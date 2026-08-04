@@ -49,6 +49,12 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 
 FM_PR_STATUS_TIMEOUT=${FM_PR_STATUS_TIMEOUT:-20}
+case "$FM_PR_STATUS_TIMEOUT" in
+  ''|*[!0-9]*|0)
+    echo "fm-pr-status: FM_PR_STATUS_TIMEOUT must be a positive integer" >&2
+    exit 2
+    ;;
+esac
 
 usage() {
   cat <<'EOF'
@@ -69,10 +75,16 @@ EOF
 command -v jq >/dev/null 2>&1 || { echo "fm-pr-status: jq not found" >&2; exit 1; }
 
 run_bounded() {  # <cmd...>
-  if command -v timeout >/dev/null 2>&1; then
+  if [ "${FM_PR_STATUS_FORCE_FALLBACK:-0}" != 1 ] && command -v timeout >/dev/null 2>&1; then
     timeout "$FM_PR_STATUS_TIMEOUT" "$@"
+  elif [ "${FM_PR_STATUS_FORCE_FALLBACK:-0}" != 1 ] && command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$FM_PR_STATUS_TIMEOUT" "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; waitpid $pid, 0; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
+      "$FM_PR_STATUS_TIMEOUT" "$@"
   else
-    "$@"
+    echo "fm-pr-status: no timeout implementation on PATH" >&2
+    return 125
   fi
 }
 
@@ -114,18 +126,23 @@ refresh_github() {  # <owner/repo> <number> -> normalized fields on stdout
 # GitLab merge requests through glab. detailed_merge_status carries the
 # conflict/blocked distinction; pipeline status carries the check rollup.
 refresh_gitlab() {  # <host> <project-path> <number>
-  local host=$1 path=$2 number=$3 raw
+  local host=$1 path=$2 number=$3 raw approvals review=unknown endpoint
   command -v glab >/dev/null 2>&1 || { echo "fm-pr-status: no glab on PATH" >&2; return 1; }
+  endpoint="projects/$(printf '%s' "$path" | sed 's|/|%2F|g')/merge_requests/$number"
   raw=$(GITLAB_HOST="$host" run_bounded glab api \
-    "projects/$(printf '%s' "$path" | sed 's|/|%2F|g')/merge_requests/$number" 2>/dev/null) \
+    "$endpoint" 2>/dev/null) \
     || { echo "fm-pr-status: glab could not read $path!$number" >&2; return 1; }
   printf '%s' "$raw" | jq -e 'type == "object"' >/dev/null 2>&1 \
     || { echo "fm-pr-status: unusable response for $path!$number" >&2; return 1; }
-  printf '%s' "$raw" | jq -r '
+  if approvals=$(GITLAB_HOST="$host" run_bounded glab api "$endpoint/approvals" 2>/dev/null) \
+    && printf '%s' "$approvals" | jq -e '.approved | type == "boolean"' >/dev/null 2>&1; then
+    review=$(printf '%s' "$approvals" | jq -r 'if .approved then "approved" else "review_required" end')
+  fi
+  printf '%s' "$raw" | jq -r --arg review "$review" '
     [(.state // ""), (.draft // .work_in_progress // false | tostring),
      (.detailed_merge_status // .merge_status // ""),
      (.detailed_merge_status // .merge_status // ""),
-     (if (.approvals_before_merge // 0) > 0 then "review_required" else "" end),
+     $review,
      (.sha // ""),
      (.head_pipeline.status // .pipeline.status // "")]
     | @tsv'
@@ -179,7 +196,7 @@ cmd_refresh() {  # <id> [--url <url>]
     echo "fm-pr-status: could not compose the observation for $id" >&2
     return 1
   }
-  fm_outcome_json_write "$(fm_outcome_pr_status_path "$STATE" "$id")" "$doc" || {
+  fm_outcome_pr_status_write "$STATE" "$id" "$doc" || {
     echo "fm-pr-status: could not cache the observation for $id" >&2
     return 1
   }

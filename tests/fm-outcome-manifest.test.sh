@@ -56,7 +56,7 @@ test_manifest_composition() {
   seed_ship_task "$home" "$id"
   cat > "$home/data/backlog.md" <<EOF
 ## In flight
-- [ ] $id - Durable outcome manifest https://github.com/acme/widget/pull/9 (repo: widget) (kind: ship) (since 2026-07-04)
+- [ ] $id - Durable outcome manifest (mobile) https://github.com/acme/widget/pull/9 (repo: widget) (kind: ship) (since 2026-07-04)
 EOF
   printf 'working: started\ndone: PR https://github.com/acme/widget/pull/9 checks green\n' \
     > "$home/state/$id.status"
@@ -69,7 +69,7 @@ EOF
   [ "$(printf '%s' "$out" | jq -r '.schema')" = fm-outcome-manifest.v1 ] \
     || fail "manifest schema is not fm-outcome-manifest.v1"
   [ "$(printf '%s' "$out" | jq -r '.task_id')" = "$id" ] || fail "manifest task id is wrong"
-  [ "$(printf '%s' "$out" | jq -r '.title')" = "Durable outcome manifest" ] \
+  [ "$(printf '%s' "$out" | jq -r '.title')" = "Durable outcome manifest (mobile)" ] \
     || fail "manifest title was not taken from the backlog row: $(printf '%s' "$out" | jq -r '.title')"
   [ "$(printf '%s' "$out" | jq -r '.kind')" = ship ] || fail "manifest kind is wrong"
   [ "$(printf '%s' "$out" | jq -r '.mode')" = no-mistakes ] || fail "manifest mode is wrong"
@@ -159,6 +159,17 @@ test_manifest_gbrain_and_overrides() {
   pass "the manifest carries an optional provider receipt and refuses to publish its malformed values"
 }
 
+test_secondmate_manifest_title_is_null() {
+  local home out
+  home=$(make_home secondmate-title)
+  fm_write_secondmate_meta "$home/state/design.meta" "$home/secondmate-design"
+  fm "$home" "$MANIFEST" write design >/dev/null || fail "secondmate manifest write failed"
+  out=$(fm "$home" "$MANIFEST" show design)
+  printf '%s' "$out" | jq -e '.kind == "secondmate" and .title == null and .outcome.state == "retired"' >/dev/null \
+    || fail "a secondmate manifest synthesized a backlog title"
+  pass "secondmate manifests retain the intentional null title contract"
+}
+
 test_manifest_requires_metadata_and_allowlist() {
   local home rc out
   home=$(make_home refuse)
@@ -239,12 +250,40 @@ test_work_item_rejects_unusable_urls() {
   local home url rc
   home=$(make_home workitems-bad)
   for url in 'not-a-url' 'ftp://example.com/x/issues/1' \
-      'https://example.com/../../etc/passwd' 'https://exa mple.com/a/b/issues/1'; do
+      'https://example.com/../../etc/passwd' 'https://exa mple.com/a/b/issues/1' \
+      'https://example.com/a/b/issues/0'; do
     rc=0
     fm "$home" "$WORKITEM" parse "$url" >/dev/null 2>&1 || rc=$?
     [ "$rc" -ne 0 ] || fail "an unusable work-item URL was accepted: $url"
   done
   pass "the work-item store refuses relative, non-http, traversing, and malformed URLs"
+}
+
+test_work_item_mutations_refuse_invalid_store() {
+  local home id before after rc command
+  home=$(make_home workitems-invalid-store)
+  id=ship-invalid
+  mkdir -p "$home/data/$id"
+  printf '{"schema":"fm-work-items.v0","task_id":"%s","references":[{"legacy":true}]}\n' "$id" \
+    > "$home/data/$id/work-items.json"
+  before=$(<"$home/data/$id/work-items.json")
+
+  for command in add remove clear; do
+    rc=0
+    case "$command" in
+      add) fm "$home" "$WORKITEM" add "$id" https://github.com/acme/widget/issues/19 >/dev/null 2>&1 || rc=$? ;;
+      remove) fm "$home" "$WORKITEM" remove "$id" https://github.com/acme/widget/issues/19 >/dev/null 2>&1 || rc=$? ;;
+      clear) fm "$home" "$WORKITEM" clear "$id" >/dev/null 2>&1 || rc=$? ;;
+    esac
+    [ "$rc" -ne 0 ] || fail "$command overwrote a present invalid work-item store"
+    after=$(<"$home/data/$id/work-items.json")
+    [ "$after" = "$before" ] || fail "$command changed a present invalid work-item store"
+  done
+
+  fm "$home" "$WORKITEM" list "$id" \
+    | jq -e '.schema == "fm-work-items.v1" and .references == []' >/dev/null \
+    || fail "the read-only projection did not degrade an invalid work-item store to empty"
+  pass "work-item mutations preserve invalid durable stores while read-only projection stays safe"
 }
 
 # --- normalized PR observation ----------------------------------------------
@@ -333,7 +372,78 @@ SH
   out=$(fm "$home" "$MANIFEST" show "$id")
   printf '%s' "$out" | jq -e '.pr.status.state == "open" and .pr.status.checks == "passing"' >/dev/null \
     || fail "the manifest did not embed the cached PR observation"
-  pass "the PR observation caches, survives a failed refresh, and reaches the manifest offline"
+
+  printf 'pr=https://github.com/acme/widget/pull/13\n' >> "$home/state/$id.meta"
+  PATH="$fakebin:$PATH" fm "$home" "$PRSTATUS" refresh "$id" >/dev/null 2>&1 \
+    && fail "the replacement PR refresh unexpectedly succeeded"
+  fm "$home" "$MANIFEST" write "$id" >/dev/null || fail "manifest rewrite failed"
+  out=$(fm "$home" "$MANIFEST" show "$id")
+  printf '%s' "$out" | jq -e '.pr.url == "https://github.com/acme/widget/pull/13"
+    and .pr.status.state == "unknown" and .pr.status.source == "absent"' >/dev/null \
+    || fail "a stale cache was combined with the task replacement PR"
+  pass "the PR observation retains same-PR failures and rejects stale cache identity"
+}
+
+test_gitlab_approval_state() {
+  local home id fakebin out
+  home=$(make_home gitlab-approval)
+  id=ship-gitlab
+  seed_ship_task "$home" "$id"
+  printf 'pr=https://gitlab.example.com/group/sub/proj/-/merge_requests/7\n' >> "$home/state/$id.meta"
+  fakebin=$(fm_fakebin "$TMP_ROOT/gitlab-approval")
+  cat > "$fakebin/glab" <<'SH'
+#!/usr/bin/env bash
+case "${*: -1}" in
+  */approvals) printf '%s\n' '{"approved":true,"approvals_required":2,"approvals_left":0}' ;;
+  *) printf '%s\n' '{"state":"opened","draft":false,"detailed_merge_status":"mergeable","approvals_before_merge":9,"sha":"abcdef1234567890abcdef1234567890abcdef12","head_pipeline":{"status":"success"}}' ;;
+esac
+SH
+  chmod +x "$fakebin/glab"
+
+  PATH="$fakebin:$PATH" fm "$home" "$PRSTATUS" refresh "$id" >/dev/null \
+    || fail "GitLab PR status refresh failed"
+  out=$(fm "$home" "$PRSTATUS" show "$id")
+  [ "$(printf '%s' "$out" | jq -r '.status.review')" = approved ] \
+    || fail "GitLab's current approved result was not normalized"
+
+  cat > "$fakebin/glab" <<'SH'
+#!/usr/bin/env bash
+case "${*: -1}" in
+  */approvals) exit 1 ;;
+  *) printf '%s\n' '{"state":"opened","draft":false,"detailed_merge_status":"mergeable","approvals_before_merge":9,"sha":"abcdef1234567890abcdef1234567890abcdef12","head_pipeline":{"status":"success"}}' ;;
+esac
+SH
+  chmod +x "$fakebin/glab"
+  PATH="$fakebin:$PATH" fm "$home" "$PRSTATUS" refresh "$id" >/dev/null \
+    || fail "GitLab refresh failed when only approval state was unavailable"
+  out=$(fm "$home" "$PRSTATUS" show "$id")
+  [ "$(printf '%s' "$out" | jq -r '.status.review')" = unknown ] \
+    || fail "an unavailable GitLab approval result did not degrade to unknown"
+  pass "GitLab review normalization follows current approval state and degrades safely"
+}
+
+test_pr_status_fallback_timeout() {
+  local home id fakebin started elapsed rc
+  home=$(make_home prstatus-timeout)
+  id=ship-timeout
+  seed_ship_task "$home" "$id"
+  printf 'pr=https://github.com/acme/widget/pull/14\n' >> "$home/state/$id.meta"
+  fakebin=$(fm_fakebin "$TMP_ROOT/prstatus-timeout")
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+sleep 5
+printf '%s\n' '{"state":"OPEN"}'
+SH
+  chmod +x "$fakebin/gh-axi"
+
+  started=$(date +%s)
+  rc=0
+  FM_PR_STATUS_FORCE_FALLBACK=1 FM_PR_STATUS_TIMEOUT=1 PATH="$fakebin:$PATH" \
+    fm "$home" "$PRSTATUS" refresh "$id" >/dev/null 2>&1 || rc=$?
+  elapsed=$(( $(date +%s) - started ))
+  [ "$rc" -ne 0 ] || fail "the fallback timeout accepted a hung forge call"
+  [ "$elapsed" -lt 4 ] || fail "the fallback timeout did not bound the forge call (${elapsed}s)"
+  pass "the portable fallback bounds forge calls when GNU timeout is unavailable"
 }
 
 # --- durable history --------------------------------------------------------
@@ -411,7 +521,7 @@ EOF
 # --- secret safety ----------------------------------------------------------
 
 test_no_secret_bearing_fields() {
-  local home id sentinel out snap
+  local home id sentinel out snap oversized_title oversized_source
   home=$(make_home secrets)
   id=ship-f
   sentinel=FMSECRETSENTINEL9271
@@ -431,10 +541,28 @@ test_no_secret_bearing_fields() {
   printf '# brief\nAPI key: %s\nDo not leak this.\n' "$sentinel" > "$home/data/$id/brief.md"
   printf '# report\nThe credential was %s\n' "$sentinel" > "$home/data/$id/report.md"
   printf 'done: implementation complete\n' > "$home/state/$id.status"
+  printf 'pr=https://github.com/acme/widget/pull/15\n' >> "$home/state/$id.meta"
+  oversized_title="$(printf 'x%.0s' $(seq 1 241))$sentinel"
+  oversized_source="$(printf 'x%.0s' $(seq 1 41))$sentinel"
+  jq -n --arg id "$id" --arg title "$oversized_title" '
+    {schema:"fm-work-items.v1",task_id:$id,references:[{
+      url:"https://github.com/acme/widget/issues/18",forge:"github",host:"github.com",
+      path:"acme/widget",owner:"acme",repo:"widget",number:18,kind:"issue",origin:"intake",
+      enrichment:{title:$title,state:"open",observed_at:"2026-07-04T00:00:00Z",source:"gh"}}]}' \
+    > "$home/data/$id/work-items.json"
+  jq -n --arg source "$oversized_source" '
+    {schema:"fm-pr-status.v1",url:"https://github.com/acme/widget/pull/15",provider:"github",
+     host:"github.com",path:"acme/widget",number:15,
+     status:{state:"open",draft:false,review:"approved",checks:"passing",mergeable:"mergeable",
+             head:"abcdef1234567890abcdef1234567890abcdef12",observed_at:"2026-07-04T00:00:00Z",source:$source}}' \
+    > "$home/state/$id.pr-status"
 
   fm "$home" "$MANIFEST" write "$id" >/dev/null || fail "manifest write failed"
   out=$(fm "$home" "$MANIFEST" show "$id")
   assert_not_contains "$out" "$sentinel" "the manifest emitted a secret-bearing value"
+  printf '%s' "$out" | jq -e '.work_items.references == []
+    and .pr.status.state == "unknown" and .pr.status.source == "absent"' >/dev/null \
+    || fail "non-conforming allowlisted values were not replaced with safe projections"
 
   snap=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -467,11 +595,15 @@ test_free_text_is_bounded_and_single_line() {
 
 test_manifest_composition
 test_manifest_gbrain_and_overrides
+test_secondmate_manifest_title_is_null
 test_manifest_requires_metadata_and_allowlist
 test_work_items_round_trip
 test_work_item_rejects_unusable_urls
+test_work_item_mutations_refuse_invalid_store
 test_pr_status_normalization
 test_pr_status_refresh_and_cache
+test_gitlab_approval_state
+test_pr_status_fallback_timeout
 test_history_projection
 test_history_survives_record_removal
 test_no_secret_bearing_fields

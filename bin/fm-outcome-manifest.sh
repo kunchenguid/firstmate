@@ -22,6 +22,8 @@
 #   data/<id>/work-items.json  work-item references (bin/fm-work-item.sh owns the store)
 #   state/<id>.pr-status     the normalized PR observation (bin/fm-pr-status.sh)
 #   state/<id>.gbrain        the optional capture receipt, absent by default
+# A secondmate has no backlog row by contract, so its title is null rather than
+# synthesized from a registry or intake record.
 # It never contacts a forge and never reads a brief, a prompt, a tool argument,
 # or any credential-bearing artifact. Publication is refused outright when the
 # composed document carries a key the fm-outcome-manifest.v1 allowlist in
@@ -87,20 +89,7 @@ command -v jq >/dev/null 2>&1 || { echo "fm-outcome-manifest: jq not found" >&2;
 # it. Free-text prose is capped and control characters stripped before it can
 # reach a durable record.
 backlog_title() {  # <id>
-  local id=$1 line rest
-  [ -f "$DATA/backlog.md" ] || return 0
-  line=$(grep -E "^[-*][[:space:]]+(\[[ xX]\][[:space:]]+)?(\*\*)?$id(\*\*)?[[:space:]]+-[[:space:]]+" \
-    "$DATA/backlog.md" 2>/dev/null | head -1) || true
-  [ -n "$line" ] || return 0
-  rest=${line#*"$id"}
-  rest=${rest#*- }
-  rest=$(printf '%s' "$rest" | sed -E \
-    -e 's#<?https?://[^[:space:])">]+>?##g' \
-    -e 's#[[:space:]]+data/[^[:space:])]+/report\.md##g' \
-    -e 's#\([^)]*\)##g' \
-    -e 's#blocked-by:[[:space:]]+[^[:space:])]+##g' \
-    -e 's#[[:space:]]+-[[:space:]]*$##')
-  fm_outcome_text "$rest"
+  fm_outcome_text "$(fm_outcome_backlog_title "$DATA/backlog.md" "$1")"
 }
 
 # The `since <date>` metadata of the task's backlog row, normalized to UTC
@@ -240,7 +229,7 @@ cmd_write() {
 
   local pr_identity pr_status work_items gbrain title manifest
   pr_identity=$(pr_identity_json "$pr_url" "$pr_head")
-  pr_status=$(fm_outcome_pr_status_read "$STATE" "$id")
+  pr_status=$(fm_outcome_pr_status_read "$STATE" "$id" "$pr_url")
   work_items=$(fm_outcome_work_items_read "$DATA" "$id")
   gbrain=$(fm_outcome_gbrain_json "$STATE" "$id")
   title=$(backlog_title "$id")

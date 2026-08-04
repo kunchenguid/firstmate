@@ -31,7 +31,7 @@ The manifest never contacts a forge and never reads a brief, a prompt, a tool ar
 | Field | Source of truth | Notes |
 | --- | --- | --- |
 | `schema`, `task_id`, `home`, `recorded_at` | the writer | identity and provenance of the record itself |
-| `title` | the task's structured backlog row | metadata, URLs, and report pointers stripped |
+| `title` | the task's structured backlog row | metadata, URLs, and report pointers stripped; null for secondmates because they are not backlog items |
 | `project`, `kind`, `mode`, `yolo` | `state/<id>.meta` | the delivery contract the task shipped under |
 | `harness`, `model`, `effort` | `state/<id>.meta` | the dispatch decision, retained for usage attribution |
 | `timestamps.*` | see below | each value's provenance is named in `timestamp_sources` |
@@ -77,6 +77,11 @@ An unrecognized host stores `forge: "unknown"` rather than being rejected or gue
 **Consumers must render a reference that has never been enriched.**
 A forge that cannot be reached is a missing title, never a rendering failure.
 
+The shared reader accepts only the exact reference shape produced by this contract.
+URLs are capped at 512 characters, hosts at 253, project paths at 480, owners at 400, repositories at 200, forge tokens at 32, enrichment titles at 240, and enrichment sources at 40.
+Parsed identity fields must reconstruct the canonical URL, numbers must be positive integers or null, origins and kinds must use their documented tokens, enrichment state must be `open`, `closed`, `merged`, `unknown`, or null, and enrichment timestamps must be ISO-8601 UTC or null.
+Read-only projections replace an absent or invalid store with the documented empty reference list, while `add`, `remove`, and `clear` refuse to overwrite a present invalid store.
+
 `bin/fm-work-item.sh` owns storage and transport only.
 Deciding which work item a task references, resolving it against a project's registry, and refreshing per-forge enrichment belong to the project-issue-linkage owner, which calls `add` here rather than introducing a second schema.
 The legacy `issue=<number>` field in task metadata records a same-repository GitHub issue and is not migrated into this store by this contract; that migration belongs to the same linkage owner.
@@ -96,6 +101,9 @@ A recorded PR URL does not say whether work is waiting on review, waiting on che
 The observation is cached at `state/<id>.pr-status` with an `observed_at` stamp, and the snapshot reports `status_age_seconds` as the age of that cached record.
 Read-only consumers report the cached value with its age and never call a forge themselves, so the fleet snapshot stays offline and fast.
 `bin/fm-pr-check.sh` seeds the cache when it arms a merge watch and `bin/fm-pr-merge.sh` refreshes it after a merge; both are best effort, and a failed refresh leaves the previous observation in place rather than overwriting a good reading with `unknown`.
+Every cache read validates the canonical PR identity, the normalized enumerations, the draft type, the head SHA, the ISO-8601 UTC observation stamp, and the provider source before exposing it.
+A cache whose URL does not match the task's current canonical PR URL projects the documented unknown observation, while a failed refresh for the same URL retains the previous valid observation.
+GitLab review state comes from the merge request approvals endpoint's current `approved` result and degrades to `unknown` when that endpoint is unavailable.
 
 ## Snapshot projection
 
@@ -139,12 +147,13 @@ An open PR outranks `done` because a task that reported "PR checks green" has no
 Manifests and snapshots carry no credentials, no raw prompts, no tool arguments, and no captured payloads.
 
 That is enforced, not just documented.
-`fm_outcome_manifest_keys_valid` checks a composed manifest against a fixed recursive key allowlist, and the writer refuses to publish a document carrying any path the allowlist does not name.
+Shared work-item and PR-status readers validate every stored value against its wire type, enumeration, canonical shape, and documented length cap before exposing it to a manifest or snapshot.
+`fm_outcome_manifest_keys_valid` also checks a composed manifest against a fixed recursive key allowlist, and the writer refuses to publish a document carrying any path the allowlist does not name.
 Adding a field is therefore a deliberate act in one place.
-Every free-text value that reaches a durable record passes through `fm_outcome_text`, which strips control characters, collapses the value to a single line, and caps its length, so no multi-line payload can ride along in a note.
+Every producer-owned free-text value passes through `fm_outcome_text`, which strips control characters, collapses the value to a single line, and caps its length, while stored free text is rejected when it exceeds the same boundary.
 The PR observation stores only the enumerated tokens above and a head SHA; no API response body reaches disk.
 
-`tests/fm-outcome-manifest.test.sh` plants sentinel secrets in the pairing token, the harness turn-end tokens, the agy trust record, the check-trust binding, the PR poll registration, the brief, and the scout report, then asserts none of it appears in a manifest or a snapshot.
+`tests/fm-outcome-manifest.test.sh` plants sentinel secrets in private runtime records and in non-conforming allowlisted values inside present work-item and PR-status stores, then asserts none of it appears in a manifest or a snapshot.
 The crew's own status line is deliberately outside that set: it is a single-line supervisor-facing field firstmate designed and has always surfaced, not a store of credentials or captured payloads.
 
 ## Verification

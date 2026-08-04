@@ -85,6 +85,19 @@ STATE=
 OBSERVED=
 SOURCE=
 
+work_items_for_mutation() {  # <id>
+  local id=$1 path
+  path=$(fm_outcome_work_items_path "$DATA" "$id")
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    fm_outcome_work_items_doc_read "$DATA" "$id" || {
+      echo "fm-work-item: refusing to overwrite invalid work-item store for $id" >&2
+      return 1
+    }
+  else
+    fm_outcome_work_items_empty "$id"
+  fi
+}
+
 parse_enrichment_opts() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -116,15 +129,15 @@ parse_enrichment_opts() {
 }
 
 cmd_add() {  # <id> <url> [opts...]
-  local id=$1 url=$2 ref refs
+  local id=$1 url=$2 ref doc refs
   shift 2
   parse_enrichment_opts "$@" || return $?
   ref=$(fm_outcome_work_item_json "$url" "$ORIGIN" "$FORGE" "$TITLE" "$STATE" "$OBSERVED" "$SOURCE") || {
     echo "fm-work-item: could not parse work-item URL: $url" >&2
     return 2
   }
-  refs=$(fm_outcome_work_items_read "$DATA" "$id" \
-    | jq -c --argjson ref "$ref" '
+  doc=$(work_items_for_mutation "$id") || return 1
+  refs=$(printf '%s' "$doc" | jq -c --argjson ref "$ref" '
         .references as $existing
         | if ($existing | map(.url) | index($ref.url)) == null
           then $existing + [$ref]
@@ -138,17 +151,19 @@ cmd_add() {  # <id> <url> [opts...]
 }
 
 cmd_remove() {  # <id> <url>
-  local id=$1 url=$2 refs
+  local id=$1 url=$2 doc refs
   fm_outcome_work_item_parse "$url" || {
     echo "fm-work-item: could not parse work-item URL: $url" >&2
     return 2
   }
-  refs=$(fm_outcome_work_items_read "$DATA" "$id" \
+  doc=$(work_items_for_mutation "$id") || return 1
+  refs=$(printf '%s' "$doc" \
     | jq -c --arg url "$FM_WI_URL" '[.references[] | select(.url != $url)]') || return 1
   fm_outcome_work_items_write "$DATA" "$id" "$refs" || return 1
 }
 
 cmd_clear() {  # <id>
+  work_items_for_mutation "$1" >/dev/null || return 1
   fm_outcome_work_items_write "$DATA" "$1" '[]'
 }
 

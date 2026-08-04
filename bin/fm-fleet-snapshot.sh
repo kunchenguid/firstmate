@@ -364,26 +364,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     def url_pattern: "https?://[^[:space:])\"<>]+";
     def wrapped_url_pattern: "<?" + url_pattern + ">?";
     def links($rest): [$rest | scan(url_pattern)];
-    def strip_trailing_metadata:
-      reduce range(0; 20) as $_ (.;
-        sub("[[:space:]]*\\([[:space:]]*(?:(?:repo|kind|priority|hold|hold-kind):[[:space:]]*[^)]*|(?:since|merged|reported|done)[[:space:]]+[^)]*)[[:space:]]*\\)[[:space:]]*$"; ""));
-    def strip_title_artifacts:
-      sub("[[:space:]]+-[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
-      | sub("[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
-      | sub("[[:space:]]+-[[:space:]]+local main$"; "")
-      | sub("[[:space:]]+local main$"; "")
-      | sub("[[:space:]]+-[[:space:]]*$"; "");
-    def clean_title:
-      strip_trailing_metadata
-      | strip_title_artifacts
-      | gsub("[[:space:]]+"; " ")
-      | trim;
-    def title_of($rest):
-      $rest
-      | gsub(wrapped_url_pattern; "")
-      | sub("[[:space:]]*blocked-by:[[:space:]]+[^[:space:])]+[[:space:]]+-[[:space:]]+.*$"; "")
-      | gsub("[[:space:]]*blocked-by:[[:space:]]+[^[:space:]]+"; "")
-      | clean_title;
+'"$FM_OUTCOME_BACKLOG_TITLE_JQ"'
     def blocked_by_ids($rest):
       [ $rest | scan("blocked-by:[[:space:]]+(?<id>[^[:space:])]+)") | .[0] ]
       | reduce .[] as $id ([]; if index($id) == null then . + [$id] else . end);
@@ -539,7 +520,7 @@ task_json_lines() {
     pr_identity=$(pr_identity_json "$pr")
     # Cached only: this command stays offline, so an unrefreshed PR reports
     # state "unknown" with source "absent" rather than blocking on a forge.
-    pr_status=$(fm_outcome_pr_status_read "$STATE" "$id")
+    pr_status=$(fm_outcome_pr_status_read "$STATE" "$id" "$pr")
     pr_status_path=$(fm_outcome_pr_status_path "$STATE" "$id")
     pr_status_at=$(printf '%s' "$pr_status" | jq -r '.observed_at // ""')
     if [ -n "$pr_status_at" ]; then

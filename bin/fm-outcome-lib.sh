@@ -19,12 +19,10 @@
 #                              review/check/mergeability observation for a task's
 #                              PR, cached so read-only consumers never call a forge.
 #
-# Secret safety is enforced, not documented: fm_outcome_manifest_keys_valid
-# checks a published manifest against a fixed recursive key allowlist, and
-# fm_outcome_manifest_write refuses to publish anything that fails it. Free text
-# that reaches a manifest passes through fm_outcome_text (control characters
-# stripped, length capped), so no raw prompt, tool argument, or captured payload
-# can ride along in a note field.
+# Secret safety is enforced, not documented: shared readers validate every
+# stored value against its wire type, enumeration, shape, and length cap before
+# a manifest or snapshot can project it, and manifest publication also checks a
+# fixed recursive key allowlist.
 #
 # docs/fleet-data-contracts.md owns field ownership and consumer guarantees.
 
@@ -36,12 +34,22 @@ FM_PR_STATUS_SCHEMA=fm-pr-status.v1
 FM_OUTCOME_TEXT_MAX=${FM_OUTCOME_TEXT_MAX:-240}
 FM_OUTCOME_URL_MAX=${FM_OUTCOME_URL_MAX:-512}
 FM_OUTCOME_RECEIPT_MAX=${FM_OUTCOME_RECEIPT_MAX:-200}
+FM_OUTCOME_HOST_MAX=${FM_OUTCOME_HOST_MAX:-253}
+FM_OUTCOME_PATH_MAX=${FM_OUTCOME_PATH_MAX:-480}
+FM_OUTCOME_OWNER_MAX=${FM_OUTCOME_OWNER_MAX:-400}
+FM_OUTCOME_REPO_MAX=${FM_OUTCOME_REPO_MAX:-200}
+FM_OUTCOME_SOURCE_MAX=${FM_OUTCOME_SOURCE_MAX:-40}
 
 _FM_OUTCOME_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_OUTCOME_LIB_DIR="."
 if ! declare -F fm_sup_stat_mtime >/dev/null 2>&1; then
   # shellcheck source=bin/fm-supervision-lib.sh
   # shellcheck disable=SC1091
   . "$_FM_OUTCOME_LIB_DIR/fm-supervision-lib.sh"
+fi
+if ! declare -F fm_pr_url_parse >/dev/null 2>&1; then
+  # shellcheck source=bin/fm-pr-lib.sh
+  # shellcheck disable=SC1091
+  . "$_FM_OUTCOME_LIB_DIR/fm-pr-lib.sh"
 fi
 
 # Last value of a key=value line, for the small key=value sidecars this library
@@ -98,6 +106,48 @@ fm_outcome_text() {  # <text> [max]
     | tr '\t\n\r' '   ' \
     | sed -e 's/  */ /g' -e 's/^ //' -e 's/ $//' \
     | cut -c "1-$max"
+}
+
+# Shared jq definitions for the canonical structured-backlog title parser.
+# The fleet snapshot and the outcome manifest both use this exact program so
+# trailing tasks-axi metadata is removed without stripping title parentheses.
+FM_OUTCOME_BACKLOG_TITLE_JQ=
+IFS= read -r -d '' FM_OUTCOME_BACKLOG_TITLE_JQ <<'JQ' || true
+    def strip_trailing_metadata:
+      reduce range(0; 20) as $_ (.;
+        sub("[[:space:]]*\\([[:space:]]*(?:(?:repo|kind|priority|hold|hold-kind):[[:space:]]*[^)]*|(?:since|merged|reported|done)[[:space:]]+[^)]*)[[:space:]]*\\)[[:space:]]*$"; ""));
+    def strip_title_artifacts:
+      sub("[[:space:]]+-[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
+      | sub("[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
+      | sub("[[:space:]]+-[[:space:]]+local main$"; "")
+      | sub("[[:space:]]+local main$"; "")
+      | sub("[[:space:]]+-[[:space:]]*$"; "");
+    def clean_title:
+      strip_trailing_metadata
+      | strip_title_artifacts
+      | gsub("[[:space:]]+"; " ")
+      | trim;
+    def title_of($rest):
+      $rest
+      | gsub(wrapped_url_pattern; "")
+      | sub("[[:space:]]*blocked-by:[[:space:]]+[^[:space:])]+[[:space:]]+-[[:space:]]+.*$"; "")
+      | gsub("[[:space:]]*blocked-by:[[:space:]]+[^[:space:]]+"; "")
+      | clean_title;
+JQ
+
+fm_outcome_backlog_title() {  # <backlog-path> <id>
+  local backlog=$1 id=$2
+  [ -f "$backlog" ] && [ ! -L "$backlog" ] || return 0
+  jq -Rnr --arg id "$id" '
+    def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
+    def url_pattern: "https?://[^[:space:])\"<>]+";
+    def wrapped_url_pattern: "<?" + url_pattern + ">?";
+'"$FM_OUTCOME_BACKLOG_TITLE_JQ"'
+    def row_match($line):
+      ($line | capture("^[-*][[:space:]]+\\[[ xX]\\][[:space:]]+(?<id>[^[:space:]]+)[[:space:]]+-[[:space:]]+(?<rest>.*)$")?) //
+      ($line | capture("^[-*][[:space:]]+\\*\\*(?<id>[^*]+)\\*\\*[[:space:]]+-[[:space:]]+(?<rest>.*)$")?);
+    [inputs | row_match(.) | select(. != null) | select((.id | trim) == $id) | title_of(.rest)][0] // ""
+  ' "$backlog"
 }
 
 # ---------------------------------------------------------------------------
@@ -180,21 +230,25 @@ fm_outcome_work_item_parse() {  # <url> [forge-override]
   case "$FM_WI_HOST" in
     ''|*[!A-Za-z0-9.:_-]*) return 1 ;;
   esac
+  [ "${#FM_WI_HOST}" -le "$FM_OUTCOME_HOST_MAX" ] || return 1
   rest=${rest%/}
   case "$rest" in
     *..*) return 1 ;;
     *[!A-Za-z0-9./_-]*) return 1 ;;
   esac
 
-  if [[ $rest =~ ^(.+)/-/(issues|merge_requests)/([0-9]+)$ ]]; then
+  if [[ $rest =~ ^(.+)/-/(issues|merge_requests)/([1-9][0-9]*)$ ]]; then
     FM_WI_PATH=${BASH_REMATCH[1]}
     FM_WI_KIND=${BASH_REMATCH[2]}
     FM_WI_NUMBER=${BASH_REMATCH[3]}
     [ -z "$override" ] && FM_WI_FORGE=gitlab
-  elif [[ $rest =~ ^(.+)/(issues|pull|pulls|merge_requests)/([0-9]+)$ ]]; then
+  elif [[ $rest =~ ^(.+)/(issues|pull|pulls|merge_requests)/([1-9][0-9]*)$ ]]; then
     FM_WI_PATH=${BASH_REMATCH[1]}
     FM_WI_KIND=${BASH_REMATCH[2]}
     FM_WI_NUMBER=${BASH_REMATCH[3]}
+  elif [[ $rest =~ ^(.+)/-/(issues|merge_requests)/([0-9]+)$ ]] \
+    || [[ $rest =~ ^(.+)/(issues|pull|pulls|merge_requests)/([0-9]+)$ ]]; then
+    return 1
   else
     FM_WI_PATH=$rest
     FM_WI_KIND=unknown
@@ -222,6 +276,9 @@ fm_outcome_work_item_parse() {  # <url> [forge-override]
     */*) FM_WI_OWNER=${FM_WI_PATH%/*}; FM_WI_REPO=${FM_WI_PATH##*/} ;;
     *) FM_WI_OWNER=; FM_WI_REPO=$FM_WI_PATH ;;
   esac
+  [ "${#FM_WI_PATH}" -le "$FM_OUTCOME_PATH_MAX" ] || return 1
+  [ "${#FM_WI_OWNER}" -le "$FM_OUTCOME_OWNER_MAX" ] || return 1
+  [ "${#FM_WI_REPO}" -le "$FM_OUTCOME_REPO_MAX" ] || return 1
 
   if [ -n "$rest" ]; then
     FM_WI_URL="$scheme://$FM_WI_HOST/$rest"
@@ -246,7 +303,7 @@ fm_outcome_work_item_json() {  # <url> <origin> [forge-override] [title] [state]
   fm_outcome_work_item_state_valid "$state" || return 1
   fm_outcome_work_item_parse "$url" "$override" || return 1
   title=$(fm_outcome_text "$title")
-  src=$(fm_outcome_text "$src" 40)
+  src=$(fm_outcome_text "$src" "$FM_OUTCOME_SOURCE_MAX")
   jq -n \
     --arg url "$FM_WI_URL" \
     --arg forge "$FM_WI_FORGE" \
@@ -289,21 +346,92 @@ fm_outcome_work_items_empty() {  # <id>
     '{schema:$schema,task_id:$id,references:[]}'
 }
 
-fm_outcome_work_items_read() {  # <data-dir> <id>
-  local path
+fm_outcome_work_item_ref_valid() {  # <reference-json>
+  local ref=$1 url forge host path owner repo number kind
+  jq -e \
+    --argjson text_max "$FM_OUTCOME_TEXT_MAX" \
+    --argjson source_max "$FM_OUTCOME_SOURCE_MAX" '
+      def clean_string($max):
+        type == "string" and length <= $max and (test("[\u0000-\u001f\u007f]") | not);
+      type == "object"
+      and (keys == ["enrichment","forge","host","kind","number","origin","owner","path","repo","url"])
+      and (.url | type == "string")
+      and (.forge | type == "string")
+      and (.host | type == "string")
+      and (.path == null or (.path | type == "string"))
+      and (.owner == null or (.owner | type == "string"))
+      and (.repo == null or (.repo | type == "string"))
+      and (.number == null or ((.number | type) == "number" and .number > 0 and (.number | floor) == .number))
+      and (.kind | IN("issue","pull_request","merge_request","unknown"))
+      and (.origin | IN("intake","pr-linked"))
+      and (.enrichment | type == "object")
+      and (.enrichment | keys == ["observed_at","source","state","title"])
+      and (.enrichment.title == null or (.enrichment.title | clean_string($text_max)))
+      and (.enrichment.state == null or (.enrichment.state | IN("open","closed","merged","unknown")))
+      and (.enrichment.observed_at == null or (.enrichment.observed_at | type == "string"))
+      and (.enrichment.source == null or (.enrichment.source | clean_string($source_max)))
+    ' >/dev/null 2>&1 <<<"$ref" || return 1
+
+  url=$(jq -r '.url' <<<"$ref")
+  forge=$(jq -r '.forge' <<<"$ref")
+  host=$(jq -r '.host' <<<"$ref")
+  path=$(jq -r '.path // ""' <<<"$ref")
+  owner=$(jq -r '.owner // ""' <<<"$ref")
+  repo=$(jq -r '.repo // ""' <<<"$ref")
+  number=$(jq -r '.number // ""' <<<"$ref")
+  kind=$(jq -r '.kind' <<<"$ref")
+  fm_outcome_work_item_parse "$url" "$forge" || return 1
+  [ "$FM_WI_URL" = "$url" ] && [ "$FM_WI_FORGE" = "$forge" ] \
+    && [ "$FM_WI_HOST" = "$host" ] && [ "$FM_WI_PATH" = "$path" ] \
+    && [ "$FM_WI_OWNER" = "$owner" ] && [ "$FM_WI_REPO" = "$repo" ] \
+    && [ "$FM_WI_NUMBER" = "$number" ] && [ "$FM_WI_KIND" = "$kind" ] || return 1
+
+  local observed
+  observed=$(jq -r '.enrichment.observed_at // ""' <<<"$ref")
+  [ -z "$observed" ] || fm_outcome_iso_valid "$observed"
+}
+
+fm_outcome_work_items_doc_valid() {  # <document-json> <id>
+  local doc=$1 id=$2
+  jq -e --arg schema "$FM_WORK_ITEMS_SCHEMA" --arg id "$id" '
+    type == "object"
+    and (keys == ["references","schema","task_id"])
+    and .schema == $schema
+    and .task_id == $id
+    and (.references | type == "array")
+  ' >/dev/null 2>&1 <<<"$doc" || return 1
+  fm_outcome_work_item_references_valid "$(jq -c '.references' <<<"$doc")"
+}
+
+fm_outcome_work_item_references_valid() {  # <references-json>
+  local refs=$1 ref
+  jq -e 'type == "array"' >/dev/null 2>&1 <<<"$refs" || return 1
+  while IFS= read -r ref; do
+    fm_outcome_work_item_ref_valid "$ref" || return 1
+  done < <(jq -c '.[]' <<<"$refs")
+}
+
+fm_outcome_work_items_doc_read() {  # <data-dir> <id>
+  local path doc
   path=$(fm_outcome_work_items_path "$1" "$2")
-  fm_outcome_json_read "$path" "$FM_WORK_ITEMS_SCHEMA" 2>/dev/null \
-    | jq -e 'if (.references | type) == "array" then . else error("references") end' 2>/dev/null \
+  doc=$(fm_outcome_json_read "$path" "$FM_WORK_ITEMS_SCHEMA" 2>/dev/null) || return 1
+  fm_outcome_work_items_doc_valid "$doc" "$2" || return 1
+  printf '%s\n' "$doc"
+}
+
+fm_outcome_work_items_read() {  # <data-dir> <id>
+  fm_outcome_work_items_doc_read "$1" "$2" 2>/dev/null \
     || fm_outcome_work_items_empty "$2"
 }
 
 fm_outcome_work_items_write() {  # <data-dir> <id> <references-json>
   local data=$1 id=$2 refs=$3 dir doc
-  dir="$data/$id"
-  mkdir -p "$dir" || return 1
   doc=$(jq -n --arg schema "$FM_WORK_ITEMS_SCHEMA" --arg id "$id" \
     --slurpfile refs_doc <(printf '%s' "$refs") \
     '{schema:$schema,task_id:$id,references:($refs_doc[0] // [])}') || return 1
+  fm_outcome_work_items_doc_valid "$doc" "$id" || return 1
+  dir="$data/$id"
+  mkdir -p "$dir" || return 1
   fm_outcome_json_write "$(fm_outcome_work_items_path "$data" "$id")" "$doc"
 }
 
@@ -322,18 +450,23 @@ fm_outcome_pr_status_unknown() {
 
 # The cached observation for a task, or the unknown object when none exists.
 # Read-only consumers use this instead of calling a forge.
-fm_outcome_pr_status_read() {  # <state-dir> <id>
-  local path doc
-  path=$(fm_outcome_pr_status_path "$1" "$2")
-  if doc=$(fm_outcome_json_read "$path" "$FM_PR_STATUS_SCHEMA" 2>/dev/null); then
-    printf '%s' "$doc" | jq -e '.status | if type == "object" then . else error("status") end' 2>/dev/null \
-      && return 0
+fm_outcome_pr_status_read() {  # <state-dir> <id> <expected-url>
+  local doc expected=${3:-}
+  if [ -n "$expected" ] \
+    && doc=$(fm_outcome_pr_status_doc_read "$1" "$2") \
+    && [ "$(jq -r '.url' <<<"$doc")" = "$expected" ]; then
+    jq -c '.status' <<<"$doc"
+    return 0
   fi
   fm_outcome_pr_status_unknown
 }
 
 fm_outcome_pr_status_doc_read() {  # <state-dir> <id>
-  fm_outcome_json_read "$(fm_outcome_pr_status_path "$1" "$2")" "$FM_PR_STATUS_SCHEMA" 2>/dev/null
+  local doc
+  doc=$(fm_outcome_json_read "$(fm_outcome_pr_status_path "$1" "$2")" "$FM_PR_STATUS_SCHEMA" 2>/dev/null) \
+    || return 1
+  fm_outcome_pr_status_doc_valid "$doc" || return 1
+  printf '%s\n' "$doc"
 }
 
 # Map one forge's vocabulary onto the normalized enumerations. Only these
@@ -388,17 +521,54 @@ fm_outcome_pr_mergeable_normalize() {  # <mergeable> <merge-state-status>
 }
 
 fm_outcome_sha_valid() {  # <sha>
-  case "$1" in
-    ''|*[!0-9a-fA-F]*) return 1 ;;
-    *) [ "${#1}" -ge 7 ] && [ "${#1}" -le 64 ] ;;
-  esac
+  fm_pr_head_valid "$1"
+}
+
+fm_outcome_pr_status_doc_valid() {  # <document-json>
+  local doc=$1 url provider host path number head observed
+  jq -e --arg schema "$FM_PR_STATUS_SCHEMA" --argjson source_max "$FM_OUTCOME_SOURCE_MAX" '
+    type == "object"
+    and (keys == ["host","number","path","provider","schema","status","url"])
+    and .schema == $schema
+    and (.url | type == "string")
+    and (.provider | IN("github","gitlab"))
+    and (.host | type == "string")
+    and (.path | type == "string")
+    and ((.number | type) == "number" and .number > 0 and (.number | floor) == .number)
+    and (.status | type == "object")
+    and (.status | keys == ["checks","draft","head","mergeable","observed_at","review","source","state"])
+    and (.status.state | IN("open","draft","closed","merged","unknown"))
+    and (.status.draft == null or (.status.draft | type == "boolean"))
+    and (.status.review | IN("approved","changes_requested","review_required","none","unknown"))
+    and (.status.checks | IN("passing","failing","pending","none","unknown"))
+    and (.status.mergeable | IN("mergeable","conflicting","blocked","unknown"))
+    and (.status.head == null or (.status.head | type == "string"))
+    and (.status.observed_at | type == "string")
+    and (.provider as $provider
+         | .status.source
+         | type == "string" and length <= $source_max and . == $provider)
+  ' >/dev/null 2>&1 <<<"$doc" || return 1
+
+  url=$(jq -r '.url' <<<"$doc")
+  provider=$(jq -r '.provider' <<<"$doc")
+  host=$(jq -r '.host' <<<"$doc")
+  path=$(jq -r '.path' <<<"$doc")
+  number=$(jq -r '.number' <<<"$doc")
+  head=$(jq -r '.status.head // ""' <<<"$doc")
+  observed=$(jq -r '.status.observed_at' <<<"$doc")
+  fm_pr_url_parse "$url" || return 1
+  [ "$FM_PR_URL" = "$url" ] && [ "$FM_PR_PROVIDER" = "$provider" ] \
+    && [ "$FM_PR_HOST" = "$host" ] && [ "$FM_PR_PATH" = "$path" ] \
+    && [ "$FM_PR_NUMBER" = "$number" ] || return 1
+  [ -z "$head" ] || fm_outcome_sha_valid "$head" || return 1
+  fm_outcome_iso_valid "$observed"
 }
 
 # Build the whole cached document from already-normalized parts.
 fm_outcome_pr_status_doc() {  # <url> <provider> <host> <path> <number> <state> <draft> <review> <checks> <mergeable> <head> <observed-at> <source>
-  local head=${11}
+  local head=${11} doc
   fm_outcome_sha_valid "$head" || head=
-  jq -n \
+  doc=$(jq -n \
     --arg schema "$FM_PR_STATUS_SCHEMA" \
     --arg url "$1" --arg provider "$2" --arg host "$3" --arg path "$4" --arg number "$5" \
     --arg state "$6" --arg draft "$7" --arg review "$8" --arg checks "$9" \
@@ -417,7 +587,14 @@ fm_outcome_pr_status_doc() {  # <url> <provider> <host> <path> <number> <state> 
               mergeable:$mergeable,
               head:blank($head),
               observed_at:blank($observed),
-              source:$source}}'
+              source:$source}}') || return 1
+  fm_outcome_pr_status_doc_valid "$doc" || return 1
+  printf '%s\n' "$doc"
+}
+
+fm_outcome_pr_status_write() {  # <state-dir> <id> <document-json>
+  fm_outcome_pr_status_doc_valid "$3" || return 1
+  fm_outcome_json_write "$(fm_outcome_pr_status_path "$1" "$2")" "$3"
 }
 
 # ---------------------------------------------------------------------------
@@ -572,6 +749,36 @@ fm_outcome_manifest_keys_valid() {  # <manifest-json>
   return 1
 }
 
+fm_outcome_manifest_values_valid() {  # <manifest-json>
+  local json=$1 refs status source pr_doc
+  jq -e --arg work_schema "$FM_WORK_ITEMS_SCHEMA" '
+    (.work_items | type == "object" and keys == ["references","schema"])
+    and .work_items.schema == $work_schema
+    and (.work_items.references | type == "array")
+    and (.pr | type == "object")
+    and (.pr.status | type == "object")
+  ' >/dev/null 2>&1 <<<"$json" || return 1
+  refs=$(jq -c '.work_items.references' <<<"$json")
+  fm_outcome_work_item_references_valid "$refs" || return 1
+
+  status=$(jq -c '.pr.status' <<<"$json")
+  source=$(jq -r '.source // ""' <<<"$status")
+  if [ "$source" = absent ]; then
+    jq -e '
+      keys == ["checks","draft","head","mergeable","observed_at","review","source","state"]
+      and .state == "unknown" and .draft == null and .review == "unknown"
+      and .checks == "unknown" and .mergeable == "unknown" and .head == null
+      and .observed_at == null and .source == "absent"
+    ' >/dev/null 2>&1 <<<"$status"
+    return
+  fi
+  pr_doc=$(jq -c --arg schema "$FM_PR_STATUS_SCHEMA" '
+    {schema:$schema,url:.pr.url,provider:.pr.provider,host:.pr.host,
+     path:.pr.path,number:.pr.number,status:.pr.status}
+  ' <<<"$json") || return 1
+  fm_outcome_pr_status_doc_valid "$pr_doc"
+}
+
 fm_outcome_manifest_write() {  # <data-dir> <id> <manifest-json>
   local data=$1 id=$2 json=$3
   mkdir -p "$data/$id" || return 1
@@ -579,11 +786,17 @@ fm_outcome_manifest_write() {  # <data-dir> <id> <manifest-json>
     'if .schema == $schema and .task_id == $id then . else error("identity") end' \
     >/dev/null 2>&1 <<<"$json" || return 1
   fm_outcome_manifest_keys_valid "$json" || return 1
+  fm_outcome_manifest_values_valid "$json" || return 1
   fm_outcome_json_write "$(fm_outcome_manifest_path "$data" "$id")" "$json"
 }
 
 fm_outcome_manifest_read() {  # <data-dir> <id>
-  fm_outcome_json_read "$(fm_outcome_manifest_path "$1" "$2")" "$FM_OUTCOME_MANIFEST_SCHEMA"
+  local doc
+  doc=$(fm_outcome_json_read "$(fm_outcome_manifest_path "$1" "$2")" "$FM_OUTCOME_MANIFEST_SCHEMA") \
+    || return 1
+  fm_outcome_manifest_keys_valid "$doc" >/dev/null 2>&1 || return 1
+  fm_outcome_manifest_values_valid "$doc" || return 1
+  printf '%s\n' "$doc"
 }
 
 # Durable history as schema fm-outcome-history.v1, newest completion first.
@@ -623,6 +836,10 @@ fm_outcome_history_json() {  # <data-dir> <limit>
       fi
       if ! fm_outcome_manifest_keys_valid "$doc" 2>/dev/null; then
         malformed=$malformed$(fm_outcome_history_reject "$id" "$path" unexpected_fields)$'\n'
+        continue
+      fi
+      if ! fm_outcome_manifest_values_valid "$doc" 2>/dev/null; then
+        malformed=$malformed$(fm_outcome_history_reject "$id" "$path" invalid_values)$'\n'
         continue
       fi
       records=$records$(printf '%s' "$doc" | jq -c .)$'\n'
