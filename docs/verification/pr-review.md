@@ -1,0 +1,89 @@
+# Automatic pull-request review verification
+
+Audience: maintainer verification.
+
+This record holds reusable current evidence for the automatic review and feedback guarantees.
+[`docs/configuration.md`](../configuration.md#automatic-pull-request-review-statepr-review) owns setup and limits.
+[`docs/architecture.md`](../architecture.md#automatic-pull-request-review-and-feedback) owns stable component and durability boundaries.
+[`bin/fm-pr-review.sh`](../../bin/fm-pr-review.sh) help owns commands and opt-out mechanics.
+[`pr-review-owner`](../../.agents/skills/pr-review-owner/SKILL.md) owns adjudication and routing.
+
+Verified on 2026-08-04 on macOS with:
+
+```text
+Darwin 25.5.0 arm64
+GNU bash 3.2.57(1)-release
+node v22.23.1
+gh-axi 0.1.28
+```
+
+## Executable boundary
+
+The controlled GitHub boundary is a fake `gh-axi` executable backed by mutable JSON.
+It implements selected authenticated reads, explicit pages, inline replies, conversation comments, and COMMENT reviews while logging every attempted GitHub operation.
+The product entry point, Node state owner, private files, exact-head checks, and response replay all remain real.
+No live pull request is changed by the suite.
+A separate authenticated read-only smoke ran the production poll with real `gh-axi` against the work account, completed inside the default total deadline, and published an inventory result only into a disposable private home.
+The disposable home was removed after inspecting only the bounded category and counts; the smoke exposed no GitHub write command.
+
+Run:
+
+```sh
+bash tests/fm-pr-review.test.sh
+```
+
+Current exact output:
+
+```text
+ok - automatic pull-request review owner is installed
+ok - discovery covers authored, requested, assigned, and participating PRs with one review per exact head and unchanged silence
+ok - feedback includes actionable bodies, inline comments, conversation, and substantive bots without self-reply loops
+ok - bounded pagination covers multiple PR, review, inline-thread, and conversation pages
+ok - supported inline feedback is fixed, validated, and replied exactly once
+ok - unsupported, duplicate, outdated, and superseded findings receive one evidence reply
+ok - scope expansion and stronger boundaries wait for the captain without a premature response
+ok - foreign PR review is comment-only with no branch mutation, approval, or merge path
+ok - fleet-authored exact-head review records a real outcome without self-approval or self-review
+ok - head movement during verification invalidates evidence and requeues the same finding generation
+ok - poll crashes before and after snapshot publication replay without lost or duplicate work
+ok - duplicate notifications and claim replay preserve one review worker per lane
+ok - reply failure after correction retries the same response without duplicating the fix
+ok - crash after GitHub acceptance reconciles one original-thread reply instead of duplicating it
+ok - captain takeover opt-out is durable and later restoration covers intervening heads and feedback
+ok - process-event registration is restart-idempotent and isolated per Firstmate home
+ok - locked main-home bootstrap automatically arms one account review source and secondmates do not duplicate it
+ok - authentication and rate-limit failures stay bounded, deduplicated, and preserve the last good inventory
+
+# all automatic pull-request review tests passed
+```
+
+## Independent oracles and mutation witnesses
+
+| Guarantee | Independent oracle | Mutation that the test rejects |
+| --- | --- | --- |
+| one review per exact head | the fixture explicitly contains four relevant PR identities, then changes only one SHA | keying review work by PR number alone loses the fifth exact-head item |
+| unchanged silence | item count, no task metadata, empty stdout, and the source's no-result exit are checked independently | dispatching from every timer tick creates output or task state |
+| inventory scopes | four distinct fixtures each carry one independently expected relationship | querying only authored or review-requested PRs loses assigned or participating rows |
+| bounded pagination | five records with a page size of two require pages two and three, which the fake call log proves were read | first-page-only collection loses PRs or feedback |
+| complete feedback body | a finding extends beyond the queued prefix and the exact-node chunk reader reconstructs its independently asserted suffix | adjudicating only the transport prefix loses the claim's final substantive text |
+| bot and self classification | the fixture contains one substantive CodeRabbit claim, one transport-only deployment, and one self reply | excluding every Bot drops CodeRabbit; accepting every Bot or self actor creates loops |
+| supported correction | validation evidence and one exact original-thread response are independent files and effects | replying before validation or posting twice changes the terminal record or write count |
+| dismissed feedback | each unsupported, duplicate, and superseded claim has a required response and durable terminal outcome | silently resolving any non-fixed claim leaves no delivered response |
+| crash replay | process exits are injected after item publication, snapshot publication, claim, response staging, GitHub post, and terminal publication | cursor-before-item, duplicate claim, or post-without-reconciliation loses or repeats work |
+| head movement | GitHub's current head is changed while the claim generation remains old | trusting only the claimed SHA posts stale evidence instead of incrementing and requeueing |
+| reply failure | the first write fails after correction evidence is already durable | rerunning correction or discarding the staged body changes evidence or response identity |
+| captain decision | the fake GitHub log must remain empty while the item reaches captain-decision-pending | treating reviewer wording as authority produces a write |
+| foreign PR safety | the fake log accepts only `pr review --comment` for the terminal review | approval, merge, or branch mutation appears directly in the operation log |
+| opt-out restoration | head and feedback both change while the covered cursor is frozen | updating the covered cursor during takeover loses one or both intervening identities |
+| home isolation | two homes derive different source ids and retain one idempotent registration each | machine-global or path-independent identity aliases the homes |
+| bounded failures | failed authentication and low rate headroom publish no snapshot and deduplicate the same diagnostic | partial inventory publication or immediate retry changes state or call cadence |
+
+## Supported harnesses and runtime backends
+
+The source publishes only through the generic process-event `check` path.
+It neither reads a worker endpoint nor calls `bin/fm-backend.sh`.
+Therefore tmux, Herdr, Zellij, Orca, and cmux do not differ at this integration surface.
+
+The same actionable `check` notification is consumed by Claude, Codex, OpenCode, Pi, pi-signed, Grok, and Kimi through their existing primary supervision protocols.
+No harness-rendered output, key binding, process name, or vendor-specific state participates in inventory, queue identity, or response delivery.
+The test proves registration-only supervision through `fm_supervision_needed`; the existing supervision suites remain the owner of per-harness notification continuity.

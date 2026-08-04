@@ -469,6 +469,49 @@ The published `lavish-axi poll` clears feedback destructively before returning i
 Never describe this path as at-least-once, no-loss, or lossless.
 `docs/verification/process-event-sources.md` holds the measurements and `.agents/skills/process-event-sources/SKILL.md` owns the handling procedure.
 
+## Automatic pull-request review (state/pr-review)
+
+A locked main-home session start automatically registers one `pr-review` source through `bin/fm-procevent-pr-review.sh` when GitHub authentication, `node`, and `gh-axi` are available.
+No repository list or additional token is required.
+The authenticated work account defines the inventory: authored open pull requests plus open pull requests where that identity is review-requested, assigned, or materially participating.
+Persistent secondmate homes skip this account-global source and receive routed work from the main home instead of duplicating the poll.
+
+The source is a self-throttled process-event wait, not a custom watcher check.
+It remains silent on an unchanged inventory and starts no worker or model turn.
+A new relevant exact head, new substantive authored-PR feedback identity, pending response retry, or deduplicated operational diagnostic returns one bounded result through the existing process-event inbox and `check` notification path.
+The generic result remains recoverable until handled, while the review queue remains private under `state/pr-review/` across session restarts.
+
+`bin/fm-pr-review.sh --help` is the exact setup and lifecycle command owner.
+Use `bin/fm-pr-review.sh opt-out <canonical-pr-url>` when the captain takes over one pull request.
+Use `bin/fm-pr-review.sh opt-in <canonical-pr-url>` to restore coverage from the last covered head and feedback cursor, including intervening items.
+The opt-out record is private and durable; removing the process-event registration is not a supported substitute because it loses the explicit per-PR ownership decision.
+
+The poll uses explicit pages and refuses with a bounded diagnostic rather than silently dropping eligible repositories, pull requests, reviews, inline threads, or conversation comments beyond a configured limit.
+It reads GitHub rate-limit state before inventory, uses bounded read retries, makes one non-retried write attempt before response reconciliation, bounds every `gh-axi` call and total poll execution, and preserves the last good snapshot on authentication, rate, schema, pagination, or response-size failure.
+The defaults are:
+
+```sh
+FM_PR_REVIEW_INTERVAL_SECS=900
+FM_PR_REVIEW_MAX_REPOSITORIES=25
+FM_PR_REVIEW_MAX_PULLS=50
+FM_PR_REVIEW_PAGE_SIZE=25
+FM_PR_REVIEW_FEEDBACK_PAGE_SIZE=5
+FM_PR_REVIEW_MAX_PAGES=20
+FM_PR_REVIEW_MAX_BODY_CHARS=100
+FM_PR_REVIEW_API_TIMEOUT_MS=7000
+FM_PR_REVIEW_POLL_BUDGET_MS=120000
+FM_PR_REVIEW_API_RETRIES=1
+FM_PR_REVIEW_MIN_CORE_REMAINING=3252
+FM_PR_REVIEW_MIN_SEARCH_REMAINING=10
+```
+
+The search page size is separate from the small feedback page size so selected comment prefixes stay within `gh-axi`'s bounded envelope even with costly escaping.
+A truncated prefix remains only an identity until `fm-pr-review.sh fetch-feedback <item-id>` reconstructs the exact node body through bounded authenticated chunks into private state.
+The two headroom defaults are derived from the default pull, page, and page-size bounds; changing those bounds recomputes the required minimum, and an override cannot lower it below the configured worst case.
+These values are bounded again by the state owner, so malformed or extreme overrides stop rather than weakening safety or making an unbounded request.
+`docs/architecture.md` "Automatic pull-request review and feedback" owns the stable component and durability boundaries.
+`docs/verification/pr-review.md` owns current maintainer evidence.
+
 ## Environment variables
 
 Runtime tuning via environment variables (defaults shown):

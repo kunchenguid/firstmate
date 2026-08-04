@@ -88,6 +88,34 @@ Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts 
 On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, durable catch-up evidence, and the fail-closed gate that keeps ordinary work behind every live firstmate-actionable blocker.
 `fm-send.sh` selects a pre-Enter popup-settle for slash commands and for codex `$...` skill invocations using metadata-routed target `harness=` values, then adds its own `FM_SEND_SETTLE` pause after successful text sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that post-submit pause.
 
+## Automatic pull-request review and feedback
+
+The main home registers one account-wide `pr-review` source through the existing process-event runner.
+The source sleeps until its private slow-poll deadline, uses the authenticated `gh-axi` identity to inventory bounded pages of relevant open pull requests and their reviews, inline comments, replies, and conversation comments, and returns no result when the inventory and actionable queue state are unchanged.
+It adds no cron job, LaunchAgent, daemon, custom watcher check, credential path, or notification channel.
+Persistent secondmate homes do not start duplicate account pollers; the main home routes claimed work through the existing marked secondmate channel when a registered scope owns it.
+
+`bin/fm-pr-review-state.mjs` is the single owner of the inventory and durable state machine.
+It keys initial reviews by canonical repository, pull-request number, and exact head, and keys feedback by immutable node, parent thread, content version, and the current verification generation.
+Private item records also retain the owning task, exact head, verdict, response state, retry count, and evidence needed to resume after interruption.
+The inventory stores a bounded feedback prefix and length marker; the owner reconstructs any truncated exact-node body through bounded authenticated chunks into private state before adjudication.
+Queue item publication precedes the covered inventory cursor, exact-head completion revalidates GitHub, and one home-scoped lane prevents duplicate review workers.
+A moved head invalidates incomplete evidence and requeues the same feedback generation before any fix claim or outward response.
+
+A response is bound durably before GitHub delivery.
+Delivery prepends a hidden exact-body binding marker and searches the original thread for that self-authored marker, exact head, and parent identity before posting, so a reply failure retries the same response and a crash after GitHub acceptance can reconcile the accepted post without knowingly repeating it.
+The only terminal feedback outcomes are fixed-and-replied, dismissed-and-replied, duplicate-and-replied, superseded-and-replied, and captain-decision-pending.
+An explicit per-PR opt-out preserves the last covered head and feedback cursor, so restoring coverage compares every intervening identity instead of accepting a fresh baseline.
+
+The agent-only [`pr-review-owner`](../.agents/skills/pr-review-owner/SKILL.md) is the single owner of adversarial adjudication and routing.
+It sends supported corrections back through the existing PR branch and selected validation owner, withholds scope expansion and stronger safety boundaries for the captain, and requires one original-thread evidence response even when a claim is stale or unsupported.
+Fleet-authored PRs are never self-reviewed or approved on GitHub, foreign PRs are comment-only, and this path has no merge authority.
+
+The source returns a bounded process-event result only when model attention is needed, then classifies that result terminal so the generic runner retains and re-announces it without starting another account poll.
+After the result is durably handled, the adjudication owner acknowledges the review event and re-registers the ongoing source.
+This composes with every supported primary harness through the same `check` notification path and never consults a runtime backend, so harness and backend differences are not part of its semantics.
+[`configuration.md`](configuration.md#automatic-pull-request-review-statepr-review) owns setup and limits, and [`verification/pr-review.md`](verification/pr-review.md) holds the current behavior evidence.
+
 ## Busy state is semantic, per adapter
 
 `bin/fm-busy-lib.sh` is the single owner of what "this worker is busy" means, and `bin/fm-busy-event.sh` is the only writer of the per-task records it reads.

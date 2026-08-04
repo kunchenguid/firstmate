@@ -32,7 +32,10 @@ A configured remote secondmate reply source is armed and handled through `bin/fm
 Its header owns exact commands, while the adapter owns cursor continuity, validated deduplicated status ingest, path-confined document fetch, acknowledgement, and re-arming after a good delta.
 A continuity break is escalated once and stays unarmed until an operator deliberately rebases it.
 
-`bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, and `bin/fm-procevent-remote-reply.sh --help` own the exact commands and flags.
+The main home's automatic pull-request review source is armed through `bin/fm-procevent-pr-review.sh`.
+A `procevent pr-review ...` notification additionally requires `pr-review-owner`, which owns queue claims, adjudication, response delivery, review-event acknowledgement, and re-arming.
+
+`bin/fm-procevent.sh --help` and each `bin/fm-procevent-<adapter>.sh --help` own exact commands and flags.
 
 Two rules the commands cannot enforce for you:
 

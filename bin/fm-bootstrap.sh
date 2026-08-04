@@ -12,6 +12,7 @@
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
+#                 "PR_REVIEW: automatic pull-request review source could not be registered",
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
@@ -82,9 +83,10 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
-#          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          secondmate_handoff_resume, x_mode_setup, fleet_sync) while still
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the seven MUTATING sweeps
+#          (PR-check migration, automatic PR-review source registration,
+#          secondmate_sync, secondmate_liveness_sweep, secondmate_handoff_resume,
+#          x_mode_setup, fleet_sync) while still
 #          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
@@ -1066,6 +1068,19 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   echo "BOOTSTRAP_INFO: tasks-axi available"
 fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
+  # One main-home process-event source owns account-wide pull-request review
+  # inventory. Persistent secondmate homes stay out of this account-global lane
+  # and receive routed work through their existing parent contract instead of
+  # starting duplicate account pollers.
+  if [ ! -f "$FM_HOME/.fm-secondmate-home" ] \
+    && [ -x "$FM_ROOT/bin/fm-procevent-pr-review.sh" ] \
+    && command -v gh-axi >/dev/null 2>&1 \
+    && command -v node >/dev/null 2>&1 \
+    && gh auth status >/dev/null 2>&1; then
+    if ! FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent-pr-review.sh" arm >/dev/null 2>&1; then
+      echo "PR_REVIEW: automatic pull-request review source could not be registered"
+    fi
+  fi
   secondmate_liveness_sweep
   secondmate_sync
   secondmate_handoff_resume
