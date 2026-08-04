@@ -445,7 +445,7 @@ nm_ci_checks_state() {
 # lookup failure there; parsing an empty string here would otherwise report the
 # same "no run for this branch" as a listing that genuinely lacks the branch.
 nm_runs_status_for_branch() {  # <branch> <runs-listing>
-  local branch=$1 out=${2:-} row st rest br sha authoring
+  local branch=$1 out=${2:-} row st rest br sha
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
     row=$(trim "$row")
@@ -458,13 +458,7 @@ nm_runs_status_for_branch() {  # <branch> <runs-listing>
     rest=$(trim "$rest")
     sha=${rest%% *}
     if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status, including the fix-round case: an
-      # actively-executing run authors its own commits, so a tip that advanced
-      # past this row's sha is still that run's work.
-      case "$st" in running|fixing) authoring=1 ;; *) authoring=0 ;; esac
-      # Never branch-scoped: this is the historical listing, not an answer about
-      # the worktree's current branch, so an unresolvable sha stays rejected.
-      nm_head_attributable "$sha" "$authoring" 0 || continue
+      nm_head_attributable "$sha" 0 0 || continue
       printf '%s' "$st"
       return 0
     fi

@@ -1675,29 +1675,28 @@ test_provably_working_via_degraded_run_step() {
 # immediately read unknown/none. The code-identity skip is right for a stale or
 # rewritten run and wrong for the run currently authoring those commits.
 
-test_fix_round_advanced_tip_attributes_via_runs_list() {
+test_coarse_running_row_behind_tip_does_not_attribute() {
   reset_fakes
-  local d base_short out; d=$(new_case fix-round-coarse)
-  make_repo_on_branch "$d/wt" fm/feat-fixround
+  local d base_short out; d=$(new_case coarse-running-behind)
+  make_repo_on_branch "$d/wt" fm/feat-coarse-behind
   base_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
-  # The pipeline commits its own fix; the tip advances past the recorded sha.
-  git -C "$d/wt" commit -q --allow-empty -m 'pipeline fix commit'
+  git -C "$d/wt" commit -q --allow-empty -m 'local work after parked run'
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/fixround.meta" "window=fm:fm-fixround" "worktree=$d/wt" "kind=ship" "harness=claude"
+  fm_write_meta "$d/state/coarsebehind.meta" "window=fm:fm-coarsebehind" "worktree=$d/wt" "kind=ship" "harness=claude"
   FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
   FM_FAKE_RUNS_LIST="$(cat <<EOF
   running    fm/other-crew aaaaaaa  2026-08-01 22:10
-  running    fm/feat-fixround ${base_short}  2026-08-01 22:05
+  running    fm/feat-coarse-behind ${base_short}  2026-08-01 22:05
 EOF
 )"
   FM_FAKE_BUSY=0
-  arm_idle_record "$d/state" fixround
-  out=$(run_crew_state "$d" fixround)
-  assert_contains "$out" "source: run-step" "an active run that advanced the tip keeps attribution"
-  assert_contains "$out" "state: working" "a mid-fix-round crew reads as working"
-  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working fixround \
-    || fail "a crew mid-fix-round was not treated as provably working"
-  pass "an active run that advanced the tip with its own fix commits still attributes"
+  arm_idle_record "$d/state" coarsebehind
+  out=$(run_crew_state "$d" coarsebehind)
+  assert_not_contains "$out" "source: run-step" "a coarse running row cannot prove authoring"
+  assert_contains "$out" "state: unknown" "a stopped crew behind a coarse row still surfaces"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working coarsebehind \
+    && fail "a coarse running row hid a stopped crew after the tip advanced"
+  pass "coarse running rows behind the tip do not prove authoring"
 }
 
 test_fix_round_advanced_tip_attributes_via_axi_status() {
@@ -1798,7 +1797,7 @@ test_completed_lookup_without_run_does_not_degrade
 test_busy_pane_outranks_degraded_record
 test_degraded_record_outranks_stale_status_log
 test_provably_working_via_degraded_run_step
-test_fix_round_advanced_tip_attributes_via_runs_list
+test_coarse_running_row_behind_tip_does_not_attribute
 test_fix_round_advanced_tip_attributes_via_axi_status
 test_terminal_run_behind_advanced_tip_still_invalidates
 test_pipeline_owned_unresolvable_head_attributes
