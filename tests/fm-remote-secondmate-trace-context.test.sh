@@ -29,6 +29,8 @@ SECOND_HOME="$TMP_ROOT/remote-home-2"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/fake")
 HERDR_LOG="$TMP_ROOT/remote-herdr.log"
 HERDR_STATE="$TMP_ROOT/remote-herdr.state"
+TMUX_LOG="$TMP_ROOT/remote-tmux.log"
+TMUX_STATE="$TMP_ROOT/remote-tmux.state"
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
 trap 'FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true; rm -rf -- "$TMP_ROOT"' EXIT

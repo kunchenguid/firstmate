@@ -174,7 +174,7 @@ That keeps spawn launch compatible across claude, codex, grok, pi, opencode, and
 
 `data/secondmates.md` records persistent secondmates with natural-language scopes, project clone lists, and home paths.
 A local route points directly at its home, while a remote route adds an SSH alias and remote Firstmate code root so the entire home and all of its child work stay on that host.
-Remote placement is independent of the remote home's ordinary local session backend, and individual workers are never placed remotely by this feature.
+Remote placement pins the remote second-mate agent to Herdr while leaving the remote home's worker backend selection independent, and individual workers are never placed remotely by this feature.
 [`remote-secondmates.md`](remote-secondmates.md) owns current setup, transport, relay, failure, and retirement behavior.
 `fm-home-seed.sh` provisions a local isolated home, clones the listed PR-based projects into it, initializes newly cloned `no-mistakes` projects, copies the charter to `data/charter.md`, and `fm-spawn.sh --secondmate` launches it through the same session-provider and status-file path as any direct report.
 `fm-remote-home-seed.sh` sends a bounded charter and origin manifest through the generic transport so the remote host clones and provisions its own home and projects.
