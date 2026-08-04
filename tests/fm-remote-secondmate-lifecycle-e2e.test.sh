@@ -518,6 +518,8 @@ assert_no_grep '--session default' "$HERDR_LOG" "remote launch targeted the inte
 assert_grep 'window=remote:ios' "$PARENT/state/ios.meta" "parent metadata pretended the endpoint was local"
 assert_grep 'effort=high' "$PARENT/state/ios.meta" "parent metadata omitted the delivered remote effort"
 assert_grep 'effort=high' "$REMOTE_HOME/state/parent-route/ios.meta" "remote route metadata omitted the delivered effort"
+assert_grep 'profile_delivery=fm-spawn.v1' "$REMOTE_HOME/state/parent-route/ios.meta" "remote route metadata omitted delivered-profile provenance"
+assert_grep 'delivered_effort=high' "$REMOTE_HOME/state/parent-route/ios.meta" "remote route metadata omitted the verified delivered effort"
 assert_present "$PARENT/state/procevent/remote-reply-ios.source" "remote spawn did not arm its reply source"
 publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.sh"
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
@@ -558,6 +560,10 @@ assert_not_contains "$BOOT_PROFILE_WARNING" "cannot thread requested effort" \
   "successful remote startup relaunch moved the effort warning onto stdout"
 assert_grep 'harness=opencode' "$PARENT/state/ios.meta" "warning-path relaunch did not publish the remote harness"
 assert_grep 'harness=opencode' "$REMOTE_HOME/state/parent-route/ios.meta" "warning-path relaunch did not publish endpoint metadata"
+grep -qxF 'effort=' "$PARENT/state/ios.meta" \
+  || fail "warning-path parent metadata published the omitted effort as delivered"
+assert_grep 'effort=high' "$REMOTE_HOME/state/parent-route/ios.meta" "warning-path endpoint lost the requested effort trace"
+assert_grep 'delivered_effort=default' "$REMOTE_HOME/state/parent-route/ios.meta" "warning-path endpoint did not distinguish the omitted effort from its delivered default"
 pass "remote and startup relaunch wrappers preserve successful effort diagnostics on stderr"
 publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.sh"
 
@@ -568,12 +574,41 @@ restore_rc=$?
 [ "$restore_rc" -eq 0 ] || fail "remote profile restore failed"$'\n'"$(cat "$TMP_ROOT/spawn-profile-restore.err")"
 assert_contains "$restore_out" 'harness=codex' "remote profile restore did not relaunch codex"
 assert_grep 'effort=high' "$PARENT/state/ios.meta" "remote profile restore lost the delivered effort"
+
+remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-proven-profile.meta"
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-legacy-profile.meta"
+awk '
+  /^profile_delivery=/ || /^delivered_model=/ || /^delivered_effort=/ { next }
+  /^effort=/ { print "effort=max"; next }
+  { print }
+' "$TMP_ROOT/remote-ios-proven-profile.meta" > "$remote_route_meta"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-legacy-max.meta"
+legacy_profile_state=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios \
+  2> "$TMP_ROOT/legacy-profile-state.err")
+[ "$legacy_profile_state" = unverified ] || fail "pre-fix live Codex max metadata was not classified unverified"
+launches_before_legacy_profile=$(grep -c '^tab create' "$HERDR_LOG" || true)
+if remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --effort max \
+  > "$TMP_ROOT/legacy-profile-spawn.out" 2> "$TMP_ROOT/legacy-profile-spawn.err"; then
+  fail "pre-fix live Codex max metadata was accepted as delivered"
+fi
+assert_grep 'delivered profile is unproven' "$TMP_ROOT/legacy-profile-spawn.err" \
+  "pre-fix live Codex max refusal did not identify missing delivery provenance"
+cmp -s "$TMP_ROOT/remote-ios-legacy-max.meta" "$remote_route_meta" \
+  || fail "pre-fix live Codex max refusal rewrote endpoint metadata"
+cmp -s "$TMP_ROOT/parent-ios-before-legacy-profile.meta" "$PARENT/state/ios.meta" \
+  || fail "pre-fix live Codex max refusal rewrote parent metadata"
+launches_after_legacy_profile=$(grep -c '^tab create' "$HERDR_LOG" || true)
+[ "$launches_before_legacy_profile" -eq "$launches_after_legacy_profile" ] \
+  || fail "pre-fix live Codex max refusal restarted the endpoint"
+mv -f "$TMP_ROOT/remote-ios-proven-profile.meta" "$remote_route_meta"
+pass "live pre-fix Codex max metadata is rejected without restart or republication"
+
 if [ "${FM_TEST_PROFILE_ONLY:-0}" = 1 ]; then
   echo "ALL PROFILE TESTS PASSED"
   exit 0
 fi
 
-remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-default-session.meta"
 legacy_pane=$(sed -n 's/^herdr_pane_id=//p' "$remote_route_meta")
 awk -v pane="$legacy_pane" '

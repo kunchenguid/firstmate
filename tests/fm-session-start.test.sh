@@ -842,7 +842,7 @@ EOF
 }
 
 test_herdr_backend_diagnostics_follow_real_session_start() {
-  local mode rec root home fakebin mask out
+  local mode rec root home fakebin mask out err
   for mode in configured autodetected; do
     rec=$(new_world "herdr-$mode")
     IFS='|' read -r root home fakebin <<EOF
@@ -862,15 +862,20 @@ command() {
   builtin command "$@"
 }
 SH
+    err="$home/session-start.err"
     if [ "$mode" = configured ]; then
       printf '%s\n' herdr > "$home/config/backend"
-      out=$(TMUX='' HERDR_ENV='' BASH_ENV="$mask" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+      out=$(TMUX='' HERDR_ENV='' BASH_ENV="$mask" run_session_start "$home" "$root" "$fakebin:$BASE_PATH" 2> "$err")
       assert_not_contains "$out" "NOTICE: auto-detected herdr runtime" \
         "an explicit Herdr home should not be reported as auto-detected"
+      assert_no_grep "NOTICE: auto-detected herdr runtime" "$err" \
+        "an explicit Herdr home reported auto-detection on stderr"
     else
-      out=$(TMUX='' HERDR_ENV=1 BASH_ENV="$mask" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-      assert_contains "$out" "NOTICE: auto-detected herdr runtime (HERDR_ENV=1)" \
-        "session start did not preserve the Herdr runtime auto-detection fallback"
+      out=$(TMUX='' HERDR_ENV=1 BASH_ENV="$mask" run_session_start "$home" "$root" "$fakebin:$BASE_PATH" 2> "$err")
+      assert_grep "NOTICE: auto-detected herdr runtime (HERDR_ENV=1)" "$err" \
+        "session start did not preserve the Herdr runtime auto-detection fallback on stderr"
+      assert_not_contains "$out" "NOTICE: auto-detected herdr runtime" \
+        "session start moved the Herdr runtime auto-detection notice onto stdout"
     fi
     assert_contains "$out" "SESSION START - $home" "the real session-start path did not run in the throwaway home"
     assert_not_contains "$out" "MISSING: tmux" "Herdr session start falsely required masked tmux"
@@ -968,6 +973,27 @@ EOF
   [ "$first_calls" -eq 1 ] && [ "$second_calls" -eq 1 ] \
     || fail "a second session-start pass duplicated the relaunched Pi secondmate: $(cat "$log")"
   pass "session start: an absent recorded tmux window relaunches its Pi secondmate exactly once"
+}
+
+test_session_start_preserves_bootstrap_profile_warning_stderr() {
+  local rec root home fakebin mate log spawned out err
+  rec=$(prepare_session_start_secondmate secondmate-profile-warning)
+  IFS='|' read -r root home fakebin mate log spawned <<EOF
+$rec
+EOF
+  printf '%s\n' 'opencode default high' > "$home/config/secondmate-harness"
+  err="${root%/root}/session-start.err"
+
+  out=$(run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" missing 2> "$err")
+
+  assert_grep "warning: harness 'opencode' cannot thread requested effort 'high'; accepted effort values: no supported values; omitting effort flag" \
+    "$err" "session start swallowed or rechanneled the bootstrap respawn effort warning"
+  assert_not_contains "$out" "cannot thread requested effort" \
+    "session start moved the bootstrap respawn effort warning onto stdout"
+  assert_grep 'harness=opencode' "$home/state/$SESSION_START_SECOND_MATE_ID.meta" \
+    "session-start warning regression did not exercise the real opencode respawn"
+
+  pass "session start preserves successful bootstrap profile diagnostics on stderr"
 }
 
 test_session_start_preserves_ambiguous_pi_process() {
@@ -1442,6 +1468,7 @@ test_session_lock_concurrent_single_winner
 test_output_ordering_diagnostics_lead
 test_herdr_backend_diagnostics_follow_real_session_start
 test_session_start_relaunches_missing_pi_secondmate
+test_session_start_preserves_bootstrap_profile_warning_stderr
 test_session_start_preserves_ambiguous_pi_process
 test_session_start_preserves_transiently_unreadable_tmux
 test_session_start_preserves_proven_bare_shell_recovery

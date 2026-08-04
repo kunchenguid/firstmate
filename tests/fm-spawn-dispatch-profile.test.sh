@@ -432,6 +432,12 @@ test_codex_threads_max_effort() {
   status=$?
   expect_code 0 "$status" "codex spawn with max effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
+  assert_grep 'profile_delivery=fm-spawn.v1' "$HOME_DIR/state/$id.meta" \
+    "codex max metadata omitted delivered-profile provenance"
+  assert_grep 'delivered_model=gpt-5' "$HOME_DIR/state/$id.meta" \
+    "codex max metadata omitted the delivered model"
+  assert_grep 'delivered_effort=max' "$HOME_DIR/state/$id.meta" \
+    "codex max metadata omitted the delivered effort"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
     "codex launch dropped max reasoning effort while metadata recorded it"
