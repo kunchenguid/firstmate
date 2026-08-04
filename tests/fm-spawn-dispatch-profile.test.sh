@@ -561,6 +561,25 @@ test_pi_scout_launch_marks_direct_report_context() {
   pass "pi scout launches carry the same positive direct-report marker as Pi workers"
 }
 
+test_pi_signed_scout_launch_marks_direct_report_context() {
+  local rec id out status launch
+  id=profile-pi-signed-scout-z8a
+  rec=$(make_spawn_case profile-pi-signed-scout pi-signed "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "pi-signed scout spawn should succeed"
+  assert_contains "$out" "spawned $id harness=pi-signed kind=scout" \
+    "pi-signed scout spawn did not preserve its visible identity"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed default default
+  assert_grep "kind=scout" "$HOME_DIR/state/$id.meta" "pi-signed scout meta missing kind=scout"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "FM_FIRSTMATE_PI_DIRECT_REPORT_KIND=scout FM_PI_HARNESS=pi-signed pi-signed -e" \
+    "pi-signed scout launch did not carry the scout direct-report marker"
+  pass "pi-signed scout launches carry the same positive direct-report marker as Pi workers"
+}
+
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata() {
   local rec id out status
   id=profile-pi-signed-missing-z8c
@@ -738,6 +757,7 @@ test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_scout_launch_marks_direct_report_context
+test_pi_signed_scout_launch_marks_direct_report_context
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_persistent_secondmate_uses_primary_extensions_without_direct_report_marker
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
