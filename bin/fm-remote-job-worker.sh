@@ -354,7 +354,8 @@ worker_publish_result() { # <job-dir> <exit>
 }
 
 worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
-  local job=$1 timeout=$2 group_file armed_file group_pid rc tmp deadline timed_out=0
+  local job=$1 timeout=$2 group_file armed_file group_pid rc tmp deadline next_heartbeat
+  local timed_out=0 heartbeat_failed=0
   shift 2
   group_file="$job/.claim/group"
   armed_file="$job/.claim/armed"
@@ -405,12 +406,22 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
     return 125
   fi
   deadline=$((SECONDS + timeout))
+  next_heartbeat=$((SECONDS + 1))
   while worker_process_or_group_alive group "$group_pid"; do
     if [ "$SECONDS" -ge "$deadline" ]; then
       worker_signal_process_or_group group TERM "$group_pid"
       worker_signal_process_or_group group KILL "$group_pid"
       timed_out=1
       break
+    fi
+    if [ "$SECONDS" -ge "$next_heartbeat" ]; then
+      if ! worker_write_heartbeat; then
+        worker_signal_process_or_group group TERM "$group_pid"
+        worker_signal_process_or_group group KILL "$group_pid"
+        heartbeat_failed=1
+        break
+      fi
+      next_heartbeat=$((SECONDS + 1))
     fi
     sleep "$FM_REMOTE_JOB_POLL_SECONDS"
   done
@@ -419,6 +430,7 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
   rm -f -- "$group_file" "$armed_file"
   WORKER_ACTIVE_JOB=
   [ "$timed_out" -eq 0 ] || return 124
+  [ "$heartbeat_failed" -eq 0 ] || return 125
   return "$rc"
 }
 

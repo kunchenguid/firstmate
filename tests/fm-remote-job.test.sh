@@ -182,6 +182,34 @@ assert_absent "$JOB_DIR" "reap retained a completed job record"
 assert_absent "$FAKE_PERL_LOG" "the worker invoked an unavailable Perl runtime"
 pass "the worker preserves bounded argv and stdin in an empty environment"
 
+ACTIVE_SIDE_EFFECT="$TMP_ROOT/active-side-effect"
+FM_REMOTE_JOB_TIMEOUT=5
+fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
+  fm-delay-job.sh 4 "$ACTIVE_SIDE_EFFECT" < /dev/null > /dev/null
+JOB_ID=$FM_REMOTE_JOB_ID
+JOB_DIR="$STATE_ROOT/jobs/$JOB_ID"
+for _ in $(seq 1 100); do
+  [ "$(fm_remote_job_read_state "$JOB_DIR" 2>/dev/null || true)" = running ] && break
+  sleep 0.05
+done
+[ "$(fm_remote_job_read_state "$JOB_DIR" 2>/dev/null || true)" = running ] \
+  || fail "the active-job readiness fixture did not begin running"
+ACTIVE_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
+touch -t 200001010000 "$STATE_ROOT/worker.ready"
+for _ in $(seq 1 40); do
+  fm_remote_job_probe "$ACCOUNT_HOME" && break
+  sleep 0.05
+done
+fm_remote_job_probe "$ACCOUNT_HOME" || fail "the active worker did not refresh its readiness heartbeat"
+fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail "$FM_REMOTE_JOB_ERROR"
+[ "$(cat "$STATE_ROOT/worker.pid")" = "$ACTIVE_WORKER_PID" ] \
+  || fail "ensure replaced a healthy worker during an active job"
+fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
+[ "$FM_REMOTE_JOB_EXIT" -eq 0 ] || fail "the active job did not complete after the readiness probe"
+assert_present "$ACTIVE_SIDE_EFFECT" "the active job was interrupted by the concurrent readiness check"
+fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the active readiness job could not be reaped"
+pass "active jobs keep the worker ready for concurrent requests"
+
 OLD_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
 printf '\n' >> "$REMOTE_ROOT/bin/fm-remote-job-worker.sh"
 fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" \
