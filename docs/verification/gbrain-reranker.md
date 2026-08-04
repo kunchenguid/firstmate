@@ -1,6 +1,6 @@
 # GBrain local reranker verification
 
-This record captures the local GPU reranker that story #6 can configure without rediscovering the runtime, model, endpoint, or request contract.
+This record captures the local GPU reranker that GBrain can use without rediscovering the runtime, model, endpoint, or request contract.
 The evidence below was refreshed on 2026-08-04 on the four-GPU RTX 5060 Ti host.
 
 ## Pinned deployment
@@ -79,7 +79,7 @@ The unit pins the GPU by UUID with `CUDA_VISIBLE_DEVICES`, loads the CUDA backen
 The server is launched with `--reranking --offline --no-webui --host 127.0.0.1 --port 8081 --ctx-size 4096 --batch-size 512 --ubatch-size 512 --parallel 1 --n-gpu-layers 999`.
 The service uses `Restart=on-failure`, a two-second restart delay, a startup HTTP health probe, journal output, and a 200-message-per-30-second log rate limit.
 
-Story #6 should configure GBrain with:
+Configure GBrain with:
 
 ```sh
 gbrain config set provider_base_urls.llama-server-reranker http://127.0.0.1:8081/v1
