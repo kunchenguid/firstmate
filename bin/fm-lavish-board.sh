@@ -133,8 +133,8 @@ if (missing.length > 0) {
 NODE
 }
 
-write_evaluation_payload() {  # <evaluation-output> <target> <decision-id>
-  local evaluation=$1 target=$2 decision_id=$3 result_line
+write_evaluation_payload() {  # <evaluation-output> <target> <decision-id> <home-marker>
+  local evaluation=$1 target=$2 decision_id=$3 home_marker=$4 result_line
   result_line=$(printf '%s\n' "$evaluation" | sed -n 's/^result: //p' | sed -n '1p')
   [ -n "$result_line" ] || return 1
   printf '%s\n' "$result_line" | node -e '
@@ -143,6 +143,7 @@ write_evaluation_payload() {  # <evaluation-output> <target> <decision-id>
     const target = process.argv[1];
     const marker = process.argv[2];
     const decisionId = process.argv[3];
+    const homeMarker = process.argv[4];
     let snapshot = raw;
     try {
       for (let depth = 0; depth < 4 && typeof snapshot === "string"; depth += 1) {
@@ -157,12 +158,16 @@ write_evaluation_payload() {  # <evaluation-output> <target> <decision-id>
         payload = durable.payload;
         markerMatches = true;
       }
-      if (!markerMatches || payload?.decision_id !== decisionId) process.exit(3);
+      if (
+        !markerMatches
+        || payload?.decision_id !== decisionId
+        || payload?.home_marker !== homeMarker
+      ) process.exit(3);
       fs.writeFileSync(target, JSON.stringify(payload) + "\n", { mode: 0o600 });
     } catch {
       process.exit(4);
     }
-  ' "$target" "$SUBMIT_MARKER" "$decision_id"
+  ' "$target" "$SUBMIT_MARKER" "$decision_id" "$home_marker"
 }
 
 collect_submission() {
@@ -203,12 +208,13 @@ check_submission() {
   [ -d "$profile_path" ] && [ ! -L "$profile_path" ] || exit 0
   [ -f "$html_path" ] && [ ! -L "$html_path" ] || exit 0
 
-  downloaded_path=$(node -e '
+  if ! downloaded_path=$(node -e '
     const fs = require("node:fs");
     const path = require("node:path");
     const directory = process.argv[1];
     const decisionId = process.argv[2];
     const openedAt = Number(process.argv[3]);
+    const homeMarker = process.argv[4];
     const pattern = new RegExp(
       "^lavish-answer-" + decisionId + "(?: \\(\\d+\\))?\\.json$",
     );
@@ -220,7 +226,10 @@ check_submission() {
       if (info.mtimeMs < openedAt) continue;
       try {
         const payload = JSON.parse(fs.readFileSync(candidate, "utf8"));
-        if (payload?.decision_id !== decisionId) continue;
+        if (
+          payload?.decision_id !== decisionId
+          || payload?.home_marker !== homeMarker
+        ) continue;
       } catch {
         continue;
       }
@@ -228,14 +237,18 @@ check_submission() {
     }
     candidates.sort((left, right) => right.mtimeMs - left.mtimeMs);
     if (candidates[0]) process.stdout.write(candidates[0].candidate);
-  ' "$downloads" "$decision_id" "$opened_at" 2>/dev/null) || downloaded_path=
+  ' "$downloads" "$decision_id" "$opened_at" "$home" 2>/dev/null); then
+    printf 'lavish-submit-error: download scan failed for %s in %s\n' \
+      "$decision_id" "$downloads"
+    return 1
+  fi
 
   temporary=$(mktemp "$state_dir/.lavish-board-$decision_id.payload.XXXXXX")
   evaluation=$(isolated_chrome "$session" "$profile_path" 0 eval \
     'JSON.stringify({title: document.title, payload: window.__lavishPayload ?? null, durable_record: typeof window.__lavishStorageKey === "string" ? localStorage.getItem(window.__lavishStorageKey) : null})' \
     2>/dev/null) || evaluation=
   if [ -n "$evaluation" ]; then
-    if write_evaluation_payload "$evaluation" "$temporary" "$decision_id"; then
+    if write_evaluation_payload "$evaluation" "$temporary" "$decision_id" "$home"; then
       mv "$temporary" "$payload_path"
     else
       rm -f "$temporary"
@@ -255,7 +268,7 @@ check_submission() {
         exit 0
       }
     temporary=$(mktemp "$state_dir/.lavish-board-$decision_id.payload.XXXXXX")
-    if write_evaluation_payload "$evaluation" "$temporary" "$decision_id"; then
+    if write_evaluation_payload "$evaluation" "$temporary" "$decision_id" "$home"; then
       mv "$temporary" "$payload_path"
     else
       rm -f "$temporary"

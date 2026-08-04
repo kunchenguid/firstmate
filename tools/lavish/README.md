@@ -28,6 +28,13 @@ If wake enqueueing fails, the durable answer remains authoritative.
 The command prints `answer saved; wake not queued`, exits nonzero, and the next ordinary intake scan recovers it.
 
 `bin/fm-lavish-board.sh` owns the dedicated Chrome-profile launch, fail-closed answerability preflight, and bounded pickup integration around the generated file.
+`bin/fm-lavish-board.sh` renders the same immutable request into self-contained HTML and opens it with a decision-specific Chrome profile below the effective state root (`FM_STATE_OVERRIDE` or `$FM_HOME/state`).
+Submit first writes and reads back a browser-profile record, then shows a confirmation describing that durable record; the optional browser download is not treated as confirmed delivery.
+Both records carry the resolved absolute Firstmate home as `home_marker`, so a shared Downloads directory cannot route one home's answer into another home.
+The armed check recovers the record from the same profile even after the visible browser closes, validates it through `lavish-axi collect`, and runs intake.
+After an answer is committed, the Firstmate wake adapter appends the durable wake pointer and may attempt visible prompt delivery only when the session lock proves a live supervisor route belongs to the same canonical `FM_HOME`.
+It never falls back to ambient terminal state, and a visible prompt names the manifest's declared destination rather than assuming a conventional path.
+If visible delivery is refused, the durable answer and wake pointer remain authoritative.
 Read that script's header or `--help` output for its current mechanics; the [`lavish-decisions` skill](../../.agents/skills/lavish-decisions/SKILL.md) owns when to invoke it and when to use the terminal fallback.
 
 ## Agent commands
@@ -81,7 +88,10 @@ Intake validates every unreceipted answer, writes the declared destination first
 An existing matching destination or receipt is an idempotent success.
 A conflicting destination fails closed.
 New manifests declare `destination_format`; `.json` destinations receive the schema-version-2 browser payload, while other destinations receive the authoritative TOON answer.
-Protocol-1 manifests without `destination_format` retain the original byte-for-byte TOON copy behavior regardless of filename.
+Field-less protocol-1 manifests infer that same contract from the destination extension, so a `.json` destination never receives TOON bytes.
+Payload recovery scans the effective state root plus configured download locations as one batch.
+An unreadable configured location fails the batch before any candidate is committed or any intake result is published.
+New payloads route by `home_marker`; legacy unmarked downloads remain recoverable only in a home whose immutable decision id and request digest match.
 
 All commands require either `FM_HOME` or an explicit `--home <path>` and never guess a fleet home.
 Firstmate's internal commands use `FM_HOME`; captain-facing commands carry the resolved absolute `--home` path.
@@ -98,7 +108,7 @@ TOON's strict decoder validates every encoded array count before Lavish applies 
 - `kind: lavish-decision-manifest`
 - `schema_version`, stable `decision_id`, `title`, and `created_at`
 - an `$FM_HOME`-relative durable `destination` below `data/`
-- optional `destination_format` (`answer-toon` or `payload-json-v2`); absence retains protocol-1 TOON copy semantics
+- optional `destination_format` (`answer-toon` or `payload-json-v2`); absence infers JSON payload output for `.json` destinations and TOON output otherwise
 - `expected_count` and the ordered `questions` array
 - each question's nonempty unique key, ordered nonempty options, and optional visual filename references
 - optional visual metadata binding each copied file's media type, size, and digest
@@ -112,6 +122,8 @@ TOON's strict decoder validates every encoded array count before Lavish applies 
 - exactly one ordered answer for every expected question key
 - each selected option value and label
 - schema version `2` treats omitted annotations as empty; present question notes and the overall note must be strings, option comments must map declared option values to strings, and explicit `null` is invalid for any annotation field
+
+Schema-version-2 browser and JSON-destination payloads also carry the resolved absolute `home_marker` used for fail-closed cross-home routing.
 
 `receipt.toon` contains:
 

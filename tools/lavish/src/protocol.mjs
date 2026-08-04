@@ -241,8 +241,8 @@ export function validateManifest(raw, expectedId = undefined) {
   const title = requireString(manifest.title, 'manifest.title');
   const createdAt = requireTimestamp(manifest.created_at, 'manifest.created_at');
   const destination = validateDestination(manifest.destination);
-  let destinationFormat;
-  if (manifest.destination_format !== undefined) {
+  let destinationFormat = manifest.destination_format;
+  if (destinationFormat !== undefined) {
     destinationFormat = requireString(
       manifest.destination_format,
       'manifest.destination_format',
@@ -250,6 +250,16 @@ export function validateManifest(raw, expectedId = undefined) {
     if (!['answer-toon', 'payload-json-v2'].includes(destinationFormat)) {
       throw new LavishError('unsupported manifest.destination_format', 2);
     }
+  } else {
+    destinationFormat = extname(destination).toLowerCase() === '.json'
+      ? 'payload-json-v2'
+      : 'answer-toon';
+  }
+  if (
+    extname(destination).toLowerCase() === '.json'
+    && destinationFormat !== 'payload-json-v2'
+  ) {
+    throw new LavishError('JSON destinations require manifest.destination_format payload-json-v2', 2);
   }
   const requestSha256 = requireDigest(
     manifest.request_sha256,
@@ -330,7 +340,7 @@ export function validateManifest(raw, expectedId = undefined) {
     title,
     created_at: createdAt,
     destination,
-    ...(destinationFormat === undefined ? {} : { destination_format: destinationFormat }),
+    destination_format: destinationFormat,
     expected_count: manifest.expected_count,
     request_sha256: requestSha256,
     questions,
@@ -450,7 +460,10 @@ function payloadError(name, message) {
   throw new LavishError(`${name}: ${message}`, 2);
 }
 
-export function validateCollectPayload(raw, manifest) {
+export function validateCollectPayload(raw, manifest, {
+  expectedHomeMarker = undefined,
+  allowMissingHomeMarker = false,
+} = {}) {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     payloadError('payload_invalid', 'payload must be an object');
   }
@@ -465,6 +478,22 @@ export function validateCollectPayload(raw, manifest) {
   }
   if (raw.request_sha256 !== manifest.request_sha256) {
     payloadError('payload_stale_request', 'request hash does not match manifest');
+  }
+  if (raw.home_marker === undefined) {
+    if (expectedHomeMarker !== undefined && !allowMissingHomeMarker) {
+      payloadError('payload_missing_home', 'home marker is required');
+    }
+  } else {
+    if (
+      typeof raw.home_marker !== 'string'
+      || !isAbsolute(raw.home_marker)
+      || resolve(raw.home_marker) !== raw.home_marker
+    ) {
+      payloadError('payload_invalid_home', 'home marker must be a normalized absolute path');
+    }
+    if (expectedHomeMarker !== undefined && raw.home_marker !== expectedHomeMarker) {
+      payloadError('payload_wrong_home', 'home marker does not match the selected Firstmate home');
+    }
   }
   if (!Array.isArray(raw.answers)) {
     payloadError('payload_count_mismatch', 'answers must be an array');
@@ -571,10 +600,18 @@ export function validateCollectPayload(raw, manifest) {
   };
 }
 
-export function payloadFromAnswer(answer) {
+export function payloadFromAnswer(answer, homeMarker) {
+  if (
+    typeof homeMarker !== 'string'
+    || !isAbsolute(homeMarker)
+    || resolve(homeMarker) !== homeMarker
+  ) {
+    throw new LavishError('home marker must be a normalized absolute path', 2);
+  }
   return {
     schema_version: ANSWER_SCHEMA_VERSION,
     decision_id: answer.decision_id,
+    home_marker: homeMarker,
     request_sha256: answer.request_sha256,
     answers: answer.answers.map((selection) => ({
       key: selection.key,
@@ -592,7 +629,7 @@ export function encodeJsonPayload(payload) {
 
 function destinationTextForAnswer(decision, answer, answerText) {
   if (decision.manifest.destination_format === 'payload-json-v2') {
-    return encodeJsonPayload(payloadFromAnswer(answer));
+    return encodeJsonPayload(payloadFromAnswer(answer, decision.home));
   }
   return answerText;
 }
@@ -822,8 +859,9 @@ async function readDecisionVisuals(home, visualsDirectory, declaredVisuals) {
 
 export async function readDecision(home, id) {
   validateDecisionId(id);
-  const decisionDirectory = join(resolve(home), DECISIONS_RELATIVE_DIR, id);
-  await ensureSafeDirectoryTree(home, decisionDirectory);
+  const resolvedHome = resolve(home);
+  const decisionDirectory = join(resolvedHome, DECISIONS_RELATIVE_DIR, id);
+  await ensureSafeDirectoryTree(resolvedHome, decisionDirectory);
   const requestPath = join(decisionDirectory, 'request.md');
   const manifestPath = join(decisionDirectory, 'manifest.toon');
   await assertNoSymlink(requestPath, requestPath);
@@ -839,12 +877,13 @@ export async function readDecision(home, id) {
   }
   const visualsDirectory = join(decisionDirectory, 'visuals');
   const visuals = await readDecisionVisuals(
-    home,
+    resolvedHome,
     visualsDirectory,
     manifest.visuals ?? [],
   );
   return {
     id,
+    home: resolvedHome,
     directory: decisionDirectory,
     request,
     requestText: request.toString('utf8'),

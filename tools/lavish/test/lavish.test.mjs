@@ -8,6 +8,7 @@ import {
   readFile,
   readlink,
   readdir,
+  rm,
   symlink,
   stat,
   utimes,
@@ -368,10 +369,11 @@ async function manifestFor(fx, id) {
   );
 }
 
-function browserPayload(manifest, overrides = {}) {
+function browserPayload(fx, manifest, overrides = {}) {
   return {
     schema_version: 2,
     decision_id: manifest.decision_id,
+    home_marker: resolve(fx.home),
     request_sha256: manifest.request_sha256,
     answers: manifest.questions.map((question) => ({
       key: question.key,
@@ -719,6 +721,7 @@ test('B1 board submit persists the payload before showing durable confirmation',
   const durableRecord = JSON.parse([...submitted.storage.values()][0]);
   assert.equal(durableRecord.marker, 'LAVISH-SUBMIT v2');
   assert.equal(durableRecord.payload.decision_id, id);
+  assert.equal(durableRecord.payload.home_marker, resolve(fx.home));
   const confirmation = submitted.document.querySelector('#confirmation');
   assert.equal(confirmation.hidden, false);
   assert.match(confirmation.textContent, /durably saved/i);
@@ -782,7 +785,7 @@ test('B5 fm-lavish-board executes submit and recovers after immediate browser cl
     const staleDownload = join(downloads, `lavish-answer-${id}.json`);
     await writeFile(
       staleDownload,
-      `${JSON.stringify(browserPayload(manifest, {
+      `${JSON.stringify(browserPayload(fx, manifest, {
         answers: [{
           key: 'rollout',
           value: 'green',
@@ -873,6 +876,48 @@ test('B5 watcher check leaves a live unsubmitted board open and pending', async 
   assert.equal(await exists(checkPath), true);
 });
 
+test('watcher check fails closed when its download location becomes unreadable', async () => {
+  const fx = await fixture('board-unreadable-downloads');
+  const id = await createRequest(fx);
+  const downloads = join(fx.root, 'Downloads');
+  const fakeBin = join(fx.root, 'browser-bin');
+  const fakeState = join(fx.root, 'fake-browser-state.json');
+  await mkdir(downloads);
+  await mkdir(fakeBin);
+  const chrome = join(fakeBin, 'chrome-devtools-axi');
+  await writeFile(
+    chrome,
+    `#!/bin/sh\nexec '${process.execPath}' '${FAKE_BROWSER}' "$@"\n`,
+  );
+  await chmod(chrome, 0o700);
+  const environment = {
+    PATH: `${fakeBin}:${process.env.PATH}`,
+    FM_LAVISH_BIN: CLI,
+    LAVISH_FAKE_CHROME_STATE: fakeState,
+    LAVISH_FAKE_CHROME_AUTO_SUBMIT: '0',
+    LAVISH_WAKE_COMMAND: WAKE_ADAPTER,
+  };
+
+  const opened = await runExecutable(
+    BOARD_ADAPTER,
+    [id, '--home', fx.home, '--downloads', downloads],
+    { env: environment },
+  );
+  assert.equal(opened.code, 0, opened.stderr);
+  const checkPath = join(fx.home, 'state', `lavish-board-${id}.check.sh`);
+  await rm(downloads, { recursive: true });
+  await writeFile(downloads, 'not a directory\n');
+
+  const checked = await runExecutable(checkPath, [], { env: environment });
+  assert.equal(checked.code, 2, checked.stderr);
+  assert.match(checked.stderr, /unsafe or missing downloads directory/);
+  assert.equal(
+    await exists(join(fx.home, 'data/decisions', id, 'answer.toon')),
+    false,
+  );
+  assert.equal(await exists(checkPath), true);
+});
+
 test('board renders a conventional visuals directory on an existing manifest', async () => {
   const fx = await fixture('board-existing-visual');
   const id = await createRequest(fx);
@@ -896,7 +941,7 @@ test('collect validates and persists structured annotations through the normal w
   const payloadPath = join(fx.root, 'payload.json');
   await writeFile(
     payloadPath,
-    `${JSON.stringify(browserPayload(manifest, {
+    `${JSON.stringify(browserPayload(fx, manifest, {
       answers: [{
         key: 'rollout',
         value: 'green',
@@ -939,7 +984,7 @@ test('intake recovers a browser download payload without manual copy', async () 
   const downloads = join(fx.root, 'Downloads');
   await mkdir(downloads);
   const payloadPath = join(downloads, 'lavish-answer-release-choice.json');
-  const payload = browserPayload(manifest, {
+  const payload = browserPayload(fx, manifest, {
     answers: [{
       key: 'rollout',
       value: 'green',
@@ -979,6 +1024,103 @@ test('intake recovers a browser download payload without manual copy', async () 
   assert.equal(again.stdout, '');
 });
 
+test('intake ignores a home-bound download in unrelated homes', async () => {
+  const fx = await fixture('download-home-routing');
+  const unrelated = await fixture('download-unrelated-home');
+  const id = await createRequest(fx);
+  const manifest = await manifestFor(fx, id);
+  const downloads = join(fx.root, 'Downloads');
+  await mkdir(downloads);
+  await writeFile(
+    join(downloads, `lavish-answer-${id}.json`),
+    `${JSON.stringify(browserPayload(fx, manifest))}\n`,
+  );
+
+  const unrelatedIntake = await runCli(['intake'], {
+    home: unrelated.home,
+    env: { LAVISH_DOWNLOADS_DIR: downloads },
+  });
+  assert.equal(unrelatedIntake.code, 0, unrelatedIntake.stderr);
+  assert.equal(unrelatedIntake.stdout, '');
+  assert.equal(
+    await exists(join(unrelated.home, 'data/decisions', id, 'answer.toon')),
+    false,
+  );
+
+  const matchingIntake = await runCli(['intake'], {
+    home: fx.home,
+    env: { LAVISH_DOWNLOADS_DIR: downloads },
+  });
+  assert.equal(matchingIntake.code, 0, matchingIntake.stderr);
+  assert.match(matchingIntake.stdout, /release-choice,payload-collected/);
+});
+
+test('intake recovers a legacy unmarked download only in a matching home', async () => {
+  const fx = await fixture('download-legacy-home-routing');
+  const unrelated = await fixture('download-legacy-unrelated-home');
+  const id = await createRequest(fx);
+  const manifest = await manifestFor(fx, id);
+  const downloads = join(fx.root, 'Downloads');
+  const payload = browserPayload(fx, manifest);
+  delete payload.home_marker;
+  await mkdir(downloads);
+  await writeFile(
+    join(downloads, `lavish-answer-${id}.json`),
+    `${JSON.stringify(payload)}\n`,
+  );
+
+  const unrelatedIntake = await runCli(['intake'], {
+    home: unrelated.home,
+    env: { LAVISH_DOWNLOADS_DIR: downloads },
+  });
+  assert.equal(unrelatedIntake.code, 0, unrelatedIntake.stderr);
+  assert.equal(unrelatedIntake.stdout, '');
+
+  const matchingIntake = await runCli(['intake'], {
+    home: fx.home,
+    env: { LAVISH_DOWNLOADS_DIR: downloads },
+  });
+  assert.equal(matchingIntake.code, 0, matchingIntake.stderr);
+  assert.match(matchingIntake.stdout, /release-choice,payload-collected/);
+  assert.equal(
+    await exists(join(fx.home, 'data/decisions', id, 'answer.toon')),
+    true,
+  );
+});
+
+test('intake publishes nothing when any configured payload location is unreadable', async () => {
+  const fx = await fixture('download-incomplete-scan');
+  const id = await createRequest(fx);
+  const manifest = await manifestFor(fx, id);
+  const effectiveState = join(fx.root, 'effective-state');
+  const unreadableLocation = join(fx.root, 'not-a-directory');
+  await mkdir(effectiveState);
+  await writeFile(
+    join(effectiveState, `lavish-board-${id}.payload.json`),
+    `${JSON.stringify(browserPayload(fx, manifest))}\n`,
+  );
+  await writeFile(unreadableLocation, 'not a directory\n');
+
+  const intake = await runCli(['intake'], {
+    home: fx.home,
+    env: {
+      FM_STATE_OVERRIDE: effectiveState,
+      LAVISH_DOWNLOADS_DIR: unreadableLocation,
+    },
+  });
+  assert.equal(intake.code, 6, intake.stderr);
+  assert.match(intake.stdout, /scan-incomplete/);
+  assert.match(intake.stdout, /payload_scan_error/);
+  assert.equal(
+    await exists(join(fx.home, 'data/decisions', id, 'answer.toon')),
+    false,
+  );
+  assert.equal(
+    await exists(join(fx.home, 'data/decisions', id, 'receipt.toon')),
+    false,
+  );
+});
+
 test('intake recovers landed payloads only from the effective state root', async () => {
   const fx = await fixture('state-override-intake');
   const id = await createRequest(fx);
@@ -989,11 +1131,11 @@ test('intake recovers landed payloads only from the effective state root', async
   await mkdir(defaultState);
   await writeFile(
     join(effectiveState, `lavish-board-${id}.payload.json`),
-    `${JSON.stringify(browserPayload(manifest))}\n`,
+    `${JSON.stringify(browserPayload(fx, manifest))}\n`,
   );
   await writeFile(
     join(defaultState, `lavish-board-${id}.payload.json`),
-    `${JSON.stringify(browserPayload(manifest, {
+    `${JSON.stringify(browserPayload(fx, manifest, {
       answers: [{
         key: 'rollout',
         value: 'green',
@@ -1017,7 +1159,7 @@ test('intake recovers landed payloads only from the effective state root', async
   assert.equal(stored.answers[0].value, 'blue');
 });
 
-test('protocol-1 JSON destinations recover byte-for-byte before receipt', async () => {
+test('field-less protocol-1 JSON destinations retain JSON payload semantics', async () => {
   const fx = await fixture('legacy-json-intake');
   const id = await createRequest(fx, {
     destination: 'data/lavish-answers/release-choice.json',
@@ -1028,24 +1170,21 @@ test('protocol-1 JSON destinations recover byte-for-byte before receipt', async 
   await writeFile(manifestPath, `${encode(manifest)}\n`);
 
   const payloadPath = join(fx.root, 'payload.json');
-  await writeFile(
-    payloadPath,
-    `${JSON.stringify(browserPayload(manifest))}\n`,
-  );
+  const payload = browserPayload(fx, manifest);
+  const payloadText = `${JSON.stringify(payload, null, 2)}\n`;
+  await writeFile(payloadPath, payloadText);
   const collected = await runCli(['collect', id, '--payload', payloadPath], { home: fx.home });
   assert.equal(collected.code, 0, collected.stderr);
 
-  const answerPath = join(fx.home, 'data/decisions', id, 'answer.toon');
-  const answerBytes = await readFile(answerPath);
   const destinationDirectory = join(fx.home, 'data/lavish-answers');
   const destinationPath = join(destinationDirectory, 'release-choice.json');
   await mkdir(destinationDirectory, { recursive: true });
-  await writeFile(destinationPath, answerBytes);
+  await writeFile(destinationPath, payloadText);
 
   const intake = await runCli(['intake'], { home: fx.home });
   assert.equal(intake.code, 0, intake.stderr);
   assert.match(intake.stdout, /release-choice,consumed/);
-  assert.deepEqual(await readFile(destinationPath), answerBytes);
+  assert.deepEqual(JSON.parse(await readFile(destinationPath, 'utf8')), payload);
   assert.equal(
     await exists(join(fx.home, 'data/decisions', id, 'receipt.toon')),
     true,
@@ -1075,23 +1214,27 @@ test('collect fails closed with named errors for count, key, option, and request
   const cases = [
     {
       name: 'payload_count_mismatch',
-      payload: browserPayload(manifest, { answers: [] }),
+      payload: browserPayload(fx, manifest, { answers: [] }),
     },
     {
       name: 'payload_unknown_key',
-      payload: browserPayload(manifest, {
+      payload: browserPayload(fx, manifest, {
         answers: [{ key: 'missing', value: 'blue', question_note: '', option_comments: {} }],
       }),
     },
     {
       name: 'payload_unknown_option',
-      payload: browserPayload(manifest, {
+      payload: browserPayload(fx, manifest, {
         answers: [{ key: 'rollout', value: 'purple', question_note: '', option_comments: {} }],
       }),
     },
     {
       name: 'payload_stale_request',
-      payload: browserPayload(manifest, { request_sha256: `sha256:${'0'.repeat(64)}` }),
+      payload: browserPayload(fx, manifest, { request_sha256: `sha256:${'0'.repeat(64)}` }),
+    },
+    {
+      name: 'payload_wrong_home',
+      payload: browserPayload(fx, manifest, { home_marker: resolve(fx.root, 'other-home') }),
     },
   ];
   for (const failure of cases) {
@@ -1130,7 +1273,7 @@ test('B4 collect rejects explicit null annotations without committing an answer'
   for (const failure of cases) {
     const fx = await fixture(`null-${failure.name}`);
     const id = await createRequest(fx);
-    const payload = browserPayload(await manifestFor(fx, id));
+    const payload = browserPayload(fx, await manifestFor(fx, id));
     failure.mutate(payload);
     const payloadPath = join(fx.root, 'payload.json');
     await writeFile(payloadPath, `${JSON.stringify(payload)}\n`);
@@ -1206,7 +1349,7 @@ test('B3 visible queue uses the manifest destination and home-bound target', asy
   const payloadPath = join(fx.root, 'payload.json');
   await writeFile(
     payloadPath,
-    `${JSON.stringify(browserPayload(await manifestFor(fx, id)))}\n`,
+    `${JSON.stringify(browserPayload(fx, await manifestFor(fx, id)))}\n`,
   );
   const fake = await fakeTmux(fx);
   const holder = await writeSupervisorLock(fx, 'home:0');

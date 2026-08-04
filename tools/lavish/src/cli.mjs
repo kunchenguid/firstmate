@@ -283,25 +283,39 @@ function landingCandidateId(name) {
 
 async function discoverLandingCandidates(home) {
   const stateDirectory = resolve(process.env.FM_STATE_OVERRIDE || join(home, 'state'));
-  const directories = [
-    stateDirectory,
-    process.env.LAVISH_DOWNLOADS_DIR,
-    process.env.LAVISH_SCAN_HOME_DOWNLOADS === '0' ? undefined : join(homedir(), 'Downloads'),
-  ].filter((directory, index, all) => (
-    typeof directory === 'string'
-    && directory.trim() !== ''
-    && all.indexOf(directory) === index
-  ));
+  const configuredDownloads = process.env.LAVISH_DOWNLOADS_DIR?.trim();
+  if (process.env.FM_STATE_OVERRIDE === undefined) {
+    await ensureSafeDirectoryTree(home, stateDirectory, { create: true });
+  }
+  const requestedDirectories = [
+    { path: stateDirectory, missingAllowed: false },
+    configuredDownloads === undefined || configuredDownloads === ''
+      ? undefined
+      : { path: resolve(configuredDownloads), missingAllowed: false },
+    process.env.LAVISH_SCAN_HOME_DOWNLOADS === '0'
+      ? undefined
+      : { path: join(homedir(), 'Downloads'), missingAllowed: true },
+  ].filter((entry) => entry !== undefined);
+  const directories = [];
+  for (const requested of requestedDirectories) {
+    const existing = directories.find((entry) => entry.path === requested.path);
+    if (existing === undefined) {
+      directories.push({ ...requested });
+    } else {
+      existing.missingAllowed &&= requested.missingAllowed;
+    }
+  }
   const candidates = [];
+  const errors = [];
   for (const directory of directories) {
     let entries;
     try {
-      entries = await readdir(directory, { withFileTypes: true });
+      entries = await readdir(directory.path, { withFileTypes: true });
     } catch (error) {
-      if (error.code === 'ENOENT') continue;
-      candidates.push({
+      if (error.code === 'ENOENT' && directory.missingAllowed) continue;
+      errors.push({
         id: '<scan>',
-        path: directory,
+        path: directory.path,
         error: `payload_scan_error: ${error.message}`,
       });
       continue;
@@ -309,13 +323,13 @@ async function discoverLandingCandidates(home) {
     for (const entry of entries) {
       const id = landingCandidateId(entry.name);
       if (id === undefined) continue;
-      let path = join(directory, entry.name);
+      let path = join(directory.path, entry.name);
       try {
         validateDecisionId(id);
         path = resolve(path);
         const info = await lstat(path);
         if (!info.isFile() || info.isSymbolicLink()) {
-          candidates.push({
+          errors.push({
             id,
             path,
             error: 'payload_unsafe_file: candidate is not a regular file',
@@ -324,7 +338,7 @@ async function discoverLandingCandidates(home) {
         }
         candidates.push({ id, path, mtimeMs: info.mtimeMs });
       } catch (error) {
-        candidates.push({ id, path, error: `payload_scan_error: ${error.message}` });
+        errors.push({ id, path, error: `payload_scan_error: ${error.message}` });
       }
     }
   }
@@ -333,37 +347,92 @@ async function discoverLandingCandidates(home) {
     || (right.mtimeMs ?? 0) - (left.mtimeMs ?? 0)
     || left.path.localeCompare(right.path)
   ));
-  return candidates;
+  return { candidates, errors };
 }
 
 async function recoverLandingPayloads(home) {
-  const candidates = await discoverLandingCandidates(home);
+  const discovered = await discoverLandingCandidates(home);
+  if (discovered.errors.length > 0) {
+    return {
+      results: discovered.errors.map((candidate) => ({
+        id: candidate.id,
+        status: 'scan-incomplete',
+        detail: `${candidate.path}: ${candidate.error}`,
+      })),
+      failed: true,
+      complete: false,
+    };
+  }
+  const expectedHomeMarker = resolve(home);
   const byId = new Map();
-  for (const candidate of candidates) {
+  for (const candidate of discovered.candidates) {
     if (!byId.has(candidate.id)) byId.set(candidate.id, []);
     byId.get(candidate.id).push(candidate);
   }
-  const results = [];
-  let failed = false;
+  const errors = [];
+  const plans = [];
 
   for (const [id, idCandidates] of byId) {
-    if (id === '<scan>') {
-      failed = true;
-      for (const candidate of idCandidates) {
-        results.push({ id, status: 'error', detail: `${candidate.path}: ${candidate.error}` });
+    const routedCandidates = [];
+    for (const candidate of idCandidates) {
+      let payload;
+      try {
+        payload = JSON.parse(await readFile(candidate.path, 'utf8'));
+      } catch (error) {
+        errors.push({
+          id,
+          status: 'payload-invalid',
+          detail: `${candidate.path}: payload_invalid_json: ${error.message}`,
+        });
+        continue;
       }
-      continue;
+      if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+        errors.push({
+          id,
+          status: 'payload-invalid',
+          detail: `${candidate.path}: payload_invalid: payload must be an object`,
+        });
+        continue;
+      }
+      const marker = payload?.home_marker;
+      if (marker !== undefined) {
+        if (typeof marker !== 'string' || resolve(marker) !== marker) {
+          errors.push({
+            id,
+            status: 'payload-invalid',
+            detail: `${candidate.path}: payload_invalid_home: home marker must be a normalized absolute path`,
+          });
+          continue;
+        }
+        if (marker !== expectedHomeMarker) continue;
+      }
+      routedCandidates.push({ candidate, payload, legacy: marker === undefined });
+    }
+    if (routedCandidates.length === 0) continue;
+
+    if (routedCandidates.every((entry) => entry.legacy)) {
+      const manifestPath = join(home, 'data/decisions', id, 'manifest.toon');
+      try {
+        await access(manifestPath, fsConstants.F_OK);
+      } catch (error) {
+        if (error.code === 'ENOENT') continue;
+        errors.push({
+          id,
+          status: 'payload-unmatched',
+          detail: `${routedCandidates[0].candidate.path}: ${error.message}`,
+        });
+        continue;
+      }
     }
 
     let decision;
     try {
       decision = await readDecision(home, id);
     } catch (error) {
-      failed = true;
-      results.push({
+      errors.push({
         id,
         status: 'payload-unmatched',
-        detail: `${idCandidates[0].path}: ${error.message}`,
+        detail: `${routedCandidates[0].candidate.path}: ${error.message}`,
       });
       continue;
     }
@@ -373,45 +442,30 @@ async function recoverLandingPayloads(home) {
       existingAnswer = (await readAnswer(decision)).answer;
     } catch (error) {
       if (error.code !== 'ENOENT') {
-        failed = true;
-        results.push({ id, status: 'error', detail: error.message });
+        errors.push({ id, status: 'error', detail: error.message });
         continue;
       }
     }
 
     let selected;
-    for (const candidate of idCandidates) {
-      if (candidate.error !== undefined) {
-        failed = true;
-        results.push({ id, status: 'error', detail: `${candidate.path}: ${candidate.error}` });
-        continue;
-      }
-      let payload;
-      try {
-        payload = JSON.parse(await readFile(candidate.path, 'utf8'));
-      } catch (error) {
-        failed = true;
-        results.push({
-          id,
-          status: 'payload-invalid',
-          detail: `${candidate.path}: payload_invalid_json: ${error.message}`,
-        });
-        continue;
-      }
+    for (const routed of routedCandidates) {
+      const { candidate, payload, legacy } = routed;
+      if (legacy && payload.request_sha256 !== decision.manifest.request_sha256) continue;
       let batch;
       try {
-        batch = validateCollectPayload(payload, decision.manifest);
+        batch = validateCollectPayload(payload, decision.manifest, {
+          expectedHomeMarker,
+          allowMissingHomeMarker: true,
+        });
       } catch (error) {
-        failed = true;
-        results.push({ id, status: 'payload-invalid', detail: `${candidate.path}: ${error.message}` });
+        errors.push({ id, status: 'payload-invalid', detail: `${candidate.path}: ${error.message}` });
         continue;
       }
       if (existingAnswer !== undefined) {
         if (sameBatch(existingAnswer, batch)) {
           continue;
         } else {
-          failed = true;
-          results.push({
+          errors.push({
             id,
             status: 'payload-conflict',
             detail: `${candidate.path}: decision already has different answer content`,
@@ -420,8 +474,7 @@ async function recoverLandingPayloads(home) {
         continue;
       }
       if (selected !== undefined && !sameBatch({ answers: selected.batch.selections, note: selected.batch.note }, batch)) {
-        failed = true;
-        results.push({
+        errors.push({
           id,
           status: 'payload-conflict',
           detail: `${candidate.path}: multiple landing payloads disagree`,
@@ -431,9 +484,16 @@ async function recoverLandingPayloads(home) {
       selected ??= { candidate, batch };
     }
 
-    if (existingAnswer !== undefined || selected === undefined) {
-      continue;
-    }
+    if (existingAnswer === undefined && selected !== undefined) plans.push({ id, decision, selected });
+  }
+
+  if (errors.length > 0) {
+    return { results: errors, failed: true, complete: false };
+  }
+
+  const results = [];
+  let failed = false;
+  for (const { id, decision, selected } of plans) {
     try {
       const committed = await commitAnswer(
         decision,
@@ -453,7 +513,7 @@ async function recoverLandingPayloads(home) {
     }
   }
 
-  return { results, failed };
+  return { results, failed, complete: !failed };
 }
 
 async function configureWakeCommand(options) {
@@ -549,7 +609,10 @@ async function collectCommand(id, options) {
   } catch (error) {
     throw new LavishError(`payload_invalid_json: ${error.message}`, 2);
   }
-  const batch = validateCollectPayload(payload, decision.manifest);
+  const batch = validateCollectPayload(payload, decision.manifest, {
+    expectedHomeMarker: decision.home,
+    allowMissingHomeMarker: true,
+  });
   try {
     const existing = await readAnswer(decision);
     if (
@@ -620,6 +683,13 @@ async function intakeCommand(options) {
   rejectUnknownOptions(options, ['home']);
   const home = resolveHome(options);
   const recovered = await recoverLandingPayloads(home);
+  if (!recovered.complete) {
+    if (recovered.results.length > 0) {
+      process.stdout.write(encodeToon({ decisions: recovered.results }));
+    }
+    process.exitCode = 6;
+    return;
+  }
   const result = await intakeAll(home);
   const results = [...recovered.results, ...result.results];
   if (results.length === 0) {

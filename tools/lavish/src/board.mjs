@@ -225,6 +225,7 @@ textarea:focus { outline: 2px solid var(--border-focus); outline-offset: 1px; bo
 function boardScript(decision) {
   const clientManifest = {
     decision_id: decision.id,
+    home_marker: decision.home,
     request_sha256: decision.manifest.request_sha256,
     questions: decision.manifest.questions.map((question) => ({
       key: question.key,
@@ -245,7 +246,7 @@ function boardScript(decision) {
   const submittedPayload = document.querySelector('#submitted-payload');
   const submitError = document.querySelector('#submit-error');
   const downloadFilename = 'lavish-answer-' + MANIFEST.decision_id + '.json';
-  const storageKey = 'lavish-submit:' + MANIFEST.decision_id + ':' + MANIFEST.request_sha256;
+  const storageKey = 'lavish-submit:' + MANIFEST.home_marker + ':' + MANIFEST.decision_id + ':' + MANIFEST.request_sha256;
   window.__lavishPayload = null;
   window.__lavishStorageKey = storageKey;
 
@@ -253,6 +254,7 @@ function boardScript(decision) {
     return {
       schema_version: ${ANSWER_SCHEMA_VERSION},
       decision_id: MANIFEST.decision_id,
+      home_marker: MANIFEST.home_marker,
       request_sha256: MANIFEST.request_sha256,
       answers: MANIFEST.questions.map((question) => {
         const selected = form.querySelector(
