@@ -21,12 +21,15 @@ That scope is also a hard constraint on the commands: `gh-axi search prs` inject
 The two classes then need two different commands, because `gh-axi search prs` has no requested-reviewer facet: its only review flag is `--review <none|required|approved|changes_requested>`, which is about whether a review is required, not about who it is required from, and a raw `review-requested:` qualifier passed as the positional query is rejected as an invalid search query.
 
 - **Incoming** - someone else wrote it, the captain is the requested reviewer.
-  The requested-reviewer facet exists only on the search API, so go there directly, once per project: `gh-axi api "/search/issues?q=is%3Apr+is%3Aopen+review-requested%3A%40me+repo%3A<owner>%2F<name>"`.
-  Dropping the `repo:` qualifier gives the whole fleet in one call, which is the cheaper way in - then keep only what falls inside the round's scope.
+  The requested-reviewer facet exists only on the search API, so go there directly: `gh-axi api "/search/issues?q=is%3Apr+is%3Aopen+review-requested%3A%40me+repo%3A<owner>%2F<name>"`.
+  Make a first pass with the `repo:` qualifier dropped, which returns the whole fleet in one call: that pass buys speed only, and what it returns is never the inventory.
+  Then run the scoped form above once per registered fleet project plus any repository the captain named, and treat that per-repository loop as the authoritative completeness check.
+  It runs every time, whatever the fleet-wide pass returned, because the search index lags and so a fleet-wide result cannot be trusted as complete - and a missed pull request is the exact failure this skill exists to prevent.
   Reaching for `gh-axi pr list --state open` instead costs a `gh-axi pr view <n> --reviews` pass per pull request, because `pr list` has no reviewer filter and no reviewer field to select.
   The verdict becomes the review he posts under his own name, so firstmate must get it right before it reaches him.
 - **Self** - the captain wrote it.
   Discover these with `gh-axi search prs -R <owner/repo> --author <handle> --state open` (no positional query needed), once per project in scope.
+  The authored-by facet also reaches every repository the captain has ever contributed to, so an unscoped variant returns years of unrelated upstream contributions to repositories outside the fleet: filter its results down to the registered fleet plus any captain-named repository before treating anything as in scope.
   He wants defects found, not reassurance.
 
 Within a project the authored-by facet reaches back years and surfaces work long since abandoned or superseded, so age is not evidence that a pull request still belongs in the round - decide that from what it is waiting on.
