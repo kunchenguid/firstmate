@@ -89,6 +89,12 @@ FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_TMUX_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
 FM_TMUX_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 FM_TMUX_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
+# Verified live, agy 1.1.10: the footer shows "esc to cancel" both while a
+# tool-call permission dialog is open and while a turn is actively running;
+# the idle footer shows "? for shortcuts" with no "esc to cancel" segment.
+# Delivery-only fallback, same as every other harness here - never a recorded
+# worker state source (see fm-busy-lib.sh; agy has no semantic source yet).
+FM_TMUX_AGY_BUSY_REGEX_DEFAULT='esc to cancel'
 
 fm_busy_lines_match() {  # [harness]
   local harness=${1:-} lines regex
@@ -103,6 +109,7 @@ fm_busy_lines_match() {  # [harness]
       pi|pi-signed) regex=$FM_TMUX_PI_BUSY_REGEX_DEFAULT ;;
       grok) regex=$FM_TMUX_GROK_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_TMUX_KIMI_BUSY_REGEX_DEFAULT ;;
+      agy) regex=$FM_TMUX_AGY_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_TMUX_BUSY_REGEX_DEFAULT ;;
       *)
         # A supplied harness must never borrow another harness's signature.

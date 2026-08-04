@@ -34,6 +34,8 @@
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
+#   agy-hook          reserved: agy (Antigravity CLI), gated by
+#                    fm_busy_agy_semantic_source
 # Firstmate-owned sources accepted for every converted adapter:
 #   fm-spawn         the launch-brief turn seeded at spawn
 #   fm-interrupt     a firstmate-controlled interruption of the worker
@@ -130,6 +132,17 @@ fm_busy_codex_semantic_source() {
   fm_busy_codex_appserver_observable || fm_busy_codex_hooks_verified
 }
 
+# fm_busy_agy_semantic_source: 0 when a verified agy (Antigravity CLI)
+# semantic busy source exists. agy 1.1.10 verdict (live, 2026-08-04): NOT
+# verified. `agy --help` lists no `hooks` subcommand and no documented
+# lifecycle-hook or plugin mechanism (its `plugin` subcommand only manages
+# imported marketplace plugins, not lifecycle callbacks), so there is nothing
+# to wire yet. fm-spawn arms and wires agy only behind this gate, and the
+# classifier reports unknown until it opens.
+fm_busy_agy_semantic_source() {
+  return 1
+}
+
 fm_busy_record_path() {  # <state-dir> <id>
   printf '%s/%s.busy-state' "$1" "$2"
 }
@@ -176,6 +189,10 @@ fm_busy_sources_for_harness() {  # <harness>
     kimi*)
       fm_busy_kimi_verified || { printf ''; return 0; }
       adapter='kimi-wire kimi-hook'
+      ;;
+    agy*)
+      fm_busy_agy_semantic_source || { printf ''; return 0; }
+      adapter='agy-hook'
       ;;
     *) printf ''; return 0 ;;
   esac

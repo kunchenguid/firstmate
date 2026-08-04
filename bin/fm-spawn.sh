@@ -559,6 +559,19 @@ launch_template() {
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
+    # agy (Antigravity CLI): `-i` (--prompt-interactive) submits the initial
+    # prompt and keeps the session interactive (verified, agy 1.1.10) - the
+    # same shape as opencode's --prompt. --dangerously-skip-permissions
+    # auto-approves every tool-call permission dialog (verified live against
+    # a real Bash tool call). It does NOT bypass the separate first-launch
+    # per-directory workspace-trust dialog ("Do you trust the contents of
+    # this project?"), which is not a CLI flag at all - trust is pre-seeded
+    # into ~/.gemini/antigravity-cli/settings.json's trustedWorkspaces array
+    # before this launch command runs (see the trust pre-seed block below).
+    # agy's turn-end signal is not wired yet (no verified hooks mechanism -
+    # `agy --help` lists no `hooks` subcommand), so it ships in the same
+    # unarmed busy-state posture as codex.
+    agy) printf '%s' 'agy --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__-i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -671,7 +684,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|agy)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -715,6 +728,13 @@ effort_flag_for_harness() {
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
     # kimi likewise has no reasoning-effort flag; the requested axis stays in
     # task metadata but never reaches the launch command.
+    agy)
+      # agy --help documents exactly low|medium|high for --effort (verified,
+      # agy 1.1.10); omit xhigh/max rather than passing a known-bad value.
+      case "$effort" in
+        low|medium|high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
   esac
 }
 
@@ -1480,6 +1500,12 @@ if [ "$KIND" != secondmate ]; then
     codex*)
       if fm_busy_codex_semantic_source; then
         echo "error: codex semantic busy-state wiring is not implemented; extend the probe only together with verified wiring" >&2
+        exit 1
+      fi
+      ;;
+    agy*)
+      if fm_busy_agy_semantic_source; then
+        echo "error: agy semantic busy-state wiring is not implemented; extend the probe only together with verified wiring" >&2
         exit 1
       fi
       ;;

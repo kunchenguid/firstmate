@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|agy|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -31,7 +31,7 @@ detect_own() {
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
   # Only claude, pi, and grok set verified markers of their own; codex, opencode,
-  # and kimi are markerless, so a foreign marker retained in a terminal
+  # kimi, and agy are markerless, so a foreign marker retained in a terminal
   # multiplexer's stored environment can silently misidentify one of them before
   # ancestry is consulted. This is a precedence hazard, not evidence that
   # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
@@ -56,6 +56,11 @@ detect_own() {
       kimi) echo kimi; return ;;
       pi-signed) echo pi; return ;;
       pi) echo pi; return ;;
+      # agy (Antigravity CLI): native Go binary, comm reports `agy` directly,
+      # no node/python wrapper (verified, agy 1.1.10). No env marker of its
+      # own was observed for child/tool processes, so it is markerless like
+      # codex/opencode/kimi and relies on ancestry only.
+      *agy*) echo agy; return ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
         args=$(ps -o args= -p "$pid" 2>/dev/null)
