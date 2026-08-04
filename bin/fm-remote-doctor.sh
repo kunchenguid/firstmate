@@ -143,6 +143,46 @@ launch_agent_is_aqua() {
   return 1
 }
 
+render_launch_agent() { # <resolved-herdr-path>
+  local herdr_bin=$1
+  cat <<XML
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>$LAUNCH_AGENT_LABEL</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>$herdr_bin</string>
+		<string>server</string>
+		<string>--session</string>
+		<string>$HERDR_SESSION_NAME</string>
+	</array>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>$LAUNCH_AGENT_LOG</string>
+	<key>StandardErrorPath</key>
+	<string>$LAUNCH_AGENT_LOG</string>
+</dict>
+</plist>
+XML
+}
+
+launch_agent_contract_matches() {
+  local herdr_bin actual expected
+  [ -f "$LAUNCH_AGENT_PLIST" ] && [ ! -L "$LAUNCH_AGENT_PLIST" ] || return 1
+  herdr_bin=$(command -v herdr 2>/dev/null) || return 1
+  actual=$(tr -d ' \t\r\n' < "$LAUNCH_AGENT_PLIST" 2>/dev/null) || return 1
+  expected=$(render_launch_agent "$herdr_bin" | tr -d ' \t\r\n') || return 1
+  [ "$actual" = "$expected" ]
+}
+
 # --- checks -----------------------------------------------------------------
 
 check_herdr() {
@@ -186,7 +226,12 @@ check_launch_agent() {
     return 0
   fi
   if [ -f "$LAUNCH_AGENT_PLIST" ] && [ ! -L "$LAUNCH_AGENT_PLIST" ]; then
-    record launchagent "ok: $LAUNCH_AGENT_PLIST"
+    if launch_agent_contract_matches; then
+      record launchagent "ok: $LAUNCH_AGENT_PLIST matches the Firstmate-owned contract"
+    else
+      record launchagent "fixable: $LAUNCH_AGENT_PLIST does not match the current Firstmate-owned contract" \
+        "rerun this command with --fix to rewrite its label, program arguments, session scope, restart policy, and log paths"
+    fi
     if launch_agent_is_aqua; then
       record launchagent-scope "ok: LimitLoadToSessionType=Aqua"
     else
@@ -294,33 +339,7 @@ write_launch_agent() {
   fi
   mkdir -p "$LAUNCH_AGENT_LOG_DIR" 2>/dev/null || true
   tmp="$LAUNCH_AGENT_DIR/.$LAUNCH_AGENT_LABEL.plist.tmp.$$"
-  cat > "$tmp" <<XML
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>Label</key>
-	<string>$LAUNCH_AGENT_LABEL</string>
-	<key>ProgramArguments</key>
-	<array>
-		<string>$herdr_bin</string>
-		<string>server</string>
-		<string>--session</string>
-		<string>$HERDR_SESSION_NAME</string>
-	</array>
-	<key>LimitLoadToSessionType</key>
-	<string>Aqua</string>
-	<key>RunAtLoad</key>
-	<true/>
-	<key>KeepAlive</key>
-	<true/>
-	<key>StandardOutPath</key>
-	<string>$LAUNCH_AGENT_LOG</string>
-	<key>StandardErrorPath</key>
-	<string>$LAUNCH_AGENT_LOG</string>
-</dict>
-</plist>
-XML
+  render_launch_agent "$herdr_bin" > "$tmp"
   chmod 0644 "$tmp" 2>/dev/null || true
   if ! mv -f -- "$tmp" "$LAUNCH_AGENT_PLIST" 2>/dev/null; then
     rm -f -- "$tmp"
@@ -348,8 +367,25 @@ reload_launch_agent() { # <check-to-report-under>
     fix_report "$report" failed "launchctl bootstrap gui/$UID_NUM refused: ${out:-no diagnostic}"
     return 1
   fi
-  launchctl kickstart -k "gui/$UID_NUM/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1 || true
+  if ! out=$(launchctl kickstart -k "gui/$UID_NUM/$LAUNCH_AGENT_LABEL" 2>&1); then
+    fix_report "$report" failed "launchctl kickstart gui/$UID_NUM/$LAUNCH_AGENT_LABEL refused: ${out:-no diagnostic}"
+    return 1
+  fi
+  if ! wait_for_herdr_server; then
+    fix_report "$report" failed "the herdr server for session $HERDR_SESSION_NAME did not report running within 10s"
+    return 1
+  fi
   fix_report "$report" applied "bootstrapped and started $LAUNCH_AGENT_LABEL in gui/$UID_NUM"
+}
+
+wait_for_herdr_server() {
+  local i=0
+  while [ "$i" -lt 20 ]; do
+    herdr_server_running && return 0
+    i=$((i + 1))
+    sleep 0.5
+  done
+  return 1
 }
 
 start_herdr_server() {

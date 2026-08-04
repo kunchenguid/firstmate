@@ -69,10 +69,18 @@ case "${1:-}" in
     # launchd refuses a gui/<uid> domain that has no login session.
     [ -f "$FM_FAKE_STATE/gui-session" ] || { printf 'Bootstrap failed: 5: Input/output error\n' >&2; exit 5; }
     touch "$FM_FAKE_STATE/loaded"
-    printf 'true\n' > "$FM_FAKE_HERDR_RUNNING"
+    [ -f "$FM_FAKE_STATE/bootstrap-does-not-start" ] || printf 'true\n' > "$FM_FAKE_HERDR_RUNNING"
     exit 0
     ;;
-  kickstart) printf 'true\n' > "$FM_FAKE_HERDR_RUNNING"; exit 0 ;;
+  kickstart)
+    [ ! -f "$FM_FAKE_STATE/kickstart-fail" ] || { printf 'Kickstart failed: service unavailable\n' >&2; exit 6; }
+    if [ -f "$FM_FAKE_STATE/kickstart-delay" ]; then
+      cp "$FM_FAKE_STATE/kickstart-delay" "$FM_FAKE_STATE/herdr-delay"
+    else
+      printf 'true\n' > "$FM_FAKE_HERDR_RUNNING"
+    fi
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -96,6 +104,17 @@ set -u
 running=$(cat "$FM_FAKE_HERDR_RUNNING" 2>/dev/null || printf 'false')
 case "${1:-} ${2:-}" in
   "status --json")
+    if [ -f "$FM_FAKE_STATE/herdr-delay" ]; then
+      delay=$(cat "$FM_FAKE_STATE/herdr-delay")
+      if [ "$delay" -gt 0 ]; then
+        printf '%s\n' "$((delay - 1))" > "$FM_FAKE_STATE/herdr-delay"
+        running=false
+      else
+        rm -f "$FM_FAKE_STATE/herdr-delay"
+        printf 'true\n' > "$FM_FAKE_HERDR_RUNNING"
+        running=true
+      fi
+    fi
     printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":%s}}\n' "$running"
     ;;
   "server "*|"server ")
@@ -107,6 +126,11 @@ SH
     chmod +x "$CASE_BIN/herdr"
   fi
   chmod +x "$CASE_BIN/uname" "$CASE_BIN/launchctl"
+  cat > "$CASE_BIN/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$CASE_BIN/sleep"
 }
 
 # doctor [args...] -> runs the real doctor against the current fixture,
@@ -190,6 +214,45 @@ assert_not_contains "$DOCTOR_OUT" 'fix launchagent-loaded=applied:' "a second --
   "a second --fix re-bootstrapped a loaded launch agent"
 pass "--fix is idempotent once the host is ready"
 
+# --- a loaded, running launch agent with contract drift is repaired ----------
+
+new_case Darwin with-herdr gui
+mkdir -p "$(dirname "$CASE_PLIST")"
+cat > "$CASE_PLIST" <<XML
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>$LABEL</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/obsolete/bin/herdr</string>
+		<string>server</string>
+		<string>--session</string>
+		<string>default</string>
+	</array>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+</dict>
+</plist>
+XML
+touch "$CASE_STATE/loaded"
+printf 'true\n' > "$CASE_HERDR_RUNNING"
+doctor
+expect_code 1 "$DOCTOR_RC" "a stale launch-agent contract was reported ready"
+assert_contains "$DOCTOR_OUT" 'check launchagent=fixable:' "launch-agent contract drift was not tagged fixable"
+assert_contains "$DOCTOR_OUT" 'check launchagent-scope=ok:' "the independent Aqua scope was not recognized"
+assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=ok:' "the loaded fixture was not recognized"
+assert_contains "$DOCTOR_OUT" 'check herdr-server=ok:' "the running fixture was not recognized"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "--fix did not repair launch-agent contract drift"
+assert_contains "$DOCTOR_OUT" 'check launchagent=ok:' "the repaired launch-agent contract was not confirmed"
+assert_grep "<string>$CASE_BIN/herdr</string>" "$CASE_PLIST" "the repaired launch agent does not use the resolved herdr path"
+assert_grep '<key>RunAtLoad</key>' "$CASE_PLIST" "the repaired launch agent does not start at login"
+assert_grep '<key>KeepAlive</key>' "$CASE_PLIST" "the repaired launch agent is not kept alive"
+assert_no_grep '/obsolete/bin/herdr' "$CASE_PLIST" "the obsolete herdr path survived repair"
+pass "a loaded and running launch agent must match the complete owned contract"
+
 # --- a launch agent that is not Aqua-scoped is repaired in place -------------
 
 new_case Darwin with-herdr gui
@@ -207,7 +270,7 @@ cat > "$CASE_PLIST" <<XML
 XML
 doctor
 expect_code 1 "$DOCTOR_RC" "a Background-scoped launch agent was reported ready"
-assert_contains "$DOCTOR_OUT" 'check launchagent=ok:' "an existing plist was reported absent"
+assert_contains "$DOCTOR_OUT" 'check launchagent=fixable:' "an incomplete launch agent was not tagged fixable"
 assert_contains "$DOCTOR_OUT" 'check launchagent-scope=fixable:' "a non-Aqua session scope was not tagged fixable"
 doctor --fix
 expect_code 0 "$DOCTOR_RC" "--fix could not re-scope an existing launch agent"
@@ -215,6 +278,29 @@ assert_contains "$DOCTOR_OUT" 'check launchagent-scope=ok: LimitLoadToSessionTyp
   "--fix did not re-scope the launch agent to Aqua"
 assert_no_grep 'Background' "$CASE_PLIST" "the Background session scope survived the repair"
 pass "a launch agent outside the Aqua session scope is rewritten in place"
+
+# --- launchd start failures are reported and delayed readiness is awaited ----
+
+new_case Darwin with-herdr gui
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "the launch-agent startup fixture could not be initialized"
+printf 'false\n' > "$CASE_HERDR_RUNNING"
+touch "$CASE_STATE/bootstrap-does-not-start" "$CASE_STATE/kickstart-fail"
+doctor --fix
+expect_code 1 "$DOCTOR_RC" "a failed launchctl kickstart was reported ready"
+assert_contains "$DOCTOR_OUT" 'fix herdr-server=failed: launchctl kickstart' "kickstart failure was not reported"
+assert_contains "$DOCTOR_OUT" 'Kickstart failed: service unavailable' "kickstart diagnostic was discarded"
+assert_not_contains "$DOCTOR_OUT" 'fix herdr-server=applied:' "a failed kickstart was reported as applied"
+assert_contains "$DOCTOR_OUT" 'check herdr-server=fixable:' "the stopped server was not preserved as a readiness gap"
+
+rm -f "$CASE_STATE/kickstart-fail"
+printf '2\n' > "$CASE_STATE/kickstart-delay"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "--fix did not wait for delayed launchd startup"
+assert_contains "$DOCTOR_OUT" 'fix herdr-server=applied:' "delayed launchd startup was not reported as applied"
+assert_contains "$DOCTOR_OUT" 'check herdr-server=ok:' "delayed launchd startup was not confirmed"
+assert_absent "$CASE_STATE/herdr-delay" "the readiness poll stopped before the delayed server became reachable"
+pass "launchd failures are reported and delayed server readiness is awaited"
 
 # --- no GUI login session: every dependent gap stays human -------------------
 
