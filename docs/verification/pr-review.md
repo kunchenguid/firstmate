@@ -51,6 +51,7 @@ ok - fleet-authored findings route privately, unsupported leads stay private, an
 ok - live author equality refuses formal and fallback self-review publication across stale state and replay
 ok - head movement during verification invalidates evidence and requeues the same finding generation
 ok - a closed or merged pull request ends its item without a response and frees the lane at every boundary
+ok - reopening restores coverage for closed items only and leaves every other terminal disposition intact
 ok - poll crashes before and after snapshot publication replay without lost or duplicate work
 ok - duplicate notifications and claim replay preserve one review worker per lane
 ok - reply failure after correction retries the same response without duplicating the fix
@@ -81,7 +82,8 @@ ok - authentication and rate-limit failures stay bounded, deduplicated, and pres
 | crash replay | process exits are injected after item publication, snapshot publication, claim, response staging, GitHub post, and terminal publication | cursor-before-item, duplicate claim, or post-without-reconciliation loses or repeats work |
 | head movement | GitHub's current head is changed while the claim generation remains old | trusting only the claimed SHA posts stale evidence instead of incrementing and requeueing |
 | closure or merge | the fixture pull request answers closed through the real read at the resolve, complete-review, and deliver boundaries, and the durable outcome, the freed lane, the next claim, and the write log are checked separately | treating closure as an unrecoverable error strands the item and wedges the single lane until a captain opts out; skipping the reconciliation reports an already-accepted reply as withheld or posts it twice |
-| lane recovery | the closure crash seam cuts between the terminal write and the lane release | a lane trusted as an owner rather than a pointer keeps naming a terminal item forever |
+| reopen coverage | the same pull request leaves and re-enters the inventory, and the closed review, the closed claim, an already-answered claim, a repeated poll, and a pre-cursor crash are each checked separately | recreating by item id alone silently drops the reopened review and its unanswered claim, while reactivating on any terminal outcome answers a settled claim twice |
+| lane recovery | the closure crash seam cuts between the terminal write and the lane release, and the poll itself must still announce the queued item | a lane trusted as an owner rather than a pointer keeps naming a terminal item forever, and a poll that reads the lane raw silences the very wake that would repair it |
 | bounded diagnostic message | five maximum-length repository identities are announced and the adapter itself classifies the emitted result | an unclamped message exceeds the consumer's window, so the diagnostic silently becomes malformed and unactionable |
 | reply failure | the first write fails after correction evidence is already durable | rerunning correction or discarding the staged body changes evidence or response identity |
 | captain decision | the fake GitHub log must remain empty while the item reaches captain-decision-pending | treating reviewer wording as authority produces a write |

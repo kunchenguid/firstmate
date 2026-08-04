@@ -490,6 +490,15 @@ fake_deliver() {
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PR_REVIEW" deliver "$id" "$@"
 }
 
+# A pending notification is re-announced instead of reconciled, so a fixture that
+# needs the next poll to actually reconcile drains the outstanding one first.
+drain_pending_event() { # <home> <fixture> <now>
+  local out id
+  out=$(poll_fixture "$1" "$2" "$3" 2>/dev/null) || true
+  id=$(printf '%s' "$out" | jq -r '.event_id // empty' 2>/dev/null || true)
+  [ -z "$id" ] || run_review "$1" acknowledge-event "$id" >/dev/null
+}
+
 make_inline_home() { # <name> <node-id> <body>
   local name=$1 node=$2 body=$3 home inline pull obs
   home="$TMP/$name"
@@ -789,6 +798,7 @@ set -e
 # Delivery never posts after closure, and the crash seam proves a stale lane
 # pointing at a terminal item self-heals instead of wedging the queue.
 H_CLOSE_DELIVER=$(make_inline_home closed-deliver-home IC_closed_deliver 'A staged reply must not survive closure.')
+drain_pending_event "$H_CLOSE_DELIVER" "$TMP/closed-deliver-home.json" 1301
 CLOSE_DELIVER_ID=$(item_id_for "$H_CLOSE_DELIVER" feedback)
 claim_item "$H_CLOSE_DELIVER" "$CLOSE_DELIVER_ID" closed-deliver-owner >/dev/null
 FM_PR_REVIEW_CURRENT_HEAD="$sha_a" run_review "$H_CLOSE_DELIVER" resolve-feedback "$CLOSE_DELIVER_ID" \
@@ -803,7 +813,16 @@ set -e
 assert_closed_item "$H_CLOSE_DELIVER" "$CLOSE_DELIVER_ID" "closed-pull delivery"
 assert_no_grep 'POST ' "$GITHUB_LOG" "closed-pull delivery posted a response after closure"
 assert_present "$H_CLOSE_DELIVER/state/pr-review/lane.json" "closed-pull delivery crash seam cut too late to prove lane recovery"
-run_review "$H_CLOSE_DELIVER" next >/dev/null 2>&1 || true
+# The poll's actionability must read the lane the same way every other command
+# does. A stale lane naming a terminal item would otherwise hide the still-queued
+# review behind an occupancy that no longer exists, and the commands that would
+# have repaired it are exactly the ones the suppressed wake never prompts.
+STALE_LANE_OBS="$TMP/stale-lane-inventory.json"; write_observation "$STALE_LANE_OBS" 1310 '[]'
+stale_lane_event=$(poll_fixture "$H_CLOSE_DELIVER" "$STALE_LANE_OBS" 1310) \
+  || fail "a stale lane naming a terminal item silenced still-pending queue work"
+printf '%s' "$stale_lane_event" | jq -e '.pending>=1' >/dev/null \
+  || fail "the pending-work wake did not report the queued item behind the stale lane"
+run_review "$H_CLOSE_DELIVER" acknowledge-event "$(printf '%s' "$stale_lane_event" | jq -r '.event_id')" >/dev/null
 closed_lane_free "$H_CLOSE_DELIVER" "a crash between the terminal write and the lane release"
 set +e
 fake_review "$H_CLOSE_DELIVER" deliver "$CLOSE_DELIVER_ID" >/dev/null 2>&1
@@ -837,6 +856,88 @@ run_review "$H_CLOSE_ACCEPT" show "$CLOSE_ACCEPT_ID" | jq -e '
   || fail "post-acceptance closure reconciliation posted a second reply"
 closed_lane_free "$H_CLOSE_ACCEPT" "post-acceptance closure reconciliation"
 pass "a closed or merged pull request ends its item without a response and frees the lane at every boundary"
+
+# --- Reopening restores coverage for exactly the closed items ---------------
+# The independent oracle is the fixture's own relevant identity set: an open PR
+# at a relevant exact head owes one queued review and one response per still
+# unanswered external claim. Recreating by id alone, or reactivating on any
+# terminal outcome, would each make one of these assertions fail.
+drop_from_inventory() { # <home> <now>
+  local empty="$TMP/empty-inventory.json"
+  write_observation "$empty" "$2" '[]'
+  drain_pending_event "$1" "$empty" "$2"
+  drain_pending_event "$1" "$empty" "$(($2 + 1))"
+}
+
+# H_CLOSE ended both its review and its feedback item through the live closed
+# read above, so it is the realistic close-then-reopen subject.
+drop_from_inventory "$H_CLOSE" 1320
+jq -e '(.pulls|length)==0' "$H_CLOSE/state/pr-review/snapshot.json" >/dev/null \
+  || fail "a closed pull request stayed in the covered inventory"
+reopen_event=$(poll_fixture "$H_CLOSE" "$TMP/closed-boundary-home.json" 1321) \
+  || fail "a reopened pull request produced no coverage"
+assert_contains "$reopen_event" '"changed":2' "reopening did not restore both the review and the unanswered claim"
+for id in "$CLOSE_REVIEW_ID" "$CLOSE_FEEDBACK_ID"; do
+  run_review "$H_CLOSE" show "$id" | jq -e --arg head "$sha_a" '
+    .state=="pending" and .outcome==null and .head==$head and .generation==2
+    and (has("closure")|not) and .reopened_from.closure.live_state=="closed"' >/dev/null \
+    || fail "reopened item $id did not resume as a new durable generation at the same head"
+done
+[ "$(item_json "$H_CLOSE" initial-review | jq 'length')" -eq 1 ] || fail "reopening duplicated the review item"
+[ "$(item_json "$H_CLOSE" feedback | jq 'length')" -eq 1 ] || fail "reopening duplicated the feedback item"
+closed_lane_free "$H_CLOSE" "reopening"
+
+# A repeated poll of the same reopened pull request must not bump the generation
+# again, and a crash between item publication and the covered cursor must replay
+# into exactly one reactivation.
+run_review "$H_CLOSE" acknowledge-event "$(printf '%s' "$reopen_event" | jq -r '.event_id')" >/dev/null
+poll_fixture "$H_CLOSE" "$TMP/closed-boundary-home.json" 1322 >/dev/null 2>&1 || true
+run_review "$H_CLOSE" show "$CLOSE_REVIEW_ID" | jq -e '.generation==2 and .state=="pending"' >/dev/null \
+  || fail "an unchanged reopened pull request reactivated twice"
+
+H_REOPEN_CRASH=$(make_inline_home reopen-crash-home IC_reopen_crash 'A reopened claim must replay exactly once.')
+REOPEN_CRASH_ID=$(item_id_for "$H_REOPEN_CRASH" feedback)
+claim_item "$H_REOPEN_CRASH" "$REOPEN_CRASH_ID" reopen-crash-owner >/dev/null
+close_dataset
+set +e
+fake_review "$H_REOPEN_CRASH" resolve-feedback "$REOPEN_CRASH_ID" --head "$sha_a" --generation 1 \
+  --verdict dismissed --evidence-file "$TMP/evidence.md" --reply-file "$TMP/dismissed-reply.md" >/dev/null 2>&1
+reopen_crash_close_rc=$?
+set -e
+[ "$reopen_crash_close_rc" -eq 7 ] || fail "reopen crash fixture could not reach a closed outcome"
+drop_from_inventory "$H_REOPEN_CRASH" 1330
+set +e
+FM_PR_REVIEW_TEST_CRASH_AT=after-items poll_fixture "$H_REOPEN_CRASH" "$TMP/reopen-crash-home.json" 1331 >/dev/null 2>&1
+reopen_crash_rc=$?
+set -e
+[ "$reopen_crash_rc" -eq 99 ] || fail "reopen crash seam did not cut before the covered cursor"
+run_review "$H_REOPEN_CRASH" show "$REOPEN_CRASH_ID" | jq -e '.state=="pending" and .generation==2' >/dev/null \
+  || fail "the reopen crash seam cut before the item was durable"
+poll_fixture "$H_REOPEN_CRASH" "$TMP/reopen-crash-home.json" 1332 >/dev/null 2>&1 || true
+run_review "$H_REOPEN_CRASH" show "$REOPEN_CRASH_ID" | jq -e '.state=="pending" and .generation==2' >/dev/null \
+  || fail "reopen replay reactivated the same item twice"
+
+# Every other terminal disposition survives a reopen untouched: an answered claim
+# is never reopened and never re-created as a fresh duplicate.
+H_ANSWERED=$(make_inline_home answered-reopen-home IC_answered 'An answered claim must stay answered across a reopen.')
+ANSWERED_ID=$(item_id_for "$H_ANSWERED" feedback)
+claim_item "$H_ANSWERED" "$ANSWERED_ID" answered-reopen-owner >/dev/null
+FM_PR_REVIEW_CURRENT_HEAD="$sha_a" run_review "$H_ANSWERED" resolve-feedback "$ANSWERED_ID" \
+  --head "$sha_a" --generation 1 --verdict dismissed --evidence-file "$TMP/evidence.md" \
+  --reply-file "$TMP/dismissed-reply.md" >/dev/null || fail "answered-reopen fixture could not stage its reply"
+make_dataset "[$(pull_json 1 captain "$sha_a" '["authored"]' '[]' '[]' '[]')]"; : > "$GITHUB_LOG"
+fake_deliver "$H_ANSWERED" "$ANSWERED_ID" >/dev/null || fail "answered-reopen fixture could not deliver"
+drop_from_inventory "$H_ANSWERED" 1340
+poll_fixture "$H_ANSWERED" "$TMP/answered-reopen-home.json" 1341 >/dev/null 2>&1 || true
+run_review "$H_ANSWERED" show "$ANSWERED_ID" | jq -e '
+  .state=="terminal" and .outcome=="dismissed-and-replied" and .generation==1
+  and (has("reopened_from")|not)' >/dev/null \
+  || fail "a reopen reactivated an already-answered claim"
+[ "$(item_json "$H_ANSWERED" feedback | jq 'length')" -eq 1 ] \
+  || fail "a reopen re-created an already-answered claim as a duplicate"
+[ "$(grep -c 'POST .*replies' "$GITHUB_LOG" || true)" -eq 1 ] \
+  || fail "a reopen produced a second response for an already-answered claim"
+pass "reopening restores coverage for closed items only and leaves every other terminal disposition intact"
 
 # Queue-before-snapshot crash replay creates one item, not zero or two.
 for cut in after-items after-snapshot; do

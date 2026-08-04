@@ -137,6 +137,7 @@ Original-thread responses to external feedback remain allowed because they answe
 A moved head requeues the item instead of posting stale evidence.
 When a fresh live read finds the pull request closed or merged, every completion boundary ends the item with the terminal outcome `pull-closed-without-response` and exit 7, discards the pending public response, and releases the lane; an already-accepted response is still reconciled instead of being reported as withheld.
 Treat exit 7 as a finished item, not a retryable failure: never restage or post a response after closure, and move on to the next pending item.
+If that pull request is later observed open again, the inventory resumes exactly those closed items as a new generation at the observed head, so verify them freshly rather than reusing the evidence gathered before the closure.
 A failed GitHub write keeps the same bound response and completed evidence for retry.
 A crash after GitHub accepted the response is reconciled by exact author, body, head, and parent-thread evidence before another post is attempted.
 

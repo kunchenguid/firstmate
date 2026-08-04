@@ -465,6 +465,33 @@ function newFeedbackItem(pull, feedback, now) {
   };
 }
 
+// An observed pull request is live proof that it is open again, so an item this
+// owner ended only because the pull request had closed resumes as a new durable
+// generation. Every other terminal disposition stays terminal.
+function reopenClosedItem(item, head, observedAt) {
+  item.reopened_from = { closure: item.closure ?? null, generation: item.generation, reopened_at: observedAt };
+  delete item.closure;
+  item.head = head;
+  item.generation += 1;
+  item.state = "pending";
+  item.outcome = null;
+  item.response = null;
+  item.evidence = null;
+  if (item.type === "initial-review") {
+    item.review_outcome = null;
+    item.independent_review = false;
+    item.private_route = null;
+    item.publication_guard = null;
+  }
+  delete item.validation;
+  item.updated_at = observedAt;
+  writeItem(item);
+}
+
+function closedByPullClosure(item) {
+  return Boolean(item) && item.outcome === PULL_CLOSED_OUTCOME && item.state !== "opted-out";
+}
+
 function reconcileObservation(observation) {
   ensureState();
   const previous = readSnapshot();
@@ -505,7 +532,11 @@ function reconcileObservation(observation) {
           }
         } else {
           const item = newReviewItem(pull, observation.observed_at);
-          if (!existsSync(itemPath(item.id))) {
+          const closed = currentItems.get(item.id);
+          if (closedByPullClosure(closed)) {
+            reopenClosedItem(closed, pull.head, observation.observed_at);
+            changed += 1;
+          } else if (!existsSync(itemPath(item.id))) {
             writeItem(item);
             currentItems.set(item.id, item);
             changed += 1;
@@ -521,6 +552,9 @@ function reconcileObservation(observation) {
           const item = newFeedbackItem(pull, entry, observation.observed_at);
           writeItem(item);
           currentItems.set(item.id, item);
+          changed += 1;
+        } else if (closedByPullClosure(existing)) {
+          reopenClosedItem(existing, pull.head, observation.observed_at);
           changed += 1;
         } else if (existing && !isTerminal(existing) && existing.head !== pull.head && existing.state !== "opted-out") {
           existing.head = pull.head;
@@ -755,7 +789,7 @@ function fixtureObservation(path) {
 
 function actionableCounts() {
   const items = allItems();
-  const lane = readJson(LANE, null, 65536);
+  const lane = laneRead();
   const pending = items.filter((item) => item.state === "pending").length;
   const responses = items.filter((item) => item.state === "response-pending").length;
   return { pending, responses, lane: lane?.item_id ?? null };
