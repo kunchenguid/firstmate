@@ -465,6 +465,13 @@ handoff_decide() {  # <task-id> <attempts>
         "$endpoint" "$crew_state" "$attempts" "$MAX_ATTEMPTS"
       return 1
       ;;
+    unreadable)
+      # A verdict of `unknown` is a real read and may license a handoff; a
+      # verdict that could not be read at all proves nothing about ownership.
+      printf 'handoff: refuse · endpoint: %s · crew: %s · attempts: %s/%s · reason: current task state could not be read, so validation ownership is unproven\n' \
+        "$endpoint" "$crew_state" "$attempts" "$MAX_ATTEMPTS"
+      return 1
+      ;;
   esac
   case "$endpoint" in
     dead|missing) ;;

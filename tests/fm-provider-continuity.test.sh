@@ -382,6 +382,29 @@ test_handoff_refuses_an_unreadable_or_unrecorded_task() {
   pass "an unreadable endpoint or missing task record refuses instead of licensing a handoff"
 }
 
+test_handoff_refuses_when_current_task_state_cannot_be_read() {
+  local rec state fakebin crewbin
+  rec=$(make_handoff_case handoff-state-unreadable unknown gone)
+  IFS='|' read -r state fakebin crewbin <<EOF
+$rec
+EOF
+  # The endpoint is authoritatively gone, but the current-state reader itself is
+  # unusable, so validation ownership is unproven rather than absent.
+  cat > "$crewbin" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$crewbin"
+
+  handoff "$rec" handoff-check handoff-task
+  expect_code 1 "$CONT_STATUS" "an unreadable current-state verdict must refuse a handoff"
+  assert_contains "$CONT_OUT" "crew: unreadable" \
+    "the refusal did not report that current state could not be read"
+  assert_contains "$CONT_OUT" "validation ownership is unproven" \
+    "an unreadable current-state verdict was treated like a proven-absent run"
+  pass "an unreadable current-state verdict refuses instead of being read as no active run"
+}
+
 test_repeated_handoff_attempts_stop_and_report_the_blocker() {
   local rec state
   rec=$(make_handoff_case handoff-attempts unknown gone)
@@ -703,6 +726,7 @@ test_handoff_refuses_while_the_recorded_worker_cannot_be_proved_gone
 test_handoff_refuses_while_a_validation_run_owns_the_task
 test_handoff_allows_once_the_endpoint_is_authoritatively_gone
 test_handoff_refuses_an_unreadable_or_unrecorded_task
+test_handoff_refuses_when_current_task_state_cannot_be_read
 test_repeated_handoff_attempts_stop_and_report_the_blocker
 test_resume_reuses_the_recorded_isolated_copy_and_preserves_work
 test_resume_refuses_a_pane_that_settled_on_another_copy

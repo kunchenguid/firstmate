@@ -75,6 +75,7 @@ Adapter verification itself is unchanged: `bin/fm-spawn.sh` still refuses an unv
 
 The handoff license reuses `fm_backend_agent_state`, whose own recovery-grade classifier is verified for tmux and herdr and reports `unverified` elsewhere.
 `unverified` is not `dead` or `missing`, so a handoff is refused rather than licensed on a backend with no classifier, which is the intended conservative default.
+The same conservatism applies to the current-state axis: a readable `unknown` verdict may license a handoff, while a verdict that could not be read at all refuses, because an unreadable read proves nothing about validation ownership.
 
 ## Regression coverage
 
