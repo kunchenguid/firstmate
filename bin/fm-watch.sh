@@ -328,12 +328,12 @@ prune_orphaned_signal_tracking() {
     expected_seen="${expected_seen}.seen-$(printf '%s' "$base" | tr '.' '_')|"
     task=${base%.status}
     task=${task%.turn-ended}
-    expected_hb="${expected_hb}.hb-surfaced-$task|"
+    expected_hb="${expected_hb}$(basename "$(_hb_surfaced_path "$task")")|"
   done
   for f in "$STATE"/*.meta; do
     [ -e "$f" ] || continue
     task=$(basename "$f" .meta)
-    expected_hb="${expected_hb}.hb-surfaced-$task|"
+    expected_hb="${expected_hb}$(basename "$(_hb_surfaced_path "$task")")|"
   done
   for marker in "$STATE"/.seen-*_status "$STATE"/.seen-*_turn-ended; do
     [ -e "$marker" ] || continue
@@ -368,7 +368,7 @@ revalidate_signal_snapshot() {
     if [ ! -e "$STATE/$task.status" ] \
       && [ ! -e "$STATE/$task.turn-ended" ] \
       && [ ! -e "$STATE/$task.meta" ]; then
-      rm -f -- "$STATE/.hb-surfaced-$task"
+      rm -f -- "$(_hb_surfaced_path "$task")"
     fi
     triage_log "retired vanished signal snapshot: $f"
   done

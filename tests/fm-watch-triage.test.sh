@@ -433,6 +433,37 @@ test_actionable_signal_surfaced() {
   pass "captain-relevant signal is surfaced (queue + exit) and marked surfaced"
 }
 
+# Task ids may legally contain a non-leading dot (fm_task_id_path_safe only
+# rejects a leading dot). _hb_surfaced_path runs tr ':/.' '___' on the task id,
+# so the live marker for "release.42" is ".hb-surfaced-release_42". Regression
+# for prune_orphaned_signal_tracking/revalidate_signal_snapshot building the
+# expected filename from the raw (untransformed) task id: that mismatch would
+# make the live marker look orphaned and delete it on every main-loop cycle,
+# permanently flipping heartbeat_scan_finds_actionable true for the task.
+test_dotted_task_id_heartbeat_marker_survives_prune() {
+  local dir state fakebin out pid status_file marker
+  dir=$(make_case dotted-task-hb-marker); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  status_file="$state/release.42.status"
+  marker="$state/.hb-surfaced-release_42"
+  printf 'needs-decision: pick A or B\n' > "$status_file"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for a dotted-task-id actionable signal"
+  [ -s "$marker" ] || fail "actionable signal for a dotted task id did not record the tr-normalized surfaced marker"
+
+  # Restart the watcher: prune_orphaned_signal_tracking runs every main-loop
+  # cycle and must recognize the still-live marker, or it wrongly retires it
+  # on the very next cycle.
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_live "$pid" 20
+  reap "$pid"
+  [ -s "$marker" ] || fail "prune_orphaned_signal_tracking wrongly retired a live heartbeat marker for a dotted task id"
+  [ ! -s "$out" ] || fail "a live dotted-task-id marker falsely orphaned caused a phantom re-wake: $(cat "$out")"
+  pass "dotted task id heartbeat-suppression marker survives prune_orphaned_signal_tracking"
+}
+
 test_vanished_signal_batch_during_grace_is_retired() {
   local dir state fakebin out pid f real_sleep i
   dir=$(make_case vanished-signal-grace); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1956,6 +1987,7 @@ test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
+test_dotted_task_id_heartbeat_marker_survives_prune
 test_vanished_signal_batch_during_grace_is_retired
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
