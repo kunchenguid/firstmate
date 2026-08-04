@@ -4,15 +4,13 @@
 # the leased task worktree).
 #
 # On some tmux/WSL setups a brand-new window's pane_current_path transiently
-# reports a stale, unrelated-but-real path on the very first poll, before the
-# pane actually settles into the worktree it was moved to. That stale
-# path still passes the loop's "differs from the project" check and
+# reports a stale, unrelated-but-real path before the pane actually settles
+# into the worktree it was moved to. That stale path passes
 # validate_spawn_worktree's "is a real, distinct worktree" check (it IS a real
-# git checkout, just the wrong one), so a naive single-read loop silently
-# records the wrong worktree= in state/<id>.meta. This test simulates that
-# transient-then-settled pane_current_path sequence with a fake tmux and
-# asserts the recorded worktree resolves to the real, settled worktree, never
-# the stale first read.
+# git checkout, just the wrong one), so accepting any repeated non-project path
+# silently records the wrong worktree= in state/<id>.meta. This test simulates
+# transient-then-settled pane_current_path sequences with a fake tmux and
+# asserts the recorded worktree is the exact leased worktree.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -134,12 +132,31 @@ test_single_stale_first_read_is_not_accepted() {
   pass "a single transient stale pane_current_path read is not accepted as the worktree"
 }
 
+# Two matching stale reads used to satisfy the settle loop even though the
+# lease had already identified the only valid destination. The loop must wait
+# for the pane to reach the exact leased worktree instead.
+test_repeated_stale_path_is_not_accepted() {
+  local rec id out status
+  id=settle-repeated-stale-z2
+  rec=$(make_settle_case settle-repeated "$id" 2)
+  read_settle_record "$rec"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should ignore a repeated stale path and reach the lease"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "meta did not record the exact leased worktree"
+  assert_no_grep "worktree=$STALE_DIR" "$HOME_DIR/state/$id.meta" \
+    "meta wrongly recorded a repeated unrelated worktree"
+  pass "repeated stale pane paths cannot override the leased worktree"
+}
+
 # A pane that reports the real worktree from the very first read still only
 # costs the loop's existing one-second inter-poll sleep to confirm - not an
 # extra full cycle on top of that.
 test_already_settled_pane_costs_one_confirm_sleep() {
   local rec id out status start end elapsed
-  id=settle-already-settled-z2
+  id=settle-already-settled-z3
   rec=$(make_settle_case settle-already-settled "$id" 0)
   read_settle_record "$rec"
 
@@ -156,6 +173,7 @@ test_already_settled_pane_costs_one_confirm_sleep() {
 }
 
 test_single_stale_first_read_is_not_accepted
+test_repeated_stale_path_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
 
 echo "# all fm-spawn-worktree-settle tests passed"
