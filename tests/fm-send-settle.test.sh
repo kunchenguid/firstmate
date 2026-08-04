@@ -16,6 +16,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-busy-lib.sh"
 
 SEND="$ROOT/bin/fm-send.sh"
 
@@ -36,9 +38,9 @@ set -u
 case "${1:-}" in
   send-keys) exit 0 ;;
   display-message)
-    for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
+    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
-  capture-pane) printf '\xe2\x94\x82 \xe2\x94\x82\n'; exit 0 ;;
+  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
   list-windows) exit 0 ;;
 esac
 exit 0
@@ -116,7 +118,29 @@ test_key_path_never_pauses() {
   pass "fm-send: the --key path never pauses (settle scoped to text submit)"
 }
 
+test_claude_escape_records_interrupt_idle() {
+  local dir fb log rc home gen out
+  dir="$TMP_ROOT/claude-interrupt"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/sleep.log"
+  home="$dir/home"; mkdir -p "$home/state"
+  fm_write_meta "$home/state/task.meta" \
+    "window=sess:win" "worktree=$home/wt" "project=$home/project" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" task)
+  printf 'busy_gen=%s\n' "$gen" >> "$home/state/task.meta"
+  : > "$log"
+
+  env PATH="$fb:$PATH" FM_HOME="$home" FM_SLEEP_LOG="$log" \
+    "$SEND" task --key Escape 2>/dev/null; rc=$?
+  expect_code 0 "$rc" "Claude Escape send should succeed"
+  out=$(fm_busy_classify tmux sess:win claude task "$home/state")
+  [ "$out" = "idle fm-interrupt" ] \
+    || fail "Claude Escape must classify idle/fm-interrupt, got '$out'"
+  pass "fm-send: a successful Claude Escape records the interrupt lifecycle edge"
+}
+
 test_default_send_pauses_one_second
 test_zero_disables_pause
 test_pause_is_tunable
 test_key_path_never_pauses
+test_claude_escape_records_interrupt_idle

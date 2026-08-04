@@ -25,6 +25,15 @@ if [ -n "${FM_TEST_LIB_SOURCED:-}" ]; then
 fi
 FM_TEST_LIB_SOURCED=1
 
+# Exempt firstmate's own test suite from the gate-lifecycle refusal
+# (bin/fm-gate-refuse-lib.sh). The no-mistakes gate runs this suite FROM a gate
+# worktree - the exact environment that guard refuses - so without this every
+# test that drives the real fm-spawn/fm-send/fm-teardown would be refused during
+# firstmate's own validation. A confused gate agent never sources this helper, so
+# the boundary against the real hazard is unaffected. tests/fm-gate-refuse.test.sh
+# strips this to verify real refusal.
+export FM_GATE_REFUSE_BYPASS=1
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
@@ -142,17 +151,20 @@ fm_write_meta() {
   done
 }
 
-# fm_write_secondmate_meta <file> <home> [window] [projects]: write the standard
-# kind=secondmate meta block used across the secondmate suites. window defaults
-# to firstmate:fm-<basename-of-home-dir's parent id>? No - window is explicit;
-# defaults to firstmate:fm-domain and projects to alpha to match the common case.
+# fm_write_secondmate_meta <file> <home> [window] [projects] [harness]: write the
+# standard kind=secondmate meta block used across the secondmate suites. Window
+# defaults to firstmate:fm-<id>, projects defaults to alpha, and harness defaults
+# to echo to match the common case.
 fm_write_secondmate_meta() {
-  local file=$1 home=$2 window=${3:-firstmate:fm-domain} projects=${4:-alpha}
+  local file=$1 home=$2 id window projects=${4:-alpha} harness=${5:-echo}
+  id=$(basename "$file" .meta)
+  window=${3:-firstmate:fm-$id}
   fm_write_meta "$file" \
     "window=$window" \
+    "endpoint_task_id=$id" \
     "worktree=$home" \
     "project=$home" \
-    "harness=echo" \
+    "harness=$harness" \
     "kind=secondmate" \
     "mode=secondmate" \
     "yolo=off" \
