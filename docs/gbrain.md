@@ -39,13 +39,8 @@ Verify PGLite initialization in an isolated approved directory before adopting a
 The story #6 deployment's migration-created unit has already been removed, so it has no autopilot unit eligible for routine cleanup.
 If an autopilot unit exists before a future upgrade, leave it unchanged unless an ownership record proves that this deployment created it and confirms that no other story requires it.
 A matching filename or generic GBrain-generated unit shape is not ownership proof.
-Only for a demonstrably deployment-owned leftover, remove it with the configured brain:
-
-```sh
-GBRAIN_HOME=/home/sungin/.local/share/gbrain/runtime \
-PATH=/home/sungin/.local/gbrain/bin:$PATH \
-  /home/sungin/.local/gbrain/bin/gbrain autopilot --uninstall
-```
+Do not run `gbrain autopilot --uninstall` on this shared user home because its cleanup targets ignore `GBRAIN_HOME` and sweep user-home launchd, systemd, OpenClaw, crontab, and wrapper artifacts.
+Clean up only an exact artifact with separate proof that this deployment created and still owns it.
 
 ## Initialize and configure retrieval
 
