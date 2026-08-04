@@ -36,7 +36,7 @@ The archive at `/home/sungin/.local/share/gbrain/archive` is a remote-less Git r
 GBrain imported 27 pages and created 190 chunks.
 The local embedding pass embedded 181 chunks, then the incremental import added nine already embedded chunks.
 
-`gbrain search 'snowflake arctic embed2' --limit 5` returned `firstmate-docs/gbrain-endpoints` first.
+`gbrain search 'snowflake arctic embed2' --limit 5` returned `firstmate-docs/gbrain-embedding-verification` first and two `firstmate-docs/gbrain-endpoints` excerpts next.
 The local hybrid retrieval command below returned the embedding endpoint and both endpoint-verification documents in its first four results:
 
 ```sh
