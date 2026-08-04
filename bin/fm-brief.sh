@@ -435,7 +435,7 @@ EOF
     else
       IFS= read -r -d '' STARTRUN <<EOF || true
 **Starting the run.**
-Start with \`no-mistakes axi run --intent "<task text>"\`, making \`--intent\` preserve all relevant content from this brief's \`# Task\` section plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
+Start with \`no-mistakes axi run --intent "<task text>"\`; make \`--intent\` preserve all relevant content from this brief's \`# Task\` section plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
 If \`axi run\` fails to start a first run on this branch with "no previous run for branch" (a known no-mistakes bug on some installed versions, kunchenguid/no-mistakes #351/#396), fall back to supplying the same intent as a base64 push option instead, which fires the post-receive hook directly:
 
 \`\`\`sh
@@ -460,7 +460,7 @@ Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
 $STARTRUN
 
-You then drive no-mistakes exactly as usual: monitor with \`no-mistakes axi status\` and respond to its gates via \`no-mistakes axi respond\`, not by implementing fixes yourself. Follow no-mistakes' own guidance for the mechanics beyond starting the run: it loads when you invoke /no-mistakes, and the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
+You then drive no-mistakes exactly as usual: monitor with \`no-mistakes axi status\` and respond to its gates via \`no-mistakes axi respond\`, not by implementing fixes yourself. Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
 **Validation discipline (hard rule, not advice).**
