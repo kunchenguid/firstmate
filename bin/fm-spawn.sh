@@ -2757,6 +2757,13 @@ esac
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
+# When firstmate's own session runs claude through a local proxy in front of the
+# model API (for example for cost tracking), forward that same ANTHROPIC_BASE_URL
+# onto the claude launch so the crewmate routes through the same proxy. Only when
+# set; an unset value is the direct-API default and needs no prefix.
+if [ "$HARNESS" = claude ] && [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
+  LAUNCH="ANTHROPIC_BASE_URL=$(shell_quote "$ANTHROPIC_BASE_URL") $LAUNCH"
+fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")

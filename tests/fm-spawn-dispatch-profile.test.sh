@@ -117,15 +117,17 @@ run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
   : > "$launchlog"
-  # CLAUDE_CONFIG_DIR is forwarded onto claude launches by fm-spawn, so pin it
-  # explicitly (empty by default) instead of leaking the invoking shell's value,
-  # which would make launch assertions depend on the developer's environment.
-  # A test opts in to the set case via FM_TEST_CLAUDE_CONFIG_DIR.
+  # CLAUDE_CONFIG_DIR and ANTHROPIC_BASE_URL are forwarded onto claude launches by
+  # fm-spawn, so pin them explicitly (empty by default) instead of leaking the
+  # invoking shell's values, which would make launch assertions depend on the
+  # developer's environment. A test opts in to the set case via
+  # FM_TEST_CLAUDE_CONFIG_DIR / FM_TEST_ANTHROPIC_BASE_URL.
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
+    ANTHROPIC_BASE_URL="${FM_TEST_ANTHROPIC_BASE_URL:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
@@ -808,6 +810,55 @@ test_non_claude_harness_ignores_config_dir() {
   pass "non-claude harnesses do not receive the claude CLAUDE_CONFIG_DIR prefix"
 }
 
+test_claude_forwards_firstmate_anthropic_base_url_when_set() {
+  local rec id out status launch
+  id=profile-claude-baseurl-z20
+  rec=$(make_spawn_case profile-claude-baseurl claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_ANTHROPIC_BASE_URL="http://127.0.0.1:8787" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with ANTHROPIC_BASE_URL set should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "ANTHROPIC_BASE_URL='http://127.0.0.1:8787'" \
+    "claude launch did not forward firstmate's ANTHROPIC_BASE_URL to the crewmate pane"
+  pass "claude forwards firstmate's ANTHROPIC_BASE_URL so the crewmate routes through the same proxy"
+}
+
+test_claude_omits_anthropic_base_url_prefix_when_unset() {
+  local rec id out status launch
+  id=profile-claude-nobaseurl-z21
+  rec=$(make_spawn_case profile-claude-nobaseurl claude "$id")
+  read_case_record "$rec"
+
+  # run_spawn pins ANTHROPIC_BASE_URL empty by default, exercising the direct-API
+  # default path where fm-spawn adds no prefix.
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn without ANTHROPIC_BASE_URL should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "ANTHROPIC_BASE_URL=" \
+    "claude launch must not add an ANTHROPIC_BASE_URL prefix when firstmate has none set"
+  pass "claude omits the ANTHROPIC_BASE_URL prefix when firstmate runs with the direct-API default"
+}
+
+test_non_claude_harness_ignores_anthropic_base_url() {
+  local rec id out status launch
+  id=profile-codex-nobaseurl-z22
+  rec=$(make_spawn_case profile-codex-nobaseurl codex "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_ANTHROPIC_BASE_URL="http://127.0.0.1:8787" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "codex spawn with ANTHROPIC_BASE_URL set should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "ANTHROPIC_BASE_URL=" \
+    "non-claude harness launch must not receive the claude-specific ANTHROPIC_BASE_URL prefix"
+  pass "non-claude harnesses do not receive the claude ANTHROPIC_BASE_URL prefix"
+}
+
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
   local rec id sm out status
   id=profile-secondmate-z16
@@ -856,6 +907,9 @@ test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
+test_claude_forwards_firstmate_anthropic_base_url_when_set
+test_claude_omits_anthropic_base_url_prefix_when_unset
+test_non_claude_harness_ignores_anthropic_base_url
 test_active_dispatch_profile_does_not_block_secondmate_launch
 
 echo "# all fm-spawn-dispatch-profile tests passed"
