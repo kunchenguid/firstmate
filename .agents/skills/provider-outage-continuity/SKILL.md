@@ -51,15 +51,16 @@ An outage never rewrites the captain's dispatch policy: the exclusion is an expi
 
 Never move a task while its original worker may still own or change it.
 
-1. Run the script's `handoff-check` command for that exact task id.
+1. Read the license with the script's `handoff-check` command for that exact task id.
    It composes the recorded endpoint's own state with the current-code-matched run state, and only `allow` licenses a move.
 2. A refusal naming an active or parked validation run means the pipeline still owns that branch.
    Do not change provider during it; follow the ordinary gate flow, and if the gate cannot be answered because the provider is down, report that concrete blocker to the captain.
-3. On `allow`, relaunch the same task id with `bin/fm-spawn.sh --resume-worktree <recorded worktree>` on the alternate profile, passing the same delivery mode and yolo posture.
-   Record the attempt with `handoff-attempt` so repeated failures stop rather than looping.
-4. Append a short explicit handoff note to the existing brief before relaunching: what the previous worker had completed, what remains, and that the branch and uncommitted files are already in place.
+3. Append a short explicit handoff note to the existing brief: what the previous worker had completed, what remains, and that the branch and uncommitted files are already in place.
+   Leave the brief's recorded delivery contract line untouched.
+4. Take the license for the actual move with `handoff-attempt`, which records the attempt and applies the same checks plus the repeated-failure cap.
+   Relaunch only on `allow`, using `bin/fm-spawn.sh --resume-worktree <recorded worktree>` with the same task id, the same delivery mode and yolo posture, and the alternate profile.
 5. A failed relaunch restores the previous record and removes only the endpoint it created; investigate the reported blocker rather than retrying blind.
-   After the cap, stop and report the concrete blocker to the captain.
+   Once the cap refuses, stop and report the concrete blocker to the captain.
 6. Clear the ledger with `handoff-clear` after a completed handoff.
 
 Never allocate a second isolated copy for a task that already has one, and never let two workers hold the same task.
