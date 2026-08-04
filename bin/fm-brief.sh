@@ -346,7 +346,7 @@ $ISSUE_SECTION$HERDR_SECTION
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
-The report is the only thing that survives, so anything worth keeping must be in it.
+The report is your only task-authored deliverable, so anything worth keeping must be in it.
 
 # Rules
 1. Never push to any remote and never open a PR.

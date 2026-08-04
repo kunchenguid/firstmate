@@ -687,7 +687,7 @@ task_json_lines() {
            reason:"the worker is working"}
         elif $kind == "secondmate" then
           {rank:9,column:"secondmate",action:"route_work",
-           reason:"a persistent secondmate with an empty queue is idle by design"}
+           reason:"a persistent secondmate with no higher-priority task signal"}
         else
           {rank:10,column:"idle",action:"inspect",
            reason:"no current signal"}
