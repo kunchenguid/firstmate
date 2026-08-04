@@ -12,7 +12,7 @@ metadata:
 # bootstrap-diagnostics
 
 Handle each printed line as below, before dispatching work that depends on it.
-The line formats themselves are owned by `bin/fm-bootstrap.sh`'s header; this playbook owns the response to actionable lines.
+The top-level diagnostic vocabulary is owned by `bin/fm-bootstrap.sh`'s header, delegated detector headers own their exact subtype wording, and this playbook owns the response to actionable lines.
 The inline rules in `AGENTS.md` section 3 still bind: detect, then consent, then install - never install anything the captain has not approved in this session - and no work is dispatched until the tools it needs are present and GitHub auth is good.
 When any diagnostic needs captain attention, report the plain consequence and requested action using `AGENTS.md` section 9's captain-facing translation contract; do not name the diagnostic label unless the captain needs to paste it into a command or issue.
 
@@ -27,7 +27,7 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `TANGLE: <remediation>` - the primary checkout is stranded on a feature branch instead of its default branch; `AGENTS.md` section 8 explains why this guard exists and what it protects.
   The work is safe on that branch ref; restore the primary to its default branch with the printed `git -C <root> checkout <default>`, then re-validate that branch in a proper worktree.
   This is the only sanctioned firstmate-initiated git write to the primary, and it is a non-destructive branch switch that strands nothing.
-- `VAULT_DRIFT: <project>: <vault problem and remedy>` - a project's documentation vault has drifted, and the line already names which of the two shapes it is, because they need different remedies.
+- `VAULT_DRIFT: <project>: <vault problem and remedy>` - a project's documentation vault is stale or its declared external location cannot be measured, and the line names the shape and problem because they need different remedies.
   An `in-repo vault stale` line is ordinary project work: brief a crewmate to refresh that vault in its own worktree through the project's selected delivery path.
   An `external vault stale` line names a vault that lives in a SEPARATE repo, which an isolated project worktree structurally cannot write; dispatch that work against the vault repo's own clone instead, and never tell a crewmate to write the captain's live copy.
   An `external vault link absent` or `link broken` line means drift cannot be measured there at all - the exact blindness this check exists to end - so treat restoring the link (or registering the vault repo as its own project) as the fix, and do not read the missing measurement as "the vault is current".
