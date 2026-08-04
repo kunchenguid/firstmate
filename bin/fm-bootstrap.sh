@@ -17,25 +17,27 @@
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
-#                 "FMX: X mode on ..." or "FMX: X mode off ...",
-#                 "OPS_INBOX: <operational alert watch remediation>".
-#          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
-#          own current default-branch commit (a purely LOCAL fast-forward, never
-#          a remote fetch) AND its loaded instruction surface (AGENTS.md, bin/,
-#          or .agents/skills/) actually changed, bootstrap immediately nudges it
+#                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
+#                 "FMX: X mode on ..." or "FMX: X mode off ...".
+#          When a RUNNING local secondmate worktree is fast-forwarded to
+#          firstmate's own current default-branch commit, that update is a
+#          purely local fast-forward and never an origin fetch. Remote routes
+#          instead converge the persistent home to their configured remote code
+#          root. If either placement changes its loaded instruction surface
+#          (AGENTS.md, bin/, or .agents/skills/), bootstrap immediately nudges it
 #          via FM_HOME=<active-home> bin/fm-send.sh fm-<id> so meta resolves the
-#          current backend target and the standard from-firstmate marker is
-#          applied. A successful send prints one BOOTSTRAP_INFO line with the
-#          exact target and message sent; a failed send leaves an idempotent
-#          retry marker under state/.secondmate-nudge-pending/ and prints an
-#          actionable NUDGE_SECONDMATES line.
+#          current route and the standard from-firstmate marker is applied. A
+#          successful send prints one BOOTSTRAP_INFO line with the exact target
+#          and message sent; a failed send leaves an idempotent retry marker
+#          under state/.secondmate-nudge-pending/ and prints an actionable
+#          NUDGE_SECONDMATES line.
 #          Already-current or no-instruction-change homes are silently left alone.
 #          The secondmate sweep also propagates declared inherited local material
 #          into each validated live secondmate home.
-#          SECONDMATE_SYNC lines report actionable skipped local-HEAD syncs or
-#          inheritance failures for live secondmate homes, plus quarantine
-#          diagnostics for divergent shared captain-preference copies;
-#          no-op/current and successful updates stay quiet.
+#          SECONDMATE_SYNC lines report actionable skipped placement-specific
+#          syncs or inheritance failures for live secondmate homes, plus
+#          quarantine diagnostics for divergent shared captain-preference
+#          copies; no-op/current and successful updates stay quiet.
 #          SECONDMATE_LIVENESS lines report only actionable failures from the
 #          recovery-grade state owned by bin/fm-backend.sh's
 #          fm_backend_agent_state: skipped distinguishes an existing ambiguous
@@ -50,13 +52,16 @@
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.31.2.
-#          tasks-axi is a required bootstrap tool (same class as lavish-axi) and
-#          is version and feature gated (0.1.1+ with update --archive-body and
-#          mv [<id>...]); an installed but incompatible build reports MISSING
-#          like no-mistakes. A compatible tasks-axi default backend is silent.
-#          quota-axi is deliberately NOT a required tool: capacity is advisory to
-#          dispatch (AGENTS.md section 4), so its absence or age must never
-#          produce a start-path blocker.
+#          tasks-axi and quota-axi are required bootstrap tools (same class as
+#          lavish-axi). tasks-axi is also version and feature gated (0.1.1+
+#          with update --archive-body and mv [<id>...]); an installed but
+#          incompatible build reports MISSING like no-mistakes. A compatible
+#          tasks-axi default backend is silent. quota-axi is required for the
+#          agent-owned dispatch-profile array procedure in AGENTS.md section 4
+#          and .agents/skills/quota-array-dispatch/SKILL.md, and is also version
+#          gated by fm-quota-axi-lib.sh, which owns that floor and its rationale.
+#          An older build reports MISSING like no-mistakes rather than passing
+#          silently while emitting auth semantics dispatch cannot scope.
 #          On a primary home, the locked mutable path materializes the visible
 #          default config/startup-memory-budget=7500 when absent. It never
 #          guesses at malformed or unsafe existing files, and secondmate homes
@@ -65,34 +70,25 @@
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
-#          The operational alert inbox watch follows fm-ops-inbox-lib.sh's
-#          decision: it arms only from the home's explicit private config; auto
-#          mode arms when the configured alert inbox exists, while explicit
-#          enablement arms fail-closed even when the spool is absent.
-#          docs/ops-inbox-wake.md owns the contract.
-#          Arming registers the reserved standing check state/ops-watch.check.sh
-#          through the ordinary custom-check trust binding.
-#          Arming and disarming are silent unless FM_BOOTSTRAP_VERBOSE_FACTS=1
-#          requests the BOOTSTRAP_INFO fact.
-#          Only a failure prints an actionable OPS_INBOX line.
 #          Fleet sync fetches, fast-forwards safe default-branch states, reports
 #          recovered and STUCK clone drift, and prunes gone local branches; it is
 #          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT when it is a non-empty
 #          numeric override, while non-numeric values fall back to 20s.
 #          When the override is unset or blank, the timeout is
-#          max(20, 5 + 3 * remote-backed project clone count). A timed-out
+#          max(20, 5 + 3 * origin-backed project clone count). A timed-out
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
 #          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          x_mode_setup, ops_inbox_setup, fleet_sync) while still printing every read-only detect line
+#          secondmate_handoff_resume, x_mode_setup, fleet_sync) while still
+#          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
 #          the fleet lock, so a second concurrent session never race-mutates
-#          PR-check artifacts, secondmate homes, X-mode artifacts, the
-#          operational alert watch, project clones, or repair instructions.
+#          PR-check artifacts, secondmate homes, pending handoff outboxes,
+#          X-mode artifacts, project clones, or repair instructions.
 #          Unset/0 (the default) runs every sweep exactly as before - this flag
 #          is purely additive.
 #        fm-bootstrap.sh install <tool>...
@@ -108,40 +104,33 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-quota-axi-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
+# shellcheck source=bin/fm-secondmate-nudge-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-x-lib.sh"
-# shellcheck source=bin/fm-pr-lib.sh disable=SC1091
-. "$SCRIPT_DIR/fm-pr-lib.sh"
-# shellcheck source=bin/fm-check-lib.sh disable=SC1091
-. "$SCRIPT_DIR/fm-check-lib.sh"
-# shellcheck source=bin/fm-ops-inbox-lib.sh disable=SC1091
-. "$SCRIPT_DIR/fm-ops-inbox-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-remote-readiness-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 
-# Reserved check id for the standing operational alert inbox watch. It is a
-# watch, never a work item, so it never appears in the backlog or fleet view.
-OPS_INBOX_CHECK_ID=ops-watch
-
-# Count the clones fleet-sync will actually fetch: those with a publish remote
-# (bin/fm-remote-lib.sh, sourced via fm-ff-lib.sh). A fork-backed clone counts the
-# same as an origin-backed one, so the refresh timeout below scales with real work.
-fleet_sync_remote_backed_project_count() {
+fleet_sync_origin_backed_project_count() {
   local count proj
   count=0
   [ -d "$PROJECTS" ] || { echo 0; return 0; }
   for proj in "$PROJECTS"/*; do
     [ -d "$proj" ] || continue
     git -C "$proj" rev-parse --git-dir >/dev/null 2>&1 || continue
-    fm_publish_remote "$proj" >/dev/null 2>&1 || continue
+    git -C "$proj" remote get-url origin >/dev/null 2>&1 || continue
     count=$((count + 1))
   done
   echo "$count"
@@ -157,7 +146,7 @@ fleet_sync_bootstrap_timeout() {
     return 0
   fi
 
-  count=$(fleet_sync_remote_backed_project_count)
+  count=$(fleet_sync_origin_backed_project_count)
   timeout=$((5 + (3 * count)))
   [ "$timeout" -ge 20 ] || timeout=20
   echo "$timeout"
@@ -220,11 +209,11 @@ fleet_sync() {
 secondmate_sync() {
   # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
   . "$SCRIPT_DIR/fm-wake-lib.sh"
-  # Local-HEAD secondmate sync: fast-forward every LIVE secondmate home
-  # to the primary checkout's current default-branch commit. Purely LOCAL - no
-  # fetch, no remote dependency: a linked-worktree home already holds the primary's
+  # Placement-specific secondmate sync: local homes fast-forward to the primary
+  # checkout's current default-branch commit. That path is purely LOCAL - no
+  # fetch, no origin dependency: a linked-worktree home already holds the primary's
   # commit (fm-ff-lib.sh), while a standalone clone without it is skipped until
-  # /updatefirstmate refreshes it from its publish remote. Startup sends reread nudges only
+  # /updatefirstmate refreshes it from origin. Startup sends reread nudges only
   # for RUNNING secondmates whose instruction surface (AGENTS.md, bin/, or
   # .agents/skills/) actually changed, so a secondmate already on the primary's
   # version is never disturbed (AGENTS.md bootstrap + supervision). Unlike
@@ -245,32 +234,17 @@ secondmate_sync() {
   fi
   FF_NUDGE_WINDOWS=""
   FF_SEEN_HOMES=""
-  SECOND_MATE_NUDGE_MESSAGE='firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'
+  SECOND_MATE_NUDGE_MESSAGE=$FM_SECOND_MATE_NUDGE_MESSAGE
+  REMOTE_SECOND_MATE_NUDGE_MESSAGE=$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE
   SECOND_MATE_NUDGE_PENDING_DIR="$STATE/.secondmate-nudge-pending"
 
   secondmate_nudge_marker_path() {
-    case "$1" in
-      *[!/A-Za-z0-9._-]*|""|*/*) return 1 ;;
-    esac
-    printf '%s/%s.pending' "$SECOND_MATE_NUDGE_PENDING_DIR" "$1"
+    fm_secondmate_nudge_marker_path "$STATE" "$1"
   }
 
   secondmate_write_nudge_marker() {
-    local id=$1 home=$2 commit=$3 instr=$4 selector marker tmp parent
-    selector="fm-$id"
-    marker=$(secondmate_nudge_marker_path "$id") || return 1
-    parent=${marker%/*}
-    mkdir -p "$parent" || return 1
-    tmp=$(mktemp "$parent/.nudge.XXXXXX" 2>/dev/null) || return 1
-    {
-      printf 'id=%s\n' "$id"
-      printf 'selector=%s\n' "$selector"
-      printf 'home=%s\n' "$home"
-      printf 'commit=%s\n' "$commit"
-      printf 'instructions=%s\n' "$instr"
-      printf 'message=%s\n' "$SECOND_MATE_NUDGE_MESSAGE"
-    } > "$tmp" || { rm -f "$tmp"; return 1; }
-    mv -f "$tmp" "$marker" || { rm -f "$tmp"; return 1; }
+    local id=$1 home=$2 commit=$3 instr=$4 message=${5:-$SECOND_MATE_NUDGE_MESSAGE} remote=${6:-0}
+    fm_secondmate_nudge_write "$STATE" "$id" "$home" "$commit" "$instr" "$message" "$remote"
   }
 
   secondmate_send_nudge() {
@@ -298,7 +272,7 @@ secondmate_sync() {
   }
 
   secondmate_retry_pending_nudges() {
-    local marker id selector home commit message expected_marker meta meta_home home_real head
+    local marker id selector home commit message remote expected_marker meta meta_home home_real head out
     [ -d "$SECOND_MATE_NUDGE_PENDING_DIR" ] || return 0
     for marker in "$SECOND_MATE_NUDGE_PENDING_DIR"/*.pending; do
       [ -f "$marker" ] || continue
@@ -315,14 +289,27 @@ secondmate_sync() {
       home=$(fm_meta_get "$marker" home)
       commit=$(fm_meta_get "$marker" commit)
       message=$(fm_meta_get "$marker" message)
+      remote=$(fm_meta_get "$marker" remote)
+      [ -n "$remote" ] || remote=0
       [ "$selector" = "fm-$id" ] || {
         echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker selector mismatch"
         continue
       }
-      [ "$message" = "$SECOND_MATE_NUDGE_MESSAGE" ] || {
-        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker message mismatch"
-        continue
-      }
+      case "$remote" in
+        0) [ "$message" = "$SECOND_MATE_NUDGE_MESSAGE" ] || {
+          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker message mismatch"
+          continue
+        } ;;
+        1) [ "$message" = "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" ] || {
+          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: remote retry marker message mismatch"
+          continue
+        } ;;
+        *)
+          echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker placement is invalid"
+          continue
+          ;;
+      esac
+      [ "$remote" -ne 1 ] || continue
       meta="$STATE/$id.meta"
       [ -f "$meta" ] && [ "$(fm_meta_get "$meta" kind)" = secondmate ] || {
         echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry target has no live secondmate metadata"
@@ -418,7 +405,7 @@ secondmate_sync() {
       fm_lock_release "$home_lock" || true
       continue
     }
-    if FM_CONFIG_INHERIT_REPORT="$report" \
+    if FM_CONFIG_INHERIT_REPORT="$report" FM_CONFIG_INHERIT_LIVE=1 \
       propagate_secondmate_inheritance "$FM_HOME" "$home_real" "$CONFIG" "$DATA"; then
       :
     else
@@ -439,6 +426,66 @@ secondmate_sync() {
     rm -f "$report"
     fm_lock_release "$home_lock" || true
   done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
+
+  # Remote routes converge through the generic transport. Their code root and
+  # inherited files are authoritative on that host; no local path probe or
+  # local fast-forward is attempted for them.
+  local remote_host sync_out inherit_out nudge_needed remote_marker remote_pending converged out remote_lock remote_generation
+  while IFS='|' read -r id _home _window meta; do
+    remote_host=$(fm_meta_get "$meta" remote_host)
+    [ -n "$remote_host" ] || continue
+    remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id" 2>/dev/null || true)
+    if [ -z "$remote_lock" ] || ! fm_lock_acquire_wait "$remote_lock"; then
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot lock remote inheritance transaction"
+      continue
+    fi
+    if ! "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm "$id" >/dev/null 2>&1; then
+      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote reply source could not be registered"
+    fi
+    remote_generation=$(fm_remote_inherit_generation_next "$STATE" "$id" 2>/dev/null || true)
+    if [ -z "$remote_generation" ]; then
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance generation could not be published"
+      fm_lock_release "$remote_lock" || true
+      continue
+    fi
+    remote_marker=$(secondmate_nudge_marker_path "$id" 2>/dev/null || true)
+    remote_pending=0
+    if [ -f "$remote_marker" ] && [ "$(fm_meta_get "$remote_marker" remote)" = 1 ]; then remote_pending=1; fi
+    if ! secondmate_write_nudge_marker "$id" "$_home" "" remote \
+      "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1; then
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record remote retry marker"
+      fm_lock_release "$remote_lock" || true
+      continue
+    fi
+    nudge_needed=0
+    converged=1
+    if sync_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh sync "$id" < /dev/null 2>&1); then
+      case "$sync_out" in synced:*) nudge_needed=1 ;; esac
+    else
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote tracked-file sync failed on $remote_host: $(first_line "$sync_out")"
+      converged=0
+    fi
+    if inherit_out=$(FM_CONFIG_INHERIT_LIVE=1 \
+      "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
+      if printf '%s\n' "$inherit_out" | grep -Eq '^(pushed|removed):'; then nudge_needed=1; fi
+    else
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance failed on $remote_host: $(first_line "$inherit_out")"
+      converged=0
+    fi
+    [ "$remote_pending" -eq 0 ] || nudge_needed=1
+    if [ "$converged" -eq 1 ] && [ "$nudge_needed" -eq 1 ]; then
+      if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
+        "$SCRIPT_DIR/fm-send.sh" "fm-$id" "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
+        rm -f "$remote_marker"
+        [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: nudged remote fm-$id after convergence"
+      else
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
+      fi
+    elif [ "$converged" -eq 1 ]; then
+      rm -f "$remote_marker"
+    fi
+    fm_lock_release "$remote_lock" || true
+  done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
   return 0
 }
 
@@ -455,7 +502,7 @@ secondmate_liveness_sweep() {
   # primary-only no-op there. Mid-session liveness remains explicitly out of
   # scope and requires a separate periodic signal.
   [ -d "$STATE" ] || return 0
-  local meta id window harness backend target agent_state out cause
+  local meta id window harness backend target agent_state out cause remote_host remote_rc readiness_reason route_out remote_backend
   SECONDMATE_RESPAWNED_IDS=""
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -464,6 +511,73 @@ secondmate_liveness_sweep() {
     window=$(fm_meta_get "$meta" window)
     [ -n "$window" ] || continue
     harness=$(fm_meta_get "$meta" harness)
+    remote_host=$(fm_meta_get "$meta" remote_host)
+    if [ -n "$remote_host" ]; then
+      remote_rc=0
+      fm_remote_readiness_ensure "$SCRIPT_DIR" "$id" || remote_rc=$?
+      if [ "$remote_rc" -eq 255 ]; then
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote host unavailable or endpoint state unknown; route preserved on $remote_host"
+        continue
+      fi
+      if [ "$remote_rc" -ne 0 ]; then
+        readiness_reason=$(printf '%s\n' "$FM_REMOTE_READINESS_OUT" \
+          | awk '/^check [^=]+=(fixable|human):|^action:|^error:/ { print; exit }')
+        [ -n "$readiness_reason" ] || readiness_reason=$(first_line "$FM_REMOTE_READINESS_OUT")
+        [ -n "$readiness_reason" ] || readiness_reason="unknown readiness failure"
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote readiness failed on $remote_host: $readiness_reason"
+        continue
+      fi
+      if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
+        remote_rc=0
+      else
+        remote_rc=$?
+      fi
+      if [ "$remote_rc" -eq 255 ]; then
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote host unavailable or endpoint state unknown; route preserved on $remote_host"
+        continue
+      fi
+      if [ "$remote_rc" -ne 0 ]; then
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote endpoint probe unreadable on $remote_host"
+        continue
+      fi
+      agent_state=$(printf '%s\n' "$out" | tail -1)
+      case "$agent_state" in
+        alive)
+          if route_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh route "$id" < /dev/null 2>/dev/null); then
+            remote_rc=0
+          else
+            remote_rc=$?
+          fi
+          if [ "$remote_rc" -eq 255 ]; then
+            echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote host unavailable or endpoint route unknown; route preserved on $remote_host"
+            continue
+          fi
+          if [ "$remote_rc" -ne 0 ]; then
+            echo "SECONDMATE_LIVENESS: secondmate $id: skipped: alive remote endpoint route is unreadable on $remote_host; inspect and migrate or retire it explicitly"
+            continue
+          fi
+          remote_backend=$(printf '%s\n' "$route_out" | sed -n 's/^backend=//p' | tail -1)
+          if [ "$remote_backend" != herdr ]; then
+            echo "SECONDMATE_LIVENESS: secondmate $id: skipped: alive remote endpoint is recorded on backend '${remote_backend:-missing}'; migrate or retire it explicitly"
+            continue
+          fi
+          [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: remote secondmate $id already live (host=$remote_host)"
+          ;;
+        dead|missing)
+          cause="remote endpoint $agent_state on its configured host"
+          if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+            SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
+          else
+            echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $cause: $(first_line "$out")"
+          fi
+          ;;
+        ambiguous|unreadable|unverified)
+          echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote endpoint state is $agent_state on $remote_host"
+          ;;
+        *) echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote endpoint returned an invalid state" ;;
+      esac
+      continue
+    fi
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
     [ -n "$target" ] || target="$window"
@@ -513,6 +627,27 @@ secondmate_liveness_sweep() {
   return 0
 }
 
+secondmate_handoff_resume() {
+  [ -d "$DATA/handoff" ] || return 0
+  "$SCRIPT_DIR/fm-backlog-handoff.sh" --resume-pending >/dev/null 2>&1 || true
+}
+
+secondmate_handoff_detect() {
+  local outbox id count
+  [ -d "$DATA/handoff" ] || return 0
+  for outbox in "$DATA/handoff"/*.outbox.md; do
+    [ -e "$outbox" ] || continue
+    id=$(basename "$outbox" .outbox.md)
+    case "$id" in ''|*[!A-Za-z0-9._-]*) id=unknown ;; esac
+    if [ ! -f "$outbox" ] || [ -L "$outbox" ]; then
+      echo "SECONDMATE_HANDOFF: secondmate $id: pending delivery: unsafe outbox"
+      continue
+    fi
+    count=$(awk '/^- \[[ x]\] / { count++ } END { print count + 0 }' "$outbox" 2>/dev/null || printf unknown)
+    echo "SECONDMATE_HANDOFF: secondmate $id: pending delivery: $count item(s)"
+  done
+}
+
 install_cmd() {
   case "$1" in
     tmux|node|git|gh|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
@@ -520,7 +655,7 @@ install_cmd() {
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
-    tasks-axi) echo "npm install -g $1" ;;
+    tasks-axi|quota-axi) echo "npm install -g $1" ;;
     *) return 1 ;;
   esac
 }
@@ -546,7 +681,7 @@ missing_tool_diagnostic() {
 # fm_backend_required_tools (bin/fm-backend.sh). So a herdr/zellij/cmux home is
 # never told tmux is missing, and only orca drops treehouse. A backend value with
 # no verified dependency set is reported before the universal checks continue.
-COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi"
+COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi"
 BACKEND=$(fm_backend_name)
 BACKEND_VALID=1
 if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
@@ -581,7 +716,7 @@ tool_version_at_least() {  # <tool> <min-version>
   [ "$patch" -ge "$min_patch" ]
 }
 
-bootstrap_artifact_write_if_changed() {
+x_mode_write_if_changed() {
   local dest=$1 content=$2 mode=$3 parent tmp parent_device current_mode
   parent=${dest%/*}
   [ "$parent" != "$dest" ] || return 1
@@ -602,7 +737,7 @@ bootstrap_artifact_write_if_changed() {
       return 0
     fi
   fi
-  tmp=$(umask 077; mktemp "$parent/.fm-bootstrap-artifact.XXXXXX" 2>/dev/null) || return 1
+  tmp=$(umask 077; mktemp "$parent/.fm-x-mode.XXXXXX" 2>/dev/null) || return 1
   if ! printf '%s\n' "$content" > "$tmp" \
     || ! chmod "$mode" "$tmp" \
     || ! fmx_single_link_file_mode_valid "$tmp" "$mode" "$parent_device"; then
@@ -625,25 +760,16 @@ bootstrap_artifact_write_if_changed() {
   fi
 }
 
-bootstrap_artifact_present() {
+x_mode_artifact_present() {
   [ -e "$1" ] || [ -L "$1" ]
 }
 
-# The absolute home path to bake into a generated artifact. A relative FM_HOME
-# must never reach a durable shim, and CDPATH must never redirect the resolution.
-bootstrap_home_abs() {
-  case "$FM_HOME" in
-    /*) printf '%s\n' "$FM_HOME" ;;
-    *) CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P ;;
-  esac
-}
-
-bootstrap_artifact_remove() {
+x_mode_remove_artifact() {
   local artifact=$1 parent=${1%/*}
-  bootstrap_artifact_present "$artifact" || return 0
+  x_mode_artifact_present "$artifact" || return 0
   [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
   rm -f -- "$artifact" 2>/dev/null || return 1
-  ! bootstrap_artifact_present "$artifact"
+  ! x_mode_artifact_present "$artifact"
 }
 
 # X mode (opt-in): when this home's .env carries a non-empty FMX_PAIRING_TOKEN,
@@ -671,8 +797,8 @@ x_mode_setup() {
 
   x_mode_remove_artifacts() {
     local failed=0
-    bootstrap_artifact_remove "$shim" || failed=1
-    bootstrap_artifact_remove "$cadence" || failed=1
+    x_mode_remove_artifact "$shim" || failed=1
+    x_mode_remove_artifact "$cadence" || failed=1
     [ "$failed" -eq 0 ]
   }
 
@@ -686,7 +812,7 @@ x_mode_setup() {
   if [ -z "$token" ]; then
     # Opt-out (or never opted in): drop any X artifacts; stay silent unless we
     # actually removed something.
-    if bootstrap_artifact_present "$shim" || bootstrap_artifact_present "$cadence"; then
+    if x_mode_artifact_present "$shim" || x_mode_artifact_present "$cadence"; then
       if x_mode_remove_artifacts; then
         echo "FMX: X mode off - removed relay poll shim and 30s cadence; default cadence applies on the next supervision cycle; $(x_mode_supervision_repair)"
       else
@@ -704,7 +830,7 @@ x_mode_setup() {
     fi
   done
   if [ "$missing" -ne 0 ]; then
-    if bootstrap_artifact_present "$shim" || bootstrap_artifact_present "$cadence"; then
+    if x_mode_artifact_present "$shim" || x_mode_artifact_present "$cadence"; then
       if x_mode_remove_artifacts; then
         echo "FMX: X mode off - missing relay poll dependencies; install them and rerun bootstrap"
       else
@@ -724,9 +850,15 @@ x_mode_setup() {
 
   mkdir -p "$STATE" "$CONFIG" 2>/dev/null || { fmx_arm_failed; return 0; }
 
-  shim_home=$(bootstrap_home_abs) || { fmx_arm_failed; return 0; }
+  case "$FM_HOME" in
+    /*) shim_home=$FM_HOME ;;
+    *)
+      shim_home=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) \
+        || { fmx_arm_failed; return 0; }
+      ;;
+  esac
   shim_body=$(fmx_poll_shim_content "$shim_home" "$FM_ROOT")
-  bootstrap_artifact_write_if_changed "$shim" "$shim_body" 700 || { fmx_arm_failed; return 0; }
+  x_mode_write_if_changed "$shim" "$shim_body" 700 || { fmx_arm_failed; return 0; }
   fmx_poll_shim_valid "$shim" "$shim_home" "$FM_ROOT" \
     || { fmx_arm_failed; return 0; }
 
@@ -738,108 +870,9 @@ x_mode_setup() {
 export FM_CHECK_INTERVAL=30
 EOF
 )
-  bootstrap_artifact_write_if_changed "$cadence" "$cadence_body" 600 || { fmx_arm_failed; return 0; }
+  x_mode_write_if_changed "$cadence" "$cadence_body" 600 || { fmx_arm_failed; return 0; }
 
   echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
-}
-
-# Operational alert inbox watch: keep the standing check that turns an unreviewed
-# critical alert backlog into an ordinary watcher wake. It is armed exactly when
-# fm_ops_inbox_watch_expected says so - only after private configuration selects
-# an alert inbox - so a home with no configured integration stays inert and writes
-# nothing. Arming registers state/ops-watch.check.sh through the normal custom-
-# check trust binding, which is what authorizes the watcher to run it.
-# Steady state, either armed or inert, is silent; only a real transition prints a
-# BOOTSTRAP_INFO fact, and only a failure prints an actionable OPS_INBOX line.
-# The check id is reserved, so a task that somehow owns it wins and the watch
-# refuses to arm rather than colliding with that task's artifacts.
-ops_inbox_setup() {
-  local check trust sidecar body home_abs
-  check="$STATE/$OPS_INBOX_CHECK_ID.check.sh"
-  trust="$STATE/$OPS_INBOX_CHECK_ID.check-trust"
-  sidecar="$STATE/.ops-inbox-wake"
-
-  ops_inbox_disarm() {  # <reason-when-removed>
-    local reason=$1 failed=0 disarm_home disarm_body
-    if ! bootstrap_artifact_present "$check"; then
-      bootstrap_artifact_present "$trust" || return 0
-      echo "OPS_INBOX: state/$OPS_INBOX_CHECK_ID.check-trust has no owned operational alert check; inspect and remove or rename it, then rerun bootstrap"
-      return 0
-    fi
-    disarm_home=$(bootstrap_home_abs) || {
-      echo "OPS_INBOX: the operational alert watch cannot prove ownership of state/$OPS_INBOX_CHECK_ID.check.sh because the firstmate home path is unresolved; leave it in place and rerun bootstrap after repairing the home"
-      return 0
-    }
-    disarm_body=$(fm_ops_inbox_shim_content "$disarm_home" "$FM_ROOT")
-    if [ ! -f "$check" ] || [ -L "$check" ] \
-      || ! cmp -s "$check" <(printf '%s\n' "$disarm_body"); then
-      echo "OPS_INBOX: state/$OPS_INBOX_CHECK_ID.check.sh is not this operational alert watch; leave it in place and retire or rename its owner, then rerun bootstrap"
-      return 0
-    fi
-    bootstrap_artifact_remove "$check" || failed=1
-    bootstrap_artifact_remove "$trust" || failed=1
-    bootstrap_artifact_remove "$sidecar" || failed=1
-    if [ "$failed" -eq 0 ]; then
-      [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
-        && echo "BOOTSTRAP_INFO: operational alert watch disarmed - $reason"
-      return 0
-    else
-      echo "OPS_INBOX: operational alert watch could not be disarmed; remove state/$OPS_INBOX_CHECK_ID.check.sh and its trust record, then rerun bootstrap"
-    fi
-  }
-
-  if bootstrap_artifact_present "$STATE/$OPS_INBOX_CHECK_ID.meta"; then
-    echo "OPS_INBOX: task id $OPS_INBOX_CHECK_ID is in use by live work, so the operational alert watch cannot arm; retire that task, then rerun bootstrap"
-    return 0
-  fi
-
-  if ! fm_ops_inbox_config_load "$CONFIG"; then
-    if [ "$FM_OPS_INBOX_CONFIG_ERROR" = "jq is required to read config/ops-inbox.json" ]; then
-      echo "MISSING: jq (install: $(install_cmd jq))"
-    fi
-    echo "OPS_INBOX: $FM_OPS_INBOX_CONFIG_ERROR; fix config/ops-inbox.json, then rerun bootstrap"
-    return 0
-  fi
-
-  if ! fm_ops_inbox_watch_expected "$FM_HOME"; then
-    ops_inbox_disarm "no alert inbox at $FM_OPS_INBOX_SPOOL"
-    return 0
-  fi
-
-  if ! command -v jq >/dev/null 2>&1; then
-    echo "MISSING: jq (install: $(install_cmd jq))"
-    echo "OPS_INBOX: the operational alert watch cannot read the inbox until jq is installed; install jq, then rerun bootstrap"
-    ops_inbox_disarm "jq is required to read the alert inbox"
-    return 0
-  fi
-
-  mkdir -p "$STATE" 2>/dev/null || {
-    echo "OPS_INBOX: state directory is unavailable, so the operational alert watch cannot arm"
-    return 0
-  }
-
-  home_abs=$(bootstrap_home_abs) || {
-    echo "OPS_INBOX: the firstmate home path could not be resolved, so the operational alert watch cannot arm"
-    return 0
-  }
-  body=$(fm_ops_inbox_shim_content "$home_abs" "$FM_ROOT")
-  if [ -f "$check" ] && [ ! -L "$check" ] \
-    && cmp -s "$check" <(printf '%s\n' "$body") \
-    && fm_custom_check_registered "$STATE" "$OPS_INBOX_CHECK_ID"; then
-    return 0
-  fi
-  if ! bootstrap_artifact_write_if_changed "$check" "$body" 700 \
-    || ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-      "$SCRIPT_DIR/fm-check-register.sh" "$OPS_INBOX_CHECK_ID" >/dev/null 2>&1 \
-    || ! fm_custom_check_registered "$STATE" "$OPS_INBOX_CHECK_ID"; then
-    bootstrap_artifact_remove "$check" || true
-    bootstrap_artifact_remove "$trust" || true
-    echo "OPS_INBOX: operational alert watch could not be armed; inspect state/$OPS_INBOX_CHECK_ID.check.sh, then rerun bootstrap"
-    return 0
-  fi
-  [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
-    && echo "BOOTSTRAP_INFO: operational alert watch armed for $FM_OPS_INBOX_SPOOL"
-  return 0
 }
 
 crew_dispatch_validate() {
@@ -996,6 +1029,9 @@ fi
 if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
   echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
 fi
+if command -v quota-axi >/dev/null 2>&1 && ! fm_quota_axi_compatible; then
+  echo "MISSING: quota-axi (install: $(install_cmd quota-axi))"
+fi
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
 fi
@@ -1025,8 +1061,9 @@ fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_liveness_sweep
   secondmate_sync
+  secondmate_handoff_resume
   x_mode_setup
-  ops_inbox_setup
   fleet_sync
 fi
+secondmate_handoff_detect
 exit 0

@@ -25,7 +25,8 @@ jobs:
       - run: bin/fm-lint.sh
 
   # Deterministic proof that portable parallel shards + portable serial + Herdr
-  # equal the complete tests/*.test.sh inventory with no missing or duplicates.
+  # equal the complete tests/*.test.sh inventory with no missing or duplicates,
+  # and that the portable serial CI shards partition that serial lane exactly.
   test-coverage:
     name: Test coverage guard
     runs-on: ubuntu-latest
@@ -104,17 +105,22 @@ jobs:
 
   # Required portable serial remainder: watcher, lock, AFK, tmux, daemon,
   # ambiguous, and other stateful tests. Real Herdr stays in tests-herdr.
+  # Split across separate runners so no two of these stateful scripts ever share
+  # a machine: each shard is still strictly serial in itself. Shard membership
+  # and the shard count both belong to bin/fm-test-run.sh, which refuses a lane
+  # whose "ofN" disagrees with it (docs/fm-test-portable-shards.md).
   tests-portable-serial:
-    name: Behavior portable serial
+    name: Behavior portable serial ${{ matrix.shard }}
     runs-on: ubuntu-latest
-    # Measured 2026-08-02: 16.1 min wall over 78 scripts on one hosted runner
-    # and 17.9 min over 69 on another, while two same-revision runs exceeded 20
-    # min and were killed by the previous cap. That spread is runner speed, not
-    # test growth, so a cap set near the typical wall lands inside the variance
-    # and reads as a red suite. This is a hang tripwire at roughly 2.5x the
-    # measured wall, matching the Herdr lane. Measurements and dates:
-    # docs/fm-test-portable-shards.md ("Measured serial wall").
-    timeout-minutes: 40
+    # Measured whole remainder is ~19 min of serial work; the balanced shards
+    # are ~4.8 min each. Cap is a hang tripwire with roughly 3x margin, not the
+    # expected healthy end of the lane.
+    timeout-minutes: 15
+    strategy:
+      # Every shard reports so one failure never hides another shard's result.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -137,18 +143,24 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
-      - name: Run portable serial remainder
+      - name: Run portable serial shard ${{ matrix.shard }}
+        env:
+          # job-total rather than a literal, so shrinking or growing the matrix
+          # without matching bin/fm-test-run.sh is refused instead of quietly
+          # leaving a shard of the required lane unrun.
+          FM_SERIAL_LANE: portable-serial-${{ matrix.shard }}of${{ strategy.job-total }}
+          FM_SERIAL_SHARD: ${{ matrix.shard }}
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh --lane portable-serial \
-            --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial.json"
-      - name: Upload portable serial timing artifact
+          bin/fm-test-run.sh --lane "$FM_SERIAL_LANE" \
+            --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial-${FM_SERIAL_SHARD}.json"
+      - name: Upload portable serial shard ${{ matrix.shard }} timing artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fm-test-timing-portable-serial
-          path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-serial.json
+          name: fm-test-timing-portable-serial-${{ matrix.shard }}
+          path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-serial-${{ matrix.shard }}.json
           if-no-files-found: warn
 
   # Required real-Herdr lane: pinned install, serial real-herdr-gated family,
@@ -268,62 +280,6 @@ jobs:
             ${{ runner.temp }}/fm-herdr/sessions-before.json
             ${{ runner.temp }}/fm-herdr/default-server.log
           if-no-files-found: warn
-
-  tests-herdr-macos-focus:
-    name: Behavior tests (Herdr macOS focus)
-    runs-on: macos-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - name: Require macOS focus and Herdr tools
-        run: |
-          set -eu
-          command -v jq >/dev/null || { echo "::error::jq is required"; exit 1; }
-          command -v python3 >/dev/null || { echo "::error::python3 is required"; exit 1; }
-          command -v swift >/dev/null || { echo "::error::swift is required"; exit 1; }
-          command -v osascript >/dev/null || { echo "::error::osascript is required"; exit 1; }
-      - name: Install pinned Herdr and Treehouse
-        run: |
-          set -eu
-          bin/fm-install-herdr.sh "$RUNNER_TEMP/bin"
-          bin/fm-install-treehouse.sh "$RUNNER_TEMP/bin"
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      - name: Provision spawn secret baseline
-        run: |
-          set -eu
-          umask 077
-          printf '%s\n' 'FM_TEST_BASELINE_SECRET=not-a-secret' > "$HOME/.secrets"
-      - name: Start default Herdr session for fleet-state tripwire
-        run: |
-          set -eu
-          mkdir -p "$RUNNER_TEMP/fm-herdr-macos"
-          nohup herdr server >"$RUNNER_TEMP/fm-herdr-macos/default-server.log" 2>&1 &
-          echo $! >"$RUNNER_TEMP/fm-herdr-macos/default-server.pid"
-          attempt=0
-          while [ "$attempt" -lt 150 ]; do
-            running=$(herdr status --json 2>/dev/null | jq -r '.server.running // false' || echo false)
-            if [ "$running" = true ]; then
-              echo "default Herdr session is running"
-              exit 0
-            fi
-            sleep 0.2
-            attempt=$((attempt + 1))
-          done
-          echo "::error::default Herdr server did not become ready"
-          cat "$RUNNER_TEMP/fm-herdr-macos/default-server.log" || true
-          exit 1
-      - name: Run projected spawn macOS activation regression
-        env:
-          FM_REQUIRE_MACOS_FOCUS_AUDIT: 1
-        run: tests/fm-backend-herdr-presentation-e2e.test.sh
-      - name: Stop default Herdr server
-        if: always()
-        run: |
-          if [ -f "$RUNNER_TEMP/fm-herdr-macos/default-server.pid" ]; then
-            kill "$(cat "$RUNNER_TEMP/fm-herdr-macos/default-server.pid")" 2>/dev/null || true
-          fi
 
   # Aggregate per-lane timing into one summary artifact for critical-path review.
   tests-timing-aggregate:

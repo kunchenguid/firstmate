@@ -23,19 +23,9 @@ make_fake_tmux() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
-# shellcheck source=/dev/null
-. "$(dirname "$0")/pane-shell.sh"
 case "${1:-}" in
-  has-session|new-session|new-window|kill-window)
+  has-session|new-session|new-window|send-keys|kill-window)
     printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
-    exit 0
-    ;;
-  send-keys)
-    printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
-    # This fixture has no separate launch log, so the launch the pane evaluates
-    # keeps landing in the tmux log the secondmate suites already assert on.
-    FM_FAKE_LAUNCH_LOG=${FM_FAKE_LAUNCH_LOG:-$FM_FAKE_TMUX_LOG}
-    fm_fake_pane_send "$@"
     exit 0
     ;;
   list-windows)
@@ -53,7 +43,6 @@ case "${1:-}" in
     ;;
   capture-pane)
     printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
-    fm_fake_pane_capture
     cat "$FM_FAKE_TMUX_CAPTURE"
     exit 0
     ;;
@@ -106,7 +95,6 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   chmod +x "$fakebin/treehouse"
-  fm_fake_pane_shell "$fakebin"
   : > "$dir/tmux.log"
   printf '%s\n' "$fakebin"
 }

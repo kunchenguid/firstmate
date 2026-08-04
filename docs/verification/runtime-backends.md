@@ -28,9 +28,55 @@ zsh
 ```
 
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
-Claude, Codex, OpenCode, and Grok were observed under their own process names.
-Kimi Code CLI 0.29.1 was observed under `kimi` on 2026-07-25.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
+
+### Agent liveness name sources
+
+The earlier record that every harness is observed under its own `#{pane_current_command}` no longer holds and has been replaced by the per-harness evidence below.
+In this macOS run that reading reflected a rewritable process title rather than stable executable identity, so it is now one of two independent name sources rather than the sole basis of a verdict.
+
+All seven verified adapters were relaunched on 2026-08-03 with tmux 3.6a on macOS 26.5.2 arm64, each on a private socket in an isolated lab.
+
+```sh
+tmux -L "$socket" new-window -d -t "$session:" -n "$harness" -c "$wt" -- "$bin"
+tmux -L "$socket" display-message -p -t "$session:$harness" '#{pane_current_command}'
+ps -t "${tty#/dev/}" -o pgid=,tpgid=,comm=      # rows where pgid = tpgid
+```
+
+Observed identities, and the resulting verdict:
+
+| Harness | Version | `#{pane_current_command}` | Foreground `comm` | Verdict |
+| --- | --- | --- | --- | --- |
+| claude | 2.1.220 | `2.1.220` | `claude` | alive |
+| codex | codex-cli 0.146.0 | `codex` | `codex` | alive |
+| opencode | 1.18.11 | `opencode` | `opencode` | alive |
+| pi | 0.82.0 | `pi-launcher` | `pi-signed`, `pi` | alive |
+| pi-signed | 0.82.0 | `pi-launcher` | `pi-signed`, `pi` | alive |
+| grok | 0.2.118 | `grok-0.2.118-ma` | `grok` | alive |
+| kimi | 0.31.1 | `kimi` | `kimi` | alive |
+
+Claude Code is the harness whose title no longer attributes it at all; every other adapter is currently attributed by both sources.
+Codex reported `codex-aarch64-a` at 0.145.0 and `codex` at 0.146.0, and Kimi Code reported `kimi-code` as its foreground `comm` at 0.29.1 and `kimi` at 0.31.1, so these identities move between ordinary patch releases in both directions.
+That is the evidence for treating any single process name as a surface under vendor control rather than a stable contract.
+
+`#{pane_current_command}` and foreground `ps -o comm=` read different name fields, but which one preserves executable identity is platform-dependent.
+On macOS the pane command reflected the rewritable title while the full install path could survive in `ps -o comm=`; in the Linux portable regression those roles reversed for the version-named native executable, with the identifying path retained in argv[0].
+The classifier therefore accepts a harness basename first, then an exact harness path component in the full executable path, then the same component in argv[0], without depending on which field carries it on a given platform.
+
+The portable regression is CI-enforced, while the real-harness drift guard is opt-in under the policy in `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
+Run the live guard after any harness upgrade and before trusting or refreshing the table above:
+
+```sh
+FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
+```
+
+Bounded output from the run that produced the table:
+
+```text
+ok - harness liveness: claude 2.1.220 (Claude Code) classifies alive
+# claude 2.1.220 (Claude Code): title='2.1.220' foreground=[claude ]
+# checked 7 installed harness(es)
+```
 
 Installed-wrapper checks:
 
@@ -279,42 +325,6 @@ ok - real Herdr lab: missing, renamed, and duplicate tokens trigger zero destruc
 ok - real Herdr lab validation completed on Herdr 0.7.5 with the default-session tripwire intact
 ```
 
-The concurrent recovery stress gate was repeated on 2026-07-27 against Herdr 0.7.3 protocol 16 after an isolated baseline reproduced a five-second session-lock refusal.
-The causal boundary was a second exact recovery holding the shared presentation lock through its permitted 60-second Treehouse handoff, while the peer exhausted the fresh projection's shorter best-effort lock budget.
-The recovery-only budget was extended per distinct lock owner so a progressing wave can drain without changing the fresh projection fallback.
-
-The following guarded command was run three times after the change:
-
-```sh
-# HERDR_LAB_HELPER is the Firstmate-owned helper supplied by the guarded brief.
-HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-pure-kun-herdr-validation)
-trap '"$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"' EXIT
-"$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION"
-HERDR_LAB_HELPER="$HERDR_LAB_HELPER" \
-  tests/fm-backend-herdr-presentation-e2e.test.sh
-"$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"
-trap - EXIT
-```
-
-All three post-change runs observed:
-
-```text
-ok - real Herdr lab: concurrent cross-home recoveries replace exact husks under one session lock with no focus drift
-ok - real Herdr lab validation completed on Herdr 0.7.3 with the default-session tripwire intact
-```
-
-The deterministic counterfactual kept the fresh path at 50 attempts, modeled two consecutive 600-attempt predecessors with distinct lock ownership, and acquired the recovery path on attempt 1201:
-
-```sh
-tests/fm-backend-herdr.test.sh
-```
-
-Observed regression:
-
-```text
-ok - herdr presentation lock: recovery drains progressing predecessor waves while fresh projection stays best-effort
-```
-
 The restored-shell session-start cleanup ran on 2026-07-24 against Herdr 0.7.5 protocol 17:
 
 ```sh
@@ -324,44 +334,6 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 
 Observed guarantee: one exact home-local, journal-correlated, one-tab and one-pane childless idle shell was closed after restoration while the exact non-target focus and default fleet session remained unchanged, and a repeat run was a no-op.
 
-#### macOS app activation
-
-A guarded non-default presentation lab on 2026-07-28 used Herdr 0.7.3 protocol 16 to separate Herdr's logical workspace and tab focus from macOS frontmost-app activation.
-Directly observed workspace creation, tab creation, pane execution, and raw projection `workspace.move` operations neither changed `NSWorkspace.frontmostApplication` nor emitted activation for a different bundle identifier.
-The same lab retained the existing exact active-workspace and active-tab assertions, so the evidence did not attribute the apparent focus steal to either Firstmate's projection path or the exercised Herdr core operations.
-
-The active macOS regression is:
-
-```sh
-FM_REQUIRE_MACOS_FOCUS_AUDIT=1 \
-  tests/fm-backend-herdr-presentation-e2e.test.sh
-```
-
-The test starts an `NSWorkspace.didActivateApplicationNotification` watcher before the complete projected spawn and keeps it active through a two-second settle window.
-It fails if any activation has an empty or different bundle identifier from the initially frontmost app.
-The required macOS Herdr-focus CI job makes an unavailable activation audit a hard failure, while non-macOS runs retain the logical focus checks without claiming app-activation coverage.
-
-The guarded lifecycle stress suite ran on 2026-08-02 against Herdr 0.7.3:
-
-```sh
-HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
-  tests/fm-backend-herdr-presentation-e2e.test.sh
-```
-
-Observed output:
-
-```text
-ok - real Herdr lab: flag-off spawn retains the Stage 1 Herdr command sequence with zero ordering calls
-ok - real Herdr lab: Hi Bit and Wheelhouse-style same-identity restarts reclaim one nested space with exact focus and idempotence
-ok - real Herdr lab: secondmate restart binding and reclaim stay isolated to the exact child home and parent
-ok - real Herdr lab: concurrent cross-home recoveries replace exact husks under one session lock with no focus drift
-ok - real Herdr lab: multi-home exact-pane teardowns restore captain focus without workspace close authority
-ok - real Herdr lab validation completed on Herdr 0.7.3 with the default-session tripwire intact
-```
-
-The runner exited with status 0.
-The `fm-hibit-resume-r1` case held the named-session presentation lock for six seconds, beyond fresh projection's five-second budget, and the same-identity recovery completed after release instead of falling back or refusing the resume.
-The guard exercised only a generated non-default `fm-lab-` session and captured the server-log window before and after the run.
 ### Workspace-removal focus safety
 
 The focus-flash regression ran on 2026-07-28 against Herdr 0.7.5 protocol 17 on macOS aarch64:
@@ -379,11 +351,6 @@ ok - mitigation: every in-operation sample preserved exact focus while the doome
 ok - mitigation: no explicit close and no corrective focus were needed on the defective release
 evidence: herdr=0.7.5 protocol=17 steal_live=1 default-session-tripwire=armed
 ```
-
-The active sampler reads the operation's exact pre-operation tab identity and focus state rather than reconstructing focus from a multi-object workspace snapshot.
-It makes at most eight bounded probes with a 10-millisecond delay after a missing, malformed, or identity-mismatched response; a valid unfocused response is returned immediately and fails the in-operation comparison.
-The final sample must still equal the exact pre-operation tab identity and focus state.
-If the adapter issues a corrective `tab focus`, the regression records that tab's immediately preceding state and fails when it was genuinely unfocused or unreadable, while a redundant focus of the already focused tab does not masquerade as a wrong-focus interval.
 
 Direct lab probes on the same day established the removal rules the emptying-close plan relies on, each verified with `workspace list` focus reads around one mutation in a guarded `fm-lab-` session:
 

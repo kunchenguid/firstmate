@@ -2229,43 +2229,6 @@ test_presentation_session_lock_path_rejects_malformed_socket() {
   pass "herdr presentation lock: null and missing socket paths fail closed"
 }
 
-test_presentation_recovery_lock_waits_on_live_owner() {
-  local lock_source default_attempts expected out
-  lock_source=$(sed -n '/^spawn_herdr_presentation_order_lock_acquire()/,/^spawn_herdr_presentation_order_lock_release()/p' "$ROOT/bin/fm-spawn.sh" | sed '$d')
-  default_attempts=$(sed -n 's/^HERDR_PRESENTATION_ORDER_LOCK_ATTEMPTS=//p' "$ROOT/bin/fm-spawn.sh")
-  expected="$default_attempts 0 1 1"
-  out=$(LOCK_SOURCE="$lock_source" DEFAULT_ATTEMPTS="$default_attempts" \
-    bash -c '
-      HERDR_PRESENTATION_ORDER_LOCK=
-      HERDR_PRESENTATION_ORDER_LOCK_HELD=0
-      HERDR_PRESENTATION_ORDER_LOCK_ATTEMPTS=$DEFAULT_ATTEMPTS
-      eval "$LOCK_SOURCE"
-      fm_backend_herdr_presentation_session_lock_path() { printf "%s" /tmp/fm-herdr-budget.lock; }
-      sleep() { :; }
-      tries=0
-      waits=0
-      fm_lock_try_acquire() {
-        tries=$((tries + 1))
-        return 1
-      }
-      fm_lock_acquire_wait() {
-        [ "$1" = /tmp/fm-herdr-budget.lock ] || exit 1
-        waits=$((waits + 1))
-        return 0
-      }
-      if spawn_herdr_presentation_order_lock_acquire fmtest; then
-        exit 1
-      fi
-      printf "%s " "$tries"
-      tries=0
-      spawn_herdr_presentation_order_lock_acquire fmtest exact-recovery || exit 1
-      printf "%s %s %s" "$tries" "$waits" "$HERDR_PRESENTATION_ORDER_LOCK_HELD"
-    ')
-  [ "$out" = "$expected" ] \
-    || fail "recovery did not use the live-owner wait after fresh projection's bounded fallback: $out"
-  pass "herdr presentation lock: recovery waits on the live owner while fresh projection stays best-effort"
-}
-
 test_projection_order_rejects_malformed_socket() {
   local dir log resp fb mover out status
   dir="$TMP_ROOT/projection-order-malformed-socket"; mkdir -p "$dir/responses"
@@ -2828,7 +2791,7 @@ test_composer_state_pi_separator_requires_safe_native_identity() {
 
 # --- composer_state: unbordered (bare) composer rows -------------------------
 # Regression coverage for the away-mode redelivery-loop incident
-# (docs/herdr-backend.md "Current transport behavior"): real claude and codex
+# (docs/herdr-backend.md "Incident (2026-07-07)"): real claude and codex
 # composer rows carry NO border glyph at all - the fixtures below are captured
 # verbatim (character-for-character) from a real herdr session running real
 # `claude`/`codex` (see the dated evidence entry). Before the fix these all
@@ -2984,7 +2947,7 @@ test_composer_state_codex_non_faint_same_text_is_pending() {
 # --- wait_for_working: the native agent-state poll-and-classify primitive ---
 # Direct unit coverage for fm_backend_herdr_wait_for_working, the helper
 # fm_backend_herdr_send_text_submit now uses instead of composer scraping
-# (docs/herdr-backend.md "Current transport behavior").
+# (docs/herdr-backend.md "Native agent-state submit confirmation").
 
 test_wait_for_working_returns_busy_on_first_poll() {
   local dir log resp fb out calls
@@ -3461,7 +3424,7 @@ EOF
 #
 # Root cause and fix are documented at
 # fm_backend_herdr_workspace_prune_seeded_default_tab in bin/backends/herdr.sh
-# and docs/herdr-backend.md's "Default-tab prune safety" section. These three tests
+# and docs/herdr-backend.md's "Default-tab prune" section. These three tests
 # cover the acceptance bar directly: an ADOPTED workspace's tab is never a
 # prune candidate (regardless of label or count), a freshly CREATED
 # workspace's seeded default tab IS pruned (already covered above by
@@ -3977,7 +3940,6 @@ test_projection_order_foreign_new_child_before_parent_is_read_only
 test_projection_order_missing_parent_is_read_only
 test_presentation_session_lock_path_is_shared_across_homes
 test_presentation_session_lock_path_rejects_malformed_socket
-test_presentation_recovery_lock_waits_on_live_owner
 test_projection_order_rejects_malformed_socket
 test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding

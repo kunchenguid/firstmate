@@ -27,8 +27,6 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
-# shellcheck source=/dev/null
-. "$(dirname "$0")/pane-shell.sh"
 printf '%s\n' "$*" >> "$FM_FAKE_TMUX_CALL_LOG"
 state=$(cat "$FM_FAKE_KIMI_STATE" 2>/dev/null || true)
 fake_screen() {
@@ -71,7 +69,7 @@ case "${1:-}" in
     done
     if [ -n "$literal" ]; then
       case "$literal" in
-        *' --auto'*)
+        *' --auto')
           printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG"
           printf 'launched\n' > "$FM_FAKE_KIMI_STATE"
           ;;
@@ -82,24 +80,13 @@ case "${1:-}" in
       esac
       exit 0
     fi
-    fm_fake_pane_send "$@"
-    # The shared pane shell owns the launch-delivery protocol and the launch
-    # log; this fake still owns kimi's own post-launch readiness state.
-    case "${4:-}" in
-      'eval "$FM_SPAWN_LAUNCH"')
-        if [ "${FM_FAKE_KIMI_READY:-yes}" = yes ]; then
-          printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
-        else
-          printf 'launched\n' > "$FM_FAKE_KIMI_STATE"
-        fi
-        exit 0
-        ;;
-    esac
     case " $* " in
       *' Enter '*)
         case "$state" in
-          ready)
-            printf 'unexpected-enter\n' > "$FM_FAKE_KIMI_STATE"
+          launched)
+            if [ "${FM_FAKE_KIMI_READY:-yes}" = yes ]; then
+              printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
+            fi
             ;;
           pointer-typed)
             if [ "${FM_FAKE_KIMI_DELIVERY:-yes}" = yes ]; then
@@ -127,12 +114,9 @@ case "${1:-}" in
       esac
       case "$arg" in -S|-E) prev=$arg ;; *) prev= ;; esac
     done
-    {
-      fm_fake_pane_capture 2>/dev/null || true
-      fake_screen
-    } | case "$start:$end" in
-      *[!0-9:]*|'':*|*:'') cat ;;
-      *) awk -v start="$start" -v end="$end" \
+    case "$start:$end" in
+      *[!0-9:]*|'':*|*:'') fake_screen ;;
+      *) fake_screen | awk -v start="$start" -v end="$end" \
            'NR - 1 >= start && NR - 1 <= end' ;;
     esac
     exit 0
@@ -141,7 +125,6 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_pane_shell "$fakebin"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
   fm_fake_exit0 "$fakebin" kimi
   ln -s "$JQ_BIN" "$fakebin/jq"
@@ -156,7 +139,6 @@ make_spawn_case() {
   wt="$case_dir/wt"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" "$home/.kimi-code"
-  printf '%s\n' 'FM_TEST_BASELINE_SECRET=not-a-secret' > "$home/.secrets"
   printf '# Kimi test config\ndefault_model = "test"\n' > "$home/.kimi-code/config.toml"
   printf 'brief for kimi\n' > "$home/data/$id/brief.md"
   printf 'kimi\n' > "$home/config/crew-harness"
@@ -185,20 +167,13 @@ run_spawn() {
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/brief.md" \
     FM_KIMI_READY_POLLS=2 FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
-    "$SPAWN" "$id" "$proj" --harness kimi "$@" 2>&1
+    "$SPAWN" "$id" "$proj" --harness kimi --mode no-mistakes --yolo off "$@" 2>&1
 }
 
 read_spawn_record() {
   IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR <<EOF
 $1
 EOF
-}
-
-captured_launch_body() {
-  local encoded=${1#* /bin/bash -c }
-  eval "set -- $encoded"
-  [ "$#" -eq 1 ] || fail "captured launch did not contain one child-shell command"
-  printf '%s' "$1"
 }
 
 test_kimi_launch_then_send_is_verified() {
@@ -216,14 +191,9 @@ test_kimi_launch_then_send_is_verified() {
   expect_code 0 "$rc" "verified kimi launch-then-send should succeed"
   assert_contains "$out" "spawned $id harness=kimi" "kimi spawn did not report success"
 
-  launch_line=$(cat "$CASE_DIR/launch.log")
-  launch=$(captured_launch_body "$launch_line")
-  assert_contains "$launch_line" "/usr/bin/env -u BASH_ENV -u FM_TEST_BASELINE_SECRET GOTMPDIR='$task_tmp/gotmp' /bin/bash -c " \
-    "kimi launch did not enter the scrubbed child shell"
-  assert_contains "$launch" "$FAKEBIN_DIR/kimi" "kimi launch did not use the absolute binary"
-  assert_contains "$launch" "--model" "kimi launch omitted the requested model"
-  assert_contains "$launch" "kimi-code/k3" "kimi launch omitted the requested model value"
-  assert_contains "$launch" "--auto" "kimi launch omitted --auto"
+  launch=$(cat "$CASE_DIR/launch.log")
+  [ "$launch" = "'$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
+    || fail "kimi launch did not use the absolute binary, model, and --auto only: $launch"
   assert_not_contains "$launch" "--effort" "kimi launch emitted a nonexistent effort flag"
   assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"
   assert_not_contains "$launch" "__TURNEND__" "kimi launch retained a turn-end placeholder"
@@ -478,12 +448,9 @@ test_kimi_falls_back_to_expanded_home_binary() {
   out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
   rc=$?
   expect_code 0 "$rc" "Kimi HOME fallback spawn should succeed"
-  launch_line=$(cat "$CASE_DIR/launch.log")
-  launch=$(captured_launch_body "$launch_line")
-  assert_contains "$launch_line" "/usr/bin/env -u BASH_ENV -u FM_TEST_BASELINE_SECRET GOTMPDIR='/tmp/fm-$id/gotmp' /bin/bash -c " \
-    "Kimi fallback did not enter the scrubbed child shell"
-  assert_contains "$launch" "$fallback" \
-    "Kimi fallback did not expand HOME into an absolute executable"
+  launch=$(cat "$CASE_DIR/launch.log")
+  [ "$launch" = "'$fallback' --auto" ] \
+    || fail "Kimi fallback did not expand HOME into an absolute executable: $launch"
   pass "fm-spawn: Kimi fallback expands the active HOME"
 }
 

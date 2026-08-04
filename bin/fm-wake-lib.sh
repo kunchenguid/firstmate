@@ -78,8 +78,10 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
+FM_WATCHER_MATCHED_IDENTITY=
 fm_watcher_lock_matches_pid() {
   local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
+  FM_WATCHER_MATCHED_IDENTITY=
   lockdir="$state/.watch.lock"
   lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
@@ -88,31 +90,28 @@ fm_watcher_lock_matches_pid() {
   [ "$lock_path" = "$watch_path" ] || return 1
   [ -n "$lock_identity" ] || return 1
   current_identity=$(fm_pid_identity "$pid") || return 1
-  [ "$current_identity" = "$lock_identity" ]
+  [ "$current_identity" = "$lock_identity" ] || return 1
+  FM_WATCHER_MATCHED_IDENTITY=$lock_identity
 }
 
 FM_WATCHER_HEALTHY_PID=
-FM_WATCHER_HEALTHY_CYCLE_ID=
+FM_WATCHER_HEALTHY_IDENTITY=
 fm_watcher_healthy() {
-  local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid age cycle_id
+  local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid identity age
   FM_WATCHER_HEALTHY_PID=
-  FM_WATCHER_HEALTHY_CYCLE_ID=
+  FM_WATCHER_HEALTHY_IDENTITY=
   lockdir="$state/.watch.lock"
   beat="$state/.last-watcher-beat"
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   fm_pid_alive "$pid" || return 1
   fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home" || return 1
-  cycle_id=$(cat "$lockdir/cycle-id" 2>/dev/null || true)
-  [ -n "$cycle_id" ] || return 1
-  # The cycle id is published before pid-identity. Recheck the identity after
-  # reading it so callers never pair a cycle from one lock owner with another.
-  fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home" || return 1
+  identity=$FM_WATCHER_MATCHED_IDENTITY
   age=$(fm_path_age "$beat")
   [ "$age" -lt "$grace" ] || return 1
   # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
   FM_WATCHER_HEALTHY_PID=$pid
-  # shellcheck disable=SC2034 # The caller consumes this sourced-library result.
-  FM_WATCHER_HEALTHY_CYCLE_ID=$cycle_id
+  # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
+  FM_WATCHER_HEALTHY_IDENTITY=$identity
   return 0
 }
 
@@ -122,9 +121,27 @@ fm_lock_clean_known_files() {
     "$lockdir/pid" \
     "$lockdir/fm-home" \
     "$lockdir/pid-identity" \
-    "$lockdir/cycle-id" \
+    "$lockdir/role" \
     "$lockdir/watcher-path" \
     2>/dev/null || true
+}
+
+fm_lock_set_role() {
+  local lockdir=$1 role=$2 current pid back
+  case "$role" in
+    autoarm|terminal-check) : ;;
+    *) return 1 ;;
+  esac
+  current=${BASHPID:-$$}
+  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  [ "$pid" = "$current" ] || return 1
+  printf '%s\n' "$role" > "$lockdir/role" 2>/dev/null || return 1
+  back=$(cat "$lockdir/role" 2>/dev/null || true)
+  [ "$back" = "$role" ]
+}
+
+fm_lock_role() {
+  cat "$1/role" 2>/dev/null
 }
 
 fm_lock_abs_path() {
@@ -366,18 +383,6 @@ fm_lock_acquire_wait() {
   done
 }
 
-# A classifier must never wait forever behind an unrelated queue holder.  The
-# caller chooses a short attempt budget and handles timeout as its typed failure.
-fm_lock_acquire_bounded() {  # <lockdir> [attempts] [sleep-seconds]
-  local lockdir=$1 attempts=${2:-20} delay=${3:-0.05} i=0
-  case "$attempts" in ''|*[!0-9]*) return 2 ;; esac
-  while ! fm_lock_try_acquire "$lockdir"; do
-    [ "$i" -ge "$attempts" ] && return 1
-    sleep "$delay"
-    i=$((i + 1))
-  done
-}
-
 fm_lock_release() {
   local lockdir=$1 pid current ownerdir
   current=${BASHPID:-$$}
@@ -397,12 +402,49 @@ fm_lock_release() {
   rmdir "$lockdir" 2>/dev/null || true
 }
 
+fm_failure_episode_reset() {
+  local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
+  lock="$state/.turnend-claude-blocks.lock"
+  case "$mode" in
+    acquire)
+      fm_lock_try_acquire "$lock" || return 1
+      acquired=1
+      ;;
+    held)
+      current=${BASHPID:-$$}
+      pid=$(cat "$lock/pid" 2>/dev/null || true)
+      [ "$pid" = "$current" ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  for path in \
+    "$state/.turnend-claude-blocks" \
+    "$state/.claude-autoarm-failure-notified" \
+    "$state/.claude-autoarm-failure-alarmed"
+  do
+    if [ -d "$path" ] && [ ! -L "$path" ]; then
+      [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
+      return 1
+    fi
+  done
+  if ! rm -f \
+    "$state/.turnend-claude-blocks" \
+    "$state/.claude-autoarm-failure-notified" \
+    "$state/.claude-autoarm-failure-alarmed" \
+    2>/dev/null; then
+    [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
+    return 1
+  fi
+  [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
+  return 0
+}
+
 fm_wake_clean_field() {
   LC_ALL=C tr '\t\r\n' '   '
 }
 
 fm_wake_append() {
-  local kind=$1 key=$2 payload=$3 cycle_id=${4:-${FM_WATCH_CYCLE_ID:-}} clean_key clean_payload clean_cycle epoch seq seq_file status
+  local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
   case "$kind" in
     signal|stale|check|heartbeat) ;;
     *) printf 'fm_wake_append: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
@@ -410,7 +452,6 @@ fm_wake_append() {
 
   clean_key=$(printf '%s' "$key" | fm_wake_clean_field)
   clean_payload=$(printf '%s' "$payload" | fm_wake_clean_field)
-  clean_cycle=$(printf '%s' "$cycle_id" | fm_wake_clean_field)
   epoch=$(date +%s)
   seq_file="$STATE/.wake-queue.seq"
   status=0
@@ -423,57 +464,32 @@ fm_wake_append() {
   seq=$((seq + 1))
   printf '%s\n' "$seq" > "$seq_file" || status=$?
   if [ "$status" -eq 0 ]; then
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload" "$clean_cycle" >> "$FM_WAKE_QUEUE" || status=$?
+    printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload" >> "$FM_WAKE_QUEUE" || status=$?
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"
 }
 
-# fm_wake_cycle_has_records <cycle-id>
-# Return 0 when the durable queue contains a row produced by exactly this
-# watcher cycle, 1 when it does not, and 2 when the queue cannot be locked or
-# read.  The queue is deliberately the only attribution authority.
-fm_wake_cycle_has_records() {
-  local cycle_id=$1 attempts=${FM_WAKE_CLASSIFY_LOCK_ATTEMPTS:-20} delay=${FM_WAKE_CLASSIFY_LOCK_DELAY:-0.05} status
-  [ -n "$cycle_id" ] || return 1
-  fm_lock_acquire_bounded "$FM_WAKE_QUEUE_LOCK" "$attempts" "$delay" || return 2
-  status=2
-  if [ -f "$FM_WAKE_QUEUE" ]; then
-    if awk -F '\t' -v cycle="$cycle_id" 'NF >= 6 && $6 == cycle { found = 1; exit } END { exit !found }' "$FM_WAKE_QUEUE" 2>/dev/null; then
-      status=0
-    else
-      status=$?
-    fi
-  elif [ ! -e "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ]; then
-    status=1
-  fi
+# fm_wake_queued_keys <kind>
+# Print the distinct keys currently queued for <kind>, oldest first. Read under
+# the append lock so a concurrent append is never observed half-written. The
+# durable queue stays the authority: a key appears here exactly while a record
+# for it is queued and unconsumed, and disappears when a drain consumes it.
+fm_wake_queued_keys() {
+  local kind=$1
+  case "$kind" in
+    signal|stale|check|heartbeat) ;;
+    *) printf 'fm_wake_queued_keys: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
+  esac
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  fm_wake_queued_keys_locked "$kind"
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-  [ "$status" -le 1 ] || return 2
-  return "$status"
 }
 
-# fm_wake_watcher_pid_has_records <watcher-pid>
-# An owned child can deliver and exit before it becomes healthy enough for its
-# arm to read cycle-id from the lock. Its queue rows still carry the immutable
-# cycle token, whose watcher-pid prefix identifies that just-reaped child.
-# Return values match fm_wake_cycle_has_records.
-fm_wake_watcher_pid_has_records() {
-  local watcher_pid=$1 attempts=${FM_WAKE_CLASSIFY_LOCK_ATTEMPTS:-20} delay=${FM_WAKE_CLASSIFY_LOCK_DELAY:-0.05} status
-  case "$watcher_pid" in ''|*[!0-9]*) return 1 ;; esac
-  fm_lock_acquire_bounded "$FM_WAKE_QUEUE_LOCK" "$attempts" "$delay" || return 2
-  status=2
-  if [ -f "$FM_WAKE_QUEUE" ]; then
-    if awk -F '\t' -v prefix="watcher:${watcher_pid}:" 'NF >= 6 && index($6, prefix) == 1 { found = 1; exit } END { exit !found }' "$FM_WAKE_QUEUE" 2>/dev/null; then
-      status=0
-    else
-      status=$?
-    fi
-  elif [ ! -e "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ]; then
-    status=1
-  fi
-  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-  [ "$status" -le 1 ] || return 2
-  return "$status"
+fm_wake_queued_keys_locked() {
+  local kind=$1
+  awk -F '\t' -v kind="$kind" 'NF >= 5 && $3 == kind && !seen[$4]++ { print $4 }' \
+    "$FM_WAKE_QUEUE" 2>/dev/null || true
 }
 
 fm_wake_restore_queue() {
@@ -538,8 +554,8 @@ fm_wake_status_key_map() {  # <queue-key>
 }
 
 fm_wake_annotation_manifest() {  # <deduped-raw-rows>
-  local rows=$1 epoch seq kind key payload cycle_id
-  while IFS=$(printf '\t') read -r epoch seq kind key payload cycle_id; do
+  local rows=$1 epoch seq kind key payload
+  while IFS=$(printf '\t') read -r epoch seq kind key payload; do
     [ "$kind" = signal ] || continue
     fm_wake_status_key_map "$key" || continue
     if [ "$FM_WAKE_STATUS_HISTORICAL" = true ]; then

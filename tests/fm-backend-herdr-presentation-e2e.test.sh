@@ -26,9 +26,6 @@ HERDR_CALL_LOG="$TMP_ROOT/herdr-calls.log"
 TREEHOUSE_CALL_LOG="$TMP_ROOT/treehouse-calls.log"
 MOVE_CALL_LOG="$TMP_ROOT/workspace-move-calls.log"
 FOCUS_AUDIT_LOG="$TMP_ROOT/focus-audit.log"
-MACOS_ACTIVATION_LOG="$TMP_ROOT/macos-activation.log"
-MACOS_ACTIVATION_READY="$TMP_ROOT/macos-activation.ready"
-MACOS_ACTIVATION_WATCHER="$TMP_ROOT/macos-activation-watcher.swift"
 ACTIVE_SEEDED_CONTROL="$TMP_ROOT/active-seeded-control"
 POST_CREATE_ABORT_CONTROL="$TMP_ROOT/post-create-abort-control"
 mkdir -p "$FAKEBIN"
@@ -39,56 +36,6 @@ mkdir -p "$FAKEBIN"
 REAL_MOVER="$ROOT/bin/backends/herdr-workspace-move.py"
 export REAL_HERDR REAL_TREEHOUSE REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG MOVE_CALL_LOG FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
 export ACTIVE_SEEDED_CONTROL POST_CREATE_ABORT_CONTROL TMP_ROOT
-
-# Herdr's logical workspace/tab focus is distinct from macOS app activation.
-# The projection regression observes activation events across the full spawn.
-MACOS_ACTIVATION_AUDIT_ENABLED=0
-if [ "$(uname -s)" = Darwin ] \
-   && command -v osascript >/dev/null 2>&1 \
-   && command -v swift >/dev/null 2>&1 \
-   && [ -n "$(osascript -l JavaScript -e 'ObjC.import("AppKit"); $.NSWorkspace.sharedWorkspace.frontmostApplication.bundleIdentifier.js' 2>/dev/null)" ]; then
-  MACOS_ACTIVATION_AUDIT_ENABLED=1
-fi
-
-cat > "$MACOS_ACTIVATION_WATCHER" <<'SWIFT'
-import AppKit
-import Foundation
-
-guard CommandLine.arguments.count == 3 else {
-    exit(64)
-}
-
-let logPath = CommandLine.arguments[1]
-let readyPath = CommandLine.arguments[2]
-
-func appendEvent(_ kind: String, _ bundleIdentifier: String?) {
-    let line = "\(kind)\t\(bundleIdentifier ?? "")\n"
-    guard let data = line.data(using: .utf8),
-          let handle = FileHandle(forWritingAtPath: logPath) else {
-        exit(1)
-    }
-    handle.seekToEndOfFile()
-    handle.write(data)
-    try? handle.close()
-}
-
-FileManager.default.createFile(atPath: logPath, contents: Data())
-let workspace = NSWorkspace.shared
-_ = workspace.notificationCenter.addObserver(
-    forName: NSWorkspace.didActivateApplicationNotification,
-    object: nil,
-    queue: .main
-) { notification in
-    let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
-        as? NSRunningApplication
-    appendEvent("activated", application?.bundleIdentifier)
-}
-appendEvent("initial", workspace.frontmostApplication?.bundleIdentifier)
-guard FileManager.default.createFile(atPath: readyPath, contents: Data()) else {
-    exit(1)
-}
-RunLoop.main.run()
-SWIFT
 
 # Log every production-adapter call, remove its already-validated trailing
 # session flag, and send the operation through the lab helper so that helper
@@ -320,30 +267,12 @@ export HERDR_SESSION="$HERDR_LAB_SESSION" HERDR_LAB_SESSION
 LAB_READY=0
 RECORDED_WORKTREES=""
 LOCK_CONTENTION_OWNER_PID=
-MACOS_ACTIVATION_WATCH_PID=
-RESTART_RECOVERY_LOCK_OWNER_PID=
-RESTART_RECOVERY_PID=
 cleanup_all() {
   local wt
-  if [ -n "$MACOS_ACTIVATION_WATCH_PID" ]; then
-    kill "$MACOS_ACTIVATION_WATCH_PID" 2>/dev/null || true
-    wait "$MACOS_ACTIVATION_WATCH_PID" 2>/dev/null || true
-    MACOS_ACTIVATION_WATCH_PID=
-  fi
   if [ -n "$LOCK_CONTENTION_OWNER_PID" ]; then
     kill "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null || true
     wait "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null || true
     LOCK_CONTENTION_OWNER_PID=
-  fi
-  if [ -n "$RESTART_RECOVERY_PID" ]; then
-    kill "$RESTART_RECOVERY_PID" 2>/dev/null || true
-    wait "$RESTART_RECOVERY_PID" 2>/dev/null || true
-    RESTART_RECOVERY_PID=
-  fi
-  if [ -n "$RESTART_RECOVERY_LOCK_OWNER_PID" ]; then
-    kill "$RESTART_RECOVERY_LOCK_OWNER_PID" 2>/dev/null || true
-    wait "$RESTART_RECOVERY_LOCK_OWNER_PID" 2>/dev/null || true
-    RESTART_RECOVERY_LOCK_OWNER_PID=
   fi
   while IFS= read -r wt; do
     [ -n "$wt" ] || continue
@@ -360,11 +289,6 @@ EOF
   rm -rf "$TMP_ROOT"
 }
 trap cleanup_all EXIT
-
-if [ "${FM_REQUIRE_MACOS_FOCUS_AUDIT:-0}" = 1 ] \
-   && [ "$MACOS_ACTIVATION_AUDIT_ENABLED" != 1 ]; then
-  fail "required macOS NSWorkspace activation audit is unavailable"
-fi
 
 PATH="$HERDR_ORIGINAL_PATH" \
   "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
@@ -404,42 +328,6 @@ assert_focus_is() {  # <expected> <case-name>
 }
 
 focus_audit_line_count() { wc -l < "$FOCUS_AUDIT_LOG" | tr -d '[:space:]'; }
-
-start_macos_activation_watch() {
-  local attempt=0
-  [ "$MACOS_ACTIVATION_AUDIT_ENABLED" = 1 ] || return 0
-  : > "$MACOS_ACTIVATION_LOG"
-  rm -f "$MACOS_ACTIVATION_READY"
-  swift "$MACOS_ACTIVATION_WATCHER" \
-    "$MACOS_ACTIVATION_LOG" "$MACOS_ACTIVATION_READY" \
-    > "$TMP_ROOT/macos-activation-watcher.out" 2>&1 &
-  MACOS_ACTIVATION_WATCH_PID=$!
-  while [ ! -e "$MACOS_ACTIVATION_READY" ] && [ "$attempt" -lt 100 ]; do
-    kill -0 "$MACOS_ACTIVATION_WATCH_PID" 2>/dev/null \
-      || fail "macOS activation watcher exited before readiness: $(cat "$TMP_ROOT/macos-activation-watcher.out")"
-    sleep 0.1
-    attempt=$((attempt + 1))
-  done
-  [ -e "$MACOS_ACTIVATION_READY" ] \
-    || fail "macOS activation watcher did not become ready"
-}
-
-assert_macos_activation_preserved() {  # <case-name>
-  local case_name=$1 initial changed
-  [ "$MACOS_ACTIVATION_AUDIT_ENABLED" = 1 ] || return 0
-  sleep 2
-  kill "$MACOS_ACTIVATION_WATCH_PID" 2>/dev/null \
-    || fail "macOS activation watcher was not running through the settle window"
-  wait "$MACOS_ACTIVATION_WATCH_PID" 2>/dev/null || true
-  MACOS_ACTIVATION_WATCH_PID=
-  initial=$(awk -F '\t' '$1 == "initial" { print $2; exit }' "$MACOS_ACTIVATION_LOG")
-  [ -n "$initial" ] || fail "$case_name activation watcher did not capture the initial macOS app"
-  changed=$(awk -F '\t' -v initial="$initial" '
-    $1 == "activated" && ($2 == "" || $2 != initial) { print $0 }
-  ' "$MACOS_ACTIVATION_LOG")
-  [ -z "$changed" ] \
-    || fail "$case_name activated a different macOS app during spawn or settle: $changed"
-}
 
 assert_raw_presentation_mutations_preserved_since() {  # <line-count> <case-name>
   local start=$1 case_name=$2 changed
@@ -494,15 +382,13 @@ make_project() {  # <dir>
 
 spawn_task() {  # <id> <home> <project>
   local id=$1 home=$2 project=$3
-  FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 \
-    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'sleep 120'" --backend herdr
+  FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'sleep 120'" --mode no-mistakes --yolo off --backend herdr
 }
 
 spawn_secondmate_task() {
   local id=$1 home=$2
-  FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 \
-    FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$home" "sh -c 'sleep 120'" --secondmate --backend herdr
 }
 
@@ -632,10 +518,8 @@ assert_focus_is "$CAPTAIN_FOCUS" "focused secondmate fixture"
 : > "$TREEHOUSE_CALL_LOG"
 : > "$HOME_DIR/config/herdr-presentation-spaces"
 SHAPE_FOCUS_AUDIT_START=$(focus_audit_line_count)
-start_macos_activation_watch
 spawn_task shape "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/on.out" 2> "$TMP_ROOT/on.err" \
   || fail "projected spawn failed: $(cat "$TMP_ROOT/on.err")"
-assert_macos_activation_preserved "projected spawn"
 assert_focus_is "$CAPTAIN_FOCUS" "projected spawn"
 assert_raw_presentation_mutations_preserved_since "$SHAPE_FOCUS_AUDIT_START" "projected spawn"
 ON_META="$TMP_ROOT/on.meta"
@@ -1205,58 +1089,8 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
     fail "$RESTART_ID restart fixture unexpectedly retained a registered agent"
   fi
   RECLAIM_FOCUS=$(focus_snapshot)
-  if [ "$RESTART_ID" = fm-hibit-resume-r1 ]; then
-    RESTART_RECOVERY_LOCK_READY="$TMP_ROOT/restart-recovery-lock-ready"
-    RESTART_RECOVERY_LOCK_ATTEMPTED="$TMP_ROOT/restart-recovery-lock-attempted"
-    RESTART_RECOVERY_LOCK_RELEASE="$TMP_ROOT/restart-recovery-lock-release"
-    RESTART_RECOVERY_LOCK_PATH=$(session_presentation_lock_path) \
-      || fail "could not resolve the session lock for restart recovery"
-    ROOT="$ROOT" READY="$RESTART_RECOVERY_LOCK_READY" ATTEMPTED="$RESTART_RECOVERY_LOCK_ATTEMPTED" RELEASE="$RESTART_RECOVERY_LOCK_RELEASE" LOCK="$RESTART_RECOVERY_LOCK_PATH" bash -c '
-      . "$ROOT/bin/fm-wake-lib.sh"
-      fm_lock_try_acquire "$LOCK" || exit 1
-      owner=$(readlink "$LOCK") || exit 1
-      holder=${BASHPID:-$$}
-      cleanup_owner() {
-        if [ -p "$owner/pid" ]; then
-          printf "%s\n" "$holder" > "$owner/pid.next"
-          mv -f "$owner/pid.next" "$owner/pid"
-        fi
-        fm_lock_release "$LOCK"
-      }
-      trap cleanup_owner EXIT
-      trap "exit 143" HUP INT TERM
-      rm -f "$owner/pid"
-      mkfifo "$owner/pid" || exit 1
-      : > "$READY"
-      printf "%s\n" "$holder" > "$owner/pid"
-      printf "%s\n" "$holder" > "$owner/pid.next"
-      mv -f "$owner/pid.next" "$owner/pid"
-      : > "$ATTEMPTED"
-      while [ ! -e "$RELEASE" ]; do sleep 0.05; done
-      fm_lock_release "$LOCK"
-      trap - EXIT
-    ' &
-    RESTART_RECOVERY_LOCK_OWNER_PID=$!
-    while [ ! -e "$RESTART_RECOVERY_LOCK_READY" ] && kill -0 "$RESTART_RECOVERY_LOCK_OWNER_PID" 2>/dev/null; do sleep 0.01; done
-    [ -e "$RESTART_RECOVERY_LOCK_READY" ] || fail "could not hold the session lock for restart recovery"
-    spawn_task "$RESTART_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/$RESTART_ID-reclaim.out" 2> "$TMP_ROOT/$RESTART_ID-reclaim.err" &
-    RESTART_RECOVERY_PID=$!
-    while [ ! -e "$RESTART_RECOVERY_LOCK_ATTEMPTED" ] \
-      && kill -0 "$RESTART_RECOVERY_LOCK_OWNER_PID" 2>/dev/null \
-      && kill -0 "$RESTART_RECOVERY_PID" 2>/dev/null; do sleep 0.01; done
-    [ -e "$RESTART_RECOVERY_LOCK_ATTEMPTED" ] \
-      || fail "restart recovery did not attempt the held session lock"
-    sleep 6
-    : > "$RESTART_RECOVERY_LOCK_RELEASE"
-    wait "$RESTART_RECOVERY_LOCK_OWNER_PID" || fail "restart-recovery lock owner failed"
-    RESTART_RECOVERY_LOCK_OWNER_PID=
-    wait "$RESTART_RECOVERY_PID" \
-      || fail "$RESTART_ID reclaim gave up before the delayed session lock was released: $(cat "$TMP_ROOT/$RESTART_ID-reclaim.err")"
-    RESTART_RECOVERY_PID=
-  else
-    spawn_task "$RESTART_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/$RESTART_ID-reclaim.out" 2> "$TMP_ROOT/$RESTART_ID-reclaim.err" \
-      || fail "$RESTART_ID same-identity reclaim failed: $(cat "$TMP_ROOT/$RESTART_ID-reclaim.err")"
-  fi
+  spawn_task "$RESTART_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/$RESTART_ID-reclaim.out" 2> "$TMP_ROOT/$RESTART_ID-reclaim.err" \
+    || fail "$RESTART_ID same-identity reclaim failed: $(cat "$TMP_ROOT/$RESTART_ID-reclaim.err")"
   NEW_RESTART_WT=$(remember_meta_worktree "$RESTART_META")
   NEW_RESTART_WSID=$(grep '^herdr_workspace_id=' "$RESTART_META" | cut -d= -f2-)
   NEW_RESTART_PANE=$(grep '^herdr_pane_id=' "$RESTART_META" | cut -d= -f2-)

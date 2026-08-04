@@ -1,16 +1,6 @@
 #!/usr/bin/env bash
 # Render the primary-harness supervision operating block for session start and
 # the short repair line used by guards and turn-end hooks.
-#
-# --repair-line callers differ in what they have established. A pull-based
-# caller (bin/fm-guard.sh, bin/fm-bootstrap.sh) runs mid-turn and knows only
-# that no watcher is live right now; a turn-boundary caller
-# (bin/fm-turnend-guard.sh) has additionally established that the harness's own
-# arming owner did not claim this home, and passes --owner-absent 1 to say so.
-# The distinction matters because a harness whose arming owner runs at the turn
-# boundary parks the watcher for the whole handling turn by design: demanding a
-# manual arm there would create a SECOND arming owner whose cycle then collides
-# with the owner's own (docs/watcher-continuity.md "Ownership").
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,17 +16,13 @@ AFK=0
 X_MODE=0
 REPAIR_LINE=0
 QUEUE_PENDING=0
-OWNER_ABSENT=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--x-mode 0|1] [--repair-line] [--queue-pending 0|1] [--owner-absent 0|1]
+Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--x-mode 0|1] [--repair-line] [--queue-pending 0|1]
 
 Print the current primary harness's supervision operating instructions.
 With --repair-line, print one concise repair instruction for guard and hook messages.
-Pass --owner-absent 1 only when the caller has established that this harness's own
-arming owner did not claim the home; the default 0 keeps a mid-turn caller from
-asking the model to start a second arming owner.
 EOF
 }
 
@@ -77,11 +63,6 @@ while [ "$#" -gt 0 ]; do
     --repair-line)
       REPAIR_LINE=1
       shift
-      ;;
-    --owner-absent)
-      [ "$#" -gt 1 ] || { echo "error: --owner-absent requires 0 or 1" >&2; exit 2; }
-      OWNER_ABSENT=$(bool_value "$2")
-      shift 2
       ;;
     -h|--help)
       usage
@@ -148,23 +129,13 @@ repair_line() {
   if [ "$QUEUE_PENDING" -eq 1 ]; then
     prefix='After draining queued wakes, '
   fi
-
-  # Claude's arming owner is the Stop hook, so between a wake and the next turn
-  # end the watcher is parked on purpose. A caller that has not established the
-  # owner absent must not ask for a manual arm here: that second owner is what
-  # produced colliding cycles and false failure alarms.
-  if [ "$HARNESS" = claude ] && [ "$OWNER_ABSENT" -eq 0 ]; then
-    printf '%s%s\n' "$prefix" 'watcher supervision is parked until this turn ends; the Stop-owned auto-arm (bin/fm-claude-stop-autoarm.sh) starts the next cycle then - do not arm one yourself.'
-    return 0
-  fi
-
   if [ "$X_MODE" -eq 1 ]; then
     prefix="${prefix}source ${x_mode_env_sh} first, then "
   fi
 
   case "$HARNESS" in
     claude)
-      printf '%s%s\n' "$prefix" 'repair missing watcher supervision with bin/fm-watch-arm.sh as its own Claude Code background task, never shell &.'
+      printf '%s%s\n' "$prefix" 'watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.'
       ;;
     codex)
       printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds ' "$checkpoint_seconds" '.'
@@ -207,32 +178,6 @@ ordinary_wake_line() {
   esac
 }
 
-direct_lifecycle_line() {
-  local capacity capacity_file="$CONFIG/supervision-capacity"
-  if [ "$READ_ONLY" -eq 1 ]; then
-    printf '%s\n' '- Direct lifecycle: unavailable in this read-only session; preserve every lane without merge, teardown, or refill.'
-    return 0
-  fi
-  if [ -e "$capacity_file" ] || [ -L "$capacity_file" ]; then
-    if [ ! -f "$capacity_file" ] || [ ! -r "$capacity_file" ] \
-      || ! capacity=$(<"$capacity_file"); then
-      printf '%s%s%s\n' '- Direct lifecycle: ' "$capacity_file" ' is invalid; complete guarded closeout before the next wait or turn boundary, but do not refill until the capacity source contains one integer from 1 through 64.'
-      return 0
-    fi
-    case "$capacity" in
-      [1-9]|[1-5][0-9]|6[0-4])
-        ;;
-      *)
-        printf '%s%s%s\n' '- Direct lifecycle: ' "$capacity_file" ' is invalid; complete guarded closeout before the next wait or turn boundary, but do not refill until the capacity source contains one integer from 1 through 64.'
-        return 0
-        ;;
-    esac
-    printf '%s%s%s\n' '- Direct lifecycle: before the next wait or turn boundary, complete the AGENTS.md section 8 transaction: reconcile terminal work, use the guarded landing owner for its task mode, teardown only after landed proof, and launch eligible ready work to configured capacity ' "$capacity" ' while preserving every gated or ambiguous lane.'
-    return 0
-  fi
-  printf '%s\n' '- Direct lifecycle: before the next wait or turn boundary, complete the AGENTS.md section 8 transaction: reconcile terminal work, use the guarded landing owner for its task mode, teardown only after landed proof, and launch eligible ready work to the applicable captain-recorded capacity while preserving every gated or ambiguous lane and imposing no arbitrary cap when none applies.'
-}
-
 if [ "$REPAIR_LINE" -eq 1 ]; then
   repair_line
   exit 0
@@ -259,7 +204,6 @@ else
   printf '%s\n' '- X mode: inactive; use the default watcher cadence.'
 fi
 ordinary_wake_line
-direct_lifecycle_line
 printf '\n'
 render_snippet
 printf '\n'

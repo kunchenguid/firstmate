@@ -127,7 +127,10 @@ The same run proved the Claude-compatible Stop entries stay inert under `GROK_AG
 
 The secondmate-home scope and manual-repair wake path were measured with Claude Code 2.1.207 on 2026-07-12, when a native background completion re-invoked the idle model with no human input.
 The current Stop-owned main/secondmate inclusion and child-worktree exclusion are covered deterministically by `tests/fm-claude-stop-autoarm.test.sh`.
-On 2026-07-28 with Claude Code 2.1.205, `fm_harness_ancestry_pid()` in `bin/fm-session-lock-lib.sh` was fixed to resolve the outermost pid of a contiguous nested-harness run instead of the first match, so the Stop auto-arm correctly reaches the session's true lock owner through Claude Code's multi-level `bg-spare` hook worker chain.
+Session-lock ownership in `bin/fm-session-lock-lib.sh` is decided against a session's whole contiguous harness ancestry rather than one chosen pid, so the Stop auto-arm reaches its lock owner wherever that owner sits: the outermost pid of Claude Code's multi-level `bg-spare` hook worker chain, or an inner pid when a harness-named daemon parents the session.
+Harness identity is read from the executable path and `argv[0]` as well as the command basename, because Claude Code's native installer names the per-session executable by its version (`.../share/claude/versions/2.1.220`): `ps -o comm=` reports that path on macOS and the bare version string on Linux, and neither basename names a harness.
+`tests/fm-session-lock-ancestry.test.sh` pins both platforms' reporting semantics behind a deterministic process table and runs the real Stop auto-arm in version-named, daemon-parented, and combined real process trees.
+`tests/fm-watch-arm.test.sh` runs a real watcher and attached arm to verify that a delivered reason survives queue draining, while an unrelated queue append cannot make a watcher cycle that delivered nothing look successful.
 
 The Claude product live path ran with Claude Code 2.1.219 on 2026-07-24:
 
@@ -152,47 +155,44 @@ FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 FM_GROK_STOP_LIVE_E2E=1 FM_GROK_NATIVE_BIN="$native_grok" FM_GROK_LEGACY_BIN="$pre_native_grok" tests/fm-grok-stop-live-e2e.test.sh
 ```
 
-## Direct closeout and capacity refill
-
-The pure-upstream baseline `b29621ba19a4d15b688ae277ca06b67f80baa365` was audited on 2026-07-27.
-At that baseline, an ordinary terminal wake did not initiate a complete guarded landing, teardown, and ready-work refill transaction.
-Manual operator intervention could mask the missing transaction, while the visible unattended symptom was a completed metadata record retaining capacity and eligible work remaining unlaunched.
-The upstream renderer emitted no direct-lifecycle instruction for Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, or the unknown-harness fallback.
-The production scripts had no ordinary-terminal caller of `bin/fm-teardown.sh`, and their only non-batch caller of `bin/fm-spawn.sh` was bootstrap recovery for a secondmate.
-Either an existing cross-harness transaction instruction or an ordinary-terminal production caller would have disconfirmed the finding, but neither existed.
-
-The smallest current carry is commit `9d45f011cd17b45d4ed4d0f99ecd75bc0c4b2cdf`, which changes only `AGENTS.md`, `bin/fm-supervision-instructions.sh`, `docs/configuration.md`, and `tests/fm-supervision-instructions.test.sh`.
-It makes every mutable primary wake own one closeout-and-refill transaction, preserves read-only and ambiguous lanes, uses the existing guarded landing and teardown owners, and fails refill closed when an optional local capacity source is invalid.
-It does not add a coordinator, daemon, teardown implementation, migration, or runtime-backend mechanism.
-Per Firstmate's 2026-07-27 decision `[key=upstream-closeout-refill]` under the captain's pure-upstream rule, this commit is a temporary local carry required by the fleet and a queued upstream proposal, not a permanent fork delta.
-The clean contribution shape is a fresh topic from current canonical upstream proposed back to canonical upstream, never to the old fork `main`, with this dependency-free commit plus the end-to-end regression followed by the current changed-path and full validation gates.
-
-Focused verification commands:
+The Claude auto-arm false-failure, guard-predicate, and monotonic bounded fail-open correction was verified on 2026-08-02 with the installed ShellCheck 0.11.0 and isolated behavior suites.
 
 ```sh
-bin/fm-test-run.sh \
-  tests/fm-supervision-instructions.test.sh \
-  tests/fm-instruction-owners.test.sh \
-  tests/fm-documentation-audiences.test.sh
-bin/fm-doc-audience-check.sh
 bin/fm-lint.sh
-bin/fm-test-run.sh tests/fm-direct-lifecycle.test.sh
+bin/fm-doc-audience-check.sh
+bin/fm-test-run.sh tests/fm-claude-stop-autoarm.test.sh tests/fm-guard-stale-banner.test.sh tests/fm-turnend-guard.test.sh tests/fm-supervision-instructions.test.sh
 ```
 
-Observed results:
+Observed output:
 
 ```text
-ok - every primary harness and fallback render one guarded closeout-and-refill transaction
-ok - direct lifecycle capacity accepts 1-64 and rejects invalid forms without diagnostics
-ok - all instruction-owner tests passed
-ok - all documentation-audience tests passed
-fm-doc-audience-check: ok surfaces=55 local_links=151
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
-ok - routine PR work lands on default, cleans safely, and visibly refills in one transaction
-ok - local-only yolo work uses its guarded owner and refills to configured capacity
-ok - unlanded work fails closed and remains recoverable
-ok - captain-gated completed work remains parked without merge or cleanup
-# all direct lifecycle tests passed
+fm-doc-audience-check: ok surfaces=61 local_links=174
+FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=102585
+```
+
+The broader relevant regression pass was rerun on 2026-08-02 without live-home or daemon mutation.
+
+```sh
+bin/fm-test-run.sh tests/fm-watch-triage.test.sh tests/fm-watcher-lock.test.sh tests/fm-afk-inject-e2e.test.sh tests/fm-afk-return.test.sh tests/fm-x-mode.test.sh tests/fm-backend.test.sh tests/fm-backend-tmux-smoke.test.sh tests/fm-secondmate-safety.test.sh
+```
+
+Observed output:
+
+```text
+FM_TEST_SUMMARY total=8 failed=0 skipped_gate=0 duration_ms=617507
+```
+
+The actionable-close ordering correction was reverified on 2026-08-02 against an identity-matched live successor.
+
+```sh
+tests/fm-claude-stop-autoarm.test.sh >/dev/null && echo "fm-claude-stop-autoarm: ok"
+```
+
+Observed output:
+
+```text
+fm-claude-stop-autoarm: ok
 ```
 
 ## Watcher continuity
@@ -230,70 +230,16 @@ Observed guarantee: after ordinary `session_shutdown` for `/new`, `/resume`, and
 Stale prior-generation tool callbacks could not mutate the active child, repeated transitions kept exactly one live arm cycle, and terminal `quit` still refused late rearm.
 Plain Pi and pi-signed share the same tracked `.pi/extensions/fm-primary-pi-watch.ts` path, so both inherit the generation owner; other primary harnesses are not applicable because they do not use this Pi extension lifecycle.
 
-`tests/fm-session-owner-fence.test.sh` verifies direct watcher and arm refusal under a foreign live owner, serialized restart isolation, process-identity reuse rejection, attached-successor rechecks, cross-harness handoff, dead-owner recovery, and the away-mode exemption.
-
-### Single arming owner
-
-Verified on 2026-08-02 with Claude Code 2.1.220 and ShellCheck 0.11.0, against isolated home state under `/tmp`; no live home, watcher, or fleet record was used.
-
-The mid-turn pull-based guard must name the arming owner rather than ask a Claude primary for a manual arm, because a second arm becomes a second relay:
-
-```sh
-mkdir -p /tmp/fmverify/state /tmp/fmverify/config /tmp/fmverify/root
-: > /tmp/fmverify/state/task.meta
-CLAUDECODE=1 PI_CODING_AGENT= GROK_AGENT= FM_ROOT_OVERRIDE=/tmp/fmverify/root \
-  FM_HOME=/tmp/fmverify FM_GUARD_GRACE=1 bin/fm-guard.sh
-```
-
-Observed final banner line, with no `bin/fm-watch-arm.sh` anywhere in the output:
-
-```text
-●  watcher supervision is parked until this turn ends; the Stop-owned auto-arm (bin/fm-claude-stop-autoarm.sh) starts the next cycle then - do not arm one yourself.
-```
-
-The turn-end guard is the one caller that has established the owner absent, and it still gets the manual-recovery instruction:
-
-```sh
-bin/fm-supervision-instructions.sh --harness claude --owner-absent 1 --repair-line
-```
-
-```text
-repair missing watcher supervision with bin/fm-watch-arm.sh as its own Claude Code background task, never shell &.
-```
-
-Deterministic entry points, all passing at this revision:
+Deterministic entry points:
 
 ```sh
 tests/fm-pi-watch-extension.test.sh
 tests/fm-pi-primary-types.test.sh
-tests/fm-session-owner-fence.test.sh
 tests/fm-watcher-lock.test.sh
 tests/fm-subagent-pretool-check.test.sh
 tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
-tests/fm-supervision-instructions.test.sh
 ```
-
-## Pure Kun presentation parity
-
-The Firstmate Pure Kun presentation was verified on 2026-07-28 with Pi 0.82.0.
-[The README's Pi launch guidance](../../README.md#install-and-launch) owns the current user-visible presentation contract.
-The tracked implementation uses Pi's native theme, footer-data, context-usage, session-branch, extension-status, and terminal-title APIs.
-
-Exact commands and output:
-
-```text
-pi --version
-0.82.0
-
-FM_PI_PACKAGE_DIR="$(npm root -g)/@earendil-works/pi-coding-agent" tests/fm-pi-primary-types.test.sh
-ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.82.0
-ok - Firstmate Pi footer preserves fields, statuses, and cumulative native usage
-ok - Pi 0.82.0 real TUI rendered the Firstmate footer and retained its project/branch/model title
-```
-
-The focused Pi presentation test resolves the installed compiler and Pi package through the npm environment, covers narrow, medium, and wide footer layouts, asserts that every complete native field and status value remains represented without overflow, verifies cumulative usage across every Pi 0.82.0 usage-bearing entry type, and checks stable single-line keyed status rendering.
-Its offline real-TUI check launches only the tracked footer extension, confirms the themed footer renders without provider traffic, and reads tmux's terminal title after startup to verify the project, branch, and model title survives Pi's default rebind update.
 
 ## Wedge-alarm channels
 

@@ -9,4 +9,3 @@ __pycache__/
 *.pyc
 .env
 config/
-ops-inbox/

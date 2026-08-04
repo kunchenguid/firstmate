@@ -68,31 +68,14 @@ case "${1:-}" in
     case "${1:-}" in
       status)
         shift
-        if [ "${1:-}" = --run ]; then
-          printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
-        elif [ -n "${FM_FAKE_AXI_STATUS_COUNT_FILE:-}" ]; then
-          count=$(cat "$FM_FAKE_AXI_STATUS_COUNT_FILE" 2>/dev/null || printf 0)
-          count=$((count + 1))
-          printf '%s\n' "$count" > "$FM_FAKE_AXI_STATUS_COUNT_FILE"
-          if [ "$count" -eq 1 ]; then
-            printf '%s\n' "${FM_FAKE_AXI_STATUS_FIRST:-}"
-          else
-            printf '%s\n' "${FM_FAKE_AXI_STATUS_SECOND:-}"
-          fi
-        else
-          printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"
-        fi
-        exit "${FM_FAKE_AXI_STATUS_RC:-0}" ;;
+        if [ "${1:-}" = --run ]; then printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
+        else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
       logs)
         printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
     esac
     ;;
   runs)
-    if [ "${FM_FAKE_RUNS_TERM:-0}" = 1 ]; then
-      kill -TERM "$$"
-    fi
-    printf '%s\n' "${FM_FAKE_RUNS_LIST:-}"
-    exit "${FM_FAKE_RUNS_RC:-0}" ;;
+    printf '%s\n' "${FM_FAKE_RUNS_LIST:-}" ;;
 esac
 exit 0
 SH
@@ -160,10 +143,6 @@ run_crew_state() {  # <case-dir> <id>
   PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
 }
 
-run_crew_validation() {  # <case-dir> <id>
-  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" --validation-lane "$2"
-}
-
 new_case() {  # <name> -> echoes case dir with an empty state/
   local d="$TMP_ROOT/$1"
   mkdir -p "$d/state"
@@ -191,14 +170,8 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
-  FM_FAKE_AXI_STATUS_COUNT_FILE=
-  FM_FAKE_AXI_STATUS_FIRST=
-  FM_FAKE_AXI_STATUS_SECOND=
-  FM_FAKE_AXI_STATUS_RC=0
-  FM_FAKE_RUNS_RC=0
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
-  export FM_FAKE_AXI_STATUS_COUNT_FILE FM_FAKE_AXI_STATUS_FIRST FM_FAKE_AXI_STATUS_SECOND FM_FAKE_AXI_STATUS_RC FM_FAKE_RUNS_RC
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -711,106 +684,6 @@ test_terminal_failed() {
   pass "terminal failed run is authoritative"
 }
 
-test_validation_lane_record_binds_full_run_identity() {
-  reset_fakes
-  local d short out
-  d=$(new_case validation-lane-full)
-  make_repo_on_branch "$d/wt" fm/feat-lane-full
-  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/lane-full.meta" "window=fm:fm-lane-full" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-lane-full)"
-  FM_FAKE_RUNS_LIST="completed fm/feat-lane-full ${short} 2026-08-01 12:00"
-  out=$(run_crew_validation "$d" lane-full)
-  [ "$out" = $'fm-crew-validation-v2\nstate=done\nsource=run-step\nrun-kind=full\nrun-id=01RUN\nrun-start=2026-08-01T12:00#1' ] \
-    || fail "validation lane record did not expose the full run identity (got: $out)"
-  pass "validation lane record binds full identity and run-start evidence"
-}
-
-test_validation_lane_record_marks_coarse_run_without_identity() {
-  reset_fakes
-  local d short out
-  d=$(new_case validation-lane-coarse)
-  make_repo_on_branch "$d/wt" fm/feat-lane-coarse
-  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/lane-coarse.meta" "window=fm:fm-lane-coarse" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  FM_FAKE_RUNS_LIST="running fm/feat-lane-coarse ${short} 2026-08-01 12:00"
-  out=$(run_crew_validation "$d" lane-coarse)
-  [ "$out" = $'fm-crew-validation-v2\nstate=working\nsource=run-step\nrun-kind=coarse\nrun-id=\nrun-start=2026-08-01T12:00#1' ] \
-    || fail "validation lane record did not preserve coarse evidence (got: $out)"
-  pass "validation lane record marks coarse run evidence without inventing identity"
-}
-
-test_validation_lane_record_starts_unavailable_identity() {
-  reset_fakes
-  local d short out
-  d=$(new_case validation-lane-unavailable)
-  make_repo_on_branch "$d/wt" fm/feat-lane-unavailable
-  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/lane-unavailable.meta" "window=fm:fm-lane-unavailable" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS=$(run_passed fm/feat-lane-unavailable | grep -v '^  id:')
-  FM_FAKE_RUNS_LIST="completed fm/feat-lane-unavailable ${short} 2026-08-01 12:00"
-  out=$(run_crew_validation "$d" lane-unavailable)
-  [ "$out" = $'fm-crew-validation-v2\nstate=done\nsource=run-step\nrun-kind=unavailable\nrun-id=\nrun-start=2026-08-01T12:00#1' ] \
-    || fail "validation lane record lost run-start evidence for unavailable identity (got: $out)"
-  pass "validation lane record preserves run-start evidence without identity"
-}
-
-test_validation_lane_record_distinguishes_same_minute_runs() {
-  reset_fakes
-  local d short out
-  d=$(new_case validation-lane-same-minute)
-  make_repo_on_branch "$d/wt" fm/feat-lane-same-minute
-  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/lane-same-minute.meta" "window=fm:fm-lane-same-minute" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  FM_FAKE_RUNS_LIST=$(printf 'completed fm/feat-lane-same-minute %s 2026-08-01 12:00\ncompleted fm/feat-lane-same-minute %s 2026-08-01 12:00' "$short" "$short")
-  out=$(run_crew_validation "$d" lane-same-minute)
-  [ "$out" = $'fm-crew-validation-v2\nstate=done\nsource=run-step\nrun-kind=coarse\nrun-id=\nrun-start=2026-08-01T12:00#2' ] \
-    || fail "validation lane record did not distinguish same-minute runs (got: $out)"
-  pass "validation lane record distinguishes same-minute coarse run starts"
-}
-
-test_validation_lane_rejects_changing_full_run_snapshot() {
-  reset_fakes
-  local d short out
-  d=$(new_case validation-lane-changing-snapshot)
-  make_repo_on_branch "$d/wt" fm/feat-lane-changing
-  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/lane-changing.meta" "window=fm:fm-lane-changing" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS_COUNT_FILE="$d/status-count"
-  FM_FAKE_AXI_STATUS_FIRST="$(run_passed fm/feat-lane-changing)"
-  FM_FAKE_AXI_STATUS_SECOND="$(run_running fm/feat-lane-changing | sed 's/01RUN/02RUN/')"
-  FM_FAKE_RUNS_LIST="running fm/feat-lane-changing ${short} 2026-08-01 12:01"
-  out=$(run_crew_validation "$d" lane-changing)
-  assert_contains "$out" "run-kind=unavailable" "changing full-run snapshot was not rejected"
-  assert_not_contains "$out" "run-start=2026" "changing full-run snapshot retained mixed start evidence"
-  assert_not_contains "$out" "source=run-step" "changing full-run snapshot retained stale terminal state"
-  pass "validation lane rejects a changing full-run snapshot"
-}
-
-test_validation_lane_distinguishes_runs_failure_from_absence() {
-  reset_fakes
-  local d out
-  d=$(new_case validation-lane-runs-failure)
-  make_repo_on_branch "$d/wt" fm/feat-lane-runs-failure
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/lane-runs-failure.meta" "window=fm:fm-lane-runs-failure" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  FM_FAKE_RUNS_RC=7
-  out=$(run_crew_validation "$d" lane-runs-failure)
-  assert_contains "$out" "run-kind=unavailable" "failed runs lookup was classified as absent"
-  FM_FAKE_RUNS_RC=0
-  out=$(run_crew_validation "$d" lane-runs-failure)
-  assert_contains "$out" "run-kind=absent" "successful empty runs lookup was not affirmative absence"
-  pass "validation lane distinguishes runs lookup failure from absence"
-}
-
 # (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
 # routine case once more than one crew validates the same underlying repo
 # concurrently - they share ONE no-mistakes repo registration), so the helper
@@ -994,7 +867,7 @@ test_no_run_herdr_unknown_uses_backend_capture() {
 
 # Regression (2026-07 herdr false-surface incident, now solved semantically):
 # herdr's agent.get reports generation state ("working" only while the model is
-# actively streaming - docs/herdr-backend.md "Current transport behavior"), not "this crew's
+# actively streaming - docs/herdr-backend.md "Busy state"), not "this crew's
 # turn is still in progress". A crew blocked on its own long-running foreground
 # `no-mistakes axi run` (no --yes; blocks until a gate or outcome) is not
 # generating for that whole span, so agent.get reads idle. The crew's own
@@ -1243,23 +1116,6 @@ SH
   pass "no timeout command uses perl bound"
 }
 
-test_perl_bound_preserves_signaled_runs_failure() {
-  reset_fakes
-  local d toolbin out
-  d=$(new_case signaled-runs)
-  make_repo_on_branch "$d/wt" fm/feat-signaled-runs
-  make_fakebin "$d" >/dev/null
-  toolbin=$(make_no_timeout_toolbin "$d")
-  fm_write_meta "$d/state/feat-signaled-runs.meta" "window=fm:fm-feat-signaled-runs" \
-    "worktree=$d/wt" "kind=ship" "harness=claude"
-  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  out=$(FM_FAKE_RUNS_TERM=1 PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" \
-    "$CREW_STATE" --validation-lane feat-signaled-runs)
-  assert_contains "$out" "run-kind=unavailable" "signaled runs lookup was not unavailable"
-  assert_not_contains "$out" "run-kind=absent" "signaled runs lookup was classified as absent"
-  pass "perl bound preserves signaled runs lookup failure"
-}
-
 # (i) kind=scout skips the run lookup entirely (its deliverable is a report).
 test_scout_skips_run_lookup() {
   reset_fakes
@@ -1473,12 +1329,6 @@ test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
-test_validation_lane_record_binds_full_run_identity
-test_validation_lane_record_marks_coarse_run_without_identity
-test_validation_lane_record_starts_unavailable_identity
-test_validation_lane_record_distinguishes_same_minute_runs
-test_validation_lane_rejects_changing_full_run_snapshot
-test_validation_lane_distinguishes_runs_failure_from_absence
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
@@ -1498,7 +1348,6 @@ test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
-test_perl_bound_preserves_signaled_runs_failure
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_missing_meta

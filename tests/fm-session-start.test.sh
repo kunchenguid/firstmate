@@ -6,7 +6,7 @@
 # Coverage:
 #   - absent-file markers vs empty-but-present files in the context digest
 #   - the lock-refusal read-only path: banner leads, every mutating step is
-#     skipped (including bootstrap's six mutating sweeps, verified by their
+#     skipped (including bootstrap's five mutating sweeps, verified by their
 #     ABSENCE), the digest still completes
 #   - output section ordering: diagnostics/banners lead, bulk file dumps follow
 #   - context-aware next-step guidance for read-only, AFK, X mode, and normal
@@ -231,8 +231,6 @@ make_fake_tmux_secondmate_recovery() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
-# shellcheck source=/dev/null
-. "$(dirname "$0")/pane-shell.sh"
 mode=${FM_FAKE_TMUX_MODE:?}
 log=${FM_FAKE_TMUX_LOG:?}
 spawned=${FM_FAKE_TMUX_SPAWNED:?}
@@ -306,20 +304,11 @@ case "${1:-}" in
     printf '%%1\n'
     exit 0
     ;;
-  set-window-option) exit 0 ;;
-  capture-pane)
-    fm_fake_pane_capture
-    exit 0
-    ;;
-  send-keys)
-    fm_fake_pane_send "$@"
-    exit 0
-    ;;
+  set-window-option|send-keys) exit 0 ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_pane_shell "$fakebin"
 }
 
 make_fake_herdr_secondmate_recovery() {
@@ -330,8 +319,6 @@ make_fake_herdr_secondmate_recovery() {
   cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
-# shellcheck source=/dev/null
-. "$(dirname "$0")/pane-shell.sh"
 log=${FM_FAKE_HERDR_LOG:?}
 state=${FM_FAKE_HERDR_STATE:?}
 mate_id=${FM_FAKE_SECOND_MATE_ID:?}
@@ -392,15 +379,7 @@ case "${1:-} ${2:-}" in
   "pane close")
     [ "${3:-}" = p-old ] && : > "$killed"
     ;;
-  "pane read")
-    fm_fake_pane_capture
-    ;;
-  "pane run")
-    # herdr submits the whole line in one call, so feed the pane shell directly
-    # rather than through the tmux send-keys argv parser.
-    fm_fake_pane_line "${4:-}"
-    ;;
-  "pane send-text"|"pane send-keys"|"tab close")
+  "pane run"|"pane send-text"|"pane send-keys"|"tab close")
     ;;
   *)
     exit 1
@@ -409,7 +388,6 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/herdr"
-  fm_fake_pane_shell "$fakebin"
 }
 
 # make_fake_herdr <fakebin> <live-pane>: `herdr pane get <pane>` succeeds only
@@ -706,6 +684,39 @@ EOF
   pass "session start stays read-only when lock ownership cannot be published"
 }
 
+test_trace_context_effective_state_is_frozen_after_lock() {
+  local rec root home fakebin out frozen
+  rec=$(new_world trace-context-session-state)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  : > "$home/config/trace-context"
+
+  FM_TRACE_CONTEXT=off run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
+  [ "$(awk '{print $2}' "$home/state/.trace-context-effective")" = off ] \
+    || fail "session start must freeze an env-off override over a present config flag"
+
+  rm "$home/config/trace-context"
+  FM_TRACE_CONTEXT=on run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
+  [ "$(awk '{print $2}' "$home/state/.trace-context-effective")" = on ] \
+    || fail "a new session start must freeze an env-on override over an absent config flag"
+  frozen=$(cat "$home/state/.trace-context-effective")
+
+  sleep 300 &
+  holder_pid=$!
+  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+  out=$(FM_TRACE_CONTEXT=off run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  assert_contains "$out" "READ-ONLY SESSION" "trace-context refusal fixture did not enter read-only mode"
+  [ "$(cat "$home/state/.trace-context-effective")" = "$frozen" ] \
+    || fail "a lock-refused session must not mutate the frozen trace-context state"
+
+  pass "locked session start freezes trace context and lock refusal leaves it unchanged"
+}
+
 test_session_lock_concurrent_single_winner() {
   local rec root home fakebin ready completed winners pids i pid count
   rec=$(new_world lock-concurrency)
@@ -751,7 +762,7 @@ SH
   i=1
   while [ "$i" -le 40 ]; do
     (
-      harness_pid=$BASHPID
+      harness_pid=$(sh -c 'printf "%s\n" "$PPID"')
       : > "$home/state/harness-$harness_pid"
       : > "$ready/$i"
       while [ "$(find "$ready" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
@@ -1416,6 +1427,7 @@ EOF
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
+test_trace_context_effective_state_is_frozen_after_lock
 test_session_lock_concurrent_single_winner
 test_output_ordering_diagnostics_lead
 test_herdr_backend_diagnostics_follow_real_session_start
@@ -1441,3 +1453,5 @@ test_pi_diagnostic_rejects_stale_loaded_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker
 test_pi_diagnostic_rejects_missing_turnend_guard_marker
 test_pi_diagnostic_rejects_previous_session_loaded_marker
+
+echo "# fm-session-start.test.sh: all assertions passed"

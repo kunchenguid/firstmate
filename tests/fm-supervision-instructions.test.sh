@@ -49,14 +49,13 @@ test_repair_lines() {
   out=$(FM_HOME="$home" FM_CODEX_WATCH_CHECKPOINT=7 "$RENDER" --harness codex --repair-line)
   assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 7" "codex repair line did not use checkpoint helper and env override"
 
-  out=$(FM_HOME="$home" "$RENDER" --harness claude --queue-pending 1 --owner-absent 1 --repair-line)
-  assert_contains "$out" "After draining queued wakes" "queue-pending prefix missing"
-  assert_contains "$out" "Claude Code background task" "claude repair line missing background-task mechanism"
-
   out=$(FM_HOME="$home" "$RENDER" --harness claude --queue-pending 1 --repair-line)
-  assert_contains "$out" "After draining queued wakes" "queue-pending prefix missing from the parked claude line"
-  assert_contains "$out" "watcher supervision is parked until this turn ends" "claude mid-turn line did not name the parked state"
-  assert_not_contains "$out" "bin/fm-watch-arm.sh" "claude mid-turn line asked the model to start a second arming owner"
+  assert_contains "$out" "After draining queued wakes" "queue-pending prefix missing"
+  assert_contains "$out" "watcher supervision needs Stop-owned automatic recovery" "claude pre-verification repair line is not neutral"
+  assert_not_contains "$out" "is broken" "claude pre-verification repair line claimed a verified mechanism failure"
+  assert_not_contains "$out" "FAILED" "claude pre-verification repair line emitted a verified failure notice"
+  assert_not_contains "$out" "manual background" "claude pre-verification repair line directed a manual background arm"
+  assert_not_contains "$out" "bin/fm-watch-arm.sh" "claude pre-verification repair line directed an arm command"
 
   : > "$home/config/x-mode.env"
   out=$(FM_HOME="$home" FM_CODEX_WATCH_CHECKPOINT=7 "$RENDER" --harness codex --x-mode 1 --repair-line)
@@ -95,12 +94,10 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   assert_contains "$ordinary" "bin/fm-claude-stop-autoarm.sh" "claude ordinary-wake line lost the auto-arm script name"
   assert_contains "$ordinary" "do not arm another cycle" "claude ordinary-wake line does not forbid a model re-arm"
   assert_not_contains "$ordinary" "bin/fm-watch-arm.sh" "claude ordinary-wake line incorrectly calls the manual arm"
-  out=$("$RENDER" --harness claude --owner-absent 1 --repair-line)
-  assert_contains "$out" "Claude Code background task" "claude recovery line lost its tracked background repair"
-  assert_contains "$out" "bin/fm-watch-arm.sh" "claude recovery line lost the arm command"
   out=$("$RENDER" --harness claude --repair-line)
-  assert_contains "$out" "bin/fm-claude-stop-autoarm.sh" "claude mid-turn line did not name the arming owner"
-  assert_not_contains "$out" "bin/fm-watch-arm.sh" "claude mid-turn line still demanded a second arming owner"
+  assert_contains "$out" "watcher supervision needs Stop-owned automatic recovery" "claude recovery line lost its neutral automatic-recovery guidance"
+  assert_not_contains "$out" "is broken" "claude recovery line claimed failure before verification"
+  assert_not_contains "$out" "bin/fm-watch-arm.sh" "claude recovery line must not create a repeatable manual arm loop"
 
   out=$("$RENDER" --harness grok)
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
@@ -121,74 +118,6 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   assert_contains "$out" "bin/fm-watch-checkpoint.sh" "codex recovery line lost the checkpoint command"
 
   pass "renderer preserves every harness ordinary-continuation and missing-cycle repair path"
-}
-
-test_cross_harness_direct_lifecycle_matrix() {
-  local harness home lifecycle out
-  home="$TMP_ROOT/direct-lifecycle-home"
-  mkdir -p "$home/config" "$home/state"
-  printf '%s\n' 3 > "$home/config/supervision-capacity"
-
-  for harness in claude codex opencode pi pi-signed grok kimi unknown; do
-    out=$(FM_HOME="$home" "$RENDER" --harness "$harness")
-    lifecycle=$(printf '%s\n' "$out" | grep -F -- '- Direct lifecycle:')
-    assert_contains "$lifecycle" "before the next wait or turn boundary" \
-      "$harness direct lifecycle can lapse at a primary-turn boundary"
-    assert_contains "$lifecycle" "guarded landing owner for its task mode" \
-      "$harness direct lifecycle lost mode-specific guarded landing"
-    assert_contains "$lifecycle" "teardown only after landed proof" \
-      "$harness direct lifecycle lost the landed-work cleanup gate"
-    assert_contains "$lifecycle" "launch eligible ready work" \
-      "$harness direct lifecycle lost immediate ready-work refill"
-    assert_contains "$lifecycle" "configured capacity 3" \
-      "$harness direct lifecycle lost the capacity boundary"
-    assert_contains "$lifecycle" "preserving every gated or ambiguous lane" \
-      "$harness direct lifecycle lost the preservation rule"
-  done
-
-  out=$(FM_HOME="$home" "$RENDER" --harness codex --read-only 1)
-  lifecycle=$(printf '%s\n' "$out" | grep -F -- '- Direct lifecycle:')
-  assert_contains "$lifecycle" "unavailable in this read-only session" \
-    "read-only supervision did not disable lifecycle mutation"
-  assert_contains "$lifecycle" "preserve every lane without merge, teardown, or refill" \
-    "read-only supervision did not preserve all lanes"
-
-  pass "every primary harness and fallback render one guarded closeout-and-refill transaction"
-}
-
-test_direct_lifecycle_capacity_fails_closed() {
-  local capacity error_file home lifecycle out
-  home="$TMP_ROOT/invalid-capacity-home"
-  mkdir -p "$home/config" "$home/state"
-  printf '%s\n' 64 > "$home/config/supervision-capacity"
-  out=$(FM_HOME="$home" "$RENDER" --harness codex)
-  lifecycle=$(printf '%s\n' "$out" | grep -F -- '- Direct lifecycle:')
-  assert_contains "$lifecycle" "configured capacity 64" \
-    "valid upper capacity boundary was rejected"
-
-  for capacity in unlimited 0 65 999999999999999999999999999999999999999999; do
-    printf '%s\n' "$capacity" > "$home/config/supervision-capacity"
-    error_file="$home/capacity-$capacity.err"
-    out=$(FM_HOME="$home" "$RENDER" --harness codex 2>"$error_file")
-    lifecycle=$(printf '%s\n' "$out" | grep -F -- '- Direct lifecycle:')
-    assert_contains "$lifecycle" "$home/config/supervision-capacity is invalid" \
-      "invalid configured capacity $capacity was not identified"
-    assert_contains "$lifecycle" "do not refill" \
-      "invalid configured capacity $capacity did not block refill"
-    assert_contains "$lifecycle" "complete guarded closeout" \
-      "invalid configured capacity $capacity blocked safe closeout"
-    [ ! -s "$error_file" ] \
-      || fail "invalid configured capacity $capacity emitted an arithmetic diagnostic"
-  done
-
-  rm "$home/config/supervision-capacity"
-  out=$(FM_HOME="$home" "$RENDER" --harness codex)
-  lifecycle=$(printf '%s\n' "$out" | grep -F -- '- Direct lifecycle:')
-  assert_contains "$lifecycle" "applicable captain-recorded capacity" \
-    "absent capacity source lost an explicit captain capacity"
-  assert_contains "$lifecycle" "no arbitrary cap when none applies" \
-    "absent capacity source imposed an arbitrary default cap"
-  pass "direct lifecycle capacity accepts 1-64 and rejects invalid forms without diagnostics"
 }
 
 test_pi_signed_preserves_identity_with_pi_supervision_protocol() {
@@ -252,8 +181,6 @@ test_unknown_fallback
 test_conditional_stanzas
 test_repair_lines
 test_cross_harness_ordinary_continuation_and_repair_matrix
-test_cross_harness_direct_lifecycle_matrix
-test_direct_lifecycle_capacity_fails_closed
 test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify
 test_grok_command_sources_effective_config

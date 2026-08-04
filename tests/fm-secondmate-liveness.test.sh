@@ -256,8 +256,6 @@ make_liveness_tmux() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
-# shellcheck source=/dev/null
-. "$(dirname "$0")/pane-shell.sh"
 mode=${FM_TEST_PANE_CMD:-zsh}
 case "${1:-}" in
   display-message)
@@ -288,20 +286,11 @@ case "${1:-}" in
     [ "${1:-}" = new-window ] && rm -f "${FM_TMUX_CALL_LOG}.killed"
     exit 0
     ;;
-  capture-pane)
-    fm_fake_pane_capture
-    exit 0
-    ;;
-  send-keys)
-    fm_fake_pane_send "$@"
-    exit 0
-    ;;
   has-session) exit 0 ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_pane_shell "$fakebin"
   printf '%s\n' "$fakebin"
 }
 

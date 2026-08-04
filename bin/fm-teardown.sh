@@ -19,12 +19,8 @@
 # up a merged PR whose head branch matches the worktree's branch, fetching its head
 # via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
 # by itself causes a false refusal of landed work.
-# A gh lookup error falls back to the content checks; if they are also inconclusive,
-# teardown refuses rather than risk discarding unlanded work. The exact-tree proof
-# runs first. When later default-branch edits make its 3-way merge conflict, a
-# conservative zero-context proof accepts only when the unique merge-base task delta
-# cannot still be applied forward and can be applied completely in reverse at its
-# original task locations against the default tree.
+# A gh lookup error falls back to the content check; if that is also inconclusive,
+# teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
@@ -110,12 +106,12 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
-# shellcheck source=bin/fm-remote-lib.sh
-. "$SCRIPT_DIR/fm-remote-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -129,6 +125,211 @@ FM_LOCK_LOG_PREFIX=teardown
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+
+REMOTE_HANDOFF_DIR_PRESENT=0
+REMOTE_HANDOFF_DIR_REAL=
+REMOTE_OUTBOX_PRESENT=0
+REMOTE_PENDING_DIR_PRESENT=0
+REMOTE_PENDING_DIR_REAL=
+REMOTE_HANDOFF_LOCK=
+REMOTE_REGISTRY_LOCK=
+REMOTE_REPLY_LIFECYCLE_LOCK=
+
+remote_teardown_locks_release() {
+  if [ -n "$REMOTE_REPLY_LIFECYCLE_LOCK" ]; then
+    fm_lock_release "$REMOTE_REPLY_LIFECYCLE_LOCK"
+    REMOTE_REPLY_LIFECYCLE_LOCK=
+  fi
+  if [ -n "$REMOTE_HANDOFF_LOCK" ]; then
+    fm_lock_release "$REMOTE_HANDOFF_LOCK"
+    REMOTE_HANDOFF_LOCK=
+  fi
+  if [ -n "$REMOTE_REGISTRY_LOCK" ]; then
+    fm_lock_release "$REMOTE_REGISTRY_LOCK"
+    REMOTE_REGISTRY_LOCK=
+  fi
+}
+
+remote_recovery_paths_validate() {
+  local mode=${1:-initial} handoff_dir outbox pending_dir real rec
+  handoff_dir="$DATA/handoff"
+  outbox="$handoff_dir/$ID.outbox.md"
+  pending_dir="$STATE/pending-replies"
+  if [ -e "$handoff_dir" ] || [ -L "$handoff_dir" ]; then
+    [ -d "$handoff_dir" ] && [ ! -L "$handoff_dir" ] \
+      || { echo "REFUSED: remote handoff recovery directory is unsafe" >&2; return 1; }
+    real=$(CDPATH='' cd -- "$handoff_dir" 2>/dev/null && pwd -P) || return 1
+    if [ "$mode" = initial ]; then
+      REMOTE_HANDOFF_DIR_PRESENT=1
+      REMOTE_HANDOFF_DIR_REAL=$real
+    elif [ "$REMOTE_HANDOFF_DIR_PRESENT" -ne 1 ] || [ "$REMOTE_HANDOFF_DIR_REAL" != "$real" ]; then
+      echo "REFUSED: remote handoff recovery directory changed during retirement" >&2
+      return 1
+    fi
+  elif [ "$mode" != initial ] && [ "$REMOTE_HANDOFF_DIR_PRESENT" -ne 0 ]; then
+    echo "REFUSED: remote handoff recovery directory changed during retirement" >&2
+    return 1
+  fi
+  if [ -e "$outbox" ] || [ -L "$outbox" ]; then
+    [ -f "$outbox" ] && [ ! -L "$outbox" ] \
+      || { echo "REFUSED: remote backlog outbox is unsafe" >&2; return 1; }
+    if [ "$mode" = initial ]; then
+      REMOTE_OUTBOX_PRESENT=1
+    elif [ "$REMOTE_OUTBOX_PRESENT" -ne 1 ]; then
+      echo "REFUSED: remote backlog outbox changed during retirement" >&2
+      return 1
+    fi
+  elif [ "$mode" != initial ] && [ "$REMOTE_OUTBOX_PRESENT" -ne 0 ]; then
+    echo "REFUSED: remote backlog outbox changed during retirement" >&2
+    return 1
+  fi
+  if [ -e "$pending_dir" ] || [ -L "$pending_dir" ]; then
+    [ -d "$pending_dir" ] && [ ! -L "$pending_dir" ] \
+      || { echo "REFUSED: pending-replies recovery directory is unsafe" >&2; return 1; }
+    real=$(CDPATH='' cd -- "$pending_dir" 2>/dev/null && pwd -P) || return 1
+    if [ "$mode" = initial ]; then
+      REMOTE_PENDING_DIR_PRESENT=1
+      REMOTE_PENDING_DIR_REAL=$real
+    elif [ "$REMOTE_PENDING_DIR_PRESENT" -ne 1 ] || [ "$REMOTE_PENDING_DIR_REAL" != "$real" ]; then
+      echo "REFUSED: pending-replies recovery directory changed during retirement" >&2
+      return 1
+    fi
+    for rec in "$pending_dir"/*; do
+      [ -e "$rec" ] || [ -L "$rec" ] || continue
+      [ -f "$rec" ] && [ ! -L "$rec" ] \
+        || { echo "REFUSED: pending-replies contains an unsafe recovery entry" >&2; return 1; }
+    done
+  elif [ "$mode" != initial ] && [ "$REMOTE_PENDING_DIR_PRESENT" -ne 0 ]; then
+    echo "REFUSED: pending-replies recovery directory changed during retirement" >&2
+    return 1
+  fi
+}
+
+remote_pending_replies_cleanup() {
+  local rec
+  [ "$REMOTE_PENDING_DIR_PRESENT" -eq 1 ] || return 0
+  (
+    CDPATH='' cd -- "$STATE/pending-replies" 2>/dev/null || exit 1
+    [ "$(pwd -P)" = "$REMOTE_PENDING_DIR_REAL" ] || exit 1
+    for rec in ./*; do
+      [ -e "$rec" ] || [ -L "$rec" ] || continue
+      [ -f "$rec" ] && [ ! -L "$rec" ] || exit 1
+      [ "$(fm_meta_get "$rec" task_id)" = "$ID" ] && rm -f -- "$rec"
+    done
+  )
+}
+
+remote_outbox_cleanup() {
+  [ "$REMOTE_OUTBOX_PRESENT" -eq 1 ] || return 0
+  (
+    CDPATH='' cd -- "$DATA/handoff" 2>/dev/null || exit 1
+    [ "$(pwd -P)" = "$REMOTE_HANDOFF_DIR_REAL" ] || exit 1
+    [ -f "$ID.outbox.md" ] && [ ! -L "$ID.outbox.md" ] || exit 1
+    rm -f -- "$ID.outbox.md"
+  )
+}
+
+remote_secondmate_teardown() {
+  local remote_host remote_root remote_home kind route_host route_root route_home out rc tmp rec phase task_id
+  remote_host=$(fm_meta_get "$META" remote_host)
+  [ -n "$remote_host" ] || return 3
+  kind=$(fm_meta_get "$META" kind)
+  [ "$kind" = secondmate ] || { echo "REFUSED: remote placement metadata is valid only for a secondmate" >&2; return 1; }
+  remote_root=$(fm_meta_get "$META" remote_root)
+  remote_home=$(fm_meta_get "$META" home)
+  [ -n "$remote_root" ] && [ -n "$remote_home" ] || { echo "REFUSED: remote secondmate metadata is incomplete" >&2; return 1; }
+  secondmate_registry_line_for_id "$SECONDMATE_REG" "$ID" || { echo "REFUSED: remote secondmate route is missing or ambiguous" >&2; return 1; }
+  [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ] || { echo "REFUSED: secondmate registry route is not remote" >&2; return 1; }
+  route_host=$SECONDMATE_REGISTRY_HOST
+  route_root=$SECONDMATE_REGISTRY_ROOT
+  route_home=$SECONDMATE_REGISTRY_HOME
+  [ "$route_host" = "$remote_host" ] && [ "$route_root" = "$remote_root" ] && [ "$route_home" = "$remote_home" ] \
+    || { echo "REFUSED: remote secondmate metadata does not match its registry route" >&2; return 1; }
+  [ -z "$FORCE" ] || [ "$FORCE" = --force ] || { echo "error: invalid teardown option: $FORCE" >&2; return 2; }
+  remote_recovery_paths_validate initial || return 1
+  if [ "$FORCE" != --force ] && [ "$REMOTE_OUTBOX_PRESENT" -eq 1 ]; then
+    echo "REFUSED: remote secondmate $ID still has a pending backlog outbox; deliver it or explicitly discard with --force" >&2
+    return 1
+  fi
+  if [ "$FORCE" != --force ] && [ -d "$STATE/pending-replies" ]; then
+    for rec in "$STATE/pending-replies"/*; do
+      [ -f "$rec" ] || continue
+      task_id=$(fm_meta_get "$rec" task_id)
+      [ "$task_id" = "$ID" ] || continue
+      phase=$(fm_meta_get "$rec" phase)
+      [ "$phase" = resolved ] || {
+        echo "REFUSED: remote secondmate $ID still has an unresolved routed reply" >&2
+        return 1
+      }
+    done
+  fi
+  "$SCRIPT_DIR/fm-procevent-remote-reply.sh" retire-quiesce-locked "$ID" "$FORCE" >/dev/null 2>&1 || {
+    echo "REFUSED: remote secondmate $ID still has an unhandled captured reply" >&2
+    return 1
+  }
+  "$FM_ROOT/bin/fm-guard.sh" || true
+  if [ "$FORCE" = --force ]; then
+    if out=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh retire "$ID" --force < /dev/null 2>&1); then rc=0; else rc=$?; fi
+  else
+    if out=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh retire "$ID" < /dev/null 2>&1); then rc=0; else rc=$?; fi
+  fi
+  if [ "$rc" -ne 0 ]; then
+    [ -z "$out" ] || printf '%s\n' "$out" >&2
+    if [ "$rc" -eq 255 ]; then
+      echo "error: remote retirement completion is unknown; preserving the route and local records for same-host reconciliation" >&2
+    elif ! "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm-locked "$ID" >/dev/null 2>&1; then
+      echo "error: remote retirement failed and the reply source could not be re-armed" >&2
+    fi
+    return "$rc"
+  fi
+  remote_recovery_paths_validate recheck || {
+    echo "error: remote home retired but local recovery paths changed; preserving the local route for retry" >&2
+    return 1
+  }
+  "$SCRIPT_DIR/fm-procevent-remote-reply.sh" retire-finalize-locked "$ID" "$FORCE" >/dev/null 2>&1 || {
+    echo "error: remote home retired but reply-source cleanup is incomplete; preserving the local route for retry" >&2
+    return 1
+  }
+  if [ "$FORCE" = --force ]; then
+    remote_outbox_cleanup || { echo "error: remote outbox cleanup failed; preserving the local route for retry" >&2; return 1; }
+  fi
+  remote_pending_replies_cleanup \
+    || { echo "error: remote pending-reply cleanup failed; preserving the local route for retry" >&2; return 1; }
+  tmp="$SECONDMATE_REG.tmp.$$"
+  grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
+  mv -f -- "$tmp" "$SECONDMATE_REG"
+  rm -f -- "$STATE/$ID.status" "$STATE/$ID.meta" "$STATE/$ID.turn-ended"
+  printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
+  return 0
+}
+
+remote_secondmate_teardown_locked() {
+  local rc
+  [ -n "$(fm_meta_get "$META" remote_host)" ] || return 3
+  REMOTE_REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")
+  fm_lock_acquire_wait "$REMOTE_REGISTRY_LOCK" || return 1
+  REMOTE_HANDOFF_LOCK="$STATE/.backlog-handoff-$ID.lock"
+  fm_lock_acquire_wait "$REMOTE_HANDOFF_LOCK" || {
+    remote_teardown_locks_release
+    return 1
+  }
+  REMOTE_REPLY_LIFECYCLE_LOCK=$(secondmate_reply_lifecycle_lock_path "$STATE" "$ID")
+  fm_lock_acquire_wait "$REMOTE_REPLY_LIFECYCLE_LOCK" || {
+    remote_teardown_locks_release
+    return 1
+  }
+  if remote_secondmate_teardown; then rc=0; else rc=$?; fi
+  remote_teardown_locks_release
+  return "$rc"
+}
+
+if remote_secondmate_teardown_locked; then
+  exit 0
+else
+  remote_teardown_rc=$?
+fi
+[ "$remote_teardown_rc" -eq 3 ] || exit "$remote_teardown_rc"
+
 # This is the first cleanup authorization check. It is metadata-only and must
 # complete before fm-guard, a backend command, file removal, branch deletion,
 # worktree return, registry change, or process termination can run.
@@ -139,7 +340,9 @@ WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
 T_ORCA=
 [ "$BACKEND" != orca ] || T_ORCA=$T
-"$FM_ROOT/bin/fm-guard.sh" || true
+if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
+  "$FM_ROOT/bin/fm-guard.sh" || true
+fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
@@ -403,14 +606,12 @@ pr_number_from_target() {
   printf '%s' "$n"
 }
 
-# Fetch a PR head from the remote the PR actually lives on: the publish remote
-# (bin/fm-remote-lib.sh), not the upstream a fork-backed clone was forked from.
 ensure_commit_object() {
-  local target=$1 commit=$2 n remote
+  local target=$1 commit=$2 n
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
   n=$(pr_number_from_target "$target") || return 1
-  remote=$(fm_publish_remote "$WT") || return 1
-  git -C "$WT" fetch --quiet "$remote" "refs/pull/$n/head" >/dev/null 2>&1 || return 1
+  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
+  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
@@ -474,118 +675,40 @@ pr_is_merged() {
   unpushed_patches_are_in_pr_head "$head"
 }
 
-# Is the branch's content already present in the resolved default branch? A 3-way
-# merge of that ref with HEAD has the default tree when HEAD introduces nothing the
-# default branch does not already contain. This isolates branch-only changes, so
+# Is the branch's content already present in the up-to-date default branch? Fetches
+# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
+# the default branch does not already contain (e.g. its change landed via squash) the
+# merged tree equals the default branch's tree. This isolates branch-only changes, so
 # unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns 0 for an exact match, 2 for a merge conflict, and 1 otherwise.
+# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
+# so the caller refuses rather than guesses.
 content_in_default() {
-  local ref=$1 default_tree merged_tree merge_rc
-  [ -n "$ref" ] || return 1
-  default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
-  [ -n "$default_tree" ] || return 1
-  if merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null); then
-    :
-  else
-    merge_rc=$?
-    [ "$merge_rc" -eq 1 ] && return 2
-    return 1
-  fi
-  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
-  [ "$merged_tree" = "$default_tree" ]
-}
-
-unique_merge_base() {
-  local left=$1 right=$2 bases
-  bases=$(git -C "$WT" merge-base --all "$left" "$right" 2>/dev/null) || return 1
-  [ -n "$bases" ] || return 1
-  case "$bases" in
-    *$'\n'*) return 1 ;;
-  esac
-  printf '%s\n' "$bases"
-}
-
-reverse_patch_applies_at_task_locations() {
-  local proof_index=$1 proof_patch=$2 output
-  output=$(LC_ALL=C GIT_INDEX_FILE="$proof_index" git -C "$WT" apply \
-    --cached --reverse --check --verbose --unidiff-zero "$proof_patch" 2>&1) || return 1
-  [[ ! "$output" =~ offset[[:space:]]-?[1-9][0-9]*[[:space:]]lines? ]]
-}
-
-# Does the task's complete net delta already exist in an evolved default tree even
-# though later edits made the 3-way proof above conflict? Build a private temporary
-# index at the authoritative default ref, then require both sides of the proof:
-# the task delta must not still apply forward, and its exact zero-context form must
-# apply completely in reverse at its original task locations. Any unsupported diff,
-# ambiguous application, relocated hunk, or missing task hunk fails closed.
-content_delta_in_default() {
-  local ref=$1 base proof_dir proof_index proof_patch rc=1
-  [ -n "$ref" ] || return 1
-  base=$(unique_merge_base "$ref" HEAD) || return 1
-  if git -C "$WT" diff --quiet "$base" HEAD -- 2>/dev/null; then
-    return 0
-  fi
-
-  proof_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-teardown-content.XXXXXX") || return 1
-  proof_index="$proof_dir/index"
-  proof_patch="$proof_dir/task.patch"
-  if git -C "$WT" diff --no-ext-diff --no-textconv --binary --full-index \
-      --no-renames --unified=0 "$base" HEAD -- > "$proof_patch" 2>/dev/null \
-    && GIT_INDEX_FILE="$proof_index" git -C "$WT" read-tree "$ref" 2>/dev/null \
-    && ! GIT_INDEX_FILE="$proof_index" git -C "$WT" apply --cached --check \
-      --unidiff-zero "$proof_patch" >/dev/null 2>&1 \
-    && reverse_patch_applies_at_task_locations "$proof_index" "$proof_patch"; then
-    rc=0
-  fi
-  rm -f "$proof_index" "$proof_index.lock" "$proof_patch"
-  rmdir "$proof_dir" 2>/dev/null || true
-  return "$rc"
-}
-
-content_landed_in_ref() {
-  local ref=$1 content_rc
-  if content_in_default "$ref"; then
-    return 0
-  else
-    content_rc=$?
-  fi
-  [ "$content_rc" -eq 2 ] || return 1
-  content_delta_in_default "$ref"
-}
-
-# Local-only cleanup has historically required a real task change before treating
-# an unmerged commit as content-landed. Preserve that fail-closed boundary: an
-# empty or unreadable task delta is not enough to retire the only local copy.
-nonempty_content_landed_in_ref() {
-  local ref=$1 base diff_rc
-  base=$(git -C "$WT" merge-base "$ref" HEAD 2>/dev/null) || return 1
-  if git -C "$WT" diff --quiet "$base" HEAD -- 2>/dev/null; then
-    return 1
-  else
-    diff_rc=$?
-    [ "$diff_rc" -eq 1 ] || return 1
-  fi
-  content_landed_in_ref "$ref"
-}
-
-# Has the worktree's committed work actually LANDED, though its commits are not
-# reachable from any remote-tracking branch? True when a merged PR proves the
-# current local work is contained in the PR head, OR exact-tree or conservative
-# net-delta proof shows the content is already in the default branch. False only for
-# genuinely unlanded work or an inconclusive proof.
-work_is_landed() {
-  local branch=$1 name ref remote
-  pr_is_merged "$branch" && return 0
+  local name ref default_tree merged_tree
   name=$(default_branch) || return 1
-  if remote=$(fm_publish_remote "$WT"); then
-    git -C "$WT" fetch --quiet "$remote" "+refs/heads/$name:refs/remotes/$remote/$name" >/dev/null 2>&1 || return 1
-    ref="refs/remotes/$remote/$name"
+  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
+    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+    ref="refs/remotes/origin/$name"
   elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
     ref="refs/heads/$name"
   else
     return 1
   fi
-  content_landed_in_ref "$ref"
+  default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
+  [ -n "$default_tree" ] || return 1
+  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
+  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
+  [ "$merged_tree" = "$default_tree" ]
+}
+
+# Has the worktree's committed work actually LANDED, though its commits are not
+# reachable from any remote-tracking branch? True when a merged PR proves the
+# current local work is contained in the PR head, OR the content is already in the
+# default branch (fallback, which also covers the no-PR and gh-error paths). False
+# only for genuinely unlanded work.
+work_is_landed() {
+  local branch=$1
+  pr_is_merged "$branch" && return 0
+  content_in_default
 }
 
 backlog_refresh_reminder() {
@@ -691,6 +814,7 @@ fi
 STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS
 TEARDOWN_TREEHOUSE_LOCK_REFUSED=2
 TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED=3
+TEARDOWN_PROCEVENT_RESTORE_FAILED=4
 
 # True when treehouse/git stderr shows the transient index.lock "File exists" race.
 # Other return failures must not enter the retry path.
@@ -868,8 +992,7 @@ validate_worktree_teardown_safety() {
       return 1
     fi
     unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
-    if [ -n "$dirty" ] \
-      || { [ -n "$unmerged" ] && ! nonempty_content_landed_in_ref "$DEFAULT"; }; then
+    if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
       [ -n "$dirty" ] && echo "uncommitted changes present" >&2
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
@@ -1112,23 +1235,164 @@ EOF
 }
 
 remove_firstmate_home() {
-  local home=$1 label=$2 expected_id=${3:-} abs_home_path
+  local home=$1 label=$2 expected_id=${3:-} abs_home_path process_event_backup
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
   [ -n "$abs_home_path" ] || return 0
+  process_event_backup=$(snapshot_firstmate_home_process_events "$abs_home_path" "$label") || return 1
+  if ! cleanup_firstmate_home_process_events "$abs_home_path" "$label"; then
+    restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
+    return 1
+  fi
   if firstmate_home_has_treehouse_slot "$abs_home_path"; then
     command -v treehouse >/dev/null 2>&1 || {
       echo "error: treehouse command not found; cannot return $label $abs_home_path" >&2
+      restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
     teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
+      restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
+    [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
     return 0
   fi
-  safe_rm_rf "$abs_home_path" "$label"
+  if safe_rm_rf "$abs_home_path" "$label"; then
+    [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
+    return 0
+  fi
+  restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
+  return 1
+}
+
+firstmate_home_has_process_events() {
+  local home=$1 path owner claim_root
+  for path in "$home/state/procevent"/*.source "$home/state/procevent"/*.runner; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      return 0
+    fi
+  done
+  claim_root=${FM_PROCEVENT_CLAIM_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/procevent-claims}
+  for path in "$claim_root"/*.claim; do
+    [ -f "$path" ] && [ ! -L "$path" ] || continue
+    IFS= read -r owner < "$path" 2>/dev/null || continue
+    [ "$owner" = "$home" ] && return 0
+  done
+  return 1
+}
+
+snapshot_firstmate_home_process_events() {
+  local home=$1 label=$2 backup path
+  if ! firstmate_home_has_process_events "$home"; then
+    printf '\n'
+    return 0
+  fi
+  backup=$(umask 077; mktemp -d "${home%/*}/.fm-procevent-restore.XXXXXX") || {
+    echo "REFUSED: cannot stage recoverable process-event state for $label $home" >&2
+    return 1
+  }
+  for path in "$home/state/procevent"/*.source; do
+    [ -e "$path" ] || continue
+    if [ ! -f "$path" ] || [ -L "$path" ] || ! cp -p -- "$path" "$backup/"; then
+      rm -rf -- "$backup"
+      echo "REFUSED: cannot preserve process-event registrations for $label $home" >&2
+      return 1
+    fi
+  done
+  printf '%s\n' "$backup"
+}
+
+restore_firstmate_home_process_events() {
+  local home=$1 label=$2 backup=$3 reg source tmp runner
+  [ -n "$backup" ] || return 0
+  [ -d "$backup" ] && [ ! -L "$backup" ] || {
+    echo "error: process-event restoration failed for $label $home; recovery backup is unavailable at $backup" >&2
+    return "$TEARDOWN_PROCEVENT_RESTORE_FAILED"
+  }
+  reg="$home/state/procevent"
+  (umask 077; mkdir -p "$reg") || {
+    echo "error: process-event restoration failed for $label $home; recover registrations from $backup" >&2
+    return "$TEARDOWN_PROCEVENT_RESTORE_FAILED"
+  }
+  [ -d "$reg" ] && [ ! -L "$reg" ] || {
+    echo "error: process-event restoration failed for $label $home; recover registrations from $backup" >&2
+    return "$TEARDOWN_PROCEVENT_RESTORE_FAILED"
+  }
+  for source in "$backup"/*.source; do
+    [ -e "$source" ] || continue
+    [ -f "$source" ] && [ ! -L "$source" ] || {
+      echo "error: process-event restoration failed for $label $home; recover registrations from $backup" >&2
+      return "$TEARDOWN_PROCEVENT_RESTORE_FAILED"
+    }
+    tmp=$(umask 077; mktemp "$reg/.restore.XXXXXX") || {
+      echo "error: process-event restoration failed for $label $home; recover registrations from $backup" >&2
+      return "$TEARDOWN_PROCEVENT_RESTORE_FAILED"
+    }
+    if ! cp -- "$source" "$tmp" || ! chmod 0600 "$tmp" || ! mv -f -- "$tmp" "$reg/${source##*/}"; then
+      rm -f -- "$tmp"
+      echo "error: process-event restoration failed for $label $home; recover registrations from $backup" >&2
+      return "$TEARDOWN_PROCEVENT_RESTORE_FAILED"
+    fi
+  done
+  runner="$home/bin/fm-procevent.sh"
+  if [ ! -f "$runner" ] || [ -L "$runner" ] || [ ! -x "$runner" ]; then
+    runner="$SCRIPT_DIR/fm-procevent.sh"
+  fi
+  if ! FM_HOME="$home" FM_ROOT_OVERRIDE="$FM_ROOT" "$runner" reconcile >/dev/null; then
+    echo "error: process-event restoration could not rearm $label $home; active waits may remain retired; recover registrations from $backup" >&2
+    return "$TEARDOWN_PROCEVENT_RESTORE_FAILED"
+  fi
+  rm -rf -- "$backup"
+}
+
+cleanup_firstmate_home_process_events() {
+  local home=$1 label=$2 runner="$1/bin/fm-procevent.sh"
+  firstmate_home_has_process_events "$home" || return 0
+  if [ ! -f "$runner" ] || [ -L "$runner" ] || [ ! -x "$runner" ]; then
+    echo "REFUSED: $label $home has process-event state but no sweep-capable bin/fm-procevent.sh; restore the home script and rerun teardown" >&2
+    return 1
+  fi
+  if ! FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$runner" sweep-home; then
+    echo "REFUSED: process-event cleanup is incomplete for $label $home; preserving the home, lease, and retirement records for retry" >&2
+    return 1
+  fi
+  if firstmate_home_has_process_events "$home"; then
+    echo "REFUSED: process-event state remains for $label $home after its bounded sweep; preserving the home, lease, and retirement records for retry" >&2
+    return 1
+  fi
+}
+
+preflight_firstmate_home_process_events() {
+  local home=$1 label=$2 runner="$1/bin/fm-procevent.sh"
+  firstmate_home_has_process_events "$home" || return 0
+  if [ ! -f "$runner" ] || [ -L "$runner" ] || [ ! -x "$runner" ]; then
+    echo "REFUSED: $label $home has process-event state but no sweep-capable bin/fm-procevent.sh; restore the home script and rerun teardown" >&2
+    return 1
+  fi
+  if ! FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$runner" sweep-home --preflight >/dev/null; then
+    echo "REFUSED: process-event cleanup cannot safely proceed for $label $home; preserving the home, lease, and retirement records for retry" >&2
+    return 1
+  fi
+}
+
+preflight_firstmate_home_process_event_tree() {
+  local home=$1 label=$2 sub_state child_meta child_kind child_home child_wt child_id
+  sub_state="$home/state"
+  if [ -d "$sub_state" ]; then
+    for child_meta in "$sub_state"/*.meta; do
+      [ -e "$child_meta" ] || continue
+      child_kind=$(meta_value "$child_meta" kind)
+      [ "$child_kind" = secondmate ] || continue
+      child_id=$(basename "$child_meta" .meta)
+      child_wt=$(meta_value "$child_meta" worktree)
+      child_home=$(meta_value "$child_meta" home)
+      [ -n "$child_home" ] || child_home=$child_wt
+      preflight_firstmate_home_process_event_tree "$child_home" "child firstmate home for $child_id" || return 1
+    done
+  fi
+  preflight_firstmate_home_process_events "$home" "$label"
 }
 
 validate_firstmate_home_children_removal() {
@@ -1346,8 +1610,8 @@ cleanup_firstmate_home_children() {
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
       if [ -n "$child_home" ] && [ -d "$child_home" ]; then
-        cleanup_firstmate_home_children "$child_home" || return 1
-        remove_firstmate_home "$child_home" "child firstmate home" "$child_id"
+        cleanup_firstmate_home_children "$child_home" || return $?
+        remove_firstmate_home "$child_home" "child firstmate home" "$child_id" || return $?
       fi
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
@@ -1390,11 +1654,15 @@ cleanup_firstmate_home_children() {
 }
 
 remove_secondmate_registry_entry() {
-  local id=$1 tmp
+  local id=$1 tmp lock rc=0
   [ -f "$SECONDMATE_REG" ] || return 0
+  lock=$(secondmate_registry_lock_path "$STATE")
+  fm_lock_acquire_wait "$lock" || return 1
   tmp="$SECONDMATE_REG.tmp.$$"
   grep -vE "^- $id( |$)" "$SECONDMATE_REG" > "$tmp" || true
-  mv "$tmp" "$SECONDMATE_REG"
+  mv "$tmp" "$SECONDMATE_REG" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
 }
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
@@ -1423,8 +1691,12 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
+if [ "$KIND" = secondmate ]; then
+  preflight_firstmate_home_process_event_tree "$HOME_PATH" "secondmate home" || exit 1
+fi
+
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
-  cleanup_firstmate_home_children "$HOME_PATH"
+  cleanup_firstmate_home_children "$HOME_PATH" || exit $?
 fi
 
 if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
@@ -1615,7 +1887,7 @@ if [ "$BACKEND" = herdr ]; then
 fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
-  remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"
+  remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit $?
   remove_secondmate_registry_entry "$ID"
 fi
 remove_grok_turnend_auth "$STATE" "$ID"

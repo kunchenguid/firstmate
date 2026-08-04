@@ -24,25 +24,17 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
-# shellcheck source=/dev/null
-. "$(dirname "$0")/pane-shell.sh"
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
-  capture-pane) fm_fake_pane_capture; exit 0 ;;
-  send-keys)
-    fm_fake_pane_send "$@"
-    exit 0
-    ;;
+  has-session|new-session|new-window|kill-window|send-keys) exit 0 ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_pane_shell "$fakebin"
   fm_fake_exit0 "$fakebin" treehouse pi opencode claude codex
   printf '%s\n' "$fakebin"
 }
@@ -64,8 +56,12 @@ make_spawn_case() {  # <name> <harness> <id>
 }
 
 run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
+  # Every case here is a ship spawn, which carries an explicit delivery contract
+  # (AGENTS.md section 7); these tests are about busy-state wiring, so they pass a
+  # fixed valid one.
   local home=$1 wt=$2 fakebin=$3
   shift 3
+  set -- "$@" --mode no-mistakes --yolo off
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \

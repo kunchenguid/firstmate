@@ -41,6 +41,11 @@
 #                          inspection only - never an automatic interrupt,
 #                          signal, or restart of the worker or its tool process.
 #   check: <script>: <out> authenticated check output, always actionable
+#   check: process-event result captured: <keys>
+#                          a durably captured process-to-event result is queued
+#                          and has not been surfaced yet; reported once per
+#                          captured generation, never again while that record
+#                          stays queued and never once it is acknowledged
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
@@ -75,10 +80,6 @@ mkdir -p "$STATE"
 # cheap when no records exist and never scrapes secondmate conversation.
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
-# Session-owner fence (fm_session_owner_fence): supervision here must belong to
-# the harness session holding state/.lock. Sourcing is side-effect free.
-# shellcheck source=bin/fm-session-lock-lib.sh
-. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 
@@ -458,6 +459,55 @@ scan_signals() {
   return 0
 }
 
+# Deliver a durably queued process-event result to firstmate. Publication is
+# owned by bin/fm-procevent.sh - by the runner at capture time and by reconcile's
+# re-announcement - so this decides only whether a queued check record has been
+# surfaced yet, then reports it through the same actionable exit every other wake
+# uses. Without it a captured result sits on the queue until something else
+# happens to wake firstmate, which is exactly the missed delivery this repairs.
+# Dedup uses the same .seen-* discipline as scan_signals: the durable record is
+# always written before its marker, so nothing is suppressed before it is queued,
+# and re-announcement, drain-time deduplication, and the handled acknowledgement
+# keep their existing owners untouched.
+procevent_surfaced_marker() {  # <queue-key>
+  printf '%s/.seen-procevent-%s' "$STATE" "$(printf '%s' "$1" | LC_ALL=C od -An -tx1 | tr -d ' \n')"
+}
+
+procevent_surface_after_output() {
+  local output_status=$1 key marker tmp status=0
+  if [ "$output_status" -eq 0 ]; then
+    for key in $PROCEVENT_SURFACED; do
+      marker=$(procevent_surfaced_marker "$key")
+      tmp=$(umask 077; mktemp "$STATE/.seen-procevent.XXXXXX") || { status=1; continue; }
+      if ! mv -f -- "$tmp" "$marker"; then
+        rm -f -- "$tmp"
+        status=1
+      fi
+    done
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
+}
+
+procevent_surface_queued() {
+  local key reason
+  PROCEVENT_SURFACED=
+  [ -s "$FM_WAKE_QUEUE" ] || return 0
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  while IFS= read -r key; do
+    case "$key" in procevent:*) ;; *) continue ;; esac
+    [ -e "$(procevent_surfaced_marker "$key")" ] && continue
+    PROCEVENT_SURFACED="$PROCEVENT_SURFACED $key"
+  done < <(fm_wake_queued_keys_locked check)
+  if [ -z "$PROCEVENT_SURFACED" ]; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 0
+  fi
+  reason="check: process-event result captured:$PROCEVENT_SURFACED"
+  FM_WAKE_POST_OUTPUT_ACTION=procevent_surface_after_output
+  wake "$reason"
+}
+
 run_check_process() {
   local c=$1
   shift
@@ -467,7 +517,7 @@ run_check_process() {
     exec gtimeout "$CHECK_TIMEOUT" bash "$c" "$@"
   else
     # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
-    exec perl -e 'my $t = shift; my $owned = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0) unless $owned; exec @ARGV } my $group = $owned ? getpgrp(0) : $pid; my $stop = sub { $SIG{HUP} = $SIG{INT} = $SIG{TERM} = "IGNORE"; kill "TERM", -$group; select undef, undef, undef, 0.2; kill "KILL", -$group; waitpid $pid, 0; exit 124 }; local $SIG{ALRM} = $stop; local $SIG{HUP} = $stop; local $SIG{INT} = $stop; local $SIG{TERM} = $stop; alarm $t; waitpid $pid, 0; my $status = $?; exit 125 if $status == -1; exit(128 + ($status & 127)) if $status & 127; exit($status >> 8)' "$CHECK_TIMEOUT" "${FM_CHECK_OWNED_GROUP:-0}" bash "$c" "$@"
+    exec perl -e 'my $t = shift; my $owned = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0) unless $owned; exec @ARGV } my $group = $owned ? getpgrp(0) : $pid; my $stop = sub { $SIG{HUP} = $SIG{INT} = $SIG{TERM} = "IGNORE"; kill "TERM", -$group; select undef, undef, undef, 0.2; kill "KILL", -$group; waitpid $pid, 0; exit 124 }; local $SIG{ALRM} = $stop; local $SIG{HUP} = $stop; local $SIG{INT} = $stop; local $SIG{TERM} = $stop; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$CHECK_TIMEOUT" "${FM_CHECK_OWNED_GROUP:-0}" bash "$c" "$@"
   fi
 }
 
@@ -478,17 +528,12 @@ run_check() {
 FM_ACTIVE_CHECK_PID=
 FM_ACTIVE_CHECK_PGID=
 FM_CHECK_OUTPUT=
-FM_CHECK_ERROR_OUTPUT=
 FM_CHECK_RESULT=
-FM_CHECK_ERROR=
-FM_CHECK_STATUS=0
 FM_CHECK_SIGNAL_PENDING=
 
 fm_check_output_cleanup() {
   [ -z "$FM_CHECK_OUTPUT" ] || rm -f -- "$FM_CHECK_OUTPUT"
-  [ -z "$FM_CHECK_ERROR_OUTPUT" ] || rm -f -- "$FM_CHECK_ERROR_OUTPUT"
   FM_CHECK_OUTPUT=
-  FM_CHECK_ERROR_OUTPUT=
 }
 
 fm_active_check_stop() {
@@ -517,21 +562,15 @@ fm_active_check_stop() {
 }
 
 run_check_capture() {
-  local pgid check_status=0
+  local pgid
   fm_check_output_cleanup
   FM_CHECK_RESULT=
-  FM_CHECK_ERROR=
-  FM_CHECK_STATUS=0
   FM_CHECK_OUTPUT=$(mktemp "$STATE/.fm-check-output.XXXXXX") || return 1
-  FM_CHECK_ERROR_OUTPUT=$(mktemp "$STATE/.fm-check-error.XXXXXX") \
-    || { fm_check_output_cleanup; return 1; }
-  chmod 0600 "$FM_CHECK_OUTPUT" "$FM_CHECK_ERROR_OUTPUT" \
-    || { fm_check_output_cleanup; return 1; }
+  chmod 0600 "$FM_CHECK_OUTPUT" || { fm_check_output_cleanup; return 1; }
   FM_CHECK_SIGNAL_PENDING=
   trap 'FM_CHECK_SIGNAL_PENDING=1' HUP INT TERM
   set -m
-  ( FM_CHECK_OWNED_GROUP=1 run_check_process "$@" ) \
-    > "$FM_CHECK_OUTPUT" 2> "$FM_CHECK_ERROR_OUTPUT" &
+  ( FM_CHECK_OWNED_GROUP=1 run_check_process "$@" ) > "$FM_CHECK_OUTPUT" 2>/dev/null &
   FM_ACTIVE_CHECK_PID=$!
   FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
   set +m
@@ -543,46 +582,11 @@ run_check_capture() {
     return 1
   fi
   [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
-  wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || check_status=$?
+  wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
   FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || return 1
-  FM_CHECK_STATUS=$check_status
   FM_CHECK_RESULT=$(cat "$FM_CHECK_OUTPUT" 2>/dev/null || true)
-  FM_CHECK_ERROR=$(head -c 512 "$FM_CHECK_ERROR_OUTPUT" 2>/dev/null \
-    | tr '\r\n\t' '   ' \
-    | sed 's/[[:space:]][[:space:]]*/ /g; s/^ //; s/ $//' || true)
   fm_check_output_cleanup
-}
-
-fm_check_failure_reason() {
-  local check=$1 status=$2 detail=$3
-  [ -n "$detail" ] || detail="no stderr"
-  printf 'check: %s failed (exit %s): %s' "$check" "$status" "$detail"
-}
-
-FM_VALIDATION_LANE_EVENT_RESULT=
-FM_VALIDATION_LANE_EVENT_ERROR=
-FM_VALIDATION_LANE_EVENT_STATUS=0
-run_validation_lane_event_check() {
-  local c="$STATE/validation-lane.check.sh" custom_snapshot
-  FM_VALIDATION_LANE_EVENT_RESULT=
-  FM_VALIDATION_LANE_EVENT_ERROR=
-  FM_VALIDATION_LANE_EVENT_STATUS=0
-  [ -e "$c" ] || return 0
-  if ! fm_custom_check_snapshot_prepare "$STATE" validation-lane; then
-    fm_custom_check_snapshot_cleanup
-    return 2
-  fi
-  custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
-  run_check_capture "$custom_snapshot" || {
-    fm_custom_check_snapshot_cleanup
-    return 1
-  }
-  FM_VALIDATION_LANE_EVENT_RESULT=$FM_CHECK_RESULT
-  FM_VALIDATION_LANE_EVENT_ERROR=$FM_CHECK_ERROR
-  FM_VALIDATION_LANE_EVENT_STATUS=$FM_CHECK_STATUS
-  fm_custom_check_snapshot_cleanup
-  [ "$FM_VALIDATION_LANE_EVENT_STATUS" -eq 0 ] || return 3
 }
 
 # Surfaced-marker bookkeeping for the heartbeat backstop is owned by
@@ -701,16 +705,6 @@ if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
 fi
 
-# Session-owner fence, at startup: a watcher whose process does not descend
-# from the harness session holding this home's state/.lock must not start.
-# Without this, an arm surviving from a previous harness session could take the
-# singleton and absorb wakes no live conversation ever reads. The typed FAILED
-# line goes to stdout so fm-watch-arm.sh and fm-watch-checkpoint.sh propagate it.
-if ! fm_session_owner_fence "$STATE"; then
-  echo "watcher: FAILED - session-owner fence: home session lock is held by live harness pid $FM_SESSION_OWNER_FOREIGN_PID outside this process's session; not starting"
-  exit 1
-fi
-
 # Before acquiring the watcher lock or enumerating any runnable check, replace
 # or quarantine checks created by older versions. The migration compares bytes
 # and reads data only; it never invokes legacy check files through Bash.
@@ -752,11 +746,9 @@ trap 'exit 1' HUP INT TERM
 WATCHER_PID=${BASHPID:-$$}
 printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
-# This token is a watcher-generation identity, not a timing baseline.  It is
-# published before pid-identity, then stamped on every durable wake row.
-FM_WATCH_CYCLE_ID="watcher:${WATCHER_PID}:$(date +%s):${RANDOM}${RANDOM}"
-export FM_WATCH_CYCLE_ID
-printf '%s\n' "$FM_WATCH_CYCLE_ID" > "$WATCH_LOCK/cycle-id" || true
+FM_WATCH_DELIVERY_PID=$WATCHER_PID
+FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
+printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
@@ -770,12 +762,6 @@ if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; the
   wake "$reason"
 fi
 
-if ! touch "$STATE/.last-watcher-beat" \
-  || ! fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null; then
-  echo "watcher: FAILED - could not publish watcher health"
-  exit 1
-fi
-
 while :; do
   # Self-eviction: if the singleton lock no longer names this process, a second
   # watcher has taken over (e.g. a transient duplicate from a racy arm). Stand
@@ -787,15 +773,6 @@ while :; do
     exit 0
   fi
 
-  # Session-owner fence, per cycle: if the home's session lock moved to another
-  # live harness session (a harness transition happened under this watcher),
-  # stand down so the new session's own supervision can take the singleton
-  # within one poll. The EXIT trap releases this process's lock on the way out.
-  if ! fm_session_owner_fence "$STATE"; then
-    echo "watcher: FAILED - session-owner fence: home session lock moved to live harness pid $FM_SESSION_OWNER_FOREIGN_PID outside this process's session; standing down"
-    exit 1
-  fi
-
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
@@ -805,6 +782,17 @@ while :; do
   # repost after grace, and escalate once if the recovery turn is also missed.
   # No conversation scraping; unresolved records are never silently expired.
   fm_pending_reply_tick "$STATE" || true
+
+  # Process-to-event liveness repair. This never discovers a result by polling:
+  # each registered source has its own child blocking on that source, and this
+  # only republishes results already captured durably and restarts a source
+  # whose owner is gone. It is a no-op with nothing registered.
+  if [ -d "$STATE/procevent" ]; then
+    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
+  fi
+  # Then deliver any queued-but-unsurfaced result, including one a runner
+  # published while this watcher was between cycles.
+  procevent_surface_queued
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
@@ -818,7 +806,6 @@ while :; do
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       is_pr_poll=0
-      id=
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
           && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
@@ -851,12 +838,6 @@ while :; do
           continue
         fi
       fi
-      if [ "$id" = validation-lane ] && [ "$FM_CHECK_STATUS" -ne 0 ]; then
-        reason=$(fm_check_failure_reason "$c" "$FM_CHECK_STATUS" "$FM_CHECK_ERROR")
-        fm_wake_append check "$c" "$reason" || exit 1
-        touch "$STATE/.last-check"
-        wake "$reason"
-      fi
       if [ -n "$out" ]; then
         reason="check: $c: $out"
         fm_wake_append check "$c" "$reason" || exit 1
@@ -888,18 +869,12 @@ while :; do
   # signature for an already-pending file (last write wins below).
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
-    terminal_status_event=0
     sleep "$SIGNAL_GRACE"
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
     files=""
     while IFS=$(printf '\t') read -r sf sig f; do
       [ -n "$sf" ] || continue
       case " $files " in *" $f "*) ;; *) files="$files $f" ;; esac
-      case "$f" in
-        *.status)
-          status_is_terminal_verb "$(last_status_line "$f")" && terminal_status_event=1
-          ;;
-      esac
     done <<EOF
 $pending
 EOF
@@ -919,30 +894,6 @@ EOF
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
-      if [ "$terminal_status_event" -eq 1 ]; then
-        terminal_check_rc=0
-        run_validation_lane_event_check || terminal_check_rc=$?
-        check_path="$STATE/validation-lane.check.sh"
-        case "$terminal_check_rc" in
-          0) ;;
-          2)
-            reason="check: rejected unauthenticated state checks: $check_path"
-            fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
-            wake "$reason"
-            ;;
-          3)
-            reason=$(fm_check_failure_reason "$check_path" \
-              "$FM_VALIDATION_LANE_EVENT_STATUS" "$FM_VALIDATION_LANE_EVENT_ERROR")
-            fm_wake_append check "$check_path" "$reason" || exit 1
-            wake "$reason"
-            ;;
-          *)
-            reason="check: $check_path failed before execution completed"
-            fm_wake_append check "$check_path" "$reason" || exit 1
-            wake "$reason"
-            ;;
-        esac
-      fi
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
@@ -956,14 +907,6 @@ EOF
       done <<EOF
 $pending
 EOF
-      if [ "$terminal_status_event" -eq 1 ]; then
-        if [ -n "$FM_VALIDATION_LANE_EVENT_RESULT" ]; then
-          check_path="$STATE/validation-lane.check.sh"
-          reason="check: $check_path: $FM_VALIDATION_LANE_EVENT_RESULT"
-          fm_wake_append check "$check_path" "$reason" || exit 1
-          wake "$reason"
-        fi
-      fi
       wake "$reason"
     else
       while IFS=$(printf '\t') read -r sf sig f; do
