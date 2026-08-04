@@ -489,6 +489,29 @@ secondmate_sync() {
   return 0
 }
 
+secondmate_respawn() {
+  local id=$1 out rc stderr_file stderr_output
+  stderr_file=$(mktemp "$STATE/.secondmate-respawn-stderr.XXXXXX") || {
+    echo "error: secondmate $id respawn diagnostics could not be captured"
+    return 1
+  }
+  if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>"$stderr_file"); then
+    rc=0
+  else
+    rc=$?
+  fi
+  stderr_output=$(cat "$stderr_file")
+  rm -f -- "$stderr_file"
+  if [ "$rc" -eq 0 ]; then
+    [ -z "$stderr_output" ] || printf '%s\n' "$stderr_output" >&2
+    [ -z "$out" ] || printf '%s\n' "$out"
+  else
+    [ -z "$stderr_output" ] || printf '%s\n' "$stderr_output"
+    [ -z "$out" ] || printf '%s\n' "$out"
+  fi
+  return "$rc"
+}
+
 secondmate_liveness_sweep() {
   # Idempotent secondmate liveness guarantee - SESSION START ONLY. The detailed
   # state machine and its only recovery-authorizing states are owned by
@@ -565,7 +588,7 @@ secondmate_liveness_sweep() {
           ;;
         dead|missing)
           cause="remote endpoint $agent_state on its configured host"
-          if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+          if out=$(secondmate_respawn "$id"); then
             SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
           else
             echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $cause: $(first_line "$out")"
@@ -601,7 +624,7 @@ secondmate_liveness_sweep() {
         else
           cause="recorded endpoint confidently missing"
         fi
-        if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+        if out=$(secondmate_respawn "$id"); then
           SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
           if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
             echo "BOOTSTRAP_INFO: secondmate $id relaunched after $cause (backend=$backend)"
