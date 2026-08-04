@@ -11,10 +11,11 @@
 #
 # A remote second mate always runs on the Herdr backend in the dedicated
 # fm-remote session. Its account therefore needs the Firstmate-owned Aqua Herdr
-# agent plus the sibling
-# dev.firstmate.remote-job worker that executes every fm-on command in the GUI
-# session. SSH cannot create an Aqua session, so a host with no GUI login is a
-# human gap rather than something --fix attempts to bypass.
+# agent plus the sibling dev.firstmate.remote-job worker that runs normal fm-on
+# commands through the Aqua or Linux job-worker path. Doctor remains invokable
+# over the plain-SSH bootstrap path to inspect and repair that worker. SSH cannot
+# create an Aqua session, so a host with no GUI login is a human gap rather than
+# something --fix attempts to bypass.
 #
 # Line protocol, one fact per line, stable for script consumers:
 #   mode=check|fix
