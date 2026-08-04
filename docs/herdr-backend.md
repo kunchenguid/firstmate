@@ -1,7 +1,7 @@
 # Herdr runtime backend
 
 Herdr is an experimental agent-native terminal backend with native per-pane agent state and push events.
-Firstmate requires Herdr protocol 14 or newer; versions 0.7.1, 0.7.3, 0.7.4, and 0.7.5 are verified, with protocol-16 features enabled only when available.
+Firstmate requires Herdr protocol 14 or newer; broad backend verification covers versions 0.7.1, 0.7.3, 0.7.4, and 0.7.5, while the presentation-projection suite is additionally verified on 0.8.0 protocol 19 and protocol-16 features remain gated by availability.
 Herdr provides the terminal session while Treehouse continues to provide task worktrees.
 [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns shared backend selection and metadata semantics.
 
@@ -145,7 +145,8 @@ A malformed or missing title or token, duplicate token, zero or multiple journal
 Operational compromises:
 
 - Grouping is best-effort; only an exact same-identity version 2 binding survives a Herdr restart in place.
-- A failed journal publication or projected workspace create stops that spawn instead of falling back flat, so a Herdr create failure surfaces as a spawn failure in every Herdr home rather than only in homes that opted in; every earlier degradation (no session server, contended presentation lock, absent or ambiguous parent) still warns and continues flat.
+- A failed journal publication or projected workspace create stops that spawn instead of falling back flat, so a Herdr create failure surfaces as a spawn failure in every Herdr home rather than only in homes that opted in; every earlier degradation on the fresh projected-create path (no session server, contended presentation lock, absent or ambiguous parent) still warns and continues flat.
+- Recovery of an existing presentation journal deliberately refuses the spawn when the shared presentation lock is contended rather than falling back flat, and default-on makes that refusal reachable in any Herdr home.
 - Existing layouts are not force-renamed or rearranged.
 - Missing or ambiguous restart bindings fall back to the ordinary home workspace while the old projection remains untouched.
 - Crashes, lost responses, failed exact-pane cleanup, or human renames can leave quarantined spaces; session start removes only the exact home-local, uniquely journal-correlated, childless idle-shell shape above.
