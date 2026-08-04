@@ -19,7 +19,7 @@ The receipt makes retirement safely retryable across restarts: fixed-path recove
 A concurrent replacement remains armed, every non-merged or invalid observation remains unchanged, and retirement never performs task or persistent-secondmate cleanup.
 `bin/fm-pr-lib.sh` owns the receipt format and strict identity mechanics, while `bin/fm-watch.sh` owns queue-before-retirement ordering.
 No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when there is positive evidence that the crew is still working: `bin/fm-crew-state.sh` reporting an actively running no-mistakes step attributed to that crew's current code or an exact busy verdict from the semantic busy-state contract, or - where that read is inconclusive - descendant CPU that advanced since the previous poll.
-Every one of those sources except the last is semantic, and all of them read "not working" for an agent that backgrounds a long command and ends its turn, so `bin/fm-classify-lib.sh` adds the process-level measurement: the agent is resolved from the task worktree and the foreground process group of its terminal, its descendants' cumulative CPU is compared against an identity-bound sample from the previous poll, and only growth counts.
+Every one of those sources except the last is semantic, and those semantic sources all read "not working" for an agent that backgrounds a long command and ends its turn, so `bin/fm-classify-lib.sh` adds the process-level measurement: the agent is resolved from the task worktree and the foreground process group of its terminal, its descendants' cumulative CPU is compared against an identity-bound sample from the previous poll, and only growth counts.
 A descendant that merely exists is never evidence, so a crew whose child is hung, dead, or absent still surfaces on the unchanged schedule, and a definite parked, done, failed, or blocked run-step verdict is never overridden by the process tree.
 A crew that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
 For an ordinary crew that has stopped, the normal-mode watcher first surfaces one stale wake, then applies that same cadence to an unchanged `paused:` or durable `captain-held` endpoint only when the backend confidently reports its agent dead.
@@ -101,7 +101,8 @@ Codex and standalone Kimi classify unknown behind explicit probes until a semant
 
 Missing, malformed, stale, untrusted, or unverified semantic state is unknown, never idle, and unknown is never promoted to busy either.
 Ordinary task-state consumers act only on an exact busy verdict, so an unreadable worker surfaces for a closer look instead of being absorbed as still-working or written off as finished.
-Endpoint death is the only process-level override and yields dead; child processes, CPU, process sleep state, and marker modification times are not state signals.
+Endpoint death is the only process-level override within the semantic busy-state contract and yields dead; child processes, CPU, process sleep state, and marker modification times do not change its verdict.
+The separate descendant-CPU liveness probe described above may supply positive evidence to watcher absorb classification only after that semantic read is inconclusive.
 `state/<id>.turn-ended` files remain wake notifications, not current state.
 
 Each record is bound to an incarnation token minted when the task's wiring is armed, so an event from a superseded incarnation is rejected rather than applied, and a record left behind by one classifies unknown.
