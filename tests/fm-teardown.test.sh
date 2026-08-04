@@ -62,6 +62,8 @@ REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
 REAL_PS_FOR_TEST=$(command -v ps)
 export REAL_PS_FOR_TEST
+REAL_LSOF_FOR_TEST=$(command -v lsof)
+export REAL_LSOF_FOR_TEST
 
 # Build a fresh sandbox for one test case. Sets up:
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
@@ -127,7 +129,16 @@ case "${1:-}" in
         if [ -n "${FM_FAKE_NM_ABORT_LOG:-}" ] \
            && grep -Fxq "abort --run $run_id" "$FM_FAKE_NM_ABORT_LOG" 2>/dev/null \
            && [ "${FM_FAKE_NM_ABORT_NOOP:-0}" != 1 ]; then
-          printf '%s\n' "${FM_FAKE_AXI_STATUS_AFTER_ABORT:-}"
+          if [ "${FM_FAKE_NM_NOT_FOUND_AFTER_ABORT:-0}" = 1 ]; then
+            printf 'error: "run \\"%s\\" not found"\n' "$run_id" >&2
+            exit 1
+          elif [ "${FM_FAKE_NM_EMPTY_AFTER_ABORT:-0}" = 1 ]; then
+            exit 0
+          elif [ -n "${FM_FAKE_AXI_STATUS_AFTER_ABORT:-}" ]; then
+            printf '%s\n' "$FM_FAKE_AXI_STATUS_AFTER_ABORT"
+          else
+            printf 'run:\n  id: "%s"\n  outcome: cancelled\n' "$run_id"
+          fi
         else
           printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"
         fi
@@ -1917,7 +1928,7 @@ test_parked_own_run_is_aborted_before_teardown() {
   pass "a task's own parked no-mistakes run is aborted, not orphaned, before the worker is removed"
 }
 
-test_different_parked_run_after_abort_does_not_refuse() {
+test_mismatched_run_after_abort_refuses_unconfirmed() {
   local case_dir rc head
   case_dir=$(make_case parked-run-replaced)
   write_meta "$case_dir" no-mistakes ship
@@ -1930,10 +1941,46 @@ test_different_parked_run_after_abort_does_not_refuse() {
   FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
-  expect_code 0 "$rc" "parked-run-replaced: a different parked run should not imply abort failure"
+  expect_code 1 "$rc" "parked-run-replaced: a different run does not confirm the targeted abort"
   assert_grep "abort --run 01RUN" "$case_dir/nm-abort.log" \
     "parked-run-replaced: teardown did not abort only the verified run"
-  pass "a different parked run cannot be mistaken for the targeted abort failing"
+  assert_present "$case_dir/wt" "parked-run-replaced: teardown removed the worktree without confirmation"
+  pass "a different run cannot confirm the targeted abort"
+}
+
+test_empty_status_after_abort_refuses_unconfirmed() {
+  local case_dir rc head
+  case_dir=$(make_case parked-run-empty-confirmation)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+  FM_FAKE_NM_EMPTY_AFTER_ABORT=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "parked-run-empty-confirmation: empty status should refuse"
+  assert_present "$case_dir/wt" "parked-run-empty-confirmation: teardown removed the worktree"
+  pass "empty post-abort status is not accepted as confirmation"
+}
+
+test_not_found_status_after_abort_confirms_completion() {
+  local case_dir rc head
+  case_dir=$(make_case parked-run-not-found-confirmation)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+  FM_FAKE_NM_NOT_FOUND_AFTER_ABORT=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-not-found-confirmation: explicit not-found should confirm completion"
+  pass "the CLI's exact run-not-found signal confirms completion"
 }
 
 test_parked_own_run_refuses_when_abort_is_unconfirmed() {
@@ -2123,19 +2170,22 @@ test_reused_pid_identity_is_not_force_killed() {
   sleep 0.2
   cat > "$case_dir/fakebin/lsof" <<EOF
 #!/usr/bin/env bash
-printf 'p%s\nfcwd\nn%s\n' '$pid' '$case_dir/wt'
+count=0
+[ ! -f '$case_dir/lsof-count' ] || count=\$(cat '$case_dir/lsof-count')
+count=\$((count + 1))
+printf '%s\n' "\$count" > '$case_dir/lsof-count'
+if [ "\$count" -le 3 ]; then printf 'p%s\nfcwd\nn%s\n' '$pid' '$case_dir/wt'; fi
 EOF
   cat > "$case_dir/fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = -p ] && [ "${2:-}" = "${FM_FAKE_REUSED_PID:-}" ] \
-   && [ "${3:-}" = -o ] && [ "${4:-}" = lstart= ] \
-   && [ "${5:-}" = -o ] && [ "${6:-}" = command= ]; then
+   && [ "${3:-}" = -o ] && [ "${4:-}" = lstart= ]; then
   count=0
   [ ! -f "$FM_FAKE_PS_COUNT" ] || count=$(cat "$FM_FAKE_PS_COUNT")
   count=$((count + 1))
   printf '%s\n' "$count" > "$FM_FAKE_PS_COUNT"
-  if [ "$count" -le 2 ]; then printf 'Tue Aug  4 10:00:00 2026 perl sleeper\n'
-  else printf 'Tue Aug  4 10:00:01 2026 perl replacement\n'; fi
+  if [ "$count" -le 2 ]; then printf 'Tue Aug  4 10:00:00 2026\n'
+  else printf 'Tue Aug  4 10:00:01 2026\n'; fi
   exit 0
 fi
 exec "$REAL_PS_FOR_TEST" "$@"
@@ -2153,6 +2203,144 @@ SH
   fi
   kill -KILL "$pid" 2>/dev/null || true
   pass "a reused pid with a different start time is never force-killed"
+}
+
+test_exec_changed_process_is_still_reaped() {
+  local case_dir rc pid marker done survived=0
+  case_dir=$(make_case exec-changed-process)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  marker="$case_dir/exec-now"
+  done="$case_dir/exec-done"
+
+  ( cd "$case_dir/wt" && exec perl -e '
+      my ($marker, $done) = @ARGV;
+      until (-e $marker) { select undef, undef, undef, 0.01; }
+      open my $fh, ">", $done or die "open";
+      close $fh;
+      exec "perl", "-e", '\''$SIG{TERM} = "IGNORE"; sleep 300'\'';
+    ' "$marker" "$done" ) &
+  pid=$!
+  disown
+  sleep 0.2
+  cat > "$case_dir/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -p ] && [ "${2:-}" = "${FM_FAKE_EXEC_PID:-}" ] \
+   && [ "${3:-}" = -o ] && [ "${4:-}" = lstart= ]; then
+  out=$("$REAL_PS_FOR_TEST" "$@") || exit $?
+  [ -e "$FM_FAKE_EXEC_MARKER" ] || : > "$FM_FAKE_EXEC_MARKER"
+  printf '%s\n' "$out"
+  exit 0
+fi
+exec "$REAL_PS_FOR_TEST" "$@"
+SH
+  cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+count=0
+[ ! -f "$FM_FAKE_LSOF_COUNT" ] || count=$(cat "$FM_FAKE_LSOF_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_FAKE_LSOF_COUNT"
+if [ "$count" -eq 2 ]; then
+  i=0
+  while [ "$i" -lt 100 ]; do
+    [ ! -e "$FM_FAKE_EXEC_DONE" ] || break
+    sleep 0.01
+    i=$((i + 1))
+  done
+fi
+exec "$REAL_LSOF_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/ps" "$case_dir/fakebin/lsof"
+
+  rc=0
+  FM_PROC_ROOT_OVERRIDE="$case_dir/no-proc" \
+  FM_FAKE_EXEC_PID="$pid" FM_FAKE_EXEC_MARKER="$marker" \
+  FM_FAKE_EXEC_DONE="$done" FM_FAKE_LSOF_COUNT="$case_dir/lsof-count" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  if kill -0 "$pid" 2>/dev/null; then
+    survived=1
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  expect_code 0 "$rc" "exec-changed-process: teardown should succeed"
+  [ "$survived" -eq 0 ] || fail "exec-changed-process: exec-changed leaked process survived teardown"
+  pass "an exec change preserves birth identity and the process is reaped"
+}
+
+test_process_spawned_during_grace_is_reaped_on_later_pass() {
+  local case_dir rc pid child_file child_pid="" parent_survived=0 child_survived=0
+  case_dir=$(make_case grace-spawn-convergence)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  child_file="$case_dir/child.pid"
+
+  ( cd "$case_dir/wt" && exec perl -e '
+      my $file = shift;
+      $SIG{TERM} = sub {
+        my $child = fork();
+        die "fork" unless defined $child;
+        if (!$child) { exec "sleep", "300"; }
+        open my $fh, ">", $file or die "open";
+        print {$fh} "$child\n";
+        close $fh;
+        exit 0;
+      };
+      sleep 300;
+    ' "$child_file" ) &
+  pid=$!
+  disown
+  sleep 0.2
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  if [ -f "$child_file" ]; then child_pid=$(cat "$child_file"); fi
+  if [ -n "$child_pid" ] && kill -0 "$child_pid" 2>/dev/null; then
+    child_survived=1
+    kill -KILL "$child_pid" 2>/dev/null || true
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
+    parent_survived=1
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  expect_code 0 "$rc" "grace-spawn-convergence: teardown should converge"
+  assert_present "$child_file" "grace-spawn-convergence: TERM handler did not spawn a child"
+  [ "$child_survived" -eq 0 ] || fail "grace-spawn-convergence: spawned child survived"
+  [ "$parent_survived" -eq 0 ] || fail "grace-spawn-convergence: original process survived"
+  pass "a process spawned during grace is reaped on a later pass"
+}
+
+test_persistent_scan_refuses_after_bounded_retries() {
+  local case_dir rc wt_path fake_pid=99999999
+  case_dir=$(make_case persistent-reap-refusal)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  wt_path=$(cd "$case_dir/wt" && pwd -P)
+  cat > "$case_dir/fakebin/lsof" <<EOF
+#!/usr/bin/env bash
+printf 'p%s\nfcwd\nn%s\n' '$fake_pid' '$wt_path'
+EOF
+  cat > "$case_dir/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -p ] && [ "${2:-}" = "${FM_FAKE_PERSISTENT_PID:-}" ] \
+   && [ "${3:-}" = -o ] && [ "${4:-}" = lstart= ]; then
+  printf 'Tue Aug  4 10:00:00 2026\n'
+  exit 0
+fi
+exec "$REAL_PS_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/ps"
+
+  rc=0
+  FM_PROC_ROOT_OVERRIDE="$case_dir/no-proc" FM_FAKE_PERSISTENT_PID="$fake_pid" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "persistent-reap-refusal: teardown should refuse"
+  assert_grep "remain after 3 reap attempts" "$case_dir/stderr" \
+    "persistent-reap-refusal: teardown did not report bounded non-convergence"
+  assert_present "$case_dir/wt" "persistent-reap-refusal: teardown removed the worktree"
+  assert_present "$case_dir/state/task-x1.meta" "persistent-reap-refusal: teardown removed task metadata"
+  pass "persistent leaked processes refuse teardown after bounded retries"
 }
 
 test_run_abort_precedes_process_reap_precedes_worktree_removal() {
@@ -2238,11 +2426,16 @@ test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
 test_parked_own_run_is_aborted_before_teardown
 test_parked_own_run_refuses_when_abort_is_unconfirmed
-test_different_parked_run_after_abort_does_not_refuse
+test_mismatched_run_after_abort_refuses_unconfirmed
+test_empty_status_after_abort_refuses_unconfirmed
+test_not_found_status_after_abort_confirms_completion
 test_another_branchs_parked_run_is_never_touched
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed
+test_exec_changed_process_is_still_reaped
+test_process_spawned_during_grace_is_reaped_on_later_pass
+test_persistent_scan_refuses_after_bounded_retries
 test_run_abort_precedes_process_reap_precedes_worktree_removal

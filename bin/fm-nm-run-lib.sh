@@ -8,10 +8,10 @@
 # direction is unsafe: a false negative hides a genuinely parked run, and a
 # false positive lets teardown act on a run it does not own.
 #
-# Bounded call to `no-mistakes "$@"` in dir $1, timeout $2 seconds. The checked
-# form preserves failure while discarding stderr; fm_nm_run keeps the original
-# fail-open query contract for read-only callers.
-fm_nm_run_checked() {  # <dir> <timeout_secs> <args...>
+# Bounded call to `no-mistakes "$@"` in dir $1, timeout $2 seconds. The bounded
+# form preserves stdout, stderr, and exit status; the checked form discards
+# stderr, while fm_nm_run keeps the fail-open query contract for read-only callers.
+fm_nm_run_bounded() {  # <dir> <timeout_secs> <args...>
   local dir=$1 timeout_secs=$2 have_timeout=none
   shift 2
   if command -v timeout >/dev/null 2>&1; then have_timeout=timeout
@@ -19,11 +19,15 @@ fm_nm_run_checked() {  # <dir> <timeout_secs> <args...>
   elif command -v perl >/dev/null 2>&1; then have_timeout=perl
   fi
   case "$have_timeout" in
-    timeout)  ( cd "$dir" && timeout "$timeout_secs" no-mistakes "$@" ) 2>/dev/null ;;
-    gtimeout) ( cd "$dir" && gtimeout "$timeout_secs" no-mistakes "$@" ) 2>/dev/null ;;
-    perl)     ( cd "$dir" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" no-mistakes "$@" ) 2>/dev/null ;;
+    timeout)  ( cd "$dir" && timeout "$timeout_secs" no-mistakes "$@" ) ;;
+    gtimeout) ( cd "$dir" && gtimeout "$timeout_secs" no-mistakes "$@" ) ;;
+    perl)     ( cd "$dir" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" no-mistakes "$@" ) ;;
     *)        return 1 ;;
   esac
+}
+
+fm_nm_run_checked() {  # <dir> <timeout_secs> <args...>
+  fm_nm_run_bounded "$@" 2>/dev/null
 }
 
 fm_nm_run() {  # <dir> <timeout_secs> <args...>
