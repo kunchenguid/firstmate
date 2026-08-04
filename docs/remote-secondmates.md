@@ -83,8 +83,8 @@ The script's own header owns the full line protocol.
 bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh --fix
 ```
 
-It writes and reloads the Firstmate-owned launch agent `dev.firstmate.herdr` at `~/Library/LaunchAgents/dev.firstmate.herdr.plist`, scoped with `LimitLoadToSessionType=Aqua` so it belongs to the GUI login session, bootstraps and starts the `fm-remote` server in `gui/<uid>`, starts that server directly on a host where no launch agent applies, and recreates the `~/.local/bin/fm-remote-entrypoint.sh` symlink when it is absent.
-The launch agent owns only the remote-secondmate server and does not start, stop, or require the user's interactive `default` session.
+It writes and reloads the Firstmate-owned launch agent `dev.firstmate.herdr.fm-remote` at `~/Library/LaunchAgents/dev.firstmate.herdr.fm-remote.plist`, scoped with `LimitLoadToSessionType=Aqua` so it belongs to the GUI login session, bootstraps and starts the `fm-remote` server in `gui/<uid>`, starts that server directly on a host where no launch agent applies, and recreates the `~/.local/bin/fm-remote-entrypoint.sh` symlink when it is absent.
+The dedicated launch agent owns only the remote-secondmate server and does not inspect, rewrite, start, stop, or require the user's interactive `default` session or its `dev.firstmate.herdr` launch agent.
 It re-derives every check from the host afterwards, so what it prints is the state after the repair rather than the intent of one.
 
 These steps are never automated and are always reported rather than silently attempted, because SSH cannot create a GUI session from nothing:
