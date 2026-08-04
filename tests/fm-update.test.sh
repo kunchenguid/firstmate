@@ -427,6 +427,35 @@ test_home_without_fork_remote_is_skipped_not_advanced_from_origin() {
   pass "T12 a home without a fork remote is skipped, never advanced from origin"
 }
 
+# --- T13: a fork-less CODE ROOT is skipped too, exactly like a fork-less home --
+# The fork base mode's verdict for a target with no fork remote is "skipped"
+# (bin/fm-ff-lib.sh; T12 pins it for a home). The ingest used to call the same
+# condition a hard failure and abort the whole run, so a fork-less code root -
+# a remote Firstmate root cloned from origin alone, for instance - failed the
+# update outright instead of being skipped. That inconsistency is the bug this
+# pins: one condition, one verdict, on both paths.
+#
+# The guarantee is unchanged and is asserted here directly: skipping must never
+# become an origin fallback, so the fork-less root must not move.
+test_forkless_code_root_is_skipped_not_failed() {
+  local w out rc before
+  w=$(new_world t13)
+  before=$(git -C "$w/main" rev-parse HEAD)
+  git -C "$w/main" remote remove fork
+  bump_origin "$w" instr
+
+  rc=0
+  out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null) || rc=$?
+
+  [ "$rc" -eq 0 ] || fail "a fork-less code root must be skipped, not fail the run (exit $rc)"
+  assert_contains "$out" "upstream: skipped: no fork remote" "ingest did not report the fork-less skip"
+  assert_contains "$out" "firstmate: skipped: no fork remote" "the advance did not skip the fork-less root"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
+    || fail "fork-less code root was advanced anyway (an origin fallback would strip adaptations)"
+  assert_contains "$out" "reread-firstmate: no" "a skipped run must not claim its instructions changed"
+  pass "T13 a fork-less code root is skipped, never failed and never advanced from origin"
+}
+
 test_unsafe_secondmate_home_skipped_before_git_update() {
   local w out bad before
   w=$(new_world t11)
@@ -460,6 +489,7 @@ test_registry_backstop_dedup_and_self_exclusion
 test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_home_without_fork_remote_is_skipped_not_advanced_from_origin
+test_forkless_code_root_is_skipped_not_failed
 test_unsafe_secondmate_home_skipped_before_git_update
 
 echo "# all fm-update tests passed"

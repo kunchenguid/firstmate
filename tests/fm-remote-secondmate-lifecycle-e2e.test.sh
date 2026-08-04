@@ -105,6 +105,17 @@ git init -q --bare "$REMOTE_ORIGIN"
 git -C "$REMOTE_ROOT" remote add origin "file://$REMOTE_ORIGIN"
 git -C "$REMOTE_ROOT" push -q -u origin main
 git --git-dir="$REMOTE_ORIGIN" symbolic-ref HEAD refs/heads/main
+# This fleet runs a FORK, so a code root is a two-hop participant: origin is the
+# shared upstream and the fork carries upstream PLUS this fleet's adaptations.
+# Every home, including a remote code root, advances from the FORK and never from
+# origin (AGENTS.md section 12; bin/fm-ff-lib.sh's fork base mode). A root with no
+# fork remote is therefore skipped rather than updated, so this fixture gives the
+# remote root its fork remote and the update below arrives through the fork.
+REMOTE_FORK="$TMP_ROOT/firstmate-fork.git"
+git init -q --bare "$REMOTE_FORK"
+git --git-dir="$REMOTE_FORK" symbolic-ref HEAD refs/heads/main
+git -C "$REMOTE_ROOT" remote add fork "file://$REMOTE_FORK"
+git -C "$REMOTE_ROOT" push -q fork main
 
 # One remote-backed direct-PR project. The remote home clones its origin, never
 # the primary working tree.
@@ -819,7 +830,11 @@ git -C "$REMOTE_SEED" config user.name Test
 printf 'remote update probe\n' > "$REMOTE_SEED/REMOTE_UPDATE_PROBE"
 git -C "$REMOTE_SEED" add REMOTE_UPDATE_PROBE
 git -C "$REMOTE_SEED" commit -qm 'advance remote code root'
-git -C "$REMOTE_SEED" push -q origin main
+# Published to the FORK, which is where the main firstmate's own ingest puts
+# upstream before any home moves. A remote code root only ever fast-forwards to
+# that already-ingested tip, so the ingest here is a no-op and the remote host
+# needs no push access of its own.
+git -C "$REMOTE_SEED" push -q "file://$REMOTE_FORK" main
 UPDATE_OUT=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh update ios)
 assert_contains "$UPDATE_OUT" 'synced:' "remote update did not report a host-local fast-forward"
 [ "$(git -C "$REMOTE_HOME" rev-parse HEAD)" = "$(git -C "$REMOTE_ROOT" rev-parse HEAD)" ] \

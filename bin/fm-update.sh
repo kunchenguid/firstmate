@@ -41,8 +41,13 @@
 #   - reread-firstmate: yes|no    (did the running firstmate's instructions change)
 #   - nudge-secondmates: fm-<id>...|none   (updated live secondmates to nudge)
 #
-# Exit status is 1 when the ingest could not complete (conflict, missing remote,
-# fetch or push failure), leaving every home untouched on its current commit.
+# Exit status is 1 when the ingest STARTED and could not complete (conflict,
+# fetch or push failure), leaving every home untouched on its current commit:
+# the fork tip is real but stale, so advancing to it would half-apply the update.
+# A checkout with no fork or origin remote never starts an ingest at all. That is
+# reported as "upstream: skipped: no <remote> remote" and exits 0, matching the
+# skip ff_target's fork base mode already returns for such a target; the advance
+# then skips it too, so nothing moves and nothing is advanced from origin.
 #
 # Usage: fm-update.sh [--help]
 set -eu
@@ -87,8 +92,18 @@ ingest_upstream() {
   }
   for remote in fork origin; do
     if ! git -C "$dir" remote get-url "$remote" >/dev/null 2>&1; then
-      echo "upstream: failed: no $remote remote"
-      return 1
+      # A checkout with no fork (or no origin) remote is not a participant in the
+      # two-hop model: there is nothing to ingest into, or nothing to ingest from.
+      # That is a SKIP, not a failure, and it is the same verdict ff_target's fork
+      # base mode already returns for such a target ("skipped: no fork remote",
+      # bin/fm-ff-lib.sh). Reporting it as a failure here contradicted that and
+      # aborted the whole run over a target the advance would have skipped anyway.
+      #
+      # Skipping never becomes an origin fallback: every advance below still goes
+      # through ff_target's fork base mode, which refuses to advance any target
+      # from origin. A fork-less checkout therefore stays exactly where it is.
+      echo "upstream: skipped: no $remote remote"
+      return 0
     fi
     if ! fetch_once "$dir" "$remote"; then
       echo "upstream: failed: $remote fetch failed"
