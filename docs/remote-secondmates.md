@@ -15,7 +15,7 @@ Local second mates are unaffected and keep their ordinary backend and session se
 Configure an SSH alias in the primary account's normal OpenSSH configuration.
 Use ordinary public-key authentication, strict host-key verification, and a dedicated remote account where practical.
 Do not enable agent forwarding for Firstmate.
-`fm-on.sh` also disables agent forwarding, forwarding setup, and configured `SendEnv` patterns on every call.
+`fm-on.sh` also disables agent forwarding, forwarding setup, and configured `SendEnv` patterns on every call, and arms bounded SSH dead-peer detection so a vanished host (a reboot, a dropped link) fails within a bounded window instead of hanging indefinitely; its [script header](../bin/fm-on.sh) owns the keepalive defaults and environment overrides.
 
 Clone Firstmate on the remote host at an absolute code-root path.
 Expose that clone's fixed entrypoint on the account's non-interactive SSH `PATH`, for example:
