@@ -185,8 +185,10 @@ EOF
   elif [ "$verb" = failed ]; then
     class=red word=failed
   elif [ "$verb" = needs-decision ]; then
-    # Fold yielded nothing (e.g. a malformed [key=...] token) but the newest
-    # event still asks for the captain: never demote it below red.
+    # Defensive backstop: the fold keeps every needs-decision open (malformed
+    # [key=...] tokens fold under "default" in fm-classify-lib.sh), but if it
+    # ever yields nothing while the newest event still asks for the captain,
+    # never demote that event below red.
     class=red word='needs you'
   elif [ "$verb" = blocked ]; then
     class=red word=blocked
