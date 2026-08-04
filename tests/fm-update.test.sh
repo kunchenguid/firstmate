@@ -12,7 +12,7 @@
 #     fast-forward of one worktree never disturbs another worktree's checkout
 #     or the shared default branch.
 #   - The caller-action summary is correct: reread-firstmate flips to yes only
-#     when the instruction surface (AGENTS.md / bin / skills) changed, and
+#     when the instruction surface (AGENTS.md / bin / .agents/skills) changed, and
 #     nudge-secondmates lists exactly the live secondmates that advanced.
 #   - Secondmate homes resolve from both state/<id>.meta and the
 #     data/secondmates.md registry, deduped, and the firstmate repo is never
@@ -31,7 +31,7 @@ TMP_ROOT=$(fm_test_tmproot fm-update-tests)
 
 # Build a fresh world: a bare origin seeded with one commit, a firstmate repo
 # clone checked out on main, and a home dir with state/ and data/. Echoes the
-# world dir. Files seeded: AGENTS.md, README.md, bin/tool.sh, a skill note.
+# world dir. Files seeded: AGENTS.md, README.md, bin/tool.sh, and an internal skill note.
 new_world() {
   local name=$1 w
   w="$TMP_ROOT/$name"
@@ -72,7 +72,7 @@ add_sm() {
 }
 
 # Advance origin by one commit. mode=instr changes the instruction surface
-# (AGENTS.md, bin, skills) plus README; mode=readme changes only README.
+# (AGENTS.md, bin, .agents/skills) plus README; mode=readme changes only README.
 bump_origin() {
   local w=$1 mode=$2
   git -C "$w/seed" pull -q origin main >/dev/null 2>&1 || true
@@ -107,7 +107,7 @@ test_updates_main_and_secondmate() {
   assert_contains "$out" "firstmate: updated " "firstmate fast-forwarded"
   assert_contains "$out" "secondmate sm1: updated " "secondmate fast-forwarded"
   assert_contains "$out" "reread-firstmate: yes" "instruction change triggers reread"
-  assert_contains "$out" "nudge-secondmates: main:fm-sm1" "updated secondmate is nudged"
+  assert_contains "$out" "nudge-secondmates: fm-sm1" "updated secondmate is nudged"
 
   # Fast-forward landed: HEAD == origin/main on both targets.
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$(git -C "$w/main" rev-parse origin/main)" ] \
@@ -139,7 +139,7 @@ test_reread_gate_is_instruction_only() {
   assert_contains "$out" "firstmate: updated " "firstmate still advanced"
   assert_contains "$out" "reread-firstmate: no" "non-instruction change skips reread"
   # The secondmate still advanced, so it is still nudged (update-based nudge).
-  assert_contains "$out" "nudge-secondmates: main:fm-sm1" "advanced secondmate still nudged"
+  assert_contains "$out" "nudge-secondmates: fm-sm1" "advanced secondmate still nudged"
   pass "T3 reread gates on instruction surface, nudge on advancement"
 }
 
@@ -230,7 +230,7 @@ test_registry_backstop_dedup_and_self_exclusion() {
   # output, where 'secondmate reg1: updated' legitimately appears).
   local nudge_line
   nudge_line=$(printf '%s\n' "$out" | grep '^nudge-secondmates:')
-  assert_contains "$nudge_line" "main:fm-sm1" "live-meta secondmate is nudged"
+  assert_contains "$nudge_line" "fm-sm1" "live-meta secondmate is nudged"
   assert_not_contains "$nudge_line" "reg1" "registry-only secondmate without live metadata is not nudged"
   pass "T7 registry backstop resolves, dedups meta+registry, excludes the firstmate repo"
 }

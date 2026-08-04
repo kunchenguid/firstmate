@@ -50,9 +50,9 @@ set -u
 case "${1:-}" in
   send-keys) exit 0 ;;
   display-message)
-    for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
+    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
-  capture-pane) printf '\xe2\x94\x82 \xe2\x94\x82\n'; exit 0 ;;
+  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
   list-windows) exit 0 ;;
 esac
 exit 0
@@ -67,7 +67,7 @@ SH
   printf '%s\n' "$fb"
 }
 
-# first_settle <expected> <label> <harness|--explicit> <message>: build a fresh
+# first_settle <expected> <label> <harness|--explicit> <message> [selector-form]: build a fresh
 # home, send <message> to a target whose meta records <harness> (or to a bare
 # session:window with NO meta when --explicit), and assert the FIRST recorded sleep
 # (the popup-settle) equals <expected>. FM_SEND_SETTLE=0 strips the trailing
@@ -75,16 +75,29 @@ SH
 # keeping the head assertion crisp. FM_ROOT_OVERRIDE points at a non-repo dir so
 # fm-guard's tangle check stays silent; its watcher-liveness note goes to stderr
 # (discarded).
-first_settle() {  # <expected> <label> <harness|--explicit> <message>
+first_settle() {  # <expected> <label> <harness|--explicit> <message> [selector-form]
   local expected=$1 label=$2 harness=$3 msg=$4
-  local dir fb log home target rc first
+  local selector_form=${5:-legacy}
+  local dir fb log home target rc first meta_id
   dir="$TMP_ROOT/case-$RANDOM"; mkdir -p "$dir/state"
   fb=$(make_stubs "$dir"); log="$dir/sleep.log"; home="$dir"
   if [ "$harness" = --explicit ]; then
     target="sess:win"
   else
-    target="fm-popupcase"
-    fm_write_meta "$home/state/popupcase.meta" "window=sess:win" "harness=$harness"
+    case "$selector_form" in
+      exact)
+        target="popupcase"
+        meta_id=popupcase
+        ;;
+      legacy)
+        target="fm-popupcase"
+        meta_id=popupcase
+        ;;
+      *)
+        fail "$label: unknown selector form '$selector_form'"
+        ;;
+    esac
+    fm_write_meta "$home/state/$meta_id.meta" "window=sess:win" "harness=$harness"
   fi
   : > "$log"
   env FM_SEND_SETTLE=0 PATH="$fb:$PATH" \
@@ -98,6 +111,10 @@ first_settle() {  # <expected> <label> <harness|--explicit> <message>
 
 # Codex `$<skill>` gets the long settle so its `$` popup clears (the fix).
 first_settle 1.2 'codex $skill -> long settle' codex '$no-mistakes'
+
+# The same Codex `$<skill>` path must work when the target is addressed by exact
+# task id, not only by the legacy `fm-<id>` window label.
+first_settle 1.2 'codex $skill exact task id -> long settle' codex '$no-mistakes' exact
 
 # Same `$` message to claude keeps the fast path: `$` is ordinary text there.
 first_settle 0.3 'claude $-message -> fast path' claude '$no-mistakes'
