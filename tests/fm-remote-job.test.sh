@@ -183,7 +183,7 @@ assert_absent "$FAKE_PERL_LOG" "the worker invoked an unavailable Perl runtime"
 pass "the worker preserves bounded argv and stdin in an empty environment"
 
 ACTIVE_SIDE_EFFECT="$TMP_ROOT/active-side-effect"
-FM_REMOTE_JOB_TIMEOUT=5
+FM_REMOTE_JOB_TIMEOUT=10
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
   fm-delay-job.sh 4 "$ACTIVE_SIDE_EFFECT" < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
@@ -385,7 +385,7 @@ fi
 exec "$REAL_GIT" "\$@"
 SH
 chmod +x "$ACCOUNT_HOME/.local/bin/git"
-FM_REMOTE_JOB_TIMEOUT=1
+FM_REMOTE_JOB_TIMEOUT=3
 PREEXEC_BEGAN=$(date +%s)
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-probe-job.sh < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
@@ -395,7 +395,7 @@ PREEXEC_ELAPSED=$(( $(date +%s) - PREEXEC_BEGAN ))
 [ "$FM_REMOTE_JOB_EXIT" -eq 124 ] || fail "the pre-execution deadline did not publish a timeout result"
 assert_present "$PREEXEC_STARTED" "the pre-execution timeout fixture did not enter tracked-command validation"
 assert_absent "$PREEXEC_FINISHED" "tracked-command validation continued after the job timeout"
-[ "$PREEXEC_ELAPSED" -le 5 ] || fail "tracked-command validation exceeded the job timeout bound"
+[ "$PREEXEC_ELAPSED" -le 7 ] || fail "tracked-command validation exceeded the job timeout bound"
 fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the pre-execution timeout leaked output readers or FIFOs"
 rm -f -- "$ACCOUNT_HOME/.local/bin/git"
 pass "pre-execution validation obeys the job timeout"

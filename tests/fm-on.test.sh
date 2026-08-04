@@ -156,7 +156,6 @@ pass "the fixed entrypoint runs every command in the worker's explicit environme
 ACCOUNT_HOME=$(unset HOME; CDPATH='' cd ~ && pwd -P)
 ACCOUNT_USER=$(id -un)
 MANAGER_DIRS=(
-  "$ACCOUNT_HOME"/.nvm/versions/node/*/bin
   "$ACCOUNT_HOME/.asdf/shims"
   "$ACCOUNT_HOME"/.asdf/installs/*/*/bin
   "$ACCOUNT_HOME/.local/share/mise/shims"
@@ -177,8 +176,15 @@ expect_dir() {
   EXPECTED_PATH="${EXPECTED_PATH:+$EXPECTED_PATH:}$1"
 }
 path_has() { case ":$1:" in *":$2:"*) return 0 ;; esac; return 1; }
+CHILD_PATH=$(fm_on ios fm-probe-path.sh)
+NVM_CHILD_DIRS=()
+while IFS= read -r candidate; do
+  [ -z "$candidate" ] || NVM_CHILD_DIRS+=("$candidate")
+done < <(printf '%s\n' "$CHILD_PATH" | tr ':' '\n' | sed -n "\|^$ACCOUNT_HOME/.nvm/versions/node/[^/]*/bin$|p")
+[ "${#NVM_CHILD_DIRS[@]}" -le 1 ] || fail "the child PATH selected more than one nvm version"
 expect_dir "$REMOTE_ROOT/bin"
 expect_dir "$ACCOUNT_HOME/.local/bin"
+for candidate in "${NVM_CHILD_DIRS[@]}"; do expect_dir "$candidate"; done
 for candidate in "${MANAGER_DIRS[@]}"; do
   [ -d "$candidate" ] && [ ! -L "$candidate" ] && expect_dir "$candidate"
 done
@@ -187,7 +193,6 @@ for candidate in "${OPTIONAL_DIRS[@]}"; do
 done
 for fixed in /usr/bin /bin /usr/sbin /sbin; do expect_dir "$fixed"; done
 
-CHILD_PATH=$(fm_on ios fm-probe-path.sh)
 [ "$CHILD_PATH" = "$EXPECTED_PATH" ] \
   || fail "composed child PATH did not match the portable contract"$'\n'"expected: $EXPECTED_PATH"$'\n'"actual:   $CHILD_PATH"
 [ "${CHILD_PATH%%:*}" = "$REMOTE_ROOT/bin" ] || fail "the remote code root's bin was not first on the child PATH"
