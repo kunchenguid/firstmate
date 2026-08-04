@@ -192,7 +192,8 @@ claude_config_dir() {
 }
 
 canonical_path() {
-  local input=$1 absolute cursor suffix= base part
+  local input=$1 absolute cursor suffix= base part captured
+  local sentinel=__FM_CANONICAL_PATH_SENTINEL__
   [ -n "$input" ] || return 1
   case "$input" in
     *$'\n'*) return 1 ;;
@@ -213,7 +214,12 @@ canonical_path() {
     [ -n "$cursor" ] || cursor=/
   done
   [ -d "$cursor" ] || return 1
-  base=$(CDPATH='' cd -- "$cursor" 2>/dev/null && pwd -P) || return 1
+  captured=$(CDPATH='' cd -- "$cursor" 2>/dev/null \
+    && { pwd -P && printf '%s' "$sentinel"; }) || return 1
+  case "$captured" in *"$sentinel") ;; *) return 1 ;; esac
+  base=${captured%"$sentinel"}
+  case "$base" in *$'\n') base=${base%$'\n'} ;; *) return 1 ;; esac
+  case "$base" in *$'\n'*) return 1 ;; esac
   printf '%s%s' "$base" "$suffix"
 }
 

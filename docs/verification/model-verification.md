@@ -112,6 +112,7 @@ It also requires missing `model=`, malformed `spawned_at=`, and watermark enumer
 
 The lifecycle cases require base endpoint metadata to exist when watermark capture fails, require forced teardown to print a mismatch without losing discard authority, and require recursive secondmate cleanup to print each child's verdict before removing its record.
 The store-binding cases require a default-store Claude launch to override a different backend-daemon ambient store, and require `link/../cfg` to resolve the link before applying the parent component.
+They also require a newline introduced only by physical symlink resolution to remain detectable, produce an `unverifiable` legacy verdict, and prevent a Claude launch.
 
 Focused command:
 

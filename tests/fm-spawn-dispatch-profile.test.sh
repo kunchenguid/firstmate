@@ -456,6 +456,29 @@ SH
   pass "watermark failure preserves recoverable metadata without launching"
 }
 
+test_claude_newline_physical_store_refuses_before_launch() {
+  local rec id out status target link meta_text
+  id=profile-claude-newline-store-z2d
+  rec=$(make_spawn_case profile-claude-newline-store claude "$id")
+  read_case_record "$rec"
+  target="$CASE_DIR/physical"$'\n'"store"
+  link="$CASE_DIR/store-link"
+  mkdir -p "$target"
+  ln -s "$target" "$link"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$link" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model opus)
+  status=$?
+  [ "$status" -ne 0 ] || fail "claude spawn accepted a newline-bearing physical evidence store"
+  assert_contains "$out" "failed to capture the pre-dispatch model-evidence watermark" \
+    "newline-bearing physical store failure was not surfaced"
+  meta_text=$(cat "$HOME_DIR/state/$id.meta")
+  assert_not_contains "$meta_text" "model_evidence_store=" \
+    "newline-bearing physical store was serialized into metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "newline-bearing physical store still launched the worker"
+  pass "claude refuses newline-bearing physical stores before launch"
+}
+
 test_codex_threads_model_and_effort() {
   local rec id out status launch
   id=profile-codex-z3
@@ -769,6 +792,7 @@ test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_claude_records_pre_dispatch_transcript_identities
 test_claude_watermark_failure_preserves_recoverable_metadata
+test_claude_newline_physical_store_refuses_before_launch
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort

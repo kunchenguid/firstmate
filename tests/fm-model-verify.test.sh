@@ -364,6 +364,23 @@ assert_not_contains "$out" "model_evidence_store=$canonical_root/cfg" \
   "canonicalization stripped the parent component before resolving the symlink"
 pass "evidence-store canonicalization follows filesystem resolution order"
 
+newline_root="$TMP_ROOT/newline-store"
+newline_target="$newline_root/physical"$'\n'"store"
+mkdir -p "$newline_target"
+ln -s "$newline_target" "$newline_root-link"
+wt=$(meta newline-store opus)
+sed -i.bak '/^model_evidence_store=/d' "$HOME_DIR/state/newline-store.meta"
+rm -f "$HOME_DIR/state/newline-store.meta.bak"
+out=$(CLAUDE_CONFIG_DIR="$newline_root-link" run_verify newline-store); code=$?
+expect_code 4 "$code" "newline-bearing physical evidence store exits 4"
+assert_contains "$out" "verdict: unverifiable" \
+  "newline-bearing physical evidence store did not fail loudly"
+assert_contains "$out" "could not be canonicalized" \
+  "newline-bearing physical evidence store lost its failure cause"
+assert_not_contains "$out" "verdict: match" \
+  "newline-bearing physical evidence store manufactured a match"
+pass "newline-bearing physical evidence stores are unverifiable"
+
 # Without a timestamp, disagreeing evidence cannot be attributed. Guessing which
 # half belongs to this task would be exactly the silent pass to avoid.
 wt=$(meta unbound-ambiguous opus)

@@ -44,6 +44,7 @@ Only a harness with an empirically verified evidence source is ever treated as v
 
 `<config>` is the canonical `model_evidence_store=` persisted in the dispatch record.
 `bin/fm-spawn.sh` resolves symlinks and parent components in filesystem order for `$CLAUDE_CONFIG_DIR` when set, else `~/.claude`, records that physical identity before launch, and explicitly sets every Claude launch to the same store.
+If the resolved physical path contains a newline, canonicalization fails and spawn refuses before serializing or launching with an altered store.
 Later verification never replaces that recorded store with the verifier process's ambient configuration.
 The directory name encodes the worker's working directory with every character outside `[A-Za-z0-9]` replaced by `-`.
 
@@ -116,12 +117,12 @@ Deliberate `unpinned` dispatches are also omitted, and correctly routed work the
 ## Automated validation
 
 `tests/fm-model-verify.test.sh` owns the acceptance matrix and is registered in the `pure-contract-unit` family in `bin/fm-test-run.sh`.
-It covers family-alias and pinned-id comparison, the context-window suffix, a downgrade below the dispatched family, a mid-dispatch model change where one value still matches, enumeration and modification-time failures, the `pending` and exact-`default` `unpinned` outcomes, missing model metadata, malformed timestamps, canonical evidence-store binding across ambient configuration changes and symlink-plus-parent paths, the synthetic placeholder in both directions, exact transcript-identity binding including the equal-second boundary, legacy timestamp binding, secondmate evidence resolved from its own home, `--all` exiting on the worst verdict, and the structured output.
+It covers family-alias and pinned-id comparison, the context-window suffix, a downgrade below the dispatched family, a mid-dispatch model change where one value still matches, enumeration and modification-time failures, the `pending` and exact-`default` `unpinned` outcomes, missing model metadata, malformed timestamps, canonical evidence-store binding across ambient configuration changes, symlink-plus-parent paths, and newline-bearing physical paths, the synthetic placeholder in both directions, exact transcript-identity binding including the equal-second boundary, legacy timestamp binding, secondmate evidence resolved from its own home, `--all` exiting on the worst verdict, and the structured output.
 
 `tests/fm-fleet-snapshot-view.test.sh` covers the snapshot field and the view section, including that a correctly routed fleet renders no section.
 It also proves that bounded secondmate-home summaries do not scan model transcripts.
 
-`tests/fm-spawn-dispatch-profile.test.sh` covers durable metadata publication before watermark capture, preservation when capture fails, and explicit default-store pinning over a backend daemon's ambient configuration.
+`tests/fm-spawn-dispatch-profile.test.sh` covers durable metadata publication before watermark capture, preservation when capture fails, explicit default-store pinning over a backend daemon's ambient configuration, and refusal before launch for a newline-bearing physical store.
 
 `tests/fm-teardown.test.sh` covers terminal refusal before cleanup on a mismatch, unchanged teardown on a match, forced surfacing without loss of discard authority, and recursive child surfacing.
 
