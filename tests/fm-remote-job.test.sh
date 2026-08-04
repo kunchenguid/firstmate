@@ -38,6 +38,11 @@ cat > "$REMOTE_ROOT/bin/fm-timeout-job.sh" <<'SH'
 #!/bin/bash
 sleep 3
 SH
+cat > "$REMOTE_ROOT/bin/fm-delay-job.sh" <<'SH'
+#!/bin/bash
+sleep "$1"
+printf 'ran\n' > "$2"
+SH
 cat > "$REMOTE_ROOT/bin/fm-touch-job.sh" <<'SH'
 #!/bin/bash
 printf 'ran\n' > "$1"
@@ -71,21 +76,27 @@ git -C "$REMOTE_ROOT" add AGENTS.md bin
 git -C "$REMOTE_ROOT" commit -qm 'remote job fixture'
 
 DEFAULT_STATE="$TMP_ROOT/default-timeout-jobs"
-DEFAULT_DEADLINE=$(
+DEFAULT_BOUNDS=$(
+  unset FM_REMOTE_JOB_QUEUE_TIMEOUT
   unset FM_REMOTE_JOB_TIMEOUT
   FM_REMOTE_JOB_STATE_ROOT="$DEFAULT_STATE"
   export FM_REMOTE_JOB_STATE_ROOT
   # shellcheck source=bin/fm-remote-job-lib.sh
   . "$ROOT/bin/fm-remote-job-lib.sh"
   fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-probe-job.sh </dev/null >/dev/null
-  cat "$DEFAULT_STATE/jobs/$FM_REMOTE_JOB_ID/deadline"
+  printf '%s %s\n' \
+    "$(cat "$DEFAULT_STATE/jobs/$FM_REMOTE_JOB_ID/queue_deadline")" \
+    "$(cat "$DEFAULT_STATE/jobs/$FM_REMOTE_JOB_ID/timeout")"
 )
-DEFAULT_REMAINING=$((DEFAULT_DEADLINE - $(date +%s)))
-[ "$DEFAULT_REMAINING" -ge 350 ] || fail "the default worker deadline cannot contain a 300-second long poll"
-pass "the default worker deadline leaves setup headroom beyond supported long polls"
+read -r DEFAULT_QUEUE_DEADLINE DEFAULT_EXECUTION_TIMEOUT <<< "$DEFAULT_BOUNDS"
+DEFAULT_QUEUE_REMAINING=$((DEFAULT_QUEUE_DEADLINE - $(date +%s)))
+[ "$DEFAULT_QUEUE_REMAINING" -ge 350 ] || fail "the default queue bound is too short"
+[ "$DEFAULT_EXECUTION_TIMEOUT" -ge 350 ] || fail "the default execution bound cannot contain a 300-second long poll"
+pass "default queue and execution bounds independently cover long polls"
 
 export FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT"
 export FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux
+export FM_REMOTE_JOB_QUEUE_TIMEOUT=5
 export FM_REMOTE_JOB_TIMEOUT=5
 # shellcheck source=bin/fm-remote-job-lib.sh
 . "$ROOT/bin/fm-remote-job-lib.sh"
@@ -176,7 +187,7 @@ done
   || fail "the blocking job did not begin running"
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-touch-job.sh "$QUEUED_SIDE_EFFECT" < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
-printf '%s\n' "$(fm_remote_job_read_deadline "$FIRST_JOB_DIR")" > "$STATE_ROOT/jobs/$JOB_ID/deadline"
+printf '%s\n' "$(fm_remote_job_read_deadline "$FIRST_JOB_DIR")" > "$STATE_ROOT/jobs/$JOB_ID/queue_deadline"
 fm_remote_job_wait "$ACCOUNT_HOME" "$FIRST_JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
 fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
 [ "$FM_REMOTE_JOB_EXIT" -eq 124 ] || fail "an expired queued job did not publish a timeout result"
@@ -184,6 +195,31 @@ assert_absent "$QUEUED_SIDE_EFFECT" "the worker executed a queued job after its 
 fm_remote_job_reap "$ACCOUNT_HOME" "$FIRST_JOB_ID" || fail "the blocking job could not be reaped"
 fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the expired queued job could not be reaped"
 pass "the worker expires queued jobs before they can mutate"
+
+FIRST_DELAYED_SIDE_EFFECT="$TMP_ROOT/first-delayed-side-effect"
+SECOND_DELAYED_SIDE_EFFECT="$TMP_ROOT/second-delayed-side-effect"
+FM_REMOTE_JOB_QUEUE_TIMEOUT=5
+FM_REMOTE_JOB_TIMEOUT=3
+fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
+  fm-delay-job.sh 1.8 "$FIRST_DELAYED_SIDE_EFFECT" < /dev/null > /dev/null
+FIRST_JOB_ID=$FM_REMOTE_JOB_ID
+FIRST_JOB_DIR="$STATE_ROOT/jobs/$FIRST_JOB_ID"
+for _ in $(seq 1 100); do
+  [ "$(fm_remote_job_read_state "$FIRST_JOB_DIR" 2>/dev/null || true)" = running ] && break
+  sleep 0.05
+done
+[ "$(fm_remote_job_read_state "$FIRST_JOB_DIR" 2>/dev/null || true)" = running ] \
+  || fail "the first delayed job did not begin running"
+fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
+  fm-delay-job.sh 1.8 "$SECOND_DELAYED_SIDE_EFFECT" < /dev/null > /dev/null
+JOB_ID=$FM_REMOTE_JOB_ID
+fm_remote_job_wait "$ACCOUNT_HOME" "$FIRST_JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
+fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
+[ "$FM_REMOTE_JOB_EXIT" -eq 0 ] || fail "queue time consumed the second job's execution timeout"
+assert_present "$SECOND_DELAYED_SIDE_EFFECT" "the queued job did not receive its full execution timeout"
+fm_remote_job_reap "$ACCOUNT_HOME" "$FIRST_JOB_ID" || fail "the first delayed job could not be reaped"
+fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the second delayed job could not be reaped"
+pass "queued jobs receive a fresh bounded execution window"
 
 STARTED="$TMP_ROOT/shutdown-started"
 SHUTDOWN_SIDE_EFFECT="$TMP_ROOT/shutdown-side-effect"

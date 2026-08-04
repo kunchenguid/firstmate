@@ -520,7 +520,7 @@ worker_run_job() { # <account-home> <job-dir>
 }
 
 worker_process_once() { # <account-home>
-  local account_home=$1 job id state deadline
+  local account_home=$1 job id state queue_deadline timeout deadline
   for job in "$FM_REMOTE_JOB_JOBS"/job-*; do
     [ -d "$job" ] && [ ! -L "$job" ] || continue
     id=${job##*/}
@@ -531,9 +531,9 @@ worker_process_once() { # <account-home>
     case "$state" in
       queued)
         worker_clear_dead_claim "$job" || continue
-        deadline=$(fm_remote_job_read_deadline "$job" 2>/dev/null || true)
-        case "$deadline" in ''|*[!0-9]*) worker_publish_result "$job" 126 || true; continue ;; esac
-        if [ "$(date +%s)" -ge "$deadline" ]; then
+        queue_deadline=$(fm_remote_job_read_number "$job" queue_deadline 2>/dev/null || true)
+        case "$queue_deadline" in ''|*[!0-9]*) worker_publish_result "$job" 126 || true; continue ;; esac
+        if [ "$(date +%s)" -ge "$queue_deadline" ]; then
           worker_publish_result "$job" 124 || true
           continue
         fi
@@ -545,6 +545,17 @@ worker_process_once() { # <account-home>
       *) continue ;;
     esac
     worker_claim "$job" || continue
+    timeout=$(fm_remote_job_read_number "$job" timeout 2>/dev/null || true)
+    case "$timeout" in ''|*[!0-9]*) worker_publish_result "$job" 126 || true; continue ;; esac
+    if [ "$timeout" -gt 3600 ]; then
+      worker_publish_result "$job" 126 || true
+      continue
+    fi
+    deadline=$(( $(date +%s) + timeout ))
+    fm_remote_job_write_number "$job" deadline "$deadline" || {
+      worker_publish_result "$job" 125 || true
+      continue
+    }
     fm_remote_job_write_state "$job" running || {
       worker_publish_result "$job" 125 || true
       continue
