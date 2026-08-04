@@ -243,23 +243,53 @@ command_start() {
   esac
   if [ -z "$session" ]; then
     log 'could not allocate a session id'
-    rollback_launch "$was_away"
+    if [ "$was_away" -eq 1 ]; then
+      log 'pre-existing away mode remains active without a session record; rollback was not permitted'
+    else
+      rollback_launch "$was_away"
+    fi
     return 1
   fi
   case "${FM_AWAY_TEST_FAILURE:-}" in
-    record|record-rollback) rollback_launch "$was_away"; return 1 ;;
+    record|record-rollback)
+      if [ "$was_away" -eq 1 ]; then
+        log 'pre-existing away mode remains active without a session record; the record write failed and rollback was not permitted'
+      else
+        rollback_launch "$was_away"
+      fi
+      return 1
+      ;;
   esac
   write_record "$session" "$now" "$now" "$activation" "$intent" \
-    || { rollback_launch "$was_away"; return 1; }
+    || {
+      if [ "$was_away" -eq 1 ]; then
+        log 'pre-existing away mode remains active without a session record; the record write failed and rollback was not permitted'
+      else
+        rollback_launch "$was_away"
+      fi
+      return 1
+    }
   if [ "${FM_AWAY_TEST_FAILURE:-}" = ledger ]; then
-    fm_away_record_clear
-    rollback_launch "$was_away"
+    activation_ledger_failure "$session" "$was_away"
     return 1
   fi
   fm_away_ledger_append "$session" activation \
     "source=$activation" "intent=$intent" "home=$FM_HOME" \
-    || { fm_away_record_clear; rollback_launch "$was_away"; return 1; }
+    || { activation_ledger_failure "$session" "$was_away"; return 1; }
   printf '%s\n' "$session"
+}
+
+activation_ledger_failure() {  # <session> <was-away>
+  if [ "$2" -eq 1 ]; then
+    log "away session $1 record was preserved, but its activation ledger event is missing"
+    return 1
+  fi
+  if rollback_launch "$2"; then
+    fm_away_record_clear
+    return 1
+  fi
+  log "away session $1 record was preserved because teardown is unconfirmed; its activation ledger event is missing"
+  return 1
 }
 
 rollback_launch() {  # <was-away>

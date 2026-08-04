@@ -218,6 +218,15 @@ test_activation_failures_confirm_rollback() {
     && fail "a record and rollback failure unexpectedly succeeded"
   case "$out" in *"teardown could not be confirmed"*) : ;; *) fail "rollback failure was not explicit: $out" ;; esac
   [ -e "$home/state/.afk" ] || fail "rollback-failure control did not leave the launch live"
+
+  home=$(new_home activation-preexisting-ledger-failure)
+  : > "$home/state/.afk"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_AWAY_LAUNCH_MODE=start-native \
+    FM_AWAY_TEST_FAILURE=ledger "$SESSION" start --intent afk 2>&1) \
+    && fail "a pre-existing-away ledger failure unexpectedly succeeded"
+  [ -e "$home/state/.afk" ] || fail "ledger failure tore down pre-existing away mode"
+  [ -f "$home/state/.away-session" ] || fail "ledger failure discarded the durable session record"
+  case "$out" in *"record was preserved"*"activation ledger event is missing"*) : ;; *) fail "missing activation event was not reported: $out" ;; esac
   pass "every injected post-launch failure either confirms rollback or reports it unconfirmed"
 }
 

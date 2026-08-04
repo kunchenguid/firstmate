@@ -177,6 +177,24 @@ test_failed_publication_recovers_without_orphan_or_duplicate() {
   pass "failed request publication retries without orphan or duplicate ledger evidence"
 }
 
+test_published_incomplete_request_is_refused() {
+  local id session ledger count out
+  export FM_RULING_TEST_LEDGER_FAIL=1
+  make_request t-incomplete-published D2 >/dev/null 2>&1 \
+    && fail "a publication without its ledger event succeeded"
+  unset FM_RULING_TEST_LEDGER_FAIL
+  session=$(sess id)
+  id=rr-t-incomplete-published-shape
+  [ -f "$HOME_DIR/state/away/$session/ruling/$id/request" ] || fail "the incomplete-publication control did not publish its request"
+  out=$(make_request t-incomplete-published D2 2>&1) \
+    && fail "an incomplete authoritative request was silently repaired"
+  case "$out" in *"without complete evidence and ledger publication"*) : ;; *) fail "incomplete request was not refused by completeness: $out" ;; esac
+  ledger="$HOME_DIR/state/away/$session/ledger"
+  count=$(awk -F '\t' -v request="request=$id" '$2 == "ruling-request" { for (i=3; i<=NF; i++) if ($i == request) count++ } END { print count+0 }' "$ledger")
+  [ "$count" -eq 0 ] || fail "refusing the incomplete request appended $count ledger events"
+  pass "an authoritative request missing ledger publication is refused without repair"
+}
+
 test_a_complete_request_is_durable_and_reads_its_own_baseline() {
   local id file baseline head
   id=$(make_request t-complete D2)
@@ -355,6 +373,7 @@ test_a_non_enum_reversibility_is_refused
 test_precondition_satisfaction_is_separate_and_trusted
 test_indeterminate_repository_checks_are_rejected_and_recorded
 test_failed_publication_recovers_without_orphan_or_duplicate
+test_published_incomplete_request_is_refused
 test_a_complete_request_is_durable_and_reads_its_own_baseline
 test_every_rejection_class
 test_an_operator_reserved_request_cannot_be_answered_as_delegated

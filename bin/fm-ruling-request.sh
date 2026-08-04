@@ -208,18 +208,16 @@ command_create() {
   if [ -f "$dir/request" ]; then
     ledger=$(fm_away_ledger_path "$session")
     if cmp -s "$dir/request" "$pending.final" \
-      && [ -f "$dir/evidence" ]; then
-      if ! ruling_request_event_exists "$ledger" "$id"; then
-        fm_away_ledger_append "$session" ruling-request \
-          "request=$id" "task=$task" "tier=$tier" "baseline=$baseline" \
-          || { rm -f "$pending.final"; fail 'could not complete ruling-request publication'; }
-      fi
+      && [ -f "$dir/evidence" ] \
+      && ruling_request_event_exists "$ledger" "$id"; then
       rm -f "$pending.final"
       printf '%s\n' "$id"
       return 0
     fi
-    cmp -s "$dir/request" "$pending.final" \
-      && { rm -f "$pending.final"; fail "request $id exists without complete evidence publication"; }
+    if cmp -s "$dir/request" "$pending.final"; then
+      rm -f "$pending.final"
+      fail "request $id exists without complete evidence and ledger publication"
+    fi
     rm -f "$pending.final"
     fail "request $id already exists with different content; use a new decision key"
   fi
@@ -240,6 +238,8 @@ command_create() {
   [ "${FM_RULING_TEST_PUBLISH_FAIL:-0}" != 1 ] \
     || { rm -rf "$stage"; fail 'could not publish the ruling request'; }
   mv "$stage" "$dir" || { rm -rf "$stage"; fail 'could not publish the ruling request'; }
+  [ "${FM_RULING_TEST_LEDGER_FAIL:-0}" != 1 ] \
+    || fail 'could not complete ruling-request publication'
   fm_away_ledger_append "$session" ruling-request \
     "request=$id" "task=$task" "tier=$tier" "baseline=$baseline" \
     || fail 'could not complete ruling-request publication'
