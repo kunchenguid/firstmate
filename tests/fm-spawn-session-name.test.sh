@@ -222,7 +222,9 @@ test_ship_spawn_carries_no_label_or_name_flag() {
   rec=$(make_spawn_case ship-unchanged claude "$id")
   read_case_record "$rec"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  # A ship spawn carries an explicit delivery contract; this test is about the
+  # session-name axis, so it passes a fixed valid one.
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "ship spawn should succeed unchanged"
   assert_no_grep "^label=" "$HOME_DIR/state/$id.meta" "ship meta must not record a label"

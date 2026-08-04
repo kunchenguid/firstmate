@@ -50,6 +50,7 @@ fm_git_identity fmtest fmtest@example.com
 
 REG_LINE_PLAIN='- sm-alpha - Owns the alpha domain. (home: %s; scope: alpha work; projects: alpha; added 2026-01-01)'
 REG_LINE_LABELLED='- sm-alpha - Owns the alpha domain. (home: %s; scope: alpha work; projects: alpha; added 2026-01-01; label: SM Alpha)'
+REG_LINE_REMOTE='- sm-alpha - Owns the alpha domain. (host: alpha-host; root: /srv/firstmate; home: %s; scope: alpha work; projects: alpha; added 2026-01-01)'
 
 # --- fixtures ---------------------------------------------------------------
 
@@ -837,6 +838,29 @@ test_backlog_handoff_refuses_a_captain_commanded_lane() {
   pass "firstmate does not route work into a captain-commanded lane"
 }
 
+# A remote lane is routed through a different delivery path than a local one, so
+# the command guard must sit AHEAD of that split rather than inside the local
+# branch. If it ever slipped below the split, a captain-held remote lane would be
+# handed work over the transport before anything asked who commands it, and this
+# refusal would become a transport error instead.
+test_backlog_handoff_refuses_a_captain_commanded_remote_lane() {
+  local home lane out rc
+  home=$(make_fleet handoff-refusal-remote "$REG_LINE_REMOTE")
+  lane=$(lane_of "$home")
+  printf '## Queued\n\n- [ ] alpha-item - do alpha work\n' > "$home/data/backlog.md"
+  printf '## Queued\n' > "$lane/data/backlog.md"
+  run_cmd "$home" onramp sm-alpha >/dev/null
+  rc=0
+  out=$(env FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_DATA_OVERRIDE="$home/data" \
+    "$HANDOFF" sm-alpha alpha-item 2>&1) || rc=$?
+  [ "$rc" != 0 ] || fail "firstmate must not route work into a captain-commanded remote lane"
+  assert_contains "$out" "captain command" \
+    "the remote refusal must name captain command, not fail somewhere down the transport"
+  assert_grep 'alpha-item' "$home/data/backlog.md" \
+    "a refused remote handoff must leave the item in the main backlog"
+  pass "firstmate does not route work into a captain-commanded remote lane either"
+}
+
 test_teardown_refuses_to_retire_a_captain_commanded_lane() {
   local home out rc
   home=$(make_fleet teardown-refusal)
@@ -1156,6 +1180,7 @@ test_fm_send_refuses_to_interrupt_a_captain_commanded_lane
 test_the_handback_request_can_still_be_retried
 test_a_completed_handback_closes_its_own_expectation
 test_backlog_handoff_refuses_a_captain_commanded_lane
+test_backlog_handoff_refuses_a_captain_commanded_remote_lane
 test_teardown_refuses_to_retire_a_captain_commanded_lane
 test_an_unrecorded_lane_is_retireable_and_never_silently_so
 test_an_unreadable_command_field_still_blocks_retirement

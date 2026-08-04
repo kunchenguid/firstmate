@@ -9,8 +9,10 @@
 #      A conflicting merge STOPS the run and is reported for hand resolution;
 #      nothing is forced and nothing is pushed.
 #   2. ADVANCE: fast-forward the running firstmate repo's default branch and every
-#      registered secondmate home (each a treehouse worktree of this same repo, or
-#      a standalone clone) to fork/<default>.
+#      registered secondmate home to fork/<default>. Local homes are treehouse
+#      worktrees of this repo or standalone clones; remote routes update their
+#      configured code root on that host and then fast-forward the persistent
+#      home to that root.
 # Homes advance from the FORK, never from origin: an origin advance would strip
 # the fleet's adaptations, which is why ff-lib's origin base mode is ingest-only.
 #
@@ -39,8 +41,13 @@
 #   - reread-firstmate: yes|no    (did the running firstmate's instructions change)
 #   - nudge-secondmates: fm-<id>...|none   (updated live secondmates to nudge)
 #
-# Exit status is 1 when the ingest could not complete (conflict, missing remote,
-# fetch or push failure), leaving every home untouched on its current commit.
+# Exit status is 1 when the ingest STARTED and could not complete (conflict,
+# fetch or push failure), leaving every home untouched on its current commit:
+# the fork tip is real but stale, so advancing to it would half-apply the update.
+# A checkout with no fork or origin remote never starts an ingest at all. That is
+# reported as "upstream: skipped: no <remote> remote" and exits 0, matching the
+# skip ff_target's fork base mode already returns for such a target; the advance
+# then skips it too, so nothing moves and nothing is advanced from origin.
 #
 # Usage: fm-update.sh [--help]
 set -eu
@@ -85,8 +92,18 @@ ingest_upstream() {
   }
   for remote in fork origin; do
     if ! git -C "$dir" remote get-url "$remote" >/dev/null 2>&1; then
-      echo "upstream: failed: no $remote remote"
-      return 1
+      # A checkout with no fork (or no origin) remote is not a participant in the
+      # two-hop model: there is nothing to ingest into, or nothing to ingest from.
+      # That is a SKIP, not a failure, and it is the same verdict ff_target's fork
+      # base mode already returns for such a target ("skipped: no fork remote",
+      # bin/fm-ff-lib.sh). Reporting it as a failure here contradicted that and
+      # aborted the whole run over a target the advance would have skipped anyway.
+      #
+      # Skipping never becomes an origin fallback: every advance below still goes
+      # through ff_target's fork base mode, which refuses to advance any target
+      # from origin. A fork-less checkout therefore stays exactly where it is.
+      echo "upstream: skipped: no $remote remote"
+      return 0
     fi
     if ! fetch_once "$dir" "$remote"; then
       echo "upstream: failed: $remote fetch failed"
@@ -184,14 +201,39 @@ sweep_live_secondmate_metas "$STATE" fork no
 # Registry backstop: a secondmate registered in data/secondmates.md but without
 # a live meta (e.g. between restarts) is still its persistent on-disk home.
 if [ -f "$SECONDMATES_MD" ]; then
-  while IFS= read -r line; do
+  while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       "- "*) ;;
       *) continue ;;
     esac
-    id=$(printf '%s\n' "$line" | sed -n 's/^- \([^ ][^ ]*\) - .*/\1/p')
-    home=$(printf '%s\n' "$line" | sed -n 's/.*(home:[[:space:]]*\([^;]*\);.*/\1/p' | sed 's/[[:space:]]*$//')
-    process_secondmate "$id" "$home" "" fork no
+    if ! secondmate_registry_parse_line "$line"; then
+      echo "secondmate registry: skipped malformed entry: $line" >&2
+      continue
+    fi
+    id=$SECONDMATE_REGISTRY_ID
+    home=$SECONDMATE_REGISTRY_HOME
+    if [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ]; then
+      if remote_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh update "$id" < /dev/null 2>&1); then
+        remote_result=$(printf '%s\n' "$remote_out" | tail -1)
+        case "$remote_result" in
+          synced:*)
+            echo "remote secondmate $id: updated on $SECONDMATE_REGISTRY_HOST (${remote_result#synced: })"
+            if [ -f "$STATE/$id.meta" ] && grep -qx 'kind=secondmate' "$STATE/$id.meta"; then
+              FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS fm-$id"
+            fi
+            ;;
+          current:*) echo "remote secondmate $id: already current on $SECONDMATE_REGISTRY_HOST (${remote_result#current: })" ;;
+          *) echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: malformed update result" >&2 ;;
+        esac
+      else
+        echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: ${remote_out%%$'\n'*}" >&2
+      fi
+    else
+      # base_mode "fork", never "origin": a local home advances to the ingested
+      # fork tip, and advancing it from origin would strip this fleet's
+      # adaptations - the whole reason the fork exists.
+      process_secondmate "$id" "$home" "" fork no
+    fi
   done < "$SECONDMATES_MD"
 fi
 

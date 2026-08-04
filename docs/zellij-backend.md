@@ -96,7 +96,8 @@ Real test cleanup uses only an isolated non-`firstmate` session and the guard in
 - `--secondmate` spawns are refused, as on Orca and cmux.
 - All homes share one session and tab bar; scoped titles prevent cross-home identity collisions but do not create per-home visual containers.
   A secondmate home still selects its own backend, so its ship and scout tabs can share this session even though no secondmate agent can land here.
-- There is no native busy or push-event signal, so supervision uses capture/hash and busy-regex polling.
+- There is no native busy or push-event signal, so supervision uses capture/hash polling for screen changes and each harness adapter's semantic lifecycle for worker state.
+  Grok alone retains its isolated rendered-tail fallback.
 - There is no verified agent-process liveness signal, so a dead legacy Zellij secondmate is reported inconclusive rather than auto-respawned.
 - New-tab focus restoration has a narrow visible race.
 - CLI exit status is not meaningful; a target can still disappear after structural readiness checks.

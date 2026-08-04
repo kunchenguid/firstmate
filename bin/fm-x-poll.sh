@@ -17,6 +17,14 @@
 #       claim state/x-context/<request_id>.offered.json, and print one compact
 #       line "x-mention <request_id>" (which becomes the watcher wake payload)
 #   an already offered request_id                -> print nothing, exit 0
+#   a new set of unreconciled public-followup terminal results -> print one
+#       "public-followup ..." line BEFORE the relay call, so a promised final
+#       reply is surfaced through this same wake path
+#
+# The public-followup line rides here rather than on a new poll of its own: this
+# check only exists in a home that opted into the relay, and it is an O(1)
+# directory presence test plus a signature compare, with no tasks-axi call and no
+# backlog scan. A home with no pending terminal results pays nothing for it.
 # The full object is stashed verbatim, so any conversation context the relay
 # includes (in_reply_to: {author_handle, text}, null for a fresh mention) is
 # preserved for fmx-respond to handle follow-ups with continuity. The durable
@@ -32,12 +40,29 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-# shellcheck source=bin/fm-x-lib.sh
-. "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-public-followup-lib.sh
+# Also brings in bin/fm-x-lib.sh, which this script's relay client uses.
+. "$SCRIPT_DIR/fm-public-followup-lib.sh"
 
 fmx_load_config
 # Hard no-op when X mode is off: this is what keeps the check shim inert.
 [ -n "$FMX_TOKEN" ] || exit 0
+
+# Unreconciled terminal results for a public commitment are actionable even when
+# the relay has no new mention, and they outlive any session, so surface them
+# first. The signature compare keeps this to one wake per new result set instead
+# of one per cycle; bin/fm-public-followup.sh consume clears it.
+if fm_pf_has_events "$STATE"; then
+  PF_ROOT=$(fm_pf_root "$STATE")
+  PF_SIG=$(fm_pf_events_signature "$STATE" 2>/dev/null) || PF_SIG=
+  if [ -n "$PF_SIG" ] \
+    && [ "$(cat "$PF_ROOT/$FM_PF_SURFACED_BASENAME" 2>/dev/null || true)" != "$PF_SIG" ]; then
+    if printf '%s\n' "$PF_SIG" \
+      | fmx_private_artifact_publish_stdin "$PF_ROOT" "$FM_PF_SURFACED_BASENAME" 600 2>/dev/null; then
+      printf 'public-followup terminal results are waiting to be reconciled\n'
+    fi
+  fi
+fi
 
 ERROR_FILE="$STATE/x-poll.error"
 CLAIM_ERROR_FILE="$STATE/x-poll.claim-error"
