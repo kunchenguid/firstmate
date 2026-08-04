@@ -134,6 +134,10 @@ For the automatic arm, change only the disposable fixture project's reserve to f
 The measured trigger-only reserve was 250,000 tokens and is never a production recommendation.
 Resume, clone, fork, alternate-model, split-turn, retry, and overflow checks remain separate acceptance arms rather than reasons to widen the default.
 
+`FM_CONTEXT_EFFECTIVENESS_LIVE_E2E=1 tests/fm-context-effectiveness-live-e2e.test.sh` is the committed opt-in credentialed regression for the single evidence-procedure owner, the durable stow resume receipt, and the refusal of summary-only token-savings claims.
+It needs a live provider credential, refuses any installed Pi other than the measured 0.83.0, and uses `openai-codex/gpt-5.6-sol` unless `FM_CONTEXT_EFFECTIVENESS_MODEL` names another model.
+`tests/fm-context-effectiveness.test.sh` is its credential-free counterpart and also executes the handoff blocks below.
+
 ## Primary-home local settings handoff
 
 The tracked change does not modify the primary home's private `.pi/settings.json`.
@@ -145,7 +149,8 @@ It preserves every unrelated top-level key, every unrelated package, unknown fie
 
 Set the handoff context once in the shell that runs the blocks below.
 `FM_PRIMARY_HOME` is the absolute path of the active Firstmate primary root, so this record stays runnable from any home.
-`tests/fm-context-effectiveness.test.sh` extracts and executes these labelled blocks directly, so editing one without rerunning that test fails.
+`tests/fm-context-effectiveness.test.sh` extracts and executes these labelled blocks directly against disposable fixtures, so editing one without rerunning that test fails.
+Those handoff checks are measured only against exact Pi 0.83.0 and report a skip on any other installed version, so re-measure this record after a Pi upgrade rather than reading a skipped run as coverage.
 
 ```sh fm-handoff=context
 cd "${FM_PRIMARY_HOME:?set FM_PRIMARY_HOME to the active Firstmate primary root}"
