@@ -71,9 +71,7 @@ case "${1:-}" in
         if [ "${1:-}" = --run ]; then printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
         else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
       logs)
-        if [ "${FM_FAKE_WORKER_LOG_UNAVAILABLE:-0}" != 1 ]; then
-          printf 'codex started pid=4242\n'
-        fi
+        printf '%s\n' "${FM_FAKE_WORKER_LOG:-}"
         printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
     esac
     ;;
@@ -130,7 +128,11 @@ SH
 set -u
 if printf '%s\n' "$*" | grep -F -- '-p 4242' >/dev/null; then
   [ -n "${FM_FAKE_WORKER_PS_STATE:-}" ] || exit 1
-  printf '%s codex native worker\n' "$FM_FAKE_WORKER_PS_STATE"
+  if printf '%s\n' "$*" | grep -F -- 'lstart=' >/dev/null; then
+    printf '%s\n' "${FM_FAKE_WORKER_IDENTITY:-Mon Aug  3 12:00:00 2026 codex native worker}"
+  else
+    printf '%s codex native worker\n' "$FM_FAKE_WORKER_PS_STATE"
+  fi
   exit 0
 fi
 exec /bin/ps "$@"
@@ -184,10 +186,17 @@ reset_fakes() {
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
   FM_FAKE_WORKER_PS_STATE='S+'
-  FM_FAKE_WORKER_LOG_UNAVAILABLE=0
+  FM_FAKE_WORKER_IDENTITY='Mon Aug  3 12:00:00 2026 codex native worker'
+  FM_FAKE_WORKER_LOG=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
-  export FM_FAKE_WORKER_PS_STATE FM_FAKE_WORKER_LOG_UNAVAILABLE
+  export FM_FAKE_WORKER_PS_STATE FM_FAKE_WORKER_IDENTITY FM_FAKE_WORKER_LOG
+}
+
+worker_start_log() {
+  local identity_hex
+  identity_hex=$(printf '%s' "$FM_FAKE_WORKER_IDENTITY" | od -An -v -tx1 | tr -d '[:space:]')
+  printf 'codex started pid=4242 pid-identity-hex=%s\n' "$identity_hex"
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -382,7 +391,7 @@ test_headless_pipeline_worker_liveness_overrides_pane_interruption() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/headless-live.meta" "window=fm:fm-headless-live" "worktree=$d/wt" "kind=ship" "harness=codex"
   FM_FAKE_AXI_STATUS="$(run_running fm/headless-live)"
-  FM_FAKE_CI_LOGS='codex started pid=4242'
+  FM_FAKE_WORKER_LOG=$(worker_start_log)
   FM_FAKE_WORKER_PS_STATE='S+'
   FM_FAKE_TMUX_MISSING=1
   out=$(run_crew_state "$d" headless-live)
@@ -400,7 +409,7 @@ test_dead_or_suspended_pipeline_worker_is_not_recorded_working() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/headless-dead.meta" "window=fm:fm-headless-dead" "worktree=$d/wt" "kind=ship" "harness=codex"
   FM_FAKE_AXI_STATUS="$(run_running fm/headless-dead)"
-  FM_FAKE_CI_LOGS='codex started pid=4242'
+  FM_FAKE_WORKER_LOG=$(worker_start_log)
   FM_FAKE_WORKER_PS_STATE=''
   out=$(run_crew_state "$d" headless-dead)
   assert_not_contains "$out" 'state: working' "dead step worker inherited the stale running row"
@@ -421,22 +430,43 @@ test_dead_or_suspended_pipeline_worker_is_not_recorded_working() {
   pass "dead, suspended, and zombie workers never inherit a stale running verdict"
 }
 
-test_unbound_pipeline_worker_is_indeterminate() {
+test_reused_pipeline_worker_pid_is_not_live() {
   reset_fakes
   local d out
+  d=$(new_case headless-reused)
+  make_repo_on_branch "$d/wt" fm/headless-reused
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/headless-reused.meta" "window=fm:fm-headless-reused" "worktree=$d/wt" "kind=ship" "harness=codex"
+  FM_FAKE_AXI_STATUS="$(run_running fm/headless-reused)"
+  FM_FAKE_WORKER_LOG=$(worker_start_log)
+  FM_FAKE_WORKER_IDENTITY='Mon Aug  3 12:01:00 2026 codex unrelated replacement'
+  out=$(run_crew_state "$d" headless-reused)
+  assert_contains "$out" 'state: blocked' "reused allowed-family PID was reported live"
+  assert_contains "$out" 'headless pipeline worker identity replaced pid=4242' \
+    "reused PID did not contradict the bound worker identity"
+  pass "reused worker PID cannot impersonate the recorded process birth"
+}
+
+test_unbound_pipeline_worker_preserves_authoritative_state() {
+  reset_fakes
+  local d out fixture expected
   d=$(new_case headless-unbound)
   make_repo_on_branch "$d/wt" fm/headless-unbound
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/headless-unbound.meta" "window=fm:fm-headless-unbound" "worktree=$d/wt" "kind=ship" "harness=codex"
-  FM_FAKE_AXI_STATUS="$(run_running fm/headless-unbound)"
-  FM_FAKE_CI_LOGS='pipeline log shape without a native worker pid'
-  FM_FAKE_WORKER_LOG_UNAVAILABLE=1
-  out=$(run_crew_state "$d" headless-unbound)
-  assert_contains "$out" 'state: unknown' \
-    "PID-unbound run inherited a live verdict from the stale running ledger"
-  assert_contains "$out" 'headless worker identity unavailable' \
-    "PID-unbound run did not report its process-level evidence limit"
-  pass "PID-unbound pipeline workers remain indeterminate rather than guessed live or dead"
+  FM_FAKE_CI_LOGS='pipeline log shape without a native worker identity'
+  for fixture in running fixing ci; do
+    case "$fixture" in
+      running) FM_FAKE_AXI_STATUS="$(run_running fm/headless-unbound)"; expected='validating (running)' ;;
+      fixing) FM_FAKE_AXI_STATUS="$(run_fixing fm/headless-unbound)"; expected='validating (fixing)' ;;
+      ci) FM_FAKE_AXI_STATUS="$(run_top_level_ci fm/headless-unbound)"; expected='ci running' ;;
+    esac
+    out=$(run_crew_state "$d" headless-unbound)
+    assert_contains "$out" 'state: working' "PID-unbound $fixture run lost its authoritative working state"
+    assert_contains "$out" "$expected" "PID-unbound $fixture run lost its run-step detail"
+    assert_not_contains "$out" 'state: unknown' "PID-unbound $fixture run manufactured indeterminacy"
+  done
+  pass "PID-unbound running, fixing, and CI states remain authoritatively working"
 }
 
 # (b) needs-decision log + a resumed (running/fixing) run = SUPERSEDED
@@ -1393,7 +1423,8 @@ test_missing_run_head_falls_back_to_current_state() {
 test_active_run_is_authoritative
 test_headless_pipeline_worker_liveness_overrides_pane_interruption
 test_dead_or_suspended_pipeline_worker_is_not_recorded_working
-test_unbound_pipeline_worker_is_indeterminate
+test_reused_pipeline_worker_pid_is_not_live
+test_unbound_pipeline_worker_preserves_authoritative_state
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
 test_genuine_parked_not_superseded

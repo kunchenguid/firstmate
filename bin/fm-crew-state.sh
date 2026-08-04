@@ -35,11 +35,11 @@
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
 #      green, so a green PR is never silently read as still-validating.
-#      For an active full run whose step log names its native worker PID, the
-#      process is checked independently of the pane: live remains working,
-#      stopped/suspended or absent never inherits the stale running row, and an
-#      unrecognized reused PID becomes unknown. Pane interruption cannot stop or
-#      prove the state of this detached worker.
+#      For an active full run whose step log binds its native worker PID to an
+#      exact process-birth identity, the process is checked independently of the
+#      pane: live remains working, while stopped, suspended, absent, or replaced
+#      never inherits the stale running row. A PID without that binding leaves
+#      the authoritative run-step mapping unchanged.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -112,6 +112,9 @@ HARNESS=$(meta_value harness)
 if [ -z "$WT" ] || [ ! -d "$WT" ]; then
   emit unknown none "worktree gone (torn down?)"
 fi
+
+# shellcheck source=bin/fm-process-identity-lib.sh
+. "$SCRIPT_DIR/fm-process-identity-lib.sh"
 
 # --- status log ------------------------------------------------------------
 
@@ -315,13 +318,12 @@ nm_ci_checks_state() {
 }
 
 # Resolve native no-mistakes step-worker health when the current step log exposes
-# a start PID. Absence of such an identity is an explicit unsupported shape and
-# leaves the run-record mapping unchanged; a named PID is never allowed to do so
-# when the process is dead, suspended, or has been reused by an unrelated command.
+# a PID bound to the exact process identity captured when it started. An absent
+# binding leaves the run-record mapping unchanged.
 NM_WORKER_HEALTH=unavailable
 NM_WORKER_PID=
 nm_headless_worker_health() {
-  local run_id step log started pid related ps_out stat command
+  local run_id step log started pid expected_identity current_identity related ps_out stat
   NM_WORKER_HEALTH=unavailable
   NM_WORKER_PID=
   run_id=$(strip_quotes "$(nm_field id)")
@@ -333,11 +335,13 @@ nm_headless_worker_health() {
   log=$(nm_run axi logs --step "$step" --run "$run_id")
   [ -n "$log" ] || return 0
   started=$(printf '%s\n' "$log" \
-    | grep -Ei '(codex|claude|opencode|grok|kimi|pi|agent).*started.*pid[=: ]+[0-9]+' \
+    | grep -Ei '(codex|claude|opencode|grok|kimi|pi|agent).*started.*pid[=: ]+[0-9]+.*pid-identity-hex=[0-9a-f]+' \
     | tail -1)
   [ -n "$started" ] || return 0
   pid=$(printf '%s\n' "$started" | sed -nE 's/.*pid[=: ]+([0-9]+).*/\1/p')
   case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  expected_identity=$(printf '%s\n' "$started" | sed -nE 's/.*pid-identity-hex=([0-9a-fA-F]+).*/\1/p' | tr 'A-F' 'a-f')
+  case "$expected_identity" in ''|*[!0-9a-f]*) return 0 ;; esac
   NM_WORKER_PID=$pid
   related=$(printf '%s\n' "$log" \
     | grep -Ei "((started|exited|stopped).*(pid[=: ]+)?$pid)|((pid[=: ]+)?$pid.*(started|exited|stopped))" \
@@ -345,16 +349,20 @@ nm_headless_worker_health() {
   case "$related" in
     *exited*|*stopped*) NM_WORKER_HEALTH=dead; return 0 ;;
   esac
+  current_identity=$(fm_pid_identity "$pid") || {
+    NM_WORKER_HEALTH=dead
+    return 0
+  }
+  current_identity=$(printf '%s' "$current_identity" | od -An -v -tx1 | tr -d '[:space:]')
+  if [ "$current_identity" != "$expected_identity" ]; then
+    NM_WORKER_HEALTH=reused
+    return 0
+  fi
   ps_out=$(ps -p "$pid" -o stat= -o command= 2>/dev/null) || {
     NM_WORKER_HEALTH=dead
     return 0
   }
   stat=$(printf '%s\n' "$ps_out" | awk 'NR == 1 { print $1 }')
-  command=${ps_out#*"$stat"}
-  if ! printf '%s\n' "$command" | grep -Eiq 'codex|claude|opencode|grok|kimi|(^|[ /])pi([ /]|$)|agent'; then
-    NM_WORKER_HEALTH=unknown
-    return 0
-  fi
   case "$stat" in
     *Z*) NM_WORKER_HEALTH=dead ;;
     *T*) NM_WORKER_HEALTH=suspended ;;
@@ -584,13 +592,16 @@ if [ "$HAVE_RUN" = 1 ]; then
         RUN_STATE=blocked
         RUN_DETAIL="run record still active${SEP}headless pipeline worker suspended pid=$NM_WORKER_PID"
         ;;
+      reused)
+        RUN_STATE=blocked
+        RUN_DETAIL="run record still active${SEP}headless pipeline worker identity replaced pid=$NM_WORKER_PID"
+        ;;
       unknown)
         RUN_STATE=unknown
         RUN_DETAIL="run record still active${SEP}headless worker pid=$NM_WORKER_PID has unrecognized identity"
         ;;
       *)
-        RUN_STATE=unknown
-        RUN_DETAIL="run record still active${SEP}headless worker identity unavailable; live/dead state is indeterminate"
+        RUN_DETAIL="$RUN_DETAIL${SEP}headless worker identity unavailable; run record only"
         ;;
     esac
   fi
