@@ -74,6 +74,16 @@ run_verify() {
   FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" "$VERIFY" "$@" 2>&1
 }
 
+run_verify_with_path() {
+  local path=$1
+  shift
+  PATH="$path:$PATH" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" "$VERIFY" "$@" 2>&1
+}
+
+test_mtime() {
+  stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+}
+
 # --- (a) family alias matches any member of that family ---------------------
 
 wt=$(meta alias-match opus)
@@ -175,6 +185,35 @@ else
   pass "unreadable evidence fails loudly"
 fi
 
+wt=$(meta find-failure opus spawned_at=1)
+write_transcript "$wt" s1 claude-opus-5
+fakebin=$(fm_fakebin "$TMP_ROOT/find-failure")
+cat > "$fakebin/find" <<'SH'
+#!/usr/bin/env bash
+echo "synthetic find failure" >&2
+exit 7
+SH
+chmod +x "$fakebin/find"
+out=$(run_verify_with_path "$fakebin" find-failure); code=$?
+expect_code 4 "$code" "transcript enumeration failure exits 4"
+assert_contains "$out" "verdict: unverifiable" "find failure is unverifiable"
+assert_contains "$out" "could not be enumerated" "find failure retains its cause"
+pass "transcript enumeration failure fails loudly"
+
+wt=$(meta stat-failure opus spawned_at=1)
+write_transcript "$wt" s1 claude-opus-5
+fakebin=$(fm_fakebin "$TMP_ROOT/stat-failure")
+cat > "$fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+exit 9
+SH
+chmod +x "$fakebin/stat"
+out=$(run_verify_with_path "$fakebin" stat-failure); code=$?
+expect_code 4 "$code" "transcript stat failure exits 4"
+assert_contains "$out" "verdict: unverifiable" "stat failure is unverifiable"
+assert_contains "$out" "modification time could not be read" "stat failure retains its cause"
+pass "transcript stat failure fails loudly"
+
 # --- (f) pending and unpinned are distinct no-verdict outcomes --------------
 
 wt=$(meta fresh-worker opus)
@@ -186,6 +225,10 @@ expect_code 0 "$code" "a worker with no turn yet does not alarm"
 assert_contains "$out" "verdict: pending" "no model-attributed turn yet is pending"
 assert_not_contains "$out" "verdict: match" "pending never reads as a verified match"
 pass "a worker that has not taken a turn is pending, not verified"
+out=$(run_verify fresh-worker --terminal); code=$?
+expect_code 4 "$code" "terminal verification rejects pending evidence"
+assert_contains "$out" "verdict: pending" "terminal rejection preserves the pending verdict"
+pass "terminal verification rejects pending as no verdict"
 
 # `<synthetic>` is a runtime placeholder for messages no model served. It must
 # neither manufacture a mismatch nor stand in as evidence of a match.
@@ -212,13 +255,17 @@ expect_code 0 "$code" "an unpinned dispatch does not alarm"
 assert_contains "$out" "verdict: unpinned" "no pinned model means no promise to check"
 assert_not_contains "$out" "verdict: match" "unpinned never claims a verified match"
 pass "unpinned dispatch is reported as unpinned, not verified"
+out=$(run_verify unpinned-dispatch --terminal); code=$?
+expect_code 0 "$code" "terminal verification allows an unpinned dispatch"
+assert_contains "$out" "verdict: unpinned" "terminal unpinned output stays explicit"
+pass "terminal verification allows unpinned without calling it verified"
 
 # --- (g) spawned_at binds evidence to this dispatch -------------------------
 #
 # A worktree from a reusable pool can still carry the transcripts of a previous
 # occupant. The dispatch timestamp is what tells the two apart.
 
-wt=$(meta reused-slot opus spawned_at="$(date +%s)")
+wt=$(meta reused-slot opus spawned_at="$(( $(date +%s) - 2 ))")
 write_transcript "$wt" old claude-opus-4-8
 touch -t 200001010000 "$(encoded_dir "$wt")/old.jsonl"
 write_transcript "$wt" new claude-opus-5
@@ -229,7 +276,7 @@ assert_not_contains "$out" "claude-opus-4-8" "the previous occupant's model is n
 pass "dispatch timestamp binds evidence to this dispatch"
 
 # A bound scan still catches a real deviation inside its own window.
-wt=$(meta reused-slot-bad opus spawned_at="$(date +%s)")
+wt=$(meta reused-slot-bad opus spawned_at="$(( $(date +%s) - 2 ))")
 write_transcript "$wt" old claude-opus-5
 touch -t 200001010000 "$(encoded_dir "$wt")/old.jsonl"
 write_transcript "$wt" new claude-sonnet-5
@@ -237,6 +284,40 @@ out=$(run_verify reused-slot-bad); code=$?
 expect_code 3 "$code" "a bound scan still detects this dispatch's own downgrade"
 assert_contains "$out" "verdict: mismatch" "binding does not blunt detection"
 pass "dispatch timestamp does not hide a real downgrade"
+
+wt=$(meta equal-second opus)
+write_transcript "$wt" old claude-opus-5
+touch -t 200001010000 "$(encoded_dir "$wt")/old.jsonl"
+printf 'spawned_at=%s\n' "$(test_mtime "$(encoded_dir "$wt")/old.jsonl")" \
+  >> "$HOME_DIR/state/equal-second.meta"
+out=$(run_verify equal-second); code=$?
+expect_code 4 "$code" "equal-second evidence without an identity watermark exits 4"
+assert_contains "$out" "verdict: unverifiable" "equal-second evidence is not guessed"
+assert_not_contains "$out" "verdict: match" "equal-second evidence never reuses a prior match"
+pass "equal-second legacy evidence fails loudly instead of matching"
+
+wt=$(meta exact-watermark opus \
+  model_evidence_watermark=claude-transcript-v1 model_evidence_before=old.jsonl)
+write_transcript "$wt" old claude-opus-5
+write_transcript "$wt" new claude-sonnet-5
+touch -t 200001010000 "$(encoded_dir "$wt")/old.jsonl" "$(encoded_dir "$wt")/new.jsonl"
+printf 'spawned_at=%s\n' "$(test_mtime "$(encoded_dir "$wt")/old.jsonl")" \
+  >> "$HOME_DIR/state/exact-watermark.meta"
+out=$(run_verify exact-watermark); code=$?
+expect_code 3 "$code" "identity watermark catches a same-second current mismatch"
+assert_contains "$out" "verdict: mismatch" "the current same-second transcript is compared"
+assert_contains "$out" "actual: claude-sonnet-5" "only the current transcript identity is attributed"
+assert_not_contains "$out" "claude-opus-5" "the baseline transcript identity is excluded"
+pass "identity watermark disambiguates transcripts sharing the spawn second"
+
+capture_wt="$TMP_ROOT/wt/capture-watermark"
+mkdir -p "$capture_wt"
+write_transcript "$capture_wt" existing claude-opus-5
+out=$(FM_HOME="$HOME_DIR" "$VERIFY" --capture-watermark "$capture_wt" 2>&1); code=$?
+expect_code 0 "$code" "watermark capture succeeds"
+assert_contains "$out" "model_evidence_watermark=claude-transcript-v1" "watermark format is recorded"
+assert_contains "$out" "model_evidence_before=existing.jsonl" "existing transcript identity is recorded"
+pass "spawn-time watermark capture records existing transcript identities"
 
 # Without a timestamp, disagreeing evidence cannot be attributed. Guessing which
 # half belongs to this task would be exactly the silent pass to avoid.

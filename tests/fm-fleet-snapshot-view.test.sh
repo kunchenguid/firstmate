@@ -846,9 +846,40 @@ test_model_verification_surfaces_in_snapshot_and_view() {
   pass "a correctly routed fleet renders no model-routing section"
 }
 
+test_secondmate_home_summary_skips_model_enrichment() {
+  local home fakebin cfg wt dir find_log real_find out
+  home=$(make_home summary-skips-model)
+  fakebin=$(make_fakebin "$home")
+  cfg="$home/claude-config"
+  wt="$home/projects/worker"
+  mkdir -p "$wt" "$cfg/projects"
+  printf '%s\n' '## In flight' '- [ ] worker - Worker (repo: alpha) (kind: ship)' > "$home/data/backlog.md"
+  fm_write_meta "$home/state/worker.meta" \
+    "window=firstmate:fm-worker" "worktree=$wt" "project=alpha" \
+    "harness=claude" "kind=ship" "model=opus" "spawned_at=1"
+  dir="$cfg/projects/$(printf '%s' "$wt" | sed 's/[^A-Za-z0-9]/-/g')"
+  mkdir -p "$dir"
+  find_log="$home/model-find.log"
+  real_find=$(command -v find)
+  cat > "$fakebin/find" <<SH
+#!/usr/bin/env bash
+case "\$*" in *"*.jsonl"*) printf 'model transcript scan\n' >> "$find_log" ;; esac
+exec "$real_find" "\$@"
+SH
+  chmod +x "$fakebin/find"
+
+  out=$(PATH="$fakebin:$PATH" CLAUDE_CONFIG_DIR="$cfg" FM_HOME="$home" \
+    "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '.schema == "fm-secondmate-home-summary.v1"' >/dev/null \
+    || fail "bounded secondmate summary was not produced: $out"
+  [ ! -e "$find_log" ] || fail "bounded secondmate summary scanned model transcripts"
+  pass "bounded secondmate home summary skips model enrichment"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_model_verification_surfaces_in_snapshot_and_view
+test_secondmate_home_summary_skips_model_enrichment
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state

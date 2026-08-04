@@ -382,6 +382,27 @@ test_claude_threads_model_and_effort() {
   pass "claude receives --model and --effort profile flags"
 }
 
+test_claude_records_pre_dispatch_transcript_identities() {
+  local rec id out status cfg dir
+  id=profile-claude-watermark-z2b
+  rec=$(make_spawn_case profile-claude-watermark claude "$id")
+  read_case_record "$rec"
+  cfg="$CASE_DIR/claude-config"
+  dir="$cfg/projects/$(printf '%s' "$WT_DIR" | sed 's/[^A-Za-z0-9]/-/g')"
+  mkdir -p "$dir"
+  printf '{"type":"assistant","message":{"model":"claude-opus-4-8"}}\n' > "$dir/existing.jsonl"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$cfg" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model opus)
+  status=$?
+  expect_code 0 "$status" "claude spawn should capture its transcript watermark"
+  assert_grep "model_evidence_watermark=claude-transcript-v1" "$HOME_DIR/state/$id.meta" \
+    "claude spawn did not record the watermark format"
+  assert_grep "model_evidence_before=existing.jsonl" "$HOME_DIR/state/$id.meta" \
+    "claude spawn did not record the existing transcript identity"
+  pass "claude spawn records pre-dispatch transcript identities"
+}
+
 test_codex_threads_model_and_effort() {
   local rec id out status launch
   id=profile-codex-z3
@@ -684,6 +705,7 @@ test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
+test_claude_records_pre_dispatch_transcript_identities
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort

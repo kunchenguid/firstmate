@@ -2014,6 +2014,19 @@ else
   fi
 fi
 
+MODEL_EVIDENCE_WATERMARK=
+if [ "$HARNESS" = claude ]; then
+  MODEL_EVIDENCE_CWD=$WT
+  [ "$KIND" != secondmate ] || MODEL_EVIDENCE_CWD=$PROJ_ABS
+  if ! MODEL_EVIDENCE_WATERMARK=$(
+    CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-}" \
+      "$FM_ROOT/bin/fm-model-verify.sh" --capture-watermark "$MODEL_EVIDENCE_CWD"
+  ); then
+    echo "error: failed to capture the pre-dispatch model-evidence watermark for $ID" >&2
+    exit 1
+  fi
+fi
+
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 {
@@ -2028,11 +2041,8 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
-  # Dispatch timestamp, epoch seconds. bin/fm-model-verify.sh uses it to bind
-  # runtime model evidence to THIS dispatch: a worktree from a reusable pool can
-  # still carry a previous occupant's transcripts, and without an anchor that
-  # occupant's model cannot be told apart from this worker's.
   echo "spawned_at=$(date +%s)"
+  [ -z "$MODEL_EVIDENCE_WATERMARK" ] || printf '%s\n' "$MODEL_EVIDENCE_WATERMARK"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   [ -z "$ISSUE" ] || echo "issue=$ISSUE"
   # Default-off writes no traceparent= line (meta stays byte-identical).

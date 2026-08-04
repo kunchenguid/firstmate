@@ -27,7 +27,7 @@ Three placements were considered.
 - **In a `PostToolUse` guard.** Rejected as the primary mechanism: that surface observes `resolvedModel` for the harness's own delegation tool, which a firstmate primary already denies, and it never observes a `bin/fm-spawn.sh` dispatch - the record actually at risk. The empirical work behind that lever is recorded in [`verification/model-verification.md`](verification/model-verification.md) and stays available if the delegation surface ever needs its own check.
 - **Folded into `bin/fm-crew-state.sh`.** Rejected: that helper owns one contract, reconciling a crew's current run state. Model provenance is orthogonal to run state.
 
-The shipped placement is a standalone verifier rendered by the structured fleet snapshot, which firstmate already reviews every heartbeat.
+The shipped placement is a standalone verifier rendered by the structured fleet snapshot, which firstmate already reviews every heartbeat, and required by non-forced teardown before any evidence or task metadata is removed.
 
 ## Evidence
 
@@ -81,12 +81,15 @@ It names no model, so it is dropped: it can neither manufacture a mismatch nor s
 
 ## Binding evidence to one dispatch
 
-`bin/fm-spawn.sh` records `spawned_at=` (epoch seconds) alongside `model=`.
+Before launching Claude, `bin/fm-spawn.sh` records `model_evidence_watermark=claude-transcript-v1` and one `model_evidence_before=` row for every transcript identity already present in the worker's transcript directory.
 
 A worktree drawn from a reusable pool can still carry the transcripts of a previous occupant, whose model would otherwise be attributed to the current task.
-Those transcripts are never appended to again, so their modification time precedes this dispatch, and the timestamp separates them.
+The verifier excludes exactly those identities, so a prior transcript and the new worker's transcript remain distinguishable even when both files share the one-second modification timestamp recorded by the filesystem.
 
-A record written before `spawned_at=` existed cannot be bound.
+`spawned_at=` remains as a compatibility anchor for records without an identity watermark.
+A transcript whose modification time equals that legacy anchor is ambiguous and therefore `unverifiable`, never a match.
+
+A record written before either binding existed cannot be bound.
 In that case unanimous evidence is still attributed, with the weaker binding disclosed in the detail text, and disagreeing evidence is reported `unverifiable` rather than guessed at.
 
 ## Surfacing
@@ -94,15 +97,21 @@ In that case unanimous evidence is still attributed, with the weaker binding dis
 `bin/fm-fleet-snapshot.sh` carries `model:{verdict,recorded,actual[],source,detail}` per task.
 An unreadable or absent verifier answer becomes an explicit `unverifiable` verdict there, so a broken verifier can never render as a clean one.
 
+Non-forced `bin/fm-teardown.sh` accepts only `match` or `unpinned` before cleanup.
+It refuses on `mismatch`, `unverifiable`, or `pending` while the worktree, transcript evidence, and task metadata still exist for inspection.
+
 `bin/fm-fleet-view.sh` renders a `## Model Routing` section listing every task whose verdict is `mismatch` or `unverifiable`, and renders nothing at all when every worker verifies.
 Correctly routed work therefore looks exactly as it did before.
 
 ## Automated validation
 
 `tests/fm-model-verify.test.sh` owns the acceptance matrix and is registered in the `pure-contract-unit` family in `bin/fm-test-run.sh`.
-It covers family-alias and pinned-id comparison, the context-window suffix, a downgrade below the dispatched family, a mid-dispatch model change where one value still matches, every `unverifiable` path, the `pending` and `unpinned` no-verdict outcomes, the synthetic placeholder in both directions, dispatch-timestamp binding against a reused worktree in both directions, secondmate evidence resolved from its own home, `--all` exiting on the worst verdict, and the structured output.
+It covers family-alias and pinned-id comparison, the context-window suffix, a downgrade below the dispatched family, a mid-dispatch model change where one value still matches, enumeration and modification-time failures, the `pending` and `unpinned` no-verdict outcomes, the synthetic placeholder in both directions, exact transcript-identity binding including the equal-second boundary, legacy timestamp binding, secondmate evidence resolved from its own home, `--all` exiting on the worst verdict, and the structured output.
 
 `tests/fm-fleet-snapshot-view.test.sh` covers the snapshot field and the view section, including that a correctly routed fleet renders no section.
+It also proves that bounded secondmate-home summaries do not scan model transcripts.
+
+`tests/fm-teardown.test.sh` covers terminal refusal before cleanup on a mismatch and unchanged teardown on a match.
 
 Run:
 
@@ -110,4 +119,6 @@ Run:
 bin/fm-lint.sh
 tests/fm-model-verify.test.sh
 tests/fm-fleet-snapshot-view.test.sh
+tests/fm-spawn-dispatch-profile.test.sh
+tests/fm-teardown.test.sh
 ```

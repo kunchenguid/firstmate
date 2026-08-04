@@ -484,7 +484,11 @@ task_json_lines() {
     fi
 
     current_json=$(crew_state_json "$id")
-    model_json=$(model_verify_json "$id")
+    if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
+      model_json='{"verdict":"not_checked","recorded":null,"actual":[],"source":"none","detail":"not included in bounded secondmate home summaries"}'
+    else
+      model_json=$(model_verify_json "$id")
+    fi
     event_json=$(status_event_json "$status_log")
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
     current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')

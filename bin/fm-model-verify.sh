@@ -47,7 +47,9 @@
 # Read-only and side-effect free.
 #
 # Usage: fm-model-verify.sh <task-id> [--json]
+#        fm-model-verify.sh <task-id> --terminal
 #        fm-model-verify.sh --all [--json]
+#        fm-model-verify.sh --capture-watermark <worker-cwd>
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,25 +63,40 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 usage() {
   cat <<'EOF'
 usage: fm-model-verify.sh <task-id> [--json]
+       fm-model-verify.sh <task-id> --terminal
        fm-model-verify.sh --all [--json]
+       fm-model-verify.sh --capture-watermark <worker-cwd>
 
 Verify the model a dispatched worker actually ran on against the model recorded
 for it in state/<id>.meta.
 
 Exit: 0 match/pending/unpinned · 3 mismatch · 4 unverifiable · 2 usage error.
+With --terminal, pending exits 4 because cleanup requires a conclusive verdict.
 With --all, the worst verdict across all tasks sets the exit code.
 EOF
 }
 
 JSON=0
 ALL=0
+TERMINAL=0
 ID=
+CAPTURE_WATERMARK=0
+CAPTURE_CWD=
 
-for arg in "$@"; do
+while [ "$#" -gt 0 ]; do
+  arg=$1
+  shift
   case "$arg" in
     -h|--help) usage; exit 0 ;;
     --json) JSON=1 ;;
     --all) ALL=1 ;;
+    --terminal) TERMINAL=1 ;;
+    --capture-watermark)
+      [ "$#" -gt 0 ] || { usage >&2; exit 2; }
+      CAPTURE_WATERMARK=1
+      CAPTURE_CWD=$1
+      shift
+      ;;
     -*) usage >&2; exit 2 ;;
     *)
       [ -z "$ID" ] || { usage >&2; exit 2; }
@@ -88,9 +105,16 @@ for arg in "$@"; do
   esac
 done
 
-if [ "$ALL" -eq 1 ]; then
-  [ -z "$ID" ] || { usage >&2; exit 2; }
+if [ "$CAPTURE_WATERMARK" -eq 1 ]; then
+  [ "$ALL" -eq 0 ] && [ "$JSON" -eq 0 ] && [ "$TERMINAL" -eq 0 ] \
+    && [ -z "$ID" ] && [ -n "$CAPTURE_CWD" ] \
+    || { usage >&2; exit 2; }
+elif [ "$ALL" -eq 1 ]; then
+  [ -z "$ID" ] && [ "$TERMINAL" -eq 0 ] || { usage >&2; exit 2; }
 elif [ -z "$ID" ]; then
+  usage >&2
+  exit 2
+elif [ "$TERMINAL" -eq 1 ] && [ "$JSON" -eq 1 ]; then
   usage >&2
   exit 2
 fi
@@ -180,14 +204,63 @@ claude_transcript_dir() {  # <worker-cwd>
   printf '%s/projects/%s' "$(claude_config_dir)" "$encoded"
 }
 
+capture_claude_watermark() {  # <worker-cwd>
+  local dir listing f name names=()
+  dir=$(claude_transcript_dir "$1")
+  if [ ! -d "$dir" ]; then
+    printf 'model_evidence_watermark=claude-transcript-v1\n'
+    return 0
+  fi
+  if [ ! -r "$dir" ] || [ ! -x "$dir" ]; then
+    printf 'fm-model-verify: transcript directory is not readable: %s\n' "$dir" >&2
+    return 4
+  fi
+  if ! listing=$(find "$dir" -maxdepth 1 -type f -name '*.jsonl' -print 2>&1); then
+    printf 'fm-model-verify: transcript evidence could not be enumerated under %s: %s\n' "$dir" "$listing" >&2
+    return 4
+  fi
+  if ! listing=$(printf '%s\n' "$listing" | LC_ALL=C sort); then
+    printf 'fm-model-verify: transcript identities could not be ordered under %s\n' "$dir" >&2
+    return 4
+  fi
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    name=$(basename "$f")
+    case "$name" in
+      *[!A-Za-z0-9._-]*|'')
+        printf 'fm-model-verify: unsupported transcript identity under %s\n' "$dir" >&2
+        return 4
+        ;;
+      *.jsonl) ;;
+      *)
+        printf 'fm-model-verify: unsupported transcript identity under %s\n' "$dir" >&2
+        return 4
+        ;;
+    esac
+    names+=("$name")
+  done <<EOF
+$listing
+EOF
+  printf 'model_evidence_watermark=claude-transcript-v1\n'
+  for name in "${names[@]:-}"; do
+    [ -n "$name" ] || continue
+    printf 'model_evidence_before=%s\n' "$name"
+  done
+}
+
+if [ "$CAPTURE_WATERMARK" -eq 1 ]; then
+  capture_claude_watermark "$CAPTURE_CWD"
+  exit $?
+fi
+
 # claude_models: distinct models recorded across this worker's transcripts, one
 # per line. When the evidence cannot be read at all it emits a single
 # `ERR:<reason>` line instead. The caller runs this in a command substitution,
 # so a shell variable could not carry that failure back out - and a read failure
 # that arrived as "no models" would be indistinguishable from a well-behaved
 # worker, which is the silent pass this helper exists to prevent.
-claude_models() {  # <transcript-dir> <spawned-at-epoch|empty>
-  local dir=$1 anchor=$2 files=() f
+claude_models() {  # <transcript-dir> <spawned-at-epoch|empty> <watermark> <baseline-identities>
+  local dir=$1 anchor=$2 watermark=$3 baseline=$4 files=() f listing name
 
   # No transcript directory at all means the runtime never wrote a session for
   # this working directory. For a dispatched worker that is a failure to LOCATE
@@ -203,22 +276,68 @@ claude_models() {  # <transcript-dir> <spawned-at-epoch|empty>
     return 0
   fi
 
+  if ! listing=$(find "$dir" -maxdepth 1 -type f -name '*.jsonl' -print 2>&1); then
+    printf 'ERR:transcript evidence could not be enumerated under %s: %s\n' "$dir" "$listing"
+    return 0
+  fi
+  if ! listing=$(printf '%s\n' "$listing" | LC_ALL=C sort); then
+    printf 'ERR:transcript identities could not be ordered under %s\n' "$dir"
+    return 0
+  fi
   while IFS= read -r f; do
     [ -n "$f" ] || continue
+    name=$(basename "$f")
+    case "$name" in
+      *[!A-Za-z0-9._-]*|'')
+        printf 'ERR:unsupported transcript identity under %s\n' "$dir"
+        return 0
+        ;;
+      *.jsonl) ;;
+      *)
+        printf 'ERR:unsupported transcript identity under %s\n' "$dir"
+        return 0
+        ;;
+    esac
     files+=("$f")
-  done < <(find "$dir" -maxdepth 1 -type f -name '*.jsonl' 2>/dev/null | sort)
+  done <<EOF
+$listing
+EOF
   [ "${#files[@]}" -gt 0 ] || return 0
 
-  # Time-bound the scan to this dispatch when the record allows it. A worktree
-  # from a reusable pool can carry transcripts written by a previous occupant;
-  # those are never appended to again, so their mtime precedes this spawn.
-  if [ -n "$anchor" ]; then
-    local kept=() mt
+  if [ "$watermark" = claude-transcript-v1 ]; then
+    local kept=()
     for f in "${files[@]}"; do
-      mt=$(mtime_of "$f") || mt=
-      [ -n "$mt" ] || continue
-      [ "$mt" -ge "$anchor" ] && kept+=("$f")
+      name=$(basename "$f")
+      if [ -n "$baseline" ] && printf '%s\n' "$baseline" | grep -Fxq -- "$name"; then
+        continue
+      fi
+      kept+=("$f")
     done
+    files=("${kept[@]:-}")
+    [ -n "${files[0]:-}" ] || return 0
+  elif [ -n "$anchor" ]; then
+    local kept=() mt equal=0
+    for f in "${files[@]}"; do
+      if ! mt=$(mtime_of "$f"); then
+        printf 'ERR:transcript modification time could not be read: %s\n' "$f"
+        return 0
+      fi
+      case "$mt" in
+        ''|*[!0-9]*)
+          printf 'ERR:transcript modification time was invalid: %s\n' "$f"
+          return 0
+          ;;
+      esac
+      if [ "$mt" -gt "$anchor" ]; then
+        kept+=("$f")
+      elif [ "$mt" -eq "$anchor" ]; then
+        equal=1
+      fi
+    done
+    if [ "$equal" -eq 1 ]; then
+      printf 'ERR:transcript evidence shares the dispatch timestamp and no identity watermark can attribute it safely\n'
+      return 0
+    fi
     files=("${kept[@]:-}")
     [ -n "${files[0]:-}" ] || return 0
   fi
@@ -242,7 +361,7 @@ SOURCE=
 DETAIL=
 
 verify_one() {  # <id>
-  local id=$1 meta cwd harness kind anchor models n
+  local id=$1 meta cwd harness kind anchor watermark baseline models n before
   VERDICT=; RECORDED=; ACTUAL=; SOURCE=none; DETAIL=
 
   meta="$STATE/$id.meta"
@@ -251,12 +370,19 @@ verify_one() {  # <id>
     DETAIL="no durable record at $meta"
     return
   fi
+  if [ ! -r "$meta" ]; then
+    VERDICT=unverifiable
+    DETAIL="durable record is not readable: $meta"
+    return
+  fi
 
   RECORDED=$(fm_meta_get "$meta" model)
   harness=$(fm_meta_get "$meta" harness)
   kind=$(fm_meta_get "$meta" kind)
   anchor=$(fm_meta_get "$meta" spawned_at)
   case "$anchor" in ''|*[!0-9]*) anchor= ;; esac
+  watermark=$(fm_meta_get "$meta" model_evidence_watermark)
+  baseline=$(grep '^model_evidence_before=' "$meta" 2>/dev/null | cut -d= -f2- || true)
 
   # A secondmate runs in its own home; every other worker runs in the isolated
   # worktree the backend opened its endpoint in. `project=` is the registered
@@ -282,6 +408,35 @@ verify_one() {  # <id>
   fi
   SOURCE=claude-transcript
 
+  case "$watermark" in
+    '') ;;
+    claude-transcript-v1)
+      while IFS= read -r before; do
+        [ -n "$before" ] || continue
+        case "$before" in
+          *[!A-Za-z0-9._-]*)
+            VERDICT=unverifiable
+            DETAIL="dispatch transcript watermark is malformed"
+            return
+            ;;
+          *.jsonl) ;;
+          *)
+            VERDICT=unverifiable
+            DETAIL="dispatch transcript watermark is malformed"
+            return
+            ;;
+        esac
+      done <<EOF
+$baseline
+EOF
+      ;;
+    *)
+      VERDICT=unverifiable
+      DETAIL="dispatch transcript watermark format is unsupported: $watermark"
+      return
+      ;;
+  esac
+
   if ! command -v jq >/dev/null 2>&1; then
     VERDICT=unverifiable
     DETAIL="jq is required to read transcript evidence and is not installed"
@@ -296,7 +451,7 @@ verify_one() {  # <id>
 
   local dir
   dir=$(claude_transcript_dir "$cwd")
-  models=$(claude_models "$dir" "$anchor")
+  models=$(claude_models "$dir" "$anchor" "$watermark" "$baseline")
   case "$models" in
     ERR:*)
       VERDICT=unverifiable
@@ -318,7 +473,7 @@ verify_one() {  # <id>
   # single consistent model is still attributable; disagreeing evidence is not,
   # and guessing which half belongs to this task would be exactly the silent
   # pass this helper exists to prevent.
-  if [ -z "$anchor" ] && [ "$n" -gt 1 ]; then
+  if [ -z "$anchor" ] && [ -z "$watermark" ] && [ "$n" -gt 1 ]; then
     VERDICT=unverifiable
     DETAIL="record carries no dispatch timestamp and the evidence names $n models, which cannot be attributed to this task"
     return
@@ -342,7 +497,8 @@ EOF
 
   VERDICT=match
   DETAIL="ran on $ACTUAL, as dispatched"
-  [ -z "$anchor" ] && DETAIL="$DETAIL (evidence not time-bounded: record predates dispatch timestamps)"
+  [ -n "$anchor" ] || [ -n "$watermark" ] \
+    || DETAIL="$DETAIL (evidence not time-bounded: record predates dispatch timestamps)"
 }
 
 exit_for_verdict() {  # <verdict>
@@ -384,10 +540,20 @@ fi
 worst=0
 if [ "$ALL" -eq 1 ]; then
   ids=()
+  if ! meta_listing=$(find "$STATE" -maxdepth 1 -type f -name '*.meta' -print 2>&1); then
+    printf 'fm-model-verify: task metadata could not be enumerated under %s: %s\n' "$STATE" "$meta_listing" >&2
+    exit 4
+  fi
+  if ! meta_listing=$(printf '%s\n' "$meta_listing" | LC_ALL=C sort); then
+    printf 'fm-model-verify: task metadata could not be ordered under %s\n' "$STATE" >&2
+    exit 4
+  fi
   while IFS= read -r meta; do
     [ -n "$meta" ] || continue
     ids+=("$(basename "$meta" .meta)")
-  done < <(find "$STATE" -maxdepth 1 -type f -name '*.meta' 2>/dev/null | sort)
+  done <<EOF
+$meta_listing
+EOF
 
   # Rendered in this shell rather than a pipeline subshell, so the worst verdict
   # survives to set the exit code without verifying anything twice.
@@ -409,4 +575,11 @@ fi
 
 verify_one "$ID"
 if [ "$JSON" -eq 1 ]; then emit_json "$ID"; else emit_line "$ID"; fi
+if [ "$TERMINAL" -eq 1 ]; then
+  case "$VERDICT" in
+    match|unpinned) exit 0 ;;
+    mismatch) exit 3 ;;
+    *) exit 4 ;;
+  esac
+fi
 exit "$(exit_for_verdict "$VERDICT")"

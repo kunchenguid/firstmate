@@ -100,6 +100,6 @@ fm-afk-injection-wedge · verdict: match · recorded: opus · actual: claude-opu
 firstmate-watcher-lock-flake · verdict: unverifiable · recorded: opus · actual: claude-opus-4-8,claude-opus-5 · source: claude-transcript · record carries no dispatch timestamp and the evidence names 2 models, which cannot be attributed to this task
 ```
 
-The `unverifiable` rows are the reusable-worktree case, not a fleet fault: those pool slots still carry a previous occupant's `claude-opus-4-8` transcripts, and without a dispatch timestamp the two occupants cannot be told apart.
-This is the observation that motivated recording `spawned_at=` at spawn.
+The `unverifiable` rows are the reusable-worktree case, not a fleet fault: those pool slots still carry a previous occupant's `claude-opus-4-8` transcripts, and without a dispatch binding the two occupants cannot be told apart.
+This is the observation that motivated recording a pre-dispatch transcript-identity watermark at spawn, with `spawned_at=` retained only for compatibility with earlier records.
 It is also the shape of the intended behavior: the verifier reports what it cannot attribute rather than picking whichever model would have looked right.

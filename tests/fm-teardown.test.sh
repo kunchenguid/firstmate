@@ -494,8 +494,39 @@ run_teardown() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
+}
+
+test_terminal_model_verdict_blocks_cleanup_then_allows_match() {
+  local case_dir cfg dir rc
+  case_dir=$(make_case terminal-model-verdict)
+  write_meta "$case_dir" local-only ship
+  printf '%s\n' \
+    'harness=claude' \
+    'model=opus' \
+    'model_evidence_watermark=claude-transcript-v1' >> "$case_dir/state/task-x1.meta"
+  cfg="$case_dir/claude-config"
+  dir="$cfg/projects/$(printf '%s' "$case_dir/wt" | sed 's/[^A-Za-z0-9]/-/g')"
+  mkdir -p "$dir"
+  printf '{"type":"assistant","message":{"model":"claude-sonnet-5"}}\n' > "$dir/current.jsonl"
+
+  rc=0
+  FM_TEST_CLAUDE_CONFIG_DIR="$cfg" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "terminal model mismatch did not refuse teardown"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "terminal model mismatch erased task metadata"
+  [ -d "$case_dir/wt" ] || fail "terminal model mismatch returned the task worktree"
+  assert_grep "verdict: mismatch" "$case_dir/stderr" \
+    "terminal model mismatch was not surfaced during teardown"
+
+  printf '{"type":"assistant","message":{"model":"claude-opus-5"}}\n' > "$dir/current.jsonl"
+  FM_TEST_CLAUDE_CONFIG_DIR="$cfg" \
+    run_teardown "$case_dir" > "$case_dir/stdout2" 2> "$case_dir/stderr2" \
+    || fail "matching terminal model verdict blocked teardown"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "matching terminal verdict left task metadata behind"
+  pass "terminal teardown preserves mismatches and proceeds on a model match"
 }
 
 test_local_only_fork_remote_allows() {
@@ -1825,6 +1856,7 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
 }
 
 test_local_only_fork_remote_allows
+test_terminal_model_verdict_blocks_cleanup_then_allows_match
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses

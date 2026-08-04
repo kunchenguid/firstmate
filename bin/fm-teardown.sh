@@ -336,6 +336,16 @@ fi
 # complete before fm-guard, a backend command, file removal, branch deletion,
 # worktree return, registry change, or process termination can run.
 fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
+if [ "$FORCE" != "--force" ]; then
+  if ! MODEL_VERIFY_OUTPUT=$(
+      FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+        "$SCRIPT_DIR/fm-model-verify.sh" "$ID" --terminal 2>&1
+    ); then
+    echo "REFUSED: task $ID has no successful terminal model-routing verdict; preserving its worktree and metadata." >&2
+    printf '%s\n' "$MODEL_VERIFY_OUTPUT" >&2
+    exit 1
+  fi
+fi
 BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
 WT=$(fm_meta_get "$META" worktree)
