@@ -222,3 +222,44 @@ fm_startup_memory_decimal_le() {
   [ "$left" = "$right" ] && return 0
   [[ "$left" < "$right" ]]
 }
+
+# Decimal helpers keep healthy-margin reporting portable for arbitrarily large
+# validated budget values instead of relying on the shell integer width.
+fm_startup_memory_decimal_multiply_small() {  # <decimal> <0..9>
+  local value=$1 factor=$2 i digit product carry=0 out=
+  case "$value:$factor" in
+    *[!0-9:]*|:*|*:|*:[0-9][0-9]*) return 1 ;;
+  esac
+  i=$((${#value} - 1))
+  while [ "$i" -ge 0 ]; do
+    digit=${value:$i:1}
+    product=$((digit * factor + carry))
+    out="$((product % 10))$out"
+    carry=$((product / 10))
+    i=$((i - 1))
+  done
+  while [ "$carry" -gt 0 ]; do
+    out="$((carry % 10))$out"
+    carry=$((carry / 10))
+  done
+  while [ "${#out}" -gt 1 ] && [ "${out#0}" != "$out" ]; do out=${out#0}; done
+  printf '%s\n' "${out:-0}"
+}
+
+fm_startup_memory_decimal_divide_small() {  # <decimal> <1..9>; floor quotient
+  local value=$1 divisor=$2 i=0 digit number quotient_digit remainder=0 out=
+  case "$value:$divisor" in
+    *[!0-9:]*|:*|*:|*:0|*:[0-9][0-9]*) return 1 ;;
+  esac
+  while [ "$i" -lt "${#value}" ]; do
+    digit=${value:$i:1}
+    number=$((remainder * 10 + digit))
+    quotient_digit=$((number / divisor))
+    remainder=$((number % divisor))
+    if [ -n "$out" ] || [ "$quotient_digit" -ne 0 ]; then
+      out="${out}${quotient_digit}"
+    fi
+    i=$((i + 1))
+  done
+  printf '%s\n' "${out:-0}"
+}

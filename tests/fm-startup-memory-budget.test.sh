@@ -82,7 +82,7 @@ new_bootstrap_world() {
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$root/bin/placeholder.sh"
   chmod +x "$root/bin/placeholder.sh"
   git -C "$root" add -A
-  git -C "$root" -c user.name=fmtest -c user.email=fmtest@example.invalid commit -qm initial
+  git -C "$root" -c user.name=fmtest -c user.email=fmtest@example.invalid -c commit.gpgsign=false commit -qm initial
   printf '%s|%s\n' "$root" "$home"
 }
 
@@ -183,11 +183,17 @@ test_budget_accounting_reports_all_three_files_and_safe_failure() {
   assert_contains "$out" 'file=data/learnings.md bytes=0 estimated_tokens=0 status=absent' \
     "report did not account for absent learnings"
   assert_contains "$out" 'total_estimated_tokens=5' "report total was not the sum of all three files"
+  assert_contains "$out" 'healthy_target_tokens=8 policy=at-most-80-percent-of-effective-budget' \
+    "report did not expose the healthy-margin target"
   assert_contains "$out" 'budget_status=within-budget' "report did not classify the initial total"
+  assert_contains "$out" 'healthy_margin_status=healthy-margin' \
+    "report did not distinguish a healthy margin from merely staying under the ceiling"
 
   printf 'abcdefabcdefabcdefabcdef\n' > "$home/data/learnings.md"
   out=$(FM_HOME="$home" "$BUDGET" report)
   assert_contains "$out" 'budget_status=over-budget' "report did not surface an over-budget total"
+  assert_contains "$out" 'healthy_margin_status=over-budget' \
+    "over-budget report did not preserve the healthy-margin classification"
 
   outside="$TMP_ROOT/accounting-outside"
   printf 'outside\n' > "$outside"
@@ -204,6 +210,29 @@ test_budget_accounting_reports_all_three_files_and_safe_failure() {
   pass "budget accounting sums the three startup files and reports safe failures"
 }
 
+test_default_ceiling_exposes_a_testable_healthy_margin() {
+  local home out
+  home="$TMP_ROOT/healthy-margin-home"
+  mkdir -p "$home/config" "$home/data"
+  printf '7500\n' > "$home/config/startup-memory-budget"
+
+  awk 'BEGIN { for (i=0; i<18000; i++) printf "a" }' > "$home/data/captain.md"
+  out=$(FM_HOME="$home" "$BUDGET" report)
+  assert_contains "$out" 'healthy_target_tokens=6000 policy=at-most-80-percent-of-effective-budget' \
+    "default 7500 ceiling did not expose its 6000-token healthy target"
+  assert_contains "$out" 'total_estimated_tokens=6000' "healthy-target fixture measured incorrectly"
+  assert_contains "$out" 'healthy_margin_status=healthy-margin' \
+    "the exact healthy target was not accepted"
+
+  printf 'b' >> "$home/data/captain.md"
+  out=$(FM_HOME="$home" "$BUDGET" report)
+  assert_contains "$out" 'total_estimated_tokens=6001' "near-ceiling fixture measured incorrectly"
+  assert_contains "$out" 'budget_status=within-budget' "near-ceiling memory was misreported as over budget"
+  assert_contains "$out" 'healthy_margin_status=near-ceiling' \
+    "a one-token target excess did not expose the reduced margin"
+  pass "the 7500-token ceiling exposes and tests a healthy 6000-token target"
+}
+
 new_propagation_world() {
   local world=$1 root="$1/root" home="$1/home" sm="$1/sm" head
   mkdir -p "$home/config" "$home/data" "$home/state" "$root/bin"
@@ -214,7 +243,7 @@ new_propagation_world() {
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$root/bin/placeholder.sh"
   chmod +x "$root/bin/placeholder.sh"
   git -C "$root" add -A
-  git -C "$root" -c user.name=fmtest -c user.email=fmtest@example.invalid commit -qm initial
+  git -C "$root" -c user.name=fmtest -c user.email=fmtest@example.invalid -c commit.gpgsign=false commit -qm initial
   head=$(git -C "$root" rev-parse HEAD)
   git -C "$root" worktree add -q --detach "$sm" "$head"
   printf '%s\n' sm > "$sm/.fm-secondmate-home"
@@ -320,6 +349,7 @@ test_primary_budget_converges_with_exact_reread_and_safe_failures() {
 test_primary_bootstrap_materializes_visible_default
 test_safe_parser_rejects_ambiguous_and_unsafe_values
 test_budget_accounting_reports_all_three_files_and_safe_failure
+test_default_ceiling_exposes_a_testable_healthy_margin
 test_primary_budget_converges_with_exact_reread_and_safe_failures
 
 echo '# all fm-startup-memory-budget tests passed'

@@ -11,8 +11,9 @@
 #   - output section ordering: diagnostics/banners lead, bulk file dumps follow
 #   - context-aware next-step guidance for read-only, AFK, X mode, and normal
 #     watcher ownership
-#   - status-tail bounding, default and FM_SESSION_START_STATUS_TAIL override
-#   - orphan status logs whose task meta has already disappeared
+#   - deterministic byte-bounded status projection, exact recovery identities,
+#     authoritative keyed decisions, omitted counts, and truncation receipts
+#   - orphan, empty, and missing status logs
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
 #     tmux and herdr both
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
@@ -35,6 +36,9 @@ SESSION_START_HERDR_SECOND_MATE_TMP="/tmp/fm-$SESSION_START_HERDR_SECOND_MATE_ID
 FM_TEST_CLEANUP_DIRS+=("$TMP_ROOT" "$SESSION_START_SECOND_MATE_TMP" "$SESSION_START_HERDR_SECOND_MATE_TMP")
 trap fm_test_cleanup EXIT
 fm_git_identity fmtest fmtest@example.invalid
+# Runtime markers from the interactive test host must not choose a backend for
+# fixtures that did not set one explicitly.
+unset HERDR_ENV CMUX_WORKSPACE_ID CMUX_SOCKET_PATH CMUX_WORKSPACE_NAME
 
 # --- world builders ----------------------------------------------------------
 
@@ -50,7 +54,7 @@ new_world() {
   fakebin="$w/fakebin"
   mkdir -p "$home/state" "$home/data" "$home/config" "$fakebin"
   git init -q -b main "$root"
-  git -C "$root" commit -q --allow-empty -m init
+  git -C "$root" -c commit.gpgsign=false commit -q --allow-empty -m init
   printf '%s|%s|%s\n' "$root" "$home" "$fakebin"
 }
 
@@ -881,40 +885,54 @@ SH
   pass "session start: configured and auto-detected Herdr homes never require tmux"
 }
 
-# --- status tail bounding -----------------------------------------------------
+# --- byte-bounded structured status projection -------------------------------
 
-test_status_tail_bounding() {
-  local rec root home fakebin out
-  rec=$(new_world status-tail)
+test_status_projection_bounds_8kb_and_preserves_exact_fields() {
+  local rec root home fakebin out before after head x_count
+  rec=$(new_world status-projection-8kb)
   IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   make_fake_tmux "$fakebin" "fm-sess:live"
+  head=0123456789abcdef0123456789abcdef01234567
 
   printf 'window=fm-sess:live\nkind=ship\n' > "$home/state/task-a.meta"
-  printf 'working: step 1\nworking: step 2\nworking: step 3\nworking: step 4\nworking: step 5\nworking: step 6\nworking: step 7\n' \
-    > "$home/state/task-a.status"
+  awk -v head="$head" 'BEGIN {
+    printf "done [key=ship]: "
+    for (i = 0; i < 8064; i++) printf "x"
+    printf " https://github.com/acme/repo/pull/123 exact-head=%s run_id=01JTESTRUN123\n", head
+  }' > "$home/state/task-a.status"
+  [ "$(awk '{ sub(/\n$/, ""); print length($0); exit }' "$home/state/task-a.status")" -eq 8192 ] \
+    || fail "8KB fixture did not contain an 8192-byte event"
+  before=$(cksum "$home/state/task-a.status")
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "working: step 7" "default status tail missing the most recent line"
-  assert_contains "$out" "working: step 3" "default status tail (5 lines) missing an expected recent line"
-  assert_not_contains "$out" "working: step 1" "default status tail (5 lines) leaked an older line"
-  assert_contains "$out" "$home/state/task-a.status" "digest did not print the full status log path for a deeper read"
-  assert_contains "$out" "Do NOT bulk-read state/*.status now either: their bounded tails were just" "closing reminder does not distinguish bounded status tails"
-  assert_not_contains "$out" "state/*.status now - they were just" "closing reminder still describes status logs as fully printed"
-
-  out=$(FM_SESSION_START_STATUS_TAIL=2 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "working: step 7" "FM_SESSION_START_STATUS_TAIL=2 tail missing the most recent line"
-  assert_not_contains "$out" "working: step 5" "FM_SESSION_START_STATUS_TAIL=2 did not bound the tail to 2 lines"
-
-  pass "status tail is bounded to the configured line count, with the full log path always printed"
+  out=$(FM_SESSION_START_STATUS_EVENT_BYTES=256 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  after=$(cksum "$home/state/task-a.status")
+  [ "$before" = "$after" ] || fail "status projection changed the append-only raw log"
+  assert_contains "$out" 'source_event_count=1 recognized_event_count=1 omitted_event_count=0 open_decision_count=0' \
+    "8KB projection counts were wrong"
+  assert_contains "$out" 'state_verb=done' "8KB projection lost the state verb"
+  assert_contains "$out" 'decision_key=ship' "8KB projection lost the decision key"
+  assert_contains "$out" 'pr_url=https://github.com/acme/repo/pull/123' "8KB projection lost the full PR URL"
+  assert_contains "$out" "exact_head=$head" "8KB projection lost the exact head"
+  assert_contains "$out" 'run_id=01JTESTRUN123' "8KB projection lost the run identity"
+  assert_contains "$out" "truncation=original_bytes:8192 emitted_bytes:256" \
+    "8KB projection lacked an exact truncation receipt"
+  assert_contains "$out" "source_path:$home/state/task-a.status" \
+    "8KB projection receipt lacked the exact source path"
+  x_count=$(printf '%s' "$out" | tr -cd x | wc -c | tr -d ' ')
+  [ "$x_count" -lt 600 ] || fail "8KB status prose still dominated startup ($x_count payload bytes leaked)"
+  assert_contains "$out" "Do NOT bulk-read state/*.status now either: their byte-bounded structured" \
+    "closing reminder did not describe the structured projection"
+  pass "an 8KB event is bounded while key, URL, head, run, receipt, path, and raw log survive exactly"
 }
 
-test_orphan_status_logs_are_printed() {
-  local rec root home fakebin out matched_count orphan_count
-  rec=$(new_world orphan-status)
+test_status_projection_keeps_open_decision_and_small_newest_event() {
+  local rec root home fakebin out
+  rec=$(new_world status-projection-open-decision)
   IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
@@ -922,24 +940,97 @@ EOF
   make_fake_ps_claude "$fakebin"
 
   printf 'kind=ship\n' > "$home/state/task-a.meta"
-  printf 'matched: surfaced once\n' > "$home/state/task-a.status"
-  printf 'orphan: step 1\norphan: step 2\norphan: step 3\norphan: step 4\norphan: step 5\norphan: step 6\n' \
+  cat > "$home/state/task-a.status" <<'EOF'
+needs-decision [key=route]: choose route alpha or beta
+working: implementing an unrelated subsystem
+resolved [key=other]: unrelated decision closed
+done: normal small history completed
+EOF
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" 'source_event_count=4 recognized_event_count=4 omitted_event_count=3 open_decision_count=1' \
+    "projection did not count older events and the unresolved decision"
+  assert_contains "$out" 'open_decision_1:' "older open decision was not projected"
+  assert_contains "$out" 'decision_key=route' "older open decision lost its authoritative key"
+  assert_contains "$out" 'event_text=needs-decision [key=route]: choose route alpha or beta' \
+    "small decision event changed"
+  assert_contains "$out" 'newest_recognized_event:' "newest event section is absent"
+  assert_contains "$out" 'event_text=done: normal small history completed' "normal small newest event changed"
+  assert_not_contains "$out" 'truncation=' "normal small history was unnecessarily truncated"
+  assert_contains "$out" "$home/state/task-a.status" "projection omitted its exact full-log pointer"
+  pass "the authoritative fold keeps an older unresolved decision while normal small text stays unchanged"
+}
+
+test_status_projection_total_budget_and_deterministic_order() {
+  local rec root home fakebin out repeat projection repeat_projection a_line b_line c_line id
+  rec=$(new_world status-projection-total)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  for id in c-task a-task b-task; do
+    printf 'kind=ship\n' > "$home/state/$id.meta"
+    awk -v id="$id" 'BEGIN { printf "working: %s ", id; for (i=0; i<180; i++) printf id; printf "\n" }' \
+      > "$home/state/$id.status"
+  done
+
+  out=$(FM_SESSION_START_STATUS_EVENT_BYTES=100 \
+    FM_SESSION_START_STATUS_TASK_BYTES=100 \
+    FM_SESSION_START_STATUS_TOTAL_BYTES=150 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" 'startup_status_text_budget_used_bytes=150 startup_status_text_budget_limit_bytes=150' \
+    "multiple large tasks exceeded the total status-text budget"
+  assert_contains "$out" 'truncation=original_bytes:' "budget exhaustion lacked truncation receipts"
+  assert_contains "$out" 'emitted_bytes:0 causes:per-event,per-task,total' \
+    "task after total exhaustion did not retain an explicit zero-text receipt"
+  a_line=$(printf '%s\n' "$out" | grep -n '^--- a-task ---$' | cut -d: -f1)
+  b_line=$(printf '%s\n' "$out" | grep -n '^--- b-task ---$' | cut -d: -f1)
+  c_line=$(printf '%s\n' "$out" | grep -n '^--- c-task ---$' | cut -d: -f1)
+  [ "$a_line" -lt "$b_line" ] && [ "$b_line" -lt "$c_line" ] \
+    || fail "status tasks were not rendered in deterministic C-locale order"
+
+  repeat=$(FM_SESSION_START_STATUS_EVENT_BYTES=100 \
+    FM_SESSION_START_STATUS_TASK_BYTES=100 \
+    FM_SESSION_START_STATUS_TOTAL_BYTES=150 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  projection=$(printf '%s\n' "$out" | awk '/^--- a-task ---$/ { keep=1 } keep { print } /^startup_status_text_budget_used_bytes=/ { exit }')
+  repeat_projection=$(printf '%s\n' "$repeat" | awk '/^--- a-task ---$/ { keep=1 } keep { print } /^startup_status_text_budget_used_bytes=/ { exit }')
+  [ "$projection" = "$repeat_projection" ] || fail "identical status inputs produced different projections"
+  pass "multiple large tasks obey one total budget and render deterministically"
+}
+
+test_status_projection_empty_missing_and_orphan_logs() {
+  local rec root home fakebin out orphan_count
+  rec=$(new_world status-projection-empty-missing)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  printf 'kind=ship\n' > "$home/state/task-empty.meta"
+  : > "$home/state/task-empty.status"
+  printf 'kind=ship\n' > "$home/state/task-missing.meta"
+  printf 'working: orphan step 1\nworking: orphan step 2\nworking: orphan step 3\n' \
     > "$home/state/task-orphan.status"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-
-  assert_contains "$out" "Orphan status logs (state/*.status without matching .meta)" "digest did not label orphan status logs"
-  assert_contains "$out" "--- task-orphan ---" "digest did not print the orphan status id"
-  assert_contains "$out" "orphan: step 6" "orphan status tail missing the newest line"
-  assert_not_contains "$out" "orphan: step 1" "orphan status tail was not bounded"
-  assert_contains "$out" "$home/state/task-orphan.status" "orphan status tail did not print the full log path"
-
-  matched_count=$(printf '%s\n' "$out" | grep -F -c 'matched: surfaced once')
-  orphan_count=$(printf '%s\n' "$out" | grep -F -c 'orphan: step 6')
-  [ "$matched_count" -eq 1 ] || fail "matched status log was printed $matched_count times: $out"
-  [ "$orphan_count" -eq 1 ] || fail "orphan status log was printed $orphan_count times: $out"
-
-  pass "orphan status logs are printed once with bounded tails"
+  assert_contains "$out" 'source_event_count=0 recognized_event_count=0 omitted_event_count=0 open_decision_count=0' \
+    "empty log was not represented explicitly"
+  assert_contains "$out" 'newest_recognized_event: (none)' "empty log invented a newest event"
+  assert_contains "$out" "status projection: (no status file yet; full log path: $home/state/task-missing.status)" \
+    "missing log did not preserve its exact expected path"
+  assert_contains "$out" "Orphan status logs (state/*.status without matching .meta)" \
+    "digest did not label orphan status logs"
+  assert_contains "$out" 'source_event_count=3 recognized_event_count=3 omitted_event_count=2 open_decision_count=0' \
+    "orphan log counts were wrong"
+  assert_contains "$out" 'event_text=working: orphan step 3' "orphan newest event was absent"
+  assert_not_contains "$out" 'working: orphan step 1' "orphan projection leaked older event prose"
+  assert_contains "$out" "$home/state/task-orphan.status" "orphan projection omitted the full-log path"
+  orphan_count=$(printf '%s\n' "$out" | grep -F -c 'event_text=working: orphan step 3')
+  [ "$orphan_count" -eq 1 ] || fail "orphan status log was projected $orphan_count times"
+  pass "empty, missing, and orphan logs retain explicit deterministic recovery pointers"
 }
 
 # --- session-start secondmate recovery boundary -----------------------------
@@ -1446,8 +1537,10 @@ test_session_start_preserves_ambiguous_pi_process
 test_session_start_preserves_transiently_unreadable_tmux
 test_session_start_preserves_proven_bare_shell_recovery
 test_session_start_relaunches_herdr_husk_secondmate
-test_status_tail_bounding
-test_orphan_status_logs_are_printed
+test_status_projection_bounds_8kb_and_preserves_exact_fields
+test_status_projection_keeps_open_decision_and_small_newest_event
+test_status_projection_total_budget_and_deterministic_order
+test_status_projection_empty_missing_and_orphan_logs
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts

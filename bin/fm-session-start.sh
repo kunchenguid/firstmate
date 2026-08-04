@@ -40,9 +40,9 @@
 #                       data/captain-shared.md, data/learnings.md: read-only,
 #                       always safe, always runs.
 #   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
-#                       read-only, always runs.
+#                       every state/*.meta, a byte-bounded structured
+#                       state/*.status projection, state/.afk, and a cheap
+#                       per-task endpoint-liveness read: read-only, always runs.
 #   6. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
@@ -86,12 +86,31 @@
 # compatible tasks-axi is available, or `data/backlog.md` when the file body is
 # truly needed.
 #
+# STATUS PROJECTION: raw state/*.status logs remain unchanged. For each present
+# log, this script emits the newest recognized lifecycle event and every open
+# keyed decision returned by fm-classify-lib.sh's authoritative
+# status_open_decisions fold. It also emits source/recognized/omitted counts and
+# the exact full-log path. Event text is bounded independently per record, per
+# task, and across the whole fleet; the fixed recovery fields and truncation
+# receipts do not consume those text budgets and therefore remain visible after
+# text is exhausted. A receipt records original text bytes, emitted bytes, the
+# limiting scopes, and source path. Before truncating text, the projection lifts
+# the state verb, decision key, canonical GitHub/GitLab PR URL tokens, 40/64-hex
+# exact-head tokens, and run-identity tokens into structured fields. This is
+# historical recovery evidence only and never replaces a targeted
+# fm-crew-state.sh read when current state matters.
+#
 # Usage: fm-session-start.sh
 #   Prints the full ordered digest to stdout and always exits 0: this is a
 #   reporting command, not a gate. A lock refusal is reported as a loud
 #   banner inline, never a silent failure or a non-zero exit that would make
 #   an agent skip the rest of the digest.
 set -u
+
+# Status-file glob order, byte counts, and byte truncation must not vary with
+# the launching session's locale.
+LC_ALL=C
+export LC_ALL
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -109,9 +128,21 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
-STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
-case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
+# Status projection budgets apply to emitted event/decision text. Recovery
+# fields, omitted counts, truncation receipts, and exact source paths remain
+# visible even after the text budget is exhausted. The defaults retain routine
+# one-line events, allow two saturated records per task, and cap fleet-wide
+# status prose at 12 KiB.
+STATUS_EVENT_BYTES=${FM_SESSION_START_STATUS_EVENT_BYTES:-768}
+case "$STATUS_EVENT_BYTES" in ''|*[!0-9]*|0|??????????*) STATUS_EVENT_BYTES=768 ;; esac
+STATUS_TASK_BYTES=${FM_SESSION_START_STATUS_TASK_BYTES:-1536}
+case "$STATUS_TASK_BYTES" in ''|*[!0-9]*|0|??????????*) STATUS_TASK_BYTES=1536 ;; esac
+STATUS_TOTAL_BYTES=${FM_SESSION_START_STATUS_TOTAL_BYTES:-12288}
+case "$STATUS_TOTAL_BYTES" in ''|*[!0-9]*|0|??????????*) STATUS_TOTAL_BYTES=12288 ;; esac
+STATUS_TOTAL_TEXT_USED=0
 BACKLOG_LIMIT=${FM_SESSION_START_BACKLOG_LIMIT:-80}
 case "$BACKLOG_LIMIT" in ''|*[!0-9]*|0) BACKLOG_LIMIT=80 ;; esac
 
@@ -219,10 +250,165 @@ print_backlog_compact() {
   fi
 }
 
-print_status_tail() {
-  local status=$1
-  printf 'status tail (last %s line(s), wake-EVENT history, not current state; full log: %s):\n' "$STATUS_TAIL" "$status"
-  tail -n "$STATUS_TAIL" "$status"
+status_projection_byte_count() {  # <text>
+  printf '%s' "$1" | wc -c | tr -d '[:space:]'
+}
+
+status_projection_is_recognized_verb() {  # <verb>
+  case "$1" in
+    working|paused|done|needs-decision|blocked|failed|resolved|captain-held) return 0 ;;
+    "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+status_projection_identity_fields() {  # <full, untruncated event text>
+  local text=$1 token value restore_glob=0 seen_pr=$'\n' seen_head=$'\n' seen_run=$'\n'
+  case $- in *f*) : ;; *) set -f; restore_glob=1 ;; esac
+  for token in $text; do
+    token=${token#\(}; token=${token#\[}; token=${token#\{}; token=${token#<}
+    token=${token#\"}; token=${token#\'}; token=${token#\`}
+    token=${token%\)}; token=${token%\]}; token=${token%\}}; token=${token%>}
+    token=${token%,}; token=${token%.}; token=${token%\;}; token=${token%:}
+    token=${token%\"}; token=${token%\'}; token=${token%\`}
+    case "$token" in
+      https://*/pull/[0-9]*|https://*/merge_requests/[0-9]*)
+        case "$seen_pr" in *$'\n'"$token"$'\n'*) : ;; *)
+          printf '  pr_url=%s\n' "$token"
+          seen_pr="${seen_pr}${token}"$'\n'
+          ;;
+        esac
+        ;;
+      exact-head=*|exact_head=*|head=*|pr_head=*)
+        value=${token#*=}
+        case "${#value}:$value" in
+          40:*|64:*)
+            case "$value" in *[!0-9A-Fa-f]*) : ;; *)
+              case "$seen_head" in *$'\n'"$value"$'\n'*) : ;; *)
+                printf '  exact_head=%s\n' "$value"
+                seen_head="${seen_head}${value}"$'\n'
+                ;;
+              esac
+              ;;
+            esac
+            ;;
+        esac
+        ;;
+      run=*|run_id=*|run-id=*|run_identity=*|run-identity=*)
+        value=${token#*=}
+        case "$value" in ''|*[!A-Za-z0-9._:-]*) : ;; *)
+          case "$seen_run" in *$'\n'"$value"$'\n'*) : ;; *)
+            printf '  run_id=%s\n' "$value"
+            seen_run="${seen_run}${value}"$'\n'
+            ;;
+          esac
+          ;;
+        esac
+        ;;
+    esac
+  done
+  [ "$restore_glob" -eq 0 ] || set +f
+}
+
+status_projection_record() {  # <label> <verb> <key> <text> <source-path>
+  local label=$1 verb=$2 key=$3 text=$4 source=$5 original emitted allowance
+  local task_remaining total_remaining causes='' truncated=''
+  original=$(status_projection_byte_count "$text")
+  task_remaining=$((STATUS_TASK_BYTES - STATUS_TASK_TEXT_USED))
+  [ "$task_remaining" -ge 0 ] || task_remaining=0
+  total_remaining=$((STATUS_TOTAL_BYTES - STATUS_TOTAL_TEXT_USED))
+  [ "$total_remaining" -ge 0 ] || total_remaining=0
+  allowance=$STATUS_EVENT_BYTES
+  [ "$task_remaining" -ge "$allowance" ] || allowance=$task_remaining
+  [ "$total_remaining" -ge "$allowance" ] || allowance=$total_remaining
+
+  printf '%s:\n' "$label"
+  printf '  state_verb=%s\n' "$verb"
+  printf '  decision_key=%s\n' "$key"
+  status_projection_identity_fields "$text"
+  if [ "$original" -le "$allowance" ]; then
+    emitted=$original
+    truncated=$text
+  else
+    emitted=$allowance
+    if [ "$allowance" -gt 0 ]; then
+      truncated=$(printf '%s' "$text" | cut -b "1-$allowance")
+    fi
+  fi
+  printf '  event_text=%s\n' "$truncated"
+  STATUS_TASK_TEXT_USED=$((STATUS_TASK_TEXT_USED + emitted))
+  STATUS_TOTAL_TEXT_USED=$((STATUS_TOTAL_TEXT_USED + emitted))
+
+  if [ "$emitted" -lt "$original" ]; then
+    [ "$original" -le "$STATUS_EVENT_BYTES" ] || causes=per-event
+    if [ "$original" -gt "$task_remaining" ]; then
+      causes=${causes:+$causes,}per-task
+    fi
+    if [ "$original" -gt "$total_remaining" ]; then
+      causes=${causes:+$causes,}total
+    fi
+    printf '  truncation=original_bytes:%s emitted_bytes:%s causes:%s source_path:%s\n' \
+      "$original" "$emitted" "$causes" "$source"
+  fi
+}
+
+print_status_projection() {
+  local status=$1 line stripped verb key open decision_text open_count=0 decision_index=0
+  local event_count=0 recognized_count=0 newest='' omitted
+  STATUS_TASK_TEXT_USED=0
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    stripped=${line//[[:space:]]/}
+    [ -n "$stripped" ] || continue
+    event_count=$((event_count + 1))
+    verb=$(status_line_verb "$line")
+    if status_projection_is_recognized_verb "$verb"; then
+      recognized_count=$((recognized_count + 1))
+      newest=$line
+    fi
+  done < "$status"
+
+  open=$(status_open_decisions "$status")
+  while IFS=$'\t' read -r key verb line; do
+    [ -n "$key" ] || continue
+    open_count=$((open_count + 1))
+  done <<EOF
+$open
+EOF
+
+  if [ "$recognized_count" -gt 0 ]; then
+    omitted=$((event_count - 1))
+  else
+    omitted=$event_count
+  fi
+  printf 'status projection (wake-EVENT history, not current state; full log: %s):\n' "$status"
+  printf '  source_event_count=%s recognized_event_count=%s omitted_event_count=%s open_decision_count=%s\n' \
+    "$event_count" "$recognized_count" "$omitted" "$open_count"
+  printf '  text_limits_bytes=event:%s task:%s total:%s\n' \
+    "$STATUS_EVENT_BYTES" "$STATUS_TASK_BYTES" "$STATUS_TOTAL_BYTES"
+
+  while IFS=$'\t' read -r key verb line; do
+    [ -n "$key" ] || continue
+    decision_index=$((decision_index + 1))
+    if [ "$key" = default ]; then
+      decision_text="$verb: $line"
+    else
+      decision_text="$verb [key=$key]: $line"
+    fi
+    status_projection_record "open_decision_$decision_index" "$verb" "$key" "$decision_text" "$status"
+  done <<EOF
+$open
+EOF
+
+  if [ -n "$newest" ]; then
+    verb=$(status_line_verb "$newest")
+    key=$(_fm_decision_key "$newest" 2>/dev/null) || key=invalid
+    status_projection_record newest_recognized_event "$verb" "$key" "$newest" "$status"
+  else
+    printf 'newest_recognized_event: (none)\n'
+  fi
+  printf '  task_text_budget_used_bytes=%s task_text_budget_limit_bytes=%s\n' \
+    "$STATUS_TASK_TEXT_USED" "$STATUS_TASK_BYTES"
 }
 
 hash_file() {
@@ -380,9 +566,9 @@ for meta in "$STATE"/*.meta; do
 
   status="$STATE/$id.status"
   if [ -f "$status" ]; then
-    print_status_tail "$status"
+    print_status_projection "$status"
   else
-    printf 'status tail: (no status file yet: %s)\n' "$status"
+    printf 'status projection: (no status file yet; full log path: %s)\n' "$status"
   fi
 done
 [ "$META_FOUND" -eq 1 ] || printf '(none)\n'
@@ -395,9 +581,11 @@ for status in "$STATE"/*.status; do
   [ -f "$STATE/$id.meta" ] && continue
   ORPHAN_STATUS_FOUND=1
   printf '\n--- %s ---\n' "$id"
-  print_status_tail "$status"
+  print_status_projection "$status"
 done
 [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
+printf '\nstartup_status_text_budget_used_bytes=%s startup_status_text_budget_limit_bytes=%s\n' \
+  "$STATUS_TOTAL_TEXT_USED" "$STATUS_TOTAL_BYTES"
 
 subsection "AFK"
 if [ -e "$STATE/.afk" ]; then
@@ -460,9 +648,9 @@ data/captain-shared.md, data/learnings.md,
 or state/*.meta now - they were just printed in full.
 Do NOT bulk-read data/backlog.md now either: the compact identity/metadata
 listing was just printed with a pointer for targeted full-body follow-up.
-Do NOT bulk-read state/*.status now either: their bounded tails were just
-printed with full log paths for targeted follow-up when older wake-event
-history is actually needed. Re-reading everything defeats the entire point
+Do NOT bulk-read state/*.status now either: their byte-bounded structured
+projections were just printed with full log paths for targeted follow-up when
+older wake-event history is actually needed. Re-reading everything defeats the entire point
 of this command. Re-read a file only if this digest flagged it ABSENT (then
 rebuild or create it per AGENTS.md), its contents looked unparseable/corrupt,
 or an individual full status log is needed for older wake-event history.

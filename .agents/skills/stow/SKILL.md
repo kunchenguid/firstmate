@@ -18,7 +18,7 @@ This skill writes only through the existing Firstmate ownership and write bounda
 Every `/stow` invocation performs this complete pass, even when the session contains no new finding:
 
 1. Run `bin/fm-startup-memory-budget.sh report` before considering a write.
-   Record its effective budget and each file's estimated-token total.
+   Record its effective budget, healthy target, healthy-margin status, and each file's estimated-token total.
    The helper's stable estimate is the documented conservative local approximation, not provider-exact accounting.
    If it rejects the setting or a memory file, do not infer a default or silently continue.
    Report that concrete exception and do not call the session reset-safe.
@@ -28,19 +28,21 @@ Every `/stow` invocation performs this complete pass, even when the session cont
    In a secondmate home, `data/captain-shared.md` is a read-only primary-owned input: count it, never edit it, and curate only the editable local files.
 3. Build one whole-file retention plan before editing.
    Retain, in order: current captain preferences, authority and safety boundaries, and recurring working style; stable home-local operating facts that repeatedly affect future work and are expensive to rediscover; then concise pointers to an existing authoritative report, project document, configuration, or backlog item.
-   Retain lower-priority material only while budget remains.
+   Retain lower-priority material only while the reported healthy target remains.
 4. Consolidate every editable memory file as needed, not only the file apparently related to a new finding.
    Prefer one concise current rule or authoritative pointer over duplicate prose.
    Remove, merge, or route completed incident and release chronology, stale versions and paths, transient task state, resolved alternatives, old metrics, superseded claims, duplicates, and report-sized procedures.
    Do not remove a unique current fact unless it is preserved directly elsewhere through a stronger existing owner.
 5. Run `bin/fm-startup-memory-budget.sh report` again after the complete pass.
-   Finish at or below the effective budget unless a concrete inability remains.
+   Finish with `healthy_margin_status=healthy-margin` unless a concrete inability remains.
+   A `near-ceiling` result is not the curation target even though it remains under the hard effective budget.
+   Identify the current fact or primary-owned inherited file that prevents the healthy target, and route a secondmate-owned constraint to the main firstmate.
    A secondmate must explicitly report `primary-owned-shared-file-alone-exceeds-budget` when the inherited shared file alone exceeds its allowance, because local curation cannot resolve it.
-   Any other unresolved excess must identify the fact that cannot safely be removed or routed and why.
+   Any over-budget result must identify the fact that cannot safely be removed or routed and why.
 
 A net increase is allowed only for a genuinely new current fact with no stronger owner.
-Before allowing it, consolidate enough lower-priority material to remain within budget.
-Never describe the session as reset-safe while the memory total is over budget or an exception is unresolved.
+Before allowing it, consolidate enough lower-priority material to preserve the healthy target.
+Never describe the session as reset-safe while the memory result lacks a healthy margin or an exception is unresolved.
 
 ## Knowledge sweep and routing
 
@@ -70,13 +72,13 @@ Never describe the session as reset-safe while the memory total is over budget o
 
 Report the outcome in plain captain-facing language with all of these facts:
 
-- effective startup-memory budget and total estimated tokens before and after;
+- effective startup-memory budget, healthy target, healthy-margin status, and total estimated tokens before and after;
 - one or more actions for each of `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`: `unchanged`, `added`, `rewritten`, `pruned`, or `routed`;
 - each durable finding filed outside memory and its authoritative owner;
 - every unresolved exception, including a primary-owned shared-file constraint in a secondmate home;
-- whether the session is safe to reset, only when all durable findings are captured and the post-pass result is within budget with no exception.
+- whether the session is safe to reset, only when all durable findings are captured and the post-pass result has a healthy margin with no exception.
 
-Do not hide an over-budget result behind a reset-safe claim.
+Do not hide a near-ceiling or over-budget result behind a reset-safe claim.
 
 ## Scope exclusion: no skill storage
 

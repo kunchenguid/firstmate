@@ -6,7 +6,8 @@
 #
 # `read` prints the one validated effective budget from
 # config/startup-memory-budget.  `report` prints the stable local estimate for
-# data/captain.md, data/captain-shared.md, and data/learnings.md together.
+# data/captain.md, data/captain-shared.md, and data/learnings.md together, plus
+# the healthy-margin target at 80 percent of the effective ceiling.
 # Bootstrap owns default materialization; this command never creates or repairs
 # configuration, so an absent, malformed, symlinked, hardlinked, or otherwise
 # unsafe value is a concrete error rather than an inferred default.
@@ -39,6 +40,7 @@ read_budget() {
 
 report() {
   local budget bytes tokens presence total=0 shared_tokens=0 role=primary
+  local healthy_scaled healthy_target
   if ! budget=$(read_budget); then
     return 2
   fi
@@ -48,8 +50,12 @@ report() {
   fi
 
   printf 'estimator=ceil(UTF-8 bytes / 3) conservative-local-estimate\n'
+  healthy_scaled=$(fm_startup_memory_decimal_multiply_small "$budget" 4) || return 2
+  healthy_target=$(fm_startup_memory_decimal_divide_small "$healthy_scaled" 5) || return 2
+
   printf 'role=%s\n' "$role"
   printf 'effective_budget_tokens=%s\n' "$budget"
+  printf 'healthy_target_tokens=%s policy=at-most-80-percent-of-effective-budget\n' "$healthy_target"
   for file in captain.md captain-shared.md learnings.md; do
     if ! fm_startup_memory_measure_file "$DATA/$file" >/dev/null; then
       print_error "$FM_STARTUP_MEMORY_BUDGET_ERROR"
@@ -66,8 +72,14 @@ report() {
   printf 'total_estimated_tokens=%s\n' "$total"
   if fm_startup_memory_decimal_le "$total" "$budget"; then
     printf 'budget_status=within-budget\n'
+    if fm_startup_memory_decimal_le "$total" "$healthy_target"; then
+      printf 'healthy_margin_status=healthy-margin\n'
+    else
+      printf 'healthy_margin_status=near-ceiling\n'
+    fi
   else
     printf 'budget_status=over-budget\n'
+    printf 'healthy_margin_status=over-budget\n'
   fi
   if [ "$role" = secondmate ] \
     && ! fm_startup_memory_decimal_le "$shared_tokens" "$budget"; then

@@ -321,12 +321,12 @@ jobs:
           if-no-files-found: warn
 
   macos-stock-bash:
-    name: Stock macOS Bash snapshot compatibility
+    name: Stock macOS Bash compatibility
     runs-on: macos-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
-      - name: Run snapshot consumers with stock Bash
+      - name: Run startup and snapshot consumers with stock Bash
         shell: /bin/bash {0}
         env:
           PATH: /bin:/usr/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin
@@ -346,6 +346,20 @@ jobs:
             /bin/bash -n "$f" || { echo "::error::stock macOS Bash 3.2 failed to parse $f"; parse_fail=1; }
           done < "$shell_inventory"
           [ "$parse_fail" -eq 0 ] || { echo "::error::stock macOS Bash 3.2 parse sweep failed"; exit 1; }
+
+          session_start_output=$(/bin/bash tests/fm-session-start.test.sh)
+          printf '%s\n' "$session_start_output"
+          printf '%s\n' "$session_start_output" | grep -F '# fm-session-start.test.sh: all assertions passed' >/dev/null || {
+            echo "::error::session-start projection suite did not complete under stock Bash 3.2"
+            exit 1
+          }
+
+          startup_memory_output=$(/bin/bash tests/fm-startup-memory-budget.test.sh)
+          printf '%s\n' "$startup_memory_output"
+          printf '%s\n' "$startup_memory_output" | grep -F '# all fm-startup-memory-budget tests passed' >/dev/null || {
+            echo "::error::startup-memory suite did not complete under stock Bash 3.2"
+            exit 1
+          }
 
           snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-view.test.sh)
           printf '%s\n' "$snapshot_output"

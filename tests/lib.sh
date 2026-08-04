@@ -189,11 +189,15 @@ SH
 
 # --- deterministic git identity and fixtures --------------------------------
 
-# fm_git_identity [name] [email]: export a fixed author/committer identity so
-# fixture commits never depend on the host git config.
+# fm_git_identity [name] [email]: export a fixed author/committer identity and
+# disable host-configured commit signing so fixture commits never depend on the
+# host git identity, signing key, or signing agent.
 fm_git_identity() {
   export GIT_AUTHOR_NAME=${1:-fmtest} GIT_AUTHOR_EMAIL=${2:-fmtest@example.invalid}
   export GIT_COMMITTER_NAME=$GIT_AUTHOR_NAME GIT_COMMITTER_EMAIL=$GIT_AUTHOR_EMAIL
+  export GIT_CONFIG_COUNT=1
+  export GIT_CONFIG_KEY_0=commit.gpgsign
+  export GIT_CONFIG_VALUE_0=false
 }
 
 # fm_git_init_commit <dir>: create a git repo at <dir> with a README and one
