@@ -65,6 +65,7 @@ FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+EVIDENCE_RUN="$SCRIPT_DIR/fm-evidence-run.sh"
 
 # Bounds (overridable for tests / large fleets).
 FM_BEARINGS_LANDED=${FM_BEARINGS_LANDED:-6}
@@ -186,6 +187,10 @@ trap cleanup_bearings_tmp EXIT HUP INT TERM
 LANDED_SELECTION_FILE="$BEARINGS_TMP/landed-selection.json"
 CANDIDATE_PRS_FILE="$BEARINGS_TMP/candidate-prs.json"
 PR_DISCOVERY_FILE="$BEARINGS_TMP/pr-discovery.json"
+PR_DISCOVERY_ROWS_FILE="$BEARINGS_TMP/pr-discovery.jsonl"
+PR_VERIFICATION_ROWS_FILE="$BEARINGS_TMP/pr-verification.jsonl"
+: > "$PR_DISCOVERY_ROWS_FILE"
+: > "$PR_VERIFICATION_ROWS_FILE"
 
 printf '%s' "$SNAP" | jq \
   --argjson landed_n "$FM_BEARINGS_LANDED" \
@@ -215,12 +220,10 @@ printf '%s' "$SNAP" | jq \
 
 # --- live verification for every PR URL the projection can name ------------
 PR_STATUS='checked (0 PRs named)'
-CANDIDATE_PRS='[]'
 PR_REPOS_TOTAL=0
 PR_REPOS_SHOWN=0
 PR_ROWS_CAPPED=0
 PR_ROWS_MIN_TOTAL=0
-PR_DISCOVERY='[]'
 RECORDED_URL_TOTAL=$(printf '%s' "$SNAP" | jq '[.tasks[] | select(.kind != "secondmate") | .pr.url // empty] | length')
 
 # Parse owner/repo from an https or ssh GitHub remote/PR URL; empty if not GitHub.
@@ -228,11 +231,10 @@ repo_slug() {  # <url>
   printf '%s' "$1" | sed -n 's#.*github\.com[:/]\([^/]*/[^/]*\)#\1#p' | sed 's#\.git$##; s#/pull/.*$##; s#/$##'
 }
 
-# Bounded gh call; prints stdout, non-zero on timeout/failure. gh only.
-# bin/fm-timeout-lib.sh owns the bound itself.
-gh_bounded() {  # <args...>
-  fm_run_timed "$FM_BEARINGS_PR_TIMEOUT" \
-    env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh "$@"
+# Bounded gh-axi call; prints stdout, non-zero on timeout/failure.
+ghaxi_bounded() {  # <args...>
+  GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+    "$EVIDENCE_RUN" --total "$FM_BEARINGS_PR_TIMEOUT" gh-axi "$@"
 }
 
 decode_api_body() {
@@ -294,19 +296,19 @@ EOF
       --jq 'map(.html_url) | join("\n")' 2>/dev/null); then
       discovery=$(jq -n --arg repo "$repo" \
         '{repo:$repo,verification:"NOT_VERIFIABLE",reason:"open PR discovery query failed or timed out",returned:null,complete:false}')
-      PR_DISCOVERY=$(jq -n --argjson rows "$PR_DISCOVERY" --argjson row "$discovery" '$rows + [$row]')
+      printf '%s\n' "$discovery" >> "$PR_DISCOVERY_ROWS_FILE"
       continue
     fi
     if [ "$(printf '%s\n' "$api" | sed -n 's/^[[:space:]]*truncated: //p' | head -1)" != false ]; then
       discovery=$(jq -n --arg repo "$repo" \
         '{repo:$repo,verification:"NOT_VERIFIABLE",reason:"open PR discovery response was truncated",returned:null,complete:false}')
-      PR_DISCOVERY=$(jq -n --argjson rows "$PR_DISCOVERY" --argjson row "$discovery" '$rows + [$row]')
+      printf '%s\n' "$discovery" >> "$PR_DISCOVERY_ROWS_FILE"
       continue
     fi
     if ! discovered=$(printf '%s\n' "$api" | decode_api_body 2>/dev/null); then
       discovery=$(jq -n --arg repo "$repo" \
         '{repo:$repo,verification:"NOT_VERIFIABLE",reason:"open PR discovery response was malformed",returned:null,complete:false}')
-      PR_DISCOVERY=$(jq -n --argjson rows "$PR_DISCOVERY" --argjson row "$discovery" '$rows + [$row]')
+      printf '%s\n' "$discovery" >> "$PR_DISCOVERY_ROWS_FILE"
       continue
     fi
     returned=0
@@ -325,12 +327,11 @@ EOF
       discovery=$(jq -n --arg repo "$repo" --argjson returned "$returned" \
         '{repo:$repo,verification:"verified_live",reason:null,returned:$returned,complete:true}')
     fi
-    PR_DISCOVERY=$(jq -n --argjson rows "$PR_DISCOVERY" --argjson row "$discovery" '$rows + [$row]')
+    printf '%s\n' "$discovery" >> "$PR_DISCOVERY_ROWS_FILE"
   done
   PR_REPOS_SHOWN=$nrepos
 fi
 
-rows='[]'
 named=0
 unverified=0
 while IFS= read -r url; do
@@ -340,20 +341,20 @@ while IFS= read -r url; do
   num=$(printf '%s' "$url" | sed -n 's#^https://github\.com/[^/]*/[^/]*/pull/\([0-9][0-9]*\)/*$#\1#p')
   task=$(printf '%s' "$SNAP" | jq -r --arg url "$url" '[.tasks[] | select(.pr.url==$url) | .id][0] // "-"')
   if [ -z "$repo" ] || [ -z "$num" ] || ! command -v gh-axi >/dev/null 2>&1; then
-    row=$(jq -n --arg num "${num:--}" --arg repo "${repo:--}" --arg task "$task" --arg url "$url" \
-      '{num:$num,repo:$repo,task:$task,url:$url,title:"NOT_VERIFIABLE",state:"NOT_VERIFIABLE",mergedAt:"NOT_VERIFIABLE",head:"NOT_VERIFIABLE",checks:"NOT_VERIFIABLE",verification:"NOT_VERIFIABLE"}')
+    jq -n -c --arg num "${num:--}" --arg repo "${repo:--}" --arg task "$task" --arg url "$url" \
+      '{num:$num,repo:$repo,task:$task,url:$url,title:"NOT_VERIFIABLE",state:"NOT_VERIFIABLE",mergedAt:"NOT_VERIFIABLE",head:"NOT_VERIFIABLE",checks:"NOT_VERIFIABLE",actions:null,verification:"NOT_VERIFIABLE"}' \
+      >> "$PR_VERIFICATION_ROWS_FILE"
     unverified=$((unverified + 1))
-    rows=$(jq -n --argjson a "$rows" --argjson b "$row" '$a + [$b]')
     continue
   fi
   api=$(ghaxi_bounded api "repos/$repo/pulls/$num" \
     --jq '[.number,.title,.state,(.merged_at // "-"),.html_url,.head.sha,.head.ref] | @tsv' 2>/dev/null) || api=
   details=$(printf '%s\n' "$api" | decode_api_body 2>/dev/null) || details=
   if [ -z "$details" ]; then
-    row=$(jq -n --arg num "$num" --arg repo "$repo" --arg task "$task" --arg url "$url" \
-      '{num:$num,repo:$repo,task:$task,url:$url,title:"NOT_VERIFIABLE",state:"NOT_VERIFIABLE",mergedAt:"NOT_VERIFIABLE",head:"NOT_VERIFIABLE",checks:"NOT_VERIFIABLE",verification:"NOT_VERIFIABLE"}')
+    jq -n -c --arg num "$num" --arg repo "$repo" --arg task "$task" --arg url "$url" \
+      '{num:$num,repo:$repo,task:$task,url:$url,title:"NOT_VERIFIABLE",state:"NOT_VERIFIABLE",mergedAt:"NOT_VERIFIABLE",head:"NOT_VERIFIABLE",checks:"NOT_VERIFIABLE",actions:null,verification:"NOT_VERIFIABLE"}' \
+      >> "$PR_VERIFICATION_ROWS_FILE"
     unverified=$((unverified + 1))
-    rows=$(jq -n --argjson a "$rows" --argjson b "$row" '$a + [$b]')
     continue
   fi
   IFS=$(printf '\t') read -r live_num title state merged_at canonical_url head_sha head_ref <<EOF
@@ -362,57 +363,66 @@ EOF
   case "$live_num:$state:$canonical_url:$head_sha:$head_ref" in
     "$num:open:https://github.com/$repo/pull/$num":?*:?*|"$num:closed:https://github.com/$repo/pull/$num":?*:?*) ;;
     *)
-      row=$(jq -n --arg num "$num" --arg repo "$repo" --arg task "$task" --arg url "$url" \
-        '{num:$num,repo:$repo,task:$task,url:$url,title:"NOT_VERIFIABLE",state:"NOT_VERIFIABLE",mergedAt:"NOT_VERIFIABLE",head:"NOT_VERIFIABLE",checks:"NOT_VERIFIABLE",verification:"NOT_VERIFIABLE"}')
+      jq -n -c --arg num "$num" --arg repo "$repo" --arg task "$task" --arg url "$url" \
+        '{num:$num,repo:$repo,task:$task,url:$url,title:"NOT_VERIFIABLE",state:"NOT_VERIFIABLE",mergedAt:"NOT_VERIFIABLE",head:"NOT_VERIFIABLE",checks:"NOT_VERIFIABLE",actions:null,verification:"NOT_VERIFIABLE"}' \
+        >> "$PR_VERIFICATION_ROWS_FILE"
       unverified=$((unverified + 1))
-      rows=$(jq -n --argjson a "$rows" --argjson b "$row" '$a + [$b]')
       continue
       ;;
   esac
   [ "$merged_at" != - ] && live_state=MERGED || live_state=$(printf '%s' "$state" | tr '[:lower:]' '[:upper:]')
   runs_api=$(ghaxi_bounded api "repos/$repo/actions/runs?head_sha=$head_sha&per_page=100" \
-    --jq '[.total_count, (.workflow_runs|length), (.workflow_runs | map("\(.name)[event=\(.event) attempt=\(.run_attempt) created=\(.created_at) updated=\(.updated_at) status=\(.status) conclusion=\(.conclusion // "pending") url=\(.html_url)]") | join("; "))] | @tsv' 2>/dev/null) || runs_api=
+    --jq '{total_count:.total_count,returned:(.workflow_runs|length),runs:(.workflow_runs | map({name:.name,event:.event,attempt:.run_attempt,created:.created_at,updated:.updated_at,status:.status,conclusion:(.conclusion // "pending"),url:.html_url}))}' 2>/dev/null) || runs_api=
   runs=$(printf '%s\n' "$runs_api" | decode_api_body 2>/dev/null) || runs=
   checks=NOT_VERIFIABLE
-  if [ -n "$runs" ]; then
-    IFS=$(printf '\t') read -r runs_total runs_returned checks <<EOF
-$runs
-EOF
-    case "$runs_total:$runs_returned" in *[!0-9:]*|:*) runs_total=invalid; runs_returned=invalid ;; esac
+  actions_file="$BEARINGS_TMP/actions.json"
+  checks_file="$BEARINGS_TMP/checks.txt"
+  printf 'null\n' > "$actions_file"
+  if [ -n "$runs" ] && printf '%s' "$runs" | jq -e '
+    (.total_count | type) == "number" and (.returned | type) == "number"
+      and (.runs | type) == "array"
+      and all(.runs[];
+        (.name | type) == "string" and (.event | type) == "string"
+        and (.attempt | type) == "number" and (.created | type) == "string"
+        and (.updated | type) == "string" and (.status | type) == "string"
+        and (.conclusion | type) == "string" and (.url | type) == "string"
+        and (.url | startswith("https://")))
+  ' >/dev/null 2>&1; then
+    runs_total=$(printf '%s' "$runs" | jq -r '.total_count')
+    runs_returned=$(printf '%s' "$runs" | jq -r '.returned')
     if [ "$runs_total" != "$runs_returned" ]; then
       checks="NOT_VERIFIABLE: Actions run list returned $runs_returned of $runs_total"
     elif [ "$runs_returned" = 0 ]; then
       checks=none
-    elif [ -z "$checks" ] || ! printf '%s\n' "$checks" | awk '
-      BEGIN { RS="; "; ok=1; n=0 }
-      {
-        n++
-        if ($0 !~ /\[event=[^ ]+ attempt=[0-9]+ created=[^ ]+ updated=[^ ]+ status=[^ ]+ conclusion=[^ ]+ url=https:\/\//) ok=0
-      }
-      END { exit !(ok && n == expected) }
-    ' expected="$runs_returned"; then
-      checks="NOT_VERIFIABLE: Actions instances lacked event, attempt, timestamp, status, conclusion, or URL evidence"
+      printf '[]\n' > "$actions_file"
+    else
+      printf '%s' "$runs" | jq '.runs' > "$actions_file"
+      checks=$(printf '%s' "$runs" | jq -r '[.runs[] | "\(.name)[event=\(.event) attempt=\(.attempt) created=\(.created) updated=\(.updated) status=\(.status) conclusion=\(.conclusion) url=\(.url)]"] | join("; ")')
     fi
+  elif [ -n "$runs" ]; then
+    checks="NOT_VERIFIABLE: Actions instances lacked event, attempt, timestamp, status, conclusion, or URL evidence"
   fi
-  row=$(jq -n --arg num "$live_num" --arg repo "$repo" --arg task "$task" \
+  printf '%s' "$checks" > "$checks_file"
+  jq -n -c --arg num "$live_num" --arg repo "$repo" --arg task "$task" \
     --arg url "$canonical_url" --arg title "$title" --arg state "$live_state" \
-    --arg mergedAt "$merged_at" --arg head "$head_ref@$head_sha" --arg checks "$checks" \
+    --arg mergedAt "$merged_at" --arg head "$head_ref@$head_sha" \
+    --slurpfile actions_input "$actions_file" \
+    --rawfile checks_input "$checks_file" \
     '{num:$num,repo:$repo,task:$task,url:$url,title:$title,state:$state,
-      mergedAt:(if $mergedAt=="-" then null else $mergedAt end),head:$head,checks:$checks,verification:"verified_live"}')
-  rows=$(jq -n --argjson a "$rows" --argjson b "$row" '$a + [$b]')
+      mergedAt:(if $mergedAt=="-" then null else $mergedAt end),head:$head,checks:$checks_input,
+      actions:$actions_input[0],verification:"verified_live"}' >> "$PR_VERIFICATION_ROWS_FILE"
 done <<EOF
 $URLS
 EOF
-CANDIDATE_PRS=$rows
-printf '%s\n' "$CANDIDATE_PRS" > "$CANDIDATE_PRS_FILE"
-printf '%s\n' "$PR_DISCOVERY" > "$PR_DISCOVERY_FILE"
+jq -s '.' "$PR_VERIFICATION_ROWS_FILE" > "$CANDIDATE_PRS_FILE"
+jq -s '.' "$PR_DISCOVERY_ROWS_FILE" > "$PR_DISCOVERY_FILE"
 PR_ROWS_MIN_TOTAL=$named
 if [ "$unverified" -gt 0 ]; then
   PR_STATUS="checked ($named named; $unverified NOT_VERIFIABLE)"
 else
   PR_STATUS="checked ($named named; all verified live)"
 fi
-discovery_unverified=$(printf '%s' "$PR_DISCOVERY" | jq '[.[] | select(.verification == "NOT_VERIFIABLE")] | length')
+discovery_unverified=$(jq '[.[] | select(.verification == "NOT_VERIFIABLE")] | length' "$PR_DISCOVERY_FILE")
 if [ "$discovery_unverified" -gt 0 ]; then
   PR_STATUS="$PR_STATUS; discovery NOT_VERIFIABLE for $discovery_unverified repo(s)"
 fi
