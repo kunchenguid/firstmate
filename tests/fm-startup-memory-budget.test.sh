@@ -15,7 +15,14 @@ CONFIG_PUSH="$ROOT/bin/fm-config-push.sh"
 make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
-  fm_fake_exit0 "$fakebin" node gh-axi chrome-devtools-axi lavish-axi quota-axi
+  fm_fake_exit0 "$fakebin" node chrome-devtools-axi lavish-axi
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '0.1.29'
+fi
+exit 0
+SH
   cat > "$fakebin/quota-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
