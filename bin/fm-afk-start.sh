@@ -3,7 +3,9 @@
 # foreground process when one is not already alive.
 #
 # Usage: fm-afk-start.sh
-#   Sets state/.afk unless FM_AFK_STATE_PREPARED=1, checks
+#   Refuses an external Codex thread without a verified tmux or Herdr pane
+#   before it writes state/.afk. Otherwise sets state/.afk unless
+#   FM_AFK_STATE_PREPARED=1, checks
 #   state/.supervise-daemon.lock, and:
 #     - prints "afk: daemon already running pid=<pid>" then exits 0 when that
 #       lock is held by a live daemon (a REFRESH: no stale-artifact clear);
