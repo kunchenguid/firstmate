@@ -1293,14 +1293,25 @@ reap_task_worktree_processes() {  # <label> <dir>...
     while IFS= read -r pid; do
       [ -n "$pid" ] || continue
       if ! identity=$(task_process_identity "$pid"); then
-        echo "REFUSED: cannot verify leaked process $pid identity for $ID; preserving the worktree/tasktmp for manual inspection or retry." >&2
-        return 1
+        if ! task_pids_under_roots "$@"; then
+          echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+          return 1
+        fi
+        if task_pid_list_contains "$TASK_PIDS" "$pid"; then
+          echo "REFUSED: cannot verify leaked process $pid identity for $ID; preserving the worktree/tasktmp for manual inspection or retry." >&2
+          return 1
+        fi
+        continue
       fi
       tracked_pids+=("$pid")
       tracked_identities+=("$identity")
     done <<EOF
 $pids
 EOF
+    if [ "${#tracked_pids[@]}" -eq 0 ]; then
+      pass=$((pass + 1))
+      continue
+    fi
     if ! task_pids_under_roots "$@"; then
       echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
       return 1
