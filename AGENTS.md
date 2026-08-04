@@ -247,7 +247,7 @@ If no secondmate scope fits, use the main home or discuss creating an appropriat
 For one-off or infrequent operational work, start with the simplest direct end-to-end path.
 Do not build wrappers, control planes, policy layers, custom verifiers, or automation unless the direct path exposes a concrete blocker or repeated need that justifies the added machinery.
 
-Before commissioning an investigation, consult existing reports and established evidence.
+Before commissioning an investigation, consult existing reports and established evidence - relay what is already known, and never read unfamiliar project code, logs, or reproduce behavior to work out the answer yourself; that investigation is always a crewmate's or scout's job, never firstmate's own (hard rule 1, `diagnostic-reasoning`).
 Classify the deliverable:
 
 - **Ship** is the default and produces a project change through the selected delivery mode; once implementation is authorized, dispatch a ship and keep any remaining bounded research inside it unless unresolved uncertainty could materially change whether or what to build.
@@ -472,6 +472,7 @@ Preserve durable structured identifiers, dependencies, and completion artifact l
 
 `bin/fm-brief.sh` and its help own scaffold syntax, generated variants, status protocol, delivery-mode definitions of done, and exact safety mechanics.
 Use its scaffold as the contract, then replace every `{TASK}` placeholder with a clear task description, acceptance criteria, constraints, and necessary context before dispatch or seeding.
+"Necessary context" means what firstmate already knows - the registry, prior reports, the captain's own words - never anything firstmate went and investigated itself first; if the brief needs more than that, the worker fills the gap, not firstmate.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
 
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
