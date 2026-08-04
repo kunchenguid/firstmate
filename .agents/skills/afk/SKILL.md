@@ -48,6 +48,7 @@ batched digest rather than per-wake injections.
    It exits immediately if the identity-backed daemon lock already names a live process, otherwise it execs `bin/fm-supervise-daemon.sh` in the foreground.
    The daemon is **presence-gated**: it injects escalations only while
    `state/.afk` exists, and stays quiet otherwise.
+   An external Codex thread without an inherited tmux or Herdr pane cannot enter away mode, because it has no safe asynchronous callback; follow the Codex protocol's [no-pane boundary](../../../docs/supervision-protocols/codex.md) and keep foreground checkpoints running instead.
 
 3. **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher as
    its child; the singleton lock no-ops a stray arm harmlessly.
