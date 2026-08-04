@@ -65,6 +65,8 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 The first mate detects and offers to install supported missing tools after you approve.
 Backend-specific setup is linked in [Documentation](#documentation).
 
+**Windows (Git Bash):** enable Developer Mode (Settings > System > Advanced > For developers, first toggle - or just search "use developer features"), or grant your account the "Create symbolic links" privilege, before running firstmate, then fully restart your terminal. Without it, `ln -s` on a directory silently creates a plain empty directory instead of a real symlink, which breaks the session lock in ways that are hard to diagnose.
+
 ### Recommended harnesses
 
 **Claude Code, Grok, and Pi are equal co-primary recommendations** for running the primary firstmate session, with `pi-signed` supported as Pi's distinct signed-wrapper identity.
