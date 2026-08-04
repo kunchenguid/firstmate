@@ -542,6 +542,80 @@ fm_remote_job_launchagent_loaded() { # <remote-root> <account-home> <uid>
 fm_remote_job_worker_pid_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.pid"; }
 fm_remote_job_worker_ready_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.ready"; }
 fm_remote_job_worker_identity_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.identity"; }
+fm_remote_job_worker_lock_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.lock"; }
+
+fm_remote_job_process_start() {
+  local pid=$1 ps_bin value
+  if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
+  value=$("$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
+  [ -n "$value" ] || return 1
+  case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  printf '%s\n' "$value"
+}
+
+fm_remote_job_process_command() {
+  local pid=$1 ps_bin value
+  if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
+  value=$("$ps_bin" -p "$pid" -o command= 2>/dev/null) || return 1
+  [ -n "$value" ] || return 1
+  case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  printf '%s\n' "$value"
+}
+
+fm_remote_job_read_single_line() {
+  local file=$1 max=$2 value extra
+  fm_remote_job_regular_bounded "$file" "$max" || return 1
+  IFS= read -r value < "$file" || return 1
+  if IFS= read -r extra < <(tail -n +2 "$file"); then
+    : "$extra"
+    return 1
+  fi
+  [ -n "$value" ] || return 1
+  printf '%s\n' "$value"
+}
+
+fm_remote_job_lock_owner_matches_process() {
+  local account_home=$1 lock pid recorded_start actual_start recorded_command actual_command
+  fm_remote_job_prepare_state "$account_home" || return 1
+  lock=$(fm_remote_job_worker_lock_path)
+  [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
+  pid=$(fm_remote_job_read_single_line "$lock/pid" 64) || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$pid" -gt 1 ] || return 1
+  recorded_start=$(fm_remote_job_read_single_line "$lock/start" 256) || return 1
+  actual_start=$(fm_remote_job_process_start "$pid") || return 1
+  [ "$recorded_start" = "$actual_start" ] || return 1
+  recorded_command=$(fm_remote_job_read_single_line "$lock/command" 8192) || return 1
+  actual_command=$(fm_remote_job_process_command "$pid") || return 1
+  [ "$recorded_command" = "$actual_command" ] || return 1
+  FM_REMOTE_JOB_OWNER_PID=$pid
+}
+
+fm_remote_job_worker_owned_alive() {
+  local root=$1 account_home=$2 lock pid pid_file identity_file command ps_bin
+  [ "${FM_REMOTE_JOB_ACTIVE:-}" != 1 ] || return 0
+  fm_remote_job_prepare_state "$account_home" || return 1
+  lock=$(fm_remote_job_worker_lock_path)
+  [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
+  [ ! -e "$lock/quarantine" ] && [ ! -L "$lock/quarantine" ] || return 1
+  pid_file=$(fm_remote_job_worker_pid_path)
+  pid=$(fm_remote_job_read_single_line "$pid_file" 64) || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  identity_file=$(fm_remote_job_worker_identity_path)
+  fm_remote_job_regular_bounded "$identity_file" 256 || return 1
+  fm_remote_job_probe "$account_home" || return 1
+  if fm_remote_job_lock_owner_matches_process "$account_home"; then
+    [ "$pid" = "$FM_REMOTE_JOB_OWNER_PID" ] || return 1
+    return 0
+  fi
+  [ ! -e "$lock/pid" ] && [ ! -L "$lock/pid" ] &&
+    [ ! -e "$lock/start" ] && [ ! -L "$lock/start" ] &&
+    [ ! -e "$lock/command" ] && [ ! -L "$lock/command" ] || return 1
+  if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
+  command=$("$ps_bin" -p "$pid" -o command= 2>/dev/null) || return 1
+  case "$command" in *"$root/bin/fm-remote-job-worker.sh"*) FM_REMOTE_JOB_OWNER_PID=$pid; return 0 ;; esac
+  return 1
+}
 
 fm_remote_job_code_identity() { # <remote-root> <account-home>
   local root=$1 account_home=$2 git_bin library_hash worker_hash
@@ -581,9 +655,11 @@ fm_remote_job_worker_alive() { # <account-home>
 }
 
 fm_remote_job_probe() { # <account-home>; a fresh worker heartbeat or active job proves readiness
-  local account_home=$1 ready mtime now
+  local account_home=$1 ready lock mtime now
   [ "${FM_REMOTE_JOB_ACTIVE:-}" = 1 ] && return 0
   fm_remote_job_prepare_state "$account_home" || return 1
+  lock=$(fm_remote_job_worker_lock_path)
+  [ ! -e "$lock/quarantine" ] && [ ! -L "$lock/quarantine" ] || return 1
   ready=$(fm_remote_job_worker_ready_path)
   [ -f "$ready" ] && [ ! -L "$ready" ] || return 1
   mtime=$(fm_remote_job_path_mtime "$ready" 2>/dev/null || true)
@@ -594,7 +670,7 @@ fm_remote_job_probe() { # <account-home>; a fresh worker heartbeat or active job
 
 fm_remote_job_wait_for_probe() { # <remote-root> <account-home>
   local root=$1 account_home=$2 i=0
-  while [ "$i" -lt 100 ]; do
+  while [ "$i" -lt 200 ]; do
     fm_remote_job_probe "$account_home" && fm_remote_job_worker_identity_matches "$root" "$account_home" && return 0
     i=$((i + 1))
     sleep 0.1
@@ -648,10 +724,9 @@ fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
     return 1
   }
   fm_remote_job_prepare_state "$account_home" || return 1
-  if fm_remote_job_worker_alive "$account_home"; then
+  if fm_remote_job_worker_owned_alive "$root" "$account_home"; then
     if fm_remote_job_worker_identity_matches "$root" "$account_home"; then return 0; fi
-    pid=$(cat "$(fm_remote_job_worker_pid_path)" 2>/dev/null || true)
-    case "$pid" in ''|*[!0-9]*) FM_REMOTE_JOB_ERROR="running remote job worker has an invalid pid record"; return 1 ;; esac
+    pid=$FM_REMOTE_JOB_OWNER_PID
     kill -TERM "$pid" 2>/dev/null || {
       FM_REMOTE_JOB_ERROR="could not stop the stale remote job worker"
       return 1

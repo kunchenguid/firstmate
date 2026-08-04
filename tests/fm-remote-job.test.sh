@@ -16,8 +16,9 @@ STATE_ROOT="$TMP_ROOT/remote-jobs"
 RUNTIME_BIN="$TMP_ROOT/runtime-bin"
 FAKE_PERL_LOG="$TMP_ROOT/perl.log"
 REAL_GIT=$(command -v git)
+OTHER_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
-trap 'if [ -f "$STATE_ROOT/worker.pid" ]; then kill "$(cat "$STATE_ROOT/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
+trap 'if [ -n "$OTHER_PID" ]; then kill "$OTHER_PID" 2>/dev/null || true; fi; if [ -f "$STATE_ROOT/worker.pid" ]; then kill "$(cat "$STATE_ROOT/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
 
 cp "$ROOT/bin/fm-remote-job-lib.sh" "$ROOT/bin/fm-remote-job-worker.sh" "$REMOTE_ROOT/bin/"
 printf 'fixture\n' > "$REMOTE_ROOT/AGENTS.md"
@@ -108,12 +109,34 @@ pass "the worker preserves bounded argv and stdin in an empty environment"
 
 OLD_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
 printf '\n' >> "$REMOTE_ROOT/bin/fm-remote-job-worker.sh"
-fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail "$FM_REMOTE_JOB_ERROR"
+fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" \
+  || fail "$FM_REMOTE_JOB_ERROR"
 NEW_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
 [ "$NEW_WORKER_PID" != "$OLD_WORKER_PID" ] || fail "ensure retained a worker running stale code"
 fm_remote_job_worker_identity_matches "$REMOTE_ROOT" "$ACCOUNT_HOME" \
   || fail "the replacement worker did not publish the current code identity"
 pass "ensure replaces a live worker after its code changes"
+
+CRASHED_WORKER_PID=$NEW_WORKER_PID
+kill -KILL "$CRASHED_WORKER_PID"
+wait "$CRASHED_WORKER_PID" 2>/dev/null || true
+assert_present "$STATE_ROOT/worker.lock" "an unclean exit did not retain the worker ownership lock"
+sleep 20 &
+OTHER_PID=$!
+printf '%s\n' "$OTHER_PID" > "$STATE_ROOT/worker.pid"
+printf '%s\n' "$OTHER_PID" > "$STATE_ROOT/worker.lock/pid"
+touch -t 200001010000 "$STATE_ROOT/worker.ready" "$STATE_ROOT/worker.lock"
+fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" \
+  || fail "$FM_REMOTE_JOB_ERROR"
+kill -0 "$OTHER_PID" 2>/dev/null || fail "stale worker state caused an unrelated process to be signaled"
+NEW_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
+[ "$NEW_WORKER_PID" != "$OTHER_PID" ] || fail "the replacement adopted an unrelated persisted pid"
+fm_remote_job_worker_identity_matches "$REMOTE_ROOT" "$ACCOUNT_HOME" \
+  || fail "stale ownership recovery did not start the current worker"
+kill "$OTHER_PID" 2>/dev/null || true
+wait "$OTHER_PID" 2>/dev/null || true
+OTHER_PID=
+pass "stale ownership is reclaimed without signaling a reused pid"
 
 FM_REMOTE_JOB_TIMEOUT=1
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-timeout-job.sh < /dev/null > /dev/null
@@ -212,5 +235,37 @@ fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
 [ "$FM_REMOTE_JOB_EXIT" -eq 126 ] || fail "the worker accepted a symlinked argv record"
 assert_absent "$SIDE_EFFECT" "the worker executed a job after its argv changed to a symlink"
 pass "the worker refuses symlinked job fields before command execution"
+
+QUARANTINE_STARTED="$TMP_ROOT/quarantine-started"
+QUARANTINE_SIDE_EFFECT="$TMP_ROOT/quarantine-side-effect"
+FM_REMOTE_JOB_TIMEOUT=5
+fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
+  fm-shutdown-job.sh "$QUARANTINE_STARTED" "$QUARANTINE_SIDE_EFFECT" < /dev/null > /dev/null
+JOB_ID=$FM_REMOTE_JOB_ID
+JOB_DIR="$STATE_ROOT/jobs/$JOB_ID"
+for _ in $(seq 1 100); do
+  [ -f "$QUARANTINE_STARTED" ] && break
+  sleep 0.05
+done
+assert_present "$QUARANTINE_STARTED" "the quarantine fixture did not begin executing"
+GROUP_PID=$(cat "$JOB_DIR/.claim/group")
+printf 'invalid\n' > "$JOB_DIR/.claim/group"
+WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
+kill -TERM "$WORKER_PID"
+wait "$WORKER_PID" 2>/dev/null || true
+assert_present "$STATE_ROOT/worker.lock/quarantine" "failed shutdown released worker ownership"
+fm_remote_job_probe "$ACCOUNT_HOME" && fail "quarantined worker ownership still reported ready"
+set +e
+HOME="$ACCOUNT_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" \
+  >> "$TMP_ROOT/worker.out" 2>> "$TMP_ROOT/worker.err"
+REPLACEMENT_RC=$?
+set -e
+[ "$REPLACEMENT_RC" -ne 0 ] || fail "a replacement worker ignored quarantined ownership"
+assert_present "$STATE_ROOT/worker.lock/quarantine" "a replacement removed quarantined ownership"
+kill -KILL -- "-$GROUP_PID" 2>/dev/null || true
+sleep 3
+assert_absent "$QUARANTINE_SIDE_EFFECT" "the quarantined command mutated after explicit termination"
+pass "failed shutdown quarantines ownership against replacement workers"
 
 echo "ALL TESTS PASSED"

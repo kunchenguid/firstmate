@@ -23,6 +23,9 @@ FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)}
 . "$SCRIPT_DIR/fm-remote-job-lib.sh"
 
 WORKER_ACTIVE_JOB=
+WORKER_LOCK=
+WORKER_LOCK_HELD=0
+WORKER_RELEASE_OWNERSHIP=1
 
 worker_error() { printf 'remote-job-worker: %s\n' "$1" >&2; }
 
@@ -63,15 +66,89 @@ worker_publish_identity() {
   mv -f -- "$tmp" "$identity_file"
 }
 
+worker_publish_lock_owner() {
+  local pid start command pid_tmp start_tmp command_tmp
+  pid=${BASHPID:-$$}
+  start=$(fm_remote_job_process_start "$pid") || return 1
+  command=$(fm_remote_job_process_command "$pid") || return 1
+  pid_tmp=$(umask 077; mktemp "$WORKER_LOCK/.pid.XXXXXX") || return 1
+  start_tmp=$(umask 077; mktemp "$WORKER_LOCK/.start.XXXXXX") || { rm -f -- "$pid_tmp"; return 1; }
+  command_tmp=$(umask 077; mktemp "$WORKER_LOCK/.command.XXXXXX") || { rm -f -- "$pid_tmp" "$start_tmp"; return 1; }
+  printf '%s\n' "$pid" > "$pid_tmp" || { rm -f -- "$pid_tmp" "$start_tmp" "$command_tmp"; return 1; }
+  printf '%s\n' "$start" > "$start_tmp" || { rm -f -- "$pid_tmp" "$start_tmp" "$command_tmp"; return 1; }
+  printf '%s\n' "$command" > "$command_tmp" || { rm -f -- "$pid_tmp" "$start_tmp" "$command_tmp"; return 1; }
+  chmod 600 "$pid_tmp" "$start_tmp" "$command_tmp" || { rm -f -- "$pid_tmp" "$start_tmp" "$command_tmp"; return 1; }
+  mv -f -- "$command_tmp" "$WORKER_LOCK/command" || { rm -f -- "$pid_tmp" "$start_tmp" "$command_tmp"; return 1; }
+  mv -f -- "$start_tmp" "$WORKER_LOCK/start" || { rm -f -- "$pid_tmp" "$start_tmp" "$WORKER_LOCK/command"; return 1; }
+  mv -f -- "$pid_tmp" "$WORKER_LOCK/pid" || { rm -f -- "$pid_tmp" "$WORKER_LOCK/start" "$WORKER_LOCK/command"; return 1; }
+}
+
+worker_lock_recent() {
+  local mtime now
+  mtime=$(fm_remote_job_path_mtime "$WORKER_LOCK" 2>/dev/null || true)
+  case "$mtime" in ''|*[!0-9]*) return 0 ;; esac
+  now=$(date +%s)
+  [ $((now - mtime)) -le 10 ]
+}
+
+worker_acquire_lock() {
+  local account_home=$1 attempt=0
+  while [ "$attempt" -lt 150 ]; do
+    if (umask 077; mkdir "$WORKER_LOCK") 2>/dev/null; then
+      WORKER_LOCK_HELD=1
+      worker_publish_lock_owner || return 1
+      return 0
+    fi
+    [ -d "$WORKER_LOCK" ] && [ ! -L "$WORKER_LOCK" ] || return 1
+    if [ -e "$WORKER_LOCK/quarantine" ] || [ -L "$WORKER_LOCK/quarantine" ]; then return 3; fi
+    if fm_remote_job_lock_owner_matches_process "$account_home"; then return 2; fi
+    if fm_remote_job_probe "$account_home" || worker_lock_recent; then
+      attempt=$((attempt + 1))
+      sleep 0.1
+      continue
+    fi
+    [ ! -L "$WORKER_LOCK/pid" ] && [ ! -L "$WORKER_LOCK/start" ] && [ ! -L "$WORKER_LOCK/command" ] || return 1
+    rm -f -- "$WORKER_LOCK/pid" "$WORKER_LOCK/start" "$WORKER_LOCK/command" || return 1
+    rmdir "$WORKER_LOCK" || return 1
+  done
+  return 1
+}
+
+worker_publish_quarantine() {
+  local tmp
+  [ "$WORKER_LOCK_HELD" -eq 1 ] || return 1
+  tmp=$(umask 077; mktemp "$WORKER_LOCK/.quarantine.XXXXXX") || return 1
+  printf 'active execution could not be confirmed stopped\n' > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$WORKER_LOCK/quarantine"
+}
+
+worker_clear_quarantine() {
+  [ ! -L "$WORKER_LOCK/quarantine" ] || return 1
+  rm -f -- "$WORKER_LOCK/quarantine"
+}
+
 worker_cleanup() {
-  local pid_file ready identity
+  local pid_file ready identity owner_pid
+  [ "$WORKER_LOCK_HELD" -eq 1 ] && [ "$WORKER_RELEASE_OWNERSHIP" -eq 1 ] || return 0
+  owner_pid=$(fm_remote_job_read_single_line "$WORKER_LOCK/pid" 64 2>/dev/null || true)
+  if [ -z "$owner_pid" ]; then
+    [ ! -L "$WORKER_LOCK/start" ] && [ ! -L "$WORKER_LOCK/command" ] &&
+      rm -f -- "$WORKER_LOCK/start" "$WORKER_LOCK/command" 2>/dev/null || true
+    rmdir "$WORKER_LOCK" 2>/dev/null || true
+    WORKER_LOCK_HELD=0
+    return 0
+  fi
+  [ "$owner_pid" = "${BASHPID:-$$}" ] || return 0
   pid_file=$(fm_remote_job_worker_pid_path)
   ready=$(fm_remote_job_worker_ready_path)
   identity=$(fm_remote_job_worker_identity_path)
   [ ! -L "$pid_file" ] && rm -f -- "$pid_file" 2>/dev/null || true
   [ ! -L "$ready" ] && rm -f -- "$ready" 2>/dev/null || true
   [ ! -L "$identity" ] && rm -f -- "$identity" 2>/dev/null || true
-  rmdir "$FM_REMOTE_JOB_STATE/worker.lock" 2>/dev/null || true
+  rm -f -- "$WORKER_LOCK/pid" "$WORKER_LOCK/start" "$WORKER_LOCK/command" 2>/dev/null || true
+  rmdir "$WORKER_LOCK" 2>/dev/null || true
+  WORKER_LOCK_HELD=0
 }
 
 worker_read_process_id() { # <file>
@@ -146,12 +223,31 @@ worker_stop_active_execution() {
 
 worker_shutdown() {
   trap - HUP INT TERM
+  worker_publish_quarantine || {
+    worker_error "cannot guard worker ownership for shutdown"
+    trap worker_shutdown HUP INT TERM
+    return 0
+  }
   worker_stop_active_execution || {
     worker_error "could not stop the active command tree"
+    WORKER_RELEASE_OWNERSHIP=0
     exit 125
   }
-  worker_cleanup
+  worker_clear_quarantine || {
+    worker_error "could not clear guarded worker ownership after shutdown"
+    WORKER_RELEASE_OWNERSHIP=0
+    exit 125
+  }
   exit 0
+}
+
+worker_exit_cleanup() {
+  if [ "$WORKER_RELEASE_OWNERSHIP" -eq 1 ] && ! worker_stop_active_execution; then
+    worker_error "could not stop the active command tree during exit"
+    worker_publish_quarantine || worker_error "could not quarantine failed exit ownership"
+    WORKER_RELEASE_OWNERSHIP=0
+  fi
+  worker_cleanup
 }
 
 worker_claim() { # <job-dir>
@@ -423,16 +519,21 @@ worker_process_once() { # <account-home>
 }
 
 main() {
-  local account_home lock
+  local account_home lock_status
   account_home=$(worker_account_home) || { worker_error "cannot resolve account home"; exit 1; }
   FM_ROOT=$(fm_remote_job_canonical_existing_dir "$FM_ROOT") || { worker_error "configured FM_ROOT is unsafe"; exit 1; }
   [ -f "$FM_ROOT/AGENTS.md" ] && [ ! -L "$FM_ROOT/AGENTS.md" ] || { worker_error "FM_ROOT is not a Firstmate checkout"; exit 1; }
   fm_remote_job_prepare_state "$account_home" || { worker_error "$FM_REMOTE_JOB_ERROR"; exit 1; }
-  lock="$FM_REMOTE_JOB_STATE/worker.lock"
-  if ! (umask 077; mkdir "$lock") 2>/dev/null; then
-    exit 0
-  fi
-  trap worker_cleanup EXIT
+  WORKER_LOCK=$(fm_remote_job_worker_lock_path)
+  trap worker_exit_cleanup EXIT
+  worker_acquire_lock "$account_home"
+  lock_status=$?
+  case "$lock_status" in
+    0) ;;
+    2) exit 0 ;;
+    3) worker_error "worker ownership is quarantined after an unconfirmed shutdown"; exit 1 ;;
+    *) worker_error "cannot acquire or safely reclaim worker ownership"; exit 1 ;;
+  esac
   trap worker_shutdown HUP INT TERM
   worker_publish_identity "$account_home" || { worker_error "cannot publish worker code identity"; exit 1; }
   worker_publish_pid || { worker_error "cannot publish worker pid"; exit 1; }
