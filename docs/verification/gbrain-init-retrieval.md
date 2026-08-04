@@ -58,6 +58,6 @@ No cloud embedding or reranking connection appeared in the trace.
 With `MINIMAX_API_KEY` injected only from the mode-600 Pi authentication file, one `gbrain think --rounds 1` call completed with `Model: minimax:MiniMax-M3`, five gathered pages, and four citations.
 The answer cited `firstmate-docs/gbrain-endpoints`, `firstmate-docs/gbrain-embedding-verification`, and `firstmate-docs/gbrain-reranker-verification`.
 
-With `MINIMAX_API_KEY` removed through `env -i`, the same `think` path returned no synthesis and printed `(no LLM available — set anthropic_api_key via gbrain config or ANTHROPIC_API_KEY env)` while retaining `Model: minimax:MiniMax-M3` in its summary.
+With `MINIMAX_API_KEY` removed through `env -i`, the same `think` path returned no synthesis and printed `(no LLM available - set anthropic_api_key via gbrain config or ANTHROPIC_API_KEY env)` while retaining `Model: minimax:MiniMax-M3` in its summary.
 That is a clear no-answer state, but the current GBrain message incorrectly recommends the Anthropic credential rather than the missing MiniMax credential.
 In the same credential-free environment, `gbrain search 'snowflake arctic embed2' --limit 5` continued to return five local results.

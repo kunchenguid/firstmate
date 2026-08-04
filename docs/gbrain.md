@@ -25,19 +25,27 @@ To upgrade deliberately, select a newer verified GBrain tag, then run:
 git -C /home/sungin/.local/gbrain/src fetch --tags origin
 git -C /home/sungin/.local/gbrain/src checkout --detach <verified-tag>
 cd /home/sungin/.local/gbrain/src
-/home/sungin/.local/gbrain/bin/bun install --frozen-lockfile --cache-dir /home/sungin/.local/gbrain/cache
+/home/sungin/.local/gbrain/bin/bun install --frozen-lockfile --ignore-scripts --cache-dir /home/sungin/.local/gbrain/cache
 GBRAIN_HOME=/home/sungin/.local/share/gbrain/runtime \
 PATH=/home/sungin/.local/gbrain/bin:$PATH \
-  /home/sungin/.local/gbrain/bin/gbrain apply-migrations --yes --non-interactive
-PATH=/home/sungin/.local/gbrain/bin:$PATH \
-  /home/sungin/.local/gbrain/bin/gbrain autopilot --uninstall
+  /home/sungin/.local/gbrain/bin/gbrain apply-migrations \
+  --yes --non-interactive --no-autopilot-install
 GBRAIN_HOME=/home/sungin/.local/share/gbrain/runtime \
   /home/sungin/.local/gbrain/bin/gbrain doctor
 ```
 
 Verify PGLite initialization in an isolated approved directory before adopting a new standalone release binary.
-The current migration runner can install `gbrain-autopilot.service` as a side effect.
-This archive does not enable the dream cycle, so remove that unit immediately after migrations.
+`--ignore-scripts` prevents Bun's postinstall hook from running an unguarded migration, and the explicit `--no-autopilot-install` migration skips the Phase F autopilot installation.
+The story #6 deployment's migration-created unit has already been removed, so it has no autopilot unit eligible for routine cleanup.
+If an autopilot unit exists before a future upgrade, leave it unchanged unless an ownership record proves that this deployment created it and confirms that no other story requires it.
+A matching filename or generic GBrain-generated unit shape is not ownership proof.
+Only for a demonstrably deployment-owned leftover, remove it with the configured brain:
+
+```sh
+GBRAIN_HOME=/home/sungin/.local/share/gbrain/runtime \
+PATH=/home/sungin/.local/gbrain/bin:$PATH \
+  /home/sungin/.local/gbrain/bin/gbrain autopilot --uninstall
+```
 
 ## Initialize and configure retrieval
 
