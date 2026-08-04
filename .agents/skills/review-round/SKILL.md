@@ -16,12 +16,13 @@ This skill is the single owner of that procedure.
 
 ## Build the inventory
 
-Discover both classes with `gh-axi search prs`, scoped to the requested-reviewer and authored-by facets for the captain's handle, state open.
-They are handled differently:
+The two classes need two different commands, because `gh-axi search prs` has no requested-reviewer facet - its only review flag is `--review <none|required|approved|changes_requested>`, and a raw `review-requested:` qualifier passed as the positional query is rejected as an invalid search query:
 
 - **Incoming** - someone else wrote it, the captain is the requested reviewer.
+  Discover these through the search API directly: `gh-axi api "/search/issues?q=is%3Apr+is%3Aopen+review-requested%3A%40me"`, or `gh-axi pr list --state open` per project when the round is already scoped to one repository.
   The verdict becomes the review he posts under his own name, so firstmate must get it right before it reaches him.
 - **Self** - the captain wrote it.
+  Discover these with `gh-axi search prs --author <handle> --state open` (no positional query needed).
   He wants defects found, not reassurance.
 
 The authored-by search reaches back years and surfaces old contributions to repositories that are not part of the fleet.
