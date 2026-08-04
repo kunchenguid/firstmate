@@ -197,6 +197,44 @@ test_nbsp_after_bare_glyph_with_text_is_pending() {
   pass "fm_composer_classify_content: real text after an NBSP-rendered glyph still reads pending"
 }
 
+# --- Class coverage for the other Unicode space separators -------------------
+# U+00A0 above is the codepoint captured live; the cases below are NOT captured
+# evidence. They pin the rest of the same defect class - U+202F NARROW NO-BREAK
+# SPACE, U+2007 FIGURE SPACE, U+2009 THIN SPACE are equally outside bash's
+# [:space:] class and the literal ' ' glyph-strip patterns, so each one would
+# reproduce the identical pending-deferral wedge if it were ever rendered.
+
+test_other_unicode_space_separators_after_bare_glyph_are_empty() {
+  local sep out
+  for sep in $'\xe2\x80\xaf' $'\xe2\x80\x87' $'\xe2\x80\x89'; do
+    out=$(classify 0 $'\xe2\x9d\xaf'"$sep")
+    [ "$out" = empty ] \
+      || fail "a bare claude glyph followed only by a Unicode space separator should read empty, got '$out'"
+    out=$(classify 0 $'\xe2\x80\xba'"$sep")
+    [ "$out" = empty ] \
+      || fail "a bare codex glyph followed only by a Unicode space separator should read empty, got '$out'"
+  done
+  pass "fm_composer_classify_content: a bare agent glyph followed only by U+202F/U+2007/U+2009 reads empty (class coverage)"
+}
+
+test_other_unicode_space_separators_preserve_the_safety_verdicts() {
+  local sep out
+  for sep in $'\xe2\x80\xaf' $'\xe2\x80\x87' $'\xe2\x80\x89'; do
+    # Real typed text after the separator is still unsubmitted input.
+    out=$(classify 0 $'\xe2\x9d\xaf'"$sep"'land pr 416 now')
+    [ "$out" = pending ] \
+      || fail "real text after a Unicode space separator should still read pending, got '$out'"
+    # A bare dead-shell glyph trailed only by one stays unsafe; bordered stays empty.
+    out=$(classify 0 '$'"$sep")
+    [ "$out" = unknown ] \
+      || fail "a bare shell glyph plus a Unicode space separator must read unknown, got '$out'"
+    out=$(classify 1 '$'"$sep")
+    [ "$out" = empty ] \
+      || fail "a bordered shell glyph plus a Unicode space separator must read empty, got '$out'"
+  done
+  pass "fm_composer_classify_content: U+202F/U+2007/U+2009 keep the pending and dead-shell safety verdicts (class coverage)"
+}
+
 # --- Real text is pending ---------------------------------------------------
 
 test_real_text_is_pending() {
@@ -618,6 +656,8 @@ test_bordered_shell_glyph_is_empty
 test_agent_glyphs_are_empty_bordered_and_bare
 test_nbsp_after_bare_glyph_is_empty
 test_nbsp_after_bare_glyph_with_text_is_pending
+test_other_unicode_space_separators_after_bare_glyph_are_empty
+test_other_unicode_space_separators_preserve_the_safety_verdicts
 test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit

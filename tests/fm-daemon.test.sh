@@ -1430,6 +1430,54 @@ test_wedge_alarm_herdr_shown_true_succeeds() {
   pass "wedge_alarm_via_herdr: a shown=true herdr result succeeds without a spurious failure log"
 }
 
+# herdr's stdout is a JSON stream, not guaranteed to be a single document: a
+# progress/warning object can precede the result. Extraction must be bounded to
+# one value, or `shown` becomes a multi-line $'true\ntrue' that matches neither
+# the empty nor the true case - turning a delivered notification into a logged
+# failure with a garbled multi-line log line.
+test_wedge_alarm_herdr_multi_object_stdout_is_bounded() {
+  local dir daemon_log rc
+  command -v jq >/dev/null 2>&1 || { pass "herdr multi-object stdout verdict skipped without jq"; return; }
+  dir="$TMP_ROOT/wedge-herdr-multi-object"
+  daemon_log="$dir/daemon.log"
+  install_fake_herdr "$dir" \
+    '{"id":"cli:notification:show","result":{"shown":true,"type":"notification_progress"}}
+{"id":"cli:notification:show","result":{"reason":"shown","shown":true,"type":"notification_show"}}'
+  PATH="$FAKE_HERDR_BIN:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+    wedge_alarm_via_herdr "away-mode WEDGED 900s"
+  rc=$?
+  assert_fake_herdr_ran "$dir" "multi-object stdout verdict"
+  [ "$rc" -eq 0 ] \
+    || fail "a delivered notification split across two JSON objects was misread as a failure ($rc)"
+  [ ! -s "$daemon_log" ] \
+    || fail "a multi-object herdr stdout logged a spurious failure: $(cat "$daemon_log")"
+  pass "wedge_alarm_via_herdr: multi-object herdr stdout still reads a single shown verdict"
+}
+
+# The same bounding must not swallow a genuine failure that arrives after a
+# leading progress object, and the logged reason must stay a single line.
+test_wedge_alarm_herdr_multi_object_not_shown_is_a_failure() {
+  local dir daemon_log rc lines
+  command -v jq >/dev/null 2>&1 || { pass "herdr multi-object shown=false verdict skipped without jq"; return; }
+  dir="$TMP_ROOT/wedge-herdr-multi-object-not-shown"
+  daemon_log="$dir/daemon.log"
+  install_fake_herdr "$dir" \
+    '{"id":"cli:notification:show","result":{"reason":"disabled","shown":false,"type":"notification_show"}}
+{"id":"cli:notification:show","result":{"reason":"disabled","shown":false,"type":"notification_show"}}'
+  PATH="$FAKE_HERDR_BIN:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+    wedge_alarm_via_herdr "away-mode WEDGED 900s"
+  rc=$?
+  assert_fake_herdr_ran "$dir" "multi-object shown=false verdict"
+  [ "$rc" -ne 0 ] \
+    || fail "a shown=false result repeated across two JSON objects was treated as a successful delivery"
+  grep -F 'not shown (reason: disabled)' "$daemon_log" >/dev/null \
+    || fail "a multi-object shown=false result did not log its reason: $(cat "$daemon_log" 2>/dev/null)"
+  lines=$(wc -l < "$daemon_log")
+  [ "$lines" -eq 1 ] \
+    || fail "a multi-object shown=false result logged a garbled multi-line reason: $(cat "$daemon_log")"
+  pass "wedge_alarm_via_herdr: multi-object shown=false still fails with a single-line reason"
+}
+
 # herdr's NotificationShowReason enum also allows rate_limited,
 # no_foreground_client, and busy - all transient, unlike disabled (a
 # structural host limitation). Naming the channel permanently broken on one
@@ -2090,6 +2138,8 @@ test_wedge_alarm_osascript_channel_selected
 test_wedge_alarm_herdr_channel_selected
 test_wedge_alarm_herdr_not_shown_is_a_failure
 test_wedge_alarm_herdr_shown_true_succeeds
+test_wedge_alarm_herdr_multi_object_stdout_is_bounded
+test_wedge_alarm_herdr_multi_object_not_shown_is_a_failure
 test_wedge_alarm_herdr_transient_reason_avoids_permanent_advice
 test_wedge_alarm_herdr_permanent_reason_keeps_command_channel_advice
 test_wedge_alarm_herdr_unverifiable_output_trusts_exit_code

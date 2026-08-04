@@ -858,13 +858,21 @@ wedge_alarm_via_herdr() {  # <summary>
   # output, a missing result, or an absent `shown` field all mean "cannot
   # verify", which trusts the exit code exactly like the no-jq fallback above;
   # the failure path is reserved for an explicit non-true `shown`.
+  #
+  # `first(inputs | ...)` bounds the extraction to ONE value. Streaming the
+  # whole capture would give an unbounded arity: if herdr ever writes a second
+  # JSON object to stdout (a warning or progress object alongside the result),
+  # `shown` would become a multi-line $'true\ntrue' that matches neither '' nor
+  # 'true' below, turning a genuinely delivered notification into a logged
+  # failure with a garbled multi-line log line.
   command -v jq >/dev/null 2>&1 || return 0
   shown=$(printf '%s' "$out" \
-    | jq -r '.result | objects | select(has("shown")) | .shown | tostring' 2>/dev/null)
+    | jq -n -r 'first(inputs | .result | objects | select(has("shown")) | .shown | tostring)' 2>/dev/null)
   case "$shown" in
     ''|true) return 0 ;;
   esac
-  reason=$(printf '%s' "$out" | jq -r '.result.reason // "unknown"' 2>/dev/null)
+  reason=$(printf '%s' "$out" \
+    | jq -n -r 'first(inputs | .result | objects | .reason | values | tostring)' 2>/dev/null)
   [ -n "$reason" ] || reason=unknown
   # rate_limited, no_foreground_client, and busy are transient - herdr's own
   # NotificationShowReason enum documents them as conditions that clear on
