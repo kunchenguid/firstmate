@@ -132,6 +132,11 @@ case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
     "$FM_FAKE_REMOTE_ENTRYPOINT" "$@" < "$FM_FAKE_INHERIT_PAYLOAD"
     exit $?
     ;;
+  doctor-fail:fm-remote-doctor.sh:*)
+    printf 'required git=MISSING\n'
+    printf 'error: required tools do not resolve on the remote runtime PATH: git\n' >&2
+    exit 1
+    ;;
   provision-block-fail:fm-remote-home-provision.sh:*)
     touch "$FM_FAKE_SEED_ENTERED"
     while [ ! -f "$FM_FAKE_SEED_RELEASE" ]; do sleep 0.02; done
@@ -276,6 +281,25 @@ assert_no_grep '- seed-fail ' "$TMP_ROOT/seed-parent/data/secondmates.md" "faile
 assert_grep '- seed-keep ' "$TMP_ROOT/seed-parent/data/secondmates.md" "failed seed rollback removed a competing successful route"
 assert_present "$TMP_ROOT/seed-keep-home/.fm-secondmate-home" "serialized seed lost its published remote home"
 pass "remote seed rollback preserves serialized competing routes"
+
+# A remote that cannot run the basic toolchain must be rejected by the preflight
+# before any home is created on that host.
+if FM_SECONDMATE_CHARTER='Toolless host charter.' FM_SECONDMATE_SCOPE='toolless host' \
+  FM_FAKE_SSH_MODE=doctor-fail seed_env "$ROOT/bin/fm-remote-home-seed.sh" \
+  seed-toolless remote-mac "$REMOTE_ROOT" "$TMP_ROOT/seed-toolless-home" --no-projects \
+  > "$TMP_ROOT/seed-toolless.out" 2>&1; then
+  fail "seeding proceeded against a remote that cannot run the required tools"
+fi
+assert_grep 'required tools do not resolve on the remote runtime PATH: git' \
+  "$TMP_ROOT/seed-toolless.out" "the seed hid the remote runtime diagnostics"
+assert_grep 'remote runtime preflight failed' "$TMP_ROOT/seed-toolless.out" \
+  "the seed did not report the failing stage"
+assert_absent "$TMP_ROOT/seed-toolless-home" "the seed provisioned a home despite a failing preflight"
+assert_no_grep '- seed-toolless ' "$TMP_ROOT/seed-parent/data/secondmates.md" \
+  "the refused route survived the preflight rollback"
+assert_absent "$TMP_ROOT/seed-parent/data/seed-toolless/brief.md" \
+  "the refused route left its scaffolded charter behind"
+pass "remote seeding stops on the runtime preflight before touching the host"
 
 # Provision and register the remote route from the captain-facing primary.
 out=$(FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
