@@ -597,8 +597,11 @@ test_failed_relaunch_leaves_the_original_record_and_work_recoverable() {
     "a failed alternate launch lost the recorded isolated copy"
   assert_absent "$HOME_DIR/state/.resume-$id.meta.bak" \
     "the restored record left its snapshot behind"
-  assert_grep 'fm-' "$CASE_DIR/kill.log" \
-    "the failed relaunch left the endpoint it created behind"
+  # tmux's exact-match target form, so the cleanup can only ever name this task.
+  assert_grep "=firstmate:=fm-$id" "$CASE_DIR/kill.log" \
+    "the failed relaunch did not remove the exact endpoint it created"
+  [ "$(wc -l < "$CASE_DIR/kill.log")" -eq 1 ] \
+    || fail "the failed relaunch removed more than the one endpoint it created"
 
   # The work itself is untouched.
   [ "$(git -C "$WT_DIR" rev-parse HEAD)" = "$head_before" ] \
