@@ -59,16 +59,33 @@ domain=${2:-}
 case "${1:-}" in
   print)
     case "$domain" in
-      */*/*) [ -f "$FM_FAKE_STATE/loaded" ] || exit 113 ;;
+      */*/*) [ -f "$FM_FAKE_STATE/loaded-contract" ] || exit 113; cat "$FM_FAKE_STATE/loaded-contract" ;;
       *) [ -f "$FM_FAKE_STATE/gui-session" ] || exit 113 ;;
     esac
     exit 0
     ;;
-  bootout) rm -f "$FM_FAKE_STATE/loaded"; exit 0 ;;
+  bootout)
+    [ ! -f "$FM_FAKE_STATE/bootout-fail" ] || { printf 'Boot-out failed: operation not permitted\n' >&2; exit 6; }
+    rm -f "$FM_FAKE_STATE/loaded-contract"
+    exit 0
+    ;;
   bootstrap)
     # launchd refuses a gui/<uid> domain that has no login session.
     [ -f "$FM_FAKE_STATE/gui-session" ] || { printf 'Bootstrap failed: 5: Input/output error\n' >&2; exit 5; }
-    touch "$FM_FAKE_STATE/loaded"
+    [ ! -f "$FM_FAKE_STATE/loaded-contract" ] || { printf 'Bootstrap failed: service already loaded\n' >&2; exit 5; }
+    cat > "$FM_FAKE_STATE/loaded-contract" <<EOF
+path = $FM_FAKE_PLIST
+program = $FM_FAKE_HERDR_BIN
+arguments = {
+	$FM_FAKE_HERDR_BIN
+	server
+	--session
+	default
+}
+stdout path = $FM_FAKE_LAUNCH_AGENT_LOG
+stderr path = $FM_FAKE_LAUNCH_AGENT_LOG
+properties = keepalive | runatload | inferred program
+EOF
     [ -f "$FM_FAKE_STATE/bootstrap-does-not-start" ] || printf 'true\n' > "$FM_FAKE_HERDR_RUNNING"
     exit 0
     ;;
@@ -144,10 +161,30 @@ doctor() {
     FM_FAKE_LAUNCHCTL_LOG="$CASE_LAUNCHCTL_LOG" \
     FM_FAKE_FORBIDDEN_LOG="$CASE_FORBIDDEN_LOG" \
     FM_FAKE_HERDR_RUNNING="$CASE_HERDR_RUNNING" \
+    FM_FAKE_HERDR_BIN="$CASE_BIN/herdr" \
+    FM_FAKE_PLIST="$CASE_PLIST" \
+    FM_FAKE_LAUNCH_AGENT_LOG="$CASE_HOME/Library/Logs/$LABEL.log" \
     "$ROOT/bin/fm-remote-doctor.sh" "$@" 2>&1
   )
   DOCTOR_RC=$?
   set -e
+}
+
+write_loaded_contract() { # <herdr-path> [properties]
+  local herdr_bin=$1 properties=${2:-'keepalive | runatload | inferred program'}
+  cat > "$CASE_STATE/loaded-contract" <<EOF
+path = $CASE_PLIST
+program = $herdr_bin
+arguments = {
+	$herdr_bin
+	server
+	--session
+	default
+}
+stdout path = $CASE_HOME/Library/Logs/$LABEL.log
+stderr path = $CASE_HOME/Library/Logs/$LABEL.log
+properties = $properties
+EOF
 }
 
 assert_no_dangerous_calls() { # <msg>
@@ -236,13 +273,13 @@ cat > "$CASE_PLIST" <<XML
 </dict>
 </plist>
 XML
-touch "$CASE_STATE/loaded"
+write_loaded_contract /obsolete/bin/herdr 'runatload | inferred program'
 printf 'true\n' > "$CASE_HERDR_RUNNING"
 doctor
 expect_code 1 "$DOCTOR_RC" "a stale launch-agent contract was reported ready"
 assert_contains "$DOCTOR_OUT" 'check launchagent=fixable:' "launch-agent contract drift was not tagged fixable"
 assert_contains "$DOCTOR_OUT" 'check launchagent-scope=ok:' "the independent Aqua scope was not recognized"
-assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=ok:' "the loaded fixture was not recognized"
+assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=fixable:' "the stale effective launch-agent contract was not tagged fixable"
 assert_contains "$DOCTOR_OUT" 'check herdr-server=ok:' "the running fixture was not recognized"
 doctor --fix
 expect_code 0 "$DOCTOR_RC" "--fix did not repair launch-agent contract drift"
@@ -252,6 +289,45 @@ assert_grep '<key>RunAtLoad</key>' "$CASE_PLIST" "the repaired launch agent does
 assert_grep '<key>KeepAlive</key>' "$CASE_PLIST" "the repaired launch agent is not kept alive"
 assert_no_grep '/obsolete/bin/herdr' "$CASE_PLIST" "the obsolete herdr path survived repair"
 pass "a loaded and running launch agent must match the complete owned contract"
+
+# --- failed replacement cannot hide a stale loaded launch-agent contract -----
+
+new_case Darwin with-herdr gui
+mkdir -p "$(dirname "$CASE_PLIST")"
+cat > "$CASE_PLIST" <<XML
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>$LABEL</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/obsolete/bin/herdr</string>
+		<string>server</string>
+		<string>--session</string>
+		<string>default</string>
+	</array>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+</dict>
+</plist>
+XML
+write_loaded_contract /obsolete/bin/herdr 'runatload | inferred program'
+printf 'true\n' > "$CASE_HERDR_RUNNING"
+touch "$CASE_STATE/bootout-fail"
+doctor --fix
+expect_code 1 "$DOCTOR_RC" "a stale loaded job passed after its replacement failed"
+assert_contains "$DOCTOR_OUT" 'fix launchagent-loaded=failed: launchctl bootstrap' "the failed replacement was not reported"
+assert_contains "$DOCTOR_OUT" 'check launchagent=ok:' "the repaired disk contract was not confirmed"
+assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=fixable:' "the stale loaded contract did not remain a readiness gap"
+assert_contains "$DOCTOR_OUT" 'check herdr-server=ok:' "the existing server masking condition was not preserved"
+
+rm -f "$CASE_STATE/bootout-fail"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "--fix did not replace the stale loaded launch-agent contract"
+assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=ok:' "the replacement loaded contract was not confirmed"
+assert_no_grep '/obsolete/bin/herdr' "$CASE_STATE/loaded-contract" "the stale effective program survived replacement"
+pass "a failed reload leaves stale effective launch-agent state unready"
 
 # --- a launch agent that is not Aqua-scoped is repaired in place -------------
 

@@ -183,6 +183,23 @@ launch_agent_contract_matches() {
   [ "$actual" = "$expected" ]
 }
 
+launch_agent_loaded_contract_matches() {
+  local loaded herdr_bin herdr_compact plist_compact log_compact args
+  herdr_bin=$(command -v herdr 2>/dev/null) || return 1
+  loaded=$(launchctl print "gui/$UID_NUM/$LAUNCH_AGENT_LABEL" 2>/dev/null) || return 1
+  loaded=$(printf '%s' "$loaded" | tr -d ' \t\r\n') || return 1
+  herdr_compact=$(printf '%s' "$herdr_bin" | tr -d ' \t\r\n') || return 1
+  plist_compact=$(printf '%s' "$LAUNCH_AGENT_PLIST" | tr -d ' \t\r\n') || return 1
+  log_compact=$(printf '%s' "$LAUNCH_AGENT_LOG" | tr -d ' \t\r\n') || return 1
+  args="arguments={$herdr_compact"'server--session'"$HERDR_SESSION_NAME}"
+  [[ "$loaded" == *"path=$plist_compact"* ]] || return 1
+  [[ "$loaded" == *"program=$herdr_compact"* ]] || return 1
+  [[ "$loaded" == *"$args"* ]] || return 1
+  [[ "$loaded" == *"stdoutpath=$log_compact"* ]] || return 1
+  [[ "$loaded" == *"stderrpath=$log_compact"* ]] || return 1
+  [[ "$loaded" == *'properties=keepalive|runatload'* ]] || return 1
+}
+
 # --- checks -----------------------------------------------------------------
 
 check_herdr() {
@@ -253,7 +270,12 @@ check_launch_agent_loaded() {
     return 0
   fi
   if launchctl print "gui/$UID_NUM/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1; then
-    record launchagent-loaded "ok: gui/$UID_NUM/$LAUNCH_AGENT_LABEL"
+    if launch_agent_loaded_contract_matches; then
+      record launchagent-loaded "ok: gui/$UID_NUM/$LAUNCH_AGENT_LABEL matches the effective contract"
+    else
+      record launchagent-loaded "fixable: gui/$UID_NUM/$LAUNCH_AGENT_LABEL does not match the effective Firstmate-owned contract" \
+        "rerun this command with --fix to replace the loaded job with the current launch-agent contract"
+    fi
     return 0
   fi
   if check_is_ok gui-session; then
