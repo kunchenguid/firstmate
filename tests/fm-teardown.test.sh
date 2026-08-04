@@ -1264,6 +1264,28 @@ test_teardown_missing_busy_sidecar_completes() {
   pass "teardown completes when an exact busy-state sidecar is already absent"
 }
 
+test_teardown_removes_the_provider_handoff_ledger() {
+  local case_dir rc ledger
+  case_dir=$(make_case continuity-handoff-ledger)
+  write_meta "$case_dir" local-only ship
+  ledger="$case_dir/state/provider-continuity/handoff/task-x1.attempts"
+  mkdir -p "$(dirname "$ledger")"
+  printf '1700000000\n' > "$ledger"
+  printf '1700000000\tprovider-5xx\t\n' > "$case_dir/state/provider-continuity/vendor-a.events"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "continuity-handoff-ledger: teardown should complete"
+  assert_absent "$ledger" \
+    "continuity-handoff-ledger: teardown left the task's cross-provider handoff ledger behind"
+  assert_present "$case_dir/state/provider-continuity/vendor-a.events" \
+    "continuity-handoff-ledger: teardown removed fleet-wide provider evidence that outlives one task"
+  pass "teardown removes a task's cross-provider handoff ledger and keeps fleet provider evidence"
+}
+
 test_herdr_teardown_clears_escalation_marker() {
   local case_dir marker
   case_dir=$(make_case herdr-marker-cleanup)
@@ -1833,6 +1855,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
+test_teardown_removes_the_provider_handoff_ledger
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence

@@ -170,6 +170,11 @@ Secondmate launches are exempt because they resolve the secondmate harness and a
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
 That keeps spawn launch compatible across claude, codex, grok, pi, opencode, and kimi while preserving the requested profile for later audit.
 
+Provider-outage continuity extends that same boundary instead of adding a second control plane.
+`bin/fm-provider-continuity.sh` holds only deterministic records and verdicts over opaque provider tokens the agent supplies, and its handoff license composes the existing endpoint-state and current-state readers rather than introducing a second classifier.
+`bin/fm-spawn.sh --resume-worktree` reuses the existing spawn path, isolation assertion, and task lock rather than a separate relaunch mechanism.
+No part of it adds a daemon, a provider health probe, or a second source of task truth; [`configuration.md`](configuration.md) "Provider outage continuity" owns the behavior.
+
 ## Optional secondmates
 
 `data/secondmates.md` records persistent secondmates with natural-language scopes, project clone lists, and home paths.

@@ -165,6 +165,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/provider-outage-continuity/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/quota-array-dispatch/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -239,6 +243,10 @@
     {
       "path": "docs/documentation-audiences.md",
       "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/examples/crew-dispatch-continuity.json",
+      "audience": "operator-example"
     },
     {
       "path": "docs/examples/crew-dispatch.json",
@@ -326,6 +334,10 @@
     },
     {
       "path": "docs/verification/process-event-sources.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/provider-continuity.md",
       "audience": "maintainer-verification"
     },
     {
