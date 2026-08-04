@@ -208,7 +208,7 @@ batch_safe() {  # <request-file>
   local reversibility blast
   reversibility=$(ruling_field "$1" reversibility | head -1)
   blast=$(ruling_field "$1" blast-radius | head -1)
-  case "$reversibility" in *[Ii]rreversible*) return 1 ;; esac
+  [ "$reversibility" = reversible ] || return 1
   case "$blast" in contained) : ;; *) return 1 ;; esac
   return 0
 }

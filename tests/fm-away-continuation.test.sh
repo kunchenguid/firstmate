@@ -147,7 +147,7 @@ make_ruling() {
     --authorized-action keep-core-ownership \
     --invariant 'no component declares a caller identity to satisfy the matrix' \
     --available-verification 'run the regression suite as the platform team' \
-    --verifiable-precondition 'the regression suite is green')
+    --verifiable-precondition baseline-current)
   session=$(in_home "$home" "$SESSION" id)
   "$DOUBLE" operator-reserved "$home/state/away/$session/ruling/$id/request" > "$home/response"
   in_home "$home" "$RULING" validate "$id" --repo "$repo" --response "$home/response" >/dev/null
@@ -176,7 +176,7 @@ EOF
   hold=$(in_home "$home" "$HOLD" hold widget-api shape \
     --title 'Widget API ownership' --reason 'reassigns the architectural owner' --repo demo)
   in_home "$home" "$CONT" pause --hold "$hold" --task widget-cli >/dev/null
-  make_ruling "$home" "$repo" widget-api 'reversible - ownership can move back' contained >/dev/null
+  make_ruling "$home" "$repo" widget-api reversible contained >/dev/null
 
   out=$(in_home "$home" "$CONT" reentry)
 
@@ -220,7 +220,7 @@ EOF
   in_home "$home" "$SESSION" start --intent afk >/dev/null 2>&1
   hold=$(in_home "$home" "$HOLD" hold widget-api shape \
     --title 'Widget API ownership' --reason 'reassigns the architectural owner' --repo demo)
-  make_ruling "$home" "$repo" widget-api 'irreversible - the old owner loses history' broad >/dev/null
+  make_ruling "$home" "$repo" widget-api irreversible broad >/dev/null
 
   out=$(in_home "$home" "$CONT" reentry)
   case "$out" in
@@ -229,6 +229,31 @@ EOF
   esac
   : "$hold"
   pass "an irreversible or broad decision is never marked safe for an undifferentiated approval"
+}
+
+test_unknown_and_missing_reversibility_are_not_batch_safe() {
+  local rec home repo out id session request
+  rec=$(new_world batch-safety-unknown)
+  IFS='|' read -r home repo <<EOF
+$rec
+EOF
+  axi "$home" add widget-api "Widget API" --repo demo >/dev/null
+  in_home "$home" "$SESSION" start --intent afk >/dev/null 2>&1
+  in_home "$home" "$CLASS" classify --task widget-api --key shape \
+    --reassigns-authority yes --record >/dev/null
+  in_home "$home" "$HOLD" hold widget-api shape \
+    --title 'Widget API ownership' --reason 'reassigns the architectural owner' --repo demo >/dev/null
+  make_ruling "$home" "$repo" widget-api unknown contained >/dev/null
+  out=$(in_home "$home" "$CONT" reentry)
+  case "$out" in *"batch-safe: no"*) : ;; *) fail "unknown reversibility was offered as batch-safe: $out" ;; esac
+
+  session=$(in_home "$home" "$SESSION" id)
+  id=rr-widget-api-shape
+  request="$home/state/away/$session/ruling/$id/request"
+  sed -i '/^reversibility\t/d' "$request"
+  out=$(in_home "$home" "$CONT" reentry)
+  case "$out" in *"batch-safe: no"*) : ;; *) fail "missing reversibility was offered as batch-safe: $out" ;; esac
+  pass "unknown and missing reversibility fail closed for batch approval"
 }
 
 test_a_session_with_no_ruling_says_so_plainly() {
@@ -257,6 +282,7 @@ test_pause_blocks_only_dependent_work
 test_frontier_is_the_transitive_closure
 test_reentry_reports_decisions_not_transcripts
 test_an_irreversible_item_is_not_batch_safe
+test_unknown_and_missing_reversibility_are_not_batch_safe
 test_a_session_with_no_ruling_says_so_plainly
 
 echo "# fm-away-continuation.test.sh: all assertions passed"

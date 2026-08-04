@@ -71,7 +71,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-away-intent.sh`      | Resolve an operator away or return sentence to the canonical action, and host the Claude prompt hook |
 | `fm-away-lib.sh`         | Shared away-session identity, durable record, and append-only ledger helpers          |
 | `fm-decision-class.sh`   | Classify one decision D0-D3, keeping uncertainty a capability signal and never an authority one |
-| `fm-ruling-request.sh`   | Create durable ruling requests and validate an advisor's response before it can influence action |
+| `fm-ruling-request.sh`   | Create durable ruling requests with closed reversibility and trusted precondition checkers, then validate an advisor's response |
 | `fm-away-continuation.sh` | Pause only dependent work behind a decision, and render the decision-oriented reentry summary |
 | `fm-supervisor-target-lib.sh` | Resolve the shared supervisor target and backend for the daemon and launcher       |
 | `fm-supervise-daemon.sh` | Presence-gated away-mode sub-supervisor: self-handle routine wakes, guard injection by the detected primary harness, escalate batched digests, alert on failed delivery |

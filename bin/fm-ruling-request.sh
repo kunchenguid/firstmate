@@ -35,6 +35,10 @@
 #                  --alternative --authority-evidence --authorized-action
 #                  --invariant --available-verification --verifiable-precondition
 #   optional:      --evidence-file <path>   untrusted supporting text
+# --reversibility is the closed enum reversible|irreversible|unknown.
+# Each --verifiable-precondition is a checker name from the closed set
+# baseline-current|worktree-clean; validation runs every checker from the
+# trusted request after confirming response membership.
 # The exact repository baseline is READ from --repo, never typed, so no claim
 # about which commit a request is bound to can be wrong.
 #
@@ -50,8 +54,9 @@
 #                              delegated, or an action outside the authorized
 #                              action boundary
 #   higher-rule-contradiction  the response waives a declared invariant
-#   precondition-unverifiable  a precondition firstmate cannot deterministically
-#                              check
+#   precondition-unverifiable  a response names no request-declared precondition
+#   precondition-unsatisfied   a request-declared deterministic checker is
+#                              unknown, false, or cannot determine its result
 #   verification-unavailable   a verification the request does not offer
 # Exit 0 accepts, 1 rejects, 2 is invalid usage.
 set -u
@@ -130,7 +135,7 @@ command_create() {
   local task='' key='' repo='' tier='' evidence_file='' session dir id baseline
   local single_keys='question why recommendation counterargument dependency-impact reversibility blast-radius falsifier expiry-condition expires'
   local multi_keys='alternative authority-evidence authorized-action invariant available-verification verifiable-precondition'
-  local pending name value k
+  local pending name value k stage ledger
 
   pending=$(mktemp "${TMPDIR:-/tmp}/fm-ruling-create.XXXXXX") || fail 'could not stage the request'
   # The staging paths go in a global the EXIT trap can still read after this
@@ -171,6 +176,10 @@ command_create() {
     [ "$(field_values "$pending" "$k" | grep -c .)" = 1 ] \
       || fail "--$k is required exactly once"
   done
+  case "$(field_one "$pending" reversibility)" in
+    reversible|irreversible|unknown) ;;
+    *) fail 'malformed: --reversibility must be reversible, irreversible, or unknown' ;;
+  esac
   [ "$(field_one "$pending" expires)" -gt 0 ] 2>/dev/null || fail '--expires must be an epoch'
   for k in $multi_keys; do
     [ "$(field_values "$pending" "$k" | grep -c .)" -ge 1 ] \
@@ -197,28 +206,39 @@ command_create() {
   } > "$pending.final" || fail 'could not assemble the request'
 
   if [ -f "$dir/request" ]; then
-    if cmp -s "$dir/request" "$pending.final"; then
+    ledger=$(fm_away_ledger_path "$session")
+    if cmp -s "$dir/request" "$pending.final" \
+      && [ -f "$dir/evidence" ] \
+      && awk -F '\t' -v request="request=$id" '$2 == "ruling-request" { for (i = 3; i <= NF; i++) if ($i == request) found=1 } END { exit !found }' "$ledger" 2>/dev/null; then
       rm -f "$pending.final"
       printf '%s\n' "$id"
       return 0
+    fi
+    if cmp -s "$dir/request" "$pending.final"; then
+      rm -f "$pending.final"
+      fail "request $id exists without complete evidence and ledger publication"
     fi
     rm -f "$pending.final"
     fail "request $id already exists with different content; use a new decision key"
   fi
 
-  mkdir -p "$dir" || fail "could not create $dir"
-  mv "$pending.final" "$dir/request" || fail 'could not persist the request'
+  [ -z "$evidence_file" ] || [ -f "$evidence_file" ] \
+    || fail "evidence file does not exist: $evidence_file"
+  mkdir -p "$(dirname "$dir")" || fail "could not create $(dirname "$dir")"
+  stage=$(mktemp -d "$(dirname "$dir")/.${id}.pending.XXXXXX") \
+    || fail 'could not stage the ruling request'
+  mv "$pending.final" "$stage/request" || { rm -rf "$stage"; fail 'could not stage the request'; }
   # Untrusted supporting text is stored verbatim and separately. It is never
   # parsed here, and no field of it is ever compared, matched, or executed.
   if [ -n "$evidence_file" ]; then
-    [ -f "$evidence_file" ] || fail "evidence file does not exist: $evidence_file"
-    cp "$evidence_file" "$dir/evidence" || fail 'could not store untrusted evidence'
+    cp "$evidence_file" "$stage/evidence" || { rm -rf "$stage"; fail 'could not stage untrusted evidence'; }
   else
-    : > "$dir/evidence"
+    : > "$stage/evidence" || { rm -rf "$stage"; fail 'could not stage empty evidence'; }
   fi
   fm_away_ledger_append "$session" ruling-request \
     "request=$id" "task=$task" "tier=$tier" "baseline=$baseline" \
-    || fail 'could not record the ruling request'
+    || { rm -rf "$stage"; fail 'could not record the ruling request'; }
+  mv "$stage" "$dir" || { rm -rf "$stage"; fail 'could not publish the ruling request'; }
   printf '%s\n' "$id"
 }
 
@@ -233,6 +253,20 @@ has_shell_metacharacter() {  # <value>
     *';'*|*'|'*|*'&'*|*'`'*|*'$'*|*'('*|*')'*|*'<'*|*'>'*|*'\'*|*'"'*|*"'"*) return 0 ;;
   esac
   return 1
+}
+
+precondition_satisfied() {  # <request-file> <repo-dir> <checker>
+  local request=$1 repo=$2 checker=$3 live
+  case "$checker" in
+    baseline-current)
+      live=$(fm_away_baseline "$repo") || return 1
+      [ "$(field_one "$request" baseline)" = "$live" ]
+      ;;
+    worktree-clean)
+      [ -z "$(git -C "$repo" status --porcelain 2>/dev/null)" ]
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 command_validate() {
@@ -349,6 +383,14 @@ EOF
       || reject precondition-unverifiable "firstmate cannot deterministically check: $value"
   done <<EOF
 $(field_values "$response" precondition)
+EOF
+
+  while IFS= read -r value; do
+    [ -n "$value" ] || continue
+    precondition_satisfied "$request" "$repo" "$value" \
+      || reject precondition-unsatisfied "request-declared checker is unknown, false, or undetermined: $value"
+  done <<EOF
+$(field_values "$request" verifiable-precondition)
 EOF
 
   value=$(field_one "$response" verification)

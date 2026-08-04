@@ -82,7 +82,7 @@ a false exit is self-correcting (the captain re-runs `/afk`).
 Relay it in `AGENTS.md` section 9 language: the captain reads outcomes and choices, never raw worker output.
 
 Lead each remaining captain decision with its recommended ruling, then the opposing position, what accepting and rejecting each cost, reversibility, blast radius, the settled architecture at stake, and the exact directive needed.
-Offer a batched approval only across the items the summary marks `batch-safe: yes`; anything irreversible or broad is presented on its own, never folded into an undifferentiated "approve all".
+Offer a batched approval only across the items the summary marks `batch-safe: yes`; only the affirmative `reversible` state with a contained blast radius qualifies, while unknown, missing, irreversible, or broad items are presented on their own.
 Record the captain's answer with `bin/fm-decision-hold.sh resolve`, which clears the dependency edges and lets the paused work resume automatically.
 If no genuine ruling is waiting, say so plainly and keep the report short.
 

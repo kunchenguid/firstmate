@@ -13,7 +13,8 @@
 # runtime authority to an explicit operator ruling and no such ruling exists.
 # Whether activation should instead become a Runtime operation is an open
 # operator decision, and the seam for it is exactly one place: command_start
-# below performs the transition and then records it. Making activation a Runtime
+# below performs the transition and commits its record, rolling the owned launch
+# back if that commit fails. Making activation a Runtime
 # operation means dispatching that operation there, in place of the local record
 # write, and nothing else in this slice changes - the session identity, the
 # ledger, the classifier, the ruling-request contract and the reentry summary all
@@ -31,7 +32,8 @@
 # Usage:
 #   fm-away-session.sh start [--intent <text>] [--native] [--activation <src>]
 #                           Canonical activation. Runs the existing away-mode
-#                           launch, then records (or refreshes) the session.
+#                           launch, then records (or refreshes) the session;
+#                           a failed initial record rolls the launch back.
 #                           Idempotent: a second start while away mode is
 #                           already active refreshes timestamps, keeps the same
 #                           session id, and logs a repeat rather than opening a
@@ -187,7 +189,7 @@ command_health() {
 # --- canonical activation ---------------------------------------------------
 
 command_start() {
-  local intent='' native=0 activation=canonical session now existing launch_mode
+  local intent='' native=0 activation=canonical session now existing launch_mode was_away=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --intent) shift; intent=${1:-} ;;
@@ -214,6 +216,7 @@ command_start() {
     start|start-native) ;;
     *) log "FM_AWAY_LAUNCH_MODE must be start or start-native"; return 2 ;;
   esac
+  ! away_flag_present || was_away=1
   if ! "$FM_AWAY_SESSION_DIR/fm-afk-launch.sh" "$launch_mode"; then
     log 'away-mode launch refused; no away session was opened'
     return 1
@@ -224,18 +227,22 @@ command_start() {
   if [ -n "$existing" ] && fm_away_valid_session_id "$existing"; then
     session=$existing
     write_record "$session" "$(fm_away_field started)" "$now" \
-      "$(fm_away_field activation)" "$(fm_away_field intent)" || return 1
+      "$(fm_away_field activation)" "$(fm_away_field intent)" \
+      || { [ "$was_away" -eq 1 ] || "$FM_AWAY_SESSION_DIR/fm-afk-launch.sh" stop; return 1; }
     fm_away_ledger_append "$session" activation-repeat \
-      "source=$activation" "intent=$intent" || return 1
+      "source=$activation" "intent=$intent" \
+      || { [ "$was_away" -eq 1 ] || "$FM_AWAY_SESSION_DIR/fm-afk-launch.sh" stop; return 1; }
     printf '%s\n' "$session"
     log "away session $session was already open; refreshed it (no second session)"
     return 0
   fi
 
   session=$(fm_away_new_session_id "$now") || { log 'could not allocate a session id'; return 1; }
-  write_record "$session" "$now" "$now" "$activation" "$intent" || return 1
+  write_record "$session" "$now" "$now" "$activation" "$intent" \
+    || { "$FM_AWAY_SESSION_DIR/fm-afk-launch.sh" stop; return 1; }
   fm_away_ledger_append "$session" activation \
-    "source=$activation" "intent=$intent" "home=$FM_HOME" || return 1
+    "source=$activation" "intent=$intent" "home=$FM_HOME" \
+    || { fm_away_record_clear; "$FM_AWAY_SESSION_DIR/fm-afk-launch.sh" stop; return 1; }
   printf '%s\n' "$session"
 }
 

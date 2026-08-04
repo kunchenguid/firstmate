@@ -50,18 +50,19 @@ request_file() {  # <request-id>
 }
 
 sess start --intent afk >/dev/null 2>&1
+TEST_EXPIRES=$(( $(date +%s) + 3600 ))
 
-# make_request <task> <tier> [expires-epoch]
+# make_request <task> <tier> [expires-epoch] [checker]
 make_request() {
-  local task=$1 tier=$2 expires=${3:-}
-  [ -n "$expires" ] || expires=$(( $(date +%s) + 3600 ))
+  local task=$1 tier=$2 expires=${3:-} checker=${4:-baseline-current}
+  [ -n "$expires" ] || expires=$TEST_EXPIRES
   rr create --task "$task" --key shape --repo "$REPO" --tier "$tier" \
     --question 'Should the widget API expose a builder or a struct literal?' \
     --why 'Two call sites need different construction order' \
     --recommendation 'Adopt the builder' \
     --counterargument 'A struct literal is simpler and matches the sibling module' \
     --dependency-impact 'widget-cli and widget-docs wait on this shape' \
-    --reversibility 'reversible - one module, no persisted format' \
+    --reversibility reversible \
     --blast-radius contained \
     --falsifier 'a benchmark showing builder allocation dominates' \
     --expiry-condition 'invalid once the widget module is refactored' \
@@ -71,7 +72,7 @@ make_request() {
     --authorized-action adopt-builder \
     --invariant 'the public API stays additive' \
     --available-verification 'cargo test widget' \
-    --verifiable-precondition 'the widget tests are green'
+    --verifiable-precondition "$checker"
 }
 
 # --- request contract -------------------------------------------------------
@@ -82,6 +83,48 @@ test_a_partial_request_is_refused() {
     fail "a request missing most of its contract was created anyway"
   fi
   pass "a request missing required contract fields is refused rather than sent half-formed"
+}
+
+test_a_non_enum_reversibility_is_refused() {
+  if rr create --task bad-reversibility --key shape --repo "$REPO" --tier D2 \
+    --question q --why w --recommendation r --counterargument c --dependency-impact d \
+    --reversibility 'probably reversible' --blast-radius contained --falsifier f \
+    --expiry-condition e --expires "$(( $(date +%s) + 3600 ))" --alternative a \
+    --authority-evidence ae --authorized-action a --invariant i \
+    --available-verification v --verifiable-precondition baseline-current >/dev/null 2>&1; then
+    fail "a free-text reversibility value was persisted"
+  fi
+  pass "request creation refuses reversibility outside the closed enum"
+}
+
+test_precondition_satisfaction_is_separate_and_trusted() {
+  local id out marker response payload
+  printf 'dirty\n' > "$REPO/untracked"
+  id=$(make_request t-unsatisfied D2 '' worktree-clean)
+  "$DOUBLE" valid "$(request_file "$id")" > "$TMP_ROOT/response"
+  out=$(rr validate "$id" --repo "$REPO" --response "$TMP_ROOT/response" 2>&1) || true
+  case "$out" in "invalid precondition-unsatisfied"*) : ;; *) fail "unsatisfied checker was not rejected: $out" ;; esac
+  rm -f "$REPO/untracked"
+
+  id=$(make_request t-unknown-checker D2)
+  sed -i 's/verifiable-precondition\tbaseline-current/verifiable-precondition\tunknown-checker/' "$(request_file "$id")"
+  "$DOUBLE" valid "$(request_file "$id")" > "$TMP_ROOT/response"
+  out=$(rr validate "$id" --repo "$REPO" --response "$TMP_ROOT/response" 2>&1) || true
+  case "$out" in "invalid precondition-unsatisfied"*) : ;; *) fail "unknown checker was not rejected: $out" ;; esac
+
+  id=$(make_request t-satisfied-checker D2)
+  response="$TMP_ROOT/satisfaction-response"
+  "$DOUBLE" valid "$(request_file "$id")" > "$response"
+  marker="$TMP_ROOT/response-derived-marker"
+  # shellcheck disable=SC2016 # Literal response payload; validation must not evaluate it.
+  payload='$(touch '"$marker"')'
+  awk -F '\t' -v payload="$payload" 'BEGIN { OFS="\t" } $1 == "rationale" { $2=payload } { print }' \
+    "$response" > "$response.pending"
+  mv "$response.pending" "$response"
+  rr validate "$id" --repo "$REPO" --response "$response" >/dev/null 2>&1 \
+    || fail "a satisfied trusted checker was refused"
+  [ ! -e "$marker" ] || fail "response-derived text was executed by precondition satisfaction"
+  pass "trusted request checkers reject false and unknown states without executing response text"
 }
 
 test_a_complete_request_is_durable_and_reads_its_own_baseline() {
@@ -244,7 +287,7 @@ test_untrusted_evidence_is_stored_verbatim_and_never_interpreted() {
     --falsifier f --expiry-condition e --expires "$(( $(date +%s) + 3600 ))" \
     --alternative a --authority-evidence ae --authorized-action adopt-builder \
     --invariant inv --available-verification 'cargo test' \
-    --verifiable-precondition 'tests are green' --evidence-file "$evidence")
+    --verifiable-precondition baseline-current --evidence-file "$evidence")
   stored="$(dirname "$(request_file "$id")")/evidence"
   [ -f "$stored" ] || fail "untrusted evidence was not stored"
   cmp -s "$evidence" "$stored" || fail "untrusted evidence was altered rather than stored verbatim"
@@ -258,6 +301,8 @@ test_untrusted_evidence_is_stored_verbatim_and_never_interpreted() {
 }
 
 test_a_partial_request_is_refused
+test_a_non_enum_reversibility_is_refused
+test_precondition_satisfaction_is_separate_and_trusted
 test_a_complete_request_is_durable_and_reads_its_own_baseline
 test_every_rejection_class
 test_an_operator_reserved_request_cannot_be_answered_as_delegated
