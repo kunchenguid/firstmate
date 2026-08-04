@@ -9,9 +9,10 @@
 # recomposing it, so the entrypoint stays the single owner of that ordering and
 # the two can never drift.
 #
-# A remote second mate always runs on the Herdr backend, so readiness is more
-# than tool resolution. herdr must resolve, its server must be reachable, and on
-# macOS the Firstmate-owned launch agent dev.firstmate.herdr at
+# A remote second mate always runs on the Herdr backend in the dedicated
+# fm-remote session, so readiness is more than tool resolution. herdr must
+# resolve, that server must be reachable, and on macOS the Firstmate-owned
+# launch agent dev.firstmate.herdr at
 # ~/Library/LaunchAgents/dev.firstmate.herdr.plist must exist, carry
 # LimitLoadToSessionType=Aqua, and be loaded into the console user's gui/<uid>
 # domain, so the server belongs to the GUI login session and survives logout and
@@ -54,7 +55,10 @@ SCRIPT_DIR=$(CDPATH='' cd -- "$SCRIPT_DIR" && pwd -P)
 REQUIRED_TOOLS=(git jq)
 OPTIONAL_TOOLS=(tmux treehouse no-mistakes tasks-axi claude codex opencode pi grok kimi)
 LAUNCH_AGENT_LABEL=dev.firstmate.herdr
-HERDR_SESSION_NAME=default
+# The dedicated remote-secondmate session. The user's interactive Herdr work
+# remains in the separate default session, which this readiness check never
+# requires or changes.
+HERDR_SESSION_NAME=fm-remote
 LAUNCH_AGENT_DIR="${HOME:-}/Library/LaunchAgents"
 LAUNCH_AGENT_PLIST="$LAUNCH_AGENT_DIR/$LAUNCH_AGENT_LABEL.plist"
 LAUNCH_AGENT_LOG_DIR="${HOME:-}/Library/Logs"

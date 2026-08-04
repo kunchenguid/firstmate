@@ -13,13 +13,16 @@
 #   fm-remote-secondmate-control.sh update <id>
 #   fm-remote-secondmate-control.sh retire <id> [--force]
 #
-# Remote placement ends here, but the second-mate agent itself always runs on
-# the Herdr backend, so launch refuses any other selection rather than reading
-# this home's config/backend; fm-spawn/fm-send/fm-teardown keep owning the local
-# endpoint mechanics, and the home's own workers keep its ordinary backend
-# selection. bin/fm-remote-doctor.sh owns that host's readiness for Herdr, and
-# docs/remote-secondmates.md owns why. A private parent-route state directory
-# stores only the remote secondmate agent's endpoint record; the home's own
+# Remote placement ends here, but the second-mate agent always runs on the
+# Herdr backend in the dedicated fm-remote session, so launch refuses any other
+# selection rather than reading this home's config/backend. The interactive
+# default session remains for the user's work.
+# fm-spawn/fm-send/fm-teardown keep owning the local endpoint mechanics.
+# The home's own workers keep their ordinary backend selection.
+# bin/fm-remote-doctor.sh owns that host's readiness for Herdr.
+# docs/remote-secondmates.md owns why.
+# A private parent-route state directory stores only the remote secondmate
+# agent's endpoint record; the home's own
 # state/*.meta remains reserved for workers the secondmate supervises.
 #
 # The optional launch traceparent is the per-task W3C trace-context carrier the
@@ -35,6 +38,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 TARGET_HOME=${FM_HOME:?FM_HOME is required}
 CONTROL_STATE="$TARGET_HOME/state/parent-route"
 CONTROL_DATA="$TARGET_HOME/data/.parent-route"
+REMOTE_HERDR_SESSION=fm-remote
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
@@ -69,7 +73,7 @@ state_value() { # <id>; prints recovery-grade state
 }
 
 print_route() { # <id>
-  local meta=$1 backend target harness traceparent
+  local meta=$1 backend target harness traceparent herdr_session
   meta=$(meta_path "$meta")
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
@@ -78,6 +82,10 @@ print_route() { # <id>
   printf 'schema=fm-remote-secondmate-control.v1\n'
   printf 'backend=%s\n' "$backend"
   printf 'target=%s\n' "$target"
+  [ "$backend" != herdr ] || {
+    herdr_session=$(fm_meta_get "$meta" herdr_session)
+    printf 'herdr_session=%s\n' "$herdr_session"
+  }
   printf 'harness=%s\n' "$harness"
   [ -z "$traceparent" ] || printf 'traceparent=%s\n' "$traceparent"
 }
@@ -95,7 +103,7 @@ cmd_route() {
 
 cmd_launch() {
   local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5 traceparent=${6:-}
-  local current meta out backend target
+  local current meta out backend target herdr_session
 
   validate_id "$id"
   validate_home "$id"
@@ -114,6 +122,9 @@ cmd_launch() {
         backend=$(fm_backend_of_meta "$meta")
         [ "$backend" = herdr ] \
           || die "remote secondmate $id has an alive endpoint recorded on backend '$backend'; refusing reuse until it is explicitly migrated or retired"
+        herdr_session=$(fm_meta_get "$meta" herdr_session)
+        [ "$herdr_session" = "$REMOTE_HERDR_SESSION" ] \
+          || die "remote secondmate $id has an alive endpoint in Herdr session '${herdr_session:-missing}', expected '$REMOTE_HERDR_SESSION'; refusing reuse until it is explicitly migrated or retired"
         print_route "$id"
         return 0
         ;;
@@ -130,7 +141,7 @@ cmd_launch() {
   [ "$model" = - ] || ARGS+=(--model "$model")
   [ "$effort" = - ] || ARGS+=(--effort "$effort")
   [ -z "$traceparent" ] || ARGS+=(--traceparent "$traceparent")
-  if ! out=$(FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
+  if ! out=$(HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_SKIP_SECONDMATE_INHERIT=1 \
     "$SCRIPT_DIR/fm-spawn.sh" "${ARGS[@]}" 2>&1); then
@@ -138,6 +149,9 @@ cmd_launch() {
     die "remote host-local secondmate launch failed"
   fi
   [ -f "$meta" ] || die "remote launch returned without endpoint metadata"
+  herdr_session=$(fm_meta_get "$meta" herdr_session)
+  [ "$herdr_session" = "$REMOTE_HERDR_SESSION" ] \
+    || die "remote launch recorded Herdr session '${herdr_session:-missing}', expected '$REMOTE_HERDR_SESSION'"
   print_route "$id"
 }
 

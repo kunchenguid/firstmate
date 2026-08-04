@@ -80,7 +80,7 @@ arguments = {
 	$FM_FAKE_HERDR_BIN
 	server
 	--session
-	default
+	fm-remote
 }
 stdout path = $FM_FAKE_LAUNCH_AGENT_LOG
 stderr path = $FM_FAKE_LAUNCH_AGENT_LOG
@@ -179,7 +179,7 @@ arguments = {
 	$herdr_bin
 	server
 	--session
-	default
+	fm-remote
 }
 stdout path = $CASE_HOME/Library/Logs/$LABEL.log
 stderr path = $CASE_HOME/Library/Logs/$LABEL.log
@@ -236,6 +236,8 @@ assert_present "$CASE_PLIST" "--fix reported success without writing the plist"
 assert_grep '<string>Aqua</string>' "$CASE_PLIST" "the written plist is not Aqua-scoped"
 assert_grep "<string>$LABEL</string>" "$CASE_PLIST" "the written plist does not carry the Firstmate label"
 assert_grep '<string>server</string>' "$CASE_PLIST" "the written plist does not run a herdr server"
+assert_grep '<string>fm-remote</string>' "$CASE_PLIST" "the written plist does not pin the remote-secondmate session"
+assert_no_grep '<string>default</string>' "$CASE_PLIST" "the written plist pins the interactive default session"
 assert_grep "gui/$(id -u)" "$CASE_LAUNCHCTL_LOG" "the launch agent was not bootstrapped into the GUI domain"
 assert_no_dangerous_calls "the repair reached for auto-login, FileVault, or the keychain"
 pass "--fix installs, Aqua-scopes, loads, and starts the Firstmate herdr launch agent"

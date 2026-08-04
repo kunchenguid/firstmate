@@ -165,6 +165,11 @@ fm_send_resolve_target() {  # <raw-target>
   fi
 
   case "$raw" in
+    fm-*:*)
+      # A named Herdr session may itself begin with "fm-". Keep that explicit
+      # session:pane target on the validated backend-target path below rather
+      # than mistaking it for an unresolved task selector.
+      ;;
     fm-*)
       RESOLUTION_TRIED="meta=$STATE/$raw.meta; legacy-meta=$STATE/${raw#fm-}.meta; backend=none"
       echo "error: no metadata for $raw in $STATE (tried $RESOLUTION_TRIED); pass a well-formed explicit backend target only when targeting outside this firstmate home" >&2
