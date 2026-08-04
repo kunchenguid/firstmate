@@ -129,9 +129,11 @@ status_is_paused() {  # <status-line>
 
 # 0 if a status line declares either an external-wait pause or a verified
 # captain-held transfer.
-# Both declarations can intentionally leave an exited crew's endpoint idle, so
-# the watcher applies its bounded pause cadence when agent death confirms that
-# no live decision gate is being silenced.
+# A declared paused: is a live external wait - the crew stays alive and idle - so
+# the watcher applies its bounded pause cadence regardless of agent liveness. A
+# captain-held transfer instead expects the endpoint to have exited, so the
+# watcher applies the same cadence only when agent death confirms it and surfaces
+# a still-live captain-held endpoint. pause_state_class owns that split.
 status_is_paused_or_captain_held() {  # <status-line>
   local line=$1 verb
   status_is_paused "$line" && return 0
