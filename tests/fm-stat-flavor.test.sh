@@ -22,13 +22,14 @@ TMP_ROOT=$(fm_test_tmproot fm-stat-flavor-tests)
 REAL_STAT=$(command -v stat)
 [ -n "$REAL_STAT" ] || fail "no stat on PATH; cannot build a flavor shim"
 
-# Every file loaded into the fm-watch.sh, fm-supervise-daemon.sh, or fm-guard.sh
-# process that reads file metadata. This is the graph whose readers decide
-# watcher liveness, lock staleness, and artifact safety, so none of them may
-# re-derive a stat flavor.
+# Every file that reads file metadata inside the fm-watch.sh,
+# fm-supervise-daemon.sh, or fm-guard.sh process, plus the fleet read path
+# (fm-fleet-snapshot.sh). These readers decide watcher liveness, lock staleness,
+# event age, and artifact safety, so none of them may re-derive a stat flavor.
 STAT_OWNERS="fm-watch.sh fm-crew-state.sh fm-wake-lib.sh fm-lock-lib.sh
 fm-x-lib.sh fm-pr-lib.sh fm-pending-reply-lib.sh fm-supervise-daemon.sh
-fm-supervision-lib.sh fm-guard.sh fm-busy-event.sh fm-classify-lib.sh"
+fm-supervision-lib.sh fm-guard.sh fm-busy-event.sh fm-classify-lib.sh
+fm-fleet-snapshot.sh backends/herdr.sh"
 
 # --- flavor shims -----------------------------------------------------------
 #
@@ -48,30 +49,47 @@ REAL=\${FM_TEST_REAL_STAT:?FM_TEST_REAL_STAT unset}
 SHIM
   cat >> "$bin/stat" <<'SHIM'
 if "$REAL" -c %Y / >/dev/null 2>&1; then
-  real_datum() {  # <mtime|size|mode|device|inode|nlink|ctime> <file>
+  real_datum() {  # <mtime|size|fullmode|uid|device|inode|nlink|ctime> <file>
     case "$1" in
-      mtime)  "$REAL" -c %Y "$2" ;;
-      size)   "$REAL" -c %s "$2" ;;
-      mode)   "$REAL" -c %a "$2" ;;
-      device) "$REAL" -c %d "$2" ;;
-      inode)  "$REAL" -c %i "$2" ;;
-      nlink)  "$REAL" -c %h "$2" ;;
-      ctime)  "$REAL" -c %Z "$2" ;;
+      mtime)    "$REAL" -c %Y "$2" ;;
+      size)     "$REAL" -c %s "$2" ;;
+      fullmode) "$REAL" -c %a "$2" ;;
+      uid)      "$REAL" -c %u "$2" ;;
+      device)   "$REAL" -c %d "$2" ;;
+      inode)    "$REAL" -c %i "$2" ;;
+      nlink)    "$REAL" -c %h "$2" ;;
+      ctime)    "$REAL" -c %Z "$2" ;;
     esac
   }
 else
   real_datum() {
+    local raw
     case "$1" in
-      mtime)  "$REAL" -f %m "$2" ;;
-      size)   "$REAL" -f %z "$2" ;;
-      mode)   "$REAL" -f %Lp "$2" ;;
-      device) "$REAL" -f %d "$2" ;;
-      inode)  "$REAL" -f %i "$2" ;;
-      nlink)  "$REAL" -f %l "$2" ;;
-      ctime)  LC_ALL=C "$REAL" -f %c "$2" ;;
+      mtime)    "$REAL" -f %m "$2" ;;
+      size)     "$REAL" -f %z "$2" ;;
+      fullmode) raw=$("$REAL" -f '%Mp%Lp' "$2") || return 1
+                printf '%o\n' "$((8#$raw))" ;;
+      uid)      "$REAL" -f %u "$2" ;;
+      device)   "$REAL" -f %d "$2" ;;
+      inode)    "$REAL" -f %i "$2" ;;
+      nlink)    "$REAL" -f %l "$2" ;;
+      ctime)    LC_ALL=C "$REAL" -f %c "$2" ;;
     esac
   }
 fi
+
+# The two flavors render a mode differently, and that difference is under test:
+# GNU %a is the whole permission word, BSD %Lp keeps only the low nine bits
+# while %Mp carries setuid/setgid/sticky on its own.
+mode_piece() {  # <a|Lp|Mp> <file>
+  local want=$1 f=$2 full
+  full=$(real_datum fullmode "$f") || return 1
+  case "$want" in
+    a)  printf '%o' "$((8#$full))" ;;
+    Lp) printf '%o' "$(( 8#$full & 8#777 ))" ;;
+    Mp) printf '%o' "$(( (8#$full >> 9) & 7 ))" ;;
+  esac
+}
 
 # Emit <datum> when this flavor owns <spec>, otherwise `?` - exactly what the
 # real binaries print for a specifier they do not know.
@@ -92,17 +110,25 @@ expand() {  # <fmt> <file>
     case "$rest" in
       %Fm*) rest=${rest#%Fm}; piece=$(owned bsd mtime "$f") || return 1
             [ "$piece" = '?' ] || piece="$piece.000000000" ;;
-      %Lp*) rest=${rest#%Lp}; piece=$(owned bsd mode "$f") || return 1 ;;
+      %Lp*) rest=${rest#%Lp}
+            if [ "$FLAVOR" = bsd ]; then piece=$(mode_piece Lp "$f") || return 1
+            else piece='?'; fi ;;
+      %Mp*) rest=${rest#%Mp}
+            if [ "$FLAVOR" = bsd ]; then piece=$(mode_piece Mp "$f") || return 1
+            else piece='?'; fi ;;
       %m*)  rest=${rest#%m};  piece=$(owned bsd mtime "$f") || return 1 ;;
       %z*)  rest=${rest#%z};  piece=$(owned bsd size "$f") || return 1 ;;
       %l*)  rest=${rest#%l};  piece=$(owned bsd nlink "$f") || return 1 ;;
       %c*)  rest=${rest#%c};  piece=$(owned bsd ctime "$f") || return 1 ;;
       %Y*)  rest=${rest#%Y};  piece=$(owned gnu mtime "$f") || return 1 ;;
       %s*)  rest=${rest#%s};  piece=$(owned gnu size "$f") || return 1 ;;
-      %a*)  rest=${rest#%a};  piece=$(owned gnu mode "$f") || return 1 ;;
+      %a*)  rest=${rest#%a}
+            if [ "$FLAVOR" = gnu ]; then piece=$(mode_piece a "$f") || return 1
+            else piece='?'; fi ;;
       %h*)  rest=${rest#%h};  piece=$(owned gnu nlink "$f") || return 1 ;;
       %Z*)  rest=${rest#%Z};  piece=$(owned gnu ctime "$f") || return 1 ;;
-      # Both flavors spell device and inode the same way.
+      # Both flavors spell owner, device, and inode the same way.
+      %u*)  rest=${rest#%u};  piece=$(real_datum uid "$f") || return 1 ;;
       %d*)  rest=${rest#%d};  piece=$(real_datum device "$f") || return 1 ;;
       %i*)  rest=${rest#%i};  piece=$(real_datum inode "$f") || return 1 ;;
       %%*)  rest=${rest#%%};  piece='%' ;;
@@ -270,6 +296,68 @@ test_owner_signature_tracks_changes_under_every_stat_flavor() {
     [ "$before" != "$after" ] || fail "fm_stat_sig under $flavor stat did not change after an append"
   done
   pass "fm_stat_sig detects an appended status line under GNU, BSD, and native stat"
+}
+
+test_owner_reports_one_mode_vocabulary_on_every_flavor() {
+  local dir flavor f got
+  dir=$(make_case owner-mode)
+  f="$dir/artifact"
+  : > "$f"
+  # <chmod> <expected canonical mode>. The special-bit rows are the contract:
+  # BSD %Lp alone drops them, so a `mode = 600` check would accept a setuid
+  # private artifact on macOS while rejecting the identical file on Linux.
+  for row in '600 600' '700 700' '755 755' '4600 4600' '2700 2700' '1777 1777' '007 7'; do
+    set -- $row
+    chmod "$1" "$f"
+    for flavor in gnu bsd native; do
+      got=$(run_with_stat "$dir" "$flavor" '. "$ROOT/bin/fm-stat-lib.sh"; fm_stat_mode "'"$f"'"') \
+        || fail "fm_stat_mode failed on a chmod $1 file under $flavor stat"
+      [ "$got" = "$2" ] \
+        || fail "fm_stat_mode under $flavor stat read chmod $1 as '$got', expected '$2'"
+    done
+  done
+  chmod 600 "$f"
+  pass "fm_stat_mode reports one canonical full mode - special bits included - on every flavor"
+}
+
+test_private_artifact_checks_reject_special_bits_on_every_flavor() {
+  local dir flavor art
+  dir=$(make_case owner-mode-security)
+  art="$dir/state/private"
+  mkdir -p "$art"
+  chmod 700 "$art"
+  : > "$art/record"
+  for flavor in gnu bsd native; do
+    chmod 600 "$art/record"
+    run_with_stat "$dir" "$flavor" \
+      '. "$ROOT/bin/fm-x-lib.sh"; fmx_single_link_file_mode_valid "'"$art"'/record" 600' \
+      || fail "a plain 0600 artifact was rejected under $flavor stat"
+    run_with_stat "$dir" "$flavor" \
+      '. "$ROOT/bin/fm-pr-lib.sh"; [ "$(fm_pr_file_mode "'"$art"'/record")" = 600 ]' \
+      || fail "fm_pr_file_mode misread a plain 0600 check under $flavor stat"
+    chmod 4600 "$art/record"
+    run_with_stat "$dir" "$flavor" \
+      '. "$ROOT/bin/fm-x-lib.sh"; fmx_single_link_file_mode_valid "'"$art"'/record" 600' \
+      && fail "a SETUID artifact passed the 0600 private-artifact check under $flavor stat"
+    run_with_stat "$dir" "$flavor" \
+      '. "$ROOT/bin/fm-pr-lib.sh"; [ "$(fm_pr_file_mode "'"$art"'/record")" = 600 ]' \
+      && fail "a SETUID check registration passed the 0600 mode check under $flavor stat"
+    chmod 2600 "$art/record"
+    run_with_stat "$dir" "$flavor" \
+      '. "$ROOT/bin/fm-x-lib.sh"; fmx_single_link_file_mode_valid "'"$art"'/record" 600' \
+      && fail "a SETGID artifact passed the 0600 private-artifact check under $flavor stat"
+    chmod 700 "$art"
+    run_with_stat "$dir" "$flavor" \
+      '. "$ROOT/bin/fm-x-lib.sh"; fmx_private_artifact_dir_device "'"$art"'" >/dev/null' \
+      || fail "a plain 0700 private artifact dir was rejected under $flavor stat"
+    chmod 1700 "$art"
+    run_with_stat "$dir" "$flavor" \
+      '. "$ROOT/bin/fm-x-lib.sh"; fmx_private_artifact_dir_device "'"$art"'" >/dev/null' \
+      && fail "a STICKY private artifact dir passed the 0700 check under $flavor stat"
+  done
+  chmod 700 "$art"
+  chmod 600 "$art/record"
+  pass "0600/0700 artifact checks reject setuid, setgid, and sticky identically on every flavor"
 }
 
 # --- the readers the finding names ------------------------------------------
@@ -442,6 +530,85 @@ test_pending_reply_signature_survives_gnu_stat_shadowing() {
   pass "pending-reply status signatures track real changes under every stat flavor"
 }
 
+test_fleet_snapshot_event_age_survives_gnu_stat_shadowing() {
+  local dir flavor state age
+  dir=$(make_case fleet-event-age)
+  state="$dir/state"
+  printf 'working: a\n' > "$state/task.status"
+  set_mtime "$(( $(date +%s) - 600 ))" "$state/task.status"
+  for flavor in gnu bsd native; do
+    # The snapshot's own reader, driven exactly as bounded_secondmate_rows does:
+    # an unreadable epoch must stay EMPTY, never a filesystem dump that reaches
+    # the event-age subtraction.
+    age=$(run_with_stat "$dir" "$flavor" \
+      'set -u; . "$ROOT/bin/fm-stat-lib.sh"
+       epoch=$(fm_stat_mtime "'"$state"'/task.status") || epoch=
+       [ -n "$epoch" ] || { echo EMPTY; exit 0; }
+       echo $(( '"$(date +%s)"' - epoch ))') \
+      || fail "the fleet snapshot event-age read failed under $flavor stat"
+    case "$age" in
+      ''|*[!0-9]*) fail "fleet snapshot event age under $flavor stat was '$age', not a number" ;;
+    esac
+    [ "$age" -ge 595 ] && [ "$age" -le 660 ] \
+      || fail "fleet snapshot event age under $flavor stat: expected ~600s, got ${age}s"
+  done
+  # An absent status log yields an empty epoch on every flavor, so the caller's
+  # `[ -n "$event_epoch" ]` guard is the only thing standing between a bad read
+  # and arithmetic - and it now actually holds.
+  for flavor in gnu bsd native; do
+    age=$(run_with_stat "$dir" "$flavor" \
+      'set -u; . "$ROOT/bin/fm-stat-lib.sh"
+       epoch=$(fm_stat_mtime "'"$state"'/absent.status") || epoch=
+       [ -n "$epoch" ] || { echo EMPTY; exit 0; }
+       echo "LEAKED:$epoch"')
+    [ "$age" = EMPTY ] \
+      || fail "an absent status log produced '$age' under $flavor stat instead of an empty epoch"
+  done
+  pass "fleet snapshot event age is exact, and an unreadable log never reaches its arithmetic"
+}
+
+test_fleet_snapshot_bounded_activity_size_survives_gnu_stat_shadowing() {
+  local dir flavor f got want
+  dir=$(make_case fleet-activity-size)
+  f="$dir/state/task.status"
+  printf 'working: a\nworking: b\n' > "$f"
+  want=$(wc -c < "$f" | tr -d '[:space:]')
+  for flavor in gnu bsd native; do
+    got=$(run_with_stat "$dir" "$flavor" \
+      '. "$ROOT/bin/fm-stat-lib.sh"; fm_stat_size "'"$f"'"') \
+      || fail "the bounded activity scan's size read failed under $flavor stat"
+    [ "$got" = "$want" ] \
+      || fail "fm_stat_size under $flavor stat read '$got', expected '$want'"
+  done
+  pass "the bounded parent-activity scan reads an exact byte size under every stat flavor"
+}
+
+test_herdr_presentation_lock_namespace_survives_gnu_stat_shadowing() {
+  local dir flavor ns
+  dir=$(make_case herdr-lock-namespace)
+  ns="$dir/presentation-ns"
+  mkdir -p "$ns"
+  chmod 700 "$ns"
+  for flavor in gnu bsd native; do
+    run_with_stat "$dir" "$flavor" \
+      '. "$ROOT/bin/backends/herdr.sh" >/dev/null 2>&1
+       fm_backend_herdr_presentation_lock_namespace_valid "'"$ns"'"' \
+      || fail "an own-uid 0700 presentation lock namespace was refused under $flavor stat"
+    chmod 755 "$ns"
+    run_with_stat "$dir" "$flavor" \
+      '. "$ROOT/bin/backends/herdr.sh" >/dev/null 2>&1
+       fm_backend_herdr_presentation_lock_namespace_valid "'"$ns"'"' \
+      && fail "a world-readable presentation lock namespace was accepted under $flavor stat"
+    chmod 1700 "$ns"
+    run_with_stat "$dir" "$flavor" \
+      '. "$ROOT/bin/backends/herdr.sh" >/dev/null 2>&1
+       fm_backend_herdr_presentation_lock_namespace_valid "'"$ns"'"' \
+      && fail "a STICKY presentation lock namespace was accepted as 0700 under $flavor stat"
+    chmod 700 "$ns"
+  done
+  pass "the herdr presentation lock namespace check holds on every stat flavor"
+}
+
 # --- the class cannot come back ---------------------------------------------
 
 # Code lines only: these files legitimately NAME the forbidden forms in the
@@ -474,6 +641,8 @@ test_gnu_shim_reproduces_the_darwin_name_branch_failure
 test_owner_reads_mtime_under_every_stat_flavor
 test_owner_refuses_unreadable_paths_instead_of_printing_garbage
 test_owner_signature_tracks_changes_under_every_stat_flavor
+test_owner_reports_one_mode_vocabulary_on_every_flavor
+test_private_artifact_checks_reject_special_bits_on_every_flavor
 test_watcher_beacon_age_survives_gnu_stat_shadowing
 test_watcher_beacon_age_reports_the_sentinel_only_when_truly_absent
 test_git_lock_age_and_stale_proof_survive_gnu_stat_shadowing
@@ -482,4 +651,7 @@ test_pause_fingerprint_deadline_tracks_the_event_under_gnu_stat_shadowing
 test_x_private_artifact_checks_still_accept_a_valid_artifact
 test_pr_check_registration_identity_survives_gnu_stat_shadowing
 test_pending_reply_signature_survives_gnu_stat_shadowing
+test_fleet_snapshot_event_age_survives_gnu_stat_shadowing
+test_fleet_snapshot_bounded_activity_size_survives_gnu_stat_shadowing
+test_herdr_presentation_lock_namespace_survives_gnu_stat_shadowing
 test_supervision_owners_do_not_re_derive_a_stat_flavor

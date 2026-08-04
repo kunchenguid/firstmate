@@ -5,8 +5,10 @@
 #
 # It defines:
 #   fm_stat_mtime <path>  - mtime in whole epoch seconds
+#   fm_stat_size <path>   - size in bytes
 #   fm_stat_sig <path>    - opaque "<size>:<mtime>" change signature
-#   fm_stat_mode <path>   - permission bits in octal (e.g. 600)
+#   fm_stat_mode <path>   - FULL permission mode in octal, special bits and all
+#   fm_stat_uid <path>    - owning user id
 #   fm_stat_device <path> - device number
 #   fm_stat_inode <path>  - inode number
 #   fm_stat_nlink <path>  - hard link count
@@ -41,22 +43,36 @@
 # dump into arithmetic or into a cache fingerprint. Callers keep their own
 # unreadable-value POLICY - a "very old" sentinel where the fail-safe direction
 # is "assume abandoned", a hard refusal where it is "never touch it".
+#
+# The two flavors also disagree on what a "mode" IS. GNU `%a` reports the full
+# permission word, so setuid/setgid/sticky show up as a leading digit; BSD `%Lp`
+# reports only the low nine bits and silently drops them, while `%Mp%Lp` keeps
+# them but pads inconsistently ("0600" for 0600, but "07" for 0007). A private
+# artifact check written as `mode = 600` therefore ACCEPTS a setuid file on
+# macOS and rejects the identical file on Linux. fm_stat_mode normalizes both
+# flavors to one canonical rendering - the full mode in octal with no leading
+# zeros, which is what GNU already prints - so 0600/0700 checks mean the same
+# thing everywhere and a special bit is always a mismatch.
 
 if [ -z "${FM_STAT_LIB_SOURCED:-}" ]; then
   FM_STAT_LIB_SOURCED=1
 
   if stat -c %Y / >/dev/null 2>&1; then
     _fm_stat_mtime_raw() { stat -c %Y "$1" 2>/dev/null; }
+    _fm_stat_size_raw() { stat -c %s "$1" 2>/dev/null; }
     _fm_stat_sig_raw() { stat -c '%s:%Y' "$1" 2>/dev/null; }
     _fm_stat_mode_raw() { stat -c %a "$1" 2>/dev/null; }
+    _fm_stat_uid_raw() { stat -c %u "$1" 2>/dev/null; }
     _fm_stat_device_raw() { stat -c %d "$1" 2>/dev/null; }
     _fm_stat_inode_raw() { stat -c %i "$1" 2>/dev/null; }
     _fm_stat_nlink_raw() { stat -c %h "$1" 2>/dev/null; }
     _fm_stat_identity_raw() { LC_ALL=C stat -c '%d:%i:%s:%Y:%Z' "$1" 2>/dev/null; }
   else
     _fm_stat_mtime_raw() { stat -f %m "$1" 2>/dev/null; }
+    _fm_stat_size_raw() { stat -f %z "$1" 2>/dev/null; }
     _fm_stat_sig_raw() { stat -f '%z:%Fm' "$1" 2>/dev/null; }
-    _fm_stat_mode_raw() { stat -f %Lp "$1" 2>/dev/null; }
+    _fm_stat_mode_raw() { stat -f '%Mp%Lp' "$1" 2>/dev/null; }
+    _fm_stat_uid_raw() { stat -f %u "$1" 2>/dev/null; }
     _fm_stat_device_raw() { stat -f %d "$1" 2>/dev/null; }
     _fm_stat_inode_raw() { stat -f %i "$1" 2>/dev/null; }
     _fm_stat_nlink_raw() { stat -f %l "$1" 2>/dev/null; }
@@ -77,11 +93,26 @@ if [ -z "${FM_STAT_LIB_SOURCED:-}" ]; then
   # Whole epoch seconds, or non-zero with no output.
   fm_stat_mtime() { _fm_stat_integer _fm_stat_mtime_raw "$1"; }
 
-  # Permission bits in octal (600, 755, ...).
-  fm_stat_mode() { _fm_stat_integer _fm_stat_mode_raw "$1"; }
+  # Size in bytes.
+  fm_stat_size() { _fm_stat_integer _fm_stat_size_raw "$1"; }
 
-  # Device and inode numbers, and the hard link count. Meaningful only within
-  # one host, which is all their callers compare them across.
+  # The FULL permission mode in octal, canonicalized to GNU's rendering (no
+  # leading zeros) on both flavors: 600, 700, 4600, 2755, 1777, 7. A setuid,
+  # setgid, or sticky bit is therefore always visible, so a caller comparing
+  # against 600 or 700 rejects it on macOS exactly as it already does on Linux.
+  fm_stat_mode() {
+    local raw
+    raw=$(_fm_stat_mode_raw "$1") || return 1
+    case "$raw" in
+      ''|*[!0-7]*) return 1 ;;
+    esac
+    printf '%o\n' "$((8#$raw))"
+  }
+
+  # Owning user id, device and inode numbers, and the hard link count.
+  # Meaningful only within one host, which is all their callers compare them
+  # across.
+  fm_stat_uid() { _fm_stat_integer _fm_stat_uid_raw "$1"; }
   fm_stat_device() { _fm_stat_integer _fm_stat_device_raw "$1"; }
   fm_stat_inode() { _fm_stat_integer _fm_stat_inode_raw "$1"; }
   fm_stat_nlink() { _fm_stat_integer _fm_stat_nlink_raw "$1"; }

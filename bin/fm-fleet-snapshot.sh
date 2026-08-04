@@ -125,6 +125,13 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_BYTES "$FM_SNAPSHOT_REGISTRY_BYTES"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_RECORDS "$FM_SNAPSHOT_REGISTRY_RECORDS"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIMEOUT"
 
+# File timestamps, sizes, and modes come from the one probe-bound stat owner.
+# A `uname` branch here would be worse than elsewhere: this reader's helpers
+# swallowed a failed read, so a GNU filesystem dump reached the snapshot's
+# event-age arithmetic with exit 0 (issue #1601).
+# shellcheck source=bin/fm-stat-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-stat-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
@@ -799,18 +806,6 @@ run_timed() {  # <seconds> <command...>
   fi
 }
 
-# GNU stat treats -f as a filesystem-report command, so a BSD-first fallback can
-# pollute arithmetic input before failing. Select the platform syntax once.
-if [ "$(uname 2>/dev/null || true)" = Darwin ]; then
-  SNAPSHOT_STAT_STYLE=bsd
-  file_mtime_epoch() { stat -f '%m' "$1" 2>/dev/null || true; }
-  file_mode_octal() { stat -f '%Lp' "$1" 2>/dev/null || true; }
-else
-  SNAPSHOT_STAT_STYLE=gnu
-  file_mtime_epoch() { stat -c '%Y' "$1" 2>/dev/null || true; }
-  file_mode_octal() { stat -c '%a' "$1" 2>/dev/null || true; }
-fi
-
 registry_secondmates_json() {
   local reg="$DATA/secondmates.md" out rc reason mode script parse_filter output_filter
   if [ ! -f "$reg" ]; then
@@ -818,7 +813,7 @@ registry_secondmates_json() {
       '{present:false,available:true,complete:true,reason:null,provenance:"registered-table",path:$path,freshness:{status:"fresh",observed_at:$observed},records:[],input_truncated:false,records_truncated:false,reasons:[],lines_in_window:0,records_in_window:0}'
     return 0
   fi
-  mode=$(file_mode_octal "$reg")
+  mode=$(fm_stat_mode "$reg") || mode=
   if [ -z "$mode" ] || [ $((8#$mode & 0444)) -eq 0 ]; then
     jq -n --arg path "$reg" --arg observed "$SNAPSHOT_NOW" \
       --arg reason "registered secondmate table is unreadable" \
@@ -933,13 +928,10 @@ bounded_parent_activities_json() {  # <status-file>
     max_lines=$3
     max_bytes=$4
     max_records=$5
-    stat_style=$6
+    stat_lib=$6
     . "$classify"
-    if [ "$stat_style" = bsd ]; then
-      size=$(stat -f "%z" "$f" 2>/dev/null) || exit 3
-    else
-      size=$(stat -c "%s" "$f" 2>/dev/null) || exit 3
-    fi
+    . "$stat_lib"
+    size=$(fm_stat_size "$f") || exit 3
     content=$(LC_ALL=C tail -c "$max_bytes" "$f") || exit 3
     byte_truncated=false
     if [ "$size" -gt "$max_bytes" ]; then
@@ -994,7 +986,7 @@ BASH
   out=$(run_timed "$FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT" bash -c "$script" \
     fm-parent-activities "$SCRIPT_DIR/fm-classify-lib.sh" "$f" \
     "$FM_SNAPSHOT_PARENT_ACTIVITY_LINES" "$FM_SNAPSHOT_PARENT_ACTIVITY_BYTES" \
-    "$FM_SNAPSHOT_PARENT_ACTIVITIES" "$SNAPSHOT_STAT_STYLE" 2>/dev/null)
+    "$FM_SNAPSHOT_PARENT_ACTIVITIES" "$SCRIPT_DIR/fm-stat-lib.sh" 2>/dev/null)
   rc=$?
   if [ "$rc" -eq 0 ] && printf '%s' "$out" | jq -e '
     (.records | type) == "array" and (.available | type) == "boolean"
@@ -1163,7 +1155,7 @@ secondmate_current_json() {  # <parent-tasks-json>
     activity_scan=$(bounded_parent_activities_json "$status_file")
     activities=$(printf '%s' "$activity_scan" | jq -c '.records')
     decisions=$(printf '%s' "$task" | jq -c '.hints.open_decisions // []')
-    event_epoch=$(file_mtime_epoch "$status_file")
+    event_epoch=$(fm_stat_mtime "$status_file") || event_epoch=
     event_age=null
     if [ -n "$event_epoch" ]; then
       event_age=$((SNAPSHOT_EPOCH - event_epoch))

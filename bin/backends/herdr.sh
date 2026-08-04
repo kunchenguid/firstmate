@@ -71,6 +71,14 @@ FM_BACKEND_HERDR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_HERDR_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
+# Portable file metadata (bin/fm-stat-lib.sh, the one probe-bound owner). The
+# presentation-lock namespace check reads an owner and a mode, and a hand-rolled
+# stat-flavor guess makes both reads fail on a host where GNU coreutils shadows
+# BSD stat - which refuses every presentation lock rather than mis-reading one
+# (issue #1601).
+# shellcheck source=bin/fm-stat-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-stat-lib.sh"
+
 # Shared composer-content classifier (empty|pending|unknown, and the fleet-wide
 # dead-shell-vs-agent-composer rule). Owned by bin/fm-composer-lib.sh, reused by
 # every backend so the decision cannot drift.
@@ -472,19 +480,11 @@ fm_backend_herdr_presentation_lock_namespace() {
 }
 
 fm_backend_herdr_presentation_lock_namespace_mode() {
-  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    stat -f '%Lp' "$1" 2>/dev/null
-  else
-    stat -c '%a' "$1" 2>/dev/null
-  fi
+  fm_stat_mode "$1"
 }
 
 fm_backend_herdr_presentation_lock_namespace_uid() {
-  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    stat -f '%u' "$1" 2>/dev/null
-  else
-    stat -c '%u' "$1" 2>/dev/null
-  fi
+  fm_stat_uid "$1"
 }
 
 fm_backend_herdr_presentation_lock_namespace_valid() {
