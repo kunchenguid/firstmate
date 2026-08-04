@@ -99,26 +99,37 @@ command -v jq >/dev/null 2>&1 || { echo "fm-liveness-snapshot: jq not found" >&2
 . "$SCRIPT_DIR/fm-backend.sh"
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-liveness.XXXXXX") || exit 1
+OWNED_PIDS="$TMP/owned-pids"
+: > "$OWNED_PIDS"
 cleanup() {
   local job_pid
-  while read -r job_pid; do
+  while IFS= read -r job_pid; do
     [ -n "$job_pid" ] || continue
     kill "$job_pid" 2>/dev/null || true
     wait "$job_pid" 2>/dev/null || true
-  done < <(jobs -pr)
+  done < "$OWNED_PIDS"
   rm -rf -- "$TMP"
 }
-trap cleanup EXIT HUP INT TERM
+cleanup_signal() { local rc=$1; trap - EXIT HUP INT TERM; cleanup; exit "$rc"; }
+trap cleanup EXIT
+trap 'cleanup_signal 129' HUP
+trap 'cleanup_signal 130' INT
+trap 'cleanup_signal 143' TERM
+
+forget_owned_pid() {  # <pid>
+  grep -Fvx "$1" "$OWNED_PIDS" > "$OWNED_PIDS.next" 2>/dev/null || true
+  mv "$OWNED_PIDS.next" "$OWNED_PIDS"
+}
 
 run_bounded_reaping() {  # <seconds> <command...>
   local seconds=$1
   shift
   if command -v timeout >/dev/null 2>&1; then
-    timeout -k 1 "$seconds" "$@"
+    exec timeout -k 1 "$seconds" "$@"
   elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout -k 1 "$seconds" "$@"
+    exec gtimeout -k 1 "$seconds" "$@"
   elif command -v perl >/dev/null 2>&1; then
-    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; waitpid $pid, 0; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$seconds" "$@"
+    exec perl -e 'my $t = shift; my $pid = 0; my $stopping = 0; my $stop = sub { my $code = shift; return if $stopping++; alarm 0; if ($pid > 0) { kill "TERM", $pid; kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", $pid; kill "KILL", -$pid; waitpid $pid, 0 } exit $code }; local $SIG{ALRM} = sub { $stop->(124) }; local $SIG{HUP} = sub { $stop->(129) }; local $SIG{INT} = sub { $stop->(130) }; local $SIG{TERM} = sub { $stop->(143) }; $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } alarm $t; waitpid $pid, 0; my $status = $?; alarm 0; exit(($status & 127) ? 128 + ($status & 127) : ($status >> 8))' "$seconds" "$@"
   else
     return 124
   fi
@@ -298,6 +309,7 @@ REMOTE_RECORDS="$TMP/remote-records.jsonl"
 : > "$REMOTE_JOBS"
 : > "$REMOTE_RECORDS"
 while IFS=$(printf '\t') read -r id harness worktree backend target route; do
+  remote_pid=
   [ "$route" = remote ] || continue
   if [ "$backend" = unknown ] || [ "$target" = __FM_MISSING_TARGET__ ]; then
     unverified_remote_record "$id" "$harness" "$worktree" "$backend" "$target" >> "$REMOTE_RECORDS"
@@ -312,7 +324,9 @@ while IFS=$(printf '\t') read -r id harness worktree backend target route; do
       "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh liveness "$id" "$INTERVAL_MS" \
       > "$remote_file" 2>/dev/null &
   fi
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$!" "$remote_file" "$harness" "$worktree" "$backend" "$target" >> "$REMOTE_JOBS"
+  remote_pid=$!
+  printf '%s\n' "$remote_pid" >> "$OWNED_PIDS"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$remote_pid" "$remote_file" "$harness" "$worktree" "$backend" "$target" >> "$REMOTE_JOBS"
 done < "$METAS"
 
 ENDPOINTS="$TMP/endpoints.tsv"
@@ -349,7 +363,10 @@ process_snapshot "$SAMPLE2" || { PROCESS2_OK=false; : > "$SAMPLE2"; }
 while IFS=$(printf '\t') read -r id remote_pid remote_file harness worktree backend target; do
   [ -n "$id" ] || continue
   remote_ok=false
-  if wait "$remote_pid" && jq -e \
+  remote_wait_ok=false
+  if wait "$remote_pid"; then remote_wait_ok=true; fi
+  forget_owned_pid "$remote_pid"
+  if [ "$remote_wait_ok" = true ] && jq -e \
     --arg id "$id" --arg backend "$backend" --arg target "$target" --arg worktree "$worktree" --argjson interval "$INTERVAL_MS" '
       .schema == "fm-liveness.v1" and .interval_ms == $interval
       and (.records | length) == 1 and .records[0].id == $id
