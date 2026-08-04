@@ -85,6 +85,29 @@ SH
   chmod +x "$dir/bin/endpoint" "$dir/bin/capture" "$dir/bin/process"
 }
 
+install_remote_evidence() {  # <dir>
+  local dir=$1
+  cat > "$dir/bin/remote" <<'SH'
+#!/usr/bin/env bash
+printf 'remote\n' >> "${E_DIR:?}/remote.log"
+[ "${E_REMOTE:-ok}" = ok ] || exit 1
+id=$1
+interval=$2
+jq -n --arg id "$id" --argjson interval "$interval" '
+  {schema:"fm-liveness.v1",observed_at:"2026-08-03T12:00:00Z",interval_ms:$interval,
+   process_samples:{sample_1_readable:true,sample_2_readable:true},
+   records:[{id:$id,harness:"claude",harness_family:"claude",backend:"tmux",
+     target:"remote-session:fm-task",worktree:"remote-worktree",
+     endpoint:{presence:"verified_present",raw:"alive"},
+     worker:{presence:"verified_present",pids_sample_1:1,pids_sample_2:1,
+       harness_processes_sample_1:1,harness_processes_sample_2:1},
+     output:{sample_1_readable:true,sample_2_readable:true,changed:false},
+     cpu:{sample_1_max_ms:5000,sample_2_max_ms:5000,delta_ms:0,rate_ms_per_minute:0,
+       baseline:"verified",threshold_ms_per_minute:760},activity:"parked"}]}'
+SH
+  chmod +x "$dir/bin/remote"
+}
+
 run_case() {  # <dir> [env assignments through caller]
   local dir=$1
   rm -f "$dir"/*.count
@@ -205,6 +228,60 @@ test_endpoint_three_way_and_output_activity() {
   pass "endpoint presence is three-way and changed output independently establishes work"
 }
 
+test_remote_routes_use_remote_endpoint_evidence() {
+  local dir json
+  dir=$(make_case remote-route claude)
+  install_evidence "$dir"
+  install_remote_evidence "$dir"
+  cat >> "$dir/home/state/task.meta" <<EOF
+remote_host=fixture-host
+remote_root=/remote/firstmate
+remote_backend=tmux
+remote_target=remote-session:fm-task
+worktree=remote-worktree
+EOF
+  json=$(FM_LIVENESS_REMOTE_BIN="$dir/bin/remote" E_REMOTE=ok run_case "$dir")
+  printf '%s' "$json" | jq -e '
+    .records[0] | .backend=="tmux" and .target=="remote-session:fm-task"
+      and .endpoint.presence=="verified_present" and .worker.presence=="verified_present"
+      and .activity=="parked"
+  ' >/dev/null || fail "remote route did not retain its remote backend evidence: $json"
+  [ "$(wc -l < "$dir/remote.log" | tr -d ' ')" = 1 ] \
+    || fail "remote liveness evidence producer was not called exactly once"
+
+  : > "$dir/remote.log"
+  json=$(FM_LIVENESS_REMOTE_BIN="$dir/bin/remote" E_REMOTE=fail run_case "$dir")
+  printf '%s' "$json" | jq -e '
+    .records[0] | .target=="remote-session:fm-task"
+      and .endpoint.presence=="unverified" and .endpoint.raw=="remote_unreadable"
+      and .worker.presence=="unverified" and .activity=="unverified"
+  ' >/dev/null || fail "unreachable remote evidence was collapsed to local absence: $json"
+  pass "remote routes use their recorded remote target or remain unverified"
+}
+
+test_remote_control_samples_recorded_host_local_target() {
+  local dir home json
+  dir=$(make_case remote-control claude)
+  install_evidence "$dir"
+  home="$dir/remote-home"
+  mkdir -p "$home/state/parent-route" "$home/bin"
+  printf 'task\n' > "$home/.fm-secondmate-home"
+  printf '# fixture\n' > "$home/AGENTS.md"
+  fm_write_meta "$home/state/parent-route/task.meta" \
+    "window=remote-session:fm-task" "worktree=$dir/wt" "harness=claude" "kind=secondmate"
+  json=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_LIVENESS_INTERVAL_MS=100 \
+    FM_LIVENESS_ENDPOINT_BIN="$dir/bin/endpoint" FM_LIVENESS_CAPTURE_BIN="$dir/bin/capture" \
+    FM_LIVENESS_PROCESS_SNAPSHOT_BIN="$dir/bin/process" E_DIR="$dir" E_WT="$dir/wt" \
+    E_FAMILY=claude E_PROCESS=working E_CPU2=1002 \
+    "$ROOT/bin/fm-remote-secondmate-control.sh" liveness task 100)
+  printf '%s' "$json" | jq -e '
+    .records[0] | .id=="task" and .backend=="tmux" and .target=="remote-session:fm-task"
+      and .worktree != null and .endpoint.presence=="verified_present"
+      and .worker.presence=="verified_present" and .activity=="active"
+  ' >/dev/null || fail "remote control did not sample its recorded host-local target: $json"
+  pass "remote control samples the recorded backend target in its host-local process table"
+}
+
 # Neutralization matrix: each active proof is rerun with one guard's evidence
 # removed or falsified.
 # The inner assertion MUST fail, which is the required RED proof.
@@ -241,6 +318,8 @@ test_max_cpu_launcher_and_two_sample_delta
 test_real_process_snapshot_accepts_partial_lsof_output
 test_cwd_binding_and_shell_amplifier_refusals
 test_endpoint_three_way_and_output_activity
+test_remote_routes_use_remote_endpoint_evidence
+test_remote_control_samples_recorded_host_local_target
 test_neutralization_matrix_goes_red
 
 echo "all fm-liveness-snapshot tests passed"
