@@ -190,6 +190,8 @@ test_kimi_launch_then_send_is_verified() {
   rc=$?
   expect_code 0 "$rc" "verified kimi launch-then-send should succeed"
   assert_contains "$out" "spawned $id harness=kimi" "kimi spawn did not report success"
+  assert_contains "$out" "warning: harness 'kimi' cannot thread requested effort 'high'; accepted effort values: no supported values; omitting effort flag" \
+    "kimi effort-axis omission was silent"
 
   launch=$(cat "$CASE_DIR/launch.log")
   [ "$launch" = "'$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
