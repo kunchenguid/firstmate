@@ -105,7 +105,7 @@ bin/fm-remote-home-seed.sh <id> <ssh-alias> <remote-root> <remote-home> {<projec
 `<remote-root>` is the remote Firstmate code clone that supplies tracked scripts.
 `<remote-home>` is a separate absolute path for the persistent secondmate home and must not overlap the code root.
 The seed records `host:`, `root:`, and `home:` in `data/secondmates.md`, gates the host on readiness, sends a bounded manifest, and lets the remote host clone its own Firstmate home and project origins.
-Readiness always runs as check, then `--fix`, then a second read-only check whose verdict decides, so the operator never has to run the repair by hand and a repair is never trusted on its own word.
+Readiness starts with a read-only check; when that check reports a gap, it runs `--fix` and then a second read-only check whose verdict decides, so the operator never has to run the repair by hand and a repair is never trusted on its own word.
 A host that stays red prints the doctor's remaining gaps and their operator steps, restores the registry, and creates nothing on the remote host.
 It does not copy project trees or the primary process environment.
 A known provisioning failure rolls back the new route, while SSH exit 255 preserves it because remote completion is unknown and must be reconciled on the same host.
