@@ -89,6 +89,19 @@ fm_remote_job_path_append_if_dir() { # <directory>
   fm_remote_job_path_append "$1"
 }
 
+fm_remote_job_path_append_resolved_dir() { # <directory>
+  local directory physical
+  directory=$1
+  [ -d "$directory" ] || return 0
+  if [ ! -L "$directory" ]; then
+    fm_remote_job_path_append "$directory"
+    return 0
+  fi
+  physical=$(CDPATH='' cd -- "$directory" 2>/dev/null && pwd -P) || return 0
+  [ -d "$physical" ] && [ ! -L "$physical" ] || return 0
+  fm_remote_job_path_append "$physical"
+}
+
 fm_remote_job_append_glob_dirs() { # <glob whose matches are directories>
   local pattern=$1 directory
   while IFS= read -r directory; do
@@ -107,12 +120,12 @@ fm_remote_job_compose_operator_path() { # <account-home>
   fm_remote_job_path_append_if_dir "$account_home/.mise/shims"
   fm_remote_job_append_glob_dirs "$account_home/.local/share/mise/installs/*/*/bin"
   fm_remote_job_append_glob_dirs "$account_home/.mise/installs/*/*/bin"
-  fm_remote_job_path_append_if_dir "$account_home/.nix-profile/bin"
+  fm_remote_job_path_append_resolved_dir "$account_home/.nix-profile/bin"
   account_user=$(id -un 2>/dev/null || true)
   if [ -n "$account_user" ]; then
-    fm_remote_job_path_append_if_dir "/etc/profiles/per-user/$account_user/bin"
+    fm_remote_job_path_append_resolved_dir "/etc/profiles/per-user/$account_user/bin"
   fi
-  fm_remote_job_path_append_if_dir /run/current-system/sw/bin
+  fm_remote_job_path_append_resolved_dir /run/current-system/sw/bin
   fm_remote_job_path_append_if_dir /opt/homebrew/bin
   fm_remote_job_path_append_if_dir /usr/local/bin
   fm_remote_job_path_append /usr/bin

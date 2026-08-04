@@ -101,6 +101,17 @@ export FM_REMOTE_JOB_TIMEOUT=5
 # shellcheck source=bin/fm-remote-job-lib.sh
 . "$ROOT/bin/fm-remote-job-lib.sh"
 
+NIX_PROFILE="$ACCOUNT_HOME/.nix-profile"
+NIX_BIN="$TMP_ROOT/nix-profile-bin"
+mkdir -p "$NIX_PROFILE" "$NIX_BIN"
+ln -s "$NIX_BIN" "$NIX_PROFILE/bin"
+fm_remote_job_compose_operator_path "$ACCOUNT_HOME" >/dev/null
+case ":$FM_REMOTE_JOB_OPERATOR_PATH:" in
+  *":$NIX_BIN:"*) ;;
+  *) fail "the composed PATH omitted a resolved Nix profile bin link" ;;
+esac
+pass "operator PATH resolves the authorized Nix profile bin link"
+
 HOME="$ACCOUNT_HOME" PATH="$RUNTIME_BIN:/usr/bin:/bin:/usr/sbin:/sbin" FM_FAKE_PERL_LOG="$FAKE_PERL_LOG" \
   FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT" \
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux FM_REMOTE_JOB_TIMEOUT=5 \
