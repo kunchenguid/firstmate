@@ -2239,12 +2239,12 @@ SH
 }
 
 test_exec_changed_process_is_still_reaped() {
-  local case_dir rc pid marker done survived=0
+  local case_dir rc pid marker done_flag survived=0
   case_dir=$(make_case exec-changed-process)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
   marker="$case_dir/exec-now"
-  done="$case_dir/exec-done"
+  done_flag="$case_dir/exec-done"
 
   ( cd "$case_dir/wt" && exec perl -e '
       my ($marker, $done) = @ARGV;
@@ -2252,7 +2252,7 @@ test_exec_changed_process_is_still_reaped() {
       open my $fh, ">", $done or die "open";
       close $fh;
       exec "perl", "-e", '\''$SIG{TERM} = "IGNORE"; sleep 300'\'';
-    ' "$marker" "$done" ) &
+    ' "$marker" "$done_flag" ) &
   pid=$!
   disown
   sleep 0.2
@@ -2288,7 +2288,7 @@ SH
   rc=0
   FM_PROC_ROOT_OVERRIDE="$case_dir/no-proc" \
   FM_FAKE_EXEC_PID="$pid" FM_FAKE_EXEC_MARKER="$marker" \
-  FM_FAKE_EXEC_DONE="$done" FM_FAKE_LSOF_COUNT="$case_dir/lsof-count" \
+  FM_FAKE_EXEC_DONE="$done_flag" FM_FAKE_LSOF_COUNT="$case_dir/lsof-count" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   if kill -0 "$pid" 2>/dev/null; then
