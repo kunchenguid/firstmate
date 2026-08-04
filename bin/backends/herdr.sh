@@ -108,8 +108,8 @@ FM_BACKEND_HERDR_ESCALATED_PREFIX=".herdr-escalated-"
 # at a seeded secondmate home's root, containing exactly that secondmate's id.
 # The primary firstmate home never carries this marker.
 FM_BACKEND_HERDR_SECONDMATE_MARKER=".fm-secondmate-home"
-# The default-off presentation projection is intentionally separate from the
-# authoritative task endpoint record.
+# The presentation projection is intentionally separate from the authoritative
+# task endpoint record.
 # A per-task journal lives under state/ as <id>.herdr-presentation.
 # Version 1 records only the attempted projection's random correlator.
 # Version 2 additionally binds the successful projection's exact home,
@@ -117,6 +117,36 @@ FM_BACKEND_HERDR_SECONDMATE_MARKER=".fm-secondmate-home"
 # spawn can replace one verified agent-free husk under the session lock.
 # No send, capture, Treehouse, or general task-ownership path reads it.
 FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX=".herdr-presentation"
+
+# The config item a home writes to opt OUT of the projection.
+FM_BACKEND_HERDR_PRESENTATION_CONFIG="herdr-presentation-spaces"
+
+# fm_backend_herdr_presentation_enabled <config-dir>: true when this home's
+# children should be projected into disposable one-task workspaces
+# (docs/herdr-backend.md "Presentation spaces" owns the full contract).
+# Projection is ON by default, so an absent config file enables it; a home opts
+# out by writing "off". Values are read with the whole-file whitespace-stripped
+# convention the other scalar config items already use (config/backlog-backend,
+# config/crew-harness), plus case folding. An empty file is the historical
+# presence-based opt-in form and still means on, so no home that had the
+# projection enabled can be turned off by the default flip. An unrecognized
+# value warns and keeps the default rather than failing a spawn over a purely
+# visual setting, so a typo is visible instead of silently disabling anything.
+fm_backend_herdr_presentation_enabled() {  # <config-dir>
+  local config_dir=${1:-} file value
+  [ -n "$config_dir" ] || return 0
+  file="$config_dir/$FM_BACKEND_HERDR_PRESENTATION_CONFIG"
+  [ -f "$file" ] || return 0
+  value=$(tr -d '[:space:]' < "$file" 2>/dev/null | tr '[:upper:]' '[:lower:]') || value=""
+  case "$value" in
+    off) return 1 ;;
+    ''|on) return 0 ;;
+    *)
+      echo "warning: $file: unrecognized value \"$value\"; herdr presentation spaces stay on (write \"off\" to opt out)" >&2
+      return 0
+      ;;
+  esac
+}
 
 # fm_backend_herdr_workspace_label: the per-firstmate-HOME herdr workspace
 # label (docs/herdr-backend.md "Default task container shape"). The PRIMARY home (no

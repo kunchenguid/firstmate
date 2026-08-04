@@ -831,7 +831,70 @@ test_create_task_creates_with_no_focus_flag() {
   pass "fm_backend_herdr_create_task: tab create passes --no-focus"
 }
 
-# --- default-off disposable presentation projection ------------------------
+# --- default-on disposable presentation projection --------------------------
+
+# fm_backend_herdr_presentation_enabled is the one gate bin/fm-spawn.sh consults
+# before projecting a crewmate or scout, so these cases pin the default-on
+# contract and its explicit opt-out at that interface.
+presentation_enabled_verdict() {  # <config-dir> -> "on"/"off" on stdout, warnings on stderr
+  bash -c '
+    . "$0/bin/backends/herdr.sh"
+    if fm_backend_herdr_presentation_enabled "$1"; then printf "on\n"; else printf "off\n"; fi
+  ' "$ROOT" "$1"
+}
+
+test_presentation_defaults_on_without_config() {
+  local dir config verdict
+  dir="$TMP_ROOT/presentation-default-on"; config="$dir/config"; mkdir -p "$config"
+  verdict=$(presentation_enabled_verdict "$config" 2>/dev/null)
+  [ "$verdict" = on ] || fail "an absent presentation config must resolve on, got '$verdict'"
+  verdict=$(presentation_enabled_verdict "$dir/missing-config-dir" 2>/dev/null)
+  [ "$verdict" = on ] || fail "a missing config dir must resolve on, got '$verdict'"
+  pass "herdr presentation: a home that set nothing gets the projection by default"
+}
+
+test_presentation_legacy_opt_in_file_still_resolves_on() {
+  local dir config verdict stderr
+  dir="$TMP_ROOT/presentation-legacy-opt-in"; config="$dir/config"; mkdir -p "$config"
+  stderr="$dir/legacy.err"
+  # The historical opt-in was a bare `touch` of the file, so an empty file must
+  # keep meaning on - and must not warn, or every migrated home warns on every spawn.
+  : > "$config/herdr-presentation-spaces"
+  verdict=$(presentation_enabled_verdict "$config" 2>"$stderr")
+  [ "$verdict" = on ] || fail "a legacy empty opt-in file must resolve on, got '$verdict'"
+  [ ! -s "$stderr" ] || fail "a legacy empty opt-in file must not warn: $(cat "$stderr")"
+  printf '\n \n' > "$config/herdr-presentation-spaces"
+  verdict=$(presentation_enabled_verdict "$config" 2>"$stderr")
+  [ "$verdict" = on ] || fail "a whitespace-only opt-in file must resolve on, got '$verdict'"
+  [ ! -s "$stderr" ] || fail "a whitespace-only opt-in file must not warn: $(cat "$stderr")"
+  printf 'on\n' > "$config/herdr-presentation-spaces"
+  verdict=$(presentation_enabled_verdict "$config" 2>/dev/null)
+  [ "$verdict" = on ] || fail "an explicit on must resolve on, got '$verdict'"
+  pass "herdr presentation: an already-enabled home keeps the projection with no migration step"
+}
+
+test_presentation_explicit_off_opts_out() {
+  local dir config verdict value
+  dir="$TMP_ROOT/presentation-opt-out"; config="$dir/config"; mkdir -p "$config"
+  for value in 'off' 'off
+' '  off  ' 'OFF' 'Off'; do
+    printf '%s' "$value" > "$config/herdr-presentation-spaces"
+    verdict=$(presentation_enabled_verdict "$config" 2>/dev/null)
+    [ "$verdict" = off ] || fail "the opt-out value '$value' must resolve off, got '$verdict'"
+  done
+  pass "herdr presentation: an explicit off opts the home out"
+}
+
+test_presentation_unrecognized_value_warns_and_keeps_default() {
+  local dir config verdict stderr
+  dir="$TMP_ROOT/presentation-unrecognized"; config="$dir/config"; mkdir -p "$config"
+  stderr="$dir/unrecognized.err"
+  printf 'disabled\n' > "$config/herdr-presentation-spaces"
+  verdict=$(presentation_enabled_verdict "$config" 2>"$stderr")
+  [ "$verdict" = on ] || fail "an unrecognized value must keep the default on, got '$verdict'"
+  [ -s "$stderr" ] || fail "an unrecognized value must warn so a typo is visible"
+  pass "herdr presentation: an unrecognized value warns and keeps the default instead of failing a spawn"
+}
 
 test_projection_journal_is_atomic_and_uses_128_bit_token() {
   local dir state out token parsed status
@@ -3898,6 +3961,10 @@ test_create_task_refuses_when_agent_state_ambiguous
 test_create_task_husk_replacement_creates_before_closing
 test_create_task_creates_and_parses_ids
 test_create_task_creates_with_no_focus_flag
+test_presentation_defaults_on_without_config
+test_presentation_legacy_opt_in_file_still_resolves_on
+test_presentation_explicit_off_opts_out
+test_presentation_unrecognized_value_warns_and_keeps_default
 test_projection_journal_is_atomic_and_uses_128_bit_token
 test_projection_journal_v2_binds_and_advances_exact_endpoint
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane
