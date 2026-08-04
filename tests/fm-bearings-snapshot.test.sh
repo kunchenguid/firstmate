@@ -586,6 +586,72 @@ test_default_secondmate_timeout_covers_liveness_overhead() {
   pass "default secondmate timeout covers the two-sample observation envelope"
 }
 
+test_secondmate_timeout_derives_from_fleet_size() {
+  local home mate fakebin timeout_log i wt fleet_size small_bound large_bound expected_delta
+  local neutralized_json neutralized_bound expected_large
+  home=$(make_home derived-secondmate-timeout)
+  : > "$home/data/secondmates.md"
+  printf '## Done\n' > "$home/data/backlog.md"
+  mate="$TMP_ROOT/derived-timeout-home"
+  make_valid_secondmate_home derived-timeout "$mate"
+  append_secondmate_registry "$home" derived-timeout "$mate"
+  fakebin=$(make_fakebin "$home")
+  timeout_log="$home/timeout.log"
+  cat > "$fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -k ]; then shift 2; fi
+seconds=$1
+shift
+case " $* " in
+  *'fm-fleet-snapshot.sh --secondmate-home-summary'*)
+    printf '%s\n' "$seconds" >> "${TIMEOUT_LOG:?}"
+    if [ -n "${REQUIRED_SUMMARY_BOUND:-}" ] && [ "$seconds" -lt "$REQUIRED_SUMMARY_BOUND" ]; then
+      exit 124
+    fi
+    ;;
+esac
+exec "$@"
+SH
+  chmod +x "$fakebin/timeout"
+
+  fleet_size=25
+  i=1
+  while [ "$i" -le "$fleet_size" ]; do
+    wt="$mate/projects/child-$i"
+    mkdir -p "$wt"
+    fm_write_meta "$mate/state/child-$i.meta" \
+      "window=firstmate:fm-child-$i" "worktree=$wt" "project=sample" \
+      "harness=codex" "kind=scout" "mode=scout"
+    if [ "$i" -eq 1 ]; then
+      TIMEOUT_LOG="$timeout_log" run "$home" "$fakebin" --json >/dev/null
+      small_bound=$(tail -1 "$timeout_log")
+    fi
+    i=$((i + 1))
+  done
+  TIMEOUT_LOG="$timeout_log" run "$home" "$fakebin" --json >/dev/null
+  large_bound=$(tail -1 "$timeout_log")
+  expected_delta=$(((fleet_size - 1) * (4 * 2 + 2 * (10 + 1) + 1)))
+  expected_large=$((small_bound + expected_delta))
+  [ "$large_bound" -gt "$small_bound" ] \
+    || fail "secondmate summary timeout did not grow with fleet size: $small_bound -> $large_bound"
+  [ "$large_bound" -eq "$expected_large" ] \
+    || fail "secondmate summary bound omitted per-child evidence, fallback, or task work: $small_bound -> $large_bound"
+
+  : > "$timeout_log"
+  neutralized_json=$(PATH="$fakebin:$PATH" TIMEOUT_LOG="$timeout_log" REQUIRED_SUMMARY_BOUND="$expected_large" \
+    FM_SNAPSHOT_SECONDMATE_TIMEOUT=20 FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  neutralized_bound=$(tail -1 "$timeout_log")
+  [ "$neutralized_bound" -eq 20 ] \
+    || fail "the fixed-timeout neutralization did not reach the production summary boundary"
+  printf '%s' "$neutralized_json" | jq -e '
+    .secondmate_current.records[] | select(.id=="derived-timeout")
+    | .current.state=="unknown" and (.current.reason | contains("timed out"))
+  ' >/dev/null || fail "neutralizing the derived bound left the fleet-growth assertion green: $neutralized_json"
+  pass "secondmate summary timeout derives from every child's bounded work"
+}
+
 test_oversized_secondmate_summary_stays_strict_unknown() {
   local home mate fakebin json i
   home=$(make_home oversized-home)
@@ -2074,6 +2140,7 @@ test_active_child_overrides_old_parent_event
 test_structured_child_decision_reaches_captains_call
 test_bad_secondmate_homes_never_revive_parent_work
 test_default_secondmate_timeout_covers_liveness_overhead
+test_secondmate_timeout_derives_from_fleet_size
 test_oversized_secondmate_summary_stays_strict_unknown
 test_secondmate_and_child_bounds_are_disclosed
 test_parent_decision_is_untrusted_contradiction_only

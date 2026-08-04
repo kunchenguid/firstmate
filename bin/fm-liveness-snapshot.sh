@@ -59,6 +59,16 @@ INTERVAL_MS=${FM_LIVENESS_INTERVAL_MS:-7500}
 case "$INTERVAL_MS" in
   ''|*[!0-9]*|0) echo "fm-liveness-snapshot: FM_LIVENESS_INTERVAL_MS must be a positive integer" >&2; exit 2 ;;
 esac
+EVIDENCE_TIMEOUT=${FM_LIVENESS_EVIDENCE_TIMEOUT:-2}
+REMOTE_OVERHEAD_SECS=${FM_LIVENESS_REMOTE_OVERHEAD_SECS:-2}
+case "$EVIDENCE_TIMEOUT" in
+  ''|*[!0-9]*|0) echo "fm-liveness-snapshot: FM_LIVENESS_EVIDENCE_TIMEOUT must be a positive integer" >&2; exit 2 ;;
+esac
+case "$REMOTE_OVERHEAD_SECS" in
+  ''|*[!0-9]*|0) echo "fm-liveness-snapshot: FM_LIVENESS_REMOTE_OVERHEAD_SECS must be a positive integer" >&2; exit 2 ;;
+esac
+INTERVAL_CEIL_SECS=$(( (INTERVAL_MS + 999) / 1000 ))
+REMOTE_ACQUISITION_TIMEOUT=$((INTERVAL_CEIL_SECS + 5 * EVIDENCE_TIMEOUT + REMOTE_OVERHEAD_SECS))
 
 usage() {
   cat <<'EOF'
@@ -89,8 +99,30 @@ command -v jq >/dev/null 2>&1 || { echo "fm-liveness-snapshot: jq not found" >&2
 . "$SCRIPT_DIR/fm-backend.sh"
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-liveness.XXXXXX") || exit 1
-cleanup() { rm -rf -- "$TMP"; }
+cleanup() {
+  local job_pid
+  while read -r job_pid; do
+    [ -n "$job_pid" ] || continue
+    kill "$job_pid" 2>/dev/null || true
+    wait "$job_pid" 2>/dev/null || true
+  done < <(jobs -pr)
+  rm -rf -- "$TMP"
+}
 trap cleanup EXIT HUP INT TERM
+
+run_bounded_reaping() {  # <seconds> <command...>
+  local seconds=$1
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout -k 1 "$seconds" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout -k 1 "$seconds" "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; waitpid $pid, 0; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$seconds" "$@"
+  else
+    return 124
+  fi
+}
 
 meta_value() {  # <meta> <key>
   fm_meta_get "$1" "$2"
@@ -152,14 +184,6 @@ capture_output() {  # <backend> <target> <label>
     "$FM_LIVENESS_CAPTURE_BIN" "$@"
   else
     fm_backend_capture "$1" "$2" 80 "$3"
-  fi
-}
-
-remote_liveness_snapshot() {  # <id> <interval-ms>
-  if [ -n "${FM_LIVENESS_REMOTE_BIN:-}" ]; then
-    "$FM_LIVENESS_REMOTE_BIN" "$@"
-  else
-    "$SCRIPT_DIR/fm-on.sh" "$1" fm-remote-secondmate-control.sh liveness "$1" "$2"
   fi
 }
 
@@ -280,7 +304,14 @@ while IFS=$(printf '\t') read -r id harness worktree backend target route; do
     continue
   fi
   remote_file="$TMP/remote-$id.json"
-  remote_liveness_snapshot "$id" "$INTERVAL_MS" > "$remote_file" 2>/dev/null &
+  if [ -n "${FM_LIVENESS_REMOTE_BIN:-}" ]; then
+    run_bounded_reaping "$REMOTE_ACQUISITION_TIMEOUT" \
+      "$FM_LIVENESS_REMOTE_BIN" "$id" "$INTERVAL_MS" > "$remote_file" 2>/dev/null &
+  else
+    run_bounded_reaping "$REMOTE_ACQUISITION_TIMEOUT" \
+      "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh liveness "$id" "$INTERVAL_MS" \
+      > "$remote_file" 2>/dev/null &
+  fi
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$!" "$remote_file" "$harness" "$worktree" "$backend" "$target" >> "$REMOTE_JOBS"
 done < "$METAS"
 
