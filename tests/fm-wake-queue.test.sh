@@ -340,8 +340,10 @@ SH
   grep '^wake annotation:.*\[truncated\]$' "$out" >/dev/null || fail "per-item/input truncation marker was not emitted"
   grep -E '^wake annotation: [1-9][0-9]* annotations omitted \(global enrichment byte cap\)$' "$out" >/dev/null \
     || fail "global omitted-annotation marker was not emitted"
+  # shellcheck disable=SC2016 # awk owns $0 in this literal program.
   annotation_bytes=$(env LC_ALL=C awk '/^wake annotation:/ { bytes += length($0) + 1 } END { print bytes + 0 }' "$out")
   [ "$annotation_bytes" -le 8192 ] || fail "global annotation output exceeded 8192 bytes ($annotation_bytes)"
+  # shellcheck disable=SC2016 # awk owns $0 in this literal program.
   oversized_lines=$(env LC_ALL=C awk '/^wake annotation: latest/ && length($0) + 1 > 2048 { count++ } END { print count + 0 }' "$out")
   [ "$oversized_lines" -eq 0 ] || fail "a per-item annotation exceeded 2048 bytes"
   annotation_count=$(grep -c '^wake annotation: latest' "$out" || true)
@@ -523,8 +525,10 @@ test_annotation_caps_are_byte_bounds_under_a_utf8_locale() {
     || fail "drain over multibyte status content failed"
 
   grep '^wake annotation:' "$out" >/dev/null || fail "multibyte status content produced no annotation to bound"
+  # shellcheck disable=SC2016 # awk owns $0 in this literal program.
   widest=$(env LC_ALL=C awk '/^wake annotation:/ { if (length($0) + 1 > m) m = length($0) + 1 } END { print m + 0 }' "$out")
   [ "$widest" -le 2048 ] || fail "a per-item annotation reached $widest bytes, so the cap is counting characters not bytes"
+  # shellcheck disable=SC2016 # awk owns $0 in this literal program.
   total=$(env LC_ALL=C awk '/^wake annotation:/ { bytes += length($0) + 1 } END { print bytes + 0 }' "$out")
   [ "$total" -le 8192 ] || fail "global annotation output reached $total bytes over multibyte input"
   pass "annotation caps stay byte bounds when the status content is multibyte"
