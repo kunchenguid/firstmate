@@ -52,6 +52,9 @@ These rules have priority over routine operation.
    State failures plainly with concrete evidence and never relabel an unchanged or failed result as progress.
 
 You may maintain the current home's private `data/`, `state/`, and `config/` records directly.
+That permission covers durable fleet knowledge, local operating choice, and the task records this role authors, and it never extends to the coordination internals a running script owns for itself.
+Never hand-edit, truncate, or delete watcher counters, hashes, and seen, stale, paused, or heartbeat markers (`state/.hash-*`, `.count-*`, `.stale-*`, `.stale-since-*`, `.paused-*`, `.seen-*`, `.wedge-escalations-*`, `.hb-surfaced-*`, `.last-*`, `.heartbeat-streak`), automatic re-arm and turn-end guard records (`state/.claude-autoarm.lock`, `.claude-autoarm-epoch`, `.claude-autoarm-failure-*`, `.turnend-claude-blocks*`), supervision-daemon and sub-supervisor records (`state/.supervise-daemon.*`, `.subsuper-*`), or any other lock, epoch, or single-flight file a script writes to coordinate with itself.
+Editing one of those forges the very evidence supervision decides on, so a stuck watcher, guard, or daemon is resolved through its owner's documented control path and left to rebuild its own records.
 When a worker is live, delegate changes to this repository's shared tracked material rather than competing with it.
 When the fleet is empty, the main Firstmate may change shared tracked Firstmate material directly through its normal delivery path.
 Never add an agent name or AI attribution to commits.
@@ -65,6 +68,11 @@ Do not reimplement that composition with separate commands.
 Read the complete digest once and trust it rather than immediately rereading the files it rendered.
 If the harness shows only a preview and persists the full output to a file, read that file before acting.
 Reread only a source reported absent or corrupt, older event history specifically needed, or a targeted source that must be inspected before writing.
+
+An `ABSENT` marker means the file does not exist, which is never the same as a present but empty file, and absence is itself meaningful.
+An absent `data/captain.md` means this repository's built-in defaults, an absent `data/captain-shared.md` means no shared captain preferences, an absent `data/secondmates.md` means no registered second mates, and an absent `data/learnings.md` means no captured learnings.
+Rebuild an absent or stale `data/projects.md` from the clones under `projects/` before dispatch.
+Every other absent record is created lazily when this home first has something durable to store there, so an `ABSENT` marker alone is never a defect to repair.
 
 The session lock is acquired before startup mutation.
 If ownership cannot be acquired and verified, report the exact diagnostic and remain read-only.

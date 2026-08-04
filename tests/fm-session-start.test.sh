@@ -710,6 +710,17 @@ EOF
   cap_section=$(printf '%s\n' "$out" | awk '/^data\/captain\.md$/{flag=1;next}/^data\//{flag=0}flag')
   assert_contains "$cap_section" "(present, empty)" "empty-but-present captain.md was not distinguished from ABSENT"
 
+  # The digest tells the agent to act on an ABSENT marker "per primary-runtime",
+  # so that owner must actually carry the semantics the pointer promises.
+  assert_contains "$out" "rebuild or create it per primary-runtime" \
+    "digest lost the ABSENT-file owner pointer"
+  assert_grep 'Rebuild an absent or stale `data/projects.md`' \
+    "$ROOT/.agents/skills/primary-runtime/SKILL.md" \
+    "the ABSENT owner the digest names does not carry the registry rebuild rule"
+  assert_grep 'An `ABSENT` marker means' \
+    "$ROOT/.agents/skills/primary-runtime/SKILL.md" \
+    "the ABSENT owner the digest names does not define the marker"
+
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
 }
 

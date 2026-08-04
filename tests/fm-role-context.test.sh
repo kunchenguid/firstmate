@@ -131,6 +131,16 @@ runtime = x["primaryRuntimeBody"]
 need("bin/fm-check-register.sh <id>", runtime, "primary runtime lost the custom-check registration trigger")
 need("mode-`0700`", runtime, "primary runtime lost the custom-check file contract")
 need("FM_CHECK_TIMEOUT", runtime, "primary runtime lost the custom-check timeout contract")
+# Boundaries the session-start digest and the state layout point at this owner
+# for. Each one must survive in the runtime the loader actually delivers, or
+# the pointer resolves to nothing.
+need("`ABSENT` marker", runtime, "primary runtime lost the absent-file semantics")
+need("Rebuild an absent or stale `data/projects.md`", runtime, "primary runtime lost the registry rebuild rule")
+need("Never hand-edit", runtime, "primary runtime lost the coordination-internals boundary")
+need(".claude-autoarm-epoch", runtime, "primary runtime lost the automatic re-arm never-edit boundary")
+need(".supervise-daemon.", runtime, "primary runtime lost the supervision-daemon never-edit boundary")
+need(".heartbeat-streak", runtime, "primary runtime lost the watcher-internals never-edit boundary")
+need("maintain the current home's private", runtime, "primary runtime lost ordinary private record maintenance")
 for role in ("ship", "scout"):
     text = x[role]
     need("establishes the ordinary worker role", text, f"{role} brief lost worker role")

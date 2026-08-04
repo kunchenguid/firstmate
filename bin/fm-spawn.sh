@@ -84,6 +84,11 @@
 #   Every single-task invocation holds one task-id-scoped lock across backend
 #   creation through metadata publication, so concurrent same-id spawns serialize
 #   even when they select different backends.
+#   Metadata publication is staged into <id>.meta.tmp.<pid>, verified, and then
+#   renamed into place, so state/<id>.meta is only ever a complete task record:
+#   a compose, write, or rename failure publishes nothing, removes the staging
+#   file, and discards the endpoint this spawn created rather than stranding a
+#   window no task record names.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -2192,7 +2197,37 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
-{
+META_TMP="$STATE/$ID.meta.tmp.$$"
+
+# The endpoint created above is reachable only through the task record, so a
+# spawn that never publishes one would otherwise strand a window no teardown
+# can find. Orca terminals/worktrees and a pending herdr projection are unwound
+# by the EXIT trap instead, which still holds their cleanup flags here.
+discard_unpublished_endpoint() {
+  [ "$BACKEND" != orca ] || return 0
+  [ "${HERDR_PROJECTION_ABORT_CLEANUP:-0}" != 1 ] || return 0
+  [ -n "${T:-}" ] || return 0
+  fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "$W" 2>/dev/null && return 0
+  echo "warning: the $BACKEND endpoint $T for $ID outlived the failed spawn and no task record names it; remove it by hand" >&2
+  return 1
+}
+
+# Report only what this path actually did: the EXIT trap owns the rest of the
+# unwind and prints its own diagnostics, so nothing here claims a complete
+# cleanup it cannot verify.
+abort_unpublished_meta() {  # <detail>
+  rm -f "$META_TMP" 2>/dev/null || true
+  echo "error: task metadata could not be published at $STATE/$ID.meta ($1); no task record was written for $ID" >&2
+  discard_unpublished_endpoint || true
+  exit 1
+}
+
+# Publish atomically. A truncated meta is worse than no meta at all, because
+# teardown and crew-state reconciliation read a record missing window= or
+# worktree= as authoritative. Compose in memory, write once, verify the bytes
+# landed, and only then rename into place, so a write that fails partway
+# (ENOSPC, quota) leaves the final path untouched rather than half written.
+if ! META_BODY=$(
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
   echo "worktree=$WT"
@@ -2233,10 +2268,15 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta" || {
-  echo "error: task metadata could not be published at $STATE/$ID.meta; cleaning up the incomplete spawn" >&2
-  exit 1
-}
+); then
+  abort_unpublished_meta "the record could not be composed"
+fi
+printf '%s\n' "$META_BODY" > "$META_TMP" \
+  || abort_unpublished_meta "the staged record could not be written"
+[ "$(cat "$META_TMP" 2>/dev/null)" = "$META_BODY" ] \
+  || abort_unpublished_meta "the staged record was written incompletely"
+mv -f -- "$META_TMP" "$STATE/$ID.meta" \
+  || abort_unpublished_meta "the staged record could not be renamed into place"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")

@@ -18,12 +18,13 @@ Character counts measure generated model instructions rather than only tracked f
 | Root repository instruction context | 62,128 | 8,416 | 53,712 (86.5%) |
 | Skill index | 11,395 | 9,048 | 2,347 (20.6%) |
 | Universal Pi system prompt | 75,418 | 19,359 | 56,059 (74.3%) |
-| Primary after startup instruction and primary-runtime load | 75,540 | 44,481 | 31,059 (41.1%) |
+| Primary after startup instruction and primary-runtime load | 75,540 | 46,153 | 29,387 (38.9%) |
 | Ship worker system prompt plus generated brief | 81,656 | 26,073 | 55,583 (68.1%) |
 | Scout worker system prompt plus generated brief | 78,948 | 23,354 | 55,594 (70.4%) |
-| Second mate after generated charter and primary-runtime load | 80,912 | 50,312 | 30,600 (37.8%) |
+| Second mate after generated charter and primary-runtime load | 80,912 | 51,984 | 28,928 (35.8%) |
 
 The after skill index contains 21 repository-owned skills, including `primary-runtime` and `validation-supervision`, against 19 before.
+The two runtime-load rows include the 1,672 characters a review round added to `primary-runtime` for the absent-file semantics and the coordination-internals never-edit boundary; the universal, ship, and scout surfaces are unaffected because none of them loads the runtime.
 The generated root context remains below its 12,000-character regression budget, and the universal Pi system prompt remains below its 40,000-character regression budget.
 
 Current deterministic command:
