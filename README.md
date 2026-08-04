@@ -174,7 +174,7 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | `/bearings`        | Generate a concise four-section chat digest from bounded local fleet and registered-secondmate state; use `/bearings file` to also replace today's dated report in `data/`, and add `include PRs` when live PR enrichment is wanted |
 | `/updatefirstmate` | Self-update the running firstmate and its secondmates to the latest from origin with fast-forward-only pulls, then re-read instructions and nudge secondmates |
 | `/stow`            | Sweep the session for uncaptured durable knowledge, curate tiered startup memory with decay and cold archival, propose captain-gated offloads when still over budget, cascade to registered second mates, and report what is safe to reset |
-| `/pr-shepherd`     | Gate an open PR to merge-ready: inventory reviews, disposition every comment, drive critical CI green, report honestly, and merge only with authority |
+| `/pr-shepherd`     | Gate an open PR and merge by default when gates pass: inventory reviews, disposition every comment, drive critical CI green, report honestly; use `--no-merge` for report-only |
 
 Bearings invocation examples:
 
