@@ -228,22 +228,49 @@ command_start() {
     session=$existing
     write_record "$session" "$(fm_away_field started)" "$now" \
       "$(fm_away_field activation)" "$(fm_away_field intent)" \
-      || { [ "$was_away" -eq 1 ] || "$FM_AWAY_SESSION_DIR/fm-afk-launch.sh" stop; return 1; }
+      || { rollback_launch "$was_away"; return 1; }
     fm_away_ledger_append "$session" activation-repeat \
       "source=$activation" "intent=$intent" \
-      || { [ "$was_away" -eq 1 ] || "$FM_AWAY_SESSION_DIR/fm-afk-launch.sh" stop; return 1; }
+      || { rollback_launch "$was_away"; return 1; }
     printf '%s\n' "$session"
     log "away session $session was already open; refreshed it (no second session)"
     return 0
   fi
 
-  session=$(fm_away_new_session_id "$now") || { log 'could not allocate a session id'; return 1; }
+  case "${FM_AWAY_TEST_FAILURE:-}" in
+    allocation|allocation-rollback) session= ;;
+    *) session=$(fm_away_new_session_id "$now") ;;
+  esac
+  if [ -z "$session" ]; then
+    log 'could not allocate a session id'
+    rollback_launch "$was_away"
+    return 1
+  fi
+  case "${FM_AWAY_TEST_FAILURE:-}" in
+    record|record-rollback) rollback_launch "$was_away"; return 1 ;;
+  esac
   write_record "$session" "$now" "$now" "$activation" "$intent" \
-    || { "$FM_AWAY_SESSION_DIR/fm-afk-launch.sh" stop; return 1; }
+    || { rollback_launch "$was_away"; return 1; }
+  if [ "${FM_AWAY_TEST_FAILURE:-}" = ledger ]; then
+    fm_away_record_clear
+    rollback_launch "$was_away"
+    return 1
+  fi
   fm_away_ledger_append "$session" activation \
     "source=$activation" "intent=$intent" "home=$FM_HOME" \
-    || { fm_away_record_clear; "$FM_AWAY_SESSION_DIR/fm-afk-launch.sh" stop; return 1; }
+    || { fm_away_record_clear; rollback_launch "$was_away"; return 1; }
   printf '%s\n' "$session"
+}
+
+rollback_launch() {  # <was-away>
+  [ "$1" -eq 0 ] || return 0
+  case "${FM_AWAY_TEST_FAILURE:-}" in
+    rollback|*-rollback) log 'away-mode rollback failed; teardown could not be confirmed'; return 1 ;;
+  esac
+  if ! "$FM_AWAY_SESSION_DIR/fm-afk-launch.sh" stop; then
+    log 'away-mode rollback failed; teardown could not be confirmed'
+    return 1
+  fi
 }
 
 write_record() {  # <session> <started> <refreshed> <activation> <intent>

@@ -201,6 +201,26 @@ test_activation_is_durable_and_idempotent() {
   pass "repeating the phrase is harmless: one durable activation, one session"
 }
 
+test_activation_failures_confirm_rollback() {
+  local home mode out
+  for mode in allocation record ledger; do
+    home=$(new_home "activation-$mode-failure")
+    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_AWAY_LAUNCH_MODE=start-native \
+      FM_AWAY_TEST_FAILURE="$mode" "$SESSION" start --intent afk 2>&1) \
+      && fail "$mode failure unexpectedly activated away mode"
+    [ ! -e "$home/state/.afk" ] || fail "$mode failure left away mode active after rollback: $out"
+    [ ! -f "$home/state/.away-session" ] || fail "$mode failure left a session record"
+  done
+
+  home=$(new_home activation-rollback-failure)
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_AWAY_LAUNCH_MODE=start-native \
+    FM_AWAY_TEST_FAILURE=record-rollback "$SESSION" start --intent afk 2>&1) \
+    && fail "a record and rollback failure unexpectedly succeeded"
+  case "$out" in *"teardown could not be confirmed"*) : ;; *) fail "rollback failure was not explicit: $out" ;; esac
+  [ -e "$home/state/.afk" ] || fail "rollback-failure control did not leave the launch live"
+  pass "every injected post-launch failure either confirms rollback or reports it unconfirmed"
+}
+
 test_state_and_wakes_survive_restart() {
   local home id_before id_after queued
   home=$(new_home restart)
@@ -323,6 +343,7 @@ test_length_cap_refused_with_control
 test_code_fence_refused_with_control
 test_ambiguous_message_is_never_guessed
 test_activation_is_durable_and_idempotent
+test_activation_failures_confirm_rollback
 test_state_and_wakes_survive_restart
 test_return_intent_leaves_away_mode
 test_hook_is_default_off

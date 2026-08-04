@@ -127,6 +127,56 @@ test_precondition_satisfaction_is_separate_and_trusted() {
   pass "trusted request checkers reject false and unknown states without executing response text"
 }
 
+test_indeterminate_repository_checks_are_rejected_and_recorded() {
+  local id response before after out nonrepo unreadable fakebin real_git dollar='$'
+  id=$(make_request t-indeterminate-repo D2)
+  response="$TMP_ROOT/indeterminate-response"
+  "$DOUBLE" valid "$(request_file "$id")" > "$response"
+  before=$(sess ledger ruling-rejected | grep -c . || true)
+
+  nonrepo="$TMP_ROOT/nonrepo"
+  mkdir -p "$nonrepo"
+  out=$(rr validate "$id" --repo "$nonrepo" --response "$response" 2>&1) || true
+  case "$out" in "invalid precondition-unsatisfied"*) : ;; *) fail "non-repository path was not rejected as indeterminate: $out" ;; esac
+
+  unreadable="$TMP_ROOT/unreadable-repo"
+  cp -R "$REPO" "$unreadable"
+  chmod 000 "$unreadable"
+  fakebin="$TMP_ROOT/failing-git-bin"
+  mkdir -p "$fakebin"
+  real_git=$(command -v git)
+  printf '#!/usr/bin/env bash\nif [ "%s1" = -C ] && [ "%s2" = %q ]; then exit 128; fi\nexec %q "%s@"\n' \
+    "$dollar" "$dollar" "$unreadable" "$real_git" "$dollar" > "$fakebin/git"
+  chmod +x "$fakebin/git"
+  out=$(PATH="$fakebin:$PATH" rr validate "$id" --repo "$unreadable" --response "$response" 2>&1) || true
+  chmod 700 "$unreadable"
+  case "$out" in "invalid precondition-unsatisfied"*) : ;; *) fail "unreadable repository was not rejected as indeterminate: $out" ;; esac
+
+  out=$(rr validate "$id" --repo "$TMP_ROOT/missing-repo" --response "$response" 2>&1) || true
+  case "$out" in "invalid precondition-unsatisfied"*) : ;; *) fail "failed baseline read was not rejected as indeterminate: $out" ;; esac
+  after=$(sess ledger ruling-rejected | grep -c . || true)
+  [ "$after" -eq $((before + 3)) ] || fail "indeterminate checks recorded $((after - before)) rejection events, expected 3"
+  pass "indeterminate repository checkers reject and record evidence"
+}
+
+test_failed_publication_recovers_without_orphan_or_duplicate() {
+  local id session ledger count
+  export FM_RULING_TEST_PUBLISH_FAIL=1
+  make_request t-publish-retry D2 >/dev/null 2>&1 \
+    && fail "a forced publication failure succeeded"
+  unset FM_RULING_TEST_PUBLISH_FAIL
+  session=$(sess id)
+  id=rr-t-publish-retry-shape
+  [ ! -e "$HOME_DIR/state/away/$session/ruling/$id" ] || fail "failed publication left a request artifact"
+  ledger="$HOME_DIR/state/away/$session/ledger"
+  count=$(awk -F '\t' -v request="request=$id" '$2 == "ruling-request" { for (i=3; i<=NF; i++) if ($i == request) count++ } END { print count+0 }' "$ledger")
+  [ "$count" -eq 0 ] || fail "failed publication left $count orphan ledger events"
+  [ "$(make_request t-publish-retry D2)" = "$id" ] || fail "identical retry did not publish the request"
+  count=$(awk -F '\t' -v request="request=$id" '$2 == "ruling-request" { for (i=3; i<=NF; i++) if ($i == request) count++ } END { print count+0 }' "$ledger")
+  [ "$count" -eq 1 ] || fail "identical retry produced $count ruling-request events"
+  pass "failed request publication retries without orphan or duplicate ledger evidence"
+}
+
 test_a_complete_request_is_durable_and_reads_its_own_baseline() {
   local id file baseline head
   id=$(make_request t-complete D2)
@@ -303,6 +353,8 @@ test_untrusted_evidence_is_stored_verbatim_and_never_interpreted() {
 test_a_partial_request_is_refused
 test_a_non_enum_reversibility_is_refused
 test_precondition_satisfaction_is_separate_and_trusted
+test_indeterminate_repository_checks_are_rejected_and_recorded
+test_failed_publication_recovers_without_orphan_or_duplicate
 test_a_complete_request_is_durable_and_reads_its_own_baseline
 test_every_rejection_class
 test_an_operator_reserved_request_cannot_be_answered_as_delegated

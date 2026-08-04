@@ -208,16 +208,18 @@ command_create() {
   if [ -f "$dir/request" ]; then
     ledger=$(fm_away_ledger_path "$session")
     if cmp -s "$dir/request" "$pending.final" \
-      && [ -f "$dir/evidence" ] \
-      && awk -F '\t' -v request="request=$id" '$2 == "ruling-request" { for (i = 3; i <= NF; i++) if ($i == request) found=1 } END { exit !found }' "$ledger" 2>/dev/null; then
+      && [ -f "$dir/evidence" ]; then
+      if ! ruling_request_event_exists "$ledger" "$id"; then
+        fm_away_ledger_append "$session" ruling-request \
+          "request=$id" "task=$task" "tier=$tier" "baseline=$baseline" \
+          || { rm -f "$pending.final"; fail 'could not complete ruling-request publication'; }
+      fi
       rm -f "$pending.final"
       printf '%s\n' "$id"
       return 0
     fi
-    if cmp -s "$dir/request" "$pending.final"; then
-      rm -f "$pending.final"
-      fail "request $id exists without complete evidence and ledger publication"
-    fi
+    cmp -s "$dir/request" "$pending.final" \
+      && { rm -f "$pending.final"; fail "request $id exists without complete evidence publication"; }
     rm -f "$pending.final"
     fail "request $id already exists with different content; use a new decision key"
   fi
@@ -235,11 +237,19 @@ command_create() {
   else
     : > "$stage/evidence" || { rm -rf "$stage"; fail 'could not stage empty evidence'; }
   fi
+  [ "${FM_RULING_TEST_PUBLISH_FAIL:-0}" != 1 ] \
+    || { rm -rf "$stage"; fail 'could not publish the ruling request'; }
+  mv "$stage" "$dir" || { rm -rf "$stage"; fail 'could not publish the ruling request'; }
   fm_away_ledger_append "$session" ruling-request \
     "request=$id" "task=$task" "tier=$tier" "baseline=$baseline" \
-    || { rm -rf "$stage"; fail 'could not record the ruling request'; }
-  mv "$stage" "$dir" || { rm -rf "$stage"; fail 'could not publish the ruling request'; }
+    || fail 'could not complete ruling-request publication'
   printf '%s\n' "$id"
+}
+
+ruling_request_event_exists() {  # <ledger> <request-id>
+  awk -F '\t' -v request="request=$2" \
+    '$2 == "ruling-request" { for (i = 3; i <= NF; i++) if ($i == request) found=1 } END { exit !found }' \
+    "$1" 2>/dev/null
 }
 
 # --- validate ---------------------------------------------------------------
@@ -256,14 +266,19 @@ has_shell_metacharacter() {  # <value>
 }
 
 precondition_satisfied() {  # <request-file> <repo-dir> <checker>
-  local request=$1 repo=$2 checker=$3 live
+  local request=$1 repo=$2 checker=$3 live status
   case "$checker" in
     baseline-current)
-      live=$(fm_away_baseline "$repo") || return 1
+      live=$(fm_away_baseline "$repo")
+      status=$?
+      [ "$status" -eq 0 ] && [ -n "$live" ] || return 1
       [ "$(field_one "$request" baseline)" = "$live" ]
       ;;
     worktree-clean)
-      [ -z "$(git -C "$repo" status --porcelain 2>/dev/null)" ]
+      live=$(git -C "$repo" status --porcelain 2>/dev/null)
+      status=$?
+      [ "$status" -eq 0 ] || return 1
+      [ -z "$live" ]
       ;;
     *) return 1 ;;
   esac
@@ -348,7 +363,8 @@ EOF
   [ "$(field_one "$response" session)" = "$session" ] \
     || reject id-mismatch 'response session id does not match the open away session'
 
-  live=$(fm_away_baseline "$repo") || fail "could not read a git baseline from $repo"
+  live=$(fm_away_baseline "$repo") \
+    || reject precondition-unsatisfied "could not determine the live repository baseline: $repo"
   [ "$(field_one "$request" baseline)" = "$live" ] \
     || reject stale-baseline 'the request was raised against a superseded commit'
   [ "$(field_one "$response" baseline)" = "$live" ] \
