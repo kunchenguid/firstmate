@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 # GitHub concurrency groups retain at most one pending run, replacing older
 # pending runs even when cancel-in-progress is false. Give body-bearing events
@@ -28,16 +29,33 @@ jobs:
     steps:
       - name: Verify no-mistakes signature in PR body
         env:
+          GH_TOKEN: ${{ github.token }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -eu
           marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
-          if printf '%s' "${PR_BODY:-}" | grep -qF -- "$marker"; then
-            echo "Found no-mistakes signature in PR #${PR_NUMBER} body."
-            exit 0
-          fi
+          # The pull_request payload snapshots the body at event time. A
+          # no-mistakes push arrives as a synchronize event moments before the
+          # pipeline rewrites the PR body with the signature, so the snapshot
+          # can predate it and record a false failure at the new head. Check
+          # the live body instead, with a short grace period for that rewrite.
+          attempt=1
+          max_attempts=6
+          while :; do
+            body=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.body // ""' 2>/dev/null) || body="${PR_BODY:-}"
+            if printf '%s' "$body" | grep -qF -- "$marker"; then
+              echo "Found no-mistakes signature in PR #${PR_NUMBER} body."
+              exit 0
+            fi
+            if [ "$attempt" -ge "$max_attempts" ]; then
+              break
+            fi
+            echo "No signature yet (attempt ${attempt}/${max_attempts}); waiting for a pipeline body update..."
+            attempt=$((attempt + 1))
+            sleep 20
+          done
           {
             echo "::error::This PR was not raised through no-mistakes."
             echo
