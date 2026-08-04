@@ -727,7 +727,7 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
 fm_pending_reply_pid_identity() {  # <pid>
   local pid=$1 identity
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  identity=$(COLUMNS=10000 LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
+  identity=$(env COLUMNS=10000 LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
   [ -n "$identity" ] || return 1
   printf '%s' "$identity"
 }

@@ -19,6 +19,8 @@
 #  10. fm-send secondmate path embeds corr and creates durable pending records
 #  11. Backend busy/idle observation works through the shared busy abstraction
 #      used by Pi/Claude secondmate backends (no conversation scrape)
+#  12. Pending-reply process identities survive the macOS forked-child locale
+#      boundary across the public helper and sender-liveness path
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -231,6 +233,52 @@ test_recovery_attempt_is_never_reinjected() {
   unset FM_PENDING_REPLY_SEND_HOOK
   pass "recovery attempts reconcile without reinjection"
 }
+
+test_pending_reply_pid_identity_is_locale_invariant() (
+  local home state corr rec pid expected observed
+  home=$(setup_parent locale-identity)
+  state="$home/state"
+  sleep 300 &
+  pid=$!
+  trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+
+  # The pending-reply helper is the portable ps identity path. Keep this
+  # behavioral check available on hosts whose ps supports the documented fields.
+  if ! env LC_ALL=C ps -p "$pid" -o lstart= -o command= >/dev/null 2>&1; then
+    pass "pending-reply ps identity locale check skipped where ps -o lstart= is unsupported"
+    return 0
+  fi
+
+  expected=$(fm_pending_reply_pid_identity "$pid") \
+    || fail "pending-reply identity helper produced no baseline identity"
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "locale identity") \
+    || fail "could not create sender-liveness identity fixture"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_set "$rec" recovery_sender_pid "$pid" \
+    || fail "could not record sender pid"
+  fm_pending_reply_set "$rec" recovery_sender_identity "$expected" \
+    || fail "could not record sender identity"
+
+  observed=$(env -u LANG -u LC_ALL LC_CTYPE=UTF-8 bash -c '
+    set -u
+    lib=$1
+    pid=$2
+    rec=$3
+    expected=$4
+    . "$lib"
+    last=
+    for i in $(seq 1 96); do
+      last=$(fm_pending_reply_pid_identity "$pid") || exit 1
+      [ "$last" = "$expected" ] || exit 2
+      fm_pending_reply_sender_alive "$rec" || exit 3
+    done
+    printf "%s" "$last"
+  ' _ "$ROOT/bin/fm-pending-reply-lib.sh" "$pid" "$rec" "$expected") \
+    || fail "pending-reply identity paths failed under bare LC_CTYPE=UTF-8"
+  [ "$observed" = "$expected" ] \
+    || fail "pending-reply identity changed under caller locale (got '$observed', want '$expected')"
+  pass "pending-reply identity and sender liveness stay stable under bare LC_CTYPE=UTF-8"
+)
 
 test_recovery_reply_resolves_original() {
   local home state corr hook_log
@@ -910,6 +958,7 @@ test_failed_send_discards_undelivered_expectation() {
 test_normal_correlated_reply_resolves_once
 test_completed_turn_no_report_triggers_one_recovery
 test_recovery_attempt_is_never_reinjected
+test_pending_reply_pid_identity_is_locale_invariant
 test_recovery_reply_resolves_original
 test_second_missed_turn_escalates_once_and_stays_durable
 test_escalation_publication_failure_retries
