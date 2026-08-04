@@ -121,6 +121,7 @@ fm_dispatch_record_lines() {
     if [ "$route" = "$FM_DISPATCH_UNKNOWN" ]; then
       floor=$FM_DISPATCH_UNKNOWN
     else
+      # shellcheck disable=SC2016 # $r is a jq variable bound by --arg, not a shell one
       floor=$(_fm_dispatch_id_or_unknown "$(_fm_dispatch_query "$file" \
         '[.rules[]? | select(.route == $r) | .floor] | unique |
          if length == 1 and (.[0] | type) == "string" then .[0] else empty end' \
