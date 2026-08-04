@@ -52,9 +52,10 @@ default_branch() {
 
 # Resolve the PRIMARY checkout's current default-branch commit - the local-HEAD
 # sync target every secondmate follows. Reads the default branch *ref* rather than
-# HEAD, so even a primary stranded on a feature branch (the worktree tangle of
-# section 8) still yields the true default-branch tip instead of propagating a
-# stray feature branch to the fleet. Echoes the commit SHA, or returns 1.
+# HEAD, so even a primary stranded on a feature branch (the worktree tangle
+# fm-tangle-lib.sh classifies) still yields the true default-branch tip instead
+# of propagating a stray feature branch to the fleet. Echoes the commit SHA, or
+# returns 1.
 primary_head_commit() {
   local root=$1 default
   default=$(default_branch "$root") || return 1
