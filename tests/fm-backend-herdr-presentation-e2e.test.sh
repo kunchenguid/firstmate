@@ -142,10 +142,44 @@ if [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$ACTIVE_SEEDED_CONTROL" ] \
 fi
 before=
 [ -z "$mutation" ] || before=$(focus_snapshot || printf ambiguous/ambiguous)
-if out=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"); then
+# Lease acquisition now precedes endpoint creation, so arm the post-create
+# abort at the first worktree-entry command instead. Pane-death cleanup has no
+# explicit pane-close call to audit, so record its first confirmed absence as
+# the logical close while preserving the real before/after focus snapshots.
+abort_task=
+abort_cleanup_task=
+if [ "${1:-} ${2:-}" = "pane run" ] && [ "${4:-}" != "${4#cd }" ] \
+   && [ -d "$POST_CREATE_ABORT_CONTROL" ]; then
+  for task_dir in "$POST_CREATE_ABORT_CONTROL"/abort-*; do
+    [ -d "$task_dir" ] || continue
+    [ "${3:-}" = "$(cat "$task_dir/task-pane" 2>/dev/null || true)" ] || continue
+    abort_task=$task_dir
+    break
+  done
+fi
+if [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$POST_CREATE_ABORT_CONTROL" ]; then
+  for task_dir in "$POST_CREATE_ABORT_CONTROL"/abort-*; do
+    [ -e "$task_dir/armed" ] || continue
+    [ "${3:-}" = "$(cat "$task_dir/task-pane" 2>/dev/null || true)" ] || continue
+    abort_cleanup_task=$task_dir
+    before=$(focus_snapshot || printf ambiguous/ambiguous)
+    break
+  done
+fi
+if [ -n "$abort_task" ]; then
+  : > "$abort_task/armed"
+  out=
+  status=97
+elif out=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"); then
   status=0
 else
   status=$?
+fi
+if [ -n "$abort_cleanup_task" ] && [ "$status" -ne 0 ] \
+   && [ ! -e "$abort_cleanup_task/close-audited" ]; then
+  : > "$abort_cleanup_task/close-audited"
+  mutation=pane-close
+  mutation_target=${3:-}
 fi
 if [ "$status" -eq 0 ] && [ "$mutation" = workspace-create ]; then
   case "$label" in
@@ -207,12 +241,25 @@ set -u
   done
   printf '\n'
 } >> "$TREEHOUSE_CALL_LOG"
-if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
-  # Arm a POST-CREATE abort: `treehouse get --lease` "succeeds" (exit 0) but
-  # leases nothing (no path on stdout), so fm-spawn refuses to launch a task
-  # with no worktree AFTER the Herdr pane is created - the armed failure this
-  # fixture verifies the Herdr cleanup handles.
-  exit 0
+# The abort fixture needs a non-empty lease path before endpoint creation, but
+# must stay independent of real Treehouse setup latency so the fresh pane has a
+# deterministic cleanup shape. Every other case still uses real Treehouse.
+if [ -d "$POST_CREATE_ABORT_CONTROL" ]; then
+  case "${1:-}" in
+    get)
+      holder=
+      previous=
+      for arg in "$@"; do
+        if [ "$previous" = --lease-holder ]; then holder=$arg; break; fi
+        previous=$arg
+      done
+      leased="$POST_CREATE_ABORT_CONTROL/${holder:?missing lease holder}/leased-worktree"
+      mkdir -p "$leased"
+      printf '%s\n' "$leased"
+      exit 0
+      ;;
+    return) exit 0 ;;
+  esac
 fi
 exec "$REAL_TREEHOUSE" "$@"
 SH
@@ -750,10 +797,10 @@ spawn_task abort-b "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/abort-b.out" 2> "$TMP
 ABORT_B_PID=$!
 if wait "$ABORT_A_PID"; then fail "post-create abort fixture A unexpectedly succeeded"; fi
 if wait "$ABORT_B_PID"; then fail "post-create abort fixture B unexpectedly succeeded"; fi
-grep -F "reported no task worktree" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
-  || fail "post-create abort fixture A did not reach the armed worktree-lease failure"
-grep -F "reported no task worktree" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
-  || fail "post-create abort fixture B did not reach the armed worktree-lease failure"
+[ -e "$POST_CREATE_ABORT_CONTROL/abort-a/armed" ] \
+  || fail "post-create abort fixture A did not reach the armed worktree-entry failure"
+[ -e "$POST_CREATE_ABORT_CONTROL/abort-b/armed" ] \
+  || fail "post-create abort fixture B did not reach the armed worktree-entry failure"
 ABORT_A_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/task-pane")
 ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")
 ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
@@ -1127,13 +1174,17 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
       || fail "$RESTART_ID repeated reclaim changed workspace identity"
     [ "$NEW_RESTART_PANE" != "$PRIOR_RESTART_PANE" ] \
       || fail "$RESTART_ID repeated reclaim reused the prior husk pane"
-    "$REAL_TREEHOUSE" return --force "$PRIOR_RESTART_WT" >/dev/null 2>&1 || true
+    # A leased relaunch reuses the same worktree, so never return the prior
+    # path when it is also the currently bound lease.
+    if [ "$PRIOR_RESTART_WT" != "$NEW_RESTART_WT" ]; then
+      "$REAL_TREEHOUSE" return --force "$PRIOR_RESTART_WT" >/dev/null 2>&1 || true
+    fi
   fi
 
   teardown_task "$RESTART_ID" "$HOME_DIR" > "$TMP_ROOT/$RESTART_ID-teardown.out" 2> "$TMP_ROOT/$RESTART_ID-teardown.err" \
     || fail "$RESTART_ID teardown after reclaim failed: $(cat "$TMP_ROOT/$RESTART_ID-teardown.err")"
   [ ! -e "$HOME_DIR/state/$RESTART_ID.herdr-presentation" ] \
-    || fail "$RESTART_ID exact reclaimed teardown did not retire its journal"
+    || fail "$RESTART_ID exact reclaimed teardown did not retire its journal: $(cat "$TMP_ROOT/$RESTART_ID-teardown.err")"
   "$REAL_TREEHOUSE" return --force "$OLD_RESTART_WT" >/dev/null 2>&1 || true
   "$REAL_TREEHOUSE" return --force "$NEW_RESTART_WT" >/dev/null 2>&1 || true
 done

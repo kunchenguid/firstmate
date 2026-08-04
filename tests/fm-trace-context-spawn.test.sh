@@ -79,12 +79,20 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   # fm-spawn LEASES the task worktree in-process: `treehouse get --lease
-  # --lease-holder <id>` prints the leased path. The pane settles there, which
-  # in these cases is FM_FAKE_PANE_PATH; any other subcommand exits silently.
+  # --lease-holder <id>` prints the leased path. On relaunch, `status --json`
+  # proves that the recorded path is still leased to the same task. The pane
+  # settles there, which in these cases is FM_FAKE_PANE_PATH.
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
-[ "${1:-}" = get ] && printf '%s\n' "${FM_FAKE_PANE_PATH:?FM_FAKE_PANE_PATH unset}"
+case "${1:-}" in
+  get) printf '%s\n' "${FM_FAKE_PANE_PATH:?FM_FAKE_PANE_PATH unset}" ;;
+  status)
+    node -e 'console.log(JSON.stringify([{path: process.argv[1], status: "leased", lease_holder: process.argv[2]}]))' \
+      "${FM_FAKE_PANE_PATH:?FM_FAKE_PANE_PATH unset}" \
+      "${FM_FAKE_LEASE_HOLDER:?FM_FAKE_LEASE_HOLDER unset}"
+    ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
@@ -123,6 +131,7 @@ run_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_FAKE_LEASE_HOLDER="$1" \
     FM_FAKE_TRACEPARENT_SEND_FAIL="${FM_FAKE_TRACEPARENT_SEND_FAIL:-0}" \
     FM_FAKE_TRACEPARENT_SEND_UNSAFE="${FM_FAKE_TRACEPARENT_SEND_UNSAFE:-0}" \
     FM_FAKE_TRACE_METADATA_APPEND_FAIL="${FM_FAKE_TRACE_METADATA_APPEND_FAIL:-0}" \
@@ -141,6 +150,7 @@ run_spawn_tc() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_FAKE_LEASE_HOLDER="$1" \
     FM_FAKE_LAUNCH_LOG="$launchlog" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" --mode no-mistakes --yolo off 2>&1
 }

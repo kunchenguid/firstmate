@@ -47,6 +47,9 @@
 # Projected closes share the presentation-order lock, refuse to close the
 # captain's active tab, and restore the exact response-derived pre-close tab
 # if Herdr's last-pane cleanup focuses an unrelated neighboring workspace.
+# Before returning a Herdr worktree, teardown interrupts any remaining agent,
+# moves the pane shell back to the project, and verifies that cwd twice so
+# treehouse cannot kill the pane before the focus-preserving close owns it.
 # Secondmates (kind=secondmate in meta) are retired explicitly. Normal
 # teardown refuses while their home has in-flight crewmate meta files; --force
 # is the approved discard path that prevalidates child removal targets, discards
@@ -1453,6 +1456,49 @@ FMEOF
   return 1
 }
 
+# Move a Herdr pane's shell out of the leased worktree before treehouse return.
+# A direct-root pane may die on interrupt, in which case exact focus restoration
+# turns that endpoint removal into the same safe handoff.
+teardown_herdr_leave_worktree() {  # <target> <project>
+  local target=$1 project=$2 quoted project_real current current_real candidate attempt
+  local session pane before presence
+  project_real=$(CDPATH='' cd -- "$project" 2>/dev/null && pwd -P) || return 1
+  fm_backend_herdr_parse_target "$target" || return 1
+  session=$FM_BACKEND_HERDR_SESSION
+  pane=$FM_BACKEND_HERDR_PANE
+  before=$(fm_backend_herdr_projection_focus_snapshot "$session") || return 1
+  printf -v quoted '%q' "$project_real"
+  candidate=
+  for attempt in $(seq 1 50); do
+    if [ "$(( (attempt - 1) % 5 ))" -eq 0 ]; then
+      fm_backend_herdr_send_key "$target" C-c || true
+      sleep 0.1
+      presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane")
+      if [ "$presence" = dead ]; then
+        fm_backend_herdr_projection_focus_restore "$session" "$before" "pre-return interrupt" || return 1
+        return 0
+      fi
+      [ "$presence" = present ] || return 1
+      fm_backend_herdr_send_text_line "$target" "cd $quoted" || continue
+    fi
+    current=$(fm_backend_herdr_current_path "$target" || true)
+    current_real=
+    if [ -n "$current" ]; then
+      current_real=$(CDPATH='' cd -- "$current" 2>/dev/null && pwd -P) || current_real=
+    fi
+    if [ "$current_real" = "$project_real" ]; then
+      if [ "$candidate" = "$current_real" ]; then
+        return 0
+      fi
+      candidate=$current_real
+    else
+      candidate=
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
 teardown_herdr_require_prerequisites() {  # <task-id>
   local task_id=$1 prerequisite
   if ! fm_backend_source herdr; then
@@ -1465,6 +1511,11 @@ teardown_herdr_require_prerequisites() {  # <task-id>
     fm_backend_herdr_workspace_presence_state \
     fm_backend_herdr_endpoint_confirmed_gone \
     fm_backend_herdr_explicit_close_pane_confirmed \
+    fm_backend_herdr_projection_focus_snapshot \
+    fm_backend_herdr_projection_focus_restore \
+    fm_backend_herdr_send_key \
+    fm_backend_herdr_send_text_line \
+    fm_backend_herdr_current_path \
     fm_backend_herdr_presentation_session_lock_path; do
     if ! declare -F "$prerequisite" >/dev/null 2>&1; then
       echo "error: herdr teardown prerequisites are unavailable for $task_id; nothing was changed - restore the adapter and rerun teardown" >&2
@@ -1492,6 +1543,7 @@ teardown_herdr_preflight_target() {  # <target> <task-id>
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE
   presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane")
+  TEARDOWN_HERDR_PANE_PRESENCE=$presence
   case "$presence" in
     dead|present) ;;
     *)
@@ -1771,11 +1823,33 @@ fi
 # refuses before any destructive step.
 TEARDOWN_HERDR_SESSION=
 TEARDOWN_HERDR_PANE=
+TEARDOWN_HERDR_PANE_PRESENCE=
 if [ "$BACKEND" = herdr ]; then
   teardown_herdr_preflight_target "$T" "$ID" || exit 1
   fm_backend_herdr_parse_target "$T" || exit 1
   TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
+fi
+
+HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
+HERDR_PRESENTATION_RETIRE_CANDIDATE=0
+HERDR_PRESENTATION_SESSION=
+HERDR_PRESENTATION_PANE=
+if [ "$BACKEND" = herdr ] \
+   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
+  fm_backend_source herdr || true
+  HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
+  HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
+  HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
+  if [ -n "$HERDR_PRESENTATION_SESSION" ] \
+     && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
+     && [ -n "$HERDR_PRESENTATION_PANE" ] \
+     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
+     && fm_backend_herdr_projection_endpoint_matches_journal \
+       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
+       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
+    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
+  fi
 fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
@@ -1815,31 +1889,15 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
+  if [ "$BACKEND" = herdr ] && [ "$TEARDOWN_HERDR_PANE_PRESENCE" = present ] \
+     && ! teardown_herdr_leave_worktree "$T" "$PROJ"; then
+    echo "error: herdr pane did not leave worktree $WT before return; teardown aborted" >&2
+    exit 1
+  fi
   teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }
-fi
-
-HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
-HERDR_PRESENTATION_RETIRE_CANDIDATE=0
-HERDR_PRESENTATION_SESSION=
-HERDR_PRESENTATION_PANE=
-if [ "$BACKEND" = herdr ] \
-   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
-  fm_backend_source herdr || true
-  HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
-  HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
-  HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
-  if [ -n "$HERDR_PRESENTATION_SESSION" ] \
-     && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
-     && [ -n "$HERDR_PRESENTATION_PANE" ] \
-     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
-     && fm_backend_herdr_projection_endpoint_matches_journal \
-       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
-       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
-    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
-  fi
 fi
 
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then

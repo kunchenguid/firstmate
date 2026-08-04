@@ -1374,6 +1374,9 @@ case "\${1:-} \${2:-}" in
   "pane close")
     : > "\${FM_FAKE_HERDR_CLOSED:?}"
     ;;
+  "pane run")
+    : > "$case_dir/left-worktree"
+    ;;
   "pane get")
     if [ "\${FM_FAKE_HERDR_PANE_GET_GARBAGE:-0}" = 1 ]; then
       printf '%s\n' 'not-json'
@@ -1383,7 +1386,11 @@ case "\${1:-} \${2:-}" in
       printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
       exit 1
     fi
-    printf '%s\n' '{"result":{"pane":{"pane_id":"wG:pQ","tab_id":"wG:tQ","workspace_id":"wG"}}}'
+    if [ -e "$case_dir/left-worktree" ]; then
+      printf '%s\n' '{"result":{"pane":{"pane_id":"wG:pQ","tab_id":"wG:tQ","workspace_id":"wG","foreground_cwd":"$case_dir/project"}}}'
+    else
+      printf '%s\n' '{"result":{"pane":{"pane_id":"wG:pQ","tab_id":"wG:tQ","workspace_id":"wG","foreground_cwd":"$case_dir/wt"}}}'
+    fi
     ;;
   "agent get")
     printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
@@ -1784,6 +1791,9 @@ case "${1:-} ${2:-}" in
     fi
     : > "${FM_FAKE_HERDR_CLOSED:?}"
     ;;
+  "pane run")
+    : > "${FM_FAKE_HERDR_LEFT_WORKTREE:?}"
+    ;;
   "pane get")
     if [ -e "${FM_FAKE_HERDR_CLOSED:?}" ]; then
       if [ "${FM_FAKE_HERDR_PRESENCE_UNKNOWN:-0}" = 1 ]; then
@@ -1793,7 +1803,12 @@ case "${1:-} ${2:-}" in
       printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
       exit 1
     fi
-    printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2","tab_id":"w1:t2","workspace_id":"w1"}}}'
+    if [ -e "${FM_FAKE_HERDR_LEFT_WORKTREE:?}" ]; then
+      printf '{"result":{"pane":{"pane_id":"w1:p2","tab_id":"w1:t2","workspace_id":"w1","foreground_cwd":"%s"}}}\n' \
+        "${FM_FAKE_HERDR_PROJECT:?}"
+    else
+      printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2","tab_id":"w1:t2","workspace_id":"w1"}}}'
+    fi
     ;;
   "tab get")
     printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t2","workspace_id":"w2"}}}'
@@ -1819,6 +1834,7 @@ test_herdr_projection_teardown_retires_journal_only_after_confirmed_close() {
   log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
 
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+    FM_FAKE_HERDR_LEFT_WORKTREE="$case_dir/left-worktree" FM_FAKE_HERDR_PROJECT="$case_dir/project" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "herdr-projection-confirmed-close: forced teardown failed"
   [ ! -e "$case_dir/state/task-x1.herdr-presentation" ] \
@@ -1838,7 +1854,9 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
   log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
 
   local rc=0
-  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" FM_FAKE_HERDR_PRESENCE_UNKNOWN=1 \
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+    FM_FAKE_HERDR_LEFT_WORKTREE="$case_dir/left-worktree" FM_FAKE_HERDR_PROJECT="$case_dir/project" \
+    FM_FAKE_HERDR_PRESENCE_UNKNOWN=1 \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   [ "$rc" -ne 0 ] \
     || fail "herdr-projection-unconfirmed-close: teardown reported success after an unknown post-close presence read"
