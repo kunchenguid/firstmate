@@ -16,7 +16,8 @@
 #     those sections are preserved as unstructured records.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
 #     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
-#     state, source, detail, and raw line separately.
+#     state, source, detail, liveness, and raw line separately. Liveness is
+#     alive, dead, unknown, or null when no observation was made.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
 #     hints.open_decisions is the keyed open-decision set returned by
@@ -96,17 +97,14 @@ last_nonempty_line() {  # <file>
 }
 
 crew_state_json() {  # <id>
-  local id=$1 raw rest state source detail sep
-  raw=$(
-    FM_ROOT_OVERRIDE="$FM_ROOT" \
-      FM_HOME="$FM_HOME" \
-      FM_STATE_OVERRIDE="$STATE" \
-      FM_DATA_OVERRIDE="$DATA" \
-      FM_PROJECTS_OVERRIDE="$PROJECTS" \
-      FM_CONFIG_OVERRIDE="$CONFIG" \
-      "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null || true
-  )
-  raw=$(printf '%s\n' "$raw" | head -1)
+  local id=$1 raw rest state source detail sep liveness
+  raw=$(FM_ROOT_OVERRIDE="$FM_ROOT" \
+    FM_HOME="$FM_HOME" \
+    FM_STATE_OVERRIDE="$STATE" \
+    FM_DATA_OVERRIDE="$DATA" \
+    FM_PROJECTS_OVERRIDE="$PROJECTS" \
+    FM_CONFIG_OVERRIDE="$CONFIG" \
+    crew_state_line "$id")
   sep=' · '
   state=unknown
   source=none
@@ -122,8 +120,13 @@ crew_state_json() {  # <id>
       esac
       ;;
   esac
-  jq -n --arg raw "$raw" --arg state "$state" --arg source "$source" --arg detail "$detail" \
-    '{state:$state,source:$source,detail:$detail,raw:$raw}'
+  liveness=$(crew_state_liveness_verdict "$raw")
+  case "$liveness" in
+    alive|dead|unknown|'') ;;
+    *) liveness=unknown ;;
+  esac
+  jq -n --arg raw "$raw" --arg state "$state" --arg source "$source" --arg detail "$detail" --arg liveness "$liveness" \
+    '{state:$state,source:$source,detail:$detail,liveness:($liveness | if . == "" then null else . end),raw:$raw}'
 }
 
 status_event_json() {  # <status-log>
@@ -273,7 +276,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
-  local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
+  local last_event_raw current_state current_source current_liveness current_activity_usable pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
   for meta in "$STATE"/*.meta; do
@@ -308,6 +311,12 @@ task_json_lines() {
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
     current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
     current_source=$(printf '%s' "$current_json" | jq -r '.source // ""')
+    current_liveness=$(printf '%s' "$current_json" | jq -r '.liveness // ""')
+    case "$current_liveness" in
+      alive|'') current_activity_usable=1 ;;
+      dead|unknown) current_activity_usable=0 ;;
+      *) current_activity_usable=0 ;;
+    esac
 
     # Durable keyed open-decision set: fold the WHOLE status stream
     # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
@@ -317,7 +326,9 @@ task_json_lines() {
     # crewmate has provably moved past. Two lifecycle signals clear it, neither of which
     # reads any report content:
     #   - a live activity read (run-step or busy pane) that is working/done, so a
-    #     crewmate that resumed past a gate is not still reported as parked; and
+    #     crewmate that resumed past a gate is not still reported as parked. A
+    #     dead or unknown liveness observation is not usable activity evidence;
+    #     a line with no observation keeps the historical behavior; and
     #   - a TERMINAL done/failed state on a single-owner task (scout or ship), whose
     #     deliverable is its report or PR, so a COMPLETED scout surfaces only as a
     #     report POINTER, never as a reopened pending decision.
@@ -329,6 +340,7 @@ task_json_lines() {
     open_decisions_tsv=$(status_open_decisions "$status_log")
     if [ "$kind" != secondmate ] && \
        { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
+           && [ "$current_activity_usable" = 1 ] \
            && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
          || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
       open_decisions_tsv=""

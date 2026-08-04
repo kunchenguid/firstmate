@@ -17,9 +17,9 @@
 # working/paused wrappers). It is NOT a pure status-file read: it reuses
 # bin/fm-crew-state.sh, which may make bounded no-mistakes and GitHub PR-state
 # calls, to decide whether a crewmate that just stopped its turn or went stale is
-# working, deliberately paused, or neither. Callers run it ONLY on no-verb signal
-# handling and first sighting of a stale hash, never on every wake, so the
-# per-wake triage stays cheap.
+# working, deliberately paused, or neither. Signal and stale callers keep those
+# reads bounded to the paths that need them; heartbeat readers inspect the fleet
+# only on their backoff cadence.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -321,8 +321,9 @@ signal_reason_is_actionable() {  # <file> ...
 #   paused  - the crewmate's authoritative current state is a declared external-wait
 #             pause (paused:), or stale-pane triage supplied that durable pause
 #             alongside a finished run-step, so the pane is EXPECTED to idle;
-#   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
-#             torn-down/unknown crewmate, or an unreadable verdict).
+#   none    - neither, so the wake must surface (including dead and unknown
+#             liveness, a stopped/finished/parked/failed/torn-down crewmate, or
+#             an unreadable verdict).
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
 # authoritatively (not the status log) keeps run-step precedence: a crewmate that
 # appended paused: but then STARTED a run reports working, never paused. The optional
@@ -332,14 +333,79 @@ signal_reason_is_actionable() {  # <file> ...
 # event explains why its pane is now expected to idle. Failed, parked, unknown, and
 # actively-working run-steps never yield to that event.
 # NOT a pure local read: fm-crew-state.sh may make bounded no-mistakes and GitHub
-# PR-state calls, so callers run it only on no-verb signal and first-sighting
-# stale paths, never every wake.
+# PR-state calls, so signal and stale callers run it only on no-verb signal and
+# first-sighting stale paths. Heartbeat callers use it only on their backoff
+# cadence.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
+crew_state_line() {  # <id>
+  local line
+  [ -n "$1" ] || return 0
+  line=$("$FM_CREW_STATE_BIN" "$1" 2>/dev/null) || true
+  printf '%s\n' "$line" | head -1
+}
+
+# Parse the optional presence-only liveness observation from a current-state
+# line. This boundary has exactly three verdicts: alive, dead, and unknown.
+# An unrecognized value in an explicit liveness field is malformed evidence, so
+# it becomes unknown; a line with no liveness field remains empty for backward
+# compatibility and keeps its previous classification.
+crew_state_liveness_verdict() {  # <current-state-line>
+  local rest=$1 field value label sep=' · '
+  while :; do
+    case "$rest" in
+      *"$sep"*) field=${rest%%"$sep"*}; rest=${rest#*"$sep"} ;;
+      *) field=$rest; rest= ;;
+    esac
+    label=${field%%:*}
+    label=${label#"${label%%[![:space:]]*}"}
+    label=${label%"${label##*[![:space:]]}"}
+    label=$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]')
+    if [ "$label" = liveness ]; then
+      case "$field" in
+        liveness:\ *)
+          value=${field#liveness: }
+          value=${value%% *}
+          case "$value" in
+            alive|dead|unknown) printf '%s' "$value" ;;
+            *) printf 'unknown' ;;
+          esac
+          ;;
+        *) printf 'unknown' ;;
+      esac
+      return 0
+    fi
+    [ -n "$rest" ] || return 0
+  done
+}
+
+# Print task, verdict, and current-state line for each ship carrying a liveness
+# observation. Callers explicitly decide alive/dead/unknown actionability; a
+# line with no observation is omitted so its existing behavior is unchanged.
+scan_crew_liveness_observations() {  # <state-dir>
+  local state=$1 meta task kind line verdict
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || continue
+    kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ -n "$kind" ] || kind=ship
+    [ "$kind" = ship ] || continue
+    task=$(basename "$meta"); task=${task%.meta}
+    line=$(crew_state_line "$task")
+    verdict=$(crew_state_liveness_verdict "$line")
+    [ -n "$verdict" ] || continue
+    printf '%s\t%s\t%s\n' "$task" "$verdict" "$line"
+  done
+}
+
 crew_absorb_class() {  # <id> [declared-pause-status-line]
-  local id=$1 declared_pause=${2:-} line state src
+  local id=$1 declared_pause=${2:-} line state src liveness
   [ -n "$id" ] || { printf 'none'; return; }
-  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  line=$(crew_state_line "$id")
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
+  liveness=$(crew_state_liveness_verdict "$line")
+  case "$liveness" in
+    alive|'') ;;
+    dead|unknown) printf 'none'; return ;;
+  esac
   state=${line#state: }; state=${state%% *}
   if [ "$state" = paused ]; then printf 'paused'; return; fi
   src=${line#*source: }; src=${src%% *}
@@ -361,14 +427,26 @@ crew_absorb_class() {  # <id> [declared-pause-status-line]
 # status log so a pre-validation captain-relevant line does not override an active
 # run. See crew_absorb_class for the exact working/paused/none decision.
 crew_is_provably_working() {  # <id>
-  [ "$(crew_absorb_class "$1")" = working ]
+  # This predicate needs only prove-or-surface; `none` deliberately groups dead
+  # and unknown on the surface side because neither is positive working evidence.
+  case "$(crew_absorb_class "$1")" in
+    working) return 0 ;;
+    paused|none) return 1 ;;
+    *) return 1 ;;
+  esac
 }
 
 # 0 if crewmate <id>'s authoritative current state is a declared external-wait pause.
 # The stale path absorbs such a crewmate (on a long re-surface cadence) instead of
 # escalating a possible wedge.
 crew_is_paused() {  # <id>
-  [ "$(crew_absorb_class "$1")" = paused ]
+  # This predicate needs only pause-or-not; dead and unknown arrive as `none`
+  # and stay distinct from the one absorbable paused outcome.
+  case "$(crew_absorb_class "$1")" in
+    paused) return 0 ;;
+    working|none) return 1 ;;
+    *) return 1 ;;
+  esac
 }
 
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably
@@ -377,7 +455,7 @@ crew_is_paused() {  # <id>
 # task ids by stripping the .status / .turn-ended suffix; a no-verb wake with nothing
 # provably working must surface, so an empty/unresolvable list returns 1.
 signal_crew_provably_working() {  # <file> ...
-  local f base task seen=""
+  local f base task seen="" class
   for f in "$@"; do
     base=${f##*/}
     case "$base" in
@@ -388,7 +466,14 @@ signal_crew_provably_working() {  # <file> ...
     [ -n "$task" ] || continue
     case " $seen " in *" $task "*) continue ;; esac
     seen="$seen $task"
-    crew_is_provably_working "$task" || return 1
+    class=$(crew_absorb_class "$task")
+    # A signal needs only absorb-or-surface; `none` includes dead and unknown,
+    # both of which must surface rather than be treated as assume-fine.
+    case "$class" in
+      working) ;;
+      paused|none) return 1 ;;
+      *) return 1 ;;
+    esac
   done
   [ -n "$seen" ] || return 1
   return 0

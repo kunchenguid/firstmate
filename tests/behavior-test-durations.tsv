@@ -54,6 +54,7 @@
 187	tests/fm-lock.test.sh
 1686	tests/fm-macos-permissions.test.sh
 1560	tests/fm-no-mistakes-reattach.test.sh
+3428	tests/fm-nm-step-liveness.test.sh
 10	tests/fm-pi-primary-live-e2e.test.sh
 80	tests/fm-pi-primary-types.test.sh
 3170	tests/fm-pi-watch-extension.test.sh

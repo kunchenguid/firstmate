@@ -20,7 +20,7 @@ For stale-pane triage only, that durable declaration also explains the expected 
 Pause cadence markers remain in force while the latest durable status still declares the pause and are cleared only after that status resumes, so every continuously declared pause still re-surfaces on the bounded long cadence.
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or busy pane outranks an old captain-relevant status-log line left behind before validation.
-No-change heartbeats are also benign.
+Heartbeats are benign only when the fleet scan finds neither an unsurfaced captain-relevant status nor a `dead` or `unknown` command-step liveness observation.
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
 At each drain boundary, `fm-wake-drain.sh` first intakes durable Lavish answers, then drains queued wakes and runs the same liveness guard as the supervision scripts, so unreceipted answers recover and a lapsed watcher chain surfaces even on a turn that only drains and handles queued wakes.
 Routine watcher polling, supervision no-ops, elapsed waiting time, and absorbed benign wakes stay silent.

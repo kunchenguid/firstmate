@@ -269,6 +269,10 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson candidate_prs "$CANDIDATE_PRS" '
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
+  def liveness_unhealthy:
+    if . == null or . == "alive" then false
+    elif . == "dead" or . == "unknown" then true
+    else true end;
   ($fields | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $fl
   | (($fl | index("bodies")) != null) as $f_bodies
   | (($fl | index("paths")) != null) as $f_paths
@@ -288,11 +292,15 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | (.tasks | map(.id)) as $live_ids
   | ($live_ids + $done_ids) as $rel_ids
   | ([ .tasks[]
-       | select(.endpoint.exists == false or .endpoint.agent_alive == "dead")
-       | {id, backend, target:(.endpoint.target // "-"), exists:.endpoint.exists, agent:.endpoint.agent_alive} ]) as $unhealthy_all
+       | select(.endpoint.exists == false
+                or .endpoint.agent_alive == "dead"
+                or (.current_state.liveness | liveness_unhealthy))
+       | {id, backend, target:(.endpoint.target // "-"), exists:.endpoint.exists,
+          agent:.endpoint.agent_alive, liveness:(.current_state.liveness // null)} ]) as $unhealthy_all
   | ([ .tasks[] | {
         id, kind,
         state: .current_state.state,
+        liveness: (.current_state.liveness // null),
         doing: ((.current_state.detail // "") as $d
                 | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
       } ]) as $in_flight_all

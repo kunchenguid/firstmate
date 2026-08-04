@@ -63,6 +63,7 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-supervise-daemon.sh` | Presence-gated away-mode sub-supervisor: self-handle routine wakes, complete native tasks or inject compatibility digests |
 | `fm-crew-state.sh`       | Print one deterministic current-state line for a crewmate                            |
 | `fm-no-mistakes-reattach.sh` | Retry one home-scoped existing run after its transient reconciliation timeout    |
+| `fm-nm-step-liveness.sh` | Read a no-mistakes step's processes as alive, stalled, dead, or unknown              |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
 | `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for origin pulls and local secondmate syncs       |

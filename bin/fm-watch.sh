@@ -42,7 +42,8 @@
 #   auto-reap: <out>       stale crashed-spawn acquisition recovery made progress
 #                          or refused and retained state for operator inspection
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
-#                          status, unless afk is active
+#                          status or a dead/unknown command-step liveness reading,
+#                          unless afk is active
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -430,6 +431,7 @@ pause_state_class() {  # <window> <task>
   class=$(crew_absorb_class "$task" "$last")
   case "$class" in
     paused) date +%s > "$recheck_file" ;;
+    working|none) rm -f "$recheck_file" ;;
     *) rm -f "$recheck_file" ;;
   esac
   printf '%s' "$class"
@@ -779,22 +781,27 @@ mark_all_captain_relevant_surfaced() {
   done < <(scan_captain_relevant_statuses "$STATE")
 }
 
-# Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
-# any captain-relevant status has NOT already been surfaced to firstmate (its
-# content differs from the .hb-surfaced-<task> marker). Pure detect, no side
-# effects: the caller enqueues first, then marks surfaced. Because every
-# captain-relevant signal/stale already marks itself surfaced when it wakes
-# firstmate, this normally finds nothing and the heartbeat is absorbed; it
-# surfaces only a captain-relevant status the per-wake path absorbed by mistake -
-# the fail-safe backstop.
+# Heartbeat fleet-scan (the always-on twin of the daemon's catch-all). Status
+# events retain their surfaced-marker dedup. Command-step liveness is handled as
+# three explicit states: alive is healthy, while dead and unknown both surface
+# because neither may be absorbed as positive evidence. A line with no liveness
+# observation keeps its prior behavior.
 heartbeat_scan_finds_actionable() {
-  local f task last surfaced
+  local f task last surfaced verdict
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
     surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
     [ "$surfaced" = "$last" ] && continue
     return 0
   done < <(scan_captain_relevant_statuses "$STATE")
+  while IFS=$(printf '\t') read -r task verdict _; do
+    [ -n "$task" ] || continue
+    case "$verdict" in
+      alive) ;;
+      dead|unknown) return 0 ;;
+      *) return 0 ;;
+    esac
+  done < <(scan_crew_liveness_observations "$STATE")
   return 1
 }
 
@@ -1120,6 +1127,9 @@ EOF
         working)
           clear_pause_state "$w"
           ;;
+        none)
+          clear_pause_tracking "$w"
+          ;;
         *)
           clear_pause_tracking "$w"
           ;;
@@ -1160,6 +1170,7 @@ EOF
         if [ "$kind" = secondmate ]; then
           case "$(pause_state_class "$w" "$task")" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;
+            working|none) clear_pause_tracking "$w" ;;
             *)      clear_pause_tracking "$w" ;;
           esac
         elif afk_present; then
@@ -1233,6 +1244,9 @@ EOF
               paused)
                 handle_paused_stale "$w" "$task" "$h"
                 ;;
+              none)
+                surface_nonterminal_stale "$w" "$h"
+                ;;
               *)
                 surface_nonterminal_stale "$w" "$h"
                 ;;
@@ -1246,6 +1260,7 @@ EOF
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
+                none)    surface_nonterminal_stale "$w" "$h" ;;
                 *)       surface_nonterminal_stale "$w" "$h" ;;
               esac
             else
@@ -1268,6 +1283,7 @@ EOF
       if ! afk_present && status_is_paused "$(last_status_line "$STATE/$task.status")" && [ "$window_busy" != 1 ]; then
         case "$(pause_state_class "$w" "$task")" in
           paused) handle_paused_stale "$w" "$task" "$h" ;;
+          working|none) clear_pause_tracking "$w" ;;
           *)      clear_pause_tracking "$w" ;;
         esac
       else
@@ -1276,7 +1292,7 @@ EOF
     fi
   done < <(recorded_windows)
 
-  # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
+  # Heartbeat: the watcher runs a bounded fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
   # no-change heartbeat (idle fleet) up to HEARTBEAT_MAX, and resets on any
   # surfaced non-heartbeat wake.
@@ -1285,11 +1301,11 @@ EOF
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if marker_due "$STATE/.last-heartbeat" "$hb" "watcher heartbeat"; then
-    # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
-    # turns up a captain-relevant status the per-wake path missed. Absorb the
-    # no-change case (advance the schedule and back off exactly as wake() would,
-    # without exiting); the away-mode daemon, when present, owns triage and wants
-    # every heartbeat.
+    # Triage: in always-on mode a heartbeat is benign unless the fleet-scan turns
+    # up a captain-relevant status or a dead/unknown command-step liveness reading.
+    # Unknown is grouped with actionable here because a heartbeat needs only the
+    # binary absorb/surface decision, and unknown is not proof of health. The
+    # away-mode daemon, when present, owns triage and wants every heartbeat.
     if afk_present; then
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       safe_touch_marker_or_log "$STATE/.last-heartbeat" "watcher heartbeat" || true

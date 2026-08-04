@@ -69,10 +69,29 @@ async function fixture(name) {
 }
 
 function processGroupMembers(pgid) {
-  const output = execFileSync('ps', ['-axo', 'pid=,pgid=,command='], {
-    encoding: 'utf8',
-    maxBuffer: 4 * 1024 * 1024,
-  });
+  let output;
+  try {
+    // Filter in ps so a large process table cannot overflow execFileSync's default 1 MiB maxBuffer.
+    output = execFileSync(
+      'ps',
+      ['-o', 'pid=,pgid=,command=', '-g', String(pgid)],
+      {
+        encoding: 'utf8',
+        maxBuffer: 8 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+  } catch (error) {
+    if (
+      error.status === 1
+      && error.signal === null
+      && error.stdout === ''
+      && error.stderr === ''
+    ) {
+      return [];
+    }
+    throw error;
+  }
   return output
     .trim()
     .split('\n')
