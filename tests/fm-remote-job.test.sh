@@ -128,8 +128,13 @@ rm -f "$NVM_ROOT/alias/default"
 fm_remote_job_compose_operator_path "$ACCOUNT_HOME" >/dev/null
 NVM_SELECTED=$(PATH="$FM_REMOTE_JOB_OPERATOR_PATH" node)
 [ "$NVM_SELECTED" = 24 ] || fail "the nvm fallback did not select the highest installed version"
+printf 'system\n' > "$NVM_ROOT/alias/default"
+fm_remote_job_compose_operator_path "$ACCOUNT_HOME" >/dev/null
+case ":$FM_REMOTE_JOB_OPERATOR_PATH:" in
+  *":$NVM_V20:"*|*":$NVM_V24:"*) fail "the composed PATH ignored nvm's system default" ;;
+esac
 printf '20\n' > "$NVM_ROOT/alias/default"
-pass "operator PATH selects nvm default with a deterministic fallback"
+pass "operator PATH honors nvm defaults with a deterministic fallback"
 
 NIX_PROFILE="$ACCOUNT_HOME/.nix-profile"
 NIX_BIN="$TMP_ROOT/nix-profile-bin"
