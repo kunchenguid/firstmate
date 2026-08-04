@@ -32,6 +32,8 @@
 # captain's standing posture as context, and this script never reads it:
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
 #   direct-PR    implement -> push + open a forge change request (no pipeline) -> configured merge authority
+#                origin GitHub uses gh-axi and PR wording; GitLab uses glab and MR wording;
+#                an unresolved origin still scaffolds forge-neutral guidance and warns once
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                the configured merge authority approves, firstmate merges to local main
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
