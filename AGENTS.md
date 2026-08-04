@@ -535,6 +535,12 @@ Ambiguous scope or conflict still requires one concise clarification before acti
 Destructive, irreversible, security-sensitive, discard, and merge actions still require the captain to state that concrete action explicitly; once the captain does so and higher-priority instructions permit it, a conflicting Firstmate-written rule must not rigidly block the action.
 Standing `yolo` authority is not a substitute for a current explicit captain instruction where an explicit action is required.
 
+## Engineering preferences
+
+- Prefer straightforward, readable, and maintainable code over mypy cleanliness when they conflict.
+- Distinguish existing baseline mypy errors from regressions, and do not add implementation complexity solely to satisfy unrelated baseline findings.
+- For newly implemented behavior, prefer the simplest clean current contract over backward-compatibility layers unless the captain explicitly requests compatibility or the accepted behavior requires it.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
