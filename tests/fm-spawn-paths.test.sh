@@ -91,11 +91,16 @@ setup_fixture() {
 # Run a single-task spawn through the fake tmux. TMUX is set (non-empty) so
 # fm-spawn takes the in-tmux branch and uses the numeric session name. A raw
 # launch command ('true ...') avoids resolving a real harness or installing hooks.
+# Defaults to --scout: this fixture exercises path resolution and session
+# targeting only, not delivery-contract behavior, and a ship spawn now requires
+# an explicit --mode/--yolo - pass extra_flags (a single word-split string) to
+# spawn ship instead, e.g. run_spawn id sid inproj '--mode direct-PR --yolo on'.
 run_spawn() {
-  local id=$1 sid=${2:-'$7'} inproj=${3:-1}
+  local id=$1 sid=${2:-'$7'} inproj=${3:-1} extra_flags=${4:---scout}
   mkdir -p "$HOME_D/data/$id"
   printf 'brief\n' > "$HOME_D/data/$id/brief.md"
   : > "$TMP_ROOT/pane-counter-$id"
+  # shellcheck disable=SC2086  # extra_flags is a deliberately word-split flag list
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_D" \
     FM_STATE_OVERRIDE="$HOME_D/state" FM_DATA_OVERRIDE="$HOME_D/data" \
     FM_PROJECTS_OVERRIDE="$HOME_D/projects" FM_CONFIG_OVERRIDE="$HOME_D/config" \
@@ -106,7 +111,7 @@ run_spawn() {
     FM_FAKE_PANE_INPROJ_SAMPLES="$inproj" \
     FM_FAKE_PANE_PROJ="$CLONE_PHYS" FM_FAKE_PANE_WT="$WT_PHYS" \
     FM_FAKE_SESSION_NAME=0 FM_FAKE_SESSION_ID="$sid" \
-    "$SPAWN" "$id" projects/alpha 'true placeholder' 2>&1
+    "$SPAWN" "$id" projects/alpha $extra_flags 'true placeholder' 2>&1
 }
 
 # Bug A: a symlinked project dir resolves to its physical path, so the wait loop
@@ -138,55 +143,56 @@ test_numeric_session_targets_by_id() {
   out=$(run_spawn "$id" '$9' 1); status=$?
   expect_code 0 "$status" "spawn into a numeric session should succeed"
   log="$TMP_ROOT/tmux-log-$id"
-  # new-window and list-windows must target the session id ($9), not "0".
-  grep -E '^new-window .*-t \$9( |$)' "$log" >/dev/null \
-    || fail "new-window did not target the session id (-t \$9)"$'\n'"$(grep '^new-window' "$log")"
-  grep -E '^list-windows .*-t \$9( |$)' "$log" >/dev/null \
-    || fail "list-windows did not target the session id (-t \$9)"$'\n'"$(grep '^list-windows' "$log")"
-  grep -E '^new-window .*-t 0( |$)' "$log" >/dev/null \
-    && fail "new-window still targets the bare numeric session name (-t 0)"
+  # bin/backends/tmux.sh's fm_backend_tmux_create_task targets the session by
+  # NAME with a trailing colon ("0:"), which tmux always parses as "this session,
+  # next free window index" - unambiguous even for a numeric name - rather than
+  # resolving a separate session id. list-windows (the pre-create duplicate
+  # check) targets the same bare name, which is a safe read-only query.
+  grep -E '^new-window .*-t 0:( |$)' "$log" >/dev/null \
+    || fail "new-window did not target the session by trailing-colon name (-t 0:)"$'\n'"$(grep '^new-window' "$log")"
+  grep -E '^list-windows -t 0( |$)' "$log" >/dev/null \
+    || fail "list-windows did not target the session name (-t 0)"$'\n'"$(grep '^list-windows' "$log")"
   # send-keys must still address the window by the session:window NAME form, and
   # the recorded meta keeps that same human-addressable form.
   grep -E '^send-keys .*-t 0:fm-'"$id"'( |$)' "$log" >/dev/null \
     || fail "send-keys did not address the window by its session:window name"
   meta="$HOME_D/state/$id.meta"
   assert_grep "window=0:fm-$id" "$meta" "meta did not record the session:window name form"
-  pass "fm-spawn: numeric session is targeted by id for window ops, name form kept for the window target"
+  pass "fm-spawn: numeric session is targeted by trailing-colon name for window creation, name form kept for the window target"
 }
 
-# Bug A, regression: the delivery mode and yolo flag must survive a symlinked
-# project. fm-project-mode.sh matches data/projects.md by the projects/<name>
-# registry key ("alpha"), so PROJ_NAME must be the logical entry name, not the
-# physical clone basename ("clone"). With a registry entry for alpha the meta must
-# record its configured mode/yolo, not the no-mistakes/off fallback.
+# Bug A, regression: PROJ_NAME (used for the delivery-contract deviation notice)
+# must be keyed on the logical projects/<name> registry entry ("alpha"), not the
+# physical clone basename ("clone"), so a symlinked project's standing posture is
+# still found. Delivery mode/yolo are now an explicit per-task decision passed to
+# fm-spawn.sh (AGENTS.md section 7), not read from data/projects.md internally,
+# so this exercises the flags surviving a symlinked project rather than a lookup.
 test_symlinked_project_preserves_mode_and_yolo() {
   local id=sym-mode-z3 out status meta
   printf -- '- alpha [direct-PR +yolo] - test project (added 2026-06-29)\n' \
     > "$HOME_D/data/projects.md"
-  out=$(run_spawn "$id" '$7' 1); status=$?
+  out=$(run_spawn "$id" '$7' 1 '--mode direct-PR --yolo on'); status=$?
   rm -f "$HOME_D/data/projects.md"
-  expect_code 0 "$status" "spawn into a symlinked project with a registry entry should succeed"
+  expect_code 0 "$status" "spawn into a symlinked project with an explicit delivery contract should succeed"
+  assert_not_contains "$out" "less rigor than the captain's standing posture" \
+    "PROJ_NAME missed the symlinked project's registry entry (spurious deviation notice)"
   meta="$HOME_D/state/$id.meta"
-  assert_grep "mode=direct-PR" "$meta" "registry lookup missed for the symlinked project (mode fell back to default)"
-  assert_grep "yolo=on" "$meta" "registry lookup missed for the symlinked project (yolo fell back to default)"
-  pass "fm-spawn: a symlinked project keeps its configured delivery mode and yolo flag"
+  assert_grep "mode=direct-PR" "$meta" "meta did not record the explicit mode"
+  assert_grep "yolo=on" "$meta" "meta did not record the explicit yolo"
+  pass "fm-spawn: a symlinked project's explicit delivery mode and yolo flag reach meta, and PROJ_NAME still matches its registry entry"
 }
 
 # The widened fm-project-mode.sh output ("<mode> <yolo> <tiered> <ci-tests>")
-# must be recorded into meta as tiering=/ci_tests=, and absent flags must default
-# off rather than corrupting yolo (the read -r MODE YOLO TIERED CITESTS width bug
-# the report warned about: a two-var read on a four-word line would merge the
-# trailing words into YOLO).
+# is now consumed by firstmate at intake, not fm-spawn.sh internally; fm-spawn.sh
+# takes explicit --tiered/--ci-tests flags (mirroring --mode/--yolo) and records
+# them into meta as tiering=/ci_tests= without corrupting mode/yolo.
 test_symlinked_project_preserves_tiered_and_ci_tests() {
   local id=sym-tier-z4 out status meta
-  printf -- '- alpha [no-mistakes +tiered +ci-tests] - test project (added 2026-06-29)\n' \
-    > "$HOME_D/data/projects.md"
-  out=$(run_spawn "$id" '$7' 1); status=$?
-  rm -f "$HOME_D/data/projects.md"
-  expect_code 0 "$status" "spawn into a symlinked project with a tiered registry entry should succeed"
+  out=$(run_spawn "$id" '$7' 1 '--mode no-mistakes --yolo off --tiered on --ci-tests on'); status=$?
+  expect_code 0 "$status" "spawn into a symlinked project with explicit tiered/ci-tests flags should succeed"
   meta="$HOME_D/state/$id.meta"
-  assert_grep "mode=no-mistakes" "$meta" "tiered registry entry lost its mode"
-  assert_grep "yolo=off" "$meta" "tiered registry entry's yolo was corrupted by the widened read"
+  assert_grep "mode=no-mistakes" "$meta" "tiered spawn lost its mode"
+  assert_grep "yolo=off" "$meta" "tiered spawn's yolo was corrupted"
   assert_grep "tiering=on" "$meta" "meta did not record tiering=on"
   assert_grep "ci_tests=on" "$meta" "meta did not record ci_tests=on"
   pass "fm-spawn: tiered/ci-tests flags are recorded in meta without corrupting mode/yolo"

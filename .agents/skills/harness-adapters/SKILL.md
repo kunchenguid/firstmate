@@ -178,7 +178,7 @@ The shared symptom is a healthy-looking pane with no work in progress, so each a
 | Exit command | `/exit` |
 | Interrupt | single Escape |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
-| Model | Sonnet by default (`bin/fm-spawn.sh` defaults `MODEL=sonnet` for the claude harness when no `--model`/dispatch profile/secondmate-harness token supplies one), regardless of the operator's global default model; an explicit `--model` (per-spawn, `config/crew-dispatch.json`, or `config/secondmate-harness`) overrides it |
+| Model | No forced default: `bin/fm-spawn.sh` passes `--model` only when a dispatch profile (`config/crew-dispatch.json`), an explicit per-spawn `--model`, or a `config/secondmate-harness` model token supplies one; absent all three, the launch omits `--model` entirely and the crewmate uses claude's own configured default. To pin every claude crewmate/secondmate to Sonnet regardless of the operator's global default, register it in `config/crew-dispatch.json` (`docs/configuration.md` "Crew dispatch profiles") rather than in code. |
 
 First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.
 After every spawn, peek the pane within about 20 seconds.

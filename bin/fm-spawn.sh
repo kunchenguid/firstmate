@@ -958,15 +958,6 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
   fi
 fi
 
-# Every claude crewmate/secondmate defaults to Sonnet regardless of the
-# operator's global default model, unless a dispatch profile or per-spawn
-# --model explicitly overrides it (config/crew-dispatch.json, this spawn's
-# --model, or the config/secondmate-harness model token resolved above all
-# win by leaving MODEL_SET/MODEL already non-empty before this point).
-if [ "$HARNESS" = claude ] && [ -z "$MODEL" ]; then
-  MODEL=sonnet
-fi
-
 secondmate_registry_value() {
   secondmate_registry_field "$DATA/secondmates.md" "$1" "$2"
 }
