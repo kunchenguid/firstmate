@@ -345,13 +345,18 @@ EOF
 # script path ending in "/omp" (mirrors fm-harness.sh's own node/python/bun
 # bare-interpreter args check). Fails closed (false) on any read failure.
 fm_backend_tmux_bun_child_is_omp() {  # <target>
-  local target=$1 pane_pid args
+  local target=$1 pane_pid child_pid args
   pane_pid=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null) || return 1
   case "$pane_pid" in ''|*[!0-9]*) return 1 ;; esac
-  args=$(ps -o args= --ppid "$pane_pid" 2>/dev/null) || return 1
-  case "$args" in
-    *' '*/omp|*' '*/omp' '*) return 0 ;;
-  esac
+  # `ps --ppid` is a GNU/procps-ng long option unsupported by BSD/macOS ps;
+  # `pgrep -P` (child-pid lookup) plus the portable `ps -o args= -p <pid>`
+  # form works on both, matching fm-harness.sh's own ancestry-walk idiom.
+  for child_pid in $(pgrep -P "$pane_pid" 2>/dev/null); do
+    args=$(ps -o args= -p "$child_pid" 2>/dev/null) || continue
+    case "$args" in
+      *' '*/omp|*' '*/omp' '*) return 0 ;;
+    esac
+  done
   return 1
 }
 

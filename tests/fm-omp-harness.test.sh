@@ -451,10 +451,18 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
+  cat > "$fb/pgrep" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *-P*4242*) printf '4343\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/pgrep"
   cat > "$fb/ps" <<SH
 #!/usr/bin/env bash
 case "\$*" in
-  *--ppid*4242*) printf '%s\n' "$args" ;;
+  *4343*) printf '%s\n' "$args" ;;
 esac
 exit 0
 SH

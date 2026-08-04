@@ -1003,17 +1003,11 @@ effort_flag_for_harness() {
         low|medium|high) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
-    pi|pi-signed)
+    pi|pi-signed|omp)
       # Pi 0.80.6 accepts the full shared effort vocabulary, including max, through
-      # its --thinking flag.
-      case "$effort" in
-        low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
-      esac
-      ;;
-    omp)
-      # omp 17.2.5's --thinking accepts off|minimal|low|medium|high|xhigh|max|auto,
-      # a superset of the shared vocabulary; all five firstmate levels verified
-      # working with no error.
+      # its --thinking flag. omp 17.2.5's --thinking accepts
+      # off|minimal|low|medium|high|xhigh|max|auto, a superset of the shared
+      # vocabulary; all five firstmate levels verified working with no error.
       case "$effort" in
         low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
       esac
