@@ -47,15 +47,14 @@
 #            after its listener starts must reach that verdict inside the
 #            window, not after a confirmation that already reported it ready.
 #            It never starts a runner; call reconcile first. Exit 0 confirms
-#            liveness, and only with no result this generation captured after
-#            <baseline-sequence> that the adapter classifies terminal.
-#            Exit 3 means
-#            the source ENDED before any live listener was confirmed - its own
-#            adapter classified terminal a result captured after
-#            <baseline-sequence> (default 0), or its current registration
-#            generation holds a terminal claim - so it can never become live and
-#            retrying cannot help. Any other nonzero exit leaves the registration
-#            in place for ordinary reconcile recovery.
+#            liveness, and is withheld while this generation holds a result
+#            captured after <baseline-sequence> that the adapter classifies
+#            terminal. Exit 3 means the source ENDED before any live listener
+#            was confirmed - its own adapter classified terminal a result
+#            captured after <baseline-sequence> (default 0), or its current
+#            registration generation holds a terminal claim - so it can never
+#            become live and retrying cannot help. Any other nonzero exit leaves
+#            the registration in place for ordinary reconcile recovery.
 # handled    Durably and idempotently record that a captured result has been
 #            fully handled: <source-id> <sequence>. Prints "handled: id seq"
 #            the first time for that exact source-and-sequence generation and
