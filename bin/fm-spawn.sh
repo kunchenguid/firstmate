@@ -2245,11 +2245,6 @@ fi
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
-# Bind this task to its own chrome-devtools-axi browser session so concurrent
-# crewmates never share one Chrome instance (and thus each other's tabs/auth).
-# Shipped through the same pane-export channel as GOTMPDIR above, and covered by
-# the single settle sleep before the launch command below.
-spawn_send_text_line "$T" "export CHROME_DEVTOOLS_AXI_SESSION=$ID"
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
 # entirely when trace context is off.
@@ -2266,6 +2261,13 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
     fi
   fi
 fi
+# Bind this task to its own chrome-devtools-axi browser session so concurrent
+# crewmates never share one Chrome instance (and thus each other's tabs/auth).
+# Shipped through the same pane-export channel as GOTMPDIR and TRACEPARENT, and
+# covered by the same settle sleep below. Deliberately placed after the trace
+# block rather than beside GOTMPDIR: tests/fm-trace-context-lib.test.sh requires
+# the TRACEPARENT export to stay within five lines of the GOTMPDIR site.
+spawn_send_text_line "$T" "export CHROME_DEVTOOLS_AXI_SESSION=$ID"
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
