@@ -88,9 +88,13 @@ set -u
 case "${1:-}" in
   get) printf '%s\n' "${FM_FAKE_PANE_PATH:?FM_FAKE_PANE_PATH unset}" ;;
   status)
-    node -e 'console.log(JSON.stringify([{path: process.argv[1], status: "leased", lease_holder: process.argv[2]}]))' \
-      "${FM_FAKE_PANE_PATH:?FM_FAKE_PANE_PATH unset}" \
-      "${FM_FAKE_LEASE_HOLDER:?FM_FAKE_LEASE_HOLDER unset}"
+    if [ "${2:-}" = --help ]; then
+      printf '%s\n' '      --json   Print pool status as JSON'
+    else
+      node -e 'console.log(JSON.stringify([{path: process.argv[1], status: "leased", lease_holder: process.argv[2]}]))' \
+        "${FM_FAKE_PANE_PATH:?FM_FAKE_PANE_PATH unset}" \
+        "${FM_FAKE_LEASE_HOLDER:?FM_FAKE_LEASE_HOLDER unset}"
+    fi
     ;;
 esac
 exit 0
