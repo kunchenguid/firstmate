@@ -128,6 +128,18 @@
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
+#   Local, gitignored config/launch-wrapper optionally prepends one operator-chosen
+#   command prefix to the finished launch, for every harness, kind, and backend.
+#   Only the first non-empty, non-comment line is used, whitespace-trimmed, and every
+#   __TASKID__ in it is replaced with this spawn's task id. It is applied after the
+#   placeholders above and before the CLAUDE_CONFIG_DIR and secondmate FM_HOME env
+#   prefixes, so the result is "<env assignments> <wrapper> <harness invocation>".
+#   The line is typed literally, so it must be a shell-safe prefix that ends by exec'ing
+#   its remaining arguments; it must never itself carry a secret, because the launch
+#   string is typed into the pane and appears in that pane's scrollback and in `ps`.
+#   Absent, empty, or comment-only leaves the launch byte-identical to no wrapper.
+#   The file is per-home and deliberately not inherited into secondmate homes, so each
+#   home binds its own wrapper (for example a distinct per-home credential seat).
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -2041,6 +2053,40 @@ LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+# Optional operator-chosen launch wrapper (config/launch-wrapper), applied after
+# every harness placeholder above so the wrapper wraps the exact harness
+# invocation this spawn would otherwise have typed, and before the env prefixes
+# below so those assignments stay leftmost and are inherited through the wrapper.
+# It exists because some boxes must start the pane's harness under a launcher
+# that supplies a per-worker binding (a credential, a seat, a resource limit) in
+# the CHILD process's own environment: firstmate's own process environment does
+# not reach a pane created by a long-lived multiplexer daemon, and such a value
+# must never be written into LAUNCH itself, which is typed literally into a pane
+# and is visible in that pane's scrollback and in the wrapper's own `ps` line.
+# This repo therefore stays credential-agnostic: the config names a command
+# PREFIX only, and the operator's own tool does the sensitive work inside the
+# spawned pane. There is deliberately no built-in default, so an absent file
+# leaves the launch byte-identical to the no-wrapper behavior.
+launch_wrapper_prefix() {  # -> rendered wrapper prefix, or nothing
+  local line
+  [ -f "$CONFIG/launch-wrapper" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [ -n "$line" ] || continue
+    case "$line" in
+      '#'*) continue ;;
+    esac
+    # __TASKID__ is substituted unquoted on purpose: the id already passed
+    # fm_task_id_creation_valid above, so it is a non-empty [A-Za-z0-9._-] string
+    # with no leading dot. It therefore cannot break out of whatever quoting the
+    # operator's own template puts around the placeholder.
+    printf '%s\n' "${line//__TASKID__/$ID}"
+    return 0
+  done < "$CONFIG/launch-wrapper"
+}
+LAUNCH_WRAPPER=$(launch_wrapper_prefix)
+[ -z "$LAUNCH_WRAPPER" ] || LAUNCH="$LAUNCH_WRAPPER $LAUNCH"
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a

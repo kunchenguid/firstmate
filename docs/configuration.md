@@ -237,6 +237,20 @@ The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 
+## Launch wrapper (config/launch-wrapper)
+
+`config/launch-wrapper` is an optional local, gitignored file naming one command prefix that [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) prepends to the launch it types into a freshly created pane, for every harness, spawn kind, and runtime backend.
+It exists because a pane created by a long-lived multiplexer daemon does not inherit the firstmate process's own environment, so a per-worker binding that must reach the harness process - a credential, a seat, a resource limit - has to be established inside that pane rather than around it.
+Firstmate stays deliberately generic here: it renders a prefix and never learns what the wrapper does, so no site-specific launcher, path, or credential mechanism belongs in this repo.
+
+The file's first non-empty, non-comment line is used, whitespace-trimmed, with every `__TASKID__` in it replaced by that spawn's task id.
+Absent, empty, or comment-only leaves the launch byte-identical to the no-wrapper behavior.
+`bin/fm-spawn.sh`'s header owns where in the launch pipeline the prefix lands relative to the harness placeholders and the `CLAUDE_CONFIG_DIR` and secondmate `FM_HOME` prefixes.
+
+The line is typed literally into the pane, so it must be a shell-safe prefix that ends by exec'ing its remaining arguments, and it must never itself carry a secret: the launch string is visible in the pane's scrollback and in the wrapper process's `ps` line.
+A wrapper that supplies a credential must read it itself and place it in its child's own environment.
+The file is per-home and not inherited into secondmate homes, so each home binds its own wrapper rather than sharing one.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
