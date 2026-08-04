@@ -1,14 +1,14 @@
 ---
 name: pr-shepherd
 description: >-
-  Thoroughly review one or more GitHub PRs and shepherd them to merge-ready
-  (or merge when authorized): inventory reviewer findings, verify each is fixed
-  or intentionally deferred with evidence, drive CI to green, fix real failures,
-  and report a gate-style outcome. Use when the captain asks to babysit/shepherd a
-  PR, ensure reviewer comments are addressed, get CI green and land a PR, "make
-  sure comments are fixed", "drive to merge", or invokes /pr-shepherd.
+  Thoroughly review one or more GitHub PRs and shepherd them to merge when gates
+  pass: inventory reviewer findings, verify each is fixed or intentionally deferred
+  with evidence, drive CI to green, fix real failures, report a gate-style outcome,
+  and merge by default. Use when the captain asks to babysit/shepherd a PR, ensure
+  reviewer comments are addressed, get CI green and land a PR, "make sure comments
+  are fixed", "drive to merge", or invokes /pr-shepherd.
 user-invocable: true
-argument-hint: "<pr-number-or-url> [pr...] [--merge]"
+argument-hint: "<pr-number-or-url> [pr...] [--no-merge]"
 metadata:
   internal: true
 ---
@@ -16,7 +16,7 @@ metadata:
 # pr-shepherd
 
 `pr-shepherd` is a gated PR landing pipeline for existing open pull requests.
-It is the counterpart of `no-mistakes` (which gates your uncommitted work before and through open): you drive a fixed sequence of phases until the PR is honestly merge-ready, and only then merge when authority allows.
+It is the counterpart of `no-mistakes` (which gates your uncommitted work before and through open): you drive a fixed sequence of phases until the PR is honestly merge-ready, then **merge by default** when all hard gates pass.
 
 You are the pipeline driver: every phase produces evidence; skip nothing; never claim "comments addressed" without a per-finding disposition table.
 
@@ -29,17 +29,19 @@ You are the pipeline driver: every phase produces evidence; skip nothing; never 
 
 | Invocation | Behavior |
 |---|---|
-| `/pr-shepherd <n>` or URL | Full pipeline through **merge-ready**; **do not merge** unless authority exists. |
-| `/pr-shepherd <n> --merge` | Same pipeline; **merge only after** all hard gates pass **and** merge authority is satisfied (see Merge authority). |
+| `/pr-shepherd <n>` or URL | Full pipeline; **default terminal is merge** after all hard gates pass. |
+| `/pr-shepherd <n> --no-merge` | Same pipeline through report only; stop at **merge-ready** without merging. |
 | Multiple PRs | Process **bottom-up** if stacked; otherwise one at a time. Stack desync is a hard gate. |
 
-Translate plain language ("merge when green") into `--merge` only when the captain explicitly authorized merge for that PR (or standing `yolo` covers it for that project).
+Invoking `/pr-shepherd` (without `--no-merge`) is merge authority for that PR once gates pass.
+Standing firstmate `yolo` is not required for a captain-invoked `/pr-shepherd`, but red CI and incomplete comment dispositions still block merge.
+Translate "report only" / "don't merge yet" into `--no-merge`.
 
 ## Hard rules
 
 1. **Never invent "addressed."** Every unresolved thread, formal CHANGES_REQUESTED body, and consensus BLOCKER/WARN from bot review gets a disposition row.
 2. **Never merge red CI.** Optional/non-blocking checks (for example long-running advisory review jobs you have evidence are non-required) may remain pending only when explicitly classified - see CI.
-3. **Never merge without authority.** Default is report `merge-ready` and stop.
+3. **Default terminal is merge.** When gates 3–5 pass on the current head, merge unless `--no-merge` was requested.
 4. **Never force-push without `--force-with-lease`.** Prefer rebase + lease after base advances.
 5. **Never discard unlanded work** to clear a path.
 6. **Dead-code / wrong-surface findings are blockers.** If a review says the change is on an unused component, **verify importers with `git grep` / search** before disposing as NIT.
@@ -48,11 +50,12 @@ Translate plain language ("merge when green") into `--merge` only when the capta
 ## Pipeline overview
 
 ```
-intake → inventory → thorough-review → comments → ci → base/stack → report → [merge]
+intake → inventory → thorough-review → comments → ci → base/stack → report → merge
 ```
 
 Each phase ends with a **gate**.
 Missing evidence means not ready.
+Merge is the default final step when gates pass; only `--no-merge` stops after the report.
 
 ---
 
@@ -212,7 +215,7 @@ Emit a captain-facing summary **in outcomes, not mechanics** (AGENTS.md section 
 ## PR shepherd: <title>
 URL: https://github.com/.../pull/N
 
-### Status: merge-ready | blocked | merged
+### Status: merged | merge-ready | blocked
 
 ### Comments
 | Finding | Disposition | Evidence |
@@ -225,26 +228,29 @@ Critical: green | red (list failures)
 1–5 bullets of independent findings (or "none beyond inventory")
 
 ### Next
-- merge when you say / already merged / blocked on <decision>
+- merged at <SHA> / merge-ready (--no-merge) / blocked on <decision>
 ```
 
 **Gate 6:** Report delivered.
-Pipeline ends here unless merge authorized.
+Proceed to Phase 7 unless `--no-merge` or a hard gate failed.
 
 ---
 
-## Phase 7 - Merge (optional, gated)
+## Phase 7 - Merge (default terminal)
 
-Merge **only if** all of:
+Merge when all of the following hold:
 
 1. Gates 3–5 passed on the **current** head SHA.
-2. Merge authority:
+2. `--no-merge` was **not** requested.
+3. Merge authority is satisfied by one of:
+   - Captain invoked `/pr-shepherd` (or equivalent land intent) for this PR, or
    - Explicit captain instruction to merge **this** PR, or
-   - Firstmate standing `yolo` for that project **and** PR is green and within original task scope (still never red merge).
-3. Prefer the project's merge path:
+   - Firstmate standing `yolo` for that project **and** PR is green and within original task scope.
+4. Prefer the project's merge path:
    - Firstmate: `bin/fm-pr-merge.sh <task-id> <url>` when a task owns the PR.
    - Else: `gh-axi pr merge <n> --squash` (or repo default); use `--admin` only when the captain authorized bypass of non-code gates **and** code/CI gates passed.
 
+Still never merge red CI or incomplete BLOCKER dispositions.
 After merge: confirm `state=MERGED`, full URL, one-line outcome.
 Firstmate: fleet-sync clone; cleanup only when unlanded-work checks pass.
 
@@ -257,12 +263,13 @@ When running as firstmate:
 | Concern | Rule |
 |---------|------|
 | Project edits | Worker / isolated copy only (hard rule 1). |
-| PR open from ship | After worker reports green, **still run Phase 1–3** before telling captain "ready" or merging under yolo. |
+| PR open from ship | After worker reports green, **still run Phase 1–3** before telling captain "ready" or merging under yolo / default shepherd merge. |
 | Bot formal CHANGES_REQUESTED | Block merge until re-run clears or code fixes land. |
 | Status line `done: PR … checks green` | Treat as worker claim; **re-verify** gates 3–4 yourself. |
-| Merge | Never without AGENTS.md section 7 authority. |
+| Default merge | Captain `/pr-shepherd` (or ship yolo path) is land authority once gates pass; use `--no-merge` to stop at report. |
 
-Suggested captain invocation: `/pr-shepherd 4125` or `/pr-shepherd https://github.com/org/repo/pull/4125 --merge`.
+Suggested captain invocation: `/pr-shepherd 4125` or `/pr-shepherd https://github.com/org/repo/pull/4125`.
+Use `/pr-shepherd 4125 --no-merge` when the captain wants a merge-ready report only.
 
 ---
 
@@ -272,9 +279,9 @@ Suggested captain invocation: `/pr-shepherd 4125` or `/pr-shepherd https://githu
 |------|------|
 | `no-mistakes` | Pre-merge validation of **your** branch/pipeline work. |
 | `pr-babysit` | Multi-PR loop with auto-fix; **never merges**; use for watch lists. |
-| **pr-shepherd** | **Thorough single/stack land gate** with mandatory comment disposition and optional authorized merge. |
+| **pr-shepherd** | **Thorough single/stack land gate** with mandatory comment disposition; **merges by default** when hard gates pass. |
 
-Prefer `pr-shepherd` when honesty of "comments addressed + CI green" matters more than polling many PRs.
+Prefer `pr-shepherd` when honesty of "comments addressed + CI green" and landing matter more than polling many PRs.
 Use `pr-babysit` for ongoing multi-PR watch.
 
 ---
@@ -309,6 +316,6 @@ git grep -n Symbol origin/branch -- '*.ts' '*.tsx'
 git push --force-with-lease   # only if rebase rewrote
 gh-axi pr comment N --body "..."
 
-# Merge (only when authorized + gates green)
+# Merge (default terminal when gates green; skip if --no-merge)
 gh-axi pr merge N --squash
 ```
