@@ -90,7 +90,15 @@ install_remote_evidence() {  # <dir>
   cat > "$dir/bin/remote" <<'SH'
 #!/usr/bin/env bash
 printf 'remote\n' >> "${E_DIR:?}/remote.log"
-[ "${E_REMOTE:-ok}" = ok ] || exit 1
+[ "${E_REMOTE:-ok}" = fail ] && exit 1
+[ "${E_REMOTE:-ok}" = stall ] && {
+  trap '' TERM
+  (trap '' TERM; sleep 30) &
+  child_pid=$!
+  printf '%s\t%s\n' "$$" "$child_pid" > "$E_DIR/remote.pid"
+  wait "$child_pid"
+  exit 1
+}
 id=$1
 interval=$2
 jq -n --arg id "$id" --argjson interval "$interval" '
@@ -259,6 +267,55 @@ EOF
   pass "remote routes use their recorded remote target or remain unverified"
 }
 
+test_stalled_remote_route_is_bounded_and_reaped() {
+  local dir json started elapsed remote_pid child_pid neutralized_bin neutralized_rc
+  dir=$(make_case remote-stall claude)
+  install_evidence "$dir"
+  install_remote_evidence "$dir"
+  cat >> "$dir/home/state/task.meta" <<EOF
+remote_host=fixture-host
+remote_root=/remote/firstmate
+remote_backend=tmux
+remote_target=remote-session:fm-task
+worktree=remote-worktree
+EOF
+  started=$(date +%s)
+  json=$(FM_LIVENESS_REMOTE_BIN="$dir/bin/remote" FM_LIVENESS_EVIDENCE_TIMEOUT=1 \
+    FM_LIVENESS_REMOTE_OVERHEAD_SECS=1 E_REMOTE=stall run_case "$dir")
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 12 ] || fail "stalled remote liveness exceeded its derived acquisition bound (${elapsed}s)"
+  printf '%s' "$json" | jq -e '
+    .records[0] | .endpoint.presence=="unverified" and .endpoint.raw=="remote_unreadable"
+      and .worker.presence=="unverified" and .activity=="unverified"
+  ' >/dev/null || fail "stalled remote route did not degrade to explicit unverified evidence: $json"
+  while IFS=$(printf '\t') read -r remote_pid child_pid; do
+    if kill -0 "$remote_pid" 2>/dev/null || kill -0 "$child_pid" 2>/dev/null; then
+      fail "stalled remote evidence process survived timeout cancellation: $remote_pid $child_pid"
+    fi
+  done < "$dir/remote.pid"
+
+  neutralized_bin="$dir/neutralized-bin"
+  mkdir -p "$neutralized_bin"
+  cat > "$neutralized_bin/timeout" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = -k ] && shift 2
+shift
+exec "$@"
+SH
+  chmod +x "$neutralized_bin/timeout"
+  rm -f "$dir/remote.pid"
+  perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; waitpid $pid, 0; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
+    9 env PATH="$neutralized_bin:$PATH" FM_HOME="$dir/home" FM_LIVENESS_INTERVAL_MS=100 FM_LIVENESS_NOW=2026-08-03T12:00:00Z \
+    FM_LIVENESS_ENDPOINT_BIN="$dir/bin/endpoint" FM_LIVENESS_CAPTURE_BIN="$dir/bin/capture" \
+    FM_LIVENESS_PROCESS_SNAPSHOT_BIN="$dir/bin/process" FM_LIVENESS_REMOTE_BIN="$dir/bin/remote" \
+    FM_LIVENESS_EVIDENCE_TIMEOUT=1 FM_LIVENESS_REMOTE_OVERHEAD_SECS=1 E_REMOTE=stall \
+    E_DIR="$dir" E_WT="$dir/wt" "$LIVENESS" --json >/dev/null 2>&1
+  neutralized_rc=$?
+  [ "$neutralized_rc" -eq 124 ] \
+    || fail "neutralizing remote acquisition cancellation did not make the bounded assertion RED: rc=$neutralized_rc"
+  pass "stalled remote evidence is bounded, reaped, and reported unverified"
+}
+
 test_remote_control_samples_recorded_host_local_target() {
   local dir home json
   dir=$(make_case remote-control claude)
@@ -319,6 +376,7 @@ test_real_process_snapshot_accepts_partial_lsof_output
 test_cwd_binding_and_shell_amplifier_refusals
 test_endpoint_three_way_and_output_activity
 test_remote_routes_use_remote_endpoint_evidence
+test_stalled_remote_route_is_bounded_and_reaped
 test_remote_control_samples_recorded_host_local_target
 test_neutralization_matrix_goes_red
 
