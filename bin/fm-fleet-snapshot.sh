@@ -557,7 +557,7 @@ task_json_lines() {
     # crew has provably moved past. Two lifecycle signals clear it, neither of which
     # reads any report content:
     #   - a live activity read (run-step or measured process/output) that is
-    #     working/done, so a
+    #     positively working, so a
     #     crew that resumed past a gate is not still reported as parked; and
     #   - a TERMINAL done/failed state on a single-owner task (scout or ship), whose
     #     deliverable is its report or PR, so a COMPLETED scout surfaces only as a
@@ -570,7 +570,7 @@ task_json_lines() {
     open_decisions_tsv=$(status_open_decisions "$status_log")
     if [ "$kind" != secondmate ] && \
        { { { [ "$current_source" = run-step ] || [ "$current_source" = process-output ]; } \
-           && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
+           && [ "$current_state" = working ]; } \
          || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; } \
          || { [ "$kind" = scout ] && [ -f "$report_path" ] \
               && { [ "$last_event_state" = "done" ] || [ "$last_event_state" = "failed" ]; }; }; }; then

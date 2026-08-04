@@ -1,11 +1,22 @@
 #!/usr/bin/env bash
 set -u
 
+TIMESTAMP_FILE=${1:-${FM_LIVENESS_PROCESS_TIMESTAMP_FILE:-}}
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-liveness-process.XXXXXX") || exit 1
 trap 'rm -rf -- "$TMP"' EXIT HUP INT TERM
 command -v lsof >/dev/null 2>&1 || exit 1
 
 LC_ALL=C ps -Ao pid=,time=,comm= > "$TMP/ps.raw" 2>/dev/null || exit 1
+if [ -n "$TIMESTAMP_FILE" ]; then
+  if command -v perl >/dev/null 2>&1; then
+    perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e 'printf "%.0f\n", clock_gettime(CLOCK_MONOTONIC) * 1000' \
+      > "$TIMESTAMP_FILE" || exit 1
+  elif [ -r /proc/uptime ]; then
+    awk '{printf "%.0f\n", $1 * 1000}' /proc/uptime > "$TIMESTAMP_FILE" || exit 1
+  else
+    exit 1
+  fi
+fi
 awk '
   function ms(t, a,n,d,h,m,s) {
     d=0

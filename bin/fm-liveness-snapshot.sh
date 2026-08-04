@@ -45,7 +45,8 @@
 #   active | parked | inactive | absent | unverified
 #
 # Test seams name external evidence producers, not classifier decisions:
-#   FM_LIVENESS_PROCESS_SNAPSHOT_BIN prints pid<TAB>cpu_ms<TAB>comm<TAB>cwd.
+#   FM_LIVENESS_PROCESS_SNAPSHOT_BIN prints pid<TAB>cpu_ms<TAB>comm<TAB>cwd and
+#     may write its CPU-read clock to FM_LIVENESS_PROCESS_TIMESTAMP_FILE.
 #   FM_LIVENESS_ENDPOINT_BIN prints an fm_backend_agent_state verdict.
 #   FM_LIVENESS_CAPTURE_BIN prints the current endpoint output.
 # The production path ignores none of its guards; tests replace evidence only.
@@ -134,13 +135,17 @@ meta_value() {  # <meta> <key>
   fm_meta_get "$1" "$2"
 }
 
-process_snapshot() {  # <output>
-  local output=$1
+process_snapshot() {  # <output> <timestamp-output>
+  local output=$1 timestamp_output=$2
+  rm -f -- "$timestamp_output"
   if [ -n "${FM_LIVENESS_PROCESS_SNAPSHOT_BIN:-}" ]; then
-    "$EVIDENCE_RUN" --total "$EVIDENCE_TIMEOUT" "$FM_LIVENESS_PROCESS_SNAPSHOT_BIN" > "$output" 2>/dev/null
+    FM_LIVENESS_PROCESS_TIMESTAMP_FILE="$timestamp_output" \
+      "$EVIDENCE_RUN" --total "$EVIDENCE_TIMEOUT" "$FM_LIVENESS_PROCESS_SNAPSHOT_BIN" > "$output" 2>/dev/null || return
   else
-    "$EVIDENCE_RUN" --total "$EVIDENCE_TIMEOUT" "$SCRIPT_DIR/fm-liveness-process-snapshot.sh" > "$output" 2>/dev/null
+    FM_LIVENESS_PROCESS_TIMESTAMP_FILE="$timestamp_output" \
+      "$EVIDENCE_RUN" --total "$EVIDENCE_TIMEOUT" "$SCRIPT_DIR/fm-liveness-process-snapshot.sh" "$timestamp_output" > "$output" 2>/dev/null || return
   fi
+  [ -s "$timestamp_output" ] || monotonic_ms > "$timestamp_output"
 }
 
 bounded_endpoint_verdict() {  # <output> <backend> <target> <label>
@@ -277,11 +282,14 @@ fi
 
 SAMPLE1="$TMP/process-1.tsv"
 SAMPLE2="$TMP/process-2.tsv"
+SAMPLE1_TIME="$TMP/process-1.time"
+SAMPLE2_TIME="$TMP/process-2.time"
 PROCESS1_OK=true
 PROCESS2_OK=true
 TIMING_OK=true
-process_snapshot "$SAMPLE1" || { PROCESS1_OK=false; : > "$SAMPLE1"; }
-SAMPLE1_AT_MS=$(monotonic_ms) || { TIMING_OK=false; SAMPLE1_AT_MS=0; }
+process_snapshot "$SAMPLE1" "$SAMPLE1_TIME" || { PROCESS1_OK=false; : > "$SAMPLE1"; }
+SAMPLE1_AT_MS=$(cat "$SAMPLE1_TIME" 2>/dev/null) || { TIMING_OK=false; SAMPLE1_AT_MS=0; }
+case "$SAMPLE1_AT_MS" in ''|*[!0-9]*) TIMING_OK=false; SAMPLE1_AT_MS=0 ;; esac
 
 REMOTE_JOBS="$TMP/remote-jobs.tsv"
 REMOTE_RECORDS="$TMP/remote-records.jsonl"
@@ -297,10 +305,10 @@ while IFS=$(printf '\t') read -r id harness worktree backend target route; do
   remote_file="$TMP/remote-$id.json"
   if [ -n "${FM_LIVENESS_REMOTE_BIN:-}" ]; then
     "$EVIDENCE_RUN" --total "$REMOTE_ACQUISITION_TIMEOUT" \
-      "$FM_LIVENESS_REMOTE_BIN" "$id" "$INTERVAL_MS" > "$remote_file" 2>/dev/null &
+      "$FM_LIVENESS_REMOTE_BIN" "$id" "$INTERVAL_MS" "$EVIDENCE_TIMEOUT" > "$remote_file" 2>/dev/null &
   else
     "$EVIDENCE_RUN" --total "$REMOTE_ACQUISITION_TIMEOUT" \
-      "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh liveness "$id" "$INTERVAL_MS" \
+      "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh liveness "$id" "$INTERVAL_MS" "$EVIDENCE_TIMEOUT" \
       > "$remote_file" 2>/dev/null &
   fi
   PENDING_EVIDENCE_PID=$!
@@ -349,8 +357,9 @@ done < "$METAS"
 
 sleep_seconds=$(awk -v ms="$INTERVAL_MS" 'BEGIN { printf "%.3f", ms/1000 }')
 sleep "$sleep_seconds"
-process_snapshot "$SAMPLE2" || { PROCESS2_OK=false; : > "$SAMPLE2"; }
-SAMPLE2_AT_MS=$(monotonic_ms) || { TIMING_OK=false; SAMPLE2_AT_MS=0; }
+process_snapshot "$SAMPLE2" "$SAMPLE2_TIME" || { PROCESS2_OK=false; : > "$SAMPLE2"; }
+SAMPLE2_AT_MS=$(cat "$SAMPLE2_TIME" 2>/dev/null) || { TIMING_OK=false; SAMPLE2_AT_MS=0; }
+case "$SAMPLE2_AT_MS" in ''|*[!0-9]*) TIMING_OK=false; SAMPLE2_AT_MS=0 ;; esac
 SAMPLE_ELAPSED_MS=$((SAMPLE2_AT_MS - SAMPLE1_AT_MS))
 if [ "$TIMING_OK" != true ] || [ "$SAMPLE_ELAPSED_MS" -le 0 ]; then
   TIMING_OK=false
