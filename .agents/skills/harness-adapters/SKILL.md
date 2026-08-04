@@ -182,6 +182,7 @@ The shared symptom is a healthy-looking pane with no work in progress, so each a
 A crewmate's per-task hooks live OUTSIDE the worktree, in `state/<id>.claude-settings.json`, and reach the session through `claude --settings <file>` on the launch command (`bin/fm-spawn.sh`).
 Nothing is written into the project, so a project that tracks `.claude/settings.local.json` keeps its committed content, and its own settings still load alongside firstmate's hooks because `--settings` is additive (verified live, [`docs/verification/supervision.md`](../../../docs/verification/supervision.md)).
 Because the hooks ride the launch command rather than the worktree, any manual resume or relaunch of a claude crewmate must carry the same `--settings <state/<id>.claude-settings.json>` argument; a bare `claude` in the worktree starts with no turn-end wake and no busy-state reporting.
+For the same reason, a claude spawn through `fm-spawn`'s raw-launch-command escape hatch cannot receive that argument, so `fm-spawn` warns and names it, leaves the busy-state contract unarmed rather than seeding a busy nothing could clear, and that worker classifies `unknown` until the argument is added by hand.
 
 First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.
 After every spawn, peek the pane within about 20 seconds.
