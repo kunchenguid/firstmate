@@ -24,7 +24,7 @@ The board is not an authority over delivery posture - `data/projects.md` and `AG
 
 Notion is reached only through the account-level MCP connector, from inside firstmate's own turn.
 There is no poller and no shell client: MCP tools do not exist outside an agent turn, so nothing in `bin/` or the watcher can read this board.
-Only a `claude`-harness agent can reach the connector at all; never route board work to a `codex` or `agy` worker, and never ask a crewmate to touch the board.
+Only a `claude`-harness agent can reach the connector at all; never route board work to a `codex` worker, and never ask a crewmate to touch the board.
 
 `query_data_sources` and `query_database_view` are rate-limited on the captain's plan; `search` and `fetch` are not.
 Spend at most ONE `query_data_sources` call per cycle - the board sweep below - and read individual cards with `fetch`.
