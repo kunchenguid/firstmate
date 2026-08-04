@@ -948,8 +948,6 @@ test_private_file_mode_validation_accommodates_mode_inert_fs() {
   ! fm_pr_private_file_valid "$file" 600 999999 \
     || fail "mode-inert filesystem accepted a private marker on the wrong device"
   eval "$real_probe"
-  FM_PR_MODE_PROBE_DEVICE=
-  FM_PR_MODE_PROBE_VERDICT=
   pass "private-file validation skips only exact mode on a mode-inert filesystem"
 }
 
