@@ -37,7 +37,8 @@
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
-#   from that harness's launch rather than guessed.
+#   from that harness's launch rather than guessed, with a warning that names the
+#   harness, requested value, and adapter's accepted set.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -1377,11 +1378,12 @@ effort_flag_for_harness() {
       esac
       ;;
     codex)
-      # The installed codex config schema uses model_reasoning_effort, and the
-      # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
-      # than passing an unsupported value.
+      # Verified with codex-cli 0.146.0 on 2026-08-05: the server accepts
+      # none|minimal|low|medium|high|xhigh|max through model_reasoning_effort.
+      # Firstmate threads its shared low|medium|high|xhigh|max vocabulary here;
+      # none and minimal remain outside the shared profile axis.
       case "$effort" in
-        low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+        low|medium|high|xhigh|max) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
       esac
       ;;
     grok)
@@ -1391,6 +1393,7 @@ effort_flag_for_harness() {
       # than passing a known-bad value.
       case "$effort" in
         low|medium|high) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
+        *) echo "warning: harness '$harness' cannot thread requested effort '$effort'; accepted effort values: low, medium, high; omitting effort flag" >&2 ;;
       esac
       ;;
     pi|pi-signed)
@@ -1418,9 +1421,17 @@ effort_flag_for_harness() {
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
     # kimi likewise has no reasoning-effort flag; the requested axis stays in
-    # task metadata but never reaches the launch command. Cursor encodes effort
-    # in model ids such as cursor-grok-4.5-high, so it also receives no separate
-    # effort flag.
+    # task metadata but never reaches the launch command.
+    opencode|kimi)
+      echo "warning: harness '$harness' cannot thread requested effort '$effort'; accepted effort values: no supported values; omitting effort flag" >&2
+      ;;
+    # Cursor encodes effort in model ids such as cursor-grok-4.5-high, so it
+    # receives no separate effort flag.
+    cursor)
+      ;;
+    *)
+      echo "warning: harness '$harness' cannot thread requested effort '$effort'; accepted effort values through fm-spawn: no supported values; raw launch commands must carry their own effort flags" >&2
+      ;;
   esac
 }
 
