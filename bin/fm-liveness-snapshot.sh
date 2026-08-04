@@ -24,6 +24,8 @@
 # chosen ahead of the real long-running agent.
 # A harness process must also exist in that worktree before CPU can establish
 # activity, so leftover background shells cannot impersonate a live worker.
+# Sample 2 owns current worker presence, and cumulative CPU can establish
+# activity only when the worker exists in both samples.
 #
 # Harness-relative CPU thresholds are rates in milliseconds per minute.
 # The 7.5-second default interval gives a 10 ms process-time clock at least ten
@@ -426,11 +428,16 @@ EOF
   if [ "$endpoint" = verified_absent ]; then
     worker=verified_absent
   elif [ "$PROCESS1_OK" = true ] && [ "$PROCESS2_OK" = true ]; then
-    if [ "$workers1" -gt 0 ] || [ "$workers2" -gt 0 ]; then worker=verified_present
+    if [ "$workers2" -gt 0 ]; then worker=verified_present
     else worker=verified_absent
     fi
   else
     worker=unverified
+  fi
+
+  cpu_worker_evidence=false
+  if [ "$workers1" -gt 0 ] && [ "$workers2" -gt 0 ]; then
+    cpu_worker_evidence=true
   fi
 
   delta=$((cpu2 - cpu1))
@@ -451,7 +458,7 @@ EOF
     activity=inactive
   elif [ "$output_changed" = true ]; then
     activity=active
-  elif [ "$baseline" = verified ] && [ "$rate" -ge "$threshold" ]; then
+  elif [ "$baseline" = verified ] && [ "$cpu_worker_evidence" = true ] && [ "$rate" -ge "$threshold" ]; then
     activity=active
   elif [ "$baseline" = verified ] && [ "$output1_ok" = true ] && [ "$output2_ok" = true ]; then
     activity=parked

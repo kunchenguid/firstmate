@@ -196,6 +196,58 @@ test_large_snapshot_payloads_never_cross_exec_argv() {
   pass "fleet snapshot keeps backlog and task JSON off exec argv beyond ARG_MAX"
 }
 
+test_large_liveness_payload_reaches_every_member_off_exec_environment() {
+  local home fakebin payload padding arg_max padding_bytes oversized out_file id
+  home=$(make_home large-liveness-payload)
+  fakebin=$(make_fakebin "$home")
+  payload="$home/liveness.json"
+  padding="$home/padding"
+  arg_max=$(getconf ARG_MAX)
+  case "$arg_max" in ''|*[!0-9]*) fail "ARG_MAX unavailable for liveness transport regression" ;; esac
+  padding_bytes=$((arg_max / 7 + 65536))
+  awk -v n="$padding_bytes" 'BEGIN { for (i=0; i<n; i++) printf "x" }' > "$padding"
+  for id in claude codex opencode pi-signed pi grok kimi; do
+    mkdir -p "$home/projects/$id"
+    fm_write_meta "$home/state/$id.meta" \
+      "window=firstmate:fm-$id" "worktree=$home/projects/$id" \
+      "project=firstmate" "harness=$id" "kind=scout" "mode=scout"
+  done
+  jq -n --rawfile padding "$padding" '
+    ["claude","codex","opencode","pi-signed","pi","grok","kimi"]
+    | map({id:.,harness:.,harness_family:.,backend:"tmux",target:("fm:"+.),worktree:null,
+      endpoint:{presence:"verified_present",raw:"alive"},
+      worker:{presence:"verified_present",pids_sample_1:1,pids_sample_2:1,
+        harness_processes_sample_1:1,harness_processes_sample_2:1},
+      output:{sample_1_readable:true,sample_2_readable:true,changed:true},
+      cpu:{sample_1_max_ms:1000,sample_2_max_ms:1030,delta_ms:30,
+        rate_ms_per_minute:900,baseline:"verified",threshold_ms_per_minute:400},
+      activity:"active",padding:$padding})
+    | {schema:"fm-liveness.v1",observed_at:"2026-08-04T12:00:00Z",interval_ms:2000,
+      process_samples:{sample_1_readable:true,sample_2_readable:true},records:.}
+  ' > "$payload"
+  [ "$(LC_ALL=C wc -c < "$payload" | tr -d ' ')" -gt "$arg_max" ] \
+    || fail "large liveness fixture did not exceed ARG_MAX"
+  oversized=$(cat "$payload")
+  if FM_CREW_STATE_LIVENESS_JSON="$oversized" /usr/bin/true 2>/dev/null; then
+    fail "legacy liveness environment fixture did not reach E2BIG"
+  fi
+  cat > "$fakebin/large-liveness" <<'SH'
+#!/usr/bin/env bash
+cat "${FM_LARGE_LIVENESS_PAYLOAD:?}"
+SH
+  chmod +x "$fakebin/large-liveness"
+  out_file="$home/snapshot.json"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/large-liveness" \
+    FM_LARGE_LIVENESS_PAYLOAD="$payload" "$SNAPSHOT" --json > "$out_file" \
+    || fail "fleet snapshot could not carry the beyond-ARG_MAX liveness file"
+  jq -e '
+    (.tasks | length) == 7
+      and ([.tasks[].id] | sort) == (["claude","codex","opencode","pi-signed","pi","grok","kimi"] | sort)
+      and all(.tasks[]; .current_state.state == "working" and .current_state.source == "process-output")
+  ' "$out_file" >/dev/null || fail "large liveness transport lost one or more fleet members"
+  pass "beyond-ARG_MAX liveness evidence reaches every supported harness member by file pointer"
+}
+
 test_cross_home_aggregation_never_uses_growing_json_argv() {
   local home fakebin guard real_jq out
   home=$(make_home cross-home-argv)
@@ -216,7 +268,7 @@ for argument in "\$@"; do
   fi
   if [ "\$previous" = argjson-name ]; then
     case "\$name" in
-      current|records) [ "\${#argument}" -le 100 ] || exit 97 ;;
+      current|records|summary) [ "\${#argument}" -le 100 ] || exit 97 ;;
     esac
     previous=
     continue
@@ -228,10 +280,10 @@ SH
   chmod +x "$guard/jq"
   out=$(PATH="$guard:$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" \
     FM_HOME="$home" "$SNAPSHOT" --json) \
-    || fail "cross-home snapshot put a growing current or records collection on jq argv"
+    || fail "cross-home snapshot put a growing current, records, or summary collection on jq argv"
   printf '%s' "$out" | jq -e '.schema == "fm-fleet-snapshot.v1" and (.secondmate_current.records | length) == 1' >/dev/null \
     || fail "off-argv cross-home aggregation lost its record: $out"
-  pass "cross-home current and records collections stay off jq argv"
+  pass "cross-home current, records, and summary collections stay off jq argv"
 }
 
 test_fixture_snapshot_json() {
@@ -877,6 +929,7 @@ test_parked_scout_decision_stays_pending() {
 
 test_empty_fleet_json
 test_large_snapshot_payloads_never_cross_exec_argv
+test_large_liveness_payload_reaches_every_member_off_exec_environment
 test_cross_home_aggregation_never_uses_growing_json_argv
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure

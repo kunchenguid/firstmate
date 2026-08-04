@@ -82,6 +82,16 @@ case "${E_PROCESS:-working}" in
     printf '11\t500000\t%s\t%s\n' "$worker" "$wt"
     printf '12\t%s\tzsh\t%s\n' "$shell_cpu" "$wt"
     ;;
+  exit-between-samples)
+    if [ "$n" -eq 1 ]; then
+      printf '11\t500000\t%s\t%s\n' "$worker" "$wt"
+    fi
+    ;;
+  enter-between-samples)
+    if [ "$n" -eq 2 ]; then
+      printf '11\t500000\t%s\t%s\n' "$worker" "$wt"
+    fi
+    ;;
   fail) exit 1 ;;
 esac
 SH
@@ -220,6 +230,42 @@ test_cwd_binding_and_shell_amplifier_refusals() {
   pass "exact CWD binding refuses another worktree and background shells cannot amplify worker CPU"
 }
 
+test_between_sample_exit_is_absent_for_every_harness() {
+  local family dir json
+  for family in claude codex opencode pi-signed pi grok kimi; do
+    dir=$(make_case "between-sample-$family" "$family"); install_evidence "$dir"
+    json=$(E_FAMILY="$family" E_PROCESS=exit-between-samples run_case "$dir")
+    printf '%s' "$json" | jq -e '
+      .records[0]
+      | .worker.presence=="verified_absent"
+        and .worker.harness_processes_sample_1==1
+        and .worker.harness_processes_sample_2==0
+        and .activity=="inactive"
+    ' >/dev/null || fail "$family retained a worker that exited between samples: $json"
+
+    dir=$(make_case "one-sample-cpu-$family" "$family"); install_evidence "$dir"
+    json=$(E_FAMILY="$family" E_PROCESS=enter-between-samples run_case "$dir")
+    printf '%s' "$json" | jq -e '
+      .records[0]
+      | .worker.presence=="verified_present"
+        and .worker.harness_processes_sample_1==0
+        and .worker.harness_processes_sample_2==1
+        and .activity!="active"
+    ' >/dev/null || fail "$family credited processor activity without two-sample worker evidence: $json"
+
+    dir=$(make_case "two-sample-$family" "$family"); install_evidence "$dir"
+    json=$(E_FAMILY="$family" E_PROCESS=parked-high-total run_case "$dir")
+    printf '%s' "$json" | jq -e '
+      .records[0]
+      | .worker.presence=="verified_present"
+        and .worker.harness_processes_sample_1==1
+        and .worker.harness_processes_sample_2==1
+        and .activity!="inactive"
+    ' >/dev/null || fail "$family refused a worker present in both samples: $json"
+  done
+  pass "sample 2 owns current worker presence for every harness and two samples preserve legitimate workers"
+}
+
 test_endpoint_three_way_and_output_activity() {
   local dir json
   dir=$(make_case endpoint-present claude); install_evidence "$dir"
@@ -312,7 +358,7 @@ count_file=${E_DIR:?}/ps.count
 n=$(cat "$count_file" 2>/dev/null || printf 0)
 n=$((n + 1))
 printf '%s' "$n" > "$count_file"
-if [ "$n" -eq 1 ]; then cpu=00:00:01.00; else cpu=00:00:01.02; fi
+if [ "$n" -eq 1 ]; then cpu=00:00:01.00; else cpu=00:00:01.04; fi
 printf '11 %s claude\n' "$cpu"
 SH
   cat > "$dir/bin/lsof" <<'SH'
@@ -321,7 +367,7 @@ count_file=${E_DIR:?}/lsof.count
 n=$(cat "$count_file" 2>/dev/null || printf 0)
 n=$((n + 1))
 printf '%s' "$n" > "$count_file"
-[ "$(cat "${E_DIR:?}/ps.count")" -ne 2 ] || sleep 1
+[ "$(cat "${E_DIR:?}/ps.count")" -ne 2 ] || sleep 4
 printf 'p11\nn%s\n' "${E_WT:?}"
 SH
   cat > "$dir/bin/late-clock-process" <<SH
@@ -332,19 +378,19 @@ SH
   chmod +x "$dir/bin/ps" "$dir/bin/lsof" "$dir/bin/late-clock-process"
   rm -f "$dir"/*.count
   json=$(PATH="$dir/bin:$PATH" FM_HOME="$dir/home" FM_LIVENESS_INTERVAL_MS=100 \
-    FM_LIVENESS_NOW=2026-08-03T12:00:00Z FM_LIVENESS_ENDPOINT_BIN="$dir/bin/endpoint" \
-    FM_LIVENESS_CAPTURE_BIN="$dir/bin/capture" FM_LIVENESS_PROCESS_SNAPSHOT_BIN= \
-    E_ENDPOINT_SLEEP= E_CAPTURE_SLEEP= E_CPU2= \
+    FM_LIVENESS_NOW=2026-08-03T12:00:00Z FM_LIVENESS_EVIDENCE_TIMEOUT=6 FM_LIVENESS_ENDPOINT_BIN="$dir/bin/endpoint" \
+    FM_LIVENESS_CAPTURE_BIN="$dir/bin/capture" FM_LIVENESS_PROCESS_SNAPSHOT_BIN='' \
+    E_ENDPOINT_SLEEP='' E_CAPTURE_SLEEP='' E_CPU2='' \
     E_REAL_PS="$real_ps" E_DIR="$dir" E_WT="$dir/wt" "$LIVENESS" --json)
   printf '%s' "$json" | jq -e '
-    .records[0].cpu.delta_ms == 20 and .records[0].activity == "active"
+    .records[0].cpu.delta_ms == 40 and .records[0].activity == "active"
   ' >/dev/null || fail "trailing lsof latency distorted the CPU-read interval: $json"
 
   rm -f "$dir"/*.count
   neutralized_json=$(PATH="$dir/bin:$PATH" FM_HOME="$dir/home" FM_LIVENESS_INTERVAL_MS=100 \
-    FM_LIVENESS_NOW=2026-08-03T12:00:00Z FM_LIVENESS_ENDPOINT_BIN="$dir/bin/endpoint" \
+    FM_LIVENESS_NOW=2026-08-03T12:00:00Z FM_LIVENESS_EVIDENCE_TIMEOUT=6 FM_LIVENESS_ENDPOINT_BIN="$dir/bin/endpoint" \
     FM_LIVENESS_CAPTURE_BIN="$dir/bin/capture" FM_LIVENESS_PROCESS_SNAPSHOT_BIN="$dir/bin/late-clock-process" \
-    E_ENDPOINT_SLEEP= E_CAPTURE_SLEEP= E_REAL_PS="$real_ps" E_DIR="$dir" E_WT="$dir/wt" "$LIVENESS" --json)
+    E_ENDPOINT_SLEEP='' E_CAPTURE_SLEEP='' E_REAL_PS="$real_ps" E_DIR="$dir" E_WT="$dir/wt" "$LIVENESS" --json)
   printf '%s' "$neutralized_json" | jq -e '.records[0].activity == "active"' >/dev/null \
     && fail "neutralizing the CPU-boundary timestamp left the activity assertion green: $neutralized_json"
   pass "production CPU timestamps are taken before trailing lsof work"
@@ -625,6 +671,7 @@ test_harness_relative_cpu_rows
 test_max_cpu_launcher_and_two_sample_delta
 test_real_process_snapshot_accepts_partial_lsof_output
 test_cwd_binding_and_shell_amplifier_refusals
+test_between_sample_exit_is_absent_for_every_harness
 test_endpoint_three_way_and_output_activity
 test_local_evidence_producers_are_bounded
 test_cpu_rate_uses_actual_sample_elapsed_time

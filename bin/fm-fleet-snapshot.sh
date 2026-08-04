@@ -36,7 +36,7 @@
 #     row from bin/fm-liveness-snapshot.sh.
 #     That row is the current output/process measurement Bearings consumes;
 #     current_state uses the same fleet-wide measurement when no matching
-#     no-mistakes run exists, so one two-sample observation serves every task.
+#     no-mistakes run exists, so one two-sample observation file serves every task.
 #   scout_reports[]: present data/<id>/report.md pointers.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
@@ -307,7 +307,7 @@ crew_state_json() {  # <id>
       FM_DATA_OVERRIDE="$DATA" \
       FM_PROJECTS_OVERRIDE="$PROJECTS" \
       FM_CONFIG_OVERRIDE="$CONFIG" \
-      FM_CREW_STATE_LIVENESS_JSON="$MEASURED_LIVENESS_JSON" \
+      FM_CREW_STATE_LIVENESS_FILE="$LIVENESS_FILE" \
       "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null || true
   )
   raw=$(printf '%s\n' "$raw" | head -1)
@@ -1207,8 +1207,10 @@ terminal_evidence_json() {  # <parent-task-json> <event-note> <evidence-contradi
     '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:true,observed_at:$observed,freshness:"fresh",reason:null,lines:$lines,bytes:$bytes,event_note_seen:$seen,contradiction:$contradiction}'
 }
 
-parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <decisions-json>
-  jq -n --argjson summary "$1" --argjson activities "$2" --argjson decisions "$3" '
+parent_evidence_reconciliation_json() {  # <summary-json-file> <activities-json> <decisions-json>
+  jq -n --slurpfile summary_input "$1" --argjson activities "$2" --argjson decisions "$3" '
+    ($summary_input[0]) as $summary
+    |
     def keyed: . != null and . != "" and . != "default";
     def result($e; $matches; $complete; $surface):
       $e + {
@@ -1270,7 +1272,7 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
 secondmate_current_json() {  # <parent-tasks-json-file>
   local tasks_file=$1 registry_file union_file rows_file records_file total_registered total shown truncated
   local row id home host remote registered registry_error task status_file event_raw event_note event_epoch event_age
-  local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
+  local activity_scan activities decisions reconciliation provenance freshness reason summary summary_file summary_rc summary_bytes summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
   local record child_count freeze_output freeze_info freeze_path freeze_rc summary_route summary_timeout seen_homes=''
   registry_file="$SNAP_TMP/secondmate-registry.json"
   union_file="$SNAP_TMP/secondmate-union.json"
@@ -1456,12 +1458,14 @@ secondmate_current_json() {  # <parent-tasks-json-file>
     fi
 
     if [ -z "$reason" ]; then
+      summary_file=$(mktemp "$SNAP_TMP/secondmate-summary.XXXXXX") || return 1
+      printf '%s\n' "$summary" > "$summary_file" || return 1
       state=$(printf '%s' "$summary" | jq -r '.state')
       current_reason=
       if [ "$summary_valid" != true ]; then
         current_reason="structured home state invalid: $(printf '%s' "$summary" | jq -r '.reason // "unknown reason"')"
       fi
-      reconciliation=$(parent_evidence_reconciliation_json "$summary" "$activities" "$decisions")
+      reconciliation=$(parent_evidence_reconciliation_json "$summary_file" "$activities" "$decisions") || return 1
       contradiction=$(printf '%s' "$reconciliation" | jq -r '.contradiction')
       terminal_contradiction=$(printf '%s' "$reconciliation" | jq -r --arg note "$event_note" '
         any(.activities[]; .verdict == "contradicts" and .summary == $note)')
@@ -1474,10 +1478,12 @@ secondmate_current_json() {  # <parent-tasks-json-file>
       if printf '%s' "$terminal" | jq -e '.contradiction == true' >/dev/null; then contradiction=true; fi
       record=$(jq -n \
         --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg state "$state" --arg current_reason "$current_reason" --arg observed "$SNAPSHOT_NOW" \
-        --argjson registered "$registered" --argjson summary "$summary" --argjson summary_valid "$summary_valid" --argjson decisions "$decisions" \
+        --argjson registered "$registered" --slurpfile summary_input "$summary_file" --argjson summary_valid "$summary_valid" --argjson decisions "$decisions" \
         --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
         --argjson reconciliation "$reconciliation" --argjson terminal "$terminal" --argjson contradiction "$contradiction" \
         --arg event_raw "$event_raw" --arg event_note "$event_note" --argjson event_age "$event_age" '
+        ($summary_input[0]) as $summary
+        |
         {id:$id,home:$home,host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
          current:{state:$state,reason:($current_reason | if . == "" then null else . end)},invalidity:$summary.invalidity,
          provenance:{selected:"structured-home",structured_home:$home,summary_valid:$summary_valid,
@@ -1487,7 +1493,7 @@ secondmate_current_json() {  # <parent-tasks-json-file>
          decisions_open:$summary.decisions_open,holds:$summary.holds,queued:$summary.queued,
          landed:$summary.landed,endpoints:$summary.endpoints,counts:$summary.counts,omitted:$summary.omitted,
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan,reconciliation:$reconciliation},
-         terminal_evidence:$terminal,contradiction:$contradiction}')
+         terminal_evidence:$terminal,contradiction:$contradiction}') || return 1
     else
       if [ -n "$event_raw" ]; then
         provenance='parent-event-fallback'
@@ -1570,25 +1576,27 @@ elif ! MEASURED_LIVENESS_JSON=$(FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" F
   "$LIVENESS_BIN" --json 2>/dev/null); then
   MEASURED_LIVENESS_JSON=$EMPTY_LIVENESS_JSON
 fi
+SNAP_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-snapshot.XXXXXX") || exit 1
+cleanup_snapshot_tmp() {
+  rm -rf -- "$SNAP_TMP"
+  if [ -n "$FROZEN_STATE_ROOT" ]; then cleanup_frozen_state; fi
+}
+trap cleanup_snapshot_tmp EXIT HUP INT TERM
+LIVENESS_FILE="$SNAP_TMP/liveness.json"
+printf '%s\n' "$MEASURED_LIVENESS_JSON" > "$LIVENESS_FILE"
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
 if [ -n "$FROZEN_STATE_ROOT" ]; then
   cleanup_frozen_state
   FROZEN_STATE_ROOT=
-  trap - EXIT HUP INT TERM
 fi
-SNAP_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-snapshot.XXXXXX") || exit 1
-cleanup_snapshot_tmp() { rm -rf -- "$SNAP_TMP"; }
-trap cleanup_snapshot_tmp EXIT HUP INT TERM
 BACKLOG_FILE="$SNAP_TMP/backlog.json"
 TASKS_FILE="$SNAP_TMP/tasks.json"
-LIVENESS_FILE="$SNAP_TMP/liveness.json"
 printf '%s\n' "$BACKLOG_JSON" > "$BACKLOG_FILE"
 printf '%s\n' "$TASKS_JSON" > "$TASKS_FILE"
 LIVENESS_JSON=$EMPTY_LIVENESS_JSON
 if [ "$FM_SNAPSHOT_INCLUDE_LIVENESS" = 1 ]; then
   LIVENESS_JSON=$MEASURED_LIVENESS_JSON
-  printf '%s\n' "$LIVENESS_JSON" > "$LIVENESS_FILE"
   TASKS_JSON=$(jq -n --slurpfile tasks_input "$TASKS_FILE" --slurpfile live_input "$LIVENESS_FILE" '
     def unavailable($task): {
       id:$task.id,harness:$task.harness,harness_family:"unknown",backend:$task.backend,

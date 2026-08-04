@@ -647,7 +647,7 @@ SH
 }
 
 test_remote_secondmate_summary_preserves_frozen_inventory() {
-  local home fakebin remote_root remote_home late_meta fake_ssh ssh_count json
+  local home fakebin remote_root remote_home remote_job_state late_meta fake_ssh ssh_count json
   home=$(make_home frozen-remote-inventory)
   printf '## Done\n' > "$home/data/backlog.md"
   fakebin=$(make_fakebin "$home")
@@ -704,12 +704,15 @@ if [ "$count" -eq 2 ]; then cp "${FM_FAKE_RACE_META:?}" "${FM_FAKE_RACE_STATE:?}
 exec "${FM_FAKE_REMOTE_ENTRYPOINT:?}" "$@"
 SH
   chmod +x "$fake_ssh"
+  remote_job_state="$(cd "$home" && pwd -P)/remote-jobs"
   json=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_SSH_BIN="$fake_ssh" \
     FM_FAKE_SSH_COUNT="$ssh_count" FM_FAKE_RACE_META="$late_meta" \
     FM_FAKE_RACE_STATE="$remote_home/state" FM_FAKE_REMOTE_ENTRYPOINT="$remote_root/bin/fm-remote-entrypoint.sh" \
+    FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux FM_REMOTE_JOB_STATE_ROOT="$remote_job_state" \
     FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z "$ROOT/bin/fm-fleet-snapshot.sh" --json)
-  [ "$(cat "$ssh_count")" -eq 2 ] || fail "remote frozen inventory did not use one prepare and one summary handoff"
+  [ "$(cat "$ssh_count")" -eq 2 ] \
+    || fail "remote frozen inventory did not use one prepare and one summary handoff: $(cat "$ssh_count") calls"
   [ -f "$remote_home/state/late.meta" ] || fail "remote race mutation did not change the live metadata inventory"
   printf '%s' "$json" | jq -e '
     .secondmate_current.records[] | select(.id=="remote-race")
@@ -874,6 +877,58 @@ EOF
       and (.landed | any(.owner == "oversized") | not)
   ' >/dev/null || fail "oversized summary revived or retained unvalidated surfaces: $json"
   pass "an oversized secondmate summary retains the strict empty unknown fallback"
+}
+
+test_beyond_arg_max_secondmate_summary_carries_every_row_off_argv() {
+  local home mate fakebin arg_max row_count long_path i freeze_output freeze_path summary_file summary_bytes oversized out_file
+  home=$(make_home large-secondmate-summary)
+  printf '## Done\n' > "$home/data/backlog.md"
+  mate="$TMP_ROOT/large-secondmate-summary-home"
+  make_valid_secondmate_home large-summary "$mate"
+  append_secondmate_registry "$home" large-summary "$mate"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$mate/data/backlog.md"
+  arg_max=$(getconf ARG_MAX)
+  case "$arg_max" in ''|*[!0-9]*) fail "ARG_MAX unavailable for secondmate summary regression" ;; esac
+  row_count=$((arg_max / 600 + 500))
+  long_path=$(awk 'BEGIN { for (i=0; i<420; i++) printf "p" }')
+  i=1
+  while [ "$i" -le "$row_count" ]; do
+    printf -- '- [x] landed-%05d - Every summary row %05d https://example.invalid/%s/pull/%d (repo: sample) (kind: ship) (done 2026-08-04)\n' \
+      "$i" "$i" "$long_path" "$i" >> "$mate/data/backlog.md"
+    i=$((i + 1))
+  done
+  fakebin=$(make_fakebin "$home")
+  freeze_output=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+    FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-freeze)
+  freeze_path=$(printf '%s\n' "$freeze_output" | awk -F '\t' '$1=="ready" {print $3}')
+  summary_file="$home/large-summary.json"
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+    FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" \
+    FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary --frozen-state "$freeze_path" > "$summary_file" \
+    || fail "public secondmate summary fixture generation failed"
+  summary_bytes=$(LC_ALL=C wc -c < "$summary_file" | tr -d ' ')
+  [ "$summary_bytes" -gt "$arg_max" ] || fail "secondmate summary fixture did not exceed ARG_MAX: $summary_bytes <= $arg_max"
+  oversized=$(cat "$summary_file")
+  if jq -n --argjson summary "$oversized" '$summary | type' >/dev/null 2>&1; then
+    fail "legacy secondmate summary argv fixture did not reach E2BIG"
+  fi
+  out_file="$home/parent-snapshot.json"
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" \
+    FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 \
+    FM_SNAPSHOT_SECONDMATE_MAX_BYTES=$((summary_bytes + 1024)) \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json > "$out_file" \
+    || fail "parent snapshot could not carry the beyond-ARG_MAX secondmate summary"
+  jq -e --argjson rows "$row_count" '
+    .secondmate_current.records[] | select(.id=="large-summary")
+    | .provenance.selected=="structured-home"
+      and .counts.landed==$rows
+      and (.landed | length)==$rows
+      and ([.landed[].id] | unique | length)==$rows
+  ' "$out_file" >/dev/null || fail "large summary transport lost one or more generated rows"
+  pass "beyond-ARG_MAX secondmate summary reaches both shared consumers with every row intact"
 }
 
 test_secondmate_and_child_bounds_are_disclosed() {
@@ -1457,6 +1512,30 @@ test_section_caps_are_counted() {
     and ([.omitted[].surface] | index("unhealthy_endpoints showing 2 of 5") != null)
   ' >/dev/null || fail "section caps or counted omissions are wrong: $json"
   pass "all fleet-sized sections stay capped with counted omissions"
+}
+
+test_portfolio_boundary_declares_every_truncated_section_only_when_needed() {
+  local home fakebin json toon complete
+  home=$(make_home portfolio-boundary); write_large_fixture "$home" 5
+  fakebin=$(make_fakebin "$home")
+  json=$(FM_BEARINGS_DECISIONS=2 FM_BEARINGS_GATES=2 FM_BEARINGS_REPORTS=2 \
+    FM_BEARINGS_RECORDED_PRS=2 FM_BEARINGS_UNHEALTHY=2 run "$home" "$fakebin" --json)
+  toon=$(FM_BEARINGS_DECISIONS=2 FM_BEARINGS_GATES=2 FM_BEARINGS_REPORTS=2 \
+    FM_BEARINGS_RECORDED_PRS=2 FM_BEARINGS_UNHEALTHY=2 run "$home" "$fakebin")
+  printf '%s' "$json" | jq -e '
+    [.portfolio_bounds[] | .surface] == ["decisions_open","gates","reports","recorded_prs","unhealthy_endpoints"]
+      and all(.portfolio_bounds[];
+        .shown==2 and .total==5 and .omitted==3
+          and (.shown + .omitted)==.total
+          and (.rest | startswith("rerun with FM_BEARINGS_")))
+  ' >/dev/null || fail "bounded portfolio did not declare every truncated section and recovery path: $json"
+  assert_contains "$toon" 'portfolio_bounds[5]' "TOON hid the portfolio boundary declaration"
+
+  complete=$(FM_BEARINGS_DECISIONS=10 FM_BEARINGS_GATES=10 FM_BEARINGS_REPORTS=10 \
+    FM_BEARINGS_RECORDED_PRS=10 FM_BEARINGS_UNHEALTHY=10 run "$home" "$fakebin" --json)
+  printf '%s' "$complete" | jq -e 'has("portfolio_bounds") | not' >/dev/null \
+    || fail "unbounded portfolio emitted a false truncation declaration: $complete"
+  pass "portfolio boundary names every omitted row and is absent when no portfolio section is truncated"
 }
 
 test_pr_repository_cap_is_disclosed() {
@@ -2278,6 +2357,8 @@ EOF
   pass "main and secondmate captain actionability use the same blocker readiness"
 }
 
+test_beyond_arg_max_secondmate_summary_carries_every_row_off_argv
+test_portfolio_boundary_declares_every_truncated_section_only_when_needed
 test_domain_alpha_stale_parent_event_does_not_become_current_work
 test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution
 test_parent_activity_evidence_is_bounded_and_disclosed
