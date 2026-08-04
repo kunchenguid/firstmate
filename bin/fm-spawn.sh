@@ -1750,8 +1750,24 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # subshell, so cd the pane into it explicitly. The settle poll below still
   # confirms the pane actually moved and validate_spawn_worktree still proves
   # the resulting worktree is isolated from the primary checkout.
-  RECORDED_WT=$(fm_backend_meta_exact_value "$STATE/$ID.meta" worktree 2>/dev/null || true)
-  if [ -n "$RECORDED_WT" ] && [ -d "$RECORDED_WT" ]; then
+  RECORDED_WT_COUNT=0
+  if [ -f "$STATE/$ID.meta" ]; then
+    RECORDED_WT_COUNT=$(grep -c '^worktree=' "$STATE/$ID.meta" 2>/dev/null || true)
+  fi
+  if [ "$RECORDED_WT_COUNT" -gt 0 ]; then
+    if [ "$RECORDED_WT_COUNT" -ne 1 ]; then
+      echo "error: recorded task worktree metadata for $ID is ambiguous; refusing to acquire a replacement lease" >&2
+      exit 1
+    fi
+    RECORDED_WT=$(fm_backend_meta_exact_value "$STATE/$ID.meta" worktree 2>/dev/null || true)
+    if [ -z "$RECORDED_WT" ]; then
+      echo "error: recorded task worktree metadata for $ID is empty; refusing to acquire a replacement lease" >&2
+      exit 1
+    fi
+    if [ ! -d "$RECORDED_WT" ]; then
+      echo "error: recorded task worktree $RECORDED_WT for $ID does not exist; refusing to acquire a replacement lease" >&2
+      exit 1
+    fi
     RECORDED_WT=$(real_path_or_raw "$RECORDED_WT")
     if treehouse_lease_matches_task "$RECORDED_WT"; then
       LEASED_WT=$RECORDED_WT
@@ -1761,9 +1777,11 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
         echo "error: treehouse status could not validate the recorded task worktree lease for $ID" >&2
         exit 1
       fi
+      echo "error: recorded task worktree $RECORDED_WT is not leased under task id $ID; refusing to acquire a replacement lease" >&2
+      exit 1
     fi
   fi
-  if [ -z "$LEASED_WT" ]; then
+  if [ "$RECORDED_WT_COUNT" -eq 0 ]; then
     LEASED_WT=$( cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID" ) || {
       echo "error: treehouse get --lease failed to lease a task worktree for $ID; inspect the pool under $PROJ_ABS" >&2
       exit 1

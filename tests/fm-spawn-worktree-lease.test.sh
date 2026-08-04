@@ -60,6 +60,7 @@ printf '%s\n' "$*" >> "${FM_FAKE_TH_LOG:?FM_FAKE_TH_LOG unset}"
 case "${1:-}" in
   get) printf '%s\n' "${FM_FAKE_LEASE_PATH:?FM_FAKE_LEASE_PATH unset}" ;;
   status)
+    [ "${FM_FAKE_STATUS_FAIL:-0}" != 1 ] || exit 1
     node -e 'console.log(JSON.stringify([{path: process.argv[1], status: "leased", lease_holder: process.argv[2]}]))' \
       "${FM_FAKE_LEASE_PATH:?FM_FAKE_LEASE_PATH unset}" \
       "${FM_FAKE_LEASE_HOLDER:?FM_FAKE_LEASE_HOLDER unset}"
@@ -109,7 +110,8 @@ run_lease_spawn() {
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_LEASE_PATH="$lease" FM_FAKE_PANE_PATH="$pane" \
-    FM_FAKE_LEASE_HOLDER="$id" \
+    FM_FAKE_LEASE_HOLDER="${FM_FAKE_LEASE_HOLDER_OVERRIDE:-$id}" \
+    FM_FAKE_STATUS_FAIL="${FM_FAKE_STATUS_FAIL_OVERRIDE:-0}" \
     FM_FAKE_TH_LOG="$THLOG" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
@@ -230,6 +232,52 @@ test_aborted_relaunch_preserves_recorded_lease() {
   pass "aborted relaunch preserves the original task lease"
 }
 
+test_relaunch_rejects_wrong_lease_holder() {
+  local rec id out status meta_before
+  id="lease-wrong-holder-z5"
+  rec=$(make_lease_case lease-wrong-holder "$id")
+  read_lease_record "$rec"
+  printf '%s\n' "worktree=$WT_DIR" "project=$PROJ_DIR" > "$HOME_DIR/state/$id.meta"
+  meta_before=$(cat "$HOME_DIR/state/$id.meta")
+
+  set +e
+  out=$(FM_FAKE_LEASE_HOLDER_OVERRIDE=another-task run_lease_spawn "$id" "$WT_DIR" "$WT_DIR")
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "relaunch should reject a lease owned by another task: $out"
+  assert_contains "$out" "is not leased under task id $id" \
+    "wrong-holder relaunch did not surface the lease ambiguity"
+  assert_no_grep '^get --lease ' "$THLOG" \
+    "wrong-holder relaunch acquired a replacement lease"
+  [ "$(cat "$HOME_DIR/state/$id.meta")" = "$meta_before" ] \
+    || fail "wrong-holder relaunch changed the recorded task metadata"
+  pass "relaunch fails closed when another task holds the recorded lease"
+}
+
+test_relaunch_rejects_unreadable_lease_status() {
+  local rec id out status meta_before
+  id="lease-status-failure-z6"
+  rec=$(make_lease_case lease-status-failure "$id")
+  read_lease_record "$rec"
+  printf '%s\n' "worktree=$WT_DIR" "project=$PROJ_DIR" > "$HOME_DIR/state/$id.meta"
+  meta_before=$(cat "$HOME_DIR/state/$id.meta")
+
+  set +e
+  out=$(FM_FAKE_STATUS_FAIL_OVERRIDE=1 run_lease_spawn "$id" "$WT_DIR" "$WT_DIR")
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "relaunch should reject unreadable lease status: $out"
+  assert_contains "$out" "could not validate the recorded task worktree lease" \
+    "unreadable-status relaunch did not surface the lease ambiguity"
+  assert_no_grep '^get --lease ' "$THLOG" \
+    "unreadable-status relaunch acquired a replacement lease"
+  [ "$(cat "$HOME_DIR/state/$id.meta")" = "$meta_before" ] \
+    || fail "unreadable-status relaunch changed the recorded task metadata"
+  pass "relaunch fails closed when recorded lease status is unreadable"
+}
+
 # --- real treehouse: the lease contract fm-spawn/fm-teardown rely on ---------
 
 treehouse_supports_lease() {
@@ -299,6 +347,8 @@ test_spawn_abort_releases_leased_worktree
 test_relaunch_reuses_recorded_lease
 test_relaunch_accepts_equivalent_status_path
 test_aborted_relaunch_preserves_recorded_lease
+test_relaunch_rejects_wrong_lease_holder
+test_relaunch_rejects_unreadable_lease_status
 test_treehouse_lease_contract_real
 
 echo "# all fm-spawn-worktree-lease tests passed"
