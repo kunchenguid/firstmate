@@ -7,6 +7,11 @@
 # and GitHub reports a PR head that contains the current local work, or its content
 # is already in the up-to-date default branch.
 #
+# That last containment step is the shared instrument in bin/fm-landed-lib.sh.
+# Teardown keeps its own policy on top of it (refresh the remote first, and
+# measure against that remote whenever an origin exists), so these cases are the
+# regression coverage for changes to that library reaching the releaser of work.
+#
 # Covers three fixes:
 #   - local-only fork-remote: a fork IS a remote, so fork-pushed upstream-
 #     contribution PRs are teardown-eligible (the pre-fix code false-refused them).
