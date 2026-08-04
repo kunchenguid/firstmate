@@ -310,6 +310,11 @@ test_pr_status_normalization() {
       "$(fm_outcome_pr_mergeable_normalize MERGEABLE clean)" \
       "$(fm_outcome_pr_mergeable_normalize MERGEABLE dirty)" \
       "$(fm_outcome_pr_mergeable_normalize "" "")"
+    printf "%s %s %s %s\n" \
+      "$(fm_outcome_pr_gitlab_review_normalize false 0 0 0)" \
+      "$(fm_outcome_pr_gitlab_review_normalize false 2 2 0)" \
+      "$(fm_outcome_pr_gitlab_review_normalize true 2 0 2)" \
+      "$(fm_outcome_pr_gitlab_review_normalize false 2 "" "")"
   ')
   [ "$(printf '%s\n' "$out" | sed -n 1p)" = "draft merged closed unknown" ] \
     || fail "PR state normalization is wrong: $(printf '%s\n' "$out" | sed -n 1p)"
@@ -319,6 +324,8 @@ test_pr_status_normalization() {
     || fail "PR check normalization is wrong: $(printf '%s\n' "$out" | sed -n 3p)"
   [ "$(printf '%s\n' "$out" | sed -n 4p)" = "mergeable conflicting unknown" ] \
     || fail "PR mergeability normalization is wrong: $(printf '%s\n' "$out" | sed -n 4p)"
+  [ "$(printf '%s\n' "$out" | sed -n 5p)" = "none review_required approved unknown" ] \
+    || fail "GitLab review normalization is wrong: $(printf '%s\n' "$out" | sed -n 5p)"
   pass "each forge vocabulary maps onto the normalized state, review, check, and mergeability enumerations"
 }
 

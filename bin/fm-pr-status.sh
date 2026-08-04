@@ -126,7 +126,8 @@ refresh_github() {  # <owner/repo> <number> -> normalized fields on stdout
 # GitLab merge requests through glab. detailed_merge_status carries the
 # conflict/blocked distinction; pipeline status carries the check rollup.
 refresh_gitlab() {  # <host> <project-path> <number>
-  local host=$1 path=$2 number=$3 raw approvals review=unknown endpoint
+  local host=$1 path=$2 number=$3 raw approvals approval_fields review=unknown endpoint
+  local approved required left approved_count
   command -v glab >/dev/null 2>&1 || { echo "fm-pr-status: no glab on PATH" >&2; return 1; }
   endpoint="projects/$(printf '%s' "$path" | sed 's|/|%2F|g')/merge_requests/$number"
   raw=$(GITLAB_HOST="$host" run_bounded glab api \
@@ -135,8 +136,21 @@ refresh_gitlab() {  # <host> <project-path> <number>
   printf '%s' "$raw" | jq -e 'type == "object"' >/dev/null 2>&1 \
     || { echo "fm-pr-status: unusable response for $path!$number" >&2; return 1; }
   if approvals=$(GITLAB_HOST="$host" run_bounded glab api "$endpoint/approvals" 2>/dev/null) \
-    && printf '%s' "$approvals" | jq -e '.approved | type == "boolean"' >/dev/null 2>&1; then
-    review=$(printf '%s' "$approvals" | jq -r 'if .approved then "approved" else "review_required" end')
+    && approval_fields=$(printf '%s' "$approvals" | jq -er '
+      if (.approved | type == "boolean")
+         and ((.approvals_required | type) == "number" and .approvals_required >= 0
+              and (.approvals_required | floor) == .approvals_required)
+         and ((.approvals_left | type) == "number"
+              and .approvals_left >= 0 and (.approvals_left | floor) == .approvals_left
+              or (.approved_by | type) == "array")
+      then [(.approved | tostring), (.approvals_required | tostring),
+            (if (.approvals_left | type) == "number" then (.approvals_left | tostring) else "" end),
+            (if (.approved_by | type) == "array" then (.approved_by | length | tostring) else "" end)]
+           | join("\u001f")
+      else error("ambiguous GitLab approval state") end
+    ' 2>/dev/null); then
+    IFS=$'\037' read -r approved required left approved_count <<<"$approval_fields"
+    review=$(fm_outcome_pr_gitlab_review_normalize "$approved" "$required" "$left" "$approved_count")
   fi
   printf '%s' "$raw" | jq -r --arg review "$review" '
     [(.state // ""), (.draft // .work_in_progress // false | tostring),

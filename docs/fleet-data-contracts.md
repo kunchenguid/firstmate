@@ -103,7 +103,7 @@ Read-only consumers report the cached value with its age and never call a forge 
 `bin/fm-pr-check.sh` seeds the cache when it arms a merge watch and `bin/fm-pr-merge.sh` refreshes it after a merge; both are best effort, and a failed refresh leaves the previous observation in place rather than overwriting a good reading with `unknown`.
 Every cache read validates the canonical PR identity, the normalized enumerations, the draft type, the head SHA, the ISO-8601 UTC observation stamp, and the provider source before exposing it.
 A cache whose URL does not match the task's current canonical PR URL projects the documented unknown observation, while a failed refresh for the same URL retains the previous valid observation.
-GitLab review state comes from the merge request approvals endpoint's current `approved` result and degrades to `unknown` when that endpoint is unavailable.
+GitLab review state combines the merge request approvals endpoint's current `approved`, `approvals_required`, `approvals_left`, and `approved_by` values to distinguish `none`, `review_required`, and `approved`, and ambiguous or unavailable results degrade to `unknown`.
 
 ## Snapshot projection
 
@@ -116,6 +116,7 @@ Top level: `card_precedence`, `supervision` (watcher beacon age against the shar
 
 `history` is schema `fm-outcome-history.v1`, built from every `data/<id>/outcome.json` in the home, newest completion first and bounded by `FM_SNAPSHOT_HISTORY`.
 A manifest that no longer parses, is not a plain file, or exceeds the read bound is disclosed in `history.malformed` with its reason rather than dropped, so a consumer can distinguish "nothing completed" from "one record is unreadable".
+History orders readable same-schema candidates before applying full value conformance, then validates only enough newest candidates to fill the requested bound.
 
 ### Card precedence
 
