@@ -83,7 +83,7 @@ case "$SNAPSHOT_EPOCH" in ''|*[!0-9]*) SNAPSHOT_EPOCH=$(date +%s) ;; esac
 # Cross-home bounds are explicit so one broken or unexpectedly large home cannot
 # hang or explode the parent snapshot.
 FM_SNAPSHOT_SECONDMATES=${FM_SNAPSHOT_SECONDMATES:-20}
-FM_SNAPSHOT_SECONDMATE_TIMEOUT=${FM_SNAPSHOT_SECONDMATE_TIMEOUT:-20}
+FM_SNAPSHOT_SECONDMATE_TIMEOUT=${FM_SNAPSHOT_SECONDMATE_TIMEOUT:-auto}
 FM_SNAPSHOT_SECONDMATE_MAX_BYTES=${FM_SNAPSHOT_SECONDMATE_MAX_BYTES:-262144}
 FM_SNAPSHOT_SECONDMATE_CHILDREN=${FM_SNAPSHOT_SECONDMATE_CHILDREN:-20}
 FM_SNAPSHOT_SECONDMATE_QUEUED=${FM_SNAPSHOT_SECONDMATE_QUEUED:-20}
@@ -99,6 +99,12 @@ FM_SNAPSHOT_REGISTRY_LINES=${FM_SNAPSHOT_REGISTRY_LINES:-256}
 FM_SNAPSHOT_REGISTRY_BYTES=${FM_SNAPSHOT_REGISTRY_BYTES:-65536}
 FM_SNAPSHOT_REGISTRY_RECORDS=${FM_SNAPSHOT_REGISTRY_RECORDS:-40}
 FM_SNAPSHOT_REGISTRY_TIMEOUT=${FM_SNAPSHOT_REGISTRY_TIMEOUT:-2}
+FM_SNAPSHOT_REMOTE_PROBE_TIMEOUT=${FM_SNAPSHOT_REMOTE_PROBE_TIMEOUT:-5}
+FM_SNAPSHOT_TASK_OVERHEAD_SECS=${FM_SNAPSHOT_TASK_OVERHEAD_SECS:-1}
+FM_CREW_STATE_NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
+FM_LIVENESS_INTERVAL_MS=${FM_LIVENESS_INTERVAL_MS:-7500}
+FM_LIVENESS_EVIDENCE_TIMEOUT=${FM_LIVENESS_EVIDENCE_TIMEOUT:-2}
+FM_LIVENESS_REMOTE_OVERHEAD_SECS=${FM_LIVENESS_REMOTE_OVERHEAD_SECS:-2}
 FM_SNAPSHOT_INCLUDE_LIVENESS=${FM_SNAPSHOT_INCLUDE_LIVENESS:-0}
 case "$FM_SNAPSHOT_INCLUDE_LIVENESS" in 0|1) ;; *) echo "fm-fleet-snapshot: FM_SNAPSHOT_INCLUDE_LIVENESS must be 0 or 1" >&2; exit 2 ;; esac
 validate_positive_bound() {  # <name> <value>
@@ -115,7 +121,10 @@ case "$FM_SNAPSHOT_SECONDMATES" in
     exit 2
     ;;
 esac
-validate_positive_bound FM_SNAPSHOT_SECONDMATE_TIMEOUT "$FM_SNAPSHOT_SECONDMATE_TIMEOUT"
+case "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" in
+  auto) ;;
+  *) validate_positive_bound FM_SNAPSHOT_SECONDMATE_TIMEOUT "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" ;;
+esac
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_MAX_BYTES "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_CHILDREN "$FM_SNAPSHOT_SECONDMATE_CHILDREN"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_QUEUED "$FM_SNAPSHOT_SECONDMATE_QUEUED"
@@ -131,6 +140,12 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_LINES "$FM_SNAPSHOT_REGISTRY_LINES"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_BYTES "$FM_SNAPSHOT_REGISTRY_BYTES"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_RECORDS "$FM_SNAPSHOT_REGISTRY_RECORDS"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIMEOUT"
+validate_positive_bound FM_SNAPSHOT_REMOTE_PROBE_TIMEOUT "$FM_SNAPSHOT_REMOTE_PROBE_TIMEOUT"
+validate_positive_bound FM_SNAPSHOT_TASK_OVERHEAD_SECS "$FM_SNAPSHOT_TASK_OVERHEAD_SECS"
+validate_positive_bound FM_CREW_STATE_NM_TIMEOUT "$FM_CREW_STATE_NM_TIMEOUT"
+validate_positive_bound FM_LIVENESS_INTERVAL_MS "$FM_LIVENESS_INTERVAL_MS"
+validate_positive_bound FM_LIVENESS_EVIDENCE_TIMEOUT "$FM_LIVENESS_EVIDENCE_TIMEOUT"
+validate_positive_bound FM_LIVENESS_REMOTE_OVERHEAD_SECS "$FM_LIVENESS_REMOTE_OVERHEAD_SECS"
 
 # shellcheck source=bin/fm-backend.sh
 # shellcheck disable=SC1091
@@ -149,6 +164,7 @@ usage() {
   cat <<'EOF'
 usage: fm-fleet-snapshot.sh --json
        fm-fleet-snapshot.sh --secondmate-home-summary
+       fm-fleet-snapshot.sh --secondmate-home-count
 
 Print a read-only structured snapshot of the firstmate fleet.
 JSON is the stable machine-readable output contract.
@@ -161,7 +177,8 @@ Actionable tasks-axi captain holds appear as decisions_open and stay visible in
 queued with hold_reason, hold_kind, and plural blocker fields for downstream
 projections. A captain hold is actionable only when every blocker is Done.
 Cross-home reads use FM_SNAPSHOT_SECONDMATES (default 20, 0 lifts the count
-bound), FM_SNAPSHOT_SECONDMATE_TIMEOUT, and FM_SNAPSHOT_SECONDMATE_MAX_BYTES.
+bound), an auto-derived FM_SNAPSHOT_SECONDMATE_TIMEOUT by default, and
+FM_SNAPSHOT_SECONDMATE_MAX_BYTES.
 Terminal contradiction evidence uses
 FM_SNAPSHOT_TERMINAL_LINES, FM_SNAPSHOT_TERMINAL_BYTES, and
 FM_SNAPSHOT_TERMINAL_TIMEOUT and never becomes canonical current state.
@@ -178,9 +195,24 @@ OUTPUT_MODE=json
 case "${1:---json}" in
   --json) ;;
   --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
+  --secondmate-home-count) OUTPUT_MODE=secondmate-home-count ;;
   -h|--help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
 esac
+
+count_meta_entries_at() {  # <state-dir>
+  local state_dir=$1 meta count=0
+  for meta in "$state_dir"/*.meta; do
+    [ -e "$meta" ] || continue
+    count=$((count + 1))
+  done
+  printf '%s\n' "$count"
+}
+
+if [ "$OUTPUT_MODE" = secondmate-home-count ]; then
+  count_meta_entries_at "$STATE"
+  exit 0
+fi
 
 command -v jq >/dev/null 2>&1 || { echo "fm-fleet-snapshot: jq not found" >&2; exit 1; }
 
@@ -495,7 +527,7 @@ task_json_lines() {
     endpoint_exists=null
     agent_alive=not_checked
     if [ -n "$remote_host" ]; then
-      if remote_state=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
+      if remote_state=$(fm_run_timed "$FM_SNAPSHOT_REMOTE_PROBE_TIMEOUT" \
         "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
         remote_rc=0
       else
@@ -804,6 +836,33 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
 FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=${FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME:-10}
 case "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" in ''|*[!0-9]*) FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=10 ;; esac
 
+secondmate_summary_timeout() {  # <child-count> <local|remote>
+  local child_count=$1 route=$2 interval_ms evidence_timeout nm_timeout task_overhead
+  local interval_secs evidence_seconds crew_seconds task_seconds remote_seconds total
+  if [ "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" != auto ]; then
+    printf '%s\n' "$FM_SNAPSHOT_SECONDMATE_TIMEOUT"
+    return 0
+  fi
+  if [ "$route" = remote ]; then
+    interval_ms=7500
+    evidence_timeout=2
+    nm_timeout=10
+    task_overhead=1
+  else
+    interval_ms=$FM_LIVENESS_INTERVAL_MS
+    evidence_timeout=$FM_LIVENESS_EVIDENCE_TIMEOUT
+    nm_timeout=$FM_CREW_STATE_NM_TIMEOUT
+    task_overhead=$FM_SNAPSHOT_TASK_OVERHEAD_SECS
+  fi
+  interval_secs=$(( (interval_ms + 999) / 1000 ))
+  evidence_seconds=$(( (2 + 4 * child_count) * evidence_timeout ))
+  crew_seconds=$((2 * child_count * (nm_timeout + 1)))
+  task_seconds=$(( (child_count + 1) * task_overhead))
+  remote_seconds=0
+  [ "$route" = remote ] && remote_seconds=$FM_SNAPSHOT_REMOTE_PROBE_TIMEOUT
+  total=$((interval_secs + evidence_seconds + crew_seconds + task_seconds + remote_seconds))
+  printf '%s\n' "$total"
+}
 # GNU stat treats -f as a filesystem-report command, so a BSD-first fallback can
 # pollute arithmetic input before failing. Select the platform syntax once.
 if [ "$(uname 2>/dev/null || true)" = Darwin ]; then
@@ -1130,7 +1189,7 @@ secondmate_current_json() {  # <parent-tasks-json-file>
   local tasks_file=$1 registry_file union_file rows_file records_file total_registered total shown truncated
   local row id home host remote registered registry_error task status_file event_raw event_note event_epoch event_age
   local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
-  local record seen_homes=''
+  local record child_count count_out count_rc summary_route summary_timeout seen_homes=''
   registry_file="$SNAP_TMP/secondmate-registry.json"
   union_file="$SNAP_TMP/secondmate-union.json"
   rows_file="$SNAP_TMP/secondmate-rows.jsonl"
@@ -1212,11 +1271,31 @@ secondmate_current_json() {  # <parent-tasks-json-file>
     fi
     if [ -z "$reason" ]; then
       if [ "$remote" = true ]; then
-        summary=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
+        if count_out=$(fm_run_timed "$FM_SNAPSHOT_REMOTE_PROBE_TIMEOUT" \
+          "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-count < /dev/null 2>/dev/null); then
+          count_rc=0
+        else
+          count_rc=$?
+        fi
+        case "$count_out" in ''|*[!0-9]*) count_rc=1 ;; esac
+        if [ "$count_rc" -ne 0 ]; then
+          reason="structured home child count unavailable"
+        else
+          child_count=$count_out
+        fi
+      else
+        child_count=$(count_meta_entries_at "$home/state")
+      fi
+    fi
+    if [ -z "$reason" ]; then
+      if [ "$remote" = true ]; then summary_route=remote; else summary_route=local; fi
+      summary_timeout=$(secondmate_summary_timeout "$child_count" "$summary_route")
+      if [ "$remote" = true ]; then
+        summary=$(fm_run_timed "$summary_timeout" \
           "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-summary < /dev/null 2>/dev/null)
         summary_rc=$?
       else
-        summary=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" env \
+        summary=$(fm_run_timed "$summary_timeout" env \
           FM_ROOT_OVERRIDE="$FM_ROOT" \
           FM_HOME="$home" \
           FM_STATE_OVERRIDE="$home/state" \
