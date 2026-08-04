@@ -89,6 +89,14 @@ set +e
 
 fm_afk_launch_log() { printf 'fm-afk-launch: %s\n' "$*" >&2; }
 
+fm_afk_launch_refuse_external_codex_without_pane() {
+  fm_supervisor_external_codex_without_pane || return 1
+  fm_afk_launch_log "away mode is unavailable from an external Codex thread without a primary tmux or Herdr pane"
+  fm_afk_launch_log "Codex provides no safe asynchronous callback to this thread; do not set FM_SUPERVISOR_TARGET to a worker pane"
+  fm_afk_launch_log "keep foreground checkpoints running while present, or restart the primary inside tmux or Herdr before leaving work unattended"
+  return 0
+}
+
 fm_afk_launch_lock_owned() {
   local pid expected actual
   [ -d "$FM_AFK_LAUNCH_LOCK" ] || return 1
@@ -462,6 +470,7 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
 
 fm_afk_launch_start() {
   local captain_target captain_backend backup artifact had_afk=0 result
+  fm_afk_launch_refuse_external_codex_without_pane && return 1
   if [ -e "$FM_AFK_LAUNCH_STATE/.afk-return-catchup" ]; then
     fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
     return 1
@@ -531,6 +540,7 @@ fm_afk_launch_start() {
 
 fm_afk_launch_start_native() {
   local backup artifact had_afk=0 result=0
+  fm_afk_launch_refuse_external_codex_without_pane && return 1
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
   if [ -e "$FM_AFK_LAUNCH_STATE/.afk-return-catchup" ]; then
     fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"

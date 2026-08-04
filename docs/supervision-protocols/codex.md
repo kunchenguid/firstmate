@@ -13,3 +13,8 @@ When this session owns supervision and away mode is not active:
 
 Codex cannot reason while a foreground tool call is running.
 The bounded checkpoint returns control regularly so user messages and queued wakes can be handled without relying on background-task wake semantics.
+
+Away mode needs a verified primary tmux or Herdr pane where the daemon can deliver its return and escalation messages.
+An external Codex thread identified by `CODEX_THREAD_ID` without either pane has no safe asynchronous callback, so `bin/fm-afk-launch.sh` refuses before it writes away state.
+Do not supply `FM_SUPERVISOR_TARGET` for a worker pane.
+Keep foreground checkpoints running while present, or restart the primary in tmux or Herdr before leaving work unattended.

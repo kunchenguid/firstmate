@@ -22,6 +22,9 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LAUNCH="$ROOT/bin/fm-afk-launch.sh"
 START="$ROOT/bin/fm-afk-start.sh"
+CHECKPOINT="$ROOT/bin/fm-watch-checkpoint.sh"
+WATCH="$ROOT/bin/fm-watch.sh"
+DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 FAILED=0
 fail() { printf 'not ok - %s\n' "$1" >&2; FAILED=1; }
@@ -291,7 +294,7 @@ unit_signal_exits_with_lock_cleanup() {
   marker="$st/resumed"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
-    fm_afk_launch_start() { sleep 30; }
+    fm_afk_launch_start() { sleep 1; }
     fm_afk_launch_main start
     : > "$2"
   ' _ "$LAUNCH" "$marker" &
@@ -823,6 +826,77 @@ unit_flag_write_failure_aborts() {
 }
 
 # ---------------------------------------------------------------------------
+# UNIT 4: an external Codex thread has no owned pane or callback destination.
+# A bounded checkpoint remains intentionally finite, while away entry rejects
+# both the normal and native paths before they can create daemon state or consume
+# a durable wake. An explicit worker-looking target must not bypass that check.
+# ---------------------------------------------------------------------------
+unit_external_codex_no_pane_refuses_before_away_state() {
+  local st checkpoint_out checkpoint_err watch_out launch_out launch_rc checkpoint_rc native_out native_rc drained
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-codex-no-pane.XXXXXX")
+  mkdir -p "$st/state" "$st/config" "$st/data"
+  printf 'window=worker-pane\nkind=ship\n' > "$st/state/demo.meta"
+  checkpoint_out="$st/checkpoint.out"
+  checkpoint_err="$st/checkpoint.err"
+  watch_out="$st/watch.out"
+  checkpoint_rc=0
+  env -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID \
+    CODEX_THREAD_ID=fixture FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$CHECKPOINT" --seconds 1 > "$checkpoint_out" 2> "$checkpoint_err" || checkpoint_rc=$?
+  if [ "$checkpoint_rc" -eq 124 ] \
+    && grep -F 'checkpoint: no actionable wake within 1s' "$checkpoint_out" >/dev/null \
+    && [ ! -e "$st/state/.watch.lock" ]; then
+    pass "external Codex: bounded checkpoint returns without retaining a watcher lock"
+  else
+    fail "external Codex: bounded checkpoint did not leave the expected finite no-lock state"
+  fi
+
+  printf 'done: fixture wake after checkpoint\n' > "$st/state/demo.status"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$watch_out" 2>&1 \
+    || fail "external Codex: could not create a durable fixture wake"
+  launch_out="$st/launch.out"
+  launch_rc=0
+  env -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID \
+    CODEX_THREAD_ID=fixture FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+    FM_SUPERVISOR_TARGET=worker-pane FM_SUPERVISOR_BACKEND=tmux "$LAUNCH" start > "$launch_out" 2>&1 \
+    || launch_rc=$?
+  if [ "$launch_rc" -ne 0 ] \
+    && grep -F 'no safe asynchronous callback' "$launch_out" >/dev/null \
+    && grep -F 'do not set FM_SUPERVISOR_TARGET to a worker pane' "$launch_out" >/dev/null \
+    && [ ! -e "$st/state/.afk" ] \
+    && [ ! -e "$st/state/.afk-daemon-terminal" ] \
+    && [ ! -e "$st/state/.supervise-daemon.lock" ]; then
+    pass "external Codex: wrong pane target is refused before daemon lifecycle state"
+  else
+    fail "external Codex: wrong pane target bypassed or obscured the explicit AFK refusal"
+  fi
+
+  native_out="$st/native.out"
+  native_rc=0
+  env -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID \
+    CODEX_THREAD_ID=fixture FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native > "$native_out" 2>&1 \
+    || native_rc=$?
+  if [ "$native_rc" -ne 0 ] \
+    && grep -F 'no safe asynchronous callback' "$native_out" >/dev/null \
+    && [ ! -e "$st/state/.afk" ] \
+    && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
+    pass "external Codex: native launch path cannot create a reapable daemon"
+  else
+    fail "external Codex: native launch path created away state without a delivery surface"
+  fi
+
+  drained=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$DRAIN")
+  if printf '%s\n' "$drained" | grep "$(printf '\tsignal\t')" | grep -F "$st/state/demo.status" >/dev/null; then
+    pass "external Codex: refusal preserves the durable wake for the captain's return"
+  else
+    fail "external Codex: away refusal consumed or lost the durable wake"
+  fi
+  rm -rf "$st"
+}
+
+# ---------------------------------------------------------------------------
 # E2E herdr: topology invariant.
 # ---------------------------------------------------------------------------
 e2e_herdr() {
@@ -951,6 +1025,7 @@ unit_clear_failure_aborts_entry
 unit_confirmed_absence_succeeds
 unit_incomplete_restore_retains_backup
 unit_flag_write_failure_aborts
+unit_external_codex_no_pane_refuses_before_away_state
 e2e_herdr
 e2e_tmux
 

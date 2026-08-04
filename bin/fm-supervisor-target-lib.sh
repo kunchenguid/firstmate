@@ -21,6 +21,25 @@
 FM_SUPERVISOR_TARGET_DEFAULT="firstmate:0"
 FM_SUPERVISOR_BACKEND_DEFAULT="tmux"
 
+# fm_supervisor_primary_pane_available: return success only when this process
+# itself carries a verified captain-pane marker. An explicit target does not
+# count here: an external Codex thread has no safe way to prove that a manually
+# supplied tmux or herdr target is its own primary rather than a worker pane.
+fm_supervisor_primary_pane_available() {
+  [ -n "${TMUX_PANE:-}" ] && return 0
+  [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ] && return 0
+  return 1
+}
+
+# fm_supervisor_external_codex_without_pane: Codex Desktop marks the active
+# external thread with CODEX_THREAD_ID but provides neither a primary-terminal
+# marker nor an asynchronous callback into that thread. AFK must refuse this
+# surface instead of accepting a guessed worker pane as its delivery target.
+fm_supervisor_external_codex_without_pane() {
+  [ -n "${CODEX_THREAD_ID:-}" ] || return 1
+  ! fm_supervisor_primary_pane_available
+}
+
 # discover_supervisor_target: resolve the pane running firstmate. Priority:
 #   1. FM_SUPERVISOR_TARGET env (explicit override) - may be a tmux target or a
 #      herdr "<session>:<pane-id>" target (paired with discover_supervisor_backend
