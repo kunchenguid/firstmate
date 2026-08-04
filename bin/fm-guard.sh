@@ -154,6 +154,17 @@ watcher_healthy=false
 if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
   watcher_healthy=true
 fi
+# The alarm gate is the weaker, beacon-anchored liveness, not the strict identity
+# match: a fresh beacon with a live lock holder means a watcher IS beating, so
+# supervision is happening even if the recorded identity does not byte-match (a
+# transient identity read, a benign re-render, or a mid-handoff). This is what
+# keeps a demonstrably fresh beacon from ever being reported as "watcher down".
+# fm_watcher_healthy stays authoritative for the turn-end block and arm/attach
+# paths; only this advisory relaxes to the beacon.
+watcher_beating=false
+if [ "$watcher_healthy" = true ] || fm_watcher_beating "$STATE" "$GRACE" "$FM_HOME"; then
+  watcher_beating=true
+fi
 if [ "$needed" = false ]; then
   # Leave the unhealthy state (nothing riding on the watcher): clear so a later
   # work or X-mode need + stale combination is a fresh episode even if the
@@ -164,10 +175,10 @@ fi
 
 [ -s "$FM_WAKE_QUEUE" ] && queue_pending=true
 
-# No fresh watcher with tasks in flight is the dangerous state: emit a prominent,
-# bordered banner FIRST so it reads as an alarm, not a buried stderr line. Later
-# calls in the same episode get a one-line reminder only.
-if [ "$watcher_healthy" = false ]; then
+# No beating watcher with tasks in flight is the dangerous state: emit a
+# prominent, bordered banner FIRST so it reads as an alarm, not a buried stderr
+# line. Later calls in the same episode get a one-line reminder only.
+if [ "$watcher_beating" = false ]; then
   episode_key=$(fm_guard_stale_episode_key "$STATE")
   episode_key=${episode_key%$'\n'}
   print_full_banner=0
@@ -190,15 +201,25 @@ if [ "$watcher_healthy" = false ]; then
       --queue-pending "$queue_arg" \
       --repair-line 2>/dev/null || printf '%s\n' 'Repair missing watcher supervision according to the session-start operating block.')
     rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+    # Word the verdict from the actual failure, never from stale-beacon wording
+    # the beacon does not support. A stale (or absent) beacon is a genuine "no
+    # fresh beacon"; a fresh beacon that still failed the beating check means the
+    # recorded watcher pid is not a live holder of this home's lock (a watcher
+    # died and left a not-yet-aged beacon), which is reported as such.
+    if [ "$FM_SUP_WATCHER_FRESH" = true ]; then
+      down_desc="no live watcher holds this home lock (last beat: $beacon_desc)"
+    else
+      down_desc="no watcher has a fresh beacon (last beat: $beacon_desc, grace ${GRACE}s)"
+    fi
     {
       printf '●%s\n' "$rule"
       printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
       if [ "$in_flight" -gt 0 ]; then
-        printf '●  %s task(s) in flight, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
+        printf '●  %s task(s) in flight, but %s.\n' "$in_flight" "$down_desc"
       elif [ "$sources" -gt 0 ]; then
-        printf '●  %s process-event source(s) registered, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$sources" "$beacon_desc" "$GRACE"
+        printf '●  %s process-event source(s) registered, but %s.\n' "$sources" "$down_desc"
       else
-        printf '●  X-mode relay polling needs supervision, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$beacon_desc" "$GRACE"
+        printf '●  X-mode relay polling needs supervision, but %s.\n' "$down_desc"
       fi
       if [ "$READ_ONLY" -eq 1 ]; then
         printf '●  This read-only session should report the lapse, not repair it.\n'

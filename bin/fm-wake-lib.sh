@@ -115,6 +115,35 @@ fm_watcher_healthy() {
   return 0
 }
 
+# fm_watcher_beating <state-dir> [grace] [home]
+# A weaker, beacon-anchored liveness signal for the PULL-BASED advisory guard
+# (bin/fm-guard.sh) ONLY. True when a live process holds THIS home's watcher lock
+# AND the liveness beacon is fresh within grace. It deliberately does NOT require
+# the recorded pid-identity or watcher-path to still match, because the beacon is
+# the ground-truth "a watcher beat within grace" signal and a transient
+# fm_pid_identity read failure, a benign lstart re-render, or a brief mid-handoff
+# window must never make the advisory contradict a demonstrably fresh beacon by
+# declaring supervision off. fm_watcher_healthy stays the STRICT gate for
+# arm/attach (bin/fm-watch-arm.sh) and turn-end block (bin/fm-turnend-guard.sh)
+# decisions; this must never be substituted there. Home scoping is retained so a
+# foreign or stale lock record is never counted as this home's live watcher.
+FM_WATCHER_BEATING_PID=
+fm_watcher_beating() {
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} home=${3:-$FM_HOME} lockdir beat pid lock_home age
+  FM_WATCHER_BEATING_PID=
+  lockdir="$state/.watch.lock"
+  beat="$state/.last-watcher-beat"
+  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  fm_pid_alive "$pid" || return 1
+  lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
+  [ "$lock_home" = "$home" ] || return 1
+  age=$(fm_path_age "$beat")
+  [ "$age" -lt "$grace" ] || return 1
+  # shellcheck disable=SC2034 # Read by callers after fm_watcher_beating returns.
+  FM_WATCHER_BEATING_PID=$pid
+  return 0
+}
+
 fm_lock_clean_known_files() {
   local lockdir=$1
   rm -f \

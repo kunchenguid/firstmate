@@ -179,6 +179,116 @@ test_guard_warnings() {
   pass "guard banner leads when down with pending wakes (repair-after-drain) and stays silent when live and fresh"
 }
 
+# fm_watcher_beating is the beacon-anchored advisory predicate that keeps
+# bin/fm-guard.sh from reporting a demonstrably fresh beacon as "watcher down".
+# It is deliberately weaker than fm_watcher_healthy (no pid-identity / watcher-
+# path requirement) but still home-scoped and still requires a LIVE lock holder
+# plus a fresh beacon.
+test_watcher_beating_predicate() {
+  local dir state live rc
+  dir=$(make_case beating-predicate)
+  state="$dir/state"
+  sleep 60 &
+  live=$!
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$live" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  touch "$state/.last-watcher-beat"
+
+  # live lock holder + home match + fresh beacon -> beating.
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_beating "$2" 300 "$3"' _ "$LIB" "$state" "$dir" || rc=$?
+  [ "$rc" -eq 0 ] || fail "beating predicate rejected a live lock holder with a fresh beacon (rc=$rc)"
+
+  # stale beacon -> not beating.
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_beating "$2" 300 "$3"' _ "$LIB" "$state" "$dir" || rc=$?
+  [ "$rc" -ne 0 ] || fail "beating predicate accepted a stale beacon"
+  touch "$state/.last-watcher-beat"
+
+  # foreign home record -> not beating (home scoping preserved).
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_beating "$2" 300 "$3"' _ "$LIB" "$state" "/some/other/home" || rc=$?
+  [ "$rc" -ne 0 ] || fail "beating predicate accepted a foreign-home lock record"
+
+  # dead recorded pid + fresh beacon -> not beating (no live holder).
+  printf '%s\n' "$(dead_pid)" > "$state/.watch.lock/pid"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_beating "$2" 300 "$3"' _ "$LIB" "$state" "$dir" || rc=$?
+  [ "$rc" -ne 0 ] || fail "beating predicate accepted a dead recorded pid"
+
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "fm_watcher_beating requires a live home-matched lock holder and a fresh beacon"
+}
+
+# Regression for the false "WATCHER DOWN" verdict: a genuinely-live watcher whose
+# recorded identity or path no longer byte-matches (a transient identity read, a
+# benign re-render, or a mid-handoff) must NEVER be reported down while its beacon
+# is fresh, and a genuine leftover-beacon down must be worded from the lock, never
+# as a stale beacon it demonstrably is not.
+test_guard_fresh_beacon_is_never_reported_down() {
+  local dir state err live identity
+
+  # (1) fresh beacon + live lock holder + identity MISMATCH -> total silence.
+  dir=$(make_case guard-fresh-identity-mismatch)
+  state="$dir/state"; err="$dir/guard.err"
+  printf 'project=x\n' > "$state/task.meta"
+  sleep 60 & live=$!
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$live" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "stale recorded identity" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+  FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_GUARD_GRACE=300 \
+    "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed (identity mismatch)"
+  ! grep -qF 'WATCHER DOWN' "$err" || fail "fresh beacon + live holder + identity mismatch was reported WATCHER DOWN: $(cat "$err")"
+  ! grep -qF 'no watcher has a fresh beacon' "$err" || fail "guard claimed no fresh beacon while the beacon was fresh"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+
+  # (2) fresh beacon + live lock holder + watcher-path MISMATCH -> total silence.
+  dir=$(make_case guard-fresh-path-mismatch)
+  state="$dir/state"; err="$dir/guard.err"
+  printf 'project=x\n' > "$state/task.meta"
+  sleep 60 & live=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
+    || fail "could not identify fresh path-mismatch holder"
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$live" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "/some/other/spelling/bin/fm-watch.sh" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+  FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_GUARD_GRACE=300 \
+    "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed (path mismatch)"
+  ! grep -qF 'WATCHER DOWN' "$err" || fail "fresh beacon + live holder + path mismatch was reported WATCHER DOWN: $(cat "$err")"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+
+  # (3) genuine down: recorded pid DEAD with a not-yet-aged leftover beacon. The
+  # guard MUST alarm, but must report it as a lock/live-watcher failure, never as
+  # a stale beacon (which would contradict the demonstrably fresh beacon).
+  dir=$(make_case guard-dead-fresh-leftover)
+  state="$dir/state"; err="$dir/guard.err"
+  printf 'project=x\n' > "$state/task.meta"
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$(dead_pid)" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "dead watcher identity" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+  FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_GUARD_GRACE=300 \
+    "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed (dead pid + fresh leftover)"
+  grep -qF 'WATCHER DOWN' "$err" || fail "dead pid + fresh leftover beacon did not alarm: $(cat "$err")"
+  grep -qF 'no live watcher holds this home lock' "$err" || fail "genuine leftover-beacon down did not use the lock-truthful wording: $(cat "$err")"
+  ! grep -qF 'no watcher has a fresh beacon' "$err" || fail "genuine leftover-beacon down falsely claimed a stale beacon: $(cat "$err")"
+
+  pass "guard never reports a fresh-beacon live watcher down and words a leftover-beacon down truthfully"
+}
+
 test_lock_single_winner_under_concurrency() {
   local dir state lockdir marker i pids pid wins
   dir=$(make_case lock-concurrency)
@@ -1028,6 +1138,8 @@ test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
+test_watcher_beating_predicate
+test_guard_fresh_beacon_is_never_reported_down
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
