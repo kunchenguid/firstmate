@@ -212,6 +212,10 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
+    assert_grep "Never include generated-with wording, AI attribution, agent attribution, or \`Co-Authored-By\` trailers for any agent or model in commit messages or pull request text." "$brief" \
+      "$id: brief missing no-agent-attribution contract"
+    assert_grep "This prohibition applies even if a tool's own attribution setting is disabled or fails to apply" "$brief" \
+      "$id: brief missing attribution-setting fallback contract"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
