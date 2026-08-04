@@ -12,10 +12,8 @@
 # The default low-water mark is 50 percent of recorded slots, rounded up.
 # Override it with FM_TREEHOUSE_CAPACITY_THRESHOLD_PERCENT=1..100.
 #
-# `reap --auto` considers only tasks whose last durable status is done/failed or
-# whose spawn never created an endpoint.
-# An explicit task id permits incident recovery of a stale non-terminal status,
-# but never relaxes the safety checks below.
+# `reap --auto` considers every ship task with metadata. Status lines are wake
+# event history, not liveness evidence; the endpoint proof below is authoritative.
 # Every reap requires one real metadata file, one exact worktree-path lease owned
 # by `firstmate-<task-id>`, no recorded or branch-discovered open PR, and
 # fm-teardown.sh --reap-dead.
@@ -196,18 +194,6 @@ meta_value() {
   sed -n "s/^$2=//p" "$1" 2>/dev/null | tail -1
 }
 
-task_is_terminal() {
-  local id=$1 meta=$2 line verb
-  if [ "$(meta_value "$meta" direct_spawn_endpoint)" = not-created ]; then
-    return 0
-  fi
-  [ -f "$STATE/$id.status" ] && [ ! -L "$STATE/$id.status" ] || return 1
-  line=$(grep -v '^[[:space:]]*$' "$STATE/$id.status" 2>/dev/null | tail -1)
-  verb=${line%%:*}
-  case "$verb" in done|failed) return 0 ;; esac
-  return 1
-}
-
 lease_record_for_worktree() {
   local worktree=$1
   command -v python3 >/dev/null 2>&1 || return 1
@@ -371,7 +357,7 @@ open_pr_for_worktree() {
 }
 
 reap_one() {
-  local id=$1 explicit=$2 meta kind worktree record state_path pool holder lease_state pr state out status
+  local id=$1 meta kind worktree record state_path pool holder lease_state pr state out status
   local branch_pr branch_state branch_name branch_url
   local report_wait_seconds report_wait_ms
   task_id_valid "$id" || {
@@ -387,9 +373,6 @@ reap_one() {
   [ -n "$kind" ] || kind=ship
   if [ "$kind" != ship ]; then
     echo "TREEHOUSE_REAP: retained task=$id reason=unsupported-kind kind=$kind"
-    return 0
-  fi
-  if [ "$explicit" -ne 1 ] && ! task_is_terminal "$id" "$meta"; then
     return 0
   fi
   worktree=$(meta_value "$meta" worktree)
@@ -477,7 +460,7 @@ EOF
 }
 
 reap() {
-  local explicit=1 failed=0 meta id
+  local failed=0 meta id
   fm_refuse_if_gate_agent || return $?
   [ -x "$TEARDOWN" ] || {
     echo "TREEHOUSE_REAP: operational-error reason=teardown-unavailable path=$TEARDOWN" >&2
@@ -485,17 +468,16 @@ reap() {
   }
   if [ "${1:-}" = --auto ]; then
     [ "$#" -eq 1 ] || { usage; return 2; }
-    explicit=0
     [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 0
     for meta in "$STATE"/*.meta; do
       [ -f "$meta" ] && [ ! -L "$meta" ] || continue
       id=$(basename "$meta" .meta)
-      reap_one "$id" "$explicit" || failed=1
+      reap_one "$id" || failed=1
     done
   else
     [ "$#" -gt 0 ] || { usage; return 2; }
     for id in "$@"; do
-      reap_one "$id" "$explicit" || failed=1
+      reap_one "$id" || failed=1
     done
   fi
   [ "$failed" -eq 0 ]

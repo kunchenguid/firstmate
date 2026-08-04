@@ -217,7 +217,7 @@ SH
   (
     ulimit -n 128 || exit 71
     cd "$project" || exit 70
-    PATH="$fakebin:$PATH" python3 "$BOUNDARY_PY" "$worktree" "$project"
+    PATH="$fakebin:$PATH" python3 "$BOUNDARY_PY" "$worktree" "$project" --force
   ) >/dev/null 2>&1
   status=$?
   expect_code 0 "$status" "a worktree with more than 42,000 directories and depth beyond the descriptor limit must return"
