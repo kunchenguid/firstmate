@@ -201,26 +201,18 @@ $set
 EOF
   printf '%s' "$out"
 }
-_fm_status_nofollow_read() {  # <status-file>
-  perl -MFcntl=:DEFAULT -e '
-    my ($path) = @ARGV;
-    sysopen(my $file, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
-    my @stat = stat $file or exit 1;
-    exit 1 unless -f _;
-    while (1) {
-      my $read = read($file, my $buffer, 65536);
-      exit 1 unless defined $read;
-      last unless $read;
-      print $buffer or exit 1;
-    }
-  ' "$1" 2>/dev/null
-}
 # Fold the WHOLE status stream into the set of decisions still open. Prints one
 # TAB-separated "<key>\t<verb>\t<summary>" line per still-open decision, in
 # most-recently-opened-last order; prints nothing when none are open. Pure read of
 # the file, no globals beyond the optional FM_CLASSIFY_RESOLVE_VERB override. This
 # is the durable open-set the fleet snapshot and any point-in-time consumer must use
 # instead of trusting the last status line.
+# The scan_open_decisions wrapper below enumerates a whole directory rather than
+# a single caller-chosen path, so a status file that is itself a symlink (e.g.
+# escaping the state directory) is rejected outright with a plain [ -L ] check
+# before any read - a cheap builtin, unlike fm_wake_latest_event's O_NOFOLLOW
+# subprocess read, which exists for that function's much narrower payload-driven
+# path resolution rather than this directory-local glob.
 status_open_decisions() {  # <status-file>
   local f=$1 line verb key note resolve held open='' stripped
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
@@ -243,7 +235,7 @@ status_open_decisions() {  # <status-file>
         [ -n "$open" ] && open="${open}"$'\n'
         ;;
     esac
-  done < <(_fm_status_nofollow_read "$f")
+  done < "$f"
   printf '%s' "$open"
 }
 
