@@ -16,6 +16,7 @@ This is the single owner of Firstmate's workspace and connectivity stewardship p
 
 ## Read-only inventory
 
+Treat this phase as non-destructive observation.
 Treat inventory as observation, never as authority to change a host, workspace, task, or connection.
 Start with the applicable Firstmate home records and targeted current task state before reading Herdr.
 Classify a workspace, tab, or pane as Firstmate-owned only when its recorded task identity and exact endpoint agree.
@@ -35,7 +36,7 @@ For connectivity diagnosis, separately record each host's local Tailscale status
 Report the host, evidence time, reachability result, ownership classification, and the next decision without treating stale output as current health.
 A healthy Tailscale peer does not prove SSH or Herdr health, and a reachable SSH host does not prove a task endpoint is safe to touch.
 
-## Workspace Wizard operating mode
+## Workspace mutation mode
 
 Start with targeted task and secondmate metadata, then query only the host and confirmed endpoint whose evidence needs refreshing.
 Run at most one bounded batched JSON inventory per host per stewardship pass.
@@ -57,6 +58,10 @@ Do not install or update software, access secrets, or send a prompt, text, or ke
 Do not bypass Firstmate's selected task delivery path, task isolation, or recorded endpoint ownership through manual Herdr commands.
 This procedure creates no authority to start, stop, restart, or clean up Herdr lifecycle resources.
 A separate task that drives Herdr lifecycle behavior must retain the existing `--herdr-lab` safeguard.
+
+## Mutation guardrails
+
+Only move from observation to proposals or changes when exact captain approval exists for every requested action.
 
 Propose reversible naming or layout improvements before changing them.
 Each proposal must state the current layout, affected confirmed owners, exact reversible change, expected benefit, rollback, and any unknown ownership.
