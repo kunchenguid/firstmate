@@ -906,6 +906,128 @@ EOF
   pass "a hold reason survives its commas through snapshot and view"
 }
 
+# --- payload ceiling --------------------------------------------------------
+#
+# execve caps ONE argv string at MAX_ARG_STRLEN, 131072 bytes on Linux, so a
+# payload handed to jq on argv is refused outright with "Argument list too long"
+# once it crosses that, taking the whole snapshot down rather than degrading.
+# Backlog and task payloads both grow with fleet size, so each fixture below is
+# built PAST the ceiling deliberately and each test re-measures the payload it
+# produced. An in-limit fixture would pass by construction and prove nothing,
+# which is exactly the coverage state that let this defect ship.
+ARGV_CEILING=131072
+
+oversized_backlog_home() {  # <name> - Done rows whose encoded payload passes the ceiling
+  local home i=0
+  home=$(make_home "$1")
+  {
+    printf '## In flight\n\n## Queued\n\n## Done\n'
+    while [ "$i" -lt 200 ]; do
+      printf -- '- [x] landed-%03d - Landed change %03d with an ordinary length title https://github.com/example/example/pull/%d (repo: alpha) (kind: ship) (merged 2026-07-06)\n' \
+        "$i" "$i" "$i"
+      i=$((i + 1))
+    done
+  } > "$home/data/backlog.md"
+  printf '%s\n' "$home"
+}
+
+test_oversized_backlog_payload_still_snapshots() {
+  local home out
+  home=$(oversized_backlog_home oversized-backlog)
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "--json must survive a backlog payload past the argv ceiling"
+  printf '%s' "$out" | jq -e --argjson ceiling "$ARGV_CEILING" '
+    (.backlog | tojson | length) > $ceiling
+  ' >/dev/null || fail "fixture backlog payload no longer exceeds $ARGV_CEILING bytes; the test proves nothing"
+  printf '%s' "$out" | jq -e '
+    (.backlog.records | length) == 200
+      and ([.backlog.records[] | select(.state == "done" and .structured)] | length) == 200
+      and .main_inventory.valid == true
+  ' >/dev/null || fail "oversized backlog was not reported in full"
+  pass "a backlog payload past the argv ceiling still snapshots in full"
+}
+
+test_oversized_backlog_home_summary() {
+  local home out
+  home=$(oversized_backlog_home oversized-backlog-summary)
+  out=$(FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary) \
+    || fail "--secondmate-home-summary must survive a backlog payload past the argv ceiling"
+  printf '%s' "$out" | jq -e '
+    .schema == "fm-secondmate-home-summary.v1"
+      and .valid == true
+      and .counts.landed == 200
+  ' >/dev/null || fail "oversized backlog home summary lost its landed inventory"
+  pass "the home-summary mode survives a backlog payload past the argv ceiling"
+}
+
+# The task payload has the same unbounded shape and reaches jq through the same
+# call sites; it simply has not crossed the ceiling on a live fleet yet. Pin it
+# with a SMALL backlog so only the task payload can be over the limit.
+test_oversized_task_payload_still_snapshots() {
+  local home out fakebin pad i=0 n
+  home=$(make_home oversized-tasks)
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  pad=$(printf 'detail%.0s' $(seq 1 200))
+  while [ "$i" -lt 32 ]; do
+    n=$(printf 't%03d' "$i")
+    fm_write_meta "$home/state/$n.meta" \
+      "window=firstmate:fm-$n" \
+      "worktree=$home/projects/$n" \
+      "project=alpha" \
+      "harness=codex" \
+      "kind=ship" \
+      "mode=ship"
+    printf 'working: %s %s\n' "$n" "$pad" > "$home/state/$n.status"
+    i=$((i + 1))
+  done
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "--json must survive a task payload past the argv ceiling"
+  printf '%s' "$out" | jq -e --argjson ceiling "$ARGV_CEILING" '
+    (.tasks | tojson | length) > $ceiling and (.backlog | tojson | length) < $ceiling
+  ' >/dev/null || fail "fixture must put the TASK payload alone past $ARGV_CEILING bytes"
+  printf '%s' "$out" | jq -e '
+    (.tasks | length) == 32
+      and ([.tasks[] | select(.paths.status_log.last_event.state == "working")] | length) == 32
+  ' >/dev/null || fail "oversized task payload was not reported in full"
+  pass "a task payload past the argv ceiling still snapshots in full"
+}
+
+# The other unbounded kind is free text read from a status log: nothing caps a
+# single status line. On argv an oversized one did not even fail loudly - the
+# per-task render was refused and the live worker vanished from the snapshot at
+# exit 0, so the fleet view reported no work where a blocked worker was waiting.
+test_oversized_status_line_keeps_its_task() {
+  local home fakebin out chunk line i=0
+  home=$(make_home oversized-status-line)
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  fm_write_meta "$home/state/loud.meta" \
+    "window=firstmate:fm-loud" \
+    "worktree=$home/projects/loud" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship"
+  chunk=$(printf 'x%.0s' $(seq 1 1000))
+  line="blocked: pasted a whole run log"
+  while [ "$i" -lt 140 ]; do
+    line="$line$chunk"
+    i=$((i + 1))
+  done
+  printf '%s\n' "$line" > "$home/state/loud.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "--json must survive a status line past the argv ceiling"
+  printf '%s' "$out" | jq -e --argjson ceiling "$ARGV_CEILING" '
+    (.tasks | length) == 1
+      and .tasks[0].id == "loud"
+      and (.tasks[0].paths.status_log.last_event.raw | length) > $ceiling
+      and .tasks[0].paths.status_log.last_event.state == "blocked"
+      and .tasks[0].hints.blocked_event == true
+  ' >/dev/null || fail "a status line past the argv ceiling dropped its task from the snapshot"
+  pass "a status line past the argv ceiling keeps its task and its blocked state"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
@@ -924,3 +1046,7 @@ test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
 test_held_backlog_item_is_distinguishable
 test_hold_reason_keeps_its_commas
+test_oversized_backlog_payload_still_snapshots
+test_oversized_backlog_home_summary
+test_oversized_task_payload_still_snapshots
+test_oversized_status_line_keeps_its_task

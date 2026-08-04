@@ -1909,6 +1909,35 @@ EOF
   pass "main and secondmate captain actionability use the same blocker readiness"
 }
 
+# Bearings has no state parser of its own, so a canonical snapshot that refuses a
+# payload takes bearings down with it. execve caps ONE argv string at
+# MAX_ARG_STRLEN, 131072 bytes on Linux, and the backlog payload grows with fleet
+# size, so the fixture is built past that ceiling on purpose and the test
+# re-measures it: an in-limit backlog would pass by construction.
+test_backlog_past_the_argv_ceiling_still_renders() {
+  local home fakebin out json snap i=0
+  home=$(make_home argv-ceiling)
+  fakebin=$(make_fakebin "$home")
+  {
+    printf '## In flight\n\n## Queued\n\n## Done\n'
+    while [ "$i" -lt 200 ]; do
+      printf -- '- [x] landed-%03d - Landed change %03d with an ordinary length title https://github.com/example/example/pull/%d (repo: firstmate) (kind: ship) (merged 2026-07-06)\n' \
+        "$i" "$i" "$i"
+      i=$((i + 1))
+    done
+  } > "$home/data/backlog.md"
+  snap=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "the canonical snapshot bearings reads must survive a backlog past the argv ceiling"
+  printf '%s' "$snap" | jq -e '(.backlog | tojson | length) > 131072' >/dev/null \
+    || fail "fixture backlog payload no longer exceeds the argv ceiling; the test proves nothing"
+  out=$(run "$home" "$fakebin") || fail "bearings must survive a backlog past the argv ceiling"
+  assert_contains "$out" "schema: fm-bearings.v1" "bearings lost its schema line"
+  json=$(run "$home" "$fakebin" --json) || fail "bearings --json must survive a backlog past the argv ceiling"
+  printf '%s' "$json" | jq -e '(.landed | length) > 0 and .omitted != null' >/dev/null \
+    || fail "bearings dropped the landed projection for an oversized backlog: $json"
+  pass "a backlog past the argv ceiling still renders bearings"
+}
+
 test_domain_alpha_stale_parent_event_does_not_become_current_work
 test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution
 test_parent_activity_evidence_is_bounded_and_disclosed
@@ -1951,3 +1980,4 @@ test_section_caps_and_expansion_flags
 test_pr_repository_cap_and_expansion
 test_per_repository_pr_cap_is_disclosed
 test_projection_and_toon_fail_closed
+test_backlog_past_the_argv_ceiling_still_renders
