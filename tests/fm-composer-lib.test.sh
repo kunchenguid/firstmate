@@ -79,7 +79,10 @@ test_agent_glyphs_are_empty_bordered_and_bare() {
   out=$(classify 0 '›'); [ "$out" = empty ] || fail "bare codex '›' should read empty, got '$out'"
   out=$(classify 1 '❯'); [ "$out" = empty ] || fail "bordered claude '❯' should read empty, got '$out'"
   out=$(classify 1 '›'); [ "$out" = empty ] || fail "bordered codex '›' should read empty, got '$out'"
-  pass "fm_composer_classify_content: agent prompt glyphs (❯ claude, › codex) read empty bordered or bare"
+  # Hermes classic REPL idle composer is the same bare ❯ agent glyph.
+  out=$(classify 0 '❯'); [ "$out" = empty ] \
+    || fail "bare hermes '❯' must not read as a dead shell, got '$out'"
+  pass "fm_composer_classify_content: agent prompt glyphs (❯ claude/hermes, › codex) read empty bordered or bare"
 }
 
 # --- Empty content and idle placeholder -------------------------------------

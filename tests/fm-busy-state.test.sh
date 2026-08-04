@@ -243,7 +243,32 @@ Ctrl+c:cancel')
   # Another adapter's footer never makes grok busy either.
   out=$(fm_busy_classify tmux w1 grok t1 "$state" '• Working (6s • esc to interrupt)')
   [ "$out" = "idle grok-regex" ] || fail "a claude footer must not classify grok busy, got '$out'"
+  # Hermes busy chrome must not classify a grok task (colon vs space form).
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" '⚕ ❯ msg=interrupt · Ctrl+C cancel')
+  [ "$out" = "idle grok-regex" ] || fail "hermes busy chrome must not classify grok busy, got '$out'"
   pass "the grok fallback is regex-scoped to grok and classifies only grok tasks"
+}
+
+test_hermes_regex_isolated() {
+  local state out
+  state=$(new_state_dir hermes-arm)
+  out=$(fm_busy_classify tmux w1 hermes t1 "$state" 'tool running
+⚕ ❯ msg=interrupt · /queue · Ctrl+C cancel')
+  [ "$out" = "busy hermes-regex" ] || fail "hermes busy tail must classify 'busy hermes-regex', got '$out'"
+  out=$(fm_busy_classify tmux w1 hermes t1 "$state" 'Initializing agent...')
+  [ "$out" = "busy hermes-regex" ] || fail "hermes startup must classify busy, got '$out'"
+  out=$(fm_busy_classify tmux w1 hermes t1 "$state" 'ready
+❯')
+  [ "$out" = "idle hermes-regex" ] || fail "hermes bare ❯ must classify idle, got '$out'"
+  # Grok's colon form must not classify hermes busy.
+  out=$(fm_busy_classify tmux w1 hermes t1 "$state" 'Ctrl+c:cancel')
+  [ "$out" = "idle hermes-regex" ] || fail "grok busy token must not classify hermes busy, got '$out'"
+  # Another adapter never receives hermes-regex.
+  out=$(fm_busy_classify tmux w1 claude t1 "$state" '⚕ ❯ msg=interrupt · Ctrl+C cancel')
+  [ "$out" = "unknown missing" ] || fail "hermes chrome must not classify claude, got '$out'"
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" '⚕ ❯ msg=interrupt · Ctrl+C cancel')
+  [ "$out" = "idle grok-regex" ] || fail "hermes chrome must not classify grok via hermes-regex, got '$out'"
+  pass "the hermes fallback is regex-scoped to hermes and classifies only hermes tasks"
 }
 
 # --- kimi verification gate -----------------------------------------------------
@@ -370,6 +395,7 @@ test_record_without_sidecar_unknown
 test_source_mismatch_cross_adapter
 test_converted_adapters_ignore_footer_text
 test_grok_regex_isolated
+test_hermes_regex_isolated
 test_codex_unverified_gate
 test_kimi_unverified_gate
 test_dead_endpoint_overrides

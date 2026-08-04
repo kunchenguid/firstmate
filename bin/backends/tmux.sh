@@ -160,7 +160,7 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
   base=${path##*/}
   base=${base#-}
   case "$base" in
-    *claude*|*codex*|*opencode*|*grok*|*kimi*|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
+    *claude*|*codex*|*opencode*|*grok*|*kimi*|*hermes*|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
       if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then
@@ -210,7 +210,7 @@ fm_backend_tmux_foreground_comms() {  # <target>
 }
 
 fm_backend_tmux_foreground_argv0s() {  # <target>
-  local target=$1 tty pid pgid tpgid comm args argv0
+  local target=$1 tty pid pgid tpgid comm args argv0 token
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
   [ -n "$tty" ] || return 0
   LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
@@ -221,6 +221,17 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
         args=${args#"${args%%[![:space:]]*}"}
         argv0=${args%%[[:space:]]*}
         [ -n "$argv0" ] && printf '%s\n' "$argv0"
+        # Interpreter-wrapped harnesses (Hermes: comm/argv0=Python, later argv
+        # carries /.../hermes) need those later path tokens classified too.
+        # shellcheck disable=SC2086 # deliberate word-split of ps args tokens
+        for token in $args; do
+          [ "$token" = "$argv0" ] && continue
+          case "$token" in
+            /*/*hermes*|/*/*hermes-agent*|*hermes*|*hermes-agent*)
+              printf '%s\n' "$token"
+              ;;
+          esac
+        done
       done
 }
 

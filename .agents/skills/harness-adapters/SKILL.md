@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, and kimi.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, and hermes.
 user-invocable: false
 metadata:
   internal: true
@@ -127,6 +127,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | pi / pi-signed | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-27 on Pi and pi-signed 0.82.0. Both expose the same accepted thinking levels and completed the same model-qualified max-thinking smoke. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
+| hermes | `-m <model>` | none | Verified 2026-08-03 on Hermes Agent v0.19.0 (2026.7.20). |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 No script resolves that split for you: establish which credential store a tuple reads from the discovery surfaces below plus `quota-axi auth --json`'s per-provider sources, and show that reasoning rather than inferring it from a harness, model, or source name.
@@ -144,6 +145,7 @@ Use the discovery surface in the current authenticated environment because suppo
 | pi / pi-signed | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
+| hermes | Run `hermes model` / `hermes chat --help`; default model comes from user config when `-m` is omitted. |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
@@ -163,6 +165,7 @@ Natural language is acceptable if uncertain.
 - pi and pi-signed: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) handles this through the structural composer reader; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 - kimi: `/<skill>`, for example `/no-mistakes`.
+- hermes: natural language is acceptable; no separate verified slash-skill form beyond ordinary chat commands.
 
 ## Submission acknowledgement hazards
 
@@ -397,3 +400,28 @@ The delivery-only spinner match covers the full moon-phase glyph set rather than
 Each Kimi crew worktree receives a gitignored `.fm-kimi-turnend` token pointer, and the global hook touches that task's `state/<id>.turn-ended` only when the Stop payload's `cwd`, pointer, and registry entry all agree.
 A guarded silent hook cannot be verified from absence of effect, so prove invocation with an unguarded probe before concluding that the hook did not fire.
 The guarded turn-end signal remains a wake notification; standalone Kimi has no busy-state source until one is live-verified.
+
+## hermes (VERIFIED 2026-08-03, Hermes Agent v0.19.0 / 2026.7.20)
+
+Hermes Agent classic REPL launches from the absolute path resolved from `PATH` (`hermes`, then `hermes-agent`).
+
+| Fact | Value |
+|---|---|
+| Binary | Executable `hermes` from `PATH`, then `hermes-agent`; spawning refuses if neither exists. |
+| Launch | `hermes chat --yolo --accept-hooks` plus optional `-m MODEL`; bare launch, then readiness-gated absolute brief pointer delivery. |
+| Busy state | Harness-scoped rendered-tail fallback only (`hermes-regex`): stable ASCII `Ctrl+C cancel`, `msg=interrupt`, and/or `Initializing agent`. Idle is bare `❯` without that interrupt footer. Never classifies another adapter. |
+| Exit command | `/quit` or `/exit` |
+| Interrupt | single `Ctrl+C` while busy (returns to `❯`; shell tools may show exit 130). Prefer interrupt only when the busy footer shows `Ctrl+C cancel` - idle `Ctrl+C` can tear down the session. |
+| Skill invocation | Natural language; no separate verified slash-skill form. |
+| Autonomy | `--yolo` (banner: YOLO mode - all approval prompts bypassed). |
+| Trust dialog | None required for the verified crewmate path inside a worktree. |
+| Environment marker | None found; detection relies on process ancestry argv matching `hermes` / `hermes-agent`, not bare `Python` alone. |
+| Composer | Bare `❯` idle glyph (already an agent prompt glyph in `fm-composer-lib.sh`). Busy footer keeps `❯` beside `msg=interrupt` / `Ctrl+C cancel`. |
+| Effort | No reasoning-effort flag; requested effort is recorded in task metadata but omitted from launch. |
+| Resume | `hermes --resume <session-id>` (id printed on exit). |
+
+`fm-spawn.sh` launches Hermes bare on the classic REPL, waits for bare `❯` or a Welcome/Hermes Agent banner, sends only `Read the brief at <absolute-path> and follow it exactly.`, and requires either busy chrome or an idle composer with the pointer visible before accepting delivery.
+This launch-then-send shape is mandatory because Hermes has no crewmate positional-brief path comparable to Grok/Claude.
+Do **not** launch with modern `--tui` on the verified brew install: it is broken (missing `ui-tui`).
+No turn-end hook is installed; supervision uses the rendered-tail busy fallback plus ordinary status and watcher signals, the same Grok-style posture when structured lifecycle is unavailable.
+Process detection often sees `comm=Python` with argv containing `hermes`; ancestry matching must read argv, never bare Python alone.

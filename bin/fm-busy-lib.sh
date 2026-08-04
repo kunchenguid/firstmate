@@ -39,7 +39,7 @@
 #   fm-interrupt     a firstmate-controlled interruption of the worker
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
-#   endpoint-gone, herdr-native, grok-regex, missing, malformed,
+#   endpoint-gone, herdr-native, grok-regex, hermes-regex, missing, malformed,
 #   gen-mismatch, source-mismatch, kimi-unverified, codex-unverified,
 #   capture-failed, no-target
 #
@@ -50,15 +50,15 @@
 #   3. a valid, gen-matching, source-trusted record -> its state and source
 #   4. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
-#      Grok-only temporary regex fallback classifies a grok task from its
-#      rendered tail, then unknown missing
+#      harness-scoped temporary regex fallbacks classify a grok or hermes
+#      task from its rendered tail, then unknown missing
 #   5. malformed, stale, or untrusted records -> unknown, never a fallback
-# The Grok arm is the ONLY rendered-text classification that survives the
-# redesign, because Grok's structured lifecycle was not credited-live-verified
-# in the approved audit; it is scoped to harness=grok and can never classify
-# another adapter. The delivery guards in bin/fm-tmux-lib.sh match rendered
-# footers for submit acknowledgement and away-mode supervisor injection only;
-# neither is a recorded worker state source.
+# The Grok and Hermes arms are the ONLY rendered-text classifications that
+# survive the redesign: each lacks a live-verified structured lifecycle, and
+# each is scoped to its own harness= value so it can never classify another
+# adapter. The delivery guards in bin/fm-tmux-lib.sh match rendered footers
+# for submit acknowledgement and away-mode supervisor injection only; neither
+# is a recorded worker state source.
 #
 # Codex negotiation (fm_busy_codex_appserver_observable,
 # fm_busy_codex_hooks_verified): the approved contract prefers Codex's
@@ -161,8 +161,9 @@ fm_busy_current_gen() {  # <state-dir> <id>
 # fm_busy_sources_for_harness: the semantic sources trusted to classify a
 # task recorded with <harness>. One line, space-separated, possibly empty.
 # The firstmate-owned sources are appended for every converted adapter.
-# Grok deliberately trusts nothing: it has no semantic writer yet, and its
-# temporary rendered-tail fallback lives in the classifier, not in records.
+# Grok and Hermes deliberately trust nothing: neither has a semantic writer
+# yet, and each temporary rendered-tail fallback lives in the classifier,
+# not in records.
 fm_busy_sources_for_harness() {  # <harness>
   local adapter=
   case "${1:-}" in
@@ -255,12 +256,24 @@ fm_busy_grok_tail_busy() {
     | grep -qiE "${FM_BUSY_REGEX:-${FM_TMUX_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel}}"
 }
 
+# fm_busy_hermes_tail_busy: the Hermes-only temporary rendered-tail fallback.
+# Consumes the tail on stdin; 0 when Hermes's verified busy signature matches.
+# Prefer stable ASCII from the classic REPL (Hermes Agent v0.19.0, 2026-08-03):
+# mid-turn footer Ctrl+C cancel and/or msg=interrupt, plus startup
+# Initializing agent. Idle is a bare ❯ without those tokens. Never match bare
+# Python, timer glyphs alone, or another harness's footer. FM_BUSY_REGEX still
+# globally overrides, matching the Grok arm.
+fm_busy_hermes_tail_busy() {
+  grep -v '^[[:space:]]*$' | tail -12 \
+    | grep -qiE "${FM_BUSY_REGEX:-${FM_TMUX_HERMES_BUSY_REGEX_DEFAULT:-Ctrl\\+C cancel|msg=interrupt|Initializing agent}}"
+}
+
 # fm_busy_classify: semantic classification for a task whose endpoint the
 # caller has already established as present. Prints "<verdict> <source>":
 # busy|idle|unknown plus the producing source (see header). Never probes
 # process state. <tail40> is optional pre-captured plain output used only by
-# the Grok arm; when absent the Grok arm captures through fm_backend_capture
-# if available, else reports unknown capture-failed.
+# the Grok/Hermes arms; when absent those arms capture through
+# fm_backend_capture if available, else report unknown capture-failed.
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
   local out rc r_state r_source native
@@ -327,6 +340,25 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       fi
       return 0
       ;;
+    hermes*)
+      if [ -z "$tail40" ]; then
+        if command -v fm_backend_capture >/dev/null 2>&1; then
+          tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || {
+            printf 'unknown capture-failed'
+            return 0
+          }
+        else
+          printf 'unknown capture-failed'
+          return 0
+        fi
+      fi
+      if printf '%s' "$tail40" | fm_busy_hermes_tail_busy; then
+        printf 'busy hermes-regex'
+      else
+        printf 'idle hermes-regex'
+      fi
+      return 0
+      ;;
   esac
   printf 'unknown missing'
 }
@@ -350,7 +382,7 @@ fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir> [expe
 # fm_busy_classify_meta: classify a task from its recorded metadata, so every
 # consumer resolves backend, target, and harness the same way instead of
 # re-deriving them. Requires fm-backend.sh to be sourced. <tail40> is
-# optional pre-captured plain output reused by the Grok arm.
+# optional pre-captured plain output reused by the Grok/Hermes arms.
 fm_busy_classify_meta() {  # <meta-file> <id> <state-dir> [tail40]
   local meta=$1 id=$2 state=$3 tail40=${4-} backend target harness
   [ -f "$meta" ] || { printf 'unknown missing'; return 0; }
