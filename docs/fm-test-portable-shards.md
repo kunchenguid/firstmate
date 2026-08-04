@@ -82,7 +82,7 @@ Refresh the hints by downloading the per-shard timing artifacts from a green CI 
 
 ```sh
 gh run download <run-id> -R kunchenguid/firstmate --pattern 'fm-test-timing-portable-serial-*' -D /tmp/fm-serial
-jq -r '.scripts[] | [.path, .duration_ms] | @tsv' /tmp/fm-serial/*.json | LC_ALL=C sort
+jq -r '.scripts[] | [.path, .duration_ms] | @tsv' /tmp/fm-serial/*.json | env LC_ALL=C sort
 bin/fm-test-run.sh --check-coverage
 ```
 
