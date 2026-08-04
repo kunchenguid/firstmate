@@ -57,9 +57,14 @@ SH
 #!/usr/bin/env bash
 set -u
 printf '%s\n' "$*" >> "${FM_FAKE_TH_LOG:?FM_FAKE_TH_LOG unset}"
-if [ "${1:-}" = get ]; then
-  printf '%s\n' "${FM_FAKE_LEASE_PATH:?FM_FAKE_LEASE_PATH unset}"
-fi
+case "${1:-}" in
+  get) printf '%s\n' "${FM_FAKE_LEASE_PATH:?FM_FAKE_LEASE_PATH unset}" ;;
+  status)
+    node -e 'console.log(JSON.stringify([{path: process.argv[1], status: "leased", lease_holder: process.argv[2]}]))' \
+      "${FM_FAKE_LEASE_PATH:?FM_FAKE_LEASE_PATH unset}" \
+      "${FM_FAKE_LEASE_HOLDER:?FM_FAKE_LEASE_HOLDER unset}"
+    ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
@@ -104,6 +109,7 @@ run_lease_spawn() {
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_LEASE_PATH="$lease" FM_FAKE_PANE_PATH="$pane" \
+    FM_FAKE_LEASE_HOLDER="$id" \
     FM_FAKE_TH_LOG="$THLOG" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
@@ -141,14 +147,65 @@ test_spawn_abort_releases_leased_worktree() {
   read_lease_record "$rec"
 
   set +e
-  out=$(run_lease_spawn "$id" "$WT_DIR" "$BAD_DIR")
+  out=$(run_lease_spawn "$id" "$BAD_DIR" "$BAD_DIR")
   status=$?
   set -e
 
   [ "$status" -ne 0 ] || fail "spawn should have aborted when the pane never reaches an isolated worktree: $out"
-  assert_grep "return --force $WT_DIR" "$THLOG" \
+  assert_grep "return --force $BAD_DIR" "$THLOG" \
     "aborted spawn leaked the lease instead of returning the leased worktree"
   pass "a spawn that aborts after leasing returns the lease (no leaked pool slot)"
+}
+
+test_relaunch_reuses_recorded_lease() {
+  local rec id out status branch head
+  id="lease-relaunch-z3"
+  rec=$(make_lease_case lease-relaunch "$id")
+  read_lease_record "$rec"
+
+  out=$(run_lease_spawn "$id" "$WT_DIR" "$WT_DIR")
+  status=$?
+  expect_code 0 "$status" "initial spawn should acquire the task lease"
+  git -C "$WT_DIR" checkout -q -b "fm/$id"
+  printf '%s\n' in-flight > "$WT_DIR/inflight.txt"
+  git -C "$WT_DIR" -c user.email=t@t -c user.name=t add inflight.txt
+  git -C "$WT_DIR" -c user.email=t@t -c user.name=t commit -qm "task work"
+  head=$(git -C "$WT_DIR" rev-parse HEAD)
+
+  out=$(run_lease_spawn "$id" "$WT_DIR" "$WT_DIR")
+  status=$?
+  expect_code 0 "$status" "relaunch should reuse the recorded task lease"
+  [ "$(grep -c "^get --lease --lease-holder $id$" "$THLOG")" -eq 1 ] \
+    || fail "relaunch acquired a second worktree lease: $(cat "$THLOG")"
+  assert_no_grep "return --force $WT_DIR" "$THLOG" \
+    "successful relaunch returned the reused task lease"
+  branch=$(git -C "$WT_DIR" rev-parse --abbrev-ref HEAD)
+  [ "$branch" = "fm/$id" ] || fail "relaunch lost the task branch (now '$branch')"
+  [ "$(git -C "$WT_DIR" rev-parse HEAD)" = "$head" ] \
+    || fail "relaunch lost the task's in-flight commit"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "relaunch did not preserve the recorded leased worktree"
+  pass "relaunch reuses the recorded lease with its branch and commits"
+}
+
+test_aborted_relaunch_preserves_recorded_lease() {
+  local rec id out status
+  id="lease-relaunch-abort-z4"
+  rec=$(make_lease_case lease-relaunch-abort "$id")
+  read_lease_record "$rec"
+  printf '%s\n' "worktree=$BAD_DIR" > "$HOME_DIR/state/$id.meta"
+
+  set +e
+  out=$(run_lease_spawn "$id" "$BAD_DIR" "$BAD_DIR")
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "relaunch should reject a recorded lease that is not an isolated worktree: $out"
+  assert_no_grep '^get --lease ' "$THLOG" \
+    "relaunch acquired a fresh lease instead of reusing the recorded lease"
+  assert_no_grep "return --force $BAD_DIR" "$THLOG" \
+    "aborted relaunch returned a lease acquired by the original spawn"
+  pass "aborted relaunch preserves the original task lease"
 }
 
 # --- real treehouse: the lease contract fm-spawn/fm-teardown rely on ---------
@@ -217,6 +274,8 @@ test_treehouse_lease_contract_real() {
 
 test_spawn_leases_worktree_under_task_id
 test_spawn_abort_releases_leased_worktree
+test_relaunch_reuses_recorded_lease
+test_aborted_relaunch_preserves_recorded_lease
 test_treehouse_lease_contract_real
 
 echo "# all fm-spawn-worktree-lease tests passed"

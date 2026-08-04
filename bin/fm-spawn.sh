@@ -1278,6 +1278,27 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+treehouse_lease_matches_task() {
+  local path=$1 status rc
+  status=$(cd "$PROJ_ABS" && treehouse status --json 2>/dev/null) || return 2
+  set +e
+  printf '%s' "$status" | node -e '
+const fs = require("fs");
+const [path, holder] = process.argv.slice(1);
+let entries;
+try {
+  entries = JSON.parse(fs.readFileSync(0, "utf8"));
+} catch {
+  process.exit(2);
+}
+if (!Array.isArray(entries)) process.exit(2);
+process.exit(entries.some((entry) => entry?.path === path && entry?.status === "leased" && entry?.lease_holder === holder) ? 0 : 1);
+' "$path" "$ID"
+  rc=$?
+  set -e
+  return "$rc"
+}
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -1721,16 +1742,31 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # subshell, so cd the pane into it explicitly. The settle poll below still
   # confirms the pane actually moved and validate_spawn_worktree still proves
   # the resulting worktree is isolated from the primary checkout.
-  LEASED_WT=$( cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID" ) || {
-    echo "error: treehouse get --lease failed to lease a task worktree for $ID; inspect the pool under $PROJ_ABS" >&2
-    exit 1
-  }
-  [ -n "$LEASED_WT" ] || {
-    echo "error: treehouse get --lease reported no task worktree for $ID" >&2
-    exit 1
-  }
-  LEASED_WT=$(real_path_or_raw "$LEASED_WT")
-  TREEHOUSE_LEASE_ABORT_CLEANUP=1
+  RECORDED_WT=$(fm_backend_meta_exact_value "$STATE/$ID.meta" worktree 2>/dev/null || true)
+  if [ -n "$RECORDED_WT" ] && [ -d "$RECORDED_WT" ]; then
+    RECORDED_WT=$(real_path_or_raw "$RECORDED_WT")
+    if treehouse_lease_matches_task "$RECORDED_WT"; then
+      LEASED_WT=$RECORDED_WT
+    else
+      LEASE_MATCH_STATUS=$?
+      if [ "$LEASE_MATCH_STATUS" -eq 2 ]; then
+        echo "error: treehouse status could not validate the recorded task worktree lease for $ID" >&2
+        exit 1
+      fi
+    fi
+  fi
+  if [ -z "$LEASED_WT" ]; then
+    LEASED_WT=$( cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID" ) || {
+      echo "error: treehouse get --lease failed to lease a task worktree for $ID; inspect the pool under $PROJ_ABS" >&2
+      exit 1
+    }
+    [ -n "$LEASED_WT" ] || {
+      echo "error: treehouse get --lease reported no task worktree for $ID" >&2
+      exit 1
+    }
+    LEASED_WT=$(real_path_or_raw "$LEASED_WT")
+    TREEHOUSE_LEASE_ABORT_CLEANUP=1
+  fi
   spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$LEASED_WT")"
 
   # Wait for the pane's cwd to move from the project into the leased worktree.
