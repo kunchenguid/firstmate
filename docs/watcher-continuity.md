@@ -18,6 +18,7 @@ A cycle-end failure is benign when that live-watcher predicate is true, and the 
 Only an exhausted failure with no verified watcher emits one last-resort notice for the continuous failure episode; later consecutive Stop cycles exit 2 to guarantee another Stop-owned retry without repeating the notice until the turn-end guard consumes the attended fail-open.
 The Claude turn-end guard owns the monotonic failure progression, one-time attended fail-open, post-alarm continuation suppression, and positive recovery reset described in [`turnend-guard.md`](turnend-guard.md#harness-integrations).
 While supervision is still needed and away mode remains inactive, an actionable close wakes the idle session through exit 2.
+Hermes's tracked primary plugin owns the corresponding managed-terminal cycle: it arms `bin/fm-watch-arm.sh` with `background=true, notify_on_complete=true`, drains the completion notification, and admits only one successor. Shell `&` is not used.
 
 ## Actionable wake ordering
 

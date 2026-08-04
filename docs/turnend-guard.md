@@ -46,6 +46,7 @@ If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot s
 - OpenCode listens for `session.idle` in `.opencode/plugins/fm-primary-turnend-guard.js`, lets the watcher coordinator act first, and calls `client.session.promptAsync` once when the guard returns 2.
 - Pi listens for `agent_settled` in `.pi/extensions/fm-primary-turnend-guard.ts`, runs once per logical agent run, and calls `pi.sendUserMessage(..., { deliverAs: "followUp" })` once when the guard returns 2.
 - Grok registers a `Stop` hook in `.grok/hooks/fm-primary-turnend-guard.json` and delegates capability selection to `bin/fm-turnend-guard-grok.sh`.
+- Hermes registers the tracked `.hermes/plugins/firstmate-primary` `post_llm_call` hook. When the shared guard blocks, the plugin injects one bounded recovery message; its retry marker clears the latch before the next check so the recovery cannot recurse.
   The tracked Claude Stop entries are inert when `GROK_AGENT` is present, so Grok's Claude-compatible settings loading cannot create a second continuation path.
 
 Claude and Codex can block a Stop directly with exit status 2 and stderr.
@@ -99,7 +100,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - Installation refuses before writing unless `python3` with `tomllib` and `jq` are available.
 - If `jq` is removed after installation, the hook remains silent and exits 0, turn-end wakes stop, and Kimi crews fall back to idle detection.
 - Unreadable hook input remains fail-open.
-- No harness adapter uses a shell ampersand to manufacture supervision.
+- No harness adapter uses a shell ampersand to manufacture supervision. Hermes arms through the managed `terminal(background=true, notify_on_complete=true)` registry and re-arms from its completion notification.
 
 ## Regression coverage
 

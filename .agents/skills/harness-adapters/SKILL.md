@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, and kimi.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, and the Hermes primary adapter.
 user-invocable: false
 metadata:
   internal: true
@@ -39,7 +39,7 @@ If the captain asks for a new harness, propose verifying it first: spawn a trivi
 
 ## Detection
 
-`bin/fm-harness.sh` prints firstmate's own harness, using verified env markers first and then process ancestry.
+`bin/fm-harness.sh` prints firstmate's own harness, using verified env markers first and then process ancestry. Hermes is recognized only as the persistent primary path; its trusted normal signature is `hermes -p firstmate --tui`, while one-shot Hermes workers never own the primary lock.
 Within the Pi family, only the exact launch-boundary marker `FM_PI_HARNESS=pi-signed` alongside `PI_CODING_AGENT=true` selects the signed identity; unmarked shared launcher ancestry remains `pi`.
 `bin/fm-harness.sh crew` resolves the effective crewmate harness from `config/crew-harness` (absent or `default` -> own).
 `bin/fm-harness.sh secondmate` resolves the secondmate-launch harness through the chain `config/secondmate-harness` -> `config/crew-harness` -> own, so an unset `config/secondmate-harness` matches the crew harness.
@@ -61,6 +61,8 @@ Kimi is outside the primary turn-end guard scope, while `docs/turnend-guard.md` 
 The exact hook files, commands, scoping rules, and fail-open tradeoffs are owned by `docs/turnend-guard.md`.
 `docs/verification/supervision.md` "Turn-end guard" owns active validation evidence.
 When changing any primary turn-end hook, validate the real harness behavior in a scratch project or throwaway home before trusting it, then update that doc and the relevant concise fact below.
+
+Hermes Agent 0.20.0 is primary-only. Its tracked project plugin uses `pre_tool_call`, `post_llm_call`, and `on_session_finalize`; it blocks `delegate_task`, remains inert outside the real persistent primary scope, and directs visible dispatch through `bin/fm-spawn.sh`. Hermes supervision uses its managed `terminal(background=true, notify_on_complete=true)` registry, never shell `&`. Crewmate launches continue to resolve through the configured `config/backend=herdr` and optional `config/herdr-presentation-spaces` contract; Hermes has no direct worker path or hidden fallback.
 
 ## Primary pre-arm (PreToolUse) seatbelt
 

@@ -216,7 +216,14 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 case "$field" in
-  comm=|args=) printf '/opt/test/bin/%s\n' "${FM_TEST_HERMES_NAME:-hermes}" ;;
+  comm=) printf '/opt/test/bin/%s\n' "${FM_TEST_HERMES_NAME:-hermes}" ;;
+  args=)
+    if [ "${FM_TEST_HERMES_NAME:-hermes}" = hermes ]; then
+      printf '%s\n' '/opt/test/bin/hermes -p firstmate --tui'
+    else
+      printf '%s\n' "/opt/test/bin/${FM_TEST_HERMES_NAME:-hermes} -p firstmate --tui"
+    fi
+    ;;
   ppid=) printf '1\n' ;;
 esac
 SH

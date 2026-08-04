@@ -8,6 +8,9 @@
 # lock-owning primary session before it may arm or rewake.
 # This file is sourced by scripts and has no side effects on source.
 
+# shellcheck source=bin/fm-harness-process-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-harness-process-lib.sh"
+
 # Known harness command names; extend when a new adapter is verified.
 # Captain-local customization: Hermes is the wrapper process for this private distribution.
 FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^hermes$|^pi$|^pi-signed$'
@@ -54,6 +57,10 @@ fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
   FM_HARNESS_IS_CLAUDE=0
   base=$(basename -- "$comm")
+  if [ "$base" = hermes ]; then
+    fm_process_is_hermes_primary "$args"
+    return
+  fi
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
@@ -66,6 +73,10 @@ fm_harness_process_matches() {  # <comm> <args>
   # Bare interpreter (e.g. node): match the harness name in its script path.
   case "$comm" in
     *node*|*python*)
+      if fm_process_is_hermes "$args"; then
+        fm_process_is_hermes_primary "$args"
+        return
+      fi
       if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
         case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
         return 0

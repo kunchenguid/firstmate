@@ -1300,6 +1300,29 @@ EOF
   pass "session start emits exactly one detected harness block and reports Pi extension load state"
 }
 
+test_supervision_block_hermes_and_plugin_diagnostic() {
+  local rec root home fakebin out
+  rec=$(new_world hermes-supervision-block)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" hermes
+
+  out=$(FM_FAKE_HARNESS=hermes run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: hermes" \
+    "Hermes supervision block missing from session start"
+  assert_contains "$out" "Mode: Hermes managed background-process notification." \
+    "Hermes protocol missing from session start"
+  assert_contains "$out" "HERMES_PRIMARY_PLUGIN: not loaded" \
+    "Hermes plugin-load diagnostic missing from session start"
+  assert_contains "$out" "bin/fm-hermes-primary.sh" \
+    "Hermes plugin-load diagnostic omitted the trusted launcher"
+
+  pass "session start emits Hermes supervision and reports missing primary plugin state"
+}
+
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization() {
   local rec root home fakebin out
   rec=$(new_world pi-signed-supervision-block)
@@ -1451,6 +1474,7 @@ test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_supervision_block_exactly_one_and_pi_diagnostic
+test_supervision_block_hermes_and_plugin_diagnostic
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
 test_pi_diagnostic_rejects_stale_loaded_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker

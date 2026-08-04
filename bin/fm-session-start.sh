@@ -237,7 +237,7 @@ hash_file() {
   fi
 }
 
-pi_extension_loaded() {
+adapter_loaded_marker_matches() {
   local marker=$1 expected_version=$2 lock=$3 marker_version marker_pid lock_pid
   [ -f "$marker" ] && [ -f "$lock" ] && [ -n "$expected_version" ] || return 1
   marker_version=$(sed -n '1p' "$marker")
@@ -331,9 +331,18 @@ if [ "$PRIMARY_HARNESS" = pi ] || [ "$PRIMARY_HARNESS" = pi-signed ]; then
   [ "$PRIMARY_HARNESS" != pi ] || PI_RESTART_COMMAND='plain pi'
   PI_WATCH_VERSION=$(hash_file "$PI_EXT" || printf '')
   PI_TURNEND_VERSION=$(hash_file "$PI_TURNEND_EXT" || printf '')
-  if ! pi_extension_loaded "$PI_WATCH_MARKER" "$PI_WATCH_VERSION" "$PI_LOCK" \
-    || ! pi_extension_loaded "$PI_TURNEND_MARKER" "$PI_TURNEND_VERSION" "$PI_LOCK"; then
+  if ! adapter_loaded_marker_matches "$PI_WATCH_MARKER" "$PI_WATCH_VERSION" "$PI_LOCK" \
+    || ! adapter_loaded_marker_matches "$PI_TURNEND_MARKER" "$PI_TURNEND_VERSION" "$PI_LOCK"; then
     printf 'PI_WATCH_EXTENSION: not loaded - approve Pi project trust once per clone, then restart %s so %s and %s auto-load for turn-end guard and background wake coverage; use -e %s -e %s only if project hooks are not trusted\n' "$PI_RESTART_COMMAND" "$PI_TURNEND_EXT" "$PI_EXT" "$PI_TURNEND_EXT" "$PI_EXT"
+  fi
+fi
+if [ "$PRIMARY_HARNESS" = hermes ]; then
+  HERMES_PLUGIN="$FM_ROOT/.hermes/plugins/firstmate-primary/__init__.py"
+  HERMES_MARKER="$STATE/.hermes-primary-plugin-loaded"
+  HERMES_LOCK="$STATE/.lock"
+  HERMES_VERSION=$(hash_file "$HERMES_PLUGIN" || printf '')
+  if ! adapter_loaded_marker_matches "$HERMES_MARKER" "$HERMES_VERSION" "$HERMES_LOCK"; then
+    printf 'HERMES_PRIMARY_PLUGIN: not loaded - launch this trusted checkout with %s/bin/fm-hermes-primary.sh so the project plugin, managed watcher notifications, and turn-end recovery backstop are active\n' "$FM_ROOT"
   fi
 fi
 "$SCRIPT_DIR/fm-supervision-instructions.sh" \
