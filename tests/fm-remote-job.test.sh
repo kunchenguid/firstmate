@@ -161,13 +161,21 @@ for _ in $(seq 1 100); do
 done
 assert_present "$STATE_ROOT/worker.ready" "the worker did not publish its readiness heartbeat"
 
+file_mode() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$1"
+  else
+    stat -c %a "$1"
+  fi
+}
+
 printf 'first line\nsecond line\n' > "$TMP_ROOT/stdin"
 # shellcheck disable=SC2016 # Literal shell-looking argv is an injection probe.
 TOP_SECRET=must-not-cross fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
   fm-probe-job.sh 'two words' '$(not executed)' < "$TMP_ROOT/stdin" > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
 JOB_DIR="$STATE_ROOT/jobs/$JOB_ID"
-[ "$(stat -f '%Lp' "$JOB_DIR" 2>/dev/null || stat -c '%a' "$JOB_DIR")" = 700 ] \
+[ "$(file_mode "$JOB_DIR")" = 700 ] \
   || fail "staged job directory is not mode 0700"
 fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
 [ "$FM_REMOTE_JOB_EXIT" -eq 0 ] || fail "the completed probe did not preserve exit status"

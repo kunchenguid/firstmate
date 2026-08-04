@@ -183,7 +183,9 @@ while IFS= read -r candidate; do
 done < <(printf '%s\n' "$CHILD_PATH" | tr ':' '\n' | sed -n "\|^$ACCOUNT_HOME/.nvm/versions/node/[^/]*/bin$|p")
 [ "${#NVM_CHILD_DIRS[@]}" -le 1 ] || fail "the child PATH selected more than one nvm version"
 expect_dir "$REMOTE_ROOT/bin"
-expect_dir "$ACCOUNT_HOME/.local/bin"
+if [ -d "$ACCOUNT_HOME/.local/bin" ] && [ ! -L "$ACCOUNT_HOME/.local/bin" ]; then
+  expect_dir "$ACCOUNT_HOME/.local/bin"
+fi
 for candidate in "${NVM_CHILD_DIRS[@]}"; do expect_dir "$candidate"; done
 for candidate in "${MANAGER_DIRS[@]}"; do
   [ -d "$candidate" ] && [ ! -L "$candidate" ] && expect_dir "$candidate"
@@ -196,8 +198,13 @@ for fixed in /usr/bin /bin /usr/sbin /sbin; do expect_dir "$fixed"; done
 [ "$CHILD_PATH" = "$EXPECTED_PATH" ] \
   || fail "composed child PATH did not match the portable contract"$'\n'"expected: $EXPECTED_PATH"$'\n'"actual:   $CHILD_PATH"
 [ "${CHILD_PATH%%:*}" = "$REMOTE_ROOT/bin" ] || fail "the remote code root's bin was not first on the child PATH"
-[ "$(printf '%s' "$CHILD_PATH" | cut -d: -f2)" = "$ACCOUNT_HOME/.local/bin" ] \
-  || fail "the account's ~/.local/bin was not second on the child PATH"
+if [ -d "$ACCOUNT_HOME/.local/bin" ] && [ ! -L "$ACCOUNT_HOME/.local/bin" ]; then
+  [ "$(printf '%s' "$CHILD_PATH" | cut -d: -f2)" = "$ACCOUNT_HOME/.local/bin" ] \
+    || fail "the account's discovered ~/.local/bin was not second on the child PATH"
+else
+  path_has "$CHILD_PATH" "$ACCOUNT_HOME/.local/bin" \
+    && fail "the account's absent or symlinked ~/.local/bin was added to the child PATH"
+fi
 case "$CHILD_PATH" in *:/usr/bin:/bin:/usr/sbin:/sbin) ;; *) fail "the child PATH did not end with the portable system tail" ;; esac
 DUPES=$(printf '%s\n' "$CHILD_PATH" | tr ':' '\n' | sort | uniq -d)
 [ -z "$DUPES" ] || fail "the child PATH repeated entries: $DUPES"
