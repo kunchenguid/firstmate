@@ -95,6 +95,8 @@ Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
+portfolio_bounds{surface,shown,total,omitted,rest} appears only when a fleet
+  portfolio section dropped rows and names the environment bound that retrieves them.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
   a per-home cap (FM_BEARINGS_LANDED_PER_HOME) and an overall cap (FM_BEARINGS_LANDED),
   with omitted[] disclosure. Default selection is balanced across deterministic home
@@ -160,6 +162,10 @@ printf '%s' "$SNAP" | jq \
      | {id, title, pr_url, report_path, local_note, completion, home:"(main)", home_id:"(main)"} ]) as $main_done
   | ((.secondmate_landed.records) // []) as $mate_done
   | ($main_done + $mate_done) as $all_rows
+  | ([ .secondmate_current.records[]?
+       | select(.provenance.selected == "structured-home")
+       | ((.counts.landed // (.landed | length)) - (.landed | length))
+       | select(. > 0) ] | add // 0) as $upstream_omitted
   | ([ $all_rows | group_by(.home_id)[]
        | sort_by([(.completion.date // ""), .id]) | reverse
        | .[:$landed_per_home_n] ]) as $groups
@@ -167,7 +173,8 @@ printf '%s' "$SNAP" | jq \
   | {
       selected:($groups | round_robin_landed($landed_n)),
       per_home_capped_count:($per_home_capped | length),
-      home_cap_dropped:([ $all_rows | group_by(.home_id)[] | select(length > $landed_per_home_n) ] | length)
+      home_cap_dropped:([ $all_rows | group_by(.home_id)[] | select(length > $landed_per_home_n) ] | length),
+      total_count:(($all_rows | length) + $upstream_omitted)
     }' > "$LANDED_SELECTION_FILE" \
   || { echo "fm-bearings-snapshot: landed selection failed" >&2; exit 1; }
 
@@ -406,6 +413,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --slurpfile pr_discovery_input "$PR_DISCOVERY_FILE" '
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
+  def portfolio_bound($surface; $shown; $total; $rest):
+    {surface:$surface,shown:$shown,total:$total,omitted:($total-$shown),rest:$rest};
   ($landed_selection_input[0]) as $landed_selection
   | ($candidate_prs_input[0]) as $candidate_prs
   | ($pr_discovery_input[0]) as $pr_discovery
@@ -417,6 +426,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | ($landed_selection.selected) as $done
   | ($landed_selection.per_home_capped_count) as $per_home_capped_count
   | ($landed_selection.home_cap_dropped) as $home_cap_dropped
+  | ($landed_selection.total_count) as $landed_total_count
   | ($done | map(.id)) as $done_ids
   | ([.tasks[] | select(.kind != "secondmate") | .id]) as $live_ids
   | ([.tasks[] | select(.kind != "secondmate" and .liveness.activity == "active") | .id]) as $working_ids
@@ -525,6 +535,48 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | ([ $candidate_prs[] | select(.task != "-")
        | {id:.task,url,state,mergedAt,verification} ]) as $recorded_prs_all
   | . as $snap
+  | (($secondmates_all | length) + ($snap.secondmate_current.truncated // 0)) as $secondmates_total
+  | ([
+      (if ($in_flight_all | length) > $in_flight_n then
+         portfolio_bound("in_flight"; $in_flight_n; ($in_flight_all | length);
+           ("rerun with FM_BEARINGS_IN_FLIGHT=" + (($in_flight_all | length) | tostring)))
+       else empty end),
+      (if $secondmates_total > $secondmates_n then
+         portfolio_bound("secondmates"; ([($secondmates_all[:$secondmates_n])[]] | length); $secondmates_total;
+           ("rerun with FM_BEARINGS_SECONDMATES=" + ($secondmates_total | tostring)
+            + " and FM_SNAPSHOT_SECONDMATES=" + ($secondmates_total | tostring)))
+       else empty end),
+      (if ($decisions_all | length) > $decisions_n then
+         portfolio_bound("decisions_open"; $decisions_n; ($decisions_all | length);
+           ("rerun with FM_BEARINGS_DECISIONS=" + (($decisions_all | length) | tostring)))
+       else empty end),
+      (if $landed_total_count > ($done | length) then
+         portfolio_bound("landed"; ($done | length); $landed_total_count;
+           ("rerun with FM_BEARINGS_LANDED=" + ($landed_total_count | tostring)
+            + " FM_BEARINGS_LANDED_PER_HOME=" + ($landed_total_count | tostring)
+            + " and FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=" + ($landed_total_count | tostring)))
+       else empty end),
+      (if ($gates_all | length) > $gates_n then
+         portfolio_bound("gates"; $gates_n; ($gates_all | length);
+           ("rerun with FM_BEARINGS_GATES=" + (($gates_all | length) | tostring)))
+       else empty end),
+      (if ($reports_all | length) > $reports_n then
+         portfolio_bound("reports"; $reports_n; ($reports_all | length);
+           ("rerun with FM_BEARINGS_REPORTS=" + (($reports_all | length) | tostring)))
+       else empty end),
+      (if $recorded_url_total > ($recorded_prs_all[:$recorded_prs_n] | length) then
+         portfolio_bound("recorded_prs"; ($recorded_prs_all[:$recorded_prs_n] | length); $recorded_url_total;
+           ("rerun with FM_BEARINGS_RECORDED_PRS=" + ($recorded_url_total | tostring)))
+       else empty end),
+      (if ($unhealthy_all | length) > $unhealthy_n then
+         portfolio_bound("unhealthy_endpoints"; $unhealthy_n; ($unhealthy_all | length);
+           ("rerun with FM_BEARINGS_UNHEALTHY=" + (($unhealthy_all | length) | tostring)))
+       else empty end),
+      (if $include_prs == 1 and $pr_repos_total > $pr_repos_shown then
+         portfolio_bound("PR repositories"; $pr_repos_shown; $pr_repos_total;
+           ("rerun with FM_BEARINGS_PR_REPOS=" + ($pr_repos_total | tostring) + " --include-prs"))
+       else empty end)
+    ]) as $portfolio_bounds
   | {
       schema: "fm-bearings.v1",
       home: $home,
@@ -539,6 +591,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       reports: $reports_all[:$reports_n],
       recorded_prs: $recorded_prs_all[:$recorded_prs_n]
     }
+  | . + (if ($portfolio_bounds | length) > 0 then {portfolio_bounds:$portfolio_bounds} else {} end)
   | . + (if ($unhealthy_all | length) > 0 then
            {unhealthy_endpoints:$unhealthy_all[:$unhealthy_n]}
          else {} end)
