@@ -481,7 +481,7 @@ task_json_lines() {
     agent_alive=not_checked
     if [ -n "$remote_host" ]; then
       if remote_state=$(run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
-        "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" 2>/dev/null); then
+        "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
         remote_rc=0
       else
         remote_rc=$?
@@ -1200,7 +1200,7 @@ secondmate_current_json() {  # <parent-tasks-json>
     if [ -z "$reason" ]; then
       if [ "$remote" = true ]; then
         summary=$(run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
-          "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-summary 2>/dev/null)
+          "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-summary < /dev/null 2>/dev/null)
         summary_rc=$?
       else
         summary=$(run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" env \

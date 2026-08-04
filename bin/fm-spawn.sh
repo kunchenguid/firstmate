@@ -495,7 +495,7 @@ spawn_remote_secondmate() {
   launch_args=("$id" "$harness" "$model" "$effort" "$backend")
   [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
-    "${launch_args[@]}" 2>&1); then
+    "${launch_args[@]}" < /dev/null 2>&1); then
     rc=0
   else
     rc=$?

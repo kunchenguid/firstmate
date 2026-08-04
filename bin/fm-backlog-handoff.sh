@@ -309,7 +309,7 @@ remote_deliver_outbox() { # <secondmate-id> <outbox-path>
   fi
   rm -f -- "$snapshot"
   if ! receive_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-backlog-receive.sh \
-    "$remote_rel" "$bytes" "$hash" "$generation" 2>&1); then
+    "$remote_rel" "$bytes" "$hash" "$generation" < /dev/null 2>&1); then
     [ -z "$receive_out" ] || printf '%s\n' "$receive_out" >&2
     echo "error: handoff receipt by $id was unavailable or completion is unknown; outbox preserved at $outbox" >&2
     return 1
