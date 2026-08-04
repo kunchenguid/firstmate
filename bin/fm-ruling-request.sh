@@ -40,7 +40,8 @@
 # baseline-current|worktree-clean; validation runs every checker from the
 # trusted request after confirming response membership.
 # The exact repository baseline is READ from --repo, never typed, so no claim
-# about which commit a request is bound to can be wrong.
+# about which commit a request is bound to can be wrong; its canonical checkout
+# path is persisted as request context for dynamic reentry validation.
 #
 # validate refuses a response for any of these reasons, each named on stderr and
 # recorded in the away-session ledger:
@@ -68,7 +69,7 @@ FM_RULING_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 FM_RULING_SCHEMA=fm-ruling-request.v1
 
-FM_RULING_REQUEST_SINGLE='schema request session task tier baseline question why recommendation counterargument dependency-impact reversibility blast-radius falsifier expiry-condition expires'
+FM_RULING_REQUEST_SINGLE='schema request session task tier repo baseline question why recommendation counterargument dependency-impact reversibility blast-radius falsifier expiry-condition expires'
 FM_RULING_REQUEST_MULTI='alternative authority-evidence authorized-action invariant available-verification verifiable-precondition'
 FM_RULING_RESPONSE_SINGLE='request session baseline disposition action rationale opposing verification residual-uncertainty authority'
 FM_RULING_RESPONSE_MULTI='precondition invalidator'
@@ -170,6 +171,8 @@ command_create() {
   fm_away_valid_session_id "$key" || fail 'a privacy-safe --key slug is required'
   case "$tier" in D2|D3) ;; *) fail '--tier must be D2 or D3' ;; esac
   [ -n "$repo" ] || fail '--repo is required so the baseline is read, never typed'
+  repo=$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null) \
+    || fail "could not read a git checkout from $repo"
   baseline=$(fm_away_baseline "$repo") || fail "could not read a git baseline from $repo"
 
   for k in $single_keys; do
@@ -201,6 +204,7 @@ command_create() {
     printf 'session\t%s\n' "$session"
     printf 'task\t%s\n' "$task"
     printf 'tier\t%s\n' "$tier"
+    printf 'repo\t%s\n' "$(fm_away_clean_field "$repo")"
     printf 'baseline\t%s\n' "$baseline"
     cat "$pending"
   } > "$pending.final" || fail 'could not assemble the request'
@@ -263,25 +267,6 @@ has_shell_metacharacter() {  # <value>
     *';'*|*'|'*|*'&'*|*'`'*|*'$'*|*'('*|*')'*|*'<'*|*'>'*|*'\'*|*'"'*|*"'"*) return 0 ;;
   esac
   return 1
-}
-
-precondition_satisfied() {  # <request-file> <repo-dir> <checker>
-  local request=$1 repo=$2 checker=$3 live status
-  case "$checker" in
-    baseline-current)
-      live=$(fm_away_baseline "$repo")
-      status=$?
-      [ "$status" -eq 0 ] && [ -n "$live" ] || return 1
-      [ "$(field_one "$request" baseline)" = "$live" ]
-      ;;
-    worktree-clean)
-      live=$(git -C "$repo" status --porcelain 2>/dev/null)
-      status=$?
-      [ "$status" -eq 0 ] || return 1
-      [ -z "$live" ]
-      ;;
-    *) return 1 ;;
-  esac
 }
 
 command_validate() {
@@ -411,7 +396,7 @@ EOF
 
   while IFS= read -r value; do
     [ -n "$value" ] || continue
-    precondition_satisfied "$request" "$repo" "$value" \
+    fm_away_precondition_satisfied "$request" "$repo" "$value" \
       || reject precondition-unsatisfied "request-declared checker is unknown, false, or undetermined: $value"
   done <<EOF
 $(field_values "$request" verifiable-precondition)
@@ -422,6 +407,8 @@ EOF
     || reject verification-unavailable "no deterministic verification is available for: $value"
 
   if [ "$already_accepted" -eq 1 ]; then
+    record_dynamic_verification "$dir/accepted" "$live" \
+      || fail 'could not record dynamic verification'
     printf 'valid %s (already accepted)\n' "$id"
     return 0
   fi
@@ -436,6 +423,7 @@ EOF
     printf 'digest\t%s\n' "$digest"
     printf 'accepted\t%s\n' "$(date +%s)"
     printf 'baseline\t%s\n' "$live"
+    printf 'verified\t%s\n' "$(date +%s)"
   } > "$pending_accepted" \
     || { rm -f "$pending_response" "$pending_accepted"; fail 'could not stage acceptance'; }
   if ! ruling_response_event_exists "$ledger" "$id" "$digest"; then
@@ -453,6 +441,20 @@ EOF
   mv "$pending_accepted" "$dir/accepted" \
     || { rm -f "$pending_accepted"; fail 'could not publish acceptance'; }
   printf 'valid %s\n' "$id"
+}
+
+record_dynamic_verification() {  # <accepted-file> <baseline>
+  local accepted_file=$1 baseline=$2 pending digest accepted_at
+  digest=$(field_one "$accepted_file" digest)
+  accepted_at=$(field_one "$accepted_file" accepted)
+  pending=$(mktemp "$(dirname "$accepted_file")/.accepted.verify.XXXXXX") || return 1
+  {
+    printf 'digest\t%s\n' "$digest"
+    printf 'accepted\t%s\n' "$accepted_at"
+    printf 'baseline\t%s\n' "$baseline"
+    printf 'verified\t%s\n' "$(date +%s)"
+  } > "$pending" || { rm -f "$pending"; return 1; }
+  mv "$pending" "$accepted_file" || { rm -f "$pending"; return 1; }
 }
 
 ruling_response_event_exists() {  # <ledger> <request-id> <digest>

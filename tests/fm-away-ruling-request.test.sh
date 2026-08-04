@@ -196,13 +196,15 @@ test_published_incomplete_request_is_refused() {
 }
 
 test_a_complete_request_is_durable_and_reads_its_own_baseline() {
-  local id file baseline head
+  local id file baseline head stored_repo
   id=$(make_request t-complete D2)
   file=$(request_file "$id")
   [ -f "$file" ] || fail "the request was not persisted"
   baseline=$(sed -n 's/^baseline\t//p' "$file")
   head=$(git -C "$REPO" rev-parse HEAD)
   [ "$baseline" = "repo@$head" ] || fail "the request baseline was not read from the checkout: $baseline"
+  stored_repo=$(sed -n 's/^repo\t//p' "$file")
+  [ "$stored_repo" = "$REPO" ] || fail "the request did not persist its canonical repository context: $stored_repo"
 
   # Creating the same request again is idempotent, not a second artifact.
   [ "$(make_request t-complete D2)" = "$id" ] || fail "recreating an identical request changed its id"

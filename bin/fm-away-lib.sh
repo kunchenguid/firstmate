@@ -166,3 +166,23 @@ fm_away_baseline() {  # <repo-dir>
   name=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || return 1
   printf '%s@%s' "${name##*/}" "$commit"
 }
+
+fm_away_precondition_satisfied() {  # <request-file> <repo-dir> <checker>
+  local request=$1 repo=$2 checker=$3 live status expected
+  case "$checker" in
+    baseline-current)
+      live=$(fm_away_baseline "$repo")
+      status=$?
+      [ "$status" -eq 0 ] && [ -n "$live" ] || return 1
+      expected=$(awk -F '\t' '$1 == "baseline" { sub(/^[^\t]*\t/, ""); print; exit }' "$request")
+      [ "$expected" = "$live" ]
+      ;;
+    worktree-clean)
+      live=$(git -C "$repo" status --porcelain 2>/dev/null)
+      status=$?
+      [ "$status" -eq 0 ] || return 1
+      [ -z "$live" ]
+      ;;
+    *) return 1 ;;
+  esac
+}

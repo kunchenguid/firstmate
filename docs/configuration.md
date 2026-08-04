@@ -120,6 +120,7 @@ It always exits 0 and never blocks or rewrites a prompt.
 
 One away stretch has a durable identity so a decision classification, a ruling request, and the reentry summary all bind to the same session across a restart.
 `state/.away-session` is the current session record and `state/away/<session>/ledger` is that session's append-only evidence log; `state/away/<session>/ruling/` holds its durable ruling requests and any validated response.
+Each ruling request retains its canonical checkout context so reentry can label dynamically invalid advice stale instead of presenting it as current.
 The ledger is evidence, never a queue: the durable actionable queue remains `state/.wake-queue`.
 The session record is cleared only once the return catch-up gate has actually cleared, while the ledger is retained.
 `bin/fm-away-lib.sh`'s header owns the exact formats.

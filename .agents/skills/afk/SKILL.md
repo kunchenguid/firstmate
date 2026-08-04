@@ -79,6 +79,7 @@ a false exit is self-correcting (the captain re-runs `/afk`).
 ## The reentry report
 
 `bin/fm-away-continuation.sh reentry` renders the away stretch as decisions, not transcripts, deriving every count from the away ledger and the backlog rather than from a second tally.
+It trusts only completely published ruling artifacts and marks advice explicitly stale, with its last verification time, when the request-owned repository baseline, expiry, or preconditions no longer hold.
 Relay it in `AGENTS.md` section 9 language: the captain reads outcomes and choices, never raw worker output.
 
 Lead each remaining captain decision with its recommended ruling, then the opposing position, what accepting and rejecting each cost, reversibility, blast radius, the settled architecture at stake, and the exact directive needed.

@@ -202,6 +202,84 @@ ruling_field_joined() {  # <file> <key>
   ruling_field "$1" "$2" | awk 'NR > 1 { printf ", " } { printf "%s", $0 } END { print "" }'
 }
 
+ruling_sha256() {  # <file>
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    sha256sum "$1" | awk '{print $1}'
+  fi
+}
+
+ruling_event_exists() {  # <ledger> <kind> <request-id> [digest]
+  awk -F '\t' -v kind="$2" -v request="request=$3" -v digest="${4:+digest=$4}" '
+    $2 == kind {
+      has_request=0
+      has_digest=(digest == "")
+      for (i = 3; i <= NF; i++) {
+        if ($i == request) has_request=1
+        if ($i == digest) has_digest=1
+      }
+      if (has_request && has_digest) found=1
+    }
+    END { exit !found }
+  ' "$1" 2>/dev/null
+}
+
+ruling_request_complete() {  # <session> <request-id>
+  local dir ledger
+  dir=$(ruling_dir "$1" "$2")
+  ledger=$(fm_away_ledger_path "$1")
+  [ -f "$dir/request" ] && [ -f "$dir/evidence" ] \
+    && ruling_event_exists "$ledger" ruling-request "$2"
+}
+
+ruling_response_complete() {  # <session> <request-id>
+  local dir ledger digest actual
+  dir=$(ruling_dir "$1" "$2")
+  ledger=$(fm_away_ledger_path "$1")
+  [ -f "$dir/response" ] && [ -f "$dir/accepted" ] || return 1
+  digest=$(ruling_field "$dir/accepted" digest | head -1)
+  [ -n "$digest" ] || return 1
+  actual=$(ruling_sha256 "$dir/response") || return 1
+  [ "$actual" = "$digest" ] \
+    && ruling_event_exists "$ledger" ruling-response "$2" "$digest"
+}
+
+ruling_dynamic_state() {  # <request-file> <accepted-file>
+  local request=$1 accepted=$2 repo live expires checker
+  FM_RULING_DYNAMIC_DETAIL='repository context is missing from the request'
+  FM_RULING_LAST_VERIFIED=$(ruling_field "$accepted" verified | head -1)
+  [ -n "$FM_RULING_LAST_VERIFIED" ] \
+    || FM_RULING_LAST_VERIFIED=$(ruling_field "$accepted" accepted | head -1)
+  [ -n "$FM_RULING_LAST_VERIFIED" ] || FM_RULING_LAST_VERIFIED=never
+  repo=$(ruling_field "$request" repo | head -1)
+  [ -n "$repo" ] || return 1
+  live=$(fm_away_baseline "$repo") || {
+    FM_RULING_DYNAMIC_DETAIL="repository context is unavailable: $repo"
+    return 1
+  }
+  if [ "$(ruling_field "$request" baseline | head -1)" != "$live" ]; then
+    FM_RULING_DYNAMIC_DETAIL='request baseline is no longer current'
+    return 1
+  fi
+  expires=$(ruling_field "$request" expires | head -1)
+  if ! [ "$(date +%s)" -le "$expires" ] 2>/dev/null; then
+    FM_RULING_DYNAMIC_DETAIL='request expiry has passed or is indeterminate'
+    return 1
+  fi
+  while IFS= read -r checker; do
+    [ -n "$checker" ] || continue
+    if ! fm_away_precondition_satisfied "$request" "$repo" "$checker"; then
+      FM_RULING_DYNAMIC_DETAIL="precondition is false or indeterminate: $checker"
+      return 1
+    fi
+  done <<EOF
+$(ruling_field "$request" verifiable-precondition)
+EOF
+  FM_RULING_DYNAMIC_DETAIL='all dynamic gates currently hold'
+  return 0
+}
+
 # A D3 item is safe to approve in a batch only when the advice it carries is
 # reversible and contained. Anything else must be inspected on its own.
 batch_safe() {  # <request-file>
@@ -214,41 +292,47 @@ batch_safe() {  # <request-file>
 }
 
 print_d3_item() {  # <session> <hold-id> <task> <key>
-  local session=$1 hold=$2 request response accepted ledger digest id
+  local session=$1 hold=$2 request response accepted id request_ok=0 response_ok=0 current=0
   id="rr-$3-$4"
   request="$(ruling_dir "$session" "$id")/request"
   response="$(ruling_dir "$session" "$id")/response"
   accepted="$(ruling_dir "$session" "$id")/accepted"
-  ledger=$(fm_away_ledger_path "$session")
 
   printf '\n  decision: %s\n' "$hold"
-  if [ -f "$request" ]; then
+  if ruling_request_complete "$session" "$id"; then
+    request_ok=1
     printf '    exact decision: %s\n' "$(ruling_field "$request" question | head -1)"
     printf '    why operator-owned: %s\n' "$(ruling_field "$request" why | head -1)"
+  else
+    printf '    ruling status: STALE - request publication is incomplete; no request fields are trusted\n'
+    printf '    last verified: never\n'
   fi
-  digest=$(ruling_field "$accepted" digest | head -1)
-  if [ -f "$response" ] && [ -n "$digest" ] \
-    && awk -F '\t' -v request="request=$id" -v digest="digest=$digest" '
-      $2 == "ruling-response" {
-        has_request=0
-        has_digest=0
-        for (i = 3; i <= NF; i++) {
-          if ($i == request) has_request=1
-          if ($i == digest) has_digest=1
-        }
-        if (has_request && has_digest) found=1
-      }
-      END { exit !found }
-    ' "$ledger" 2>/dev/null; then
+  if [ "$request_ok" -eq 1 ]; then
+    ruling_dynamic_state "$request" "$accepted" && current=1
+    if [ "$current" -eq 0 ]; then
+      printf '    ruling status: STALE - %s\n' "$FM_RULING_DYNAMIC_DETAIL"
+      printf '    last verified: %s\n' "$FM_RULING_LAST_VERIFIED"
+    fi
+  fi
+  if ruling_response_complete "$session" "$id"; then
+    response_ok=1
+  fi
+  if [ "$response_ok" -eq 1 ] && [ "$current" -eq 1 ]; then
+    printf '    ruling status: current\n'
+    printf '    last verified: %s\n' "$FM_RULING_LAST_VERIFIED"
     printf '    recommended ruling: %s\n' "$(ruling_field "$response" disposition | head -1)"
     printf '    strongest opposing position: %s\n' "$(ruling_field "$response" opposing | head -1)"
     printf '    if accepted: %s\n' "$(ruling_field "$response" action | head -1)"
+  elif [ "$response_ok" -eq 1 ]; then
+    printf '    stale recommendation (not currently valid): %s\n' \
+      "$(ruling_field "$response" disposition | head -1)"
+    printf '    strongest opposing position: %s\n' "$(ruling_field "$response" opposing | head -1)"
   else
     printf '    recommended ruling: none recorded - no validated advice was accepted\n'
-    [ ! -f "$request" ] \
+    [ "$request_ok" -eq 0 ] \
       || printf '    strongest opposing position: %s\n' "$(ruling_field "$request" counterargument | head -1)"
   fi
-  if [ -f "$request" ]; then
+  if [ "$request_ok" -eq 1 ]; then
     printf '    if rejected: %s\n' "$(ruling_field "$request" dependency-impact | head -1)"
     printf '    reversibility: %s\n' "$(ruling_field "$request" reversibility | head -1)"
     printf '    blast radius: %s\n' "$(ruling_field "$request" blast-radius | head -1)"
@@ -256,20 +340,20 @@ print_d3_item() {  # <session> <hold-id> <task> <key>
       "$(ruling_field_joined "$request" invariant)"
     printf '    exact directive needed: choose one of: %s\n' \
       "$(ruling_field_joined "$request" authorized-action)"
-    if batch_safe "$request"; then
+    if [ "$response_ok" -eq 1 ] && [ "$current" -eq 1 ] && batch_safe "$request"; then
       printf '    batch-safe: yes\n'
     else
       printf '    batch-safe: no - inspect this one on its own\n'
     fi
   else
-    printf '    batch-safe: no - no ruling request was recorded for this decision\n'
+    printf '    batch-safe: no - no complete ruling request was recorded for this decision\n'
   fi
   printf '    resolve with: bin/fm-decision-hold.sh resolve %s %s --decision-file <file> --routed-to <task>\n' "$3" "$4"
 }
 
 command_reentry() {
   local session='' started ledger d0 d1 d2 d3 line hold task key
-  local held='' id state blocked_ids=''
+  local held='' id state blocked_ids='' shown=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --session) shift; session=${1:-} ;;
@@ -300,13 +384,24 @@ command_reentry() {
   if fm_away_ledger_read "$session" ruling-response | grep -q .; then
     while IFS= read -r line; do
       [ -n "$line" ] || continue
-      printf '  %s -> %s (authority: %s)\n' \
-        "$(fm_away_ledger_value "$line" request)" \
-        "$(fm_away_ledger_value "$line" action)" \
-        "$(fm_away_ledger_value "$line" authority)"
+      id=$(fm_away_ledger_value "$line" request)
+      ruling_request_complete "$session" "$id" || continue
+      ruling_response_complete "$session" "$id" || continue
+      if ruling_dynamic_state "$(ruling_dir "$session" "$id")/request" \
+        "$(ruling_dir "$session" "$id")/accepted"; then
+        printf '  %s -> %s (authority: %s; last verified: %s)\n' \
+          "$id" "$(fm_away_ledger_value "$line" action)" \
+          "$(fm_away_ledger_value "$line" authority)" "$FM_RULING_LAST_VERIFIED"
+        shown=1
+      else
+        printf '  %s -> STALE (last verified: %s; %s)\n' \
+          "$id" "$FM_RULING_LAST_VERIFIED" "$FM_RULING_DYNAMIC_DETAIL"
+        shown=1
+      fi
     done <<EOF
 $(fm_away_ledger_read "$session" ruling-response)
 EOF
+    [ "$shown" -eq 1 ] || printf '  (none)\n'
   else
     printf '  (none)\n'
   fi

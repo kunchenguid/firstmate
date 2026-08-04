@@ -130,7 +130,7 @@ EOF
 # make_ruling <home> <repo> <task> <reversibility> <blast>: a complete D3 request
 # with an accepted, operator-reserved response.
 make_ruling() {
-  local home=$1 repo=$2 task=$3 reversibility=$4 blast=$5 id session
+  local home=$1 repo=$2 task=$3 reversibility=$4 blast=$5 checker=${6:-baseline-current} id session
   id=$(in_home "$home" "$RULING" create --task "$task" --key shape --repo "$repo" --tier D3 \
     --question "Does the $task owner move to the platform team?" \
     --why 'Two teams change the same module and neither owns it' \
@@ -147,7 +147,7 @@ make_ruling() {
     --authorized-action keep-core-ownership \
     --invariant 'no component declares a caller identity to satisfy the matrix' \
     --available-verification 'run the regression suite as the platform team' \
-    --verifiable-precondition baseline-current)
+    --verifiable-precondition "$checker")
   session=$(in_home "$home" "$SESSION" id)
   "$DOUBLE" operator-reserved "$home/state/away/$session/ruling/$id/request" > "$home/response"
   in_home "$home" "$RULING" validate "$id" --repo "$repo" --response "$home/response" >/dev/null
@@ -278,11 +278,86 @@ EOF
   pass "a session with no genuine ruling reports that plainly and keeps the summary short"
 }
 
+test_reentry_requires_complete_publication() {
+  local rec home repo hold out session dir
+  rec=$(new_world reentry-completeness)
+  IFS='|' read -r home repo <<EOF
+$rec
+EOF
+  axi "$home" add widget-api "Widget API" --repo demo >/dev/null
+  in_home "$home" "$SESSION" start --intent afk >/dev/null 2>&1
+  in_home "$home" "$CLASS" classify --task widget-api --key shape \
+    --reassigns-authority yes --record >/dev/null
+  hold=$(in_home "$home" "$HOLD" hold widget-api shape \
+    --title 'Widget API ownership' --reason 'reassigns the architectural owner' --repo demo)
+  make_ruling "$home" "$repo" widget-api reversible contained >/dev/null
+  session=$(in_home "$home" "$SESSION" id)
+  dir="$home/state/away/$session/ruling/rr-widget-api-shape"
+  rm -f "$dir/evidence"
+  out=$(in_home "$home" "$CONT" reentry)
+  case "$out" in *"STALE - request publication is incomplete"*) : ;; *) fail "incomplete request was not marked stale: $out" ;; esac
+  case "$out" in *"exact directive needed:"*) fail "incomplete request fields influenced reentry: $out" ;; esac
+
+  : > "$dir/evidence"
+  rm -f "$dir/accepted"
+  out=$(in_home "$home" "$CONT" reentry)
+  case "$out" in *"rr-widget-api-shape -> move-ownership-to-platform"*) fail "pre-authority response event appeared accepted: $out" ;; esac
+  case "$out" in *"recommended ruling: none recorded"*) : ;; *) fail "incomplete response was not withheld: $out" ;; esac
+  : "$hold"
+  pass "reentry trusts only completely published requests and accepted responses"
+}
+
+test_reentry_marks_dynamic_gate_failures_stale() {
+  local rec home repo out session request
+  rec=$(new_world reentry-stale-baseline)
+  IFS='|' read -r home repo <<EOF
+$rec
+EOF
+  axi "$home" add widget-api "Widget API" --repo demo >/dev/null
+  in_home "$home" "$SESSION" start --intent afk >/dev/null 2>&1
+  in_home "$home" "$CLASS" classify --task widget-api --key shape --reassigns-authority yes --record >/dev/null
+  in_home "$home" "$HOLD" hold widget-api shape --title ownership --reason authority --repo demo >/dev/null
+  make_ruling "$home" "$repo" widget-api reversible contained >/dev/null
+  git -C "$repo" commit -q --allow-empty -m moved-after-validation
+  out=$(in_home "$home" "$CONT" reentry)
+  case "$out" in *"STALE"*"baseline is no longer current"*"last verified:"*) : ;; *) fail "stale baseline was not explicit: $out" ;; esac
+  case "$out" in *"stale recommendation (not currently valid):"*) : ;; *) fail "stale recommendation was silently dropped: $out" ;; esac
+  case "$out" in *"batch-safe: no"*) : ;; *) fail "stale advice remained batch-safe: $out" ;; esac
+
+  rec=$(new_world reentry-stale-precondition)
+  IFS='|' read -r home repo <<EOF
+$rec
+EOF
+  axi "$home" add widget-api "Widget API" --repo demo >/dev/null
+  in_home "$home" "$SESSION" start --intent afk >/dev/null 2>&1
+  in_home "$home" "$CLASS" classify --task widget-api --key shape --reassigns-authority yes --record >/dev/null
+  in_home "$home" "$HOLD" hold widget-api shape --title ownership --reason authority --repo demo >/dev/null
+  make_ruling "$home" "$repo" widget-api reversible contained worktree-clean >/dev/null
+  : > "$repo/dirty-after-validation"
+  out=$(in_home "$home" "$CONT" reentry)
+  case "$out" in *"STALE"*"precondition is false or indeterminate: worktree-clean"*) : ;; *) fail "false precondition was not explicit: $out" ;; esac
+
+  session=$(in_home "$home" "$SESSION" id)
+  request="$home/state/away/$session/ruling/rr-widget-api-shape/request"
+  rm -f "$repo/dirty-after-validation"
+  sed -i "s/^expires\t.*/expires\t$(( $(date +%s) - 1 ))/" "$request"
+  out=$(in_home "$home" "$CONT" reentry)
+  case "$out" in *"STALE"*"request expiry has passed"*) : ;; *) fail "expired request was not explicit: $out" ;; esac
+
+  sed -i "s/^expires\t.*/expires\t$(( $(date +%s) + 3600 ))/" "$request"
+  mv "$repo" "$repo-gone"
+  out=$(in_home "$home" "$CONT" reentry)
+  case "$out" in *"STALE"*"repository context is unavailable:"*) : ;; *) fail "missing repository context was not explicit: $out" ;; esac
+  pass "reentry marks stale baseline, expiry, preconditions, and missing repositories explicitly"
+}
+
 test_pause_blocks_only_dependent_work
 test_frontier_is_the_transitive_closure
 test_reentry_reports_decisions_not_transcripts
 test_an_irreversible_item_is_not_batch_safe
 test_unknown_and_missing_reversibility_are_not_batch_safe
 test_a_session_with_no_ruling_says_so_plainly
+test_reentry_requires_complete_publication
+test_reentry_marks_dynamic_gate_failures_stale
 
 echo "# fm-away-continuation.test.sh: all assertions passed"
