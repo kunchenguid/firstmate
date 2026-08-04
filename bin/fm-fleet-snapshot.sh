@@ -83,7 +83,7 @@ case "$SNAPSHOT_EPOCH" in ''|*[!0-9]*) SNAPSHOT_EPOCH=$(date +%s) ;; esac
 # Cross-home bounds are explicit so one broken or unexpectedly large home cannot
 # hang or explode the parent snapshot.
 FM_SNAPSHOT_SECONDMATES=${FM_SNAPSHOT_SECONDMATES:-20}
-FM_SNAPSHOT_SECONDMATE_TIMEOUT=${FM_SNAPSHOT_SECONDMATE_TIMEOUT:-8}
+FM_SNAPSHOT_SECONDMATE_TIMEOUT=${FM_SNAPSHOT_SECONDMATE_TIMEOUT:-20}
 FM_SNAPSHOT_SECONDMATE_MAX_BYTES=${FM_SNAPSHOT_SECONDMATE_MAX_BYTES:-262144}
 FM_SNAPSHOT_SECONDMATE_CHILDREN=${FM_SNAPSHOT_SECONDMATE_CHILDREN:-20}
 FM_SNAPSHOT_SECONDMATE_QUEUED=${FM_SNAPSHOT_SECONDMATE_QUEUED:-20}
@@ -1138,13 +1138,18 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
 }
 
 secondmate_current_json() {  # <parent-tasks-json-file>
-  local tasks_file=$1 registry union rows total_registered total shown truncated
+  local tasks_file=$1 registry_file union_file rows_file records_file total_registered total shown truncated
   local row id home host remote registered registry_error task status_file event_raw event_note event_epoch event_age
   local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
-  local records='[]' seen_homes=''
-  registry=$(registry_secondmates_json) || return 1
-  union=$(jq -n --argjson registry "$registry" --slurpfile tasks_input "$tasks_file" '
-    ($tasks_input[0]) as $tasks
+  local record seen_homes=''
+  registry_file="$SNAP_TMP/secondmate-registry.json"
+  union_file="$SNAP_TMP/secondmate-union.json"
+  rows_file="$SNAP_TMP/secondmate-rows.jsonl"
+  records_file="$SNAP_TMP/secondmate-records.jsonl"
+  registry_secondmates_json > "$registry_file" || return 1
+  jq -n --slurpfile registry_input "$registry_file" --slurpfile tasks_input "$tasks_file" '
+    ($registry_input[0]) as $registry
+    | ($tasks_input[0]) as $tasks
     | ($registry.records // []) as $registered
     | (($registered | map(.id)) // []) as $registered_ids
     | ([ $registered[] as $r
@@ -1158,12 +1163,14 @@ secondmate_current_json() {  # <parent-tasks-json-file>
                               else "secondmate registration is unknown because the registry read is incomplete or unavailable" end),
               parent_task:$t} ])
     | sort_by(.id)
-    | {registry:$registry,records:.}') || return 1
-  total_registered=$(printf '%s' "$union" | jq '[.records[] | select(.registered)] | length')
-  total=$(printf '%s' "$union" | jq '.records | length')
-  rows=$(printf '%s' "$union" | jq -c --argjson cap "$FM_SNAPSHOT_SECONDMATES" '(if $cap == 0 then .records else .records[:$cap] end)[]')
-  shown=$(printf '%s\n' "$rows" | grep -c . || true)
+    | {registry:$registry,records:.}' > "$union_file" || return 1
+  total_registered=$(jq '[.records[] | select(.registered)] | length' "$union_file")
+  total=$(jq '.records | length' "$union_file")
+  jq -c --argjson cap "$FM_SNAPSHOT_SECONDMATES" \
+    '(if $cap == 0 then .records else .records[:$cap] end)[]' "$union_file" > "$rows_file" || return 1
+  shown=$(grep -c . "$rows_file" || true)
   truncated=$((total - shown))
+  : > "$records_file"
 
   while IFS= read -r row; do
     [ -n "$row" ] || continue
@@ -1326,22 +1333,22 @@ secondmate_current_json() {  # <parent-tasks-json-file>
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan},
          terminal_evidence:$terminal,contradiction:false}')
     fi
-    records=$(jq -n --argjson records "$records" --argjson record "$record" '$records + [$record]')
-  done <<EOF
-$rows
-EOF
+    printf '%s\n' "$record" >> "$records_file"
+  done < "$rows_file"
   jq -n \
-    --argjson registry "$(printf '%s' "$union" | jq '.registry')" \
-    --argjson records "$records" \
+    --slurpfile union_input "$union_file" \
+    --slurpfile records_input "$records_file" \
     --argjson total_registered "$total_registered" \
     --argjson total "$total" \
     --argjson shown "$shown" \
     --argjson truncated "$truncated" \
-    '{registry:$registry,records:$records,total_registered:$total_registered,total:$total,shown:$shown,truncated:$truncated}'
+    '{registry:$union_input[0].registry,records:$records_input,total_registered:$total_registered,total:$total,shown:$shown,truncated:$truncated}'
 }
 
-secondmate_landed_from_current_json() {  # <secondmate-current-json>
-  jq -n --argjson current "$1" '
+secondmate_landed_from_current_file() {  # <secondmate-current-json-file>
+  jq -n --slurpfile current_input "$1" '
+    ($current_input[0]) as $current
+    |
     {records:[ $current.records[]
       | select(.provenance.selected == "structured-home") as $mate
       | $mate.landed[]
@@ -1424,10 +1431,6 @@ fi
 SCOUT_REPORTS_JSON=$(scout_report_lines)
 MAIN_INVENTORY_JSON=$(main_inventory_json "$BACKLOG_FILE" "$TASKS_FILE") \
   || { echo "fm-fleet-snapshot: main inventory summary failed" >&2; exit 1; }
-SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_FILE") \
-  || { echo "fm-fleet-snapshot: registered secondmate aggregation failed" >&2; exit 1; }
-SECONDMATE_LANDED_JSON=$(secondmate_landed_from_current_json "$SECONDMATE_CURRENT_JSON") \
-  || { echo "fm-fleet-snapshot: secondmate landed projection failed" >&2; exit 1; }
 
 MAIN_INVENTORY_FILE="$SNAP_TMP/main-inventory.json"
 SCOUT_REPORTS_FILE="$SNAP_TMP/scout-reports.json"
@@ -1435,8 +1438,10 @@ SECONDMATE_CURRENT_FILE="$SNAP_TMP/secondmate-current.json"
 SECONDMATE_LANDED_FILE="$SNAP_TMP/secondmate-landed.json"
 printf '%s\n' "$MAIN_INVENTORY_JSON" > "$MAIN_INVENTORY_FILE"
 printf '%s\n' "$SCOUT_REPORTS_JSON" > "$SCOUT_REPORTS_FILE"
-printf '%s\n' "$SECONDMATE_CURRENT_JSON" > "$SECONDMATE_CURRENT_FILE"
-printf '%s\n' "$SECONDMATE_LANDED_JSON" > "$SECONDMATE_LANDED_FILE"
+secondmate_current_json "$TASKS_FILE" > "$SECONDMATE_CURRENT_FILE" \
+  || { echo "fm-fleet-snapshot: registered secondmate aggregation failed" >&2; exit 1; }
+secondmate_landed_from_current_file "$SECONDMATE_CURRENT_FILE" > "$SECONDMATE_LANDED_FILE" \
+  || { echo "fm-fleet-snapshot: secondmate landed projection failed" >&2; exit 1; }
 
 jq -n \
   --arg generated "$SNAPSHOT_NOW" \

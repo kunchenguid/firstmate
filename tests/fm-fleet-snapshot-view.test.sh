@@ -196,6 +196,44 @@ test_large_snapshot_payloads_never_cross_exec_argv() {
   pass "fleet snapshot keeps backlog and task JSON off exec argv beyond ARG_MAX"
 }
 
+test_cross_home_aggregation_never_uses_growing_json_argv() {
+  local home fakebin guard real_jq out
+  home=$(make_home cross-home-argv)
+  write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  guard="$home/jq-guard"
+  mkdir -p "$guard"
+  real_jq=$(command -v jq)
+  cat > "$guard/jq" <<SH
+#!/usr/bin/env bash
+previous=
+name=
+for argument in "\$@"; do
+  if [ "\$previous" = --argjson ]; then
+    name=\$argument
+    previous=argjson-name
+    continue
+  fi
+  if [ "\$previous" = argjson-name ]; then
+    case "\$name" in
+      current|records) [ "\${#argument}" -le 100 ] || exit 97 ;;
+    esac
+    previous=
+    continue
+  fi
+  previous=\$argument
+done
+exec "$real_jq" "\$@"
+SH
+  chmod +x "$guard/jq"
+  out=$(PATH="$guard:$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" \
+    FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "cross-home snapshot put a growing current or records collection on jq argv"
+  printf '%s' "$out" | jq -e '.schema == "fm-fleet-snapshot.v1" and (.secondmate_current.records | length) == 1' >/dev/null \
+    || fail "off-argv cross-home aggregation lost its record: $out"
+  pass "cross-home current and records collections stay off jq argv"
+}
+
 test_fixture_snapshot_json() {
   local home fakebin out ids
   home=$(make_home fixture)
@@ -826,6 +864,7 @@ test_parked_scout_decision_stays_pending() {
 
 test_empty_fleet_json
 test_large_snapshot_payloads_never_cross_exec_argv
+test_cross_home_aggregation_never_uses_growing_json_argv
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness

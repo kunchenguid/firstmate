@@ -362,9 +362,6 @@ clear_pause_tracking() {  # <window>
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.parked-$key"
 }
 
-# Retained, independently measured parked workers are healthy idle lanes, not
-# wedges. Record the exact output hash and remove every wedge timer; a later
-# output change forces a fresh process/output classification.
 handle_parked_stale() {  # <window> <hash>
   local win=$1 h=$2 key
   key=$(printf '%s' "$win" | tr ':/.' '___')
@@ -372,6 +369,23 @@ handle_parked_stale() {  # <window> <hash>
   : > "$STATE/.parked-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   triage_log "absorbed stale (independently measured parked): $win"
+}
+
+handle_bounded_parked_stale() {  # <window> <hash>
+  local win=$1 h=$2 key since_file
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  since_file="$STATE/.stale-since-$key"
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  rm -f "$STATE/.parked-$key"
+  [ -s "$since_file" ] || date +%s > "$since_file"
+  triage_log "absorbed non-terminal stale (independently measured parked, bounded): $win"
+}
+
+parked_has_terminal_completion() {  # <window>
+  local win=$1 task verb
+  task=$(window_to_task "$win" "$STATE")
+  verb=$(status_line_verb "$(last_status_line "$STATE/$task.status")")
+  case "$verb" in done|failed) return 0 ;; *) return 1 ;; esac
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
@@ -1013,7 +1027,16 @@ EOF
                 triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
                 ;;
               parked)
-                handle_parked_stale "$w" "$h"
+                if parked_has_terminal_completion "$w"; then
+                  handle_parked_stale "$w" "$h"
+                else
+                  rm -f "$pkf"
+                  fm_wake_append stale "$w" "stale: $w" || exit 1
+                  printf '%s' "$h" > "$sf"
+                  rm -f "$ssf"
+                  mark_surfaced "$STATE/$task.status"
+                  wake "stale: $w"
+                fi
                 ;;
               *)
                 rm -f "$pkf"
@@ -1024,6 +1047,11 @@ EOF
                 wake "stale: $w"
                 ;;
             esac
+          elif [ -e "$pkf" ] && ! parked_has_terminal_completion "$w"; then
+            rm -f "$pkf"
+            fm_wake_append stale "$w" "stale: $w" || exit 1
+            mark_surfaced "$STATE/$task.status"
+            wake "stale: $w"
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a
             # wedge timer is running for it) - keep treating it that way
@@ -1060,7 +1088,7 @@ EOF
                 ;;
               parked)
                 clear_pause_state "$w"
-                handle_parked_stale "$w" "$h"
+                handle_bounded_parked_stale "$w" "$h"
                 ;;
               paused)
                 handle_paused_stale "$w" "$task" "$h"
@@ -1080,6 +1108,9 @@ EOF
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
+            elif [ -e "$pkf" ] && ! parked_has_terminal_completion "$w"; then
+              handle_bounded_parked_stale "$w" "$h"
+              wedge_timer_check "$w" "$ssf" "non-terminal stale (independently measured parked)" "$ewf"
             elif [ ! -e "$pkf" ]; then
               wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf"
             fi
