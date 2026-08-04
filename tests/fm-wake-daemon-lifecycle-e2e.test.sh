@@ -106,7 +106,7 @@ test_routine_then_terminal_after_restart() {
 
 # --- Phase 2: stale working-pane transient -> persistent -> resumed ----------
 test_stale_pane_transient_persistent_resume() {
-  local dir state fakebin win key
+  local dir state fakebin win key resumed_gen
   dir=$(make_supercase wd-stale)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -128,15 +128,23 @@ test_stale_pane_transient_persistent_resume() {
   echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
   : > "$state/.subsuper-escalations" 2>/dev/null || true
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
-    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state" \
+    2>"$dir/housekeeping.err"
+  [ ! -s "$dir/housekeeping.err" ] \
+    || fail "missing task metadata leaked a raw read error: $(cat "$dir/housekeeping.err")"
   [ -s "$state/.subsuper-escalations" ] || fail "persistent stale did not escalate"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "stale marker not cleared after escalation"
 
-  # Resumed: a fresh transient marker but the pane is now busy -> housekeeping
-  # clears the marker without escalating.
+  # Resumed: a fresh transient marker but the crew is provably working again ->
+  # housekeeping clears the marker without escalating. The proof is the crew's
+  # own semantic busy-state record (bin/fm-busy-lib.sh), not rendered pane text.
   stale_marker_record "$win" "$state"
   echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
   printf 'Working...\n' > "$dir/pane.txt"
+  fm_write_meta "$state/stale-w2.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
+  resumed_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" stale-w2)
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" stale-w2 busy --gen "$resumed_gen" \
+    --source pi-ext --event agent-start
   : > "$state/.subsuper-escalations"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"

@@ -115,7 +115,7 @@ test_guard_warnings() {
   #       warning follows it, and the guidance is repair-after-drain (never the
   #       old conflicting "restart NOW first").
   #   (2) a fresh watcher and an empty queue: total silence.
-  local dir state err first banner_line queue_line
+  local dir state err first banner_line queue_line pid identity
   dir=$(make_case guard)
   state="$dir/state"
   err="$dir/guard.err"
@@ -138,9 +138,9 @@ test_guard_warnings() {
   grep -F 'last beat: never' "$err" >/dev/null || fail "guard banner missing the beacon age"
   grep -F 'guarded operation WILL still run' "$err" >/dev/null || fail "guard banner missing generic continuation wording"
   ! grep -F 'requested message WILL still be sent' "$err" >/dev/null || fail "shared guard used send-specific continuation wording"
-  grep -F 'repair missing watcher supervision' "$err" >/dev/null || fail "guard banner missing the harness-aware fix command"
+  grep -F 'watcher supervision needs Stop-owned automatic recovery' "$err" >/dev/null || fail "guard banner missing neutral automatic-recovery guidance"
   grep -F 'queued wakes pending - drain them' "$err" >/dev/null || fail "guard did not warn about pending queue"
-  grep -F 'After draining queued wakes, repair missing watcher supervision' "$err" >/dev/null || fail "guard did not order supervision repair after drain"
+  grep -F 'After draining queued wakes, watcher supervision needs Stop-owned automatic recovery' "$err" >/dev/null || fail "guard did not order neutral automatic recovery after drain"
   ! grep -F 'Restart it NOW, before anything else' "$err" >/dev/null || fail "guard still gave conflicting restart-first instruction"
   ! grep -F 'as the harness-tracked background task' "$err" >/dev/null || fail "guard still printed the old universal background-task repair text"
   banner_line=$(grep -n 'WATCHER DOWN' "$err" | head -1 | cut -d: -f1)
@@ -156,17 +156,27 @@ test_guard_warnings() {
   CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
   grep -F "source '$dir/config/x-mode.env' first" "$err" >/dev/null || fail "guard repair line did not source the X-mode cadence config"
 
-  # (2) fresh watcher, empty queue -> silence.
+  # (2) live watcher plus fresh beacon, empty queue -> silence.
   dir=$(make_case guard-fresh)
   state="$dir/state"
   err="$dir/guard.err"
   printf 'project=x\n' > "$state/task.meta"
+  sleep 60 &
+  pid=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") || fail "could not identify fresh guard watcher"
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   touch "$state/.last-watcher-beat"
   # Non-git FM_ROOT keeps the worktree-tangle check inert so "fresh watcher ->
   # total silence" stays a pure assertion about watcher state.
   FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
-  [ ! -s "$err" ] || fail "guard warned with a fresh watcher and no queued wakes: $(cat "$err")"
-  pass "guard banner leads when down with pending wakes (repair-after-drain) and stays silent when fresh"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ ! -s "$err" ] || fail "guard warned with a live watcher and fresh beacon: $(cat "$err")"
+  pass "guard banner leads when down with pending wakes (repair-after-drain) and stays silent when live and fresh"
 }
 
 test_lock_single_winner_under_concurrency() {
@@ -438,7 +448,7 @@ test_watch_restart_rejects_reused_pid() {
 }
 
 test_watch_restart_attaches_to_healthy_peer() {
-  local dir state fakebin out peer identity armpid i new_pid status
+  local dir state fakebin out peer identity armpid status i
   dir=$(make_case restart-healthy-peer)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -466,32 +476,11 @@ test_watch_restart_attaches_to_healthy_peer() {
   is_live_non_zombie "$peer" || fail "restart killed a TERM-resistant peer unexpectedly"
   kill -KILL "$peer" 2>/dev/null || true
   wait "$peer" 2>/dev/null || true
-  # This arm never forked the peer, so it has no visibility into why it ended -
-  # it cannot tell "the true owner already caught and reported a wake" from an
-  # unexplained crash. It must not report a false FAILED: since firstmate's own
-  # continuity contract makes THIS arm responsible for supervision now, it takes
-  # over ownership and starts a genuine fresh watcher instead.
-  i=0
-  while [ "$i" -lt 80 ]; do
-    grep -qF 'watcher: started pid=' "$out" 2>/dev/null && break
-    sleep 0.1
-    i=$((i + 1))
-  done
-  grep -qF 'watcher: FAILED' "$out" && fail "restart arm falsely reported failure after losing an attached peer with no successor: $(cat "$out")"
-  grep -qF 'watcher: started pid=' "$out" || fail "restart arm did not take over ownership after its attached peer ended without a successor: $(cat "$out")"
-  new_pid=$(sed -n 's/^watcher: started pid=\([0-9][0-9]*\).*/\1/p' "$out" | tail -1)
-  [ -n "$new_pid" ] && [ "$new_pid" != "$peer" ] || fail "restart arm's takeover pid was not a genuine new watcher (got '$new_pid')"
-  is_live_non_zombie "$new_pid" || fail "restart arm's takeover watcher is not alive"
-  is_live_non_zombie "$armpid" || fail "restart arm exited instead of staying live on its takeover watcher"
-  # This arm DID fork new_pid, so killing only the takeover watcher (never the
-  # arm) and expecting a genuine typed FAILED proves the fix does not paper
-  # over a real post-takeover failure.
-  kill -TERM "$new_pid" 2>/dev/null || true
   wait_for_exit "$armpid" 80
   status=$?
-  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "arm did not fail nonzero after its takeover watcher was killed (status $status)"
-  grep -qF 'watcher: FAILED' "$out" || fail "arm did not report a genuine failure after its takeover watcher died: $(cat "$out")"
-  pass "watch restart attaches to a verified healthy peer, self-heals by taking ownership after a successor gap, and still fails loudly if that takeover watcher later dies unexplained"
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "restart arm did not fail after its attached peer ended without a successor (status $status)"
+  grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$out" || fail "restart arm did not surface the attached cycle end"
+  pass "watch restart attaches to a verified healthy peer and later surfaces a successor gap"
 }
 
 test_watcher_self_evicts_on_lock_takeover() {
@@ -555,7 +544,7 @@ test_arm_self_eviction_is_loud_without_successor() {
 }
 
 test_arm_attaches_and_waits_for_live_fresh_watcher() {
-  local dir state fakebin out armout i wpid armpid new_pid status
+  local dir state fakebin out armout i wpid armpid status
   dir=$(make_case arm-attach)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -586,35 +575,14 @@ test_arm_attaches_and_waits_for_live_fresh_watcher() {
   ! grep -qF 'watcher: FAILED' "$armout" || fail "arm reported FAILED for a healthy watcher"
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "arm disturbed the healthy watcher's lock"
   is_live_non_zombie "$armpid" || fail "arm exited while the seed watcher was still healthy"
-  # This arm never forked the seed watcher, so it has no way to tell "the true
-  # owner already caught and reported a wake" (e.g. a Claude Stop-hook auto-arm
-  # racing an out-of-band manual repair) from an unexplained crash. Reporting
-  # FAILED here would be a false alarm and would also leave supervision
-  # genuinely down, so once the seed dies with no successor the attached arm
-  # must take over ownership and start a genuine fresh watcher instead.
+  # After the seed dies without a successor, the attached arm must fail loudly.
   kill "$wpid" 2>/dev/null || true
   wait "$wpid" 2>/dev/null || true
-  i=0
-  while [ "$i" -lt 80 ]; do
-    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
-    sleep 0.1
-    i=$((i + 1))
-  done
-  grep -qF 'watcher: FAILED' "$armout" && fail "attached arm falsely reported failure after the seed died with no successor: $(cat "$armout")"
-  grep -qF 'watcher: started pid=' "$armout" || fail "attached arm did not take over ownership after the seed died with no successor: $(cat "$armout")"
-  new_pid=$(sed -n 's/^watcher: started pid=\([0-9][0-9]*\).*/\1/p' "$armout" | tail -1)
-  [ -n "$new_pid" ] && [ "$new_pid" != "$wpid" ] || fail "attached arm's takeover pid was not a genuine new watcher (got '$new_pid')"
-  is_live_non_zombie "$new_pid" || fail "attached arm's takeover watcher is not alive"
-  is_live_non_zombie "$armpid" || fail "attached arm exited instead of staying live on its takeover watcher"
-  # This arm DID fork new_pid, so killing only the takeover watcher (never the
-  # arm) and expecting a genuine typed FAILED proves the fix does not paper
-  # over a real post-takeover failure.
-  kill -TERM "$new_pid" 2>/dev/null || true
   wait_for_exit "$armpid" 80
   status=$?
-  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "arm did not fail nonzero after its takeover watcher was killed (status $status)"
-  grep -qF 'watcher: FAILED' "$armout" || fail "arm did not report a genuine failure after its takeover watcher died: $(cat "$armout")"
-  pass "arm attaches to a live fresh watcher, self-heals by taking ownership when that cycle has no successor, and still fails loudly if that takeover watcher later dies unexplained"
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "attached arm did not fail after seed died (status $status)"
+  grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$armout" || fail "attached arm did not emit the typed cycle-end failure"
+  pass "arm attaches to a live fresh watcher and fails loudly when that cycle has no successor"
 }
 
 test_attached_arm_signal_is_recorded_in_cycle_ledger() {
@@ -757,7 +725,7 @@ SH
 }
 
 test_arm_waits_for_peer_beacon_after_child_stands_down() {
-  local dir state fakebin armout peer identity armpid i new_pid status
+  local dir state fakebin armout peer identity armpid status i
   dir=$(make_case arm-peer-startup-race)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -795,33 +763,14 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   grep -qF "watcher: attached pid=$peer" "$armout" || fail "arm did not wait for and attach to the peer watcher: $(cat "$armout")"
   ! grep -qF 'watcher: FAILED' "$armout" || fail "arm falsely reported FAILED during peer startup race"
   is_live_non_zombie "$armpid" || fail "arm exited while the peer was still healthy"
-  # This arm's own child stood down behind the peer, so it never forked the
-  # peer either and has no visibility into why it later exits. After the peer
-  # dies without a successor, it must not report a false FAILED - it takes
-  # over ownership and starts a genuine fresh watcher instead.
+  # After the peer dies without a successor, the attached arm must fail loudly.
   kill "$peer" 2>/dev/null || true
   wait "$peer" 2>/dev/null || true
-  i=0
-  while [ "$i" -lt 80 ]; do
-    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
-    sleep 0.1
-    i=$((i + 1))
-  done
-  grep -qF 'watcher: FAILED' "$armout" && fail "attached arm falsely reported failure after the peer died with no successor: $(cat "$armout")"
-  grep -qF 'watcher: started pid=' "$armout" || fail "attached arm did not take over ownership after the peer died with no successor: $(cat "$armout")"
-  new_pid=$(sed -n 's/^watcher: started pid=\([0-9][0-9]*\).*/\1/p' "$armout" | tail -1)
-  [ -n "$new_pid" ] && [ "$new_pid" != "$peer" ] || fail "attached arm's takeover pid was not a genuine new watcher (got '$new_pid')"
-  is_live_non_zombie "$new_pid" || fail "attached arm's takeover watcher is not alive"
-  is_live_non_zombie "$armpid" || fail "attached arm exited instead of staying live on its takeover watcher"
-  # This arm DID fork new_pid, so killing only the takeover watcher (never the
-  # arm) and expecting a genuine typed FAILED proves the fix does not paper
-  # over a real post-takeover failure.
-  kill -TERM "$new_pid" 2>/dev/null || true
   wait_for_exit "$armpid" 80
   status=$?
-  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "arm did not fail nonzero after its takeover watcher was killed (status $status)"
-  grep -qF 'watcher: FAILED' "$armout" || fail "arm did not report a genuine failure after its takeover watcher died: $(cat "$armout")"
-  pass "arm attaches to a peer watcher after child stands down, self-heals by taking ownership when that cycle has no successor, and still fails loudly if that takeover watcher later dies unexplained"
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "attached arm did not fail after peer died (status $status): $(cat "$armout")"
+  grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$armout" || fail "peer-attached arm did not emit the typed cycle-end failure"
+  pass "arm attaches to a peer watcher after child stands down and surfaces a missing successor"
 }
 
 test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
