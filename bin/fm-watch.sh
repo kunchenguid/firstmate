@@ -255,6 +255,125 @@ recorded_windows() {
   done
 }
 
+# Remove pane-specific watcher bookkeeping once no durable task metadata names
+# that pane. recorded_windows runs in a process-substitution snapshot, so a
+# teardown can remove both the backend pane and its metadata after the target
+# has already been emitted to the current stale-loop iteration. Without this
+# reconciliation, the lossy hash/count/stale files survive forever and that
+# already-emitted iteration can keep advancing an old wedge timer.
+clear_window_tracking() {  # <window>
+  local win=$1 key meta recorded key_in_use=
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  # The historical filename mapping is lossy (`:`, `/`, and `.` all become
+  # `_`). Preserve a shared key if any still-recorded target maps to it, so
+  # retiring one target can never erase a colliding live target's state.
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    recorded=$(fm_backend_target_of_meta "$meta")
+    [ -n "$recorded" ] || continue
+    [ "$(printf '%s' "$recorded" | tr ':/.' '___')" = "$key" ] && key_in_use=1
+  done
+  [ -n "$key_in_use" ] && return
+  rm -f -- \
+    "$STATE/.hash-$key" \
+    "$STATE/.count-$key" \
+    "$STATE/.stale-$key" \
+    "$STATE/.stale-since-$key" \
+    "$STATE/.wedge-escalations-$key" \
+    "$STATE/.paused-$key" \
+    "$STATE/.paused-rechecked-$key" \
+    "$STATE/.paused-resurfaced-$key"
+}
+
+window_is_recorded() {  # <window>
+  [ -n "$(fm_backend_meta_for_window "$1" "$STATE" 2>/dev/null || true)" ]
+}
+
+prune_orphaned_window_tracking() {
+  local meta w key expected='|' f base
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    w=$(fm_backend_target_of_meta "$meta")
+    [ -n "$w" ] || continue
+    key=$(printf '%s' "$w" | tr ':/.' '___')
+    expected="${expected}.hash-$key|.count-$key|.stale-$key|.stale-since-$key|.wedge-escalations-$key|.paused-$key|.paused-rechecked-$key|.paused-resurfaced-$key|"
+  done
+  for f in \
+    "$STATE"/.hash-* \
+    "$STATE"/.count-* \
+    "$STATE"/.stale-* \
+    "$STATE"/.stale-since-* \
+    "$STATE"/.wedge-escalations-* \
+    "$STATE"/.paused-* \
+    "$STATE"/.paused-rechecked-* \
+    "$STATE"/.paused-resurfaced-*; do
+    [ -e "$f" ] || continue
+    base=${f##*/}
+    case "$expected" in
+      *"|$base|"*) ;;
+      *) rm -f -- "$f"; triage_log "retired orphaned pane tracking: $base" ;;
+    esac
+  done
+}
+
+# Signal scans also use a snapshot: the grace period deliberately waits for a
+# trailing turn-end, and teardown can remove the task's status, turn-end, and
+# metadata during that wait. Keep only records whose source still exists, and
+# retire suppression/heartbeat files that no longer have a source or task.
+prune_orphaned_signal_tracking() {
+  local f task marker base expected_seen='|' expected_hb='|'
+  for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
+    [ -e "$f" ] || continue
+    base=$(basename "$f")
+    expected_seen="${expected_seen}.seen-$(printf '%s' "$base" | tr '.' '_')|"
+    task=${base%.status}
+    task=${task%.turn-ended}
+    expected_hb="${expected_hb}.hb-surfaced-$task|"
+  done
+  for f in "$STATE"/*.meta; do
+    [ -e "$f" ] || continue
+    task=$(basename "$f" .meta)
+    expected_hb="${expected_hb}.hb-surfaced-$task|"
+  done
+  for marker in "$STATE"/.seen-*_status "$STATE"/.seen-*_turn-ended; do
+    [ -e "$marker" ] || continue
+    base=${marker##*/}
+    case "$expected_seen" in
+      *"|$base|"*) ;;
+      *) rm -f -- "$marker"; triage_log "retired orphaned signal tracking: $base" ;;
+    esac
+  done
+  for marker in "$STATE"/.hb-surfaced-*; do
+    [ -e "$marker" ] || continue
+    base=${marker##*/}
+    case "$expected_hb" in
+      *"|$base|"*) ;;
+      *) rm -f -- "$marker"; triage_log "retired orphaned heartbeat tracking: $base" ;;
+    esac
+  done
+}
+
+revalidate_signal_snapshot() {
+  local sf sig f base task
+  while IFS=$(printf '\t') read -r sf sig f; do
+    [ -n "$sf" ] || continue
+    if [ -e "$f" ]; then
+      printf '%s\t%s\t%s\n' "$sf" "$sig" "$f"
+      continue
+    fi
+    rm -f -- "$sf"
+    base=$(basename "$f")
+    task=${base%.status}
+    task=${task%.turn-ended}
+    if [ ! -e "$STATE/$task.status" ] \
+      && [ ! -e "$STATE/$task.turn-ended" ] \
+      && [ ! -e "$STATE/$task.meta" ]; then
+      rm -f -- "$STATE/.hb-surfaced-$task"
+    fi
+    triage_log "retired vanished signal snapshot: $f"
+  done
+}
+
 # Consecutive wedge-escalation count for a window past FM_WEDGE_DEMAND_INSPECT_COUNT
 # (default 3): a pane that keeps re-wedging on the SAME stale hash - each
 # escalation gets absorbed again as "still validating" one poll later, since the
@@ -277,6 +396,11 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # line that an active run/busy pane outranked).
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason
+  if ! window_is_recorded "$win"; then
+    clear_window_tracking "$win"
+    triage_log "retired pane tracking before wedge escalation: $win"
+    return
+  fi
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -777,6 +901,12 @@ while :; do
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
 
+  # Teardown removes task metadata after retiring its backend endpoint. Retire
+  # watcher-local pane state on the next cycle as well, including state left by
+  # a watcher that exited or restarted during the teardown boundary.
+  prune_orphaned_window_tracking
+  prune_orphaned_signal_tracking
+
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
   # parent reports, observe backend busy/idle turn completion, send one recovery
   # repost after grace, and escalate once if the recovery turn is also missed.
@@ -871,6 +1001,7 @@ while :; do
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
+    pending=$(printf '%s\n' "$pending" | revalidate_signal_snapshot)
     files=""
     while IFS=$(printf '\t') read -r sf sig f; do
       [ -n "$sf" ] || continue
@@ -893,7 +1024,9 @@ EOF
     # check is the only costly one (it may run a bounded no-mistakes call), so the ||
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
-    if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
+    if [ -z "$pending" ]; then
+      triage_log "absorbed signal batch whose sources vanished during grace"
+    elif afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
@@ -937,6 +1070,15 @@ EOF
       continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    # recorded_windows may have emitted this target just before teardown
+    # removed its metadata, while a backend can still return a final cached
+    # capture for the vanished pane. Never classify or advance stale state for
+    # a target that is no longer part of this home's recorded fleet.
+    if ! window_is_recorded "$w"; then
+      clear_window_tracking "$w"
+      triage_log "retired pane tracking after target vanished during capture: $w"
+      continue
+    fi
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"

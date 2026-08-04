@@ -433,6 +433,56 @@ test_actionable_signal_surfaced() {
   pass "captain-relevant signal is surfaced (queue + exit) and marked surfaced"
 }
 
+test_vanished_signal_batch_during_grace_is_retired() {
+  local dir state fakebin out pid f real_sleep i
+  dir=$(make_case vanished-signal-grace); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  printf 'window=test:fm-residue\nkind=ship\n' > "$state/residue.meta"
+  printf 'needs-decision: stale snapshot\n' > "$state/residue.status"
+  : > "$state/residue.turn-ended"
+  printf 'old-signature' > "$state/.seen-residue_status"
+  printf 'old-signature' > "$state/.seen-residue_turn-ended"
+  printf 'needs-decision: stale snapshot\n' > "$state/.hb-surfaced-residue"
+  real_sleep=$(command -v sleep)
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ ! -e "$FM_FAKE_TEARDOWN_DONE" ]; then
+  : > "$FM_FAKE_TEARDOWN_DONE"
+  rm -f -- "$FM_FAKE_TEARDOWN_META" "$FM_FAKE_TEARDOWN_STATUS" "$FM_FAKE_TEARDOWN_TURNEND"
+fi
+exec "$FM_FAKE_REAL_SLEEP" 0.1
+SH
+  chmod +x "$fakebin/sleep"
+
+  PATH="$fakebin:$PATH" \
+    FM_FAKE_REAL_SLEEP="$real_sleep" \
+    FM_FAKE_TEARDOWN_DONE="$dir/teardown-done" \
+    FM_FAKE_TEARDOWN_META="$state/residue.meta" \
+    FM_FAKE_TEARDOWN_STATUS="$state/residue.status" \
+    FM_FAKE_TEARDOWN_TURNEND="$state/residue.turn-ended" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 30 ] && [ ! -e "$dir/teardown-done" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$dir/teardown-done" ] || { reap "$pid"; fail "the signal teardown fixture never crossed the grace window"; }
+  wait_live "$pid" 30 || { reap "$pid"; fail "vanished signal paths produced a phantom wake: $(cat "$out")"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "vanished signal paths were printed after teardown: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "vanished signal paths queued a phantom wake"; }
+  for f in \
+    "$state/.seen-residue_status" \
+    "$state/.seen-residue_turn-ended" \
+    "$state/.hb-surfaced-residue"; do
+    [ ! -e "$f" ] || { reap "$pid"; fail "vanished signal paths retained tracking: $f"; }
+  done
+  reap "$pid"
+  pass "signal paths removed during grace are dropped with their seen and heartbeat tracking"
+}
+
 test_terminal_stale_surfaced() {
   local dir state fakebin out drain_out capture_file window key pane_hash sig pid
   dir=$(make_case terminal-stale); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1053,6 +1103,100 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold() {
   [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 3 ] || fail "escalation counter did not persist across consecutive rounds"
   unset FM_FAKE_CREW_STATE
   pass "consecutive wedge escalations on the same pane accumulate and demand deep inspection at the threshold"
+}
+
+test_vanished_pane_mid_escalation_retires_tracking() {
+  local dir state fakebin out capture_file window key pane_hash sig pid i f
+
+  # Reproduce teardown racing the stale-loop snapshot: recorded_windows has
+  # already emitted the target, then the pane disappears and teardown removes
+  # its metadata while the backend returns one final cached capture. Before the
+  # fix, the current iteration trusted the old .stale-since-* record, emitted
+  # another possible-wedge wake, and advanced the escalation counter.
+  dir=$(make_case vanished-pane-mid-escalation); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-vanished-pane"
+  printf 'idle cached pane\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/vanished-pane.meta"
+  printf 'working: validation still running\n' > "$state/vanished-pane.status"
+  sig=$(seen_sig "$state/vanished-pane.status"); printf '%s' "$sig" > "$state/.seen-vanished-pane_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle cached pane")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '2\n' > "$state/.count-$key"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  printf '1\n' > "$state/.wedge-escalations-$key"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  capture-pane)
+    rm -f "$FM_FAKE_META_TO_REMOVE"
+    cat "$FM_FAKE_TMUX_CAPTURE"
+    exit 0
+    ;;
+  display-message)
+    case "$*" in *pane_current_command*) printf 'zsh\n'; exit 0 ;; esac
+    ;;
+  list-windows) exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_META_TO_REMOVE="$state/vanished-pane.meta" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 30 ] && [ -e "$state/vanished-pane.meta" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ ! -e "$state/vanished-pane.meta" ] || { reap "$pid"; fail "the pane-kill fixture never removed its metadata"; }
+  wait_live "$pid" 30 || { reap "$pid"; fail "a vanished pane produced another phantom wake: $(cat "$out")"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "a vanished pane printed a phantom escalation: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a vanished pane queued a phantom escalation"; }
+  for f in \
+    "$state/.hash-$key" \
+    "$state/.count-$key" \
+    "$state/.stale-$key" \
+    "$state/.stale-since-$key" \
+    "$state/.wedge-escalations-$key" \
+    "$state/.paused-$key" \
+    "$state/.paused-rechecked-$key" \
+    "$state/.paused-resurfaced-$key"; do
+    [ ! -e "$f" ] || { reap "$pid"; fail "a vanished pane retained watcher tracking: $f"; }
+  done
+  reap "$pid"
+
+  # Control: the same already-aged stale state still escalates normally when
+  # its live task metadata remains recorded.
+  dir=$(make_case live-pane-mid-escalation-control); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-live-pane"
+  printf 'idle cached pane\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/live-pane.meta"
+  printf 'working: validation still running\n' > "$state/live-pane.status"
+  sig=$(seen_sig "$state/live-pane.status"); printf '%s' "$sig" > "$state/.seen-live-pane_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle cached pane")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '2\n' > "$state/.count-$key"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  printf '1\n' > "$state/.wedge-escalations-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "the live stale-pane control did not escalate: $(cat "$out")"
+  grep -F "possible wedge, escalation 2" "$out" >/dev/null \
+    || fail "the live stale-pane control lost normal wedge escalation: $(cat "$out")"
+  [ -e "$state/live-pane.meta" ] || fail "the live stale-pane control lost its task metadata"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 2 ] \
+    || fail "the live stale-pane control did not advance its escalation counter"
+  pass "a pane removed mid-escalation retires watcher state while a live stale pane still escalates"
 }
 
 test_wedge_escalation_resets_when_pane_becomes_active() {
@@ -1812,10 +1956,12 @@ test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
+test_vanished_signal_batch_during_grace_is_retired
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
+test_vanished_pane_mid_escalation_retires_tracking
 test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
