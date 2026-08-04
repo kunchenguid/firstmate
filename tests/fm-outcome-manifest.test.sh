@@ -167,11 +167,17 @@ test_secondmate_manifest_title_is_null() {
   out=$(fm "$home" "$MANIFEST" show design)
   printf '%s' "$out" | jq -e '.kind == "secondmate" and .title == null and .outcome.state == "retired"' >/dev/null \
     || fail "a secondmate manifest synthesized a backlog title"
-  pass "secondmate manifests retain the intentional null title contract"
+  fm "$home" "$MANIFEST" validate design >/dev/null || fail "secondmate manifest did not validate"
+  out=$(fm "$home" "$MANIFEST" list)
+  printf '%s' "$out" | jq -e '.records[0]
+    | .task_id == "design" and .title == null and .gbrain.status == "absent"
+      and .gbrain.receipt == null and .gbrain.observed_at == null and .gbrain.detail == null' >/dev/null \
+    || fail "a secondmate with an absent optional provider did not remain in durable history"
+  pass "secondmate manifests retain nullable title and provider fields in durable history"
 }
 
 test_manifest_requires_metadata_and_allowlist() {
-  local home rc out
+  local home id path valid history rc out
   home=$(make_home refuse)
   rc=0
   fm "$home" "$MANIFEST" write ghost >/dev/null 2>&1 || rc=$?
@@ -185,7 +191,30 @@ test_manifest_requires_metadata_and_allowlist() {
     if fm_outcome_manifest_keys_valid "$doc" 2>/dev/null; then echo accepted; else echo refused; fi
   ')
   [ "$out" = refused ] || fail "the manifest allowlist accepted an undeclared field"
-  pass "manifest publication refuses a missing task record and any undeclared field"
+
+  id=shape-check
+  seed_ship_task "$home" "$id"
+  fm "$home" "$MANIFEST" write "$id" >/dev/null || fail "valid manifest setup failed"
+  path="$home/data/$id/outcome.json"
+  valid=$(<"$path")
+  printf '%s' "$valid" | jq -c '{schema,task_id,work_items,pr}' > "$path"
+  rc=0
+  fm "$home" "$MANIFEST" show "$id" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "a manifest missing required fields was emitted"
+  history=$(fm "$home" "$MANIFEST" list)
+  printf '%s' "$history" | jq -e --arg id "$id" '
+    .records == [] and (.malformed | any(.id == $id and .reason == "invalid_values"))' >/dev/null \
+    || fail "an incomplete manifest was not disclosed as malformed"
+
+  printf '%s\n%s\n' "$valid" "$valid" > "$path"
+  rc=0
+  fm "$home" "$MANIFEST" show "$id" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "a doubled manifest document was emitted"
+  history=$(fm "$home" "$MANIFEST" list)
+  printf '%s' "$history" | jq -e --arg id "$id" '
+    .records == [] and (.malformed | any(.id == $id and .reason == "unreadable_or_wrong_schema"))' >/dev/null \
+    || fail "a doubled manifest was not disclosed as malformed"
+  pass "manifest publication and reads require the complete single-root contract"
 }
 
 # --- work-item references ---------------------------------------------------
@@ -260,7 +289,7 @@ test_work_item_rejects_unusable_urls() {
 }
 
 test_work_item_mutations_refuse_invalid_store() {
-  local home id before after rc command
+  local home id before after valid rc command
   home=$(make_home workitems-invalid-store)
   id=ship-invalid
   mkdir -p "$home/data/$id"
@@ -283,7 +312,25 @@ test_work_item_mutations_refuse_invalid_store() {
   fm "$home" "$WORKITEM" list "$id" \
     | jq -e '.schema == "fm-work-items.v1" and .references == []' >/dev/null \
     || fail "the read-only projection did not degrade an invalid work-item store to empty"
-  pass "work-item mutations preserve invalid durable stores while read-only projection stays safe"
+
+  valid=$(jq -cn --arg id "$id" '{schema:"fm-work-items.v1",task_id:$id,references:[]}')
+  printf '%s\n%s\n' "$valid" "$valid" > "$home/data/$id/work-items.json"
+  before=$(<"$home/data/$id/work-items.json")
+  for command in add remove clear; do
+    rc=0
+    case "$command" in
+      add) fm "$home" "$WORKITEM" add "$id" https://github.com/acme/widget/issues/19 >/dev/null 2>&1 || rc=$? ;;
+      remove) fm "$home" "$WORKITEM" remove "$id" https://github.com/acme/widget/issues/19 >/dev/null 2>&1 || rc=$? ;;
+      clear) fm "$home" "$WORKITEM" clear "$id" >/dev/null 2>&1 || rc=$? ;;
+    esac
+    [ "$rc" -ne 0 ] || fail "$command accepted a doubled work-item store"
+    after=$(<"$home/data/$id/work-items.json")
+    [ "$after" = "$before" ] || fail "$command changed a doubled work-item store"
+  done
+  fm "$home" "$WORKITEM" list "$id" \
+    | jq -e '.schema == "fm-work-items.v1" and .references == []' >/dev/null \
+    || fail "the read-only projection did not degrade a doubled work-item store to empty"
+  pass "work-item mutations preserve invalid single- and multi-root durable stores"
 }
 
 # --- normalized PR observation ----------------------------------------------
@@ -310,10 +357,12 @@ test_pr_status_normalization() {
       "$(fm_outcome_pr_mergeable_normalize MERGEABLE clean)" \
       "$(fm_outcome_pr_mergeable_normalize MERGEABLE dirty)" \
       "$(fm_outcome_pr_mergeable_normalize "" "")"
-    printf "%s %s %s %s\n" \
+    printf "%s %s %s %s %s %s\n" \
       "$(fm_outcome_pr_gitlab_review_normalize false 0 0 0)" \
       "$(fm_outcome_pr_gitlab_review_normalize false 2 2 0)" \
       "$(fm_outcome_pr_gitlab_review_normalize true 2 0 2)" \
+      "$(fm_outcome_pr_gitlab_review_normalize true 2 1 1)" \
+      "$(fm_outcome_pr_gitlab_review_normalize false 2 0 2)" \
       "$(fm_outcome_pr_gitlab_review_normalize false 2 "" "")"
   ')
   [ "$(printf '%s\n' "$out" | sed -n 1p)" = "draft merged closed unknown" ] \
@@ -324,7 +373,7 @@ test_pr_status_normalization() {
     || fail "PR check normalization is wrong: $(printf '%s\n' "$out" | sed -n 3p)"
   [ "$(printf '%s\n' "$out" | sed -n 4p)" = "mergeable conflicting unknown" ] \
     || fail "PR mergeability normalization is wrong: $(printf '%s\n' "$out" | sed -n 4p)"
-  [ "$(printf '%s\n' "$out" | sed -n 5p)" = "none review_required approved unknown" ] \
+  [ "$(printf '%s\n' "$out" | sed -n 5p)" = "none review_required approved review_required unknown review_required" ] \
     || fail "GitLab review normalization is wrong: $(printf '%s\n' "$out" | sed -n 5p)"
   pass "each forge vocabulary maps onto the normalized state, review, check, and mergeability enumerations"
 }

@@ -46,6 +46,11 @@ The manifest never contacts a forge and never reads a brief, a prompt, a tool ar
 | `work_items` | `data/<id>/work-items.json` | embedded so the manifest is self-contained |
 | `gbrain` | `state/<id>.gbrain`, an optional provider | `status` is `absent` when no provider wrote one |
 
+Every listed manifest key is required, while fields whose source may be absent retain an explicit null value with the documented type-or-null contract.
+A null `title` is intended for a secondmate because secondmates are never backlog items, and an absent GBrain provider retains null receipt, observation, and detail fields.
+Task identifiers are capped at 64 characters, general text at 240, paths at 480, source and backend tokens at 40, receipts at 200, URLs at 512, and hosts at 253 characters.
+The shared reader validates the complete shape, types, enums, nullability, caps, task identity, and timestamp provenance before a manifest reaches `show`, history, or the fleet snapshot.
+
 ### Timestamps and their provenance
 
 The records firstmate keeps do not all carry an explicit stamp, so the manifest names where each value came from instead of implying a precision it does not have.
@@ -104,6 +109,7 @@ Read-only consumers report the cached value with its age and never call a forge 
 Every cache read validates the canonical PR identity, the normalized enumerations, the draft type, the head SHA, the ISO-8601 UTC observation stamp, and the provider source before exposing it.
 A cache whose URL does not match the task's current canonical PR URL projects the documented unknown observation, while a failed refresh for the same URL retains the previous valid observation.
 GitLab review state combines the merge request approvals endpoint's current `approved`, `approvals_required`, `approvals_left`, and `approved_by` values to distinguish `none`, `review_required`, and `approved`, and ambiguous or unavailable results degrade to `unknown`.
+A present `approvals_left` is authoritative: a positive value is `review_required`, zero requires a consistent result, and only a missing value falls back to `approved` plus `approvals_required`.
 
 ## Snapshot projection
 
@@ -115,7 +121,7 @@ Per task: `model`, `effort`, `paths.status_log.last_event_at` and `last_event_ag
 Top level: `card_precedence`, `supervision` (watcher beacon age against the shared grace window from `bin/fm-supervision-lib.sh`, plus away-mode state and age), and `history`.
 
 `history` is schema `fm-outcome-history.v1`, built from every `data/<id>/outcome.json` in the home, newest completion first and bounded by `FM_SNAPSHOT_HISTORY`.
-A manifest that no longer parses, is not a plain file, or exceeds the read bound is disclosed in `history.malformed` with its reason rather than dropped, so a consumer can distinguish "nothing completed" from "one record is unreadable".
+A manifest that no longer parses, lacks the complete required shape, is not a plain file, or exceeds the read bound is disclosed in `history.malformed` with its reason rather than dropped, so a consumer can distinguish "nothing completed" from "one record is unreadable".
 History orders readable same-schema candidates before applying full value conformance, then validates only enough newest candidates to fill the requested bound.
 
 ### Card precedence
@@ -150,8 +156,9 @@ Manifests and snapshots carry no credentials, no raw prompts, no tool arguments,
 That is enforced, not just documented.
 Shared work-item and PR-status readers validate every stored value against its wire type, enumeration, canonical shape, and documented length cap before exposing it to a manifest or snapshot.
 `fm_outcome_manifest_keys_valid` also checks a composed manifest against a fixed recursive key allowlist, and the writer refuses to publish a document carrying any path the allowlist does not name.
+Every artifact reader and atomic publisher requires exactly one top-level JSON object, so concatenated records are refused rather than partially selected.
 Adding a field is therefore a deliberate act in one place.
-Every producer-owned free-text value passes through `fm_outcome_text`, which strips control characters, collapses the value to a single line, and caps its length, while stored free text is rejected when it exceeds the same boundary.
+Producer-owned title and outcome detail values pass through `fm_outcome_text`, which strips control characters, collapses the value to a single line, and caps its length, while every other stored free-text value is rejected when it violates the same shape or its field-specific cap.
 The PR observation stores only the enumerated tokens above and a head SHA; no API response body reaches disk.
 
 `tests/fm-outcome-manifest.test.sh` plants sentinel secrets in private runtime records and in non-conforming allowlisted values inside present work-item and PR-status stores, then asserts none of it appears in a manifest or a snapshot.

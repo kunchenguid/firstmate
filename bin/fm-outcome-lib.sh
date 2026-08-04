@@ -166,7 +166,9 @@ fm_outcome_json_write() {  # <dest> <json>
   tmp=$(mktemp "$dir/.fm-outcome.XXXXXX") || return 1
   if ! printf '%s\n' "$json" > "$tmp" \
     || ! chmod 0600 "$tmp" \
-    || ! jq -e . "$tmp" >/dev/null 2>&1 \
+    || ! jq -se 'if length == 1 and (.[0] | type == "object")
+                  then .[0] else error("single object required") end' \
+         "$tmp" >/dev/null 2>&1 \
     || ! mv -f -- "$tmp" "$dest"; then
     rm -f -- "$tmp"
     return 1
@@ -179,9 +181,10 @@ fm_outcome_json_write() {  # <dest> <json>
 fm_outcome_json_read() {  # <path> <expected-schema> [expected-task-id]
   local path=$1 schema=$2 id=${3:-}
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  jq -ce --arg schema "$schema" --arg id "$id" \
-    'if type == "object" and .schema == $schema and ($id == "" or .task_id == $id)
-     then . else error("schema or identity") end' \
+  jq -cse --arg schema "$schema" --arg id "$id" \
+    'if length == 1 and (.[0] | type == "object")
+        and .[0].schema == $schema and ($id == "" or .[0].task_id == $id)
+     then .[0] else error("single object, schema, or identity") end' \
     "$path" 2>/dev/null
 }
 
@@ -403,13 +406,15 @@ fm_outcome_validation_fields_valid() {  # <newline-delimited-fields>
 
 fm_outcome_work_items_doc_valid() {  # <document-json> <id>
   local doc=$1 id=$2 fields
-  fields=$(jq -er --arg schema "$FM_WORK_ITEMS_SCHEMA" --arg id "$id" \
+  fields=$(jq -ser --arg schema "$FM_WORK_ITEMS_SCHEMA" --arg id "$id" \
     --argjson url_max "$FM_OUTCOME_URL_MAX" --argjson host_max "$FM_OUTCOME_HOST_MAX" \
     --argjson path_max "$FM_OUTCOME_PATH_MAX" --argjson owner_max "$FM_OUTCOME_OWNER_MAX" \
     --argjson repo_max "$FM_OUTCOME_REPO_MAX" --argjson text_max "$FM_OUTCOME_TEXT_MAX" \
     --argjson source_max "$FM_OUTCOME_SOURCE_MAX" '
 '"$FM_OUTCOME_WORK_ITEM_VALIDATOR_JQ"'
-    if type == "object"
+    if length == 1 and (.[0] | type == "object") then .[0]
+    else error("single work-item object required") end
+    | if type == "object"
        and (keys == ["references","schema","task_id"])
        and .schema == $schema and .task_id == $id
        and (.references | type == "array")
@@ -422,13 +427,15 @@ fm_outcome_work_items_doc_valid() {  # <document-json> <id>
 
 fm_outcome_work_item_references_valid() {  # <references-json>
   local refs=$1 fields
-  fields=$(jq -er \
+  fields=$(jq -ser \
     --argjson url_max "$FM_OUTCOME_URL_MAX" --argjson host_max "$FM_OUTCOME_HOST_MAX" \
     --argjson path_max "$FM_OUTCOME_PATH_MAX" --argjson owner_max "$FM_OUTCOME_OWNER_MAX" \
     --argjson repo_max "$FM_OUTCOME_REPO_MAX" --argjson text_max "$FM_OUTCOME_TEXT_MAX" \
     --argjson source_max "$FM_OUTCOME_SOURCE_MAX" '
 '"$FM_OUTCOME_WORK_ITEM_VALIDATOR_JQ"'
-    if type == "array"
+    if length == 1 and (.[0] | type == "array") then .[0]
+    else error("single reference array required") end
+    | if type == "array"
        and all(.[]; fm_work_item_ref_valid($url_max;$host_max;$path_max;$owner_max;$repo_max;$text_max;$source_max))
     then [.[] | fm_work_item_fields] | join("\n")
     else error("invalid work-item references") end
@@ -523,9 +530,22 @@ fm_outcome_pr_gitlab_review_normalize() {  # <approved> <required> <left> <appro
   case "$required" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
   case "$left" in *[!0-9]*) printf 'unknown'; return 0 ;; esac
   case "$approved_count" in *[!0-9]*) printf 'unknown'; return 0 ;; esac
-  [ -n "$left" ] || [ -n "$approved_count" ] || { printf 'unknown'; return 0; }
-
-  if [ "$required" -eq 0 ]; then
+  if [ -n "$left" ]; then
+    [ "$left" -le "$required" ] || { printf 'unknown'; return 0; }
+    if [ "$left" -gt 0 ]; then
+      printf 'review_required'
+    elif [ "$required" -eq 0 ] && [ "$approved_count" = 0 ]; then
+      printf 'none'
+    elif [ "$approved" != true ]; then
+      printf 'unknown'
+    elif [ "$required" -gt 0 ]; then
+      printf 'approved'
+    elif [ -n "$approved_count" ] && [ "$approved_count" -gt 0 ]; then
+      printf 'approved'
+    else
+      printf 'unknown'
+    fi
+  elif [ "$required" -eq 0 ]; then
     if [ "$approved_count" = 0 ]; then
       printf 'none'
     elif [ -n "$approved_count" ] && [ "$approved_count" -gt 0 ] && [ "$approved" = true ]; then
@@ -535,9 +555,7 @@ fm_outcome_pr_gitlab_review_normalize() {  # <approved> <required> <left> <appro
     fi
   elif [ "$approved" = true ]; then
     printf 'approved'
-  elif [ -n "$left" ] && [ "$left" -gt 0 ]; then
-    printf 'review_required'
-  elif [ -n "$approved_count" ] && [ "$approved_count" -lt "$required" ]; then
+  elif [ "$approved" = false ]; then
     printf 'review_required'
   else
     printf 'unknown'
@@ -611,11 +629,13 @@ JQ
 
 fm_outcome_pr_status_doc_valid() {  # <document-json>
   local doc=$1 fields
-  fields=$(jq -er --arg schema "$FM_PR_STATUS_SCHEMA" \
+  fields=$(jq -ser --arg schema "$FM_PR_STATUS_SCHEMA" \
     --argjson url_max "$FM_OUTCOME_URL_MAX" --argjson host_max "$FM_OUTCOME_HOST_MAX" \
     --argjson path_max "$FM_OUTCOME_PATH_MAX" --argjson source_max "$FM_OUTCOME_SOURCE_MAX" '
 '"$FM_OUTCOME_PR_STATUS_VALIDATOR_JQ"'
-    if fm_pr_status_valid($schema;$url_max;$host_max;$path_max;$source_max)
+    if length == 1 and (.[0] | type == "object") then .[0]
+    else error("single PR status object required") end
+    | if fm_pr_status_valid($schema;$url_max;$host_max;$path_max;$source_max)
     then fm_pr_fields
     else error("invalid PR status document") end
   ' <<<"$doc" 2>/dev/null) || return 1
@@ -793,7 +813,8 @@ fm_outcome_manifest_keys_valid() {  # <manifest-json>
     --slurpfile doc <(printf '%s' "$1") \
     --rawfile allowed <(fm_outcome_manifest_allowed_keys) '
       ($allowed | split("\n") | map(select(length > 0))) as $ok
-      | ($doc[0] // error("fm-outcome: empty manifest"))
+      | (if ($doc | length) == 1 and ($doc[0] | type == "object")
+         then $doc[0] else error("fm-outcome: single manifest object required") end)
       | [ paths
           | map(if type == "number" then "[]" else . end)
           | reduce .[] as $seg (""; if . == "" then $seg
@@ -807,15 +828,26 @@ fm_outcome_manifest_keys_valid() {  # <manifest-json>
   return 1
 }
 
-fm_outcome_manifest_values_valid() {  # <manifest-json>
-  local json=$1 fields
-  fields=$(jq -er --arg work_schema "$FM_WORK_ITEMS_SCHEMA" --arg pr_schema "$FM_PR_STATUS_SCHEMA" \
+fm_outcome_manifest_values_valid() {  # <manifest-json> [expected-task-id]
+  local json=$1 expected_id=${2:-} fields
+  fields=$(jq -ser --arg manifest_schema "$FM_OUTCOME_MANIFEST_SCHEMA" \
+    --arg work_schema "$FM_WORK_ITEMS_SCHEMA" --arg pr_schema "$FM_PR_STATUS_SCHEMA" \
+    --arg expected_id "$expected_id" \
     --argjson url_max "$FM_OUTCOME_URL_MAX" --argjson host_max "$FM_OUTCOME_HOST_MAX" \
     --argjson path_max "$FM_OUTCOME_PATH_MAX" --argjson owner_max "$FM_OUTCOME_OWNER_MAX" \
     --argjson repo_max "$FM_OUTCOME_REPO_MAX" --argjson text_max "$FM_OUTCOME_TEXT_MAX" \
-    --argjson source_max "$FM_OUTCOME_SOURCE_MAX" '
+    --argjson source_max "$FM_OUTCOME_SOURCE_MAX" --argjson receipt_max "$FM_OUTCOME_RECEIPT_MAX" '
 '"$FM_OUTCOME_WORK_ITEM_VALIDATOR_JQ"'
 '"$FM_OUTCOME_PR_STATUS_VALIDATOR_JQ"'
+    def fm_iso:
+      type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$");
+    def fm_nullable_clean($max):
+      . == null or (. | fm_clean_string($max));
+    def fm_nullable_path:
+      . == null or (. | fm_clean_string($path_max));
+    def fm_task_id:
+      type == "string" and length > 0 and length <= 64
+      and test("^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$");
     def absent_status:
       keys == ["checks","draft","head","mergeable","observed_at","review","source","state"]
       and .state == "unknown" and .draft == null and .review == "unknown"
@@ -827,19 +859,74 @@ fm_outcome_manifest_values_valid() {  # <manifest-json>
     def identity_present:
       fm_pr_identity_valid($url_max;$host_max;$path_max)
       and (.head == null or (.head | type == "string" and test("^(?:[0-9a-f]{40}|[0-9a-f]{64})$")));
-    if (.work_items | type == "object" and keys == ["references","schema"])
-         and .work_items.schema == $work_schema
-         and (.work_items.references | type == "array")
-         and all(.work_items.references[]; fm_work_item_ref_valid($url_max;$host_max;$path_max;$owner_max;$repo_max;$text_max;$source_max))
-         and (.pr | type == "object" and keys == ["head","host","number","path","provider","status","url"])
-         and (.pr.status | type == "object")
-         and ((.pr | identity_absent) or (.pr | identity_present))
-         and (if .pr.status.source == "absent"
-              then (.pr.status | absent_status)
-              else ({schema:$pr_schema,url:.pr.url,provider:.pr.provider,host:.pr.host,
-                     path:.pr.path,number:.pr.number,status:.pr.status}
-                    | fm_pr_status_valid($pr_schema;$url_max;$host_max;$path_max;$source_max))
-              end)
+    def full_shape:
+      keys == ["attribution","effort","gbrain","harness","home","kind","mode","model","outcome","pr","project","recorded_at","report","schema","task_id","timestamp_sources","timestamps","title","work_items","yolo"]
+      and .schema == $manifest_schema
+      and (.task_id | fm_task_id)
+      and ($expected_id == "" or .task_id == $expected_id)
+      and (.home | fm_clean_string($path_max)) and (.home | length > 0)
+      and (.title | fm_nullable_clean($text_max))
+      and (.project | fm_nullable_path)
+      and (.kind | IN("ship","scout","secondmate"))
+      and (.mode == null or (.mode | IN("no-mistakes","direct-PR","local-only","secondmate")))
+      and (.yolo == null or (.yolo | IN("on","off")))
+      and (.harness | fm_nullable_clean($text_max))
+      and (.model | fm_nullable_clean($text_max))
+      and (.effort == null or (.effort | IN("default","low","medium","high","xhigh","max")))
+      and (.timestamps | type == "object" and keys == ["completed","created","started"])
+      and (.timestamps.created | fm_iso_or_null)
+      and (.timestamps.started | fm_iso_or_null)
+      and (.timestamps.completed | fm_iso)
+      and (.timestamp_sources | type == "object" and keys == ["completed","created","started"])
+      and (.timestamp_sources.created == null or (.timestamp_sources.created | IN("brief_mtime","backlog_since")))
+      and (.timestamp_sources.started == null or .timestamp_sources.started == "meta_mtime")
+      and (.timestamp_sources.completed | IN("manifest_write","explicit"))
+      and ((.timestamps.created == null) == (.timestamp_sources.created == null))
+      and ((.timestamps.started == null) == (.timestamp_sources.started == null))
+      and (.outcome | type == "object" and keys == ["detail","forced","source","state"])
+      and (.outcome.state | IN("done","failed","discarded","retired","unknown"))
+      and (.outcome.detail | fm_nullable_clean($text_max))
+      and (.outcome.source | IN("explicit","status_event","task_kind","forced_teardown","none"))
+      and (.outcome.forced | type == "boolean")
+      and (.pr | type == "object" and keys == ["head","host","number","path","provider","status","url"])
+      and (.pr.status | type == "object")
+      and ((.pr | identity_absent) or (.pr | identity_present))
+      and (if .pr.status.source == "absent"
+           then (.pr.status | absent_status)
+           else ({schema:$pr_schema,url:.pr.url,provider:.pr.provider,host:.pr.host,
+                  path:.pr.path,number:.pr.number,status:.pr.status}
+                 | fm_pr_status_valid($pr_schema;$url_max;$host_max;$path_max;$source_max))
+           end)
+      and (.report | type == "object" and keys == ["path","present"])
+      and (.report.path | fm_nullable_path)
+      and (.report.present | type == "boolean")
+      and ((.report.present | not) or .report.path != null)
+      and (.attribution | type == "object" and keys == ["backend","endpoint","secondmate_home","task_tmp","traceparent","worktree"])
+      and (.attribution.backend | fm_clean_string($source_max)) and (.attribution.backend | length > 0)
+      and (.attribution.endpoint | type == "object" and keys == ["target","task_id"])
+      and (.attribution.endpoint.target | fm_nullable_clean($text_max))
+      and (.attribution.endpoint.task_id | fm_nullable_clean($text_max))
+      and (.attribution.worktree | fm_nullable_path)
+      and (.attribution.task_tmp | fm_nullable_path)
+      and (.attribution.traceparent | fm_nullable_clean($text_max))
+      and (.attribution.secondmate_home | fm_nullable_path)
+      and (.work_items | type == "object" and keys == ["references","schema"])
+      and .work_items.schema == $work_schema
+      and (.work_items.references | type == "array")
+      and all(.work_items.references[]; fm_work_item_ref_valid($url_max;$host_max;$path_max;$owner_max;$repo_max;$text_max;$source_max))
+      and (.gbrain | type == "object" and keys == ["detail","observed_at","receipt","status"])
+      and (.gbrain.status | IN("absent","captured","pending","failed","skipped","unknown"))
+      and (.gbrain.receipt == null or (.gbrain.receipt | type == "string" and length > 0 and length <= $receipt_max and test("^[A-Za-z0-9._:/-]+$")))
+      and (.gbrain.observed_at | fm_iso_or_null)
+      and (.gbrain.detail | fm_nullable_clean($text_max))
+      and (if .gbrain.status == "absent"
+           then .gbrain.receipt == null and .gbrain.observed_at == null and .gbrain.detail == null
+           else true end)
+      and (.recorded_at | fm_iso)
+      and .recorded_at == .timestamps.completed;
+    if length == 1 and (.[0] | type == "object") then .[0]
+    else error("single outcome manifest object required") end
+    | if full_shape
       then ([.work_items.references[] | fm_work_item_fields]
             + (if .pr.url == null then [] else [.pr | fm_pr_identity_fields] end))
            | join("\n")
@@ -851,20 +938,17 @@ fm_outcome_manifest_values_valid() {  # <manifest-json>
 fm_outcome_manifest_write() {  # <data-dir> <id> <manifest-json>
   local data=$1 id=$2 json=$3
   mkdir -p "$data/$id" || return 1
-  jq -e --arg schema "$FM_OUTCOME_MANIFEST_SCHEMA" --arg id "$id" \
-    'if .schema == $schema and .task_id == $id then . else error("identity") end' \
-    >/dev/null 2>&1 <<<"$json" || return 1
   fm_outcome_manifest_keys_valid "$json" || return 1
-  fm_outcome_manifest_values_valid "$json" || return 1
+  fm_outcome_manifest_values_valid "$json" "$id" || return 1
   fm_outcome_json_write "$(fm_outcome_manifest_path "$data" "$id")" "$json"
 }
 
 fm_outcome_manifest_read() {  # <data-dir> <id>
   local doc
-  doc=$(fm_outcome_json_read "$(fm_outcome_manifest_path "$1" "$2")" "$FM_OUTCOME_MANIFEST_SCHEMA") \
+  doc=$(fm_outcome_json_read "$(fm_outcome_manifest_path "$1" "$2")" "$FM_OUTCOME_MANIFEST_SCHEMA" "$2") \
     || return 1
   fm_outcome_manifest_keys_valid "$doc" >/dev/null 2>&1 || return 1
-  fm_outcome_manifest_values_valid "$doc" || return 1
+  fm_outcome_manifest_values_valid "$doc" "$2" || return 1
   printf '%s\n' "$doc"
 }
 
@@ -920,7 +1004,7 @@ fm_outcome_history_json() {  # <data-dir> <limit>
         total=$((total - 1))
         continue
       fi
-      if ! fm_outcome_manifest_values_valid "$doc" 2>/dev/null; then
+      if ! fm_outcome_manifest_values_valid "$doc" "$id" 2>/dev/null; then
         malformed=$malformed$(fm_outcome_history_reject "$id" "$path" invalid_values)$'\n'
         total=$((total - 1))
         continue
