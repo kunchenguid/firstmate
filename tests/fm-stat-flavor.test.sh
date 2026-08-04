@@ -13,6 +13,13 @@
 # flavors, plus a native-stat control, so the behavior is asserted rather than
 # assumed. Each flavor case runs in a fresh process because the flavor probe
 # binds at source time.
+#
+# Every single-quoted string below is a probe body handed to `bash -c` in that
+# child process. `$ROOT` and the variables a probe declares for itself must stay
+# unexpanded in this shell and expand in that one, while a case's own paths are
+# spliced in through the explicit '"$var"' seam, so the single quotes are load
+# bearing throughout this file.
+# shellcheck disable=SC2016
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -325,6 +332,8 @@ test_owner_reports_one_mode_vocabulary_on_every_flavor() {
   for row in '600 600 -' '700 700 -' '755 755 -' '4600 4600 -u' '2600 2600 -g' \
              '2700 2700 -g' '1777 1777 -k' '007 7 -' '4007 4007 -u' \
              '4000 4000 -u' '2007 2007 -g' '1007 1007 -k'; do
+    # shellcheck disable=SC2086 # $row is a literal field list; splitting it into
+    # the positional parameters is exactly what this row table is for.
     set -- $row
     chmod "$1" "$f" || fail "the host refused chmod $1, so this contract row cannot be trusted"
     # Confirm the special bit really landed, independently of any stat flavor:
@@ -361,6 +370,8 @@ test_fleet_snapshot_readability_mask_agrees_across_flavors() {
   # read as readable on macOS and unreadable on Linux from the same bytes.
   for row in '600 readable' '4000 unreadable' '4100 unreadable' '4007 readable' \
              '444 readable' '000 unreadable'; do
+    # shellcheck disable=SC2086 # $row is a literal field list; splitting it into
+    # the positional parameters is exactly what this row table is for.
     set -- $row
     chmod "$1" "$f" || fail "the host refused chmod $1"
     for flavor in gnu bsd native; do
