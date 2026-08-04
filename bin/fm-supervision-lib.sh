@@ -6,9 +6,12 @@
 # work (a state/<id>.meta exists) or an X-mode relay poll
 # (state/x-watch.check.sh), and whether its watcher has a fresh liveness beacon
 # (state/.last-watcher-beat, touched every poll cycle, within the grace window).
-# bin/fm-guard.sh and bin/fm-turnend-guard.sh use fm_watcher_healthy from
-# bin/fm-wake-lib.sh for their warning and block decisions, so a fresh leftover
-# beacon never counts as a live watcher. The status fields here retain the
+# bin/fm-turnend-guard.sh uses the PID-strict fm_watcher_healthy from
+# bin/fm-wake-lib.sh for its block decision. bin/fm-guard.sh uses the model-aware
+# fm_watcher_supervision_verdict (also in bin/fm-wake-lib.sh): under the Claude
+# Stop auto-arm model, where the watcher only runs between turns, a fresh beacon
+# with no live watcher is healthy; under persistent-watcher harnesses a live
+# identity-matched watcher is still required. The status fields here retain the
 # beacon-age details used in their messages.
 
 # Portable mtime; Linux stat lacks -f, macOS stat lacks -c.

@@ -12,16 +12,16 @@ DRAIN_LOCK_HELD=false
 RAW_ROWS=
 
 # Defense in depth for the supervision chain: this script runs at the top of
-# every wake-handling and recovery turn, so assert watcher liveness here too. A
+# every wake-handling and recovery turn, so assert supervision health here too. A
 # lapsed supervision chain then surfaces on a plain drain-and-handle turn, not
 # only when a guarded supervision script (fm-peek/fm-send/...) happens to run.
-# Reuse fm-guard.sh's existing graced, beacon-based alarm (FM_GUARD_GRACE) - do
-# not duplicate the beacon math. Because the watcher touches its beacon every
-# poll cycle, a normal fire leaves a recent beacon well inside grace and stays
-# silent; only a genuine stale-beyond-grace lapse with work in flight warns. Call
-# after the queue is emptied so guard never re-prints its own queued-wakes notice
-# for the records this run just drained, and never let a guard hiccup change the
-# drain's exit status.
+# Reuse fm-guard.sh's model-aware alarm and FM_GUARD_GRACE instead of duplicating
+# its supervision verdict. Under Claude's between-turns auto-arm model, a normal
+# fire leaves a recent beacon well inside grace and stays silent mid-turn. Under
+# persistent-watcher models, the guard also requires the live identity-matched
+# watcher. Call after the queue is emptied so guard never re-prints its own
+# queued-wakes notice for the records this run just drained, and never let a
+# guard hiccup change the drain's exit status.
 assert_watcher_liveness() {
   "$SCRIPT_DIR/fm-guard.sh" || true
 }

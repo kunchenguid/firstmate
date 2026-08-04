@@ -829,6 +829,41 @@ test_spawn_explicit_harness_uses_explicit_profile_axes() {
   pass "C8 spawn: an explicit --harness still honors explicit model/effort flags"
 }
 
+test_spawned_secondmate_uses_its_harness_supervision_model() {
+  local harness expected w sm launchlog launch fakebin out
+  for harness in codex claude; do
+    w="$TMP_ROOT/spawn-supervision-model-$harness"
+    sm="$w/sm"
+    launchlog="$w/launch.log"
+    mkdir -p "$w/home/config"
+    printf '%s\n' "$harness" > "$w/home/config/secondmate-harness"
+    make_seeded_home "$sm" sm
+    spawn_secondmate_capture "$w" sm "$sm" "$launchlog" >/dev/null 2>&1
+    fm_write_meta "$sm/state/task.meta" "window=firstmate:fm-task" "kind=ship"
+    touch "$sm/state/.last-watcher-beat"
+    fakebin="$w/tmux-sm/fakebin"
+    cat > "$fakebin/$harness" <<SH
+#!/usr/bin/env bash
+"$ROOT/bin/fm-guard.sh"
+SH
+    chmod +x "$fakebin/$harness"
+    launch=$(cat "$launchlog")
+    out=$(PATH="$fakebin:$BASE_PATH" CLAUDECODE=1 bash -c "$launch" 2>&1)
+    case "$harness" in
+      codex)
+        expected='WATCHER DOWN - SUPERVISION IS OFF'
+        assert_contains "$out" "$expected" \
+          "Codex secondmate inherited Claude auto-arm despite its persistent watcher model"
+        ;;
+      claude)
+        [ -z "$out" ] \
+          || fail "Claude secondmate with a fresh beacon should use auto-arm supervision, got: $out"
+        ;;
+    esac
+  done
+  pass "C9 spawn: secondmate launch pins supervision to its own harness"
+}
+
 # The harness fallback chain (secondmate-harness -> crew-harness -> own) still
 # resolves correctly with no model/effort tokens anywhere in the chain, and a
 # crew/scout (non-secondmate) launch is entirely unaffected by this feature: no
@@ -2384,6 +2419,7 @@ test_spawn_explicit_model_overrides_secondmate_harness_token
 test_spawn_explicit_effort_overrides_secondmate_harness_token
 test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens
 test_spawn_explicit_harness_uses_explicit_profile_axes
+test_spawned_secondmate_uses_its_harness_supervision_model
 test_spawn_fallback_chain_and_crew_scout_unaffected
 test_bootstrap_sweep_propagates_and_reconverges
 test_bootstrap_sweep_propagates_when_tracked_current
