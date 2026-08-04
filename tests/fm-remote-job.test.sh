@@ -101,6 +101,36 @@ export FM_REMOTE_JOB_TIMEOUT=5
 # shellcheck source=bin/fm-remote-job-lib.sh
 . "$ROOT/bin/fm-remote-job-lib.sh"
 
+LOCAL_BIN_PARENT="$ACCOUNT_HOME/.local"
+LOCAL_BIN_TARGET="$TMP_ROOT/local-bin-target"
+mkdir -p "$LOCAL_BIN_PARENT" "$LOCAL_BIN_TARGET"
+ln -s "$LOCAL_BIN_TARGET" "$LOCAL_BIN_PARENT/bin"
+fm_remote_job_compose_operator_path "$ACCOUNT_HOME" >/dev/null
+case ":$FM_REMOTE_JOB_OPERATOR_PATH:" in
+  *":$LOCAL_BIN_PARENT/bin:"*|*":$LOCAL_BIN_TARGET:"*) fail "the composed PATH followed a symlinked local bin" ;;
+esac
+rm -f "$LOCAL_BIN_PARENT/bin"
+mkdir "$LOCAL_BIN_PARENT/bin"
+pass "operator PATH excludes a symlinked local bin"
+
+NVM_ROOT="$ACCOUNT_HOME/.nvm"
+NVM_V20="$NVM_ROOT/versions/node/v20.18.0/bin"
+NVM_V24="$NVM_ROOT/versions/node/v24.14.1/bin"
+mkdir -p "$NVM_ROOT/alias" "$NVM_V20" "$NVM_V24"
+printf '20\n' > "$NVM_ROOT/alias/default"
+printf '#!/bin/bash\nprintf "20\\n"\n' > "$NVM_V20/node"
+printf '#!/bin/bash\nprintf "24\\n"\n' > "$NVM_V24/node"
+chmod +x "$NVM_V20/node" "$NVM_V24/node"
+fm_remote_job_compose_operator_path "$ACCOUNT_HOME" >/dev/null
+NVM_SELECTED=$(PATH="$FM_REMOTE_JOB_OPERATOR_PATH" node)
+[ "$NVM_SELECTED" = 20 ] || fail "the composed PATH ignored nvm's default alias"
+rm -f "$NVM_ROOT/alias/default"
+fm_remote_job_compose_operator_path "$ACCOUNT_HOME" >/dev/null
+NVM_SELECTED=$(PATH="$FM_REMOTE_JOB_OPERATOR_PATH" node)
+[ "$NVM_SELECTED" = 24 ] || fail "the nvm fallback did not select the highest installed version"
+printf '20\n' > "$NVM_ROOT/alias/default"
+pass "operator PATH selects nvm default with a deterministic fallback"
+
 NIX_PROFILE="$ACCOUNT_HOME/.nix-profile"
 NIX_BIN="$TMP_ROOT/nix-profile-bin"
 mkdir -p "$NIX_PROFILE" "$NIX_BIN"

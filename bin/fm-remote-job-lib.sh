@@ -109,11 +109,80 @@ fm_remote_job_append_glob_dirs() { # <glob whose matches are directories>
   done < <(compgen -G "$pattern" || true)
 }
 
+fm_remote_job_nvm_default_selector() { # <account-home>
+  local account_home=$1 alias_root selector alias_file next depth=0 suffix
+  alias_root="$account_home/.nvm/alias"
+  selector=$(fm_remote_job_read_single_line "$alias_root/default" 256 2>/dev/null || true)
+  while [ -n "$selector" ] && [ "$depth" -lt 8 ]; do
+    case "$selector" in ''|/*|*..*|*[!A-Za-z0-9._*/-]*) return 1 ;; esac
+    case "$selector" in
+      lts/*) suffix=${selector#lts/}; case "$suffix" in ''|*/*) return 1 ;; esac ;;
+      */*) return 1 ;;
+    esac
+    alias_file="$alias_root/$selector"
+    if [ -f "$alias_file" ] && [ ! -L "$alias_file" ]; then
+      next=$(fm_remote_job_read_single_line "$alias_file" 256 2>/dev/null || true)
+      [ -n "$next" ] && [ "$next" != "$selector" ] || return 1
+      selector=$next
+      depth=$((depth + 1))
+      continue
+    fi
+    printf '%s\n' "$selector"
+    return 0
+  done
+  return 1
+}
+
+fm_remote_job_nvm_selected_bin() { # <account-home>
+  local account_home=$1 selector normalized directory base version major minor patch extra
+  local selected= fallback= selected_major=-1 selected_minor=-1 selected_patch=-1
+  local fallback_major=-1 fallback_minor=-1 fallback_patch=-1 matches
+  selector=$(fm_remote_job_nvm_default_selector "$account_home" 2>/dev/null || true)
+  case "$selector" in node|stable|unstable) normalized= ;; v*) normalized=${selector#v} ;; *) normalized=$selector ;; esac
+  case "$normalized" in *[!0-9.]*|.*|*.|*..*) normalized=invalid ;; esac
+  for directory in "$account_home"/.nvm/versions/node/*/bin; do
+    [ -d "$directory" ] && [ ! -L "$directory" ] || continue
+    base=${directory%/bin}
+    version=${base##*/}
+    version=${version#v}
+    IFS=. read -r major minor patch extra <<< "$version"
+    case "$major:$minor:$patch:$extra" in *[!0-9:]*) continue ;; esac
+    [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || continue
+    if [ "$major" -gt "$fallback_major" ] ||
+      { [ "$major" -eq "$fallback_major" ] && [ "$minor" -gt "$fallback_minor" ]; } ||
+      { [ "$major" -eq "$fallback_major" ] && [ "$minor" -eq "$fallback_minor" ] && [ "$patch" -gt "$fallback_patch" ]; }; then
+      fallback=$directory
+      fallback_major=$major
+      fallback_minor=$minor
+      fallback_patch=$patch
+    fi
+    matches=0
+    if [ -z "$normalized" ]; then
+      matches=1
+    elif [ "$normalized" != invalid ]; then
+      case ".$version." in
+        ."$normalized".|."$normalized".*) matches=1 ;;
+      esac
+    fi
+    [ "$matches" -eq 1 ] || continue
+    if [ "$major" -gt "$selected_major" ] ||
+      { [ "$major" -eq "$selected_major" ] && [ "$minor" -gt "$selected_minor" ]; } ||
+      { [ "$major" -eq "$selected_major" ] && [ "$minor" -eq "$selected_minor" ] && [ "$patch" -gt "$selected_patch" ]; }; then
+      selected=$directory
+      selected_major=$major
+      selected_minor=$minor
+      selected_patch=$patch
+    fi
+  done
+  [ -n "$selected" ] && printf '%s\n' "$selected" || { [ -n "$fallback" ] && printf '%s\n' "$fallback"; }
+}
+
 fm_remote_job_compose_operator_path() { # <account-home>
-  local account_home=$1 account_user
+  local account_home=$1 account_user nvm_bin
   FM_REMOTE_JOB_OPERATOR_PATH=
-  fm_remote_job_path_append "$account_home/.local/bin"
-  fm_remote_job_append_glob_dirs "$account_home/.nvm/versions/node/*/bin"
+  fm_remote_job_path_append_if_dir "$account_home/.local/bin"
+  nvm_bin=$(fm_remote_job_nvm_selected_bin "$account_home" 2>/dev/null || true)
+  [ -z "$nvm_bin" ] || fm_remote_job_path_append "$nvm_bin"
   fm_remote_job_path_append_if_dir "$account_home/.asdf/shims"
   fm_remote_job_append_glob_dirs "$account_home/.asdf/installs/*/*/bin"
   fm_remote_job_path_append_if_dir "$account_home/.local/share/mise/shims"
