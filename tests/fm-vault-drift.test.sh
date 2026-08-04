@@ -214,6 +214,41 @@ test_current_external_symlinked_vault_is_silent() {
   pass "a current external symlinked vault is silent"
 }
 
+test_declared_external_target_without_marker_reports_invalid() {
+  local home proj target out
+  home=$(new_home declared-external-target-without-marker-reports-invalid)
+  proj="$home/projects/arknode"
+  init_repo "$proj" "$T0"
+  declare_external "$proj" /vault
+  target="$home/vaults/not-a-vault"
+  init_repo "$target" "$T0"
+  ln -s "$target" "$proj/vault"
+  project_commits "$proj" 30 $((T0 + 30 * DAY))
+
+  out=$(run_drift "$home")
+  assert_contains "$out" \
+    "VAULT_DRIFT: arknode: external vault target invalid at vault -> $target - 00-Home.md marker missing" \
+    "a declared external target without the bundle marker must report as invalid"
+  assert_not_contains "$out" "vault stale at" \
+    "a declared non-vault target must never be classified as stale"
+  pass "a declared external target without the marker reports invalid"
+}
+
+test_undeclared_root_symlink_to_non_vault_repo_is_silent() {
+  local home proj target out
+  home=$(new_home undeclared-root-symlink-to-non-vault-repo-is-silent)
+  proj="$home/projects/fixtures"
+  init_repo "$proj" "$T0"
+  target="$home/repos/unrelated"
+  init_repo "$target" "$T0"
+  ln -s "$target" "$proj/vault"
+  project_commits "$proj" 30 $((T0 + 30 * DAY))
+
+  out=$(run_drift "$home")
+  [ -z "$out" ] || fail "an undeclared symlink to a non-vault repo must be ignored, got: $out"
+  pass "an undeclared root symlink to a non-vault repo is silent"
+}
+
 test_broken_link_reports_distinctly_from_staleness() {
   local home proj out
   home=$(new_home broken-link-reports-distinctly-from-staleness)
@@ -364,6 +399,8 @@ test_in_repo_vault_stale_by_commit_count
 test_in_repo_vault_stale_by_drift_window
 test_external_symlinked_vault_stale_reports_the_separate_repo_remedy
 test_current_external_symlinked_vault_is_silent
+test_declared_external_target_without_marker_reports_invalid
+test_undeclared_root_symlink_to_non_vault_repo_is_silent
 test_broken_link_reports_distinctly_from_staleness
 test_absent_link_reports_distinctly_from_staleness
 test_arknode_absent_link_and_stale_vault_at_once

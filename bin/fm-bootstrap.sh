@@ -210,6 +210,11 @@ fleet_sync() {
   rm -f "$tmp"
 }
 
+vault_drift_check() {
+  FM_HOME="$FM_HOME" FM_PROJECTS_OVERRIDE="$PROJECTS" FM_DATA_OVERRIDE="$DATA" \
+    "$SCRIPT_DIR/fm-vault-drift.sh" || true
+}
+
 secondmate_sync() {
   # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
   . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -1020,11 +1025,13 @@ if [ -n "$tangle_branch" ]; then
     echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - restore the primary with: git -C $FM_ROOT checkout $tangle_default, then re-validate the branch in a proper worktree"
   fi
 fi
-# Documentation-vault drift: read-only inspection of the project clones, so it
-# runs in detect-only sessions too. bin/fm-vault-drift.sh owns the shapes,
+# Documentation-vault drift is read-only, so a detect-only session can inspect
+# the clones immediately. A normal session checks after fleet sync below so it
+# inspects the resulting clone state. bin/fm-vault-drift.sh owns the shapes,
 # thresholds, and line wording.
-FM_HOME="$FM_HOME" FM_PROJECTS_OVERRIDE="$PROJECTS" FM_DATA_OVERRIDE="$DATA" \
-  "$SCRIPT_DIR/fm-vault-drift.sh" || true
+if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" = 1 ]; then
+  vault_drift_check
+fi
 crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] && [ -n "$crew" ] && [ "$crew" != "default" ]; then
@@ -1041,6 +1048,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_handoff_resume
   x_mode_setup
   fleet_sync
+  vault_drift_check
 fi
 secondmate_handoff_detect
 exit 0

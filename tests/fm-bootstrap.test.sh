@@ -128,12 +128,14 @@ make_fake_fleet_sync_root() {
   local dir=$1 fake_root
   fake_root="$dir/fake-root"
   mkdir -p "$fake_root/bin"
-  cat > "$fake_root/bin/fm-fleet-sync.sh" <<'SH'
+cat > "$fake_root/bin/fm-fleet-sync.sh" <<'SH'
 #!/usr/bin/env bash
 [ -z "${FM_FAKE_FLEET_SYNC_STARTED_MARKER:-}" ] || : > "$FM_FAKE_FLEET_SYNC_STARTED_MARKER"
+[ -z "${FM_FAKE_FLEET_SYNC_STARTED_MARKER:-}" ] \
+  || trap ': > "${FM_FAKE_FLEET_SYNC_STARTED_MARKER}.finished"' EXIT
 printf '%s\n' 'alpha: synced'
 printf '%s\n' 'beta: skipped: no origin remote'
-exec perl -e 'sleep 300'
+perl -e 'sleep 300'
 SH
   chmod +x "$fake_root/bin/fm-fleet-sync.sh"
   printf '%s\n' "$fake_root"
@@ -189,7 +191,10 @@ run_bootstrap_timeout_case() {
           tries=$((tries + 1))
         done
       fi
-      if [ -n "${FM_FAKE_GIT_SYNC_STARTED_RECORD:-}" ] && [ -n "${FM_FAKE_FLEET_SYNC_STARTED_MARKER:-}" ] && [ -e "$FM_FAKE_FLEET_SYNC_STARTED_MARKER" ]; then
+      if [ -n "${FM_FAKE_GIT_SYNC_STARTED_RECORD:-}" ] \
+        && [ -n "${FM_FAKE_FLEET_SYNC_STARTED_MARKER:-}" ] \
+        && [ -e "$FM_FAKE_FLEET_SYNC_STARTED_MARKER" ] \
+        && [ ! -e "${FM_FAKE_FLEET_SYNC_STARTED_MARKER}.finished" ]; then
         printf '%s\n' "$*" >> "$FM_FAKE_GIT_SYNC_STARTED_RECORD"
       fi
       command git "$@"
@@ -764,9 +769,9 @@ test_routine_bootstrap_contract_runs_under_system_bash() {
 # and the detect-only (lock-refused) session, and never rewrite the clone.
 # bin/fm-vault-drift.sh's own suite owns the vault shapes and thresholds.
 test_bootstrap_relays_vault_drift_in_both_modes() {
-  local case_dir fakebin proj out i mode
+  local case_dir fakebin proj out i mode seed
   case_dir="$TMP_ROOT/vault-drift"
-  mkdir -p "$case_dir/home/config" "$case_dir/home/projects"
+  mkdir -p "$case_dir/home/bin" "$case_dir/home/config" "$case_dir/home/projects"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   fakebin=$(make_fake_toolchain "$case_dir")
 
@@ -779,16 +784,30 @@ test_bootstrap_relays_vault_drift_in_both_modes() {
   git -C "$proj" add -A
   GIT_AUTHOR_DATE='@1700000000 +0000' GIT_COMMITTER_DATE='@1700000000 +0000' \
     git -C "$proj" commit -qm 'vault: seed'
+  seed=$(git -C "$proj" rev-parse HEAD)
   for ((i = 1; i <= 20; i++)); do
     printf '%s\n' "change $i" > "$proj/file-$i.txt"
     git -C "$proj" add -A
     GIT_AUTHOR_DATE='@1700086400 +0000' GIT_COMMITTER_DATE='@1700086400 +0000' \
       git -C "$proj" commit -qm "work $i"
   done
+  git -C "$proj" branch upstream
+  git -C "$proj" reset -q --hard "$seed"
+  cat > "$case_dir/home/bin/fm-fleet-sync.sh" <<'SH'
+#!/usr/bin/env bash
+git -C "$FM_FAKE_VAULT_PROJECT" merge -q --ff-only upstream
+SH
+  chmod +x "$case_dir/home/bin/fm-fleet-sync.sh"
 
   for mode in 0 1; do
+    if [ "$mode" -eq 0 ]; then
+      git -C "$proj" reset -q --hard "$seed"
+    else
+      git -C "$proj" reset -q --hard upstream
+    fi
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-      FM_BOOTSTRAP_DETECT_ONLY="$mode" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+      FM_BOOTSTRAP_DETECT_ONLY="$mode" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+      FM_FAKE_VAULT_PROJECT="$proj" "$ROOT/bin/fm-bootstrap.sh")
     printf '%s\n' "$out" \
       | grep -F 'VAULT_DRIFT: hermes: in-repo vault stale at vault/ - vault last updated 2023-11-14, 20 project commits landed since, drift window 1d' \
         >/dev/null \
@@ -796,7 +815,7 @@ test_bootstrap_relays_vault_drift_in_both_modes() {
   done
   [ -z "$(git -C "$proj" status --porcelain)" ] \
     || fail "bootstrap's vault check must leave the clone untouched"
-  pass "bootstrap relays vault-drift detection in normal and detect-only sessions"
+  pass "bootstrap checks post-sync drift normally and relays it in detect-only sessions"
 }
 
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {

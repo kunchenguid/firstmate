@@ -31,6 +31,7 @@ When any diagnostic needs captain attention, report the plain consequence and re
   An `in-repo vault stale` line is ordinary project work: brief a crewmate to refresh that vault in its own worktree through the project's selected delivery path.
   An `external vault stale` line names a vault that lives in a SEPARATE repo, which an isolated project worktree structurally cannot write; dispatch that work against the vault repo's own clone instead, and never tell a crewmate to write the captain's live copy.
   An `external vault link absent` or `link broken` line means drift cannot be measured there at all - the exact blindness this check exists to end - so treat restoring the link (or registering the vault repo as its own project) as the fix, and do not read the missing measurement as "the vault is current".
+  An `external vault target invalid` line means a declared location lacks the OKF marker or a recognized bundle is not backed by Git; correct the target or declaration before treating it as a measurable vault.
   The check is detection only by design: a vault is curated knowledge, so never auto-write one, and never modify a project clone to silence the line.
 - `STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>` - the visible startup-memory budget is not a safe one-line positive decimal file; do not infer the default or propagate it.
   Correct the local primary file, then rerun session start so the normal convergence path can deliver the validated value to secondmate homes.

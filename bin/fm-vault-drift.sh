@@ -21,7 +21,8 @@
 #     00-Home.md, which is an IN-REPO vault (a tracked directory named vault
 #     WITHOUT that marker is some other directory - e.g. a test fixture - and is
 #     deliberately ignored, so it can never raise a false alarm);
-#   - a root-level "vault" symlink, however it got there.
+#   - a root-level "vault" symlink whose resolved target carries the OKF marker,
+#     however it got there.
 #
 # Each location is classified and reported as one of:
 #   link absent    - an external vault is declared but nothing is linked here, so
@@ -29,6 +30,8 @@
 #                    hides staleness, and it is reported separately from staleness
 #                    because the remedy is different.
 #   link broken    - the symlink exists but its target does not.
+#   target invalid - a declared location resolves without the OKF marker, or a
+#                    recognized bundle is not in a Git repository.
 #   in-repo vault stale   - fixable inside an ordinary project worktree.
 #   external vault stale  - NOT fixable from a project worktree: the vault is a
 #                    separate repo, so the work belongs to that repo's own clone.
@@ -176,10 +179,19 @@ report_stale() {
   esac
 }
 
-# check_external <name> <proj> <rel> <vault-repo-dir> <detail-suffix>
+# check_external <name> <proj> <rel> <vault-repo-dir> <detail-suffix> <declared>
 check_external() {
-  local name=$1 proj=$2 rel=$3 dir=$4 suffix=$5 top vault_ts vault_date head_ts behind
-  top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || return 0
+  local name=$1 proj=$2 rel=$3 dir=$4 suffix=$5 declared=$6 top vault_ts vault_date head_ts behind
+  if [ ! -f "$dir/$VAULT_MARKER" ]; then
+    if [ "$declared" -eq 1 ]; then
+      report "$name" "external vault target invalid at $rel$suffix - $VAULT_MARKER marker missing, so this declared location is not a valid OKF bundle and vault drift cannot be measured"
+    fi
+    return 0
+  fi
+  if ! top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null); then
+    report "$name" "external vault target invalid at $rel$suffix - the OKF bundle is not in a Git repository, so vault drift cannot be measured"
+    return 0
+  fi
   vault_ts=$(git -C "$top" log -1 --format=%ct 2>/dev/null) || return 0
   [ -n "$vault_ts" ] || return 0
   vault_date=$(git -C "$top" log -1 --format=%cd --date=short 2>/dev/null) || return 0
@@ -207,29 +219,34 @@ check_in_repo() {
 # check_location <name> <proj> <rel>: classify one candidate location by what is
 # actually on disk and in the index, and report only a real problem.
 check_location() {
-  local name=$1 proj=$2 rel=$3 full="$2/$3" target
+  local name=$1 proj=$2 rel=$3 full="$2/$3" target declared=0
+  if declared_paths "$proj" | grep -Fxq "$rel"; then
+    declared=1
+  fi
   if [ -L "$full" ]; then
     target=$(readlink "$full")
     if [ ! -e "$full" ]; then
-      report "$name" "external vault link broken at $rel -> $target (target missing); the vault content is not reachable from this clone, so its drift cannot be measured"
+      if [ "$declared" -eq 1 ]; then
+        report "$name" "external vault link broken at $rel -> $target (target missing); the vault content is not reachable from this clone, so its drift cannot be measured"
+      fi
       return 0
     fi
-    check_external "$name" "$proj" "$rel" "$full" " -> $target"
+    check_external "$name" "$proj" "$rel" "$full" " -> $target" "$declared"
     return 0
   fi
   if [ -d "$full" ]; then
     if git -C "$proj" cat-file -e "HEAD:$rel/$VAULT_MARKER" 2>/dev/null; then
       check_in_repo "$name" "$proj" "$rel"
-    elif [ -e "$full/.git" ]; then
+    elif [ "$declared" -eq 1 ] || [ -e "$full/.git" ]; then
       # An untracked, ignored clone of the vault repo sitting in place of a
       # symlink: same external shape, same remedy.
-      check_external "$name" "$proj" "$rel" "$full" ""
+      check_external "$name" "$proj" "$rel" "$full" "" "$declared"
     fi
     return 0
   fi
   # Nothing there. Only a declared external vault is a problem: a tracked vault
   # path that is merely missing from a dirty checkout is not this check's business.
-  if declared_paths "$proj" | grep -Fxq "$rel"; then
+  if [ "$declared" -eq 1 ]; then
     report "$name" "external vault link absent at $rel - the project declares an external vault there but this clone has none, so vault drift cannot be measured here at all; restore the link in the clone, or track the vault through its own registered repo"
   fi
 }
