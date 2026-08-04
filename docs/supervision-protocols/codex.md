@@ -17,6 +17,6 @@ When work still needs supervision, the tracked Codex Stop hook re-blocks after a
 That continuation is owned by the active Codex Stop surface and never by a reaped child, a worker pane, or a second primary.
 
 Away mode needs a verified primary tmux or Herdr pane where the daemon can deliver its return and escalation messages.
-An external Codex thread identified by `CODEX_THREAD_ID` without either pane has no safe asynchronous callback, so `bin/fm-afk-launch.sh` refuses before it writes away state.
+An external Codex thread identified by `CODEX_THREAD_ID` without either pane has no safe asynchronous callback, so both `bin/fm-afk-launch.sh` and its common `bin/fm-afk-start.sh` entry refuse before they write away state.
 Do not supply `FM_SUPERVISOR_TARGET` for a worker pane.
 Keep foreground checkpoints running while present, or restart the primary in tmux or Herdr before leaving work unattended.
