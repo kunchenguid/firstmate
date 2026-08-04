@@ -532,31 +532,12 @@ crew_child_cpu_advancing() {  # <id> [state-dir]
   [ "$(fm_child_cpu_state "$state" "$id")" = advancing ]
 }
 
-# Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
-# from bin/fm-crew-state.sh's one authoritative current-state line
-# ("state: <s> · source: <src> · <detail>"). Prints exactly one token:
-#   working - an actively-running no-mistakes step (running/fixing/ci), a busy
-#             pane, or advancing descendant CPU; the crew is legitimately
-#             mid-work on a static-looking pane (e.g. waiting on CI, or
-#             supervising a command it backgrounded before ending its turn);
-#   paused  - the crew's authoritative current state is a declared external-wait
-#             pause (paused:), which is EXPECTED to idle;
-#   none    - none of those, so the wake must surface (a stopped/finished/parked/
-#             failed/torn-down/unknown crew whose descendants are hung, dead, or
-#             absent).
-# One fm-crew-state.sh read serves BOTH of its absorb reasons at once, and the
-# process-liveness probe runs only where that read came back INCONCLUSIVE, so
-# the semantic sources keep their precedence in both directions: a crew that
-# appended paused: but then STARTED a run reports working, never paused, and a
-# definite done/parked/failed/blocked verdict is never overridden by whatever
-# its process tree happens to still be doing.
-# NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call and the
-# probe maintains its own sample, so callers run it only on no-verb signal and
-# first-sighting stale paths, never every wake.
-# FM_CREW_STATE_BIN lets tests stub the verdict.
-crew_absorb_class() {  # <id> [state-dir]
-  local id=$1 state_dir=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}} line state src
-  [ -n "$id" ] || { printf 'none'; return; }
+# Classify bin/fm-crew-state.sh's authoritative current-state line without
+# consulting process liveness. Prints working, paused, definite, or inconclusive.
+# FM_CREW_STATE_BIN lets tests stub the semantic verdict.
+crew_semantic_class() {  # <id>
+  local id=$1 line state src
+  [ -n "$id" ] || { printf 'definite'; return; }
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   state=unreadable
   case "$line" in
@@ -569,18 +550,21 @@ crew_absorb_class() {  # <id> [state-dir]
       fi
       ;;
   esac
-  # A DEFINITE verdict is final: a done, failed, blocked, or gate-parked run has
-  # an answer already, and whatever its process tree is still doing must not
-  # mask it. Only an INCONCLUSIVE read continues - `unknown`, an unreadable
-  # verdict, or a `working` claim from a source that cannot prove it (the status
-  # log). That inconclusive set is exactly what every semantic source reports
-  # for an agent that backgrounded a long command and then ended its turn, so it
-  # is the one place the process-liveness signal belongs: descendant CPU that
-  # ADVANCED since the last poll. Existence alone never counts, so a hung, dead,
-  # or absent child still falls through to `none` and the wake surfaces.
   case "$state" in
-    working|unknown|unreadable) ;;
-    *) printf 'none'; return ;;
+    working|unknown|unreadable) printf 'inconclusive' ;;
+    *) printf 'definite' ;;
+  esac
+}
+
+# Classify why an idle or stale crew may be absorbed. Prints working, paused, or
+# none. Process liveness is consulted only after an inconclusive semantic read.
+crew_absorb_class() {  # <id> [state-dir]
+  local id=$1 state_dir=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}} semantic
+  [ -n "$id" ] || { printf 'none'; return; }
+  semantic=$(crew_semantic_class "$id")
+  case "$semantic" in
+    working|paused) printf '%s' "$semantic"; return ;;
+    definite) printf 'none'; return ;;
   esac
   if [ "$(fm_child_cpu_state "$state_dir" "$id")" = advancing ]; then
     printf 'working'

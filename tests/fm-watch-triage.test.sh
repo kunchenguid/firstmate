@@ -331,19 +331,24 @@ test_crew_absorb_class_classifier() {
   export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
   export FM_FAKE_CREW_STATE
   FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  [ "$(crew_semantic_class a)" = working ] || fail "active run-step semantic class was not working"
   [ "$(crew_absorb_class a)" = working ] || fail "active run-step not classed working"
   FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
   [ "$(crew_absorb_class a)" = working ] || fail "busy pane not classed working"
   FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting upstream'
+  [ "$(crew_semantic_class a)" = paused ] || fail "declared pause semantic class was not paused"
   [ "$(crew_absorb_class a)" = paused ] || fail "declared pause not classed paused"
   crew_is_paused a || fail "crew_is_paused did not recognize a paused verdict"
   ! crew_is_provably_working a || fail "a paused crew was treated as provably working"
   FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling'
+  [ "$(crew_semantic_class a)" = inconclusive ] || fail "status-log working claim was not inconclusive"
   [ "$(crew_absorb_class a)" = none ] || fail "stale working: status-log classed absorbable"
   FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
+  [ "$(crew_semantic_class a)" = inconclusive ] || fail "unknown semantic class was not inconclusive"
   [ "$(crew_absorb_class a)" = none ] || fail "unknown crew classed absorbable"
   ! crew_is_paused a || fail "unknown crew classed paused"
   [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
+  [ "$(crew_semantic_class "")" = definite ] || fail "empty id semantic class was not definite"
   unset FM_FAKE_CREW_STATE
   pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
 }
@@ -412,6 +417,7 @@ test_child_cpu_counts_already_reaped_descendants() {
   mkdir -p "$proc" "$wt"
   printf 'window=test:fm-task\nkind=ship\nworktree=%s\n' "$wt" > "$state/task.meta"
   export FM_PROC_ROOT_OVERRIDE="$proc"
+  # Replace the baseline on every probe so reaped-child assertions measure one interval.
   export FM_CHILD_CPU_SAMPLE_INTERVAL=0
   write_fake_proc_process "$proc" 100 1 100 5 100 0 0 900 "$wt"
   fm_child_cpu_state "$state" task >/dev/null
@@ -433,6 +439,7 @@ test_child_cpu_sample_is_identity_bound() {
   mkdir -p "$proc" "$wt"
   printf 'window=test:fm-task\nkind=ship\nworktree=%s\n' "$wt" > "$state/task.meta"
   export FM_PROC_ROOT_OVERRIDE="$proc"
+  # Replace the baseline on every probe so identity assertions measure one interval.
   export FM_CHILD_CPU_SAMPLE_INTERVAL=0
   make_fake_agent_tree "$proc" "$wt"
   fm_child_cpu_state "$state" task >/dev/null
@@ -551,6 +558,7 @@ test_child_cpu_real_process_tree() {
   agent=$(cat "$wt/agent.pid"); burner=$(cat "$wt/burn.pid")
   cleanup_real_tree() { kill -CONT "$burner" 2>/dev/null; kill -KILL "$burner" "$agent" 2>/dev/null || true; }
 
+  # Replace each real-process baseline so the following sleep is the measured interval.
   FM_CHILD_CPU_SAMPLE_INTERVAL=0 fm_child_cpu_state "$state" task >/dev/null
   sleep 2
   [ "$(FM_CHILD_CPU_SAMPLE_INTERVAL=0 fm_child_cpu_state "$state" task)" = advancing ] \
@@ -559,6 +567,7 @@ test_child_cpu_real_process_tree() {
   # SIGSTOP is the honest hung-child control: the process is still alive and
   # still a descendant, it just stops consuming CPU.
   kill -STOP "$burner" 2>/dev/null || { cleanup_real_tree; fail "could not stop the real burner"; }
+  # Replace the baseline immediately before measuring the stopped-child interval.
   FM_CHILD_CPU_SAMPLE_INTERVAL=0 fm_child_cpu_state "$state" task >/dev/null
   sleep 2
   kill -0 "$burner" 2>/dev/null || { cleanup_real_tree; fail "the stopped burner was not still alive"; }
@@ -916,6 +925,7 @@ test_stale_pane_with_advancing_child_is_absorbed() {
   key=$(printf '%s' "$window" | tr ':/.' '___')
   export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
 
+  # Keep the synthetic fixed-tick interval available across repeated watcher polls.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_PROC_ROOT_OVERRIDE="$proc" FM_CHILD_CPU_SAMPLE_INTERVAL=99999 \
@@ -936,6 +946,29 @@ test_stale_pane_with_advancing_child_is_absorbed() {
   pass "a stale pane whose work is happening in an advancing child process is absorbed, not wedge-escalated"
 }
 
+test_default_interval_advancing_child_is_absorbed() {
+  local dir state proc fakebin capture window pid
+  window="test:fm-childdefault"
+  read -r dir state proc fakebin capture < <(setup_child_cpu_watch_case child-work-default "$window" childdefault 5000)
+  printf '%s\t0\t%s\n' "$(( $(date +%s) - 15 ))" \
+    "$(fake_proc_identity "$proc" "$state" 100)" > "$state/childdefault.childcpu"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PROC_ROOT_OVERRIDE="$proc" FM_STALE_ESCALATE_SECS=999 \
+    FM_POLL=15 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$dir/watch.out" &
+  pid=$!
+  if ! wait_live "$pid" 45; then
+    reap "$pid"; fail "the default sample interval lost advancing child evidence: $(cat "$dir/watch.out")"
+  fi
+  [ ! -s "$dir/watch.out" ] || fail "the default sample interval surfaced an advancing child"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "the watcher absorbs advancing child work at the default sample interval"
+}
+
 test_definite_verdict_with_advancing_child_still_surfaces() {
   local dir state proc fakebin capture window pid drain_out
   window="test:fm-childdone"
@@ -943,6 +976,7 @@ test_definite_verdict_with_advancing_child_still_surfaces() {
   drain_out="$dir/drain.out"
   export FM_FAKE_CREW_STATE='state: done · source: run-step · validation passed'
 
+  # Keep the synthetic fixed-tick interval available until stale triage surfaces it.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_PROC_ROOT_OVERRIDE="$proc" FM_CHILD_CPU_SAMPLE_INTERVAL=99999 \
@@ -970,6 +1004,7 @@ test_stale_pane_with_hung_child_still_surfaces() {
   drain_out="$dir/drain.out"
   export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
 
+  # Keep the synthetic fixed-tick interval available across repeated watcher polls.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_PROC_ROOT_OVERRIDE="$proc" FM_CHILD_CPU_SAMPLE_INTERVAL=99999 \
@@ -999,6 +1034,7 @@ test_advancing_child_still_bounded_by_turn_age() {
   # No completed turn has ever been recorded, so the spawn record carries the age.
   touch -t 200001010000 "$state/childbound.meta"
 
+  # Keep the synthetic fixed-tick interval available across the timer assertion.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_PROC_ROOT_OVERRIDE="$proc" FM_CHILD_CPU_SAMPLE_INTERVAL=99999 \
@@ -1014,6 +1050,7 @@ test_advancing_child_still_bounded_by_turn_age() {
 
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$dir/watch.out"
+  # Keep the synthetic fixed-tick interval available across the escalation assertion.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_PROC_ROOT_OVERRIDE="$proc" FM_CHILD_CPU_SAMPLE_INTERVAL=99999 \
@@ -2232,6 +2269,7 @@ test_child_cpu_refuses_a_stale_baseline
 test_crew_absorb_class_process_liveness
 test_child_cpu_real_process_tree
 test_stale_pane_with_advancing_child_is_absorbed
+test_default_interval_advancing_child_is_absorbed
 test_definite_verdict_with_advancing_child_still_surfaces
 test_stale_pane_with_hung_child_still_surfaces
 test_advancing_child_still_bounded_by_turn_age

@@ -977,7 +977,7 @@ EOF
     # verdict or hung, dead, or absent child leaves work_now at the busy verdict.
     child_cpu=$(fm_child_cpu_state "$STATE" "$task")
     work_now=$busy_now
-    if [ "$child_cpu" = advancing ] && [ "$(crew_absorb_class "$task")" = working ]; then
+    if [ "$child_cpu" = advancing ] && [ "$(crew_semantic_class "$task")" = inconclusive ]; then
       work_now=0
     fi
     if [ "$h" = "$prev" ]; then
