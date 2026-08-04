@@ -586,6 +586,140 @@ test_default_secondmate_timeout_covers_liveness_overhead() {
   pass "default secondmate timeout covers the two-sample observation envelope"
 }
 
+test_secondmate_summary_freezes_budgeted_inventory() {
+  local home mate fakebin late_meta timeout_log json bound
+  home=$(make_home frozen-secondmate-inventory)
+  : > "$home/data/secondmates.md"
+  printf '## Done\n' > "$home/data/backlog.md"
+  mate="$TMP_ROOT/frozen-secondmate-home"
+  make_valid_secondmate_home frozen-race "$mate"
+  append_secondmate_registry "$home" frozen-race "$mate"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] stable - Stable worker (repo: sample) (kind: scout)
+
+## Queued
+
+## Done
+EOF
+  mkdir -p "$mate/projects/stable" "$mate/projects/late"
+  fm_write_meta "$mate/state/stable.meta" \
+    "window=firstmate:fm-stable" "worktree=$mate/projects/stable" "project=sample" \
+    "harness=codex" "kind=scout" "mode=scout"
+  record_claude_state "$mate/state" stable busy
+  late_meta="$home/late.meta"
+  fm_write_meta "$late_meta" \
+    "window=firstmate:fm-late" "worktree=$mate/projects/late" "project=sample" \
+    "harness=codex" "kind=scout" "mode=scout"
+  fakebin=$(make_fakebin "$home")
+  timeout_log="$home/frozen-timeout.log"
+  cat > "$fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -k ]; then shift 2; fi
+seconds=$1
+shift
+case " $* " in
+  *'fm-fleet-snapshot.sh --secondmate-home-summary'*)
+    printf '%s\n' "$seconds" >> "${TIMEOUT_LOG:?}"
+    if [ -n "${RACE_META:-}" ] && [ ! -e "${RACE_MARKER:?}" ]; then
+      cp "$RACE_META" "${RACE_STATE:?}/late.meta"
+      : > "$RACE_MARKER"
+    fi
+    ;;
+esac
+exec "$@"
+SH
+  chmod +x "$fakebin/timeout"
+  json=$(PATH="$fakebin:$PATH" TIMEOUT_LOG="$timeout_log" RACE_META="$late_meta" \
+    RACE_STATE="$mate/state" RACE_MARKER="$home/race-fired" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  bound=$(tail -1 "$timeout_log")
+  [ "$bound" -eq $((8 + (2 + 4) * 2 + 2 * (10 + 1) + 2)) ] \
+    || fail "frozen inventory did not derive the one-child summary bound: $bound"
+  [ -f "$mate/state/late.meta" ] || fail "race mutation did not change the live metadata inventory"
+  printf '%s' "$json" | jq -e '
+    .secondmate_current.records[] | select(.id=="frozen-race")
+    | .provenance.selected=="structured-home" and .provenance.summary_valid==true
+      and .counts.endpoints==1 and ([.endpoints[] | select(.id=="late")] | length)==0
+  ' >/dev/null || fail "summary consumed metadata outside its budgeted frozen inventory: $json"
+  pass "secondmate summary consumes exactly its budgeted frozen inventory"
+}
+
+test_remote_secondmate_summary_preserves_frozen_inventory() {
+  local home fakebin remote_root remote_home late_meta fake_ssh ssh_count json
+  home=$(make_home frozen-remote-inventory)
+  printf '## Done\n' > "$home/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+  remote_root="$TMP_ROOT/frozen-remote-root"
+  remote_home="$TMP_ROOT/frozen-remote-home"
+  mkdir -p "$remote_root"
+  remote_root=$(cd "$remote_root" && pwd -P)
+  cp -R "$ROOT/bin" "$remote_root/bin"
+  printf '# Remote root fixture\n' > "$remote_root/AGENTS.md"
+  make_valid_secondmate_home remote-race "$remote_home"
+  remote_home=$(cd "$remote_home" && pwd -P)
+  cat > "$remote_home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] stable - Stable remote worker (repo: sample) (kind: scout)
+
+## Queued
+
+## Done
+EOF
+  mkdir -p "$remote_home/projects/stable" "$remote_home/projects/late"
+  fm_write_meta "$remote_home/state/stable.meta" \
+    "window=firstmate:fm-stable" "worktree=$remote_home/projects/stable" "project=sample" \
+    "harness=codex" "kind=scout" "mode=scout"
+  record_claude_state "$remote_home/state" stable busy
+  cp "$fakebin/fm-liveness-snapshot" "$remote_root/bin/fm-liveness-snapshot.sh"
+  chmod +x "$remote_root/bin/fm-liveness-snapshot.sh"
+  fm_git_identity
+  git -C "$remote_root" init -q -b main
+  git -C "$remote_root" add AGENTS.md bin
+  git -C "$remote_root" commit -qm 'remote fleet fixture'
+  printf -- '- remote-race - fixture domain (host: remote-mac; root: %s; home: %s; scope: fixture; projects: sample; added 2026-08-03)\n' \
+    "$remote_root" "$remote_home" > "$home/data/secondmates.md"
+  late_meta="$home/remote-late.meta"
+  fm_write_meta "$late_meta" \
+    "window=firstmate:fm-late" "worktree=$remote_home/projects/late" "project=sample" \
+    "harness=codex" "kind=scout" "mode=scout"
+  fake_ssh="$fakebin/fake-ssh"
+  ssh_count="$home/ssh.count"
+  cat > "$fake_ssh" <<'SH'
+#!/usr/bin/env bash
+count=$(cat "${FM_FAKE_SSH_COUNT:?}" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_FAKE_SSH_COUNT"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) shift 2 ;;
+    --) shift; break ;;
+    *) exit 90 ;;
+  esac
+done
+[ "$1" = remote-mac ] && [ "$2" = fm-remote-entrypoint.sh ] || exit 91
+shift 2
+if [ "$count" -eq 2 ]; then cp "${FM_FAKE_RACE_META:?}" "${FM_FAKE_RACE_STATE:?}/late.meta"; fi
+exec "${FM_FAKE_REMOTE_ENTRYPOINT:?}" "$@"
+SH
+  chmod +x "$fake_ssh"
+  json=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_SSH_BIN="$fake_ssh" \
+    FM_FAKE_SSH_COUNT="$ssh_count" FM_FAKE_RACE_META="$late_meta" \
+    FM_FAKE_RACE_STATE="$remote_home/state" FM_FAKE_REMOTE_ENTRYPOINT="$remote_root/bin/fm-remote-entrypoint.sh" \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  [ "$(cat "$ssh_count")" -eq 2 ] || fail "remote frozen inventory did not use one prepare and one summary handoff"
+  [ -f "$remote_home/state/late.meta" ] || fail "remote race mutation did not change the live metadata inventory"
+  printf '%s' "$json" | jq -e '
+    .secondmate_current.records[] | select(.id=="remote-race")
+    | .remote==true and .provenance.selected=="structured-home"
+      and .provenance.summary_valid==true and .counts.endpoints==1
+      and ([.endpoints[] | select(.id=="late")] | length)==0
+  ' >/dev/null || fail "remote summary lost frozen inventory identity across handoff: $json"
+  pass "remote secondmate handoff preserves the budgeted frozen inventory"
+}
+
 test_secondmate_timeout_derives_from_fleet_size() {
   local home mate fakebin timeout_log i wt fleet_size small_bound large_bound expected_delta
   local neutralized_json neutralized_bound expected_large
@@ -2140,6 +2274,8 @@ test_active_child_overrides_old_parent_event
 test_structured_child_decision_reaches_captains_call
 test_bad_secondmate_homes_never_revive_parent_work
 test_default_secondmate_timeout_covers_liveness_overhead
+test_secondmate_summary_freezes_budgeted_inventory
+test_remote_secondmate_summary_preserves_frozen_inventory
 test_secondmate_timeout_derives_from_fleet_size
 test_oversized_secondmate_summary_stays_strict_unknown
 test_secondmate_and_child_bounds_are_disclosed

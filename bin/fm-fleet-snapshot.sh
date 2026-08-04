@@ -163,8 +163,8 @@ validate_positive_bound FM_LIVENESS_REMOTE_OVERHEAD_SECS "$FM_LIVENESS_REMOTE_OV
 usage() {
   cat <<'EOF'
 usage: fm-fleet-snapshot.sh --json
-       fm-fleet-snapshot.sh --secondmate-home-summary
-       fm-fleet-snapshot.sh --secondmate-home-count
+       fm-fleet-snapshot.sh --secondmate-home-summary --frozen-state <dir>
+       fm-fleet-snapshot.sh --secondmate-home-freeze
 
 Print a read-only structured snapshot of the firstmate fleet.
 JSON is the stable machine-readable output contract.
@@ -192,13 +192,48 @@ EOF
 }
 
 OUTPUT_MODE=json
-case "${1:---json}" in
-  --json) ;;
-  --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
-  --secondmate-home-count) OUTPUT_MODE=secondmate-home-count ;;
-  -h|--help) usage; exit 0 ;;
-  *) usage >&2; exit 2 ;;
+FROZEN_STATE_ROOT=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --json) OUTPUT_MODE=json ;;
+    --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
+    --secondmate-home-freeze) OUTPUT_MODE=secondmate-home-freeze ;;
+    --frozen-state)
+      shift
+      [ "$#" -gt 0 ] || { usage >&2; exit 2; }
+      FROZEN_STATE_ROOT=${1:-}
+      ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+  shift
+done
+case "$OUTPUT_MODE" in
+  secondmate-home-summary) [ -n "$FROZEN_STATE_ROOT" ] || { usage >&2; exit 2; } ;;
+  *) [ -z "$FROZEN_STATE_ROOT" ] || { usage >&2; exit 2; } ;;
 esac
+
+freeze_meta_inventory() {  # <source-state> <destination-state>
+  local source_state=$1 destination_state=$2 meta id sidecar suffix
+  local metas=()
+  mkdir -p "$destination_state" || return 1
+  metas=("$source_state"/*.meta)
+  for meta in "${metas[@]}"; do
+    [ -e "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    for suffix in meta status busy-state busy-gen; do
+      sidecar="$source_state/$id.$suffix"
+      [ -e "$sidecar" ] || continue
+      cp -R "$sidecar" "$destination_state/" || return 1
+    done
+  done
+}
+
+freeze_temp_base() {
+  local base=${TMPDIR:-/tmp}
+  while [ "$base" != / ] && [ "${base%/}" != "$base" ]; do base=${base%/}; done
+  printf '%s\n' "$base"
+}
 
 count_meta_entries_at() {  # <state-dir>
   local state_dir=$1 meta count=0
@@ -209,9 +244,34 @@ count_meta_entries_at() {  # <state-dir>
   printf '%s\n' "$count"
 }
 
-if [ "$OUTPUT_MODE" = secondmate-home-count ]; then
-  count_meta_entries_at "$STATE"
+if [ "$OUTPUT_MODE" = secondmate-home-freeze ]; then
+  freeze_base=$(freeze_temp_base)
+  freeze_root=$(mktemp -d "$freeze_base/fm-secondmate-state.XXXXXX") || exit 1
+  if ! freeze_meta_inventory "$STATE" "$freeze_root/state"; then
+    rm -rf -- "$freeze_root"
+    exit 1
+  fi
+  printf '%s\n' "$FM_HOME" > "$freeze_root/home"
+  printf '%s\t%s\n' "$(count_meta_entries_at "$freeze_root/state")" "$freeze_root"
   exit 0
+fi
+
+if [ -n "$FROZEN_STATE_ROOT" ]; then
+  freeze_base=$(freeze_temp_base)
+  case "$FROZEN_STATE_ROOT" in "$freeze_base"/fm-secondmate-state.*) ;; *) echo "fm-fleet-snapshot: invalid frozen state" >&2; exit 2 ;; esac
+  [ "$(dirname "$FROZEN_STATE_ROOT")" = "$freeze_base" ] \
+    && [ -d "$FROZEN_STATE_ROOT" ] && [ ! -L "$FROZEN_STATE_ROOT" ] && [ -O "$FROZEN_STATE_ROOT" ] \
+    && [ -d "$FROZEN_STATE_ROOT/state" ] && [ ! -L "$FROZEN_STATE_ROOT/state" ] \
+    && [ -f "$FROZEN_STATE_ROOT/home" ] && [ ! -L "$FROZEN_STATE_ROOT/home" ] \
+    && [ "$(cat "$FROZEN_STATE_ROOT/home")" = "$FM_HOME" ] \
+    || { echo "fm-fleet-snapshot: invalid frozen state" >&2; exit 2; }
+  STATE="$FROZEN_STATE_ROOT/state"
+  cleanup_frozen_state() { rm -rf -- "$FROZEN_STATE_ROOT"; }
+  frozen_state_signal() { local rc=$1; trap - EXIT HUP INT TERM; cleanup_frozen_state; exit "$rc"; }
+  trap cleanup_frozen_state EXIT
+  trap 'frozen_state_signal 129' HUP
+  trap 'frozen_state_signal 130' INT
+  trap 'frozen_state_signal 143' TERM
 fi
 
 command -v jq >/dev/null 2>&1 || { echo "fm-fleet-snapshot: jq not found" >&2; exit 1; }
@@ -1189,7 +1249,7 @@ secondmate_current_json() {  # <parent-tasks-json-file>
   local tasks_file=$1 registry_file union_file rows_file records_file total_registered total shown truncated
   local row id home host remote registered registry_error task status_file event_raw event_note event_epoch event_age
   local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
-  local record child_count count_out count_rc summary_route summary_timeout seen_homes=''
+  local record child_count freeze_info freeze_path freeze_rc summary_route summary_timeout seen_homes=''
   registry_file="$SNAP_TMP/secondmate-registry.json"
   union_file="$SNAP_TMP/secondmate-union.json"
   rows_file="$SNAP_TMP/secondmate-rows.jsonl"
@@ -1271,20 +1331,30 @@ secondmate_current_json() {  # <parent-tasks-json-file>
     fi
     if [ -z "$reason" ]; then
       if [ "$remote" = true ]; then
-        if count_out=$(fm_run_timed "$FM_SNAPSHOT_REMOTE_PROBE_TIMEOUT" \
-          "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-count < /dev/null 2>/dev/null); then
-          count_rc=0
+        if freeze_info=$(fm_run_timed "$FM_SNAPSHOT_REMOTE_PROBE_TIMEOUT" \
+          "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-freeze < /dev/null 2>/dev/null); then
+          freeze_rc=0
         else
-          count_rc=$?
+          freeze_rc=$?
         fi
-        case "$count_out" in ''|*[!0-9]*) count_rc=1 ;; esac
-        if [ "$count_rc" -ne 0 ]; then
-          reason="structured home child count unavailable"
+        child_count=${freeze_info%%$'\t'*}
+        freeze_path=${freeze_info#*$'\t'}
+        case "$child_count" in ''|*[!0-9]*) freeze_rc=1 ;; esac
+        case "$freeze_path" in /*) ;; *) freeze_rc=1 ;; esac
+        if [ "$freeze_rc" -ne 0 ]; then
+          reason="structured home inventory unavailable"
         else
-          child_count=$count_out
+          :
         fi
       else
-        child_count=$(count_meta_entries_at "$home/state")
+        freeze_path=$(mktemp -d "$(freeze_temp_base)/fm-secondmate-state.XXXXXX") || freeze_path=
+        if [ -z "$freeze_path" ] || ! freeze_meta_inventory "$home/state" "$freeze_path/state"; then
+          [ -z "$freeze_path" ] || rm -rf -- "$freeze_path"
+          reason="structured home inventory unavailable"
+        else
+          printf '%s\n' "$home" > "$freeze_path/home"
+          child_count=$(count_meta_entries_at "$freeze_path/state")
+        fi
       fi
     fi
     if [ -z "$reason" ]; then
@@ -1292,7 +1362,8 @@ secondmate_current_json() {  # <parent-tasks-json-file>
       summary_timeout=$(secondmate_summary_timeout "$child_count" "$summary_route")
       if [ "$remote" = true ]; then
         summary=$(fm_run_timed "$summary_timeout" \
-          "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-summary < /dev/null 2>/dev/null)
+          "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-summary \
+          --frozen-state "$freeze_path" < /dev/null 2>/dev/null)
         summary_rc=$?
       else
         summary=$(fm_run_timed "$summary_timeout" env \
@@ -1308,8 +1379,10 @@ secondmate_current_json() {  # <parent-tasks-json-file>
           FM_SNAPSHOT_SECONDMATE_QUEUED="$FM_SNAPSHOT_SECONDMATE_QUEUED" \
           FM_SNAPSHOT_SECONDMATE_DECISIONS="$FM_SNAPSHOT_SECONDMATE_DECISIONS" \
           FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME="$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
-          "$SCRIPT_DIR/fm-fleet-snapshot.sh" --secondmate-home-summary 2>/dev/null)
+          "$SCRIPT_DIR/fm-fleet-snapshot.sh" --secondmate-home-summary \
+          --frozen-state "$freeze_path" 2>/dev/null)
         summary_rc=$?
+        rm -rf -- "$freeze_path"
       fi
       if [ "$summary_rc" -ne 0 ]; then
         [ "$summary_rc" -eq 124 ] && reason="structured home snapshot timed out" || reason="structured home snapshot failed"
@@ -1458,6 +1531,11 @@ elif ! MEASURED_LIVENESS_JSON=$(FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" F
 fi
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
+if [ -n "$FROZEN_STATE_ROOT" ]; then
+  cleanup_frozen_state
+  FROZEN_STATE_ROOT=
+  trap - EXIT HUP INT TERM
+fi
 SNAP_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-snapshot.XXXXXX") || exit 1
 cleanup_snapshot_tmp() { rm -rf -- "$SNAP_TMP"; }
 trap cleanup_snapshot_tmp EXIT HUP INT TERM

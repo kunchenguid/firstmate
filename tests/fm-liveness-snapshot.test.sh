@@ -316,6 +316,85 @@ SH
   pass "stalled remote evidence is bounded, reaped, and reported unverified"
 }
 
+test_external_cancellation_reaps_perl_remote_group() {
+  local dir perl_path snapshot_pid snapshot_rc remote_pid child_pid i real_perl neutralized_path tool tool_path
+  local neutralized_pid neutralized_rc survivor=false
+  dir=$(make_case remote-cancel claude)
+  install_evidence "$dir"
+  install_remote_evidence "$dir"
+  cat >> "$dir/home/state/task.meta" <<EOF
+remote_host=fixture-host
+remote_root=/remote/firstmate
+remote_backend=tmux
+remote_target=remote-session:fm-task
+worktree=remote-worktree
+EOF
+  perl_path="$dir/perl-path"
+  mkdir -p "$perl_path"
+  for tool in bash basename cat cksum cp cut date dirname grep head jq mktemp mv perl rm sed shasum sha256sum sleep sort tail tr uname wc awk; do
+    tool_path=$(command -v "$tool" 2>/dev/null || true)
+    [ -n "$tool_path" ] || continue
+    ln -s "$tool_path" "$perl_path/$tool"
+  done
+  PATH="$perl_path" FM_HOME="$dir/home" \
+    FM_LIVENESS_INTERVAL_MS=100 FM_LIVENESS_NOW=2026-08-03T12:00:00Z \
+    FM_LIVENESS_ENDPOINT_BIN="$dir/bin/endpoint" FM_LIVENESS_CAPTURE_BIN="$dir/bin/capture" \
+    FM_LIVENESS_PROCESS_SNAPSHOT_BIN="$dir/bin/process" FM_LIVENESS_REMOTE_BIN="$dir/bin/remote" \
+    FM_LIVENESS_EVIDENCE_TIMEOUT=1 FM_LIVENESS_REMOTE_OVERHEAD_SECS=1 E_REMOTE=stall \
+    E_DIR="$dir" E_WT="$dir/wt" "$LIVENESS" --json > "$dir/cancel.json" 2>/dev/null &
+  snapshot_pid=$!
+  i=0
+  while [ ! -s "$dir/remote.pid" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+  [ -s "$dir/remote.pid" ] || { kill "$snapshot_pid" 2>/dev/null || true; fail "Perl cancellation fixture did not start remote evidence"; }
+  kill -TERM "$snapshot_pid"
+  wait "$snapshot_pid"
+  snapshot_rc=$?
+  [ "$snapshot_rc" -eq 143 ] || fail "Perl cancellation did not preserve TERM status: $snapshot_rc"
+  while IFS=$(printf '\t') read -r remote_pid child_pid; do
+    i=0
+    while { kill -0 "$remote_pid" 2>/dev/null || kill -0 "$child_pid" 2>/dev/null; } && [ "$i" -lt 40 ]; do
+      sleep 0.05
+      i=$((i + 1))
+    done
+    if kill -0 "$remote_pid" 2>/dev/null || kill -0 "$child_pid" 2>/dev/null; then
+      fail "Perl cancellation left a remote descendant alive: $remote_pid $child_pid"
+    fi
+  done < "$dir/remote.pid"
+
+  real_perl=$(command -v perl)
+  neutralized_path="$dir/neutralized-perl"
+  mkdir -p "$neutralized_path"
+  cat > "$neutralized_path/perl" <<'SH'
+#!/usr/bin/env bash
+shift 2
+seconds=$1
+shift
+exec "${REAL_PERL:?}" -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } alarm $t; waitpid $pid, 0; exit($? >> 8)' "$seconds" "$@"
+SH
+  chmod +x "$neutralized_path/perl"
+  rm -f "$dir/remote.pid"
+  PATH="$neutralized_path:$perl_path" REAL_PERL="$real_perl" \
+    FM_HOME="$dir/home" FM_LIVENESS_INTERVAL_MS=100 FM_LIVENESS_NOW=2026-08-03T12:00:00Z \
+    FM_LIVENESS_ENDPOINT_BIN="$dir/bin/endpoint" FM_LIVENESS_CAPTURE_BIN="$dir/bin/capture" \
+    FM_LIVENESS_PROCESS_SNAPSHOT_BIN="$dir/bin/process" FM_LIVENESS_REMOTE_BIN="$dir/bin/remote" \
+    FM_LIVENESS_EVIDENCE_TIMEOUT=1 FM_LIVENESS_REMOTE_OVERHEAD_SECS=1 E_REMOTE=stall \
+    E_DIR="$dir" E_WT="$dir/wt" "$LIVENESS" --json > "$dir/neutralized.json" 2>/dev/null &
+  neutralized_pid=$!
+  i=0
+  while [ ! -s "$dir/remote.pid" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+  [ -s "$dir/remote.pid" ] || { kill "$neutralized_pid" 2>/dev/null || true; fail "neutralized Perl fixture did not start remote evidence"; }
+  kill -TERM "$neutralized_pid"
+  wait "$neutralized_pid"
+  neutralized_rc=$?
+  [ "$neutralized_rc" -eq 143 ] || fail "neutralized Perl fixture did not receive TERM: $neutralized_rc"
+  while IFS=$(printf '\t') read -r remote_pid child_pid; do
+    if kill -0 "$remote_pid" 2>/dev/null || kill -0 "$child_pid" 2>/dev/null; then survivor=true; fi
+    kill -KILL "$remote_pid" "$child_pid" 2>/dev/null || true
+  done < "$dir/remote.pid"
+  [ "$survivor" = true ] || fail "neutralizing the Perl signal handler left the descendant-reap assertion green"
+  pass "external cancellation reaps the real Perl fallback process group"
+}
+
 test_remote_control_samples_recorded_host_local_target() {
   local dir home json
   dir=$(make_case remote-control claude)
@@ -377,6 +456,7 @@ test_cwd_binding_and_shell_amplifier_refusals
 test_endpoint_three_way_and_output_activity
 test_remote_routes_use_remote_endpoint_evidence
 test_stalled_remote_route_is_bounded_and_reaped
+test_external_cancellation_reaps_perl_remote_group
 test_remote_control_samples_recorded_host_local_target
 test_neutralization_matrix_goes_red
 
