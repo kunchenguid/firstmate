@@ -81,6 +81,7 @@ case "${1:-}" in
     esac
     ;;
   runs)
+    [ "${FM_FAKE_RUNS_RC:-0}" = 0 ] || exit "${FM_FAKE_RUNS_RC}"
     printf '%s\n' "${FM_FAKE_RUNS_LIST:-}" ;;
 esac
 exit 0
@@ -184,12 +185,13 @@ reset_fakes() {
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
   FM_FAKE_NM_RC=0
+  FM_FAKE_RUNS_RC=0
   FM_FAKE_NM_SLEEP=""
   FM_CREW_STATE_DEGRADED_MAX_AGE=""
   FM_CREW_STATE_NM_TIMEOUT=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
-  export FM_FAKE_NM_RC FM_FAKE_NM_SLEEP FM_CREW_STATE_DEGRADED_MAX_AGE FM_CREW_STATE_NM_TIMEOUT
+  export FM_FAKE_NM_RC FM_FAKE_RUNS_RC FM_FAKE_NM_SLEEP FM_CREW_STATE_DEGRADED_MAX_AGE FM_CREW_STATE_NM_TIMEOUT
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -1600,15 +1602,18 @@ test_terminal_unresolvable_head_still_rejected() {
   fm_write_meta "$d/state/termunres.meta" "window=fm:fm-termunres" "worktree=$d/wt" \
     "kind=ship" "harness=claude"
   printf 'working: stage 2 implementation in progress\n' > "$d/state/termunres.status"
+  seed_known_run_step "$d" termunres fm/feat-termunres
   FM_FAKE_RUN_HEAD="$UNRESOLVABLE_HEAD"
   FM_FAKE_AXI_STATUS="$(run_terminal_unresolvable_head fm/feat-termunres)"
-  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_RUNS_RC=124
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" termunres
   out=$(run_crew_state "$d" termunres)
   assert_not_contains "$out" "source: run-step" "a finished run with an unseen head must not attribute"
   assert_contains "$out" "source: status-log" "falls back to the current-state sources"
-  pass "a terminal run with an unresolvable head is still rejected"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working termunres \
+    && fail "a terminal same-branch answer was hidden by a failed historical lookup"
+  pass "a terminal same-branch answer invalidates the record before fallback failure"
 }
 
 # SAFETY: the runs LISTING is a historical log with no notion of "current", so an

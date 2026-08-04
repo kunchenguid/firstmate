@@ -602,10 +602,15 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     LOOKUP_FAILED=1
   else
     run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
-      HAVE_RUN=1
-      LOOKUP_COMPLETED=1
-    else
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ]; then
+      if nm_run_head_matches_worktree; then
+        HAVE_RUN=1
+        LOOKUP_COMPLETED=1
+      else
+        runstep_record_clear
+      fi
+    fi
+    if [ "$HAVE_RUN" = 0 ]; then
       # The active-or-most-recent run is for another branch, or same branch with
       # a rewritten/diverged head (the CLI is alive and answered; only the
       # attribution missed) - try the coarse fallback.
