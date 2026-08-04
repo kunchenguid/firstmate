@@ -155,6 +155,33 @@ FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 FM_GROK_STOP_LIVE_E2E=1 FM_GROK_NATIVE_BIN="$native_grok" FM_GROK_LEGACY_BIN="$pre_native_grok" tests/fm-grok-stop-live-e2e.test.sh
 ```
 
+The Pi direct-report isolation boundary was reverified on 2026-08-04 with Pi 0.83.0.
+The regression pass drives `fm-spawn` launch construction for Pi and pi-signed ship, scout, and secondmate cases, imports the tracked Pi primary extensions from a linked Firstmate worker worktree with a leaked primary root override, and keeps genuine primary controls active.
+
+```sh
+bin/fm-test-run.sh tests/fm-spawn-dispatch-profile.test.sh tests/fm-turnend-guard.test.sh tests/fm-pi-watch-extension.test.sh tests/fm-sessionstart-nudge.test.sh tests/fm-session-start.test.sh tests/fm-supervision-instructions.test.sh
+```
+
+Observed output:
+
+```text
+FM_TEST_SUMMARY total=6 failed=0 skipped_gate=0 duration_ms=109119
+```
+
+The broader relevant spawn and busy-state regression pass also ran in the same Pi worker environment.
+
+```sh
+bin/fm-test-run.sh tests/fm-busy-adapter-wiring.test.sh tests/fm-busy-state.test.sh tests/fm-crew-state.test.sh tests/fm-pi-primary-types.test.sh tests/fm-spawn-batch.test.sh
+```
+
+Observed output:
+
+```text
+FM_TEST_SUMMARY total=5 failed=0 skipped_gate=1 duration_ms=23868
+```
+
+The skipped gate was the optional strict Pi extension typecheck because `tsc` was not installed.
+
 The Claude auto-arm false-failure, guard-predicate, and monotonic bounded fail-open correction was verified on 2026-08-02 with the installed ShellCheck 0.11.0 and isolated behavior suites.
 
 ```sh
@@ -240,6 +267,8 @@ tests/fm-subagent-pretool-check.test.sh
 tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
 ```
+
+The 2026-08-04 Pi direct-report isolation pass above also covers the watcher extension's direct-report no-op and the pi-signed launch-control path.
 
 ## Wedge-alarm channels
 

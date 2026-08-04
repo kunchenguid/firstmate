@@ -20,4 +20,5 @@ When this session owns supervision and away mode is not active:
 
 The turn-end guard extension lives at `__FM_PI_TURNEND_EXT__`.
 The watcher extension lives at `__FM_PI_EXT__`.
-Both are tracked, project-local `.pi/extensions/*.ts` files that Pi auto-discovers once the project is trusted; `bin/fm-session-start.sh` reports when the running Pi session has not loaded both required extensions.
+Both are tracked, project-local `.pi/extensions/*.ts` files that Pi auto-discovers once the primary project is trusted; `bin/fm-session-start.sh` reports when the running Pi primary session has not loaded both required extensions.
+The ship/scout direct-report no-op boundary is owned by [`turnend-guard.md`](../turnend-guard.md#shared-predicate).

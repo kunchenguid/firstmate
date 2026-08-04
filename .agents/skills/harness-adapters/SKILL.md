@@ -282,6 +282,7 @@ Firstmate launches the selected executable name from `PATH`, records `pi-signed`
 The observed signed process tree is an exact `pi-signed` wrapper parent with the Pi application as its child, while tmux reports the foreground command as the exact `pi-launcher` name for both selected executables.
 The installed plain `pi` command also execs that signed launcher, so `FM_PI_HARNESS=pi-signed` is the authoritative selection marker and shared unmarked ancestry remains `pi`.
 Firstmate sets `FM_PI_HARNESS` explicitly for both worker launch identities, and a signed primary uses the README launch command to establish the same boundary.
+`fm-spawn` also marks Pi-family ship and scout direct-report launches before Pi starts; [`turnend-guard.md`](../../../docs/turnend-guard.md#shared-predicate) owns that primary-extension no-op boundary.
 Keep the brief as one positional argument.
 Multiple positional args become separate queued messages; `fm-spawn`'s template already does this correctly.
 

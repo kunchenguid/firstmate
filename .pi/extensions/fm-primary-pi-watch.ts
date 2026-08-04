@@ -46,6 +46,8 @@ type WatchToolRenderContext = {
   isPartial: boolean;
 };
 
+type FirstmateDirectReportKind = "ship" | "scout";
+
 type SessionGeneration = {
   id: number;
   stopping: boolean;
@@ -55,6 +57,15 @@ type SessionGeneration = {
   restoring: boolean;
   seq: number;
 };
+
+function firstmateDirectReportKind(): FirstmateDirectReportKind | "" {
+  const value = process.env.FM_FIRSTMATE_PI_DIRECT_REPORT_KIND;
+  return value === "ship" || value === "scout" ? value : "";
+}
+
+function shouldRunPrimaryPiExtension(): boolean {
+  return firstmateDirectReportKind() === "";
+}
 
 function refreshWatchToolShell(
   state: WatchToolShellState,
@@ -101,6 +112,7 @@ const shuttingDownMessage = "watcher: not armed - Pi session is shutting down";
 
 let nextGenerationId = 0;
 let activeGeneration: SessionGeneration | null = null;
+let processExitCleanupInstalled = false;
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 
@@ -215,9 +227,18 @@ function stopGeneration(generation: SessionGeneration): void {
 const cleanupOnProcessExit = () => {
   if (activeGeneration) stopGeneration(activeGeneration);
 };
-process.once("exit", cleanupOnProcessExit);
+
+function ensureProcessExitCleanup(): void {
+  if (processExitCleanupInstalled) return;
+  process.once("exit", cleanupOnProcessExit);
+  processExitCleanupInstalled = true;
+}
 
 export default function (pi: ExtensionAPI) {
+  if (!shouldRunPrimaryPiExtension()) return;
+
+  ensureProcessExitCleanup();
+
   let generation = createGeneration();
   activateGeneration(generation);
 

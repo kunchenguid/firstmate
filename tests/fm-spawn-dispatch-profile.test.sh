@@ -12,6 +12,7 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
+export FM_BACKEND=tmux
 
 make_spawn_fakebin() {
   local dir=$1 fakebin
@@ -91,7 +92,7 @@ run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_BACKEND=tmux FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
@@ -500,8 +501,8 @@ test_pi_threads_model_and_max_effort() {
   expect_code 0 "$status" "pi spawn with max effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi pi --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
-    "pi launch did not thread the requested model and max thinking level"
+  assert_contains "$launch" "FM_FIRSTMATE_PI_DIRECT_REPORT_KIND=ship FM_PI_HARNESS=pi pi --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
+    "pi launch did not thread the direct-report marker, requested model, and max thinking level"
   assert_not_contains "$launch" "FM_FIRSTMATE_PI_LAUNCH_BRIEF=" \
     "pi launch still exports the removed Calm input-reroute binding"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
@@ -522,8 +523,8 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   assert_contains "$out" "spawned $id harness=pi-signed" "pi-signed spawn did not preserve its visible identity"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed openai-codex/gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi-signed pi-signed --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
-    "pi-signed launch did not share Pi's model, thinking, and extension semantics"
+  assert_contains "$launch" "FM_FIRSTMATE_PI_DIRECT_REPORT_KIND=ship FM_PI_HARNESS=pi-signed pi-signed --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
+    "pi-signed launch did not share Pi's direct-report marker, model, thinking, and extension semantics"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
     "pi-signed launch lost the canonical typed launch-brief envelope"
   assert_present "$HOME_DIR/state/$id.pi-ext.ts" "pi-signed launch did not install Pi's turn-end extension"
@@ -540,6 +541,43 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   assert_contains "$ext" '"--source", "pi-ext"' "pi extension does not attribute its semantic source"
   assert_contains "$ext" 'pi.on("turn_end"' "pi extension lost the turn-end notification touch"
   pass "pi-signed shares Pi launch semantics while preserving its configured and recorded identity"
+}
+
+test_pi_scout_launch_marks_direct_report_context() {
+  local rec id out status launch
+  id=profile-pi-scout-z8a
+  rec=$(make_spawn_case profile-pi-scout pi "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "pi scout spawn should succeed"
+  assert_contains "$out" "spawned $id harness=pi kind=scout" "pi scout spawn did not report scout kind"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi default default
+  assert_grep "kind=scout" "$HOME_DIR/state/$id.meta" "pi scout meta missing kind=scout"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "FM_FIRSTMATE_PI_DIRECT_REPORT_KIND=scout FM_PI_HARNESS=pi pi -e" \
+    "pi scout launch did not carry the scout direct-report marker"
+  pass "pi scout launches carry the same positive direct-report marker as Pi workers"
+}
+
+test_pi_signed_scout_launch_marks_direct_report_context() {
+  local rec id out status launch
+  id=profile-pi-signed-scout-z8a
+  rec=$(make_spawn_case profile-pi-signed-scout pi-signed "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "pi-signed scout spawn should succeed"
+  assert_contains "$out" "spawned $id harness=pi-signed kind=scout" \
+    "pi-signed scout spawn did not preserve its visible identity"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed default default
+  assert_grep "kind=scout" "$HOME_DIR/state/$id.meta" "pi-signed scout meta missing kind=scout"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "FM_FIRSTMATE_PI_DIRECT_REPORT_KIND=scout FM_PI_HARNESS=pi-signed pi-signed -e" \
+    "pi-signed scout launch did not carry the scout direct-report marker"
+  pass "pi-signed scout launches carry the same positive direct-report marker as Pi workers"
 }
 
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata() {
@@ -565,6 +603,30 @@ test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata() {
   pass "pi-signed refuses safely and actionably when the selected executable is unavailable"
 }
 
+test_pi_persistent_secondmate_uses_primary_extensions_without_direct_report_marker() {
+  local rec id sm out status launch
+  id=profile-pi-secondmate-z8d1
+  rec=$(make_spawn_case profile-pi-secondmate codex "$id")
+  read_case_record "$rec"
+  printf '%s\n' pi > "$HOME_DIR/config/secondmate-harness"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "pi persistent secondmate spawn should succeed"
+  assert_contains "$out" "spawned $id harness=pi kind=secondmate" \
+    "pi secondmate spawn did not preserve its runtime identity"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi default default
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "FM_PI_HARNESS=pi pi -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
+    "pi secondmate did not use Pi's primary extension launch shape"
+  assert_not_contains "$launch" "FM_FIRSTMATE_PI_DIRECT_REPORT_KIND=" \
+    "pi secondmate primary must not carry the worker/scout no-op marker"
+  pass "pi persistent secondmate launches keep primary Pi extensions active without the direct-report marker"
+}
+
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   local rec id sm out status launch
   id=profile-pi-signed-secondmate-z8d
@@ -584,6 +646,8 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "FM_PI_HARNESS=pi-signed pi-signed -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
     "pi-signed secondmate did not share Pi's primary extension launch shape"
+  assert_not_contains "$launch" "FM_FIRSTMATE_PI_DIRECT_REPORT_KIND=" \
+    "pi-signed secondmate primary must not carry the worker/scout no-op marker"
   pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
 }
 
@@ -692,7 +756,10 @@ test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
+test_pi_scout_launch_marks_direct_report_context
+test_pi_signed_scout_launch_marks_direct_report_context
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
+test_pi_persistent_secondmate_uses_primary_extensions_without_direct_report_marker
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set

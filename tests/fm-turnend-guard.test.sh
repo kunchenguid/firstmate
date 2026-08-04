@@ -17,6 +17,7 @@ set -u
 . "$ROOT/bin/fm-supervision-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
+unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE
 fm_git_identity fmtest fmtest@example.invalid
 
 REQUIRED_REASON='watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn'
@@ -904,6 +905,59 @@ EOF
   pass ".opencode primary plugin: guard path is anchored to worktree, not directory"
 }
 
+test_pi_extension_noops_for_firstmate_direct_report() {
+  local base worker home ext log out status
+  base="$TMP_ROOT/pi-direct-report-guard-base"
+  worker="$TMP_ROOT/pi-direct-report-guard-worker"
+  home="$TMP_ROOT/pi-direct-report-guard-home"
+  ext="$worker/.pi/extensions/fm-primary-turnend-guard.ts"
+  log="$TMP_ROOT/pi-direct-report-guard.log"
+  fm_git_worktree "$base" "$worker" fm/pi-direct-report-guard-worker
+  mkdir -p "$worker/.pi/extensions/lib" "$worker/bin" "$home/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$worker/.pi/extensions/lib/fm-operational-input.ts"
+  cat > "$worker/bin/fm-sessionstart-nudge.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'session-start\n' >> "${FM_DIRECT_REPORT_LOG:?}"
+printf 'unexpected session-start nudge\n'
+SH
+  cat > "$worker/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'turn-end\n' >> "${FM_DIRECT_REPORT_LOG:?}"
+printf 'unexpected guard\n' >&2
+exit 2
+SH
+  chmod +x "$worker/bin/fm-sessionstart-nudge.sh" "$worker/bin/fm-turnend-guard.sh"
+  out=$(PLUGIN="$ext" FM_HOME="$home" FM_ROOT_OVERRIDE="$base" FM_DIRECT_REPORT_LOG="$log" FM_FIRSTMATE_PI_DIRECT_REPORT_KIND=ship node --input-type=module 2>&1 <<'EOF'
+import { existsSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  sendMessage() {
+    throw new Error("direct report received a session-start nudge");
+  },
+  sendUserMessage() {
+    throw new Error("direct report received a turn-end follow-up");
+  },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+if (handlers.size !== 0) throw new Error(`direct report registered primary handlers: ${[...handlers.keys()].join(",")}`);
+if (existsSync(process.env.FM_DIRECT_REPORT_LOG)) throw new Error("direct report ran a primary script");
+if (existsSync(`${process.env.FM_HOME}/state/.pi-turnend-extension-loaded`)) throw new Error("direct report wrote primary turn-end marker");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi turn-end extension must no-op in a positively marked Firstmate worker"
+  [ -z "$out" ] || fail "Pi direct-report turn-end no-op test printed output: $out"
+  pass ".pi primary extension: positively marked Firstmate worker loads no primary lifecycle hooks"
+}
+
 test_pi_extension_injects_once_per_logical_agent_run() {
   local repo home ext log out status
   repo="$TMP_ROOT/pi-logical-run-root"
@@ -1578,6 +1632,7 @@ test_grok_adapter_missing_jq_and_no_supervision_allow
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
+test_pi_extension_noops_for_firstmate_direct_report
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy

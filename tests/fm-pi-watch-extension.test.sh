@@ -6,6 +6,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-pi-watch-extension)
+unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE
 EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 # Node 24 warns when these test-only dynamic imports load tracked ESM plugins
 # from a clean checkout with no tracked .opencode/package.json. The warning is
@@ -57,6 +58,50 @@ export const Type = {
   },
 };
 JS
+}
+
+test_pi_watch_extension_noops_for_firstmate_direct_report() {
+  local base worker home plugin out status
+  base="$TMP_ROOT/pi-direct-report-base"
+  worker="$TMP_ROOT/pi-direct-report-worker"
+  home="$TMP_ROOT/pi-direct-report-home"
+  fm_git_worktree "$base" "$worker" fm/pi-direct-report-worker
+  mkdir -p "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$worker"
+  plugin="$worker/.pi/extensions/fm-primary-pi-watch.ts"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$base" FM_FIRSTMATE_PI_DIRECT_REPORT_KIND=ship node --input-type=module 2>&1 <<'EOF'
+import { existsSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = [];
+let commands = 0;
+let tools = 0;
+const beforeExitListeners = process.listenerCount("exit");
+const pi = {
+  on(event) {
+    handlers.push(event);
+  },
+  registerCommand() {
+    commands += 1;
+  },
+  registerTool() {
+    tools += 1;
+  },
+  sendUserMessage: async () => {},
+  events: { on() {} },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+if (handlers.length !== 0) throw new Error(`direct report registered handlers: ${handlers.join(",")}`);
+if (commands !== 0 || tools !== 0) throw new Error(`direct report registered command/tool hooks: ${commands}/${tools}`);
+if (process.listenerCount("exit") !== beforeExitListeners) throw new Error("direct report installed process-exit watcher cleanup");
+if (existsSync(`${process.env.FM_HOME}/state/.pi-watch-extension-loaded`)) throw new Error("direct report wrote primary watch marker");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi watch extension must no-op in a positively marked Firstmate worker"
+  [ -z "$out" ] || fail "Pi direct-report watch no-op test printed output: $out"
+  pass "Pi watch extension no-ops inside a positively marked Firstmate worker worktree"
 }
 
 test_pi_extension_reports_external_healthy_watcher() {
@@ -2124,6 +2169,7 @@ EOF
   pass "OpenCode healthy arm output does not suppress the turn-end guard"
 }
 
+test_pi_watch_extension_noops_for_firstmate_direct_report
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
