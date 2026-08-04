@@ -21,6 +21,13 @@ fm_git_identity fmtest fmtest@example.invalid
 
 REQUIRED_REASON='watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn'
 
+register_custom_check() {
+  local state=$1 id=$2
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$state/$id.check.sh"
+  chmod 0700 "$state/$id.check.sh"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" "$id" >/dev/null
+}
+
 # --- PREDICATE: bin/fm-supervision-lib.sh -----------------------------------
 
 test_predicate_healthy_no_inflight() {
@@ -98,6 +105,33 @@ test_predicate_source_needs_supervision() {
   pass "fm_supervision_unhealthy: source-only home needs supervision"
 }
 
+test_predicate_registered_custom_check_needs_supervision() {
+  local state="$TMP_ROOT/pred-custom-check/state"
+  mkdir -p "$state"
+  register_custom_check "$state" currency-tick
+  fm_supervision_unhealthy "$state" 300 || fail "registered custom check with no beacon must be unhealthy"
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "a registered custom check must not count as a task"
+  [ "$FM_SUP_CHECKS" -eq 1 ] || fail "expected one registered custom check, got $FM_SUP_CHECKS"
+  pass "fm_supervision_unhealthy: custom-check-only home needs supervision"
+}
+
+test_predicate_rejects_unregistered_or_changed_custom_check() {
+  local state="$TMP_ROOT/pred-untrusted-check/state"
+  mkdir -p "$state"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$state/untrusted.check.sh"
+  chmod 0700 "$state/untrusted.check.sh"
+  if fm_supervision_needed "$state" 300; then
+    fail "unregistered custom check created supervision need"
+  fi
+  register_custom_check "$state" changed
+  printf '%s\n' '# changed after registration' >> "$state/changed.check.sh"
+  if fm_supervision_needed "$state" 300; then
+    fail "custom check whose bytes no longer match its trust binding created supervision need"
+  fi
+  [ "$FM_SUP_CHECKS" -eq 0 ] || fail "invalid custom checks must not contribute to FM_SUP_CHECKS"
+  pass "fm_supervision_needed: only currently authenticated custom checks count"
+}
+
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
 #
 # Each scenario gets its own directory carrying a copy of the two guard scripts
@@ -114,6 +148,8 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
+  cp "$ROOT/bin/fm-pr-lib.sh" "$dir/bin/fm-pr-lib.sh"
+  cp "$ROOT/bin/fm-check-lib.sh" "$dir/bin/fm-check-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
@@ -247,6 +283,16 @@ test_hook_blocks_source_only_home() {
   expect_code 2 "$status" "non-Claude hook must block when a source-only home has no watcher"
   assert_contains "$out" "1 process-event source(s) registered" "block reason must identify the source-only supervision need"
   pass "fm-turnend-guard: non-Claude path blocks a source-only home"
+}
+
+test_hook_blocks_custom_check_only_home() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-custom-check-only")
+  register_custom_check "$dir/state" currency-tick
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "non-Claude hook must block when a custom-check-only home has no watcher"
+  assert_contains "$out" "1 registered custom check(s)" "block reason must identify the custom-check-only supervision need"
+  pass "fm-turnend-guard: non-Claude path blocks a custom-check-only home"
 }
 
 test_hook_blocks_when_dead_lock_has_fresh_beacon() {
@@ -1056,6 +1102,8 @@ install_integrated_autoarm() {
   cp "$ROOT/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-claude-stop-autoarm.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
+  cp "$ROOT/bin/fm-pr-lib.sh" "$dir/bin/fm-pr-lib.sh"
+  cp "$ROOT/bin/fm-check-lib.sh" "$dir/bin/fm-check-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
@@ -1542,9 +1590,12 @@ test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
 test_predicate_x_mode_needs_supervision
 test_predicate_source_needs_supervision
+test_predicate_registered_custom_check_needs_supervision
+test_predicate_rejects_unregistered_or_changed_custom_check
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home
+test_hook_blocks_custom_check_only_home
 test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_non_claude_health_ignores_claude_budget_contention

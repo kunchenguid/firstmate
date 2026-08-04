@@ -145,10 +145,11 @@ if [ -n "$tangle_branch" ]; then
 fi
 
 # Compute supervision need and watcher-beacon freshness via the shared
-# grace-based predicate (bin/fm-supervision-lib.sh). Act when work, an event
-# source, or an X-mode relay poll needs supervision.
+# grace-based predicate (bin/fm-supervision-lib.sh). Act when work, a registered
+# custom check, an event source, or an X-mode relay poll needs supervision.
 fm_supervision_status "$STATE" "$GRACE"
 in_flight=$FM_SUP_IN_FLIGHT
+checks=$FM_SUP_CHECKS
 sources=$FM_SUP_SOURCES
 needed=$FM_SUP_NEEDED
 beacon_desc=$FM_SUP_BEACON_DESC
@@ -165,9 +166,10 @@ fi
 
 [ -s "$FM_WAKE_QUEUE" ] && queue_pending=true
 
-# No fresh watcher with tasks in flight is the dangerous state: emit a prominent,
-# bordered banner FIRST so it reads as an alarm, not a buried stderr line. Later
-# calls in the same episode get a one-line reminder only.
+# No fresh watcher while the shared predicate reports supervision need is the
+# dangerous state: emit a prominent, bordered banner FIRST so it reads as an
+# alarm, not a buried stderr line. Later calls in the same episode get a one-line
+# reminder only.
 if [ "$watcher_healthy" = false ]; then
   episode_key=$(fm_guard_stale_episode_key "$watcher_down_reason")
   episode_key=${episode_key%$'\n'}
@@ -201,6 +203,8 @@ if [ "$watcher_healthy" = false ]; then
       fi
       if [ "$in_flight" -gt 0 ]; then
         printf '●  %s task(s) in flight, but %s.\n' "$in_flight" "$watcher_cause"
+      elif [ "$checks" -gt 0 ]; then
+        printf '●  %s registered custom check(s), but %s.\n' "$checks" "$watcher_cause"
       elif [ "$sources" -gt 0 ]; then
         printf '●  %s process-event source(s) registered, but %s.\n' "$sources" "$watcher_cause"
       else

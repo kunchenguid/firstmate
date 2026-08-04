@@ -159,13 +159,15 @@ block_stop() {
   x_mode=0
   [ -f "$CONFIG/x-mode.env" ] && x_mode=1
   reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
-    || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
+    || printf '%s\n' 'supervision needed, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
   rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '●%s\n' "$rule"
     printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n'
     if [ "$FM_SUP_IN_FLIGHT" -gt 0 ]; then
       printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_IN_FLIGHT" "$FM_SUP_BEACON_DESC"
+    elif [ "$FM_SUP_CHECKS" -gt 0 ]; then
+      printf '●  %s registered custom check(s), but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_CHECKS" "$FM_SUP_BEACON_DESC"
     elif [ "$FM_SUP_SOURCES" -gt 0 ]; then
       printf '●  %s process-event source(s) registered, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_SOURCES" "$FM_SUP_BEACON_DESC"
     else
@@ -364,6 +366,8 @@ terminal_status=$?
 if [ "$terminal_status" -eq 0 ]; then
   if [ "$FM_SUP_IN_FLIGHT" -gt 0 ]; then
     NEED_DESC="$FM_SUP_IN_FLIGHT task(s) in flight"
+  elif [ "$FM_SUP_CHECKS" -gt 0 ]; then
+    NEED_DESC="$FM_SUP_CHECKS registered custom check(s)"
   elif [ "$FM_SUP_SOURCES" -gt 0 ]; then
     NEED_DESC="$FM_SUP_SOURCES process-event source(s) registered"
   else

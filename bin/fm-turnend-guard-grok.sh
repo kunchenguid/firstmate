@@ -73,7 +73,7 @@ RC=$?
 [ "$RC" -eq 2 ] || exit 0
 
 REASON=$(cat "$ERR" 2>/dev/null || true)
-[ -n "$REASON" ] || REASON='tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn'
+[ -n "$REASON" ] || REASON='supervision needed, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn'
 # shellcheck source=bin/fm-operational-input.sh
 . "$ROOT/bin/fm-operational-input.sh"
 fm_operational_input_encode turn-end-guard \

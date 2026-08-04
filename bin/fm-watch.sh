@@ -774,7 +774,8 @@ while :; do
   fi
 
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
-  # alive. Supervision scripts warn when this goes stale with tasks in flight.
+  # alive. Supervision scripts warn when this goes stale with any supervision
+  # need, including a registered custom check in a task-free home.
   touch "$STATE/.last-watcher-beat"
 
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated

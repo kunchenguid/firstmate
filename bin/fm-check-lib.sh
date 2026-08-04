@@ -2,6 +2,7 @@
 
 FM_CUSTOM_CHECK_HASH=
 FM_CUSTOM_CHECK_SNAPSHOT=
+FM_CUSTOM_CHECK_REGISTERED_COUNT=0
 
 fm_custom_check_sha256() {
   local file=$1
@@ -43,6 +44,21 @@ fm_custom_check_registered() {
   fm_pr_private_file_valid "$check" 700 "$state_device" || return 1
   hash=$(fm_custom_check_sha256 "$check") || return 1
   [ "$hash" = "$FM_CUSTOM_CHECK_HASH" ]
+}
+
+# Count only custom checks whose current bytes match a valid private trust
+# binding.
+# Unregistered checks, invalid trust records, PR polls, and the separately
+# authenticated X-mode shim do not contribute.
+fm_custom_check_registered_count() {
+  local state=$1 check id
+  FM_CUSTOM_CHECK_REGISTERED_COUNT=0
+  for check in "$state"/*.check.sh; do
+    [ -e "$check" ] || continue
+    id=$(basename "$check" .check.sh)
+    fm_custom_check_registered "$state" "$id" || continue
+    FM_CUSTOM_CHECK_REGISTERED_COUNT=$((FM_CUSTOM_CHECK_REGISTERED_COUNT + 1))
+  done
 }
 
 fm_custom_check_snapshot_prepare() {

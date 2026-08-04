@@ -339,6 +339,21 @@ tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
 ```
 
+The registered-custom-check-only boundary was empirically verified on 2026-08-04 with GNU Bash 5.2.21 against the real Stop auto-arm, arm wrapper, watcher, registration helper, and custom-check execution path in isolated throwaway homes.
+The positive home had zero `state/*.meta` files and one valid private custom-check trust binding; its arm lifecycle recorded `origin=started` and `reason=actionable-check`, the check executed once, and the Stop auto-arm recorded a rewake.
+The negative home had zero task metadata and zero registered checks; the auto-arm returned silently without a watcher lock or beacon.
+
+```sh
+bin/fm-test-run.sh tests/fm-claude-stop-autoarm.test.sh
+```
+
+Observed bounded output:
+
+```text
+ok - auto-arm e2e: zero tasks plus one registered check starts the real watcher and fires; zero checks stays inert
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=60671
+```
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.

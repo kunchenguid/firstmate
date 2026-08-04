@@ -22,6 +22,13 @@ ln -s /bin/bash "$FAKEBIN/claude"
 FAKE_CLAUDE="$FAKEBIN/claude"
 export FAKE_CLAUDE
 
+register_custom_check() {
+  local state=$1 id=$2
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$state/$id.check.sh"
+  chmod 0700 "$state/$id.check.sh"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" "$id" >/dev/null
+}
+
 # Copy the hook and its sourced dependencies into a fixture checkout.
 install_autoarm_scripts() {
   local dir=$1
@@ -29,6 +36,8 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-claude-stop-autoarm.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
+  cp "$ROOT/bin/fm-pr-lib.sh" "$dir/bin/fm-pr-lib.sh"
+  cp "$ROOT/bin/fm-check-lib.sh" "$dir/bin/fm-check-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
@@ -42,6 +51,17 @@ make_primary_dir() {
   git -C "$dir" commit -q --allow-empty -m init
   : > "$dir/AGENTS.md"
   install_autoarm_scripts "$dir"
+  printf '%s\n' "$dir"
+}
+
+make_real_watcher_primary_dir() {
+  local dir=$1
+  mkdir -p "$dir/state"
+  git init -q "$dir"
+  git -C "$dir" commit -q --allow-empty -m init
+  : > "$dir/AGENTS.md"
+  cp -R "$ROOT/bin" "$dir/bin"
+  ln -s /bin/bash "$dir/fake-claude"
   printf '%s\n' "$dir"
 }
 
@@ -319,11 +339,11 @@ test_inert_when_fleet_idle() {
   : > "$dir/state/.claude-autoarm-failure-alarmed"
   write_arm_fixture "$dir" actionable
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
-  expect_code 0 "$status" "hook must exit 0 in an idle home with no X-mode poll"
+  expect_code 0 "$status" "hook must exit 0 in an idle home with no registered checks or X-mode poll"
   [ ! -e "$dir/state/arm-ran" ] || fail "hook armed an idle home"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "idle state without positive recovery reset the failure notice"
   assert_present "$dir/state/.claude-autoarm-failure-alarmed" "idle state without positive recovery reset the attended alarm"
-  pass "auto-arm: inert with nothing in flight and no X-mode need"
+  pass "auto-arm: inert with no task, registered-check, or X-mode need"
 }
 
 # --- the armed cycle ----------------------------------------------------------
@@ -509,6 +529,47 @@ test_arms_for_x_mode_poll_need_without_inflight() {
   pass "auto-arm: X-mode poll need arms the cycle even with no tasks in flight"
 }
 
+test_arms_for_registered_custom_check_without_inflight() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/custom-check-need")
+  register_custom_check "$dir/state" currency-tick
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a registered custom check must keep the auto-arm active with zero tasks in flight"
+  [ -e "$dir/state/arm-ran" ] || fail "hook did not arm for the registered custom check"
+  pass "auto-arm: registered custom check arms the cycle even with no tasks in flight"
+}
+
+test_real_check_only_home_starts_watcher_and_fires() {
+  local dir empty out status cycle empty_out empty_status
+  dir=$(make_real_watcher_primary_dir "$TMP_ROOT/real-custom-check-need")
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'printf "fired\\n" >> "$FM_HOME/state/check-fired"' \
+    'sleep 1' \
+    'printf "org-currency-current\\n"' > "$dir/state/org-currency.check.sh"
+  chmod 0700 "$dir/state/org-currency.check.sh"
+  FM_HOME="$dir" "$dir/bin/fm-check-register.sh" org-currency >/dev/null
+  out=$(FM_CHECK_INTERVAL=0 FM_POLL=0.1 FM_SIGNAL_GRACE=0 FM_ARM_CONFIRM_TIMEOUT=5 run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "the real watcher must surface a registered check in a zero-task home"
+  cycle=$(tail -n 1 "$dir/state/.watch-cycle-exits.log")
+  assert_contains "$cycle" "origin=started" "the real arm did not start a watcher"
+  assert_contains "$cycle" "reason=actionable-check" "the real watcher did not classify the check result"
+  [ "$(find "$dir/state" -maxdepth 1 -name '*.meta' -type f | wc -l | tr -d ' ')" -eq 0 ] \
+    || fail "the real custom-check proof unexpectedly had task metadata"
+  [ "$(wc -l < "$dir/state/check-fired" | tr -d ' ')" -eq 1 ] \
+    || fail "the registered custom check did not execute exactly once"
+  assert_contains "$out" "org-currency-current" "the real auto-arm did not translate the custom-check wake"
+
+  empty=$(make_real_watcher_primary_dir "$TMP_ROOT/real-empty-need")
+  empty_out=$(FM_CHECK_INTERVAL=0 FM_POLL=0.1 FM_SIGNAL_GRACE=0 FM_ARM_CONFIRM_TIMEOUT=5 run_autoarm "$empty" 2>/dev/null); empty_status=$?
+  expect_code 0 "$empty_status" "a real zero-task zero-check home must remain inert"
+  [ -z "$empty_out" ] || fail "the real empty-home negative control produced output: $empty_out"
+  assert_absent "$empty/state/.watch.lock" "the real empty-home negative control started a watcher"
+  assert_absent "$empty/state/.last-watcher-beat" "the real empty-home negative control produced a watcher beacon"
+  pass "auto-arm e2e: zero tasks plus one registered check starts the real watcher and fires; zero checks stays inert"
+}
+
 test_single_flight_admits_exactly_one_owner() {
   local dir rc1 rc2 count
   dir=$(make_primary_dir "$TMP_ROOT/single-flight")
@@ -592,6 +653,8 @@ test_post_alarm_actionable_close_is_suppressed
 test_benign_cycle_end_with_live_watcher_is_silent
 test_positive_recovery_budget_contention_preserves_episode
 test_arms_for_x_mode_poll_need_without_inflight
+test_arms_for_registered_custom_check_without_inflight
+test_real_check_only_home_starts_watcher_and_fires
 test_single_flight_admits_exactly_one_owner
 test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
