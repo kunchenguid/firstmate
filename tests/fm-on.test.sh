@@ -11,7 +11,7 @@ TMP_ROOT=$(fm_test_tmproot fm-on)
 # and physicalize macOS's /var -> /private/var alias before transport validation.
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
-trap 'rm -rf -- "$TMP_ROOT"' EXIT
+trap 'if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then kill "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
 LOCAL_HOME="$TMP_ROOT/local-home"
 REMOTE_ROOT="$TMP_ROOT/remote-root"
 REMOTE_HOME="$TMP_ROOT/remote-home"
@@ -20,7 +20,8 @@ SSH_LOG="$TMP_ROOT/ssh.log"
 SSH_COUNT="$TMP_ROOT/ssh.count"
 mkdir -p "$LOCAL_HOME/data" "$REMOTE_ROOT/bin" "$REMOTE_HOME"
 printf 'fixture\n' > "$REMOTE_ROOT/AGENTS.md"
-cp "$ROOT/bin/fm-remote-entrypoint.sh" "$REMOTE_ROOT/bin/fm-remote-entrypoint.sh"
+cp "$ROOT/bin/fm-remote-entrypoint.sh" "$ROOT/bin/fm-remote-job-lib.sh" \
+  "$ROOT/bin/fm-remote-job-worker.sh" "$REMOTE_ROOT/bin/"
 
 cat > "$REMOTE_ROOT/bin/fm-probe-one.sh" <<'SH'
 #!/usr/bin/env bash
@@ -36,14 +37,17 @@ exit "$rc"
 SH
 cat > "$REMOTE_ROOT/bin/fm-probe-two.sh" <<'SH'
 #!/usr/bin/env bash
-printf 'home=%s\nroot=%s\n' "$FM_HOME" "$FM_ROOT_OVERRIDE"
+printf 'home=%s\nroot=%s\nworker=%s\n' "$FM_HOME" "$FM_ROOT_OVERRIDE" "${FM_REMOTE_JOB_ACTIVE:-}"
 if [ -n "${TOP_SECRET:-}" ]; then printf 'secret=leaked\n'; else printf 'secret=absent\n'; fi
 SH
 cat > "$REMOTE_ROOT/bin/fm-probe-path.sh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$PATH"
 SH
-cp "$ROOT/bin/fm-remote-doctor.sh" "$REMOTE_ROOT/bin/fm-remote-doctor.sh"
+cp "$ROOT/bin/fm-remote-doctor.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" \
+  "$ROOT/bin/fm-backend.sh" "$REMOTE_ROOT/bin/"
+mkdir -p "$REMOTE_ROOT/bin/backends"
+cp "$ROOT/bin/backends/herdr.sh" "$REMOTE_ROOT/bin/backends/herdr.sh"
 cat > "$REMOTE_ROOT/bin/fm-mutate.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'mutation\n' >> "$1"
@@ -97,6 +101,8 @@ fm_on() {
   FM_FAKE_SSH_COUNT="$SSH_COUNT" \
   FM_FAKE_SSH_LOG="$SSH_LOG" \
   FM_FAKE_REMOTE_ENTRYPOINT="$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+  FM_REMOTE_JOB_STATE_ROOT="$TMP_ROOT/remote-jobs" \
   "$ROOT/bin/fm-on.sh" "$@"
 }
 
@@ -128,7 +134,8 @@ out=$(TOP_SECRET='must-not-cross' fm_on remote-mac fm-probe-two.sh)
 assert_contains "$out" "home=$REMOTE_HOME" "remote FM_HOME was not explicit"
 assert_contains "$out" "root=$REMOTE_ROOT" "remote root was not explicit"
 assert_contains "$out" 'secret=absent' "the primary ambient environment crossed the transport"
-pass "the fixed entrypoint sets only its explicit environment"
+assert_contains "$out" 'worker=1' "the fixed entrypoint executed outside the remote job worker"
+pass "the fixed entrypoint runs every command in the worker's explicit environment"
 
 # The child PATH is the entrypoint's own composition, so it is asserted on the
 # PATH a real child receives rather than on the script that builds it. The
@@ -137,6 +144,15 @@ pass "the fixed entrypoint sets only its explicit environment"
 # with nix, homebrew, or neither exercises both the include and omit directions.
 ACCOUNT_HOME=$(unset HOME; CDPATH='' cd ~ && pwd -P)
 ACCOUNT_USER=$(id -un)
+MANAGER_DIRS=(
+  "$ACCOUNT_HOME"/.nvm/versions/node/*/bin
+  "$ACCOUNT_HOME/.asdf/shims"
+  "$ACCOUNT_HOME"/.asdf/installs/*/*/bin
+  "$ACCOUNT_HOME/.local/share/mise/shims"
+  "$ACCOUNT_HOME/.mise/shims"
+  "$ACCOUNT_HOME"/.local/share/mise/installs/*/*/bin
+  "$ACCOUNT_HOME"/.mise/installs/*/*/bin
+)
 OPTIONAL_DIRS=(
   "$ACCOUNT_HOME/.nix-profile/bin"
   "/etc/profiles/per-user/$ACCOUNT_USER/bin"
@@ -152,8 +168,11 @@ expect_dir() {
 path_has() { case ":$1:" in *":$2:"*) return 0 ;; esac; return 1; }
 expect_dir "$REMOTE_ROOT/bin"
 expect_dir "$ACCOUNT_HOME/.local/bin"
+for candidate in "${MANAGER_DIRS[@]}"; do
+  [ -d "$candidate" ] && [ ! -L "$candidate" ] && expect_dir "$candidate"
+done
 for candidate in "${OPTIONAL_DIRS[@]}"; do
-  [ -d "$candidate" ] && expect_dir "$candidate"
+  [ -d "$candidate" ] && [ ! -L "$candidate" ] && expect_dir "$candidate"
 done
 for fixed in /usr/bin /bin /usr/sbin /sbin; do expect_dir "$fixed"; done
 
@@ -168,16 +187,16 @@ DUPES=$(printf '%s\n' "$CHILD_PATH" | tr ':' '\n' | sort | uniq -d)
 [ -z "$DUPES" ] || fail "the child PATH repeated entries: $DUPES"
 PRESENT_CHECKED=0
 ABSENT_CHECKED=0
-for candidate in "${OPTIONAL_DIRS[@]}"; do
-  if [ -d "$candidate" ]; then
-    path_has "$CHILD_PATH" "$candidate" || fail "an existing package-manager directory was dropped: $candidate"
+for candidate in "${MANAGER_DIRS[@]}" "${OPTIONAL_DIRS[@]}"; do
+  if [ -d "$candidate" ] && [ ! -L "$candidate" ]; then
+    path_has "$CHILD_PATH" "$candidate" || fail "an existing discovered PATH directory was dropped: $candidate"
     PRESENT_CHECKED=$((PRESENT_CHECKED + 1))
   else
-    path_has "$CHILD_PATH" "$candidate" && fail "an absent directory was added to the child PATH: $candidate"
+    path_has "$CHILD_PATH" "$candidate" && fail "an absent or symlinked PATH directory was added: $candidate"
     ABSENT_CHECKED=$((ABSENT_CHECKED + 1))
   fi
 done
-pass "the entrypoint composes a deduplicated child PATH (kept $PRESENT_CHECKED existing, omitted $ABSENT_CHECKED absent)"
+pass "the entrypoint composes a deduplicated discovered child PATH (kept $PRESENT_CHECKED existing, omitted $ABSENT_CHECKED absent)"
 
 set +e
 out=$(
@@ -226,27 +245,43 @@ printf 'Linux\n'
 SH
 chmod +x "$DOCTOR_BIN/uname"
 set +e
-out=$(HOME="$DOCTOR_HOME" PATH="$DOCTOR_BIN" "$ROOT/bin/fm-remote-doctor.sh" 2>&1)
+out=$(HOME="$DOCTOR_HOME" PATH="$DOCTOR_BIN:/usr/bin:/bin:/usr/sbin:/sbin" "$ROOT/bin/fm-remote-doctor.sh" 2>&1)
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "the remote doctor passed with a missing required tool"
-assert_contains "$out" 'required git=MISSING' "the remote doctor did not mark the missing required tool"
-assert_contains "$out" 'required jq=MISSING' "the remote doctor did not mark every missing required tool"
-assert_contains "$out" 'required tools do not resolve on the remote runtime PATH: git jq' "the remote doctor did not name the missing tools"
+assert_contains "$out" 'required herdr=MISSING' "the remote doctor did not mark a missing required tool"
+assert_contains "$out" 'required tasks-axi=MISSING' "the remote doctor did not mark every missing required tool"
+assert_contains "$out" 'required tools do not resolve on the remote runtime PATH: herdr tasks-axi treehouse harness' "the remote doctor did not name the missing tools"
 assert_contains "$out" '.local/bin' "the remote doctor did not offer the wrapper escape hatch"
 ln -sf "$(command -v git)" "$DOCTOR_BIN/git"
-# A resolvable stub is enough: this file asserts tool RESOLUTION, and with no
-# herdr on the fixture PATH nothing ever asks jq to parse anything.
+# The direct doctor fixture needs the complete required tool set. These stubs
+# exercise resolution only; the dedicated doctor suite owns worker and Herdr
+# lifecycle behavior against controlled launchctl fixtures.
 printf '#!/usr/bin/env bash\nexit 0\n' > "$DOCTOR_BIN/jq"
-chmod +x "$DOCTOR_BIN/jq"
+printf '#!/usr/bin/env bash\nprintf "{\\\"server\\\":{\\\"running\\\":false}}\\n"\n' > "$DOCTOR_BIN/herdr"
+cat > "$DOCTOR_BIN/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in
+  --version:*) printf '0.2.2\n' ;;
+  update:--help) printf '%s\n' --archive-body ;;
+  mv:--help) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...]' ;;
+esac
+SH
+printf '#!/usr/bin/env bash\nexit 0\n' > "$DOCTOR_BIN/treehouse"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$DOCTOR_BIN/claude"
+chmod +x "$DOCTOR_BIN/jq" "$DOCTOR_BIN/herdr" "$DOCTOR_BIN/tasks-axi" "$DOCTOR_BIN/treehouse" "$DOCTOR_BIN/claude"
 set +e
-out=$(HOME="$DOCTOR_HOME" PATH="$DOCTOR_BIN" "$ROOT/bin/fm-remote-doctor.sh" 2>&1)
+out=$(HOME="$DOCTOR_HOME" PATH="$DOCTOR_BIN:/usr/bin:/bin:/usr/sbin:/sbin" "$ROOT/bin/fm-remote-doctor.sh" 2>&1)
 rc=$?
 set -e
 assert_contains "$out" "required git=$DOCTOR_BIN/git" "the remote doctor did not report where the required tool resolved"
 assert_contains "$out" 'optional tmux=absent' "the remote doctor did not report an absent optional tool"
+assert_contains "$out" "required herdr=$DOCTOR_BIN/herdr" "the remote doctor did not require herdr"
+assert_contains "$out" "required tasks-axi=$DOCTOR_BIN/tasks-axi" "the remote doctor did not require compatible tasks-axi"
+assert_contains "$out" "required treehouse=$DOCTOR_BIN/treehouse" "the remote doctor did not require treehouse"
+assert_contains "$out" "required harness=claude:$DOCTOR_BIN/claude" "the remote doctor did not require a verified harness"
 assert_not_contains "$out" 'required tools do not resolve' "a resolved required tool was still reported missing"
-pass "the remote doctor reports required and optional tool resolution and names what is missing"
+pass "the remote doctor reports its required runtime tool set and optional tools"
 
 out=$(fm_on ios fm-probe-two.sh)
 assert_contains "$out" "home=$REMOTE_HOME" "first dynamic command stopped resolving"
@@ -283,7 +318,8 @@ untracked_root_b64=$(printf '%s' "$REMOTE_ROOT" | base64 | tr -d '\n')
 untracked_home_b64=$(printf '%s' "$REMOTE_HOME" | base64 | tr -d '\n')
 untracked_argv_b64=$(printf '%s\0' fm-untracked.sh | base64 | tr -d '\n')
 set +e
-out=$(FM_GIT_SHADOW_LOG="$GIT_SHADOW_LOG" "$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
+out=$(FM_GIT_SHADOW_LOG="$GIT_SHADOW_LOG" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+  FM_REMOTE_JOB_STATE_ROOT="$TMP_ROOT/remote-jobs" "$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
   1 "$untracked_root_b64" "$untracked_home_b64" "$untracked_argv_b64" 2>&1)
 rc=$?
 set -e

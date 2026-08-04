@@ -25,7 +25,7 @@ TMUX_LOG="$TMP_ROOT/remote-tmux.log"
 TMUX_STATE="$TMP_ROOT/remote-tmux.state"
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
-trap 'touch "$TMP_ROOT/provision.release" "$TMP_ROOT/seed.release" "$TMP_ROOT/handoff.release" "$TMP_ROOT/inherit.release" "$TMP_ROOT/launch.release" 2>/dev/null || true; FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true; rm -rf -- "$TMP_ROOT"' EXIT
+trap 'touch "$TMP_ROOT/provision.release" "$TMP_ROOT/seed.release" "$TMP_ROOT/handoff.release" "$TMP_ROOT/inherit.release" "$TMP_ROOT/launch.release" 2>/dev/null || true; FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true; if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then kill "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
 
 # Materialize the current branch as the remote host's tracked code root. The
 # fixture is a real git repository because provisioning and guarded sync exercise
@@ -246,6 +246,9 @@ remote_env() {
   FM_SSH_BIN="$FAKEBIN/fake-ssh" \
   FM_FAKE_SSH_COUNT="$SSH_COUNT" \
   FM_FAKE_REMOTE_ENTRYPOINT="$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+  FM_REMOTE_JOB_STATE_ROOT="$TMP_ROOT/remote-jobs" \
+  FM_FAKE_SSH_MODE="${FM_FAKE_SSH_MODE:-normal}" \
   FM_FAKE_REMOTE_CWD="$TMP_ROOT" \
   FM_FAKE_SEED_ENTERED="$TMP_ROOT/seed.entered" \
   FM_FAKE_SEED_RELEASE="$TMP_ROOT/seed.release" \
@@ -271,6 +274,9 @@ seed_env() {
   FM_SSH_BIN="$FAKEBIN/fake-ssh" \
   FM_FAKE_SSH_COUNT="$SSH_COUNT" \
   FM_FAKE_REMOTE_ENTRYPOINT="$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+  FM_REMOTE_JOB_STATE_ROOT="$TMP_ROOT/remote-jobs" \
+  FM_FAKE_SSH_MODE="${FM_FAKE_SSH_MODE:-normal}" \
   FM_FAKE_REMOTE_CWD="$TMP_ROOT" \
   FM_FAKE_SEED_ENTERED="$TMP_ROOT/seed.entered" \
   FM_FAKE_SEED_RELEASE="$TMP_ROOT/seed.release" \

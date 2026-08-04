@@ -194,7 +194,7 @@ cmd_source() {
   validate_id "$id"
   read_cursor "$id"
   exec "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-delta-read.sh \
-    "$REMOTE_LOG" "$CURSOR_OFFSET" "$CURSOR_HASH" "$WAIT_SECONDS"
+    "$REMOTE_LOG" "$CURSOR_OFFSET" "$CURSOR_HASH" "$WAIT_SECONDS" < /dev/null
 }
 
 safe_doc_path() {
@@ -219,7 +219,7 @@ fetch_document() { # <id> <remote-relative> <result-var>
   case "$parent_real" in "$base"|"$base"/*) ;; *) return 1 ;; esac
   [ ! -L "$destination" ] || return 1
   tmp=$(umask 077; mktemp "$parent/.remote-doc.XXXXXX") || return 1
-  if ! "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh get "$rel" "$MAX_DOC_BYTES" > "$tmp"; then
+  if ! "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh get "$rel" "$MAX_DOC_BYTES" < /dev/null > "$tmp"; then
     rm -f -- "$tmp"
     return 1
   fi
