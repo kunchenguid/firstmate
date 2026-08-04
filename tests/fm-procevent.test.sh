@@ -18,9 +18,6 @@ set -u
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TMP_ROOT=$(fm_test_tmproot fm-procevent-tests)
-# fm_test_tmproot runs inside a command substitution, whose EXIT trap removes the
-# directory it just registered, so recreate it before writing anything into it.
-mkdir -p "$TMP_ROOT"
 export FM_PROCEVENT_CLAIM_ROOT="$TMP_ROOT/claims"
 
 BLOCKER="$TMP_ROOT/blocker.sh"

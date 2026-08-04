@@ -32,13 +32,7 @@ fi
 # that channel, to exercise graceful degradation. Suites that do not source this
 # harness still cannot fire a real notification: the daemon defaults the seam to
 # "discard" whenever it is sourced (its library-mode guard).
-# Create the recorder dir with mktemp directly (not fm_test_tmproot, whose
-# first call installs an EXIT trap that, invoked inside a command-substitution
-# subshell, would delete the dir on subshell exit). Register it for the same
-# cleanup and install the trap in THIS shell if it is the first registration.
-_fm_wedge_rec_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-wedge-rec.XXXXXX")
-if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then trap fm_test_cleanup EXIT; fi
-FM_TEST_CLEANUP_DIRS+=("$_fm_wedge_rec_dir")
+_fm_wedge_rec_dir=$(fm_test_tmproot fm-wedge-rec)
 cat > "$_fm_wedge_rec_dir/rec" <<'REC'
 #!/usr/bin/env bash
 printf '%s\t%s\n' "${1:-}" "${2:-}" >> "${FM_WEDGE_ALARM_LOG:-/dev/null}"
