@@ -18,8 +18,15 @@
 # harness only, no model/effort. Only the first non-empty, non-comment line is parsed.
 # Model/effort come ONLY from this file - config/crew-harness stays a bare adapter
 # name and is never parsed for a model.
-# Detection layers: verified environment markers first, then process ancestry.
-# Record each newly verified env marker here.
+# Detection layers: live process ancestry FIRST, then verified environment
+# markers as a fallback when ancestry cannot see the harness. Ancestry is the
+# authoritative signal because the parent chain reflects the process tree as it
+# exists right now and can never name a dead ancestor (a process whose parent
+# exits is reparented to pid 1, where the walk stops). An exported marker such as
+# CLAUDECODE=1 outlives the process that set it - it persists in an interactive
+# shell across `/exit` and into the next program launched there - so a stale
+# inherited marker must never outrank the harness whose process actually launched
+# this one. Record each newly verified env marker in the fallback layer below.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,24 +34,27 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
-detect_own() {
-  # Layer 1: environment markers for verified harnesses.
-  # Keep marker detection before ancestry detection as an explicit precedence rule.
-  # Only claude, pi, and grok set verified markers of their own; codex, opencode,
-  # and kimi are markerless, so a foreign marker retained in a terminal
-  # multiplexer's stored environment can silently misidentify one of them before
-  # ancestry is consulted. This is a precedence hazard, not evidence that
-  # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
-  [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
-  if [ "${PI_CODING_AGENT:-}" = "true" ]; then
-    if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
-    return
+# resolve_pi_identity: refine a Pi-family result into the signed identity ONLY
+# when both live Pi markers are present - the family marker PI_CODING_AGENT=true
+# AND the exact signed launch-boundary marker FM_PI_HARNESS=pi-signed. Firstmate
+# sets FM_PI_HARNESS explicitly on every Pi launch (pi-signed for the signed
+# wrapper, pi for plain Pi; see bin/fm-spawn.sh and docs/configuration.md), so a
+# plain-Pi launch cannot be relabelled by an inherited FM_PI_HARNESS=pi-signed,
+# and shared unmarked Pi ancestry stays plain pi.
+resolve_pi_identity() {
+  if [ "${PI_CODING_AGENT:-}" = "true" ] && [ "${FM_PI_HARNESS:-}" = "pi-signed" ]; then
+    echo pi-signed
+  else
+    echo pi
   fi
-  # grok sets GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73).
-  # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so this marker
-  # is unambiguous when firstmate runs natively on grok.
-  [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
-  # Layer 2: walk the parent chain and match the command name.
+}
+
+# detect_ancestry: walk the live parent chain and return the CLOSEST verified
+# harness (the Pi family is reported as the base name "pi"; the pi-signed
+# refinement is applied by the caller), or "unknown" when no ancestor matches.
+# The walk starts at this process and stops at pid 1, so it only ever reflects
+# processes that are alive right now - it cannot be fooled by a stale env marker.
+detect_ancestry() {
   local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
@@ -72,6 +82,33 @@ detect_own() {
       break
     fi
   done
+  echo unknown
+}
+
+detect_own() {
+  # Layer 1: live process ancestry is authoritative. Whichever verified harness
+  # the parent chain names is the one whose process actually launched firstmate,
+  # so it wins even when a stale exported marker from a dead ancestor is still in
+  # the environment - the exact leak seen when a captain runs `pi` in the shell a
+  # `/exit`ed claude session left behind (CLAUDECODE=1 survives, but the live
+  # parent is pi). This also resolves genuine nesting (e.g. a pi launched from a
+  # claude tool shell): the CLOSEST harness in the chain is the operative one.
+  local anc
+  anc=$(detect_ancestry)
+  case "$anc" in
+    pi) resolve_pi_identity; return ;;
+    claude|codex|opencode|grok|kimi) echo "$anc"; return ;;
+  esac
+  # Layer 2: ancestry could not name a verified harness (a bare interpreter whose
+  # script path did not match, or ps was unavailable). Fall back to the verified
+  # environment markers as the best remaining evidence. Only claude, the Pi
+  # family, and grok expose a marker of their own; codex, opencode, and kimi are
+  # markerless and are therefore detectable ONLY through ancestry above.
+  [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
+  if [ "${PI_CODING_AGENT:-}" = "true" ]; then resolve_pi_identity; return; fi
+  # grok sets GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73)
+  # and does NOT set CLAUDECODE despite being Claude-Code-compatible.
+  [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
   echo unknown
 }
 

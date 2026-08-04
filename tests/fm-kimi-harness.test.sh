@@ -503,7 +503,12 @@ test_kimi_readiness_gate_precedes_pointer() {
   pass "fm-spawn: kimi never sends the brief pointer before an observable ready signal"
 }
 
-test_kimi_detection_uses_ancestry_after_markers() {
+# kimi is markerless (no env marker of its own), so it is detectable ONLY through
+# live process ancestry. bin/fm-harness.sh resolves ancestry FIRST, so a stale
+# CLAUDECODE=1 inherited from a dead claude session must NOT relabel a live kimi
+# process as claude - the same leak the Pi cases hit, in a harness that has no
+# marker to fall back to.
+test_kimi_detection_prefers_live_ancestry_over_stale_markers() {
   local dir fakebin cfg out
   dir="$TMP_ROOT/detection"
   fakebin=$(fm_fakebin "$dir")
@@ -533,9 +538,10 @@ SH
   out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
     PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = kimi ] || fail "kimi ancestry detection returned '$out'"
+  # The leak: CLAUDECODE=1 is stale (dead claude ancestor); the live parent is kimi.
   out=$(CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
-  [ "$out" = claude ] || fail "verified env-marker precedence changed, got '$out'"
-  pass "fm-harness: markerless kimi is detected by ancestry after env-marker precedence"
+  [ "$out" = kimi ] || fail "stale CLAUDECODE outranked live kimi ancestry, got '$out'"
+  pass "fm-harness: live kimi ancestry beats a stale inherited CLAUDECODE marker"
 }
 
 test_kimi_session_lock_identity() {
@@ -669,7 +675,7 @@ test_kimi_falls_back_to_expanded_home_binary
 test_kimi_missing_binary_refuses_before_pane_creation
 test_kimi_unconfirmed_delivery_fails_loudly
 test_kimi_readiness_gate_precedes_pointer
-test_kimi_detection_uses_ancestry_after_markers
+test_kimi_detection_prefers_live_ancestry_over_stale_markers
 test_kimi_session_lock_identity
 test_kimi_busy_signature_is_scoped_to_spinner_lines
 test_watcher_never_classifies_kimi_from_its_spinner

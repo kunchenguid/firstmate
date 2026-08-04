@@ -61,6 +61,35 @@ fm_git_identity fmtest fmtest@example.com
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-harness)
 export FM_BACKEND=tmux
 
+# The config-resolution cases below only need detect_own pinned to a KNOWN value,
+# not to a specific ancestry: they set CLAUDECODE=1 to mean "own harness = claude".
+# bin/fm-harness.sh now resolves live process ancestry FIRST, so without a
+# controlled parent chain those cases would silently resolve to whichever harness
+# actually launched the suite (claude under one runner, pi under another). Running
+# them through a neutral fake `ps` that reports no verified harness in the chain
+# keeps ancestry deliberately blind, so the env marker each case sets is the sole
+# signal and the assertions no longer depend on the runner.
+NEUTRAL_PS_BIN=$(fm_fakebin "$TMP_ROOT/neutral-ps")
+cat > "$NEUTRAL_PS_BIN/ps" <<'SH'
+#!/usr/bin/env bash
+# A parent chain with no verified harness: any pid reports comm=bash, ppid=1, so
+# the ancestry walk stops immediately and detect_own falls back to env markers.
+set -u
+field=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$field" in
+  comm=|args=) printf '%s\n' bash ;;
+  ppid=) printf '%s\n' 1 ;;
+esac
+SH
+chmod +x "$NEUTRAL_PS_BIN/ps"
+
 # ===========================================================================
 # A) fm-harness.sh secondmate resolution + fallback (deterministic detect_own)
 # ===========================================================================
@@ -80,8 +109,8 @@ test_harness_resolution() {
     mkdir -p "$cfg"
     [ "$crew" = "-" ] || printf '%s\n' "$crew" > "$cfg/crew-harness"
     [ "$sm" = "-" ] || printf '%s\n' "$sm" > "$cfg/secondmate-harness"
-    got_sm=$(CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate)
-    got_crew=$(CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" crew)
+    got_sm=$(CLAUDECODE=1 PATH="$NEUTRAL_PS_BIN:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate)
+    got_crew=$(CLAUDECODE=1 PATH="$NEUTRAL_PS_BIN:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" crew)
     [ "$got_sm" = "$exp_sm" ] || fail "$label: secondmate resolved '$got_sm', expected '$exp_sm'"
     [ "$got_crew" = "$exp_crew" ] || fail "$label: crew resolved '$got_crew', expected '$exp_crew'"
   done <<'ROWS'
@@ -116,9 +145,9 @@ test_secondmate_model_effort_tokens() {
     cfg="$case_dir/config"
     mkdir -p "$cfg"
     [ "$line" = ABSENT ] || printf '%b\n' "$line" > "$cfg/secondmate-harness"
-    got_h=$(CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate)
-    got_m=$(CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-model)
-    got_e=$(CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-effort)
+    got_h=$(CLAUDECODE=1 PATH="$NEUTRAL_PS_BIN:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate)
+    got_m=$(CLAUDECODE=1 PATH="$NEUTRAL_PS_BIN:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-model)
+    got_e=$(CLAUDECODE=1 PATH="$NEUTRAL_PS_BIN:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-effort)
     [ "$got_h" = "$exp_harness" ] || fail "$label: harness resolved '$got_h', expected '$exp_harness'"
     [ "$got_m" = "$exp_model" ] || fail "$label: model resolved '$got_m', expected '$exp_model'"
     [ "$got_e" = "$exp_effort" ] || fail "$label: effort resolved '$got_e', expected '$exp_effort'"
@@ -249,6 +278,92 @@ SH
   [ ! -s "$err" ] || fail "session-lock liveness wrote basename option noise for literal -codex: $(cat "$err")"
 
   pass "harness identity: dash-leading ps command names are basename operands, not options"
+}
+
+# ===========================================================================
+# A) detect_own: a stale INHERITED env marker never outranks live ancestry
+# ===========================================================================
+# Regression for the CLAUDECODE-leak bug. A captain who `/exit`s a claude session
+# and starts `pi` in the same shell leaves CLAUDECODE=1 (and the other CLAUDE_CODE_*
+# vars) exported. bin/fm-harness.sh must still report the LIVE harness - its running
+# parent - because an exported marker outlives the process that set it while the
+# live process ancestry cannot name a dead ancestor. A fake `ps` supplies the live
+# chain; FM_TEST_ANC (a test-only selector, NOT read by fm-harness.sh) picks the
+# harness at the top of that chain. Both leak directions are covered, plus the
+# FM_PI_HARNESS=pi-signed launch boundary and a markerless harness (kimi) leak, plus
+# the blind-ancestry fallback where the env marker is legitimately the only signal.
+test_stale_env_marker_never_outranks_live_ancestry() {
+  local dir fakebin label anc cc pc fp ga exp got n
+  dir="$TMP_ROOT/stale-marker-leak"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+# Live parent chain: <self> -bash-> pid 4242 -> init(1). The harness named at pid
+# 4242 is chosen by FM_TEST_ANC; FM_TEST_ANC=none leaves the chain harness-free so
+# ancestry is blind and detect_own falls back to whatever env markers are set.
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+anc=${FM_TEST_ANC:-none}
+if [ "$pid" = 4242 ]; then
+  case "$field" in
+    comm=)
+      case "$anc" in
+        pi)     printf '%s\n' '/opt/homebrew/bin/pi' ;;
+        claude) printf '%s\n' '/opt/homebrew/bin/claude' ;;
+        grok)   printf '%s\n' '/usr/local/bin/grok' ;;
+        kimi)   printf '%s\n' 'kimi' ;;
+        *)      printf '%s\n' 'bash' ;;
+      esac ;;
+    args=) printf '%s\n' "$anc" ;;
+    ppid=) printf '%s\n' 1 ;;
+  esac
+else
+  case "$field" in
+    comm=|args=) printf '%s\n' bash ;;
+    ppid=) printf '%s\n' 4242 ;;
+  esac
+fi
+SH
+  chmod +x "$fakebin/ps"
+
+  n=0
+  while IFS='^' read -r label anc cc pc fp ga exp; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    # Drop every ambient marker, then set only this row's markers (a literal '-'
+    # means leave that marker unset). FM_TEST_ANC drives the faked live chain.
+    set -- env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+      PATH="$fakebin:$BASE_PATH" "FM_TEST_ANC=$anc"
+    [ "$cc" = - ] || set -- "$@" "CLAUDECODE=$cc"
+    [ "$pc" = - ] || set -- "$@" "PI_CODING_AGENT=$pc"
+    [ "$fp" = - ] || set -- "$@" "FM_PI_HARNESS=$fp"
+    [ "$ga" = - ] || set -- "$@" "GROK_AGENT=$ga"
+    got=$("$@" "$ROOT/bin/fm-harness.sh")
+    [ "$got" = "$exp" ] || fail "$label: resolved '$got', expected '$exp' (row $n)"
+  done <<'ROWS'
+leak A: dead claude marker + live pi ancestry -> pi^pi^1^-^-^-^pi
+leak A + pi-signed launch boundary survives the leak^pi^1^true^pi-signed^-^pi-signed
+live pi ancestry, only a stale claude marker (no pi marker) -> pi^pi^1^-^-^-^pi
+leak B: dead pi markers + live claude ancestry + claude marker -> claude^claude^1^true^pi-signed^-^claude
+leak B: dead pi markers + live claude ancestry, no claude marker -> claude^claude^-^true^pi-signed^-^claude
+markerless leak: dead claude marker + live kimi ancestry -> kimi^kimi^1^-^-^-^kimi
+markerless leak: dead pi marker + live kimi ancestry -> kimi^kimi^-^true^-^-^kimi
+leak: dead claude marker + live grok ancestry -> grok^grok^1^-^-^-^grok
+blind ancestry falls back to the claude marker^none^1^-^-^-^claude
+blind ancestry falls back to the pi marker^none^-^true^-^-^pi
+blind ancestry: pi marker + signed boundary -> pi-signed^none^-^true^pi-signed^-^pi-signed
+blind ancestry: signed boundary without the pi family marker -> unknown^none^-^-^pi-signed^-^unknown
+blind ancestry falls back to the grok marker^none^-^-^-^1^grok
+blind ancestry with no marker -> unknown^none^-^-^-^-^unknown
+ROWS
+  pass "detect_own: live ancestry beats a stale inherited marker in both directions; pi-signed boundary and markerless harnesses preserved"
 }
 
 # ===========================================================================
@@ -2341,6 +2456,7 @@ test_harness_resolution
 test_secondmate_model_effort_tokens
 test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
+test_stale_env_marker_never_outranks_live_ancestry
 test_propagate_lib
 test_spawn_split_and_inherit
 test_spawn_backward_compat_crew_fallback
