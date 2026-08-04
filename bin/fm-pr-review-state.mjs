@@ -31,17 +31,26 @@ const OPTOUT_SCHEMA = "fm-pr-review-opt-out.v1";
 const EVENT_SCHEMA = "fm-pr-review-event.v1";
 const PRIVATE_ROUTE_SCHEMA = "fm-pr-review-private-route.v1";
 const PUBLICATION_GUARD_SCHEMA = "fm-pr-review-publication-guard.v1";
+const PULL_CLOSED_SCHEMA = "fm-pr-review-pull-closed.v1";
 const SELF_REVIEW_PUBLICATION_METHODS = new Set(["comment-only-review", "fallback-comment"]);
 const ISOLATED_PULL_READ_FAILURES = new Set(["github-read", "github-schema", "pagination-bound", "response-bound"]);
 const MAX_DIAGNOSTIC_PULLS = 5;
+const MAX_EVENT_MESSAGE_CHARS = 1000;
+const PULL_CLOSED_OUTCOME = "pull-closed-without-response";
 const TERMINAL_FEEDBACK = new Set([
   "fixed-and-replied",
   "dismissed-and-replied",
   "duplicate-and-replied",
   "superseded-and-replied",
   "captain-decision-pending",
+  PULL_CLOSED_OUTCOME,
 ]);
-const TERMINAL_REVIEW = new Set(["reviewed-clean", "reviewed-findings-corrected", "foreign-reviewed-and-commented"]);
+const TERMINAL_REVIEW = new Set([
+  "reviewed-clean",
+  "reviewed-findings-corrected",
+  "foreign-reviewed-and-commented",
+  PULL_CLOSED_OUTCOME,
+]);
 const SHA_RE = /^[0-9a-f]{40}$/;
 const LOGIN_RE = /^[A-Za-z0-9][A-Za-z0-9_.\-[\]]{0,99}$/;
 const REPO_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/;
@@ -757,7 +766,16 @@ function makeEvent(control, changed, category = "inventory", message = "", degra
   if (!force && changed === 0 && counts.responses === 0 && !(counts.pending > 0 && !counts.lane)) return null;
   const counter = control.event_counter + 1;
   const id = `${NOW()}-${sha256(`${counter}:${changed}:${counts.pending}:${counts.responses}:${category}`).slice(0, 16)}`;
-  return { schema: EVENT_SCHEMA, event_id: id, category, changed, pending: counts.pending, response_pending: counts.responses, degraded, message };
+  return {
+    schema: EVENT_SCHEMA,
+    event_id: id,
+    category,
+    changed,
+    pending: counts.pending,
+    response_pending: counts.responses,
+    degraded,
+    message: String(message ?? "").slice(0, MAX_EVENT_MESSAGE_CHARS),
+  };
 }
 
 // An isolated per-pull read failure never suppresses the rest of the inventory,
@@ -842,18 +860,70 @@ function poll() {
   }
 }
 
-function currentHead(item) {
-  if (process.env.FM_PR_REVIEW_CURRENT_HEAD) return validateSha(process.env.FM_PR_REVIEW_CURRENT_HEAD, "current head override");
+function liveLifecycle(item) {
+  if (process.env.FM_PR_REVIEW_CURRENT_HEAD) {
+    return { head: validateSha(process.env.FM_PR_REVIEW_CURRENT_HEAD, "current head override"), state: "open" };
+  }
   deadline = Date.now() + API_TIMEOUT_MS * (API_RETRIES + 1);
   const detail = apiJson("{head:.head.sha,state:.state}", [`/repos/${item.repository}/pulls/${item.number}`]);
-  if (String(detail.state).toLowerCase() !== "open") die("pull request is no longer open");
-  return validateSha(detail.head, "current GitHub head");
+  const state = String(detail.state ?? "").toLowerCase();
+  if (state !== "open" && state !== "closed") die("GitHub returned an unsupported live pull-request lifecycle state");
+  return { head: validateSha(detail.head, "current GitHub head"), state };
 }
 
+// A pull request that closes or merges under a nonterminal item ends that item
+// durably instead of stranding it: no outward response survives closure, and the
+// one-at-a-time lane is released so the rest of the queue keeps moving.
+function closePullWithoutResponse(item, live) {
+  item.closure = {
+    schema: PULL_CLOSED_SCHEMA,
+    live_state: live.state,
+    live_head: live.head,
+    covered_head: item.head,
+    generation: item.generation,
+    prior_state: item.state,
+    closed_at: NOW(),
+  };
+  item.response = null;
+  item.outcome = PULL_CLOSED_OUTCOME;
+  item.state = "terminal";
+  item.updated_at = NOW();
+  writeItem(item);
+  if (process.env.FM_PR_REVIEW_TEST_CRASH_AT === "after-pull-closed") process.exit(99);
+  laneRelease(item.id);
+  process.stdout.write(`${JSON.stringify({
+    item_id: item.id,
+    outcome: item.outcome,
+    head: item.head,
+    live_state: live.state,
+    response: "withheld",
+  })}\n`);
+  process.exit(7);
+}
+
+function currentHead(item) {
+  const live = liveLifecycle(item);
+  if (live.state !== "open") closePullWithoutResponse(item, live);
+  return live.head;
+}
+
+// The lane record is a pointer, not an owner. A crash between a terminal item
+// write and its release would otherwise strand the single lane forever, so a
+// lane naming a missing, terminal, or parked item is stale and self-heals here.
 function laneRead() {
   const lane = readJson(LANE, null, 65536);
   if (!lane) return null;
   if (lane.schema !== "fm-pr-review-lane.v1" || !ID_RE.test(lane.item_id) || !ID_RE.test(lane.owner_task)) die("review lane record is invalid");
+  const path = itemPath(lane.item_id);
+  if (!existsSync(path)) {
+    rmSync(LANE, { force: true });
+    return null;
+  }
+  const owner = validateItem(readJson(path, null, 262144), lane.item_id);
+  if (isTerminal(owner) || owner.state === "opted-out") {
+    rmSync(LANE, { force: true });
+    return null;
+  }
   return lane;
 }
 
@@ -1231,8 +1301,10 @@ function deliver(args) {
   if (item.state !== "response-pending" || !item.response || item.response.state !== "pending") die("item has no pending response", 4);
   deadline = Date.now() + POLL_BUDGET_MS;
   requireCoreHeadroom(MAX_PAGES + 8);
-  const current = currentHead(item);
-  if (current !== item.response.head || current !== item.head) {
+  const live = liveLifecycle(item);
+  const current = live.head;
+  const closed = live.state !== "open";
+  if (!closed && (current !== item.response.head || current !== item.head)) {
     item.head = current;
     item.generation += 1;
     item.state = "pending";
@@ -1255,7 +1327,9 @@ function deliver(args) {
   const viewer = snapshot.viewer || String(process.env.FM_PR_REVIEW_VIEWER ?? "").toLowerCase();
   if (!LOGIN_RE.test(viewer)) die("authenticated reply identity is unavailable");
   let found = existingResponse(item, viewer);
-  if (SELF_REVIEW_PUBLICATION_METHODS.has(item.response.method)) {
+  if (closed) {
+    if (!found) closePullWithoutResponse(item, live);
+  } else if (SELF_REVIEW_PUBLICATION_METHODS.has(item.response.method)) {
     const identity = livePublicationIdentity(item);
     if (identity.head !== item.response.head || identity.head !== item.head) {
       item.head = identity.head;

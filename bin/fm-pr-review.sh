@@ -47,7 +47,11 @@
 # feedback prefix is completed by `fetch-feedback` through bounded authenticated
 # chunks and stored privately before adjudication. Completion and response
 # delivery re-read the exact GitHub head. A moved head requeues the same
-# item at a new generation, and a failed reply keeps one already-bound response
+# item at a new generation. A live read that finds the pull request closed or
+# merged ends the item with the terminal outcome pull-closed-without-response and
+# exit 7 at every completion boundary, discards any pending public response,
+# releases the lane, and never posts after closure; a response GitHub already
+# accepted is still reconciled instead. A failed reply keeps one already-bound response
 # for retry instead of rerunning a correction. Delivery first searches the
 # original thread for the response's self-authored exact-body binding marker, so
 # a crash after GitHub accepted the response is reconciled without knowingly
@@ -60,8 +64,9 @@
 # fm-pr-review-validation.v1, owner_task matching the claim, the exact head,
 # result checks-green or selected-lifecycle-passed, and a focused proof string.
 # The only terminal feedback outcomes are fixed-and-replied,
-# dismissed-and-replied, duplicate-and-replied, superseded-and-replied, and
-# captain-decision-pending. A captain decision stages no outward response.
+# dismissed-and-replied, duplicate-and-replied, superseded-and-replied,
+# captain-decision-pending, and pull-closed-without-response. A captain decision
+# stages no outward response.
 # An authored initial review records clean privately or stages supported findings
 # with `complete-review --outcome findings` for its owning implementation task;
 # after correction, `findings-corrected` completes that same private review. It

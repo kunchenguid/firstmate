@@ -42,6 +42,7 @@ ok - bounded pagination covers multiple PR, review, inline-thread, and conversat
 ok - CRLF and leading-whitespace truncated bodies reconstruct and adjudicate at the exact node
 ok - a pull request closed between search and detail is omitted after its live closed-state read
 ok - one pull request's read failure stays isolated, announced once, durable, and non-destructive
+ok - a wide isolated-read diagnostic stays inside the adapter's bounded message window
 ok - supported inline feedback is fixed, validated, and replied exactly once
 ok - unsupported, duplicate, outdated, and superseded findings receive one evidence reply
 ok - scope expansion and stronger boundaries wait for the captain without a premature response
@@ -49,6 +50,7 @@ ok - distinct-author foreign PR review is comment-only and submits exactly once
 ok - fleet-authored findings route privately, unsupported leads stay private, and neither counts as independent review
 ok - live author equality refuses formal and fallback self-review publication across stale state and replay
 ok - head movement during verification invalidates evidence and requeues the same finding generation
+ok - a closed or merged pull request ends its item without a response and frees the lane at every boundary
 ok - poll crashes before and after snapshot publication replay without lost or duplicate work
 ok - duplicate notifications and claim replay preserve one review worker per lane
 ok - reply failure after correction retries the same response without duplicating the fix
@@ -78,6 +80,9 @@ ok - authentication and rate-limit failures stay bounded, deduplicated, and pres
 | dismissed feedback | each unsupported, duplicate, and superseded claim has a required response and durable terminal outcome | silently resolving any non-fixed claim leaves no delivered response |
 | crash replay | process exits are injected after item publication, snapshot publication, claim, response staging, GitHub post, and terminal publication | cursor-before-item, duplicate claim, or post-without-reconciliation loses or repeats work |
 | head movement | GitHub's current head is changed while the claim generation remains old | trusting only the claimed SHA posts stale evidence instead of incrementing and requeueing |
+| closure or merge | the fixture pull request answers closed through the real read at the resolve, complete-review, and deliver boundaries, and the durable outcome, the freed lane, the next claim, and the write log are checked separately | treating closure as an unrecoverable error strands the item and wedges the single lane until a captain opts out; skipping the reconciliation reports an already-accepted reply as withheld or posts it twice |
+| lane recovery | the closure crash seam cuts between the terminal write and the lane release | a lane trusted as an owner rather than a pointer keeps naming a terminal item forever |
+| bounded diagnostic message | five maximum-length repository identities are announced and the adapter itself classifies the emitted result | an unclamped message exceeds the consumer's window, so the diagnostic silently becomes malformed and unactionable |
 | reply failure | the first write fails after correction evidence is already durable | rerunning correction or discarding the staged body changes evidence or response identity |
 | captain decision | the fake GitHub log must remain empty while the item reaches captain-decision-pending | treating reviewer wording as authority produces a write |
 | private authored findings | an authored fixture has a distinct existing implementation owner and must retain its findings without any GitHub operation or independent-review credit | requiring public review transport leaks the internal findings or loses their correction route |

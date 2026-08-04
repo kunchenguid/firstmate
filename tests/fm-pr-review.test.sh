@@ -446,6 +446,24 @@ jq -e '.pulls["https://github.com/acme/widgets/pull/1"]|has("degraded")|not' \
   || fail "a recovered pull request stayed marked degraded"
 pass "one pull request's read failure stays isolated, announced once, durable, and non-destructive"
 
+# The isolated-read notice must stay inside the window its own consumer enforces.
+# The independent oracle is the adapter's verdict on the emitted result, not a
+# copy of the message-building code.
+H_CLAMP="$TMP/clamp-home"; new_home "$H_CLAMP"
+CLAMP_REPO="$(jq -rn '[range(0;100)|"a"]|join("")')/$(jq -rn '[range(0;100)|"b"]|join("")')"
+CLAMP_DEGRADED=$(jq -cn --arg repo "$CLAMP_REPO" \
+  '[range(1;6)|{repository:$repo,number:.,category:"pagination-bound",message:"GitHub pagination exceeded the configured page bound."}]')
+CLAMP_OBS="$TMP/clamp.json"
+jq -n --argjson pulls "[$(pull_json 1 captain "$sha_a" '["authored"]')]" --argjson degraded "$CLAMP_DEGRADED" \
+  '{schema:"fm-pr-review-observation.v1",viewer:"captain",observed_at:1900,pulls:$pulls,degraded:$degraded}' > "$CLAMP_OBS"
+clamp_event=$(poll_fixture "$H_CLAMP" "$CLAMP_OBS" 1900) || fail "a wide isolated-read diagnostic failed the poll"
+printf '%s' "$clamp_event" | jq -e '.degraded==5 and (.message|length)>0 and (.message|length)<=1000' >/dev/null \
+  || fail "the isolated-read diagnostic left its bounded message window: $(printf '%s' "$clamp_event" | jq -r '.message|length')"
+printf '%s\n' "$clamp_event" > "$TMP/clamp-result.json"
+[ "$("$ADAPTER" classify "$TMP/clamp-result.json")" = work ] \
+  || fail "the bounded diagnostic became unactionable at its own consumer"
+pass "a wide isolated-read diagnostic stays inside the adapter's bounded message window"
+
 # --- Resolution helper driven through the fake GitHub write boundary --------
 write_proof_files() {
   local dir=$1 head=$2
@@ -705,6 +723,120 @@ assert_contains "$move_out" "$sha_b" "head movement did not name the requeued he
 run_review "$H_MOVE" show "$MOVE_ID" | jq -e --arg head "$sha_b" '.state=="pending" and .head==$head and .generation==2 and .response==null' >/dev/null \
   || fail "head movement retained stale evidence or response state"
 pass "head movement during verification invalidates evidence and requeues the same finding generation"
+
+# --- Closure or merge ends the item at every completion boundary ------------
+# The independent oracle is the live lifecycle answer plus three separately
+# checked effects: the durable outcome, the freed one-at-a-time lane, and the
+# GitHub operation log. Treating closure as an unrecoverable error would leave
+# the item claimed and the single lane occupied forever.
+closed_lane_free() { # <home> <label>
+  [ ! -e "$1/state/pr-review/lane.json" ] || fail "$2 kept the one-at-a-time lane after closure"
+}
+# Every closure boundary answers through the real gh-axi read against a dataset
+# whose pull request is closed, never through a head override.
+close_dataset() {
+  make_dataset "[$(pull_json 1 captain "$sha_a" '["authored"]' '[]' '[]' '[]' | jq -c '.state="closed"')]"
+  : > "$GITHUB_LOG"
+}
+fake_review() { # <home> <args...>
+  local home=$1
+  shift
+  PATH="$FAKEBIN:$PATH" FM_FAKE_DATASET="$DATASET" FM_FAKE_GH_LOG="$GITHUB_LOG" \
+    FM_PR_REVIEW_VIEWER=captain \
+    FM_PR_REVIEW_PAGE_SIZE=2 FM_PR_REVIEW_FEEDBACK_PAGE_SIZE=2 FM_PR_REVIEW_MAX_PAGES=4 \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PR_REVIEW" "$@"
+}
+assert_closed_item() { # <home> <item-id> <label>
+  run_review "$1" show "$2" | jq -e --arg head "$sha_a" '
+    .state=="terminal" and .outcome=="pull-closed-without-response" and .response==null
+    and .closure.live_state=="closed" and .closure.covered_head==$head and .head==$head' >/dev/null \
+    || fail "$3 did not reach a durable pull-closed-without-response outcome"
+}
+
+H_CLOSE=$(make_inline_home closed-boundary-home IC_closed 'This claim outlives its own pull request.')
+CLOSE_FEEDBACK_ID=$(item_id_for "$H_CLOSE" feedback)
+claim_item "$H_CLOSE" "$CLOSE_FEEDBACK_ID" closed-feedback-owner >/dev/null
+close_dataset
+set +e
+close_resolve_out=$(fake_review "$H_CLOSE" resolve-feedback "$CLOSE_FEEDBACK_ID" --head "$sha_a" --generation 1 \
+  --verdict dismissed --evidence-file "$TMP/evidence.md" --reply-file "$TMP/dismissed-reply.md" 2>/dev/null)
+close_resolve_rc=$?
+set -e
+[ "$close_resolve_rc" -eq 7 ] || fail "resolve-feedback on a closed pull request did not end the item, got $close_resolve_rc"
+assert_contains "$close_resolve_out" '"response":"withheld"' "closed-pull resolution did not report a withheld response"
+assert_closed_item "$H_CLOSE" "$CLOSE_FEEDBACK_ID" "closed-pull feedback resolution"
+closed_lane_free "$H_CLOSE" "closed-pull feedback resolution"
+assert_no_grep 'POST ' "$GITHUB_LOG" "closed-pull feedback resolution wrote to GitHub"
+
+CLOSE_REVIEW_ID=$(item_id_for "$H_CLOSE" initial-review)
+claim_item "$H_CLOSE" "$CLOSE_REVIEW_ID" closed-review-owner >/dev/null \
+  || fail "a closed pull request wedged the lane against the next queued item"
+close_dataset
+set +e
+fake_review "$H_CLOSE" complete-review "$CLOSE_REVIEW_ID" --head "$sha_a" --generation 1 \
+  --outcome clean --evidence-file "$TMP/evidence.md" >/dev/null 2>&1
+close_review_rc=$?
+set -e
+[ "$close_review_rc" -eq 7 ] || fail "complete-review on a closed pull request did not end the item, got $close_review_rc"
+assert_closed_item "$H_CLOSE" "$CLOSE_REVIEW_ID" "closed-pull initial review"
+closed_lane_free "$H_CLOSE" "closed-pull initial review"
+set +e
+run_review "$H_CLOSE" claim "$CLOSE_REVIEW_ID" --owner-task closed-review-owner >/dev/null 2>&1
+close_reclaim_rc=$?
+set -e
+[ "$close_reclaim_rc" -ne 0 ] || fail "a closed pull request's terminal item was handed out again"
+
+# Delivery never posts after closure, and the crash seam proves a stale lane
+# pointing at a terminal item self-heals instead of wedging the queue.
+H_CLOSE_DELIVER=$(make_inline_home closed-deliver-home IC_closed_deliver 'A staged reply must not survive closure.')
+CLOSE_DELIVER_ID=$(item_id_for "$H_CLOSE_DELIVER" feedback)
+claim_item "$H_CLOSE_DELIVER" "$CLOSE_DELIVER_ID" closed-deliver-owner >/dev/null
+FM_PR_REVIEW_CURRENT_HEAD="$sha_a" run_review "$H_CLOSE_DELIVER" resolve-feedback "$CLOSE_DELIVER_ID" \
+  --head "$sha_a" --generation 1 --verdict dismissed --evidence-file "$TMP/evidence.md" \
+  --reply-file "$TMP/dismissed-reply.md" >/dev/null || fail "closed-delivery fixture could not stage its reply"
+close_dataset
+set +e
+FM_PR_REVIEW_TEST_CRASH_AT=after-pull-closed fake_review "$H_CLOSE_DELIVER" deliver "$CLOSE_DELIVER_ID" >/dev/null 2>&1
+close_deliver_crash_rc=$?
+set -e
+[ "$close_deliver_crash_rc" -eq 99 ] || fail "closed-pull delivery crash seam did not cut after the durable outcome"
+assert_closed_item "$H_CLOSE_DELIVER" "$CLOSE_DELIVER_ID" "closed-pull delivery"
+assert_no_grep 'POST ' "$GITHUB_LOG" "closed-pull delivery posted a response after closure"
+assert_present "$H_CLOSE_DELIVER/state/pr-review/lane.json" "closed-pull delivery crash seam cut too late to prove lane recovery"
+run_review "$H_CLOSE_DELIVER" next >/dev/null 2>&1 || true
+closed_lane_free "$H_CLOSE_DELIVER" "a crash between the terminal write and the lane release"
+set +e
+fake_review "$H_CLOSE_DELIVER" deliver "$CLOSE_DELIVER_ID" >/dev/null 2>&1
+close_deliver_replay_rc=$?
+set -e
+[ "$close_deliver_replay_rc" -ne 0 ] || fail "a closed pull request's discarded response became deliverable again"
+assert_no_grep 'POST ' "$GITHUB_LOG" "closed-pull delivery replay posted after closure"
+
+# A response GitHub already accepted before closure is still reconciled, not
+# reported as withheld, and is never posted a second time.
+H_CLOSE_ACCEPT=$(make_inline_home closed-accepted-home IC_closed_accepted 'An accepted reply must survive later closure.')
+CLOSE_ACCEPT_ID=$(item_id_for "$H_CLOSE_ACCEPT" feedback)
+claim_item "$H_CLOSE_ACCEPT" "$CLOSE_ACCEPT_ID" closed-accept-owner >/dev/null
+FM_PR_REVIEW_CURRENT_HEAD="$sha_a" run_review "$H_CLOSE_ACCEPT" resolve-feedback "$CLOSE_ACCEPT_ID" \
+  --head "$sha_a" --generation 1 --verdict dismissed --evidence-file "$TMP/evidence.md" \
+  --reply-file "$TMP/dismissed-reply.md" >/dev/null || fail "closed-acceptance fixture could not stage its reply"
+make_dataset "[$(pull_json 1 captain "$sha_a" '["authored"]' '[]' '[]' '[]')]"; : > "$GITHUB_LOG"
+set +e
+FM_PR_REVIEW_TEST_CRASH_AT=after-post fake_deliver "$H_CLOSE_ACCEPT" "$CLOSE_ACCEPT_ID" >/dev/null 2>&1
+close_accept_rc=$?
+set -e
+[ "$close_accept_rc" -eq 99 ] || fail "closed-acceptance fixture did not cut after GitHub acceptance"
+CLOSE_ACCEPT_DATASET=$(jq -c '.pulls |= map(.state="closed")' "$DATASET")
+printf '%s\n' "$CLOSE_ACCEPT_DATASET" > "$DATASET"
+fake_review "$H_CLOSE_ACCEPT" deliver "$CLOSE_ACCEPT_ID" >/dev/null \
+  || fail "closure discarded a response GitHub had already accepted"
+run_review "$H_CLOSE_ACCEPT" show "$CLOSE_ACCEPT_ID" | jq -e '
+  .state=="terminal" and .outcome=="dismissed-and-replied" and .response.state=="delivered"' >/dev/null \
+  || fail "an accepted response was reported as withheld after closure"
+[ "$(grep -c 'POST .*replies' "$GITHUB_LOG" || true)" -eq 1 ] \
+  || fail "post-acceptance closure reconciliation posted a second reply"
+closed_lane_free "$H_CLOSE_ACCEPT" "post-acceptance closure reconciliation"
+pass "a closed or merged pull request ends its item without a response and frees the lane at every boundary"
 
 # Queue-before-snapshot crash replay creates one item, not zero or two.
 for cut in after-items after-snapshot; do
