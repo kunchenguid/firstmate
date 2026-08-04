@@ -246,7 +246,7 @@ ruling_response_complete() {  # <session> <request-id>
 }
 
 ruling_dynamic_state() {  # <request-file> <accepted-file>
-  local request=$1 accepted=$2 repo live expires checker
+  local request=$1 accepted=$2 repo canonical live expires checker
   FM_RULING_DYNAMIC_DETAIL='repository context is missing from the request'
   FM_RULING_LAST_VERIFIED=$(ruling_field "$accepted" verified | head -1)
   [ -n "$FM_RULING_LAST_VERIFIED" ] \
@@ -254,6 +254,14 @@ ruling_dynamic_state() {  # <request-file> <accepted-file>
   [ -n "$FM_RULING_LAST_VERIFIED" ] || FM_RULING_LAST_VERIFIED=never
   repo=$(ruling_field "$request" repo | head -1)
   [ -n "$repo" ] || return 1
+  canonical=$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null) || {
+    FM_RULING_DYNAMIC_DETAIL="repository context is unavailable: $repo"
+    return 1
+  }
+  if [ "$canonical" != "$repo" ]; then
+    FM_RULING_DYNAMIC_DETAIL="repository context no longer resolves to its request-owned path: $repo"
+    return 1
+  fi
   live=$(fm_away_baseline "$repo") || {
     FM_RULING_DYNAMIC_DETAIL="repository context is unavailable: $repo"
     return 1

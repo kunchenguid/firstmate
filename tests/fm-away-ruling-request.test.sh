@@ -128,8 +128,8 @@ test_precondition_satisfaction_is_separate_and_trusted() {
 }
 
 test_indeterminate_repository_checks_are_rejected_and_recorded() {
-  local id response before after out nonrepo unreadable fakebin real_git dollar='$'
-  id=$(make_request t-indeterminate-repo D2)
+  local id response before after out nonrepo fakebin real_git dollar='$'
+  id=$(make_request t-indeterminate-repo D2 '' worktree-clean)
   response="$TMP_ROOT/indeterminate-response"
   "$DOUBLE" valid "$(request_file "$id")" > "$response"
   before=$(sess ledger ruling-rejected | grep -c . || true)
@@ -137,26 +137,45 @@ test_indeterminate_repository_checks_are_rejected_and_recorded() {
   nonrepo="$TMP_ROOT/nonrepo"
   mkdir -p "$nonrepo"
   out=$(rr validate "$id" --repo "$nonrepo" --response "$response" 2>&1) || true
-  case "$out" in "invalid precondition-unsatisfied"*) : ;; *) fail "non-repository path was not rejected as indeterminate: $out" ;; esac
+  case "$out" in *"could not read a git checkout"*) : ;; *) fail "non-repository caller was not refused during canonicalization: $out" ;; esac
 
-  unreadable="$TMP_ROOT/unreadable-repo"
-  cp -R "$REPO" "$unreadable"
-  chmod 000 "$unreadable"
   fakebin="$TMP_ROOT/failing-git-bin"
   mkdir -p "$fakebin"
   real_git=$(command -v git)
-  printf '#!/usr/bin/env bash\nif [ "%s1" = -C ] && [ "%s2" = %q ]; then exit 128; fi\nexec %q "%s@"\n' \
-    "$dollar" "$dollar" "$unreadable" "$real_git" "$dollar" > "$fakebin/git"
+  printf '#!/usr/bin/env bash\nif [ "%s1" = -C ] && [ "%s2" = %q ] && [ "%s3" = status ]; then exit 128; fi\nexec %q "%s@"\n' \
+    "$dollar" "$dollar" "$REPO" "$dollar" "$real_git" "$dollar" > "$fakebin/git"
   chmod +x "$fakebin/git"
-  out=$(PATH="$fakebin:$PATH" rr validate "$id" --repo "$unreadable" --response "$response" 2>&1) || true
-  chmod 700 "$unreadable"
-  case "$out" in "invalid precondition-unsatisfied"*) : ;; *) fail "unreadable repository was not rejected as indeterminate: $out" ;; esac
-
-  out=$(rr validate "$id" --repo "$TMP_ROOT/missing-repo" --response "$response" 2>&1) || true
-  case "$out" in "invalid precondition-unsatisfied"*) : ;; *) fail "failed baseline read was not rejected as indeterminate: $out" ;; esac
+  out=$(PATH="$fakebin:$PATH" rr validate "$id" --repo "$REPO" --response "$response" 2>&1) || true
+  case "$out" in "invalid precondition-unsatisfied"*) : ;; *) fail "indeterminate request-owned checker was not rejected: $out" ;; esac
   after=$(sess ledger ruling-rejected | grep -c . || true)
-  [ "$after" -eq $((before + 3)) ] || fail "indeterminate checks recorded $((after - before)) rejection events, expected 3"
-  pass "indeterminate repository checkers reject and record evidence"
+  [ "$after" -eq $((before + 1)) ] || fail "indeterminate checker recorded $((after - before)) rejection events, expected 1"
+  pass "caller canonicalization fails closed and indeterminate request-owned checks record evidence"
+}
+
+test_validation_is_bound_to_request_owned_checkout() {
+  local id response alternate out codes subdir link
+  id=$(make_request t-repo-context D2 '' worktree-clean)
+  response="$TMP_ROOT/repo-context-response"
+  "$DOUBLE" valid "$(request_file "$id")" > "$response"
+  alternate="$TMP_ROOT/alternate/repo"
+  mkdir -p "$(dirname "$alternate")"
+  git clone -q "$REPO" "$alternate"
+  : > "$REPO/dirty-original"
+  out=$(rr validate "$id" --repo "$alternate" --response "$response" 2>&1) || true
+  case "$out" in "invalid repo-context-mismatch"*) : ;; *) fail "same-basename alternate checkout was not rejected by identity: $out" ;; esac
+  codes=$(sess ledger ruling-rejected)
+  case "$codes" in *"request=$id"*"code=repo-context-mismatch"*) : ;; *) fail "repo-context mismatch was not recorded in the ledger" ;; esac
+
+  rm -f "$REPO/dirty-original"
+  subdir="$REPO/subdir"
+  mkdir -p "$subdir"
+  rr validate "$id" --repo "$subdir" --response "$response" >/dev/null \
+    || fail "an equivalent checkout subdirectory was falsely rejected"
+  link="$TMP_ROOT/repo-link"
+  ln -s "$REPO" "$link"
+  rr validate "$id" --repo "$link" --response "$response" >/dev/null \
+    || fail "an equivalent checkout symlink was falsely rejected"
+  pass "validation canonicalizes callers and enforces request-owned checkout identity"
 }
 
 test_failed_publication_recovers_without_orphan_or_duplicate() {
@@ -441,6 +460,7 @@ test_a_partial_request_is_refused
 test_a_non_enum_reversibility_is_refused
 test_precondition_satisfaction_is_separate_and_trusted
 test_indeterminate_repository_checks_are_rejected_and_recorded
+test_validation_is_bound_to_request_owned_checkout
 test_failed_publication_recovers_without_orphan_or_duplicate
 test_published_incomplete_request_is_refused
 test_a_complete_request_is_durable_and_reads_its_own_baseline

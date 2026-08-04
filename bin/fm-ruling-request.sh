@@ -49,6 +49,7 @@
 #   shell-content              an actionable field carries shell metacharacters
 #   duplicate                  a different response was already accepted
 #   id-mismatch                request or session id does not match
+#   repo-context-mismatch      caller checkout is not the request-owned checkout
 #   stale-baseline             response or request baseline is not the live one
 #   expired                    the request's expiry has passed
 #   authority-expansion        an operator-reserved request answered as
@@ -270,7 +271,7 @@ has_shell_metacharacter() {  # <value>
 }
 
 command_validate() {
-  local id='' repo='' response='' session dir request live digest accepted
+  local id='' repo='' response='' session dir request live digest accepted request_repo
   local keys unknown k count value ledger already_accepted=0 pending_response pending_accepted
 
   id=${1:-}
@@ -356,8 +357,13 @@ EOF
   [ "$(field_one "$response" session)" = "$session" ] \
     || reject id-mismatch 'response session id does not match the open away session'
 
-  live=$(fm_away_baseline "$repo") \
-    || reject precondition-unsatisfied "could not determine the live repository baseline: $repo"
+  repo=$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null) \
+    || fail "could not read a git checkout from $repo"
+  request_repo=$(field_one "$request" repo)
+  [ "$repo" = "$request_repo" ] \
+    || reject repo-context-mismatch "validation checkout does not match request-owned context: $repo"
+  live=$(fm_away_baseline "$request_repo") \
+    || reject precondition-unsatisfied "could not determine the live repository baseline: $request_repo"
   [ "$(field_one "$request" baseline)" = "$live" ] \
     || reject stale-baseline 'the request was raised against a superseded commit'
   [ "$(field_one "$response" baseline)" = "$live" ] \
@@ -396,7 +402,7 @@ EOF
 
   while IFS= read -r value; do
     [ -n "$value" ] || continue
-    fm_away_precondition_satisfied "$request" "$repo" "$value" \
+    fm_away_precondition_satisfied "$request" "$request_repo" "$value" \
       || reject precondition-unsatisfied "request-declared checker is unknown, false, or undetermined: $value"
   done <<EOF
 $(field_values "$request" verifiable-precondition)
