@@ -148,7 +148,7 @@ test_claude_prompt_suggestion_split_by_kind() {
   id=suggestion-ship-z16
   rec=$(make_spawn_case suggestion-ship claude "$id")
   read_case_record "$rec"
-  run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" >/dev/null
+  run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" >/dev/null
   status=$?
   expect_code 0 "$status" "claude ship spawn should succeed"
   assert_grep "kind=ship" "$HOME_DIR/state/$id.meta" "ship meta missing kind=ship"

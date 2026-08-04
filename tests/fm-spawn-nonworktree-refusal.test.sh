@@ -180,7 +180,7 @@ run_spawn() {
     FM_FAKE_WINDOW_ID="$FAKE_WINDOW_ID" \
     FM_TMUX_REC="$TMP_ROOT/tmux-calls-$id" \
     PATH="$FAKEBIN:$PATH" \
-    "$SPAWN" "$id" "$proj" codex 2>&1)
+    "$SPAWN" "$id" "$proj" codex --mode no-mistakes --yolo off 2>&1)
   SPAWN_STATUS=$?
   set -e
   end=$(date +%s%N)

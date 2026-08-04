@@ -691,13 +691,18 @@ test_scout_and_secondmate_load_decision_hold_policy() {
 # The tdd seam-discipline folds into every ship brief (all three delivery
 # modes) and stays out of scout and secondmate briefs, which do not implement.
 test_ship_briefs_carry_test_discipline() {
-  local home id brief
+  local home id brief rest proj mode
   home="$TMP_ROOT/test-discipline-home"
   write_registry "$home"
-  for id_proj in "brief-tdd-nm:no-registry-proj" "brief-tdd-dpr:direct-proj" "brief-tdd-lo:local-proj"; do
+  # A ship brief now carries an explicit per-task delivery contract, so each
+  # mode is named rather than inferred from the project's registered posture.
+  for id_proj in "brief-tdd-nm:no-registry-proj:no-mistakes" \
+    "brief-tdd-dpr:direct-proj:direct-PR" "brief-tdd-lo:local-proj:local-only"; do
     id=${id_proj%%:*}
-    proj=${id_proj##*:}
-    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1
+    rest=${id_proj#*:}
+    proj=${rest%%:*}
+    mode=${rest##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" --mode "$mode" >/dev/null 2>&1
     brief="$home/data/$id/brief.md"
     assert_grep "# Test discipline" "$brief" "$id: ship brief missing the test-discipline section"
     assert_grep "Agree the test seam before you implement" "$brief" \
@@ -727,7 +732,7 @@ test_ship_and_scout_carry_cwd_rule() {
   home="$TMP_ROOT/cwd-rule-home"
   mkdir -p "$home/data"
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-brief.sh" cwd-rule-ship sample >/dev/null 2>&1 \
+    "$ROOT/bin/fm-brief.sh" cwd-rule-ship sample --mode no-mistakes >/dev/null 2>&1 \
     || fail "fm-brief.sh ship scaffold exited non-zero"
   ship="$home/data/cwd-rule-ship/brief.md"
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
@@ -770,7 +775,7 @@ test_browser_as_user_rule_reaches_ship_and_scout() {
   local home brief kind
   home="$TMP_ROOT/browser-rule-home"
   mkdir -p "$home/data"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-browser-ship some-proj >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-browser-ship some-proj --mode no-mistakes >/dev/null 2>&1
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-browser-scout some-proj --scout >/dev/null 2>&1
   for kind in ship scout; do
     brief="$home/data/brief-browser-$kind/brief.md"
@@ -864,7 +869,7 @@ commit_authorship_block() {
 }
 
 test_every_scaffold_forbids_agent_co_author() {
-  local home id proj brief first block
+  local home id proj brief first block mode
   home="$TMP_ROOT/co-author-home"
   write_registry "$home"
   first=""
@@ -880,7 +885,16 @@ test_every_scaffold_forbids_agent_co_author() {
       *-scout) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" --scout >/dev/null 2>&1 ;;
       *-mate) FM_HOME="$home" FM_SECONDMATE_CHARTER='x' \
         "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1 ;;
-      *) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1 ;;
+      # A ship brief carries an explicit delivery contract; the rule under test
+      # must reach every mode, so each ship id names its own.
+      *)
+        case "$id" in
+          *-dpr) mode=direct-PR ;;
+          *-lo) mode=local-only ;;
+          *) mode=no-mistakes ;;
+        esac
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" --mode "$mode" >/dev/null 2>&1
+        ;;
     esac
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$id: brief was not scaffolded"

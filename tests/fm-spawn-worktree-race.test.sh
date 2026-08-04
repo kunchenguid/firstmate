@@ -76,7 +76,7 @@ run_spawn() {
     FM_FAKE_TRANSIENT="$transient" FM_FAKE_PROJ="$project_hit" FM_FAKE_WORKTREE="$worktree" \
     FM_FAKE_TRANSIENT_READS="$transient_reads" \
     PATH="$fakebin:$PATH" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex 2>&1
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex --mode no-mistakes --yolo off 2>&1
 }
 
 test_spawn_survives_preinit_transient_before_project_dir() {
