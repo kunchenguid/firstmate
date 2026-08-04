@@ -480,10 +480,19 @@ worker_run_job() { # <account-home> <job-dir>
   fm_remote_job_compose_operator_path "$account_home" >/dev/null
   git_bin=$(fm_remote_job_operator_tool git 2>/dev/null || true)
   [ -n "$git_bin" ] || { worker_publish_result "$job" 126; return; }
-  "$git_bin" -C "$root" ls-files --error-unmatch "bin/$command" >/dev/null 2>&1 || {
-    worker_publish_result "$job" 126
-    return
-  }
+  remaining=$((deadline - $(date +%s)))
+  [ "$remaining" -gt 0 ] || { worker_publish_result "$job" 124; return; }
+  set +e
+  worker_run_with_timeout "$job" "$remaining" \
+    "$git_bin" -C "$root" ls-files --error-unmatch "bin/$command" >/dev/null 2>&1
+  rc=$?
+  set -e
+  case "$rc" in
+    0) ;;
+    124) worker_publish_result "$job" 124; return ;;
+    125) worker_publish_result "$job" 125; return ;;
+    *) worker_publish_result "$job" 126; return ;;
+  esac
   fm_remote_job_build_child_path "$root" >/dev/null
   for command in stdin stdout stderr; do
     [ -f "$job/$command" ] && [ ! -L "$job/$command" ] || { worker_publish_result "$job" 126; return; }

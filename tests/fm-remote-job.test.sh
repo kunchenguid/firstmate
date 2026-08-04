@@ -373,21 +373,32 @@ fm_remote_job_probe "$ACCOUNT_HOME" || fail "the restarted worker did not remain
 pass "Linux supervision recovers crashes and stops orphaned commands"
 
 mkdir -p "$ACCOUNT_HOME/.local/bin"
+PREEXEC_STARTED="$TMP_ROOT/preexecution-started"
+PREEXEC_FINISHED="$TMP_ROOT/preexecution-finished"
 cat > "$ACCOUNT_HOME/.local/bin/git" <<SH
 #!/bin/bash
-if [ "\${3:-}" = ls-files ]; then sleep 2; fi
+if [ "\${3:-}" = ls-files ]; then
+  printf 'started\n' > "$PREEXEC_STARTED"
+  sleep 30
+  printf 'finished\n' > "$PREEXEC_FINISHED"
+fi
 exec "$REAL_GIT" "\$@"
 SH
 chmod +x "$ACCOUNT_HOME/.local/bin/git"
 FM_REMOTE_JOB_TIMEOUT=1
+PREEXEC_BEGAN=$(date +%s)
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-probe-job.sh < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
 JOB_DIR="$STATE_ROOT/jobs/$JOB_ID"
 fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
+PREEXEC_ELAPSED=$(( $(date +%s) - PREEXEC_BEGAN ))
 [ "$FM_REMOTE_JOB_EXIT" -eq 124 ] || fail "the pre-execution deadline did not publish a timeout result"
+assert_present "$PREEXEC_STARTED" "the pre-execution timeout fixture did not enter tracked-command validation"
+assert_absent "$PREEXEC_FINISHED" "tracked-command validation continued after the job timeout"
+[ "$PREEXEC_ELAPSED" -le 5 ] || fail "tracked-command validation exceeded the job timeout bound"
 fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the pre-execution timeout leaked output readers or FIFOs"
 rm -f -- "$ACCOUNT_HOME/.local/bin/git"
-pass "pre-execution deadline expiry cleans output capture resources"
+pass "pre-execution validation obeys the job timeout"
 
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-output-job.sh < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
