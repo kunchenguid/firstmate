@@ -141,6 +141,30 @@ assert_grep 'stderr: separate' "$TMP_ROOT/stderr" "remote stderr was not preserv
 assert_absent /tmp/fm-on-injected "shell-looking argv was interpreted"
 pass "fm-on preserves argv, stdin, stdout, stderr, and exit status without shell interpretation"
 
+# A vanished remote peer must become a bounded ssh failure instead of an
+# indefinite hang on a half-open TCP connection, so the existing no-result ->
+# reconcile re-arm recovery can self-heal without manual intervention. Assert
+# this on the real ssh argv the FM_SSH_BIN process seam captured, never on
+# fm-on.sh source text.
+LAST_SSH_ARGV=$(tail -n 1 "$SSH_LOG")
+DEFAULT_INTERVAL=$(printf '%s\n' "$LAST_SSH_ARGV" | grep -oE 'ServerAliveInterval=[0-9]+' | cut -d= -f2)
+DEFAULT_COUNT=$(printf '%s\n' "$LAST_SSH_ARGV" | grep -oE 'ServerAliveCountMax=[0-9]+' | cut -d= -f2)
+[ -n "$DEFAULT_INTERVAL" ] || fail "the ssh transport did not arm ServerAliveInterval dead-peer detection"
+[ -n "$DEFAULT_COUNT" ] || fail "the ssh transport did not arm ServerAliveCountMax dead-peer detection"
+[ "$DEFAULT_INTERVAL" -gt 0 ] || fail "ServerAliveInterval was not a positive interval (got $DEFAULT_INTERVAL)"
+[ "$DEFAULT_COUNT" -gt 0 ] || fail "ServerAliveCountMax was not a positive count (got $DEFAULT_COUNT)"
+DEFAULT_WINDOW=$((DEFAULT_INTERVAL * DEFAULT_COUNT))
+[ "$DEFAULT_WINDOW" -le 120 ] \
+  || fail "the default dead-peer detection window is not bounded to a sane ceiling (got ${DEFAULT_WINDOW}s = ${DEFAULT_INTERVAL}s x $DEFAULT_COUNT)"
+pass "fm-on arms a bounded SSH dead-peer detection window by default (${DEFAULT_INTERVAL}s x $DEFAULT_COUNT = ${DEFAULT_WINDOW}s)"
+
+: > "$SSH_LOG"
+FM_SSH_ALIVE_INTERVAL=7 FM_SSH_ALIVE_COUNT_MAX=2 fm_on ios fm-probe-two.sh >/dev/null
+OVERRIDE_ARGV=$(tail -n 1 "$SSH_LOG")
+assert_contains "$OVERRIDE_ARGV" 'ServerAliveInterval=7' "FM_SSH_ALIVE_INTERVAL override was not honored on the ssh transport"
+assert_contains "$OVERRIDE_ARGV" 'ServerAliveCountMax=2' "FM_SSH_ALIVE_COUNT_MAX override was not honored on the ssh transport"
+pass "fm-on's dead-peer detection window is env-overridable"
+
 out=$(TOP_SECRET='must-not-cross' fm_on remote-mac fm-probe-two.sh)
 assert_contains "$out" "home=$REMOTE_HOME" "remote FM_HOME was not explicit"
 assert_contains "$out" "root=$REMOTE_ROOT" "remote root was not explicit"
