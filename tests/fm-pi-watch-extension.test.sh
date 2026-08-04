@@ -137,6 +137,78 @@ EOF
   pass "Pi extension reports external healthy watcher output"
 }
 
+test_pi_extension_defers_wake_delivery_while_afk() {
+  local mode repo home plugin log stop out status
+  for mode in present absent; do
+    repo="$TMP_ROOT/pi-afk-$mode-root"
+    home="$TMP_ROOT/pi-afk-$mode-home"
+    log="$TMP_ROOT/pi-afk-$mode.log"
+    stop="$TMP_ROOT/pi-afk-$mode.stop"
+    mkdir -p "$repo/bin" "$home/state" "$home/config"
+    install_pi_watch_extension_fixture "$repo"
+    plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+    cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ "$count" -eq 1 ]; then
+  printf 'wake\theartbeat\theartbeat\theartbeat\n' >> "$FM_HOME/state/.wake-queue"
+  printf 'heartbeat\n'
+  exit 0
+fi
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+    chmod +x "$repo/bin/fm-watch-arm.sh"
+    [ "$mode" = present ] && : > "$home/state/.afk"
+    out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_AFK_MODE="$mode" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const prompts = [];
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+};
+const armRows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean)
+  : [];
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-afk-delivery", {}, undefined, undefined, {});
+for (let i = 0; i < 250; i += 1) {
+  if (armRows().length >= 2 && (process.env.FM_AFK_MODE === "present" || prompts.length > 0)) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (armRows().length !== 2) throw new Error(`expected one verified successor arm, got ${armRows().join(" | ")}`);
+if (!existsSync(`${process.env.FM_HOME}/state/.wake-queue`)) throw new Error("heartbeat was not durably queued");
+if (process.env.FM_AFK_MODE === "present") {
+  if (prompts.length !== 0) throw new Error(`Pi injected ${prompts.length} wake(s) while away mode owned delivery`);
+} else {
+  if (prompts.length !== 1 || !prompts[0].includes("FIRSTMATE WATCHER WAKE: heartbeat")) {
+    throw new Error(`normal wake delivery changed: ${prompts.join(" | ")}`);
+  }
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+    )
+    status=$?
+    expect_code 0 "$status" "Pi extension must defer queued heartbeat delivery only while away mode is active ($mode)"
+    [ -z "$out" ] || fail "Pi AFK-$mode delivery test printed output: $out"
+  done
+  pass "Pi extension defers queued heartbeats to away-mode delivery without changing normal delivery"
+}
+
 test_pi_tool_returns_agent_tool_result() {
   local repo home plugin out status
   repo="$TMP_ROOT/pi-tool-result-root"
@@ -2125,6 +2197,7 @@ EOF
 }
 
 test_pi_extension_reports_external_healthy_watcher
+test_pi_extension_defers_wake_delivery_while_afk
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
