@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression tests for fm-guard's stale-watcher banner deduplication.
+# Regression tests for fm-guard's watcher-down banner deduplication.
 #
 # The first stale command in one FM_HOME must print the full actionable watcher
 # banner.
