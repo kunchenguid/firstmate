@@ -1,9 +1,6 @@
 ---
 name: stuck-crewmate-recovery
-description: >-
-  Agent-only playbook for stuck or missing ordinary Firstmate direct reports.
-  Use when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
-  Reconciles recorded work before escalating from targeted inspection through safe relaunch or failure.
+description: Use for dead, missing, no-window, stale, looping, confused, unresponsive, answered-by-brief, or failed-steer ordinary crewmates.
 user-invocable: false
 metadata:
   internal: true

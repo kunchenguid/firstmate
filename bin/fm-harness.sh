@@ -18,20 +18,27 @@
 # harness only, no model/effort. Only the first non-empty, non-comment line is parsed.
 # Model/effort come ONLY from this file - config/crew-harness stays a bare adapter
 # name and is never parsed for a model.
-# Detection layers: verified environment markers first, then process ancestry.
-# Record each newly verified env marker here.
+# Detection layers: verified environment markers, process ancestry, then the
+# Codex thread-marker fallback when process inspection is unavailable.
+# Record each newly verified marker here.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
-  # Keep marker detection before ancestry detection as an explicit precedence rule.
-  # Only claude, pi, and grok set verified markers of their own; codex, opencode,
-  # and kimi are markerless, so a foreign marker retained in a terminal
+  # Keep non-Codex marker detection before ancestry detection as an explicit
+  # precedence rule.
+  # Claude, Pi, Grok, and Codex set verified markers of their own. Keep markers
+  # with verified precedence before ancestry, but leave Codex's marker as a
+  # post-ancestry fallback because it can be inherited by markerless child
+  # harnesses launched from a Codex primary.
+  # Opencode and Kimi are markerless, so a foreign marker retained in a terminal
   # multiplexer's stored environment can silently misidentify one of them before
   # ancestry is consulted. This is a precedence hazard, not evidence that
   # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
@@ -72,6 +79,10 @@ detect_own() {
       break
     fi
   done
+  if fm_codex_thread_identity >/dev/null 2>&1; then
+    echo codex
+    return
+  fi
   echo unknown
 }
 

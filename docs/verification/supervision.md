@@ -10,6 +10,40 @@ Task-specific chronology, temporary paths, run identifiers, and delivery transcr
 
 The cross-harness transport pass ran on 2026-07-17 with Codex 0.144.4, Grok 0.2.103, OpenCode 1.17.18, Pi 0.80.10, and the tracked Claude hook wiring.
 
+Codex 0.146.0 was rechecked on 2026-08-01 with a throwaway `FM_HOME`, throwaway `HOME`, and throwaway `CODEX_HOME`.
+Two separate probes ran, and neither one covers what the other observed.
+
+`CODEX_HOME=<throwaway> codex sandbox -- /bin/sh -c '/bin/ps -o comm= -p $$'` reproduced the seatbelt process-inspection denial exactly: `/bin/sh: /bin/ps: Operation not permitted`.
+Against that denied-`ps` shape, `bin/fm-lock.sh` printed `error: cannot locate harness process in ancestry` before the fix, so `bin/fm-session-start.sh` reported primary harness `unknown` and stayed read-only.
+
+`CODEX_HOME=<throwaway> codex sandbox -- /usr/bin/env` exported only `CODEX_SANDBOX=seatbelt` and `CODEX_SANDBOX_NETWORK_DISABLED=1`.
+The standalone `codex sandbox` subcommand runs no thread, so it exports neither `CODEX_CI` nor `CODEX_THREAD_ID` and cannot exercise the marker gate in `fm_codex_thread_identity()`.
+Recapturing a fresh interactive Codex 0.146.0 session's exported tool-command environment was out of reach from this worktree, so the `CODEX_CI=1` plus UUID-shaped `CODEX_THREAD_ID` gate rests on the captain's original transcript and on the deterministic coverage below, not on a re-run live capture.
+That gate is the only condition under which the fallback fires; if a supported interactive session turns out not to export `CODEX_CI`, the fallback stays inert and the read-only symptom returns rather than misfiring.
+The session-lock owner falls back to `codex-thread:<CODEX_THREAD_ID>` only after process ancestry fails, so markerless child process harnesses still win whenever `ps` is available.
+A `codex-thread:` owner names a conversation, not a process, so no other session can probe it and its liveness is a lease on `state/.lock`.
+The owning session rewrites the lock when it acquires it and renews it from every guarded command (`bin/fm-guard.sh`), so a live Codex primary keeps strict exclusive ownership: any other session, Codex or not, reads a lock refreshed inside `FM_CODEX_THREAD_LEASE_SECS` (default 900) as held and stays read-only with an error naming the owner and the lock to remove once that session is confirmed gone.
+Only an expired lease is stale-lock recovery, reclaimed through the unchanged `bin/fm-lock.sh` path, so one Codex session still cannot poison a home's lock forever.
+
+The GitHub diagnostic was separated from the lock bug outside the sandbox.
+With the captain's normal environment, an authenticated account succeeded through `gh auth status` while `gh help environment` documents `GH_TOKEN`, `GITHUB_TOKEN`, and the `GH_CONFIG_DIR`, `$XDG_CONFIG_HOME/gh`, `~/.config/gh` config-directory order as the only credential material the CLI reads.
+Bootstrap now checks exactly that set, so its verdict cannot disagree with the `gh` and `gh-axi` calls in `bin/fm-pr-check.sh`, `bin/fm-pr-merge.sh`, `bin/fm-teardown.sh`, and `bin/fm-bearings-snapshot.sh`.
+Inside a Codex sandbox that material can be present but unvalidatable, because `gh auth status` validates the token over the network and the probe above exported `CODEX_SANDBOX_NETWORK_DISABLED=1` alongside `CODEX_SANDBOX=seatbelt`.
+The denied network call is the cause, not one platform's sandbox implementation, so bootstrap keys the diagnostic on that marker and, only while the sandbox reports no network state at all, on any non-empty `CODEX_SANDBOX` rather than on the `seatbelt` label alone, and reports `GH_AUTH_UNVERIFIED` instead of requesting a fresh login.
+A throwaway home with no token and no `hosts.yml` still reports `NEEDS_GH_AUTH` in every one of those shapes, as does a session whose sandbox reports its network available.
+
+Skill-budget reproduction was bounded to repository-controlled inputs.
+`codex -C "$PWD" debug prompt-input` with a throwaway `CODEX_HOME` and no user plugins showed no 2% warning for Firstmate project skills alone, so the observed Ponytail-enabled user path is an independent budget contributor rather than a proven sole cause.
+Firstmate's controllable mitigation is to keep every internal skill discoverable while shortening only frontmatter descriptions to exact triggers.
+
+The remaining external contributor was then measured rather than assumed, on 2026-08-02 with codex-cli 0.146.0.
+`codex debug prompt-input` was rendered twice with a throwaway `CODEX_HOME`: once with a throwaway `HOME` holding one seeded skill under `~/.agents/skills` and one under `$CODEX_HOME/skills`, which proved both roots reach the prompt, and once with the captain's real `HOME` outside any project, which rendered 78 skill entries - 73 from `~/.agents/skills` and 5 from Codex's own bundled `$CODEX_HOME/skills/.system` set.
+Diffing those 73 rendered entries against the files on disk fixed the scan rule exactly: the root is walked recursively, symlinks are followed, and hidden directories are skipped.
+All 486 unrendered `SKILL.md` files under `~/.agents/skills` sat below a hidden path component, and the 73 rendered ones were exactly the rest.
+By that rule the captain's machine-global roots hold 74 skill-definition paths, 73 of them distinct files, against this repository's 19 - plus the skills of the nine enabled Codex plugins that `codex plugin list` reports and that live in Codex's private cache layout.
+The bundled `.system` set does spend the same budget, but it is Codex's own and not the captain's to remove, so the same hidden-directory skip keeps it out of the reported count.
+That external surface is the cause this branch must not fix for the captain, so `bin/fm-bootstrap.sh` reports it as a read-only `CODEX_SKILL_BUDGET` line on a Codex primary home whenever the machine-global count exceeds this repository's own, and `docs/configuration.md` "Codex skill budget" owns the scoping options.
+
 Codex command shape:
 
 ```sh
@@ -52,6 +86,8 @@ Current deterministic and live entry points:
 
 ```sh
 tests/fm-sessionstart-nudge.test.sh
+tests/fm-secondmate-harness.test.sh
+tests/fm-bootstrap.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh
 ```
@@ -127,7 +163,7 @@ The same run proved the Claude-compatible Stop entries stay inert under `GROK_AG
 
 The secondmate-home scope and manual-repair wake path were measured with Claude Code 2.1.207 on 2026-07-12, when a native background completion re-invoked the idle model with no human input.
 The current Stop-owned main/secondmate inclusion and child-worktree exclusion are covered deterministically by `tests/fm-claude-stop-autoarm.test.sh`.
-Session-lock ownership in `bin/fm-session-lock-lib.sh` is decided against a session's whole contiguous harness ancestry rather than one chosen pid, so the Stop auto-arm reaches its lock owner wherever that owner sits: the outermost pid of Claude Code's multi-level `bg-spare` hook worker chain, or an inner pid when a harness-named daemon parents the session.
+For process-backed session locks, `bin/fm-session-lock-lib.sh` decides ownership against a session's whole contiguous harness ancestry rather than one chosen pid, so the Stop auto-arm reaches its lock owner wherever that owner sits: the outermost pid of Claude Code's multi-level `bg-spare` hook worker chain, or an inner pid when a harness-named daemon parents the session.
 Harness identity is read from the executable path and `argv[0]` as well as the command basename, because Claude Code's native installer names the per-session executable by its version (`.../share/claude/versions/2.1.220`): `ps -o comm=` reports that path on macOS and the bare version string on Linux, and neither basename names a harness.
 `tests/fm-session-lock-ancestry.test.sh` pins both platforms' reporting semantics behind a deterministic process table and runs the real Stop auto-arm in version-named, daemon-parented, and combined real process trees.
 `tests/fm-watch-arm.test.sh` runs a real watcher and attached arm to verify that a delivered reason survives queue draining, while an unrelated queue append cannot make a watcher cycle that delivered nothing look successful.

@@ -102,18 +102,60 @@ test_missing_state_is_silent() {
 }
 
 test_owned_lock_is_silent() {
-  local root="$TMP_ROOT/already-ran"
+  local root="$TMP_ROOT/already-ran" fakebin="$TMP_ROOT/already-ran-fakebin"
   make_primary "$root"
-  printf '%s\n' "$$" > "$root/state/.lock"
-  expect_silent_zero "owned lock nudge" run_nudge "$root"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  4242:comm=) printf '%s\n' '/opt/test/bin/claude' ;;
+  4242:args=) printf '%s\n' 'claude' ;;
+  4242:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' '/bin/zsh' ;;
+  *:args=) printf '%s\n' 'zsh' ;;
+  *:ppid=) printf '%s\n' 4242 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '%s\n' 4242 > "$root/state/.lock"
+  expect_silent_zero "owned lock nudge" env PATH="$fakebin:$PATH" \
+    FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE"
   pass "fm-sessionstart-nudge: a lock holder in process ancestry is already run"
+}
+
+test_codex_thread_lock_is_silent_without_ps() {
+  local root="$TMP_ROOT/codex-thread-ran" fakebin="$TMP_ROOT/codex-thread-fakebin"
+  local uuid=019fbddb-b27d-7b23-86d2-7dc3bbaba31f
+  make_primary "$root"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '/bin/ps: Operation not permitted' >&2
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  printf 'codex-thread:%s\n' "$uuid" > "$root/state/.lock"
+  expect_silent_zero "owned Codex thread lock nudge" env \
+    CODEX_CI=1 CODEX_THREAD_ID="$uuid" PATH="$fakebin:$PATH" \
+    FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE"
+  pass "fm-sessionstart-nudge: an owned Codex thread lock is already run without ps"
 }
 
 test_opencode_plugin_delivers_exact_nudge_once() {
   local root="$TMP_ROOT/opencode-primary" out status=0
   make_primary "$root"
   cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$ROOT/bin/fm-primary-scope-lib.sh" \
-    "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" "$root/bin/"
+    "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" \
+    "$ROOT/bin/fm-session-lock-lib.sh" "$root/bin/"
   chmod +x "$root/bin/fm-sessionstart-nudge.sh"
   out=$(PLUGIN="$ROOT/.opencode/plugins/fm-primary-sessionstart-nudge.js" \
     WORKTREE="$root" EXPECTED="$NUDGE_LINE" node --input-type=module 2>&1 <<'EOF'
@@ -155,4 +197,5 @@ test_unmarked_linked_worktree_is_silent
 test_linked_secondmate_primary_nudges
 test_missing_state_is_silent
 test_owned_lock_is_silent
+test_codex_thread_lock_is_silent_without_ps
 test_opencode_plugin_delivers_exact_nudge_once

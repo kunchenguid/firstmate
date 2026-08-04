@@ -54,7 +54,7 @@ set -u
 # ambient CLAUDECODE=1, the pi-signed ancestry case resolves "claude". Drop the
 # ambient markers so what this suite asserts does not depend on which harness it
 # was launched from; every case states the marker it means to test.
-unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT
+unset CLAUDECODE CODEX_CI CODEX_THREAD_ID CODEX_SANDBOX PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
@@ -230,7 +230,8 @@ SH
   chmod +x "$fakebin/ps"
 
   err="$dir/fm-harness.err"
-  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+  got=$(env -u CLAUDECODE -u CODEX_CI -u CODEX_THREAD_ID -u CODEX_SANDBOX \
+    -u PI_CODING_AGENT -u GROK_AGENT \
     PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh" 2>"$err")
   [ "$got" = codex ] || fail "dash-leading shell ancestry resolved '$got', expected codex"
   [ ! -s "$err" ] || fail "fm-harness wrote basename option noise for literal -zsh: $(cat "$err")"
@@ -249,6 +250,278 @@ SH
   [ ! -s "$err" ] || fail "session-lock liveness wrote basename option noise for literal -codex: $(cat "$err")"
 
   pass "harness identity: dash-leading ps command names are basename operands, not options"
+}
+
+test_codex_thread_identity_fallback_after_ps_denial() {
+  local dir fakebin uuid out status err home
+  dir="$TMP_ROOT/codex-thread-identity"
+  fakebin=$(fm_fakebin "$dir")
+  uuid=019fbddb-b27d-7b23-86d2-7dc3bbaba31f
+  home="$dir/home"
+  mkdir -p "$home/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '/bin/ps: Operation not permitted' >&2
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+
+  out=$(CODEX_CI=1 CODEX_THREAD_ID="$uuid" PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT")
+  [ "$out" = "codex-thread:$uuid" ] \
+    || fail "Codex ps-denied identity returned '$out'"
+
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    CODEX_CI=1 CODEX_THREAD_ID="$uuid" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$out" = codex ] || fail "fm-harness did not use Codex thread fallback, got '$out'"
+
+  out=$(CODEX_CI=1 CODEX_THREAD_ID="$uuid" PATH="$fakebin:$BASE_PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" 2>&1); status=$?
+  expect_code 0 "$status" "fm-lock should acquire through Codex thread identity: $out"
+  assert_contains "$out" "lock acquired: harness identity codex-thread:$uuid" \
+    "fm-lock did not report the Codex thread lock"
+  [ "$(cat "$home/state/.lock")" = "codex-thread:$uuid" ] \
+    || fail "fm-lock wrote the wrong Codex thread identity"
+
+  out=$(CODEX_CI=1 CODEX_THREAD_ID="$uuid" PATH="$fakebin:$BASE_PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "lock: held by live harness identity codex-thread:$uuid" \
+    "fm-lock status did not accept the Codex thread identity"
+
+  err="$dir/missing-marker.err"
+  if CODEX_THREAD_ID="$uuid" PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT" 2>"$err"; then
+    fail "Codex thread fallback accepted CODEX_THREAD_ID without CODEX_CI"
+  fi
+  err="$dir/invalid-marker.err"
+  if CODEX_CI=1 CODEX_THREAD_ID=not-a-thread PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT" 2>"$err"; then
+    fail "Codex thread fallback accepted an invalid thread id"
+  fi
+
+  pass "Codex identity: thread marker covers ps-denied seatbelt without accepting invalid markers"
+}
+
+test_codex_thread_lock_is_reclaimable_by_other_sessions() {
+  local dir uuid other home out status denied_ps claude_ps
+  dir="$TMP_ROOT/codex-thread-stale"
+  uuid=019fbddb-b27d-7b23-86d2-7dc3bbaba31f
+  other=019fbddb-b27d-7b23-86d2-7dc3bbaba320
+  home="$dir/home"
+  mkdir -p "$home/state"
+
+  denied_ps=$(fm_fakebin "$dir/denied")
+  cat > "$denied_ps/ps" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '/bin/ps: Operation not permitted' >&2
+exit 1
+SH
+  chmod +x "$denied_ps/ps"
+
+  claude_ps=$(fm_fakebin "$dir/claude")
+  cat > "$claude_ps/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  4242:comm=) printf '%s\n' '/opt/test/bin/claude' ;;
+  4242:args=) printf '%s\n' 'claude' ;;
+  4242:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' '/bin/zsh' ;;
+  *:args=) printf '%s\n' 'zsh' ;;
+  *:ppid=) printf '%s\n' 4242 ;;
+esac
+SH
+  chmod +x "$claude_ps/ps"
+
+  # A Codex thread lock whose lease is still fresh belongs to a session no other
+  # harness can probe, so it must be respected, not reclaimed.
+  printf 'codex-thread:%s\n' "$uuid" > "$home/state/.lock"
+  out=$(env -u CODEX_CI -u CODEX_THREAD_ID PATH="$claude_ps:$BASE_PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" 2>&1); status=$?
+  expect_code 1 "$status" "a fresh Codex thread lease must refuse another harness: $out"
+  [ "$(cat "$home/state/.lock")" = "codex-thread:$uuid" ] \
+    || fail "a fresh Codex thread lease was overwritten: $(cat "$home/state/.lock")"
+
+  touch -t 200001010000 "$home/state/.lock"
+  out=$(env -u CODEX_CI -u CODEX_THREAD_ID PATH="$claude_ps:$BASE_PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "lock: stale" \
+    "a foreign session must read an expired Codex thread lease as stale"
+
+  out=$(env -u CODEX_CI -u CODEX_THREAD_ID PATH="$claude_ps:$BASE_PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" 2>&1); status=$?
+  expect_code 0 "$status" "a leftover Codex thread lock must not wedge another harness: $out"
+  [ "$(cat "$home/state/.lock")" = 4242 ] \
+    || fail "reclaim left the Codex thread lock in place: $(cat "$home/state/.lock")"
+
+  printf 'codex-thread:%s\n' "$uuid" > "$home/state/.lock"
+  touch -t 200001010000 "$home/state/.lock"
+  out=$(CODEX_CI=1 CODEX_THREAD_ID="$other" PATH="$denied_ps:$BASE_PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" 2>&1); status=$?
+  expect_code 0 "$status" "a later Codex thread must reclaim the prior thread's expired lease: $out"
+  [ "$(cat "$home/state/.lock")" = "codex-thread:$other" ] \
+    || fail "later Codex session did not take the lock: $(cat "$home/state/.lock")"
+
+  out=$(CODEX_CI=1 CODEX_THREAD_ID="$other" PATH="$denied_ps:$BASE_PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "lock: held by live harness identity codex-thread:$other" \
+    "the owning Codex thread must still read its own lock as live"
+
+  pass "Codex identity: a codex-thread lock is stale to every other session once its lease expires"
+}
+
+# Two live Codex primaries on one FM_HOME, both with `ps` denied: neither can
+# probe the other's thread, so the lock lease is the only ownership proof. The
+# second session must stay read-only instead of trading the lock back and forth,
+# while an expired lease still reclaims and the owner's own guarded commands
+# keep renewing it.
+test_concurrent_codex_threads_are_mutually_exclusive() {
+  local dir denied_ps child_ps a b c home out status lock before after
+  dir="$TMP_ROOT/codex-thread-concurrent"
+  a=019fbddb-b27d-7b23-86d2-7dc3bbaba30a
+  b=019fbddb-b27d-7b23-86d2-7dc3bbaba30b
+  c=019fbddb-b27d-7b23-86d2-7dc3bbaba30c
+  home="$dir/home"
+  lock="$home/state/.lock"
+  mkdir -p "$home/state"
+
+  denied_ps=$(fm_fakebin "$dir/denied")
+  cat > "$denied_ps/ps" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '/bin/ps: Operation not permitted' >&2
+exit 1
+SH
+  chmod +x "$denied_ps/ps"
+
+  # A markerless child harness launched from the owning Codex primary: it
+  # inherits CODEX_CI/CODEX_THREAD_ID, and only process ancestry tells it apart
+  # from the owner.
+  child_ps=$(fm_fakebin "$dir/child")
+  cat > "$child_ps/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  4242:comm=) printf '%s\n' '/opt/test/bin/opencode' ;;
+  4242:args=) printf '%s\n' 'opencode' ;;
+  4242:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' '/bin/zsh' ;;
+  *:args=) printf '%s\n' 'zsh' ;;
+  *:ppid=) printf '%s\n' 4242 ;;
+esac
+SH
+  chmod +x "$child_ps/ps"
+
+  out=$(CODEX_CI=1 CODEX_THREAD_ID="$a" PATH="$denied_ps:$BASE_PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" 2>&1); status=$?
+  expect_code 0 "$status" "first Codex thread should acquire: $out"
+
+  out=$(CODEX_CI=1 CODEX_THREAD_ID="$b" PATH="$denied_ps:$BASE_PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" 2>&1); status=$?
+  expect_code 1 "$status" "a second live Codex thread must not take a leased lock: $out"
+  assert_contains "$out" "another Codex session holds the lock (owner codex-thread:$a)" \
+    "the refusal must name the leased Codex owner"
+  assert_contains "$out" "operate read-only until resolved" \
+    "the refusal must keep the contending session read-only"
+  [ "$(cat "$lock")" = "codex-thread:$a" ] \
+    || fail "a contending Codex thread overwrote the leased lock: $(cat "$lock")"
+
+  out=$(CODEX_CI=1 CODEX_THREAD_ID="$b" PATH="$denied_ps:$BASE_PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "lock: held by live harness identity codex-thread:$a" \
+    "a contending Codex thread must read a leased lock as held, not stale"
+
+  out=$(CODEX_CI=1 CODEX_THREAD_ID="$a" PATH="$denied_ps:$BASE_PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" 2>&1); status=$?
+  expect_code 0 "$status" "the owning Codex thread must still re-acquire its own lock: $out"
+
+  # A guarded command run by the owner renews the lease, so a long-lived Codex
+  # primary keeps exclusive control between session starts.
+  touch -t 200001010000 "$lock"
+  CODEX_CI=1 CODEX_THREAD_ID="$a" PATH="$denied_ps:$BASE_PATH" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$ROOT/bin/fm-guard.sh" >/dev/null 2>&1 || true
+  out=$(CODEX_CI=1 CODEX_THREAD_ID="$c" PATH="$denied_ps:$BASE_PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" 2>&1); status=$?
+  expect_code 1 "$status" "a renewed lease must still refuse another live Codex thread: $out"
+  [ "$(cat "$lock")" = "codex-thread:$a" ] \
+    || fail "a renewed lease lost the lock to another thread: $(cat "$lock")"
+
+  # A markerless child harness that inherited the owner's thread markers must
+  # not renew a lease fm-lock.sh would refuse to grant it: once the primary is
+  # gone, an inherited-marker renewer would keep the home's lock alive forever.
+  touch -t 200001010000 "$lock"
+  before=$(date -r "$lock" +%s 2>/dev/null || stat -c %Y "$lock")
+  env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    CODEX_CI=1 CODEX_THREAD_ID="$a" PATH="$child_ps:$BASE_PATH" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$ROOT/bin/fm-guard.sh" >/dev/null 2>&1 || true
+  after=$(date -r "$lock" +%s 2>/dev/null || stat -c %Y "$lock")
+  [ "$before" = "$after" ] \
+    || fail "a child harness that only inherited the owner's Codex markers renewed its lease"
+
+  # A non-owner's guarded command must never renew someone else's lease.
+  touch -t 200001010000 "$lock"
+  CODEX_CI=1 CODEX_THREAD_ID="$c" PATH="$denied_ps:$BASE_PATH" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$ROOT/bin/fm-guard.sh" >/dev/null 2>&1 || true
+  out=$(CODEX_CI=1 CODEX_THREAD_ID="$c" PATH="$denied_ps:$BASE_PATH" \
+    FM_HOME="$home" "$ROOT/bin/fm-lock.sh" 2>&1); status=$?
+  expect_code 0 "$status" "an expired lease must still be reclaimable: $out"
+  [ "$(cat "$lock")" = "codex-thread:$c" ] \
+    || fail "expired-lease reclaim did not take the lock: $(cat "$lock")"
+
+  pass "Codex identity: simultaneous live Codex threads keep strict mutual exclusion"
+}
+
+test_codex_thread_fallback_does_not_outrank_process_ancestry() {
+  local dir fakebin uuid out harness
+  dir="$TMP_ROOT/codex-thread-precedence"
+  fakebin=$(fm_fakebin "$dir")
+  uuid=019fbddb-b27d-7b23-86d2-7dc3bbaba31f
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  4242:comm=) printf '/opt/test/bin/%s\n' "${FM_FAKE_PARENT_HARNESS:?}" ;;
+  4242:args=) printf '%s\n' "${FM_FAKE_PARENT_HARNESS:?}" ;;
+  4242:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' '/bin/zsh' ;;
+  *:args=) printf '%s\n' 'zsh' ;;
+  *:ppid=) printf '%s\n' 4242 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  for harness in opencode kimi; do
+    out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+      CODEX_CI=1 CODEX_THREAD_ID="$uuid" FM_FAKE_PARENT_HARNESS="$harness" \
+      PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+    [ "$out" = "$harness" ] \
+      || fail "Codex marker outranked $harness process ancestry: got '$out'"
+  done
+
+  pass "Codex identity: process ancestry outranks inherited Codex thread markers"
 }
 
 # ===========================================================================
@@ -2341,6 +2614,10 @@ test_harness_resolution
 test_secondmate_model_effort_tokens
 test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
+test_codex_thread_identity_fallback_after_ps_denial
+test_codex_thread_lock_is_reclaimable_by_other_sessions
+test_concurrent_codex_threads_are_mutually_exclusive
+test_codex_thread_fallback_does_not_outrank_process_ancestry
 test_propagate_lib
 test_spawn_split_and_inherit
 test_spawn_backward_compat_crew_fallback

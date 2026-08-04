@@ -1,9 +1,6 @@
 ---
 name: firstmate-coding-guidelines
-description: >-
-  Agent-only reference for changing firstmate's shared, tracked material per AGENTS.md section 1.
-  Use before editing any of that material, whether working as firstmate directly or as a crewmate briefed on a firstmate-repo task.
-  Covers the knowledge-placement decision tree, the one-owner rule for contracts, the inline-stub pattern for content moved into a skill, AGENTS.md size discipline, trigger hygiene for new skills, and repo style rules (one sentence per line, plain dash, no agent co-author, shellcheck-clean bin scripts, colocated tests, and maintainer-verification evidence).
+description: Use before editing firstmate shared tracked material, whether as firstmate or a crewmate on a firstmate-repo task.
 user-invocable: false
 metadata:
   internal: true
@@ -68,6 +65,7 @@ When in doubt, write the fact into the skill or doc first by patching that owner
 A new skill is dead weight if nothing loads it.
 Every new skill needs its load trigger declared inline: section 13 for agent-only reference skills, or the relevant operating section for anything else.
 State the trigger as a condition ("load before X", "load on Y wake"), never as a vague pointer.
+Keep the frontmatter `description` to that trigger alone and leave the procedure, the rationale, and what the skill owns in the body: a Codex primary renders every discovered skill's name and description into its system prompt against a fixed budget, and `docs/configuration.md` "Codex skill budget" owns what happens when the combined set outgrows it.
 Briefs for tasks that touch firstmate's own tracked material should tell the crewmate to load this skill.
 `bin/fm-brief.sh`'s `REPO` argument is a caller-supplied string with no reliable signal that it names firstmate's own repo, unlike a project registered in `data/projects.md`, so there is no clean point inside the scaffold to detect this case automatically.
 Firstmate adds this skill's load instruction to firstmate-repo briefs by hand instead.

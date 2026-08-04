@@ -32,6 +32,8 @@ export FM_BACKEND_CMUX_BUNDLE_BIN="$TMP_ROOT/no-bundled-cmux"
 # otherwise - the same hermeticity discipline as pinning PATH via BASE_PATH.
 unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
   CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_SOCKET_PATH CMUX_TAB_ID CMUX_PANEL_ID 2>/dev/null || true
+unset CLAUDECODE CODEX_CI CODEX_THREAD_ID CODEX_SANDBOX \
+  PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT 2>/dev/null || true
 
 # A fake toolchain where every required tool is present and gh is authenticated.
 # treehouse's `get --help` advertises --lease only when FM_FAKE_TREEHOUSE_LEASE_HELP=1.
@@ -39,6 +41,11 @@ make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
   fm_fake_exit0 "$fakebin" tmux node gh-axi chrome-devtools-axi lavish-axi
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/ps"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
@@ -293,6 +300,242 @@ manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSI
 manual backlog backend suppresses tasks-axi availability^1^0.1.1^1^manual^empty^^
 ROWS
   pass "bootstrap reports treehouse lease + tasks-axi/quota-axi bootstrap contracts"
+}
+
+# Run bin/fm-bootstrap.sh with a gh that always fails `gh auth status`, so only
+# the credential-material check can change the printed diagnostic. Every gh
+# credential env var is dropped up front; each case adds back exactly the one it
+# means to test.
+run_gh_auth_case() {
+  local case_dir=$1 userhome=$2 fakebin
+  shift 2
+  mkdir -p "$case_dir/home" "$userhome"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+  env -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_PERSONAL_ACCESS_TOKEN \
+    -u GH_CONFIG_DIR -u XDG_CONFIG_HOME -u CODEX_SANDBOX \
+    -u CODEX_SANDBOX_NETWORK_DISABLED \
+    PATH="$fakebin:$BASE_PATH" HOME="$userhome" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$@" "$ROOT/bin/fm-bootstrap.sh"
+}
+
+test_gh_auth_diagnostics_distinguish_codex_sandbox() {
+  local case_dir out status unverified
+  unverified="GH_AUTH_UNVERIFIED: Codex sandbox could not validate existing GitHub credential material"
+
+  # A token the GitHub CLI never reads is not credential material: gh-axi and gh
+  # would still run unauthenticated, so the actionable login request must stand.
+  case_dir="$TMP_ROOT/gh-unreadable-token"
+  out=$(run_gh_auth_case "$case_dir" "$case_dir/userhome" \
+    GITHUB_PERSONAL_ACCESS_TOKEN=pat-ok CODEX_SANDBOX=seatbelt)
+  [ "$out" = "NEEDS_GH_AUTH" ] \
+    || fail "a token gh does not read must not silence the login request, got: $out"
+
+  case_dir="$TMP_ROOT/gh-codex-sandbox-configured"
+  mkdir -p "$case_dir/userhome/.config/gh"
+  printf 'github.com:\n    user: fmtest\n' > "$case_dir/userhome/.config/gh/hosts.yml"
+  out=$(run_gh_auth_case "$case_dir" "$case_dir/userhome" CODEX_SANDBOX=seatbelt); status=$?
+  expect_code 0 "$status" "Codex sandbox auth diagnostic"
+  assert_contains "$out" "$unverified" "Codex sandbox auth failure should not ask for login"
+  assert_not_contains "$out" "NEEDS_GH_AUTH" "Codex sandbox auth failure was mislabeled as missing login"
+
+  # gh resolves its config dir as GH_CONFIG_DIR, then $XDG_CONFIG_HOME/gh, then
+  # ~/.config/gh; a captain using either override still has credential material.
+  case_dir="$TMP_ROOT/gh-config-dir"
+  mkdir -p "$case_dir/ghconfig"
+  printf 'github.com:\n    user: fmtest\n' > "$case_dir/ghconfig/hosts.yml"
+  out=$(run_gh_auth_case "$case_dir" "$case_dir/userhome" \
+    GH_CONFIG_DIR="$case_dir/ghconfig" XDG_CONFIG_HOME="$case_dir/empty-xdg" \
+    CODEX_SANDBOX=seatbelt)
+  assert_contains "$out" "$unverified" "GH_CONFIG_DIR credential material was ignored"
+
+  case_dir="$TMP_ROOT/gh-xdg-config-home"
+  mkdir -p "$case_dir/xdg/gh"
+  printf 'github.com:\n    user: fmtest\n' > "$case_dir/xdg/gh/hosts.yml"
+  out=$(run_gh_auth_case "$case_dir" "$case_dir/userhome" \
+    XDG_CONFIG_HOME="$case_dir/xdg" CODEX_SANDBOX=seatbelt)
+  assert_contains "$out" "$unverified" "XDG_CONFIG_HOME credential material was ignored"
+
+  # The sandbox's denied network call is what `gh auth status` cannot survive, so
+  # the diagnostic must follow that marker rather than one platform's sandbox name.
+  case_dir="$TMP_ROOT/gh-network-disabled-only"
+  mkdir -p "$case_dir/userhome/.config/gh"
+  printf 'github.com:\n    user: fmtest\n' > "$case_dir/userhome/.config/gh/hosts.yml"
+  out=$(run_gh_auth_case "$case_dir" "$case_dir/userhome" CODEX_SANDBOX_NETWORK_DISABLED=1)
+  assert_contains "$out" "$unverified" "network-disabled Codex sandbox was mislabeled as missing login"
+
+  case_dir="$TMP_ROOT/gh-non-seatbelt-sandbox"
+  mkdir -p "$case_dir/userhome/.config/gh"
+  printf 'github.com:\n    user: fmtest\n' > "$case_dir/userhome/.config/gh/hosts.yml"
+  out=$(run_gh_auth_case "$case_dir" "$case_dir/userhome" \
+    CODEX_SANDBOX=landlock CODEX_SANDBOX_NETWORK_DISABLED=1)
+  assert_contains "$out" "$unverified" "non-seatbelt Codex sandbox was mislabeled as missing login"
+
+  # A sandbox that reports its network as available cannot excuse a failed check.
+  case_dir="$TMP_ROOT/gh-network-enabled"
+  mkdir -p "$case_dir/userhome/.config/gh"
+  printf 'github.com:\n    user: fmtest\n' > "$case_dir/userhome/.config/gh/hosts.yml"
+  out=$(run_gh_auth_case "$case_dir" "$case_dir/userhome" CODEX_SANDBOX_NETWORK_DISABLED=0)
+  [ "$out" = "NEEDS_GH_AUTH" ] \
+    || fail "a network-enabled session should request login, got: $out"
+
+  # An explicit network-available report outranks the sandbox label: the check
+  # was reachable, so its failure is a real revoked-credential gap.
+  case_dir="$TMP_ROOT/gh-sandboxed-network-enabled"
+  mkdir -p "$case_dir/userhome/.config/gh"
+  printf 'github.com:\n    user: fmtest\n' > "$case_dir/userhome/.config/gh/hosts.yml"
+  out=$(run_gh_auth_case "$case_dir" "$case_dir/userhome" \
+    CODEX_SANDBOX=seatbelt CODEX_SANDBOX_NETWORK_DISABLED=0)
+  [ "$out" = "NEEDS_GH_AUTH" ] \
+    || fail "a Codex sandbox reporting its network available should request login, got: $out"
+
+  case_dir="$TMP_ROOT/gh-missing"
+  out=$(run_gh_auth_case "$case_dir" "$case_dir/userhome" CODEX_SANDBOX=seatbelt)
+  [ "$out" = "NEEDS_GH_AUTH" ] || fail "missing credentials should request login, got: $out"
+
+  case_dir="$TMP_ROOT/gh-missing-network-disabled"
+  out=$(run_gh_auth_case "$case_dir" "$case_dir/userhome" CODEX_SANDBOX_NETWORK_DISABLED=1)
+  [ "$out" = "NEEDS_GH_AUTH" ] \
+    || fail "missing credentials in a network-disabled sandbox should request login, got: $out"
+
+  # Outside the Codex sandbox, present-but-unvalidatable material is a real gap.
+  case_dir="$TMP_ROOT/gh-unsandboxed"
+  mkdir -p "$case_dir/userhome/.config/gh"
+  printf 'github.com:\n    user: fmtest\n' > "$case_dir/userhome/.config/gh/hosts.yml"
+  out=$(run_gh_auth_case "$case_dir" "$case_dir/userhome")
+  [ "$out" = "NEEDS_GH_AUTH" ] \
+    || fail "outside the Codex sandbox a failed auth check should request login, got: $out"
+
+  pass "bootstrap distinguishes missing GitHub auth from Codex sandbox validation limits"
+}
+
+# Write <count> discoverable skill definitions under <dir>, named <prefix>N.
+make_fixture_skills() {
+  local dir=$1 prefix=$2 count=$3 i=1
+  while [ "$i" -le "$count" ]; do
+    mkdir -p "$dir/$prefix$i"
+    printf -- '---\nname: %s%s\ndescription: fixture skill %s%s.\n---\n\nbody\n' \
+      "$prefix" "$i" "$prefix" "$i" > "$dir/$prefix$i/SKILL.md"
+    i=$((i + 1))
+  done
+}
+
+# Run bin/fm-bootstrap.sh as the captain's real Codex shape: a Codex thread whose
+# seatbelt denies process inspection, so harness identity resolves through the
+# thread marker rather than ancestry. Each case owns its own user home, CODEX_HOME
+# and repository checkout, because those roots are exactly what is being counted.
+# Trailing arguments are the case's own harness marker ASSIGNMENTS (a non-Codex
+# case passes its own); every -u stays ahead of the first assignment because env
+# stops parsing options there and would otherwise run `-u` as the command.
+run_codex_skill_budget_case() {
+  local case_dir=$1 userhome=$2 repo=$3 fakebin
+  shift 3
+  [ $# -gt 0 ] || set -- CODEX_CI=1 CODEX_THREAD_ID=019fbddb-b27d-7b23-86d2-7dc3bbaba31f
+  mkdir -p "$case_dir/home" "$userhome" "$repo/.agents/skills"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '/bin/ps: Operation not permitted' >&2
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u CODEX_CI -u CODEX_THREAD_ID \
+    PATH="$fakebin:$BASE_PATH" HOME="$userhome" CODEX_HOME="$case_dir/codexhome" \
+    FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$repo" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$@" "$ROOT/bin/fm-bootstrap.sh"
+}
+
+test_codex_skill_budget_reports_machine_global_surface() {
+  # Every silent case checks bootstrap's exit status too: silence only proves the
+  # diagnostic held back if bootstrap actually ran to completion.
+  local case_dir userhome repo out status
+
+  # Codex discovers skills under ~/.agents/skills and $CODEX_HOME/skills, scanning
+  # each recursively through symlinks. A symlinked collection is how a large global
+  # set actually arrives, so its nested skills have to count.
+  case_dir="$TMP_ROOT/codex-skills-global"
+  userhome="$case_dir/userhome"
+  repo="$case_dir/repo"
+  mkdir -p "$userhome/.agents/skills" "$case_dir/codexhome/skills" "$case_dir/collection"
+  make_fixture_skills "$repo/.agents/skills" repo 3
+  make_fixture_skills "$userhome/.agents/skills" global 2
+  make_fixture_skills "$case_dir/collection" bundled 2
+  ln -s "$case_dir/collection" "$userhome/.agents/skills/bundle"
+  make_fixture_skills "$case_dir/codexhome/skills" codexhome 2
+  out=$(run_codex_skill_budget_case "$case_dir" "$userhome" "$repo")
+  assert_contains "$out" "CODEX_SKILL_BUDGET: 6 machine-global skills (" \
+    "bootstrap did not count the machine-global skill surface Codex loads"
+  assert_contains "$out" "$userhome/.agents/skills: 4" \
+    "bootstrap did not follow a symlinked global skill collection"
+  assert_contains "$out" "$case_dir/codexhome/skills: 2" \
+    "bootstrap ignored the CODEX_HOME skill root"
+  assert_contains "$out" "load on top of this repository's 3" \
+    "bootstrap did not report this repository's own skill count for comparison"
+  assert_contains "$out" '2% skills context budget' \
+    "the reported cause did not name Codex's skill budget"
+
+  # Codex's own bundled set lives in a hidden directory under $CODEX_HOME/skills
+  # and is not the captain's to remove, so it must not be reported as their doing.
+  case_dir="$TMP_ROOT/codex-skills-hidden"
+  userhome="$case_dir/userhome"
+  repo="$case_dir/repo"
+  mkdir -p "$userhome/.agents/skills" "$case_dir/codexhome/skills/.system"
+  make_fixture_skills "$repo/.agents/skills" repo 3
+  make_fixture_skills "$case_dir/codexhome/skills/.system" system 9
+  out=$(run_codex_skill_budget_case "$case_dir" "$userhome" "$repo"); status=$?
+  expect_code 0 "$status" "bootstrap did not run on the hidden-skills case"
+  assert_not_contains "$out" "CODEX_SKILL_BUDGET" \
+    "Codex's own bundled hidden skills were blamed on the captain"
+
+  # A global set no larger than this repository's own cannot be the remaining
+  # cause, so reporting it would be noise.
+  case_dir="$TMP_ROOT/codex-skills-small"
+  userhome="$case_dir/userhome"
+  repo="$case_dir/repo"
+  mkdir -p "$userhome/.agents/skills"
+  make_fixture_skills "$repo/.agents/skills" repo 3
+  make_fixture_skills "$userhome/.agents/skills" global 3
+  out=$(run_codex_skill_budget_case "$case_dir" "$userhome" "$repo"); status=$?
+  expect_code 0 "$status" "bootstrap did not run on the small-global-set case"
+  assert_not_contains "$out" "CODEX_SKILL_BUDGET" \
+    "a global skill set no larger than this repository's was reported anyway"
+
+  # The budget is Codex's; every other harness must stay silent about it.
+  case_dir="$TMP_ROOT/codex-skills-claude"
+  userhome="$case_dir/userhome"
+  repo="$case_dir/repo"
+  mkdir -p "$userhome/.agents/skills"
+  make_fixture_skills "$repo/.agents/skills" repo 3
+  make_fixture_skills "$userhome/.agents/skills" global 9
+  out=$(run_codex_skill_budget_case "$case_dir" "$userhome" "$repo" CLAUDECODE=1); status=$?
+  expect_code 0 "$status" "bootstrap did not run on the Claude case"
+  assert_not_contains "$out" "CODEX_SKILL_BUDGET" \
+    "a Claude session was told about Codex's skill budget"
+
+  # Only the captain can scope machine-global skills, so a secondmate home never
+  # repeats a report it must not act on.
+  case_dir="$TMP_ROOT/codex-skills-secondmate"
+  userhome="$case_dir/userhome"
+  repo="$case_dir/repo"
+  mkdir -p "$userhome/.agents/skills" "$case_dir/home"
+  : > "$case_dir/home/.fm-secondmate-home"
+  make_fixture_skills "$repo/.agents/skills" repo 3
+  make_fixture_skills "$userhome/.agents/skills" global 9
+  out=$(run_codex_skill_budget_case "$case_dir" "$userhome" "$repo"); status=$?
+  expect_code 0 "$status" "bootstrap did not run on the secondmate-home case"
+  assert_not_contains "$out" "CODEX_SKILL_BUDGET" \
+    "a secondmate home reported machine-global skills it cannot scope"
+
+  pass "bootstrap reports the machine-global skill surface behind Codex's 2% budget"
 }
 
 test_no_mistakes_min_version() {
@@ -833,6 +1076,8 @@ ROWS
 }
 
 test_bootstrap_reporting
+test_gh_auth_diagnostics_distinguish_codex_sandbox
+test_codex_skill_budget_reports_machine_global_surface
 test_no_mistakes_min_version
 test_quota_axi_min_version
 test_git_is_required_with_supported_install_instruction

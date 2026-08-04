@@ -237,6 +237,27 @@ The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 
+## Codex skill budget (machine-global skills and plugins)
+
+Codex renders every skill it discovers into its system prompt as one name and description, and when that combined set outgrows its 2% skills context budget it shortens the descriptions and says so.
+Every skill stays visible and loadable; only the descriptions Codex routes on get shorter.
+Firstmate's own skills are sized to fit that budget alone, measured in [`docs/verification/supervision.md`](verification/supervision.md), so a Codex primary that still reports shortened descriptions is spending the budget on the machine-global skills loaded alongside them.
+That surface belongs to the captain's environment rather than to Firstmate, so bootstrap measures it and reports the choice with a `CODEX_SKILL_BUDGET` line whenever the machine-global count exceeds this repository's own, naming each root and its count.
+It never edits, disables, or removes anything under those roots, and a secondmate home stays silent because only the captain can act on machine-global state.
+
+The counted roots are `~/.agents/skills` and `$CODEX_HOME/skills` (default `~/.codex/skills`).
+Codex scans each recursively, follows symlinks, and skips hidden directories, so one symlinked collection can contribute dozens of skills on its own.
+Codex's bundled `$CODEX_HOME/skills/.system` set spends the same budget but is Codex's own rather than the captain's to remove, so the same hidden-directory skip keeps it out of the reported count.
+Enabled Codex plugins carry their own skills into the same budget; `codex plugin list` is Codex's supported view of which are installed and enabled, and `codex plugin remove <plugin>@<marketplace>` is its supported way to drop one.
+
+To recover budget, scope the global set rather than this repository's:
+
+- move a collection you only need in one project out of `~/.agents/skills` and into that project's own `.agents/skills`
+- unlink or delete global skills you no longer use
+- remove plugins you no longer use with Codex's own plugin commands
+
+Each of those changes the captain's own machine-global configuration, which is why Firstmate reports the measurement and leaves the decision to the captain.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
@@ -521,6 +542,7 @@ FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting X-mode completion 
 FMX_FOLLOWUP_MAX_COUNT=3   # local cap on X-mode completion follow-ups per linked mention
 FM_PF_RETRY_BACKOFF_SECS=900   # seconds before the next attempt after a retryable promised-public-reply delivery error
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
+FM_CODEX_THREAD_LEASE_SECS=900   # seconds a Codex `codex-thread:` session lock stays proof of a live owner; the owner renews it on every guarded command, and only an expired lease is reclaimable by another session
 FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon as stale
 FM_CLAUDE_AUTOARM_ATTEMPTS=2   # bounded Stop-owned arm attempts per Claude auto-arm cycle; accepted values are 1, 2, or 3
 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=800   # milliseconds the --claude turn-end guard waits for watcher health, a role-verified Stop auto-arm claim, or a fresh epoch before deciding recovery ownership or failure progression

@@ -7,6 +7,8 @@
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
+#                 "GH_AUTH_UNVERIFIED: <reason>",
+#                 "CODEX_SKILL_BUDGET: <n> machine-global skills (<root>: <n>...) load on top of this repository's <n>; ...",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
@@ -45,6 +47,13 @@
 #          failed names whether the endpoint was missing or agent-less.
 #          Already-live and successfully relaunched secondmates are silent
 #          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts.
+#          A CODEX_SKILL_BUDGET line is read-only reporting for a Codex primary
+#          home whose machine-global skill roots carry more skills than this
+#          repository's own: that global set, not firstmate's, is what remains
+#          when Codex says it shortened skill descriptions to fit its 2% skills
+#          context budget. Bootstrap never edits, disables, or removes anything
+#          under those roots; docs/configuration.md "Codex skill budget" owns the
+#          scoping guidance.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
@@ -122,6 +131,94 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+
+# Credential material is exactly what the GitHub CLI itself reads: GH_TOKEN,
+# GITHUB_TOKEN, and hosts.yml under GH_CONFIG_DIR, then $XDG_CONFIG_HOME/gh,
+# then ~/.config/gh. Anything the CLI would not read is not evidence of auth,
+# because every downstream gh and gh-axi call in this repo sees only what gh
+# sees; treating a wider credential set as sufficient would silence a real
+# auth gap here and fail later at PR and merge time instead.
+gh_auth_config_present() {
+  [ -n "${GH_TOKEN:-}" ] || [ -n "${GITHUB_TOKEN:-}" ] \
+    || [ -s "${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/gh}/hosts.yml" ]
+}
+
+# `gh auth status` validates the token over the network, and the observed Codex
+# sandbox denies exactly that (`CODEX_SANDBOX_NETWORK_DISABLED=1`), so present
+# credential material can be unvalidatable there. The network denial is the
+# cause, not one platform's sandbox implementation, so any non-empty
+# CODEX_SANDBOX counts too rather than only the macOS `seatbelt` label - but
+# only while the sandbox has not reported its network state. A sandbox that
+# explicitly reports its network AVAILABLE ran a real, reachable check, so its
+# failure is a genuine auth gap that must still request an interactive login.
+codex_sandbox_blocks_auth_check() {
+  case "${CODEX_SANDBOX_NETWORK_DISABLED:-}" in
+    0 | false) return 1 ;;
+    '') [ -n "${CODEX_SANDBOX:-}" ]; return ;;
+    *) return 0 ;;
+  esac
+}
+
+gh_auth_diagnostic() {
+  gh auth status >/dev/null 2>&1 && return 0
+  if gh_auth_config_present && codex_sandbox_blocks_auth_check; then
+    echo "GH_AUTH_UNVERIFIED: Codex sandbox could not validate existing GitHub credential material; rerun the auth check outside the Codex sandbox or expose a valid GH_TOKEN/GITHUB_TOKEN to this session"
+  else
+    echo "NEEDS_GH_AUTH"
+  fi
+}
+
+# Count the skill definitions Codex would discover under one skill root.
+# The scan rule is Codex's own, established against codex-cli 0.146.0 by
+# rendering `codex debug prompt-input` and diffing the rendered set against the
+# files on disk: each root is scanned recursively, symlinks are followed, and
+# hidden directories are skipped. Following symlinks matters because a single
+# symlinked collection under a skill root contributes every nested skill it
+# carries, and skipping hidden directories is what keeps a repository's own
+# .git, a bundle's private .slate, and Codex's bundled $CODEX_HOME/skills/.system
+# set out of a count meant to name what the captain can actually scope.
+codex_skill_root_count() {
+  local root=$1
+  [ -d "$root" ] || { echo 0; return 0; }
+  find -L "$root" -name '.*' -prune -o -name SKILL.md -type f -print 2>/dev/null \
+    | wc -l | tr -d '[:space:]'
+}
+
+# Codex renders every discoverable skill's name and description into its system
+# prompt and, when that set outgrows its 2% skills context budget, shortens the
+# descriptions and reports that it did. This repository's own skills fit that
+# budget alone (docs/verification/supervision.md), so when a Codex primary still
+# reports shortened descriptions the remaining contributor is the machine-global
+# skill surface loaded on top of them. That surface is the captain's own
+# environment: firstmate measures it and reports the choice, and never edits,
+# disables, or removes anything under those roots. Enabled Codex plugins carry
+# skills into the same budget, but their cache layout is Codex's private detail,
+# so the line points at `codex plugin list` - Codex's own supported view - rather
+# than walking it.
+# Scoped to a Codex primary home: no other harness has this budget, and only the
+# captain's own session can act on machine-global user state, so a secondmate
+# home stays quiet instead of repeating a report it must not act on.
+codex_skill_budget_diagnostic() {
+  local repo global root count roots
+  if [ -e "$FM_HOME/.fm-secondmate-home" ] || [ -L "$FM_HOME/.fm-secondmate-home" ]; then
+    return 0
+  fi
+  [ "$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null)" = codex ] || return 0
+  repo=$(codex_skill_root_count "$FM_ROOT/.agents/skills")
+  global=0
+  roots=""
+  for root in "${HOME:-}/.agents/skills" "${CODEX_HOME:-${HOME:-}/.codex}/skills"; do
+    count=$(codex_skill_root_count "$root")
+    [ "$count" -gt 0 ] || continue
+    global=$((global + count))
+    roots="${roots:+$roots, }$root: $count"
+  done
+  # Firstmate's own skills are proven to fit the budget alone, so only a global
+  # set larger than them can still be the cause once this repository has trimmed
+  # its own share; below that, reporting would be noise the captain cannot act on.
+  [ "$global" -gt "$repo" ] || return 0
+  echo "CODEX_SKILL_BUDGET: $global machine-global skills ($roots) load on top of this repository's $repo; Codex shortens skill descriptions to fit its 2% skills context budget when the combined set outgrows it, and firstmate can only scope its own - review that global set and \`codex plugin list\`"
+}
 
 fleet_sync_origin_backed_project_count() {
   local count proj
@@ -1035,7 +1132,8 @@ fi
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
 fi
-gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+gh_auth_diagnostic
+codex_skill_budget_diagnostic
 # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
 # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
 # primary only; detached-HEAD worktrees and secondmate homes never trip it.

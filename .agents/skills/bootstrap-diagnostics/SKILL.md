@@ -1,9 +1,6 @@
 ---
 name: bootstrap-diagnostics
-description: >-
-  Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
-  A silent bootstrap section, or a BOOTSTRAP_INFO fact, means no skill load.
+description: Use when session start or fm-bootstrap prints MISSING, backend, GH auth, skill-budget, TANGLE, config, dispatch, fleet-sync, PR-check, secondmate, nudge, or FMX diagnostics.
 user-invocable: false
 metadata:
   internal: true
@@ -24,6 +21,12 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `MISSING_MANUAL: <tool> (instructions: <url>)` - tell the captain why the tool is required and give them the printed instructions URL, but do not pass the tool to `bin/fm-bootstrap.sh install`; wait for the captain to complete the manual installation, then rerun session start to confirm the dependency is present.
 - `BACKEND_INVALID: <name> (known: <names>)` - the resolved runtime backend has no verified dependency or lifecycle contract, so do not dispatch work until the invalid `FM_BACKEND` or `config/backend` value is corrected to one of the listed backends.
 - `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
+- `GH_AUTH_UNVERIFIED: <reason>` - GitHub credential material exists, but the current environment could not validate it.
+  Do not ask the captain to log in again from that diagnostic alone.
+  Report the printed reason and rerun the auth check from an environment that can reach the existing credential material before dispatching GitHub-dependent work.
+- `CODEX_SKILL_BUDGET: <n> machine-global skills (<root>: <n>...) load on top of this repository's <n>` - a Codex primary is loading more skills from the captain's own machine-global roots than this repository defines, and that global set is what remains when Codex reports shortening skill descriptions to fit its 2% skills context budget.
+  Do not dispatch work on it and do not touch those roots, `$CODEX_HOME/config.toml`, or any plugin: they are the captain's machine-global state, outside firstmate's control.
+  Report the counted roots and the scoping options in `docs/configuration.md` "Codex skill budget" so the captain can decide, and never trim, hide, or de-register a firstmate skill to buy budget instead.
 - `TANGLE: <remediation>` - the primary checkout is stranded on a feature branch instead of its default branch; `AGENTS.md` section 8 explains why this guard exists and what it protects.
   The work is safe on that branch ref; restore the primary to its default branch with the printed `git -C <root> checkout <default>`, then re-validate that branch in a proper worktree.
   This is the only sanctioned firstmate-initiated git write to the primary, and it is a non-destructive branch switch that strands nothing.
