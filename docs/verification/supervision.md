@@ -241,6 +241,25 @@ tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
 ```
 
+### External Codex no-pane AFK boundary
+
+The external-Codex AFK boundary was verified on 2026-08-04 with the installed tmux and Herdr transports.
+`tests/fm-afk-launch.test.sh` reconstructs the bounded no-pane Codex checkpoint, retains an actionable wake, rejects both normal and native daemon entry before away state exists, and refuses an explicit worker-looking target.
+The same test keeps the established tmux and Herdr detached-daemon lifetime and exact cleanup coverage, while `tests/fm-afk-return.test.sh` covers return catch-up cleanup.
+
+```sh
+bin/fm-test-run.sh tests/fm-afk-launch.test.sh tests/fm-watch-checkpoint.test.sh tests/fm-afk-return.test.sh tests/fm-supervision-instructions.test.sh
+```
+
+Observed output:
+
+```text
+FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=13718
+```
+
+The supported external-Codex result is an early refusal with no away flag, daemon record, or daemon lock because the surface has no safe asynchronous callback into its active thread.
+The current operator mechanism and supported route are owned by [`supervision-protocols/codex.md`](../supervision-protocols/codex.md).
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.
