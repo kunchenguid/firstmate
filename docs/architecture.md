@@ -126,8 +126,8 @@ It sends supported corrections back through the existing PR branch and selected 
 Fleet-authored exact-head findings remain private and route directly to the implementation owner; unsupported internal leads remain private.
 Fleet-authored PRs are never self-reviewed or approved on GitHub, their private passes never count as independent review evidence, foreign PRs are comment-only after a live distinct-identity check, and this path has no merge authority.
 
-The source returns a bounded process-event result only when model attention is needed, then classifies that result terminal so the generic runner retains and re-announces it without starting another account poll.
-After the result is durably handled, the adjudication owner acknowledges the review event and re-registers the ongoing source.
+The source returns a bounded process-event result only when model attention is needed, then classifies that result terminal, so the generic runner retires this registration instead of starting another account poll while the result waits, and the captured result stays re-announced until it is acknowledged.
+Coverage therefore resumes only on a deliberate re-arm: the adjudication owner acknowledges the review event and re-registers the source after durably handling it, and the next locked main-home bootstrap re-arms it otherwise.
 This composes with every supported primary harness through the same `check` notification path and never consults a runtime backend, so harness and backend differences are not part of its semantics.
 [`configuration.md`](configuration.md#automatic-pull-request-review-statepr-review) owns setup and limits, and [`verification/pr-review.md`](verification/pr-review.md) holds the current behavior evidence.
 

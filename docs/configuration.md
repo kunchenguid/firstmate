@@ -490,7 +490,8 @@ The opt-out record is private and durable; removing the process-event registrati
 The poll uses explicit pages and refuses with a bounded diagnostic rather than silently dropping eligible repositories, pull requests, reviews, inline threads, or conversation comments beyond a configured limit.
 Before any formal COMMENT review write, delivery re-reads the live pull-request author and authenticated actor and refuses when they match; stale fallback-comment state receives the same refusal and fallback comments are never published.
 Original-thread replies to independently supplied external feedback remain available after adjudication.
-It reads GitHub rate-limit state before inventory, uses bounded read retries, makes one non-retried write attempt before response reconciliation, bounds every `gh-axi` call and total poll execution, and preserves the last good snapshot on authentication, rate, schema, pagination, or response-size failure.
+It reads GitHub rate-limit state before inventory, uses bounded read retries, makes one non-retried write attempt before response reconciliation, bounds every `gh-axi` call and total poll execution, and preserves the last good snapshot whenever an account-wide authentication, rate, or execution-bound failure ends the poll.
+A read, pagination, schema, or response-size failure confined to one pull request is isolated instead of ending the poll, as `docs/architecture.md` describes.
 The defaults are:
 
 ```sh

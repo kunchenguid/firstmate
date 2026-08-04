@@ -19,14 +19,17 @@
 #   fm-pr-review.sh opt-in <canonical-pr-url>
 #   fm-pr-review.sh source-id
 #
-# `arm` installs one ongoing source in this home's existing process-event runner.
-# Locked session-start bootstrap calls it automatically for the main Firstmate
-# home, so no cron job, LaunchAgent, daemon, custom watcher check, token, or
-# separate credential is needed. The source uses gh-axi and its authenticated
-# GitHub identity, sleeps until its durable slow-poll deadline, and remains
-# silent when the relevant PR set, exact heads, feedback identities, and queue
-# actionability are unchanged. An unchanged poll makes no model call and starts
-# no worker. A pull request whose live detail read answers closed is omitted; a
+# `arm` installs one source in this home's existing process-event runner. Every
+# captured result classifies terminal, so the runner retires that registration
+# and coverage resumes only when the adjudication owner re-arms after handling
+# the result or the next locked session-start bootstrap re-arms it. Bootstrap
+# calls `arm` automatically for the main Firstmate home, so no cron job,
+# LaunchAgent, daemon, custom watcher check, token, or separate credential is
+# needed. The source uses gh-axi and its authenticated GitHub identity, sleeps
+# until its durable slow-poll deadline, and remains silent when the relevant PR
+# set, exact heads, feedback identities, and queue actionability are unchanged.
+# An unchanged poll makes no model call and starts no worker.
+# A pull request whose live detail read answers closed is omitted; a
 # read, pagination, or schema failure for one open pull request keeps that pull
 # request's last covered head and feedback cursor, records the failure in the
 # snapshot, announces one deduplicated diagnostic, and lets the rest of the
