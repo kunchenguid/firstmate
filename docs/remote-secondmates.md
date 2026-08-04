@@ -42,7 +42,9 @@ No login or interactive shell ever runs on the remote host, so `~/.profile`, `~/
 `bin/fm-remote-job-lib.sh` is the single owner of the worker `PATH` and builds it by filesystem discovery rather than by evaluating shell startup files.
 The authorized child sees `<remote-root>/bin` first, then the account's `~/.local/bin`, existing nvm version bins, asdf shims and install bins, mise shims and install bins, Nix directories, Homebrew directories, and the system tail `/usr/bin:/bin:/usr/sbin:/sbin`.
 The Nix and package-manager order after version-manager discovery is `~/.nix-profile/bin`, `/etc/profiles/per-user/<account>/bin`, `/run/current-system/sw/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`.
-Repeated or symlinked directories are excluded, so the resulting order is deterministic and contains no duplicate entries.
+Exact repeated entries are omitted.
+For the three Nix locations, a final `bin` symlink is resolved to its physical directory, while a path reached through symlinked ancestors remains in its documented position.
+Other final-component symlink directories are excluded.
 The entrypoint resolves `git` only from the operator portion before prepending `<remote-root>/bin` for the authorized child.
 A checkout-local `bin/git` therefore cannot authorize an untracked command, and a host with no operator `git` receives an install-or-wrapper diagnostic before command execution.
 
