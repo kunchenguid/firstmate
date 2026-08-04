@@ -356,7 +356,7 @@ refresh_v1_x_shim() {
   mv -f -- "$MIGRATION_X_SHIM_TMP" "$shim" || return 1
   MIGRATION_X_SHIM_TMP=
   [ "$(fm_pr_file_device "$shim")" = "$STATE_DEVICE" ] || return 1
-  fm_pr_mode_matches "$shim" 700 || return 1
+  [ "$(fm_pr_file_mode "$shim")" = 700 ] || return 1
   fmx_poll_shim_valid "$shim" "$FM_HOME" "$FM_ROOT"
 }
 if ! refresh_v1_x_shim; then
