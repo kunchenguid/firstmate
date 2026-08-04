@@ -222,6 +222,14 @@ phase_teardown() {
   assert_no_grep '- design ' "$HOME_DIR/data/secondmates.md" "teardown did not remove the registry route"
   # The parent's source projects are untouched (no write through a parent home).
   assert_present "$HOME_DIR/projects/alpha" "teardown disturbed a parent project"
+  # The retired secondmate stays in the parent's durable history. The manifest
+  # must be published BEFORE the home is removed, because a home can contain the
+  # very records the manifest is composed from.
+  assert_present "$HOME_DIR/data/design/outcome.json" \
+    "teardown did not leave a durable outcome manifest for the retired secondmate"
+  jq -e '.task_id == "design" and .kind == "secondmate" and .outcome.state == "retired"' \
+    "$HOME_DIR/data/design/outcome.json" >/dev/null \
+    || fail "the retired secondmate's manifest did not record a retirement outcome"
   pass "teardown: removes the home, then clears meta and the registry route"
 }
 

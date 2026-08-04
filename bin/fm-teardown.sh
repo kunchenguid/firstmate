@@ -6,9 +6,10 @@
 # for ship and scout teardowns (a secondmate teardown prints none, since
 # secondmates are not backlog items).
 # The manifest at data/<task-id>/outcome.json is written atomically BEFORE the
-# volatile records it is composed from are removed, so the task stays in durable
-# history afterwards. A manifest that cannot be published refuses the cleanup
-# rather than erasing a task that could not be archived; see
+# volatile records it is composed from are removed - including before a retired
+# secondmate's home, which can contain those records - so the task stays in
+# durable history afterwards. A manifest that cannot be published refuses the
+# cleanup rather than erasing a task that could not be archived; see
 # publish_outcome_manifest below and bin/fm-outcome-manifest.sh.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
@@ -1942,6 +1943,11 @@ if [ "$BACKEND" = herdr ]; then
     exit 1
   fi
 fi
+# Every refusal gate has passed and the endpoint is confirmed gone, so this is
+# the last point at which the records the manifest is composed from all still
+# exist: a retired secondmate's own state and data directories can live INSIDE
+# the home removed on the next line.
+publish_outcome_manifest "$FORCE" || exit 1
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit $?
@@ -1961,7 +1967,6 @@ fi
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
-publish_outcome_manifest "$FORCE" || exit 1
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.pr-status" "$STATE/$ID.gbrain"
