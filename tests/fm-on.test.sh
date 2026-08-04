@@ -201,34 +201,52 @@ assert_contains "$out" '/.local/bin' "the entrypoint did not point at the wrappe
 assert_not_contains "$out" 'command is not tracked by the configured remote root' "missing git was misreported as an untracked command"
 pass "the entrypoint gives an actionable missing-git diagnostic"
 
-out=$(fm_on ios fm-remote-doctor.sh)
-rc=$?
-expect_code 0 "$rc" "the remote doctor failed through the transport"
+# The doctor's readiness verdict depends on the host it runs on, which is this
+# developer's or runner's real account here, so this transport test asserts only
+# what the transport itself owns: the PATH the entrypoint handed the child.
+# tests/fm-remote-doctor.test.sh owns the verdict against controlled fixtures.
+set +e
+out=$(fm_on ios fm-remote-doctor.sh 2>/dev/null)
+set -e
 assert_contains "$out" "path=$EXPECTED_PATH" "the remote doctor did not report the entrypoint child PATH"
 assert_contains "$out" 'entrypoint=yes' "the remote doctor did not detect its entrypoint launch"
 assert_contains "$out" 'required git=' "the remote doctor did not report the required tool"
 pass "the remote doctor reports the same PATH the entrypoint hands its children"
 
 DOCTOR_BIN="$TMP_ROOT/doctor-bin"
-mkdir -p "$DOCTOR_BIN"
+DOCTOR_HOME="$TMP_ROOT/doctor-home"
+mkdir -p "$DOCTOR_BIN" "$DOCTOR_HOME"
 ln -sf "$(command -v bash)" "$DOCTOR_BIN/bash"
+# Report a non-darwin host so this file keeps testing tool resolution alone and
+# never reads or writes the real account's launch agents.
+cat > "$DOCTOR_BIN/uname" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = -s ] && { printf 'Linux\n'; exit 0; }
+printf 'Linux\n'
+SH
+chmod +x "$DOCTOR_BIN/uname"
 set +e
-out=$(PATH="$DOCTOR_BIN" "$ROOT/bin/fm-remote-doctor.sh" 2>&1)
+out=$(HOME="$DOCTOR_HOME" PATH="$DOCTOR_BIN" "$ROOT/bin/fm-remote-doctor.sh" 2>&1)
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "the remote doctor passed with a missing required tool"
 assert_contains "$out" 'required git=MISSING' "the remote doctor did not mark the missing required tool"
-assert_contains "$out" 'required tools do not resolve on the remote runtime PATH: git' "the remote doctor did not name the missing tool"
+assert_contains "$out" 'required jq=MISSING' "the remote doctor did not mark every missing required tool"
+assert_contains "$out" 'required tools do not resolve on the remote runtime PATH: git jq' "the remote doctor did not name the missing tools"
 assert_contains "$out" '.local/bin' "the remote doctor did not offer the wrapper escape hatch"
 ln -sf "$(command -v git)" "$DOCTOR_BIN/git"
+# A resolvable stub is enough: this file asserts tool RESOLUTION, and with no
+# herdr on the fixture PATH nothing ever asks jq to parse anything.
+printf '#!/usr/bin/env bash\nexit 0\n' > "$DOCTOR_BIN/jq"
+chmod +x "$DOCTOR_BIN/jq"
 set +e
-out=$(PATH="$DOCTOR_BIN" "$ROOT/bin/fm-remote-doctor.sh" 2>&1)
+out=$(HOME="$DOCTOR_HOME" PATH="$DOCTOR_BIN" "$ROOT/bin/fm-remote-doctor.sh" 2>&1)
 rc=$?
 set -e
-expect_code 0 "$rc" "the remote doctor failed with every required tool present"
 assert_contains "$out" "required git=$DOCTOR_BIN/git" "the remote doctor did not report where the required tool resolved"
 assert_contains "$out" 'optional tmux=absent' "the remote doctor did not report an absent optional tool"
-pass "the remote doctor fails only on missing required tools and names them"
+assert_not_contains "$out" 'required tools do not resolve' "a resolved required tool was still reported missing"
+pass "the remote doctor reports required and optional tool resolution and names what is missing"
 
 out=$(fm_on ios fm-probe-two.sh)
 assert_contains "$out" "home=$REMOTE_HOME" "first dynamic command stopped resolving"
