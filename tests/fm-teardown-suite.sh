@@ -67,6 +67,7 @@ set -u
 fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
+TREEHOUSE_REAPER="$ROOT/bin/fm-treehouse-reap.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 # shellcheck source=bin/fm-checkout-lock-lib.sh disable=SC1091
 . "$ROOT/bin/fm-checkout-lock-lib.sh"
@@ -130,6 +131,81 @@ with open(state, "w", encoding="utf-8") as stream:
         stream,
     )
 PY
+}
+
+write_reaper_pool_lease() {
+  local case_dir=$1 holder=${2:-firstmate-task-x1} pool
+  pool="$case_dir/pools/test"
+  mkdir -p "$pool"
+  python3 - "$pool/treehouse-state.json" "$case_dir/wt" "$holder" <<'PY'
+import json
+import os
+import sys
+
+state, path, holder = sys.argv[1:]
+with open(state, "w", encoding="utf-8") as stream:
+    json.dump(
+        {
+            "worktrees": [
+                {
+                    "name": "1",
+                    "path": os.path.realpath(path),
+                    "leased": True,
+                    "lease_holder": holder,
+                }
+            ]
+        },
+        stream,
+    )
+PY
+}
+
+write_reaper_pool_returned() {
+  local case_dir=$1 pool
+  pool="$case_dir/pools/test"
+  mkdir -p "$pool"
+  python3 - "$pool/treehouse-state.json" "$case_dir/wt" <<'PY'
+import json
+import os
+import sys
+
+state, path = sys.argv[1:]
+with open(state, "w", encoding="utf-8") as stream:
+    json.dump(
+        {"worktrees": [{"name": "1", "path": os.path.realpath(path)}]},
+        stream,
+    )
+PY
+}
+
+install_nonforcing_treehouse_recorder() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_REAPER_RETURN_LOG:?}"
+case " $* " in
+  *' --force '*) exit 90 ;;
+  ' return . ') exit 0 ;;
+esac
+exit 91
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+run_treehouse_reaper() {
+  local case_dir=$1
+  shift
+  FM_HOME="$case_dir/home" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_PROJECTS_OVERRIDE="$case_dir/source-projects" \
+  FM_CHECKOUT_REFRESH_LOCK_ROOT="$case_dir/checkout-locks" \
+  FM_TREEHOUSE_ROOT="$case_dir/pools" \
+  FM_REAPER_RETURN_LOG="$case_dir/treehouse-return.log" \
+  FM_FAKE_FIRSTMATE_SOURCE="$ROOT" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$TREEHOUSE_REAPER" "$@"
 }
 
 prepare_secondmate_home_fixture() {
@@ -1452,6 +1528,290 @@ test_dirty_worktree_refuses() {
   pass "dirty worktree is refused even when its committed work has landed (dirty always wins)"
 }
 
+test_dead_task_reaper_returns_only_clean_landed_work_without_force() {
+  local case_dir out
+  case_dir=$(make_case dead-reaper-clean)
+  mkdir -p "$case_dir/home"
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt landed "landed task work"
+  add_fork_with_pushed_branch "$case_dir"
+  git -C "$case_dir/wt" remote set-url origin https://github.com/example/repo.git
+  rm -f "$case_dir/fakebin/.tmux-live"
+  write_reaper_pool_lease "$case_dir"
+  install_nonforcing_treehouse_recorder "$case_dir"
+  : > "$case_dir/treehouse-return.log"
+  printf '%s\n' 'done: task completed' > "$case_dir/state/task-x1.status"
+
+  out=$(run_treehouse_reaper "$case_dir" reap --auto) \
+    || fail "dead reaper refused clean remote-reachable work: $out"
+
+  assert_contains "$out" "TREEHOUSE_REAP: released task=task-x1" \
+    "dead reaper did not report the released task"
+  assert_grep 'return .' "$case_dir/treehouse-return.log" \
+    "dead reaper did not use the non-forcing Treehouse return"
+  assert_no_grep 'return --force' "$case_dir/treehouse-return.log" \
+    "dead reaper used the forcing Treehouse return"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "dead reaper left stale task metadata after releasing the lease"
+  pass "dead task reaping releases clean remote-reachable work without forcing"
+}
+
+test_dead_task_reaper_treats_stale_status_as_no_liveness_evidence() {
+  local dead_case live_case out
+  dead_case=$(make_case dead-reaper-stale-working-status)
+  mkdir -p "$dead_case/home"
+  write_meta "$dead_case" no-mistakes ship
+  wt_commit_file "$dead_case" feature.txt landed "landed task work"
+  add_fork_with_pushed_branch "$dead_case"
+  git -C "$dead_case/wt" remote set-url origin https://github.com/example/repo.git
+  rm -f "$dead_case/fakebin/.tmux-live"
+  write_reaper_pool_lease "$dead_case"
+  install_nonforcing_treehouse_recorder "$dead_case"
+  : > "$dead_case/treehouse-return.log"
+  printf '%s\n' 'working: stale event from a dead endpoint' > "$dead_case/state/task-x1.status"
+
+  out=$(run_treehouse_reaper "$dead_case" reap --auto) \
+    || fail "stale working status prevented dead endpoint recovery: $out"
+  assert_contains "$out" "TREEHOUSE_REAP: released task=task-x1" \
+    "automatic reaping treated stale status history as live state"
+  assert_absent "$dead_case/state/task-x1.meta" \
+    "automatic reaping retained dead task metadata because of stale status history"
+
+  live_case=$(make_case live-reaper-stale-working-status)
+  mkdir -p "$live_case/home"
+  write_meta "$live_case" no-mistakes ship
+  wt_commit_file "$live_case" feature.txt landed "landed task work"
+  add_fork_with_pushed_branch "$live_case"
+  git -C "$live_case/wt" remote set-url origin https://github.com/example/repo.git
+  : > "$live_case/fakebin/.tmux-live"
+  write_reaper_pool_lease "$live_case"
+  install_nonforcing_treehouse_recorder "$live_case"
+  : > "$live_case/treehouse-return.log"
+  printf '%s\n' 'working: recent event from a live endpoint' > "$live_case/state/task-x1.status"
+
+  out=$(run_treehouse_reaper "$live_case" reap --auto 2>&1) \
+    || fail "live-endpoint safety refusal should be a successful automatic reap pass: $out"
+  assert_contains "$out" "found a live endpoint" \
+    "automatic reaping did not make the authoritative endpoint check"
+  assert_present "$live_case/state/task-x1.meta" \
+    "automatic reaping removed metadata for a live endpoint"
+  [ ! -s "$live_case/treehouse-return.log" ] \
+    || fail "automatic reaping returned a live endpoint's worktree"
+  pass "status history never substitutes for the authoritative endpoint proof"
+}
+
+test_dead_task_reaper_reconciles_an_already_returned_lease() {
+  local case_dir out
+  case_dir=$(make_case dead-reaper-returned)
+  mkdir -p "$case_dir/home"
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'tasktmp=/tmp/fm-task-x1' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt landed "landed task work"
+  add_fork_with_pushed_branch "$case_dir"
+  rm -f "$case_dir/fakebin/.tmux-live"
+  write_treehouse_returned "$case_dir/wt"
+  write_reaper_pool_returned "$case_dir"
+  install_nonforcing_treehouse_recorder "$case_dir"
+  : > "$case_dir/treehouse-return.log"
+
+  out=$(run_treehouse_reaper "$case_dir" reap task-x1) \
+    || fail "dead reaper could not reconcile an already-returned lease: $out"
+
+  assert_contains "$out" "TREEHOUSE_REAP: reconciled task=task-x1" \
+    "dead reaper did not report already-returned bookkeeping reconciliation"
+  [ ! -s "$case_dir/treehouse-return.log" ] \
+    || fail "dead reaper called Treehouse for an already-returned lease"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "dead reaper left stale metadata for an already-returned lease"
+  pass "dead task reaping reconciles metadata after an already-returned lease"
+}
+
+test_dead_task_reaper_retains_dirty_work_and_live_endpoints() {
+  local case_dir out rc
+  case_dir=$(make_case dead-reaper-dirty)
+  mkdir -p "$case_dir/home"
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt landed "landed task work"
+  add_fork_with_pushed_branch "$case_dir"
+  rm -f "$case_dir/fakebin/.tmux-live"
+  write_reaper_pool_lease "$case_dir"
+  install_nonforcing_treehouse_recorder "$case_dir"
+  : > "$case_dir/treehouse-return.log"
+  printf '%s\n' retained > "$case_dir/wt/operator-note.txt"
+
+  set +e
+  out=$(run_treehouse_reaper "$case_dir" reap task-x1 2>&1)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "dead reaper dirty-work safety refusal"
+  assert_contains "$out" "TREEHOUSE_REAP: retained task=task-x1 reason=teardown-refused" \
+    "dead reaper did not report its dirty-work refusal"
+  assert_present "$case_dir/wt/operator-note.txt" \
+    "dead reaper discarded uncommitted work"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "dead reaper cleared metadata for dirty work"
+  [ ! -s "$case_dir/treehouse-return.log" ] \
+    || fail "dead reaper called Treehouse for dirty work"
+
+  rm -f "$case_dir/wt/operator-note.txt"
+  : > "$case_dir/treehouse-return.log"
+  : > "$case_dir/fakebin/.tmux-live"
+  set +e
+  out=$(run_treehouse_reaper "$case_dir" reap task-x1 2>&1)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "dead reaper live-endpoint safety refusal"
+  assert_contains "$out" "found a live endpoint" \
+    "dead reaper did not cite the live endpoint"
+  assert_present "$case_dir/fakebin/.tmux-live" \
+    "dead reaper killed a live endpoint"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "dead reaper cleared metadata for a live task"
+  [ ! -s "$case_dir/treehouse-return.log" ] \
+    || fail "dead reaper called Treehouse for a live endpoint"
+  pass "dead task reaping retains dirty work and never kills a live endpoint"
+}
+
+test_dead_task_reaper_requires_exact_lease_and_closed_pr() {
+  local case_dir out rc
+  case_dir=$(make_case dead-reaper-authority)
+  mkdir -p "$case_dir/home"
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt landed "landed task work"
+  add_fork_with_pushed_branch "$case_dir"
+  rm -f "$case_dir/fakebin/.tmux-live"
+  install_nonforcing_treehouse_recorder "$case_dir"
+  : > "$case_dir/treehouse-return.log"
+  write_reaper_pool_lease "$case_dir" firstmate-misleading-label
+
+  set +e
+  out=$(run_treehouse_reaper "$case_dir" reap task-x1 2>&1)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "dead reaper lease-holder mismatch safety refusal"
+  assert_contains "$out" "lease-holder-mismatch holder=firstmate-misleading-label" \
+    "dead reaper trusted a misleading lease label"
+  [ ! -s "$case_dir/treehouse-return.log" ] \
+    || fail "dead reaper returned a lease owned by another label"
+
+  write_reaper_pool_lease "$case_dir"
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'pull_request:' '  number: 7' '  state: open'
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+  set +e
+  out=$(run_treehouse_reaper "$case_dir" reap task-x1 2>&1)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "dead reaper open-PR safety refusal"
+  assert_contains "$out" "reason=open-pr" \
+    "dead reaper did not preserve the worktree for an open PR"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "dead reaper cleared metadata for an open PR"
+  [ ! -s "$case_dir/treehouse-return.log" ] \
+    || fail "dead reaper returned an open-PR worktree"
+
+  case_dir=$(make_case dead-reaper-unrecorded-open-pr)
+  mkdir -p "$case_dir/home"
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'worktree_git_ref=refs/heads/fm/task-x1' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt landed "landed task work"
+  add_fork_with_pushed_branch "$case_dir"
+  git -C "$case_dir/wt" remote set-url origin https://github.com/example/repo.git
+  rm -f "$case_dir/fakebin/.tmux-live"
+  write_reaper_pool_lease "$case_dir"
+  install_nonforcing_treehouse_recorder "$case_dir"
+  : > "$case_dir/treehouse-return.log"
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr list")
+    printf '%s\n' \
+      'count: 1' \
+      'pull_requests[1]{number,title,state,author,draft,review,url}:' \
+      '  7,"unmerged work",open,example,no,none,"https://github.com/example/repo/pull/7"'
+    exit 0
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+  set +e
+  out=$(run_treehouse_reaper "$case_dir" reap task-x1 2>&1)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "dead reaper unrecorded open-PR safety refusal"
+  assert_contains "$out" "reason=open-pr branch=fm/task-x1" \
+    "dead reaper did not discover the open PR from the task branch"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "dead reaper cleared metadata for a branch-discovered open PR"
+  [ ! -s "$case_dir/treehouse-return.log" ] \
+    || fail "dead reaper returned a branch-discovered open-PR worktree"
+
+  case_dir=$(make_case dead-reaper-scout)
+  mkdir -p "$case_dir/home"
+  write_meta "$case_dir" no-mistakes scout
+  write_reaper_pool_lease "$case_dir"
+  install_nonforcing_treehouse_recorder "$case_dir"
+  : > "$case_dir/treehouse-return.log"
+  set +e
+  out=$(run_treehouse_reaper "$case_dir" reap task-x1 2>&1)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "dead reaper unsupported-kind safety refusal"
+  assert_contains "$out" "reason=unsupported-kind kind=scout" \
+    "dead reaper did not conservatively reject a scout lease"
+  [ ! -s "$case_dir/treehouse-return.log" ] \
+    || fail "dead reaper returned an unsupported scout lease"
+  pass "dead task reaping requires exact lease ownership and preserves open PRs"
+}
+
+test_treehouse_capacity_reports_low_clean_availability() {
+  local case_dir pool out path index
+  case_dir=$(make_case treehouse-capacity-low)
+  mkdir -p "$case_dir/home" "$case_dir/capacity-pools/demo"
+  pool="$case_dir/capacity-pools/demo"
+  for index in 1 2; do
+    path="$pool/$index/wt"
+    fm_git_init_commit "$path"
+  done
+  printf '%s\n' dirty > "$pool/2/wt/operator-note.txt"
+  python3 - "$pool/treehouse-state.json" "$pool" <<'PY'
+import json
+import os
+import sys
+
+state, pool = sys.argv[1:]
+entries = [
+    {"name": "1", "path": os.path.join(pool, "1", "wt")},
+    {"name": "2", "path": os.path.join(pool, "2", "wt")},
+    {
+        "name": "3",
+        "path": os.path.join(pool, "3", "wt"),
+        "leased": True,
+        "lease_holder": "firstmate-a",
+    },
+    {
+        "name": "4",
+        "path": os.path.join(pool, "4", "wt"),
+        "leased": True,
+        "lease_holder": "firstmate-b",
+    },
+]
+with open(state, "w", encoding="utf-8") as stream:
+    json.dump({"worktrees": entries}, stream)
+PY
+
+  out=$(FM_HOME="$case_dir/home" FM_TREEHOUSE_ROOT="$case_dir/capacity-pools" \
+    "$TREEHOUSE_REAPER" capacity --low-only) \
+    || fail "Treehouse capacity check failed: $out"
+  assert_contains "$out" "TREEHOUSE_CAPACITY: LOW pool=$pool available=1 total=4 leased=2 dirty=1 invalid=0 threshold=2 threshold_percent=50" \
+    "Treehouse capacity check did not report the bounded low-water calculation"
+  pass "Treehouse capacity reports clean unleased availability against its threshold"
+}
+
 test_nonignored_untracked_work_refuses_without_preservation() {
   local case_dir rc
   case_dir=$(make_case nonignored-untracked)
@@ -1586,6 +1946,463 @@ test_ignored_worktree_content_is_summarized_without_blocking() {
   assert_absent "$case_dir/state/task-x1.meta" \
     "ignored-summary: teardown left task metadata behind"
   pass "ignored content stays exempt and receives a collapsed summary"
+}
+
+prepare_reap_case() {
+  local case_dir=$1 ignore=$2
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" .gitignore "$ignore" "define ignored outputs"
+  add_fork_with_pushed_branch "$case_dir"
+  git -C "$case_dir/project" remote set-url origin \
+    https://github.com/Ruby-Labs/firstmate.git
+  rm -f "$case_dir/fakebin/.tmux-live"
+}
+
+test_dead_reap_allows_generated_ignored_output_with_summary() {
+  local case_dir rc
+  case_dir=$(make_case reap-generated-ignored)
+  prepare_reap_case "$case_dir" $'build/\ncoverage/'
+  mkdir -p "$case_dir/wt/build/assets" "$case_dir/wt/coverage"
+  printf 'bundle\n' > "$case_dir/wt/build/assets/app.js"
+  printf 'coverage\n' > "$case_dir/wt/coverage/results.json"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "dead reap should allow confidently generated ignored output"
+  assert_grep 'ignored worktree summary: count=2' "$case_dir/stdout" \
+    "successful dead reap omitted its ignored inventory summary"
+  pass "dead reap inventories and allows generated ignored output"
+}
+
+test_dead_reap_refuses_work_shaped_ignored_output() {
+  local case_dir rc
+  case_dir=$(make_case reap-work-shaped-ignored)
+  prepare_reap_case "$case_dir" $'docs/\n'
+  mkdir -p "$case_dir/wt/docs"
+  printf 'draft\n' > "$case_dir/wt/docs/launch-draft.md"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 77 "$rc" "dead reap must safely refuse ignored work-shaped output"
+  assert_grep 'docs/launch-draft.md' "$case_dir/stderr" \
+    "work-shaped refusal omitted the exact ignored file"
+  pass "dead reap names refused ignored work"
+}
+
+test_dead_reap_refuses_ambiguous_ignored_output() {
+  local case_dir rc
+  case_dir=$(make_case reap-ambiguous-ignored)
+  prepare_reap_case "$case_dir" $'mystery/'
+  mkdir -p "$case_dir/wt/mystery"
+  printf 'unknown\n' > "$case_dir/wt/mystery/payload.bin"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 77 "$rc" "dead reap must safely refuse ambiguous ignored output"
+  assert_grep 'mystery/payload.bin (ambiguous)' "$case_dir/stderr" \
+    "ambiguous refusal omitted the exact ignored file and reason"
+  pass "dead reap refuses ambiguous ignored output"
+}
+
+test_dead_reap_refuses_recent_hand_edit_shaped_output() {
+  local case_dir rc
+  case_dir=$(make_case reap-recent-hand-edit)
+  prepare_reap_case "$case_dir" $'build/'
+  mkdir -p "$case_dir/wt/build"
+  printf 'manual recovery code\n' > "$case_dir/wt/build/manual-recovery.js"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 77 "$rc" "dead reap must safely refuse recent hand-edit-shaped output"
+  assert_grep 'build/manual-recovery.js (recent-ambiguous)' "$case_dir/stderr" \
+    "recent hand-edit refusal omitted the exact ignored file"
+  pass "dead reap refuses recent hand-edit-shaped ignored output"
+}
+
+test_dead_reap_refuses_old_ambiguous_output() {
+  local case_dir rc
+  case_dir=$(make_case reap-old-ambiguous)
+  prepare_reap_case "$case_dir" $'build/'
+  mkdir -p "$case_dir/wt/build"
+  printf 'old manual recovery code\n' > "$case_dir/wt/build/manual-recovery.js"
+  touch -t 202001010000 "$case_dir/wt/build/manual-recovery.js"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 77 "$rc" "dead reap must safely refuse old ambiguous ignored output"
+  assert_grep 'build/manual-recovery.js (ambiguous)' "$case_dir/stderr" \
+    "old ambiguous refusal omitted the exact ignored file"
+  pass "dead reap never ages ambiguous ignored output into safety"
+}
+
+test_dead_reap_protects_work_roots_before_dependencies() {
+  local case_dir rc
+  case_dir=$(make_case reap-protected-dependencies)
+  prepare_reap_case "$case_dir" $'docs/\ndata/\n.agents/skills/'
+  mkdir -p "$case_dir/wt/docs/node_modules" \
+    "$case_dir/wt/data/.venv" \
+    "$case_dir/wt/.agents/skills/x/node_modules"
+  printf 'docs recovery\n' > "$case_dir/wt/docs/node_modules/recovery.md"
+  printf 'operator note\n' > "$case_dir/wt/data/.venv/operator-note"
+  printf 'skill draft\n' \
+    > "$case_dir/wt/.agents/skills/x/node_modules/draft.md"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 77 "$rc" "protected work roots must safely block dependency ownership"
+  assert_grep 'docs/node_modules/recovery.md (work-shaped)' "$case_dir/stderr" \
+    "docs dependency refusal omitted the exact ignored file"
+  assert_grep 'data/.venv/operator-note (work-shaped)' "$case_dir/stderr" \
+    "data dependency refusal omitted the exact ignored file"
+  assert_grep '.agents/skills/x/node_modules/draft.md (work-shaped)' \
+    "$case_dir/stderr" \
+    "skill dependency refusal omitted the exact ignored file"
+  pass "protected work roots outrank dependency ownership"
+}
+
+test_dead_reap_allows_dependency_tree_contents() {
+  local case_dir rc
+  case_dir=$(make_case reap-dependency-ignored)
+  prepare_reap_case "$case_dir" $'node_modules/'
+  mkdir -p "$case_dir/wt/node_modules/report-skill"
+  printf 'dependency notice\n' > "$case_dir/wt/node_modules/report-skill/NOTICE.txt"
+  printf '{"name":"report-skill"}\n' \
+    > "$case_dir/wt/node_modules/report-skill/package.json"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "dead reap should allow dependency-owned ignored contents"
+  assert_grep 'ignored worktree summary: count=1' "$case_dir/stdout" \
+    "dependency-owned successful reap omitted its ignored summary"
+  pass "dead reap allows structurally owned dependency output"
+}
+
+test_dead_reap_rechecks_open_pr_at_locked_return() {
+  local case_dir rc
+  case_dir=$(make_case reap-locked-open-pr)
+  prepare_reap_case "$case_dir" $'build/'
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr list")
+    case " $* " in
+      *' --repo Ruby-Labs/firstmate '*) ;;
+      *) exit 88 ;;
+    esac
+    printf '%s\n' 'count: 1 (showing first 1)' \
+      'pull_requests[1]{url}:' \
+      '  https://github.com/Ruby-Labs/firstmate/pull/99'
+    exit 0
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 77 "$rc" "locked return must classify an open PR as a safety refusal"
+  assert_grep 'found an open PR under the checkout lock' "$case_dir/stderr" \
+    "locked return did not surface its repeated open-PR proof"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "locked open-PR refusal cleared task metadata"
+  pass "dead reap repeats open-PR protection under the checkout lock"
+}
+
+test_dead_reap_rechecks_endpoint_after_local_proofs() {
+  local case_dir rc
+  case_dir=$(make_case reap-endpoint-restored-during-scan)
+  prepare_reap_case "$case_dir" $'build/'
+  mkdir -p "$case_dir/wt/build/assets"
+  printf 'bundle\n' > "$case_dir/wt/build/assets/app.js"
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' ls-files --others --ignored --exclude-standard '*)
+    : > "$(dirname "$0")/.tmux-live"
+    ;;
+esac
+exec "$REAL_GIT_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 77 "$rc" "restored endpoint must return the safety-refusal status"
+  assert_grep 'found a live endpoint' "$case_dir/stderr" \
+    "post-scan endpoint proof did not detect the restored endpoint"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "restored-endpoint refusal cleared task metadata"
+  pass "dead reap repeats endpoint proof after slow local scans"
+}
+
+run_treehouse_reaper_status_fixture() {
+  local case_dir=$1
+  shift
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$case_dir/home" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_TREEHOUSE_ROOT="$case_dir/home/.treehouse" \
+  HOME="$case_dir/home" \
+    "$TREEHOUSE_REAPER" "$@"
+}
+
+test_treehouse_reaper_safe_refusals_exit_success() {
+  local case_dir explicit_rc auto_rc
+  case_dir=$(make_case reaper-safe-refusal-status)
+  mkdir -p "$case_dir/home"
+  set +e
+  run_treehouse_reaper_status_fixture "$case_dir" reap missing-task \
+    > "$case_dir/explicit-stdout" 2> "$case_dir/explicit-stderr"
+  explicit_rc=$?
+  fm_write_meta "$case_dir/state/safe-scout.meta" 'kind=scout'
+  run_treehouse_reaper_status_fixture "$case_dir" reap --auto \
+    > "$case_dir/auto-stdout" 2> "$case_dir/auto-stderr"
+  auto_rc=$?
+  set -e
+  expect_code 0 "$explicit_rc" "explicit metadata safety refusal should succeed"
+  expect_code 0 "$auto_rc" "automatic unsupported-kind safety refusal should succeed"
+  assert_grep 'retained task=missing-task reason=metadata-unavailable' \
+    "$case_dir/explicit-stdout" \
+    "explicit safe refusal omitted its retained reason"
+  assert_grep 'retained task=safe-scout reason=unsupported-kind kind=scout' \
+    "$case_dir/auto-stdout" \
+    "automatic safe refusal omitted its retained reason"
+  pass "explicit and automatic safety refusals exit successfully"
+}
+
+test_treehouse_reaper_operational_failure_exits_nonzero() {
+  local case_dir rc
+  case_dir=$(make_case reaper-operational-failure-status)
+  mkdir -p "$case_dir/home"
+  set +e
+  FM_TREEHOUSE_REAP_TEARDOWN="$case_dir/missing-teardown" \
+    run_treehouse_reaper_status_fixture "$case_dir" reap missing-task \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "missing teardown machinery should fail operationally"
+  assert_grep 'operational-error reason=teardown-unavailable' "$case_dir/stderr" \
+    "operational failure was not classified explicitly"
+  pass "reaper operational failures remain nonzero"
+}
+
+prepare_reaper_execution_case() {
+  local case_dir=$1 pool state worktree
+  write_meta "$case_dir" no-mistakes ship
+  add_fork_with_pushed_branch "$case_dir"
+  pool="$case_dir/home/.treehouse/test-pool"
+  state="$pool/treehouse-state.json"
+  worktree=$(cd "$case_dir/wt" && pwd -P)
+  mkdir -p "$pool"
+  python3 - "$state" "$worktree" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "w", encoding="utf-8") as stream:
+    json.dump({"worktrees": [{
+        "path": sys.argv[2],
+        "leased": True,
+        "lease_holder": "firstmate-task-x1",
+    }]}, stream)
+PY
+}
+
+test_treehouse_reaper_translates_only_safety_status() {
+  local case_dir rc
+  case_dir=$(make_case reaper-dedicated-safety-status)
+  mkdir -p "$case_dir/home"
+  prepare_reaper_execution_case "$case_dir"
+  cat > "$case_dir/fake-teardown" <<'SH'
+#!/usr/bin/env bash
+exit 77
+SH
+  chmod +x "$case_dir/fake-teardown"
+  set +e
+  FM_TREEHOUSE_REAP_TEARDOWN="$case_dir/fake-teardown" \
+    run_treehouse_reaper_status_fixture "$case_dir" reap task-x1 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "dedicated teardown safety status should become success"
+  assert_grep 'retained task=task-x1 reason=teardown-refused status=77' \
+    "$case_dir/stdout" \
+    "dedicated safety status omitted retained output"
+  pass "reaper translates only the dedicated safety-refusal status"
+}
+
+test_treehouse_reaper_executable_failures_remain_nonzero() {
+  local cause case_dir rc
+  for cause in report-publication checkout-helper; do
+    case_dir=$(make_case "reaper-$cause-failure")
+    mkdir -p "$case_dir/home"
+    prepare_reaper_execution_case "$case_dir"
+    cat > "$case_dir/fake-teardown" <<SH
+#!/usr/bin/env bash
+echo "$cause failed" >&2
+exit 1
+SH
+    chmod +x "$case_dir/fake-teardown"
+    set +e
+    FM_TREEHOUSE_REAP_TEARDOWN="$case_dir/fake-teardown" \
+      run_treehouse_reaper_status_fixture "$case_dir" reap task-x1 \
+        > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "$cause failure should remain operational"
+    assert_grep 'operational-error task=task-x1 reason=teardown-failed status=1' \
+      "$case_dir/stderr" \
+      "$cause failure was masked as safe retention"
+  done
+  pass "report and checkout-helper failures remain operational"
+}
+
+test_dead_reap_leaf_helper_failures_remain_operational() {
+  local case_dir rc
+  for helper in git python3; do
+    case_dir=$(make_case "reap-broken-$helper")
+    prepare_reap_case "$case_dir" $'build/'
+    cat > "$case_dir/fakebin/$helper" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+    chmod +x "$case_dir/fakebin/$helper"
+    set +e
+    run_teardown "$case_dir" --reap-dead \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "broken $helper inspection must remain operational"
+  done
+  pass "broken git and python inspection remain operational"
+}
+
+test_dead_reap_authority_statuses_are_distinct() {
+  local case_dir rc state
+  case_dir=$(make_case reap-authority-mismatch-status)
+  prepare_reap_case "$case_dir" $'build/'
+  state="$TMP_ROOT/treehouse-state.json"
+  python3 - "$state" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    state = json.load(stream)
+state["worktrees"][0]["lease_holder"] = "firstmate-other"
+with open(sys.argv[1], "w", encoding="utf-8") as stream:
+    json.dump(state, stream)
+PY
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 77 "$rc" "inspected authority mismatch must be a safety refusal"
+
+  case_dir=$(make_case reap-authority-unreadable-status)
+  prepare_reap_case "$case_dir" $'build/'
+  printf '{broken\n' > "$TMP_ROOT/treehouse-state.json"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "unreadable authority state must remain operational"
+  pass "authority mismatch and inspection failure have distinct statuses"
+}
+
+install_lock_blocking_git() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' status --porcelain=v1 --untracked-files=all '*)
+    [ ! -e "$FM_FAKE_INDEX_LOCK" ] || exit 128
+    ;;
+esac
+exec "$REAL_GIT_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+}
+
+test_dead_reap_lock_refusal_and_cleanup_failure_are_distinct() {
+  local case_dir lock rc
+  case_dir=$(make_case reap-live-lock-status)
+  prepare_reap_case "$case_dir" $'build/'
+  lock=$(git_index_lock_path "$case_dir/wt")
+  : > "$lock"
+  install_lock_blocking_git "$case_dir"
+  add_lsof_live_holder "$case_dir"
+  set +e
+  FM_FAKE_INDEX_LOCK="$lock" FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 \
+    run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 77 "$rc" "live git lock must be a safety refusal"
+
+  case_dir=$(make_case reap-lock-cleanup-failure)
+  prepare_reap_case "$case_dir" $'build/'
+  lock=$(git_index_lock_path "$case_dir/wt")
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+  install_lock_blocking_git "$case_dir"
+  add_lsof_no_holder "$case_dir"
+  cat > "$case_dir/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+[ "${2:-}" != "$FM_FAKE_INDEX_LOCK" ] || exit 1
+exec /bin/rm "$@"
+SH
+  chmod +x "$case_dir/fakebin/rm"
+  set +e
+  FM_FAKE_INDEX_LOCK="$lock" FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 \
+  FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "git lock cleanup failure must remain operational"
+  pass "live lock refusal and cleanup failure have distinct statuses"
+}
+
+test_dead_reap_landing_statuses_are_distinct() {
+  local case_dir rc
+  case_dir=$(make_case reap-truly-unlanded-status)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt unlanded "unlanded task work"
+  rm -f "$case_dir/fakebin/.tmux-live"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 77 "$rc" "conclusively unlanded work must be a safety refusal"
+  assert_grep 'has work not on any remote and not landed' "$case_dir/stderr" \
+    "unlanded safety refusal was not named"
+
+  case_dir=$(make_case reap-landing-fetch-failure)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt unlanded "unlanded task work"
+  rm -f "$case_dir/fakebin/.tmux-live"
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' fetch --quiet origin '*) exit 1 ;;
+esac
+exec "$REAL_GIT_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "failed landing fetch must remain operational"
+  assert_grep 'landing proof could not execute' "$case_dir/stderr" \
+    "landing machinery failure was not classified operationally"
+  pass "unlanded proof and landing machinery failure have distinct statuses"
 }
 
 test_preserve_scratch_captures_then_reclaims_dirty_worktree() {
@@ -5269,6 +6086,44 @@ if [ "${FM_TEST_FOCUSED:-}" = reclaim-regressions ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = dead-treehouse-reap ]; then
+  test_dead_task_reaper_returns_only_clean_landed_work_without_force
+  test_dead_task_reaper_treats_stale_status_as_no_liveness_evidence
+  test_dead_task_reaper_reconciles_an_already_returned_lease
+  test_dead_task_reaper_retains_dirty_work_and_live_endpoints
+  test_dead_task_reaper_requires_exact_lease_and_closed_pr
+  test_treehouse_capacity_reports_low_clean_availability
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = review-reap-final-proofs ]; then
+  test_dead_reap_allows_generated_ignored_output_with_summary
+  test_dead_reap_refuses_work_shaped_ignored_output
+  test_dead_reap_refuses_ambiguous_ignored_output
+  test_dead_reap_refuses_recent_hand_edit_shaped_output
+  test_dead_reap_refuses_old_ambiguous_output
+  test_dead_reap_protects_work_roots_before_dependencies
+  test_dead_reap_allows_dependency_tree_contents
+  test_dead_reap_rechecks_open_pr_at_locked_return
+  test_dead_reap_rechecks_endpoint_after_local_proofs
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = review-reaper-status ]; then
+  test_dead_reap_refuses_ambiguous_ignored_output
+  test_dead_reap_rechecks_open_pr_at_locked_return
+  test_treehouse_reaper_safe_refusals_exit_success
+  test_treehouse_reaper_operational_failure_exits_nonzero
+  test_treehouse_reaper_translates_only_safety_status
+  test_treehouse_reaper_executable_failures_remain_nonzero
+  test_dead_reap_leaf_helper_failures_remain_operational
+  test_dead_reap_authority_statuses_are_distinct
+  test_dead_reap_lock_refusal_and_cleanup_failure_are_distinct
+  test_dead_reap_landing_statuses_are_distinct
+  test_content_in_default_fallback_allows
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = treehouse-per-home ]; then
   test_never_created_direct_spawn_endpoint_is_not_quiesced
   test_never_created_scout_without_report_cleans_bookkeeping
@@ -5436,11 +6291,34 @@ TEARDOWN_FULL_SUITE_CASES=(
   test_locked_return_reuses_checkout_lock_for_landing_recheck
   test_treehouse_return_timeout_reaps_children_before_unlock
   test_dirty_worktree_refuses
+  test_dead_task_reaper_returns_only_clean_landed_work_without_force
+  test_dead_task_reaper_treats_stale_status_as_no_liveness_evidence
+  test_dead_task_reaper_reconciles_an_already_returned_lease
+  test_dead_task_reaper_retains_dirty_work_and_live_endpoints
+  test_dead_task_reaper_requires_exact_lease_and_closed_pr
+  test_treehouse_capacity_reports_low_clean_availability
   test_nonignored_untracked_work_refuses_without_preservation
   test_already_returned_worktree_finishes_bookkeeping
   test_already_returned_worktree_refuses_preservation_without_mutation
   test_watchman_cookies_do_not_block_teardown
   test_ignored_worktree_content_is_summarized_without_blocking
+  test_dead_reap_allows_generated_ignored_output_with_summary
+  test_dead_reap_refuses_work_shaped_ignored_output
+  test_dead_reap_refuses_ambiguous_ignored_output
+  test_dead_reap_refuses_recent_hand_edit_shaped_output
+  test_dead_reap_refuses_old_ambiguous_output
+  test_dead_reap_protects_work_roots_before_dependencies
+  test_dead_reap_allows_dependency_tree_contents
+  test_dead_reap_rechecks_open_pr_at_locked_return
+  test_dead_reap_rechecks_endpoint_after_local_proofs
+  test_treehouse_reaper_safe_refusals_exit_success
+  test_treehouse_reaper_operational_failure_exits_nonzero
+  test_treehouse_reaper_translates_only_safety_status
+  test_treehouse_reaper_executable_failures_remain_nonzero
+  test_dead_reap_leaf_helper_failures_remain_operational
+  test_dead_reap_authority_statuses_are_distinct
+  test_dead_reap_lock_refusal_and_cleanup_failure_are_distinct
+  test_dead_reap_landing_statuses_are_distinct
   test_preserve_scratch_captures_then_reclaims_dirty_worktree
   test_preserve_scratch_never_cleans_unlanded_commits
   test_preserve_scratch_refuses_tracked_drift_before_cleanup

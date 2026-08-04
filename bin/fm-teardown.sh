@@ -68,13 +68,20 @@
 # the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force] [--preserve-scratch]
+# Usage: fm-teardown.sh <task-id> [--force] [--preserve-scratch] [--reap-dead]
 #   --force permits recursive kind=secondmate retirement. It never bypasses
 #   dirty, untracked, stash, landed-work, endpoint, identity, or report proofs.
 #   --preserve-scratch permits a ship/scout teardown to preserve tracked diffs
 #   and non-ignored untracked files under data/<task-id>/scratch/ before cleaning.
 #   Ignored files remain exempt and are summarized before a leased return.
 #   Committed work must still pass the ordinary landed-work proof first.
+#   --reap-dead is the conservative dead-endpoint path used by
+#   bin/fm-treehouse-reap.sh.
+#   It refuses a present or unknown endpoint, repeats that absence proof under
+#   the checkout lock, and uses non-forcing `treehouse return` after the ordinary
+#   identity, cleanliness, stash, and landed-work proofs pass.
+#   Classified safety refusals exit 77; operational failures retain their normal
+#   nonzero status so bin/fm-treehouse-reap.sh can distinguish the outcomes.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crewmate process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -150,13 +157,15 @@ case "$TEARDOWN_UPSTREAM_TIMEOUT" in
     ;;
 esac
 [ "$#" -ge 1 ] || {
-  echo "usage: fm-teardown.sh <task-id> [--force] [--preserve-scratch]" >&2
+  echo "usage: fm-teardown.sh <task-id> [--force] [--preserve-scratch] [--reap-dead]" >&2
   exit 2
 }
 ID=$1
 shift
 FORCE=
 PRESERVE_SCRATCH=0
+REAP_DEAD=0
+TEARDOWN_REAP_SAFETY_REFUSAL=77
 for option in "$@"; do
   case "$option" in
     --force)
@@ -173,12 +182,24 @@ for option in "$@"; do
       }
       PRESERVE_SCRATCH=1
       ;;
+    --reap-dead)
+      [ "$REAP_DEAD" -eq 0 ] || {
+        echo "error: duplicate teardown option: --reap-dead" >&2
+        exit 2
+      }
+      REAP_DEAD=1
+      ;;
     *)
       echo "error: unknown teardown option: $option" >&2
       exit 2
       ;;
   esac
 done
+if [ "$REAP_DEAD" -eq 1 ] && { [ -n "$FORCE" ] || [ "$PRESERVE_SCRATCH" -eq 1 ]; }; then
+  echo "error: --reap-dead cannot be combined with --force or --preserve-scratch" >&2
+  exit 2
+fi
+
 META="$STATE/$ID.meta"
 
 require_safe_task_metadata() {
@@ -401,6 +422,10 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 }
 if [ "$PRESERVE_SCRATCH" -eq 1 ] && [ "$KIND" = secondmate ]; then
   echo "error: --preserve-scratch is supported only for ship and scout worktrees" >&2
+  exit 2
+fi
+if [ "$REAP_DEAD" -eq 1 ] && [ "$KIND" != ship ]; then
+  echo "error: --reap-dead is supported only for ship worktrees" >&2
   exit 2
 fi
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
@@ -832,11 +857,17 @@ remove_grok_turnend_auth() {
 # single match and returns 0; returns non-zero on no match or any lookup failure,
 # so the caller treats it as "no PR found" (fail-safe).
 pr_number_from_branch() {
-  local branch=$1 out n
-  [ -n "$branch" ] && [ "$branch" != HEAD ] || return 1
-  out=$( cd "$WT" && gh-axi pr list --state all --head "$branch" --limit 1 2>/dev/null ) || return 1
+  local branch=$1 out n status
+  [ -n "$branch" ] && [ "$branch" != HEAD ] \
+    || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  if out=$(cd "$WT" && gh-axi pr list --state all --head "$branch" --limit 1 2>/dev/null); then
+    :
+  else
+    status=$?
+    return "$status"
+  fi
   n=$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*\([0-9][0-9]*\),.*/\1/p' | head -1)
-  [ -n "$n" ] || return 1
+  [ -n "$n" ] || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
   printf '%s' "$n"
 }
 
@@ -904,26 +935,32 @@ EOF
 # current work is not contained in the PR head, no PR is found, or any gh error
 # occurs - the caller then falls back to the content check.
 pr_is_merged() {
-  local branch=$1 target view state head current
+  local branch=$1 target view state head current status
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
-    target=$(pr_number_from_branch "$branch") || return 1
+    if target=$(pr_number_from_branch "$branch"); then
+      :
+    else
+      status=$?
+      return "$status"
+    fi
   fi
-  [ -n "$target" ] || return 1
+  [ -n "$target" ] || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
   view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
   state=${view%%$'\t'*}
   head=${view#*$'\t'}
   [ "$state" != "$view" ] || return 1
   case "$state" in
     MERGED|merged) ;;
-    *) return 1 ;;
+    *) return "$TEARDOWN_REAP_SAFETY_REFUSAL" ;;
   esac
   [ -n "$head" ] || return 1
   ensure_commit_object "$target" "$head" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null && return 0
-  unpushed_patches_are_in_pr_head "$head"
+  unpushed_patches_are_in_pr_head "$head" \
+    || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
 }
 
 # Is the branch's content already present in the up-to-date default branch?
@@ -937,7 +974,7 @@ content_matches_ref() {
   merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
   if [ "$merged_tree" != "$default_tree" ]; then
     echo "teardown: task content is not present in authoritative $ref; retaining $WT" >&2
-    return 1
+    return "$TEARDOWN_REAP_SAFETY_REFUSAL"
   fi
   return 0
 }
@@ -1005,9 +1042,21 @@ content_in_default() {
 # default branch (fallback, which also covers the no-PR and gh-error paths). False
 # only for genuinely unlanded work.
 work_is_landed() {
-  local branch=$1
-  pr_is_merged "$branch" && return 0
-  content_in_default
+  local branch=$1 pr_status content_status
+  if pr_is_merged "$branch"; then
+    return 0
+  else
+    pr_status=$?
+  fi
+  if content_in_default; then
+    return 0
+  else
+    content_status=$?
+  fi
+  [ "$content_status" -eq "$TEARDOWN_REAP_SAFETY_REFUSAL" ] \
+    && return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  : "$pr_status"
+  return "$content_status"
 }
 
 backlog_refresh_reminder() {
@@ -1083,7 +1132,7 @@ worktree_registered_for_project() {
   done <<EOF
 $listed
 EOF
-  return 1
+  return "$TEARDOWN_REAP_SAFETY_REFUSAL"
 }
 
 inspectable_git_worktree() {
@@ -1126,12 +1175,12 @@ treehouse_task_lease_state() {
     echo "error: cannot resolve authoritative Treehouse state for $worktree" >&2
     return 1
   }
-  python3 - "$state" "$worktree" "$expected_holder" <<'PY'
+  python3 - "$state" "$worktree" "$expected_holder" "$TEARDOWN_REAP_SAFETY_REFUSAL" <<'PY'
 import json
 import os
 import sys
 
-state_path, expected_path, expected_holder = sys.argv[1:]
+state_path, expected_path, expected_holder, safety_status = sys.argv[1:]
 try:
     with open(state_path, encoding="utf-8") as stream:
         state = json.load(stream)
@@ -1148,13 +1197,13 @@ try:
         if os.path.realpath(path) == expected_path:
             matches.append(entry)
     if len(matches) != 1:
-        raise ValueError("expected exactly one matching worktree entry")
+        raise RuntimeError("expected exactly one matching worktree entry")
     entry = matches[0]
     if entry.get("destroying") is True:
-        raise ValueError("worktree is already being destroyed")
+        raise RuntimeError("worktree is already being destroyed")
     if entry.get("leased") is True:
         if entry.get("lease_holder") != expected_holder:
-            raise ValueError(
+            raise RuntimeError(
                 f"lease holder is {entry.get('lease_holder')!r}, "
                 f"expected {expected_holder!r}"
             )
@@ -1165,7 +1214,13 @@ try:
     ):
         print("returned")
     else:
-        raise ValueError("worktree lease state is neither owned nor cleanly returned")
+        raise RuntimeError("worktree lease state is neither owned nor cleanly returned")
+except RuntimeError as error:
+    print(
+        f"error: Treehouse ownership for {expected_path} is unprovable: {error}",
+        file=sys.stderr,
+    )
+    raise SystemExit(int(safety_status))
 except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
     print(
         f"error: Treehouse ownership for {expected_path} is unprovable: {error}",
@@ -1176,19 +1231,29 @@ PY
 }
 
 require_treehouse_task_lease() {
-  local state
-  state=$(treehouse_task_lease_state "$1" "$2") || return 1
+  local state status
+  if state=$(treehouse_task_lease_state "$1" "$2"); then
+    :
+  else
+    status=$?
+    return "$status"
+  fi
   [ "$state" = leased ] || {
     echo "error: Treehouse ownership for $1 is unprovable: worktree is not durably leased" >&2
-    return 1
+    return "$TEARDOWN_REAP_SAFETY_REFUSAL"
   }
 }
 
 TREEHOUSE_TARGET_ALREADY_RETURNED=0
 require_treehouse_task_lease_or_returned() {
-  local state
+  local state status
   TREEHOUSE_TARGET_ALREADY_RETURNED=0
-  state=$(treehouse_task_lease_state "$1" "$2") || return 1
+  if state=$(treehouse_task_lease_state "$1" "$2"); then
+    :
+  else
+    status=$?
+    return "$status"
+  fi
   case "$state" in
     leased) ;;
     returned) TREEHOUSE_TARGET_ALREADY_RETURNED=1 ;;
@@ -1196,24 +1261,27 @@ require_treehouse_task_lease_or_returned() {
   esac
 }
 require_treehouse_return_authority() {
-  local worktree=$1 project=$2 worktree_root project_root worktree_common project_common
+  local worktree=$1 project=$2 worktree_root project_root worktree_common project_common status
   worktree_root=$(exact_git_worktree_root "$worktree") || return 1
   project_root=$(exact_git_worktree_root "$project") || return 1
   worktree_common=$(fm_checkout_git_common_dir "$worktree_root") || return 1
   project_common=$(fm_checkout_git_common_dir "$project_root") || return 1
   [ "$worktree_common" = "$project_common" ] || {
     echo "error: Treehouse return target $worktree_root does not belong to $project_root" >&2
-    return 1
+    return "$TEARDOWN_REAP_SAFETY_REFUSAL"
   }
-  worktree_registered_for_project "$project_root" "$worktree_root" || {
+  if worktree_registered_for_project "$project_root" "$worktree_root"; then
+    :
+  else
+    status=$?
     echo "error: Treehouse return target $worktree_root is not registered to $project_root" >&2
-    return 1
-  }
-  fm_treehouse_require_task_lease "$worktree_root" "$3"
+    return "$status"
+  fi
+  require_treehouse_task_lease "$worktree_root" "$3"
 }
 
 validate_teardown_target_identity() {
-  local project_root worktree_root project_common worktree_common
+  local project_root worktree_root project_common worktree_common identity_status
   [ "$KIND" != secondmate ] || return 0
   require_safe_task_metadata || return 1
   project_root=$(exact_git_worktree_root "$PROJ") || {
@@ -1240,7 +1308,7 @@ validate_teardown_target_identity() {
   worktree_common=$(fm_checkout_git_common_dir "$worktree_root") || return 1
   [ "$project_common" = "$worktree_common" ] || {
     echo "error: teardown worktree does not belong to the recorded project: $worktree_root" >&2
-    return 1
+    return "$TEARDOWN_REAP_SAFETY_REFUSAL"
   }
   if [ "$BACKEND" = orca ]; then
     require_orca_task_metadata_identity "$META" "$ID" || return 1
@@ -1248,10 +1316,13 @@ validate_teardown_target_identity() {
     ORCA_PATH_MATCH_VERIFIED=1
     return 0
   fi
-  worktree_registered_for_project "$project_root" "$worktree_root" || {
+  if worktree_registered_for_project "$project_root" "$worktree_root"; then
+    :
+  else
+    identity_status=$?
     echo "error: teardown worktree is not registered to the recorded project: $worktree_root" >&2
-    return 1
-  }
+    return "$identity_status"
+  fi
   require_treehouse_task_lease_or_returned "$worktree_root" "firstmate-$ID"
 }
 
@@ -1311,8 +1382,11 @@ worktree_safety_blocked_by_lock() {
 }
 
 cleanup_stale_lock_for_safety_check() {
-  local dir=$1 lock
-  lock=$(worktree_git_lock_path "$dir") || lock=""
+  local dir=$1 lock staleness
+  lock=$(worktree_git_lock_path "$dir") || {
+    echo "teardown: cannot resolve worktree git lock during safety cleanup" >&2
+    return 1
+  }
   [ -n "$lock" ] && [ -e "$lock" ] || return 0
 
   echo "teardown: worktree safety check blocked by git lock $lock; waiting ${STALE_WORKTREE_LOCK_RETRY_WAIT_SECS}s and retrying (owning process may be exiting)" >&2
@@ -1323,34 +1397,58 @@ cleanup_stale_lock_for_safety_check() {
     return 0
   fi
 
-  if fm_lock_is_provably_stale "$lock" "$dir" "$STALE_WORKTREE_LOCK_AGE_SECS"; then
-    rm -f "$lock"
+  staleness=$(fm_lock_staleness_state "$lock" "$dir" "$STALE_WORKTREE_LOCK_AGE_SECS") || {
+    echo "teardown: cannot inspect git lock $lock during safety cleanup" >&2
+    return 1
+  }
+  if [ "$staleness" = stale ]; then
+    rm -f "$lock" || return 1
     echo "teardown: removed provably-stale git lock $lock (age >= ${STALE_WORKTREE_LOCK_AGE_SECS}s, no live holder) and retrying worktree safety checks" >&2
     return 0
   fi
 
   echo "teardown: worktree safety check blocked by git lock $lock that is not provably stale (may belong to a live process); leaving it in place" >&2
-  return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
+  return "$TEARDOWN_REAP_SAFETY_REFUSAL"
 }
 
-# Return a worktree/home via `treehouse return --force`, tolerating a transient or
-# stale git index.lock left by a killed crewmate process. See the script header.
+# Return a worktree/home via Treehouse, tolerating a transient or stale git
+# index.lock left by a killed crewmate process. See the script header.
 teardown_treehouse_return_locked() {
   local dir=$1 cd_dir=$2 label=$3 expected_holder=$4 post_cleanup_check=${5:-} post_return_cleanup=${6:-}
+  local return_mode=${7:---force}
   local out lock attempt=0 max_retries lock_desc return_status return_branch=
 
-  require_treehouse_return_authority "$dir" "$cd_dir" "$expected_holder" || {
+  case "$return_mode" in
+    --force|--safe) ;;
+    *)
+      echo "teardown: $label return aborted because its return mode is invalid" >&2
+      return 1
+      ;;
+  esac
+
+  if require_treehouse_return_authority "$dir" "$cd_dir" "$expected_holder"; then
+    :
+  else
+    return_status=$?
     echo "teardown: $label return aborted because Treehouse task ownership changed" >&2
-    return 1
-  }
-  if [ -n "$post_cleanup_check" ] && ! "$post_cleanup_check" "$dir" "$cd_dir" "$expected_holder"; then
-    echo "teardown: $label return aborted because the final locked safety check failed" >&2
-    return 1
+    return "$return_status"
   fi
-  require_treehouse_return_authority "$dir" "$cd_dir" "$expected_holder" || {
+  if [ -n "$post_cleanup_check" ]; then
+    if "$post_cleanup_check" "$dir" "$cd_dir" "$expected_holder"; then
+      :
+    else
+      return_status=$?
+      echo "teardown: $label return aborted because the final locked safety check failed" >&2
+      return "$return_status"
+    fi
+  fi
+  if require_treehouse_return_authority "$dir" "$cd_dir" "$expected_holder"; then
+    :
+  else
+    return_status=$?
     echo "teardown: $label return aborted because Treehouse task ownership changed during final safety checks" >&2
-    return 1
-  }
+    return "$return_status"
+  fi
   if [ -n "$post_return_cleanup" ]; then
     return_branch=$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null) || {
       echo "teardown: $label return aborted because the task branch cannot be inspected under lock" >&2
@@ -1358,7 +1456,7 @@ teardown_treehouse_return_locked() {
     }
   fi
   validate_removal_tree_boundaries "$dir" "$label" || return 1
-  if out=$(fm_checkout_treehouse_return_locked "$dir" "$CHECKOUT_LOCK_ROOT" "$cd_dir" 2>&1); then
+  if out=$(fm_checkout_treehouse_return_locked "$dir" "$CHECKOUT_LOCK_ROOT" "$cd_dir" "$return_mode" 2>&1); then
     [ -n "$out" ] && printf '%s\n' "$out"
     if [ -n "$post_return_cleanup" ]; then
       "$post_return_cleanup" "$return_branch" "$dir" "$cd_dir" || return 1
@@ -1391,20 +1489,31 @@ teardown_treehouse_return_locked() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    if ! require_treehouse_return_authority "$dir" "$cd_dir" "$expected_holder"; then
+    if require_treehouse_return_authority "$dir" "$cd_dir" "$expected_holder"; then
+      :
+    else
+      return_status=$?
       echo "teardown: $label return aborted because Treehouse task ownership changed" >&2
-      return 1
+      return "$return_status"
     fi
-    if [ -n "$post_cleanup_check" ] && ! "$post_cleanup_check" "$dir" "$cd_dir" "$expected_holder"; then
-      echo "teardown: $label return aborted because the final locked safety check failed" >&2
-      return 1
+    if [ -n "$post_cleanup_check" ]; then
+      if "$post_cleanup_check" "$dir" "$cd_dir" "$expected_holder"; then
+        :
+      else
+        return_status=$?
+        echo "teardown: $label return aborted because the final locked safety check failed" >&2
+        return "$return_status"
+      fi
     fi
-    if ! require_treehouse_return_authority "$dir" "$cd_dir" "$expected_holder"; then
+    if require_treehouse_return_authority "$dir" "$cd_dir" "$expected_holder"; then
+      :
+    else
+      return_status=$?
       echo "teardown: $label return aborted because Treehouse task ownership changed during final safety checks" >&2
-      return 1
+      return "$return_status"
     fi
     validate_removal_tree_boundaries "$dir" "$label" || return 1
-    if out=$(fm_checkout_treehouse_return_locked "$dir" "$CHECKOUT_LOCK_ROOT" "$cd_dir" 2>&1); then
+    if out=$(fm_checkout_treehouse_return_locked "$dir" "$CHECKOUT_LOCK_ROOT" "$cd_dir" "$return_mode" 2>&1); then
       [ -n "$out" ] && printf '%s\n' "$out"
       if [ -n "$post_return_cleanup" ]; then
         "$post_return_cleanup" "$return_branch" "$dir" "$cd_dir" || return 1
@@ -1433,22 +1542,31 @@ teardown_treehouse_return_locked() {
     if fm_lock_is_provably_stale "$lock" "$dir" "$STALE_WORKTREE_LOCK_AGE_SECS"; then
       rm -f "$lock"
       echo "teardown: removed provably-stale git lock $lock (age >= ${STALE_WORKTREE_LOCK_AGE_SECS}s, no live holder) and retrying $label return" >&2
-      if ! require_treehouse_return_authority "$dir" "$cd_dir" "$expected_holder"; then
+      if require_treehouse_return_authority "$dir" "$cd_dir" "$expected_holder"; then
+        :
+      else
+        return_status=$?
         echo "teardown: $label return aborted after stale-lock cleanup because Treehouse task ownership changed" >&2
-        return 1
+        return "$return_status"
       fi
       if [ -n "$post_cleanup_check" ]; then
-        if ! "$post_cleanup_check" "$dir" "$cd_dir" "$expected_holder"; then
+        if "$post_cleanup_check" "$dir" "$cd_dir" "$expected_holder"; then
+          :
+        else
+          return_status=$?
           echo "teardown: $label return aborted after stale-lock cleanup because safety checks failed" >&2
-          return 1
+          return "$return_status"
         fi
       fi
-      if ! require_treehouse_return_authority "$dir" "$cd_dir" "$expected_holder"; then
+      if require_treehouse_return_authority "$dir" "$cd_dir" "$expected_holder"; then
+        :
+      else
+        return_status=$?
         echo "teardown: $label return aborted after stale-lock cleanup because Treehouse task ownership changed during safety checks" >&2
-        return 1
+        return "$return_status"
       fi
       validate_removal_tree_boundaries "$dir" "$label" || return 1
-      if out=$(fm_checkout_treehouse_return_locked "$dir" "$CHECKOUT_LOCK_ROOT" "$cd_dir" 2>&1); then
+      if out=$(fm_checkout_treehouse_return_locked "$dir" "$CHECKOUT_LOCK_ROOT" "$cd_dir" "$return_mode" 2>&1); then
         [ -n "$out" ] && printf '%s\n' "$out"
         if [ -n "$post_return_cleanup" ]; then
           "$post_return_cleanup" "$return_branch" "$dir" "$cd_dir" || return 1
@@ -1525,12 +1643,12 @@ validate_worktree_stash_absent() {
   }
   [ -z "$stash_list" ] || {
     echo "REFUSED: worktree $WT has retained stash history." >&2
-    return 1
+    return "$TEARDOWN_REAP_SAFETY_REFUSAL"
   }
 }
 
 validate_worktree_committed_landing() {
-  local unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  local unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch landing_status
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
@@ -1556,7 +1674,7 @@ validate_worktree_committed_landing() {
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
       printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
       echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push it to a fork or remote, then retry teardown." >&2
-      return 1
+      return "$TEARDOWN_REAP_SAFETY_REFUSAL"
     fi
   elif [ -n "$unpushed" ]; then
     branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
@@ -1564,11 +1682,18 @@ validate_worktree_committed_landing() {
       branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
       TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
     fi
-    if ! work_is_landed "$branch"; then
+    if work_is_landed "$branch"; then
+      :
+    else
+      landing_status=$?
+      if [ "$landing_status" -ne "$TEARDOWN_REAP_SAFETY_REFUSAL" ]; then
+        echo "REFUSED: worktree $WT landing proof could not execute." >&2
+        return "$landing_status"
+      fi
       echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
       echo "Push the branch or land its PR, then retry teardown." >&2
-      return 1
+      return "$TEARDOWN_REAP_SAFETY_REFUSAL"
     fi
   fi
 }
@@ -1579,7 +1704,7 @@ validate_worktree_teardown_safety() {
   case "$KIND" in
     secondmate) return 0 ;;
   esac
-  validate_worktree_stash_absent || return 1
+  validate_worktree_stash_absent || return $?
 
   if ! dirty_raw=$(git -C "$WT" status --porcelain=v1 --untracked-files=all 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
@@ -1600,8 +1725,22 @@ validate_worktree_teardown_safety() {
     else
       echo "Retry with --preserve-scratch to capture the diff and untracked files before cleaning, or commit and land them first." >&2
     fi
-    return 1
+    return "$TEARDOWN_REAP_SAFETY_REFUSAL"
   fi
+}
+
+validate_reap_worktree_safety() {
+  local dirty_raw
+  validate_worktree_teardown_safety || return $?
+  dirty_raw=$(git -C "$WT" status --porcelain=v1 --untracked-files=all 2>/dev/null) || {
+    echo "REFUSED: dead-task reaping cannot inspect worktree $WT for uncommitted changes." >&2
+    return 1
+  }
+  [ -z "$dirty_raw" ] || {
+    echo "REFUSED: dead-task reaping never discards uncommitted changes in $WT." >&2
+    printf '%s\n' "$dirty_raw" | sed -n '1,5p' >&2
+    return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  }
 }
 
 summarize_ignored_worktree_paths() {
@@ -1636,6 +1775,101 @@ print(
     return 1
   }
   printf '%s\n' "$summary"
+}
+
+validate_reap_ignored_worktree_paths() {
+  local output status
+  output=$(
+    set -o pipefail
+    git -C "$WT" ls-files --others --ignored --exclude-standard -z -- |
+      python3 -c '
+import os
+import sys
+import time
+
+worktree = sys.argv[1]
+entries = [
+    item.decode("utf-8", "surrogateescape").rstrip("/")
+    for item in sys.stdin.buffer.read().split(b"\0")
+    if item
+]
+dependency_roots = {
+    ".bundle", ".pnpm", ".venv", "node_modules", "pods", "venv",
+}
+generated_roots = {
+    ".cache", ".mypy_cache", ".next", ".nuxt", ".parcel-cache",
+    ".pytest_cache", ".ruff_cache", "__pycache__", "build", "cache",
+    "caches", "coverage", "dist", "target",
+}
+generated_path_parts = {"assets", "chunks", "generated", "static"}
+generated_names = {
+    ".coverage", "coverage-final.json", "lcov.info", "results.json",
+}
+work_roots = {"data", "docs"}
+work_words = ("draft", "note", "report", "skill")
+recent_cutoff = time.time() - 24 * 60 * 60
+refused = []
+
+for entry in entries:
+    parts = tuple(part for part in entry.split("/") if part)
+    lowered = tuple(part.lower() for part in parts)
+    basename = lowered[-1] if lowered else ""
+    dependency_owned = any(part in dependency_roots for part in lowered)
+    generated_root = next((part for part in lowered if part in generated_roots), None)
+    generated_evidence = (
+        any(part in generated_path_parts for part in lowered[:-1])
+        or basename in generated_names
+        or basename.endswith((".map", ".pyc"))
+    )
+    reason = None
+    dependency_index = next(
+        (index for index, part in enumerate(lowered) if part in dependency_roots),
+        len(lowered),
+    )
+    protected_prefix = lowered[:dependency_index]
+    protected_work_path = (
+        not parts
+        or lowered[0] in work_roots
+        or ".agents" in protected_prefix and "skills" in protected_prefix
+        or any(part in {"draft", "drafts", "note", "notes", "report", "reports"}
+               for part in protected_prefix)
+    )
+    if protected_work_path:
+        reason = "work-shaped"
+    elif dependency_owned:
+        continue
+    elif any(word in basename for word in work_words):
+        reason = "work-shaped"
+    elif generated_root is None:
+        reason = "ambiguous"
+    elif not generated_evidence:
+        try:
+            if os.stat(os.path.join(worktree, entry), follow_symlinks=False).st_mtime >= recent_cutoff:
+                reason = "recent-ambiguous"
+            else:
+                reason = "ambiguous"
+        except OSError:
+            reason = "uninspectable"
+    if reason:
+        refused.append((entry, reason))
+
+if refused:
+    print(f"REFUSED: dead-task reaping found {len(refused)} unsafe ignored path(s).")
+    for path, reason in refused[:10]:
+        print(f"ignored path refused: {path} ({reason})")
+    if len(refused) > 10:
+        print(f"ignored path refused: ... {len(refused) - 10} more")
+    raise SystemExit(int(sys.argv[2]))
+' "$WT" "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  )
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    [ -z "$output" ] || printf '%s\n' "$output" >&2
+    [ "$status" -eq "$TEARDOWN_REAP_SAFETY_REFUSAL" ] \
+      || echo "REFUSED: cannot classify ignored files in worktree $WT." >&2
+    return "$status"
+  fi
+  summarize_ignored_worktree_paths
 }
 
 validate_worktree_teardown_safety_and_summarize_ignored() {
@@ -4658,11 +4892,49 @@ if [ "$KIND" = scout ] && [ "$SPAWN_NEVER_LAUNCHED" != 1 ]; then
   fi
 fi
 
-[ "$KIND" = secondmate ] || validate_teardown_target_identity || exit 1
+if [ "$KIND" != secondmate ]; then
+  if validate_teardown_target_identity; then
+    :
+  else
+    identity_status=$?
+    [ "$REAP_DEAD" -eq 1 ] && exit "$identity_status"
+    exit 1
+  fi
+fi
 
 PROBE_HOME=
 ENDPOINT_HOME=$(fm_backend_endpoint_home "$BACKEND" "$KIND" "$FM_HOME" "$HOME_PATH")
 [ "$ENDPOINT_HOME" = "$FM_HOME" ] || PROBE_HOME=$ENDPOINT_HOME
+
+require_reap_endpoint_absent() {
+  local endpoint_status scoped_target
+  if [ "$DIRECT_SPAWN_CLEANUP" = pending ] && [ "$DIRECT_SPAWN_ENDPOINT" = not-created ]; then
+    return 0
+  fi
+  scoped_target=$(meta_value "$META" tmux_session_target)
+  if managed_endpoint_is_gone "$BACKEND" "$T" "fm-$ID" "$PROBE_HOME" "$scoped_target"; then
+    return 0
+  else
+    endpoint_status=$?
+  fi
+  if [ "$endpoint_status" -eq 2 ]; then
+    echo "REFUSED: dead-task reaping cannot prove the endpoint absent for $ID." >&2
+  else
+    echo "REFUSED: dead-task reaping found a live endpoint for $ID." >&2
+  fi
+  return 1
+}
+
+REPORT_PUBLISHED=0
+publish_completion_report_if_required() {
+  [ "$REPORT_GATED" = 1 ] && [ "$SPAWN_NEVER_LAUNCHED" != 1 ] || return 0
+  if [ "$MANAGED_ACCOUNT" = 1 ]; then
+    reconcile_managed_account_rollback "$META" "$ID" "$DATA" || return $?
+  fi
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$SCRIPT_DIR/fm-report-stack.mjs" publish "$ID" || return 1
+  REPORT_PUBLISHED=1
+}
 
 quiesce_task_endpoint() {
   local endpoint_status zellij_tab scoped_target
@@ -4749,7 +5021,18 @@ post_quiescence_safety_refusal() {
   echo "The task endpoint has already been shut down; the worktree and task metadata are preserved for a safe retry." >&2
 }
 
-if [ "$DIRECT_SPAWN_CLEANUP" = pending ]; then
+if [ "$REAP_DEAD" -eq 1 ]; then
+  [ "$BACKEND" != orca ] || {
+    echo "error: --reap-dead does not support Orca worktrees" >&2
+    exit 2
+  }
+  require_reap_endpoint_absent || exit "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  validate_teardown_target_identity || exit $?
+  # Publication is non-destructive and owns a globally contended lock.
+  # Join that queue before the slower landing proof, then still require every
+  # ordinary and reaper-specific safety proof before releasing the lease.
+  publish_completion_report_if_required || exit $?
+elif [ "$DIRECT_SPAWN_CLEANUP" = pending ]; then
   if [ "$DIRECT_SPAWN_ENDPOINT" != not-created ]; then
     quiesce_retained_direct_spawn_endpoint || exit 1
   fi
@@ -4783,15 +5066,32 @@ if [ "$PRESERVE_SCRATCH" -eq 1 ] && [ -d "$WT" ]; then
 fi
 
 if [ -d "$WT" ]; then
-  if validate_worktree_teardown_safety; then
+  if [ "$REAP_DEAD" -eq 1 ]; then
+    safety_command=validate_reap_worktree_safety
+  else
+    safety_command=validate_worktree_teardown_safety
+  fi
+  if "$safety_command"; then
     :
   else
     safety_rc=$?
     if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
-      cleanup_stale_lock_for_safety_check "$WT" || { post_quiescence_safety_refusal; exit 1; }
-      validate_worktree_teardown_safety || { post_quiescence_safety_refusal; exit 1; }
+      if cleanup_stale_lock_for_safety_check "$WT"; then
+        :
+      else
+        safety_rc=$?
+        post_quiescence_safety_refusal
+        [ "$REAP_DEAD" -eq 1 ] && exit "$safety_rc"
+        exit 1
+      fi
+      "$safety_command" || {
+        post_quiescence_safety_refusal
+        [ "$REAP_DEAD" -eq 1 ] && exit "$TEARDOWN_REAP_SAFETY_REFUSAL"
+        exit 1
+      }
     else
       post_quiescence_safety_refusal
+      [ "$REAP_DEAD" -eq 1 ] && exit "$safety_rc"
       exit 1
     fi
   fi
@@ -4799,12 +5099,8 @@ fi
 
 # Report-gated tasks restore any pending rollback generation and fail closed on
 # their machine-global completion report before lease release or worktree removal.
-if [ "$REPORT_GATED" = 1 ] && [ "$SPAWN_NEVER_LAUNCHED" != 1 ]; then
-  if [ "$MANAGED_ACCOUNT" = 1 ]; then
-    reconcile_managed_account_rollback "$META" "$ID" "$DATA" || exit $?
-  fi
-  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-    "$FM_ROOT/bin/fm-report-stack.mjs" publish "$ID" || exit 1
+if [ "$REPORT_PUBLISHED" -ne 1 ]; then
+  publish_completion_report_if_required || exit $?
 fi
 
 if [ "$MANAGED_ACCOUNT" = 1 ]; then
@@ -4815,7 +5111,15 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   cleanup_firstmate_home_children "$HOME_PATH" || exit $?
 fi
 
-[ "$KIND" = secondmate ] || validate_teardown_target_identity || exit 1
+if [ "$KIND" != secondmate ]; then
+  if validate_teardown_target_identity; then
+    :
+  else
+    identity_status=$?
+    [ "$REAP_DEAD" -eq 1 ] && exit "$identity_status"
+    exit 1
+  fi
+fi
 
 remove_orca_worktree_locked() {
   local branch=HEAD boundary_token
@@ -4851,6 +5155,104 @@ validate_returned_worktree_bookkeeping_locked() {
   }
 }
 
+validate_reap_return_safety() {
+  validate_reap_worktree_safety_and_summarize_ignored || return $?
+  require_reap_endpoint_absent || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  validate_reap_open_pr_absent || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+}
+
+reap_github_repo_for_worktree() {
+  local url rest owner repo
+  url=$(git -C "$WT" remote get-url origin 2>/dev/null) || return 1
+  case "$url" in
+    https://github.com/*) rest=${url#https://github.com/} ;;
+    git@github.com:*) rest=${url#git@github.com:} ;;
+    ssh://git@github.com/*) rest=${url#ssh://git@github.com/} ;;
+    *) return 1 ;;
+  esac
+  rest=${rest%.git}
+  owner=${rest%%/*}
+  repo=${rest#*/}
+  [ -n "$owner" ] && [ -n "$repo" ] && [ "$repo" != "$rest" ] \
+    && [ "${repo#*/}" = "$repo" ] || return 1
+  printf '%s/%s' "$owner" "$repo"
+}
+
+validate_reap_open_pr_absent() {
+  local out status state branch recorded_ref count repo seen='|'
+  command -v gh-axi >/dev/null 2>&1 || {
+    echo "REFUSED: dead-task reaping cannot recheck open PRs under the checkout lock." >&2
+    return 1
+  }
+  repo=$(reap_github_repo_for_worktree) || {
+    echo "REFUSED: dead-task reaping cannot resolve the worktree GitHub repository under the checkout lock." >&2
+    return 1
+  }
+  if [ -n "$PR_URL" ]; then
+    if fm_run_bounded_capture --combine-stderr out 10 \
+        gh-axi pr view "$PR_URL" --repo "$repo"; then
+      status=0
+    else
+      status=$?
+    fi
+    if [ "$status" -ne 0 ] || ! fm_process_tree_cleanup_verified; then
+      echo "REFUSED: dead-task reaping cannot prove recorded PR state under the checkout lock: $PR_URL" >&2
+      return 1
+    fi
+    state=$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*state:[[:space:]]*\([^[:space:]]*\).*/\1/p' | head -1)
+    case "$state" in
+      merged|closed) ;;
+      open)
+        echo "REFUSED: dead-task reaping found an open recorded PR under the checkout lock: $PR_URL" >&2
+        return 1
+        ;;
+      *)
+        echo "REFUSED: dead-task reaping cannot prove recorded PR state under the checkout lock: $PR_URL" >&2
+        return 1
+        ;;
+    esac
+  fi
+
+  recorded_ref=$(meta_value "$META" worktree_git_ref)
+  case "$recorded_ref" in refs/heads/*) recorded_ref=${recorded_ref#refs/heads/} ;; *) recorded_ref= ;; esac
+  for branch in "$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null)" "$recorded_ref"; do
+    [ -n "$branch" ] || continue
+    case "$seen" in *"|$branch|"*) continue ;; esac
+    seen="$seen$branch|"
+    if fm_run_bounded_capture --combine-stderr out 10 \
+        gh-axi pr list --repo "$repo" --state open --head "$branch" --limit 2 --fields url; then
+      status=0
+    else
+      status=$?
+    fi
+    if [ "$status" -ne 0 ] || ! fm_process_tree_cleanup_verified; then
+      echo "REFUSED: dead-task reaping cannot prove branch PR state under the checkout lock: $branch" >&2
+      return 1
+    fi
+    count=$(printf '%s\n' "$out" | sed -n 's/^count:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
+    case "$count" in
+      0) ;;
+      ''|*[!0-9]*)
+        echo "REFUSED: dead-task reaping cannot prove branch PR state under the checkout lock: $branch" >&2
+        return 1
+        ;;
+      *)
+        echo "REFUSED: dead-task reaping found an open PR under the checkout lock: branch=$branch" >&2
+        return 1
+        ;;
+    esac
+  done
+  [ "$seen" != '|' ] || {
+    echo "REFUSED: dead-task reaping cannot identify a branch for the final open-PR proof." >&2
+    return 1
+  }
+}
+
+validate_reap_worktree_safety_and_summarize_ignored() {
+  validate_reap_worktree_safety || return $?
+  validate_reap_ignored_worktree_paths
+}
+
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
@@ -4869,11 +5271,24 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     # directory, so run it from the project.
     # teardown_treehouse_return tolerates transient and stale git locks left by
     # a killed crewmate process; see the script header for the retry proof.
-    post_lock_cleanup_check=validate_worktree_teardown_safety_and_summarize_ignored
-    teardown_treehouse_return "$WT" "$PROJ" "worktree" "firstmate-$ID" "$post_lock_cleanup_check" cleanup_returned_worktree || {
+    if [ "$REAP_DEAD" -eq 1 ]; then
+      post_lock_cleanup_check=validate_reap_return_safety
+      treehouse_return_mode=--safe
+    else
+      post_lock_cleanup_check=validate_worktree_teardown_safety_and_summarize_ignored
+      treehouse_return_mode=--force
+    fi
+    if teardown_treehouse_return "$WT" "$PROJ" "worktree" "firstmate-$ID" "$post_lock_cleanup_check" cleanup_returned_worktree "$treehouse_return_mode"; then
+      :
+    else
+      treehouse_return_status=$?
       echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+      if [ "$REAP_DEAD" -eq 1 ] \
+          && [ "$treehouse_return_status" -eq "$TEARDOWN_REAP_SAFETY_REFUSAL" ]; then
+        exit "$TEARDOWN_REAP_SAFETY_REFUSAL"
+      fi
       exit 1
-    }
+    fi
   fi
 fi
 

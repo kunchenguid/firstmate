@@ -33,6 +33,9 @@ SH
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ -n "${FM_FAKE_TREEHOUSE_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
+fi
 if [ "${1:-}" = get ]; then
   printf '%s\n' "${FM_FAKE_TREEHOUSE_WORKTREE:?}"
 fi
@@ -79,13 +82,15 @@ run_spawn() {
   local home=$1 worktree=$2 fakebin=$3 launch_log=$4
   shift 4
   : > "$launch_log"
+  : > "$home/treehouse.log"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_TREEHOUSE_ROOT="$home/treehouse-pools" \
     FM_CHECKOUT_REFRESH_STATE_BASE="$home/checkout-refresh-state" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$worktree" TMUX="fake,1,0" \
-    FM_FAKE_TREEHOUSE_WORKTREE="$worktree" FM_FAKE_LAUNCH_LOG="$launch_log" \
+    FM_FAKE_TREEHOUSE_WORKTREE="$worktree" FM_FAKE_TREEHOUSE_LOG="$home/treehouse.log" \
+    FM_FAKE_LAUNCH_LOG="$launch_log" \
     PATH="${FM_TEST_PATH_OVERRIDE:-$fakebin:$PATH}" "$SPAWN" "$@" 2>&1
 }
 
@@ -111,6 +116,8 @@ test_new_ship_without_row_is_refused_with_fix() {
   assert_contains "$out" "$expected_fix" "refusal did not print the exact tasks-axi repair command"
   assert_absent "$HOME_DIR/state/$id.meta" "backlog refusal wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "backlog refusal created an endpoint launch"
+  assert_not_contains "$(cat "$HOME_DIR/treehouse.log")" "get " \
+    "backlog refusal acquired a Treehouse lease before validation"
   pass "new ship without a backlog row is refused before endpoint creation with a scoped fix"
 }
 

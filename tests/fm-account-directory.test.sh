@@ -549,7 +549,7 @@ set -u
 [ "${1:-}" = return ] || exit 0
 target=${@: -1}
 [ "$target" != . ] || target=$(pwd -P)
-printf 'return --force %s\n' "$target" >> "${FM_FAKE_TREEHOUSE_LOG:?}"
+printf '%s\tcwd=%s\n' "$*" "$(pwd -P)" >> "${FM_FAKE_TREEHOUSE_LOG:?}"
 [ "${FM_FAKE_TREEHOUSE_RETURN_FAIL:-0}" != 1 ] || exit 71
 project=${FM_TREEHOUSE_RETURN_PROJECT:-$(pwd -P)}
 cd "$project" || exit 72
@@ -602,7 +602,7 @@ make_spawn_case() {
   case_dir="$TMP_ROOT/spawn-$name"
   home="$case_dir/home"
   project="$case_dir/project"
-  worktree="$case_dir/worktree"
+  worktree="$case_dir/treehouse-pool/1/worktree"
   launch_log="$case_dir/launch.log"
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" \
     "$home/state/.task-tmp" "$home/treehouse-pools"
@@ -617,6 +617,26 @@ make_spawn_case() {
   fm_git_worktree "$project" "$worktree" "wt-$name"
   git -C "$worktree" checkout --quiet --detach HEAD
   git -C "$project" branch --quiet -D "wt-$name"
+  python3 - "$case_dir/treehouse-pool/treehouse-state.json" "$worktree" "$id" <<'PY'
+import json
+import sys
+
+state_path, worktree, task_id = sys.argv[1:]
+with open(state_path, "w", encoding="utf-8") as stream:
+    json.dump(
+        {
+            "worktrees": [
+                {
+                    "name": "1",
+                    "path": worktree,
+                    "leased": True,
+                    "lease_holder": f"firstmate-{task_id}",
+                }
+            ]
+        },
+        stream,
+    )
+PY
   printf '%s\n' "$home|$project|$worktree|$launch_log"
 }
 
@@ -1235,13 +1255,14 @@ test_failed_new_direct_spawn_returns_worktree_after_endpoint_cleanup() {
     status=$?
   fi
   [ "$status" -ne 0 ] || fail "new direct rollback fixture unexpectedly succeeded"
-  if ! grep -Fq "return --force $recorded_worktree" "$TREEHOUSE_LOG"; then
-    fail "failed new direct spawn did not return its worktree: output=$out treehouse=$(cat "$TREEHOUSE_LOG")"
-  fi
+  assert_grep $'return .\tcwd='"$recorded_worktree" "$TREEHOUSE_LOG" \
+    "failed new direct spawn did not use the lease-owner-checked non-forcing return: output=$out treehouse=$(cat "$TREEHOUSE_LOG")"
+  assert_no_grep 'return --force' "$TREEHOUSE_LOG" \
+    "failed new direct spawn bypassed the non-forcing rollback contract"
   [ ! -e "$SPAWN_WORKTREE" ] || fail "failed new direct spawn left its worktree registered"
   [ ! -e "$SPAWN_HOME/state/$id.meta" ] || fail "successful direct rollback left task metadata"
   [ ! -e "$SPAWN_HOME/state/.fake-endpoint" ] || fail "successful direct rollback left its endpoint"
-  pass "failed new direct spawn removes its endpoint and returns its worktree"
+  pass "failed new direct spawn removes its endpoint and returns its exactly owned lease without force"
 }
 
 test_failed_new_direct_spawn_retains_cleanup_when_worktree_return_fails() {

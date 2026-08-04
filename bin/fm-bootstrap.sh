@@ -16,6 +16,7 @@
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: fm-<id>...",
 #                 "REPORT_RETENTION: unavailable: <reason>",
+#                 "TREEHOUSE_CAPACITY: LOW pool=<path> available=<n> ...",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: <outcome>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          A NUDGE_SECONDMATES line lists the RUNNING secondmate task selectors
@@ -129,6 +130,23 @@ report_retention_ensure() {
     [ -n "$out" ] || out="persistent owner did not start"
     echo "REPORT_RETENTION: unavailable: ${out%%$'\n'*}"
   fi
+}
+
+treehouse_capacity_check() {
+  local out status
+  if fm_run_bounded_capture --combine-stderr out 15 \
+      "$SCRIPT_DIR/fm-treehouse-reap.sh" capacity --low-only; then
+    status=0
+  else
+    status=$?
+  fi
+  if ! fm_process_tree_cleanup_verified; then
+    echo "TREEHOUSE_CAPACITY: unavailable reason=cleanup-unverified"
+    return 0
+  fi
+  [ -z "$out" ] || printf '%s\n' "$out"
+  [ "$status" -eq 0 ] \
+    || echo "TREEHOUSE_CAPACITY: unavailable reason=capacity-check-failed status=$status"
 }
 
 checkout_refresh_ensure() {
@@ -898,4 +916,5 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   x_mode_setup
   fleet_sync
 fi
+treehouse_capacity_check
 exit 0

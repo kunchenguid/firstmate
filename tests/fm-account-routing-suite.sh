@@ -196,6 +196,16 @@ SH
 if [ "${1:-}" = return ] && [ -n "${FM_FAKE_TREEHOUSE_RETURN_SLEEP:-}" ]; then
   sleep "$FM_FAKE_TREEHOUSE_RETURN_SLEEP"
 fi
+if [ "${1:-}" = return ]; then
+  case " $* " in
+    *' --force '*) ;;
+    *)
+      target=${!#}
+      [ "$target" != . ] || target=$PWD
+      [ -z "$(git -C "$target" status --porcelain=v1 --untracked-files=all 2>/dev/null)" ] || exit 1
+      ;;
+  esac
+fi
 if [ "${1:-}" = return ] && [ -n "${FM_EXPECT_CHECKOUT_LOCK_ROOT:-}" ]; then
   # Prove the live lock through the guarded owner exported to the bounded return.
   # Recomputing the private lock hash here made the assertion depend on path-normalization details instead of the lock guarantee.
@@ -665,15 +675,17 @@ test_failed_freshness_proof_rolls_back_unmanaged_resources() {
     "failed freshness proof did not identify the stale acquired worktree"
   assert_not_grep '^new-window ' "$TMUX_LOG" \
     "failed unmanaged freshness proof created an endpoint before verification"
+  assert_grep 'return .' "$TREEHOUSE_LOG" \
+    "failed unmanaged freshness proof did not roll back its clean lease"
   assert_not_grep 'return --force' "$TREEHOUSE_LOG" \
-    "failed unmanaged freshness proof force-returned an unverified acquired worktree"
-  assert_contains "$out" "retained unsafe acquired worktree" \
-    "failed unmanaged freshness proof did not surface retain-only cleanup"
+    "failed unmanaged freshness proof used the forcing return path"
+  assert_not_contains "$out" "retained unsafe acquired worktree" \
+    "failed unmanaged freshness proof reported a clean lease as retained"
   assert_absent "$CASE_DIR/endpoint-live" \
     "failed unmanaged freshness proof left its endpoint alive"
   assert_absent "$HOME_DIR/state/$id.meta" \
     "failed unmanaged freshness proof published task metadata"
-  pass "failed freshness proofs unwind endpoints and retain unverified worktrees"
+  pass "failed freshness proofs unwind endpoints and return clean leases without forcing"
 }
 
 test_local_only_spawn_uses_local_default_tip() {
@@ -719,6 +731,8 @@ test_dirty_acquisition_is_retained_without_force_return() {
     "dirty acquisition was not durably leased before verification"
   assert_not_grep 'return --force' "$TREEHOUSE_LOG" \
     "dirty acquisition was returned through the destructive Treehouse path"
+  assert_grep 'return .' "$TREEHOUSE_LOG" \
+    "dirty acquisition cleanup did not attempt the non-forcing rollback path"
   grep -Fq '# unlanded work' "$draft" || fail "dirty acquisition cleanup changed its draft"
   assert_absent "$CASE_DIR/endpoint-live" \
     "dirty acquisition refusal left its prepared endpoint alive"
@@ -828,7 +842,7 @@ test_unmanaged_postinstall_failure_restores_prior_state() {
   done
   assert_absent "$CASE_DIR/endpoint-live" \
     "post-metadata unmanaged failure left its endpoint alive"
-  assert_grep "return --force ." "$TREEHOUSE_LOG" \
+  assert_grep 'return .' "$TREEHOUSE_LOG" \
     "post-metadata unmanaged failure did not return its clean worktree"
   assert_present "$lock_marker" \
     "spawn rollback did not hold the common checkout lock during Treehouse return"
@@ -1217,7 +1231,7 @@ test_enforce_failure_rolls_back_prepared_endpoint() {
   [ "$status" -ne 0 ] || fail "failed Agent Fleet selection should block spawn"
   assert_regex '^new-window ' "$TMUX_LOG" "selection did not happen after endpoint preparation"
   assert_regex '^kill-window ' "$TMUX_LOG" "selection failure did not remove its prepared endpoint"
-  assert_grep 'return --force' "$TREEHOUSE_LOG" \
+  assert_grep 'return .' "$TREEHOUSE_LOG" \
     "selection failure did not return its prepared worktree (spawn: $out; lifecycle: $(tr '\n' '|' < "$LIFECYCLE_LOG"))"
   assert_absent "$HOME_DIR/state/$id.meta" "selection failure wrote task meta"
   [ -n "$out" ] || true
@@ -2862,7 +2876,7 @@ test_fresh_launch_requires_session_binding_and_fully_rolls_back() {
   assert_grep "lease release --task $task --force" "$AF_LOG" "unbound launch did not release its lease"
   assert_grep "session remove --task $task" "$AF_LOG" "unbound launch did not remove its attempt mapping"
   assert_regex '^kill-window ' "$TMUX_LOG" "unbound launch did not kill its endpoint"
-  assert_grep 'return --force' "$TREEHOUSE_LOG" "unbound launch did not return its worktree"
+  assert_grep 'return .' "$TREEHOUSE_LOG" "unbound launch did not return its worktree without forcing"
   assert_absent "$HOME_DIR/state/$id.meta" "unbound launch left phantom recovery metadata"
   assert_contains "$out" "did not bind a fresh SessionStart mapping" "unbound launch did not report its binding failure"
   pass "fresh managed launches commit only after provider binding and otherwise unwind"

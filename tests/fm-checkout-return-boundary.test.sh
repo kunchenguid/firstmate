@@ -48,7 +48,7 @@ with open(lib_path, encoding="utf-8") as stream:
 
 marker = "if fm_run_bounded \"$timeout\" python3 -c '"
 start = text.index(marker) + len(marker)
-end = text.index("\n' \"$checkout\" \"$project\"", start)
+end = text.index("\n' \"$checkout\" \"$project\" \"$mode\"", start)
 program = text[start:end]
 # The program is embedded in a single-quoted shell word, so it can contain no
 # apostrophes and needs no unescaping. Assert that rather than assume it.
@@ -79,7 +79,7 @@ run_boundary() {  # <project> <target> [cd-dir] [fd-limit] -> exit status
       ulimit -n "$fd_limit" || exit 71
     fi
     cd "$cd_dir" || exit 70
-    PATH="$fakebin:$PATH" python3 "$BOUNDARY_PY" "$target" "$project"
+    PATH="$fakebin:$PATH" python3 "$BOUNDARY_PY" "$target" "$project" --force
   ) >/dev/null 2>&1
   status=$?
   printf '%s' "$status"
@@ -92,7 +92,7 @@ run_boundary_low_fd() {  # <project> <target> <open-file-limit> -> exit status
   (
     ulimit -n "$open_file_limit" || exit 70
     cd "$project" || exit 71
-    PATH="$fakebin:$PATH" python3 "$BOUNDARY_PY" "$target" "$project"
+    PATH="$fakebin:$PATH" python3 "$BOUNDARY_PY" "$target" "$project" --force
   ) >/dev/null 2>&1
   status=$?
   printf '%s' "$status"
@@ -217,7 +217,7 @@ SH
   (
     ulimit -n 128 || exit 71
     cd "$project" || exit 70
-    PATH="$fakebin:$PATH" python3 "$BOUNDARY_PY" "$worktree" "$project"
+    PATH="$fakebin:$PATH" python3 "$BOUNDARY_PY" "$worktree" "$project" --force
   ) >/dev/null 2>&1
   status=$?
   expect_code 0 "$status" "a worktree with more than 42,000 directories and depth beyond the descriptor limit must return"
