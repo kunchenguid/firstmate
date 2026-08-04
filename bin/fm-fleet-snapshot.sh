@@ -63,6 +63,7 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EVIDENCE_RUN="$SCRIPT_DIR/fm-evidence-run.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -221,7 +222,8 @@ freeze_meta_inventory() {  # <source-state> <destination-state>
     for suffix in meta status busy-state busy-gen; do
       sidecar="$source_state/$id.$suffix"
       [ -e "$sidecar" ] || continue
-      cp -R "$sidecar" "$destination_state/" || return 1
+      "$EVIDENCE_RUN" --total "$FM_LIVENESS_EVIDENCE_TIMEOUT" cp -R "$sidecar" "$destination_state/" || return 1
+      printf '.\n'
     done
   done
 }
@@ -249,7 +251,7 @@ if [ "$OUTPUT_MODE" = secondmate-home-freeze ]; then
     exit 1
   fi
   printf '%s\n' "$FM_HOME" > "$freeze_root/home"
-  printf '%s\t%s\n' "$(count_meta_entries_at "$freeze_root/state")" "$freeze_root"
+  printf 'ready\t%s\t%s\n' "$(count_meta_entries_at "$freeze_root/state")" "$freeze_root"
   exit 0
 fi
 
@@ -499,7 +501,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 
 task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
-  local remote_host remote_root remote_state remote_rc remote_home_present
+  local remote_host remote_root remote_state remote_rc remote_home_present endpoint_rc
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw last_event_state current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
@@ -605,14 +607,23 @@ task_json_lines() {
       fi
     else
       if [ -n "$target" ]; then
-        if fm_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
+        if run_timed "$FM_LIVENESS_EVIDENCE_TIMEOUT" bash -c \
+          ". \"\$1\"; fm_backend_target_exists \"\$2\" \"\$3\" \"\$4\"" \
+          fm-target-exists "$SCRIPT_DIR/fm-backend.sh" "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
           endpoint_exists=true
         else
-          endpoint_exists=false
+          endpoint_rc=$?
+          if [ "$endpoint_rc" -eq 124 ] || [ "$endpoint_rc" -ge 128 ]; then
+            endpoint_exists=null
+          else
+            endpoint_exists=false
+          fi
         fi
       fi
       if [ "$kind" = secondmate ] && [ -n "$target" ]; then
-        agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf unknown)
+        agent_alive=$(run_timed "$FM_LIVENESS_EVIDENCE_TIMEOUT" bash -c \
+          ". \"\$1\"; fm_backend_agent_alive \"\$2\" \"\$3\"" \
+          fm-agent-alive "$SCRIPT_DIR/fm-backend.sh" "$backend" "$target" 2>/dev/null) || agent_alive=unknown
       fi
     fi
 
@@ -896,15 +907,13 @@ case "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" in ''|*[!0-9]*) FM_SNAPSHOT_SECON
 run_timed() {  # <seconds> <command...>
   local seconds=$1
   shift
-  if command -v timeout >/dev/null 2>&1; then
-    timeout -k 1 "$seconds" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout -k 1 "$seconds" "$@"
-  elif command -v perl >/dev/null 2>&1; then
-    perl -e 'my $t = shift; my $pid = 0; my $stopping = 0; my $stop = sub { my $code = shift; return if $stopping++; alarm 0; if ($pid > 0) { kill "TERM", $pid; kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", $pid; kill "KILL", -$pid; waitpid $pid, 0 } exit $code }; local $SIG{ALRM} = sub { $stop->(124) }; local $SIG{HUP} = sub { $stop->(129) }; local $SIG{INT} = sub { $stop->(130) }; local $SIG{TERM} = sub { $stop->(143) }; $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } alarm $t; waitpid $pid, 0; my $status = $?; alarm 0; exit(($status & 127) ? 128 + ($status & 127) : ($status >> 8))' "$seconds" "$@"
-  else
-    return 124
-  fi
+  "$EVIDENCE_RUN" --total "$seconds" "$@"
+}
+
+run_progressive() {  # <idle-seconds> <command...>
+  local seconds=$1
+  shift
+  "$EVIDENCE_RUN" --progress "$seconds" "$@"
 }
 
 secondmate_summary_timeout() {  # <child-count> <local|remote>
@@ -1261,7 +1270,7 @@ secondmate_current_json() {  # <parent-tasks-json-file>
   local tasks_file=$1 registry_file union_file rows_file records_file total_registered total shown truncated
   local row id home host remote registered registry_error task status_file event_raw event_note event_epoch event_age
   local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
-  local record child_count freeze_info freeze_path freeze_rc summary_route summary_timeout seen_homes=''
+  local record child_count freeze_output freeze_info freeze_path freeze_rc summary_route summary_timeout seen_homes=''
   registry_file="$SNAP_TMP/secondmate-registry.json"
   union_file="$SNAP_TMP/secondmate-union.json"
   rows_file="$SNAP_TMP/secondmate-rows.jsonl"
@@ -1317,6 +1326,10 @@ secondmate_current_json() {  # <parent-tasks-json-file>
     reason=$registry_error
     summary='{}'
     summary_valid=false
+    freeze_output=
+    freeze_info=
+    freeze_path=
+    freeze_rc=1
     if [ -z "$reason" ] && [ -z "$home" ]; then reason="no recorded secondmate home"; fi
     if [ -z "$reason" ]; then
       case "$home" in
@@ -1343,14 +1356,15 @@ secondmate_current_json() {  # <parent-tasks-json-file>
     fi
     if [ -z "$reason" ]; then
       if [ "$remote" = true ]; then
-        if freeze_info=$(run_timed "$FM_SNAPSHOT_REMOTE_PROBE_TIMEOUT" \
+        if freeze_output=$(run_progressive "$FM_SNAPSHOT_REMOTE_PROBE_TIMEOUT" \
           "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-freeze < /dev/null 2>/dev/null); then
           freeze_rc=0
         else
           freeze_rc=$?
         fi
-        child_count=${freeze_info%%$'\t'*}
-        freeze_path=${freeze_info#*$'\t'}
+        freeze_info=$(printf '%s\n' "$freeze_output" | tail -n 1)
+        child_count=$(printf '%s\n' "$freeze_info" | awk -F '\t' '$1=="ready" {print $2}')
+        freeze_path=$(printf '%s\n' "$freeze_info" | awk -F '\t' '$1=="ready" {print $3}')
         case "$child_count" in ''|*[!0-9]*) freeze_rc=1 ;; esac
         case "$freeze_path" in /*) ;; *) freeze_rc=1 ;; esac
         if [ "$freeze_rc" -ne 0 ]; then
@@ -1359,13 +1373,27 @@ secondmate_current_json() {  # <parent-tasks-json-file>
           :
         fi
       else
-        freeze_path=$(mktemp -d "$(freeze_temp_base)/fm-secondmate-state.XXXXXX") || freeze_path=
-        if [ -z "$freeze_path" ] || ! freeze_meta_inventory "$home/state" "$freeze_path/state"; then
+        if freeze_output=$(run_progressive "$FM_LIVENESS_EVIDENCE_TIMEOUT" env \
+          FM_ROOT_OVERRIDE="$FM_ROOT" \
+          FM_HOME="$home" \
+          FM_STATE_OVERRIDE="$home/state" \
+          FM_DATA_OVERRIDE="$home/data" \
+          FM_CONFIG_OVERRIDE="$home/config" \
+          FM_PROJECTS_OVERRIDE="$home/projects" \
+          FM_LIVENESS_EVIDENCE_TIMEOUT="$FM_LIVENESS_EVIDENCE_TIMEOUT" \
+          "$SCRIPT_DIR/fm-fleet-snapshot.sh" --secondmate-home-freeze 2>/dev/null); then
+          freeze_rc=0
+        else
+          freeze_rc=$?
+        fi
+        freeze_info=$(printf '%s\n' "$freeze_output" | tail -n 1)
+        child_count=$(printf '%s\n' "$freeze_info" | awk -F '\t' '$1=="ready" {print $2}')
+        freeze_path=$(printf '%s\n' "$freeze_info" | awk -F '\t' '$1=="ready" {print $3}')
+        case "$child_count" in ''|*[!0-9]*) freeze_rc=1 ;; esac
+        case "$freeze_path" in /*) ;; *) freeze_rc=1 ;; esac
+        if [ "$freeze_rc" -ne 0 ]; then
           [ -z "$freeze_path" ] || rm -rf -- "$freeze_path"
           reason="structured home inventory unavailable"
-        else
-          printf '%s\n' "$home" > "$freeze_path/home"
-          child_count=$(count_meta_entries_at "$freeze_path/state")
         fi
       fi
     fi

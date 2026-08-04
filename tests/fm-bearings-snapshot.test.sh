@@ -89,11 +89,16 @@ https://github.com/$repo/pull/3"
         previous=$arg
       done
       [ -n "$query" ] || exit 2
-      rendered=$(jq -n '{
+      workflow_name=CI
+      [ "${FAKE_WORKFLOW_SEMICOLON:-0}" = 1 ] && workflow_name='Release; Production'
+      if [ "${FAKE_LONG_WORKFLOW:-0}" = 1 ]; then
+        workflow_name=$(awk 'BEGIN { for (i=0; i<6000; i++) printf "x" }')
+      fi
+      rendered=$(${FAKE_REAL_JQ:-jq} -n --arg workflow_name "$workflow_name" '{
         total_count:2,
         workflow_runs:[
-          {name:"CI",event:"pull_request",run_attempt:1,created_at:"2026-08-03T10:00:00Z",updated_at:"2026-08-03T10:05:00Z",status:"completed",conclusion:"success",html_url:"https://github.com/acme/repo/actions/runs/1"},
-          {name:"CI",event:"pull_request_target",run_attempt:2,created_at:"2026-08-03T10:06:00Z",updated_at:"2026-08-03T10:08:00Z",status:"completed",conclusion:"failure",html_url:"https://github.com/acme/repo/actions/runs/2"}
+          {name:$workflow_name,event:"pull_request",run_attempt:1,created_at:"2026-08-03T10:00:00Z",updated_at:"2026-08-03T10:05:00Z",status:"completed",conclusion:"success",html_url:"https://github.com/acme/repo/actions/runs/1"},
+          {name:$workflow_name,event:"pull_request_target",run_attempt:2,created_at:"2026-08-03T10:06:00Z",updated_at:"2026-08-03T10:08:00Z",status:"completed",conclusion:"failure",html_url:"https://github.com/acme/repo/actions/runs/2"}
         ]
       }' | jq -r "$query") || exit 1
       emit_body "$rendered"
@@ -781,6 +786,62 @@ SH
   pass "secondmate summary timeout derives from every child's bounded work"
 }
 
+test_inventory_freeze_progress_scales_with_exact_fleet() {
+  local home mate fakebin i json real_cp badbin real_perl neutralized
+  home=$(make_home progressive-freeze)
+  printf '## Done\n' > "$home/data/backlog.md"
+  mate="$TMP_ROOT/progressive-freeze-home"
+  make_valid_secondmate_home progressive "$mate"
+  append_secondmate_registry "$home" progressive "$mate"
+  printf '## In flight\n' > "$mate/data/backlog.md"
+  i=1
+  while [ "$i" -le 8 ]; do
+    mkdir -p "$mate/projects/child-$i"
+    printf -- '- [ ] child-%s - Child %s (repo: sample) (kind: scout)\n' "$i" "$i" >> "$mate/data/backlog.md"
+    fm_write_meta "$mate/state/child-$i.meta" \
+      "window=firstmate:fm-child-$i" "worktree=$mate/projects/child-$i" "project=sample" \
+      "harness=codex" "kind=scout" "mode=scout"
+    record_claude_state "$mate/state" "child-$i" busy
+    i=$((i + 1))
+  done
+  printf '\n## Queued\n\n## Done\n' >> "$mate/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+  real_cp=$(command -v cp)
+  cat > "$fakebin/cp" <<'SH'
+#!/usr/bin/env bash
+sleep "${SLOW_CP_SLEEP:-0}"
+exec "${REAL_CP:?}" "$@"
+SH
+  chmod +x "$fakebin/cp"
+  json=$(REAL_CP="$real_cp" SLOW_CP_SLEEP=0.15 FM_LIVENESS_EVIDENCE_TIMEOUT=1 run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .secondmates[] | select(.id=="progressive")
+    | .provenance=="structured-home" and .state=="active_child_work"
+  ' >/dev/null || fail "fleet-sized freeze was cut off by a fixed preflight timeout: $json"
+
+  badbin="$home/bad-progress-bin"
+  mkdir -p "$badbin"
+  real_perl=$(command -v perl)
+  cat > "$badbin/perl" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in -MIO::Select) ;; *) exec "${REAL_PERL:?}" "$@" ;; esac
+shift 5
+shift
+seconds=$1
+shift
+exec "${REAL_PERL:?}" -e 'my $t=shift; my $pid=fork; die unless defined $pid; if (!$pid) { setpgrp(0,0); exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", -$pid; select undef,undef,undef,0.2; kill "KILL", -$pid; waitpid $pid,0; exit 124 }; alarm $t; waitpid $pid,0; exit($? >> 8)' "$seconds" "$@"
+SH
+  chmod +x "$badbin/perl"
+  neutralized=$(PATH="$badbin:$fakebin:$PATH" REAL_PERL="$real_perl" REAL_CP="$real_cp" SLOW_CP_SLEEP=0.15 \
+    FM_HOME="$home" FM_LIVENESS_EVIDENCE_TIMEOUT=1 FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" \
+    FM_BEARINGS_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" "$BEARINGS" --json)
+  printf '%s' "$neutralized" | jq -e '
+    .secondmates[] | select(.id=="progressive")
+    | .state=="unknown" and (.reason | contains("inventory unavailable"))
+  ' >/dev/null || fail "neutralizing progress-derived freeze time left the fleet-growth assertion green: $neutralized"
+  pass "inventory freeze budget scales from progress across the exact frozen fleet"
+}
+
 test_oversized_secondmate_summary_stays_strict_unknown() {
   local home mate fakebin json i
   home=$(make_home oversized-home)
@@ -1291,6 +1352,53 @@ test_firstmate_check_tally_is_refused() {
       and (.checks | startswith("NOT_VERIFIABLE: Actions instances lacked")))
   ' >/dev/null || fail "bare check tally was accepted as current firstmate gate evidence: $json"
   pass "firstmate checks refuse a bare tally without per-instance event, attempt, and timestamp evidence"
+}
+
+test_actions_instances_preserve_forge_delimiters() {
+  local home fakebin json
+  home=$(make_home actions-delimiter); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  json=$(FAKE_WORKFLOW_SEMICOLON=1 run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    [.candidate_prs[] | select(.repo=="kunchenguid/firstmate")]
+    | length == 3 and all(.[];
+        .verification=="verified_live"
+        and (.actions | length)==2
+        and all(.actions[]; .name=="Release; Production")
+        and (.checks | contains("Release; Production[event=pull_request")))
+  ' >/dev/null || fail "forge-controlled semicolon delimiter corrupted Actions instances: $json"
+  pass "Actions instances remain structured when workflow names contain delimiters"
+}
+
+test_pr_verification_payloads_never_reenter_argv() {
+  local home fakebin guardbin real_jq json
+  home=$(make_home pr-argv-stream); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  guardbin="$home/jq-guard"
+  mkdir -p "$guardbin"
+  real_jq=$(command -v jq)
+cat > "$guardbin/jq" <<'SH'
+#!/usr/bin/env bash
+state=
+for arg in "$@"; do
+  case "$state" in
+    name) state=value; continue ;;
+    value) [ "${#arg}" -le 4000 ] || exit 97; state=; continue ;;
+  esac
+  case "$arg" in --arg|--argjson) state=name ;; esac
+done
+exec "${REAL_JQ:?}" "$@"
+SH
+  chmod +x "$guardbin/jq"
+  json=$(PATH="$fakebin:$guardbin:$PATH" REAL_JQ="$real_jq" FAKE_REAL_JQ="$real_jq" FAKE_LONG_WORKFLOW=1 \
+    FM_HOME="$home" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" \
+    FM_BEARINGS_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" \
+    "$BEARINGS" --all-landed --all-recorded-prs --json)
+  printf '%s' "$json" | jq -e '
+    [.candidate_prs[] | select(.repo=="kunchenguid/firstmate")]
+    | length == 3 and all(.[]; .verification=="verified_live" and (.actions | length)==2)
+  ' >/dev/null || fail "large streamed PR verification payload was lost: $json"
+  pass "all PR expansion paths assemble growing verification payloads from files"
 }
 
 test_partial_github_failure_degrades() {
@@ -2272,6 +2380,7 @@ test_default_secondmate_timeout_covers_liveness_overhead
 test_secondmate_summary_freezes_budgeted_inventory
 test_remote_secondmate_summary_preserves_frozen_inventory
 test_secondmate_timeout_derives_from_fleet_size
+test_inventory_freeze_progress_scales_with_exact_fleet
 test_oversized_secondmate_summary_stays_strict_unknown
 test_secondmate_and_child_bounds_are_disclosed
 test_parent_decision_is_untrusted_contradiction_only
@@ -2283,6 +2392,8 @@ test_default_is_bounded_and_verifies_every_named_pr
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges
 test_every_final_landed_pr_is_live_verified
+test_actions_instances_preserve_forge_delimiters
+test_pr_verification_payloads_never_reenter_argv
 test_landed_default_balances_dominant_and_sparse_homes
 test_landed_default_refills_capacity_after_sparse_homes_exhaust
 test_landed_default_uses_deterministic_home_order_when_homes_exceed_cap

@@ -26,11 +26,13 @@ install_evidence() {  # <dir>
   local dir=$1
   cat > "$dir/bin/endpoint" <<'SH'
 #!/usr/bin/env bash
+[ -z "${E_ENDPOINT_SLEEP:-}" ] || sleep "$E_ENDPOINT_SLEEP"
 printf '%s\n' "${E_ENDPOINT:-alive}"
 SH
   cat > "$dir/bin/capture" <<'SH'
 #!/usr/bin/env bash
 count_file=${E_DIR:?}/capture.count
+[ -z "${E_CAPTURE_SLEEP:-}" ] || sleep "$E_CAPTURE_SLEEP"
 n=$(cat "$count_file" 2>/dev/null || printf 0)
 n=$((n + 1))
 printf '%s' "$n" > "$count_file"
@@ -50,17 +52,18 @@ wt=${E_WT:?}
 family=${E_FAMILY:-claude}
 case "$family" in claude) worker=claude ;; codex) worker=codex ;; *) worker=$family ;; esac
 case "${E_PROCESS:-working}" in
+  stall) sleep 30 ;;
   working)
     if [ "$n" -eq 1 ]; then cpu=1000; else cpu=${E_CPU2:-1030}; fi
     printf '11\t%s\t%s\t%s\n' "$cpu" "$worker" "$wt"
     ;;
   launcher-trap)
-    if [ "$n" -eq 1 ]; then real=5000; else real=5002; fi
+    if [ "$n" -eq 1 ]; then real=5000; else real=5020; fi
     printf '10\t40\tnode\t%s\n' "$wt"
     printf '11\t%s\t%s\t%s\n' "$real" "$worker" "$wt"
     ;;
   same-family-max)
-    if [ "$n" -eq 1 ]; then high=5000; else high=5002; fi
+    if [ "$n" -eq 1 ]; then high=5000; else high=5020; fi
     printf '10\t40\t%s\t%s\n' "$worker" "$wt"
     printf '11\t%s\t%s\t%s\n' "$high" "$worker" "$wt"
     ;;
@@ -134,17 +137,17 @@ assert_activity() {  # <json> <activity> <message>
 test_harness_relative_cpu_rows() {
   local dir json
   dir=$(make_case claude-active claude); install_evidence "$dir"
-  json=$(E_FAMILY=claude E_PROCESS=working E_CPU2=1002 run_case "$dir")
-  printf '%s' "$json" | jq -e '.records[0] | .activity=="active" and .cpu.threshold_ms_per_minute==760 and .cpu.delta_ms==2' >/dev/null \
-    || fail "Claude row did not fire on a 2ms cumulative delta over 100ms: $json"
+  json=$(E_FAMILY=claude E_PROCESS=working E_CPU2=1020 run_case "$dir")
+  printf '%s' "$json" | jq -e '.records[0] | .activity=="active" and .cpu.threshold_ms_per_minute==760 and .cpu.delta_ms==20' >/dev/null \
+    || fail "Claude row did not fire above its elapsed-time working floor: $json"
 
   dir=$(make_case claude-refusal claude); install_evidence "$dir"
   json=$(E_FAMILY=claude E_PROCESS=working E_CPU2=1001 run_case "$dir")
   assert_activity "$json" parked "Claude row did not refuse its legitimate idle-baseline input"
 
   dir=$(make_case codex-active codex); install_evidence "$dir"
-  json=$(E_FAMILY=codex E_PROCESS=working E_CPU2=1001 run_case "$dir")
-  printf '%s' "$json" | jq -e '.records[0] | .activity=="active" and .cpu.threshold_ms_per_minute==400 and .cpu.delta_ms==1' >/dev/null \
+  json=$(E_FAMILY=codex E_PROCESS=working E_CPU2=1010 run_case "$dir")
+  printf '%s' "$json" | jq -e '.records[0] | .activity=="active" and .cpu.threshold_ms_per_minute==400 and .cpu.delta_ms==10' >/dev/null \
     || fail "Codex row did not fire on its own measured working delta: $json"
 
   dir=$(make_case codex-refusal codex); install_evidence "$dir"
@@ -157,12 +160,12 @@ test_max_cpu_launcher_and_two_sample_delta() {
   local dir json
   dir=$(make_case launcher-max codex); install_evidence "$dir"
   json=$(E_FAMILY=codex E_PROCESS=launcher-trap run_case "$dir")
-  printf '%s' "$json" | jq -e '.records[0] | .activity=="active" and .cpu.sample_1_max_ms==5000 and .cpu.sample_2_max_ms==5002' >/dev/null \
+  printf '%s' "$json" | jq -e '.records[0] | .activity=="active" and .cpu.sample_1_max_ms==5000 and .cpu.sample_2_max_ms==5020' >/dev/null \
     || fail "max-CPU guard trusted the thin launcher instead of the real child: $json"
 
   dir=$(make_case same-family-max claude); install_evidence "$dir"
   json=$(E_FAMILY=claude E_PROCESS=same-family-max run_case "$dir")
-  printf '%s' "$json" | jq -e '.records[0] | .activity=="active" and .cpu.sample_1_max_ms==5000 and .cpu.sample_2_max_ms==5002' >/dev/null \
+  printf '%s' "$json" | jq -e '.records[0] | .activity=="active" and .cpu.sample_1_max_ms==5000 and .cpu.sample_2_max_ms==5020' >/dev/null \
     || fail "max-CPU guard trusted the first same-family wrapper instead of the busy worker: $json"
 
   dir=$(make_case cumulative-not-percent claude); install_evidence "$dir"
@@ -234,6 +237,68 @@ test_endpoint_three_way_and_output_activity() {
   printf '%s' "$json" | jq -e '.records[0] | .endpoint.presence=="unverified" and .activity=="unverified"' >/dev/null \
     || fail "unreadable endpoint was silently collapsed to present or absent: $json"
   pass "endpoint presence is three-way and changed output independently establishes work"
+}
+
+test_local_evidence_producers_are_bounded() {
+  local dir json started elapsed
+  dir=$(make_case local-process-stall claude); install_evidence "$dir"
+  started=$(date +%s)
+  json=$(FM_LIVENESS_EVIDENCE_TIMEOUT=1 E_PROCESS=stall run_case "$dir")
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 6 ] || fail "stalled process producer exceeded the shared bound (${elapsed}s)"
+  printf '%s' "$json" | jq -e '
+    .process_samples.sample_1_readable == false and .process_samples.sample_2_readable == false
+      and .records[0].worker.presence == "unverified" and .records[0].activity == "unverified"
+  ' >/dev/null || fail "stalled process evidence did not degrade to unverified: $json"
+
+  dir=$(make_case local-endpoint-stall claude); install_evidence "$dir"
+  started=$(date +%s)
+  json=$(FM_LIVENESS_EVIDENCE_TIMEOUT=1 E_ENDPOINT_SLEEP=30 run_case "$dir")
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 5 ] || fail "stalled endpoint producer exceeded the shared bound (${elapsed}s)"
+  printf '%s' "$json" | jq -e '.records[0] | .endpoint.presence=="unverified" and .activity=="unverified"' >/dev/null \
+    || fail "stalled endpoint evidence did not degrade to unverified: $json"
+
+  dir=$(make_case local-capture-stall claude); install_evidence "$dir"
+  started=$(date +%s)
+  json=$(FM_LIVENESS_EVIDENCE_TIMEOUT=1 E_CAPTURE_SLEEP=30 E_CPU2=1000 run_case "$dir")
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 6 ] || fail "stalled capture producer exceeded the shared bound (${elapsed}s)"
+  printf '%s' "$json" | jq -e '
+    .records[0] | .endpoint.presence=="verified_present"
+      and .output.sample_1_readable==false and .output.sample_2_readable==false
+      and .activity=="unverified"
+  ' >/dev/null || fail "stalled output evidence did not degrade to unreadable: $json"
+
+  dir=$(make_case local-lsof-stall claude); install_evidence "$dir"
+  cat > "$dir/bin/lsof" <<'SH'
+#!/usr/bin/env bash
+sleep 30
+SH
+  chmod +x "$dir/bin/lsof"
+  started=$(date +%s)
+  json=$(PATH="$dir/bin:$PATH" FM_HOME="$dir/home" FM_LIVENESS_INTERVAL_MS=100 \
+    FM_LIVENESS_NOW=2026-08-03T12:00:00Z FM_LIVENESS_EVIDENCE_TIMEOUT=1 \
+    FM_LIVENESS_ENDPOINT_BIN="$dir/bin/endpoint" FM_LIVENESS_CAPTURE_BIN="$dir/bin/capture" \
+    E_DIR="$dir" E_WT="$dir/wt" "$LIVENESS" --json)
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 6 ] || fail "stalled production lsof exceeded the shared bound (${elapsed}s)"
+  printf '%s' "$json" | jq -e '
+    .process_samples.sample_1_readable == false and .process_samples.sample_2_readable == false
+      and .records[0].worker.presence == "unverified"
+  ' >/dev/null || fail "stalled production lsof did not become unreadable: $json"
+  pass "all local process, endpoint, and output evidence producers share one bound"
+}
+
+test_cpu_rate_uses_actual_sample_elapsed_time() {
+  local dir json
+  dir=$(make_case elapsed-rate claude); install_evidence "$dir"
+  json=$(FM_LIVENESS_EVIDENCE_TIMEOUT=2 E_ENDPOINT_SLEEP=1 E_FAMILY=claude E_PROCESS=working E_CPU2=1010 run_case "$dir")
+  printf '%s' "$json" | jq -e '
+    .sample_elapsed_ms >= 900 and .records[0].cpu.delta_ms == 10
+      and .records[0].cpu.rate_ms_per_minute < 760 and .records[0].activity == "parked"
+  ' >/dev/null || fail "configured sleep inflated CPU rate instead of using elapsed sample time: $json"
+  pass "CPU rate uses monotonic elapsed time between cumulative samples"
 }
 
 test_remote_routes_use_remote_endpoint_evidence() {
@@ -366,9 +431,12 @@ EOF
   mkdir -p "$neutralized_path"
   cat > "$neutralized_path/perl" <<'SH'
 #!/usr/bin/env bash
+case "${1:-}" in -MIO::Select) ;; *) exec "${REAL_PERL:?}" "$@" ;; esac
+shift 5
+mode=$1
+seconds=$2
 shift 2
-seconds=$1
-shift
+[ "$mode" = --total ] || exit 124
 exec "${REAL_PERL:?}" -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } alarm $t; waitpid $pid, 0; exit($? >> 8)' "$seconds" "$@"
 SH
   chmod +x "$neutralized_path/perl"
@@ -395,6 +463,48 @@ SH
   pass "external cancellation reaps the real Perl fallback process group"
 }
 
+test_signal_before_remote_pid_registration_reaps_job() {
+  local dir hook rc remote_pid child_pid i
+  dir=$(make_case registration-race claude)
+  install_evidence "$dir"
+  install_remote_evidence "$dir"
+  cat >> "$dir/home/state/task.meta" <<EOF
+remote_host=fixture-host
+remote_root=/remote/firstmate
+remote_backend=tmux
+remote_target=remote-session:fm-task
+worktree=remote-worktree
+EOF
+  hook="$dir/bin/before-register"
+  cat > "$hook" <<'SH'
+#!/usr/bin/env bash
+i=0
+while [ ! -s "${E_DIR:?}/remote.pid" ] && [ "$i" -lt 100 ]; do sleep 0.02; i=$((i + 1)); done
+kill -TERM "$PPID"
+SH
+  chmod +x "$hook"
+  PATH="$PATH" FM_HOME="$dir/home" FM_LIVENESS_INTERVAL_MS=100 FM_LIVENESS_NOW=2026-08-03T12:00:00Z \
+    FM_LIVENESS_ENDPOINT_BIN="$dir/bin/endpoint" FM_LIVENESS_CAPTURE_BIN="$dir/bin/capture" \
+    FM_LIVENESS_PROCESS_SNAPSHOT_BIN="$dir/bin/process" FM_LIVENESS_REMOTE_BIN="$dir/bin/remote" \
+    FM_LIVENESS_BEFORE_REGISTER_BIN="$hook" FM_LIVENESS_EVIDENCE_TIMEOUT=1 \
+    FM_LIVENESS_REMOTE_OVERHEAD_SECS=1 E_REMOTE=stall E_DIR="$dir" E_WT="$dir/wt" \
+    "$LIVENESS" --json >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 143 ] || fail "pre-registration cancellation did not preserve TERM status: $rc"
+  [ -s "$dir/remote.pid" ] || fail "pre-registration fixture never launched remote evidence"
+  while IFS=$(printf '\t') read -r remote_pid child_pid; do
+    i=0
+    while { kill -0 "$remote_pid" 2>/dev/null || kill -0 "$child_pid" 2>/dev/null; } && [ "$i" -lt 40 ]; do
+      sleep 0.05
+      i=$((i + 1))
+    done
+    if kill -0 "$remote_pid" 2>/dev/null || kill -0 "$child_pid" 2>/dev/null; then
+      fail "pre-registration cancellation leaked remote evidence: $remote_pid $child_pid"
+    fi
+  done < "$dir/remote.pid"
+  pass "signal-before-registration cancellation still owns and reaps the remote job"
+}
+
 test_remote_control_samples_recorded_host_local_target() {
   local dir home json
   dir=$(make_case remote-control claude)
@@ -408,7 +518,7 @@ test_remote_control_samples_recorded_host_local_target() {
   json=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_LIVENESS_INTERVAL_MS=100 \
     FM_LIVENESS_ENDPOINT_BIN="$dir/bin/endpoint" FM_LIVENESS_CAPTURE_BIN="$dir/bin/capture" \
     FM_LIVENESS_PROCESS_SNAPSHOT_BIN="$dir/bin/process" E_DIR="$dir" E_WT="$dir/wt" \
-    E_FAMILY=claude E_PROCESS=working E_CPU2=1002 \
+    E_FAMILY=claude E_PROCESS=working E_CPU2=1020 \
     "$ROOT/bin/fm-remote-secondmate-control.sh" liveness task 100)
   printf '%s' "$json" | jq -e '
     .records[0] | .id=="task" and .backend=="tmux" and .target=="remote-session:fm-task"
@@ -454,9 +564,12 @@ test_max_cpu_launcher_and_two_sample_delta
 test_real_process_snapshot_accepts_partial_lsof_output
 test_cwd_binding_and_shell_amplifier_refusals
 test_endpoint_three_way_and_output_activity
+test_local_evidence_producers_are_bounded
+test_cpu_rate_uses_actual_sample_elapsed_time
 test_remote_routes_use_remote_endpoint_evidence
 test_stalled_remote_route_is_bounded_and_reaped
 test_external_cancellation_reaps_perl_remote_group
+test_signal_before_remote_pid_registration_reaps_job
 test_remote_control_samples_recorded_host_local_target
 test_neutralization_matrix_goes_red
 
