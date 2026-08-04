@@ -2,9 +2,10 @@
 # Shared wake classifier: the common source of truth for captain-relevant status
 # tests, declared-external-wait vocabulary, and the working/paused absorb
 # classification that makes no-verb signal and stale-pane wakes safe to absorb.
-# Sourced by BOTH the always-on watcher
-# (bin/fm-watch.sh) and the away-mode daemon (bin/fm-supervise-daemon.sh) so the
-# overlapping triage policy lives in one place instead of two copies that can
+# Sourced by the always-on watcher
+# (bin/fm-watch.sh), the away-mode daemon (bin/fm-supervise-daemon.sh), and the
+# status-line readout (bin/fm-statusline.sh, pure status-file reads only) so the
+# overlapping triage policy lives in one place instead of copies that can
 # drift apart.
 #
 # Most functions are pure, side-effect-free reads of status files: each takes
