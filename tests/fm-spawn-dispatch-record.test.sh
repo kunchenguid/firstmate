@@ -32,6 +32,8 @@ DISPATCH_JSON='{
     { "when": "small mechanical work", "use": { "harness": "claude" }, "route": "R3-LOW", "floor": "F-IMPL-LOW" },
     { "when": "one", "use": { "harness": "claude" }, "route": "DUP-ROUTE", "floor": "F-GEN" },
     { "when": "two", "use": { "harness": "claude" }, "route": "DUP-ROUTE", "floor": "F-RISK" },
+    { "when": "floored", "use": { "harness": "claude" }, "route": "PARTIAL-FLOOR", "floor": "F-GEN" },
+    { "when": "floorless", "use": { "harness": "claude" }, "route": "PARTIAL-FLOOR" },
     { "when": "three", "use": { "harness": "claude" }, "route": "NO-FLOOR" }
   ],
   "default": { "harness": "claude", "route": "R1-DEFAULT", "floor": "F-DEFAULT" }
@@ -142,6 +144,20 @@ test_explicit_default_is_recorded() {
   pass "a dispatch that matched no rule records the explicit default's route and floor"
 }
 
+test_array_default_is_recorded() {
+  local config
+  config=$(printf '%s' "$DISPATCH_JSON" | jq \
+    '.default = [
+      {"harness":"claude","route":"R1-DEFAULT","floor":"F-DEFAULT"},
+      {"harness":"codex","route":"R1-DEFAULT","floor":"F-DEFAULT"}
+    ]')
+  make_home array-default "$config"
+  run_spawn ship-array-default --mode no-mistakes --yolo off --route default >/dev/null
+  assert_recorded "$HOME_DIR/state/ship-array-default.meta" \
+    R1-DEFAULT F-DEFAULT '2026-08-03 routing redesign, rev 5' "array default"
+  pass "an array-form default records its unambiguous route and floor"
+}
+
 # The load-bearing case. Three ways a route fails to resolve, each recording
 # `unknown` rather than vanishing - including immediately after a resolved
 # spawn in the same home, which is where a leaked or defaulted value would show.
@@ -157,12 +173,12 @@ test_unresolvable_records_unknown() {
 
   run_spawn ship-stale --mode no-mistakes --yolo off --route R9-RETIRED >/dev/null
   assert_recorded "$HOME_DIR/state/ship-stale.meta" \
-    R9-RETIRED unknown '2026-08-03 routing redesign, rev 5' "route absent from the config"
+    unknown unknown '2026-08-03 routing redesign, rev 5' "route absent from the config"
 
   make_home noconfig
   run_spawn ship-noconfig --mode no-mistakes --yolo off --route R2-GEN >/dev/null
   assert_recorded "$HOME_DIR/state/ship-noconfig.meta" \
-    R2-GEN unknown unknown "no dispatch config in the home"
+    unknown unknown unknown "no dispatch config in the home"
   pass "an unresolvable route, floor, or revision records 'unknown' and never inherits or blanks"
 }
 
@@ -244,6 +260,8 @@ test_ambiguous_and_missing_floors() {
     '2026-08-03 routing redesign, rev 5' "rules disagreeing about a floor"
   expect_lines "$(record "$cfg" NO-FLOOR)" NO-FLOOR unknown \
     '2026-08-03 routing redesign, rev 5' "a route carrying no floor"
+  expect_lines "$(record "$cfg" PARTIAL-FLOOR)" PARTIAL-FLOOR unknown \
+    '2026-08-03 routing redesign, rev 5' "a route with floored and floorless rules"
   pass "an ambiguous or absent floor records 'unknown' with the route intact"
 }
 
@@ -253,7 +271,7 @@ test_config_defects_never_abort_or_guess() {
 
   printf '%s\n' '{ "rules": [ }' > "$cfg/crew-dispatch.json"
   out=$(record "$cfg" R2-GEN) || fail "malformed config must not fail the caller"
-  expect_lines "$out" R2-GEN unknown unknown "malformed dispatch config"
+  expect_lines "$out" unknown unknown unknown "malformed dispatch config"
 
   # A default profile with no route identity at all: taking the default is
   # still a fact, but there is no identity to record for it.
@@ -266,12 +284,16 @@ test_config_defects_never_abort_or_guess() {
     > "$cfg/crew-dispatch.json"
   expect_lines "$(record "$cfg" '')" unknown unknown 'rev 6 tabbed' "multi-line revision"
 
-  expect_lines "$(record "$TMP_ROOT/does-not-exist" R2-GEN)" R2-GEN unknown unknown "absent config"
+  printf '%s\n' '{ "_policy": { "version": "  rev  7  " }, "rules": [] }' \
+    > "$cfg/crew-dispatch.json"
+  expect_lines "$(record "$cfg" '')" unknown unknown '  rev  7  ' "printable revision spacing"
+
+  expect_lines "$(record "$TMP_ROOT/does-not-exist" R2-GEN)" unknown unknown unknown "absent config"
   pass "a malformed, incomplete, or absent dispatch config records 'unknown' without failing"
 }
 
 # jq reads the config; without it nothing can be resolved from the file, but the
-# route firstmate declared is still known and the spawn must not be disturbed.
+# route firstmate declared cannot be confirmed and the spawn must not be disturbed.
 test_missing_jq_degrades_to_unknown() {
   local cfg="$TMP_ROOT/nojq" fakebin
   mkdir -p "$cfg"
@@ -284,12 +306,13 @@ test_missing_jq_degrades_to_unknown() {
   local out
   out=$(PATH="$fakebin" fm_dispatch_record_lines "$cfg" R2-GEN) \
     || fail "a missing jq must not fail the caller"
-  expect_lines "$out" R2-GEN unknown unknown "jq unavailable"
+  expect_lines "$out" unknown unknown unknown "jq unavailable"
   pass "an unavailable jq records 'unknown' rather than omitting the floor"
 }
 
 test_matched_rule_is_recorded
 test_explicit_default_is_recorded
+test_array_default_is_recorded
 test_unresolvable_records_unknown
 test_batch_shares_the_route
 test_route_flag_is_refused_where_it_cannot_apply

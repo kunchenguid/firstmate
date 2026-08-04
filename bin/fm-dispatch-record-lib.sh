@@ -48,7 +48,7 @@
 #   ._policy.version   recorded verbatim as policy_revision
 #
 # A route or floor id must match FM_DISPATCH_ID_RE. policy_revision is prose, so
-# it is only reduced to its first line with control characters stripped; it is
+# it is only reduced to its first line with control characters folded; it is
 # never truncated, because a shortened revision string is a different revision
 # string that still compares equal to nothing.
 
@@ -102,28 +102,37 @@ fm_dispatch_record_lines() {
     route=$FM_DISPATCH_UNKNOWN
     floor=$FM_DISPATCH_UNKNOWN
   elif [ "$declared" = "$FM_DISPATCH_DEFAULT_ROUTE" ]; then
-    route=$(_fm_dispatch_id_or_unknown "$(_fm_dispatch_query "$file" '.default.route // empty')")
-    floor=$(_fm_dispatch_id_or_unknown "$(_fm_dispatch_query "$file" '.default.floor // empty')")
-  else
-    route=$(_fm_dispatch_id_or_unknown "$declared")
-    # One distinct floor across every rule carrying this route id. Rules that
-    # disagree make the floor genuinely ambiguous, and an ambiguous floor is
-    # unknown rather than whichever rule happened to be listed first.
-    # shellcheck disable=SC2016  # $r is a jq variable bound by --arg, not a shell one
+    route=$(_fm_dispatch_id_or_unknown "$(_fm_dispatch_query "$file" \
+      'def profiles: if type == "array" then .[] else . end;
+       [.default | profiles | .route] | unique |
+       if length == 1 and (.[0] | type) == "string" then .[0] else empty end')")
     floor=$(_fm_dispatch_id_or_unknown "$(_fm_dispatch_query "$file" \
-      '[.rules[]? | select(.route == $r) | .floor // empty] | unique | if length == 1 then .[0] else empty end' \
+      'def profiles: if type == "array" then .[] else . end;
+       [.default | profiles | .floor] | unique |
+       if length == 1 and (.[0] | type) == "string" then .[0] else empty end')")
+  else
+    # A declaration is a candidate identity until the config confirms at least
+    # one rule carries it. One distinct floor must exist across every matching
+    # rule; missing and invalid values participate in that ambiguity decision.
+    # shellcheck disable=SC2016  # $r is a jq variable bound by --arg, not a shell one
+    route=$(_fm_dispatch_id_or_unknown "$(_fm_dispatch_query "$file" \
+      '[.rules[]? | select(.route == $r)] | if length > 0 then $r else empty end' \
       --arg r "$declared")")
+    if [ "$route" = "$FM_DISPATCH_UNKNOWN" ]; then
+      floor=$FM_DISPATCH_UNKNOWN
+    else
+      floor=$(_fm_dispatch_id_or_unknown "$(_fm_dispatch_query "$file" \
+        '[.rules[]? | select(.route == $r) | .floor] | unique |
+         if length == 1 and (.[0] | type) == "string" then .[0] else empty end' \
+        --arg r "$declared")")
+    fi
   fi
 
-  # First line only, every remaining control character folded to a space, runs of
-  # whitespace collapsed, ends trimmed. Enough to keep the key=value record
-  # intact and comparable, and deliberately no truncation.
+  # First line only, every remaining control character folded to a space.
   revision=$(_fm_dispatch_query "$file" '._policy.version // empty')
   if [ -n "$revision" ]; then
     revision=${revision%%$'\n'*}
-    revision=$(printf '%s' "$revision" | tr '\000-\037\177' ' ' | tr -s ' ')
-    revision=${revision#" "}
-    revision=${revision%" "}
+    revision=$(printf '%s' "$revision" | tr '\000-\037\177' ' ')
   fi
   [ -n "$revision" ] || revision=$FM_DISPATCH_UNKNOWN
 
