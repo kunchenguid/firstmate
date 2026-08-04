@@ -215,6 +215,40 @@ kill -0 "$bg_pid" 2>/dev/null \
   || fail "the background harness-named process died during the check, so this case proves nothing"
 pass "tmux liveness: a harness-named background process in an idle pane still classifies dead"
 
+# --- an argv path that merely mentions a harness is not an agent ------------
+# The interpreter-wrapped Hermes scan reads later argv tokens, not just argv[0],
+# so it can see any file an ordinary command was pointed at. An editor opened on
+# a hermes-named note is the cheap way to prove that scan cannot manufacture an
+# agent: a false alive here would suppress recovery on an empty pane forever.
+
+mkdir -p "$LAB/notes"
+cat > "$LAB/bin/editor-decoy" <<'SH'
+#!/bin/sh
+/bin/sh
+SH
+chmod +x "$LAB/bin/editor-decoy"
+new_window editor "$LAB/bin/editor-decoy" "$LAB/notes/hermes-todo.md"
+wait_for_state "$SESSION:editor" dead \
+  || fail "a non-interpreter command whose argv names a hermes path must classify dead"
+pass "tmux liveness: an editor opened on a hermes-named file never classifies as an agent"
+
+# --- an interpreter-wrapped hermes is still found through its argv ----------
+# The positive half of the same scan: Hermes really does run as Python with the
+# executable path in a later argv token, and that pane must stay alive.
+
+if PYTHON_BIN=$(command -v python3 2>/dev/null); then
+  cat > "$LAB/bin/hermes" <<'PY'
+import time
+time.sleep(900)
+PY
+  new_window hermespy "$PYTHON_BIN" "$LAB/bin/hermes" chat --yolo
+  wait_for_state "$SESSION:hermespy" alive \
+    || fail "an interpreter-wrapped hermes must classify alive from its argv path token"
+  pass "tmux liveness: python-wrapped hermes classifies alive through its absolute argv path"
+else
+  echo "skip: python3 not found; interpreter-wrapped hermes case not run"
+fi
+
 # --- an absent window never inherits tmux's active-window fallback ----------
 # tmux answers a display-message for an absent target from the CLIENT's active
 # window instead of failing, so both raw name reads can describe a completely

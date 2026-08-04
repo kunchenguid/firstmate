@@ -409,7 +409,7 @@ Hermes Agent classic REPL launches from the absolute path resolved from `PATH` (
 |---|---|
 | Binary | Executable `hermes` from `PATH`, then `hermes-agent`; spawning refuses if neither exists. |
 | Launch | `hermes chat --yolo --accept-hooks` plus optional `-m MODEL`; bare launch, then readiness-gated absolute brief pointer delivery. |
-| Busy state | Harness-scoped rendered-tail fallback only (`hermes-regex`): stable ASCII `Ctrl+C cancel`, `msg=interrupt`, and/or `Initializing agent`. Idle is bare `❯` without that interrupt footer. Never classifies another adapter. |
+| Busy state | Harness-scoped rendered-tail fallback only (`hermes-regex`): stable ASCII `Ctrl+C cancel`, `msg=interrupt`, and/or `Initializing agent`. Idle requires a bare `❯` row without that interrupt footer; a tail with neither is `unknown`, never idle. Never classifies another adapter. |
 | Exit command | `/quit` or `/exit` |
 | Interrupt | single `Ctrl+C` while busy (returns to `❯`; shell tools may show exit 130). Prefer interrupt only when the busy footer shows `Ctrl+C cancel` - idle `Ctrl+C` can tear down the session. |
 | Skill invocation | Natural language; no separate verified slash-skill form. |
@@ -420,7 +420,9 @@ Hermes Agent classic REPL launches from the absolute path resolved from `PATH` (
 | Effort | No reasoning-effort flag; requested effort is recorded in task metadata but omitted from launch. |
 | Resume | `hermes --resume <session-id>` (id printed on exit). |
 
-`fm-spawn.sh` launches Hermes bare on the classic REPL, waits for bare `❯` or a Welcome/Hermes Agent banner, sends only `Read the brief at <absolute-path> and follow it exactly.`, and requires either busy chrome or an idle composer with the pointer visible before accepting delivery.
+`fm-spawn.sh` launches Hermes bare on the classic REPL, waits for a Welcome to Hermes / Hermes Agent banner, sends only `Read the brief at <absolute-path> and follow it exactly.`, and requires either the post-submit interrupt footer or an idle composer with the pointer visible before accepting delivery.
+Readiness needs that Hermes-only chrome because a bare `❯` is also the default starship/oh-my-zsh shell prompt: a failed launch leaves the pane at the user's own shell, where the pointer would be executed as a command.
+For the same reason `Initializing agent` is startup chrome only and never confirms delivery - it is already in scrollback before the pointer is typed, so a swallowed keystroke would otherwise report a brief that was never delivered.
 This launch-then-send shape is mandatory because Hermes has no crewmate positional-brief path comparable to Grok/Claude.
 Do **not** launch with modern `--tui` on the verified brew install: it is broken (missing `ui-tui`).
 No turn-end hook is installed; supervision uses the rendered-tail busy fallback plus ordinary status and watcher signals, the same Grok-style posture when structured lifecycle is unavailable.

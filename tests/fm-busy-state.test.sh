@@ -260,9 +260,15 @@ test_hermes_regex_isolated() {
   out=$(fm_busy_classify tmux w1 hermes t1 "$state" 'ready
 ❯')
   [ "$out" = "idle hermes-regex" ] || fail "hermes bare ❯ must classify idle, got '$out'"
-  # Grok's colon form must not classify hermes busy.
+  # Grok's colon form must not classify hermes busy - and with no bare ❯ it is
+  # not idle either, only unknown.
   out=$(fm_busy_classify tmux w1 hermes t1 "$state" 'Ctrl+c:cancel')
-  [ "$out" = "idle hermes-regex" ] || fail "grok busy token must not classify hermes busy, got '$out'"
+  [ "$out" = "unknown hermes-regex" ] || fail "grok busy token must not classify hermes busy, got '$out'"
+  # A tail with no composer at all (scrolled tool output, pager, crashed REPL)
+  # is never idle: a false idle tells the supervisor a live crewmate is done.
+  out=$(fm_busy_classify tmux w1 hermes t1 "$state" 'diff --git a/x b/x
++ added a line')
+  [ "$out" = "unknown hermes-regex" ] || fail "a hermes tail without ❯ must be unknown, got '$out'"
   # Another adapter never receives hermes-regex.
   out=$(fm_busy_classify tmux w1 claude t1 "$state" '⚕ ❯ msg=interrupt · Ctrl+C cancel')
   [ "$out" = "unknown missing" ] || fail "hermes chrome must not classify claude, got '$out'"

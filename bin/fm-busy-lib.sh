@@ -268,6 +268,16 @@ fm_busy_hermes_tail_busy() {
     | grep -qiE "${FM_BUSY_REGEX:-${FM_TMUX_HERMES_BUSY_REGEX_DEFAULT:-Ctrl\\+C cancel|msg=interrupt|Initializing agent}}"
 }
 
+# fm_busy_hermes_tail_idle: positive evidence that a Hermes pane is between
+# turns. Consumes the tail on stdin; 0 only when the idle composer - a bare ❯
+# row - is present. Absence of the busy signature is not idleness: a scrolled
+# tool output, a pager, or a crashed REPL shows neither, and calling those idle
+# would tell the supervisor a mid-turn or dead crewmate is done.
+fm_busy_hermes_tail_idle() {
+  grep -v '^[[:space:]]*$' | tail -12 \
+    | grep -qE '^[[:space:]]*❯[[:space:]]*$'
+}
+
 # fm_busy_classify: semantic classification for a task whose endpoint the
 # caller has already established as present. Prints "<verdict> <source>":
 # busy|idle|unknown plus the producing source (see header). Never probes
@@ -354,8 +364,10 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       fi
       if printf '%s' "$tail40" | fm_busy_hermes_tail_busy; then
         printf 'busy hermes-regex'
-      else
+      elif printf '%s' "$tail40" | fm_busy_hermes_tail_idle; then
         printf 'idle hermes-regex'
+      else
+        printf 'unknown hermes-regex'
       fi
       return 0
       ;;

@@ -1740,12 +1740,19 @@ hermes_capture_has_idle_composer() {  # <plain-pane-capture>
   printf '%s\n' "$1" | grep -Eq '^[[:space:]]*❯[[:space:]]*$'
 }
 
+# A bare ❯ is also the default starship/oh-my-zsh shell prompt, so it can never
+# be readiness on its own: a failed `hermes chat` launch leaves the pane at the
+# user's own shell, where the pointer would be executed as a command. Readiness
+# requires Hermes-only startup chrome.
+hermes_capture_has_hermes_chrome() {  # <plain-pane-capture>
+  printf '%s\n' "$1" | grep -qiE 'Welcome to Hermes|Hermes Agent'
+}
+
 hermes_wait_for_ready() {
   local pane i=0 max=${FM_HERMES_READY_POLLS:-60} interval=${FM_HERMES_POLL_INTERVAL:-0.5}
   while [ "$i" -lt "$max" ]; do
     pane=$(hermes_capture)
-    if printf '%s\n' "$pane" | grep -qiE 'Welcome to Hermes|Hermes Agent' \
-       || hermes_capture_has_idle_composer "$pane"; then
+    if hermes_capture_has_hermes_chrome "$pane"; then
       return 0
     fi
     i=$((i + 1))
@@ -1756,8 +1763,11 @@ hermes_wait_for_ready() {
 
 hermes_delivery_is_confirmed() {  # <plain-pane-capture>
   local pane=$1
-  # Started working on the brief: stable ASCII busy chrome from the verified TUI.
-  if printf '%s\n' "$pane" | grep -qiE 'Ctrl\+C cancel|msg=interrupt|Initializing agent'; then
+  # Started working on the brief: post-submit mid-turn footer from the verified
+  # TUI. Startup chrome such as Initializing agent is deliberately absent here:
+  # it is already in scrollback before the pointer is ever typed, so it would
+  # confirm a delivery that never happened.
+  if printf '%s\n' "$pane" | grep -qiE 'Ctrl\+C cancel|msg=interrupt'; then
     return 0
   fi
   # Or back at idle with the pointer visible in scrollback.

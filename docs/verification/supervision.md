@@ -73,7 +73,7 @@ Each pass polled `state/<id>.busy-state` while a real turn ran.
 | Codex | codex-cli 0.145.0 | None usable | See below; classifies `unknown codex-unverified`. |
 | Kimi (standalone) | not installed | None usable | No binary on `PATH`, so the gate stays closed and it classifies `unknown kimi-unverified`. |
 | Grok | 0.2.112 | Isolated rendered-tail fallback | Retained unconverted; the approved audit could not credit a live structured-lifecycle run. |
-| Hermes | v0.19.0 (2026.7.20) | Isolated rendered-tail fallback (`hermes-regex`) | Classic REPL only; no structured lifecycle wired. Live-verified 2026-08-03: busy footer carries `Ctrl+C cancel` and/or `msg=interrupt`; idle is bare `❯`. Scoped to `harness=hermes` only. |
+| Hermes | v0.19.0 (2026.7.20) | Isolated rendered-tail fallback (`hermes-regex`) | Classic REPL only; no structured lifecycle wired. Live-verified 2026-08-03: busy footer carries `Ctrl+C cancel` and/or `msg=interrupt`; idle requires a bare `❯` row and a tail with neither signal stays `unknown`. Scoped to `harness=hermes` only. |
 
 Codex was probed two ways, both refused:
 
@@ -115,6 +115,7 @@ $ hermes chat --yolo --accept-hooks
 Modern `--tui` is broken on this brew install (missing `ui-tui`) and is not used.
 No reliable `HERMES_*=1` child env marker was found; detection matches argv `hermes` / `hermes-agent`, not bare `Python`.
 Smoke scout `hermes-smoke-h1` passed under raw launch plus post-ready brief pointer delivery.
+Readiness is gated on the Welcome to Hermes / Hermes Agent banner rather than a bare `❯`, which is also the default starship shell prompt, and `Initializing agent` is startup chrome that never confirms delivery.
 No turn-end hook is wired; busy classification is the harness-scoped `hermes-regex` rendered-tail fallback only.
 
 ## Turn-end guard

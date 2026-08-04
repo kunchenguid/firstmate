@@ -40,6 +40,12 @@ fake_screen() {
     delivered-busy)
       printf 'Read the brief at %s and follow it exactly.\nInitializing agent...\n⚕ ❯ msg=interrupt · /queue · Ctrl+C cancel\n' "$FM_FAKE_BRIEF_REAL"
       ;;
+    bare-prompt)
+      printf 'shell starting\n❯\n'
+      ;;
+    initializing-only)
+      printf 'Hermes Agent v0.19.0\nWelcome to Hermes\nInitializing agent...\n'
+      ;;
     *)
       printf 'shell starting\n$ \n'
       ;;
@@ -48,7 +54,7 @@ fake_screen() {
 fake_cursor_y() {
   case "$state" in
     pointer-typed) printf '1\n' ;;
-    ready|delivered-idle|delivered-busy) printf '2\n' ;;
+    ready|delivered-idle|delivered-busy|initializing-only) printf '2\n' ;;
     *) printf '1\n' ;;
   esac
 }
@@ -86,6 +92,9 @@ case "${1:-}" in
           launched)
             if [ "${FM_FAKE_HERMES_READY:-yes}" = yes ]; then
               printf 'ready\n' > "$FM_FAKE_HERMES_STATE"
+            else
+              printf '%s\n' "${FM_FAKE_HERMES_UNREADY_STATE:-launched}" \
+                > "$FM_FAKE_HERMES_STATE"
             fi
             ;;
           pointer-typed)
@@ -98,7 +107,8 @@ case "${1:-}" in
                   > "$FM_FAKE_HERMES_STATE"
               fi
             else
-              printf 'ready\n' > "$FM_FAKE_HERMES_STATE"
+              printf '%s\n' "${FM_FAKE_HERMES_UNDELIVERED_STATE:-ready}" \
+                > "$FM_FAKE_HERMES_STATE"
             fi
             ;;
         esac
@@ -163,6 +173,8 @@ run_spawn() {
     FM_FAKE_HERMES_SWALLOWED="$case_dir/hermes.swallowed" \
     FM_FAKE_HERMES_SWALLOW_FIRST="${FM_FAKE_HERMES_SWALLOW_FIRST:-no}" \
     FM_FAKE_HERMES_DELIVERED_STATE="${FM_FAKE_HERMES_DELIVERED_STATE:-delivered-busy}" \
+    FM_FAKE_HERMES_UNDELIVERED_STATE="${FM_FAKE_HERMES_UNDELIVERED_STATE:-ready}" \
+    FM_FAKE_HERMES_UNREADY_STATE="${FM_FAKE_HERMES_UNREADY_STATE:-launched}" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/brief.md" \
     FM_HERMES_READY_POLLS=2 FM_HERMES_DELIVERY_POLLS=2 FM_HERMES_POLL_INTERVAL=0 \
@@ -286,6 +298,36 @@ test_hermes_readiness_gate_precedes_pointer() {
     "hermes readiness failure lacked a loud diagnostic"
   [ ! -s "$CASE_DIR/pointer.log" ] || fail "hermes pointer was sent before readiness"
   pass "fm-spawn: hermes never sends the brief pointer before an observable ready signal"
+}
+
+test_hermes_bare_shell_prompt_is_not_readiness() {
+  local id rec out rc
+  id=hermes-shell-prompt-z7
+  rec=$(make_spawn_case shell-prompt "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_HERMES_READY=no FM_FAKE_HERMES_UNREADY_STATE=bare-prompt run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a bare ❯ with no Hermes chrome should not be readiness"
+  assert_contains "$out" "hermes did not show a verified ready signal" \
+    "bare shell prompt readiness failure lacked a loud diagnostic"
+  [ ! -s "$CASE_DIR/pointer.log" ] \
+    || fail "hermes typed the brief pointer into a bare shell prompt"
+  pass "fm-spawn: a bare ❯ shell prompt without Hermes chrome is never readiness"
+}
+
+test_hermes_startup_chrome_alone_is_not_delivery() {
+  local id rec out rc
+  id=hermes-init-only-z8
+  rec=$(make_spawn_case init-only "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_HERMES_DELIVERY=no FM_FAKE_HERMES_UNDELIVERED_STATE=initializing-only \
+    run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "pre-submit Initializing agent must not confirm delivery"
+  assert_contains "$out" "hermes brief pointer delivery was not confirmed" \
+    "swallowed pointer with startup chrome left in scrollback did not fail loudly"
+  pass "fm-spawn: startup Initializing agent alone never confirms brief delivery"
 }
 
 test_hermes_detection_uses_argv_not_bare_python() {
@@ -426,6 +468,8 @@ test_hermes_missing_binary_refuses_before_pane_creation
 test_hermes_falls_back_to_hermes_agent_binary
 test_hermes_unconfirmed_delivery_fails_loudly
 test_hermes_readiness_gate_precedes_pointer
+test_hermes_bare_shell_prompt_is_not_readiness
+test_hermes_startup_chrome_alone_is_not_delivery
 test_hermes_detection_uses_argv_not_bare_python
 test_hermes_composer_idle_glyph_is_empty
 test_hermes_busy_signature_is_harness_scoped

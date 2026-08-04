@@ -160,7 +160,7 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
   base=${path##*/}
   base=${base#-}
   case "$base" in
-    *claude*|*codex*|*opencode*|*grok*|*kimi*|*hermes*|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
+    *claude*|*codex*|*opencode*|*grok*|*kimi*|hermes|hermes-agent|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
       if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then
@@ -223,13 +223,29 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
         [ -n "$argv0" ] && printf '%s\n' "$argv0"
         # Interpreter-wrapped harnesses (Hermes: comm/argv0=Python, later argv
         # carries /.../hermes) need those later path tokens classified too.
+        # Only an interpreter's own argv is scanned, and only an absolute path
+        # whose basename is exactly the harness executable counts: any argv
+        # token can name a hermes-ish file (`vim ~/notes/hermes-todo.md`), and
+        # calling that an agent would report a live harness on an empty pane
+        # and suppress recovery forever.
+        case "${comm##*/}" in
+          python*|Python*|node*) ;;
+          *)
+            case "${argv0##*/}" in
+              python*|Python*|node*) ;;
+              *) continue ;;
+            esac
+            ;;
+        esac
         # shellcheck disable=SC2086 # deliberate word-split of ps args tokens
         for token in $args; do
           [ "$token" = "$argv0" ] && continue
           case "$token" in
-            /*/*hermes*|/*/*hermes-agent*|*hermes*|*hermes-agent*)
-              printf '%s\n' "$token"
-              ;;
+            /*) ;;
+            *) continue ;;
+          esac
+          case "${token##*/}" in
+            hermes|hermes-agent) printf '%s\n' "$token" ;;
           esac
         done
       done
