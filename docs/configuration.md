@@ -320,7 +320,7 @@ There is no hot standby: a second session competing for the same home is refused
 1. Exit the current primary's harness normally, which ends the process that holds `state/.lock`.
 2. Start the other verified harness against the same `FM_HOME` from the same repo root, using that harness's launch command in [README requirements](../README.md#requirements).
 3. Let session start run once as usual.
-   It acquires the lock from the now-dead holder, drains the wake queue, and reconciles every recorded direct report from durable records and live endpoint inventory, so ongoing work is picked up rather than migrated.
+   It acquires the lock from the now-dead holder, drains the wake queue, and prints the durable records and live endpoint inventory that the ordinary recovery contract in [`AGENTS.md`](../AGENTS.md) reconciles, so ongoing work is picked up rather than migrated.
 
 If the lock is still held by a live process, the new session stays read-only and reports it; that is the intended protection, so resolve the live session rather than forcing the lock.
 See [verification/provider-continuity.md](verification/provider-continuity.md) for the current evidence behind classification, deterministic cooldown expiry, tiered selection, and the per-backend applicability review.

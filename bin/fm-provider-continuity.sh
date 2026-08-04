@@ -209,11 +209,11 @@ reconcile() {  # <provider>
           burst++
         }
       }
-      until = 0
+      until_ts = 0
       state = "eligible"
       if (burst >= threshold && last > 0 && now < last + cooldown) {
         state = "unavailable"
-        until = last + cooldown
+        until_ts = last + cooldown
       }
       detail = ""
       m = 0
@@ -226,7 +226,7 @@ reconcile() {  # <provider>
       for (i = 1; i <= m; i++) {
         detail = detail (detail == "" ? "" : " ") keys[i] "=" other[keys[i]]
       }
-      printf "%s %d %d %d %s\n", state, burst, last, until, detail
+      printf "%s %d %d %d %s\n", state, burst, last, until_ts, detail
     }
   ' "$file"
 }
