@@ -129,7 +129,7 @@ Treat `data/captain.md` as the domain-local record of captain preferences, optio
 Run `bin/fm-session-start.sh` exactly once at session start.
 Its header is the single owner of composed commands, ordering, and digest contents.
 `bin/fm-supervision-instructions.sh` renders the emitted supervision block from `docs/supervision-protocols/`.
-Do not reimplement it by separately running its lock, bootstrap, or initial wake-drain components.
+Do not reimplement it by separately running its lock, bootstrap, record-reconciliation, or initial wake-drain components.
 Tracked native session-open adapters only nudge this command; `docs/sessionstart-nudge.md` owns their current behavior and compatibility.
 
 Read the complete digest once and trust it as this turn's startup and recovery input.
@@ -144,14 +144,16 @@ A lock-refused session must not spawn, steer, merge, drain the wake queue, repai
    When the lock could not be acquired, the worktree-tangle check uses read-only advisory wording without a checkout repair command.
    Home-local stale Herdr projection cleanup and the six bootstrap MUTATING sweeps - non-executing legacy PR-check migration, fleet sync, secondmate convergence, secondmate liveness, pending remote handoff retry, and X-mode artifact writes - run only when this session actually holds the lock from step 1.
    The secondmate liveness sweep deterministically accounts for every registered secondmate: it relaunches only from the recovery-grade `dead` or `missing` states, preserves ambiguous, unreadable, or unreachable remote targets, and reports skipped or failed guarantees as `SECONDMATE_LIVENESS:` lines (`bin/fm-bootstrap.sh`; `bin/fm-backend.sh`'s `fm_backend_agent_state`; `docs/remote-secondmates.md`).
-3. **Wake queue** - when locked, drains the durable wake queue and prints the raw records prominently as this turn's first work queue; a bounded, clearly labeled historical status-event annotation may follow a valid `signal` record but never replaces it or current-state reconciliation, and a lapsed watcher chain still surfaces here via the same guard alarm.
+3. **Record reconciliation** - when locked, records exact-head and clean-tree retention evidence for eligible terminal producer rows and inventories metadata/backlog drift without deleting evidence or moving unlanded work to Done.
+   A lock-refused session skips this mutation, and the producer row remains In flight until teardown independently confirms landing.
+4. **Wake queue** - when locked, drains the durable wake queue, custody-versions the consumed bytes, and prints the raw records prominently as this turn's first work queue; a structurally mapped terminal signal triggers record reconciliation in the same turn, while a bounded, clearly labeled historical status-event annotation may follow but never replaces the raw record or current-state reconciliation, and a lapsed watcher chain still surfaces here via the same guard alarm.
    Every locked drain also prints a bounded fleet-wide `OPEN DECISIONS` section when durable decision records remain open, including when the queue itself is empty; reconcile those entries before continuing.
    When the lock could not be acquired and verified, the queue is left untouched because no session mutation is authorized, and the guard's tangle/watcher-liveness alarms still print in read-only advisory mode without drain, supervision repair, or checkout repair commands.
-4. **Context digest** - the full contents of `data/projects.md`, `data/secondmates.md`, `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, each clearly delimited.
+5. **Context digest** - the full contents of `data/projects.md`, `data/secondmates.md`, `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, each clearly delimited.
    A file that does not exist prints an explicit `ABSENT` marker, never confused with an empty-but-present file: absence is meaningful (`captain.md` absent means use the firstmate repo's built-in defaults, `projects.md` absent means rebuild it from the clones under `projects/`, etc.).
-5. **Fleet-state digest** - the compact backlog listing owned by `bin/fm-session-start.sh`; every `state/<id>.meta`; a bounded tail of each task's `state/<id>.status` (labeled as wake-EVENT history, not current state, with the full log path printed for a deeper read); the `state/.afk` flag; and one cheap alive/dead read of each task's recorded backend endpoint.
+6. **Fleet-state digest** - the compact backlog listing owned by `bin/fm-session-start.sh`; every `state/<id>.meta`; a bounded tail of each task's `state/<id>.status` (labeled as wake-EVENT history, not current state, with the full log path printed for a deeper read); the `state/.afk` flag; and one cheap alive/dead read of each task's recorded backend endpoint.
    That liveness line is a fast presence check only, not a full state read - when you need a crew's actual current state (a run-step, not just "is the pane there"), read it with `bin/fm-crew-state.sh <id>` as before; the digest deliberately skips that deeper, slower read for every task so it stays fast and bounded.
-6. **Supervision operating instructions and next step** - after the wake queue and before context, the digest emits exactly one operating block for the detected primary harness.
+7. **Supervision operating instructions and next step** - after the wake queue and before context, the digest emits exactly one operating block for the detected primary harness.
    The closing reminder points back to that emitted block and preserves only the lock, afk, X-mode, and read-once reminders.
    The script itself never starts supervision; the emitted harness protocol owns the exact wait or wake mechanism.
 

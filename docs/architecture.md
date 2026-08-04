@@ -91,7 +91,8 @@ The daemon injects only into an affirmatively `empty` composer, so both `pending
 Unsupported supervisor backends refuse at daemon startup.
 Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts a configured backend-independent active alert after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, durable catch-up evidence, and the fail-closed gate that keeps ordinary work behind every live firstmate-actionable blocker.
-`fm-send.sh` selects a pre-Enter popup-settle for slash commands and for codex `$...` skill invocations using metadata-routed target `harness=` values, then adds its own `FM_SEND_SETTLE` pause after successful text sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that post-submit pause.
+Before typing a local steer, `fm-send.sh` requires the shared composer classifier to return exactly `empty`; pending or unreadable input refuses before mutation so a stale order cannot be extended or mistaken for the new message.
+It then selects a pre-Enter popup-settle for slash commands and for codex `$...` skill invocations using metadata-routed target `harness=` values, and adds its own `FM_SEND_SETTLE` pause after successful text sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that post-submit pause.
 
 ## Busy state is semantic, per adapter
 
