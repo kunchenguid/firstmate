@@ -110,7 +110,7 @@ case "${1:-} ${2:-}" in
     fi
     ;;
   "session list"*)
-    printf '{"sessions":[{"name":"default","running":true,"socket_path":"%s"}]}\n' "$SOCKET" ;;
+    printf '{"sessions":[{"name":"default","running":true,"socket_path":"%s"},{"name":"fm-remote","running":true,"socket_path":"%s"}]}\n' "$SOCKET" "$SOCKET" ;;
 esac
 exit 0
 SH

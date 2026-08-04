@@ -13,7 +13,8 @@ set -u
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (the herdr adapter parses its JSON)"; exit 0; }
 
 TMP_ROOT=$(fm_test_tmproot fm-remote-doctor)
-LABEL=dev.firstmate.herdr
+LABEL=dev.firstmate.herdr.fm-remote
+INTERACTIVE_LABEL=dev.firstmate.herdr
 CASE_N=0
 
 # A fixture must be able to present a host with NO herdr, so the doctor never
@@ -40,6 +41,7 @@ new_case() {
   CASE_FORBIDDEN_LOG="$CASE_STATE/forbidden.log"
   CASE_HERDR_RUNNING="$CASE_STATE/herdr.running"
   CASE_PLIST="$CASE_HOME/Library/LaunchAgents/$LABEL.plist"
+  CASE_INTERACTIVE_PLIST="$CASE_HOME/Library/LaunchAgents/$INTERACTIVE_LABEL.plist"
   mkdir -p "$CASE_BIN" "$CASE_HOME" "$CASE_STATE"
   printf 'false\n' > "$CASE_HERDR_RUNNING"
   : > "$CASE_LAUNCHCTL_LOG"
@@ -59,14 +61,24 @@ domain=${2:-}
 case "${1:-}" in
   print)
     case "$domain" in
-      */*/*) [ -f "$FM_FAKE_STATE/loaded-contract" ] || exit 113; cat "$FM_FAKE_STATE/loaded-contract" ;;
+      */dev.firstmate.herdr.fm-remote)
+        [ -f "$FM_FAKE_STATE/loaded-contract" ] || exit 113
+        cat "$FM_FAKE_STATE/loaded-contract"
+        ;;
+      */dev.firstmate.herdr)
+        [ -f "$FM_FAKE_STATE/interactive-loaded" ] || exit 113
+        printf 'interactive default job\n'
+        ;;
       *) [ -f "$FM_FAKE_STATE/gui-session" ] || exit 113 ;;
     esac
     exit 0
     ;;
   bootout)
     [ ! -f "$FM_FAKE_STATE/bootout-fail" ] || { printf 'Boot-out failed: operation not permitted\n' >&2; exit 6; }
-    rm -f "$FM_FAKE_STATE/loaded-contract"
+    case "$domain" in
+      */dev.firstmate.herdr.fm-remote) rm -f "$FM_FAKE_STATE/loaded-contract" ;;
+      */dev.firstmate.herdr) rm -f "$FM_FAKE_STATE/interactive-loaded" ;;
+    esac
     exit 0
     ;;
   bootstrap)
@@ -80,7 +92,7 @@ arguments = {
 	$FM_FAKE_HERDR_BIN
 	server
 	--session
-	default
+	fm-remote
 }
 stdout path = $FM_FAKE_LAUNCH_AGENT_LOG
 stderr path = $FM_FAKE_LAUNCH_AGENT_LOG
@@ -179,7 +191,7 @@ arguments = {
 	$herdr_bin
 	server
 	--session
-	default
+	fm-remote
 }
 stdout path = $CASE_HOME/Library/Logs/$LABEL.log
 stderr path = $CASE_HOME/Library/Logs/$LABEL.log
@@ -212,6 +224,25 @@ pass "a missing herdr CLI is a human gap that --fix never claims to close"
 # --- an absent launch agent is a fixable gap that --fix installs -------------
 
 new_case Darwin with-herdr gui
+mkdir -p "$(dirname "$CASE_INTERACTIVE_PLIST")"
+cat > "$CASE_INTERACTIVE_PLIST" <<XML
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>$INTERACTIVE_LABEL</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>$CASE_BIN/herdr</string>
+		<string>server</string>
+		<string>--session</string>
+		<string>default</string>
+	</array>
+</dict>
+</plist>
+XML
+cp "$CASE_INTERACTIVE_PLIST" "$CASE_STATE/interactive-before.plist"
+touch "$CASE_STATE/interactive-loaded"
 doctor
 expect_code 1 "$DOCTOR_RC" "a host with no launch agent was reported ready"
 assert_contains "$DOCTOR_OUT" 'check herdr=ok:' "the fake herdr CLI was not detected"
@@ -236,9 +267,16 @@ assert_present "$CASE_PLIST" "--fix reported success without writing the plist"
 assert_grep '<string>Aqua</string>' "$CASE_PLIST" "the written plist is not Aqua-scoped"
 assert_grep "<string>$LABEL</string>" "$CASE_PLIST" "the written plist does not carry the Firstmate label"
 assert_grep '<string>server</string>' "$CASE_PLIST" "the written plist does not run a herdr server"
+assert_grep '<string>fm-remote</string>' "$CASE_PLIST" "the written plist does not pin the remote-secondmate session"
+assert_no_grep '<string>default</string>' "$CASE_PLIST" "the written plist pins the interactive default session"
 assert_grep "gui/$(id -u)" "$CASE_LAUNCHCTL_LOG" "the launch agent was not bootstrapped into the GUI domain"
+cmp -s "$CASE_STATE/interactive-before.plist" "$CASE_INTERACTIVE_PLIST" \
+  || fail "the fm-remote repair rewrote the interactive default launch agent"
+assert_present "$CASE_STATE/interactive-loaded" "the fm-remote repair unloaded the interactive default launch agent"
+assert_no_grep "gui/$(id -u)/$INTERACTIVE_LABEL$" "$CASE_LAUNCHCTL_LOG" \
+  "the fm-remote repair inspected or controlled the interactive default launch agent"
 assert_no_dangerous_calls "the repair reached for auto-login, FileVault, or the keychain"
-pass "--fix installs, Aqua-scopes, loads, and starts the Firstmate herdr launch agent"
+pass "--fix installs the dedicated fm-remote launch agent without touching default"
 
 PLIST_BEFORE=$(cat "$CASE_PLIST")
 : > "$CASE_LAUNCHCTL_LOG"

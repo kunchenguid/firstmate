@@ -198,6 +198,15 @@ case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
     printf 'harness=codex\n'
     exit 0
     ;;
+  launch-default-session-route:fm-remote-secondmate-control.sh:*)
+    [ "$_command_action" = launch ] || exit 93
+    printf 'schema=fm-remote-secondmate-control.v1\n'
+    printf 'backend=herdr\n'
+    printf 'target=default:w1:p2\n'
+    printf 'herdr_session=default\n'
+    printf 'harness=codex\n'
+    exit 0
+    ;;
   provision-block-fail:fm-remote-home-provision.sh:*)
     touch "$FM_FAKE_SEED_ENTERED"
     while [ ! -f "$FM_FAKE_SEED_RELEASE" ]; do sleep 0.02; done
@@ -479,6 +488,11 @@ out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate)
 assert_contains "$out" 'remote=remote-mac backend=herdr' "remote spawn did not report separate host and backend dimensions"
 assert_grep 'remote_host=remote-mac' "$PARENT/state/ios.meta" "parent metadata omitted the remote host"
 assert_grep 'remote_backend=herdr' "$PARENT/state/ios.meta" "parent metadata omitted the remote-local backend"
+assert_grep 'remote_herdr_session=fm-remote' "$PARENT/state/ios.meta" "parent metadata omitted the pinned remote Herdr session"
+assert_grep 'remote_target=fm-remote:' "$PARENT/state/ios.meta" "parent metadata did not record an fm-remote endpoint"
+assert_grep 'herdr_session=fm-remote' "$REMOTE_HOME/state/parent-route/ios.meta" "remote metadata did not record the pinned Herdr session"
+assert_grep '--session fm-remote' "$HERDR_LOG" "remote launch did not target the fm-remote session"
+assert_no_grep '--session default' "$HERDR_LOG" "remote launch targeted the interactive default session"
 assert_grep 'window=remote:ios' "$PARENT/state/ios.meta" "parent metadata pretended the endpoint was local"
 assert_present "$PARENT/state/procevent/remote-reply-ios.source" "remote spawn did not arm its reply source"
 publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.sh"
@@ -489,6 +503,42 @@ publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.s
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh observe ios)" = idle ] \
   || fail "remote endpoint delivery observation did not execute on its own host"
 pass "remote spawn launches on the remote-local backend and records a host-qualified route"
+
+remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-default-session.meta"
+legacy_pane=$(sed -n 's/^herdr_pane_id=//p' "$remote_route_meta")
+awk -v pane="$legacy_pane" '
+  /^window=/ { print "window=default:" pane; next }
+  /^herdr_session=/ { print "herdr_session=default"; next }
+  { print }
+' "$TMP_ROOT/remote-ios-before-default-session.meta" > "$remote_route_meta"
+cp "$HERDR_LOG" "$TMP_ROOT/herdr-before-default-session.log"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios 2>/dev/null)" = unverified ] \
+  || fail "legacy default-session metadata was not classified unverified"
+if remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios >/dev/null 2>&1 \
+  || remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh send ios probe >/dev/null 2>&1 \
+  || remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh key ios Enter >/dev/null 2>&1 \
+  || remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh capture ios >/dev/null 2>&1 \
+  || remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh observe ios >/dev/null 2>&1 \
+  || remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh retire ios --force >/dev/null 2>&1 \
+  || remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios codex - - herdr >/dev/null 2>&1; then
+  fail "legacy default-session metadata remained operational"
+fi
+cmp -s "$TMP_ROOT/herdr-before-default-session.log" "$HERDR_LOG" \
+  || fail "legacy default-session metadata caused a Herdr operation"
+assert_present "$REMOTE_HOME" "refused legacy retirement removed the remote home"
+assert_grep 'herdr_session=default' "$remote_route_meta" "refused legacy retirement rewrote endpoint metadata"
+
+awk -v pane="$legacy_pane" '
+  /^window=/ { print "window=default:" pane; next }
+  { print }
+' "$TMP_ROOT/remote-ios-before-default-session.meta" > "$remote_route_meta"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios 2>/dev/null)" = unverified ] \
+  || fail "mismatched fm-remote target was not classified unverified"
+cmp -s "$TMP_ROOT/herdr-before-default-session.log" "$HERDR_LOG" \
+  || fail "mismatched fm-remote target caused a Herdr operation"
+mv -f "$TMP_ROOT/remote-ios-before-default-session.meta" "$remote_route_meta"
+pass "legacy and mismatched remote endpoints fail closed before backend access"
 
 cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-nonherdr.meta"
 cp "$PARENT/data/secondmates.md" "$TMP_ROOT/registry-before-nonherdr.md"
@@ -504,6 +554,17 @@ cmp -s "$TMP_ROOT/parent-ios-before-nonherdr.meta" "$PARENT/state/ios.meta" \
   || fail "parent rewrote its endpoint metadata after a non-herdr route refusal"
 cmp -s "$TMP_ROOT/registry-before-nonherdr.md" "$PARENT/data/secondmates.md" \
   || fail "parent removed or changed the registry route after a non-herdr route refusal"
+
+set +e
+FM_FAKE_SSH_MODE=launch-default-session-route remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  > "$TMP_ROOT/spawn-default-session-route.out" 2>&1
+default_session_parent_rc=$?
+set -e
+[ "$default_session_parent_rc" -ne 0 ] || fail "parent accepted an interactive default-session remote route"
+assert_grep "remote launch returned Herdr session 'default', expected 'fm-remote'" "$TMP_ROOT/spawn-default-session-route.out" \
+  "parent refusal did not name the default session"
+cmp -s "$TMP_ROOT/parent-ios-before-nonherdr.meta" "$PARENT/state/ios.meta" \
+  || fail "parent rewrote its endpoint metadata after a default-session route refusal"
 
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-legacy.meta"
@@ -523,8 +584,8 @@ remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios c
 legacy_alive_rc=$?
 set -e
 [ "$legacy_alive_rc" -ne 0 ] || fail "remote control reused an alive legacy tmux endpoint"
-assert_grep "alive endpoint recorded on backend 'tmux'" "$TMP_ROOT/legacy-alive-refusal.out" \
-  "remote refusal did not name the alive endpoint's recorded backend"
+assert_grep "endpoint is recorded on backend 'tmux', expected 'herdr'" "$TMP_ROOT/legacy-alive-refusal.out" \
+  "remote refusal did not name the endpoint's recorded backend"
 cmp -s "$TMP_ROOT/remote-ios-legacy-before-refusal.meta" "$remote_route_meta" \
   || fail "remote refusal changed the legacy endpoint metadata"
 assert_present "$TMUX_STATE" "remote refusal killed the alive legacy endpoint"
@@ -777,7 +838,7 @@ printf 'fm-ios|%s\n' "$REMOTE_HOME" > "$TMUX_STATE"
 tmux_state_before=$(cat "$TMUX_STATE")
 launches_before_legacy=$(grep -c '^tab create' "$HERDR_LOG" || true)
 BOOT_LEGACY=$(remote_env "$ROOT/bin/fm-bootstrap.sh")
-assert_contains "$BOOT_LEGACY" "SECONDMATE_LIVENESS: secondmate ios: skipped: alive remote endpoint is recorded on backend 'tmux'; migrate or retire it explicitly" \
+assert_contains "$BOOT_LEGACY" "SECONDMATE_LIVENESS: secondmate ios: skipped: remote endpoint state is unverified on remote-mac" \
   "liveness accepted an alive legacy remote backend"
 cmp -s "$TMP_ROOT/remote-ios-liveness-legacy.meta" "$remote_route_meta" \
   || fail "liveness rewrote the alive legacy endpoint metadata"
@@ -815,10 +876,20 @@ pass "unreachable remote state remains unknown with no local respawn or failover
 
 # Retirement delegates its safety check to the remote home. An in-flight child
 # record refuses cleanup and preserves both machines' durable routes.
+# A sibling remote secondmate workspace shares fm-remote and must survive every
+# refusal and the eventual successful retirement of ios.
 # This fixture overrides FM_ROOT for transport, so teardown's root-owned guard
 # sees the fixture root rather than the source script path used by fm-send.
 publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$REMOTE_ROOT/bin/fm-watch.sh"
 resolve_ios_pending
+SIBLING_CREATE=$("$REMOTE_ROOT/bin/herdr" workspace create --cwd "$REMOTE_ROOT" \
+  --label 2ndmate-macos --no-focus --session fm-remote)
+SIBLING_WORKSPACE=$(printf '%s' "$SIBLING_CREATE" | jq -r '.result.workspace.workspace_id')
+SIBLING_PANE=$(printf '%s' "$SIBLING_CREATE" | jq -r '.result.root_pane.pane_id')
+[ -n "$SIBLING_WORKSPACE" ] && [ "$SIBLING_WORKSPACE" != null ] \
+  || fail "the shared-session sibling fixture did not create a workspace"
+[ -n "$SIBLING_PANE" ] && [ "$SIBLING_PANE" != null ] \
+  || fail "the shared-session sibling fixture did not create a pane"
 printf 'kind=ship\n' > "$REMOTE_HOME/state/child.meta"
 rm -rf "$PARENT/state/procevent"
 : > "$PARENT/state/procevent"
@@ -903,6 +974,13 @@ fi
 assert_absent "$REMOTE_HOME" "remote retirement did not remove the remote home"
 assert_absent "$PARENT/state/ios.meta" "remote retirement did not remove parent metadata"
 assert_no_grep '- ios ' "$PARENT/data/secondmates.md" "remote retirement did not remove the registry route"
-pass "remote retirement refuses child work, then cleans the same host through existing guards"
+jq -e --arg workspace "$SIBLING_WORKSPACE" --arg pane "$SIBLING_PANE" '
+  any(.workspaces[]; .workspace_id == $workspace and .label == "2ndmate-macos")
+  and any(.tabs[]; .workspace_id == $workspace and .pane_id == $pane)
+' "$HERDR_STATE" >/dev/null \
+  || fail "remote retirement removed the sibling secondmate workspace or pane from fm-remote"
+assert_no_grep 'session stop' "$HERDR_LOG" "remote retirement stopped the shared fm-remote session"
+assert_no_grep 'server stop' "$HERDR_LOG" "remote retirement stopped the shared fm-remote server"
+pass "remote retirement refuses child work, then removes only its own endpoint while a shared-session sibling survives"
 
 echo "ALL TESTS PASSED"

@@ -335,7 +335,7 @@ fi
 
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
-  local remote_backend remote_target remote_harness registry_lock remote_lock remote_generation
+  local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
   local remote_traceparent remote_recorded_traceparent
   local -a launch_args
   id=${POS[0]:-}
@@ -513,6 +513,7 @@ spawn_remote_secondmate() {
   remote_backend=$(printf '%s\n' "$out" | sed -n 's/^backend=//p' | tail -1)
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
+  remote_herdr_session=$(printf '%s\n' "$out" | sed -n 's/^herdr_session=//p' | tail -1)
   if [ "$remote_backend" != herdr ]; then
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
@@ -527,6 +528,13 @@ spawn_remote_secondmate() {
     echo "error: remote launch returned malformed route metadata; preserving the remote route for reconciliation" >&2
     return 1
   }
+  if [ "$remote_herdr_session" != fm-remote ] || [ "${remote_target%%:*}" != "$remote_herdr_session" ]; then
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected 'fm-remote'; preserving the remote route for reconciliation" >&2
+    return 1
+  fi
   # Record what the remote endpoint ACTUALLY carries, read back from its own
   # launch, rather than what this side hoped to deliver. That keeps the #995
   # guarantee that the recorded carrier is the identity the child received even
@@ -553,6 +561,7 @@ spawn_remote_secondmate() {
     echo "remote_host=$host"
     echo "remote_root=$root"
     echo "remote_backend=$remote_backend"
+    echo "remote_herdr_session=$remote_herdr_session"
     echo "remote_target=$remote_target"
     [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
   } > "$tmp"

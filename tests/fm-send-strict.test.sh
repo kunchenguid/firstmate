@@ -59,6 +59,17 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "$FM_HERDR_LOG"
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":true}}\n' ;;
+  "pane get") printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${3:-}" ;;
+  "pane send-keys") : ;;
+esac
+SH
+  chmod +x "$fb/herdr"
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -147,6 +158,22 @@ test_unmatched_single_colon_target_must_exist() {
   pass "fm-send strict: unmatched single-colon explicit targets must verify live before sending"
 }
 
+test_fm_prefixed_herdr_session_is_an_explicit_target() {
+  local dir fb home err log herdr_log rc
+  dir="$TMP_ROOT/fm-remote-explicit"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home fmremote); err="$dir/send.err"; log="$dir/tmux.log"; herdr_log="$dir/herdr.log"
+  : > "$log"
+  : > "$herdr_log"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_HERDR_LOG="$herdr_log" FM_SEND_SETTLE=0 \
+    "$SEND" fm-remote:w1:p2 --key Enter >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "an fm-prefixed Herdr session target should be accepted as explicit"
+  assert_grep 'pane get w1:p2 --session fm-remote' "$herdr_log" "fm-prefixed Herdr target was not verified in its session"
+  assert_grep 'pane send-keys w1:p2 enter --session fm-remote' "$herdr_log" "fm-prefixed Herdr target was not sent its key in its session"
+  assert_no_grep '--session default' "$herdr_log" "fm-prefixed Herdr target fell back to the default session"
+  pass "fm-send strict: fm-prefixed Herdr sessions remain explicit backend targets"
+}
+
 test_healthy_fm_id_send_still_works() {
   local dir fb home err log rc got
   dir="$TMP_ROOT/healthy"; mkdir -p "$dir"
@@ -168,4 +195,5 @@ test_unset_fm_home_fails
 test_unresolvable_target_does_not_tmux_fallback
 test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
+test_fm_prefixed_herdr_session_is_an_explicit_target
 test_healthy_fm_id_send_still_works
