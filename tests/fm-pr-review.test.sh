@@ -743,10 +743,11 @@ closed_lane_free() { # <home> <label>
 }
 # Every closure boundary answers through the real gh-axi read against a dataset
 # whose pull request is closed, never through a head override.
-close_dataset() {
-  make_dataset "[$(pull_json 1 captain "$sha_a" '["authored"]' '[]' '[]' '[]' | jq -c '.state="closed"')]"
+close_dataset_at() { # <head>
+  make_dataset "[$(pull_json 1 captain "$1" '["authored"]' '[]' '[]' '[]' | jq -c '.state="closed"')]"
   : > "$GITHUB_LOG"
 }
+close_dataset() { close_dataset_at "$sha_a"; }
 fake_review() { # <home> <args...>
   local home=$1
   shift
@@ -1007,6 +1008,118 @@ printf '%s' "$revert_event" | jq -e '.category=="inventory"' >/dev/null \
 run_review "$H_REVERT" show "$REVERT_CLOSED_ID" | jq -e '
   .state=="terminal" and .outcome=="pull-closed-without-response"' >/dev/null \
   || fail "a superseded closed review was reactivated behind the live review owner"
+
+# An item id keeps the head it was created at, while a requeue moves the item's
+# head in place. Reactivation must therefore match the head the item currently
+# records. Both supported head-movement paths are exercised: the reconcile
+# requeue and the completion-boundary requeue.
+assert_review_reactivated() { # <home> <item-id> <head> <generation> <label>
+  run_review "$1" show "$2" | jq -e --arg head "$3" --argjson generation "$4" '
+    .state=="pending" and .outcome==null and .head==$head and .generation==$generation
+    and (has("closure")|not) and .reopened_from.closure.live_state=="closed"' >/dev/null \
+    || fail "$5 did not resume the moved-head review as a new durable generation"
+  [ "$(item_json "$1" initial-review | jq 'length')" -eq 1 ] \
+    || fail "$5 left more than one exact-head review for the pull request"
+}
+
+H_MOVED_CLOSE="$TMP/moved-close-home"; new_home "$H_MOVED_CLOSE"
+MOVED_INLINE=$(jq -cn --arg head "$sha_b" \
+  '[{id:801,node_id:"IC_moved_close",body:"A claim that outlives a head move and a closure.",commit_id:$head,updated_at:"2026-01-01T06:00:00Z",user:{login:"human",type:"User"}}]')
+MOVED_A="$TMP/moved-close-a.json"; write_observation "$MOVED_A" 1370 "[$(pull_json 1 captain "$sha_a" '["authored"]')]"
+MOVED_B="$TMP/moved-close-b.json"; write_observation "$MOVED_B" 1371 "[$(pull_json 1 captain "$sha_b" '["authored"]' '[]' "$MOVED_INLINE" '[]')]"
+drain_pending_event "$H_MOVED_CLOSE" "$MOVED_A" 1370
+MOVED_REVIEW_ID=$(item_id_for "$H_MOVED_CLOSE" initial-review)
+drain_pending_event "$H_MOVED_CLOSE" "$MOVED_B" 1371
+[ "$(item_id_for "$H_MOVED_CLOSE" initial-review)" = "$MOVED_REVIEW_ID" ] \
+  || fail "the requeued review changed its durable identity, so this fixture cannot exercise creation-head divergence"
+run_review "$H_MOVED_CLOSE" show "$MOVED_REVIEW_ID" | jq -e --arg head "$sha_b" \
+  '.head==$head and .generation==2' >/dev/null \
+  || fail "the reconcile requeue did not move the review's head in place"
+MOVED_FEEDBACK_ID=$(item_id_for "$H_MOVED_CLOSE" feedback)
+claim_item "$H_MOVED_CLOSE" "$MOVED_REVIEW_ID" moved-close-owner >/dev/null
+close_dataset_at "$sha_b"
+set +e
+fake_review "$H_MOVED_CLOSE" complete-review "$MOVED_REVIEW_ID" --head "$sha_b" --generation 2 \
+  --outcome clean --evidence-file "$TMP/evidence.md" >/dev/null 2>&1
+moved_close_rc=$?
+set -e
+[ "$moved_close_rc" -eq 7 ] || fail "the moved-head fixture could not close at a completion boundary"
+jq -e --arg head "$sha_b" '.pulls["https://github.com/acme/widgets/pull/1"].covered_head==$head' \
+  "$H_MOVED_CLOSE/state/pr-review/snapshot.json" >/dev/null \
+  || fail "the moved-head fixture did not leave the covered cursor on the moved head"
+moved_reopen_event=$(poll_fixture "$H_MOVED_CLOSE" "$MOVED_B" 1372) \
+  || fail "a pull request whose head moved before closure regained no exact-head review"
+assert_contains "$moved_reopen_event" '"changed":1' "the moved-head reopen restored more or less than the closed review"
+assert_review_reactivated "$H_MOVED_CLOSE" "$MOVED_REVIEW_ID" "$sha_b" 3 "the reconcile-requeued review"
+run_review "$H_MOVED_CLOSE" show "$MOVED_FEEDBACK_ID" | jq -e '.state=="pending" and (has("reopened_from")|not)' >/dev/null \
+  || fail "the claim beside the moved-head review was disturbed"
+run_review "$H_MOVED_CLOSE" acknowledge-event "$(printf '%s' "$moved_reopen_event" | jq -r '.event_id')" >/dev/null
+poll_fixture "$H_MOVED_CLOSE" "$MOVED_B" 1373 >/dev/null 2>&1 || true
+run_review "$H_MOVED_CLOSE" show "$MOVED_REVIEW_ID" | jq -e '.generation==3 and .state=="pending"' >/dev/null \
+  || fail "an unchanged moved-head reopen reactivated twice"
+
+H_MOVED_BOUNDARY="$TMP/moved-boundary-home"; new_home "$H_MOVED_BOUNDARY"
+MB_A="$TMP/moved-boundary-a.json"; write_observation "$MB_A" 1380 "[$(pull_json 1 captain "$sha_a" '["authored"]')]"
+MB_B="$TMP/moved-boundary-b.json"; write_observation "$MB_B" 1381 "[$(pull_json 1 captain "$sha_b" '["authored"]')]"
+drain_pending_event "$H_MOVED_BOUNDARY" "$MB_A" 1380
+MB_ID=$(item_id_for "$H_MOVED_BOUNDARY" initial-review)
+claim_item "$H_MOVED_BOUNDARY" "$MB_ID" moved-boundary-owner >/dev/null
+set +e
+FM_PR_REVIEW_CURRENT_HEAD="$sha_b" run_review "$H_MOVED_BOUNDARY" complete-review "$MB_ID" \
+  --head "$sha_a" --generation 1 --outcome clean --evidence-file "$TMP/evidence.md" >/dev/null 2>&1
+mb_move_rc=$?
+set -e
+[ "$mb_move_rc" -eq 5 ] || fail "the completion-boundary head move did not requeue the review"
+run_review "$H_MOVED_BOUNDARY" show "$MB_ID" | jq -e --arg head "$sha_b" '.head==$head and .generation==2' >/dev/null \
+  || fail "the completion-boundary requeue did not move the review's head in place"
+claim_item "$H_MOVED_BOUNDARY" "$MB_ID" moved-boundary-owner >/dev/null
+close_dataset_at "$sha_b"
+set +e
+fake_review "$H_MOVED_BOUNDARY" complete-review "$MB_ID" --head "$sha_b" --generation 2 \
+  --outcome clean --evidence-file "$TMP/evidence.md" >/dev/null 2>&1
+mb_close_rc=$?
+set -e
+[ "$mb_close_rc" -eq 7 ] || fail "the boundary-requeued review could not close at a completion boundary"
+poll_fixture "$H_MOVED_BOUNDARY" "$MB_B" 1382 >/dev/null \
+  || fail "a boundary-requeued review regained no coverage after its pull request reopened"
+assert_review_reactivated "$H_MOVED_BOUNDARY" "$MB_ID" "$sha_b" 3 "the boundary-requeued review"
+
+# Two closed reviews can end up recording the same head once a head moves away,
+# a replacement is created, and the head is force-pushed back. No reactivation is
+# provably the right one, so the poll refuses deterministically instead of
+# guessing which closed item covers the reopened head.
+H_AMBIGUOUS="$TMP/ambiguous-reopen-home"; new_home "$H_AMBIGUOUS"
+AMB_A="$TMP/ambiguous-a.json"; write_observation "$AMB_A" 1390 "[$(pull_json 1 captain "$sha_a" '["authored"]')]"
+AMB_B="$TMP/ambiguous-b.json"; write_observation "$AMB_B" 1391 "[$(pull_json 1 captain "$sha_b" '["authored"]')]"
+close_at_boundary() { # <home> <item-id> <head> <generation> <owner> <label>
+  claim_item "$1" "$2" "$5" >/dev/null
+  close_dataset_at "$3"
+  set +e
+  fake_review "$1" complete-review "$2" --head "$3" --generation "$4" \
+    --outcome clean --evidence-file "$TMP/evidence.md" >/dev/null 2>&1
+  local rc=$?
+  set -e
+  [ "$rc" -eq 7 ] || fail "$6 could not close at a completion boundary"
+}
+drain_pending_event "$H_AMBIGUOUS" "$AMB_A" 1390
+AMB_FIRST=$(item_id_for "$H_AMBIGUOUS" initial-review)
+close_at_boundary "$H_AMBIGUOUS" "$AMB_FIRST" "$sha_a" 1 ambiguous-first-owner "the first ambiguous review"
+drain_pending_event "$H_AMBIGUOUS" "$AMB_B" 1391
+AMB_SECOND=$(run_review "$H_AMBIGUOUS" list --json \
+  | jq -r --arg first "$AMB_FIRST" '.[]|select(.type=="initial-review" and .id!=$first)|.id')
+[ -n "$AMB_SECOND" ] || fail "the moved head did not create a replacement review beside the closed one"
+drain_pending_event "$H_AMBIGUOUS" "$AMB_A" 1392
+run_review "$H_AMBIGUOUS" show "$AMB_SECOND" | jq -e --arg head "$sha_a" '.head==$head and .state=="pending"' >/dev/null \
+  || fail "the force-pushed revert did not move the replacement review onto the previously closed head"
+close_at_boundary "$H_AMBIGUOUS" "$AMB_SECOND" "$sha_a" 2 ambiguous-second-owner "the second ambiguous review"
+ambiguous_event=$(poll_fixture "$H_AMBIGUOUS" "$AMB_A" 1393) \
+  || fail "the ambiguous reopen produced no bounded diagnostic"
+printf '%s' "$ambiguous_event" | jq -e '.category=="private-state"' >/dev/null \
+  || fail "two closed reviews at one head were resolved by guessing instead of refusing: $ambiguous_event"
+for id in "$AMB_FIRST" "$AMB_SECOND"; do
+  run_review "$H_AMBIGUOUS" show "$id" | jq -e '.state=="terminal" and .outcome=="pull-closed-without-response"' >/dev/null \
+    || fail "an ambiguous closed review was reactivated despite the refusal"
+done
 pass "reopening restores coverage for closed items only and leaves every other terminal disposition intact"
 
 # Queue-before-snapshot crash replay creates one item, not zero or two.

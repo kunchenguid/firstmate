@@ -412,12 +412,8 @@ function findOwningTask(url) {
   return matches.length === 1 ? matches[0] : null;
 }
 
-function reviewItemId(url, head) {
-  return itemId("review", `${url}\u0000${head}`);
-}
-
 function newReviewItem(pull, now) {
-  const id = reviewItemId(pull.url, pull.head);
+  const id = itemId("review", `${pull.url}\u0000${pull.head}`);
   return {
     schema: ITEM_SCHEMA,
     id,
@@ -502,6 +498,15 @@ function owningReviews(currentItems, url) {
   );
 }
 
+// An item id keeps the head it was created at, while a requeue moves the item's
+// head in place, so a reopened pull request is matched against the head the item
+// currently records rather than against a recomputed creation identity.
+function closedReviewsAtHead(currentItems, url, head) {
+  return [...currentItems.values()].filter((item) =>
+    item.type === "initial-review" && item.url === url && item.head === head && closedByPullClosure(item),
+  );
+}
+
 function reconcileObservation(observation) {
   ensureState();
   const previous = readSnapshot();
@@ -517,9 +522,12 @@ function reconcileObservation(observation) {
     let coveredHead = prior.covered_head ?? null;
     let coveredFeedback = Array.isArray(prior.covered_feedback) ? prior.covered_feedback : [];
     if (!optedOut) {
-      const closedReview = currentItems.get(reviewItemId(pull.url, pull.head));
-      if (closedByPullClosure(closedReview) && owningReviews(currentItems, pull.url).length === 0) {
-        reopenClosedItem(closedReview, pull.head, observation.observed_at);
+      const closedReviews = closedReviewsAtHead(currentItems, pull.url, pull.head);
+      if (closedReviews.length > 1) {
+        throw new PollError("private-state", `More than one closed review owns ${pull.url} at its observed head.`, true);
+      }
+      if (closedReviews.length === 1 && owningReviews(currentItems, pull.url).length === 0) {
+        reopenClosedItem(closedReviews[0], pull.head, observation.observed_at);
         changed += 1;
       }
       if (coveredHead !== pull.head) {

@@ -53,8 +53,9 @@
 # releases the lane, and never posts after closure; a response GitHub already
 # accepted is still reconciled instead. Observing that pull request open again
 # resumes exactly those closed items at a new generation, whether or not the
-# covered head moved, and leaves every other terminal outcome and the live review
-# owner alone. A failed reply keeps one already-bound response
+# covered head moved and whether or not the item's head was requeued away from
+# the head it was created at, and leaves every other terminal outcome and the
+# live review owner alone. A failed reply keeps one already-bound response
 # for retry instead of rerunning a correction. Delivery first searches the
 # original thread for the response's self-authored exact-body binding marker, so
 # a crash after GitHub accepted the response is reconciled without knowingly
