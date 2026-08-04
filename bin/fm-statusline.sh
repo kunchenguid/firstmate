@@ -184,6 +184,12 @@ EOF
     esac
   elif [ "$verb" = failed ]; then
     class=red word=failed
+  elif [ "$verb" = needs-decision ]; then
+    # Fold yielded nothing (e.g. a malformed [key=...] token) but the newest
+    # event still asks for the captain: never demote it below red.
+    class=red word='needs you'
+  elif [ "$verb" = blocked ]; then
+    class=red word=blocked
   elif [ "$verb" = 'done' ]; then
     class='done' word='done'
   elif status_is_paused "$last"; then
@@ -203,6 +209,7 @@ EOF
 
   sid=${id#fm-}
   sid=${sid#fm/}
+  sid=$(sanitize_note "$sid")
   trunc_into "$sid" 20
   sid=$TRUNCATED
   if [ -n "$shownote" ]; then

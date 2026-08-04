@@ -110,6 +110,33 @@ assert_contains "$out" "…" "over-budget note hard-truncated"
 assert_not_contains "$out" "display budget" "note truncated before its tail"
 pass "status text is sanitized and hard-truncated"
 
+# --- malformed decision key still needs the captain --------------------------
+
+home=$(make_home badkey)
+fm_write_meta "$home/state/badkey.meta" "window=w" "kind=ship"
+printf 'needs-decision [key=bad key]: pick a thing\n' > "$home/state/badkey.status"
+out=$(run_sl "$home")
+assert_contains "$out" "1 needs you" "malformed key decision counted in summary"
+assert_contains "$out" "badkey needs you" "malformed key decision renders as needs-you"
+assert_not_contains "$out" "ready" "malformed key decision never demoted to ready"
+printf 'blocked [key=also bad]: stuck on creds\n' > "$home/state/badkey.status"
+out=$(run_sl "$home")
+assert_contains "$out" "badkey blocked" "malformed key blocked still renders blocked"
+pass "malformed decision keys still surface as needs-attention"
+
+# --- hostile task id sanitized -----------------------------------------------
+
+home=$(make_home hostileid)
+evil_id=$(printf 'ev\001il')
+fm_write_meta "$home/state/$evil_id.meta" "window=w" "kind=ship"
+printf 'working: fine\n' > "$home/state/$evil_id.status"
+out=$(run_sl "$home")
+case "$out" in
+  *$'\001'*) fail "task id must not carry control bytes into the status bar" ;;
+esac
+assert_contains "$out" "evil" "sanitized id keeps printable text"
+pass "hostile task id is sanitized before rendering"
+
 # --- colors present by default, dropped with NO_COLOR ------------------------
 
 out=$(env -u NO_COLOR FM_HOME="$home" "$SL" </dev/null)
