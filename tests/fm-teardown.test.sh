@@ -105,7 +105,29 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh"
+  # Default hermetic no-mistakes stub: `axi status` answers FM_FAKE_AXI_STATUS
+  # verbatim (empty by default, i.e. no active run - the pre-teardown run-abort
+  # step is then a no-op), and `axi abort` appends one line to
+  # FM_FAKE_NM_ABORT_LOG when set. This keeps every case hermetic - without it,
+  # `command -v no-mistakes` would fall through to whatever real binary
+  # happens to be on the test runner's own PATH. Tests exercising the run-abort
+  # path override FM_FAKE_AXI_STATUS/FM_FAKE_NM_ABORT_LOG before run_teardown.
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  axi)
+    shift
+    case "${1:-}" in
+      status) printf '%s\n' "${FM_FAKE_AXI_STATUS:-}" ;;
+      abort)
+        [ -z "${FM_FAKE_NM_ABORT_LOG:-}" ] || printf 'abort\n' >> "$FM_FAKE_NM_ABORT_LOG"
+        exit 0 ;;
+    esac
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -1824,6 +1846,179 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
   pass "herdr projection teardown retains every record when post-close presence is unknown"
 }
 
+# --- Fix 1: conclude/abort the task's own parked no-mistakes run before the
+# worker is removed, and Fix 2: reap leaked descendant processes rooted under
+# the task's own worktree/tasktmp - both exercised through the real teardown
+# path (bin/fm-teardown.sh), never by matching its source text. ------------
+
+# A parked-at-a-gate `axi status` TOON payload for <branch>/<head>, matching
+# the shape no-mistakes actually emits (see tests/fm-crew-state.test.sh's
+# run_parked fixture, the same shape bin/fm-crew-state.sh's own tests pin).
+parked_axi_status_toon() {  # <branch> <head>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: awaiting_approval
+  awaiting_agent: parked 2m10s
+  head: "$2"
+  pr: ""
+  findings: none
+gate: review
+EOF
+}
+
+# Land a shippable commit on the task branch and push it to origin, the same
+# "definitely landed, teardown must ALLOW" shape test_no_mistakes_origin_remote_allows
+# uses, so these new cases exercise the abort/reap steps on a real successful
+# teardown rather than a refusal path.
+land_shippable_commit() {
+  local case_dir=$1
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+}
+
+test_parked_own_run_is_aborted_before_teardown() {
+  local case_dir rc head
+  case_dir=$(make_case parked-run-abort)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  local rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-abort: teardown should still succeed"
+  assert_present "$case_dir/nm-abort.log" \
+    "parked-run-abort: no-mistakes axi abort was never invoked for the task's own parked run"
+  assert_grep "parked at a gate; aborting" "$case_dir/stderr" \
+    "parked-run-abort: teardown did not report aborting the parked run before removing the worker"
+  pass "a task's own parked no-mistakes run is aborted, not orphaned, before the worker is removed"
+}
+
+test_another_branchs_parked_run_is_never_touched() {
+  local case_dir rc
+  case_dir=$(make_case parked-run-not-ours)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  local rc=0
+  # A parked run reported for a DIFFERENT branch - e.g. another crew's task
+  # still validating on the shared gate - must never be aborted by this task's
+  # teardown.
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/some-other-task deadbeef)" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-not-ours: teardown should still succeed"
+  assert_absent "$case_dir/nm-abort.log" \
+    "parked-run-not-ours: teardown called axi abort for a run on another branch"
+  assert_not_contains "$(cat "$case_dir/stderr")" "aborting" \
+    "parked-run-not-ours: teardown reported aborting a run it does not own"
+  pass "a parked run on another branch is never aborted by this task's teardown (ownership is precise)"
+}
+
+test_leaked_worktree_process_is_reaped() {
+  local case_dir rc pid
+  case_dir=$(make_case leaked-process-reap)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  # A backgrounded, disowned process rooted (by cwd) under the task's own
+  # worktree - the same shape the observed incident's leaked `go test`
+  # binaries took (reparented to init, no live task meta to attribute them
+  # to once an unpatched teardown had already run).
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "leaked-process-reap: setup sleeper did not start"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "leaked-process-reap: teardown should still succeed"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "leaked-process-reap: leaked worktree process survived teardown"
+  fi
+  assert_grep "reaping leaked worktree process" "$case_dir/stderr" \
+    "leaked-process-reap: teardown did not report reaping the leaked process"
+  pass "a leaked descendant process rooted under the task's worktree is reaped by teardown, not left surviving"
+}
+
+test_leaked_tasktmp_process_is_reaped() {
+  local case_dir rc pid
+  case_dir=$(make_case leaked-tasktmp-reap)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' "tasktmp=$case_dir/tasktmp" >> "$case_dir/state/task-x1.meta"
+  mkdir -p "$case_dir/tasktmp"
+  land_shippable_commit "$case_dir"
+
+  ( cd "$case_dir/tasktmp" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "leaked-tasktmp-reap: setup sleeper did not start"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "leaked-tasktmp-reap: teardown should still succeed"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "leaked-tasktmp-reap: leaked tasktmp process survived teardown"
+  fi
+  assert_grep "reaping leaked worktree process" "$case_dir/stderr" \
+    "leaked-tasktmp-reap: teardown did not report reaping the leaked tasktmp process"
+  pass "a leaked descendant process rooted under the task's per-task tasktmp is reaped by teardown too"
+}
+
+test_run_abort_precedes_process_reap_precedes_worktree_removal() {
+  local case_dir rc head pid abort_log
+  case_dir=$(make_case abort-then-reap-then-remove-order)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  abort_log="$case_dir/nm-abort.log"
+
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "abort-then-reap-then-remove-order: setup sleeper did not start"
+
+  # A treehouse fake that snapshots, at the exact moment the destructive
+  # worktree return runs, whether the run was already aborted and whether the
+  # leaked process was already reaped - direct causal proof of ordering from
+  # real observed state, not a source-text or line-number correlation.
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ -s "$abort_log" ]; then echo "abort-already-happened" >> "$case_dir/order.log"; fi
+if ! kill -0 $pid 2>/dev/null; then echo "reap-already-happened" >> "$case_dir/order.log"; fi
+exit 0
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
+  FM_FAKE_NM_ABORT_LOG="$abort_log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "abort-then-reap-then-remove-order: teardown should still succeed"
+  kill -0 "$pid" 2>/dev/null && { kill -KILL "$pid" 2>/dev/null || true; }
+
+  assert_present "$case_dir/order.log" \
+    "abort-then-reap-then-remove-order: the destructive worktree return was never invoked"
+  assert_grep "abort-already-happened" "$case_dir/order.log" \
+    "abort-then-reap-then-remove-order: the run was not yet aborted when the worktree return ran"
+  assert_grep "reap-already-happened" "$case_dir/order.log" \
+    "abort-then-reap-then-remove-order: the leaked process was not yet reaped when the worktree return ran"
+  pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -1863,3 +2058,8 @@ test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
 test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
+test_parked_own_run_is_aborted_before_teardown
+test_another_branchs_parked_run_is_never_touched
+test_leaked_worktree_process_is_reaped
+test_leaked_tasktmp_process_is_reaped
+test_run_abort_precedes_process_reap_precedes_worktree_removal

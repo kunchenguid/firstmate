@@ -86,6 +86,42 @@
 # is present; teardown clears only a provably stale lock, then re-runs the safety
 # checks before any destructive return. Teardown output notes every wait, retry, and
 # removal so the operator can see what happened.
+#
+# Pre-teardown cleanup sequence (runs once every landed/discard-work safety
+# refusal above has already passed, and BEFORE any worktree return, branch
+# delete, or backend kill below - a still-active run or a leaked process may
+# own live work in that worktree):
+#   Fix 1 - conclude the task's own no-mistakes run. A ship task's worktree can
+#     be torn down while its no-mistakes pipeline run is still PARKED at a gate
+#     (awaiting_approval/fix_review/any awaiting_agent field), with no worker
+#     left to ever answer it - the run then sits there holding a fleet slot
+#     indefinitely (observed 2026-08-03: runs parked 7h39m and parked at a
+#     post-CI approval gate after the worker was already cleaned up). A run
+#     with an autonomous step still under way (running/fixing/ci) is left
+#     alone: no-mistakes drives those against its own gate-repo clone, not the
+#     crew's worktree, so they are not orphaned by removing the worktree.
+#     conclude_task_no_mistakes_run attributes the active-or-most-recent run to
+#     THIS task only when its branch AND code identity (bin/fm-nm-run-lib.sh's
+#     fm_nm_head_matches_worktree, the same rule bin/fm-crew-state.sh uses) both
+#     match this worktree, then runs `no-mistakes axi abort` cd'd into that
+#     exact worktree so the daemon resolves "the active run on the current
+#     branch" itself - teardown never passes a bare --run id, so it can never
+#     name (and thus never touch) another task's run. A run already terminal
+#     (an outcome is set) or not parked at a gate is left untouched. Idempotent:
+#     an already-aborted run reads back terminal and is skipped on retry.
+#   Fix 2 - reap leaked descendant processes. A backgrounded/disowned process
+#     started under the worktree (or its per-task tasktmp) does not receive the
+#     SIGHUP/SIGTERM that closing the backend pane sends to its own foreground
+#     process group, so it survives reparented to init (observed 2026-08-03:
+#     two `go test` binaries, deadlines blown past by ~100x, pinning CPU for
+#     hours with no live task meta to attribute them to once teardown had
+#     already removed it). reap_task_worktree_processes finds every process
+#     whose CURRENT WORKING DIRECTORY is this task's own worktree or tasktmp
+#     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
+#     walking the worktree's file tree) and sends TERM, then KILL after a short
+#     grace period to any survivor. Both roots are unique per task and never
+#     shared, so this can never reach another task's or the primary's
+#     processes. Idempotent: nothing left to find is a silent no-op.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -112,6 +148,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-nm-run-lib.sh
+. "$SCRIPT_DIR/fm-nm-run-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -1019,6 +1057,131 @@ validate_worktree_teardown_safety() {
   fi
 }
 
+# Fix 1 (see script header): does the active-or-most-recent no-mistakes run in
+# worktree $1 belong to THIS task, and is it parked at a gate awaiting an agent
+# that is about to be removed? Prints nothing; returns 0 only on a genuine
+# match so the caller knows it is safe to abort - never a guess.
+NM_TEARDOWN_TIMEOUT=${FM_TEARDOWN_NM_TIMEOUT:-10}
+case "$NM_TEARDOWN_TIMEOUT" in ''|*[!0-9]*) NM_TEARDOWN_TIMEOUT=10 ;; esac
+task_run_is_own_parked_run() {  # <worktree>
+  local wt=$1 branch out run_branch run_head status outcome awaiting has_gate
+  branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
+  [ -n "$branch" ] || return 1
+  out=$(fm_nm_run "$wt" "$NM_TEARDOWN_TIMEOUT" axi status)
+  [ -n "$out" ] || return 1
+  run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$out" branch)")
+  [ -n "$run_branch" ] && [ "$run_branch" = "$branch" ] || return 1
+  run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$out" head)")
+  fm_nm_head_matches_worktree "$wt" "$run_head" || return 1
+  outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$out" outcome)")
+  [ -z "$outcome" ] || return 1
+  status=$(fm_nm_strip_quotes "$(fm_nm_field "$out" status)")
+  awaiting=$(printf '%s\n' "$out" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
+  has_gate=$(printf '%s\n' "$out" | grep -Eq '^[[:space:]]*gate:[[:space:]]*' && echo 1 || echo 0)
+  case "$status" in
+    awaiting_approval|fix_review) return 0 ;;
+  esac
+  [ -n "$awaiting" ] || [ "$has_gate" = 1 ]
+}
+
+# Abort THIS task's own parked no-mistakes run before the worker that would
+# have answered its gate is removed, so no run is left orphaned holding a
+# fleet slot. Only KIND=ship drives a no-mistakes validation of its own
+# worktree (scouts and secondmates never do, mirroring bin/fm-crew-state.sh);
+# a run not attributed to this exact branch+head is left completely alone.
+# Best-effort past that point: a CLI that cannot be reached leaves the run for
+# a later manual `no-mistakes axi abort --run <id>` rather than blocking
+# teardown on a daemon communication hiccup.
+conclude_task_no_mistakes_run() {  # <worktree>
+  local wt=$1
+  [ "$KIND" = ship ] || return 0
+  [ -d "$wt" ] || return 0
+  command -v no-mistakes >/dev/null 2>&1 || return 0
+  task_run_is_own_parked_run "$wt" || return 0
+  echo "teardown: no-mistakes run for $ID is parked at a gate; aborting before the worker is removed" >&2
+  fm_nm_run "$wt" "$NM_TEARDOWN_TIMEOUT" axi abort >/dev/null 2>&1 || true
+  # fm_nm_run always reports success (its bounded-call contract discards the
+  # underlying exit code so a communication hiccup never trips `set -e` here);
+  # verify the effect instead of trusting the abort call's own exit status.
+  if task_run_is_own_parked_run "$wt"; then
+    echo "warning: no-mistakes run for $ID still reads parked after axi abort; it may need a manual no-mistakes axi abort --run <id>" >&2
+  fi
+}
+
+# Fix 2 (see script header): pids of every process whose CURRENT WORKING
+# DIRECTORY is exactly $1 or under it, from one bounded system-wide `lsof -a
+# -d cwd` scan (never the recursive +D file-tree walk, which lsof itself
+# documents as slow). Never $$ (this script's own pid). Empty output, never a
+# failure, when lsof is unavailable or nothing matches.
+pids_with_cwd_under() {  # <dir>
+  local dir=$1 out pid path
+  [ -n "$dir" ] && [ -d "$dir" ] || return 0
+  command -v lsof >/dev/null 2>&1 || return 0
+  dir=$(cd "$dir" && pwd -P) || return 0
+  out=$(lsof -a -d cwd -Fpn 2>/dev/null) || true
+  [ -n "$out" ] || return 0
+  pid=
+  while IFS= read -r line; do
+    case "$line" in
+      p*) pid=${line#p} ;;
+      n*)
+        path=${line#n}
+        case "$path" in
+          "$dir"|"$dir"/*)
+            [ -n "$pid" ] && [ "$pid" != "$$" ] && printf '%s\n' "$pid"
+            ;;
+        esac
+        ;;
+    esac
+  done <<EOF
+$out
+EOF
+}
+
+# Reap every process rooted (by cwd) under this task's own worktree or tasktmp
+# - both unique per task and never shared - before either is removed. TERM
+# first, then KILL after a short grace period for anything still alive; a
+# process that exits on its own between the two passes is simply absent from
+# the recheck. Best-effort: a missing lsof leaves nothing to find and is a
+# silent no-op, never a teardown refusal.
+reap_task_worktree_processes() {  # <label> <dir>...
+  local label=$1 dir pids pid remaining
+  shift
+  pids=""
+  for dir in "$@"; do
+    [ -n "$dir" ] || continue
+    pids="$pids
+$(pids_with_cwd_under "$dir")"
+  done
+  pids=$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un || true)
+  [ -n "$pids" ] || return 0
+  echo "teardown: reaping leaked $label process(es) for $ID: $(printf '%s' "$pids" | tr '\n' ' ')" >&2
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    kill -TERM "$pid" 2>/dev/null || true
+  done <<EOF
+$pids
+EOF
+  sleep 1
+  remaining=""
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    kill -0 "$pid" 2>/dev/null && remaining="$remaining
+$pid"
+  done <<EOF
+$pids
+EOF
+  remaining=$(printf '%s\n' "$remaining" | grep -E '^[0-9]+$' | sort -un || true)
+  [ -n "$remaining" ] || return 0
+  echo "teardown: force-killing leaked $label process(es) for $ID: $(printf '%s' "$remaining" | tr '\n' ' ')" >&2
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    kill -KILL "$pid" 2>/dev/null || true
+  done <<EOF
+$remaining
+EOF
+}
+
 require_orca_worktree_path_match() {
   local worktree_id=$1 inspected=$2 resolved inspected_abs resolved_abs
   resolved=$(fm_backend_worktree_path orca "$worktree_id") || {
@@ -1758,6 +1921,18 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       exit 1
     fi
   fi
+fi
+
+# Every landed/discard-work refusal above has now passed (or --force skipped
+# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
+# --force, and before ANY destructive step below - a still-parked run or a
+# leaked process can own live work in this exact worktree. Not for
+# kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
+# dedicated process-event and firstmate-home removal machinery further below,
+# not by task-worktree cleanup.
+if [ "$KIND" != secondmate ]; then
+  conclude_task_no_mistakes_run "$WT"
+  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
 
 # A Herdr close may reposition shared workspace order, so the whole
