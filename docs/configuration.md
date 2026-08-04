@@ -253,13 +253,20 @@ This section is the single owner of the canonical schema and its per-field seman
     {
       "when": "<natural-language condition describing a kind of task>",
       "use": [
-        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max, optional>" }
+        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max, optional>", "provider": "<optional provider token>" }
       ],
+      "fallback": [
+        { "harness": "<adapter>", "model": "<optional model>", "effort": "<optional effort>", "provider": "<optional provider token>" }
+      ],
+      "independent": false,
       "why": "<optional rationale that helps firstmate choose>"
     }
   ],
   "default": [
-    { "harness": "<adapter>", "model": "<optional model>", "effort": "<optional effort>" }
+    { "harness": "<adapter>", "model": "<optional model>", "effort": "<optional effort>", "provider": "<optional provider token>" }
+  ],
+  "default_fallback": [
+    { "harness": "<adapter>", "model": "<optional model>", "effort": "<optional effort>", "provider": "<optional provider token>" }
   ]
 }
 ```
@@ -267,17 +274,56 @@ This section is the single owner of the canonical schema and its per-field seman
 Per rule, `when` and `use` are required.
 Both `use` and the optional top-level `default` accept either one profile object or a non-empty array of profile objects.
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
-Profile `model` and `effort` fields and rule `why` are optional.
+Profile `model`, `effort`, and `provider` fields and rule `why` are optional.
 An omitted model or effort means the selected harness uses its own default for that axis.
+`provider` is an opaque lowercase `[a-z0-9._-]` token naming the model provider that profile bills against; firstmate establishes that relation itself from the harness's own catalog, and no script infers a provider from a harness or model name.
+A profile with no `provider` is never excluded by provider-outage state, so an existing configuration keeps its current behavior exactly.
+The optional rule-level `fallback` and top-level `default_fallback` take the same profile object or non-empty array and are the outage alternative for that rule or default; `independent` is an optional rule-level boolean marking a review or audit that must not share a provider with the work under review.
+See "Provider outage continuity" below for how those three fields are consumed.
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
 If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
-See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
+See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`, and [`docs/examples/crew-dispatch-continuity.json`](examples/crew-dispatch-continuity.json) for the same file expressed with explicit providers, per-rule outage fallbacks, and an independent review rule.
+Both examples use only verified harness adapters; a locally hosted model becomes selectable here only after it completes the adapter verification path in [`harness-adapters`](../.agents/skills/harness-adapters/SKILL.md).
 When the file exists, bootstrap validates it with `jq`.
-Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
-Malformed JSON, an empty or malformed rule/default array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
+Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule including its provider tokens, outage fallback, and independence marking, and one fact each for the optional default and default-fallback profile sets.
+Malformed JSON, an empty or malformed rule, default, fallback, or default-fallback array, a non-boolean `independent`, an empty `provider`, an unverified harness anywhere in the file, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
+
+## Provider outage continuity (state/provider-continuity)
+
+When a model provider is unavailable, Firstmate routes new work away from it and can move an already-running task to another verified provider without ever creating a second owner for that task.
+This section is the single owner of the record layout, the switch-the-primary operator path, and the boundary between outage handling and quota handling.
+`bin/fm-provider-continuity.sh`'s header and `--help` own the exact subcommands, evidence classes, qualification rule, and tunables, and [`provider-outage-continuity`](../.agents/skills/provider-outage-continuity/SKILL.md) owns the conditional operator reasoning.
+
+The mechanism is explicit rather than an opaque mid-turn retry.
+Firstmate classifies a failure and records it; the script never calls a provider, never probes one for health, never maps a model or harness to a provider, and never selects a route.
+Only retry-exhausted provider-level observations can qualify an outage, so one transient error, an authentication or configuration refusal, and an ordinary task failure never do.
+Quota and rate-limit pressure is recorded as its own class and stays with `quota-axi` and [`quota-array-dispatch`](../.agents/skills/quota-array-dispatch/SKILL.md); it never marks a provider unavailable.
+A qualified outage expires on its own cooldown, so it is a bounded state over recorded evidence rather than a silent rewrite of the captain's dispatch policy.
+
+Records live under `$FM_HOME/state/provider-continuity/` at mode `0700`: one append-only `<provider>.events` file per provider, plus `handoff/<task-id>.attempts` ledgers.
+A home that records nothing keeps its existing dispatch behavior and creates no state at all.
+`config/crew-dispatch.json`'s `provider`, `fallback`, `default_fallback`, and `independent` fields above are what firstmate feeds into the script's `filter` command: the rule's own profiles first, its configured fallback only when every primary candidate is unavailable, and `--exclude` for a review that must stay independent of the family that produced the work.
+When no tier remains, the work is deferred into the backlog instead of dispatched.
+
+Moving an in-flight task is licensed by the script's `handoff-check` command, which composes the recorded endpoint's own state with `bin/fm-crew-state.sh`'s current-code-matched run state; an active or parked validation run keeps its single-worker ownership and refuses the move.
+A licensed move relaunches the same task id through `bin/fm-spawn.sh --resume-worktree`, which enters the isolated copy that task already owns instead of allocating a second one and restores the previous record if the relaunch fails.
+Repeated attempts are capped so a failing handoff stops and reports its concrete blocker rather than looping.
+
+### Switching the primary Firstmate to another provider
+
+Keep exactly one live primary session per home.
+There is no hot standby: a second session competing for the same home is refused by the session lock, and removing that lock by hand is never part of this path.
+
+1. Exit the current primary's harness normally, which ends the process that holds `state/.lock`.
+2. Start the other verified harness against the same `FM_HOME` from the same repo root, using that harness's launch command in [README requirements](../README.md#requirements).
+3. Let session start run once as usual.
+   It acquires the lock from the now-dead holder, drains the wake queue, and reconciles every recorded direct report from durable records and live endpoint inventory, so ongoing work is picked up rather than migrated.
+
+If the lock is still held by a live process, the new session stays read-only and reports it; that is the intended protection, so resolve the live session rather than forcing the lock.
+See [verification/provider-continuity.md](verification/provider-continuity.md) for the current evidence behind classification, deterministic cooldown expiry, tiered selection, and the per-backend applicability review.
 
 ## Toolchain
 
@@ -509,7 +555,13 @@ FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; defaul
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed to the current code
-FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
+FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage and the provider-continuity handoff license
+FM_CONTINUITY_NOW=                    # epoch override for provider-continuity reconciliation; tests and replay only
+FM_CONTINUITY_OUTAGE_THRESHOLD=3      # qualifying provider observations in one burst before an outage is qualified
+FM_CONTINUITY_OUTAGE_WINDOW_SECS=900  # maximum gap between two observations of the same qualifying burst
+FM_CONTINUITY_COOLDOWN_SECS=1800      # seconds a provider stays unavailable after the newest qualifying observation
+FM_CONTINUITY_RETENTION_SECS=604800   # retention for recorded provider observations (7 days)
+FM_CONTINUITY_HANDOFF_MAX_ATTEMPTS=2  # cross-provider handoff attempts per task before it stops and reports the blocker
 FMX_PAIRING_TOKEN=      # X mode pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional X relay override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct X client invocations; bootstrap still checks $FM_HOME/.env

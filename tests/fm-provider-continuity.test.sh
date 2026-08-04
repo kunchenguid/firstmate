@@ -163,6 +163,42 @@ test_new_task_selection_excludes_only_the_unavailable_provider() {
   pass "new-task selection excludes only the unavailable provider and preserves the rest"
 }
 
+test_configured_fallback_is_consulted_only_during_an_outage() {
+  local state
+  state=$(make_state fallback-tier)
+
+  # Healthy primary: the configured fallback stays unused, so an outage
+  # fallback can never quietly act as a second quota choice.
+  cont "$state" 1000 filter --fallback vendor-two vendor-one
+  expect_code 0 "$CONT_STATUS" "an available primary must not defer"
+  assert_contains "$CONT_OUT" "vendor-one eligible primary" \
+    "the available primary candidate was not selected"
+  assert_contains "$CONT_OUT" "fallback: not consulted" \
+    "the outage fallback was consulted while the primary was available"
+  assert_not_contains "$CONT_OUT" "vendor-two eligible" \
+    "the outage fallback was offered alongside an available primary"
+
+  cont "$state" 1000 record vendor-one provider-5xx
+  cont "$state" 1100 record vendor-one provider-connection
+  cont "$state" 1200 record vendor-one provider-stream
+
+  cont "$state" 1200 filter --fallback vendor-two vendor-one
+  expect_code 0 "$CONT_STATUS" "a configured fallback must keep the work dispatchable"
+  assert_contains "$CONT_OUT" "vendor-one excluded outage until 3000 (primary)" \
+    "the unavailable primary was not reported with its tier"
+  assert_contains "$CONT_OUT" "vendor-two eligible fallback" \
+    "the configured outage fallback was not selected once the primary went down"
+
+  # Both tiers down: the work waits rather than routing somewhere unqualified.
+  cont "$state" 1200 record vendor-two provider-5xx
+  cont "$state" 1210 record vendor-two provider-5xx
+  cont "$state" 1220 record vendor-two provider-5xx
+  cont "$state" 1220 filter --fallback vendor-two vendor-one
+  expect_code 3 "$CONT_STATUS" "both tiers unavailable must defer"
+  assert_contains "$CONT_OUT" "defer:" "an exhausted fallback chain did not defer"
+  pass "a configured outage fallback is consulted only when every primary candidate is unavailable"
+}
+
 test_review_independence_defers_when_no_independent_provider_remains() {
   local state
   state=$(make_state independence)
@@ -656,6 +692,7 @@ test_auth_config_and_task_failures_never_qualify
 test_quota_pressure_is_recorded_separately_and_never_qualifies
 test_cooldown_expiry_restores_eligibility_deterministically
 test_new_task_selection_excludes_only_the_unavailable_provider
+test_configured_fallback_is_consulted_only_during_an_outage
 test_review_independence_defers_when_no_independent_provider_remains
 test_no_configured_continuity_state_leaves_selection_unchanged
 test_unknown_evidence_classes_and_provider_tokens_are_refused

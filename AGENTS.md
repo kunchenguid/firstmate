@@ -186,6 +186,7 @@ Do not add model-specific versions of that policy.
 `secondmate-provisioning` owns secondmate harness pins and inherited local material, while `harness-adapters` owns the harness consequences.
 Dispatch only on a backend that `fm-spawn` validates as spawn-capable; pass an explicit per-spawn `--backend` only under that exact task's own authority, never as later-task precedent (selection contract: [`docs/configuration.md`](docs/configuration.md) "Runtime backend").
 A missing dependency, authentication failure, unsupported backend, or version refusal is a blocker; never silently retry on another backend.
+Load `provider-outage-continuity` before classifying repeated failures as a provider outage, routing new work away from a provider, moving an in-flight task to another provider, or switching the primary to another provider; a single transient failure, an authentication or configuration refusal, and quota pressure are never an outage.
 
 ## 5. Recovery
 
@@ -499,6 +500,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `diagnostic-reasoning` - load before scoping a reported bug and before acting on a diagnostic report.
 - `ask-user-authority` - load before deciding any ask-user finding, regardless of the project's `yolo` posture.
 - `quota-array-dispatch` - load before choosing among a matched crew-dispatch profile array from current quota-axi output.
+- `provider-outage-continuity` - load before classifying repeated failures as a provider outage, routing new work away from a provider, moving an in-flight task to another provider, or switching the primary Firstmate to another provider.
 - `harness-adapters` - load before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
 - `firstmate-orca` - load before switching to Orca, spawning or supervising Orca-backed work, smoke-testing Orca backend behavior, debugging Orca task state, or reconciling Orca-backed task metadata.
 - `project-management` - load before adding, creating, removing, or initializing a project.

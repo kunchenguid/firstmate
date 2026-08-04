@@ -1,0 +1,59 @@
+{
+  "rules": [
+    {
+      "when": "The task is visual, browser-driven, or product-facing UI work.",
+      "use": [
+        { "harness": "codex", "model": "gpt-5.5", "effort": "high", "provider": "provider-a" }
+      ],
+      "fallback": [
+        { "harness": "claude", "model": "claude-opus-5", "effort": "high", "provider": "provider-b" }
+      ],
+      "why": "Keep visual work on its preferred profile, and move it to the other family only while that provider is unavailable."
+    },
+    {
+      "when": "The task is architecture, security-sensitive, or deep diagnosis work.",
+      "use": [
+        { "harness": "claude", "model": "claude-opus-5", "effort": "xhigh", "provider": "provider-b" }
+      ],
+      "fallback": [
+        { "harness": "codex", "model": "gpt-5.5", "effort": "xhigh", "provider": "provider-a" }
+      ],
+      "why": "Preserve the strongest reasoning class on both tiers; an outage must never quietly downgrade it."
+    },
+    {
+      "when": "The task is a substantial or bounded non-visual implementation.",
+      "use": [
+        { "harness": "claude", "model": "claude-sonnet-5", "effort": "high", "provider": "provider-b" }
+      ],
+      "fallback": [
+        { "harness": "codex", "model": "gpt-5.5", "effort": "high", "provider": "provider-a" }
+      ],
+      "why": "Ordinary implementation work continues on the other family at a comparable effort while one provider is down."
+    },
+    {
+      "when": "The task is deterministic mechanical work such as a rote rename, formatting sweep, or targeted typo fix.",
+      "use": [
+        { "harness": "claude", "model": "haiku", "effort": "low", "provider": "provider-b" }
+      ],
+      "fallback": [
+        { "harness": "codex", "model": "gpt-5.5", "effort": "low", "provider": "provider-a" }
+      ],
+      "why": "A locally hosted model belongs on this rule's primary tier once it has completed harness verification; until then keep a cheap verified profile here."
+    },
+    {
+      "when": "The task is an independent review or audit of work another family produced.",
+      "independent": true,
+      "use": [
+        { "harness": "claude", "model": "claude-opus-5", "effort": "high", "provider": "provider-b" },
+        { "harness": "codex", "model": "gpt-5.5", "effort": "high", "provider": "provider-a" }
+      ],
+      "why": "Review keeps the opposite-family requirement and waits when it cannot be met, rather than letting a family review its own work."
+    }
+  ],
+  "default": [
+    { "harness": "claude", "model": "claude-sonnet-5", "effort": "medium", "provider": "provider-b" }
+  ],
+  "default_fallback": [
+    { "harness": "codex", "model": "gpt-5.5", "effort": "medium", "provider": "provider-a" }
+  ]
+}

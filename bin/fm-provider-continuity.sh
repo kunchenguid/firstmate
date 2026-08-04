@@ -20,10 +20,16 @@
 #       is named). Always exits 0.
 #   fm-provider-continuity.sh eligible <provider>
 #       Exit 0 when <provider> may take new work, 1 while it is unavailable.
-#   fm-provider-continuity.sh filter [--exclude <provider>]... <provider>...
+#   fm-provider-continuity.sh filter [--exclude <provider>]... \
+#                                    [--fallback <provider>]... <provider>...
 #       Print one verdict line per candidate provider, preserving input order and
-#       de-duplicating. Exit 0 when at least one candidate remains eligible,
-#       3 (with a `defer:` line) when none does.
+#       de-duplicating. Positional providers are the rule's own `use` tier;
+#       --fallback providers are that rule's configured outage fallback and are
+#       consulted ONLY when no primary candidate remains, so an outage fallback
+#       can never act as a second quota choice. --exclude carries a review's
+#       independence requirement: the named provider is refused in both tiers.
+#       Exit 0 when at least one candidate remains eligible, 3 (with a `defer:`
+#       line) when none does.
 #   fm-provider-continuity.sh clear <provider>
 #       Drop <provider>'s observations after firstmate has positive evidence it
 #       recovered.
@@ -320,12 +326,50 @@ cmd_eligible() {
   return 1
 }
 
+FILTER_ELIGIBLE=0
+FILTER_EXCLUDED=()
+FILTER_SEEN=()
+
+# Print one verdict line per candidate in a tier, de-duplicated against every
+# candidate already reported, and count how many survived.
+filter_tier() {  # <tier-label> <provider>...
+  local tier=$1 p e dup
+  shift
+  FILTER_ELIGIBLE=0
+  for p in "$@"; do
+    dup=0
+    for e in ${FILTER_SEEN[@]+"${FILTER_SEEN[@]}"}; do
+      [ "$e" = "$p" ] && dup=1 && break
+    done
+    [ "$dup" = 0 ] || continue
+    FILTER_SEEN+=("$p")
+    dup=0
+    for e in ${FILTER_EXCLUDED[@]+"${FILTER_EXCLUDED[@]}"}; do
+      [ "$e" = "$p" ] && dup=1 && break
+    done
+    if [ "$dup" = 1 ]; then
+      printf '%s excluded independence (%s)\n' "$p" "$tier"
+      continue
+    fi
+    read_reconciled "$p"
+    if [ "$R_STATE" = eligible ]; then
+      printf '%s eligible %s\n' "$p" "$tier"
+      FILTER_ELIGIBLE=$((FILTER_ELIGIBLE + 1))
+    else
+      printf '%s excluded outage until %s (%s)\n' "$p" "$R_UNTIL" "$tier"
+    fi
+  done
+}
+
 cmd_filter() {
-  local -a excluded=() candidates=() seen=()
-  local arg p e dup remaining=0
+  local -a candidates=() fallbacks=()
+  local arg p
+  FILTER_EXCLUDED=()
+  FILTER_SEEN=()
   while [ $# -gt 0 ]; do
     case "$1" in
-      --exclude) shift; [ $# -gt 0 ] || die "--exclude needs a provider"; excluded+=("$1") ;;
+      --exclude) shift; [ $# -gt 0 ] || die "--exclude needs a provider"; FILTER_EXCLUDED+=("$1") ;;
+      --fallback) shift; [ $# -gt 0 ] || die "--fallback needs a provider"; fallbacks+=("$1") ;;
       --) shift; break ;;
       -*) die "unexpected flag: $1" ;;
       *) candidates+=("$1") ;;
@@ -333,42 +377,27 @@ cmd_filter() {
     shift
   done
   for arg in "$@"; do candidates+=("$arg"); done
-  [ "${#candidates[@]}" -gt 0 ] || die "usage: fm-provider-continuity.sh filter [--exclude <provider>]... <provider>..."
-  for p in "${candidates[@]}" ${excluded[@]+"${excluded[@]}"}; do
+  [ "${#candidates[@]}" -gt 0 ] || die "usage: fm-provider-continuity.sh filter [--exclude <provider>]... [--fallback <provider>]... <provider>..."
+  for p in "${candidates[@]}" ${fallbacks[@]+"${fallbacks[@]}"} ${FILTER_EXCLUDED[@]+"${FILTER_EXCLUDED[@]}"}; do
     valid_provider "$p" || die "provider must be lowercase [a-z0-9._-] and start alphanumeric: $p"
   done
-  for p in "${candidates[@]}"; do
-    dup=0
-    for e in ${seen[@]+"${seen[@]}"}; do
-      [ "$e" = "$p" ] && dup=1 && break
-    done
-    [ "$dup" = 0 ] || continue
-    seen+=("$p")
-    dup=0
-    for e in ${excluded[@]+"${excluded[@]}"}; do
-      [ "$e" = "$p" ] && dup=1 && break
-    done
-    if [ "$dup" = 1 ]; then
-      printf '%s excluded independence\n' "$p"
-      continue
-    fi
-    read_reconciled "$p"
-    if [ "$R_STATE" = eligible ]; then
-      printf '%s eligible\n' "$p"
-      remaining=$((remaining + 1))
-    else
-      printf '%s excluded outage until %s\n' "$p" "$R_UNTIL"
-    fi
-  done
-  if [ "$remaining" -eq 0 ]; then
-    if [ "${#excluded[@]}" -gt 0 ]; then
-      printf 'defer: no candidate provider is both available and independent of %s\n' "$(printf '%s ' "${excluded[@]}" | sed 's/ $//')"
-    else
-      printf 'defer: every candidate provider is currently unavailable\n'
-    fi
-    return 3
+  filter_tier primary "${candidates[@]}"
+  if [ "$FILTER_ELIGIBLE" -gt 0 ]; then
+    # The configured fallback tier exists for an outage, not as a second quota
+    # choice, so an available primary tier never consults it.
+    [ "${#fallbacks[@]}" -eq 0 ] || printf 'fallback: not consulted (primary tier available)\n'
+    return 0
   fi
-  return 0
+  if [ "${#fallbacks[@]}" -gt 0 ]; then
+    filter_tier fallback "${fallbacks[@]}"
+    [ "$FILTER_ELIGIBLE" -eq 0 ] || return 0
+  fi
+  if [ "${#FILTER_EXCLUDED[@]}" -gt 0 ]; then
+    printf 'defer: no candidate provider is both available and independent of %s\n' "$(printf '%s ' "${FILTER_EXCLUDED[@]}" | sed 's/ $//')"
+  else
+    printf 'defer: every candidate provider is currently unavailable\n'
+  fi
+  return 3
 }
 
 cmd_clear() {
