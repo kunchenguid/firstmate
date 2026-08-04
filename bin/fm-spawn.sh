@@ -1280,19 +1280,22 @@ real_path_or_raw() {  # <path>
 }
 
 treehouse_lease_matches_task() {
-  local path=$1 status rc
-  status=$(cd "$PROJ_ABS" && treehouse status --json 2>/dev/null) || return 2
+  local path=$1 status rc status_format=json
+  # Treehouse 2.0.1 supports leases but predates status --json. Retain its
+  # path-and-holder text validation until the minimum supported version rises.
+  if ! (cd "$PROJ_ABS" && treehouse status --help 2>&1) | grep -q -- '--json'; then
+    status_format=text
+  fi
+  if [ "$status_format" = json ]; then
+    status=$(cd "$PROJ_ABS" && treehouse status --json 2>/dev/null) || return 2
+  else
+    status=$(cd "$PROJ_ABS" && treehouse status 2>/dev/null) || return 2
+  fi
   set +e
   printf '%s' "$status" | node -e '
 const fs = require("fs");
-const [path, holder] = process.argv.slice(1);
-let entries;
-try {
-  entries = JSON.parse(fs.readFileSync(0, "utf8"));
-} catch {
-  process.exit(2);
-}
-if (!Array.isArray(entries)) process.exit(2);
+const [path, holder, format] = process.argv.slice(1);
+const input = fs.readFileSync(0, "utf8");
 const canonical = (value) => {
   try {
     return fs.realpathSync(value);
@@ -1301,8 +1304,28 @@ const canonical = (value) => {
   }
 };
 const expectedPath = canonical(path);
-process.exit(entries.some((entry) => canonical(entry?.path) === expectedPath && entry?.status === "leased" && entry?.lease_holder === holder) ? 0 : 1);
-' "$path" "$ID"
+if (format === "json") {
+  let entries;
+  try {
+    entries = JSON.parse(input);
+  } catch {
+    process.exit(2);
+  }
+  if (!Array.isArray(entries)) process.exit(2);
+  process.exit(entries.some((entry) => canonical(entry?.path) === expectedPath && entry?.status === "leased" && entry?.lease_holder === holder) ? 0 : 1);
+}
+const suffix = "  (held by " + holder + ")";
+for (const line of input.split(/\r?\n/)) {
+  if (!line.endsWith(suffix)) continue;
+  const match = line.slice(0, -suffix.length).match(/^\S+\s+leased\s+(.+)$/);
+  if (!match) continue;
+  let candidate = match[1];
+  if (candidate === "~") candidate = require("os").homedir();
+  if (candidate.startsWith("~/")) candidate = require("path").join(require("os").homedir(), candidate.slice(2));
+  if (canonical(candidate) === expectedPath) process.exit(0);
+}
+process.exit(1);
+' "$path" "$ID" "$status_format"
   rc=$?
   set -e
   return "$rc"

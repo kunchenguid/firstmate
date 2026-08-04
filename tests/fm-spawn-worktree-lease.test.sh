@@ -62,9 +62,17 @@ case "${1:-}" in
   get) printf '%s\n' "${FM_FAKE_LEASE_PATH:?FM_FAKE_LEASE_PATH unset}" ;;
   status)
     [ "${FM_FAKE_STATUS_FAIL:-0}" != 1 ] || exit 1
-    node -e 'console.log(JSON.stringify([{path: process.argv[1], status: "leased", lease_holder: process.argv[2]}]))' \
-      "${FM_FAKE_LEASE_PATH:?FM_FAKE_LEASE_PATH unset}" \
-      "${FM_FAKE_LEASE_HOLDER:?FM_FAKE_LEASE_HOLDER unset}"
+    if [ "${2:-}" = --help ]; then
+      [ "${FM_FAKE_STATUS_LEGACY:-0}" = 1 ] || printf '%s\n' '      --json   Print pool status as JSON'
+    elif [ "${FM_FAKE_STATUS_LEGACY:-0}" = 1 ]; then
+      printf '1     leased       %s  (held by %s)\n' \
+        "${FM_FAKE_LEASE_PATH:?FM_FAKE_LEASE_PATH unset}" \
+        "${FM_FAKE_LEASE_HOLDER:?FM_FAKE_LEASE_HOLDER unset}"
+    else
+      node -e 'console.log(JSON.stringify([{path: process.argv[1], status: "leased", lease_holder: process.argv[2]}]))' \
+        "${FM_FAKE_LEASE_PATH:?FM_FAKE_LEASE_PATH unset}" \
+        "${FM_FAKE_LEASE_HOLDER:?FM_FAKE_LEASE_HOLDER unset}"
+    fi
     ;;
 esac
 exit 0
@@ -113,6 +121,7 @@ run_lease_spawn() {
     FM_FAKE_LEASE_PATH="$lease" FM_FAKE_PANE_PATH="$pane" \
     FM_FAKE_LEASE_HOLDER="${FM_FAKE_LEASE_HOLDER_OVERRIDE:-$id}" \
     FM_FAKE_STATUS_FAIL="${FM_FAKE_STATUS_FAIL_OVERRIDE:-0}" \
+    FM_FAKE_STATUS_LEGACY="${FM_FAKE_STATUS_LEGACY_OVERRIDE:-0}" \
     FM_FAKE_TH_LOG="$THLOG" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
@@ -211,6 +220,28 @@ test_relaunch_accepts_equivalent_status_path() {
   assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
     "relaunch did not preserve the canonical leased worktree"
   pass "relaunch recognizes symlink-equivalent Treehouse lease paths"
+}
+
+test_relaunch_accepts_legacy_treehouse_status() {
+  local rec id out status
+  id="lease-relaunch-legacy-z5"
+  rec=$(make_lease_case lease-relaunch-legacy "$id")
+  read_lease_record "$rec"
+
+  out=$(run_lease_spawn "$id" "$WT_DIR" "$WT_DIR")
+  status=$?
+  expect_code 0 "$status" "initial spawn should acquire the task lease"
+
+  out=$(FM_FAKE_STATUS_LEGACY_OVERRIDE=1 run_lease_spawn "$id" "$WT_DIR" "$WT_DIR")
+  status=$?
+  expect_code 0 "$status" "relaunch should accept Treehouse 2.0.1 text status"
+  [ "$(grep -c "^get --lease --lease-holder $id$" "$THLOG")" -eq 1 ] \
+    || fail "legacy status caused a second lease acquisition: $(cat "$THLOG")"
+  assert_no_grep '^status --json$' "$THLOG" \
+    "legacy Treehouse validation invoked its unsupported --json flag"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "legacy-status relaunch did not preserve the recorded leased worktree"
+  pass "relaunch validates the recorded lease through Treehouse 2.0.1 text status"
 }
 
 test_aborted_relaunch_preserves_recorded_lease() {
@@ -349,6 +380,7 @@ test_spawn_leases_worktree_under_task_id
 test_spawn_abort_releases_leased_worktree
 test_relaunch_reuses_recorded_lease
 test_relaunch_accepts_equivalent_status_path
+test_relaunch_accepts_legacy_treehouse_status
 test_aborted_relaunch_preserves_recorded_lease
 test_relaunch_rejects_wrong_lease_holder
 test_relaunch_rejects_unreadable_lease_status
