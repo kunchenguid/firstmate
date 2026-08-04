@@ -403,6 +403,7 @@ spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
   local remote_traceparent remote_recorded_traceparent remote_model remote_effort
+  local remote_profile_delivery remote_requested_model remote_requested_effort
   local remote_recorded_model remote_recorded_effort remote_stderr_file remote_stderr
   local -a launch_args
   id=${POS[0]:-}
@@ -592,6 +593,9 @@ spawn_remote_secondmate() {
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
   remote_herdr_session=$(printf '%s\n' "$out" | sed -n 's/^herdr_session=//p' | tail -1)
+  remote_profile_delivery=$(printf '%s\n' "$out" | sed -n 's/^profile_delivery=//p' | tail -1)
+  remote_requested_model=$(printf '%s\n' "$out" | sed -n 's/^requested_model=//p' | tail -1)
+  remote_requested_effort=$(printf '%s\n' "$out" | sed -n 's/^requested_effort=//p' | tail -1)
   remote_model=$(printf '%s\n' "$out" | sed -n 's/^model=//p' | tail -1)
   remote_effort=$(printf '%s\n' "$out" | sed -n 's/^effort=//p' | tail -1)
   if [ "$remote_backend" != herdr ]; then
@@ -615,25 +619,27 @@ spawn_remote_secondmate() {
     echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected 'fm-remote'; preserving the remote route for reconciliation" >&2
     return 1
   fi
-  if [ -z "$remote_model" ] || [ -z "$remote_effort" ]; then
+  if [ "$remote_profile_delivery" != fm-spawn.v1 ] \
+    || [ -z "$remote_requested_model" ] || [ -z "$remote_requested_effort" ] \
+    || [ -z "$remote_model" ] || [ -z "$remote_effort" ]; then
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: remote launch returned no actual model or effort; preserving the remote route for reconciliation" >&2
+    echo "error: remote launch returned no verified delivered profile; preserving the remote route for reconciliation" >&2
     return 1
   fi
-  if [ "$model" != - ] && [ "$remote_model" != "$model" ]; then
+  if [ "$model" != - ] && [ "$remote_requested_model" != "$model" ]; then
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: remote secondmate $id is already live with model '$remote_model', not requested model '$model'; live endpoint was not restarted" >&2
+    echo "error: remote secondmate $id is already live with model '$remote_requested_model', not requested model '$model'; live endpoint was not restarted" >&2
     return 1
   fi
-  if [ "$effort" != - ] && [ "$remote_effort" != "$effort" ]; then
+  if [ "$effort" != - ] && [ "$remote_requested_effort" != "$effort" ]; then
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: remote secondmate $id is already live with effort '$remote_effort', not requested effort '$effort'; live endpoint was not restarted" >&2
+    echo "error: remote secondmate $id is already live with effort '$remote_requested_effort', not requested effort '$effort'; live endpoint was not restarted" >&2
     return 1
   fi
   remote_recorded_model=$remote_model
@@ -661,6 +667,9 @@ spawn_remote_secondmate() {
     echo "tasktmp="
     echo "model=$remote_recorded_model"
     echo "effort=$remote_recorded_effort"
+    echo "profile_delivery=$remote_profile_delivery"
+    echo "delivered_model=$remote_model"
+    echo "delivered_effort=$remote_effort"
     echo "home=$home"
     echo "projects=$(secondmate_registry_field "$DATA/secondmates.md" "$id" projects)"
     echo "remote_host=$host"
@@ -2656,6 +2665,13 @@ elif [ "$KIND" = scout ]; then
   YOLO=
 fi
 
+MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
+EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+DELIVERED_MODEL=default
+DELIVERED_EFFORT=default
+[ -z "$MODELFLAG" ] || DELIVERED_MODEL=${MODEL:-default}
+[ -z "$EFFORTFLAG" ] || DELIVERED_EFFORT=${EFFORT:-default}
+
 # Resolve the optional default-off W3C trace context (bin/fm-trace-context-lib.sh,
 # docs/configuration.md): the one carrier both recorded in meta and injected into
 # the pane, so an observer reads exactly what the child receives. Empty only when
@@ -2779,8 +2795,6 @@ sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
-MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
@@ -2880,6 +2894,13 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$RAW_LAUNCH" -eq 0 ]; then
+  {
+    echo "profile_delivery=fm-spawn.v1"
+    echo "delivered_model=$DELIVERED_MODEL"
+    echo "delivered_effort=$DELIVERED_EFFORT"
+  } >> "$STATE/$ID.meta"
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"

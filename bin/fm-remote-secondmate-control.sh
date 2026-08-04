@@ -41,6 +41,7 @@ TARGET_HOME=${FM_HOME:?FM_HOME is required}
 CONTROL_STATE="$TARGET_HOME/state/parent-route"
 CONTROL_DATA="$TARGET_HOME/data/.parent-route"
 REMOTE_HERDR_SESSION=fm-remote
+REMOTE_PROFILE_DELIVERY=fm-spawn.v1
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
@@ -96,6 +97,28 @@ remote_endpoint_require() {
   remote_endpoint_load "$1" || die "$REMOTE_ENDPOINT_ERROR"
 }
 
+remote_profile_load() {
+  local id=$1 profile_delivery
+  REMOTE_PROFILE_ERROR=
+  profile_delivery=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" profile_delivery 2>/dev/null || true)
+  if [ "$profile_delivery" != "$REMOTE_PROFILE_DELIVERY" ]; then
+    REMOTE_PROFILE_ERROR="remote secondmate $id delivered profile is unproven; refusing access until the endpoint is explicitly refreshed"
+    return 1
+  fi
+  if ! REMOTE_REQUESTED_MODEL=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" model 2>/dev/null) \
+    || ! REMOTE_REQUESTED_EFFORT=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" effort 2>/dev/null) \
+    || ! REMOTE_DELIVERED_MODEL=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" delivered_model 2>/dev/null) \
+    || ! REMOTE_DELIVERED_EFFORT=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" delivered_effort 2>/dev/null); then
+    REMOTE_PROFILE_ERROR="remote secondmate $id delivered profile metadata is invalid; refusing access until the endpoint is explicitly refreshed"
+    return 1
+  fi
+}
+
+remote_endpoint_require_profile() {
+  remote_endpoint_require "$1"
+  remote_profile_load "$1" || die "$REMOTE_PROFILE_ERROR"
+}
+
 state_value() { # <id>; prints recovery-grade state
   local id=$1 meta
   meta=$(meta_path "$id")
@@ -105,23 +128,29 @@ state_value() { # <id>; prints recovery-grade state
     printf 'unverified\n'
     return 0
   fi
+  if ! remote_profile_load "$id"; then
+    printf 'error: %s\n' "$REMOTE_PROFILE_ERROR" >&2
+    printf 'unverified\n'
+    return 0
+  fi
   fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n'
 }
 
 print_route() { # <id>
-  local id=$1 harness model effort traceparent
-  remote_endpoint_require "$id"
+  local id=$1 harness traceparent
+  remote_endpoint_require_profile "$id"
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
-  model=$(fm_meta_get "$REMOTE_ENDPOINT_META" model)
-  effort=$(fm_meta_get "$REMOTE_ENDPOINT_META" effort)
   traceparent=$(fm_meta_get "$REMOTE_ENDPOINT_META" traceparent)
   printf 'schema=fm-remote-secondmate-control.v1\n'
   printf 'backend=%s\n' "$REMOTE_ENDPOINT_BACKEND"
   printf 'target=%s\n' "$REMOTE_ENDPOINT_TARGET"
   printf 'herdr_session=%s\n' "$REMOTE_HERDR_SESSION"
   printf 'harness=%s\n' "$harness"
-  printf 'model=%s\n' "$model"
-  printf 'effort=%s\n' "$effort"
+  printf 'profile_delivery=%s\n' "$REMOTE_PROFILE_DELIVERY"
+  printf 'requested_model=%s\n' "$REMOTE_REQUESTED_MODEL"
+  printf 'requested_effort=%s\n' "$REMOTE_REQUESTED_EFFORT"
+  printf 'model=%s\n' "$REMOTE_DELIVERED_MODEL"
+  printf 'effort=%s\n' "$REMOTE_DELIVERED_EFFORT"
   [ -z "$traceparent" ] || printf 'traceparent=%s\n' "$traceparent"
 }
 
@@ -202,7 +231,7 @@ cmd_send() {
   local id=$1 message=$2
   validate_id "$id"
   validate_home "$id"
-  remote_endpoint_require "$id"
+  remote_endpoint_require_profile "$id"
   FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
     "$SCRIPT_DIR/fm-send.sh" "$REMOTE_ENDPOINT_TARGET" "$message"
 }
@@ -211,7 +240,7 @@ cmd_key() {
   local id=$1 key=$2
   validate_id "$id"
   validate_home "$id"
-  remote_endpoint_require "$id"
+  remote_endpoint_require_profile "$id"
   FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
     "$SCRIPT_DIR/fm-send.sh" "$REMOTE_ENDPOINT_TARGET" --key "$key"
 }
@@ -222,7 +251,7 @@ cmd_capture() {
   validate_home "$id"
   case "$lines" in ''|*[!0-9]*|0) die "capture line count must be positive" ;; esac
   [ "$lines" -le 100 ] || die "capture line count exceeds 100"
-  remote_endpoint_require "$id"
+  remote_endpoint_require_profile "$id"
   fm_backend_capture "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$lines" "fm-$id" | head -c 65536
 }
 
@@ -230,7 +259,7 @@ cmd_observe() {
   local id=$1 harness
   validate_id "$id"
   validate_home "$id"
-  remote_endpoint_require "$id"
+  remote_endpoint_require_profile "$id"
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
   fm_pending_reply_backend_observation "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "fm-$id" "$harness"
   printf '\n'
@@ -288,7 +317,7 @@ cmd_retire() {
     return 0
   fi
   [ -z "$force" ] || [ "$force" = --force ] || usage
-  remote_endpoint_require "$id"
+  remote_endpoint_require_profile "$id"
   FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" "$SCRIPT_DIR/fm-guard.sh" || true
   if [ -n "$force" ]; then
