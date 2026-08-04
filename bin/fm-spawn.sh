@@ -1292,7 +1292,15 @@ try {
   process.exit(2);
 }
 if (!Array.isArray(entries)) process.exit(2);
-process.exit(entries.some((entry) => entry?.path === path && entry?.status === "leased" && entry?.lease_holder === holder) ? 0 : 1);
+const canonical = (value) => {
+  try {
+    return fs.realpathSync(value);
+  } catch {
+    return value;
+  }
+};
+const expectedPath = canonical(path);
+process.exit(entries.some((entry) => canonical(entry?.path) === expectedPath && entry?.status === "leased" && entry?.lease_holder === holder) ? 0 : 1);
 ' "$path" "$ID"
   rc=$?
   set -e

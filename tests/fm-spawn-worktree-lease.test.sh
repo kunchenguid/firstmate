@@ -95,7 +95,7 @@ make_lease_case() {
 }
 
 read_lease_record() {
-  IFS='|' read -r _ HOME_DIR PROJ_DIR WT_DIR BAD_DIR FAKEBIN_DIR THLOG <<EOF
+  IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR BAD_DIR FAKEBIN_DIR THLOG <<EOF
 $1
 EOF
 }
@@ -188,6 +188,28 @@ test_relaunch_reuses_recorded_lease() {
   pass "relaunch reuses the recorded lease with its branch and commits"
 }
 
+test_relaunch_accepts_equivalent_status_path() {
+  local rec id out status linked_wt
+  id="lease-relaunch-symlink-z4"
+  rec=$(make_lease_case lease-relaunch-symlink "$id")
+  read_lease_record "$rec"
+
+  out=$(run_lease_spawn "$id" "$WT_DIR" "$WT_DIR")
+  status=$?
+  expect_code 0 "$status" "initial spawn should acquire the task lease"
+  linked_wt="$CASE_DIR/wt-link"
+  ln -s "$WT_DIR" "$linked_wt"
+
+  out=$(run_lease_spawn "$id" "$linked_wt" "$WT_DIR")
+  status=$?
+  expect_code 0 "$status" "relaunch should accept an equivalent Treehouse status path"
+  [ "$(grep -c "^get --lease --lease-holder $id$" "$THLOG")" -eq 1 ] \
+    || fail "equivalent status path caused a second lease acquisition: $(cat "$THLOG")"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "relaunch did not preserve the canonical leased worktree"
+  pass "relaunch recognizes symlink-equivalent Treehouse lease paths"
+}
+
 test_aborted_relaunch_preserves_recorded_lease() {
   local rec id out status
   id="lease-relaunch-abort-z4"
@@ -275,6 +297,7 @@ test_treehouse_lease_contract_real() {
 test_spawn_leases_worktree_under_task_id
 test_spawn_abort_releases_leased_worktree
 test_relaunch_reuses_recorded_lease
+test_relaunch_accepts_equivalent_status_path
 test_aborted_relaunch_preserves_recorded_lease
 test_treehouse_lease_contract_real
 
