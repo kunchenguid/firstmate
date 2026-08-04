@@ -79,14 +79,7 @@ The unit pins the GPU by UUID with `CUDA_VISIBLE_DEVICES`, loads the CUDA backen
 The server is launched with `--reranking --offline --no-webui --host 127.0.0.1 --port 8081 --ctx-size 4096 --batch-size 512 --ubatch-size 512 --parallel 1 --n-gpu-layers 999`.
 The service uses `Restart=on-failure`, a two-second restart delay, a startup HTTP health probe, journal output, and a 200-message-per-30-second log rate limit.
 
-Configure GBrain with:
-
-```sh
-gbrain config set provider_base_urls.llama-server-reranker http://127.0.0.1:8081/v1
-gbrain config set search.reranker.model llama-server-reranker:qwen3-reranker-0.6b-q8_0
-gbrain config set search.reranker.enabled true
-```
-
+The current GBrain configuration commands are owned by [`gbrain.md`](../gbrain.md).
 The model alias is explicit and does not depend on a serving catalog shorthand.
 
 ## Endpoint checks
@@ -126,6 +119,11 @@ The observed result correctly placed the relevant passage at index 2 first:
   ]
 }
 ```
+
+That 268-token fixture proves the model's ordering behavior only for a short payload.
+At the current physical batch size of 512, representative archive inputs of 878, 1599, and 2868 tokens each returned HTTP 500 with `input ... is too large to process. increase the physical batch size (current batch size: 512)`.
+GBrain's failure log recorded the same response for real requests containing 5 to 26 documents and 724 to 1098 input tokens.
+GBrain still returned retrieval results through its non-reranked fallback, so provider health and a loopback connection do not establish successful archive-sized reranking.
 
 ## GPU, recovery, and privacy evidence
 

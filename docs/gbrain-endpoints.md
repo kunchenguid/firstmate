@@ -21,30 +21,9 @@ Reload and enable the service with `systemctl --user daemon-reload` and `systemc
 Run the health check with `/home/sungin/.local/gbrain-endpoints/bin/check-embedding.sh`.
 The tracked unit owns the boot target, on-failure restart policy, and per-unit journal rate limit.
 
-## GBrain #6 configuration and probe
+## GBrain probe
 
-During story #6, initialize a new PGLite brain with:
-
-```sh
-OLLAMA_BASE_URL=http://127.0.0.1:11434/v1 \
-  gbrain init --pglite \
-  --embedding-model ollama:snowflake-arctic-embed2:568m \
-  --embedding-dimensions 1024
-```
-
-For an existing PGLite brain, use the supported reinitialization path:
-
-```sh
-OLLAMA_BASE_URL=http://127.0.0.1:11434/v1 \
-  gbrain reinit-pglite \
-  --embedding-model ollama:snowflake-arctic-embed2:568m \
-  --embedding-dimensions 1024
-```
-
-Reinitialization backs up and rebuilds the existing PGLite brain, so run it only as part of story #6.
-GBrain does not persist the command-scoped `OLLAMA_BASE_URL` value during initialization or reinitialization.
-Set `OLLAMA_BASE_URL=http://127.0.0.1:11434/v1` for every later GBrain command, including `import`, `embed`, and `search`.
-Without it, GBrain falls back to `http://localhost:11434/v1`, which can miss this IPv4-only listener.
+[`gbrain.md`](gbrain.md) owns the story #6 initialization, configuration, and rebuild commands that consume this endpoint.
 Verify the endpoint directly before initialization:
 
 ```sh

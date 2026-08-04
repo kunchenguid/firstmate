@@ -1,23 +1,44 @@
 # Local GBrain archive
 
-This operator reference owns the Firstmate GBrain archive setup, retrieval boundary, and recovery procedure.
-The local embedding endpoint contract is in [gbrain-endpoints.md](gbrain-endpoints.md), and the empirical installation evidence is in [verification/gbrain-init-retrieval.md](verification/gbrain-init-retrieval.md).
+This operator reference owns the Firstmate GBrain installation, archive setup, retrieval configuration, privacy boundary, and recovery procedure.
+The local embedding endpoint contract is in [gbrain-endpoints.md](gbrain-endpoints.md), the local reranker evidence is in [verification/gbrain-reranker.md](verification/gbrain-reranker.md), and the empirical installation evidence is in [verification/gbrain-init-retrieval.md](verification/gbrain-init-retrieval.md).
 
 ## Operating paths
 
 The pinned GBrain source and executable live under `/home/sungin/.local/gbrain`.
 The PGLite database and index live at `/home/sungin/.local/share/gbrain/pglite`.
 The GBrain runtime configuration lives at `/home/sungin/.local/share/gbrain/runtime/.gbrain` through `GBRAIN_HOME=/home/sungin/.local/share/gbrain/runtime`.
-The canonical markdown archive is the remote-less Git repository at `/home/sungin/.local/share/gbrain/archive`.
+The canonical markdown archive is the remote-less Git repository at `/home/sungin/.local/share/gbrain/archive`, outside both Firstmate project roots and the Firstmate source tree.
 Do not add a third-party Git remote to that archive.
 
 ## Pinned installation and upgrade
 
-The installed GBrain release is `v0.42.69.0`, which is the first release whose tag contains GBrain's native MiniMax chat-touchpoint change for `MiniMax-M3`.
+The installed GBrain release is `v0.42.69.0` at commit `3acd511b80bd4d2fe487290a70de75d4cf094730`, which is the first release whose tag contains GBrain's native MiniMax chat-touchpoint change for `MiniMax-M3`.
 The installation uses GBrain's documented `git clone` plus `bun install` fallback because the tested standalone Linux release binaries did not initialize PGLite correctly.
 The supporting Bun runtime is `1.3.14` at `/home/sungin/.local/gbrain/bin/bun`.
 
 The executable is `/home/sungin/.local/gbrain/bin/gbrain`.
+For a clean source installation with the pinned Bun binary already present, run:
+
+```sh
+mkdir -p /home/sungin/.local/gbrain/{bin,bun-global,cache}
+git clone https://github.com/garrytan/gbrain.git /home/sungin/.local/gbrain/src
+git -C /home/sungin/.local/gbrain/src checkout --detach 3acd511b80bd4d2fe487290a70de75d4cf094730
+cd /home/sungin/.local/gbrain/src
+BUN_INSTALL=/home/sungin/.local/gbrain/bun-global \
+  /home/sungin/.local/gbrain/bin/bun install \
+  --frozen-lockfile --ignore-scripts --cache-dir /home/sungin/.local/gbrain/cache
+BUN_INSTALL=/home/sungin/.local/gbrain/bun-global \
+  /home/sungin/.local/gbrain/bin/bun link
+install -m 0755 /dev/stdin /home/sungin/.local/gbrain/bin/gbrain <<'GBRAIN_LAUNCHER'
+#!/usr/bin/env bash
+set -euo pipefail
+
+exec /home/sungin/.local/gbrain/bin/bun /home/sungin/.local/gbrain/src/src/cli.ts "$@"
+GBRAIN_LAUNCHER
+```
+
+The installed `/home/sungin/.local/gbrain/bin/gbrain` launcher executes `/home/sungin/.local/gbrain/src/src/cli.ts` with the pinned Bun binary, so runtime selection does not depend on a user-global `bun` command.
 Set `PATH=/home/sungin/.local/gbrain/bin:$PATH` for operations that cause GBrain to spawn `gbrain` as a child process, including migrations.
 To upgrade deliberately, select a newer verified GBrain tag, then run:
 
@@ -72,7 +93,10 @@ GBRAIN_HOME=/home/sungin/.local/share/gbrain/runtime \
 ```
 
 The embedding and reranking providers are local only.
-The `models.think` provider is hosted MiniMax synthesis.
+Set `OLLAMA_BASE_URL=http://127.0.0.1:11434/v1` on every command that can embed or query, because GBrain does not persist the command-scoped endpoint and otherwise falls back to `http://localhost:11434/v1`.
+The only configured hosted synthesis provider is `models.think=minimax:MiniMax-M3` through `https://api.minimax.io/v1`.
+The current reranker service passes reachability and short-fixture checks, but its physical batch size of 512 returns HTTP 500 for archive-sized inputs, so GBrain falls back to results that were not reranked as recorded in [verification/gbrain-reranker.md](verification/gbrain-reranker.md).
+Treat archive-sized local reranking as an open deployment blocker rather than a verified retrieval guarantee.
 
 ## MiniMax credential contract and privacy boundary
 
