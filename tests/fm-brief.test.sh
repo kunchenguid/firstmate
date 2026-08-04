@@ -688,6 +688,28 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+test_briefs_cross_reference_lavish_review_surface_policy() {
+  local home ship scout charter
+  home="$TMP_ROOT/lavish-review-policy-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" sample-ship sample --mode no-mistakes >/dev/null 2>&1
+  ship="$home/data/sample-ship/brief.md"
+  assert_grep "$ROOT/.agents/skills/lavish-review-surfaces/SKILL.md" "$ship" \
+    "ship brief did not point to the Lavish subject-first policy"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" sample-scout sample --scout >/dev/null 2>&1
+  scout="$home/data/sample-scout/brief.md"
+  assert_grep "$ROOT/.agents/skills/lavish-review-surfaces/SKILL.md" "$scout" \
+    "scout brief did not point to the Lavish subject-first policy"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SECONDMATE_CHARTER='sample reviews' \
+    "$ROOT/bin/fm-brief.sh" sample-mate --secondmate --no-projects >/dev/null 2>&1
+  charter="$home/data/sample-mate/brief.md"
+  assert_grep "load \`lavish-review-surfaces\`" "$charter" \
+    "secondmate charter did not load the Lavish subject-first policy"
+  pass "fm-brief.sh: every delegated workflow cross-references the Lavish subject-first policy"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -727,4 +749,5 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_briefs_cross_reference_lavish_review_surface_policy
 test_scout_and_secondmate_scaffold
