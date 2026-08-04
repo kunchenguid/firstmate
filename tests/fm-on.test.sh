@@ -15,6 +15,7 @@ trap 'if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then kill "$(cat "$TMP_ROOT/
 LOCAL_HOME="$TMP_ROOT/local-home"
 REMOTE_ROOT="$TMP_ROOT/remote-root"
 REMOTE_HOME="$TMP_ROOT/remote-home"
+TOOL_PROBE_LOG="$TMP_ROOT/tool-probe.log"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/fakebin")
 SSH_LOG="$TMP_ROOT/ssh.log"
 SSH_COUNT="$TMP_ROOT/ssh.count"
@@ -44,6 +45,15 @@ cat > "$REMOTE_ROOT/bin/fm-probe-path.sh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$PATH"
 SH
+cat > "$REMOTE_ROOT/bin/tasks-axi" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\${FM_REMOTE_JOB_ACTIVE:-absent}" >> "$TOOL_PROBE_LOG"
+case "\${1:-}:\${2:-}" in
+  --version:*) printf '0.2.2\n' ;;
+  update:--help) printf '%s\n' --archive-body ;;
+  mv:--help) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...]' ;;
+esac
+SH
 cp "$ROOT/bin/fm-remote-doctor.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" \
   "$ROOT/bin/fm-backend.sh" "$REMOTE_ROOT/bin/"
 mkdir -p "$REMOTE_ROOT/bin/backends"
@@ -53,6 +63,7 @@ cat > "$REMOTE_ROOT/bin/fm-mutate.sh" <<'SH'
 printf 'mutation\n' >> "$1"
 SH
 chmod +x "$REMOTE_ROOT/bin"/*.sh
+chmod +x "$REMOTE_ROOT/bin/tasks-axi"
 git -C "$REMOTE_ROOT" init -q -b main
 git -C "$REMOTE_ROOT" config user.email test@example.com
 git -C "$REMOTE_ROOT" config user.name Test
@@ -225,6 +236,15 @@ assert_contains "$out" 'required git=' "the remote doctor did not report the req
 pass "the remote doctor reports the same PATH the entrypoint hands its children"
 
 fm_on ios fm-probe-two.sh >/dev/null
+: > "$TOOL_PROBE_LOG"
+set +e
+out=$(fm_on ios fm-remote-doctor.sh 2>&1)
+set -e
+assert_contains "$out" 'check remote-job-probe=ok: the remote job worker completed the required-tool probe' \
+  "the doctor did not use a completed worker probe for tool readiness"
+assert_grep '1' "$TOOL_PROBE_LOG" "the required-tool probe did not execute inside the worker"
+assert_not_contains "$(cat "$TOOL_PROBE_LOG")" absent "the bootstrap process probed required tools locally"
+pass "the remote doctor derives tool readiness from the installed worker"
 
 DOCTOR_BIN="$TMP_ROOT/doctor-bin"
 DOCTOR_HOME="$TMP_ROOT/doctor-home"
@@ -324,6 +344,37 @@ assert_contains "$out" 'command is not tracked by the configured remote root' "t
 [ "$(wc -l < "$GIT_SHADOW_LOG" | tr -d ' ')" -eq 1 ] \
   || fail "the tracked-command authorization consulted checkout-local git"
 pass "tracked-command authorization excludes checkout-local git"
+
+set +e
+out=$(
+  command() {
+    if [ "${1:-}" = -v ] && [ "${2:-}" = git ]; then return 1; fi
+    builtin command "$@"
+  }
+  export -f command
+  fm_on ios fm-remote-doctor.sh 2>&1
+)
+set -e
+assert_contains "$out" 'mode=check' "the trusted doctor could not bootstrap while git was unavailable"
+printf '\n' >> "$REMOTE_ROOT/bin/fm-remote-doctor.sh"
+set +e
+out=$(
+  command() {
+    if [ "${1:-}" = -v ] && [ "${2:-}" = git ]; then return 1; fi
+    builtin command "$@"
+  }
+  export -f command
+  fm_on ios fm-remote-doctor.sh 2>&1
+)
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "an altered doctor bootstrapped without tracked-command validation"
+assert_contains "$out" 'doctor does not match the trusted bootstrap identity' \
+  "an altered doctor did not fail closed when git was unavailable"
+cp "$ROOT/bin/fm-remote-doctor.sh" "$REMOTE_ROOT/bin/fm-remote-doctor.sh"
+chmod +x "$REMOTE_ROOT/bin/fm-remote-doctor.sh"
+pass "doctor bootstrap remains authenticated when git is unavailable"
+
 if FM_HOME="$LOCAL_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_SSH_BIN="$FAKEBIN/fake-ssh" \
   "$ROOT/bin/fm-on.sh" '-oProxyCommand=bad' fm-probe-two.sh >/dev/null 2>&1; then
   fail "an option-shaped SSH route was accepted"

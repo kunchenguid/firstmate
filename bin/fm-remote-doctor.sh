@@ -75,6 +75,11 @@ MODE=check
 case "${1:-}" in
   '') ;;
   --fix) MODE=fix; shift ;;
+  --worker-tool-probe)
+    [ "${FM_REMOTE_JOB_ACTIVE:-}" = 1 ] || { printf 'error: worker tool probe requires the remote job worker\n' >&2; exit 64; }
+    MODE=worker-tool-probe
+    shift
+    ;;
   *) usage ;;
 esac
 [ "$#" -eq 0 ] || usage
@@ -107,6 +112,19 @@ check_value() { # <name>; prints the recorded value, empty when unrecorded
 check_is_ok() { # <name>
   case "$(check_value "$1" 2>/dev/null || true)" in ok:*) return 0 ;; esac
   return 1
+}
+
+set_check() { # <name> <value> [operator-action]
+  local i=0
+  while [ "$i" -lt "${#CHECK_NAMES[@]}" ]; do
+    if [ "${CHECK_NAMES[$i]}" = "$1" ]; then
+      CHECK_VALUES[$i]=$2
+      CHECK_ACTIONS[$i]=${3:-}
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  record "$@"
 }
 
 herdr_cli_available() {
@@ -272,7 +290,7 @@ check_remote_job_worker() {
     fi
   fi
   if remote_job_probe_ok; then
-    record remote-job-probe "ok: the remote job worker executed this runtime environment"
+    record remote-job-probe "ok: the remote job worker published a fresh heartbeat"
   else
     record remote-job-probe "fixable: the remote job worker has not reported a fresh probe" \
       "rerun this command with --fix to restart the worker, then rerun through fm-on.sh"
@@ -305,6 +323,52 @@ report_required_tools() {
   done
   printf 'required harness=MISSING\n'
   MISSING+=(harness)
+}
+
+report_required_tools_from_worker() {
+  local job_id probe_stdout probe_stderr probe_exit line fact name value
+  local expected=6 count=0 valid=1 seen=' '
+  if ! job_id=$(fm_remote_job_stage "${HOME:-}" "$FM_ROOT" "${FM_HOME:-}" \
+    fm-remote-doctor.sh --worker-tool-probe </dev/null); then
+    set_check remote-job-probe "fixable: the remote job worker could not accept the required-tool probe" \
+      "rerun this command with --fix to restart the worker"
+    report_required_tools
+    return 0
+  fi
+  if ! fm_remote_job_wait "${HOME:-}" "$job_id"; then
+    fm_remote_job_reap "${HOME:-}" "$job_id" 2>/dev/null || true
+    set_check remote-job-probe "fixable: the remote job worker did not complete the required-tool probe" \
+      "rerun this command with --fix to restart the worker"
+    report_required_tools
+    return 0
+  fi
+  probe_stdout=$FM_REMOTE_JOB_STDOUT
+  probe_stderr=$FM_REMOTE_JOB_STDERR
+  probe_exit=$FM_REMOTE_JOB_EXIT
+  MISSING=()
+  while IFS= read -r line; do
+    case "$line" in required\ *=*) ;; *) valid=0; continue ;; esac
+    fact=${line#required }
+    name=${fact%%=*}
+    value=${fact#*=}
+    case "$name" in git|jq|herdr|tasks-axi|treehouse|harness) ;; *) valid=0; continue ;; esac
+    case "$seen" in *" $name "*) valid=0; continue ;; esac
+    seen="$seen$name "
+    count=$((count + 1))
+    case "$value" in MISSING*) MISSING+=("$name") ;; '') valid=0 ;; esac
+  done < "$probe_stdout"
+  [ "$count" -eq "$expected" ] || valid=0
+  [ ! -s "$probe_stderr" ] || valid=0
+  case "$probe_exit:${#MISSING[@]}" in 0:0|1:[1-9]*) ;; *) valid=0 ;; esac
+  if [ "$valid" -eq 1 ]; then
+    cat "$probe_stdout"
+    set_check remote-job-probe "ok: the remote job worker completed the required-tool probe"
+  else
+    set_check remote-job-probe "fixable: the remote job worker returned an invalid required-tool probe result" \
+      "rerun this command with --fix to restart the worker"
+    report_required_tools
+  fi
+  fm_remote_job_reap "${HOME:-}" "$job_id" 2>/dev/null || true
 }
 
 wrapper_is_firstmate_owned() { # <path>
@@ -658,6 +722,12 @@ apply_fixes() {
 
 # --- report -----------------------------------------------------------------
 
+if [ "$MODE" = worker-tool-probe ]; then
+  report_required_tools
+  [ "${#MISSING[@]}" -eq 0 ]
+  exit
+fi
+
 printf 'mode=%s\n' "$MODE"
 printf 'path=%s\n' "${PATH:-}"
 if [ -n "${FM_ROOT_OVERRIDE:-}" ] && [ "${PATH%%:*}" = "$FM_ROOT_OVERRIDE/bin" ]; then
@@ -676,7 +746,11 @@ if [ "$MODE" = fix ]; then
   run_checks
 fi
 
-report_required_tools
+if [ "${FM_REMOTE_JOB_ACTIVE:-}" = 1 ] || ! remote_job_probe_ok; then
+  report_required_tools
+else
+  report_required_tools_from_worker
+fi
 for tool in "${OPTIONAL_TOOLS[@]}"; do
   if resolved=$(command -v "$tool" 2>/dev/null); then
     printf 'optional %s=%s\n' "$tool" "$resolved"

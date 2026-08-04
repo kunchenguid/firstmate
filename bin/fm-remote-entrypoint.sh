@@ -22,6 +22,7 @@
 set -eu
 
 PROTOCOL=1
+DOCTOR_SHA256=30fd4a3ef758848ec3faff01c106354c1fc0db6696cdcb3ea2f85c5bb9725d45
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 
 # shellcheck source=bin/fm-remote-job-lib.sh
@@ -49,6 +50,22 @@ path_is_ancestor() { # <ancestor> <path>
   [ "$1" != "$2" ] || return 1
   case "$2" in "$1"/*) return 0 ;; esac
   return 1
+}
+
+sha256_file() { # <path>
+  local path=$1 digest extra
+  if [ -x /usr/bin/shasum ]; then
+    read -r digest extra < <(/usr/bin/shasum -a 256 "$path") || return 1
+  elif [ -x /usr/bin/sha256sum ]; then
+    read -r digest extra < <(/usr/bin/sha256sum "$path") || return 1
+  elif [ -x /bin/sha256sum ]; then
+    read -r digest extra < <(/bin/sha256sum "$path") || return 1
+  else
+    return 1
+  fi
+  case "$digest" in *[!0-9a-f]*|'') return 1 ;; esac
+  [ "${#digest}" -eq 64 ] || return 1
+  printf '%s\n' "$digest"
 }
 
 [ "$#" -eq 4 ] || die "remote entrypoint expects protocol, root, home, and argv"
@@ -81,6 +98,18 @@ COMMAND_PATH="$ROOT/bin/$COMMAND"
 unset HOME
 ACCOUNT_HOME=$(CDPATH='' cd ~ 2>/dev/null && pwd -P) || die "cannot resolve the remote account home"
 fm_remote_job_compose_operator_path "$ACCOUNT_HOME" >/dev/null
+GIT_BIN=$(fm_remote_job_operator_tool git 2>/dev/null || true)
+if [ -n "$GIT_BIN" ]; then
+  "$GIT_BIN" -C "$ROOT" ls-files --error-unmatch "bin/$COMMAND" >/dev/null 2>&1 \
+    || die "command is not tracked by the configured remote root: $COMMAND"
+elif [ "$COMMAND" = fm-remote-doctor.sh ]; then
+  ACTUAL_DOCTOR_SHA256=$(sha256_file "$COMMAND_PATH") \
+    || die "required tool git is unavailable and the doctor bootstrap identity cannot be verified"
+  [ "$ACTUAL_DOCTOR_SHA256" = "$DOCTOR_SHA256" ] \
+    || die "required tool git is unavailable and the doctor does not match the trusted bootstrap identity"
+else
+  die "required tool git does not resolve on the remote operator PATH; install git there or put a wrapper for it in ~/.local/bin using the recipe in docs/remote-secondmates.md"
+fi
 if [ "$COMMAND" = fm-remote-doctor.sh ]; then
   fm_remote_job_build_child_path "$ROOT" >/dev/null
   DOCTOR_ENV=(
@@ -101,10 +130,6 @@ if [ "$COMMAND" = fm-remote-doctor.sh ]; then
   rm -rf -- "$TMP"
   exec "${DOCTOR_ENV[@]}" "$COMMAND_PATH" "${ARGV[@]:1}"
 fi
-GIT_BIN=$(fm_remote_job_operator_tool git 2>/dev/null || true)
-[ -n "$GIT_BIN" ] || die "required tool git does not resolve on the remote operator PATH; install git there or put a wrapper for it in ~/.local/bin using the recipe in docs/remote-secondmates.md"
-"$GIT_BIN" -C "$ROOT" ls-files --error-unmatch "bin/$COMMAND" >/dev/null 2>&1 \
-  || die "command is not tracked by the configured remote root: $COMMAND"
 
 if ! fm_remote_job_ensure_worker "$ROOT" "$ACCOUNT_HOME"; then
   die "${FM_REMOTE_JOB_ERROR:-remote job worker is unavailable; run fm-on.sh <route> fm-remote-doctor.sh --fix}"
