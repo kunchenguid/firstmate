@@ -36,14 +36,15 @@ Database `✅ Tasks (Тактический уровень)`, id `4163a7f3-7122-
 
 | Property | Values that matter here |
 |---|---|
-| `Status` | `Новая`, `В работе`, `На ревью`, `Тест`, `Завершена`, `Отложена`, `♻️ Свободна` |
+| `Status` | `Новая`, `В работе`, `На ревью`, `Тест`, `Завершена`, `Отложена`, `♻️ Пул` |
 | `Stream` | `Маркетинг`, `Продажи`, `Деливери`, `Финансы`, `Лигал` |
 | `Sprint` | `🏃 Текущий спринт`, `⏭️ Следующий спринт`, `📋 Бэклог` |
 | `Priority` | `Низкий`, `Средний`, `Высокий` |
 | `Tags` | `Bug`, `Feature`, `Enhancement`, `Documentation` |
 
 `Name` is the title, `Description` is free text, and `Related Stream` relates to the strategic Project Streams data source.
-`♻️ Свободна` is the recycle pool and is added once through `update_data_source`; every other option is the captain's and is never edited.
+`♻️ Пул` is the recycle pool, already present in the schema; every other option is the captain's and is never edited.
+It is deliberately the one `Status` value that describes the CARD rather than the task - a card sitting in the pool holds no task at all.
 
 The board sweep, the one rate-limited call per cycle:
 
@@ -125,11 +126,11 @@ Order is strict and never reversed:
 1. Append the task's line to `🗄️ Архив задач`.
 2. Re-read that page and confirm the line is actually there.
 3. `bin/fm-notion-link.sh --archive <task-id>` - retires `notion_page=` to `notion_page_archived=`, so no later wake can push a status into a card that is about to belong to someone else.
-4. Only now clear the card: `replace_content` the body to empty, set `Name` to `♻️ (свободна)`, clear `Priority`, `Tags`, `Due Date`, and `Assignee`, set `Sprint` to `📋 Бэклог` and `Status` to `♻️ Свободна`.
+4. Only now clear the card: `replace_content` the body to empty, set `Name` to `♻️ (пустая карточка)`, clear `Priority`, `Tags`, `Due Date`, and `Assignee`, set `Sprint` to `📋 Бэклог` and `Status` to `♻️ Пул`.
 
 Losing the archive line loses the only record of the work, so a failure at step 1 or 2 stops the recycle with the card untouched.
 
-When any new card is needed, take one from `♻️ Свободна` first and create a page only when the pool is empty.
+When any new card is needed, take one from `♻️ Пул` first and create a page only when the pool is empty.
 Recycle only what is genuinely finished: `Завершена` set by the captain, or a card the captain explicitly retired.
 Never recycle `Тест` - the captain has not confirmed it yet.
 
