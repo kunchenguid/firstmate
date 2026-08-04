@@ -62,13 +62,13 @@ An explicit raw `session:pane` target remains a pane-existence-only operator esc
 
 Zellij's CLI action commands return exit 0 even for missing sessions or panes.
 The adapter therefore verifies session, terminal pane, and expected title before an operation and validates JSON or integer response shapes afterward.
-A pane can still disappear between verification and the operation; downstream submit, worktree-discovery, and stale detection report that narrow race rather than treating exit 0 as success.
+A pane can still disappear between verification and the operation; downstream submit, worktree-settlement verification, and stale detection report that narrow race rather than treating exit 0 as success.
 
 Every pane operation passes an explicit `--pane-id` because a new session can focus its release-notes plugin pane, whose numeric plugin id is in a separate namespace from terminal pane ids.
 
-`pane_cwd` follows a top-level shell `cd` but not the foreground subshell opened by `treehouse get`.
-Worktree discovery therefore sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines.
-This active probe is scoped to spawn-time worktree discovery and is not advertised as a general live-cwd API.
+`treehouse get --lease` returns the reserved worktree path without opening a subshell, and spawn explicitly changes the pane's top-level shell to that path.
+Settlement verification sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines instead of trusting Zellij's fallible structured cwd reporting.
+This active probe is scoped to spawn-time worktree settlement and is not advertised as a general live-cwd API.
 
 `new-tab` has no no-focus flag and temporarily focuses the created tab in attached clients.
 The adapter records the previously active tab and immediately restores it with `go-to-tab-by-id`.
@@ -96,7 +96,7 @@ Real test cleanup uses only an isolated non-`firstmate` session and the guard in
 - There is no verified agent-process liveness signal, so a dead Zellij secondmate is reported inconclusive rather than auto-respawned.
 - New-tab focus restoration has a narrow visible race.
 - CLI exit status is not meaningful; a target can still disappear after structural readiness checks.
-- Worktree cwd discovery requires the spawn-time marker probe.
+- Worktree cwd settlement requires the spawn-time marker probe.
 - An ambiguous unscoped legacy title requires manual cleanup and respawn.
 
 ## Regression entry points

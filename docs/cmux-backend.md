@@ -87,8 +87,8 @@ A genuinely fresh surface returns an internal error from `read-screen` until som
 Target readiness therefore uses the structural `list-panes` response instead of a content read.
 Capture remains bounded and locally trimmed after `read-screen` becomes available.
 
-`current_directory` follows a top-level shell `cd` but not the foreground subshell opened by `treehouse get`.
-Spawn-time worktree discovery sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines.
+`treehouse get --lease` returns the reserved worktree path without opening a subshell, and spawn explicitly changes the surface's top-level shell to that path.
+Spawn-time settlement verification sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines instead of trusting cmux's fallible structured cwd reporting.
 
 Literal send and Enter are separate calls.
 Enter, Escape, and Ctrl-C are supported.

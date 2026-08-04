@@ -109,9 +109,9 @@ pass "real cmux: current_path reads the surface's live cwd after a direct cd"
 # get` does). Verified real finding (docs/cmux-backend.md finding #2):
 # current_directory stays frozen at wherever the surface's shell was when it
 # launched the subshell as a foreground command - it never follows the
-# subshell's own cd. fm_backend_cmux_current_path's active pwd-probe is what
-# fm-spawn.sh's worktree-discovery poll actually depends on, so this must be
-# proven against a real subshell, not just a plain cd in the top-level shell.
+# subshell's own cd. fm_backend_cmux_current_path's active pwd-probe also
+# promises the live cwd when a foreground subshell takes over, so retain real
+# coverage beyond the direct spawn-time cd.
 fm_backend_cmux_send_text_line "$TARGET" 'cd / && bash'
 sleep 0.5
 fm_backend_cmux_send_text_line "$TARGET" "cd /private/tmp"

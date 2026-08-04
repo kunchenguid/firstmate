@@ -696,8 +696,9 @@ spawn_abort_cleanup() {
     fi
   fi
   # Release a task-worktree lease acquired by this aborting spawn so a failed
-  # launch never leaks a reserved pool slot. Only fires before the task is
-  # recorded (success clears the flag); mirrors the leased-home rollback path.
+  # launch does not silently leak a reserved pool slot. Only fires before the
+  # task is recorded (success clears the flag); a failed return warns that the
+  # lease may still be held. Mirrors the leased-home rollback path.
   if [ "$TREEHOUSE_LEASE_ABORT_CLEANUP" = 1 ] && [ -n "$LEASED_WT" ]; then
     TREEHOUSE_LEASE_ABORT_CLEANUP=0
     ( cd "$PROJ_ABS" && treehouse return --force "$LEASED_WT" ) >/dev/null 2>&1 \

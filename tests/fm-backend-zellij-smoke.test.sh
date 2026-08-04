@@ -145,9 +145,8 @@ pass "real zellij: current_path reconstructs a long cwd that can wrap in the ter
 # at wherever the pane's shell was when it launched the subshell as a
 # foreground command - it never follows the subshell's own cd, even once
 # that subshell is fully interactive. fm_backend_zellij_current_path's active
-# pwd-probe (docs/zellij-backend.md) is what fm-spawn.sh's worktree-discovery
-# poll actually depends on, so this must be proven against a real subshell,
-# not just a plain cd in the pane's own top-level shell (the case above).
+# pwd-probe (docs/zellij-backend.md) also promises the live cwd when a foreground
+# subshell takes over, so retain real coverage beyond the direct spawn-time cd.
 fm_backend_zellij_send_text_line "$TARGET" 'cd / && bash'
 sleep 0.5
 fm_backend_zellij_send_text_line "$TARGET" "cd $TMP_CWD_Q"
