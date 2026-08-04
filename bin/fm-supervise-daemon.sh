@@ -42,8 +42,12 @@
 #     routine is escalated.
 #   - Bounded wedge latency: a stale pane without a declared external wait is
 #     escalated only after it has been idle for STALE_ESCALATE_SECS
-#     (configurable), rechecked once. A wedged crewmate is therefore detected
-#     within STALE_ESCALATE_SECS + a tick, never lost. A declared pause instead
+#     (configurable), rechecked once, and only when that recheck finds no fresh
+#     evidence the crew is still working (stale_wedge_defers below; a crew
+#     blocked on a long foreground pipeline step renders an idle pane while its
+#     run is genuinely active). A crew that is actually stopped is therefore
+#     still detected within STALE_ESCALATE_SECS + a tick, never lost, while a
+#     working one defers a window at a time. A declared pause instead
 #     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
@@ -90,6 +94,12 @@
 #                                   as a possible wedge (default 240)
 #          FM_PAUSE_RESURFACE_SECS  idle seconds before a declared external wait
 #                                   re-surfaces as a recheck (default 3600)
+#          FM_WEDGE_ACTIVITY_DEFER_MAX
+#                                   consecutive wedge escalations a working
+#                                   status row alone may defer before the alarm
+#                                   fires anyway; 0 disables status-row-only
+#                                   deferral (default 3, owned by
+#                                   bin/fm-classify-lib.sh)
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
 #                                   digests; 0 = flush immediately (default 90)
 #          FM_HEARTBEAT_SCAN_SECS   cadence for the catch-all status scan
@@ -471,7 +481,8 @@ clear_pause_tracking() {  # <window> <state>
   watcher_key=$(_stale_key "$win")
   rm -f "$state/.subsuper-paused-$key" "$state/.subsuper-stale-$key" \
     "$state/.paused-$watcher_key" "$state/.paused-rechecked-$watcher_key" "$state/.paused-resurfaced-$watcher_key" \
-    "$state/.stale-$watcher_key" "$state/.stale-since-$watcher_key" "$state/.wedge-escalations-$watcher_key"
+    "$state/.stale-$watcher_key" "$state/.stale-since-$watcher_key" \
+    "$state/.wedge-escalations-$watcher_key" "$state/.wedge-deferrals-$watcher_key"
 }
 
 reconcile_pause_tracking() {  # <window> <state> <last-status-line>
@@ -628,6 +639,24 @@ stale_window_is_busy() {  # <window> <state>
   tail40=$(fm_backend_capture "$backend" "$win" 40 "$label" 2>/dev/null) || return 2
   verdict=$(fm_busy_classify "$backend" "$win" "$harness" "$task" "$state" "$tail40")
   [ "${verdict%% *}" = busy ]
+}
+
+# stale_wedge_defers: 0 when a not-busy stale window still shows FRESH evidence
+# it is working, so the persistence recheck must defer instead of escalating a
+# possible wedge. The semantic busy contract above answers "is the harness
+# mid-turn", which reads idle for a crew blocked on a long foreground pipeline
+# step - the exact shape that produced repeated false wedge alarms for healthy
+# crews. bin/fm-classify-lib.sh's crew_wedge_defer is the one owner of what
+# counts as evidence and of the bound on rendered-status-row deferrals, shared
+# with the always-on watcher so both supervisors decide identically. Prints the
+# deciding evidence token for the caller's log.
+stale_wedge_defers() {  # <window> <state>
+  local win=$1 state=$2 backend label task tail40
+  task=$(window_to_task "$win" "$state")
+  backend=$(task_window_backend "$win" "$state")
+  label="fm-$task"
+  tail40=$(fm_backend_capture "$backend" "$win" 40 "$label" 2>/dev/null) || tail40=''
+  crew_wedge_defer "$task" "$tail40" "$state/.wedge-deferrals-$(_stale_key "$win")"
 }
 
 escalate_add() {  # <state> <distilled-item>
@@ -957,7 +986,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs evidence
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -1014,7 +1043,14 @@ housekeeping() {  # <state>
     case "$?" in
       0) rm -f "$marker" ;;
       2) rm -f "$marker" ;;
-      *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
+      *) if evidence=$(stale_wedge_defers "$win" "$state"); then
+           # Still demonstrably working; restart the persistence clock so the
+           # next recheck is a full window away rather than every tick.
+           _now > "$marker"
+           log "stale recheck deferred (${age}s, evidence: $evidence): $win"
+           continue
+         fi
+         escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
          stale_marker_remove "$win" "$state" ;;
     esac
   done

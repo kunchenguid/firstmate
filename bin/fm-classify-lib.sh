@@ -363,6 +363,120 @@ crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
 }
 
+# --- wedge-escalation evidence ----------------------------------------------
+#
+# A stale pane is CLASSIFIED once, on the first sighting of a distinct pane
+# hash, and then aged toward a "possible wedge" escalation by a timer its
+# consumer owns. Both supervisors used to escalate purely because that timer
+# expired, without ever asking again. A crew deliberately waiting on a long
+# no-mistakes step renders nothing for minutes, so it kept tripping the wedge
+# alarm while `no-mistakes axi status` reported the run genuinely active
+# seconds earlier - a false alarm that costs a whole supervision turn to
+# triage by hand, repeatedly observed on claude/tmux and herdr alike.
+#
+# crew_wedge_evidence is the ONE owner of "is there FRESH positive evidence
+# this crew is still working, read at the moment an escalation would fire".
+# It is deliberately separate from crew_is_provably_working, which answers the
+# cheaper first-sighting question; this one is the re-confirmation gate. Like
+# crew_absorb_class it is NOT a pure read, so consumers call it only when an
+# escalation is actually due - never per poll. Deferring resets the consumer's
+# timer, so the cost recurs at most once per escalation window per pane.
+#
+# Tokens, strongest first:
+#   run       the pipeline itself reports an actively-running step, or the
+#             harness reports an exact busy verdict (crew_absorb_class
+#             `working`). Authoritative: work is provably in flight, so this
+#             defers an escalation without a count bound.
+#   activity  the crew's rendered status row still shows work in flight - a
+#             background-shell count, or an in-progress/elapsed working row.
+#             Corroborating only, because it is vendor-rendered text, so
+#             crew_wedge_defer bounds how long it may hold the alarm off.
+#   none      no evidence: the escalation fires exactly as before.
+#
+# This is a false-positive fix, never a detection removal: with no active run
+# and no working status row, an idle pane escalates on the unchanged schedule.
+
+# The rendered status-row signatures that count as `activity`. Two independent
+# renderings, either of which carries the verdict on its own, so no single
+# vendor string is load-bearing: a still-running background shell/tool count,
+# and an in-progress elapsed-work row. FM_CLASSIFY_WORK_ROW_RE replaces the
+# whole set for a home whose harness renders something else.
+FM_CLASSIFY_WORK_ROW_RE_DEFAULT='[0-9]+[[:space:]]+(background[[:space:]]+)?(shell|bash|command|task|tool)s?[[:space:]]+(still[[:space:]]+)?running|(worked|working|crunched|crunching|thinking|running|building|compiling)[[:space:]]+for[[:space:]]+[0-9]'
+# How many trailing non-blank lines count as the status row. Scoped to the TUI
+# footer area, the same discipline the busy contract applies, so matching prose
+# anywhere in displayed scrollback can never suppress a wedge escalation.
+FM_CLASSIFY_WORK_ROW_LINES_DEFAULT=6
+
+# 0 when the footer area of a captured pane tail (read on stdin) still renders
+# work in flight. Pure: no state, no subprocess beyond the pipeline itself.
+status_row_shows_work() {
+  grep -v '^[[:space:]]*$' \
+    | tail -"${FM_CLASSIFY_WORK_ROW_LINES:-$FM_CLASSIFY_WORK_ROW_LINES_DEFAULT}" \
+    | grep -qiE "${FM_CLASSIFY_WORK_ROW_RE:-$FM_CLASSIFY_WORK_ROW_RE_DEFAULT}"
+}
+
+crew_wedge_evidence() {  # <id> [pane-tail]
+  local id=$1 tail=${2-}
+  [ -n "$id" ] || { printf 'none'; return; }
+  if [ "$(crew_absorb_class "$id")" = working ]; then
+    printf 'run'
+    return
+  fi
+  if [ -n "$tail" ] && printf '%s\n' "$tail" | status_row_shows_work; then
+    printf 'activity'
+    return
+  fi
+  printf 'none'
+}
+
+# Consecutive escalations that `activity` evidence alone may defer for one pane
+# before the alarm fires anyway. Rendered text is corroborating, not
+# authoritative, so a frozen status row must not silence a genuine wedge
+# forever. 0 disables activity-only deferral entirely; `run` evidence is never
+# subject to this bound.
+FM_WEDGE_ACTIVITY_DEFER_MAX_DEFAULT=3
+
+# crew_wedge_defer: THE escalation gate both supervisors call when a wedge
+# escalation is due. Returns 0 to DEFER (do not escalate now) and 1 to
+# ESCALATE, and prints the evidence token that decided it, for the caller's
+# triage log:
+#   run             active run/busy verdict - defer, deferral count cleared
+#   activity        working status row within the bound - defer, count advanced
+#   activity-bound  working status row past the bound - escalate, count cleared
+#   none            no evidence - escalate, count cleared
+# <defer-file> holds the consecutive activity-only deferral count; owning it
+# here is what keeps the bound identical for the watcher and the away daemon.
+# Pass an empty <defer-file> for a caller that keeps no count, which makes
+# every activity deferral the first one.
+crew_wedge_defer() {  # <id> <pane-tail> <defer-file>
+  local id=$1 tail=${2-} df=${3-} n max
+  max=${FM_WEDGE_ACTIVITY_DEFER_MAX:-$FM_WEDGE_ACTIVITY_DEFER_MAX_DEFAULT}
+  case "$max" in ''|*[!0-9]*) max=$FM_WEDGE_ACTIVITY_DEFER_MAX_DEFAULT ;; esac
+  case "$(crew_wedge_evidence "$id" "$tail")" in
+    run)
+      if [ -n "$df" ]; then rm -f "$df"; fi
+      printf 'run'
+      return 0
+      ;;
+    activity)
+      n=$(cat "$df" 2>/dev/null || true)
+      case "$n" in ''|*[!0-9]*) n=0 ;; esac
+      n=$((n + 1))
+      if [ "$n" -gt "$max" ]; then
+        if [ -n "$df" ]; then rm -f "$df"; fi
+        printf 'activity-bound'
+        return 1
+      fi
+      if [ -n "$df" ]; then printf '%s' "$n" > "$df"; fi
+      printf 'activity'
+      return 0
+      ;;
+  esac
+  if [ -n "$df" ]; then rm -f "$df"; fi
+  printf 'none'
+  return 1
+}
+
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably
 # working; 1 (actionable/surface) if any is not, or no task can be resolved. Pass the
 # same space-separated file list as signal_reason_is_actionable. Files are mapped to

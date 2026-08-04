@@ -135,6 +135,25 @@ tests/fm-tmux-submit-busy.test.sh
 Expected structural matrix: real text on any content row is pending; all-empty complete boxes are empty; unreadable, incomplete, or unsafe boxes are unknown; and non-bordered panes retain cursor-row compatibility.
 Expected submit matrix: proven pending plus busy is accepted as queued; proven pending plus idle remains pending; ambiguous pending is never converted by the busy exception; and only a proven empty composer succeeds directly.
 
+### Wedge-escalation status row
+
+Before a stale pane's wedge timer raises a possible-wedge alarm, both supervisors re-read the crew for fresh evidence it is still working.
+The authoritative source is the pipeline's own run step and needs no harness cooperation.
+The second, independent source is the harness's own rendered status row, read by `status_row_shows_work` in `bin/fm-classify-lib.sh`, and rendered output is a surface the vendor controls.
+
+The signatures currently recognized are a still-running background shell or tool count and an in-progress elapsed-work row.
+They are transcribed from status rows observed during hand triage of false wedge alarms on claude/tmux and herdr on 2026-08-01, 2026-08-02, and 2026-08-04, not yet from a live guard run, so this entry records no per-harness table.
+Drift here reverts a harness to the earlier false-positive behavior rather than silencing a genuine wedge: the row can only defer an escalation, an active run defers on its own, and a deferral is bounded by `FM_WEDGE_ACTIVITY_DEFER_MAX`.
+
+The portable regression in `tests/fm-watch-triage.test.sh` pins the classifier logic in CI, including that the shell-count and elapsed-work signatures are independent and that neither fixture carries the other.
+Run the live guard after any harness upgrade and before trusting these signatures; it fails naming the harness, its version, and the captured footer, and it needs harness credentials because each harness must actually work for a few seconds:
+
+```sh
+FM_WEDGE_STATUS_ROW_DRIFT=1 bin/fm-test-run.sh tests/fm-wedge-status-row-drift-live-e2e.test.sh
+```
+
+Record its per-harness result here once it has been run against the installed harnesses.
+
 ### Cleanup endpoint identity
 
 The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a and metadata fixtures for every supported backend.

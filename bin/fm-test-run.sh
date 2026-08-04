@@ -182,7 +182,8 @@ family_for_basename() {
     fm-grok-continuity-live-e2e.test.sh|\
     fm-grok-stop-live-e2e.test.sh|fm-harness-liveness-drift-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-primary-live-e2e.test.sh|\
-    fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh)
+    fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
+    fm-wedge-status-row-drift-live-e2e.test.sh)
       printf '%s\n' live-harness-optin
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
@@ -871,8 +872,15 @@ families_for_changed_path() {
       printf '%s\n' real-herdr-gated
       ;;
     bin/fm-watch*|bin/fm-wake*|\
-    bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
+    bin/fm-daemon*|bin/fm-supervise-daemon.sh|bin/fm-turnend-guard*|bin/fm-guard.sh)
       printf '%s\n' watcher-wake-lock
+      ;;
+    # The shared classifier also owns the rendered status-row signature the
+    # wedge-escalation gate reads, which only a real harness can prove.
+    bin/fm-classify-lib.sh)
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' afk
+      printf '%s\n' live-harness-optin
       ;;
     bin/fm-afk*)
       printf '%s\n' afk

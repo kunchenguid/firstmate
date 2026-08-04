@@ -423,7 +423,7 @@ test_housekeeping_pause_marker_transitions_to_clear() {
 }
 
 test_housekeeping_persistent_stale_escalates() {
-  local dir state fakebin win pane key
+  local dir state fakebin win pane key crew_bin
   dir=$(make_supercase stale-persistent)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -432,12 +432,33 @@ test_housekeeping_persistent_stale_escalates() {
   printf 'working\n' > "$state/pers-w5.status"
   printf 'idle prompt $\n' > "$pane"
   key=$(printf '%s' "pers-w5" | tr ':/.' '___')
+  crew_bin=$(make_fake_crew_state "$fakebin")
+
+  # Phase A: the false positive this fix exists to avoid. The pane is static
+  # (no busy row, no working status row) but the pipeline's own run step is
+  # still active, so housekeeping's stale_wedge_defers (bin/fm-supervise-daemon.sh,
+  # sharing bin/fm-classify-lib.sh's crew_wedge_defer with the watcher) must
+  # defer the escalation and restart the persistence clock rather than raise a
+  # possible wedge.
   echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_CREW_STATE_BIN="$crew_bin" FM_FAKE_CREW_STATE='state: working · source: run-step · ci running' \
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
-  [ -s "$state/.subsuper-escalations" ] || fail "persistent stale was not escalated"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "an active pipeline run was escalated as a possible wedge on a static pane"
+  [ -e "$state/.subsuper-stale-$key" ] || fail "a deferred wedge escalation dropped its persistence marker"
+  [ "$(cat "$state/.subsuper-stale-$key")" -gt $(( $(date +%s) - 240 )) ] \
+    || fail "a deferred wedge escalation did not restart the persistence timer"
+
+  # Phase B: the run stops. With no working evidence left, the same backdated
+  # marker escalates exactly like before this fix.
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_CREW_STATE_BIN="$crew_bin" FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] || fail "persistent stale was not escalated once its run stopped"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "stale marker not cleared after escalation"
-  pass "persistent stale escalates after threshold and clears its marker"
+  pass "persistent stale defers its escalation while an active run answers for a static pane, then escalates once it stops"
 }
 
 test_housekeeping_resumed_stale_cleared() {
