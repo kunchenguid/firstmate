@@ -1346,7 +1346,7 @@ test_local_advanced_past_run_head_invalidates() {
   pass "local work advanced past run head invalidates attribution"
 }
 
-test_missing_run_head_falls_back_to_current_state() {
+test_missing_run_head_with_failed_fallback_degrades() {
   reset_fakes
   local d out
   d=$(new_case missing-run-head)
@@ -1354,15 +1354,17 @@ test_missing_run_head_falls_back_to_current_state() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/no-head.meta" "window=fm:fm-no-head" "worktree=$d/wt" "kind=ship" "harness=claude"
   printf 'working: current stage still in progress\n' > "$d/state/no-head.status"
+  seed_known_run_step "$d" no-head fm/feat-no-head
   FM_FAKE_AXI_STATUS=$(run_parked fm/feat-no-head | grep -v '^  head:')
-  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_RUNS_RC=124
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" no-head
   out=$(run_crew_state "$d" no-head)
-  assert_not_contains "$out" "source: run-step" "missing run head must not permit branch-only attribution"
-  assert_contains "$out" "source: status-log" "missing run head falls back to current state sources"
-  assert_contains "$out" "state: working" "status-log remains current after missing run head"
-  pass "missing run head falls back instead of matching by branch"
+  assert_contains "$out" "source: run-step-degraded" "missing run head preserves the recorded step"
+  assert_contains "$out" "state: working" "missing run head stays known after fallback failure"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working no-head \
+    || fail "an inconclusive missing head erased the crew's known working step"
+  pass "missing run head degrades when the fallback lookup fails"
 }
 
 # ---------------------------------------------------------------------------
@@ -1798,6 +1800,6 @@ test_usage_error
 test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
-test_missing_run_head_falls_back_to_current_state
+test_missing_run_head_with_failed_fallback_degrades
 
 echo "all fm-crew-state tests passed"

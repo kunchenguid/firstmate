@@ -574,6 +574,16 @@ nm_run_head_matches_worktree() {
     "$(nm_run_is_authoring)" "$(nm_run_is_live)"
 }
 
+nm_run_invalidates_record() {
+  local relation
+  [ "$(nm_run_is_live)" = 0 ] && return 0
+  relation=$(nm_head_relation "$(strip_quotes "$(nm_field head)")")
+  case "$relation" in
+    run-behind|diverged) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 HAVE_RUN=0
 # RUN_SOURCE distinguishes the two ways HAVE_RUN=1 can happen: "full" means
 # $RUN_OUT is real `axi status` TOON with step/gate detail; "coarse" means only
@@ -606,7 +616,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       if nm_run_head_matches_worktree; then
         HAVE_RUN=1
         LOOKUP_COMPLETED=1
-      else
+      elif nm_run_invalidates_record; then
         runstep_record_clear
       fi
     fi
