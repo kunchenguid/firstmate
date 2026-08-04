@@ -46,10 +46,16 @@ DOCTOR_LOG="$TMP_ROOT/doctor.log"
 HERDR_STATE="$TMP_ROOT/remote-herdr.state"
 HERDR_LOG="$TMP_ROOT/remote-herdr.log"
 CLAIMS="$TMP_ROOT/claims"
+PUBLISH_PID=
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
 
 cleanup() {
   local worker_pid=''
+  if [ -n "$PUBLISH_PID" ]; then
+    touch "$PUBLISH_RELEASE" 2>/dev/null || true
+    kill "$PUBLISH_PID" 2>/dev/null || true
+    wait "$PUBLISH_PID" 2>/dev/null || true
+  fi
   FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
     "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
   if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then
@@ -59,6 +65,52 @@ cleanup() {
   rm -rf -- "$TMP_ROOT"
 }
 trap cleanup EXIT
+
+PUBLISH_HOME="$TMP_ROOT/publication-home"
+PUBLISH_FAKEBIN=$(fm_fakebin "$TMP_ROOT/publication-fake")
+PUBLISH_ENTERED="$TMP_ROOT/publication-marker-entered"
+PUBLISH_RELEASE="$TMP_ROOT/publication-marker-release"
+PUBLISH_MANIFEST="$TMP_ROOT/publication.manifest"
+REAL_MV=$(command -v mv)
+cat > "$PUBLISH_FAKEBIN/mv" <<'SH'
+#!/usr/bin/env bash
+destination=${!#}
+case "$destination" in
+  */.fm-secondmate-home)
+    touch "$FM_TEST_PUBLISH_ENTERED"
+    while [ ! -f "$FM_TEST_PUBLISH_RELEASE" ]; do sleep 0.02; done
+    ;;
+esac
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+chmod +x "$PUBLISH_FAKEBIN/mv"
+printf 'schema=fm-remote-home-provision.v1\nid_b64=%s\ncharter_b64=%s\nparent_host_b64=%s\nproject_count=0\n' \
+  "$(printf publication | base64 | tr -d '\n')" \
+  "$(printf 'Publication-order regression charter.\n' | base64 | tr -d '\n')" \
+  "$(printf publish-host | base64 | tr -d '\n')" > "$PUBLISH_MANIFEST"
+PATH="$PUBLISH_FAKEBIN:$PATH" FM_HOME="$PUBLISH_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_TEST_REAL_MV="$REAL_MV" FM_TEST_PUBLISH_ENTERED="$PUBLISH_ENTERED" \
+  FM_TEST_PUBLISH_RELEASE="$PUBLISH_RELEASE" \
+  "$ROOT/bin/fm-remote-home-provision.sh" < "$PUBLISH_MANIFEST" >/dev/null 2>&1 &
+PUBLISH_PID=$!
+publish_wait=0
+while [ ! -f "$PUBLISH_ENTERED" ]; do
+  kill -0 "$PUBLISH_PID" 2>/dev/null || fail "remote provisioning exited before its completion marker"
+  publish_wait=$((publish_wait + 1))
+  [ "$publish_wait" -le 250 ] || fail "remote provisioning never reached its completion marker"
+  sleep 0.02
+done
+cmp -s "$PUBLISH_HOME/.fm-secondmate-parent" <(
+  printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_host=publish-host\n'
+) || fail "remote provisioning exposed completion before publishing the durable parent record"
+assert_absent "$PUBLISH_HOME/.fm-secondmate-home" \
+  "the remote identity marker must remain absent until durable parent publication completes"
+touch "$PUBLISH_RELEASE"
+wait "$PUBLISH_PID" || fail "remote provisioning failed after publishing durable state"
+PUBLISH_PID=
+assert_present "$PUBLISH_HOME/.fm-secondmate-home" \
+  "remote provisioning must publish its identity marker as the completion point"
+pass "remote provisioning publishes durable parent state before its completion marker"
 
 # --- the remote host's tracked code root, real git repos, one project --------
 (

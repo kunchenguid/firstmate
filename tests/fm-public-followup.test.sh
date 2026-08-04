@@ -694,7 +694,7 @@ test_secondmate_teardown_resolves_parent_from_durable_record_when_env_lost() {
 
 test_secondmate_teardown_durable_record_missing_parent_registration_still_refuses() {
   local parent child parent_resolved
-  parent=$(make_home teardown-durable-missing-parent)
+  parent=$(make_home teardown-durable-missing-parent relay-off)
   child="$TMP_ROOT/teardown-durable-missing-child"
   FM_SECONDMATE_CHARTER='Durable-record missing-registration regression charter.' \
     FM_HOME="$parent" "$ROOT/bin/fm-home-seed.sh" mate "$child" --no-projects >/dev/null \
@@ -725,7 +725,7 @@ test_secondmate_teardown_durable_record_missing_parent_registration_still_refuse
 
 test_secondmate_teardown_durable_record_with_no_commitment_succeeds() {
   local parent child parent_resolved rc out
-  parent=$(make_home teardown-durable-clean-parent)
+  parent=$(make_home teardown-durable-clean-parent relay-off)
   child="$TMP_ROOT/teardown-durable-clean-child"
   FM_SECONDMATE_CHARTER='Durable-record clean-cleanup regression charter.' \
     FM_HOME="$parent" "$ROOT/bin/fm-home-seed.sh" mate "$child" --no-projects >/dev/null \

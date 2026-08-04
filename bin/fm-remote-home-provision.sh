@@ -7,12 +7,12 @@
 # Manifest schema fm-remote-home-provision.v1 carries a base64 charter, the
 # base64 parent SSH alias, and one base64 project record per line. The remote
 # code root is cloned into an absent home, project origins are cloned on this
-# host, the project registry and charter are published, and the
-# .fm-secondmate-home marker commits the seed last, alongside a durable
-# .fm-secondmate-parent record naming this home's route to its parent as
+# host, the project registry and charter are published, the durable
+# .fm-secondmate-parent record names this home's route to its parent as
 # "remote" - read by bin/fm-teardown.sh's cleanup gate so a delegated public
 # reply promise, which the subsystem can only carry on the parent's own
-# filesystem, is never mistaken for one this child could hold.
+# filesystem, is never mistaken for one this child could hold - and the
+# .fm-secondmate-home marker commits the complete seed last.
 # A newly created home is removed on failure. An existing matching seeded home
 # is converged only through guarded ordinary-file updates and new project clones.
 set -eu
@@ -238,14 +238,14 @@ chmod 600 "$FM_HOME/data/charter.md.tmp.$$"
 mv -f -- "$FM_HOME/data/charter.md.tmp.$$" "$FM_HOME/data/charter.md"
 cp "$PROJECT_REG" "$FM_HOME/data/projects.md.tmp.$$"
 mv -f -- "$FM_HOME/data/projects.md.tmp.$$" "$FM_HOME/data/projects.md"
-printf '%s\n' "$ID" > "$FM_HOME/.fm-secondmate-home.tmp.$$"
-mv -f -- "$FM_HOME/.fm-secondmate-home.tmp.$$" "$FM_HOME/.fm-secondmate-home"
 {
   printf 'schema=fm-secondmate-parent.v1\n'
   printf 'route=remote\n'
   [ -z "$PARENT_HOST" ] || printf 'parent_host=%s\n' "$PARENT_HOST"
 } > "$FM_HOME/.fm-secondmate-parent.tmp.$$"
 mv -f -- "$FM_HOME/.fm-secondmate-parent.tmp.$$" "$FM_HOME/.fm-secondmate-parent"
+printf '%s\n' "$ID" > "$FM_HOME/.fm-secondmate-home.tmp.$$"
+mv -f -- "$FM_HOME/.fm-secondmate-home.tmp.$$" "$FM_HOME/.fm-secondmate-home"
 PUBLISHED=1
 release_provision_lock
 trap - EXIT

@@ -469,17 +469,27 @@ if [ -f "$FM_HOME/$SUB_HOME_MARKER" ]; then
       PUBLIC_FOLLOWUP_HOME=
       PUBLIC_FOLLOWUP_STATE=
     fi
-  else
-    # A marked child only enters the primary-binding path when the authoritative
-    # parent relay is active. A child that has not opted into the relay must
-    # retain the old teardown path, even without a durable parent registry.
-    # The durable local parent_home only fills in when the launch-time env var
-    # is absent, so a restart that drops the launch prefix can still resolve
-    # the real parent instead of silently treating the relay as inactive.
-    PRIMARY_HOME_CANDIDATE=${FM_PUBLIC_FOLLOWUP_PRIMARY_HOME:-}
-    if [ -z "$PRIMARY_HOME_CANDIDATE" ] && [ "$PARENT_ROUTE" = local ]; then
-      PRIMARY_HOME_CANDIDATE=$PARENT_ROUTE_HOME
+  elif [ "$PARENT_ROUTE" = local ]; then
+    PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=1
+    if fm_pf_home_id_valid "secondmate:$SECOND_MATE_ID"; then
+      PUBLIC_FOLLOWUP_WORK_HOME="secondmate:$SECOND_MATE_ID"
+      if PUBLIC_FOLLOWUP_HOME=$(public_followup_resolve_primary_home \
+          "$PARENT_ROUTE_HOME" "$FM_HOME" "$SECOND_MATE_ID"); then
+        PUBLIC_FOLLOWUP_STATE="$PUBLIC_FOLLOWUP_HOME/state"
+        PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=0
+        if [ "$FORCE" != "--force" ] \
+          && fm_pf_relay_active "$PUBLIC_FOLLOWUP_HOME"; then
+          PUBLIC_FOLLOWUP_RELAY_ACTIVE=1
+        fi
+      else
+        PUBLIC_FOLLOWUP_HOME=
+        PUBLIC_FOLLOWUP_STATE=
+      fi
     fi
+  else
+    # A home seeded before the durable record existed retains the legacy
+    # launch-time binding behavior unchanged.
+    PRIMARY_HOME_CANDIDATE=${FM_PUBLIC_FOLLOWUP_PRIMARY_HOME:-}
     if [ -n "$PRIMARY_HOME_CANDIDATE" ]; then
       if fm_pf_relay_active "$PRIMARY_HOME_CANDIDATE"; then
         PUBLIC_FOLLOWUP_PARENT_RELAY_ACTIVE=1
