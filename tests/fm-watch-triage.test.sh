@@ -225,8 +225,9 @@ EOF
 }
 
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is
-# benign (absorb) ONLY when fm-crew-state.sh reports the crew as working from an
-# actively-running pipeline step (source run-step) or a busy pane (source pane);
+# benign (absorb) ONLY when fm-crew-state.sh reports the crew as working from a
+# current or bounded-degraded pipeline step (source run-step or
+# run-step-degraded) or a busy pane (source pane);
 # everything else - a stale working: status-log line, a finished/parked/failed run,
 # an unknown/torn-down crew, or an empty id - is NOT provable, so it surfaces. The
 # fake fm-crew-state.sh (FM_CREW_STATE_BIN) returns a canned verdict per case.

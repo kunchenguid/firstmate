@@ -318,7 +318,7 @@ signal_reason_is_actionable() {  # <file> ...
 # Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
 # from bin/fm-crew-state.sh's one authoritative current-state line
 # ("state: <s> · source: <src> · <detail>"). Prints exactly one token:
-#   working - an actively-running no-mistakes step (running/fixing/ci) or a busy
+#   working - a current no-mistakes step, its bounded degraded replay, or a busy
 #             pane; the crew is legitimately mid-work on a static-looking pane
 #             (e.g. waiting on CI);
 #   paused  - the crew's authoritative current state is a declared external-wait
@@ -340,12 +340,8 @@ crew_absorb_class() {  # <id>
   if [ "$state" = paused ]; then printf 'paused'; return; fi
   if [ "$state" = working ]; then
     src=${line#*source: }; src=${src%% *}
-    # run-step-degraded is a run-step the reader could not re-confirm because the
-    # no-mistakes lookup did not complete, replayed from its own recent record and
-    # only while the crew's endpoint is still alive. It is positive working
-    # evidence for the same reason run-step is - a run WAS observed executing -
-    # so a saturated daemon no longer turns a validating crew into a wedge
-    # suspect. fm-crew-state.sh bounds how long it may stand in.
+    # A working run-step-degraded verdict is bounded positive evidence whose
+    # replay and safety rules are owned by fm-crew-state.sh.
     case "$src" in run-step|run-step-degraded|pane) printf 'working'; return ;; esac
   fi
   printf 'none'

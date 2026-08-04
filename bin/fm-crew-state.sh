@@ -7,20 +7,20 @@
 # last EVENT, not the current STATE. After firstmate resolves a needs-decision
 # or blocked and the crew resumes (responds to the gate, the pipeline fixes, it
 # re-validates), the log's last line stays stale. This helper never infers the
-# current state from a tail of the log: it reads the authoritative source (a
-# no-mistakes run-step attributed to this crew's branch and current code
-# identity, else the pane busy-signature) and reconciles the possibly-stale log
-# against it.
+# current state from a tail of the log: it reconciles attributable no-mistakes run
+# evidence, the bounded record used only after a lookup failure, and pane busy
+# state before consulting the possibly-stale log.
 #
-# The determinism lives entirely here - only run-step / pane / log reads plus
-# fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
-# token-tight line firstmate can read every heartbeat:
+# The deterministic reconciliation lives entirely here - bounded run-step / pane /
+# log reads, one run-step cache update, and fixed mapping logic, with no heuristics
+# and no LLM. Output is one stable, parseable, token-tight line firstmate can read
+# every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|run-step-degraded|pane|status-log|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
-#   2. Matching no-mistakes run for this crew's branch AND current code identity,
+#   2. Matching no-mistakes run for this crew's branch AND attributable code identity,
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
 #      fallback)? Branch name alone is not enough: a historical run on a reused
 #      branch whose head was rewritten or diverged must not be attributed.
@@ -46,24 +46,21 @@
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
-#   4. No run for this crew (pre-validation, or kind=scout): fall back to the
-#      recorded backend's pane busy state, then the status log's last line only
-#      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
-#   5. Missing meta or torn-down worktree: report unknown · none. If no run is
+#   4. A run lookup that cannot complete may replay this crew's recent observed
+#      step as `run-step-degraded`, but only after endpoint liveness and an exact
+#      busy verdict and only inside the configured age bound.
+#   5. A completed lookup with no run for this crew (pre-validation, or kind=scout)
+#      falls back to the recorded backend's pane busy state, then the status log's
+#      last line only when its verb maps to a recognized run-state. Decision-only
+#      events such as `resolved` never become current state or detail.
+#   6. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
 #
-# A run LOOKUP FAILURE is not a run ABSENCE. The bounded no-mistakes call can
-# fail to complete - it times out under a saturated daemon, errors, or cannot be
-# bounded at all - and that used to be indistinguishable from "this branch has no
-# run", collapsing a crew that was demonstrably mid-validation to unknown · none.
-# Because fm-classify-lib.sh's crew_is_provably_working() reads this same line, a
-# working crew stopped being provably working exactly during the longest phase of
-# a run, and every idle repaint raised a fresh possible-wedge escalation. A
-# failure now degrades to the LAST KNOWN run-step (see the run-step record below)
-# and reports source `run-step-degraded`; only a completed lookup that found no
-# run falls through to the pane/log sources.
+# A run LOOKUP FAILURE is not a run ABSENCE. The bounded no-mistakes call
+# propagates timeout, execution, and no-bounding-mechanism failures so only a
+# failed lookup can replay the last known run step; a completed lookup that found
+# no run falls through to the pane and log sources.
 #
 # Writes exactly one thing: state/<id>.run-step, the last known run-step record
 # that makes that degrade possible (runstep_record_write below is the only

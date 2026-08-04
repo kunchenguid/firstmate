@@ -4,9 +4,10 @@
 #
 # The status file (state/<id>.status) is a best-effort append-only EVENT LOG, so
 # `tail -1` of it reports the last event, not the current state. fm-crew-state
-# reads the AUTHORITATIVE source (a matching no-mistakes run-step, else the
-# semantic busy-state contract) and reconciles the possibly-stale log against it. These
-# cases pin every branch of that logic, hermetically, over real throwaway git
+# reconciles an attributable no-mistakes run-step, a recent recorded step when
+# that lookup fails, and the semantic busy-state contract before consulting the
+# possibly-stale log. These cases pin every branch of that logic, hermetically,
+# over real throwaway git
 # repos with a fake `no-mistakes` (run-step source) and a fake `tmux` (pane
 # source):
 #   (a) active run-step is authoritative                          -> run-step
@@ -25,6 +26,9 @@
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
 #       proving the watcher's own absorb-only-when-provably-working predicate
 #       benefits from the fix in both directions.
+#   (l) failed lookup reuses only a recent observed run step       -> run-step-degraded
+#   (m) an executing run keeps its pipeline-authored tip advance  -> run-step
+#   (n) branch-scoped live status accepts a pipeline-owned head   -> run-step
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -286,8 +290,8 @@ EOF
 }
 
 # The pipeline owns the branch and is committing in its own copy, so the head it
-# reports is not an object this crew's worktree has ever seen. Shape copied from
-# a live `axi status` observed 2026-08-01 on a run parked at fix_review.
+# reports is not an object this crew's worktree has ever seen. This fixture keeps
+# the live `axi status` shape for a run parked at fix_review.
 run_pipeline_owned_fix_review() {  # <branch>
   cat <<EOF
 run:
@@ -1377,12 +1381,8 @@ test_missing_run_head_with_failed_fallback_degrades() {
 
 # ---------------------------------------------------------------------------
 # (l) A run lookup that could not COMPLETE must not read like a run ABSENCE.
-# Regression pair for the 2026-07-28 tsa-451-mc-compute-budget observation: the
-# helper reported working/run-step/validating, then a saturated no-mistakes
-# daemon made the bounded query exceed its timeout and the crew flipped to
-# unknown/none for ~10 minutes while it was demonstrably mid-sweep. Because
-# crew_is_provably_working() reads this same line, the watcher could no longer
-# absorb the stale wake and re-escalated a possible wedge on every idle repaint.
+# These cases reproduce a validating crew whose bounded no-mistakes lookup times
+# out, then guard the evidence and age bounds that keep a real wedge visible.
 
 # A crew whose state is read once while validating, then read again while the
 # lookup times out, stays at its last known step instead of going unknown.
@@ -1567,16 +1567,9 @@ test_degraded_record_outranks_stale_status_log() {
 }
 
 # ---------------------------------------------------------------------------
-# (n) Pipeline-owned head: the run reports a head this worktree cannot resolve.
-# Verified live 2026-08-01 on task arkrh-corpus-types-unbound-unconstructible:
-# `axi status` in the crew's own worktree returned that crew's own branch,
-# status running, parked at fix_review with 3 findings and
-# `branch_sync.state: pipeline_owned` - but the head it reported was not an
-# object in the worktree at all (`git rev-parse --verify` failed: "malformed
-# object name"), because the pipeline commits in its own copy. This is neither
-# recorded cause: the lookup completed in under a second, and the sha was not
-# behind the tip, it was unresolvable. A head we cannot resolve is not the same
-# evidence as a head that diverged.
+# (n) Pipeline-owned head: a branch-scoped live run may report a head this
+# worktree cannot resolve because the pipeline commits in its own copy. This is
+# distinct from both lookup failure and a resolvable head that diverged.
 
 # A non-resolvable sha of the right shape. Deliberately not an object anywhere.
 UNRESOLVABLE_HEAD=1c17405cdeadbeefdeadbeefdeadbeefdeadbeef
@@ -1669,11 +1662,8 @@ test_provably_working_via_degraded_run_step() {
 
 # ---------------------------------------------------------------------------
 # (m) Fix-round attribution: a run that advances the tip with its OWN commits.
-# Regression pair for the 2026-08-01 tsa-396-postgres-flow-sources observation:
-# a review finding was answered `--action fix`, the pipeline committed the fix
-# and the branch head advanced past the sha the run had recorded, and the crew
-# immediately read unknown/none. The code-identity skip is right for a stale or
-# rewritten run and wrong for the run currently authoring those commits.
+# The code-identity skip is right for a stale or rewritten run and wrong for the
+# actively executing run currently authoring those commits.
 
 test_coarse_running_row_behind_tip_does_not_attribute() {
   reset_fakes
