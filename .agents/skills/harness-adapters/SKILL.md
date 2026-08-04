@@ -420,7 +420,8 @@ Hermes Agent classic REPL launches from the absolute path resolved from `PATH` (
 | Effort | No reasoning-effort flag; requested effort is recorded in task metadata but omitted from launch. |
 | Resume | `hermes --resume <session-id>` (id printed on exit). |
 
-`fm-spawn.sh` launches Hermes bare on the classic REPL, waits for a Welcome to Hermes / Hermes Agent banner, sends only `Read the brief at <absolute-path> and follow it exactly.`, and requires either the post-submit interrupt footer or an idle composer with the pointer visible before accepting delivery.
+`fm-spawn.sh` launches Hermes bare on the classic REPL, waits for a Welcome to Hermes / Hermes Agent banner while `fm_backend_agent_state` reports a live agent, sends only `Read the brief at <absolute-path> and follow it exactly.`, and requires a still-live agent plus either the post-submit interrupt footer or an idle composer with the pointer visible before accepting delivery.
+Banner text left in scrollback after the process exits is not readiness or delivery proof.
 Readiness needs that Hermes-only chrome because a bare `❯` is also the default starship/oh-my-zsh shell prompt: a failed launch leaves the pane at the user's own shell, where the pointer would be executed as a command.
 For the same reason `Initializing agent` is startup chrome only and never confirms delivery - it is already in scrollback before the pointer is typed, so a swallowed keystroke would otherwise report a brief that was never delivered.
 This launch-then-send shape is mandatory because Hermes has no crewmate positional-brief path comparable to Grok/Claude.

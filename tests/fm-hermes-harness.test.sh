@@ -46,6 +46,13 @@ fake_screen() {
     initializing-only)
       printf 'Hermes Agent v0.19.0\nWelcome to Hermes\nInitializing agent...\n'
       ;;
+    banner-dead)
+      # Banner left in scrollback after hermes exited to a shell.
+      printf 'Hermes Agent v0.19.0\nWelcome to Hermes\n❯\n'
+      ;;
+    banner-dead-delivered)
+      printf 'Hermes Agent v0.19.0\nWelcome to Hermes\nRead the brief at %s and follow it exactly.\n❯\n' "$FM_FAKE_BRIEF_REAL"
+      ;;
     *)
       printf 'shell starting\n$ \n'
       ;;
@@ -54,18 +61,55 @@ fake_screen() {
 fake_cursor_y() {
   case "$state" in
     pointer-typed) printf '1\n' ;;
-    ready|delivered-idle|delivered-busy|initializing-only) printf '2\n' ;;
+    ready|delivered-idle|delivered-busy|initializing-only|banner-dead|banner-dead-delivered) printf '2\n' ;;
     *) printf '1\n' ;;
+  esac
+}
+fake_current_command() {
+  # Live hermes states report the harness; dead/shell states report zsh so
+  # fm_backend_tmux_agent_state classifies shell/dead rather than agent.
+  case "$state" in
+    ready|pointer-typed|delivered-idle|delivered-busy|initializing-only|launched)
+      if [ "${FM_FAKE_HERMES_AGENT_ALIVE:-yes}" = yes ]; then
+        printf 'hermes\n'
+      else
+        printf 'zsh\n'
+      fi
+      ;;
+    banner-dead|banner-dead-delivered|bare-prompt|*)
+      printf 'zsh\n'
+      ;;
   esac
 }
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "$FM_FAKE_PANE_PATH"; exit 0 ;;
+  *"#{pane_current_command}"*) fake_current_command; exit 0 ;;
+  *"#{pane_tty}"*) printf '\n'; exit 0 ;;
   *"#{cursor_y}"*) fake_cursor_y; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  list-windows)
+    # Only report windows after new-window, so spawn create does not see a
+    # pre-existing name. Agent-state probes need the name present once created.
+    if [ -f "${FM_FAKE_WINDOWS_FILE:-}" ]; then
+      cat "${FM_FAKE_WINDOWS_FILE}"
+    fi
+    exit 0
+    ;;
+  has-session|new-session|kill-window) exit 0 ;;
+  new-window)
+    # Record the -n name so later list-windows / agent_state inventory succeeds.
+    prev=
+    for arg in "$@"; do
+      if [ "$prev" = -n ]; then
+        printf '%s\n' "$arg" >> "${FM_FAKE_WINDOWS_FILE:-/dev/null}"
+        break
+      fi
+      prev=$arg
+    done
+    exit 0
+    ;;
   send-keys)
     prev=
     literal=
@@ -157,6 +201,7 @@ make_spawn_case() {
   : > "$case_dir/pointer.log"
   : > "$case_dir/hermes.state"
   : > "$case_dir/tmux-calls.log"
+  : > "$case_dir/windows.list"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
 }
 
@@ -175,6 +220,9 @@ run_spawn() {
     FM_FAKE_HERMES_DELIVERED_STATE="${FM_FAKE_HERMES_DELIVERED_STATE:-delivered-busy}" \
     FM_FAKE_HERMES_UNDELIVERED_STATE="${FM_FAKE_HERMES_UNDELIVERED_STATE:-ready}" \
     FM_FAKE_HERMES_UNREADY_STATE="${FM_FAKE_HERMES_UNREADY_STATE:-launched}" \
+    FM_FAKE_HERMES_AGENT_ALIVE="${FM_FAKE_HERMES_AGENT_ALIVE:-yes}" \
+    FM_FAKE_WINDOW_NAME="fm-$id" \
+    FM_FAKE_WINDOWS_FILE="$case_dir/windows.list" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/brief.md" \
     FM_HERMES_READY_POLLS=2 FM_HERMES_DELIVERY_POLLS=2 FM_HERMES_POLL_INTERVAL=0 \
@@ -330,6 +378,39 @@ test_hermes_startup_chrome_alone_is_not_delivery() {
   pass "fm-spawn: startup Initializing agent alone never confirms brief delivery"
 }
 
+test_hermes_banner_without_live_agent_is_not_readiness() {
+  local id rec out rc
+  id=hermes-banner-dead-z9
+  rec=$(make_spawn_case banner-dead "$id")
+  read_spawn_record "$rec"
+  rc=0
+  # banner-dead screen keeps Hermes chrome but pane_current_command is zsh.
+  out=$(FM_FAKE_HERMES_READY=no FM_FAKE_HERMES_UNREADY_STATE=banner-dead \
+    run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "Hermes banner with a dead agent must not be readiness"
+  assert_contains "$out" "hermes did not show a verified ready signal" \
+    "banner-without-live-agent readiness failure lacked a loud diagnostic"
+  [ ! -s "$CASE_DIR/pointer.log" ] \
+    || fail "hermes typed the brief pointer after the agent had exited"
+  pass "fm-spawn: Hermes banner in scrollback without a live agent is never readiness"
+}
+
+test_hermes_idle_delivery_requires_live_agent() {
+  local id rec out rc
+  id=hermes-dead-delivery-z10
+  rec=$(make_spawn_case dead-delivery "$id")
+  read_spawn_record "$rec"
+  rc=0
+  # Ready while live (state=ready → hermes), then after submit the undelivered
+  # state is banner-dead-delivered (zsh + pointer echo + ❯). Idle delivery must refuse.
+  out=$(FM_FAKE_HERMES_DELIVERY=no FM_FAKE_HERMES_UNDELIVERED_STATE=banner-dead-delivered \
+    run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "idle pointer echo without a live agent must not confirm delivery"
+  assert_contains "$out" "hermes brief pointer delivery was not confirmed" \
+    "dead-agent idle delivery lacked a loud diagnostic"
+  pass "fm-spawn: idle delivery confirmation requires a live hermes agent"
+}
+
 test_hermes_detection_uses_argv_not_bare_python() {
   local dir fakebin cfg out
   dir="$TMP_ROOT/detection"
@@ -470,6 +551,8 @@ test_hermes_unconfirmed_delivery_fails_loudly
 test_hermes_readiness_gate_precedes_pointer
 test_hermes_bare_shell_prompt_is_not_readiness
 test_hermes_startup_chrome_alone_is_not_delivery
+test_hermes_banner_without_live_agent_is_not_readiness
+test_hermes_idle_delivery_requires_live_agent
 test_hermes_detection_uses_argv_not_bare_python
 test_hermes_composer_idle_glyph_is_empty
 test_hermes_busy_signature_is_harness_scoped

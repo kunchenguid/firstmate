@@ -115,7 +115,8 @@ $ hermes chat --yolo --accept-hooks
 Modern `--tui` is broken on this brew install (missing `ui-tui`) and is not used.
 No reliable `HERMES_*=1` child env marker was found; detection matches argv `hermes` / `hermes-agent`, not bare `Python`.
 Smoke scout `hermes-smoke-h1` passed under raw launch plus post-ready brief pointer delivery.
-Readiness is gated on the Welcome to Hermes / Hermes Agent banner rather than a bare `❯`, which is also the default starship shell prompt, and `Initializing agent` is startup chrome that never confirms delivery.
+Readiness is gated on the Welcome to Hermes / Hermes Agent banner plus a live agent process (`fm_backend_agent_state`), not a bare `❯` alone (also the default starship shell prompt) and not banner text left after the process exits.
+`Initializing agent` is startup chrome that never confirms delivery.
 No turn-end hook is wired; busy classification is the harness-scoped `hermes-regex` rendered-tail fallback only.
 
 ## Turn-end guard

@@ -1748,11 +1748,22 @@ hermes_capture_has_hermes_chrome() {  # <plain-pane-capture>
   printf '%s\n' "$1" | grep -qiE 'Welcome to Hermes|Hermes Agent'
 }
 
+# Scrollback alone is not proof the REPL is still alive: hermes can print its
+# banner and then exit, leaving Welcome/Hermes Agent text while the pane is a
+# bare shell. Gate send and idle delivery on a live agent process (tmux classifies
+# bare shell as shell/dead, not agent).
+hermes_agent_is_live() {
+  case "$(fm_backend_agent_state "$BACKEND" "$T")" in
+    alive) return 0 ;;
+  esac
+  return 1
+}
+
 hermes_wait_for_ready() {
   local pane i=0 max=${FM_HERMES_READY_POLLS:-60} interval=${FM_HERMES_POLL_INTERVAL:-0.5}
   while [ "$i" -lt "$max" ]; do
     pane=$(hermes_capture)
-    if hermes_capture_has_hermes_chrome "$pane"; then
+    if hermes_capture_has_hermes_chrome "$pane" && hermes_agent_is_live; then
       return 0
     fi
     i=$((i + 1))
@@ -1763,6 +1774,9 @@ hermes_wait_for_ready() {
 
 hermes_delivery_is_confirmed() {  # <plain-pane-capture>
   local pane=$1
+  # A dead/exited agent must never confirm delivery, even if scrollback still
+  # shows the pointer echo and a shell ❯.
+  hermes_agent_is_live || return 1
   # Started working on the brief: post-submit mid-turn footer from the verified
   # TUI. Startup chrome such as Initializing agent is deliberately absent here:
   # it is already in scrollback before the pointer is ever typed, so it would
