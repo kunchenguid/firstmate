@@ -146,6 +146,22 @@ fm_remote_job_worker_identity_matches "$REMOTE_ROOT" "$ACCOUNT_HOME" \
   || fail "the replacement worker did not publish the current code identity"
 pass "ensure replaces a live worker after its code changes"
 
+RELOCATED_ROOT="$TMP_ROOT/relocated-root"
+cp -R "$REMOTE_ROOT" "$RELOCATED_ROOT"
+OLD_WORKER_PID=$NEW_WORKER_PID
+fm_remote_job_ensure_worker "$RELOCATED_ROOT" "$ACCOUNT_HOME" \
+  || fail "$FM_REMOTE_JOB_ERROR"
+NEW_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
+[ "$NEW_WORKER_PID" != "$OLD_WORKER_PID" ] || fail "ensure retained a worker bound to a different code root"
+fm_remote_job_stage "$ACCOUNT_HOME" "$RELOCATED_ROOT" "$REMOTE_HOME" fm-probe-job.sh < /dev/null > /dev/null
+JOB_ID=$FM_REMOTE_JOB_ID
+fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
+[ "$FM_REMOTE_JOB_EXIT" -eq 0 ] || fail "the relocated worker rejected its configured code root"
+fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the relocated-root probe could not be reaped"
+fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail "$FM_REMOTE_JOB_ERROR"
+NEW_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
+pass "worker identity binds the canonical configured code root"
+
 CRASHED_WORKER_PID=$NEW_WORKER_PID
 kill -KILL "$CRASHED_WORKER_PID"
 wait "$CRASHED_WORKER_PID" 2>/dev/null || true
@@ -254,6 +270,34 @@ assert_absent "$SHUTDOWN_SIDE_EFFECT" "the active command mutated after worker s
 fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the interrupted job could not be reaped"
 pass "worker shutdown terminates the active command tree before replacement"
 
+CRASH_STARTED="$TMP_ROOT/crash-started"
+CRASH_SIDE_EFFECT="$TMP_ROOT/crash-side-effect"
+FM_REMOTE_JOB_TIMEOUT=5
+fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
+  fm-shutdown-job.sh "$CRASH_STARTED" "$CRASH_SIDE_EFFECT" < /dev/null > /dev/null
+JOB_ID=$FM_REMOTE_JOB_ID
+for _ in $(seq 1 100); do
+  [ -f "$CRASH_STARTED" ] && break
+  sleep 0.05
+done
+assert_present "$CRASH_STARTED" "the crash fixture did not begin executing"
+CRASHED_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
+kill -KILL "$CRASHED_WORKER_PID"
+for _ in $(seq 1 200); do
+  RESTARTED_WORKER_PID=$(cat "$STATE_ROOT/worker.pid" 2>/dev/null || true)
+  [ -n "$RESTARTED_WORKER_PID" ] && [ "$RESTARTED_WORKER_PID" != "$CRASHED_WORKER_PID" ] && break
+  sleep 0.05
+done
+[ -n "${RESTARTED_WORKER_PID:-}" ] && [ "$RESTARTED_WORKER_PID" != "$CRASHED_WORKER_PID" ] \
+  || fail "the Linux supervisor did not restart a crashed worker"
+fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
+[ "$FM_REMOTE_JOB_EXIT" -eq 125 ] || fail "worker crash recovery did not publish unknown completion"
+sleep 3
+assert_absent "$CRASH_SIDE_EFFECT" "an orphaned command mutated after worker crash recovery"
+fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the crash-recovered job could not be reaped"
+fm_remote_job_probe "$ACCOUNT_HOME" || fail "the restarted worker did not remain ready"
+pass "Linux supervision recovers crashes and stops orphaned commands"
+
 mkdir -p "$ACCOUNT_HOME/.local/bin"
 cat > "$ACCOUNT_HOME/.local/bin/git" <<SH
 #!/bin/bash
@@ -318,6 +362,10 @@ printf 'invalid\n' > "$JOB_DIR/.claim/group"
 WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
 kill -TERM "$WORKER_PID"
 wait "$WORKER_PID" 2>/dev/null || true
+for _ in $(seq 1 100); do
+  [ -f "$STATE_ROOT/worker.lock/quarantine" ] && break
+  sleep 0.05
+done
 assert_present "$STATE_ROOT/worker.lock/quarantine" "failed shutdown released worker ownership"
 fm_remote_job_probe "$ACCOUNT_HOME" && fail "quarantined worker ownership still reported ready"
 set +e

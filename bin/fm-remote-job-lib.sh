@@ -647,17 +647,19 @@ fm_remote_job_worker_owned_alive() {
 }
 
 fm_remote_job_code_identity() { # <remote-root> <account-home>
-  local root=$1 account_home=$2 git_bin library_hash worker_hash
+  local root=$1 account_home=$2 git_bin root_hash library_hash worker_hash
+  root=$(fm_remote_job_canonical_existing_dir "$root") || return 1
   [ -f "$root/bin/fm-remote-job-lib.sh" ] && [ ! -L "$root/bin/fm-remote-job-lib.sh" ] || return 1
   [ -f "$root/bin/fm-remote-job-worker.sh" ] && [ ! -L "$root/bin/fm-remote-job-worker.sh" ] || return 1
   fm_remote_job_compose_operator_path "$account_home" >/dev/null
   git_bin=$(fm_remote_job_operator_tool git 2>/dev/null || true)
   [ -n "$git_bin" ] || return 1
+  root_hash=$(printf '%s' "$root" | "$git_bin" hash-object --stdin 2>/dev/null) || return 1
   library_hash=$("$git_bin" hash-object -- "$root/bin/fm-remote-job-lib.sh" 2>/dev/null) || return 1
   worker_hash=$("$git_bin" hash-object -- "$root/bin/fm-remote-job-worker.sh" 2>/dev/null) || return 1
-  case "$library_hash:$worker_hash" in *[!0-9a-f:]*) return 1 ;; esac
-  [ -n "$library_hash" ] && [ -n "$worker_hash" ] || return 1
-  printf '%s:%s\n' "$library_hash" "$worker_hash"
+  case "$root_hash:$library_hash:$worker_hash" in *[!0-9a-f:]*) return 1 ;; esac
+  [ -n "$root_hash" ] && [ -n "$library_hash" ] && [ -n "$worker_hash" ] || return 1
+  printf '%s:%s:%s\n' "$root_hash" "$library_hash" "$worker_hash"
 }
 
 fm_remote_job_worker_identity_matches() { # <remote-root> <account-home>

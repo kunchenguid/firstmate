@@ -2,10 +2,10 @@
 # Long-lived per-account worker for remote fm-on jobs.
 #
 # This process is launched by the Firstmate-owned dev.firstmate.remote-job
-# LaunchAgent on macOS and by the matching Linux bootstrap path. It claims only
-# complete 0700 records staged by fm-remote-job-lib.sh under the fixed account
-# queue, refuses symlinks and malformed records, and executes only a tracked
-# non-symlink fm-*.sh under this worker's configured FM_ROOT/bin.
+# LaunchAgent on macOS and by a detached restart supervisor on Linux. It claims
+# only complete 0700 records staged by fm-remote-job-lib.sh under the fixed
+# account queue, refuses symlinks and malformed records, and executes only a
+# tracked non-symlink fm-*.sh under this worker's configured FM_ROOT/bin.
 #
 # Each child runs under env -i with the shared filesystem-composed PATH, HOME,
 # FM_HOME, FM_ROOT_OVERRIDE, and FM_REMOTE_JOB_ACTIVE=1. Commands receive their
@@ -26,6 +26,7 @@ WORKER_ACTIVE_JOB=
 WORKER_LOCK=
 WORKER_LOCK_HELD=0
 WORKER_RELEASE_OWNERSHIP=1
+WORKER_SUPERVISED_PID=
 
 worker_error() { printf 'remote-job-worker: %s\n' "$1" >&2; }
 
@@ -577,7 +578,7 @@ main() {
   case "$lock_status" in
     0) ;;
     2) exit 0 ;;
-    3) worker_error "worker ownership is quarantined after an unconfirmed shutdown"; exit 1 ;;
+    3) worker_error "worker ownership is quarantined after an unconfirmed shutdown"; exit 75 ;;
     *) worker_error "cannot acquire or safely reclaim worker ownership"; exit 1 ;;
   esac
   trap worker_shutdown HUP INT TERM
@@ -595,4 +596,68 @@ main() {
   done
 }
 
-main "$@"
+worker_supervisor_cleanup_dead_child() { # <account-home> <pid>
+  local account_home=$1 pid=$2 lock recorded pid_file ready identity
+  fm_remote_job_prepare_state "$account_home" || return 1
+  lock=$(fm_remote_job_worker_lock_path)
+  [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
+  [ ! -e "$lock/quarantine" ] && [ ! -L "$lock/quarantine" ] || return 1
+  recorded=$(fm_remote_job_read_single_line "$lock/pid" 64) || return 1
+  [ "$recorded" = "$pid" ] || return 1
+  pid_file=$(fm_remote_job_worker_pid_path)
+  ready=$(fm_remote_job_worker_ready_path)
+  identity=$(fm_remote_job_worker_identity_path)
+  [ ! -L "$pid_file" ] && rm -f -- "$pid_file" || return 1
+  [ ! -L "$ready" ] && rm -f -- "$ready" || return 1
+  [ ! -L "$identity" ] && rm -f -- "$identity" || return 1
+  [ ! -L "$lock/start" ] && [ ! -L "$lock/command" ] || return 1
+  rm -f -- "$lock/pid" "$lock/start" "$lock/command" || return 1
+  rmdir "$lock"
+}
+
+worker_supervisor_shutdown() {
+  local pid=${WORKER_SUPERVISED_PID:-}
+  trap - HUP INT TERM
+  if [ -n "$pid" ]; then
+    kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+  exit 0
+}
+
+worker_supervise_linux() {
+  local account_home child_status
+  account_home=$(worker_account_home) || { worker_error "cannot resolve account home"; return 1; }
+  FM_ROOT=$(fm_remote_job_canonical_existing_dir "$FM_ROOT") || { worker_error "configured FM_ROOT is unsafe"; return 1; }
+  [ -f "$FM_ROOT/AGENTS.md" ] && [ ! -L "$FM_ROOT/AGENTS.md" ] || { worker_error "FM_ROOT is not a Firstmate checkout"; return 1; }
+  fm_remote_job_prepare_state "$account_home" || { worker_error "$FM_REMOTE_JOB_ERROR"; return 1; }
+  trap worker_supervisor_shutdown HUP INT TERM
+  while :; do
+    "$SCRIPT_DIR/fm-remote-job-worker.sh" --serve &
+    WORKER_SUPERVISED_PID=$!
+    wait "$WORKER_SUPERVISED_PID" 2>/dev/null
+    child_status=$?
+    if [ "$child_status" -eq 0 ]; then
+      WORKER_SUPERVISED_PID=
+      return 0
+    fi
+    if [ "$child_status" -eq 75 ]; then
+      WORKER_SUPERVISED_PID=
+      return 75
+    fi
+    worker_supervisor_cleanup_dead_child "$account_home" "$WORKER_SUPERVISED_PID" || true
+    WORKER_SUPERVISED_PID=
+    sleep 0.1
+  done
+}
+
+case "${1:-}" in
+  --serve)
+    [ "$#" -eq 1 ] || { worker_error "unexpected worker arguments"; exit 2; }
+    main
+    ;;
+  '')
+    if [ "$(fm_remote_job_platform)" = linux ]; then worker_supervise_linux; else main; fi
+    ;;
+  *) worker_error "unexpected worker arguments"; exit 2 ;;
+esac
