@@ -398,11 +398,22 @@ done
 [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
 
 subsection "AFK"
-if [ -e "$STATE/.afk" ]; then
-  printf 'present - away-mode supervision is active; the daemon owns the watcher.\n'
+# The away flag says away mode was ENTERED, never that anything is supervising
+# now: the daemon dies on a session, process or host restart while the flag
+# survives. Reporting supervision from the flag alone therefore states something
+# false in the captain's normal path exactly when it matters most. The three-
+# state verdict is owned once by bin/fm-away-session.sh (active, down, or
+# genuinely undetermined) and is never collapsed back into a yes/no here.
+AFK_REPORT=$("$SCRIPT_DIR/fm-away-session.sh" health --report 2>/dev/null) || AFK_REPORT=
+if [ -n "$AFK_REPORT" ]; then
+  printf '%s\n' "$AFK_REPORT"
+elif [ "$AFK_PRESENT" -eq 1 ]; then
+  printf 'present - away mode is on and its supervision state could not be read here; treat supervision as unconfirmed.\n'
 else
   printf 'absent\n'
 fi
+AWAY_SESSION=$("$SCRIPT_DIR/fm-away-session.sh" id 2>/dev/null) || AWAY_SESSION=
+[ -z "$AWAY_SESSION" ] || printf 'away session: %s\n' "$AWAY_SESSION"
 
 # Public commitments made through the myfirstmate relay. A promise to reply in a
 # public thread must survive compaction and restart, so it is surfaced from disk

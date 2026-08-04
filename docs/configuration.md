@@ -105,6 +105,25 @@ That keeps a tmux pane nested inside herdr on the tmux transport, matching the r
 Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then the legacy `firstmate:0` tmux fallback with a warning.
 Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, refuses at daemon startup instead of trying tmux injection primitives against a non-tmux pane.
 
+## Away-mode intent hook (config/away-intent)
+
+Away mode has a canonical action, `bin/fm-away-session.sh start`, and a deterministic resolver, `bin/fm-away-intent.sh`, that turns an operator sentence such as "I have to step away for a while" into it.
+The resolver is always available and always usable directly; the optional local, gitignored `config/away-intent` presence flag decides only whether a harness prompt hook may call it with no model turn.
+Absent, the flag leaves the hook inert after one file test, so a home that never opts in behaves exactly as before.
+Present, the Claude `UserPromptSubmit` hook classifies each captain message and runs the canonical action on a clear away or return intent.
+The hook additionally refuses to act outside a genuine primary firstmate checkout and refuses operational input, so a crewmate's linked task worktree and firstmate's own machine traffic can never activate away mode.
+It always exits 0 and never blocks or rewrites a prompt.
+`FM_AWAY_INTENT_MAX_WORDS` (default 60) caps how long a message may be and still be read as a departure announcement.
+`bin/fm-away-intent.sh`'s header owns the exact pattern sets, the refusals, and their rationale; [`verification/supervision.md`](verification/supervision.md#away-mode-supervision-health) records which harnesses have a verified prompt-hook seam.
+
+## Away-mode session record and evidence (state/.away-session, state/away/)
+
+One away stretch has a durable identity so a decision classification, a ruling request, and the reentry summary all bind to the same session across a restart.
+`state/.away-session` is the current session record and `state/away/<session>/ledger` is that session's append-only evidence log; `state/away/<session>/ruling/` holds its durable ruling requests and any validated response.
+The ledger is evidence, never a queue: the durable actionable queue remains `state/.wake-queue`.
+The session record is cleared only once the return catch-up gate has actually cleared, while the ledger is retained.
+`bin/fm-away-lib.sh`'s header owns the exact formats.
+
 ## Away-mode wedge alarm channels (config/wedge-alarm)
 
 When away-mode injection wedges past `FM_MAX_DEFER_SECS`, the sub-supervisor raises a loud, rate-limited alarm.

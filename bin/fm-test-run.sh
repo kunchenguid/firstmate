@@ -197,7 +197,9 @@ family_for_basename() {
     fm-teardown.test.sh|fm-x-mode.test.sh)
       printf '%s\n' pr-forge
       ;;
-    fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
+    fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh|\
+    fm-away-continuation.test.sh|fm-away-decision-class.test.sh|\
+    fm-away-health.test.sh|fm-away-intent.test.sh|fm-away-ruling-request.test.sh)
       printf '%s\n' afk
       ;;
     fm-bearings-snapshot.test.sh|fm-fleet-snapshot-view.test.sh)

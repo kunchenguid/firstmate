@@ -273,3 +273,26 @@ Observed output:
 ```
 
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.
+
+## Away-mode supervision health
+
+The away flag records that away mode was entered, and it outlives the supervisor across a session, process or host restart.
+Reporting supervision from that flag alone therefore states something false in the captain's normal path exactly when it matters most, so `bin/fm-away-session.sh health` reads the supervisor lock's liveness instead and keeps three outcomes distinct: `active`, `down`, and `unknown`.
+
+`tests/fm-away-health.test.sh` is the command that refreshes this evidence.
+It drives all three outcomes with real processes and no harness: a live daemon-shaped process with a matching recorded identity, a dead recorded pid, a recycled pid, a pid running an unrelated command, an unreadable owner pid, and a live pid whose identity cannot be read because neither a `/proc`-compatible source (`FM_PROC_ROOT_OVERRIDE`) nor `ps` can answer.
+That last case is the one a yes/no predicate silently folds into "down"; it is exercised deliberately so the collapse cannot return unnoticed.
+`tests/fm-session-start.test.sh` covers the same verdict through the session-start digest, with a positive control that a genuinely live supervisor is still reported as running.
+
+### Prompt-hook seam per primary harness
+
+Checked on 2026-08-03 against this repo's tracked hook wiring.
+
+| Harness | Prompt-submit seam | State |
+|---|---|---|
+| claude | `UserPromptSubmit` in `.claude/settings.json` | Wired, default-off behind `config/away-intent`. Covered by `tests/fm-away-intent.test.sh` against a synthetic hook payload; a live interactive activation has not been run. |
+| grok | none | The tracked `.grok/hooks/` set covers `SessionStart`, `PreToolUse` and `Stop` only. No prompt-submit seam is wired, so the canonical action is reached by running it directly. |
+| pi, pi-signed | none | The tracked `.pi/extensions/` set covers watcher and turn-end guard extensions only. |
+| codex, opencode, kimi | none | No tracked prompt-submit hook surface. |
+
+Every harness without a seam keeps the pre-existing paths unchanged: `/afk`, and running `bin/fm-away-session.sh start` directly.

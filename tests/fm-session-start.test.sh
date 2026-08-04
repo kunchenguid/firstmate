@@ -11,6 +11,9 @@
 #   - output section ordering: diagnostics/banners lead, bulk file dumps follow
 #   - context-aware next-step guidance for read-only, AFK, X mode, and normal
 #     watcher ownership
+#   - the AFK subsection's three-state supervision report: an away flag with no
+#     daemon must say supervision is NOT running, and a live daemon must be
+#     reported as running (the positive control for that claim)
 #   - status-tail bounding, default and FM_SESSION_START_STATUS_TAIL override
 #   - orphan status logs whose task meta has already disappeared
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
@@ -1261,13 +1264,55 @@ EOF
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  assert_contains "$out" "away-mode supervision is active" "AFK digest did not report away mode"
+  # The away flag is present and NO daemon is running, which is exactly the
+  # state a host restart leaves behind. The digest must say so: claiming
+  # supervision is active here would be a false statement in the captain's
+  # normal path.
+  assert_contains "$out" "away mode is on but away-mode supervision is NOT running" \
+    "AFK digest did not report the missing supervisor"
+  assert_not_contains "$out" "away-mode supervision is active" \
+    "AFK digest still asserted active supervision with no daemon running"
   assert_contains "$out" "Away mode is active" "next step did not switch to AFK guidance"
-  assert_contains "$out" "daemon owns the watcher" "next step did not delegate watcher ownership to the daemon"
+  assert_contains "$out" "the daemon owns watcher" "next step did not delegate watcher ownership to the daemon"
   assert_contains "$out" "- Away mode: active" "supervision block did not include active AFK state"
   assert_not_contains "$out" "  bin/fm-watch-arm.sh" "AFK next step still told the agent to arm the watcher directly"
 
-  pass "next step delegates watcher ownership to the AFK daemon"
+  pass "AFK digest reports a missing supervisor instead of asserting it is active"
+}
+
+# Positive control for the test above: with a live daemon holding the lock the
+# same digest DOES report active supervision, so the honest report is reading
+# liveness rather than always reporting down.
+test_afk_digest_reports_a_live_supervisor() {
+  local rec root home fakebin out sleeper pid identity
+  rec=$(new_world afk-live-daemon)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  : > "$home/state/.afk"
+
+  sleeper="$home/fm-supervise-daemon.sh"
+  printf '#!/usr/bin/env bash\nexec sleep 120\n' > "$sleeper"
+  chmod +x "$sleeper"
+  "$sleeper" >/dev/null 2>&1 &
+  pid=$!
+  mkdir -p "$home/state/.supervise-daemon.lock"
+  printf '%s' "$pid" > "$home/state/.supervise-daemon.lock/pid"
+  identity=$(FM_HOME="$home" bash -c '. "$1"/bin/fm-wake-lib.sh >/dev/null 2>&1; fm_pid_identity "$2"' _ "$ROOT" "$pid")
+  printf '%s' "$identity" > "$home/state/.supervise-daemon.lock/pid-identity"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  assert_contains "$out" "away-mode supervision is running" \
+    "AFK digest did not report a genuinely live supervisor as running"
+  assert_not_contains "$out" "supervision is NOT running" \
+    "AFK digest reported a live supervisor as down"
+
+  pass "AFK digest reports a live supervisor as running"
 }
 
 test_supervision_block_exactly_one_and_pi_diagnostic() {
@@ -1447,6 +1492,7 @@ test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
+test_afk_digest_reports_a_live_supervisor
 test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
 test_pi_diagnostic_rejects_stale_loaded_marker

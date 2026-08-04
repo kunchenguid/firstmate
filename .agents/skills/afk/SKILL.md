@@ -18,10 +18,14 @@ batched digest rather than per-wake injections.
 
 ## What it does
 
-1. **Enter the lifecycle through `bin/fm-afk-launch.sh`.**
-   This owns the durable state write, session-scoped stale-artifact clearing,
-   terminal record, and rollback.
+1. **Enter through the canonical action, `bin/fm-away-session.sh start`.**
+   It runs the `bin/fm-afk-launch.sh` lifecycle below and additionally opens one durable away SESSION with a stable id, so a decision classification, a ruling request, and the reentry summary all bind to the same away stretch across a restart.
+   Repeating it while away mode is already on refreshes the session and never opens a second one.
+   `bin/fm-away-intent.sh` is its deterministic caller: it resolves an operator sentence to that action without a model turn, and a home that sets `config/away-intent` lets the Claude prompt hook invoke it directly.
+   Do not hand-roll a different entry.
+   `bin/fm-afk-launch.sh` remains the owner of the durable flag write, session-scoped stale-artifact clearing, terminal record, and rollback.
    The flag survives a firstmate restart, so recovery re-enters afk when it is present.
+   The flag survives the daemon too, so never report supervision from its presence: `bin/fm-away-session.sh health` is the single owner of the active/down/unknown verdict, and session start prints it.
 
 2. **Ensure the sub-supervisor daemon is running as a tracked background process.**
    Its hosting differs by harness.
@@ -59,8 +63,9 @@ batched digest rather than per-wake injections.
 No `/back` is needed. The first genuine message is the return signal:
 
 - A message **without** the current operational prefix or a legacy bare marker, and **not** starting with `/afk` -> the captain is back.
-  Run `bin/fm-afk-return.sh` before acting on the message that brought the captain back.
-  That script owns correct-ordered daemon shutdown, durable wake draining, escalation and wedge evidence, and the return-catch-up gate.
+  Run `bin/fm-away-session.sh return` before acting on the message that brought the captain back.
+  It runs the same `bin/fm-afk-return.sh` gate, records the return against the away session, and prints the decision-oriented reentry summary described below.
+  `bin/fm-afk-return.sh` remains the owner of correct-ordered daemon shutdown, durable wake draining, escalation and wedge evidence, and the return-catch-up gate.
   If it reports a firstmate-actionable `blocked:` event, remediate it immediately through the normal lifecycle, or explicitly reclassify it with a durable reason and close its decision key with `resolved [key=...]`, then run `bin/fm-afk-return.sh check`.
   Once the daemon stops, resume full per-wake responsiveness through the emitted primary-harness supervision protocol while blocker handling proceeds, so the gate never creates a blind wait.
   Do not answer a Bearings request or perform any other ordinary captain work until the check exits successfully.
@@ -71,12 +76,59 @@ No `/back` is needed. The first genuine message is the return signal:
 Bias ambiguous cases toward exit: a present captain beats token savings, and
 a false exit is self-correcting (the captain re-runs `/afk`).
 
+## The reentry report
+
+`bin/fm-away-continuation.sh reentry` renders the away stretch as decisions, not transcripts, deriving every count from the away ledger and the backlog rather than from a second tally.
+Relay it in `AGENTS.md` section 9 language: the captain reads outcomes and choices, never raw worker output.
+
+Lead each remaining captain decision with its recommended ruling, then the opposing position, what accepting and rejecting each cost, reversibility, blast radius, the settled architecture at stake, and the exact directive needed.
+Offer a batched approval only across the items the summary marks `batch-safe: yes`; anything irreversible or broad is presented on its own, never folded into an undifferentiated "approve all".
+Record the captain's answer with `bin/fm-decision-hold.sh resolve`, which clears the dependency edges and lets the paused work resume automatically.
+If no genuine ruling is waiting, say so plainly and keep the report short.
+
 ## Orthogonal to approval authority
 
 afk changes how aggressively firstmate surfaces things, **not who approves what**.
 "Away" never means "approves more" or "approves less."
 A PR ready for merge or a needs-decision finding keeps the same configured authority and exceptions from `AGENTS.md` section 7, while anything requiring the captain still waits for the captain's explicit word.
 The daemon only batches the notification.
+
+## Deciding while away: uncertainty is not authority
+
+The failure this exists to prevent is treating "firstmate is uncertain" and "only the captain may decide" as the same condition, which turns every hard engineering call into a gate the captain has to answer on their return.
+They are different conditions, and only the second one is the captain's.
+
+Classify an actionable decision with `bin/fm-decision-class.sh classify`, passing what is actually true about it rather than how confident you feel.
+Its header owns the exact flags and the four tiers.
+Two rules govern how you use it:
+
+- **Never let uncertainty reach the captain as authority.**
+  Low confidence, novelty, several reasonable options, or a broad blast radius route a decision to assisted judgment, never to the captain.
+  The script enforces this structurally, so passing those signals honestly is safe.
+- **Never reclassify a reserved decision downward.**
+  A decision that reassigns authority, changes accepted architecture, touches credentials, has material external effects, is destructive or irreversible beyond a standing rule, weakens certification, or hits a gate explicitly reserved to human judgment stays the captain's, however clear the right answer looks.
+
+Then act on the tier:
+
+- **D0** - apply the standing rule and continue.
+- **D1** - decide, record the rationale in the away ledger with `bin/fm-away-session.sh event`, and continue.
+- **D2** - raise a ruling request (below), validate the response, and make the disposition yourself. Advice is evidence, never certification, and never a reason to escalate to the captain merely because firstmate and the advisor first disagreed.
+- **D3** - open the durable captain hold with `bin/fm-decision-hold.sh hold`, then pause only the dependent work with `bin/fm-away-continuation.sh pause`. Every other authorized item keeps moving. Ask the captain the question once; do not re-ask it through another worker.
+
+## Ruling requests
+
+A D2 or D3 question sent to an external reasoning resource is a durable structured artifact, created and validated by `bin/fm-ruling-request.sh`; its header owns the complete field contract and every rejection class.
+Three rules matter more than the mechanics:
+
+- **The response is advisory evidence, never certification, and is never executed.**
+  Translate a validated recommendation into an admitted platform action yourself.
+- **Validate before acting, always.**
+  A stale, malformed, duplicated, mismatched, or authority-expanding response is refused by name and recorded; it never partially applies.
+- **A dead channel is not an escalation.**
+  If the channel is unavailable, keep D0 and D1 work moving, keep every independent item moving, leave the D2 request durable for a later retry, and substitute nothing.
+  Convert nothing into captain authority just because a provider is down.
+
+The live browser channel is currently unreachable from a shell, so `tests/fm-sol-ruling-double.sh` is the deterministic stand-in the contract is covered against.
 
 ## Operational prefix contract
 
