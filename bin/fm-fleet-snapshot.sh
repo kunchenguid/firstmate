@@ -23,8 +23,19 @@
 #   tasks[]: one row per state/<id>.meta, sorted by id.
 #     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
 #     state, source, detail, and raw line separately.
+#     model and effort are the dispatch record from state/<id>.meta.
 #     paths.status_log.last_event is historical wake-event data only, never
-#     current state.
+#     current state. Its last_event_at and last_event_age_seconds report WHEN
+#     that event landed, from the log's mtime, so a renderer can age a task
+#     without reparsing the log.
+#     pr carries the parsed provider/host/path/number identity, the recorded
+#     head, and the normalized review/check/mergeability observation cached by
+#     bin/fm-pr-status.sh, with its age and freshness. This command never calls
+#     a forge: an unrefreshed task reports state "unknown" with source "absent".
+#     work_items is the task's durable forge- and host-agnostic work-item
+#     reference list from data/<id>/work-items.json, empty when it has none.
+#     card is the computed column, action, rank, and inspectable signals for a
+#     board renderer; see card_precedence below.
 #     hints.open_decisions is the keyed open-decision set returned by
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
@@ -52,8 +63,22 @@
 #     structured homes with an unknown current classification are partial, not
 #     unreadable, and retain independently trustworthy structured surfaces.
 #   secondmate_guidance: return-channel action note for renderers and bearings.
+#   card_precedence: the ordered column ladder every tasks[].card is resolved
+#     against, highest-priority first. Exactly one column wins per task, and the
+#     rank is its 1-based position in this list.
+#   supervision: {watcher,afk} - the watcher liveness beacon's age against the
+#     shared grace window from bin/fm-supervision-lib.sh, and this home's durable
+#     away-mode flag with its age.
+#   history: durable completion history (schema fm-outcome-history.v1) built from
+#     data/<id>/outcome.json manifests by bin/fm-outcome-lib.sh, newest first.
+#     A task stays here after teardown removes its volatile records and after its
+#     Done backlog entry is pruned. Unreadable manifests are disclosed in
+#     history.malformed rather than dropped. FM_SNAPSHOT_HISTORY (default 40)
+#     bounds the record count.
 #
 # Compatibility: JSON is the primary machine-readable surface.
+# Every field above is additive within `fm-fleet-snapshot.v1`: an existing v1
+# consumer that reads only the fields it knows keeps working unchanged.
 # Human views must render this output instead of parsing state files again.
 set -u
 
@@ -94,6 +119,7 @@ FM_SNAPSHOT_REGISTRY_LINES=${FM_SNAPSHOT_REGISTRY_LINES:-256}
 FM_SNAPSHOT_REGISTRY_BYTES=${FM_SNAPSHOT_REGISTRY_BYTES:-65536}
 FM_SNAPSHOT_REGISTRY_RECORDS=${FM_SNAPSHOT_REGISTRY_RECORDS:-40}
 FM_SNAPSHOT_REGISTRY_TIMEOUT=${FM_SNAPSHOT_REGISTRY_TIMEOUT:-2}
+FM_SNAPSHOT_HISTORY=${FM_SNAPSHOT_HISTORY:-40}
 validate_positive_bound() {  # <name> <value>
   case "$2" in
     ''|*[!0-9]*|0)
@@ -105,6 +131,12 @@ validate_positive_bound() {  # <name> <value>
 case "$FM_SNAPSHOT_SECONDMATES" in
   ''|*[!0-9]*)
     echo "fm-fleet-snapshot: FM_SNAPSHOT_SECONDMATES must be a non-negative integer" >&2
+    exit 2
+    ;;
+esac
+case "$FM_SNAPSHOT_HISTORY" in
+  ''|*[!0-9]*)
+    echo "fm-fleet-snapshot: FM_SNAPSHOT_HISTORY must be a non-negative integer" >&2
     exit 2
     ;;
 esac
@@ -134,6 +166,15 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIME
 # shellcheck source=bin/fm-ff-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"  # validate_secondmate_home: shared seeded-home boundary checks
+# shellcheck source=bin/fm-outcome-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-outcome-lib.sh"  # durable manifest, work-item, and PR-status contracts
+# shellcheck source=bin/fm-supervision-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-supervision-lib.sh"  # fm_sup_grace_seconds: shared beacon grace window
+# shellcheck source=bin/fm-pr-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-pr-lib.sh"  # fm_pr_url_parse: shared forge identity parsing
 
 usage() {
   cat <<'EOF'
@@ -241,21 +282,56 @@ crew_state_json() {  # <id>
     '{state:$state,source:$source,detail:$detail,raw:$raw}'
 }
 
+# Seconds between a file's mtime and this snapshot's observation time, or empty
+# when the path is missing or its mtime is unreadable. Never negative: a clock
+# skew that puts a record in the future reports 0 rather than a nonsense age.
+path_age_seconds() {  # <path>
+  local m age
+  [ -e "$1" ] || return 0
+  m=$(fm_sup_stat_mtime "$1") || return 0
+  [ -n "$m" ] || return 0
+  case "$m" in ''|*[!0-9]*) return 0 ;; esac
+  age=$(( SNAPSHOT_EPOCH - m ))
+  [ "$age" -lt 0 ] && age=0
+  printf '%s' "$age"
+}
+
 status_event_json() {  # <status-log>
-  local log=$1 present=0 raw='' verb='' note=''
+  local log=$1 present=0 raw='' verb='' note='' at='' age=''
   if [ -f "$log" ]; then
     present=1
     raw=$(last_nonempty_line "$log" || true)
     verb=$(status_line_verb "$raw")
     note=$(status_line_note "$raw")
+    at=$(fm_outcome_path_iso "$log")
+    age=$(path_age_seconds "$log")
   fi
   jq -n \
     --arg path "$log" \
     --arg raw "$raw" \
     --arg verb "$verb" \
     --arg note "$note" \
+    --arg at "$at" \
+    --arg age "$age" \
     --argjson present "$(bool_json "$present")" \
-    '{path:$path,present:$present,kind:"event_history",last_event:{state:$verb,note:$note,raw:$raw}}'
+    '{path:$path,present:$present,kind:"event_history",
+      last_event:{state:$verb,note:$note,raw:$raw},
+      last_event_at:(if $at == "" then null else $at end),
+      last_event_age_seconds:(if $age == "" then null else ($age | tonumber) end)}'
+}
+
+# The parsed forge identity for a recorded PR URL. Unparseable or absent leaves
+# every part null while the raw url field keeps whatever was recorded.
+pr_identity_json() {  # <pr-url>
+  local url=$1
+  if [ -z "$url" ] || ! fm_pr_url_parse "$url"; then
+    jq -n '{provider:null,host:null,path:null,number:null}'
+    return 0
+  fi
+  jq -n --arg provider "$FM_PR_PROVIDER" --arg host "$FM_PR_HOST" \
+    --arg path "$FM_PR_PATH" --arg number "$FM_PR_NUMBER" \
+    '{provider:$provider,host:$host,path:$path,
+      number:(if $number == "" then null else ($number | tonumber) end)}'
 }
 
 first_pr_url_in_file() {  # <file>
@@ -414,11 +490,12 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 }
 
 task_json_lines() {
-  local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
+  local meta id kind harness model effort mode yolo project worktree home projects backend target status_log report_path
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
+  local pr_head pr_identity pr_status pr_status_path pr_status_at pr_status_age work_items_json
 
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -426,6 +503,8 @@ task_json_lines() {
     kind=$(meta_value "$meta" kind)
     [ -n "$kind" ] || kind=ship
     harness=$(meta_value "$meta" harness)
+    model=$(meta_value "$meta" model)
+    effort=$(meta_value "$meta" effort)
     mode=$(meta_value "$meta" mode)
     yolo=$(meta_value "$meta" yolo)
     project=$(meta_value "$meta" project)
@@ -455,6 +534,20 @@ task_json_lines() {
     if [ -z "$pr" ]; then
       pr_source=absent
     fi
+    pr_head=$(meta_value "$meta" pr_head)
+    fm_outcome_sha_valid "$pr_head" || pr_head=
+    pr_identity=$(pr_identity_json "$pr")
+    # Cached only: this command stays offline, so an unrefreshed PR reports
+    # state "unknown" with source "absent" rather than blocking on a forge.
+    pr_status=$(fm_outcome_pr_status_read "$STATE" "$id")
+    pr_status_path=$(fm_outcome_pr_status_path "$STATE" "$id")
+    pr_status_at=$(printf '%s' "$pr_status" | jq -r '.observed_at // ""')
+    if [ -n "$pr_status_at" ]; then
+      pr_status_age=$(path_age_seconds "$pr_status_path")
+    else
+      pr_status_age=
+    fi
+    work_items_json=$(fm_outcome_work_items_read "$DATA" "$id" | jq -c '.references')
 
     current_json=$(crew_state_json "$id")
     event_json=$(status_event_json "$status_log")
@@ -545,6 +638,8 @@ task_json_lines() {
       --arg id "$id" \
       --arg kind "$kind" \
       --arg harness "$harness" \
+      --arg model "$model" \
+      --arg effort "$effort" \
       --arg mode "$mode" \
       --arg yolo "$yolo" \
       --arg project "$project" \
@@ -557,6 +652,11 @@ task_json_lines() {
       --arg remote_root "$remote_root" \
       --arg pr "$pr" \
       --arg pr_source "$pr_source" \
+      --arg pr_head "$pr_head" \
+      --arg pr_status_age "$pr_status_age" \
+      --argjson pr_identity "$pr_identity" \
+      --argjson pr_status "$pr_status" \
+      --argjson work_items "$work_items_json" \
       --arg agent_alive "$agent_alive" \
       --arg observed_at "$SNAPSHOT_NOW" \
       --arg last_event_raw "$last_event_raw" \
@@ -571,10 +671,52 @@ task_json_lines() {
       --argjson pending_decision "$(bool_json "$pending_decision")" \
       --argjson blocked_event "$(bool_json "$blocked_event")" \
       --argjson report_present "$(bool_json "$report_present")" \
-      '{
+      '
+      # Card precedence: the FIRST matching rung wins, so overlapping signals
+      # resolve to exactly one column. An open decision outranks everything
+      # because it is unanswered work for firstmate or the captain even when a
+      # PR is already open; a blocker outranks a failure because the worker is
+      # still there and asking; a failure outranks an open PR because the PR is
+      # not the live problem; and an open PR outranks done because a task that
+      # reported "PR checks green" has not landed until that PR is merged.
+      def card($kind; $state; $pending; $blocked; $pr_recorded; $pr_merged):
+        if $pending then
+          {rank:1,column:"needs_decision",action:"decide",
+           reason:"an open decision is waiting on firstmate or the captain"}
+        elif $blocked then
+          {rank:2,column:"blocked",action:"unblock",
+           reason:"the worker reported a blocker it cannot clear itself"}
+        elif $state == "parked" then
+          {rank:3,column:"parked",action:"respond_to_gate",
+           reason:"validation is parked at a gate awaiting a response"}
+        elif $state == "failed" then
+          {rank:4,column:"failed",action:"investigate",
+           reason:"the task reported a failure"}
+        elif $pr_recorded and ($pr_merged | not) then
+          {rank:5,column:"review",action:"review_pr",
+           reason:"a pull request is recorded and not confirmed merged"}
+        elif $state == "done" then
+          {rank:6,column:"done",action:"close_out",
+           reason:"the task reported completion with nothing left open"}
+        elif $state == "paused" then
+          {rank:7,column:"waiting",action:"recheck",
+           reason:"a declared external wait expected to clear on its own"}
+        elif $state == "working" then
+          {rank:8,column:"active",action:"supervise",
+           reason:"the worker is working"}
+        elif $kind == "secondmate" then
+          {rank:9,column:"secondmate",action:"route_work",
+           reason:"a persistent secondmate with an empty queue is idle by design"}
+        else
+          {rank:10,column:"idle",action:"inspect",
+           reason:"no current signal"}
+        end;
+      {
         id:$id,
         kind:$kind,
         harness:($harness // ""),
+        model:($model // ""),
+        effort:($effort // ""),
         mode:($mode // ""),
         yolo:($yolo // ""),
         project:($project // ""),
@@ -594,7 +736,14 @@ task_json_lines() {
                   elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
                   else "unknown" end),
           observed_at:$observed_at,freshness:"fresh"},
-        pr:{url:($pr | if . == "" then null else . end),source:$pr_source},
+        pr:({url:($pr | if . == "" then null else . end),
+             source:$pr_source,
+             head:($pr_head | if . == "" then null else . end),
+             status:$pr_status,
+             status_age_seconds:($pr_status_age | if . == "" then null else tonumber end),
+             status_freshness:(if $pr_status.observed_at == null then "absent" else "cached" end)}
+            + $pr_identity),
+        work_items:$work_items,
         hints:{
           pending_decision:$pending_decision,
           blocked_event:$blocked_event,
@@ -602,6 +751,17 @@ task_json_lines() {
           scout_report_present:$report_present,
           last_event_text:$last_event_raw
         },
+        card:(card($kind;
+                   $current_state.state;
+                   $pending_decision;
+                   $blocked_event;
+                   ($pr != "");
+                   ($pr_status.state == "merged"))
+              + {signals:{pending_decision:$pending_decision,
+                          blocked_event:$blocked_event,
+                          current_state:$current_state.state,
+                          pr_recorded:($pr != ""),
+                          pr_merged:($pr_status.state == "merged")}}),
         actions:(
           if $kind == "secondmate" then
             {send:"bin/fm-send.sh fm-\($id) \u0027<request>\u0027",
@@ -1399,6 +1559,54 @@ scout_report_lines() {
     | jq -s 'sort_by(.id)'
 }
 
+# Watcher liveness and away mode, from the same beacon and grace window
+# bin/fm-guard.sh and the supervision scripts use, so a renderer never invents a
+# second staleness rule.
+supervision_json() {
+  local beat="$STATE/.last-watcher-beat" afk="$STATE/.afk"
+  local grace beat_at='' beat_age='' afk_at='' afk_age=''
+  local beat_present=0 afk_present=0 stale=1
+  # bin/fm-supervision-lib.sh owns the grace window; the beacon is stale once its
+  # age reaches it, measured against this snapshot's own observation time so the
+  # reported age and the reported verdict always agree.
+  grace=$(fm_sup_grace_seconds)
+  if [ -e "$beat" ]; then
+    beat_present=1
+    beat_at=$(fm_outcome_path_iso "$beat")
+    beat_age=$(path_age_seconds "$beat")
+    [ -n "$beat_age" ] && [ "$beat_age" -lt "$grace" ] && stale=0
+  fi
+  if [ -e "$afk" ]; then
+    afk_present=1
+    afk_at=$(fm_outcome_path_iso "$afk")
+    afk_age=$(path_age_seconds "$afk")
+  fi
+  jq -n \
+    --arg beat_path "$beat" \
+    --arg beat_at "$beat_at" \
+    --arg beat_age "$beat_age" \
+    --arg afk_path "$afk" \
+    --arg afk_at "$afk_at" \
+    --arg afk_age "$afk_age" \
+    --argjson beat_present "$(bool_json "$beat_present")" \
+    --argjson afk_present "$(bool_json "$afk_present")" \
+    --argjson stale "$(bool_json "$stale")" \
+    --argjson grace "$grace" \
+    'def num($v): if $v == "" then null else ($v | tonumber) end;
+     def blank($v): if $v == "" then null else $v end;
+     (num($beat_age)) as $age
+     | {watcher:{beacon_path:$beat_path,
+                 present:$beat_present,
+                 observed_at:blank($beat_at),
+                 age_seconds:$age,
+                 grace_seconds:$grace,
+                 stale:$stale},
+        afk:{path:$afk_path,
+             active:$afk_present,
+             since:blank($afk_at),
+             age_seconds:num($afk_age)}}'
+}
+
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
 
@@ -1415,6 +1623,10 @@ SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_JSON") \
   || { echo "fm-fleet-snapshot: registered secondmate aggregation failed" >&2; exit 1; }
 SECONDMATE_LANDED_JSON=$(secondmate_landed_from_current_json "$SECONDMATE_CURRENT_JSON") \
   || { echo "fm-fleet-snapshot: secondmate landed projection failed" >&2; exit 1; }
+SUPERVISION_JSON=$(supervision_json) \
+  || { echo "fm-fleet-snapshot: supervision summary failed" >&2; exit 1; }
+HISTORY_JSON=$(fm_outcome_history_json "$DATA" "$FM_SNAPSHOT_HISTORY") \
+  || { echo "fm-fleet-snapshot: durable history read failed" >&2; exit 1; }
 
 jq -n \
   --arg generated "$SNAPSHOT_NOW" \
@@ -1430,6 +1642,8 @@ jq -n \
   --slurpfile scout_reports_doc <(printf '%s' "$SCOUT_REPORTS_JSON") \
   --slurpfile secondmate_current_doc <(printf '%s' "$SECONDMATE_CURRENT_JSON") \
   --slurpfile secondmate_landed_doc <(printf '%s' "$SECONDMATE_LANDED_JSON") \
+  --slurpfile supervision_doc <(printf '%s' "$SUPERVISION_JSON") \
+  --slurpfile history_doc <(printf '%s' "$HISTORY_JSON") \
   'def doc($v): ($v[0] // error("fm-fleet-snapshot: empty jq payload"));
    doc($backlog_doc) as $backlog
    | doc($tasks_doc) as $tasks
@@ -1437,6 +1651,8 @@ jq -n \
    | doc($scout_reports_doc) as $scout_reports
    | doc($secondmate_current_doc) as $secondmate_current
    | doc($secondmate_landed_doc) as $secondmate_landed
+   | doc($supervision_doc) as $supervision
+   | doc($history_doc) as $history
    | def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
    def task_by_id($id): ($tasks[]? | select(.id == $id) | .) // null;
    def report_kind($id): (task_by_id($id).kind // backlog_by_id($id).kind // "scout");
@@ -1451,6 +1667,10 @@ jq -n \
      scout_reports:($scout_reports | map(. + {kind:report_kind(.id)})),
      secondmate_current:$secondmate_current,
      secondmate_landed:$secondmate_landed,
+     card_precedence:["needs_decision","blocked","parked","failed","review",
+                      "done","waiting","active","secondmate","idle"],
+     supervision:$supervision,
+     history:$history,
      secondmate_guidance:{
        note:"For kind=secondmate, bearings selects validated structured state from that registered home; parent events and bounded terminal evidence are fallback-only supplements and never current-state authority."
      }

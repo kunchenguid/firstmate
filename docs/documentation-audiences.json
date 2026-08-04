@@ -249,6 +249,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/fleet-data-contracts.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/fm-test-isolation-proof.md",
       "audience": "maintainer-verification"
     },

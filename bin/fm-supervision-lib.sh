@@ -11,6 +11,20 @@
 # beacon never counts as a live watcher. The status fields here retain the
 # beacon-age details used in their messages.
 
+# The shared watcher-beacon grace window, in seconds. This is the single owner
+# of the window every consumer measures the beacon against: fm_supervision_status
+# below, bin/fm-guard.sh through it, and bin/fm-fleet-snapshot.sh's supervision
+# block. A beacon is fresh while its age is strictly under the window.
+# FM_GUARD_GRACE overrides it; an unparseable override falls back to the default
+# rather than silently disabling the check.
+FM_SUP_GRACE_DEFAULT=300
+
+fm_sup_grace_seconds() {  # [explicit-override]
+  local grace=${1:-${FM_GUARD_GRACE:-$FM_SUP_GRACE_DEFAULT}}
+  case "$grace" in ''|*[!0-9]*) grace=$FM_SUP_GRACE_DEFAULT ;; esac
+  printf '%s' "$grace"
+}
+
 # Portable mtime; Linux stat lacks -f, macOS stat lacks -c.
 fm_sup_stat_mtime() {
   if [ "$(uname)" = Darwin ]; then
@@ -30,10 +44,11 @@ fm_sup_stat_mtime() {
 #   FM_SUP_WATCHER_FRESH  true/false - a watcher beacon within the grace window
 #   FM_SUP_BEACON_DESC    human-readable beacon age, for banners ("never" if absent)
 #   FM_SUP_QUEUE_PENDING  true/false - state/.wake-queue has unread records
-# grace-seconds defaults to $FM_GUARD_GRACE, then 300, matching fm-guard.sh.
+# grace-seconds defaults through fm_sup_grace_seconds above.
 # Always returns 0; callers read the vars, or use fm_supervision_unhealthy below.
 fm_supervision_status() {
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source beat m age
+  local state=$1 grace meta source beat m age
+  grace=$(fm_sup_grace_seconds "${2:-}")
   FM_SUP_IN_FLIGHT=0
   FM_SUP_NEEDED=false
   FM_SUP_WATCHER_FRESH=false

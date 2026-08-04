@@ -72,7 +72,7 @@ make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -493,6 +493,7 @@ run_teardown() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
@@ -1824,7 +1825,85 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
   pass "herdr projection teardown retains every record when post-close presence is unknown"
 }
 
+# --- durable outcome manifest ------------------------------------------------
+#
+# Teardown is the last moment the records that describe a task still exist, so
+# the manifest it publishes is the only thing that keeps the task in history.
+# These cases pin publication before removal, the forced-discard outcome, and
+# the refusal that stops a task being erased when it could not be archived.
+
+test_teardown_publishes_outcome_manifest_before_removing_records() {
+  local case_dir rc manifest
+  case_dir=$(make_case manifest-publish)
+  write_meta "$case_dir" local-only ship
+  printf '%s\n' 'model=opus' 'effort=xhigh' >> "$case_dir/state/task-x1.meta"
+  printf 'done: ready in branch\n' > "$case_dir/state/task-x1.status"
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "manifest-publish: teardown should succeed on landed work"
+
+  manifest="$case_dir/data/task-x1/outcome.json"
+  assert_present "$manifest" "teardown did not publish the durable outcome manifest"
+  assert_absent "$case_dir/state/task-x1.meta" "teardown left the volatile task metadata behind"
+  jq -e '.schema == "fm-outcome-manifest.v1" and .task_id == "task-x1"
+    and .outcome.state == "done" and .outcome.forced == false
+    and .model == "opus" and .effort == "xhigh"
+    and .attribution.endpoint.target == "firstmate:fm-task-x1"' "$manifest" >/dev/null \
+    || fail "the published manifest did not record the outcome and attribution: $(cat "$manifest")"
+  pass "teardown publishes the durable outcome manifest and then removes the volatile records"
+}
+
+test_forced_teardown_records_a_discarded_outcome() {
+  local case_dir rc manifest
+  case_dir=$(make_case manifest-forced)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unlanded work"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "manifest-forced: forced teardown should succeed"
+
+  manifest="$case_dir/data/task-x1/outcome.json"
+  assert_present "$manifest" "a forced teardown did not publish a manifest"
+  jq -e '.outcome.state == "discarded" and .outcome.forced == true
+    and .outcome.source == "forced_teardown"' "$manifest" >/dev/null \
+    || fail "a forced teardown did not record a discarded outcome: $(cat "$manifest")"
+  pass "a forced teardown records the discard in durable history instead of erasing the task silently"
+}
+
+test_teardown_refuses_when_the_manifest_cannot_be_published() {
+  local case_dir rc
+  case_dir=$(make_case manifest-refuse)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+  # An unwritable manifest destination: publication fails, so the task must not
+  # be erased without a durable record of it.
+  mkdir -p "$case_dir/data/task-x1/outcome.json"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "manifest-refuse: teardown succeeded despite an unpublishable manifest"
+  grep -q "could not publish the durable outcome manifest" "$case_dir/stderr" \
+    || fail "manifest-refuse: teardown did not name the manifest failure: $(cat "$case_dir/stderr")"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "manifest-refuse: teardown erased the task metadata it could not archive"
+  pass "teardown refuses and retains every task record when the manifest cannot be published"
+}
+
 test_local_only_fork_remote_allows
+test_teardown_publishes_outcome_manifest_before_removing_records
+test_forced_teardown_records_a_discarded_outcome
+test_teardown_refuses_when_the_manifest_cannot_be_published
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses

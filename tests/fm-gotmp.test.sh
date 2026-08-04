@@ -78,6 +78,12 @@ make_fake_root() {
   # fm-wake-lib.sh: teardown sources it for serialized secondmate lifecycle locks
   # and the agy trust-ownership lock.
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
+  # The durable outcome manifest teardown publishes before removing the volatile
+  # records, and the libraries that writer sources.
+  ln -s "$ROOT/bin/fm-outcome-manifest.sh" "$fake/bin/fm-outcome-manifest.sh"
+  ln -s "$ROOT/bin/fm-outcome-lib.sh" "$fake/bin/fm-outcome-lib.sh"
+  ln -s "$ROOT/bin/fm-supervision-lib.sh" "$fake/bin/fm-supervision-lib.sh"
+  ln -s "$ROOT/bin/fm-classify-lib.sh" "$fake/bin/fm-classify-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -155,6 +161,11 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-x-lib.sh" "$fake/bin/fm-x-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-registry-lib.sh" "$fake/bin/fm-secondmate-registry-lib.sh"
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
+  # The durable outcome manifest writer and the libraries it sources.
+  ln -s "$ROOT/bin/fm-outcome-manifest.sh" "$fake/bin/fm-outcome-manifest.sh"
+  ln -s "$ROOT/bin/fm-outcome-lib.sh" "$fake/bin/fm-outcome-lib.sh"
+  ln -s "$ROOT/bin/fm-supervision-lib.sh" "$fake/bin/fm-supervision-lib.sh"
+  ln -s "$ROOT/bin/fm-classify-lib.sh" "$fake/bin/fm-classify-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0

@@ -119,4 +119,10 @@ fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
+# Seed the normalized review/check/mergeability cache so a PR-ready task shows a
+# real state to read-only consumers straight away instead of "unknown" until the
+# next refresh. Best effort: the watch is already armed, and an offline or
+# unauthenticated forge must not fail the arm.
+FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+  "$SCRIPT_DIR/fm-pr-status.sh" refresh "$ID" >/dev/null 2>&1 || true
 printf 'armed: state/%s.check.sh\n' "$ID"

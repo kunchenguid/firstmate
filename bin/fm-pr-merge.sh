@@ -87,6 +87,14 @@ fi
 
 gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
 
+# Refresh the cached PR observation so the task's final normalized state reads
+# `merged` in the fleet snapshot and in the outcome manifest teardown publishes.
+# Best effort by design: the merge already succeeded and must never look
+# retryable, so a failed refresh only leaves the previous observation in place.
+FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+  "$SCRIPT_DIR/fm-pr-status.sh" refresh "$ID" >/dev/null 2>&1 || \
+  echo "warning: PR merge succeeded: $URL; the cached PR state could not be refreshed" >&2
+
 issue_close_warning() {  # <detail>
   echo "warning: PR merge succeeded: $URL; GitHub issue bookkeeping did not complete: $1" >&2
 }

@@ -551,7 +551,7 @@ EOF
       and .paths.report.present == true
   ' >/dev/null || fail "bold task did not join to override-backed backlog and report"
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_PROJECTS_OVERRIDE="$projects" "$VIEW")
-  assert_contains "$view" "| bold-task | done / status-log | scout | alpha | tmux | present | $data/bold-task/report.md" \
+  assert_contains "$view" "| bold-task | done / close_out | done / status-log | scout | alpha | tmux | present | - | $data/bold-task/report.md" \
     "view should render bold in-flight row from snapshot"
   assert_contains "$view" "| blocked-reason | Blocked Reason | beta | ship | queued-comma - waits on queued-comma | - |" \
     "view should render blocked reason without title metadata"
@@ -568,7 +568,7 @@ test_view_renders_snapshot() {
   write_fixture "$home"
   fakebin=$(make_fakebin "$home")
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
-  assert_contains "$view" "| ship-task | working / pane | ship | alpha | tmux | present | https://github.com/kunchenguid/firstmate/pull/9" \
+  assert_contains "$view" "| ship-task | review / review_pr | working / pane | ship | alpha | tmux | present | unknown / unknown | https://github.com/kunchenguid/firstmate/pull/9" \
     "view should render ship row from snapshot"
   assert_contains "$view" "| queued-task | Queued Task | alpha | ship | ship-task | -" \
     "view should render queued backlog row"
@@ -576,7 +576,7 @@ test_view_renders_snapshot() {
     "view should render done backlog row"
   assert_contains "$view" "bin/fm-send.sh fm-secondmate-task" \
     "view should show secondmate send guidance"
-  assert_contains "$view" "| secondmate-task | working / status-log | secondmate | $home/secondmate-home | tmux | present / alive |" \
+  assert_contains "$view" "| secondmate-task | active / supervise | working / status-log | secondmate | $home/secondmate-home | tmux | present / alive | - |" \
     "view should show secondmate endpoint agent liveness"
   assert_not_contains "$view" "fm-peek.sh fm-secondmate-task" \
     "view must not tell firstmate to routinely peek secondmates"
@@ -597,9 +597,9 @@ test_view_renders_dead_secondmate_agent_status() {
   printf 'working: watching delegated scope\n' > "$home/state/dead-secondmate.status"
   fakebin=$(make_fakebin "$home")
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
-  assert_contains "$view" "| dead-secondmate | unknown / none | secondmate | $home/secondmate-home | tmux | present / dead |" \
+  assert_contains "$view" "| dead-secondmate | secondmate / route_work | unknown / none | secondmate | $home/secondmate-home | tmux | present / dead | - |" \
     "view should distinguish a present secondmate endpoint from a dead agent"
-  assert_contains "$view" "| dead-secondmate | unknown / none | secondmate | $home/secondmate-home | tmux | present / dead | - | $home/secondmate-home (absent) |" \
+  assert_contains "$view" "| dead-secondmate | secondmate / route_work | unknown / none | secondmate | $home/secondmate-home | tmux | present / dead | - | - | $home/secondmate-home (absent) |" \
     "view should show a recorded missing secondmate home path"
   pass "fleet view renders secondmate agent liveness"
 }
@@ -779,8 +779,252 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+# --- additive fm-fleet-snapshot.v1 telemetry --------------------------------
+#
+# The dashboard consumers must render model/effort, event age, watcher and
+# away-mode health, normalized PR state, work-item references, and durable
+# history WITHOUT reparsing private state files, so each of those is asserted
+# through the snapshot's own output here.
+
+test_additive_telemetry_fields() {
+  local home fakebin out
+  home=$(make_home telemetry)
+  write_fixture "$home"
+  printf 'model=opus\neffort=xhigh\n' >> "$home/state/ship-task.meta"
+  "$ROOT/bin/fm-work-item.sh" list ship-task >/dev/null 2>&1 || true
+  FM_HOME="$home" "$ROOT/bin/fm-work-item.sh" add ship-task \
+    https://gitlab.example.com/group/sub/proj/-/issues/7 --origin pr-linked >/dev/null \
+    || fail "seeding a work-item reference failed"
+  : > "$home/state/.last-watcher-beat"
+  : > "$home/state/.afk"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "ship-task")
+    | .model == "opus" and .effort == "xhigh"
+  ' >/dev/null || fail "the dispatch model and effort are missing from the task row: $out"
+
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "ship-task")
+    | (.paths.status_log.last_event_at | test("^[0-9]{4}-.*Z$"))
+      and (.paths.status_log.last_event_age_seconds | type) == "number"
+      and .paths.status_log.last_event_age_seconds >= 0
+  ' >/dev/null || fail "the last task-event timestamp and computed age are missing"
+
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "ship-task")
+    | .pr.provider == "github" and .pr.host == "github.com" and .pr.number == 9
+      and .pr.status.state == "unknown" and .pr.status.review == "unknown"
+      and .pr.status.checks == "unknown" and .pr.status.mergeable == "unknown"
+      and .pr.status_freshness == "absent"
+  ' >/dev/null || fail "the normalized PR state is missing or not offline-safe"
+
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "ship-task")
+    | (.work_items | length) == 1
+      and .work_items[0].forge == "gitlab"
+      and .work_items[0].owner == "group/sub"
+      and .work_items[0].origin == "pr-linked"
+      and .work_items[0].enrichment.title == null
+  ' >/dev/null || fail "work-item references are missing from the task row"
+
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "scout-task") | (.work_items | length) == 0
+  ' >/dev/null || fail "a task with no work items must expose an empty list, not a null"
+
+  printf '%s' "$out" | jq -e '
+    .supervision.watcher.present == true
+      and (.supervision.watcher.age_seconds | type) == "number"
+      and .supervision.watcher.stale == false
+      and (.supervision.watcher.grace_seconds | type) == "number"
+      and .supervision.afk.active == true
+      and (.supervision.afk.since | test("^[0-9]{4}-.*Z$"))
+  ' >/dev/null || fail "watcher heartbeat age and away-mode state are missing"
+  pass "the snapshot exposes model/effort, event age, PR state, work items, and supervision health"
+}
+
+test_watcher_beacon_staleness_and_absence() {
+  local home fakebin out
+  home=$(make_home beacon)
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .supervision.watcher.present == false
+      and .supervision.watcher.age_seconds == null
+      and .supervision.watcher.stale == true
+      and .supervision.afk.active == false
+  ' >/dev/null || fail "an absent beacon must read as stale, not as fresh: $out"
+
+  : > "$home/state/.last-watcher-beat"
+  out=$(PATH="$fakebin:$PATH" FM_GUARD_GRACE=1 FM_SNAPSHOT_NOW_EPOCH=$(( $(date -u +%s) + 600 )) \
+    FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .supervision.watcher.present == true
+      and .supervision.watcher.stale == true
+      and .supervision.watcher.age_seconds >= 600
+      and .supervision.watcher.grace_seconds == 1
+  ' >/dev/null || fail "a beacon past the shared grace window must read stale: $out"
+  pass "watcher liveness reports absence and staleness against the shared grace window"
+}
+
+# The exact precedence when signals overlap. Each case deliberately stacks a
+# lower-priority signal underneath the one that must win.
+test_card_column_precedence() {
+  local home fakebin out gen
+  home=$(make_home cards)
+  mkdir -p "$home/projects/wt"
+  printf '## In flight\n' > "$home/data/backlog.md"
+
+  # needs-decision, stacked under an open PR and a done event.
+  fm_write_meta "$home/state/decide-task.meta" \
+    "window=firstmate:fm-decide-task" "worktree=$home/projects/wt" \
+    "project=alpha" "harness=claude" "kind=ship" "mode=ship" \
+    "pr=https://github.com/acme/widget/pull/1"
+  printf 'done: PR up\nneeds-decision [key=k1]: pick an API shape\n' > "$home/state/decide-task.status"
+  record_claude_idle "$home/state" decide-task
+
+  # blocked, stacked under an open PR.
+  fm_write_meta "$home/state/blocked-task.meta" \
+    "window=firstmate:fm-blocked-task" "worktree=$home/projects/wt" \
+    "project=alpha" "harness=claude" "kind=ship" "mode=ship" \
+    "pr=https://github.com/acme/widget/pull/2"
+  printf 'blocked [key=k2]: missing credential\n' > "$home/state/blocked-task.status"
+  record_claude_idle "$home/state" blocked-task
+
+  # failed, stacked under an open PR.
+  fm_write_meta "$home/state/failed-task.meta" \
+    "window=firstmate:fm-failed-task" "worktree=$home/projects/wt" \
+    "project=alpha" "harness=claude" "kind=ship" "mode=ship" \
+    "pr=https://github.com/acme/widget/pull/3"
+  printf 'failed: pipeline gave up\n' > "$home/state/failed-task.status"
+  record_claude_idle "$home/state" failed-task
+
+  # An open PR outranks a done event, because "PR checks green" is not landed.
+  fm_write_meta "$home/state/review-task.meta" \
+    "window=firstmate:fm-review-task" "worktree=$home/projects/wt" \
+    "project=alpha" "harness=claude" "kind=ship" "mode=ship" \
+    "pr=https://github.com/acme/widget/pull/4"
+  printf 'done: PR https://github.com/acme/widget/pull/4 checks green\n' > "$home/state/review-task.status"
+  record_claude_idle "$home/state" review-task
+
+  # A merged PR stops outranking done, so the task moves to close-out.
+  fm_write_meta "$home/state/merged-task.meta" \
+    "window=firstmate:fm-merged-task" "worktree=$home/projects/wt" \
+    "project=alpha" "harness=claude" "kind=ship" "mode=ship" \
+    "pr=https://github.com/acme/widget/pull/5"
+  printf 'done: merged\n' > "$home/state/merged-task.status"
+  record_claude_idle "$home/state" merged-task
+  printf '{"schema":"fm-pr-status.v1","url":"https://github.com/acme/widget/pull/5",
+"provider":"github","host":"github.com","path":"acme/widget","number":5,
+"status":{"state":"merged","draft":false,"review":"approved","checks":"passing",
+"mergeable":"mergeable","head":null,"observed_at":"2026-07-04T00:00:00Z","source":"github"}}\n' \
+    > "$home/state/merged-task.pr-status"
+
+  # A declared external wait with no PR.
+  fm_write_meta "$home/state/paused-task.meta" \
+    "window=firstmate:fm-paused-task" "worktree=$home/projects/wt" \
+    "project=alpha" "harness=claude" "kind=scout" "mode=scout"
+  printf 'paused: waiting on an upstream release\n' > "$home/state/paused-task.status"
+  record_claude_idle "$home/state" paused-task
+
+  # A working worker with no PR and no open decision.
+  fm_write_meta "$home/state/active-task.meta" \
+    "window=firstmate:fm-active-task" "worktree=$home/projects/wt" \
+    "project=alpha" "harness=claude" "kind=ship" "mode=ship"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" active-task)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" active-task busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+
+  # A quiet persistent secondmate is idle by design, not an idle card.
+  fm_write_secondmate_meta "$home/state/quiet-secondmate.meta" "$home/projects/wt"
+
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+
+  assert_card() {  # <id> <column> <rank> <action>
+    printf '%s' "$out" | jq -e --arg id "$1" --arg column "$2" \
+      --argjson rank "$3" --arg action "$4" '
+      .tasks[] | select(.id == $id)
+      | .card.column == $column and .card.rank == $rank and .card.action == $action
+    ' >/dev/null || fail "card precedence wrong for $1: $(printf '%s' "$out" \
+      | jq -c --arg id "$1" '.tasks[] | select(.id == $id) | .card')"
+  }
+  assert_card decide-task needs_decision 1 decide
+  assert_card blocked-task blocked 2 unblock
+  assert_card failed-task failed 4 investigate
+  assert_card review-task review 5 review_pr
+  assert_card merged-task "done" 6 close_out
+  assert_card paused-task waiting 7 recheck
+  assert_card active-task active 8 supervise
+  assert_card quiet-secondmate secondmate 9 route_work
+
+  # The published ladder is the contract, and every card's rank is its position
+  # in it, so a renderer can sort by rank without re-deriving the order.
+  printf '%s' "$out" | jq -e '
+    .card_precedence as $ladder
+    | $ladder == ["needs_decision","blocked","parked","failed","review",
+                  "done","waiting","active","secondmate","idle"]
+      and ([.tasks[] | .card as $c | $c.rank == (($ladder | index($c.column)) + 1)] | all)
+  ' >/dev/null || fail "the card precedence ladder is missing or ranks disagree with it: $out"
+
+  # The verdict is inspectable: the inputs that produced it travel with it.
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "decide-task")
+    | .card.signals.pending_decision == true
+      and .card.signals.pr_recorded == true
+      and .card.signals.pr_merged == false
+  ' >/dev/null || fail "card signals do not record the inputs behind the verdict"
+  pass "overlapping signals resolve to exactly one card column in the documented order"
+}
+
+test_history_is_projected_after_teardown() {
+  local home fakebin out view
+  home=$(make_home snapshot-history)
+  mkdir -p "$home/data/gone-task"
+  printf '# brief\n' > "$home/data/gone-task/brief.md"
+  fm_write_meta "$home/state/gone-task.meta" \
+    "window=firstmate:fm-gone-task" "worktree=$home/projects/wt" \
+    "project=alpha" "harness=codex" "kind=ship" "mode=no-mistakes" \
+    "model=gpt-5" "effort=low"
+  printf 'done: landed\n' > "$home/state/gone-task.status"
+  FM_HOME="$home" "$ROOT/bin/fm-outcome-manifest.sh" write gone-task >/dev/null \
+    || fail "seeding a manifest failed"
+  rm -f "$home/state/gone-task.meta" "$home/state/gone-task.status"
+
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    (.tasks | length) == 0
+      and .history.schema == "fm-outcome-history.v1"
+      and .history.total == 1
+      and .history.records[0].task_id == "gone-task"
+      and .history.records[0].harness == "codex"
+      and .history.records[0].model == "gpt-5"
+      and .history.records[0].outcome.state == "done"
+  ' >/dev/null || fail "durable history did not survive removal of the volatile records: $out"
+
+  # A renderer shows the torn-down task without reaching into private state.
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
+  assert_contains "$view" "| gone-task |" "the fleet view did not render the durable history record"
+  assert_contains "$view" "No live task metadata found." "the fleet view invented a live task from history"
+
+  printf 'not json\n' > "$home/data/gone-task/outcome.json"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .history.total == 0
+      and (.history.malformed | length) == 1
+      and .history.malformed[0].id == "gone-task"
+  ' >/dev/null || fail "an unreadable manifest must be disclosed, not silently dropped: $out"
+  pass "the snapshot projects durable history and discloses unreadable manifests"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_additive_telemetry_fields
+test_watcher_beacon_staleness_and_absence
+test_card_column_precedence
+test_history_is_projected_after_teardown
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state
