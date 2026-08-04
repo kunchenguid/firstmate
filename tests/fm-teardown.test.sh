@@ -1895,6 +1895,19 @@ gate: review
 EOF
 }
 
+running_axi_status_toon() {  # <branch> <head> [run-id]
+  cat <<EOF
+run:
+  id: "${3:-01RUN}"
+  branch: $1
+  status: running
+  head: "$2"
+  pr: ""
+steps[1]{step,status,findings,summary}:
+  test,running,0,"agent under way"
+EOF
+}
+
 # Land a shippable commit on the task branch and push it to origin, the same
 # "definitely landed, teardown must ALLOW" shape test_no_mistakes_origin_remote_allows
 # uses, so these new cases exercise the abort/reap steps on a real successful
@@ -2039,6 +2052,26 @@ test_another_branchs_parked_run_is_never_touched() {
   assert_not_contains "$(cat "$case_dir/stderr")" "aborting" \
     "parked-run-not-ours: teardown reported aborting a run it does not own"
   pass "a parked run on another branch is never aborted by this task's teardown (ownership is precise)"
+}
+
+test_own_autonomous_run_is_left_alone() {
+  local case_dir rc head
+  case_dir=$(make_case autonomous-run-left-alone)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(running_axi_status_toon fm/task-x1 "$head")" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "autonomous-run-left-alone: teardown should still succeed"
+  assert_absent "$case_dir/nm-abort.log" \
+    "autonomous-run-left-alone: teardown aborted a task-owned autonomous run"
+  assert_not_contains "$(cat "$case_dir/stderr")" "aborting" \
+    "autonomous-run-left-alone: teardown reported aborting an autonomous run"
+  pass "a task-owned autonomous running step is left alone rather than aborted"
 }
 
 test_leaked_worktree_process_is_reaped() {
@@ -2471,6 +2504,7 @@ test_mismatched_run_after_abort_refuses_unconfirmed
 test_empty_status_after_abort_refuses_unconfirmed
 test_not_found_status_after_abort_confirms_completion
 test_another_branchs_parked_run_is_never_touched
+test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
 test_lsof_absent_reaps_tmux_process_group
