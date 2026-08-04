@@ -354,6 +354,42 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
 }
 
+# A PR-raising worker stops at the CI-ready handoff, but firstmate still has to
+# confirm the PR can merge and land it. A bare "done: PR <url> checks green"
+# reads at a glance like a finished task, so both PR modes must generate a status
+# line that says the PR is not landed yet - and the no-mistakes line must keep
+# the "checks green" token that bin/fm-crew-state.sh and bin/fm-classify-lib.sh
+# key off, so the clarification cannot cost the existing CI-ready detection.
+test_pr_modes_report_merge_pending() {
+  local home id brief line
+  home="$TMP_ROOT/merge-pending-home"
+  mkdir -p "$home/data"
+
+  id="brief-mergepending-d1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "no-mistakes brief was not scaffolded"
+  assert_grep 'done: PR {url} checks green - merge pending, not yet landed' "$brief" \
+    "no-mistakes brief must report the CI-ready handoff as not yet landed"
+  assert_grep "firstmate then confirms the PR can merge and lands it" "$brief" \
+    "no-mistakes brief must name who lands the PR after CI green"
+
+  id="brief-mergepending-d2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep 'done: PR {url} opened - merge pending, not yet landed' "$brief" \
+    "direct-PR brief must report the opened PR as not yet landed"
+
+  # The clarified line must still classify as captain-relevant through the
+  # shipped library. Its CI-ready reading is covered end to end by
+  # test_ci_ready_done_log_beats_monitoring_run in tests/fm-crew-state.test.sh.
+  line='done: PR https://github.com/o/r/pull/2 checks green - merge pending, not yet landed'
+  ( . "$ROOT/bin/fm-classify-lib.sh"
+    status_is_captain_relevant "$line" ) \
+    || fail "clarified CI-ready line must stay captain-relevant"
+  pass "fm-brief.sh: PR modes report the merge-pending handoff, not a landed task"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -795,6 +831,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_pr_modes_report_merge_pending
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path

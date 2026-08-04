@@ -457,6 +457,26 @@ test_ci_ready_done_log_beats_monitoring_run() {
   pass "ci-ready status log beats monitoring run"
 }
 
+# The brief scaffold now has the worker spell out that a CI-green PR is not
+# landed yet, so the reported line carries a trailing merge-pending clause. That
+# clarification must not cost the CI-ready reading of the same line.
+test_ci_ready_done_log_with_merge_pending_clause() {
+  reset_fakes
+  local d; d=$(new_case ci-ready-pending)
+  make_repo_on_branch "$d/wt" fm/feat-cipending
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cipending.meta" "window=fm:fm-feat-cipending" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2 checks green - merge pending, not yet landed\n' \
+    > "$d/state/feat-cipending.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cipending)"
+  local out; out=$(run_crew_state "$d" feat-cipending)
+  assert_contains "$out" "state: done" "merge-pending ci-ready status log -> done"
+  assert_contains "$out" "source: status-log" "merge-pending ci-ready state comes from the status log"
+  assert_contains "$out" "merge pending" "merge-pending ci-ready detail preserves the handoff wording"
+  assert_not_contains "$out" "state: working" "merge-pending ci-ready is not hidden by monitoring run"
+  pass "ci-ready status log still wins with the merge-pending clause"
+}
+
 # Regression for the PR #252 incident: the crew's own status log never got a
 # "done: ... checks green" line (log_reports_ci_ready above does not apply),
 # but the ci step's log tail shows CI is actually green and only waiting on
@@ -1316,6 +1336,7 @@ test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
+test_ci_ready_done_log_with_merge_pending_clause
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
 test_ci_monitoring_no_checks_terminal_surfaces_done

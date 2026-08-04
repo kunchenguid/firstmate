@@ -52,6 +52,11 @@
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns approval decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
+# Both PR-raising modes end on a status line that states the PR is not yet landed
+# ("merge pending, not yet landed"), because the worker's stop point is the CI-ready
+# handoff, not the merge: firstmate still confirms mergeability and lands the PR.
+# The no-mistakes line keeps its "checks green" token, which bin/fm-crew-state.sh's
+# CI-ready detection and the captain-relevance regex in bin/fm-classify-lib.sh read.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
@@ -388,7 +393,8 @@ case "$MODE" in
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url} opened - merge pending, not yet landed\` to the status file and stop.
+Say "merge pending, not yet landed" verbatim so the handoff is not read as a landed task.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;
@@ -427,7 +433,9 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green - merge pending, not yet landed\` and stop. You are finished.
+Your work stops at CI green; firstmate then confirms the PR can merge and lands it under the configured merge authority.
+Say "merge pending, not yet landed" verbatim so that handoff is not read as a landed task.
 EOF
     ;;
 esac
