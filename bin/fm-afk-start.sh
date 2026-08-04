@@ -41,6 +41,8 @@ FM_AFK_DAEMON="$FM_AFK_START_DIR/fm-supervise-daemon.sh"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$FM_AFK_START_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-supervisor-target-lib.sh
+. "$FM_AFK_START_DIR/fm-supervisor-target-lib.sh"
 
 fm_afk_start_usage() {
   sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -116,6 +118,12 @@ fm_afk_start_main() {
     -h|--help) fm_afk_start_usage; return 0 ;;
     * ) echo "usage: $(basename "${BASH_SOURCE[1]:-fm-afk-start.sh}")" >&2; return 2 ;;
   esac
+
+  if fm_supervisor_external_codex_without_pane; then
+    echo "afk: away mode is unavailable from an external Codex thread without a primary tmux or Herdr pane" >&2
+    echo "afk: Codex provides no safe asynchronous callback to this thread" >&2
+    return 1
+  fi
 
   mkdir -p "$FM_AFK_STATE"
   if [ "${FM_AFK_STATE_PREPARED:-0}" = 1 ]; then
