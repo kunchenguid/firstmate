@@ -134,15 +134,23 @@ resolve_evidence_base() {
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     remote_default=$(git -C "$WT" ls-remote --symref origin HEAD 2>/dev/null \
       | awk '/^ref:/ { sub("refs/heads/", "", $2); print $2; exit }')
-    if [ -n "$remote_default" ] && git -C "$WT" fetch --quiet origin \
-      "+refs/heads/$remote_default:refs/fm-merge/base/$remote_default" >/dev/null 2>&1; then
-      resolved=$(git -C "$WT" rev-parse --verify -q \
-        "refs/fm-merge/base/$remote_default^{commit}" 2>/dev/null || true)
-      if [ -n "$resolved" ] && [ "$resolved" != "$EVIDENCE_REF" ]; then
-        printf '%s' "$resolved"
-        return 0
+    # The remote's HEAD symref lookup above can miss the real default branch
+    # (e.g. an older git that never auto-points an empty bare repo's HEAD at
+    # the first branch pushed to it, leaving HEAD referencing a name nothing
+    # was ever pushed as). Also try the common default names directly against
+    # origin before giving up on the remote and falling back to local-only
+    # refs, which a task worktree normally never has checked out.
+    for branch in ${remote_default:+"$remote_default"} main master; do
+      if git -C "$WT" fetch --quiet origin \
+        "+refs/heads/$branch:refs/fm-merge/base/$branch" >/dev/null 2>&1; then
+        resolved=$(git -C "$WT" rev-parse --verify -q \
+          "refs/fm-merge/base/$branch^{commit}" 2>/dev/null || true)
+        if [ -n "$resolved" ] && [ "$resolved" != "$EVIDENCE_REF" ]; then
+          printf '%s' "$resolved"
+          return 0
+        fi
       fi
-    fi
+    done
   fi
   for branch in main master; do
     resolved=$(git -C "$WT" rev-parse --verify -q "refs/heads/$branch^{commit}" 2>/dev/null || true)
