@@ -165,6 +165,20 @@ assert_contains "$OVERRIDE_ARGV" 'ServerAliveInterval=7' "FM_SSH_ALIVE_INTERVAL 
 assert_contains "$OVERRIDE_ARGV" 'ServerAliveCountMax=2' "FM_SSH_ALIVE_COUNT_MAX override was not honored on the ssh transport"
 pass "fm-on's dead-peer detection window is env-overridable"
 
+SSH_CALLS_BEFORE_INVALID=$(cat "$SSH_COUNT")
+set +e
+INVALID_INTERVAL_OUT=$(FM_SSH_ALIVE_INTERVAL=0 fm_on ios fm-probe-two.sh 2>&1)
+INVALID_INTERVAL_RC=$?
+INVALID_COUNT_OUT=$(FM_SSH_ALIVE_COUNT_MAX=not-a-number fm_on ios fm-probe-two.sh 2>&1)
+INVALID_COUNT_RC=$?
+set -e
+[ "$INVALID_INTERVAL_RC" -eq 1 ] || fail "a zero FM_SSH_ALIVE_INTERVAL was accepted (got exit $INVALID_INTERVAL_RC)"
+[ "$INVALID_COUNT_RC" -eq 1 ] || fail "a non-integer FM_SSH_ALIVE_COUNT_MAX was accepted (got exit $INVALID_COUNT_RC)"
+assert_contains "$INVALID_INTERVAL_OUT" 'FM_SSH_ALIVE_INTERVAL must be a positive integer' "invalid interval did not explain its constraint"
+assert_contains "$INVALID_COUNT_OUT" 'FM_SSH_ALIVE_COUNT_MAX must be a positive integer' "invalid count did not explain its constraint"
+[ "$(cat "$SSH_COUNT")" -eq "$SSH_CALLS_BEFORE_INVALID" ] || fail "invalid keepalive configuration launched ssh"
+pass "fm-on rejects invalid dead-peer settings before launching ssh"
+
 out=$(TOP_SECRET='must-not-cross' fm_on remote-mac fm-probe-two.sh)
 assert_contains "$out" "home=$REMOTE_HOME" "remote FM_HOME was not explicit"
 assert_contains "$out" "root=$REMOTE_ROOT" "remote root was not explicit"
