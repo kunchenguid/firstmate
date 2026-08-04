@@ -936,6 +936,29 @@ test_stale_pane_with_advancing_child_is_absorbed() {
   pass "a stale pane whose work is happening in an advancing child process is absorbed, not wedge-escalated"
 }
 
+test_definite_verdict_with_advancing_child_still_surfaces() {
+  local dir state proc fakebin capture window pid drain_out
+  window="test:fm-childdone"
+  read -r dir state proc fakebin capture < <(setup_child_cpu_watch_case child-work-definite "$window" childdone 5000)
+  drain_out="$dir/drain.out"
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · validation passed'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PROC_ROOT_OVERRIDE="$proc" FM_CHILD_CPU_SAMPLE_INTERVAL=99999 \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" &
+  pid=$!
+  wait_for_exit "$pid" 45 || fail "a definite verdict with an advancing child was absorbed"
+  grep -Fx "stale: $window" "$dir/watch.out" >/dev/null \
+    || fail "a definite verdict with an advancing child did not reach stale triage"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after definite-verdict stale failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null \
+    || fail "the definite-verdict stale wake was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a definite semantic verdict wins over advancing descendant CPU at the watcher gate"
+}
+
 # The control that separates a fix from a blindfold: same fixture, same idle
 # pane, same silent status log - only the child has stopped consuming CPU. It
 # must still surface immediately.
@@ -2209,6 +2232,7 @@ test_child_cpu_refuses_a_stale_baseline
 test_crew_absorb_class_process_liveness
 test_child_cpu_real_process_tree
 test_stale_pane_with_advancing_child_is_absorbed
+test_definite_verdict_with_advancing_child_still_surfaces
 test_stale_pane_with_hung_child_still_surfaces
 test_advancing_child_still_bounded_by_turn_age
 test_signal_crew_provably_working_classifier

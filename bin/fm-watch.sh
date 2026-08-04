@@ -970,14 +970,16 @@ EOF
     # runs in a child process. Sampled every poll for every window - including
     # while the pane is busy - so a baseline is always warm and the busy->idle
     # transition never has to spend a false escalation rebuilding one.
-    # ADVANCING descendant CPU folds into the same work_now gate a busy pane
-    # uses, so it inherits that bound too: BUSY_TURN_MAX_SECS still routes the
-    # pane through the wedge timer once the task has gone that long with no
-    # completed turn, and a hung, dead, or absent child leaves work_now at the
-    # busy verdict so a genuine wedge escalates exactly as before.
+    # An inconclusive semantic read with ADVANCING descendant CPU folds into the
+    # same work_now gate a busy pane uses, so it inherits that bound too:
+    # BUSY_TURN_MAX_SECS still routes the pane through the wedge timer once the
+    # task has gone that long with no completed turn, and a definite semantic
+    # verdict or hung, dead, or absent child leaves work_now at the busy verdict.
     child_cpu=$(fm_child_cpu_state "$STATE" "$task")
     work_now=$busy_now
-    [ "$child_cpu" = advancing ] && work_now=0
+    if [ "$child_cpu" = advancing ] && [ "$(crew_absorb_class "$task")" = working ]; then
+      work_now=0
+    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
