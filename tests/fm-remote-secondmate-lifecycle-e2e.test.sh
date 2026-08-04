@@ -148,6 +148,15 @@ if [ "$command_name" = fm-remote-doctor.sh ]; then
   printf '%s %s\n' "${FM_FAKE_SSH_MODE:-normal}" "${_command_action:--}" >> "$FM_FAKE_DOCTOR_LOG"
   case "${FM_FAKE_SSH_MODE:-normal}" in
     unreachable) exit 255 ;;
+    doctor-fix-unknown)
+      if [ "${_command_action:-}" = --fix ]; then
+        printf 'fix launchagent=applied: wrote the Aqua-scoped launch agent\n'
+        exit 255
+      fi
+      printf 'check launchagent=fixable: no Firstmate herdr launch agent\n'
+      printf 'error: this host is not ready for a remote second mate; unresolved: launchagent\n' >&2
+      exit 1
+      ;;
     doctor-human)
       printf 'check gui-session=human: no Aqua login session exists for uid 501\n'
       printf 'action: gui-session: log that account in once at the console\n'
@@ -337,6 +346,25 @@ assert_no_grep '- seed-fail ' "$TMP_ROOT/seed-parent/data/secondmates.md" "faile
 assert_grep '- seed-keep ' "$TMP_ROOT/seed-parent/data/secondmates.md" "failed seed rollback removed a competing successful route"
 assert_present "$TMP_ROOT/seed-keep-home/.fm-secondmate-home" "serialized seed lost its published remote home"
 pass "remote seed rollback preserves serialized competing routes"
+
+: > "$DOCTOR_LOG"
+if FM_SECONDMATE_CHARTER='Unknown readiness charter.' FM_SECONDMATE_SCOPE='unknown readiness' \
+  FM_FAKE_SSH_MODE=doctor-fix-unknown seed_env "$ROOT/bin/fm-remote-home-seed.sh" \
+  seed-unknown remote-mac "$REMOTE_ROOT" "$TMP_ROOT/seed-unknown-home" --no-projects \
+  > "$TMP_ROOT/seed-unknown.out" 2>&1; then
+  fail "seeding claimed success after readiness repair completion became unknown"
+fi
+assert_grep 'remote readiness completion is unknown' "$TMP_ROOT/seed-unknown.out" \
+  "unknown readiness did not report its distinct completion state"
+assert_grep '- seed-unknown ' "$TMP_ROOT/seed-parent/data/secondmates.md" \
+  "unknown readiness removed the registered route"
+assert_present "$TMP_ROOT/seed-parent/data/seed-unknown/brief.md" \
+  "unknown readiness removed the scaffolded brief"
+assert_absent "$TMP_ROOT/seed-unknown-home" \
+  "unknown readiness proceeded into remote home provisioning"
+[ "$(cat "$DOCTOR_LOG")" = 'doctor-fix-unknown -
+doctor-fix-unknown --fix' ] || fail "unknown readiness did not occur during the repair stage"$'\n'"$(cat "$DOCTOR_LOG")"
+pass "unknown readiness preserves its route and brief for reconciliation"
 
 # A host that cannot hold a durable second mate must be rejected by the
 # readiness gate before any home is created on it, and the operator must get the
@@ -731,6 +759,40 @@ launches_after_repair=$(grep -c '^tab create' "$HERDR_LOG" || true)
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
   || fail "the endpoint was not probed successfully after readiness repair"
 pass "startup repairs remote readiness before probing without relaunching"
+
+remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-liveness-legacy.meta"
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-liveness-legacy.meta"
+cp "$PARENT/data/secondmates.md" "$TMP_ROOT/registry-before-liveness-legacy.md"
+cat > "$remote_route_meta" <<EOF
+window=firstmate:fm-ios
+worktree=$REMOTE_HOME
+project=$REMOTE_ROOT
+harness=codex
+kind=secondmate
+backend=tmux
+EOF
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-liveness-legacy.meta"
+printf 'fm-ios|%s\n' "$REMOTE_HOME" > "$TMUX_STATE"
+tmux_state_before=$(cat "$TMUX_STATE")
+launches_before_legacy=$(grep -c '^tab create' "$HERDR_LOG" || true)
+BOOT_LEGACY=$(remote_env "$ROOT/bin/fm-bootstrap.sh")
+assert_contains "$BOOT_LEGACY" "SECONDMATE_LIVENESS: secondmate ios: skipped: alive remote endpoint is recorded on backend 'tmux'; migrate or retire it explicitly" \
+  "liveness accepted an alive legacy remote backend"
+cmp -s "$TMP_ROOT/remote-ios-liveness-legacy.meta" "$remote_route_meta" \
+  || fail "liveness rewrote the alive legacy endpoint metadata"
+cmp -s "$TMP_ROOT/parent-ios-before-liveness-legacy.meta" "$PARENT/state/ios.meta" \
+  || fail "liveness rewrote the parent route metadata for an alive legacy endpoint"
+cmp -s "$TMP_ROOT/registry-before-liveness-legacy.md" "$PARENT/data/secondmates.md" \
+  || fail "liveness changed the registry route for an alive legacy endpoint"
+[ "$(cat "$TMUX_STATE")" = "$tmux_state_before" ] \
+  || fail "liveness changed or killed the alive legacy endpoint"
+launches_after_legacy=$(grep -c '^tab create' "$HERDR_LOG" || true)
+[ "$launches_before_legacy" -eq "$launches_after_legacy" ] \
+  || fail "liveness relaunched an alive legacy endpoint"
+mv -f "$TMP_ROOT/remote-ios-before-liveness-legacy.meta" "$remote_route_meta"
+rm -f "$TMUX_STATE"
+pass "startup reports alive legacy backends without changing their routes"
 
 # Host loss maps to unknown/unavailable and never creates a local replacement.
 launches_before=$(grep -c '^tab create' "$HERDR_LOG" || true)

@@ -11,7 +11,7 @@
 # manifest through fm-on.sh, and lets the remote host clone its own Firstmate
 # home and project origins. No project tree or secret environment is copied.
 # Known provisioning failure rolls the registry back. SSH status 255 preserves
-# the route because completion is unknown and a same-route rerun converges.
+# the route and any newly scaffolded brief because completion is unknown and a same-route rerun converges.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -194,10 +194,12 @@ fm_remote_readiness_ensure "$SCRIPT_DIR" "$ID"
 PREFLIGHT_RC=$?
 set -e
 if [ "$PREFLIGHT_RC" -ne 0 ]; then
-  restore_registry_and_brief
+  if [ "$PREFLIGHT_RC" -ne 255 ]; then
+    restore_registry_and_brief
+  fi
   [ -z "$FM_REMOTE_READINESS_OUT" ] || printf '%s\n' "$FM_REMOTE_READINESS_OUT" >&2
   if [ "$PREFLIGHT_RC" -eq 255 ]; then
-    die "remote runtime preflight could not complete; nothing was provisioned and the host must be reachable to retry"
+    die "remote readiness completion is unknown; route and brief preserved for same-host reconciliation"
   fi
   die "remote runtime preflight failed; nothing was provisioned. Close the gaps listed above, or update the remote code root if it predates the current fm-remote-doctor.sh"
 fi
