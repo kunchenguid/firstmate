@@ -90,9 +90,9 @@ SH
 
 install_remote_evidence() {  # <dir>
   local dir=$1
-  cat > "$dir/bin/remote" <<'SH'
+cat > "$dir/bin/remote" <<'SH'
 #!/usr/bin/env bash
-printf 'remote\n' >> "${E_DIR:?}/remote.log"
+printf 'remote\t%s\t%s\t%s\n' "$1" "$2" "$3" >> "${E_DIR:?}/remote.log"
 [ "${E_REMOTE:-ok}" = fail ] && exit 1
 [ "${E_REMOTE:-ok}" = stall ] && {
   trap '' TERM
@@ -301,6 +301,55 @@ test_cpu_rate_uses_actual_sample_elapsed_time() {
   pass "CPU rate uses monotonic elapsed time between cumulative samples"
 }
 
+test_production_cpu_clock_excludes_trailing_lsof_latency() {
+  local dir json neutralized_json real_ps
+  dir=$(make_case cpu-clock-boundary claude); install_evidence "$dir"
+  real_ps=$(command -v ps)
+  cat > "$dir/bin/ps" <<'SH'
+#!/usr/bin/env bash
+if [ "$*" != "-Ao pid=,time=,comm=" ]; then exec "${E_REAL_PS:?}" "$@"; fi
+count_file=${E_DIR:?}/ps.count
+n=$(cat "$count_file" 2>/dev/null || printf 0)
+n=$((n + 1))
+printf '%s' "$n" > "$count_file"
+if [ "$n" -eq 1 ]; then cpu=00:00:01.00; else cpu=00:00:01.02; fi
+printf '11 %s claude\n' "$cpu"
+SH
+  cat > "$dir/bin/lsof" <<'SH'
+#!/usr/bin/env bash
+count_file=${E_DIR:?}/lsof.count
+n=$(cat "$count_file" 2>/dev/null || printf 0)
+n=$((n + 1))
+printf '%s' "$n" > "$count_file"
+[ "$(cat "${E_DIR:?}/ps.count")" -ne 2 ] || sleep 1
+printf 'p11\nn%s\n' "${E_WT:?}"
+SH
+  cat > "$dir/bin/late-clock-process" <<SH
+#!/usr/bin/env bash
+unset FM_LIVENESS_PROCESS_TIMESTAMP_FILE
+exec "$ROOT/bin/fm-liveness-process-snapshot.sh"
+SH
+  chmod +x "$dir/bin/ps" "$dir/bin/lsof" "$dir/bin/late-clock-process"
+  rm -f "$dir"/*.count
+  json=$(PATH="$dir/bin:$PATH" FM_HOME="$dir/home" FM_LIVENESS_INTERVAL_MS=100 \
+    FM_LIVENESS_NOW=2026-08-03T12:00:00Z FM_LIVENESS_ENDPOINT_BIN="$dir/bin/endpoint" \
+    FM_LIVENESS_CAPTURE_BIN="$dir/bin/capture" FM_LIVENESS_PROCESS_SNAPSHOT_BIN= \
+    E_ENDPOINT_SLEEP= E_CAPTURE_SLEEP= E_CPU2= \
+    E_REAL_PS="$real_ps" E_DIR="$dir" E_WT="$dir/wt" "$LIVENESS" --json)
+  printf '%s' "$json" | jq -e '
+    .records[0].cpu.delta_ms == 20 and .records[0].activity == "active"
+  ' >/dev/null || fail "trailing lsof latency distorted the CPU-read interval: $json"
+
+  rm -f "$dir"/*.count
+  neutralized_json=$(PATH="$dir/bin:$PATH" FM_HOME="$dir/home" FM_LIVENESS_INTERVAL_MS=100 \
+    FM_LIVENESS_NOW=2026-08-03T12:00:00Z FM_LIVENESS_ENDPOINT_BIN="$dir/bin/endpoint" \
+    FM_LIVENESS_CAPTURE_BIN="$dir/bin/capture" FM_LIVENESS_PROCESS_SNAPSHOT_BIN="$dir/bin/late-clock-process" \
+    E_ENDPOINT_SLEEP= E_CAPTURE_SLEEP= E_REAL_PS="$real_ps" E_DIR="$dir" E_WT="$dir/wt" "$LIVENESS" --json)
+  printf '%s' "$neutralized_json" | jq -e '.records[0].activity == "active"' >/dev/null \
+    && fail "neutralizing the CPU-boundary timestamp left the activity assertion green: $neutralized_json"
+  pass "production CPU timestamps are taken before trailing lsof work"
+}
+
 test_remote_routes_use_remote_endpoint_evidence() {
   local dir json
   dir=$(make_case remote-route claude)
@@ -321,6 +370,8 @@ EOF
   ' >/dev/null || fail "remote route did not retain its remote backend evidence: $json"
   [ "$(wc -l < "$dir/remote.log" | tr -d ' ')" = 1 ] \
     || fail "remote liveness evidence producer was not called exactly once"
+  grep -F $'remote\ttask\t100\t2' "$dir/remote.log" >/dev/null \
+    || fail "validated evidence timeout was not carried to the remote producer"
 
   : > "$dir/remote.log"
   json=$(FM_LIVENESS_REMOTE_BIN="$dir/bin/remote" E_REMOTE=fail run_case "$dir")
@@ -506,7 +557,7 @@ SH
 }
 
 test_remote_control_samples_recorded_host_local_target() {
-  local dir home json
+  local dir home json started elapsed
   dir=$(make_case remote-control claude)
   install_evidence "$dir"
   home="$dir/remote-home"
@@ -519,12 +570,23 @@ test_remote_control_samples_recorded_host_local_target() {
     FM_LIVENESS_ENDPOINT_BIN="$dir/bin/endpoint" FM_LIVENESS_CAPTURE_BIN="$dir/bin/capture" \
     FM_LIVENESS_PROCESS_SNAPSHOT_BIN="$dir/bin/process" E_DIR="$dir" E_WT="$dir/wt" \
     E_FAMILY=claude E_PROCESS=working E_CPU2=1020 \
-    "$ROOT/bin/fm-remote-secondmate-control.sh" liveness task 100)
+    "$ROOT/bin/fm-remote-secondmate-control.sh" liveness task 100 2)
   printf '%s' "$json" | jq -e '
     .records[0] | .id=="task" and .backend=="tmux" and .target=="remote-session:fm-task"
       and .worktree != null and .endpoint.presence=="verified_present"
       and .worker.presence=="verified_present" and .activity=="active"
   ' >/dev/null || fail "remote control did not sample its recorded host-local target: $json"
+
+  started=$(date +%s)
+  json=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_LIVENESS_INTERVAL_MS=100 \
+    FM_LIVENESS_EVIDENCE_TIMEOUT=9 FM_LIVENESS_ENDPOINT_BIN="$dir/bin/endpoint" \
+    FM_LIVENESS_CAPTURE_BIN="$dir/bin/capture" FM_LIVENESS_PROCESS_SNAPSHOT_BIN="$dir/bin/process" \
+    E_ENDPOINT_SLEEP=30 E_DIR="$dir" E_WT="$dir/wt" \
+    "$ROOT/bin/fm-remote-secondmate-control.sh" liveness task 100 1)
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 6 ] || fail "remote control ignored the handed-off evidence timeout (${elapsed}s)"
+  printf '%s' "$json" | jq -e '.records[0].endpoint.presence == "unverified"' >/dev/null \
+    || fail "remote control timeout did not become unverified evidence: $json"
   pass "remote control samples the recorded backend target in its host-local process table"
 }
 
@@ -566,6 +628,7 @@ test_cwd_binding_and_shell_amplifier_refusals
 test_endpoint_three_way_and_output_activity
 test_local_evidence_producers_are_bounded
 test_cpu_rate_uses_actual_sample_elapsed_time
+test_production_cpu_clock_excludes_trailing_lsof_latency
 test_remote_routes_use_remote_endpoint_evidence
 test_stalled_remote_route_is_bounded_and_reaped
 test_external_cancellation_reaps_perl_remote_group

@@ -882,7 +882,7 @@ EOF
 }
 
 test_secondmate_and_child_bounds_are_disclosed() {
-  local home fakebin id mate child json expanded canonical i
+  local home fakebin id mate child json canonical i
   home=$(make_home secondmate-bounds)
   : > "$home/data/secondmates.md"
   for id in a b c; do
@@ -925,13 +925,7 @@ test_secondmate_and_child_bounds_are_disclosed() {
       and ([.omitted[].surface] | any(test("secondmates showing 1 of 2")))
       and ([.omitted[].surface] | any(test("registered secondmates omitted by snapshot bound: 1")))
   ' >/dev/null || fail "bearings secondmate bound was not disclosed: $json"
-  expanded=$(FM_SNAPSHOT_SECONDMATE_CHILDREN=2 FM_BEARINGS_SECONDMATES=1 \
-    run "$home" "$fakebin" --json --all-secondmates)
-  printf '%s' "$expanded" | jq -e '
-    (.secondmates | length) == 3
-      and ([.omitted[].surface] | any(test("secondmates showing|registered secondmates omitted")) | not)
-  ' >/dev/null || fail "--all-secondmates did not expand the canonical and bearings bounds: $expanded"
-  pass "secondmate and per-home child counts are bounded, disclosed, and explicitly expandable"
+  pass "secondmate and per-home child counts are bounded and disclosed"
 }
 
 test_parent_decision_is_untrusted_contradiction_only() {
@@ -1318,10 +1312,7 @@ test_superseded_queued_item_dropped_by_default() {
   printf '%s' "$json" | jq -e '
     (.gates | any(.[]; .id == "live-gate")) and (.gates | any(.[]; .id == "dead-gate") | not)
   ' >/dev/null || fail "default gates must include live and drop superseded: $json"
-  json=$(run "$home" "$fakebin" --json --all-queued)
-  printf '%s' "$json" | jq -e '.gates | any(.[]; .id == "dead-gate")' >/dev/null \
-    || fail "--all-queued must restore the superseded item"
-  pass "superseded queued items are dropped by default and restored with --all-queued"
+  pass "superseded queued items are dropped from the bounded core"
 }
 
 test_include_prs_adds_discovery_after_mandatory_verification() {
@@ -1373,37 +1364,6 @@ test_actions_instances_preserve_forge_delimiters() {
         and (.checks | contains("Release; Production[event=pull_request")))
   ' >/dev/null || fail "forge-controlled semicolon delimiter corrupted Actions instances: $json"
   pass "Actions instances remain structured when workflow names contain delimiters"
-}
-
-test_pr_verification_payloads_never_reenter_argv() {
-  local home fakebin guardbin real_jq json
-  home=$(make_home pr-argv-stream); write_fixture "$home"
-  fakebin=$(make_fakebin "$home")
-  guardbin="$home/jq-guard"
-  mkdir -p "$guardbin"
-  real_jq=$(command -v jq)
-cat > "$guardbin/jq" <<'SH'
-#!/usr/bin/env bash
-state=
-for arg in "$@"; do
-  case "$state" in
-    name) state=value; continue ;;
-    value) [ "${#arg}" -le 4000 ] || exit 97; state=; continue ;;
-  esac
-  case "$arg" in --arg|--argjson) state=name ;; esac
-done
-exec "${REAL_JQ:?}" "$@"
-SH
-  chmod +x "$guardbin/jq"
-  json=$(PATH="$fakebin:$guardbin:$PATH" REAL_JQ="$real_jq" FAKE_REAL_JQ="$real_jq" FAKE_LONG_WORKFLOW=1 \
-    FM_HOME="$home" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" \
-    FM_BEARINGS_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" \
-    "$BEARINGS" --all-landed --all-recorded-prs --json)
-  printf '%s' "$json" | jq -e '
-    [.candidate_prs[] | select(.repo=="kunchenguid/firstmate")]
-    | length == 3 and all(.[]; .verification=="verified_live" and (.actions | length)==2)
-  ' >/dev/null || fail "large streamed PR verification payload was lost: $json"
-  pass "all PR expansion paths assemble growing verification payloads from files"
 }
 
 test_partial_github_failure_degrades() {
@@ -1484,8 +1444,8 @@ write_large_fixture() {  # <home> <count>
   done
 }
 
-test_section_caps_and_expansion_flags() {
-  local home fakebin json expanded
+test_section_caps_are_counted() {
+  local home fakebin json
   home=$(make_home caps); write_large_fixture "$home" 5
   fakebin=$(make_fakebin "$home")
   json=$(FM_BEARINGS_IN_FLIGHT=2 FM_BEARINGS_DECISIONS=2 FM_BEARINGS_GATES=2 \
@@ -1501,32 +1461,32 @@ test_section_caps_and_expansion_flags() {
     and ([.omitted[].surface] | index("recorded_prs showing 2 of 5") != null)
     and ([.omitted[].surface] | index("unhealthy_endpoints showing 2 of 5") != null)
   ' >/dev/null || fail "section caps or counted omissions are wrong: $json"
-  expanded=$(FM_BEARINGS_IN_FLIGHT=2 FM_BEARINGS_DECISIONS=2 FM_BEARINGS_GATES=2 \
-    FM_BEARINGS_REPORTS=2 FM_BEARINGS_RECORDED_PRS=2 FM_BEARINGS_UNHEALTHY=2 \
-    run "$home" "$fakebin" --json --all-in-flight --all-decisions --all-queued \
-      --all-reports --all-recorded-prs --all-unhealthy)
-  printf '%s' "$expanded" | jq -e '
-    (.in_flight|length) == 0 and (.decisions_open|length) == 5 and (.gates|length) == 5
-    and (.reports|length) == 5 and (.recorded_prs|length) == 5 and (.unhealthy_endpoints|length) == 5
-  ' >/dev/null || fail "section expansion flags did not reveal full sets: $expanded"
-  pass "all fleet-sized sections are capped with counted opt-in expansion"
+  pass "all fleet-sized sections stay capped with counted omissions"
 }
 
-test_pr_repository_cap_and_expansion() {
-  local home fakebin json expanded
+test_pr_repository_cap_is_disclosed() {
+  local home fakebin json
   home=$(make_home repo-caps); write_large_fixture "$home" 5
   fakebin=$(make_fakebin "$home"); : > "$home/net.log"
   json=$(FM_BEARINGS_PR_REPOS=2 run "$home" "$fakebin" --include-prs --json)
   [ "$(grep -c '^gh-axi api repos/.*/pulls?state=open' "$home/net.log")" = 2 ] || fail "default PR repository cap was not enforced"
   printf '%s' "$json" | jq -e '
-    [.omitted[] | select(.surface == "PR repositories showing 2 of 5" and .reveal == "--all-pr-repos")] | length == 1
+    [.omitted[] | select(.surface == "PR repositories showing 2 of 5" and .reveal == "bounded core")] | length == 1
   ' >/dev/null || fail "PR repository truncation was not recorded: $json"
-  : > "$home/net.log"
-  expanded=$(FM_BEARINGS_PR_REPOS=2 run "$home" "$fakebin" --include-prs --all-pr-repos --json)
-  [ "$(grep -c '^gh-axi api repos/.*/pulls?state=open' "$home/net.log")" = 5 ] || fail "--all-pr-repos did not reveal every repository"
-  printf '%s' "$expanded" | jq -e '.candidate_prs | length >= 5' >/dev/null \
-    || fail "expanded PR repository set did not verify every discovered repository: $expanded"
-  pass "live PR enrichment caps repositories with counted expansion"
+  pass "live PR enrichment caps repositories with counted disclosure"
+}
+
+test_removed_expansion_flags_are_rejected() {
+  local home fakebin flag rc
+  home=$(make_home removed-expansion-flags)
+  fakebin=$(make_fakebin "$home")
+  for flag in --all-in-flight --all-decisions --all-secondmates --all-landed --all-reports \
+    --all-queued --all-recorded-prs --all-unhealthy --all-pr-repos; do
+    run "$home" "$fakebin" "$flag" --json >/dev/null 2>&1
+    rc=$?
+    [ "$rc" -eq 2 ] || fail "removed expansion flag remained callable: $flag (rc=$rc)"
+  done
+  pass "all nine removed expansion flags fail closed"
 }
 
 test_per_repository_pr_cap_is_disclosed() {
@@ -1542,7 +1502,7 @@ test_per_repository_pr_cap_is_disclosed() {
     and ([.omitted[] | select(.surface | contains("candidate_prs showing"))] | length) == 1
   ' >/dev/null || fail "per-repository PR truncation was not disclosed: $json"
   assert_contains "$toon" 'candidate_prs showing' "TOON did not preserve PR truncation disclosure"
-  pass "per-repository open-PR caps are disclosed with an expansion knob"
+  pass "per-repository open-PR caps are disclosed"
 }
 
 install_failing_jq() {  # <fakebin> <model|toon>
@@ -1647,16 +1607,6 @@ test_every_final_landed_pr_is_live_verified() {
 $(printf '%s' "$json" | jq -r '.landed[].artifact')
 EOF
 
-  : > "$home/net.log"
-  json=$(FM_BEARINGS_LANDED=1 run "$home" "$fakebin" --json --all-landed)
-  [ "$(printf '%s' "$json" | jq '.landed | length')" = 8 ] || fail "--all-landed did not render every fixture PR"
-  while IFS= read -r artifact; do
-    pr=${artifact##*/}
-    grep -q "gh-axi api repos/acme/repo/pulls/$pr " "$home/net.log" \
-      || fail "--all-landed PR $pr was rendered without live verification: $(cat "$home/net.log")"
-  done <<EOF
-$(printf '%s' "$json" | jq -r '.landed[].artifact')
-EOF
   pass "every PR in the final landed selection is live-verified"
 }
 
@@ -1794,37 +1744,10 @@ test_landed_default_handles_no_landed_items() {
   pass "landed selection handles no landed items"
 }
 
-test_all_landed_keeps_complete_global_order() {
-  local home alpha beta fakebin json actual expected
-  home=$(make_home landed-all-order)
-  : > "$home/data/secondmates.md"
-  printf '## Done\n' > "$home/data/backlog.md"
-  alpha=$(make_landed_secondmate "$home" alpha)
-  beta=$(make_landed_secondmate "$home" beta)
-  append_landed_row "$alpha" alpha-old "Alpha old" 2026-07-01
-  append_landed_row "$alpha" alpha-new "Alpha new" 2026-07-09
-  append_landed_row "$beta" beta-new "Beta new" 2026-07-10
-  append_landed_row "$beta" beta-mid "Beta mid" 2026-07-05
-  fakebin=$(make_fakebin "$home")
-  json=$(FM_BEARINGS_LANDED=1 run "$home" "$fakebin" --json --all-landed)
-  actual=$(printf '%s' "$json" | jq -r '.landed[] | "\(.owner)/\(.id)"')
-  expected='beta/beta-new
-alpha/alpha-new
-beta/beta-mid
-alpha/alpha-old'
-  [ "$actual" = "$expected" ] || fail "--all-landed global order changed: $actual"
-  printf '%s' "$json" | jq -e '
-    (.landed | length) == 4
-      and ([.omitted[].surface] | any(test("landed|snapshot layer")) | not)
-  ' >/dev/null || fail "--all-landed no longer revealed the complete landed set: $json"
-  pass "--all-landed keeps the complete global landed output"
-}
-
 # The roll-up stays bounded: a per-home cap and an overall cap, both disclosed in
-# omitted[], with --all-landed as the counted expansion knob. This also covers the
-# previously-silent main-home landed truncation.
+# omitted[]. This also covers the previously-silent main-home landed truncation.
 test_landed_bounded_and_disclosed() {
-  local home mate fakebin json i expected actual
+  local home mate fakebin json i
   home=$(make_home mate-landed-caps); write_fixture "$home"
   mate=$(fixture_mate_home "$home")
   {
@@ -1844,21 +1767,6 @@ test_landed_bounded_and_disclosed() {
     ([.landed[].id | select(startswith("mate-landed-"))] | length) == 10
       and ([.omitted[].surface] | any(test("snapshot layer")))
   ' >/dev/null || fail "default landed path must retain and disclose the snapshot per-home cap: $json"
-  json=$(FM_BEARINGS_LANDED=1 run "$home" "$fakebin" --json --all-landed)
-  expected=done-a
-  i=1
-  while [ "$i" -le 12 ]; do
-    expected="$expected
-$(printf 'mate-landed-%02d' "$i")"
-    i=$((i + 1))
-  done
-  expected=$(printf '%s\n' "$expected" | LC_ALL=C sort)
-  actual=$(printf '%s' "$json" | jq -r '.landed[].id' | LC_ALL=C sort)
-  [ "$actual" = "$expected" ] || fail "--all-landed returned wrong identities: $actual"
-  printf '%s' "$json" | jq -e '
-    (.landed | length) == 13
-      and ([.omitted[].surface] | any(test("landed|snapshot layer")) | not)
-  ' >/dev/null || fail "--all-landed must reveal the exact full landed set: $json"
   pass "landed stays bounded with per-home + overall caps and omitted[] disclosure"
 }
 
@@ -2162,7 +2070,7 @@ EOF
               and .unresolved_blocker_ids == ["prep", "security"]
               and .captain_actionable == false))
   ' >/dev/null || fail "canonical mixed-domain classification was wrong: $canonical"
-  json=$(run "$home" "$fakebin" --json --fields bodies --all-landed)
+  json=$(run "$home" "$fakebin" --json --fields bodies)
   printf '%s' "$json" | jq -e '
     ([.in_flight[].id] | sort) == ["hibit", "home-assistant", "wheel"]
       and (.decisions_open | any(.id == "sshhip/reviewer-decision"))
@@ -2398,13 +2306,11 @@ test_toon_json_parity
 test_landed_includes_secondmate_home_merges
 test_every_final_landed_pr_is_live_verified
 test_actions_instances_preserve_forge_delimiters
-test_pr_verification_payloads_never_reenter_argv
 test_landed_default_balances_dominant_and_sparse_homes
 test_landed_default_refills_capacity_after_sparse_homes_exhaust
 test_landed_default_uses_deterministic_home_order_when_homes_exceed_cap
 test_landed_default_preserves_internal_order_for_ties
 test_landed_default_handles_no_landed_items
-test_all_landed_keeps_complete_global_order
 test_landed_bounded_and_disclosed
 test_live_blocker_is_not_charted_queue_work
 test_captains_call_anti_leak
@@ -2422,7 +2328,8 @@ test_firstmate_check_tally_is_refused
 test_partial_github_failure_degrades
 test_truncated_github_evidence_is_refused
 test_perl_fallback_bounds_github_call
-test_section_caps_and_expansion_flags
-test_pr_repository_cap_and_expansion
+test_section_caps_are_counted
+test_pr_repository_cap_is_disclosed
+test_removed_expansion_flags_are_rejected
 test_per_repository_pr_cap_is_disclosed
 test_projection_and_toon_fail_closed
