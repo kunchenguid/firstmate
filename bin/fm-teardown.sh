@@ -34,6 +34,9 @@
 # device. It refuses and preserves task state when that proof fails; otherwise
 # it removes the task's check, trust record, PR sidecar, publication record, and
 # quarantine entries with the rest of the volatile state.
+# Before cleanup, teardown also enforces the terminal dispatched-model check
+# owned by docs/model-verification.md; --force surfaces that verdict while
+# retaining its explicitly authorized discard behavior.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
