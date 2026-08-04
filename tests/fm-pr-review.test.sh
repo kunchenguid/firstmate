@@ -224,6 +224,10 @@ case "$endpoint" in
     repo_number=${clean#/repos/}; repo=${repo_number%%/pulls/*};
     if [ "$repo" = "$repo_number" ]; then repo=${repo_number%%/issues/*}; fi
     number=$(printf '%s' "$clean" | sed -E 's#^.*/(pulls|issues)/([0-9]+).*$#\2#')
+    if [ "$method" = GET ] && [ "${FM_FAKE_READ_FAIL_PR:-}" = "$number" ]; then
+      printf 'server error\n' >&2
+      exit 1
+    fi
     if [ "$method" = POST ]; then
       [ "${FM_FAKE_POST_FAIL:-0}" = 0 ] || exit 1
       body=
@@ -266,6 +270,7 @@ SH
 chmod +x "$FAKEBIN/gh-axi"
 cat > "$FAKEBIN/gh" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_FAKE_GH_AUTH_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_GH_AUTH_LOG"
 case "${1-} ${2-}" in
   'auth status') exit 0 ;;
 esac
@@ -333,6 +338,113 @@ FM_PR_REVIEW_CURRENT_HEAD="$sha_a" run_review "$H_PAGE" resolve-feedback "$LONG_
   --head "$sha_a" --generation 1 --verdict dismissed --evidence-file "$TMP/long-evidence.md" \
   --reply-file "$TMP/long-reply.md" >/dev/null || fail "complete exact-node feedback could not be adjudicated"
 pass "bounded pagination covers multiple PR, review, inline-thread, and conversation pages"
+
+# A truncated body whose bounded prefix carries CRLF line endings or leading
+# whitespace must still reconstruct. The independent oracle is the exact GitHub
+# body text; normalizing before slicing would shift the 100-character window and
+# make the reconstructed prefix disagree with the stored one forever.
+printf 'Exact-head %s evidence disproves this claim across the complete production path.\n' "$sha_a" > "$TMP/crlf-evidence.md"
+printf 'Dismissed at exact head %s after the complete exact-node body was verified.\n' "$sha_a" > "$TMP/crlf-reply.md"
+crlf_case() { # <name> <node> <jq-body-expression> <expected-start> <expected-end>
+  local name=$1 node=$2 expression=$3 start=$4 tail=$5 home inline id record
+  home="$TMP/$name"; new_home "$home"
+  inline=$(jq -cn --arg head "$sha_a" --arg node "$node" \
+    "[{id:401,node_id:\$node,body:($expression),commit_id:\$head,updated_at:\"2026-01-01T04:00:00Z\",user:{login:\"human\",type:\"User\"}}]")
+  make_dataset "[$(pull_json 1 captain "$sha_a" '["authored"]' '[]' "$inline" '[]')]"
+  : > "$GITHUB_LOG"
+  run_fake_poll "$home" 1210 >/dev/null || fail "$node feedback discovery failed"
+  id=$(item_id_for "$home" feedback)
+  run_review "$home" show "$id" | jq -e '.feedback.body_truncated==true' >/dev/null \
+    || fail "$node was not disclosed as truncated beyond the bounded prefix"
+  run_review "$home" claim "$id" --owner-task "$name-owner" >/dev/null || fail "$node could not be claimed"
+  record=$(PATH="$FAKEBIN:$PATH" FM_FAKE_DATASET="$DATASET" FM_FAKE_GH_LOG="$GITHUB_LOG" \
+    run_review "$home" fetch-feedback "$id") \
+    || fail "$node exact body could not be reconstructed through the bounded prefix comparison"
+  jq -e --arg start "$start" --arg tail "$tail" '
+    .schema=="fm-pr-review-feedback-body.v1" and (.body|test("\r")|not)
+    and (.body|startswith($start)) and (.body|endswith($tail)) and (.body|length)>600' \
+    "$(printf '%s' "$record" | jq -r '.path')" >/dev/null \
+    || fail "$node exact body record did not preserve the complete normalized claim"
+  FM_PR_REVIEW_CURRENT_HEAD="$sha_a" run_review "$home" resolve-feedback "$id" \
+    --head "$sha_a" --generation 1 --verdict dismissed --evidence-file "$TMP/crlf-evidence.md" \
+    --reply-file "$TMP/crlf-reply.md" >/dev/null || fail "$node could not be adjudicated after reconstruction"
+}
+crlf_case crlf-home IC_crlf \
+  '"  \r\nThe retry path drops the final write when the peer closes early.\r\nIt reproduces at this exact head under a slow reader.\r\n" + ([range(0;12)|"Additional exact-head evidence for the same claim.\r\n"]|join(""))' \
+  'The retry path' 'same claim.'
+crlf_case leading-space-home IC_lead \
+  '"    The assignment order still races the cache invalidation on this path.\n" + ([range(0;12)|"Additional exact-head evidence for the same lead.\n"]|join(""))' \
+  'The assignment order' 'same lead.'
+pass "CRLF and leading-whitespace truncated bodies reconstruct and adjudicate at the exact node"
+
+# A candidate merged or closed between the lagging search index and the detail
+# read is omitted only because the live detail read answered closed; the rest of
+# the account inventory still reconciles.
+H_CLOSED="$TMP/closed-home"; new_home "$H_CLOSED"
+CLOSED_PULL=$(pull_json 20 captain "$sha_a" '["authored"]' | jq -c '.state="closed"')
+OPEN_PULL=$(pull_json 21 captain "$sha_a" '["authored"]')
+make_dataset "[$CLOSED_PULL,$OPEN_PULL]"
+: > "$GITHUB_LOG"
+run_fake_poll "$H_CLOSED" 1220 >/dev/null || fail "a stale closed search hit aborted the whole account inventory"
+item_json "$H_CLOSED" initial-review | jq -e 'length==1 and .[0].number==21' >/dev/null \
+  || fail "close-during-search did not isolate to the closed pull request"
+jq -e '(.pulls|keys)==["https://github.com/acme/widgets/pull/21"]' "$H_CLOSED/state/pr-review/snapshot.json" >/dev/null \
+  || fail "a live-closed pull request stayed in the covered inventory"
+pass "a pull request closed between search and detail is omitted after its live closed-state read"
+
+# One pull request's read failure never ends account-wide coverage. Its previous
+# durable cursor and queued work survive, the failure is announced once and stays
+# durably visible, and unaffected pull requests keep reconciling.
+H_ISOLATE="$TMP/isolate-home"; new_home "$H_ISOLATE"
+isolate_inline() { # <id> <node> <body>
+  jq -cn --arg head "$sha_a" --argjson id "$1" --arg node "$2" --arg body "$3" \
+    '[{id:$id,node_id:$node,body:$body,commit_id:$head,updated_at:"2026-01-01T05:00:00Z",user:{login:"human",type:"User"}}]'
+}
+isolate_dataset() { # <second-pr-inline>
+  make_dataset "[$(pull_json 1 captain "$sha_a" '["authored"]' '[]' "$(isolate_inline 601 IC_isolated 'The retained claim must survive an isolated read failure.')" '[]'),$(pull_json 2 captain "$sha_a" '["authored"]' '[]' "$1" '[]')]"
+}
+isolate_dataset "$(isolate_inline 701 IC_healthy 'The unaffected pull request must keep reconciling.')"
+: > "$GITHUB_LOG"
+isolate_event=$(run_fake_poll "$H_ISOLATE" 1230) || fail "isolation baseline poll failed"
+run_review "$H_ISOLATE" acknowledge-event "$(printf '%s' "$isolate_event" | jq -r '.event_id')" >/dev/null
+[ "$(item_json "$H_ISOLATE" feedback | jq 'length')" -eq 2 ] || fail "isolation baseline did not cover both pull requests"
+ISOLATE_BASE=$(jq -c '.pulls["https://github.com/acme/widgets/pull/1"]|{covered_head,covered_feedback}' "$H_ISOLATE/state/pr-review/snapshot.json")
+
+isolate_inline_new=$(jq -cn --arg head "$sha_a" \
+  '[{id:701,node_id:"IC_healthy",body:"The unaffected pull request must keep reconciling.",commit_id:$head,updated_at:"2026-01-01T05:00:00Z",user:{login:"human",type:"User"}},
+    {id:702,node_id:"IC_healthy_new",body:"A later claim on the unaffected pull request.",commit_id:$head,updated_at:"2026-01-01T05:10:00Z",user:{login:"human",type:"User"}}]')
+isolate_dataset "$isolate_inline_new"
+: > "$GITHUB_LOG"
+degraded_event=$(FM_FAKE_READ_FAIL_PR=1 run_fake_poll "$H_ISOLATE" 1231) \
+  || fail "one pull request's read failure aborted the whole account inventory"
+printf '%s' "$degraded_event" | jq -e '.degraded==1 and (.message|contains("acme/widgets/pull/1"))' >/dev/null \
+  || fail "the isolated read failure was hidden instead of announced: $degraded_event"
+item_json "$H_ISOLATE" feedback | jq -e 'any(.[]; .feedback.node_id=="IC_healthy_new")' >/dev/null \
+  || fail "an isolated read failure blocked coverage of an unaffected pull request"
+item_json "$H_ISOLATE" feedback | jq -e 'any(.[]; .feedback.node_id=="IC_isolated")' >/dev/null \
+  || fail "an isolated read failure erased previously queued coverage"
+jq -c '.pulls["https://github.com/acme/widgets/pull/1"]|{covered_head,covered_feedback}' "$H_ISOLATE/state/pr-review/snapshot.json" \
+  | grep -Fqx "$ISOLATE_BASE" || fail "an isolated read failure discarded the previous durable cursor"
+jq -e '.pulls["https://github.com/acme/widgets/pull/1"].degraded.category=="github-read"' \
+  "$H_ISOLATE/state/pr-review/snapshot.json" >/dev/null \
+  || fail "the isolated read failure was silently treated as a complete inventory"
+run_review "$H_ISOLATE" acknowledge-event "$(printf '%s' "$degraded_event" | jq -r '.event_id')" >/dev/null
+ISOLATE_CLAIM=$(item_id_for "$H_ISOLATE" initial-review 2)
+run_review "$H_ISOLATE" claim "$ISOLATE_CLAIM" --owner-task isolation-owner >/dev/null
+set +e
+repeat_degraded=$(FM_FAKE_READ_FAIL_PR=1 run_fake_poll "$H_ISOLATE" 1232 2>/dev/null)
+repeat_degraded_rc=$?
+set -e
+[ "$repeat_degraded_rc" -eq 3 ] && [ -z "$repeat_degraded" ] \
+  || fail "an unchanged isolated read failure re-announced instead of deduplicating"
+jq -e '.pulls["https://github.com/acme/widgets/pull/1"].degraded.category=="github-read"' \
+  "$H_ISOLATE/state/pr-review/snapshot.json" >/dev/null \
+  || fail "a deduplicated isolated read failure stopped being durably visible"
+run_fake_poll "$H_ISOLATE" 1233 >/dev/null 2>&1 || true
+jq -e '.pulls["https://github.com/acme/widgets/pull/1"]|has("degraded")|not' \
+  "$H_ISOLATE/state/pr-review/snapshot.json" >/dev/null \
+  || fail "a recovered pull request stayed marked degraded"
+pass "one pull request's read failure stays isolated, announced once, durable, and non-destructive"
 
 # --- Resolution helper driven through the fake GitHub write boundary --------
 write_proof_files() {
@@ -717,21 +829,33 @@ pass "process-event registration is restart-idempotent and isolated per Firstmat
 # skips the account-global poller.
 H_BOOT="$TMP/bootstrap-arm"; new_home "$H_BOOT"; mkdir -p "$H_BOOT/config"
 printf 'tmux\n' > "$H_BOOT/config/backend"
+GH_AUTH_LOG="$TMP/gh-auth.log"; : > "$GH_AUTH_LOG"
 PATH="$FAKEBIN:$PATH" FM_HOME="$H_BOOT" FM_ROOT_OVERRIDE="$ROOT" FM_BACKEND=tmux \
+  FM_FAKE_GH_AUTH_LOG="$GH_AUTH_LOG" \
   FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=1 "$ROOT/bin/fm-bootstrap.sh" > "$TMP/bootstrap-arm.out" \
   || fail "main-home bootstrap could not register automatic review"
 BOOT_SID=$(FM_HOME="$H_BOOT" "$ADAPTER" source-id)
 assert_present "$H_BOOT/state/procevent/$BOOT_SID.source" "locked bootstrap omitted automatic review registration"
-H_BOOT_SECOND="$TMP/bootstrap-secondmate"; new_home "$H_BOOT_SECOND"; mkdir -p "$H_BOOT_SECOND/config"
-printf 'tmux\n' > "$H_BOOT_SECOND/config/backend"
-printf 'review-mate\n' > "$H_BOOT_SECOND/.fm-secondmate-home"
-PATH="$FAKEBIN:$PATH" FM_HOME="$H_BOOT_SECOND" FM_ROOT_OVERRIDE="$ROOT" FM_BACKEND=tmux \
-  FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=1 "$ROOT/bin/fm-bootstrap.sh" > "$TMP/bootstrap-secondmate.out" \
-  || fail "secondmate bootstrap failed"
-[ ! -d "$H_BOOT_SECOND/state/procevent" ] \
-  || [ -z "$(find "$H_BOOT_SECOND/state/procevent" -name 'pr-review-*.source' -print)" ] \
-  || fail "secondmate bootstrap started a duplicate account-global review source"
-pass "locked main-home bootstrap automatically arms one account review source and secondmates do not duplicate it"
+[ "$(grep -c '^auth status' "$GH_AUTH_LOG" || true)" -eq 1 ] \
+  || fail "locked bootstrap probed GitHub authentication more than once per session start"
+for marker in plain symlink dangling; do
+  home="$TMP/bootstrap-secondmate-$marker"; new_home "$home"; mkdir -p "$home/config"
+  printf 'tmux\n' > "$home/config/backend"
+  case "$marker" in
+    plain) printf 'review-mate\n' > "$home/.fm-secondmate-home" ;;
+    symlink)
+      printf 'review-mate\n' > "$TMP/secondmate-identity"
+      ln -s "$TMP/secondmate-identity" "$home/.fm-secondmate-home" ;;
+    dangling) ln -s "$TMP/secondmate-identity-absent" "$home/.fm-secondmate-home" ;;
+  esac
+  PATH="$FAKEBIN:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_BACKEND=tmux \
+    FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=1 "$ROOT/bin/fm-bootstrap.sh" > "$TMP/bootstrap-secondmate-$marker.out" \
+    || fail "secondmate bootstrap failed for a $marker marker"
+  [ ! -d "$home/state/procevent" ] \
+    || [ -z "$(find "$home/state/procevent" -name 'pr-review-*.source' -print)" ] \
+    || fail "a $marker secondmate marker still started a duplicate account-global review source"
+done
+pass "locked main-home bootstrap arms one account review source with one auth probe and no secondmate duplicates it"
 
 # --- Authentication and rate limits fail boundedly without corrupting state --
 H_AUTHFAIL="$TMP/auth-fail"; new_home "$H_AUTHFAIL"; make_dataset '[]'; : > "$GITHUB_LOG"

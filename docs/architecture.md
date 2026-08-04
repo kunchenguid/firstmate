@@ -102,6 +102,11 @@ The inventory stores a bounded feedback prefix and length marker; the owner reco
 Queue item publication precedes the covered inventory cursor, exact-head completion revalidates GitHub, and one home-scoped lane prevents duplicate review workers.
 A moved head invalidates incomplete evidence and requeues the same feedback generation before any fix claim or outward response.
 
+Inventory failure is per pull request, never account-wide.
+The search index lags merges and closes, so a candidate is omitted only after its own live detail read answers closed.
+A detail, pagination, or schema failure for one eligible open pull request keeps that pull request's previous covered head and feedback cursor, leaves its queued work untouched, records the failure durably in the snapshot, and announces one deduplicated diagnostic, while every unaffected pull request still reconciles.
+Account-wide conditions - authentication, rate headroom, and the total execution bound - remain whole-poll failures that publish no partial inventory.
+
 A response is bound durably before GitHub delivery.
 Delivery prepends a hidden exact-body binding marker and searches the original thread for that self-authored marker, exact head, and parent identity before posting, so a reply failure retries the same response and a crash after GitHub acceptance can reconcile the accepted post without knowingly repeating it.
 Immediately before a formal COMMENT review or any stale fallback-comment artifact could write, the state owner re-reads the live pull-request author and authenticated actor.

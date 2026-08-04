@@ -32,6 +32,8 @@ const EVENT_SCHEMA = "fm-pr-review-event.v1";
 const PRIVATE_ROUTE_SCHEMA = "fm-pr-review-private-route.v1";
 const PUBLICATION_GUARD_SCHEMA = "fm-pr-review-publication-guard.v1";
 const SELF_REVIEW_PUBLICATION_METHODS = new Set(["comment-only-review", "fallback-comment"]);
+const ISOLATED_PULL_READ_FAILURES = new Set(["github-read", "github-schema", "pagination-bound", "response-bound"]);
+const MAX_DIAGNOSTIC_PULLS = 5;
 const TERMINAL_FEEDBACK = new Set([
   "fixed-and-replied",
   "dismissed-and-replied",
@@ -245,8 +247,9 @@ function allItems() {
 
 function readControl() {
   const value = readJson(CONTROL, null, 65536);
-  if (!value) return { schema: CONTROL_SCHEMA, next_poll: 0, failure: null, event_counter: 0, pending_event: null };
-  if (value.schema !== CONTROL_SCHEMA || !Number.isSafeInteger(value.next_poll) || !Number.isSafeInteger(value.event_counter)) {
+  if (!value) return { schema: CONTROL_SCHEMA, next_poll: 0, failure: null, event_counter: 0, pending_event: null, degraded_fingerprint: "" };
+  if (value.schema !== CONTROL_SCHEMA || !Number.isSafeInteger(value.next_poll) || !Number.isSafeInteger(value.event_counter)
+    || typeof (value.degraded_fingerprint ?? "") !== "string") {
     die("poll control is invalid");
   }
   return value;
@@ -303,7 +306,9 @@ function actionableBody(body) {
 function feedbackFor(pull, viewer) {
   const result = [];
   const push = (kind, raw, reviewHead = "") => {
-    const body = normalizedBody(raw.body);
+    const rawPrefix = String(raw.body ?? "");
+    const prefixLength = [...rawPrefix].length;
+    const body = normalizedBody(rawPrefix);
     const author = String(raw.user?.login ?? raw.author?.login ?? "").toLowerCase();
     const actorType = String(raw.user?.type ?? raw.author?.type ?? "User");
     if (!LOGIN_RE.test(author) || author === viewer || !actionableBody(body) || transportOnly(author, actorType, body)) return;
@@ -324,7 +329,7 @@ function feedbackFor(pull, viewer) {
       review_head: reviewHead && SHA_RE.test(String(reviewHead).toLowerCase()) ? String(reviewHead).toLowerCase() : null,
       url: String(raw.html_url ?? pull.url),
       body: [...body].slice(0, MAX_BODY_CHARS).join(""),
-      body_truncated: Number(raw.body_length ?? [...body].length) > [...body].length,
+      body_truncated: Number(raw.body_length ?? prefixLength) > prefixLength,
     });
   };
   for (const review of pull.reviews ?? []) push("review-body", review, review.commit_id);
@@ -343,8 +348,20 @@ function validateObservation(value) {
     throw new PollError("github-schema", "GitHub returned an unsupported pull-request review inventory shape.", true);
   }
   const viewer = value.viewer.toLowerCase();
-  if (value.pulls.length > MAX_PULLS) throw new PollError("inventory-bound", "Relevant open pull requests exceed the configured bounded inventory.", true);
+  const rawDegraded = value.degraded ?? [];
+  if (!Array.isArray(rawDegraded)) throw new PollError("github-schema", "GitHub returned an unsupported isolated-read diagnostic shape.", true);
+  if (value.pulls.length + rawDegraded.length > MAX_PULLS) throw new PollError("inventory-bound", "Relevant open pull requests exceed the configured bounded inventory.", true);
   const repositories = new Set();
+  const degraded = rawDegraded.map((entry) => {
+    if (!entry || !REPO_RE.test(String(entry.repository ?? "")) || !Number.isSafeInteger(entry.number) || entry.number < 1
+      || !ISOLATED_PULL_READ_FAILURES.has(String(entry.category ?? ""))
+      || typeof entry.message !== "string" || entry.message.length === 0 || entry.message.length > 500) {
+      throw new PollError("github-schema", "GitHub returned an invalid isolated pull-request read diagnostic.", true);
+    }
+    repositories.add(entry.repository);
+    if (repositories.size > MAX_REPOSITORIES) throw new PollError("inventory-bound", "Relevant open pull requests span more repositories than the configured bound.", true);
+    return { repository: entry.repository, number: entry.number, url: canonicalUrl(entry.repository, entry.number), category: entry.category, message: entry.message };
+  }).sort((a, b) => a.url.localeCompare(b.url));
   const pulls = value.pulls.map((pull) => {
     if (!pull || !REPO_RE.test(String(pull.repository ?? "")) || !Number.isSafeInteger(pull.number) || pull.number < 1) {
       throw new PollError("github-schema", "GitHub returned an invalid pull-request identity.", true);
@@ -368,7 +385,7 @@ function validateObservation(value) {
       conversation_comments: Array.isArray(pull.conversation_comments) ? pull.conversation_comments : [],
     };
   });
-  return { viewer, observed_at: Number(value.observed_at ?? NOW()), pulls: pulls.sort((a, b) => a.url.localeCompare(b.url)) };
+  return { viewer, observed_at: Number(value.observed_at ?? NOW()), pulls: pulls.sort((a, b) => a.url.localeCompare(b.url)), degraded };
 }
 
 function findOwningTask(url) {
@@ -525,6 +542,12 @@ function reconcileObservation(observation) {
       opted_out: optedOut,
     };
   }
+  for (const entry of observation.degraded) {
+    if (next.pulls[entry.url]) throw new PollError("github-schema", `An isolated read diagnostic duplicated an observed pull request: ${entry.url}`, true);
+    const prior = previous.pulls[entry.url];
+    if (!prior) continue;
+    next.pulls[entry.url] = { ...prior, degraded: { category: entry.category, observed_at: observation.observed_at } };
+  }
   if (process.env.FM_PR_REVIEW_TEST_CRASH_AT === "after-items") process.exit(99);
   atomicWrite(SNAPSHOT, next);
   if (process.env.FM_PR_REVIEW_TEST_CRASH_AT === "after-snapshot") process.exit(99);
@@ -678,30 +701,41 @@ function liveObservation() {
   const repositories = new Set([...scopes.values()].map((entry) => entry.repository));
   if (repositories.size > MAX_REPOSITORIES) throw new PollError("inventory-bound", "Relevant open pull requests span more repositories than the configured bound.", true);
   const pulls = [];
+  const degraded = [];
   for (const candidate of [...scopes.values()].sort((a, b) => `${a.repository}#${a.number}`.localeCompare(`${b.repository}#${b.number}`))) {
-    const detail = apiJson("{number,html_url,state,draft,head:.head.sha,author:.user.login,requested_reviewers:[.requested_reviewers[].login],assignees:[.assignees[].login]}", [`/repos/${candidate.repository}/pulls/${candidate.number}`]);
-    const authored = String(detail.author ?? "").toLowerCase() === viewer;
-    if (authored) candidate.scopes.add("authored");
-    if ((detail.requested_reviewers ?? []).some((login) => String(login).toLowerCase() === viewer)) candidate.scopes.add("review-requested");
-    if ((detail.assignees ?? []).some((login) => String(login).toLowerCase() === viewer)) candidate.scopes.add("assigned");
-    const reviews = authored ? readPaged(`/repos/${candidate.repository}/pulls/${candidate.number}/reviews`, `[.[]|${selectedBodyFilter()}]`) : [];
-    const reviewComments = authored ? readPaged(`/repos/${candidate.repository}/pulls/${candidate.number}/comments`, `[.[]|${selectedBodyFilter()}]`) : [];
-    const conversationComments = authored ? readPaged(`/repos/${candidate.repository}/issues/${candidate.number}/comments`, `[.[]|${selectedBodyFilter()}]`) : [];
-    pulls.push({
-      repository: candidate.repository,
-      number: candidate.number,
-      url: detail.html_url,
-      state: String(detail.state ?? "").toLowerCase(),
-      draft: Boolean(detail.draft),
-      head: detail.head,
-      author: detail.author,
-      scopes: [...candidate.scopes],
-      reviews,
-      review_comments: reviewComments,
-      conversation_comments: conversationComments,
-    });
+    try {
+      const detail = apiJson("{number,html_url,state,draft,head:.head.sha,author:.user.login,requested_reviewers:[.requested_reviewers[].login],assignees:[.assignees[].login]}", [`/repos/${candidate.repository}/pulls/${candidate.number}`]);
+      const liveState = String(detail.state ?? "").toLowerCase();
+      if (liveState !== "open" && liveState !== "closed") throw new PollError("github-schema", "GitHub returned an unsupported live pull-request lifecycle state.", true);
+      // The search index lags merges and closes. Omitting a candidate is only safe
+      // because this detail read is the live lifecycle answer, not the stale index.
+      if (liveState !== "open") continue;
+      const authored = String(detail.author ?? "").toLowerCase() === viewer;
+      if (authored) candidate.scopes.add("authored");
+      if ((detail.requested_reviewers ?? []).some((login) => String(login).toLowerCase() === viewer)) candidate.scopes.add("review-requested");
+      if ((detail.assignees ?? []).some((login) => String(login).toLowerCase() === viewer)) candidate.scopes.add("assigned");
+      const reviews = authored ? readPaged(`/repos/${candidate.repository}/pulls/${candidate.number}/reviews`, `[.[]|${selectedBodyFilter()}]`) : [];
+      const reviewComments = authored ? readPaged(`/repos/${candidate.repository}/pulls/${candidate.number}/comments`, `[.[]|${selectedBodyFilter()}]`) : [];
+      const conversationComments = authored ? readPaged(`/repos/${candidate.repository}/issues/${candidate.number}/comments`, `[.[]|${selectedBodyFilter()}]`) : [];
+      pulls.push({
+        repository: candidate.repository,
+        number: candidate.number,
+        url: detail.html_url,
+        state: liveState,
+        draft: Boolean(detail.draft),
+        head: detail.head,
+        author: detail.author,
+        scopes: [...candidate.scopes],
+        reviews,
+        review_comments: reviewComments,
+        conversation_comments: conversationComments,
+      });
+    } catch (error) {
+      if (!(error instanceof PollError) || !ISOLATED_PULL_READ_FAILURES.has(error.category)) throw error;
+      degraded.push({ repository: candidate.repository, number: candidate.number, category: error.category, message: error.message.slice(0, 500) });
+    }
   }
-  return { schema: "fm-pr-review-observation.v1", viewer, observed_at: NOW(), pulls };
+  return { schema: "fm-pr-review-observation.v1", viewer, observed_at: NOW(), pulls, degraded };
 }
 
 function fixtureObservation(path) {
@@ -718,12 +752,28 @@ function actionableCounts() {
   return { pending, responses, lane: lane?.item_id ?? null };
 }
 
-function makeEvent(control, changed, category = "inventory", message = "") {
+function makeEvent(control, changed, category = "inventory", message = "", degraded = 0, force = false) {
   const counts = actionableCounts();
-  if (changed === 0 && counts.responses === 0 && !(counts.pending > 0 && !counts.lane)) return null;
+  if (!force && changed === 0 && counts.responses === 0 && !(counts.pending > 0 && !counts.lane)) return null;
   const counter = control.event_counter + 1;
   const id = `${NOW()}-${sha256(`${counter}:${changed}:${counts.pending}:${counts.responses}:${category}`).slice(0, 16)}`;
-  return { schema: EVENT_SCHEMA, event_id: id, category, changed, pending: counts.pending, response_pending: counts.responses, message };
+  return { schema: EVENT_SCHEMA, event_id: id, category, changed, pending: counts.pending, response_pending: counts.responses, degraded, message };
+}
+
+// An isolated per-pull read failure never suppresses the rest of the inventory,
+// but it must not be silent either. The notice is deduplicated by the exact set
+// of affected pull requests so a persistent failure announces once and a new or
+// recovered one announces again.
+function degradedNotice(control, degraded) {
+  const signature = degraded.map((entry) => `${entry.url} ${entry.category}`).sort().join("\n");
+  const fingerprint = signature ? sha256(signature) : "";
+  if (!fingerprint || fingerprint === (control.degraded_fingerprint ?? "")) return { fingerprint, message: null };
+  const listed = degraded.slice(0, MAX_DIAGNOSTIC_PULLS).map((entry) => `${entry.url} (${entry.category})`).join(", ");
+  const overflow = degraded.length > MAX_DIAGNOSTIC_PULLS ? ` and ${degraded.length - MAX_DIAGNOSTIC_PULLS} more` : "";
+  return {
+    fingerprint,
+    message: `Isolated pull-request read failure kept the previous covered head and feedback cursor for ${listed}${overflow}; the rest of the inventory reconciled normally.`,
+  };
 }
 
 function emitEvent(event) {
@@ -744,13 +794,17 @@ function poll() {
     const raw = process.env.FM_PR_REVIEW_OBSERVATION_FILE ? fixtureObservation(process.env.FM_PR_REVIEW_OBSERVATION_FILE) : liveObservation();
     const observation = validateObservation(raw);
     const changed = reconcileObservation(observation);
-    const event = makeEvent(control, changed);
+    const notice = degradedNotice(control, observation.degraded);
+    const degradedCount = observation.degraded.length;
+    let event = makeEvent(control, changed, "inventory", notice.message ?? "", degradedCount);
+    if (!event && notice.message) event = makeEvent(control, 0, "pull-read-isolated", notice.message, degradedCount, true);
     const next = {
       schema: CONTROL_SCHEMA,
       next_poll: now + INTERVAL,
       failure: null,
       event_counter: event ? control.event_counter + 1 : control.event_counter,
       pending_event: event,
+      degraded_fingerprint: notice.fingerprint,
     };
     writeControl(next);
     if (!event) process.exit(3);
@@ -770,6 +824,7 @@ function poll() {
         failure: { category: failure.category, message: failure.message, fingerprint, count, notified: true },
         event_counter: control.event_counter,
         pending_event: null,
+        degraded_fingerprint: control.degraded_fingerprint ?? "",
       });
       process.exit(3);
     }
@@ -780,6 +835,7 @@ function poll() {
       failure: { category: failure.category, message: failure.message, fingerprint, count, notified: true },
       event_counter: control.event_counter + 1,
       pending_event: event,
+      degraded_fingerprint: control.degraded_fingerprint ?? "",
     };
     writeControl(next);
     emitEvent(event);
@@ -922,8 +978,9 @@ function fetchFeedback(args) {
     chunks.push(chunk);
     start += consumed;
   }
-  const body = normalizedBody(chunks.join(""));
-  if (normalizedBody([...body].slice(0, MAX_BODY_CHARS).join("")) !== item.feedback.body) {
+  const raw = chunks.join("");
+  const body = normalizedBody(raw);
+  if (normalizedBody([...raw].slice(0, MAX_BODY_CHARS).join("")) !== item.feedback.body) {
     die("feedback prefix changed while its complete body was being fetched; poll before adjudication", 5);
   }
   const recordPath = join(BODIES, `${item.id}.json`);

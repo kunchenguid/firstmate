@@ -9,11 +9,13 @@
 #   fm-procevent-pr-review.sh source-id
 #   fm-procevent-pr-review.sh retire
 #
-# The registered source is ongoing, not terminal. It blocks until the durable
-# slow-poll deadline, performs one bounded gh-axi inventory, and exits with no
-# result when nothing needs model attention. A result is only a bounded private
-# notification that durable queue work or one deduplicated diagnostic exists;
-# feedback bodies and response text never enter the wake queue.
+# The registered source blocks until the durable slow-poll deadline, performs one
+# bounded gh-axi inventory, and exits with no result when nothing needs model
+# attention. A result is only a bounded private notification that durable queue
+# work or one deduplicated diagnostic exists; feedback bodies and response text
+# never enter the wake queue. Every captured result classifies terminal, so the
+# generic runner retires this registration; coverage resumes when the adjudication
+# owner acknowledges the event and re-arms, or when a locked bootstrap re-arms.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,6 +36,7 @@ classify() {
         || !Number.isSafeInteger(x.changed) || x.changed<0
         || !Number.isSafeInteger(x.pending) || x.pending<0
         || !Number.isSafeInteger(x.response_pending) || x.response_pending<0
+        || !Number.isSafeInteger(x.degraded ?? 0) || (x.degraded ?? 0)<0
         || typeof x.message!=="string" || x.message.length>1000) process.exit(2);
       process.stdout.write([x.category,x.pending,x.response_pending].join("\t"));
     } catch { process.exit(2); }

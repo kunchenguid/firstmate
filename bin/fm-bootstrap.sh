@@ -1044,7 +1044,12 @@ fi
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
 fi
-gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+gh_authenticated=0
+if gh auth status >/dev/null 2>&1; then
+  gh_authenticated=1
+else
+  echo "NEEDS_GH_AUTH"
+fi
 # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
 # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
 # primary only; detached-HEAD worktrees and secondmate homes never trip it.
@@ -1072,11 +1077,11 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   # inventory. Persistent secondmate homes stay out of this account-global lane
   # and receive routed work through their existing parent contract instead of
   # starting duplicate account pollers.
-  if [ ! -f "$FM_HOME/.fm-secondmate-home" ] \
+  if [ ! -e "$FM_HOME/.fm-secondmate-home" ] && [ ! -L "$FM_HOME/.fm-secondmate-home" ] \
     && [ -x "$FM_ROOT/bin/fm-procevent-pr-review.sh" ] \
     && command -v gh-axi >/dev/null 2>&1 \
     && command -v node >/dev/null 2>&1 \
-    && gh auth status >/dev/null 2>&1; then
+    && [ "$gh_authenticated" -eq 1 ]; then
     if ! FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent-pr-review.sh" arm >/dev/null 2>&1; then
       echo "PR_REVIEW: automatic pull-request review source could not be registered"
     fi

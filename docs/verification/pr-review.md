@@ -39,6 +39,9 @@ ok - automatic pull-request review owner is installed
 ok - discovery covers authored, requested, assigned, and participating PRs with one review per exact head and unchanged silence
 ok - feedback includes actionable bodies, inline comments, conversation, and substantive bots without self-reply loops
 ok - bounded pagination covers multiple PR, review, inline-thread, and conversation pages
+ok - CRLF and leading-whitespace truncated bodies reconstruct and adjudicate at the exact node
+ok - a pull request closed between search and detail is omitted after its live closed-state read
+ok - one pull request's read failure stays isolated, announced once, durable, and non-destructive
 ok - supported inline feedback is fixed, validated, and replied exactly once
 ok - unsupported, duplicate, outdated, and superseded findings receive one evidence reply
 ok - scope expansion and stronger boundaries wait for the captain without a premature response
@@ -52,7 +55,7 @@ ok - reply failure after correction retries the same response without duplicatin
 ok - crash after GitHub acceptance reconciles one original-thread reply instead of duplicating it
 ok - captain takeover opt-out is durable and later restoration covers intervening heads and feedback
 ok - process-event registration is restart-idempotent and isolated per Firstmate home
-ok - locked main-home bootstrap automatically arms one account review source and secondmates do not duplicate it
+ok - locked main-home bootstrap arms one account review source with one auth probe and no secondmate duplicates it
 ok - authentication and rate-limit failures stay bounded, deduplicated, and preserve the last good inventory
 
 # all automatic pull-request review tests passed
@@ -67,6 +70,9 @@ ok - authentication and rate-limit failures stay bounded, deduplicated, and pres
 | inventory scopes | four distinct fixtures each carry one independently expected relationship | querying only authored or review-requested PRs loses assigned or participating rows |
 | bounded pagination | five records with a page size of two require pages two and three, which the fake call log proves were read | first-page-only collection loses PRs or feedback |
 | complete feedback body | a finding extends beyond the queued prefix and the exact-node chunk reader reconstructs its independently asserted suffix | adjudicating only the transport prefix loses the claim's final substantive text |
+| truncated CRLF and leading-whitespace bodies | separate fixtures carry CRLF line endings and leading spaces inside the bounded prefix, and the reconstructed record is asserted against the independently known first and last text | normalizing before slicing shifts the prefix window, so the reconstruction never matches and those bodies can never be adjudicated |
+| close during search | a candidate is still returned by the lagging search index while its live detail read answers closed | omitting on the index alone drops open work, and failing the whole poll on one stale hit ends account-wide coverage |
+| isolated pull read failure | one pull request's paged reads fail while another gains new feedback, and the previous covered cursor, queued items, announced diagnostic, and durable snapshot marker are each checked separately | aborting the poll ends account-wide coverage, and swallowing the failure publishes a partial inventory as if it were complete |
 | bot and self classification | the fixture contains one substantive CodeRabbit claim, one transport-only deployment, and one self reply | excluding every Bot drops CodeRabbit; accepting every Bot or self actor creates loops |
 | supported correction | validation evidence and one exact original-thread response are independent files and effects | replying before validation or posting twice changes the terminal record or write count |
 | dismissed feedback | each unsupported, duplicate, and superseded claim has a required response and durable terminal outcome | silently resolving any non-fixed claim leaves no delivered response |
@@ -79,6 +85,7 @@ ok - authentication and rate-limit failures stay bounded, deduplicated, and pres
 | foreign PR safety | the live actor and author reads are distinct and the fake log accepts exactly one `pr review --comment` for the terminal review | approval, merge, branch mutation, missing identity reads, or duplicate delivery appears directly in the operation log |
 | opt-out restoration | head and feedback both change while the covered cursor is frozen | updating the covered cursor during takeover loses one or both intervening identities |
 | home isolation | two homes derive different source ids and retain one idempotent registration each | machine-global or path-independent identity aliases the homes |
+| secondmate exclusion | plain, symlinked, and dangling-symlink markers each stand for a secondmate home, and the locked bootstrap probes GitHub authentication exactly once | a marker test that follows or ignores symlinks lets a secondmate start the account-global poller, and a second probe adds a network round trip to every session start |
 | bounded failures | failed authentication and low rate headroom publish no snapshot and deduplicate the same diagnostic | partial inventory publication or immediate retry changes state or call cadence |
 
 ## Supported harnesses and runtime backends
