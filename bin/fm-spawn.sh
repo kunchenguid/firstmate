@@ -125,6 +125,10 @@
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
+#   Pi and pi-signed ship/scout launches also receive
+#   FM_FIRSTMATE_PI_DIRECT_REPORT_KIND=<ship|scout> before Pi starts, which is
+#   the positive runtime marker that tells tracked primary Pi extensions to no-op
+#   when this repository's own task worktree is trusted and auto-discovers them.
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
@@ -881,7 +885,12 @@ case "$ARG3" in
 esac
 
 case "$HARNESS" in
-  pi|pi-signed) LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH" ;;
+  pi|pi-signed)
+    LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH"
+    case "$KIND" in
+      ship|scout) LAUNCH="FM_FIRSTMATE_PI_DIRECT_REPORT_KIND=$KIND $LAUNCH" ;;
+    esac
+    ;;
 esac
 
 # pi-signed is an explicitly selected executable identity, not an alias that may

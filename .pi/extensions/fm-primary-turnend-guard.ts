@@ -10,6 +10,17 @@ let guardFollowupActive = false;
 
 type LockOwnership = "owned" | "missing" | "other";
 
+type FirstmateDirectReportKind = "ship" | "scout";
+
+function firstmateDirectReportKind(): FirstmateDirectReportKind | "" {
+  const value = process.env.FM_FIRSTMATE_PI_DIRECT_REPORT_KIND;
+  return value === "ship" || value === "scout" ? value : "";
+}
+
+function shouldRunPrimaryPiExtension(): boolean {
+  return firstmateDirectReportKind() === "";
+}
+
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
@@ -106,6 +117,8 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
 }
 
 export default function (pi: ExtensionAPI) {
+  if (!shouldRunPrimaryPiExtension()) return;
+
   pi.on?.("session_start", (event) => {
     const reason = String((event as { reason?: unknown }).reason ?? "");
     const nudge = ["startup", "new", "resume"].includes(reason) ? runSessionstartNudge() : "";
