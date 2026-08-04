@@ -4,11 +4,12 @@
 # and keeps blocking; it queues and exits only for actionable wakes.
 # The no-verb signal and stale path is absorb-only-when-provably-working: a wake
 # is absorbed only when the crew shows POSITIVE evidence it is still working (an
-# actively-running no-mistakes step, or a backend busy signal), and surfaced
-# otherwise, so a crew that finishes (or stops and waits) without a current
-# working signal is never silently swallowed. A declared external-wait pause is
-# the separate idle absorb case and re-surfaces only on its long bounded cadence,
-# although its initial no-verb status signal still surfaces in normal mode.
+# actively-running no-mistakes step, a backend busy signal, or descendant CPU
+# that advanced since the previous poll), and surfaced otherwise, so a crew that
+# finishes (or stops and waits) without a current working signal is never
+# silently swallowed. A declared external-wait pause is the separate idle absorb
+# case and re-surfaces only on its long bounded cadence, although its initial
+# no-verb status signal still surfaces in normal mode.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
@@ -30,9 +31,14 @@
 #                          also carries a "demand-deep-inspection" marker so the
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
-#                          resume. Unless afk is active. A genuinely busy pane
-#                          (window_is_busy true) is exempt from the above, but
-#                          only up to BUSY_TURN_MAX_SECS with no completed turn
+#                          resume. Unless afk is active. A pane with current
+#                          proof of work - a genuinely busy harness
+#                          (window_is_busy true), or descendant CPU that
+#                          advanced since the previous poll (fm_child_cpu_state
+#                          advancing), which is what a backgrounded command
+#                          looks like once its agent's turn has ended - is
+#                          exempt from the above, but only up to
+#                          BUSY_TURN_MAX_SECS with no completed turn
 #                          (state/<id>.turn-ended, or the spawn record before any
 #                          turn completes); past that bound busy_turn_over_age
 #                          routes it through the same wedge timer, so it surfaces
@@ -126,11 +132,14 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # debug log, and keeps blocking WITHOUT enqueuing or exiting. The no-verb signal
 # / stale path is absorb-only-when-provably-working: such a wake is absorbed ONLY
 # while the crew shows positive evidence it is still working (an actively-running
-# no-mistakes step, or a busy pane, via crew_is_provably_working over
-# fm-crew-state.sh); a crew that stopped its turn with no running pipeline and no
-# busy pane is SURFACED, so a finish reported only through interactive pane menus
-# (no done: status) is never swallowed. An ACTIONABLE wake (a captain-relevant
-# signal, a no-verb signal whose crew is not provably working, any check, a stale
+# no-mistakes step or a busy pane, via crew_is_provably_working over
+# fm-crew-state.sh, or descendant CPU that advanced since the previous poll, via
+# fm_child_cpu_state - the only source that can see work an agent backgrounded
+# before ending its turn); a crew that stopped its turn with no running pipeline,
+# no busy pane, and no advancing child is SURFACED, so a finish reported only
+# through interactive pane menus (no done: status) is never swallowed, and so is
+# a crew whose child has hung. An ACTIONABLE wake (a captain-relevant signal, a
+# no-verb signal whose crew is not provably working, any check, a stale
 # pane whose crew is not provably working, a provably-working stale past the
 # threshold, or anything unknown) is written to the durable queue and exits, which
 # is what wakes the LLM through the background-task completion. The same classifier
@@ -138,9 +147,11 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
-# A busy pane is unconditional proof of liveness with no built-in duration bound,
-# so a hung foreground call can remain hidden even while its rendered busy
-# footer changes every poll. BUSY_TURN_MAX_SECS bounds how long any busy pane
+# Current proof of work - a busy pane, or advancing descendant CPU - is
+# unconditional proof of liveness with no built-in duration bound, so a hung
+# foreground call can remain hidden even while its rendered busy footer changes
+# every poll, and so can an agent parked behind a child that keeps burning CPU
+# without ever finishing. BUSY_TURN_MAX_SECS bounds how long ANY such pane
 # may go with no completed turn: once its task's
 # state/<id>.turn-ended marker (or, before any turn has completed, the task's
 # spawn record) is this old, busy_turn_over_age routes the pane through the
@@ -952,10 +963,25 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    # Process liveness (fm-classify-lib.sh's fm_child_cpu_state). A busy pane is
+    # the harness telling us the AGENT is working; it says nothing about an
+    # agent that backgrounded a long command and ended its turn, which leaves an
+    # idle pane, an idle busy signal, and a silent status log while the real work
+    # runs in a child process. Sampled every poll for every window - including
+    # while the pane is busy - so a baseline is always warm and the busy->idle
+    # transition never has to spend a false escalation rebuilding one.
+    # ADVANCING descendant CPU folds into the same work_now gate a busy pane
+    # uses, so it inherits that bound too: BUSY_TURN_MAX_SECS still routes the
+    # pane through the wedge timer once the task has gone that long with no
+    # completed turn, and a hung, dead, or absent child leaves work_now at the
+    # busy verdict so a genuine wedge escalates exactly as before.
+    child_cpu=$(fm_child_cpu_state "$STATE" "$task")
+    work_now=$busy_now
+    [ "$child_cpu" = advancing ] && work_now=0
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
-      if [ "$n" -ge 2 ] && [ "$busy_now" -ne 0 ]; then
+      if [ "$n" -ge 2 ] && [ "$work_now" -ne 0 ]; then
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
         if [ "$kind" = secondmate ]; then
@@ -1055,11 +1081,12 @@ EOF
           fi
         fi
       else
-        # Pane busy or not yet stably stale: reset pending escalation bookkeeping,
-        # unless a genuinely busy pane has gone too long with no completed turn -
-        # then route it through the same wedge timer instead of erasing it.
-        if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-          wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
+        # Pane working or not yet stably stale: reset pending escalation
+        # bookkeeping, unless proven-working - a busy pane, or advancing
+        # descendant CPU - has gone too long with no completed turn; then route
+        # it through the same wedge timer instead of erasing it.
+        if [ "$work_now" -eq 0 ] && busy_turn_over_age "$task"; then
+          wedge_timer_check "$w" "$ssf" "working (no completed turn)" "$ewf"
         else
           rm -f "$ssf" "$ewf"
         fi
@@ -1070,8 +1097,8 @@ EOF
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
-      if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-        wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
+      if [ "$work_now" -eq 0 ] && busy_turn_over_age "$task"; then
+        wedge_timer_check "$w" "$ssf" "working (no completed turn)" "$ewf"
       else
         rm -f "$ssf" "$ewf"
       fi

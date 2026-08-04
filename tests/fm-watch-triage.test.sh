@@ -111,6 +111,46 @@ record_pi_busy() {  # <state-dir> <id>
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
+# Write one process into a fake /proc tree, carrying every field the
+# process-liveness probe and fm_pid_identity read: ppid/pgrp (field 4/5), the
+# controlling terminal and its foreground group (7/8), the process's own
+# utime/stime (14/15), the CPU of the children it has already reaped (16/17),
+# and starttime (22). The optional cwd argument creates the symlink the
+# worktree anchor resolves through, so only the intended process anchors.
+write_fake_proc_process() {  # <proc-root> <pid> <ppid> <pgrp> <tty> <tpgid> <own-ticks> <reaped-ticks> <starttime> [cwd]
+  local root=$1 pid=$2 ppid=$3 pgrp=$4 tty=$5 tpgid=$6 own=$7 reaped=$8 start=$9 cwd=${10:-}
+  mkdir -p "$root/$pid"
+  printf '%s (fake agent) S %s %s %s %s %s 0 0 0 0 0 %s 0 %s 0 20 0 1 0 %s\n' \
+    "$pid" "$ppid" "$pgrp" "$pgrp" "$tty" "$tpgid" "$own" "$reaped" "$start" > "$root/$pid/stat"
+  printf 'fake-agent\0--task\0' > "$root/$pid/cmdline"
+  rm -f "$root/$pid/cwd"
+  [ -z "$cwd" ] || ln -s "$cwd" "$root/$pid/cwd"
+  return 0
+}
+
+# The standard two-process fixture: an agent that is the foreground group leader
+# of terminal 5 with its working directory in <wt>, and one child of it in its
+# own group with no controlling terminal (how a harness that detaches its tool
+# subprocesses spawns them).
+make_fake_agent_tree() {  # <proc-root> <wt> [agent-own] [agent-reaped] [child-own] [agent-starttime]
+  local proc=$1 wt=$2 aown=${3:-0} areaped=${4:-0} cown=${5:-0} astart=${6:-900}
+  write_fake_proc_process "$proc" 100 1 100 5 100 "$aown" "$areaped" "$astart" "$wt"
+  write_fake_proc_process "$proc" 200 100 200 0 -1 "$cown" 0 901
+}
+
+# A fake process's identity, read through the production owner (fm_pid_identity)
+# rather than reconstructed here, so a test seeding a baseline writes exactly
+# what the probe will compare against. Scoped to a subshell like append_wake, so
+# sourcing fm-wake-lib.sh cannot leak its state-directory setup - or its
+# load order - into this test process.
+fake_proc_identity() {  # <proc-root> <state-dir> <pid>
+  FM_PROC_ROOT_OVERRIDE="$1" FM_STATE_OVERRIDE="$2" bash -c '
+    # shellcheck disable=SC1090,SC1091
+    . "$1"
+    fm_pid_identity "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$3"
+}
+
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 
 test_signal_reason_is_actionable_classifier() {
@@ -306,6 +346,233 @@ test_crew_absorb_class_classifier() {
   [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
   unset FM_FAKE_CREW_STATE
   pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
+}
+
+# --- process liveness: descendant CPU advancement ---------------------------
+# Every other absorb source is semantic (run step, status log, harness busy
+# signal) and all three correctly read "not working" the moment an agent
+# backgrounds a long command and ends its turn - while the work continues in a
+# child process none of them can see. fm_child_cpu_state is the process-level
+# evidence that closes that gap. The four directions below are the whole
+# contract, and the second one is the one that matters: a change that absorbed
+# everything would look exactly like a fix.
+
+test_child_cpu_state_four_directions() {
+  local dir state proc wt
+  dir=$(make_case child-cpu-directions); state="$dir/state"; proc="$dir/proc"; wt="$dir/wt"
+  mkdir -p "$proc" "$wt"
+  printf 'window=test:fm-task\nkind=ship\nworktree=%s\n' "$wt" > "$state/task.meta"
+  export FM_PROC_ROOT_OVERRIDE="$proc"
+  # Replace the baseline on every probe, so each assertion measures exactly the
+  # interval the test just created rather than an accumulated one.
+  export FM_CHILD_CPU_SAMPLE_INTERVAL=0
+  make_fake_agent_tree "$proc" "$wt"
+
+  # A first sample has nothing to compare against, so it is never evidence.
+  [ "$(fm_child_cpu_state "$state" task)" = static ] \
+    || fail "a first sample with no baseline was treated as evidence of work"
+
+  # 1. Live descendant whose CPU ADVANCED: absorbed as working.
+  make_fake_agent_tree "$proc" "$wt" 0 0 250
+  [ "$(fm_child_cpu_state "$state" task)" = advancing ] \
+    || fail "an advancing live descendant was not read as work"
+
+  # 2. Live descendant whose CPU is STATIC: still escalates. A hung child that
+  #    merely exists must never mask a wedge.
+  [ "$(fm_child_cpu_state "$state" task)" = static ] \
+    || fail "a live but hung descendant was treated as work (existence is not advancement)"
+
+  # 3. No descendant at all and the agent idle: still escalates - and it stays
+  #    static even when the AGENT itself burns CPU, because the agent working is
+  #    what the harness busy contract owns and a looping wedged agent must not
+  #    be able to vouch for itself.
+  rm -rf "$proc/200"
+  fm_child_cpu_state "$state" task >/dev/null
+  write_fake_proc_process "$proc" 100 1 100 5 100 99999 0 900 "$wt"
+  [ "$(fm_child_cpu_state "$state" task)" = static ] \
+    || fail "the agent's own CPU was counted as descendant work"
+
+  # 4. Agent dead: no anchor resolves at all.
+  rm -rf "$proc/100"
+  [ "$(fm_child_cpu_state "$state" task)" = none ] \
+    || fail "a dead agent still resolved a process-liveness anchor"
+
+  unset FM_PROC_ROOT_OVERRIDE FM_CHILD_CPU_SAMPLE_INTERVAL
+  pass "fm_child_cpu_state: only advancing descendant CPU absorbs; hung, absent, and dead all still surface"
+}
+
+# A crew driving one short-lived child after another - the 42-minute portable
+# suite that produced the seven false escalations - can have no live descendant
+# at either sample and still be working flat out. The agent's cutime/cstime
+# carries the CPU of everything it has already reaped, so the aggregate advances
+# anyway and no per-child bookkeeping is needed.
+test_child_cpu_counts_already_reaped_descendants() {
+  local dir state proc wt
+  dir=$(make_case child-cpu-reaped); state="$dir/state"; proc="$dir/proc"; wt="$dir/wt"
+  mkdir -p "$proc" "$wt"
+  printf 'window=test:fm-task\nkind=ship\nworktree=%s\n' "$wt" > "$state/task.meta"
+  export FM_PROC_ROOT_OVERRIDE="$proc"
+  export FM_CHILD_CPU_SAMPLE_INTERVAL=0
+  write_fake_proc_process "$proc" 100 1 100 5 100 0 0 900 "$wt"
+  fm_child_cpu_state "$state" task >/dev/null
+  write_fake_proc_process "$proc" 100 1 100 5 100 0 400 900 "$wt"
+  [ "$(fm_child_cpu_state "$state" task)" = advancing ] \
+    || fail "CPU burned by already-reaped children was not counted as work"
+  [ "$(fm_child_cpu_state "$state" task)" = static ] \
+    || fail "a reaped-children total that stopped growing was still read as work"
+  unset FM_PROC_ROOT_OVERRIDE FM_CHILD_CPU_SAMPLE_INTERVAL
+  pass "fm_child_cpu_state: CPU of already-reaped descendants advances the total, and stalls with it"
+}
+
+# The kernel reissues pids, so a stored sample compared across a pid reuse would
+# read an unrelated process's counter as a jump in this crew's work. Every
+# sample is bound to fm_pid_identity of the agent it came from.
+test_child_cpu_sample_is_identity_bound() {
+  local dir state proc wt
+  dir=$(make_case child-cpu-identity); state="$dir/state"; proc="$dir/proc"; wt="$dir/wt"
+  mkdir -p "$proc" "$wt"
+  printf 'window=test:fm-task\nkind=ship\nworktree=%s\n' "$wt" > "$state/task.meta"
+  export FM_PROC_ROOT_OVERRIDE="$proc"
+  export FM_CHILD_CPU_SAMPLE_INTERVAL=0
+  make_fake_agent_tree "$proc" "$wt"
+  fm_child_cpu_state "$state" task >/dev/null
+  # The same pid, a different start time: a DIFFERENT process wearing the old
+  # pid, with a descendant carrying a large counter of its own.
+  make_fake_agent_tree "$proc" "$wt" 0 0 5000 977
+  [ "$(fm_child_cpu_state "$state" task)" = static ] \
+    || fail "a reused agent pid was compared across the identity change"
+  # Within one identity the very next interval measures normally again.
+  make_fake_agent_tree "$proc" "$wt" 0 0 9000 977
+  [ "$(fm_child_cpu_state "$state" task)" = advancing ] \
+    || fail "the rebound sample did not resume measuring after the identity change"
+  unset FM_PROC_ROOT_OVERRIDE FM_CHILD_CPU_SAMPLE_INTERVAL
+  pass "fm_child_cpu_state: a sample is bound to the agent's identity, never to a bare pid"
+}
+
+# A baseline from long ago says nothing about whether work is happening NOW, so
+# it is refused rather than credited - otherwise a watcher restart could carry a
+# gap of arbitrary length and read it as a single advancing interval.
+test_child_cpu_refuses_a_stale_baseline() {
+  local dir state proc wt identity
+  dir=$(make_case child-cpu-stale-baseline); state="$dir/state"; proc="$dir/proc"; wt="$dir/wt"
+  mkdir -p "$proc" "$wt"
+  printf 'window=test:fm-task\nkind=ship\nworktree=%s\n' "$wt" > "$state/task.meta"
+  export FM_PROC_ROOT_OVERRIDE="$proc"
+  make_fake_agent_tree "$proc" "$wt" 0 0 9000
+  identity=$(fake_proc_identity "$proc" "$state" 100) || fail "could not read the fake agent identity"
+  printf '%s\t0\t%s\n' "$(( $(date +%s) - 30 ))" "$identity" > "$state/task.childcpu"
+  [ "$(FM_CHILD_CPU_MAX_SAMPLE_AGE=120 fm_child_cpu_state "$state" task)" = advancing ] \
+    || fail "a baseline inside the freshness window was not compared"
+  printf '%s\t0\t%s\n' "$(( $(date +%s) - 3000 ))" "$identity" > "$state/task.childcpu"
+  [ "$(FM_CHILD_CPU_MAX_SAMPLE_AGE=120 fm_child_cpu_state "$state" task)" = static ] \
+    || fail "a baseline older than the freshness window was still credited as advancement"
+  unset FM_PROC_ROOT_OVERRIDE
+  pass "fm_child_cpu_state: a baseline older than the freshness window proves nothing about now"
+}
+
+# The absorb classification consults process liveness ONLY where the semantic
+# read came back inconclusive. A definite verdict keeps its precedence in both
+# directions: a parked gate or a finished run is never talked out of surfacing
+# by whatever the process tree happens to still be doing.
+test_crew_absorb_class_process_liveness() {
+  local dir state proc wt fakebin
+  dir=$(make_case absorb-class-process); state="$dir/state"; proc="$dir/proc"
+  wt="$dir/wt"; fakebin="$dir/fakebin"
+  mkdir -p "$proc" "$wt"
+  printf 'window=test:fm-a\nkind=ship\nworktree=%s\n' "$wt" > "$state/a.meta"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_STATE
+  export FM_PROC_ROOT_OVERRIDE="$proc"
+  # Freeze one advancing interval: seed a baseline, then leave it in place
+  # (a huge sample interval) so every probe in this test scores the same jump.
+  export FM_CHILD_CPU_SAMPLE_INTERVAL=99999
+  make_fake_agent_tree "$proc" "$wt"
+  FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  crew_absorb_class a "$state" >/dev/null
+  make_fake_agent_tree "$proc" "$wt" 0 0 5000
+
+  [ "$(crew_absorb_class a "$state")" = working ] \
+    || fail "an unknown crew with advancing descendants was not classed working"
+  FM_FAKE_CREW_STATE='state: working · source: status-log · working: implementing'
+  [ "$(crew_absorb_class a "$state")" = working ] \
+    || fail "a status-log-only working crew with advancing descendants was not classed working"
+  FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review'
+  [ "$(crew_absorb_class a "$state")" = none ] \
+    || fail "a gate-parked run was overridden by its process tree"
+  FM_FAKE_CREW_STATE='state: done · source: run-step · checks green'
+  [ "$(crew_absorb_class a "$state")" = none ] \
+    || fail "a finished run was overridden by its process tree"
+  FM_FAKE_CREW_STATE='state: failed · source: run-step · run failed'
+  [ "$(crew_absorb_class a "$state")" = none ] \
+    || fail "a failed run was overridden by its process tree"
+  FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting upstream'
+  [ "$(crew_absorb_class a "$state")" = paused ] \
+    || fail "a declared pause was overridden by its process tree"
+  # And with the descendants hung rather than advancing, the inconclusive cases
+  # go straight back to surfacing.
+  rm -rf "$proc/200"
+  rm -f "$state/a.childcpu"
+  FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  crew_absorb_class a "$state" >/dev/null
+  [ "$(crew_absorb_class a "$state")" = none ] \
+    || fail "an unknown crew with no advancing descendant was absorbed"
+  unset FM_FAKE_CREW_STATE FM_PROC_ROOT_OVERRIDE FM_CHILD_CPU_SAMPLE_INTERVAL
+  pass "crew_absorb_class: process liveness only breaks an inconclusive tie, never a definite verdict"
+}
+
+# The fixtures above drive a synthetic /proc so the four directions are exact
+# and portable. This one proves the anchor rule against REAL processes: a real
+# controlling terminal, a real foreground process group, a real child burning
+# real CPU, and a real kill. It self-skips only where the probe is inert anyway.
+test_child_cpu_real_process_tree() {
+  local dir state wt agent burner i
+  if [ ! -r /proc/self/stat ] || [ ! -r /proc/self/cmdline ]; then
+    pass "real-process descendant CPU check skipped: no Linux-compatible /proc, where the probe is inert by design"
+    return
+  fi
+  if ! command -v script >/dev/null 2>&1; then
+    pass "real-process descendant CPU check skipped: no script(1) to create a controlling terminal"
+    return
+  fi
+  dir=$(make_case child-cpu-real); state="$dir/state"; wt="$dir/wt"
+  mkdir -p "$wt"
+  printf 'window=test:fm-task\nkind=ship\nworktree=%s\n' "$wt" > "$state/task.meta"
+  # A real pty whose foreground group leader sits in the worktree and starts one
+  # CPU-burning child, exactly the shape of an agent that backgrounded a command
+  # and ended its turn.
+  script -qec "cd '$wt' && exec bash -c 'echo \$\$ > agent.pid; (while :; do :; done) & echo \$! > burn.pid; sleep 60'" \
+    /dev/null >/dev/null 2>&1 &
+  i=0
+  while [ "$i" -lt 60 ] && [ ! -s "$wt/burn.pid" ]; do sleep 0.1; i=$((i + 1)); done
+  if [ ! -s "$wt/burn.pid" ]; then
+    pass "real-process descendant CPU check skipped: this script(1) did not start a pty-backed shell"
+    return
+  fi
+  agent=$(cat "$wt/agent.pid"); burner=$(cat "$wt/burn.pid")
+  cleanup_real_tree() { kill -CONT "$burner" 2>/dev/null; kill -KILL "$burner" "$agent" 2>/dev/null || true; }
+
+  FM_CHILD_CPU_SAMPLE_INTERVAL=0 fm_child_cpu_state "$state" task >/dev/null
+  sleep 2
+  [ "$(FM_CHILD_CPU_SAMPLE_INTERVAL=0 fm_child_cpu_state "$state" task)" = advancing ] \
+    || { cleanup_real_tree; fail "a real child burning real CPU was not read as work"; }
+
+  # SIGSTOP is the honest hung-child control: the process is still alive and
+  # still a descendant, it just stops consuming CPU.
+  kill -STOP "$burner" 2>/dev/null || { cleanup_real_tree; fail "could not stop the real burner"; }
+  FM_CHILD_CPU_SAMPLE_INTERVAL=0 fm_child_cpu_state "$state" task >/dev/null
+  sleep 2
+  kill -0 "$burner" 2>/dev/null || { cleanup_real_tree; fail "the stopped burner was not still alive"; }
+  [ "$(FM_CHILD_CPU_SAMPLE_INTERVAL=0 fm_child_cpu_state "$state" task)" = static ] \
+    || { cleanup_real_tree; fail "a real live-but-hung descendant was treated as work"; }
+
+  kill -CONT "$burner" 2>/dev/null; kill -KILL "$burner" 2>/dev/null
+  kill -KILL "$agent" 2>/dev/null
+  i=0
+  while [ "$i" -lt 60 ] && kill -0 "$agent" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
+  [ "$(FM_CHILD_CPU_SAMPLE_INTERVAL=0 fm_child_cpu_state "$state" task)" = none ] \
+    || { cleanup_real_tree; fail "a dead real agent still resolved an anchor"; }
+  cleanup_real_tree
+  pass "real process tree: a live burning child absorbs, a hung one and a dead agent still surface"
 }
 
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
@@ -606,6 +873,135 @@ test_nonterminal_stale_not_working_surfaced() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the immediate stale failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "immediate stale wake was not queued"
   pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
+}
+
+# --- stale pane whose WORK IS IN A CHILD PROCESS ------------------------------
+# The 2026-08-03 case: a crew backgrounded the portable suite and ended its
+# turn. The pane went static, the harness reported idle, the status log kept its
+# last `working:` note, and no pipeline was running - so every semantic source
+# read "not working" and the same pane wedge-escalated seven times across 42
+# minutes while 117 test scripts ran underneath it. These three tests fix the
+# behaviour in all three directions at the watcher level.
+
+# Build a stale-pane fixture whose only difference from
+# test_nonterminal_stale_not_working_surfaced is a fake /proc carrying the
+# crew's agent and one child. Echoes "<dir> <state> <proc> <fakebin> <capture>".
+setup_child_cpu_watch_case() {  # <case-name> <window> <task> <child-ticks>
+  local name=$1 window=$2 task=$3 ticks=$4 dir state proc wt fakebin capture key sig hash
+  dir=$(make_case "$name"); state="$dir/state"; proc="$dir/proc"; wt="$dir/wt"
+  fakebin="$dir/fakebin"; capture="$dir/pane.txt"
+  mkdir -p "$proc" "$wt"
+  printf 'idle prompt, suite running in the background' > "$capture"
+  printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$wt" > "$state/$task.meta"
+  printf 'working: implementing\n' > "$state/$task.status"
+  sig=$(seen_sig "$state/$task.status"); printf '%s' "$sig" > "$state/.seen-${task}_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  hash=$(hash_text "idle prompt, suite running in the background")
+  printf '%s' "$hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # No pipeline, idle pane: NOT provably working by any semantic source. Only
+  # the process tree can tell these three cases apart.
+  make_fake_agent_tree "$proc" "$wt" 0 0 "$ticks"
+  # Seed the baseline at zero ticks and pin it there, so every poll scores the
+  # same interval and the test is not a race against the watcher's cadence.
+  printf '%s\t0\t%s\n' "$(date +%s)" \
+    "$(fake_proc_identity "$proc" "$state" 100)" > "$state/$task.childcpu"
+  printf '%s %s %s %s %s\n' "$dir" "$state" "$proc" "$fakebin" "$capture"
+}
+
+test_stale_pane_with_advancing_child_is_absorbed() {
+  local dir state proc fakebin capture window key pid
+  window="test:fm-childwork"
+  read -r dir state proc fakebin capture < <(setup_child_cpu_watch_case child-work-absorbed "$window" childwork 5000)
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PROC_ROOT_OVERRIDE="$proc" FM_CHILD_CPU_SAMPLE_INTERVAL=99999 \
+    FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" &
+  pid=$!
+  if ! wait_live "$pid" 45; then
+    reap "$pid"; fail "a stale pane whose child is burning CPU was surfaced: $(cat "$dir/watch.out")"
+  fi
+  [ ! -s "$dir/watch.out" ] || fail "a stale pane with an advancing child printed a wake reason"
+  [ ! -s "$state/.wake-queue" ] || fail "a stale pane with an advancing child enqueued a wake"
+  # Even with the wedge threshold at one second, no timer ever starts: current
+  # proof of work keeps the pane out of the stale path entirely, exactly as a
+  # busy pane does.
+  [ ! -e "$state/.stale-since-$key" ] || fail "an advancing child still started a wedge timer"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a stale pane whose work is happening in an advancing child process is absorbed, not wedge-escalated"
+}
+
+# The control that separates a fix from a blindfold: same fixture, same idle
+# pane, same silent status log - only the child has stopped consuming CPU. It
+# must still surface immediately.
+test_stale_pane_with_hung_child_still_surfaces() {
+  local dir state proc fakebin capture window key pid drain_out
+  window="test:fm-childhung"
+  read -r dir state proc fakebin capture < <(setup_child_cpu_watch_case child-work-hung "$window" childhung 0)
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  drain_out="$dir/drain.out"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PROC_ROOT_OVERRIDE="$proc" FM_CHILD_CPU_SAMPLE_INTERVAL=99999 \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" &
+  pid=$!
+  wait_for_exit "$pid" 45 || fail "a stale pane whose child is hung was not surfaced"
+  grep -Fx "stale: $window" "$dir/watch.out" >/dev/null \
+    || fail "the hung-child stale did not print the immediate stale wake"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the hung-child stale failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null \
+    || fail "the hung-child stale wake was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a stale pane whose child exists but consumes no CPU still surfaces immediately"
+}
+
+# Advancing descendants are current proof of work, so they inherit exactly the
+# bound a busy pane has: BUSY_TURN_MAX_SECS still routes the pane through the
+# wedge timer once the task has gone that long with no completed turn. A child
+# that churns forever can delay an escalation, never cancel one.
+test_advancing_child_still_bounded_by_turn_age() {
+  local dir state proc fakebin capture window key pid
+  window="test:fm-childbound"
+  read -r dir state proc fakebin capture < <(setup_child_cpu_watch_case child-work-bound "$window" childbound 5000)
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  # No completed turn has ever been recorded, so the spawn record carries the age.
+  touch -t 200001010000 "$state/childbound.meta"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PROC_ROOT_OVERRIDE="$proc" FM_CHILD_CPU_SAMPLE_INTERVAL=99999 \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "an advancing child past the turn-age bound escalated before the wedge threshold: $(cat "$dir/watch.out")"
+  fi
+  [ -s "$state/.stale-since-$key" ] \
+    || fail "an advancing child past the turn-age bound did not start a wedge timer"
+  reap "$pid"
+
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$dir/watch.out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PROC_ROOT_OVERRIDE="$proc" FM_CHILD_CPU_SAMPLE_INTERVAL=99999 \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" &
+  pid=$!
+  wait_for_exit "$pid" 45 || fail "an advancing child never escalated past the completed-turn bound"
+  grep -F "stale: $window" "$dir/watch.out" >/dev/null || fail "the bounded escalation did not print the stale wake"
+  grep -F "possible wedge" "$dir/watch.out" >/dev/null || fail "the bounded escalation did not flag a possible wedge"
+  unset FM_FAKE_CREW_STATE
+  pass "an advancing child delays a wedge escalation but never cancels one: the completed-turn bound still fires"
 }
 
 # --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
@@ -1806,6 +2202,15 @@ test_classifier_primitives
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
+test_child_cpu_state_four_directions
+test_child_cpu_counts_already_reaped_descendants
+test_child_cpu_sample_is_identity_bound
+test_child_cpu_refuses_a_stale_baseline
+test_crew_absorb_class_process_liveness
+test_child_cpu_real_process_tree
+test_stale_pane_with_advancing_child_is_absorbed
+test_stale_pane_with_hung_child_still_surfaces
+test_advancing_child_still_bounded_by_turn_age
 test_signal_crew_provably_working_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed

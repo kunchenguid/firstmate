@@ -315,32 +315,276 @@ signal_reason_is_actionable() {  # <file> ...
   return 1
 }
 
+# --- process liveness: descendant CPU advancement ---------------------------
+#
+# Every absorb source below is SEMANTIC: the no-mistakes run step, the status
+# log, the harness busy signal. All three correctly read "not working" the
+# moment an agent backgrounds a long command and ends its turn - while the real
+# work continues in a child process none of them can see. Measured 2026-08-03:
+# one crew running the portable suite in the background produced seven
+# consecutive false wedge escalations across 42 minutes, each demanding a deep
+# inspection, and at least three other crews hit the same pattern while pipeline
+# stages ran underneath them.
+#
+# This adds the missing PROCESS-level evidence ALONGSIDE those sources, never in
+# place of them. Two rules keep it from becoming a blindfold:
+#
+#   1. Identity, never a bare pid. The kernel reissues pids, so a recorded pid
+#      routinely resolves to an unrelated live process; `kill -0`, a `/proc/<pid>`
+#      directory test and a bare `ps -p` all report that impostor as alive
+#      (data/learnings.md records the measured evidence). Every stored sample is
+#      bound to the fm_pid_identity of the agent it was taken from, and a sample
+#      whose anchor identity no longer matches is discarded, never compared.
+#   2. ADVANCEMENT, never existence. A descendant that merely EXISTS is no
+#      evidence of work: a hung child would then mask a genuine wedge, trading a
+#      false alarm for the far more dangerous silence. Only cumulative CPU that
+#      GREW since the previous sample counts.
+#
+# The agent is resolved from kernel facts, never a vendor process name: the
+# task's recorded worktree is the agent's working directory, and the agent is
+# the LEADER of the foreground process group on that pane's terminal.
+#
+# Leader, not the whole group, and that choice is load-bearing. Whether a tool
+# subprocess ends up in its parent's process group or its own is entirely a
+# harness implementation detail - Claude Code detaches its Bash-tool children
+# into a new session, a plain shell leaves a background job in the shell's own
+# group and on the shell's terminal. Excluding the whole group would therefore
+# make this signal silently measure nothing for any harness that spawns children
+# the second way, which is far worse than the cost of the leader rule: where a
+# harness does NOT get its own foreground group (a multi-process launcher such
+# as pi-signed, or an agent started without `exec`), the second harness process
+# is a descendant of the leader and its own CPU is counted. The threshold below
+# and the caller's completed-turn bound are what keep that over-inclusion safe.
+#
+# The LEADER's own utime/stime is deliberately EXCLUDED. That is the agent
+# itself working, which the semantic busy contract (bin/fm-busy-lib.sh) already
+# owns, and counting it would let an idle agent's rendering jitter - or worse, a
+# genuinely looping wedged agent - read as work. What is counted is everything
+# below it: every live strict descendant's CPU, plus every already-reaped
+# descendant's CPU through the leader's own cutime/cstime. That sum is monotonic
+# across a child exiting (the child's total leaves the live set and lands in its
+# parent's cutime), so one aggregate is enough and no per-child bookkeeping is
+# needed - which is also what makes a long run of short-lived children, such as
+# a test suite driving one script after another, register as advancing at all.
+#
+# A Linux-compatible /proc is required. Where it is absent this reports `none`,
+# which is exactly today's no-evidence behaviour: the wake surfaces.
+
+# Kernel ticks of descendant CPU that must accrue between two samples before a
+# crew counts as working. A tick is 10ms at the standard Linux USER_HZ of 100,
+# so the default is one full CPU-second per sample: far above what a harness
+# helper being spawned and reaped costs incidentally, and far below any real
+# build, test run, or pipeline stage. At the watcher's default 15s poll that is
+# roughly 7% of one core sustained.
+FM_CHILD_CPU_MIN_TICKS_DEFAULT=100
+# A baseline older than this proves nothing about NOW, so it is refreshed and
+# the probe reports no evidence for that poll rather than comparing against it.
+FM_CHILD_CPU_MAX_SAMPLE_AGE_DEFAULT=120
+# The baseline is replaced only once it is at least this old. Both the no-verb
+# signal path and the stale path can probe within one watcher cycle; without
+# this the second probe would reset the baseline to a near-zero measurement
+# window and report live work as static.
+FM_CHILD_CPU_SAMPLE_INTERVAL_DEFAULT=5
+
+# fm_pid_identity lives in bin/fm-wake-lib.sh, which creates the state directory
+# when sourced. This library is also sourced by strictly read-only readers
+# (bin/fm-crew-state.sh), so it is loaded on first probe instead of at source
+# time. Every consumer that actually probes - the watcher and the away-mode
+# daemon - has already loaded it, so this normally sources nothing.
+_fm_child_cpu_need_identity() {
+  command -v fm_pid_identity >/dev/null 2>&1 && return 0
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$_FM_CLASSIFY_LIB_DIR/fm-wake-lib.sh" 2>/dev/null || return 1
+  command -v fm_pid_identity >/dev/null 2>&1
+}
+
+# Print "<ticks>\t<agent-identity>" for the agent that owns <worktree>: the
+# total CPU its descendants have consumed, live and already reaped, and the
+# identity that total is bound to. Returns 1 when no agent can be resolved -
+# no readable /proc, no live process whose working directory is that worktree,
+# no controlling terminal, no foreground group, no live foreground group leader,
+# or two different panes claiming the same worktree (refused rather than
+# guessed).
+_fm_child_cpu_measure() {  # <worktree>
+  local wt=$1 proc d pid line rest cur c i
+  local tty='' tpgid='' total=0 identity
+  local -a ppid_of pgrp_of own_of reaped_of kids_of visited queue
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  proc=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  [ -d "$proc" ] || return 1
+  for d in "$proc"/[0-9]*; do
+    pid=${d#"$proc"/}
+    # stderr is redirected BEFORE stdin on purpose: redirections are applied
+    # left to right, so this also swallows the shell's own "no such file"
+    # complaint for a process that exited mid-scan, or for the literal glob left
+    # behind when the process table is empty.
+    read -r line 2>/dev/null < "$d/stat" || continue
+    # The comm field is parenthesised and may itself contain ") ", so strip
+    # greedily to the LAST one; every field after it is numeric. What remains
+    # starts at proc stat field 3, so field N sits at position N-2: ppid 4->2,
+    # pgrp 5->3, tty_nr 7->5, tpgid 8->6, utime 14->12, stime 15->13,
+    # cutime 16->14, cstime 17->15.
+    rest=${line##*') '}
+    # shellcheck disable=SC2086  # deliberate split of the fixed-shape numeric stat tail
+    set -- $rest
+    [ "$#" -ge 15 ] || continue
+    ppid_of[pid]=$2
+    pgrp_of[pid]=$3
+    own_of[pid]=$(( ${12} + ${13} ))
+    reaped_of[pid]=$(( ${14} + ${15} ))
+    # `-ef` compares the RESOLVED directory by device and inode, so it needs no
+    # readlink fork and is immune to a symlinked or bind-mounted worktree path.
+    [ "$d/cwd" -ef "$wt" ] 2>/dev/null || continue
+    # tty_nr 0 means no controlling terminal and tpgid -1 means no foreground
+    # group; neither can anchor an agent.
+    [ "$5" != 0 ] && [ "$6" != -1 ] || continue
+    if [ -z "$tty" ]; then
+      tty=$5
+      tpgid=$6
+    elif [ "$tty" != "$5" ] || [ "$tpgid" != "$6" ]; then
+      return 1
+    fi
+  done
+  [ -n "$tpgid" ] || return 1
+  # The foreground group's LEADER is the agent, and it must still be alive: a
+  # group whose leader has gone describes an agent already replaced.
+  [ -n "${pgrp_of[tpgid]+set}" ] && [ "${pgrp_of[tpgid]}" = "$tpgid" ] || return 1
+  for pid in "${!ppid_of[@]}"; do
+    kids_of[ppid_of[pid]]="${kids_of[ppid_of[pid]]:-} $pid"
+  done
+  # The leader's own cutime/cstime: the CPU of every descendant it has already
+  # reaped. Its own utime/stime is excluded on purpose (see above).
+  total=${reaped_of[tpgid]}
+  visited[tpgid]=1
+  queue=("$tpgid")
+  i=0
+  while [ "$i" -lt "${#queue[@]}" ]; do
+    cur=${queue[i]}
+    i=$(( i + 1 ))
+    for c in ${kids_of[cur]:-}; do
+      [ -z "${visited[c]+set}" ] || continue
+      visited[c]=1
+      total=$(( total + own_of[c] + reaped_of[c] ))
+      queue+=("$c")
+    done
+  done
+  identity=$(fm_pid_identity "$tpgid") || return 1
+  printf '%s\t%s' "$total" "$identity"
+}
+
+# Print the process-liveness verdict for crew <id>:
+#   advancing - its agent's descendants burned at least FM_CHILD_CPU_MIN_TICKS
+#               of CPU since the previous sample, so work is happening NOW in a
+#               child process even though the pane and every semantic source
+#               look idle;
+#   static    - an agent was resolved but its descendants did not advance (they
+#               are hung, finished, or absent), or there is no usable baseline
+#               to compare against yet;
+#   none      - no agent could be resolved at all: no /proc, no worktree
+#               recorded, no live agent on it, or an unreadable process table.
+# NOT a pure read: it maintains the state/<id>.childcpu sample the next call
+# measures against. Safe to call more than once per cycle - the baseline is
+# replaced only once it is FM_CHILD_CPU_SAMPLE_INTERVAL old, so a second probe
+# re-scores the SAME baseline instead of resetting the measurement window.
+fm_child_cpu_state() {  # <state-dir> <id>
+  local state=$1 id=$2 meta wt file now measured identity ticks verdict
+  local prev_ts='' prev_ticks='' prev_identity='' age min interval max_age
+  [ -n "$state" ] && [ -n "$id" ] || { printf 'none'; return; }
+  meta="$state/$id.meta"
+  [ -f "$meta" ] || { printf 'none'; return; }
+  wt=$(grep '^worktree=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$wt" ] || { printf 'none'; return; }
+  _fm_child_cpu_need_identity || { printf 'none'; return; }
+  measured=$(_fm_child_cpu_measure "$wt") || { printf 'none'; return; }
+  ticks=${measured%%$'\t'*}
+  identity=${measured#*$'\t'}
+  file="$state/$id.childcpu"
+  now=$(date +%s)
+  min=${FM_CHILD_CPU_MIN_TICKS:-$FM_CHILD_CPU_MIN_TICKS_DEFAULT}
+  interval=${FM_CHILD_CPU_SAMPLE_INTERVAL:-$FM_CHILD_CPU_SAMPLE_INTERVAL_DEFAULT}
+  max_age=${FM_CHILD_CPU_MAX_SAMPLE_AGE:-$FM_CHILD_CPU_MAX_SAMPLE_AGE_DEFAULT}
+  # Identity last, so a stray separator inside it can never shift the numbers.
+  if [ -f "$file" ]; then
+    IFS=$'\t' read -r prev_ts prev_ticks prev_identity < "$file" 2>/dev/null || true
+  fi
+  # A missing, truncated, or corrupt baseline is no baseline: measure afresh.
+  case "$prev_ts" in ''|*[!0-9]*) prev_ts='' ;; esac
+  case "$prev_ticks" in ''|*[!0-9]*) prev_ts='' ;; esac
+  verdict=static
+  if [ -n "$prev_ts" ] && [ "$prev_identity" = "$identity" ]; then
+    age=$(( now - prev_ts ))
+    if [ "$age" -ge 0 ] && [ "$age" -le "$max_age" ] \
+      && [ $(( ticks - prev_ticks )) -ge "$min" ]; then
+      verdict=advancing
+    fi
+  fi
+  if [ -z "$prev_ts" ] || [ "$prev_identity" != "$identity" ] \
+    || [ $(( now - prev_ts )) -ge "$interval" ]; then
+    printf '%s\t%s\t%s\n' "$now" "$ticks" "$identity" > "$file" 2>/dev/null || true
+  fi
+  printf '%s' "$verdict"
+}
+
+# 0 if crew <id> shows advancing descendant CPU. The positive half of the
+# process-liveness signal; see fm_child_cpu_state for the exact verdict.
+crew_child_cpu_advancing() {  # <id> [state-dir]
+  local id=$1 state=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}}
+  [ "$(fm_child_cpu_state "$state" "$id")" = advancing ]
+}
+
 # Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
 # from bin/fm-crew-state.sh's one authoritative current-state line
 # ("state: <s> · source: <src> · <detail>"). Prints exactly one token:
-#   working - an actively-running no-mistakes step (running/fixing/ci) or a busy
-#             pane; the crew is legitimately mid-work on a static-looking pane
-#             (e.g. waiting on CI);
+#   working - an actively-running no-mistakes step (running/fixing/ci), a busy
+#             pane, or advancing descendant CPU; the crew is legitimately
+#             mid-work on a static-looking pane (e.g. waiting on CI, or
+#             supervising a command it backgrounded before ending its turn);
 #   paused  - the crew's authoritative current state is a declared external-wait
 #             pause (paused:), which is EXPECTED to idle;
-#   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
-#             torn-down/unknown crew, or an unreadable verdict).
-# One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
-# authoritatively (not the status log) is what keeps run-step precedence: a crew
-# that appended paused: but then STARTED a run reports working, never paused.
-# NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
-# run it only on no-verb signal and first-sighting stale paths, never every wake.
+#   none    - none of those, so the wake must surface (a stopped/finished/parked/
+#             failed/torn-down/unknown crew whose descendants are hung, dead, or
+#             absent).
+# One fm-crew-state.sh read serves BOTH of its absorb reasons at once, and the
+# process-liveness probe runs only where that read came back INCONCLUSIVE, so
+# the semantic sources keep their precedence in both directions: a crew that
+# appended paused: but then STARTED a run reports working, never paused, and a
+# definite done/parked/failed/blocked verdict is never overridden by whatever
+# its process tree happens to still be doing.
+# NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call and the
+# probe maintains its own sample, so callers run it only on no-verb signal and
+# first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
-crew_absorb_class() {  # <id>
-  local id=$1 line state src
+crew_absorb_class() {  # <id> [state-dir]
+  local id=$1 state_dir=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}} line state src
   [ -n "$id" ] || { printf 'none'; return; }
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
-  case "$line" in state:*) ;; *) printf 'none'; return ;; esac
-  state=${line#state: }; state=${state%% *}
-  if [ "$state" = paused ]; then printf 'paused'; return; fi
-  if [ "$state" = working ]; then
-    src=${line#*source: }; src=${src%% *}
-    case "$src" in run-step|pane) printf 'working'; return ;; esac
+  state=unreadable
+  case "$line" in
+    state:*)
+      state=${line#state: }; state=${state%% *}
+      if [ "$state" = paused ]; then printf 'paused'; return; fi
+      if [ "$state" = working ]; then
+        src=${line#*source: }; src=${src%% *}
+        case "$src" in run-step|pane) printf 'working'; return ;; esac
+      fi
+      ;;
+  esac
+  # A DEFINITE verdict is final: a done, failed, blocked, or gate-parked run has
+  # an answer already, and whatever its process tree is still doing must not
+  # mask it. Only an INCONCLUSIVE read continues - `unknown`, an unreadable
+  # verdict, or a `working` claim from a source that cannot prove it (the status
+  # log). That inconclusive set is exactly what every semantic source reports
+  # for an agent that backgrounded a long command and then ended its turn, so it
+  # is the one place the process-liveness signal belongs: descendant CPU that
+  # ADVANCED since the last poll. Existence alone never counts, so a hung, dead,
+  # or absent child still falls through to `none` and the wake surfaces.
+  case "$state" in
+    working|unknown|unreadable) ;;
+    *) printf 'none'; return ;;
+  esac
+  if [ "$(fm_child_cpu_state "$state_dir" "$id")" = advancing ]; then
+    printf 'working'
+    return
   fi
   printf 'none'
 }

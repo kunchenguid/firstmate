@@ -94,6 +94,37 @@ tests/fm-busy-adapter-wiring.test.sh
 tests/fm-crew-state.test.sh
 ```
 
+## Descendant CPU liveness
+
+The process-liveness signal in [`bin/fm-classify-lib.sh`](../../bin/fm-classify-lib.sh) resolves a task's agent from two kernel facts rather than any vendor string: the agent's working directory is the recorded worktree, and the agent is the leader of the foreground process group on its pane's terminal.
+Both were measured on 2026-08-03 on Linux 6.18 (WSL2) against a live firstmate-launched Claude Code 2.1.220 worker, reading `/proc/<pid>/stat` directly.
+
+| Process | pid | pgrp | sid | tty_nr | tpgid |
+| --- | --- | --- | --- | --- | --- |
+| Pane shell | 943045 | 943045 | 943045 | 34835 | 943682 |
+| Agent (`claude`) | 943682 | 943682 | 943045 | 34835 | 943682 |
+| A Bash-tool child | 2009197 | 2009197 | 2009197 | 0 | -1 |
+
+The agent is the only process that is its own process-group leader and the terminal's foreground group, so `tpgid` identifies it exactly.
+Its tool children are placed in a new session with no controlling terminal, which is why the signal walks parent-child links rather than the terminal's process list: a `ps -t` scan of that terminal reports the pane shell and the agent only, and never the child doing the work.
+
+The end-to-end behaviour was verified against real processes in all four directions on the same date, with a pty-backed shell in a scratch worktree and one CPU-burning child:
+
+| Condition | Verdict |
+| --- | --- |
+| Live descendant, CPU advancing | `advancing` |
+| Live descendant held by `SIGSTOP`, CPU static | `static` |
+| No descendant, agent idle | `static` |
+| Agent killed | `none` |
+
+Only the first absorbs; the other three surface on the unchanged schedule.
+
+Deterministic entry point, including that real-process pass and the synthetic-`/proc` regressions for pid reuse, baseline freshness, and the excluded agent-own CPU:
+
+```sh
+tests/fm-watch-triage.test.sh
+```
+
 ## Turn-end guard
 
 The direct and passive mechanisms were validated across all five harnesses on 2026-07-08 through 2026-07-12, with Claude's replacement Stop-owned path revalidated on 2026-07-24.
