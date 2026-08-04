@@ -1,6 +1,9 @@
 ---
 name: updatefirstmate
-description: Self-update a running firstmate and its secondmates to the latest from this fleet's fork. Use when the captain invokes /updatefirstmate (e.g. "/updatefirstmate", "update firstmate", "pull the latest firstmate"). Merges upstream origin into fork/main, then fast-forwards this firstmate repo's default branch and every secondmate home to the fork (fast-forward only, never forced, never disruptive), then re-reads AGENTS.md and nudges each updated secondmate to do the same, so the whole tree runs the latest bin/ and instructions.
+description: >-
+  Self-update a running firstmate and its secondmates to the latest from this fleet's fork.
+  Use when the captain invokes /updatefirstmate (e.g. "/updatefirstmate", "update firstmate", "pull the latest firstmate").
+  Merges upstream origin into fork/main, then fast-forwards this firstmate repo's default branch and every local or remote secondmate to the fork through its guarded update path (fast-forward only, never forced, never disruptive), then re-reads AGENTS.md and nudges each updated secondmate to do the same, so the whole tree runs the latest bin/ and instructions.
 user-invocable: true
 metadata:
   internal: true
@@ -22,8 +25,9 @@ Only `AGENTS.md`, `bin/`, and `.agents/skills/` are a running firstmate instruct
 This skill performs that update for the running main firstmate and every secondmate, without disturbing any in-flight work.
 
 The home advance is **fast-forward only** - the same sanctioned self-write as the fleet sync firstmate already runs.
+For a remote route, it updates the configured Firstmate code root on that host from that host's own remote, then guardedly fast-forwards the persistent home to that code-root commit.
 It never forces, never stashes, and advances a target only on a clean fast-forward; anything dirty, diverged, offline, or on the wrong branch is skipped and reported.
-The one commit an update may create is the upstream merge on `fork/main`, and a conflicting merge stops the run instead of forcing it.
+The one commit an update may create is the upstream merge on `fork/main`, and a conflicting merge stops the run instead of forcing it; no home advance ever creates a commit.
 A tracked-files fast-forward leaves the gitignored operational dirs (data/, state/, config/, projects/, .no-mistakes/) untouched, so a secondmate's in-flight work is never disrupted.
 This touches only the firstmate repo and its own worktrees, never anything under `projects/`.
 
@@ -33,7 +37,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
    ```sh
    bin/fm-update.sh
    ```
-   It merges `origin/main` into `fork/main` and pushes the result to the fork, then fast-forwards this firstmate repo's default branch to `fork/main`, then fast-forwards every registered secondmate home (each a treehouse worktree of this same repo, leased at a detached HEAD on the default branch) the same way.
+   It merges `origin/main` into `fork/main` and pushes the result to the fork, then fast-forwards this firstmate repo's default branch to `fork/main`, then updates every registered local or remote secondmate home to the fork through its placement-specific guarded path.
    It prints one `upstream: ...` ingest line, one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed by two action lines that tell you exactly what to do next:
    - `reread-firstmate: yes|no`
    - `nudge-secondmates: fm-<id>...|none`
@@ -74,5 +78,5 @@ This touches only the firstmate repo and its own worktrees, never anything under
 - **Only the firstmate repo and its worktrees** are touched, never `projects/`.
   It is the same sanctioned self-write as the fleet sync.
 - **Secondmates are never disrupted.**
-  A secondmate gets a tracked-files fast-forward (safe while it is mid-task, since its work lives in gitignored operational dirs and separate project worktrees) plus a gentle re-read nudge.
+  A local or remote secondmate gets a tracked-files fast-forward only when its own checkout is safe to advance, plus a gentle re-read nudge when it changed.
   It is never torn down, interrupted, or forced.

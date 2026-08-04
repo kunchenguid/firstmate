@@ -18,7 +18,7 @@
 # standalone with unchanged default behavior - other flows (fm-bootstrap.sh
 # install <tools> after consent, /updatefirstmate, the afk daemon, existing
 # tests) still call them directly. The one seam this script needed -
-# bootstrap running its detect-only diagnostics without its five mutating
+# bootstrap running its detect-only diagnostics without its six mutating
 # sweeps - is an opt-in FM_BOOTSTRAP_DETECT_ONLY=1 flag on fm-bootstrap.sh
 # itself (default unset/0 = unchanged behavior), not a fork.
 #
@@ -29,10 +29,11 @@
 #                       mutating step runs.
 #   2. bootstrap      - home-local stale Herdr projection cleanup runs only
 #                       when this session actually holds the lock. Detect-only
-#                       diagnostics always run. Bootstrap's five MUTATING sweeps
-#                       (legacy PR-check migration, secondmate fast-forward,
-#                       secondmate liveness, X-mode artifact writes, fleet sync)
-#                       also run only when locked.
+#                       diagnostics always run. Bootstrap's six MUTATING sweeps
+#                       (legacy PR-check migration, secondmate convergence,
+#                       secondmate liveness, pending remote handoff retry,
+#                       X-mode artifact writes, fleet sync) also run only when
+#                       locked.
 #   3. wake-drain     - mutates the durable wake queue, so it also only runs
 #                       when locked.
 #   4. context digest - data/projects.md, data/secondmates.md, data/captain.md,
@@ -53,12 +54,13 @@
 # reminder line when one is missing.
 #
 # Why lock first: the old documented order (bootstrap, THEN lock) let a
-# SECOND concurrent session run bootstrap's mutating sweeps - fast-forwarding
-# secondmate homes, writing X-mode artifacts, fetching/fast-forwarding every
-# project clone - before ever discovering another session already holds the
-# lock. Two sessions racing those sweeps is exactly the hazard the lock
-# exists to prevent, so locking first closes the hole outright: only the
-# session that actually wins the lock ever touches shared mutable state.
+# SECOND concurrent session run bootstrap's mutating sweeps - converging
+# secondmate homes, retrying pending handoff outboxes, writing X-mode artifacts,
+# and fetching or fast-forwarding every project clone - before ever discovering
+# another session already holds the lock. Two sessions racing those sweeps is
+# exactly the hazard the lock exists to prevent, so locking first closes the
+# hole outright: only the session that actually wins the lock ever touches
+# shared mutable state.
 #
 # The tradeoff this ordering accepts: a refused (read-only) session must not
 # go dark. So on refusal, bootstrap still runs (in FM_BOOTSTRAP_DETECT_ONLY=1
@@ -107,6 +109,10 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-secondmate-command-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-command-lib.sh"
+# shellcheck source=bin/fm-public-followup-lib.sh
+. "$SCRIPT_DIR/fm-public-followup-lib.sh"
+# shellcheck source=bin/fm-trace-context-lib.sh
+. "$SCRIPT_DIR/fm-trace-context-lib.sh"
 
 STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
 case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
@@ -261,12 +267,16 @@ if [ "$LOCK_RC" -ne 0 ]; then
     printf '●  READ-ONLY SESSION - FLEET LOCK OWNERSHIP WAS NOT VERIFIED\n'
     printf '●  %s\n' "$LOCK_OUT"
     printf '●  Skipping every mutating step: PR-check migration, stale Herdr child cleanup,\n'
-    printf '●  secondmate sync, X-mode artifacts, fleet sync, and wake-queue drain. Detect-only bootstrap\n'
+    printf '●  secondmate convergence, secondmate liveness, pending remote handoff retry,\n'
+    printf '●  X-mode artifacts, fleet sync, and wake-queue drain. Detect-only bootstrap\n'
     printf '●  diagnostics and the rest of this read-only-safe digest still ran below.\n'
     printf '●  Operate read-only until this resolves - do not spawn, steer, merge, or\n'
     printf '●  otherwise mutate fleet state from this session.\n'
     printf '%s\n' "$BAR"
   }
+fi
+if [ "$READ_ONLY" -eq 0 ]; then
+  fm_trace_context_session_start "$CONFIG" "$STATE/.trace-context-effective"
 fi
 
 # --- 2. bootstrap --------------------------------------------------------
@@ -413,6 +423,23 @@ if [ -e "$STATE/.afk" ]; then
   printf 'present - away-mode supervision is active; the daemon owns the watcher.\n'
 else
   printf 'absent\n'
+fi
+
+# Public commitments made through the myfirstmate relay. A promise to reply in a
+# public thread must survive compaction and restart, so it is surfaced from disk
+# here rather than from conversation memory. fm-public-followup-lib.sh owns both
+# gates: a home that never opted into the relay runs one [ -f ] test, prints no
+# subsection, and never reaches fm-public-followup.sh.
+if fm_pf_relay_active "$FM_HOME" \
+  && { fm_pf_has_registrations "$STATE" || fm_pf_has_events "$STATE"; }; then
+  PUBLIC_FOLLOWUP=$("$SCRIPT_DIR/fm-public-followup.sh" pending 2>/dev/null) || PUBLIC_FOLLOWUP=
+  if [ -n "$PUBLIC_FOLLOWUP" ]; then
+    subsection "Public commitments awaiting delivery"
+    printf '%s\n' "$PUBLIC_FOLLOWUP"
+    printf '\nEach line is a public reply this home still owes. Reconcile terminal results with\n'
+    printf '%s/bin/fm-public-followup.sh consume, then deliver a ready one with\n' "$FM_ROOT"
+    printf '%s/bin/fm-public-followup.sh deliver <id>. Load fmx-respond for the procedure.\n' "$FM_ROOT"
+  fi
 fi
 
 # --- 6. closing reminder -----------------------------------------------

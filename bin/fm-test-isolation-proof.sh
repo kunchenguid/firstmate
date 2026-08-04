@@ -96,7 +96,7 @@ exclusion_reason() {
     fm-backend.test.sh)
       printf '%s\n' 'old-vs-new main checkout diff fixture; gray-zone concurrent git/worktree cost'
       ;;
-    fm-spawn-dispatch-profile.test.sh|fm-spawn-worktree-settle.test.sh)
+    fm-spawn-dispatch-profile.test.sh|fm-spawn-worktree-settle.test.sh|fm-trace-context-spawn.test.sh)
       printf '%s\n' 'real isolated git worktrees plus spawn settle loops; gray zone until dedicated proof'
       ;;
     fm-pr-check-security.test.sh)
@@ -121,7 +121,7 @@ exclusion_reason() {
     fm-afk-pi-herdr-return-e2e.test.sh|\
     fm-codex-continuity-live-e2e.test.sh|fm-grok-continuity-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-primary-live-e2e.test.sh|\
-    fm-send-secondmate-marker-herdr-e2e.test.sh)
+    fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh)
       printf '%s\n' 'live harness opt-in; never default parallel CI'
       ;;
     fm-backend-autodetect-smoke.test.sh|fm-backend-herdr-eventwait-smoke.test.sh|\
@@ -190,6 +190,7 @@ fm-backend-tmux-smoke.test.sh
 fm-backend.test.sh
 fm-spawn-dispatch-profile.test.sh
 fm-spawn-worktree-settle.test.sh
+fm-trace-context-spawn.test.sh
 fm-pr-check-security.test.sh
 fm-teardown.test.sh
 fm-watcher-lock.test.sh
@@ -198,6 +199,7 @@ fm-afk-inject-e2e.test.sh
 fm-backend-herdr-smoke.test.sh
 fm-backend-cmux-smoke.test.sh
 fm-pi-primary-live-e2e.test.sh
+fm-quota-array-dispatch-live-e2e.test.sh
 EOF
 }
 
