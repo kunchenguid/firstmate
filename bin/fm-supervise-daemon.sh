@@ -858,8 +858,9 @@ wedge_alarm_via_herdr() {  # <summary>
   [ "$rc" -eq 0 ] || { log "wedge alarm: herdr notification failed"; return 1; }
   # Only a parseable result OBJECT proves anything about delivery. Unparseable
   # output, a missing result, or an absent `shown` field all mean "cannot
-  # verify", which trusts the exit code exactly like the no-jq fallback above;
-  # the failure path is reserved for an explicit non-true `shown`.
+  # verify", which trusts the exit code exactly like the no-jq fallback above
+  # and, like it, records that the delivery went unverified rather than passing
+  # silently; the failure path is reserved for an explicit non-true `shown`.
   #
   # `first(inputs | ...)` bounds the extraction to ONE value. Streaming the
   # whole capture would give an unbounded arity: if herdr ever writes a second
@@ -877,7 +878,9 @@ wedge_alarm_via_herdr() {  # <summary>
     return 0; }
   verdict=$(printf '%s' "$out" \
     | jq -n -r 'first(inputs | .result | objects | select(has("shown")) | [(.shown | tostring), (.reason // "" | tostring)] | @tsv)' 2>/dev/null)
-  [ -n "$verdict" ] || return 0
+  [ -n "$verdict" ] || {
+    log "wedge alarm: herdr notification delivery NOT verified - herdr's output carried no readable result to confirm it; falling back to the exit code, which herdr can return 0 for without showing anything"
+    return 0; }
   shown=${verdict%%$'\t'*}
   reason=${verdict#*$'\t'}
   [ "$shown" != true ] || return 0

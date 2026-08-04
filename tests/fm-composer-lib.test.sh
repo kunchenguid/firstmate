@@ -199,10 +199,15 @@ test_nbsp_after_bare_glyph_with_text_is_pending() {
 
 # --- Class coverage for the other Unicode space separators -------------------
 # U+00A0 above is the codepoint captured live; the cases below are NOT captured
-# evidence. They pin the rest of the same defect class - U+202F NARROW NO-BREAK
-# SPACE, U+2007 FIGURE SPACE, U+2009 THIN SPACE are equally outside bash's
-# [:space:] class and the literal ' ' glyph-strip patterns, so each one would
-# reproduce the identical pending-deferral wedge if it were ever rendered.
+# evidence. They pin the rest of the same defect class - U+202F (NARROW NO-BREAK
+# SPACE), U+2007 (FIGURE SPACE) and U+2009 (THIN SPACE) - whose reach is
+# locale-dependent. Under a C/POSIX locale bash's [:space:] class covers no
+# Unicode space separator at all, so all three would reproduce the identical
+# pending-deferral wedge. Under a glibc UTF-8 locale [:space:] already covers
+# U+2009, which therefore read empty before this change; U+00A0, U+202F and
+# U+2007 stay outside the class under either locale. All three are asserted
+# here regardless: the classifier must give the same verdicts whatever locale
+# the daemon runs under.
 
 test_other_unicode_space_separators_after_bare_glyph_are_empty() {
   local sep out

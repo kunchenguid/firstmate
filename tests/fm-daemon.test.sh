@@ -1554,15 +1554,21 @@ test_wedge_alarm_herdr_unverifiable_output_trusts_exit_code() {
   daemon_log="$dir/daemon.log"
   # An older herdr build, or extra non-JSON chatter on stdout, leaves nothing
   # to parse. That is an inability to VERIFY delivery, not proof of a
-  # non-delivery, so it must fall back to the exit code like the no-jq path.
+  # non-delivery, so it must fall back to the exit code like the no-jq path -
+  # and, like that path, say so. A silent success here is the same invisibility
+  # in a different shape: a permanent per-host condition under which the channel
+  # can never be confirmed, with nothing in the log to reveal it.
   install_fake_herdr "$dir" 'notification sent'
   PATH="$FAKE_HERDR_BIN:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
     wedge_alarm_via_herdr "away-mode WEDGED 900s"
   rc=$?
   assert_fake_herdr_ran "$dir" "unparseable-output fallback"
   [ "$rc" -eq 0 ] || fail "unparseable herdr output was treated as a proven non-delivery ($rc)"
-  assert_no_failure_logged "$daemon_log" "unparseable herdr output"
-  pass "wedge_alarm_via_herdr: output it cannot parse trusts the exit code instead of claiming non-delivery"
+  grep -F 'delivery NOT verified' "$daemon_log" >/dev/null \
+    || fail "unparseable herdr output left no record that delivery went unverified: $(cat "$daemon_log" 2>/dev/null)"
+  grep -F 'not shown' "$daemon_log" >/dev/null \
+    && fail "unparseable herdr output logged a false non-delivery: $(cat "$daemon_log")"
+  pass "wedge_alarm_via_herdr: output it cannot parse records an unverified delivery instead of claiming non-delivery"
 }
 
 # A host without jq cannot read herdr's result at all, so the exit code is the
