@@ -54,6 +54,11 @@ case "${1:-}" in
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
   list-windows) exit 0 ;;
+  list-panes)
+    # The endpoint-presence check asks which window the target resolved to.
+    target= prev=
+    for a in "$@"; do [ "$prev" = -t ] && target=$a; prev=$a; done
+    printf '%s\n' "${target#*:}"; exit 0 ;;
 esac
 exit 0
 SH

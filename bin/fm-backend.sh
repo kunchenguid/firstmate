@@ -825,17 +825,35 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
 # going through fm_backend_herdr_target_ready (which auto-starts the herdr
 # server as a side effect via fm_backend_herdr_server_ensure - fine for an
 # operation that is about to use the pane, wrong for a passive liveness
-# probe). A gone tmux window or an unqueryable herdr pane (server down, pane
-# closed), missing zellij pane, or unreadable Orca terminal simply fails, which
-# IS "does not exist" for this purpose.
-# Mirrors fm-crew-state.sh's pane_readable check; exists here as one shared
-# primitive so callers that only need a fast alive/dead read (recovery
-# digests, the session-start fleet digest) do not re-derive it inline.
+# probe). An unqueryable herdr pane (server down, pane closed), missing zellij
+# pane, or unreadable Orca terminal simply fails, which IS "does not exist" for
+# this purpose; tmux needs the extra binding described at its branch below.
+# The single owner of this check; callers that only need a fast alive/dead read
+# (recovery digests, fm-crew-state.sh's pane_readable, the session-start fleet
+# digest) call it rather than re-deriving it inline.
 fm_backend_target_exists() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2 expected_label=${3:-} session pane
   case "$backend" in
     tmux)
-      tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1
+      # tmux's `-t` resolution is fail-open and fuzzy, so no command's exit
+      # status alone answers this: display-message is CMD_FIND_CANFAIL and
+      # answers an absent target from the client's active window instead of
+      # failing, and a window NAME also resolves by fnmatch and by prefix. Both
+      # make a torn-down endpoint read live. list-panes does fail on a target it
+      # cannot resolve, and asking it which window it landed on turns the
+      # remaining fuzzy match into an exact one: a recorded session:window-name
+      # must resolve to that same name. Every other shape (%pane, @window,
+      # session:index) already resolves exactly, so its exit status is enough,
+      # except a target that names no window at all (empty, or "session:"),
+      # which tmux answers from whatever window is current.
+      case "$target" in
+        ''|*:) return 1 ;;
+        *:*[!0-9]*)
+          [ "$(LC_ALL=C tmux list-panes -t "$target" -F '#{window_name}' 2>/dev/null \
+            | head -1)" = "${target#*:}" ]
+          ;;
+        *) tmux list-panes -t "$target" -F '#{pane_id}' >/dev/null 2>&1 ;;
+      esac
       ;;
     herdr)
       fm_backend_source herdr || return 1

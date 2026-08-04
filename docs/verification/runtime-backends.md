@@ -30,6 +30,37 @@ zsh
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
 
+### Target resolution
+
+Endpoint-presence resolution was verified on 2026-08-04 with tmux 3.7b on macOS 15.5 arm64, on a private socket started with `-f /dev/null`.
+The session held one window, `fm-live`.
+
+```sh
+tmux display-message -p -t fmtest:fm-live '#{window_name}'
+tmux display-message -p -t fmtest:fm-gone '#{window_name}'
+tmux display-message -p -t nosuch:fm-gone '#{window_name}'
+tmux list-panes -t fmtest:fm-live -F '#{window_name}'
+tmux list-panes -t fmtest:fm-gone -F '#{window_name}'
+tmux list-panes -t nosuch:fm-gone -F '#{window_name}'
+tmux list-panes -t fmtest:fm-li -F '#{window_name}'
+```
+
+Observed output:
+
+```text
+fm-live (exit 0)
+fm-live (exit 0)
+<empty> (exit 0)
+fm-live (exit 0)
+can't find window: fm-gone (exit 1)
+can't find session: nosuch (exit 1)
+fm-live (exit 0)
+```
+
+`display-message` never failed: an absent window was answered from another window entirely, and an absent session returned an empty expansion, both with exit 0.
+`list-panes` failed on both absent targets, and its remaining fuzziness is name matching, which the last line shows resolving a prefix to a different window.
+Exit status alone therefore answers presence only for a pane id, a window id, or a window index, so a recorded `session:window-name` is confirmed by asking `list-panes` which window it landed on and requiring that same name back.
+
 ### Agent liveness name sources
 
 The earlier record that every harness is observed under its own `#{pane_current_command}` no longer holds and has been replaced by the per-harness evidence below.

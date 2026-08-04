@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # tests/fm-tmux-agent-liveness.test.sh - portable regression for the tmux
-# agent-liveness classifier (bin/backends/tmux.sh).
+# agent-liveness classifier (bin/backends/tmux.sh) and for the cheap endpoint
+# presence check every supervision readout shares
+# (fm_backend_target_exists, bin/fm-backend.sh).
 #
 # It runs REAL processes in a REAL tmux server on a private socket (`-L`), and
 # needs no harness and no credentials, so it runs everywhere CI runs tmux. The
@@ -31,17 +33,20 @@ LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-liveness.XXXXXX")
 SESSION=liveness
 
 cleanup_all() {
-  "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
+  "$REAL_TMUX" -L "$SOCKET" -f /dev/null kill-server >/dev/null 2>&1 || true
   [ -n "${LAB:-}" ] && rm -rf "$LAB"
 }
 trap cleanup_all EXIT
 
 # A `tmux` shim on PATH so bin/backends/tmux.sh's bare `tmux` calls reach the
-# private socket and never touch the host's real sessions.
+# private socket and never touch the host's real sessions. `-f /dev/null` keeps
+# the private server off the host's tmux.conf too: a maintainer whose config
+# carries an `after-new-session` hook that renames sessions would otherwise see
+# every case here fail for a reason that has nothing to do with the classifier.
 mkdir -p "$LAB/shim" "$LAB/bin" "$LAB/bin/claude" "$LAB/bin/decoy" "$LAB/wt"
 cat > "$LAB/shim/tmux" <<SH
 #!/usr/bin/env bash
-exec "$REAL_TMUX" -L "$SOCKET" "\$@"
+exec "$REAL_TMUX" -L "$SOCKET" -f /dev/null "\$@"
 SH
 chmod +x "$LAB/shim/tmux"
 PATH="$LAB/shim:$PATH"
@@ -81,7 +86,7 @@ chmod +x "$LAB/bin/agent-launcher"
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source tmux || fail "fm_backend_source tmux failed"
 
-"$REAL_TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -n idle -c "$LAB/wt" \
+"$REAL_TMUX" -L "$SOCKET" -f /dev/null new-session -d -s "$SESSION" -n idle -c "$LAB/wt" \
   || fail "could not start the private tmux server"
 
 # Run the pane's process DIRECTLY as the window command rather than typing into
@@ -89,7 +94,7 @@ fm_backend_source tmux || fail "fm_backend_source tmux failed"
 new_window() {  # <name> <cmd...>
   local name=$1
   shift
-  "$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n "$name" -c "$LAB/wt" -- "$@" \
+  "$REAL_TMUX" -L "$SOCKET" -f /dev/null new-window -d -t "$SESSION:" -n "$name" -c "$LAB/wt" -- "$@" \
     || fail "could not create window $name"
 }
 
@@ -349,6 +354,44 @@ fi
 [ "$(fm_tmux_composer_state "$SESSION:cursor-exited")" != empty ] \
   || fail "a dead-shell pane still showing Cursor's composer must never read empty"
 pass "cursor composer: a stale Cursor screen over a dead shell never reads empty"
+
+# --- the cheap presence check must not inherit that fallback either ---------
+# fm_backend_target_exists (bin/fm-backend.sh) is the fast alive/dead read the
+# session-start fleet digest, fm-crew-state.sh's pane_readable, and the away-mode
+# daemon's pane guard all share, so a false live verdict there tells a supervisor
+# a torn-down worker is still working. It is a different predicate from the
+# recovery-grade classifier above and needs its own proof against real tmux.
+
+tmux display-message -p -t "$SESSION:no-such-window" '#{pane_id}' >/dev/null 2>&1 \
+  || fail "tmux no longer answers display-message for an absent target, so these cases prove nothing"
+
+fm_backend_target_exists tmux "$SESSION:agent" \
+  || fail "a live window must read as present"
+fm_backend_target_exists tmux "$SESSION:no-such-window" \
+  && fail "an absent window in a live session must not read as present"
+fm_backend_target_exists tmux "no-such-session:agent" \
+  && fail "a window whose whole session is gone must not read as present"
+fm_backend_target_exists tmux "$SESSION:age" \
+  && fail "a window name that is only a PREFIX of a live window must not read as present"
+pass "tmux presence: only the exact recorded window reads present, never tmux's fallback, a gone session, or a prefix match"
+
+# The away-mode supervisor pane is recorded as a %pane id, not session:window,
+# so the non-name target shapes must keep resolving exactly.
+PANE_ID=$(tmux list-panes -t "$SESSION:idle" -F '#{pane_id}' | head -1)
+[ -n "$PANE_ID" ] || fail "could not read a real pane id for the pane-target case"
+fm_backend_target_exists tmux "$PANE_ID" \
+  || fail "a live pane id must read as present"
+fm_backend_target_exists tmux '%999999' \
+  && fail "a pane id that does not exist must not read as present"
+pass "tmux presence: a %pane id target resolves exactly, live and absent"
+
+# A record that names no window is how a missing endpoint reaches this check, and
+# tmux answers those from whatever window is current rather than refusing.
+fm_backend_target_exists tmux '' \
+  && fail "an empty recorded endpoint must not read as present"
+fm_backend_target_exists tmux "$SESSION:" \
+  && fail "a recorded endpoint naming a session but no window must not read as present"
+pass "tmux presence: a record naming no window reads absent instead of borrowing the current window"
 
 cleanup_all
 trap - EXIT

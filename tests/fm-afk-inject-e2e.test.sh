@@ -54,7 +54,7 @@ cleanup_all() {
     wait "$DAEMON_PID" 2>/dev/null || true
   fi
   if [ -n "${SOCKET:-}" ] && [ -n "${REAL_TMUX:-}" ]; then
-    "$REAL_TMUX" -L "$SOCKET" kill-server 2>/dev/null || true
+    "$REAL_TMUX" -L "$SOCKET" -f /dev/null kill-server 2>/dev/null || true
   fi
   rm -rf "${TMUX_SHIM_DIR:-}" 2>/dev/null || true
   rm -rf "${STATE_DIR:-}" 2>/dev/null || true
@@ -73,8 +73,8 @@ LOG_FILE="$STATE_DIR/submitted.log"
 . "$DAEMON"
 
 # Private tmux server with a supervisor session.
-"$REAL_TMUX" -L "$SOCKET" new-session -d -s supervisor -x 200 -y 50
-SUPERVISOR_PANE=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t supervisor '#{pane_id}')
+"$REAL_TMUX" -L "$SOCKET" -f /dev/null new-session -d -s supervisor -x 200 -y 50
+SUPERVISOR_PANE=$("$REAL_TMUX" -L "$SOCKET" -f /dev/null display-message -p -t supervisor '#{pane_id}')
 
 # Supervisor pane loop: a small deterministic composer that logs each submitted
 # line verbatim (hex + text + classification). It draws the in-progress input
@@ -133,7 +133,7 @@ LOOP
 chmod +x "$LOOP_SCRIPT"
 
 # Start the loop in the supervisor pane.
-"$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" \
+"$REAL_TMUX" -L "$SOCKET" -f /dev/null send-keys -t "$SUPERVISOR_PANE" \
   "bash '$LOOP_SCRIPT' '$LOG_FILE'" Enter
 sleep 1  # let the loop start and settle
 
@@ -152,15 +152,15 @@ if [ "\${1:-}" = "send-keys" ] && [ -f "$STATE_DIR/.swallow-enter" ]; then
     fi
     _args+=("\$_arg")
   done
-  exec "$REAL_TMUX" -L "$SOCKET" send-keys "\${_args[@]}"
+  exec "$REAL_TMUX" -L "$SOCKET" -f /dev/null send-keys "\${_args[@]}"
 fi
-exec "$REAL_TMUX" -L "$SOCKET" "\$@"
+exec "$REAL_TMUX" -L "$SOCKET" -f /dev/null "\$@"
 SHIM
 chmod +x "$TMUX_SHIM_DIR/tmux"
 
 # Create a fake crewmate window (the watcher lists fm-* windows for stale
 # detection). The pane is an inert shell - it just needs to exist.
-"$REAL_TMUX" -L "$SOCKET" new-window -d -n fm-fake-c1 -t supervisor
+"$REAL_TMUX" -L "$SOCKET" -f /dev/null new-window -d -n fm-fake-c1 -t supervisor
 
 start_daemon() {
   PATH="$TMUX_SHIM_DIR:$PATH" \
@@ -225,23 +225,23 @@ reset_state() {
 
 selfcheck_pane_input_pending() {
   local check_text="selfcheck-marker-12345"
-  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" -l "$check_text"
+  "$REAL_TMUX" -L "$SOCKET" -f /dev/null send-keys -t "$SUPERVISOR_PANE" -l "$check_text"
   if wait_for_pane_input_pending; then
     # Detected - clean up the text and proceed.
-    "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" Enter
+    "$REAL_TMUX" -L "$SOCKET" -f /dev/null send-keys -t "$SUPERVISOR_PANE" Enter
     sleep 0.3
     return 0
   fi
   # Not detected - print diagnostics and fail.
   echo "pane_input_pending cannot detect typed text in this tmux environment" >&2
   local _cy _line
-  _cy=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$SUPERVISOR_PANE" '#{cursor_y}' 2>/dev/null)
+  _cy=$("$REAL_TMUX" -L "$SOCKET" -f /dev/null display-message -p -t "$SUPERVISOR_PANE" '#{cursor_y}' 2>/dev/null)
   echo "  cursor_y=$_cy" >&2
   echo "  pane capture (first 10 lines):" >&2
-  "$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SUPERVISOR_PANE" 2>/dev/null | head -10 | sed 's/^/    /' >&2
-  _line=$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SUPERVISOR_PANE" 2>/dev/null | sed -n "$((_cy + 1))p")
+  "$REAL_TMUX" -L "$SOCKET" -f /dev/null capture-pane -p -t "$SUPERVISOR_PANE" 2>/dev/null | head -10 | sed 's/^/    /' >&2
+  _line=$("$REAL_TMUX" -L "$SOCKET" -f /dev/null capture-pane -p -t "$SUPERVISOR_PANE" 2>/dev/null | sed -n "$((_cy + 1))p")
   echo "  cursor line: '$_line'" >&2
-  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" Enter
+  "$REAL_TMUX" -L "$SOCKET" -f /dev/null send-keys -t "$SUPERVISOR_PANE" Enter
   fail "pane_input_pending self-check failed"
 }
 
@@ -268,7 +268,7 @@ test_scenario_a() {
 
   # Type partial text into the supervisor pane with NO Enter. This simulates the
   # captain returning and starting to type before afk has been cleared.
-  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" -l "human draft text"
+  "$REAL_TMUX" -L "$SOCKET" -f /dev/null send-keys -t "$SUPERVISOR_PANE" -l "human draft text"
   wait_for_pane_input_pending \
     || fail "Scenario A: human draft text did not become detectable as pending input"
 
@@ -291,7 +291,7 @@ test_scenario_a() {
   fi
 
   # Now submit the human's text (Enter). The pane goes idle.
-  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" Enter
+  "$REAL_TMUX" -L "$SOCKET" -f /dev/null send-keys -t "$SUPERVISOR_PANE" Enter
   sleep 0.5
 
   # Wait for the daemon to retry injection (housekeeping tick = 1s).

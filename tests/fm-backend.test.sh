@@ -650,6 +650,7 @@ case "${1:-}" in
     fi
     exit 0 ;;
   list-windows) exit 0 ;;
+  list-panes) printf 'win\n'; exit 0 ;;
 esac
 exit 0
 SH
@@ -689,7 +690,7 @@ test_send_tmux_contract() {
   run_send_case "$ROOT" "$fb" "$log" "$home" -- "sess:win" --key Escape
   rc=$?
   expect_code 0 "$rc" "fm-send --key should succeed against a live fake pane"
-  assert_contains "$(cat "$log")" $'\x1f''display-message'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''#{pane_id}' \
+  assert_contains "$(cat "$log")" $'\x1f''list-panes'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-F'$'\x1f''#{window_name}' \
     "fm-send --key did not verify the explicit tmux target before sending"
   assert_contains "$(cat "$log")" $'\x1f''Escape' "fm-send --key did not send the named key"
   assert_not_contains "$(cat "$log")" $'\x1f''-l'$'\x1f' "fm-send --key must not type literal text"

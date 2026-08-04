@@ -290,23 +290,56 @@ SH
   chmod +x "$fakebin/ps"
 }
 
-# make_fake_tmux <fakebin> <live-target>: display-message succeeds only for
-# the given "session:window" target - the exact primitive
-# fm_backend_target_exists uses for a tmux endpoint liveness read.
+# make_fake_tmux <fakebin> <live-target>: a tmux boundary that reproduces REAL
+# tmux target resolution around one live "session:window" target, so the
+# endpoint-liveness read is tested against how tmux actually answers rather than
+# against a fixture that fails politely. Verified against tmux 3.7b: a `-t`
+# target that does not resolve makes display-message answer from the client's
+# active window and exit 0 (CMD_FIND_CANFAIL), while list-windows and list-panes
+# do fail - and list-panes still resolves a window NAME by prefix.
 make_fake_tmux() {
   local fakebin=$1 live=$2
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
+live="$live"
+live_session="\${live%%:*}"
+live_window="\${live#*:}"
+target=""
+format=""
+prev=""
+for a in "\$@"; do
+  [ "\$prev" = "-t" ] && target="\$a"
+  [ "\$prev" = "-F" ] && format="\$a"
+  prev="\$a"
+done
+emit() {  # what the requested format expands to for the one live pane
+  case "\$format" in
+    *window_name*) printf '%s\n' "\$live_window" ;;
+    *) printf '%%0\n' ;;
+  esac
+}
 case "\${1:-}" in
   display-message)
-    target=""
-    prev=""
-    for a in "\$@"; do
-      [ "\$prev" = "-t" ] && target="\$a"
-      prev="\$a"
-    done
-    [ "\$target" = "$live" ] && { printf '%%1\n'; exit 0; }
+    emit
+    exit 0
+    ;;
+  list-windows)
+    [ "\$target" = "\$live_session" ] || { echo "can't find session: \$target" >&2; exit 1; }
+    printf '%s\n' "\$live_window"
+    exit 0
+    ;;
+  list-panes)
+    # The session must match exactly, while the window name also resolves by
+    # prefix, and the answer describes the window tmux actually landed on.
+    case "\$target" in
+      "\$live_session":*) ;;
+      *) echo "can't find session: \${target%%:*}" >&2; exit 1 ;;
+    esac
+    case "\$live_window" in
+      "\${target#*:}"*) emit; exit 0 ;;
+    esac
+    echo "can't find window: \${target#*:}" >&2
     exit 1
     ;;
 esac
@@ -383,6 +416,35 @@ case "${1:-}" in
     else
       printf '%s\n' main
     fi
+    exit 0
+    ;;
+  list-panes)
+    # The endpoint-presence check resolves a target and asks which window it
+    # landed on, so this arm answers from the same inventory list-windows serves.
+    target=
+    format=
+    prev=
+    for arg in "$@"; do
+      [ "$prev" = -t ] && target=$arg
+      prev=$arg
+      case "$arg" in '#{'*) format=$arg ;; esac
+    done
+    if [ "${target#%}" != "$target" ]; then printf '%s\n' "$target"; exit 0; fi
+    if [ "$mode" = unreadable ] && [ ! -e "$spawned" ] && [ ! -e "$killed" ]; then
+      exit 1
+    fi
+    if [ -e "$spawned" ]; then
+      inventory=$mate_window
+    elif [ ! -e "$killed" ] && { [ "$mode" = ambiguous ] || [ "$mode" = shell ]; }; then
+      inventory=$mate_window
+    else
+      inventory=main
+    fi
+    [ "${target#*:}" = "$inventory" ] || { echo "can't find window: ${target#*:}" >&2; exit 1; }
+    case "$format" in
+      *window_name*) printf '%s\n' "$inventory" ;;
+      *) printf '%%1\n' ;;
+    esac
     exit 0
     ;;
   has-session) exit 0 ;;
@@ -1313,12 +1375,18 @@ EOF
 
   printf 'window=fm-sess:live-window\nkind=ship\n' > "$home/state/task-live.meta"
   printf 'window=fm-sess:dead-window\nkind=ship\n' > "$home/state/task-dead.meta"
+  printf 'window=gone-sess:live-window\nkind=ship\n' > "$home/state/task-gone-session.meta"
+  printf 'window=fm-sess:live\nkind=ship\n' > "$home/state/task-prefix.meta"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:live-window)" "live tmux endpoint not reported alive"
   assert_contains "$out" "endpoint: dead (backend=tmux window=fm-sess:dead-window)" "dead tmux endpoint not reported dead"
+  assert_contains "$out" "endpoint: dead (backend=tmux window=gone-sess:live-window)" \
+    "a recorded window whose whole session is gone was not reported dead"
+  assert_contains "$out" "endpoint: dead (backend=tmux window=fm-sess:live)" \
+    "a recorded window name that is only a PREFIX of a live window was not reported dead"
 
-  pass "tmux endpoint liveness is reported per task: alive for a live window, dead for a gone one"
+  pass "tmux endpoint liveness is reported per task: alive only for the exact live window, dead for a gone window, a gone session, and a prefix of a live name"
 }
 
 test_endpoint_liveness_herdr() {

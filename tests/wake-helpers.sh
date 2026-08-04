@@ -155,6 +155,14 @@ case "${1:-}" in
   list-windows)
     [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
     exit 0 ;;
+  list-panes)
+    # The endpoint-presence check asks which window the target resolved to; a
+    # live pane resolves to exactly the window its target names.
+    [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || exit 1
+    _t=""; _prev=""
+    for _a in "$@"; do [ "$_prev" = "-t" ] && _t=$_a; _prev=$_a; done
+    printf '%s\n' "${_t#*:}"
+    exit 0 ;;
   capture-pane)
     # Honor a single-line band capture (-S N -E M, both non-negative) for the
     # composer reader's non-bordered compatibility fallback; otherwise (e.g. its
@@ -242,6 +250,13 @@ case "${1:-}" in
     exit 0 ;;
   capture-pane) cat "$COMPOSER" 2>/dev/null; exit 0 ;;
   list-windows) exit 0 ;;
+  list-panes)
+    # The endpoint-presence check asks which window the target resolved to; this
+    # fixture's pane is always live.
+    target= prev=
+    for a in "$@"; do [ "$prev" = -t ] && target=$a; prev=$a; done
+    printf '%s\n' "${target#*:}"
+    exit 0 ;;
   send-keys)
     shift
     text=""; is_enter=0; lit=0
