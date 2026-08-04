@@ -139,8 +139,8 @@ META="$STATE/$ID.meta"
 # removed. bin/fm-outcome-manifest.sh composes data/<ID>/outcome.json from the
 # task metadata, status log, backlog row, report, work-item store, and cached PR
 # observation while they all still exist, then writes it atomically.
-# Teardown refuses when that fails: the manifest is the only record of this task
-# that survives cleanup, so a task that cannot be archived must not be erased.
+# Teardown refuses when that fails: the manifest is the canonical structured
+# completion record, so a task that cannot be archived must not be erased.
 # Rerun teardown once the cause is fixed - the write is idempotent.
 publish_outcome_manifest() {  # <force-flag>
   local rc=0

@@ -24,8 +24,9 @@
 #   state/<id>.gbrain        the optional capture receipt, absent by default
 # A secondmate has no backlog row by contract, so its title is null rather than
 # synthesized from a registry or intake record.
-# It never contacts a forge and never reads a brief, a prompt, a tool argument,
-# or any credential-bearing artifact. Publication is refused outright when the
+# It never contacts a forge and never reads brief contents, a prompt, a tool
+# argument, or any credential-bearing artifact. It inspects only the brief's
+# mtime for timestamp provenance. Publication is refused outright when the
 # composed document carries a key the fm-outcome-manifest.v1 allowlist in
 # bin/fm-outcome-lib.sh does not name.
 #

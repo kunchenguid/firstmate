@@ -96,9 +96,9 @@ fm_outcome_path_iso() {  # <path>
 }
 
 
-# Single-line, control-character-free, length-capped free text.
-# Every durable free-text field passes through here so a captured payload,
-# multi-line prompt, or terminal escape can never reach a manifest.
+# Convert producer-owned free text to one control-character-free, length-capped
+# line. Readers separately reject stored free text that violates the same shape
+# or its field-specific cap before it can reach a manifest or snapshot.
 fm_outcome_text() {  # <text> [max]
   local text=$1 max=${2:-$FM_OUTCOME_TEXT_MAX}
   printf '%s' "$text" \

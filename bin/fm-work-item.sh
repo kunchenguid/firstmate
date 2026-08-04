@@ -8,8 +8,8 @@
 #
 # This script owns STORAGE and TRANSPORT only. Deciding which work item a task
 # references, resolving it against a project's registry, and refreshing per-forge
-# enrichment belong to the project-issue-linkage owner, which calls `add` and
-# `enrich` here rather than inventing a second schema.
+# enrichment belong to the project-issue-linkage owner, which upserts through
+# `add` here rather than inventing a second schema.
 #
 # The store lives at data/<task-id>/work-items.json (schema fm-work-items.v1),
 # beside the scout report and the outcome manifest, so it survives teardown into
@@ -32,7 +32,7 @@
 # the captain or brief declared; pr-linked marks one derived later from a PR's
 # linked-issue metadata.
 #
-# Enrichment (title and open/closed state) is optional and nullable by contract.
+# Enrichment (title and state) is optional and nullable by contract.
 # Every consumer must render a reference that has never been enriched, so a
 # forge that cannot be reached is never a rendering failure.
 #

@@ -2,7 +2,8 @@
 
 Firstmate's durable records are produced by one script each and consumed by many.
 This page owns the field-ownership map across those producers and consumers.
-Exact flags, exact commands, and exact paths stay in each script's header and `--help`; the schemas themselves live in [`bin/fm-outcome-lib.sh`](../bin/fm-outcome-lib.sh), which is the single owner of every wire shape described here.
+Exact flags, exact commands, and exact paths stay in each script's header and `--help`.
+[`bin/fm-outcome-lib.sh`](../bin/fm-outcome-lib.sh) owns the stored-artifact and history wire shapes, while [`bin/fm-fleet-snapshot.sh`](../bin/fm-fleet-snapshot.sh)'s header owns the snapshot projection.
 
 Three artifacts carry the contract.
 
@@ -21,12 +22,12 @@ The backlog's Done section is pruned to a configured recent window.
 Before this contract, a task that finished and was cleaned up left nothing structured behind except a scout report, so nothing could attribute its usage, ingest its outcome, or show it in history.
 
 The manifest closes that gap: teardown publishes it atomically before removing the volatile records it is composed from.
-A task that cannot be archived is not erased - [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) refuses the cleanup and keeps every record for a retry, because the manifest is the only thing that survives.
+A task that cannot be archived is not erased - [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) refuses the cleanup and keeps every record for a retry, because the manifest is the canonical structured completion record.
 
 ## Manifest field ownership
 
-Every field is composed from a record that already exists at completion time.
-The manifest never contacts a forge and never reads a brief, a prompt, a tool argument, or a credential-bearing artifact.
+Every externally sourced field is composed from a record that already exists at completion time.
+The manifest never contacts a forge and never reads brief contents, a prompt, a tool argument, or a credential-bearing artifact; it inspects only the brief's mtime for timestamp provenance.
 
 | Field | Source of truth | Notes |
 | --- | --- | --- |
@@ -94,7 +95,7 @@ The legacy `issue=<number>` field in task metadata records a same-repository Git
 ## Normalized PR state
 
 A recorded PR URL does not say whether work is waiting on review, waiting on checks, conflicting, or already merged.
-`bin/fm-pr-status.sh` is the one place that asks a forge and the one place that maps each forge's vocabulary onto these enumerations.
+`bin/fm-pr-status.sh` is the one network caller for this normalized observation and the one place that maps each forge's vocabulary onto these enumerations.
 
 | Field | Values |
 | --- | --- |
@@ -117,6 +118,7 @@ A present `approvals_left` is authoritative: a positive value is `review_require
 Every field below is new; a v1 consumer that reads only the fields it already knows keeps working unchanged, so no renderer migration is required.
 
 Per task: `model`, `effort`, `paths.status_log.last_event_at` and `last_event_age_seconds`, the parsed PR identity with `head`, `status`, `status_age_seconds`, and `status_freshness`, the `work_items` list, and the computed `card`.
+`status_freshness` is `cached` for a valid matching observation and `absent` otherwise; consumers use `status_age_seconds` when they need an age policy.
 
 Top level: `card_precedence`, `supervision` (watcher beacon age against the shared grace window from `bin/fm-supervision-lib.sh`, plus away-mode state and age), and `history`.
 
@@ -140,7 +142,7 @@ Exactly one column wins per task, resolved against this ladder in order, and `ca
 | 6 | `done` | `close_out` | the task reported completion with nothing left open |
 | 7 | `waiting` | `recheck` | a declared external wait |
 | 8 | `active` | `supervise` | the worker is working |
-| 9 | `secondmate` | `route_work` | a persistent secondmate with an empty queue |
+| 9 | `secondmate` | `route_work` | a persistent secondmate with no higher-priority task signal |
 | 10 | `idle` | `inspect` | no current signal |
 
 The ordering encodes four judgements worth stating.
