@@ -44,8 +44,12 @@
 # delivery re-read the exact GitHub head. A moved head requeues the same
 # item at a new generation, and a failed reply keeps one already-bound response
 # for retry instead of rerunning a correction. Delivery first searches the
-# original thread for the response's self-authored exact-body binding marker, so a crash after
-# GitHub accepted the response is reconciled without knowingly posting it twice.
+# original thread for the response's self-authored exact-body binding marker, so
+# a crash after GitHub accepted the response is reconciled without knowingly
+# posting it twice. Immediately before any formal COMMENT review or legacy
+# fallback-comment write, delivery re-reads the live PR author and authenticated
+# actor. Equality returns exit 6, discards the outward response, and preserves a
+# private implementation-owner route; no fallback-comment write is supported.
 #
 # Fixed feedback requires a private validation JSON file with schema
 # fm-pr-review-validation.v1, owner_task matching the claim, the exact head,
@@ -53,9 +57,12 @@
 # The only terminal feedback outcomes are fixed-and-replied,
 # dismissed-and-replied, duplicate-and-replied, superseded-and-replied, and
 # captain-decision-pending. A captain decision stages no outward response.
-# Authored PR review completion never posts or approves its own review. A foreign
-# PR can post only a COMMENT review. No command in this interface approves or
-# merges a pull request.
+# An authored initial review records clean privately or stages supported findings
+# with `complete-review --outcome findings` for its owning implementation task;
+# after correction, `findings-corrected` completes that same private review. It
+# never counts as independent evidence and never stages a reply. A foreign PR can
+# post only a COMMENT review after the live identity guard. No command in this
+# interface approves or merges a pull request.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

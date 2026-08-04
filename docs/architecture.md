@@ -104,12 +104,17 @@ A moved head invalidates incomplete evidence and requeues the same feedback gene
 
 A response is bound durably before GitHub delivery.
 Delivery prepends a hidden exact-body binding marker and searches the original thread for that self-authored marker, exact head, and parent identity before posting, so a reply failure retries the same response and a crash after GitHub acceptance can reconcile the accepted post without knowingly repeating it.
+Immediately before a formal COMMENT review or any stale fallback-comment artifact could write, the state owner re-reads the live pull-request author and authenticated actor.
+Identity equality deletes the outward response and records a private route to the implementation owner; it never marks the pass as independent review evidence.
+Fallback comments are not a supported publication path.
+Original-thread responses to external feedback remain separate and permitted after verification.
 The only terminal feedback outcomes are fixed-and-replied, dismissed-and-replied, duplicate-and-replied, superseded-and-replied, and captain-decision-pending.
 An explicit per-PR opt-out preserves the last covered head and feedback cursor, so restoring coverage compares every intervening identity instead of accepting a fresh baseline.
 
 The agent-only [`pr-review-owner`](../.agents/skills/pr-review-owner/SKILL.md) is the single owner of adversarial adjudication and routing.
-It sends supported corrections back through the existing PR branch and selected validation owner, withholds scope expansion and stronger safety boundaries for the captain, and requires one original-thread evidence response even when a claim is stale or unsupported.
-Fleet-authored PRs are never self-reviewed or approved on GitHub, foreign PRs are comment-only, and this path has no merge authority.
+It sends supported corrections back through the existing PR branch and selected validation owner, withholds scope expansion and stronger safety boundaries for the captain, and requires one original-thread evidence response even when an external claim is stale or unsupported.
+Fleet-authored exact-head findings remain private and route directly to the implementation owner; unsupported internal leads remain private.
+Fleet-authored PRs are never self-reviewed or approved on GitHub, their private passes never count as independent review evidence, foreign PRs are comment-only after a live distinct-identity check, and this path has no merge authority.
 
 The source returns a bounded process-event result only when model attention is needed, then classifies that result terminal so the generic runner retains and re-announces it without starting another account poll.
 After the result is durably handled, the adjudication owner acknowledges the review event and re-registers the ongoing source.

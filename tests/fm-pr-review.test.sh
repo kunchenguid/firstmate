@@ -431,7 +431,7 @@ run_review "$H_DECISION" show "$DECISION_ID" | jq -e '.state=="captain-decision-
 [ ! -s "$GITHUB_LOG" ] || fail "captain-decision escalation reached GitHub"
 pass "scope expansion and stronger boundaries wait for the captain without a premature response"
 
-# A foreign PR receives only a COMMENT review and never a branch mutation.
+# A distinct-author foreign PR receives one COMMENT review and never a branch mutation.
 H_FOREIGN="$TMP/foreign-home"; new_home "$H_FOREIGN"
 FOREIGN_PULL=$(pull_json 9 outsider "$sha_a" '["review-requested","materially-participating"]')
 FOREIGN_OBS="$TMP/foreign.json"; write_observation "$FOREIGN_OBS" 1400 "[$FOREIGN_PULL]"
@@ -445,12 +445,22 @@ FM_PR_REVIEW_CURRENT_HEAD="$sha_a" run_review "$H_FOREIGN" complete-review "$FOR
 make_dataset "[$FOREIGN_PULL]"
 : > "$GITHUB_LOG"
 fake_deliver "$H_FOREIGN" "$FOREIGN_ID" >/dev/null || fail "foreign comment-only review did not deliver"
-assert_grep 'pr review 9 --repo acme/widgets --comment' "$GITHUB_LOG" "foreign PR did not use comment-only review"
+assert_grep 'api /user' "$GITHUB_LOG" "foreign review did not re-read the authenticated actor at the write boundary"
+assert_grep 'api /repos/acme/widgets/pulls/9' "$GITHUB_LOG" "foreign review did not re-read the live pull-request author at the write boundary"
+[ "$(grep -c 'pr review 9 --repo acme/widgets --comment' "$GITHUB_LOG" || true)" -eq 1 ] \
+  || fail "distinct-author foreign review was not submitted exactly once"
 assert_no_grep 'approve' "$GITHUB_LOG" "foreign PR was approved automatically"
 assert_no_grep 'merge' "$GITHUB_LOG" "foreign PR reached a merge path"
-pass "foreign PR review is comment-only with no branch mutation, approval, or merge path"
+set +e
+fake_deliver "$H_FOREIGN" "$FOREIGN_ID" >/dev/null 2>&1
+foreign_replay_rc=$?
+set -e
+[ "$foreign_replay_rc" -ne 0 ] || fail "terminal foreign review delivery ran twice"
+[ "$(grep -c 'pr review 9 --repo acme/widgets --comment' "$GITHUB_LOG" || true)" -eq 1 ] \
+  || fail "foreign review replay submitted a duplicate"
+pass "distinct-author foreign PR review is comment-only and submits exactly once"
 
-# Fleet-authored initial review is durable but never posts its own review.
+# Fleet-authored findings remain private and route to the implementation owner.
 H_AUTHORED="$TMP/authored-review-home"; new_home "$H_AUTHORED"
 fm_write_meta "$H_AUTHORED/state/existing-owner.meta" \
   'window=firstmate:fm-existing-owner' \
@@ -461,15 +471,113 @@ poll_fixture "$H_AUTHORED" "$AUTH_OBS" 1450 >/dev/null
 AUTH_ID=$(item_id_for "$H_AUTHORED" initial-review)
 run_review "$H_AUTHORED" show "$AUTH_ID" | jq -e '.owning_task=="existing-owner"' >/dev/null \
   || fail "authored PR did not correlate to its existing task metadata"
-claim_item "$H_AUTHORED" "$AUTH_ID" existing-owner >/dev/null
+claim_item "$H_AUTHORED" "$AUTH_ID" authored-review-worker >/dev/null
 : > "$GITHUB_LOG"
 FM_PR_REVIEW_CURRENT_HEAD="$sha_a" run_review "$H_AUTHORED" complete-review "$AUTH_ID" \
+  --head "$sha_a" --generation 1 --outcome findings --evidence-file "$TMP/evidence.md" >/dev/null \
+  || fail "authored findings were not routed privately"
+run_review "$H_AUTHORED" show "$AUTH_ID" | jq -e '
+  .state=="private-findings-pending" and .outcome==null and .response==null
+  and .independent_review==false and .private_route.status=="pending"
+  and .private_route.owner_task=="existing-owner"' >/dev/null \
+  || fail "authored findings did not remain private for the implementation owner"
+[ ! -s "$GITHUB_LOG" ] || fail "private authored findings reached GitHub"
+FM_PR_REVIEW_CURRENT_HEAD="$sha_a" run_review "$H_AUTHORED" complete-review "$AUTH_ID" \
+  --head "$sha_a" --generation 1 --outcome findings-corrected --evidence-file "$TMP/evidence.md" >/dev/null \
+  || fail "privately routed authored findings could not complete after correction"
+run_review "$H_AUTHORED" show "$AUTH_ID" | jq -e '
+  .outcome=="reviewed-findings-corrected" and .response==null
+  and .independent_review==false and .private_route.status=="corrected"' >/dev/null \
+  || fail "private authored correction was counted as independent review evidence"
+[ ! -s "$GITHUB_LOG" ] || fail "authored correction completion made an outward GitHub call"
+
+H_AUTHORED_CLEAN="$TMP/authored-clean-home"; new_home "$H_AUTHORED_CLEAN"
+AUTH_CLEAN_PULL=$(pull_json 13 captain "$sha_a" '["authored"]')
+AUTH_CLEAN_OBS="$TMP/authored-clean.json"; write_observation "$AUTH_CLEAN_OBS" 1451 "[$AUTH_CLEAN_PULL]"
+poll_fixture "$H_AUTHORED_CLEAN" "$AUTH_CLEAN_OBS" 1451 >/dev/null
+AUTH_CLEAN_ID=$(item_id_for "$H_AUTHORED_CLEAN" initial-review)
+claim_item "$H_AUTHORED_CLEAN" "$AUTH_CLEAN_ID" clean-review-worker >/dev/null
+FM_PR_REVIEW_CURRENT_HEAD="$sha_a" run_review "$H_AUTHORED_CLEAN" complete-review "$AUTH_CLEAN_ID" \
   --head "$sha_a" --generation 1 --outcome clean --evidence-file "$TMP/evidence.md" >/dev/null \
-  || fail "authored exact-head review did not complete"
-run_review "$H_AUTHORED" show "$AUTH_ID" | jq -e '.outcome=="reviewed-clean" and .response==null' >/dev/null \
-  || fail "authored review lacks a durable actual-review outcome"
-[ ! -s "$GITHUB_LOG" ] || fail "authored PR review made an outward GitHub call"
-pass "fleet-authored exact-head review records a real outcome without self-approval or self-review"
+  || fail "unsupported authored leads could not complete privately"
+run_review "$H_AUTHORED_CLEAN" show "$AUTH_CLEAN_ID" | jq -e '
+  .outcome=="reviewed-clean" and .state=="terminal" and .response==null
+  and .independent_review==false' >/dev/null \
+  || fail "unsupported authored leads became public or independent evidence"
+[ ! -s "$GITHUB_LOG" ] || fail "unsupported authored leads reached GitHub"
+pass "fleet-authored findings route privately, unsupported leads stay private, and neither counts as independent review"
+
+# Incident regression: a stale foreign classification cannot publish after the
+# live author becomes the authenticated actor. The formal review and a legacy
+# fallback-comment artifact both fail at the final write boundary and preserve
+# one private route to the existing implementation owner.
+make_stale_self_review_home() { # <name> <number>
+  local name=$1 number=$2 home pull obs id
+  home="$TMP/$name"; new_home "$home"
+  fm_write_meta "$home/state/stale-implementation-owner.meta" \
+    'window=firstmate:fm-stale-owner' \
+    "pr=https://github.com/acme/widgets/pull/$number"
+  pull=$(pull_json "$number" outsider "$sha_a" '["review-requested"]')
+  obs="$TMP/$name.json"; write_observation "$obs" 1460 "[$pull]"
+  poll_fixture "$home" "$obs" 1460 >/dev/null
+  id=$(item_id_for "$home" initial-review "$number")
+  claim_item "$home" "$id" stale-review-worker >/dev/null
+  FM_PR_REVIEW_CURRENT_HEAD="$sha_a" run_review "$home" complete-review "$id" \
+    --head "$sha_a" --generation 1 --outcome findings --evidence-file "$TMP/evidence.md" \
+    --reply-file "$TMP/foreign-reply.md" >/dev/null || fail "$name could not stage stale review"
+  printf '%s\t%s\n' "$home" "$id"
+}
+
+IFS="$(printf '\t')" read -r H_SELF_GUARD SELF_GUARD_ID <<EOF
+$(make_stale_self_review_home self-guard-home 11)
+EOF
+SELF_LIVE_PULL=$(pull_json 11 captain "$sha_a" '["authored"]')
+make_dataset "[$SELF_LIVE_PULL]"
+: > "$GITHUB_LOG"
+set +e
+FM_PR_REVIEW_TEST_CRASH_AT=after-publication-refusal fake_deliver "$H_SELF_GUARD" "$SELF_GUARD_ID" >/dev/null 2> "$TMP/self-guard.err"
+self_guard_rc=$?
+set -e
+[ "$self_guard_rc" -eq 99 ] || fail "self-review refusal crash seam did not cut after durable private routing"
+assert_no_grep 'pr review 11' "$GITHUB_LOG" "live author equality still submitted a formal review"
+assert_no_grep 'POST ' "$GITHUB_LOG" "live author equality posted a replacement comment"
+run_review "$H_SELF_GUARD" show "$SELF_GUARD_ID" | jq -e '
+  .authored==true and .state=="private-findings-pending" and .outcome==null and .response==null
+  and .independent_review==false and .private_route.owner_task=="stale-implementation-owner"
+  and .publication_guard.actor=="captain" and .publication_guard.author=="captain"' >/dev/null \
+  || fail "crashed formal self-review refusal did not preserve its private owner route"
+set +e
+fake_deliver "$H_SELF_GUARD" "$SELF_GUARD_ID" >/dev/null 2>&1
+self_guard_replay_rc=$?
+set -e
+[ "$self_guard_replay_rc" -ne 0 ] || fail "refused self-review remained deliverable on crash replay"
+assert_no_grep 'pr review 11' "$GITHUB_LOG" "refused self-review crash replay reached GitHub"
+
+IFS="$(printf '\t')" read -r H_FALLBACK_GUARD FALLBACK_GUARD_ID <<EOF
+$(make_stale_self_review_home fallback-guard-home 12)
+EOF
+fallback_item="$H_FALLBACK_GUARD/state/pr-review/items/$FALLBACK_GUARD_ID.json"
+fallback_tmp="$fallback_item.tmp"
+if ! jq '.response.method="fallback-comment"' "$fallback_item" > "$fallback_tmp" \
+  || ! chmod 0600 "$fallback_tmp" || ! mv "$fallback_tmp" "$fallback_item"; then
+  fail "could not create the legacy fallback-comment crash artifact"
+fi
+FALLBACK_LIVE_PULL=$(pull_json 12 captain "$sha_a" '["authored"]')
+make_dataset "[$FALLBACK_LIVE_PULL]"
+: > "$GITHUB_LOG"
+set +e
+fallback_guard_out=$(fake_deliver "$H_FALLBACK_GUARD" "$FALLBACK_GUARD_ID" 2> "$TMP/fallback-guard.err")
+fallback_guard_rc=$?
+set -e
+[ "$fallback_guard_rc" -eq 6 ] || fail "live author equality did not refuse fallback self-comment"
+assert_contains "$fallback_guard_out" 'self-review-publication-refused' "fallback refusal did not expose its private route result"
+assert_no_grep 'pr review 12' "$GITHUB_LOG" "fallback self-review submitted a formal review"
+assert_no_grep 'POST ' "$GITHUB_LOG" "fallback self-review posted a replacement comment"
+run_review "$H_FALLBACK_GUARD" show "$FALLBACK_GUARD_ID" | jq -e '
+  .state=="private-findings-pending" and .response==null and .private_route.status=="pending"
+  and .publication_guard.method=="fallback-comment"' >/dev/null \
+  || fail "refused fallback self-comment did not preserve a private route"
+pass "live author equality refuses formal and fallback self-review publication across stale state and replay"
 
 # --- Head movement, response retry, duplicate notification, and crash cuts ---
 H_MOVE=$(make_inline_home moved-head-home IC_move 'The exact-head behavior may be stale.')

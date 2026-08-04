@@ -479,6 +479,7 @@ Persistent secondmate homes skip this account-global source and receive routed w
 The source is a self-throttled process-event wait, not a custom watcher check.
 It remains silent on an unchanged inventory and starts no worker or model turn.
 A new relevant exact head, new substantive authored-PR feedback identity, pending response retry, or deduplicated operational diagnostic returns one bounded result through the existing process-event inbox and `check` notification path.
+Authored exact-head findings are private queue evidence routed to the owning implementation task and never become a GitHub review or replacement comment.
 The generic result remains recoverable until handled, while the review queue remains private under `state/pr-review/` across session restarts.
 
 `bin/fm-pr-review.sh --help` is the exact setup and lifecycle command owner.
@@ -487,6 +488,8 @@ Use `bin/fm-pr-review.sh opt-in <canonical-pr-url>` to restore coverage from the
 The opt-out record is private and durable; removing the process-event registration is not a supported substitute because it loses the explicit per-PR ownership decision.
 
 The poll uses explicit pages and refuses with a bounded diagnostic rather than silently dropping eligible repositories, pull requests, reviews, inline threads, or conversation comments beyond a configured limit.
+Before any formal COMMENT review write, delivery re-reads the live pull-request author and authenticated actor and refuses when they match; stale fallback-comment state receives the same refusal and fallback comments are never published.
+Original-thread replies to independently supplied external feedback remain available after adjudication.
 It reads GitHub rate-limit state before inventory, uses bounded read retries, makes one non-retried write attempt before response reconciliation, bounds every `gh-axi` call and total poll execution, and preserves the last good snapshot on authentication, rate, schema, pagination, or response-size failure.
 The defaults are:
 

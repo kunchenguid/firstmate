@@ -78,10 +78,14 @@ Never make a fix claim or post a response from a stale generation.
 
 ## Initial review outcomes
 
-For a fleet-authored PR, never submit a GitHub review, approve it, or add a clean comment.
-Route supported findings through the existing implementation owner, complete correction and validation, then record one actual-review outcome with `complete-review`.
-A clean exact-head review records `clean`.
-A review whose supported findings were corrected and validated records `findings-corrected`.
+For a fleet-authored PR, never submit a GitHub review, approve it, add a clean comment, or publish a replacement findings summary.
+A clean exact-head review uses `complete-review --outcome clean` and remains private.
+For supported findings, first use `complete-review --outcome findings` without a reply file.
+That durable transition keeps the lane occupied, preserves the findings privately, and names the existing implementation owner in `private_route`; send the evidence only to that owner through the existing task channel.
+After correction and validation through the existing branch lifecycle, use `complete-review --outcome findings-corrected` on the same item and generation.
+Unsupported internally generated leads remain private and need no GitHub disposition.
+Every authored review record has `independent_review=false` and never satisfies a human or approved-reviewer requirement.
+Independent evidence must come from a distinct human or approved reviewer identity.
 
 For a foreign PR, never mutate the branch unless separately authorized.
 Follow the repository's existing review policy, but the automatic path is comment-only and never approves or requests merge.
@@ -121,6 +125,11 @@ bin/fm-pr-review.sh deliver <item-id>
 ```
 
 Delivery revalidates the current head.
+Immediately before any formal COMMENT review or legacy fallback-comment write, the state owner re-reads the live pull-request author and authenticated actor through `gh-axi`.
+When they are equal, it returns exit 6 without a write, deletes the pending public response, records the exact refusal, and turns supported findings into a private route to the implementation owner.
+Treat that return as a routing result, not a retryable publication failure: inspect the item, send its private evidence to `private_route.owner_task` or use the existing safe owner-recovery path, and never restage a review or replacement comment.
+The fallback-comment method is recognized only so stale crash state is guarded and is never an allowed publication path.
+Original-thread responses to external feedback remain allowed because they answer public input rather than publishing Firstmate's initial findings.
 A moved head requeues the item instead of posting stale evidence.
 A failed GitHub write keeps the same bound response and completed evidence for retry.
 A crash after GitHub accepted the response is reconciled by exact author, body, head, and parent-thread evidence before another post is attempted.

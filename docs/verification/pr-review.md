@@ -42,8 +42,9 @@ ok - bounded pagination covers multiple PR, review, inline-thread, and conversat
 ok - supported inline feedback is fixed, validated, and replied exactly once
 ok - unsupported, duplicate, outdated, and superseded findings receive one evidence reply
 ok - scope expansion and stronger boundaries wait for the captain without a premature response
-ok - foreign PR review is comment-only with no branch mutation, approval, or merge path
-ok - fleet-authored exact-head review records a real outcome without self-approval or self-review
+ok - distinct-author foreign PR review is comment-only and submits exactly once
+ok - fleet-authored findings route privately, unsupported leads stay private, and neither counts as independent review
+ok - live author equality refuses formal and fallback self-review publication across stale state and replay
 ok - head movement during verification invalidates evidence and requeues the same finding generation
 ok - poll crashes before and after snapshot publication replay without lost or duplicate work
 ok - duplicate notifications and claim replay preserve one review worker per lane
@@ -73,7 +74,9 @@ ok - authentication and rate-limit failures stay bounded, deduplicated, and pres
 | head movement | GitHub's current head is changed while the claim generation remains old | trusting only the claimed SHA posts stale evidence instead of incrementing and requeueing |
 | reply failure | the first write fails after correction evidence is already durable | rerunning correction or discarding the staged body changes evidence or response identity |
 | captain decision | the fake GitHub log must remain empty while the item reaches captain-decision-pending | treating reviewer wording as authority produces a write |
-| foreign PR safety | the fake log accepts only `pr review --comment` for the terminal review | approval, merge, or branch mutation appears directly in the operation log |
+| private authored findings | an authored fixture has a distinct existing implementation owner and must retain its findings without any GitHub operation or independent-review credit | requiring public review transport leaks the internal findings or loses their correction route |
+| live self-review guard | a queued foreign review changes to live author equality before delivery, and a second fixture mutates the staged method to a legacy fallback comment | trusting queued authorship or prompt wording submits the PR 4034-shaped self-review or replacement comment; replaying the refused item writes again |
+| foreign PR safety | the live actor and author reads are distinct and the fake log accepts exactly one `pr review --comment` for the terminal review | approval, merge, branch mutation, missing identity reads, or duplicate delivery appears directly in the operation log |
 | opt-out restoration | head and feedback both change while the covered cursor is frozen | updating the covered cursor during takeover loses one or both intervening identities |
 | home isolation | two homes derive different source ids and retain one idempotent registration each | machine-global or path-independent identity aliases the homes |
 | bounded failures | failed authentication and low rate headroom publish no snapshot and deduplicate the same diagnostic | partial inventory publication or immediate retry changes state or call cadence |

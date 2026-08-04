@@ -29,6 +29,9 @@ const SNAPSHOT_SCHEMA = "fm-pr-review-snapshot.v1";
 const CONTROL_SCHEMA = "fm-pr-review-control.v1";
 const OPTOUT_SCHEMA = "fm-pr-review-opt-out.v1";
 const EVENT_SCHEMA = "fm-pr-review-event.v1";
+const PRIVATE_ROUTE_SCHEMA = "fm-pr-review-private-route.v1";
+const PUBLICATION_GUARD_SCHEMA = "fm-pr-review-publication-guard.v1";
+const SELF_REVIEW_PUBLICATION_METHODS = new Set(["comment-only-review", "fallback-comment"]);
 const TERMINAL_FEEDBACK = new Set([
   "fixed-and-replied",
   "dismissed-and-replied",
@@ -214,7 +217,9 @@ function validateItem(item, path = "item") {
   }
   if (!REPO_RE.test(item.repository) || !Number.isSafeInteger(item.number) || item.number < 1) die(`${path} has an invalid pull-request identity`);
   if (item.url !== canonicalUrl(item.repository, item.number) || !SHA_RE.test(item.head)) die(`${path} has an invalid exact head`);
-  if (!Number.isSafeInteger(item.generation) || item.generation < 1 || !Array.isArray(item.scopes)) die(`${path} has an invalid generation`);
+  if (typeof item.authored !== "boolean" || !Number.isSafeInteger(item.generation) || item.generation < 1 || !Array.isArray(item.scopes)) {
+    die(`${path} has an invalid generation or authorship`);
+  }
   return item;
 }
 
@@ -403,6 +408,9 @@ function newReviewItem(pull, now) {
     evidence: null,
     response: null,
     review_outcome: null,
+    independent_review: false,
+    private_route: null,
+    publication_guard: null,
   };
 }
 
@@ -460,6 +468,10 @@ function reconcileObservation(observation) {
             item.outcome = null;
             item.response = null;
             item.evidence = null;
+            item.review_outcome = null;
+            item.independent_review = false;
+            item.private_route = null;
+            item.publication_guard = null;
             delete item.validation;
             item.updated_at = observation.observed_at;
             writeItem(item);
@@ -835,11 +847,13 @@ function claim(args) {
   process.stdout.write(`${JSON.stringify({ item_id: id, owner_task: owner, head: item.head, generation: item.generation, replay: Boolean(lane) })}\n`);
 }
 
-function verifyGeneration(item, flags) {
+function verifyGeneration(item, flags, allowedStates = ["claimed"]) {
   const head = validateSha(flags.head, "resolved head");
   const generation = Number(flags.generation);
   if (!Number.isSafeInteger(generation) || generation < 1) die("--generation is invalid", 2);
-  if (item.state !== "claimed" || item.head !== head || item.generation !== generation) die("item claim no longer matches the exact head generation", 5);
+  if (!allowedStates.includes(item.state) || item.head !== head || item.generation !== generation) {
+    die("item claim no longer matches the exact head generation", 5);
+  }
   const current = currentHead(item);
   if (current !== head) {
     item.head = current;
@@ -848,6 +862,12 @@ function verifyGeneration(item, flags) {
     item.outcome = null;
     item.response = null;
     item.evidence = null;
+    if (item.type === "initial-review") {
+      item.review_outcome = null;
+      item.independent_review = false;
+      item.private_route = null;
+      item.publication_guard = null;
+    }
     delete item.validation;
     item.updated_at = NOW();
     writeItem(item);
@@ -990,30 +1010,62 @@ function resolveFeedback(args) {
   process.stdout.write(`${JSON.stringify({ item_id: item.id, outcome: item.outcome, response: "pending" })}\n`);
 }
 
+function stagePrivateFindings(item, source) {
+  item.authored = true;
+  item.independent_review = false;
+  item.outcome = null;
+  item.response = null;
+  item.state = "private-findings-pending";
+  item.private_route = {
+    schema: PRIVATE_ROUTE_SCHEMA,
+    status: "pending",
+    owner_task: item.owning_task,
+    review_task: item.owner_task,
+    head: item.head,
+    generation: item.generation,
+    findings_sha256: sha256(item.evidence),
+    source,
+    routed_at: NOW(),
+  };
+}
+
 function completeReview(args) {
   const flags = parseFlags(args);
   requireOnly(flags, ["head", "generation", "outcome", "evidence_file", "reply_file"]);
   const item = readItem(flags._[0]);
   if (item.type !== "initial-review") die("item is not an initial review", 2);
-  const head = verifyGeneration(item, flags);
+  const head = verifyGeneration(item, flags, item.authored ? ["claimed", "private-findings-pending"] : ["claimed"]);
   const outcome = flags.outcome;
   if (!["clean", "findings", "findings-corrected"].includes(outcome)) die("--outcome must be clean, findings, or findings-corrected", 2);
   item.evidence = fileText(flags.evidence_file, "review evidence file");
   item.review_outcome = outcome;
   item.updated_at = NOW();
   if (item.authored) {
-    if (outcome === "findings") die("a fleet-authored review remains open until supported findings are corrected", 4);
     if (flags.reply_file) die("a fleet-authored pull request never receives its own review response", 2);
+    item.independent_review = false;
+    if (outcome === "findings") {
+      stagePrivateFindings(item, "authored-review");
+      writeItem(item);
+      process.stdout.write(`${JSON.stringify({ item_id: item.id, outcome: "private-findings-routed", head, owner_task: item.owning_task })}\n`);
+      return;
+    }
+    if (outcome === "findings-corrected" && item.private_route?.status === "pending") {
+      item.private_route.status = "corrected";
+      item.private_route.corrected_at = NOW();
+      item.private_route.correction_evidence_sha256 = sha256(item.evidence);
+    }
     item.outcome = outcome === "clean" ? "reviewed-clean" : "reviewed-findings-corrected";
     item.state = "terminal";
+    item.response = null;
     writeItem(item);
     laneRelease(item.id);
-    process.stdout.write(`${JSON.stringify({ item_id: item.id, outcome: item.outcome, head })}\n`);
+    process.stdout.write(`${JSON.stringify({ item_id: item.id, outcome: item.outcome, head, independent_review: false })}\n`);
     return;
   }
   if (outcome === "findings-corrected") die("a foreign comment-only review cannot claim branch corrections", 4);
   const body = fileText(flags.reply_file, "comment-only review file");
   publicResponse(body, head);
+  item.independent_review = false;
   item.response = boundResponse(item, "comment-only-review", body, head);
   item.state = "response-pending";
   item.outcome = "foreign-reviewed-and-commented";
@@ -1041,6 +1093,53 @@ function existingResponse(item, viewer) {
   return pagedForDelivery(item, "issue").find((entry) => String(entry.user?.login ?? "").toLowerCase() === viewer && normalizedBody(entry.body).includes(response.marker));
 }
 
+function livePublicationIdentity(item) {
+  const actorValue = apiJson("{login:.login}", ["/user"]);
+  const actor = String(actorValue.login ?? "").toLowerCase();
+  if (!LOGIN_RE.test(actor)) throw new PollError("authentication", "GitHub authentication did not identify a valid publication actor.");
+  const pull = apiJson("{author:.user.login,head:.head.sha,state:.state}", [`/repos/${item.repository}/pulls/${item.number}`]);
+  const author = String(pull.author ?? "").toLowerCase();
+  if (!LOGIN_RE.test(author) || String(pull.state ?? "").toLowerCase() !== "open") {
+    throw new PollError("github-read", "GitHub did not return a valid live pull-request author at the publication boundary.");
+  }
+  return { actor, author, head: validateSha(pull.head, "publication-boundary head") };
+}
+
+function refuseSelfReviewPublication(item, identity) {
+  const method = item.response.method;
+  item.publication_guard = {
+    schema: PUBLICATION_GUARD_SCHEMA,
+    decision: "self-review-publication-refused",
+    actor: identity.actor,
+    author: identity.author,
+    method,
+    head: identity.head,
+    refused_at: NOW(),
+  };
+  if (item.review_outcome === "findings") {
+    stagePrivateFindings(item, "publication-guard");
+  } else if (item.review_outcome === "clean") {
+    item.authored = true;
+    item.independent_review = false;
+    item.outcome = "reviewed-clean";
+    item.response = null;
+    item.state = "terminal";
+  } else {
+    die("self-review publication has no valid private review outcome");
+  }
+  writeItem(item);
+  if (item.state === "terminal") laneRelease(item.id);
+  if (process.env.FM_PR_REVIEW_TEST_CRASH_AT === "after-publication-refusal") process.exit(99);
+  process.stdout.write(`${JSON.stringify({
+    item_id: item.id,
+    publication: "self-review-publication-refused",
+    head: item.head,
+    owner_task: item.owning_task,
+    private_route: item.private_route?.status ?? "clean",
+  })}\n`);
+  process.exit(6);
+}
+
 function postResponse(item) {
   const response = item.response;
   if (response.method === "comment-only-review") {
@@ -1056,6 +1155,12 @@ function postResponse(item) {
     if (result.error || result.status !== 0) throw new PollError("reply", "Comment-only review delivery failed and remains queued for retry.");
     return;
   }
+  if (response.method === "fallback-comment") {
+    throw new PollError("reply", "Replacement review comments are not a supported publication path.");
+  }
+  if (!item.feedback || !["inline-reply", "issue-comment"].includes(response.method)) {
+    throw new PollError("reply", "Pending response method is not supported.");
+  }
   const endpoint = response.method === "inline-reply"
     ? `/repos/${item.repository}/pulls/${item.number}/comments/${item.feedback.parent_thread_id}/replies`
     : `/repos/${item.repository}/issues/${item.number}/comments`;
@@ -1068,7 +1173,7 @@ function deliver(args) {
   const item = readItem(flags._[0]);
   if (item.state !== "response-pending" || !item.response || item.response.state !== "pending") die("item has no pending response", 4);
   deadline = Date.now() + POLL_BUDGET_MS;
-  requireCoreHeadroom(MAX_PAGES + 5);
+  requireCoreHeadroom(MAX_PAGES + 8);
   const current = currentHead(item);
   if (current !== item.response.head || current !== item.head) {
     item.head = current;
@@ -1077,6 +1182,12 @@ function deliver(args) {
     item.outcome = null;
     item.response = null;
     item.evidence = null;
+    if (item.type === "initial-review") {
+      item.review_outcome = null;
+      item.independent_review = false;
+      item.private_route = null;
+      item.publication_guard = null;
+    }
     delete item.validation;
     item.updated_at = NOW();
     writeItem(item);
@@ -1087,6 +1198,26 @@ function deliver(args) {
   const viewer = snapshot.viewer || String(process.env.FM_PR_REVIEW_VIEWER ?? "").toLowerCase();
   if (!LOGIN_RE.test(viewer)) die("authenticated reply identity is unavailable");
   let found = existingResponse(item, viewer);
+  if (SELF_REVIEW_PUBLICATION_METHODS.has(item.response.method)) {
+    const identity = livePublicationIdentity(item);
+    if (identity.head !== item.response.head || identity.head !== item.head) {
+      item.head = identity.head;
+      item.generation += 1;
+      item.state = "pending";
+      item.outcome = null;
+      item.response = null;
+      item.evidence = null;
+      item.review_outcome = null;
+      item.independent_review = false;
+      item.private_route = null;
+      item.publication_guard = null;
+      item.updated_at = NOW();
+      writeItem(item);
+      process.stdout.write(`${JSON.stringify({ requeued: item.id, head: identity.head, generation: item.generation })}\n`);
+      process.exit(5);
+    }
+    if (identity.actor === identity.author) refuseSelfReviewPublication(item, identity);
+  }
   if (!found) {
     try {
       postResponse(item);
