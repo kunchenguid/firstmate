@@ -241,6 +241,18 @@ Against the pre-change scripts, a lock holder that died moments after the arm's 
 Against the current scripts both cases pass: the dying target is never announced, the arm restarts and confirms a fresh watcher, and the terminated cycle reports its step and `after SIGTERM`.
 The same 2026-08-02 run measured the previously flaky TERM-resistant-peer fixture at 1 failure in 6 before its readiness handshake and 0 in 6 after, on both the pre-change and current scripts.
 
+Review follow-up added two further regression cases on the same host on 2026-08-04, verified the same way against the pre-change scripts and then against the current ones:
+
+```sh
+tests/fm-watcher-lock.test.sh   # test_arm_retargets_to_a_healthy_lock_successor
+tests/fm-watcher-lock.test.sh   # test_arm_signal_replays_watcher_failure_line
+```
+
+Against the pre-change scripts, a mid-window lock move to a successor that had already passed the same liveness, identity, and beacon gate was classified as a failed attach, so the arm printed `watcher: restarting after a failed attach - the watcher lock moved from pid=88308 to pid=88309 within 6s of attaching`, exec'd `--restart`, and TERMed that verified-healthy successor.
+Against the pre-change scripts, an arm interrupted at a turn boundary also deleted its watcher's captured stdout unread, losing the `watcher: FAILED - watcher cycle exited <rc> during <step> after SIGTERM` line the cycle had already printed.
+Against the current scripts both cases pass: the arm retargets onto the successor, reports the attach against it, and leaves it alive, and the interrupted arm replays that failure line on its own stderr while a non-`watcher: FAILED` line seeded into the same capture is not replayed onto either stream.
+All four cases named in this section pass against the current scripts.
+
 Deterministic entry points:
 
 ```sh

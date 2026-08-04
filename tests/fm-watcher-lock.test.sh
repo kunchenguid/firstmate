@@ -706,6 +706,57 @@ test_arm_hup_cleans_child_and_temp_output() {
   pass "arm cleans child watcher and temp output on HUP"
 }
 
+test_arm_signal_replays_watcher_failure_line() {
+  # The harness TERMs the arm at a turn boundary; the arm TERMs its watcher,
+  # whose EXIT trap prints the step-naming failure line onto the CAPTURED stdout.
+  # cleanup_child then deletes that capture, so the line has to be replayed
+  # first or the exact teardown this change exists to make diagnosable stays
+  # silent. The replay is filtered to `watcher: FAILED` lines because the arm's
+  # stdout is what the adapters and bin/fm-claude-stop-autoarm.sh classify: an
+  # unfiltered replay would surface a wake reason line for a cycle that is being
+  # torn down on purpose. Both halves are asserted here, the second against a
+  # wake line seeded into the capture the arm actually owns.
+  local dir state fakebin armout armerr armpid capture status i candidate
+  dir=$(make_case arm-signal-stdout-replay)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  armerr="$dir/arm.err"
+  mark_pr_check_migration_complete "$state"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" 2> "$armerr" &
+  armpid=$!
+  # Ordered handshake: the started line prints only after the watcher is live and
+  # confirmed, so the TERM is caused by that state rather than timed against it.
+  i=0
+  while [ "$i" -lt 120 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start a watcher before the signal-replay check"
+  capture=
+  for candidate in "$state"/.watch-arm-output.*; do
+    [ -e "$candidate" ] || continue
+    capture=$candidate
+    break
+  done
+  [ -n "$capture" ] || fail "arm left no stdout capture to replay from"
+  printf 'check: %s/task.check.sh: merged: https://example.test/pr/7\n' "$state" >> "$capture"
+  kill -TERM "$armpid" 2>/dev/null || fail "could not TERM the arm"
+  wait_for_exit "$armpid" 120
+  status=$?
+  [ "$status" -eq 143 ] || fail "arm did not exit with TERM status (got $status): $(cat "$armerr")"
+  grep -qE 'watcher: FAILED - watcher cycle exited [0-9]+ during [a-z][a-z0-9:._-]* after SIGTERM' "$armerr" \
+    || fail "interrupted arm dropped the watcher's own failure line: out=$(cat "$armout") err=$(cat "$armerr")"
+  ! grep -qF 'merged: https://example.test/pr/7' "$armerr" \
+    || fail "interrupted arm replayed a non-FAILED watcher stdout line: $(cat "$armerr")"
+  ! grep -qF 'merged: https://example.test/pr/7' "$armout" \
+    || fail "interrupted arm leaked a non-FAILED watcher stdout line onto its own stdout: $(cat "$armout")"
+  ! ls "$state"/.watch-arm-output.* >/dev/null 2>&1 || fail "signal cleanup left the arm's stdout capture behind"
+  pass "an interrupted arm replays only the watcher's failure line from captured stdout"
+}
+
 test_arm_propagates_immediate_wake_before_confirmation() {
   local dir state fakebin armout drain_out check_file rc
   dir=$(make_case arm-immediate-wake)
@@ -1290,6 +1341,7 @@ test_arm_attaches_and_waits_for_live_fresh_watcher
 test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
+test_arm_signal_replays_watcher_failure_line
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable

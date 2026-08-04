@@ -128,7 +128,10 @@ STDERR_TAIL_LINES=${FM_ARM_STDERR_TAIL_LINES:-5}
 # A zero window would collapse the gate to the single healthy read this script
 # exists to stop trusting, while still printing "verified 0s" as if it passed.
 case "$ATTACH_VERIFY" in *[!0-9]*|''|0) ATTACH_VERIFY=2 ;; esac
-case "$ATTACH_RETARGET_MAX" in *[!0-9]*|'') ATTACH_RETARGET_MAX=2 ;; esac
+# A zero retarget budget would make the first mid-window lock move a failed
+# attach again, so the arm would TERM a verified-healthy successor: retargeting
+# is a correctness property, not a tunable-off feature.
+case "$ATTACH_RETARGET_MAX" in *[!0-9]*|''|0) ATTACH_RETARGET_MAX=2 ;; esac
 case "$ARM_RESTART_MAX" in *[!0-9]*|'') ARM_RESTART_MAX=1 ;; esac
 case "$ARM_RESTART_DEPTH" in *[!0-9]*|'') ARM_RESTART_DEPTH=0 ;; esac
 case "$STDERR_TAIL_LINES" in *[!0-9]*|''|0) STDERR_TAIL_LINES=5 ;; esac
@@ -617,6 +620,21 @@ print_watch_stderr() {
   cat "$err" >&2
 }
 
+# The watcher's own step-naming failure line lands on ITS stdout, which the arm
+# captures. When the arm is torn down mid-cycle that capture is deleted, so the
+# line has to be replayed first - but only the `watcher: FAILED` lines. The arm's
+# stdout is what the Pi and OpenCode adapters and bin/fm-claude-stop-autoarm.sh
+# classify, and an unfiltered replay could surface a wake reason line those
+# matchers would read as an actionable wake for a cycle that is being torn down
+# on purpose. The surviving lines go to stderr, the same stream the stderr replay
+# uses, so the two behave consistently.
+# shellcheck disable=SC2329 # Invoked indirectly by the arm's signal traps.
+print_watch_failure_lines() {  # <stdout-file>
+  local out=${1:-}
+  { [ -n "$out" ] && [ -s "$out" ]; } || return 0
+  grep '^watcher: FAILED' "$out" >&2 || true
+}
+
 # The owned child's bookkeeping is declared before the attach path because a
 # failed attach may restart through cleanup_child while no child exists yet.
 child=
@@ -708,7 +726,9 @@ handle_arm_signal() {
   # The watcher's stderr is captured, not inherited, so an interrupted arm has to
   # replay it before cleanup_child deletes the file. A refusal written at t=0 is
   # exactly what an operator needs when the harness tears the arm down at a turn
-  # boundary, and it used to appear live.
+  # boundary, and it used to appear live. The watcher's own failure line lands on
+  # the captured stdout instead, and is replayed under the same rule.
+  print_watch_failure_lines "$child_out"
   print_watch_stderr "$child_err"
   cleanup_child
   exit "$rc"
