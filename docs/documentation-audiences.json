@@ -172,7 +172,6 @@
       "path": ".agents/skills/quota-array-dispatch/SKILL.md",
       "audience": "agent-runtime"
     },
-
     {
       "path": ".agents/skills/secondmate-provisioning/SKILL.md",
       "audience": "agent-runtime"
