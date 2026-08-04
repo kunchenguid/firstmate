@@ -7,6 +7,7 @@
 #   fm-procevent.sh register <adapter> <source-id> -- <argv>...
 #   fm-procevent.sh start <source-id>
 #   fm-procevent.sh reconcile
+#   fm-procevent.sh await-live <source-id>
 #   fm-procevent.sh handled <source-id> <sequence>
 #   fm-procevent.sh retire <source-id>
 #   fm-procevent.sh sweep-home [--preflight]
@@ -15,6 +16,7 @@
 # register   Record a source: its adapter, its canonical id, and the exact argv
 #            to execute. argv is stored one argument per line and executed
 #            directly, so there is no shell surface and no argument splitting.
+#            An identical repeat preserves the existing registration generation.
 #            Adapters register sources; nothing here parses user text.
 # start      Claim the source, run its child to completion, durably capture the
 #            output, publish normalized wakes for pending results, then release
@@ -29,6 +31,9 @@
 #            start a runner for any registered source that has no live owner.
 #            This is liveness repair only - it never discovers results by
 #            polling the source, because the child blocks on the source itself.
+# await-live Verify that the exact registered source has a live owner, requiring
+#            five consecutive checks within FM_PROCEVENT_LIVE_CONFIRM_TIMEOUT
+#            seconds (default 5). It never starts a runner; call reconcile first.
 # handled    Durably and idempotently record that a captured result has been
 #            fully handled: <source-id> <sequence>. Prints "handled: id seq"
 #            the first time for that exact source-and-sequence generation and
@@ -77,9 +82,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 REG=$(fm_procevent_registry_dir "$STATE")
 MAX_OUTPUT_BYTES=${FM_PROCEVENT_MAX_OUTPUT_BYTES:-1048576}
+LIVE_CONFIRM_TIMEOUT=${FM_PROCEVENT_LIVE_CONFIRM_TIMEOUT:-5}
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,63p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,68p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 adapter_script() { printf '%s/bin/fm-procevent-%s.sh\n' "$FM_ROOT" "$1"; }
 
@@ -144,7 +150,12 @@ cmd_register() {
   } > "$tmp" || { rm -f -- "$tmp"; die "cannot write the registration"; }
   chmod 0600 "$tmp" || { rm -f -- "$tmp"; die "cannot secure the registration"; }
   fm_procevent_source_lock_acquire "$id" || { rm -f -- "$tmp"; die "cannot lock the source"; }
-  if ! mv -f -- "$tmp" "$dest"; then
+  if [ -f "$dest" ] && [ ! -L "$dest" ] && cmp -s -- "$tmp" "$dest"; then
+    if ! rm -f -- "$tmp"; then
+      fm_procevent_source_lock_release "$id"
+      die "cannot discard the duplicate registration"
+    fi
+  elif ! mv -f -- "$tmp" "$dest"; then
     fm_procevent_source_lock_release "$id"
     rm -f -- "$tmp"
     die "cannot publish the registration"
@@ -483,6 +494,57 @@ cmd_reconcile() {
   printf 'reconciled: published=%s started=%s stopped=%s uncertain=%s\n' "$published" "$started" "$stopped" "$uncertain"
 }
 
+# Confirm a handoff without becoming another lifecycle owner. Reconcile remains
+# the only detached-start and recovery path; this command only reads the exact
+# source's claim under the same per-source boundary as list and ownership changes.
+# Requiring five consecutive live reads prevents a runner that exits immediately
+# without establishing a durable wait from being reported as ready.
+cmd_await_live() {
+  local id=${1-} i=0 limit state=none claim_state live_reads=0
+  [ "$#" -eq 1 ] || usage
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  case "$LIVE_CONFIRM_TIMEOUT" in
+    ''|*[!0-9]*|0) die "FM_PROCEVENT_LIVE_CONFIRM_TIMEOUT must be an integer from 1 to 300" ;;
+  esac
+  [ "$LIVE_CONFIRM_TIMEOUT" -le 300 ] \
+    || die "FM_PROCEVENT_LIVE_CONFIRM_TIMEOUT must be an integer from 1 to 300"
+  limit=$((LIVE_CONFIRM_TIMEOUT * 10))
+  while [ "$i" -lt "$limit" ]; do
+    fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+    if [ ! -f "$(source_file "$id")" ] || [ -L "$(source_file "$id")" ]; then
+      state=unregistered
+    else
+      fm_procevent_claim_state_locked "$id"
+      claim_state=$?
+      case "$claim_state" in
+        0) state=live ;;
+        1) state=none ;;
+        2) state=uncertain ;;
+        3) state=orphaned ;;
+        4) state=terminal ;;
+        *) state=unknown ;;
+      esac
+    fi
+    fm_procevent_source_lock_release "$id"
+    if [ "$state" = live ]; then
+      live_reads=$((live_reads + 1))
+      if [ "$live_reads" -ge 5 ]; then
+        printf 'live: %s\n' "$id"
+        return 0
+      fi
+    else
+      live_reads=0
+      [ "$state" = unregistered ] && break
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ "$state" = unregistered ]; then
+    die "source registration disappeared before listener liveness was confirmed: $id"
+  fi
+  die "listener did not become live for source $id within ${LIVE_CONFIRM_TIMEOUT}s (owner=$state); registration remains for reconcile"
+}
+
 # Stop a runner and the child it is blocked on. A runner started by reconcile is
 # its own process group leader, so the group signal is what actually reaches the
 # blocking child - signalling only the runner would leave that child alive and
@@ -712,10 +774,11 @@ cmd_list() {
 
 case "${1-}" in
   register)  shift; cmd_register "$@" ;;
-  start)     shift; cmd_start_public "$@" ;;
-  _start)    shift; cmd_start "$@" ;;
-  reconcile) shift; cmd_reconcile "$@" ;;
-  handled)   shift; cmd_handled "$@" ;;
+  start)      shift; cmd_start_public "$@" ;;
+  _start)     shift; cmd_start "$@" ;;
+  reconcile)  shift; cmd_reconcile "$@" ;;
+  await-live) shift; cmd_await_live "$@" ;;
+  handled)    shift; cmd_handled "$@" ;;
   retire)    shift; cmd_retire "$@" ;;
   sweep-home) shift; cmd_sweep_home "$@" ;;
   list)      shift; cmd_list "$@" ;;

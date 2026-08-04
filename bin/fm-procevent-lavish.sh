@@ -8,6 +8,10 @@
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
 #
+# arm        Register the canonical source, reconcile it through the generic
+#            runner, and report armed only after that exact source has a live
+#            owner. A failed confirmation returns nonzero and stays registered
+#            for the runner's ordinary restart recovery.
 # classify   Print the lifecycle state a handler should act on: feedback, ended,
 #            waiting, missing, or unknown.
 # terminal   Exit 0 when the captured result means this Lavish source will never
@@ -47,7 +51,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,39p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
@@ -75,6 +79,8 @@ cmd_arm() {
     || die "cannot resolve the artifact path: $artifact"
   # The plain blocking form: no --timeout-ms, so completion is a server event.
   "$SCRIPT_DIR/fm-procevent.sh" register lavish "$id" -- lavish-axi poll "$real" || exit 1
+  "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null || exit 1
+  "$SCRIPT_DIR/fm-procevent.sh" await-live "$id" >/dev/null || exit 1
   printf 'armed: %s\n' "$id"
   printf 'artifact: %s\n' "$real"
 }

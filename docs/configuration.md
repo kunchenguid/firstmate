@@ -432,6 +432,9 @@ A durable handled acknowledgement stops future re-announcement, while a record a
 
 Discovery is never a timer.
 Each registered source has its own child process blocking on that source, and the watcher's per-cycle `reconcile` republishes every captured result with no durable handled acknowledgement yet - regardless of any earlier publication - restarts a source whose owner is gone, and stops this home's runner when reconciliation runs after its registration disappeared unexpectedly.
+Lavish `arm` performs that same reconciliation immediately, then reports `armed` only after a bounded confirmation that the exact canonical source has a live machine-wide owner.
+Registration alone is not a successful Lavish handoff: confirmation failure returns nonzero with a concrete ownership diagnostic while retaining the registration for ordinary reconciliation and restart recovery.
+An identical repeated registration preserves its existing generation, so repeated Lavish arm converges on one listener without preventing that active generation's later terminal retirement.
 In supported steady state, a home with no registered source runs nothing, generates no state, and keeps its ordinary cadence.
 
 Whether a captured result ends its source is adapter knowledge, never the runner's.
@@ -505,6 +508,7 @@ FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or X-mode dispatch)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
+FM_PROCEVENT_LIVE_CONFIRM_TIMEOUT=5     # seconds Lavish arm allows for exact-source live-owner confirmation; accepted range 1-300
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh

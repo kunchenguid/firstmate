@@ -69,6 +69,21 @@ A result lost after that clearing and before the runner reads the child's output
 **Consequence for wording:** the runner may describe only its own durability boundary.
 Never at-least-once, no-loss, or lossless.
 
+## Lavish arm live-owner confirmation
+
+Re-verified on 2026-08-04 on macOS (Darwin 25.5.0 arm64) with GNU Bash 3.2.57 against a stand-in using the exact published `lavish-axi poll <html-file>` argv shape above.
+The executable regression starts with a registration and no owner, invokes the public Lavish `arm`, and accepts success only after the stand-in listener has started and the exact source reports `owner=live` through the public list command.
+It repeats arm against that listener to prove one process and one registration generation, forces startup to exit before a durable wait to prove a nonzero diagnostic, and then proves ordinary `reconcile` recovers that same retained source.
+
+```text
+$ tests/fm-procevent.test.sh
+...
+ok - Lavish arm reports success only after the exact source listener is live, and repeated arm stays idempotent
+ok - failed Lavish listener startup is reported and the durable source recovers through reconcile
+...
+all procevent tests passed
+```
+
 ## What the runner does prove
 
 Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose completion is a process event, not a timer, and - for the two supervision-delivery rows below - by `tests/fm-watch-triage.test.sh` driving a real `bin/fm-watch.sh` over a real capture:
@@ -83,6 +98,7 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | terminal retirement preserves the result | the retired source's captured output, its announced event, its handled acknowledgement, and later explicit `retire` all still behave normally |
 | registration-generation retirement | an old terminal runner preserves a concurrently replaced registration and releases ownership so the replacement runs independently; injected registration-removal failure retains a terminal claim, performs no second poll, and completes idempotently once removal recovers |
 | one `Send & End`, one result | an armed Lavish source driven against a stand-in for the published poll, which delivers the final `session_ended` feedback once and empty ended sessions afterward, polls exactly once, captures exactly one result, publishes one distinct event, and retires itself |
+| live Lavish arm handoff | the public arm command starts the exact source through ordinary reconciliation, withholds success until the listener is invoked and ownership is stably live, converges an identical repeat on one owner and registration generation, returns nonzero when startup cannot hold liveness, and leaves that failed registration recoverable by ordinary reconciliation |
 | bounded re-announcement until handled | a durably captured result with no handled acknowledgement is re-announced by `reconcile` with the same source and sequence on every call - not only the first restart after a crash - and a drained-but-unhandled wake resurfaces identically after a simulated replacement session |
 | handled acknowledgement | `fm-procevent.sh handled <source-id> <sequence>` atomically and idempotently records handling at mode `0600`, fails without leaving a marker when private-mode enforcement fails, reports the first call distinctly from every repeat, stops further re-announcement once recorded, and never authorizes a paired effect twice across repeat calls |
 | publication-and-acknowledgement serialization | a concurrent `reconcile` cannot append a wake after `handled` wins the shared per-source boundary, so an acknowledged result is not re-announced by a publication race |

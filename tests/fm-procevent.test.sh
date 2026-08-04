@@ -440,6 +440,104 @@ assert_absent "$FM_PROCEVENT_CLAIM_ROOT/retire-fail-src.claim" \
   || fail "retirement recovery reran the terminal source"
 pass "failed terminal retirement is fail-closed and idempotently recoverable"
 
+# --- end-user-aligned regression: Lavish arm confirms a live listener -------
+# Registration is deliberately observable before a runner starts, so this drives
+# the public adapter command and verifies that its success boundary is the exact
+# source's live ownership, not merely the presence of its registration.
+# The stand-in writes only after `lavish-axi poll <artifact>` is actually invoked,
+# which also proves the listener process started before arm reported success.
+HARM="$TMP_ROOT/harm"; new_home "$HARM"
+LAVISH_ARM_BIN=$(fm_fakebin "$TMP_ROOT/lavish-arm-stub")
+LAVISH_ARM_COUNT="$TMP_ROOT/lavish-arm-count"
+LAVISH_ARM_LISTENER="$TMP_ROOT/lavish-arm-listener"
+LAVISH_ARM_RELEASE="$TMP_ROOT/lavish-arm-release"
+export LAVISH_ARM_COUNT LAVISH_ARM_LISTENER LAVISH_ARM_RELEASE
+cat > "$LAVISH_ARM_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+[ "${1-}" = poll ] && [ -f "${2-}" ] || exit 64
+count=$(cat "$LAVISH_ARM_COUNT" 2>/dev/null || echo 0)
+printf '%s\n' "$((count + 1))" > "$LAVISH_ARM_COUNT"
+printf '%s\n' "$$" > "$LAVISH_ARM_LISTENER"
+trap 'exit 0' TERM INT
+while [ ! -e "$LAVISH_ARM_RELEASE" ]; do sleep 0.05; done
+printf 'session:\n  file: /review.html\n  status: ended\n  ended_by: fixture\n'
+SH
+chmod +x "$LAVISH_ARM_BIN/lavish-axi"
+LAVISH_ARM_ART="$TMP_ROOT/lavish-arm.html"
+printf '<h1>live arm</h1>\n' > "$LAVISH_ARM_ART"
+lavish_arm_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$LAVISH_ARM_ART")
+PE_TRACKED+=("$HARM|$lavish_arm_id")
+arm_out=$(PATH="$LAVISH_ARM_BIN:$PATH" FM_HOME="$HARM" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$LAVISH_ARM_ART")
+assert_contains "$arm_out" "armed: $lavish_arm_id" "Lavish arm did not report its confirmed source"
+assert_present "$LAVISH_ARM_LISTENER" "Lavish arm returned before invoking the exact blocking listener"
+arm_owner=$(pe "$HARM" list | awk -v id="$lavish_arm_id" '$1 == id { print $3 }')
+[ "$arm_owner" = live ] || fail "Lavish arm returned with owner=$arm_owner instead of a live listener"
+
+# Repeating the same public arm converges on the existing owner rather than
+# creating a second listener or weakening the success check to registration.
+repeat_arm_out=$(PATH="$LAVISH_ARM_BIN:$PATH" FM_HOME="$HARM" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$LAVISH_ARM_ART")
+assert_contains "$repeat_arm_out" "armed: $lavish_arm_id" "repeated Lavish arm did not stay idempotent"
+[ "$(cat "$LAVISH_ARM_COUNT")" = 1 ] \
+  || fail "repeated Lavish arm launched $(cat "$LAVISH_ARM_COUNT") listeners instead of one"
+arm_owner=$(pe "$HARM" list | awk -v id="$lavish_arm_id" '$1 == id { print $3 }')
+[ "$arm_owner" = live ] || fail "repeated Lavish arm lost the existing live owner"
+: > "$LAVISH_ARM_RELEASE"
+for _ in $(seq 1 100); do
+  [ "$(count_results "$HARM" "$lavish_arm_id")" = 1 ] && break
+  sleep 0.05
+done
+[ "$(count_results "$HARM" "$lavish_arm_id")" = 1 ] || fail "repeated arm listener captured no terminal result"
+for _ in 1 2 3; do pe "$HARM" reconcile >/dev/null; sleep 0.1; done
+[ "$(cat "$LAVISH_ARM_COUNT")" = 1 ] \
+  || fail "repeated arm replaced the active registration and caused $(cat "$LAVISH_ARM_COUNT") terminal polls"
+assert_absent "$HARM/state/procevent/$lavish_arm_id.source" \
+  "repeated arm prevented the exact active registration from retiring"
+pe "$HARM" retire "$lavish_arm_id" >/dev/null
+pass "Lavish arm reports success only after the exact source listener is live, and repeated arm stays idempotent"
+
+# A listener that exits before it can hold live ownership must make arm fail
+# without printing armed. The registration remains durable, so the ordinary
+# reconcile path can recover the same source after the external failure clears.
+HARMFAIL="$TMP_ROOT/harm-fail"; new_home "$HARMFAIL"
+LAVISH_FAIL_BIN=$(fm_fakebin "$TMP_ROOT/lavish-arm-fail-stub")
+LAVISH_FAIL_READY="$TMP_ROOT/lavish-arm-fail-ready"
+LAVISH_FAIL_LISTENER="$TMP_ROOT/lavish-arm-fail-listener"
+export LAVISH_FAIL_READY LAVISH_FAIL_LISTENER
+cat > "$LAVISH_FAIL_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+[ "${1-}" = poll ] && [ -f "${2-}" ] || exit 64
+[ -e "$LAVISH_FAIL_READY" ] || exit 71
+printf '%s\n' "$$" > "$LAVISH_FAIL_LISTENER"
+trap 'exit 0' TERM INT
+while :; do sleep 0.05; done
+SH
+chmod +x "$LAVISH_FAIL_BIN/lavish-axi"
+LAVISH_FAIL_ART="$TMP_ROOT/lavish-arm-fail.html"
+printf '<h1>failed arm recovery</h1>\n' > "$LAVISH_FAIL_ART"
+lavish_fail_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$LAVISH_FAIL_ART")
+PE_TRACKED+=("$HARMFAIL|$lavish_fail_id")
+arm_fail_status=0
+arm_fail_out=$(PATH="$LAVISH_FAIL_BIN:$PATH" FM_HOME="$HARMFAIL" \
+  FM_PROCEVENT_LIVE_CONFIRM_TIMEOUT=1 \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$LAVISH_FAIL_ART" 2>&1) || arm_fail_status=$?
+[ "$arm_fail_status" -ne 0 ] || fail "Lavish arm reported success for a listener that exited immediately"
+assert_not_contains "$arm_fail_out" "armed:" "failed Lavish arm printed a false ready result"
+assert_contains "$arm_fail_out" "listener did not become live" "failed Lavish arm omitted its liveness diagnostic"
+assert_present "$HARMFAIL/state/procevent/$lavish_fail_id.source" \
+  "failed Lavish arm discarded the registration needed for restart recovery"
+arm_owner=$(pe "$HARMFAIL" list | awk -v id="$lavish_fail_id" '$1 == id { print $3 }')
+[ "$arm_owner" = none ] || fail "failed Lavish arm left unexpected owner=$arm_owner"
+
+: > "$LAVISH_FAIL_READY"
+PATH="$LAVISH_FAIL_BIN:$PATH" pe "$HARMFAIL" reconcile >/dev/null
+wait_for "$LAVISH_FAIL_LISTENER" || fail "reconcile did not restart the failed Lavish listener"
+arm_owner=$(pe "$HARMFAIL" list | awk -v id="$lavish_fail_id" '$1 == id { print $3 }')
+[ "$arm_owner" = live ] || fail "reconcile recovered the listener process but owner=$arm_owner"
+pe "$HARMFAIL" retire "$lavish_fail_id" >/dev/null
+pass "failed Lavish listener startup is reported and the durable source recovers through reconcile"
+
 # --- end-user-aligned regression: one Send & End, one captured result -------
 # The dogfood defect: a real armed Lavish source received one human `Send & End`
 # action, and the runner captured four results - the human's real feedback, then
@@ -450,7 +548,8 @@ pass "failed terminal retirement is fail-closed and idempotently recoverable"
 HLT="$TMP_ROOT/hlt"; new_home "$HLT"
 LAVISH_BIN=$(fm_fakebin "$TMP_ROOT/lavish-stub")
 LAVISH_POLL_COUNT="$TMP_ROOT/lavish-poll-count"
-export LAVISH_POLL_COUNT
+LAVISH_SEND_END_TRIGGER="$TMP_ROOT/lavish-send-end-trigger"
+export LAVISH_POLL_COUNT LAVISH_SEND_END_TRIGGER
 cat > "$LAVISH_BIN/lavish-axi" <<'SH'
 #!/usr/bin/env bash
 # Stand-in for `lavish-axi poll <file>` around a human `Send & End`: the final
@@ -460,6 +559,7 @@ n=$(cat "$LAVISH_POLL_COUNT" 2>/dev/null || echo 0)
 n=$((n + 1))
 printf '%s\n' "$n" > "$LAVISH_POLL_COUNT"
 if [ "$n" = 1 ]; then
+  while [ ! -e "$LAVISH_SEND_END_TRIGGER" ]; do sleep 0.05; done
   printf 'session:\n  file: /review.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nfeedback[1]{text}:\n  ship it\n'
 else
   printf 'session:\n  file: /review.html\n  status: ended\n  ended_by: user\n'
@@ -471,6 +571,7 @@ printf '<h1>review</h1>\n' > "$REVIEW_ART"
 lavish_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$REVIEW_ART")
 PE_TRACKED+=("$HLT|$lavish_id")
 PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh" arm "$REVIEW_ART" >/dev/null
+: > "$LAVISH_SEND_END_TRIGGER"
 for _ in $(seq 1 6); do
   PATH="$LAVISH_BIN:$PATH" pe "$HLT" reconcile >/dev/null
   sleep 0.3
@@ -1060,12 +1161,16 @@ pass "the adapter owns which Lavish results end a source, and payload text canno
 # Checked through --help, the operator-facing surface, rather than by reading
 # implementation bytes.
 adapter_help=$("$ROOT/bin/fm-procevent-lavish.sh" --help 2>&1 || true)
+assert_contains "$adapter_help" "report armed only after" \
+  "the adapter's help makes live ownership the arm success boundary"
 assert_contains "$adapter_help" "destructively clears" \
   "the adapter's help states the destructive-source loss limitation"
 assert_contains "$adapter_help" "Never describe" \
   "the adapter's help forbids an at-least-once or lossless description"
 
 runner_help=$("$ROOT/bin/fm-procevent.sh" --help 2>&1 || true)
+assert_contains "$runner_help" "await-live" \
+  "the runner's help exposes its bounded exact-source liveness confirmation"
 assert_contains "$runner_help" "Durability boundary" \
   "the runner's help scopes what it actually proves"
 assert_not_contains "$runner_help" "exactly-once" \
