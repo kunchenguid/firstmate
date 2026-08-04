@@ -14,7 +14,7 @@ The evidence below was refreshed on 2026-08-04 on the four-GPU RTX 5060 Ti host.
 | Artifact | `qwen3-reranker-0.6b-q8_0.gguf`, Q8_0, 639153184 bytes, SHA-256 `22c9979ce4fbcdc5acdc310c6641c32797eff1aa980b8f7a2db8a8ea23429a48` |
 | Model license | Apache-2.0, as declared by the Hugging Face model card |
 | API | `http://127.0.0.1:8081/v1/rerank`, alias `qwen3-reranker-0.6b-q8_0` |
-| GPU | `GPU-7ef74f00-ba0f-c5e9-2235-a8e7b2ca930e`, PCI `00000000:03:00.0`, host GPU index 1 |
+| GPU | `<gpu-uuid>`, PCI `<gpu-pci-address>`, host GPU index `<gpu-index>` |
 
 The artifact source is [ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF](https://huggingface.co/ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF).
 The serving source is [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp/tree/7d56da7e546f54fb1fa54ef2bc9ad9a872860ab0).
@@ -132,11 +132,11 @@ The observed result correctly placed the relevant passage at index 2 first:
 `nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv,noheader` reported:
 
 ```text
-GPU-7ef74f00-ba0f-c5e9-2235-a8e7b2ca930e, 2013291, /home/sungin/.local/share/gbrain-reranker/runtime/bin/llama-server, 1504 MiB
+<gpu-uuid>, <pid>, <home>/.local/share/gbrain-reranker/runtime/bin/llama-server, 1504 MiB
 ```
 
 The process mappings contained the pinned `libggml-cuda.so`, CUDA driver 570.207, and CUDA 12.9 cuBLAS libraries.
-A user-service restart changed the serving PID from 1945504 to 2009524 while the unit remained enabled and the health endpoint returned `{"status":"ok"}`.
-Sending `SIGKILL` to PID 2009524 caused systemd to launch PID 2013291, increment `NRestarts` from 0 to 1, and restore both the health and ordering checks.
-After reranking, `ss -anpt` showed only the loopback listener for the serving PID and no established remote socket.
+A user-service restart replaced the serving process while the unit remained enabled and the health endpoint returned `{"status":"ok"}`.
+Sending `SIGKILL` to the serving process caused systemd to replace it, increment `NRestarts` from 0 to 1, and restore both the health and ordering checks.
+After reranking, `ss -anpt` showed only the loopback listener for the serving process and no established remote socket.
 The server's `--offline` flag prevents runtime downloads or other network access, and the journal showed model loading from the local GGUF path only.
