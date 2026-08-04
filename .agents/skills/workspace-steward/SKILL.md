@@ -61,7 +61,7 @@ A separate task that drives Herdr lifecycle behavior must retain the existing `-
 
 ## Mutation guardrails
 
-Only move from observation to proposals or changes when exact captain approval exists for every requested action.
+Only make changes after exact captain approval exists for every requested action.
 
 Propose reversible naming or layout improvements before changing them.
 Each proposal must state the current layout, affected confirmed owners, exact reversible change, expected benefit, rollback, and any unknown ownership.
