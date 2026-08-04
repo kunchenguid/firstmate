@@ -292,6 +292,73 @@ test_a_valid_response_is_accepted_once_and_idempotently() {
   pass "a valid response is accepted once, re-accepting identical bytes is idempotent, different bytes are a duplicate"
 }
 
+test_accepted_response_rechecks_dynamic_gates() {
+  local id out response expires_file
+  id=$(make_request t-accepted-stale D2)
+  response="$TMP_ROOT/accepted-stale-response"
+  "$DOUBLE" valid "$(request_file "$id")" > "$response"
+  rr validate "$id" --repo "$REPO" --response "$response" >/dev/null
+  git -C "$REPO" commit -q --allow-empty -m accepted-moved-on
+  out=$(rr validate "$id" --repo "$REPO" --response "$response" 2>&1) || true
+  git -C "$REPO" reset -q --hard HEAD~1
+  case "$out" in "invalid stale-baseline"*) : ;; *) fail "accepted response skipped live baseline validation: $out" ;; esac
+
+  id=$(make_request t-accepted-dirty D2 '' worktree-clean)
+  response="$TMP_ROOT/accepted-dirty-response"
+  "$DOUBLE" valid "$(request_file "$id")" > "$response"
+  rr validate "$id" --repo "$REPO" --response "$response" >/dev/null
+  : > "$REPO/dirty-after-acceptance"
+  out=$(rr validate "$id" --repo "$REPO" --response "$response" 2>&1) || true
+  rm -f "$REPO/dirty-after-acceptance"
+  case "$out" in "invalid precondition-unsatisfied"*) : ;; *) fail "accepted response skipped precondition validation: $out" ;; esac
+
+  id=$(make_request t-accepted-expired D2)
+  response="$TMP_ROOT/accepted-expired-response"
+  "$DOUBLE" valid "$(request_file "$id")" > "$response"
+  rr validate "$id" --repo "$REPO" --response "$response" >/dev/null
+  expires_file=$(request_file "$id")
+  sed -i "s/^expires\t.*/expires\t$(( $(date +%s) - 1 ))/" "$expires_file"
+  out=$(rr validate "$id" --repo "$REPO" --response "$response" 2>&1) || true
+  case "$out" in "invalid expired"*) : ;; *) fail "accepted response skipped expiry validation: $out" ;; esac
+  pass "accepted responses remain subject to live baseline, expiry, and precondition gates"
+}
+
+test_acceptance_evidence_precedes_authority() {
+  local id response session ledger count out
+  id=$(make_request t-response-ledger-failure D2)
+  response="$TMP_ROOT/response-ledger-failure"
+  "$DOUBLE" valid "$(request_file "$id")" > "$response"
+  export FM_RULING_TEST_RESPONSE_LEDGER_FAIL=1
+  rr validate "$id" --repo "$REPO" --response "$response" >/dev/null 2>&1 \
+    && fail "acceptance succeeded without ruling-response evidence"
+  unset FM_RULING_TEST_RESPONSE_LEDGER_FAIL
+  [ ! -f "$(dirname "$(request_file "$id")")/accepted" ] || fail "acceptance became authoritative before ledger evidence"
+  rr validate "$id" --repo "$REPO" --response "$response" >/dev/null \
+    || fail "identical retry did not complete acceptance"
+  session=$(sess id)
+  ledger="$HOME_DIR/state/away/$session/ledger"
+  count=$(awk -F '\t' -v request="request=$id" '$2 == "ruling-response" { for (i=3; i<=NF; i++) if ($i == request) count++ } END { print count+0 }' "$ledger")
+  [ "$count" -eq 1 ] || fail "acceptance retry produced $count ruling-response events"
+
+  id=$(make_request t-response-publish-failure D2)
+  response="$TMP_ROOT/response-publish-failure"
+  "$DOUBLE" valid "$(request_file "$id")" > "$response"
+  export FM_RULING_TEST_ACCEPT_PUBLISH_FAIL=1
+  rr validate "$id" --repo "$REPO" --response "$response" >/dev/null 2>&1 \
+    && fail "forced acceptance publication failure succeeded"
+  unset FM_RULING_TEST_ACCEPT_PUBLISH_FAIL
+  [ ! -f "$(dirname "$(request_file "$id")")/accepted" ] || fail "failed acceptance publication became authoritative"
+  rr validate "$id" --repo "$REPO" --response "$response" >/dev/null \
+    || fail "pre-authority acceptance retry did not recover"
+  count=$(awk -F '\t' -v request="request=$id" '$2 == "ruling-response" { for (i=3; i<=NF; i++) if ($i == request) count++ } END { print count+0 }' "$ledger")
+  [ "$count" -eq 1 ] || fail "pre-authority recovery produced $count ruling-response events"
+
+  rm -f "$(dirname "$(request_file "$id")")/response"
+  out=$(rr validate "$id" --repo "$REPO" --response "$response" 2>&1) || true
+  case "$out" in "invalid malformed"*) : ;; *) fail "incomplete accepted response was not refused: $out" ;; esac
+  pass "acceptance evidence precedes authority and incomplete authority is refused"
+}
+
 test_rejections_are_recorded_as_evidence() {
   local codes
   codes=$(sess ledger ruling-rejected | sed -n 's/.*code=\([a-z-]*\).*/\1/p' | sort -u | tr '\n' ' ')
@@ -380,6 +447,8 @@ test_an_operator_reserved_request_cannot_be_answered_as_delegated
 test_an_expired_request_is_refused
 test_a_superseded_commit_invalidates_a_matching_response
 test_a_valid_response_is_accepted_once_and_idempotently
+test_accepted_response_rechecks_dynamic_gates
+test_acceptance_evidence_precedes_authority
 test_rejections_are_recorded_as_evidence
 test_a_response_is_never_executed_as_shell
 test_untrusted_evidence_is_stored_verbatim_and_never_interpreted

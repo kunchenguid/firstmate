@@ -214,17 +214,32 @@ batch_safe() {  # <request-file>
 }
 
 print_d3_item() {  # <session> <hold-id> <task> <key>
-  local session=$1 hold=$2 request response id
+  local session=$1 hold=$2 request response accepted ledger digest id
   id="rr-$3-$4"
   request="$(ruling_dir "$session" "$id")/request"
   response="$(ruling_dir "$session" "$id")/response"
+  accepted="$(ruling_dir "$session" "$id")/accepted"
+  ledger=$(fm_away_ledger_path "$session")
 
   printf '\n  decision: %s\n' "$hold"
   if [ -f "$request" ]; then
     printf '    exact decision: %s\n' "$(ruling_field "$request" question | head -1)"
     printf '    why operator-owned: %s\n' "$(ruling_field "$request" why | head -1)"
   fi
-  if [ -f "$response" ]; then
+  digest=$(ruling_field "$accepted" digest | head -1)
+  if [ -f "$response" ] && [ -n "$digest" ] \
+    && awk -F '\t' -v request="request=$id" -v digest="digest=$digest" '
+      $2 == "ruling-response" {
+        has_request=0
+        has_digest=0
+        for (i = 3; i <= NF; i++) {
+          if ($i == request) has_request=1
+          if ($i == digest) has_digest=1
+        }
+        if (has_request && has_digest) found=1
+      }
+      END { exit !found }
+    ' "$ledger" 2>/dev/null; then
     printf '    recommended ruling: %s\n' "$(ruling_field "$response" disposition | head -1)"
     printf '    strongest opposing position: %s\n' "$(ruling_field "$response" opposing | head -1)"
     printf '    if accepted: %s\n' "$(ruling_field "$response" action | head -1)"

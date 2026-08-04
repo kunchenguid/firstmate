@@ -286,7 +286,7 @@ precondition_satisfied() {  # <request-file> <repo-dir> <checker>
 
 command_validate() {
   local id='' repo='' response='' session dir request live digest accepted
-  local keys unknown k count value
+  local keys unknown k count value ledger already_accepted=0 pending_response pending_accepted
 
   id=${1:-}
   [ -n "$id" ] || fail 'a request id is required'
@@ -311,6 +311,10 @@ command_validate() {
   dir="$(ruling_root "$session")/$id"
   request="$dir/request"
   [ -f "$request" ] || fail "no such ruling request: $id"
+  ledger=$(fm_away_ledger_path "$session")
+  if [ ! -f "$dir/evidence" ] || ! ruling_request_event_exists "$ledger" "$id"; then
+    reject malformed "ruling request $id lacks complete evidence publication"
+  fi
 
   [ -f "$response" ] || reject malformed "response file does not exist: $response"
   [ -s "$response" ] || reject malformed 'response is empty'
@@ -354,8 +358,12 @@ EOF
     accepted=$(field_one "$dir/accepted" digest)
     [ "$accepted" = "$digest" ] \
       || reject duplicate "a different response was already accepted for $id"
-    printf 'valid %s (already accepted)\n' "$id"
-    return 0
+    if [ ! -f "$dir/response" ] \
+      || [ "$(sha256_file "$dir/response")" != "$digest" ] \
+      || ! ruling_response_event_exists "$ledger" "$id" "$digest"; then
+      reject malformed "accepted response for $id lacks complete evidence publication"
+    fi
+    already_accepted=1
   fi
 
   [ "$(field_one "$response" request)" = "$id" ] \
@@ -413,17 +421,53 @@ EOF
   field_values "$request" available-verification | grep -Fqx "$value" \
     || reject verification-unavailable "no deterministic verification is available for: $value"
 
-  cp "$response" "$dir/response" || fail 'could not store the accepted response'
+  if [ "$already_accepted" -eq 1 ]; then
+    printf 'valid %s (already accepted)\n' "$id"
+    return 0
+  fi
+
+  pending_response=$(mktemp "$dir/.response.pending.XXXXXX") \
+    || fail 'could not stage the accepted response'
+  pending_accepted=$(mktemp "$dir/.accepted.pending.XXXXXX") \
+    || { rm -f "$pending_response"; fail 'could not stage acceptance'; }
+  cp "$response" "$pending_response" \
+    || { rm -f "$pending_response" "$pending_accepted"; fail 'could not stage the accepted response'; }
   {
     printf 'digest\t%s\n' "$digest"
     printf 'accepted\t%s\n' "$(date +%s)"
     printf 'baseline\t%s\n' "$live"
-  } > "$dir/accepted" || fail 'could not record acceptance'
-  fm_away_ledger_append "$session" ruling-response \
-    "request=$id" "authority=$(field_one "$response" authority)" \
-    "action=$(field_one "$response" action)" "digest=$digest" \
-    || fail 'could not record the accepted response'
+  } > "$pending_accepted" \
+    || { rm -f "$pending_response" "$pending_accepted"; fail 'could not stage acceptance'; }
+  if ! ruling_response_event_exists "$ledger" "$id" "$digest"; then
+    [ "${FM_RULING_TEST_RESPONSE_LEDGER_FAIL:-0}" != 1 ] \
+      || { rm -f "$pending_response" "$pending_accepted"; fail 'could not record the accepted response'; }
+    fm_away_ledger_append "$session" ruling-response \
+      "request=$id" "authority=$(field_one "$response" authority)" \
+      "action=$(field_one "$response" action)" "digest=$digest" \
+      || { rm -f "$pending_response" "$pending_accepted"; fail 'could not record the accepted response'; }
+  fi
+  [ "${FM_RULING_TEST_ACCEPT_PUBLISH_FAIL:-0}" != 1 ] \
+    || { rm -f "$pending_response" "$pending_accepted"; fail 'could not publish the accepted response'; }
+  mv "$pending_response" "$dir/response" \
+    || { rm -f "$pending_response" "$pending_accepted"; fail 'could not publish the accepted response'; }
+  mv "$pending_accepted" "$dir/accepted" \
+    || { rm -f "$pending_accepted"; fail 'could not publish acceptance'; }
   printf 'valid %s\n' "$id"
+}
+
+ruling_response_event_exists() {  # <ledger> <request-id> <digest>
+  awk -F '\t' -v request="request=$2" -v digest="digest=$3" '
+    $2 == "ruling-response" {
+      has_request=0
+      has_digest=0
+      for (i = 3; i <= NF; i++) {
+        if ($i == request) has_request=1
+        if ($i == digest) has_digest=1
+      }
+      if (has_request && has_digest) found=1
+    }
+    END { exit !found }
+  ' "$1" 2>/dev/null
 }
 
 command_show() {
