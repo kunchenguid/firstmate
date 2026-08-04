@@ -55,6 +55,7 @@ Never move a task while its original worker may still own or change it.
    It composes the recorded endpoint's own state with the current-code-matched run state, and only `allow` licenses a move.
 2. A refusal naming an active or parked validation run means the pipeline still owns that branch.
    Do not change provider during it; follow the ordinary gate flow, and if the gate cannot be answered because the provider is down, report that concrete blocker to the captain.
+   A refusal naming an unreadable current state or an unreadable endpoint is a different shape: nothing is proven either way, so resolve that read before considering a move rather than treating it as an absent run.
 3. Append a short explicit handoff note to the existing brief: what the previous worker had completed, what remains, and that the branch and uncommitted files are already in place.
    Leave the brief's recorded delivery contract line untouched.
 4. Take the license for the actual move with `handoff-attempt`, which records the attempt and applies the same checks plus the repeated-failure cap.

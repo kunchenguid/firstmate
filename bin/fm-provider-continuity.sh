@@ -34,7 +34,13 @@
 #       Drop <provider>'s observations after firstmate has positive evidence it
 #       recovered.
 #   fm-provider-continuity.sh handoff-check <task-id>
-#       Read-only cross-provider handoff license for one recorded task.
+#       Read-only cross-provider handoff license for one recorded task. It
+#       composes the recorded endpoint's own state with the current-code-matched
+#       run state and licenses a move only when BOTH are proven: the endpoint is
+#       `dead` or `missing`, and the current-state read succeeded without showing
+#       an active or parked validation run. A readable `unknown` verdict is a
+#       real read and may license a move; a verdict that could not be read at all
+#       refuses, because it proves nothing about validation ownership.
 #   fm-provider-continuity.sh handoff-attempt <task-id>
 #       Record one handoff attempt, then apply the same license plus the
 #       repeated-failure cap.
