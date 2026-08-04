@@ -974,6 +974,8 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
+  # Same untracked-residue filter as git_unlanded_facts in
+  # bin/fm-completeness-check.sh, which gates this teardown first: edit both.
   dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
@@ -1759,7 +1761,8 @@ fi
 # --force (the explicit discard path) and for secondmates (governed elsewhere).
 if [ "$FORCE" != "--force" ] && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; }; then
   set +e
-  gate_out=$("$FM_ROOT/bin/fm-completeness-check.sh" --gate teardown --id "$ID" 2>&1)
+  gate_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$FM_ROOT/bin/fm-completeness-check.sh" --gate teardown --id "$ID" 2>&1)
   gate_rc=$?
   set -e
   if [ "$gate_rc" = 2 ] || [ "$gate_rc" = 3 ] || [ "$gate_rc" = 64 ]; then

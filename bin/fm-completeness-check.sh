@@ -94,7 +94,11 @@ git_unlanded_facts() {
     WORKTREE="${WORKTREE:-clean}"
     return 0
   fi
-  dirty=$(git -C "$wt" status --porcelain 2>/dev/null | grep -vE '^\?\? \.claude/' | head -1 || true)
+  # Untracked-residue filter, byte-identical to the one in fm-teardown.sh's
+  # validate_worktree_teardown_safety: firstmate-owned scratch (.claude/, the
+  # grok/kimi turn-end pointers) is not the crewmate's work. Edit both or
+  # neither, or this gate refuses a teardown its own guarded check would allow.
+  dirty=$(git -C "$wt" status --porcelain 2>/dev/null | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
   unpushed=$(git -C "$wt" log --oneline HEAD --not --remotes -- 2>/dev/null | head -1 || true)
   # Name the concrete evidence so a blocked claim's output cites it alongside
   # the violated rule (uncommitted changes are never landed).

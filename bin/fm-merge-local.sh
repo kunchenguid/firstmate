@@ -20,6 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=${1:?usage: fm-merge-local.sh <task-id>}
 META="$STATE/$ID.meta"
@@ -52,7 +53,8 @@ default_branch() {
 # working until they install it; once installed, an unasserted approval blocks.
 # Exit 64 is invalid facts, which blocks rather than passing.
 set +e
-gate_out=$("$FM_ROOT/bin/fm-completeness-check.sh" --gate merge --id "$ID" 2>&1)
+gate_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+  "$FM_ROOT/bin/fm-completeness-check.sh" --gate merge --id "$ID" 2>&1)
 gate_rc=$?
 set -e
 if [ "$gate_rc" = 2 ] || [ "$gate_rc" = 3 ] || [ "$gate_rc" = 64 ]; then

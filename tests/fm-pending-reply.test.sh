@@ -340,6 +340,39 @@ test_escalation_publication_failure_retries() {
   pass "failed escalation publication remains retryable and publishes once"
 }
 
+test_escalation_dedup_compares_whole_lines() {
+  local home state corr rec payload status line matches total
+  home=$(setup_parent escalate-dedup)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=4600
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "dedup escalation")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  fm_pending_reply_send_recovery "$state" "$corr" || fail "recovery send failed"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" recovery
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  payload="pending-reply-missed: task=$(fm_pending_reply_get "$rec" task_id)"
+  payload="$payload pending-reply-id=${corr} request=$(fm_pending_reply_get "$rec" request_summary)"
+  status=$(fm_pending_reply_get "$rec" parent_status)
+  mkdir -p "$(dirname "$status")"
+  # A longer line that merely quotes the escalation is not the escalation: only
+  # a stamped line whose stripped body is exactly equal may suppress a new one.
+  printf '%s blocked: %s (quoted in an earlier note)\n' "$(fm_status_stamp)" "$payload" > "$status"
+  fm_pending_reply_maybe_escalate "$state" "$corr" || fail "escalation should fire"
+  matches=0
+  total=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    total=$((total + 1))
+    if [ "$(status_line_body "$line")" = "blocked: $payload" ]; then
+      matches=$((matches + 1))
+    fi
+  done < "$status"
+  [ "$total" = 2 ] || fail "escalation should have been appended, got $total lines"
+  [ "$matches" = 1 ] || fail "a superstring line must not suppress escalation, got $matches"
+  pass "escalation dedup compares whole stripped lines, not substrings"
+}
+
 test_transport_success_is_not_reply_success() {
   local home state corr
   home=$(setup_parent transport-not-reply)
@@ -919,6 +952,7 @@ test_recovery_attempt_is_never_reinjected
 test_recovery_reply_resolves_original
 test_second_missed_turn_escalates_once_and_stays_durable
 test_escalation_publication_failure_retries
+test_escalation_dedup_compares_whole_lines
 test_transport_success_is_not_reply_success
 test_undelivered_records_are_scan_immutable
 test_delivery_confirmation_fallback_reconciles

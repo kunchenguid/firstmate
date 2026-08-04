@@ -199,3 +199,23 @@ if [ "$(FM_HOME="$HOME_DIR" "$GATE" --gate teardown --id ship-m >/dev/null 2>&1;
 else
   fail "local-only master-default repo did not clear after merge"
 fi
+
+# Firstmate's own untracked residue is not the crewmate's work: the gate runs
+# before fm-teardown.sh's validate_worktree_teardown_safety and rc 2 hard-refuses,
+# so both must ignore exactly the same markers or the gate blocks a teardown the
+# guarded check would allow.
+mkdir -p "$PROJ/.claude"
+printf 'x\n' > "$PROJ/.claude/settings.json"
+printf 'token=t\n' > "$PROJ/.fm-grok-turnend"
+printf 'token=t\n' > "$PROJ/.fm-kimi-turnend"
+if [ "$(FM_HOME="$HOME_DIR" "$GATE" --gate teardown --id ship-m >/dev/null 2>&1; echo $?)" = "0" ]; then
+  pass "firstmate turn-end markers and .claude/ are not unlanded work"
+else
+  fail "firstmate turn-end markers blocked a teardown fm-teardown.sh allows"
+fi
+printf 'real\n' > "$PROJ/uncommitted.txt"
+if [ "$(FM_HOME="$HOME_DIR" "$GATE" --gate teardown --id ship-m >/dev/null 2>&1; echo $?)" = "2" ]; then
+  pass "a genuinely dirty worktree still blocks"
+else
+  fail "a genuinely dirty worktree was not blocked"
+fi
