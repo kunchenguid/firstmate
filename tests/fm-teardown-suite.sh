@@ -3681,6 +3681,80 @@ test_teardown_refuses_unsafe_tasktmp_metadata() {
   pass "teardown only removes its exact task temp root"
 }
 
+test_teardown_accepts_legacy_tasktmp_with_clean_absent_endpoint() {
+  local case_dir legacy_tasktmp
+  case_dir=$(make_case legacy-tasktmp-clean-absent-endpoint)
+  legacy_tasktmp=/tmp/fm-task-x1
+  write_meta "$case_dir" local-only ship
+  sed -i.bak 's/^generation_id=.*/generation_id=account:recoveredgeneration/' \
+    "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak" "$case_dir/fakebin/.tmux-live"
+  printf 'tasktmp=%s\ntasktmp_phase=created\n' "$legacy_tasktmp" \
+    >> "$case_dir/state/task-x1.meta"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "legacy tasktmp remained blocked after endpoint absence was proved: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "legacy tasktmp teardown retained completed task metadata"
+  assert_absent "$case_dir/fakebin/.tmux-live" \
+    "legacy tasktmp teardown recreated an absent endpoint"
+  pass "teardown accepts an exact legacy tasktmp for a clean task with an absent endpoint"
+}
+
+test_teardown_refuses_tasktmp_bound_to_different_generation() {
+  local case_dir mismatched_tasktmp rc
+  case_dir=$(make_case tasktmp-different-generation)
+  mismatched_tasktmp="$case_dir/state/.task-tmp/fm-task-x1-othergeneration"
+  mkdir -p "$mismatched_tasktmp"
+  printf '%s\n' preserve > "$mismatched_tasktmp/sentinel"
+  write_meta "$case_dir" local-only ship
+  sed -i.bak 's/^generation_id=.*/generation_id=account:currentgeneration/' \
+    "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak" "$case_dir/fakebin/.tmux-live"
+  printf 'tasktmp=%s\ntasktmp_phase=created\n' "$mismatched_tasktmp" \
+    >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "different generation-bound tasktmp teardown exit"
+  assert_present "$mismatched_tasktmp/sentinel" \
+    "different generation-bound tasktmp refusal removed the mismatched root"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "different generation-bound tasktmp refusal removed task metadata"
+  assert_grep 'task temp path belongs to a different task generation' "$case_dir/stderr" \
+    "different generation-bound tasktmp did not receive its own refusal classification"
+  pass "teardown refuses a tasktmp bound to a different generation"
+}
+
+test_teardown_refuses_unknown_tasktmp_classification() {
+  local case_dir unknown_tasktmp rc
+  case_dir=$(make_case tasktmp-unknown-classification)
+  unknown_tasktmp="$case_dir/unknown-tasktmp"
+  mkdir -p "$unknown_tasktmp"
+  printf '%s\n' preserve > "$unknown_tasktmp/sentinel"
+  write_meta "$case_dir" local-only ship
+  sed -i.bak 's/^generation_id=.*/generation_id=account:currentgeneration/' \
+    "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak" "$case_dir/fakebin/.tmux-live"
+  printf 'tasktmp=%s\ntasktmp_phase=created\n' "$unknown_tasktmp" \
+    >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "unknown tasktmp teardown exit"
+  assert_present "$unknown_tasktmp/sentinel" \
+    "unknown tasktmp refusal removed an unprovable root"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "unknown tasktmp refusal removed task metadata"
+  assert_grep 'unknown or unprovable task temp path' "$case_dir/stderr" \
+    "unknown tasktmp did not receive its own refusal classification"
+  pass "teardown refuses an unknown tasktmp classification"
+}
+
 test_teardown_removes_safe_tasktmp_and_accepts_absence() {
   local case_dir tasktmp
   case_dir=$(make_case safe-tasktmp)
@@ -4783,7 +4857,7 @@ test_surviving_object_storage_is_bound_through_graph_proof() {
     fm_test_wait_for_file "$marker" "$teardown_pid" 0.05; then
     : > "$release"
     wait "$teardown_pid" || true
-    fail "object-storage graph proof did not expose its retained-identity boundary"
+    fail "object-storage graph proof did not expose its retained-identity boundary: $(cat "$case_dir/stderr")"
   fi
   mv "$pack" "$redirected"
   ln -s "$redirected" "$pack"
@@ -5221,6 +5295,28 @@ if [ "${FM_TEST_FOCUSED:-}" = preserve-scratch ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = tasktmp-classification ]; then
+  test_teardown_accepts_legacy_tasktmp_with_clean_absent_endpoint
+  test_teardown_refuses_tasktmp_bound_to_different_generation
+  test_teardown_refuses_unknown_tasktmp_classification
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = tasktmp-legacy-classification ]; then
+  test_teardown_accepts_legacy_tasktmp_with_clean_absent_endpoint
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = tasktmp-different-generation ]; then
+  test_teardown_refuses_tasktmp_bound_to_different_generation
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = tasktmp-unknown-classification ]; then
+  test_teardown_refuses_unknown_tasktmp_classification
+  exit 0
+fi
+
 run_partitioned_test() {
   local assigned_part test_function=$1
   assigned_part=$((FM_TEST_PART_SEQUENCE % FM_TEST_PART_TOTAL + 1))
@@ -5311,6 +5407,9 @@ TEARDOWN_FULL_SUITE_CASES=(
   test_secondmate_registry_updates_are_locked_and_literal
   test_teardown_retains_untracked_claude_skill_draft
   test_teardown_refuses_unsafe_tasktmp_metadata
+  test_teardown_accepts_legacy_tasktmp_with_clean_absent_endpoint
+  test_teardown_refuses_tasktmp_bound_to_different_generation
+  test_teardown_refuses_unknown_tasktmp_classification
   test_teardown_removes_safe_tasktmp_and_accepts_absence
   test_teardown_rejects_malformed_report_requirement
   test_secondmate_state_enumeration_fails_closed

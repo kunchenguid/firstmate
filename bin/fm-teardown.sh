@@ -259,16 +259,59 @@ PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # absent for tasks spawned before that change, so tolerate empty legacy metadata.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
 TASK_GENERATION=$(grep '^generation_id=' "$META" | cut -d= -f2- || true)
-if [ -n "$TASK_TMP" ] && ! fm_account_task_tmp_is_expected "$ID" "$TASK_TMP" "$TASK_GENERATION"; then
-  echo "REFUSED: unsafe task temp path in metadata for $ID: $TASK_TMP" >&2
-  exit 1
-fi
+
+classify_teardown_task_tmp() {  # <task-id> <path> <generation-id>
+  local task=$1 target=$2 generation=$3 generation_root suffix
+  if [ -z "$target" ]; then
+    printf 'absent\n'
+  elif fm_account_task_tmp_is_current "$task" "$target" "$generation"; then
+    printf 'current\n'
+  elif fm_account_task_tmp_is_legacy "$task" "$target"; then
+    printf 'legacy\n'
+  elif fm_account_task_tmp_is_previous "$task" "$target"; then
+    printf 'previous\n'
+  elif fm_account_task_tmp_path "$task" "$generation" >/dev/null 2>&1 \
+    && generation_root=$(fm_account_previous_task_tmp_path "$task"); then
+    case "$target" in
+      "$generation_root"-*)
+        suffix=${target#"$generation_root"-}
+        if fm_account_valid_id "$suffix"; then
+          printf 'different-generation\n'
+        else
+          printf 'unknown\n'
+        fi
+        ;;
+      *) printf 'unknown\n' ;;
+    esac
+  else
+    printf 'unknown\n'
+  fi
+}
+
+TASK_TMP_CLASSIFICATION=$(classify_teardown_task_tmp "$ID" "$TASK_TMP" "$TASK_GENERATION")
+case "$TASK_TMP_CLASSIFICATION" in
+  absent|current|legacy|previous) ;;
+  different-generation)
+    echo "REFUSED: task temp path belongs to a different task generation for $ID: $TASK_TMP" >&2
+    exit 1
+    ;;
+  unknown)
+    echo "REFUSED: unsafe task temp path in metadata for $ID; unknown or unprovable task temp path: $TASK_TMP" >&2
+    exit 1
+    ;;
+  *)
+    echo "REFUSED: invalid task temp path classification for $ID" >&2
+    exit 1
+    ;;
+esac
 TASK_TMP_PHASE=$(fm_meta_get "$META" tasktmp_phase)
 case "$TASK_TMP_PHASE" in
   '') ;;
   created)
-    fm_account_task_tmp_is_current "$ID" "$TASK_TMP" "$TASK_GENERATION" \
-      || { echo "error: created task temp phase is not bound to the exact task generation for $ID" >&2; exit 1; }
+    case "$TASK_TMP_CLASSIFICATION" in
+      current|legacy) ;;
+      *) echo "error: created task temp phase is not bound to the exact task generation for $ID" >&2; exit 1 ;;
+    esac
     ;;
   not-created)
     fm_account_task_tmp_is_current "$ID" "$TASK_TMP" "$TASK_GENERATION" || {
