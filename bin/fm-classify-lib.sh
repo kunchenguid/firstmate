@@ -207,9 +207,15 @@ EOF
 # the file, no globals beyond the optional FM_CLASSIFY_RESOLVE_VERB override. This
 # is the durable open-set the fleet snapshot and any point-in-time consumer must use
 # instead of trusting the last status line.
+# The scan_open_decisions wrapper below enumerates a whole directory rather than
+# a single caller-chosen path, so a status file that is itself a symlink (e.g.
+# escaping the state directory) is rejected outright with a plain [ -L ] check
+# before any read - a cheap builtin, unlike fm_wake_latest_event's O_NOFOLLOW
+# subprocess read, which exists for that function's much narrower payload-driven
+# path resolution rather than this directory-local glob.
 status_open_decisions() {  # <status-file>
   local f=$1 line verb key note resolve held open='' stripped
-  [ -f "$f" ] || return 0
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
@@ -231,6 +237,30 @@ status_open_decisions() {  # <status-file>
     esac
   done < "$f"
   printf '%s' "$open"
+}
+
+# Fleet-wide wrapper around status_open_decisions: scans every task's status
+# log under <state> and prefixes each still-open decision with its owning task
+# id, so a per-wake or per-session surface can print the consolidated open set
+# without re-walking the fold itself. A thin directory scan only - the fold
+# above remains the ONE place the open/resolved semantics are decided. Prints
+# one "<task>\t<key>\t<verb>\t<note>" line per open decision, in glob (task id)
+# order; prints nothing when none are open.
+scan_open_decisions() {  # <state>
+  local state=$1 f task open line
+  for f in "$state"/*.status; do
+    [ -e "$f" ] || continue
+    task=$(basename "$f"); task="${task%.status}"
+    open=$(status_open_decisions "$f") || continue
+    [ -n "$open" ] || continue
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      printf '%s\t%s\n' "$task" "$line"
+    done <<EOF
+$open
+EOF
+  done
+  return 0
 }
 
 # Fold material routed-work phases in the same keyed event stream.
