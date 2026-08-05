@@ -85,6 +85,9 @@ The new report is offered through the existing authenticated custom-check path i
 Claude, Codex, OpenCode, Pi and `pi-signed`, Grok, and Kimi therefore consume the same typed `daily-upstream-report <report-id>` check result, while the agent-only handling skill is loaded from the shared `AGENTS.md` trigger.
 No backend adapter under `bin/backends/`, no harness-specific supervision protocol, and no runtime session-provider contract changed.
 The deterministic suite executes the exact generated check, validates its private offer file, verifies the typed result, and proves exact acknowledgement removes the executable check only after the report is readable.
+The watcher execs a validated snapshot of that check as an external command and exports nothing to it.
+The generated check therefore binds its own absolute home the way the X-mode poll shim does.
+The suite runs it with `FM_HOME` and `FM_ROOT_OVERRIDE` removed from the environment to prove the typed offer still surfaces.
 
 ## Static deployment boundary
 

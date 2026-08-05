@@ -219,7 +219,7 @@ test_collection_matrix_and_redaction() {
 }
 
 test_channel_dedupe_and_report_preservation() {
-  local root="$TMP_ROOT/update-world/home" world="$TMP_ROOT/update-world" feed receipt out id offers before_lines
+  local root="$TMP_ROOT/update-world/home" world="$TMP_ROOT/update-world" feed receipt out id offers before_lines bound_home
   feed="$world/feed.xml"
   # A second local date with the same newest identity is current, not resurfaced.
   run_daily "$root" "$root" 2026-08-03 200000 "$feed" collect >/dev/null
@@ -243,7 +243,11 @@ test_channel_dedupe_and_report_preservation() {
   private_mode=$(path_mode_test "$offers")
   [ "$private_mode" = 600 ] || fail "report offers mode is not 600"
   id=$(cut -f1 "$offers")
-  assert_contains "$(FM_HOME="$root" "$root/state/daily-upstream-report.check.sh")" "daily-upstream-report $id" "authenticated check did not offer report"
+  # The watcher execs the check as an external command and exports nothing, so
+  # the generated check must bind its own home rather than inherit one.
+  bound_home=$(cd "$root" && pwd -P)
+  assert_grep "export FM_HOME=$(printf '%q' "$bound_home")" "$root/state/daily-upstream-report.check.sh" "generated check did not bind its owning absolute home"
+  assert_contains "$(env -u FM_HOME -u FM_ROOT_OVERRIDE "$root/state/daily-upstream-report.check.sh")" "daily-upstream-report $id" "authenticated check did not offer report without an inherited environment"
   [ -z "$(FM_HOME="$root" "$root/state/daily-upstream-report.check.sh")" ] || fail "pending report re-offered on the immediately following sweep"
   [ "$(path_mode_test "$root/state/daily-upstream/report-offer.notified")" = 600 ] || fail "re-offer stamp mode is not 600"
   assert_contains "$(FM_HOME="$root" FM_DAILY_REPORT_REOFFER_SECS=0 "$root/state/daily-upstream-report.check.sh")" "daily-upstream-report $id" "elapsed re-offer interval did not surface the pending report"
