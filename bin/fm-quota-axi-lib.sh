@@ -4,8 +4,6 @@
 #
 # FM_QUOTA_AXI_MIN follows the axi-family floor policy owned beside the floor
 # constants in bin/fm-bootstrap.sh.
-# Keep it at the current latest, captain-bumped, and never lower it to a feature
-# minimum.
 #
 # This file is the single owner of that version number. bin/fm-bootstrap.sh
 # turns a failing check into the operator-facing MISSING diagnostic, which is
