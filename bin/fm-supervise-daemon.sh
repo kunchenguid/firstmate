@@ -598,8 +598,13 @@ pane_busy_observation() {  # <target> [backend]
   [ "$rendered" = busy ]
 }
 
+PANE_BUSY_OBSERVATION=
 pane_is_busy() {  # <target> [backend]
-  pane_busy_observation "$@" >/dev/null
+  local observation status
+  observation=$(pane_busy_observation "$@")
+  status=$?
+  PANE_BUSY_OBSERVATION=$observation
+  return "$status"
 }
 
 # pane_input_pending dispatches through fm_backend_composer_state and treats
@@ -1152,11 +1157,13 @@ inject_msg() {  # <message> [state]
     return 1
   fi
   # (3) Busy-guard: never inject into an in-use supervisor pane.
-  busy_observation=$(pane_busy_observation "$target" "$backend")
-  if [ $? -eq 0 ]; then
+  PANE_BUSY_OBSERVATION=
+  if pane_is_busy "$target" "$backend"; then
+    busy_observation=${PANE_BUSY_OBSERVATION:-harness=unknown native=unknown rendered=busy}
     log "inject deferred: gate=busy backend=$backend $busy_observation"
     return 1
   fi
+  busy_observation=${PANE_BUSY_OBSERVATION:-harness=unknown native=unknown rendered=idle}
   #   b) Composer-guard: inject ONLY into a confirmed-empty GENUINE agent
   #      composer. The shared classifier (fm_backend_composer_state ->
   #      fm_composer_classify_content, bin/fm-composer-lib.sh) reports 'pending'
