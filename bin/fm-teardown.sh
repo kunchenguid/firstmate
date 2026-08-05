@@ -133,6 +133,23 @@
 #     root still exists, so the account's healthy LaunchAgent worker and every
 #     live remote secondmate worker are out of scope. Best effort: a sweep
 #     failure never blocks this teardown.
+#   Fix 4 - reap the cursor worker-server by recorded pid. Cursor's background
+#     `node .../index.js worker-server` child detaches from the pane and can
+#     leave the worktree's cwd, so the cwd-based reaper cannot see it (observed
+#     2026-08-05: one worker-server survived teardown reparented to init, self-
+#     exited ~6 minutes later). fm-spawn records its pid and starttime in
+#     state/<id>.meta at launch; reap_cursor_worker_server TERMs then KILLs the
+#     recorded pid only when its starttime identity still matches (a recycled
+#     pid is never touched), then removes the record. A missing record falls
+#     back to the cwd-based reaper unchanged. Never matched by a generic
+#     worker-server cmdline or the cursor install dir: both are shared across
+#     homes and tasks.
+#     The recorded-pid path is lsof-independent (it needs only /proc starttime
+#     plus kill). The cwd-based Fix 2 reaper above still requires lsof for the
+#     generic leaked-descendant scan; without lsof it falls back to the tmux
+#     process-group reaper, which cannot see a detached worker-server - so a
+#     cursor primary/crew host should install lsof for full leaked-process
+#     coverage (see docs/configuration.md Toolchain).
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1409,6 +1426,50 @@ reap_task_backend_process_group() {  # <label>
   fi
 }
 
+# Reap the cursor worker-server recorded at spawn time (see
+# cursor_worker_server_record in bin/fm-spawn.sh). Cursor's background
+# `node .../index.js worker-server` child detaches from the pane (reparents to
+# init) and can leave the task worktree's cwd, so the cwd-based reaper below
+# cannot see it - the observed cursor-worker-server-cleanup-gap incident
+# (2026-08-05). The record carries the pid plus its starttime identity, so a
+# recycled pid is never killed. A missing record falls through to the cwd-based
+# reaper unchanged. Never matches a generic worker-server cmdline or the cursor
+# install dir: both are shared across homes and tasks.
+reap_cursor_worker_server() {  # <meta>
+  local meta=$1 pid starttime current
+  pid=$(grep '^cursor_worker_server=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  case "$pid" in ''|*[!0-9]*) pid= ;; esac
+  [ -n "$pid" ] || return 0
+  starttime=$(grep '^cursor_worker_server_start=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  case "$starttime" in ''|*[!0-9]*) starttime= ;; esac
+  [ -n "$starttime" ] || return 0
+  if ! current=$(task_process_identity "$pid") \
+     || [ "$current" != "starttime=$starttime" ]; then
+    # The pid was recycled or is gone; nothing to reap. Remove the stale
+    # record so a later teardown does not re-consult it.
+    remove_cursor_worker_server_record "$meta"
+    return 0
+  fi
+  echo "teardown: reaping recorded cursor worker-server for $ID: $pid" >&2
+  kill -TERM "$pid" 2>/dev/null || true
+  sleep 1
+  if task_process_identity_matches "$pid" "starttime=$starttime"; then
+    echo "teardown: force-killing recorded cursor worker-server for $ID: $pid" >&2
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  remove_cursor_worker_server_record "$meta"
+}
+
+remove_cursor_worker_server_record() {  # <meta>
+  local meta=$1 tmp
+  tmp="$meta.tmp.$$"
+  if grep -vE '^cursor_worker_server(=|_start=)' "$meta" > "$tmp" 2>/dev/null; then
+    mv -f -- "$tmp" "$meta"
+  else
+    rm -f -- "$tmp"
+  fi
+}
+
 # Reap every process rooted (by cwd) under this task's own worktree or tasktmp
 # - both unique per task and never shared - before either is removed. TERM
 # first, then KILL after a short grace period for anything still alive; a
@@ -2380,6 +2441,7 @@ fi
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
+  reap_cursor_worker_server "$META"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
 

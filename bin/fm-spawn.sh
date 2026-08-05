@@ -2076,6 +2076,80 @@ kimi_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
 
+# cursor_worker_server_record: after a cursor-agent launch, find the CLI's
+# background `node .../index.js worker-server` child and record its pid plus a
+# starttime identity in state/<id>.meta so teardown can reap it by pid even
+# after it detaches (reparents to init) and its cwd leaves the task worktree
+# (the observed cursor-worker-server-cleanup-gap incident, 2026-08-05).
+#
+# Discovery: the worker-server is a direct child of the cursor-agent process
+# running in this task's pane, so it is found from the pane's own process tree
+# (tmux: ps -t <pane-tty>; herdr: pane process-info foreground pids). The
+# bounded poll runs immediately after Enter, before the worker-server can
+# detach. No match is not fatal: teardown falls back to its cwd-based reaper.
+# Never matched by a generic worker-server cmdline scan - the install dir and
+# cmdline are shared across homes and tasks.
+cursor_worker_server_find() {  # <backend> <target> -> pid on stdout
+  local backend=$1 target=$2 tty pid args
+  case "$backend" in
+    tmux)
+      tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
+      [ -n "$tty" ] || return 1
+      # The pane's foreground process group: the cursor-agent process (kernel
+      # comm MainThread) is the group leader. Its worker-server child is NOT in
+      # the foreground group once detached, so match by parent below instead.
+      LC_ALL=C ps -t "${tty#/dev/}" -o pid=,args= 2>/dev/null | while read -r pid args; do
+        case "$args" in
+          *cursor-agent*) printf '%s\n' "$pid"; return 0 ;;
+        esac
+      done
+      ;;
+    herdr)
+      # herdr exposes the pane's foreground processes; the cursor-agent is one
+      # of them. Its worker-server child is found by parent below.
+      fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
+        | jq -r '.result.process_info.foreground_processes[]?.pid // empty' 2>/dev/null \
+        | while read -r pid; do
+          [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null && printf '%s\n' "$pid"
+        done
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+cursor_worker_server_record() {  # <backend> <target> <meta>
+  local backend=$1 target=$2 meta=$3 agent_pid worker_pid starttime i
+  for i in 1 2 3 4 5; do
+    agent_pid=
+    while IFS= read -r pid; do
+      [ -n "$pid" ] || continue
+      # The cursor-agent process is the one whose own cmdline names
+      # cursor-agent (the worker-server's does not, even though its parent
+      # does).
+      if LC_ALL=C ps -p "$pid" -o args= 2>/dev/null | grep -q 'cursor-agent'; then
+        agent_pid=$pid
+        break
+      fi
+    done <<EOF
+$(cursor_worker_server_find "$backend" "$target")
+EOF
+    [ -n "$agent_pid" ] || { sleep 0.3; continue; }
+    worker_pid=$(pgrep -P "$agent_pid" -f 'index.js worker-server' 2>/dev/null | head -1 || true)
+    [ -n "$worker_pid" ] || { sleep 0.3; continue; }
+    # Record the same starttime identity teardown's task_process_identity
+    # reads, so the reaper can verify the pid was not reused.
+    starttime=$(awk '{print $22}' "/proc/$worker_pid/stat" 2>/dev/null || true)
+    [ -n "$starttime" ] || return 0
+    {
+      echo "cursor_worker_server=$worker_pid"
+      echo "cursor_worker_server_start=$starttime"
+    } >> "$meta"
+    echo "cursor worker-server recorded for $ID: pid=$worker_pid start=$starttime" >&2
+    return 0
+  done
+  return 0
+}
+
 kimi_capture_has_empty_composer() {  # <plain-pane-capture>
   printf '%s\n' "$1" \
     | grep -Eq '^[[:space:]]*(│|┃|\|)[[:space:]]*>[[:space:]]*(│|┃|\|)[[:space:]]*$'
@@ -2705,6 +2779,11 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$HARNESS" = cursor ]; then
+  # Record the CLI's background worker-server so teardown can reap it by pid
+  # even after it detaches from the pane (see cursor_worker_server_record).
+  cursor_worker_server_record "$BACKEND" "$T" "$STATE/$ID.meta"
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"

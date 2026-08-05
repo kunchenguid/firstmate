@@ -2259,6 +2259,129 @@ test_leaked_tasktmp_process_is_reaped() {
   pass "a leaked descendant process rooted under the task's per-task tasktmp is reaped by teardown too"
 }
 
+test_recorded_cursor_worker_server_is_reaped() {
+  local case_dir rc pid starttime
+  case_dir=$(make_case cursor-worker-server-reap)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  # A detached-style sleeper standing in for cursor's background worker-server:
+  # NOT rooted under the worktree, so the cwd-based reaper cannot see it - the
+  # exact incident shape.
+  ( exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "cursor-worker-server-reap: setup sleeper did not start"
+  starttime=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)
+  [ -n "$starttime" ] || fail "cursor-worker-server-reap: cannot read starttime"
+  printf 'cursor_worker_server=%s\ncursor_worker_server_start=%s\n' "$pid" "$starttime" \
+    >> "$case_dir/state/task-x1.meta"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "cursor-worker-server-reap: teardown should succeed"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "cursor-worker-server-reap: recorded cursor worker-server survived teardown"
+  fi
+  assert_grep "reaping recorded cursor worker-server" "$case_dir/stderr" \
+    "cursor-worker-server-reap: teardown did not report reaping the recorded worker-server"
+  if grep -q '^cursor_worker_server=' "$case_dir/state/task-x1.meta" 2>/dev/null; then
+    fail "cursor-worker-server-reap: the worker-server record survived teardown"
+  fi
+  pass "a cursor worker-server recorded at spawn is reaped by pid at teardown, cwd-independent"
+}
+
+test_recorded_cursor_worker_server_recycled_pid_not_killed() {
+  local case_dir rc victim starttime
+  case_dir=$(make_case cursor-worker-server-recycled)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  # Record a pid with a WRONG starttime (a recycled pid whose process identity
+  # no longer matches the recorded one). The reaper must leave the current
+  # process alone.
+  victim="$$"; starttime=1
+  printf 'cursor_worker_server=%s\ncursor_worker_server_start=%s\n' "$victim" "$starttime" \
+    >> "$case_dir/state/task-x1.meta"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "cursor-worker-server-recycled: teardown should succeed"
+  kill -0 "$victim" 2>/dev/null \
+    || fail "cursor-worker-server-recycled: a recycled-pid record killed the current process"
+  if grep -q '^cursor_worker_server=' "$case_dir/state/task-x1.meta" 2>/dev/null; then
+    fail "cursor-worker-server-recycled: the stale worker-server record was not removed"
+  fi
+  pass "a worker-server record whose starttime no longer matches is never killed, and the stale record is removed"
+}
+
+test_cursor_worker_server_record_missing_falls_back_to_cwd_reaper() {
+  local case_dir rc pid
+  case_dir=$(make_case cursor-worker-server-no-record)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  # No cursor_worker_server record at all: the cwd-based reaper must still
+  # catch a process rooted under the worktree (regression: Fix 2 unchanged).
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "cursor-worker-server-no-record: setup sleeper did not start"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "cursor-worker-server-no-record: teardown should succeed"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "cursor-worker-server-no-record: cwd-based reaping regressed without a worker-server record"
+  fi
+  assert_grep "reaping leaked worktree process" "$case_dir/stderr" \
+    "cursor-worker-server-no-record: cwd-based reaper did not run without a record"
+  pass "teardown without a worker-server record still reaps cwd-rooted processes unchanged"
+}
+
+test_cursor_worker_server_record_never_touches_other_home_daemon() {
+  local case_dir rc pid other_pid
+  case_dir=$(make_case cursor-worker-server-other-home)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  # This task's recorded worker-server plus a second, UNrecorded worker-server
+  # standing in for another home's daemon. Only the recorded one is killed.
+  ( exec sleep 300 ) &
+  pid=$!
+  disown
+  ( exec sleep 300 ) &
+  other_pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "cursor-worker-server-other-home: setup sleeper did not start"
+  kill -0 "$other_pid" 2>/dev/null || fail "cursor-worker-server-other-home: second sleeper did not start"
+  printf 'cursor_worker_server=%s\ncursor_worker_server_start=%s\n' "$pid" "$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)" \
+    >> "$case_dir/state/task-x1.meta"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "cursor-worker-server-other-home: teardown should succeed"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "cursor-worker-server-other-home: this task's recorded worker-server survived teardown"
+  fi
+  if ! kill -0 "$other_pid" 2>/dev/null; then
+    kill -KILL "$other_pid" 2>/dev/null || true
+    fail "cursor-worker-server-other-home: an unrecorded (other home) worker-server was killed"
+  fi
+  kill -KILL "$other_pid" 2>/dev/null || true
+  pass "teardown kills only the recorded worker-server, never an unrecorded other-home daemon"
+}
+
 test_lsof_absent_reaps_tmux_process_group() {
   local case_dir rc pid path_without_lsof
   case_dir=$(make_case lsof-absent-process-group-reap)
@@ -2641,6 +2764,10 @@ test_another_branchs_parked_run_is_never_touched
 test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
+test_recorded_cursor_worker_server_is_reaped
+test_recorded_cursor_worker_server_recycled_pid_not_killed
+test_cursor_worker_server_record_missing_falls_back_to_cwd_reaper
+test_cursor_worker_server_record_never_touches_other_home_daemon
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed
