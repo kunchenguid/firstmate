@@ -37,8 +37,10 @@ Real harness credential tests remain opt-in rather than part of default CI.
 
 The ordinary topology puts one task tab per endpoint in the exact workspace of the Firstmate or secondmate that launches it.
 When the launcher has no Herdr workspace to inherit, the adapter maintains one durable home-labeled workspace instead.
-The primary home label is `firstmate`.
-A secondmate home label is `2ndmate-<secondmate-id>`, derived from its validated `.fm-secondmate-home` marker.
+The primary home label is `firstmate`, or the value in the primary home's local `config/herdr-workspace-label` when that file is present ([configuration.md](configuration.md#herdr-workspace-label)).
+Set it after renaming that workspace for display, so launches keep resolving to the renamed workspace instead of creating a second one; Firstmate never renames or migrates a live workspace itself.
+A blank label is supported and matched exactly like any other, so a workspace deliberately renamed to blank still resolves.
+A secondmate home label is `2ndmate-<secondmate-id>`, derived from its validated `.fm-secondmate-home` marker, and is never affected by that override.
 A secondmate launched by the primary receives a narrowly scoped home override during container creation.
 
 Attach to the selected named Herdr session and switch to the relevant home workspace to watch its task tabs.
@@ -185,6 +187,25 @@ A prior label heuristic could adopt a captain-owned workspace named `firstmate` 
 The current structural gate removes label inference from cleanup authority.
 `tests/fm-backend-herdr-prune-safety-e2e.test.sh` reproduces the collision in an isolated named session and proves the adopted pane remains untouched.
 
+## Agent display names
+
+Herdr lists every registered agent in its agents sidebar, and an unnamed agent shows as its harness, so a whole fleet reads as one repeated entry.
+Each spawn therefore gives the agent it just launched its own name.
+A crewmate or scout takes the first unused name from an ordered crew roster (`bosun`, `quartermaster`, `lookout`, `gunner`, `cooper`, `sailmaker`, `coxswain`, `sparks`, `chips`, `purser`, `swabbie`, `rigger`, `caulker`, `topman`), a secondmate takes its own id, and an exhausted roster falls back to the task id.
+The same spawn also names the primary's own pane `firstmate` when this home is the primary and that pane carries no name yet, so the primary is distinguishable from its workers.
+The assigned name is recorded as `agent_name=` in the task's endpoint metadata.
+
+Naming is presentation only.
+It is never task identity, endpoint authority, or a lookup key, and no other part of Firstmate reads it back.
+A pane that already carries a name is never renamed, so a name set by hand wins.
+Names are assigned after the launch command is submitted, because Herdr accepts a rename only once it has registered that agent; a launch Herdr never registers as an agent is left unnamed after a short bounded wait.
+Every naming failure is a warning and the spawn still succeeds.
+
+Herdr accepts a name matching `^[a-z][a-z0-9_-]{0,31}$` and enforces name uniqueness itself, so an id used as a name is lowercased, stripped of characters outside that set, prefixed when it would start with a non-letter, and truncated.
+
+Live agent registrations do not survive a Herdr server restart, so names are lost with them and are not re-applied to tasks already running.
+The next spawn in that home reinstates the primary's own name.
+
 ## Endpoint metadata
 
 ```text
@@ -194,7 +215,10 @@ herdr_session=<session>
 herdr_workspace_id=<workspace-id>
 herdr_tab_id=<tab-id>
 herdr_pane_id=<pane-id>
+agent_name=<display-name>
 ```
+
+`agent_name=` is present only when a display name was actually assigned.
 
 A Herdr pane id contains a colon, so the adapter splits `window=` on the first colon only.
 The recorded pane is the operational fast path.
@@ -247,7 +271,7 @@ No Herdr-specific copy of that protocol exists.
 
 ## Restart and liveness behavior
 
-Stopping and restarting a named Herdr server preserves workspace, tab, pane, and label ids, but the underlying harness processes and live agent registrations do not survive.
+Stopping and restarting a named Herdr server preserves workspace, tab, pane, and label ids, but the underlying harness processes and live agent registrations, including assigned display names, do not survive.
 A restored same-labeled tab with a missing pane or no registered agent is a husk.
 Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.
@@ -309,6 +333,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 - A Firstmate outside Herdr cannot resolve a launcher workspace, so a colliding home label refuses new spawns until the collision is cleared.
 - Ghost and placeholder recognition depends on ANSI de-emphasis and fails safely to pending when unavailable.
 - Mid-session secondmate liveness is not implemented.
+- Agent display names are lost when a Herdr server restarts and are not re-applied to tasks already running.
 - OpenCode 1.18.4 can accept Enter while busy without clearing the composer.
   The tmux backend has a busy-queue fallback, but Herdr still reports this case as submit pending and needs a separate adapter fix.
 - Only tmux and Herdr can host the away-mode supervisor terminal.

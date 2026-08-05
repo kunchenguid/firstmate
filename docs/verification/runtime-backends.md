@@ -551,6 +551,33 @@ ok - real herdr: an agent that does not stop fails closed instead of being repor
 The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so registering and not registering an agent on a plain shell pane exercises exactly the gate every lifecycle verb depends on, with no real agent launched.
 That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
 
+### Agent display names
+
+Herdr's own naming rules were checked on 2026-08-05 against Herdr 0.7.5 in a guarded lab session:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh
+"$HERDR_LAB_HELPER" run "$LAB" agent rename "$PANE" bosun
+```
+
+| Rule | Command shape | Result |
+| --- | --- | --- |
+| A rename needs a registered agent | `agent rename` on a plain-shell pane | `{"error":{"code":"agent_not_found"}}`; the pane's own `pane rename` label is a separate field and never becomes an agent name. |
+| Registration is fast | agent launched, then `agent list` polled | Registered within 0.3s of the launch command. |
+| Herdr enforces uniqueness | `agent rename` to a name another agent holds | `{"error":{"code":"agent_name_taken"}}`. |
+| Names are constrained | `agent rename` with `firstmate/bar`, `2ndmate-foo`, or 33 characters | `{"error":{"code":"invalid_agent_name","message":"agent name must start with a lowercase letter and contain only lowercase letters, digits, '-' or '_' (1-32 characters)"}}`; 32 characters was accepted. |
+| Assigned names read back | `agent get <pane>` after a rename | `.result.agent.name` reports the assigned name, and an unnamed agent reports `null`. |
+| Blank workspace labels exist | `workspace create --label ' '` | Accepted and reported back verbatim as `" "`, so a deliberately blank primary label stays exactly matchable. |
+
+The active regressions are:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh tests/fm-backend-herdr-smoke.test.sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
+```
+
+Observed guarantees: two live agents took two different roster names that Herdr reported back; a secondmate-shaped assignment carried its own id; a pane with no registered agent warned and reported failure instead of failing its caller; the primary's own pane was named `firstmate` once and left untouched by later touches; two real spawns recorded distinct `agent_name=` values matching what Herdr reported for their panes; and a home configured with a blank workspace label created that exact workspace and reused it on the next spawn instead of minting a second one.
+
 ### Away-mode transport
 
 The Pi/Herdr return and injection path was reverified on Herdr 0.7.3 and Pi 0.80.7:

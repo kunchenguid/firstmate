@@ -273,6 +273,85 @@ test_workspace_label_different_secondmates_get_different_labels() {
   pass "fm_backend_herdr_workspace_label: two different secondmate homes get two different, non-colliding labels"
 }
 
+# --- workspace_label: the primary home's optional configured label -----------
+#
+# The primary label is a placement resolver, so a captain who renames that
+# workspace for display needs a way to keep launches resolving to it instead of
+# minting a second one (docs/configuration.md "Herdr workspace label").
+
+test_workspace_label_primary_home_honors_configured_override() {
+  local home
+  home="$TMP_ROOT/primary-home-override"; mkdir -p "$home/config"
+  printf 'bridge\n' > "$home/config/herdr-workspace-label"
+  out=$( FM_HOME="$home" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT" )
+  [ "$out" = "bridge" ] || fail "a primary home with config/herdr-workspace-label should resolve to that label, got '$out'"
+  pass "fm_backend_herdr_workspace_label: a primary home resolves to its configured label"
+}
+
+test_workspace_label_override_is_the_first_line_verbatim() {
+  local home
+  home="$TMP_ROOT/primary-home-override-ws"; mkdir -p "$home/config"
+  printf 'the bridge\nignored second line\n' > "$home/config/herdr-workspace-label"
+  out=$( FM_HOME="$home" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT" )
+  [ "$out" = "the bridge" ] || fail "the override should be the first line verbatim, got '$out'"
+  pass "fm_backend_herdr_workspace_label: the configured label is the first line verbatim, so internal spaces survive"
+}
+
+test_workspace_label_whitespace_override_is_honored_as_written() {
+  local home
+  home="$TMP_ROOT/primary-home-override-blank"; mkdir -p "$home/config"
+  # A blank workspace label is a deliberate captain choice, so it must survive
+  # exactly as written: the resolver has to match the live workspace byte for
+  # byte, and trimming it would silently resolve to a different workspace.
+  printf ' \n' > "$home/config/herdr-workspace-label"
+  out=$( FM_HOME="$home" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT" )
+  [ "$out" = " " ] || fail "a single-space configured label should resolve to exactly one space, got '$out'"
+  pass "fm_backend_herdr_workspace_label: a blank configured label is honored exactly as written"
+}
+
+test_workspace_label_empty_override_file_is_a_blank_label() {
+  local home err
+  home="$TMP_ROOT/primary-home-override-empty"; mkdir -p "$home/config"
+  : > "$home/config/herdr-workspace-label"
+  err="$TMP_ROOT/primary-home-override-empty.err"
+  out=$( FM_HOME="$home" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT" 2>"$err" )
+  [ "$out" = " " ] || fail "an empty override file should resolve to the blank label, got '$out'"
+  [ ! -s "$err" ] || fail "a blank label is a deliberate choice, not something to warn about"$'\n'"$(cat "$err")"
+  pass "fm_backend_herdr_workspace_label: an empty override file means a blank label, not the default"
+}
+
+test_workspace_label_control_character_override_warns_and_keeps_default() {
+  local home err
+  home="$TMP_ROOT/primary-home-override-cntrl"; mkdir -p "$home/config"
+  printf 'bridge\ta\n' > "$home/config/herdr-workspace-label"
+  err="$TMP_ROOT/primary-home-override-cntrl.err"
+  out=$( FM_HOME="$home" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT" 2>"$err" )
+  [ "$out" = "firstmate" ] || fail "a control-character label should keep the default 'firstmate', got '$out'"
+  assert_contains "$(cat "$err")" "control characters" "a rejected label should say why rather than fail silently"
+  pass "fm_backend_herdr_workspace_label: a control-character label warns and keeps the default"
+}
+
+test_workspace_label_secondmate_home_ignores_override() {
+  local home
+  home="$TMP_ROOT/secondmate-home-override"; mkdir -p "$home/config"
+  printf 'sshhip-h7\n' > "$home/.fm-secondmate-home"
+  printf 'bridge\n' > "$home/config/herdr-workspace-label"
+  out=$( FM_HOME="$home" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT" )
+  [ "$out" = "2ndmate-sshhip-h7" ] || fail "a secondmate home's label must stay derived from its own id, got '$out'"
+  pass "fm_backend_herdr_workspace_label: a secondmate home ignores the primary-only configured label"
+}
+
+test_workspace_label_override_follows_config_override_env() {
+  local home config
+  home="$TMP_ROOT/primary-home-config-env"; mkdir -p "$home"
+  config="$TMP_ROOT/primary-home-config-env-elsewhere"; mkdir -p "$config"
+  printf 'bridge\n' > "$config/herdr-workspace-label"
+  out=$( FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT" )
+  [ "$out" = "bridge" ] || fail "the label should read the FM_CONFIG_OVERRIDE config dir, got '$out'"
+  pass "fm_backend_herdr_workspace_label: the configured label is read from FM_CONFIG_OVERRIDE when set"
+}
+
 # --- fm_backend_herdr_cli: session targeting (2026-07-02 incident fix) -------
 
 test_cli_helper_sets_env_and_appends_trailing_session_flag() {
@@ -3601,6 +3680,212 @@ test_send_text_submit_unknown_on_capture_failure() {
   pass "fm_backend_herdr_send_text_submit: reports 'unknown' when the post-Enter agent-get read fails (never retries past an unreadable target)"
 }
 
+# --- agent display names (herdr's agents sidebar) ----------------------------
+#
+# Presentation only: bin/fm-spawn.sh names each agent it creates so a fleet
+# stops reading as one repeated harness entry (docs/herdr-backend.md "Agent
+# display names"). The behavior that matters here is which name is chosen and
+# that nothing about naming can take a spawn down with it.
+
+# agent_list_json <name>...: a herdr `agent list` response whose agents carry
+# the given names, plus one unnamed agent (herdr reports an unnamed agent's
+# name as JSON null, which must never be mistaken for a name in use).
+agent_list_json() {
+  local name args=()
+  for name in "$@"; do args+=(--arg "n${#args[@]}" "$name"); done
+  jq -cn "${args[@]+"${args[@]}"}" \
+    '{result:{type:"agent_list", agents:([$ARGS.named[]|{pane_id:"w1:p9", name:.}] + [{pane_id:"w1:p1", name:null}])}}'
+}
+
+test_pick_agent_name_takes_the_first_free_roster_name() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/name-pick-first"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  agent_list_json > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pick_agent_name fmtest taskid' "$ROOT" )
+  [ "$out" = bosun ] || fail "an empty fleet should take the first roster name, got '$out'"
+  pass "fm_backend_herdr_pick_agent_name: takes the first roster name when no agent is named yet"
+}
+
+test_pick_agent_name_skips_names_already_in_use() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/name-pick-skip"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  agent_list_json bosun quartermaster > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pick_agent_name fmtest taskid' "$ROOT" )
+  [ "$out" = lookout ] || fail "the pick must skip every name already in use, got '$out'"
+  pass "fm_backend_herdr_pick_agent_name: skips roster names already in use, so two live agents never collide"
+}
+
+test_pick_agent_name_falls_back_to_the_task_id_when_the_roster_is_exhausted() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/name-pick-exhausted"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  agent_list_json bosun quartermaster lookout gunner cooper sailmaker coxswain \
+    sparks chips purser swabbie rigger caulker topman > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pick_agent_name fmtest crew-agent-names' "$ROOT" )
+  [ "$out" = crew-agent-names ] || fail "an exhausted roster should fall back to the task id, got '$out'"
+  pass "fm_backend_herdr_pick_agent_name: falls back to the task id once every roster name is taken"
+}
+
+test_pick_agent_name_falls_back_when_the_listing_is_unreadable() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/name-pick-unreadable"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"error":{"code":"boom"}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pick_agent_name fmtest crew-agent-names' "$ROOT" )
+  [ "$out" = crew-agent-names ] || fail "an unreadable listing must not be read as an empty fleet, got '$out'"
+  pass "fm_backend_herdr_pick_agent_name: an unreadable listing falls back to the task id instead of guessing a roster name"
+}
+
+test_pick_agent_name_coerces_a_fallback_herdr_would_reject() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/name-pick-coerce"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"error":{"code":"boom"}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pick_agent_name fmtest "2ndmate/Web Ops"' "$ROOT" )
+  # herdr accepts ^[a-z][a-z0-9_-]{0,31}$ only (verified 0.7.5), so an id that
+  # starts with a digit keeps its head through a prefix rather than losing it.
+  [ "$out" = fm-2ndmate-web-ops ] || fail "the fallback should be coerced into a name herdr accepts, got '$out'"
+  pass "fm_backend_herdr_pick_agent_name: coerces an id herdr would reject into an acceptable name"
+}
+
+test_assign_agent_name_names_a_registered_agent() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/name-assign-ok"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"pane_id":"w1:p2","agent_status":"idle"}}}\n' > "$resp/1.out"
+  agent_list_json > "$resp/2.out"
+  printf '{"result":{"agent":{"pane_id":"w1:p2","name":"bosun"}}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_assign_agent_name fmtest w1:p2 "" cm1' "$ROOT" )
+  [ "$out" = bosun ] || fail "assign_agent_name should report the name it assigned, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''agent'$'\x1f''rename'$'\x1f''w1:p2'$'\x1f''bosun' \
+    "assign_agent_name did not rename the exact pane it was given"
+  pass "fm_backend_herdr_assign_agent_name: names a freshly registered agent with the next free roster name"
+}
+
+test_assign_agent_name_uses_the_secondmate_id_instead_of_the_roster() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/name-assign-secondmate"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"pane_id":"w2:p1","agent_status":"idle"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"pane_id":"w2:p1","name":"sshhip-h7"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_assign_agent_name fmtest w2:p1 sshhip-h7 sshhip-h7' "$ROOT" )
+  [ "$out" = sshhip-h7 ] || fail "a secondmate should be named by its own id, got '$out'"
+  assert_not_contains "$(cat "$log")" $'\x1f''agent'$'\x1f''list' \
+    "a secondmate's name is its own id, so the roster listing should not be consulted at all"
+  pass "fm_backend_herdr_assign_agent_name: a secondmate carries its own id as its display name"
+}
+
+test_assign_agent_name_fails_open_when_the_rename_is_refused() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/name-assign-refused"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"pane_id":"w1:p2","agent_status":"idle"}}}\n' > "$resp/1.out"
+  agent_list_json > "$resp/2.out"
+  printf '{"error":{"code":"agent_name_taken","message":"agent name bosun is already used"}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_assign_agent_name fmtest w1:p2 "" cm1' "$ROOT" 2>&1 )
+  status=$?
+  expect_code 1 "$status" "a refused rename must report failure to its caller rather than a bogus name"
+  assert_contains "$out" "did not accept the display name" "a refused rename should warn in plain terms"
+  assert_not_contains "$out" "bosun"$'\n' "a refused rename must not print a name as if it had been assigned"
+  pass "fm_backend_herdr_assign_agent_name: a refused rename warns and reports failure, leaving the caller free to continue"
+}
+
+test_assign_agent_name_gives_up_when_no_agent_ever_registers() {
+  local dir log resp fb out status rename_count
+  dir="$TMP_ROOT/name-assign-noagent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Every agent get answers agent_not_found: the pane hosts a plain shell, the
+  # shape a raw non-agent launch command leaves behind.
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/1.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/2.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_AGENT_NAME_POLLS=3 FM_BACKEND_HERDR_AGENT_NAME_INTERVAL=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_assign_agent_name fmtest w1:p2 "" cm1' "$ROOT" 2>&1 )
+  status=$?
+  expect_code 1 "$status" "an unregistered pane must report failure instead of waiting forever"
+  assert_contains "$out" "registered no agent" "giving up on an unregistered pane should say so"
+  rename_count=$(grep -c $'\x1f''agent'$'\x1f''rename' "$log" || true)
+  [ "$rename_count" = 0 ] || fail "no rename may be attempted for a pane that never registered an agent, saw $rename_count"
+  pass "fm_backend_herdr_assign_agent_name: gives up within its bounded wait when no agent ever registers"
+}
+
+test_name_primary_agent_skips_a_secondmate_home() {
+  local dir log resp fb home
+  dir="$TMP_ROOT/name-primary-secondmate"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  home="$dir/home"; mkdir -p "$home"; printf 'sshhip-h7\n' > "$home/.fm-secondmate-home"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HOME="$home" \
+    HERDR_ENV=1 HERDR_PANE_ID=w7:p3 HERDR_SESSION=fmtest HERDR_SOCKET_PATH=/tmp/fm-herdr-unit/fmtest.sock \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_name_primary_agent fmtest' "$ROOT" \
+    || fail "naming the primary must never fail its caller"
+  [ ! -s "$log" ] || fail "a secondmate home must not name anything 'firstmate'"$'\n'"$(cat "$log")"
+  pass "fm_backend_herdr_name_primary_agent: a secondmate home never claims the primary's name"
+}
+
+test_name_primary_agent_names_an_unnamed_launcher_pane() {
+  local dir log resp fb home out
+  dir="$TMP_ROOT/name-primary-ok"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  home="$dir/home"; mkdir -p "$home"
+  # 1-4 are launcher_identity's own same-session proof and workspace binding.
+  printf '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fm-herdr-unit/fmtest.sock"}]}\n' > "$resp/1.out"
+  printf '{"result":{"pane":{"pane_id":"w7:p3","tab_id":"w7:t3","workspace_id":"w7"}}}\n' > "$resp/2.out"
+  printf '{"result":{"tab":{"tab_id":"w7:t3","workspace_id":"w7"}}}\n' > "$resp/3.out"
+  printf '{"result":{"workspaces":[{"workspace_id":"w7","label":"firstmate"}]}}\n' > "$resp/4.out"
+  printf '{"result":{"agent":{"pane_id":"w7:p3","agent_status":"working"}}}\n' > "$resp/5.out"
+  printf '{"result":{"agent":{"pane_id":"w7:p3","name":"firstmate"}}}\n' > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HOME="$home" \
+    HERDR_ENV=1 HERDR_PANE_ID=w7:p3 HERDR_SESSION=fmtest HERDR_SOCKET_PATH=/tmp/fm-herdr-unit/fmtest.sock \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_name_primary_agent fmtest' "$ROOT" )
+  [ "$out" = firstmate ] || fail "the primary's own unnamed pane should be named 'firstmate', got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''agent'$'\x1f''rename'$'\x1f''w7:p3'$'\x1f''firstmate' \
+    "the primary naming touch did not rename the launcher's own pane"
+  pass "fm_backend_herdr_name_primary_agent: names the primary's own unnamed pane 'firstmate'"
+}
+
+test_name_primary_agent_leaves_an_existing_name_alone() {
+  local dir log resp fb home out rename_count
+  dir="$TMP_ROOT/name-primary-existing"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  home="$dir/home"; mkdir -p "$home"
+  printf '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fm-herdr-unit/fmtest.sock"}]}\n' > "$resp/1.out"
+  printf '{"result":{"pane":{"pane_id":"w7:p3","tab_id":"w7:t3","workspace_id":"w7"}}}\n' > "$resp/2.out"
+  printf '{"result":{"tab":{"tab_id":"w7:t3","workspace_id":"w7"}}}\n' > "$resp/3.out"
+  printf '{"result":{"workspaces":[{"workspace_id":"w7","label":"firstmate"}]}}\n' > "$resp/4.out"
+  printf '{"result":{"agent":{"pane_id":"w7:p3","name":"captains-own-name"}}}\n' > "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HOME="$home" \
+    HERDR_ENV=1 HERDR_PANE_ID=w7:p3 HERDR_SESSION=fmtest HERDR_SOCKET_PATH=/tmp/fm-herdr-unit/fmtest.sock \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_name_primary_agent fmtest' "$ROOT" ) \
+    || fail "an already-named pane is nothing to do, not a failure"
+  [ -z "$out" ] || fail "an already-named pane should report no assignment, got '$out'"
+  rename_count=$(grep -c $'\x1f''agent'$'\x1f''rename' "$log" || true)
+  [ "$rename_count" = 0 ] || fail "a pane that already carries a name must never be renamed, saw $rename_count rename(s)"
+  pass "fm_backend_herdr_name_primary_agent: never renames a pane that already carries a name"
+}
+
+test_name_primary_agent_skips_a_launcher_outside_herdr() {
+  local dir log resp fb home
+  dir="$TMP_ROOT/name-primary-nopane"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  home="$dir/home"; mkdir -p "$home"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HOME="$home" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_name_primary_agent fmtest' "$ROOT" \
+    || fail "a firstmate running outside herdr has no pane to name, which is not a failure"
+  [ ! -s "$log" ] || fail "a launcher with no herdr pane must not call herdr at all"$'\n'"$(cat "$log")"
+  pass "fm_backend_herdr_name_primary_agent: a firstmate running outside herdr is silently skipped"
+}
+
 # --- fm-backend.sh dispatch wiring -------------------------------------------
 
 test_dispatch_routes_herdr_backend() {
@@ -4209,6 +4494,13 @@ test_workspace_label_secondmate_home_uses_marker_id
 test_workspace_label_secondmate_marker_trims_whitespace
 test_workspace_label_empty_marker_falls_back_to_primary
 test_workspace_label_different_secondmates_get_different_labels
+test_workspace_label_primary_home_honors_configured_override
+test_workspace_label_override_is_the_first_line_verbatim
+test_workspace_label_whitespace_override_is_honored_as_written
+test_workspace_label_empty_override_file_is_a_blank_label
+test_workspace_label_control_character_override_warns_and_keeps_default
+test_workspace_label_secondmate_home_ignores_override
+test_workspace_label_override_follows_config_override_env
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_launcher_identity_absent_without_a_herdr_pane
 test_launcher_identity_absent_when_herdr_env_alone_is_set
@@ -4352,6 +4644,19 @@ test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmat
 test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter
 test_send_text_submit_send_failed
 test_send_text_submit_unknown_on_capture_failure
+test_pick_agent_name_takes_the_first_free_roster_name
+test_pick_agent_name_skips_names_already_in_use
+test_pick_agent_name_falls_back_to_the_task_id_when_the_roster_is_exhausted
+test_pick_agent_name_falls_back_when_the_listing_is_unreadable
+test_pick_agent_name_coerces_a_fallback_herdr_would_reject
+test_assign_agent_name_names_a_registered_agent
+test_assign_agent_name_uses_the_secondmate_id_instead_of_the_roster
+test_assign_agent_name_fails_open_when_the_rename_is_refused
+test_assign_agent_name_gives_up_when_no_agent_ever_registers
+test_name_primary_agent_skips_a_secondmate_home
+test_name_primary_agent_names_an_unnamed_launcher_pane
+test_name_primary_agent_leaves_an_existing_name_alone
+test_name_primary_agent_skips_a_launcher_outside_herdr
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
 test_dispatch_composer_state_routes_by_backend

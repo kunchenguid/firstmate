@@ -93,6 +93,16 @@
 #   session's exact active workspace and tab. A detected focus change restores
 #   only that exact tab id; an ambiguous pre-operation snapshot refuses the
 #   focus-sensitive presentation mutation.
+#   After a herdr launch is submitted, the new agent is given its own display
+#   name in herdr's agents sidebar and that name is recorded as agent_name= in
+#   the task's meta: a crewmate or scout takes the next free crew-roster name in
+#   the target session, a secondmate takes its own id, and an exhausted roster
+#   falls back to the task id. The same call idempotently names the primary's own
+#   pane "firstmate" when this home is the primary and its pane is unnamed.
+#   Naming is presentation only (docs/herdr-backend.md "Agent display names"):
+#   it never renames a pane that already carries a name, is not re-applied to
+#   live tasks after a herdr server restart drops agent registrations, and every
+#   failure is a warning that leaves the spawn itself successful.
 #   Every single-task invocation holds one task-id-scoped lock across backend
 #   creation through metadata publication, so concurrent same-id spawns serialize
 #   even when they select different backends. A fresh spawn first takes the
@@ -2674,6 +2684,28 @@ if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
       echo "CONFIG_REREAD: secondmate $ID: cleanup failed; pre-relaunch generations were force-cleared where possible (destination=$PROJ_ABS source=$FM_HOME)" >&2
     fi
   fi
+fi
+
+# Presentation only (docs/herdr-backend.md "Agent display names"): give this new
+# agent its own name in herdr's agents sidebar, so a fleet of workers no longer
+# reads as one repeated harness entry, and record the assigned name in meta.
+# Runs last, after the launch command was submitted, because herdr only accepts
+# a rename once it has registered the agent that command started. A crewmate or
+# scout draws the next free crew-roster name; a secondmate carries its own id.
+# The naming owner absorbs every failure into a warning, so a spawn never
+# depends on it, and nothing else in firstmate reads the name back.
+if [ "$BACKEND" = herdr ]; then
+  HERDR_AGENT_NAME_PREFERRED=
+  [ "$KIND" != secondmate ] || HERDR_AGENT_NAME_PREFERRED=$ID
+  if HERDR_AGENT_NAME=$(fm_backend_herdr_assign_agent_name \
+      "$HERDR_SES" "$HERDR_PANE_ID" "$HERDR_AGENT_NAME_PREFERRED" "$ID"); then
+    echo "agent_name=$HERDR_AGENT_NAME" >> "$STATE/$ID.meta" \
+      || echo "warning: could not record agent_name=$HERDR_AGENT_NAME for $ID" >&2
+  fi
+  # The same touch for the launcher's own pane: this is the cheap idempotent
+  # path that reinstates the primary's name after a herdr server restart drops
+  # every live agent registration.
+  fm_backend_herdr_name_primary_agent "$HERDR_SES" >/dev/null || true
 fi
 
 SPAWN_DELIVERY=

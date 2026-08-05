@@ -68,7 +68,7 @@ A cmux spawn additionally version-gates against the installed `cmux` binary's ve
 A backend spawn refusal from a missing dependency, version gate, or unauthenticated socket is terminal for that selected backend; firstmate surfaces it as a blocker instead of silently retrying another backend.
 Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
 Every new task records `endpoint_task_id=` as the cleanup binding between the metadata filename and its opaque runtime endpoint.
-A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
+A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`, plus `agent_name=` when a display name was assigned ([Agent display names](herdr-backend.md#agent-display-names)).
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
 A cmux task additionally records `cmux_workspace_id=` and `cmux_surface_id=`.
@@ -81,7 +81,7 @@ These five sentences are the single owner of the task-selector vocabulary; backe
 `fm-teardown.sh <id>` takes a task id directly and validates the complete metadata-only endpoint identity before any runtime dispatch or cleanup mutation.
 Missing, empty, duplicate, malformed, backend-inconsistent, or task-mismatched endpoint records are preserved and refused.
 Legacy tmux metadata remains cleanup-compatible when its exact window name is `fm-<id>`; opaque non-tmux endpoints require their recorded `endpoint_task_id=` binding.
-`FM_HOME` determines Herdr's home label: the primary home uses `firstmate`, and a secondmate home marked by `.fm-secondmate-home` uses `2ndmate-<secondmate-id>`.
+`FM_HOME` determines Herdr's home label: the primary home uses `firstmate` or its configured override below, and a secondmate home marked by `.fm-secondmate-home` uses `2ndmate-<secondmate-id>`.
 [`herdr-backend.md`](herdr-backend.md#watching-and-task-containers) owns launcher-bound workspace placement, the label-only fallback, collision handling, and recovery behavior.
 The local `config/herdr-presentation-spaces` file instead opts a home out of, or explicitly in to, Herdr's default-on disposable single-task visual projection; [Presentation spaces](herdr-backend.md#presentation-spaces) owns its accepted values, default, Herdr version floor, migration, behavior, safety limits, recovery contract, and narrow locked session-start cleanup of exact restored idle-shell children.
 The setting is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
@@ -94,6 +94,21 @@ cmux has no session layer at all - one workspace per task, in whatever cmux wind
 The caller-facing label remains `fm-<id>`, but the actual cmux workspace title is scoped by the active `FM_HOME` readable label plus a short hash of the resolved `FM_ROOT` path as `fm-<home-label>-<id>`.
 Test cleanup must use the guarded path in [`docs/cmux-backend.md`](cmux-backend.md#current-operation-and-safety), never enumerate-and-close every workspace.
 `config/backend` is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
+
+## Herdr workspace label
+
+`config/herdr-workspace-label` is a local, gitignored file holding the PRIMARY home's Herdr workspace label.
+Presence, not content, decides whether the default applies: an absent file means `firstmate`, the historical constant, so no home changes behavior by default.
+
+A present file's value is its first line taken verbatim, with only the line terminator removed, because the label has to match what was set on the live workspace byte for byte.
+A whitespace-only line is therefore a valid blank label, honored exactly as written, and a completely empty file means the same thing and resolves to one space.
+A blank label is a supported choice: it puts the sidebar's emphasis on the agent names beside it ([Agent display names](herdr-backend.md#agent-display-names)).
+A value containing control characters warns and keeps the default rather than failing a spawn over a purely visual setting.
+
+That label is a placement resolver for launches with no Herdr ancestry, so set it after renaming that workspace for display and the resolver keeps finding the renamed workspace instead of creating a second one.
+Firstmate never renames or migrates a live workspace itself.
+The override applies only to the primary home: a secondmate home's label stays `2ndmate-<secondmate-id>`, and the file is not inherited into secondmate homes.
+[`herdr-backend.md`](herdr-backend.md#watching-and-task-containers) owns the placement, collision, and recovery behavior the label feeds.
 
 ## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
 

@@ -351,5 +351,88 @@ pass "real herdr: list_live discovers a live task tab by fm-<id> label"
 
 fm_backend_herdr_kill "$SESSION:$PANE_ID2"
 
+# --- agent display names, against the real binary ---------------------------
+#
+# The naming rules firstmate depends on are herdr's, not firstmate's: a rename
+# needs a registered agent, herdr enforces name uniqueness itself, and a name
+# must match ^[a-z][a-z0-9_-]{0,31}$. Fake-CLI unit tests can only confirm the
+# assumptions written into the fake, so the contract is proven here (herdr
+# $(herdr --version) - docs/verification/runtime-backends.md).
+
+name_scenario_pane() {  # <label> -> echoes a pane id hosting a registered agent
+  local label=$1 raw container seeded ids pane
+  raw=$(fm_backend_herdr_container_ensure /tmp) || return 1
+  container=${raw%%$'\t'*}
+  seeded=${raw#*$'\t'}
+  ids=$(fm_backend_herdr_create_task "$container" "$label" /tmp "$seeded") || return 1
+  read -r _tab pane <<EOF
+$ids
+EOF
+  [ -n "$pane" ] || return 1
+  # Register an agent the way the smoke suite already does, so naming is
+  # exercised without launching a real harness.
+  herdr pane report-agent "$pane" --source fm-smoke-test --agent fm-smoke-name-agent --state idle --session "$SESSION" >/dev/null 2>&1 || return 1
+  printf '%s' "$pane"
+}
+
+NAME_PANE1=$(name_scenario_pane fm-smoke-name1) || fail "could not stand up the first naming scenario pane"
+NAME1=$(fm_backend_herdr_assign_agent_name "$SESSION" "$NAME_PANE1" "" smokename1) \
+  || fail "assign_agent_name failed against a really registered agent"
+[ "$NAME1" = bosun ] || fail "the first named agent in a fresh session should take the first roster name, got '$NAME1'"
+LIVE_NAME1=$(herdr agent get "$NAME_PANE1" --session "$SESSION" 2>/dev/null | jq -r '.result.agent.name // empty')
+[ "$LIVE_NAME1" = "$NAME1" ] || fail "herdr does not report the assigned name for $NAME_PANE1: got '$LIVE_NAME1'"
+pass "real herdr: assign_agent_name names a registered agent, and herdr reports that exact name back ($NAME1)"
+
+NAME_PANE2=$(name_scenario_pane fm-smoke-name2) || fail "could not stand up the second naming scenario pane"
+NAME2=$(fm_backend_herdr_assign_agent_name "$SESSION" "$NAME_PANE2" "" smokename2) \
+  || fail "assign_agent_name failed for the second registered agent"
+[ "$NAME2" != "$NAME1" ] || fail "two live agents must not share a display name, both got '$NAME1'"
+LIVE_NAME2=$(herdr agent get "$NAME_PANE2" --session "$SESSION" 2>/dev/null | jq -r '.result.agent.name // empty')
+[ "$LIVE_NAME2" = "$NAME2" ] || fail "herdr does not report the second assigned name: got '$LIVE_NAME2'"
+pass "real herdr: two live agents get two different roster names ($NAME1, $NAME2)"
+
+# A secondmate carries its own id rather than a roster name.
+NAME_PANE3=$(name_scenario_pane fm-smoke-name3) || fail "could not stand up the secondmate naming scenario pane"
+NAME3=$(fm_backend_herdr_assign_agent_name "$SESSION" "$NAME_PANE3" smokesm-h7 smokesm-h7) \
+  || fail "assign_agent_name failed for a secondmate-shaped name"
+[ "$NAME3" = smokesm-h7 ] || fail "a secondmate should carry its own id as its name, got '$NAME3'"
+pass "real herdr: a secondmate-shaped assignment carries its own id ($NAME3)"
+
+# Fail-open: a pane that hosts no agent at all cannot be named, and saying so
+# is the whole failure - the caller keeps going.
+NAME_FAIL_OUT=$(FM_BACKEND_HERDR_AGENT_NAME_POLLS=2 FM_BACKEND_HERDR_AGENT_NAME_INTERVAL=0.05 \
+  fm_backend_herdr_assign_agent_name "$SESSION" "w999:p999" "" smokemissing 2>&1)
+NAME_FAIL_RC=$?
+[ "$NAME_FAIL_RC" -ne 0 ] || fail "naming a pane with no registered agent must report failure, not success"
+case "$NAME_FAIL_OUT" in
+  *"registered no agent"*) : ;;
+  *) fail "the unnameable-pane failure should warn in plain terms, got: $NAME_FAIL_OUT" ;;
+esac
+pass "real herdr: a pane herdr will not name warns and reports failure instead of taking anything down with it"
+
+# The primary's own pane: named once, then left alone on every later touch.
+PRIMARY_NAME_HOME="$SM_SCRATCH/primary-name-home"
+mkdir -p "$PRIMARY_NAME_HOME"
+NAME_PANE4=$(name_scenario_pane fm-smoke-name4) || fail "could not stand up the primary naming scenario pane"
+NAME_SOCKET=$(fm_backend_herdr_presentation_session_socket_path "$SESSION") \
+  || fail "could not resolve the lab session's own socket for the launcher identity"
+PRIMARY_NAME1=$(FM_HOME="$PRIMARY_NAME_HOME" HERDR_ENV=1 HERDR_PANE_ID="$NAME_PANE4" \
+  HERDR_SESSION="$SESSION" HERDR_SOCKET_PATH="$NAME_SOCKET" \
+  fm_backend_herdr_name_primary_agent "$SESSION") \
+  || fail "naming the primary's own pane failed against real herdr"
+[ "$PRIMARY_NAME1" = firstmate ] || fail "the primary's own pane should be named 'firstmate', got '$PRIMARY_NAME1'"
+PRIMARY_NAME2=$(FM_HOME="$PRIMARY_NAME_HOME" HERDR_ENV=1 HERDR_PANE_ID="$NAME_PANE4" \
+  HERDR_SESSION="$SESSION" HERDR_SOCKET_PATH="$NAME_SOCKET" \
+  fm_backend_herdr_name_primary_agent "$SESSION") \
+  || fail "a repeated primary naming touch must stay harmless"
+[ -z "$PRIMARY_NAME2" ] || fail "a second touch must leave the existing name alone, but it reported '$PRIMARY_NAME2'"
+LIVE_PRIMARY=$(herdr agent get "$NAME_PANE4" --session "$SESSION" 2>/dev/null | jq -r '.result.agent.name // empty')
+[ "$LIVE_PRIMARY" = firstmate ] || fail "the primary's pane should still be named 'firstmate', got '$LIVE_PRIMARY'"
+pass "real herdr: the primary's own pane is named 'firstmate' once and left untouched by every later touch"
+
+for pane in "$NAME_PANE1" "$NAME_PANE2" "$NAME_PANE3" "$NAME_PANE4"; do
+  fm_backend_herdr_kill "$SESSION:$pane"
+done
+
 cleanup_all
 trap - EXIT

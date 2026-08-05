@@ -337,13 +337,61 @@ fm_backend_herdr_presentation_enabled() {  # <config-dir> [<state-dir>]
   fm_backend_herdr_presentation_default_supported "$state_dir"
 }
 
+# The config item the PRIMARY home writes to override its own workspace label
+# (docs/configuration.md "Herdr workspace label").
+FM_BACKEND_HERDR_WORKSPACE_LABEL_CONFIG="herdr-workspace-label"
+
+# fm_backend_herdr_config_dir: this home's config directory, resolved fresh on
+# every call from the same FM_HOME the label itself is read from, so a caller
+# that shadows FM_HOME gets that home's config rather than a value frozen at
+# source time.
+fm_backend_herdr_config_dir() {
+  printf '%s' "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+}
+
+# The label an empty configured file resolves to: one space. A blank label is a
+# deliberate choice (it moves the emphasis onto the agent names beside it), and
+# a single space keeps it a real label value the resolver can match exactly.
+FM_BACKEND_HERDR_BLANK_WORKSPACE_LABEL=' '
+
+# fm_backend_herdr_workspace_label_override: the primary home's configured
+# workspace label, or non-zero when none applies. Presence, not content, decides
+# whether the default is overridden: the value is the file's FIRST LINE taken
+# verbatim, with only its line terminator removed, because the label has to
+# match what the captain set on the live workspace byte for byte. A whitespace
+# label is therefore honored as written, and a completely empty file resolves to
+# one space. A control-character value warns and keeps the default rather than
+# failing a spawn over a purely visual setting.
+fm_backend_herdr_workspace_label_override() {  # <config-dir>
+  local config_dir=${1:-} file value
+  [ -n "$config_dir" ] || return 1
+  file="$config_dir/$FM_BACKEND_HERDR_WORKSPACE_LABEL_CONFIG"
+  [ -f "$file" ] || return 1
+  IFS= read -r value < "$file" 2>/dev/null || true
+  value=${value%$'\r'}
+  case "$value" in
+    *[[:cntrl:]]*)
+      echo "warning: $file: herdr workspace label contains control characters; keeping the default \"firstmate\"" >&2
+      return 1
+      ;;
+  esac
+  [ -n "$value" ] || value=$FM_BACKEND_HERDR_BLANK_WORKSPACE_LABEL
+  printf '%s' "$value"
+}
+
 # fm_backend_herdr_workspace_label: the per-firstmate-HOME herdr workspace
 # label (docs/herdr-backend.md "Default task container shape"). The PRIMARY home (no
 # secondmate marker) resolves to the constant "firstmate", byte-identical to
-# every pre-existing task's recorded label - no forced migration. A SECONDMATE
+# every pre-existing task's recorded label - no forced migration - unless this
+# home configured its own label in config/herdr-workspace-label, which exists so
+# a captain who renamed that workspace for display can keep launches resolving
+# to it instead of minting a second one, including a deliberately blank label.
+# A SECONDMATE
 # home resolves to "2ndmate-<secondmate-id>", so its tasks land in their own
 # workspace, obviously distinguishable from the primary's (and from every
-# other secondmate's) in herdr's spaces sidebar. Read fresh from FM_HOME on
+# other secondmate's) in herdr's spaces sidebar; the override never applies
+# there, so secondmate labels stay derived from their own id alone. Read fresh
+# from FM_HOME on
 # every call rather than cached at source time: FM_HOME is the home's own
 # durable identity, not env plumbing threaded through a call chain, so the
 # label is automatically stable across every respawn/recovery for the life of
@@ -351,13 +399,17 @@ fm_backend_herdr_presentation_enabled() {  # <config-dir> [<state-dir>]
 # when the PRIMARY spawns that secondmate (its own process's FM_HOME still
 # names the primary at that point) - see fm-spawn.sh's herdr case arm.
 fm_backend_herdr_workspace_label() {
-  local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id
+  local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id override
   if [ -f "$marker" ]; then
     id=$(tr -d '[:space:]' < "$marker" 2>/dev/null)
     if [ -n "$id" ]; then
       printf '2ndmate-%s' "$id"
       return 0
     fi
+  fi
+  if override=$(fm_backend_herdr_workspace_label_override "$(fm_backend_herdr_config_dir)"); then
+    printf '%s' "$override"
+    return 0
   fi
   printf 'firstmate'
 }
@@ -1919,6 +1971,175 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
     dead|no-agent) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# --- agent display names -----------------------------------------------------
+#
+# Presentation only (docs/herdr-backend.md "Agent display names"). Herdr shows
+# every registered agent in its agents sidebar under the agent's own `name`
+# field, and an unnamed agent is shown by its harness, so a whole firstmate
+# fleet reads as one repeated entry. bin/fm-spawn.sh asks this owner to name
+# each agent it creates. Nothing else in firstmate reads the name: it is never
+# task identity, endpoint authority, or a lookup key.
+#
+# Verified against the installed herdr 0.7.5 (docs/verification/runtime-backends.md):
+# `agent rename <pane> <name>` needs a REGISTERED agent on that pane and fails
+# with agent_not_found otherwise, so naming happens after the launch command is
+# submitted; herdr enforces name uniqueness itself (agent_name_taken); and a
+# name must match ^[a-z][a-z0-9_-]{0,31}$ (invalid_agent_name otherwise).
+# Live agent registrations, names included, do not survive a herdr server
+# restart, which is an accepted limitation rather than something firstmate
+# re-applies.
+
+# The ordered crew roster a crewmate or scout draws from. First free name wins,
+# so a small fleet reads bosun, quartermaster, lookout, ... in spawn order.
+FM_BACKEND_HERDR_AGENT_NAME_ROSTER=(
+  bosun quartermaster lookout gunner cooper sailmaker coxswain
+  sparks chips purser swabbie rigger caulker topman
+)
+
+# fm_backend_herdr_agent_name_sanitize: coerce an arbitrary firstmate id into a
+# name herdr will accept, or fail when nothing usable survives. Lowercases,
+# replaces every disallowed character with '-', prefixes a leading non-letter
+# (so a secondmate id like 2ndmate-web stays legible as fm-2ndmate-web instead
+# of losing its head), and truncates to herdr's 32-character bound.
+fm_backend_herdr_agent_name_sanitize() {  # <raw>
+  local raw=${1:-} name
+  name=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '-')
+  name=${name//$'\n'/}
+  [ -n "$name" ] || return 1
+  case "$name" in
+    [a-z]*) ;;
+    *) name="fm-$name" ;;
+  esac
+  printf '%s' "${name:0:32}"
+}
+
+# fm_backend_herdr_agent_names_in_use: every display name currently assigned in
+# <session>, one per line. Fails (rather than reporting "none in use") when the
+# listing is missing or malformed, so a caller never treats an unreadable fleet
+# as an empty one.
+fm_backend_herdr_agent_names_in_use() {  # <session>
+  local session=$1 out
+  out=$(fm_backend_herdr_cli "$session" agent list 2>/dev/null) || return 1
+  printf '%s' "$out" | jq -r '
+    if (.result.agents | type) == "array"
+    then [.result.agents[]
+          | select((.name | type) == "string" and (.name | length) > 0)
+          | .name]
+         | join("\n")
+    else error("herdr agent list has no agents array")
+    end
+  ' 2>/dev/null
+}
+
+# fm_backend_herdr_pick_agent_name: the first roster name not already in use in
+# <session>, falling back to <fallback> when the roster is exhausted or the live
+# listing could not be read (the fallback is the task's own id, which is already
+# distinct, so an unreadable listing still yields a distinct name).
+fm_backend_herdr_pick_agent_name() {  # <session> <fallback>
+  local session=$1 fallback=$2 in_use name
+  if in_use=$(fm_backend_herdr_agent_names_in_use "$session"); then
+    for name in "${FM_BACKEND_HERDR_AGENT_NAME_ROSTER[@]}"; do
+      if ! printf '%s\n' "$in_use" | grep -Fxq -- "$name"; then
+        printf '%s' "$name"
+        return 0
+      fi
+    done
+  fi
+  fm_backend_herdr_agent_name_sanitize "$fallback"
+}
+
+# fm_backend_herdr_agent_registered: true only when <pane> currently hosts a
+# registered agent, which is what `agent rename` requires.
+fm_backend_herdr_agent_registered() {  # <session> <pane>
+  local session=$1 pane=$2 out
+  out=$(fm_backend_herdr_cli "$session" agent get "$pane" 2>/dev/null) || return 1
+  printf '%s' "$out" | jq -e --arg pane "$pane" \
+    '.result.agent.pane_id == $pane' >/dev/null 2>&1
+}
+
+# fm_backend_herdr_rename_agent: exactly one rename call, confirmed against the
+# exact pane and name in herdr's own response.
+fm_backend_herdr_rename_agent() {  # <session> <pane> <name>
+  local session=$1 pane=$2 name=$3 out
+  out=$(fm_backend_herdr_cli "$session" agent rename "$pane" "$name" 2>/dev/null) || return 1
+  printf '%s' "$out" | jq -e --arg pane "$pane" --arg name "$name" \
+    '.result.agent.pane_id == $pane and .result.agent.name == $name' >/dev/null 2>&1
+}
+
+# fm_backend_herdr_assign_agent_name: name one freshly launched agent pane and
+# print the assigned name. <preferred> names the agent directly (a secondmate
+# uses its own id); an empty <preferred> draws the next free roster name, with
+# <fallback> as the exhausted-roster name.
+#
+# The only wait here is a bounded readiness wait for herdr to register the agent
+# the launch command just started (registration is a process-level detection,
+# observed well under a second). Once the agent is present, naming is a single
+# attempt: no retry, no re-apply, and every failure is a warning that leaves the
+# spawn successful, because a display name is never worth failing a spawn over.
+fm_backend_herdr_assign_agent_name() {  # <session> <pane> <preferred> <fallback>
+  local session=$1 pane=$2 preferred=${3:-} fallback=$4 polls interval i name
+  polls=${FM_BACKEND_HERDR_AGENT_NAME_POLLS:-20}
+  interval=${FM_BACKEND_HERDR_AGENT_NAME_INTERVAL:-0.1}
+  case "$polls" in ''|*[!0-9]*) polls=20 ;; esac
+  i=0
+  while ! fm_backend_herdr_agent_registered "$session" "$pane"; do
+    i=$((i + 1))
+    if [ "$i" -ge "$polls" ]; then
+      echo "warning: herdr registered no agent on $pane in time; leaving it unnamed in the agents sidebar" >&2
+      return 1
+    fi
+    sleep "$interval"
+  done
+  if [ -n "$preferred" ]; then
+    name=$(fm_backend_herdr_agent_name_sanitize "$preferred")
+  else
+    name=$(fm_backend_herdr_pick_agent_name "$session" "$fallback")
+  fi
+  if [ -z "$name" ]; then
+    echo "warning: no herdr-acceptable display name could be derived for $pane; leaving it unnamed in the agents sidebar" >&2
+    return 1
+  fi
+  if ! fm_backend_herdr_rename_agent "$session" "$pane" "$name"; then
+    echo "warning: herdr did not accept the display name '$name' for $pane; leaving it unnamed in the agents sidebar" >&2
+    return 1
+  fi
+  printf '%s' "$name"
+}
+
+# The constant name the primary firstmate's own agent pane carries.
+FM_BACKEND_HERDR_PRIMARY_AGENT_NAME=firstmate
+
+# fm_backend_herdr_name_primary_agent: idempotently name the PRIMARY firstmate's
+# own agent pane, so the captain can tell the primary from its workers in the
+# same sidebar the workers are named in. Prints the name when this call assigned
+# it and nothing when there was nothing to do.
+#
+# Deliberately a touch on an existing path rather than a mechanism of its own:
+# herdr drops live agent registrations (names included) on a server restart, and
+# re-running a cheap idempotent touch reinstates the name without any journal,
+# marker, or re-apply machinery. It is skipped entirely unless this home is the
+# primary and the launching process really is a verified pane of THIS session -
+# a pane id from another session can resolve to a real but unrelated pane here.
+# An already-named pane is never renamed, so a name the captain set by hand
+# wins, and every failure is a warning that leaves the caller unaffected.
+fm_backend_herdr_name_primary_agent() {  # <session>
+  local session=$1 pane out current
+  if [ -f "$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" ]; then
+    return 0
+  fi
+  fm_backend_herdr_launcher_identity "$session" 2>/dev/null || return 0
+  pane=$FM_BACKEND_HERDR_LAUNCHER_PANE_ID
+  [ -n "$pane" ] || return 0
+  out=$(fm_backend_herdr_cli "$session" agent get "$pane" 2>/dev/null) || return 0
+  current=$(printf '%s' "$out" | jq -r '.result.agent.name // empty' 2>/dev/null)
+  [ -z "$current" ] || return 0
+  if ! fm_backend_herdr_rename_agent "$session" "$pane" "$FM_BACKEND_HERDR_PRIMARY_AGENT_NAME"; then
+    echo "warning: herdr did not accept the display name '$FM_BACKEND_HERDR_PRIMARY_AGENT_NAME' for this firstmate's own pane $pane" >&2
+    return 1
+  fi
+  printf '%s' "$FM_BACKEND_HERDR_PRIMARY_AGENT_NAME"
 }
 
 # fm_backend_herdr_agent_state: recovery-grade state for the same session-start
