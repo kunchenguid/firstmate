@@ -149,6 +149,11 @@ For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved tas
 `fm-spawn.sh` also owns the base-freshness boundary for every fresh ship and scout: no worker starts until its clean task worktree matches the fetched tip of origin's resolved default branch, and any unsafe or unverifiable base stops the spawn.
 Its header owns the exact refusal mechanics, while `tests/fm-spawn-pool-base-freshen.test.sh` owns the portable regression coverage.
 
+A project clone whose main checkout deliberately carries `core.bare=true` makes git refuse the work-tree operation the pane's own `treehouse get` starts with, so for those clones `fm-spawn.sh` leases the pooled task worktree itself and only tells the pane to `cd` into it; the clone's configuration is never written, and the isolation assertion above still runs.
+That per-task lease is distinct from the secondmate home lease below: `fm-spawn.sh`'s abort cleanup returns it until `state/<id>.meta` records the worktree, after which `fm-teardown.sh` owns its release.
+A pane that never settles in the leased worktree fails the spawn rather than launching in a worktree that was never leased for the task.
+`bin/fm-spawn.sh`'s header owns the exact acquisition mechanism, its treehouse version requirement, and the environment scoping that keeps the override off the crewmate's shell.
+
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
 The primary checkout is healthy on its default branch, and linked worktrees or secondmate homes are healthy at detached HEAD.
