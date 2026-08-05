@@ -24,7 +24,7 @@ This is deliberate because the alarm fires only after a genuine max-defer wedge 
 The max-defer escape never force-injects over byte-stable `pending` content.
 A real half-typed human line can remain byte-identical indefinitely, so content stability cannot safely distinguish it from a future classifier fault.
 With the default 300-second max defer and 15-second housekeeping tick, an unpredicted false `pending` reaches the tmux status overlay within 315 seconds while the buffered digest remains preserved.
-The overlay remains visible for the full max-defer interval and is refreshed at the next alarm, so it does not disappear between checks.
+The overlay duration includes one housekeeping interval plus one second of scheduling slack beyond max-defer, and it is refreshed at the next alarm, so it does not disappear between checks.
 Linux hosts have no reliable default off-host notification channel, and operators who need one must configure `command:`.
 `wall` is intentionally not a channel because it writes into logged-in agent terminals and can corrupt or confuse their displays.
 

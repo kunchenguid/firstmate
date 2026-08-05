@@ -751,7 +751,7 @@ test_busy_guard_defers_when_supervisor_busy() {
   fakebin="$dir/fakebin"
   sent="$dir/sent.log"; : > "$sent"
   capture="$dir/pane.txt"
-  printf 'esc to interrupt\n' > "$capture"
+  printf '… (6s)\n' > "$capture"
   escalate_add "$state" "done: PR 1"
   afk_enter "$state"
   if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
@@ -1178,9 +1178,16 @@ test_max_defer_pending_composer_alarms_without_typing() {
   [ -s "$state/.subsuper-inject-wedged" ] || fail "pending composer did not raise a wedge alarm marker"
   [ -s "$state/.subsuper-escalations" ] || fail "buffer lost while composer was pending"
   grep -F 'human draft' "$dir/composer" >/dev/null || fail "pending composer content changed"
-  grep -F 'display-message -d 60000 -t' "$display_log" >/dev/null \
+  grep -F 'display-message -d 76000 -t' "$display_log" >/dev/null \
     || fail "pending composer wedge did not keep the tmux status alarm visible through the next refresh"
-  pass "max-defer on a pending composer alarms without typing and keeps the tmux status alarm visible"
+  touch -d '61 seconds ago' "$state/.subsuper-inject-wedged"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_TMUX_DISPLAY_LOG="$display_log" \
+    FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 FM_INJECT_CONFIRM_SLEEP=0.05 \
+    housekeeping "$state"
+  [ "$(grep -cF 'display-message -d 76000 -t' "$display_log")" -eq 2 ] \
+    || fail "pending composer wedge did not refresh the status alarm before its slackened duration expired"
+  pass "max-defer on a pending composer alarms without typing and refreshes a gap-free tmux status alarm"
 }
 
 test_normal_flush_clears_stale_wedge_marker() {
@@ -1830,6 +1837,85 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
   pass "inject_msg: unrecognized composer states defer by default"
 }
 
+test_real_tmux_away_delivery_and_guards() {
+  local dir state helper session target received before after log row_hex
+  command -v tmux >/dev/null 2>&1 || { pass "real tmux away delivery skipped: tmux unavailable"; return; }
+  dir=$(make_supercase real-tmux-away-delivery)
+  state="$dir/state"; helper="$dir/render.sh"; received="$dir/received"; log="$state/.supervise-daemon.log"; LOG="$log"
+  session="fm-daemon-e2e-$$-$RANDOM"
+  cat > "$helper" <<'SH'
+#!/usr/bin/env bash
+set -u
+mode=$1 out=$2
+render() {
+  case "$mode" in
+    idle) printf 'esc to interrupt\n\342\235\257\302\240' ;;
+    draft) printf 'esc to interrupt\nhuman draft' ;;
+    shell) printf '$ ' ;;
+    spinner) printf 'esc to interrupt\n\342\200\246 (6s)' ;;
+    custom) printf 'custom idle>' ;;
+  esac
+}
+render
+if [ "$mode" = idle ] || [ "$mode" = custom ]; then
+  while IFS= read -r line; do
+    printf '%s' "$line" > "$out"
+    printf '\n'
+    render
+  done
+else
+  sleep 30
+fi
+SH
+  chmod +x "$helper"
+  tmux new-session -d -s "$session" -x 100 -y 20 "$helper idle '$received'"
+  target=$(tmux list-panes -t "$session" -F '#{pane_id}')
+  sleep 0.2
+  row_hex=$(tmux display-message -p -t "$target" '#{cursor_y}' | {
+    read -r cursor_y
+    tmux capture-pane -p -t "$target" -S "$cursor_y" -E "$cursor_y" | od -An -t u1 | tr -s ' ' | sed 's/^ //;s/ $//'
+  })
+  [ "$row_hex" = '226 157 175 194 160 10' ] \
+    || fail "real tmux idle Claude row bytes drifted: $row_hex"
+  escalate_add "$state" "needs-decision: exact tmux delivery"
+  afk_enter "$state"
+  FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="$target" FM_DAEMON_PRIMARY_HARNESS=claude \
+    FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state" \
+    || fail "real tmux idle Claude row did not accept the buffered digest"
+  grep -F 'Supervisor escalate (1 event(s)): needs-decision: exact tmux delivery' "$received" >/dev/null \
+    || fail "real tmux pane did not receive the operational digest"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "real tmux delivery did not clear the escalation buffer"
+
+  for mode in draft shell spinner; do
+    tmux respawn-pane -k -t "$target" "$helper $mode '$received'"
+    sleep 0.2
+    before=$(tmux capture-pane -p -t "$target")
+    : > "$received"
+    escalate_add "$state" "needs-decision: must remain buffered"
+    if FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="$target" FM_DAEMON_PRIMARY_HARNESS=claude \
+      FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state"; then
+      fail "real tmux $mode guard allowed injection"
+    fi
+    after=$(tmux capture-pane -p -t "$target")
+    [ "$before" = "$after" ] || fail "real tmux $mode guard modified the pane"
+    [ ! -s "$received" ] || fail "real tmux $mode guard delivered text"
+    : > "$state/.subsuper-escalations"
+  done
+
+  tmux respawn-pane -k -t "$target" "$helper custom '$received'"
+  sleep 0.2
+  escalate_add "$state" "needs-decision: override delivery"
+  FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="$target" FM_DAEMON_PRIMARY_HARNESS=claude \
+    FM_COMPOSER_IDLE_RE='^custom idle>$' FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state" \
+    || fail "FM_COMPOSER_IDLE_RE did not propagate through real tmux guard and submit acknowledgement"
+  grep -F 'needs-decision: override delivery' "$received" >/dev/null \
+    || fail "real tmux override delivery did not reach the target pane"
+  tmux kill-session -t "$session"
+  grep -F 'gate=busy backend=tmux harness=claude' "$log" >/dev/null \
+    || fail "real tmux active-spinner defer did not log its delivery-boundary verdict"
+  pass "real tmux away delivery handles exact Claude bytes, safety guards, busy state, and idle overrides"
+}
+
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
@@ -1929,3 +2015,4 @@ test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
 test_inject_msg_defers_on_dead_shell_unknown
 test_inject_msg_defers_on_unrecognized_composer_state
+test_real_tmux_away_delivery_and_guards

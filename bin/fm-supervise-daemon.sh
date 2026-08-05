@@ -580,16 +580,26 @@ fm_daemon_primary_harness() {
   printf '%s' "$FM_DAEMON_PRIMARY_HARNESS"
 }
 
-pane_is_busy() {  # <target> [backend]
-  local target=$1 backend=${2:-tmux} native tail40 harness
+pane_busy_observation() {  # <target> [backend]
+  local target=$1 backend=${2:-tmux} native tail40 harness rendered=idle
   harness=$(fm_daemon_primary_harness)
   native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)
   case "$native" in
-    busy) return 0 ;;
+    busy) printf 'harness=%s native=busy rendered=not-read' "$harness"; return 0 ;;
   esac
-  tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
-    | fm_busy_lines_match "$harness"
+  if ! tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null); then
+    printf 'harness=%s native=%s rendered=capture-failed' "$harness" "${native:-unknown}"
+    return 1
+  fi
+  if printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 | fm_busy_lines_match "$harness"; then
+    rendered=busy
+  fi
+  printf 'harness=%s native=%s rendered=%s' "$harness" "${native:-unknown}" "$rendered"
+  [ "$rendered" = busy ]
+}
+
+pane_is_busy() {  # <target> [backend]
+  pane_busy_observation "$@" >/dev/null
 }
 
 # pane_input_pending dispatches through fm_backend_composer_state and treats
@@ -922,7 +932,7 @@ inject_wedge_alarm() {  # <state> <age-seconds>
     # Keep the status overlay visible until the next rate-limited alarm refresh.
     # Unlike wall or terminal output, display-message never writes into an agent
     # pane or its composer.
-    display_ms=$((max_defer * 1000))
+    display_ms=$(((max_defer + ${FM_HOUSEKEEPING_TICK:-$HOUSEKEEPING_TICK_DEFAULT} + 1) * 1000))
     tmux display-message -d "$display_ms" -t "$target" \
       "fm: away-mode escalations WEDGED ${age}s - see $marker" 2>/dev/null || true
   fi
@@ -1117,12 +1127,12 @@ window_for_task() {  # <task-key> [state]
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
 inject_msg() {  # <message> [state]
-  local msg=$1 state target backend retries sleep_s verdict composer encoded
+  local msg=$1 state target backend retries sleep_s verdict composer encoded busy_observation override_set=no
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
   # watcher triage. Escalations buffer and survive for the next catch-up flush.
-  afk_active "$state" || { log "inject deferred: afk inactive"; return 1; }
+  afk_active "$state" || { log "inject deferred: gate=presence verdict=afk-inactive"; return 1; }
   # (2) Single-line digest: collapse any embedded newlines so submission via
   # send-keys + Enter is unambiguous regardless of how the TUI composer treats
   # them. Then use the canonical typed envelope so downstream consumers retain
@@ -1137,10 +1147,14 @@ inject_msg() {  # <message> [state]
   # when unset (sourced/test contexts that never ran fm_super_main's startup
   # discovery), matching this function's pre-existing default assumption.
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
-  fm_backend_target_exists "$backend" "$target" || return 1
+  if ! fm_backend_target_exists "$backend" "$target"; then
+    log "inject deferred: gate=target backend=$backend verdict=missing"
+    return 1
+  fi
   # (3) Busy-guard: never inject into an in-use supervisor pane.
-  if pane_is_busy "$target" "$backend"; then
-    log "inject deferred: supervisor pane busy (agent mid-turn)"
+  busy_observation=$(pane_busy_observation "$target" "$backend")
+  if [ $? -eq 0 ]; then
+    log "inject deferred: gate=busy backend=$backend $busy_observation"
     return 1
   fi
   #   b) Composer-guard: inject ONLY into a confirmed-empty GENUINE agent
@@ -1153,8 +1167,9 @@ inject_msg() {  # <message> [state]
   #      on anything that is not affirmatively 'empty'. A deferred escalation
   #      stays buffered for the next cycle or the catch-up flush.
   composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
+  [ -n "${FM_COMPOSER_IDLE_RE+x}" ] && override_set=yes
   if [ "$composer" != empty ]; then
-    log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
+    log "inject deferred: gate=composer backend=$backend $busy_observation verdict=${composer:-unknown} idle_override=$override_set"
     return 1
   fi
   # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never
@@ -1170,7 +1185,7 @@ inject_msg() {  # <message> [state]
   if [ "$verdict" = empty ]; then
     return 0  # Backend confirmed the submit.
   fi
-  log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
+  log "inject failed: gate=submit-ack backend=$backend $busy_observation composer=empty idle_override=$override_set verdict=${verdict:-unknown} retries=$retries text_may_be_in_composer=yes"
   return 1
 }
 

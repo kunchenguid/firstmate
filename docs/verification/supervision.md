@@ -334,10 +334,30 @@ Exact output:
 %58	probe_hits=0	composer=empty
 ```
 
-The production tmux overlay lasts one full `FM_MAX_DEFER_SECS` interval and refreshes on the next alarm.
+The production tmux overlay lasts through `FM_MAX_DEFER_SECS`, the following housekeeping interval, and one additional second of scheduling slack, then refreshes on the next alarm.
 At defaults, a future unpredicted false `pending` therefore costs at most 315 seconds, or 5.25 minutes, before a persistent on-host warning appears.
 This Linux host has no verified default off-host alert, so remote notification still requires an explicit `command:` channel.
 Content stability does not authorize forced injection because a real half-typed line can remain byte-identical indefinitely.
+
+A 2026-08-05 live incident left an away digest buffered for 1558 seconds while each daemon retry passed the rendered busy guard and then reported `composer=pending` despite the same daemon environment's `FM_COMPOSER_IDLE_RE` and a direct public classifier call both reporting `empty`.
+Claude Code 2.1.221 also rendered `esc to interrupt` while idle, so Claude's delivery-only busy guard now relies on its live-verified elapsed spinner instead of that ambiguous footer.
+Each delivery defer now records its exact gate, backend, detected harness, native and rendered busy verdicts, composer verdict, idle-override presence, or post-submit acknowledgement without recording composer content.
+Busy detection remains independent of `FM_COMPOSER_IDLE_RE`; the override applies only to the inject-time composer proof and the post-submit acknowledgement.
+
+The real-tmux delivery path is exercised with:
+
+```sh
+bin/fm-test-run.sh tests/fm-daemon.test.sh | grep -F 'real tmux away delivery'
+```
+
+Exact output:
+
+```text
+ok - real tmux away delivery handles exact Claude bytes, safety guards, busy state, and idle overrides
+```
+
+The disposable pane renders the captured octal bytes `342 235 257 302 240`, followed by Claude's idle `esc to interrupt` footer, then reads the submitted operational digest.
+The same public `escalate_add` and `escalate_flush` path proves the digest reaches the pane and clears the buffer, while a half-typed line and bare shell prompt remain byte-identical, an elapsed Claude spinner remains busy, and `FM_COMPOSER_IDLE_RE` governs both composer checks around submission.
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.
 Automated suites never execute these real notification commands.
