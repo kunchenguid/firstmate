@@ -156,7 +156,7 @@ test_grok_command_sources_effective_config() {
 }
 
 test_agy_is_background_notify() {
-  local out ordinary
+  local out ordinary arm
   out=$("$RENDER" --harness agy)
   assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: agy" \
     "AGY heading missing"
@@ -166,7 +166,10 @@ test_agy_is_background_notify() {
   assert_contains "$out" "bin/fm-watch-arm.sh" "AGY protocol lost its watcher arm"
   assert_not_contains "$out" "foreground checkpoint" \
     "AGY protocol incorrectly rendered Codex foreground supervision"
-  assert_not_contains "$out" "shell &" "AGY protocol permitted shell backgrounding"
+  arm=$(printf '%s\n' "$out" | grep -F -- 'exec bin/fm-watch-arm.sh')
+  if printf '%s\n' "$arm" | grep -Eq '(^|[^&])&([^&]|$)'; then
+    fail "AGY arm command uses shell backgrounding"
+  fi
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
   assert_contains "$ordinary" "re-arm exactly one" \
     "AGY ordinary-wake line did not require one re-arm"
