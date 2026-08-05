@@ -141,6 +141,11 @@ Before changing it, inspect the current file and curate the matching bullet in p
 Shared captain preferences that apply across secondmate domains live only in the primary home's optional `data/captain-shared.md`.
 `secondmate-provisioning` owns its propagation contract, including the required header, read-only secondmate copies, quarantine diagnostics, and the rollout rule that existing homes trim `data/captain.md` by hand after first propagation rather than deleting private content automatically.
 
+A captain may record a standing shepherd or merge posture in these files: in `data/captain.md` for one domain, or in `data/captain-shared.md` when it should apply across secondmate domains.
+A recorded posture is a standing relaxation of [AGENTS.md hard rule 2](../AGENTS.md#1-identity-and-prime-directives) alongside a project's `+yolo` flag, and it is changed with the same inspect-then-update rule as any other preference here.
+Absence of such an entry means there is no standing posture, so a merge still needs `+yolo` or a current explicit captain word.
+Hard rule 2 owns the full rule, and the internal [`pr-shepherd`](../.agents/skills/pr-shepherd/SKILL.md) skill owns how a recorded posture is read and applied to a PR.
+
 ## Operational learnings (data/learnings.md)
 
 Fleet-local operational facts and gotchas live locally in `data/learnings.md`; it is gitignored and printed after the captain-preference files in the session-start context digest.
