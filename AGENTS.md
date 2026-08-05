@@ -327,7 +327,7 @@ Resume fleet supervision immediately after the decision lands.
 
 Judge validation by the current-code-matched run step through `bin/fm-crew-state.sh`, not by shell liveness or the last status event.
 Running, fixing, or CI states remain working; parked approval or fix-review states require the worker to follow the active gate help; passed or checks-passed is done; failed or cancelled is failed.
-The one exception is a passive CI monitor: when nothing but that monitor is still attached to a run on exactly this worktree's head, the worker is idle, and a newer `paused:` event exists, the reader reports `paused · run-step` with the attached run and head, which is the declared external wait rather than validation work.
+The one exception is a passive CI monitor: when nothing but that monitor is still attached to a run on exactly this worktree's head, the worker is idle or confidently gone, and a newer `paused:` event exists, the reader reports `paused · run-step` with the attached run and head, which is the declared external wait rather than validation work.
 A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership outside the supersession sequence above; steer it back to the gate response flow.
 The worker reports the PR when CI first becomes green rather than waiting for merge monitoring to finish.
 
