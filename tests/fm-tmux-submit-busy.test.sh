@@ -69,7 +69,7 @@ test_busy_pane_pending_returns_empty() {
   # Now test the submit - write verdict to file to avoid nested $().
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=1 \
-    fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
+    fm_tmux_submit_enter_core "win" 3 0.05 opencode > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = empty ] || fail "busy-pane pending should return empty, got '$(cat "$vfile")'"
   [ "$(grep -c '^Enter$' "$sent" 2>/dev/null || true)" -eq 3 ] \
     || fail "proven pending should consume the configured Enter retry budget"
@@ -88,7 +88,7 @@ test_idle_pane_pending_returns_pending() {
   touch "$dir/.swallow"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=0 \
-    fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
+    fm_tmux_submit_enter_core "win" 3 0.05 opencode > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = pending ] || fail "idle-pane pending should return pending, got '$(cat "$vfile")'"
   pass "fm_tmux_submit_enter_core: idle pane + pending composer stays pending (genuine swallow preserved)"
 }
@@ -160,6 +160,25 @@ test_busy_pane_ambiguous_pending_retries_without_conversion() {
   [ "$(grep -c '^Enter$' "$sent" 2>/dev/null || true)" -eq 3 ] \
     || fail "pending-unproven should consume the configured Enter retry budget"
   pass "fm_tmux_submit_enter_core: pending-unproven retries without busy conversion"
+}
+
+test_busy_kimi_pending_stays_pending() {
+  local dir fakebin composer sent vfile
+  dir="$TMP_ROOT/busy-kimi-conservative"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  vfile="$dir/verdict"
+  printf '╭────────────╮\n│ > fix      │\n╰────────────╯\n' > "$composer"
+  : > "$sent"
+  touch "$dir/.swallow"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=1 \
+    fm_tmux_submit_enter_core "win" 3 0.05 kimi > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = pending ] || fail "busy kimi pane must stay pending, got '$(cat "$vfile")"
+  [ "$(grep -c '^Enter$' "$sent" 2>/dev/null || true)" -eq 3 ] \
+    || fail "kimi should consume the full Enter retry budget before reporting pending"
+  pass "fm_tmux_submit_enter_core: busy kimi pane stays pending (conversion scoped to opencode/cursor)"
 }
 
 test_unrecognized_state_skips_busy_conversion() {
@@ -320,6 +339,7 @@ test_busy_pane_composer_clears_first_try
 test_idle_pane_composer_clears_first_try
 test_busy_pane_unknown_stays_unknown
 test_busy_pane_ambiguous_pending_retries_without_conversion
+test_busy_kimi_pending_stays_pending
 test_unrecognized_state_skips_busy_conversion
 test_claude_busy_signature_uses_real_capture_shapes
 test_cursor_busy_signature_scoped
