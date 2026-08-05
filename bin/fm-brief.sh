@@ -230,6 +230,7 @@ Optional helper: \`bin/fm-secondmate-report.sh\` can append a correlated status 
 For a terse result, a status line is the whole answer.
 For a detailed answer (an investigation, a plan, an audit), write it to a doc under your home's \`data/\` and append a status line that points to that doc - the scout-report pattern - so the main firstmate is woken and can read it.
 Before treating an investigation or visual review as complete, load \`decision-hold-lifecycle\` from this home's \`.agents/skills/\` and pass its shared completion gate.
+Before creating or revising a Lavish review surface, load \`lavish-review-surfaces\` from this home's \`.agents/skills/\` and follow its subject-first contract.
 A message with NO marker is the captain typing directly into your pane: treat it as authoritative captain intervention and stay conversational exactly as you would for any captain message; do not force it onto the status path.
 
 # Escalation to main firstmate
@@ -316,6 +317,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+   Before creating or revising a Lavish review surface, read and follow \`$FM_ROOT/.agents/skills/lavish-review-surfaces/SKILL.md\`.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -428,6 +430,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+   Before creating or revising a Lavish review surface, read and follow \`$FM_ROOT/.agents/skills/lavish-review-surfaces/SKILL.md\`.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
