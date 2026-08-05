@@ -793,6 +793,37 @@ fm_backend_busy_state() {  # <backend> <target>
   esac
 }
 
+# fm_backend_composer_classifier_capability: the static, adapter-owned answer to
+# whether <backend> exposes a composer classifier. This is intentionally decided
+# only from the verified backend identity, before any target, actor, pane, or
+# classifier output is consulted. A newly added or unrecognized backend reports
+# unknown so callers refuse until its capability is classified deliberately.
+fm_backend_composer_classifier_capability() {  # <backend> -> present|absent|unknown
+  case "$1" in
+    tmux|herdr|orca|cmux) printf 'present' ;;
+    zellij) printf 'absent' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# fm_backend_composer_preflight_state: bind the static capability to the runtime
+# classifier verdict without letting classifier output impersonate the
+# no-classifier state. Every result from a present classifier is namespaced under
+# classified:, so only this function's static absent arm can emit unclassified.
+fm_backend_composer_preflight_state() {  # <backend> <target> [expected-label]
+  local backend=$1 capability state
+  shift
+  capability=$(fm_backend_composer_classifier_capability "$backend")
+  case "$capability" in
+    present)
+      state=$(fm_backend_composer_state "$backend" "$@") || state=unknown
+      printf 'classified:%s' "${state:-unknown}"
+      ;;
+    absent) printf 'unclassified' ;;
+    *) printf 'capability-unknown' ;;
+  esac
+}
+
 # fm_backend_composer_state: classify the composer/input row of <target> as
 # empty|pending|pending-unproven|unknown for callers that need a pre-submit
 # input guard or an adapter's conservative submit fallback. It is exposed so a
@@ -803,8 +834,9 @@ fm_backend_busy_state() {  # <backend> <target>
 # fm_backend_herdr_composer_state), as do orca and cmux
 # (fm_backend_orca_composer_state, fm_backend_cmux_composer_state); zellij's
 # submit path uses an internal content-diff approach with no separately named
-# classifier, so it reports unknown here - callers fall back to their own
-# policy, exactly as an unknown fm_backend_busy_state already does.
+# classifier, so its static capability reports absent and callers fall back to
+# its own submit-verification policy. A present classifier that returns unknown
+# remains a runtime failure to prove emptiness, never a no-classifier signal.
 fm_backend_composer_state() {  # <backend> <target> -> empty|pending|pending-unproven|unknown
   local backend=$1
   shift

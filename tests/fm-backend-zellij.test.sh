@@ -979,6 +979,35 @@ test_send_text_submit_send_failed_when_pane_absent() {
   pass "fm_backend_zellij_send_text_submit: reports 'send-failed' when the target pane is absent"
 }
 
+test_fm_send_text_falls_back_to_zellij_submit_policy() {
+  local dir state fb neutral rc out
+  dir="$TMP_ROOT/fm-send-text-fallback"; state="$dir/state"
+  mkdir -p "$state" "$dir/responses"
+  neutral="$dir/neutral-root"; mkdir -p "$neutral"
+  fm_write_meta "$state/zellij-fallback.meta" "window=firstmate:7" "backend=zellij" "kind=ship"
+  touch "$state/.last-watcher-beat"
+  zellij_pane_response "$dir" 1 7 3
+  zellij_pane_response "$dir" 3 7 3
+  zellij_pane_response "$dir" 5 7 3
+  zellij_pane_response "$dir" 7 7 3
+  printf '%s' $'❯ steer zellij' > "$dir/responses/4.out"
+  printf '%s' $'steer zellij\n❯' > "$dir/responses/8.out"
+  fb=$(make_zellij_fakebin "$dir")
+  fm_fake_exit0 "$fb" sleep
+
+  rc=0
+  out=$( PATH="$fb:$PATH" FM_HOME="$neutral" FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" \
+    FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" FM_ZELLIJ_SESSION_LIST="firstmate" \
+    FM_SEND_RETRIES=1 FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-send.sh" firstmate:7 "steer zellij" 2>&1 ) || rc=$?
+  expect_code 0 "$rc" "fm-send should use zellij's own submit verification when no composer classifier exists: $out"
+  assert_contains "$(cat "$dir/log")" $'\x1f''paste'$'\x1f''--pane-id'$'\x1f''7'$'\x1f''--'$'\x1f''steer zellij' \
+    "fm-send did not reach zellij's submit policy after the no-classifier fallback"
+  assert_contains "$(cat "$dir/log")" $'\x1f''send-keys'$'\x1f''--pane-id'$'\x1f''7'$'\x1f''Enter' \
+    "zellij's fallback submit policy did not send Enter"
+  pass "fm-send: a statically unclassified zellij backend uses its own submit verification"
+}
+
 # --- fm-*.sh script routing via explicit backend-tagged meta ------------------
 
 test_scripts_route_explicit_target_through_meta_backend() {
@@ -1115,6 +1144,7 @@ test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_send_failed_when_session_absent
 test_send_text_submit_send_failed_when_pane_absent
+test_fm_send_text_falls_back_to_zellij_submit_policy
 test_scripts_route_explicit_target_through_meta_backend
 test_scripts_verify_label_for_fm_targets
 test_scripts_reject_fm_target_label_mismatch

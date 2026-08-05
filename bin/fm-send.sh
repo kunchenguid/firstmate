@@ -284,11 +284,19 @@ else
   MESSAGE=$*
   fm_model_capacity_hold_refuse "text submission to $T" || exit 1
   if [ "$TARGET_BACKEND" != remote ]; then
-    composer_state=$(fm_backend_composer_state "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL")
-    if [ "$composer_state" != empty ]; then
-      echo "error: text not sent to $T because its composer is not affirmatively empty (verdict=${composer_state:-unknown}; backend=$TARGET_BACKEND; tried $RESOLUTION_TRIED). Preserve the pane and reconcile its pending input before retrying." >&2
-      exit 1
-    fi
+    composer_preflight=$(fm_backend_composer_preflight_state "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL")
+    case "$composer_preflight" in
+      classified:empty|unclassified) : ;;
+      classified:*)
+        composer_state=${composer_preflight#classified:}
+        echo "error: text not sent to $T because its composer is not affirmatively empty (verdict=${composer_state:-unknown}; backend=$TARGET_BACKEND; tried $RESOLUTION_TRIED). Preserve the pane and reconcile its pending input before retrying." >&2
+        exit 1
+        ;;
+      *)
+        echo "error: text not sent to $T because composer-classifier capability is not established for backend=$TARGET_BACKEND (capability=${composer_preflight:-unknown}; tried $RESOLUTION_TRIED)." >&2
+        exit 1
+        ;;
+    esac
   fi
   if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
     # Reuse an existing correlation id for recovery resends; otherwise create a

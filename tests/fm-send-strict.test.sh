@@ -46,7 +46,7 @@ case "${1:-}" in
     if [ -n "${FM_FAKE_TMUX_DEAD_TARGET:-}" ] && [ "$target" = "$FM_FAKE_TMUX_DEAD_TARGET" ]; then
       exit 1
     fi
-    [ "$cursor" = 1 ] && { printf '1\n'; exit 0; }
+    [ "$cursor" = 1 ] && { printf '%s\n' "${FM_FAKE_TMUX_CURSOR:-1}"; exit 0; }
     printf '%%1\n'
     exit 0 ;;
   capture-pane)
@@ -86,6 +86,41 @@ setup_home() {  # <name> -> echoes home dir
   local home="$TMP_ROOT/$1-$RANDOM"
   mkdir -p "$home/state"
   printf '%s\n' "$home"
+}
+
+test_composer_classifier_capability_matrix() {
+  (
+    local backend expected expected_preflight observed observed_preflight seen=''
+    # shellcheck source=bin/fm-backend.sh
+    . "$ROOT/bin/fm-backend.sh"
+    fm_backend_composer_state() { printf 'unknown'; }
+    for backend in $FM_BACKEND_KNOWN; do
+      case "$backend" in
+        tmux|herdr|orca|cmux) expected=present; expected_preflight=classified:unknown ;;
+        zellij) expected=absent; expected_preflight=unclassified ;;
+        *) fail "composer-classifier matrix has no expected row for known backend '$backend'" ;;
+      esac
+      observed=$(fm_backend_composer_classifier_capability "$backend") \
+        || fail "composer-classifier capability query failed for known backend '$backend'"
+      [ "$observed" = "$expected" ] \
+        || fail "composer-classifier capability for $backend: expected $expected, got $observed"
+      observed_preflight=$(fm_backend_composer_preflight_state "$backend" fixture-target) \
+        || fail "composer preflight-state query failed for known backend '$backend'"
+      [ "$observed_preflight" = "$expected_preflight" ] \
+        || fail "composer preflight for $backend with classifier verdict unknown: expected $expected_preflight, got $observed_preflight"
+      seen="$seen $backend=$observed/$observed_preflight"
+    done
+    [ "$seen" = " tmux=present/classified:unknown herdr=present/classified:unknown zellij=absent/unclassified orca=present/classified:unknown cmux=present/classified:unknown" ] \
+      || fail "composer-classifier matrix did not cover the exact known-backend enumeration:$seen"
+    [ "$(fm_backend_composer_classifier_capability bogus)" = unknown ] \
+      || fail "an unrecognized backend must not inherit the no-classifier fallback"
+    [ "$(fm_backend_composer_preflight_state bogus fixture-target)" = capability-unknown ] \
+      || fail "an unrecognized backend must fail closed at preflight"
+    fm_backend_composer_state() { printf 'unclassified'; }
+    [ "$(fm_backend_composer_preflight_state tmux fixture-target)" = classified:unclassified ] \
+      || fail "a classified backend's actor-influenced verdict impersonated the static no-classifier state"
+  ) || fail "composer-classifier capability matrix failed"
+  pass "fm-backend: every known backend declares a static composer-classifier capability"
 }
 
 test_exact_lane_id_send_still_works() {
@@ -217,6 +252,27 @@ test_stale_composer_refuses_before_typing() {
   pass "fm-send strict: stale composer text refuses before any typing or Enter"
 }
 
+test_unknown_classified_composer_refuses_before_typing() {
+  local dir fb home err log rc got
+  dir="$TMP_ROOT/unknown-classified-composer"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home unknownclassified); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/unknown.meta" "window=sess:fm-unknown" "kind=ship" "harness=codex"
+
+  rc=0
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CURSOR=unreadable FM_SEND_SETTLE=0 \
+    "$SEND" unknown "fresh order" >/dev/null 2>"$err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "unknown verdict from a classified backend was accepted"
+  got=$(cat "$log")
+  assert_not_contains "$got" 'literal=1 arg=fresh order' \
+    "fm-send typed after a classified backend returned unknown"
+  assert_not_contains "$got" 'literal=0 arg=Enter' \
+    "fm-send submitted after a classified backend returned unknown"
+  assert_contains "$(cat "$err")" 'verdict=unknown' \
+    "classified-backend refusal did not preserve the unknown verdict"
+  pass "fm-send strict: unknown remains unsafe when a backend has a composer classifier"
+}
+
 test_remote_send_uses_host_local_composer_check() {
   local dir fb home err log rc decoded
   dir="$TMP_ROOT/remote"; mkdir -p "$dir"
@@ -251,6 +307,7 @@ SH
   pass "fm-send strict: remote text reaches the host-local guarded sender"
 }
 
+test_composer_classifier_capability_matrix
 test_exact_lane_id_send_still_works
 test_unset_fm_home_fails
 test_unresolvable_target_does_not_tmux_fallback
@@ -258,5 +315,6 @@ test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
 test_fm_prefixed_herdr_session_is_an_explicit_target
 test_healthy_fm_id_send_still_works
+test_unknown_classified_composer_refuses_before_typing
 test_stale_composer_refuses_before_typing
 test_remote_send_uses_host_local_composer_check
