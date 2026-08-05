@@ -2073,7 +2073,11 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+} > "$STATE/$ID.meta" || exit 1
+# The explicit `|| exit 1` matters: bash 3.2 (stock macOS) does not trip
+# `set -e` on a compound command's failed redirection, which would let a
+# failed metadata publication sail on to a false "spawned" success while
+# the abort-cleanup trap stays disarmed forever.
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
