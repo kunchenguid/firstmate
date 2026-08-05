@@ -356,36 +356,36 @@ status_open_decisions_incremental() {  # <status-file>
   offset=0
   ident=''
   if [ -f "$cf" ] && [ -r "$cf" ] && [ ! -L "$cf" ]; then
-    cursor_data=$(LC_ALL=C command cat "$cf" 2>/dev/null) \
-      || { printf '%s' "$trusted_open"; return 0; }
-    first=${cursor_data%%$'\n'*}
-    case "$first" in
-      offset=*)
-        offset=${first#offset=}
-        case "$offset" in
-          ''|*[!0-9]*) offset=0 ;;
-          *)
-            case "$cursor_data" in
-              *$'\n'*)
-                rest=${cursor_data#*$'\n'}
-                ident_line=${rest%%$'\n'*}
-                case "$ident_line" in
-                  ident=*)
-                    ident=${ident_line#ident=}
-                    case "$rest" in
-                      *$'\n'*) open=${rest#*$'\n'} ;;
-                    esac
-                    trusted_open=$open
-                    ;;
-                  *) offset=0 ;;
-                esac
-                ;;
-              *) offset=0 ;;
-            esac
-            ;;
-        esac
-        ;;
-    esac
+    if cursor_data=$(LC_ALL=C command cat "$cf" 2>/dev/null); then
+      first=${cursor_data%%$'\n'*}
+      case "$first" in
+        offset=*)
+          offset=${first#offset=}
+          case "$offset" in
+            ''|*[!0-9]*) offset=0 ;;
+            *)
+              case "$cursor_data" in
+                *$'\n'*)
+                  rest=${cursor_data#*$'\n'}
+                  ident_line=${rest%%$'\n'*}
+                  case "$ident_line" in
+                    ident=*)
+                      ident=${ident_line#ident=}
+                      case "$rest" in
+                        *$'\n'*) open=${rest#*$'\n'} ;;
+                      esac
+                      trusted_open=$open
+                      ;;
+                    *) offset=0 ;;
+                  esac
+                  ;;
+                *) offset=0 ;;
+              esac
+              ;;
+          esac
+          ;;
+      esac
+    fi
   fi
 
   # A stat/size-read failure is a genuine I/O error, not "the file is empty" -

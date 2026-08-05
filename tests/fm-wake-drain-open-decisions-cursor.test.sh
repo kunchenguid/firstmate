@@ -227,7 +227,51 @@ SH
   pass "a failed incremental read preserves the persisted open set instead of silently returning empty"
 }
 
+test_cursor_cache_read_failure_refolds_authoritative_status() {
+  local dir state fakebin statusfile cursor out probe real_cat status_bytes probe_bytes
+  dir=$(make_case cursor-cache-read-failure)
+  state="$dir/state"
+  fakebin="$dir/failbin"
+  mkdir -p "$fakebin"
+  statusfile="$state/task5.status"
+  cursor="$state/.task5.open-decisions-cursor"
+  out="$dir/drain.out"
+  probe="$dir/probe.tsv"
+  real_cat=$(command -v cat)
+
+  printf 'needs-decision [key=cache]: recover from authoritative status\n' > "$statusfile"
+  append_filler "$statusfile" 40 >/dev/null
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "bootstrap drain before the cursor-cache read failure failed"
+  grep -F 'task5' "$out" | grep -F '[key=cache]' | grep -F 'authoritative status' >/dev/null \
+    || fail "the decision did not surface before the cursor-cache read failure"
+  [ -s "$cursor" ] || fail "no cursor was persisted before the cursor-cache read failure"
+
+  printf 'working: appended before cache failure\n' >> "$statusfile"
+  status_bytes=$(LC_ALL=C wc -c < "$statusfile" | tr -d '[:space:]')
+  : > "$probe"
+  cat > "$fakebin/cat" <<SH
+#!/usr/bin/env bash
+if [ "\$#" -eq 1 ] && [ "\$1" = "$cursor" ]; then
+  exit 1
+fi
+exec "$real_cat" "\$@"
+SH
+  chmod +x "$fakebin/cat"
+
+  FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" PATH="$fakebin:$PATH" "$DRAIN" > "$out" \
+    || fail "wake drain failed instead of refolding after the cursor-cache read failure"
+  grep -F 'task5' "$out" | grep -F '[key=cache]' | grep -F 'authoritative status' >/dev/null \
+    || fail "the cursor-cache read failure hid the decision instead of refolding status: $(command cat "$out")"
+  probe_bytes=$(last_probe_bytes "$probe" "$statusfile")
+  [ "$probe_bytes" = "$status_bytes" ] \
+    || fail "the cursor-cache read failure read $probe_bytes bytes, expected a full $status_bytes-byte status refold"
+
+  pass "a cursor-cache read failure refolds the authoritative status file without hiding an open decision"
+}
+
 test_truncated_log_falls_back_to_a_full_refold_not_a_dropped_decision
 test_same_size_rewrite_is_detected_via_inode_identity
 test_read_failure_never_silently_returns_empty
+test_cursor_cache_read_failure_refolds_authoritative_status
 test_buried_decision_survives_many_growing_drains_and_resolution_clears_it
