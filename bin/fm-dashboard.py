@@ -135,6 +135,7 @@ class DashboardStore:
         self.last_error: str | None = None
         self.last_success_at: str | None = None
         self.initialized = bool(self.snapshot)
+        self.status_sources: dict[str, Path] = {}
 
     def _load_snapshot(self) -> dict[str, object]:
         try:
@@ -195,6 +196,7 @@ class DashboardStore:
             if isinstance(row, dict) and row.get("id")
         }
         tasks = []
+        status_sources: dict[str, Path] = {}
         for row in fleet.get("in_flight", []):
             if not isinstance(row, dict):
                 continue
@@ -204,6 +206,8 @@ class DashboardStore:
             meta_value = str(path_row.get("meta", ""))
             status_path = Path(status_value) if status_value else None
             meta_path = Path(meta_value) if meta_value else None
+            if status_path:
+                status_sources[task_id] = status_path
             age = file_age(status_path) if status_path else None
             if age is None and meta_path:
                 age = file_age(meta_path)
@@ -237,6 +241,44 @@ class DashboardStore:
                     "endpoint": endpoint,
                 }
             )
+        for row in fleet.pop("secondmate_work", []):
+            if not isinstance(row, dict):
+                continue
+            home_id = str(row.get("home_id", ""))
+            child_id = str(row.get("id", ""))
+            home_value = row.get("home")
+            if not home_id or not child_id or not isinstance(home_value, str):
+                continue
+            home_path = Path(home_value)
+            if not home_path.is_absolute():
+                continue
+            task_id = f"{home_id}/{child_id}"
+            status_path = home_path / "state" / f"{child_id}.status"
+            status_sources[task_id] = status_path
+            age = file_age(status_path)
+            state = str(row.get("state", "unknown"))
+            if state in {"done", "failed"}:
+                attention = "terminal"
+            elif state == "paused":
+                attention = "paused"
+            elif age is None:
+                attention = "unknown"
+            elif age >= self.stale_seconds:
+                attention = "possible-wedge" if state == "working" else "stale"
+            else:
+                attention = "fresh"
+            tasks.append(
+                {
+                    "id": task_id,
+                    "kind": row.get("kind"),
+                    "phase": state,
+                    "doing": row.get("doing"),
+                    "last_update_age_seconds": age,
+                    "attention": attention,
+                    "endpoint": None,
+                }
+            )
+        self.status_sources = status_sources
         service = {
             "state": "degraded" if self.last_error else "ready",
             "snapshot_error": self.last_error,
@@ -333,9 +375,12 @@ class DashboardStore:
     def _scan_status_events(self) -> None:
         self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
         changed = False
+        status_paths = {
+            status_path.stem: status_path for status_path in sorted(self.state.glob("*.status"))
+        }
+        status_paths.update(self.status_sources)
         with self.lock:
-            for status_path in sorted(self.state.glob("*.status")):
-                task_id = status_path.stem
+            for task_id, status_path in sorted(status_paths.items()):
                 try:
                     size = status_path.stat().st_size
                 except OSError:
@@ -519,7 +564,6 @@ def serve(args: argparse.Namespace) -> int:
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     httpd.store = store  # type: ignore[attr-defined]
     httpd.daemon_threads = True
-    store.refresh()
     store.pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
     os.chmod(store.pid_path, 0o600)
     atomic_json_write(

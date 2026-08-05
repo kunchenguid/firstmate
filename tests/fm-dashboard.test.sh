@@ -49,6 +49,31 @@ EOF
   printf '%s\n' "$home"
 }
 
+make_active_secondmate() {
+  local home=$1 mate=$2 gen
+  mkdir -p "$mate/state" "$mate/data" "$mate/config" "$mate/projects/child" "$mate/bin"
+  printf '# Firstmate fixture\n' > "$mate/AGENTS.md"
+  printf 'mate\n' > "$mate/.fm-secondmate-home"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] child - Active child (repo: local) (kind: ship) (since 2026-08-04)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$mate/state/child.meta" \
+    "window=firstmate:fm-child" "worktree=$mate/projects/child" \
+    "project=local" "harness=claude" "kind=ship" "mode=no-mistakes"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$mate/state" child)
+  "$ROOT/bin/fm-busy-event.sh" apply "$mate/state" child busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  printf 'working [key=child]: active child\n' > "$mate/state/child.status"
+  printf -- '- mate - fixture domain (home: %s; scope: fixture; projects: local; added 2026-08-04)\n' \
+    "$mate" >> "$home/data/secondmates.md"
+  fm_write_secondmate_meta "$home/state/mate.meta" "$mate" "firstmate:fm-mate" local claude
+}
+
 start_dashboard() {
   local home=$1 output
   output=$(FM_HOME="$home" \
@@ -64,6 +89,18 @@ start_dashboard() {
 
 api_snapshot() {
   curl -fsS "${DASHBOARD_URL%/}/api/snapshot"
+}
+
+wait_for_snapshot() {
+  local i=0
+  while [ "$i" -lt 40 ]; do
+    if api_snapshot | jq -e '.schema == "fm-dashboard-snapshot.v1"' >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  fail "dashboard did not publish its initial snapshot"
 }
 
 test_public_launcher_snapshot_and_health() {
@@ -92,6 +129,7 @@ test_status_event_cursor_and_restart_replay() {
   local home stream replay output2 pid2 i
   home=$(make_home replay)
   start_dashboard "$home"
+  wait_for_snapshot
   printf 'done [key=dashboard]: event arrived token=dashboard-sentinel\n' >> "$home/state/dashboard-task.status"
   sleep 0.4
   stream=$(curl -N -fsS --max-time 2 "${DASHBOARD_URL%/}/events?since=0" || true)
@@ -144,6 +182,29 @@ test_snapshot_failure_is_not_healthy() {
   pass "snapshot failures mark the observation stale instead of presenting old health"
 }
 
+test_secondmate_child_work_and_events() {
+  local home mate out stream
+  home=$(make_home secondmate)
+  : > "$home/data/secondmates.md"
+  mate="$TMP_ROOT/secondmate-home"
+  make_active_secondmate "$home" "$mate"
+  start_dashboard "$home"
+  sleep 1
+  out=$(api_snapshot)
+  printf '%s' "$out" | jq -e '
+    .tasks | any(.[]; .id == "mate/child" and .kind == "ship" and .phase == "working")
+  ' >/dev/null || fail "validated secondmate child was not rendered: $out"
+  printf 'working [key=child]: child event arrived\n' >> "$mate/state/child.status"
+  sleep 0.4
+  stream=$(curl -N -fsS --max-time 2 "${DASHBOARD_URL%/}/events?since=0" || true)
+  printf '%s' "$stream" | grep -F '"task_id": "mate/child"' >/dev/null \
+    || fail "secondmate child status event was not delivered: $stream"
+  printf '%s' "$stream" | grep -F 'child event arrived' >/dev/null \
+    || fail "secondmate child status summary was not delivered: $stream"
+  pass "validated secondmate child work and status events are visible"
+}
+
 test_public_launcher_snapshot_and_health
 test_status_event_cursor_and_restart_replay
 test_snapshot_failure_is_not_healthy
+test_secondmate_child_work_and_events

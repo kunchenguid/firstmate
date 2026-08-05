@@ -35,6 +35,7 @@ For a systemd user session, create the unit manually with an absolute path to th
 Description=Firstmate local dashboard
 
 [Service]
+Environment=FM_HOME=/absolute/path/to/firstmate-home
 ExecStart=/absolute/path/to/firstmate/bin/fm-dashboard.sh serve --no-prs
 Restart=on-failure
 
