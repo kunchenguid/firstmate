@@ -139,7 +139,9 @@
 #   makes git refuse the work-tree operation `treehouse get` starts with, so its
 #   worktree is leased by this script instead and the pane is only told to cd into
 #   it - see lease_bare_clone_worktree. The clone's configuration is never written,
-#   and both paths converge on the same settle loop and isolation assertion.
+#   and both paths converge on the same settle loop and isolation assertion; the
+#   leased path additionally pins the settled path to the worktree it leased, and
+#   any abort before the meta write returns that durable lease to the pool.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -635,6 +637,13 @@ BACKEND=
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+# Set only while this process holds a durable treehouse lease that no state file
+# records yet. `treehouse get --lease` hands out a worktree that is never pruned
+# and never handed to a later get, and fm-teardown.sh can only release a task
+# that has a state/<id>.meta, so every abort between the lease and the meta write
+# would otherwise burn a pool slot with no firstmate command able to free it.
+LEASED_WT=
+LEASED_WT_REAL=
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -679,6 +688,7 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  local leased_wt=
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -747,6 +757,15 @@ spawn_abort_cleanup() {
           } > "$STATE/$ID.meta" 2>/dev/null || true
         fi
       fi
+    fi
+  fi
+  if [ -n "${LEASED_WT:-}" ]; then
+    leased_wt=$LEASED_WT
+    LEASED_WT=
+    # --if-lease-holder makes the release a no-op unless this task still owns the
+    # lease, so a concurrent re-lease of the same pool tree cannot be stolen.
+    if ! ( cd "$PROJ_ABS" && treehouse return --force --if-lease-holder "$ID" "$leased_wt" ) >/dev/null 2>&1; then
+      echo "warning: could not release the worktree leased for $ID; the pool slot stays leased until you run 'treehouse return --force $leased_wt' from $PROJ_ABS" >&2
     fi
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
@@ -2208,6 +2227,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   if project_is_bare_flagged; then
     ACQUIRE_SOURCE='treehouse get --lease'
     LEASED_WT=$(lease_bare_clone_worktree) || exit 1
+    LEASED_WT_REAL=$(real_path_or_raw "$LEASED_WT")
     spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$LEASED_WT")"
   else
     spawn_send_text_line "$WT_TARGET" 'treehouse get'
@@ -2255,6 +2275,22 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   if [ -z "$WT" ]; then
     echo "error: $ACQUIRE_SOURCE did not enter a worktree within 60s; inspect window $T" >&2
     exit 1
+  fi
+
+  # On the leased path the correct worktree is already known, so pin the settled
+  # path to it. The two-consecutive-reads guard above makes a transient stale
+  # pane path unlikely, not impossible, and such a path resolves to a real,
+  # distinct worktree root that validate_spawn_worktree accepts - which would
+  # record a worktree treehouse never leased for this task while the leased one
+  # stayed leased with nobody to return it. Fail closed instead; the abort
+  # cleanup releases the lease. The ordinary path has no such expectation and
+  # keeps its existing behaviour.
+  if [ -n "$LEASED_WT" ]; then
+    SETTLED_WT_REAL=$(real_path_or_raw "$WT")
+    if [ "$SETTLED_WT_REAL" != "$LEASED_WT_REAL" ]; then
+      echo "error: $ACQUIRE_SOURCE leased '$LEASED_WT' (resolved '$LEASED_WT_REAL') for $ID but window $T settled in '$WT' (resolved '$SETTLED_WT_REAL'); refusing to launch in a worktree that was never leased for this task. Inspect window $T" >&2
+      exit 1
+    fi
   fi
 
   validate_spawn_worktree "$ACQUIRE_SOURCE" "$T"
@@ -2678,6 +2714,9 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
 fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+# From here the task's meta records the worktree, so fm-teardown.sh owns the
+# lease and a later abort must not return it out from under a live task.
+LEASED_WT=
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

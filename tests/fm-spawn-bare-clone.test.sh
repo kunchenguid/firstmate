@@ -58,11 +58,14 @@ case "${1:-}" in
     # bare `treehouse get` line is the pane acquiring one itself. Either way the
     # simulated pane's reported cwd becomes the worktree, exactly as the real
     # pane's would.
+    # FM_FAKE_PANE_SETTLE stands in for a pane that settles somewhere other than
+    # the path it was sent to, which is the transient stale pane_current_path the
+    # settle loop guards against.
     case "$*" in
       *"cd "*)
-        printf '%s\n' "${FM_FAKE_LEASE_PATH:-}" > "$FM_FAKE_PANE_PATHFILE" ;;
+        printf '%s\n' "${FM_FAKE_PANE_SETTLE:-${FM_FAKE_LEASE_PATH:-}}" > "$FM_FAKE_PANE_PATHFILE" ;;
       *"treehouse get"*)
-        printf '%s\n' "${FM_FAKE_LEASE_PATH:-}" > "$FM_FAKE_PANE_PATHFILE" ;;
+        printf '%s\n' "${FM_FAKE_PANE_SETTLE:-${FM_FAKE_LEASE_PATH:-}}" > "$FM_FAKE_PANE_PATHFILE" ;;
     esac
     exit 0
     ;;
@@ -116,6 +119,12 @@ if [ "${1:-}" = get ]; then
   printf '%s\n' "$FM_FAKE_LEASE_PATH"
   exit 0
 fi
+if [ "${1:-}" = return ]; then
+  # Real `treehouse return` takes an explicit path and needs no work tree of its
+  # own, so it resolves against a bare-flagged clone too. The argv log above is
+  # what the test asserts on.
+  exit 0
+fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
@@ -128,16 +137,22 @@ SH
 # the untracked file is what makes an absolute GIT_WORK_TREE override visibly
 # corrupt the pool-cleanliness check above.
 make_bare_case() {
-  local name=$1 id=$2 bare=$3 lease_support=$4 case_dir home proj wt fakebin
+  local name=$1 id=$2 bare=$3 lease_support=$4 case_dir home proj wt stale fakebin
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/pool-worktree"
+  stale="$case_dir/stale-worktree"
   fakebin=$(make_bare_fakebin "$case_dir/fake" "$lease_support")
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   printf 'codex\n' > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "pool-$name"
   git -C "$wt" checkout --detach -q
+  # A second real, isolated worktree: the stale pane path that passes both the
+  # non-project comparison and validate_spawn_worktree, so only the lease pin can
+  # catch it.
+  git -C "$proj" worktree add --quiet -b "stale-$name" "$stale"
+  git -C "$stale" checkout --detach -q
   if [ "$bare" = yes ]; then
     printf 'max_trees = 1\n' > "$proj/treehouse.toml"
     git -C "$proj" config core.bare true
@@ -145,16 +160,17 @@ make_bare_case() {
   mkdir -p "$home/data/$id"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   touch "$home/state/.last-watcher-beat"
-  printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
+  printf '%s\n' "$case_dir|$home|$proj|$wt|$stale|$fakebin"
 }
 
 read_bare_record() {
-  IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR <<EOF
+  IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR STALE_DIR FAKEBIN_DIR <<EOF
 $1
 EOF
   SENDKEYS_LOG="$CASE_DIR/sendkeys.log"
   TREEHOUSE_LOG="$CASE_DIR/treehouse.log"
   PANE_PATHFILE="$CASE_DIR/pane-path"
+  PANE_SETTLE=""
   : > "$SENDKEYS_LOG"
   : > "$TREEHOUSE_LOG"
   rm -f "$PANE_PATHFILE"
@@ -167,6 +183,7 @@ run_bare_spawn() {
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_LEASE_PATH="$WT_DIR" FM_FAKE_PANE_PROJECT="$PROJ_DIR" \
+    FM_FAKE_PANE_SETTLE="$PANE_SETTLE" \
     FM_FAKE_PANE_PATHFILE="$PANE_PATHFILE" FM_FAKE_SENDKEYS_LOG="$SENDKEYS_LOG" \
     FM_FAKE_TREEHOUSE_LOG="$TREEHOUSE_LOG" \
     PATH="$FAKEBIN_DIR:$PATH" \
@@ -195,7 +212,45 @@ test_bare_flagged_clone_spawns() {
   # inherit the GIT_WORK_TREE override into the worker's own environment.
   assert_grep "get --lease" "$TREEHOUSE_LOG" \
     "worktree was not acquired with treehouse get --lease"
+  # Once the meta records the worktree, fm-teardown.sh owns the lease: a spawn
+  # that reached that point must not hand the pool slot back under the live task.
+  assert_no_grep "return --force" "$TREEHOUSE_LOG" \
+    "successful spawn returned the lease out from under the live task"
   pass "a bare-flagged clone yields an isolated worktree leased by firstmate"
+}
+
+# A pane that settles somewhere other than the leased worktree must not be
+# accepted: the leased tree would stay leased with nobody to return it and the
+# task would run in a tree treehouse never handed to it.
+test_settled_path_must_be_the_leased_worktree() {
+  local rec id out status
+  id='bare-stale-pane-b5'
+  rec=$(make_bare_case bare-stale "$id" yes yes)
+  read_bare_record "$rec"
+  PANE_SETTLE="$STALE_DIR"
+
+  out=$(run_bare_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a settled path that was never leased for the task"
+  assert_contains "$out" "$WT_DIR" "refusal did not name the leased worktree"
+  assert_contains "$out" "$STALE_DIR" "refusal did not name the observed worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" "refused spawn still recorded task metadata"
+  pass "a settled path other than the leased worktree is refused by name"
+}
+
+# Every abort before the meta write has to give the pool slot back: no state file
+# records the lease yet, so fm-teardown.sh can never release it.
+test_abort_before_meta_releases_the_lease() {
+  local rec id
+  id='bare-lease-release-b6'
+  rec=$(make_bare_case bare-release "$id" yes yes)
+  read_bare_record "$rec"
+  PANE_SETTLE="$STALE_DIR"
+
+  run_bare_spawn "$id" >/dev/null
+  assert_grep "return --force --if-lease-holder $id $WT_DIR" "$TREEHOUSE_LOG" \
+    "aborted spawn did not release the worktree it had leased"
+  pass "an abort before the meta write releases the durable lease"
 }
 
 # The deliberate flag is the whole reason this path exists: it must survive.
@@ -260,5 +315,7 @@ test_bare_flagged_clone_spawns
 test_bare_flag_survives_the_spawn
 test_non_bare_clone_path_is_unchanged
 test_bare_without_lease_support_refuses
+test_settled_path_must_be_the_leased_worktree
+test_abort_before_meta_releases_the_lease
 
 echo "# all fm-spawn-bare-clone tests passed"
