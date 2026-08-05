@@ -1693,7 +1693,7 @@ EOF
   pass "every PR in the final landed selection is live-verified"
 }
 
-test_landed_prs_require_live_merged_state() {
+test_landed_prs_normalize_supported_urls_and_require_live_merged_state() {
   local home fakebin json
   home=$(make_home landed-live-state)
   cat > "$home/data/backlog.md" <<'EOF'
@@ -1702,7 +1702,7 @@ test_landed_prs_require_live_merged_state() {
 ## Queued
 
 ## Done
-- [x] merged-pr - Merged PR https://github.com/kunchenguid/firstmate/pull/7 (repo: firstmate) (kind: ship) (merged 2026-07-11)
+- [x] merged-pr - Merged PR https://github.com/kunchenguid/firstmate/pull/7/ (repo: firstmate) (kind: ship) (merged 2026-07-11)
 - [x] open-pr - Open PR https://github.com/kunchenguid/firstmate/pull/9 (repo: firstmate) (kind: ship) (done 2026-07-11)
 - [x] unverifiable-pr - Unverifiable PR https://example.invalid/acme/repo/pull/10 (repo: firstmate) (kind: ship) (done 2026-07-11)
 - [x] local-completion - Local completion (repo: firstmate) (kind: scout) (done 2026-07-11)
@@ -1711,13 +1711,17 @@ EOF
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
     ([.landed[].id] | sort) == ["local-completion", "merged-pr"]
+      and (.landed | any(.id == "merged-pr"
+        and .artifact == "https://github.com/kunchenguid/firstmate/pull/7/"))
+      and (.candidate_prs | any(.url == "https://github.com/kunchenguid/firstmate/pull/7"
+        and .verification == "verified_live" and .state == "MERGED"))
       and (.candidate_prs | any(.url == "https://github.com/kunchenguid/firstmate/pull/9"
         and .verification == "verified_live" and .state == "OPEN"))
       and (.candidate_prs | any(.url == "https://example.invalid/acme/repo/pull/10"
         and .verification == "NOT_VERIFIABLE"))
       and (.omitted | any(.surface == "selected PR completion(s) excluded from landed by live forge state: 2"))
   ' >/dev/null || fail "local Done state substituted for live merged PR evidence: $json"
-  pass "landed PRs require live merged state while local completions remain visible"
+  pass "landed normalizes supported PR URLs while requiring live merged state"
 }
 
 test_landed_default_balances_dominant_and_sparse_homes() {
@@ -2417,7 +2421,7 @@ test_default_is_bounded_and_verifies_every_named_pr
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges
 test_every_final_landed_pr_is_live_verified
-test_landed_prs_require_live_merged_state
+test_landed_prs_normalize_supported_urls_and_require_live_merged_state
 test_actions_instances_preserve_forge_delimiters
 test_landed_default_balances_dominant_and_sparse_homes
 test_landed_default_refills_capacity_after_sparse_homes_exhaust
