@@ -33,6 +33,10 @@
 # the default-off path. print_route echoes the carrier the endpoint actually
 # holds, including for an already-alive endpoint that was not relaunched, so the
 # parent records the identity the agent really received rather than an intent.
+# Route output also echoes versioned proof of the endpoint's requested and
+# delivered model and effort. An alive endpoint without that proof is unverified
+# for ordinary launch and control but remains retireable; a dead or missing
+# endpoint can be relaunched to publish fresh proof.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

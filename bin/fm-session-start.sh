@@ -12,8 +12,10 @@
 # belong in a script, not in N agent turns.
 #
 # COMPOSITION, NOT DUPLICATION: this script calls fm-lock.sh, fm-bootstrap.sh,
-# and fm-wake-drain.sh as real subprocesses and prints their real output. It
-# never re-implements their logic; all sequencing/formatting logic added here
+# and fm-wake-drain.sh as real subprocesses and prints their real output.
+# It keeps subprocess stderr on stderr so launch warnings are neither swallowed
+# by command substitution nor reclassified as digest output.
+# It never re-implements their logic; all sequencing/formatting logic added here
 # stays local to this file. Those three scripts remain fully working
 # standalone with unchanged default behavior - other flows (fm-bootstrap.sh
 # install <tools> after consent, /updatefirstmate, the afk daemon, existing

@@ -143,11 +143,15 @@ The primary resolves the verified secondmate harness and optional model and effo
 All remote secondmates on one host share `fm-remote` and retain separate `2ndmate-<id>` workspaces inside it.
 An explicit request for any other backend is refused rather than honored, and the remote host refuses one too.
 An existing remote endpoint recorded in another Herdr session, including `default`, is classified as unverified and left untouched; launch, liveness recovery, control, and retirement refuse it until an operator explicitly migrates it instead of attempting a live cutover.
+A live endpoint is reused only when its endpoint record proves both the requested and delivered model and effort.
+An older live endpoint without that proof is unverified and remains untouched by ordinary launch and control, while guarded teardown remains available; after the endpoint is dead or missing, normal recovery relaunches it with fresh proof.
+If a current launch names a model or effort that differs from the live endpoint's recorded request, it refuses without restarting the endpoint or rewriting either metadata record.
 A launch after a host has drifted out of readiness fails with the doctor's own gap text instead of leaving a half-created endpoint.
 Raw launch commands are not accepted for remote secondmates.
 Backends that already refuse secondmate launch, currently Orca and cmux, remain unsupported on the remote host.
 
 Startup liveness recovery relaunches a dead or missing remote second mate through this same command, so recovery passes the same readiness gate rather than a weaker one.
+The unsupported-axis warning owned by [Harness support](configuration.md#harness-support) remains on stderr through both remote launch and startup recovery.
 
 Send routed requests normally:
 
