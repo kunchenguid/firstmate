@@ -780,6 +780,12 @@ assert_not_contains "$late_end_out" "armed: $lavish_late_id" \
   "arm printed a ready result for a session Lavish no longer lists"
 assert_contains "$late_end_out" "ended or was missing" \
   "a saturated-host ended verdict lost the target-session diagnostic"
+# Arm fails on Lavish's own listing rather than on the poll's verdict, so it
+# returns while the listener reconcile detached is still starting: the poll count
+# is recorded after arm has already exited. Waiting for that record is what makes
+# "exactly one poll" a fact about the listener instead of a race with it.
+wait_for "$LAVISH_LATE_COUNT" \
+  || fail "the late-ended session's listener never recorded a poll of its own"
 [ "$(cat "$LAVISH_LATE_COUNT")" = 1 ] \
   || fail "arm polled the late-ended session $(cat "$LAVISH_LATE_COUNT") times"
 assert_present "$HARMLATE/state/procevent/$lavish_late_id.source" \
