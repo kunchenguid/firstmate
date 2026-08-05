@@ -361,12 +361,18 @@ FM_BACKEND_HERDR_BLANK_WORKSPACE_LABEL=' '
 # match what the captain set on the live workspace byte for byte. A whitespace
 # label is therefore honored as written, and a completely empty file resolves to
 # one space. A control-character value warns and keeps the default rather than
-# failing a spawn over a purely visual setting.
+# failing a spawn over a purely visual setting, and an existing file this
+# process cannot read does the same: a broken config is a fault to surface, not
+# a deliberately blank label.
 fm_backend_herdr_workspace_label_override() {  # <config-dir>
   local config_dir=${1:-} file value
   [ -n "$config_dir" ] || return 1
   file="$config_dir/$FM_BACKEND_HERDR_WORKSPACE_LABEL_CONFIG"
   [ -f "$file" ] || return 1
+  if [ ! -r "$file" ]; then
+    echo "warning: $file: herdr workspace label exists but is unreadable; keeping the default \"firstmate\"" >&2
+    return 1
+  fi
   IFS= read -r value < "$file" 2>/dev/null || true
   value=${value%$'\r'}
   case "$value" in
@@ -2083,6 +2089,7 @@ fm_backend_herdr_assign_agent_name() {  # <session> <pane> <preferred> <fallback
   polls=${FM_BACKEND_HERDR_AGENT_NAME_POLLS:-20}
   interval=${FM_BACKEND_HERDR_AGENT_NAME_INTERVAL:-0.1}
   case "$polls" in ''|*[!0-9]*) polls=20 ;; esac
+  case "$interval" in ''|.|*[!0-9.]*|*.*.*) interval=0.1 ;; esac
   i=0
   while ! fm_backend_herdr_agent_registered "$session" "$pane"; do
     i=$((i + 1))

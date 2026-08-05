@@ -331,6 +331,22 @@ test_workspace_label_control_character_override_warns_and_keeps_default() {
   pass "fm_backend_herdr_workspace_label: a control-character label warns and keeps the default"
 }
 
+test_workspace_label_unreadable_override_warns_and_keeps_default() {
+  local home err
+  home="$TMP_ROOT/primary-home-override-unreadable"; mkdir -p "$home/config"
+  # An unreadable file is a broken config, not a deliberately blank label, so
+  # it must keep the default instead of silently relocating spawns into a
+  # blank-labeled workspace.
+  printf 'bridge\n' > "$home/config/herdr-workspace-label"
+  chmod 000 "$home/config/herdr-workspace-label"
+  err="$TMP_ROOT/primary-home-override-unreadable.err"
+  out=$( FM_HOME="$home" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT" 2>"$err" )
+  chmod 600 "$home/config/herdr-workspace-label"
+  [ "$out" = "firstmate" ] || fail "an unreadable override file should keep the default 'firstmate', got '$out'"
+  assert_contains "$(cat "$err")" "unreadable" "a skipped unreadable label should say why rather than fail silently"
+  pass "fm_backend_herdr_workspace_label: an unreadable override file warns and keeps the default"
+}
+
 test_workspace_label_secondmate_home_ignores_override() {
   local home
   home="$TMP_ROOT/secondmate-home-override"; mkdir -p "$home/config"
@@ -3820,6 +3836,25 @@ test_assign_agent_name_gives_up_when_no_agent_ever_registers() {
   pass "fm_backend_herdr_assign_agent_name: gives up within its bounded wait when no agent ever registers"
 }
 
+test_assign_agent_name_tolerates_a_malformed_poll_interval() {
+  local dir log resp fb err
+  dir="$TMP_ROOT/name-assign-badinterval"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # The first poll misses so the wait has to sleep once; a malformed interval
+  # must fall back to the default rather than reach sleep raw.
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"pane_id":"w1:p2","agent_status":"idle"}}}\n' > "$resp/2.out"
+  agent_list_json > "$resp/3.out"
+  printf '{"result":{"agent":{"pane_id":"w1:p2","name":"bosun"}}}\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  err="$dir/err"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_AGENT_NAME_POLLS=5 FM_BACKEND_HERDR_AGENT_NAME_INTERVAL='half a tick' \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_assign_agent_name fmtest w1:p2 "" cm1' "$ROOT" 2>"$err" )
+  [ "$out" = bosun ] || fail "a malformed poll interval must not derail naming, got '$out'"
+  [ ! -s "$err" ] || fail "a malformed interval must fall back to the default instead of reaching sleep raw"$'\n'"$(cat "$err")"
+  pass "fm_backend_herdr_assign_agent_name: a malformed poll interval falls back to the default"
+}
+
 test_name_primary_agent_skips_a_secondmate_home() {
   local dir log resp fb home
   dir="$TMP_ROOT/name-primary-secondmate"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -4499,6 +4534,7 @@ test_workspace_label_override_is_the_first_line_verbatim
 test_workspace_label_whitespace_override_is_honored_as_written
 test_workspace_label_empty_override_file_is_a_blank_label
 test_workspace_label_control_character_override_warns_and_keeps_default
+test_workspace_label_unreadable_override_warns_and_keeps_default
 test_workspace_label_secondmate_home_ignores_override
 test_workspace_label_override_follows_config_override_env
 test_cli_helper_sets_env_and_appends_trailing_session_flag
@@ -4653,6 +4689,7 @@ test_assign_agent_name_names_a_registered_agent
 test_assign_agent_name_uses_the_secondmate_id_instead_of_the_roster
 test_assign_agent_name_fails_open_when_the_rename_is_refused
 test_assign_agent_name_gives_up_when_no_agent_ever_registers
+test_assign_agent_name_tolerates_a_malformed_poll_interval
 test_name_primary_agent_skips_a_secondmate_home
 test_name_primary_agent_names_an_unnamed_launcher_pane
 test_name_primary_agent_leaves_an_existing_name_alone
