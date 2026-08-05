@@ -325,6 +325,19 @@ outcome: passed
 EOF
 }
 
+run_checks_passed() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/1"
+  findings: none
+outcome: checks-passed
+EOF
+}
+
 run_failed() {  # <branch>
   cat <<EOF
 run:
@@ -335,6 +348,19 @@ run:
   pr: ""
   findings: none
 outcome: failed
+EOF
+}
+
+run_cancelled() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: cancelled
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+outcome: cancelled
 EOF
 }
 
@@ -718,6 +744,20 @@ test_terminal_passed() {
   pass "terminal passed run is authoritative"
 }
 
+test_terminal_checks_passed() {
+  reset_fakes
+  local d; d=$(new_case checks-passed)
+  make_repo_on_branch "$d/wt" fm/feat-checks-passed
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/checks-passed.meta" "window=fm:fm-checks-passed" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-checks-passed)"
+  local out; out=$(run_crew_state "$d" checks-passed)
+  assert_contains "$out" "state: done" "checks-passed run -> done"
+  assert_contains "$out" "source: run-step" "checks-passed -> run-step source"
+  assert_contains "$out" "checks green: PR ready for review" "checks-passed keeps review-ready detail"
+  pass "terminal checks-passed run is authoritative"
+}
+
 test_terminal_failed() {
   reset_fakes
   local d; d=$(new_case failed)
@@ -729,6 +769,20 @@ test_terminal_failed() {
   assert_contains "$out" "state: failed" "failed run -> failed"
   assert_contains "$out" "source: run-step" "failed -> run-step source"
   pass "terminal failed run is authoritative"
+}
+
+test_terminal_cancelled() {
+  reset_fakes
+  local d; d=$(new_case cancelled)
+  make_repo_on_branch "$d/wt" fm/feat-cancelled
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/cancelled.meta" "window=fm:fm-cancelled" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_cancelled fm/feat-cancelled)"
+  local out; out=$(run_crew_state "$d" cancelled)
+  assert_contains "$out" "state: failed" "cancelled run -> failed"
+  assert_contains "$out" "source: run-step" "cancelled -> run-step source"
+  assert_contains "$out" "run cancelled" "cancelled keeps terminal detail"
+  pass "terminal cancelled run is authoritative"
 }
 
 # (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
@@ -1545,7 +1599,9 @@ test_ci_fixing_after_green_stays_working
 test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
+test_terminal_checks_passed
 test_terminal_failed
+test_terminal_cancelled
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
