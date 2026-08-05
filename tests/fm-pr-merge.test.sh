@@ -17,6 +17,9 @@
 #   (i) a merge command that succeeds without the PR merging is not success
 #   (j) a queued auto-merge is its own non-merged outcome, never "done"
 #   (k) a merge that lands just after the command returns is still confirmed
+#   (l) a torn-down task's PR still merges and records the merge durably
+#   (m) a merge queue still reports not-merged for a torn-down task
+#   (n) a present but irregular meta is still refused, never read as teardown
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -32,7 +35,10 @@ make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$fakebin"
+  mkdir -p "$case_dir/state" "$fakebin" "$case_dir/data/task-x1"
+  # fm-spawn.sh refuses to launch a task without this brief, so every real task
+  # has one; it is what tells a torn-down task apart from an unknown task id.
+  printf '%s\n' '# brief' > "$case_dir/data/task-x1/brief.md"
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=fm-task-x1" \
     "worktree=$case_dir/wt" \
@@ -45,8 +51,21 @@ make_case() {
   printf '%s\n' "$case_dir"
 }
 
+# Build a sandbox for a task that has already been torn down: bin/fm-teardown.sh
+# removes state/<id>.meta but never touches the durable data/<id>/ record, so
+# this is the exact on-disk shape a finished, cleaned-up task leaves behind.
+# Echoes the case dir.
+make_torn_down_case() {
+  local name=$1 case_dir
+  case_dir="$TMP_ROOT/$name"
+  mkdir -p "$case_dir/state" "$case_dir/fakebin" "$case_dir/data/task-x1"
+  printf '%s\n' '# brief' > "$case_dir/data/task-x1/brief.md"
+  printf '%s\n' "$case_dir"
+}
+
 # gh-axi mock recording every invocation to a log file, and gh mock answering
-# headRefOid for fm-pr-check.sh's pr_head lookup. Args: case_dir head_sha
+# headRefOid for fm-pr-check.sh's pr_head lookup and mergeCommit for the merge
+# record. Args: case_dir head_sha
 add_gh_mocks() {
   local case_dir=$1 head=$2
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
@@ -60,6 +79,7 @@ case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+      *mergeCommit*) printf '%s\n' 'ccccccccccccccccccccccccccccccccccccccc1' ; exit 0 ;;
       *state*) printf '%s\n' MERGED ; exit 0 ;;
     esac
     ;;
@@ -155,6 +175,7 @@ run_pr_merge() {
   # cannot hang a test; one retry is enough to cover the late-landing case.
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   FM_TEST_STATE_PROBE="$case_dir/state-probe" \
   FM_PR_MERGE_VERIFY_TIMEOUT=1 \
@@ -189,7 +210,91 @@ test_records_pr_and_head_before_merging() {
     "records-before-merge: pr_head= was not recorded"
   grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
     || fail "records-before-merge: gh-axi pr merge was not invoked with number, --repo, and default --squash"
+  assert_grep 'task live at merge' "$case_dir/data/task-x1/merge.md" \
+    "records-before-merge: the confirmed merge was not recorded durably for a live task"
   pass "fm-pr-merge records pr= and pr_head= before invoking gh-axi pr merge"
+}
+
+test_torn_down_task_merges_and_records() {
+  local case_dir rc
+  case_dir=$(make_torn_down_case torn-down-merge)
+  add_gh_mocks "$case_dir" deadbeefcafefeed0000000000000000deadbeef
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/41 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "torn-down-merge: a finished task's PR should still merge through the sanctioned path"
+  assert_grep 'merged: https://github.com/example/repo/pull/41' "$case_dir/stdout" \
+    "torn-down-merge: the confirmed merge was not announced"
+  grep -qxF 'pr merge 41 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "torn-down-merge: gh-axi pr merge was not invoked with number, --repo, and default --squash"
+  assert_grep 'https://github.com/example/repo/pull/41 confirmed merged at the forge' \
+    "$case_dir/data/task-x1/merge.md" "torn-down-merge: the merge was not recorded durably"
+  assert_grep 'merge commit ccccccccccccccccccccccccccccccccccccccc1' \
+    "$case_dir/data/task-x1/merge.md" "torn-down-merge: the merge commit was not recorded"
+  assert_grep 'task torn-down at merge' "$case_dir/data/task-x1/merge.md" \
+    "torn-down-merge: the record did not say the task was already torn down"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "torn-down-merge: merging recreated task metadata teardown had removed"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "torn-down-merge: merging armed a merge poll for an already torn-down task"
+  pass "fm-pr-merge merges a torn-down task's PR and records the merge durably"
+}
+
+test_torn_down_queued_merge_is_not_merged() {
+  local case_dir rc
+  case_dir=$(make_torn_down_case torn-down-merge-queue)
+  # A merge queue looks exactly like this: gh-axi accepts and reports the merge,
+  # while the PR itself stays open until the queue lands it.
+  add_gh_mocks_merge_not_landed "$case_dir" OPEN
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/43 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 3 "$rc" "torn-down-merge-queue: a queued merge must stay the distinct not-merged outcome"
+  assert_grep 'is not merged' "$case_dir/stderr" \
+    "torn-down-merge-queue: refusal did not say the PR is not merged"
+  assert_grep 'has not landed' "$case_dir/stderr" \
+    "torn-down-merge-queue: refusal did not warn that the work has not landed"
+  assert_no_grep 'merged: https://github.com/example/repo/pull/43' "$case_dir/stdout" \
+    "torn-down-merge-queue: a queued merge was announced as merged"
+  assert_absent "$case_dir/data/task-x1/merge.md" \
+    "torn-down-merge-queue: a queued merge was written to the durable merge record"
+  pass "fm-pr-merge still reports a queued merge-queue merge as not merged for a torn-down task"
+}
+
+test_irregular_meta_is_not_read_as_teardown() {
+  local case_dir rc
+  case_dir=$(make_case symlinked-meta)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 1111111111111111111111111111111111111111
+  : > "$case_dir/gh-axi.log"
+  mv "$case_dir/state/task-x1.meta" "$case_dir/state/task-x1.meta.real"
+  ln -s task-x1.meta.real "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/45 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "symlinked-meta: a symlinked meta should still be refused"
+  assert_grep 'error: task metadata is unavailable' "$case_dir/stderr" \
+    "symlinked-meta: refusal did not explain the unusable meta"
+  assert_no_grep 'no durable record' "$case_dir/stderr" \
+    "symlinked-meta: a present but irregular meta was reported as an unknown task"
+  [ ! -s "$case_dir/gh-axi.log" ] || fail "symlinked-meta: gh-axi pr merge was invoked"
+  assert_absent "$case_dir/data/task-x1/merge.md" \
+    "symlinked-meta: a refused merge was recorded"
+  pass "fm-pr-merge refuses a present but irregular meta instead of reading it as teardown"
 }
 
 test_merge_failure_propagates_after_recording() {
@@ -243,10 +348,12 @@ test_missing_meta_refuses_before_merge() {
   expect_code 1 "$rc" "missing-meta: fm-pr-merge should refuse"
   assert_grep 'error: task metadata is unavailable' "$case_dir/stderr" \
     "missing-meta: refusal did not explain missing meta"
+  assert_grep 'no durable record of missing-x1 exists' "$case_dir/stderr" \
+    "missing-meta: refusal did not distinguish an unknown task from a torn-down one"
   [ ! -s "$case_dir/gh-axi.log" ] || fail "missing-meta: gh-axi pr merge was invoked"
   assert_absent "$case_dir/state/missing-x1.check.sh" \
     "missing-meta: fm-pr-check should not arm a poll for an unknown task"
-  pass "fm-pr-merge refuses before merging when task meta is missing"
+  pass "fm-pr-merge refuses before merging when a task has no durable record at all"
 }
 
 test_malformed_url_refuses_before_merge() {
@@ -435,6 +542,9 @@ test_merge_confirmed_when_it_lands_late() {
 }
 
 test_records_pr_and_head_before_merging
+test_torn_down_task_merges_and_records
+test_torn_down_queued_merge_is_not_merged
+test_irregular_meta_is_not_read_as_teardown
 test_merge_failure_propagates_after_recording
 test_unmerged_pr_is_not_reported_as_merged
 test_queued_auto_merge_is_its_own_outcome

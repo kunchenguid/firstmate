@@ -55,3 +55,4 @@ An unreadable state is treated as not merged rather than assumed landed.
 ## Regression coverage
 
 `tests/fm-pr-merge.test.sh` covers the confirmation, including a merge command that exits zero without the pull request merging, a queued auto-merge reported as its own non-merged outcome, and a merge that lands just after the command returns.
+It also pins the confirmation to the path a torn-down task takes, where no task metadata exists to record into: a merge queue that accepts the merge while the pull request stays open is still the distinct not-merged outcome and writes no merge record.

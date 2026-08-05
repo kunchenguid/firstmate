@@ -10,8 +10,38 @@
 #
 # A zero exit means the PR was confirmed merged at the forge, never merely that
 # the merge command was accepted. Exit 3 is the distinct "not merged" outcome,
-# including an auto-merge that is only queued, so a caller can never read a
-# queued or rejected merge as landed work.
+# including an auto-merge that is only queued or waiting in a merge queue, so a
+# caller can never read a queued or rejected merge as landed work.
+#
+# The pr=/pr_head= recording above exists for one consumer: bin/fm-teardown.sh,
+# which must prove a worktree's work landed before discarding it. That consumer
+# only exists while the task does, and teardown removes state/<id>.meta itself,
+# so requiring the metadata unconditionally made the sanctioned merge path stop
+# working at exactly the point the work was finished. This script therefore
+# resolves the task against durable evidence instead of assuming meta exists:
+#
+#   meta present   - live task, unchanged path: record pr=/pr_head= through
+#                    bin/fm-pr-check.sh and refuse if that recording fails.
+#   meta absent,   - torn-down task: nothing is left to discard unsafely, so
+#   brief present    there is no landed-work check to satisfy. The merge is
+#                    still confirmed at the forge and is recorded durably (see
+#                    below) rather than into state teardown already removed.
+#   neither        - unknown task, refused exactly as before.
+#
+# data/<id>/brief.md is the evidence because bin/fm-spawn.sh refuses to launch
+# without it and no teardown path removes it, while state/<id>.meta is written
+# by spawn and removed only by teardown. Meta present but not a plain file is
+# still refused, so tampering is never read as teardown. A live task whose meta
+# was lost some other way also lands here; that task can no longer be torn down
+# at all (teardown reads the same file), so no landed-work guard is bypassed.
+#
+# Every confirmed merge appends one line to data/<id>/merge.md, which survives
+# teardown. That record is history, not authority: a merge that is confirmed at
+# the forge but cannot be recorded still exits 0 with a warning, because the
+# exit code describes the forge's state and nothing else.
+#
+# The ordinary lifecycle still merges before cleanup; this path exists so an
+# out-of-order teardown cannot force a hand merge at the forge.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
 set -eu
 
@@ -19,6 +49,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -78,16 +109,35 @@ reject_repo_overrides "$@" || exit 1
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
-if [ ! -f "$META" ] || [ -L "$META" ]; then
-  echo "error: task metadata is unavailable" >&2
+BRIEF="$DATA/$ID/brief.md"
+
+# Resolve the task against durable evidence. Only the absence of the metadata
+# file counts as teardown; a present-but-irregular meta stays a refusal so a
+# symlink or a directory can never be read as a finished task.
+if [ -e "$META" ] || [ -L "$META" ]; then
+  if [ ! -f "$META" ] || [ -L "$META" ]; then
+    echo "error: task metadata is unavailable" >&2
+    exit 1
+  fi
+  TASK_STATE=live
+elif [ -f "$BRIEF" ] && [ ! -L "$BRIEF" ]; then
+  TASK_STATE=torn-down
+else
+  echo "error: task metadata is unavailable and no durable record of $ID exists" >&2
   exit 1
 fi
 
-"$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
-grep -qxF "pr=$URL" "$META" || {
-  echo "error: PR metadata recording failed" >&2
-  exit 1
-}
+# A live task still records the PR before merging, because its worktree has not
+# been discarded yet and teardown's landed-work check reads that record. A
+# torn-down task has no worktree left to protect and no metadata to record
+# into, so it skips this step rather than re-arming state teardown removed.
+if [ "$TASK_STATE" = live ]; then
+  "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
+  grep -qxF "pr=$URL" "$META" || {
+    echo "error: PR metadata recording failed" >&2
+    exit 1
+  }
+fi
 
 merge_args=()
 if ! caller_has_merge_method "$@"; then
@@ -114,8 +164,9 @@ case "$VERIFY_INTERVAL" in ''|*[!0-9]*|0) VERIFY_INTERVAL=2 ;; esac
 MERGED=
 ELAPSED=0
 while :; do
-  STATE=$(gh pr view "$URL" --json state -q .state 2>/dev/null) || STATE=
-  if [ "$STATE" = MERGED ]; then
+  # PR_STATE, not STATE: the state directory is still needed after this loop.
+  PR_STATE=$(gh pr view "$URL" --json state -q .state 2>/dev/null) || PR_STATE=
+  if [ "$PR_STATE" = MERGED ]; then
     MERGED=yes
     break
   fi
@@ -133,4 +184,20 @@ if [ -z "$MERGED" ]; then
   echo "error: the task's work has not landed; do not tear it down" >&2
   exit 3
 fi
+
+# Only now, past the forge confirmation, is there a merge to record. The merge
+# commit is read best-effort and is supplementary: it never gates the outcome,
+# and an unreadable one is recorded as unavailable rather than retried.
+MERGE_COMMIT=$(gh pr view "$URL" --json mergeCommit -q .mergeCommit.oid 2>/dev/null) || MERGE_COMMIT=
+fm_pr_head_valid "$MERGE_COMMIT" || MERGE_COMMIT=unavailable
+
+record_merge() {
+  local dir="$DATA/$ID" record="$DATA/$ID/merge.md"
+  mkdir -p "$dir" || return 1
+  [ -s "$record" ] || printf '# Merge record: %s\n\n' "$ID" > "$record" || return 1
+  printf -- '- %s %s confirmed merged at the forge; merge commit %s; task %s at merge\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$URL" "$MERGE_COMMIT" "$TASK_STATE" >> "$record"
+}
+
+record_merge || echo "warning: $URL merged but the merge record could not be written" >&2
 printf 'merged: %s\n' "$URL"
