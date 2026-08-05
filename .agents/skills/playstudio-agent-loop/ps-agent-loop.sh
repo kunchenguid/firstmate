@@ -267,17 +267,19 @@ cmd_preflight() {
 # Ensure Daytona org memory has headroom for one create: started_mem + need ≤ org_cap.
 # Creds from env (DAYTONA_* / PLAY_STUDIO_DAYTONA_*) or PlayStudio .env.runtime.local / .env.local.
 # Optional PS_DAYTONA_PRUNE_STARTED=1 deletes started sandboxes once, then rechecks.
+# HTTP uses curl (macOS system Python TLS fails Daytona Basic Constraints; curl works).
 _daytona_capacity_gate() {
   local root="${PS_PLAYSTUDIO_ROOT:-}"
   if [ -z "$root" ] && [ -n "${HOME:-}" ] && [ -d "$HOME/projects/PlayStudio" ]; then
     root="$HOME/projects/PlayStudio"
   fi
+  require_cmd curl
   PS_DAYTONA_ORG_MEM_GIB="$PS_DAYTONA_ORG_MEM_GIB" \
   PS_DAYTONA_NEED_MEM_GIB="$PS_DAYTONA_NEED_MEM_GIB" \
   PS_DAYTONA_PRUNE_STARTED="${PS_DAYTONA_PRUNE_STARTED:-}" \
   PS_PLAYSTUDIO_ROOT="$root" \
-  python3 -c '
-import json, os, sys, urllib.error, urllib.request
+  python3 - <<'PY'
+import json, os, subprocess, sys
 
 ORG = float(os.environ.get("PS_DAYTONA_ORG_MEM_GIB") or "10")
 NEED = float(os.environ.get("PS_DAYTONA_NEED_MEM_GIB") or "8")
@@ -317,30 +319,43 @@ if not api_url or not api_key:
     )
     sys.exit(2)
 
-headers = {"Authorization": "Bearer " + api_key, "Accept": "application/json"}
-if org_id:
-    headers["X-Daytona-Organization-ID"] = org_id
-
-# macOS system Python often fails Daytona's TLS chain (Basic Constraints);
-# curl works. Use an unverified context for this local capacity probe only.
-ssl_ctx = ssl._create_unverified_context()
-
 def call(path, method="GET"):
-    req = urllib.request.Request(api_url + path, headers=headers, method=method)
+    cmd = [
+        "curl", "-sS", "-X", method,
+        "-H", "Authorization: Bearer " + api_key,
+        "-H", "Accept: application/json",
+        "-w", "\n%{http_code}",
+        "--max-time", "30",
+    ]
+    if org_id:
+        cmd.extend(["-H", "X-Daytona-Organization-ID: " + org_id])
+    cmd.append(api_url + path)
     try:
-        with urllib.request.urlopen(req, context=ssl_ctx, timeout=30) as resp:
-            body = resp.read().decode("utf-8", "replace")
-            return resp.status, json.loads(body) if body.strip() else None
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", "replace")
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        sys.stderr.write("ps-agent-loop: blocked: Daytona capacity gate requires curl\n")
+        sys.exit(2)
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "curl failed").strip().splitlines()
+        sys.stderr.write("ps-agent-loop: blocked: Daytona API curl error (%s)\n" % (err[-1] if err else "unknown",))
+        sys.exit(2)
+    out = proc.stdout or ""
+    if "\n" not in out:
+        sys.stderr.write("ps-agent-loop: blocked: Daytona API curl missing status line\n")
+        sys.exit(2)
+    body, _, status_s = out.rpartition("\n")
+    try:
+        status = int(status_s.strip())
+    except ValueError:
+        sys.stderr.write("ps-agent-loop: blocked: Daytona API curl bad status %r\n" % (status_s,))
+        sys.exit(2)
+    payload = None
+    if body.strip():
         try:
-            payload = json.loads(body) if body.strip() else None
+            payload = json.loads(body)
         except Exception:
             payload = body[:200]
-        return exc.code, payload
-    except Exception as exc:
-        sys.stderr.write("ps-agent-loop: blocked: Daytona API error (%s)\n" % (exc,))
-        sys.exit(2)
+    return status, payload
 
 def list_sandboxes():
     status, payload = call("/sandbox")
@@ -394,7 +409,6 @@ if total + NEED > ORG:
         sid = str(s.get("id") or "")
         if not sid:
             continue
-        # Stop first when needed; delete releases memory reservation.
         st, _ = call("/sandbox/%s/stop" % sid, method="POST")
         st2, _ = call("/sandbox/%s" % sid, method="DELETE")
         pruned.append({"id": sid, "stopStatus": st, "deleteStatus": st2})
@@ -416,9 +430,10 @@ out = {
     "startedMemGib": total,
     "headroomGib": ORG - total,
     "pruned": pruned,
+    "transport": "curl",
 }
 print(json.dumps(out, separators=(",", ":")))
-'
+PY
 }
 
 cmd_ensure_session() {

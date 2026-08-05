@@ -31,6 +31,7 @@ This skill owns Firstmate mate procedure and the colocated driver only.
    - Requires `DAYTONA_API_URL` + `DAYTONA_API_KEY` (or `PLAY_STUDIO_DAYTONA_*`), optionally `DAYTONA_ORG_ID`.
    - Creds may come from the environment or from `$PS_PLAYSTUDIO_ROOT/.env.runtime.local` (default `$HOME/projects/PlayStudio`).
    - Gate: `started_mem + PS_DAYTONA_NEED_MEM_GIB ≤ PS_DAYTONA_ORG_MEM_GIB` (defaults need `8`, org `10`).
+   - Inventory HTTP uses `curl` (macOS system Python TLS often fails Daytona Basic Constraints).
    - Optional `PS_DAYTONA_PRUNE_STARTED=1` deletes started sandboxes once when the gate fails, then rechecks.
 3. Chrome attach where Entra can complete without a human click wait:
    - Prefer `CHROME_DEVTOOLS_AXI_AUTO_CONNECT=1` against the captain's Chrome (remote debugging enabled).
