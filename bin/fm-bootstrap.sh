@@ -53,11 +53,12 @@
 #          branch carries commits origin/<default> does not - typically a shared fix
 #          landed directly on it instead of through the normal PR path - so the
 #          fast-forward-only self-update path (/updatefirstmate) can no longer
-#          reconcile it and silently skips instead of alarming; reconcile manually
-#          per the line. Like TANGLE it is scoped to the primary checkout by branch
-#          state, so detached-HEAD worktrees and secondmate homes never trip it even
-#          though they read the same shared refs, and a tangled primary defers to
-#          TANGLE. This check never fetches (it reads the already-known
+#          reconcile it and declines to advance it, which is reported only to
+#          whoever runs that update; reconcile manually per the line. Like TANGLE
+#          it is scoped to the primary checkout by branch state, so detached-HEAD
+#          worktrees and secondmate homes never trip it even though they read the
+#          same shared refs, and a tangled primary defers to TANGLE.
+#          This check never fetches (it reads the already-known
 #          origin/<default> ref) and stays silent for a missing origin, a missing
 #          origin/<default> ref, or a local default branch that is merely behind
 #          origin, so a local-only or offline install never false-alarms.

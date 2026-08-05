@@ -4,11 +4,13 @@
 #
 # Firstmate's self-update path (bin/fm-update.sh, /updatefirstmate) is
 # fast-forward ONLY: it advances the primary checkout's default branch to
-# origin/<default> and refuses, silently skipping, the moment the local branch
-# is not an ancestor of origin. That silent skip is the failure mode this guard
-# surfaces loudly at session start instead: a shared fix landed directly on the
-# local default branch (bypassing the normal PR path) diverges it from origin,
-# and every later self-update quietly does nothing until someone notices.
+# origin/<default> and refuses the moment the local branch is not an ancestor of
+# origin, reporting "skipped: diverged from origin/<default>" (fm-ff-lib.sh).
+# That report only reaches anyone who runs /updatefirstmate, and nothing else in
+# the daily loop compares local to origin - so a shared fix landed directly on
+# the local default branch (bypassing the normal PR path) diverges it and every
+# later self-update declines to advance it with no one watching. This guard
+# closes that gap by surfacing the state at every session start instead.
 #
 # fm_primary_diverged_branch detects exactly that and nothing else: the local
 # default branch carries commits origin/<default> does not, so a fast-forward
