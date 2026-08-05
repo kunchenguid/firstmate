@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+# Parse the durable parent binding written into a seeded secondmate home.
+#
+# The fm-secondmate-parent.v1 record contains exactly one schema and route.
+# A local route contains exactly one absolute parent_home and no parent_host.
+# A remote route contains no parent_home; current provisioning includes its SSH
+# alias as diagnostic-only parent_host, while legacy-compatible manifests may
+# omit that field.
+# Unknown fields are reserved for forward-compatible additions.
+# Duplicate schema or route fields, a malformed local binding, an unsupported
+# route or schema, and a symlinked record fail closed.
+# Writers publish this record before .fm-secondmate-home so that the identity
+# marker remains the seed-completion point.
 
 fm_secondmate_parent_record_parse() {
   local file=$1 line schema= route= parent_home= parent_host=
