@@ -201,7 +201,7 @@ A pane that already carries a name is never renamed, so a name set by hand wins.
 Names are assigned after the launch command is submitted, because Herdr accepts a rename only once it has registered that agent; a launch Herdr never registers as an agent is left unnamed after a short bounded wait.
 Every naming failure is a warning and the spawn still succeeds.
 
-Herdr accepts a name matching `^[a-z][a-z0-9_-]{0,31}$` and enforces name uniqueness itself, so an id used as a name is lowercased, stripped of characters outside that set, prefixed when it would start with a non-letter, and truncated.
+Herdr accepts a name matching `^[a-z][a-z0-9_-]{0,31}$` and enforces name uniqueness itself, so an id used as a name is lowercased, has each character outside that set replaced with `-`, is prefixed when it would start with a non-letter, and is truncated.
 
 Live agent registrations do not survive a Herdr server restart, so names are lost with them and are not re-applied to tasks already running.
 The next spawn in that home reinstates the primary's own name.
