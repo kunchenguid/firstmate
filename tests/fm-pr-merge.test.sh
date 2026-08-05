@@ -272,6 +272,22 @@ test_self_hosted_nested_project_and_explicit_method() {
   pass "fm-pr-merge supports self-hosted nested GitLab projects and explicit methods"
 }
 
+test_gitlab_option_value_not_read_as_merge_method() {
+  local case_dir url
+  case_dir=$(make_case gitlab-value-not-method)
+  url=https://gitlab.com/example/repo/-/merge_requests/47
+  mkdir -p "$case_dir/wt"
+  add_glab_mock "$case_dir"
+  : > "$case_dir/glab.log"
+
+  FM_TEST_GLAB_URL="$url" run_pr_merge "$case_dir" task-x1 "$url" -- --squash-message '-r' -m '-s' \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "gitlab-value-not-method: merge failed"
+
+  grep -qxF 'mr merge 47 -R https://gitlab.com/example/repo --squash --yes --squash-message -r -m -s' "$case_dir/glab.log" \
+    || fail "gitlab-value-not-method: literal -r/-s option values suppressed the default --squash"
+  pass "fm-pr-merge keeps default squash when option values look like merge methods"
+}
+
 test_gitlab_missing_cli_refuses_before_recording() {
   local case_dir rc url
   case_dir=$(make_case gitlab-missing-cli)
@@ -516,6 +532,7 @@ test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
 test_gitlab_com_success_records_exact_metadata
 test_self_hosted_nested_project_and_explicit_method
+test_gitlab_option_value_not_read_as_merge_method
 test_gitlab_missing_cli_refuses_before_recording
 test_gitlab_lookup_and_target_verification_fail_closed
 test_gitlab_merge_failure_propagates

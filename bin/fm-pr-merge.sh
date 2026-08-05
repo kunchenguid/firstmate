@@ -55,10 +55,15 @@ caller_has_merge_method() {
 }
 
 caller_has_gitlab_merge_method() {
-  local arg
+  local expect_value=0 arg
   for arg in "$@"; do
+    if [ "$expect_value" -eq 1 ]; then
+      expect_value=0
+      continue
+    fi
     case "$arg" in
       --squash|-s|--rebase|-r) return 0 ;;
+      --message|-m|--sha|--squash-message) expect_value=1 ;;
     esac
   done
   return 1
