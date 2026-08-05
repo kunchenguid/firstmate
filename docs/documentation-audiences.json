@@ -265,6 +265,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/no-pronoun-communication.md",
+      "audience": "public-product"
+    },
+    {
       "path": "docs/orca-backend.md",
       "audience": "operator-current"
     },
