@@ -56,10 +56,11 @@ Use that value for interrupt, exit, resume, and skill-invocation facts.
 
 ## Primary turn-end guard
 
-The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, and `grok` have empirically validated hook paths for the "no turn ends blind" guard.
+The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, and `cursor` have empirically validated hook paths for the "no turn ends blind" guard.
 `claude` and `codex` block directly through Stop hooks that preserve exit status 2 and stderr from `bin/fm-turnend-guard.sh`.
 `opencode`, `pi`, and `pi-signed` expose passive lifecycle callbacks and force one bounded follow-up when the shared predicate blocks.
 Grok selects native blocking or its pre-native bounded resume fallback from the exact running Stop payload; [`docs/turnend-guard.md`](../../../docs/turnend-guard.md) owns that contract.
+Cursor translates the shared guard's exit-2 signal into a `followup_message` body through `bin/fm-turnend-guard-cursor.sh`, because cursor's stop hook does not honour exit 2 as a forced continuation.
 Kimi is outside the primary turn-end guard scope, while `docs/turnend-guard.md` owns its separate guarded global hook for crew wake signals.
 muse is CREWMATE/SCOUT ONLY and has no primary integration at all: its plugin engine (its only hook surface) is disabled in the default build, and its Claude-compatible hook dialect names `asyncRewake` and model reawakening as explicitly unsupported, which is exactly what a firstmate primary's turn-end supervision needs.
 `bin/fm-spawn.sh` refuses a `--secondmate` launch on muse for that reason.
@@ -69,7 +70,8 @@ When changing any primary turn-end hook, validate the real harness behavior in a
 
 ## Primary pre-arm (PreToolUse) seatbelt
 
-The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, and `grok` also have wired PreToolUse-equivalent hooks that deny a watcher-arm anti-pattern (shell `&`, truncating pipe, bundling, broad `pkill -f fm-watch`) before it runs.
+The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, and `cursor` also have wired PreToolUse-equivalent hooks that deny a watcher-arm anti-pattern (shell `&`, truncating pipe, bundling, broad `pkill -f fm-watch`) before it runs.
+Cursor's `preToolUse` hook (matcher `Shell`) runs `bin/fm-arm-pretool-check.sh --cursor`, which emits the cursor-shaped `{"permission":"deny","agent_message":...}` object on stdout.
 `claude` and `codex` block directly through PreToolUse hooks; `grok` blocks the same way but requires every `$VAR` reference in its hook `command` string to carry an inline `:-default` or it fails to launch the hook entirely.
 `opencode`, `pi`, and `pi-signed` block by throwing from `tool.execute.before` / returning `{block: true}` from `tool_call`.
 The exact hook files, commands, output-shaping quirks (Claude Code only honors the deny when stdout is empty), and validation transcripts are owned by `docs/arm-pretool-check.md`.
@@ -100,6 +102,7 @@ Claude's Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns tokenles
 Codex uses bounded foreground checkpoints through `bin/fm-watch-checkpoint.sh` because Codex cannot reason while a foreground tool call is running.
 OpenCode uses `.opencode/plugins/fm-primary-watch-arm.js`, which coordinates with the turn-end guard plugin and wakes the TUI with `client.session.promptAsync`.
 Pi and pi-signed use the tracked `.pi/extensions/fm-primary-turnend-guard.ts` plus the tracked `.pi/extensions/fm-primary-pi-watch.ts`, both project-local extensions the Pi engine auto-discovers once trusted.
+Cursor's `stop` hook owns the arm from inside the synchronous hook (the Shell tool's own 30 s timeout makes a foreground tool a poor arm host); see `docs/supervision-protocols/cursor.md`.
 When changing any primary watcher adapter, update `docs/supervision-protocols/`, `docs/turnend-guard.md` if a shared idle or turn-end hook changed, and the relevant concise fact below.
 
 ## Launch profile axes
@@ -510,13 +513,17 @@ Any model-support verdict taken from that short list would be falsely negative.
 The authoritative set is revealed by the rejection error message when an invalid model is passed.
 Do not use `--list-models` for model-support verification.
 
-**Crew wake signal (phase 3):** the `stop` event in cursor's bundled hook system maps directly to the per-task turn-end pattern.
-Cursor's `--plugin-dir` flag is per-launch and repeatable, which would be cleaner than grok's or kimi's global config installs.
-Phase 3 is blocked on correct upstream manifest key discovery.
+**Primary-session guard fact (verified 2026-08-05, cursor-agent 2026.07.23-e383d2b).**
+Cursor is a verified PRIMARY harness since 2026-08-05: firstmate can run itself on cursor.
+The tracked `.cursor/hooks.json` registers a `stop` hook (long `timeout`, `loop_limit: null`) running `bin/fm-turnend-guard-cursor.sh`, and a `preToolUse` hook with a `Shell` matcher running `bin/fm-arm-pretool-check.sh --cursor`.
+The top-level `"version": 1` key is load-bearing: without it cursor silently discards the file and every hook is inert.
+Cursor's stop hook does not honour exit 2 as a forced continuation, so the shim translates the shared guard's blind-turn signal into a `{"followup_message": ...}` body that cursor auto-submits as a new turn; the shim maps `loop_count > 0` to `stop_hook_active: true` so the shared loop guard applies unchanged.
+The stop hook owns the watcher arm (the Shell tool's own 30 s timeout makes a foreground tool a poor arm host); see `docs/supervision-protocols/cursor.md`.
+Headless is not a supervision host: `cursor-agent -p` fires only `sessionStart`, never `stop`.
+Captain input typed while the stop hook is parked is buffered unsubmitted and needs a second Enter after the forced follow-up completes (nothing is lost).
+Verified against cursor-agent 2026.07.23-e383d2b only; re-verify after any cursor-agent upgrade.
 
-**Primary-session guard:** out of scope for the MVP.
-Firstmate running itself on cursor is a separate, larger effort (turn-end guard, PreToolUse seatbelt, session-start nudge, watcher supervision protocol).
-Cursor is crew/secondmate-only in the first release, matching Kimi's position.
+**Crew wake signal (phase 3):** the per-task turn-end pattern remains unimplemented for cursor crewmates; the `stop` event and `--plugin-dir` flag are the natural carriers when it is built.
 
 **Remote secondmates:** cursor is a verified remote secondmate harness since 2026-08-05 (herdr + cursor live-verified in an isolated lab; see `docs/verification/runtime-backends.md`).
 `bin/fm-spawn.sh`, `bin/fm-remote-secondmate-control.sh`, and `bin/fm-remote-doctor.sh` all admit it; the doctor resolves cursor through the same name-and-path order as spawn (see the Binary row above), so a login PATH that omits `~/.local/bin` still passes readiness.

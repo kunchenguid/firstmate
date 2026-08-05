@@ -631,6 +631,23 @@ if [ "$PRIMARY_HARNESS" = pi ] || [ "$PRIMARY_HARNESS" = pi-signed ]; then
     printf 'PI_WATCH_EXTENSION: not loaded - approve Pi project trust once per clone, then restart %s so %s and %s auto-load for turn-end guard and background wake coverage; use -e %s -e %s only if project hooks are not trusted\n' "$PI_RESTART_COMMAND" "$PI_TURNEND_EXT" "$PI_EXT" "$PI_TURNEND_EXT" "$PI_EXT"
   fi
 fi
+if [ "$PRIMARY_HARNESS" = cursor ]; then
+  # Cursor's project hooks are tracked shared material (.cursor/hooks.json).
+  # The top-level "version": 1 key is load-bearing: without it cursor silently
+  # discards the file and every hook is inert, a fail-open supervision hole.
+  # The stop hook must carry the long timeout and the preToolUse seatbelt must
+  # be registered with the Shell matcher.
+  CURSOR_HOOKS="$FM_ROOT/.cursor/hooks.json"
+  CURSOR_HOOKS_OK=0
+  if [ -f "$CURSOR_HOOKS" ] && command -v jq >/dev/null 2>&1; then
+    if jq -e '.version == 1 and (.hooks.stop | type) == "array" and (.hooks.preToolUse | type) == "array"' "$CURSOR_HOOKS" >/dev/null 2>&1; then
+      CURSOR_HOOKS_OK=1
+    fi
+  fi
+  if [ "$CURSOR_HOOKS_OK" -eq 0 ]; then
+    printf 'CURSOR_HOOKS: not registered or malformed - %s must carry version 1 plus stop and preToolUse hook arrays (without the version key cursor silently discards the file); repair it before ending blind\n' "$CURSOR_HOOKS"
+  fi
+fi
 "$SCRIPT_DIR/fm-supervision-instructions.sh" \
   --harness "$PRIMARY_HARNESS" \
   --read-only "$READ_ONLY" \

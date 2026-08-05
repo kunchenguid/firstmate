@@ -502,18 +502,18 @@ SH
 # Drop every harness env marker from bin/fm-harness.sh detect_own so the
 # surrounding interactive shell cannot leak past the suite's fake ps harness.
 # Markers today: CLAUDECODE (claude), PI_CODING_AGENT plus FM_PI_HARNESS
-# (Pi family), GROK_AGENT (grok).
+# (Pi family), GROK_AGENT (grok), CURSOR_AGENT (cursor).
 # codex and opencode have no env markers (ancestry only). Without this, a local
-# claude/pi/grok session fails cases that pin a different fake harness while CI
-# (no ambient markers) still passes.
+# claude/pi/grok/cursor session fails cases that pin a different fake harness
+# while CI (no ambient markers) still passes.
 run_session_start() {
   local home=$1 root=$2 path=$3 pi_harness=${4:-}
   if [ -n "$pi_harness" ]; then
-    env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
+    env -u CLAUDECODE -u GROK_AGENT -u CURSOR_AGENT PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   else
-    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT -u CURSOR_AGENT \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   fi
@@ -2076,6 +2076,43 @@ EOF
   pass "session start preserves pi-signed primary identity while applying Pi extension guarantees"
 }
 
+test_cursor_primary_reports_hooks_registration() {
+  local rec root home fakebin out
+  rec=$(new_world cursor-supervision-block)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" cursor
+
+  out=$(FM_FAKE_HARNESS=cursor run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: cursor" "cursor supervision block missing"
+  assert_contains "$out" "Mode: Cursor stop-hook-owned supervision." "cursor snippet missing from session start"
+  # The tracked .cursor/hooks.json exists in the real repo root, so a fixture
+  # root that does NOT carry it must report the registration gap.
+  assert_contains "$out" "CURSOR_HOOKS: not registered or malformed" "cursor hooks registration diagnostic missing"
+  pass "session start emits the cursor supervision block and reports hooks registration state"
+}
+
+test_cursor_primary_accepts_registered_hooks() {
+  local rec root home fakebin out
+  rec=$(new_world cursor-hooks-ok)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" cursor
+  mkdir -p "$root/.cursor"
+  cp "$ROOT/.cursor/hooks.json" "$root/.cursor/hooks.json"
+
+  out=$(FM_FAKE_HARNESS=cursor run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: cursor" "cursor supervision block missing"
+  assert_not_contains "$out" "CURSOR_HOOKS: not registered or malformed" "cursor hooks diagnostic fired for a registered fixture"
+  pass "session start accepts a registered .cursor/hooks.json without a diagnostic"
+}
+
 test_pi_diagnostic_rejects_stale_loaded_marker() {
   local rec root home fakebin out marker holder_pid
   rec=$(new_world pi-stale-loaded-marker)
@@ -2213,6 +2250,8 @@ test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
+test_cursor_primary_reports_hooks_registration
+test_cursor_primary_accepts_registered_hooks
 test_pi_diagnostic_rejects_stale_loaded_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker
 test_pi_diagnostic_rejects_missing_turnend_guard_marker
