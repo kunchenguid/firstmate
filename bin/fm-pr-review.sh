@@ -28,13 +28,13 @@
 # needed. The source uses gh-axi and its authenticated GitHub identity, sleeps
 # until its durable slow-poll deadline, and remains silent when the relevant PR
 # set, exact heads, feedback identities, and queue actionability are unchanged.
-# An unchanged poll makes no model call and starts no worker.
-# A pull request whose live detail read answers closed is omitted; a
-# read, pagination, or schema failure for one open pull request keeps that pull
-# request's last covered head and feedback cursor, records the failure in the
-# snapshot, announces one deduplicated diagnostic, and lets the rest of the
-# inventory reconcile. Authentication, rate, and total-deadline failures still
-# fail the whole poll without publishing a partial inventory.
+# An unchanged poll makes no model call and starts no worker. A pull request
+# whose live detail read answers closed is omitted; a read, pagination, or
+# schema failure for one open pull request keeps that pull request's last
+# covered head and feedback cursor, records the failure in the snapshot,
+# announces one deduplicated diagnostic, and lets the rest of the inventory
+# reconcile. Authentication, rate, and total-deadline failures still fail the
+# whole poll without publishing a partial inventory.
 #
 # `opt-out` is the explicit durable captain-takeover control for one canonical
 # pull request. It parks nonterminal work while preserving the last covered head

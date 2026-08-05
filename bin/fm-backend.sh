@@ -592,6 +592,10 @@ fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
 # Each adapter is an independently linted canonical root. The /dev/null source
 # boundaries keep runtime dispatch from importing all five adapter ASTs into
 # every dispatcher consumer while preserving the runtime source operations.
+# A validated name whose adapter file is absent means an incomplete install, not
+# an unknown backend, so preflight the file and name it on stderr: several
+# callers below absorb a source failure into an `unknown`/`unverified` verdict,
+# which would otherwise hide the missing adapter behind ordinary uncertainty.
 fm_backend_source() {  # <name>
   local name=$1 adapter
   fm_backend_validate "$name" || return 1
