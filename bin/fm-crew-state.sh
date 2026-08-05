@@ -27,7 +27,10 @@
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
 #      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution.
+#      diverged from it, invalidates attribution. A run head that does not
+#      resolve here at all is a THIRD case, not divergence: the pipeline commits
+#      before it pushes, so it is routine and expected mid-run. It is settled
+#      from branch_sync (see nm_run_pipeline_owns_branch), never from the sha.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -349,11 +352,20 @@ nm_runs_status_for_branch() {  # <branch>
     rest=$(trim "$rest")
     sha=${rest%% *}
     if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status: skip a same-branch row whose
-      # short-sha does not match this worktree (rewritten or advanced tip).
-      if ! nm_coarse_head_matches_worktree "$sha"; then
-        continue
-      fi
+      # Same code-identity rule as axi status, with the same three outcomes.
+      case "$(nm_coarse_head_verdict "$sha")" in
+        match) ;;
+        # A rewritten or superseded tip: this row is provably not ours, but an
+        # older row on the same branch still can be. Keep scanning.
+        mismatch) continue ;;
+        # This branch's most recent run holds commits that are not here yet, and
+        # the plain runs list carries nothing to corroborate ownership with. The
+        # rows below it are OLDER runs of the same branch, which that live one
+        # supersedes - answering from them is how a running pipeline came back
+        # as `failed`. Decline to answer instead, and let the pane and status-log
+        # sources report current state.
+        *) return 0 ;;
+      esac
       printf '%s' "$st"
       return 0
     fi
@@ -365,20 +377,85 @@ nm_runs_status_for_branch() {  # <branch>
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
-# 0 if the active axi-status run's head field matches this worktree's code
-# identity. Branch match is a precondition (caller). Rule owned by
-# fm_nm_head_matches_worktree in bin/fm-nm-run-lib.sh.
-nm_run_head_matches_worktree() {
-  local run_head
-  run_head=$(strip_quotes "$(nm_field head)")
-  fm_nm_head_matches_worktree "$WT" "$run_head"
+# What the head check protects, stated before it is relaxed below: branch name
+# alone is not identity. The same branch name is reused across stages and across
+# crews, so a HISTORICAL run - one whose head was rewritten, or one the local
+# tree has since committed past - must never be reported as this crew's current
+# state. That protection is a claim about DIVERGENT HISTORY, and it needs both
+# commits in hand to make it.
+#
+# It used to be enforced with a two-way test that read "run head does not resolve
+# here" as divergence. Those are different facts. The gate commits into its own
+# copy, so from its first pipeline commit onward the run head is simply not an
+# object in the crew's worktree - and it does not become one when the gate
+# pushes, because that push goes to the remote, not here. Verified against the
+# installed gate v1.41.2 on one live run, whose head stayed unresolvable both at
+# `phase: pre_push` (empty pushed_head, step document) and after `pushed_head`
+# filled in (step ci): the window is most of every no-mistakes delivery, not a
+# narrow pre-push moment. Reading that as divergence lost attribution, dropped
+# through to the coarse runs-list fallback, and let a superseded terminal row
+# report a LIVE run as failed - a verdict that invites tearing down or
+# restarting a worker holding unlanded work.
+#
+# So: divergence still rejects, unchanged. An unresolvable head is not decided by
+# the sha at all - it is decided by branch_sync, which carries exactly the
+# missing facts (bin/fm-nm-run-lib.sh's fm_nm_branch_sync_field).
+# nm_run_pipeline_owns_branch below requires all four to line up before it binds;
+# any one absent - including an older gate that emits no branch_sync - leaves the
+# conservative rejection in place.
+nm_run_pipeline_owns_branch() {  # <unresolvable-run-head>
+  local run_head=$1 run_id pipeline_run pipeline_head local_head submitted
+  # 1. Same run: the branch_sync report describes the run we are attributing,
+  #    not some other run that happens to be the branch's most recent.
+  run_id=$(strip_quotes "$(nm_field id)")
+  pipeline_run=$(strip_quotes "$(fm_nm_branch_sync_field "$RUN_OUT" pipeline run)")
+  [ -n "$run_id" ] && [ "$pipeline_run" = "$run_id" ] || return 1
+  # 2. Same head: the head we could not resolve IS this pipeline's own advanced
+  #    head, so its absence here is explained rather than assumed. run.head is
+  #    abbreviated and pipeline.current_head is full, so bind on the prefix.
+  pipeline_head=$(strip_quotes "$(fm_nm_branch_sync_field "$RUN_OUT" pipeline current_head)")
+  [ -n "$run_head" ] && [ -n "$pipeline_head" ] || return 1
+  case "$pipeline_head" in "$run_head"*) ;; *) return 1 ;; esac
+  # 3. Same worktree: branch_sync's local view is the tree we are reporting on.
+  local_head=$(strip_quotes "$(fm_nm_branch_sync_field "$RUN_OUT" local head)")
+  [ -n "$local_head" ] || return 1
+  [ "$local_head" = "$(git -C "$WT" rev-parse HEAD 2>/dev/null)" ] || return 1
+  # 4. Same code: the commit this run took custody of binds to our code identity
+  #    under the UNCHANGED rule. This is where a rewritten or locally-advanced
+  #    branch is still caught - the submitted head is resolvable precisely
+  #    because it predates the pipeline's own unpushed commits.
+  submitted=$(strip_quotes "$(fm_nm_branch_sync_field "$RUN_OUT" pipeline submitted_head)")
+  fm_nm_head_matches_worktree "$WT" "$submitted"
 }
 
-# Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
-# sha for this branch row matches the worktree head under the same rules as
-# nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
-nm_coarse_head_matches_worktree() {  # <short-sha>
+# 0 if the active axi-status run belongs to this worktree's code identity.
+# Branch match is a precondition (caller). Sha rule owned by
+# fm_nm_head_matches_worktree in bin/fm-nm-run-lib.sh; its unresolvable verdict
+# (2) is referred to branch_sync rather than treated as divergence.
+nm_run_head_matches_worktree() {
+  local run_head rc
+  run_head=$(strip_quotes "$(nm_field head)")
+  fm_nm_head_matches_worktree "$WT" "$run_head"
+  rc=$?
+  [ "$rc" = 0 ] && return 0
+  [ "$rc" = 2 ] || return 1
+  nm_run_pipeline_owns_branch "$run_head"
+}
+
+# Coarse runs-list rows are "<status> <branch> <short-sha> ...". Echoes the
+# verdict for one row's sha under the same rules as nm_run_head_matches_worktree:
+# `match`, `mismatch`, or `unresolvable`. The plain runs list carries no
+# branch_sync, so an unresolvable sha cannot be corroborated here - it is left
+# undecided for the caller rather than downgraded to either answer.
+nm_coarse_head_verdict() {  # <short-sha>
+  local rc
   fm_nm_head_matches_worktree "$WT" "$1"
+  rc=$?
+  case "$rc" in
+    0) printf 'match' ;;
+    2) printf 'unresolvable' ;;
+    *) printf 'mismatch' ;;
+  esac
 }
 
 HAVE_RUN=0

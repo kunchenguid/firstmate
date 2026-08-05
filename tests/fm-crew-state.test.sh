@@ -25,6 +25,10 @@
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
 #       proving the watcher's own absorb-only-when-provably-working predicate
 #       benefits from the fix in both directions.
+#   (l) head-binding: a rewritten or locally-advanced tip is still rejected,
+#       while a run head that is merely absent from the worktree (the gate
+#       commits into its own copy) is attributed on branch_sync corroboration
+#       instead of being read as divergence and answered from a superseded row.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -201,6 +205,49 @@ run:
   pr: ""
   findings: none
 EOF
+}
+
+# `axi status`'s branch_sync block, in the shape the real gate emits whenever the
+# pipeline holds commits this worktree does not have (verified against the
+# installed v1.41.2 on a live run, in both its pre-push and post-push halves -
+# the pipeline's commits stay unresolvable here even after `pushed_head` fills
+# in, because the push goes to the remote, not into the crew's worktree).
+branch_sync_block() {  # <branch> <run-id> <local-head> <submitted-head> <current-head>
+  cat <<EOF
+branch_sync:
+  state: pipeline_owned
+  changed: false
+  local:
+    branch: $1
+    head: $3
+    clean: true
+  pipeline:
+    run: "$2"
+    status: running
+    phase: pre_push
+    submitted_head: $4
+    current_head: $5
+    pushed_head: ""
+    pushed_at: 0
+    push_generation: 0
+  target:
+    kind: ""
+    remote: origin
+    url: "https://example.invalid/r.git"
+    ref: ""
+  relation: unknown
+  safety: blocked_pipeline_owned
+EOF
+}
+
+# A 40-hex commit-shaped sha that is deliberately NOT an object in any fixture
+# repo, standing in for a pipeline commit that has not reached the worktree.
+UNRESOLVABLE_SHA=16f026f7f982fc043b54a6f4fcd2c05c98f53701
+
+assert_absent_object() {  # <repo> <sha>
+  git -C "$1" rev-parse --verify "$2^{commit}" >/dev/null 2>&1 \
+    && fail "fixture sha $2 must not resolve in $1"
+  return 0
 }
 
 run_top_level_ci() {  # <branch>
@@ -1309,6 +1356,176 @@ test_missing_run_head_falls_back_to_current_state() {
   pass "missing run head falls back instead of matching by branch"
 }
 
+# Head-binding, the third case: the run's head is not an object in this worktree
+# at all, because the pipeline commits into its own copy. That is the routine
+# mid-run condition for every no-mistakes delivery, not divergence. With
+# branch_sync corroborating ownership the LIVE run must be attributed and report
+# its real step - never the superseded terminal row the runs list still carries.
+test_pipeline_head_absent_locally_stays_working() {
+  reset_fakes
+  local d local_head short out
+  d=$(new_case pipeline-unpushed)
+  make_repo_on_branch "$d/wt" fm/feat-unpushed
+  local_head=$(git -C "$d/wt" rev-parse HEAD)
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  assert_absent_object "$d/wt" "$UNRESOLVABLE_SHA"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/unpushed.meta" "window=fm:fm-unpushed" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementation committed, validating\n' > "$d/state/unpushed.status"
+  FM_FAKE_RUN_HEAD=${UNRESOLVABLE_SHA:0:8}
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-unpushed
+branch_sync_block fm/feat-unpushed 01RUN "$local_head" "$local_head" "$UNRESOLVABLE_SHA")"
+  # The exact runs list the live incident had: the branch's own newest row is the
+  # live run at the unresolvable pipeline head, and below it sits an OLDER failed
+  # run submitted at the head this worktree is still on.
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-unpushed ${UNRESOLVABLE_SHA:0:8}  2026-08-05 11:01
+  failed     fm/feat-unpushed ${short}  2026-08-04 21:08
+EOF
+)"
+  out=$(run_crew_state "$d" unpushed)
+  assert_contains "$out" "state: working" "a live run whose head is not local yet is still working"
+  assert_contains "$out" "source: run-step" "corroborated ownership keeps the run-step source"
+  assert_not_contains "$out" "state: failed" "a superseded terminal row must never report a live run as failed"
+  pass "unpushed pipeline head is attributed and reports the live run step"
+}
+
+# The relaxation is evidence-driven, not assumed: with no branch_sync to
+# corroborate ownership (an older gate, or a run that says nothing about this
+# tree), an unresolvable head keeps the conservative pre-existing rejection.
+test_absent_head_without_branch_sync_not_attributed() {
+  reset_fakes
+  local d out
+  d=$(new_case unpushed-nosync)
+  make_repo_on_branch "$d/wt" fm/feat-nosync
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/nosync.meta" "window=fm:fm-nosync" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: current stage still in progress\n' > "$d/state/nosync.status"
+  FM_FAKE_RUN_HEAD=${UNRESOLVABLE_SHA:0:8}
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-nosync)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" nosync
+  out=$(run_crew_state "$d" nosync)
+  assert_not_contains "$out" "source: run-step" "an uncorroborated absent head must not bind by branch alone"
+  assert_not_contains "$out" "parked at" "an unattributed run must not mask current state"
+  assert_contains "$out" "source: status-log" "falls back to current-state sources instead"
+  pass "absent run head without branch_sync keeps the conservative rejection"
+}
+
+# What the head check protected stays protected. A historical run on a reused,
+# rewritten branch reports a head that is absent here too, and branch_sync is
+# present - but the commit that run took custody of is on the abandoned line of
+# history, so the code-identity rule still rejects it.
+test_absent_head_diverged_submitted_head_not_attributed() {
+  reset_fakes
+  local d old_head new_head out
+  d=$(new_case unpushed-diverged)
+  make_repo_on_branch "$d/wt" fm/feat-diverged
+  old_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" checkout -q --orphan tmp-rewrite
+  git -C "$d/wt" commit -q --allow-empty -m 'rewritten tip'
+  git -C "$d/wt" branch -q -M fm/feat-diverged
+  new_head=$(git -C "$d/wt" rev-parse HEAD)
+  [ "$old_head" != "$new_head" ] || fail "rewrite did not produce a new head"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/diverged.meta" "window=fm:fm-diverged" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: stage 2 setup complete\n' > "$d/state/diverged.status"
+  FM_FAKE_RUN_HEAD=${UNRESOLVABLE_SHA:0:8}
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-diverged
+branch_sync_block fm/feat-diverged 01RUN "$new_head" "$old_head" "$UNRESOLVABLE_SHA")"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" diverged
+  out=$(run_crew_state "$d" diverged)
+  assert_not_contains "$out" "source: run-step" "a run holding a diverged submitted head is not ours"
+  assert_not_contains "$out" "parked at" "historical parked run must not mask current state"
+  assert_contains "$out" "source: status-log" "falls back after the divergence rejection"
+  assert_contains "$out" "state: working" "status-log working: remains current"
+  pass "diverged submitted head is still rejected when the run head is absent"
+}
+
+# branch_sync must describe the SAME run being attributed. A report about some
+# other run of this branch proves nothing about the one `axi status` returned.
+test_absent_head_foreign_branch_sync_run_not_attributed() {
+  reset_fakes
+  local d local_head out
+  d=$(new_case unpushed-foreignrun)
+  make_repo_on_branch "$d/wt" fm/feat-foreign
+  local_head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/foreign.meta" "window=fm:fm-foreign" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: current stage still in progress\n' > "$d/state/foreign.status"
+  FM_FAKE_RUN_HEAD=${UNRESOLVABLE_SHA:0:8}
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-foreign
+branch_sync_block fm/feat-foreign 01OTHERRUN "$local_head" "$local_head" "$UNRESOLVABLE_SHA")"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" foreign
+  out=$(run_crew_state "$d" foreign)
+  assert_not_contains "$out" "source: run-step" "branch_sync for another run must not corroborate this one"
+  assert_contains "$out" "source: status-log" "falls back when the corroboration is about a different run"
+  pass "branch_sync naming a different run does not attribute an absent head"
+}
+
+# branch_sync must also describe THIS tree. `axi status` answers repo-wide, and
+# two worktrees of one repo can carry the same branch name, so a report whose
+# local view is some other head is not evidence about this crew's code - even
+# when the run id, the pipeline head, and the submitted head all line up.
+test_absent_head_foreign_local_view_not_attributed() {
+  reset_fakes
+  local d base_head head out
+  d=$(new_case unpushed-foreignlocal)
+  make_repo_on_branch "$d/wt" fm/feat-foreignlocal
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'this crew work'
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  [ "$base_head" != "$head" ] || fail "fixture did not advance the head"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/foreignlocal.meta" "window=fm:fm-foreignlocal" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: current stage still in progress\n' > "$d/state/foreignlocal.status"
+  FM_FAKE_RUN_HEAD=${UNRESOLVABLE_SHA:0:8}
+  # Submitted head IS this tree's head, so the code-identity rule alone would
+  # accept; only the mismatched local view rejects.
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-foreignlocal
+branch_sync_block fm/feat-foreignlocal 01RUN "$base_head" "$head" "$UNRESOLVABLE_SHA")"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" foreignlocal
+  out=$(run_crew_state "$d" foreignlocal)
+  assert_not_contains "$out" "source: run-step" "branch_sync describing another tree must not corroborate"
+  assert_contains "$out" "source: status-log" "falls back when the corroboration is about a different tree"
+  pass "branch_sync reporting a different local head does not attribute an absent head"
+}
+
+# The coarse runs list carries no branch_sync, so it cannot corroborate an
+# unresolvable sha - and the rows beneath the branch's newest one are OLDER runs
+# that the live one supersedes. Answering from them is precisely how a running
+# pipeline was reported failed, so the fallback declines instead.
+test_coarse_absent_head_row_does_not_fall_through_to_stale_row() {
+  reset_fakes
+  local d short out
+  d=$(new_case coarse-unpushed)
+  make_repo_on_branch "$d/wt" fm/feat-coarse-unpushed
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/coarseunp.meta" "window=fm:fm-coarseunp" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementation committed, validating\n' > "$d/state/coarseunp.status"
+  # The repo-wide answer belongs to another crew, so attribution falls to the list.
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-coarse-unpushed ${UNRESOLVABLE_SHA:0:8}  2026-08-05 11:01
+  failed     fm/feat-coarse-unpushed ${short}  2026-08-04 21:08
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" coarseunp
+  out=$(run_crew_state "$d" coarseunp)
+  assert_not_contains "$out" "state: failed" "a superseded coarse row must not report the live run as failed"
+  assert_not_contains "$out" "source: run-step" "an uncorroborated coarse row must not be attributed"
+  assert_contains "$out" "source: status-log" "declines the coarse answer and reads current state instead"
+  pass "coarse fallback declines rather than answering from a superseded row"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1358,5 +1575,11 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
+test_pipeline_head_absent_locally_stays_working
+test_absent_head_without_branch_sync_not_attributed
+test_absent_head_diverged_submitted_head_not_attributed
+test_absent_head_foreign_branch_sync_run_not_attributed
+test_absent_head_foreign_local_view_not_attributed
+test_coarse_absent_head_row_does_not_fall_through_to_stale_row
 
 echo "all fm-crew-state tests passed"
