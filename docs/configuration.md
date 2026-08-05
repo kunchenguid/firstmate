@@ -302,6 +302,7 @@ An absent or incompatible `lavish-axi` reports `MISSING: lavish-axi (install: np
 An absent or too-old `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; firstmate cannot resolve a profile array without a compatible binary.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
+Bootstrap also reports a `MAIN_DIVERGED:` line when `FM_ROOT` is on its default branch and that branch carries commits `origin/<default>` does not, which is the state fast-forward self-update can no longer reconcile; follow the printed inspect-and-reconcile remediation rather than treating it as an installable tool problem, and note it never fetches, so a local-only or offline install stays silent.
 The locked session-start bootstrap step also runs a best-effort project clone refresh through `fm-fleet-sync.sh`.
 It emits `FLEET_SYNC:` for skipped refreshes that may matter, recovered self-heals, and `STUCK:` alarms.
 Normal completed runs keep local-only and no-origin skips silent.

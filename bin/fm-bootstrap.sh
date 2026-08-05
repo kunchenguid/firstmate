@@ -54,7 +54,10 @@
 #          landed directly on it instead of through the normal PR path - so the
 #          fast-forward-only self-update path (/updatefirstmate) can no longer
 #          reconcile it and silently skips instead of alarming; reconcile manually
-#          per the line. This check never fetches (it reads the already-known
+#          per the line. Like TANGLE it is scoped to the primary checkout by branch
+#          state, so detached-HEAD worktrees and secondmate homes never trip it even
+#          though they read the same shared refs, and a tangled primary defers to
+#          TANGLE. This check never fetches (it reads the already-known
 #          origin/<default> ref) and stays silent for a missing origin, a missing
 #          origin/<default> ref, or a local default branch that is merely behind
 #          origin, so a local-only or offline install never false-alarms.
@@ -1078,6 +1081,8 @@ fi
 # Origin-divergence check: the firstmate primary checkout's local default branch
 # must remain an ancestor of origin/<default> so the fast-forward-only self-update
 # path (/updatefirstmate) can still reconcile it (see fm-main-divergence-lib.sh).
+# Scoped to the primary checkout on its default branch by the same branch-state
+# discriminator TANGLE uses, so linked worktrees and secondmate homes stay silent.
 # Never fetches and never mutates; runs the same in every mode.
 diverged_default=$(fm_primary_diverged_branch "$FM_ROOT" 2>/dev/null || true)
 if [ -n "$diverged_default" ]; then

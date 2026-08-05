@@ -144,6 +144,7 @@ Only a named non-default branch checked out in `FM_ROOT` is a worktree tangle.
 
 `fm-tangle-lib.sh` resolves the default branch from `origin/HEAD`, then local `main` or `master`, and classifies that named non-default primary branch as the tangle.
 `fm-guard.sh` prints the repair command on the next mutable fleet action, while `bin/fm-session-start.sh` reports the same condition through bootstrap as a `TANGLE:` line at session start.
+`fm-main-divergence-lib.sh` reports the neighbouring failure through the same session-start surface as a `MAIN_DIVERGED:` line when the primary checkout's local default branch carries commits `origin/<default>` does not, which leaves the fast-forward-only self-update silently unable to reconcile it; because the shared refs it reads are visible from every linked worktree, it uses the same branch-state discriminator as the tangle guard and stays silent anywhere but the primary sitting on its default branch.
 If another live session holds the fleet lock, both surfaces keep the alarm but switch to read-only wording with no repair command.
 Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-toplevel` before creating `fm/<id>`, then stop with a blocked status if it landed in the primary checkout.
 

@@ -9,8 +9,9 @@
 # path, which diverges it from origin and leaves every later self-update quietly
 # doing nothing with no alarm. These cases pin: the shared lib's divergence
 # classification (healthy/behind, diverged, ahead-only, no origin, no
-# origin/<default> ref) and the fm-bootstrap.sh MAIN_DIVERGED problem line -
-# all hermetic over temp git repos.
+# origin/<default> ref), its primary-only scoping over the shared refs every
+# linked worktree can also read, and the fm-bootstrap.sh MAIN_DIVERGED problem
+# line - all hermetic over temp git repos.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -88,6 +89,61 @@ test_lib_classification() {
   pass "fm_primary_diverged_branch: behind/equal stay silent; diverged and ahead-only both flag; no origin or unfetched origin/<default> stay silent"
 }
 
+# --- shared lib: primary-only scoping ----------------------------------------
+#
+# refs/heads/<default> and refs/remotes/origin/<default> live in the shared
+# common git dir, so every linked worktree of a diverged repo reads the exact
+# refs the check compares. Only the primary checkout sitting on its default
+# branch may raise the alarm; a detached-HEAD linked worktree (the shape of a
+# crewmate worktree or secondmate home) and a named non-default branch (the
+# tangled primary, which TANGLE owns) must stay silent over that same repo.
+
+test_lib_primary_scoping() {
+  local seed bare tracked home feature out
+
+  seed="$TMP_ROOT/scope-seed"
+  make_repo "$seed" >/dev/null
+  bare="$TMP_ROOT/scope-origin.git"
+  git clone --quiet --bare "$seed" "$bare" >/dev/null
+  tracked="$TMP_ROOT/scope-tracked"
+  git clone --quiet "$bare" "$tracked" >/dev/null
+  git -C "$tracked" commit -q --allow-empty -m "local-only fix, landed directly"
+
+  # Premise: this repo really is diverged, and the primary still flags.
+  out=$(fm_primary_diverged_branch "$tracked" || true)
+  [ "$out" = "main" ] || fail "scoping fixture is not diverged at the primary: got '$out'"
+
+  # A detached-HEAD linked worktree of that same diverged repo - the secondmate
+  # home / crewmate worktree shape - must stay silent even though it resolves
+  # the identical shared refs.
+  home="$TMP_ROOT/scope-secondmate-home"
+  git -C "$tracked" worktree add --quiet --detach "$home" main >/dev/null 2>&1
+  [ -n "$(git -C "$home" rev-parse --verify --quiet refs/remotes/origin/main)" ] \
+    || fail "linked worktree cannot see refs/remotes/origin/main, so silence would prove nothing"
+  [ -z "$(git -C "$home" symbolic-ref --quiet --short HEAD 2>/dev/null || true)" ] \
+    || fail "linked worktree fixture is not at detached HEAD"
+  out=$(fm_primary_diverged_branch "$home" || true)
+  [ -z "$out" ] || fail "detached-HEAD linked worktree of a diverged repo wrongly reported diverged: '$out'"
+
+  # A named non-default branch is the tangled state: silent here, and TANGLE
+  # still owns and reports it.
+  feature="$TMP_ROOT/scope-feature"
+  git clone --quiet "$bare" "$feature" >/dev/null
+  git -C "$feature" checkout -q -b fm/some-task
+  git -C "$feature" commit -q --allow-empty -m "local-only fix on a feature branch"
+  git -C "$feature" branch -q -f main HEAD
+  [ -n "$(git -C "$feature" rev-parse --verify --quiet refs/remotes/origin/main)" ] \
+    || fail "feature-branch fixture cannot see refs/remotes/origin/main"
+  git -C "$feature" merge-base --is-ancestor refs/heads/main refs/remotes/origin/main 2>/dev/null \
+    && fail "feature-branch fixture's local main is not diverged, so silence would prove nothing"
+  out=$(fm_primary_diverged_branch "$feature" || true)
+  [ -z "$out" ] || fail "named non-default branch wrongly reported diverged: '$out'"
+  out=$(fm_primary_tangle_branch "$feature" || true)
+  [ "$out" = "fm/some-task" ] || fail "tangled checkout is unowned: TANGLE did not flag it either: got '$out'"
+
+  pass "fm_primary_diverged_branch: scoped to the primary on its default branch - a detached-HEAD linked worktree and a tangled feature branch over the same diverged refs both stay silent"
+}
+
 # --- fm-bootstrap.sh MAIN_DIVERGED problem line ------------------------------
 
 run_bootstrap() {
@@ -131,4 +187,5 @@ test_bootstrap_line() {
 }
 
 test_lib_classification
+test_lib_primary_scoping
 test_bootstrap_line
