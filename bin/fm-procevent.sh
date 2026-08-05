@@ -37,15 +37,16 @@
 #            source, or 0 when it has captured none. Take this immediately before
 #            arming to get the baseline await-live needs, so an older session's
 #            result cannot be read as this attempt's outcome.
-# await-live Verify that the exact registered source has a live owner, requiring
-#            it to stay live for an unbroken settle window of at least
-#            FM_PROCEVENT_LIVE_SETTLE_SECONDS seconds (default 2), inside an
+# await-live Verify that the exact registered source has a live owner that is
+#            executing its registered listener right now, inside an
 #            elapsed wall-clock bound of FM_PROCEVENT_LIVE_CONFIRM_TIMEOUT
 #            seconds (default 8) that a concurrent ownership change cannot
-#            stretch. The window has to outlast the target's own verdict
-#            latency: a source that answers "already ended" a second or more
-#            after its listener starts must reach that verdict inside the
-#            window, not after a confirmation that already reported it ready.
+#            stretch.
+#            Liveness is a state, not a duration: an owning runner that has not
+#            reached its registered argv, or has already finished it, is never
+#            confirmed, so a failed startup cannot pass by being sampled at the
+#            right moment. Whether the TARGET can still answer is an adapter
+#            question this domain-neutral runner never decides.
 #            It never starts a runner; call reconcile first. Exit 0 confirms
 #            liveness, and is withheld while this generation holds a result
 #            captured after <baseline-sequence> that the adapter classifies
@@ -104,7 +105,6 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 REG=$(fm_procevent_registry_dir "$STATE")
 MAX_OUTPUT_BYTES=${FM_PROCEVENT_MAX_OUTPUT_BYTES:-1048576}
 LIVE_CONFIRM_TIMEOUT=${FM_PROCEVENT_LIVE_CONFIRM_TIMEOUT:-8}
-LIVE_SETTLE_SECONDS=${FM_PROCEVENT_LIVE_SETTLE_SECONDS:-2}
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,89p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -174,6 +174,26 @@ load_latest_captured_result() {  # <source-id>
 # (a concurrent retire or home sweep, or reconcile completing an earlier
 # terminal retirement) would be reported as this session having ended, which
 # would tell a caller to abandon a review surface that is live.
+# Whether the claim just loaded by fm_procevent_claim_state_locked is currently
+# executing its registered listener. cmd_start stages this file immediately
+# before it runs the registered argv and removes it as soon as that child is
+# done, so its presence - under the OWNING home's registry, for this claim's own
+# generation token - is the runner's own statement that the exact registered
+# process is running right now. That is the difference between a listener and a
+# runner that claimed the source and then failed before establishing its wait,
+# and it is a state rather than a duration, so no amount of host load can turn a
+# failed startup into a confirmation.
+claim_is_executing_listener() {  # <source-id>
+  local marker reg
+  [ -n "${FM_PROCEVENT_CLAIM_TOKEN:-}" ] || return 1
+  # The claim's own registration directory, so the marker is read where its
+  # owner writes it even when that owner is another home sharing this
+  # machine-wide source.
+  reg=${FM_PROCEVENT_CLAIM_REG_DIR:-$REG}
+  marker="$reg/.$1.$FM_PROCEVENT_CLAIM_TOKEN.output"
+  [ -f "$marker" ] && [ ! -L "$marker" ]
+}
+
 source_ended_terminally_since() {  # <source-id> <baseline-sequence>
   local id=$1 since=$2 adapter
   load_latest_captured_result "$id"
@@ -587,15 +607,20 @@ cmd_latest_sequence() {
 # the only detached-start and recovery path; this command only reads the exact
 # source's claim under the same per-source boundary as list and ownership changes.
 #
-# Liveness is only believable once it has held for a settle window, because a
-# process being alive is not yet proof that the thing it is waiting on can ever
-# answer. A runner that exits immediately without establishing a durable wait
-# fails the window. So does a target that takes a moment to report that it has
-# already ended: a real listener needs time to reach that verdict, and a
-# confirmation shorter than that latency would report the handoff ready and only
-# then watch the source retire itself. The window is what makes ended and missing
-# targets the diagnosed failures they are documented to be rather than a success
-# followed by a surprise.
+# Liveness here is a state, never a duration. An owning runner alone is not the
+# proof a caller needs: a runner that claimed the source and then failed before
+# it could establish its blocking wait is alive for a moment without any
+# listener ever existing. So a confirmation requires the runner's own execution
+# marker for THIS claim generation - the staged capture file it creates
+# immediately before it executes the registered argv and removes as soon as that
+# child is done - which is true exactly while the exact registered listener is
+# running. Waiting a fixed settle window instead would only bound how late a
+# wrong answer arrives, and on a loaded host it bounds nothing at all.
+#
+# Whether the TARGET can still answer is deliberately not decided here. The
+# runner is domain-neutral and cannot ask a source whether it is still alive;
+# only an adapter can, and the Lavish adapter does so from Lavish's own session
+# listing before it reports a handoff armed.
 #
 # Two properties are what make this safe to call inside a conversational turn.
 # The bound is elapsed wall-clock time, and the boundary is taken with the
@@ -605,7 +630,7 @@ cmd_latest_sequence() {
 # terminal result newer than the caller's baseline - can never become live, so it
 # exits 3 distinctly rather than burning the window and reporting missing state.
 cmd_await_live() {
-  local id=${1-} since=${2-0} state=unread claim_state live_since='' settled=0 detail
+  local id=${1-} since=${2-0} state=unread claim_state confirmed=0 detail
   [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   case "$since" in
@@ -616,11 +641,6 @@ cmd_await_live() {
   esac
   [ "$LIVE_CONFIRM_TIMEOUT" -le 300 ] \
     || die "FM_PROCEVENT_LIVE_CONFIRM_TIMEOUT must be an integer from 1 to 300"
-  case "$LIVE_SETTLE_SECONDS" in
-    ''|*[!0-9]*|0) die "FM_PROCEVENT_LIVE_SETTLE_SECONDS must be an integer from 1 to 300" ;;
-  esac
-  [ "$LIVE_SETTLE_SECONDS" -le 300 ] \
-    || die "FM_PROCEVENT_LIVE_SETTLE_SECONDS must be an integer from 1 to 300"
   SECONDS=0
   while [ "$SECONDS" -le "$LIVE_CONFIRM_TIMEOUT" ]; do
     if ! fm_procevent_source_lock_try_acquire "$id"; then
@@ -633,34 +653,30 @@ cmd_await_live() {
       fm_procevent_claim_state_locked "$id"
       claim_state=$?
       state=$(claim_state_label "$claim_state")
+      # The claim's own fields name the owning home and generation, so the
+      # marker is read for the exact owner even when that owner is another home
+      # sharing this machine-wide source.
+      if [ "$state" = live ] && claim_is_executing_listener "$id"; then
+        confirmed=1
+      fi
     fi
     fm_procevent_source_lock_release "$id"
+    [ "$confirmed" -eq 0 ] || break
     case "$state" in
-      live)
-        [ -n "$live_since" ] || live_since=$SECONDS
-        # SECONDS truncates, so the difference understates elapsed time by up to
-        # one second. Requiring strictly more than the window is what makes the
-        # observed window at least LIVE_SETTLE_SECONDS of real time.
-        if [ "$((SECONDS - live_since))" -gt "$LIVE_SETTLE_SECONDS" ]; then
-          settled=1
-          break
-        fi
-        ;;
       unregistered|terminal) break ;;
-      *) live_since= ;;
     esac
     sleep 0.1
   done
   # Read the ended verdict before reporting anything ready: a result captured
-  # inside the settle window is this generation's outcome even when the claim it
-  # was captured under is still being released, and an ended source can never
-  # accept what the caller is arming to receive.
+  # while the confirmation was running is this generation's outcome even when the
+  # claim it was captured under is still being released, and an ended source can
+  # never accept what the caller is arming to receive.
   if [ "$state" = terminal ] || source_ended_terminally_since "$id" "$since"; then
     printf 'error: source %s ended before a live listener was confirmed: its own adapter classified the captured result terminal, so it will never produce another one\n' \
       "$id" >&2
     exit 3
   fi
-  if [ "$settled" -eq 1 ]; then
+  if [ "$confirmed" -eq 1 ]; then
     printf 'live: %s\n' "$id"
     return 0
   fi
@@ -672,7 +688,7 @@ cmd_await_live() {
   detail="owner=$state"
   case "$state" in
     unread) detail="owner unread, the per-source boundary stayed unavailable" ;;
-    live) detail="owner=live for less than the ${LIVE_SETTLE_SECONDS}s settle window" ;;
+    live) detail="owner=live but never executing its registered listener" ;;
   esac
   die "listener did not become live for source $id within ${LIVE_CONFIRM_TIMEOUT}s ($detail); registration remains for reconcile"
 }

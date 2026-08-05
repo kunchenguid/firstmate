@@ -107,6 +107,20 @@ wait_for_claimed_runner() {  # <source-id> [tries]: print the live runner pid
   return 1
 }
 
+# A Lavish arm against a dead target now fails on Lavish's own session state
+# instead of waiting out the poll, so the listener it started is still finishing
+# when arm returns. Its terminal result and self-retirement are what has to be
+# waited for, and waiting for the registration to disappear is the last of those
+# steps to happen.
+wait_for_retirement() {  # <home> <source-id> [tries]
+  local home=$1 id=$2 n=${3:-200}
+  for _ in $(seq 1 "$n"); do
+    [ -e "$home/state/procevent/$id.source" ] || return 0
+    sleep 0.05
+  done
+  return 1
+}
+
 hold_source_lock() {  # <source-id> <ready-file> <release-file>
   local id=$1 ready=$2 release=$3 parent=$$
   FM_HOME="$TMP_ROOT/lock-helper-home" bash -c '
@@ -476,14 +490,50 @@ pass "failed terminal retirement is fail-closed and idempotently recoverable"
 # source's live ownership, not merely the presence of its registration.
 # The stand-in writes only after `lavish-axi poll <artifact>` is actually invoked,
 # which also proves the listener process started before arm reported success.
+
+# Every Lavish stand-in answers the two published shapes arm depends on: the
+# bare session listing and the blocking poll. LAVISH_STUB_SESSIONS names a file
+# holding one realpath per session Lavish would list as open; an empty file is
+# the `sessions: []` a machine with none prints, which - verified against real
+# lavish-axi 0.1.45 - is exactly what an ended review and a never-opened one both
+# look like. Scenarios rewrite that file, so a session can be opened or ended
+# without a real server, and the poll half stays free to answer whenever it likes.
+LAVISH_STUB_SESSIONS="$TMP_ROOT/lavish-stub-sessions"
+export LAVISH_STUB_SESSIONS
+: > "$LAVISH_STUB_SESSIONS"
+LAVISH_STUB_HEAD=$(cat <<'SH'
+#!/usr/bin/env bash
+if [ "$#" -eq 0 ]; then
+  if [ -s "$LAVISH_STUB_SESSIONS" ]; then
+    printf 'sessions[%s]{file,status,url,pending_prompts}:\n' "$(grep -c . "$LAVISH_STUB_SESSIONS")"
+    while IFS= read -r listed; do
+      [ -n "$listed" ] || continue
+      printf '  %s,open,"http://127.0.0.1:0/session/stub",0\n' "$listed"
+    done < "$LAVISH_STUB_SESSIONS"
+  else
+    printf 'sessions: []\n'
+  fi
+  exit 0
+fi
+SH
+)
+write_lavish_stub() {  # <bin-dir>: prepend the shared listing half to a poll half on stdin
+  printf '%s\n' "$LAVISH_STUB_HEAD" > "$1/lavish-axi"
+  cat >> "$1/lavish-axi"
+  chmod +x "$1/lavish-axi"
+}
+list_session_open() {  # <artifact>: make the stand-in list that exact session as open
+  perl -MCwd=realpath -e 'print realpath($ARGV[0]), "\n"' "$1" > "$LAVISH_STUB_SESSIONS"
+}
+list_no_sessions() { : > "$LAVISH_STUB_SESSIONS"; }
+
 HARM="$TMP_ROOT/harm"; new_home "$HARM"
 LAVISH_ARM_BIN=$(fm_fakebin "$TMP_ROOT/lavish-arm-stub")
 LAVISH_ARM_COUNT="$TMP_ROOT/lavish-arm-count"
 LAVISH_ARM_LISTENER="$TMP_ROOT/lavish-arm-listener"
 LAVISH_ARM_RELEASE="$TMP_ROOT/lavish-arm-release"
 export LAVISH_ARM_COUNT LAVISH_ARM_LISTENER LAVISH_ARM_RELEASE
-cat > "$LAVISH_ARM_BIN/lavish-axi" <<'SH'
-#!/usr/bin/env bash
+write_lavish_stub "$LAVISH_ARM_BIN" <<'SH'
 [ "${1-}" = poll ] && [ -f "${2-}" ] || exit 64
 count=$(cat "$LAVISH_ARM_COUNT" 2>/dev/null || echo 0)
 printf '%s\n' "$((count + 1))" > "$LAVISH_ARM_COUNT"
@@ -492,21 +542,16 @@ trap 'exit 0' TERM INT
 while [ ! -e "$LAVISH_ARM_RELEASE" ]; do sleep 0.05; done
 printf 'session:\n  file: /review.html\n  status: ended\n  ended_by: fixture\n'
 SH
-chmod +x "$LAVISH_ARM_BIN/lavish-axi"
 LAVISH_ARM_ART="$TMP_ROOT/lavish-arm.html"
 printf '<h1>live arm</h1>\n' > "$LAVISH_ARM_ART"
 lavish_arm_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$LAVISH_ARM_ART")
 PE_TRACKED+=("$HARM|$lavish_arm_id")
-arm_started=$(date +%s)
+list_session_open "$LAVISH_ARM_ART"
+[ "$(PATH="$LAVISH_ARM_BIN:$PATH" "$ROOT/bin/fm-procevent-lavish.sh" session-state "$LAVISH_ARM_ART")" = open ] \
+  || fail "the healthy fixture's exact session did not read as open in the published listing"
 arm_out=$(PATH="$LAVISH_ARM_BIN:$PATH" FM_HOME="$HARM" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$LAVISH_ARM_ART")
-arm_elapsed=$(( $(date +%s) - arm_started ))
 assert_contains "$arm_out" "armed: $lavish_arm_id" "Lavish arm did not report its confirmed source"
-# Readiness is only believable after the settle window has held, because a
-# healthy-looking listener that is really talking to an ended session needs that
-# long to say so. Confirming sooner is exactly what reported those as armed.
-[ "$arm_elapsed" -ge 2 ] \
-  || fail "Lavish arm reported ready after ${arm_elapsed}s, shorter than the settle window it must hold live"
 assert_present "$LAVISH_ARM_LISTENER" "Lavish arm returned before invoking the exact blocking listener"
 arm_owner=$(pe "$HARM" list | awk -v id="$lavish_arm_id" '$1 == id { print $3 }')
 [ "$arm_owner" = live ] || fail "Lavish arm returned with owner=$arm_owner instead of a live listener"
@@ -542,19 +587,21 @@ LAVISH_FAIL_BIN=$(fm_fakebin "$TMP_ROOT/lavish-arm-fail-stub")
 LAVISH_FAIL_READY="$TMP_ROOT/lavish-arm-fail-ready"
 LAVISH_FAIL_LISTENER="$TMP_ROOT/lavish-arm-fail-listener"
 export LAVISH_FAIL_READY LAVISH_FAIL_LISTENER
-cat > "$LAVISH_FAIL_BIN/lavish-axi" <<'SH'
-#!/usr/bin/env bash
+write_lavish_stub "$LAVISH_FAIL_BIN" <<'SH'
 [ "${1-}" = poll ] && [ -f "${2-}" ] || exit 64
 [ -e "$LAVISH_FAIL_READY" ] || exit 71
 printf '%s\n' "$$" > "$LAVISH_FAIL_LISTENER"
 trap 'exit 0' TERM INT
 while :; do sleep 0.05; done
 SH
-chmod +x "$LAVISH_FAIL_BIN/lavish-axi"
 LAVISH_FAIL_ART="$TMP_ROOT/lavish-arm-fail.html"
 printf '<h1>failed arm recovery</h1>\n' > "$LAVISH_FAIL_ART"
 lavish_fail_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$LAVISH_FAIL_ART")
 PE_TRACKED+=("$HARMFAIL|$lavish_fail_id")
+# The target session is healthy here, so the only thing that can fail is the
+# listener. That keeps this the startup regression it is meant to be rather than
+# an ended-session test wearing its name.
+list_session_open "$LAVISH_FAIL_ART"
 arm_fail_status=0
 arm_fail_out=$(PATH="$LAVISH_FAIL_BIN:$PATH" FM_HOME="$HARMFAIL" \
   FM_PROCEVENT_LIVE_CONFIRM_TIMEOUT=1 \
@@ -583,8 +630,7 @@ HARMEND="$TMP_ROOT/harm-end"; new_home "$HARMEND"
 LAVISH_END_BIN=$(fm_fakebin "$TMP_ROOT/lavish-ended-stub")
 LAVISH_END_COUNT="$TMP_ROOT/lavish-ended-count"
 export LAVISH_END_COUNT
-cat > "$LAVISH_END_BIN/lavish-axi" <<'SH'
-#!/usr/bin/env bash
+write_lavish_stub "$LAVISH_END_BIN" <<'SH'
 # Stand-in for `lavish-axi poll <file>` against a session that already ended: it
 # returns at once, so the runner captures a terminal result and retires the
 # source while arm is still confirming liveness.
@@ -593,11 +639,14 @@ count=$(cat "$LAVISH_END_COUNT" 2>/dev/null || echo 0)
 printf '%s\n' "$((count + 1))" > "$LAVISH_END_COUNT"
 printf 'session:\n  file: /review.html\n  status: ended\n  ended_by: user\n'
 SH
-chmod +x "$LAVISH_END_BIN/lavish-axi"
 LAVISH_END_ART="$TMP_ROOT/lavish-ended.html"
 printf '<h1>ended review</h1>\n' > "$LAVISH_END_ART"
 lavish_end_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$LAVISH_END_ART")
 PE_TRACKED+=("$HARMEND|$lavish_end_id")
+# An ended review leaves Lavish's own listing, so the exact session reads absent.
+list_no_sessions
+[ "$(PATH="$LAVISH_END_BIN:$PATH" "$ROOT/bin/fm-procevent-lavish.sh" session-state "$LAVISH_END_ART")" = absent ] \
+  || fail "an ended session did not read as absent from the published listing"
 arm_end_status=0
 arm_end_out=$(PATH="$LAVISH_END_BIN:$PATH" FM_HOME="$HARMEND" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$LAVISH_END_ART" 2>&1) || arm_end_status=$?
@@ -608,14 +657,18 @@ assert_contains "$arm_end_out" "ended or was missing" \
   "arm did not diagnose that the target session ended before a live listener"
 assert_not_contains "$arm_end_out" "registration disappeared" \
   "arm blamed its own state for a target session that simply ended"
+# arm now fails on Lavish's own state rather than on the poll's verdict, so it
+# can return before that final payload lands. The listener it started still owes
+# the human's last `Send & End` feedback, so the capture, the announcement, and
+# the retirement must all still happen on their own.
+wait_for_retirement "$HARMEND" "$lavish_end_id" \
+  || fail "the ended session's source did not retire itself"
 [ "$(cat "$LAVISH_END_COUNT")" = 1 ] \
   || fail "arm polled the ended session $(cat "$LAVISH_END_COUNT") times"
 [ "$(count_results "$HARMEND" "$lavish_end_id")" = 1 ] \
   || fail "the ended session's terminal result was not captured exactly once"
 assert_contains "$(wake_payloads "$HARMEND")" "procevent lavish $lavish_end_id 1" \
   "the ended session's captured result was not announced"
-assert_absent "$HARMEND/state/procevent/$lavish_end_id.source" \
-  "the ended session's source did not retire itself"
 
 # The human reopens the review on the same artifact, so the canonical source id
 # is unchanged and that ended session's terminal result stays in the inbox
@@ -624,14 +677,13 @@ assert_absent "$HARMEND/state/procevent/$lavish_end_id.source" \
 LAVISH_REOPEN_BIN=$(fm_fakebin "$TMP_ROOT/lavish-reopened-stub")
 LAVISH_REOPEN_LISTENER="$TMP_ROOT/lavish-reopened-listener"
 export LAVISH_REOPEN_LISTENER
-cat > "$LAVISH_REOPEN_BIN/lavish-axi" <<'SH'
-#!/usr/bin/env bash
+write_lavish_stub "$LAVISH_REOPEN_BIN" <<'SH'
 [ "${1-}" = poll ] && [ -f "${2-}" ] || exit 64
 printf '%s\n' "$$" > "$LAVISH_REOPEN_LISTENER"
 trap 'exit 0' TERM INT
 while :; do sleep 0.05; done
 SH
-chmod +x "$LAVISH_REOPEN_BIN/lavish-axi"
+list_session_open "$LAVISH_END_ART"
 reopen_status=0
 reopen_out=$(PATH="$LAVISH_REOPEN_BIN:$PATH" FM_HOME="$HARMEND" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$LAVISH_END_ART" 2>&1) || reopen_status=$?
@@ -648,93 +700,131 @@ arm_owner=$(pe "$HARMEND" list | awk -v id="$lavish_end_id" '$1 == id { print $3
 pe "$HARMEND" retire "$lavish_end_id" >/dev/null
 pass "Lavish arm fails with a target-session diagnostic when that session already ended, and still arms the same artifact once it is reopened"
 
-# The same contract at the timing that actually broke it. The published poll does
-# not answer instantly: on lavish-axi 0.1.45 the real `lavish-axi poll` reaches its
-# ended verdict in 1.12-1.23s and its missing-session verdict in 1.12-1.13s after
-# the listener starts, and a confirmation that finished before then reported both
-# as armed. These stand-ins answer at 1.4s and 1.2s, at or above that measured
-# latency, so the hard failure is proved against real timing rather than against a
-# verdict that arrives before the listener can even look live.
-lavish_verdict_arm() {  # <home> <bin-dir> <artifact>: run arm, print exit then output
-  local home=$1 bin=$2 artifact=$3 out status=0
+# The never-opened artifact, at ordinary speed: the same diagnosed arm failure as
+# an ended review, and the result its listener does capture must classify as
+# missing and retire the source on its own.
+HGONEFAST="$TMP_ROOT/harm-missing"; new_home "$HGONEFAST"
+LAVISH_MISSING_BIN=$(fm_fakebin "$TMP_ROOT/lavish-missing-stub")
+write_lavish_stub "$LAVISH_MISSING_BIN" <<'SH'
+[ "${1-}" = poll ] && [ -f "${2-}" ] || exit 64
+printf 'error: No active Lavish Editor session for this file\ncode: NOT_FOUND\n'
+exit 1
+SH
+LAVISH_MISSING_ART="$TMP_ROOT/lavish-missing.html"
+printf '<h1>never opened</h1>\n' > "$LAVISH_MISSING_ART"
+lavish_missing_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$LAVISH_MISSING_ART")
+PE_TRACKED+=("$HGONEFAST|$lavish_missing_id")
+list_no_sessions
+missing_status=0
+missing_out=$(PATH="$LAVISH_MISSING_BIN:$PATH" FM_HOME="$HGONEFAST" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$LAVISH_MISSING_ART" 2>&1) || missing_status=$?
+[ "$missing_status" -ne 0 ] || fail "Lavish arm reported armed for an artifact that never had a session"
+assert_contains "$missing_out" "ended or was missing" \
+  "a never-opened artifact lost the target-session diagnostic"
+assert_not_contains "$missing_out" "registration disappeared" \
+  "arm blamed its own state for an artifact that never had a session"
+wait_for_retirement "$HGONEFAST" "$lavish_missing_id" \
+  || fail "the missing session's source did not retire itself"
+[ "$(count_results "$HGONEFAST" "$lavish_missing_id")" = 1 ] \
+  || fail "the missing session's result was not captured exactly once"
+assert_contains "$("$ROOT/bin/fm-procevent-lavish.sh" classify "$(first_result "$HGONEFAST" "$lavish_missing_id")")" \
+  missing "the captured result of a never-opened session did not classify as missing"
+
+# The saturated-host regression, and the reason the readiness proof is no longer
+# a settle window. On lavish-axi 0.1.45 the real `lavish-axi poll` reaches its
+# ended verdict in 1.12-1.23s and its missing-session verdict in 1.12-1.13s on an
+# idle machine, but a loaded one stretched that to 2.42s, 2.71s, and once 10.67s,
+# and a confirmation that ran out first reported both as armed. These stand-ins
+# hold their verdict far past any window a caller would wait for, so the hard
+# failure has to come from Lavish's own session state instead - which does not
+# move with load - and the assertions below fail on any timing-based proof.
+LAVISH_SATURATED_VERDICT_SECONDS=30
+export LAVISH_SATURATED_VERDICT_SECONDS
+lavish_verdict_arm() {  # <home> <bin-dir> <artifact>: run arm, print exit, elapsed, output
+  local home=$1 bin=$2 artifact=$3 out status=0 started
+  started=$(date +%s)
   out=$(PATH="$bin:$PATH" FM_HOME="$home" \
     "$ROOT/bin/fm-procevent-lavish.sh" arm "$artifact" 2>&1) || status=$?
-  printf '%s\n%s\n' "$status" "$out"
+  printf '%s\n%s\n%s\n' "$status" "$(( $(date +%s) - started ))" "$out"
 }
 
 HARMLATE="$TMP_ROOT/harm-late-end"; new_home "$HARMLATE"
 LAVISH_LATE_BIN=$(fm_fakebin "$TMP_ROOT/lavish-late-ended-stub")
 LAVISH_LATE_COUNT="$TMP_ROOT/lavish-late-ended-count"
 export LAVISH_LATE_COUNT
-cat > "$LAVISH_LATE_BIN/lavish-axi" <<'SH'
-#!/usr/bin/env bash
-# Stand-in for `lavish-axi poll <file>` on a session that already ended, at the
-# latency the real CLI takes to reach that verdict.
+write_lavish_stub "$LAVISH_LATE_BIN" <<'SH'
+# Stand-in for `lavish-axi poll <file>` on a session that already ended, on a host
+# so loaded that its verdict arrives long after any confirmation would give up.
 [ "${1-}" = poll ] && [ -f "${2-}" ] || exit 64
 count=$(cat "$LAVISH_LATE_COUNT" 2>/dev/null || echo 0)
 printf '%s\n' "$((count + 1))" > "$LAVISH_LATE_COUNT"
-sleep 1.4
+trap 'exit 0' TERM INT
+sleep "$LAVISH_SATURATED_VERDICT_SECONDS"
 printf 'session:\n  file: /review.html\n  status: ended\n  ended_by: user\n'
 SH
-chmod +x "$LAVISH_LATE_BIN/lavish-axi"
 LAVISH_LATE_ART="$TMP_ROOT/lavish-late-ended.html"
 printf '<h1>slowly ended review</h1>\n' > "$LAVISH_LATE_ART"
 lavish_late_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$LAVISH_LATE_ART")
 PE_TRACKED+=("$HARMLATE|$lavish_late_id")
+list_no_sessions
 late_end_result=$(lavish_verdict_arm "$HARMLATE" "$LAVISH_LATE_BIN" "$LAVISH_LATE_ART")
-[ "$(printf '%s\n' "$late_end_result" | head -1)" -ne 0 ] \
-  || fail "Lavish arm reported armed for a session that answered ended 1.4s after its listener started"
-late_end_out=$(printf '%s\n' "$late_end_result" | tail -n +2)
+[ "$(printf '%s\n' "$late_end_result" | sed -n 1p)" -ne 0 ] \
+  || fail "Lavish arm reported armed for an ended session whose verdict had not arrived yet"
+late_end_elapsed=$(printf '%s\n' "$late_end_result" | sed -n 2p)
+# The whole point of the deterministic preflight: the diagnosis does not wait for
+# the target to answer, so it cannot be outrun by a slow one.
+[ "$late_end_elapsed" -lt "$LAVISH_SATURATED_VERDICT_SECONDS" ] \
+  || fail "Lavish arm waited ${late_end_elapsed}s for the target's own ended verdict instead of reading its session state"
+late_end_out=$(printf '%s\n' "$late_end_result" | tail -n +3)
 assert_not_contains "$late_end_out" "armed: $lavish_late_id" \
-  "arm printed a ready result before the target's own ended verdict arrived"
+  "arm printed a ready result for a session Lavish no longer lists"
 assert_contains "$late_end_out" "ended or was missing" \
-  "a late ended verdict lost the target-session diagnostic"
+  "a saturated-host ended verdict lost the target-session diagnostic"
 [ "$(cat "$LAVISH_LATE_COUNT")" = 1 ] \
   || fail "arm polled the late-ended session $(cat "$LAVISH_LATE_COUNT") times"
-[ "$(count_results "$HARMLATE" "$lavish_late_id")" = 1 ] \
-  || fail "the late ended session's terminal result was not captured exactly once"
-assert_contains "$(wake_payloads "$HARMLATE")" "procevent lavish $lavish_late_id 1" \
-  "the late ended session's captured result was not announced"
-assert_absent "$HARMLATE/state/procevent/$lavish_late_id.source" \
-  "the late ended session's source did not retire itself"
+assert_present "$HARMLATE/state/procevent/$lavish_late_id.source" \
+  "the still-running listener's registration was discarded before it could deliver its final payload"
 
 HARMGONE="$TMP_ROOT/harm-late-missing"; new_home "$HARMGONE"
 LAVISH_GONE_BIN=$(fm_fakebin "$TMP_ROOT/lavish-late-missing-stub")
 LAVISH_GONE_COUNT="$TMP_ROOT/lavish-late-missing-count"
 export LAVISH_GONE_COUNT
-cat > "$LAVISH_GONE_BIN/lavish-axi" <<'SH'
-#!/usr/bin/env bash
+write_lavish_stub "$LAVISH_GONE_BIN" <<'SH'
 # Stand-in for `lavish-axi poll <file>` on an artifact that never had a session,
-# at the latency the real CLI takes to report NOT_FOUND.
+# on a host so loaded that NOT_FOUND takes far longer than the real CLI's 1.2s.
 [ "${1-}" = poll ] && [ -f "${2-}" ] || exit 64
 count=$(cat "$LAVISH_GONE_COUNT" 2>/dev/null || echo 0)
 printf '%s\n' "$((count + 1))" > "$LAVISH_GONE_COUNT"
-sleep 1.2
+trap 'exit 0' TERM INT
+sleep "$LAVISH_SATURATED_VERDICT_SECONDS"
 printf 'error: No active Lavish Editor session for this file\ncode: NOT_FOUND\n'
 exit 1
 SH
-chmod +x "$LAVISH_GONE_BIN/lavish-axi"
 LAVISH_GONE_ART="$TMP_ROOT/lavish-late-missing.html"
 printf '<h1>never opened review</h1>\n' > "$LAVISH_GONE_ART"
 lavish_gone_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$LAVISH_GONE_ART")
 PE_TRACKED+=("$HARMGONE|$lavish_gone_id")
+list_no_sessions
 late_gone_result=$(lavish_verdict_arm "$HARMGONE" "$LAVISH_GONE_BIN" "$LAVISH_GONE_ART")
-[ "$(printf '%s\n' "$late_gone_result" | head -1)" -ne 0 ] \
+[ "$(printf '%s\n' "$late_gone_result" | sed -n 1p)" -ne 0 ] \
   || fail "Lavish arm reported armed for an artifact whose session was missing"
-late_gone_out=$(printf '%s\n' "$late_gone_result" | tail -n +2)
+late_gone_elapsed=$(printf '%s\n' "$late_gone_result" | sed -n 2p)
+[ "$late_gone_elapsed" -lt "$LAVISH_SATURATED_VERDICT_SECONDS" ] \
+  || fail "Lavish arm waited ${late_gone_elapsed}s for a missing-session verdict instead of reading its session state"
+late_gone_out=$(printf '%s\n' "$late_gone_result" | tail -n +3)
 assert_not_contains "$late_gone_out" "armed: $lavish_gone_id" \
   "arm printed a ready result for a target session that was never there"
 assert_contains "$late_gone_out" "ended or was missing" \
   "a missing target session lost the target-session diagnostic"
 assert_not_contains "$late_gone_out" "registration disappeared" \
   "arm blamed its own state for a target session that was never there"
-[ "$(count_results "$HARMGONE" "$lavish_gone_id")" = 1 ] \
-  || fail "the missing session's result was not captured exactly once"
-assert_contains "$("$ROOT/bin/fm-procevent-lavish.sh" classify "$(first_result "$HARMGONE" "$lavish_gone_id")")" \
-  missing "the captured result of a never-opened session did not classify as missing"
-assert_absent "$HARMGONE/state/procevent/$lavish_gone_id.source" \
-  "the missing session's source did not retire itself"
-pass "a target session that answers ended or missing at real listener latency is still a diagnosed arm failure"
+# The listener is still waiting out its slow verdict, so the ordinary machinery -
+# not arm - is what captures and retires it. Both halves are proved here.
+pe "$HARMGONE" retire "$lavish_gone_id" >/dev/null
+wait_for_retirement "$HARMGONE" "$lavish_gone_id" \
+  || fail "the missing session's source could not be retired while its listener was still waiting"
+pe "$HARMLATE" retire "$lavish_late_id" >/dev/null
+pass "a target session Lavish no longer lists is a diagnosed arm failure even when its own verdict never arrives in time"
 
 # The generic runner owns that distinction, so it is proved on its own public
 # command too: a source that ended terminally reads differently from one whose
@@ -821,9 +911,10 @@ wait "$HOLDER_PID" 2>/dev/null || true
 pe "$HCONT" retire contended-src >/dev/null
 pass "the liveness confirmation bound is elapsed time that a held source boundary cannot stretch"
 
-# The window itself, on the runner's own command: an owner that is merely present
-# is not yet confirmed, and one that holds live ownership is confirmed only after
-# the whole settle window has passed.
+# Liveness on the runner's own command is a state, not a duration: it confirms a
+# live owner that is executing its registered listener right now, and refuses an
+# owner that holds the claim without one. That is what replaced the settle
+# window, whose only real effect was to bound how late a wrong answer arrived.
 HSETTLE="$TMP_ROOT/hsettle"; new_home "$HSETTLE"
 SETTLE_TRIGGER="$TMP_ROOT/settle-trigger"
 pe_register "$HSETTLE" lavish settle-src -- "$BLOCKER" "$SETTLE_TRIGGER" "settle payload" >/dev/null
@@ -831,22 +922,34 @@ pe "$HSETTLE" reconcile >/dev/null
 wait_for_claimed_runner settle-src >/dev/null || fail "the settle fixture runner did not start"
 settle_started=$(date +%s)
 pe "$HSETTLE" await-live settle-src >/dev/null \
-  || fail "await-live refused a listener that held live ownership throughout"
+  || fail "await-live refused a listener that was executing its registered source"
 settle_elapsed=$(( $(date +%s) - settle_started ))
-[ "$settle_elapsed" -ge 2 ] \
-  || fail "await-live confirmed liveness after only ${settle_elapsed}s, short of its settle window"
+# No fixed window means no tax on a healthy handoff: a caller waiting inside a
+# conversational turn gets its answer as soon as the state is readable.
+[ "$settle_elapsed" -le 2 ] \
+  || fail "await-live took ${settle_elapsed}s to confirm an already-executing listener"
+
+# The exact state a settle window was standing in for, made explicit: an owner
+# that claimed the source but never reached its registered argv. Removing that
+# generation's execution marker reproduces it without a timing race.
+settle_marker=$(find "$HSETTLE/state/procevent" -name '.settle-src.*.output' -print -quit)
+[ -n "$settle_marker" ] \
+  || fail "the running listener left no execution marker for its claim generation"
+mv -f "$settle_marker" "$settle_marker.parked"
 settle_short_status=0
-settle_short_out=$(FM_HOME="$HSETTLE" FM_PROCEVENT_LIVE_SETTLE_SECONDS=5 \
-  FM_PROCEVENT_LIVE_CONFIRM_TIMEOUT=2 \
+settle_short_out=$(FM_HOME="$HSETTLE" FM_PROCEVENT_LIVE_CONFIRM_TIMEOUT=1 \
   "$ROOT/bin/fm-procevent.sh" await-live settle-src 2>&1) || settle_short_status=$?
 [ "$settle_short_status" -ne 0 ] \
-  || fail "await-live confirmed a live owner it never observed for a whole settle window"
-assert_contains "$settle_short_out" "settle window" \
-  "a live owner short of its settle window lost the diagnostic naming that window"
+  || fail "await-live confirmed an owner that was not executing its registered listener"
+assert_contains "$settle_short_out" "never executing its registered listener" \
+  "an owner without a running listener lost the diagnostic naming that cause"
 assert_present "$HSETTLE/state/procevent/settle-src.source" \
-  "an unsettled confirmation discarded the registration needed for reconcile recovery"
+  "an unconfirmed liveness check discarded the registration needed for reconcile recovery"
+mv -f "$settle_marker.parked" "$settle_marker"
+pe "$HSETTLE" await-live settle-src >/dev/null \
+  || fail "await-live refused the same listener once its execution marker was readable again"
 pe "$HSETTLE" retire settle-src >/dev/null
-pass "liveness is confirmed only after the exact source holds live ownership for the whole settle window"
+pass "liveness is the exact registered listener executing, not an owner observed for long enough"
 
 # --- end-user-aligned regression: one Send & End, one captured result -------
 # The dogfood defect: a real armed Lavish source received one human `Send & End`
@@ -860,8 +963,7 @@ LAVISH_BIN=$(fm_fakebin "$TMP_ROOT/lavish-stub")
 LAVISH_POLL_COUNT="$TMP_ROOT/lavish-poll-count"
 LAVISH_SEND_END_TRIGGER="$TMP_ROOT/lavish-send-end-trigger"
 export LAVISH_POLL_COUNT LAVISH_SEND_END_TRIGGER
-cat > "$LAVISH_BIN/lavish-axi" <<'SH'
-#!/usr/bin/env bash
+write_lavish_stub "$LAVISH_BIN" <<'SH'
 # Stand-in for `lavish-axi poll <file>` around a human `Send & End`: the final
 # feedback is delivered exactly once carrying session_ended, and every later
 # poll returns an empty ended session immediately.
@@ -875,11 +977,11 @@ else
   printf 'session:\n  file: /review.html\n  status: ended\n  ended_by: user\n'
 fi
 SH
-chmod +x "$LAVISH_BIN/lavish-axi"
 REVIEW_ART="$TMP_ROOT/review.html"
 printf '<h1>review</h1>\n' > "$REVIEW_ART"
 lavish_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$REVIEW_ART")
 PE_TRACKED+=("$HLT|$lavish_id")
+list_session_open "$REVIEW_ART"
 PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh" arm "$REVIEW_ART" >/dev/null
 : > "$LAVISH_SEND_END_TRIGGER"
 for _ in $(seq 1 6); do
@@ -1474,12 +1576,51 @@ printf 'session:\n  file: /a.html\n  status: feedback\nfeedback[1]{text}:\n  ses
   && fail "prompt payload text was read as a session-level terminal marker"
 pass "the adapter owns which Lavish results end a source, and payload text cannot forge one"
 
+# --- the exact-session read the arm gate depends on -------------------------
+# It has to be exact and it has to fail loudly. A listing that names some other
+# review must not answer for this artifact, and a Lavish that cannot answer at
+# all must not be read as a session that ended - that would turn every outage
+# into a false "your review is gone" and send a caller off to rebuild a surface
+# that is still open.
+SESSION_STATE_BIN=$(fm_fakebin "$TMP_ROOT/lavish-session-state-stub")
+write_lavish_stub "$SESSION_STATE_BIN" <<'SH'
+exit 64
+SH
+SS_ART="$TMP_ROOT/session-state-target.html"
+SS_OTHER="$TMP_ROOT/session-state-other.html"
+printf '<h1>target</h1>\n' > "$SS_ART"
+printf '<h1>other</h1>\n' > "$SS_OTHER"
+list_session_open "$SS_OTHER"
+[ "$(PATH="$SESSION_STATE_BIN:$PATH" "$ROOT/bin/fm-procevent-lavish.sh" session-state "$SS_ART")" = absent ] \
+  || fail "another review's open session answered for this artifact"
+list_session_open "$SS_ART"
+[ "$(PATH="$SESSION_STATE_BIN:$PATH" "$ROOT/bin/fm-procevent-lavish.sh" session-state "$SS_ART")" = open ] \
+  || fail "the artifact's own open session was not read from the published listing"
+SS_MUTE_BIN=$(fm_fakebin "$TMP_ROOT/lavish-session-state-mute")
+cat > "$SS_MUTE_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+printf 'error: cannot reach the Lavish server\n' >&2
+exit 1
+SH
+chmod +x "$SS_MUTE_BIN/lavish-axi"
+ss_mute_status=0
+ss_mute_out=$(PATH="$SS_MUTE_BIN:$PATH" "$ROOT/bin/fm-procevent-lavish.sh" session-state "$SS_ART" 2>&1) \
+  || ss_mute_status=$?
+[ "$ss_mute_status" -ne 0 ] || fail "an unreadable Lavish listing was reported as a session state"
+assert_contains "$ss_mute_out" "cannot read the Lavish session listing" \
+  "an unreadable listing lost its own diagnostic"
+assert_not_contains "$ss_mute_out" "absent" \
+  "an unreadable listing was reported as a session that is gone"
+pass "the exact-session read is path-exact and fails loudly rather than inventing an ended session"
+
 # --- the loss limitation is stated on the public interface ------------------
 # Checked through --help, the operator-facing surface, rather than by reading
 # implementation bytes.
 adapter_help=$("$ROOT/bin/fm-procevent-lavish.sh" --help 2>&1 || true)
-assert_contains "$adapter_help" "report armed only after" \
-  "the adapter's help makes live ownership the arm success boundary"
+assert_contains "$adapter_help" "report armed only while two independent things are both" \
+  "the adapter's help makes both an open session and a live listener the arm success boundary"
+assert_contains "$adapter_help" "session-state" \
+  "the adapter's help exposes the exact-session state its arm gate reads"
 assert_contains "$adapter_help" "cannot accept feedback" \
   "the adapter's help states that an ended or missing target session is a failed arm"
 assert_contains "$adapter_help" "destructively clears" \
@@ -1492,8 +1633,8 @@ assert_contains "$runner_help" "await-live" \
   "the runner's help exposes its bounded exact-source liveness confirmation"
 assert_contains "$runner_help" "elapsed wall-clock bound" \
   "the runner's help states that the confirmation bound is elapsed time"
-assert_contains "$runner_help" "settle window" \
-  "the runner's help states that liveness must hold for a settle window"
+assert_contains "$runner_help" "Liveness is a state, not a duration" \
+  "the runner's help states that liveness is a state rather than a waited-out window"
 assert_contains "$runner_help" "latest-sequence" \
   "the runner's help exposes the baseline query its ended verdict depends on"
 assert_contains "$runner_help" "Exit 3" \
