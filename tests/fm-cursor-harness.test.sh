@@ -27,6 +27,7 @@ make_cursor_fakebin() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_tty}"*) printf '%s\n' "${FM_FAKE_PANE_TTY:-/dev/pts/99}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -48,6 +49,35 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  # Fake ps/pgrep so the worker-server discovery can simulate the pane's
+  # process tree: ps -t <tty> reports a cursor-agent process, and pgrep -P
+  # reports its worker-server child. The parent pid and child pid come from
+  # env so each test controls the topology.
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"-t "*)
+    printf '%s %s\n' "${FM_FAKE_CURSOR_AGENT_PID:-4242}" "${FM_FAKE_CURSOR_AGENT_ARGS:-"/opt/cursor-agent --force --trust brief"}"
+    exit 0 ;;
+  *"-p "*)
+    printf '%s\n' "${FM_FAKE_CURSOR_AGENT_ARGS:-"/opt/cursor-agent --force --trust brief"}"
+    exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  cat > "$fakebin/pgrep" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"index.js worker-server"*)
+    printf '%s\n' "${FM_FAKE_CURSOR_WORKER_PID:-4243}"
+    exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/pgrep"
   fm_fake_exit0 "$fakebin" treehouse cursor-agent
   printf '%s\n' "$fakebin"
 }
@@ -310,6 +340,61 @@ SH
   pass "non-cursor launch unsets CURSOR_AGENT; detection resolves to the actual target harness"
 }
 
+# --- worker-server record: the cursor child daemon pid lands in meta ---------
+
+test_cursor_worker_server_recorded_at_spawn() {
+  local rec id out status worker_pid
+  id=cursor-worker-z8
+  rec=$(make_cursor_case cursor-worker "$id")
+  read_case_record "$rec"
+  # A real long-running process stands in for cursor's background worker-server
+  # so /proc/<pid>/stat carries a real starttime; the fake ps/pgrep in the
+  # fakebin report it as the pane's worker-server child.
+  ( exec sleep 300 ) &
+  worker_pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$worker_pid" 2>/dev/null || fail "cursor-worker-z8: worker stand-in did not start"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID=$worker_pid \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "cursor spawn with a worker-server child should succeed"
+  assert_grep "cursor_worker_server=$worker_pid" "$HOME_DIR/state/$id.meta" \
+    "cursor spawn did not record the worker-server pid in meta"
+  assert_grep "cursor_worker_server_start=" "$HOME_DIR/state/$id.meta" \
+    "cursor spawn did not record the worker-server starttime identity"
+  kill -KILL "$worker_pid" 2>/dev/null || true
+  pass "cursor spawn records the worker-server pid and starttime identity in meta"
+}
+
+test_cursor_worker_server_absent_record_is_omitted() {
+  local rec id out status
+  id=cursor-worker-none-z9
+  rec=$(make_cursor_case cursor-worker-none "$id")
+  read_case_record "$rec"
+  # No worker-server child: the fake pgrep exits 1, so no record is written and
+  # the spawn still succeeds (teardown falls back to its cwd-based reaper).
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID='' \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "cursor spawn without a worker-server child should succeed"
+  if grep -q '^cursor_worker_server=' "$HOME_DIR/state/$id.meta" 2>/dev/null; then
+    fail "cursor spawn without a worker-server child must not write a worker-server record"
+  fi
+  pass "cursor spawn without a worker-server child records nothing and still succeeds"
+}
+
 # --- run all tests (order matters: simpler checks first) ---------------------
 
 test_cursor_env_marker
@@ -322,3 +407,5 @@ test_cursor_resolver_falls_back_to_agent_alias
 test_cursor_resolver_unix_home_fallback
 test_cursor_missing_binary_refusal
 test_non_cursor_launch_unsets_cursor_agent
+test_cursor_worker_server_recorded_at_spawn
+test_cursor_worker_server_absent_record_is_omitted
