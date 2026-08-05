@@ -2,45 +2,76 @@
 # shellcheck disable=SC2034 # parsed fields are output globals for sourcing callers.
 # Shared parser for data/secondmates.md records.
 #
-# A generated record ends with an explicit structured suffix:
+# A generated local record ends with this explicit structured suffix:
 #   (home: ...; scope: ...; projects: ...; added YYYY-MM-DD)
+# A remote record adds its host placement before the existing fields:
+#   (host: ...; root: ...; home: ...; scope: ...; projects: ...; added YYYY-MM-DD)
 # Summary text and scope text are natural language and may contain parentheses
 # and semicolons, so field boundaries are anchored to the suffix markers rather
 # than to the first incidental punctuation.
 
 SECONDMATE_REGISTRY_ID=
 SECONDMATE_REGISTRY_SUMMARY=
+SECONDMATE_REGISTRY_HOST=
+SECONDMATE_REGISTRY_ROOT=
 SECONDMATE_REGISTRY_HOME=
 SECONDMATE_REGISTRY_SCOPE=
 SECONDMATE_REGISTRY_PROJECTS=
 SECONDMATE_REGISTRY_ADDED=
+SECONDMATE_REGISTRY_REMOTE=0
 SECONDMATE_REGISTRY_LINE=
+SECONDMATE_REGISTRY_MATCH_HOST=
+SECONDMATE_REGISTRY_MATCH_ROOT=
 SECONDMATE_REGISTRY_MATCH_HOME=
 SECONDMATE_REGISTRY_MATCH_HOME_KEY=
 SECONDMATE_REGISTRY_MATCH_PROJECTS=
+SECONDMATE_REGISTRY_MATCH_REMOTE=0
 SECONDMATE_REGISTRY_ERROR=
+
+secondmate_registry_lock_path() { printf '%s/.secondmate-registry.lock\n' "$1"; }
+secondmate_reply_lifecycle_lock_path() { printf '%s/.remote-reply-lifecycle-%s.lock\n' "$1" "$2"; }
 
 secondmate_registry_parse_line() {
   local line=$1
-  local record_re='^- ([A-Za-z0-9._-]+) - (.+) \(home:[[:space:]]*([^;)]*);[[:space:]]*scope:[[:space:]]*(.*);[[:space:]]*projects:[[:space:]]*([^;)]*);[[:space:]]*added[[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2})\)[[:space:]]*$'
+  local local_re='^- ([A-Za-z0-9._-]+) - (.+) \(home:[[:space:]]*([^;)]*);[[:space:]]*scope:[[:space:]]*(.*);[[:space:]]*projects:[[:space:]]*([^;)]*);[[:space:]]*added[[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2})\)[[:space:]]*$'
+  local remote_re='^- ([A-Za-z0-9._-]+) - (.+) \(host:[[:space:]]*([^;)]*);[[:space:]]*root:[[:space:]]*([^;)]*);[[:space:]]*home:[[:space:]]*([^;)]*);[[:space:]]*scope:[[:space:]]*(.*);[[:space:]]*projects:[[:space:]]*([^;)]*);[[:space:]]*added[[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2})\)[[:space:]]*$'
   SECONDMATE_REGISTRY_ID=
   SECONDMATE_REGISTRY_SUMMARY=
+  SECONDMATE_REGISTRY_HOST=
+  SECONDMATE_REGISTRY_ROOT=
   SECONDMATE_REGISTRY_HOME=
   SECONDMATE_REGISTRY_SCOPE=
   SECONDMATE_REGISTRY_PROJECTS=
   SECONDMATE_REGISTRY_ADDED=
-  if [[ "$line" =~ $record_re ]]; then
+  SECONDMATE_REGISTRY_REMOTE=0
+  # Parse the legacy local form first so summary prose that happens to mention
+  # remote field names cannot change an existing route's placement semantics.
+  if [[ "$line" =~ $local_re ]]; then
     SECONDMATE_REGISTRY_ID=${BASH_REMATCH[1]}
     SECONDMATE_REGISTRY_SUMMARY=${BASH_REMATCH[2]}
     SECONDMATE_REGISTRY_HOME=${BASH_REMATCH[3]}
     SECONDMATE_REGISTRY_SCOPE=${BASH_REMATCH[4]}
     SECONDMATE_REGISTRY_PROJECTS=${BASH_REMATCH[5]}
     SECONDMATE_REGISTRY_ADDED=${BASH_REMATCH[6]}
+  elif [[ "$line" =~ $remote_re ]]; then
+    SECONDMATE_REGISTRY_ID=${BASH_REMATCH[1]}
+    SECONDMATE_REGISTRY_SUMMARY=${BASH_REMATCH[2]}
+    SECONDMATE_REGISTRY_HOST=${BASH_REMATCH[3]}
+    SECONDMATE_REGISTRY_ROOT=${BASH_REMATCH[4]}
+    SECONDMATE_REGISTRY_HOME=${BASH_REMATCH[5]}
+    SECONDMATE_REGISTRY_SCOPE=${BASH_REMATCH[6]}
+    SECONDMATE_REGISTRY_PROJECTS=${BASH_REMATCH[7]}
+    SECONDMATE_REGISTRY_ADDED=${BASH_REMATCH[8]}
+    SECONDMATE_REGISTRY_REMOTE=1
   else
     return 1
   fi
   [ -n "$SECONDMATE_REGISTRY_HOME" ] || return 1
   [ -n "$SECONDMATE_REGISTRY_SCOPE" ] || return 1
+  if [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ]; then
+    [ -n "$SECONDMATE_REGISTRY_HOST" ] || return 1
+    [ -n "$SECONDMATE_REGISTRY_ROOT" ] || return 1
+  fi
   return 0
 }
 
@@ -62,8 +93,12 @@ secondmate_registry_field() {
   local reg=$1 id=$2 key=$3
   secondmate_registry_line_for_id "$reg" "$id" || return 1
   case "$key" in
+    host) printf '%s\n' "$SECONDMATE_REGISTRY_HOST" ;;
+    root) printf '%s\n' "$SECONDMATE_REGISTRY_ROOT" ;;
     home) printf '%s\n' "$SECONDMATE_REGISTRY_HOME" ;;
+    scope) printf '%s\n' "$SECONDMATE_REGISTRY_SCOPE" ;;
     projects) printf '%s\n' "$SECONDMATE_REGISTRY_PROJECTS" ;;
+    remote) printf '%s\n' "$SECONDMATE_REGISTRY_REMOTE" ;;
     *) return 1 ;;
   esac
 }
@@ -82,10 +117,13 @@ secondmate_registry_path_key() {
 
 secondmate_registry_validate_bindings() {
   local reg=$1 resolver=$2 expected_id=${3:-} expected_home=${4:-}
-  local tmp snapshot bindings line id home home_key duplicate_homes duplicate_ids overlaps expected_home_key
+  local tmp snapshot bindings line id host root home home_key duplicate_homes duplicate_ids overlaps expected_home_key
+  SECONDMATE_REGISTRY_MATCH_HOST=
+  SECONDMATE_REGISTRY_MATCH_ROOT=
   SECONDMATE_REGISTRY_MATCH_HOME=
   SECONDMATE_REGISTRY_MATCH_HOME_KEY=
   SECONDMATE_REGISTRY_MATCH_PROJECTS=
+  SECONDMATE_REGISTRY_MATCH_REMOTE=0
   SECONDMATE_REGISTRY_ERROR=
   case "$expected_id" in *[!A-Za-z0-9._-]*) SECONDMATE_REGISTRY_ERROR="invalid secondmate id: $expected_id"; return 1 ;; esac
   if [ ! -f "$reg" ] || [ -L "$reg" ]; then
@@ -112,6 +150,8 @@ secondmate_registry_validate_bindings() {
           return 1
         fi
         id=$SECONDMATE_REGISTRY_ID
+        host=$SECONDMATE_REGISTRY_HOST
+        root=$SECONDMATE_REGISTRY_ROOT
         home=$SECONDMATE_REGISTRY_HOME
         case "$home" in
           /*) ;;
@@ -121,24 +161,79 @@ secondmate_registry_validate_bindings() {
             return 1
             ;;
         esac
-        case "$home" in
-          *$'\t'*)
+        case "$home$host$root" in
+          *$'\t'*|*$'\n'*|*$'\r'*)
             rm -rf -- "$tmp"
-            SECONDMATE_REGISTRY_ERROR="unsafe secondmate home for $id"
+            SECONDMATE_REGISTRY_ERROR="unsafe secondmate route for $id"
             return 1
             ;;
         esac
-        home_key=$("$resolver" "$home" 2>/dev/null || true)
-        if [ -z "$home_key" ]; then
-          rm -rf -- "$tmp"
-          SECONDMATE_REGISTRY_ERROR="unresolvable secondmate home for $id: $home"
-          return 1
+        if [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ]; then
+          case "$host" in ''|-*|*[!A-Za-z0-9._-]*)
+            rm -rf -- "$tmp"
+            SECONDMATE_REGISTRY_ERROR="unsafe SSH host alias for $id: $host"
+            return 1
+            ;;
+          esac
+          case "$root" in /*) ;; *)
+            rm -rf -- "$tmp"
+            SECONDMATE_REGISTRY_ERROR="unsafe non-absolute remote root for $id: $root"
+            return 1
+            ;;
+          esac
+          case "/$root/" in */../*|*/./*)
+            rm -rf -- "$tmp"
+            SECONDMATE_REGISTRY_ERROR="remote code root contains traversal components for $id: $root"
+            return 1
+            ;;
+          esac
+          case "/$home/" in */../*|*/./*)
+            rm -rf -- "$tmp"
+            SECONDMATE_REGISTRY_ERROR="remote home contains traversal components for $id: $home"
+            return 1
+            ;;
+          esac
+          case "$root$home" in *'//'*)
+            rm -rf -- "$tmp"
+            SECONDMATE_REGISTRY_ERROR="remote route contains an empty path component for $id"
+            return 1
+            ;;
+          esac
+          if [ "$root" = "$home" ]; then
+            rm -rf -- "$tmp"
+            SECONDMATE_REGISTRY_ERROR="overlapping remote root and home for $id: $root"
+            return 1
+          fi
+          case "$home/" in "$root/"*)
+            rm -rf -- "$tmp"
+            SECONDMATE_REGISTRY_ERROR="remote home for $id is inside its code root: $home"
+            return 1
+            ;;
+          esac
+          case "$root/" in "$home/"*)
+            rm -rf -- "$tmp"
+            SECONDMATE_REGISTRY_ERROR="remote code root for $id is inside its home: $root"
+            return 1
+            ;;
+          esac
+          home_key="ssh:$host:$home"
+        else
+          home_key=$("$resolver" "$home" 2>/dev/null || true)
+          if [ -z "$home_key" ]; then
+            rm -rf -- "$tmp"
+            SECONDMATE_REGISTRY_ERROR="unresolvable secondmate home for $id: $home"
+            return 1
+          fi
+          home_key="local:$home_key"
         fi
         printf '%s\t%s\n' "$home_key" "$id" >> "$bindings"
         if [ -n "$expected_id" ] && [ "$id" = "$expected_id" ]; then
+          SECONDMATE_REGISTRY_MATCH_HOST=$host
+          SECONDMATE_REGISTRY_MATCH_ROOT=$root
           SECONDMATE_REGISTRY_MATCH_HOME=$home
           SECONDMATE_REGISTRY_MATCH_HOME_KEY=$home_key
           SECONDMATE_REGISTRY_MATCH_PROJECTS=$SECONDMATE_REGISTRY_PROJECTS
+          SECONDMATE_REGISTRY_MATCH_REMOTE=$SECONDMATE_REGISTRY_REMOTE
         fi
         ;;
     esac
@@ -201,7 +296,12 @@ secondmate_registry_validate_bindings() {
     return 1
   fi
   if [ -n "$expected_home" ]; then
-    expected_home_key=$("$resolver" "$expected_home" 2>/dev/null || true)
+    if [ "$SECONDMATE_REGISTRY_MATCH_REMOTE" -eq 1 ]; then
+      expected_home_key="ssh:$SECONDMATE_REGISTRY_MATCH_HOST:$expected_home"
+    else
+      expected_home_key=$("$resolver" "$expected_home" 2>/dev/null || true)
+      [ -z "$expected_home_key" ] || expected_home_key="local:$expected_home_key"
+    fi
     if [ -z "$expected_home_key" ] || [ "$expected_home_key" != "$SECONDMATE_REGISTRY_MATCH_HOME_KEY" ]; then
       SECONDMATE_REGISTRY_ERROR="secondmate $expected_id is registered at $SECONDMATE_REGISTRY_MATCH_HOME, not $expected_home"
       return 1

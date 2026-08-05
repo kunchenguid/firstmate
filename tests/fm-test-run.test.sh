@@ -594,7 +594,6 @@ echo "not ok - deliberate proven-set fail"
 exit 1
 SH
   chmod +x "$repo/$b"
-  rm -f "$evidence/slow-done"
   set +e
   SCHED_EVIDENCE="$evidence" "$runner" --jobs 2 "$a" "$b" >"$tmp/out4" 2>"$tmp/err4"
   rc=$?

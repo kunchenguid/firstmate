@@ -55,15 +55,27 @@ pass() {
 #
 # fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal.
 # fm_test_reap <pid>... registers a background process for teardown.
-# Both are torn down by fm_test_cleanup, which the first registration installs on
-# EXIT and on the signals that stop a wedged suite. A test file that needs extra
-# teardown (e.g. killing a daemon) should define its own EXIT trap and call
-# fm_test_cleanup from inside it so registered dirs and processes are still torn
-# down.
+# Both are torn down by fm_test_cleanup, which is armed below on EXIT and on the
+# signals that stop a wedged suite. A test file that needs extra teardown (e.g.
+# killing a daemon) should define its own EXIT trap and call fm_test_cleanup from
+# inside it so registered dirs and processes are still torn down.
+#
+# Directories and processes register through deliberately different mechanisms.
+# The tmproot call site is almost always `TMP_ROOT=$(fm_test_tmproot prefix)`,
+# which forks a subshell to capture stdout. Anything that function does to the
+# current shell's state - an array append, a trap - dies with that subshell and
+# never reaches the real caller, so directory registration cannot go through
+# in-process state. `$$` is the one thing bash keeps stable across that boundary
+# (it always resolves to the invoking shell's PID, not the subshell's - see
+# `man bash` on `$$`), so fm_test_tmproot records the directory in a `$$`-keyed
+# registry file instead. fm_test_reap is called directly from the test shell,
+# never through command substitution, so it registers into arrays and can also
+# carry each pid's identity for the recycled-pid check.
 
 FM_TEST_CLEANUP_DIRS=()
 FM_TEST_CLEANUP_PIDS=()
 FM_TEST_CLEANUP_PID_IDENTITIES=()
+FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-cleanup.$$.XXXXXX") || return 1
 
 # Install fm_test_cleanup for every way a suite can end, once per shell.
 # A bare EXIT trap does not run for a signalled shell, and timeout(1) stops a
@@ -94,6 +106,14 @@ fm_test_cleanup_on_signal() {  # <signal-number>
 # suites. Failure prints nothing and returns nonzero.
 fm_test_pid_identity() {  # <pid>
   FM_STATE_OVERRIDE="${TMPDIR:-/tmp}" bash -c '. "$1" && fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$1" 2>/dev/null
+}
+
+# This shell's own identity, recorded into every fixture's .fm-test-fixture
+# marker so the orphan sweep below can tell a live owner's directory from a dead
+# one across PID reuse. Read once, here, in the real caller.
+FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
+  rm -f "$FM_TEST_CLEANUP_REGISTRY"
+  return 1
 }
 
 # fm_test_reap <pid> ...: register background processes for teardown on every
@@ -187,15 +207,63 @@ fm_test_cleanup() {
     [ -n "$d" ] && rm -rf "$d"
   done
   FM_TEST_CLEANUP_DIRS=()
+  if [ -f "$FM_TEST_CLEANUP_REGISTRY" ]; then
+    while IFS= read -r d; do
+      [ -n "$d" ] && rm -rf "$d"
+    done < "$FM_TEST_CLEANUP_REGISTRY"
+    rm -f "$FM_TEST_CLEANUP_REGISTRY"
+  fi
 }
 
 fm_test_tmproot() {
   local prefix=${1:-fm-test} root
-  root=$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX")
-  fm_test_install_cleanup_trap
-  FM_TEST_CLEANUP_DIRS+=("$root")
+  root=$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX") || return 1
+  if ! printf '%s\n%s\n' "$$" "$FM_TEST_OWNER_IDENTITY" > "$root/.fm-test-fixture" ||
+    ! printf '%s\n' "$root" >> "$FM_TEST_CLEANUP_REGISTRY"; then
+    rm -rf "$root"
+    return 1
+  fi
   printf '%s\n' "$root"
 }
+
+# Arm cleanup here, at source time, which always runs in the real caller and
+# never in one of fm_test_tmproot's command-substitution subshells. The install
+# is idempotent, so the fm_test_reap call site can re-request it harmlessly.
+fm_test_install_cleanup_trap
+
+# fm_test_reap_orphans: best-effort sweep for fixture roots left behind by a
+# prior run that was killed hard enough to skip the traps above (e.g. a
+# SIGKILL timeout). Only removes directories carrying the .fm-test-fixture
+# marker fm_test_tmproot writes, so it never touches unrelated fm-* tmp dirs
+# from real (non-test) firstmate commands. The marker identifies the owning
+# shell across PID reuse, so the same live owner always wins over the age
+# fallback for dead or unowned roots.
+FM_TEST_ORPHAN_MAX_AGE_SECONDS=${FM_TEST_ORPHAN_MAX_AGE_SECONDS:-3600}
+
+fm_test_reap_orphans() {
+  local marker dir mtime now owner_pid owner_identity current_identity
+  now=$(date +%s)
+  for marker in "${TMPDIR:-/tmp}"/fm-*/.fm-test-fixture; do
+    [ -e "$marker" ] || continue
+    owner_pid=$(sed -n '1p' "$marker" 2>/dev/null) || owner_pid=
+    owner_identity=$(sed -n '2,$p' "$marker" 2>/dev/null) || owner_identity=
+    case "$owner_pid" in
+      '' | *[!0-9]*) ;;
+      *)
+        current_identity=$(fm_test_pid_identity "$owner_pid" 2>/dev/null) || current_identity=
+        if [ -n "$owner_identity" ] && [ "$current_identity" = "$owner_identity" ]; then
+          continue
+        fi
+        ;;
+    esac
+    mtime=$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null) || continue
+    [ $((now - mtime)) -ge "$FM_TEST_ORPHAN_MAX_AGE_SECONDS" ] || continue
+    dir=$(dirname "$marker")
+    rm -rf "$dir"
+  done
+}
+
+fm_test_reap_orphans
 
 # --- fakebin / PATH shims ---------------------------------------------------
 #
