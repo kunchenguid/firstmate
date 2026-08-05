@@ -191,7 +191,7 @@ SH
   cat > "$CASE_BIN/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in
-  --version:*) printf '0.2.2\n' ;;
+  --version:*) printf '0.2.4\n' ;;
   update:--help) printf '%s\n' --archive-body ;;
   mv:--help) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...]' ;;
 esac

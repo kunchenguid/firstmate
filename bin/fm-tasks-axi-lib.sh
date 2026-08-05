@@ -6,11 +6,11 @@
 # Compatible means tasks-axi --version reports FM_TASKS_AXI_MIN or newer,
 # `tasks-axi update --help` exposes --archive-body for recoverable note rewrites,
 # and `tasks-axi mv --help` exposes [<id>...] for atomic multi-ID moves required
-# by secondmate handoffs (introduced in tasks-axi 0.2.2).
-# 0.2.2 is the floor because multi-ID mv is the true minimum firstmate uses;
-# earlier builds could pass a 0.1.1 version check and still fail handoff.
-# Feature probes stay as defense in depth for stripped or forked builds that
-# advertise a current version without those flags.
+# by secondmate handoffs.
+# FM_TASKS_AXI_MIN follows the axi-family floor policy owned beside the floor
+# constants in bin/fm-bootstrap.sh.
+# The feature probes are a separate concern and stay as defense in depth for
+# stripped or forked builds that advertise a current version without those flags.
 # `config/backlog-backend=manual` opts out of tasks-axi for routine firstmate
 # backlog mutations, but validated secondmate handoffs always use `tasks-axi mv`.
 # Absent or any other value keeps the default tasks-axi backend path, falling
@@ -19,7 +19,7 @@
 # This file is the single owner of FM_TASKS_AXI_MIN. bin/fm-bootstrap.sh turns a
 # failing check into the operator-facing MISSING diagnostic.
 
-FM_TASKS_AXI_MIN=0.2.2
+FM_TASKS_AXI_MIN=0.2.4
 
 fm_tasks_axi_version_parts() {
   local output

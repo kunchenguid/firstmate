@@ -163,7 +163,7 @@ for key in "${KEYS[@]}"; do
 done
 
 if [ "${#TO_MOVE[@]}" -gt 0 ]; then
-  fm_tasks_axi_compatible || die "tasks-axi 0.2.2+ is required for atomic backlog receipt"
+  fm_tasks_axi_compatible || die "a compatible tasks-axi is required for atomic backlog receipt; run bin/fm-bootstrap.sh for the required version"
   if ! MOVE_OUT=$(run_move "${TO_MOVE[@]}" 2>&1); then
     recovered=0
     for lock in "$DELIVERED.lock" "$DEST.lock"; do
