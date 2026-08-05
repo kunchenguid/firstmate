@@ -47,7 +47,7 @@ case "$INCLUDE_PRS" in
   *) echo "fm-dashboard-snapshot: FM_DASHBOARD_INCLUDE_PRS must be 0 or 1" >&2; exit 2 ;;
 esac
 
-fleet_args=(--json --fields paths,endpoints --all-in-flight --all-decisions --all-landed --all-unhealthy --all-recorded-prs)
+fleet_args=(--json --fields paths,endpoints --all-in-flight --all-decisions --all-secondmates --all-landed --all-unhealthy --all-recorded-prs)
 [ "$INCLUDE_PRS" -eq 1 ] && fleet_args+=(--include-prs --all-pr-repos)
 
 fleet=$(FM_HOME="$FM_HOME" \
