@@ -24,12 +24,13 @@ The generator is the crewmate that wrote the code; the evaluator is a **separate
 Never ask the generator to confirm its own UI works, and never accept "I verified it visually" from the agent that built it as evidence.
 Independence comes from two places, and the second was added deliberately: the evaluator has its own context, **and it runs on a different vendor**. The generator builds on `claude`; the evaluator runs on `codex`. A critic that shares the builder's model shares its blind spots and its taste, so a separate vendor buys a genuinely different read of the same page rather than a second opinion from the same mind.
 
-Model comes from the dispatch profile, not from this file - `config/crew-dispatch.json` carries `gpt-5.6-terra` as the primary with `gpt-5.6-luna` behind it, and `quota-array-dispatch` picks between them on remaining headroom.
+Model comes from the dispatch profile, not from this file - `config/crew-dispatch.json` carries `gpt-5.6-sol` as the primary with `gpt-5.6-terra` behind it, and `quota-array-dispatch` picks between them on remaining headroom.
 
-Two verified traps, both of which cost a diagnosis on 2026-08-05:
+Three traps, all paid for on 2026-08-05:
 
-- **`codex`'s model picker is not an entitlement list.** It offers `gpt-5.6-sol` as the default frontier model, but a live call on a ChatGPT-account auth returns `400 ... not supported when using Codex with a ChatGPT account`. Test a slug with a real call before putting it in a profile.
-- **`codex login status` and `codex doctor` both report success on a spent token.** They read the stored auth mode, not liveness; only a real request surfaces `refresh token was already used`. When every model fails identically, suspect auth rather than the model name, and fix it with `codex logout && codex login`.
+- **Entitlement moves.** `gpt-5.6-sol` returned `400 ... not supported when using Codex with a ChatGPT account` and then answered normally under an hour later, as the subscription settled. A model that failed once is not permanently unavailable, and a model that worked once may stop. Verify with a real call at the moment it matters.
+- **Slugs carry the `gpt-5.6-` prefix.** Bare `gpt-5.6` is rejected with a 400 even though documentation lists it alongside `gpt-5.6-sol` as the flagship.
+- **`codex login status` and `codex doctor` both report success on a spent token.** They read the stored auth mode, not liveness; only a real request surfaces `refresh token was already used`. When every model fails identically, suspect auth rather than the slug, and fix it with `codex logout && codex login`.
 
 The evaluator reads and drives. It never edits code, never commits, and never lands anything.
 A `pass` verdict is permission to continue through the project's normal gates, never a substitute for any of them.
