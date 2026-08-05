@@ -413,6 +413,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --slurpfile pr_discovery_input "$PR_DISCOVERY_FILE" '
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
+  def effectively_working: (.current_state.state == "working" or .liveness.activity == "active");
   def portfolio_bound($surface; $shown; $total; $rest):
     {surface:$surface,shown:$shown,total:$total,omitted:($total-$shown),rest:$rest};
   ($landed_selection_input[0]) as $landed_selection
@@ -423,13 +424,19 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | (($fl | index("paths")) != null) as $f_paths
   | (($fl | index("actions")) != null) as $f_actions
   | (($fl | index("endpoints")) != null) as $f_endpoints
-  | ($landed_selection.selected) as $done
+  | ([ $landed_selection.selected[] as $row
+       | if $row.pr_url == null then $row
+         else ([ $candidate_prs[] | select(.url == $row.pr_url) ][0]) as $live_pr
+         | select($live_pr.verification == "verified_live" and $live_pr.state == "MERGED")
+         | $row
+         end ]) as $done
+  | ($landed_selection.selected | length) as $landed_selected_count
+  | ($landed_selected_count - ($done | length)) as $landed_live_rejected_count
   | ($landed_selection.per_home_capped_count) as $per_home_capped_count
   | ($landed_selection.home_cap_dropped) as $home_cap_dropped
   | ($landed_selection.total_count) as $landed_total_count
   | ($done | map(.id)) as $done_ids
   | ([.tasks[] | select(.kind != "secondmate") | .id]) as $live_ids
-  | ([.tasks[] | select(.kind != "secondmate" and .liveness.activity == "active") | .id]) as $working_ids
   | ($live_ids + $done_ids) as $rel_ids
   | ([ .tasks[]
        | select(.liveness.endpoint.presence != "verified_present" or .liveness.worker.presence != "verified_present")
@@ -480,11 +487,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | ([ .tasks[]
        | select(.kind != "secondmate")
        | select(.backlog.current_role != "program")
-       | select(.backlog.current_role != "held" or .liveness.activity == "active")
-       | select(.liveness.activity == "active")
+       | select(.backlog.current_role != "held")
+       | select(effectively_working)
        | {id, kind,
-        state: .liveness.activity,
-        doing: ((if .liveness.output.changed then "backend output changed across samples"
+        state: (if .current_state.state == "working" then "working" else .liveness.activity end),
+        doing: ((if .liveness.activity != "active" then (.current_state.detail // "authoritative run active")
+                 elif .liveness.output.changed then "backend output changed across samples"
                  else "cumulative CPU delta \(.liveness.cpu.delta_ms) ms (\(.liveness.cpu.rate_ms_per_minute) ms/min, \(.liveness.harness_family) baseline)" end) | trunc(90))
       } ]
      + [ $secondmate_views[]
@@ -508,14 +516,13 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       else [] end)
      + [ .tasks[]
          | select(.kind != "secondmate" and .backlog.state == "in_flight"
-                  and .backlog.current_role != "held" and .liveness.activity != "active")
+                  and .backlog.current_role != "held" and (effectively_working | not))
          | {id,title:((.backlog.title // .id) | trunc(60)),blocked_by:"-",
             reason:("measured liveness: " + .liveness.activity + "; endpoint=" + .liveness.endpoint.presence + "; worker=" + .liveness.worker.presence | trunc(120)),owner:"(main)"} ]
      + [ .backlog.records[]
-         | . as $record
          | select(.structured and
              (.state == "queued" or
-              (.state == "in_flight" and .current_role == "held" and ($working_ids | index($record.id) | not))))
+              (.state == "in_flight" and .current_role == "held")))
          | select(.captain_actionable != true)
          | select((((.body_excerpt // "") | test("SUPERSEDED|NOT REQUIRED|NOT-REQUIRED|DEFERRED"; "i")) | not))
          | {id, title:(.title | trunc(60)),
@@ -550,8 +557,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          portfolio_bound("decisions_open"; $decisions_n; ($decisions_all | length);
            ("rerun with FM_BEARINGS_DECISIONS=" + (($decisions_all | length) | tostring)))
        else empty end),
-      (if $landed_total_count > ($done | length) then
-         portfolio_bound("landed"; ($done | length); $landed_total_count;
+      (if $landed_total_count > $landed_selected_count then
+         portfolio_bound((if $landed_live_rejected_count > 0 then "landed candidates" else "landed" end);
+           $landed_selected_count; $landed_total_count;
            ("rerun with FM_BEARINGS_LANDED=" + ($landed_total_count | tostring)
             + " FM_BEARINGS_LANDED_PER_HOME=" + ($landed_total_count | tostring)
             + " and FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=" + ($landed_total_count | tostring)))
@@ -609,7 +617,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $f_endpoints then empty else {surface:"healthy endpoint detail", reveal:"--fields endpoints"} end),
         {surface:"full scout-report inventory", reveal:"not included in bounded core"},
         {surface:"superseded queued items", reveal:"not included in bounded core"},
-        (if $per_home_capped_count > ($done | length) then {surface:("landed showing \($done | length) of \($per_home_capped_count)" + (($done | map(.home_id) | unique | map(select(. != "(main)")) | length) as $k | if $k > 0 then " (incl. \($k) secondmate home(s))" else "" end)), reveal:"bounded core"} else empty end),
+        (if $per_home_capped_count > $landed_selected_count then {surface:((if $landed_live_rejected_count > 0 then "landed candidates" else "landed" end) + " showing \($landed_selected_count) of \($per_home_capped_count)" + (($landed_selection.selected | map(.home_id) | unique | map(select(. != "(main)")) | length) as $k | if $k > 0 then " (incl. \($k) secondmate home(s))" else "" end)), reveal:"bounded core"} else empty end),
+        (if $landed_live_rejected_count > 0 then {surface:("selected PR completion(s) excluded from landed by live forge state: \($landed_live_rejected_count)"), reveal:"inspect candidate_prs"} else empty end),
         (if $home_cap_dropped > 0 then {surface:("landed per-home capped at \($landed_per_home_n) for \($home_cap_dropped) home(s)"), reveal:"bounded core"} else empty end),
         (if (($snap.secondmate_landed.unreadable // []) | length) > 0 then {surface:("secondmate home(s) with unreadable backlog: \(($snap.secondmate_landed.unreadable // []) | length)"), reveal:"inspect the listed secondmate home backlogs"} else empty end),
         (if (($snap.secondmate_landed.truncated // []) | length) > 0 then {surface:("secondmate home Done capped at the snapshot layer for \(($snap.secondmate_landed.truncated // []) | length) home(s)"), reveal:"bounded core"} else empty end),
