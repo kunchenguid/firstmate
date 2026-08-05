@@ -24,6 +24,7 @@ In both modes, preserve the captain's actual goal and use the existing owner for
 ## 1. Demand ownership
 
 Require the crewmate to solve and implement the task: it never stops solely because work is hard or failing, it preserves mandated safety `blocked` stops such as unsafe or non-isolated worktree placement, and it exhausts its capability before following the solve-first escalation bar owned by `AGENTS.md` section 9.
+When a lane reports `paused:` while its run-step is active, apply the in-flight validation-custody boundary from `AGENTS.md` section 8: steer it back to attending and driving the run instead of accepting the pause.
 
 ## 2. Reject vague or optimistic claims
 

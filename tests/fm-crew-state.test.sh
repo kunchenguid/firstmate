@@ -193,6 +193,8 @@ SH
 #!/usr/bin/env bash
 set -u
 case "${FM_FAKE_LIVENESS_MODE:-}" in
+  dead) printf 'liveness: dead · run: 01RUN · procs: 0 · confirmed by a second scan\n' ;;
+  alive) printf 'liveness: alive · run: 01RUN · procs: 2 · doing: sleep 30 (00:01)\n' ;;
   empty) exit 0 ;;
   malformed) printf 'not a liveness result\n' ;;
   multiline) printf 'liveness: alive · run: 01RUN · procs: 3\nunexpected extra output\n' ;;
@@ -495,19 +497,20 @@ test_active_run_is_authoritative() {
   pass "active run-step is authoritative"
 }
 
-# (l) a quiet step carries a real liveness verdict instead of leaving firstmate
-# to hand-check it. On 2026-08-02 that hand check was wrong and two healthy runs
-# were aborted, so both directions are pinned here.
+# (l) a quiet step carries the liveness probe's verdict instead of leaving
+# firstmate to hand-check it. The probe's real process enumeration is covered by
+# fm-nm-step-liveness.test.sh; these cases isolate this consumer's mapping.
 test_quiet_step_reports_dead_liveness() {
   reset_fakes
   local d; d=$(new_case quiet-dead)
   make_repo_on_branch "$d/wt" fm/feat-q
   make_fakebin "$d" >/dev/null
-  # An existing run worktree with nothing running in it: provably dead.
   mkdir -p "$d/nm-home/worktrees/repo1/01RUN"
   fm_write_meta "$d/state/feat-q.meta" "window=fm:fm-feat-q" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_running_quiet_step fm/feat-q test)"
-  local out; out=$(run_crew_state "$d" feat-q)
+  local out
+  out=$(FM_CREW_STATE_NM_LIVENESS_BIN="$d/fakebin/fake-liveness" \
+    FM_FAKE_LIVENESS_MODE=dead run_crew_state "$d" feat-q)
   assert_contains "$out" "state: working" "a quiet step is still reported working"
   assert_contains "$out" "liveness: dead (0 procs)" "a quiet step with no process reports dead"
   assert_contains "$out" "step: test" "the liveness observation names its active step"
@@ -519,35 +522,18 @@ test_quiet_step_reports_alive_liveness() {
   local d; d=$(new_case quiet-alive)
   make_repo_on_branch "$d/wt" fm/feat-q
   make_fakebin "$d" >/dev/null
-  local nmwt="$d/nm-home/worktrees/repo1/01RUN"
-  mkdir -p "$nmwt"
+  mkdir -p "$d/nm-home/worktrees/repo1/01RUN"
   fm_write_meta "$d/state/feat-q.meta" "window=fm:fm-feat-q" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_running_quiet_step fm/feat-q test)"
-  # A real process working in that worktree, named nothing like the run - the
-  # exact shape the false-negative argv search missed. The parent turns over
-  # children like the suite loop starts new scripts, so one invocation can prove
-  # progress from membership change and report the current unit of work.
-  ( cd "$nmwt" && exec sh -c 'bash -c "while :; do sleep 0.2; done" & wait' ) &
-  local worker=$!
-  sleep 0.3
-  [ ! -e "$d/nm-snap/01RUN.snap" ] \
-    || fail "the one-shot liveness fixture unexpectedly had a prior snapshot"
-  local out; out=$(run_crew_state "$d" feat-q)
-  local child
-  for child in $(pgrep -P "$worker" 2>/dev/null); do
-    pkill -9 -P "$child" 2>/dev/null || true
-    kill -9 "$child" 2>/dev/null || true
-  done
-  kill -9 "$worker" 2>/dev/null || true
-  wait "$worker" 2>/dev/null || true
+  local out
+  out=$(FM_CREW_STATE_NM_LIVENESS_BIN="$d/fakebin/fake-liveness" \
+    FM_FAKE_LIVENESS_MODE=alive run_crew_state "$d" feat-q)
   assert_contains "$out" "liveness: alive" "a quiet step with a live process reports alive"
   # Alive alone leaves hours of runtime unexplained; naming the current unit of
   # work and its age is what separates a slow step from a hung one without
   # spending a run to find out, so the heartbeat read must carry it.
-  assert_contains "$out" " on bash -c " "the alive verdict names the current unit of work"
-  printf '%s\n' "$out" | grep -qE ' on bash -c .*\([0-9]+:[0-9]{2}' \
-    || fail "the alive verdict names the current unit of work and its age: $out"
-  pass "a one-shot quiet step reports alive with no prior liveness call"
+  assert_contains "$out" " on sleep 30 (" "the alive verdict names the current unit of work and its age"
+  pass "a quiet step with a live process reports an alive liveness verdict"
 }
 
 test_quiet_step_probe_failures_are_unknown() {
