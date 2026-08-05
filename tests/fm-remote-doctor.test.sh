@@ -29,6 +29,16 @@ TOOLS="$TMP_ROOT/tools"
 mkdir -p "$TOOLS"
 ln -sf "$(command -v git)" "$TOOLS/git"
 ln -sf "$(command -v jq)" "$TOOLS/jq"
+# The hermetic doctor() PATH symlinks every tool the doctor and its remote
+# job worker invoke, so harness resolution sees exactly the fixture and never
+# a host-installed harness binary (e.g. a dev machine's /usr/bin/claude).
+for _tool in bash sh env cat chmod date dirname kill ln mkdir printf readlink rm sed sleep tail tr \
+  basename head mktemp ps stat wc grep uniq sort cut touch ls cp mv find xargs test echo; do
+  _resolved=$(command -v "$_tool" 2>/dev/null || true)
+  if [ -n "$_resolved" ]; then
+    ln -sf "$_resolved" "$TOOLS/$_tool"
+  fi
+done
 BASE_PATH="$TOOLS:/usr/bin:/bin:/usr/sbin:/sbin"
 
 # new_case <Darwin|Linux> [with-herdr] [gui]
@@ -214,12 +224,26 @@ SH
 
 # doctor [args...] -> runs the real doctor against the current fixture,
 # capturing merged output in DOCTOR_OUT and its status in DOCTOR_RC.
+# The optional second argument selects the PATH passed to the doctor:
+#   doctor <args...>            - the normal fixture PATH (host coreutils dirs
+#                                 included, so host-installed harness binaries
+#                                 can leak on a dev machine; fine for the
+#                                 general scenarios).
+#   doctor <args...> hermetic   - a fully self-contained PATH with every tool
+#                                 the doctor needs symlinked into $TOOLS and
+#                                 NO host bin dirs, so harness resolution is
+#                                 exactly what the fixture provides.
 doctor() {
   set +e
+  local doc_path="$CASE_HOME/.local/bin:$CASE_BIN:$BASE_PATH"
+  if [ "${!#}" = hermetic ]; then
+    doc_path="$CASE_HOME/.local/bin:$CASE_BIN:$TOOLS"
+    set -- "${@:1:$#-1}"
+  fi
   DOCTOR_OUT=$(
     HOME="$CASE_HOME" \
     FM_HOME="$CASE_PROJECT_HOME" \
-    PATH="$CASE_HOME/.local/bin:$CASE_BIN:$BASE_PATH" \
+    PATH="$doc_path" \
     FM_FAKE_STATE="$CASE_STATE" \
     FM_FAKE_LAUNCHCTL_LOG="$CASE_LAUNCHCTL_LOG" \
     FM_FAKE_FORBIDDEN_LOG="$CASE_FORBIDDEN_LOG" \
@@ -525,12 +549,15 @@ printf '#!/usr/bin/env bash\nexit 0\n' > "$MANAGER_BIN/codex"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$MANAGER_BIN/grok"
 chmod +x "$MANAGER_BIN/codex" "$MANAGER_BIN/grok"
 mv "$CASE_BIN/tasks-axi" "$MANAGER_BIN/tasks-axi"
-doctor
+# The hermetic PATH makes the harness assertions host-independent: a dev
+# machine with /usr/bin/claude must not satisfy the readiness check that the
+# fixture intends to be claude-only.
+doctor hermetic
 expect_code 1 "$DOCTOR_RC" "a version-manager-only required tool was reported ready"
 assert_contains "$DOCTOR_OUT" 'required tasks-axi=MISSING' "the missing managed tool was not reported"
 assert_contains "$DOCTOR_OUT" 'tools in an unselected nvm version or outside the discovered asdf or mise paths need an absolute wrapper' \
   "the missing-tool diagnostic contradicted filesystem version-manager discovery"
-doctor --fix
+doctor --fix hermetic
 expect_code 0 "$DOCTOR_RC" "--fix did not create a wrapper for the discoverable managed tool"
 assert_contains "$DOCTOR_OUT" 'fix required-tasks-axi=applied:' "--fix did not report the owned wrapper"
 assert_contains "$DOCTOR_OUT" "required tasks-axi=$CASE_HOME/.local/bin/tasks-axi" \
@@ -543,7 +570,7 @@ assert_absent "$CASE_HOME/.local/bin/codex" "--fix wrapped an alternate harness 
 assert_absent "$CASE_HOME/.local/bin/grok" "--fix wrapped an alternate harness when claude already satisfied readiness"
 
 rm -f "$CASE_BIN/claude"
-doctor --fix
+doctor --fix hermetic
 expect_code 0 "$DOCTOR_RC" "--fix did not wrap one discoverable harness when none resolved"
 assert_present "$CASE_HOME/.local/bin/codex" "--fix did not create the first needed harness wrapper"
 assert_absent "$CASE_HOME/.local/bin/grok" "--fix created more harness wrappers than readiness requires"
@@ -623,3 +650,61 @@ assert_contains "$DOCTOR_OUT" 'check entrypoint-link=human:' "an operator-owned 
   || fail "--fix overwrote a file it did not create"
 unset FM_ROOT_OVERRIDE
 pass "the entrypoint symlink is recreated when absent and never overwritten when operator-owned"
+
+# --- cursor executable resolution (fm_remote_doctor_resolve_harness) --------
+# The doctor must accept every Cursor executable the local spawn path does
+# (resolve_cursor_binary in bin/fm-spawn.sh): cursor-agent from PATH, the
+# legacy alias `agent` from PATH (fallback only), then the ~/.local/bin
+# installs for both names. These tests exercise the resolver function in
+# isolation with controlled PATH/HOME fixtures; the generic `agent` name is
+# never admitted as a harness on its own.
+
+CURSOR_RESOLVER_TMP=$(fm_test_tmproot fm-remote-doctor-resolver)
+awk '/^fm_remote_doctor_resolve_harness\(\)/ { p=1; print; next } p && /^}/ { print; exit } p { print }' \
+  "$ROOT/bin/fm-remote-doctor.sh" > "$CURSOR_RESOLVER_TMP/resolver.sh"
+. "$CURSOR_RESOLVER_TMP/resolver.sh"
+
+resolver_case_home() {  # <dir> -> home
+  local dir=$1
+  mkdir -p "$dir/bin" "$dir/home/.local/bin"
+  printf '%s\n' "$dir"
+}
+
+resolver_make_exe() {  # <path>
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$1"
+  chmod +x "$1"
+}
+
+# Only the legacy alias on PATH, no other harness anywhere.
+R_CASE=$(resolver_case_home "$CURSOR_RESOLVER_TMP/only-agent-path")
+resolver_make_exe "$R_CASE/bin/agent"
+res=$(PATH="$R_CASE/bin:/usr/bin:/bin" HOME="$R_CASE/home" \
+  fm_remote_doctor_resolve_harness cursor-agent) || fail "resolver rejected a host with only the agent alias on PATH"
+[ "$res" = "$R_CASE/bin/agent" ] || fail "resolver resolved '$res', expected '$R_CASE/bin/agent'"
+pass "fm_remote_doctor_resolve_harness: accepts the agent alias from PATH when it is the only Cursor executable"
+
+# Only ~/.local/bin/agent outside PATH.
+R_CASE=$(resolver_case_home "$CURSOR_RESOLVER_TMP/only-agent-home")
+resolver_make_exe "$R_CASE/home/.local/bin/agent"
+res=$(PATH="/usr/bin:/bin" HOME="$R_CASE/home" \
+  fm_remote_doctor_resolve_harness cursor-agent) || fail "resolver rejected a host with only ~/.local/bin/agent"
+[ "$res" = "$R_CASE/home/.local/bin/agent" ] || fail "resolver resolved '$res', expected '$R_CASE/home/.local/bin/agent'"
+pass "fm_remote_doctor_resolve_harness: finds ~/.local/bin/agent outside PATH"
+
+# cursor-agent takes precedence over the agent alias when both exist on PATH.
+R_CASE=$(resolver_case_home "$CURSOR_RESOLVER_TMP/both")
+resolver_make_exe "$R_CASE/bin/cursor-agent"
+resolver_make_exe "$R_CASE/bin/agent"
+res=$(PATH="$R_CASE/bin:/usr/bin:/bin" HOME="$R_CASE/home" \
+  fm_remote_doctor_resolve_harness cursor-agent) || fail "resolver rejected a host with cursor-agent on PATH"
+[ "$res" = "$R_CASE/bin/cursor-agent" ] || fail "resolver resolved '$res', expected cursor-agent to win over the alias"
+pass "fm_remote_doctor_resolve_harness: cursor-agent takes precedence over the agent alias"
+
+# The generic `agent` name is never admitted to HARNESS_TOOLS: the harness
+# readiness loop can only consult it through the cursor-agent alias branch,
+# so an unrelated executable named agent can never classify as a separate
+# verified harness. Assert the array definition stays agent-free.
+if grep -qE '^HARNESS_TOOLS=\([^)]*(\(| )agent(\)| )' "$ROOT/bin/fm-remote-doctor.sh"; then
+  fail "the bare agent name leaked into HARNESS_TOOLS in fm-remote-doctor.sh"
+fi
+pass "fm_remote_doctor_resolve_harness: the bare agent name is never admitted to HARNESS_TOOLS"
