@@ -915,6 +915,14 @@ fm_remote_job_ensure_worker() { # <remote-root> <account-home>
     fm_remote_job_reload_launchagent "$account_home" "$uid" || return 1
     FM_REMOTE_JOB_REPAIRED=1
     fm_remote_job_wait_for_probe "$root" "$account_home" && return 0
+  else
+    # A replaced Linux supervisor can lose its first ownership race while the
+    # prior supervisor finishes releasing the shared worker lock. Retry the
+    # idempotent start once, matching the bounded recovery already used above
+    # for launchd, before reporting a startup failure.
+    fm_remote_job_start_linux_worker "$root" "$account_home" || return 1
+    FM_REMOTE_JOB_REPAIRED=1
+    fm_remote_job_wait_for_probe "$root" "$account_home" && return 0
   fi
   # shellcheck disable=SC2034 # Sourceable API consumed by the entrypoint and remote doctor.
   FM_REMOTE_JOB_ERROR="remote job worker did not report ready after startup"
