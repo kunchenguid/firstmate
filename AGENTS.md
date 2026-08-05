@@ -328,11 +328,11 @@ Resume fleet supervision immediately after the decision lands.
 Judge validation by the current-code-matched run step through `bin/fm-crew-state.sh`, not by shell liveness or the last status event.
 Running, fixing, or CI states remain working; parked approval or fix-review states require the worker to follow the active gate help; passed or checks-passed is done; failed or cancelled is failed.
 A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership outside the supersession sequence above; steer it back to the gate response flow.
-The worker reports the PR when CI first becomes green rather than waiting for merge monitoring to finish.
+The worker reports the forge change request when CI first becomes green rather than waiting for merge monitoring to finish.
 
 ### Change-request readiness, landing, and teardown
 
-For forge-backed ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening a GitHub pull request or `done: MR <url>` after opening a GitLab merge request.
+For forge-backed ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green for a GitHub pull request or `done: MR <url> checks green` for a GitLab merge request, while `direct-PR` reports `done: PR <url>` after opening a GitHub pull request or `done: MR <url>` after opening a GitLab merge request.
 Run `bin/fm-pr-check.sh <id> <change-request-url>` - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
 Tell the captain the change request's full URL, always the complete `https://...` link rather than a bare `#number`, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine authority.

@@ -221,7 +221,7 @@ test_ship_modes_generate_clean_briefs() {
 # The firstmate repo itself is the one supported fallback because it has no
 # clone under FM_HOME/projects; an unavailable project remains forge-neutral.
 test_forge_specific_brief_guidance() {
-  local home self_root github_brief gitlab_dir gitlab_brief unknown_brief out
+  local home self_root github_brief gitlab_dir gitlab_brief gitlab_no_mistakes_brief unknown_brief traversal_brief out
   home="$TMP_ROOT/forge-guidance-home"
   self_root="$TMP_ROOT/firstmate-self"
   mkdir -p "$home/data" "$home/projects/kc-admin-web" "$self_root"
@@ -255,6 +255,19 @@ test_forge_specific_brief_guidance() {
     "GitLab direct-PR brief did not report an MR artifact"
   [ ! -s "$TMP_ROOT/forge-gitlab.err" ] || fail "GitLab origin emitted an unexpected forge warning"
 
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" forge-gitlab-no-mistakes kc-admin-web --mode no-mistakes \
+    >"$TMP_ROOT/forge-gitlab-no-mistakes.out" 2>"$TMP_ROOT/forge-gitlab-no-mistakes.err" \
+    || fail "GitLab no-mistakes brief should scaffold"
+  gitlab_no_mistakes_brief="$home/data/forge-gitlab-no-mistakes/brief.md"
+  assert_grep "Never merge the merge request." "$gitlab_no_mistakes_brief" \
+    "GitLab no-mistakes brief retained PR-only merge guidance"
+  assert_grep "validate and ship a merge request" "$gitlab_no_mistakes_brief" \
+    "GitLab no-mistakes brief retained PR-only lifecycle wording"
+  assert_grep "done: MR {url} checks green" "$gitlab_no_mistakes_brief" \
+    "GitLab no-mistakes brief did not report an MR artifact"
+  [ ! -s "$TMP_ROOT/forge-gitlab-no-mistakes.err" ] \
+    || fail "GitLab no-mistakes origin emitted an unexpected forge warning"
+
   out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" forge-unknown missing-project --mode direct-PR 2>&1) \
     || fail "unknown-forge brief should still scaffold"
   unknown_brief="$home/data/forge-unknown/brief.md"
@@ -264,6 +277,18 @@ test_forge_specific_brief_guidance() {
     "unknown forge brief silently fell back to GitHub"
   assert_contains "$out" "warning: could not determine forge for missing-project" \
     "unknown forge brief did not emit a visible warning"
+
+  git -C "$home" init -q
+  git -C "$home" remote add origin https://github.com/example/forge-guidance-home.git
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" forge-traversal .. --mode direct-PR 2>&1) \
+    || fail "traversal repo brief should still scaffold"
+  traversal_brief="$home/data/forge-traversal/brief.md"
+  assert_grep "Use the forge tool appropriate for this project's origin remote" "$traversal_brief" \
+    "traversal repo name derived forge guidance from the active home"
+  assert_no_grep "Use gh-axi for GitHub operations" "$traversal_brief" \
+    "traversal repo name silently fell back to the active home's GitHub origin"
+  assert_contains "$out" "warning: could not determine forge for ..: project directory is unavailable" \
+    "traversal repo name did not emit the unavailable-project warning"
   pass "fm-brief.sh: forge guidance follows origin host and warns when unavailable"
 }
 

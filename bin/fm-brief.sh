@@ -30,7 +30,7 @@
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
-#   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
+#   no-mistakes  implement -> /no-mistakes pipeline -> forge change request -> configured merge authority
 #   direct-PR    implement -> push + open a forge change request (no pipeline) -> configured merge authority
 #                origin GitHub uses gh-axi and PR wording; GitLab uses glab and MR wording;
 #                an unresolved origin still scaffolds forge-neutral guidance and warns once
@@ -272,6 +272,9 @@ REPO=${POS[1]}
 # when the caller-supplied repo name matches that root's basename. Do not infer
 # a forge from a missing project directory.
 resolve_brief_project_dir() {
+  case "$REPO" in
+    ''|.|..|*/*) return 0 ;;
+  esac
   local project_dir="$FM_HOME/projects/$REPO"
   if [ -d "$project_dir" ]; then
     printf '%s\n' "$project_dir"
@@ -429,13 +432,13 @@ EOF
   *)  # no-mistakes
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
-    RULE1='1. Never push to the default branch. Never merge a PR.'
+    RULE1="1. Never push to the default branch. Never merge the $BRIEF_CHANGE_REQUEST."
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+Firstmate will then instruct you to run /no-mistakes to validate and ship a $BRIEF_CHANGE_REQUEST.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
@@ -448,7 +451,7 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: $BRIEF_CHANGE_REQUEST_STATUS {url} checks green\` and stop. You are finished.
 EOF
     ;;
 esac
