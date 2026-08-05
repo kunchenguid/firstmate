@@ -960,8 +960,8 @@ EOF
         case "$(cat "$STATE/.endpoint-gone-$key" 2>/dev/null || true)" in
           fired) ;;
           seen)
-            printf 'fired' > "$STATE/.endpoint-gone-$key"
             fm_wake_append stale "$w" "stale: $w (endpoint gone)" || exit 1
+            printf 'fired' > "$STATE/.endpoint-gone-$key"
             wake "stale: $w (endpoint gone)"
             ;;
           *) printf 'seen' > "$STATE/.endpoint-gone-$key" ;;
