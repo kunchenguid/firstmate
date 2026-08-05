@@ -139,7 +139,7 @@ test_public_launcher_snapshot_and_health() {
 }
 
 test_status_event_cursor_and_restart_replay() {
-  local home stream replay output2 pid2 i
+  local home stream replay output2 pid2 i aws_access_key aws_secret_key
   home=$(make_home replay)
   start_dashboard "$home"
   wait_for_snapshot
@@ -161,6 +161,23 @@ test_status_event_cursor_and_restart_replay() {
     || fail "SSE payload exposed a token-shaped status value: $stream"
   ! grep -F 'ghp_status_secret_ABC123456789' "$home/state/.dashboard/events.jsonl" >/dev/null \
     || fail "event outbox persisted a token-shaped status value"
+  aws_access_key=AKIAIOSFODNN7EXAMPLE
+  aws_secret_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+  printf 'working [key=dashboard]: AWS_ACCESS_KEY_ID=%s\n' "$aws_access_key" >> \
+    "$home/state/dashboard-task.status"
+  printf 'working [key=dashboard]: AWS_SECRET_ACCESS_KEY=%s\n' "$aws_secret_key" >> \
+    "$home/state/dashboard-task.status"
+  sleep 0.4
+  stream=$(curl -N -fsS --max-time 2 "${DASHBOARD_URL%/}/events?since=0" || true)
+  printf '%s' "$stream" | grep -F 'AWS_ACCESS_KEY_ID=<redacted>' >/dev/null \
+    && printf '%s' "$stream" | grep -F 'AWS_SECRET_ACCESS_KEY=<redacted>' >/dev/null \
+    || fail "SSE payload lost the meaningful redacted status summary: $stream"
+  for secret in "$aws_access_key" "$aws_secret_key"; do
+    ! printf '%s' "$stream" | grep -F "$secret" >/dev/null \
+      || fail "SSE payload exposed an AWS credential-shaped value: $stream"
+    ! grep -F "$secret" "$home/state/.dashboard/events.jsonl" >/dev/null \
+      || fail "event outbox persisted an AWS credential-shaped value"
+  done
   kill "$DASHBOARD_PID"
   i=0
   while [ "$i" -lt 40 ] && [ -e "$home/state/.dashboard/service.pid" ]; do
