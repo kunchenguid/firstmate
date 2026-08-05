@@ -1307,6 +1307,53 @@ test_home_seed_refuses_unsafe_leaf_files() {
   pass "home seeding refuses symlinked and non-regular leaf files"
 }
 
+test_home_seed_preserves_existing_parent_binding() {
+  local parent_a parent_b child child_abs before err out parent_a_abs parent_b_abs leaf
+  parent_a="$TMP_ROOT/reseed-parent-a"
+  parent_b="$TMP_ROOT/reseed-parent-b"
+  child="$TMP_ROOT/reseed-parent-child"
+  before="$TMP_ROOT/reseed-parent-before"
+  err="$TMP_ROOT/reseed-parent.err"
+  mkdir -p "$parent_a/data" "$parent_a/state" "$parent_a/projects" \
+    "$parent_b/data" "$parent_b/state" "$parent_b/projects" "$before/data"
+
+  FM_HOME="$parent_a" FM_SECONDMATE_CHARTER='Durable parent reseed charter.' \
+    FM_SECONDMATE_SCOPE='durable parent reseed scope' \
+    "$ROOT/bin/fm-home-seed.sh" mate "$child" --no-projects >/dev/null \
+    || fail "initial durable-parent seed failed"
+  parent_a_abs=$(cd "$parent_a" && pwd -P)
+  parent_b_abs=$(cd "$parent_b" && pwd -P)
+  child_abs=$(cd "$child" && pwd -P)
+  for leaf in data/projects.md data/charter.md .fm-secondmate-home .fm-secondmate-parent; do
+    mkdir -p "$before/$(dirname "$leaf")"
+    cp "$child/$leaf" "$before/$leaf"
+  done
+
+  if FM_HOME="$parent_b" FM_SECONDMATE_CHARTER='Replacement parent charter.' \
+    FM_SECONDMATE_SCOPE='replacement parent scope' \
+    "$ROOT/bin/fm-home-seed.sh" mate "$child" --no-projects > /dev/null 2>"$err"; then
+    fail "reseed replaced a valid durable parent binding"
+  fi
+  grep -F "bound to parent $parent_a_abs, not requested parent $parent_b_abs" "$err" >/dev/null \
+    || fail "mismatched-parent reseed did not name both parent identities"
+  for leaf in data/projects.md data/charter.md .fm-secondmate-home .fm-secondmate-parent; do
+    cmp -s "$before/$leaf" "$child/$leaf" \
+      || fail "mismatched-parent reseed changed $leaf"
+  done
+  [ ! -e "$parent_b/data/mate/brief.md" ] \
+    || fail "mismatched-parent reseed created a replacement parent brief"
+  [ ! -e "$parent_b/data/secondmates.md" ] \
+    || fail "mismatched-parent reseed registered the child to the replacement parent"
+
+  out=$(FM_HOME="$parent_a" "$ROOT/bin/fm-home-seed.sh" mate "$child" --no-projects) \
+    || fail "matching-parent reseed failed"
+  printf '%s\n' "$out" | grep -F "home=$child_abs" >/dev/null \
+    || fail "matching-parent reseed did not report success"
+  cmp -s "$before/.fm-secondmate-parent" "$child/.fm-secondmate-parent" \
+    || fail "matching-parent reseed changed the durable parent binding"
+  pass "home reseeding preserves and enforces the durable parent binding"
+}
+
 test_secondmate_spawn_requires_seeded_matching_home() {
   local home subhome wronghome marker_only active_descendant active_ancestor ancestor_active_home fakeroot root_descendant root_ancestor root_inside fakebin log err
   home="$TMP_ROOT/spawn-validate-home"
@@ -2655,6 +2702,7 @@ test_home_seed_refuses_uninitialized_existing_no_mistakes_project
 test_home_seed_refuses_project_destinations_outside_subhome
 test_home_seed_refuses_operational_dirs_outside_subhome
 test_home_seed_refuses_unsafe_leaf_files
+test_home_seed_preserves_existing_parent_binding
 test_secondmate_spawn_requires_seeded_matching_home
 test_secondmate_spawn_refuses_operational_dirs_outside_subhome
 test_fm_send_refuses_bare_window_without_home_meta

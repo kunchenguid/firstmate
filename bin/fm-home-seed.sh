@@ -43,6 +43,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-secondmate-parent-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-secondmate-charter-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -305,6 +307,21 @@ validate_seed_leaf_files() {
         ;;
     esac
   done
+}
+
+validate_existing_parent_binding() {
+  local home=$1 record recorded_parent requested_parent
+  record="$home/$SUB_HOME_PARENT_MARKER"
+  [ -f "$record" ] && [ ! -L "$record" ] || return 0
+  fm_secondmate_parent_record_parse "$record" || return 0
+  [ "$FM_SECONDMATE_PARENT_ROUTE" = local ] || return 0
+
+  recorded_parent=$(resolved_path "$FM_SECONDMATE_PARENT_HOME")
+  requested_parent=$(resolved_path "$FM_HOME")
+  [ "$recorded_parent" = "$requested_parent" ] && return 0
+  printf 'error: secondmate home is bound to parent %s, not requested parent %s\n' \
+    "$recorded_parent" "$requested_parent" >&2
+  return 1
 }
 
 validate_project_destination() {
@@ -857,6 +874,7 @@ seed_home() {
   validate_home_assignment "$id" "$home"
   validate_operational_dirs "$home" || return 1
   validate_seed_leaf_files "$home" || return 1
+  validate_existing_parent_binding "$home" || return 1
   if [ "$no_projects" -eq 1 ]; then
     refuse_populated_projectless_home "$home" || return 1
     if [ -f "$SEED_PARENT_BRIEF" ]; then

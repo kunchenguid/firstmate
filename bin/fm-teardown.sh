@@ -146,6 +146,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-secondmate-parent-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
@@ -437,18 +439,10 @@ if [ -f "$FM_HOME/$SUB_HOME_MARKER" ]; then
   PARENT_ROUTE_HOME=
   if [ -e "$PARENT_ROUTE_FILE" ] || [ -L "$PARENT_ROUTE_FILE" ]; then
     PARENT_ROUTE_RECORD=invalid
-    if [ -f "$PARENT_ROUTE_FILE" ] && [ ! -L "$PARENT_ROUTE_FILE" ] \
-      && [ "$(fm_meta_get "$PARENT_ROUTE_FILE" schema)" = fm-secondmate-parent.v1 ]; then
-      PARENT_ROUTE=$(fm_meta_get "$PARENT_ROUTE_FILE" route)
-      PARENT_ROUTE_HOME=$(fm_meta_get "$PARENT_ROUTE_FILE" parent_home)
-      case "$PARENT_ROUTE" in
-        local)
-          [ -n "$PARENT_ROUTE_HOME" ] && PARENT_ROUTE_RECORD=valid
-          ;;
-        remote)
-          PARENT_ROUTE_RECORD=valid
-          ;;
-      esac
+    if fm_secondmate_parent_record_parse "$PARENT_ROUTE_FILE"; then
+      PARENT_ROUTE=$FM_SECONDMATE_PARENT_ROUTE
+      PARENT_ROUTE_HOME=$FM_SECONDMATE_PARENT_HOME
+      PARENT_ROUTE_RECORD=valid
     fi
   fi
   if [ "$PARENT_ROUTE_RECORD" = invalid ]; then

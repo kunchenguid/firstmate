@@ -844,7 +844,7 @@ test_secondmate_teardown_rejects_conflicting_live_and_durable_parent_bindings() 
 
 test_secondmate_teardown_rejects_unsafe_durable_parent_records() {
   local case_name parent child parent_record
-  for case_name in symlink invalid-route; do
+  for case_name in symlink invalid-route duplicate-route; do
     parent=$(make_home "teardown-durable-$case_name-parent" relay-off)
     child="$TMP_ROOT/teardown-durable-$case_name-child"
     FM_SECONDMATE_CHARTER='Unsafe durable-record regression charter.' \
@@ -864,6 +864,10 @@ test_secondmate_teardown_rejects_unsafe_durable_parent_records() {
         ;;
       invalid-route)
         printf 'schema=fm-secondmate-parent.v1\nroute=garbage\n' > "$parent_record"
+        ;;
+      duplicate-route)
+        printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\nroute=remote\n' \
+          "$parent" > "$parent_record"
         ;;
     esac
 
