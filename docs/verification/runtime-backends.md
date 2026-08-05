@@ -707,3 +707,64 @@ The host-tool sequence was:
 Observed guarantee: a Desktop-owned thread can write Firstmate lifecycle files when the prompt provides an authorized absolute path, and create, send, read, and archive work at the Desktop host-tool layer.
 The missing guarantee remains a supported shell-callable bridge that lets Firstmate perform those operations against the same visible Desktop endpoint.
 App-server partial methods and raw socket experiments do not satisfy that bridge contract.
+
+## Cursor Agent CLI
+
+Verified 2026-08-04 against cursor-agent 2026.07.23-e383d2b on Linux, tmux backend.
+
+**Composer and ghost-text captures (ANSI):**
+
+Idle cursor composer, plain capture:
+
+```
+→ Add a follow-up
+```
+
+Idle cursor composer, ANSI capture (`cat -v`):
+
+```
+^[[48;2;21;21;21m ^[[2mM-bM-^FM-^R ^[[0;7m^[[48;2;21;21;21mA^[[0;2m^[[48;2;21;21;21mdd a follow-up^[[0m
+```
+
+The `→` glyph (multibyte `M-bM-^FM-^R`) is SGR 2 (dim) ghost text.
+The cursor cell `A` is wrapped in `^[[0;7m` (reverse video) with the same dark background, then immediately followed by `^[[0;2m` (dim resumption) and the rest of the ghost text.
+Before the fix, `fm_composer_strip_ghost` kept `A` (not dim) and stripped the rest, leaving `A` which classified as `pending`.
+After the fix, the ghost-gap buffer in `fm_composer_strip_ghost` detects the SGR-0-exit followed by SGR-2-re-entry pattern and drops the gap content.
+
+**Busy state capture:**
+
+```
+  → Add a follow-up                                                                                                                                                                     ctrl+c to stop
+```
+
+`ctrl+c to stop` is continuously present while busy and absent while idle.
+This is deliberately NOT wired as a state source (captain decision 2026-08-04, option a).
+
+**Liveness state:**
+
+```sh
+$ LC_ALL=C ps -t pts/18 -o pid=,ppid=,pgid=,tpgid=,comm=,args=
+ 564102 1790016 564102 564102 MainThread  /home/agent-runner/.local/share/cursor-agent/versions/2026.07.23-e383d2b/cursor-agent ...
+$ tmux list-panes -t cursorlab -F '#{pane_current_command}'
+cursor-agent
+```
+
+Kernel exec name: `MainThread` (Node bundle).
+Tmux pane command: `cursor-agent`.
+Both now classify as `agent`.
+
+**Environment marker dump:**
+
+```sh
+CURSOR_AGENT=1
+CURSOR_INVOKED_AS=cursor-agent
+CURSOR_CONVERSATION_ID=bc5f0f1a-b8fc-45a4-b2f5-9e14c259c8b2
+```
+
+`CLAUDECODE=1` and `CLAUDE_CODE_ENTRYPOINT=cli` leaked from a parent claude process.
+Fix: `unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT` in the cursor launch template.
+
+**Model support trap:**
+
+`--list-models` lists ~29 models, but the API accepts ~180.
+The authoritative set is revealed by the rejection error for an invalid model name.

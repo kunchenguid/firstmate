@@ -104,7 +104,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|muse|cursor)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. pi-signed launches that exact executable name from PATH and
@@ -416,7 +416,7 @@ spawn_remote_secondmate() {
     harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
   fi
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi) ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
     *)
       fm_lock_release "$registry_lock" || true
       fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1023,7 +1023,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|muse|cursor)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1088,6 +1088,14 @@ launch_template() {
     # only an absolute brief pointer after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
+    # cursor-agent: positional prompt auto-submits (verified 2026-08-04,
+    # cursor-agent 2026.07.23-e383d2b). --force is the autonomy flag;
+    # --trust suppresses the per-directory workspace trust dialog. The env
+    # sanitization unsets CLAUDECODE/CLAUDE_CODE_ENTRYPOINT so a cursor worker
+    # launched from a claude firstmate does not inherit those markers (the
+    # precedence hazard reproduced and fixed). --worktree is NEVER passed:
+    # firstmate owns worktree isolation.
+    cursor) printf '%s' 'unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT; cursor-agent --force --trust __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
     # muse (Muse Code): a positional prompt starts the supervised interactive
     # session. --yolo is the single flag that makes a crewmate pane viable: muse
@@ -1171,6 +1179,11 @@ fi
 # retain the literal name in the launch command and task metadata.
 if [ "$HARNESS" = pi-signed ] && ! command -v pi-signed >/dev/null 2>&1; then
   echo "error: pi-signed executable not found on PATH; install the signed Pi wrapper or select a different verified harness" >&2
+  exit 1
+fi
+
+if [ "$HARNESS" = cursor ] && ! command -v cursor-agent >/dev/null 2>&1; then
+  echo "error: cursor-agent executable not found on PATH; install Cursor Agent CLI or select a different verified harness" >&2
   exit 1
 fi
 
@@ -1283,7 +1296,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|muse|cursor)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1336,6 +1349,12 @@ effort_flag_for_harness() {
         max) printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
       esac
       ;;
+    # cursor has no effort flag; effort is baked into model id suffixes
+    # (-low, -medium, -high, -xhigh, -max, -fast). The requested effort stays
+    # in task metadata but never reaches the launch command, because composing
+    # an effort suffix onto a model id is unsafe (not every model supports
+    # every suffix, e.g. gpt-5.2 has no -medium, gemini-3.1-pro has none at
+    # all). See .agents/skills/harness-adapters/SKILL.md cursor section.
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.

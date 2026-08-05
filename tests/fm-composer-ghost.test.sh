@@ -624,6 +624,29 @@ test_peek_output_is_escape_free() {
   pass "fm-peek output is escape-free (no raw -e bytes reach firstmate context)"
 }
 
+# --- Cursor reverse-video ghost cell -----------------------------------------
+
+test_cursor_reverse_video_ghost_cell_is_stripped() {
+  local result styled
+  # Exact ANSI fixture from cursor-agent 2026.07.23-e383d2b idle composer:
+  #   → Add a follow-up
+  # The cursor cell 'A' is wrapped in reverse video (SGR 7) between two dim
+  # (SGR 2) runs. Before the ghost-gap fix, the reverse-video cell survived
+  # ghost stripping and left 'A' which classified as pending.
+  # The fixture: bg(48;2;21;21;21) space dim(2) →
+  #   reset+reverse(0;7) bg(48;2;21;21;21) A
+  #   reset+dim(0;2) bg(48;2;21;21;21) dd a follow-up reset(0)
+  styled=$(printf '\033[48;2;21;21;21m \033[2m\xe2\x86\x92 \033[0;7m\033[48;2;21;21;21mA\033[0;2m\033[48;2;21;21;21mdd a follow-up\033[0m')
+  result=$(printf '%s' "$styled" | "$ROOT/bin/fm-composer-lib.sh" 2>/dev/null; fm_composer_strip_ghost <<< "$styled")
+  # The ghost-gap fix drops the reverse-video cursor cell 'A' between the two
+  # dim runs. A leading space (not dimmed) survives the strip but is trimmed
+  # by the classifier. Assert the cursor cell 'A' is gone.
+  case "$result" in
+    *A*) fail "cursor reverse-video ghost cell 'A' survived strip: result='$result'" ;;
+  esac
+  pass "fm_composer_strip_ghost: cursor reverse-video ghost cell is stripped"
+}
+
 test_strip_ghost_drops_dim_keeps_normal
 test_strip_ghost_handles_combined_and_boundary_codes
 test_strip_ghost_keeps_colored_text_with_2_payloads
@@ -655,3 +678,4 @@ test_legitimate_empty_routes_remain_empty
 test_non_bordered_composer_uses_compatibility_fallback
 test_non_bordered_interior_edges_are_pending
 test_peek_output_is_escape_free
+test_cursor_reverse_video_ghost_cell_is_stripped

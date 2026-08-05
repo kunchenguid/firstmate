@@ -255,5 +255,44 @@ fm_backend_tmux_foreground_comms "$SESSION:no-such-window" >/dev/null \
   || fail "an absent window in a readable session must classify missing, not whatever the fallback pane runs"
 pass "tmux liveness: an absent window classifies missing rather than inheriting tmux's active-window fallback"
 
+# --- cursor-agent: MainThread kernel exec name -------------------------------
+
+"$REAL_TMUX" -L "$SOCKET" new-window -t "$SESSION" -n cmainthrd bash -c "exec -a MainThread '$SLEEP_BIN' 30"
+# A bare MainThread exec name without a cursor-agent path component must NOT
+# classify alive: no name source attributes it to a harness, so the readable
+# foreground group (a non-shell) stays ambiguous, never an invented agent.
+if [ "$(fm_backend_agent_state tmux "$SESSION:cmainthrd" 2>/dev/null)" = alive ]; then
+  fail "a bare 'MainThread' foreground process must not classify alive (no cursor-agent path context)"
+fi
+"$REAL_TMUX" -L "$SOCKET" kill-window -t "$SESSION:cmainthrd" 2>/dev/null || true
+pass "tmux liveness: a bare MainThread exec name without cursor-agent path is not alive"
+
+# --- cursor-agent: MainThread with cursor-agent argv0 ------------------------
+
+ln -sf "$SLEEP_BIN" "$LAB/bin/cursor-agent"
+"$REAL_TMUX" -L "$SOCKET" new-window -t "$SESSION" -n cursorargv0 bash -c "exec -a MainThread '$LAB/bin/cursor-agent' 30"
+wait_for_state "$SESSION:cursorargv0" alive 2>/dev/null \
+  || fail "a 'MainThread' process with cursor-agent argv0 must classify alive"
+"$REAL_TMUX" -L "$SOCKET" kill-window -t "$SESSION:cursorargv0" 2>/dev/null || true
+pass "tmux liveness: MainThread with cursor-agent argv0 classifies alive"
+
+# --- cursor-agent: cursor-agent pane command ---------------------------------
+
+"$REAL_TMUX" -L "$SOCKET" new-window -t "$SESSION" -n cursorpane bash -c "exec -a cursor-agent '$LAB/bin/cursor-agent' 30"
+wait_for_state "$SESSION:cursorpane" alive 2>/dev/null \
+  || fail "a 'cursor-agent' pane command must classify alive"
+"$REAL_TMUX" -L "$SOCKET" kill-window -t "$SESSION:cursorpane" 2>/dev/null || true
+pass "tmux liveness: cursor-agent pane command classifies alive"
+
+# --- cursor-agent: negative case (~/.cursor path should not match) ------------
+
+ln -sf "$SLEEP_BIN" "$LAB/bin/notcursor"
+"$REAL_TMUX" -L "$SOCKET" new-window -t "$SESSION" -n cursorneg bash -c "exec -a notcursor '$LAB/bin/notcursor' 30"
+if [ "$(fm_backend_agent_state tmux "$SESSION:cursorneg" 2>/dev/null)" = alive ]; then
+  fail "a non-cursor process must not classify alive (over-broad matching hazard)"
+fi
+"$REAL_TMUX" -L "$SOCKET" kill-window -t "$SESSION:cursorneg" 2>/dev/null || true
+pass "tmux liveness: a non-cursor process does not classify alive"
+
 cleanup_all
 trap - EXIT

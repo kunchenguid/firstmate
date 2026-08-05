@@ -373,3 +373,65 @@ Observed output:
 ```
 
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.
+
+## Cursor Agent CLI
+
+Cursor Agent CLI is a crew/secondmate-only adapter in the MVP; primary-session guard supervision is out of scope.
+Liveness and composer verification was performed on 2026-08-04 against cursor-agent 2026.07.23-e383d2b on Linux, tmux backend.
+
+**Composer state (before fix):**
+
+An idle cursor pane with `→ Add a follow-up` classified as `pending` because the `→` glyph was unrecognized.
+The reverse-video cursor cell inside a dim ghost run (`A` in `→ Add a follow-up`) survived `fm_composer_strip_ghost` and classified as `pending`.
+
+```sh
+$ . bin/fm-composer-lib.sh
+$ fm_composer_classify_content 0 '→ Add a follow-up'                    -> pending
+$ fm_composer_classify_content 0 '→'                                    -> pending
+```
+
+**Composer state (after fix):**
+
+`→` is recognized as an agent prompt glyph, classifying as `empty`.
+`Add a follow-up` is the idle placeholder.
+The reverse-video cursor cell inside a dim ghost run is now handled by the shared `fm_composer_strip_ghost` ghost-gap buffer.
+
+**Liveness classification (before fix):**
+
+```sh
+$ . bin/fm-session-lock-lib.sh; . bin/backends/tmux.sh
+$ fm_backend_tmux_classify_process_name MainThread                -> other
+$ fm_backend_tmux_classify_process_name cursor-agent              -> other
+```
+
+**Liveness classification (after fix):**
+
+Both `MainThread` (kernel exec name) and `cursor-agent` (tmux pane command) classify as `agent`.
+
+**Environment marker leak (before fix):**
+
+A cursor-agent process launched from a Claude Code firstmate inherits `CLAUDECODE=1` and `CLAUDE_CODE_ENTRYPOINT=cli`.
+Detection ordering plus `unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT` in the launch template fix this.
+
+**Busy state:**
+
+MVP ships `unknown cursor-unverified` with an empty `FM_BUSY_CURSOR_VERIFIED_VERSIONS` version gate.
+Captain decision 2026-08-04, option (a).
+
+**Steering measurement (2026-08-04):**
+
+- `fm-send` message lands in composer, second Enter submits.
+- Enter-while-busy: **queued** (same as opencode 1.18.4). No separate submit core branch needed.
+- `/no-mistakes` lands on a single Enter with popup settle.
+
+**Hook status (2026-08-04):**
+
+No hooks could be established.
+Three locations tried: `<project>/.cursor/hooks/hooks.json`, `--plugin-dir` plugin manifest, `<project>/.cursor/hooks.json`.
+The bundle's hook discovery code expects a plugin manifest with a `hooks` field, but the correct manifest key format was not found.
+Phase 3 blocked on correct upstream manifest key discovery.
+
+```sh
+$ cursor-agent --version
+2026.07.23-e383d2b
+```
