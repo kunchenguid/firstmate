@@ -184,6 +184,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/frontend-evaluator/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "AGENTS.md",
       "audience": "agent-runtime"
     },
