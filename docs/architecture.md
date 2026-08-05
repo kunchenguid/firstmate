@@ -166,6 +166,10 @@ Both shapes keep two durable channels with deliberately different wake semantics
 `data/<id>/log.md` is the crewmate's own working log, maintained by the agent as it works and never a wake source, so it can carry the established facts, rejected approaches, and post-dispatch steers that a lost context would otherwise take with it.
 It survives teardown with the task's other data, which is what lets a relaunched worker resume from disk rather than from a brief firstmate rebuilds by hand.
 
+A scaffolded ship or scout brief also leads with the target repo's ground truth when the repo has any: the established architecture, studied tool choices, and hard constraints firstmate keeps in `data/repos/<key>.md`, injected ahead of the task as a binding do-not-re-derive section so a worker never re-improvises what the fleet already settled.
+`bin/fm-ground.sh` owns resolution from a repo name or path, and its header owns the `repo-path:` form that makes a repo outside `projects/` first-class without cloning it there.
+Grounding is additive and never blocks a dispatch: a repo with no ground-truth file scaffolds normally and warns on stderr, so the gap is visible rather than silently guessed.
+
 ## Dispatch profiles
 
 Crewmate and scout dispatch can stay on the static crewmate harness resolved by `config/crew-harness`, or it can use local dispatch profiles in `config/crew-dispatch.json`.
