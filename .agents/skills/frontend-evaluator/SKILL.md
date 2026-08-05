@@ -22,7 +22,9 @@ It exists because a DOM assertion suite and an agent's own judgement both miss t
 An agent asked to judge work it produced praises it.
 The generator is the crewmate that wrote the code; the evaluator is a **separate spawn with its own context** that did not write it.
 Never ask the generator to confirm its own UI works, and never accept "I verified it visually" from the agent that built it as evidence.
-Independence here comes from the separated context, not from a different vendor - the evaluator runs `claude` with `--model claude-opus-5`, the same profile as the design work itself, because judging layout and visual coherence needs the strongest model available.
+Independence comes from two places, and the second was added deliberately: the evaluator has its own context, **and it runs on a different vendor**. The generator builds on `claude`; the evaluator runs on `codex`. A critic that shares the builder's model shares its blind spots and its taste, so a separate vendor buys a genuinely different read of the same page rather than a second opinion from the same mind.
+
+Model comes from the dispatch profile, not from this file - `config/crew-dispatch.json` carries `gpt-5.6-sol` as the primary with `gpt-5.6-terra` behind it, and `quota-array-dispatch` picks between them on remaining headroom. `codex` must be authenticated for any of this to work; a stale refresh token fails every model identically, so check `codex doctor` before concluding a model name is wrong.
 
 The evaluator reads and drives. It never edits code, never commits, and never lands anything.
 A `pass` verdict is permission to continue through the project's normal gates, never a substitute for any of them.
