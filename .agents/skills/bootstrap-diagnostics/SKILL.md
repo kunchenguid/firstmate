@@ -29,6 +29,7 @@ When any diagnostic needs captain attention, report the plain consequence and re
   Treat GitHub auth as unproven rather than broken: do not dispatch work that needs it, and do not ask the captain to re-authenticate on this evidence alone.
   Ask the captain to run `! gh auth status` themselves to settle the state, since a wedged credential helper, an unreachable network, or a blocking keychain prompt are the usual causes.
   `FM_GH_AUTH_TIMEOUT_SECS` raises the 10 second bound when the home is merely slow rather than stuck.
+  The reported seconds are that bound, not the elapsed wall clock: a probe that ignores SIGTERM is escalated to SIGKILL after a further 2 second grace, and that escalated kill still reports indeterminate rather than unauthenticated.
 - `GH_AUTH: indeterminate (no bounded-probe tool: install coreutils or perl)` - the home has none of `timeout`, `gtimeout`, or `perl`, so bootstrap skipped the auth check entirely rather than risk hanging session start on it.
   Report the missing bounding tool and the printed coreutils-or-perl remediation, then rerun session start once one is installed.
   The credential state stays unknown until then, so treat it exactly like the timeout case above and do not dispatch work that needs GitHub auth.

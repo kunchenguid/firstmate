@@ -106,16 +106,20 @@ SH
   chmod +x "$fakebin/gh"
 }
 
-# Records what the bounding tool is asked to enforce, then runs the command it
-# was handed. Shadowing `timeout` from the fakebin pins bootstrap on its primary
-# branch regardless of whether the host ships GNU coreutils at all.
-set_fake_bounding_timeout() {  # <fakebin> <argv record path>
-  local fakebin=$1 record=$2
+# Records what the bounding tool is asked to enforce, then either runs the
+# command it was handed or exits a caller-selected status, so a case can pin the
+# exact result the real bounder would report - 124 for a plain expiry, 137 for
+# the SIGKILL a kill grace escalates to. Shadowing `timeout` from the fakebin
+# pins bootstrap on its primary branch regardless of whether the host ships GNU
+# coreutils at all.
+set_fake_bounding_timeout() {  # <fakebin> <argv record path> [forced exit status]
+  local fakebin=$1 record=$2 forced=${3:-}
   cat > "$fakebin/timeout" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" > '$record'
 [ "\${1:-}" != -k ] || shift 2
 shift
+[ -z '$forced' ] || exit '$forced'
 exec "\$@"
 SH
   chmod +x "$fakebin/timeout"
@@ -143,7 +147,7 @@ make_path_without() {  # <dir> <tool>...
 }
 
 test_gh_auth_probe_forces_every_bounding_branch() {
-  local case_dir fakebin record out probe_path start elapsed
+  local case_dir fakebin record out probe_path start elapsed forced
   case_dir="$TMP_ROOT/gh-auth-branches"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
@@ -167,6 +171,24 @@ test_gh_auth_probe_forces_every_bounding_branch() {
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ "$(cat "$record")" = "-k 2 7 gh auth status" ] \
     || fail "a zero-padded bound should be read as base 10, got: $(cat "$record")"
+
+  # Every way a bounder can say the bound fired must read as indeterminate: 124
+  # for a plain expiry, 137 for the SIGKILL the kill grace escalates to when the
+  # probe ignores SIGTERM, and 143 for implementations reporting the SIGTERM.
+  for forced in 124 137 143; do
+    set_fake_bounding_timeout "$fakebin" "$record" "$forced"
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    [ "$out" = "GH_AUTH: indeterminate (probe timed out after 10s)" ] \
+      || fail "bounder status $forced means the bound fired, so it must report indeterminate, got: $out"
+  done
+
+  # An ordinary non-zero status is still a finished probe with a real answer.
+  set_fake_bounding_timeout "$fakebin" "$record" 1
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "NEEDS_GH_AUTH" ] \
+    || fail "an ordinary non-zero bounder status should still report NEEDS_GH_AUTH, got: $out"
   rm -f "$fakebin/timeout"
 
   # Perl fallback branch, the stock-macOS path this chain exists to serve.

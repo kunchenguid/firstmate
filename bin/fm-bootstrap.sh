@@ -87,6 +87,9 @@
 #          credential helper can never hang startup. FM_GH_AUTH_TIMEOUT_SECS
 #          overrides the 10s bound; non-numeric values, zero, and zero-padded
 #          zeros such as 00 all reset to 10 so the bound can never be disabled.
+#          A probe that ignores SIGTERM is escalated to SIGKILL after a further
+#          2s grace, so worst-case wall clock is the bound plus that grace rather
+#          than a flat 10s, and the escalated kill still reports indeterminate.
 #          An expired bound, or a home carrying none of those three bounding
 #          tools, reports GH_AUTH: indeterminate and never NEEDS_GH_AUTH, because
 #          an unfinished probe proves nothing about the credential; the two
@@ -243,7 +246,7 @@ GH_AUTH_INDETERMINATE_CAUSE=timeout
 # Return 0 for authenticated, 1 for an ordinary unauthenticated/error result,
 # and 124 when the bounded probe could not determine a result.
 gh_auth_probe() {
-  local bounder="" candidate
+  local bounder="" candidate status
   GH_AUTH_INDETERMINATE_CAUSE=timeout
   for candidate in timeout gtimeout; do
     if command -v "$candidate" >/dev/null 2>&1; then
@@ -255,6 +258,13 @@ gh_auth_probe() {
     GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
       "$bounder" -k "$GH_AUTH_KILL_GRACE_SECS" "$FM_GH_AUTH_TIMEOUT_SECS" \
       gh auth status >/dev/null 2>&1
+    status=$?
+    # A bounder reports a plain expiry as 124, but the SIGKILL its kill grace
+    # escalates to arrives as 137 and other implementations report the SIGTERM
+    # as 143. Every 128+N outcome means the probe was killed rather than
+    # answered, so it is indeterminate and never a confident unauthenticated.
+    [ "$status" -lt 128 ] || status=124
+    return "$status"
   elif command -v perl >/dev/null 2>&1; then
     GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 perl -e '
       my $t = shift;

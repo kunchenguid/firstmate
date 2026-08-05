@@ -304,6 +304,7 @@ The GitHub auth check issues exactly one `gh auth status`, bounded by `timeout`,
 A missing credential still reports `NEEDS_GH_AUTH`, but a probe that could not finish reports `GH_AUTH: indeterminate` instead, because an unfinished probe proves nothing about the credential.
 The two indeterminate causes carry distinct wording: an expired bound names the seconds it waited, while a home carrying none of those three bounding tools names the coreutils or perl install that would restore the check.
 `FM_GH_AUTH_TIMEOUT_SECS` overrides the 10 second bound, and `FM_BOOTSTRAP_GH_AUTH_DIAGNOSTICS=1` adds the otherwise-silent typed `authenticated` and `not authenticated` lines.
+A probe that ignores SIGTERM is escalated to SIGKILL after a further 2 second grace, so the worst case is the bound plus that grace rather than a flat 10 seconds, and that escalated kill still reports indeterminate rather than unauthenticated.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
 The locked session-start bootstrap step also runs a best-effort project clone refresh through `fm-fleet-sync.sh`.
@@ -502,7 +503,7 @@ FM_BACKEND_CMUX_IDLE_RE='^Type a message\.\.\.$'  # cmux-only: empty-composer pl
 CMUX_SOCKET_PASSWORD=   # cmux-only: socket password fallback when config/cmux-socket-password is absent (docs/cmux-backend.md)
 FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the session-start digest
 FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording
-FM_GH_AUTH_TIMEOUT_SECS=10   # seconds allowed for bootstrap's single bounded `gh auth status` preflight; non-numeric, zero, and zero-padded-zero values reset to 10
+FM_GH_AUTH_TIMEOUT_SECS=10   # seconds allowed for bootstrap's single bounded `gh auth status` preflight, plus a 2s SIGKILL grace when the probe ignores SIGTERM; non-numeric, zero, and zero-padded-zero values reset to 10
 FM_BOOTSTRAP_GH_AUTH_DIAGNOSTICS=0   # set to 1 to also print the typed `GH_AUTH: authenticated` / `GH_AUTH: not authenticated` lines; the `GH_AUTH: indeterminate` line always prints
 FM_GUARD_READ_ONLY=0    # internal/read-only guard mode: keep alarms but suppress drain, supervision repair, and checkout repair commands
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the guarded operation WILL still run.'   # banner continuation line; fm-send.sh overrides it to name the requested message specifically
