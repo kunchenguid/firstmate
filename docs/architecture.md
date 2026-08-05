@@ -314,7 +314,7 @@ The mechanics are owned by the `/updatefirstmate` skill and firstmate's operatin
 
 An optional formal completeness gate (`bin/fm-completeness-check.sh`, Z3-backed via `fm-completeness.py` and `fm-completeness.rules.json`) wires into `fm-teardown.sh` and `fm-merge-local.sh` to prove each done, teardown, or merge claim consistent with the directives before the irreversible step.
 Hard rules gate and soft rules score; a blocked claim names the invariant it violated instead of refusing anonymously.
-Bootstrap reports it as an optional capability only when `python3` can import `z3`, and when the solver is absent the gate steps aside so the existing bash safety checks remain the hard guarantee.
+Bootstrap reports it as an optional capability only under `FM_BOOTSTRAP_VERBOSE_FACTS=1` and only when `python3` can import `z3`, and when the solver is absent the gate steps aside so the existing bash safety checks remain the hard guarantee.
 `FM_COMPLETENESS_GATE=0` disables it entirely, and `FM_COMPLETENESS_STRICT=1` refuses instead of stepping aside when the tooling is absent or broken.
 The gate never re-derives whether remote-backed ship work has landed: `fm-teardown.sh` owns that test, and duplicating it is what once made the gate false-block squash-merged work.
 A local-only merge asserts the captain's approval explicitly through `FM_CAPTAIN_APPROVED` (`granted`, or `not_required` under yolo); without it the gate blocks the merge when the solver is installed.

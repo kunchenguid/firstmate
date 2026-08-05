@@ -553,6 +553,9 @@ FM_COMPLETENESS_GATE=1     # set to 0 to skip the gate entirely (always exits 0)
 FM_COMPLETENESS_STRICT=0   # set to 1 to refuse instead of stepping aside when the solver tooling is absent/broken
 FM_COMPLETENESS_RULES=     # optional override for the rules file (default bin/fm-completeness.rules.json)
 FM_CAPTAIN_APPROVED=       # assert the captain's merge approval at the merge gate: granted|yes|1|true, or not_required under yolo
+# delivery verification (bin/fm-verify-delivered.sh); the script header owns the modes, resolution order, and exit outcomes
+FM_VERIFY_REPO=            # repo the brand-identity mode inspects; unset resolves through data/projects.md, then $FM_HOME/projects/inception
+FM_VERIFY_REV=origin/main  # rev the brand-identity mode inspects
 FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh treats a leftover worktree git index.lock as provably stale
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3        # retries after a treehouse return fails on the transient git index.lock signature
 FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=1 # seconds fm-teardown.sh waits before each retry after that signature
