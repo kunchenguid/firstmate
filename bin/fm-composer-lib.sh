@@ -127,8 +127,8 @@ fm_composer_strip_ghost() {
       return ((299*r + 587*g + 114*b) / 1000 < lumamax) ? 1 : 0
     }
     {
-      line = $0; out = ""; dim = 0; darkfg = 0; n = length(line); i = 1
-      ghost_gap = 0; gap_buf = ""
+      line = $0; out = ""; dim = 0; darkfg = 0; rev = 0; n = length(line); i = 1
+      ghost_gap = 0; gap_buf = ""; gap_rev = 0
       while (i <= n) {
         c = substr(line, i, 1)
         if (c == "\033") {            # ESC: consume a CSI ... final-byte sequence
@@ -148,9 +148,11 @@ fm_composer_strip_ghost() {
               # buffer, because they arrive before the real content and would
               # close the gap prematurely (cursor-agent reverse-video cursor
               # cell sits between a dim exit and a dim re-entry, with a
-              # background-color SGR in between). If the gap content is real
-              # (no dim re-entry), the caller must close the gap by changing
-              # de-emphasis, not by passing through a color-only SGR.
+              # background-color SGR in between). The buffer is dropped on dim
+              # re-entry ONLY when its content was reverse-video-marked (SGR 7,
+              # how the observed cursor cell is always rendered): a plain-text
+              # gap is real typed content and survives, deferring injection
+              # rather than licensing it over genuine input.
               if (ghost_gap) {
                 # peek: is this a de-emphasis-changing SGR or a color-only SGR?
                 # Must skip color payload parameters (38;2, 38;5, 48;2, 48;5,
@@ -184,12 +186,12 @@ fm_composer_strip_ghost() {
                     }
                     if (code_check == "2") { dim_reentered = 1; break }
                   }
-                  if (dim_reentered) {
-                    gap_buf = ""   # gap content is ghost, drop it
+                  if (dim_reentered && gap_rev) {
+                    gap_buf = ""   # reverse-video gap content is the cursor cell, drop it
                   } else {
                     out = out gap_buf   # gap content is real, emit it
                   }
-                  gap_buf = ""
+                  gap_buf = ""; gap_rev = 0
                 }
               }
               k = split(params, a, ";")
@@ -201,17 +203,22 @@ fm_composer_strip_ghost() {
                 } else if (code == "48" || code == "58") {
                   p = skip_color_payload(a, p, k)
                 } else if (code == "2") {
-                  if (!dim) { dim = 1; ghost_gap = 0; gap_buf = "" }
+                  if (!dim) { dim = 1; ghost_gap = 0; gap_buf = ""; gap_rev = 0 }
                 } else if (code == "0") {
                   if (dim || darkfg) {
                     # Exiting de-emphasis: start a ghost gap buffer to
                     # capture potential reverse-video cursor cell.
-                    ghost_gap = 1; gap_buf = ""
+                    ghost_gap = 1; gap_buf = ""; gap_rev = 0
                   }
-                  dim = 0; darkfg = 0
+                  dim = 0; darkfg = 0; rev = 0
                 } else if (code == "22") {
-                  if (dim) { ghost_gap = 1; gap_buf = "" }
+                  if (dim) { ghost_gap = 1; gap_buf = ""; gap_rev = 0 }
                   dim = 0
+                } else if (code == "7") {
+                  rev = 1
+                  if (ghost_gap) gap_rev = 1
+                } else if (code == "27") {
+                  rev = 0
                 } else if (code == "39") { darkfg = 0 }
                 else if (code + 0 >= 30 && code + 0 <= 37) { darkfg = 0 }
                 else if (code + 0 >= 90 && code + 0 <= 97) { darkfg = 0 }
