@@ -1,0 +1,200 @@
+{
+  "loopspec_schema_version": 1,
+  "id": "approved-work-reconciliation",
+  "spec_version": 1,
+  "status": "ready_not_active",
+  "title": "Recurring approved-work reconciliation",
+  "goal": "On recurrence, answer which reported work was genuinely approved and remains unimplemented, without re-reading the report corpus.",
+  "success_condition": "The verifier confirms that every report whose content hash changed since the last accepted iteration has been reclassified from its own decision and implementation evidence, and that the resulting delta is either empty or emitted with per-item citations.",
+  "trigger": {
+    "id": "required-artifact-changes",
+    "source": "filesystem",
+    "predicate": "The content hash of the report-corpus inventory differs from the hash recorded by the last accepted iteration."
+  },
+  "preconditions": [
+    {
+      "id": "corpus-readable",
+      "description": "Every report path in the inventory is readable and its hash is computable. An unreadable member is an integrity fault, never an implicit empty."
+    },
+    {
+      "id": "decision-sources-reachable",
+      "description": "All three approval sources are reachable: ruling documents, backlog task notes, and the durable record of chat-issued instructions. An unreachable source is an integrity fault and never a proposed-never-approved verdict."
+    },
+    {
+      "id": "implementation-head-known",
+      "description": "The implementation HEAD used to judge landed work is resolvable, so delivered-but-not-in-the-working-tree cannot read as unimplemented."
+    },
+    {
+      "id": "scanner-available",
+      "description": "The referenced research-approved-work skill and its deterministic scanner are installed and runnable."
+    }
+  ],
+  "selection": {
+    "key": [
+      "trigger.id",
+      "selection.scope",
+      "selection.priority"
+    ],
+    "scope": "fleet-reports",
+    "priority": 10,
+    "tie_behavior": "refuse"
+  },
+  "authority": {
+    "class": "read-only",
+    "permitted_skills": [
+      "research-approved-work"
+    ],
+    "permitted_actions": [
+      "read the report-corpus inventory and its metadata",
+      "compute and compare content hashes",
+      "read decision and implementation evidence",
+      "write this loop's persistent state",
+      "write the derived index owned by the referenced skill",
+      "emit a delta report for firstmate to relay"
+    ],
+    "forbidden_actions": [
+      "implement any work the scan finds",
+      "close, reopen or edit any backlog item or decision",
+      "edit, move or delete any report",
+      "open, push to or merge any pull request",
+      "spawn, steer or tear down any worker",
+      "treat a finding as authorization to change code"
+    ]
+  },
+  "verification": {
+    "verifier": "research-approved-work-scanner",
+    "required_evidence": [
+      "corpus inventory hash for this iteration and the previous accepted one",
+      "per-report content hash and size for every changed member",
+      "per-item citation naming the approval source and its location",
+      "per-item implementation evidence resolved against a named HEAD",
+      "the count of corpus members skipped as unchanged"
+    ],
+    "on_unavailable": "fail_closed"
+  },
+  "state": {
+    "path_template": "state/loopspec/<id>.state.json",
+    "required_fields": [
+      "spec_id",
+      "spec_version",
+      "status",
+      "iteration",
+      "event_key",
+      "open",
+      "consecutive_no_progress",
+      "last_terminal",
+      "last_corpus_sha"
+    ]
+  },
+  "cadence": {
+    "min_interval_secs": 3600,
+    "max_interval_secs": 604800,
+    "backoff": {
+      "strategy": "exponential",
+      "factor": 2,
+      "ceiling_secs": 86400
+    },
+    "retry": {
+      "max_attempts": 3
+    },
+    "dedup": {
+      "key": [
+        "trigger.id",
+        "corpus_content_sha"
+      ],
+      "window_secs": 86400
+    }
+  },
+  "budgets": {
+    "max_iterations": 8,
+    "max_wall_secs": 3600,
+    "capacity_stop_band_percent": 20
+  },
+  "no_progress": {
+    "progress_signal": "declared_by_verifier",
+    "max_iterations_without_progress": 2,
+    "terminal": "no_progress_stalled"
+  },
+  "terminal_states": [
+    {
+      "name": "no_delta",
+      "kind": "neutral",
+      "maps_to": "NOOP",
+      "description": "The corpus is unchanged since the last accepted iteration. Reaching this must cost no model turn."
+    },
+    {
+      "name": "delta_emitted",
+      "kind": "success",
+      "maps_to": "COMPLETE",
+      "description": "The corpus changed and a cited delta was emitted for firstmate to relay."
+    },
+    {
+      "name": "confirmed_work_found",
+      "kind": "success",
+      "maps_to": "COMPLETE",
+      "description": "At least one item is confirmed approved and still unimplemented, with approval and implementation proven separately."
+    },
+    {
+      "name": "needs_ruling",
+      "kind": "refusal",
+      "maps_to": "REFUSED",
+      "description": "An item's approval or supersession cannot be settled from evidence and requires a captain ruling. The loop stops rather than guessing."
+    },
+    {
+      "name": "blocked_by_evidence_integrity",
+      "kind": "failure",
+      "maps_to": "FAILED",
+      "description": "A corpus member or decision source was unreadable, so absence of evidence could not be distinguished from evidence of absence."
+    },
+    {
+      "name": "budget_exhausted",
+      "kind": "failure",
+      "maps_to": "EXHAUSTED",
+      "description": "An iteration, wall-clock or capacity budget was reached before the success condition was met."
+    },
+    {
+      "name": "verification_failed",
+      "kind": "failure",
+      "maps_to": "FAILED",
+      "description": "The verifier ran and rejected the iteration, or was unavailable. An unavailable verifier lands here and can never become a pass."
+    },
+    {
+      "name": "no_progress_stalled",
+      "kind": "failure",
+      "maps_to": "STALLED",
+      "description": "Consecutive iterations produced no verifier-declared progress, so the loop stopped instead of repeating forever."
+    }
+  ],
+  "escalation": {
+    "authority_owner": "firstmate, escalating to the captain where the authority contract requires it",
+    "channel": "the task's durable status record, never a worker pane",
+    "on": [
+      "confirmed_work_found",
+      "needs_ruling",
+      "blocked_by_evidence_integrity",
+      "budget_exhausted",
+      "verification_failed",
+      "no_progress_stalled"
+    ]
+  },
+  "idempotency": {
+    "event_key": [
+      "trigger.id",
+      "corpus_content_sha"
+    ],
+    "claim_scope": "At most one open iteration per (spec id, event key). A repeated wake carrying an already-claimed key is refused and mutates nothing."
+  },
+  "crash_recovery": {
+    "open_iteration_policy": "resume_same_version",
+    "version_change_policy": "refuse"
+  },
+  "evidence": {
+    "links": [
+      "data/capability-substrate-audit-loopspec-substrate/report.md",
+      "data/loop-engineering-commission-2026-08-02.md",
+      "data/research-approved-work/baseline-2026-08-04.md"
+    ],
+    "written_to": "the derived, content-addressed index owned by the research-approved-work skill"
+  },
+  "notes": "This spec is ready_not_active and cannot become enabled today, for two independently sufficient reasons the validator enforces rather than asserts: its trigger has no implemented detector and no verified execution path, and its only permitted skill is not installed. It deliberately references research-approved-work instead of restating that skill's workflow, so the scan procedure keeps exactly one owner. Whether the capacity stop band covers validation runs is an open captain decision owned by another lane; capacity_stop_band_percent bounds starting a new iteration only, and never blocks verifying an iteration already in flight."
+}
