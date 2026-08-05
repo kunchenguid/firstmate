@@ -85,7 +85,21 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_FAIL:-0}" = 0 ] || exit 1
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
-printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
+case "${1:-} ${2:-}" in
+  "mr view")
+    project=
+    previous=
+    for arg in "$@"; do
+      if [ "$previous" = -R ]; then
+        project=$arg
+        break
+      fi
+      previous=$arg
+    done
+    printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\nurl:\t%s/-/merge_requests/%s\n' \
+      "${FM_TEST_GLAB_STATE:-opened}" "$project" "${3:-}"
+    ;;
+esac
 SH
   chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
   : > "$dir/gh.log"
@@ -2872,15 +2886,13 @@ EOF
   esac
   [ ! -e "$state/task-b.check.sh" ] || fail "refused GitLab arming left a poll armed"
 
-  # The merge path still addresses GitHub only, so it refuses rather than
-  # sending a merge request to the wrong forge.
+  # The merge path derives the same exact host, nested project, and MR number.
   write_task_meta "$dir" task-c
-  set +e
-  run_merge_entry "$dir" task-c "$url" >/dev/null 2>&1
-  rc=$?
-  set -e
-  [ "$rc" -eq 2 ] || fail "merge wrapper did not refuse a GitLab merge request URL"
+  run_merge_entry "$dir" task-c "$url" >/dev/null 2>&1 \
+    || fail "merge wrapper refused a canonical GitLab merge request URL"
   [ ! -s "$dir/gh-axi.log" ] || fail "merge wrapper reached the GitHub CLI for a GitLab URL"
+  grep -qxF 'mr merge 7 -R https://gitlab.example/group/subgroup/project --squash --yes' "$dir/glab.log" \
+    || fail "merge wrapper did not preserve the canonical GitLab target"
 
   pass "GitLab merge requests are followed on any instance and never wake falsely"
 }

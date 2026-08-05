@@ -161,10 +161,9 @@ fm_pr_gitlab_path_valid() {
 # unchanged, and GitLab gets its own host and namespace rules rather than a
 # loosened GitHub rule.
 #
-# FM_PR_OWNER and FM_PR_REPO are additionally set for github because
-# bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab URL leaves
-# them empty; teaching the merge path about GitLab is a separate change, and
-# until then it refuses a GitLab URL rather than merging anything.
+# FM_PR_OWNER and FM_PR_REPO are additionally set for github because GitHub is
+# addressed by owner/repository. GitLab consumers use FM_PR_HOST and the full
+# FM_PR_PATH because nested namespaces and self-hosted instances are supported.
 fm_pr_url_parse() {
   local raw=${1-} pattern host path
   local LC_ALL=C

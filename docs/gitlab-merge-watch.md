@@ -1,13 +1,14 @@
 # GitLab merge request watch verification
 
 Empirical record for the merge watch on GitLab, alongside the existing GitHub watch.
-Every command below was run on 2026-07-21 and its output is reproduced exactly.
+The watch evidence commands below were run on 2026-07-21 and their output is reproduced exactly.
+The guarded merge interface and regression evidence were refreshed on 2026-08-05.
 
 ## Versions
 
 ```
 $ glab --version
-Current glab version: 1.53.0
+glab 1.108.0 (5de20850)
 
 $ bash --version | head -1
 GNU bash, version 5.3.9(1)-release (x86_64-pc-linux-gnu)
@@ -190,10 +191,31 @@ merged
 
 No armed watch is lost by upgrading.
 
-## What this change does not cover
+## Guarded merge path
 
-`bin/fm-pr-merge.sh` still addresses GitHub only, by owner and repository.
-It refuses a GitLab merge request URL rather than sending it to the wrong forge, so merging a merge request stays a deliberate manual step until merge parity lands separately.
+`bin/fm-pr-merge.sh` accepts the same canonical GitLab MR identity as the watcher.
+It runs `bin/fm-pr-check.sh` and verifies the exact `pr=` metadata before any forge merge command.
+For GitLab, it passes the derived MR number and `https://<host>/<full-project-path>` to `glab mr view`, requires the reported MR URL to equal the canonical input exactly, and only then calls `glab mr merge` with the same explicit project target.
+This keeps self-hosted instances and nested group paths out of ambient repository or glab configuration.
+
+The current `glab mr merge --help` interface exposes `-R, --repo` as its project selector.
+The wrapper rejects `-R`, attached `-R<value>`, `--repo`, and `--repo=<value>` in caller arguments, and forwards only the documented non-target merge options it explicitly recognizes.
+Squash remains the default when the caller supplies neither GitLab's squash nor rebase option.
+Missing `glab`, a failed lookup, a target mismatch, unavailable metadata, an unsafe URL, an unsupported argument, or a failed merge command produces a nonzero result without trying another target.
+
+This is only a guarded mechanism.
+It does not grant merge authority, infer approval, or replace Firstmate's captain-approval and yolo decision boundary.
+The regression suite uses hermetic command mocks and never merges a real MR.
+
+The merge interface and its public regression were refreshed with these commands:
+
+```
+$ glab mr merge --help | sed -n 's/^[[:space:]]*//; /-R --repo/p'
+-R --repo                  Select another repository. You can use either OWNER/REPO or GROUP/NAMESPACE/REPO. The full URL or Git URL is also accepted.
+
+$ bin/fm-test-run.sh tests/fm-pr-merge.test.sh 2>&1 | sed -n 's/ duration_ms=.*//; /^FM_TEST_SUMMARY /p'
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
+```
 
 A GitLab task records no `pr_head=`.
 `gh` exposes the head commit as a selectable field, while plain `glab` exposes it only inside its JSON output, which would need a JSON processor firstmate does not require.

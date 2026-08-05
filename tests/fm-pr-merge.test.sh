@@ -11,9 +11,11 @@
 #   (c) extra gh-axi pr merge args are forwarded after number and --repo
 #   (d) merge is refused before gh-axi when task meta is missing
 #   (e) PR URL is parsed to number + --repo for gh-axi (defaults to --squash)
-#   (f) malformed PR URL fails fast without calling gh-axi
+#   (f) malformed PR/MR URLs fail fast without calling either forge
 #   (g) explicit merge method is not overridden by the default --squash
-#   (h) repo override args fail fast because the repo comes from the URL
+#   (h) repo override args fail fast because the target comes from the URL
+#   (i) GitLab.com and self-hosted nested projects use the exact derived target
+#   (j) GitLab lookup, metadata, CLI, argument, and merge failures fail closed
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -84,11 +86,33 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
+add_glab_mock() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/glab" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
+case "${1:-} ${2:-}" in
+  "mr view")
+    [ "${FM_TEST_GLAB_LOOKUP_FAIL:-0}" = 0 ] || exit 1
+    printf 'title:\tfixture\nstate:\topened\nurl:\t%s\n--\nfixture body\n' "$FM_TEST_GLAB_URL"
+    ;;
+  "mr merge")
+    [ "${FM_TEST_GLAB_MERGE_FAIL:-0}" = 0 ] || exit 1
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/glab"
+}
+
 run_pr_merge() {
   local case_dir=$1 rc; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_GLAB_LOG="$case_dir/glab.log" \
+  FM_TEST_GLAB_URL="${FM_TEST_GLAB_URL:-}" \
+  FM_TEST_GLAB_LOOKUP_FAIL="${FM_TEST_GLAB_LOOKUP_FAIL:-0}" \
+  FM_TEST_GLAB_MERGE_FAIL="${FM_TEST_GLAB_MERGE_FAIL:-0}" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
   rc=$?
@@ -187,21 +211,200 @@ test_malformed_url_refuses_before_merge() {
   : > "$case_dir/gh-axi.log"
 
   set +e
-  run_pr_merge "$case_dir" task-x1 'https://gitlab.com/example/repo/-/merge_requests/1' \
+  run_pr_merge "$case_dir" task-x1 'https://gitlab.com/example/repo/-/merge_requests/01' \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
-  expect_code 2 "$rc" "malformed-url: fm-pr-merge should refuse a non-GitHub PR URL"
+  expect_code 2 "$rc" "malformed-url: fm-pr-merge should refuse a malformed MR URL"
   assert_grep 'error: invalid PR merge request' "$case_dir/stderr" \
     "malformed-url: refusal was not fixed and non-probing"
-  assert_no_grep 'pr=https://gitlab.com/example/repo/-/merge_requests/1' "$case_dir/state/task-x1.meta" \
+  assert_no_grep 'pr=https://gitlab.com/example/repo/-/merge_requests/01' "$case_dir/state/task-x1.meta" \
     "malformed-url: malformed PR URL was recorded in meta"
   assert_absent "$case_dir/state/task-x1.check.sh" \
     "malformed-url: malformed PR URL armed a merge poll"
   assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
     "malformed-url: gh-axi pr merge was invoked for a malformed URL"
   pass "fm-pr-merge refuses malformed PR URLs before calling gh-axi"
+}
+
+test_gitlab_com_success_records_exact_metadata() {
+  local case_dir url
+  case_dir=$(make_case gitlab-com-success)
+  url=https://gitlab.com/example/repo/-/merge_requests/31
+  mkdir -p "$case_dir/wt"
+  add_glab_mock "$case_dir"
+  : > "$case_dir/glab.log"
+
+  FM_TEST_GLAB_URL="$url" run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "gitlab-com-success: merge failed"
+
+  [ "$(grep -c '^pr=' "$case_dir/state/task-x1.meta")" -eq 1 ] \
+    || fail "gitlab-com-success: metadata did not contain exactly one pr= line"
+  grep -qxF "pr=$url" "$case_dir/state/task-x1.meta" \
+    || fail "gitlab-com-success: canonical MR metadata was not exact"
+  assert_no_grep '^pr_head=' "$case_dir/state/task-x1.meta" \
+    "gitlab-com-success: GitLab unexpectedly recorded pr_head="
+  grep -qxF 'mr view 31 -R https://gitlab.com/example/repo' "$case_dir/glab.log" \
+    || fail "gitlab-com-success: lookup target was not exact"
+  grep -qxF 'mr merge 31 -R https://gitlab.com/example/repo --squash --yes' "$case_dir/glab.log" \
+    || fail "gitlab-com-success: default squash merge target was not exact"
+  pass "fm-pr-merge records exact GitLab metadata and defaults to squash"
+}
+
+test_self_hosted_nested_project_and_explicit_method() {
+  local case_dir url
+  case_dir=$(make_case gitlab-self-hosted)
+  url=https://gitlab.corp.example/platform/payments/runtime/service/-/merge_requests/42
+  mkdir -p "$case_dir/wt"
+  add_glab_mock "$case_dir"
+  : > "$case_dir/glab.log"
+
+  FM_TEST_GLAB_URL="$url" run_pr_merge "$case_dir" task-x1 "$url" -- --rebase --remove-source-branch \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "gitlab-self-hosted: merge failed"
+
+  grep -qxF 'mr view 42 -R https://gitlab.corp.example/platform/payments/runtime/service' "$case_dir/glab.log" \
+    || fail "gitlab-self-hosted: lookup lost host or nested project path"
+  grep -qxF 'mr merge 42 -R https://gitlab.corp.example/platform/payments/runtime/service --yes --rebase --remove-source-branch' "$case_dir/glab.log" \
+    || fail "gitlab-self-hosted: explicit rebase merge was not forwarded exactly"
+  assert_no_grep 'mr merge .*--squash' "$case_dir/glab.log" \
+    "gitlab-self-hosted: explicit rebase received default squash"
+  pass "fm-pr-merge supports self-hosted nested GitLab projects and explicit methods"
+}
+
+test_gitlab_missing_cli_refuses_before_recording() {
+  local case_dir rc url
+  case_dir=$(make_case gitlab-missing-cli)
+  url=https://gitlab.com/example/repo/-/merge_requests/43
+  mkdir -p "$case_dir/wt"
+
+  set +e
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    PATH="$case_dir/fakebin:/usr/bin:/bin" \
+    "$PR_MERGE" task-x1 "$url" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitlab-missing-cli: fm-pr-merge should refuse"
+  assert_grep 'requires glab on PATH' "$case_dir/stderr" \
+    "gitlab-missing-cli: refusal did not name glab"
+  assert_no_grep '^pr=' "$case_dir/state/task-x1.meta" \
+    "gitlab-missing-cli: MR metadata was recorded without glab"
+  pass "fm-pr-merge refuses GitLab merge when glab is missing"
+}
+
+test_gitlab_lookup_and_target_verification_fail_closed() {
+  local case_dir rc url
+  case_dir=$(make_case gitlab-lookup-failure)
+  url=https://gitlab.com/example/repo/-/merge_requests/44
+  mkdir -p "$case_dir/wt"
+  add_glab_mock "$case_dir"
+  : > "$case_dir/glab.log"
+
+  set +e
+  FM_TEST_GLAB_URL="$url" FM_TEST_GLAB_LOOKUP_FAIL=1 \
+    run_pr_merge "$case_dir" task-x1 "$url" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "gitlab-lookup-failure: lookup failure should refuse"
+  assert_grep 'GitLab merge request lookup failed' "$case_dir/stderr" \
+    "gitlab-lookup-failure: refusal was unclear"
+  assert_no_grep '^mr merge ' "$case_dir/glab.log" \
+    "gitlab-lookup-failure: merge ran after lookup failure"
+
+  case_dir=$(make_case gitlab-target-mismatch)
+  mkdir -p "$case_dir/wt"
+  add_glab_mock "$case_dir"
+  : > "$case_dir/glab.log"
+  set +e
+  FM_TEST_GLAB_URL=https://gitlab.com/example/other/-/merge_requests/44 \
+    run_pr_merge "$case_dir" task-x1 "$url" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "gitlab-target-mismatch: target mismatch should refuse"
+  assert_grep 'target could not be verified' "$case_dir/stderr" \
+    "gitlab-target-mismatch: refusal was unclear"
+  assert_no_grep '^mr merge ' "$case_dir/glab.log" \
+    "gitlab-target-mismatch: merge ran against an unverified target"
+  pass "fm-pr-merge fails closed on GitLab lookup or canonical-target failure"
+}
+
+test_gitlab_merge_failure_propagates() {
+  local case_dir rc url
+  case_dir=$(make_case gitlab-merge-failure)
+  url=https://gitlab.com/example/repo/-/merge_requests/45
+  mkdir -p "$case_dir/wt"
+  add_glab_mock "$case_dir"
+  : > "$case_dir/glab.log"
+
+  set +e
+  FM_TEST_GLAB_URL="$url" FM_TEST_GLAB_MERGE_FAIL=1 \
+    run_pr_merge "$case_dir" task-x1 "$url" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitlab-merge-failure: merge failure should propagate"
+  grep -qxF "pr=$url" "$case_dir/state/task-x1.meta" \
+    || fail "gitlab-merge-failure: exact metadata was not recorded first"
+  grep -qxF 'mr merge 45 -R https://gitlab.com/example/repo --squash --yes' "$case_dir/glab.log" \
+    || fail "gitlab-merge-failure: merge command was not exact"
+  pass "fm-pr-merge propagates GitLab merge-command failure"
+}
+
+test_gitlab_target_override_spellings_refuse() {
+  local spelling name case_dir rc url
+  url=https://gitlab.com/right/repo/-/merge_requests/46
+  for spelling in '--repo wrong/repo' '--repo=wrong/repo' '-R wrong/repo' '-Rwrong/repo'; do
+    name=$(printf '%s' "$spelling" | tr -c 'A-Za-z0-9' '_')
+    case_dir=$(make_case "gitlab-override-$name")
+    mkdir -p "$case_dir/wt"
+    add_glab_mock "$case_dir"
+    : > "$case_dir/glab.log"
+    set +e
+    # Word splitting is deliberate: each fixture models the CLI spelling shown.
+    # shellcheck disable=SC2086
+    FM_TEST_GLAB_URL="$url" run_pr_merge "$case_dir" task-x1 "$url" -- $spelling \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "gitlab-override-$name: override should refuse"
+    assert_grep 'must not override the repository' "$case_dir/stderr" \
+      "gitlab-override-$name: refusal was unclear"
+    assert_no_grep '^pr=' "$case_dir/state/task-x1.meta" \
+      "gitlab-override-$name: metadata changed before argument refusal"
+    [ ! -s "$case_dir/glab.log" ] || fail "gitlab-override-$name: glab ran despite override"
+  done
+  pass "fm-pr-merge rejects every documented glab repository-selector spelling"
+}
+
+test_gitlab_argument_injection_is_data_and_unknown_flags_refuse() {
+  local case_dir rc url marker
+  case_dir=$(make_case gitlab-argument-injection)
+  url=https://gitlab.com/example/repo/-/merge_requests/47
+  marker="$case_dir/injected"
+  mkdir -p "$case_dir/wt"
+  add_glab_mock "$case_dir"
+  : > "$case_dir/glab.log"
+
+  FM_TEST_GLAB_URL="$url" run_pr_merge "$case_dir" task-x1 "$url" -- \
+    --squash-message "\$(touch $marker)" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "gitlab-argument-injection: safe message was rejected"
+  [ ! -e "$marker" ] || fail "gitlab-argument-injection: argument bytes executed"
+
+  case_dir=$(make_case gitlab-unknown-target-flag)
+  mkdir -p "$case_dir/wt"
+  add_glab_mock "$case_dir"
+  : > "$case_dir/glab.log"
+  set +e
+  FM_TEST_GLAB_URL="$url" run_pr_merge "$case_dir" task-x1 "$url" -- --hostname evil.example \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "gitlab-unknown-target-flag: unknown target flag should refuse"
+  assert_grep 'unsupported GitLab merge argument' "$case_dir/stderr" \
+    "gitlab-unknown-target-flag: refusal was unclear"
+  [ ! -s "$case_dir/glab.log" ] || fail "gitlab-unknown-target-flag: glab ran"
+  pass "fm-pr-merge keeps safe GitLab values as data and rejects unknown flags"
 }
 
 test_rejects_unsafe_url_segments_before_recording() {
@@ -311,3 +514,10 @@ test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
+test_gitlab_com_success_records_exact_metadata
+test_self_hosted_nested_project_and_explicit_method
+test_gitlab_missing_cli_refuses_before_recording
+test_gitlab_lookup_and_target_verification_fail_closed
+test_gitlab_merge_failure_propagates
+test_gitlab_target_override_spellings_refuse
+test_gitlab_argument_injection_is_data_and_unknown_flags_refuse
