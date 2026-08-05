@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, and kimi.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, and agy.
 user-invocable: false
 metadata:
   internal: true
@@ -98,7 +98,7 @@ Full mechanics, scoping, and fail-open behavior live in `docs/sessionstart-nudge
 
 At session start, `bin/fm-session-start.sh` prints exactly one watcher supervision block for the detected primary harness.
 Do not substitute another harness's wait shape when resuming supervision.
-Claude's Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns tokenless re-arm around `bin/fm-watch-arm.sh`, and Grok uses tracked background-notify cycles around `bin/fm-watch-arm.sh`.
+Claude's Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns tokenless re-arm around `bin/fm-watch-arm.sh`. Grok and agy use background-notify cycles around `bin/fm-watch-arm.sh`.
 Codex uses bounded foreground checkpoints through `bin/fm-watch-checkpoint.sh` because Codex cannot reason while a foreground tool call is running.
 OpenCode uses `.opencode/plugins/fm-primary-watch-arm.js`, which coordinates with the turn-end guard plugin and wakes the TUI with `client.session.promptAsync`.
 Pi and pi-signed use the tracked `.pi/extensions/fm-primary-turnend-guard.ts` plus the tracked `.pi/extensions/fm-primary-pi-watch.ts`, both project-local extensions the Pi engine auto-discovers once trusted.
@@ -127,6 +127,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | pi / pi-signed | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-27 on Pi and pi-signed 0.82.0. Both expose the same accepted thinking levels and completed the same model-qualified max-thinking smoke. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
+| agy | `--model <model>` | `--effort <low\|medium\|high>` | Verified with Antigravity CLI / AGY 1.1.9 using `agy --version` and `agy --help`. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 No script resolves that split for you: establish which credential store a tuple reads from the discovery surfaces below plus `quota-axi auth --json`'s per-provider sources, and show that reasoning rather than inferring it from a harness, model, or source name.
@@ -356,6 +357,22 @@ The exact adaptive and malformed-input contract is owned by `docs/turnend-guard.
 The tracked Claude Stop hooks skip themselves under `GROK_AGENT`, because Grok also loads Claude-compatible project settings and otherwise creates a second blocking path.
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol remains background-notify around `bin/fm-watch-arm.sh`; native Stop continuation does not provide Pi-like extension ownership.
+
+## agy (VERIFIED 2026-08-04, Antigravity CLI 1.1.9)
+
+Antigravity CLI (`agy`) supports print-mode launch through `--prompt` and the short interactive alias `-i`.
+Firstmate uses `agy --dangerously-skip-permissions --prompt "<launch brief>"` for autonomous worker launches.
+The installed CLI advertises `--model` and `--effort`, with effort values limited to `low|medium|high`.
+
+| Fact | Value |
+|---|---|
+| Busy state | Firstmate seeds `busy fm-spawn` before launch and the completion callback records `idle agy-cli` for both successful and failed AGY command completion. |
+| Launch profile | `--model <model>` and `--effort <low\|medium\|high>` are passed when requested. |
+| Autonomy | `--dangerously-skip-permissions`. |
+| Environment markers | `ANTIGRAVITY_CLI_VERSION` or `ANTIGRAVITY_SESSION_ID`; ancestry detection accepts the exact `agy` or `antigravity` command names. |
+| Primary supervision | Background-notify cycles around `bin/fm-watch-arm.sh`, using `run_command` as a standalone background task and never shell `&`. |
+
+`agy --version` and `agy --help` are the authoritative local discovery commands for this adapter's installed version and launch flags.
 
 ## kimi (VERIFIED 2026-07-25, kimi 0.29.1)
 

@@ -70,7 +70,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|agy)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. pi-signed launches that exact executable name from PATH and
@@ -425,7 +425,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|agy)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -491,9 +491,12 @@ launch_template() {
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
+    agy) printf '%s' 'agy --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"; res=$?; __FM_BUSY_EVENT__ apply __STATE_REAL__ __ID__ idle --current-gen --source agy-cli --event done; [ "$res" -eq 0 ] && printf "done\n" >> __STATUS__ || printf "failed\n" >> __STATUS__' ;;
     *) return 1 ;;
   esac
 }
+
+
 
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
@@ -575,6 +578,46 @@ shell_quote() {
   printf "'"
 }
 
+expand_launch_placeholders() {
+  local rest=$1 output= token prefix best_prefix best_token best_value
+  while :; do
+    best_prefix=$rest
+    best_token=
+    for token in \
+      __MODELFLAG__ __EFFORTFLAG__ __BRIEF__ __TURNEND__ __PIEXT__ \
+      __PITURNEND__ __PIWATCH__ __OPINPUT__ __FM_BUSY_EVENT__ \
+      __STATE_REAL__ __ID__ __STATUS__; do
+      prefix=${rest%%"$token"*}
+      if [ "$prefix" != "$rest" ] && {
+        [ -z "$best_token" ] || [ "${#prefix}" -lt "${#best_prefix}" ]
+      }; then
+        best_prefix=$prefix
+        best_token=$token
+      fi
+    done
+    if [ -z "$best_token" ]; then
+      printf '%s%s' "$output" "$rest"
+      return 0
+    fi
+    case "$best_token" in
+      __MODELFLAG__) best_value=$MODELFLAG ;;
+      __EFFORTFLAG__) best_value=$EFFORTFLAG ;;
+      __BRIEF__) best_value=$sq_brief ;;
+      __TURNEND__) best_value=$sq_turnend ;;
+      __PIEXT__) best_value=$sq_piext ;;
+      __PITURNEND__) best_value=$sq_piturnend ;;
+      __PIWATCH__) best_value=$sq_piwatch ;;
+      __OPINPUT__) best_value=$sq_opinput ;;
+      __FM_BUSY_EVENT__) best_value=$sq_fm_busy_event ;;
+      __STATE_REAL__) best_value=$sq_state_real ;;
+      __ID__) best_value=$sq_id ;;
+      __STATUS__) best_value=$sq_status ;;
+    esac
+    output=$output$best_prefix$best_value
+    rest=${rest#*"$best_token"}
+  done
+}
+
 resolve_kimi_binary() {
   local candidate dir fallback
   candidate=$(command -v kimi 2>/dev/null || true)
@@ -603,7 +646,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|agy)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -633,6 +676,12 @@ effort_flag_for_harness() {
       # than passing a known-bad value.
       case "$effort" in
         low|medium|high) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
+    agy)
+      # AGY 1.1.9 exposes only low|medium|high for its --effort flag.
+      case "$effort" in
+        low|medium|high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
     pi|pi-signed)
@@ -1356,6 +1405,7 @@ mkdir -p "$TASK_TMP/gotmp"
 # check or leak into a commit.
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
+FM_ROOT_REAL=$(cd "$FM_ROOT" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
 exclude_path() {
   local rel=$1 EXCL
@@ -1382,7 +1432,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
+    claude*|opencode*|pi|pi-signed|agy*)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -1651,16 +1701,13 @@ sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
+sq_fm_busy_event=$(shell_quote "$FM_ROOT_REAL/bin/fm-busy-event.sh")
+sq_state_real=$(shell_quote "$STATE_REAL")
+sq_id=$(shell_quote "$ID")
+sq_status=$(shell_quote "$STATE_REAL/$ID.status")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
-LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
-LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
-LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
-LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
-LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
-LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
-LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
-LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+LAUNCH=$(expand_launch_placeholders "$LAUNCH")
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a
