@@ -346,16 +346,42 @@ window_key() {  # <window>
   printf '%s' "$1" | tr ':/.' '___'
 }
 
-# One definition of a live lane: a recorded non-secondmate task. The refill
-# gate and the captain pulse must agree on this number.
+# One definition of a live lane: a recorded non-secondmate task whose endpoint
+# is not authoritatively gone. The refill gate and the captain pulse must agree
+# on this number.
+#
+# 2026-08-05: counting records alone reported a working fleet after every
+# endpoint had died - the pulse read "live-lanes=7" with nothing running, and
+# the refill gate stayed above target so a drained fleet never refilled. Only
+# an authoritative `dead` (the backend proving the endpoint missing or the
+# agent gone) is excluded; `unknown` still counts, so an unreadable backend can
+# never inflate dispatch by under-reporting. Costs one bounded backend probe
+# per recorded non-secondmate task, and the fleet size bounds that.
 count_live_lanes() {
-  local live=0 meta
+  local live=0 meta w
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     grep -q '^kind=secondmate$' "$meta" 2>/dev/null && continue
+    w=$(fm_backend_target_of_meta "$meta")
+    if [ -n "$w" ] &&
+      [ "$(fm_backend_agent_alive "$(window_backend "$w")" "$w" 2>/dev/null)" = dead ]; then
+      continue
+    fi
     live=$((live + 1))
   done
   printf '%s' "$live"
+}
+
+# Recorded non-secondmate tasks, live or not. The pulse pairs this with the
+# live count so a fleet of dead records reads as dead instead of as work.
+count_recorded_lanes() {
+  local n=0 meta
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    grep -q '^kind=secondmate$' "$meta" 2>/dev/null && continue
+    n=$((n + 1))
+  done
+  printf '%s' "$n"
 }
 
 # Seconds since the newest commit on <task>'s recorded worktree HEAD, 999999
@@ -786,9 +812,12 @@ heartbeat_refill_due() {
 # at minute granularity, and a per-poll refresh forks per state file for
 # nothing. Best-effort; never blocks or fails the cycle.
 write_captain_pulse() {
-  local live q=0 newest=999999 f a evt
+  local live recorded q=0 newest=999999 f a evt lanes
   [ "$(age_of "$STATE/.captain-pulse")" -lt 60 ] && return 0
   live=$(count_live_lanes)
+  recorded=$(count_recorded_lanes)
+  lanes="$live"
+  [ "$live" != "$recorded" ] && lanes="$live (of $recorded recorded)"
   if [ -s "$FM_WAKE_QUEUE" ]; then
     q=$(wc -l < "$FM_WAKE_QUEUE" 2>/dev/null | tr -d '[:space:]')
     case "$q" in ''|*[!0-9]*) q=0 ;; esac
@@ -801,7 +830,7 @@ write_captain_pulse() {
   evt="${newest}s ago"
   [ "$newest" -eq 999999 ] && evt="none"
   printf '%s | watcher alive | live-lanes=%s | wakes-queued=%s | last-crew-event=%s\n' \
-    "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$live" "$q" "$evt" > "$STATE/.captain-pulse" 2>/dev/null || true
+    "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$lanes" "$q" "$evt" > "$STATE/.captain-pulse" 2>/dev/null || true
 }
 
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home

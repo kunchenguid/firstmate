@@ -2014,9 +2014,66 @@ test_captain_pulse_written_every_poll() {
   pass "the captain pulse is overwritten every poll with lanes, queue depth, and event age"
 }
 
+# A recorded task is not a live one. Counting records alone reported a working
+# fleet after every endpoint had died (2026-08-05: the pulse read live-lanes=7
+# with nothing running, and the refill gate stayed above target so a drained
+# fleet never refilled). Only an authoritative dead/missing endpoint is
+# excluded; an unreadable backend still counts, so it can never inflate
+# dispatch by under-reporting.
+test_live_lane_count_excludes_dead_endpoints() (
+  local dir state fakebin
+  dir=$(make_case live-lane-liveness); state="$dir/state"; fakebin="$dir/fakebin"
+  # Two recorded ship tasks plus one secondmate; the fake tmux reports an empty
+  # window inventory, so every endpoint resolves authoritatively missing.
+  fm_write_meta "$state/dead-a.meta" "window=sess:fm-dead-a" "backend=tmux" "kind=ship"
+  fm_write_meta "$state/dead-b.meta" "window=sess:fm-dead-b" "backend=tmux" "kind=ship"
+  fm_write_meta "$state/mate.meta" "window=sess:fm-mate" "backend=tmux" "kind=secondmate"
+  FM_HOME="$dir"
+  FM_STATE_OVERRIDE="$state"
+  export FM_HOME FM_STATE_OVERRIDE
+  PATH="$fakebin:$PATH"
+  export PATH
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-watch.sh"
+  [ "$(count_recorded_lanes)" = 2 ] \
+    || fail "recorded count did not see both non-secondmate tasks: $(count_recorded_lanes)"
+  [ "$(count_live_lanes)" = 0 ] \
+    || fail "dead endpoints still counted as live lanes: $(count_live_lanes)"
+  # An unreadable backend is not proof of death, so it must keep counting.
+  # shellcheck disable=SC2329 # Runtime override called by the sourced watcher.
+  fm_backend_agent_alive() { printf 'unknown'; }
+  [ "$(count_live_lanes)" = 2 ] \
+    || fail "an unreadable backend under-reported live lanes: $(count_live_lanes)"
+  # shellcheck disable=SC2329 # Runtime override called by the sourced watcher.
+  fm_backend_agent_alive() { printf 'alive'; }
+  [ "$(count_live_lanes)" = 2 ] || fail "live endpoints were not counted: $(count_live_lanes)"
+  pass "a live lane is a recorded task with an endpoint that is not authoritatively gone"
+)
+
+# The pulse must not read as a working fleet when every recorded endpoint is
+# gone; it shows the live count and, when they differ, the recorded total.
+test_captain_pulse_reports_dead_endpoints_as_zero() {
+  local dir state fakebin out pid
+  dir=$(make_case captain-pulse-dead); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  fm_write_meta "$state/dead-a.meta" "window=sess:fm-dead-a" "backend=tmux" "kind=ship"
+  fm_write_meta "$state/dead-b.meta" "window=sess:fm-dead-b" "backend=tmux" "kind=ship"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 20 || { reap "$pid"; fail "watcher exited unexpectedly while asserting the pulse: $(cat "$out")"; }
+  wait_numeric_file "$state/.captain-pulse" 40 >/dev/null 2>&1 || true
+  [ -s "$state/.captain-pulse" ] || { reap "$pid"; fail "state/.captain-pulse was not written"; }
+  grep -F "live-lanes=0 (of 2 recorded)" "$state/.captain-pulse" >/dev/null \
+    || { reap "$pid"; fail "the pulse reported dead endpoints as live lanes: $(cat "$state/.captain-pulse")"; }
+  reap "$pid"
+  pass "the captain pulse reports a fleet of dead endpoints as zero live lanes"
+}
+
 test_quiet_stall_churning_idle_pane_surfaced
 test_quiet_stall_fresh_commit_absorbed
 test_seat_death_capture_failed_dead_agent_surfaced
 test_seat_death_terminal_status_keeps_signal_owner
 test_heartbeat_refill_target_surfaces_idle_fleet
 test_captain_pulse_written_every_poll
+test_live_lane_count_excludes_dead_endpoints
+test_captain_pulse_reports_dead_endpoints_as_zero
