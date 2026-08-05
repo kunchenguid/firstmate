@@ -661,6 +661,23 @@ test_real_text_between_dim_runs_survives() {
   pass "fm_composer_strip_ghost: real text between dim runs survives"
 }
 
+test_cursor_idle_composer_reads_empty_end_to_end() {
+  local dir fb capture out
+  dir="$TMP_ROOT/cursor-idle-verdict"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  # The exact ANSI fixture from cursor-agent 2026.07.23-e383d2b idle composer
+  # through the REAL tmux capture path: the dim `→` glyph and placeholder strip
+  # to empty content, so the plain-content fallback must classify the row
+  # `empty` (the verdict fm_tmux_submit_enter_core needs to confirm delivery).
+  printf '\033[48;2;21;21;21m \033[2m\xe2\x86\x92 \033[0;7m\033[48;2;21;21;21mA\033[0;2m\033[48;2;21;21;21mdd a follow-up\033[0m\n' > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = empty ] \
+    || fail "cursor idle composer must read empty on the real capture path, got '$out'"
+  pass "fm_tmux_composer_state: cursor idle composer reads empty end-to-end"
+}
+
 test_strip_ghost_drops_dim_keeps_normal
 test_strip_ghost_handles_combined_and_boundary_codes
 test_strip_ghost_keeps_colored_text_with_2_payloads
@@ -694,3 +711,4 @@ test_non_bordered_interior_edges_are_pending
 test_peek_output_is_escape_free
 test_cursor_reverse_video_ghost_cell_is_stripped
 test_real_text_between_dim_runs_survives
+test_cursor_idle_composer_reads_empty_end_to_end

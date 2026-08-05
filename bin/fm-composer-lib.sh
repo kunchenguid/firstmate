@@ -19,12 +19,12 @@
 # container - a bordered composer box, where the harness draws its own prompt
 # glyph (e.g. claude's older `| > ... |`). On a bare, unstructured row it is a
 # dead-shell prompt and is NEVER "empty"; it classifies as `unknown` (not a safe
-# injection target). The AGENT prompt glyphs `❯` (claude), `›` (codex), and
-# `⟩` (U+27E9, muse) are a genuine empty agent composer either way, bordered or
-# bare. Every agent glyph must be listed in ALL THREE places below - the
-# ghost-stripped-to-empty fallback, the bare-row case, and the leading-glyph
-# strip - because a glyph present in only some of them classifies inconsistently
-# depending on how its harness happens to colour the row.
+# injection target). The AGENT prompt glyphs `❯` (claude), `›` (codex), `⟩`
+# (U+27E9, muse), and `→` (cursor) are a genuine empty agent composer either
+# way, bordered or bare. Every agent glyph must be listed in ALL THREE places
+# below - the ghost-stripped-to-empty fallback, the bare-row case, and the
+# leading-glyph strip - because a glyph present in only some of them classifies
+# inconsistently depending on how its harness happens to colour the row.
 #
 # GHOST/PLACEHOLDER TEXT is the other half of this owner (task
 # afk-herdr-false-pending): a harness fills an otherwise-empty composer with
@@ -267,8 +267,13 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
   plain_content=${5:-$content}
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
+    # Ghost stripping emptied the row, so every byte was de-emphasised; an
+    # agent-glyph-prefixed row is a ghost-only agent composer (cursor renders
+    # its `→` glyph dim together with the idle placeholder). Shell glyphs
+    # (>, $, %, #) stay unknown: a fully de-emphasised dead-shell prompt is
+    # still not a safe injection target.
     case "$plain_content" in
-      '❯'|'›'|'⟩') printf 'empty'; return 0 ;;
+      '→'*|'❯'*|'›'*|'⟩'*) printf 'empty'; return 0 ;;
       *) printf 'unknown'; return 0 ;;
     esac
   fi

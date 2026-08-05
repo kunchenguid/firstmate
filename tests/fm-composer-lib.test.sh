@@ -158,6 +158,21 @@ test_cursor_real_text_is_pending() {
   pass "fm_composer_classify_content: cursor real text reads pending"
 }
 
+test_cursor_stripped_ghost_plain_is_empty() {
+  local out
+  # Real capture path: cursor-agent renders the `→` glyph dim (SGR 2) with the
+  # idle placeholder, so ghost stripping empties the content and the verdict
+  # rests on the plain-content fallback. An agent-glyph-prefixed plain row must
+  # read empty; a shell-glyph row must stay unknown (dead-shell safety).
+  out=$(classify 0 '' '' sensitive '→ Add a follow-up')
+  [ "$out" = empty ] || fail "stripped '→ Add a follow-up' should read empty, got '$out'"
+  out=$(classify 0 '' '' sensitive '→')
+  [ "$out" = empty ] || fail "stripped bare '→' should read empty, got '$out'"
+  out=$(classify 0 '' '' sensitive '> ls')
+  [ "$out" = unknown ] || fail "stripped shell-glyph row '> ls' must stay unknown, got '$out'"
+  pass "fm_composer_classify_content: stripped ghost-only agent-glyph rows read empty, shell rows unknown"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
@@ -170,3 +185,4 @@ test_real_text_is_pending
 test_cursor_agent_glyph_is_empty
 test_cursor_idle_placeholder_is_empty
 test_cursor_real_text_is_pending
+test_cursor_stripped_ghost_plain_is_empty
