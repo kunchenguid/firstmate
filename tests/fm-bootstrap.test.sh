@@ -17,6 +17,9 @@
 # Dedicated fleet-sync cases pin the computed bootstrap timeout, explicit
 # override, blank-env defaulting, partial-output relay, and pre-launch timeout
 # scan.
+# Dedicated gh-auth cases pin the bounded probe's typed states and force each
+# branch of its timeout/gtimeout/perl/no-tool chain, since a host would otherwise
+# exercise only whichever bounding tool it happens to ship.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -86,7 +89,7 @@ SH
   printf '%s\n' "$fakebin"
 }
 
-set_fake_gh_auth_status() {  # <fakebin> <authenticated|unauthenticated|hung>
+set_fake_gh_auth_status() {  # <fakebin> <authenticated|unauthenticated|hung|signal>
   local fakebin=$1 mode=$2
   cat > "$fakebin/gh" <<SH
 #!/usr/bin/env bash
@@ -95,11 +98,108 @@ if [ "\${1:-}" = auth ] && [ "\${2:-}" = status ]; then
     authenticated) exit 0 ;;
     unauthenticated) exit 1 ;;
     hung) sleep 300 ;;
+    signal) kill -SEGV \$\$ ;;
   esac
 fi
 exit 0
 SH
   chmod +x "$fakebin/gh"
+}
+
+# Records what the bounding tool is asked to enforce, then runs the command it
+# was handed. Shadowing `timeout` from the fakebin pins bootstrap on its primary
+# branch regardless of whether the host ships GNU coreutils at all.
+set_fake_bounding_timeout() {  # <fakebin> <argv record path>
+  local fakebin=$1 record=$2
+  cat > "$fakebin/timeout" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" > '$record'
+[ "\${1:-}" != -k ] || shift 2
+shift
+exec "\$@"
+SH
+  chmod +x "$fakebin/timeout"
+}
+
+# Mirrors BASE_PATH into a directory that omits the named tools, so a case can
+# force bootstrap's bounded-probe chain onto one specific branch. Without it each
+# host exercises only whichever bounding tool it happens to ship: Linux CI always
+# takes `timeout` and never reaches the Perl fallback or the no-tool path, while
+# stock macOS never reaches the `timeout` branch.
+make_path_without() {  # <dir> <tool>...
+  local dir=$1 entry tool
+  shift
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  ( IFS=:
+    for entry in $BASE_PATH; do
+      [ -d "$entry" ] || continue
+      ln -s "$entry"/* "$dir/" 2>/dev/null || true
+    done )
+  for tool in "$@"; do
+    rm -f "$dir/$tool"
+  done
+  printf '%s\n' "$dir"
+}
+
+test_gh_auth_probe_forces_every_bounding_branch() {
+  local case_dir fakebin record out probe_path start elapsed
+  case_dir="$TMP_ROOT/gh-auth-branches"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  record="$case_dir/timeout-argv"
+
+  # Primary `timeout` branch. A zero-padded zero must reset to the 10s default
+  # exactly as a literal 0 does; leaving it alone would hand the bounding tool a
+  # zero duration, which GNU timeout treats as no bound at all.
+  set_fake_gh_auth_status "$fakebin" authenticated
+  set_fake_bounding_timeout "$fakebin" "$record"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_GH_AUTH_TIMEOUT_SECS=00 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "an authenticated probe must stay silent by default, got: $out"
+  [ "$(cat "$record")" = "-k 2 10 gh auth status" ] \
+    || fail "a zero-padded zero bound should reset to 10s and escalate to SIGKILL, got: $(cat "$record")"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_GH_AUTH_TIMEOUT_SECS=007 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$(cat "$record")" = "-k 2 7 gh auth status" ] \
+    || fail "a zero-padded bound should be read as base 10, got: $(cat "$record")"
+  rm -f "$fakebin/timeout"
+
+  # Perl fallback branch, the stock-macOS path this chain exists to serve.
+  probe_path=$(make_path_without "$case_dir/path-without-gnu-timeout" timeout gtimeout)
+  if [ -x "$probe_path/perl" ]; then
+    set_fake_gh_auth_status "$fakebin" hung
+    start=$SECONDS
+    out=$(PATH="$fakebin:$probe_path" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_BOOTSTRAP_DETECT_ONLY=1 FM_GH_AUTH_TIMEOUT_SECS=1 \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    elapsed=$((SECONDS - start))
+    [ "$out" = "GH_AUTH: indeterminate (probe timed out after 1s)" ] \
+      || fail "the Perl fallback should bound a hung probe, got: $out"
+    [ "$elapsed" -lt 5 ] || fail "Perl fallback exceeded its 1s bound (elapsed ${elapsed}s)"
+
+    set_fake_gh_auth_status "$fakebin" signal
+    out=$(PATH="$fakebin:$probe_path" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    [ "$out" = "NEEDS_GH_AUTH" ] \
+      || fail "a signal-killed probe must not read as authenticated, got: $out"
+  else
+    printf '# skipped Perl fallback branch: no perl under %s\n' "$BASE_PATH"
+  fi
+
+  # No bounding tool at all: still 124, but named as a skipped check rather than
+  # an expired bound, so the coreutils-or-perl remediation is discoverable.
+  probe_path=$(make_path_without "$case_dir/path-without-bounding-tool" timeout gtimeout perl)
+  set_fake_gh_auth_status "$fakebin" authenticated
+  out=$(PATH="$fakebin:$probe_path" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "GH_AUTH: indeterminate (no bounded-probe tool: install coreutils or perl)" ] \
+    || fail "a home with no bounding tool should name that cause, not claim a timeout, got: $out"
+  pass "bootstrap's bounded gh auth probe behaves correctly on each of its three branches"
 }
 
 test_bounded_gh_auth_probe_reports_typed_states() {
@@ -1043,6 +1143,7 @@ ROWS
 
 test_bootstrap_reporting
 test_bounded_gh_auth_probe_reports_typed_states
+test_gh_auth_probe_forces_every_bounding_branch
 test_pilot_preflight_reaches_result_for_all_auth_states
 test_no_mistakes_min_version
 test_gh_axi_min_version

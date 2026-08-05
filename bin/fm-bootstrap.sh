@@ -7,7 +7,9 @@
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
-#                 "GH_AUTH: authenticated|not authenticated|indeterminate (probe timed out after <seconds>s)"
+#                 "GH_AUTH: indeterminate (probe timed out after <seconds>s)",
+#                 "GH_AUTH: indeterminate (no bounded-probe tool: install coreutils or perl)",
+#                 "GH_AUTH: authenticated" / "GH_AUTH: not authenticated" (opt-in only),
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
@@ -80,6 +82,18 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
+#          The GitHub auth preflight issues exactly one `gh auth status`, bounded
+#          by timeout, gtimeout, or a Perl process-group alarm, so a wedged
+#          credential helper can never hang startup. FM_GH_AUTH_TIMEOUT_SECS
+#          overrides the 10s bound; non-numeric values, zero, and zero-padded
+#          zeros such as 00 all reset to 10 so the bound can never be disabled.
+#          An expired bound, or a home carrying none of those three bounding
+#          tools, reports GH_AUTH: indeterminate and never NEEDS_GH_AUTH, because
+#          an unfinished probe proves nothing about the credential; the two
+#          causes carry distinct wording so the remediation is discoverable.
+#          The typed authenticated/not authenticated states print only under
+#          FM_BOOTSTRAP_GH_AUTH_DIAGNOSTICS=1, so default output for those two
+#          cases stays byte-identical for existing consumers.
 #          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
 #          secondmate_handoff_resume, x_mode_setup, fleet_sync) while still
@@ -105,7 +119,14 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 FM_GH_AUTH_TIMEOUT_SECS=${FM_GH_AUTH_TIMEOUT_SECS:-10}
 case "$FM_GH_AUTH_TIMEOUT_SECS" in
-  ''|*[!0-9]*|0) FM_GH_AUTH_TIMEOUT_SECS=10 ;;
+  ''|*[!0-9]*) FM_GH_AUTH_TIMEOUT_SECS=10 ;;
+  *)
+    # Compare numerically, not textually: 00 and 000 are zero values too, and a
+    # zero bound disables both `timeout` and Perl's alarm outright. Forcing base
+    # 10 also keeps a padded 007 from being read as octal.
+    FM_GH_AUTH_TIMEOUT_SECS=$((10#$FM_GH_AUTH_TIMEOUT_SECS))
+    [ "$FM_GH_AUTH_TIMEOUT_SECS" -gt 0 ] || FM_GH_AUTH_TIMEOUT_SECS=10
+    ;;
 esac
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
@@ -211,22 +232,35 @@ fleet_sync() {
   rm -f "$tmp"
 }
 
+# Seconds the bounding tool waits after SIGTERM before escalating to SIGKILL, so
+# a `gh` or credential helper that ignores SIGTERM cannot outlive the bound.
+GH_AUTH_KILL_GRACE_SECS=2
+# Why a 124 came back, so the report can tell an expired bound apart from a home
+# that never had a bounding tool to expire.
+GH_AUTH_INDETERMINATE_CAUSE=timeout
+
 # Runs only `gh auth status` with prompting and update notifications disabled.
 # Return 0 for authenticated, 1 for an ordinary unauthenticated/error result,
 # and 124 when the bounded probe could not determine a result.
 gh_auth_probe() {
-  if command -v timeout >/dev/null 2>&1; then
+  local bounder="" candidate
+  GH_AUTH_INDETERMINATE_CAUSE=timeout
+  for candidate in timeout gtimeout; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      bounder=$candidate
+      break
+    fi
+  done
+  if [ -n "$bounder" ]; then
     GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
-      timeout "$FM_GH_AUTH_TIMEOUT_SECS" gh auth status >/dev/null 2>&1
-  elif command -v gtimeout >/dev/null 2>&1; then
-    GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
-      gtimeout "$FM_GH_AUTH_TIMEOUT_SECS" gh auth status >/dev/null 2>&1
+      "$bounder" -k "$GH_AUTH_KILL_GRACE_SECS" "$FM_GH_AUTH_TIMEOUT_SECS" \
+      gh auth status >/dev/null 2>&1
   elif command -v perl >/dev/null 2>&1; then
     GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 perl -e '
       my $t = shift;
       my $pid = fork;
       die "fork failed" unless defined $pid;
-      if (!$pid) { setpgrp(0, 0); exec @ARGV }
+      if (!$pid) { setpgrp(0, 0); exec @ARGV; exit 127 }
       local $SIG{ALRM} = sub {
         kill "TERM", -$pid;
         select undef, undef, undef, 0.2;
@@ -235,11 +269,23 @@ gh_auth_probe() {
       };
       alarm $t;
       waitpid $pid, 0;
-      exit($? >> 8);
+      my $st = $?;
+      exit(127) if $st == -1;
+      # A signal-killed child leaves 0 in the high byte, so reporting $? >> 8
+      # alone would read a crashed probe as authenticated. Map it the way the
+      # shell does, keeping it non-zero and distinct from the 124 timeout.
+      exit($st & 127 ? 128 + ($st & 127) : $st >> 8);
     ' "$FM_GH_AUTH_TIMEOUT_SECS" gh auth status >/dev/null 2>&1
   else
+    GH_AUTH_INDETERMINATE_CAUSE=no-bounding-tool
     return 124
   fi
+}
+
+# The typed authenticated/not-authenticated states are opt-in so default output
+# stays byte-identical for consumers that only read NEEDS_GH_AUTH.
+gh_auth_diagnostic() {
+  [ "${FM_BOOTSTRAP_GH_AUTH_DIAGNOSTICS:-0}" != 1 ] || echo "GH_AUTH: $1"
 }
 
 gh_auth_report() {
@@ -248,16 +294,21 @@ gh_auth_report() {
   status=$?
   case "$status" in
     0)
-      [ "${FM_BOOTSTRAP_GH_AUTH_DIAGNOSTICS:-0}" != 1 ] \
-        || echo "GH_AUTH: authenticated"
+      gh_auth_diagnostic authenticated
       ;;
     124)
-      echo "GH_AUTH: indeterminate (probe timed out after ${FM_GH_AUTH_TIMEOUT_SECS}s)"
+      case "$GH_AUTH_INDETERMINATE_CAUSE" in
+        no-bounding-tool)
+          echo "GH_AUTH: indeterminate (no bounded-probe tool: install coreutils or perl)"
+          ;;
+        *)
+          echo "GH_AUTH: indeterminate (probe timed out after ${FM_GH_AUTH_TIMEOUT_SECS}s)"
+          ;;
+      esac
       ;;
     *)
       echo "NEEDS_GH_AUTH"
-      [ "${FM_BOOTSTRAP_GH_AUTH_DIAGNOSTICS:-0}" != 1 ] \
-        || echo "GH_AUTH: not authenticated"
+      gh_auth_diagnostic "not authenticated"
       ;;
   esac
 }
