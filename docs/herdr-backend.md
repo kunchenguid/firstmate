@@ -1,7 +1,7 @@
 # Herdr runtime backend
 
 Herdr is an experimental agent-native terminal backend with native per-pane agent state and push events.
-Firstmate requires Herdr protocol 14 or newer; broad backend verification covers versions 0.7.1, 0.7.3, 0.7.4, and 0.7.5, while the presentation-projection suite is additionally verified on 0.8.0 protocol 19 and protocol-16 features remain gated by availability.
+Firstmate requires Herdr protocol 14 or newer; broad backend verification covers versions 0.7.1, 0.7.3, 0.7.4, and 0.7.5, while presentation projection and pane-directory semantics are additionally verified on 0.8.0 protocol 19 and protocol-16 features remain gated by availability.
 Herdr provides the terminal session while Treehouse continues to provide task worktrees.
 [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns shared backend selection and metadata semantics.
 
@@ -193,6 +193,53 @@ Workspace and tab ids support verification and cleanup but are not inferred from
 The adapter starts and polls a named server before workspace, tab, pane, or agent calls.
 Every Herdr invocation goes through `fm_backend_herdr_cli`, which sets the environment and passes an explicit trailing `--session <name>`.
 An environment variable alone is not reliable when another Herdr server is running.
+
+### Pane-directory semantics on Herdr 0.8.0 / protocol 19
+
+`fm_backend_herdr_current_path` matches tmux's shell-directory behavior rather than returning raw `pane.foreground_cwd`.
+On Herdr 0.8.0, `pane.cwd` follows the persistent parent shell while `pane.foreground_cwd` follows any process group that owns the terminal.
+The foreground field therefore sees both the nested interactive shell that Treehouse leaves in its acquired worktree and transient ordinary commands that run before that shell exists.
+
+Protocol 19's `pane.process_info` identifies `shell_pid`, `foreground_process_group_id`, and the foreground process records.
+The adapter returns the persistent shell cwd while that shell or an ordinary command owns the terminal, switches to the group leader's cwd only for a nested interactive shell without a command flag, and returns no path when protocol-19 process inspection is unreadable.
+Protocols before 19 retain their verified `foreground_cwd` compatibility path because the 0.7.x `pane.cwd` field was frozen at pane creation and the process-info surface was unavailable.
+
+This fixes two sides of Treehouse discovery without weakening `validate_spawn_worktree`:
+
+- A completed `treehouse get` resolves the nested shell's isolated worktree path.
+- A transient helper cwd such as `/Users/walter` does not become a candidate worktree; the adapter retains the parent shell path so polling continues.
+- A plain shell, including a direct `cd`, continues to resolve its live cwd.
+
+The spawn-side two-consecutive-read settling guard remains useful defense in depth, but it does not replace process-aware semantics because a transient foreground command can outlive two polls.
+
+The guarded real-runtime probe ran on 2026-08-05 in a generated non-`default` session through `bin/fm-herdr-lab.sh`.
+The teardown trap was installed before provisioning, all Herdr calls used the helper's `run` path with a trailing named session, and teardown preserved the default-session fleet snapshot.
+The controlled transition was:
+
+```sh
+HERDR_LAB_HELPER=/Users/walter/Dev/firstmate/bin/fm-herdr-lab.sh
+HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name herdr-backend-cwd-fix)
+trap '"$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"' EXIT
+"$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION"
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane run "$PANE" \
+  "bash -c 'cd /Users/walter && sleep 3 && cd \"$ROOT/tests\" && exec bash --noprofile --norc'"
+```
+
+The adapter was read before the transition, during the transient command, after the nested shell took over, and after a direct `cd` in a separate plain-shell pane.
+Observed output:
+
+```text
+PLAIN_PATH=/Users/walter/.treehouse/firstmate-17c42a/1/firstmate
+TRANSIENT_RAW=/Users/walter
+TRANSIENT_ADAPTER=/Users/walter/.treehouse/firstmate-17c42a/1/firstmate
+FINAL_RAW=/Users/walter/.treehouse/firstmate-17c42a/1/firstmate/tests
+FINAL_ADAPTER=/Users/walter/.treehouse/firstmate-17c42a/1/firstmate/tests
+PLAIN_DIRECT_CD_RAW=/Users/walter/.treehouse/firstmate-17c42a/1/firstmate/tests
+PLAIN_DIRECT_CD_ADAPTER=/Users/walter/.treehouse/firstmate-17c42a/1/firstmate/tests
+{"client_version":"0.8.0","client_protocol":19,"server_version":"0.8.0","server_protocol":19}
+```
+
+`tests/fm-backend-herdr.test.sh` pins nested-Treehouse selection, transient-command rejection, plain-shell behavior, protocol-19 fail-closed behavior, and the pre-19 compatibility path.
 
 Literal text and Enter are separate operations for ordinary steers.
 Spawn-time fixed commands may use Herdr's atomic run primitive.

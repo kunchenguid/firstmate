@@ -13,7 +13,8 @@
 #
 # Default container shape (D4, decided empirically - see
 # herdr-verification-p2.md "Task container shape", refined by
-# docs/herdr-backend.md "Default task container shape"): ONE herdr workspace PER
+# docs/herdr-backend.md "Watching and task containers" and
+# "Pane-directory semantics on Herdr 0.8.0 / protocol 19"): ONE herdr workspace PER
 # FIRSTMATE HOME (the primary, and each secondmate, gets its own), ONE herdr TAB
 # per task inside its home's workspace. The default-on presentation projection
 # creates a disposable workspace for a clean fresh task instead unless the home
@@ -99,6 +100,10 @@ FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL=16
 # presentation path uses one narrowly whitelisted raw-socket request after
 # verifying the exact method and parameter schema.
 FM_BACKEND_HERDR_MIN_WORKSPACE_MOVE_PROTOCOL=16
+# pane.process_info first shipped at protocol 19 (verified: herdr 0.8.0).
+# It distinguishes the pane's persistent shell from a foreground command or
+# nested interactive shell, which is required for tmux-compatible cwd reads.
+FM_BACKEND_HERDR_MIN_PROCESS_INFO_PROTOCOL=19
 # Per-pane escalation dedupe marker prefix, under the state dir. One marker per
 # window (keyed like the watcher's own .stale-<key>): set when a ->blocked edge
 # is enqueued, cleared on any working edge, so exactly one wake fires per
@@ -203,8 +208,9 @@ fm_backend_herdr_tool_check() {
 }
 
 # fm_backend_herdr_version_check: refuse loudly on a missing/incompatible
-# herdr client. Verified locally: v0.7.1, protocol 14 (herdr status --json's
-# .client.protocol; client info is session-independent, unlike .server).
+# herdr client. Verified locally from v0.7.1/protocol 14 through
+# v0.8.0/protocol 19 (herdr status --json's .client.protocol; client info is
+# session-independent, unlike .server).
 fm_backend_herdr_version_check() {
   fm_backend_herdr_tool_check || return 1
   local status protocol version
@@ -2304,22 +2310,78 @@ fm_backend_herdr_target_ready() {  # <target>
   fm_backend_herdr_server_ensure "$FM_BACKEND_HERDR_SESSION" || return 1
 }
 
-# fm_backend_herdr_current_path: the live FOREGROUND process's cwd, or empty on
-# any error. Mirrors tmux's pane_current_path poll used for worktree-path
-# discovery after `treehouse get`.
+# fm_backend_herdr_process_info_path: select the tmux-compatible current path
+# from one protocol-19 pane.get response and one pane.process_info response.
+# The top-level shell's cwd wins while a normal foreground command is running.
+# A nested interactive shell wins instead, which is the shape `treehouse get`
+# leaves behind after it enters the acquired worktree subshell.
+fm_backend_herdr_process_info_path() {  # <pane-json> <process-info-json> <pane-id>
+  local pane_json=$1 process_json=$2 pane_id=$3 parent
+  parent=$(printf '%s' "$pane_json" | jq -r '.result.pane.cwd // empty' 2>/dev/null)
+  printf '%s' "$process_json" | jq -er --arg pane "$pane_id" --arg parent "$parent" '
+    def interactive_shell:
+      (.name // "" | split("/")[-1] | ascii_downcase) as $name
+      | ($name == "sh" or $name == "ash" or $name == "bash"
+         or $name == "csh" or $name == "dash" or $name == "elvish"
+         or $name == "fish" or $name == "ksh" or $name == "mksh"
+         or $name == "nu" or $name == "nushell" or $name == "osh"
+         or $name == "pwsh" or $name == "tcsh" or $name == "xonsh"
+         or $name == "zsh")
+      and ((.argv | type) == "array")
+      and ([.argv[1:][]? | select(. == "--command" or test("^-[^-]*c"))] | length == 0);
+    .result.process_info as $info
+    | select($info.pane_id == $pane)
+    | (($info.foreground_processes // [])
+       | map(select(.pid == $info.foreground_process_group_id))
+       | first) as $leader
+    | if $info.foreground_process_group_id == $info.shell_pid then
+        ($leader.cwd // $parent)
+      elif (($leader // {}) | interactive_shell) then
+        ($leader.cwd // empty)
+      else
+        $parent
+      end
+    | select(type == "string" and length > 0)
+  ' 2>/dev/null
+}
+
+# fm_backend_herdr_current_path: the live shell/subshell cwd, or empty on any
+# error. Mirrors tmux's pane_current_path poll used for worktree-path discovery
+# after `treehouse get`.
 #
-# Verified pitfall: `pane get`'s `.result.pane.cwd` is the pane's cwd AT
-# CREATION TIME - the top-level shell's cwd - and does NOT update when that
-# shell `cd`s or enters a subshell (as `treehouse get` does). Reading it here
-# would make fm-spawn.sh's worktree-discovery poll never see the pane "leave"
-# the project directory, since `cwd` stays frozen at the original path forever.
-# `.result.pane.foreground_cwd` tracks the ACTUALLY RUNNING foreground
-# process's cwd instead, which is what changes when `treehouse get` enters its
-# worktree subshell - confirmed live against a real treehouse acquisition.
+# Herdr 0.7.x exposed only pane.cwd and pane.foreground_cwd. pane.cwd was frozen
+# at pane creation, while foreground_cwd followed the acquired Treehouse
+# subshell, so protocols before 19 retain the foreground_cwd read.
+#
+# Herdr 0.8.0/protocol 19 makes pane.cwd track the persistent parent shell and
+# foreground_cwd track ANY foreground process. That broader signal can briefly
+# report a helper command's own cwd (observed as /Users/walter during
+# `treehouse get`) before the final worktree shell exists. Returning that
+# transient path makes fm-spawn stop polling early and correctly refuse the
+# non-worktree. pane.process_info distinguishes the persistent shell PID from
+# the foreground process group: keep pane.cwd for an ordinary foreground
+# command, and use the group leader's cwd only when it is a nested interactive
+# shell. If protocol 19 process inspection is unreadable, fail closed with an
+# empty path rather than reviving the transient foreground_cwd race.
 fm_backend_herdr_current_path() {  # <target>
+  local pane_out process_out path status protocol foreground
   fm_backend_herdr_target_ready "$1" || return 0
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
-    | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
+  pane_out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 0
+  foreground=$(printf '%s' "$pane_out" | jq -r '.result.pane.foreground_cwd // .result.pane.cwd // empty' 2>/dev/null)
+  process_out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true)
+  if path=$(fm_backend_herdr_process_info_path "$pane_out" "$process_out" "$FM_BACKEND_HERDR_PANE"); then
+    printf '%s' "$path"
+    return 0
+  fi
+  status=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" status --json 2>/dev/null || true)
+  protocol=$(printf '%s' "$status" | jq -r '.server.protocol // .client.protocol // empty' 2>/dev/null)
+  case "$protocol" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  if [ "$protocol" -ge "$FM_BACKEND_HERDR_MIN_PROCESS_INFO_PROTOCOL" ]; then
+    return 0
+  fi
+  printf '%s' "$foreground"
 }
 
 # fm_backend_herdr_send_text_line: send one line of TEXT then submit,
