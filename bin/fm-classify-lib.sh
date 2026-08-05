@@ -284,10 +284,9 @@ EOF
 #
 # status_open_decisions above re-reads and re-folds a status file's ENTIRE
 # lifetime on every call, so its cost grows with total log size. A per-drain
-# fleet-wide scan (scan_open_decisions, called by bin/fm-wake-drain.sh on every
-# drain including the empty-queue fast path) pays that cost for every task on
-# every wake, which grows unbounded as tasks run longer and accumulate status
-# history. status_open_decisions_incremental and scan_open_decisions_incremental
+# fleet-wide scan using that whole-file function would pay that cost for every
+# task on every wake, which grows unbounded as tasks run longer and accumulate
+# status history. status_open_decisions_incremental and scan_open_decisions_incremental
 # below are the bounded-cost siblings used for that per-drain path: each call
 # reads only the bytes appended to a status file since its own last call (a
 # persisted per-file byte cursor) and folds just those new lines into a
