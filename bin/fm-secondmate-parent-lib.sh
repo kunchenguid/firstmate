@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034 # parsed fields are output globals for sourcing callers.
 # Parse the durable parent binding written into a seeded secondmate home.
 #
 # The fm-secondmate-parent.v1 record contains exactly one schema and route.
@@ -13,7 +14,7 @@
 # marker remains the seed-completion point.
 
 fm_secondmate_parent_record_parse() {
-  local file=$1 line schema= route= parent_home= parent_host=
+  local file=$1 line schema='' route='' parent_home='' parent_host=''
   local schema_count=0 route_count=0 parent_home_count=0 parent_host_count=0
 
   FM_SECONDMATE_PARENT_ROUTE=
