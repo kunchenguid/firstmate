@@ -697,6 +697,52 @@ test_calm_batches_drain_presentation_without_dropping_actionable_context() {
   pass "calm wake drain batches rows, annotations, and open decisions without dropping actionable detail"
 }
 
+test_calm_preference_uses_effective_config_and_defaults_off() {
+  local dir state home config out
+  dir=$(make_case calm-preference)
+  state="$dir/state"
+  home="$dir/home"
+  config="$dir/effective-config"
+  out="$dir/drain.out"
+  mkdir -p "$home/config" "$config"
+  printf 'on\n' > "$home/config/calm"
+  printf 'off\n' > "$config/calm"
+
+  append_wake "$state" heartbeat heartbeat heartbeat || fail "off-preference heartbeat append failed"
+  CLAUDECODE=1 FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain with off Calm preference failed"
+  assert_not_contains "$(cat "$out")" "FIRSTMATE WAKE DIGEST" "FM_CONFIG_OVERRIDE did not win over an enabled FM_HOME preference"
+  grep "$(printf '\theartbeat\theartbeat\theartbeat')" "$out" >/dev/null \
+    || fail "an off Calm preference did not retain ordinary drain output"
+
+  rm "$config/calm"
+  append_wake "$state" heartbeat heartbeat heartbeat || fail "missing-preference heartbeat append failed"
+  CLAUDECODE=1 FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain with missing Calm preference failed"
+  assert_not_contains "$(cat "$out")" "FIRSTMATE WAKE DIGEST" "a missing effective Calm preference fell back to another config directory"
+
+  printf 'enabled\n' > "$config/calm"
+  append_wake "$state" heartbeat heartbeat heartbeat || fail "unrecognized-preference heartbeat append failed"
+  CLAUDECODE=1 FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain with unrecognized Calm preference failed"
+  assert_not_contains "$(cat "$out")" "FIRSTMATE WAKE DIGEST" "an unrecognized Calm preference enabled compact presentation"
+
+  printf 'on\n' > "$config/calm"
+  chmod 000 "$config/calm"
+  append_wake "$state" heartbeat heartbeat heartbeat || fail "unreadable-preference heartbeat append failed"
+  CLAUDECODE=1 FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain with unreadable Calm preference failed"
+  chmod 600 "$config/calm"
+  assert_not_contains "$(cat "$out")" "FIRSTMATE WAKE DIGEST" "an unreadable Calm preference enabled compact presentation"
+
+  append_wake "$state" heartbeat heartbeat heartbeat || fail "on-preference heartbeat append failed"
+  CLAUDECODE=1 FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain with enabled Calm preference failed"
+  assert_contains "$(cat "$out")" "FIRSTMATE WAKE DIGEST (1):" "an exact on preference did not enable compact presentation"
+  [ ! -s "$state/.wake-queue" ] || fail "Calm preference handling changed queue consumption"
+  pass "Calm preference honors effective config and defaults off on invalid reads"
+}
+
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
@@ -705,6 +751,7 @@ test_check_output_is_queued
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
 test_calm_batches_drain_presentation_without_dropping_actionable_context
+test_calm_preference_uses_effective_config_and_defaults_off
 test_drain_asserts_watcher_liveness
 test_structural_signal_enrichment_preserves_raw_rows
 test_enrichment_caps_and_status_file_failures

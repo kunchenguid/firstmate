@@ -10,7 +10,7 @@
 fm_calm_enabled() {  # [config-dir]
   local config=${1:-${FM_CONFIG_OVERRIDE:-${FM_HOME:-${FM_ROOT_OVERRIDE:-.}}/config}} value bytes
   [ -f "$config/calm" ] || return 1
-  bytes=$(LC_ALL=C wc -c < "$config/calm" 2>/dev/null) || return 1
+  bytes=$({ LC_ALL=C wc -c < "$config/calm"; } 2>/dev/null) || return 1
   bytes=${bytes//[[:space:]]/}
   [ "$bytes" = 3 ] || return 1
   value=$(cat "$config/calm" 2>/dev/null) || return 1
