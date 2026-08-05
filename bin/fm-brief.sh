@@ -170,6 +170,16 @@ BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
 mkdir -p "$DATA/$ID"
 
+# Every generated variant (ship, scout, secondmate charter) carries this section.
+# It governs only what the worker PUBLISHES, never how this brief addresses the
+# worker or how the worker is meant to read this brief; do not rename the
+# in-brief instructional uses of these same words below.
+PUBLISH_SECTION=$(printf '%s\n' \
+'# What you publish' \
+'Never let a pull request title or body, a commit message, a review comment, an issue, or any file committed to the project carry firstmate'\''s internal role vocabulary - captain, first mate, crewmate, crew, scout, second mate - or its nautical flavor.' \
+'Write "the repository owner" or "the owner of the pull request" instead.' \
+'This is about what you publish outside the fleet, not about how this brief addresses you or how you should read it.')
+
 shell_quote() {
   printf "'"
   printf '%s' "$1" | sed "s/'/'\\\\''/g"
@@ -201,6 +211,8 @@ else
 fi
 cat > "$BRIEF" <<EOF
 You are a persistent second mate managed by the main firstmate. Work on your own; do not wait for a human.
+
+$PUBLISH_SECTION
 
 # Charter
 $SECONDMATE_CHARTER
@@ -300,6 +312,8 @@ fi
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+
+$PUBLISH_SECTION
 
 # Task
 {TASK}
@@ -409,6 +423,8 @@ DOD=${DOD%$'\n'}
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+
+$PUBLISH_SECTION
 
 # Task
 {TASK}
