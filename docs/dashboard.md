@@ -17,7 +17,7 @@ The page also shows the heartbeat age and does not treat an old snapshot as heal
 
 The service owns only `state/.dashboard/`.
 It atomically writes `snapshot.json`, appends dashboard events to `events.jsonl`, and records status-log cursors in `status-cursors.json`.
-It observes append-only `state/<id>.status` files and the existing read-only snapshot readers.
+It observes append-only main-home status files and status files for active validated registered-secondmate children, and uses the existing read-only snapshot readers.
 It never consumes or drains `state/.wake-queue`.
 The event stream uses reconnecting Server-Sent Events with durable numeric cursors, so a browser reconnect or service restart can replay events after the last received id.
 
