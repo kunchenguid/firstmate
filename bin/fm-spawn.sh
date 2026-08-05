@@ -2241,6 +2241,26 @@ if [ "$KIND" = secondmate ]; then
   # injected carrier and this on/off snapshot are guaranteed to agree.
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE $LAUNCH"
 fi
+# Bind this task to its own chrome-devtools-axi browser session, and put the
+# fail-closed guard shim ahead of the real tool on the agent's PATH.
+# chrome-devtools-axi resolves an unset CHROME_DEVTOOLS_AXI_SESSION to the shared
+# "default" instance, so an agent launched without this binding silently joins
+# every other concurrent agent's tabs, cookies, and signed-in accounts - which is
+# how one task once acted on another task's real production account. The shim
+# (bin/shims/chrome-devtools-axi -> bin/fm-browser-session-guard.sh) refuses such
+# an invocation instead of running it shared.
+#
+# This rides the LAUNCH command string ON PURPOSE, exactly like CLAUDE_CONFIG_DIR
+# and the secondmate FM_HOME above, rather than living only in a separate
+# pre-launch pane line. A binding placed beside the launch command is dropped by
+# anything that copies only the launch command - which is exactly how a
+# hand-built recovery relaunch, assembled from launch_template(), once lost this
+# isolation and silently reverted to the shared session. Inside the command, it
+# travels with every copy. The pane export below is the same binding for the
+# pane's own shell, so a later command typed into that pane is bound too.
+# docs/browser-session-isolation.md owns the complete contract.
+BROWSER_SESSION_ENV="CHROME_DEVTOOLS_AXI_SESSION=$(shell_quote "$ID") PATH=$(shell_quote "$FM_ROOT/bin/shims"):\$PATH"
+LAUNCH="$BROWSER_SESSION_ENV $LAUNCH"
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
@@ -2261,13 +2281,15 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
     fi
   fi
 fi
-# Bind this task to its own chrome-devtools-axi browser session so concurrent
-# crewmates never share one Chrome instance (and thus each other's tabs/auth).
+# Bind the pane's own shell to the same browser session the launch command now
+# carries, so a command typed into that pane later is bound too. This supersedes
+# the earlier session-only export: it also puts the guard shim on the pane's
+# PATH, and the launch command no longer depends on this line surviving.
 # Shipped through the same pane-export channel as GOTMPDIR and TRACEPARENT, and
 # covered by the same settle sleep below. Deliberately placed after the trace
 # block rather than beside GOTMPDIR: tests/fm-trace-context-lib.test.sh requires
 # the TRACEPARENT export to stay within five lines of the GOTMPDIR site.
-spawn_send_text_line "$T" "export CHROME_DEVTOOLS_AXI_SESSION=$ID"
+spawn_send_text_line "$T" "export $BROWSER_SESSION_ENV"
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
