@@ -180,6 +180,9 @@
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
+# A verified adapter launch appends versioned delivered-profile metadata only
+# after launch submission; a raw command never claims verified profile delivery.
+# AGENTS.md section 2 owns the exact fields and local-versus-remote meaning.
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
 # success line and state/<id>.meta omit them.
@@ -1490,9 +1493,11 @@ effort_flag_for_harness() {
     opencode|kimi)
       echo "warning: harness '$harness' cannot thread requested effort '$effort'; accepted effort values: no supported values; omitting effort flag" >&2
       ;;
-    # Cursor encodes effort in model ids such as cursor-grok-4.5-high, so it
-    # receives no separate effort flag.
+    # Cursor exposes no separate effort flag. Its model ids may encode a
+    # reasoning class (for example cursor-grok-4.5-high), but fm-spawn does not
+    # infer or validate that mapping from a separate effort request.
     cursor)
+      echo "warning: harness '$harness' cannot thread requested effort '$effort'; accepted effort values: no separate supported values; select a model-qualified reasoning class; omitting effort flag" >&2
       ;;
     *)
       echo "warning: harness '$harness' cannot thread requested effort '$effort'; accepted effort values through fm-spawn: no supported values; raw launch commands must carry their own effort flags" >&2
