@@ -163,6 +163,13 @@ done
   printf 'schema=fm-remote-home-provision.v1\n'
   printf 'id_b64=%s\n' "$(printf '%s' "$ID" | encode)"
   printf 'charter_b64=%s\n' "$(encode < "$TMP/charter.remote")"
+  # The SSH alias reaching this host from the parent's own config, carried
+  # only so the remote-provisioned home can record durably that its parent
+  # lives on another machine (bin/fm-teardown.sh's cleanup gate). It is
+  # diagnostic identity, never a route the remote host could use to reach
+  # back; the parent's real filesystem path is never sent, since it names
+  # nothing on the remote filesystem.
+  printf 'parent_host_b64=%s\n' "$(printf '%s' "$HOST" | encode)"
   printf 'project_count=%s\n' "${#PROJECT_NAMES[@]}"
   cat "$TMP/project.records"
 } > "$TMP/manifest"
