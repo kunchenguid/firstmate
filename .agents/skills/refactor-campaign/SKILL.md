@@ -42,8 +42,9 @@ Every slice states its one concern, its carve source, its base, its dependencies
 Size the slices to that reviewer's approval capacity rather than to conceptual tidiness, because a slice no reviewer can approve is a slice that does not land.
 The map also states a dependency graph and a single linear ordering for the stack, so every branch has exactly one parent and the eventual landing order is already decided.
 
-Choices the captain owns surface in the plan as explicit decision items, each with a stated default the plan proceeds on until overridden.
-That keeps planning unblocked while the captain still owns every real choice, and it follows the durable unresolved-decision contract in `decision-hold-lifecycle`.
+Choices the captain owns surface in the plan as explicit decision items, and every one of them becomes a registered durable hold under `decision-hold-lifecycle`, which owns their identity, completion, and resolution contract.
+Each item also carries a stated default, and that default governs planning progress only: it lets the planning investigation keep moving instead of stalling on an unanswered choice.
+A stated default never governs landing, merging, or any other delivery decision, and each of those waits for the captain's recorded answer through the hold's normal resolution path.
 
 ## 2. Author fresh at final vocabulary
 
@@ -53,7 +54,7 @@ Carving means copy, rename, and apply the listed cuts, not replaying the origina
 
 The resubmission is the cheapest simplification moment the code will ever have.
 Every cut applied while authoring costs nothing; the same cut applied later costs a migration.
-Authoring fresh also removes compatibility shims from existing: a shim exists only because a file with the same name was rewritten in place, and new files from birth never need one.
+Authoring fresh also removes compatibility shims from existence: a shim exists only because a file with the same name was rewritten in place, and new files from birth never need one.
 Old work is closed rather than merged, and closing is a captain-sequenced action like any other.
 
 ## 3. Validate whole, then drip
@@ -91,4 +92,4 @@ Rulings are keyed and durable so they can be cited by later slices, and a ruling
 - Concentrate expected conflicts deliberately: where many slices must touch one shared build or index file, have each slice append one self-contained fenced block so conflicts become append-order trivia.
 - Under worker, allocator, or disk pressure, repurpose parked workers that already hold warm build trees instead of allocating fresh ones, and reclaim finished lanes' build artifacts between waves.
 - Verify each allocated isolated copy against the recorded runtime state after every spawn rather than trusting the allocation.
-- A long external wait during a campaign is a declared pause, not a silent idle, so supervision leaves the waiting worker alone instead of treating it as stuck.
+- A long external wait during a campaign is declared as a pause under the owning supervision contract rather than left as a silent idle.
