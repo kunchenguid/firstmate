@@ -172,10 +172,11 @@ build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry p
   # moment it dispatches, and each conformance assertion below reports a
   # behavior difference the comparison never actually reached. Fail here, on
   # the real cause, the next time an adapter grows a dependency.
-  for f in $(sed -n 's/^\. "\$FM_BACKEND_LIB_DIR\/\([^"]*\)".*/\1/p' "$bin"/backends/*.sh | sort -u); do
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
     [ -f "$bin/$f" ] \
       || fail "build_old_bin '$name': bin/backends sources '$f', which the assembled old bin/ lacks; add it to OLD_BIN_UNCHANGED_SIBLINGS"
-  done
+  done < <(sed -n "s/^\. \"\\\$FM_BACKEND_LIB_DIR\/\([^\"]*\)\".*/\1/p" "$bin"/backends/*.sh | sort -u)
   printf '%s\n' "$root"
 }
 
