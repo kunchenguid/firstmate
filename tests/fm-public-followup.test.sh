@@ -776,7 +776,7 @@ test_secondmate_teardown_durable_record_missing_parent_registration_still_refuse
   pass "a durable local parent record does not bypass a genuinely missing parent-side registration"
 }
 
-test_secondmate_teardown_durable_record_with_no_commitment_succeeds() {
+test_secondmate_teardown_durable_record_with_unknown_field_succeeds() {
   local parent parent_alias child parent_resolved rc out
   parent=$(make_home teardown-durable-clean-parent relay-off)
   child="$TMP_ROOT/teardown-durable-clean-child"
@@ -788,6 +788,7 @@ test_secondmate_teardown_durable_record_with_no_commitment_succeeds() {
   make_fake_curl "$child" >/dev/null
   fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
+  printf 'some_future_field=value\n' >> "$child/.fm-secondmate-parent"
   parent_alias="$TMP_ROOT/teardown-durable-clean-parent-alias"
   ln -s "$parent" "$parent_alias"
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
@@ -806,7 +807,7 @@ test_secondmate_teardown_durable_record_with_no_commitment_succeeds() {
   [ "$rc" -eq 0 ] || fail "a resolved parent with no owed commitment must allow cleanup (rc=$rc): $out"
   assert_not_contains "$out" "cannot resolve the primary home" \
     "a real durable-record-backed parent must resolve cleanly"
-  pass "a resolved parent through the durable local record allows cleanup with nothing owed"
+  pass "unknown durable parent fields remain forward-compatible"
 }
 
 test_secondmate_teardown_rejects_conflicting_live_and_durable_parent_bindings() {
@@ -844,7 +845,7 @@ test_secondmate_teardown_rejects_conflicting_live_and_durable_parent_bindings() 
 
 test_secondmate_teardown_rejects_unsafe_durable_parent_records() {
   local case_name parent child parent_record
-  for case_name in symlink invalid-route duplicate-route; do
+  for case_name in symlink invalid-route duplicate-route remote-parent-home local-parent-host; do
     parent=$(make_home "teardown-durable-$case_name-parent" relay-off)
     child="$TMP_ROOT/teardown-durable-$case_name-child"
     FM_SECONDMATE_CHARTER='Unsafe durable-record regression charter.' \
@@ -867,6 +868,14 @@ test_secondmate_teardown_rejects_unsafe_durable_parent_records() {
         ;;
       duplicate-route)
         printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\nroute=remote\n' \
+          "$parent" > "$parent_record"
+        ;;
+      remote-parent-home)
+        printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_home=%s\n' \
+          "$parent" > "$parent_record"
+        ;;
+      local-parent-host)
+        printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\nparent_host=remote-host\n' \
           "$parent" > "$parent_record"
         ;;
     esac
@@ -1275,7 +1284,7 @@ test_secondmate_teardown_requires_parent_binding
 test_local_secondmate_seed_publishes_parent_before_identity
 test_secondmate_teardown_resolves_parent_from_durable_record_when_env_lost
 test_secondmate_teardown_durable_record_missing_parent_registration_still_refuses
-test_secondmate_teardown_durable_record_with_no_commitment_succeeds
+test_secondmate_teardown_durable_record_with_unknown_field_succeeds
 test_secondmate_teardown_rejects_conflicting_live_and_durable_parent_bindings
 test_secondmate_teardown_rejects_unsafe_durable_parent_records
 test_relay_disabled_unmarked_teardown_skips_public_path

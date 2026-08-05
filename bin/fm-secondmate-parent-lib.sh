@@ -2,7 +2,7 @@
 
 fm_secondmate_parent_record_parse() {
   local file=$1 line schema= route= parent_home= parent_host=
-  local schema_count=0 route_count=0 parent_home_count=0
+  local schema_count=0 route_count=0 parent_home_count=0 parent_host_count=0
 
   FM_SECONDMATE_PARENT_ROUTE=
   FM_SECONDMATE_PARENT_HOME=
@@ -24,6 +24,7 @@ fm_secondmate_parent_record_parse() {
         parent_home=${line#parent_home=}
         ;;
       parent_host=*)
+        parent_host_count=$((parent_host_count + 1))
         parent_host=${line#parent_host=}
         ;;
     esac
@@ -35,10 +36,13 @@ fm_secondmate_parent_record_parse() {
   case "$route" in
     local)
       [ "$parent_home_count" -eq 1 ] || return 1
+      [ "$parent_host_count" -eq 0 ] || return 1
       [ -n "$parent_home" ] || return 1
       FM_SECONDMATE_PARENT_HOME=$parent_home
       ;;
-    remote) ;;
+    remote)
+      [ "$parent_home_count" -eq 0 ] || return 1
+      ;;
     *) return 1 ;;
   esac
 
