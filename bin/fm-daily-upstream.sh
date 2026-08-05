@@ -18,6 +18,7 @@
 #   data/daily-upstream/channel-last-seen  validated public YouTube video id
 #   data/daily-upstream/retention.index     epoch<TAB>owned-relative-path
 #   state/daily-upstream/report-offers.index id<TAB>owned-report-relative-path
+#   state/daily-upstream/report-offer.notified epoch<TAB>last-offered-report-id
 # Exact mechanics and flags are documented by --help below.
 set -eu
 
@@ -31,6 +32,7 @@ REPORTS="$DATA_ROOT/reports"
 RETENTION_INDEX="$DATA_ROOT/retention.index"
 CHANNEL_SEEN="$DATA_ROOT/channel-last-seen"
 OFFERS="$STATE_ROOT/report-offers.index"
+OFFER_STAMP="$STATE_ROOT/report-offer.notified"
 CHECK_FILE="$FM_HOME/state/daily-upstream-report.check.sh"
 CHECK_TRUST="$FM_HOME/state/daily-upstream-report.check-trust"
 RUN_LOCK="$STATE_ROOT/run.lock"
@@ -67,6 +69,11 @@ Commands:
                   fast-forwards, then publish a typed private receipt.
   report          Run the 08:00 deterministic morning report, best-effort local
                   notification, and authenticated Firstmate check registration.
+                  A scheduled report extends its lock wait only while a live
+                  collection owns the lock, and otherwise records an explicit
+                  deferral instead of failing without an explanation.
+                  A pending report is re-offered to the watcher on a bounded
+                  cadence rather than on every sweep.
   show-report ID  Print one exact pending private report for synthesis.
   acknowledge ID  Retire one exact report offer after successful synthesis.
   install         Idempotently write, but never load, two per-user LaunchAgent
@@ -280,6 +287,18 @@ acquire_lock() {
   LOCK_OWNED=1
   RUN_TMP=$(mktemp -d "$STATE_ROOT/.run.XXXXXX") || return 1
   chmod 700 "$RUN_TMP"
+}
+
+collection_lock_live() {
+  local action pid
+  [ -d "$RUN_LOCK" ] && [ ! -L "$RUN_LOCK" ] || return 1
+  private_file_valid "$RUN_LOCK/action" 600 || return 1
+  private_file_valid "$RUN_LOCK/pid" 600 || return 1
+  action=$(sed -n '1p' "$RUN_LOCK/action")
+  [ "$action" = collect ] || return 1
+  pid=$(sed -n '1p' "$RUN_LOCK/pid")
+  safe_number "$pid" || return 1
+  kill -0 "$pid" 2>/dev/null
 }
 
 bounded_capture() {
@@ -693,7 +712,7 @@ collect_one_project() {
     if [ "$apply" = yes ]; then
       sync_out="$RUN_TMP/project-sync.$name"
       set +e
-      bounded_capture "$sync_out" 180 env FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_FLEET_PRUNE=0 "$SCRIPT_DIR/fm-fleet-sync.sh" --expected-target "$candidate" "$name"
+      bounded_capture "$sync_out" 180 env FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_PROJECTS_OVERRIDE="$FM_HOME/projects" FM_DATA_OVERRIDE="$FM_HOME/data" FM_FLEET_PRUNE=0 "$SCRIPT_DIR/fm-fleet-sync.sh" --expected-target "$candidate" "$name"
       sync_rc=$?
       set -e
       if [ "$sync_rc" -eq 0 ] && grep -Eq "^$name: (synced|already current)" "$sync_out" 2>/dev/null; then
@@ -748,7 +767,7 @@ collect_projects() {
       break
     fi
     printf '%s\n' "$name" >> "$registered_names"
-    posture=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-project-mode.sh" --upstream-posture "$name" 2>/dev/null || echo report-only:ambiguous-posture)
+    posture=$(env FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_DATA_OVERRIDE="$FM_HOME/data" "$SCRIPT_DIR/fm-project-mode.sh" --upstream-posture "$name" 2>/dev/null || echo report-only:ambiguous-posture)
     collect_one_project "$name" "$posture" "$APPLY_UPDATES"
   done < "$registry"
 
@@ -843,7 +862,7 @@ channel_feed_fetch() {
 }
 
 collect_channel() {
-  local feed entries last_seen='' newest='' status=unknown found=0 count=0 id published title safe_title next_seen=''
+  local feed entries pending entry last_seen='' newest='' status=unknown found=0 count=0 id published title safe_title next_seen=''
   receipt_section channel
   feed=$(channel_feed_fetch || true)
   if [ -z "$feed" ]; then
@@ -894,16 +913,23 @@ collect_channel() {
   elif [ "$last_seen" = "$newest" ]; then
     status=current
   else
+    pending="$RUN_TMP/channel-pending"
+    : > "$pending"
+    chmod 600 "$pending"
     while IFS=$(printf '\t') read -r id published title; do
       [ -n "$id" ] || continue
       if [ "$id" = "$last_seen" ]; then found=1; break; fi
       count=$((count + 1))
       safe_title=$(printf '%s' "$title" | xml_unescape_titles | LC_ALL=C tr '\t\r\n' '   ' | cut -c1-200)
-      receipt_line channel-entry "$id|$published|$safe_title|https://www.youtube.com/watch?v=$id"
+      printf '%s\n' "$id|$published|$safe_title|https://www.youtube.com/watch?v=$id" >> "$pending"
     done < "$entries"
     if [ "$found" -eq 1 ]; then
       status=new
       next_seen=$newest
+      while IFS= read -r entry; do
+        [ -n "$entry" ] || continue
+        receipt_line channel-entry "$entry"
+      done < "$pending"
     else
       status=history-gap
       count=0
@@ -915,7 +941,7 @@ collect_channel() {
     initialized) receipt_line summary "Kun Chen channel: initialized at the newest public upload without replaying history." ;;
     current) receipt_line summary "Kun Chen channel: no new public upload metadata." ;;
     new) receipt_line summary "Kun Chen channel: $count new public uploads are ready for Firstmate relevance decisions; no media was downloaded." ;;
-    history-gap) receipt_line summary "Kun Chen channel: the prior identity fell outside the bounded feed, so state was preserved and no upload was falsely deduplicated." ;;
+    history-gap) receipt_line summary "Kun Chen channel: the prior identity fell outside the bounded feed, so state was preserved, no upload was falsely deduplicated, and no metadata was surfaced; monitoring stays gapped until the captain resolves the last-seen identity." ;;
   esac
   CHANNEL_NEXT_SEEN=$next_seen
 }
@@ -983,11 +1009,25 @@ run_collection() {
   echo "collection=published"
 }
 
+receipt_field() {
+  local receipt=$1 key=$2
+  awk -v k="$key=" 'index($0,k)==1 { print substr($0,length(k)+1); exit }' "$receipt"
+}
+
 report_from_receipt() {
-  local receipt=$1 output=$2 today=$3
+  local receipt=$1 output=$2 today=$3 receipt_date=${4:-} receipt_mode=${5:-}
+  case "$receipt_date" in ????-??-??) ;; *) receipt_date=unknown ;; esac
+  case "$receipt_mode" in collect|assess) ;; *) receipt_mode=unknown ;; esac
   {
     printf '# Firstmate morning upstream report\n\n'
-    printf 'Report date: %s.\n\n' "$today"
+    printf 'Report date: %s.\n' "$today"
+    if [ -z "$receipt" ]; then
+      printf 'Evidence source: none, because no safe collection receipt was available.\n\n'
+    elif [ "$receipt_date" = "$today" ] && [ "$receipt_mode" = collect ]; then
+      printf 'Evidence source: the %s collection receipt.\n\n' "$today"
+    else
+      printf 'Evidence source: an earlier %s receipt dated %s, so no collection is claimed for %s.\n\n' "$receipt_mode" "$receipt_date" "$today"
+    fi
     printf '## Deterministic findings\n\n'
     if [ -n "$receipt" ]; then
       awk 'index($0,"summary=")==1 { print "- " substr($0,9) }' "$receipt"
@@ -1038,27 +1078,56 @@ set -eu
 home=${FM_HOME:?}
 dir="$home/state/daily-upstream"
 offers="$dir/report-offers.index"
+stamp="$dir/report-offer.notified"
 [ -d "$dir" ] && [ ! -L "$dir" ] || exit 0
-[ -f "$offers" ] && [ ! -L "$offers" ] || exit 0
-if [ "$(uname 2>/dev/null || echo unknown)" = Darwin ]; then
-  links=$(stat -f %l "$offers" 2>/dev/null || echo 0)
-  mode=$(stat -f %Lp "$offers" 2>/dev/null || echo 0)
-  owner=$(stat -f %u "$offers" 2>/dev/null || echo -1)
-else
-  links=$(stat -c %h "$offers" 2>/dev/null || echo 0)
-  mode=$(stat -c %a "$offers" 2>/dev/null || echo 0)
-  owner=$(stat -c %u "$offers" 2>/dev/null || echo -1)
-fi
-[ "$links" = 1 ] && [ "$mode" = 600 ] && [ "$owner" = "$(id -u)" ] || exit 0
+
+private_file() {
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  if [ "$(uname 2>/dev/null || echo unknown)" = Darwin ]; then
+    links=$(stat -f %l "$1" 2>/dev/null || echo 0)
+    mode=$(stat -f %Lp "$1" 2>/dev/null || echo 0)
+    owner=$(stat -f %u "$1" 2>/dev/null || echo -1)
+  else
+    links=$(stat -c %h "$1" 2>/dev/null || echo 0)
+    mode=$(stat -c %a "$1" 2>/dev/null || echo 0)
+    owner=$(stat -c %u "$1" 2>/dev/null || echo -1)
+  fi
+  [ "$links" = 1 ] && [ "$mode" = 600 ] && [ "$owner" = "$(id -u)" ]
+}
+
+private_file "$offers" || exit 0
 line=$(sed -n '1p' "$offers")
 id=${line%%	*}
 case "$id" in ''|*[!A-Za-z0-9._-]*) exit 0 ;; esac
 [ "${#id}" -le 96 ] || exit 0
+
+# A pending report is re-offered on a bounded cadence so an unacknowledged
+# report cannot wake the primary on every watcher sweep.
+interval=${FM_DAILY_REPORT_REOFFER_SECS:-1800}
+case "$interval" in ''|*[!0-9]*) interval=1800 ;; esac
+now=$(date +%s)
+last_epoch=0
+last_id=
+if private_file "$stamp"; then
+  line=$(sed -n '1p' "$stamp")
+  last_epoch=${line%%	*}
+  last_id=${line#*	}
+  case "$last_epoch" in ''|*[!0-9]*) last_epoch=0; last_id= ;; esac
+fi
+if [ "$last_id" = "$id" ] && [ "$now" -ge "$last_epoch" ] && [ "$((now - last_epoch))" -lt "$interval" ]; then
+  exit 0
+fi
+umask 077
+if tmp=$(mktemp "$dir/.report-offer.notified.XXXXXX"); then
+  if ! printf '%s\t%s\n' "$now" "$id" > "$tmp" || ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$stamp"; then
+    rm -f -- "$tmp"
+  fi
+fi
 printf 'daily-upstream-report %s\n' "$id"
 SH
   chmod 700 "$tmp"
   atomic_publish "$tmp" "$CHECK_FILE" 700 || return 1
-  FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" "$SCRIPT_DIR/fm-check-register.sh" daily-upstream-report >/dev/null 2>&1
+  env FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$FM_HOME/state" "$SCRIPT_DIR/fm-check-register.sh" daily-upstream-report >/dev/null 2>&1
 }
 
 notify_report() {
@@ -1074,20 +1143,37 @@ notify_report() {
 
 run_report() {
   local today receipt='' report_tmp receipt_hash report_name report_dest report_hash report_id relative wait=0 collection_wait=0 elapsed=0
+  local grace max_wait lock_rc=0 receipt_date='' receipt_mode=''
   require_timezone
   init_private
   today=$(local_date)
   if [ "${FM_DAILY_SCHEDULED:-0}" = 1 ]; then
-    sleep "${FM_DAILY_REPORT_GRACE_SECS:-5}"
+    grace=${FM_DAILY_REPORT_GRACE_SECS:-5}
+    safe_number "$grace" || grace=5
+    sleep "$grace"
     wait=${FM_DAILY_LOCK_WAIT_SECS:-900}
+    safe_number "$wait" || wait=900
+    max_wait=${FM_DAILY_REPORT_MAX_LOCK_WAIT_SECS:-3600}
+    safe_number "$max_wait" || max_wait=3600
     collection_wait=${FM_DAILY_REPORT_COLLECTION_WAIT_SECS:-120}
     safe_number "$collection_wait" || collection_wait=120
     while [ "$elapsed" -lt "$collection_wait" ] && [ ! -e "$RECEIPTS/$today.receipt" ] && [ ! -L "$RECEIPTS/$today.receipt" ]; do
       sleep 1
       elapsed=$((elapsed + 1))
     done
+    if collection_lock_live && [ "$max_wait" -gt "$wait" ]; then
+      wait=$max_wait
+    fi
   fi
+  set +e
   acquire_lock report "$wait"
+  lock_rc=$?
+  set -e
+  if [ "$lock_rc" -eq 75 ]; then
+    echo "report=deferred; reason=run-lock-busy; retry=next-scheduled-report"
+    return 75
+  fi
+  [ "$lock_rc" -eq 0 ] || return "$lock_rc"
   if [ -e "$RECEIPTS/$today.receipt" ] || [ -L "$RECEIPTS/$today.receipt" ]; then
     receipt_valid "$RECEIPTS/$today.receipt" || { echo "refused: receipt path is unsafe" >&2; return 1; }
     receipt="$RECEIPTS/$today.receipt"
@@ -1097,12 +1183,14 @@ run_report() {
   fi
   if [ -n "$receipt" ]; then
     receipt_hash=$(shasum -a 256 "$receipt" | awk '{print substr($1,1,12)}')
+    receipt_date=$(receipt_field "$receipt" local-date)
+    receipt_mode=$(receipt_field "$receipt" mode)
   else
     receipt_hash=none
   fi
   report_name="$today-$receipt_hash.md"
   report_tmp="$RUN_TMP/$report_name"
-  report_from_receipt "$receipt" "$report_tmp" "$today"
+  report_from_receipt "$receipt" "$report_tmp" "$today" "$receipt_date" "$receipt_mode"
   report_hash=$(shasum -a 256 "$report_tmp" | awk '{print substr($1,1,16)}')
   report_id="${today//-/}-$report_hash"
   relative="reports/$report_name"
@@ -1154,6 +1242,9 @@ acknowledge_report() {
   [ "$remaining" -lt "$(awk 'NF { n++ } END { print n+0 }' "$old")" ] || { echo "refused: report id is not pending" >&2; return 1; }
   if [ "$remaining" -eq 0 ]; then
     rm -f -- "$OFFERS"
+    if safe_existing_destination "$OFFER_STAMP" 600; then
+      rm -f -- "$OFFER_STAMP"
+    fi
     if safe_existing_destination "$CHECK_FILE" 700 && safe_existing_destination "$CHECK_TRUST" 600; then
       rm -f -- "$CHECK_FILE" "$CHECK_TRUST"
     fi

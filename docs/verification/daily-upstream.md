@@ -5,7 +5,7 @@ It records repeatable deterministic evidence rather than a deployment approval o
 
 ## Environment
 
-Verification was run on 2026-08-02 with this local toolchain:
+Verification was first run on 2026-08-02 and re-run on 2026-08-05 after review fixes with this local toolchain:
 
 ```text
 ProductName:            macOS
@@ -17,6 +17,8 @@ gh-axi 0.1.28
 ShellCheck - shell script analysis tool
 version: 0.11.0
 ```
+
+The 2026-08-05 re-run matched this toolchain except for `gh-axi`, which had advanced to 0.1.29, and the deterministic suite uses a local `gh-axi` fixture rather than the installed client.
 
 The source commands were:
 
@@ -40,13 +42,18 @@ tests/fm-daily-upstream.test.sh
 ```text
 ok - green update matrix applies only pinned eligible copies and redacts canaries
 ok - channel identities dedupe and report survives an absent notifier/session until exact acknowledgement
+ok - a channel history gap preserves state without resurfacing uncounted uploads
 ok - duplicate collection is excluded by one home-local lock
+ok - a scheduled report contending with a live collection defers explicitly
+ok - a report rendered from an earlier receipt names that receipt's date and mode
 ok - LaunchAgent definitions are 04:00/08:00 exact, idempotent, static, and transactional on refusal
 # all fm-daily-upstream tests passed
 ```
 
-The matrix covers green, red, and missing checks; clean, dirty, diverged, off-default, local-only, production-bearing, ambiguous-origin, absent, and unregistered project outcomes; private output canaries; report preservation; authenticated report offers; channel initialization, new upload, and dedupe; duplicate locking; notification absence; exact calendar hours; no `RunAtLoad`; install idempotence; unsafe-file refusal; transactional uninstall refusal; and preservation of unrelated LaunchAgent files.
+The matrix covers green, red, and missing checks; clean, dirty, diverged, off-default, local-only, production-bearing, ambiguous-origin, absent, and unregistered project outcomes; private output canaries; report preservation; authenticated report offers; channel initialization, new upload, dedupe, and history-gap preservation; duplicate locking; scheduled report lock contention; earlier-receipt attribution; bounded report re-offer cadence; notification absence; exact calendar hours; no `RunAtLoad`; install idempotence; unsafe-file refusal; transactional uninstall refusal; and preservation of unrelated LaunchAgent files.
 The 04:00 and 08:00 definitions use local `StartCalendarInterval` triggers, while the absence of `RunAtLoad` and the report grace plus bounded lock wait cover sleep-delayed launch without an unscheduled login update or a partial receipt read.
+The contention test fabricates a live collection lock and requires the scheduled report to return the explicit `report=deferred; reason=run-lock-busy` outcome rather than ending silently under `set -e`.
+The re-offer test runs the exact generated check three times and requires the pending report to be offered, then suppressed within the cadence, then offered again once the interval has elapsed.
 
 The authoritative self-update expected-SHA race test was run with:
 

@@ -238,18 +238,74 @@ test_channel_dedupe_and_report_preservation() {
 
   out=$(PATH="$FAKEBIN:$PATH" FAKE_GH_DATA="$GH_DATA" FM_DAILY_TEST_MODE=1 FM_DAILY_TEST_TIMEZONE=America/Sao_Paulo FM_DAILY_TEST_DATE=2026-08-05 FM_DAILY_TEST_EPOCH=400000 FM_DAILY_NOTIFICATION_EXEC=/usr/bin/false FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$DAILY" report 2>&1)
   assert_contains "$out" "local-notification=unavailable; report-preserved=yes" "notification absence did not preserve report"
+  assert_grep "Evidence source: the 2026-08-05 collection receipt." "$root/data/daily-upstream/latest-report.md" "report did not attribute its own collection receipt"
   offers="$root/state/daily-upstream/report-offers.index"
   private_mode=$(path_mode_test "$offers")
   [ "$private_mode" = 600 ] || fail "report offers mode is not 600"
   id=$(cut -f1 "$offers")
   assert_contains "$(FM_HOME="$root" "$root/state/daily-upstream-report.check.sh")" "daily-upstream-report $id" "authenticated check did not offer report"
+  [ -z "$(FM_HOME="$root" "$root/state/daily-upstream-report.check.sh")" ] || fail "pending report re-offered on the immediately following sweep"
+  [ "$(path_mode_test "$root/state/daily-upstream/report-offer.notified")" = 600 ] || fail "re-offer stamp mode is not 600"
+  assert_contains "$(FM_HOME="$root" FM_DAILY_REPORT_REOFFER_SECS=0 "$root/state/daily-upstream-report.check.sh")" "daily-upstream-report $id" "elapsed re-offer interval did not surface the pending report"
   before_lines=$(wc -l < "$offers" | tr -d ' ')
   PATH="$FAKEBIN:$PATH" FM_DAILY_TEST_MODE=1 FM_DAILY_TEST_TIMEZONE=America/Sao_Paulo FM_DAILY_TEST_DATE=2026-08-05 FM_DAILY_TEST_EPOCH=400000 FM_DAILY_NOTIFICATION_EXEC=/usr/bin/false FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$DAILY" report >/dev/null
   [ "$(wc -l < "$offers" | tr -d ' ')" = "$before_lines" ] || fail "idempotent report duplicated its offer"
   FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$DAILY" show-report "$id" | grep -F "Firstmate morning upstream report" >/dev/null || fail "pending report could not be read"
   FM_DAILY_TEST_MODE=1 FM_DAILY_TEST_TIMEZONE=America/Sao_Paulo FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$DAILY" acknowledge "$id" >/dev/null
   assert_absent "$root/state/daily-upstream-report.check.sh" "acknowledged final offer left executable check"
+  assert_absent "$root/state/daily-upstream/report-offer.notified" "acknowledged final offer left a re-offer stamp"
   pass "channel identities dedupe and report survives an absent notifier/session until exact acknowledgement"
+}
+
+test_channel_history_gap_preserves_state_without_resurfacing() {
+  local root="$TMP_ROOT/update-world/home" feed="$TMP_ROOT/update-world/feed.xml" receipt
+  # The prior identity falls outside the bounded feed, so nothing is deduplicated
+  # and nothing is claimed or rendered as a new upload either.
+  write_feed "$feed" videoGAPTWO videoGAPTHREE
+  run_daily "$root" "$root" 2026-08-08 650000 "$feed" collect >/dev/null 2>&1
+  receipt="$root/data/daily-upstream/receipts/2026-08-08.receipt"
+  assert_grep "status=history-gap" "$receipt" "history gap was not detected"
+  assert_grep "new-upload-count=0" "$receipt" "history gap claimed new uploads"
+  assert_no_grep "channel-entry=" "$receipt" "history gap emitted upload entries it did not count"
+  [ "$(cat "$root/data/daily-upstream/channel-last-seen")" = videoNEW456 ] || fail "history gap did not preserve the prior identity"
+  write_feed "$feed" videoNEW456 videoOLD123
+  pass "a channel history gap preserves state without resurfacing uncounted uploads"
+}
+
+test_scheduled_report_defers_instead_of_vanishing() {
+  local root="$TMP_ROOT/update-world/home" lock out rc
+  lock="$root/state/daily-upstream/run.lock"
+  mkdir "$lock"
+  printf '%s\n' "$$" > "$lock/pid"
+  printf '%s\n' collect > "$lock/action"
+  chmod 700 "$lock"; chmod 600 "$lock/pid" "$lock/action"
+  set +e
+  out=$(PATH="$FAKEBIN:$PATH" FM_DAILY_TEST_MODE=1 FM_DAILY_TEST_TIMEZONE=America/Sao_Paulo \
+    FM_DAILY_TEST_DATE=2026-08-07 FM_DAILY_TEST_EPOCH=600000 FM_DAILY_SCHEDULED=1 \
+    FM_DAILY_REPORT_GRACE_SECS=0 FM_DAILY_REPORT_COLLECTION_WAIT_SECS=0 \
+    FM_DAILY_LOCK_WAIT_SECS=0 FM_DAILY_REPORT_MAX_LOCK_WAIT_SECS=1 \
+    FM_DAILY_NOTIFICATION_EXEC=/usr/bin/false FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$DAILY" report 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 75 ] || fail "scheduled report contending with a live collection returned $rc instead of 75"
+  assert_contains "$out" "report=deferred; reason=run-lock-busy" "lock contention did not record an explicit deferral"
+  rm -f "$lock/pid" "$lock/action"; rmdir "$lock"
+  pass "a scheduled report contending with a live collection defers explicitly"
+}
+
+test_report_attributes_an_earlier_receipt() {
+  local root="$TMP_ROOT/update-world/home" feed="$TMP_ROOT/update-world/feed.xml" out report
+  # A report-only assessment publishes the latest receipt, and the next morning
+  # report must not present its conclusions as that morning's collection.
+  run_daily "$root" "$root" 2026-08-09 700000 "$feed" assess >/dev/null 2>&1
+  out=$(PATH="$FAKEBIN:$PATH" FM_DAILY_TEST_MODE=1 FM_DAILY_TEST_TIMEZONE=America/Sao_Paulo \
+    FM_DAILY_TEST_DATE=2026-08-10 FM_DAILY_TEST_EPOCH=800000 FM_DAILY_NOTIFICATION_EXEC=/usr/bin/false \
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$DAILY" report 2>&1)
+  assert_contains "$out" "report=preserved" "fallback report was not preserved"
+  report="$root/data/daily-upstream/latest-report.md"
+  assert_grep "Report date: 2026-08-10." "$report" "fallback report lost its own date"
+  assert_grep "Evidence source: an earlier assess receipt dated 2026-08-09, so no collection is claimed for 2026-08-10." "$report" "fallback report presented an earlier assessment as today's collection"
+  pass "a report rendered from an earlier receipt names that receipt's date and mode"
 }
 
 path_mode_test() {
@@ -321,7 +377,10 @@ test_launchagent_install_verify_refusal_and_rollback() {
 
 test_collection_matrix_and_redaction
 test_channel_dedupe_and_report_preservation
+test_channel_history_gap_preserves_state_without_resurfacing
 test_duplicate_run_lock
+test_scheduled_report_defers_instead_of_vanishing
+test_report_attributes_an_earlier_receipt
 test_launchagent_install_verify_refusal_and_rollback
 
 echo "# all fm-daily-upstream tests passed"

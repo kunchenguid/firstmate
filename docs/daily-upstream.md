@@ -12,7 +12,9 @@ Installation and scheduled execution refuse unless the local timezone resolves e
 The definitions do not use `RunAtLoad`, so a login or script installation does not create an unscheduled update.
 Launchd coalesces a calendar event missed while the Mac sleeps and runs it after wake rather than requiring a resident process.
 If the delayed 04:00 and 08:00 phases overlap after wake, the report phase waits for the bounded collection lock before reading only a completely published receipt.
+The scheduled report extends that wait to a bounded ceiling only while a live collection still owns the lock, and it records an explicit `report=deferred` outcome instead of ending without an explanation when the lock never frees.
 A powered-off Mac may miss a calendar event, and the next report explicitly avoids claiming a collection that does not exist.
+A report rendered from an earlier receipt names that receipt's own local date and mode, so a stale or report-only assessment is never presented as that morning's collection.
 Daily collection is date-idempotent, so duplicate launch delivery cannot apply a second update.
 
 ## Collection policy
@@ -43,6 +45,8 @@ The collector reads only public upload metadata for `https://www.youtube.com/@ku
 It never starts a browser, reads a profile or cookie, authenticates, or downloads media.
 A validated last-seen public video identity makes normal uploads appear in one collection receipt.
 An initialization records the newest identity without replaying history, while a feed history gap preserves the prior identity instead of guessing.
+A history gap surfaces no upload metadata at all, because a gap cannot prove which bounded entries are genuinely new.
+Each report says so explicitly, because the preserved identity keeps the monitor gapped until the captain resolves the last-seen identity.
 A surfaced upload remains evidence for Firstmate to decide whether later analysis is relevant.
 Any later acquisition or analysis remains owned by the accepted `/watch` capability and its 4 GiB default, explicitly authorized 16 GiB ceiling, adaptive full-versus-section choice, and exact cleanup contract.
 
@@ -53,6 +57,8 @@ The owner uses restrictive permissions, same-directory atomic publication, regul
 It emits only controlled status values and suppresses credential, authentication, private URL, host, network, device, account, environment, process-command-line, and unrelated repository content.
 A report is indexed before its authenticated check is registered, so an absent live Firstmate session leaves the report available for the next session rather than launching another primary or losing the result.
 Pending reports form a durable oldest-first queue, and the report-handling skill acknowledges only the exact report it synthesized.
+An unacknowledged report is re-offered to the watcher on a bounded half-hour cadence rather than on every sweep, while a new report identity is offered immediately.
+A session that starts after the report was written is therefore still woken on the same morning.
 A best-effort macOS Notification Center message never controls report durability.
 An absent or failed notifier leaves the private report and authenticated check in place.
 
