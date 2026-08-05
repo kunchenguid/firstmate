@@ -32,7 +32,7 @@ ln -sf "$(command -v jq)" "$TOOLS/jq"
 # The hermetic doctor() PATH symlinks every tool the doctor and its remote
 # job worker invoke, so harness resolution sees exactly the fixture and never
 # a host-installed harness binary (e.g. a dev machine's /usr/bin/claude).
-for _tool in bash sh env cat chmod date dirname kill ln mkdir printf readlink rm sed sleep tail tr \
+for _tool in bash sh env cat chmod date dirname id kill ln mkdir nohup printf readlink rm sed seq sleep tail tr \
   basename head mktemp ps stat wc grep uniq sort cut touch ls cp mv find xargs test echo; do
   _resolved=$(command -v "$_tool" 2>/dev/null || true)
   if [ -n "$_resolved" ]; then
