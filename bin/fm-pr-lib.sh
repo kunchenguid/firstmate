@@ -279,7 +279,7 @@ FM_PR_MODE_PROBE_DEVICE=
 FM_PR_MODE_PROBE_VERDICT=
 
 fm_pr_fs_enforces_mode() {
-  local dir=$1 device probe verdict
+  local dir=$1 device probe verdict mode
   device=$(fm_pr_file_device "$dir" 2>/dev/null) || device=
   if [ -n "$device" ] && [ "$device" = "$FM_PR_MODE_PROBE_DEVICE" ]; then
     return "$FM_PR_MODE_PROBE_VERDICT"
@@ -288,7 +288,8 @@ fm_pr_fs_enforces_mode() {
   probe=$(mktemp "$dir/.fm-mode-probe.XXXXXX" 2>/dev/null) || probe=
   if [ -n "$probe" ]; then
     if chmod 0600 "$probe" 2>/dev/null; then
-      [ "$(fm_pr_file_mode "$probe")" = 600 ] || verdict=1
+      mode=$(fm_pr_file_mode "$probe")
+      [ -n "$mode" ] && [ "$mode" != 600 ] && verdict=1
     fi
     rm -f -- "$probe"
   fi
