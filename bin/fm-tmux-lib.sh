@@ -413,15 +413,21 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness]
     return 0
   fi
   # Retries exhausted, composer still shows proven pending.
-  # If the pane is busy (agent mid-turn), the harness accepted the Enter
-  # and queued the message for processing when the current turn ends.
-  # Treat it as submitted so the caller does not re-send.
-  # On an idle pane, keep reporting pending - a genuine swallow.
-  if fm_pane_is_busy "$target" "$harness"; then
-    printf 'empty'
-  else
-    printf 'pending'
-  fi
+  # Only opencode and cursor have verified Enter-while-busy queuing: a busy
+  # pane means the harness accepted the Enter and queued the message for
+  # processing when the current turn ends. Treat it as submitted so the caller
+  # does not re-send. Other harnesses keep pending - a genuine swallow stays
+  # a loud failure.
+  case "$harness" in
+    opencode|cursor)
+      if fm_pane_is_busy "$target" "$harness"; then
+        printf 'empty'
+      else
+        printf 'pending'
+      fi
+      ;;
+    *) printf 'pending' ;;
+  esac
 }
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [harness]
