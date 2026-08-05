@@ -224,7 +224,7 @@ fm_composer_strip_ghost() {
                   rev = 1
                   if (ghost_gap) gap_rev = 1
                 } else if (code == "27") {
-                  rev = 0
+                  rev = 0; gap_rev = 0
                 } else if (code == "39") { darkfg = 0 }
                 else if (code + 0 >= 30 && code + 0 <= 37) { darkfg = 0 }
                 else if (code + 0 >= 90 && code + 0 <= 97) { darkfg = 0 }

@@ -647,6 +647,24 @@ test_cursor_reverse_video_ghost_cell_is_stripped() {
   pass "fm_composer_strip_ghost: cursor reverse-video ghost cell is stripped"
 }
 
+test_rev_off_inside_gap_keeps_real_text() {
+  local result styled
+  # SGR 27 (reverse-video off) ends the reverse-video marking of a ghost gap:
+  # content after it is real typed input and must survive a later dim
+  # re-entry, not be flushed as the cursor cell. Sequence: dim ghost, reset,
+  # rev-on cursor cell, rev-off, REAL text, dim re-entry ghost again.
+  styled=$(printf '\033[2mghost\033[0;7mA\033[27mREAL\033[2mghost2\033[0m')
+  result=$(fm_composer_strip_ghost <<< "$styled")
+  # The whole gap must not be flushed as droppable: real text after the
+  # rev-off survives the dim re-entry flush (the rev-marked prefix may also
+  # survive, an over-preserve that defers rather than injects).
+  case "$result" in
+    *REAL*) : ;;
+    *) fail "real text after SGR 27 in a ghost gap must survive strip, got '$result'" ;;
+  esac
+  pass "fm_composer_strip_ghost: SGR 27 inside a ghost gap keeps the real text after it"
+}
+
 test_real_text_between_dim_runs_survives() {
   local result styled
   # Real typed content between two dim ghost runs must survive ghost
@@ -744,6 +762,7 @@ test_non_bordered_composer_uses_compatibility_fallback
 test_non_bordered_interior_edges_are_pending
 test_peek_output_is_escape_free
 test_cursor_reverse_video_ghost_cell_is_stripped
+test_rev_off_inside_gap_keeps_real_text
 test_real_text_between_dim_runs_survives
 test_dark_truecolor_ghost_after_dim_ghost_strips_empty
 test_real_text_between_dim_and_dark_ghost_runs_survives
