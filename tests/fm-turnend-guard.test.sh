@@ -991,7 +991,7 @@ test_cursor_shim_missing_payload_allows() {
 }
 
 test_cursor_hooks_json_is_registered() {
-  local hooks shim present
+  local hooks present
   hooks="$ROOT/.cursor/hooks.json"
   [ -f "$hooks" ] || fail "tracked .cursor/hooks.json is missing"
   jq -e '.version == 1' "$hooks" >/dev/null || fail "cursor hooks.json must carry the load-bearing version key"
