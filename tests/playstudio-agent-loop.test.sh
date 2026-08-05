@@ -23,9 +23,15 @@ test_skill_and_driver_surface() {
   assert_grep 'started_mem' "$SKILL" "skill omits Daytona started_mem gate"
   assert_grep '_daytona_capacity_gate' "$DRIVER" "driver omits Daytona capacity gate"
   assert_grep 'strict=False' "$DRIVER" "driver omits tolerant JSON loads"
+  assert_grep '_job_slim_status_js' "$DRIVER" "driver omits slim waitSettled poll helper"
+  assert_grep 'frameCount' "$DRIVER" "driver slim poll omits frameCount"
+  assert_grep '_job_message_summaries_js' "$DRIVER" "driver omits slim snapshotMessages helper"
+  assert_grep 'NEVER stringify frames' "$DRIVER" "driver lost slim-poll frames ban comment"
   assert_grep 'demo-session' "$SKILL" "skill should explicitly refuse demo-session"
   assert_grep 'Do **not** call agent-host' "$SKILL" "skill lost agent-host turn refusal"
   assert_grep 'never agent-host' "$DRIVER" "driver header lost agent-host refusal"
+  assert_grep 'slim status object' "$SKILL" "skill omits slim waitSettled poll guidance"
+  assert_grep 'Slim message summaries' "$SKILL" "skill omits slim snapshotMessages guidance"
 
   local help
   help="$("$DRIVER" --help 2>&1)" || fail "driver --help failed"
@@ -39,4 +45,23 @@ test_skill_and_driver_surface() {
   pass "playstudio-agent-loop skill and driver expose the expected mate surface"
 }
 
+test_slim_waitsettled_poll_shape() {
+  # Slim poll JS must not stringify the page job wholesale (frames[]).
+  local slim_js
+  slim_js="$(
+    DRIVER="$DRIVER" bash <<'EOS'
+eval "$(sed -n '/^_job_slim_status_js()/,/^}/p' "$DRIVER")"
+_job_slim_status_js "job_test"
+EOS
+  )"
+  printf '%s\n' "$slim_js" | grep -q 'frameCount' || fail "slim poll JS missing frameCount"
+  printf '%s\n' "$slim_js" | grep -q 'settledType' || fail "slim poll JS missing settledType"
+  printf '%s\n' "$slim_js" | grep -q 'lastRunEventSeq' || fail "slim poll JS missing lastRunEventSeq"
+  if printf '%s\n' "$slim_js" | grep -Eq 'frames[[:space:]]*:[[:space:]]*frames|frames[[:space:]]*:[[:space:]]*job\.frames'; then
+    fail "slim poll JS still returns frames array through axi"
+  fi
+  pass "playstudio-agent-loop slim waitSettled poll shape is axi-safe"
+}
+
 test_skill_and_driver_surface
+test_slim_waitsettled_poll_shape

@@ -33,6 +33,7 @@
 #
 # Review video: during waitSettled with --review-dir, capture periodic viewport
 # JPEGs; fixture stitches them with ffmpeg to <out-dir>/review.mp4.
+# waitSettled axi poll returns a slim status object only (never frames[]).
 #
 # Exit codes: 0 ok, 1 usage/error, 2 blocked (auth/stack/capacity/axi), 3 settle failed/timeout
 set -euo pipefail
@@ -709,13 +710,85 @@ _stitch_review_mp4() {
     "$out_mp4"
 }
 
+# Slim job status for axi polling — NEVER stringify frames[] through chrome-devtools-axi.
+_job_slim_status_js() {
+  python3 -c 'import json,sys
+jid=json.dumps(sys.argv[1])
+print("""() => {
+  const jobId = %s;
+  const job = (window.__psAgentLoopJobs && window.__psAgentLoopJobs[jobId]) || { status: "missing" };
+  const frames = Array.isArray(job.frames) ? job.frames : [];
+  let lastSeq = job.lastRunEventSeq;
+  if (lastSeq == null) {
+    lastSeq = frames.reduce((m, f) => Math.max(m, (f && f.runEventSeq) || 0), 0);
+  }
+  return JSON.stringify({
+    status: job.status || "missing",
+    settledType: job.settledType || null,
+    partStatus: job.partStatus || null,
+    frameCount: frames.length,
+    runId: job.runId || null,
+    projectId: job.projectId || null,
+    sessionId: job.sessionId || null,
+    lastRunEventSeq: lastSeq || 0,
+    error: job.error || null
+  });
+ }""" % (jid,))' "$1"
+}
+
+# Slim agent-visible summaries from page-local frames (frames stay on the page job).
+_job_message_summaries_js() {
+  python3 -c 'import json,sys
+jid=json.dumps(sys.argv[1])
+print("""() => {
+  const jobId = %s;
+  const job = (window.__psAgentLoopJobs && window.__psAgentLoopJobs[jobId]) || null;
+  if (!job) return JSON.stringify({ status: "missing", frameCount: 0, messageCount: 0, messages: [] });
+  const frames = Array.isArray(job.frames) ? job.frames : [];
+  const messages = [];
+  const MAX = 40;
+  const MAX_TEXT = 240;
+  const interesting = new Set(["text", "message", "assistant", "error", "done", "step", "tool", "run"]);
+  for (const f of frames) {
+    if (messages.length >= MAX) break;
+    const part = f && f.part;
+    if (!part || typeof part !== "object") continue;
+    const t = part.type;
+    if (!interesting.has(t)) continue;
+    let text = part.text || part.message || part.label || part.content || null;
+    if (text && typeof text === "object") {
+      text = text.text || text.value || null;
+      if (text && typeof text !== "string") text = String(text).slice(0, MAX_TEXT);
+    }
+    if (typeof text === "string" && text.length > MAX_TEXT) text = text.slice(0, MAX_TEXT);
+    messages.push({
+      seq: f.seq || f.runEventSeq || null,
+      type: t,
+      state: part.state || null,
+      code: part.code || part.errorCode || null,
+      text: text || null
+    });
+  }
+  return JSON.stringify({
+    status: job.status || null,
+    settledType: job.settledType || null,
+    frameCount: frames.length,
+    messageCount: messages.length,
+    messages: messages,
+    runId: job.runId || null,
+    projectId: job.projectId || null,
+    sessionId: job.sessionId || null
+  });
+ }""" % (jid,))' "$1"
+}
+
 _poll_wait_job() {
   local job_id="$1"
   local timeout_sec="$2"
   local review_dir="${3:-}"
   local deadline now payload status js frame_idx=0 last_shot=0 rc
   deadline=$(( $(date +%s) + timeout_sec + 5 ))
-  js="$(python3 -c 'import json,sys; print("""() => JSON.stringify((window.__psAgentLoopJobs && window.__psAgentLoopJobs[%s]) || {status:\"missing\"})""" % (json.dumps(sys.argv[1]),))' "$job_id")"
+  js="$(_job_slim_status_js "$job_id")"
   # Capture an opening frame immediately when review is enabled.
   if [ -n "$review_dir" ]; then
     _capture_review_frame "$review_dir" "$frame_idx"
@@ -770,13 +843,14 @@ cmd_wait_settled() {
   [ -n "$run_id" ] || die "waitSettled: --run-id required"
   [ -n "$project_id" ] || die "waitSettled: --project-id required"
   ensure_origin_page
-  local started job_id payload status
+  local started job_id payload status summaries
   started="$(_start_wait_job "$run_id" "$project_id" "$timeout_sec")"
   job_id="$(json_get "$started" 'data.get("jobId")')"
   [ -n "$job_id" ] && [ "$job_id" != "None" ] || die "waitSettled: failed to start stream job: $started"
   payload="$(_poll_wait_job "$job_id" "$timeout_sec" "$review_dir")"
-  # Attach jobId so snapshotMessages can reload frames from the page job.
-  payload="$(JOB_ID="$job_id" PAYLOAD="$payload" python3 -c '
+  # Attach jobId + slim message summaries (separate axi eval; never dump frames[]).
+  summaries="$(axi_eval_raw "$(_job_message_summaries_js "$job_id")" || echo '{"messages":[]}')"
+  payload="$(JOB_ID="$job_id" PAYLOAD="$payload" SUMMARIES="$summaries" python3 -c '
 import json, os, re, sys
 
 def loads_tolerant(text):
@@ -793,6 +867,12 @@ def loads_tolerant(text):
 try:
     d = loads_tolerant(os.environ["PAYLOAD"])
     d["jobId"] = os.environ["JOB_ID"]
+    try:
+        s = loads_tolerant(os.environ.get("SUMMARIES") or "{}")
+        d["messageCount"] = s.get("messageCount")
+        d["messages"] = s.get("messages") or []
+    except Exception:
+        d["messages"] = []
     print(json.dumps(d, separators=(",", ":")))
 except Exception as exc:
     sys.stderr.write("ps-agent-loop: blocked: invalid waitSettled payload (%s)\n" % (exc,))
@@ -836,7 +916,8 @@ cmd_snapshot_messages() {
   [ -n "$job_id" ] || die "snapshotMessages: --job-id required (from waitSettled / in-page job; no list API)"
   ensure_origin_page
   local payload
-  payload="$(axi_eval_raw "() => JSON.stringify((window.__psAgentLoopJobs && window.__psAgentLoopJobs[$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$job_id")]) || {status:\"missing\"})")"
+  # Slim path only: message summaries, never the full frames[] array through axi.
+  payload="$(axi_eval_raw "$(_job_message_summaries_js "$job_id")")"
   if [ -n "$out" ]; then
     mkdir -p "$(dirname "$out")"
     printf '%s\n' "$payload" >"$out"

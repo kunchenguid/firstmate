@@ -74,8 +74,8 @@ export FM_HOME="${FM_HOME:-$HOME/projects/firstmate}"   # or this home's path
 | `newProject` | `POST /api/entry-shell/projects` → `{ project, workspaceUrl }` |
 | `openWorkspace` | Navigate workspace URL; optional `POST /api/runs/session` |
 | `sendTurn` | `POST /api/runs/start` with `{ projectId, prompt, sessionId? }` → `{ runId, sessionId }` |
-| `waitSettled` | In-page SSE until `done`/`error`; tolerant JSON for control chars in frames; empty/invalid axi → `blocked:`; optional `--review-dir` for periodic viewport screenshots |
-| `snapshotMessages` | Read accumulated SSE frames from the wait job (no public message list API) |
+| `waitSettled` | In-page SSE until `done`/`error`; axi poll returns a slim status object (never `frames[]`); empty/invalid axi → `blocked:`; optional `--review-dir` for periodic viewport screenshots |
+| `snapshotMessages` | Slim message summaries from the page-local wait job (no full SSE frame dump through axi; no public message list API) |
 | `listCheckpoints` | Thin wrapper: `GET /api/runs/history` (may 501 when sandbox/history unavailable) |
 | `revertMessage` | Thin wrapper: `POST /api/runs/restore` with `mode:"revert"` |
 | `undoRestore` | Thin wrapper: `POST /api/runs/restore/undo` |
