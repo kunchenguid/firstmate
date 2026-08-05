@@ -549,6 +549,19 @@ run_teardown() {
     "$TEARDOWN" task-x1 "$@"
 }
 
+# Build the teardown test's executable search path without lsof, regardless of
+# whether the host installs it in /usr/bin, /usr/sbin, or a package-manager bin.
+make_path_without_lsof() {  # <case-dir>
+  local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
+  mkdir -p "$path_dir"
+  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
+    mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
+    resolved=$(command -v "$cmd" 2>/dev/null) || continue
+    case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
+  done
+  printf '%s\n' "$path_dir"
+}
+
 test_local_only_fork_remote_allows() {
   local case_dir rc
   case_dir=$(make_case fork-allow)
@@ -2131,10 +2144,13 @@ test_leaked_tasktmp_process_is_reaped() {
 }
 
 test_lsof_absent_reaps_tmux_process_group() {
-  local case_dir rc pid
+  local case_dir rc pid path_without_lsof
   case_dir=$(make_case lsof-absent-process-group-reap)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
+  path_without_lsof=$(make_path_without_lsof "$case_dir")
+  PATH="$path_without_lsof" command -v lsof >/dev/null 2>&1 \
+    && fail "lsof-absent-process-group-reap: fixture path unexpectedly exposes lsof"
 
   perl -e 'setpgrp(0, 0); chdir shift or die; exec "sleep", "300"' "$case_dir/wt" &
   pid=$!
@@ -2151,7 +2167,7 @@ EOF
   chmod +x "$case_dir/fakebin/tmux"
 
   rc=0
-  FM_TEARDOWN_TEST_PATH=/usr/bin:/bin \
+  FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 0 "$rc" "lsof-absent-process-group-reap: teardown should succeed"
