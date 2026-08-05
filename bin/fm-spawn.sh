@@ -689,6 +689,7 @@ parse_orca_worktree_result() {
 spawn_abort_cleanup() {
   local status=$?
   local leased_wt=
+  local -a release_args
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -763,8 +764,19 @@ spawn_abort_cleanup() {
     leased_wt=$LEASED_WT
     LEASED_WT=
     # --if-lease-holder makes the release a no-op unless this task still owns the
-    # lease, so a concurrent re-lease of the same pool tree cannot be stolen.
-    if ! ( cd "$PROJ_ABS" && treehouse return --force --if-lease-holder "$ID" "$leased_wt" ) >/dev/null 2>&1; then
+    # lease, so a concurrent re-lease of the same pool tree cannot be stolen. It
+    # postdates the treehouse this repo pins, so capability-detect it the same way
+    # the --lease support above is detected. On a binary without it the release
+    # still has to happen unguarded - a skipped release burns the pool slot, which
+    # is the leak this cleanup exists to close - and holder identity simply cannot
+    # be verified there.
+    release_args=(--force)
+    if treehouse return --help 2>&1 \
+       | grep -Eq '(^|[^[:alnum:]_-])--if-lease-holder([^[:alnum:]_-]|$)'; then
+      release_args+=(--if-lease-holder "$ID")
+    fi
+    release_args+=("$leased_wt")
+    if ! ( cd "$PROJ_ABS" && treehouse return "${release_args[@]}" ) >/dev/null 2>&1; then
       echo "warning: could not release the worktree leased for $ID; the pool slot stays leased until you run 'treehouse return --force $leased_wt' from $PROJ_ABS" >&2
     fi
   fi

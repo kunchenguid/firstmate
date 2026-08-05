@@ -22,7 +22,11 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-bare-clone)
 
-# make_bare_fakebin <dir> <lease_support> builds the fake tmux and fake treehouse.
+# make_bare_fakebin <dir> <lease_support> [holder_guard_support] builds the fake
+# tmux and fake treehouse. <holder_guard_support> defaults to yes and stands for
+# `treehouse return --if-lease-holder`, which the version this repo pins does not
+# have: the fake rejects the flag as unknown when it is no, exactly as that binary
+# does, so a release that assumes the flag visibly fails to free the pool slot.
 #
 # The fake treehouse mirrors the two real behaviours that matter:
 #   * `get` resolves the repo from its cwd with `git rev-parse --show-toplevel`,
@@ -36,7 +40,7 @@ TMP_ROOT=$(fm_test_tmproot fm-spawn-bare-clone)
 # Every send-keys line is appended to FM_FAKE_SENDKEYS_LOG so the test can assert
 # which acquire command each path actually put in the pane.
 make_bare_fakebin() {
-  local dir=$1 lease_support=$2 fakebin
+  local dir=$1 lease_support=$2 holder_guard_support=${3:-yes} fakebin
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -81,6 +85,7 @@ SH
 #!/usr/bin/env bash
 set -u
 LEASE_SUPPORT=$lease_support
+HOLDER_GUARD_SUPPORT=$holder_guard_support
 SH
   cat >> "$fakebin/treehouse" <<'SH'
 printf '%s\n' "$*" >> "${FM_FAKE_TREEHOUSE_LOG:?FM_FAKE_TREEHOUSE_LOG unset}"
@@ -123,6 +128,20 @@ if [ "${1:-}" = return ]; then
   # Real `treehouse return` takes an explicit path and needs no work tree of its
   # own, so it resolves against a bare-flagged clone too. The argv log above is
   # what the test asserts on.
+  if [ "${2:-}" = --help ]; then
+    printf 'Terminate lingering processes and return a worktree\n'
+    printf 'Flags:\n      --force   Clean, reset, and return without prompting\n'
+    [ "$HOLDER_GUARD_SUPPORT" = yes ] \
+      && printf '      --if-lease-holder string   Return only if the current lease has this holder\n'
+    exit 0
+  fi
+  case " $* " in
+    *" --if-lease-holder "*)
+      # The pinned treehouse has no such flag and rejects the whole command, so a
+      # release that assumes it never frees the pool slot.
+      [ "$HOLDER_GUARD_SUPPORT" = yes ] || { echo "unknown flag: --if-lease-holder" >&2; exit 1; }
+      ;;
+  esac
   exit 0
 fi
 exit 0
@@ -131,19 +150,20 @@ SH
   printf '%s\n' "$fakebin"
 }
 
-# make_bare_case <name> <id> <bare> <lease_support> builds a home plus a project
-# clone with a real linked worktree standing in for the pooled tree. When <bare>
-# is yes the clone gets core.bare=true AND an untracked file in its work tree -
-# the untracked file is what makes an absolute GIT_WORK_TREE override visibly
-# corrupt the pool-cleanliness check above.
+# make_bare_case <name> <id> <bare> <lease_support> [holder_guard_support] builds
+# a home plus a project clone with a real linked worktree standing in for the
+# pooled tree. When <bare> is yes the clone gets core.bare=true AND an untracked
+# file in its work tree - the untracked file is what makes an absolute
+# GIT_WORK_TREE override visibly corrupt the pool-cleanliness check above.
 make_bare_case() {
-  local name=$1 id=$2 bare=$3 lease_support=$4 case_dir home proj wt stale fakebin
+  local name=$1 id=$2 bare=$3 lease_support=$4 holder_guard_support=${5:-yes}
+  local case_dir home proj wt stale fakebin
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/pool-worktree"
   stale="$case_dir/stale-worktree"
-  fakebin=$(make_bare_fakebin "$case_dir/fake" "$lease_support")
+  fakebin=$(make_bare_fakebin "$case_dir/fake" "$lease_support" "$holder_guard_support")
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   printf 'codex\n' > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "pool-$name"
@@ -253,6 +273,28 @@ test_abort_before_meta_releases_the_lease() {
   pass "an abort before the meta write releases the durable lease"
 }
 
+# --if-lease-holder postdates the treehouse version this repo pins, which rejects
+# the whole command as an unknown flag. The release still has to happen there:
+# skipping it burns the pool slot, which is the leak the cleanup exists to close.
+test_abort_releases_the_lease_without_holder_guard() {
+  local rec id out
+  id='bare-lease-release-b7'
+  rec=$(make_bare_case bare-release-noguard "$id" yes yes no)
+  read_bare_record "$rec"
+  PANE_SETTLE="$STALE_DIR"
+
+  out=$(run_bare_spawn "$id")
+  assert_grep "return --force $WT_DIR" "$TREEHOUSE_LOG" \
+    "aborted spawn did not fall back to a plain release when treehouse lacks --if-lease-holder"
+  assert_no_grep "--if-lease-holder" "$TREEHOUSE_LOG" \
+    "aborted spawn passed --if-lease-holder to a treehouse that does not support it"
+  case "$out" in
+    *"could not release the worktree leased for $id"*)
+      fail "the lease release failed against a treehouse without --if-lease-holder" ;;
+  esac
+  pass "an abort releases the lease unguarded when treehouse lacks --if-lease-holder"
+}
+
 # The deliberate flag is the whole reason this path exists: it must survive.
 test_bare_flag_survives_the_spawn() {
   local rec id status
@@ -317,5 +359,6 @@ test_non_bare_clone_path_is_unchanged
 test_bare_without_lease_support_refuses
 test_settled_path_must_be_the_leased_worktree
 test_abort_before_meta_releases_the_lease
+test_abort_releases_the_lease_without_holder_guard
 
 echo "# all fm-spawn-bare-clone tests passed"
