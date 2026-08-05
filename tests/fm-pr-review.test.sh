@@ -1220,8 +1220,8 @@ pass "captain takeover opt-out is durable and later restoration covers interveni
 
 # --- Process-event registration, restart, supervision, and home isolation ----
 H_ARM1="$TMP/arm-home-1"; H_ARM2="$TMP/arm-home-2"; new_home "$H_ARM1"; new_home "$H_ARM2"
-FM_HOME="$H_ARM1" "$ADAPTER" arm >/dev/null || fail "first home could not arm review source"
-FM_HOME="$H_ARM2" "$ADAPTER" arm >/dev/null || fail "second home could not arm review source"
+PATH="$FAKEBIN:$PATH" FM_HOME="$H_ARM1" "$ADAPTER" arm >/dev/null || fail "first home could not arm review source"
+PATH="$FAKEBIN:$PATH" FM_HOME="$H_ARM2" "$ADAPTER" arm >/dev/null || fail "second home could not arm review source"
 SID1=$(FM_HOME="$H_ARM1" "$ADAPTER" source-id)
 SID2=$(FM_HOME="$H_ARM2" "$ADAPTER" source-id)
 [ "$SID1" != "$SID2" ] || fail "two homes shared one review source identity"
@@ -1235,7 +1235,7 @@ printf '%s\n' '{"schema":"fm-pr-review-event.v1","event_id":"1900-0123456789abcd
 "$ADAPTER" terminal "$TMP/pr-review-result.json" || fail "review result did not retire its exact source generation"
 printf 'not-json\n' > "$TMP/pr-review-malformed"
 "$ADAPTER" terminal "$TMP/pr-review-malformed" >/dev/null 2>&1 && fail "malformed review result retired its source"
-FM_HOME="$H_ARM1" "$ADAPTER" arm >/dev/null || fail "restart re-arm failed"
+PATH="$FAKEBIN:$PATH" FM_HOME="$H_ARM1" "$ADAPTER" arm >/dev/null || fail "restart re-arm failed"
 [ "$(find "$H_ARM1/state/procevent" -name '*.source' | wc -l | tr -d ' ')" -eq 1 ] || fail "restart created a second source"
 sup=$(bash -c '. "$1/bin/fm-supervision-lib.sh"; fm_supervision_needed "$2" && echo yes || echo no' _ "$ROOT" "$H_ARM1/state")
 [ "$sup" = yes ] || fail "review source alone did not retain supervision"
