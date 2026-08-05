@@ -385,7 +385,7 @@ test_ship_and_scout_briefs_scaffold_working_log() {
     if [ "$kind" = scout ]; then
       FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" someproj --scout >/dev/null 2>&1
     else
-      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" someproj >/dev/null 2>&1
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" someproj --mode no-mistakes >/dev/null 2>&1
     fi
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$kind: brief was not scaffolded"
@@ -429,7 +429,7 @@ test_ship_setup_step_is_resume_aware() {
   local home brief
   home="$TMP_ROOT/worklog-resume-home"
   mkdir -p "$home/data"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-worklog-resume someproj >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-worklog-resume someproj --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/brief-worklog-resume/brief.md"
   assert_grep "if you are resuming and it already exists, check it out instead and read your working log below" "$brief" \
     "ship brief's first setup step is not resume-aware"
@@ -446,7 +446,7 @@ test_ground_truth_is_injected_into_ship_and_scout_briefs() {
   mkdir -p "$home/data/repos"
   printf 'repo-path: /opt/acme\n\n- Storage is Postgres, never SQLite.\n' > "$home/data/repos/acme.md"
 
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-ground-ship acme >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-ground-ship acme --mode no-mistakes >/dev/null 2>&1
   assert_grep "Repo ground truth - authoritative, do not re-derive or guess" \
     "$home/data/brief-ground-ship/brief.md" "ship brief lost the ground-truth heading"
   assert_grep "Storage is Postgres, never SQLite." \
@@ -458,7 +458,7 @@ test_ground_truth_is_injected_into_ship_and_scout_briefs() {
 
   # An ungrounded dispatch still produces a brief, and says so on stderr.
   err="$TMP_ROOT/ground-warn.err"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-ground-none otherproj >/dev/null 2>"$err"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-ground-none otherproj --mode no-mistakes >/dev/null 2>"$err"
   [ -f "$home/data/brief-ground-none/brief.md" ] \
     || fail "a repo with no ground truth must still scaffold a brief"
   assert_grep "no ground truth for 'otherproj'" "$err" \
@@ -802,7 +802,7 @@ test_status_instruction_is_one_stamped_line() {
   for kind in ship scout secondmate; do
     id="brief-stamp-$kind"
     case "$kind" in
-      ship)   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate >/dev/null 2>&1 ;;
+      ship)   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1 ;;
       scout)  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1 ;;
       secondmate) FM_HOME="$home" FM_SECONDMATE_CHARTER='sample domain' \
         "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1 ;;
