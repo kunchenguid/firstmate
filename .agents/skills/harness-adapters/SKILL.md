@@ -518,3 +518,7 @@ Phase 3 is blocked on correct upstream manifest key discovery.
 **Primary-session guard:** out of scope for the MVP.
 Firstmate running itself on cursor is a separate, larger effort (turn-end guard, PreToolUse seatbelt, session-start nudge, watcher supervision protocol).
 Cursor is crew/secondmate-only in the first release, matching Kimi's position.
+
+**Remote-secondmate guard:** cursor is deliberately refused as a remote secondmate harness (both `bin/fm-spawn.sh` and `bin/fm-remote-secondmate-control.sh` allowlist it out) until herdr + cursor is verified.
+Remote secondmates run only on the herdr backend, where cursor's composer and busy semantics are tmux-verified only.
+The exclusion is fail-closed: a remote cursor spawn is refused up front rather than launched against unverified herdr behavior.
