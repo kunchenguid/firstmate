@@ -1,15 +1,16 @@
 // Firstmate's home-persistent Pi transcript presentation toggle.
 //
-// Verified against Pi 0.81.1 and 0.82.0, which expose built-in ToolDefinitions, per-slot
-// renderers, renderShell: "self", session_start replacement reasons, agent_start and
-// agent_settled, ExtensionUIContext.setToolsExpanded(), setWorkingVisible(), setWidget()
-// with a disposable component factory, and setHiddenThinkingLabel().
+// Pi exposes built-in ToolDefinitions, per-slot renderers, renderShell: "self",
+// session_start replacement reasons, agent_start and agent_settled,
+// ExtensionUIContext.setToolsExpanded(), setWorkingVisible(), setWidget() with a
+// disposable component factory, and setHiddenThinkingLabel().
 // ./lib/fm-calm-working-ship.ts owns the animated working presentation this file
 // installs. The focused tests pin those assumptions but never reject a
 // newer Pi solely for its version. The collapsed-thinking and operational-user
 // presentation adapters probe the exact API they patch and degrade independently with a
 // diagnostic (see installCalmPresentationAdapter below) if a future Pi removes it; Pi
 // still exposes no global renderer for arbitrary built-in or custom rows.
+// docs/calm-mode-feasibility.md owns version-scoped compatibility evidence.
 // docs/configuration.md owns the home-local Calm preference contract.
 import { randomUUID } from "node:crypto";
 import {
@@ -274,7 +275,23 @@ export default function (pi: ExtensionAPI) {
   registerBuiltIn(createFindToolDefinition);
   registerBuiltIn(createLsToolDefinition);
 
+  // Pi can deliver one last queued lifecycle event after the session is disposed:
+  // AgentSession.dispose() invalidates the extension runner before it disconnects from
+  // the agent, so an in-flight agent_start/agent_settled may arrive with a ctx whose
+  // guarded `ui` getter already throws the stale-ctx error (surfacing as an
+  // "Extension error (fm-calm.ts)" line at `pi -p` exit). A disposed session has
+  // nothing left to present, so a stale ctx turns a lifecycle handler into a no-op.
+  const activeUi = (ctx: { ui: ExtensionUIContext }): ExtensionUIContext | undefined => {
+    try {
+      return ctx.ui;
+    } catch {
+      return undefined;
+    }
+  };
+
   pi.on("session_start", (_event, ctx) => {
+    const ui = activeUi(ctx);
+    if (!ui) return;
     exportRendering = false;
     setCalmPresentation(loadCalmPreference());
     setCalmStockExportRendering(false);
@@ -283,14 +300,14 @@ export default function (pi: ExtensionAPI) {
     workingShipShown = false;
     // A genuine new session lifetime starts the boat at the normal initial position.
     workingShipAnimation.reset();
-    applyWorkingPresentation(ctx.ui, true);
-    ctx.ui.setHiddenThinkingLabel(calmPresentationIsActive() ? "" : undefined);
-    ctx.ui.setStatus("firstmate-calm", undefined);
+    applyWorkingPresentation(ui, true);
+    ui.setHiddenThinkingLabel(calmPresentationIsActive() ? "" : undefined);
+    ui.setStatus("firstmate-calm", undefined);
     removeTerminalInputHandler?.();
-    removeTerminalInputHandler = ctx.ui.onTerminalInput((data) => {
+    removeTerminalInputHandler = ui.onTerminalInput((data) => {
       if (!getKeybindings().matches(data, "tui.input.submit")) return;
 
-      const input = ctx.ui.getEditorText().trim();
+      const input = ui.getEditorText().trim();
       if (
         input !== "/share" &&
         input !== "/export" &&
@@ -299,6 +316,16 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
+      // Extension input listeners run before Pi dispatches the slash command.
+      // Rebuild Calm's hidden tool rows now, while their normal renderers are
+      // active, so the later export can keep Pi's completion status as the
+      // final transcript status. Refreshing after the command would coalesce
+      // over that completion status in Pi 0.83.
+      if (calmPresentationIsActive()) {
+        const expanded = ui.getToolsExpanded();
+        ui.setToolsExpanded(!expanded);
+        ui.setToolsExpanded(expanded);
+      }
       exportRendering = true;
       setCalmStockExportRendering(true);
       publishPresentationState();
@@ -306,27 +333,30 @@ export default function (pi: ExtensionAPI) {
         exportRendering = false;
         setCalmStockExportRendering(false);
         publishPresentationState();
-        const expanded = ctx.ui.getToolsExpanded();
-        ctx.ui.setToolsExpanded(!expanded);
-        ctx.ui.setToolsExpanded(expanded);
       }, 0);
     });
   });
 
   pi.on("agent_start", (_event, ctx) => {
+    const ui = activeUi(ctx);
+    if (!ui) return;
     agentRunActive = true;
-    applyWorkingPresentation(ctx.ui);
+    applyWorkingPresentation(ui);
   });
 
   // agent_settled is emitted from a finally block, so it also covers abort and failure.
   pi.on("agent_settled", (_event, ctx) => {
+    const ui = activeUi(ctx);
+    if (!ui) return;
     agentRunActive = false;
-    applyWorkingPresentation(ctx.ui);
+    applyWorkingPresentation(ui);
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
+    const ui = activeUi(ctx);
+    if (!ui) return;
     agentRunActive = false;
-    applyWorkingPresentation(ctx.ui);
+    applyWorkingPresentation(ui);
   });
 
   pi.registerCommand("calm", {
