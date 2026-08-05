@@ -342,10 +342,31 @@ test_kimi_and_grok_install_no_unverified_wiring() {
   pass "kimi and grok install no unverified semantic wiring and classify through their own gates"
 }
 
+test_agy_busy_source_selection() {
+  local state gen out
+  state="$TMP_ROOT/agy-source/state"
+  mkdir -p "$state"
+  out=$(fm_busy_sources_for_harness agy)
+  [ "$out" = "agy-cli fm-spawn fm-interrupt fm-recovery" ] \
+    || fail "AGY trusted sources were '$out'"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" agy-source)
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" agy-source idle --gen "$gen" \
+    --source agy-cli --event done || fail "AGY completion source was rejected"
+  out=$(fm_busy_classify tmux fake:w agy agy-source "$state")
+  [ "$out" = "idle agy-cli" ] || fail "AGY completion classified '$out'"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" agy-source idle --current-gen \
+    --source claude-hook --event stop || fail "cross-adapter event writer failed unexpectedly"
+  out=$(fm_busy_classify tmux fake:w agy agy-source "$state")
+  [ "$out" = "unknown source-mismatch" ] \
+    || fail "AGY accepted a foreign semantic source: '$out'"
+  pass "AGY trusts its completion source and rejects foreign busy-state writers"
+}
+
 test_pi_extension_semantic_lifecycle
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring
+test_agy_busy_source_selection
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless

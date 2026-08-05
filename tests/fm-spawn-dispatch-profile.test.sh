@@ -9,6 +9,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=/dev/null
+. "$(dirname "${BASH_SOURCE[0]}")/../bin/fm-busy-lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
@@ -42,6 +44,13 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/agy" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "${FM_FAKE_AGY_LOG:-/dev/null}"
+exit "${FM_FAKE_AGY_STATUS:-0}"
+SH
+  chmod +x "$fakebin/agy"
   fm_fake_exit0 "$fakebin" treehouse pi-signed
   printf '%s\n' "$fakebin"
 }
@@ -469,6 +478,50 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
   pass "grok omits unsupported xhigh reasoning effort"
 }
 
+test_agy_threads_model_effort_and_completion_callback() {
+  local rec id out status launch agylog
+  id=profile-agy-complete-z6c
+  rec=$(make_spawn_case profile-agy-complete agy "$id")
+  read_case_record "$rec"
+  agylog="$CASE_DIR/agy.log"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gemini/test --effort medium)
+  status=$?
+  expect_code 0 "$status" "AGY spawn with supported profile flags should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" agy gemini/test medium
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "agy --dangerously-skip-permissions --model 'gemini/test' --effort 'medium' --prompt" \
+    "AGY launch did not thread its supported model and effort flags"
+  assert_contains "$launch" "${ROOT}/bin/fm-busy-event.sh\" apply \"$HOME_DIR/state\" \"$id\" idle --current-gen --source agy-cli --event done" \
+    "AGY launch did not include its completion callback"
+
+  FM_FAKE_AGY_LOG="$agylog" FM_FAKE_AGY_STATUS=0 PATH="$FAKEBIN_DIR:$PATH" \
+    bash -c "$launch" || fail "successful AGY completion command failed"
+  assert_contains "$(cat "$agylog")" "--dangerously-skip-permissions" \
+    "fake AGY did not receive the generated launch command"
+  [ "$(tail -n1 "$HOME_DIR/state/$id.status")" = done ] \
+    || fail "successful AGY completion did not append done status"
+  out=$(fm_busy_classify tmux fake:w agy "$id" "$HOME_DIR/state")
+  [ "$out" = "idle agy-cli" ] || fail "successful AGY completion classified '$out'"
+
+  id=profile-agy-failed-z6d
+  rec=$(make_spawn_case profile-agy-failed agy "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gemini/test --effort high)
+  status=$?
+  expect_code 0 "$status" "AGY failure-path spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  FM_FAKE_AGY_LOG="$CASE_DIR/agy.log" FM_FAKE_AGY_STATUS=17 PATH="$FAKEBIN_DIR:$PATH" \
+    bash -c "$launch" || fail "AGY completion callback did not absorb the worker failure"
+  [ "$(tail -n1 "$HOME_DIR/state/$id.status")" = failed ] \
+    || fail "failed AGY completion did not append failed status"
+  out=$(fm_busy_classify tmux fake:w agy "$id" "$HOME_DIR/state")
+  [ "$out" = "idle agy-cli" ] || fail "failed AGY completion classified '$out'"
+  pass "AGY spawn passes supported flags and records both successful and failed completion callbacks"
+}
+
 test_opencode_threads_model_and_ignores_effort_axis() {
   local rec id out status launch
   id=profile-opencode-z7
@@ -689,6 +742,7 @@ test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
+test_agy_threads_model_effort_and_completion_callback
 test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
