@@ -446,7 +446,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | ([ .tasks[]
        | select(.liveness.endpoint.presence != "verified_present" or .liveness.worker.presence != "verified_present")
        | {id, backend, target:(.endpoint.target // "-"), endpoint:.liveness.endpoint.presence,
-          worker:.liveness.worker.presence,activity:.liveness.activity} ]
+          worker:.liveness.worker.presence,activity:.liveness.activity,
+          evidence_grade:(.liveness.evidence.grade // "unverified")} ]
      + [ (.secondmate_current.records // [])[] as $m | $m.endpoints[]?
          | select(.endpoint.exists == false or .endpoint.agent_alive == "dead")
          | {id:($m.id + "/" + .id),backend:"secondmate-home",target:(.endpoint.target // "-"),
@@ -455,7 +456,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             worker:(if .endpoint.agent_alive == "alive" then "verified_present"
                     elif .endpoint.agent_alive == "dead" then "verified_absent" else "unverified" end),
             activity:(if .endpoint.exists == false then "absent"
-                      elif .endpoint.agent_alive == "dead" then "inactive" else "unverified" end)} ]) as $unhealthy_all
+                      elif .endpoint.agent_alive == "dead" then "inactive" else "unverified" end),
+            evidence_grade:"endpoint_only"} ]) as $unhealthy_all
   | ([ (.secondmate_current.records // [])[]
        | ([.decisions_open[]? | select(.source == "backlog" and .verb == "captain-hold")]) as $captain_holds
        | ([.holds[]? | select(.source == "backlog")]) as $backlog_holds

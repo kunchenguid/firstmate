@@ -644,7 +644,7 @@ SH
     FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   bound=$(tail -1 "$timeout_log")
-  [ "$bound" -eq $((8 + (2 + 4) * 2 + 2 * (10 + 1) + 2)) ] \
+  [ "$bound" -eq $((8 + (2 + 4) * 5 + 2 * (10 + 1) + 2)) ] \
     || fail "frozen inventory did not derive the one-child summary bound: $bound"
   [ -f "$mate/state/late.meta" ] || fail "race mutation did not change the live metadata inventory"
   printf '%s' "$json" | jq -e '
@@ -721,7 +721,7 @@ SH
     FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux FM_REMOTE_JOB_STATE_ROOT="$remote_job_state" \
     FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   [ "$(cat "$ssh_count")" -eq 2 ] \
-    || fail "remote frozen inventory did not use one prepare and one summary handoff: $(cat "$ssh_count") calls"
+    || fail "remote frozen inventory did not use one prepare and one summary handoff: $(cat "$ssh_count") calls; snapshot=$json"
   [ -f "$remote_home/state/late.meta" ] || fail "remote race mutation did not change the live metadata inventory"
   printf '%s' "$json" | jq -e '
     .secondmate_current.records[] | select(.id=="remote-race")
@@ -776,7 +776,7 @@ SH
   done
   TIMEOUT_LOG="$timeout_log" run "$home" "$fakebin" --json >/dev/null
   large_bound=$(tail -1 "$timeout_log")
-  expected_delta=$(((fleet_size - 1) * (4 * 2 + 2 * (10 + 1) + 1)))
+  expected_delta=$(((fleet_size - 1) * (4 * 5 + 2 * (10 + 1) + 1)))
   expected_large=$((small_bound + expected_delta))
   [ "$large_bound" -gt "$small_bound" ] \
     || fail "secondmate summary timeout did not grow with fleet size: $small_bound -> $large_bound"
@@ -825,7 +825,9 @@ sleep "${SLOW_CP_SLEEP:-0}"
 exec "${REAL_CP:?}" "$@"
 SH
   chmod +x "$fakebin/cp"
-  json=$(REAL_CP="$real_cp" SLOW_CP_SLEEP=0.15 FM_LIVENESS_EVIDENCE_TIMEOUT=1 run "$home" "$fakebin" --json)
+  # Keep the idle window below the total freeze duration, but leave enough room
+  # for one deliberately slow copy plus process-launch overhead on a loaded host.
+  json=$(REAL_CP="$real_cp" SLOW_CP_SLEEP=0.15 FM_LIVENESS_EVIDENCE_TIMEOUT=2 run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
     .secondmates[] | select(.id=="progressive")
     | .provenance=="structured-home" and .state=="active_child_work"
@@ -845,7 +847,7 @@ exec "${REAL_PERL:?}" -e 'my $t=shift; my $pid=fork; die unless defined $pid; if
 SH
   chmod +x "$badbin/perl"
   neutralized=$(PATH="$badbin:$fakebin:$PATH" REAL_PERL="$real_perl" REAL_CP="$real_cp" SLOW_CP_SLEEP=0.15 \
-    FM_HOME="$home" FM_LIVENESS_EVIDENCE_TIMEOUT=1 FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" \
+    FM_HOME="$home" FM_LIVENESS_EVIDENCE_TIMEOUT=2 FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" \
     FM_BEARINGS_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" "$BEARINGS" --json)
   printf '%s' "$neutralized" | jq -e '
     .secondmates[] | select(.id=="progressive")
@@ -1471,9 +1473,12 @@ test_perl_fallback_bounds_github_call() {
   done
   started=$(date +%s)
   json=$(PATH="$fakebin:$toolbin" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z \
+    FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" \
     FM_BEARINGS_PR_TIMEOUT=1 NET_LOG="$home/net.log" FAKE_GH_SLEEP=1 "$BEARINGS" --include-prs --json)
   elapsed=$(( $(date +%s) - started ))
-  [ "$elapsed" -lt 10 ] || fail "Perl fallback did not bound a stalled gh call (${elapsed}s)"
+  # Several separately bounded forge probes run in sequence. Keep the suite-level
+  # ceiling below one unbounded 30-second fixture stall without assuming an idle host.
+  [ "$elapsed" -lt 20 ] || fail "Perl fallback did not bound a stalled gh call (${elapsed}s)"
   printf '%s' "$json" | jq -e '.prs | test("NOT_VERIFIABLE")' >/dev/null \
     || fail "timed-out gh call did not fail soft: $json"
   pass "Perl fallback bounds stalled GitHub calls without coreutils timeout"
@@ -1705,6 +1710,7 @@ test_landed_prs_normalize_supported_urls_and_require_live_merged_state() {
 - [x] merged-pr - Merged PR https://github.com/kunchenguid/firstmate/pull/7/ (repo: firstmate) (kind: ship) (merged 2026-07-11)
 - [x] open-pr - Open PR https://github.com/kunchenguid/firstmate/pull/9 (repo: firstmate) (kind: ship) (done 2026-07-11)
 - [x] unverifiable-pr - Unverifiable PR https://example.invalid/acme/repo/pull/10 (repo: firstmate) (kind: ship) (done 2026-07-11)
+- [x] gitlab-local-done - GitLab MR claimed done https://gitlab.example/acme/repo/-/merge_requests/11 (repo: firstmate) (kind: ship) (done 2026-07-11)
 - [x] local-completion - Local completion (repo: firstmate) (kind: scout) (done 2026-07-11)
 EOF
   fakebin=$(make_fakebin "$home")
@@ -1719,9 +1725,12 @@ EOF
         and .verification == "verified_live" and .state == "OPEN"))
       and (.candidate_prs | any(.url == "https://example.invalid/acme/repo/pull/10"
         and .verification == "NOT_VERIFIABLE"))
-      and (.omitted | any(.surface == "selected PR completion(s) excluded from landed by live forge state: 2"))
+      and (.candidate_prs | any(.url == "https://gitlab.example/acme/repo/-/merge_requests/11"
+        and .verification == "NOT_VERIFIABLE"))
+      and (.landed | any(.id == "gitlab-local-done") | not)
+      and (.omitted | any(.surface == "selected PR completion(s) excluded from landed by live forge state: 3"))
   ' >/dev/null || fail "local Done state substituted for live merged PR evidence: $json"
-  pass "landed normalizes supported PR URLs while requiring live merged state"
+  pass "landed requires live merged state and refuses an unverified GitLab local-done claim"
 }
 
 test_landed_default_balances_dominant_and_sparse_homes() {

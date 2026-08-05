@@ -667,7 +667,7 @@ EOF
     .backlog.records[] | select(.id == "done-comma")
     | .repo == "gamma"
       and .merged == "2026-07-09"
-      and .completion == {verb:"merged",date:"2026-07-09"}
+      and .completion == {local_claim:"merged",date:"2026-07-09"}
   ' >/dev/null || fail "done comma metadata did not split"
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "done-bracket-pr")
@@ -675,14 +675,14 @@ EOF
       and .title == "Done Bracket PR"
       and .pr_url == "https://github.com/kunchenguid/firstmate/pull/43"
       and .links == ["https://github.com/kunchenguid/firstmate/pull/43"]
-      and .completion == {verb:"merged",date:"2026-07-12"}
+      and .completion == {local_claim:"merged",date:"2026-07-12"}
   ' >/dev/null || fail "bracketed PR artifact did not parse"
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "reported-comma")
     | .repo == "gamma"
       and .title == "Reported Scout"
       and .reported == "2026-07-10"
-      and .completion == {verb:"reported",date:"2026-07-10"}
+      and .completion == {local_claim:"reported",date:"2026-07-10"}
   ' >/dev/null || fail "reported closure metadata did not parse"
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "done-note")
@@ -690,7 +690,7 @@ EOF
       and .title == "Done Note"
       and .local_note == "local main"
       and .done == "2026-07-11"
-      and .completion == {verb:"done",date:"2026-07-11"}
+      and .completion == {local_claim:"done",date:"2026-07-11"}
   ' >/dev/null || fail "done closure metadata did not parse"
   printf '%s' "$out" | jq -e --arg data "$data" '
     .tasks[] | select(.id == "bold-task")

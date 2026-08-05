@@ -10,15 +10,16 @@
 #   - Endpoint presence comes from fm_backend_agent_state, whose backend adapter
 #     verifies the recorded endpoint rather than accepting a pane label as a
 #     process claim.
-#   - Worker ownership comes from the kernel's process table plus
-#     `lsof -a -d cwd`: every PID is bound to the exact worktree= path recorded
-#     in state/<id>.meta.
+#   - Worker ownership comes from a random per-spawn token recorded in task
+#     metadata and inherited by that task's process tree. `lsof -a -d cwd`
+#     remains a second constraint, never task identity: pooled worktrees are
+#     intentionally reused and cannot distinguish their former owners.
 #   - Activity comes from two independent observations: a hash of backend output
 #     at each sample and the delta of cumulative process CPU time.
 #
 # CPU is never read as instantaneous %CPU.
 # Each sample takes the MAX cumulative CPU across EVERY matching harness process
-# whose cwd is the exact task worktree.
+# carrying the task token whose cwd is the exact task worktree.
 # This avoids both launcher traps: Codex's near-zero node launcher is not chosen
 # ahead of its native codex child, and Claude's first short-lived wrapper is not
 # chosen ahead of the real long-running agent.
@@ -47,7 +48,8 @@
 #   active | parked | inactive | absent | unverified
 #
 # Test seams name external evidence producers, not classifier decisions:
-#   FM_LIVENESS_PROCESS_SNAPSHOT_BIN prints pid<TAB>cpu_ms<TAB>comm<TAB>cwd and
+#   FM_LIVENESS_PROCESS_SNAPSHOT_BIN prints
+#     pid<TAB>cpu_ms<TAB>comm<TAB>cwd<TAB>worker_token and
 #     may write its CPU-read clock to FM_LIVENESS_PROCESS_TIMESTAMP_FILE.
 #   FM_LIVENESS_ENDPOINT_BIN prints an fm_backend_agent_state verdict.
 #   FM_LIVENESS_CAPTURE_BIN prints the current endpoint output.
@@ -63,7 +65,7 @@ INTERVAL_MS=${FM_LIVENESS_INTERVAL_MS:-7500}
 case "$INTERVAL_MS" in
   ''|*[!0-9]*|0) echo "fm-liveness-snapshot: FM_LIVENESS_INTERVAL_MS must be a positive integer" >&2; exit 2 ;;
 esac
-EVIDENCE_TIMEOUT=${FM_LIVENESS_EVIDENCE_TIMEOUT:-2}
+EVIDENCE_TIMEOUT=${FM_LIVENESS_EVIDENCE_TIMEOUT:-5}
 REMOTE_OVERHEAD_SECS=${FM_LIVENESS_REMOTE_OVERHEAD_SECS:-2}
 case "$EVIDENCE_TIMEOUT" in
   ''|*[!0-9]*|0) echo "fm-liveness-snapshot: FM_LIVENESS_EVIDENCE_TIMEOUT must be a positive integer" >&2; exit 2 ;;
@@ -78,7 +80,7 @@ usage() {
   cat <<'EOF'
 usage: fm-liveness-snapshot.sh --json [--id <task-id>]
 
-Measure endpoint presence, exact-worktree worker presence, output change, and
+Measure endpoint presence, task-bound worker presence, output change, and
 two-sample cumulative CPU delta for recorded tasks in the current FM_HOME.
 EOF
 }
@@ -210,8 +212,8 @@ threshold_for() {  # <family>
   esac
 }
 
-metrics_for() {  # <snapshot> <worktree> <family> -> max_ms<TAB>pid_count<TAB>worker_count
-  awk -F '\t' -v wt="$2" -v family="$3" '
+metrics_for() {  # <snapshot> <worktree> <family> <worker-token> -> max_ms<TAB>pid_count<TAB>worker_count
+  awk -F '\t' -v wt="$2" -v family="$3" -v token="$4" '
     function worker(comm, family, base) {
       base=comm; sub(/^.*\//,"",base); base=tolower(base)
       if (family=="claude") return base ~ /^claude/
@@ -223,7 +225,7 @@ metrics_for() {  # <snapshot> <worktree> <family> -> max_ms<TAB>pid_count<TAB>wo
       if (family=="kimi") return base ~ /^kimi/
       return 0
     }
-    $4==wt {
+    token != "" && $4==wt && $5==token {
       count++
       if (worker($3,family)) {
         workers++
@@ -246,6 +248,7 @@ unverified_remote_record() {  # <id> <harness> <worktree> <backend> <target>
      endpoint:{presence:"unverified",raw:"remote_unreadable"},
      worker:{presence:"unverified",pids_sample_1:0,pids_sample_2:0,
        harness_processes_sample_1:0,harness_processes_sample_2:0},
+     evidence:{grade:"unverified"},
      output:{sample_1_readable:false,sample_2_readable:false,changed:false},
      cpu:{sample_1_max_ms:0,sample_2_max_ms:0,delta_ms:0,rate_ms_per_minute:0,
        baseline:"unverified",threshold_ms_per_minute:null},activity:"unverified"}'
@@ -271,7 +274,10 @@ for meta in "$STATE"/*.meta; do
     target=$(fm_backend_target_of_meta "$meta")
     route=local
   fi
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$harness" "$worktree" "$backend" "$target" "$route" >> "$METAS"
+  worker_token=$(meta_value "$meta" worker_token)
+  case "$worker_token" in *[!0-9a-f]*) worker_token= ;; esac
+  [ "${#worker_token}" -eq 32 ] || worker_token=
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$harness" "$worktree" "$backend" "$target" "$route" "$worker_token" >> "$METAS"
 done
 
 if [ ! -s "$METAS" ]; then
@@ -297,7 +303,7 @@ REMOTE_JOBS="$TMP/remote-jobs.tsv"
 REMOTE_RECORDS="$TMP/remote-records.jsonl"
 : > "$REMOTE_JOBS"
 : > "$REMOTE_RECORDS"
-while IFS=$(printf '\t') read -r id harness worktree backend target route; do
+while IFS=$(printf '\t') read -r id harness worktree backend target route worker_token; do
   remote_pid=
   [ "$route" = remote ] || continue
   if [ "$backend" = unknown ] || [ "$target" = __FM_MISSING_TARGET__ ]; then
@@ -327,7 +333,7 @@ ENDPOINTS="$TMP/endpoints.tsv"
 OUTPUT1="$TMP/output-1.tsv"
 : > "$ENDPOINTS"
 : > "$OUTPUT1"
-while IFS=$(printf '\t') read -r id harness worktree backend target route; do
+while IFS=$(printf '\t') read -r id harness worktree backend target route worker_token; do
   [ -n "$id" ] || continue
   [ "$route" = local ] || continue
   if [ -z "$target" ]; then
@@ -392,16 +398,16 @@ done < "$REMOTE_JOBS"
 
 RECORDS="$TMP/records.jsonl"
 cp "$REMOTE_RECORDS" "$RECORDS"
-while IFS=$(printf '\t') read -r id harness worktree backend target route; do
+while IFS=$(printf '\t') read -r id harness worktree backend target route worker_token; do
   [ -n "$id" ] || continue
   [ "$route" = local ] || continue
   family=$(harness_family "$harness")
   threshold=$(threshold_for "$family")
   IFS=$(printf '\t') read -r cpu1 pids1 workers1 <<EOF
-$(metrics_for "$SAMPLE1" "$worktree" "$family")
+$(metrics_for "$SAMPLE1" "$worktree" "$family" "$worker_token")
 EOF
   IFS=$(printf '\t') read -r cpu2 pids2 workers2 <<EOF
-$(metrics_for "$SAMPLE2" "$worktree" "$family")
+$(metrics_for "$SAMPLE2" "$worktree" "$family" "$worker_token")
 EOF
   verdict=$(awk -F '\t' -v id="$id" '$1==id {print $2; exit}' "$ENDPOINTS")
   IFS=$(printf '\t') read -r output1_ok hash1 <<EOF
@@ -425,12 +431,21 @@ EOF
     missing) endpoint=verified_absent ;;
     *) endpoint=unverified ;;
   esac
-  if [ "$PROCESS1_OK" = true ] && [ "$PROCESS2_OK" = true ]; then
+  if [ -n "$worker_token" ] && [ "$PROCESS1_OK" = true ] && [ "$PROCESS2_OK" = true ]; then
+    evidence_grade=task_bound_process
     if [ "$workers2" -gt 0 ]; then worker=verified_present
     else worker=verified_absent
     fi
+  elif [ -z "$worker_token" ]; then
+    evidence_grade=endpoint_only
+    case "$verdict" in
+      alive) worker=verified_present ;;
+      dead|missing) worker=verified_absent ;;
+      *) worker=unverified; evidence_grade=unverified ;;
+    esac
   else
     worker=unverified
+    evidence_grade=unverified
   fi
 
   cpu_worker_evidence=false
@@ -468,7 +483,7 @@ EOF
     --arg id "$id" --arg harness "$harness" --arg family "$family" \
     --arg backend "$backend" --arg target "$target" --arg worktree "$worktree" \
     --arg endpoint "$endpoint" --arg endpoint_raw "$verdict" --arg worker "$worker" \
-    --arg activity "$activity" --arg baseline "$baseline" \
+    --arg activity "$activity" --arg baseline "$baseline" --arg evidence_grade "$evidence_grade" \
     --argjson cpu1 "$cpu1" --argjson cpu2 "$cpu2" --argjson delta "$delta" \
     --argjson rate "$rate" --argjson pids1 "$pids1" --argjson pids2 "$pids2" \
     --argjson workers1 "$workers1" --argjson workers2 "$workers2" \
@@ -480,6 +495,7 @@ EOF
       endpoint:{presence:$endpoint,raw:$endpoint_raw},
       worker:{presence:$worker,pids_sample_1:$pids1,pids_sample_2:$pids2,
         harness_processes_sample_1:$workers1,harness_processes_sample_2:$workers2},
+      evidence:{grade:$evidence_grade},
       output:{sample_1_readable:$output1,sample_2_readable:$output2,changed:$changed},
       cpu:{sample_1_max_ms:$cpu1,sample_2_max_ms:$cpu2,delta_ms:$delta,
         rate_ms_per_minute:$rate,baseline:$baseline,

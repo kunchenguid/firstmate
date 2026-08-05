@@ -41,7 +41,7 @@
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
 #   4. No run for this crew (pre-validation, or kind=scout): use two samples
-#      bound to the recorded endpoint and exact worktree.
+#      bound to the task's spawn token, with exact worktree as a second guard.
 #      Changed output or above-baseline cumulative CPU -> working; a verified
 #      worker at its harness-relative baseline -> parked; absent, inactive, or
 #      unverified evidence -> unknown.

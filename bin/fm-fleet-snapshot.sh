@@ -104,7 +104,7 @@ FM_SNAPSHOT_REMOTE_PROBE_TIMEOUT=${FM_SNAPSHOT_REMOTE_PROBE_TIMEOUT:-5}
 FM_SNAPSHOT_TASK_OVERHEAD_SECS=${FM_SNAPSHOT_TASK_OVERHEAD_SECS:-1}
 FM_CREW_STATE_NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
 FM_LIVENESS_INTERVAL_MS=${FM_LIVENESS_INTERVAL_MS:-7500}
-FM_LIVENESS_EVIDENCE_TIMEOUT=${FM_LIVENESS_EVIDENCE_TIMEOUT:-2}
+FM_LIVENESS_EVIDENCE_TIMEOUT=${FM_LIVENESS_EVIDENCE_TIMEOUT:-5}
 FM_LIVENESS_REMOTE_OVERHEAD_SECS=${FM_LIVENESS_REMOTE_OVERHEAD_SECS:-2}
 FM_SNAPSHOT_INCLUDE_LIVENESS=${FM_SNAPSHOT_INCLUDE_LIVENESS:-0}
 case "$FM_SNAPSHOT_INCLUDE_LIVENESS" in 0|1) ;; *) echo "fm-fleet-snapshot: FM_SNAPSHOT_INCLUDE_LIVENESS must be 0 or 1" >&2; exit 2 ;; esac
@@ -411,10 +411,10 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
       (metadata_word($rest; "merged")) as $merged
       | (metadata_word($rest; "reported")) as $reported
       | (metadata_word($rest; "done")) as $done
-      | if $merged != null then {verb:"merged",date:$merged}
-        elif $reported != null then {verb:"reported",date:$reported}
-        elif $done != null then {verb:"done",date:$done}
-        else {verb:null,date:null} end;
+      | if $merged != null then {local_claim:"merged",date:$merged}
+        elif $reported != null then {local_claim:"reported",date:$reported}
+        elif $done != null then {local_claim:"done",date:$done}
+        else {local_claim:null,date:null} end;
     def row_match($line):
       (($line | capture("^[-*][[:space:]]+\\[(?<check>[ xX])\\][[:space:]]+(?<id>[^[:space:]]+)[[:space:]]+-[[:space:]]+(?<rest>.*)$")?) //
        (($line | capture("^[-*][[:space:]]+\\*\\*(?<id>[^*]+)\\*\\*[[:space:]]+-[[:space:]]+(?<rest>.*)$")?)
@@ -448,7 +448,9 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
              done:metadata_word($rest; "done"),
              completion:completion($rest),
              links:links($rest),
-             pr_url:((links($rest) | map(select(test("/pull/[0-9]+"))) | .[0]) // null),
+             pr_url:((links($rest)
+               | map(select(test("/pull/[0-9]+/?$") or test("/-/merge_requests/[0-9]+/?$")))
+               | .[0]) // null),
              report_path:cap($rest; ".*(?<v>data/[^[:space:])]+/report\\.md).*"),
              local_note:local_note($rest),
              raw:$line,
@@ -927,7 +929,7 @@ secondmate_summary_timeout() {  # <child-count> <local|remote>
   fi
   if [ "$route" = remote ]; then
     interval_ms=7500
-    evidence_timeout=2
+    evidence_timeout=5
     nm_timeout=10
     task_overhead=1
   else
