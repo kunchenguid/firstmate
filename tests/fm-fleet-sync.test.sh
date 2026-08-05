@@ -196,18 +196,29 @@ SH
 # git shim: reject a ref-only "fetch origin <branch>:<branch>" update (the form
 # advance_local_default uses for a bare-flagged clone) with a non-fast-forward
 # error, while delegating every other call - including the plain prune fetch -
-# to real git.
+# to real git. Mirrors real git's reporting exactly: the refspec report is the
+# only place the refusal states its reason, it is suppressed entirely by
+# --quiet, and it leads with a "From <url>" line before the rejection itself.
 git_bare_fetch_rejects() {
   cat > "$1/git" <<'SH'
 #!/usr/bin/env bash
 real=${REAL_GIT_FOR_TEST:?}
+quiet=no
+for a in "$@"; do
+  if [ "$a" = --quiet ] || [ "$a" = -q ]; then
+    quiet=yes
+  fi
+done
 for a in "$@"; do
   case "$a" in
     *:*)
       branch=${a%%:*}
       branch2=${a#*:}
       if [ -n "$branch" ] && [ "$branch" = "$branch2" ]; then
-        echo "! [rejected]        $branch -> $branch  (non-fast-forward)" >&2
+        if [ "$quiet" = no ]; then
+          echo "From /fake/origin-should-not-be-reported" >&2
+          echo " ! [rejected]        $branch -> $branch  (non-fast-forward)" >&2
+        fi
         exit 1
       fi
       ;;
@@ -408,8 +419,13 @@ test_bare_clone_rejected_advance_reports_skip_untouched() {
   run_sync_guarded "$home" "$fakebin" "$out" "$err" bare-reject
   set -e
 
-  assert_contains "$(cat "$out")" "bare-reject: skipped: fast-forward failed" \
-    "a rejected bare ref-only advance reports a clear skip, not a silent success"
+  assert_contains "$(cat "$out")" \
+    "bare-reject: skipped: fast-forward failed: ! [rejected] main -> main (non-fast-forward)" \
+    "a rejected bare ref-only advance reports a clear skip with git's reason, not a silent success"
+  # The reason must be the rejection line, not the "From <url>" line git prints
+  # ahead of it.
+  assert_not_contains "$(cat "$out")" "origin-should-not-be-reported" \
+    "the skip reason quoted the fetch's From line instead of the rejection"
   [ "$(head_sha "$clone")" = "$before" ] || fail "bare clone advanced despite the rejected fetch"
   pass "a bare clone whose ref-only advance is rejected reports a clear skip and is left untouched"
 }

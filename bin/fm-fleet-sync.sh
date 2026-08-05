@@ -132,6 +132,19 @@ first_line() {
   printf '%s\n' "$1" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p'
 }
 
+# The line of a failed command's output that names the reason. `git fetch`'s
+# refspec report leads with a "From <url>" line and puts the refusal itself in a
+# later "! [rejected] ..." line, so the first line alone would report the remote
+# URL instead of the failure. Falls back to the first line when no recognisable
+# failure line is present (which is what `git merge --ff-only` produces: its
+# "fatal: Not possible to fast-forward, aborting." is already line one).
+failure_line() {
+  local line
+  line=$(printf '%s\n' "$1" | grep -m1 -E '^[[:space:]]*(fatal:|error:|! \[rejected\]|! \[remote rejected\])' || true)
+  [ -n "$line" ] || line=$1
+  first_line "$(printf '%s\n' "$line" | sed '1s/^[[:space:]]*//')"
+}
+
 # True when git stderr shows the packed-refs.lock "File exists" race. The lock
 # path can appear anywhere in the message (git prefixes it with the failed ref op,
 # e.g. "could not delete reference ...:"). Other "File exists" errors must not match.
@@ -220,11 +233,14 @@ fetch_with_packed_refs_lock_guard() {
 # merge into, so it advances the local ref directly with a ref-only
 # `git fetch origin <branch>:<branch>` - the same pattern that harness's own
 # tooling uses (see the bare-clone note near the top of this file). Git refuses
-# a non-fast-forward update here the same way --ff-only refuses one. Sets
-# ADVANCE_OUTPUT to the command's combined output; returns its exit status.
+# a non-fast-forward update here the same way --ff-only refuses one. The fetch
+# runs without --quiet because that flag suppresses git's refspec report - the
+# only place a rejection states its reason - which would leave that failure
+# reported with no reason at all. Sets ADVANCE_OUTPUT to the command's combined
+# output (only read on failure); returns its exit status.
 advance_local_default() {
   if [ "$bare" = yes ]; then
-    ADVANCE_OUTPUT=$(git -C "$PROJ" fetch origin --quiet "$DEFAULT:$DEFAULT" 2>&1)
+    ADVANCE_OUTPUT=$(git -C "$PROJ" fetch origin "$DEFAULT:$DEFAULT" 2>&1)
   else
     ADVANCE_OUTPUT=$(git -C "$PROJ" merge --ff-only "$BASE" 2>&1)
   fi
@@ -430,7 +446,7 @@ sync_project() {
   if ! advance_local_default; then
     reason="fast-forward failed"
     if [ -n "$ADVANCE_OUTPUT" ]; then
-      reason="$reason: $(first_line "$ADVANCE_OUTPUT")"
+      reason="$reason: $(failure_line "$ADVANCE_OUTPUT")"
     fi
     echo "$label: skipped: $reason"
     return 0
