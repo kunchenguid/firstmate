@@ -15,9 +15,10 @@
 # and fetch failures.
 # A clone with core.bare=true set (a harness's main checkout deliberately
 # bare-flagged so it can serve as a ref-only fetch target while a branch stays
-# checked out, e.g. Nice's .claude/hooks/worktreeContext.sh) has no work tree to
-# run `git status`/`git merge` against, so it is advanced with a ref-only
-# `git fetch origin <branch>:<branch>` instead - see advance_local_default.
+# checked out, e.g. Nice's .claude/hooks/worktreeContext.sh) makes git refuse
+# every work-tree operation, including `git status` and `git merge`, so it is
+# advanced with a ref-only `git fetch origin <branch>:<branch>` instead - see
+# advance_local_default.
 # Pruning never deletes the checked-out branch or a branch that still has a
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
 # When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite
@@ -229,10 +230,11 @@ fetch_with_packed_refs_lock_guard() {
 }
 
 # Fast-forward $DEFAULT to $BASE. An ordinary clone uses `git merge --ff-only`,
-# which needs a work tree to update. A clone with $bare=yes has no work tree to
-# merge into, so it advances the local ref directly with a ref-only
-# `git fetch origin <branch>:<branch>` - the same pattern that harness's own
-# tooling uses (see the bare-clone note near the top of this file). Git refuses
+# which needs a work tree to update. A clone with $bare=yes refuses that merge
+# (see the dirty-check note in sync_project), so it advances the local ref
+# directly with a ref-only `git fetch origin <branch>:<branch>` - the same
+# pattern that harness's own tooling uses (see the bare-clone note near the top
+# of this file). Git refuses
 # a non-fast-forward update here the same way --ff-only refuses one. The fetch
 # runs without --quiet because that flag suppresses git's refspec report - the
 # only place a rejection states its reason - which would leave that failure
@@ -376,9 +378,11 @@ sync_project() {
 
   cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
   dirty=no
-  # `git status` requires a work tree; a bare-flagged clone has none to inspect,
-  # so there is nothing to detect as dirty (matches that harness's own ref-only
-  # treatment of this checkout - see the bare-clone note near the top of this file).
+  # `git status` requires a work tree. The files are still on disk (the harness
+  # keeps a branch checked out), but core.bare=true makes git refuse every
+  # work-tree operation there, so no dirty check is possible - which is the same
+  # ref-only treatment that harness gives this checkout itself (see the
+  # bare-clone note near the top of this file).
   if [ "$bare" = no ]; then
     [ -z "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ] || dirty=yes
   fi
