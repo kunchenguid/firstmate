@@ -162,11 +162,14 @@ fm_composer_strip_ghost() {
                 # (code 2 after a code 0/22 reset). The scans are separate
                 # because code "0" is de-emphasis but does NOT re-enter dim,
                 # and code "2" may appear after code "0" in the same params.
-                is_deemph = 0; dim_reentered = 0
+                is_deemph = 0; dim_reentered = 0; dark_reentered = 0
                 k_check = split(params, a_check, ";")
                 for (p_check = 1; p_check <= k_check; p_check++) {
                   v_check = a_check[p_check]; code_check = sgr_code(v_check)
                   if (code_check == "38" || code_check == "48" || code_check == "58") {
+                    if (code_check == "38" && fg38_is_dark(a_check, p_check, k_check, lumamax)) {
+                      is_deemph = 1; dark_reentered = 1; break
+                    }
                     p_check = skip_color_payload(a_check, p_check, k_check)
                     continue
                   }
@@ -181,12 +184,15 @@ fm_composer_strip_ghost() {
                   for (p_check = 1; p_check <= k_check; p_check++) {
                     v_check = a_check[p_check]; code_check = sgr_code(v_check)
                     if (code_check == "38" || code_check == "48" || code_check == "58") {
+                      if (code_check == "38" && fg38_is_dark(a_check, p_check, k_check, lumamax)) {
+                        dark_reentered = 1; break
+                      }
                       p_check = skip_color_payload(a_check, p_check, k_check)
                       continue
                     }
                     if (code_check == "2") { dim_reentered = 1; break }
                   }
-                  if (dim_reentered && gap_rev) {
+                  if ((dim_reentered || dark_reentered) && gap_rev) {
                     gap_buf = ""   # reverse-video gap content is the cursor cell, drop it
                   } else {
                     out = out gap_buf   # gap content is real, emit it

@@ -187,6 +187,50 @@ test_cursor_missing_binary_refusal() {
   pass "cursor refuses safely and actionably when the executable is unavailable"
 }
 
+test_non_cursor_launch_unsets_cursor_agent() {
+  local rec id out status launch envlog probe_out
+  id=claude-under-cursor-z5
+  rec=$(make_cursor_case claude-under-cursor "$id")
+  read_case_record "$rec"
+  printf '%s\n' claude > "$HOME_DIR/config/crew-harness"
+  # Fake claude: report whether the CURSOR_AGENT marker survived the launch
+  # boundary, set its own verified marker on children, then run harness
+  # detection - mirroring a real claude worker spawned from a cursor
+  # secondmate, whose tmux server inherits CURSOR_AGENT=1.
+  cat > "$FAKEBIN_DIR/claude" <<'SH'
+#!/usr/bin/env bash
+printf 'cursor_agent=%s\n' "${CURSOR_AGENT:-unset}" >> "${FM_FAKE_CLAUDE_ENV:-/dev/null}"
+export CLAUDECODE=1
+exec "${FM_HARNESS_PROBE:-true}"
+SH
+  chmod +x "$FAKEBIN_DIR/claude"
+  envlog="$CASE_DIR/claude.env"
+  : > "$envlog"
+  : > "$LAUNCH_LOG"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    CLAUDE_CONFIG_DIR='' GROK_HOME="$HOME_DIR/grok-home" CURSOR_AGENT=1 \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "claude spawn under CURSOR_AGENT=1 should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  case "$launch" in
+    "env -u CURSOR_AGENT "*) : ;;
+    *) fail "non-cursor launch must unset CURSOR_AGENT at the launch boundary"$'\n'"launch: $launch" ;;
+  esac
+  probe_out=$(CURSOR_AGENT=1 PATH="$FAKEBIN_DIR:$PATH" \
+    FM_HARNESS_PROBE="$HARNESS" FM_FAKE_CLAUDE_ENV="$envlog" \
+    bash -c "$launch")
+  [ "$probe_out" = claude ] \
+    || fail "harness detection under the captured launch resolved '$probe_out', expected claude"
+  assert_contains "$(cat "$envlog")" "cursor_agent=unset" \
+    "the child inherited the CURSOR_AGENT marker despite the launch-boundary unset"
+  pass "non-cursor launch unsets CURSOR_AGENT; detection resolves to the actual target harness"
+}
+
 # --- run all tests (order matters: simpler checks first) ---------------------
 
 test_cursor_env_marker
@@ -195,3 +239,4 @@ test_cursor_launch_command_typed
 test_cursor_model_flag_threaded
 test_cursor_effort_recorded_not_emitted
 test_cursor_missing_binary_refusal
+test_non_cursor_launch_unsets_cursor_agent

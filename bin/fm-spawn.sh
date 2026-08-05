@@ -2632,6 +2632,11 @@ spawn_record_traceparent() {
   return "$status"
 }
 
+
+case "$HARNESS" in
+  claude|codex|opencode|pi|pi-signed|grok|kimi) LAUNCH="env -u CURSOR_AGENT $LAUNCH" ;;
+esac
+
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.

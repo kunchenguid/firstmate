@@ -661,6 +661,38 @@ test_real_text_between_dim_runs_survives() {
   pass "fm_composer_strip_ghost: real text between dim runs survives"
 }
 
+test_dark_truecolor_ghost_after_dim_ghost_strips_empty() {
+  local result styled
+  # dim ghost → reset → dark TRUECOLOR ghost: the dark foreground is a
+  # re-entry into de-emphasis, so the whole row strips to empty (both the
+  # semicolon and colon colour forms).
+  styled=$(printf '\033[2mdim ghost\033[0m\033[38;2;60;60;60mdark ghost\033[0m')
+  result=$(fm_composer_strip_ghost <<< "$styled")
+  [ -z "$result" ] || fail "dark truecolor ghost after a dim ghost must strip to empty, got '$result'"
+  styled=$(printf '\033[2mdim ghost\033[0m\033[38:2::60:60:60mdark ghost\033[0m')
+  result=$(fm_composer_strip_ghost <<< "$styled")
+  [ -z "$result" ] || fail "dark colon-truecolor ghost after a dim ghost must strip to empty, got '$result'"
+  # A reverse-video cursor cell between the dim exit and the dark re-entry is
+  # dropped exactly like the dim re-entry case.
+  styled=$(printf '\033[2mg\033[0;7mA\033[38;2;60;60;60mrest\033[0m')
+  result=$(fm_composer_strip_ghost <<< "$styled")
+  case "$result" in
+    *A*) fail "reverse-video cursor cell survived a dark truecolor re-entry: result='$result'" ;;
+  esac
+  pass "fm_composer_strip_ghost: dark TRUECOLOR re-entry after a dim ghost strips to empty"
+}
+
+test_real_text_between_dim_and_dark_ghost_runs_survives() {
+  local result styled
+  # dim ghost → reset → REAL text → dark TRUECOLOR ghost: the genuine normal
+  # text between the two ghost runs must survive.
+  styled=$(printf '\033[2mdim\033[0mREAL\033[38;2;60;60;60mdark\033[0m')
+  result=$(fm_composer_strip_ghost <<< "$styled")
+  [ "$result" = REAL ] \
+    || fail "real text between dim and dark truecolor ghost runs must survive, got '$result'"
+  pass "fm_composer_strip_ghost: real text between dim and dark TRUECOLOR ghost runs survives"
+}
+
 test_cursor_idle_composer_reads_empty_end_to_end() {
   local dir fb capture out
   dir="$TMP_ROOT/cursor-idle-verdict"; mkdir -p "$dir"
@@ -711,4 +743,6 @@ test_non_bordered_interior_edges_are_pending
 test_peek_output_is_escape_free
 test_cursor_reverse_video_ghost_cell_is_stripped
 test_real_text_between_dim_runs_survives
+test_dark_truecolor_ghost_after_dim_ghost_strips_empty
+test_real_text_between_dim_and_dark_ghost_runs_survives
 test_cursor_idle_composer_reads_empty_end_to_end

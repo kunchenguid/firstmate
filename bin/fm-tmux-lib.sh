@@ -89,6 +89,7 @@ FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_TMUX_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
 FM_TMUX_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 FM_TMUX_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
+FM_TMUX_CURSOR_BUSY_REGEX_DEFAULT='ctrl\+c to stop'
 
 fm_busy_lines_match() {  # [harness]
   local harness=${1:-} lines regex
@@ -103,6 +104,7 @@ fm_busy_lines_match() {  # [harness]
       pi|pi-signed) regex=$FM_TMUX_PI_BUSY_REGEX_DEFAULT ;;
       grok) regex=$FM_TMUX_GROK_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_TMUX_KIMI_BUSY_REGEX_DEFAULT ;;
+      cursor) regex=$FM_TMUX_CURSOR_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_TMUX_BUSY_REGEX_DEFAULT ;;
       *)
         # A supplied harness must never borrow another harness's signature.
@@ -388,12 +390,13 @@ fm_pane_is_busy() {  # <target> [harness]
 # and queues it for after the current turn, but keeps the typed text visible in
 # the composer. Once the Enter-retry budget is spent and a structurally proven
 # composer still reads "pending", the submit core falls back to
-# `fm_pane_is_busy`: a busy pane means the Enter was accepted and queued (report
+# `fm_pane_is_busy` (with the target harness's verified footer signature when the
+# caller supplies one): a busy pane means the Enter was accepted and queued (report
 # `empty` so the caller does not re-send), while an idle pane keeps `pending` as
 # a genuine swallow. Pending-unproven receives the same Enter retry budget but
 # never reaches this exception.
-fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
-  local target=$1 retries=$2 sleep_s=$3 i=0 state
+fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness]
+  local target=$1 retries=$2 sleep_s=$3 harness=${4:-} i=0 state
   while :; do
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
@@ -414,16 +417,16 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
   # and queued the message for processing when the current turn ends.
   # Treat it as submitted so the caller does not re-send.
   # On an idle pane, keep reporting pending - a genuine swallow.
-  if fm_pane_is_busy "$target"; then
+  if fm_pane_is_busy "$target" "$harness"; then
     printf 'empty'
   else
     printf 'pending'
   fi
 }
 
-fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5
+fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [harness]
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${6:-}
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s"
+  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$harness"
 }
