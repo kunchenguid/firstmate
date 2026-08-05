@@ -280,7 +280,6 @@ resolve_brief_project_dir() {
   fi
 }
 
-BRIEF_FORGE=unknown
 BRIEF_FORGE_RULE="Use the forge tool appropriate for this project's origin remote and chrome-devtools-axi for browser operations. Do not assume GitHub."
 BRIEF_FORGE_TOOL='the appropriate forge tool'
 BRIEF_CHANGE_REQUEST='change request'
@@ -299,16 +298,14 @@ else
       -e 's#^[^@/:]*@\([^/:]*\):.*#\1#p')
     case "$BRIEF_HOST" in
       github.com)
-        BRIEF_FORGE=github
         BRIEF_FORGE_RULE='Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.'
-        BRIEF_FORGE_TOOL='`gh-axi`'
+        BRIEF_FORGE_TOOL="\`gh-axi\`"
         BRIEF_CHANGE_REQUEST='PR'
         BRIEF_CHANGE_REQUEST_STATUS='PR'
         ;;
       gitlab.com|gitlab.*)
-        BRIEF_FORGE=gitlab
         BRIEF_FORGE_RULE='Use glab for GitLab operations and chrome-devtools-axi for browser operations.'
-        BRIEF_FORGE_TOOL='`glab`'
+        BRIEF_FORGE_TOOL="\`glab\`"
         BRIEF_CHANGE_REQUEST='merge request'
         BRIEF_CHANGE_REQUEST_STATUS='MR'
         ;;
