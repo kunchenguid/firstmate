@@ -447,11 +447,8 @@ ROWS
   pass "bootstrap enforces tasks-axi minimum version"
 }
 
-# Every axi-family floor is the current latest published version of that tool,
-# captain-bumped to keep the fleet on the newest axi tools, not the minimum
-# version that introduced a depended-on behavior. bin/fm-bootstrap.sh's header
-# owns that policy; these rows only pin that a build below the floor is reported
-# and a build at or above it is silent.
+# These rows exercise the real bootstrap check with a fake quota-axi answering
+# --version: below the floor produces MISSING, while at or above is silent.
 test_quota_axi_min_version() {
   local label version mode case_dir fakebin out missing n
   missing='MISSING: quota-axi (install: npm install -g quota-axi)'
