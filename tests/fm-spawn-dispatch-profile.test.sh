@@ -475,7 +475,7 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
 test_agy_threads_model_effort_and_completion_callback() {
   local rec id out status launch agylog
   id=profile-agy-complete-z6c
-  rec=$(make_spawn_case profile-agy-complete agy "$id")
+  rec=$(make_spawn_case profile-agy-complete-__ID__ agy "$id")
   read_case_record "$rec"
   agylog="$CASE_DIR/agy.log"
 
