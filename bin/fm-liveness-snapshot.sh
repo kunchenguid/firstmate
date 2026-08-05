@@ -425,9 +425,7 @@ EOF
     missing) endpoint=verified_absent ;;
     *) endpoint=unverified ;;
   esac
-  if [ "$endpoint" = verified_absent ]; then
-    worker=verified_absent
-  elif [ "$PROCESS1_OK" = true ] && [ "$PROCESS2_OK" = true ]; then
+  if [ "$PROCESS1_OK" = true ] && [ "$PROCESS2_OK" = true ]; then
     if [ "$workers2" -gt 0 ]; then worker=verified_present
     else worker=verified_absent
     fi
@@ -450,16 +448,16 @@ EOF
   baseline=unverified
   if [ -n "$threshold" ] && [ "$TIMING_OK" = true ]; then baseline=verified; fi
 
-  if [ "$endpoint" = verified_absent ]; then
+  if [ "$worker" = verified_present ] && [ "$output_changed" = true ]; then
+    activity=active
+  elif [ "$worker" = verified_present ] && [ "$baseline" = verified ] && [ "$cpu_worker_evidence" = true ] && [ "$rate" -ge "$threshold" ]; then
+    activity=active
+  elif [ "$endpoint" = verified_absent ] && [ "$worker" = verified_absent ]; then
     activity=absent
   elif [ "$endpoint" = unverified ] || [ "$worker" = unverified ]; then
     activity=unverified
   elif [ "$worker" = verified_absent ]; then
     activity=inactive
-  elif [ "$output_changed" = true ]; then
-    activity=active
-  elif [ "$baseline" = verified ] && [ "$cpu_worker_evidence" = true ] && [ "$rate" -ge "$threshold" ]; then
-    activity=active
   elif [ "$baseline" = verified ] && [ "$output1_ok" = true ] && [ "$output2_ok" = true ]; then
     activity=parked
   else

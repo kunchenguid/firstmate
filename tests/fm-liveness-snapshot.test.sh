@@ -275,14 +275,18 @@ test_endpoint_three_way_and_output_activity() {
 
   dir=$(make_case endpoint-absent claude); install_evidence "$dir"
   json=$(E_ENDPOINT=missing E_FAMILY=claude E_PROCESS=working run_case "$dir")
-  printf '%s' "$json" | jq -e '.records[0] | .endpoint.presence=="verified_absent" and .activity=="absent"' >/dev/null \
-    || fail "authoritatively missing endpoint was not absent: $json"
+  printf '%s' "$json" | jq -e '
+    .records[0] | .endpoint.presence=="verified_absent"
+      and .worker.presence=="verified_present" and .activity=="active"
+  ' >/dev/null || fail "missing endpoint erased independently active process evidence: $json"
 
   dir=$(make_case endpoint-unverified claude); install_evidence "$dir"
   json=$(E_ENDPOINT=unreadable E_FAMILY=claude E_PROCESS=working run_case "$dir")
-  printf '%s' "$json" | jq -e '.records[0] | .endpoint.presence=="unverified" and .activity=="unverified"' >/dev/null \
-    || fail "unreadable endpoint was silently collapsed to present or absent: $json"
-  pass "endpoint presence is three-way and changed output independently establishes work"
+  printf '%s' "$json" | jq -e '
+    .records[0] | .endpoint.presence=="unverified"
+      and .worker.presence=="verified_present" and .activity=="active"
+  ' >/dev/null || fail "unreadable endpoint erased independently active process evidence: $json"
+  pass "endpoint presence remains three-way while independent process or output evidence establishes work"
 }
 
 test_local_evidence_producers_are_bounded() {
@@ -302,8 +306,10 @@ test_local_evidence_producers_are_bounded() {
   json=$(FM_LIVENESS_EVIDENCE_TIMEOUT=1 E_ENDPOINT_SLEEP=30 run_case "$dir")
   elapsed=$(( $(date +%s) - started ))
   [ "$elapsed" -lt 5 ] || fail "stalled endpoint producer exceeded the shared bound (${elapsed}s)"
-  printf '%s' "$json" | jq -e '.records[0] | .endpoint.presence=="unverified" and .activity=="unverified"' >/dev/null \
-    || fail "stalled endpoint evidence did not degrade to unverified: $json"
+  printf '%s' "$json" | jq -e '
+    .records[0] | .endpoint.presence=="unverified"
+      and .worker.presence=="verified_present" and .activity=="active"
+  ' >/dev/null || fail "stalled endpoint evidence erased independently active process evidence: $json"
 
   dir=$(make_case local-capture-stall claude); install_evidence "$dir"
   started=$(date +%s)
@@ -650,9 +656,6 @@ neutralized_active_assertion_fails() {  # <label> <dir> <env command args...>
 
 test_neutralization_matrix_goes_red() {
   local dir
-  dir=$(make_case neutralize-endpoint claude); install_evidence "$dir"
-  neutralized_active_assertion_fails endpoint "$dir" E_ENDPOINT=missing E_FAMILY=claude E_PROCESS=working
-
   dir=$(make_case neutralize-cwd claude); install_evidence "$dir"
   neutralized_active_assertion_fails cwd "$dir" E_ENDPOINT=alive E_FAMILY=claude E_PROCESS=wrong-cwd
 
@@ -664,7 +667,7 @@ test_neutralization_matrix_goes_red() {
 
   dir=$(make_case neutralize-output claude); install_evidence "$dir"
   neutralized_active_assertion_fails output-delta "$dir" E_ENDPOINT=alive E_FAMILY=claude E_PROCESS=working E_CPU2=1000 E_OUTPUT=static
-  pass "neutralizing endpoint, CWD, max-CPU, CPU-delta, or output-delta evidence makes the active assertion RED"
+  pass "neutralizing CWD, max-CPU, CPU-delta, or output-delta evidence makes the active assertion RED"
 }
 
 test_harness_relative_cpu_rows
