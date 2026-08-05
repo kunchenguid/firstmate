@@ -46,14 +46,18 @@ ok - a channel history gap preserves state without resurfacing uncounted uploads
 ok - duplicate collection is excluded by one home-local lock
 ok - a scheduled report contending with a live collection defers explicitly
 ok - a report rendered from an earlier receipt names that receipt's date and mode
+ok - bounded retention removes only expired indexed evidence and never a pending report
+ok - lock recovery refuses live, young, and sub-hour cases and only preserves an aged dead lock
 ok - LaunchAgent definitions are 04:00/08:00 exact, idempotent, static, and transactional on refusal
 # all fm-daily-upstream tests passed
 ```
 
-The matrix covers green, red, and missing checks; clean, dirty, diverged, off-default, local-only, production-bearing, ambiguous-origin, absent, and unregistered project outcomes; private output canaries; report preservation; authenticated report offers; channel initialization, new upload, dedupe, and history-gap preservation; duplicate locking; scheduled report lock contention; earlier-receipt attribution; bounded report re-offer cadence; notification absence; exact calendar hours; no `RunAtLoad`; install idempotence; unsafe-file refusal; transactional uninstall refusal; and preservation of unrelated LaunchAgent files.
+The matrix covers green, red, and missing checks; clean, dirty, diverged, off-default, local-only, production-bearing, ambiguous-origin, absent, and unregistered project outcomes; private output canaries; report preservation; authenticated report offers; channel initialization, new upload, dedupe, and history-gap preservation; duplicate locking; scheduled report lock contention; earlier-receipt attribution; bounded report re-offer cadence; bounded retention; dead-lock recovery refusal and preservation; notification absence; exact calendar hours; no `RunAtLoad`; install idempotence; unsafe-file refusal; transactional uninstall refusal; and preservation of unrelated LaunchAgent files.
 The 04:00 and 08:00 definitions use local `StartCalendarInterval` triggers, while the absence of `RunAtLoad` and the report grace plus bounded lock wait cover sleep-delayed launch without an unscheduled login update or a partial receipt read.
 The contention test fabricates a live collection lock and requires the scheduled report to return the explicit `report=deferred; reason=run-lock-busy` outcome rather than ending silently under `set -e`.
 The re-offer test runs the exact generated check three times and requires the pending report to be offered, then suppressed within the cadence, then offered again once the interval has elapsed.
+The retention test expires every indexed receipt and still requires the pending report, the unindexed operator evidence, and the unindexed latest-report pointer to survive, with a repeated pass removing nothing further.
+The lock-recovery test requires an explicit refusal for a sub-hour threshold, a live owner, and a young dead lock, and requires the single aged dead lock to be moved aside with its owner evidence intact rather than deleted.
 
 The authoritative self-update expected-SHA race test was run with:
 

@@ -316,6 +316,99 @@ path_mode_test() {
   if [ "$(uname)" = Darwin ]; then stat -f %Lp "$1"; else stat -c %a "$1"; fi
 }
 
+test_bounded_retention_preserves_pending_and_unrelated_evidence() {
+  local root="$TMP_ROOT/update-world/home" data offers pending unrelated out
+  data="$root/data/daily-upstream"
+  offers="$root/state/daily-upstream/report-offers.index"
+  pending=$(cut -f2 "$offers" | tail -1)
+  [ -n "$pending" ] || fail "retention fixture has no pending report to preserve"
+  unrelated="$data/operator-note.txt"
+  printf 'operator evidence\n' > "$unrelated"
+  chmod 600 "$unrelated"
+  assert_present "$data/receipts/2026-08-02.receipt" "retention fixture lost its oldest receipt"
+
+  # Every indexed receipt predates the threshold, but the pending report and
+  # unindexed operator evidence must survive.
+  out=$(FM_DAILY_TEST_MODE=1 FM_DAILY_TEST_TIMEZONE=America/Sao_Paulo FM_DAILY_TEST_EPOCH=900000 \
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$DAILY" cleanup --keep-days 1 2>&1)
+  assert_contains "$out" "cleanup=complete" "bounded cleanup did not complete"
+  assert_absent "$data/receipts/2026-08-02.receipt" "expired indexed receipt was retained"
+  assert_present "$data/$pending" "cleanup removed a pending report"
+  assert_present "$unrelated" "cleanup removed unindexed operator evidence"
+  assert_present "$data/latest-report.md" "cleanup removed the unindexed latest-report pointer"
+  assert_grep "$pending" "$data/retention.index" "cleanup dropped the pending report from the index"
+  assert_no_grep "receipts/2026-08-02.receipt" "$data/retention.index" "cleanup kept an index entry for a removed file"
+  [ "$(path_mode_test "$data/retention.index")" = 600 ] || fail "rewritten retention index is not 600"
+
+  # A second pass over the same index removes nothing further.
+  out=$(FM_DAILY_TEST_MODE=1 FM_DAILY_TEST_TIMEZONE=America/Sao_Paulo FM_DAILY_TEST_EPOCH=900000 \
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$DAILY" cleanup --keep-days 1 2>&1)
+  assert_contains "$out" "removed=0" "repeated cleanup removed evidence twice"
+  rm -f "$unrelated"
+  pass "bounded retention removes only expired indexed evidence and never a pending report"
+}
+
+test_lock_recovery_refuses_before_it_preserves() {
+  local root="$TMP_ROOT/update-world/home" lock preserved dead out rc
+  lock="$root/state/daily-upstream/run.lock"
+  set +e
+  out=$(FM_DAILY_TEST_MODE=1 FM_DAILY_TEST_TIMEZONE=America/Sao_Paulo FM_ROOT_OVERRIDE="$root" \
+    FM_HOME="$root" "$DAILY" recover-lock --older-than-seconds 3600 2>&1)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "absent lock recovery"
+  assert_contains "$out" "recover-lock=none" "absent lock was not reported as none"
+
+  mkdir "$lock"
+  printf '%s\n' "$$" > "$lock/pid"
+  printf '%s\n' collect > "$lock/action"
+  chmod 700 "$lock"; chmod 600 "$lock/pid" "$lock/action"
+
+  set +e
+  out=$(FM_DAILY_TEST_MODE=1 FM_DAILY_TEST_TIMEZONE=America/Sao_Paulo FM_ROOT_OVERRIDE="$root" \
+    FM_HOME="$root" "$DAILY" recover-lock --older-than-seconds 60 2>&1)
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "sub-hour threshold"
+  assert_contains "$out" "must be at least 3600 seconds" "sub-hour threshold was not refused"
+  assert_present "$lock/pid" "refused sub-hour recovery touched the lock"
+
+  set +e
+  out=$(FM_DAILY_TEST_MODE=1 FM_DAILY_TEST_TIMEZONE=America/Sao_Paulo FM_ROOT_OVERRIDE="$root" \
+    FM_HOME="$root" "$DAILY" recover-lock --older-than-seconds 3600 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "recovery moved aside a lock whose owner is still alive"
+  assert_contains "$out" "still alive" "live owner refusal is not explicit"
+  assert_present "$lock/pid" "refused live-owner recovery touched the lock"
+
+  # A dead owner is still preserved while the lock is younger than the threshold.
+  ( : ) & dead=$!
+  wait "$dead" 2>/dev/null || true
+  printf '%s\n' "$dead" > "$lock/pid"
+  chmod 600 "$lock/pid"
+  set +e
+  out=$(FM_DAILY_TEST_MODE=1 FM_DAILY_TEST_TIMEZONE=America/Sao_Paulo FM_ROOT_OVERRIDE="$root" \
+    FM_HOME="$root" "$DAILY" recover-lock --older-than-seconds 3600 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "recovery cleared a young dead lock"
+  assert_contains "$out" "not old enough" "young dead lock refusal is not explicit"
+  assert_present "$lock/action" "refused young-lock recovery touched the lock"
+
+  # Only an aged dead lock is moved aside, and its evidence is preserved.
+  touch -t 202601010000 "$lock"
+  out=$(FM_DAILY_TEST_MODE=1 FM_DAILY_TEST_TIMEZONE=America/Sao_Paulo FM_ROOT_OVERRIDE="$root" \
+    FM_HOME="$root" "$DAILY" recover-lock --older-than-seconds 3600 2>&1)
+  assert_contains "$out" "recover-lock=preserved-and-cleared" "aged dead lock was not cleared"
+  assert_absent "$lock" "aged dead lock was not moved aside"
+  preserved=$(find "$root/state/daily-upstream" -maxdepth 1 -name 'preserved-run-lock-*' | head -1)
+  [ -n "$preserved" ] || fail "aged dead lock was deleted instead of preserved"
+  assert_grep "$dead" "$preserved/pid" "preserved lock lost its owner evidence"
+  rm -rf "$preserved"
+  pass "lock recovery refuses live, young, and sub-hour cases and only preserves an aged dead lock"
+}
+
 test_duplicate_run_lock() {
   local root="$TMP_ROOT/update-world/home" feed="$TMP_ROOT/update-world/feed.xml" lock out rc
   lock="$root/state/daily-upstream/run.lock"
@@ -385,6 +478,8 @@ test_channel_history_gap_preserves_state_without_resurfacing
 test_duplicate_run_lock
 test_scheduled_report_defers_instead_of_vanishing
 test_report_attributes_an_earlier_receipt
+test_bounded_retention_preserves_pending_and_unrelated_evidence
+test_lock_recovery_refuses_before_it_preserves
 test_launchagent_install_verify_refusal_and_rollback
 
 echo "# all fm-daily-upstream tests passed"
