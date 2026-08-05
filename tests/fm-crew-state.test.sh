@@ -195,6 +195,13 @@ set -u
 case "${FM_FAKE_LIVENESS_MODE:-}" in
   empty) exit 0 ;;
   malformed) printf 'not a liveness result\n' ;;
+  multiline) printf 'liveness: alive · run: 01RUN · procs: 3\nunexpected extra output\n' ;;
+  malformed-verdict) printf 'liveness: alive junk · run: 01RUN · procs: 3\n' ;;
+  malformed-procs) printf 'liveness: alive · run: 01RUN · procs: 3x\n' ;;
+  alive-zero) printf 'liveness: alive · run: 01RUN · procs: 0\n' ;;
+  dead-nonzero) printf 'liveness: dead · run: 01RUN · procs: 2\n' ;;
+  empty-procs) printf 'liveness: unknown · run: 01RUN · procs:  · grade: unreadable · missing count · doing: bash t.sh (1:00)\n' ;;
+  argv-fields) printf 'liveness: unknown · run: 01RUN · procs: 3 · grade: present-unproven · presence established · doing: python -c "procs: x grade: bogus" (1:00)\n' ;;
   nonzero) exit 9 ;;
   timeout) sleep 30 ;;
   *) printf 'liveness: alive · run: 01RUN · procs: 1 · processes present\n' ;;
@@ -223,6 +230,7 @@ run_crew_state() {  # <case-dir> <id>
     FM_BACKEND_HERDR_TEST_HOOKS=firstmate-herdr-tests-v1 \
     FM_TEST_HERDR_READSTEER_REACHABLE=1 \
     FM_NM_HOME="${FM_NM_HOME:-$1/nm-home}" \
+    FM_NM_SNAP_DIR="${FM_NM_SNAP_DIR:-$1/nm-snap}" \
     "$CREW_STATE" "$2"
 }
 
@@ -516,27 +524,30 @@ test_quiet_step_reports_alive_liveness() {
   fm_write_meta "$d/state/feat-q.meta" "window=fm:fm-feat-q" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_running_quiet_step fm/feat-q test)"
   # A real process working in that worktree, named nothing like the run - the
-  # exact shape the false-negative argv search missed. It is a parent shell with
-  # a child, matching a suite loop running one script at a time, so the reported
-  # unit of work is exercised too and not just the bare verdict.
-  ( cd "$nmwt" && exec sh -c 'sleep 30 & wait' ) &
-  local sleeper=$!
-  local out=""
-  local _
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    out=$(run_crew_state "$d" feat-q)
-    case "$out" in *"liveness: alive"*" on "*) break ;; esac
-    sleep 0.3
+  # exact shape the false-negative argv search missed. The parent turns over
+  # children like the suite loop starts new scripts, so one invocation can prove
+  # progress from membership change and report the current unit of work.
+  ( cd "$nmwt" && exec sh -c 'bash -c "while :; do sleep 0.2; done" & wait' ) &
+  local worker=$!
+  sleep 0.3
+  [ ! -e "$d/nm-snap/01RUN.snap" ] \
+    || fail "the one-shot liveness fixture unexpectedly had a prior snapshot"
+  local out; out=$(run_crew_state "$d" feat-q)
+  local child
+  for child in $(pgrep -P "$worker" 2>/dev/null); do
+    pkill -9 -P "$child" 2>/dev/null || true
+    kill -9 "$child" 2>/dev/null || true
   done
-  pkill -9 -P "$sleeper" 2>/dev/null || true
-  kill -9 "$sleeper" 2>/dev/null || true
-  wait "$sleeper" 2>/dev/null || true
+  kill -9 "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
   assert_contains "$out" "liveness: alive" "a quiet step with a live process reports alive"
   # Alive alone leaves hours of runtime unexplained; naming the current unit of
   # work and its age is what separates a slow step from a hung one without
   # spending a run to find out, so the heartbeat read must carry it.
-  assert_contains "$out" " on sleep 30 (" "the alive verdict names the current unit of work and its age"
-  pass "a quiet step with a live process reports an alive liveness verdict"
+  assert_contains "$out" " on bash -c " "the alive verdict names the current unit of work"
+  printf '%s\n' "$out" | grep -qE ' on bash -c .*\([0-9]+:[0-9]{2}' \
+    || fail "the alive verdict names the current unit of work and its age: $out"
+  pass "a one-shot quiet step reports alive with no prior liveness call"
 }
 
 test_quiet_step_probe_failures_are_unknown() {
@@ -568,7 +579,53 @@ test_quiet_step_probe_failures_are_unknown() {
   out=$(FM_CREW_STATE_NM_LIVENESS_BIN="$probe" FM_FAKE_LIVENESS_MODE=malformed \
     run_crew_state "$d" feat-qu)
   assert_contains "$out" "liveness: unknown" "a malformed probe result is visibly unknown"
-  assert_contains "$out" "probe result unparseable" "a malformed result reports its parse failure"
+  assert_contains "$out" "probe protocol unreadable: verdict missing or invalid" \
+    "a malformed result reports its distinct protocol failure"
+
+  out=$(FM_CREW_STATE_NM_LIVENESS_BIN="$probe" FM_FAKE_LIVENESS_MODE=multiline \
+    run_crew_state "$d" feat-qu)
+  assert_contains "$out" "liveness: unknown" "a multiline probe result is visibly unknown"
+  assert_contains "$out" "probe protocol unreadable: multiline result" \
+    "a multiline probe result is rejected before field parsing"
+
+  out=$(FM_CREW_STATE_NM_LIVENESS_BIN="$probe" FM_FAKE_LIVENESS_MODE=malformed-verdict \
+    run_crew_state "$d" feat-qu)
+  assert_contains "$out" "liveness: unknown" "a verdict with trailing data is visibly unknown"
+  assert_contains "$out" "probe protocol unreadable: verdict missing or invalid" \
+    "a verdict with trailing data is rejected at its field boundary"
+
+  out=$(FM_CREW_STATE_NM_LIVENESS_BIN="$probe" FM_FAKE_LIVENESS_MODE=malformed-procs \
+    run_crew_state "$d" feat-qu)
+  assert_contains "$out" "liveness: unknown" "a process count with trailing data is visibly unknown"
+  assert_contains "$out" "probe protocol unreadable: numeric process count missing or invalid" \
+    "a process count with trailing data is rejected at its field boundary"
+
+  out=$(FM_CREW_STATE_NM_LIVENESS_BIN="$probe" FM_FAKE_LIVENESS_MODE=alive-zero \
+    run_crew_state "$d" feat-qu)
+  assert_contains "$out" "liveness: unknown" "an alive verdict with no processes is visibly unknown"
+  assert_contains "$out" "probe protocol unreadable: alive verdict requires processes" \
+    "an alive verdict requires a positive process count"
+
+  out=$(FM_CREW_STATE_NM_LIVENESS_BIN="$probe" FM_FAKE_LIVENESS_MODE=dead-nonzero \
+    run_crew_state "$d" feat-qu)
+  assert_contains "$out" "liveness: unknown" "a dead verdict with processes is visibly unknown"
+  assert_contains "$out" "probe protocol unreadable: dead verdict requires zero processes" \
+    "a dead verdict requires a zero process count"
+
+  out=$(FM_CREW_STATE_NM_LIVENESS_BIN="$probe" FM_FAKE_LIVENESS_MODE=empty-procs \
+    run_crew_state "$d" feat-qu)
+  assert_contains "$out" "liveness: unknown" "an empty process count is visibly unknown"
+  assert_contains "$out" "probe protocol unreadable: numeric process count missing or invalid" \
+    "an empty process count reports the probe-side protocol defect"
+  assert_not_contains "$out" "grade:" \
+    "an empty process count is not collapsed into a measurement-grade unknown"
+
+  out=$(FM_CREW_STATE_NM_LIVENESS_BIN="$probe" FM_FAKE_LIVENESS_MODE=argv-fields \
+    run_crew_state "$d" feat-qu)
+  assert_contains "$out" "liveness: unknown (grade: present-unproven; 3 procs; presence established)" \
+    "structured fields are parsed before argv text containing field names"
+  assert_contains "$out" 'on python -c "procs: x grade: bogus" (1:00)' \
+    "argv field-name text remains visible without corrupting the verdict"
 
   out=$(FM_CREW_STATE_NM_LIVENESS_BIN="$probe" FM_CREW_STATE_NM_TIMEOUT=1 FM_FAKE_LIVENESS_MODE=timeout \
     run_crew_state "$d" feat-qu)

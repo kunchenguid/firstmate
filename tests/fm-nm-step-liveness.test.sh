@@ -13,11 +13,11 @@
 # whole point is that it observes the operating system rather than a status
 # report:
 #   (a) no process in the worktree            -> dead
-#   (b) a live process in the worktree        -> alive (presence-only, --sample 0)
+#   (b) a live process in presence-only mode  -> graded unknown, never healthy
 #   (c) argv-invisible process: the exact regression for the false negative -
 #       the process is undiscoverable by name and discoverable by cwd
 #   (d) a CPU-burning process                 -> alive, with measured progress
-#   (e) a sleeping process                    -> stalled, explicitly NOT dead
+#   (e) a sleeping process                    -> graded unknown, explicitly NOT dead
 #   (f) worktree resolution through the no-mistakes home layout
 #   (g) unresolvable worktree                 -> unknown (never dead)
 #   (h) usage error                           -> exit 2
@@ -44,6 +44,9 @@ mkdir -p "$WT"
 STARTED_PIDS=""
 kill_tree() {  # <pid>
   local child
+  # Freeze the parent before enumerating descendants so a turnover fixture
+  # cannot spawn a replacement child between the pgrep and kill operations.
+  kill -STOP "$1" 2>/dev/null || true
   for child in $(pgrep -P "$1" 2>/dev/null); do
     kill_tree "$child"
   done
@@ -73,6 +76,19 @@ wait_for_barrier() {  # <barrier-dir> <probe-pid>
   return 1
 }
 
+# --- protocol: emit always carries a numeric process count ------------------
+
+out=$(FM_NM_TEST_EMIT_EMPTY_PROCS=1 "$PROBE" "$RUN_ID" --worktree "$WT" --sample 0)
+[ "$(verdict_of "$out")" = unknown ] \
+  || fail "an omitted process count must fail closed to unknown, got: $out"
+assert_contains "$out" "procs: 0" \
+  "an omitted process count is replaced by a numeric fail-closed placeholder"
+assert_contains "$out" "grade: unreadable" \
+  "an omitted process count remains unreadable rather than looking absent"
+assert_contains "$out" "could not report a numeric process count" \
+  "an omitted process count explains the probe-side protocol defect"
+pass "the probe never emits an empty process-count field"
+
 # --- (a) no process in the worktree -> dead ---------------------------------
 
 out=$("$PROBE" "$RUN_ID" --worktree "$WT" --sample 0)
@@ -80,7 +96,7 @@ out=$("$PROBE" "$RUN_ID" --worktree "$WT" --sample 0)
 assert_contains "$out" "procs: 0" "dead verdict reports zero processes"
 pass "no process with its cwd in the worktree reads dead"
 
-# --- (b) a live process in the worktree -> alive ----------------------------
+# --- (b) presence-only mode establishes presence, not health ----------------
 
 ( cd "$WT" && exec sleep 120 ) &
 SLEEPER=$!
@@ -93,14 +109,12 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   case "$out" in *"procs: 1"*) break ;; esac
   sleep 0.3
 done
-# What this case proves is DISCOVERY: the process is found through its working
-# directory. It deliberately does NOT assert `alive`, because presence is not
-# progress - `sleep 120` accrues no cpu and is correctly not called working (see
-# case (e)). Asserting alive here is exactly the conflation that let four field
-# hangs read healthy while frozen.
 assert_contains "$out" "procs: 1" "the live process is discovered through its cwd"
-[ "$(verdict_of "$out")" != dead ] || fail "a discovered live process must not read dead, got: $out"
-pass "a live process with its cwd in the worktree is discovered (presence, not health)"
+[ "$(verdict_of "$out")" = unknown ] \
+  || fail "presence-only mode must not infer health from a process, got: $out"
+assert_contains "$out" "grade: present-unproven" \
+  "presence-only mode grades established presence separately from unreadable evidence"
+pass "a live process is discovered without collapsing presence into health"
 
 # --- (c) the false-negative regression: invisible to a name search ----------
 #
@@ -112,24 +126,38 @@ by_name=$(pgrep -f "$WT" 2>/dev/null || true)
 case "$out" in *"procs: 1"*) ;; *) fail "cwd search must find what an argv search cannot, got: $out" ;; esac
 pass "a process invisible to an argv search is still found by working directory"
 
-# --- (e) a sleeping process reads stalled, never dead -----------------------
+# --- (e) stable sleeping processes remain graded unknown ---------------------
 #
-# Ordered before the CPU case so the sleeper is still the only process here.
-out=$("$PROBE" "$RUN_ID" --worktree "$WT" --sample 1)
-[ "$(verdict_of "$out")" = stalled ] || fail "an idle process must read stalled, got: $out"
+# Ordered before the CPU case so the sleeper is still the only process here. A
+# short membership sample establishes presence but cannot establish CPU progress.
+SNAP_SLEEP="$TMP_ROOT/snap-sleep"
+out=$(FM_NM_SNAP_DIR="$SNAP_SLEEP" "$PROBE" "$RUN_ID" --worktree "$WT" --sample 1)
+[ "$(verdict_of "$out")" = unknown ] || fail "a first stable sample must read unknown, got: $out"
+assert_contains "$out" "grade: present-unproven" \
+  "a stable first sample distinguishes presence from unreadable evidence"
+baseline_before=$(head -1 "$SNAP_SLEEP/$RUN_ID.snap")
+out=$(FM_NM_SNAP_DIR="$SNAP_SLEEP" "$PROBE" "$RUN_ID" --worktree "$WT" --sample 1)
+baseline_after=$(head -1 "$SNAP_SLEEP/$RUN_ID.snap")
+[ "$(verdict_of "$out")" = unknown ] || fail "a too-recent stable sample must read unknown, got: $out"
+[ "$baseline_before" = "$baseline_after" ] \
+  || fail "a too-recent caller overwrote the preserved CPU baseline"
 assert_not_contains "$out" "liveness: dead" "a sleeping process is never reported dead"
-assert_contains "$out" "blocked on I/O" "stalled explains that it may be legitimately waiting"
-pass "a process making no progress reads stalled, explicitly distinct from dead"
+assert_contains "$out" "preserved baseline" "the fast repeat explains that it kept the older baseline"
+pass "fast callers preserve the CPU baseline and keep present-without-progress unknown"
 
 # --- (d) a CPU-burning process reports measured progress --------------------
 
 ( cd "$WT" && exec bash -c 'while :; do :; done' ) &
 BURNER=$!
 STARTED_PIDS="$STARTED_PIDS $BURNER"
-out=$("$PROBE" "$RUN_ID" --worktree "$WT" --sample 1)
+SNAP_CPU="$TMP_ROOT/snap-cpu"
+FM_NM_SNAP_DIR="$SNAP_CPU" FM_NM_MIN_WINDOW=1 \
+  "$PROBE" "$RUN_ID" --worktree "$WT" --sample 1 >/dev/null
+out=$(FM_NM_SNAP_DIR="$SNAP_CPU" FM_NM_MIN_WINDOW=1 \
+  "$PROBE" "$RUN_ID" --worktree "$WT" --sample 1)
 [ "$(verdict_of "$out")" = alive ] || fail "a CPU-burning process must read alive, got: $out"
-assert_contains "$out" "cpu +" "the alive verdict reports the measured CPU delta"
-pass "a process consuming CPU reads alive with measured progress"
+assert_contains "$out" "advanced cpu over" "the alive verdict reports the long-window CPU delta"
+pass "stable membership falls back to a long-window per-process CPU comparison"
 
 kill_started
 
@@ -198,28 +226,23 @@ pass "a missing run id is a usage error"
 # (j1) The exact incident signature: a step whose log is quiet, whose agent_pid
 # is empty and whose round reads `starting` - i.e. nothing in `axi status` says
 # it is alive - is still reported ALIVE while its processes are working.
-( cd "$WT" && exec bash -c 'while :; do :; done' ) &
+# A one-shot call has no stored baseline. The fixture turns over children during
+# the short in-invocation sample, matching a suite loop beginning new units.
+( cd "$WT" && exec bash -c 'while :; do sleep 0.2; done' ) &
 LIVE=$!
 STARTED_PIDS="$STARTED_PIDS $LIVE"
-# Progress is established by comparing two observations, so seed a baseline and
-# let the process accumulate cpu before the second read. A short window is
-# permitted here only to keep the suite fast; the production floor is unchanged.
 SNAP_J="$TMP_ROOT/snap-j1"
-out=""
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-  FM_NM_SNAP_DIR="$SNAP_J" FM_NM_MIN_WINDOW=1 "$PROBE" "$RUN_ID" --worktree "$WT" --sample 0 >/dev/null
-  sleep 1.2
-  out=$(FM_NM_SNAP_DIR="$SNAP_J" FM_NM_MIN_WINDOW=1 "$PROBE" "$RUN_ID" --worktree "$WT" --sample 0)
-  [ "$(verdict_of "$out")" = alive ] && break
-done
+out=$(FM_NM_SNAP_DIR="$SNAP_J" "$PROBE" "$RUN_ID" --worktree "$WT" --sample 1)
 [ "$(verdict_of "$out")" = alive ] \
-  || fail "REGRESSION: a working step with no axi-status liveness signal must read alive, got: $out"
-pass "regression: a quiet step with no pid and no round still reads alive while working"
+  || fail "REGRESSION: a one-shot working step with no prior sample must read alive, got: $out"
+assert_contains "$out" "process membership changed in 1s" \
+  "the one-shot verdict names membership churn as its evidence"
+pass "regression: a one-shot call proves a quiet working step alive from child turnover"
 
 # (j2) A momentary gap between units of work must NOT read dead. The scan barrier
 # proves the first scan was empty before the successor is allowed to appear, so
 # this cannot pass merely because a load-delayed first scan found the successor.
-kill -9 "$LIVE" 2>/dev/null || true
+kill_tree "$LIVE"
 wait "$LIVE" 2>/dev/null || true
 GAP_BARRIER="$TMP_ROOT/gap-barrier"
 mkdir -p "$GAP_BARRIER"
@@ -351,15 +374,17 @@ FROZEN=$!
 STARTED_PIDS="$STARTED_PIDS $FROZEN"
 sleep 0.5
 
-# A first observation has nothing to compare against and must say so, never alive.
-out=$(FM_NM_SNAP_DIR="$SNAP_K" FM_NM_MIN_WINDOW=1 "$PROBE" "$RUN_ID" --worktree "$WT_K" --sample 0)
+# A first stable-membership observation has no long-window CPU baseline and must
+# say so, never alive.
+out=$(FM_NM_SNAP_DIR="$SNAP_K" FM_NM_MIN_WINDOW=1 "$PROBE" "$RUN_ID" --worktree "$WT_K" --sample 1)
 [ "$(verdict_of "$out")" = unknown ] \
   || fail "a first observation must read unknown, not a verdict, got: $out"
-pass "regression: a first observation reports unknown rather than assuming health"
+assert_contains "$out" "grade: present-unproven" \
+  "a first stable sample grades established presence separately"
+pass "regression: a first stable sample reports graded unknown rather than assuming health"
 
 # Working: the process advances its own cpu, so it is alive.
-sleep 2
-out=$(FM_NM_SNAP_DIR="$SNAP_K" FM_NM_MIN_WINDOW=1 "$PROBE" "$RUN_ID" --worktree "$WT_K" --sample 0)
+out=$(FM_NM_SNAP_DIR="$SNAP_K" FM_NM_MIN_WINDOW=1 "$PROBE" "$RUN_ID" --worktree "$WT_K" --sample 1)
 [ "$(verdict_of "$out")" = alive ] \
   || fail "a cpu-advancing process must read alive, got: $out"
 pass "regression: a genuinely working process reads alive (no false positive)"
@@ -374,17 +399,20 @@ pass "regression: a genuinely working process reads alive (no false positive)"
 # against hangs measured in hours, and the alternative (a lower floor) would
 # risk condemning slow-but-working steps, which is the costlier error.
 kill -STOP "$FROZEN" 2>/dev/null || true
-sleep 2
-FM_NM_SNAP_DIR="$SNAP_K" FM_NM_MIN_WINDOW=1 "$PROBE" "$RUN_ID" --worktree "$WT_K" --sample 0 >/dev/null
-sleep 2
-out=$(FM_NM_SNAP_DIR="$SNAP_K" FM_NM_MIN_WINDOW=1 "$PROBE" "$RUN_ID" --worktree "$WT_K" --sample 0)
+FM_NM_SNAP_DIR="$SNAP_K" FM_NM_MIN_WINDOW=1 \
+  "$PROBE" "$RUN_ID" --worktree "$WT_K" --sample 1 >/dev/null
+out=$(FM_NM_SNAP_DIR="$SNAP_K" FM_NM_MIN_WINDOW=1 \
+  "$PROBE" "$RUN_ID" --worktree "$WT_K" --sample 1)
 kill -CONT "$FROZEN" 2>/dev/null || true
 [ "$(verdict_of "$out")" != alive ] \
   || fail "REGRESSION: a present-but-frozen process must NOT read alive, got: $out"
-[ "$(verdict_of "$out")" = stalled ] \
-  || fail "a present-but-frozen process must read stalled, got: $out"
-assert_contains "$out" "PRESENT BUT NOT PROGRESSING" "the stalled detail names the field-hang signature"
-pass "regression: a present-but-frozen process reads stalled, never alive"
+[ "$(verdict_of "$out")" = unknown ] \
+  || fail "a present-but-frozen process must read unknown, got: $out"
+assert_contains "$out" "grade: present-no-progress" \
+  "the frozen verdict distinguishes present-without-progress from unreadable"
+assert_contains "$out" "PRESENT BUT NOT PROGRESSING" \
+  "the graded unknown detail names the field-hang signature"
+pass "regression: a present-but-frozen process reads graded unknown, never alive"
 
 kill_started
 
@@ -401,20 +429,20 @@ kill_started
 # does. This pins that, because an earlier build of this probe dropped exactly
 # the pids that prove turnover: a short-lived child can exit between the cwd
 # enumeration and the `ps` read, and those unreadable pids were discarded, which
-# made a healthy crawling step read `stalled`. A false hang call on a slow step
+# made a healthy crawling step read not-progressing. A false hang call on a slow step
 # is the costly direction - it condemns work that is merely starved.
 TURN_WT="$TMP_ROOT/turnover-wt"; mkdir -p "$TURN_WT"
 SNAP_M="$TMP_ROOT/snap-turnover"
-( cd "$TURN_WT" && exec bash -c 'while :; do ( sleep 1 ); done' ) &
+( cd "$TURN_WT" && exec bash -c 'while :; do ( sleep 0.2 ); done' ) &
 TURNOVER=$!
 STARTED_PIDS="$STARTED_PIDS $TURNOVER"
 sleep 0.5
-FM_NM_SNAP_DIR="$SNAP_M" FM_NM_MIN_WINDOW=1 "$PROBE" "$RUN_ID" --worktree "$TURN_WT" --sample 0 >/dev/null
-sleep 2
-out=$(FM_NM_SNAP_DIR="$SNAP_M" FM_NM_MIN_WINDOW=1 "$PROBE" "$RUN_ID" --worktree "$TURN_WT" --sample 0)
+out=$(FM_NM_SNAP_DIR="$SNAP_M" "$PROBE" "$RUN_ID" --worktree "$TURN_WT" --sample 1)
 [ "$(verdict_of "$out")" = alive ] \
-  || fail "REGRESSION: child turnover with a flat parent must read alive, got: $out"
-pass "regression: a crawling step proved alive by child turnover, not by parent cpu"
+  || fail "REGRESSION: one-shot child turnover with a flat parent must read alive, got: $out"
+assert_contains "$out" "process membership changed in 1s" \
+  "the child-turnover verdict does not rely on a short CPU rate"
+pass "regression: a one-shot crawling step is proved alive by child turnover"
 
 kill_started
 
@@ -425,11 +453,16 @@ SNAP_N="$TMP_ROOT/snap-lone"
 LONE=$!
 STARTED_PIDS="$STARTED_PIDS $LONE"
 sleep 0.5
-FM_NM_SNAP_DIR="$SNAP_N" FM_NM_MIN_WINDOW=1 "$PROBE" "$RUN_ID" --worktree "$LONE_WT" --sample 0 >/dev/null
-sleep 2
-out=$(FM_NM_SNAP_DIR="$SNAP_N" FM_NM_MIN_WINDOW=1 "$PROBE" "$RUN_ID" --worktree "$LONE_WT" --sample 0)
+FM_NM_SNAP_DIR="$SNAP_N" FM_NM_MIN_WINDOW=1 \
+  "$PROBE" "$RUN_ID" --worktree "$LONE_WT" --sample 1 >/dev/null
+out=$(FM_NM_SNAP_DIR="$SNAP_N" FM_NM_MIN_WINDOW=1 \
+  "$PROBE" "$RUN_ID" --worktree "$LONE_WT" --sample 1)
 [ "$(verdict_of "$out")" != alive ] \
   || fail "REGRESSION: a lone childless process with no cpu must not read alive, got: $out"
-pass "regression: a stranded step with no children and no cpu is not reported alive"
+[ "$(verdict_of "$out")" = unknown ] \
+  || fail "a lone childless process with no cpu must read unknown, got: $out"
+assert_contains "$out" "grade: present-no-progress" \
+  "the stranded process is visibly present but not progressing"
+pass "regression: a stranded step is graded unknown, never reported alive"
 
 kill_started

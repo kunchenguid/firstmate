@@ -97,14 +97,17 @@ That reasoning was sound but answered the wrong question: load explains *how muc
 ## What changed here
 
 `bin/fm-nm-step-liveness.sh` answers the question the tool could not: are this run's own processes alive and doing work?
-It finds processes by **working directory**, which is the one attribute that reliably identifies them, and separates four outcomes that were previously indistinguishable.
+It finds processes by **working directory**, which is the one attribute that reliably identifies them, and separates three outcomes that were previously indistinguishable.
 
 - `alive` - processes present and making measurable progress.
-- `stalled` - processes present but no progress in the sample window; explicitly not dead, because a command blocked on I/O or sleeping reads this way.
 - `dead` - provably zero processes while the step is recorded running. This is the only verdict that justifies discarding a run.
-- `unknown` - the answer could not be established. Fail-closed, following the rule `bin/fm-lock-lib.sh` already applies to `lsof`: an unreadable answer is never evidence of absence.
+- `unknown` - the answer could not be established. Fail-closed, following the rule `bin/fm-lock-lib.sh` already applies to `lsof`: an unreadable answer is never evidence of absence. Its grade distinguishes `unreadable`, `transition`, `present-unproven`, and `present-no-progress` without making any grade healthy.
 
-`bin/fm-crew-state.sh` calls it automatically whenever the active step renders quiet, so the verdict appears in the ordinary heartbeat read:
+`bin/fm-crew-state.sh` calls it automatically with a one-second in-invocation sample whenever the active step renders quiet, so a one-shot heartbeat read can establish process churn without relying on an earlier call.
+When membership stays stable, the probe falls back to per-process CPU change against a preserved snapshot that is at least 20 seconds old.
+Calls made sooner than 20 seconds do not overwrite that snapshot, so fast heartbeat polling cannot destroy its own baseline.
+`--sample 0` is the zero-wait presence-only mode: confirmed absence is `dead`, while established presence without progress is graded `unknown`, never `alive`.
+The verdict appears in the ordinary heartbeat read:
 
 ```
 state: working · source: run-step · validating (running) · liveness: alive (3 procs) on bash tests/fm-teardown-a.test.sh (38:37) · step: test
@@ -119,10 +122,14 @@ They are carried on the heartbeat read rather than left to a second command, sin
 Run the probe directly for the full detail:
 
 ```
-liveness: alive · run: 01KZ0Q9CZ4B4170FSBM0HX1F0M · procs: 7 · processes present in worktree · doing: bash tests/fm-teardown-a.test.sh (38:37)
+liveness: alive · run: 01KZ0Q9CZ4B4170FSBM0HX1F0M · procs: 7 · process membership changed in 1s (1 started, 1 stopped) · doing: bash tests/fm-teardown-a.test.sh (38:37)
 ```
 
 That is what makes slow separable from hung without spending a run to find out: a step that keeps changing what it is on is slow, and one sitting on the same script past any plausible budget is worth investigating.
+
+The one-second membership interval was measured on 2026-08-04 against a flat-parent loop that started a `sleep 0.2` child repeatedly.
+Five consecutive one-shot probes reported `alive` from one new process in all five trials; four reported `cpu +0.00s`, so membership churn rather than a short CPU rate decided those verdicts.
+Observed wall times were 2.00s, 1.65s, 1.76s, 1.69s, and 1.66s including the process scans.
 
 ## Operating rule
 

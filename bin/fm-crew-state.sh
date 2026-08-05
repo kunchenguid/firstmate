@@ -536,24 +536,27 @@ nm_active_step_name() {
   strip_quotes "$(trim "${row%%,*}")"
 }
 
-# One-line liveness verdict for the active step's own processes. Presence-only
-# (--sample 0) keeps the heartbeat path bounded and gives this consumer exactly
-# three verdicts: alive, dead, or unknown. A missing, failed, empty, or malformed
-# probe is unknown, never silence and never evidence of health or death.
+# One-line liveness verdict for the active step's own processes. A one-second
+# in-invocation membership sample lets this one-shot caller establish child
+# turnover without paying the 20-second window CPU rates require. Stable process
+# membership falls back to the probe's preserved long-window CPU baseline. This
+# consumer accepts exactly three verdicts: alive, dead, or unknown. A missing,
+# failed, empty, or malformed probe is unknown, never silence and never evidence
+# of health or death.
 nm_step_liveness() {
-  local run_id out status=0 verdict procs doing detail line
+  local run_id out status=0 verdict procs doing grade detail detail_fields line rest reported_run structured_detail
   run_id=$(strip_quotes "$(nm_field id)")
   [ -n "$run_id" ] || { printf 'unknown (probe unreadable: run id unavailable)'; return; }
   [ -x "$NM_LIVENESS_BIN" ] || { printf 'unknown (probe unreadable: executable unavailable)'; return; }
   case "$HAVE_TIMEOUT" in
-    timeout)  out=$(timeout "$NM_TIMEOUT" "$NM_LIVENESS_BIN" "$run_id" --sample 0 2>/dev/null) || status=$? ;;
-    gtimeout) out=$(gtimeout "$NM_TIMEOUT" "$NM_LIVENESS_BIN" "$run_id" --sample 0 2>/dev/null) || status=$? ;;
+    timeout)  out=$(timeout "$NM_TIMEOUT" "$NM_LIVENESS_BIN" "$run_id" --sample 1 2>/dev/null) || status=$? ;;
+    gtimeout) out=$(gtimeout "$NM_TIMEOUT" "$NM_LIVENESS_BIN" "$run_id" --sample 1 2>/dev/null) || status=$? ;;
     # Same bounded perl fallback nm_run already uses. Without this case, a host
     # with neither timeout nor gtimeout - the ordinary macOS default, including
     # this one - fell through to an UNBOUNDED probe call, so a slow lsof or
     # process scan could block the supervision read for as long as it took.
     perl)     out=$(perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
-                  "$NM_TIMEOUT" "$NM_LIVENESS_BIN" "$run_id" --sample 0 2>/dev/null) || status=$? ;;
+                  "$NM_TIMEOUT" "$NM_LIVENESS_BIN" "$run_id" --sample 1 2>/dev/null) || status=$? ;;
     *)        printf 'unknown (probe unreadable: no bounded runner available)'; return ;;
   esac
   case "$status" in
@@ -568,13 +571,67 @@ nm_step_liveness() {
   # line is the read firstmate actually makes. Omitting them would leave the
   # follow-up question ("alive, but stuck on the same script for three hours?")
   # needing a second command on every heartbeat.
-  verdict=$(printf '%s\n' "$out" | sed -n 's/^liveness:[[:space:]]*\([a-z]*\).*/\1/p')
-  procs=$(printf '%s\n' "$out" | sed -n 's/.*procs:[[:space:]]*\([0-9]*\).*/\1/p')
+  # `doing:` is unstructured, truncated argv. Parse every structured field only
+  # from the prefix before it: argv may legitimately contain strings such as
+  # `procs:` or `grade:`, which must not override the fields they describe.
+  case "$out" in
+    *$'\n'*) printf 'unknown (probe protocol unreadable: multiline result)'; return ;;
+  esac
+  detail_fields=${out%%"$SEP"doing: *}
+  case "$detail_fields" in
+    liveness:\ *) ;;
+    *) printf 'unknown (probe protocol unreadable: verdict missing or invalid)'; return ;;
+  esac
+  rest=${detail_fields#liveness: }
+  case "$rest" in
+    *"$SEP"*) verdict=${rest%%"$SEP"*}; rest=${rest#*"$SEP"} ;;
+    *) printf 'unknown (probe protocol unreadable: structured prefix invalid)'; return ;;
+  esac
+  case "$rest" in
+    run:\ *) reported_run=${rest#run: } ;;
+    *) printf 'unknown (probe protocol unreadable: structured prefix invalid)'; return ;;
+  esac
+  case "$reported_run" in
+    *"$SEP"*) rest=${reported_run#*"$SEP"}; reported_run=${reported_run%%"$SEP"*} ;;
+    *) printf 'unknown (probe protocol unreadable: structured prefix invalid)'; return ;;
+  esac
+  [ "$reported_run" = "$run_id" ] \
+    || { printf 'unknown (probe protocol unreadable: run identity mismatch)'; return; }
+  case "$rest" in
+    procs:\ *) rest=${rest#procs: } ;;
+    *) printf 'unknown (probe protocol unreadable: structured prefix invalid)'; return ;;
+  esac
+  case "$rest" in
+    *"$SEP"*) procs=${rest%%"$SEP"*}; structured_detail=${rest#*"$SEP"} ;;
+    *) procs=$rest; structured_detail="" ;;
+  esac
+  grade=""
+  case "$structured_detail" in
+    grade:\ *) grade=${structured_detail#grade: }; grade=${grade%%"$SEP"*} ;;
+  esac
   case "$verdict" in
     alive|dead|unknown) ;;
-    *) printf 'unknown (probe result unparseable)'; return ;;
+    *) printf 'unknown (probe protocol unreadable: verdict missing or invalid)'; return ;;
   esac
-  case "$procs" in ''|*[!0-9]*) printf 'unknown (probe result unparseable)'; return ;; esac
+  case "$procs" in
+    ''|*[!0-9]*)
+      printf 'unknown (probe protocol unreadable: numeric process count missing or invalid)'
+      return
+      ;;
+  esac
+  case "$verdict" in
+    alive)
+      case "$procs" in
+        *[1-9]*) ;;
+        *) printf 'unknown (probe protocol unreadable: alive verdict requires processes)'; return ;;
+      esac
+      ;;
+    dead)
+      case "$procs" in
+        *[!0]*) printf 'unknown (probe protocol unreadable: dead verdict requires zero processes)'; return ;;
+      esac
+      ;;
+  esac
   # `doing: <argv> (<etime>)` is the probe's last field when it could name one.
   # The probe already truncates argv, so take it verbatim rather than re-parsing
   # a command line whose shape varies by whatever the step happens to be running.
@@ -582,9 +639,16 @@ nm_step_liveness() {
   [ "$doing" = "$out" ] && doing=""
   line="$verdict ($procs procs)"
   if [ "$verdict" = unknown ]; then
-    detail=${out##*"$SEP"}
-    [ "$detail" = "$out" ] && detail="probe reported unknown"
-    line="unknown ($procs procs; $detail)"
+    case "$grade" in
+      unreadable|present-unproven|present-no-progress|transition) ;;
+      '') grade=ungraded ;;
+      *) grade=unreadable ;;
+    esac
+    detail=${detail_fields##*"$SEP"}
+    case "$detail" in
+      "$detail_fields"|grade:*) detail="probe reported unknown" ;;
+    esac
+    line="unknown (grade: $grade; $procs procs; $detail)"
   fi
   [ -n "$doing" ] && line="$line on $doing"
   printf '%s' "$line"
