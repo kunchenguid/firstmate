@@ -124,6 +124,55 @@ else
   fail "a value undeclared by the active rules file did not exit 64"
 fi
 
+# An axis whose values are a scalar rather than a list is rules breakage too:
+# iterating the string would yield a per-character vocabulary that then rejects
+# the correctly-derived value as invalid facts, and the facts are not the broken
+# thing here.
+printf '{"axes": {"kind": "ship", "landed": ["merged", "pushed", "local_merged", "none"], "report": ["present", "absent"], "worktree": ["clean", "holds_unlanded_work"], "captain_approval": ["granted", "not_required", "pending"]}, "hard_rules": [], "soft_rules": []}' \
+  > "$TMP_ROOT/scalar-axis.json"
+if [ "$(FM_COMPLETENESS_RULES="$TMP_ROOT/scalar-axis.json" "$GATE" --kind ship --landed pushed >/dev/null 2>&1; echo $?)" = "0" ]; then
+  pass "a scalar axis value fails open instead of rejecting valid facts"
+else
+  fail "a scalar axis value did not fail open"
+fi
+if [ "$(FM_COMPLETENESS_STRICT=1 FM_COMPLETENESS_RULES="$TMP_ROOT/scalar-axis.json" "$GATE" --kind ship --landed pushed >/dev/null 2>&1; echo $?)" = "3" ]; then
+  pass "strict mode enforces on a scalar axis value"
+else
+  fail "strict mode did not enforce on a scalar axis value"
+fi
+
+# An axis beyond the five this wrapper supplies facts for would stay a free
+# solver variable, so every hard rule about it is trivially satisfiable: a rule
+# that reads as enforcing and never blocks. That must be reported, not ignored.
+python3 - "$ROOT/bin/fm-completeness.rules.json" "$TMP_ROOT/extra-axis.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as handle:
+    rules = json.load(handle)
+rules["axes"]["review"] = ["approved", "pending"]
+with open(sys.argv[2], "w") as handle:
+    json.dump(rules, handle)
+PY
+set +e
+extra_axis_err=$(FM_COMPLETENESS_RULES="$TMP_ROOT/extra-axis.json" "$GATE" --kind ship --landed pushed 2>&1 >/dev/null)
+extra_axis_rc=$?
+set -e
+if [ "$extra_axis_rc" = "0" ]; then
+  pass "an axis the gate supplies no fact for fails open"
+else
+  fail "an undeliverable axis did not fail open (rc=$extra_axis_rc)"
+fi
+case "$extra_axis_err" in
+  *"declares axis 'review'"*) pass "the unenforceable axis is named rather than silently ignored" ;;
+  *) fail "the unenforceable axis was not reported: $extra_axis_err" ;;
+esac
+if [ "$(FM_COMPLETENESS_STRICT=1 FM_COMPLETENESS_RULES="$TMP_ROOT/extra-axis.json" "$GATE" --kind ship --landed pushed >/dev/null 2>&1; echo $?)" = "3" ]; then
+  pass "strict mode enforces on an axis the gate supplies no fact for"
+else
+  fail "strict mode did not enforce on an undeliverable axis"
+fi
+
 # A rules file with no axes at all is rules breakage, not invalid facts.
 printf '{"hard_rules": [], "soft_rules": []}' > "$TMP_ROOT/no-axes.json"
 if [ "$(FM_COMPLETENESS_RULES="$TMP_ROOT/no-axes.json" "$GATE" --kind ship --landed pushed >/dev/null 2>&1; echo $?)" = "0" ]; then
@@ -351,3 +400,27 @@ if [ "$(FM_HOME="$HOME_DIR" "$GATE" --gate teardown --id ship-m >/dev/null 2>&1;
 else
   fail "a genuinely dirty worktree was not blocked"
 fi
+
+# NO_UNLANDED_AT_TEARDOWN also fires for a remote-backed task whose only problem
+# is uncommitted changes, and that cause clears by committing rather than by a
+# local merge. bin/fm-teardown.sh picks its remediation from this evidence line,
+# so the gate must keep printing it alongside the invariant.
+mkdir -p "$HOME_DIR/data/ship-nm"
+printf 'kind=ship\nmode=no-mistakes\nworktree=%s\nproject=%s\n' "$PROJ" "$PROJ" > "$HOME_DIR/state/ship-nm.meta"
+set +e
+dirty_err=$(FM_HOME="$HOME_DIR" "$GATE" --gate teardown --id ship-nm 2>&1 >/dev/null)
+dirty_rc=$?
+set -e
+if [ "$dirty_rc" = "2" ]; then
+  pass "a remote-backed task with uncommitted changes is blocked"
+else
+  fail "a remote-backed task with uncommitted changes was not blocked (rc=$dirty_rc)"
+fi
+case "$dirty_err" in
+  *"uncommitted changes present in $PROJ"*) pass "the block names uncommitted changes as its evidence" ;;
+  *) fail "the block did not cite uncommitted changes: $dirty_err" ;;
+esac
+case "$dirty_err" in
+  *"violated: NO_UNLANDED_AT_TEARDOWN"*) pass "the uncommitted-changes block names its violated invariant" ;;
+  *) fail "the uncommitted-changes block lost its invariant name: $dirty_err" ;;
+esac

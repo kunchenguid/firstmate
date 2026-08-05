@@ -243,6 +243,8 @@ with open(sys.argv[1]) as handle:
 if not isinstance(axes, dict) or not axes:
     raise SystemExit(1)
 for axis, values in axes.items():
+    if not isinstance(values, list):
+        raise SystemExit(1)
     values = [str(value) for value in values]
     if not values or " " in str(axis) or any(" " in value for value in values):
         raise SystemExit(1)
@@ -272,6 +274,23 @@ validate_rules_axis() {  # <flag-name> <axis> <value>
   allowed=$(rules_axis_values "$2") || fail_open "rules file $RULES declares no '$2' axis"
   validate_axis "$1" "$3" "$allowed"
 }
+
+# The engine only constrains axes the submitted facts name, so an axis this
+# wrapper cannot supply stays a free variable and every hard rule about it is
+# trivially satisfiable - a rule that reads as enforcing and never blocks. An
+# unenforceable rules file is a rules error, reported on the same fail-open path
+# as a file missing an axis the wrapper needs.
+WRAPPER_AXES="kind landed report worktree captain_approval"
+while IFS= read -r rules_axis; do
+  [ -n "$rules_axis" ] || continue
+  rules_axis=${rules_axis%% *}
+  case " $WRAPPER_AXES " in
+    *" $rules_axis "*) ;;
+    *) fail_open "rules file $RULES declares axis '$rules_axis', which this gate supplies no fact for, so every rule about it would be unenforceable" ;;
+  esac
+done <<EOF
+$rules_axes
+EOF
 
 validate_rules_axis --kind kind "$KIND"
 validate_rules_axis --landed landed "$LANDED"

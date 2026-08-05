@@ -674,6 +674,51 @@ SH
   pass "a blocked completeness gate names the remediation the bash check would have printed"
 }
 
+# NO_UNLANDED_AT_TEARDOWN has two causes. A worktree that is merely dirty clears
+# by committing, and bin/fm-merge-local.sh refuses anything that is not
+# mode=local-only, so naming it here would leave --force - the one irreversible
+# answer - as the only clause the operator could act on.
+test_blocked_completeness_gate_on_dirty_worktree_says_commit() {
+  local case_dir rc fake_root entry
+  case_dir=$(make_case gate-blocked-dirty)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "some work"
+  printf 'uncommitted\n' > "$case_dir/wt/uncommitted.txt"
+
+  fake_root="$case_dir/fakeroot"
+  mkdir -p "$fake_root/bin" "$fake_root/data" "$fake_root/state"
+  for entry in "$ROOT"/bin/*; do
+    ln -s "$entry" "$fake_root/bin/$(basename "$entry")"
+  done
+  rm -f "$fake_root/bin/fm-completeness-check.sh"
+  # The real gate's own output for this cause: the evidence line it prints from
+  # git_unlanded_facts, then the invariant that evidence violates.
+  cat > "$fake_root/bin/fm-completeness-check.sh" <<'SH'
+#!/usr/bin/env bash
+echo "completeness gate: uncommitted changes present in /some/worktree" >&2
+echo "completeness gate: BLOCKED - task-x1 (teardown) is provably premature" >&2
+echo "  violated: NO_UNLANDED_AT_TEARDOWN" >&2
+exit 2
+SH
+  chmod 0755 "$fake_root/bin/fm-completeness-check.sh"
+
+  set +e
+  FM_ROOT_OVERRIDE="$fake_root" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$TEARDOWN" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gate-blocked-dirty: teardown should refuse on a blocked verdict"
+  grep -q 'Commit them, or stash them' "$case_dir/stderr" \
+    || fail "gate-blocked-dirty: the refusal did not say how to clear uncommitted changes"
+  ! grep -q 'fm-merge-local.sh' "$case_dir/stderr" \
+    || fail "gate-blocked-dirty: the refusal pointed at a command that refuses this task"
+  pass "a gate blocked by uncommitted changes says to commit them, not to merge locally"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -1916,6 +1961,7 @@ test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_unrunnable_completeness_gate_refuses_teardown
 test_blocked_completeness_gate_names_the_remediation
+test_blocked_completeness_gate_on_dirty_worktree_says_commit
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed

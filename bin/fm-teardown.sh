@@ -958,11 +958,20 @@ teardown_treehouse_return() {
   return 1
 }
 
-# The one owner of the unlanded-work remediation text. The completeness gate
+# The one owner of each unlanded-work remediation text. The completeness gate
 # refuses before validate_worktree_teardown_safety ever runs, so both refusals
-# read from here rather than keeping a second copy that can drift.
+# read from here rather than keeping a second copy that can drift. They are two
+# messages because holds_unlanded_work has two causes that clear differently:
+# uncommitted changes are committed or stashed, and a local-only branch that no
+# remote or default branch carries is merged or pushed. bin/fm-merge-local.sh
+# refuses anything that is not mode=local-only, so offering it for the wrong
+# cause would leave --force as the only actionable clause on screen.
 unlanded_work_remediation() {  # [default-branch]
   echo "Merge the branch into local ${1:-<default>} first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
+}
+
+uncommitted_work_remediation() {
+  echo "Commit them, or stash them (or get the captain's explicit OK to discard, then --force)." >&2
 }
 
 validate_worktree_teardown_safety() {
@@ -1016,7 +1025,7 @@ validate_worktree_teardown_safety() {
   elif [ -n "$dirty" ]; then
     echo "REFUSED: worktree $WT has uncommitted changes." >&2
     echo "uncommitted changes present" >&2
-    echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
+    uncommitted_work_remediation
     return 1
   elif [ -n "$unpushed" ]; then
     branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
@@ -1782,8 +1791,14 @@ if [ "$FORCE" != "--force" ] && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; }; 
         # A named invariant is not an instruction. When the gate refuses over
         # unlanded work it pre-empts validate_worktree_teardown_safety, so print
         # that check's own remediation here too, or --force reads as the only
-        # way out of the most common refusal.
+        # way out of the most common refusal. Which remediation is decided by the
+        # gate's own evidence line rather than derived a second time here: an
+        # uncommitted-changes block clears by committing, and offering the
+        # local-only merge for it would name a command that refuses the task.
         case "$gate_out" in
+          *"uncommitted changes present"*)
+            uncommitted_work_remediation
+            ;;
           *NO_UNLANDED_AT_TEARDOWN*|*SHIP_REQUIRES_LANDED*)
             unlanded_work_remediation "$(default_branch || true)"
             ;;
