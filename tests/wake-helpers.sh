@@ -66,6 +66,55 @@ append_wake() {
   ' _ "$lib" "$kind" "$key" "$payload"
 }
 
+# Portable bounded worker pool for wake-suite subprocesses.
+# Bash 3.2 has no wait -n, so submissions wait for the oldest outstanding PID
+# before starting another worker once the declared limit is full.
+# A failed worker is remembered while the pool still reaps every submitted PID.
+WAKE_TEST_POOL_LIMIT=0
+WAKE_TEST_POOL_ACTIVE=0
+WAKE_TEST_POOL_PIDS=
+WAKE_TEST_POOL_FAILED=0
+
+wake_test_pool_start() {  # <positive-limit>
+  case "${1:-}" in
+    ''|*[!0-9]*|0) return 2 ;;
+  esac
+  WAKE_TEST_POOL_LIMIT=$1
+  WAKE_TEST_POOL_ACTIVE=0
+  WAKE_TEST_POOL_PIDS=
+  WAKE_TEST_POOL_FAILED=0
+}
+
+wake_test_pool_wait_oldest() {
+  local pid
+  [ "$WAKE_TEST_POOL_ACTIVE" -gt 0 ] || return 0
+  # PIDs contain digits only, so shell word splitting is intentional here.
+  # shellcheck disable=SC2086
+  set -- $WAKE_TEST_POOL_PIDS
+  pid=$1
+  shift
+  WAKE_TEST_POOL_PIDS=$*
+  wait "$pid" || WAKE_TEST_POOL_FAILED=1
+  WAKE_TEST_POOL_ACTIVE=$((WAKE_TEST_POOL_ACTIVE - 1))
+}
+
+wake_test_pool_submit() {  # <command> [args...]
+  [ "$WAKE_TEST_POOL_LIMIT" -gt 0 ] || return 2
+  if [ "$WAKE_TEST_POOL_ACTIVE" -ge "$WAKE_TEST_POOL_LIMIT" ]; then
+    wake_test_pool_wait_oldest
+  fi
+  "$@" &
+  WAKE_TEST_POOL_PIDS="${WAKE_TEST_POOL_PIDS:+$WAKE_TEST_POOL_PIDS }$!"
+  WAKE_TEST_POOL_ACTIVE=$((WAKE_TEST_POOL_ACTIVE + 1))
+}
+
+wake_test_pool_finish() {
+  while [ "$WAKE_TEST_POOL_ACTIVE" -gt 0 ]; do
+    wake_test_pool_wait_oldest
+  done
+  [ "$WAKE_TEST_POOL_FAILED" -eq 0 ]
+}
+
 make_case() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"

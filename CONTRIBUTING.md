@@ -81,6 +81,8 @@ Agent Fleet is independently packaged under `tools/agent-fleet` and requires Pyt
 Run the complete locked verification in [`tools/agent-fleet/RELEASING.md`](tools/agent-fleet/RELEASING.md) before pushing; that document also owns versioning, tagging, and clean-install verification.
 
 Discover behavior-test entrypoints by listing `tests/*.test.sh` and run one directly to focus on a subject; partition wrappers source their matching `tests/*-suite.sh` implementation.
+Background process fan-out is report-only unless a behavior test declares and continuously verifies a fixed per-script bound without reducing its assertion or input matrix.
+`tests/fm-wake-queue.test.sh` owns its concurrency contract and focused slow-host regression in the script header.
 When triaging a red behavior shard, use its begin and end markers to identify each failing script: the shard continues through its complete assignment and records every exit code before the final `Behavior tests` job verifies the executed union.
 Reproduce with the exclusion-aware local loop to see every safe failure at once before concluding which ones are real.
 Reproduce in a checkout whose `origin` is the repository's https URL, as CI's own checkout is: the secondmate network-authority fixtures assert that the product pins the resolved address of the origin host, and a checkout whose `origin` is a local filesystem path has no host to pin, so those cases refuse for a reason that exists only locally.
