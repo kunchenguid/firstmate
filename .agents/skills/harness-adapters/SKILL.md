@@ -477,7 +477,7 @@ The positional prompt auto-submits (verified: no readiness-gated delivery needed
 
 | Fact | Value |
 |---|---|
-| Binary | Executable `cursor-agent` from PATH; spawning refuses if absent. |
+| Binary | Resolved at spawn time, not assumed from PATH: `cursor-agent` from PATH, then the legacy alias `agent` from PATH (fallback only - the name is too generic to trust as the primary pick), then `$HOME/.local/bin/cursor-agent` and `$HOME/.local/bin/agent`; spawning refuses only if none of them exists. `agent` is never a standalone harness entry. `bin/fm-remote-doctor.sh` mirrors this exact order in `fm_remote_doctor_resolve_harness` so remote readiness and local spawn agree. |
 | Busy state | Unknown until a semantic source is live-verified (hooks are phase 3, pending correct upstream manifest key discovery). The rendered `ctrl+c to stop` token is deliberately NOT a state source; supervision falls back to stale-pane detection. |
 | Exit command | `/exit` (or `/quit`); needs ~1.5s settle before Enter. |
 | Interrupt | `C-c` (single Ctrl+C). Escape does NOT interrupt (verified 2026-08-04). |
@@ -520,5 +520,5 @@ Firstmate running itself on cursor is a separate, larger effort (turn-end guard,
 Cursor is crew/secondmate-only in the first release, matching Kimi's position.
 
 **Remote secondmates:** cursor is a verified remote secondmate harness since 2026-08-05 (herdr + cursor live-verified in an isolated lab; see `docs/verification/runtime-backends.md`).
-`bin/fm-spawn.sh`, `bin/fm-remote-secondmate-control.sh`, and `bin/fm-remote-doctor.sh` all admit it; the doctor accepts cursor's `~/.local/bin/cursor-agent` install even when the login PATH omits it.
+`bin/fm-spawn.sh`, `bin/fm-remote-secondmate-control.sh`, and `bin/fm-remote-doctor.sh` all admit it; the doctor resolves cursor through the same name-and-path order as spawn (see the Binary row above), so a login PATH that omits `~/.local/bin` still passes readiness.
 Remote cursor spawns run through the same doctor readiness gate and control allowlist as every other verified harness; no cursor-specific exclusion remains.
