@@ -945,18 +945,32 @@ EOF
       # reached. Separate "endpoint genuinely gone" from a transient read error
       # with the side-effect-free existence probe and surface the gone case
       # exactly once, so a vanished fleet wakes firstmate instead of going quiet.
-      if ! fm_backend_target_exists "$(window_backend "$w")" "$w"; then
-        if [ ! -e "$STATE/.endpoint-gone-$key" ]; then
-          fm_wake_append stale "$w" "stale: $w endpoint gone" || exit 1
-          : > "$STATE/.endpoint-gone-$key"
-          wake "stale: $w endpoint gone"
-        fi
+      # The reason keeps the `stale: <window> (<detail>)` shape every other
+      # producer uses: fm-supervise-daemon.sh strips the detail only inside
+      # parentheses, so an unparenthesized detail would leave it classifying a
+      # window that does not exist.
+      # A deliberate teardown looks identical to a vanished endpoint for a
+      # multi-second window - fm-teardown.sh kills the pane well before it
+      # removes $ID.meta, and recorded_windows() reads meta from disk - so the
+      # gone verdict must be confirmed on a second consecutive poll and against
+      # a still-present meta before it wakes anyone.
+      if fm_backend_target_exists "$(window_backend "$w")" "$w"; then
+        rm -f "$STATE/.endpoint-gone-$key"
+      elif [ -e "$STATE/$task.meta" ]; then
+        case "$(cat "$STATE/.endpoint-gone-$key" 2>/dev/null || true)" in
+          fired) ;;
+          seen)
+            printf 'fired' > "$STATE/.endpoint-gone-$key"
+            fm_wake_append stale "$w" "stale: $w (endpoint gone)" || exit 1
+            wake "stale: $w (endpoint gone)"
+            ;;
+          *) printf 'seen' > "$STATE/.endpoint-gone-$key" ;;
+        esac
       fi
       continue
     fi
     rm -f "$STATE/.endpoint-gone-$key"
     h=$(printf '%s' "$tail40" | hash_pane)
-    key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
     sf="$STATE/.stale-$key"
