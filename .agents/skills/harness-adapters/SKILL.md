@@ -245,7 +245,7 @@ Opencode can auto-upgrade itself in the background and the running TUI can exit 
 If a pane shows the exit banner, relaunch with `--continue` to resume the session.
 `--prompt` does not auto-submit alongside `--continue`, so send the next instruction via `fm-send` once the TUI is up.
 
-**Busy-queued Enter (opencode 1.18.4 and cursor-agent, tmux backend fix, herdr known gap).**
+**Busy-queued Enter (opencode 1.18.4 and cursor-agent, both backends).**
 While opencode is mid-turn, the composer accepts Enter as a "send when the turn
 ends" keystroke but does not clear the typed text from the composer until the
 turn actually finishes.
@@ -257,10 +257,10 @@ to `fm_pane_is_busy` once the Enter-retry budget is spent, scoped to the two
 harnesses with verified Enter-while-busy queuing (opencode and cursor; a busy
 kimi or claude pane keeps `pending`): a busy pane means the Enter was accepted
 and queued (reported as `empty` so the caller does not re-send), while an idle
-pane keeps `pending` as a genuine swallow. The herdr adapter observes the same
-opencode behavior but needs a separate fix; it is recorded as a known gap in
-`docs/herdr-backend.md` rather than patched here, so the tmux adapter does not
-paper over a herdr-specific shape.
+pane keeps `pending` as a genuine swallow. The herdr adapter has the same fallback through its native busy state
+(`fm_backend_herdr_send_text_submit` consults `fm_backend_herdr_busy_state` on
+the exhausted-retry pending path for opencode and cursor, verified live on
+herdr 2026-08-05), so queued Enters report as delivered on both backends.
 Regression coverage: `tests/fm-tmux-submit-busy.test.sh` covers the four
 scenarios (busy + pending -> `empty`, idle + pending -> `pending`, busy +
 cleared -> `empty`, idle + cleared -> `empty`).
@@ -519,6 +519,6 @@ Phase 3 is blocked on correct upstream manifest key discovery.
 Firstmate running itself on cursor is a separate, larger effort (turn-end guard, PreToolUse seatbelt, session-start nudge, watcher supervision protocol).
 Cursor is crew/secondmate-only in the first release, matching Kimi's position.
 
-**Remote-secondmate guard:** cursor is deliberately refused as a remote secondmate harness (both `bin/fm-spawn.sh` and `bin/fm-remote-secondmate-control.sh` allowlist it out) until herdr + cursor is verified.
-Remote secondmates run only on the herdr backend, where cursor's composer and busy semantics are tmux-verified only.
+**Remote secondmates:** cursor is a verified remote secondmate harness since 2026-08-05 (herdr + cursor live-verified in an isolated lab; see `docs/verification/runtime-backends.md`).
+`bin/fm-spawn.sh`, `bin/fm-remote-secondmate-control.sh`, and `bin/fm-remote-doctor.sh` all admit it; the doctor accepts cursor's `~/.local/bin/cursor-agent` install even when the login PATH omits it.
 The exclusion is fail-closed: a remote cursor spawn is refused up front rather than launched against unverified herdr behavior.
