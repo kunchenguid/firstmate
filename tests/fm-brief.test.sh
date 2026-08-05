@@ -699,7 +699,7 @@ test_context_pressure_contract_reaches_every_agent_kind() {
   home="$TMP_ROOT/context-pressure-home"
   mkdir -p "$home/data"
 
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" context-ship-z1 firstmate >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" context-ship-z1 firstmate --mode no-mistakes >/dev/null 2>&1
   ship="$home/data/context-ship-z1/brief.md"
   assert_grep '/tmp/fm-context-ship-z1/context-pressure.json' "$ship" \
     "ship brief missing its task-scoped Claude context snapshot"
@@ -764,7 +764,7 @@ test_crewmate_scaffolds_carry_who_is_speaking() {
         "$ROOT/bin/fm-brief.sh" "speaks-$kind" alpha --scout >/dev/null 2>&1
     else
       FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-        "$ROOT/bin/fm-brief.sh" "speaks-$kind" alpha >/dev/null 2>&1
+        "$ROOT/bin/fm-brief.sh" "speaks-$kind" alpha --mode no-mistakes >/dev/null 2>&1
     fi
     brief="$home/data/speaks-$kind/brief.md"
     assert_present "$brief" "$kind brief was not scaffolded"
@@ -810,13 +810,15 @@ test_secondmate_charter_keeps_its_own_marker_consequence() {
 # conflict resolution, and the no-mistakes DOD keeps the delegated-rebase
 # carve-out that reconciles that rule with its no-commit-during-a-run line.
 test_standing_worker_rules_by_variant() {
-  local home id brief
+  local home id brief proj mode
   home="$TMP_ROOT/standing-rules-home"
   write_registry "$home"
 
-  for id_proj in "standing-nomistakes:no-registry-proj" "standing-directpr:direct-proj" "standing-localonly:local-proj"; do
+  for id_proj in "standing-nomistakes:no-registry-proj:no-mistakes" "standing-directpr:direct-proj:direct-PR" "standing-localonly:local-proj:local-only"; do
     id=${id_proj%%:*}
-    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "${id_proj##*:}" >/dev/null 2>&1
+    mode=${id_proj##*:}
+    proj=${id_proj#*:}; proj=${proj%%:*}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" --mode "$mode" >/dev/null 2>&1
     brief="$home/data/$id/brief.md"
     assert_grep "# Branch conflict resolution" "$brief" \
       "$id: ship brief lost the branch conflict resolution section"

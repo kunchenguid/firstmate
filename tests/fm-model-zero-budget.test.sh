@@ -106,7 +106,7 @@ make_home() {
 spawn_out() {
   local home=$1 model=$2
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SPAWN_NO_GUARD=1 \
-    "$SPAWN" zb-task "$home/projects/demo" --harness pi --model "$model" --effort low 2>&1 || true
+    "$SPAWN" zb-task "$home/projects/demo" --mode no-mistakes --yolo off --harness pi --model "$model" --effort low 2>&1 || true
 }
 
 # --- the decision function --------------------------------------------------

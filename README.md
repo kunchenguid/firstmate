@@ -209,6 +209,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/remote-secondmates.md](docs/remote-secondmates.md) - current setup, routing, transfer, recovery, and safety behavior for whole-home remote second mates.
 - [docs/launcher.md](docs/launcher.md) - the optional harness menu that starts and attaches one primary session in a home.
 - [docs/windows-launcher.md](docs/windows-launcher.md) - launch the Herdr-backed harness menu from Windows through WSL.
+- [docs/remote-secondmates.md](docs/remote-secondmates.md) - current setup, routing, transfer, recovery, and safety behavior for whole-home remote second mates.
 - [docs/calm.md](docs/calm.md) - current Pi `/calm` behavior and supported presentation limits.
 - [docs/wedge-alarm.md](docs/wedge-alarm.md) - configure the active alert for an away-mode escalation delivery that gets stuck.
 - [docs/tmux-backend.md](docs/tmux-backend.md) - current setup and limits for the tmux reference backend.
