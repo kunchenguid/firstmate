@@ -281,8 +281,14 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
     # fully de-emphasised bare row - a dimmed shell prompt, a dimmed prompt
     # glyph alone - stays unknown: never a safe injection target.
     case "$plain_content" in
-      '→ '*|'❯ '*|'› '*|'⟩ '*) plain_content=${plain_content#??} ;;
-      '→'*|'❯'*|'›'*|'⟩'*) plain_content=${plain_content#?} ;;
+      '→ '*) plain_content=${plain_content#'→ '} ;;
+      '❯ '*) plain_content=${plain_content#'❯ '} ;;
+      '› '*) plain_content=${plain_content#'› '} ;;
+      '⟩ '*) plain_content=${plain_content#'⟩ '} ;;
+      '→'*) plain_content=${plain_content#'→'} ;;
+      '❯'*) plain_content=${plain_content#'❯'} ;;
+      '›'*) plain_content=${plain_content#'›'} ;;
+      '⟩'*) plain_content=${plain_content#'⟩'} ;;
     esac
     plain_content="${plain_content#"${plain_content%%[![:space:]]*}"}"
     if fm_composer_idle_matches "$plain_content" "$idle_re" "$idle_case"; then
