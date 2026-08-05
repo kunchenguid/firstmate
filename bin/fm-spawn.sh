@@ -2234,9 +2234,11 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # worktree and cd's the pane into it. A bare-flagged clone cannot: see
   # lease_bare_clone_worktree for why the acquire has to happen here instead, with
   # the pane only told to cd into the worktree that call already leased. Both
-  # branches converge on the same settle loop and isolation assertion below, so
-  # neither the transient-stale-path guard nor validate_spawn_worktree is skipped
-  # for a leased worktree.
+  # branches share the settle loop and the isolation assertion below, but they
+  # wait differently: the leased path waits for the pane to reach the worktree it
+  # already holds and accepts nothing else, while the ordinary path, which learns
+  # its destination only from the pane, keeps the two-consecutive-reads guard
+  # against a transient stale path. validate_spawn_worktree runs on both.
   ACQUIRE_SOURCE='treehouse get'
   if project_is_bare_flagged; then
     ACQUIRE_SOURCE='treehouse get --lease'
@@ -2271,6 +2273,11 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # leased worktree and the last path the pane reported so the two are
   # distinguishable. The abort cleanup releases the lease.
   #
+  # The resolved comparison only decides that the pane arrived; what gets
+  # recorded is treehouse's own spelling of the leased path, not the pane's
+  # physically-resolved cwd, because `treehouse return` matches the path it
+  # recorded literally and rejects an equivalent spelling as unmanaged.
+  #
   # On the ordinary path the destination is not known in advance, so a single
   # read that already differs from PROJ_ABS_REAL is not proof the pane settled
   # there. Require two consecutive reads to agree on the same non-project path
@@ -2289,7 +2296,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
         last_seen="$p"
         last_seen_real="$p_real"
         if [ "$p_real" = "$LEASED_WT_REAL" ]; then
-          WT="$p"
+          WT="$LEASED_WT"
           break
         fi
       elif [ "$p_real" != "$PROJ_ABS_REAL" ]; then

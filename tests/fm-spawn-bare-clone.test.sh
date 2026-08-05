@@ -191,6 +191,10 @@ EOF
   TREEHOUSE_LOG="$CASE_DIR/treehouse.log"
   PANE_PATHFILE="$CASE_DIR/pane-path"
   PANE_SETTLE=""
+  # The spelling treehouse hands back, which is also the only spelling its own
+  # `return` accepts. It is the pooled tree's own path unless a case points it at
+  # an equivalent-but-differently-spelled route to the same directory.
+  LEASE_PATH="$WT_DIR"
   : > "$SENDKEYS_LOG"
   : > "$TREEHOUSE_LOG"
   rm -f "$PANE_PATHFILE"
@@ -203,7 +207,7 @@ run_bare_spawn() {
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_SPAWN_SETTLE_INTERVAL=0.02 \
-    FM_FAKE_LEASE_PATH="$WT_DIR" FM_FAKE_PANE_PROJECT="$PROJ_DIR" \
+    FM_FAKE_LEASE_PATH="$LEASE_PATH" FM_FAKE_PANE_PROJECT="$PROJ_DIR" \
     FM_FAKE_PANE_SETTLE="$PANE_SETTLE" \
     FM_FAKE_PANE_PATHFILE="$PANE_PATHFILE" FM_FAKE_SENDKEYS_LOG="$SENDKEYS_LOG" \
     FM_FAKE_TREEHOUSE_LOG="$TREEHOUSE_LOG" \
@@ -258,6 +262,31 @@ test_settled_path_must_be_the_leased_worktree() {
   assert_contains "$out" "$STALE_DIR" "refusal did not name the observed worktree"
   assert_absent "$HOME_DIR/state/$id.meta" "refused spawn still recorded task metadata"
   pass "a settled path other than the leased worktree is refused by name"
+}
+
+# `treehouse return` matches the path treehouse recorded literally: an equivalent
+# spelling of the same directory is rejected as unmanaged. The pane reports its
+# physically-resolved cwd, so with a symlink anywhere above the pool the two
+# spellings differ, and recording the pane's would leave fm-teardown.sh passing a
+# path treehouse refuses - burning the pool slot for good, since a leased tree is
+# never pruned and never handed to a later get.
+test_meta_records_the_treehouse_spelling_of_the_lease() {
+  local rec id out status
+  id='bare-lease-spelling-b8'
+  rec=$(make_bare_case bare-spelling "$id" yes yes)
+  read_bare_record "$rec"
+  ln -s "$WT_DIR" "$CASE_DIR/pool-link"
+  LEASE_PATH="$CASE_DIR/pool-link"
+  PANE_SETTLE="$WT_DIR"
+
+  out=$(run_bare_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should accept a pane that resolves to the leased worktree"
+  assert_grep "worktree=$LEASE_PATH" "$HOME_DIR/state/$id.meta" \
+    "meta did not record treehouse's own spelling of the leased worktree"
+  assert_no_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "meta recorded the pane's spelling, which treehouse return rejects as unmanaged"
+  pass "the meta records the spelling treehouse leased, not the pane's resolved cwd"
 }
 
 # Every abort before the meta write has to give the pool slot back: no state file
@@ -360,6 +389,7 @@ test_bare_flag_survives_the_spawn
 test_non_bare_clone_path_is_unchanged
 test_bare_without_lease_support_refuses
 test_settled_path_must_be_the_leased_worktree
+test_meta_records_the_treehouse_spelling_of_the_lease
 test_abort_before_meta_releases_the_lease
 test_abort_releases_the_lease_without_holder_guard
 
