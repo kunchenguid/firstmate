@@ -850,13 +850,51 @@ test_tracked_claude_entries_inert_under_grok() {
 # Cursor's stop hook does not honour exit 2 as a forced continuation, so the
 # shim translates the shared guard's blind-turn signal into a followup_message
 # body. loop_count > 0 maps to stop_hook_active so the shared loop guard
-# applies unchanged. Verified against cursor-agent 2026.07.23-e383d2b.
+# applies unchanged. On a blind turn the shim foregrounds bin/fm-watch-arm.sh,
+# re-runs the shared guard, and emits the followup_message only when the turn
+# would still end blind. Verified against cursor-agent 2026.07.23-e383d2b.
+
+# The shim runs bin/fm-watch-arm.sh inside the fixture. These stubs stand in
+# for the real arm wrapper so the test controls whether the arm succeeds
+# (leaving a live identity-matched watcher lock with a fresh beacon, which the
+# re-run guard reads as healthy) or fails, and record every invocation.
+install_failing_arm_stub() {
+  local dir=$1
+  cat > "$dir/bin/fm-watch-arm.sh" <<EOF
+#!/usr/bin/env bash
+printf 'arm-invoked\\n' >> "$dir/state/.arm-invocations"
+exit 1
+EOF
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+}
+
+install_succeeding_arm_stub() {
+  local dir=$1 root
+  root=$(cd "$dir" && pwd)
+  cat > "$dir/bin/fm-watch-arm.sh" <<EOF
+#!/usr/bin/env bash
+printf 'arm-invoked\n' >> "$dir/state/.arm-invocations"
+sleep 60 &
+pid=\$!
+identity=\$(FM_STATE_OVERRIDE="$dir/state" bash -c '. "\$1"; fm_pid_identity "\$2"' _ "$dir/bin/fm-wake-lib.sh" "\$pid")
+mkdir -p "$dir/state/.watch.lock"
+printf '%s\n' "\$pid" > "$dir/state/.watch.lock/pid"
+printf '%s\n' "$root" > "$dir/state/.watch.lock/fm-home"
+printf '%s\n' "$root/bin/fm-watch.sh" > "$dir/state/.watch.lock/watcher-path"
+printf '%s\n' "\$identity" > "$dir/state/.watch.lock/pid-identity"
+touch "$dir/state/.last-watcher-beat"
+exit 0
+EOF
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+}
 
 test_cursor_shim_emits_followup_on_block() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-block")
   : > "$dir/state/task1.meta"
-  # No live watcher, so the shared guard blocks (exit 2) with its banner.
+  install_failing_arm_stub "$dir"
+  # No live watcher, so the shared guard blocks (exit 2) with its banner; the
+  # arm fails, the re-run still blocks, and the turn would still end blind.
   out=$(printf '{"session_id":"cur-session","loop_count":0,"workspace_roots":["%s"]}' "$dir" \
     | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>&1); status=$?
   expect_code 0 "$status" "cursor shim must exit 0 after translating a block into a followup_message"
@@ -864,22 +902,45 @@ test_cursor_shim_emits_followup_on_block() {
     '{"followup_message":"'*'TURN WOULD END BLIND'*) : ;;
     *) fail "cursor shim must emit a followup_message carrying the guard banner, got: $out" ;;
   esac
-  pass "fm-turnend-guard-cursor: translates a shared-guard block into a followup_message body"
+  grep -q '^arm-invoked$' "$dir/state/.arm-invocations" 2>/dev/null \
+    || fail "cursor shim must attempt the arm before deciding the turn still ends blind"
+  pass "fm-turnend-guard-cursor: translates a still-blind post-arm turn into a followup_message body"
+}
+
+test_cursor_shim_arms_then_allows() {
+  local dir out status pid
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-arm-ok")
+  : > "$dir/state/task1.meta"
+  install_succeeding_arm_stub "$dir"
+  # The shared guard blocks, the arm succeeds (live watcher lock + fresh
+  # beacon), the re-run guard allows, and the shim emits {}.
+  out=$(printf '{"session_id":"cur-session","loop_count":0,"workspace_roots":["%s"]}' "$dir" \
+    | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>&1); status=$?
+  pid=$(cat "$dir/state/.watch.lock/pid" 2>/dev/null || true)
+  kill "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "cursor shim must exit 0 after a successful arm"
+  [ "$out" = '{}' ] || fail "cursor shim must emit {} when the arm succeeded, got: $out"
+  grep -q '^arm-invoked$' "$dir/state/.arm-invocations" 2>/dev/null \
+    || fail "cursor shim must foreground the arm wrapper on a blind turn"
+  pass "fm-turnend-guard-cursor: parks in the arm wrapper and emits {} when the re-run guard allows"
 }
 
 test_cursor_shim_allows_when_healthy() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-allow")
+  install_failing_arm_stub "$dir"
   out=$(printf '{"session_id":"cur-session","loop_count":0,"workspace_roots":["%s"]}' "$dir" \
     | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>&1); status=$?
   expect_code 0 "$status" "cursor shim must allow a healthy stop"
   [ "$out" = '{}' ] || fail "cursor shim must emit {} on an allowed stop, got: $out"
-  pass "fm-turnend-guard-cursor: emits {} when the shared guard allows the stop"
+  [ ! -e "$dir/state/.arm-invocations" ] || fail "cursor shim must not arm when the shared guard allows the stop"
+  pass "fm-turnend-guard-cursor: emits {} without arming when the shared guard allows the stop"
 }
 
 test_cursor_shim_loop_count_maps_to_stop_hook_active() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-loop")
+  install_failing_arm_stub "$dir"
   # A forced-follow-up turn (loop_count>0) must be treated as a continuation:
   # the shared guard's loop guard sees stop_hook_active=true and allows the
   # stop even with no watcher, exactly like Claude/Codex rewakes.
@@ -887,6 +948,7 @@ test_cursor_shim_loop_count_maps_to_stop_hook_active() {
     | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>&1); status=$?
   expect_code 0 "$status" "cursor shim must allow a loop-count continuation"
   [ "$out" = '{}' ] || fail "cursor shim must not re-block a loop-count continuation, got: $out"
+  [ ! -e "$dir/state/.arm-invocations" ] || fail "cursor shim must not arm on a loop-count continuation"
   pass "fm-turnend-guard-cursor: loop_count>0 maps to stop_hook_active so continuations are not re-blocked"
 }
 
@@ -929,6 +991,7 @@ test_cursor_shim_anchor_resolves_via_cursor_project_dir() {
   [ -n "$command" ] || fail "stop hook command is missing from .cursor/hooks.json"
   dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-anchor")
   : > "$dir/state/task1.meta"
+  install_failing_arm_stub "$dir"
   # The hook command anchors through CURSOR_PROJECT_DIR (verified live:
   # cursor sets it to the project root for hook commands). Executing it with
   # that env var must run the real shim against this scenario dir.
@@ -1737,6 +1800,7 @@ test_grok_adapter_invalid_inputs_start_neither_path
 test_grok_adapter_missing_jq_and_no_supervision_allow
 test_tracked_claude_entries_inert_under_grok
 test_cursor_shim_emits_followup_on_block
+test_cursor_shim_arms_then_allows
 test_cursor_shim_allows_when_healthy
 test_cursor_shim_loop_count_maps_to_stop_hook_active
 test_cursor_shim_missing_payload_allows

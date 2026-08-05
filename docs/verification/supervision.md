@@ -381,7 +381,8 @@ The safe command-channel contract is covered without a notification by `tests/fm
 
 ## Cursor Agent CLI
 
-Cursor Agent CLI is a crew/secondmate-only adapter in the MVP; primary-session guard supervision is out of scope.
+Cursor Agent CLI is a full firstmate adapter (crew, primary, and herdr).
+Primary-session guard supervision ships in the tracked `.cursor/hooks.json` stop hook; see the Turn-end guard table above and docs/supervision-protocols/cursor.md.
 Liveness and composer verification was performed on 2026-08-04 against cursor-agent 2026.07.23-e383d2b on Linux, tmux backend.
 
 **Composer state (before fix):**
@@ -429,12 +430,10 @@ Captain decision 2026-08-04, option (a).
 - Enter-while-busy: **queued** (same as opencode 1.18.4). No separate submit core branch needed.
 - `/no-mistakes` lands on a single Enter with popup settle.
 
-**Hook status (2026-08-04):**
+**Hook status (2026-08-04, superseded):**
 
-No hooks could be established.
-Three locations tried: `<project>/.cursor/hooks/hooks.json`, `--plugin-dir` plugin manifest, `<project>/.cursor/hooks.json`.
-The bundle's hook discovery code expects a plugin manifest with a `hooks` field, but the correct manifest key format was not found.
-Phase 3 blocked on correct upstream manifest key discovery.
+The first discovery attempt could not establish hooks: three locations were tried (`<project>/.cursor/hooks/hooks.json`, a `--plugin-dir` plugin manifest, `<project>/.cursor/hooks.json`), and the bundle's hook discovery code expects a manifest key format that was not found then.
+The primary-harness branch superseded this with the tracked project-root `.cursor/hooks.json` registration (load-bearing `"version": 1` key, `stop` hook, `preToolUse` Shell seatbelt), verified in the Turn-end guard table above.
 
 ```sh
 $ cursor-agent --version
