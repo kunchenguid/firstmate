@@ -13,6 +13,7 @@
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
 #                 "TANGLE: <remediation>",
+#                 "MAIN_DIVERGED: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
@@ -48,6 +49,15 @@
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
+#          A MAIN_DIVERGED line means the firstmate primary checkout's local default
+#          branch carries commits origin/<default> does not - typically a shared fix
+#          landed directly on it instead of through the normal PR path - so the
+#          fast-forward-only self-update path (/updatefirstmate) can no longer
+#          reconcile it and silently skips instead of alarming; reconcile manually
+#          per the line. This check never fetches (it reads the already-known
+#          origin/<default> ref) and stays silent for a missing origin, a missing
+#          origin/<default> ref, or a local default branch that is merely behind
+#          origin, so a local-only or offline install never false-alarms.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
@@ -108,6 +118,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
+# shellcheck source=bin/fm-main-divergence-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-main-divergence-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh disable=SC1091
@@ -1062,6 +1074,14 @@ if [ -n "$tangle_branch" ]; then
   else
     echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - restore the primary with: git -C $FM_ROOT checkout $tangle_default, then re-validate the branch in a proper worktree"
   fi
+fi
+# Origin-divergence check: the firstmate primary checkout's local default branch
+# must remain an ancestor of origin/<default> so the fast-forward-only self-update
+# path (/updatefirstmate) can still reconcile it (see fm-main-divergence-lib.sh).
+# Never fetches and never mutates; runs the same in every mode.
+diverged_default=$(fm_primary_diverged_branch "$FM_ROOT" 2>/dev/null || true)
+if [ -n "$diverged_default" ]; then
+  echo "MAIN_DIVERGED: primary checkout's '$diverged_default' carries commits origin/$diverged_default does not; fast-forward self-update can no longer reconcile it - inspect with: git -C $FM_ROOT log origin/$diverged_default..$diverged_default --oneline, then reconcile manually (rebase/merge onto origin/$diverged_default, or push the local commits) before rerunning /updatefirstmate"
 fi
 crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
