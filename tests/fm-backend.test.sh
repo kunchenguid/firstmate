@@ -356,6 +356,29 @@ test_backend_detect_cmux_fallback_ancestry_stops_at_launchd() {
   pass "fm_backend_detect: ancestry fallback stops undetected at launchd (a reparented tmux server never reaches cmux)"
 }
 
+test_tmux_agent_state_recognizes_agy_commands() {
+  local dir fakebin out
+  dir="$TMP_ROOT/tmux-agy-liveness"; fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) printf '%s\n' fm-agy ;;
+  display-message) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-agy}" ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
+
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_CURRENT_COMMAND=agy \
+    fm_backend_agent_state tmux fake:fm-agy)
+  [ "$out" = alive ] || fail "AGY tmux command should classify alive, got '$out'"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_CURRENT_COMMAND=antigravity \
+    fm_backend_agent_state tmux fake:fm-agy)
+  [ "$out" = alive ] || fail "Antigravity tmux command should classify alive, got '$out'"
+  pass "fm_backend_agent_state: AGY and antigravity tmux commands classify as alive"
+}
+
 # The auto-detect NOTICE must say when cmux was selected via a fallback
 # signal, so a captain can tell a wrapper-stripped claude-under-cmux spawn
 # apart from the primary-marker case.
@@ -1135,6 +1158,7 @@ test_backend_detect_cmux_fallback_tmux_nested_false_positive
 test_backend_detect_cmux_fallback_ancestry_pid_match
 test_backend_detect_cmux_fallback_ancestry_comm_match
 test_backend_detect_cmux_fallback_ancestry_stops_at_launchd
+test_tmux_agent_state_recognizes_agy_commands
 test_backend_name_cmux_fallback_notice
 test_backend_name_autodetect_notice
 test_backend_name_explicit_beats_detection

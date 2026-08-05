@@ -877,7 +877,7 @@ launch_template() {
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
     muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
-    agy) printf '%s' 'agy --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"; res=$?; "'"$FM_ROOT"'/bin/fm-busy-event.sh" apply "'"$STATE"'" "'"$ID"'" idle --current-gen --source agy-cli --event done; [ $res -eq 0 ] && printf "done\n" >> "'"$STATE/$ID.status"'" || printf "failed\n" >> "'"$STATE/$ID.status"'"' ;;
+    agy) printf '%s' 'agy --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"; res=$?; __FM_BUSY_EVENT__ apply __STATE_REAL__ __ID__ idle --current-gen --source agy-cli --event done; [ "$res" -eq 0 ] && printf "done\n" >> __STATUS__ || printf "failed\n" >> __STATUS__' ;;
     *) return 1 ;;
   esac
 }
@@ -1891,6 +1891,7 @@ mkdir -p "$TASK_TMP/gotmp"
 # check or leak into a commit.
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
+FM_ROOT_REAL=$(cd "$FM_ROOT" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
 exclude_path() {
   local rel=$1 EXCL
@@ -2244,6 +2245,10 @@ sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
+sq_fm_busy_event=$(shell_quote "$FM_ROOT_REAL/bin/fm-busy-event.sh")
+sq_state_real=$(shell_quote "$STATE_REAL")
+sq_id=$(shell_quote "$ID")
+sq_status=$(shell_quote "$STATE_REAL/$ID.status")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
@@ -2254,6 +2259,10 @@ LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+LAUNCH=${LAUNCH//__FM_BUSY_EVENT__/$sq_fm_busy_event}
+LAUNCH=${LAUNCH//__STATE_REAL__/$sq_state_real}
+LAUNCH=${LAUNCH//__ID__/$sq_id}
+LAUNCH=${LAUNCH//__STATUS__/$sq_status}
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a

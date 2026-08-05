@@ -493,7 +493,7 @@ test_agy_threads_model_effort_and_completion_callback() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "agy --dangerously-skip-permissions --model 'gemini/test' --effort 'medium' --prompt" \
     "AGY launch did not thread its supported model and effort flags"
-  assert_contains "$launch" "${ROOT}/bin/fm-busy-event.sh\" apply \"$HOME_DIR/state\" \"$id\" idle --current-gen --source agy-cli --event done" \
+  assert_contains "$launch" "${ROOT}/bin/fm-busy-event.sh' apply '$HOME_DIR/state' '$id' idle --current-gen --source agy-cli --event done" \
     "AGY launch did not include its completion callback"
 
   FM_FAKE_AGY_LOG="$agylog" FM_FAKE_AGY_STATUS=0 PATH="$FAKEBIN_DIR:$PATH" \
