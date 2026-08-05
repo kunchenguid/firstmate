@@ -21,7 +21,8 @@ RECOVERY_WORKER_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 trap 'if [ -n "$OTHER_PID" ]; then kill "$OTHER_PID" 2>/dev/null || true; fi; if [ -n "$RECOVERY_WORKER_PID" ]; then kill "$RECOVERY_WORKER_PID" 2>/dev/null || true; fi; if [ -f "$STATE_ROOT/worker.pid" ]; then kill "$(cat "$STATE_ROOT/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
 
-cp "$ROOT/bin/fm-remote-job-lib.sh" "$ROOT/bin/fm-remote-job-worker.sh" "$REMOTE_ROOT/bin/"
+cp "$ROOT/bin/fm-remote-job-lib.sh" "$ROOT/bin/fm-remote-job-worker.sh" \
+  "$ROOT/bin/fm-remote-delta-read.sh" "$REMOTE_ROOT/bin/"
 printf 'fixture\n' > "$REMOTE_ROOT/AGENTS.md"
 cat > "$REMOTE_ROOT/bin/fm-probe-job.sh" <<'SH'
 #!/bin/bash
@@ -322,6 +323,83 @@ assert_present "$SECOND_DELAYED_SIDE_EFFECT" "the queued job did not receive its
 fm_remote_job_reap "$ACCOUNT_HOME" "$FIRST_JOB_ID" || fail "the first delayed job could not be reaped"
 fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the second delayed job could not be reaped"
 pass "queued jobs receive a fresh bounded execution window"
+
+if command -v shasum >/dev/null 2>&1; then
+  EMPTY_SHA=$(: | shasum -a 256 | awk '{print $1}')
+else
+  EMPTY_SHA=$(: | sha256sum | awk '{print $1}')
+fi
+mkdir -p "$REMOTE_HOME/state"
+REPLY_LOG_REL=state/parent-replies.status
+PREEMPT_SIDE_EFFECT="$TMP_ROOT/preempt-side-effect"
+FM_REMOTE_JOB_QUEUE_TIMEOUT=60
+FM_REMOTE_JOB_TIMEOUT=40
+fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
+  fm-remote-delta-read.sh "$REPLY_LOG_REL" 0 "$EMPTY_SHA" 30 < /dev/null > /dev/null
+POLL_JOB_ID=$FM_REMOTE_JOB_ID
+POLL_JOB_DIR="$STATE_ROOT/jobs/$POLL_JOB_ID"
+for _ in $(seq 1 100); do
+  [ "$(fm_remote_job_read_state "$POLL_JOB_DIR" 2>/dev/null || true)" = running ] && break
+  sleep 0.05
+done
+[ "$(fm_remote_job_read_state "$POLL_JOB_DIR" 2>/dev/null || true)" = running ] \
+  || fail "the long-poll job did not begin running"
+PREEMPT_BEGAN=$(date +%s)
+fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
+  fm-touch-job.sh "$PREEMPT_SIDE_EFFECT" < /dev/null > /dev/null
+JOB_ID=$FM_REMOTE_JOB_ID
+fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
+PREEMPT_ELAPSED=$(( $(date +%s) - PREEMPT_BEGAN ))
+[ "$FM_REMOTE_JOB_EXIT" -eq 0 ] || fail "the short command behind a long poll did not complete"
+assert_present "$PREEMPT_SIDE_EFFECT" "the short command behind a long poll did not run"
+[ "$PREEMPT_ELAPSED" -le 10 ] || fail "a queued short command waited a full poll window behind the long poll"
+fm_remote_job_wait "$ACCOUNT_HOME" "$POLL_JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
+[ "$FM_REMOTE_JOB_EXIT" -eq 75 ] || fail "a preempted long poll did not publish its elapsed-window result"
+[ ! -s "$FM_REMOTE_JOB_STDOUT" ] || fail "a preempted long poll published partial stdout"
+[ ! -s "$FM_REMOTE_JOB_STDERR" ] || fail "a preempted long poll published partial stderr"
+fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the short command could not be reaped"
+fm_remote_job_reap "$ACCOUNT_HOME" "$POLL_JOB_ID" || fail "the preempted poll could not be reaped"
+pass "a queued short command preempts a running long poll instead of waiting its window"
+
+printf 'hello after preemption\n' > "$REMOTE_HOME/$REPLY_LOG_REL"
+FM_REMOTE_JOB_TIMEOUT=10
+fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
+  fm-remote-delta-read.sh "$REPLY_LOG_REL" 0 "$EMPTY_SHA" 5 < /dev/null > /dev/null
+JOB_ID=$FM_REMOTE_JOB_ID
+fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
+[ "$FM_REMOTE_JOB_EXIT" -eq 0 ] || fail "the re-armed poll after preemption did not complete"
+OUT=$(<"$FM_REMOTE_JOB_STDOUT")
+assert_contains "$OUT" 'status=delta' "the re-armed poll did not return a delta from the preserved cursor"
+assert_contains "$OUT" 'hello after preemption' "the re-armed poll lost data appended around the preemption"
+fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the re-armed poll could not be reaped"
+rm -f -- "$REMOTE_HOME/$REPLY_LOG_REL"
+pass "a poll re-armed after preemption reads the same cursor with nothing lost"
+
+FM_REMOTE_JOB_TIMEOUT=15
+fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
+  fm-remote-delta-read.sh "$REPLY_LOG_REL" 0 "$EMPTY_SHA" 6 < /dev/null > /dev/null
+FIRST_JOB_ID=$FM_REMOTE_JOB_ID
+FIRST_JOB_DIR="$STATE_ROOT/jobs/$FIRST_JOB_ID"
+for _ in $(seq 1 100); do
+  [ "$(fm_remote_job_read_state "$FIRST_JOB_DIR" 2>/dev/null || true)" = running ] && break
+  sleep 0.05
+done
+[ "$(fm_remote_job_read_state "$FIRST_JOB_DIR" 2>/dev/null || true)" = running ] \
+  || fail "the first sibling poll did not begin running"
+POLL_PAIR_BEGAN=$(date +%s)
+fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
+  fm-remote-delta-read.sh "$REPLY_LOG_REL" 0 "$EMPTY_SHA" 1 < /dev/null > /dev/null
+JOB_ID=$FM_REMOTE_JOB_ID
+fm_remote_job_wait "$ACCOUNT_HOME" "$FIRST_JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
+POLL_PAIR_ELAPSED=$(( $(date +%s) - POLL_PAIR_BEGAN ))
+[ "$FM_REMOTE_JOB_EXIT" -eq 75 ] || fail "the first sibling poll did not close its own window"
+[ "$POLL_PAIR_ELAPSED" -ge 4 ] || fail "a queued sibling poll preempted a running poll"
+fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
+[ "$FM_REMOTE_JOB_EXIT" -eq 75 ] || fail "the queued sibling poll did not run after the first window"
+fm_remote_job_reap "$ACCOUNT_HOME" "$FIRST_JOB_ID" || fail "the first sibling poll could not be reaped"
+fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the queued sibling poll could not be reaped"
+FM_REMOTE_JOB_QUEUE_TIMEOUT=5
+pass "sibling polls never preempt each other into a re-arm churn loop"
 
 STARTED="$TMP_ROOT/shutdown-started"
 SHUTDOWN_SIDE_EFFECT="$TMP_ROOT/shutdown-side-effect"
