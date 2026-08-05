@@ -771,7 +771,8 @@ test_peek_and_crew_state_fail_closed_on_orca_error_json() {
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-crew-state.sh" "$id" )
   assert_contains "$out" "state: unknown" "crew-state should not treat an Orca read error as a live endpoint"
-  assert_contains "$out" "backend target gone: term-stale" "crew-state should report the stale Orca terminal as gone"
+  assert_contains "$out" "source: process-output" "crew-state should classify the Orca read error through measured liveness"
+  assert_contains "$out" "activity=unverified endpoint=unverified" "crew-state should preserve an unreadable Orca endpoint as unverified"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''read'$'\x1f''--terminal'$'\x1f''term-stale' \
     "fm-peek/fm-crew-state did not read the recorded Orca terminal"
   pass "fm-peek/fm-crew-state: Orca read error JSON fails closed"

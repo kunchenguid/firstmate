@@ -23,11 +23,14 @@ fi
 if command -v perl >/dev/null 2>&1; then
   exec perl -MIO::Select -MTime::HiRes=time -e '
     use Errno qw(EINTR);
+    use POSIX qw(WNOHANG);
     $| = 1;
     my $mode = shift;
     my $limit = shift;
     my $pid = 0;
     my $stopping = 0;
+    my $reaped = 0;
+    my $status;
     my $reader;
     my $stop = sub {
       my $code = shift;
@@ -62,10 +65,21 @@ if command -v perl >/dev/null 2>&1; then
       my $select = IO::Select->new($reader);
       my $deadline = time + $limit;
       while (1) {
+        if (!$reaped && waitpid($pid, WNOHANG) == $pid) {
+          $status = $?;
+          $reaped = 1;
+        }
         my $remaining = $deadline - time;
-        $stop->(124) if $remaining <= 0;
-        my @ready = $select->can_read($remaining);
-        $stop->(124) unless @ready;
+        my @ready;
+        if ($reaped) {
+          @ready = $select->can_read(0);
+          last unless @ready;
+        } else {
+          $stop->(124) if $remaining <= 0;
+          my $poll = $remaining < 0.1 ? $remaining : 0.1;
+          @ready = $select->can_read($poll);
+          next unless @ready;
+        }
         my $buffer = "";
         my $bytes = sysread($reader, $buffer, 8192);
         next if !defined($bytes) && $! == EINTR;
@@ -84,8 +98,10 @@ if command -v perl >/dev/null 2>&1; then
       }
       alarm $limit;
     }
-    waitpid $pid, 0;
-    my $status = $?;
+    if (!$reaped) {
+      waitpid $pid, 0;
+      $status = $?;
+    }
     alarm 0;
     exit(($status & 127) ? 128 + ($status & 127) : ($status >> 8));
   ' -- "$MODE" "$TIME_LIMIT" "$@"
