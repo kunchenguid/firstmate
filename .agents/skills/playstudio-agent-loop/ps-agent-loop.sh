@@ -698,15 +698,9 @@ print("""() => {
 _capture_review_frame() {
   # Best-effort viewport JPEG into <dir>/frame-NNNNNN.jpg. Never fails the turn.
   # chrome-devtools-axi --format jpeg may write <path>.jpeg even when asked for .jpg,
-  # and the headed Chrome sandbox often can only materialize files under /tmp —
-  # so capture via TMPDIR then move into the review dir.
-  local dir="$1"
-  local idx="$2"
-  local path tmp_base tmp_jpg tmp_jpeg written
-  [ -n "$dir" ] || return 0
-  mkdir -p "$dir" || return 0
+  # Headed Chrome only materializes jpeg files under literal /tmp (not macOS TMPDIR).
   path="$(printf '%s/frame-%06d.jpg' "$dir" "$idx")"
-  tmp_base="$(printf '%s/ps-review-%s-%06d' "${TMPDIR:-/tmp}" "$$" "$idx")"
+  tmp_base="$(printf '/tmp/ps-review-%s-%06d' "$$" "$idx")"
   tmp_jpg="${tmp_base}.jpg"
   tmp_jpeg="${tmp_base}.jpeg"
   rm -f "$tmp_jpg" "$tmp_jpeg" 2>/dev/null || true
