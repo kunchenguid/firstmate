@@ -37,6 +37,48 @@ run_bearings() {  # <home>
     "$BEARINGS" --json
 }
 
+liveness_record() {  # <id> <activity> <endpoint-presence> <worker-presence>
+  local id=$1 activity=$2 endpoint=$3 worker=$4
+  jq -n \
+    --arg id "$id" \
+    --arg activity "$activity" \
+    --arg endpoint "$endpoint" \
+    --arg worker "$worker" '
+    {
+      id:$id,
+      harness:"codex",
+      harness_family:"codex",
+      backend:"tmux",
+      target:("firstmate:fm-" + $id),
+      worktree:null,
+      endpoint:{
+        presence:$endpoint,
+        raw:(if $endpoint == "verified_present" then "alive" else "missing" end)
+      },
+      worker:{
+        presence:$worker,
+        pids_sample_1:(if $worker == "verified_present" then 1 else 0 end),
+        pids_sample_2:(if $worker == "verified_present" then 1 else 0 end),
+        harness_processes_sample_1:(if $worker == "verified_present" then 1 else 0 end),
+        harness_processes_sample_2:(if $worker == "verified_present" then 1 else 0 end)
+      },
+      output:{
+        sample_1_readable:true,
+        sample_2_readable:true,
+        changed:($activity == "active")
+      },
+      cpu:{
+        sample_1_max_ms:1000,
+        sample_2_max_ms:(if $activity == "active" then 1030 else 1000 end),
+        delta_ms:(if $activity == "active" then 30 else 0 end),
+        rate_ms_per_minute:(if $activity == "active" then 900 else 0 end),
+        baseline:"verified",
+        threshold_ms_per_minute:760
+      },
+      activity:$activity
+    }'
+}
+
 run_teardown() {  # <home> <id>
   local home=$1 id=$2
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -46,16 +88,20 @@ run_teardown() {  # <home> <id>
 
 # Reproduces the loss exactly with privacy-safe synthetic names: the investigation
 # and visual review have ended, the only genuine unresolved decision is report prose,
-# no held backlog item or open status exists, and the authoritative Bearings view
-# correctly omits it. Completion must now refuse before teardown can erase the source.
+# no held backlog item or open status exists. Measured liveness must surface the
+# unreclaimed in-flight task as a gate before completion can erase the source.
 test_uninventoried_report_decision_refuses_completion() {
-  local home id json rc
+  local home id held_id active_id phantom_liveness held_liveness active_liveness liveness json rc
   home=$(make_home omitted-decision)
   id=sample-route-review
-  mkdir -p "$home/data/$id"
+  held_id=sample-held-review
+  active_id=sample-active-review
+  mkdir -p "$home/data/$id" "$home/data/$held_id" "$home/data/$active_id"
   cat > "$home/data/backlog.md" <<EOF
 ## In flight
 - [ ] $id - Investigate sample routing (repo: sample) (kind: scout) (since 2026-07-14)
+- [ ] $held_id - Hold sample routing (repo: sample) (kind: captain) (since 2026-07-14) (hold: captain route choice pending) (hold-kind: captain)
+- [ ] $active_id - Continue sample routing (repo: sample) (kind: scout) (since 2026-07-14)
 
 ## Queued
 
@@ -68,7 +114,23 @@ EOF
     "harness=codex" \
     "kind=scout" \
     "mode=scout"
+  fm_write_meta "$home/state/$held_id.meta" \
+    "window=firstmate:fm-$held_id" \
+    "worktree=$home/projects/missing-held" \
+    "project=$home/projects/sample" \
+    "harness=codex" \
+    "kind=captain" \
+    "mode=captain"
+  fm_write_meta "$home/state/$active_id.meta" \
+    "window=firstmate:fm-$active_id" \
+    "worktree=$home/projects/active-scratch" \
+    "project=$home/projects/sample" \
+    "harness=codex" \
+    "kind=scout" \
+    "mode=scout"
   printf 'done: report and visual review complete\n' > "$home/state/$id.status"
+  printf 'needs-decision [key=route]: captain route choice pending\n' > "$home/state/$held_id.status"
+  printf 'working: continuing sample routing\n' > "$home/state/$active_id.status"
   cat > "$home/data/$id/report.md" <<'EOF'
 # Sample route review
 
@@ -76,12 +138,36 @@ The evidence is complete.
 The captain still needs to choose route north or route south before follow-up work starts.
 EOF
 
-  json=$(run_bearings "$home") || fail "Bearings failed for unresolved-decision regression"
-  printf '%s' "$json" | jq -e '
-    (.decisions_open | length) == 0
-      and (.gates | length) == 0
-      and (.reports | any(.id == "sample-route-review"))
-  ' >/dev/null || fail "the pre-policy omission shape was not reproduced: $json"
+  phantom_liveness=$(liveness_record "$id" absent verified_absent verified_absent)
+  held_liveness=$(liveness_record "$held_id" absent verified_absent verified_absent)
+  active_liveness=$(liveness_record "$active_id" active verified_present verified_present)
+  liveness=$(jq -n \
+    --argjson phantom "$phantom_liveness" \
+    --argjson held "$held_liveness" \
+    --argjson active "$active_liveness" '
+    {
+      schema:"fm-liveness.v1",
+      observed_at:"2026-07-14T12:00:00Z",
+      interval_ms:2000,
+      process_samples:{sample_1_readable:true,sample_2_readable:true},
+      records:[$phantom,$held,$active]
+    }')
+  json=$(FM_SNAPSHOT_LIVENESS_JSON="$liveness" run_bearings "$home") \
+    || fail "Bearings failed for unresolved-decision regression"
+  printf '%s' "$json" | jq -e --arg id "$id" --arg held "$held_id" --arg active "$active_id" '
+    (.decisions_open | any(.id == $id) | not)
+      and (.gates | any(
+        .id == $id
+          and .reason == "measured liveness: absent; endpoint=verified_absent; worker=verified_absent"
+      ))
+      and (.gates | any(.id == $held and .reason == "captain route choice pending"))
+      and (.gates | any(
+        .id == $held and (.reason | startswith("measured liveness:"))
+      ) | not)
+      and (.gates | any(.id == $active) | not)
+      and (.in_flight | any(.id == $active and .state == "active"))
+      and (.reports | any(.id == $id))
+  ' >/dev/null || fail "measured liveness did not distinguish the phantom, held, and active lanes without hiding the held gate: $json"
 
   set +e
   run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err"
@@ -90,7 +176,7 @@ EOF
   [ "$rc" -ne 0 ] || fail "completed investigation teardown erased a report-only unresolved decision"
   assert_present "$home/state/$id.meta" "refused completion must preserve investigation metadata"
   assert_grep "REFUSED" "$home/teardown.err" "refusal must be explicit"
-  pass "report-only unresolved decision is reproduced and completion refuses before loss"
+  pass "verified-absent in-flight work gates while held and active lanes avoid measured-liveness gates, and completion refuses before report loss"
 }
 
 tasks_in() {  # <home> <tasks-axi args...>
