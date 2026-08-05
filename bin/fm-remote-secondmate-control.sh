@@ -120,7 +120,7 @@ remote_endpoint_require_profile() {
 }
 
 state_value() { # <id>; prints recovery-grade state
-  local id=$1 meta
+  local id=$1 meta state
   meta=$(meta_path "$id")
   [ -f "$meta" ] && [ ! -L "$meta" ] || { printf 'missing\n'; return 0; }
   if ! remote_endpoint_load "$id"; then
@@ -128,12 +128,15 @@ state_value() { # <id>; prints recovery-grade state
     printf 'unverified\n'
     return 0
   fi
-  if ! remote_profile_load "$id"; then
+  if ! state=$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null); then
+    state=unreadable
+  fi
+  if [ "$state" = alive ] && ! remote_profile_load "$id"; then
     printf 'error: %s\n' "$REMOTE_PROFILE_ERROR" >&2
     printf 'unverified\n'
     return 0
   fi
-  fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n'
+  printf '%s\n' "$state"
 }
 
 print_route() { # <id>
@@ -317,7 +320,7 @@ cmd_retire() {
     return 0
   fi
   [ -z "$force" ] || [ "$force" = --force ] || usage
-  remote_endpoint_require_profile "$id"
+  remote_endpoint_require "$id"
   FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" "$SCRIPT_DIR/fm-guard.sh" || true
   if [ -n "$force" ]; then
