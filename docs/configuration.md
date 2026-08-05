@@ -103,7 +103,7 @@ Presence, not content, decides whether the default applies: an absent file means
 A present file's value is its first line taken verbatim, with only the line terminator removed, because the label has to match what was set on the live workspace byte for byte.
 A whitespace-only line is therefore a valid blank label, honored exactly as written, and a completely empty file means the same thing and resolves to one space.
 A blank label is a supported choice: it puts the sidebar's emphasis on the agent names beside it ([Agent display names](herdr-backend.md#agent-display-names)).
-A value containing control characters warns and keeps the default rather than failing a spawn over a purely visual setting.
+A value containing control characters warns and keeps the default rather than failing a spawn over a purely visual setting, and a present file the spawning process cannot read does the same: a broken config is a fault to surface, not a deliberately blank label.
 
 That label is a placement resolver for launches with no Herdr ancestry, so set it after renaming that workspace for display and the resolver keeps finding the renamed workspace instead of creating a second one.
 Firstmate never renames or migrates a live workspace itself.
