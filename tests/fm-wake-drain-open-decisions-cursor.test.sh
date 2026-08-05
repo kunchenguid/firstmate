@@ -143,5 +143,90 @@ test_truncated_log_falls_back_to_a_full_refold_not_a_dropped_decision() {
   pass "a truncated/rewritten log falls back to a full re-fold instead of dropping or misreading the decision"
 }
 
+test_same_size_rewrite_is_detected_via_inode_identity() {
+  local dir state out probe status new_bytes probe_bytes
+  dir=$(make_case cursor-rotation)
+  state="$dir/state"
+  out="$dir/drain.out"
+  probe="$dir/probe.tsv"
+  status="$state/task3.status"
+  : > "$probe"
+
+  printf 'needs-decision [key=migration]: pick the rollout plan\n' > "$status"
+  append_filler "$status" 100 >/dev/null
+  FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
+    || fail "initial drain before rotation failed"
+  grep -F 'task3' "$out" | grep -F '[key=migration]' >/dev/null \
+    || fail "the decision did not surface before rotation"
+
+  # Replace the file at the same path with a DIFFERENT file of the SAME byte
+  # size (mv gives the destination path a new inode) - a same-size rewrite,
+  # which a plain offset>size shrink check alone would NOT catch. The buried
+  # decision must still surface: the device+inode identity check must detect
+  # this as a rotation/recreation and fall back to a full re-fold.
+  new_bytes=$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')
+  printf 'needs-decision [key=migration]: rewritten via rotation\n' > "$dir/replacement"
+  padded=$(LC_ALL=C wc -c < "$dir/replacement" | tr -d '[:space:]')
+  pad=$((new_bytes - padded))
+  [ "$pad" -gt 0 ] && head -c "$pad" /dev/zero | tr '\0' 'x' >> "$dir/replacement"
+  mv "$dir/replacement" "$status"
+  [ "$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')" = "$new_bytes" ] \
+    || fail "test setup error: the rotated replacement is not the same size as the original"
+
+  FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
+    || fail "post-rotation drain failed"
+  grep -F 'task3' "$out" | grep -F '[key=migration]' | grep -F 'rewritten via rotation' >/dev/null \
+    || fail "the same-size rotated file's decision did not surface (inode-identity check did not fire)"
+  probe_bytes=$(last_probe_bytes "$probe" "$status")
+  [ "$probe_bytes" = "$new_bytes" ] \
+    || fail "post-rotation drain read $probe_bytes bytes, expected a full re-fold of the $new_bytes-byte replacement"
+
+  pass "a same-size file rotation (new inode) is detected and falls back to a full re-fold"
+}
+
+# Not driven through bin/fm-wake-drain.sh: this targets one specific internal
+# read (tail failing mid-fold) precisely, which would be impossible to isolate
+# reliably through the full drain script without also breaking unrelated tail
+# usage elsewhere in the drain/guard chain. status_open_decisions_incremental
+# is itself a real, directly callable function - this still exercises real
+# behavior end to end for that function, not source text.
+test_read_failure_never_silently_returns_empty() {
+  local dir fakebin statusfile cursor before after
+  dir=$(make_case cursor-read-failure)
+  fakebin="$dir/failbin"
+  mkdir -p "$fakebin"
+  statusfile="$dir/state/task4.status"
+  cursor="$dir/state/.task4.open-decisions-cursor"
+
+  printf 'needs-decision [key=x]: something important\n' > "$statusfile"
+  before=$(bash -c '. "$1"; status_open_decisions_incremental "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$statusfile")
+  printf '%s\n' "$before" | grep -F 'needs-decision' | grep -F 'something important' >/dev/null \
+    || fail "the decision did not surface on the bootstrap call"
+  [ -s "$cursor" ] || fail "no cursor was persisted after the bootstrap call"
+
+  printf 'working: more routine content\n' >> "$statusfile"
+  # Fail ONLY the byte-offset content read (`tail -c ...`) that status_open_
+  # decisions_incremental uses to pull new appended bytes; pass every other
+  # invocation (including its own `tail -n +3` cursor-body read) through to
+  # the real tail, so this isolates exactly the one read path under test.
+  cat > "$fakebin/tail" <<SH
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in -c|-c*) exit 1 ;; esac
+done
+exec "$(command -v tail)" "\$@"
+SH
+  chmod +x "$fakebin/tail"
+
+  after=$(PATH="$fakebin:$PATH" bash -c '. "$1"; status_open_decisions_incremental "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$statusfile")
+  [ "$after" = "$before" ] \
+    || fail "a failed read did not preserve the persisted open set: got '$after', expected '$before'"
+  grep -q '^offset=' "$cursor" || fail "the cursor file was corrupted by the failed read"
+
+  pass "a failed incremental read preserves the persisted open set instead of silently returning empty"
+}
+
 test_truncated_log_falls_back_to_a_full_refold_not_a_dropped_decision
+test_same_size_rewrite_is_detected_via_inode_identity
+test_read_failure_never_silently_returns_empty
 test_buried_decision_survives_many_growing_drains_and_resolution_clears_it

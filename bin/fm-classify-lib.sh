@@ -302,15 +302,24 @@ EOF
 # persisted open-set carries every still-open key forward across calls
 # regardless of how much new unrelated log content has since been folded in.
 #
-# Cursor invalidation: the cursor file records the exact byte offset already
-# folded. When it is absent (a new task, or one whose cursor was deleted), or
-# its recorded offset exceeds the CURRENT file size (the log was truncated or
-# rewritten), this falls back to a full re-fold of the whole file from byte 0 -
-# byte for byte what status_open_decisions itself would compute - and rewrites
-# the cursor from that clean baseline. It does not detect every conceivable
-# rewrite (e.g. a same-size or grown replacement content swap), only the sizes
-# this scan can observe cheaply; that matches the truncated/rewritten/shrunk/
-# new-task cases callers need to handle.
+# Cursor invalidation is deliberately minimal, matching how status files are
+# ACTUALLY used in this repo: every one is created once (`>`) and only ever
+# appended to (`>>`) - never replaced, renamed, or rewritten in place. So the
+# only two ways a cursor can go stale are a shrink (truncated) or the file at
+# this path being a different file than before (replaced/rotated/recreated),
+# which a changed device+inode makes an O(1) check via a single `stat` call -
+# no content hashing, no re-reading the consumed prefix. Either signal falls
+# back to a full re-fold of the whole current file from byte 0 - byte for byte
+# what status_open_decisions itself would compute - and rewrites the cursor
+# from that clean baseline. A same-inode, same-size, in-place byte edit is NOT
+# detected; that is a deliberately accepted gap because no code path in this
+# repo ever does that to a status file.
+#
+# The other real failure mode is OUR OWN read failing (a stat/wc/tail I/O
+# error), not a malformed writer: every such read here is checked, and on
+# failure this reports the already-trusted persisted set unchanged rather than
+# risking a silent invalidation that would wipe it - never a bare "empty" as if
+# nothing were open.
 #
 # Not a pure status-file read: this writes/rewrites the sibling cursor file as a
 # side effect (state/.<task>.open-decisions-cursor), the library's second
@@ -329,27 +338,53 @@ _fm_open_decisions_cursor_path() {  # <status-file>
   printf '%s/.%s.open-decisions-cursor' "$dir" "${base%.status}"
 }
 
+# Portable device:inode identity for the rotation/recreation check below.
+_fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure
+  local f=$1
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    LC_ALL=C stat -f '%d:%i' "$f" 2>/dev/null
+  else
+    LC_ALL=C stat -c '%d:%i' "$f" 2>/dev/null
+  fi
+}
+
 status_open_decisions_incremental() {  # <status-file>
-  local f=$1 cf offset size open='' first resolve held
+  local f=$1 cf offset ident open='' first size cur_ident resolve held chunk line
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   cf=$(_fm_open_decisions_cursor_path "$f")
   offset=0
+  ident=''
   if [ -f "$cf" ] && [ -r "$cf" ] && [ ! -L "$cf" ]; then
     first=$(head -n1 "$cf" 2>/dev/null)
     case "$first" in
       offset=*)
         offset=${first#offset=}
-        case "$offset" in ''|*[!0-9]*) offset=0 ;; *) open=$(tail -n +2 "$cf" 2>/dev/null) ;; esac
+        case "$offset" in
+          ''|*[!0-9]*) offset=0 ;;
+          *)
+            ident=$(sed -n '2p' "$cf" 2>/dev/null); ident=${ident#ident=}
+            open=$(tail -n +3 "$cf" 2>/dev/null)
+            ;;
+        esac
         ;;
     esac
   fi
+
+  # A stat/size-read failure is a genuine I/O error, not "the file is empty" -
+  # report the already-trusted persisted set unchanged rather than risking a
+  # silent invalidation that would wipe it.
+  cur_ident=$(_fm_open_decisions_file_ident "$f") || { printf '%s' "$open"; return 0; }
+  [ -n "$cur_ident" ] || { printf '%s' "$open"; return 0; }
   size=$(LC_ALL=C wc -c < "$f" 2>/dev/null | tr -d '[:space:]')
-  case "$size" in ''|*[!0-9]*) size=0 ;; esac
-  if [ "$offset" -gt "$size" ]; then
+  case "$size" in ''|*[!0-9]*) printf '%s' "$open"; return 0 ;; esac
+
+  if [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ]; then
     offset=0
     open=''
   fi
+
   if [ "$offset" -lt "$size" ]; then
+    chunk=$(tail -c "+$((offset + 1))" "$f" 2>/dev/null) || { printf '%s' "$open"; return 0; }
     # Test-only observability seam (off by default, no production behavior
     # change): when set, records exactly how many bytes THIS call folded, so a
     # test can assert the incremental path stays bounded by new appends rather
@@ -360,9 +395,12 @@ status_open_decisions_incremental() {  # <status-file>
     held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
     while IFS= read -r line || [ -n "$line" ]; do
       open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
-    done < <(tail -c "+$((offset + 1))" "$f")
+    done <<EOF
+$chunk
+EOF
     {
       printf 'offset=%s\n' "$size"
+      printf 'ident=%s\n' "$cur_ident"
       # An `if` (not `[ -n "$open" ] && printf ...`) so the group's exit status
       # is always 0 even when open is empty (fully resolved) - a bare `&&`
       # there would make the whole group fail on that condition, silently
