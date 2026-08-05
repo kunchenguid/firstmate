@@ -371,6 +371,34 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# Two universal contract additions that must survive in EVERY ship mode, because
+# both defend against failures that a green gate does not catch: shipping a
+# rendered-but-inert element, and mistaking inherited breakage for your own.
+# They live in the shared heredoc precisely so no mode can drift out of them,
+# so assert across all three rather than on one sample.
+test_ship_baseline_and_no_placeholder_contract() {
+  local home id mode brief
+  home="$TMP_ROOT/baseline-placeholder-home"
+  write_registry "$home"
+
+  for id_mode in "brief-base-d1:no-mistakes" "brief-base-d2:direct-PR" "brief-base-d3:local-only"; do
+    id=${id_mode%%:*}
+    mode=${id_mode##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    assert_grep "Establish a test baseline before your first edit." "$brief" \
+      "$id ($mode): brief lost the baseline-before-editing contract"
+    assert_grep "treat that as inherited breakage" "$brief" \
+      "$id ($mode): baseline contract lost the inherited-breakage stop condition"
+    assert_grep "Leave behind no placeholder or unimplemented code" "$brief" \
+      "$id ($mode): brief lost the no-placeholder rule"
+    assert_grep "an element a user can click and get nothing from is not done" "$brief" \
+      "$id ($mode): no-placeholder rule lost its works-not-compiles bar"
+  done
+  pass "fm-brief.sh: every ship mode carries the baseline and no-placeholder contracts"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -718,6 +746,7 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_ship_baseline_and_no_placeholder_contract
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

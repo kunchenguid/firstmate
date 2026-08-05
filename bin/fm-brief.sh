@@ -424,6 +424,11 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
 
+**Establish a test baseline before your first edit.** Run the project's own test gate the way its \`AGENTS.md\` or \`README.md\` documents it, before you change anything.
+A green baseline is what makes a later failure attributable to your work; without one you cannot tell your own breakage apart from breakage you inherited.
+If the baseline is already red, treat that as inherited breakage: append \`blocked: {the failing gate and what it printed}\` and stop, rather than folding the repair into this task or building on top of it.
+If the gate runs long enough that you would otherwise sit silent, append one \`working:\` line first so supervision does not read the wait as a wedged pane.
+
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
@@ -448,6 +453,12 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. Implement what the task asks for, completely. Leave behind no placeholder or unimplemented code:
+   no handler that accepts input and does nothing, no control wired to nothing, no branch returning a
+   fixed value that stands in for real work, no "wire this up later" comment. Code that compiles and
+   renders is not evidence that it works - an element a user can click and get nothing from is not done.
+   If the task turns out larger than it looked and you cannot finish it honestly, append
+   \`needs-decision: {what is missing and what you propose}\` and stop; never quietly ship a reduced version.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
