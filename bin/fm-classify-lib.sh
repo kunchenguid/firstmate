@@ -13,13 +13,17 @@
 # daemon keeps its escalation-digest seen-markers; the watcher keeps its .seen-*
 # signatures).
 #
-# The one exception is the absorb classification (crew_absorb_class and its
-# working/paused wrappers). It is NOT a pure status-file read: it reuses
-# bin/fm-crew-state.sh, which may make a bounded no-mistakes call, to decide
-# whether a crew that just stopped its turn or went stale is working, deliberately
-# paused, or neither. Callers run it ONLY on no-verb signal handling and first
-# sighting of a stale hash, never on every wake, so the per-wake triage stays
-# cheap.
+# There are two documented exceptions. The absorb classification
+# (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
+# read: it reuses bin/fm-crew-state.sh, which may make a bounded no-mistakes call,
+# to decide whether a crew that just stopped its turn or went stale is working,
+# deliberately paused, or neither. Callers run it ONLY on no-verb signal handling
+# and first sighting of a stale hash, never on every wake, so the per-wake triage
+# stays cheap. status_open_decisions_incremental (see "incremental (cursor-backed)
+# open-decisions fold" below) also writes: it persists a per-status-file byte
+# cursor and folded open-set as a side effect, so a per-drain fleet-wide scan
+# stays bounded by new appends instead of re-reading each task's whole lifetime
+# log every time.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -201,6 +205,34 @@ $set
 EOF
   printf '%s' "$out"
 }
+# Fold ONE status line into an existing "<key>\t<verb>\t<note>\n"-per-line open
+# set, applying the same needs-decision/blocked-opens, resolved/captain-held-closes
+# rule status_open_decisions documents above. Pure text transform, no file I/O.
+# This is the ONE place the per-line open/resolved rule is written; both the
+# whole-file fold (status_open_decisions) and the incremental cursor-backed fold
+# (status_open_decisions_incremental) below call this instead of re-deriving the
+# rule, so the two consumption strategies can never drift apart on semantics.
+_fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb>
+  local open=$1 line=$2 resolve=$3 held=$4 verb key note stripped
+  stripped=${line//[[:space:]]/}
+  [ -n "$stripped" ] || { printf '%s' "$open"; return 0; }
+  verb=$(status_line_verb "$line")
+  key=$(_fm_decision_key "$line") || { printf '%s' "$open"; return 0; }
+  case "$verb" in
+    needs-decision|blocked)
+      note=$(status_line_note "$line")
+      open=$(_fm_decision_drop "$open" "$key")
+      [ -n "$open" ] && open="${open}"$'\n'
+      open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
+      ;;
+    "$resolve"|"$held")
+      open=$(_fm_decision_drop "$open" "$key")
+      [ -n "$open" ] && open="${open}"$'\n'
+      ;;
+  esac
+  printf '%s' "$open"
+}
+
 # Fold the WHOLE status stream into the set of decisions still open. Prints one
 # TAB-separated "<key>\t<verb>\t<summary>" line per still-open decision, in
 # most-recently-opened-last order; prints nothing when none are open. Pure read of
@@ -214,27 +246,12 @@ EOF
 # subprocess read, which exists for that function's much narrower payload-driven
 # path resolution rather than this directory-local glob.
 status_open_decisions() {  # <status-file>
-  local f=$1 line verb key note resolve held open='' stripped
+  local f=$1 line resolve held open=''
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
-    stripped=${line//[[:space:]]/}
-    [ -n "$stripped" ] || continue
-    verb=$(status_line_verb "$line")
-    key=$(_fm_decision_key "$line") || continue
-    case "$verb" in
-      needs-decision|blocked)
-        note=$(status_line_note "$line")
-        open=$(_fm_decision_drop "$open" "$key")
-        [ -n "$open" ] && open="${open}"$'\n'
-        open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
-        ;;
-      "$resolve"|"$held")
-        open=$(_fm_decision_drop "$open" "$key")
-        [ -n "$open" ] && open="${open}"$'\n'
-        ;;
-    esac
+    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
   done < "$f"
   printf '%s' "$open"
 }
@@ -252,6 +269,121 @@ scan_open_decisions() {  # <state>
     [ -e "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
     open=$(status_open_decisions "$f") || continue
+    [ -n "$open" ] || continue
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      printf '%s\t%s\n' "$task" "$line"
+    done <<EOF
+$open
+EOF
+  done
+  return 0
+}
+
+# --- incremental (cursor-backed) open-decisions fold ------------------------
+#
+# status_open_decisions above re-reads and re-folds a status file's ENTIRE
+# lifetime on every call, so its cost grows with total log size. A per-drain
+# fleet-wide scan (scan_open_decisions, called by bin/fm-wake-drain.sh on every
+# drain including the empty-queue fast path) pays that cost for every task on
+# every wake, which grows unbounded as tasks run longer and accumulate status
+# history. status_open_decisions_incremental and scan_open_decisions_incremental
+# below are the bounded-cost siblings used for that per-drain path: each call
+# reads only the bytes appended to a status file since its own last call (a
+# persisted per-file byte cursor) and folds just those new lines into a
+# persisted running open-set, via the exact same _fm_decision_fold_line rule
+# status_open_decisions uses - so the two strategies can never disagree on what
+# is open. Cost is bounded by NEW appends since the last drain, not by the
+# status file's total lifetime size.
+#
+# Correctness invariant (unchanged from the whole-file fold): an open decision
+# is dropped ONLY by an explicit resolved/captain-held line for its exact key,
+# never by cursor advancement, age, or being buried under later appends - the
+# persisted open-set carries every still-open key forward across calls
+# regardless of how much new unrelated log content has since been folded in.
+#
+# Cursor invalidation: the cursor file records the exact byte offset already
+# folded. When it is absent (a new task, or one whose cursor was deleted), or
+# its recorded offset exceeds the CURRENT file size (the log was truncated or
+# rewritten), this falls back to a full re-fold of the whole file from byte 0 -
+# byte for byte what status_open_decisions itself would compute - and rewrites
+# the cursor from that clean baseline. It does not detect every conceivable
+# rewrite (e.g. a same-size or grown replacement content swap), only the sizes
+# this scan can observe cheaply; that matches the truncated/rewritten/shrunk/
+# new-task cases callers need to handle.
+#
+# Not a pure status-file read: this writes/rewrites the sibling cursor file as a
+# side effect (state/.<task>.open-decisions-cursor), the library's second
+# documented exception to the pure-read rule after crew_absorb_class. The write
+# is atomic (temp file + rename), so a crash between calls leaves either the
+# prior cursor or the new one, never a partial one. bin/fm-wake-drain.sh calls
+# this only after releasing the wake-queue lock, so a hypothetical race between
+# two overlapping drains can at worst redo a little folding work twice - never
+# drop an open decision - because a losing writer's offset can only ever be
+# equal to or behind an already-recorded byte position, and the next call
+# re-derives from whatever offset actually landed on disk.
+_fm_open_decisions_cursor_path() {  # <status-file>
+  local f=$1 dir base
+  dir=$(dirname "$f")
+  base=$(basename "$f")
+  printf '%s/.%s.open-decisions-cursor' "$dir" "${base%.status}"
+}
+
+status_open_decisions_incremental() {  # <status-file>
+  local f=$1 cf offset size open='' first resolve held
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+  cf=$(_fm_open_decisions_cursor_path "$f")
+  offset=0
+  if [ -f "$cf" ] && [ -r "$cf" ] && [ ! -L "$cf" ]; then
+    first=$(head -n1 "$cf" 2>/dev/null)
+    case "$first" in
+      offset=*)
+        offset=${first#offset=}
+        case "$offset" in ''|*[!0-9]*) offset=0 ;; *) open=$(tail -n +2 "$cf" 2>/dev/null) ;; esac
+        ;;
+    esac
+  fi
+  size=$(LC_ALL=C wc -c < "$f" 2>/dev/null | tr -d '[:space:]')
+  case "$size" in ''|*[!0-9]*) size=0 ;; esac
+  if [ "$offset" -gt "$size" ]; then
+    offset=0
+    open=''
+  fi
+  if [ "$offset" -lt "$size" ]; then
+    # Test-only observability seam (off by default, no production behavior
+    # change): when set, records exactly how many bytes THIS call folded, so a
+    # test can assert the incremental path stays bounded by new appends rather
+    # than re-reading the whole file, without relying on timing or source text.
+    [ -n "${FM_OPEN_DECISIONS_READ_PROBE:-}" ] \
+      && printf '%s\t%s\n' "$f" "$((size - offset))" >> "$FM_OPEN_DECISIONS_READ_PROBE"
+    resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+    held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+    while IFS= read -r line || [ -n "$line" ]; do
+      open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
+    done < <(tail -c "+$((offset + 1))" "$f")
+    {
+      printf 'offset=%s\n' "$size"
+      # An `if` (not `[ -n "$open" ] && printf ...`) so the group's exit status
+      # is always 0 even when open is empty (fully resolved) - a bare `&&`
+      # there would make the whole group fail on that condition, silently
+      # skipping the mv below and leaving the cursor stuck on the OLD offset.
+      if [ -n "$open" ]; then printf '%s' "$open"; fi
+    } > "$cf.tmp.$$" && mv -f "$cf.tmp.$$" "$cf"
+  fi
+  printf '%s' "$open"
+}
+
+# Incremental sibling of scan_open_decisions: same fleet-wide directory walk and
+# output shape ("<task>\t<key>\t<verb>\t<note>" per open decision), but folds
+# each task's status log through status_open_decisions_incremental instead of
+# the whole-file status_open_decisions, so a fleet-wide per-drain scan stays
+# bounded by new appends rather than total lifetime log size across every task.
+scan_open_decisions_incremental() {  # <state>
+  local state=$1 f task open line
+  for f in "$state"/*.status; do
+    [ -e "$f" ] || continue
+    task=$(basename "$f"); task="${task%.status}"
+    open=$(status_open_decisions_incremental "$f") || continue
     [ -n "$open" ] || continue
     while IFS= read -r line; do
       [ -n "$line" ] || continue
