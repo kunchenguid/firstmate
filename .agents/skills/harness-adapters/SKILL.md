@@ -520,4 +520,4 @@ Cursor is crew/secondmate-only in the first release, matching Kimi's position.
 
 **Remote secondmates:** cursor is a verified remote secondmate harness since 2026-08-05 (herdr + cursor live-verified in an isolated lab; see `docs/verification/runtime-backends.md`).
 `bin/fm-spawn.sh`, `bin/fm-remote-secondmate-control.sh`, and `bin/fm-remote-doctor.sh` all admit it; the doctor accepts cursor's `~/.local/bin/cursor-agent` install even when the login PATH omits it.
-The exclusion is fail-closed: a remote cursor spawn is refused up front rather than launched against unverified herdr behavior.
+Remote cursor spawns run through the same doctor readiness gate and control allowlist as every other verified harness; no cursor-specific exclusion remains.
