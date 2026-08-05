@@ -22,6 +22,9 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   Model-qualified incompatibilities are rejected before launch and metadata.
+#   For codex, low through xhigh map to model_reasoning_effort, and max is accepted
+#   only with model gpt-5.6-luna.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -923,6 +926,21 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
   fi
 fi
 
+codex_effort_supported() {
+  local model=$1 effort=$2
+  case "$effort" in
+    low|medium|high|xhigh) return 0 ;;
+    max) [ "$model" = gpt-5.6-luna ] ;;
+    *) return 1 ;;
+  esac
+}
+
+if [ "$HARNESS" = codex ] && [ -n "$EFFORT" ] && [ "$EFFORT" != default ] \
+  && ! codex_effort_supported "$MODEL" "$EFFORT"; then
+  echo "error: codex effort '$EFFORT' requires model 'gpt-5.6-luna'" >&2
+  exit 1
+fi
+
 secondmate_registry_value() {
   secondmate_registry_field "$DATA/secondmates.md" "$1" "$2"
 }
@@ -968,7 +986,7 @@ model_flag_for_harness() {
 }
 
 effort_flag_for_harness() {
-  local harness=$1 effort=$2
+  local harness=$1 model=$2 effort=$3
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
   case "$harness" in
     claude)
@@ -977,11 +995,14 @@ effort_flag_for_harness() {
       esac
       ;;
     codex)
-      # The installed codex config schema uses model_reasoning_effort, and the
-      # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
-      # than passing an unsupported value.
       case "$effort" in
-        low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+        low|medium|high|xhigh)
+          printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")"
+          ;;
+        max)
+          codex_effort_supported "$model" "$effort" \
+            && printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")"
+          ;;
       esac
       ;;
     grok)
@@ -2083,7 +2104,7 @@ sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$MODEL" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
