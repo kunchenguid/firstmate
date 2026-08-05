@@ -748,7 +748,7 @@ CURSOR_CONVERSATION_ID=bc5f0f1a-b8fc-45a4-b2f5-9e14c259c8b2
 ```
 
 `CLAUDECODE=1` and `CLAUDE_CODE_ENTRYPOINT=cli` leaked from a parent claude process.
-Fix: `unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT` in the cursor launch template.
+Fix: `env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT` in the cursor launch template.
 
 **Model support trap:**
 

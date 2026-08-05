@@ -1095,7 +1095,7 @@ launch_template() {
     # launched from a claude firstmate does not inherit those markers (the
     # precedence hazard reproduced and fixed). --worktree is NEVER passed:
     # firstmate owns worktree isolation.
-    cursor) printf '%s' 'unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT; cursor-agent --force --trust __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    cursor) printf '%s' 'env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT cursor-agent --force --trust __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
     # muse (Muse Code): a positional prompt starts the supervised interactive
     # session. --yolo is the single flag that makes a crewmate pane viable: muse

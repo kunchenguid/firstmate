@@ -871,6 +871,49 @@ SH
   pass "C9 spawn: secondmate launch pins supervision to its own harness"
 }
 
+# A cursor secondmate must receive the isolation env prefix AT the agent
+# process. The cursor template sanitizes with `env -u`, so the FM_* prefix
+# assignments bind to env and are forwarded; a template that started with a
+# shell `unset ...;` would bind the prefix to the unset builtin and drop
+# FM_HOME/FM_SUPERVISION_MODEL before the agent started. Regression: execute
+# the captured launch in a clean pane-like shell (env -i, no FM_* inherited)
+# and assert the child cursor-agent's environment.
+test_spawn_cursor_secondmate_env_reaches_agent() {
+  local w sm launchlog launch envdump fakebin out status
+  w="$TMP_ROOT/spawn-cursor-env"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  envdump="$w/agent.env"
+  mkdir -p "$w/home/config"
+  printf 'cursor\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+  fakebin="$w/tmux-sm/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/cursor-agent" <<'SH'
+#!/usr/bin/env bash
+env | grep -E '^(FM_ROOT_OVERRIDE|FM_STATE_OVERRIDE|FM_DATA_OVERRIDE|FM_PROJECTS_OVERRIDE|FM_CONFIG_OVERRIDE|FM_PUBLIC_FOLLOWUP_PRIMARY_HOME|FM_HOME|FM_TRACE_CONTEXT|FM_SUPERVISION_MODEL|CLAUDECODE|CLAUDE_CODE_ENTRYPOINT)=' | sort > "${FM_AGENT_ENV_DUMP:?}"
+exit 0
+SH
+  chmod +x "$fakebin/cursor-agent"
+
+  out=$(spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "cursor secondmate spawn should succeed"$'\n'"$out"
+
+  launch=$(cat "$launchlog")
+  out=$(env -i CLAUDECODE=1 CLAUDE_CODE_ENTRYPOINT=cli \
+    FM_AGENT_ENV_DUMP="$envdump" PATH="$fakebin:/usr/bin:/bin" HOME="$w" \
+    bash -c "$launch" 2>&1)
+  [ -s "$envdump" ] || fail "cursor agent env dump empty or missing (isolation prefix dropped); launch: $launch"$'\n'"$out"
+  assert_grep "FM_HOME=$sm" "$envdump" "cursor agent lost FM_HOME (env prefix dropped)"
+  assert_grep "FM_SUPERVISION_MODEL=persistent" "$envdump" "cursor agent lost FM_SUPERVISION_MODEL"
+  assert_grep "FM_TRACE_CONTEXT=off" "$envdump" "cursor agent lost FM_TRACE_CONTEXT"
+  assert_grep "FM_ROOT_OVERRIDE=" "$envdump" "cursor agent lost the cleared FM_ROOT_OVERRIDE"
+  assert_grep "FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$w/home" "$envdump" "cursor agent lost the primary home pointer"
+  assert_not_contains "$(cat "$envdump")" "CLAUDECODE=" "cursor agent inherited the CLAUDECODE marker"
+  assert_not_contains "$(cat "$envdump")" "CLAUDE_CODE_ENTRYPOINT=" "cursor agent inherited CLAUDE_CODE_ENTRYPOINT"
+  pass "C10 spawn: cursor secondmate receives the isolation env prefix; sanitization does not swallow it"
+}
+
 # The harness fallback chain (secondmate-harness -> crew-harness -> own) still
 # resolves correctly with no model/effort tokens anywhere in the chain, and a
 # crew/scout (non-secondmate) launch is entirely unaffected by this feature: no
@@ -2483,6 +2526,7 @@ test_spawn_explicit_effort_overrides_secondmate_harness_token
 test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens
 test_spawn_explicit_harness_uses_explicit_profile_axes
 test_spawned_secondmate_uses_its_harness_supervision_model
+test_spawn_cursor_secondmate_env_reaches_agent
 test_spawn_fallback_chain_and_crew_scout_unaffected
 test_bootstrap_sweep_propagates_and_reconverges
 test_bootstrap_sweep_propagates_when_tracked_current
