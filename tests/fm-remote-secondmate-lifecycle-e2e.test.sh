@@ -601,8 +601,31 @@ cmp -s "$TMP_ROOT/parent-ios-before-legacy-profile.meta" "$PARENT/state/ios.meta
 launches_after_legacy_profile=$(grep -c '^tab create' "$HERDR_LOG" || true)
 [ "$launches_before_legacy_profile" -eq "$launches_after_legacy_profile" ] \
   || fail "pre-fix live Codex max refusal restarted the endpoint"
-mv -f "$TMP_ROOT/remote-ios-proven-profile.meta" "$remote_route_meta"
 pass "live pre-fix Codex max metadata is rejected without restart or republication"
+
+reset_remote_herdr_fixture "$HERDR_STATE"
+legacy_dead_profile_state=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios \
+  2> "$TMP_ROOT/legacy-dead-profile-state.err")
+[ "$legacy_dead_profile_state" = missing ] \
+  || fail "dead pre-upgrade endpoint was masked as $legacy_dead_profile_state instead of missing"
+[ ! -s "$TMP_ROOT/legacy-dead-profile-state.err" ] \
+  || fail "dead pre-upgrade endpoint emitted a profile-proof refusal"
+launches_before_legacy_recovery=$(grep -c '^tab create' "$HERDR_LOG" || true)
+if ! legacy_recovery_out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --effort high \
+  2> "$TMP_ROOT/legacy-profile-recovery.err"); then
+  fail "dead pre-upgrade endpoint did not recover"$'\n'"$(cat "$TMP_ROOT/legacy-profile-recovery.err")"
+fi
+assert_contains "$legacy_recovery_out" 'harness=codex' "dead pre-upgrade recovery did not relaunch Codex"
+launches_after_legacy_recovery=$(grep -c '^tab create' "$HERDR_LOG" || true)
+[ "$launches_after_legacy_recovery" -eq $((launches_before_legacy_recovery + 1)) ] \
+  || fail "dead pre-upgrade recovery did not perform exactly one relaunch"
+assert_grep 'profile_delivery=fm-spawn.v1' "$remote_route_meta" \
+  "dead pre-upgrade recovery did not publish fresh profile provenance"
+assert_grep 'delivered_effort=high' "$remote_route_meta" \
+  "dead pre-upgrade recovery did not record its delivered effort"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
+  || fail "dead pre-upgrade recovery did not produce a live proven endpoint"
+pass "dead pre-upgrade endpoints recover with fresh delivered-profile provenance"
 
 if [ "${FM_TEST_PROFILE_ONLY:-0}" = 1 ]; then
   echo "ALL PROFILE TESTS PASSED"
@@ -1073,6 +1096,17 @@ if ! wait "$spawn_retirement_pid"; then
   printf 'serialized respawn output:\n%s\n' "$(cat "$TMP_ROOT/spawn-retirement.out")" >&2
   fail "serialized remote respawn failed"
 fi
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
+  || fail "retirement fixture did not produce a live endpoint"
+awk '
+  /^profile_delivery=/ || /^delivered_model=/ || /^delivered_effort=/ { next }
+  { print }
+' "$remote_route_meta" > "$TMP_ROOT/remote-ios-live-legacy-retire.meta"
+mv -f "$TMP_ROOT/remote-ios-live-legacy-retire.meta" "$remote_route_meta"
+legacy_retire_state=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios \
+  2> "$TMP_ROOT/legacy-retire-state.err")
+[ "$legacy_retire_state" = unverified ] \
+  || fail "live pre-upgrade retirement fixture was not classified unverified"
 sleep 0.2
 kill -0 "$teardown_pid" 2>/dev/null || fail "remote retirement bypassed an active backlog handoff"
 touch "$TMP_ROOT/handoff.release"
@@ -1091,6 +1125,7 @@ jq -e --arg workspace "$SIBLING_WORKSPACE" --arg pane "$SIBLING_PANE" '
   || fail "remote retirement removed the sibling secondmate workspace or pane from fm-remote"
 assert_no_grep 'session stop' "$HERDR_LOG" "remote retirement stopped the shared fm-remote session"
 assert_no_grep 'server stop' "$HERDR_LOG" "remote retirement stopped the shared fm-remote server"
+pass "live pre-upgrade endpoint retires through the documented teardown path"
 pass "remote retirement refuses child work, then removes only its own endpoint while a shared-session sibling survives"
 
 echo "ALL TESTS PASSED"
