@@ -106,14 +106,35 @@ _hb_surfaced_path() {
   printf '%s/.hb-surfaced-%s' "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')"
 }
 
+# Fire the captain's producer tag for a status event reaching them for the first
+# time. bin/fm-notify.sh owns the status-to-event-class mapping, the channel, the
+# sound, and the captain's config; it always exits 0 and its diagnostics are
+# discarded, so supervision can never be broken, blocked, or slowed by a
+# notification. Best-effort by construction: the durable wake is already queued.
+notify_status_surfaced() {  # <task> <status-line>
+  local notifier="$FM_PUSH_TRANSITION_LIB_DIR/fm-notify.sh"
+  [ -x "$notifier" ] || return 0
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$notifier" --from-status "$1" "$2" >/dev/null 2>&1 || true
+  return 0
+}
+
 # Record a captain-relevant status after its durable wake has been enqueued.
+# The surfaced marker doubles as the notification's dedup anchor: the tag fires
+# only when this status differs from the one already surfaced for the task, so
+# the signal, stale, push-transition, and heartbeat-backstop paths that all call
+# through here can never beep twice for the same event.
 mark_surfaced() {  # <status-file>
-  local f=$1 task last
+  local f=$1 task last previous marker
   task=$(basename "$f"); task="${task%.status}"
   last=$(last_status_line "$f")
   [ -n "$last" ] || return 0
   status_is_captain_relevant "$last" || return 0
-  printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
+  marker=$(_hb_surfaced_path "$task")
+  previous=$(cat "$marker" 2>/dev/null || true)
+  printf '%s' "$last" > "$marker"
+  [ "$previous" = "$last" ] && return 0
+  notify_status_surfaced "$task" "$last"
 }
 
 # Act on a fresh actionable transition from a push-capable backend.

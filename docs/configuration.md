@@ -116,6 +116,34 @@ An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisel
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) for active evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Producer-tag notifications (config/notify)
+
+Three supervision events earn a distinct desktop notification, so a sound the captain hears always carries signal: `pr-merged` when a task's pull request lands, `pr-ready` when a task's pull request is open and waiting on the captain's review, and `attention` when a task finishes, fails, needs a decision, or is blocked.
+Ordinary turn-ends, watcher polls, and routine progress stay silent.
+`bin/fm-notify.sh` owns the whole feature - the event classes, the status-to-class mapping, channel and sound resolution, the once-per-fact dedup, and the config below - and its header owns the exact mechanics and the manual smoke commands.
+
+The tag fires only from a genuine primary firstmate home whose state directory is that home's own `state/`, so a crewmate worktree and a secondmate home never reach the captain's desktop.
+Notification is always best-effort: the script exits 0 whatever happens, because the underlying event is already recorded durably and a missing binary or refused channel must never break a merge or a supervision cycle.
+
+`config/notify` (local, gitignored) holds one `key=value` per non-empty, non-comment line, last assignment wins.
+An absent file means all three classes are on with their default sounds.
+
+```
+enabled=off                     # global kill switch (on|off, default on)
+channel=<channel>               # default channel for every class (default auto)
+pr-merged=<sound>[,<channel>]   # per-class sound and optional channel override,
+pr-ready=<sound>[,<channel>]    # or the bare value `off` to silence that class
+attention=<sound>[,<channel>]
+```
+
+Channels are `auto` (default), `macos`, `herdr`, `both`, and `none`.
+`auto` resolves to the macOS Notification Center when `osascript` is available, else a herdr UI notification when the herdr CLI is available, else nothing.
+macOS wins even inside herdr because named system sounds are what make the three classes audibly distinct, while `herdr notification show` offers only `none`, `done`, and `request`; set `channel=both` for the herdr toast alongside the macOS sound.
+Sounds are named macOS system sounds and default to `Glass` for `pr-merged`, `Ping` for `pr-ready`, and `Sosumi` for `attention`; a value that is not a plain sound name is refused and the default is used.
+Herdr sounds are fixed per class (`done`, `done`, `request`) because the CLI accepts only three values.
+
+This is separate from the away-mode wedge alarm ([`wedge-alarm.md`](wedge-alarm.md)), which stays a louder, rate-limited alert for a supervision channel that has genuinely wedged.
+
 ## Trace context propagation (config/trace-context / FM_TRACE_CONTEXT)
 
 The optional local, gitignored `config/trace-context` presence flag enables default-off native W3C trace-context propagation.
