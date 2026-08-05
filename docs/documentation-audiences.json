@@ -113,6 +113,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/apple-notes-channel/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/ahoy/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -199,6 +203,10 @@
     {
       "path": "README.md",
       "audience": "public-product"
+    },
+    {
+      "path": "docs/apple-notes-channel.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/architecture.md",
@@ -319,6 +327,10 @@
     {
       "path": "docs/turnend-guard.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/verification/apple-notes-channel.md",
+      "audience": "maintainer-verification"
     },
     {
       "path": "docs/verification/dispatch-auth.md",

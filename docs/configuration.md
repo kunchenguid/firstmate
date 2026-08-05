@@ -323,6 +323,14 @@ The locked bootstrap inheritance pass uses the same placement-specific behavior;
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 
+## Apple Notes channel local capability
+
+The generated local-runtime Apple Notes capability is absent and inert on official Firstmate.
+When its reviewed patch slot is present, `config/apple-notes-channel.json` is the private disabled-by-default provider, exact binding, helper-identity, mode, and limit record for the primary home only.
+The dedicated [Apple Notes channel reference](apple-notes-channel.md) owns the complete fixed tree, supported modes, activation, authenticated bounded-check, authority, emergency-disable, and rollback contract.
+The script headers for `bin/fm-notes-channel.sh`, `bin/fm-notes-poll.sh`, and `bin/fm-notes-bridge-build.sh` own exact commands and build mechanics.
+No config field can authorize general Notes access, raise Notes-origin authority, clear the emergency marker, change TCC or iCloud, or activate login behavior.
+
 ## X mode (.env)
 
 X mode lets a firstmate instance answer public `@myfirstmate` mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
