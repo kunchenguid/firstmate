@@ -86,6 +86,98 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+set_fake_gh_auth_status() {  # <fakebin> <authenticated|unauthenticated|hung>
+  local fakebin=$1 mode=$2
+  cat > "$fakebin/gh" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = auth ] && [ "\${2:-}" = status ]; then
+  case '$mode' in
+    authenticated) exit 0 ;;
+    unauthenticated) exit 1 ;;
+    hung) sleep 300 ;;
+  esac
+fi
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+}
+
+test_bounded_gh_auth_probe_reports_typed_states() {
+  local case_dir fakebin out start elapsed
+  case_dir="$TMP_ROOT/gh-auth-probe"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  set_fake_gh_auth_status "$fakebin" authenticated
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_GH_AUTH_DIAGNOSTICS=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "GH_AUTH: authenticated" ] \
+    || fail "authenticated probe should report its typed state, got: $out"
+
+  set_fake_gh_auth_status "$fakebin" unauthenticated
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_GH_AUTH_DIAGNOSTICS=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = $'NEEDS_GH_AUTH\nGH_AUTH: not authenticated' ] \
+    || fail "unauthenticated probe should remain distinct from a timeout, got: $out"
+
+  set_fake_gh_auth_status "$fakebin" hung
+  start=$SECONDS
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_GH_AUTH_DIAGNOSTICS=1 \
+    FM_GH_AUTH_TIMEOUT_SECS=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  elapsed=$((SECONDS - start))
+  [ "$out" = "GH_AUTH: indeterminate (probe timed out after 1s)" ] \
+    || fail "hung probe should report indeterminate rather than unauthenticated, got: $out"
+  [ "$elapsed" -lt 5 ] || fail "hung auth probe exceeded its 1s bound (elapsed ${elapsed}s)"
+  pass "bootstrap bounds gh auth status and reports authenticated, unauthenticated, and indeterminate states"
+}
+
+run_preflight_bootstrap_capture() {  # <bootstrap command...>
+  local bootstrap_output preflight_result
+  bootstrap_output=$(FM_BOOTSTRAP_DETECT_ONLY=1 "$@")
+  if [ -n "$bootstrap_output" ]; then
+    printf '%s\n' "$bootstrap_output"
+    preflight_result=PASS_WITH_REPORTED_TOOLCHAIN_GAPS
+  else
+    preflight_result=PASS
+  fi
+  printf 'PREFLIGHT_RESULT: %s\n' "$preflight_result"
+}
+
+test_pilot_preflight_reaches_result_for_all_auth_states() {
+  local case_dir fakebin out start elapsed
+  case_dir="$TMP_ROOT/pilot-preflight-auth"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  set_fake_gh_auth_status "$fakebin" authenticated
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 run_preflight_bootstrap_capture "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "PREFLIGHT_RESULT: PASS" ] \
+    || fail "authenticated preflight should reach PASS, got: $out"
+
+  set_fake_gh_auth_status "$fakebin" unauthenticated
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 run_preflight_bootstrap_capture "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = $'NEEDS_GH_AUTH\nPREFLIGHT_RESULT: PASS_WITH_REPORTED_TOOLCHAIN_GAPS' ] \
+    || fail "unauthenticated preflight should reach a reported-gap result, got: $out"
+
+  set_fake_gh_auth_status "$fakebin" hung
+  start=$SECONDS
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_GH_AUTH_TIMEOUT_SECS=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    run_preflight_bootstrap_capture "$ROOT/bin/fm-bootstrap.sh")
+  elapsed=$((SECONDS - start))
+  [ "$out" = $'GH_AUTH: indeterminate (probe timed out after 1s)\nPREFLIGHT_RESULT: PASS_WITH_REPORTED_TOOLCHAIN_GAPS' ] \
+    || fail "indeterminate auth preflight should reach a reported-gap result, got: $out"
+  [ "$elapsed" -lt 5 ] || fail "indeterminate preflight exceeded its 1s auth bound (elapsed ${elapsed}s)"
+  pass "pilot preflight reaches PREFLIGHT_RESULT for authenticated, unauthenticated, and indeterminate auth states"
+}
+
 add_quota_axi() {
   local fakebin=$1
   cat > "$fakebin/quota-axi" <<'SH'
@@ -950,6 +1042,8 @@ ROWS
 }
 
 test_bootstrap_reporting
+test_bounded_gh_auth_probe_reports_typed_states
+test_pilot_preflight_reaches_result_for_all_auth_states
 test_no_mistakes_min_version
 test_gh_axi_min_version
 test_lavish_axi_min_version
