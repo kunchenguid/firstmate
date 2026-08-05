@@ -1095,7 +1095,11 @@ launch_template() {
     # launched from a claude firstmate does not inherit those markers (the
     # precedence hazard reproduced and fixed). --worktree is NEVER passed:
     # firstmate owns worktree isolation.
-    cursor) printf '%s' 'env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT cursor-agent --force --trust __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # The binary name is resolved at spawn time into __CURSORBIN__ (see
+    # resolve_cursor_binary below): cursor ships both `cursor-agent` and the
+    # legacy alias `agent`, and the user-local install path is often absent
+    # from a non-interactive PATH.
+    cursor) printf '%s' 'env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT __CURSORBIN__ --force --trust __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
     # muse (Muse Code): a positional prompt starts the supervised interactive
     # session. --yolo is the single flag that makes a crewmate pane viable: muse
@@ -1179,11 +1183,6 @@ fi
 # retain the literal name in the launch command and task metadata.
 if [ "$HARNESS" = pi-signed ] && ! command -v pi-signed >/dev/null 2>&1; then
   echo "error: pi-signed executable not found on PATH; install the signed Pi wrapper or select a different verified harness" >&2
-  exit 1
-fi
-
-if [ "$HARNESS" = cursor ] && ! command -v cursor-agent >/dev/null 2>&1; then
-  echo "error: cursor-agent executable not found on PATH; install Cursor Agent CLI or select a different verified harness" >&2
   exit 1
 fi
 
@@ -1292,6 +1291,39 @@ muse_credential_present() {
   [ -s "$auth" ] || muse_worker_meta_api_key_present
 }
 
+resolve_cursor_binary() {
+  local candidate dir name fallback
+  # cursor-agent is the primary name; `agent` is the legacy alias cursor
+  # ships on every platform and a FALLBACK ONLY - the name is too generic to
+  # trust as the primary pick when something else on PATH could shadow it.
+  # Known Unix install locations ($HOME/.local/bin) cover non-interactive
+  # shells whose PATH omits the user's local bin directory.
+  for name in cursor-agent agent; do
+    candidate=$(command -v "$name" 2>/dev/null || true)
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+      case "$candidate" in
+        /*) printf '%s\n' "$candidate"; return 0 ;;
+        *)
+          dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
+          if [ -n "$dir" ]; then
+            printf '%s/%s\n' "$dir" "$(basename "$candidate")"
+            return 0
+          fi
+          ;;
+      esac
+    fi
+  done
+  for name in cursor-agent agent; do
+    fallback="${HOME:-}/.local/bin/$name"
+    if [ -n "${HOME:-}" ] && [ -x "$fallback" ]; then
+      printf '%s\n' "$fallback"
+      return 0
+    fi
+  done
+  echo "error: cursor executable not found; searched PATH for 'cursor-agent' and 'agent', plus fallbacks '$HOME/.local/bin/cursor-agent' and '$HOME/.local/bin/agent'" >&2
+  return 1
+}
+
 model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
@@ -1393,6 +1425,13 @@ case "$LAUNCH" in
         exit 1
       }
     fi
+    ;;
+esac
+
+case "$LAUNCH" in
+  *__CURSORBIN__*)
+    CURSOR_BIN=$(resolve_cursor_binary) || exit 1
+    LAUNCH=${LAUNCH//__CURSORBIN__/$(shell_quote "$CURSOR_BIN")}
     ;;
 esac
 
