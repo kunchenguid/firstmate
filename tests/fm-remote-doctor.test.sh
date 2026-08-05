@@ -678,7 +678,7 @@ resolver_make_exe() {  # <path>
 # Only the legacy alias on PATH, no other harness anywhere.
 R_CASE=$(resolver_case_home "$CURSOR_RESOLVER_TMP/only-agent-path")
 resolver_make_exe "$R_CASE/bin/agent"
-res=$(PATH="$R_CASE/bin:/usr/bin:/bin" HOME="$R_CASE/home" \
+res=$(PATH="$R_CASE/bin:$TOOLS" HOME="$R_CASE/home" \
   fm_remote_doctor_resolve_harness cursor-agent) || fail "resolver rejected a host with only the agent alias on PATH"
 [ "$res" = "$R_CASE/bin/agent" ] || fail "resolver resolved '$res', expected '$R_CASE/bin/agent'"
 pass "fm_remote_doctor_resolve_harness: accepts the agent alias from PATH when it is the only Cursor executable"
@@ -686,7 +686,7 @@ pass "fm_remote_doctor_resolve_harness: accepts the agent alias from PATH when i
 # Only ~/.local/bin/agent outside PATH.
 R_CASE=$(resolver_case_home "$CURSOR_RESOLVER_TMP/only-agent-home")
 resolver_make_exe "$R_CASE/home/.local/bin/agent"
-res=$(PATH="/usr/bin:/bin" HOME="$R_CASE/home" \
+res=$(PATH="$TOOLS" HOME="$R_CASE/home" \
   fm_remote_doctor_resolve_harness cursor-agent) || fail "resolver rejected a host with only ~/.local/bin/agent"
 [ "$res" = "$R_CASE/home/.local/bin/agent" ] || fail "resolver resolved '$res', expected '$R_CASE/home/.local/bin/agent'"
 pass "fm_remote_doctor_resolve_harness: finds ~/.local/bin/agent outside PATH"
@@ -695,7 +695,7 @@ pass "fm_remote_doctor_resolve_harness: finds ~/.local/bin/agent outside PATH"
 R_CASE=$(resolver_case_home "$CURSOR_RESOLVER_TMP/both")
 resolver_make_exe "$R_CASE/bin/cursor-agent"
 resolver_make_exe "$R_CASE/bin/agent"
-res=$(PATH="$R_CASE/bin:/usr/bin:/bin" HOME="$R_CASE/home" \
+res=$(PATH="$R_CASE/bin:$TOOLS" HOME="$R_CASE/home" \
   fm_remote_doctor_resolve_harness cursor-agent) || fail "resolver rejected a host with cursor-agent on PATH"
 [ "$res" = "$R_CASE/bin/cursor-agent" ] || fail "resolver resolved '$res', expected cursor-agent to win over the alias"
 pass "fm_remote_doctor_resolve_harness: cursor-agent takes precedence over the agent alias"
@@ -703,8 +703,20 @@ pass "fm_remote_doctor_resolve_harness: cursor-agent takes precedence over the a
 # The generic `agent` name is never admitted to HARNESS_TOOLS: the harness
 # readiness loop can only consult it through the cursor-agent alias branch,
 # so an unrelated executable named agent can never classify as a separate
-# verified harness. Assert the array definition stays agent-free.
-if grep -qE '^HARNESS_TOOLS=\([^)]*(\(| )agent(\)| )' "$ROOT/bin/fm-remote-doctor.sh"; then
-  fail "the bare agent name leaked into HARNESS_TOOLS in fm-remote-doctor.sh"
-fi
-pass "fm_remote_doctor_resolve_harness: the bare agent name is never admitted to HARNESS_TOOLS"
+# verified harness. With only that unrelated agent on the hermetic PATH, the
+# worker-tool-probe must emit exactly one harness fact (the cursor-agent
+# alias) and never a standalone harness fact for agent, and --fix must never
+# create a wrapper for the generic name.
+new_case Linux with-herdr no-gui
+rm -f "$CASE_BIN/claude"
+resolver_make_exe "$CASE_BIN/agent"
+doctor hermetic
+harness_facts=$(printf '%s\n' "$DOCTOR_OUT" | grep -c '^required harness=' || true)
+[ "$harness_facts" -eq 1 ] || fail "expected exactly one harness fact, got $harness_facts"$'\n'"$DOCTOR_OUT"
+assert_contains "$DOCTOR_OUT" "required harness=cursor-agent:$CASE_BIN/agent" \
+  "the unrelated agent did not satisfy readiness through the cursor-agent alias"
+assert_not_contains "$DOCTOR_OUT" 'required harness=agent=' \
+  "the bare agent name was reported as a standalone harness"
+doctor --fix hermetic
+assert_absent "$CASE_HOME/.local/bin/agent" "--fix created a wrapper for the generic agent name"
+pass "the bare agent name is never a standalone harness and never gets its own wrapper"
