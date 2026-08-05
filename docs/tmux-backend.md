@@ -94,7 +94,7 @@ Ambiguous pending text never receives the busy-queue conversion.
 ## Limits and regression entry points
 
 - tmux is the reference path and supports secondmate homes.
-- The OpenCode and Cursor busy-queue exceptions are tmux-specific; Herdr retains its separately documented gap.
+- The OpenCode and Cursor busy-queue exceptions are verified on both tmux and herdr; the herdr adapter has its own native-busy fallback via `fm_backend_herdr_busy_state`.
 
 ```sh
 tests/fm-backend-tmux-smoke.test.sh
