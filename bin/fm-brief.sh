@@ -287,6 +287,28 @@ resolve_brief_project_dir() {
   fi
 }
 
+extract_brief_origin_host() {
+  local origin=$1 authority host path
+  case "$origin" in
+    [a-z][a-z0-9+.-]*://*)
+      authority=${origin#*://}
+      case "$authority" in */*) ;; *) return ;; esac
+      authority=${authority%%/*}
+      host=${authority##*@}
+      host=${host%%:*}
+      ;;
+    ?*@?*:?*)
+      authority=${origin%%:*}
+      host=${authority#*@}
+      path=${origin#*:}
+      [ "$authority" != "$host" ] && [ -n "$path" ] || return
+      ;;
+    *) return ;;
+  esac
+  case "$host" in ''|*[!A-Za-z0-9.-]*) return ;; esac
+  printf '%s\n' "$host"
+}
+
 BRIEF_FORGE_RULE="Use the forge tool appropriate for this project's origin remote and chrome-devtools-axi for browser operations. Do not assume GitHub."
 BRIEF_FORGE_TOOL='the appropriate forge tool'
 BRIEF_CHANGE_REQUEST='change request'
@@ -299,10 +321,7 @@ else
   if [ -z "$BRIEF_ORIGIN" ]; then
     echo "warning: could not determine forge for $REPO: origin remote is unavailable; generated brief uses forge-neutral instructions" >&2
   else
-    BRIEF_HOST=$(printf '%s\n' "$BRIEF_ORIGIN" | sed -n \
-      -e 's#^[a-z][a-z0-9+.-]*://[^@/]*@\([^/:]*\).*#\1#p' \
-      -e 's#^[a-z][a-z0-9+.-]*://\([^/:]*\).*#\1#p' \
-      -e 's#^[^@/:]*@\([^/:]*\):.*#\1#p')
+    BRIEF_HOST=$(extract_brief_origin_host "$BRIEF_ORIGIN")
     case "$BRIEF_HOST" in
       github.com)
         BRIEF_FORGE_RULE='Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.'

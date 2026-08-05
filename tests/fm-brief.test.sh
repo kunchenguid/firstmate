@@ -221,7 +221,7 @@ test_ship_modes_generate_clean_briefs() {
 # The firstmate repo itself is the one supported fallback because it has no
 # clone under FM_HOME/projects; an unavailable project remains forge-neutral.
 test_forge_specific_brief_guidance() {
-  local home self_root github_brief gitlab_dir gitlab_brief gitlab_no_mistakes_brief unknown_brief traversal_brief out
+  local home self_root github_brief gitlab_dir gitlab_brief gitlab_uri_brief gitlab_no_mistakes_brief unknown_brief traversal_brief out
   home="$TMP_ROOT/forge-guidance-home"
   self_root="$TMP_ROOT/firstmate-self"
   mkdir -p "$home/data" "$home/projects/kc-admin-web" "$self_root"
@@ -254,6 +254,19 @@ test_forge_specific_brief_guidance() {
   assert_grep "done: MR {url}" "$gitlab_brief" \
     "GitLab direct-PR brief did not report an MR artifact"
   [ ! -s "$TMP_ROOT/forge-gitlab.err" ] || fail "GitLab origin emitted an unexpected forge warning"
+
+  git -C "$gitlab_dir" remote set-url origin ssh://git@gitlab.com/aijinetcorp/front-end/kc-admin-web.git
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" forge-gitlab-uri kc-admin-web --mode direct-PR \
+    >"$TMP_ROOT/forge-gitlab-uri.out" 2>"$TMP_ROOT/forge-gitlab-uri.err" \
+    || fail "GitLab URI project brief should scaffold"
+  gitlab_uri_brief="$home/data/forge-gitlab-uri/brief.md"
+  assert_grep "Use glab for GitLab operations" "$gitlab_uri_brief" \
+    "GitLab URI origin did not select glab guidance"
+  assert_grep "open the merge request with \`glab\`" "$gitlab_uri_brief" \
+    "GitLab URI direct-PR brief did not require glab for the merge request"
+  assert_grep "done: MR {url}" "$gitlab_uri_brief" \
+    "GitLab URI direct-PR brief did not report an MR artifact"
+  [ ! -s "$TMP_ROOT/forge-gitlab-uri.err" ] || fail "GitLab URI origin emitted an unexpected forge warning"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" forge-gitlab-no-mistakes kc-admin-web --mode no-mistakes \
     >"$TMP_ROOT/forge-gitlab-no-mistakes.out" 2>"$TMP_ROOT/forge-gitlab-no-mistakes.err" \
