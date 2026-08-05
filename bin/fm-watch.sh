@@ -126,6 +126,10 @@ ACCOUNT_SESSION_SYNC_TIMEOUT=${FM_ACCOUNT_SESSION_SYNC_TIMEOUT:-5}
 ACCOUNT_SESSION_SYNC_TOTAL_TIMEOUT=${FM_ACCOUNT_SESSION_SYNC_TOTAL_TIMEOUT:-$((ACCOUNT_SESSION_SYNC_TIMEOUT + 3))}
 REPORT_RETENTION_INTERVAL=${FM_REPORT_RETENTION_INTERVAL:-86400}
 REPORT_RETENTION_TIMEOUT=${FM_REPORT_RETENTION_TIMEOUT:-30}
+REPORT_RETENTION_OWNER_FRESH_SECS=${FM_REPORT_RETENTION_OWNER_FRESH_SECS:-660}
+case "$REPORT_RETENTION_OWNER_FRESH_SECS" in
+  ''|*[!0-9]*) REPORT_RETENTION_OWNER_FRESH_SECS=660 ;;
+esac
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
@@ -763,11 +767,40 @@ sync_account_sessions_if_due() {
 }
 
 prune_reports_if_due() {
-  local cadence="$STATE/.last-report-retention"
-  marker_due "$cadence" "$REPORT_RETENTION_INTERVAL" "report retention cadence" || return 0
-  if run_bounded "$REPORT_RETENTION_TIMEOUT" "$FM_ROOT/bin/fm-report-stack.mjs" prune >/dev/null 2>&1; then
-    safe_touch_marker_or_log "$cadence" "report retention cadence" || true
+  local attempt="$STATE/.last-report-retention-attempt"
+  local success="$STATE/.last-report-retention"
+  local cadence=$attempt status
+  if [ ! -e "$attempt" ] && [ ! -L "$attempt" ]; then
+    cadence=$success
   fi
+  marker_due "$cadence" "$REPORT_RETENTION_INTERVAL" "report retention cadence" || return 0
+  safe_touch_marker_or_log "$attempt" "report retention attempt cadence" || return 0
+  if report_retention_owner_is_fresh; then
+    return 0
+  fi
+  if run_bounded "$REPORT_RETENTION_TIMEOUT" "$FM_ROOT/bin/fm-report-stack.mjs" prune >/dev/null 2>&1; then
+    safe_touch_marker_or_log "$success" "report retention success" || true
+    return 0
+  else
+    status=$?
+  fi
+  triage_log "report retention fallback prune failed status=$status; next attempt remains cadenced"
+}
+
+report_retention_owner_is_fresh() {
+  local root heartbeat epoch provenance run_identity extra now age
+  root=${FM_REPORT_STACK_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/firstmate/report-stack}
+  heartbeat="$root/.retention-heartbeat"
+  [ -f "$heartbeat" ] && [ ! -L "$heartbeat" ] || return 1
+  epoch=$(sed -n '1p' "$heartbeat")
+  provenance=$(sed -n '2p' "$heartbeat")
+  run_identity=$(sed -n '4p' "$heartbeat")
+  extra=$(sed -n '5p' "$heartbeat")
+  case "$epoch" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$provenance" ] && [ -n "$run_identity" ] && [ -z "$extra" ] || return 1
+  now=$(date +%s)
+  age=$((now - epoch))
+  [ "$age" -ge 0 ] && [ "$age" -le "$REPORT_RETENTION_OWNER_FRESH_SECS" ]
 }
 
 # Surfaced-marker bookkeeping for the heartbeat backstop. The watcher records the

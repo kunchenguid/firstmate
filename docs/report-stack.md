@@ -8,6 +8,9 @@ Scheduled retention is owned by a per-user macOS LaunchAgent only when it is ins
 The installer publishes immutable self-contained generations and atomically advances the LaunchAgent plist only after the referenced generation is complete, so a crash or reboot never depends on a later Firstmate session to restore executable code.
 Each sweep uses a crash-recoverable namespace cutover to isolate expired cohorts, publishes the authoritative retention cutoff, regenerates the visible index, and then makes bounded physical-deletion progress, so cleanup may span later runs without restoring an expired report to readers.
 The installed owner is a stable self-contained bundle, runs at boot and every five minutes by default, retries failed runs, and records a successful-prune heartbeat that session bootstrap validates.
+Per-home watchers skip their daily opportunistic fallback while that successful-prune heartbeat is fresh, but retain the fallback when the owner is absent or stale.
+Each watcher records a fallback attempt before starting it, records success separately, and leaves a failed attempt visibly failed in its triage log without retrying on the next poll.
+Every report-stack operation atomically reclaims dead-owner publication candidates before locking and removes interrupted control-file temporaries while holding the machine-global lock.
 Merging the code does not install or activate the owner.
 The authoritative visibility cutoff is the later of its prior value and the current `now - 30 days` boundary, so ordinary forward wall time tracks that boundary exactly while a backward clock adjustment never re-exposes expired reports.
 Physical cleanup still waits for each report's 30-day minimum age, its five-minute cohort deadline, and a later retention sweep, so the shipped five-minute defaults normally remove an expired report about zero to ten minutes after its minimum age.

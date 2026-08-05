@@ -6,6 +6,7 @@ import ctypes
 import hashlib
 import json
 import os
+import re
 import selectors
 import secrets
 import signal
@@ -1071,6 +1072,226 @@ def command_remove_owned_directory_fd(arguments):
         os.close(directory)
 
 
+def process_start_identity(pid):
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-p", str(pid), "-o", "lstart="],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env={**os.environ, "LC_ALL": "C"},
+            text=True,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    value = " ".join(result.stdout.split())
+    return value or None
+
+
+def owned_process_liveness(owner):
+    try:
+        os.kill(owner["pid"], 0)
+    except ProcessLookupError:
+        return "dead"
+    except PermissionError:
+        return "unknown"
+    started_at = process_start_identity(owner["pid"])
+    if not started_at:
+        return "unknown"
+    return "live" if started_at == owner["startedAt"] else "dead"
+
+
+def process_is_absent(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False
+
+
+def read_owned_directory_control(directory, control_name):
+    control = read_relative(directory, control_name, 4096, "strict")
+    if control["oversized"]:
+        fail("owned directory control file is too large")
+    try:
+        owner = json.loads(control["content"].decode("utf-8").strip())
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        fail("owned directory control file is invalid")
+    if not isinstance(owner, dict) or not isinstance(owner.get("pid"), int) or owner["pid"] <= 0 \
+            or not isinstance(owner.get("startedAt"), str) or not owner["startedAt"] \
+            or not isinstance(owner.get("token"), str) or not owner["token"]:
+        fail("owned directory control file has no verifiable process generation")
+    return owner
+
+
+def command_remove_dead_owned_directory_fd(arguments):
+    if len(arguments) != 5:
+        fail(
+            "usage: fm-contained-read.py remove-dead-owned-directory-fd "
+            "<directory-name> <control-name> <pid> <started-at> <token>"
+        )
+    directory_name, control_name, pid_text, started_at, token = arguments
+    if len(components(directory_name)) != 1 or len(components(control_name)) != 1:
+        fail("dead-owned directory names must be single safe components")
+    if not pid_text.isdigit() or int(pid_text) <= 0 or not started_at \
+            or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", token):
+        fail("dead-owned directory identity is invalid")
+    candidate_name = f".publish.lock.candidate.{pid_text}.{token}"
+    quarantine = f".publish.lock.candidate-orphan.{pid_text}.{token}"
+    if directory_name not in (candidate_name, quarantine):
+        fail("dead-owned directory name does not match its owner identity")
+    expected_owner = {"pid": int(pid_text), "startedAt": started_at, "token": token}
+    root = checked_root(3)
+    before = os.stat(directory_name, dir_fd=root, follow_symlinks=False)
+    if not stat.S_ISDIR(before.st_mode) or before.st_uid != os.getuid() \
+            or stat.S_IMODE(before.st_mode) != 0o700:
+        fail("dead-owned path is not a private current-user directory")
+    directory = os.open(
+        directory_name,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        dir_fd=root,
+    )
+    renamed = False
+    deleting = False
+    try:
+        opened = os.fstat(directory)
+        if opened.st_dev != before.st_dev or opened.st_ino != before.st_ino:
+            fail("dead-owned directory changed while opening")
+        owner = read_owned_directory_control(directory, control_name)
+        if owner != expected_owner or owned_process_liveness(owner) != "dead":
+            fail("dead-owned directory owner is not positively dead")
+        test_fifo_handshake(
+            "FM_CONTAINED_DEAD_OWNER_TEST_READY",
+            "FM_CONTAINED_DEAD_OWNER_TEST_PROCEED",
+            "dead-owner-observed\n",
+            "dead-owned directory removal test gate",
+        )
+        current = os.stat(directory_name, dir_fd=root, follow_symlinks=False)
+        owner = read_owned_directory_control(directory, control_name)
+        if current.st_dev != opened.st_dev or current.st_ino != opened.st_ino \
+                or owner != expected_owner or owned_process_liveness(owner) != "dead":
+            fail("dead-owned directory changed before removal")
+        if directory_name == candidate_name:
+            rename_noreplace(root, root, directory_name, quarantine)
+            renamed = True
+        quarantined = os.stat(quarantine, dir_fd=root, follow_symlinks=False)
+        owner = read_owned_directory_control(directory, control_name)
+        if quarantined.st_dev != opened.st_dev or quarantined.st_ino != opened.st_ino \
+                or owner != expected_owner or owned_process_liveness(owner) != "dead":
+            fail("dead-owned directory changed during removal")
+        deleting = True
+        remove_directory_contents(directory)
+        os.rmdir(quarantine, dir_fd=root)
+    except BaseException:
+        if renamed and not deleting:
+            try:
+                rename_noreplace(root, root, quarantine, directory_name)
+            except OSError:
+                pass
+        raise
+    finally:
+        os.close(directory)
+
+
+def incomplete_candidate_contents(directory):
+    names = os.listdir(directory)
+    if not names:
+        return False
+    if names != ["owner"]:
+        fail("incomplete dead candidate contains unexpected entries")
+    before = os.stat("owner", dir_fd=directory, follow_symlinks=False)
+    if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() \
+            or stat.S_IMODE(before.st_mode) != 0o600 or before.st_nlink != 1 \
+            or before.st_size > 4096:
+        fail("incomplete candidate owner is not a private current-user file")
+    owner_descriptor = os.open(
+        "owner",
+        os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+        dir_fd=directory,
+    )
+    try:
+        opened = os.fstat(owner_descriptor)
+        content = os.read(owner_descriptor, 4097)
+        if not same_file(before, opened) or not same_file(opened, os.fstat(owner_descriptor)) \
+                or len(content) > 4096:
+            fail("incomplete candidate owner changed while reading")
+    finally:
+        os.close(owner_descriptor)
+    try:
+        owner = json.loads(content.decode("utf-8").strip())
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return True
+    if isinstance(owner, dict) and isinstance(owner.get("pid"), int) and owner["pid"] > 0 \
+            and isinstance(owner.get("startedAt"), str) and owner["startedAt"] \
+            and isinstance(owner.get("token"), str) and owner["token"]:
+        fail("incomplete candidate acquired a complete owner")
+    return True
+
+
+def command_remove_incomplete_dead_candidate_fd(arguments):
+    if len(arguments) != 3:
+        fail(
+            "usage: fm-contained-read.py remove-incomplete-dead-candidate-fd "
+            "<directory-name> <pid> <token>"
+        )
+    directory_name, pid_text, token = arguments
+    if len(components(directory_name)) != 1 or not pid_text.isdigit() or int(pid_text) <= 0 \
+            or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", token):
+        fail("incomplete dead candidate identity is invalid")
+    candidate_name = f".publish.lock.candidate.{pid_text}.{token}"
+    quarantine = f".publish.lock.candidate-orphan.{pid_text}.{token}"
+    if directory_name not in (candidate_name, quarantine):
+        fail("incomplete dead candidate name does not match its process identity")
+    pid = int(pid_text)
+    root = checked_root(3)
+    before = os.stat(directory_name, dir_fd=root, follow_symlinks=False)
+    if not stat.S_ISDIR(before.st_mode) or before.st_uid != os.getuid() \
+            or stat.S_IMODE(before.st_mode) != 0o700:
+        fail("incomplete dead candidate is not a private current-user directory")
+    directory = os.open(
+        directory_name,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        dir_fd=root,
+    )
+    renamed = False
+    try:
+        opened = os.fstat(directory)
+        if opened.st_dev != before.st_dev or opened.st_ino != before.st_ino \
+                or not process_is_absent(pid):
+            fail("incomplete dead candidate is not positively abandoned")
+        has_owner = incomplete_candidate_contents(directory)
+        current = os.stat(directory_name, dir_fd=root, follow_symlinks=False)
+        if current.st_dev != opened.st_dev or current.st_ino != opened.st_ino \
+                or incomplete_candidate_contents(directory) != has_owner \
+                or not process_is_absent(pid):
+            fail("incomplete dead candidate changed before removal")
+        if directory_name == candidate_name:
+            rename_noreplace(root, root, directory_name, quarantine)
+            renamed = True
+        quarantined = os.stat(quarantine, dir_fd=root, follow_symlinks=False)
+        if quarantined.st_dev != opened.st_dev or quarantined.st_ino != opened.st_ino \
+                or incomplete_candidate_contents(directory) != has_owner \
+                or not process_is_absent(pid):
+            fail("incomplete dead candidate changed during removal")
+        if has_owner:
+            os.unlink("owner", dir_fd=directory)
+        os.rmdir(quarantine, dir_fd=root)
+    except BaseException:
+        if renamed:
+            try:
+                rename_noreplace(root, root, quarantine, directory_name)
+            except OSError:
+                pass
+        raise
+    finally:
+        os.close(directory)
+
+
 def exchange_names(root, first, second):
     exchange_between(root, first, root, second)
 
@@ -1853,6 +2074,10 @@ def main():
         command_replace_file_fd(sys.argv[2:])
     elif sys.argv[1] == "remove-owned-directory-fd":
         command_remove_owned_directory_fd(sys.argv[2:])
+    elif sys.argv[1] == "remove-dead-owned-directory-fd":
+        command_remove_dead_owned_directory_fd(sys.argv[2:])
+    elif sys.argv[1] == "remove-incomplete-dead-candidate-fd":
+        command_remove_incomplete_dead_candidate_fd(sys.argv[2:])
     elif sys.argv[1] == "fingerprint-paths-fd":
         command_fingerprint_paths_fd(sys.argv[2:])
     elif sys.argv[1] == "fingerprint-submodules-fd":

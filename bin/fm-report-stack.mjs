@@ -68,6 +68,8 @@ const reportRetentionSweepMs = reportRetentionSweepSeconds * 1000;
 const retentionPolicyName = ".retention-policy.js";
 const containedReadHelper = path.join(fmRoot, "bin", "fm-contained-read.py");
 const pythonRuntime = process.env.FM_REPORT_PYTHON || "python3";
+const reportLockCandidatePattern = /^\.publish\.lock\.candidate\.(\d+)\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+const reportLockCandidateOrphanPattern = /^\.publish\.lock\.candidate-orphan\.(\d+)\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 
 function fail(message) {
   console.error(`error: ${message}`);
@@ -515,6 +517,63 @@ function tryAcquireReportLockReclaimGuard(file, token) {
   }
 }
 
+function recoverOrphanedReportLockCandidates() {
+  for (const entry of fs.readdirSync(stackRoot, { withFileTypes: true })) {
+    const match = entry.isDirectory()
+      && (entry.name.match(reportLockCandidatePattern) || entry.name.match(reportLockCandidateOrphanPattern));
+    if (!match) continue;
+    const candidate = path.join(stackRoot, entry.name);
+    const ownerState = reportPublicationOwnerState(path.join(candidate, "owner"), "report lock candidate owner", true);
+    if (ownerState.kind !== "identified") {
+      try {
+        runContainedHelper(
+          ["remove-incomplete-dead-candidate-fd", entry.name, match[1], match[2]],
+          [stackRootDescriptor],
+          1024 * 1024,
+        );
+      } catch {
+        // A live or changing candidate remains owned by its publisher.
+      }
+      continue;
+    }
+    const owner = ownerState.owner;
+    if (String(owner.pid) !== match[1] || owner.token.toLowerCase() !== match[2].toLowerCase()
+      || reportPublicationOwnerLiveness(ownerState) !== "dead") {
+      continue;
+    }
+    try {
+      runContainedHelper(
+        ["remove-dead-owned-directory-fd", entry.name, "owner", String(owner.pid), owner.startedAt, owner.token],
+        [stackRootDescriptor],
+        1024 * 1024,
+      );
+    } catch {}
+  }
+}
+
+function recoverInterruptedReportTemps(entriesRootDescriptor) {
+  const patterns = [
+    /^\.\.retention-policy\.js\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/i,
+    /^\.index\.html\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/i,
+    /^\.\.(?:legacy-cutover|retention-cutover)\.json\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/i,
+    /^\.[a-zA-Z0-9][a-zA-Z0-9._-]*\.transaction\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/i,
+  ];
+  for (const entry of fs.readdirSync(entriesDir, { withFileTypes: true })) {
+    if (!entry.isFile() || !patterns.some((pattern) => pattern.test(entry.name))) continue;
+    const temp = path.join(entriesDir, entry.name);
+    const observed = fs.lstatSync(temp);
+    if (!observed.isFile() || observed.isSymbolicLink() || observed.nlink !== 1
+      || observed.uid !== process.getuid() || (observed.mode & 0o777) !== 0o600) {
+      continue;
+    }
+    runContainedHelper(
+      ["remove-owned-file-fd", entry.name, `${observed.dev}:${observed.ino}`, `.interrupted-temp.removed.${crypto.randomUUID()}`],
+      [entriesRootDescriptor],
+      1024 * 1024,
+    );
+  }
+}
+
 const completedTestFifoHandshakes = new Set();
 
 function runTestFifoHandshake(readyName, proceedName, payload, label) {
@@ -660,6 +719,7 @@ function acquireLock() {
   }
   stackRootDescriptor = pinnedStackRoot.descriptor;
   stackRoot = ".";
+  recoverOrphanedReportLockCandidates();
   const lock = path.join(stackRoot, ".publish.lock");
   const reclaimGuard = path.join(stackRoot, ".publish.lock.reclaim");
   let lockDeadline = Date.now() + reportLockWaitMs;
@@ -699,9 +759,27 @@ function acquireLock() {
     try {
       fs.mkdirSync(candidate, { mode: 0o700 });
       try {
+        runTestFifoHandshake(
+          "FM_REPORT_EMPTY_CANDIDATE_TEST_READY",
+          "FM_REPORT_EMPTY_CANDIDATE_TEST_PROCEED",
+          "empty-candidate-created\n",
+          "empty report lock candidate test gate",
+        );
         const startedAt = processStartIdentity(process.pid);
         if (!startedAt) throw new Error(`cannot identify report publisher process ${process.pid}`);
-        fs.writeFileSync(path.join(candidate, "owner"), `${JSON.stringify({ pid: process.pid, startedAt, token })}\n`, { mode: 0o600 });
+        const ownerFile = path.join(candidate, "owner");
+        const ownerDescriptor = fs.openSync(ownerFile, "wx", 0o600);
+        try {
+          runTestFifoHandshake(
+            "FM_REPORT_INCOMPLETE_OWNER_TEST_READY",
+            "FM_REPORT_INCOMPLETE_OWNER_TEST_PROCEED",
+            "incomplete-candidate-owner-created\n",
+            "incomplete report lock candidate owner test gate",
+          );
+          fs.writeFileSync(ownerDescriptor, `${JSON.stringify({ pid: process.pid, startedAt, token })}\n`);
+        } finally {
+          fs.closeSync(ownerDescriptor);
+        }
         let reclaimGuardExists = true;
         try { fs.lstatSync(reclaimGuard); } catch (error) { if (error.code === "ENOENT") reclaimGuardExists = false; else throw error; }
         if (!reclaimGuardExists) {
@@ -816,6 +894,7 @@ function acquireLock() {
           if (error.code !== "EEXIST") throw error;
         }
         pinnedTombstones = pinnedDirectory(".retention-tombstones", pinnedStackRoot.real, "report retention tombstone directory");
+        recoverInterruptedReportTemps(pinnedEntries.descriptor);
         process.chdir(entriesDir);
         if (!sameDirectoryIdentity(pinnedEntries.descriptor)) {
           throw new Error("report entries directory changed while entering it");
@@ -1392,6 +1471,12 @@ function publishRetentionPolicy(policy) {
   const authority = JSON.stringify({ schemaVersion: 1, generation: policy.generation, cutoffMs: policy.cutoffMs });
   try {
     fs.writeFileSync(temp, `window.firstmateRetentionPolicy=${authority};\n`, { flag: "wx", mode: 0o600 });
+    runTestFifoHandshake(
+      "FM_REPORT_RETENTION_TEMP_TEST_READY",
+      "FM_REPORT_RETENTION_TEMP_TEST_PROCEED",
+      "retention-temp-created\n",
+      "report retention temp test gate",
+    );
     runContainedHelper(
       ["replace-file-fd", tempName, retentionPolicyName],
       [entriesDescriptor, stackRootDescriptor],

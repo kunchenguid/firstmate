@@ -1643,6 +1643,184 @@ test_stale_lock_reclaim_is_serialized() {
   pass "report stack serializes concurrent stale-lock reclamation"
 }
 
+test_killed_prune_candidate_is_recovered() {
+  local stack="$TMP_ROOT/killed-prune-candidate-stack"
+  local ready="$TMP_ROOT/killed-prune-candidate.ready"
+  local proceed="$TMP_ROOT/killed-prune-candidate.proceed"
+  local output="$TMP_ROOT/killed-prune-candidate.out"
+  local pid state residue
+  mkdir -p "$stack"
+  mkfifo "$ready" "$proceed"
+  exec 7<>"$ready"
+  exec 8<>"$proceed"
+  FM_HOME="$HOME_DIR" FM_REPORT_STACK_ROOT="$stack" \
+    FM_REPORT_LOCK_PRECHECK_TEST_READY="$ready" \
+    FM_REPORT_LOCK_PRECHECK_TEST_PROCEED="$proceed" \
+    "$SCRIPT" prune > "$output" 2>&1 &
+  pid=$!
+  if ! IFS= read -r -t 10 state <&7; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "prune did not pause with a publication candidate: $(cat "$output")"
+  fi
+  [ "$state" = "guard-absent" ] || fail "prune emitted an unexpected candidate state: $state"
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  residue=$(find "$stack" -maxdepth 1 -type d -name '.publish.lock.candidate.*' -print)
+  [ -n "$residue" ] || fail "killed prune fixture did not leave its candidate"
+
+  FM_HOME="$HOME_DIR" FM_REPORT_STACK_ROOT="$stack" "$SCRIPT" prune >/dev/null \
+    || fail "report stack did not recover a killed prune candidate"
+  residue=$(find "$stack" -maxdepth 1 -type d \
+    \( -name '.publish.lock.candidate.*' -o -name '.publish.lock.candidate-orphan.*' \) -print)
+  [ -z "$residue" ] || fail "killed prune candidate recovery left scratch: $residue"
+  exec 7>&-; exec 8>&-
+  pass "the next report-stack operation removes candidates left by a killed prune"
+}
+
+test_killed_prune_empty_candidate_is_recovered() {
+  local stack="$TMP_ROOT/killed-prune-empty-candidate-stack"
+  local ready="$TMP_ROOT/killed-prune-empty-candidate.ready"
+  local proceed="$TMP_ROOT/killed-prune-empty-candidate.proceed"
+  local output="$TMP_ROOT/killed-prune-empty-candidate.out"
+  local pid state residue
+  mkdir -p "$stack"
+  mkfifo "$ready" "$proceed"
+  exec 7<>"$ready"
+  exec 8<>"$proceed"
+  FM_HOME="$HOME_DIR" FM_REPORT_STACK_ROOT="$stack" \
+    FM_REPORT_EMPTY_CANDIDATE_TEST_READY="$ready" \
+    FM_REPORT_EMPTY_CANDIDATE_TEST_PROCEED="$proceed" \
+    "$SCRIPT" prune > "$output" 2>&1 &
+  pid=$!
+  if ! IFS= read -r -t 10 state <&7; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "prune did not pause after creating its empty publication candidate: $(cat "$output")"
+  fi
+  [ "$state" = "empty-candidate-created" ] || fail "prune emitted an unexpected empty candidate state: $state"
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  residue=$(find "$stack" -maxdepth 1 -type d -name '.publish.lock.candidate.*' -empty -print)
+  [ -n "$residue" ] || fail "killed prune fixture did not leave its empty candidate"
+
+  FM_HOME="$HOME_DIR" FM_REPORT_STACK_ROOT="$stack" "$SCRIPT" prune >/dev/null \
+    || fail "report stack did not recover a killed empty prune candidate"
+  residue=$(find "$stack" -maxdepth 1 -type d \
+    \( -name '.publish.lock.candidate.*' -o -name '.publish.lock.candidate-orphan.*' \) -print)
+  [ -z "$residue" ] || fail "killed empty candidate recovery left scratch: $residue"
+  exec 7>&-; exec 8>&-
+  pass "the next report-stack operation removes an empty candidate left by a killed prune"
+}
+
+test_killed_prune_incomplete_owner_is_recovered() {
+  local stack="$TMP_ROOT/killed-prune-incomplete-owner-stack"
+  local ready="$TMP_ROOT/killed-prune-incomplete-owner.ready"
+  local proceed="$TMP_ROOT/killed-prune-incomplete-owner.proceed"
+  local output="$TMP_ROOT/killed-prune-incomplete-owner.out"
+  local pid state residue
+  mkdir -p "$stack"
+  mkfifo "$ready" "$proceed"
+  exec 7<>"$ready"
+  exec 8<>"$proceed"
+  FM_HOME="$HOME_DIR" FM_REPORT_STACK_ROOT="$stack" \
+    FM_REPORT_INCOMPLETE_OWNER_TEST_READY="$ready" \
+    FM_REPORT_INCOMPLETE_OWNER_TEST_PROCEED="$proceed" \
+    "$SCRIPT" prune > "$output" 2>&1 &
+  pid=$!
+  if ! IFS= read -r -t 10 state <&7; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "prune did not pause after creating its incomplete owner: $(cat "$output")"
+  fi
+  [ "$state" = "incomplete-candidate-owner-created" ] \
+    || fail "prune emitted an unexpected incomplete-owner state: $state"
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  residue=$(find "$stack" -maxdepth 2 -type f -name owner -empty -print)
+  [ -n "$residue" ] || fail "killed prune fixture did not leave its incomplete owner"
+
+  FM_HOME="$HOME_DIR" FM_REPORT_STACK_ROOT="$stack" "$SCRIPT" prune >/dev/null \
+    || fail "report stack did not recover a killed incomplete-owner candidate"
+  residue=$(find "$stack" -maxdepth 1 -type d \
+    \( -name '.publish.lock.candidate.*' -o -name '.publish.lock.candidate-orphan.*' \) -print)
+  [ -z "$residue" ] || fail "killed incomplete-owner recovery left scratch: $residue"
+  exec 7>&-; exec 8>&-
+  pass "the next report-stack operation removes an incomplete owner left by a killed prune"
+}
+
+test_dead_candidate_cleanup_rechecks_the_removal_generation() {
+  local stack="$TMP_ROOT/candidate-removal-race-stack"
+  local ready="$TMP_ROOT/candidate-removal-race.ready"
+  local proceed="$TMP_ROOT/candidate-removal-race.proceed"
+  local output="$TMP_ROOT/candidate-removal-race.out"
+  local dead_pid token candidate displaced pid state started_at status
+  mkdir -p "$stack"
+  (exit 0) & dead_pid=$!
+  wait "$dead_pid" 2>/dev/null || true
+  token=11111111-2222-4333-8444-555555555555
+  candidate="$stack/.publish.lock.candidate.$dead_pid.$token"
+  displaced="$stack/displaced-dead-candidate"
+  mkdir -m 700 "$candidate"
+  printf '{"pid":%s,"startedAt":"dead-generation","token":"%s"}\n' "$dead_pid" "$token" > "$candidate/owner"
+  chmod 600 "$candidate/owner"
+  mkfifo "$ready" "$proceed"
+  exec 7<>"$ready"
+  exec 8<>"$proceed"
+  FM_HOME="$HOME_DIR" FM_REPORT_STACK_ROOT="$stack" \
+    FM_CONTAINED_DEAD_OWNER_TEST_READY="$ready" \
+    FM_CONTAINED_DEAD_OWNER_TEST_PROCEED="$proceed" \
+    "$SCRIPT" render > "$output" 2>&1 &
+  pid=$!
+  if ! IFS= read -r -t 10 state <&7; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "candidate cleanup did not reach its atomic recheck gate: $(cat "$output")"
+  fi
+  [ "$state" = "dead-owner-observed" ] || fail "candidate cleanup emitted an unexpected state: $state"
+  mv "$candidate" "$displaced"
+  mkdir -m 700 "$candidate"
+  started_at=$(LC_ALL=C ps -p $$ -o lstart= | sed 's/^[[:space:]]*//;s/[[:space:]][[:space:]]*/ /g;s/[[:space:]]*$//')
+  printf '{"pid":%s,"startedAt":"%s","token":"%s"}\n' "$$" "$started_at" "$token" > "$candidate/owner"
+  chmod 600 "$candidate/owner"
+  printf 'continue\n' >&8
+  if wait "$pid"; then status=0; else status=$?; fi
+  [ "$status" -eq 0 ] || fail "candidate cleanup race prevented report-stack progress: $(cat "$output")"
+  assert_present "$candidate/owner" "candidate cleanup removed a live replacement from a stale observation"
+  rm -rf "$candidate" "$displaced"
+  exec 7>&-; exec 8>&-
+  pass "candidate cleanup rechecks path identity and owner liveness at removal"
+}
+
+test_killed_prune_temps_are_recovered_under_lock() {
+  local stack="$TMP_ROOT/killed-prune-temp-stack"
+  local ready="$TMP_ROOT/killed-prune-temp.ready"
+  local proceed="$TMP_ROOT/killed-prune-temp.proceed"
+  local output="$TMP_ROOT/killed-prune-temp.out"
+  local pid state residue
+  mkdir -p "$stack"
+  mkfifo "$ready" "$proceed"
+  exec 7<>"$ready"
+  exec 8<>"$proceed"
+  FM_HOME="$HOME_DIR" FM_REPORT_STACK_ROOT="$stack" \
+    FM_REPORT_RETENTION_TEMP_TEST_READY="$ready" \
+    FM_REPORT_RETENTION_TEMP_TEST_PROCEED="$proceed" \
+    "$SCRIPT" prune > "$output" 2>&1 &
+  pid=$!
+  if ! IFS= read -r -t 10 state <&7; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "prune did not pause after creating its retention temp: $(cat "$output")"
+  fi
+  [ "$state" = "retention-temp-created" ] || fail "prune emitted an unexpected temp state: $state"
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  residue=$(find "$stack/entries" -maxdepth 1 -type f -name '..retention-policy.js.*.tmp' -print)
+  [ -n "$residue" ] || fail "killed prune fixture did not leave its retention temp"
+
+  FM_HOME="$HOME_DIR" FM_REPORT_STACK_ROOT="$stack" "$SCRIPT" prune >/dev/null \
+    || fail "report stack did not recover a killed prune temp"
+  residue=$(find "$stack/entries" -maxdepth 1 -type f -name '..retention-policy.js.*.tmp' -print)
+  [ -z "$residue" ] || fail "killed prune temp recovery left scratch: $residue"
+  exec 7>&-; exec 8>&-
+  pass "the next locked operation removes retention temps left by a killed prune"
+}
+
 test_install_guard_release_failure_cleans_owned_lock() {
   local stack="$TMP_ROOT/install-guard-release-stack" out status residue
   mkdir -p "$stack"
@@ -2273,8 +2451,61 @@ test_watcher_periodically_owns_idle_report_retention() {
     ' _ "$ROOT" || fail "watcher-owned report retention failed"
   assert_absent "$(dirname "$old_entry")" "watcher-owned retention kept an expired report"
   assert_present "$fresh_entry" "watcher-owned retention removed a fresh report"
-  assert_present "$HOME_DIR/state/.last-report-retention" "watcher-owned retention did not persist its cadence"
+  assert_present "$HOME_DIR/state/.last-report-retention-attempt" "watcher-owned retention did not persist its attempt cadence"
+  assert_present "$HOME_DIR/state/.last-report-retention" "watcher-owned retention did not record success"
   pass "watcher supervision periodically owns idle report retention"
+}
+
+test_watcher_failed_report_retention_attempt_is_backed_off() {
+  local fake_root="$TMP_ROOT/watcher-retention-failure-root"
+  local state="$TMP_ROOT/watcher-retention-failure-state"
+  local stack="$TMP_ROOT/watcher-retention-failure-stack"
+  local calls="$TMP_ROOT/watcher-retention-failure.calls"
+  local count
+  mkdir -p "$fake_root/bin" "$state" "$stack"
+  cat > "$fake_root/bin/fm-report-stack.mjs" <<'SH'
+#!/usr/bin/env bash
+printf 'attempt\n' >> "$FM_FAKE_REPORT_RETENTION_CALLS"
+exit 1
+SH
+  chmod +x "$fake_root/bin/fm-report-stack.mjs"
+  FM_ROOT_OVERRIDE="$fake_root" FM_STATE_OVERRIDE="$state" FM_REPORT_STACK_ROOT="$stack" \
+    FM_REPORT_RETENTION_INTERVAL=86400 FM_REPORT_RETENTION_TIMEOUT=5 \
+    FM_FAKE_REPORT_RETENTION_CALLS="$calls" bash -c '
+      . "$1/bin/fm-watch.sh"
+      prune_reports_if_due
+      prune_reports_if_due
+    ' _ "$ROOT" || fail "failed watcher retention fixture could not complete"
+  count=$(wc -l < "$calls" | tr -d '[:space:]')
+  [ "$count" -eq 1 ] || fail "failed prune retried without waiting for its cadence (calls=$count)"
+  assert_present "$state/.last-report-retention-attempt" "failed prune did not persist its attempt cadence"
+  assert_absent "$state/.last-report-retention" "failed prune was recorded as a successful prune"
+  assert_grep 'fallback prune failed status=1' "$state/.watch-triage.log" \
+    "failed prune was not left visibly failed"
+  pass "a failed watcher prune remains failed and does not retry on the next poll"
+}
+
+test_watcher_defers_to_a_fresh_retention_owner() {
+  local fake_root="$TMP_ROOT/watcher-retention-owner-root"
+  local state="$TMP_ROOT/watcher-retention-owner-state"
+  local stack="$TMP_ROOT/watcher-retention-owner-stack"
+  local calls="$TMP_ROOT/watcher-retention-owner.calls"
+  mkdir -p "$fake_root/bin" "$state" "$stack"
+  cat > "$fake_root/bin/fm-report-stack.mjs" <<'SH'
+#!/usr/bin/env bash
+printf 'attempt\n' >> "$FM_FAKE_REPORT_RETENTION_CALLS"
+SH
+  chmod +x "$fake_root/bin/fm-report-stack.mjs"
+  printf '%s\n%s\n\n%s\n' "$(date +%s)" "installed-owner-provenance" "owner-run" > "$stack/.retention-heartbeat"
+  FM_ROOT_OVERRIDE="$fake_root" FM_STATE_OVERRIDE="$state" FM_REPORT_STACK_ROOT="$stack" \
+    FM_REPORT_RETENTION_INTERVAL=86400 FM_FAKE_REPORT_RETENTION_CALLS="$calls" bash -c '
+      . "$1/bin/fm-watch.sh"
+      prune_reports_if_due
+    ' _ "$ROOT" || fail "healthy retention-owner fixture could not complete"
+  assert_absent "$calls" "watcher pruned despite a fresh successful-owner heartbeat"
+  assert_present "$state/.last-report-retention-attempt" "owner delegation did not cadence the watcher fallback"
+  assert_absent "$state/.last-report-retention" "owner delegation fabricated watcher prune success"
+  pass "a fresh scheduled-owner heartbeat suppresses redundant per-home pruning"
 }
 
 test_retention_restores_expired_entries_when_index_swap_fails() {
@@ -3865,6 +4096,18 @@ test_interrupted_owned_tree_cleanup_enters_retention_recovery() {
   pass "interrupted owned tree cleanup remains enrolled in retention recovery"
 }
 
+if [ "${FM_TEST_FOCUSED:-}" = prune-retry-storm ]; then
+  test_killed_prune_candidate_is_recovered
+  test_killed_prune_empty_candidate_is_recovered
+  test_killed_prune_incomplete_owner_is_recovered
+  test_dead_candidate_cleanup_rechecks_the_removal_generation
+  test_killed_prune_temps_are_recovered_under_lock
+  test_watcher_periodically_owns_idle_report_retention
+  test_watcher_failed_report_retention_attempt_is_backed_off
+  test_watcher_defers_to_a_fresh_retention_owner
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = report-lock-handshakes ]; then
   test_stale_lock_reclaim_is_serialized
   test_install_guard_release_failure_cleans_owned_lock
@@ -4146,6 +4389,11 @@ run_partitioned_test test_large_visual_inventory_does_not_share_text_buffer_head
 run_partitioned_test test_scout_and_legacy_sources
 run_partitioned_test test_stale_lock_rejects_reused_pid
 run_partitioned_test test_stale_lock_reclaim_is_serialized
+run_partitioned_test test_killed_prune_candidate_is_recovered
+run_partitioned_test test_killed_prune_empty_candidate_is_recovered
+run_partitioned_test test_killed_prune_incomplete_owner_is_recovered
+run_partitioned_test test_dead_candidate_cleanup_rechecks_the_removal_generation
+run_partitioned_test test_killed_prune_temps_are_recovered_under_lock
 run_partitioned_test test_install_guard_release_failure_cleans_owned_lock
 run_partitioned_test test_post_install_guard_owner_death_is_recovered
 run_partitioned_test test_reclaim_guard_fences_the_stale_generation_gap
@@ -4166,6 +4414,8 @@ run_partitioned_test test_aged_transactionless_staging_is_reclaimed
 run_partitioned_test test_completed_reports_prune_after_minimum_age
 run_partitioned_test test_retention_binds_manifests_to_entry_directories
 run_partitioned_test test_watcher_periodically_owns_idle_report_retention
+run_partitioned_test test_watcher_failed_report_retention_attempt_is_backed_off
+run_partitioned_test test_watcher_defers_to_a_fresh_retention_owner
 run_partitioned_test test_retention_batches_make_interruption_safe_progress
 run_partitioned_group \
   test_persistent_retention_owner_prunes_without_tasks_or_watcher \

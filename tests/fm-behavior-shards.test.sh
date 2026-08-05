@@ -13,23 +13,25 @@ TEARDOWN_SUITE="$ROOT/tests/fm-teardown-suite.sh"
 SHARD_COUNT=8
 
 test_checked_in_plan_is_complete_balanced_and_deterministic() {
-  local tmp plan_a plan_b inventory planned out
+  local tmp plan_a plan_b inventory planned expected_count out
   tmp=$(fm_test_tmproot fm-behavior-plan)
   plan_a="$tmp/plan-a.tsv"
   plan_b="$tmp/plan-b.tsv"
   inventory="$tmp/inventory.txt"
   planned="$tmp/planned.txt"
 
+  find "$ROOT/tests" -maxdepth 1 -type f -name '*.test.sh' -print \
+    | sed "s#^$ROOT/##" | LC_ALL=C sort > "$inventory"
+  expected_count=$(wc -l < "$inventory" | tr -d ' ')
+
   out=$("$SHARDER" --check "$SHARD_COUNT") \
     || fail "checked-in behavior shard plan failed its coverage guard"
-  assert_contains "$out" "FM_BEHAVIOR_PLAN ok tests=97 shards=8" \
-    "coverage guard did not report the complete 97-test inventory"
+  assert_contains "$out" "FM_BEHAVIOR_PLAN ok tests=$expected_count shards=8" \
+    "coverage guard did not report the complete test inventory"
   "$SHARDER" --plan "$SHARD_COUNT" > "$plan_a"
   "$SHARDER" --plan "$SHARD_COUNT" > "$plan_b"
   cmp -s "$plan_a" "$plan_b" || fail "same durations produced different shard plans"
 
-  find "$ROOT/tests" -maxdepth 1 -type f -name '*.test.sh' -print \
-    | sed "s#^$ROOT/##" | LC_ALL=C sort > "$inventory"
   cut -f3 "$plan_a" | LC_ALL=C sort > "$planned"
   cmp -s "$inventory" "$planned" \
     || fail "planned shard union did not equal tests/*.test.sh"
@@ -154,18 +156,19 @@ write_complete_manifests() {
 }
 
 test_post_run_guard_requires_the_exact_executed_union() {
-  local tmp plan good missing duplicate failed out rc first_file first_row
+  local tmp plan good missing duplicate failed expected_count out rc first_file first_row
   tmp=$(fm_test_tmproot fm-behavior-verify)
   plan="$tmp/plan.tsv"
   good="$tmp/good"
   missing="$tmp/missing"
   duplicate="$tmp/duplicate"
   failed="$tmp/failed"
+  expected_count=$(find "$ROOT/tests" -maxdepth 1 -type f -name '*.test.sh' | wc -l | tr -d ' ')
   "$SHARDER" --plan "$SHARD_COUNT" > "$plan"
   write_complete_manifests "$plan" "$good"
   out=$("$SHARDER" --verify "$SHARD_COUNT" "$good") \
     || fail "post-run guard rejected the exact complete manifest union"
-  assert_contains "$out" "FM_BEHAVIOR_COMPLETENESS ok tests=97 shards=8" \
+  assert_contains "$out" "FM_BEHAVIOR_COMPLETENESS ok tests=$expected_count shards=8" \
     "post-run guard did not report complete execution"
 
   cp -R "$good" "$missing"
