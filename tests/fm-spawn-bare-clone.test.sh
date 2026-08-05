@@ -169,8 +169,8 @@ make_bare_case() {
   fm_git_worktree "$proj" "$wt" "pool-$name"
   git -C "$wt" checkout --detach -q
   # A second real, isolated worktree: the stale pane path that passes both the
-  # non-project comparison and validate_spawn_worktree, so only the lease pin can
-  # catch it.
+  # non-project comparison and validate_spawn_worktree, so only waiting for the
+  # leased path itself can reject it.
   git -C "$proj" worktree add --quiet -b "stale-$name" "$stale"
   git -C "$stale" checkout --detach -q
   if [ "$bare" = yes ]; then
@@ -202,6 +202,7 @@ run_bare_spawn() {
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    FM_SPAWN_SETTLE_INTERVAL=0.02 \
     FM_FAKE_LEASE_PATH="$WT_DIR" FM_FAKE_PANE_PROJECT="$PROJ_DIR" \
     FM_FAKE_PANE_SETTLE="$PANE_SETTLE" \
     FM_FAKE_PANE_PATHFILE="$PANE_PATHFILE" FM_FAKE_SENDKEYS_LOG="$SENDKEYS_LOG" \
@@ -239,9 +240,10 @@ test_bare_flagged_clone_spawns() {
   pass "a bare-flagged clone yields an isolated worktree leased by firstmate"
 }
 
-# A pane that settles somewhere other than the leased worktree must not be
-# accepted: the leased tree would stay leased with nobody to return it and the
-# task would run in a tree treehouse never handed to it.
+# A pane that never reaches the leased worktree must not be accepted: the leased
+# tree would stay leased with nobody to return it and the task would run in a
+# tree treehouse never handed to it. The stand-in path here is a second real,
+# isolated worktree, so only the wait-for-the-leased-path rule can reject it.
 test_settled_path_must_be_the_leased_worktree() {
   local rec id out status
   id='bare-stale-pane-b5'

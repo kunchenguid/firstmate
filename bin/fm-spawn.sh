@@ -134,14 +134,15 @@
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
 #   refuses the spawn rather than risking a PR based on stale history.
-#   A project clone whose main checkout deliberately carries core.bare=true (a
-#   harness's ref-host pattern, as in fm-fleet-sync.sh's matching refresh path)
-#   makes git refuse the work-tree operation `treehouse get` starts with, so its
-#   worktree is leased by this script instead and the pane is only told to cd into
-#   it - see lease_bare_clone_worktree. The clone's configuration is never written,
-#   and both paths converge on the same settle loop and isolation assertion; the
-#   leased path additionally pins the settled path to the worktree it leased, and
-#   any abort before the meta write returns that durable lease to the pool.
+#   A project clone whose main checkout deliberately carries core.bare=true (the
+#   flag lets one checkout double as a ref host that advances its own branches
+#   with a ref-only fetch) makes git refuse the work-tree operation `treehouse
+#   get` starts with, so its worktree is leased by this script instead and the
+#   pane is only told to cd into it - see lease_bare_clone_worktree. The clone's
+#   configuration is never written, and both paths converge on the same settle
+#   loop and isolation assertion; the leased path waits for the pane to reach the
+#   worktree it leased and accepts nothing else, and any abort before the meta
+#   write returns that durable lease to the pool.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1734,9 +1735,10 @@ freshen_spawn_worktree_base() {  # <worktree>
 # harness may set that flag deliberately so the checkout can double as a ref host
 # that advances its own branches with a ref-only `git fetch origin <b>:<b>`, which
 # git permits on a checked-out branch only while the flag is set. The files stay on
-# disk, but git then refuses every work-tree operation against the clone. Same
-# signal and naming as fm-fleet-sync.sh's bare=yes check, which fixed the matching
-# refresh failure.
+# disk, but git then refuses every work-tree operation against the clone.
+# `rev-parse --is-bare-repository` is the signal rather than a `config --get
+# core.bare` read because it reports git's own discovery-time verdict - the very
+# state that makes those operations fail - however the flag was arrived at.
 project_is_bare_flagged() {
   [ "$(git -C "$PROJ_ABS" rev-parse --is-bare-repository 2>/dev/null)" = true ]
 }
@@ -2254,23 +2256,43 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # prefix would otherwise make the pane's OS-level cwd read differ from
   # PROJ_ABS on the very first poll, before the pane has actually moved.
   #
-  # A single read that already differs from PROJ_ABS_REAL is not proof the pane
-  # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
-  # transiently reports an unrelated stale path (seen live as another real git
-  # checkout entirely) before the shell catches up with treehouse get's cd. That
-  # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
-  # below (it resolves to a real, distinct worktree top-level too), so accepting it
-  # on one read alone silently records the wrong worktree= in state/<id>.meta. Require
-  # two consecutive reads to agree on the same non-project path before accepting it;
-  # a mismatch just becomes the new candidate rather than resetting the wait, so a
-  # pane that is already settled by the first real read only costs the one existing
-  # inter-poll sleep as confirmation, not a whole extra cycle on top.
+  # A brand-new window's pane_current_path can transiently report an unrelated
+  # stale path (seen live on some tmux/WSL setups as another real git checkout
+  # entirely) before the shell catches up with the cd. Such a path passes the
+  # PROJ_ABS_REAL comparison and validate_spawn_worktree below, because it
+  # resolves to a real, distinct worktree top-level too, so accepting it would
+  # silently record the wrong worktree= in state/<id>.meta.
+  #
+  # On the leased path the destination is already known, so wait for that exact
+  # path and accept nothing else: a stale reading can never be mistaken for the
+  # destination however often it repeats. Never reaching it inside the wait is
+  # the terminal failure - fail closed, because launching in an unleased tree
+  # would leave the leased one held with nobody to return it, and name both the
+  # leased worktree and the last path the pane reported so the two are
+  # distinguishable. The abort cleanup releases the lease.
+  #
+  # On the ordinary path the destination is not known in advance, so a single
+  # read that already differs from PROJ_ABS_REAL is not proof the pane settled
+  # there. Require two consecutive reads to agree on the same non-project path
+  # before accepting it; a mismatch just becomes the new candidate rather than
+  # resetting the wait, so a pane that is already settled by the first real read
+  # only costs the one existing inter-poll sleep as confirmation, not a whole
+  # extra cycle on top.
   candidate=""
+  last_seen=""
+  last_seen_real=""
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
-      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
+      if [ -n "$LEASED_WT" ]; then
+        last_seen="$p"
+        last_seen_real="$p_real"
+        if [ "$p_real" = "$LEASED_WT_REAL" ]; then
+          WT="$p"
+          break
+        fi
+      elif [ "$p_real" != "$PROJ_ABS_REAL" ]; then
         if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
           WT="$p"
           break
@@ -2282,27 +2304,15 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     else
       candidate=""
     fi
-    sleep 1
+    sleep "${FM_SPAWN_SETTLE_INTERVAL:-1}"
   done
   if [ -z "$WT" ]; then
-    echo "error: $ACQUIRE_SOURCE did not enter a worktree within 60s; inspect window $T" >&2
-    exit 1
-  fi
-
-  # On the leased path the correct worktree is already known, so pin the settled
-  # path to it. The two-consecutive-reads guard above makes a transient stale
-  # pane path unlikely, not impossible, and such a path resolves to a real,
-  # distinct worktree root that validate_spawn_worktree accepts - which would
-  # record a worktree treehouse never leased for this task while the leased one
-  # stayed leased with nobody to return it. Fail closed instead; the abort
-  # cleanup releases the lease. The ordinary path has no such expectation and
-  # keeps its existing behaviour.
-  if [ -n "$LEASED_WT" ]; then
-    SETTLED_WT_REAL=$(real_path_or_raw "$WT")
-    if [ "$SETTLED_WT_REAL" != "$LEASED_WT_REAL" ]; then
-      echo "error: $ACQUIRE_SOURCE leased '$LEASED_WT' (resolved '$LEASED_WT_REAL') for $ID but window $T settled in '$WT' (resolved '$SETTLED_WT_REAL'); refusing to launch in a worktree that was never leased for this task. Inspect window $T" >&2
+    if [ -n "$LEASED_WT" ]; then
+      echo "error: $ACQUIRE_SOURCE leased '$LEASED_WT' (resolved '$LEASED_WT_REAL') for $ID but window $T never settled there (last observed '${last_seen:-none}', resolved '${last_seen_real:-none}'); refusing to launch in a worktree that was never leased for this task. Inspect window $T" >&2
       exit 1
     fi
+    echo "error: $ACQUIRE_SOURCE did not enter a worktree within 60s; inspect window $T" >&2
+    exit 1
   fi
 
   validate_spawn_worktree "$ACQUIRE_SOURCE" "$T"
