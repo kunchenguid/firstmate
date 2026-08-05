@@ -267,6 +267,8 @@ empty
 The bytes are U+276F followed by U+00A0 and a newline.
 The shared classifier now normalizes every non-ASCII code point in Unicode's `White_Space` property before deciding emptiness.
 Real text after Unicode whitespace remains `pending`, a bare shell prompt followed by Unicode whitespace remains `unknown`, and ghost-only text remains `empty`.
+Before the fix, the exact U+276F plus U+00A0 empty-row regression returned `pending` instead of `empty`, and the NBSP bare-shell precision check returned `pending` instead of `unknown`.
+The pre-fix real-text safety control already returned `pending`, and the pre-fix ghost safety control already returned `empty`; neither control failed before the fix.
 
 Claude and Codex reach the shared classifier from their bare prompt rows on tmux and Herdr.
 OpenCode and Kimi reach it from bordered `>` composers.
