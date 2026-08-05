@@ -325,7 +325,7 @@ run_sandboxed_spawn() {
   local sandbox=$1 harness=$2
   FM_HOME="$sandbox/home" FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux \
     "$sandbox/bin/fm-spawn.sh" one-owner-probe "$sandbox/no-such-project" \
-    --harness "$harness" 2>&1
+    --mode no-mistakes --yolo off --harness "$harness" 2>&1
 }
 
 # The stub libraries below define the library's whole public surface, so a

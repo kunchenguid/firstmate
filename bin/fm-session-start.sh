@@ -299,6 +299,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
 # shellcheck source=bin/fm-admission-lib.sh
 . "$SCRIPT_DIR/fm-admission-lib.sh"
+# shellcheck source=bin/fm-trace-context-lib.sh
+. "$SCRIPT_DIR/fm-trace-context-lib.sh"
 
 # One tasks-axi compatibility verdict per session start. The probe costs three
 # tasks-axi subprocesses and this digest needs the same answer twice - here for
