@@ -491,6 +491,23 @@ remove_kimi_turnend_auth() {
   rm -f "$hooks_dir/$token"
 }
 
+# Stop this task's own chrome-devtools-axi browser session (spawn exports
+# CHROME_DEVTOOLS_AXI_SESSION=<task-id> into the pane; see fm-spawn.sh), so a
+# headless Chrome instance never outlives its task. Scoped strictly to this
+# task's own named session - never a process-name kill, which would also
+# catch sibling tasks' in-flight browsers. A missing binary, an already-
+# stopped or never-started session (the common case), and any other stop
+# failure are all silent/non-fatal: teardown's own safety checks remain the
+# only thing authorized to fail this run.
+stop_chrome_devtools_session() {
+  local id=$1
+  fm_task_id_path_safe "$id" || return 0
+  command -v chrome-devtools-axi >/dev/null 2>&1 || return 0
+  CHROME_DEVTOOLS_AXI_SESSION="$id" chrome-devtools-axi stop >/dev/null 2>&1 \
+    || echo "warning: chrome-devtools-axi stop failed for $id; a browser instance may be left running" >&2
+  return 0
+}
+
 retire_busy_state() {
   local state_dir=$1 id=$2 gen=${3:-}
   if [ -n "$gen" ]; then
@@ -1897,6 +1914,7 @@ if [ "$KIND" = secondmate ]; then
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
 remove_kimi_turnend_auth "$STATE" "$ID"
+stop_chrome_devtools_session "$ID"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
