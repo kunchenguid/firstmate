@@ -15,6 +15,16 @@
 # for done, relay stdout and stderr separately, then reap only their completed
 # record. Input, argv, stdout, and stderr are each capped at 1048576 bytes.
 #
+# The worker executes one job at a time, so a deliberately long-blocking poll
+# would serialize every short interactive command behind its wait window.
+# fm_remote_job_command_preemptible names the read-only long-poll class
+# (fm-remote-delta-read.sh, the reply-log delta read). The worker preempts a
+# running preemptible job as soon as a non-preemptible job is queued and
+# publishes exit 75 with emptied stdout and stderr, identical to the poll's own
+# elapsed-window-with-no-data result. The delta read is non-destructive and
+# cursor-anchored, so the caller's normal re-arm re-reads the same data and a
+# preempted poll loses nothing.
+#
 # The worker accepts only a tracked, non-symlink executable named fm-*.sh below
 # its configured FM_ROOT/bin. Every child receives env -i with the composed
 # PATH, HOME, FM_HOME, FM_ROOT_OVERRIDE, and FM_REMOTE_JOB_ACTIVE=1. The PATH
@@ -53,6 +63,10 @@ fm_remote_job_die() {
 
 fm_remote_job_safe_id() {
   case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+}
+
+fm_remote_job_command_preemptible() { # <staged argv command>
+  case "${1:-}" in fm-remote-delta-read.sh) return 0 ;; *) return 1 ;; esac
 }
 
 fm_remote_job_validate_settings() {

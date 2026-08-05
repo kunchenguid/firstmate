@@ -27,6 +27,8 @@ WORKER_LOCK=
 WORKER_LOCK_HELD=0
 WORKER_RELEASE_OWNERSHIP=1
 WORKER_SUPERVISED_PID=
+WORKER_PREEMPTIBLE=0
+WORKER_PREEMPTED=0
 
 worker_error() { printf 'remote-job-worker: %s\n' "$1" >&2; }
 
@@ -354,8 +356,9 @@ worker_publish_result() { # <job-dir> <exit>
 }
 
 worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
-  local job=$1 timeout=$2 group_file armed_file group_pid rc tmp deadline next_heartbeat
+  local job=$1 timeout=$2 group_file armed_file group_pid rc tmp deadline next_heartbeat attempt
   local timed_out=0 heartbeat_failed=0
+  WORKER_PREEMPTED=0
   shift 2
   group_file="$job/.claim/group"
   armed_file="$job/.claim/armed"
@@ -421,6 +424,17 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
         heartbeat_failed=1
         break
       fi
+      if [ "$WORKER_PREEMPTIBLE" -eq 1 ] && worker_preempting_waiter_exists; then
+        worker_signal_process_or_group group TERM "$group_pid"
+        attempt=0
+        while worker_process_or_group_alive group "$group_pid" && [ "$attempt" -lt 20 ]; do
+          attempt=$((attempt + 1))
+          sleep 0.05
+        done
+        worker_signal_process_or_group group KILL "$group_pid"
+        WORKER_PREEMPTED=1
+        break
+      fi
       next_heartbeat=$((SECONDS + 1))
     fi
     sleep "$FM_REMOTE_JOB_POLL_SECONDS"
@@ -431,7 +445,27 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
   WORKER_ACTIVE_JOB=
   [ "$timed_out" -eq 0 ] || return 124
   [ "$heartbeat_failed" -eq 0 ] || return 125
+  [ "$WORKER_PREEMPTED" -eq 0 ] || return 75
   return "$rc"
+}
+
+worker_job_command() { # <job-dir>; the first argv element of a staged record
+  local job=$1 first=
+  fm_remote_job_regular_bounded "$job/argv" "$FM_REMOTE_JOB_MAX_BYTES" || return 1
+  IFS= read -r -d '' first < "$job/argv" || [ -n "$first" ] || return 1
+  printf '%s\n' "$first"
+}
+
+worker_preempting_waiter_exists() {
+  local job state command
+  for job in "$FM_REMOTE_JOB_JOBS"/job-*; do
+    [ -d "$job" ] && [ ! -L "$job" ] || continue
+    state=$(fm_remote_job_read_state "$job" 2>/dev/null || true)
+    [ "$state" = queued ] || continue
+    command=$(worker_job_command "$job" 2>/dev/null || true)
+    fm_remote_job_command_preemptible "$command" || return 0
+  done
+  return 1
 }
 
 worker_cleanup_output_capture() { # <job-dir> <stdout-reader> <stderr-reader>
@@ -452,7 +486,7 @@ worker_capture_output() { # <fifo> <destination>
 
 worker_run_job() { # <account-home> <job-dir>
   local account_home=$1 job=$2 root home command command_path git_bin rc deadline remaining
-  local stdout_pipe stderr_pipe stdout_reader stderr_reader
+  local stdout_pipe stderr_pipe stdout_reader stderr_reader preemptible=0
   local -a argv child_env
   root=$(worker_read_text "$job" root 8192) || { worker_publish_result "$job" 126; return; }
   home=$(worker_read_text "$job" home 8192) || { worker_publish_result "$job" 126; return; }
@@ -472,6 +506,7 @@ worker_run_job() { # <account-home> <job-dir>
   command=${argv[0]}
   case "$command" in fm-*.sh) ;; *) worker_publish_result "$job" 126; return ;; esac
   case "$command" in */*|*..*) worker_publish_result "$job" 126; return ;; esac
+  if fm_remote_job_command_preemptible "$command"; then preemptible=1; fi
   command_path="$root/bin/$command"
   [ -f "$command_path" ] && [ ! -L "$command_path" ] && [ -x "$command_path" ] || {
     worker_publish_result "$job" 126
@@ -531,13 +566,19 @@ worker_run_job() { # <account-home> <job-dir>
     return
   }
   set +e
+  WORKER_PREEMPTIBLE=$preemptible
   worker_run_with_timeout "$job" "$remaining" "${child_env[@]}" \
     "$command_path" "${argv[@]:1}" < "$job/stdin" > "$stdout_pipe" 2> "$stderr_pipe"
   rc=$?
+  WORKER_PREEMPTIBLE=0
   wait "$stdout_reader"
   wait "$stderr_reader"
   rm -f -- "$stdout_pipe" "$stderr_pipe"
   set -e
+  if [ "$WORKER_PREEMPTED" -eq 1 ]; then
+    : > "$job/stdout"
+    : > "$job/stderr"
+  fi
   worker_publish_result "$job" "$rc" || worker_error "could not publish result for ${job##*/}"
 }
 
