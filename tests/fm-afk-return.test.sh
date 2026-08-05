@@ -18,6 +18,8 @@ install_runner() {  # <case-dir>
   mkdir -p "$dir/bin" "$dir/home/state" "$dir/home/data" "$dir/home/config"
   cp "$ROOT/bin/fm-afk-return.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/"
+  # fm-stat-lib.sh: the one portable file-metadata owner the wake lib sources.
+  cp "$ROOT/bin/fm-stat-lib.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-classify-lib.sh" "$dir/bin/"
   cat > "$dir/bin/fm-afk-launch.sh" <<'SH'
 #!/usr/bin/env bash
