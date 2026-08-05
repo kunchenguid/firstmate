@@ -15,6 +15,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 GRACE=${FM_GUARD_GRACE:-300}
 INCLUDE_PRS=${FM_DASHBOARD_INCLUDE_PRS:-1}
 NOW=${FM_DASHBOARD_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
+DASHBOARD_SECONDMATE_LIMIT=${FM_DASHBOARD_SECONDMATE_LIMIT:-8}
+DASHBOARD_SECONDMATE_TIMEOUT=${FM_DASHBOARD_SECONDMATE_TIMEOUT:-2}
+DASHBOARD_PR_REPO_LIMIT=${FM_DASHBOARD_PR_REPO_LIMIT:-3}
+DASHBOARD_PR_TIMEOUT=${FM_DASHBOARD_PR_TIMEOUT:-5}
 
 usage() {
   cat <<'EOF'
@@ -24,6 +28,7 @@ Print the read-only structured snapshot used by the local dashboard.
 Live PR and CI enrichment is enabled by default and can be disabled for a
 local-only read with FM_DASHBOARD_INCLUDE_PRS=0.
 The watcher health uses FM_GUARD_GRACE, defaulting to 300 seconds.
+Dashboard enrichment is bounded to eight secondmate homes at two seconds each and three PR repositories at five seconds each by default.
 EOF
 }
 
@@ -47,13 +52,17 @@ case "$INCLUDE_PRS" in
   *) echo "fm-dashboard-snapshot: FM_DASHBOARD_INCLUDE_PRS must be 0 or 1" >&2; exit 2 ;;
 esac
 
-fleet_args=(--json --fields paths,endpoints --all-in-flight --all-decisions --all-secondmates --all-landed --all-unhealthy --all-recorded-prs)
-[ "$INCLUDE_PRS" -eq 1 ] && fleet_args+=(--include-prs --all-pr-repos)
+fleet_args=(--json --fields paths,endpoints --all-in-flight --all-decisions --all-unhealthy --all-recorded-prs)
+[ "$INCLUDE_PRS" -eq 1 ] && fleet_args+=(--include-prs)
 
 fleet=$(FM_HOME="$FM_HOME" \
   FM_ROOT_OVERRIDE="$FM_ROOT" \
   FM_STATE_OVERRIDE="$STATE" \
   FM_BEARINGS_NOW="$NOW" \
+  FM_SNAPSHOT_SECONDMATES="$DASHBOARD_SECONDMATE_LIMIT" \
+  FM_SNAPSHOT_SECONDMATE_TIMEOUT="$DASHBOARD_SECONDMATE_TIMEOUT" \
+  FM_BEARINGS_PR_REPOS="$DASHBOARD_PR_REPO_LIMIT" \
+  FM_BEARINGS_PR_TIMEOUT="$DASHBOARD_PR_TIMEOUT" \
   "$SCRIPT_DIR/fm-bearings-snapshot.sh" "${fleet_args[@]}" 2>/dev/null) \
   || { echo "fm-dashboard-snapshot: Bearings projection failed" >&2; exit 1; }
 printf '%s' "$fleet" | jq -e '.schema == "fm-bearings.v1"' >/dev/null \

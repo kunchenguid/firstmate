@@ -28,6 +28,15 @@ SECRET_RE = re.compile(
 STATUS_RE = re.compile(
     r"^([a-z][a-z0-9-]*)(?:\s+\[key=([^\]]+)\])?(?::\s*(.*))?$"
 )
+SECOND_MATE_TRANSITION_VERBS = {
+    "blocked",
+    "cancelled",
+    "canceled",
+    "done",
+    "failed",
+    "needs-decision",
+    "paused",
+}
 
 
 def now_iso() -> str:
@@ -136,6 +145,9 @@ class DashboardStore:
         self.last_success_at: str | None = None
         self.initialized = bool(self.snapshot)
         self.status_sources: dict[str, Path] = {}
+        self.secondmate_status_sources: dict[str, Path] = {}
+        self.active_secondmate_status_sources: set[str] = set()
+        self.secondmate_transitions_consumed: set[str] = set()
 
     def _load_snapshot(self) -> dict[str, object]:
         try:
@@ -197,6 +209,7 @@ class DashboardStore:
         }
         tasks = []
         status_sources: dict[str, Path] = {}
+        secondmate_sources: dict[str, Path] = {}
         for row in fleet.get("in_flight", []):
             if not isinstance(row, dict):
                 continue
@@ -254,7 +267,7 @@ class DashboardStore:
                 continue
             task_id = f"{home_id}/{child_id}"
             status_path = home_path / "state" / f"{child_id}.status"
-            status_sources[task_id] = status_path
+            secondmate_sources[task_id] = status_path
             age = file_age(status_path)
             state = str(row.get("state", "unknown"))
             if state in {"done", "failed"}:
@@ -279,6 +292,16 @@ class DashboardStore:
                 }
             )
         self.status_sources = status_sources
+        active_secondmate_sources = set(secondmate_sources)
+        for task_id in list(self.secondmate_status_sources):
+            if task_id in active_secondmate_sources:
+                self.secondmate_transitions_consumed.discard(task_id)
+            elif task_id in self.secondmate_transitions_consumed:
+                del self.secondmate_status_sources[task_id]
+                self.secondmate_transitions_consumed.discard(task_id)
+        self.secondmate_status_sources.update(secondmate_sources)
+        self.active_secondmate_status_sources = active_secondmate_sources
+        self.status_sources.update(self.secondmate_status_sources)
         service = {
             "state": "degraded" if self.last_error else "ready",
             "snapshot_error": self.last_error,
@@ -400,12 +423,18 @@ class DashboardStore:
                     continue
                 complete_length = content.rfind(b"\n") + 1
                 complete = content[:complete_length]
+                transition_seen = False
                 for raw_line in complete.splitlines():
                     line = raw_line.decode("utf-8", "replace").strip()
                     match = STATUS_RE.match(line)
                     if not match or not match.group(1):
                         continue
                     verb, key, note = match.groups()
+                    if (
+                        task_id in self.secondmate_status_sources
+                        and verb in SECOND_MATE_TRANSITION_VERBS
+                    ):
+                        transition_seen = True
                     self._append_event(
                         "status",
                         {
@@ -419,6 +448,11 @@ class DashboardStore:
                 if new_offset != self.cursors[task_id]:
                     self.cursors[task_id] = new_offset
                     changed = True
+                if transition_seen:
+                    self.secondmate_transitions_consumed.add(task_id)
+                    if task_id not in self.active_secondmate_status_sources:
+                        self.secondmate_status_sources.pop(task_id, None)
+                        self.secondmate_transitions_consumed.discard(task_id)
             if changed:
                 atomic_json_write(self.cursors_path, self.cursors)
             if changed:

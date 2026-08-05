@@ -183,7 +183,7 @@ test_snapshot_failure_is_not_healthy() {
 }
 
 test_secondmate_child_work_and_events() {
-  local home mate out stream
+  local home mate out stream gen
   home=$(make_home secondmate)
   : > "$home/data/secondmates.md"
   mate="$TMP_ROOT/secondmate-home"
@@ -201,6 +201,14 @@ test_secondmate_child_work_and_events() {
     || fail "secondmate child status event was not delivered: $stream"
   printf '%s' "$stream" | grep -F 'child event arrived' >/dev/null \
     || fail "secondmate child status summary was not delivered: $stream"
+  printf 'done [key=child]: child finished\n' >> "$mate/state/child.status"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$mate/state" child)
+  "$ROOT/bin/fm-busy-event.sh" apply "$mate/state" child idle --gen "$gen" \
+    --source claude-hook --event stop
+  sleep 0.4
+  stream=$(curl -N -fsS --max-time 2 "${DASHBOARD_URL%/}/events?since=0" || true)
+  printf '%s' "$stream" | grep -F '"task_id": "mate/child"' | grep -F 'child finished' >/dev/null \
+    || fail "secondmate terminal status event was not delivered: $stream"
   pass "validated secondmate child work and status events are visible"
 }
 
