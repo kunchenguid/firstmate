@@ -41,7 +41,7 @@ make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
   fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi
-  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.35
+  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.45
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
@@ -81,7 +81,7 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/no-mistakes"
-  add_tasks_axi "$fakebin" "0.2.2"
+  add_tasks_axi "$fakebin" "0.2.4"
   add_quota_axi "$fakebin"
   printf '%s\n' "$fakebin"
 }
@@ -91,7 +91,7 @@ add_quota_axi() {
   cat > "$fakebin/quota-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
-  printf '%s\n' "${FM_FAKE_QUOTA_AXI_VERSION:-0.1.16}"
+  printf '%s\n' "${FM_FAKE_QUOTA_AXI_VERSION:-0.1.17}"
   exit 0
 fi
 exit 0
@@ -293,16 +293,16 @@ test_bootstrap_reporting() {
         ;;
     esac
   done <<'ROWS'
-treehouse --lease support is accepted silently^1^0.2.2^1^manual^empty^^
-treehouse without --lease reports an upgrade, gh auth is fine^0^0.2.2^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
-compatible tasks-axi is silent by default^1^0.2.2^1^-^empty^^
+treehouse --lease support is accepted silently^1^0.2.4^1^manual^empty^^
+treehouse without --lease reports an upgrade, gh auth is fine^0^0.2.4^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
+compatible tasks-axi is silent by default^1^0.2.4^1^-^empty^^
 missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 incompatible tasks-axi is required by default^1^0.1.0^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-tasks-axi without archive-body is required by default^1^0.2.2:noarchive^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-tasks-axi without multi-id mv is required by default^1^0.2.2:nomulti^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-missing quota-axi is required by default^1^0.2.2^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
+tasks-axi without archive-body is required by default^1^0.2.4:noarchive^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+tasks-axi without multi-id mv is required by default^1^0.2.4:nomulti^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+missing quota-axi is required by default^1^0.2.4^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
 manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-manual backlog backend suppresses tasks-axi availability^1^0.2.2^1^manual^empty^^
+manual backlog backend suppresses tasks-axi availability^1^0.2.4^1^manual^empty^^
 ROWS
   pass "bootstrap reports treehouse lease + tasks-axi/quota-axi bootstrap contracts"
 }
@@ -388,11 +388,11 @@ test_lavish_axi_min_version() {
         [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
     esac
   done <<'ROWS'
-minimum lavish-axi version is accepted^0.1.35^empty
-newer lavish-axi patch is accepted^0.1.36^empty
+minimum lavish-axi version is accepted^0.1.45^empty
+newer lavish-axi patch is accepted^0.1.46^empty
 newer lavish-axi minor is accepted^0.2.0^empty
 newer lavish-axi major is accepted^1.0.0^empty
-older lavish-axi patch reports an upgrade^0.1.34^missing
+the patch just below the floor reports an upgrade^0.1.44^missing
 much older lavish-axi minor reports an upgrade^0.0.9^missing
 unparseable lavish-axi version reports an upgrade^lavish-axi development build^missing
 ROWS
@@ -434,24 +434,24 @@ test_tasks_axi_min_version() {
         [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
     esac
   done <<'ROWS'
-minimum tasks-axi version is accepted^0.2.2^empty
-newer tasks-axi patch is accepted^0.2.3^empty
+minimum tasks-axi version is accepted^0.2.4^empty
+newer tasks-axi patch is accepted^0.2.5^empty
 newer tasks-axi minor is accepted^0.3.0^empty
 newer tasks-axi major is accepted^1.0.0^empty
 older tasks-axi with features reports an upgrade^0.1.1^missing
-pre-multi-id tasks-axi reports an upgrade^0.2.1^missing
+the patch just below the floor reports an upgrade^0.2.3^missing
 unparseable tasks-axi version reports an upgrade^tasks-axi development build^missing
-tasks-axi at floor without archive-body reports an upgrade^0.2.2:noarchive^missing
-tasks-axi at floor without multi-id reports an upgrade^0.2.2:nomulti^missing
+tasks-axi at floor without archive-body reports an upgrade^0.2.4:noarchive^missing
+tasks-axi at floor without multi-id reports an upgrade^0.2.4:nomulti^missing
 ROWS
   pass "bootstrap enforces tasks-axi minimum version"
 }
 
-# 0.1.16 is the first quota-axi that reports per-credential auth sources and Grok
-# state.authStatus. Before it, a dispatch candidate could not be scoped to its own
-# authentication surface, which is exactly how one harness's expired CLI token
-# produced a captain-facing "log in" claim for a candidate that never read it. A
-# stale install used to pass this check silently, so the fix stayed uninstalled.
+# Every axi-family floor is the current latest published version of that tool,
+# captain-bumped to keep the fleet on the newest axi tools, not the minimum
+# version that introduced a depended-on behavior. bin/fm-bootstrap.sh's header
+# owns that policy; these rows only pin that a build below the floor is reported
+# and a build at or above it is silent.
 test_quota_axi_min_version() {
   local label version mode case_dir fakebin out missing n
   missing='MISSING: quota-axi (install: npm install -g quota-axi)'
@@ -472,11 +472,11 @@ test_quota_axi_min_version() {
         [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
     esac
   done <<'ROWS'
-minimum quota-axi version is accepted^0.1.16^empty
-newer quota-axi patch is accepted^0.1.17^empty
+minimum quota-axi version is accepted^0.1.17^empty
+newer quota-axi patch is accepted^0.1.18^empty
 newer quota-axi minor is accepted^0.2.0^empty
 newer quota-axi major is accepted^1.0.0^empty
-older quota-axi patch reports an upgrade^0.1.15^missing
+the patch just below the floor reports an upgrade^0.1.16^missing
 much older quota-axi minor reports an upgrade^0.0.9^missing
 unparseable quota-axi version reports an upgrade^quota-axi development build^missing
 ROWS

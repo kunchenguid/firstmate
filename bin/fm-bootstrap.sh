@@ -52,30 +52,26 @@
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.31.2.
-#          gh-axi is also MISSING when its installed version is older than
-#          0.1.29, the first release whose bare --squash shorthand works for
-#          firstmate's non-interactive PR merge path.
-#          lavish-axi is also MISSING when its installed version is older than
-#          0.1.35, the first release whose poll response carries session_ended
-#          beside the session status. bin/fm-procevent-lavish.sh reads exactly
-#          that field to decide that a human "Send & End" review is terminal, so
-#          an older build leaves every such review source armed forever, and a
-#          plain reopen would also override a session the human deliberately
-#          ended. Release 0.1.44 also suppresses recurring poll wait ticks outside
-#          interactive terminals, but those ticks use stderr and bin/fm-procevent.sh
-#          discards child stderr, so the change does not affect adapter behavior.
-#          Other later releases only add artifact-authoring surface the adapter never
-#          reads, so the floor stays 0.1.35 rather than tracking latest.
+#          AXI-FAMILY FLOOR POLICY. Every axi-family floor - gh-axi, lavish-axi,
+#          tasks-axi, and quota-axi - is the CURRENT LATEST published version of
+#          that tool, captain-bumped periodically to keep the whole fleet on the
+#          newest axi tools. It is NOT the minimum feature-introduced version.
+#          Do not "correct" a floor downward to the earliest release that happens
+#          to satisfy some depended-on behavior: that is the opposite of this
+#          policy. The captain accepts that these floors drift upward as new
+#          versions ship, and owns each bump. An installed build below its floor
+#          reports MISSING like no-mistakes, so the operator is asked to upgrade
+#          rather than silently running an older tool. Feature probes are a
+#          separate concern and still apply where a tool has one: tasks-axi is
+#          additionally feature gated on update --archive-body and mv [<id>...].
+#          The floors live in exactly one place per tool: gh-axi and lavish-axi in
+#          the constants below, tasks-axi in fm-tasks-axi-lib.sh, and quota-axi in
+#          fm-quota-axi-lib.sh.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
-#          lavish-axi). tasks-axi is also version and feature gated (0.2.2+
-#          with update --archive-body and mv [<id>...]); an installed but
-#          incompatible build reports MISSING like no-mistakes. A compatible
-#          tasks-axi default backend is silent. quota-axi is required for the
-#          agent-owned dispatch-profile array procedure in AGENTS.md section 4
-#          and .agents/skills/quota-array-dispatch/SKILL.md, and is also version
-#          gated by fm-quota-axi-lib.sh, which owns that floor and its rationale.
-#          An older build reports MISSING like no-mistakes rather than passing
-#          silently while emitting auth semantics dispatch cannot scope.
+#          lavish-axi). A compatible tasks-axi default backend is silent.
+#          quota-axi is required for the agent-owned dispatch-profile array
+#          procedure in AGENTS.md section 4 and
+#          .agents/skills/quota-array-dispatch/SKILL.md.
 #          On a primary home, the locked mutable path materializes the visible
 #          default config/startup-memory-budget=7500 when absent. It never
 #          guesses at malformed or unsafe existing files, and secondmate homes
@@ -704,8 +700,10 @@ if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
 fi
 TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
 NO_MISTAKES_MIN=1.31.2
+# gh-axi and lavish-axi floors: current latest, captain-bumped (see the
+# AXI-FAMILY FLOOR POLICY in this file's header). Not a feature minimum.
 GH_AXI_MIN=0.1.29
-LAVISH_AXI_MIN=0.1.35
+LAVISH_AXI_MIN=0.1.45
 
 treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
