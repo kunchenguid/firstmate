@@ -411,7 +411,7 @@ Both `MainThread` (kernel exec name) and `cursor-agent` (tmux pane command) clas
 **Environment marker leak (before fix):**
 
 A cursor-agent process launched from a Claude Code firstmate inherits `CLAUDECODE=1` and `CLAUDE_CODE_ENTRYPOINT=cli`.
-Detection ordering plus `unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT` in the launch template fix this.
+Detection ordering plus `env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT` in the launch template fix this.
 
 **Busy state:**
 

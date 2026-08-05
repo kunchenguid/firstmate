@@ -126,7 +126,7 @@ test_cursor_launch_command_typed() {
   assert_contains "$out" "spawned $id harness=cursor" "spawn did not report cursor harness"
   assert_grep "harness=cursor" "$HOME_DIR/state/$id.meta" "meta missing harness=cursor"
   launch=$(cat "$LAUNCH_LOG")
-  expected="unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT; cursor-agent --force --trust \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT cursor-agent --force --trust \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "cursor launch did not match the canonical command"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "cursor spawn types --force --trust with env sanitization and the encoded brief"
 }
