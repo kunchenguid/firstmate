@@ -222,7 +222,7 @@ The capture owner requests at least 200 lines from Herdr and trims locally to th
 This generous floor is required for small composer and peek reads.
 
 Herdr's native agent state can read idle while a harness waits on its own long foreground tool.
-Current-state reconciliation therefore treats native agent state only as endpoint evidence and uses exact-worktree process presence, output change, and cumulative CPU from `bin/fm-liveness-snapshot.sh` for worker activity; native `idle` alone never proves that a worker has stopped.
+Current-state reconciliation therefore treats native agent state only as endpoint evidence and uses task-token-bound process presence, output change, and cumulative CPU from `bin/fm-liveness-snapshot.sh` for worker activity; exact worktree remains a second constraint because pooled worktrees are reused, and native `idle` alone never proves that a worker has stopped.
 A human-blocked permission dialog has no busy banner and still surfaces.
 
 ## Composer and injection safety

@@ -7,6 +7,7 @@ trap 'rm -rf -- "$TMP"' EXIT HUP INT TERM
 command -v lsof >/dev/null 2>&1 || exit 1
 
 LC_ALL=C ps -Ao pid=,time=,comm= > "$TMP/ps.raw" 2>/dev/null || exit 1
+LC_ALL=C ps eww -Ao pid=,command= > "$TMP/env.raw" 2>/dev/null || exit 1
 if [ -n "$TIMESTAMP_FILE" ]; then
   if command -v perl >/dev/null 2>&1; then
     perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e 'printf "%.0f\n", clock_gettime(CLOCK_MONOTONIC) * 1000' \
@@ -29,6 +30,17 @@ awk '
   }
   { pid=$1; cpu=$2; $1=$2=""; sub(/^[[:space:]]+/,""); print pid "\t" ms(cpu) "\t" $0 }
 ' "$TMP/ps.raw" > "$TMP/ps.tsv"
+awk '
+  {
+    for (i=2; i<=NF; i++) {
+      if ($i ~ /^FM_WORKER_TOKEN=[0-9a-f]+$/) {
+        token=substr($i,17)
+        if (length(token)==32) print $1 "\t" token
+        break
+      }
+    }
+  }
+' "$TMP/env.raw" > "$TMP/token.tsv" || exit 1
 pid_list=$(awk -F '\t' 'BEGIN{sep=""} {printf "%s%s",sep,$1; sep=","}' "$TMP/ps.tsv")
 [ -n "$pid_list" ] || exit 0
 lsof -a -d cwd -p "$pid_list" -Fn > "$TMP/lsof.raw" 2>/dev/null || true
@@ -40,4 +52,8 @@ awk '
 awk -F '\t' '
   NR==FNR { cwd[$1]=$2; next }
   ($1 in cwd) { print $1 "\t" $2 "\t" $3 "\t" cwd[$1] }
-' "$TMP/cwd.tsv" "$TMP/ps.tsv"
+' "$TMP/cwd.tsv" "$TMP/ps.tsv" > "$TMP/process.tsv"
+awk -F '\t' '
+  NR==FNR { token[$1]=$2; next }
+  { print $0 "\t" token[$1] }
+' "$TMP/token.tsv" "$TMP/process.tsv"

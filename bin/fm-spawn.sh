@@ -1242,6 +1242,24 @@ secondmate_registry_value() {
   secondmate_registry_field "$DATA/secondmates.md" "$1" "$2"
 }
 
+shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+mint_worker_token() {
+  local token=
+  if command -v openssl >/dev/null 2>&1; then
+    token=$(openssl rand -hex 16 2>/dev/null || true)
+  elif [ -r /dev/urandom ]; then
+    token=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d '[:space:]')
+  fi
+  case "$token" in *[!0-9a-f]*) return 1 ;; esac
+  [ "${#token}" -eq 32 ] || return 1
+  printf '%s' "$token"
+}
+
 resolve_kimi_binary() {
   local candidate dir fallback
   candidate=$(command -v kimi 2>/dev/null || true)
@@ -2197,7 +2215,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       p_real=$(real_path_or_raw "$p")
       if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
         if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
-          WT="$p"
+          WT="$p_real"
           break
         fi
         candidate="$p_real"
@@ -2569,6 +2587,10 @@ preserve_relaunch_meta() {
     }
     !($1 in owned)
   ' "$RELAUNCH_META"
+WT=$(real_path_or_raw "$WT")
+WORKER_TOKEN=$(mint_worker_token) || {
+  echo "error: could not mint a task-bound worker token; refusing to launch" >&2
+  exit 1
 }
 {
   echo "window=$META_WINDOW"
@@ -2582,6 +2604,7 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  echo "worker_token=$WORKER_TOKEN"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
@@ -2617,7 +2640,10 @@ preserve_relaunch_meta() {
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
-} > "$SPAWN_META_PATH"
+} > "$SPAWN_META_PATH" || {
+  echo "error: could not publish task metadata for $ID; refusing to launch" >&2
+  exit 1
+}
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
@@ -2704,6 +2730,10 @@ spawn_record_traceparent() {
   return "$status"
 }
 
+# A worktree is a reusable execution slot, not a task identity. Carry the
+# incarnation token on the worker process itself so liveness can attribute CPU
+# and presence to exactly one metadata record even after the slot is reused.
+LAUNCH="FM_WORKER_TOKEN=$WORKER_TOKEN $LAUNCH"
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.

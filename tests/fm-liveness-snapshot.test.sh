@@ -18,7 +18,8 @@ make_case() {  # <name> <harness>
   local dir=$TMP_ROOT/$1 harness=$2
   mkdir -p "$dir/home/state" "$dir/wt" "$dir/bin"
   fm_write_meta "$dir/home/state/task.meta" \
-    "window=fm:fm-task" "worktree=$dir/wt" "harness=$harness" "kind=ship"
+    "window=fm:fm-task" "worktree=$dir/wt" "harness=$harness" "kind=ship" \
+    "worker_token=11111111111111111111111111111111"
   printf '%s\n' "$dir"
 }
 
@@ -48,48 +49,52 @@ count_file=${E_DIR:?}/process.count
 n=$(cat "$count_file" 2>/dev/null || printf 0)
 n=$((n + 1))
 printf '%s' "$n" > "$count_file"
+if [ -n "${E_PROCESS_CLOCK_STEP_MS:-}" ] && [ -n "${FM_LIVENESS_PROCESS_TIMESTAMP_FILE:-}" ]; then
+  printf '%s\n' "$((n * E_PROCESS_CLOCK_STEP_MS))" > "$FM_LIVENESS_PROCESS_TIMESTAMP_FILE"
+fi
 wt=${E_WT:?}
 family=${E_FAMILY:-claude}
+token=${E_TOKEN:-11111111111111111111111111111111}
 case "$family" in claude) worker=claude ;; codex) worker=codex ;; *) worker=$family ;; esac
 case "${E_PROCESS:-working}" in
   stall) sleep 30 ;;
   working)
     if [ "$n" -eq 1 ]; then cpu=1000; else cpu=${E_CPU2:-1030}; fi
-    printf '11\t%s\t%s\t%s\n' "$cpu" "$worker" "$wt"
+    printf '11\t%s\t%s\t%s\t%s\n' "$cpu" "$worker" "$wt" "$token"
     ;;
   launcher-trap)
     if [ "$n" -eq 1 ]; then real=5000; else real=5020; fi
-    printf '10\t40\tnode\t%s\n' "$wt"
-    printf '11\t%s\t%s\t%s\n' "$real" "$worker" "$wt"
+    printf '10\t40\tnode\t%s\t%s\n' "$wt" "$token"
+    printf '11\t%s\t%s\t%s\t%s\n' "$real" "$worker" "$wt" "$token"
     ;;
   same-family-max)
     if [ "$n" -eq 1 ]; then high=5000; else high=5020; fi
-    printf '10\t40\t%s\t%s\n' "$worker" "$wt"
-    printf '11\t%s\t%s\t%s\n' "$high" "$worker" "$wt"
+    printf '10\t40\t%s\t%s\t%s\n' "$worker" "$wt" "$token"
+    printf '11\t%s\t%s\t%s\t%s\n' "$high" "$worker" "$wt" "$token"
     ;;
   parked-high-total)
-    printf '11\t500000\t%s\t%s\n' "$worker" "$wt"
+    printf '11\t500000\t%s\t%s\t%s\n' "$worker" "$wt" "$token"
     ;;
   wrong-cwd)
-    printf '11\t9000\t%s\t%s-other\n' "$worker" "$wt"
+    printf '11\t9000\t%s\t%s-other\t%s\n' "$worker" "$wt" "$token"
     ;;
   shells-only)
     if [ "$n" -eq 1 ]; then cpu=1000; else cpu=9000; fi
-    printf '11\t%s\tzsh\t%s\n' "$cpu" "$wt"
+    printf '11\t%s\tzsh\t%s\t%s\n' "$cpu" "$wt" "$token"
     ;;
   parked-worker-busy-shells)
     if [ "$n" -eq 1 ]; then shell_cpu=1000; else shell_cpu=9000; fi
-    printf '11\t500000\t%s\t%s\n' "$worker" "$wt"
-    printf '12\t%s\tzsh\t%s\n' "$shell_cpu" "$wt"
+    printf '11\t500000\t%s\t%s\t%s\n' "$worker" "$wt" "$token"
+    printf '12\t%s\tzsh\t%s\t%s\n' "$shell_cpu" "$wt" "$token"
     ;;
   exit-between-samples)
     if [ "$n" -eq 1 ]; then
-      printf '11\t500000\t%s\t%s\n' "$worker" "$wt"
+      printf '11\t500000\t%s\t%s\t%s\n' "$worker" "$wt" "$token"
     fi
     ;;
   enter-between-samples)
     if [ "$n" -eq 2 ]; then
-      printf '11\t500000\t%s\t%s\n' "$worker" "$wt"
+      printf '11\t500000\t%s\t%s\t%s\n' "$worker" "$wt" "$token"
     fi
     ;;
   fail) exit 1 ;;
@@ -147,21 +152,21 @@ assert_activity() {  # <json> <activity> <message>
 test_harness_relative_cpu_rows() {
   local dir json
   dir=$(make_case claude-active claude); install_evidence "$dir"
-  json=$(E_FAMILY=claude E_PROCESS=working E_CPU2=1020 run_case "$dir")
+  json=$(E_PROCESS_CLOCK_STEP_MS=1000 E_FAMILY=claude E_PROCESS=working E_CPU2=1020 run_case "$dir")
   printf '%s' "$json" | jq -e '.records[0] | .activity=="active" and .cpu.threshold_ms_per_minute==760 and .cpu.delta_ms==20' >/dev/null \
     || fail "Claude row did not fire above its elapsed-time working floor: $json"
 
   dir=$(make_case claude-refusal claude); install_evidence "$dir"
-  json=$(E_FAMILY=claude E_PROCESS=working E_CPU2=1001 run_case "$dir")
+  json=$(E_PROCESS_CLOCK_STEP_MS=1000 E_FAMILY=claude E_PROCESS=working E_CPU2=1001 run_case "$dir")
   assert_activity "$json" parked "Claude row did not refuse its legitimate idle-baseline input"
 
   dir=$(make_case codex-active codex); install_evidence "$dir"
-  json=$(E_FAMILY=codex E_PROCESS=working E_CPU2=1010 run_case "$dir")
+  json=$(E_PROCESS_CLOCK_STEP_MS=1000 E_FAMILY=codex E_PROCESS=working E_CPU2=1010 run_case "$dir")
   printf '%s' "$json" | jq -e '.records[0] | .activity=="active" and .cpu.threshold_ms_per_minute==400 and .cpu.delta_ms==10' >/dev/null \
     || fail "Codex row did not fire on its own measured working delta: $json"
 
   dir=$(make_case codex-refusal codex); install_evidence "$dir"
-  json=$(E_FAMILY=codex E_PROCESS=working E_CPU2=1000 run_case "$dir")
+  json=$(E_PROCESS_CLOCK_STEP_MS=1000 E_FAMILY=codex E_PROCESS=working E_CPU2=1000 run_case "$dir")
   assert_activity "$json" parked "Codex row did not refuse its legitimate zero-delta parked input"
   pass "harness-relative CPU rows fire and refuse independently for Claude and Codex"
 }
@@ -289,6 +294,71 @@ test_endpoint_three_way_and_output_activity() {
   pass "endpoint presence remains three-way while independent process or output evidence establishes work"
 }
 
+make_shared_worktree_case() {
+  local dir=$TMP_ROOT/shared-task-identity
+  mkdir -p "$dir/home/state" "$dir/wt" "$dir/bin"
+  fm_write_meta "$dir/home/state/live.meta" \
+    "window=fm:fm-live" "worktree=$dir/wt" "harness=claude" "kind=ship" \
+    "worker_token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  fm_write_meta "$dir/home/state/phantom.meta" \
+    "window=fm:fm-phantom" "worktree=$dir/wt" "harness=claude" "kind=ship" \
+    "worker_token=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  cat > "$dir/bin/endpoint" <<'SH'
+#!/usr/bin/env bash
+case "$3" in fm-live) printf 'alive\n' ;; *) printf 'missing\n' ;; esac
+SH
+  cat > "$dir/bin/capture" <<'SH'
+#!/usr/bin/env bash
+printf 'same-frame\n'
+SH
+  cat > "$dir/bin/process" <<'SH'
+#!/usr/bin/env bash
+count_file=${E_DIR:?}/process.count
+n=$(cat "$count_file" 2>/dev/null || printf 0)
+n=$((n + 1))
+printf '%s' "$n" > "$count_file"
+if [ "$n" -eq 1 ]; then cpu=1000; else cpu=1100; fi
+printf '11\t%s\tclaude\t%s\t%s\n' "$cpu" "${E_WT:?}" "${E_SHARED_TOKEN:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
+SH
+  chmod +x "$dir/bin/endpoint" "$dir/bin/capture" "$dir/bin/process"
+  printf '%s\n' "$dir"
+}
+
+shared_identity_property() {  # <json>
+  printf '%s' "$1" | jq -e '
+    (.records[] | select(.id=="live")
+      | .endpoint.presence=="verified_present"
+        and .worker.presence=="verified_present"
+        and .evidence.grade=="task_bound_process"
+        and .activity=="active")
+    and (.records[] | select(.id=="phantom")
+      | .endpoint.presence=="verified_absent"
+        and .worker.presence=="verified_absent"
+        and .evidence.grade=="task_bound_process"
+        and .cpu.sample_1_max_ms==0 and .cpu.sample_2_max_ms==0
+        and .activity=="absent")
+  ' >/dev/null
+}
+
+test_shared_worktree_process_belongs_to_one_task() {
+  local dir json neutralized
+  dir=$(make_shared_worktree_case)
+  json=$(run_case "$dir")
+  shared_identity_property "$json" \
+    || fail "one shared-worktree process was not bound exclusively to its owning task: $json"
+
+  rm -f "$dir"/*.count
+  neutralized=$(E_SHARED_TOKEN=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb run_case "$dir")
+  if shared_identity_property "$neutralized"; then
+    fail "neutralizing task attribution left the one-owner property green: $neutralized"
+  fi
+  printf '%s' "$neutralized" | jq -e '
+    (.records[] | select(.id=="live") | .activity!="active")
+    and (.records[] | select(.id=="phantom") | .activity=="active")
+  ' >/dev/null || fail "attribution falsifier went RED for the wrong reason: $neutralized"
+  pass "a shared-worktree process belongs to one task; swapping its token makes that property RED"
+}
+
 test_local_evidence_producers_are_bounded() {
   local dir json started elapsed
   dir=$(make_case local-process-stall claude); install_evidence "$dir"
@@ -359,6 +429,10 @@ test_production_cpu_clock_excludes_trailing_lsof_latency() {
   real_ps=$(command -v ps)
   cat > "$dir/bin/ps" <<'SH'
 #!/usr/bin/env bash
+if [ "$*" = "eww -Ao pid=,command=" ]; then
+  printf '11 claude FM_WORKER_TOKEN=11111111111111111111111111111111\n'
+  exit 0
+fi
 if [ "$*" != "-Ao pid=,time=,comm=" ]; then exec "${E_REAL_PS:?}" "$@"; fi
 count_file=${E_DIR:?}/ps.count
 n=$(cat "$count_file" 2>/dev/null || printf 0)
@@ -422,7 +496,7 @@ EOF
   ' >/dev/null || fail "remote route did not retain its remote backend evidence: $json"
   [ "$(wc -l < "$dir/remote.log" | tr -d ' ')" = 1 ] \
     || fail "remote liveness evidence producer was not called exactly once"
-  grep -F $'remote\ttask\t100\t2' "$dir/remote.log" >/dev/null \
+  grep -F $'remote\ttask\t100\t5' "$dir/remote.log" >/dev/null \
     || fail "validated evidence timeout was not carried to the remote producer"
 
   : > "$dir/remote.log"
@@ -617,7 +691,8 @@ test_remote_control_samples_recorded_host_local_target() {
   printf 'task\n' > "$home/.fm-secondmate-home"
   printf '# fixture\n' > "$home/AGENTS.md"
   fm_write_meta "$home/state/parent-route/task.meta" \
-    "window=remote-session:fm-task" "worktree=$dir/wt" "harness=claude" "kind=secondmate"
+    "window=remote-session:fm-task" "worktree=$dir/wt" "harness=claude" "kind=secondmate" \
+    "worker_token=11111111111111111111111111111111"
   json=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_LIVENESS_INTERVAL_MS=100 \
     FM_LIVENESS_ENDPOINT_BIN="$dir/bin/endpoint" FM_LIVENESS_CAPTURE_BIN="$dir/bin/capture" \
     FM_LIVENESS_PROCESS_SNAPSHOT_BIN="$dir/bin/process" E_DIR="$dir" E_WT="$dir/wt" \
@@ -676,6 +751,7 @@ test_real_process_snapshot_accepts_partial_lsof_output
 test_cwd_binding_and_shell_amplifier_refusals
 test_between_sample_exit_is_absent_for_every_harness
 test_endpoint_three_way_and_output_activity
+test_shared_worktree_process_belongs_to_one_task
 test_local_evidence_producers_are_bounded
 test_cpu_rate_uses_actual_sample_elapsed_time
 test_production_cpu_clock_excludes_trailing_lsof_latency
