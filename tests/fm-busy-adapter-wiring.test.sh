@@ -268,6 +268,11 @@ test_claude_hooks_semantic_lifecycle() {
   jq -e . "$settings" >/dev/null || fail "claude hook settings are not valid JSON"
   [ "$(wc -l <"$settings")" -gt 1 ] \
     || fail "claude hook settings must be pretty-printed multi-line JSON, not minified to one line"
+  if grep -q $'\t' "$settings"; then
+    fail "claude hook settings must be indented with spaces, not tabs, or biome's format gate rejects them downstream"
+  fi
+  grep -qFx '  "hooks": {' "$settings" \
+    || fail "claude hook settings must use a 2-space indent width, expected a line '  \"hooks\": {'"
   for ev in UserPromptSubmit Stop StopFailure SessionEnd; do
     jq -e ".hooks[\"$ev\"]" "$settings" >/dev/null || fail "claude hook settings lack $ev"
   done
