@@ -12,7 +12,7 @@ metadata:
 # refactor-campaign
 
 Use this method when one body of work must be restructured across many pull requests, several waves of crew, and more than one delivery day.
-It is the single owner of Firstmate's campaign shape; the ordinary task lifecycle in `AGENTS.md` section 7 still owns intake, dispatch, supervision, and merge authority for each individual slice inside the campaign.
+It is the single owner of Firstmate's campaign shape; `AGENTS.md` section 7 still owns intake, dispatch, delivery mode, and merge authority for each individual slice inside the campaign, and section 8 still owns its supervision.
 
 ## Scope
 
