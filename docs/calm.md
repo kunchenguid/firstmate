@@ -19,6 +19,7 @@ The session-start nudge remains on its existing non-displayed custom-message pat
 
 Outside Pi's same-name built-in override collision described below, Calm changes presentation only.
 Calm's built-in wrappers preserve Pi's execution behavior, and input delivery, ordering, model context, session storage, diagnostics, and `/export` and `/share` operation remain unchanged.
+Those commands keep Pi's stock HTML tool rendering and built-in completion feedback while Calm is active.
 Every hidden Firstmate input remains available to the model and in serialized session data and exported artifacts.
 Legacy operational custom messages remain in session data and Pi's sidebar tree, although the main HTML transcript may omit them.
 Toggling Calm off restores ordinary rendering, and `Ctrl+O` expansion state is preserved.
