@@ -178,6 +178,29 @@ else
   fail "strict mode did not enforce on contradictory rules file"
 fi
 
+# A malformed soft-rule weight is a rules-file defect, not invalid facts: it
+# fails open like any other broken rules file (exit 64 stays reserved for the
+# caller's own facts).
+cat > "$TMP_ROOT/badweight.json" <<'JSON'
+{
+  "axes": {"kind": ["ship", "scout", "secondmate"], "landed": ["merged", "pushed", "local_merged", "none"], "report": ["present", "absent"], "worktree": ["clean", "holds_unlanded_work"], "captain_approval": ["granted", "not_required", "pending"]},
+  "hard_rules": [],
+  "soft_rules": [
+    {"name": "S", "when": {"kind": "scout"}, "weight": "heavy", "require_meta": "backlog_recorded", "reason": "z"}
+  ]
+}
+JSON
+if [ "$(FM_COMPLETENESS_RULES="$TMP_ROOT/badweight.json" "$GATE" --mode graded --kind scout --report present >/dev/null 2>&1; echo $?)" = "0" ]; then
+  pass "malformed soft-rule weight fails open"
+else
+  fail "malformed soft-rule weight did not fail open"
+fi
+if [ "$(FM_COMPLETENESS_STRICT=1 FM_COMPLETENESS_RULES="$TMP_ROOT/badweight.json" "$GATE" --mode graded --kind scout --report present >/dev/null 2>&1; echo $?)" = "3" ]; then
+  pass "strict mode enforces on malformed soft-rule weight"
+else
+  fail "strict mode did not enforce on malformed soft-rule weight"
+fi
+
 # Local-only derivation mirrors fm-teardown.sh's main-or-master fallback: a
 # repo whose default branch is master must still block on unmerged work.
 PROJ="$TMP_ROOT/proj-master"

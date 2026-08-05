@@ -112,7 +112,12 @@ def _score_soft(spec, fact_axes, metadata):
         when = rule.get("when", {})
         if any(fact_axes.get(k) != v for k, v in when.items()):
             continue  # rule does not apply to this proposal
-        weight = int(rule.get("weight", 1))
+        try:
+            weight = int(rule.get("weight", 1))
+        except (TypeError, ValueError):
+            raise RulesError(
+                "soft rule %r has a non-integer weight %r"
+                % (rule.get("name"), rule.get("weight")))
         total += weight
         key = rule.get("require_meta")
         if key is not None and metadata.get(key):

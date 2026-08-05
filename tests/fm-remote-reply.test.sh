@@ -156,6 +156,22 @@ assert_contains "$out" 'handled: remote-reply-ios 2' "earlier generation remaine
   || fail "earlier generation replay duplicated its parent status"
 pass "later generations cannot invalidate an unacknowledged ingested result"
 
+# A stamped reply (bin/fm-classify-lib.sh's status timestamp contract) must
+# validate exactly like a legacy unstamped one and be appended verbatim, stamp
+# and correlation id intact.
+STAMPED_LINE="$(date -u +%Y-%m-%dT%H:%M:%SZ) done [corr=3333333333333333]: stamped generation"
+printf '%s\n' "$STAMPED_LINE" >> "$REMOTE/state/parent-replies.status"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
+  || fail "stamped reply generation was not captured"
+RESULT_STAMPED="$PARENT/state/procevent-inbox/$SID.4.result"
+remote_env "$ADAPTER" handle ios 4 "$RESULT_STAMPED" >/dev/null \
+  || fail "stamped reply generation was not handled"
+grep -Fqx -- "$STAMPED_LINE" "$PARENT/state/ios.status" \
+  || fail "stamped reply was not appended verbatim with its stamp and correlation id"
+[ "$(grep -cF 'done [corr=2222222222222222]' "$PARENT/state/ios.status")" -eq 1 ] \
+  || fail "legacy unstamped reply lost its correlated append"
+pass "stamped and legacy unstamped replies both validate with their correlation ids"
+
 # A digest-valid but uncorrelated line is still rejected at the public ingest
 # boundary. Recalculate its payload commitment so the behavioral assertion is
 # specifically about status validation, not incidental digest failure.
@@ -184,23 +200,23 @@ printf 'failed [corr=fedcba9876543210]: source was replaced\n' > "$REMOTE/state/
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/start-two.out" 2>&1 &
 RUNNER=$!
 wait "$RUNNER" || fail "continuity break was not captured as a structured result"
-RESULT_FOUR=$(find "$PARENT/state/procevent-inbox" -name "$SID.4.result" -print -quit)
-[ -n "$RESULT_FOUR" ] || fail "continuity break produced no durable result"
-[ "$(remote_env "$ADAPTER" classify "$RESULT_FOUR")" = continuity-broken ] \
+RESULT_FIVE=$(find "$PARENT/state/procevent-inbox" -name "$SID.5.result" -print -quit)
+[ -n "$RESULT_FIVE" ] || fail "continuity break produced no durable result"
+[ "$(remote_env "$ADAPTER" classify "$RESULT_FIVE")" = continuity-broken ] \
   || fail "truncated source was not classified as a continuity break"
 set +e
-remote_env "$ADAPTER" handle ios 4 "$RESULT_FOUR" > "$TMP_ROOT/handle-four.out" 2>&1
+remote_env "$ADAPTER" handle ios 5 "$RESULT_FIVE" > "$TMP_ROOT/handle-five.out" 2>&1
 handle_rc=$?
 set -e
 [ "$handle_rc" -eq 3 ] || fail "continuity handling returned an unexpected status: $handle_rc"
 assert_grep 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status" "continuity break did not escalate"
 assert_absent "$PARENT/state/procevent/$SID.source" "continuity break was re-armed without an operator rebase"
-remote_env "$ADAPTER" ingest ios "$RESULT_FOUR" >/dev/null 2>&1 || true
+remote_env "$ADAPTER" ingest ios "$RESULT_FIVE" >/dev/null 2>&1 || true
 [ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "continuity replay duplicated the escalation"
 pass "truncation is detected, escalated once, and not silently rebased"
 
-rm -f "$PARENT/state/procevent-inbox/$SID.4.handled"
+rm -f "$PARENT/state/procevent-inbox/$SID.5.handled"
 if remote_env "$ADAPTER" retire ios > "$TMP_ROOT/retire-pending.out" 2>&1; then
   fail "remote reply retirement accepted an unhandled captured result"
 fi
@@ -208,7 +224,7 @@ assert_grep 'unhandled captured result' "$TMP_ROOT/retire-pending.out" \
   "remote reply retirement did not explain its pending-result refusal"
 assert_absent "$PARENT/state/procevent/$SID.source" \
   "refused retirement left the reply source running past its pending-result check"
-remote_env "$ADAPTER" handle ios 4 "$RESULT_FOUR" >/dev/null 2>&1 || [ "$?" -eq 3 ] \
+remote_env "$ADAPTER" handle ios 5 "$RESULT_FIVE" >/dev/null 2>&1 || [ "$?" -eq 3 ] \
   || fail "pending continuity result could not be acknowledged after retirement refusal"
 remote_env "$ADAPTER" retire ios >/dev/null
 assert_absent "$PARENT/state/remote-replies/ios.cursor" "adapter retirement left its cursor"
