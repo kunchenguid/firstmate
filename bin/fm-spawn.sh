@@ -2229,11 +2229,10 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
 fi
 spawn_send_key "$T" Enter
 if [ "$RAW_LAUNCH" -eq 0 ]; then
-  {
-    echo "profile_delivery=fm-spawn.v1"
-    echo "delivered_model=$DELIVERED_MODEL"
-    echo "delivered_effort=$DELIVERED_EFFORT"
-  } >> "$STATE/$ID.meta"
+  if ! printf 'profile_delivery=fm-spawn.v1\ndelivered_model=%s\ndelivered_effort=%s\n' \
+    "$DELIVERED_MODEL" "$DELIVERED_EFFORT" >> "$STATE/$ID.meta"; then
+    echo "warning: delivered profile metadata could not be recorded for $ID; launch remains active without verified profile delivery" >&2
+  fi
 fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then

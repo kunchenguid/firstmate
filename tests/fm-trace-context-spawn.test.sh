@@ -337,9 +337,13 @@ test_failed_metadata_append_unsets_carrier_and_still_launches() {
 
   ! grep -q '^traceparent=' "$meta" \
     || fail "failed metadata append must not leave a traceparent= claim in meta"
+  ! grep -Eq '^(profile_delivery|delivered_model|delivered_effort)=' "$meta" \
+    || fail "failed metadata append must not leave an unproven delivered-profile claim in meta"
   grep -q '^unset TRACEPARENT; .*claude' "$LAUNCH_LOG" \
     || fail "failed metadata append must unset TRACEPARENT in the launch command"
-  pass "failed traceparent metadata append removes the carrier from the launched task"
+  assert_contains "$out" "warning: delivered profile metadata could not be recorded for $CASE_ID; launch remains active without verified profile delivery" \
+    "failed delivered-profile metadata append must be diagnosed without aborting spawn"
+  pass "failed metadata appends remove the carrier, retain the launch, and leave profile delivery unverified"
 }
 
 test_duplicate_secondmate_spawn_does_not_converge_trace_context() {
