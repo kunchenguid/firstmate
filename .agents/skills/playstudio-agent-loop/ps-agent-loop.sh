@@ -321,10 +321,14 @@ headers = {"Authorization": "Bearer " + api_key, "Accept": "application/json"}
 if org_id:
     headers["X-Daytona-Organization-ID"] = org_id
 
+# macOS system Python often fails Daytona's TLS chain (Basic Constraints);
+# curl works. Use an unverified context for this local capacity probe only.
+ssl_ctx = ssl._create_unverified_context()
+
 def call(path, method="GET"):
     req = urllib.request.Request(api_url + path, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, context=ssl_ctx, timeout=30) as resp:
             body = resp.read().decode("utf-8", "replace")
             return resp.status, json.loads(body) if body.strip() else None
     except urllib.error.HTTPError as exc:
