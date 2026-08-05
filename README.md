@@ -104,7 +104,7 @@ pi
 FM_PI_HARNESS=pi-signed pi-signed
 ```
 
-**Codex CLI**
+**Codex CLI (supported alternative)**
 
 ```sh
 codex
