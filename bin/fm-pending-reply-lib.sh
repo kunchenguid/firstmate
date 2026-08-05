@@ -793,7 +793,7 @@ fm_pending_reply_reconcile_recovery() {  # <state-dir> <corr_id>
 fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
   local state=$1 corr=$2
   local rec phase completed now task_id summary payload parent_status outcome
-  local escalation line seen
+  local escalation
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
@@ -831,23 +831,12 @@ fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
   esac
   [ -n "$parent_status" ] || return 1
   mkdir -p "$(dirname "$parent_status")" 2>/dev/null || return 1
-  # Whole-line dedup under the stamp contract: the append carries a leading
-  # timestamp (bin/fm-classify-lib.sh), so compare each existing line's stripped
-  # body for equality rather than searching for the payload as a substring, which
-  # would let an unrelated line that merely quotes it suppress a real escalation.
+  # Whole-line dedup under the stamp contract, through the writer that owns it
+  # (bin/fm-classify-lib.sh): each existing line's stripped body is compared for
+  # equality rather than searching for the payload as a substring, which would
+  # let an unrelated line that merely quotes it suppress a real escalation.
   escalation="blocked: $payload"
-  seen=0
-  if [ -f "$parent_status" ]; then
-    while IFS= read -r line || [ -n "$line" ]; do
-      if [ "$(status_line_body "$line")" = "$escalation" ]; then
-        seen=1
-        break
-      fi
-    done < "$parent_status"
-  fi
-  if [ "$seen" = 0 ]; then
-    printf '%s %s\n' "$(fm_status_stamp)" "$escalation" >> "$parent_status" 2>/dev/null || return 1
-  fi
+  fm_status_append_once "$parent_status" "$escalation" 2>/dev/null || return 1
   now=$(fm_pending_reply_now)
   fm_pending_reply_set "$rec" escalated_epoch "$now" || return 1
   fm_pending_reply_set "$rec" phase escalated || return 1

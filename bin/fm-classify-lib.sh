@@ -121,6 +121,20 @@ status_line_body() {  # <status-line>
   printf '%s' "$_FM_STATUS_BODY"
 }
 
+# Append one firstmate-written status line, stamped, at most once. Dedup compares
+# each existing line's stripped body rather than the whole line, because the stamp
+# this writer adds differs on every replay and a whole-line probe would therefore
+# never match its own earlier append. Returns non-zero only when the append fails.
+fm_status_append_once() {  # <status-file> <line-body>
+  local file=$1 body=$2 existing
+  if [ -f "$file" ]; then
+    while IFS= read -r existing || [ -n "$existing" ]; do
+      [ "$(status_line_body "$existing")" != "$body" ] || return 0
+    done < "$file"
+  fi
+  printf '%s %s\n' "$(fm_status_stamp)" "$body" >> "$file" || return 1
+}
+
 # The leading stamp of a status line, empty when the line carries none.
 status_line_stamp() {  # <status-line>
   # shellcheck disable=SC2254 # deliberate glob match, not a literal comparison.

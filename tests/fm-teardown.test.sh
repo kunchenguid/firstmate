@@ -589,6 +589,46 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
+# The completeness gate exits 0 for every case it means as "proceed" - SAT, the
+# off-switch, and its own fail-open - so any other exit means the gate did not
+# reach a verdict. A wrapper that lost its exec bit (or vanished) in a partial
+# update yields 126/127, and reading that as approval would silently skip a check
+# that never ran, right before an irreversible teardown.
+test_unrunnable_completeness_gate_refuses_teardown() {
+  local case_dir rc fake_root entry wt_head
+  case_dir=$(make_case gate-unrunnable)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  # Landed work, so nothing but the broken gate can explain a refusal.
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+
+  fake_root="$case_dir/fakeroot"
+  mkdir -p "$fake_root/bin" "$fake_root/data" "$fake_root/state"
+  for entry in "$ROOT"/bin/*; do
+    ln -s "$entry" "$fake_root/bin/$(basename "$entry")"
+  done
+  rm -f "$fake_root/bin/fm-completeness-check.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fake_root/bin/fm-completeness-check.sh"
+  chmod 0644 "$fake_root/bin/fm-completeness-check.sh"
+
+  set +e
+  FM_ROOT_OVERRIDE="$fake_root" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$TEARDOWN" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gate-unrunnable: teardown should refuse when the gate cannot run"
+  grep -q 'completeness gate could not run' "$case_dir/stderr" \
+    || fail "gate-unrunnable: teardown did not report the unrunnable gate"
+  grep -q 'REFUSED: completeness gate blocked teardown' "$case_dir/stderr" \
+    || fail "gate-unrunnable: an unrunnable gate was not treated as blocking"
+  pass "a completeness gate that cannot run blocks teardown instead of passing"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -1829,6 +1869,7 @@ test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_unrunnable_completeness_gate_refuses_teardown
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed

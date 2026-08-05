@@ -210,11 +210,17 @@ handle_rc=$?
 set -e
 [ "$handle_rc" -eq 3 ] || fail "continuity handling returned an unexpected status: $handle_rc"
 assert_grep 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status" "continuity break did not escalate"
+# The escalation is a firstmate-side append, so it carries the leading UTC stamp
+# every parser reads for evidence age - a break that just happened must not read
+# as an unknown age - and it keeps its correlation key alongside that stamp.
+grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z blocked \[key=remote-reply-continuity-ios\]: ' \
+  "$PARENT/state/ios.status" \
+  || fail "continuity escalation was appended without its stamp or lost its correlation key"
 assert_absent "$PARENT/state/procevent/$SID.source" "continuity break was re-armed without an operator rebase"
 remote_env "$ADAPTER" ingest ios "$RESULT_FIVE" >/dev/null 2>&1 || true
 [ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "continuity replay duplicated the escalation"
-pass "truncation is detected, escalated once, and not silently rebased"
+pass "truncation is detected, escalated once with its stamp, and not silently rebased"
 
 rm -f "$PARENT/state/procevent-inbox/$SID.5.handled"
 if remote_env "$ADAPTER" retire ios > "$TMP_ROOT/retire-pending.out" 2>&1; then

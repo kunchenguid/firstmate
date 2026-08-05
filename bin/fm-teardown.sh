@@ -1756,17 +1756,24 @@ fi
 # Formal completeness gate (AGENTS.md section 7): prove the "done" claim consistent
 # with the directives before the irreversible teardown. It STEPS ASIDE when the
 # solver tooling is absent, so the bash checks below remain the hard guarantee;
-# when present it gives a provable, named refusal first. Exit 64 is invalid facts
-# (a typo or corrupted record), which blocks rather than passing. Skipped under
-# --force (the explicit discard path) and for secondmates (governed elsewhere).
+# when present it gives a provable, named refusal first. Exit 0 is the gate's ONLY
+# proceed signal (it exits 0 for SAT, for the off-switch, and when it fails open),
+# so every other rc blocks: 2 is UNSAT, 64 is invalid facts, 3 is strict-mode
+# enforcement, and anything else means the gate could not run at all - a missing
+# or non-executable wrapper must never read as approval. Skipped under --force
+# (the explicit discard path) and for secondmates (governed elsewhere).
 if [ "$FORCE" != "--force" ] && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; }; then
   set +e
   gate_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
     "$FM_ROOT/bin/fm-completeness-check.sh" --gate teardown --id "$ID" 2>&1)
   gate_rc=$?
   set -e
-  if [ "$gate_rc" = 2 ] || [ "$gate_rc" = 3 ] || [ "$gate_rc" = 64 ]; then
+  if [ "$gate_rc" != 0 ]; then
     printf '%s\n' "$gate_out" >&2
+    case "$gate_rc" in
+      2|3|64) ;;
+      *) echo "completeness gate could not run (exit $gate_rc); treating that as blocking." >&2 ;;
+    esac
     echo "REFUSED: completeness gate blocked teardown of $ID." >&2
     exit 1
   fi

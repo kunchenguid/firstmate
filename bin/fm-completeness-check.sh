@@ -99,11 +99,14 @@ git_unlanded_facts() {
   # grok/kimi turn-end pointers) is not the crewmate's work. Edit both or
   # neither, or this gate refuses a teardown its own guarded check would allow.
   dirty=$(git -C "$wt" status --porcelain 2>/dev/null | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
-  unpushed=$(git -C "$wt" log --oneline HEAD --not --remotes -- 2>/dev/null | head -1 || true)
   # Name the concrete evidence so a blocked claim's output cites it alongside
   # the violated rule (uncommitted changes are never landed).
   [ -z "$dirty" ] || echo "completeness gate: uncommitted changes present in $wt" >&2
   if [ "$mode" = "local-only" ]; then
+    # Only the local-only path reads unpushed; the remote-backed path below
+    # defers landedness entirely to fm-teardown.sh, so it never pays for this
+    # revision walk against every remote ref.
+    unpushed=$(git -C "$wt" log --oneline HEAD --not --remotes -- 2>/dev/null | head -1 || true)
     default=$(git -C "$proj" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)
     if [ -z "$default" ]; then
       for branch in main master; do
@@ -263,8 +266,27 @@ case "$rc" in
     exit 0
     ;;
   2)
-    reason=$(printf '%s' "$out" | sed -n 's/.*"reason": "\(.*\)", "violated_rules.*/\1/p')
-    violated=$(printf '%s' "$out" | sed -n 's/.*"violated_rules": \[\(.*\)\], "counterexample.*/\1/p')
+    # Naming the violated invariant is the whole point of a blocked verdict, so
+    # read it out of the engine's own JSON rather than pattern-matching the keys
+    # that happen to sit next to it in the serialized result.
+    reason=""
+    violated=""
+    if verdict=$(printf '%s' "$out" | python3 -c '
+import json
+import sys
+try:
+    result = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+sys.stdout.write("%s\n%s" % (
+    ", ".join(str(name) for name in result.get("violated_rules") or []),
+    (result.get("reason") or "").replace("\n", " ")))
+' 2>/dev/null); then
+      case "$verdict" in
+        *$'\n'*) violated=${verdict%%$'\n'*}; reason=${verdict#*$'\n'} ;;
+        *) violated=$verdict ;;
+      esac
+    fi
     echo "completeness gate: BLOCKED - $label is provably premature" >&2
     [ -n "$violated" ] && echo "  violated: $violated" >&2
     [ -n "$reason" ] && echo "  reason: $reason" >&2

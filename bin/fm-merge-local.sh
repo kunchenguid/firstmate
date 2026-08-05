@@ -51,14 +51,20 @@ default_branch() {
 # $FM_CAPTAIN_APPROVED (granted | yes | 1 | true; or not_required under yolo). The
 # gate STEPS ASIDE when the solver tooling is absent, so existing setups keep
 # working until they install it; once installed, an unasserted approval blocks.
-# Exit 64 is invalid facts, which blocks rather than passing.
+# Exit 0 is the gate's ONLY proceed signal (SAT, the off-switch, and fail-open all
+# exit 0), so every other rc blocks: 2 is UNSAT, 64 is invalid facts, 3 is
+# strict-mode enforcement, and anything else means the gate could not run at all.
 set +e
 gate_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
   "$FM_ROOT/bin/fm-completeness-check.sh" --gate merge --id "$ID" 2>&1)
 gate_rc=$?
 set -e
-if [ "$gate_rc" = 2 ] || [ "$gate_rc" = 3 ] || [ "$gate_rc" = 64 ]; then
+if [ "$gate_rc" != 0 ]; then
   printf '%s\n' "$gate_out" >&2
+  case "$gate_rc" in
+    2|3|64) ;;
+    *) echo "completeness gate could not run (exit $gate_rc); treating that as blocking." >&2 ;;
+  esac
   echo "REFUSED: completeness gate blocked the local merge of $ID." >&2
   echo "Assert the captain's approval explicitly, e.g. FM_CAPTAIN_APPROVED=granted bin/fm-merge-local.sh $ID" >&2
   exit 1

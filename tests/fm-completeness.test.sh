@@ -99,6 +99,74 @@ else
   fail "malformed --meta key did not exit 64"
 fi
 
+# A blocked claim must name the invariant it violated from the engine's own
+# result, not from whichever key happens to be serialized next to it. This stub
+# engine emits a BLOCKED verdict with no "counterexample" key at all: the naming
+# has to survive that field being pruned.
+STUB_DIR="$TMP_ROOT/stub-engine"
+mkdir -p "$STUB_DIR"
+cp "$GATE" "$STUB_DIR/fm-completeness-check.sh"
+cat > "$STUB_DIR/fm-completeness.py" <<'PY'
+import json
+import sys
+
+sys.stdin.read()
+print(json.dumps({
+    "sat": False,
+    "reason": "[SHIP_REQUIRES_LANDED] a ship task must be landed",
+    "violated_rules": ["SHIP_REQUIRES_LANDED"],
+    "compliance": 1.0,
+    "unmet_soft": [],
+    "mode": "strict",
+}))
+sys.exit(2)
+PY
+set +e
+stub_err=$("$STUB_DIR/fm-completeness-check.sh" --kind ship --landed none --worktree holds_unlanded_work 2>&1 >/dev/null)
+stub_rc=$?
+set -e
+if [ "$stub_rc" = "2" ]; then
+  pass "a blocked verdict from an engine result without a counterexample key still exits 2"
+else
+  fail "blocked verdict without a counterexample key did not exit 2 (rc=$stub_rc)"
+fi
+case "$stub_err" in
+  *"violated: SHIP_REQUIRES_LANDED"*) pass "a blocked verdict names its violated rule without the dead counterexample key" ;;
+  *) fail "blocked verdict lost its violated-rule naming: $stub_err" ;;
+esac
+case "$stub_err" in
+  *"reason: [SHIP_REQUIRES_LANDED] a ship task must be landed"*) pass "a blocked verdict still cites the engine's reason" ;;
+  *) fail "blocked verdict lost its reason: $stub_err" ;;
+esac
+
+# Exit 0 is the gate's only proceed signal, so a caller must block on any other
+# rc - including the ones the gate itself never issues. A wrapper that is missing
+# or has lost its exec bit after a partial update yields 127/126, and reading
+# that as approval would step aside from a check that never ran.
+BROKEN_ROOT="$TMP_ROOT/broken-root"
+MERGE_HOME="$TMP_ROOT/merge-home"
+mkdir -p "$BROKEN_ROOT/bin" "$MERGE_HOME/state"
+printf 'kind=ship\nmode=local-only\nworktree=%s\nproject=%s\n' "$TMP_ROOT/wt-b" "$TMP_ROOT/proj-b" \
+  > "$MERGE_HOME/state/ship-b.meta"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$BROKEN_ROOT/bin/fm-completeness-check.sh"
+chmod 0644 "$BROKEN_ROOT/bin/fm-completeness-check.sh"
+assert_merge_local_blocks() {
+  local desc=$1 out rc
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$BROKEN_ROOT" FM_HOME="$MERGE_HOME" FM_CAPTAIN_APPROVED=granted \
+    "$ROOT/bin/fm-merge-local.sh" ship-b 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" != "0" ] || fail "$desc: fm-merge-local.sh proceeded past a gate that could not run"
+  case "$out" in
+    *"REFUSED: completeness gate blocked the local merge"*) pass "$desc" ;;
+    *) fail "$desc: the refusal did not come from the completeness gate: $out" ;;
+  esac
+}
+assert_merge_local_blocks "fm-merge-local.sh blocks when the gate script is not executable"
+rm -f "$BROKEN_ROOT/bin/fm-completeness-check.sh"
+assert_merge_local_blocks "fm-merge-local.sh blocks when the gate script is missing"
+
 # --- Solver-dependent tier ---------------------------------------------------
 
 if ! python3 -c "import z3" >/dev/null 2>&1; then
