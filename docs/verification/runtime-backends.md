@@ -711,6 +711,7 @@ App-server partial methods and raw socket experiments do not satisfy that bridge
 ## Cursor Agent CLI
 
 Verified 2026-08-04 against cursor-agent 2026.07.23-e383d2b on Linux, tmux backend.
+The herdr adapter's cursor semantics (bare `→` row, split-SGR ghost relay, and the exhausted-retry busy-queue fallback) were live-verified on herdr 2026-08-05 with the same cursor-agent build; see `docs/herdr-backend.md` and the cursor rows in `tests/fm-backend-herdr.test.sh`.
 
 **Composer and ghost-text captures (ANSI):**
 
