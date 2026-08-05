@@ -180,7 +180,16 @@ fm_composer_strip_ghost() {
                   if (code_check + 0 >= 90 && code_check + 0 <= 97) { is_deemph = 1; break }
                 }
                 if (is_deemph) {
-                  ghost_gap = 0
+                  # Compute the re-entry flags first (dim / dark-38 re-entry in
+                  # this same sequence), then decide. A de-emphasis-END-ONLY
+                  # SGR (0 / 22 / 39 / base fg, with no dim or dark-38 re-entry
+                  # in the same sequence) must NOT flush an open reverse-video
+                  # gap: herdr relays the raw split SGR sequences
+                  # (ESC[0m + ESC[2m) while tmux coalesces them (0;2m), and the
+                  # intermediate bare reset would flush the cursor cell as real
+                  # text before the dim re-entry arrives. The gap stays open
+                  # until dim/dark re-entry (drop if gap_rev), rev-off (SGR 27,
+                  # keeps text), or end-of-line / normal content (emit).
                   for (p_check = 1; p_check <= k_check; p_check++) {
                     v_check = a_check[p_check]; code_check = sgr_code(v_check)
                     if (code_check == "38" || code_check == "48" || code_check == "58") {
@@ -192,12 +201,18 @@ fm_composer_strip_ghost() {
                     }
                     if (code_check == "2") { dim_reentered = 1; break }
                   }
-                  if ((dim_reentered || dark_reentered) && gap_rev) {
-                    gap_buf = ""   # reverse-video gap content is the cursor cell, drop it
-                  } else {
-                    out = out gap_buf   # gap content is real, emit it
+                  if (!(gap_rev && !dim_reentered && !dark_reentered)) {
+                    # Not a split-sequence relay reset: flush the gap as before.
+                    ghost_gap = 0
+                    if ((dim_reentered || dark_reentered) && gap_rev) {
+                      gap_buf = ""   # reverse-video gap content is the cursor cell, drop it
+                    } else {
+                      out = out gap_buf   # gap content is real, emit it
+                    }
+                    gap_buf = ""; gap_rev = 0
                   }
-                  gap_buf = ""; gap_rev = 0
+                  # else: de-emphasis-END-ONLY SGR on a reverse-video gap
+                  # (split-sequence relay) - the gap stays open untouched.
                 }
               }
               k = split(params, a, ";")

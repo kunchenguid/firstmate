@@ -57,7 +57,28 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 REQUIRED_TOOLS=(git jq herdr tasks-axi treehouse)
-HARNESS_TOOLS=(claude codex opencode pi pi-signed grok kimi)
+HARNESS_TOOLS=(claude codex opencode pi pi-signed grok kimi cursor-agent)
+
+# Resolve a harness executable like the local spawn path does. cursor-agent is
+# the one harness whose user-local install ($HOME/.local/bin) is often absent
+# from a non-interactive login PATH, mirroring resolve_cursor_binary in
+# bin/fm-spawn.sh; every other harness resolves from PATH only.
+fm_remote_doctor_resolve_harness() {  # <name>
+  local name=$1 resolved fallback
+  resolved=$(command -v "$name" 2>/dev/null || true)
+  if [ -n "$resolved" ] && [ -x "$resolved" ]; then
+    printf '%s\n' "$resolved"
+    return 0
+  fi
+  if [ "$name" = cursor-agent ]; then
+    fallback="${HOME:-}/.local/bin/cursor-agent"
+    if [ -n "${HOME:-}" ] && [ -x "$fallback" ]; then
+      printf '%s\n' "$fallback"
+      return 0
+    fi
+  fi
+  return 1
+}
 OPTIONAL_TOOLS=(tmux no-mistakes gh)
 LAUNCH_AGENT_LABEL=dev.firstmate.herdr.fm-remote
 # The dedicated remote-secondmate session. The user's interactive Herdr work
@@ -327,8 +348,7 @@ report_required_tools() {
     fi
   done
   for harness in "${HARNESS_TOOLS[@]}"; do
-    resolved=$(command -v "$harness" 2>/dev/null || true)
-    if [ -n "$resolved" ] && [ -x "$resolved" ]; then
+    if resolved=$(fm_remote_doctor_resolve_harness "$harness"); then
       printf 'required harness=%s:%s\n' "$harness" "$resolved"
       return 0
     fi
@@ -430,8 +450,9 @@ repair_required_wrappers() {
     repair_tool_wrapper "$tool" || true
   done
   for tool in "${HARNESS_TOOLS[@]}"; do
-    resolved=$(command -v "$tool" 2>/dev/null || true)
-    [ -z "$resolved" ] || [ ! -x "$resolved" ] || return 0
+    if resolved=$(fm_remote_doctor_resolve_harness "$tool"); then
+      [ -z "$resolved" ] || [ ! -x "$resolved" ] || return 0
+    fi
   done
   for tool in "${HARNESS_TOOLS[@]}"; do
     fm_remote_job_manager_tool "${HOME:-}" "$tool" >/dev/null 2>&1 || continue

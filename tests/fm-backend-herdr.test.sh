@@ -3036,6 +3036,56 @@ test_composer_state_popup_placeholder_fill_is_pending() {
   pass "fm_backend_herdr_composer_state: a slash-command popup's argument-hint placeholder still reads pending (the incident fix)"
 }
 
+# --- composer_state: cursor bare `→` rows ----------------------------------
+# Live-verified 2026-08-05 (cursor-agent 2026.07.23-e383d2b on herdr): the
+# idle composer renders as a fully de-emphasised bare `→ Add a follow-up` row.
+# The bare-prompt regex admits `→`; the plain-row + idle-regex call shape
+# makes the ghost-only row read empty ONLY when it matches the harness idle
+# placeholder, so a dimmed bare `→` row carrying anything else stays unknown
+# (a dead-shell prompt is never an injection target) and real typed text
+# stays pending.
+
+test_composer_state_cursor_idle_placeholder_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-cursor-idle"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Bare cursor idle row: → Add a follow-up (plain capture; the styled form
+  # is exercised by the ghost-strip fixtures in fm-composer-ghost.test.sh).
+  printf '  → Add a follow-up\n\n  ctrl+c to stop\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_COMPOSER_IDLE_RE='^Add a follow-up$' \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "cursor idle '→ Add a follow-up' should read empty, got '$out'"
+  pass "fm_backend_herdr_composer_state: cursor idle placeholder reads empty via the idle regex"
+}
+
+test_composer_state_cursor_dimmed_bare_row_stays_unknown() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-cursor-unknown"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # A fully de-emphasised bare `→ anything else` row (a dimmed dead-shell
+  # prompt shape) must stay unknown, never an injection target, even though
+  # `→` is now a recognized agent glyph. The row is SGR-2 dim, so the ghost
+  # stripper empties the content and the plain-content idle-regex gate is
+  # what the verdict hangs on.
+  printf '  \033[2m→ something else\033[0m\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_COMPOSER_IDLE_RE='^Add a follow-up$' \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = unknown ] || fail "a dimmed bare '→ something else' row must stay unknown, got '$out'"
+  pass "fm_backend_herdr_composer_state: a dimmed bare → row without the idle placeholder stays unknown"
+}
+
+test_composer_state_cursor_real_text_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-cursor-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Real typed cursor text (pre-submit) reads pending: → Reply with exactly...
+  printf '  → Reply with exactly: pong\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_COMPOSER_IDLE_RE='^Add a follow-up$' \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "real typed cursor text should read pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: real typed cursor text reads pending"
+}
+
 test_composer_state_unknown_on_capture_failure() {
   local dir log resp fb out status
   dir="$TMP_ROOT/composer-capture-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -4318,6 +4368,9 @@ test_composer_state_bare_prompt_is_empty
 test_composer_state_ghost_placeholder_is_empty
 test_composer_state_real_text_is_pending
 test_composer_state_popup_placeholder_fill_is_pending
+test_composer_state_cursor_idle_placeholder_is_empty
+test_composer_state_cursor_dimmed_bare_row_stays_unknown
+test_composer_state_cursor_real_text_is_pending
 test_composer_state_unknown_on_capture_failure
 test_composer_state_unknown_when_no_composer_row_found
 test_composer_state_pi_separator_idle_is_empty
@@ -4352,6 +4405,83 @@ test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmat
 test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter
 test_send_text_submit_send_failed
 test_send_text_submit_unknown_on_capture_failure
+
+# Busy-queued Enter fallback (opencode 1.18.4, cursor-agent - live-verified on
+# herdr 2026-08-05): when the Enter-retry budget is exhausted with the
+# composer still reading pending, a native busy verdict for opencode/cursor
+# means the Enter was accepted and queued, so the submit reports empty
+# (delivered) instead of a false pending failure.
+test_send_text_submit_busy_queued_fallback_empty_for_cursor() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-busy-queued-cursor"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # 1: send-text  2: baseline agent get -> idle  3: send-keys enter
+  # 4,5: wait_for_working agent gets -> idle (never working)
+  # 6: agent identity get -> cursor  7: busy_state agent get -> working
+  printf '{"result":{"agent":{"agent_status":"idle"}}}
+' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}
+' > "$resp/4.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}
+' > "$resp/5.out"
+  printf '{"result":{"agent":{"agent":"cursor","agent_status":"working"}}}
+' > "$resp/6.out"
+  printf '{"result":{"agent":{"agent":"cursor","agent_status":"working"}}}
+' > "$resp/7.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=2 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "Reply with exactly: pong" 1 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "a queued Enter on a busy cursor pane must report empty (delivered), got '$out'"
+  pass "fm_backend_herdr_send_text_submit: exhausted-retry pending + native busy for cursor reports empty (Enter queued)"
+}
+
+test_send_text_submit_busy_queued_fallback_keeps_pending_when_idle() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-busy-queued-idle"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Same shape but the native busy_state reads idle: a genuine swallow on an
+  # idle pane keeps pending.
+  printf '{"result":{"agent":{"agent_status":"idle"}}}
+' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}
+' > "$resp/4.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}
+' > "$resp/5.out"
+  printf '{"result":{"agent":{"agent":"cursor","agent_status":"idle"}}}
+' > "$resp/6.out"
+  printf '{"result":{"agent":{"agent":"cursor","agent_status":"idle"}}}
+' > "$resp/7.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=2 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "Reply with exactly: pong" 1 0.01 0.01' "$ROOT" )
+  [ "$out" = pending ] || fail "an idle native state after exhausted retries must keep pending (genuine swallow), got '$out'"
+  pass "fm_backend_herdr_send_text_submit: exhausted-retry pending + native idle keeps pending"
+}
+
+test_send_text_submit_busy_queued_fallback_not_applied_to_other_harnesses() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-busy-queued-other"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # A non-opencode/cursor harness (claude) on the exhausted-retry path keeps
+  # pending even when native state is busy - the queue semantics are not
+  # verified for it.
+  printf '{"result":{"agent":{"agent_status":"idle"}}}
+' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}
+' > "$resp/4.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}
+' > "$resp/5.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}
+' > "$resp/6.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}
+' > "$resp/7.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=2 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 1 0.01 0.01' "$ROOT" )
+  [ "$out" = pending ] || fail "the busy-queue fallback must stay scoped to opencode/cursor, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: the busy-queue fallback stays scoped to opencode and cursor"
+}
+
+test_send_text_submit_busy_queued_fallback_empty_for_cursor
+test_send_text_submit_busy_queued_fallback_keeps_pending_when_idle
+test_send_text_submit_busy_queued_fallback_not_applied_to_other_harnesses
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
 test_dispatch_composer_state_routes_by_backend

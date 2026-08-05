@@ -2687,8 +2687,9 @@ FM_BACKEND_HERDR_COMPOSER_LINES=${FM_BACKEND_HERDR_COMPOSER_LINES:-20}
 # herdr-verified harness needs its own idle placeholder recognized.
 FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 # Known bare (unbordered) prompt glyphs a composer row may start with: ❯
-# (claude) and › (codex) only. Generic shell-style glyphs > $ % # are still
-# recognized after a bordered composer row has already been structurally found.
+# (claude), › (codex), and → (cursor-agent, live-verified on herdr 2026-08-05).
+# Generic shell-style glyphs > $ % # are still recognized after a bordered
+# composer row has already been structurally found.
 # Deliberately an alternation, not a `[...]` bracket expression: under a C/POSIX
 # locale (LC_CTYPE=C, the fleet default), grep's bracket expressions match
 # individual BYTES rather than whole multibyte characters, so `[❯›]` silently
@@ -2697,7 +2698,7 @@ FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 # misclassifying a bordered composer's bottom border row as the bare shape.
 # An alternation's branches are matched as whole literal byte sequences and
 # stay correct regardless of locale.
-FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^(❯|›)'}
+FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^(❯|›|→)'}
 # Pi allows a multi-line composer between its horizontal separators. Bound the
 # structural candidate so two unrelated transcript rules with an arbitrarily
 # large region between them can never be promoted into a composer.
@@ -2765,7 +2766,7 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
 }
 
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
+  local target=$1 session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped plain_row=""
   local identity agent agent_status row=0 generic_line=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   session=$FM_BACKEND_HERDR_SESSION
@@ -2786,6 +2787,7 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
       '│'*'│'|'┃'*'┃'|'|'*'|')
         shape=bordered
         raw_match=$line
+        plain_row=$trimmed
         generic_line=$row
         found=1
         ;;
@@ -2793,6 +2795,7 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
         if printf '%s' "$trimmed" | grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE"; then
           shape=bare
           raw_match=$line
+          plain_row=$trimmed
           generic_line=$row
           found=1
         fi
@@ -2853,6 +2856,11 @@ EOF
     stripped=${stripped//|/}
     stripped="${stripped#"${stripped%%[![:space:]]*}"}"
     stripped="${stripped%"${stripped##*[![:space:]]}"}"
+    plain_row=${plain_row//│/}
+    plain_row=${plain_row//┃/}
+    plain_row=${plain_row//|/}
+    plain_row="${plain_row#"${plain_row%%[![:space:]]*}"}"
+    plain_row="${plain_row%"${plain_row##*[![:space:]]}"}"
   elif [ "$shape" = separated ]; then
     # The native Pi identity plus the complete separator pair is the genuine
     # composer container, equivalent to a bordered box for shared content
@@ -2861,9 +2869,18 @@ EOF
   fi
   # Delegate the empty/pending/unknown decision to the shared owner. The bare
   # shape only ever starts with an AGENT glyph (FM_BACKEND_HERDR_BARE_PROMPT_RE
-  # is '^(❯|›)'), so a bare shell prompt never reaches here - it stays 'unknown'
+  # is '^(❯|›|→)'), so a bare shell prompt never reaches here - it stays 'unknown'
   # via the no-composer-row path above, exactly as before.
-  fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
+  # The plain (ANSI-stripped, border-stripped, trimmed) form of the winning row
+  # is passed as plain_content so the shared classifier can distinguish a
+  # ghost-only row whose placeholder matches the harness idle regex (cursor's
+  # '→ Add a follow-up', exported as FM_COMPOSER_IDLE_RE by fm-send and the
+  # away-mode daemon) from any other fully de-emphasised bare row, which must
+  # stay unknown (a dimmed dead-shell prompt is never an injection target).
+  # The idle regex honors FM_COMPOSER_IDLE_RE first (per-harness cursor
+  # default) and falls back to this backend's placeholder regex.
+  fm_composer_classify_content "$bordered" "$stripped" \
+    "${FM_COMPOSER_IDLE_RE:-$FM_BACKEND_HERDR_IDLE_RE}" insensitive "$plain_row"
 }
 
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,
@@ -2929,6 +2946,7 @@ EOF
 # literally "the composer read empty".
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
+  local queue_harness queue_identity
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
@@ -2950,8 +2968,29 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       unknown) printf 'unknown'; return 0 ;;
     esac
     i=$((i + 1))
-    [ "$i" -lt "$retries" ] || { printf 'pending'; return 0; }
+    [ "$i" -lt "$retries" ] || break
   done
+  # Retries exhausted with the composer still reading pending. opencode and
+  # cursor accept the Enter while mid-turn and QUEUE the message for the
+  # current turn's end without clearing the composer (opencode 1.18.4,
+  # cursor-agent 2026.07.23-e383d2b - both verified live on herdr, see
+  # docs/herdr-backend.md). Herdr's native agent state is the reliable signal
+  # here: a native busy verdict means the Enter was accepted and queued, so
+  # report empty (confirmed delivered) instead of a false pending failure.
+  # Any other state keeps pending - a genuine swallow on an idle pane.
+  queue_identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true)
+  queue_harness=${queue_identity%%$'\t'*}
+  case "$queue_harness" in
+    opencode|cursor)
+      if [ "$(fm_backend_herdr_busy_state "$target")" = busy ]; then
+        printf 'empty'
+      else
+        printf 'pending'
+      fi
+      ;;
+    *) printf 'pending' ;;
+  esac
+  return 0
 }
 
 # fm_backend_herdr_kill: remove the task's pane, best-effort (mirrors

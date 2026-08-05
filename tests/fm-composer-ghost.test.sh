@@ -647,6 +647,24 @@ test_cursor_reverse_video_ghost_cell_is_stripped() {
   pass "fm_composer_strip_ghost: cursor reverse-video ghost cell is stripped"
 }
 
+test_cursor_reverse_video_ghost_cell_split_sgr_is_stripped() {
+  local result styled
+  # The SAME cursor-agent idle composer captured through herdr's raw relay:
+  # herdr transmits the app's split SGR sequences (ESC[0m + ESC[7m,
+  # ESC[0m + ESC[2m) where tmux coalesces them (0;7m / 0;2m). The shared
+  # ghost-gap logic must keep the reverse-video gap open across the bare
+  # reset so the cursor cell 'A' drops identically on both transports.
+  # The fixture (exact herdr bytes, live-verified 2026-08-05):
+  #   reset bg(48;2;21;21;21) space reset dim(2) bg →
+  #   reset rev(7) bg A space reset dim(2) bg dd a follow-up space reset
+  styled=$(printf '\033[0m\033[48;2;21;21;21m \033[0m\033[2m\033[48;2;21;21;21m\xe2\x86\x92 \033[0m\033[7m\033[48;2;21;21;21mA \033[0m\033[2m\033[48;2;21;21;21mdd a follow-up \033[0m')
+  result=$(printf '%s' "$styled" | "$ROOT/bin/fm-composer-lib.sh" 2>/dev/null; fm_composer_strip_ghost <<< "$styled")
+  case "$result" in
+    *A*) fail "cursor reverse-video ghost cell 'A' survived strip on split-SGR relay: result='$result'" ;;
+  esac
+  pass "fm_composer_strip_ghost: cursor reverse-video ghost cell is stripped on herdr's split-SGR relay"
+}
+
 test_rev_off_inside_gap_keeps_real_text() {
   local result styled
   # SGR 27 (reverse-video off) ends the reverse-video marking of a ghost gap:
@@ -762,6 +780,7 @@ test_non_bordered_composer_uses_compatibility_fallback
 test_non_bordered_interior_edges_are_pending
 test_peek_output_is_escape_free
 test_cursor_reverse_video_ghost_cell_is_stripped
+test_cursor_reverse_video_ghost_cell_split_sgr_is_stripped
 test_rev_off_inside_gap_keeps_real_text
 test_real_text_between_dim_runs_survives
 test_dark_truecolor_ghost_after_dim_ghost_strips_empty
