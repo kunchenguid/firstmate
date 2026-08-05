@@ -23,6 +23,13 @@ For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` 
 Scout teardown calls the script's read-only `verify` subcommand after checking for the report and before removing any source state.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
+Both subcommands share one durability lookup, which reads the live backlog first and falls back to `data/done-archive.md` only when the identity is absent there.
+That secondary read exists because tasks-axi Done retention prunes older resolved records out of the live backlog, which previously made a correctly filed and correctly resolved decision indistinguishable from one that was never filed.
+The fallback is read-only, never restores a record into the backlog, and satisfies the gate only for an archived record that is marked done, is kind `captain`, and still carries the durable resolution record.
+An identity absent from both sources, an archived record that is not resolved, and a missing, unreadable, or malformed archive all keep the same refusal.
+The refusal now names what it actually found rather than reporting every case as absence: a decision that was never filed, one that is archived without a durable resolution record, and an archive that could not be read are reported distinctly, because only the first two are facts the gate can establish.
+`resolve` uses the same archived record to stay idempotent for an exact retry that straddles retention, and still rejects a changed decision or routed-task set.
+
 The `resolve` subcommand requires a decision file and at least one existing dependent task whose structured `blocked-by` edge points to the hold.
 It records the decision digest and routed task identities as a retry identity in the hold body, clears each dependency edge through tasks-axi, and marks the hold Done only after those writes succeed.
 An exact retry can finish a partial routing operation, while a changed decision or routed-task set is rejected.
@@ -43,6 +50,7 @@ The projection remains read-only and does not inspect historical prose.
 Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
+Archived resolved decision lookup verification date: 2026-08-05.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
@@ -88,4 +96,32 @@ $ git diff --check
 
 $ for test_script in tests/*.test.sh; do bash "$test_script"; done
 ALL 71 TEST SCRIPTS PASSED
+```
+
+### Archived resolved decision lookup
+
+Verification date: 2026-08-05, against tasks-axi 0.2.3.
+
+The two added cases use only synthetic `sample` identities.
+The first drives a real hold through completion and resolution, then archives it with `tasks-axi prune --keep 0 --state done` so the resolved record leaves the live backlog exactly as Done retention leaves it.
+The second exercises every archive shape that must not satisfy the gate: absent from both sources, unreadable, malformed, archived but not marked done, archived and done without a durable resolution record, a non-`captain` identity, a longer id that merely shares the prefix, and a neighbouring record whose resolution must not leak across the entry boundary.
+It also asserts that an unreadable archive is never reported as a decision that was never filed.
+Both cases fail against the pre-change script, the first with the reported `is absent from .../data/backlog.md` refusal.
+
+```text
+$ bash tests/fm-decision-hold-lifecycle.test.sh
+ok - report-only unresolved decision is reproduced and completion refuses before loss
+ok - non-forced scout teardown always requires durable inventory verification
+ok - an archived resolved captain decision satisfies the completion gate
+ok - only a genuinely resolved archived captain decision satisfies the gate
+ok - captain holds are idempotent, distinct, teardown-safe, Bearings-visible, and durably routed before close
+ok - completion and verification validate origins before constructing paths
+ok - ended visual review follows the same decision-hold completion owner
+ok - resolved findings and decision-like prose do not create false holds
+ok - terminal single-owner stale status decisions do not block empty inventory
+ok - main-home and secondmate-home captain holds remain correctly routed
+ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
+
+$ bin/fm-lint.sh
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
 ```

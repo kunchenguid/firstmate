@@ -33,6 +33,15 @@
 # `verify` is read-only and is called by scout teardown so teardown cannot erase a
 # source before this gate has succeeded.
 #
+# A decision identity is looked up in the live backlog first and, only when it is
+# absent there, in data/done-archive.md, where tasks-axi Done retention prunes older
+# resolved records. That secondary lookup is read-only and never restores a record.
+# It satisfies the gate only for an archived record that is marked done, is kind
+# captain, and still carries the durable resolution record. An identity absent from
+# both sources, an archived record that is not resolved, and a missing, unreadable,
+# or malformed archive all keep today's refusal, and the refusal now names what it
+# actually found rather than reporting every case as absence.
+#
 # `resolve` requires every --routed-to task to exist and to be blocked by the hold.
 # It writes the captain decision and routed identities into the hold body, clears
 # those dependency edges, and only then marks the hold Done. A failure before the
@@ -44,6 +53,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+ARCHIVE="$DATA/done-archive.md"
 
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
@@ -157,6 +167,67 @@ origin_open_decisions() {  # <origin-id>
   printf '%s' "$open"
 }
 
+# tasks-axi Done retention prunes older resolved records out of the live backlog
+# into the archive, so a genuinely resolved captain decision stops being visible to
+# `tasks-axi show`. These two helpers are the read-only secondary lookup for that
+# case. They never write to the archive and never restore a record from it.
+archive_record() {  # <hold-id> - prints the most recent archived record and its body
+  [ -f "$ARCHIVE" ] && [ -r "$ARCHIVE" ] || return 1
+  awk -v id="$1" '
+    /^- \[[ x]\] / {
+      rest = $0
+      sub(/^- \[[ x]\] /, "", rest)
+      space = index(rest, " ")
+      entry = (space > 0 ? substr(rest, 1, space - 1) : rest)
+      if (entry == id) { keep = 1; body = $0 "\n" } else { keep = 0 }
+      next
+    }
+    /^## / { keep = 0; next }
+    /^- / { keep = 0; next }
+    keep { body = body $0 "\n" }
+    END { printf "%s", body }
+  ' "$ARCHIVE" 2>/dev/null || return 1
+}
+
+# Prints `resolved` only for an archived record that is genuinely a closed captain
+# decision: marked done, kind captain, and still carrying the durable resolution
+# record that `resolve` writes before it closes a hold. Every other outcome - a
+# record that was never filed, a record that is not done, an identity that is not a
+# captain decision, a missing or unreadable archive, and malformed content - prints
+# something else, so the caller keeps refusing exactly as it does today.
+# `unreadable` is reported separately because an archive that cannot be read is the
+# one case where absence from the live backlog does not prove the decision was never
+# filed, and the refusal must not claim more than it checked.
+archive_hold_status() {  # <hold-id> - prints resolved | unresolved | unreadable | absent
+  local record='' entry_line
+  if [ -e "$ARCHIVE" ] && [ ! -r "$ARCHIVE" ]; then
+    printf 'unreadable\n'
+    return 0
+  fi
+  record=$(archive_record "$1") || true
+  if [ -z "$record" ]; then
+    printf 'absent\n'
+    return 0
+  fi
+  entry_line=${record%%$'\n'*}
+  case "$entry_line" in
+    '- [x] '*) : ;;
+    *) printf 'unresolved\n'; return 0 ;;
+  esac
+  case "$entry_line" in
+    *'(kind: captain)'*) : ;;
+    *) printf 'unresolved\n'; return 0 ;;
+  esac
+  case "$record" in
+    *"Resolution recorded by fm-decision-hold."*"Routed work:"*) printf 'resolved\n' ;;
+    *) printf 'unresolved\n' ;;
+  esac
+}
+
+archive_record_field() {  # <record> <label>
+  printf '%s\n' "$1" | sed -n "s/^[[:space:]]*$2: //p" | head -1
+}
+
 verify_hold_active() {  # <hold-id>
   local id=$1 show state held kind hold_kind
   show=$(task_show "$id") || fail "captain hold $id is absent from $FM_HOME/data/backlog.md"
@@ -185,8 +256,16 @@ verify_hold_resolved() {  # <hold-id>
 }
 
 verify_hold_durable() {  # <hold-id>
-  local id=$1 show state held kind hold_kind body
-  show=$(task_show "$id") || fail "captain decision $id is absent from $FM_HOME/data/backlog.md"
+  local id=$1 show state held kind hold_kind body archived
+  if ! show=$(task_show "$id"); then
+    archived=$(archive_hold_status "$id")
+    [ "$archived" != resolved ] || return 0
+    [ "$archived" != unresolved ] \
+      || fail "captain decision $id is archived in $ARCHIVE without a durable resolution record"
+    [ "$archived" != unreadable ] \
+      || fail "captain decision $id is absent from $DATA/backlog.md and $ARCHIVE could not be read"
+    fail "captain decision $id was never filed: it is absent from both $DATA/backlog.md and $ARCHIVE"
+  fi
   state=$(show_field "$show" state)
   held=$(show_field "$show" held)
   kind=$(show_field "$show" kind)
@@ -368,7 +447,7 @@ EOF
 }
 
 command_resolve() {
-  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0
+  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body archived_record resolution_recorded=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -397,6 +476,18 @@ command_resolve() {
     hold_show=$(task_show "$id")
     hold_body=$(show_field "$hold_show" body)
     verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
+    printf 'resolved: %s\n' "$id"
+    return 0
+  fi
+  # Done retention can prune an already resolved hold out of the live backlog
+  # between the original resolve and an exact retry. Confirm the archived record
+  # carries this same decision and routed work before reporting it resolved.
+  if [ "$(archive_hold_status "$id")" = resolved ]; then
+    archived_record=$(archive_record "$id")
+    [ "$(archive_record_field "$archived_record" 'Decision digest')" = "$decision_digest" ] \
+      || fail "archived captain decision $id records a different captain decision"
+    [ "$(archive_record_field "$archived_record" 'Routed identities')" = "$routed_csv" ] \
+      || fail "archived captain decision $id records different routed work"
     printf 'resolved: %s\n' "$id"
     return 0
   fi

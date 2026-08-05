@@ -550,9 +550,194 @@ test_resolve_matches_quoted_blocked_by_edges() {
   pass "resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id"
 }
 
+# Reproduces the live portfolio-dashboard-visual-calibration shape: a correctly
+# filed and correctly resolved captain decision that tasks-axi Done retention has
+# pruned out of the live backlog. The gate used to see only data/backlog.md, report
+# the decision absent, and refuse completion and teardown for finished work.
+test_archived_resolved_decision_satisfies_the_gate() {
+  local home origin hold out
+  home=$(make_home archived-resolved-decision)
+  origin=sample-retention-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Investigate sample retention" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create retention-review origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report and visual review complete\n' > "$home/state/$origin.status"
+  printf '# Sample retention review\n\nOne captain choice was made several rounds ago.\n' \
+    > "$home/data/$origin/report.md"
+
+  hold=$(run_decisions "$home" hold "$origin" anchors \
+    --title "Choose the sample evidence anchors" --reason "captain anchor choice pending" --repo sample) \
+    || fail "could not register the retention hold"
+  run_decisions "$home" complete "$origin" anchors >/dev/null \
+    || fail "completion failed while the hold was still live"
+  tasks_in "$home" add sample-anchor-followup "Apply the selected sample anchors" \
+    --kind ship --repo sample --blocked-by "$hold" >/dev/null \
+    || fail "could not create dependent work fixture"
+  printf 'Use the clean sample anchors.\n' > "$home/anchor-decision.txt"
+  run_decisions "$home" resolve "$origin" anchors --decision-file "$home/anchor-decision.txt" \
+    --routed-to sample-anchor-followup >/dev/null \
+    || fail "could not resolve the retention hold"
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "verification failed while the resolved hold was still in the live backlog"
+
+  # Done retention prunes the resolved record out of the live backlog.
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null || fail "could not archive the resolved hold"
+  assert_no_grep "$hold" "$home/data/backlog.md" "retention fixture left the hold in the live backlog"
+  assert_grep "- [x] $hold" "$home/data/done-archive.md" "retention fixture did not archive the resolved hold"
+
+  run_decisions "$home" verify "$origin" > "$home/archived-verify.out" 2> "$home/archived-verify.err" \
+    || fail "gate refused an archived resolved decision: $(cat "$home/archived-verify.err")"
+  run_decisions "$home" complete "$origin" anchors >/dev/null \
+    || fail "completion refused an archived resolved decision"
+  run_teardown "$home" "$origin" >/dev/null 2> "$home/archived-teardown.err" \
+    || fail "teardown refused finished work whose decision was archived: $(cat "$home/archived-teardown.err")"
+
+  # The archive is evidence, never a source to write back to or restore from.
+  assert_no_grep "$hold" "$home/data/backlog.md" "the gate restored an archived record into the live backlog"
+
+  # An exact resolve retry that straddles retention stays idempotent, and a
+  # different decision or routed set is still rejected against the archived record.
+  run_decisions "$home" resolve "$origin" anchors --decision-file "$home/anchor-decision.txt" \
+    --routed-to sample-anchor-followup >/dev/null \
+    || fail "exact resolve retry failed once the hold was archived"
+  printf 'Use different sample anchors.\n' > "$home/changed-anchor-decision.txt"
+  if run_decisions "$home" resolve "$origin" anchors --decision-file "$home/changed-anchor-decision.txt" \
+    --routed-to sample-anchor-followup > "$home/archived-drift.out" 2> "$home/archived-drift.err"; then
+    fail "resolve retry accepted a different captain decision against the archived record"
+  fi
+  tasks_in "$home" add sample-anchor-extra "Extra sample anchor work" --kind ship --repo sample >/dev/null
+  if run_decisions "$home" resolve "$origin" anchors --decision-file "$home/anchor-decision.txt" \
+    --routed-to sample-anchor-followup --routed-to sample-anchor-extra \
+    > "$home/archived-routes.out" 2> "$home/archived-routes.err"; then
+    fail "resolve retry accepted a different routed task set against the archived record"
+  fi
+
+  out=$(cat "$home/archived-verify.out")
+  assert_contains "$out" "verified: $origin" "archived-decision verification lost its summary"
+  pass "an archived resolved captain decision satisfies the completion gate"
+}
+
+# The safety property the archive lookup must not weaken: only a genuinely resolved
+# archived record counts. Every other archive shape keeps today's refusal.
+test_archive_lookup_refuses_every_unresolved_shape() {
+  local home origin hold err
+  home=$(make_home archive-refusals)
+  origin=sample-refusal-review
+  mkdir -p "$home/data/$origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Sample refusal review\n\nSynthetic archive shapes.\n' > "$home/data/$origin/report.md"
+  hold="$origin-decision-choice"
+  printf 'decisions_reviewed=1\ndecision_keys=choice\n' >> "$home/state/$origin.meta"
+
+  # 1. Absent from both sources: never filed at all. The refusal must say so.
+  assert_absent "$home/data/done-archive.md" "fixture must start with no archive"
+  if run_decisions "$home" verify "$origin" > "$home/no-archive.out" 2> "$home/no-archive.err"; then
+    fail "a never-filed decision passed with no archive present"
+  fi
+  assert_grep "was never filed" "$home/no-archive.err" \
+    "a missing archive must still report the decision as never filed"
+
+  # 2. An unreadable archive must refuse without crashing, and must not claim the
+  #    decision was never filed - that is the one case the gate cannot rule out.
+  printf '## Archived 2026-08-05\n- [x] %s - Choice (repo: sample) (kind: captain) (done 2026-08-05)\n  Resolution recorded by fm-decision-hold.\n  Routed work:- dep\n' \
+    "$hold" > "$home/data/done-archive.md"
+  chmod 000 "$home/data/done-archive.md"
+  if [ -r "$home/data/done-archive.md" ]; then
+    chmod 644 "$home/data/done-archive.md"
+  else
+    if run_decisions "$home" verify "$origin" > "$home/unreadable.out" 2> "$home/unreadable.err"; then
+      fail "an unreadable archive satisfied the gate"
+    fi
+    assert_grep "could not be read" "$home/unreadable.err" "an unreadable archive must refuse, not crash"
+    assert_no_grep "was never filed" "$home/unreadable.err" \
+      "an unreadable archive must not be reported as a decision that was never filed"
+    chmod 644 "$home/data/done-archive.md"
+  fi
+
+  # 3. Malformed archive content refuses exactly as an absent record does.
+  printf 'not a backlog file at all\n\x00\n- [x\n## \n' > "$home/data/done-archive.md"
+  if run_decisions "$home" verify "$origin" > "$home/malformed.out" 2> "$home/malformed.err"; then
+    fail "a malformed archive satisfied the gate"
+  fi
+  assert_grep "was never filed" "$home/malformed.err" "a malformed archive must refuse, not crash"
+
+  # 4. Archived but not marked done: the record exists and is not resolved.
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-08-05
+- [ ] $hold - Choice (repo: sample) (kind: captain)
+  Resolution recorded by fm-decision-hold.
+  Routed work:- sample-dep
+EOF
+  if run_decisions "$home" verify "$origin" > "$home/not-done.out" 2> "$home/not-done.err"; then
+    fail "an archived record that is not marked done satisfied the gate"
+  fi
+  assert_grep "without a durable resolution record" "$home/not-done.err" \
+    "an unresolved archived record must be named as archived, not as never filed"
+
+  # 5. Archived and done, but with no durable resolution record.
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-08-05
+- [x] $hold - Choice (repo: sample) (kind: captain) (done 2026-08-05)
+  Origin: $origin
+  State: awaiting captain decision.
+EOF
+  if run_decisions "$home" verify "$origin" > "$home/no-record.out" 2> "$home/no-record.err"; then
+    fail "an archived record without a resolution record satisfied the gate"
+  fi
+  assert_grep "without a durable resolution record" "$home/no-record.err" \
+    "an archived record missing its resolution record must refuse"
+
+  # 6. Archived, done, resolved-looking, but not a captain identity.
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-08-05
+- [x] $hold - Choice (repo: sample) (kind: ship) (done 2026-08-05)
+  Resolution recorded by fm-decision-hold.
+  Routed work:- sample-dep
+EOF
+  if run_decisions "$home" verify "$origin" > "$home/wrong-kind.out" 2> "$home/wrong-kind.err"; then
+    fail "an archived non-captain identity satisfied the captain-decision gate"
+  fi
+
+  # 7. A longer archived id that merely shares this identity's prefix must not
+  #    satisfy the gate for the shorter key.
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-08-05
+- [x] ${hold}-extended - Extended choice (repo: sample) (kind: captain) (done 2026-08-05)
+  Resolution recorded by fm-decision-hold.
+  Routed work:- sample-dep
+EOF
+  if run_decisions "$home" verify "$origin" > "$home/prefix.out" 2> "$home/prefix.err"; then
+    fail "a prefix-colliding archived id satisfied the gate for a different decision"
+  fi
+  assert_grep "was never filed" "$home/prefix.err" \
+    "a prefix-colliding archived id must count as never filed for this decision"
+
+  # 8. The body of a neighbouring archived record must not leak into this one.
+  cat > "$home/data/done-archive.md" <<EOF
+## Archived 2026-08-05
+- [x] $hold - Choice (repo: sample) (kind: captain) (done 2026-08-05)
+  Origin: $origin
+  State: awaiting captain decision.
+- [x] sample-other-decision - Other (repo: sample) (kind: captain) (done 2026-08-05)
+  Resolution recorded by fm-decision-hold.
+  Routed work:- sample-dep
+EOF
+  if run_decisions "$home" verify "$origin" > "$home/leak.out" 2> "$home/leak.err"; then
+    fail "a neighbouring archived record's resolution satisfied this decision"
+  fi
+
+  err=$(cat "$home/leak.err")
+  assert_contains "$err" "$hold" "refusal must name the decision identity it checked"
+  pass "only a genuinely resolved archived captain decision satisfies the gate"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
+test_archived_resolved_decision_satisfies_the_gate
+test_archive_lookup_refuses_every_unresolved_shape
 test_structured_holds_survive_teardown_and_route_resolution
 test_origin_slug_validation_precedes_path_construction
 test_visual_review_uses_shared_completion_owner
