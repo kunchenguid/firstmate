@@ -81,18 +81,18 @@ Two verified facts worth pinning here.
 The subagent tool presents to the model as `Agent`, and on Claude Code 2.1.217 both `Agent` and `Task` work as `permissions.deny` keys, verified by an A/B with a nonsense-name control.
 `permissions.allow` is a pre-approval list rather than an availability list, so there is no fail-closed positive allowlist.
 
-## Primary session-start nudge
+## Primary session start
 
-AGENTS.md section 3 remains the behavioral owner for session start, while tracked native adapters invoke `bin/fm-sessionstart-nudge.sh` as an idempotent enforcement layer.
-The wrapper prints one canonically typed `session-start` instruction to run `bin/fm-session-start.sh`; it never runs the digest, wake drain, bootstrap sweeps, lock, or supervision arm itself.
-Full mechanics, scoping, and fail-open behavior live in `docs/sessionstart-nudge.md`.
+AGENTS.md section 3 remains the behavioral owner for session start, while tracked native adapters enforce it idempotently at session open through one of two tiers.
+Run-tier adapters invoke `bin/fm-sessionstart-run.sh`, which executes `bin/fm-session-start.sh` so the digest is in model context before the first turn; nudge-tier adapters invoke `bin/fm-sessionstart-nudge.sh`, which only prints one canonically typed `session-start` instruction and never runs the digest, wake drain, bootstrap sweeps, lock, or supervision arm itself.
+Tier assignment, source routing, the runtime bound, and fail-open behavior live in `docs/sessionstart-nudge.md`.
 `docs/verification/supervision.md` "Native session-start delivery" owns active dated commands, payloads, and evidence.
 
-- `claude`: verified native `SessionStart` stdout injection; `.claude/settings.json` matches `startup`, `resume`, and `clear`, but not `compact`.
-- `codex`: verified on 0.144.4; `.codex/hooks.json` receives `source=startup`, and wrapper stdout reaches model context.
-- `opencode`: verified on 1.17.18; `session.created` plus `client.session.promptAsync` starts the nudge turn in the TUI, while `opencode run` remains fail-open headless.
-- `pi` and `pi-signed`: verified native `session_start`; the existing primary extension handles `startup`, `new`, and `resume` and uses `pi.sendMessage` to inject context without racing a positional launch prompt.
-- `grok`: the 0.2.103 project `SessionStart` event fires with `source=new`, but stdout does not reach model context; the tracked project hook remains fail-open, and a global token-guarded fallback requires a captain decision.
+- `claude`: run tier; verified native `SessionStart` stdout injection, with one unmatched hook whose payload `source` drives the routing.
+- `codex`: run tier; the `SessionStart` payload carries the same `startup|resume|clear|compact` `source` vocabulary as Claude, and wrapper stdout reaches model context.
+- `opencode`: nudge tier; verified on 1.17.18, `session.created` plus `client.session.promptAsync` starts the nudge turn in the TUI, while `opencode run` can exit before that turn, which is also why it cannot run the digest in the hook.
+- `pi` and `pi-signed`: run tier; the primary extension maps `session_start` reasons `startup`, `new`, `resume`, and `fork` onto wrapper sources, handles `session_compact`, and uses `pi.sendMessage` to inject context without racing a positional launch prompt; because that is a message rather than hook stdout, the extension gives an unencoded digest `session-start` operational provenance first.
+- `grok`: nudge tier; the 0.2.103 project `SessionStart` event fires with `source=new`, but stdout does not reach model context, so it cannot run the digest either; the tracked project hook remains fail-open, and a global token-guarded fallback requires a captain decision.
 
 ## Primary watcher supervision
 

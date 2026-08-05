@@ -2,7 +2,7 @@
 
 This is the authoritative current contract for the "no turn ends blind" primary backstop referenced from AGENTS.md section 8.
 The predicate lives in `bin/fm-turnend-guard.sh`.
-Primary scope lives in `bin/fm-primary-scope-lib.sh`, shared with the native session-start nudge in [`sessionstart-nudge.md`](sessionstart-nudge.md).
+Primary scope lives in `bin/fm-primary-scope-lib.sh`, shared with the native session-start adapters in [`sessionstart-nudge.md`](sessionstart-nudge.md).
 Harness hook files adapt each enabled primary harness integration's turn-end mechanism to that shared predicate.
 
 Related PreToolUse guards deny unsafe commands before execution rather than detecting a blind turn end afterward.

@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# Behavior and tracked-registration tests for the native session-start nudge.
+# Behavior tests for both native session-open tiers: the nudge wrapper that
+# only asks the agent to take the helm, and the run wrapper that takes it.
+#
+# The run-wrapper cases drive the REAL bin/fm-session-start.sh against a
+# throwaway home, so they prove routing by the digest that actually appears,
+# not by inspecting the wrapper's source. docs/sessionstart-nudge.md owns the
+# tier assignment and the source table these pin.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -9,6 +15,7 @@ unset NO_MISTAKES_GATE
 
 TMP_ROOT=$(fm_test_tmproot fm-sessionstart-nudge)
 NUDGE="$ROOT/bin/fm-sessionstart-nudge.sh"
+RUN="$ROOT/bin/fm-sessionstart-run.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-operational-input.sh"
 NUDGE_TEXT="Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions."
@@ -148,6 +155,133 @@ EOF
   pass "OpenCode session.created delivers the exact wrapper nudge once per session"
 }
 
+# --- run tier ----------------------------------------------------------------
+#
+# make_run_primary builds a primary the run wrapper accepts and the REAL
+# fm-session-start.sh can execute: a git repo on main so the tangle check
+# behaves, plus the home directories the digest reads. The deliberately bare
+# PATH keeps every bootstrap probe fast and hermetic - it reports missing tools
+# instead of reaching the host's real gh/tmux/tasks-axi.
+RUN_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+
+make_run_primary() {
+  local dir=$1
+  mkdir -p "$dir/bin" "$dir/state" "$dir/data" "$dir/config"
+  git init -q -b main "$dir"
+  git -C "$dir" commit -q --allow-empty -m init
+  : > "$dir/AGENTS.md"
+}
+
+run_hook() {  # <root> [args...]
+  local root=$1
+  shift
+  FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" "$@"
+}
+
+# Every run-tier assertion keys off the digest banner, which fm-session-start.sh
+# prints before the lock result, so routing is proven whether or not the lock
+# was won in the test environment.
+FULL_BANNER="SESSION START - "
+REEMIT_BANNER="SESSION START (CONTEXT RE-EMIT) - "
+
+test_run_startup_runs_the_full_digest() {
+  local root="$TMP_ROOT/run-startup" out status=0
+  make_run_primary "$root"
+  out=$(run_hook "$root" --source startup </dev/null) || status=$?
+  expect_code 0 "$status" "run wrapper startup"
+  assert_contains "$out" "$FULL_BANNER$root" "startup did not run the full digest"
+  assert_not_contains "$out" "$REEMIT_BANNER" "startup was misrouted to a context re-emit"
+  assert_not_contains "$out" "FIRSTMATE_OP" "a run-tier open also emitted the nudge instruction"
+  assert_contains "$out" "NEXT STEP" "the run wrapper did not deliver a complete digest"
+  pass "run wrapper: startup runs the full digest and never also nudges"
+}
+
+test_run_clear_and_compact_reemit() {
+  local root out source status
+  for source in clear compact; do
+    root="$TMP_ROOT/run-$source"
+    make_run_primary "$root"
+    status=0
+    out=$(run_hook "$root" --source "$source" </dev/null) || status=$?
+    expect_code 0 "$status" "run wrapper $source"
+    assert_contains "$out" "$REEMIT_BANNER$root" "$source did not re-emit the digest"
+    assert_contains "$out" "are NOT repeated" "$source did not report the skipped startup sweeps"
+    assert_contains "$out" "Queued wakes ARE still drained" "$source did not preserve the wake-queue drain"
+    assert_not_contains "$out" "FIRSTMATE_OP" "a $source open also emitted the nudge instruction"
+  done
+  pass "run wrapper: clear and compact re-emit the digest without repeating startup sweeps"
+}
+
+test_run_resume_delegates_to_the_nudge() {
+  local root="$TMP_ROOT/run-resume" out status=0
+  make_run_primary "$root"
+  out=$(run_hook "$root" --source resume </dev/null) || status=$?
+  expect_code 0 "$status" "run wrapper resume"
+  [ "$out" = "$NUDGE_LINE" ] || fail "resume did not delegate to the exact nudge line, got: $out"
+  assert_absent "$root/state/.lock" "resume acquired the fleet lock instead of delegating"
+  pass "run wrapper: resume delegates to the nudge instead of re-running the digest"
+}
+
+test_run_reads_source_from_the_hook_payload() {
+  local root="$TMP_ROOT/run-payload" out status=0
+  make_run_primary "$root"
+  out=$(printf '{"session_id":"s1","hook_event_name":"SessionStart","source":"compact"}' |
+    run_hook "$root") || status=$?
+  expect_code 0 "$status" "run wrapper payload compact"
+  assert_contains "$out" "$REEMIT_BANNER$root" "a compact hook payload was not routed to a re-emit"
+
+  # A fresh root, because the compact case above legitimately took the lock and
+  # an owned lock is exactly when the nudge is supposed to stay silent.
+  root="$TMP_ROOT/run-payload-resume"
+  make_run_primary "$root"
+  status=0
+  out=$(printf '{"source":"resume","cwd":"/nowhere"}' | run_hook "$root") || status=$?
+  expect_code 0 "$status" "run wrapper payload resume"
+  assert_contains "$out" "FIRSTMATE_OP" "a resume hook payload did not delegate to the nudge"
+  assert_not_contains "$out" "SESSION START" "a resume hook payload still ran the digest"
+  pass "run wrapper: the hook payload's source field drives routing with no explicit argument"
+}
+
+test_run_unknown_source_takes_the_helm() {
+  local root="$TMP_ROOT/run-unknown" out status=0
+  make_run_primary "$root"
+  out=$(run_hook "$root" --source somethingnew </dev/null) || status=$?
+  expect_code 0 "$status" "run wrapper unknown source"
+  assert_contains "$out" "$FULL_BANNER$root" "an unrecognized source did not fall through to the full digest"
+
+  status=0
+  out=$(printf '{"hook_event_name":"SessionStart"}' | run_hook "$root") || status=$?
+  expect_code 0 "$status" "run wrapper sourceless payload"
+  assert_contains "$out" "$FULL_BANNER$root" "a payload with no source did not fall through to the full digest"
+  pass "run wrapper: an unrecognized or absent source takes the helm rather than skipping it"
+}
+
+test_run_gate_and_scope_are_silent() {
+  local root="$TMP_ROOT/run-gate" base="$TMP_ROOT/run-linked-base" linked="$TMP_ROOT/run-linked"
+  make_run_primary "$root"
+  expect_silent_zero "gate env run" env NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS=0 \
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" --source startup
+  assert_absent "$root/state/.lock" "a gate agent's session open still took the fleet lock"
+
+  fm_git_worktree "$base" "$linked" fm/run-linked
+  mkdir -p "$linked/bin" "$linked/state"
+  : > "$linked/AGENTS.md"
+  expect_silent_zero "linked worktree run" run_hook "$linked" --source startup
+  assert_absent "$linked/state/.lock" "an unmarked task worktree still took the fleet lock"
+  pass "run wrapper: a gate agent and an unmarked task worktree never run a session start"
+}
+
+test_run_reports_a_failed_session_start_as_digest_text() {
+  local root="$TMP_ROOT/run-unwritable" out status=0
+  make_run_primary "$root"
+  chmod 0500 "$root/state"
+  out=$(run_hook "$root" --source startup </dev/null) || status=$?
+  chmod 0700 "$root/state"
+  expect_code 0 "$status" "run wrapper with an unwritable state directory"
+  assert_contains "$out" "READ-ONLY SESSION" "a failed lock did not reach the agent as digest text"
+  pass "run wrapper: a session start that cannot take the lock still opens the session and says so"
+}
+
 test_genuine_primary_nudges
 test_gate_env_is_silent
 test_gate_common_dir_is_silent
@@ -156,3 +290,10 @@ test_linked_secondmate_primary_nudges
 test_missing_state_is_silent
 test_owned_lock_is_silent
 test_opencode_plugin_delivers_exact_nudge_once
+test_run_startup_runs_the_full_digest
+test_run_clear_and_compact_reemit
+test_run_resume_delegates_to_the_nudge
+test_run_reads_source_from_the_hook_payload
+test_run_unknown_source_takes_the_helm
+test_run_gate_and_scope_are_silent
+test_run_reports_a_failed_session_start_as_digest_text
