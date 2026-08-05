@@ -4,10 +4,15 @@
 # Usage:
 #   fm-remote-home-provision.sh < manifest
 #
-# Manifest schema fm-remote-home-provision.v1 carries a base64 charter and one
-# base64 project record per line. The remote code root is cloned into an absent
-# home, project origins are cloned on this host, the project registry and charter
-# are published, and the .fm-secondmate-home marker commits the seed last.
+# Manifest schema fm-remote-home-provision.v1 carries a base64 charter, the
+# base64 parent SSH alias, and one base64 project record per line. The remote
+# code root is cloned into an absent home, project origins are cloned on this
+# host, the project registry and charter are published, the durable
+# .fm-secondmate-parent record names this home's route to its parent as
+# "remote" - read by bin/fm-teardown.sh's cleanup gate so a delegated public
+# reply promise, which the subsystem can only carry on the parent's own
+# filesystem, is never mistaken for one this child could hold - and the
+# .fm-secondmate-home marker commits the complete seed last.
 # A newly created home is removed on failure. An existing matching seeded home
 # is converged only through guarded ordinary-file updates and new project clones.
 set -eu
@@ -71,6 +76,7 @@ rollback() {
       restore_owned_file data/charter.md || true
       restore_owned_file data/projects.md || true
       restore_owned_file .fm-secondmate-home || true
+      restore_owned_file .fm-secondmate-parent || true
       [ "$CREATED_BACKLOG" -eq 0 ] || rm -f -- "$FM_HOME/data/backlog.md"
     fi
   fi
@@ -87,9 +93,18 @@ SCHEMA=$(manifest_value "$TMP/manifest" schema || true)
 [ "$SCHEMA" = fm-remote-home-provision.v1 ] || die "incompatible provisioning manifest"
 ID_B64=$(manifest_value "$TMP/manifest" id_b64 || true)
 CHARTER_B64=$(manifest_value "$TMP/manifest" charter_b64 || true)
+# Optional so a manifest sent by a not-yet-updated parent (predating this
+# field) still provisions; the durable parent record below simply omits the
+# host in that case rather than refusing the whole seed.
+PARENT_HOST_B64=$(manifest_value "$TMP/manifest" parent_host_b64 || true)
 COUNT=$(manifest_value "$TMP/manifest" project_count || true)
 base64_decode_to "$ID_B64" "$TMP/id" || die "manifest id is not valid base64"
 base64_decode_to "$CHARTER_B64" "$TMP/charter" || die "manifest charter is not valid base64"
+PARENT_HOST=
+if [ -n "$PARENT_HOST_B64" ]; then
+  base64_decode_to "$PARENT_HOST_B64" "$TMP/parent-host" || die "manifest parent host is not valid base64"
+  PARENT_HOST=$(cat "$TMP/parent-host")
+fi
 ID=$(cat "$TMP/id")
 safe_id "$ID" || die "manifest carries an unsafe secondmate id"
 case "$COUNT" in ''|*[!0-9]*) die "manifest project count is invalid" ;; esac
@@ -137,7 +152,7 @@ if [ -e "$FM_HOME" ] || [ -L "$FM_HOME" ]; then
     fi
   done
   mkdir -p "$TMP/before/data"
-  for rel in data/charter.md data/projects.md .fm-secondmate-home; do
+  for rel in data/charter.md data/projects.md .fm-secondmate-home .fm-secondmate-parent; do
     existing="$FM_HOME/$rel"
     if [ -e "$existing" ] || [ -L "$existing" ]; then
       [ -f "$existing" ] && [ ! -L "$existing" ] || die "existing remote home has unsafe owned file: $rel"
@@ -223,6 +238,12 @@ chmod 600 "$FM_HOME/data/charter.md.tmp.$$"
 mv -f -- "$FM_HOME/data/charter.md.tmp.$$" "$FM_HOME/data/charter.md"
 cp "$PROJECT_REG" "$FM_HOME/data/projects.md.tmp.$$"
 mv -f -- "$FM_HOME/data/projects.md.tmp.$$" "$FM_HOME/data/projects.md"
+{
+  printf 'schema=fm-secondmate-parent.v1\n'
+  printf 'route=remote\n'
+  [ -z "$PARENT_HOST" ] || printf 'parent_host=%s\n' "$PARENT_HOST"
+} > "$FM_HOME/.fm-secondmate-parent.tmp.$$"
+mv -f -- "$FM_HOME/.fm-secondmate-parent.tmp.$$" "$FM_HOME/.fm-secondmate-parent"
 printf '%s\n' "$ID" > "$FM_HOME/.fm-secondmate-home.tmp.$$"
 mv -f -- "$FM_HOME/.fm-secondmate-home.tmp.$$" "$FM_HOME/.fm-secondmate-home"
 PUBLISHED=1
