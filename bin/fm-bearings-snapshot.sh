@@ -428,6 +428,10 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       prs: $prs,
       in_flight: (if $all_in_flight == 1 then $in_flight_all else $in_flight_all[:$in_flight_n] end),
       secondmates: (if $all_secondmates == 1 then $secondmates_all else $secondmates_all[:$secondmates_n] end),
+      secondmate_work: [ $snap.secondmate_current.records[]?
+        | select(.provenance.selected == "structured-home") as $mate
+        | $mate.active_children[]?
+        | {home_id:$mate.id,home:$mate.home,id,kind,state,source,doing} ],
       decisions_open: (if $all_decisions == 1 then $decisions_all else $decisions_all[:$decisions_n] end),
       landed: ($done | map({id, what:(.title | trunc(70)),
                             artifact:(.pr_url // .report_path // .local_note // "-"),owner:.home_id})),

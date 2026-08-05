@@ -33,7 +33,7 @@ firstmate flips the model.
 You talk to a single agent - the first mate - and it runs the crew for you: spawning autonomous agents in a visible session backend, giving each a clean git worktree, supervising them to completion, and handing you finished PRs, approved local merges, or standalone investigation reports.
 For larger fleets, you can opt in to persistent secondmates: second mates that are still ordinary direct reports, but run from their own isolated firstmate homes.
 
-firstmate is not a model, not a harness, not a skill, not an MCP server, and not a CLI.
+firstmate is not a model, not a harness, not a skill, or an MCP server.
 firstmate is an agent distro for running a crew of agents.
 An agent distro is a portable directory of instructions, skills, tooling, policies, and state conventions that turns a general-purpose agent into a specialized one.
 There is no app to install: the cloned repo is the distro - `AGENTS.md`, bundled firstmate skills, and helper scripts that any terminal coding agent can follow.
@@ -198,6 +198,7 @@ Firstmate's skills live in two separate places with different audiences:
 
 - [docs/architecture.md](docs/architecture.md) - maintainer architecture for the crew, supervision, worktrees, secondmates, and project modes.
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional X mode, the files you set, and harness support.
+- [docs/dashboard.md](docs/dashboard.md) - start and optionally auto-start the read-only local fleet dashboard.
 - [docs/calm.md](docs/calm.md) - current Pi `/calm` behavior and supported presentation limits.
 - [docs/wedge-alarm.md](docs/wedge-alarm.md) - configure the active alert for an away-mode escalation delivery that gets stuck.
 - [docs/tmux-backend.md](docs/tmux-backend.md) - current setup and limits for the tmux reference backend.
