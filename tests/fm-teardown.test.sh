@@ -951,15 +951,19 @@ test_dirty_worktree_refuses() {
 # changed in between as a staged modification. Args: case_dir [push_second]
 # push_second defaults to "push"; pass "nopush" to leave the advanced head off
 # every remote.
+# The second copy stays detached and moves the branch ref with `git update-ref`.
+# `git checkout -B` and `git branch -f` both refuse a branch that another
+# worktree already holds, and the original copy holds it for every case here,
+# so they are not a portable way to advance the ref.
 advance_branch_from_second_worktree() {
   local case_dir=$1 push_second=${2:-push}
   local second="$case_dir/wt2"
-  git -C "$case_dir/project" worktree add -q --detach "$second" main
-  git -C "$second" checkout -q -B fm/task-x1 fm/task-x1
+  git -C "$case_dir/project" worktree add -q --detach "$second" fm/task-x1
   printf '%s\n' "follow-up rewrite" > "$second/feature.txt"
   printf '%s\n' "follow-up addition" > "$second/followup.txt"
   git -C "$second" add -A
   git -C "$second" -c user.email=t@t -c user.name=t commit -q -m "follow-up commit"
+  git -C "$second" update-ref refs/heads/fm/task-x1 HEAD
   if [ "$push_second" = push ]; then
     git -C "$second" push -q origin fm/task-x1
     git -C "$case_dir/project" fetch -q origin
