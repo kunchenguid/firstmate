@@ -2888,10 +2888,59 @@ test_capture_preserves_pane_read_failure() {
   status=$?
   [ "$status" -ne 0 ] || fail "capture should fail when pane read fails, got output '$out'"
   assert_contains "$(cat "$log")" "HERDR_SESSION=default"$'\x1f''status'$'\x1f''--json' \
-    "capture did not ensure the herdr server before reading the pane"
+    "capture did not check the herdr server before reading the pane"
   assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2' \
     "capture did not try to read the requested pane"
-  pass "fm_backend_herdr_capture: ensures the session and preserves pane read failure"
+  pass "fm_backend_herdr_capture: checks the session and preserves pane read failure"
+}
+
+test_capture_never_starts_the_server() {
+  local dir log resp fb out status
+  # A passive read must not resurrect the server. Herdr persists layout in
+  # session.json, so a restarted server restores panes without the agents that
+  # were living in them, and the caller would read a fresh empty shell and
+  # conclude the crew is healthy. A probe that starts what it observes also
+  # makes the home's "no work left" condition unreachable.
+  dir="$TMP_ROOT/capture-no-start"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":false}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_capture default:w1:p2 40' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "capture should fail when the herdr server is not running, got output '$out'"
+  assert_not_contains "$(cat "$log")" $'\x1f''server' \
+    "capture started the herdr server; a passive read must never start one"
+  assert_not_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''read' \
+    "capture read the pane despite the server being down"
+  pass "fm_backend_herdr_capture: fails without starting the herdr server when it is down"
+}
+
+test_busy_state_unknown_when_server_is_down() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/busy-no-start"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":false}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_busy_state default:w1:p2' "$ROOT" )
+  [ "$out" = unknown ] || fail "busy_state should report unknown when the server is down, got '$out'"
+  assert_not_contains "$(cat "$log")" $'\x1f''server' \
+    "busy_state started the herdr server; a passive read must never start one"
+  pass "fm_backend_herdr_busy_state: reports unknown without starting the herdr server"
+}
+
+test_send_key_still_starts_the_server() {
+  local dir log resp fb
+  # The read/action split must not disarm the ACTION path: an operation about to
+  # act on a pane still ensures the server through fm_backend_herdr_target_ready.
+  dir="$TMP_ROOT/sendkey-starts"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":false}}\n' > "$resp/1.out"
+  printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_key default:w1:p2 Escape' "$ROOT"
+  assert_contains "$(cat "$log")" $'\x1f''server' \
+    "send_key must still start the herdr server; only passive reads stop doing that"
+  pass "fm_backend_herdr_send_key: still starts the herdr server when it is down"
 }
 
 test_send_key_normalizes_and_targets_pane() {
@@ -4308,6 +4357,9 @@ test_normalize_key
 test_capture_calls_pane_read
 test_capture_works_around_small_lines_bug
 test_capture_preserves_pane_read_failure
+test_capture_never_starts_the_server
+test_busy_state_unknown_when_server_is_down
+test_send_key_still_starts_the_server
 test_send_key_normalizes_and_targets_pane
 test_kill_is_best_effort
 test_current_path_reads_cwd

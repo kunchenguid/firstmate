@@ -56,6 +56,14 @@
 # stored pane id blindly: fm_backend_herdr_list_live. The presentation journal
 # is deliberately excluded from that path.
 #
+# Reads never start, only actions start. An operation about to ACT on a pane
+# (send_*, kill, current_path) goes through fm_backend_herdr_target_ready, which
+# ensures the server. A passive OBSERVATION (capture, capture_ansi, busy_state)
+# goes through fm_backend_herdr_target_readable, which requires an already
+# running server and never starts one. See those two functions for the full
+# contract; the same split already governs fm_backend_target_exists in
+# bin/fm-backend.sh.
+#
 # Requires: herdr (CLI + socket), jq (JSON parsing). Bootstrap detects these
 # through fm_backend_required_tools only when herdr is the resolved backend;
 # this adapter also gates them again before spawning.
@@ -2512,6 +2520,25 @@ fm_backend_herdr_target_ready() {  # <target>
   fm_backend_herdr_server_ensure "$FM_BACKEND_HERDR_SESSION" || return 1
 }
 
+# fm_backend_herdr_target_readable: readiness for PASSIVE reads. Parses the
+# target and requires an ALREADY-running server, but never starts one.
+#
+# A read must not resurrect the server. Herdr persists layout in session.json,
+# so a restarted server restores the workspaces and panes but not the agent
+# processes that were living in them: the caller would then successfully read a
+# fresh empty shell and conclude the crew is fine. Worse, a probe that starts
+# what it observes can never observe an ending, so the home's "no work left"
+# condition becomes unreachable and the watcher/arm cycle never settles.
+#
+# Same rule already applied to fm_backend_target_exists (bin/fm-backend.sh):
+# reads never start, only actions start. Callers must treat false as "cannot
+# observe" and surface it, never as "nothing to see".
+fm_backend_herdr_target_readable() {  # <target>
+  fm_backend_herdr_parse_target "$1" || return 1
+  [ "$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" status --json 2>/dev/null \
+      | jq -r '.server.running // false' 2>/dev/null)" = true ]
+}
+
 # fm_backend_herdr_current_path: the live FOREGROUND process's cwd, or empty on
 # any error. Mirrors tmux's pane_current_path poll used for worktree-path
 # discovery after `treehouse get`.
@@ -2588,7 +2615,7 @@ fm_backend_herdr_send_key() {  # <target> <key>
 # always request a generous fetch far above any realistic viewport height, then
 # trim to the caller's requested bound ourselves with `tail`.
 fm_backend_herdr_capture() {  # <target> <lines>
-  fm_backend_herdr_target_ready "$1" || return 1
+  fm_backend_herdr_target_readable "$1" || return 1
   local lines=${2:-200} fetch out
   case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
   fetch=$lines
@@ -2598,7 +2625,7 @@ fm_backend_herdr_capture() {  # <target> <lines>
 }
 
 fm_backend_herdr_capture_ansi() {  # <target> <lines>
-  fm_backend_herdr_target_ready "$1" || return 1
+  fm_backend_herdr_target_readable "$1" || return 1
   local lines=${2:-200} fetch out
   case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
   fetch=$lines
@@ -3099,7 +3126,7 @@ fm_backend_herdr_agent_status_raw() {  # <session> <pane_id>
 # fm_backend_herdr_classify_agent_status for the status->busy/idle/unknown
 # mapping.
 fm_backend_herdr_busy_state() {  # <target>
-  fm_backend_herdr_target_ready "$1" || { printf 'unknown'; return 0; }
+  fm_backend_herdr_target_readable "$1" || { printf 'unknown'; return 0; }
   fm_backend_herdr_classify_agent_status \
     "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")"
 }

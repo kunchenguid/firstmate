@@ -359,7 +359,8 @@ clear_pause_tracking() {  # <window>
   key=${key//\//_}
   key=${key//./_}
   clear_pause_state "$win"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
+    "$STATE/.endpoint-gone-$key"
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
@@ -936,7 +937,24 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
       continue
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
+      # Unreadable pane. Captures no longer start a backend server (herdr's
+      # fm_backend_herdr_target_readable), so a failed read is real evidence
+      # rather than a self-healing hiccup, and skipping it outright would drop
+      # this window out of Layer 1 silently - pause_state_class below is never
+      # reached. Separate "endpoint genuinely gone" from a transient read error
+      # with the side-effect-free existence probe and surface the gone case
+      # exactly once, so a vanished fleet wakes firstmate instead of going quiet.
+      if ! fm_backend_target_exists "$(window_backend "$w")" "$w"; then
+        if [ ! -e "$STATE/.endpoint-gone-$key" ]; then
+          fm_wake_append stale "$w" "stale: $w endpoint gone" || exit 1
+          : > "$STATE/.endpoint-gone-$key"
+          wake "stale: $w endpoint gone"
+        fi
+      fi
+      continue
+    fi
+    rm -f "$STATE/.endpoint-gone-$key"
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"

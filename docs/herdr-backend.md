@@ -259,6 +259,12 @@ Unlike tmux process-name inspection, native registration can classify Pi without
 The session-start sweep uses this probe.
 Mid-session secondmate liveness is not implemented because idle secondmates are deliberately exempt from stale-pane escalation and need a separate periodic identity signal.
 
+Because a restart restores the layout without the agents, reads never start the server and only actions start it.
+An operation about to act on a pane ensures the server, so `send_*`, `kill`, and the launcher path still start a stopped one.
+A passive observation requires an already running server and fails instead: `capture`, `capture_ansi`, and `busy_state` report failure or `unknown` rather than reviving a layout whose panes no longer host the agents being observed.
+This also keeps a home's "no work left" condition reachable, since a probe that starts what it observes can never observe an ending.
+The watcher treats an unreadable pane as evidence: it confirms a genuinely gone endpoint with the side-effect-free existence probe and raises one `stale: <window> endpoint gone` wake, so a vanished fleet is reported instead of silently repaired.
+
 ## Push events and polling fallback
 
 Protocol 16 can subscribe to `pane.agent_status_changed` over one bounded Unix-socket reader.

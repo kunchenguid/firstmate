@@ -218,6 +218,34 @@ The CLI matrix was checked directly:
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
 
+### Passive reads never start the server
+
+Verified 2026-08-05 with Herdr 0.7.5 protocol 17 on Ubuntu 24.04 WSL2, against an isolated `fm-lab-` session whose server was stopped first.
+The adapter functions were called directly, and `pgrep -f "herdr server --session <lab>"` sampled server presence after each call.
+
+```sh
+LAB=$(bin/fm-herdr-lab.sh name readsafe)
+bin/fm-herdr-lab.sh provision "$LAB" && bin/fm-herdr-lab.sh stop "$LAB"
+. bin/backends/herdr.sh
+fm_backend_herdr_capture "$LAB:w1:p1" 40
+fm_backend_herdr_busy_state "$LAB:w1:p1"
+fm_backend_herdr_target_ready "$LAB:w1:p1"
+bin/fm-herdr-lab.sh teardown "$LAB"
+```
+
+```text
+server running before probes: no
+capture rc=1  server running after: no
+busy_state=unknown  server running after: no
+target_ready rc=0  server running after: yes
+server running at end: no
+default session intact: yes
+```
+
+Passive reads failed against the stopped server and started nothing.
+The action path still started it, so the read/action split does not disarm `send_*`, `kill`, or the launcher.
+`tests/fm-backend-herdr.test.sh` holds the fake-CLI regression for all three cases.
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:
