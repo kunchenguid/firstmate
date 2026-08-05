@@ -761,6 +761,7 @@ _stitch_review_mp4() {
   ffmpeg -y -hide_banner -loglevel error \
     -framerate 1 \
     -pattern_type glob -i "$frames_dir/frame-*.jpg" \
+    -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" \
     -c:v libx264 -pix_fmt yuv420p -movflags +faststart \
     "$out_mp4"
 }
