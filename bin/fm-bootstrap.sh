@@ -61,8 +61,11 @@
 #          that field to decide that a human "Send & End" review is terminal, so
 #          an older build leaves every such review source armed forever, and a
 #          plain reopen would also override a session the human deliberately
-#          ended. Later releases only add artifact-authoring surface the adapter
-#          never reads, so the floor stays 0.1.35 rather than tracking latest.
+#          ended. Release 0.1.44 also suppresses recurring poll wait ticks outside
+#          interactive terminals, but those ticks use stderr and bin/fm-procevent.sh
+#          discards child stderr, so the change does not affect adapter behavior.
+#          Other later releases only add artifact-authoring surface the adapter never
+#          reads, so the floor stays 0.1.35 rather than tracking latest.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
 #          lavish-axi). tasks-axi is also version and feature gated (0.2.2+
 #          with update --archive-body and mv [<id>...]); an installed but
