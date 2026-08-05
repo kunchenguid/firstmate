@@ -14,12 +14,20 @@
 #      a continuation, exactly like Claude's stop_hook_active / Codex's
 #      stop_hook_active, and must not re-block on every rewake);
 #   3. runs bin/fm-turnend-guard.sh with the normalized payload;
-#   4. on exit 2, emits {"followup_message": "<captured stderr>"} on stdout
-#      and exits 0 (cursor auto-submits the message as a new turn); on any
-#      other exit it emits {} and exits 0 so the turn ends normally.
+#   4. on exit 2 (a blind turn), foregrounds bin/fm-watch-arm.sh inside the
+#      hook-owned process tree - parked while the watcher arms, never shell
+#      & - then re-runs bin/fm-turnend-guard.sh against the post-arm state;
+#   5. emits {"followup_message": "<captured stderr>"} on stdout and exits 0
+#      (cursor auto-submits the message as a new turn) only when the re-run
+#      still reports a blind turn; after a successful arm it emits {} and
+#      exits 0 so the turn ends normally. Any other exit emits {} the same
+#      way.
 #
-# The shape is the grok-shim pattern (bin/fm-turnend-guard-grok.sh): a thin
-# translation layer, zero changes to the shared predicate.
+# The translation layer is the grok-shim pattern (bin/fm-turnend-guard-grok.sh):
+# a thin layer, zero changes to the shared predicate. The arm/park follows the
+# claude auto-arm model (bin/fm-claude-stop-autoarm.sh): the hook-owned
+# foreground tree is the arm lifecycle, and the watcher parks until an
+# actionable wake closes the cycle or the hook timeout tears the tree down.
 set -u
 
 PAYLOAD=$(cat 2>/dev/null || true)
@@ -51,6 +59,19 @@ ROOT=${ROOT%/}
 ERR=$(mktemp "${TMPDIR:-/tmp}/fm-turnend-cursor.XXXXXX") || exit 0
 trap 'rm -f "$ERR"' EXIT
 
+printf '%s' "$NORMALIZED" | "$ROOT/bin/fm-turnend-guard.sh" 2>"$ERR"
+RC=$?
+[ "$RC" -eq 2 ] || { printf '{}\n'; exit 0; }
+
+# Blind turn: park in the hook-owned foreground tree while the watcher arms.
+# Never shell &: the harness owns this process group, so the hook timeout and
+# turn end tear arm and watcher down together; a backgrounded child would be
+# reaped at hook exit, leaving no watcher and a false "already running".
+"$ROOT/bin/fm-watch-arm.sh" >&2 || true
+
+# Re-run the guard against the post-arm state: a successful arm leaves a
+# healthy watcher (or the need vanished), so the turn may end normally; only
+# a still-blind turn earns the followup_message that wakes the model.
 printf '%s' "$NORMALIZED" | "$ROOT/bin/fm-turnend-guard.sh" 2>"$ERR"
 RC=$?
 [ "$RC" -eq 2 ] || { printf '{}\n'; exit 0; }

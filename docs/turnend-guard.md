@@ -55,7 +55,7 @@ If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot s
   The same marker guard carries every tracked `.claude/settings.json` entry whose event Grok already covers through its own `.grok/hooks/` registration, which is both `Stop` entries, the `SessionStart` entry, and the two `PreToolUse` Bash entries; `bin/fm-subagent-pretool-check.sh` is the one deliberate unguarded exception because no Grok registration covers the subagent-spawn event, recorded in [`subagent-guard.md`](subagent-guard.md) "Known residual gap".
   `tests/fm-turnend-guard.test.sh` pins that inventory so neither the guarded set nor the exception can change silently.
 - Cursor registers a `stop` hook in `.cursor/hooks.json` (project-root, tracked), anchored through `CURSOR_PROJECT_DIR`, delegating to `bin/fm-turnend-guard-cursor.sh`.
-  Cursor's stop hook does not honour exit 2 as a forced continuation, so the shim translates the shared guard's exit-2 blind-turn signal into a `{"followup_message": ...}` body that cursor auto-submits as a new turn.
+  Cursor's stop hook does not honour exit 2 as a forced continuation, so on a blind turn the shim foregrounds `bin/fm-watch-arm.sh` (parked in the hook-owned tree), re-runs the shared guard, and translates a still-blind result into a `{"followup_message": ...}` body that cursor auto-submits as a new turn; a successful arm emits `{}` and the turn ends normally.
   The same file registers a `preToolUse` hook with a `Shell` matcher running `bin/fm-arm-pretool-check.sh --cursor`.
   Verified against cursor-agent 2026.07.23-e383d2b; the top-level `"version": 1` key is load-bearing (without it cursor silently discards the file and every hook is inert).
 
