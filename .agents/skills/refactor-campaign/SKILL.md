@@ -14,6 +14,12 @@ metadata:
 Use this method when one body of work must be restructured across many pull requests, several waves of crew, and more than one delivery day.
 It is the single owner of Firstmate's campaign shape; the ordinary task lifecycle in `AGENTS.md` section 7 still owns intake, dispatch, supervision, and merge authority for each individual slice inside the campaign.
 
+## Scope
+
+This skill owns campaign-level orchestration only: how the whole body of work is planned, sliced, proven, and sequenced.
+It deliberately owns nothing about how one pull request is shepherded to landing, and nothing about the quality loop a worker runs inside a single task.
+Those are separate altitudes with their own owners; compose with whichever ones this fleet has installed and never restate their procedure here.
+
 ## When not to use this
 
 A small change, a single-concern fix, or anything that lands in one pull request needs none of this.
