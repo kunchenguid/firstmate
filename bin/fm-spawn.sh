@@ -975,6 +975,46 @@ shell_quote() {
   printf "'"
 }
 
+expand_launch_placeholders() {
+  local rest=$1 output= token prefix best_prefix best_token best_value
+  while :; do
+    best_prefix=$rest
+    best_token=
+    for token in \
+      __MODELFLAG__ __EFFORTFLAG__ __BRIEF__ __TURNEND__ __PIEXT__ \
+      __PITURNEND__ __PIWATCH__ __OPINPUT__ __FM_BUSY_EVENT__ \
+      __STATE_REAL__ __ID__ __STATUS__; do
+      prefix=${rest%%"$token"*}
+      if [ "$prefix" != "$rest" ] && {
+        [ -z "$best_token" ] || [ "${#prefix}" -lt "${#best_prefix}" ]
+      }; then
+        best_prefix=$prefix
+        best_token=$token
+      fi
+    done
+    if [ -z "$best_token" ]; then
+      printf '%s%s' "$output" "$rest"
+      return 0
+    fi
+    case "$best_token" in
+      __MODELFLAG__) best_value=$MODELFLAG ;;
+      __EFFORTFLAG__) best_value=$EFFORTFLAG ;;
+      __BRIEF__) best_value=$sq_brief ;;
+      __TURNEND__) best_value=$sq_turnend ;;
+      __PIEXT__) best_value=$sq_piext ;;
+      __PITURNEND__) best_value=$sq_piturnend ;;
+      __PIWATCH__) best_value=$sq_piwatch ;;
+      __OPINPUT__) best_value=$sq_opinput ;;
+      __FM_BUSY_EVENT__) best_value=$sq_fm_busy_event ;;
+      __STATE_REAL__) best_value=$sq_state_real ;;
+      __ID__) best_value=$sq_id ;;
+      __STATUS__) best_value=$sq_status ;;
+    esac
+    output=$output$best_prefix$best_value
+    rest=${rest#*"$best_token"}
+  done
+}
+
 resolve_kimi_binary() {
   local candidate dir fallback
   candidate=$(command -v kimi 2>/dev/null || true)
@@ -2251,18 +2291,7 @@ sq_id=$(shell_quote "$ID")
 sq_status=$(shell_quote "$STATE_REAL/$ID.status")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
-LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
-LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
-LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
-LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
-LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
-LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
-LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
-LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
-LAUNCH=${LAUNCH//__FM_BUSY_EVENT__/$sq_fm_busy_event}
-LAUNCH=${LAUNCH//__STATE_REAL__/$sq_state_real}
-LAUNCH=${LAUNCH//__ID__/$sq_id}
-LAUNCH=${LAUNCH//__STATUS__/$sq_status}
+LAUNCH=$(expand_launch_placeholders "$LAUNCH")
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a
