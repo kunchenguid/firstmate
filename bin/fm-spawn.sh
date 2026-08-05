@@ -70,7 +70,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|agy)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. pi-signed launches that exact executable name from PATH and
@@ -425,7 +425,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|agy)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -491,7 +491,7 @@ launch_template() {
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
-    agy) printf '%s' 'agy --dangerously-skip-permissions --prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"; res=$?; "$FM_ROOT/bin/fm-busy-event.sh" apply "'"$STATE"'" "'"$ID"'" idle --current-gen --source agy-cli --event done; [ $res -eq 0 ] && printf "done\n" >> "'"$STATE/$ID.status"'" || printf "failed\n" >> "'"$STATE/$ID.status"'"' ;;
+    agy) printf '%s' 'agy --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"; res=$?; "'"$FM_ROOT"'/bin/fm-busy-event.sh" apply "'"$STATE"'" "'"$ID"'" idle --current-gen --source agy-cli --event done; [ $res -eq 0 ] && printf "done\n" >> "'"$STATE/$ID.status"'" || printf "failed\n" >> "'"$STATE/$ID.status"'"' ;;
     *) return 1 ;;
   esac
 }
@@ -606,7 +606,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|agy)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -636,6 +636,12 @@ effort_flag_for_harness() {
       # than passing a known-bad value.
       case "$effort" in
         low|medium|high) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
+    agy)
+      # AGY 1.1.9 exposes only low|medium|high for its --effort flag.
+      case "$effort" in
+        low|medium|high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
     pi|pi-signed)
@@ -1385,7 +1391,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
+    claude*|opencode*|pi|pi-signed|agy*)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1

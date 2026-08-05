@@ -198,6 +198,66 @@ SH
   pass "pi-signed identity: authoritative launch selection distinguishes shared wrapper ancestry"
 }
 
+test_agy_detection_and_session_lock_identity() {
+  local dir fakebin got
+  dir="$TMP_ROOT/agy-identity"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field:${FM_TEST_AGY_SHAPE:-exact}" in
+  100:comm=:exact) printf '%s\n' '/opt/antigravity/agy' ;;
+  100:args=:exact) printf '%s\n' 'agy --model test/model' ;;
+  100:comm=:helper) printf '%s\n' '/opt/antigravity/agy-helper' ;;
+  100:args=:helper) printf '%s\n' 'agy-helper --model test/model' ;;
+  100:ppid=*) printf '%s\n' 1 ;;
+  *:comm=*) printf '%s\n' bash ;;
+  *:args=*) printf '%s\n' bash ;;
+  *:ppid=*) printf '%s\n' 100 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$BASE_PATH" ANTIGRAVITY_CLI_VERSION=1.1.9 \
+    "$ROOT/bin/fm-harness.sh")
+  [ "$got" = agy ] || fail "AGY CLI version marker resolved '$got', expected agy"
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u ANTIGRAVITY_CLI_VERSION \
+    PATH="$fakebin:$BASE_PATH" ANTIGRAVITY_SESSION_ID=session-1 \
+    "$ROOT/bin/fm-harness.sh")
+  [ "$got" = agy ] || fail "AGY session marker resolved '$got', expected agy"
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = agy ] || fail "AGY ancestry resolved '$got', expected agy"
+
+  got=$(PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT")
+  [ "$got" = 100 ] || fail "AGY session-lock ancestry selected '$got', expected pid 100"
+  PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 100' "$ROOT" \
+    || fail "session-lock liveness rejected an exact AGY holder"
+
+  if env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$BASE_PATH" FM_TEST_AGY_SHAPE=helper "$ROOT/bin/fm-harness.sh" \
+    | grep -qx agy; then
+    fail "AGY helper ancestry was accepted as the harness"
+  fi
+  if PATH="$fakebin:$BASE_PATH" FM_TEST_AGY_SHAPE=helper bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 100' "$ROOT"; then
+    fail "session-lock liveness accepted an AGY helper"
+  fi
+
+  pass "AGY detection honors both markers, exact ancestry, and session-lock identity"
+}
+
 test_dash_leading_process_names_are_basename_operands() {
   local dir fakebin got err status
   dir="$TMP_ROOT/dash-leading-process-names"
@@ -2311,6 +2371,7 @@ SH
 test_harness_resolution
 test_secondmate_model_effort_tokens
 test_pi_signed_detection_and_session_lock_identity
+test_agy_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
 test_propagate_lib
 test_spawn_split_and_inherit

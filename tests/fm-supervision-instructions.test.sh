@@ -155,6 +155,26 @@ test_grok_command_sources_effective_config() {
   pass "grok rendered command sources the effective x-mode config"
 }
 
+test_agy_is_background_notify() {
+  local out ordinary
+  out=$("$RENDER" --harness agy)
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: agy" \
+    "AGY heading missing"
+  assert_contains "$out" "Mode: Antigravity background-notify supervision." \
+    "AGY protocol snippet missing"
+  assert_contains "$out" "run_command" "AGY protocol did not use run_command"
+  assert_contains "$out" "bin/fm-watch-arm.sh" "AGY protocol lost its watcher arm"
+  assert_not_contains "$out" "foreground checkpoint" \
+    "AGY protocol incorrectly rendered Codex foreground supervision"
+  assert_not_contains "$out" "shell &" "AGY protocol permitted shell backgrounding"
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "re-arm exactly one" \
+    "AGY ordinary-wake line did not require one re-arm"
+  out=$("$RENDER" --harness agy --repair-line)
+  assert_contains "$out" "run_command task" "AGY repair line lost background ownership"
+  pass "AGY supervision rendering selects the background-notify protocol"
+}
+
 test_pi_snippet_uses_effective_extension_path() {
   local home out turnend watch
   home="$TMP_ROOT/pi-home"
@@ -179,4 +199,5 @@ test_cross_harness_ordinary_continuation_and_repair_matrix
 test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify
 test_grok_command_sources_effective_config
+test_agy_is_background_notify
 test_pi_snippet_uses_effective_extension_path
