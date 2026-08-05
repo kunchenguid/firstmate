@@ -710,16 +710,16 @@ EOF
   cap_section=$(printf '%s\n' "$out" | awk '/^data\/captain\.md$/{flag=1;next}/^data\//{flag=0}flag')
   assert_contains "$cap_section" "(present, empty)" "empty-but-present captain.md was not distinguished from ABSENT"
 
-  # The digest tells the agent to act on an ABSENT marker "per primary-runtime",
-  # so that owner must actually carry the semantics the pointer promises.
+  # ABSENT is the digest's only re-read exception, and it delegates what to do
+  # about it to a single named owner instead of restating the rules inline.
+  # That owner's content is proved against the runtime Pi's loader actually
+  # delivers in tests/fm-role-context.test.sh, not by grepping its source prose.
+  assert_contains "$out" "Do NOT re-read any of them after reading this digest" \
+    "digest stopped stating its read-once contract"
   assert_contains "$out" "rebuild or create it per primary-runtime" \
     "digest lost the ABSENT-file owner pointer"
-  assert_grep 'Rebuild an absent or stale `data/projects.md`' \
-    "$ROOT/.agents/skills/primary-runtime/SKILL.md" \
-    "the ABSENT owner the digest names does not carry the registry rebuild rule"
-  assert_grep 'An `ABSENT` marker means' \
-    "$ROOT/.agents/skills/primary-runtime/SKILL.md" \
-    "the ABSENT owner the digest names does not define the marker"
+  assert_not_contains "$out" "Rebuild an absent or stale" \
+    "digest grew a second copy of the owner's registry rebuild rule"
 
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
 }
