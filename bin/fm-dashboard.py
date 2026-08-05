@@ -139,15 +139,26 @@ class DashboardStore:
         self.stop_event = threading.Event()
         self.snapshot: dict[str, object] = self._load_snapshot()
         self.events: list[dict[str, object]] = self._load_events()
-        self.cursors: dict[str, int] = self._load_cursors()
+        self.cursors, persisted_sources = self._load_cursors()
         self.next_event_id = max([int(event["id"]) for event in self.events] or [0]) + 1
         self.last_error: str | None = None
         self.last_success_at: str | None = None
         self.initialized = bool(self.snapshot)
         self.status_sources: dict[str, Path] = {}
         self.secondmate_status_sources: dict[str, Path] = {}
+        self.secondmate_source_metadata: dict[str, dict[str, str]] = {}
         self.active_secondmate_status_sources: set[str] = set()
         self.secondmate_transitions_consumed: set[str] = set()
+        for task_id, source in persisted_sources.items():
+            if self._valid_persisted_secondmate_source(task_id, source):
+                self.secondmate_status_sources[task_id] = Path(source["path"])
+                self.secondmate_source_metadata[task_id] = {
+                    "home_id": source["home_id"],
+                    "home": source["home"],
+                    "child_id": source["child_id"],
+                }
+            else:
+                self.cursors.pop(task_id, None)
 
     def _load_snapshot(self) -> dict[str, object]:
         try:
@@ -171,12 +182,77 @@ class DashboardStore:
             pass
         return events
 
-    def _load_cursors(self) -> dict[str, int]:
+    def _load_cursors(self) -> tuple[dict[str, int], dict[str, dict[str, str]]]:
+        cursors: dict[str, int] = {}
+        sources: dict[str, dict[str, str]] = {}
         try:
             value = json.loads(self.cursors_path.read_text(encoding="utf-8"))
-            return {str(key): int(offset) for key, offset in value.items()}
+            if not isinstance(value, dict):
+                return cursors, sources
+            for key, entry in value.items():
+                task_id = str(key)
+                if isinstance(entry, int) and not isinstance(entry, bool) and entry >= 0:
+                    cursors[task_id] = entry
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                offset = entry.get("offset")
+                path = entry.get("path")
+                home_id = entry.get("home_id")
+                home = entry.get("home")
+                child_id = entry.get("child_id")
+                if (
+                    not isinstance(offset, int)
+                    or isinstance(offset, bool)
+                    or offset < 0
+                    or not all(isinstance(item, str) and item for item in (path, home_id, home, child_id))
+                ):
+                    continue
+                cursors[task_id] = offset
+                sources[task_id] = {
+                    "path": path,
+                    "home_id": home_id,
+                    "home": home,
+                    "child_id": child_id,
+                }
         except (OSError, ValueError, AttributeError):
-            return {}
+            pass
+        return cursors, sources
+
+    def _valid_persisted_secondmate_source(
+        self, task_id: str, source: dict[str, str]
+    ) -> bool:
+        home_id = source["home_id"]
+        home = Path(source["home"])
+        child_id = source["child_id"]
+        if not home.is_absolute() or not child_id or Path(child_id).name != child_id:
+            return False
+        if task_id != f"{home_id}/{child_id}":
+            return False
+        expected = home / "state" / f"{child_id}.status"
+        try:
+            if Path(source["path"]).resolve() != expected.resolve():
+                return False
+            return (
+                (home / ".fm-secondmate-home").read_text(encoding="utf-8").strip()
+                == home_id
+            )
+        except (OSError, RuntimeError):
+            return False
+
+    def _persist_cursors(self) -> None:
+        value: dict[str, object] = dict(self.cursors)
+        for task_id, path in self.secondmate_status_sources.items():
+            offset = self.cursors.get(task_id)
+            metadata = self.secondmate_source_metadata.get(task_id)
+            if offset is None or metadata is None:
+                continue
+            value[task_id] = {
+                "offset": offset,
+                "path": str(path),
+                **metadata,
+            }
+        atomic_json_write(self.cursors_path, value)
 
     def _append_event(self, kind: str, data: dict[str, object]) -> None:
         event = {
@@ -267,6 +343,14 @@ class DashboardStore:
                 continue
             task_id = f"{home_id}/{child_id}"
             status_path = home_path / "state" / f"{child_id}.status"
+            previous_path = self.secondmate_status_sources.get(task_id)
+            if previous_path is not None and previous_path.resolve() != status_path.resolve():
+                self.cursors.pop(task_id, None)
+            self.secondmate_source_metadata[task_id] = {
+                "home_id": home_id,
+                "home": str(home_path),
+                "child_id": child_id,
+            }
             secondmate_sources[task_id] = status_path
             age = file_age(status_path)
             state = str(row.get("state", "unknown"))
@@ -293,15 +377,21 @@ class DashboardStore:
             )
         self.status_sources = status_sources
         active_secondmate_sources = set(secondmate_sources)
+        retired = False
         for task_id in list(self.secondmate_status_sources):
             if task_id in active_secondmate_sources:
                 self.secondmate_transitions_consumed.discard(task_id)
             elif task_id in self.secondmate_transitions_consumed:
                 del self.secondmate_status_sources[task_id]
+                del self.secondmate_source_metadata[task_id]
+                self.cursors.pop(task_id, None)
                 self.secondmate_transitions_consumed.discard(task_id)
+                retired = True
         self.secondmate_status_sources.update(secondmate_sources)
         self.active_secondmate_status_sources = active_secondmate_sources
         self.status_sources.update(self.secondmate_status_sources)
+        if retired:
+            self._persist_cursors()
         service = {
             "state": "degraded" if self.last_error else "ready",
             "snapshot_error": self.last_error,
@@ -402,6 +492,7 @@ class DashboardStore:
             status_path.stem: status_path for status_path in sorted(self.state.glob("*.status"))
         }
         status_paths.update(self.status_sources)
+        status_paths.update(self.secondmate_status_sources)
         with self.lock:
             for task_id, status_path in sorted(status_paths.items()):
                 try:
@@ -454,7 +545,7 @@ class DashboardStore:
                         self.secondmate_status_sources.pop(task_id, None)
                         self.secondmate_transitions_consumed.discard(task_id)
             if changed:
-                atomic_json_write(self.cursors_path, self.cursors)
+                self._persist_cursors()
             if changed:
                 self.condition.notify_all()
 

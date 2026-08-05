@@ -75,12 +75,12 @@ EOF
 }
 
 start_dashboard() {
-  local home=$1 output
+  local home=$1 interval=${2:-0.1} output
   output=$(FM_HOME="$home" \
     FM_DASHBOARD_INCLUDE_PRS=0 \
     FM_STALE_ESCALATE_SECS=1 \
     FM_DASHBOARD_NO_OPEN=1 \
-    "$DASHBOARD" start --port 0 --interval 0.1 --no-open --no-prs)
+    "$DASHBOARD" start --port 0 --interval "$interval" --no-open --no-prs)
   DASHBOARD_URL=$(printf '%s\n' "$output" | sed -n 's/^dashboard: //p')
   [ -n "$DASHBOARD_URL" ] || fail "public launcher did not print dashboard URL"
   DASHBOARD_PID=$(sed -n '1p' "$home/state/.dashboard/service.pid")
@@ -101,6 +101,19 @@ wait_for_snapshot() {
     i=$((i + 1))
   done
   fail "dashboard did not publish its initial snapshot"
+}
+
+wait_for_secondmate_cursor() {
+  local dashboard_dir=$1 status_path=$2 i=0
+  while [ "$i" -lt 40 ]; do
+    if jq -e --arg path "$status_path" '."mate/child".path == $path' \
+      "$dashboard_dir/status-cursors.json" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  fail "dashboard did not persist the secondmate status source"
 }
 
 test_public_launcher_snapshot_and_health() {
@@ -212,7 +225,36 @@ test_secondmate_child_work_and_events() {
   pass "validated secondmate child work and status events are visible"
 }
 
+test_secondmate_terminal_event_survives_restart() {
+  local home mate output2 stream pid i
+  home=$(make_home secondmate-restart)
+  : > "$home/data/secondmates.md"
+  mate="$TMP_ROOT/secondmate-restart-home"
+  make_active_secondmate "$home" "$mate"
+  start_dashboard "$home" 10
+  wait_for_snapshot
+  wait_for_secondmate_cursor "$home/state/.dashboard" "$mate/state/child.status"
+  printf 'done [key=child]: restart child finished\n' >> "$mate/state/child.status"
+  kill "$DASHBOARD_PID"
+  i=0
+  while [ "$i" -lt 40 ] && [ -e "$home/state/.dashboard/service.pid" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  output2=$(FM_HOME="$home" FM_DASHBOARD_INCLUDE_PRS=0 FM_STALE_ESCALATE_SECS=1 \
+    FM_DASHBOARD_NO_OPEN=1 "$DASHBOARD" start --port 0 --interval 0.1 --no-open --no-prs)
+  DASHBOARD_URL=$(printf '%s\n' "$output2" | sed -n 's/^dashboard: //p')
+  pid=$(sed -n '1p' "$home/state/.dashboard/service.pid")
+  DASHBOARD_PID=$pid
+  PIDS+=("$pid")
+  stream=$(curl -N -fsS --max-time 2 "${DASHBOARD_URL%/}/events?since=0" || true)
+  printf '%s' "$stream" | grep -F 'restart child finished' >/dev/null \
+    || fail "secondmate terminal event was not replayed after restart: $stream"
+  pass "persisted secondmate source replays a terminal event after restart"
+}
+
 test_public_launcher_snapshot_and_health
 test_status_event_cursor_and_restart_replay
 test_snapshot_failure_is_not_healthy
 test_secondmate_child_work_and_events
+test_secondmate_terminal_event_survives_restart
