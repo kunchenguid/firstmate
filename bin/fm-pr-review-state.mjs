@@ -834,7 +834,7 @@ function makeEvent(control, changed, category = "inventory", message = "", degra
 // of affected pull requests so a persistent failure announces once and a new or
 // recovered one announces again.
 function degradedNotice(control, degraded) {
-  const signature = degraded.map((entry) => `${entry.url} ${entry.category}`).sort().join("\n");
+  const signature = degraded.map((entry) => `${entry.url}\u0000${entry.category}`).sort().join("\n");
   const fingerprint = signature ? sha256(signature) : "";
   if (!fingerprint || fingerprint === (control.degraded_fingerprint ?? "")) return { fingerprint, message: null };
   const listed = degraded.slice(0, MAX_DIAGNOSTIC_PULLS).map((entry) => `${entry.url} (${entry.category})`).join(", ");

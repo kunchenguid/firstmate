@@ -140,8 +140,11 @@ resolve_permissive_tmux_kill_ref() {
 # the old bin/ too or `. "$SCRIPT_DIR/fm-backend.sh"` aborts under set -eu -
 # hence the dispatcher is a copied sibling, while the tmux adapter is extracted
 # from BASE_REF so conformance tests retain the exact historical behavior even
-# when this branch changes tmux dispatch semantics.
-OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-nm-run-lib.sh fm-decision-hold.sh fm-backend.sh fm-operational-input.sh fm-public-followup-lib.sh fm-secondmate-registry-lib.sh fm-secondmate-parent-lib.sh fm-x-lib.sh"
+# when this branch changes tmux dispatch semantics. The adapters' own sourced
+# helpers (fm-session-lock-lib.sh) belong here for the same reason: a missing
+# one aborts the OLD entrypoint during startup, so the conformance comparison
+# would report an exit-code difference it never actually reached.
+OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-session-lock-lib.sh fm-composer-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-nm-run-lib.sh fm-decision-hold.sh fm-backend.sh fm-operational-input.sh fm-public-followup-lib.sh fm-secondmate-registry-lib.sh fm-secondmate-parent-lib.sh fm-x-lib.sh"
 # A pull-request merge may add a new main-only dependency that the branch's older baseline does not have yet.
 OLD_BIN_OPTIONAL_SIBLINGS="fm-pending-reply-lib.sh"
 OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh fm-marker-lib.sh"
@@ -163,6 +166,15 @@ build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry p
   for f in $OLD_BIN_REFACTORED; do
     git -C "$ROOT" show "$BASE_REF:bin/$f" > "$bin/$f"
     chmod +x "$bin/$f"
+  done
+  # Every adapter helper an assembled adapter sources must exist in the
+  # assembled bin/. Otherwise the OLD entrypoint aborts under set -eu the
+  # moment it dispatches, and each conformance assertion below reports a
+  # behavior difference the comparison never actually reached. Fail here, on
+  # the real cause, the next time an adapter grows a dependency.
+  for f in $(sed -n 's/^\. "\$FM_BACKEND_LIB_DIR\/\([^"]*\)".*/\1/p' "$bin"/backends/*.sh | sort -u); do
+    [ -f "$bin/$f" ] \
+      || fail "build_old_bin '$name': bin/backends sources '$f', which the assembled old bin/ lacks; add it to OLD_BIN_UNCHANGED_SIBLINGS"
   done
   printf '%s\n' "$root"
 }
@@ -701,6 +713,11 @@ test_send_conformance_old_vs_new() {
   rc_old=$?
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" --key Escape
   rc_new=$?
+  # An empty OLD log means the old entrypoint died before it dispatched a single
+  # tmux command, so every comparison below would be comparing a startup failure
+  # against real behavior rather than old behavior against new.
+  [ -s "$log_old" ] \
+    || fail "fm-send --key: the old entrypoint issued no tmux command; the assembled old bin/ aborted during startup"
   expect_code "$rc_old" "$rc_new" "fm-send --key: old vs new exit code"
   assert_contains "$(cat "$log_new")" $'\x1f''display-message'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''#{pane_id}' \
     "fm-send --key did not verify the explicit tmux target before sending"

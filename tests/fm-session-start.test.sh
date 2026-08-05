@@ -50,7 +50,16 @@ new_world() {
   fakebin="$w/fakebin"
   mkdir -p "$home/state" "$home/data" "$home/config" "$fakebin"
   git init -q -b main "$root"
-  git -C "$root" commit -q --allow-empty -m init
+  # commit.gpgsign=false: a captain's global git config commonly signs every
+  # commit, and gpg cannot sign for the synthetic fmtest identity. Without this
+  # the fixture commit aborts, `main` is never created, and the tangle and
+  # default-branch assertions below fail for a reason that has nothing to do
+  # with the code under test.
+  git -C "$root" -c commit.gpgsign=false commit -q --allow-empty -m init
+  # Fail at setup, not inside an assertion, if the fixture repo did not reach
+  # the on-`main`-with-one-commit shape every world builder here depends on.
+  git -C "$root" rev-parse --verify -q refs/heads/main >/dev/null \
+    || fail "new_world '$name': fixture repo has no 'main' commit; git refused to create it"
   printf '%s|%s|%s\n' "$root" "$home" "$fakebin"
 }
 
