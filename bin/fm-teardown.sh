@@ -958,6 +958,13 @@ teardown_treehouse_return() {
   return 1
 }
 
+# The one owner of the unlanded-work remediation text. The completeness gate
+# refuses before validate_worktree_teardown_safety ever runs, so both refusals
+# read from here rather than keeping a second copy that can drift.
+unlanded_work_remediation() {  # [default-branch]
+  echo "Merge the branch into local ${1:-<default>} first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
+}
+
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
@@ -1003,7 +1010,7 @@ validate_worktree_teardown_safety() {
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
       [ -n "$dirty" ] && echo "uncommitted changes present" >&2
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
-      echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
+      unlanded_work_remediation "$DEFAULT"
       return 1
     fi
   elif [ -n "$dirty" ]; then
@@ -1771,7 +1778,18 @@ if [ "$FORCE" != "--force" ] && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; }; 
   if [ "$gate_rc" != 0 ]; then
     printf '%s\n' "$gate_out" >&2
     case "$gate_rc" in
-      2|3|64) ;;
+      2)
+        # A named invariant is not an instruction. When the gate refuses over
+        # unlanded work it pre-empts validate_worktree_teardown_safety, so print
+        # that check's own remediation here too, or --force reads as the only
+        # way out of the most common refusal.
+        case "$gate_out" in
+          *NO_UNLANDED_AT_TEARDOWN*|*SHIP_REQUIRES_LANDED*)
+            unlanded_work_remediation "$(default_branch || true)"
+            ;;
+        esac
+        ;;
+      3|64) ;;
       *) echo "completeness gate could not run (exit $gate_rc); treating that as blocking." >&2 ;;
     esac
     echo "REFUSED: completeness gate blocked teardown of $ID." >&2

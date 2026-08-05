@@ -129,7 +129,8 @@ fm_status_append_once() {  # <status-file> <line-body>
   local file=$1 body=$2 existing
   if [ -f "$file" ]; then
     while IFS= read -r existing || [ -n "$existing" ]; do
-      [ "$(status_line_body "$existing")" != "$body" ] || return 0
+      _fm_status_strip_stamp "$existing"
+      [ "$_FM_STATUS_BODY" != "$body" ] || return 0
     done < "$file"
   fi
   printf '%s %s\n' "$(fm_status_stamp)" "$body" >> "$file" || return 1

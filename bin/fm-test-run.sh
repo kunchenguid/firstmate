@@ -137,7 +137,8 @@ family_for_basename() {
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-decision-hold-lifecycle.test.sh|\
-    fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
+    fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|\
+    fm-ground.test.sh|fm-verify-delivered.test.sh|fm-grok-harness.test.sh|\
     fm-kimi-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
@@ -193,6 +194,7 @@ family_for_basename() {
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
+    fm-completeness.test.sh|\
     fm-pr-check-security.test.sh|fm-pr-merge.test.sh|fm-review-diff.test.sh|\
     fm-teardown.test.sh|fm-x-mode.test.sh)
       printf '%s\n' pr-forge
@@ -871,8 +873,29 @@ families_for_changed_path() {
       printf '%s\n' real-herdr-gated
       ;;
     bin/fm-watch*|bin/fm-wake*|\
-    bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
+    bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
       printf '%s\n' watcher-wake-lock
+      ;;
+    bin/fm-classify-lib.sh)
+      # Owner of the status-line stamp contract, so its blast radius is every
+      # suite whose script parses a status line through it, not the wake
+      # families alone: fm-brief.sh and fm-crew-state.sh (pure-contract-unit),
+      # fm-spawn.sh (backend-dispatch), fm-procevent-remote-reply.sh
+      # (secondmate), fm-fleet-snapshot.sh (snapshot-bearings), and the
+      # pending-reply suite that also covers fm-secondmate-report.sh.
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' backend-dispatch
+      printf '%s\n' secondmate
+      printf '%s\n' snapshot-bearings
+      printf '%s\n' "__script__:fm-pending-reply.test.sh"
+      ;;
+    bin/fm-completeness*)
+      # The gate and its rules data guard fm-teardown.sh and fm-merge-local.sh.
+      printf '%s\n' pr-forge
+      ;;
+    bin/fm-ground.sh|bin/fm-verify-delivered.sh)
+      printf '%s\n' pure-contract-unit
       ;;
     bin/fm-afk*)
       printf '%s\n' afk

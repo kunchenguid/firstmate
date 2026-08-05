@@ -492,7 +492,31 @@ test_task_mode_long_claim_list_is_truncated_not_fatal() {
   assert_contains "$OUT" "CHECKLIST: 1200 claim line(s) extracted" "the count reports the truncated display, not every claim found"
   assert_contains "$OUT" "40:40. Every call site number 40 " "the display stopped short of its 40-line cap"
   assert_not_contains "$OUT" "41:41. Every call site number 41 " "the display printed past its 40-line cap"
+  # Outcome 3's failure shape in the checklist path: a list shorter than the
+  # count it reports lets an operator finish 40 lines and read that as the whole
+  # brief. The capped display must say so where the list ends AND in the count.
+  assert_contains "$OUT" "1160 further claim line(s) NOT shown" "the capped list did not say how much it withheld"
+  assert_contains "$OUT" "this display stops at the first 40 of 1200" "the capped list did not state its shown-of-total"
+  assert_contains "$OUT" "only the first 40 shown above" "the count did not admit the list was partial"
+  assert_contains "$OUT" "NOT the whole brief" "the count let a partial list read as complete coverage"
   pass "fm-verify-delivered.sh: a long claim list is truncated for display, not fatal"
+}
+
+# The honest counterpart: when nothing was withheld, the output says so rather
+# than leaving the operator to wonder whether a cap was hit.
+test_task_mode_short_claim_list_reports_full_coverage() {
+  local home="$TMP_ROOT/home-short-claims"
+  mkdir -p "$home/data/fm-short"
+  awk 'BEGIN {
+    for (i = 1; i <= 3; i++)
+      printf "%d. Every call site number %d must consult the graph.\n", i, i
+  }' > "$home/data/fm-short/brief.md"
+
+  run_env "FM_HOME=$home" -- fm-short
+  expect_code 0 "$RC" "a short claim list must exit 0"
+  assert_contains "$OUT" "CHECKLIST: 3 claim line(s) extracted, all shown above" "an uncapped list did not report full coverage"
+  assert_not_contains "$OUT" "NOT shown" "an uncapped list claimed to withhold lines"
+  pass "fm-verify-delivered.sh: an uncapped claim list reports that every claim is shown"
 }
 
 # The same no-match hazard in the other mode: a brief whose claims do not parse
@@ -572,6 +596,7 @@ test_unclassified_failure_in_a_mode_function_reports_search_failed
 test_no_match_is_a_result_not_a_fatal
 test_task_mode_extracts_claims
 test_task_mode_long_claim_list_is_truncated_not_fatal
+test_task_mode_short_claim_list_reports_full_coverage
 test_task_mode_without_claims_reports_inspected_nothing
 test_task_mode_missing_brief_is_usage_error
 test_no_mode_is_usage_error

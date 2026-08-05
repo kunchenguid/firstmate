@@ -254,7 +254,8 @@ verify_brand_identity() {
 # --- task-id mode ----------------------------------------------------------
 
 verify_task_claims() {
-  local id=$1 brief claims st=0
+  local id=$1 brief claims claim_n st=0
+  local cap=40
   brief="$DATA/$id/brief.md"
   [ -f "$brief" ] || usage_error "no brief for '$id' at $brief"
 
@@ -267,14 +268,29 @@ verify_task_claims() {
     inspected_nothing "no acceptance-shaped line in $brief; the claim pattern extracted nothing to verify"
   fi
 
+  claim_n=$(count_lines "$claims")
+
   printf '=== ACCEPTANCE CLAIMS in the brief for %s - verify EACH against merged main ===\n' "$id"
   # sed, not head: head can close the pipe early, and under pipefail that turns
   # a long claim list into a spurious failure.
-  printf '%s\n' "$claims" | sed -n '1,40p'
+  printf '%s\n' "$claims" | sed -n "1,${cap}p"
+  # The printed list is capped but the count is not, and a list that says less
+  # than it counted is outcome 3's own failure shape in the checklist path: an
+  # operator works through what is shown and reads it as the whole brief. Say
+  # what was withheld, in both the list and the closing count.
+  if [ "$claim_n" -gt "$cap" ]; then
+    printf '  ... %s further claim line(s) NOT shown: this display stops at the first %s of %s.\n' \
+      "$((claim_n - cap))" "$cap" "$claim_n"
+  fi
   printf '\n'
   printf '>>> For each line above: does merged main actually satisfy it? Check, do not assume.\n'
   printf ">>> A worker's 'done' is a claim. The code is the evidence.\n"
-  printf 'CHECKLIST: %s claim line(s) extracted. This is a checklist, NOT a clean verdict.\n' "$(count_lines "$claims")"
+  if [ "$claim_n" -gt "$cap" ]; then
+    printf 'CHECKLIST: %s claim line(s) extracted, only the first %s shown above, so the list above is NOT the whole brief. This is a checklist, NOT a clean verdict.\n' \
+      "$claim_n" "$cap"
+  else
+    printf 'CHECKLIST: %s claim line(s) extracted, all shown above. This is a checklist, NOT a clean verdict.\n' "$claim_n"
+  fi
   exit 0
 }
 

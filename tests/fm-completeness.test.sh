@@ -99,6 +99,44 @@ else
   fail "malformed --meta key did not exit 64"
 fi
 
+# The rules file is the single owner of the axis vocabulary: a value it declares
+# must be accepted even though the shipped file has never heard of it, or a
+# rules-file edit would wedge teardown and the local merge (both treat 64 as
+# blocking) instead of routing through the fail-open path.
+python3 - "$ROOT/bin/fm-completeness.rules.json" "$TMP_ROOT/extra-kind.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as handle:
+    rules = json.load(handle)
+rules["axes"]["kind"] = list(rules["axes"]["kind"]) + ["surveyor"]
+with open(sys.argv[2], "w") as handle:
+    json.dump(rules, handle)
+PY
+if [ "$(FM_COMPLETENESS_RULES="$TMP_ROOT/extra-kind.json" "$GATE" --kind surveyor --landed pushed --worktree clean >/dev/null 2>&1; echo $?)" = "0" ]; then
+  pass "an axis value the active rules file declares is accepted, not rejected as invalid facts"
+else
+  fail "a value declared by the active rules file was not accepted"
+fi
+if [ "$(FM_COMPLETENESS_RULES="$TMP_ROOT/extra-kind.json" "$GATE" --kind surveyorr --landed pushed >/dev/null 2>&1; echo $?)" = "64" ]; then
+  pass "a value the active rules file does not declare still exits 64"
+else
+  fail "a value undeclared by the active rules file did not exit 64"
+fi
+
+# A rules file with no axes at all is rules breakage, not invalid facts.
+printf '{"hard_rules": [], "soft_rules": []}' > "$TMP_ROOT/no-axes.json"
+if [ "$(FM_COMPLETENESS_RULES="$TMP_ROOT/no-axes.json" "$GATE" --kind ship --landed pushed >/dev/null 2>&1; echo $?)" = "0" ]; then
+  pass "a rules file without an axes object fails open"
+else
+  fail "a rules file without an axes object did not fail open"
+fi
+if [ "$(FM_COMPLETENESS_STRICT=1 FM_COMPLETENESS_RULES="$TMP_ROOT/no-axes.json" "$GATE" --kind ship --landed pushed >/dev/null 2>&1; echo $?)" = "3" ]; then
+  pass "strict mode enforces on a rules file without an axes object"
+else
+  fail "strict mode did not enforce on a rules file without an axes object"
+fi
+
 # A blocked claim must name the invariant it violated from the engine's own
 # result, not from whichever key happens to be serialized next to it. This stub
 # engine emits a BLOCKED verdict with no "counterexample" key at all: the naming
@@ -106,6 +144,9 @@ fi
 STUB_DIR="$TMP_ROOT/stub-engine"
 mkdir -p "$STUB_DIR"
 cp "$GATE" "$STUB_DIR/fm-completeness-check.sh"
+# Only the engine is stubbed: the wrapper reads its axis vocabulary from the
+# rules file beside it, exactly as the engine resolves it.
+cp "$ROOT/bin/fm-completeness.rules.json" "$STUB_DIR/fm-completeness.rules.json"
 cat > "$STUB_DIR/fm-completeness.py" <<'PY'
 import json
 import sys

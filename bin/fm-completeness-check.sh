@@ -32,6 +32,9 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 ENGINE="$SCRIPT_DIR/fm-completeness.py"
+# Resolved exactly as bin/fm-completeness.py resolves it, so the wrapper and the
+# engine always read the same rules.
+RULES="${FM_COMPLETENESS_RULES:-$SCRIPT_DIR/fm-completeness.rules.json}"
 
 GATE=""
 ID=""
@@ -208,7 +211,7 @@ fi
 
 case "$ID" in *\"*|*\\*) echo "fm-completeness-check: refusing id with quote/backslash" >&2; exit 64 ;; esac
 
-# Every interpolated axis value must be one the rules file declares. An
+# Every interpolated axis value must be one the ACTIVE rules file declares. An
 # undeclared value is a typo or corrupted meta, not a pass: refuse loudly
 # (exit 64) instead of letting the engine's error fail open.
 validate_axis() {
@@ -218,13 +221,63 @@ validate_axis() {
     *) echo "fm-completeness-check: invalid $name '$value' (expected one of: $allowed)" >&2; exit 64 ;;
   esac
 }
+
+# --gate and --mode are this wrapper's own flags (they choose fact derivation and
+# reporting), not axes the rules file declares, so they are checked before the
+# rules file is even read.
 validate_axis --gate "${GATE:-teardown}" "teardown merge done"
 validate_axis --mode "$MODE" "strict graded"
-validate_axis --kind "$KIND" "ship scout secondmate"
-validate_axis --landed "$LANDED" "merged pushed local_merged none"
-validate_axis --report "$REPORT" "present absent"
-validate_axis --worktree "$WORKTREE" "clean holds_unlanded_work"
-validate_axis --captain-approval "$APPROVAL" "granted not_required pending"
+
+# The rules file owns the vocabulary (it is DATA, and $FM_COMPLETENESS_RULES may
+# point at another one), so the allowed values are read from it rather than
+# restated here: a second hand-maintained copy would reject correctly-derived
+# facts with exit 64 the moment the file declared a value it had not been taught,
+# and both callers treat 64 as blocking. Emitted as "<axis> <value>..." lines.
+read_rules_axes() {
+  python3 - "$RULES" <<'PY' 2>/dev/null
+import json
+import sys
+
+with open(sys.argv[1]) as handle:
+    axes = json.load(handle)["axes"]
+if not isinstance(axes, dict) or not axes:
+    raise SystemExit(1)
+for axis, values in axes.items():
+    values = [str(value) for value in values]
+    if not values or " " in str(axis) or any(" " in value for value in values):
+        raise SystemExit(1)
+    sys.stdout.write("%s %s\n" % (axis, " ".join(values)))
+PY
+}
+
+# A rules file that cannot be read or parsed is a rules error, never invalid
+# facts: it takes the same fail-open path as every other rules-file breakage.
+rules_axes=$(read_rules_axes) || rules_axes=""
+[ -n "$rules_axes" ] || fail_open "cannot read the axis vocabulary from rules file $RULES"
+
+rules_axis_values() {  # <axis>
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      "$1 "*) printf '%s' "${line#* }"; return 0 ;;
+    esac
+  done <<EOF
+$rules_axes
+EOF
+  return 1
+}
+
+validate_rules_axis() {  # <flag-name> <axis> <value>
+  local allowed
+  allowed=$(rules_axis_values "$2") || fail_open "rules file $RULES declares no '$2' axis"
+  validate_axis "$1" "$3" "$allowed"
+}
+
+validate_rules_axis --kind kind "$KIND"
+validate_rules_axis --landed landed "$LANDED"
+validate_rules_axis --report report "$REPORT"
+validate_rules_axis --worktree worktree "$WORKTREE"
+validate_rules_axis --captain-approval captain_approval "$APPROVAL"
 for key in ${META_KEYS[@]+"${META_KEYS[@]}"}; do
   case "$key" in
     ''|*[!A-Za-z0-9_]*) echo "fm-completeness-check: invalid --meta key '$key' (expected [A-Za-z0-9_]+)" >&2; exit 64 ;;

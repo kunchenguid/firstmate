@@ -629,6 +629,51 @@ test_unrunnable_completeness_gate_refuses_teardown() {
   pass "a completeness gate that cannot run blocks teardown instead of passing"
 }
 
+# The gate refuses before validate_worktree_teardown_safety runs, so its blocked
+# verdict is the only thing the operator sees. A named invariant with no way to
+# clear it invites --force, the single most destructive answer, so the refusal
+# must carry the same remediation the pre-empted bash check would have printed.
+test_blocked_completeness_gate_names_the_remediation() {
+  local case_dir rc fake_root entry wt_head
+  case_dir=$(make_case gate-blocked)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+
+  fake_root="$case_dir/fakeroot"
+  mkdir -p "$fake_root/bin" "$fake_root/data" "$fake_root/state"
+  for entry in "$ROOT"/bin/*; do
+    ln -s "$entry" "$fake_root/bin/$(basename "$entry")"
+  done
+  rm -f "$fake_root/bin/fm-completeness-check.sh"
+  cat > "$fake_root/bin/fm-completeness-check.sh" <<'SH'
+#!/usr/bin/env bash
+echo "completeness gate: BLOCKED - task-x1 (teardown) is provably premature" >&2
+echo "  violated: NO_UNLANDED_AT_TEARDOWN" >&2
+exit 2
+SH
+  chmod 0755 "$fake_root/bin/fm-completeness-check.sh"
+
+  set +e
+  FM_ROOT_OVERRIDE="$fake_root" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$TEARDOWN" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gate-blocked: teardown should refuse on a blocked verdict"
+  grep -q 'violated: NO_UNLANDED_AT_TEARDOWN' "$case_dir/stderr" \
+    || fail "gate-blocked: the named invariant was lost"
+  grep -q 'bin/fm-merge-local.sh after the captain approves' "$case_dir/stderr" \
+    || fail "gate-blocked: the refusal did not name the merge remediation"
+  grep -q "push to a fork/remote, or get the captain's explicit OK to discard, then --force" "$case_dir/stderr" \
+    || fail "gate-blocked: the refusal did not name the remaining remediations"
+  pass "a blocked completeness gate names the remediation the bash check would have printed"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -1870,6 +1915,7 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_unrunnable_completeness_gate_refuses_teardown
+test_blocked_completeness_gate_names_the_remediation
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
