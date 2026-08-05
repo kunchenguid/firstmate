@@ -27,7 +27,11 @@
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
 #      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution.
+#      diverged from it, invalidates attribution. A run head that no longer
+#      resolves here is the live pipeline's tip advanced in the daemon's own
+#      repo; these read-only lookups attribute it (see nm_run_head_matches_worktree),
+#      while the strict shared owner that fm-teardown.sh's destructive abort
+#      consumes never does.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -335,24 +339,32 @@ nm_ci_checks_state() {
 # matching row's status word (running/completed/cancelled/failed), or empty
 # when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
 nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br sha
+  local branch=$1 out row st br sha
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
     row=$(trim "$row")
     [ -n "$row" ] || continue
-    st=${row%% *}
-    rest=${row#* }
-    rest=$(trim "$rest")
-    br=${rest%% *}
-    rest=${rest#* }
-    rest=$(trim "$rest")
-    sha=${rest%% *}
+    read -r st br sha _ <<< "$row"
     if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status: skip a same-branch row whose
-      # short-sha does not match this worktree (rewritten or advanced tip).
-      if ! nm_coarse_head_matches_worktree "$sha"; then
-        continue
+      # A truncated "<status> <branch>" row has no sha column: read leaves sha
+      # empty and a non-hex token is rejected, so a missing head is never taken
+      # as a live head.
+      case "$sha" in ''|*[!0-9a-fA-F]*) continue ;; esac
+      # Read-only attribution split (see nm_run_head_matches_worktree below and
+      # fm-teardown.sh): a resolvable head uses the STRICT shared code-identity
+      # rule (exact, or worktree HEAD is an ancestor of the run tip; a
+      # strict-ancestor/diverged head is skipped). An UNRESOLVABLE head - the
+      # live pipeline's tip advanced in the daemon's own repo, not fetched here -
+      # is attributed only for a live running/fixing row, because a terminal
+      # unresolvable row may be ambiguous daemon-only history from a reused
+      # branch. This leniency is safe only because this path merely READS state;
+      # it must never move to the shared owner, which fm-teardown.sh consumes to
+      # decide a destructive run abort.
+      if git -C "$WT" rev-parse --verify "${sha}^{commit}" >/dev/null 2>&1; then
+        fm_nm_head_matches_worktree "$WT" "$sha" || continue
+      else
+        case "$st" in running|fixing) ;; *) continue ;; esac
       fi
       printf '%s' "$st"
       return 0
@@ -366,19 +378,31 @@ nm_runs_status_for_branch() {  # <branch>
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
 # 0 if the active axi-status run's head field matches this worktree's code
-# identity. Branch match is a precondition (caller). Rule owned by
-# fm_nm_head_matches_worktree in bin/fm-nm-run-lib.sh.
+# identity. Branch match is a precondition (caller). The resolvable rule is owned
+# by the STRICT, fail-closed fm_nm_head_matches_worktree in bin/fm-nm-run-lib.sh.
+# This wrapper adds a read-only leniency ON TOP: a non-empty head that does not
+# resolve here is the live pipeline's tip advanced in the no-mistakes daemon's
+# own repo, and `axi status` already vouched this is the branch's
+# active-or-most-recent run, so attribute it - a live run must not read as failed
+# just because its advanced tip was never fetched into this worktree.
+#
+# The leniency lives HERE, not in the shared owner, on purpose. The two call
+# sites have opposite risk profiles: fm-crew-state.sh only READS and reports a
+# state, so a wrong attribution costs a wrong label; fm-teardown.sh feeds the
+# same shared predicate into a decision to ABORT a parked validation run, where a
+# wrong match destroys another task's work. Leniency that is right for a status
+# read is dangerous on that destructive path, so the shared owner stays strict
+# and this benign interpretation is local. Do NOT re-unify them by folding this
+# into fm_nm_head_matches_worktree - it would silently arm teardown.
 nm_run_head_matches_worktree() {
   local run_head
   run_head=$(strip_quotes "$(nm_field head)")
-  fm_nm_head_matches_worktree "$WT" "$run_head"
-}
-
-# Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
-# sha for this branch row matches the worktree head under the same rules as
-# nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
-nm_coarse_head_matches_worktree() {  # <short-sha>
-  fm_nm_head_matches_worktree "$WT" "$1"
+  [ -n "$run_head" ] || return 1
+  fm_nm_head_matches_worktree "$WT" "$run_head" && return 0
+  # Not a resolvable match: attribute only when the head does not resolve here
+  # (advanced daemon-side tip); a resolvable-but-diverged head stays rejected.
+  git -C "$WT" rev-parse --verify "${run_head}^{commit}" >/dev/null 2>&1 && return 1
+  return 0
 }
 
 HAVE_RUN=0
@@ -430,7 +454,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     # surfaced through signal_reason_is_actionable regardless of this
     # coarse-vs-full distinction, so a real gate is never silently missed.
     case "$COARSE_STATUS" in
-      running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
+      running|fixing) RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
       failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
       cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;

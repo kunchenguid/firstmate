@@ -1074,6 +1074,12 @@ task_status_is_own_parked_run() {  # <worktree> <axi-status-output>
   run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$out" branch)")
   [ -n "$run_branch" ] && [ "$run_branch" = "$branch" ] || return 1
   run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$out" head)")
+  # This is the DESTRUCTIVE call site of the shared code-identity rule: a match
+  # here authorizes aborting a parked run. It MUST stay strict/fail-closed - an
+  # unresolvable head is NOT treated as this task's run, so teardown never aborts
+  # another task's work on an advanced or reused-branch head. The lenient
+  # read-only interpretation (attribute an unresolvable advanced tip) lives only
+  # in bin/fm-crew-state.sh's status read; do not fold it into the shared owner.
   fm_nm_head_matches_worktree "$wt" "$run_head" || return 1
   outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$out" outcome)")
   [ -z "$outcome" ] || return 1

@@ -1309,6 +1309,167 @@ test_missing_run_head_falls_back_to_current_state() {
   pass "missing run head falls back instead of matching by branch"
 }
 
+# Regression: a live pipeline advances the run tip (rebase + fix commits) in the
+# no-mistakes daemon's OWN repo, so the run head never lands in this worktree's
+# object db. The newest same-branch runs-list row therefore names an
+# unresolvable sha. It must still be attributed to this crew (working), not
+# skipped in favour of an older, superseded row still on the pre-run worktree
+# sha - that fall-through mislabelled an actively-fixing run "failed" and, via a
+# crew_absorb_class=none verdict, fired a no-timer stale cascade.
+test_runs_list_advanced_unresolvable_tip_stays_working() {
+  reset_fakes
+  local d head_short absent_short out
+  d=$(new_case runs-advanced-unresolvable)
+  make_repo_on_branch "$d/wt" fm/feat-adv-tip
+  head_short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  # Mint a real, well-formed sha in a throwaway repo to stand in for the
+  # daemon-side advanced tip that this worktree can never resolve.
+  git -C "$d" init -q other
+  git -C "$d/other" commit -q --allow-empty -m 'daemon-side pipeline fix commit'
+  absent_short=$(git -C "$d/other" rev-parse --short=7 HEAD)
+  git -C "$d/wt" rev-parse --verify "${absent_short}^{commit}" >/dev/null 2>&1 \
+    && fail "the advanced-tip sha must be unresolvable in the worktree for this case"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/adv-tip.meta" "window=fm:fm-adv-tip" "worktree=$d/wt" "kind=ship"
+  # Force the runs-list fallback: the bare axi status answers another crew's branch.
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  # Newest row: the live run on the advanced (unresolvable) tip. Older row: a
+  # cancelled run still sitting on the pre-run worktree sha. The live row wins.
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-adv-tip ${absent_short}  2026-07-02 22:10
+  cancelled  fm/feat-adv-tip ${head_short}  2026-07-02 20:00
+EOF
+)"
+  out=$(run_crew_state "$d" adv-tip)
+  assert_contains "$out" "state: working" "a live run on an advanced (unresolvable) tip stays working"
+  assert_contains "$out" "source: run-step" "the advanced-tip live run is attributed via run-step"
+  assert_not_contains "$out" "state: failed" "must not fall through to the older cancelled row"
+  pass "advanced (unresolvable) pipeline tip is attributed, not mislabelled failed"
+}
+
+test_runs_list_fixing_unresolvable_tip_stays_working() {
+  reset_fakes
+  local d absent_short out
+  d=$(new_case runs-fixing-unresolvable)
+  make_repo_on_branch "$d/wt" fm/feat-fixing
+  git -C "$d" init -q other
+  git -C "$d/other" commit -q --allow-empty -m 'daemon-side fixing commit'
+  absent_short=$(git -C "$d/other" rev-parse --short=7 HEAD)
+  git -C "$d/wt" rev-parse --verify "${absent_short}^{commit}" >/dev/null 2>&1 \
+    && fail "the fixing sha must be unresolvable in the worktree for this case"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/fixing.meta" "window=fm:fm-fixing" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  fixing  fm/feat-fixing ${absent_short}  2026-07-02 22:10
+EOF
+)"
+  out=$(run_crew_state "$d" fixing)
+  assert_contains "$out" "state: working" "a fixing run on an unresolvable tip stays working"
+  assert_contains "$out" "source: run-step" "the fixing run is attributed via run-step"
+  assert_not_contains "$out" "state: unknown" "fixing must not map to unknown"
+  pass "unresolvable fixing pipeline tip is attributed as working"
+}
+
+test_runs_list_missing_head_row_skipped() {
+  reset_fakes
+  local d out
+  d=$(new_case runs-missing-head)
+  make_repo_on_branch "$d/wt" fm/feat-headless
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/headless.meta" "window=fm:fm-headless" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: current implementation in progress\n' > "$d/state/headless.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST='  running  fm/feat-headless'
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" headless
+  out=$(run_crew_state "$d" headless)
+  assert_not_contains "$out" "source: run-step" "a runs-list row without a head must not be attributed"
+  assert_contains "$out" "source: status-log" "a headless row falls back to current state"
+  assert_contains "$out" "state: working" "the current working status remains authoritative"
+  pass "runs walk skips a row with no head"
+}
+
+# A terminal runs-list row on an unresolvable daemon-only tip may be historical
+# state from a reused branch. Unlike an active row, it has no signal proving the
+# tip belongs to the current crew, so it must not override current-state sources.
+test_runs_list_terminal_unresolvable_row_skipped() {
+  reset_fakes
+  local d absent_short out
+  d=$(new_case runs-terminal-unresolvable)
+  make_repo_on_branch "$d/wt" fm/feat-historical
+  git -C "$d" init -q other
+  git -C "$d/other" commit -q --allow-empty -m 'historical daemon-side tip'
+  absent_short=$(git -C "$d/other" rev-parse --short=7 HEAD)
+  git -C "$d/wt" rev-parse --verify "${absent_short}^{commit}" >/dev/null 2>&1 \
+    && fail "the historical terminal sha must be unresolvable in the worktree for this case"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/historical.meta" "window=fm:fm-historical" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: current implementation in progress\n' > "$d/state/historical.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  cancelled  fm/feat-historical ${absent_short}  2026-07-02 20:00
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" historical
+  out=$(run_crew_state "$d" historical)
+  assert_not_contains "$out" "source: run-step" "an unresolvable terminal row must not be attributed"
+  assert_not_contains "$out" "state: failed" "an ambiguous historical cancellation must not read failed"
+  assert_contains "$out" "source: status-log" "falls back to current state after skipping terminal history"
+  assert_contains "$out" "state: working" "the current working status remains authoritative"
+  pass "runs walk skips an unresolvable terminal row"
+}
+
+# The advanced-tip attribution must NOT mask a genuinely superseded run: when the
+# worktree HEAD has advanced past the run head (the run's sha is a strict
+# ancestor of HEAD - local work outside the run), that resolvable row is still
+# skipped, and the crew falls back to its current-state sources.
+test_runs_list_superseded_ancestor_row_skipped() {
+  reset_fakes
+  local d anc_short out
+  d=$(new_case runs-superseded-ancestor)
+  make_repo_on_branch "$d/wt" fm/feat-sup
+  anc_short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'local work advanced past the run head'
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/sup.meta" "window=fm:fm-sup" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: stage 2 implementation in progress\n' > "$d/state/sup.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  cancelled  fm/feat-sup ${anc_short}  2026-07-02 20:00
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" sup
+  out=$(run_crew_state "$d" sup)
+  assert_not_contains "$out" "source: run-step" "a strict-ancestor superseded row must not be attributed"
+  assert_not_contains "$out" "state: failed" "a superseded cancelled row must not read failed"
+  assert_contains "$out" "source: status-log" "falls back to current state after skipping the superseded row"
+  pass "runs walk skips a strict-ancestor superseded row"
+}
+
+# The fix must not mask a real terminal state: a genuinely cancelled current run
+# (its sha matches the worktree HEAD) still reports failed.
+test_runs_list_current_cancelled_run_reported_failed() {
+  reset_fakes
+  local d head_short out
+  d=$(new_case runs-current-cancelled)
+  make_repo_on_branch "$d/wt" fm/feat-cancel
+  head_short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/cancel.meta" "window=fm:fm-cancel" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  cancelled  fm/feat-cancel ${head_short}  2026-07-02 22:10
+EOF
+)"
+  out=$(run_crew_state "$d" cancel)
+  assert_contains "$out" "state: failed" "a genuinely cancelled current run reports failed"
+  assert_contains "$out" "source: run-step" "the cancelled current run is attributed via run-step"
+  pass "runs walk reports a genuinely cancelled current run as failed"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1331,6 +1492,12 @@ test_terminal_passed
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
+test_runs_list_advanced_unresolvable_tip_stays_working
+test_runs_list_fixing_unresolvable_tip_stays_working
+test_runs_list_missing_head_row_skipped
+test_runs_list_terminal_unresolvable_row_skipped
+test_runs_list_superseded_ancestor_row_skipped
+test_runs_list_current_cancelled_run_reported_failed
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
