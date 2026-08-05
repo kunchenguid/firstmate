@@ -59,23 +59,62 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)}"
 REQUIRED_TOOLS=(git jq herdr tasks-axi treehouse)
 HARNESS_TOOLS=(claude codex opencode pi pi-signed grok kimi cursor-agent)
 
-# Resolve a harness executable like the local spawn path does. cursor-agent is
-# the one harness whose user-local install ($HOME/.local/bin) is often absent
-# from a non-interactive login PATH, mirroring resolve_cursor_binary in
+# Resolve a harness executable like the local spawn path does. Cursor is the
+# one harness whose user-local install ($HOME/.local/bin) is often absent from
+# a non-interactive login PATH, mirroring resolve_cursor_binary in
 # bin/fm-spawn.sh; every other harness resolves from PATH only.
+# Cursor's lookup order matches resolve_cursor_binary exactly: cursor-agent
+# from PATH, then the legacy alias `agent` from PATH (fallback only - the name
+# is too generic to trust as the primary pick), then the ~/.local/bin
+# installs for both names. The generic `agent` name is NEVER added to
+# HARNESS_TOOLS: it is resolved only as a Cursor alias here, so an unrelated
+# executable named agent cannot classify as a separate harness.
 fm_remote_doctor_resolve_harness() {  # <name>
-  local name=$1 resolved fallback
+  local name=$1 resolved dir cursor_name
+  # A generic harness resolves from PATH only. Cursor is the exception: it
+  # ships two names and a user-local install, so its lookup order matches
+  # resolve_cursor_binary in bin/fm-spawn.sh exactly - cursor-agent from
+  # PATH, then the legacy alias `agent` from PATH (fallback only; the name is
+  # too generic to trust as the primary pick), then the ~/.local/bin
+  # installs for both names. The generic `agent` name is never a standalone
+  # HARNESS_TOOLS entry, so an unrelated executable cannot classify as a
+  # separate harness.
   resolved=$(command -v "$name" 2>/dev/null || true)
   if [ -n "$resolved" ] && [ -x "$resolved" ]; then
-    printf '%s\n' "$resolved"
-    return 0
+    case "$resolved" in
+      /*) printf '%s\n' "$resolved"; return 0 ;;
+      *)
+        dir=$(cd "$(dirname "$resolved")" 2>/dev/null && pwd -P) || dir=
+        if [ -n "$dir" ]; then
+          printf '%s/%s\n' "$dir" "$(basename "$resolved")"
+          return 0
+        fi
+        ;;
+    esac
   fi
   if [ "$name" = cursor-agent ]; then
-    fallback="${HOME:-}/.local/bin/cursor-agent"
-    if [ -n "${HOME:-}" ] && [ -x "$fallback" ]; then
-      printf '%s\n' "$fallback"
-      return 0
-    fi
+    for cursor_name in cursor-agent agent; do
+      resolved=$(command -v "$cursor_name" 2>/dev/null || true)
+      if [ -n "$resolved" ] && [ -x "$resolved" ]; then
+        case "$resolved" in
+          /*) printf '%s\n' "$resolved"; return 0 ;;
+          *)
+            dir=$(cd "$(dirname "$resolved")" 2>/dev/null && pwd -P) || dir=
+            if [ -n "$dir" ]; then
+              printf '%s/%s\n' "$dir" "$(basename "$resolved")"
+              return 0
+            fi
+            ;;
+        esac
+      fi
+    done
+    for cursor_name in cursor-agent agent; do
+      resolved="${HOME:-}/.local/bin/$cursor_name"
+      if [ -n "${HOME:-}" ] && [ -x "$resolved" ]; then
+        printf '%s\n' "$resolved"
+        return 0
+      fi
+    done
   fi
   return 1
 }
