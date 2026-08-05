@@ -28,9 +28,10 @@
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
 #      the same line of history). Local work that advanced past the run head, or
 #      diverged from it, invalidates attribution. A run head that does not
-#      resolve here at all is a THIRD case, not divergence: the pipeline commits
-#      before it pushes, so it is routine and expected mid-run. It is settled
-#      from branch_sync (see nm_run_pipeline_owns_branch), never from the sha.
+#      resolve here at all is a THIRD case, not divergence: the pipeline writes
+#      commits in its own copy, so its advanced head can remain absent from this
+#      worktree throughout the run, including after it pushes. It is settled from
+#      branch_sync (see nm_run_pipeline_owns_branch), never from the sha.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -423,7 +424,7 @@ nm_run_pipeline_owns_branch() {  # <unresolvable-run-head>
   # 4. Same code: the commit this run took custody of binds to our code identity
   #    under the UNCHANGED rule. This is where a rewritten or locally-advanced
   #    branch is still caught - the submitted head is resolvable precisely
-  #    because it predates the pipeline's own unpushed commits.
+  #    because it predates the pipeline's own commits.
   submitted=$(strip_quotes "$(fm_nm_branch_sync_field "$RUN_OUT" pipeline submitted_head)")
   fm_nm_head_matches_worktree "$WT" "$submitted"
 }

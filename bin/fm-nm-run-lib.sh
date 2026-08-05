@@ -81,12 +81,12 @@ fm_nm_branch_sync_field() {  # <toon-output> <section> <key>
 #                   advanced outside the run, or the branch tip was rewritten);
 #                   also the unbindable inputs: missing head, unreadable worktree
 #   2 unresolvable - the run head is not an object in this worktree at all. The
-#                   routine cause is a pipeline that has committed but not yet
-#                   pushed (branch_sync phase pre_push, empty pushed_head), so
-#                   its commits exist only in the gate's own copy. NOT evidence
-#                   of non-ownership: callers must corroborate from another
-#                   binding (fm_nm_branch_sync_field above) or stay conservative,
-#                   but must never read it as divergence.
+#                   routine cause is a pipeline committing in the gate's own
+#                   copy; even after the gate pushes to the remote, those commits
+#                   remain absent here until fetched. NOT evidence of
+#                   non-ownership: callers must corroborate from another binding
+#                   (fm_nm_branch_sync_field above) or stay conservative, but
+#                   must never read it as divergence.
 # Callers using plain `|| return 1` therefore keep the pre-tri-state behavior of
 # refusing to bind on an unresolvable head.
 fm_nm_head_matches_worktree() {  # <worktree> <run_head>
