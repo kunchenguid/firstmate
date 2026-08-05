@@ -551,13 +551,208 @@ test_arm_attaches_and_waits_for_live_fresh_watcher() {
   ! grep -qF 'watcher: FAILED' "$armout" || fail "arm reported FAILED for a healthy watcher"
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "arm disturbed the healthy watcher's lock"
   is_live_non_zombie "$armpid" || fail "arm exited while the seed watcher was still healthy"
-  # After the seed dies, the attached arm must exit 0 (cycle ended).
+  # After the seed dies the attached arm must end, and must say so: no live cycle
+  # exists any more, so it exits non-zero with the terminal line
+  # (test_arm_attach_end_is_never_a_silent_false_attach owns that contract).
   kill "$wpid" 2>/dev/null || true
   wait "$wpid" 2>/dev/null || true
   wait_for_exit "$armpid" 80
   status=$?
-  [ "$status" -eq 0 ] || fail "attached arm did not exit zero after seed died (status $status)"
+  [ "$status" -ne 124 ] || fail "attached arm never returned after the seed died"
+  [ "$status" -ne 0 ] || fail "attached arm exited zero after the seed died, reading as live supervision"
   pass "arm attaches to a live fresh watcher and exits only when that cycle ends"
+}
+
+test_arm_attach_end_is_never_a_silent_false_attach() {
+  # REGRESSION: an `attached` line is true only at the instant it is printed, but
+  # the caller reads the whole buffer after the task completes. The arm used to
+  # exit 0 and SILENT when the attached holder stopped being healthy, leaving
+  # `watcher: attached pid=<N>` as the caller's final word - a pid that no longer
+  # passed the liveness proof, and a beacon age frozen at attach time and so
+  # understated by the whole attach duration. The caller read that as live
+  # supervision and ended its turn with nothing watching the fleet.
+  #
+  # The rows cover every way an attach can stop - the holder exits, the holder
+  # wedges and its beacon goes stale, or this arm is signalled away - and all
+  # assert the same thing: the LAST word is never a bare attach claim.
+  local row dir state fakebin armout armpid status peer identity last claimed
+  for row in holder-exited beacon-stale interrupted; do
+    dir=$(make_case "arm-attach-end-$row")
+    state="$dir/state"
+    fakebin="$dir/fakebin"
+    armout="$dir/arm.out"
+    peer=
+    if [ "$row" = holder-exited ]; then
+      # A genuinely live watcher holding the singleton, which then dies.
+      PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" &
+      peer=$!
+      i=0
+      while [ "$i" -lt 80 ]; do
+        [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$peer" ] && [ -e "$state/.last-watcher-beat" ] && break
+        sleep 0.1
+        i=$((i + 1))
+      done
+      [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$peer" ] || fail "seed watcher ($row) did not take the lock"
+    else
+      # A live, identity-matched holder. The beacon-stale row later wedges it
+      # (stops beating, never exits); the interrupted row leaves it healthy and
+      # signals the arm instead.
+      sleep 300 &
+      peer=$!
+      identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
+      mkdir "$state/.watch.lock"
+      printf '%s\n' "$peer" > "$state/.watch.lock/pid"
+      printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+      printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+      printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+      touch "$state/.last-watcher-beat"
+    fi
+
+    PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$armout" &
+    armpid=$!
+    i=0
+    while [ "$i" -lt 80 ]; do
+      grep -qF "watcher: attached pid=$peer" "$armout" 2>/dev/null && break
+      sleep 0.1
+      i=$((i + 1))
+    done
+    grep -qF "watcher: attached pid=$peer" "$armout" || fail "arm ($row) did not attach to the healthy holder: $(cat "$armout")"
+    # The frozen reading must date itself, so a caller reading it later cannot
+    # mistake an attach-time age for the age now.
+    grep -qE "watcher: attached pid=$peer \(beacon [0-9]+s as of [0-9]{2}:[0-9]{2}:[0-9]{2}\)" "$armout" \
+      || fail "arm ($row) attach line did not stamp when the beacon age was measured: $(cat "$armout")"
+
+    # End the attach.
+    case "$row" in
+      holder-exited)
+        kill -KILL "$peer" 2>/dev/null || true
+        wait "$peer" 2>/dev/null || true
+        ;;
+      beacon-stale)
+        touch -t 200001010000 "$state/.last-watcher-beat"
+        ;;
+      interrupted)
+        kill -TERM "$armpid" 2>/dev/null || true
+        ;;
+    esac
+
+    wait_for_exit "$armpid" 100
+    status=$?
+    [ "$status" -ne 124 ] || fail "arm ($row) never returned after the attached cycle ended"
+
+    # The assertion that catches the bug: with the terminal line removed, the
+    # buffer's final word is the stale `attached` claim.
+    last=$(grep -v '^[[:space:]]*$' "$armout" | tail -1)
+    case "$last" in
+      *"watcher: attached"*)
+        fail "arm ($row) left a bare attach claim as its final word: $last"
+        ;;
+    esac
+    [ "$status" -ne 0 ] || fail "arm ($row) exited zero after the attach stopped, reading as live supervision"
+    if [ "$row" = interrupted ]; then
+      grep -qF "watcher: FAILED - attach interrupted" "$armout" \
+        || fail "arm ($row) did not report that the attach was interrupted: $(cat "$armout")"
+      # The holder is still fine here; the honest report is that WAKE DELIVERY
+      # stopped, not that the watcher died.
+      grep -qF "watcher pid=$peer is still live" "$armout" \
+        || fail "arm ($row) did not distinguish a live holder from a dead one: $(cat "$armout")"
+    else
+      grep -qF "watcher: FAILED - attached cycle ended" "$armout" \
+        || fail "arm ($row) did not report that the attached cycle ended: $(cat "$armout")"
+      grep -qF "(was pid=$peer," "$armout" \
+        || fail "arm ($row) terminal line did not name the holder whose cycle ended: $(cat "$armout")"
+    fi
+
+    # And the claim the caller would otherwise have believed really is false: no
+    # watcher is live for this home at return.
+    claimed=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    if [ "$row" = holder-exited ]; then
+      [ -z "$claimed" ] || ! kill -0 "$claimed" 2>/dev/null \
+        || fail "arm ($row) fixture is wrong: a watcher is still live, so there was no false attach to catch"
+    fi
+    kill "$peer" 2>/dev/null || true
+    wait "$peer" 2>/dev/null || true
+  done
+  pass "arm never leaves a bare attach claim as its final word when an attach stops"
+}
+
+test_arm_attach_end_after_peer_wake_preserves_the_wake() {
+  # The DOMINANT production shape, and why the silent exit fired on nearly every
+  # plain arm in a busy home: fm-watch.sh exits normally as soon as it surfaces a
+  # wake, by design. So an attach routinely lasts only until the next wake, the
+  # holder is gone moments after the `attached` line is printed, and the caller
+  # reads a pid with no live process behind it. No watcher crash is involved.
+  #
+  # Two things must hold when that happens: the arm says the cycle ended, and the
+  # wake the holder queued is still there for the caller to drain, because the
+  # repair for the terminal line is "drain queued wakes, then re-arm".
+  local dir state fakebin armout drain_out check_file peer armpid status i
+  dir=$(make_case arm-attach-end-after-wake)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  drain_out="$dir/drain.out"
+  check_file="$state/task.check.sh"
+  # Emits a wake only once the trigger exists, so the seed watcher blocks first
+  # and lets the arm attach to a genuinely healthy holder.
+  cat > "$check_file" <<'SH'
+#!/usr/bin/env bash
+[ -e "${FM_TEST_WAKE_TRIGGER:-/nonexistent}" ] || exit 0
+printf 'merged: https://example.test/pr/9\n'
+SH
+  chmod +x "$check_file"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_TEST_WAKE_TRIGGER="$dir/trigger" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" &
+  peer=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$peer" ] && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$peer" ] || fail "seed watcher did not take the lock"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_TEST_WAKE_TRIGGER="$dir/trigger" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$peer" "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$peer" "$armout" || fail "arm did not attach to the seed watcher: $(cat "$armout")"
+
+  # The holder now does the normal thing: surface a wake and exit zero.
+  touch "$dir/trigger"
+  wait "$peer" 2>/dev/null \
+    || fail "seed watcher did not exit cleanly after its wake, so this is not the normal-exit path"
+
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -qF 'watcher: FAILED - attached cycle ended' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  wait_for_exit "$armpid" 100
+  status=$?
+  [ "$status" -ne 124 ] || fail "arm never returned after its holder woke and exited: $(cat "$armout")"
+  [ "$status" -ne 0 ] || fail "arm exited zero after its holder woke and exited, reading as live supervision"
+  # The cause text is deliberately not pinned: the holder releases its lock in an
+  # EXIT trap and stays a not-yet-reaped zombie for a moment, so this race
+  # honestly reports either "holder exited" or "lock no longer names that
+  # watcher". Both are true; what must hold is that the ended cycle is reported
+  # at all and names the holder.
+  grep -qF 'watcher: FAILED - attached cycle ended' "$armout" \
+    || fail "arm did not report the ended cycle on the normal peer-wake exit (status $status): $(cat "$armout")"
+  grep -qF "(was pid=$peer," "$armout" \
+    || fail "arm terminal line did not name the holder whose cycle ended: $(cat "$armout")"
+
+  # The queued wake must survive: the caller's repair is drain-then-re-arm, so
+  # reporting the ended cycle must not cost the wake that ended it.
+  FM_HOME="$dir" "$DRAIN" > "$drain_out" || fail "drain after the attached holder's wake failed"
+  grep "$(printf '\tcheck\t')" "$drain_out" | grep -F 'merged: https://example.test/pr/9' >/dev/null \
+    || fail "the wake that ended the attach was lost: $(cat "$drain_out")"
+  pass "arm reports the ended cycle when its holder wakes and exits normally, and the wake survives to drain"
 }
 
 test_arm_starts_and_self_heals() {
@@ -688,12 +883,16 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   grep -qF "watcher: attached pid=$peer" "$armout" || fail "arm did not wait for and attach to the peer watcher: $(cat "$armout")"
   ! grep -qF 'watcher: FAILED' "$armout" || fail "arm falsely reported FAILED during peer startup race"
   is_live_non_zombie "$armpid" || fail "arm exited while the peer was still healthy"
-  # After the peer dies, the attached arm must exit 0 (same as pre-fork attach).
+  # After the peer dies the attached arm must end the same way as the pre-fork
+  # attach: non-zero, with the terminal line, never a silent zero.
   kill "$peer" 2>/dev/null || true
   wait "$peer" 2>/dev/null || true
   wait_for_exit "$armpid" 80
   status=$?
-  [ "$status" -eq 0 ] || fail "attached arm did not exit zero after peer died (status $status): $(cat "$armout")"
+  [ "$status" -ne 124 ] || fail "attached arm never returned after the peer died: $(cat "$armout")"
+  [ "$status" -ne 0 ] || fail "attached arm exited zero after peer died, reading as live supervision: $(cat "$armout")"
+  grep -qF "watcher: FAILED - attached cycle ended" "$armout" \
+    || fail "attached arm did not report that the peer's cycle ended: $(cat "$armout")"
   pass "arm attaches to a peer watcher after child stands down and exits when peer dies"
 }
 
@@ -777,6 +976,8 @@ test_watch_restart_rejects_reused_pid
 test_watch_restart_reports_healthy_peer_without_attaching
 test_watcher_self_evicts_on_lock_takeover
 test_arm_attaches_and_waits_for_live_fresh_watcher
+test_arm_attach_end_is_never_a_silent_false_attach
+test_arm_attach_end_after_peer_wake_preserves_the_wake
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
 test_arm_propagates_immediate_wake_before_confirmation

@@ -23,21 +23,47 @@
 # single source of truth, shared with fm-watch.sh and fm-guard.sh), and prints
 # exactly one unambiguous status line:
 #   watcher: started pid=<N> (beacon fresh)              - it launched one and confirmed it
-#   watcher: attached pid=<N> (beacon <age>s)            - arm mode found a live+fresh watcher
+#   watcher: attached pid=<N> (beacon <age>s as of <hh:mm:ss>)
+#                                                        - arm mode found a live+fresh watcher
 #                                                          holding the lock; this arm attaches and
 #                                                          waits until that cycle ends
 #   watcher: healthy pid=<N> (beacon <age>s)             - restart mode found a live+fresh
 #                                                          watcher it did not own
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
+#   watcher: FAILED - attached cycle ended ...           - an attach ended (below)
+#   watcher: FAILED - attach interrupted ...             - this arm was signalled away (below)
 # It NEVER reports started/attached/healthy off a stale beacon or a dead/reused pid: a
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
-# returns the FAILED line. On started it waits the child and propagates the wake
-# reason; on attached it stays live until the identity-matched holder is no longer
-# healthy, then exits zero so the harness background-notify fires then (not as a
-# false empty wake). On restart-only healthy it exits zero after the duplicate
-# child stands down. On FAILED it exits non-zero so the failure is loud. A live
-# cycle already present means re-arm attaches - do not start a second watcher.
+# returns a FAILED line. On started it waits the child and propagates the wake
+# reason. On restart-only healthy it exits zero after the duplicate child stands
+# down. On FAILED it exits non-zero so the failure is loud. A live cycle already
+# present means re-arm attaches - do not start a second watcher.
+#
+# `attached` is a claim about the INSTANT it is printed, and this script's output
+# outlives that instant: the caller reads the whole buffer after the task
+# completes. So an attach is ALWAYS closed by a terminal line, non-zero, stating
+# the truth at exit with a beacon age recomputed then rather than the frozen
+# attach-time one:
+#   watcher: FAILED - attached cycle ended (<which proof failed>), no live watcher
+#     with a fresh beacon (was pid=<N>, beacon <age>s as of <hh:mm:ss>)
+#   watcher: FAILED - attach interrupted ...   (this arm signalled away; says
+#     whether the holder is still live, because "the watcher is up but nothing is
+#     delivering its wakes" and "nothing is up" need different repairs)
+# Without that closure the arm exited zero and SILENT, leaving `attached pid=<N>`
+# as the caller's final word for a watcher that no longer existed and an age
+# understated by however long the attach ran - a fleet nobody was watching, read
+# as healthy. That fired constantly rather than rarely, because fm-watch.sh exits
+# normally as soon as it surfaces a wake: in a busy home an attach lasts only
+# until the next wake, so nearly every plain arm ended this way. No watcher crash
+# is involved, and --restart was unaffected because it never attaches.
+# The end of an attach is never "supervision is live": the holder is gone and any
+# wake it surfaced is already durable in state/.wake-queue, so the honest report
+# is the loud FAILED vocabulary the caller already repairs on (drain queued wakes,
+# then re-arm) - and draining is what delivers that wake. Reporting FAILED here
+# can at worst cost one redundant watcher if a successor appeared in the same
+# instant; staying silent costs the whole fleet, so the ambiguity resolves toward
+# supervision.
 #
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or report restart-only healthy if a
@@ -89,10 +115,20 @@ healthy_watcher() {
   HEALTHY_PID=$FM_WATCHER_HEALTHY_PID
 }
 
+# A beacon age is only true at the instant it is measured, and the `attached`
+# line is the one reading that routinely gets read much later - it is printed
+# once and then stands unchanged for the whole attach. Stamping the reading with
+# the clock time it was taken is what makes it unmistakable: `beacon 11s as of
+# 14:32:07` read at 14:32:36 states its own staleness, where a bare `beacon 11s`
+# silently understated a true 40s by exactly the 29s since it was printed. The
+# computation itself is exact at call time (verified against stat across the
+# grace boundary), so the honest fix is to date the reading, not to change the
+# arithmetic. Re-printing the line on a timer instead would only produce a stream
+# of readings that each go stale the same way.
 report_attached() {
   local age
   age=$(fm_path_age "$BEAT")
-  echo "watcher: attached pid=$HEALTHY_PID (beacon ${age}s)"
+  echo "watcher: attached pid=$HEALTHY_PID (beacon ${age}s as of $(date +%H:%M:%S))"
 }
 
 report_healthy() {
@@ -101,12 +137,56 @@ report_healthy() {
   echo "watcher: healthy pid=$HEALTHY_PID (beacon ${age}s)"
 }
 
+# Terminal line for an attach that has ended: the holder failed the same honesty
+# gate that let it be reported in the first place (pid gone, identity mismatch, or
+# a beacon that went stale), so no live cycle exists at exit. The age is measured
+# HERE, not carried over from the attach-time line, which is exactly the reading
+# that was understated by the attach duration.
+report_attach_ended() {
+  local ended_pid=$1 age cause
+  age=$(fm_path_age "$BEAT")
+  # Name which proof failed. Diagnosing this by hand (ps the pid, stat the
+  # beacon) is exactly the work the silent exit used to push onto the operator.
+  if ! fm_pid_alive "$ended_pid"; then
+    cause="holder exited"
+  elif ! fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$ended_pid" "$FM_HOME"; then
+    cause="lock no longer names that watcher"
+  else
+    cause="beacon went stale"
+  fi
+  echo "watcher: FAILED - attached cycle ended ($cause), no live watcher with a fresh beacon (was pid=$ended_pid, beacon ${age}s as of $(date +%H:%M:%S))"
+}
+
+# Same closure for the other way an attach stops: this arm is signalled (harness
+# restart, session teardown) while the holder may still be fine. Wake delivery
+# still stops, so the post-condition the caller reads for is false either way -
+# but say which, because "the watcher is still up, the notify path is not" and
+# "nothing is up" need different repairs.
+# shellcheck disable=SC2329 # Invoked from attach_and_wait's HUP/TERM/INT traps.
+report_attach_interrupted() {
+  local ended_pid=$1 age
+  age=$(fm_path_age "$BEAT")
+  if healthy_watcher; then
+    echo "watcher: FAILED - attach interrupted; watcher pid=$HEALTHY_PID is still live (beacon ${age}s) but this arm stopped waiting on it, so no wake reaches the harness until re-armed"
+  else
+    echo "watcher: FAILED - attach interrupted, no live watcher with a fresh beacon (was pid=$ended_pid, beacon ${age}s)"
+  fi
+}
+
 # Stay alive until the attached identity-matched healthy holder is gone.
 # If a different healthy watcher appears mid-attach (rare steal), re-attach.
-# Does not reprint the starter arm's wake reason line; exit 0 lets the harness
-# notify, and firstmate drains state/.wake-queue on background completion.
+# Does not reprint the starter arm's wake reason line: any wake the holder
+# surfaced is already durable in state/.wake-queue, and the caller's repair for
+# the terminal line below is to drain that queue and then re-arm.
 attach_and_wait() {
   local attached_pid=$1
+  # Being signalled is the other way this arm stops waiting, and it must not be
+  # silent either: the harness restarting or tearing down the task would
+  # otherwise leave the buffered `attached` line as the final word. No child to
+  # clean up here - the confirm path cleared its traps and reaped its child
+  # before calling in, and the pre-fork path never forked one.
+  trap 'report_attach_interrupted "$attached_pid"; exit 129' HUP
+  trap 'report_attach_interrupted "$attached_pid"; exit 143' TERM INT
   while :; do
     if healthy_watcher; then
       if [ "$HEALTHY_PID" != "$attached_pid" ]; then
@@ -116,8 +196,11 @@ attach_and_wait() {
       sleep "$ATTACH_POLL"
       continue
     fi
-    # Attached cycle ended (pid gone, identity mismatch, or beacon no longer fresh).
-    exit 0
+    # Attached cycle ended (pid gone, identity mismatch, or beacon no longer
+    # fresh). Never exit silently here: the buffered `attached` line would stand
+    # as the caller's final word and read as live supervision.
+    report_attach_ended "$attached_pid"
+    exit 1
   done
 }
 

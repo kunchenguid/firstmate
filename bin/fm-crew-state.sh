@@ -68,10 +68,10 @@ ID=${1:-}
 
 META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
-NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
+NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-20}
 case "$NM_TIMEOUT" in
-  ''|*[!0-9]*) NM_TIMEOUT=10 ;;
-  *) case "$NM_TIMEOUT" in *[1-9]*) ;; *) NM_TIMEOUT=10 ;; esac ;;
+  ''|*[!0-9]*) NM_TIMEOUT=20 ;;
+  *) case "$NM_TIMEOUT" in *[1-9]*) ;; *) NM_TIMEOUT=20 ;; esac ;;
 esac
 NM_LIVENESS_BIN=${FM_CREW_STATE_NM_LIVENESS_BIN:-$SCRIPT_DIR/fm-nm-step-liveness.sh}
 GH_TIMEOUT=${FM_CREW_STATE_GH_TIMEOUT:-10}

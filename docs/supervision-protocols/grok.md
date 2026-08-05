@@ -8,10 +8,12 @@ When this session owns supervision and away mode is not active:
    `run_terminal_command` with `background: true` on:
    `[ -f __FM_X_MODE_ENV_SH__ ] && . __FM_X_MODE_ENV_SH__; exec bin/fm-watch-arm.sh`
 
-4. Trust only the arm's one-line status.
-5. `watcher: started ...` or `watcher: attached ...` means a live cycle exists.
+4. Trust only the arm's status lines.
+5. `watcher: started ...` or `watcher: attached ...` means a live cycle exists **while that background task is still running**.
    On attach, the background task stays live until that existing cycle ends; it does not exit immediately.
+   Once the task has completed, those lines are history, not a claim about now.
 6. `watcher: FAILED ...` means supervision is down; fix and re-arm.
+   That includes `watcher: FAILED - attached cycle ended ...` (the attach ended and nothing is watching) and `watcher: FAILED - attach interrupted ...` (this arm stopped waiting, so no wake reaches the harness even if the watcher itself is still up).
 7. After a successful start or attach status, end the turn.
    The background arm remains the live wait until the cycle ends.
 8. Waiting is silent.
@@ -28,6 +30,7 @@ When you see a background-task-completed system reminder for the arm:
 5. Do not invent a wake from an attach-status line alone.
    Drain the queue and act only on real wake records or a real watcher reason line.
    Re-arm attaches to an existing cycle when one is already healthy, so the background task stays live until that cycle ends.
+   A completed arm whose last line is neither a wake reason nor a `FAILED` line is itself an alarm: re-arm rather than assume the cycle is still live.
 
 Grok Stop hooks are passive.
 The primary project hook runs `bin/fm-turnend-guard-grok.sh`, which forces at most one same-session follow-up via `grok --resume` when a turn would end blind.
