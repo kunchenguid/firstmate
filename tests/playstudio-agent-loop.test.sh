@@ -14,6 +14,8 @@ test_skill_and_driver_surface() {
   assert_grep 'ensureSession' "$SKILL" "skill omits ensureSession"
   assert_grep 'waitSettled' "$SKILL" "skill omits waitSettled"
   assert_grep 'fixture-blackjack' "$SKILL" "skill omits blackjack fixture"
+  assert_grep 'Continue with Microsoft Entra' "$SKILL" "skill omits Entra self-click guidance"
+  assert_grep 'MFA/passkey' "$SKILL" "skill omits MFA-only block guidance"
   assert_grep 'demo-session' "$SKILL" "skill should explicitly refuse demo-session"
   assert_grep 'Do **not** call agent-host' "$SKILL" "skill lost agent-host turn refusal"
   assert_grep 'never agent-host' "$DRIVER" "driver header lost agent-host refusal"

@@ -27,8 +27,8 @@ This skill owns Firstmate mate procedure and the colocated driver only.
 1. Local PlayStudio stack healthy:
    - `GET http://localhost:3000/api/healthz` → `ok:true`
    - `GET http://127.0.0.1:8081/health` → `status:ok` (preflight only; never drive turns here)
-2. Chrome attach with an Entra session already present (or completable interactively):
-   - Prefer `CHROME_DEVTOOLS_AXI_AUTO_CONNECT=1` against the captain's SSO'd Chrome (remote debugging enabled).
+2. Chrome attach where Entra can complete without a human click wait:
+   - Prefer `CHROME_DEVTOOLS_AXI_AUTO_CONNECT=1` against the captain's Chrome (remote debugging enabled).
    - Or `CHROME_DEVTOOLS_AXI_USER_DATA_DIR=...` / `CHROME_DEVTOOLS_AXI_BROWSER_URL=http://127.0.0.1:9222`.
 3. Same-origin page context on `http://localhost:3000` so `fetch` carries `ps_entry_session` and CSRF `Origin`/`Referer`.
 
@@ -36,8 +36,9 @@ If studio-web or agent-host is down after a main pull, stop and report `blocked:
 
 If agent turns fail with an expired AWS SSO token, refresh the PlayStudio runtime profile (see that checkout's `.env.runtime.local` / `AWS_PROFILE`) via `aws sso login --profile <profile>`, then retry - do not put credentials in the skill or transcripts.
 
-If `ensureSession` stays `authenticated:false`, open `/sign-in`, let the human complete Entra (including MFA), and retry.
-Never invent credentials.
+`ensureSession` opens `/sign-in` when needed and **clicks** Continue with Microsoft Entra ID itself; login auto-completes after that click.
+Block only if the flow actually stops on MFA/passkey.
+Never invent password credentials or call demo-session.
 
 ## Driver
 
@@ -62,7 +63,7 @@ export FM_HOME="${FM_HOME:-$HOME/projects/firstmate}"   # or this home's path
 | Verb | Behavior |
 |---|---|
 | `preflight` | Health-check studio-web + agent-host |
-| `ensureSession` | Attach Chrome; poll `GET /api/entry-shell/session` until `authenticated:true` |
+| `ensureSession` | Attach Chrome; if unauthenticated, click Entra and poll `GET /api/entry-shell/session` until `authenticated:true` (block only on MFA/passkey) |
 | `newProject` | `POST /api/entry-shell/projects` → `{ project, workspaceUrl }` |
 | `openWorkspace` | Navigate workspace URL; optional `POST /api/runs/session` |
 | `sendTurn` | `POST /api/runs/start` with `{ projectId, prompt, sessionId? }` → `{ runId, sessionId }` |

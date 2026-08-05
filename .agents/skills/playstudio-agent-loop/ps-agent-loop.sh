@@ -7,7 +7,7 @@
 # Usage:
 #   ps-agent-loop.sh --help
 #   ps-agent-loop.sh preflight
-#   ps-agent-loop.sh ensureSession [--timeout-sec N]
+#   ps-agent-loop.sh ensureSession [--timeout-sec N]   # clicks Entra; blocks only on MFA/passkey
 #   ps-agent-loop.sh newProject --name NAME [--prompt TEXT] [--path scratch|reuse_engine|reskin]
 #   ps-agent-loop.sh openWorkspace --url URL | --project-id ID
 #   ps-agent-loop.sh sendTurn --project-id ID --prompt TEXT [--session-id ID]
@@ -197,7 +197,7 @@ cmd_ensure_session() {
     esac
   done
   ensure_origin_page
-  local deadline now payload auth
+  local deadline now payload auth clicked=0 mfa
   deadline=$(( $(date +%s) + timeout_sec ))
   while true; do
     payload="$(axi_eval_raw '() => fetch("/api/entry-shell/session").then(r => r.json()).then(j => JSON.stringify(j))')"
@@ -206,12 +206,64 @@ cmd_ensure_session() {
       printf '%s\n' "$payload"
       return 0
     fi
+
+    # Block only when the flow actually stopped on MFA / passkey / verification.
+    mfa="$(axi_eval_raw '() => {
+      const t = (document.body && document.body.innerText || "").toLowerCase();
+      const hits = [];
+      if (/passkey|security key|touch.?id|face.?id/.test(t)) hits.push("passkey");
+      if (/\bmfa\b|multi-factor|two-factor|2fa|authenticator app|enter (the )?code|verification code|approve.*(sign-?in|request)/.test(t)) hits.push("mfa");
+      return JSON.stringify({ hits, href: location.href, title: document.title || "" });
+    }' || echo '{"hits":[]}')"
+    if [ "$(json_get "$mfa" 'len(data.get("hits") or [])')" != "0" ]; then
+      blocked "Entra sign-in stopped on MFA/passkey ($(json_get "$mfa" '",".join(data.get("hits") or [])')) at $(json_get "$mfa" 'data.get("href")') - complete that challenge once, then retry ensureSession"
+    fi
+
     now="$(date +%s)"
     if [ "$now" -ge "$deadline" ]; then
-      blocked "entry-shell session not authenticated after ${timeout_sec}s - complete Entra SSO in the attached Chrome (never password/demo-session), then retry ensureSession"
+      blocked "entry-shell session not authenticated after ${timeout_sec}s after Entra click attempt - inspect attached Chrome (never password/demo-session)"
     fi
-    # Nudge toward sign-in without inventing credentials.
-    axi_eval_raw '() => { if (!location.pathname.startsWith("/sign-in") && !location.pathname.startsWith("/auth")) { location.href="/sign-in?next=/home"; } return location.href; }' >/dev/null || true
+
+    # Drive Entra ourselves: open sign-in and click Microsoft / Entra once.
+    axi_eval_raw '() => {
+      if (!location.pathname.startsWith("/sign-in") && !location.pathname.startsWith("/auth") && !/login\.microsoftonline\.com|login\.live\.com/.test(location.hostname)) {
+        location.href = "/sign-in?next=/home";
+      }
+      return location.href;
+    }' >/dev/null || true
+    sleep 1
+    if [ "$clicked" -eq 0 ]; then
+      # Prefer axi click on a visible Entra control when snapshot exposes one.
+      if ps_axi_try snapshot 2>/dev/null | grep -qiE 'Continue with Microsoft|Microsoft Entra|Entra ID'; then
+        local snap_uid
+        snap_uid="$(ps_axi_try snapshot 2>/dev/null | python3 -c '
+import re, sys
+text = sys.stdin.read()
+# Match axi snapshot lines like: uid=g1:1_20 button "Continue with Microsoft Entra ID"
+pat = re.compile(r"uid=(\S+)\s+button\s+\"([^\"]*(?:Microsoft|Entra)[^\"]*)\"", re.I)
+for m in pat.finditer(text):
+    print(m.group(1))
+    raise SystemExit(0)
+' || true)"
+        if [ -n "${snap_uid:-}" ]; then
+          ps_axi_try click "@${snap_uid}" >/dev/null || true
+          clicked=1
+        fi
+      fi
+      if [ "$clicked" -eq 0 ]; then
+        local click_res
+        click_res="$(axi_eval_raw '() => {
+          const nodes = [...document.querySelectorAll("button, a, [role=button]")];
+          const btn = nodes.find((el) => /microsoft|entra/i.test((el.textContent || el.getAttribute("aria-label") || "").trim()));
+          if (!btn) return JSON.stringify({ clicked: false, reason: "entra_button_not_found" });
+          btn.click();
+          return JSON.stringify({ clicked: true, label: (btn.textContent || "").trim().slice(0, 80) });
+        }' || echo '{"clicked":false}')"
+        if [ "$(json_get "$click_res" 'str(data.get("clicked")).lower()')" = "true" ]; then
+          clicked=1
+        fi
+      fi
+    fi
     sleep 2
   done
 }
