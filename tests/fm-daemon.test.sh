@@ -1503,6 +1503,35 @@ test_wedge_alarm_herdr_multi_object_not_shown_is_a_failure() {
   pass "wedge_alarm_via_herdr: multi-object shown=false fails with the reason from the reporting document"
 }
 
+# Nothing guarantees every document in herdr's stdout stream is an object: a
+# bare progress string, a number, or an array can sit alongside the result.
+# Indexing `.result` before filtering for objects aborts the whole jq program
+# on the first such document, leaving an empty verdict - which downgrades a
+# perfectly readable shown=false to "could not verify" and returns success, the
+# exact fail-open this verification exists to close.
+test_wedge_alarm_herdr_non_object_document_does_not_swallow_failure() {
+  local dir daemon_log rc
+  command -v jq >/dev/null 2>&1 || { pass "herdr non-object document verdict skipped without jq"; return; }
+  dir="$TMP_ROOT/wedge-herdr-non-object-doc"
+  daemon_log="$dir/daemon.log"
+  install_fake_herdr "$dir" \
+    '"progress"
+42
+["chatter"]
+{"id":"cli:notification:show","result":{"reason":"disabled","shown":false,"type":"notification_show"}}'
+  PATH="$FAKE_HERDR_BIN:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+    wedge_alarm_via_herdr "away-mode WEDGED 900s"
+  rc=$?
+  assert_fake_herdr_ran "$dir" "non-object document verdict"
+  [ "$rc" -ne 0 ] \
+    || fail "a shown=false result behind non-object stream documents was treated as a successful delivery"
+  grep -F 'not shown (reason: disabled)' "$daemon_log" >/dev/null \
+    || fail "non-object stream documents swallowed a readable shown=false result: $(cat "$daemon_log" 2>/dev/null)"
+  grep -F 'delivery NOT verified' "$daemon_log" >/dev/null \
+    && fail "an observable non-delivery was downgraded to merely unverified: $(cat "$daemon_log")"
+  pass "wedge_alarm_via_herdr: non-object documents in herdr's stream are skipped, not fatal to the verdict"
+}
+
 # herdr's NotificationShowReason enum also allows rate_limited,
 # no_foreground_client, and busy - all transient, unlike disabled (a
 # structural host limitation). Naming the channel permanently broken on one
@@ -1569,6 +1598,32 @@ test_wedge_alarm_herdr_unverifiable_output_trusts_exit_code() {
   grep -F 'not shown' "$daemon_log" >/dev/null \
     && fail "unparseable herdr output logged a false non-delivery: $(cat "$daemon_log")"
   pass "wedge_alarm_via_herdr: output it cannot parse records an unverified delivery instead of claiming non-delivery"
+}
+
+# When mktemp itself fails (unwritable TMPDIR, full disk) herdr's stdout goes to
+# /dev/null and there is nothing left to parse. That is still an unverified
+# delivery, but the cause is local - blaming herdr's output would point the
+# captain at the wrong machine entirely while a broken temp dir sits unnamed.
+test_wedge_alarm_herdr_uncapturable_output_names_the_temp_failure() {
+  local dir daemon_log rc
+  dir="$TMP_ROOT/wedge-herdr-no-tempfile"
+  daemon_log="$dir/daemon.log"
+  install_fake_herdr "$dir" \
+    '{"id":"cli:notification:show","result":{"reason":"disabled","shown":false,"type":"notification_show"}}'
+  PATH="$FAKE_HERDR_BIN:$PATH" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+    TMPDIR="$dir/no-such-temp-dir" wedge_alarm_via_herdr "away-mode WEDGED 900s"
+  rc=$?
+  assert_fake_herdr_ran "$dir" "uncapturable-output fallback"
+  [ "$rc" -eq 0 ] || fail "an uncapturable herdr result was treated as a proven non-delivery ($rc)"
+  grep -F 'delivery NOT verified' "$daemon_log" >/dev/null \
+    || fail "an uncapturable herdr result left no record that delivery went unverified: $(cat "$daemon_log" 2>/dev/null)"
+  grep -F 'could not create a temp file' "$daemon_log" >/dev/null \
+    || fail "the local temp-file failure was not named as the reason nothing could be read: $(cat "$daemon_log")"
+  grep -F "carried no readable result" "$daemon_log" >/dev/null \
+    && fail "a local temp-file failure was blamed on herdr's output: $(cat "$daemon_log")"
+  grep -F 'not shown' "$daemon_log" >/dev/null \
+    && fail "an uncapturable herdr result logged a non-delivery it never read: $(cat "$daemon_log")"
+  pass "wedge_alarm_via_herdr: a failed capture temp file is named as the local cause, not blamed on herdr"
 }
 
 # A host without jq cannot read herdr's result at all, so the exit code is the
@@ -2203,9 +2258,11 @@ test_wedge_alarm_herdr_not_shown_is_a_failure
 test_wedge_alarm_herdr_shown_true_succeeds
 test_wedge_alarm_herdr_multi_object_stdout_is_bounded
 test_wedge_alarm_herdr_multi_object_not_shown_is_a_failure
+test_wedge_alarm_herdr_non_object_document_does_not_swallow_failure
 test_wedge_alarm_herdr_transient_reason_avoids_permanent_advice
 test_wedge_alarm_herdr_permanent_reason_keeps_command_channel_advice
 test_wedge_alarm_herdr_unverifiable_output_trusts_exit_code
+test_wedge_alarm_herdr_uncapturable_output_names_the_temp_failure
 test_wedge_alarm_herdr_missing_jq_logs_unverified
 test_wedge_alarm_herdr_notifier_pid_survives_capture
 test_wedge_alarm_herdr_capture_is_not_leaked

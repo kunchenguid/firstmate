@@ -873,20 +873,29 @@ wedge_alarm_via_herdr() {  # <summary>
   # independent passes could resolve to two different objects in a multi-object
   # stream, and log a reason belonging to something other than the result that
   # actually reported the failure.
+  #
+  # The leading `objects` filters the STREAM before `.result` indexes anything.
+  # Indexing first aborts the whole jq program on the first non-object document
+  # (a bare string or number alongside the result), which would discard a
+  # readable shown=false sitting later in the same stream and report a proven
+  # non-delivery as merely unverified.
+  [ "$capture" != /dev/null ] || {
+    wedge_alarm_discard_capture
+    log "wedge alarm: herdr notification delivery NOT verified - firstmate could not create a temp file under ${TMPDIR:-/tmp} to capture herdr's output, so its JSON result was discarded locally before it could be read; falling back to the exit code, which herdr can return 0 for without showing anything"
+    return 0; }
   command -v jq >/dev/null 2>&1 || {
     wedge_alarm_discard_capture
     log "wedge alarm: herdr notification delivery NOT verified - jq is unavailable, so herdr's own JSON result went unread; falling back to the exit code, which herdr can return 0 for without showing anything"
     return 0; }
-  verdict=$(jq -n -r 'first(inputs | .result | objects | select(has("shown")) | [(.shown | tostring), (.reason // "" | tostring)] | @tsv)' \
+  verdict=$(jq -n -r 'first(inputs | objects | .result | objects | select(has("shown")) | [(.shown | tostring), (.reason // "" | tostring)] | @tsv)' \
     "$capture" 2>/dev/null)
   wedge_alarm_discard_capture
   [ -n "$verdict" ] || {
     log "wedge alarm: herdr notification delivery NOT verified - herdr's output carried no readable result to confirm it; falling back to the exit code, which herdr can return 0 for without showing anything"
     return 0; }
-  shown=${verdict%%$'\t'*}
-  reason=${verdict#*$'\t'}
+  IFS=$'\t' read -r shown reason <<< "$verdict"
   [ "$shown" != true ] || return 0
-  [ -n "$reason" ] && [ "$reason" != "$verdict" ] || reason=unknown
+  [ -n "$reason" ] || reason=unknown
   # rate_limited, no_foreground_client, and busy are transient - herdr's own
   # NotificationShowReason enum documents them as conditions that clear on
   # their own, unlike disabled (a structural host limitation) or an unknown
