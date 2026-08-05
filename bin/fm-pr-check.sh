@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Record a PR-ready task: store one validated canonical pr=<url> and the forge's
+# Record a forge-change-request-ready task: store one validated canonical pr=<url> and the forge's
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
-# The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
+# The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and change-request data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
@@ -66,9 +66,9 @@ fi
 # head commit as a selectable field; plain glab exposes it only inside its JSON
 # output, which would need a JSON processor firstmate does not require, so a
 # GitLab task records no pr_head. Both consumers already treat it as optional:
-# bin/fm-teardown.sh reads the head from the forge at teardown rather than from
-# metadata and falls back to its provider-agnostic content check, and
-# bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
+# bin/fm-teardown.sh uses a fresh head lookup only for GitHub and otherwise falls
+# back to its provider-agnostic content check, while bin/fm-review-diff.sh falls
+# back to the local branch when no GitHub pull-request head can be fetched.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then

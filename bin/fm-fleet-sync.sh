@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Refresh project clones: fast-forward the checked-out local default branch to
 # origin/<default> when safe, and prune local branches whose upstream tracking
-# branch is gone (the remote branch was deleted, i.e. its PR merged) and that no
+# branch is gone (the remote branch was deleted, normally because its change request merged) and that no
 # worktree still needs.
 # Self-heals the one unambiguously safe drift: a clean, detached HEAD that holds
 # no unique commits (it is an ancestor of origin/<default>) and whose <default>
@@ -212,12 +212,12 @@ fetch_with_packed_refs_lock_guard() {
 
 prune_gone_branches() {
   # Delete local branches whose upstream tracking branch is gone - the remote
-  # branch was deleted, which in this fleet means its PR merged - as long as
+  # branch was deleted, which in this fleet normally means its change request merged - as long as
   # nothing still needs them. Never the checked-out branch, and never a branch
   # that still has a worktree (a live or not-yet-torn-down task). "Gone" plus
   # "no worktree" already proves the work landed: teardown removes a branch's
   # worktree only after confirming the work reached the remote. We deliberately
-  # do NOT also require the branch to be an ancestor of origin/<default> - PRs in
+  # do NOT also require the branch to be an ancestor of origin/<default> - change requests in
   # this fleet are squash-merged, so a merged branch is never an ancestor and
   # such a check would prune nothing. The no-worktree guard is the real safety
   # net. Set FM_FLEET_PRUNE=0 to skip pruning entirely.

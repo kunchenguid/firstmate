@@ -165,7 +165,7 @@ armed: state/e6.check.sh
 ## Upgrade path from an existing armed watch
 
 The stored record gained the provider tag, so its version moved to `fm-pr-poll-registration-v2` and a record written by the previous release no longer parses.
-The existing non-executing migration handles that: it never runs the old artifact, and rebuilds the poll from the task's recorded pull request URL.
+The existing non-executing migration handles that: it never runs the old artifact, and rebuilds the poll from the task's recorded change-request URL.
 Starting from a poll armed exactly as the previous release wrote it:
 
 ```
@@ -197,4 +197,4 @@ It refuses a GitLab merge request URL rather than sending it to the wrong forge,
 
 A GitLab task records no `pr_head=`.
 `gh` exposes the head commit as a selectable field, while plain `glab` exposes it only inside its JSON output, which would need a JSON processor firstmate does not require.
-Both consumers already treat it as optional: `bin/fm-teardown.sh` reads the head from the forge at teardown rather than from metadata and falls back to its provider-agnostic content check, and `bin/fm-review-diff.sh` resolves the head from the remote when none is recorded.
+Both consumers already treat it as optional: `bin/fm-teardown.sh` uses a fresh head lookup only for GitHub and otherwise falls back to its provider-agnostic content check, while `bin/fm-review-diff.sh` falls back to the local branch when no GitHub pull-request head can be fetched.
