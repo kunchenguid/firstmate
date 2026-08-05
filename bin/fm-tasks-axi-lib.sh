@@ -7,11 +7,10 @@
 # `tasks-axi update --help` exposes --archive-body for recoverable note rewrites,
 # and `tasks-axi mv --help` exposes [<id>...] for atomic multi-ID moves required
 # by secondmate handoffs.
-# FM_TASKS_AXI_MIN is the CURRENT LATEST published tasks-axi, captain-bumped
-# periodically to keep the whole fleet on the newest axi tools. It is NOT the
-# minimum feature-introduced version, so never lower it to the earliest release
-# that happens to satisfy the probes below; bin/fm-bootstrap.sh's header owns the
-# axi-family floor policy this follows.
+# FM_TASKS_AXI_MIN follows the axi-family floor policy owned beside the floor
+# constants in bin/fm-bootstrap.sh.
+# Keep it at the current latest, captain-bumped, and never lower it to a feature
+# minimum.
 # The feature probes are a separate concern and stay as defense in depth for
 # stripped or forked builds that advertise a current version without those flags.
 # `config/backlog-backend=manual` opts out of tasks-axi for routine firstmate

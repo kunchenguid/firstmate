@@ -52,21 +52,11 @@
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.31.2.
-#          AXI-FAMILY FLOOR POLICY. Every axi-family floor - gh-axi, lavish-axi,
-#          tasks-axi, and quota-axi - is the CURRENT LATEST published version of
-#          that tool, captain-bumped periodically to keep the whole fleet on the
-#          newest axi tools. It is NOT the minimum feature-introduced version.
-#          Do not "correct" a floor downward to the earliest release that happens
-#          to satisfy some depended-on behavior: that is the opposite of this
-#          policy. The captain accepts that these floors drift upward as new
-#          versions ship, and owns each bump. An installed build below its floor
-#          reports MISSING like no-mistakes, so the operator is asked to upgrade
-#          rather than silently running an older tool. Feature probes are a
-#          separate concern and still apply where a tool has one: tasks-axi is
-#          additionally feature gated on update --archive-body and mv [<id>...].
-#          The floors live in exactly one place per tool: gh-axi and lavish-axi in
-#          the constants below, tasks-axi in fm-tasks-axi-lib.sh, and quota-axi in
-#          fm-quota-axi-lib.sh.
+#          The AXI-family floor policy is owned beside GH_AXI_MIN and
+#          LAVISH_AXI_MIN below; the per-tool owners point there. An installed
+#          build below its floor reports MISSING like no-mistakes, so the operator
+#          is asked to upgrade rather than silently running an older tool.
+#          tasks-axi feature probes remain a separate defense-in-depth check.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
 #          lavish-axi). A compatible tasks-axi default backend is silent.
 #          quota-axi is required for the agent-owned dispatch-profile array
@@ -700,8 +690,13 @@ if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
 fi
 TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
 NO_MISTAKES_MIN=1.31.2
-# gh-axi and lavish-axi floors: current latest, captain-bumped (see the
-# AXI-FAMILY FLOOR POLICY in this file's header). Not a feature minimum.
+# AXI-FAMILY FLOOR POLICY. Every axi-family floor is the CURRENT LATEST published
+# version of that tool, captain-bumped periodically to keep the whole fleet on the
+# newest axi tools. It is NOT the minimum feature-introduced version. These floors
+# are expected to drift upward as new versions ship. Never lower a floor to the
+# earliest release that happens to satisfy some depended-on behavior. The
+# tasks-axi feature probes are an independent defense-in-depth concern, not part
+# of its floor.
 GH_AXI_MIN=0.1.29
 LAVISH_AXI_MIN=0.1.45
 
