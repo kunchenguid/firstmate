@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, MAIN_DIVERGED, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
   A silent bootstrap section, or a BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -27,7 +27,13 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
 - `TANGLE: <remediation>` - the primary checkout is stranded on a feature branch instead of its default branch; `AGENTS.md` section 8 explains why this guard exists and what it protects.
   The work is safe on that branch ref; restore the primary to its default branch with the printed `git -C <root> checkout <default>`, then re-validate that branch in a proper worktree.
-  This is the only sanctioned firstmate-initiated git write to the primary, and it is a non-destructive branch switch that strands nothing.
+  This is the only sanctioned firstmate-initiated change to which branch the primary has checked out, and it is a non-destructive branch switch that strands nothing; the fetch-and-fast-forward writes `/updatefirstmate` already makes to the primary, and the `git -C <root> fetch origin` printed by the `MAIN_DIVERGED` bullet below, are separately sanctioned.
+- `MAIN_DIVERGED: <remediation>` - the primary checkout's local default branch carries commits `origin/<default>` does not, so the fast-forward-only self-update path (`/updatefirstmate`) can no longer reconcile it and declines to advance it, reporting `skipped: diverged from origin/<default>` only to whoever runs that update.
+  This usually means a shared fix landed directly on the local default branch instead of through the normal PR path.
+  The check function never fetches, so it compares against a possibly stale `origin/<default>`; run the printed `git -C <root> fetch origin` first, because a refreshed ref alone can clear the report when the local-only commits are in fact already upstream.
+  If the divergence survives that fetch, inspect the printed `git log origin/<default>..<default>` command to see what only exists locally, then reconcile manually - rebase or merge the local default branch onto `origin/<default>`, or open a PR to land the local-only commits upstream - before rerunning `/updatefirstmate`.
+  This is a report only; do not attempt an automatic fix, and do not force-push, reset, or discard the locally-diverged commits without the captain's explicit authorization per `AGENTS.md`'s destructive-action boundary.
+  In a read-only session that did not get the fleet lock, the same line is advisory and omits the `git fetch origin` instruction, leaving refresh and reconciliation to the session holding the fleet lock.
 - `STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>` - the visible startup-memory budget is not a safe one-line positive decimal file; do not infer the default or propagate it.
   Correct the local primary file, then rerun session start so the normal convergence path can deliver the validated value to secondmate homes.
 - `CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>` - the optional dispatch profile file exists but failed low-cost bootstrap validation; stop profile-based dispatch, report the actionable error, and require correction of the malformed schema, unverified harness name, or invalid harness/effort pair rather than falling back around it or selecting a bad profile.

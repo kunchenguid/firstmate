@@ -13,6 +13,7 @@
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
 #                 "TANGLE: <remediation>",
+#                 "MAIN_DIVERGED: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
@@ -48,6 +49,24 @@
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
+#          A MAIN_DIVERGED line means the firstmate primary checkout's local default
+#          branch carries commits origin/<default> does not - typically a shared fix
+#          landed directly on it instead of through the normal PR path - so the
+#          fast-forward-only self-update path (/updatefirstmate) can no longer
+#          reconcile it and declines to advance it, which is reported only to
+#          whoever runs that update; reconcile manually per the line. Like TANGLE
+#          it is scoped to the primary checkout by branch state, so detached-HEAD
+#          worktrees and secondmate homes never trip it even though they read the
+#          same shared refs, and a tangled primary defers to TANGLE.
+#          The check function itself never fetches (it reads the already-known
+#          origin/<default> ref) and stays silent for a missing origin, a missing
+#          origin/<default> ref, or a local default branch that is merely behind
+#          origin, so a local-only or offline install never false-alarms. The
+#          non-detect-only line's remediation does instruct a `git fetch origin`
+#          refresh, so - like TANGLE's own repair command - a detect-only,
+#          lock-refused session gets advisory-only wording with no such command
+#          instead, leaving refresh and reconciliation to the session holding the
+#          fleet lock.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
@@ -108,6 +127,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
+# shellcheck source=bin/fm-main-divergence-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-main-divergence-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh disable=SC1091
@@ -1080,6 +1101,22 @@ if [ -n "$tangle_branch" ]; then
     echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - read-only session must leave restore work to the session holding the fleet lock"
   else
     echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - restore the primary with: git -C $FM_ROOT checkout $tangle_default, then re-validate the branch in a proper worktree"
+  fi
+fi
+# Origin-divergence check: the firstmate primary checkout's local default branch
+# must remain an ancestor of origin/<default> so the fast-forward-only self-update
+# path (/updatefirstmate) can still reconcile it (see fm-main-divergence-lib.sh).
+# Scoped to the primary checkout on its default branch by the same branch-state
+# discriminator TANGLE uses, so linked worktrees and secondmate homes stay silent.
+# Never mutates; the check function itself never fetches in either mode, but the
+# non-detect-only remediation below does instruct a fetch, so - like TANGLE - a
+# read-only detect-only session gets advisory-only wording with no such command.
+diverged_default=$(fm_primary_diverged_branch "$FM_ROOT" 2>/dev/null || true)
+if [ -n "$diverged_default" ]; then
+  if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" = 1 ]; then
+    echo "MAIN_DIVERGED: primary checkout's '$diverged_default' carries commits origin/$diverged_default did not have as of the last refresh; fast-forward self-update may no longer be able to reconcile it - this check never fetches, so the comparison may be stale; read-only session must leave refreshing and reconciling to the session holding the fleet lock"
+  else
+    echo "MAIN_DIVERGED: primary checkout's '$diverged_default' carries commits origin/$diverged_default does not; fast-forward self-update can no longer reconcile it - this check never fetches, so refresh the stale ref first with: git -C $FM_ROOT fetch origin, which alone can clear it; if it persists, inspect with: git -C $FM_ROOT log origin/$diverged_default..$diverged_default --oneline, then reconcile manually (rebase/merge onto origin/$diverged_default, or push the local commits) before rerunning /updatefirstmate"
   fi
 fi
 crew=
