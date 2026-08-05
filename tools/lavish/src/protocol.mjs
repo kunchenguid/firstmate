@@ -976,6 +976,7 @@ export async function createDecision(home, {
   visualsDirectory = undefined,
   createdAt = new Date().toISOString(),
   legacySource = undefined,
+  beforeCreate = undefined,
 }) {
   validateDecisionId(id);
   requireString(title, 'title');
@@ -1031,6 +1032,10 @@ export async function createDecision(home, {
       return { decision: current, created: false };
     }
     throw new LavishError(`decision ${id} already exists with different content`, 3);
+  }
+
+  if (beforeCreate !== undefined) {
+    await beforeCreate();
   }
 
   const staging = join(

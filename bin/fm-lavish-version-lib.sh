@@ -11,5 +11,5 @@ fm_lavish_version_compatible() {  # <version-output> [allow-empty]
   IFS=' ' read -r major minor patch extra <<< "$parts"
   [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
   [ "$major" -eq 1 ] || return 1
-  [ "$minor" -ge 1 ]
+  [ "$minor" -ge 2 ]
 }

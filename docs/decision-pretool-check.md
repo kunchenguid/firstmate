@@ -45,7 +45,7 @@ That is transport fail-open, not a policy exception.
 Once an exact identity is positively known, the decision fails closed.
 
 The denial tells the agent both legitimate routes.
-It gives the complete `lavish-axi create --id ... --title ... --request ... --questions ... --destination ...` shape, the lowercase-slug question-key and `value`/`label` option schema, the plain-chat yes/no route, and the captain-facing `Run: lavish answer <id>` surface line.
+It gives the complete `lavish-axi create --id ... --title ... --request ... --questions ... --destination ...` shape, points to the checked request-assembly contract, gives the lowercase-slug question-key and `value`/`label` option schema, names the plain-chat yes/no route, and preserves the captain-facing `Run: lavish answer <id>` surface line.
 
 ## Harness evidence, 2026-08-01
 

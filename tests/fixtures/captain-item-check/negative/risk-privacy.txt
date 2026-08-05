@@ -1,0 +1,1 @@
+RISK 2 - PRIVACY: customer names, addresses and phone numbers leave the device under analytics consent, against our written commitment that phone is never sent.

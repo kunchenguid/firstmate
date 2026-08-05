@@ -1002,9 +1002,22 @@ SH
   chmod +x "$fakebin/lavish-axi"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "MISSING: lavish-axi" \
+    "bootstrap accepted Lavish 1.1 without the captain-item check"
+
+  cat > "$fakebin/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 'lavish-axi 1.2.0 (store-forward protocol 1)'
+fi
+exit 0
+SH
+  chmod +x "$fakebin/lavish-axi"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_not_contains "$out" "MISSING: lavish-axi" \
-    "bootstrap rejected destination-aware Lavish 1.1"
-  pass "bootstrap requires the destination-aware Lavish fork"
+    "bootstrap rejected captain-item-aware Lavish 1.2"
+  pass "bootstrap requires the captain-item-aware Lavish fork"
 }
 
 test_bootstrap_surfaces_low_treehouse_capacity_read_only() {

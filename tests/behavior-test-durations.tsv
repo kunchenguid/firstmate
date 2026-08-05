@@ -35,6 +35,7 @@
 9402	tests/fm-bootstrap.test.sh
 2000	tests/fm-bounded-io.test.sh
 1875	tests/fm-brief.test.sh
+3000	tests/fm-captain-item-check.test.sh
 13892	tests/fm-cd-pretool-check.test.sh
 475500	tests/fm-checkout-refresh.test.sh
 336	tests/fm-checkout-return-boundary.test.sh

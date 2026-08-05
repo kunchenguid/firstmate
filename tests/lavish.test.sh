@@ -38,6 +38,13 @@ SH
     LAVISH_TEST_VERSION='lavish-axi 1.1.0 (store-forward protocol 1)' \
     LAVISH_TEST_CALL_LOG="$test_root/calls" \
     "$ROOT/bin/fm-lavish-intake.sh"
+  [ ! -e "$test_root/calls" ]
+
+  PATH="$test_root/bin:$PATH" \
+    FM_HOME="$test_root/home" \
+    LAVISH_TEST_VERSION='lavish-axi 1.2.0 (store-forward protocol 1)' \
+    LAVISH_TEST_CALL_LOG="$test_root/calls" \
+    "$ROOT/bin/fm-lavish-intake.sh"
   [ "$(cat "$test_root/calls")" = "intake --home $test_root/home" ]
 
   rm -rf "$test_root"

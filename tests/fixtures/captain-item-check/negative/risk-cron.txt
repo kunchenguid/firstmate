@@ -1,0 +1,1 @@
+RISK 4 - UNATTENDED: a monthly scheduled job deletes production data with no guard. Next run 1 September. A hold binds people; cron can't read one.

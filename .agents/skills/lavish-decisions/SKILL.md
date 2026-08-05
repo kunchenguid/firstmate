@@ -18,15 +18,18 @@ Use the firstmate-owned `lavish-axi` file protocol documented in `tools/lavish/R
 ## Create
 
 1. Reconcile the proposed decision against live fleet state immediately before writing it.
-2. Write complete human context to Markdown.
-   Include the decision, recommendation, alternatives, consequences, and what happens after each choice.
+2. Write each captain-facing risk or decision as the plain-language wrapper required by `AGENTS.md` section 9.
+   When relaying exact source text, keep it unaltered in the optional verbatim block rather than rewriting or removing its technical detail.
 3. Define the ordered questions and options in the JSON shape documented by the tool.
    Use nonempty unique lowercase-slug keys.
 4. Choose a durable `$FM_HOME`-relative destination below `data/`.
    This is where intake commits the validated answer before writing its receipt.
-5. Run `lavish-axi create` with a stable decision id, title, Markdown request, question JSON, and destination, and retain its emitted `Run:` line.
-6. From firstmate's environment, run `lavish show <id>` and `lavish inbox` to verify the exact durable request.
-7. Choose exactly one captain surface.
+5. Assemble the exact Markdown request from one or more items using the item boundaries and multi-item concatenation contract in the header of `bin/fm-captain-item-check.sh`.
+   Put no captain-facing prose outside those boundaries.
+6. Run `lavish-axi create` with a stable decision id, title, that exact Markdown request, question JSON, and destination, and retain its emitted `Run:` line.
+   Creation snapshots the request bytes once, runs request mode against that snapshot, and stores those same bytes; a separate earlier check grants no approval, and any failure refuses creation.
+7. From firstmate's environment, run `lavish show <id>` and `lavish inbox` to verify the exact durable request.
+8. Choose exactly one captain surface.
    For a terminal answer, surface only the title and the exact `Run:` line emitted by `lavish-axi create`:
 
    ```text

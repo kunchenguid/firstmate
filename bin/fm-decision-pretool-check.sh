@@ -72,7 +72,7 @@ case "$TOOL_NAME" in
 esac
 
 MESSAGE=$(cat <<'EOF'
-[lavish-only] Built-in structured questions are disabled in firstmate sessions. For a multi-option decision, write the complete context to request.md and the ordered questions to questions.json using [{"key":"lowercase-slug","prompt":"Which option?","options":[{"value":"option-a","label":"Option A"},{"value":"option-b","label":"Option B"}]}], then run: lavish-axi create --id <lowercase-slug> --title '<title>' --request <request.md> --questions <questions.json> --destination data/<id>/captain-answer.toon. For a yes/no, ask in plain chat instead. Surface only the decision title and: Run: lavish answer <id>
+[lavish-only] Built-in structured questions are disabled in firstmate sessions. For a multi-option decision, assemble the complete request.md from one or more checked item wrappers using the exact boundaries in the fm-captain-item-check.sh header; lavish-axi create refuses unchecked or outside prose. Write the ordered questions to questions.json using [{"key":"lowercase-slug","prompt":"Which option?","options":[{"value":"option-a","label":"Option A"},{"value":"option-b","label":"Option B"}]}], then run: lavish-axi create --id <lowercase-slug> --title '<title>' --request <request.md> --questions <questions.json> --destination data/<id>/captain-answer.toon. For a yes/no, ask in plain chat instead. Surface only the decision title and: Run: lavish answer <id>
 EOF
 ) || exit 0
 

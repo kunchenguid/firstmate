@@ -65,8 +65,10 @@ lavish-axi create \
   --destination data/deployment-policy/captain-answer.toon
 ```
 
-`request.md` must contain the complete context, recommendation, alternatives, consequences, and next actions.
-`create` computes its digest, validates the ordered question set, and writes the request plus `manifest.toon`.
+`request.md` must assemble one or more complete captain-facing wrappers with no prose outside the item boundaries documented in [`fm-captain-item-check.sh`](../../bin/fm-captain-item-check.sh).
+`create` snapshots the request once, requires that exact snapshot to clear request mode, and writes the same bytes plus `manifest.toon`.
+The source checkout runs its sibling checker directly; a globally installed CLI resolves the same checker beside the home-configured Firstmate wake adapter.
+This permits an unaltered technical finding inside the documented verbatim block while keeping purpose, impact, both costs, and the decision in the checked wrapper.
 To include visual evidence, pass a directory of PNG, JPEG, GIF, or WebP files with `--visuals` and reference copied filenames from a question's optional `visuals` array.
 The self-contained board embeds those declared files with the questions that reference them.
 

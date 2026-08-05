@@ -56,6 +56,10 @@ assert_teaching_message() {
     *) fail "deny message does not teach the plain-chat yes/no route" ;;
   esac
   case "$message" in
+    *'fm-captain-item-check.sh header'*'lavish-axi create refuses unchecked or outside prose'*) ;;
+    *) fail "deny message does not teach the checked request assembly" ;;
+  esac
+  case "$message" in
     *'Run: lavish answer <id>'*) ;;
     *) fail "deny message does not teach the captain-facing Lavish surface" ;;
   esac

@@ -1,0 +1,1 @@
+RISK 3 - DATA LOSS: a cleanup path deletes live production data. Four routes now, including one with a perfectly correct pointer that no operator could catch by looking.
