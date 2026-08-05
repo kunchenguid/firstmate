@@ -25,12 +25,32 @@ export FM_HERDR_SESSION_CLEANUP_SOURCE_ONLY=1
 . "$ROOT/bin/fm-herdr-session-cleanup.sh"
 unset FM_HERDR_SESSION_CLEANUP_SOURCE_ONLY
 
-LINUX_PROCESS_INFO='{"result":{"process_info":{"foreground_processes":[{"argv":["/bin/sh"],"name":"sh","pid":67}]}}}'
-[ "$(fm_herdr_cleanup_process_argv0 "$LINUX_PROCESS_INFO")" = /bin/sh ] \
-  || fail "Linux Herdr process argv array was not accepted"
-if fm_herdr_cleanup_process_argv0 \
-  '{"result":{"process_info":{"foreground_processes":[{"argv":[67],"name":"sh","pid":67}]}}}' \
-  >/dev/null 2>&1; then
+# The idle-shell proof now lives in the backend as
+# fm_backend_herdr_pane_idle_shell_pid; prove it still reads Linux argv
+# arrays (no argv0 field) and rejects malformed executable identities.
+FAKE_PS="$TMP_ROOT/fake-ps"
+cat > "$FAKE_PS" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "-axo pid=,ppid=") printf '1 0\n67 1\n' ;;
+  "-p 67 -o stat=") printf 'Ss\n' ;;
+  *) exit 1 ;;
+esac
+SH
+chmod +x "$FAKE_PS"
+LINUX_PROCESS_INFO='{"result":{"type":"pane_process_info","process_info":{"pane_id":"w2:p1","shell_pid":67,"foreground_process_group_id":67,"foreground_processes":[{"argv":["/bin/sh"],"name":"sh","pid":67}]}}}'
+argv_pid=$(
+  # shellcheck disable=SC2329 # invoked indirectly by the idle-shell proof.
+  fm_backend_herdr_cli() { printf '%s\n' "$LINUX_PROCESS_INFO"; }
+  FM_HERDR_PS_BIN="$FAKE_PS" fm_backend_herdr_pane_idle_shell_pid test w2:p1
+) || fail "Linux Herdr process argv array was not accepted"
+[ "$argv_pid" = 67 ] || fail "idle-shell proof printed the wrong shell pid: $argv_pid"
+if (
+  # shellcheck disable=SC2329 # invoked indirectly by the idle-shell proof.
+  fm_backend_herdr_cli() { printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w2:p1","shell_pid":67,"foreground_process_group_id":67,"foreground_processes":[{"argv":[67],"name":"sh","pid":67}]}}}'; }
+  FM_HERDR_PS_BIN="$FAKE_PS" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    fm_backend_herdr_pane_idle_shell_pid test w2:p1
+) >/dev/null 2>&1; then
   fail "non-string Herdr process argv was accepted"
 fi
 pass "process proof reads Linux Herdr argv arrays and rejects malformed executable identities"
@@ -54,7 +74,7 @@ fm_lock_try_acquire() {
   mkdir "$1" 2>/dev/null
 }
 fm_lock_release() { rm -rf -- "$1"; }
-fm_herdr_cleanup_process_is_idle_shell() { [ ! -e "$FIXTURE_DIR/process-unsafe" ]; }
+fm_backend_herdr_pane_idle_shell_pid() { [ ! -e "$FIXTURE_DIR/process-unsafe" ] && printf '67\n'; }
 fm_backend_herdr_projection_focus_snapshot() {
   [ ! -e "$FIXTURE_DIR/focus-unreadable" ] || return 1
   printf 'w1\t%s' "$(cat "$FIXTURE_DIR/active-tab")"

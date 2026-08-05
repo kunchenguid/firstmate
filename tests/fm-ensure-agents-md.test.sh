@@ -200,6 +200,69 @@ test_lowercase_agents_md_refuses_case_fragile_symlink() {
   pass "fm-ensure-agents-md.sh: refuses a case-variant lowercase agents.md (issue #389)"
 }
 
+test_promotion_refuses_when_disallowed_tools_guards_claude_by_path() {
+  local repo out rc
+  repo="$TMP_ROOT/guarded-project"
+  mkdir -p "$repo/automation"
+  cat > "$repo/CLAUDE.md" <<'EOF'
+# Existing agent memory
+
+The constitution unattended turns must not edit.
+EOF
+  cat > "$repo/automation/bot.sh" <<'EOF'
+#!/usr/bin/env bash
+GUARDED=(CLAUDE.md settings.json)
+claude -p "$1" --disallowedTools "${GUARDED[@]}"
+EOF
+  (
+    cd "$repo" || exit 1
+    git init -q
+    git config user.email test@example.com
+    git config user.name test
+    git add CLAUDE.md automation/bot.sh
+    git commit -q -m init
+  )
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "expected a non-zero exit when a --disallowedTools guard names CLAUDE.md by path"
+  assert_contains "$out" "conflict:" "guarded-repo refusal did not report a conflict"
+  assert_contains "$out" "disallowedTools" "guarded-repo refusal did not name the guard mechanism"
+  assert_absent "$repo/AGENTS.md" "promotion ran despite the path-based CLAUDE.md guard"
+  [ ! -L "$repo/CLAUDE.md" ] || fail "CLAUDE.md was turned into a symlink despite the path-based guard"
+  assert_grep "The constitution unattended turns must not edit." "$repo/CLAUDE.md" \
+    "the real CLAUDE.md content was disturbed despite the refusal"
+  pass "fm-ensure-agents-md.sh: refuses to promote when a --disallowedTools guard names CLAUDE.md by literal path"
+}
+
+test_promotion_proceeds_when_claude_only_mentioned_in_docs() {
+  local repo out rc
+  repo="$TMP_ROOT/docs-mention-project"
+  mkdir -p "$repo"
+  cat > "$repo/CLAUDE.md" <<'EOF'
+# Existing agent memory
+
+Run tests with `make test`.
+EOF
+  cat > "$repo/README.md" <<'EOF'
+# Project
+
+See CLAUDE.md for agent conventions.
+EOF
+  (
+    cd "$repo" || exit 1
+    git init -q
+    git config user.email test@example.com
+    git config user.name test
+    git add CLAUDE.md README.md
+    git commit -q -m init
+  )
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1)
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "an ordinary README mention of CLAUDE.md false-tripped the guard-detection heuristic: $out"
+  [ -L "$repo/CLAUDE.md" ] || fail "CLAUDE.md was not promoted to a symlink for a repo with no real guard"
+  pass "fm-ensure-agents-md.sh: an ordinary doc mention of CLAUDE.md does not block promotion"
+}
+
 test_created_agents_md_includes_self_governance
 test_promoted_claude_md_includes_self_governance
 test_promoted_claude_md_without_trailing_newline_keeps_blank_separator
@@ -209,3 +272,5 @@ test_existing_agents_md_with_section_reports_unchanged
 test_existing_crlf_agents_md_with_section_stays_unchanged
 test_existing_crlf_agents_md_without_section_preserves_crlf
 test_lowercase_agents_md_refuses_case_fragile_symlink
+test_promotion_refuses_when_disallowed_tools_guards_claude_by_path
+test_promotion_proceeds_when_claude_only_mentioned_in_docs

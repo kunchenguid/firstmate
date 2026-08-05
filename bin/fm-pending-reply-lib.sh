@@ -337,6 +337,20 @@ fm_pending_reply_confirm_delivery() {  # <state-dir> <corr_id>
   return 2
 }
 
+# Preserve an expectation when a remote transport disconnect makes delivery
+# completion unknowable. This never resolves or retries the request; it moves
+# the existing prepared record to the owner's explicit unknown-delivery path.
+fm_pending_reply_mark_delivery_unknown() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 rec phase
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] || return 1
+  phase=$(fm_pending_reply_get "$rec" phase)
+  case "$phase" in awaiting_report|delivery_unknown) ;;
+    *) return 1 ;;
+  esac
+  fm_pending_reply_set "$rec" phase delivery_unknown
+}
+
 fm_pending_reply_reconcile_delivery() {  # <state-dir> <corr_id>
   local state=$1 corr=$2 rec delivered marker entry delivery_state value epoch
   local grace now age phase
@@ -573,6 +587,22 @@ fm_pending_reply_fallback_idle_eligible() {  # <record-path>
   [ "$age" -ge "$grace" ]
 }
 
+# fm_pending_reply_backend_observation: one busy/idle observation of a
+# SECONDMATE endpoint, without ever reading its conversation.
+#
+# Deliberately NOT the semantic busy-state contract (bin/fm-busy-lib.sh).
+# That contract covers ordinary task workers, whose turn lifecycle firstmate
+# wires at spawn; a secondmate has no such wiring because an idle secondmate
+# pane is healthy and it runs no supervised turn sequence of its own. This
+# observation exists only to notice a busy-then-idle transition around one
+# delivered request, so it is a delivery-confirmation signal in the same
+# category as the submit acknowledgement in bin/fm-tmux-lib.sh - never task
+# state, and never a source consumers can confuse with semantic state.
+#
+# It stays harness-scoped (fm_busy_lines_match with the recorded harness, no
+# global OR of every vendor signature), so one harness's output cannot make
+# another read busy, and a weak rendered idle degrades to `fallback-idle`,
+# which the caller accepts as idle only after its grace window.
 fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label] [harness]
   local backend=$1 target=$2 expected_label=${3-} harness=${4-} native tail40
   native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || printf 'unknown')
@@ -925,7 +955,7 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
 # Never scrapes secondmate conversation; uses only parent status, backend busy
 # state, and optional secondmate-home wrong-home path checks.
 fm_pending_reply_tick() {  # <state-dir>
-  local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness
+  local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
   local observation observation_task found i
   local -a observation_tasks=() observation_values=()
   dir=$(fm_pending_reply_dir "$state")
@@ -988,10 +1018,15 @@ fm_pending_reply_tick() {  # <state-dir>
     sm_home=
     harness=
     if [ -f "$meta" ]; then
+      remote_host=$(fm_meta_get "$meta" remote_host)
       backend=$(fm_backend_of_meta "$meta")
       target=$(fm_backend_target_of_meta "$meta")
       sm_home=$(fm_meta_get "$meta" home)
       harness=$(fm_meta_get "$meta" harness)
+      if [ -n "$remote_host" ]; then
+        target="remote:$task_id"
+        sm_home=
+      fi
       if [ -n "$target" ]; then
         label="fm-$task_id"
         observation=
@@ -1004,7 +1039,13 @@ fm_pending_reply_tick() {  # <state-dir>
           break
         done
         if [ "$found" = 0 ]; then
-          observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness")
+          if [ -n "$remote_host" ]; then
+            observation=$("$_FM_PENDING_REPLY_LIB_DIR/fm-on.sh" "$task_id" \
+              fm-remote-secondmate-control.sh observe "$task_id" < /dev/null 2>/dev/null || printf 'unknown')
+            case "$observation" in busy|idle|fallback-idle|unknown) ;; *) observation=unknown ;; esac
+          else
+            observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness")
+          fi
           observation_tasks+=("$task_id")
           observation_values+=("$observation")
         fi
