@@ -470,6 +470,10 @@ else
   esac
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
+  if [ -z "${FM_COMPOSER_IDLE_RE:-}" ] && [ "$TARGET_HARNESS" = cursor ]; then
+    FM_COMPOSER_IDLE_RE='^Add a follow-up$'
+  fi
+  export FM_COMPOSER_IDLE_RE
   # Type once, submit, verify. Only exact empty confirms delivery; every other
   # verdict preserves the loud refusal boundary.
   send_rc=0
