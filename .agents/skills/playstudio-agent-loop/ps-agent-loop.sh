@@ -678,32 +678,42 @@ print("""() => {
 
 _capture_review_frame() {
   # Best-effort viewport JPEG into <dir>/frame-NNNNNN.jpg. Never fails the turn.
-  # chrome-devtools-axi --format jpeg may write <path>.jpeg even when asked for .jpg.
+  # chrome-devtools-axi --format jpeg may write <path>.jpeg even when asked for .jpg,
+  # and the headed Chrome sandbox often can only materialize files under /tmp —
+  # so capture via TMPDIR then move into the review dir.
   local dir="$1"
   local idx="$2"
-  local path written
+  local path tmp_base tmp_jpg tmp_jpeg written
   [ -n "$dir" ] || return 0
   mkdir -p "$dir" || return 0
   path="$(printf '%s/frame-%06d.jpg' "$dir" "$idx")"
-  if ! ps_axi_try screenshot "$path" --format jpeg >/dev/null 2>&1; then
+  tmp_base="$(printf '%s/ps-review-%s-%06d' "${TMPDIR:-/tmp}" "$$" "$idx")"
+  tmp_jpg="${tmp_base}.jpg"
+  tmp_jpeg="${tmp_base}.jpeg"
+  rm -f "$tmp_jpg" "$tmp_jpeg" 2>/dev/null || true
+  if ! ps_axi_try screenshot "$tmp_jpg" --format jpeg >/dev/null 2>&1; then
     printf 'ps-agent-loop: review screenshot failed for %s\n' "$path" >&2
     return 0
   fi
   written=""
-  if [ -f "$path" ]; then
-    written="$path"
-  elif [ -f "${path%.jpg}.jpeg" ]; then
-    written="${path%.jpg}.jpeg"
-  elif [ -f "${path}.jpeg" ]; then
-    written="${path}.jpeg"
+  if [ -f "$tmp_jpg" ]; then
+    written="$tmp_jpg"
+  elif [ -f "$tmp_jpeg" ]; then
+    written="$tmp_jpeg"
   fi
   if [ -z "$written" ]; then
-    printf 'ps-agent-loop: review screenshot reported ok but file missing at %s\n' "$path" >&2
+    printf 'ps-agent-loop: review screenshot reported ok but file missing under %s\n' "$tmp_base" >&2
     return 0
   fi
-  if [ "$written" != "$path" ]; then
-    mv -f "$written" "$path" || cp -f "$written" "$path" || true
+  if ! mv -f "$written" "$path" 2>/dev/null; then
+    cp -f "$written" "$path" 2>/dev/null || {
+      printf 'ps-agent-loop: review screenshot could not move into %s\n' "$path" >&2
+      rm -f "$tmp_jpg" "$tmp_jpeg" 2>/dev/null || true
+      return 0
+    }
+    rm -f "$written" 2>/dev/null || true
   fi
+  rm -f "$tmp_jpg" "$tmp_jpeg" 2>/dev/null || true
 }
 
 _stitch_review_mp4() {
