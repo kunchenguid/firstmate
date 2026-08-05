@@ -166,6 +166,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/loopspec/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/project-management/SKILL.md",
       "audience": "agent-runtime"
     },
