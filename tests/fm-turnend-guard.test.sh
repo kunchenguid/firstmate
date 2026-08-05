@@ -109,6 +109,7 @@ install_guard_scripts() {
   mkdir -p "$dir/bin"
   cp "$ROOT/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard.sh"
   cp "$ROOT/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-turnend-guard-grok.sh"
+  cp "$ROOT/bin/fm-turnend-guard-cursor.sh" "$dir/bin/fm-turnend-guard-cursor.sh"
   cp "$ROOT/bin/fm-operational-input.sh" "$dir/bin/fm-operational-input.sh"
   cp "$ROOT/bin/fm-supervision-instructions.sh" "$dir/bin/fm-supervision-instructions.sh"
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
@@ -117,7 +118,7 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
-  chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-operational-input.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
+  chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-turnend-guard-cursor.sh" "$dir/bin/fm-operational-input.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
 }
 
 mark_codex_hook_root() {
@@ -843,6 +844,102 @@ test_tracked_claude_entries_inert_under_grok() {
   [ "$guarded" -eq 5 ] || fail "expected 5 grok-guarded tracked entries, saw $guarded"
   [ "$unguarded" -eq 1 ] || fail "expected 1 documented unguarded tracked entry, saw $unguarded"
   pass "tracked .claude/settings.json entries: $guarded inert under grok, the documented subagent exception still armed, all live under Claude"
+}
+
+# --- HOOK: bin/fm-turnend-guard-cursor.sh -----------------------------------
+# Cursor's stop hook does not honour exit 2 as a forced continuation, so the
+# shim translates the shared guard's blind-turn signal into a followup_message
+# body. loop_count > 0 maps to stop_hook_active so the shared loop guard
+# applies unchanged. Verified against cursor-agent 2026.07.23-e383d2b.
+
+test_cursor_shim_emits_followup_on_block() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-block")
+  : > "$dir/state/task1.meta"
+  # No live watcher, so the shared guard blocks (exit 2) with its banner.
+  out=$(printf '{"session_id":"cur-session","loop_count":0,"workspace_roots":["%s"]}' "$dir" \
+    | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>&1); status=$?
+  expect_code 0 "$status" "cursor shim must exit 0 after translating a block into a followup_message"
+  case "$out" in
+    '{"followup_message":"'*'TURN WOULD END BLIND'*) : ;;
+    *) fail "cursor shim must emit a followup_message carrying the guard banner, got: $out" ;;
+  esac
+  pass "fm-turnend-guard-cursor: translates a shared-guard block into a followup_message body"
+}
+
+test_cursor_shim_allows_when_healthy() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-allow")
+  out=$(printf '{"session_id":"cur-session","loop_count":0,"workspace_roots":["%s"]}' "$dir" \
+    | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>&1); status=$?
+  expect_code 0 "$status" "cursor shim must allow a healthy stop"
+  [ "$out" = '{}' ] || fail "cursor shim must emit {} on an allowed stop, got: $out"
+  pass "fm-turnend-guard-cursor: emits {} when the shared guard allows the stop"
+}
+
+test_cursor_shim_loop_count_maps_to_stop_hook_active() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-loop")
+  # A forced-follow-up turn (loop_count>0) must be treated as a continuation:
+  # the shared guard's loop guard sees stop_hook_active=true and allows the
+  # stop even with no watcher, exactly like Claude/Codex rewakes.
+  out=$(printf '{"session_id":"cur-session","loop_count":1,"workspace_roots":["%s"]}' "$dir" \
+    | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>&1); status=$?
+  expect_code 0 "$status" "cursor shim must allow a loop-count continuation"
+  [ "$out" = '{}' ] || fail "cursor shim must not re-block a loop-count continuation, got: $out"
+  pass "fm-turnend-guard-cursor: loop_count>0 maps to stop_hook_active so continuations are not re-blocked"
+}
+
+test_cursor_shim_missing_payload_allows() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-empty")
+  out=$(printf '' | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>&1); status=$?
+  expect_code 0 "$status" "cursor shim must allow an empty payload"
+  [ -z "$out" ] || fail "cursor shim produced output on empty payload: $out"
+  pass "fm-turnend-guard-cursor: empty or unreadable payloads conservatively allow"
+}
+
+test_cursor_hooks_json_is_registered() {
+  local hooks shim present
+  hooks="$ROOT/.cursor/hooks.json"
+  [ -f "$hooks" ] || fail "tracked .cursor/hooks.json is missing"
+  jq -e '.version == 1' "$hooks" >/dev/null || fail "cursor hooks.json must carry the load-bearing version key"
+  jq -e '.hooks.stop | type == "array" and length > 0' "$hooks" >/dev/null \
+    || fail "cursor hooks.json must register a stop hook"
+  jq -e '.hooks.preToolUse | type == "array" and length > 0' "$hooks" >/dev/null \
+    || fail "cursor hooks.json must register a preToolUse hook"
+  present=$(jq -r '.hooks.stop[0].command // empty' "$hooks")
+  case "$present" in
+    *fm-turnend-guard-cursor.sh*) : ;;
+    *) fail "cursor stop hook must invoke the translating shim, got: $present" ;;
+  esac
+  present=$(jq -r '.hooks.preToolUse[0].command // empty' "$hooks")
+  case "$present" in
+    *fm-arm-pretool-check.sh*) : ;;
+    *) fail "cursor preToolUse hook must invoke the arm-pretool check, got: $present" ;;
+  esac
+  present=$(jq -r '.hooks.preToolUse[0].matcher // empty' "$hooks")
+  [ "$present" = Shell ] || fail "cursor preToolUse hook must scope its matcher to Shell, got: $present"
+  pass "fm-turnend-guard-cursor: tracked .cursor/hooks.json registers the shim, the seatbelt, and the load-bearing version key"
+}
+
+test_cursor_shim_anchor_resolves_via_cursor_project_dir() {
+  local command dir payload out status
+  command=$(jq -r '.hooks.stop[0].command // empty' "$ROOT/.cursor/hooks.json")
+  [ -n "$command" ] || fail "stop hook command is missing from .cursor/hooks.json"
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-anchor")
+  : > "$dir/state/task1.meta"
+  # The hook command anchors through CURSOR_PROJECT_DIR (verified live:
+  # cursor sets it to the project root for hook commands). Executing it with
+  # that env var must run the real shim against this scenario dir.
+  payload=$(jq -cn --arg dir "$dir" '{session_id:"cur-session",loop_count:0,workspace_roots:[$dir]}')
+  out=$(printf '%s' "$payload" | CURSOR_PROJECT_DIR="$dir" bash -c "$command" 2>&1); status=$?
+  expect_code 0 "$status" "cursor hook command anchored through CURSOR_PROJECT_DIR must run"
+  case "$out" in
+    *'TURN WOULD END BLIND'*) : ;;
+    *) fail "cursor hook command did not reach the translating shim's blocked banner, got: $out" ;;
+  esac
+  pass "fm-turnend-guard-cursor: the tracked hook command anchors through CURSOR_PROJECT_DIR"
 }
 
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root() {
@@ -1639,6 +1736,12 @@ test_grok_adapter_snake_case_native_and_camel_precedence
 test_grok_adapter_invalid_inputs_start_neither_path
 test_grok_adapter_missing_jq_and_no_supervision_allow
 test_tracked_claude_entries_inert_under_grok
+test_cursor_shim_emits_followup_on_block
+test_cursor_shim_allows_when_healthy
+test_cursor_shim_loop_count_maps_to_stop_hook_active
+test_cursor_shim_missing_payload_allows
+test_cursor_hooks_json_is_registered
+test_cursor_shim_anchor_resolves_via_cursor_project_dir
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree

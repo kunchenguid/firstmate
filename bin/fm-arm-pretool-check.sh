@@ -24,13 +24,15 @@
 # Exit/output contract:
 #   ALLOW - exit 0 and no output.
 #   DENY - exit 2, a Claude-shaped deny object on stderr, and a Grok-shaped
-#          deny object on stdout unless --claude was supplied.
+#          deny object on stdout unless --claude or --cursor was supplied.
 #   FAIL OPEN - malformed or empty stdin, missing jq for stdin transport,
 #               missing Node or policy owner, or an invalid policy response.
 #
 # Claude requires stdout to remain empty on deny.
 # Codex blocks on exit 2 and displays stderr.
 # Grok consumes the stdout decision object.
+# Cursor consumes the stdout permission object (verified cursor-agent
+# 2026.07.23-e383d2b: {"permission":"deny","agent_message":...}).
 # OpenCode and Pi consume exit 2 plus stderr.
 set -u
 
@@ -38,16 +40,17 @@ CMD=""
 CMD_SET=0
 BACKGROUND=""
 CLAUDE_MODE=0
+CURSOR_MODE=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude]
+Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude|--cursor]
 
 With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
-toolInput.command, or Claude/Codex tool_input.command).
+toolInput.command, Claude/Codex tool_input.command, or Cursor tool_input.command).
 Exits 0 to allow and 2 to deny.
 The deny reason is written to stderr, with a Grok decision object on stdout
-unless --claude is supplied.
+unless --claude or --cursor is supplied.
 Malformed transport and an unavailable classifier runtime fail open.
 EOF
 }
@@ -76,6 +79,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --claude)
       CLAUDE_MODE=1
+      shift
+      ;;
+    --cursor)
+      CURSOR_MODE=1
       shift
       ;;
     -h|--help)
@@ -169,5 +176,8 @@ json_escape() {
 DETAIL="[$CODE] $REASON"
 ESCAPED=$(json_escape "$DETAIL")
 printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$ESCAPED" >&2
-[ "$CLAUDE_MODE" -eq 1 ] || printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
+[ "$CLAUDE_MODE" -eq 1 ] || [ "$CURSOR_MODE" -eq 1 ] || printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
+if [ "$CURSOR_MODE" -eq 1 ]; then
+  printf '{"permission":"deny","agent_message":"%s"}\n' "$ESCAPED"
+fi
 exit 2

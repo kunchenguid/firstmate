@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "hooks": {
+    "stop": [
+      {
+        "command": "[ -n \"${CURSOR_PROJECT_DIR:-}\" ] && exec \"${CURSOR_PROJECT_DIR:-}/bin/fm-turnend-guard-cursor.sh\"; exit 0",
+        "timeout": 600,
+        "loop_limit": null
+      }
+    ],
+    "preToolUse": [
+      {
+        "matcher": "Shell",
+        "command": "[ -n \"${CURSOR_PROJECT_DIR:-}\" ] && exec \"${CURSOR_PROJECT_DIR:-}/bin/fm-arm-pretool-check.sh\" --cursor; exit 0",
+        "timeout": 10
+      }
+    ]
+  }
+}
