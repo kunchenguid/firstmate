@@ -218,6 +218,11 @@ make_fake_ps_harness() {
 #!/usr/bin/env bash
 set -u
 harness=${FM_FAKE_HARNESS:-claude}
+# fm-harness.sh's ancestry matcher recognizes the real cursor process by its
+# verified comm name cursor-agent (or MainThread with a cursor-agent path),
+# never by the bare name cursor - so the fake comm must carry the -agent
+# suffix for ancestry detection to resolve the harness.
+[ "$harness" = cursor ] && harness=cursor-agent
 pid=
 previous=
 for argument in "$@"; do
