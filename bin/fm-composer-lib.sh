@@ -273,15 +273,24 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
   plain_content=${5:-$content}
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
-    # Ghost stripping emptied the row, so every byte was de-emphasised; an
-    # agent-glyph-prefixed row is a ghost-only agent composer (cursor renders
-    # its `→` glyph dim together with the idle placeholder). Shell glyphs
-    # (>, $, %, #) stay unknown: a fully de-emphasised dead-shell prompt is
-    # still not a safe injection target.
+    # Ghost stripping emptied the row, so every byte was de-emphasised. A bare
+    # de-emphasised row is a confirmed empty agent composer only when its
+    # plain text (a leading agent glyph stripped) matches the harness idle
+    # placeholder: cursor renders its `→` glyph dim together with
+    # "Add a follow-up" (verified cursor-agent 2026.07.23-e383d2b). Any other
+    # fully de-emphasised bare row - a dimmed shell prompt, a dimmed prompt
+    # glyph alone - stays unknown: never a safe injection target.
     case "$plain_content" in
-      '→'*|'❯'*|'›'*|'⟩'*) printf 'empty'; return 0 ;;
-      *) printf 'unknown'; return 0 ;;
+      '→ '*|'❯ '*|'› '*|'⟩ '*) plain_content=${plain_content#??} ;;
+      '→'*|'❯'*|'›'*|'⟩'*) plain_content=${plain_content#?} ;;
     esac
+    plain_content="${plain_content#"${plain_content%%[![:space:]]*}"}"
+    if fm_composer_idle_matches "$plain_content" "$idle_re" "$idle_case"; then
+      printf 'empty'
+    else
+      printf 'unknown'
+    fi
+    return 0
   fi
   # A bare prompt glyph on its own row.
   case "$content" in
