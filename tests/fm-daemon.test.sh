@@ -1162,22 +1162,25 @@ test_max_defer_flushes_empty_idle_pane() {
 }
 
 test_max_defer_pending_composer_alarms_without_typing() {
-  local dir state fakebin sent
+  local dir state fakebin sent display_log
   dir=$(make_bordered_case maxdefer-pending-digest)
   state="$dir/state"; fakebin="$dir/fakebin"
-  sent="$dir/sent.log"; : > "$sent"
+  sent="$dir/sent.log"; display_log="$dir/display.log"; : > "$sent"; : > "$display_log"
   printf '╭─────────────────╮\n│ > human draft   │\n╰─────────────────╯\n' > "$dir/composer"
   escalate_add "$state" "needs-decision: pick B"
   echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
   afk_enter "$state"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_TMUX_DISPLAY_LOG="$display_log" \
     FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 FM_INJECT_CONFIRM_SLEEP=0.05 \
     housekeeping "$state"
   [ ! -s "$sent" ] || fail "max-defer typed into a pending composer"
   [ -s "$state/.subsuper-inject-wedged" ] || fail "pending composer did not raise a wedge alarm marker"
   [ -s "$state/.subsuper-escalations" ] || fail "buffer lost while composer was pending"
   grep -F 'human draft' "$dir/composer" >/dev/null || fail "pending composer content changed"
-  pass "max-defer on a pending composer alarms without typing"
+  grep -F 'display-message -d 60000 -t' "$display_log" >/dev/null \
+    || fail "pending composer wedge did not keep the tmux status alarm visible through the next refresh"
+  pass "max-defer on a pending composer alarms without typing and keeps the tmux status alarm visible"
 }
 
 test_normal_flush_clears_stale_wedge_marker() {
@@ -1402,7 +1405,7 @@ test_wedge_alarm_off_disables_active_alert_regardless_of_position() {
       wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
     [ ! -s "$log" ] || fail "off did not disable a preceding or following active alert: $(cat "$log")"
   done
-  pass "off disables every active alert regardless of directive position (marker and tmux flash are unaffected)"
+  pass "off disables every active alert regardless of directive position (marker and tmux overlay are unaffected)"
 }
 
 test_wedge_alarm_auto_darwin_selects_osascript() {
@@ -1420,7 +1423,7 @@ test_wedge_alarm_auto_non_darwin_has_no_os_channel() {
   PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_LOG="$log" FM_FAKE_UNAME=Linux FM_WEDGE_ALARM_CHANNEL=auto \
     wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
   [ ! -s "$log" ] || fail "auto selected a built-in OS channel on a non-macOS platform: $(cat "$log")"
-  pass "auto on a non-macOS platform selects no built-in OS channel (the marker or a configured command carries it)"
+  pass "auto on a non-macOS platform selects no built-in OS channel"
 }
 
 test_wedge_alarm_config_file_multi_channel() {

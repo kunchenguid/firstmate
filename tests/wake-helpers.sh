@@ -218,6 +218,7 @@ write_composer() {
 }
 case "${1:-}" in
   display-message)
+    [ -n "${FM_FAKE_TMUX_DISPLAY_LOG:-}" ] && printf '%s\n' "$*" >> "$FM_FAKE_TMUX_DISPLAY_LOG"
     print=0
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     for a in "$@"; do [ "$a" = "-p" ] && print=1; done

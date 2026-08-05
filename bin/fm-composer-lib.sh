@@ -180,9 +180,32 @@ fm_composer_idle_matches() {
   esac
 }
 
+# Normalize every non-ASCII code point in Unicode's White_Space property to an
+# ASCII space, then trim the result.
+# Bash's locale-sensitive [[:space:]] does not consistently include these code
+# points, including U+00A0 NO-BREAK SPACE in the live Claude idle composer.
+# Normalizing inside the shared classifier keeps tmux, Herdr, Orca, and cmux on
+# one verdict without weakening non-whitespace content checks.
+fm_composer_trim_whitespace() {  # <content>
+  local content=$1 whitespace LC_ALL=C
+  for whitespace in \
+    $'\302\205' $'\302\240' $'\341\232\200' \
+    $'\342\200\200' $'\342\200\201' $'\342\200\202' $'\342\200\203' \
+    $'\342\200\204' $'\342\200\205' $'\342\200\206' $'\342\200\207' \
+    $'\342\200\210' $'\342\200\211' $'\342\200\212' $'\342\200\250' \
+    $'\342\200\251' $'\342\200\257' $'\342\201\237' $'\343\200\200'; do
+    content=${content//"$whitespace"/ }
+  done
+  content="${content#"${content%%[![:space:]]*}"}"
+  content="${content%"${content##*[![:space:]]}"}"
+  printf '%s' "$content"
+}
+
 fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content]
   local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
   plain_content=${5:-$content}
+  content=$(fm_composer_trim_whitespace "$content")
+  plain_content=$(fm_composer_trim_whitespace "$plain_content")
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     case "$plain_content" in
       '❯'|'›') printf 'empty'; return 0 ;;
@@ -211,8 +234,7 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
     '❯ '*|'› '*|'> '*|'$ '*|'% '*|'# '*) content=${content#??} ;;
     '❯'*|'›'*|'>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
   esac
-  content="${content#"${content%%[![:space:]]*}"}"
-  content="${content%"${content##*[![:space:]]}"}"
+  content=$(fm_composer_trim_whitespace "$content")
   [ -n "$content" ] || { printf 'empty'; return 0; }
   # Known idle placeholder (matched again after the leading glyph was stripped,
   # e.g. "❯ Type a message...").

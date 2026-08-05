@@ -109,9 +109,9 @@
 #                                   active-alert directive for that wedge alarm
 #                                   (off|auto|osascript|herdr|command:<cmd>). An
 #                                   absent file/var means auto: on macOS that is
-#                                   an OS-level notification, so the alarm is
-#                                   never silent. See wedge_alarm_notify below
-#                                   and docs/configuration.md.
+#                                   an OS-level notification. See
+#                                   wedge_alarm_notify below and
+#                                   docs/configuration.md.
 #          FM_WEDGE_ALARM_EXEC      notifier seam: when set, every notifier
 #                                   channel routes through this command as
 #                                   `<cmd> <channel> <summary>` instead of
@@ -655,8 +655,8 @@ escalate_flush() {  # <state>
 }
 
 # --- backend-independent active wedge alert ---------------------------------
-# The tmux status-line flash in inject_wedge_alarm below is a cosmetic,
-# client-side OSD with no cross-backend equivalent, so a wedged non-tmux primary
+# The tmux status overlay in inject_wedge_alarm below is an on-host signal with
+# no cross-backend equivalent, so a wedged non-tmux primary
 # (the 2026-07-10 overnight incident: a claude-on-herdr primary) got NO active
 # signal - only the passive state/.subsuper-inject-wedged marker, which nothing
 # surfaces until the next fleet action (that night, 20 escalations sat buffered
@@ -665,13 +665,13 @@ escalate_flush() {  # <state>
 # herdr notification, or a captain-supplied command (push to a phone, etc.).
 # Every channel is best-effort - a missing or failing channel logs and is
 # skipped, never crashing the daemon loop - and the durable marker plus the tmux
-# flash stay exactly as before.
+# overlay stay available on the tmux path.
 #
 # Config: config/wedge-alarm (local, gitignored), one channel directive per
 # non-empty, non-comment line. FM_WEDGE_ALARM_CHANNEL overrides the file with a
 # single directive. Directives:
 #   off              disable the active alert entirely, regardless of position
-#                    (marker + flash remain)
+#                    (marker + tmux overlay remain)
 #   auto | default   platform default: macOS -> osascript; otherwise none
 #   osascript        macOS Notification Center banner (backend-independent)
 #   herdr            herdr UI notification (herdr notification show)
@@ -703,10 +703,10 @@ wedge_alarm_configured_channels() {
   [ -n "$found" ] || printf 'auto\n'
 }
 
-# Resolve the platform's default OS-level channel for `auto`. macOS reaches the
-# captain via an osascript Notification Center banner; other platforms have no
-# built-in OS channel (the captain wires a command: directive), so this prints
-# nothing and wedge_alarm_notify logs that the marker is the only signal.
+# Resolve the platform's default OS-level channel for `auto`.
+# macOS reaches the captain via an osascript Notification Center banner.
+# Other platforms have no built-in out-of-band channel, so this prints nothing
+# and wedge_alarm_notify logs that the marker is the only signal.
 wedge_alarm_platform_default() {
   case "$(uname)" in
     Darwin) command -v osascript >/dev/null 2>&1 && printf 'osascript' ;;
@@ -893,7 +893,7 @@ wedge_alarm_notify() {  # <summary> <marker>
 # is lost - the buffer and the
 # wake-queue both survive - but the stall stops being invisible.
 inject_wedge_alarm() {  # <state> <age-seconds>
-  local state=$1 age=$2 marker target backend max_defer now notify=1
+  local state=$1 age=$2 marker target backend max_defer display_ms now notify=1
   marker="$state/.subsuper-inject-wedged"
   max_defer="${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}"
   # Re-alarm at most once per max-defer window so a long wedge does not spam.
@@ -914,14 +914,19 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   } 2>/dev/null > "$marker" || true
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
   backend="${FM_SUPERVISOR_BACKEND:-$FM_SUPERVISOR_BACKEND_DEFAULT}"
-  # Best-effort status-line flash. tmux's display-message is a client-side OSD
-  # with no herdr equivalent; the log line + durable marker above are already
-  # the primary, backend-independent signal, so a non-tmux backend just skips
-  # this cosmetic extra rather than attempting an unsupported call.
+  # Best-effort persistent status overlay.
+  # tmux has no out-of-band alert channel, but this on-host signal stays visible
+  # until the next rate-limited refresh.
+  # A non-tmux backend skips it because there is no equivalent primitive.
   if [ "$backend" = tmux ]; then
-    tmux display-message -t "$target" "fm: away-mode escalations WEDGED ${age}s — see $marker" 2>/dev/null || true
+    # Keep the status overlay visible until the next rate-limited alarm refresh.
+    # Unlike wall or terminal output, display-message never writes into an agent
+    # pane or its composer.
+    display_ms=$((max_defer * 1000))
+    tmux display-message -d "$display_ms" -t "$target" \
+      "fm: away-mode escalations WEDGED ${age}s - see $marker" 2>/dev/null || true
   fi
-  # Backend-independent active alert. Unlike the tmux flash above (skipped on
+  # Backend-independent active alert. Unlike the tmux overlay above (skipped on
   # every non-tmux backend), this can reach the captain even when every pane and
   # its backend status-line is unreadable - the gap the 2026-07-10 overnight
   # incident fell through. Configurable and best-effort; the marker above stays

@@ -243,6 +243,102 @@ tests/fm-turnend-guard.test.sh
 
 ## Wedge-alarm channels
 
+Unicode composer whitespace and the Linux on-host wedge path were verified on 2026-08-05 with Claude Code 2.1.222, tmux 3.4, and util-linux 2.39.3 on Linux.
+
+The live idle Claude row and public classifier were read with:
+
+```sh
+claude --version
+tmux -V
+cy=$(tmux display-message -p -t %0 '#{cursor_y}')
+tmux capture-pane -p -t %0 -S "$cy" -E "$cy" | od -An -t u1
+(. bin/fm-backend.sh; fm_backend_composer_state tmux %0)
+```
+
+Exact output:
+
+```text
+2.1.222 (Claude Code)
+tmux 3.4
+ 226 157 175 194 160  10
+empty
+```
+
+The bytes are U+276F followed by U+00A0 and a newline.
+The shared classifier now normalizes every non-ASCII code point in Unicode's `White_Space` property before deciding emptiness.
+Real text after Unicode whitespace remains `pending`, a bare shell prompt followed by Unicode whitespace remains `unknown`, and ghost-only text remains `empty`.
+
+Claude and Codex reach the shared classifier from their bare prompt rows on tmux and Herdr.
+OpenCode and Kimi reach it from bordered `>` composers.
+Pi and pi-signed share the Pi renderer and reach it from bordered tmux composers or Herdr's identity-corroborated separator structure.
+Grok reaches it from its bordered prompt after dark truecolor placeholder removal.
+All seven tmux harness names are exercised by `tests/fm-composer-ghost.test.sh`, and the Herdr public dispatch is exercised by `tests/fm-backend-herdr.test.sh` with the exact U+276F plus U+00A0 regression and both safety controls.
+
+The focused suites ran with:
+
+```sh
+bin/fm-test-run.sh tests/fm-composer-ghost.test.sh tests/fm-backend-herdr.test.sh tests/fm-daemon.test.sh | grep -E '^FM_TEST_(END|SUMMARY)'
+```
+
+Exact summary:
+
+```text
+FM_TEST_END 2026-08-05T22:58:29Z tests/fm-composer-ghost.test.sh exit=0 duration_ms=4257 gate_skip=false
+FM_TEST_END 2026-08-05T22:58:55Z tests/fm-backend-herdr.test.sh exit=0 duration_ms=25477 gate_skip=false
+FM_TEST_END 2026-08-05T22:59:14Z tests/fm-daemon.test.sh exit=0 duration_ms=19668 gate_skip=false
+FM_TEST_SUMMARY total=3 failed=0 skipped_gate=0 duration_ms=49557
+FM_TEST_SUMMARY_FAMILY family=backend-dispatch count=1 duration_ms=25477 failed=0
+FM_TEST_SUMMARY_FAMILY family=pure-contract-unit count=1 duration_ms=4257 failed=0
+FM_TEST_SUMMARY_FAMILY family=watcher-wake-lock count=1 duration_ms=19668 failed=0
+```
+
+`wall` was tested and rejected as a Linux alarm channel because its message entered live agent panes.
+
+```sh
+probe='FIRSTMATE_HARMLESS_WALL_PROBE_20260805T2250Z'
+printf '%s\n' "$probe" | wall
+sleep 1
+for pane in $(tmux list-panes -a -F '#{pane_id}'); do
+  command_name=$(tmux display-message -p -t "$pane" '#{pane_current_command}')
+  cursor_y=$(tmux display-message -p -t "$pane" '#{cursor_y}')
+  hits=$(tmux capture-pane -p -J -t "$pane" -S -20 | grep -cF "$probe" || true)
+  composer=$(. bin/fm-backend.sh; fm_backend_composer_state tmux "$pane")
+  printf '%s\tcommand=%s\tcursor=%s\tprobe_hits=%s\tcomposer=%s\n' "$pane" "$command_name" "$cursor_y" "$hits" "$composer"
+done
+```
+
+Exact relevant output:
+
+```text
+%58	command=claude	cursor=49	probe_hits=1	composer=empty
+%0	command=claude	cursor=49	probe_hits=1	composer=empty
+```
+
+The same probe through a three-second tmux status overlay did not enter either pane and preserved both empty composers:
+
+```sh
+probe='FIRSTMATE_HARMLESS_TMUX_STATUS_PROBE_20260805T2251Z'
+tmux display-message -d 3000 -t %0 "$probe"
+sleep 1
+for pane in %0 %58; do
+  hits=$(tmux capture-pane -p -J -t "$pane" -S -20 | grep -cF "$probe" || true)
+  composer=$(. bin/fm-backend.sh; fm_backend_composer_state tmux "$pane")
+  printf '%s\tprobe_hits=%s\tcomposer=%s\n' "$pane" "$hits" "$composer"
+done
+```
+
+Exact output:
+
+```text
+%0	probe_hits=0	composer=empty
+%58	probe_hits=0	composer=empty
+```
+
+The production tmux overlay lasts one full `FM_MAX_DEFER_SECS` interval and refreshes on the next alarm.
+At defaults, a future unpredicted false `pending` therefore costs at most 315 seconds, or 5.25 minutes, before a persistent on-host warning appears.
+This Linux host has no verified default off-host alert, so remote notification still requires an explicit `command:` channel.
+Content stability does not authorize forced injection because a real half-typed line can remain byte-identical indefinitely.
+
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.
 Automated suites never execute these real notification commands.
 

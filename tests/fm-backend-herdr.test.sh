@@ -2672,6 +2672,31 @@ test_composer_state_real_text_is_pending() {
   pass "fm_backend_herdr_composer_state: real composer text reads pending"
 }
 
+test_composer_state_unicode_whitespace_through_public_interface() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-unicode-whitespace"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\xe2\x9d\xaf\xc2\xa0\n' > "$resp/1.out"
+  printf '\xe2\x9d\xaf\xc2\xa0deploy\n' > "$resp/2.out"
+  printf '$\xc2\xa0\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_state herdr default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] \
+    || fail "Claude's exact U+276F + U+00A0 idle row should be empty through Herdr, got '$out'"
+
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_state herdr default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] \
+    || fail "real Herdr text after U+00A0 must stay pending, got '$out'"
+
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_state herdr default:w1:p2' "$ROOT" )
+  [ "$out" = unknown ] \
+    || fail "a Herdr bare shell prompt followed by U+00A0 must stay unknown, got '$out'"
+  pass "fm_backend_composer_state (herdr): Unicode whitespace preserves empty, pending, and dead-shell verdicts"
+}
+
 # Live-verified incident (2026-07-03, real grok 0.2.82 on herdr, isolated
 # session): typing "/compact" opens the completion popup; the FIRST Enter
 # closes the popup and EXPANDS the composer into an argument-hint placeholder
@@ -3960,6 +3985,7 @@ test_busy_state_unknown_on_no_agent
 test_composer_state_bare_prompt_is_empty
 test_composer_state_ghost_placeholder_is_empty
 test_composer_state_real_text_is_pending
+test_composer_state_unicode_whitespace_through_public_interface
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_unknown_on_capture_failure
 test_composer_state_unknown_when_no_composer_row_found

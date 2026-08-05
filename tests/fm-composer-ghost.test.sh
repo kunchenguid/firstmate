@@ -22,10 +22,14 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 LIB="$ROOT/bin/fm-tmux-lib.sh"
+BACKEND="$ROOT/bin/fm-backend.sh"
 PEEK="$ROOT/bin/fm-peek.sh"
 
 # shellcheck source=/dev/null
 . "$LIB"
+
+# shellcheck source=/dev/null
+. "$BACKEND"
 
 TMP_ROOT=$(fm_test_tmproot fm-ghost-tests)
 
@@ -266,6 +270,73 @@ test_real_text_with_trailing_ghost_is_pending() {
   pass "fm_pane_input_pending: real text plus a trailing ghost run is still pending"
 }
 
+test_unicode_whitespace_through_public_composer_interface() {
+  local dir fb capture out label escaped whitespace nbsp
+  dir="$TMP_ROOT/unicode-whitespace"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  nbsp=$(printf '\xc2\xa0')
+
+  printf '\xe2\x9d\xaf%sdeploy\n' "$nbsp" > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_backend_composer_state tmux fakepane)
+  [ "$out" = pending ] \
+    || fail "real typed text after Unicode whitespace must stay pending, got '$out'"
+  pass "fm_backend_composer_state: real typed text after Unicode whitespace stays pending"
+
+  printf '$%s\n' "$nbsp" > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_backend_composer_state tmux fakepane)
+  [ "$out" = unknown ] \
+    || fail "a bare shell prompt followed by Unicode whitespace must stay unknown, got '$out'"
+  pass "fm_backend_composer_state: a bare shell prompt followed by Unicode whitespace stays unknown"
+
+  printf '\xe2\x9d\xaf %s\n' "$(printf '\033[2mplaceholder\033[0m')" > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_backend_composer_state tmux fakepane)
+  [ "$out" = empty ] \
+    || fail "ghost-only placeholder text must stay empty, got '$out'"
+  pass "fm_backend_composer_state: ghost-only placeholder text stays empty"
+
+  # U+00A0 is built from the exact bytes captured from a live idle Claude pane.
+  printf '\xe2\x9d\xaf\xc2\xa0\n' > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_backend_composer_state tmux fakepane)
+  [ "$out" = empty ] \
+    || fail "Claude's exact idle composer bytes (U+276F + U+00A0) should be empty, got '$out'"
+
+  # Cover every non-ASCII code point in Unicode's White_Space property.
+  while IFS=' ' read -r label escaped; do
+    whitespace=$(printf '%b' "$escaped")
+    printf '\xe2\x9d\xaf%s\n' "$whitespace" > "$capture"
+    out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+      fm_backend_composer_state tmux fakepane)
+    [ "$out" = empty ] \
+      || fail "Claude prompt followed by Unicode whitespace $label should be empty, got '$out'"
+  done <<'EOF'
+U+0085 \xc2\x85
+U+00A0 \xc2\xa0
+U+1680 \xe1\x9a\x80
+U+2000 \xe2\x80\x80
+U+2001 \xe2\x80\x81
+U+2002 \xe2\x80\x82
+U+2003 \xe2\x80\x83
+U+2004 \xe2\x80\x84
+U+2005 \xe2\x80\x85
+U+2006 \xe2\x80\x86
+U+2007 \xe2\x80\x87
+U+2008 \xe2\x80\x88
+U+2009 \xe2\x80\x89
+U+200A \xe2\x80\x8a
+U+2028 \xe2\x80\xa8
+U+2029 \xe2\x80\xa9
+U+202F \xe2\x80\xaf
+U+205F \xe2\x81\x9f
+U+3000 \xe3\x80\x80
+EOF
+  pass "fm_backend_composer_state: Unicode whitespace is empty without weakening typed-text, dead-shell, or ghost guards"
+}
+
 # --- fm_tmux_composer_state: structural multi-row box scan ------------------
 
 test_two_row_composer_reads_text_above_empty_cursor_row() {
@@ -473,11 +544,11 @@ test_all_tmux_harness_composers_share_classification() {
   dir="$TMP_ROOT/all-harness-composers"; mkdir -p "$dir"
   fb=$(make_fake_tmux "$dir")
   capture="$dir/styled.txt"
-  for harness in claude codex opencode pi pi-signed grok; do
+  for harness in claude codex opencode pi pi-signed grok kimi; do
     case "$harness" in
       claude) printf '╭────────────╮\n│ ❯ \033[2mtry\033[0m      │\n╰────────────╯\n' > "$capture" ;;
       codex) printf '╭────────────╮\n│ › \033[2mtip\033[0m      │\n╰────────────╯\n' > "$capture" ;;
-      opencode) printf '╭────────────╮\n│ >          │\n╰────────────╯\n' > "$capture" ;;
+      opencode|kimi) printf '╭────────────╮\n│ >          │\n╰────────────╯\n' > "$capture" ;;
       pi|pi-signed) printf '╭────────────╮\n│            │\n╰────────────╯\n' > "$capture" ;;
       grok) printf '╭────────────╮\n│ ❯ \033[38;2;50;47;70mType\033[0m     │\n╰────────────╯\n' > "$capture" ;;
     esac
@@ -488,7 +559,7 @@ test_all_tmux_harness_composers_share_classification() {
     case "$harness" in
       claude|grok) printf '╭────────────╮\n│ ❯ fix      │\n╰────────────╯\n' > "$capture" ;;
       codex) printf '╭────────────╮\n│ › fix      │\n╰────────────╯\n' > "$capture" ;;
-      opencode|pi|pi-signed) printf '╭────────────╮\n│ > fix      │\n╰────────────╯\n' > "$capture" ;;
+      opencode|pi|pi-signed|kimi) printf '╭────────────╮\n│ > fix      │\n╰────────────╯\n' > "$capture" ;;
     esac
     out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
       fm_tmux_composer_state "fakepane")
@@ -607,6 +678,7 @@ test_colored_text_with_2_payload_still_pending
 test_dark_truecolor_ghost_only_composer_is_not_pending
 test_dark_truecolor_bare_shell_prompt_is_unknown
 test_real_text_with_trailing_ghost_is_pending
+test_unicode_whitespace_through_public_composer_interface
 test_two_row_composer_reads_text_above_empty_cursor_row
 test_wrapped_composer_reads_all_content_rows
 test_bottom_border_cursor_reads_ghost_only_box_as_empty
