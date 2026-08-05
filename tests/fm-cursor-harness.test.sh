@@ -115,7 +115,7 @@ test_cursor_env_marker_wins_over_claudecode() {
 # --- launch: --force, --trust, env sanitization, encoded brief, no --worktree --
 
 test_cursor_launch_command_typed() {
-  local rec id out status expected launch
+  local rec id out status expected launch resolved
   id=cursor-launch-z1
   rec=$(make_cursor_case cursor-launch "$id")
   read_case_record "$rec"
@@ -126,9 +126,10 @@ test_cursor_launch_command_typed() {
   assert_contains "$out" "spawned $id harness=cursor" "spawn did not report cursor harness"
   assert_grep "harness=cursor" "$HOME_DIR/state/$id.meta" "meta missing harness=cursor"
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT cursor-agent --force --trust \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  resolved="$FAKEBIN_DIR/cursor-agent"
+  expected="env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT '$resolved' --force --trust \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "cursor launch did not match the canonical command"$'\n'"expected: $expected"$'\n'"actual:   $launch"
-  pass "cursor spawn types --force --trust with env sanitization and the encoded brief"
+  pass "cursor spawn resolves cursor-agent from PATH and types --force --trust with env sanitization and the encoded brief"
 }
 
 test_cursor_model_flag_threaded() {
@@ -142,7 +143,7 @@ test_cursor_model_flag_threaded() {
   expect_code 0 "$status" "cursor spawn with --model should succeed"
   assert_grep "model=sonnet" "$HOME_DIR/state/$id.meta" "meta missing model=sonnet"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "cursor-agent --force --trust --model 'sonnet' \"" \
+  assert_contains "$launch" "'$FAKEBIN_DIR/cursor-agent' --force --trust --model 'sonnet' \"" \
     "cursor launch did not thread the model flag"
   pass "cursor receives --model in the typed launch command"
 }
@@ -158,33 +159,111 @@ test_cursor_effort_recorded_not_emitted() {
   expect_code 0 "$status" "cursor spawn with --effort should succeed"
   assert_grep "effort=high" "$HOME_DIR/state/$id.meta" "meta missing effort=high"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "cursor-agent --force --trust --model 'sonnet'" \
+  assert_contains "$launch" "'$FAKEBIN_DIR/cursor-agent' --force --trust --model 'sonnet'" \
     "cursor launch lost the model flag when effort was recorded"
   assert_not_contains "$launch" "--effort" "cursor launch must not emit an effort flag"
   pass "cursor records effort in meta but never emits it"
 }
 
-test_cursor_missing_binary_refusal() {
-  local rec id out status
-  id=cursor-missing-z4
-  rec=$(make_cursor_case cursor-missing "$id")
+test_cursor_resolver_prefers_cursor_agent_over_agent() {
+  # Both names on PATH: cursor-agent wins (agent is the legacy alias and too
+  # generic to trust as the primary pick).
+  local rec id out status launch
+  id=cursor-prefer-z4
+  rec=$(make_cursor_case cursor-prefer "$id")
+  read_case_record "$rec"
+  fm_fake_exit0 "$FAKEBIN_DIR" agent
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "cursor spawn with both names on PATH should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "'$FAKEBIN_DIR/cursor-agent' --force --trust" \
+    "cursor resolver must prefer cursor-agent over the agent alias"
+  pass "cursor resolver prefers cursor-agent over the agent alias"
+}
+
+test_cursor_resolver_falls_back_to_agent_alias() {
+  # Only the agent alias on PATH (cursor-agent absent): the resolver falls
+  # back to it, never failing just because the primary name is missing.
+  local rec id out status launch isolated_home
+  id=cursor-alias-z5
+  rec=$(make_cursor_case cursor-alias "$id")
   read_case_record "$rec"
   rm -f "$FAKEBIN_DIR/cursor-agent"
+  fm_fake_exit0 "$FAKEBIN_DIR" agent
+  isolated_home="$CASE_DIR/nohome"
+  mkdir -p "$isolated_home"
   : > "$LAUNCH_LOG"
 
-  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" HOME="$isolated_home" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
   status=$?
-  expect_code 1 "$status" "a missing cursor-agent executable should refuse the spawn"
-  assert_contains "$out" "cursor-agent executable not found on PATH" \
-    "missing cursor-agent refusal did not name the actionable requirement"
-  assert_absent "$HOME_DIR/state/$id.meta" "missing cursor-agent refusal wrote task metadata"
-  [ ! -s "$LAUNCH_LOG" ] || fail "missing cursor-agent refusal typed a launch command"
-  pass "cursor refuses safely and actionably when the executable is unavailable"
+  expect_code 0 "$status" "cursor spawn with only the agent alias should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "'$FAKEBIN_DIR/agent' --force --trust" \
+    "cursor resolver must fall back to the agent alias"
+  pass "cursor resolver falls back to the agent alias when cursor-agent is absent"
+}
+
+test_cursor_resolver_unix_home_fallback() {
+  # Neither name on PATH but $HOME/.local/bin/cursor-agent exists: the
+  # resolver finds the user-local install (non-interactive PATHs often omit
+  # ~/.local/bin).
+  local rec id out status launch isolated_home fallback_bin
+  id=cursor-home-z6
+  rec=$(make_cursor_case cursor-home "$id")
+  read_case_record "$rec"
+  rm -f "$FAKEBIN_DIR/cursor-agent"
+  isolated_home="$CASE_DIR/nohome"
+  fallback_bin="$isolated_home/.local/bin"
+  mkdir -p "$fallback_bin"
+  fm_fake_exit0 "$fallback_bin" cursor-agent
+  : > "$LAUNCH_LOG"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" HOME="$isolated_home" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "cursor spawn with the ~/.local/bin fallback should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "'$fallback_bin/cursor-agent' --force --trust" \
+    "cursor resolver must find the ~/.local/bin install"
+  pass "cursor resolver finds the ~/.local/bin fallback install"
+}
+
+test_cursor_missing_binary_refusal() {
+  local rec id out status isolated_home
+  id=cursor-missing-z7
+  rec=$(make_cursor_case cursor-missing "$id")
+  read_case_record "$rec"
+  rm -f "$FAKEBIN_DIR/cursor-agent"
+  isolated_home="$CASE_DIR/nohome"
+  mkdir -p "$isolated_home"
+  : > "$LAUNCH_LOG"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" HOME="$isolated_home" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 1 "$status" "a missing cursor executable should refuse the spawn"
+  assert_contains "$out" "searched PATH for 'cursor-agent' and 'agent'" \
+    "missing cursor refusal did not name the searched PATH names"
+  assert_contains "$out" "fallbacks '$isolated_home/.local/bin/cursor-agent' and '$isolated_home/.local/bin/agent'" \
+    "missing cursor refusal did not name the searched fallback paths"
+  assert_absent "$HOME_DIR/state/$id.meta" "missing cursor refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "missing cursor refusal typed a launch command"
+  pass "cursor refuses safely and actionably when no executable is available, naming every name and path searched"
 }
 
 test_non_cursor_launch_unsets_cursor_agent() {
@@ -238,5 +317,8 @@ test_cursor_env_marker_wins_over_claudecode
 test_cursor_launch_command_typed
 test_cursor_model_flag_threaded
 test_cursor_effort_recorded_not_emitted
+test_cursor_resolver_prefers_cursor_agent_over_agent
+test_cursor_resolver_falls_back_to_agent_alias
+test_cursor_resolver_unix_home_fallback
 test_cursor_missing_binary_refusal
 test_non_cursor_launch_unsets_cursor_agent
