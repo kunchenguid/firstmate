@@ -605,7 +605,7 @@ cmd_latest_sequence() {
 # terminal result newer than the caller's baseline - can never become live, so it
 # exits 3 distinctly rather than burning the window and reporting missing state.
 cmd_await_live() {
-  local id=${1-} since=${2-0} state=unread claim_state live_since= settled=0 detail
+  local id=${1-} since=${2-0} state=unread claim_state live_since='' settled=0 detail
   [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   case "$since" in

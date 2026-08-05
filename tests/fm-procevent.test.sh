@@ -649,11 +649,12 @@ pe "$HARMEND" retire "$lavish_end_id" >/dev/null
 pass "Lavish arm fails with a target-session diagnostic when that session already ended, and still arms the same artifact once it is reopened"
 
 # The same contract at the timing that actually broke it. The published poll does
-# not answer instantly: the real `lavish-axi poll` returns its ended verdict about
-# 1.4s and its missing-session verdict about 1.2s after the listener starts, and a
-# confirmation that finished before then reported both as armed. These stand-ins
-# hold that latency, so the hard failure is proved against real timing rather than
-# against a verdict that arrives before the listener can even look live.
+# not answer instantly: on lavish-axi 0.1.45 the real `lavish-axi poll` reaches its
+# ended verdict in 1.12-1.23s and its missing-session verdict in 1.12-1.13s after
+# the listener starts, and a confirmation that finished before then reported both
+# as armed. These stand-ins answer at 1.4s and 1.2s, at or above that measured
+# latency, so the hard failure is proved against real timing rather than against a
+# verdict that arrives before the listener can even look live.
 lavish_verdict_arm() {  # <home> <bin-dir> <artifact>: run arm, print exit then output
   local home=$1 bin=$2 artifact=$3 out status=0
   out=$(PATH="$bin:$PATH" FM_HOME="$home" \
