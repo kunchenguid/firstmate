@@ -116,6 +116,20 @@ assert_meta_profile() {
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
 }
 
+assert_claude_auto_permissions() {
+  local launch=$1 context=$2
+  assert_contains "$launch" "claude --permission-mode auto" \
+    "$context did not select Claude's auto permission classifier"
+  assert_not_contains "$launch" "--dangerously-skip-permissions" \
+    "$context still used Claude's root-incompatible unrestricted bypass"
+}
+
+assert_no_claude_auto_permission_mode() {
+  local launch=$1 context=$2
+  assert_not_contains "$launch" "--permission-mode auto" \
+    "$context received Claude's harness-specific permission mode"
+}
+
 test_no_profile_keeps_claude_profile_defaults() {
   local rec id out status expected launch
   id=profile-off-z1
@@ -129,9 +143,10 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --permission-mode auto \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
-  pass "no --model/--effort records defaults and types the claude launch instructions"
+  assert_claude_auto_permissions "$launch" "default Claude launch"
+  pass "no --model/--effort records defaults and types the Claude auto-mode launch instructions"
 }
 
 test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
@@ -377,9 +392,34 @@ test_claude_threads_model_and_effort() {
   expect_code 0 "$status" "claude spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude sonnet high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'sonnet' --effort 'high'" \
-    "claude launch did not thread model and effort flags"
-  pass "claude receives --model and --effort profile flags"
+  assert_claude_auto_permissions "$launch" "profiled Claude ship launch"
+  assert_contains "$launch" "claude --permission-mode auto --model 'sonnet' --effort 'high'" \
+    "Claude launch did not thread model and effort flags after auto permission mode"
+  assert_contains "$launch" "fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md'" \
+    "Claude launch lost typed prompt delivery"
+  pass "Claude receives auto permissions plus --model, --effort, and typed prompt delivery"
+}
+
+test_claude_scout_uses_auto_permissions_and_delivers_profiled_prompt() {
+  local rec id out status launch
+  id=profile-claude-scout-z2b
+  rec=$(make_spawn_case profile-claude-scout claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --scout --model sonnet --effort high)
+  status=$?
+  expect_code 0 "$status" "profiled Claude scout spawn should succeed"
+  assert_contains "$out" "spawned $id harness=claude kind=scout" \
+    "Claude scout spawn did not report the expected harness and kind"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" claude sonnet high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_claude_auto_permissions "$launch" "profiled Claude scout launch"
+  assert_contains "$launch" "claude --permission-mode auto --model 'sonnet' --effort 'high'" \
+    "Claude scout launch lost model or effort delivery"
+  assert_contains "$launch" "fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md'" \
+    "Claude scout launch lost typed prompt delivery"
+  pass "Claude scout launches share auto permissions and retain profile plus prompt delivery"
 }
 
 test_codex_threads_model_and_effort() {
@@ -395,6 +435,7 @@ test_codex_threads_model_and_effort() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
     "codex launch did not thread model and reasoning effort config"
+  assert_no_claude_auto_permission_mode "$launch" "Codex launch"
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
@@ -412,6 +453,7 @@ test_codex_omits_invalid_max_effort() {
   assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
     "codex launch did not preserve the model flag when max effort was omitted"
   assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
+  assert_no_claude_auto_permission_mode "$launch" "Codex max-effort launch"
   pass "codex omits unsupported max effort instead of passing a bad config value"
 }
 
@@ -429,6 +471,7 @@ test_grok_threads_model_and_reasoning_effort() {
   assert_contains "$launch" "grok --always-approve --model 'grok-4' --reasoning-effort 'high'" \
     "grok launch did not thread model and reasoning-effort flags"
   assert_not_contains "$launch" "--effort" "grok launch must use --reasoning-effort, not --effort"
+  assert_no_claude_auto_permission_mode "$launch" "Grok launch"
   pass "grok receives --model and --reasoning-effort profile flags"
 }
 
@@ -485,6 +528,7 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
   assert_not_contains "$launch" "--variant" "opencode launch must not pass run-only --variant"
   assert_not_contains "$launch" "--thinking" "opencode launch must not pass pi thinking flag"
+  assert_no_claude_auto_permission_mode "$launch" "OpenCode launch"
   pass "opencode receives --model and omits the unsupported effort axis"
 }
 
@@ -506,6 +550,7 @@ test_pi_threads_model_and_max_effort() {
     "pi launch still exports the removed Calm input-reroute binding"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
     "pi launch lost the canonical typed launch-brief envelope"
+  assert_no_claude_auto_permission_mode "$launch" "Pi launch"
   pass "pi receives --model and --thinking max profile flags"
 }
 
@@ -684,6 +729,7 @@ test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
+test_claude_scout_uses_auto_permissions_and_delivers_profiled_prompt
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort

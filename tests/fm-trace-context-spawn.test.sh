@@ -50,7 +50,12 @@ case "${1:-}" in
       for a in "$@"; do
         case "$a" in
           "export TRACEPARENT="*)
-            chmod a-w "$FM_FAKE_META_PATH"
+            # Replacing the already-written metadata file with a directory makes
+            # the later shell redirection fail under both root and non-root test
+            # runners. chmod cannot model this failure under root, which may
+            # bypass ordinary file write bits.
+            mv "$FM_FAKE_META_PATH" "$FM_FAKE_META_PATH.before-failed-append"
+            mkdir "$FM_FAKE_META_PATH"
             ;;
         esac
       done
@@ -331,9 +336,13 @@ test_failed_metadata_append_unsets_carrier_and_still_launches() {
   out=$(FM_FAKE_TRACE_METADATA_APPEND_FAIL=1 \
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR")
   status=$?
+  meta="$HOME_DIR/state/$CASE_ID.meta"
+  [ -d "$meta" ] && [ -f "$meta.before-failed-append" ] \
+    || fail "metadata-append failure fixture did not preserve and replace the metadata file"
+  rmdir "$meta"
+  mv "$meta.before-failed-append" "$meta"
   expect_code 0 "$status" "failed traceparent metadata append must not abort spawn"
   assert_contains "$out" "spawned $CASE_ID" "spawn should report success after failed metadata append"
-  meta="$HOME_DIR/state/$CASE_ID.meta"
 
   ! grep -q '^traceparent=' "$meta" \
     || fail "failed metadata append must not leave a traceparent= claim in meta"

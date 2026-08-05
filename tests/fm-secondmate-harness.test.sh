@@ -710,9 +710,13 @@ test_spawn_secondmate_harness_model_token() {
   [ "$(meta_field "$meta" model)" = opus ] || fail "model-token: meta model not opus (got '$(meta_field "$meta" model)')"
   [ "$(meta_field "$meta" effort)" = default ] || fail "model-token: meta effort not default (got '$(meta_field "$meta" effort)')"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'opus'" \
-    "model-token: launch did not carry --model opus"
+  assert_contains "$launch" "claude --permission-mode auto --model 'opus'" \
+    "model-token: Claude secondmate launch did not carry auto permissions and --model opus"
+  assert_not_contains "$launch" "--dangerously-skip-permissions" \
+    "model-token: Claude secondmate launch retained the unrestricted bypass"
   assert_not_contains "$launch" "--effort" "model-token: launch must not carry an --effort flag"
+  assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
+    "model-token: Claude secondmate launch lost typed prompt delivery"
   pass "C3 spawn: config/secondmate-harness's model token threads --model into the launch and meta"
 }
 
@@ -732,8 +736,12 @@ test_spawn_secondmate_harness_model_and_effort_tokens() {
   [ "$(meta_field "$meta" model)" = opus ] || fail "model-effort-tokens: meta model not opus"
   [ "$(meta_field "$meta" effort)" = high ] || fail "model-effort-tokens: meta effort not high (got '$(meta_field "$meta" effort)')"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'opus' --effort 'high'" \
-    "model-effort-tokens: launch did not carry both --model opus and --effort high"
+  assert_contains "$launch" "claude --permission-mode auto --model 'opus' --effort 'high'" \
+    "model-effort-tokens: Claude secondmate launch did not carry auto permissions, --model opus, and --effort high"
+  assert_not_contains "$launch" "--dangerously-skip-permissions" \
+    "model-effort-tokens: Claude secondmate launch retained the unrestricted bypass"
+  assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
+    "model-effort-tokens: Claude secondmate launch lost typed prompt delivery"
   pass "C4 spawn: config/secondmate-harness's model+effort tokens thread into the launch and meta"
 }
 

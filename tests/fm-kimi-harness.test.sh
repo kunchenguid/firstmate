@@ -195,6 +195,8 @@ test_kimi_launch_then_send_is_verified() {
   [ "$launch" = "'$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
     || fail "kimi launch did not use the absolute binary, model, and --auto only: $launch"
   assert_not_contains "$launch" "--effort" "kimi launch emitted a nonexistent effort flag"
+  assert_not_contains "$launch" "--permission-mode auto" \
+    "Kimi launch received Claude's harness-specific permission mode"
   assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"
   assert_not_contains "$launch" "__TURNEND__" "kimi launch retained a turn-end placeholder"
 

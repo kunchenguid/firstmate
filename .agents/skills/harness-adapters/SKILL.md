@@ -116,7 +116,7 @@ The supported launch-profile flags below are verified locally; each row records 
 
 | Harness | Model flag | Effort flag | Notes |
 |---|---|---|---|
-| claude | `--model <model>` | `--effort <low\|medium\|high\|xhigh\|max>` | Verified on Claude Code 2.1.196. |
+| claude | `--model <model>` | `--effort <low\|medium\|high\|xhigh\|max>` | Verified on Claude Code 2.1.222. |
 | codex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'` | Verified on codex-cli 0.142.1. The installed binary schema contains `model_reasoning_effort`, the active config uses it, and the bundled model catalog advertises only low/medium/high/xhigh. `max` is omitted. |
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high>` | Verified on grok 0.2.99 (2026-07-13). `--effort` is an alias, but firstmate's profile axis is reasoning effort. As of 0.2.99 the ceiling is `high`; both `xhigh` and `max` are rejected with `use one of: high, medium, low`, so firstmate omits them. |
 | pi / pi-signed | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-27 on Pi and pi-signed 0.82.0. Both expose the same accepted thinking levels and completed the same model-qualified max-thinking smoke. |
@@ -166,7 +166,7 @@ A send or key action reporting success is not proof that the intended action hap
 OpenCode can accept and queue an Enter while leaving text visible, Grok can consume Enter in its slash popup without submitting, and Kimi can silently drop a message sent before readiness even though the send returns success.
 The shared symptom is a healthy-looking pane with no work in progress, so each adapter must verify the observable postcondition that is specific to its TUI.
 
-## claude (VERIFIED; busy-state hooks live-verified 2026-07-28 on Claude Code 2.1.220)
+## claude (VERIFIED; launch behavior verified 2026-08-05 on Claude Code 2.1.222; busy-state hooks live-verified 2026-07-28 on Claude Code 2.1.220)
 
 | Fact | Value |
 |---|---|
@@ -174,14 +174,19 @@ The shared symptom is a healthy-looking pane with no work in progress, so each a
 | Exit command | `/exit` |
 | Interrupt | single Escape |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
+| Permissions | `--permission-mode auto`; Claude's built-in classifier approves ordinary actions and may still request explicit approval for sensitive actions. |
 
-First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.
+First launch in a fresh worktree, or first ever on a machine, may show a project-trust or permission confirmation.
 After every spawn, peek the pane within about 20 seconds.
 If such a dialog is showing, accept it from an active firstmate session using `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Enter`, or the choice the dialog requires, unless `FM_HOME` is already set to the active firstmate home; verify the brief started processing.
 
+Firstmate launches every Claude crewmate, scout, and secondmate in classified auto mode rather than unrestricted permission bypass.
+Claude Code 2.1.222 accepts that mode under root and completed a project-scoped `Read` tool call without a root refusal.
+Sensitive actions remain subject to Claude's classifier and can still require explicit approval.
+
 Claude renders a predicted-next-prompt suggestion as dim/faint text inside an otherwise-empty composer after a turn completes.
 A plain `tmux capture-pane` cannot tell that ghost text apart from typed text.
-Firstmate launches every claude crewmate and secondmate with `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`, scoped to firstmate-launched agents through `bin/fm-spawn.sh`, so it never touches the captain's global config.
+Firstmate launches every Claude crewmate, scout, and secondmate with `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`, scoped to Firstmate-launched agents through `bin/fm-spawn.sh`, so it never touches the captain's global config.
 The CLI's `--prompt-suggestions` flag is print/SDK-mode only and does not suppress the interactive composer ghost text, verified empirically on v2.1.186.
 As defense in depth for any pane that flag cannot reach, including the captain's own firstmate composer that away-mode reads, the shared `fm_composer_strip_ghost` extractor in `bin/fm-composer-lib.sh` removes dim/faint SGR 2 ghost runs before pending-input classification on both ANSI-capable readers (tmux and herdr).
 Its broader dark-TRUECOLOR placeholder handling and dark-theme tradeoff are documented in `docs/herdr-backend.md` "Composer and injection safety", with active captures in `docs/verification/runtime-backends.md`.
