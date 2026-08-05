@@ -37,9 +37,27 @@ A `pass` verdict is permission to continue through the project's normal gates, n
 
 ## Preconditions
 
-The generator's work must be committed to its own branch before evaluation - the evaluator gets its own worktree and can only see committed state.
-Uncommitted work in the generator's tree is invisible to the evaluator, and evaluating stale code is worse than not evaluating.
+The generator's work must be **committed** to its `fm/<id>` branch before it signals the gate. Uncommitted work is invisible to the evaluator, and evaluating stale code is worse than not evaluating at all.
 The project's own test gate must already be green: the evaluator judges what actually built and passed, not a work in progress.
+
+## Worktrees: separate, always
+
+The evaluator takes **its own worktree** and checks out the generator's branch there:
+
+```sh
+git checkout fm/<task-id>
+```
+
+No push and no remote are involved - worktrees of one clone share git refs, so a local commit in the generator's worktree is immediately visible from the evaluator's.
+
+**Never run the evaluator in the generator's worktree**, however tempting it looks given that the evaluator writes nothing. The danger is not writing, it is teardown: `fm-teardown.sh` acts on the `worktree=` path recorded in `state/<id>.meta`, and nothing anywhere checks whether two tasks recorded the same path. Tearing down the evaluator would, inside the generator's live worktree, detach HEAD and `git branch -D` the generator's branch, delete its hook files, then `treehouse return --force` - which terminates the running agent and hard-resets the directory, discarding uncommitted work.
+
+The safety check does not save you, and is worst for exactly this shape: `validate_worktree_teardown_safety` returns immediately for `kind=scout`, because a scout's worktree is declared scratch. A scout-shaped evaluator sails straight into the destructive path. A ship-shaped one instead can never be torn down cleanly, because the dirty check sees the generator's work and refuses.
+
+Two related facts, recorded so they are not rediscovered:
+
+- Ordinary task worktrees hold **no lease** - only dirtiness keeps `treehouse get` from handing one out again. A generator that commits everything and goes clean is, in principle, re-gettable.
+- `treehouse enter --print-path` is the primitive for attaching to an in-use worktree, and `treehouse return` has unused `--if-lease-holder` / `--if-lease-id` guards. If shared access is ever genuinely needed, those are the anchors - and `fm-teardown.sh` must be taught ownership in the same change, never before it.
 
 ## Standing the app up
 
