@@ -43,17 +43,20 @@ The projection remains read-only and does not inspect historical prose.
 Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
+Measured-liveness gate and selector-falsification verification date: 2026-08-05.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
 The initial Bearings snapshot correctly has no open decision, and the new teardown gate refuses to erase the source.
+A completed but unreclaimed in-flight task with a verified-absent endpoint and worker surfaces as a measured-liveness gate, while a captain-held row retains only its decision gate and independently active work remains in flight without that gate.
+Neutralizing the measured-liveness selector removes only the phantom-task gate and makes the guarded property go red.
 A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so `resolve` matches the first, middle, and last ids and rejects a genuinely absent id.
 
 The final verification commands and their exact summarized outputs follow.
 
 ```text
 $ bash tests/fm-decision-hold-lifecycle.test.sh
-ok - report-only unresolved decision is reproduced and completion refuses before loss
+ok - phantom and held lanes gate while measured-active and active-run lanes do not, selector neutralization goes RED, and completion refuses before report loss
 ok - non-forced scout teardown always requires durable inventory verification
 ok - captain holds are idempotent, distinct, teardown-safe, Bearings-visible, and durably routed before close
 ok - completion and verification validate origins before constructing paths
@@ -85,7 +88,4 @@ fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
 
 $ git diff --check
 (no output)
-
-$ for test_script in tests/*.test.sh; do bash "$test_script"; done
-ALL 71 TEST SCRIPTS PASSED
 ```
