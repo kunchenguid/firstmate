@@ -7,6 +7,7 @@
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
+#                 "GH_AUTH: authenticated|not authenticated|indeterminate (probe timed out after <seconds>s)"
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
@@ -102,6 +103,10 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+FM_GH_AUTH_TIMEOUT_SECS=${FM_GH_AUTH_TIMEOUT_SECS:-10}
+case "$FM_GH_AUTH_TIMEOUT_SECS" in
+  ''|*[!0-9]*|0) FM_GH_AUTH_TIMEOUT_SECS=10 ;;
+esac
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-quota-axi-lib.sh disable=SC1091
@@ -202,6 +207,57 @@ fleet_sync() {
 
   fleet_sync_relay_filtered_output "$tmp"
   rm -f "$tmp"
+}
+
+# Runs only `gh auth status` with prompting and update notifications disabled.
+# Return 0 for authenticated, 1 for an ordinary unauthenticated/error result,
+# and 124 when the bounded probe could not determine a result.
+gh_auth_probe() {
+  if command -v timeout >/dev/null 2>&1; then
+    GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+      timeout "$FM_GH_AUTH_TIMEOUT_SECS" gh auth status >/dev/null 2>&1
+  elif command -v gtimeout >/dev/null 2>&1; then
+    GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+      gtimeout "$FM_GH_AUTH_TIMEOUT_SECS" gh auth status >/dev/null 2>&1
+  elif command -v perl >/dev/null 2>&1; then
+    GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 perl -e '
+      my $t = shift;
+      my $pid = fork;
+      die "fork failed" unless defined $pid;
+      if (!$pid) { setpgrp(0, 0); exec @ARGV }
+      local $SIG{ALRM} = sub {
+        kill "TERM", -$pid;
+        select undef, undef, undef, 0.2;
+        kill "KILL", -$pid;
+        exit 124;
+      };
+      alarm $t;
+      waitpid $pid, 0;
+      exit($? >> 8);
+    ' "$FM_GH_AUTH_TIMEOUT_SECS" gh auth status >/dev/null 2>&1
+  else
+    return 124
+  fi
+}
+
+gh_auth_report() {
+  local status
+  gh_auth_probe
+  status=$?
+  case "$status" in
+    0)
+      [ "${FM_BOOTSTRAP_GH_AUTH_DIAGNOSTICS:-0}" != 1 ] \
+        || echo "GH_AUTH: authenticated"
+      ;;
+    124)
+      echo "GH_AUTH: indeterminate (probe timed out after ${FM_GH_AUTH_TIMEOUT_SECS}s)"
+      ;;
+    *)
+      echo "NEEDS_GH_AUTH"
+      [ "${FM_BOOTSTRAP_GH_AUTH_DIAGNOSTICS:-0}" != 1 ] \
+        || echo "GH_AUTH: not authenticated"
+      ;;
+  esac
 }
 
 secondmate_sync() {
@@ -1001,7 +1057,7 @@ fi
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
 fi
-gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+gh_auth_report
 # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
 # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
 # primary only; detached-HEAD worktrees and secondmate homes never trip it.
