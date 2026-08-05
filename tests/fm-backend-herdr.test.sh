@@ -48,7 +48,8 @@ next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
   printf '\n'
 } >> "$LOG"
 if [ "${1:-}" = status ] && [ "${2:-}" = --json ] && [ "${FM_HERDR_SCRIPT_STATUS:-0}" != 1 ]; then
-  printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
+  protocol=${FM_HERDR_FAKE_PROTOCOL:-14}
+  printf '{"client":{"version":"fake","protocol":%s},"server":{"running":true,"protocol":%s}}\n' "$protocol" "$protocol"
   exit 0
 fi
 n=$next
@@ -2642,19 +2643,73 @@ test_kill_is_best_effort() {
   pass "fm_backend_herdr_kill: calls pane close and stays best-effort on failure"
 }
 
-test_current_path_reads_cwd() {
+test_current_path_protocol_19_reads_treehouse_subshell() {
   local dir log resp fb out
-  dir="$TMP_ROOT/cwd"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  # Verified pitfall (herdr-verification-p2.md): .result.pane.cwd is frozen at
-  # pane-creation time and never updates; .foreground_cwd tracks the live
-  # running process (e.g. a treehouse get subshell) and is what must be read.
-  printf '{"result":{"pane":{"cwd":"/tmp/pane-creation-dir","foreground_cwd":"/tmp/fake-worktree"}}}\n' > "$resp/1.out"
+  dir="$TMP_ROOT/cwd-treehouse"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2","cwd":"/tmp/project","foreground_cwd":"/tmp/fake-worktree"}}}\n' > "$resp/1.out"
+  printf '{"result":{"process_info":{"pane_id":"w1:p2","shell_pid":100,"foreground_process_group_id":200,"foreground_processes":[{"pid":200,"name":"zsh","argv":["-zsh"],"cwd":"/tmp/fake-worktree"}]}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_FAKE_PROTOCOL=19 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_current_path default:w1:p2' "$ROOT" )
+  [ "$out" = "/tmp/fake-worktree" ] || fail "current_path should resolve the nested Treehouse shell's cwd, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''get'$'\x1f''w1:p2' "current_path did not call pane get"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''process-info'$'\x1f''--pane'$'\x1f''w1:p2' \
+    "current_path did not inspect the protocol-19 foreground process group"
+  pass "fm_backend_herdr_current_path: protocol 19 resolves a nested Treehouse shell's worktree cwd"
+}
+
+test_current_path_protocol_19_ignores_transient_treehouse_cwd() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/cwd-transient"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Herdr 0.8.0 foreground_cwd follows any foreground process. During the
+  # live refusal it briefly reported /Users/walter while the persistent pane
+  # shell remained in the project. That transient must not make fm-spawn stop
+  # polling and hand the isolation assertion a non-worktree path.
+  printf '{"result":{"pane":{"pane_id":"w1:p2","cwd":"/tmp/project","foreground_cwd":"/Users/walter"}}}\n' > "$resp/1.out"
+  printf '{"result":{"process_info":{"pane_id":"w1:p2","shell_pid":100,"foreground_process_group_id":200,"foreground_processes":[{"pid":200,"name":"treehouse","argv":["treehouse","get"],"cwd":"/Users/walter"}]}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_FAKE_PROTOCOL=19 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_current_path default:w1:p2' "$ROOT" )
+  [ "$out" = "/tmp/project" ] || fail "current_path should hold the parent shell cwd while treehouse itself is foreground, got '$out'"
+  [ "$out" != "/Users/walter" ] || fail "current_path leaked the transient foreground-command cwd into spawn validation"
+  pass "fm_backend_herdr_current_path: protocol 19 cannot promote a transient treehouse command cwd to a worktree"
+}
+
+test_current_path_protocol_19_plain_shell_is_unchanged() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/cwd-plain-shell"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2","cwd":"/tmp/plain-shell","foreground_cwd":"/tmp/plain-shell"}}}\n' > "$resp/1.out"
+  printf '{"result":{"process_info":{"pane_id":"w1:p2","shell_pid":100,"foreground_process_group_id":100,"foreground_processes":[{"pid":100,"name":"zsh","argv":["-zsh"],"cwd":"/tmp/plain-shell"}]}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_FAKE_PROTOCOL=19 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_current_path default:w1:p2' "$ROOT" )
+  [ "$out" = "/tmp/plain-shell" ] || fail "current_path should preserve a plain shell pane's cwd, got '$out'"
+  pass "fm_backend_herdr_current_path: protocol 19 preserves plain-shell pane cwd reads"
+}
+
+test_current_path_protocol_19_unreadable_process_info_fails_closed() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/cwd-process-info-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2","cwd":"/tmp/project","foreground_cwd":"/Users/walter"}}}\n' > "$resp/1.out"
+  printf '1\n' > "$resp/2.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_FAKE_PROTOCOL=19 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_current_path default:w1:p2' "$ROOT" )
+  [ -z "$out" ] || fail "protocol-19 current_path should fail closed when process-info is unreadable, got '$out'"
+  pass "fm_backend_herdr_current_path: protocol 19 never revives raw foreground_cwd when process-info is unreadable"
+}
+
+test_current_path_legacy_protocol_reads_foreground_cwd() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/cwd-legacy"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Protocols before 19 do not expose pane process-info. Their pane cwd was
+  # frozen at creation, so retain the established foreground_cwd behavior.
+  printf '{"result":{"pane":{"pane_id":"w1:p2","cwd":"/tmp/pane-creation-dir","foreground_cwd":"/tmp/fake-worktree"}}}\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_current_path default:w1:p2' "$ROOT" )
-  [ "$out" = "/tmp/fake-worktree" ] || fail "current_path should read foreground_cwd (the live process), not the frozen creation-time cwd, got '$out'"
-  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''get'$'\x1f''w1:p2' "current_path did not call pane get"
-  pass "fm_backend_herdr_current_path: reads pane foreground_cwd (the live running process), not the frozen creation-time cwd"
+  [ "$out" = "/tmp/fake-worktree" ] || fail "legacy current_path should retain foreground_cwd semantics, got '$out'"
+  pass "fm_backend_herdr_current_path: protocols before 19 retain foreground_cwd compatibility"
 }
 
 # --- busy_state (semantic agent state) ---------------------------------------
@@ -4020,7 +4075,11 @@ test_capture_works_around_small_lines_bug
 test_capture_preserves_pane_read_failure
 test_send_key_normalizes_and_targets_pane
 test_kill_is_best_effort
-test_current_path_reads_cwd
+test_current_path_protocol_19_reads_treehouse_subshell
+test_current_path_protocol_19_ignores_transient_treehouse_cwd
+test_current_path_protocol_19_plain_shell_is_unchanged
+test_current_path_protocol_19_unreadable_process_info_fails_closed
+test_current_path_legacy_protocol_reads_foreground_cwd
 test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent
