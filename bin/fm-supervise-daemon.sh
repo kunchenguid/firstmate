@@ -1368,6 +1368,17 @@ fm_super_main() {
     exit 1
   fi
 
+  # --- composer idle-placeholder default for cursor firstmates ---------------
+  # cursor-agent renders its bare `→` prompt glyph AND its "Add a follow-up"
+  # idle placeholder fully de-emphasised, so after ghost stripping only
+  # FM_COMPOSER_IDLE_RE can prove the composer empty to the shared classifier
+  # (bin/fm-composer-lib.sh). Other harnesses keep their verified bare/bordered
+  # glyph routes and leave the override unset.
+  if [ -z "${FM_COMPOSER_IDLE_RE:-}" ] && [ "$(fm_daemon_primary_harness)" = cursor ]; then
+    FM_COMPOSER_IDLE_RE='^Add a follow-up$'
+  fi
+  export FM_COMPOSER_IDLE_RE
+
   # --- auto-discover the supervisor target (the pane running firstmate) -----
   # Priority: FM_SUPERVISOR_TARGET override > $TMUX_PANE (tmux; inherited from
   # the pane that launched the daemon, normally firstmate's own) >

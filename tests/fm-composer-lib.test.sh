@@ -9,8 +9,8 @@
 #      (unsafe-for-injection), never `empty`. This is the safety fix.
 #   2. The SAME shell glyph INSIDE a bordered composer box is the harness's own
 #      prompt and still reads `empty` (existing behavior preserved).
-#   3. The AGENT prompt glyphs `❯` (claude), `›` (codex), and `⟩` (muse) are a genuine empty
-#      agent composer either way, bordered or bare.
+#   3. The AGENT prompt glyphs `❯` (claude), `›` (codex), `⟩` (muse), and `→`
+#      (cursor) are a genuine empty agent composer either way, bordered or bare.
 #   4. Real unsubmitted text reads `pending`; a known idle placeholder reads
 #      `empty`.
 set -u
@@ -38,20 +38,12 @@ test_bare_shell_glyphs_are_unknown() {
 
 test_stripped_unbordered_content_uses_plain_content() {
   local plain out
-  for plain in '$' 'user@host $'; do
+  for plain in '$' 'user@host $' '❯' '›' '→' '⟩'; do
     out=$(classify 0 '' '' sensitive "$plain")
     [ "$out" = unknown ] \
-      || fail "stripped unbordered content '$plain' must retain its unknown safety verdict, got '$out'"
+      || fail "stripped unbordered content '$plain' must stay unknown without an idle match, got '$out'"
   done
-  # muse draws `⟩` at luminance ~150, the tightest margin over the 128 ghost
-  # threshold in the fleet, so a raised threshold really can strip it to empty
-  # and leave only the plain row. This branch is what keeps that pane readable.
-  for plain in '❯' '›' '⟩'; do
-    out=$(classify 0 '' '' sensitive "$plain")
-    [ "$out" = empty ] \
-      || fail "a stripped agent glyph '$plain' must remain empty, got '$out'"
-  done
-  pass "fm_composer_classify_content: stripped unbordered content is unknown except verified agent glyphs"
+  pass "fm_composer_classify_content: stripped unbordered content stays unknown without an idle match"
 }
 
 test_bare_shell_prompt_with_command_is_not_empty() {
@@ -162,15 +154,22 @@ test_cursor_stripped_ghost_plain_is_empty() {
   local out
   # Real capture path: cursor-agent renders the `→` glyph dim (SGR 2) with the
   # idle placeholder, so ghost stripping empties the content and the verdict
-  # rests on the plain-content fallback. An agent-glyph-prefixed plain row must
-  # read empty; a shell-glyph row must stay unknown (dead-shell safety).
+  # rests on the plain-content fallback, which requires an idle-placeholder
+  # match (anchored or not, glyph stripped before matching).
+  out=$(classify 0 '' 'Add a follow-up' sensitive '→ Add a follow-up')
+  [ "$out" = empty ] || fail "stripped '→ Add a follow-up' with an idle match should read empty, got '$out'"
+  out=$(classify 0 '' '^Add a follow-up$' sensitive '→ Add a follow-up')
+  [ "$out" = empty ] || fail "stripped '→ Add a follow-up' with an anchored idle match should read empty, got '$out'"
+  # Without an idle match the ghost-stripped row stays unknown: a fully
+  # de-emphasised bare row (dimmed shell prompt, dimmed glyph alone) is never
+  # a safe injection target on glyph shape alone.
   out=$(classify 0 '' '' sensitive '→ Add a follow-up')
-  [ "$out" = empty ] || fail "stripped '→ Add a follow-up' should read empty, got '$out'"
+  [ "$out" = unknown ] || fail "stripped '→ Add a follow-up' without an idle match must stay unknown, got '$out'"
   out=$(classify 0 '' '' sensitive '→')
-  [ "$out" = empty ] || fail "stripped bare '→' should read empty, got '$out'"
+  [ "$out" = unknown ] || fail "stripped bare '→' must stay unknown without an idle match, got '$out'"
   out=$(classify 0 '' '' sensitive '> ls')
   [ "$out" = unknown ] || fail "stripped shell-glyph row '> ls' must stay unknown, got '$out'"
-  pass "fm_composer_classify_content: stripped ghost-only agent-glyph rows read empty, shell rows unknown"
+  pass "fm_composer_classify_content: stripped ghost-only rows read empty only on an idle match, else unknown"
 }
 
 test_bare_shell_glyphs_are_unknown
