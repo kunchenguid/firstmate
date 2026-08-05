@@ -332,7 +332,8 @@ The worker reports the forge change request when CI first becomes green rather t
 
 ### Change-request readiness, landing, and teardown
 
-For forge-backed ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green for a GitHub pull request or `done: MR <url> checks green` for a GitLab merge request, while `direct-PR` reports `done: PR <url>` after opening a GitHub pull request or `done: MR <url>` after opening a GitLab merge request.
+For recognized GitHub and GitLab origin hosts, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green for a GitHub pull request or `done: MR <url> checks green` for a GitLab merge request, while `direct-PR` reports `done: PR <url>` after opening a GitHub pull request or `done: MR <url>` after opening a GitLab merge request.
+When the project directory, origin, or origin host cannot be determined, the generated forge-neutral brief uses the terminal `done: change request <url>` form and issues one scaffold warning rather than assuming GitHub.
 Run `bin/fm-pr-check.sh <id> <change-request-url>` - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
 Tell the captain the change request's full URL, always the complete `https://...` link rather than a bare `#number`, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine authority.

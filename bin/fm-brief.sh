@@ -32,8 +32,12 @@
 # captain's standing posture as context, and this script never reads it:
 #   no-mistakes  implement -> /no-mistakes pipeline -> forge change request -> configured merge authority
 #   direct-PR    implement -> push + open a forge change request (no pipeline) -> configured merge authority
-#                origin GitHub uses gh-axi and PR wording; GitLab uses glab and MR wording;
-#                an unresolved origin still scaffolds forge-neutral guidance and warns once
+#                github.com uses gh-axi and PR wording; recognized GitLab hosts use glab and MR wording;
+#                selection uses only the origin hostname, never repository names or paths;
+#                normal projects resolve under $FM_HOME/projects/<repo-name>, while this repo
+#                resolves at its root when <repo-name> matches that root's basename.
+#                An unavailable directory or origin, or an unrecognized host, still scaffolds
+#                forge-neutral guidance and warns once.
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                the configured merge authority approves, firstmate merges to local main
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
