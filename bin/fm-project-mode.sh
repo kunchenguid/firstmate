@@ -26,6 +26,15 @@
 #                          Mechanical output maps it to its most rigorous leg,
 #                          no-mistakes, so sync, seeding, and init treat such a
 #                          project as the remote-backed pipeline project it is.
+#
+# Optional upstream-maintenance posture tokens share the bracketed registry
+# posture but are queried separately with `--upstream-posture`:
+#   +daily-sync  explicitly permits the guarded daily updater to assess and
+#                fast-forward this clone when every runtime guard passes.
+#   +production  marks a production-bearing clone as report-only and overrides
+#                +daily-sync if both appear.
+# Unknown posture tokens are ambiguous and therefore report-only.
+#
 # yolo (orthogonal) = when on, firstmate may make routine approval decisions itself.
 #   AGENTS.md section 7 is the single owner of authority exceptions, including
 #   ask-user contract expansion and stronger captain boundaries.
@@ -35,7 +44,7 @@
 #
 # An unknown/missing project or unknown mode falls back to "no-mistakes off" and warns
 # to stderr, so a typo never silently drops the gate.
-# Usage: fm-project-mode.sh [--raw] <project-name>
+# Usage: fm-project-mode.sh [--raw|--upstream-posture] <project-name>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,15 +53,54 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 REG="$DATA/projects.md"
 RAW=0
-if [ "${1:-}" = "--raw" ]; then
-  RAW=1
-  shift
-fi
-NAME=${1:?usage: fm-project-mode.sh [--raw] <project-name>}
+QUERY=delivery
+case "${1:-}" in
+  --raw) RAW=1; shift ;;
+  --upstream-posture) QUERY=upstream; shift ;;
+esac
+[ $# -eq 1 ] || {
+  echo "usage: fm-project-mode.sh [--raw|--upstream-posture] <project-name>" >&2
+  exit 2
+}
+NAME=$1
 
 if [ ! -f "$REG" ]; then
-  echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2
-  echo "no-mistakes off"
+  if [ "$QUERY" = upstream ]; then
+    echo "report-only:unregistered"
+  else
+    echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2
+    echo "no-mistakes off"
+  fi
+  exit 0
+fi
+
+if [ "$QUERY" = upstream ]; then
+  posture=$(awk -v n="$NAME" '
+    $1=="-" && $2==n {
+      mode="no-mistakes"; daily=0; production=0; ambiguous=0;
+      if ($3 ~ /^\[/) {
+        s="";
+        for (i=3; i<=NF; i++) { s = s (s==""?"":" ") $i; if ($i ~ /\]$/) break }
+        gsub(/^\[|\]$/, "", s);
+        k=split(s, a, " ");
+        for (j=1; j<=k; j++) {
+          if (a[j]=="no-mistakes" || a[j]=="direct-PR" || a[j]=="local-only") mode=a[j];
+          else if (a[j]=="+yolo") ;
+          else if (a[j]=="+daily-sync") daily=1;
+          else if (a[j]=="+production") production=1;
+          else if (a[j]!="") ambiguous=1;
+        }
+      }
+      if (mode=="local-only") print "report-only:local-only";
+      else if (production) print "report-only:production-bearing";
+      else if (ambiguous) print "report-only:ambiguous-posture";
+      else if (daily) print "eligible";
+      else print "report-only:not-opted-in";
+      found=1; exit
+    }
+    END { if (!found) print "report-only:unregistered" }
+  ' "$REG")
+  printf '%s\n' "$posture"
   exit 0
 fi
 

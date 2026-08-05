@@ -25,6 +25,7 @@
   ],
   "readmeSetupTargets": [
     "docs/configuration.md",
+    "docs/daily-upstream.md",
     "docs/wedge-alarm.md",
     "docs/tmux-backend.md",
     "docs/herdr-backend.md",
@@ -133,6 +134,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/daily-upstream-report/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/diagnostic-reasoning/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -237,6 +242,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/daily-upstream.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/documentation-audiences.md",
       "audience": "maintainer-architecture"
     },
@@ -319,6 +328,10 @@
     {
       "path": "docs/turnend-guard.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/verification/daily-upstream.md",
+      "audience": "maintainer-verification"
     },
     {
       "path": "docs/verification/dispatch-auth.md",

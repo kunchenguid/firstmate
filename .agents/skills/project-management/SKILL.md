@@ -51,6 +51,9 @@ Registering a conditional policy is a one-time choice and never requires classif
 The optional `+yolo` posture changes routine approval authority but does not change the delivery mode.
 Default it off for every project and every posture, and enable it only on the captain's explicit instruction.
 `AGENTS.md` section 7 owns the complete authority boundary and exceptions when it is on.
+The optional `+daily-sync` posture explicitly permits the guarded daily upstream owner to assess and fast-forward that registered clone, and it must be enabled only on the captain's explicit instruction for that project.
+The optional `+production` posture marks a production-bearing clone as report-only for daily upstream maintenance and overrides `+daily-sync`.
+The `--upstream-posture` contract in `bin/fm-project-mode.sh` is the parser owner for those tokens and treats every unknown token as ambiguous and report-only.
 
 ## Add or clone an existing project
 

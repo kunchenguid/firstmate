@@ -325,6 +325,22 @@ test_on_default_clean_behind_fast_forwards() {
   pass "on-default clean behind clone still fast-forwards"
 }
 
+test_expected_target_refuses_origin_movement() {
+  local home clone candidate before out
+  home=$(new_home)
+  clone=$(build_pair "$home" pinned)
+  advance_origin "$home" pinned C1
+  candidate=$(git -C "$home/work-pinned" rev-parse HEAD)
+  advance_origin "$home" pinned C2
+  before=$(head_sha "$clone")
+
+  out=$(run_sync "$home" --expected-target "$candidate" pinned)
+
+  assert_contains "$out" "pinned: skipped: origin moved from expected target" "pinned sync refuses moved origin"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "pinned sync broadened to the newer origin"
+  pass "expected target refuses origin movement and leaves the clone untouched"
+}
+
 test_already_current_unchanged() {
   local home clone out before
   home=$(new_home)
@@ -610,6 +626,7 @@ test_dirty_is_stuck_untouched
 test_non_default_branch_is_stuck_untouched
 test_diverged_is_stuck_untouched
 test_on_default_clean_behind_fast_forwards
+test_expected_target_refuses_origin_movement
 test_already_current_unchanged
 test_no_origin_skipped
 test_local_only_skipped

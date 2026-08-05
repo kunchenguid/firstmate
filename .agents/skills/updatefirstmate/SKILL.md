@@ -16,9 +16,11 @@ Firstmate is its own repo, behind the same no-mistakes gate as any project, so n
 Only `AGENTS.md`, `bin/`, and `.agents/skills/` are a running firstmate instruction surface; public `skills/` is installer-facing and is not loaded by firstmate.
 This skill performs that pull for the running main firstmate and every secondmate, without disturbing any in-flight work.
 
-The update is **fast-forward only** - the same sanctioned self-write as the fleet sync firstmate already runs.
+The update is **fast-forward only** - the same sanctioned self-write as the fleet sync firstmate already runs - and accepts only the official `kunchenguid/firstmate` origin for every target.
 For a remote route, it updates the configured Firstmate code root on that host from its own origin, then guardedly fast-forwards the persistent home to that code-root commit.
-It never forces, never creates a merge commit, never stashes, and advances a target only on a clean fast-forward; anything dirty, diverged, offline, or on the wrong branch is skipped and reported.
+It never forces, never creates a merge commit, never stashes, and advances a target only on a clean fast-forward; anything dirty, diverged, offline, unofficial, or on the wrong branch is skipped and reported.
+`bin/fm-update.sh --expected-sha <sha>` is the public pinned-candidate contract for an already assessed update, and it refuses if the official default branch moved instead of broadening to a later commit.
+A remote route carries no pinned-candidate contract, so a pinned run reports it as skipped rather than updating that host to a later commit.
 A tracked-files fast-forward leaves the gitignored operational dirs (data/, state/, config/, projects/, .no-mistakes/) untouched, so a secondmate's in-flight work is never disrupted.
 This touches only the firstmate repo and its own worktrees, never anything under `projects/`.
 

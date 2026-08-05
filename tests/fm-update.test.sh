@@ -54,6 +54,8 @@ new_world() {
 
   git clone -q "$w/origin.git" "$w/main"
   git -C "$w/main" remote set-head origin main >/dev/null 2>&1 || true
+  git -C "$w/main" remote set-url origin https://github.com/kunchenguid/firstmate.git
+  git -C "$w/main" config url."file://$w/origin.git".insteadOf https://github.com/kunchenguid/firstmate.git
 
   printf '%s\n' "$w"
 }
@@ -89,7 +91,9 @@ bump_origin() {
 
 run_update() {
   local w=$1
-  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null
+  shift
+  FM_DAILY_TEST_MODE=1 FM_DAILY_TEST_ALLOW_URL_REWRITE=1 \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" "$@" 2>/dev/null
 }
 
 # --- T1: main + secondmate behind, instruction change; FF, not a merge ------
@@ -269,6 +273,26 @@ test_firstmate_detached_head_skipped() {
   pass "T10 firstmate detached HEAD is skipped"
 }
 
+test_expected_sha_refuses_origin_movement() {
+  local w candidate out before rc
+  w=$(new_world t-expected)
+  bump_origin "$w" instr
+  git -C "$w/main" fetch -q origin
+  candidate=$(git -C "$w/main" rev-parse origin/main)
+  bump_origin "$w" readme
+  before=$(git -C "$w/main" rev-parse HEAD)
+
+  set +e
+  out=$(run_update "$w" --expected-sha "$candidate")
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "pinned updater accepted a moved origin"
+  assert_contains "$out" "firstmate: skipped: origin moved from expected SHA" "origin movement is explicit"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] || fail "pinned race moved firstmate HEAD"
+  pass "expected SHA refuses an origin movement without broadening the update"
+}
+
 test_unsafe_secondmate_home_skipped_before_git_update() {
   local w out bad before
   w=$(new_world t11)
@@ -299,6 +323,7 @@ test_idempotent_already_current
 test_registry_backstop_dedup_and_self_exclusion
 test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
+test_expected_sha_refuses_origin_movement
 test_unsafe_secondmate_home_skipped_before_git_update
 
 echo "# all fm-update tests passed"

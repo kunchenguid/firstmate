@@ -19,7 +19,10 @@
 # killed mid-write - e.g. a timed-out bootstrap sync or a teardown process kill),
 # it is retried with a bounded wait and removed only when provably stale; see
 # fetch_with_packed_refs_lock_guard and the FM_FLEET_SYNC_PACKED_REFS_LOCK_* knobs.
-# Usage: fm-fleet-sync.sh [<project-dir-or-name>]
+# Usage: fm-fleet-sync.sh [--expected-target <40-hex-sha>] [<project-dir-or-name>]
+# `--expected-target` is accepted only for one named project and refuses when
+# origin advances between assessment and application, so a scheduled update can
+# never broaden itself to an unreviewed revision.
 # The single-project form accepts either a path (absolute, or relative to the
 # caller's cwd) or a bare "<name>"/"projects/<name>" form, resolved against
 # this home's projects dir ($FM_HOME/projects, or $FM_PROJECTS_OVERRIDE).
@@ -55,14 +58,34 @@ if ! [[ "$FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS" =~ ^([0-9]+([.][0-9]*)?|[
 fi
 
 usage() {
-  echo "usage: fm-fleet-sync.sh [<project-dir-or-name>]" >&2
+  cat >&2 <<'EOF'
+Usage:
+  fm-fleet-sync.sh [<project-dir-or-name>]
+  fm-fleet-sync.sh --expected-target <40-hex-sha> <project-dir-or-name>
+
+The expected-target form refreshes exactly one registered project only when the
+fetched default branch still equals the assessed SHA.
+It refuses origin movement and retains all existing clean/default/non-diverged
+fast-forward guards.
+EOF
 }
 
-if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
-  usage
-  exit 0
-fi
+EXPECTED_TARGET=
+case "${1:-}" in
+  --help|-h)
+    usage
+    exit 0
+    ;;
+  --expected-target)
+    [ $# -eq 3 ] || { usage; exit 1; }
+    EXPECTED_TARGET=$2
+    case "$EXPECTED_TARGET" in *[!0-9a-f]*|'') usage; exit 1 ;; esac
+    [ "${#EXPECTED_TARGET}" -eq 40 ] || { usage; exit 1; }
+    shift 2
+    ;;
+esac
 [ $# -le 1 ] || { usage; exit 1; }
+[ -z "$EXPECTED_TARGET" ] || [ $# -eq 1 ] || { usage; exit 1; }
 
 project_label() {
   case "$PROJ" in
@@ -286,7 +309,7 @@ stuck_state() {
 report_stuck() {
   local state=$1 behind
   behind=$(git -C "$PROJ" rev-list --count "HEAD..$BASE" 2>/dev/null) || behind="?"
-  echo "$label: STUCK: on $state, $behind commits behind $BASE - needs attention"
+  echo "$label: STUCK: on $state, $behind commits behind $BASE_LABEL - needs attention"
 }
 
 sync_project() {
@@ -321,17 +344,30 @@ sync_project() {
     return 0
   fi
 
-  prune_gone_branches || true
-
   DEFAULT=$(default_branch) || {
     echo "$label: skipped: cannot determine default branch"
     return 0
   }
   BASE="origin/$DEFAULT"
+  BASE_LABEL=$BASE
   if ! git -C "$PROJ" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null; then
     echo "$label: skipped: $BASE does not exist"
     return 0
   fi
+  if [ -n "$EXPECTED_TARGET" ]; then
+    fetched_target=$(git -C "$PROJ" rev-parse "$BASE" 2>/dev/null) || {
+      echo "$label: skipped: cannot read $BASE"
+      return 0
+    }
+    if [ "$fetched_target" != "$EXPECTED_TARGET" ]; then
+      echo "$label: skipped: origin moved from expected target"
+      return 0
+    fi
+    BASE=$EXPECTED_TARGET
+    BASE_LABEL="expected upstream target"
+  fi
+
+  prune_gone_branches || true
 
   cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
   dirty=no

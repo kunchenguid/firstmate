@@ -261,6 +261,8 @@ live_secondmate_meta_records() {
 # base_mode selects where the fast-forward base comes from:
 #   origin       - fetch origin and advance to origin/<default> (the /updatefirstmate
 #                  path); requires an origin remote and network reachability.
+#                  An optional sixth expected-SHA argument pins that fetch to one
+#                  reviewed commit and refuses when origin/<default> has moved.
 #   <commit-ish> - advance to that LOCAL commit with NO fetch and no origin
 #                  dependency (the local-HEAD secondmate sync). The commit must
 #                  already exist in the target's object store, which it always does
@@ -271,7 +273,7 @@ live_secondmate_meta_records() {
 FF_STATUS=""
 FF_INSTR=""
 ff_target() {
-  local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no} ignore_seed_marker=${5:-no}
+  local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no} ignore_seed_marker=${5:-no} expected_sha=${6:-}
   FF_STATUS="skipped"
   FF_INSTR=""
 
@@ -284,7 +286,7 @@ ff_target() {
     return 0
   fi
 
-  local default base cur instr local_rev base_rev before after out
+  local default base cur instr local_rev base_rev before after out fetched_rev
   default=$(default_branch "$dir") || {
     echo "$label: skipped: cannot determine default branch"
     return 0
@@ -296,11 +298,33 @@ ff_target() {
       echo "$label: skipped: no origin remote"
       return 0
     fi
+    if type fm_ff_origin_allowed >/dev/null 2>&1 && ! fm_ff_origin_allowed "$dir"; then
+      echo "$label: skipped: origin is not the authorized upstream"
+      return 0
+    fi
     if ! fetch_once "$dir"; then
       echo "$label: skipped: fetch failed"
       return 0
     fi
     base="origin/$default"
+    if [ -n "$expected_sha" ]; then
+      case "$expected_sha" in
+        *[!0-9a-f]*|'') echo "$label: skipped: invalid expected SHA"; return 0 ;;
+      esac
+      if [ "${#expected_sha}" -ne 40 ]; then
+        echo "$label: skipped: invalid expected SHA"
+        return 0
+      fi
+      fetched_rev=$(git -C "$dir" rev-parse "$base" 2>/dev/null) || {
+        echo "$label: skipped: cannot read $base"
+        return 0
+      }
+      if [ "$fetched_rev" != "$expected_sha" ]; then
+        echo "$label: skipped: origin moved from expected SHA"
+        return 0
+      fi
+      base="$expected_sha"
+    fi
   else
     base="$base_mode"
   fi
@@ -368,7 +392,7 @@ FF_SEEN_HOMES=""
 # Validate and fast-forward one secondmate home, accumulating its stable
 # fm-<id> task selector into FF_NUDGE_WINDOWS when it should be live-converged.
 # Args:
-#   id home window base_mode nudge_requires_instr
+#   id home window base_mode nudge_requires_instr [expected_sha]
 # A home is nudged only when it ACTUALLY advanced (FF_STATUS=updated) and has a
 # live window. With nudge_requires_instr=yes the advance must also have changed
 # the instruction surface (FF_INSTR non-empty): an already-current home, or one
@@ -376,7 +400,7 @@ FF_SEEN_HOMES=""
 # firstmate repo itself (FM_ROOT) is never processed as its own secondmate, and
 # each resolved home is processed at most once.
 process_secondmate() {
-  local id=$1 home=$2 window=${3:-} base_mode=$4 nudge_requires_instr=${5:-no} home_real fm_root_real
+  local id=$1 home=$2 window=${3:-} base_mode=$4 nudge_requires_instr=${5:-no} expected_sha=${6:-} home_real fm_root_real
   [ -n "$id" ] || return 0
   [ -n "$home" ] || return 0
   fm_root_real=$(resolve_path "$FM_ROOT")
@@ -392,7 +416,7 @@ process_secondmate() {
   esac
   FF_SEEN_HOMES="$FF_SEEN_HOMES $home_real"
 
-  ff_target "$home_real" "secondmate $id" "$base_mode" yes yes
+  ff_target "$home_real" "secondmate $id" "$base_mode" yes yes "$expected_sha"
   if [ "$FF_STATUS" = "updated" ] && [ -n "$window" ]; then
     if [ "$nudge_requires_instr" = yes ] && [ -z "$FF_INSTR" ]; then
       return 0
@@ -411,10 +435,10 @@ process_secondmate() {
 # FF_NUDGE_WINDOWS / FF_SEEN_HOMES, which the caller resets before and reads after.
 # The registry argument is only for home= fallback on older or incomplete meta records.
 sweep_live_secondmate_metas() {
-  local state=$1 base_mode=$2 nudge_requires_instr=${3:-no} registry=${4:-$FM_HOME/data/secondmates.md} id home window meta
+  local state=$1 base_mode=$2 nudge_requires_instr=${3:-no} registry=${4:-$FM_HOME/data/secondmates.md} expected_sha=${5:-} id home window meta
   [ -d "$state" ] || return 0
   while IFS='|' read -r id home window meta; do
     if grep -q '^remote_host=.' "$meta" 2>/dev/null; then continue; fi
-    process_secondmate "$id" "$home" "$window" "$base_mode" "$nudge_requires_instr"
+    process_secondmate "$id" "$home" "$window" "$base_mode" "$nudge_requires_instr" "$expected_sha"
   done < <(live_secondmate_meta_records "$state" "$registry")
 }
