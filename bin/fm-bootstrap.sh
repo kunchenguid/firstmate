@@ -55,6 +55,14 @@
 #          gh-axi is also MISSING when its installed version is older than
 #          0.1.29, the first release whose bare --squash shorthand works for
 #          firstmate's non-interactive PR merge path.
+#          lavish-axi is also MISSING when its installed version is older than
+#          0.1.35, the first release whose poll response carries session_ended
+#          beside the session status. bin/fm-procevent-lavish.sh reads exactly
+#          that field to decide that a human "Send & End" review is terminal, so
+#          an older build leaves every such review source armed forever, and a
+#          plain reopen would also override a session the human deliberately
+#          ended. Later releases only add artifact-authoring surface the adapter
+#          never reads, so the floor stays 0.1.35 rather than tracking latest.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
 #          lavish-axi). tasks-axi is also version and feature gated (0.2.2+
 #          with update --archive-body and mv [<id>...]); an installed but
@@ -694,6 +702,7 @@ fi
 TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
 NO_MISTAKES_MIN=1.31.2
 GH_AXI_MIN=0.1.29
+LAVISH_AXI_MIN=0.1.35
 
 treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
@@ -1035,6 +1044,9 @@ if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes
 fi
 if command -v gh-axi >/dev/null 2>&1 && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
   echo "MISSING: gh-axi (install: $(install_cmd gh-axi))"
+fi
+if command -v lavish-axi >/dev/null 2>&1 && ! tool_version_at_least lavish-axi "$LAVISH_AXI_MIN"; then
+  echo "MISSING: lavish-axi (install: $(install_cmd lavish-axi))"
 fi
 if command -v quota-axi >/dev/null 2>&1 && ! fm_quota_axi_compatible; then
   echo "MISSING: quota-axi (install: $(install_cmd quota-axi))"

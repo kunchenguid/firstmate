@@ -51,6 +51,7 @@ The sentence between those two, in the same help text, is "Its final feedback is
 So the last useful response of an ended review is a `feedback` response, and every poll after it returns an empty ended session immediately.
 That is why the adapter's terminal verdict covers a `feedback` response carrying `session_ended`, not only `status: ended` and a missing session: without it, one human `Send & End` leaves the source armed and each later cycle captures another empty ended result.
 `session_ended` is a session-level field emitted beside `status` in the response's leading `session:` block, which is why the adapter reads it there and ignores identical text appearing in prompt payloads.
+That field first shipped in `lavish-axi` 0.1.35 (2026-07-02, commit `8ca248b`, PR #132, "respect user-ended Lavish sessions"), which is why bootstrap gates the installed build at that floor; `bin/fm-bootstrap.sh` owns the floor and its rationale.
 
 ## The loss limitation this runner cannot close
 
