@@ -67,7 +67,7 @@ export FM_HOME="${FM_HOME:-$HOME/projects/firstmate}"   # or this home's path
 | `newProject` | `POST /api/entry-shell/projects` → `{ project, workspaceUrl }` |
 | `openWorkspace` | Navigate workspace URL; optional `POST /api/runs/session` |
 | `sendTurn` | `POST /api/runs/start` with `{ projectId, prompt, sessionId? }` → `{ runId, sessionId }` |
-| `waitSettled` | In-page SSE on `GET /api/runs/{runId}/stream` until `part.type === "done"` or `error` (mirrors `client.ts`) |
+| `waitSettled` | In-page SSE until `done`/`error`; optional `--review-dir` for periodic viewport screenshots |
 | `snapshotMessages` | Read accumulated SSE frames from the wait job (no public message list API) |
 | `listCheckpoints` | Thin wrapper: `GET /api/runs/history` (may 501 when sandbox/history unavailable) |
 | `revertMessage` | Thin wrapper: `POST /api/runs/restore` with `mode:"revert"` |
@@ -89,13 +89,19 @@ Flow:
 2. Scratch project with a simple blackjack + How to Play prompt
 3. Open workspace
 4. Base turn, then feature turns on the same `sessionId` (double-down, stats, theme)
-5. Write transcript under `$FM_HOME/data/playstudio-agent-loop/blackjack-<utc>/`
+5. Write artifacts under `$FM_HOME/data/playstudio-agent-loop/blackjack-<utc>/` (the run id directory)
+6. Stitch a review video to `review.mp4` in that same directory
 
 Artifact files (private, gitignored under `data/`):
 
 - `preflight.json`, `session.json`, `project.json`
 - `turn-N-start.json`, `turn-N-settle.json`
+- `frames/` (periodic `chrome-devtools-axi screenshot` JPEGs during `waitSettled`)
 - `transcript.jsonl`, `summary.json`
+- `review.mp4` - ffmpeg stitch of the screenshots (1 fps, H.264); path also in `summary.json` as `reviewMp4`
+
+`waitSettled --review-dir DIR` enables capture; cadence is `PS_REVIEW_INTERVAL_SEC` (default 5).
+Use headed Chrome (`CHROME_DEVTOOLS_AXI_HEADED=1`) so the viewport is visible content.
 
 Do not commit secrets, cookies, or raw auth material.
 

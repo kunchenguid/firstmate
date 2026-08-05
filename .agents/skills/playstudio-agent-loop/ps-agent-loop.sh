@@ -11,7 +11,7 @@
 #   ps-agent-loop.sh newProject --name NAME [--prompt TEXT] [--path scratch|reuse_engine|reskin]
 #   ps-agent-loop.sh openWorkspace --url URL | --project-id ID
 #   ps-agent-loop.sh sendTurn --project-id ID --prompt TEXT [--session-id ID]
-#   ps-agent-loop.sh waitSettled --run-id ID --project-id ID [--timeout-sec N] [--out FILE]
+#   ps-agent-loop.sh waitSettled --run-id ID --project-id ID [--timeout-sec N] [--out FILE] [--review-dir DIR]
 #   ps-agent-loop.sh snapshotMessages --job-id ID [--out FILE]
 #   ps-agent-loop.sh listCheckpoints --project-id ID --session-id ID
 #   ps-agent-loop.sh revertMessage --project-id ID --session-id ID --assistant-message-id ID
@@ -24,6 +24,10 @@
 #   CHROME_DEVTOOLS_AXI_*       attach mode; prefer AUTO_CONNECT=1 with SSO'd Chrome
 #   CHROME_DEVTOOLS_AXI_SESSION default playstudio-agent-loop
 #   FM_HOME                     artifact default under $FM_HOME/data/playstudio-agent-loop/
+#   PS_REVIEW_INTERVAL_SEC      screenshot cadence while waiting (default 5)
+#
+# Review video: during waitSettled with --review-dir, capture periodic viewport
+# JPEGs; fixture stitches them with ffmpeg to <out-dir>/review.mp4.
 #
 # Exit codes: 0 ok, 1 usage/error, 2 blocked (auth/stack), 3 settle failed/timeout
 set -euo pipefail
@@ -34,9 +38,10 @@ PS_AGENT_HOST_HEALTH_URL="${PS_AGENT_HOST_HEALTH_URL:-http://127.0.0.1:8081/heal
 PS_AXI_SESSION="${CHROME_DEVTOOLS_AXI_SESSION:-playstudio-agent-loop}"
 DEFAULT_SETTLE_TIMEOUT_SEC="${PS_SETTLE_TIMEOUT_SEC:-900}"
 DEFAULT_SESSION_TIMEOUT_SEC="${PS_SESSION_TIMEOUT_SEC:-120}"
+REVIEW_INTERVAL_SEC="${PS_REVIEW_INTERVAL_SEC:-5}"
 
 usage() {
-  sed -n '2,28p' "$0" | sed 's/^# \?//'
+  sed -n '2,32p' "$0" | sed 's/^# \?//'
 }
 
 die() {
@@ -447,22 +452,71 @@ print("""() => {
   axi_eval_raw "$js"
 }
 
+_capture_review_frame() {
+  # Best-effort viewport JPEG into <dir>/frame-NNNNNN.jpg. Never fails the turn.
+  local dir="$1"
+  local idx="$2"
+  local path
+  [ -n "$dir" ] || return 0
+  mkdir -p "$dir" || return 0
+  path="$(printf '%s/frame-%06d.jpg' "$dir" "$idx")"
+  ps_axi_try screenshot "$path" --format jpeg >/dev/null 2>&1 || true
+}
+
+_stitch_review_mp4() {
+  # Stitch frame-*.jpg under frames_dir into out_mp4 via ffmpeg. Soft-fail if none.
+  local frames_dir="$1"
+  local out_mp4="$2"
+  local count
+  [ -d "$frames_dir" ] || return 1
+  require_cmd ffmpeg
+  count="$(find "$frames_dir" -maxdepth 1 -name 'frame-*.jpg' 2>/dev/null | wc -l | tr -d '[:space:]')"
+  if [ "${count:-0}" -lt 1 ]; then
+    printf 'ps-agent-loop: review video skipped (no frames in %s)\n' "$frames_dir" >&2
+    return 1
+  fi
+  # Duplicate a single frame so ffmpeg can emit a short clip.
+  if [ "$count" -eq 1 ]; then
+    cp "$frames_dir"/frame-*.jpg "$frames_dir/frame-000001.jpg" 2>/dev/null || true
+  fi
+  ffmpeg -y -hide_banner -loglevel error \
+    -framerate 1 \
+    -pattern_type glob -i "$frames_dir/frame-*.jpg" \
+    -c:v libx264 -pix_fmt yuv420p -movflags +faststart \
+    "$out_mp4"
+}
+
 _poll_wait_job() {
   local job_id="$1"
   local timeout_sec="$2"
-  local deadline now payload status js
+  local review_dir="${3:-}"
+  local deadline now payload status js frame_idx=0 last_shot=0
   deadline=$(( $(date +%s) + timeout_sec + 5 ))
   js="$(python3 -c 'import json,sys; print("""() => JSON.stringify((window.__psAgentLoopJobs && window.__psAgentLoopJobs[%s]) || {status:\"missing\"})""" % (json.dumps(sys.argv[1]),))' "$job_id")"
+  # Capture an opening frame immediately when review is enabled.
+  if [ -n "$review_dir" ]; then
+    _capture_review_frame "$review_dir" "$frame_idx"
+    frame_idx=$((frame_idx + 1))
+    last_shot="$(date +%s)"
+  fi
   while true; do
     payload="$(axi_eval_raw "$js")"
     status="$(json_get "$payload" 'data.get("status")')"
     case "$status" in
       settled|timeout|error|stream_closed|missing)
+        if [ -n "$review_dir" ]; then
+          _capture_review_frame "$review_dir" "$frame_idx"
+        fi
         printf '%s\n' "$payload"
         return 0
         ;;
     esac
     now="$(date +%s)"
+    if [ -n "$review_dir" ] && [ $((now - last_shot)) -ge "$REVIEW_INTERVAL_SEC" ]; then
+      _capture_review_frame "$review_dir" "$frame_idx"
+      frame_idx=$((frame_idx + 1))
+      last_shot="$now"
+    fi
     if [ "$now" -ge "$deadline" ]; then
       settle_fail "waitSettled poll deadline for job $job_id"
     fi
@@ -471,13 +525,14 @@ _poll_wait_job() {
 }
 
 cmd_wait_settled() {
-  local run_id="" project_id="" timeout_sec="$DEFAULT_SETTLE_TIMEOUT_SEC" out=""
+  local run_id="" project_id="" timeout_sec="$DEFAULT_SETTLE_TIMEOUT_SEC" out="" review_dir=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --run-id) run_id="$2"; shift 2 ;;
       --project-id) project_id="$2"; shift 2 ;;
       --timeout-sec) timeout_sec="$2"; shift 2 ;;
       --out) out="$2"; shift 2 ;;
+      --review-dir) review_dir="$2"; shift 2 ;;
       *) die "waitSettled: unknown arg: $1" ;;
     esac
   done
@@ -488,7 +543,7 @@ cmd_wait_settled() {
   started="$(_start_wait_job "$run_id" "$project_id" "$timeout_sec")"
   job_id="$(json_get "$started" 'data.get("jobId")')"
   [ -n "$job_id" ] && [ "$job_id" != "None" ] || die "waitSettled: failed to start stream job: $started"
-  payload="$(_poll_wait_job "$job_id" "$timeout_sec")"
+  payload="$(_poll_wait_job "$job_id" "$timeout_sec" "$review_dir")"
   # Attach jobId so snapshotMessages can reload frames from the page job.
   payload="$(JOB_ID="$job_id" PAYLOAD="$payload" python3 -c 'import json,os; d=json.loads(os.environ["PAYLOAD"]); d["jobId"]=os.environ["JOB_ID"]; print(json.dumps(d, separators=(",", ":")))')"
   status="$(json_get "$payload" 'data.get("status")')"
@@ -621,6 +676,9 @@ cmd_fixture_blackjack() {
   fi
   mkdir -p "$out_dir"
   require_cmd curl
+  require_cmd ffmpeg
+  local frames_dir="$out_dir/frames"
+  mkdir -p "$frames_dir"
   cmd_preflight >"$out_dir/preflight.json"
   cmd_ensure_session --timeout-sec "$DEFAULT_SESSION_TIMEOUT_SEC" >"$out_dir/session.json"
 
@@ -647,7 +705,9 @@ cmd_fixture_blackjack() {
     local prompt="$1"
     local label="$2"
     turn_idx=$((turn_idx + 1))
-    local start_json run_id settle_json
+    local start_json run_id settle_json turn_frames
+    turn_frames="$frames_dir/turn-${turn_idx}"
+    mkdir -p "$turn_frames"
     if [ -n "$session_id" ]; then
       start_json="$(cmd_send_turn --project-id "$project_id" --prompt "$prompt" --session-id "$session_id")"
     else
@@ -657,7 +717,14 @@ cmd_fixture_blackjack() {
     run_id="$(json_get "$start_json" 'data.get("runId")')"
     session_id="$(json_get "$start_json" 'data.get("sessionId")')"
     [ -n "$run_id" ] && [ "$run_id" != "None" ] || die "fixture: missing runId on $label"
-    settle_json="$(cmd_wait_settled --run-id "$run_id" --project-id "$project_id" --timeout-sec "$timeout_sec" --out "$out_dir/turn-${turn_idx}-settle.json")"
+    settle_json="$(cmd_wait_settled --run-id "$run_id" --project-id "$project_id" --timeout-sec "$timeout_sec" --out "$out_dir/turn-${turn_idx}-settle.json" --review-dir "$turn_frames")"
+    # Flatten turn frames into the shared frames dir with a global index prefix.
+    local f base
+    for f in "$turn_frames"/frame-*.jpg; do
+      [ -e "$f" ] || continue
+      base="$(basename "$f")"
+      cp "$f" "$frames_dir/turn${turn_idx}-${base}"
+    done
     TURN_IDX="$turn_idx" LABEL="$label" RUN_ID="$run_id" SESSION_ID="$session_id" PROJECT_ID="$project_id" \
       SETTLE="$settle_json" START="$start_json" python3 -c '
 import json, os
@@ -681,8 +748,29 @@ print(json.dumps(rec, separators=(",", ":")))
   run_one_turn "Add a simple Stats page or panel showing hands played, wins, losses, and busts for this session." "feature-stats"
   run_one_turn "Apply a restrained dark casino theme with clear contrast for cards and controls; keep text readable." "feature-theme"
 
+  # Build a contiguous frame-*.jpg sequence for ffmpeg from flattened turn frames.
+  local stitch_dir="$frames_dir/stitch"
+  mkdir -p "$stitch_dir"
+  python3 - "$frames_dir" "$stitch_dir" <<'PY'
+import pathlib, sys, shutil
+src, dst = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+files = sorted([p for p in src.glob("turn*-frame-*.jpg")] + [p for p in src.glob("frame-*.jpg") if p.parent == src])
+# Prefer turn-prefixed frames only when present.
+turnish = sorted(src.glob("turn*-frame-*.jpg"))
+files = turnish if turnish else sorted(src.glob("frame-*.jpg"))
+for i, p in enumerate(files):
+    shutil.copy2(p, dst / f"frame-{i:06d}.jpg")
+PY
+  local review_mp4="$out_dir/review.mp4"
+  if _stitch_review_mp4 "$stitch_dir" "$review_mp4"; then
+    :
+  else
+    review_mp4=""
+  fi
+
   SUMMARY_PATH="$out_dir/summary.json" PROJECT_ID="$project_id" SESSION_ID="$session_id" \
     PROJECT_NAME="$project_name" WORKSPACE_URL="$workspace_url" TRANSCRIPT="$transcript" \
+    REVIEW_MP4="$review_mp4" OUT_DIR="$out_dir" \
     python3 -c '
 import json, os
 summary = {
@@ -692,8 +780,10 @@ summary = {
   "sessionId": os.environ["SESSION_ID"],
   "workspaceUrl": os.environ.get("WORKSPACE_URL") or None,
   "transcript": os.environ["TRANSCRIPT"],
+  "reviewMp4": os.environ.get("REVIEW_MP4") or None,
+  "artifactDir": os.environ["OUT_DIR"],
   "turns": 4,
-  "note": "SSE frames captured per turn in transcript.jsonl settle.frames; no message list API.",
+  "note": "SSE frames in transcript.jsonl; review.mp4 is ffmpeg-stitched chrome-devtools-axi screenshots.",
 }
 open(os.environ["SUMMARY_PATH"], "w", encoding="utf-8").write(json.dumps(summary, indent=2) + "\n")
 print(json.dumps(summary, separators=(",", ":")))
