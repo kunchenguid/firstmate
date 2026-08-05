@@ -134,6 +134,12 @@
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
 #   refuses the spawn rather than risking a PR based on stale history.
+#   A project clone whose main checkout deliberately carries core.bare=true (a
+#   harness's ref-host pattern, as in fm-fleet-sync.sh's matching refresh path)
+#   makes git refuse the work-tree operation `treehouse get` starts with, so its
+#   worktree is leased by this script instead and the pane is only told to cd into
+#   it - see lease_bare_clone_worktree. The clone's configuration is never written,
+#   and both paths converge on the same settle loop and isolation assertion.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1693,6 +1699,61 @@ freshen_spawn_worktree_base() {  # <worktree>
   fi
 }
 
+# True when the project clone carries core.bare=true on its main checkout. A
+# harness may set that flag deliberately so the checkout can double as a ref host
+# that advances its own branches with a ref-only `git fetch origin <b>:<b>`, which
+# git permits on a checked-out branch only while the flag is set. The files stay on
+# disk, but git then refuses every work-tree operation against the clone. Same
+# signal and naming as fm-fleet-sync.sh's bare=yes check, which fixed the matching
+# refresh failure.
+project_is_bare_flagged() {
+  [ "$(git -C "$PROJ_ABS" rev-parse --is-bare-repository 2>/dev/null)" = true ]
+}
+
+# Lease a pool worktree for a bare-flagged clone and print its path.
+#
+# `treehouse get` starts by resolving the repo from its working directory with
+# `git rev-parse --show-toplevel`, which is a work-tree operation, so against a
+# bare-flagged clone it dies with "this operation must be run in a work tree"
+# before any worktree exists. GIT_WORK_TREE is the only override that reaches
+# that resolution: git decides bare-ness during repository discovery, before
+# -c/GIT_CONFIG_* injected config is applied, so a scoped core.bare=false
+# override is silently ignored while GIT_WORK_TREE is honoured. Nothing here
+# writes to the clone's configuration, so the deliberate flag survives untouched.
+#
+# GIT_WORK_TREE must be RELATIVE. An absolute path pins every git process
+# treehouse spawns to the clone's work tree, including the per-worktree
+# cleanliness checks it runs as `git -C <pool-tree> status`; those then report
+# the CLONE's dirt, every pooled tree reads dirty, and treehouse refuses to reuse
+# any of them once the pool is full. `.` resolves against each invocation's own
+# directory, so discovery in the clone succeeds while treehouse's per-tree checks
+# still see the pool tree.
+#
+# --lease is what keeps the override off the worker's shell. Plain `treehouse
+# get` execs an interactive subshell that would inherit GIT_WORK_TREE, and inside
+# the worktree that variable silently redirects git at another directory - a
+# leaked absolute value makes `git status` there report the primary checkout's
+# files. Leasing acquires the worktree in this process and prints its path, so
+# the pane is only ever told to cd into a ready worktree with a clean
+# environment. The lease is durable and released by fm-teardown.sh's existing
+# `treehouse return --force`, which needs no work tree of its own.
+lease_bare_clone_worktree() {
+  local wt
+  if ! treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'; then
+    echo "error: project $PROJ_ABS has core.bare=true, which needs 'treehouse get --lease' to acquire a worktree, but the installed treehouse does not support --lease. Upgrade treehouse (bin/fm-install-treehouse.sh) and retry." >&2
+    return 1
+  fi
+  wt=$(cd "$PROJ_ABS" && GIT_WORK_TREE=. treehouse get --lease --lease-holder "$ID") || {
+    echo "error: treehouse get --lease failed to lease a worktree from bare-flagged clone $PROJ_ABS" >&2
+    return 1
+  }
+  [ -n "$wt" ] || {
+    echo "error: treehouse get --lease did not report a worktree for bare-flagged clone $PROJ_ABS" >&2
+    return 1
+  }
+  printf '%s\n' "$wt"
+}
+
 herdr_projection_meta_field_exact() {  # <meta> <key>
   local meta=$1 key=$2 count
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
@@ -2136,7 +2197,21 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  # An ordinary clone lets the pane run `treehouse get` itself, which acquires a
+  # worktree and cd's the pane into it. A bare-flagged clone cannot: see
+  # lease_bare_clone_worktree for why the acquire has to happen here instead, with
+  # the pane only told to cd into the worktree that call already leased. Both
+  # branches converge on the same settle loop and isolation assertion below, so
+  # neither the transient-stale-path guard nor validate_spawn_worktree is skipped
+  # for a leased worktree.
+  ACQUIRE_SOURCE='treehouse get'
+  if project_is_bare_flagged; then
+    ACQUIRE_SOURCE='treehouse get --lease'
+    LEASED_WT=$(lease_bare_clone_worktree) || exit 1
+    spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$LEASED_WT")"
+  else
+    spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  fi
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -2178,11 +2253,11 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: $ACQUIRE_SOURCE did not enter a worktree within 60s; inspect window $T" >&2
     exit 1
   fi
 
-  validate_spawn_worktree "treehouse get" "$T"
+  validate_spawn_worktree "$ACQUIRE_SOURCE" "$T"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
