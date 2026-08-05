@@ -86,6 +86,13 @@ done
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+# shellcheck source=bin/fm-calm-lib.sh
+. "$SCRIPT_DIR/fm-calm-lib.sh"
+
+CALM=false
+if [ "$CLAUDE_MODE" -eq 1 ] && fm_calm_enabled "$CONFIG"; then
+  CALM=true
+fi
 
 # Read the whole turn-end hook payload once; never block on unreadable/absent
 # stdin.
@@ -153,30 +160,36 @@ if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
 fi
 
 block_stop() {
-  local afk x_mode reason rule
+  local afk x_mode reason rule need
   afk=0
   [ -e "$STATE/.afk" ] && afk=1
   x_mode=0
   [ -f "$CONFIG/x-mode.env" ] && x_mode=1
   reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
     || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
-  rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
-  {
-    printf '●%s\n' "$rule"
-    printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n'
-    if [ "$FM_SUP_IN_FLIGHT" -gt 0 ]; then
-      printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_IN_FLIGHT" "$FM_SUP_BEACON_DESC"
-    elif [ "$FM_SUP_SOURCES" -gt 0 ]; then
-      printf '●  %s process-event source(s) registered, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_SOURCES" "$FM_SUP_BEACON_DESC"
-    else
-      printf '●  X-mode relay polling needs supervision, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_BEACON_DESC"
-    fi
-    if [ "$CLAUDE_MODE" -eq 1 ]; then
-      printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'
-    fi
-    printf '●  %s\n' "$reason"
-    printf '●%s\n' "$rule"
-  } >&2
+  if [ "$FM_SUP_IN_FLIGHT" -gt 0 ]; then
+    need=$(printf '%s task(s) in flight' "$FM_SUP_IN_FLIGHT")
+  elif [ "$FM_SUP_SOURCES" -gt 0 ]; then
+    need=$(printf '%s process-event source(s) registered' "$FM_SUP_SOURCES")
+  else
+    need='X-mode relay polling needs supervision'
+  fi
+  if [ "$CALM" = true ]; then
+    printf 'FIRSTMATE ALARM: TURN WOULD END BLIND - %s, but no live watcher holds this home lock (last beat: %s); the Stop-owned auto-arm did not claim recovery. %s\n' \
+      "$need" "$FM_SUP_BEACON_DESC" "$reason" >&2
+  else
+    rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+    {
+      printf '●%s\n' "$rule"
+      printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n'
+      printf '●  %s, but no live watcher holds this home lock (last beat: %s).\n' "$need" "$FM_SUP_BEACON_DESC"
+      if [ "$CLAUDE_MODE" -eq 1 ]; then
+        printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'
+      fi
+      printf '●  %s\n' "$reason"
+      printf '●%s\n' "$rule"
+    } >&2
+  fi
   exit 2
 }
 
@@ -369,7 +382,11 @@ if [ "$terminal_status" -eq 0 ]; then
   else
     NEED_DESC="X-mode relay polling active"
   fi
-  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$NEED_DESC"
+  if [ "$CALM" = true ]; then
+    printf '{"systemMessage":"FIRSTMATE ALARM: SUPERVISION IS GENUINELY DOWN - %s; automatic retries and the block budget are exhausted. Keep this session attended and diagnose the Stop hook and watcher startup before unattended use."}\n' "$NEED_DESC"
+  else
+    printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$NEED_DESC"
+  fi
   exit 0
 fi
 [ "$terminal_status" -eq 2 ] && exit 0

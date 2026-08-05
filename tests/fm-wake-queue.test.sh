@@ -659,6 +659,44 @@ test_interruption_before_and_after_raw_commit() {
   pass "interruptions preserve durable rows until post-handling acknowledgement"
 }
 
+test_calm_batches_drain_presentation_without_dropping_actionable_context() {
+  local dir state config out malformed_out
+  dir=$(make_case calm-batch)
+  state="$dir/state"
+  config="$dir/config"
+  out="$dir/drain.out"
+  mkdir -p "$config"
+  printf 'on\n' > "$config/calm"
+  printf 'needs-decision: select the release target\n' > "$state/task.status"
+  append_wake "$state" signal task.status "signal: $state/task.status" || fail "calm signal append failed"
+  append_wake "$state" check task.check.sh "check: CI failed on linux" || fail "calm check append failed"
+
+  CLAUDECODE=1 FM_CONFIG_OVERRIDE="$config" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "calm drain failed"
+
+  assert_contains "$(cat "$out")" "FIRSTMATE WAKE DIGEST (2):" "calm drain did not batch its authoritative wake rows"
+  assert_contains "$(cat "$out")" "[signal task.status: signal: $state/task.status]" "calm digest dropped the signal key or payload"
+  assert_contains "$(cat "$out")" "[check task.check.sh: check: CI failed on linux]" "calm digest dropped the check alarm"
+  assert_contains "$(cat "$out")" "FIRSTMATE WAKE CONTEXT (1):" "calm drain dropped bounded status context"
+  assert_contains "$(cat "$out")" "FIRSTMATE OPEN DECISIONS (1 shown):" "calm drain dropped the fleet-wide open decision"
+  assert_contains "$(cat "$out")" "task needs-decision: select the release target" "calm drain dropped the decision detail"
+  [ "$(grep -c '^FIRSTMATE' "$out")" -eq 3 ] || fail "calm drain did not render exactly three compact digest lines: $(cat "$out")"
+  if awk -F '\t' 'NF == 5 { found=1 } END { exit !found }' "$out"; then
+    fail "calm drain leaked raw tabular wake rows"
+  fi
+  [ ! -s "$state/.wake-queue" ] || fail "calm presentation changed queue consumption"
+
+  malformed_out="$dir/malformed.out"
+  printf 'on\noff\n' > "$config/calm"
+  append_wake "$state" heartbeat heartbeat heartbeat || fail "malformed-preference heartbeat append failed"
+  CLAUDECODE=1 FM_CONFIG_OVERRIDE="$config" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$malformed_out" \
+    || fail "drain with malformed Calm preference failed"
+  assert_not_contains "$(cat "$malformed_out")" "FIRSTMATE WAKE DIGEST" "a malformed Calm preference enabled compact presentation"
+  grep "$(printf '\theartbeat\theartbeat\theartbeat')" "$malformed_out" >/dev/null \
+    || fail "a malformed Calm preference did not retain ordinary drain output"
+  pass "calm wake drain batches rows, annotations, and open decisions without dropping actionable detail"
+}
+
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
@@ -666,6 +704,7 @@ test_not_working_stale_enqueue_before_suppressor
 test_check_output_is_queued
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
+test_calm_batches_drain_presentation_without_dropping_actionable_context
 test_drain_asserts_watcher_liveness
 test_structural_signal_enrichment_preserves_raw_rows
 test_enrichment_caps_and_status_file_failures

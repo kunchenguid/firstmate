@@ -31,6 +31,7 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
+  cp "$ROOT/bin/fm-calm-lib.sh" "$dir/bin/fm-calm-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
   chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
 }
@@ -568,6 +569,39 @@ test_active_in_marked_secondmate_home() {
   pass "auto-arm: active in a marked secondmate home"
 }
 
+test_calm_rewake_and_failure_injections_are_single_line_and_actionable() {
+  local actionable failed out status lines
+  actionable=$(make_primary_dir "$TMP_ROOT/calm-actionable")
+  mkdir -p "$actionable/config"
+  printf 'on\n' > "$actionable/config/calm"
+  : > "$actionable/state/task.meta"
+  write_arm_fixture "$actionable" actionable
+  out=$(run_autoarm "$actionable" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a calm actionable close must still rewake"
+  lines=$(printf '%s\n' "$out" | awk 'NF { count++ } END { print count + 0 }')
+  [ "$lines" -eq 1 ] || fail "calm actionable injection was not one line: $out"
+  assert_contains "$out" "FIRSTMATE WAKE" "calm actionable injection lost its wake label"
+  assert_contains "$out" "stale: fixture-win actionable" "calm actionable injection lost its reason"
+  assert_contains "$out" "bin/fm-wake-drain.sh" "calm actionable injection lost the drain-first action"
+  assert_contains "$out" "Stop hook re-arms automatically" "calm actionable injection lost continuity ownership"
+  assert_contains "$out" "do not run bin/fm-watch-arm.sh" "calm actionable injection lost the duplicate-arm warning"
+
+  failed=$(make_primary_dir "$TMP_ROOT/calm-failed")
+  mkdir -p "$failed/config"
+  printf 'on\n' > "$failed/config/calm"
+  : > "$failed/state/task.meta"
+  write_arm_fixture "$failed" failed
+  out=$(run_autoarm "$failed" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a calm exhausted failure must still rewake"
+  lines=$(printf '%s\n' "$out" | awk 'NF { count++ } END { print count + 0 }')
+  [ "$lines" -eq 1 ] || fail "calm failure injection was not one line: $out"
+  assert_contains "$out" "FIRSTMATE ALARM: watcher auto-arm FAILED" "calm failure lost the automatic-mechanism alarm"
+  assert_contains "$out" "watcher: FAILED" "calm failure lost the typed watcher result"
+  assert_contains "$out" "Do not launch a manual arm" "calm failure lost the no-manual-arm action"
+  assert_contains "$out" "diagnose the Stop hook and watcher startup" "calm failure lost the diagnosis action"
+  pass "auto-arm Calm presentation keeps actionable and failure injections complete on one line"
+}
+
 test_fm_lock_status_still_works_with_shared_lib() {
   local out
   out=$(FM_HOME="$TMP_ROOT/lock-status-home" bash "$ROOT/bin/fm-lock.sh" status 2>&1)
@@ -584,6 +618,7 @@ test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason
+test_calm_rewake_and_failure_injections_are_single_line_and_actionable
 test_actionable_close_with_live_successor_rewakes_once
 test_failed_close_rewakes_with_failure_banner
 test_failed_cycles_notify_once_and_keep_retrying

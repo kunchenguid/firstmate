@@ -48,6 +48,11 @@ STALE_BANNER_MARKER="$STATE/.guard-watcher-stale-banner"
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
+# shellcheck source=bin/fm-calm-lib.sh
+. "$SCRIPT_DIR/fm-calm-lib.sh"
+
+CALM=false
+fm_claude_calm_enabled "$CONFIG" && CALM=true
 
 # Deterministic episode key from the qualitative down-state (the failing
 # condition), NOT the beacon mtime: under the auto-arm model a healthy
@@ -126,22 +131,32 @@ fm_guard_clear_stale_banner() {
 tangle_branch=$(fm_primary_tangle_branch "$FM_ROOT" || true)
 if [ -n "$tangle_branch" ]; then
   tangle_default=$(fm_default_branch "$FM_ROOT" 2>/dev/null || echo main)
-  trule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
-  {
-    printf '●%s\n' "$trule"
-    printf '●  WORKTREE TANGLE - PRIMARY CHECKOUT IS ON A FEATURE BRANCH\n'
-    printf "●  %s is on '%s', not its default branch '%s'.\n" "$FM_ROOT" "$tangle_branch" "$tangle_default"
-    printf '●  A crewmate likely branched/committed in the primary instead of its own worktree.\n'
-    printf "●  The work is SAFE on the '%s' ref.\n" "$tangle_branch"
+  if [ "$CALM" = true ]; then
     if [ "$READ_ONLY" -eq 1 ]; then
-      printf '●  This read-only session must leave restore work to a session with verified fleet-lock ownership.\n'
+      printf "FIRSTMATE ALARM: WORKTREE TANGLE - %s is on '%s', not '%s'; work is safe on '%s'; this read-only session must leave restoration to the fleet-owning session.\n" \
+        "$FM_ROOT" "$tangle_branch" "$tangle_default" "$tangle_branch" >&2
     else
-      printf "●  Restore the primary to '%s':\n" "$tangle_default"
-      printf '●      git -C %s checkout %s\n' "$FM_ROOT" "$tangle_default"
-      printf "●  then re-validate '%s' in a proper isolated worktree.\n" "$tangle_branch"
+      printf "FIRSTMATE ALARM: WORKTREE TANGLE - %s is on '%s', not '%s'; work is safe on '%s'; restore with git -C %s checkout %s, then re-validate the feature branch in an isolated copy.\n" \
+        "$FM_ROOT" "$tangle_branch" "$tangle_default" "$tangle_branch" "$FM_ROOT" "$tangle_default" >&2
     fi
-    printf '●%s\n' "$trule"
-  } >&2
+  else
+    trule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+    {
+      printf '●%s\n' "$trule"
+      printf '●  WORKTREE TANGLE - PRIMARY CHECKOUT IS ON A FEATURE BRANCH\n'
+      printf "●  %s is on '%s', not its default branch '%s'.\n" "$FM_ROOT" "$tangle_branch" "$tangle_default"
+      printf '●  A crewmate likely branched/committed in the primary instead of its own worktree.\n'
+      printf "●  The work is SAFE on the '%s' ref.\n" "$tangle_branch"
+      if [ "$READ_ONLY" -eq 1 ]; then
+        printf '●  This read-only session must leave restore work to a session with verified fleet-lock ownership.\n'
+      else
+        printf "●  Restore the primary to '%s':\n" "$tangle_default"
+        printf '●      git -C %s checkout %s\n' "$FM_ROOT" "$tangle_default"
+        printf "●  then re-validate '%s' in a proper isolated worktree.\n" "$tangle_branch"
+      fi
+      printf '●%s\n' "$trule"
+    } >&2
+  fi
 fi
 
 # Compute supervision need and watcher-beacon freshness via the shared
@@ -190,31 +205,42 @@ if [ "$watcher_healthy" = false ]; then
       --x-mode "$x_mode" \
       --queue-pending "$queue_arg" \
       --repair-line 2>/dev/null || printf '%s\n' 'Repair missing watcher supervision according to the session-start operating block.')
-    rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
-    {
-      printf '●%s\n' "$rule"
-      printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
-      if [ "$watcher_down_reason" = no-watcher ]; then
-        watcher_cause=$(printf 'no live watcher process holds this home lock (last beat: %s)' "$beacon_desc")
-      else
-        watcher_cause=$(printf 'no watcher has a fresh beacon (last beat: %s, grace %ss)' "$beacon_desc" "$GRACE")
-      fi
-      if [ "$in_flight" -gt 0 ]; then
-        printf '●  %s task(s) in flight, but %s.\n' "$in_flight" "$watcher_cause"
-      elif [ "$sources" -gt 0 ]; then
-        printf '●  %s process-event source(s) registered, but %s.\n' "$sources" "$watcher_cause"
-      else
-        printf '●  X-mode relay polling needs supervision, but %s.\n' "$watcher_cause"
-      fi
+    if [ "$watcher_down_reason" = no-watcher ]; then
+      watcher_cause=$(printf 'no live watcher process holds this home lock (last beat: %s)' "$beacon_desc")
+    else
+      watcher_cause=$(printf 'no watcher has a fresh beacon (last beat: %s, grace %ss)' "$beacon_desc" "$GRACE")
+    fi
+    if [ "$in_flight" -gt 0 ]; then
+      watcher_need=$(printf '%s task(s) in flight' "$in_flight")
+    elif [ "$sources" -gt 0 ]; then
+      watcher_need=$(printf '%s process-event source(s) registered' "$sources")
+    else
+      watcher_need='X-mode relay polling needs supervision'
+    fi
+    if [ "$CALM" = true ]; then
       if [ "$READ_ONLY" -eq 1 ]; then
-        printf '●  This read-only session should report the lapse, not repair it.\n'
+        watcher_action='Report this lapse from this read-only session; do not repair it.'
       else
-        printf '●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.\n'
+        watcher_action='Trust the emitted supervision protocol; do not use shell & for repair.'
       fi
-      printf '●  %s\n' "$CONTINUE_LINE"
-      printf '●  %s\n' "$fix"
-      printf '●%s\n' "$rule"
-    } >&2
+      printf 'FIRSTMATE ALARM: WATCHER DOWN - %s, but %s. %s %s %s\n' \
+        "$watcher_need" "$watcher_cause" "$watcher_action" "$CONTINUE_LINE" "$fix" >&2
+    else
+      rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+      {
+        printf '●%s\n' "$rule"
+        printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
+        printf '●  %s, but %s.\n' "$watcher_need" "$watcher_cause"
+        if [ "$READ_ONLY" -eq 1 ]; then
+          printf '●  This read-only session should report the lapse, not repair it.\n'
+        else
+          printf '●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.\n'
+        fi
+        printf '●  %s\n' "$CONTINUE_LINE"
+        printf '●  %s\n' "$fix"
+        printf '●%s\n' "$rule"
+      } >&2
+    fi
   else
     printf 'WARNING: watcher still down (same stale episode; last beat: %s, grace %ss) - full banner already printed this episode.\n' \
       "$beacon_desc" "$GRACE" >&2

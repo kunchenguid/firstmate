@@ -24,12 +24,15 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
-## Pi Calm preference (config/calm)
+## Calm preference (config/calm)
 
-The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
-The only values it writes are `on` and `off`, each followed by one newline; an absent, unreadable, or unrecognized value defaults to off.
-The `/calm` command replaces the file atomically before changing live presentation, so a failed write leaves the current choice unchanged rather than claiming persistence.
-The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
+The captain's home-local Calm presentation choice lives in gitignored `config/calm` under the effective Firstmate home.
+The accepted values are `on` and `off`, each followed by one newline; an absent, unreadable, or unrecognized value defaults to off.
+Write `on` or `off` directly to select the presentation for a Claude Code primary, or use Pi's `/calm` command, which replaces the same file atomically before changing live Pi presentation.
+Pi resolves the file from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or from `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
+The Pi extension reloads the preference on every `session_start`, including startup, new, resume, fork, and reload reasons.
+For a Claude Code primary, Calm leaves Claude's transcript renderer unchanged but makes Firstmate's Stop-hook notifications and safety alarms terse and renders each wake drain as compact batched digests.
+The same queue records, decision details, warning actions, guard verdicts, and watcher lifecycle remain in force, and Calm-off output stays unchanged.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
