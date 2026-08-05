@@ -34,6 +34,13 @@ Preserve its uncommitted changes and commits, keep the same task identity, and r
 Do not use a fresh generic spawn while the recorded worktree is unaccounted for, because allocating another worktree can split one task across two copies.
 If the worktree or ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.
 
+## Hand-built relaunch carries the whole pre-launch environment
+
+A relaunch assembled by hand must reproduce every environment binding `bin/fm-spawn.sh` establishes, not just its `launch_template()` command string.
+Read that script's full pre-launch sequence and replicate each `spawn_send_text_line` setup line for the recorded harness and project.
+The browser-session binding is the one with a safety consequence, so it now rides the launch command itself and a dropped binding is refused rather than silently shared: see [`docs/browser-session-isolation.md`](../../../docs/browser-session-isolation.md).
+A relaunched agent that reports a refused browser command is telling you the relaunch lost that binding; rebind it rather than working around the refusal.
+
 ## Live-endpoint escalation
 
 Escalate in order:

@@ -170,6 +170,11 @@ run_spawn() {
     "$SPAWN" "$id" "$proj" --harness kimi --mode no-mistakes --yolo off "$@" 2>&1
 }
 
+# The browser-session binding fm-spawn.sh prefixes onto every launch command.
+browser_prefix() {
+  printf "CHROME_DEVTOOLS_AXI_SESSION='%s' PATH='%s':\$PATH " "$1" "$ROOT/bin/shims"
+}
+
 read_spawn_record() {
   IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR <<EOF
 $1
@@ -192,7 +197,9 @@ test_kimi_launch_then_send_is_verified() {
   assert_contains "$out" "spawned $id harness=kimi" "kimi spawn did not report success"
 
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "'$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
+  # Every launch command is prefixed with this task's own browser-session
+  # binding and the guard shim's PATH entry (docs/browser-session-isolation.md).
+  [ "$launch" = "$(browser_prefix "$id")'$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
     || fail "kimi launch did not use the absolute binary, model, and --auto only: $launch"
   assert_not_contains "$launch" "--effort" "kimi launch emitted a nonexistent effort flag"
   assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"
@@ -209,7 +216,9 @@ test_kimi_launch_then_send_is_verified() {
   assert_present "$task_tmp/gotmp" "kimi spawn did not create its Go temp directory"
   assert_grep "export GOTMPDIR=$task_tmp/gotmp" "$CASE_DIR/tmux-calls.log" \
     "kimi spawn did not export its Go temp directory into the pane"
-  assert_grep "export CHROME_DEVTOOLS_AXI_SESSION=$id" "$CASE_DIR/tmux-calls.log" \
+  # The pane export now carries the guard shim's PATH entry alongside the
+  # session, and quotes both (docs/browser-session-isolation.md).
+  assert_grep "export $(browser_prefix "$id")" "$CASE_DIR/tmux-calls.log" \
     "kimi spawn did not export its own chrome-devtools-axi session into the pane"
   assert_grep 'BEGIN FIRSTMATE KIMI TURN-END HOOK' "$HOME_DIR/.kimi-code/config.toml" \
     "kimi spawn did not install its guarded global hook region"
@@ -451,7 +460,7 @@ test_kimi_falls_back_to_expanded_home_binary() {
   rc=$?
   expect_code 0 "$rc" "Kimi HOME fallback spawn should succeed"
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "'$fallback' --auto" ] \
+  [ "$launch" = "$(browser_prefix "$id")'$fallback' --auto" ] \
     || fail "Kimi fallback did not expand HOME into an absolute executable: $launch"
   pass "fm-spawn: Kimi fallback expands the active HOME"
 }
