@@ -184,31 +184,29 @@ test_same_size_rewrite_is_detected_via_inode_identity() {
   pass "a same-size file rotation (new inode) is detected and falls back to a full re-fold"
 }
 
-# Not driven through bin/fm-wake-drain.sh: this targets one specific internal
-# read (tail failing mid-fold) precisely, which would be impossible to isolate
-# reliably through the full drain script without also breaking unrelated tail
-# usage elsewhere in the drain/guard chain. status_open_decisions_incremental
-# is itself a real, directly callable function - this still exercises real
-# behavior end to end for that function, not source text.
 test_read_failure_never_silently_returns_empty() {
-  local dir fakebin statusfile cursor before after
+  local dir state fakebin statusfile cursor out before_cursor after_cursor
   dir=$(make_case cursor-read-failure)
+  state="$dir/state"
   fakebin="$dir/failbin"
   mkdir -p "$fakebin"
-  statusfile="$dir/state/task4.status"
-  cursor="$dir/state/.task4.open-decisions-cursor"
+  statusfile="$state/task4.status"
+  cursor="$state/.task4.open-decisions-cursor"
+  out="$dir/drain.out"
 
   printf 'needs-decision [key=x]: something important\n' > "$statusfile"
-  before=$(bash -c '. "$1"; status_open_decisions_incremental "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$statusfile")
-  printf '%s\n' "$before" | grep -F 'needs-decision' | grep -F 'something important' >/dev/null \
-    || fail "the decision did not surface on the bootstrap call"
-  [ -s "$cursor" ] || fail "no cursor was persisted after the bootstrap call"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "bootstrap drain before the injected read failure failed"
+  grep -F 'task4' "$out" | grep -F '[key=x]' | grep -F 'something important' >/dev/null \
+    || fail "the decision did not surface on the bootstrap drain"
+  [ -s "$cursor" ] || fail "no cursor was persisted after the bootstrap drain"
+  before_cursor=$(LC_ALL=C cksum "$cursor")
 
   printf 'working: more routine content\n' >> "$statusfile"
   # Fail ONLY the byte-offset content read (`tail -c ...`) that status_open_
   # decisions_incremental uses to pull new appended bytes; pass every other
-  # invocation (including its own `tail -n +3` cursor-body read) through to
-  # the real tail, so this isolates exactly the one read path under test.
+  # drain/guard invocation through to the real tail, so this isolates exactly
+  # the one read path under test.
   cat > "$fakebin/tail" <<SH
 #!/usr/bin/env bash
 for a in "\$@"; do
@@ -218,10 +216,13 @@ exec "$(command -v tail)" "\$@"
 SH
   chmod +x "$fakebin/tail"
 
-  after=$(PATH="$fakebin:$PATH" bash -c '. "$1"; status_open_decisions_incremental "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$statusfile")
-  [ "$after" = "$before" ] \
-    || fail "a failed read did not preserve the persisted open set: got '$after', expected '$before'"
-  grep -q '^offset=' "$cursor" || fail "the cursor file was corrupted by the failed read"
+  FM_STATE_OVERRIDE="$state" PATH="$fakebin:$PATH" "$DRAIN" > "$out" \
+    || fail "wake drain failed instead of preserving state after the injected read failure"
+  grep -F 'task4' "$out" | grep -F '[key=x]' | grep -F 'something important' >/dev/null \
+    || fail "the failed read silently hid the previously-open decision: $(command cat "$out")"
+  after_cursor=$(LC_ALL=C cksum "$cursor")
+  [ "$after_cursor" = "$before_cursor" ] \
+    || fail "the failed read advanced or rewrote the persisted cursor"
 
   pass "a failed incremental read preserves the persisted open set instead of silently returning empty"
 }

@@ -349,21 +349,39 @@ _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure
 }
 
 status_open_decisions_incremental() {  # <status-file>
-  local f=$1 cf offset ident open='' first size cur_ident resolve held chunk line
+  local f=$1 cf offset ident open='' trusted_open='' cursor_data first rest ident_line
+  local size cur_ident resolve held chunk_file chunk_size line
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   cf=$(_fm_open_decisions_cursor_path "$f")
   offset=0
   ident=''
   if [ -f "$cf" ] && [ -r "$cf" ] && [ ! -L "$cf" ]; then
-    first=$(head -n1 "$cf" 2>/dev/null)
+    cursor_data=$(LC_ALL=C command cat "$cf" 2>/dev/null) \
+      || { printf '%s' "$trusted_open"; return 0; }
+    first=${cursor_data%%$'\n'*}
     case "$first" in
       offset=*)
         offset=${first#offset=}
         case "$offset" in
           ''|*[!0-9]*) offset=0 ;;
           *)
-            ident=$(sed -n '2p' "$cf" 2>/dev/null); ident=${ident#ident=}
-            open=$(tail -n +3 "$cf" 2>/dev/null)
+            case "$cursor_data" in
+              *$'\n'*)
+                rest=${cursor_data#*$'\n'}
+                ident_line=${rest%%$'\n'*}
+                case "$ident_line" in
+                  ident=*)
+                    ident=${ident_line#ident=}
+                    case "$rest" in
+                      *$'\n'*) open=${rest#*$'\n'} ;;
+                    esac
+                    trusted_open=$open
+                    ;;
+                  *) offset=0 ;;
+                esac
+                ;;
+              *) offset=0 ;;
+            esac
             ;;
         esac
         ;;
@@ -373,10 +391,12 @@ status_open_decisions_incremental() {  # <status-file>
   # A stat/size-read failure is a genuine I/O error, not "the file is empty" -
   # report the already-trusted persisted set unchanged rather than risking a
   # silent invalidation that would wipe it.
-  cur_ident=$(_fm_open_decisions_file_ident "$f") || { printf '%s' "$open"; return 0; }
-  [ -n "$cur_ident" ] || { printf '%s' "$open"; return 0; }
-  size=$(LC_ALL=C wc -c < "$f" 2>/dev/null | tr -d '[:space:]')
-  case "$size" in ''|*[!0-9]*) printf '%s' "$open"; return 0 ;; esac
+  cur_ident=$(_fm_open_decisions_file_ident "$f") || { printf '%s' "$trusted_open"; return 0; }
+  [ -n "$cur_ident" ] || { printf '%s' "$trusted_open"; return 0; }
+  size=$(LC_ALL=C wc -c < "$f" 2>/dev/null) \
+    || { printf '%s' "$trusted_open"; return 0; }
+  size=${size//[[:space:]]/}
+  case "$size" in ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;; esac
 
   if [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ]; then
     offset=0
@@ -384,20 +404,27 @@ status_open_decisions_incremental() {  # <status-file>
   fi
 
   if [ "$offset" -lt "$size" ]; then
-    chunk=$(tail -c "+$((offset + 1))" "$f" 2>/dev/null) || { printf '%s' "$open"; return 0; }
+    chunk_file="$cf.read.$$"
+    tail -c "+$((offset + 1))" "$f" > "$chunk_file" 2>/dev/null \
+      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
+    chunk_size=$(LC_ALL=C wc -c < "$chunk_file" 2>/dev/null) \
+      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
+    chunk_size=${chunk_size//[[:space:]]/}
+    case "$chunk_size" in
+      ''|*[!0-9]*) rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0 ;;
+    esac
     # Test-only observability seam (off by default, no production behavior
     # change): when set, records exactly how many bytes THIS call folded, so a
     # test can assert the incremental path stays bounded by new appends rather
     # than re-reading the whole file, without relying on timing or source text.
     [ -n "${FM_OPEN_DECISIONS_READ_PROBE:-}" ] \
-      && printf '%s\t%s\n' "$f" "$((size - offset))" >> "$FM_OPEN_DECISIONS_READ_PROBE"
+      && printf '%s\t%s\n' "$f" "$chunk_size" >> "$FM_OPEN_DECISIONS_READ_PROBE"
     resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
     held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
     while IFS= read -r line || [ -n "$line" ]; do
       open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
-    done <<EOF
-$chunk
-EOF
+    done < "$chunk_file"
+    rm -f "$chunk_file"
     {
       printf 'offset=%s\n' "$size"
       printf 'ident=%s\n' "$cur_ident"
