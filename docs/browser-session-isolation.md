@@ -93,8 +93,10 @@ An invocation by absolute path, such as `/opt/homebrew/bin/chrome-devtools-axi`,
 Closing either completely would require the upstream tool to refuse an unset session itself, which is not a change firstmate can make.
 
 A remote secondmate is a third case, of a different kind.
-Its launch command carries the primary machine's `bin/shims` path, which does not exist on the remote host, so prepending it is harmless but the shim is simply absent there.
-The session binding on that same launch command still applies, so a remote secondmate is bound; it is not additionally guarded.
+Its launch command is not assembled here at all: `bin/fm-spawn.sh` hands a marked remote route to the configured host, which runs its own `bin/fm-spawn.sh` there ([`remote-secondmates.md`](remote-secondmates.md), [`trace-context.md`](trace-context.md)).
+So the binding and the shim PATH entry are the remote checkout's own, resolved against the remote code root, and a remote secondmate launched from an up-to-date host gets both layers exactly as a local one does.
+The residual condition there is version skew rather than a missing shim: a remote code root that predates this change adds neither layer, because it is that host's `bin/fm-spawn.sh` that would have to add them.
+`bin/fm-update.sh` is what closes that skew.
 
 What the two layers do change is the realistic failure mode.
 The documented incident and the documented near-miss both came from firstmate-managed launches: one from no isolation existing at all, one from a hand-built relaunch dropping a separate setup line.
@@ -102,7 +104,7 @@ Layer 1 removes the second by making the launch command self-contained, and laye
 
 ## Automated validation
 
-`tests/fm-browser-session-guard.test.sh` owns the acceptance matrix: the refusal cases (unset, blank, `default`), the allow cases (an isolated session, the sessionless subcommands, a primary home, a declared shared use), the linked-worktree enforcement, the `check` CLI, the usage-versus-refusal exit split, the shim's anti-recursion and missing-tool behavior, the spawn wiring proven on the launch command `bin/fm-spawn.sh` actually sends, and the generated briefs' statement of the contract.
+`tests/fm-browser-session-guard.test.sh` owns the acceptance matrix: the refusal cases (unset, blank, `default`), the allow cases (an isolated session, the sessionless subcommands, a primary home, a declared shared use), the linked-worktree enforcement, the fail-closed refusal when the scope predicate is unreadable, the `check` CLI, the usage-versus-refusal exit split, the shim's anti-recursion and missing-tool behavior, the spawn wiring proven on the launch command `bin/fm-spawn.sh` actually sends, and the generated briefs' statement of the contract.
 No agent is spawned and no browser is launched; a stub stands in for `chrome-devtools-axi`.
 
 Run:

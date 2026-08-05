@@ -153,6 +153,42 @@ test_declared_shared_use_is_allowed() {
   pass "deliberate shared use is allowed when it says so"
 }
 
+# The guard fails closed, deliberately opposite to the sibling primary-session
+# guards: when the scope predicate cannot be read the inert question is
+# unanswerable, so an unisolated command is refused rather than allowed.
+# The fixture is test_inert_in_primary_home's home with exactly one delta -
+# fm-primary-scope-lib.sh is absent - so that test is this one's control: same
+# cwd shape allows with the lib, refuses without it.
+test_fails_closed_when_scope_is_unreadable() {
+  local home=$TMP_ROOT/primary-no-scope-lib code=0 home_shim
+  mkdir -p "$home/bin/shims" "$home/state"
+  git init -q "$home"
+  : > "$home/AGENTS.md"
+  cp "$GUARD" "$home/bin/"
+  chmod +x "$home/bin/fm-browser-session-guard.sh"
+  ln -sfn ../fm-browser-session-guard.sh "$home/bin/shims/chrome-devtools-axi"
+  home_shim="$home/bin/shims/chrome-devtools-axi"
+  [ -e "$home/bin/fm-primary-scope-lib.sh" ] \
+    && fail "the fixture must leave the scope predicate absent"
+
+  run_guard "$home" unset - "$home_shim" open https://example.invalid || code=$?
+  expect_code 1 "$code" "an unreadable scope predicate must refuse, not allow"
+  assert_not_contains "$RUN_OUT" "RAN session=" \
+    "an undecidable scope must not reach the shared browser"
+  assert_contains "$RUN_OUT" "REFUSED" "the fail-closed refusal must be loud"
+  pass "an unreadable scope predicate refuses instead of failing open"
+
+  # The declared-shared escape is checked before the predicate is read, so it
+  # still works on the fail-closed path.
+  code=0
+  run_guard "$home" unset FM_BROWSER_SHARED_SESSION_OK=1 \
+    "$home_shim" open https://example.invalid || code=$?
+  expect_code 0 "$code" "declared shared use must survive an unreadable scope"
+  assert_contains "$RUN_OUT" "RAN session=unset" \
+    "the explicit escape must not depend on the scope predicate"
+  pass "the declared-shared escape still works when the scope is unreadable"
+}
+
 # --- the check CLI ----------------------------------------------------------
 
 test_check_cli_decides_without_running() {
@@ -316,6 +352,7 @@ test_allows_isolated_session
 test_allows_sessionless_subcommands
 test_inert_in_primary_home
 test_declared_shared_use_is_allowed
+test_fails_closed_when_scope_is_unreadable
 test_check_cli_decides_without_running
 test_usage_is_a_usage_error
 test_shim_does_not_recurse_into_itself
