@@ -108,7 +108,7 @@ The accepted policy profiles are Codex `gpt-5.6-sol` at `xhigh` effort and Claud
 Every `account_home` must be an existing absolute directory.
 Crosscheck selects the first entry whose account and model both differ from the author identity recorded in task metadata.
 An absent or invalid file is an unavailable reviewer and therefore blocks crosscheck and merge.
-See [`crosscheck.md`](crosscheck.md) for the example file, evidence rules, and operator flow.
+See [`crosscheck.md`](crosscheck.md) for the example file, reviewer capture control, evidence rules, and operator flow.
 
 ## Captain preferences (data/captain.md)
 

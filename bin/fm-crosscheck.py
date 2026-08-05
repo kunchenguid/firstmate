@@ -38,6 +38,8 @@ ACTIVE_LIFECYCLES = {"open", "claimed-fixed"}
 ALL_LIFECYCLES = ACTIVE_LIFECYCLES | {"verified-fixed", "closed-equivalent"}
 SEVERITIES = {"blocking", "high", "medium", "low"}
 MAX_CAPTURE = 200_000
+DEFAULT_REVIEWER_CAPTURE = 16 * 1024 * 1024
+MAX_REVIEWER_CAPTURE = 64 * 1024 * 1024
 MAX_LEDGER_BYTES = 16 * 1024 * 1024
 MAX_REVIEWER_CONFIG_BYTES = 64 * 1024
 MAX_LEDGER_PROMPT_BYTES = 64_000
@@ -139,13 +141,14 @@ def run_command(
     timeout: float = 60,
     input_text: str | None = None,
     description: str | None = None,
+    maximum_output_bytes: int = MAX_CAPTURE,
 ) -> subprocess.CompletedProcess[str]:
     command_name = description or arguments[0]
     try:
         result = run_bounded(
             arguments,
             timeout_seconds=timeout,
-            maximum_output_bytes=MAX_CAPTURE,
+            maximum_output_bytes=maximum_output_bytes,
             cwd=cwd,
             env=env,
             input_bytes=input_text.encode("utf-8") if input_text is not None else None,
@@ -202,6 +205,7 @@ def run_sandboxed(
     timeout: float = 60,
     input_text: str | None = None,
     description: str | None = None,
+    maximum_output_bytes: int = MAX_CAPTURE,
 ) -> subprocess.CompletedProcess[str]:
     write_sandbox_profile(
         profile_path,
@@ -233,6 +237,7 @@ def run_sandboxed(
         timeout=timeout,
         input_text=input_text,
         description=description,
+        maximum_output_bytes=maximum_output_bytes,
     )
 
 
@@ -1203,6 +1208,23 @@ def reviewer_timeout() -> int:
     return value
 
 
+def reviewer_max_capture() -> int:
+    raw = os.environ.get(
+        "FM_CROSSCHECK_REVIEWER_MAX_CAPTURE_BYTES",
+        str(DEFAULT_REVIEWER_CAPTURE),
+    )
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        fail("FM_CROSSCHECK_REVIEWER_MAX_CAPTURE_BYTES must be an integer")
+    require(
+        MAX_CAPTURE <= value <= MAX_REVIEWER_CAPTURE,
+        "FM_CROSSCHECK_REVIEWER_MAX_CAPTURE_BYTES must be between "
+        f"{MAX_CAPTURE} and {MAX_REVIEWER_CAPTURE}",
+    )
+    return value
+
+
 def run_reviewer(
     review_dir: Path,
     snapshot_value: dict[str, Any],
@@ -1250,6 +1272,7 @@ def run_reviewer(
             timeout=reviewer_timeout(),
             input_text=prompt,
             description="Codex reviewer",
+            maximum_output_bytes=reviewer_max_capture(),
         )
         require(
             result.returncode == 0,
@@ -1290,6 +1313,7 @@ def run_reviewer(
         env=environment,
         timeout=reviewer_timeout(),
         description="Claude reviewer",
+        maximum_output_bytes=reviewer_max_capture(),
     )
     require(
         result.returncode == 0 and bool(result.stdout.strip()),

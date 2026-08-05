@@ -101,9 +101,13 @@ Because that Claude mode disables its own permission prompts, Crosscheck places 
 An unavailable sandbox blocks the reviewer rather than launching it with ambient write authority.
 A nonzero exit, timeout, missing artifact, empty artifact, malformed artifact, wrong-head artifact, or unresolved suspicion records an `unreviewed` attempt and exits nonzero.
 This includes provider refusals that surface only as a stopped or silent agent.
-Reviewer and evidence stdout plus stderr share a 200,000-byte capture ceiling; crossing it terminates the owned process tree and records a loud `unreviewed` attempt.
+Reviewer stdout plus stderr use a separate 16 MiB capture ceiling because a full agent transcript routinely exceeds the ordinary command budget.
+`FM_CROSSCHECK_REVIEWER_MAX_CAPTURE_BYTES` can override that ceiling between 200,000 bytes and 64 MiB, and an invalid value fails closed before reviewer launch.
+This remains a hard bound rather than truncation: Claude returns its structured verdict in the captured JSON envelope, while Codex must still provide its separate authoritative result artifact.
+Crossing the reviewer ceiling terminates the owned process tree and records a loud `unreviewed` attempt, and captured output alone never substitutes for a valid verdict.
+Evidence and every other ordinary command retain the 200,000-byte aggregate stdout-plus-stderr ceiling.
 The final wait and identity-pinned descendant cleanup remain inside the same absolute deadline.
-Structured verdict artifacts are stable regular files bounded by the same byte ceiling before JSON decoding.
+Structured verdict artifacts are stable regular files bounded by the ordinary 200,000-byte ceiling before JSON decoding.
 The durable ledger is bounded separately and fails closed when absent, symlinked, malformed, non-finite, or oversized.
 The platform-specific containment limits and empirical mutation evidence are recorded in [crosscheck-bounded-io.md](crosscheck-bounded-io.md).
 Reviewer result arrays are capped at 32 entries, at most 32 evidence executions are accepted, and all reproduction and mutation work shares a 900-second aggregate deadline by default.

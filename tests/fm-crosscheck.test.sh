@@ -137,6 +137,11 @@ done
 [ -n "$workdir" ] && [ -n "$output" ] || exit 99
 cat > "$FM_TEST_PROMPT_LOG"
 if [ "$FM_TEST_REVIEW_SCENARIO" = noisy-reviewer ]; then
+  python3 "$FM_TEST_REVIEW_DRIVER" "$workdir" "$output" "$FM_TEST_REVIEW_SCENARIO" "$FM_TEST_HEAD"
+  python3 -c 'import sys; sys.stdout.write("R" * 210000)'
+  exit 0
+fi
+if [ "$FM_TEST_REVIEW_SCENARIO" = noisy-reviewer-no-result ]; then
   python3 -c 'import sys; sys.stdout.write("R" * 210000)'
   exit 0
 fi
@@ -180,14 +185,18 @@ temporary=$(mktemp "${TMPDIR:-/tmp}/fm-crosscheck-claude.XXXXXX") || exit 87
 python3 "$FM_TEST_REVIEW_DRIVER" "$PWD" "$temporary" "$FM_TEST_REVIEW_SCENARIO" "$FM_TEST_HEAD" || exit 88
 python3 - "$temporary" <<'PY'
 import json
+import os
 import sys
 structured = json.load(open(sys.argv[1]))
-print(json.dumps({
+envelope = {
     "is_error": False,
     "subtype": "success",
     "terminal_reason": "completed",
     "structured_output": structured,
-}))
+}
+if os.environ["FM_TEST_REVIEW_SCENARIO"] == "noisy-reviewer":
+    envelope["transcript"] = "R" * 210000
+print(json.dumps(envelope))
 PY
 rm -f "$temporary"
 SH
@@ -462,6 +471,18 @@ seed_open_ledger() {
 JSON
 }
 
+select_claude_reviewer() {
+  local case_dir=$1
+  sed -i.bak 's/model=gpt-5.5/model=gpt-5.6-sol/' "$case_dir/state/task-x1.meta"
+  rm "$case_dir/state/task-x1.meta.bak"
+  cat > "$case_dir/reviewer.json" <<EOF
+{"reviewers":[
+  {"harness":"codex","model":"gpt-5.6-sol","effort":"xhigh","account_home":"$case_dir/author-home"},
+  {"harness":"claude","model":"claude-opus-5","effort":"xhigh","account_home":"$case_dir/reviewer-home"}
+]}
+EOF
+}
+
 test_clear_review_uses_policy_contract() {
   local record case_dir base head output
   record=$(make_case clear)
@@ -488,14 +509,7 @@ test_claude_reviewer_provides_model_separation_for_codex_author() {
   local record case_dir base head output
   record=$(make_case claude-reviewer)
   IFS=$'\t' read -r case_dir base head <<< "$record"
-  sed -i.bak 's/model=gpt-5.5/model=gpt-5.6-sol/' "$case_dir/state/task-x1.meta"
-  rm "$case_dir/state/task-x1.meta.bak"
-  cat > "$case_dir/reviewer.json" <<EOF
-{"reviewers":[
-  {"harness":"codex","model":"gpt-5.6-sol","effort":"xhigh","account_home":"$case_dir/author-home"},
-  {"harness":"claude","model":"claude-opus-5","effort":"xhigh","account_home":"$case_dir/reviewer-home"}
-]}
-EOF
+  select_claude_reviewer "$case_dir"
   output=$(run_case "$case_dir" "$base" "$head" clear run) \
     || fail "Claude reviewer did not complete"
   assert_contains "$output" 'crosscheck clear' "Claude reviewer did not earn a clear result"
@@ -852,20 +866,114 @@ test_artifacts_cannot_escape_designated_subtrees() {
   pass "resolved evidence paths remain inside designated subtrees"
 }
 
-test_reviewer_and_evidence_output_limits_fail_closed() {
-  local scenario record case_dir base head rc
-  for scenario in noisy-reviewer noisy-reproduction; do
-    record=$(make_case "$scenario")
+test_reviewer_output_uses_separate_capture_limit() {
+  local record case_dir base head rc
+  record=$(make_case noisy-codex-reviewer)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  run_case "$case_dir" "$base" "$head" noisy-reviewer run \
+    > "$case_dir/out" 2> "$case_dir/err" \
+    || fail "valid Codex review failed on incidental transcript volume"
+  assert_grep 'crosscheck clear' "$case_dir/out" \
+    "large Codex transcript did not reach its authoritative verdict"
+
+  record=$(make_case noisy-claude-reviewer)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  select_claude_reviewer "$case_dir"
+  run_case "$case_dir" "$base" "$head" noisy-reviewer run \
+    > "$case_dir/out" 2> "$case_dir/err" \
+    || fail "valid Claude review failed on its larger result envelope"
+  assert_grep 'crosscheck clear' "$case_dir/out" \
+    "large Claude envelope did not reach its structured verdict"
+
+  record=$(make_case noisy-reviewer-no-result)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  set +e
+  run_case "$case_dir" "$base" "$head" noisy-reviewer-no-result run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "large reviewer transcript without result"
+  assert_no_grep 'exceeded the 200000-byte aggregate output limit' "$case_dir/err" \
+    "missing result was obscured by the ordinary capture limit"
+  assert_grep 'reviewer verdict artifact is malformed' "$case_dir/err" \
+    "missing authoritative result did not fail closed"
+  python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1]))
+assert value["runs"][-1]["state"] == "unreviewed"
+' "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    || fail "missing authoritative result was recorded as reviewed"
+  pass "both reviewers accept larger bounded output while a missing verdict stays unreviewed"
+}
+
+test_reviewer_capture_override_is_validated() {
+  local value record case_dir base head rc
+  record=$(make_case reviewer-capture-override)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  set +e
+  FM_CROSSCHECK_REVIEWER_MAX_CAPTURE_BYTES=200000 \
+    run_case "$case_dir" "$base" "$head" noisy-reviewer run \
+      > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "reviewer capture override"
+  assert_grep 'exceeded the 200000-byte aggregate output limit' "$case_dir/err" \
+    "reviewer capture override was not applied"
+
+  for value in invalid 199999 67108865; do
+    record=$(make_case "invalid-reviewer-capture-$value")
     IFS=$'\t' read -r case_dir base head <<< "$record"
     set +e
-    run_case "$case_dir" "$base" "$head" "$scenario" run \
-      > "$case_dir/out" 2> "$case_dir/err"
+    FM_CROSSCHECK_REVIEWER_MAX_CAPTURE_BYTES=$value \
+      run_case "$case_dir" "$base" "$head" clear run \
+        > "$case_dir/out" 2> "$case_dir/err"
     rc=$?
     set -e
-    expect_code 1 "$rc" "$scenario output limit"
-    assert_grep 'exceeded the 200000-byte aggregate output limit' "$case_dir/err" \
-      "$scenario did not terminate loudly at the output limit"
+    expect_code 1 "$rc" "invalid reviewer capture $value"
+    assert_grep 'FM_CROSSCHECK_REVIEWER_MAX_CAPTURE_BYTES' "$case_dir/err" \
+      "invalid reviewer capture $value did not fail explicitly"
+    assert_absent "$case_dir/codex.log" \
+      "invalid reviewer capture $value still launched the reviewer"
   done
+  pass "reviewer capture override is bounded and invalid values fail before launch"
+}
+
+test_ordinary_output_paths_remain_bounded() {
+  local record case_dir base head rc
+  python3 - "$CROSSCHECK_PY" <<'PY' \
+    || fail "ordinary run_command output did not retain the original ceiling"
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+assert module.MAX_CAPTURE == 200_000
+try:
+    module.run_command(
+        [sys.executable, "-c", 'import sys; sys.stdout.write("O" * 210000)'],
+        description="ordinary command",
+    )
+except module.CrosscheckError as exc:
+    assert str(exc) == (
+        "ordinary command: bounded command exceeded the "
+        "200000-byte aggregate output limit"
+    )
+else:
+    raise AssertionError("ordinary command crossed the original capture limit")
+PY
+
+  record=$(make_case noisy-reproduction)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  set +e
+  run_case "$case_dir" "$base" "$head" noisy-reproduction run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "noisy reproduction output limit"
+  assert_grep 'exceeded the 200000-byte aggregate output limit' "$case_dir/err" \
+    "reproduction command did not retain the ordinary output limit"
 
   record=$(make_case oversized-artifact)
   IFS=$'\t' read -r case_dir base head <<< "$record"
@@ -880,7 +988,7 @@ test_reviewer_and_evidence_output_limits_fail_closed() {
     "oversized verdict artifact was not classified as malformed"
   assert_grep 'bounded JSON artifact exceeds 200000 bytes' "$case_dir/err" \
     "oversized verdict artifact bypassed the output ceiling: $(tr '\n' ' ' < "$case_dir/err")"
-  pass "reviewer and evidence output are capped while processes are drained"
+  pass "ordinary commands and authoritative reviewer artifacts retain the 200000-byte limit"
 }
 
 test_prompt_uses_only_bounded_ledger_projection() {
@@ -1136,7 +1244,9 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
   case "$FM_TEST_CASE" in
     test_baseline_readable_state_is_destroyed_before_mutation|\
     test_mutation_is_bound_to_cited_non_test_implementation|\
-    test_reviewer_and_evidence_output_limits_fail_closed|\
+    test_reviewer_output_uses_separate_capture_limit|\
+    test_reviewer_capture_override_is_validated|\
+    test_ordinary_output_paths_remain_bounded|\
     test_final_wait_and_residual_processes_are_bounded|\
     test_installed_sandbox_denies_shared_private_tmp|\
     test_symlinked_named_test_cannot_hide_test_mutation|\
@@ -1176,7 +1286,9 @@ test_symlinked_named_test_cannot_hide_test_mutation
 test_evidence_batch_item_limit_precedes_execution
 test_evidence_batch_has_aggregate_deadline
 test_artifacts_cannot_escape_designated_subtrees
-test_reviewer_and_evidence_output_limits_fail_closed
+test_reviewer_output_uses_separate_capture_limit
+test_reviewer_capture_override_is_validated
+test_ordinary_output_paths_remain_bounded
 test_prompt_uses_only_bounded_ledger_projection
 test_nonexistent_mutation_proof_is_unreviewed
 test_mutation_proof_does_not_float_to_a_new_head
