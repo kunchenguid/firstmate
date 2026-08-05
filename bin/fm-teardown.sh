@@ -8,9 +8,11 @@
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
 # upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
-# normal ship task whose commits are not so reachable - when its PR is merged and
-# GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
+# normal ship task whose commits are not so reachable - when its content is already
+# present in the up-to-date default branch, or when GitHub ties a contained or
+# conflict-adjusted rebased PR head to a merge commit on that live default branch.
+# The default branch is always the landing authority; a merged PR alone is never
+# sufficient. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main.
 # The PR itself is resolved from the task's recorded pr= when present, or - when
@@ -916,26 +918,367 @@ unpushed_patches_are_in_pr_head() {
       | sed '/^$/d' \
       | sort -u
   ) || return 1
-  [ -n "$pr_patch_ids" ] || return 1
   unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
-  [ -n "$unpushed" ] || return 1
+  # A remote ref may have advanced after the caller's first unpushed-work read.
+  # Empty now is the safest possible answer, not a failed proof.
+  [ -n "$unpushed" ] || return 0
+  [ -n "$pr_patch_ids" ] || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
     patch_id=$(patch_id_for_commit "$commit") || return 1
     [ -n "$patch_id" ] || return 1
-    printf '%s\n' "$pr_patch_ids" | grep -qxF "$patch_id" || return 1
+    printf '%s\n' "$pr_patch_ids" | grep -qxF "$patch_id" \
+      || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
   done <<EOF
 $unpushed
 EOF
 }
 
-# Is the worktree's PR merged for local work contained in that PR? Resolves the
-# PR from the recorded pr= URL first, then from the branch name, and asks GitHub
-# for both the PR state and head. Returns non-zero when the PR is not merged, the
-# current work is not contained in the PR head, no PR is found, or any gh error
-# occurs - the caller then falls back to the content check.
+github_repo_for_pr_rewrite() {
+  local target=$1 url rest owner repo
+  case "$target" in
+    https://github.com/*/pull/*)
+      rest=${target#https://github.com/}
+      rest=${rest%%/pull/*}
+      ;;
+    *)
+      url=$(git -C "$WT" remote get-url origin 2>/dev/null) || return 1
+      case "$url" in
+        https://github.com/*) rest=${url#https://github.com/} ;;
+        git@github.com:*) rest=${url#git@github.com:} ;;
+        ssh://git@github.com/*) rest=${url#ssh://git@github.com/} ;;
+        *) return "$TEARDOWN_REAP_SAFETY_REFUSAL" ;;
+      esac
+      rest=${rest%.git}
+      ;;
+  esac
+  case "$rest" in
+    */*/*|/*|*/|'') return "$TEARDOWN_REAP_SAFETY_REFUSAL" ;;
+    */*) ;;
+    *) return "$TEARDOWN_REAP_SAFETY_REFUSAL" ;;
+  esac
+  owner=${rest%%/*}
+  repo=${rest#*/}
+  [ -n "$owner" ] && [ -n "$repo" ] \
+    || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  case "$owner$repo" in
+    *[!A-Za-z0-9_.-]*) return "$TEARDOWN_REAP_SAFETY_REFUSAL" ;;
+  esac
+  printf '%s\t%s\n' "$owner" "$repo"
+}
+
+pr_rewrite_path_contains_head() {
+  local target=$1 current=$2 pr_head=$3 repo_parts owner repo number edges query status
+  repo_parts=$(github_repo_for_pr_rewrite "$target") || return $?
+  owner=${repo_parts%%$'\t'*}
+  repo=${repo_parts#*$'\t'}
+  number=$(pr_number_from_target "$target") \
+    || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  # GraphQL expands these variables remotely; the shell must preserve them literally.
+  # shellcheck disable=SC2016
+  query='query($owner: String!, $repo: String!, $number: Int!) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $number) {
+        timelineItems(last: 100, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT]) {
+          nodes {
+            ... on HeadRefForcePushedEvent {
+              beforeCommit { oid }
+              afterCommit { oid }
+            }
+          }
+        }
+      }
+    }
+  }'
+  if edges=$(cd "$WT" && gh api graphql \
+      -F owner="$owner" -F repo="$repo" -F number="$number" \
+      -f query="$query" \
+      --jq '.data.repository.pullRequest.timelineItems.nodes[] | select(.beforeCommit.oid != null and .afterCommit.oid != null) | [.beforeCommit.oid, .afterCommit.oid] | @tsv' \
+      2>/dev/null); then
+    :
+  else
+    status=$?
+    return "$status"
+  fi
+  [ -n "$edges" ] || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  printf '%s\n' "$edges" | awk -F '\t' \
+    -v from="$current" -v to="$pr_head" \
+    -v refusal="$TEARDOWN_REAP_SAFETY_REFUSAL" '
+    BEGIN { reachable[from] = 1 }
+    NF == 2 && reachable[$1] { reachable[$2] = 1 }
+    END { exit reachable[to] ? 0 : refusal }
+  '
+}
+
+commit_rebase_identity() {
+  local commit=$1
+  git -C "$WT" cat-file commit "$commit" 2>/dev/null \
+    | awk '
+        /^author / { print; next }
+        body { print; next }
+        /^$/ { body = 1; print }
+      ' \
+    | git hash-object --stdin 2>/dev/null
+}
+
+commit_changed_paths_identity() {
+  local commit=$1
+  git -C "$WT" diff-tree --no-commit-id --name-status -r --root "$commit" \
+      2>/dev/null \
+    | LC_ALL=C sort \
+    | git hash-object --stdin 2>/dev/null
+}
+
+commit_has_one_parent() {
+  local commit=$1 parents
+  parents=$(git -C "$WT" rev-list --parents -n 1 "$commit" 2>/dev/null) || return 1
+  [ "$(printf '%s\n' "$parents" | awk '{ print NF }')" -eq 2 ]
+}
+
+commit_patch_has_upstream_overlap() {
+  local commit=$1 old_base=$2 new_base=$3 overlap
+  overlap=$(comm -12 \
+    <(git -C "$WT" diff-tree --no-commit-id --name-only -r --root "$commit" \
+        2>/dev/null | LC_ALL=C sort -u) \
+    <(git -C "$WT" diff --name-only "$old_base" "$new_base" -- \
+        2>/dev/null | LC_ALL=C sort -u)) || return 1
+  [ -n "$overlap" ] || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+}
+
+commit_path_entry() {
+  local commit=$1 path=$2 entry
+  entry=$(git -C "$WT" ls-tree "$commit" -- "$path" 2>/dev/null) || return 1
+  if [ -z "$entry" ]; then
+    printf '%s\n' -
+    return 0
+  fi
+  printf '%s\n' "$entry" | awk 'NR == 1 { print $1 ":" $3 }'
+}
+
+rewrite_difference_refusal() {
+  local original=$1 rewritten=$2 path=$3 reason=$4 fingerprint=$5
+  echo "teardown: rewrite difference between $original and $rewritten at $path could not be attributed: $reason; delta=$fingerprint" >&2
+  return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+}
+
+materialize_blob() {
+  local oid=$1 destination=$2
+  git -C "$WT" cat-file blob "$oid" > "$destination" 2>/dev/null
+}
+
+materialize_union() {
+  local ours=$1 base=$2 theirs=$3 destination=$4 status
+  git merge-file --union -p "$ours" "$base" "$theirs" \
+    > "$destination" 2>/dev/null
+  status=$?
+  [ "$status" -le 1 ]
+}
+
+union_delta_fingerprint() {
+  local expected=$1 rewritten=$2
+  python3 - "$expected" "$rewritten" <<'PY'
+from collections import Counter
+from hashlib import sha256
+from pathlib import Path
+import sys
+
+expected, rewritten = (
+    Counter(Path(path).read_bytes().splitlines(keepends=True))
+    for path in sys.argv[1:]
+)
+
+def describe(label, lines):
+    expanded = sorted(line for line, count in lines.items() for _ in range(count))
+    shown = [sha256(line).hexdigest()[:16] for line in expanded[:4]]
+    return f"{label}_line_hashes={','.join(shown) or '-'} {label}_truncated={max(0, len(expanded) - 4)}"
+
+print(f"{describe('removed', expected - rewritten)} {describe('added', rewritten - expected)}")
+PY
+}
+
+commit_rewrite_differences_are_attributable() {
+  local original=$1 rewritten=$2 original_parent=$3 rewritten_parent=$4
+  local path old_entry original_entry new_entry rewritten_entry
+  local old_oid original_oid new_oid rewritten_oid union_hash reverse_union_hash
+  local concatenated_hash reverse_concatenated_hash
+  local paths fingerprint proof_dir
+  paths=$(git -C "$WT" diff-tree --no-commit-id --name-only -r \
+    "$original_parent" "$original" 2>/dev/null) || return 1
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    old_entry=$(commit_path_entry "$original_parent" "$path") || return 1
+    original_entry=$(commit_path_entry "$original" "$path") || return 1
+    new_entry=$(commit_path_entry "$rewritten_parent" "$path") || return 1
+    rewritten_entry=$(commit_path_entry "$rewritten" "$path") || return 1
+    if [ "$old_entry" = "$new_entry" ]; then
+      if [ "$original_entry" != "$rewritten_entry" ]; then
+        rewrite_difference_refusal "$original" "$rewritten" "$path" \
+          "the upstream version did not change" \
+          "old=$old_entry local=$original_entry upstream=$new_entry rewritten=$rewritten_entry"
+        return $?
+      fi
+      continue
+    fi
+    if [ "$old_entry" = "$original_entry" ]; then
+      if [ "$new_entry" != "$rewritten_entry" ]; then
+        rewrite_difference_refusal "$original" "$rewritten" "$path" \
+          "the local commit did not change this path" \
+          "old=$old_entry local=$original_entry upstream=$new_entry rewritten=$rewritten_entry"
+        return $?
+      fi
+      continue
+    fi
+    case "$old_entry:$original_entry:$new_entry:$rewritten_entry" in
+      *:-*|*-:*)
+        rewrite_difference_refusal "$original" "$rewritten" "$path" \
+          "a concurrent add or delete has no deterministic union proof" \
+          "old=$old_entry local=$original_entry upstream=$new_entry rewritten=$rewritten_entry"
+        return $?
+        ;;
+    esac
+    old_oid=${old_entry#*:}
+    original_oid=${original_entry#*:}
+    new_oid=${new_entry#*:}
+    rewritten_oid=${rewritten_entry#*:}
+    proof_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-rewrite-proof.XXXXXX") || return 1
+    materialize_blob "$old_oid" "$proof_dir/old" \
+      || { rm -rf "$proof_dir"; return 1; }
+    materialize_blob "$original_oid" "$proof_dir/local" \
+      || { rm -rf "$proof_dir"; return 1; }
+    materialize_blob "$new_oid" "$proof_dir/upstream" \
+      || { rm -rf "$proof_dir"; return 1; }
+    materialize_blob "$rewritten_oid" "$proof_dir/rewritten" \
+      || { rm -rf "$proof_dir"; return 1; }
+    materialize_union \
+      "$proof_dir/local" "$proof_dir/old" "$proof_dir/upstream" \
+      "$proof_dir/union" || { rm -rf "$proof_dir"; return 1; }
+    materialize_union \
+      "$proof_dir/upstream" "$proof_dir/old" "$proof_dir/local" \
+      "$proof_dir/reverse-union" || { rm -rf "$proof_dir"; return 1; }
+    command cat "$proof_dir/local" "$proof_dir/upstream" \
+      > "$proof_dir/concatenated" || { rm -rf "$proof_dir"; return 1; }
+    command cat "$proof_dir/upstream" "$proof_dir/local" \
+      > "$proof_dir/reverse-concatenated" || { rm -rf "$proof_dir"; return 1; }
+    union_hash=$(git -C "$WT" hash-object "$proof_dir/union" 2>/dev/null) \
+      || { rm -rf "$proof_dir"; return 1; }
+    reverse_union_hash=$(git -C "$WT" hash-object "$proof_dir/reverse-union" 2>/dev/null) \
+      || { rm -rf "$proof_dir"; return 1; }
+    concatenated_hash=$(git -C "$WT" hash-object "$proof_dir/concatenated" 2>/dev/null) \
+      || { rm -rf "$proof_dir"; return 1; }
+    reverse_concatenated_hash=$(git -C "$WT" hash-object \
+      "$proof_dir/reverse-concatenated" 2>/dev/null) \
+      || { rm -rf "$proof_dir"; return 1; }
+    if [ "$rewritten_oid" != "$union_hash" ] \
+        && [ "$rewritten_oid" != "$reverse_union_hash" ] \
+        && [ "$rewritten_oid" != "$concatenated_hash" ] \
+        && [ "$rewritten_oid" != "$reverse_concatenated_hash" ]; then
+      fingerprint=$(union_delta_fingerprint \
+        "$proof_dir/union" "$proof_dir/rewritten") \
+        || { rm -rf "$proof_dir"; return 1; }
+      rm -rf "$proof_dir"
+      rewrite_difference_refusal "$original" "$rewritten" "$path" \
+        "the rewritten blob is not either deterministic union of local and upstream content" \
+        "old=$old_entry local=$original_entry upstream=$new_entry rewritten=$rewritten_entry $fingerprint"
+      return $?
+    fi
+    case "${rewritten_entry%%:*}" in
+      "${original_entry%%:*}"|"${new_entry%%:*}")
+        rm -rf "$proof_dir"
+        ;;
+      *)
+        rm -rf "$proof_dir"
+        rewrite_difference_refusal "$original" "$rewritten" "$path" \
+          "the rewritten file mode is neither the local nor upstream mode" \
+          "local_mode=${original_entry%%:*} upstream_mode=${new_entry%%:*} rewritten_mode=${rewritten_entry%%:*}"
+        return $?
+        ;;
+    esac
+  done <<< "$paths"
+}
+
+commit_is_rebased_counterpart() {
+  local original=$1 rewritten=$2 old_base=$3 new_base=$4
+  local original_identity rewritten_identity original_paths rewritten_paths
+  local original_patch rewritten_patch comparison
+  commit_has_one_parent "$original" || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  commit_has_one_parent "$rewritten" || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  original_identity=$(commit_rebase_identity "$original") || return 1
+  rewritten_identity=$(commit_rebase_identity "$rewritten") || return 1
+  [ -n "$original_identity" ] && [ "$original_identity" = "$rewritten_identity" ] \
+    || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  original_paths=$(commit_changed_paths_identity "$original") || return 1
+  rewritten_paths=$(commit_changed_paths_identity "$rewritten") || return 1
+  [ -n "$original_paths" ] && [ "$original_paths" = "$rewritten_paths" ] \
+    || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  original_patch=$(patch_id_for_commit "$original") || return 1
+  rewritten_patch=$(patch_id_for_commit "$rewritten") || return 1
+  [ -n "$original_patch" ] && [ -n "$rewritten_patch" ] || return 1
+  [ "$original_patch" != "$rewritten_patch" ] || return 0
+  commit_patch_has_upstream_overlap "$original" "$old_base" "$new_base" \
+    || return $?
+  comparison=$(git -C "$WT" range-diff --no-color --no-dual-color --no-patch \
+    --abbrev=40 "$original^..$original" "$rewritten^..$rewritten" 2>/dev/null) \
+    || return 1
+  [ "$(printf '%s\n' "$comparison" | sed '/^$/d' | wc -l | tr -d ' ')" -eq 1 ] \
+    || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  printf '%s\n' "$comparison" \
+    | grep -Eq '^[[:space:]]*1:[[:space:]]+[0-9a-f]{40}[[:space:]]+![[:space:]]+1:[[:space:]]+[0-9a-f]{40}[[:space:]]' \
+    || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  commit_rewrite_differences_are_attributable \
+    "$original" "$rewritten" "$original^" "$rewritten^"
+}
+
+rebased_pr_head_contains_unpushed() {
+  local target=$1 pr_head=$2 current local_commits rewritten_commits count
+  local original rewritten original_oldest rewritten_oldest old_base new_base
+  local original_parent rewritten_parent previous_original previous_rewritten
+  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
+  local_commits=$(git -C "$WT" rev-list --reverse HEAD --not --remotes -- \
+    2>/dev/null) || return 1
+  [ -n "$local_commits" ] || return 0
+  count=$(printf '%s\n' "$local_commits" | sed '/^$/d' | wc -l | tr -d ' ')
+  case "$count" in ''|*[!0-9]*|0) return 1 ;; esac
+  rewritten_commits=$(git -C "$WT" rev-list --first-parent --reverse \
+    --max-count="$count" "$pr_head" 2>/dev/null) || return 1
+  [ "$(printf '%s\n' "$rewritten_commits" | sed '/^$/d' | wc -l | tr -d ' ')" -eq "$count" ] \
+    || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  original_oldest=$(printf '%s\n' "$local_commits" | sed -n '1p')
+  rewritten_oldest=$(printf '%s\n' "$rewritten_commits" | sed -n '1p')
+  commit_has_one_parent "$original_oldest" \
+    || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  commit_has_one_parent "$rewritten_oldest" \
+    || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  old_base=$(git -C "$WT" rev-parse "$original_oldest^" 2>/dev/null) || return 1
+  new_base=$(git -C "$WT" rev-parse "$rewritten_oldest^" 2>/dev/null) || return 1
+  git -C "$WT" merge-base --is-ancestor "$old_base" "$new_base" 2>/dev/null \
+    || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  previous_original=$old_base
+  previous_rewritten=$new_base
+  while IFS=$'\t' read -r original rewritten; do
+    [ -n "$original" ] && [ -n "$rewritten" ] \
+      || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+    original_parent=$(git -C "$WT" rev-parse "$original^" 2>/dev/null) || return 1
+    rewritten_parent=$(git -C "$WT" rev-parse "$rewritten^" 2>/dev/null) || return 1
+    [ "$original_parent" = "$previous_original" ] \
+      && [ "$rewritten_parent" = "$previous_rewritten" ] \
+      || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+    commit_is_rebased_counterpart \
+      "$original" "$rewritten" "$old_base" "$new_base" || return $?
+    previous_original=$original
+    previous_rewritten=$rewritten
+  done < <(paste <(printf '%s\n' "$local_commits") <(printf '%s\n' "$rewritten_commits"))
+  [ "$previous_original" = "$current" ] && [ "$previous_rewritten" = "$pr_head" ] \
+    || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  pr_rewrite_path_contains_head "$target" "$current" "$pr_head"
+}
+
+# Does a merged PR corroborate local work landing in the authoritative default ref?
+# The PR's merge commit must be an ancestor of that ref, and its head must contain
+# the current local work directly, by stable patch identity, or through an exact
+# force-push rewrite lineage whose commit series satisfies the strict rebase checks.
+# A merged PR without both legs is only a safety refusal, never landing proof.
 pr_is_merged() {
-  local branch=$1 target view state head current status
+  local branch=$1 authoritative_ref=$2 target view state rest head merge_commit current status
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
@@ -947,31 +1290,53 @@ pr_is_merged() {
     fi
   fi
   [ -n "$target" ] || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
-  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
+  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,mergeCommit \
+    -q '.state + "\t" + .headRefOid + "\t" + (.mergeCommit.oid // "")' \
+    2>/dev/null) || return 1
   state=${view%%$'\t'*}
-  head=${view#*$'\t'}
+  rest=${view#*$'\t'}
   [ "$state" != "$view" ] || return 1
+  head=${rest%%$'\t'*}
+  merge_commit=${rest#*$'\t'}
+  [ "$head" != "$rest" ] || return 1
   case "$state" in
     MERGED|merged) ;;
     *) return "$TEARDOWN_REAP_SAFETY_REFUSAL" ;;
   esac
-  [ -n "$head" ] || return 1
+  [ -n "$head" ] && [ -n "$merge_commit" ] || return 1
+  git -C "$WT" cat-file -e "$merge_commit^{commit}" 2>/dev/null || return 1
+  git -C "$WT" merge-base --is-ancestor "$merge_commit" "$authoritative_ref" \
+    2>/dev/null || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
   ensure_commit_object "$target" "$head" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null && return 0
-  unpushed_patches_are_in_pr_head "$head" \
-    || return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  if unpushed_patches_are_in_pr_head "$head"; then
+    return 0
+  else
+    status=$?
+  fi
+  [ "$status" -eq "$TEARDOWN_REAP_SAFETY_REFUSAL" ] || return "$status"
+  rebased_pr_head_contains_unpushed "$target" "$head"
 }
 
 # Is the branch's content already present in the up-to-date default branch?
 # Origin-backed proof holds the common checkout lock across probe, fetch,
-# unchanged branch-and-tip re-probe, and tree comparison.
+# unchanged branch-and-tip re-probe, and both direct and PR-corroborated checks.
 content_matches_ref() {
-  local ref=$1 default_tree merged_tree
+  local ref=$1 default_tree merged_output merged_tree status
   default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
-  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
+  if merged_output=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null); then
+    status=0
+  else
+    status=$?
+  fi
+  if [ "$status" -eq 1 ]; then
+    echo "teardown: task content conflicts with authoritative $ref; retaining $WT" >&2
+    return "$TEARDOWN_REAP_SAFETY_REFUSAL"
+  fi
+  [ "$status" -eq 0 ] || return "$status"
+  merged_tree=$(printf '%s\n' "$merged_output" | head -1)
   if [ "$merged_tree" != "$default_tree" ]; then
     echo "teardown: task content is not present in authoritative $ref; retaining $WT" >&2
     return "$TEARDOWN_REAP_SAFETY_REFUSAL"
@@ -980,7 +1345,8 @@ content_matches_ref() {
 }
 
 content_in_origin_default() {
-  local initial_branch initial_tip ref fetched fetch_output reason fetch_status
+  local branch=$1 initial_branch initial_tip ref fetched fetch_output reason fetch_status
+  local content_status
   if ! probe_live_origin_default; then
     reason=$(printf '%s\n' "$LIVE_DEFAULT_OUTPUT" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p')
     echo "teardown: cannot prove the live origin default for $PROJ${reason:+: $reason}; retaining $WT" >&2
@@ -1018,13 +1384,21 @@ content_in_origin_default() {
     echo "teardown: fetched origin/$initial_branch does not match live origin HEAD; retaining $WT" >&2
     return 1
   fi
-  content_matches_ref "$ref"
+  if content_matches_ref "$ref"; then
+    return 0
+  else
+    content_status=$?
+  fi
+  [ "$content_status" -eq "$TEARDOWN_REAP_SAFETY_REFUSAL" ] \
+    || return "$content_status"
+  pr_is_merged "$branch" "$ref"
 }
 
 content_in_default() {
-  local name ref
+  local branch=$1 name ref
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    fm_checkout_lock_run "$WT" "$CHECKOUT_LOCK_ROOT" content_in_origin_default
+    fm_checkout_lock_run \
+      "$WT" "$CHECKOUT_LOCK_ROOT" content_in_origin_default "$branch"
     return
   fi
   name=$(default_branch) || return 1
@@ -1037,25 +1411,16 @@ content_in_default() {
 }
 
 # Has the worktree's committed work actually LANDED, though its commits are not
-# reachable from any remote-tracking branch? True when a merged PR proves the
-# current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
-# only for genuinely unlanded work.
+# reachable from any remote-tracking branch? The live default branch is the primary
+# authority. Direct content containment is sufficient; a rewritten PR head is only
+# corroboration when GitHub's exact merge commit is also on that default branch.
 work_is_landed() {
-  local branch=$1 pr_status content_status
-  if pr_is_merged "$branch"; then
-    return 0
-  else
-    pr_status=$?
-  fi
-  if content_in_default; then
+  local branch=$1 content_status
+  if content_in_default "$branch"; then
     return 0
   else
     content_status=$?
   fi
-  [ "$content_status" -eq "$TEARDOWN_REAP_SAFETY_REFUSAL" ] \
-    && return "$TEARDOWN_REAP_SAFETY_REFUSAL"
-  : "$pr_status"
   return "$content_status"
 }
 

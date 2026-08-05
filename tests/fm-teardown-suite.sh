@@ -3,11 +3,12 @@
 #
 # The check refuses to tear down a worktree whose work has not LANDED, because
 # treehouse return hard-resets the worktree. "Landed" means reachable from a remote
-# OR - for a normal ship task whose commits are not so reachable - its PR is merged
-# and GitHub reports a PR head that contains the current local work, or its content
-# is already in the up-to-date default branch.
+# OR - for a normal ship task whose commits are not so reachable - its content is
+# already in the up-to-date default branch, or a merged PR corroborates that content
+# through a contained or strictly verified rebased head whose merge commit is on the
+# live default branch.
 #
-# Covers three fixes:
+# Covers four fixes:
 #   - local-only fork-remote: a fork IS a remote, so fork-pushed upstream-
 #     contribution PRs are teardown-eligible (the pre-fix code false-refused them).
 #   - squash-merge-then-delete-branch: the branch's own commits live nowhere on a
@@ -15,6 +16,11 @@
 #     main. Reachability alone false-refused this common GitHub flow; the check now
 #     recognizes a merged PR head containing the local work (or the content already
 #     in main) as landed.
+#   - rebasing merge queue: a queue or validator may rewrite the exact PR head while
+#     preserving the task as a conflict-adjusted rebase, then squash that rewrite
+#     onto the default branch.
+#     Teardown requires the exact rewrite lineage and the PR merge commit on the
+#     live default branch before accepting that shape.
 #   - teardown-lock-race: a killed crewmate process can leave a transient worktree
 #     git index.lock that blocks teardown. The return path retries on the lock
 #     error signature (even if the lock self-clears mid-check), then only removes a
@@ -38,6 +44,7 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (r) rebased PR head + squash commit on live default         -> ALLOW  (merge queue)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crewmate process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -440,7 +447,7 @@ land_on_origin_main() {
 
 # Override GitHub lookups to report PR 7 as merged with the supplied head.
 add_gh_pr_merged_for_head() {
-  local case_dir=$1 head=$2
+  local case_dir=$1 head=$2 merge_commit=${3:-$2}
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
@@ -475,9 +482,14 @@ SH
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
-      *"state,headRefOid"*) printf '%s\t%s\n' 'MERGED' '$head' ; exit 0 ;;
+      *"state,headRefOid,mergeCommit"*) printf '%s\t%s\t%s\n' 'MERGED' '$head' '$merge_commit' ; exit 0 ;;
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
     esac
+    ;;
+  "api graphql")
+    [ -n "\${FM_TEST_PR_REWRITE_FROM:-}" ] || exit 0
+    printf '%s\t%s\n' "\$FM_TEST_PR_REWRITE_FROM" '$head'
+    exit 0
     ;;
 esac
 echo "error: pull request not found" >&2
@@ -543,6 +555,12 @@ land_equivalent_patch_on_origin_branch() {
   git -C "$case_dir/project" fetch -q origin "$branch"
   rm -rf "$tmp"
   git -C "$case_dir/project" rev-parse "refs/remotes/origin/$branch"
+}
+
+origin_main_head() {
+  local case_dir=$1
+  git -C "$case_dir/project" fetch -q origin main
+  git -C "$case_dir/project" rev-parse refs/remotes/origin/main
 }
 
 # Override gh-axi so every call fails, simulating an API/network error.
@@ -843,6 +861,33 @@ SH
   chmod +x "$case_dir/fakebin/git"
 }
 
+add_git_rewrite_path_inspection_failure() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "${FM_TEST_FAIL_REWRITE_DIFF_TREE:-}" = 1 ]; then
+  case " $* " in
+    *" diff-tree --no-commit-id --name-only -r "*)
+      case " $* " in
+        *" --root "*) ;;
+        *) echo "fatal: simulated rewrite path inspection failure" >&2; exit 2 ;;
+      esac
+      ;;
+  esac
+fi
+if [ -n "${FM_TEST_FAIL_REWRITE_BLOB:-}" ]; then
+  case " $* " in
+    *" cat-file blob $FM_TEST_FAIL_REWRITE_BLOB "*)
+      echo "fatal: simulated rewrite blob inspection failure" >&2
+      exit 2
+      ;;
+  esac
+fi
+exec "${REAL_GIT_FOR_TEST:?}" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+}
+
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
   local case_dir=$1; shift
@@ -1008,17 +1053,18 @@ test_no_mistakes_truly_unpushed_refuses() {
 }
 
 test_squash_merged_branch_deleted_allows() {
-  local case_dir rc pr_head
+  local case_dir rc pr_head merge_commit
   case_dir=$(make_case squash-merged)
   write_meta "$case_dir" no-mistakes ship
-  # Real branch content that is NOT pushed and NOT on origin/main: a squash merge
+  # Real branch content that is NOT pushed as its original commit: a squash merge
   # rewrote it into a different commit on main and auto-deleted the head branch, so
-  # HEAD is unreachable from every remote-tracking branch. The matching merged PR is
-  # the only signal that the work landed.
+  # HEAD is unreachable from every remote-tracking branch.
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   append_pr_meta_for_current_head "$case_dir"
   pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  land_on_origin_main "$case_dir" feature.txt hello
+  merge_commit=$(origin_main_head "$case_dir")
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head" "$merge_commit"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -1031,14 +1077,16 @@ test_squash_merged_branch_deleted_allows() {
 }
 
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
-  local case_dir rc local_head pr_head
+  local case_dir rc local_head pr_head merge_commit
   case_dir=$(make_case squash-ancestor)
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   append_pr_meta_url "$case_dir"
   local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes follow-up")
-  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  land_on_origin_main "$case_dir" feature.txt hello
+  merge_commit=$(origin_main_head "$case_dir")
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head" "$merge_commit"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -1051,7 +1099,7 @@ test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
 }
 
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
-  local case_dir rc local_head pr_head
+  local case_dir rc local_head pr_head merge_commit
   case_dir=$(make_case no-pr-branch-discovery)
   write_meta "$case_dir" no-mistakes ship
   # Reproduces the real false-refusal report exactly, with NO pr=/pr_head=
@@ -1066,7 +1114,8 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
   local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes auto-fix")
   land_on_origin_main "$case_dir" feature.txt hello
-  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  merge_commit=$(origin_main_head "$case_dir")
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head" "$merge_commit"
   # No append_pr_meta_* call: state/task-x1.meta has no pr= or pr_head= line.
 
   ! grep -qE '^(pr|pr_head)=' "$case_dir/state/task-x1.meta" \
@@ -1083,7 +1132,7 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
 }
 
 test_squash_merged_pr_allows_replayed_unpushed_patch() {
-  local case_dir rc parent_head pr_head
+  local case_dir rc parent_head pr_head merge_commit
   case_dir=$(make_case squash-replayed-patch)
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" local-parent.txt parent "local parent"
@@ -1093,7 +1142,9 @@ test_squash_merged_pr_allows_replayed_unpushed_patch() {
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   append_pr_meta_url "$case_dir"
   pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head feature.txt hello "add feature")
-  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  land_on_origin_main "$case_dir" feature.txt hello
+  merge_commit=$(origin_main_head "$case_dir")
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head" "$merge_commit"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -1105,15 +1156,181 @@ test_squash_merged_pr_allows_replayed_unpushed_patch() {
   pass "squash-merged PR accepts replayed unpushed local patches contained in the PR head"
 }
 
+test_rebased_merge_queue_head_landed_on_default_allows() {
+  local case_dir rc local_first local_head rewritten_first pr_head altered_first altered_head merge_commit
+  local local_patch rewritten_patch local_blob queue
+  case_dir=$(make_case rebased-merge-queue)
+  write_meta "$case_dir" no-mistakes ship
+  append_pr_meta_url "$case_dir"
+
+  printf '%s\n' 'baseline' > "$case_dir/wt/inventory.toon"
+  git -C "$case_dir/wt" add inventory.toon
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t \
+    commit -q -m "seed inventory"
+  git -C "$case_dir/wt" push -q origin HEAD:main
+  git -C "$case_dir/project" fetch -q origin main
+
+  printf '%s\n' 'task' > "$case_dir/wt/inventory.toon"
+  printf '%s\n' 'task-code-1' 'task-code-2' 'task-code-3' 'task-code-4' \
+    > "$case_dir/wt/task-code.txt"
+  git -C "$case_dir/wt" add inventory.toon task-code.txt
+  GIT_AUTHOR_DATE='2026-08-05T00:00:00+0000' \
+  GIT_COMMITTER_DATE='2026-08-05T00:00:00+0000' \
+    git -C "$case_dir/wt" -c user.email=t@t -c user.name=t \
+      commit -q -m "add task inventory row"
+  local_first=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf '%s\n' 'validated' > "$case_dir/wt/ci-fix.txt"
+  git -C "$case_dir/wt" add ci-fix.txt
+  GIT_AUTHOR_DATE='2026-08-05T00:01:00+0000' \
+  GIT_COMMITTER_DATE='2026-08-05T00:01:00+0000' \
+    git -C "$case_dir/wt" -c user.email=t@t -c user.name=t \
+      commit -q -m "apply CI fix"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  queue="$case_dir/_queue"
+  git clone -q "$case_dir/origin.git" "$queue"
+  printf '%s\n' 'upstream' > "$queue/inventory.toon"
+  git -C "$queue" add inventory.toon
+  git -C "$queue" -c user.email=t@t -c user.name=t \
+    commit -q -m "add upstream inventory row"
+  git -C "$queue" push -q origin main
+  git -C "$queue" checkout -q -b pr-head
+  printf '%s\n' 'upstream' 'task' > "$queue/inventory.toon"
+  printf '%s\n' 'task-code-1' 'task-code-2' 'task-code-3' 'task-code-4' \
+    > "$queue/task-code.txt"
+  git -C "$queue" add inventory.toon task-code.txt
+  GIT_AUTHOR_DATE='2026-08-05T00:00:00+0000' \
+  GIT_COMMITTER_DATE='2026-08-05T00:02:00+0000' \
+    git -C "$queue" -c user.email=t@t -c user.name=t \
+      commit -q -m "add task inventory row"
+  rewritten_first=$(git -C "$queue" rev-parse HEAD)
+  printf '%s\n' 'validated' > "$queue/ci-fix.txt"
+  git -C "$queue" add ci-fix.txt
+  GIT_AUTHOR_DATE='2026-08-05T00:01:00+0000' \
+  GIT_COMMITTER_DATE='2026-08-05T00:03:00+0000' \
+    git -C "$queue" -c user.email=t@t -c user.name=t \
+      commit -q -m "apply CI fix"
+  pr_head=$(git -C "$queue" rev-parse HEAD)
+  git -C "$queue" push -q origin pr-head
+  git -C "$queue" checkout -q -b altered-head main
+  printf '%s\n' 'upstream' 'task' 'injected' > "$queue/inventory.toon"
+  printf '%s\n' 'task-code-1' 'task-code-2' 'task-code-3' 'task-code-4' \
+    > "$queue/task-code.txt"
+  git -C "$queue" add inventory.toon task-code.txt
+  GIT_AUTHOR_DATE='2026-08-05T00:00:00+0000' \
+  GIT_COMMITTER_DATE='2026-08-05T00:02:00+0000' \
+    git -C "$queue" -c user.email=t@t -c user.name=t \
+      commit -q -m "add task inventory row"
+  altered_first=$(git -C "$queue" rev-parse HEAD)
+  printf '%s\n' 'validated' > "$queue/ci-fix.txt"
+  git -C "$queue" add ci-fix.txt
+  GIT_AUTHOR_DATE='2026-08-05T00:01:00+0000' \
+  GIT_COMMITTER_DATE='2026-08-05T00:03:00+0000' \
+    git -C "$queue" -c user.email=t@t -c user.name=t \
+      commit -q -m "apply CI fix"
+  altered_head=$(git -C "$queue" rev-parse HEAD)
+  git -C "$queue" push -q origin altered-head
+  git -C "$queue" checkout -q main
+  git -C "$queue" merge -q --squash pr-head
+  git -C "$queue" -c user.email=t@t -c user.name=t \
+    commit -q -m "land rebased task (#7)"
+  merge_commit=$(git -C "$queue" rev-parse HEAD)
+  git -C "$queue" push -q origin main
+  git -C "$case_dir/project" fetch -q origin main pr-head altered-head
+  rm -rf "$queue"
+
+  local_patch=$(git -C "$case_dir/wt" show --pretty=medium --no-ext-diff \
+    "$local_first" | git patch-id --stable | awk 'NR == 1 { print $1 }')
+  local_blob=$(git -C "$case_dir/wt" rev-parse "$local_first:inventory.toon")
+  rewritten_patch=$(git -C "$case_dir/wt" show --pretty=medium --no-ext-diff \
+    "$rewritten_first" | git patch-id --stable | awk 'NR == 1 { print $1 }')
+  [ "$local_patch" != "$rewritten_patch" ] \
+    || fail "rebased-merge-queue: setup did not change the conflict-adjusted patch id"
+  ! git -C "$case_dir/wt" merge-base --is-ancestor "$local_head" "$pr_head" \
+    || fail "rebased-merge-queue: setup left local HEAD ancestral to rewritten PR head"
+  add_gh_pr_merged_for_head "$case_dir" "$altered_head" "$merge_commit"
+
+  set +e
+  FM_TEST_PR_REWRITE_FROM="$local_head" \
+    run_teardown "$case_dir" > "$case_dir/altered-stdout" 2> "$case_dir/altered-stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" \
+    "rebased-merge-queue: altered conflict resolution must refuse teardown"
+  assert_grep "rewrite difference between $local_first" "$case_dir/altered-stderr" \
+    "rebased-merge-queue: refusal did not identify the original commit"
+  assert_grep "$altered_first" "$case_dir/altered-stderr" \
+    "rebased-merge-queue: refusal did not identify the rewritten commit"
+  assert_grep 'inventory.toon could not be attributed' "$case_dir/altered-stderr" \
+    "rebased-merge-queue: refusal did not identify the unattributed path"
+  assert_grep 'removed_line_hashes=- removed_truncated=0 added_line_hashes=' \
+    "$case_dir/altered-stderr" \
+    "rebased-merge-queue: refusal did not include the bounded rejected delta fingerprint"
+  assert_grep 'added_truncated=0' "$case_dir/altered-stderr" \
+    "rebased-merge-queue: refusal did not include the rejected delta truncation count"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "rebased-merge-queue: ambiguous rewrite removed task bookkeeping"
+
+  add_git_rewrite_path_inspection_failure "$case_dir"
+  set +e
+  FM_TEST_FAIL_REWRITE_DIFF_TREE=1 FM_TEST_PR_REWRITE_FROM="$local_head" \
+    run_teardown "$case_dir" > "$case_dir/inspection-stdout" 2> "$case_dir/inspection-stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" \
+    "rebased-merge-queue: rewrite path inspection failure must refuse teardown"
+  assert_grep 'landing proof could not execute' "$case_dir/inspection-stderr" \
+    "rebased-merge-queue: path inspection failure was not operational"
+  assert_not_contains "$(cat "$case_dir/inspection-stderr")" 'could not be attributed' \
+    "rebased-merge-queue: path inspection failure was mislabeled semantic"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "rebased-merge-queue: path inspection failure removed task bookkeeping"
+
+  set +e
+  FM_TEST_FAIL_REWRITE_BLOB="$local_blob" FM_TEST_PR_REWRITE_FROM="$local_head" \
+    run_teardown "$case_dir" > "$case_dir/blob-stdout" 2> "$case_dir/blob-stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" \
+    "rebased-merge-queue: rewrite blob inspection failure must refuse teardown"
+  assert_grep 'landing proof could not execute' "$case_dir/blob-stderr" \
+    "rebased-merge-queue: blob inspection failure was not operational"
+  assert_not_contains "$(cat "$case_dir/blob-stderr")" 'could not be attributed' \
+    "rebased-merge-queue: blob inspection failure was mislabeled semantic"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "rebased-merge-queue: blob inspection failure removed task bookkeeping"
+
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head" "$merge_commit"
+
+  set +e
+  FM_TEST_PR_REWRITE_FROM="$local_head" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" \
+    "rebased-merge-queue: authoritative default landing should permit teardown"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "rebased-merge-queue: teardown printed a REFUSED line"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "rebased-merge-queue: landed task bookkeeping was not cleared"
+  pass "rebased merge-queue rewrite is accepted only after its merge commit is on the live default"
+}
+
 test_merged_pr_with_later_local_commit_refuses() {
-  local case_dir rc pr_head
+  local case_dir rc pr_head merge_commit
   case_dir=$(make_case stale-pr-head)
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   append_pr_meta_for_current_head "$case_dir"
   pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  land_on_origin_main "$case_dir" feature.txt hello
+  merge_commit=$(origin_main_head "$case_dir")
   wt_commit_file "$case_dir" later.txt local-only "local follow-up"
-  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head" "$merge_commit"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -1126,12 +1343,14 @@ test_merged_pr_with_later_local_commit_refuses() {
 }
 
 test_pr_check_does_not_refresh_stale_pr_head() {
-  local case_dir rc pr_head new_head count
+  local case_dir rc pr_head new_head count merge_commit
   case_dir=$(make_case pr-check-stale)
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  land_on_origin_main "$case_dir" feature.txt hello
+  merge_commit=$(origin_main_head "$case_dir")
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head" "$merge_commit"
 
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
@@ -1640,7 +1859,7 @@ test_treehouse_return_timeout_reaps_children_before_unlock() {
 }
 
 test_dirty_worktree_refuses() {
-  local case_dir rc pr_head
+  local case_dir rc pr_head merge_commit
   case_dir=$(make_case dirty-wt)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
@@ -1649,8 +1868,9 @@ test_dirty_worktree_refuses() {
   # discard those changes.
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   land_on_origin_main "$case_dir" feature.txt hello
+  merge_commit=$(origin_main_head "$case_dir")
   pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head" "$merge_commit"
   printf '%s\n' "uncommitted edit" > "$case_dir/wt/feature.txt"
 
   set +e
@@ -2506,7 +2726,7 @@ SH
 }
 
 test_dead_reap_landing_statuses_are_distinct() {
-  local case_dir rc
+  local case_dir rc pr_head
   case_dir=$(make_case reap-truly-unlanded-status)
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt unlanded "unlanded task work"
@@ -2518,6 +2738,25 @@ test_dead_reap_landing_statuses_are_distinct() {
   expect_code 77 "$rc" "conclusively unlanded work must be a safety refusal"
   assert_grep 'has work not on any remote and not landed' "$case_dir/stderr" \
     "unlanded safety refusal was not named"
+
+  case_dir=$(make_case reap-merged-pr-not-contained)
+  write_meta "$case_dir" no-mistakes ship
+  append_pr_meta_url "$case_dir"
+  wt_commit_file "$case_dir" feature.txt local "local task work"
+  land_on_origin_main "$case_dir" feature.txt different
+  pr_head=$(origin_main_head "$case_dir")
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head" "$pr_head"
+  rm -f "$case_dir/fakebin/.tmux-live"
+  set +e
+  run_teardown "$case_dir" --reap-dead > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 77 "$rc" \
+    "merged PR that does not contain local work must be a safety refusal"
+  assert_grep 'has work not on any remote and not landed' "$case_dir/stderr" \
+    "merged PR non-containment was not named as a safety refusal"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'landing proof could not execute' \
+    "semantic PR non-containment was mislabeled as an execution failure"
 
   case_dir=$(make_case reap-landing-fetch-failure)
   write_meta "$case_dir" no-mistakes ship
@@ -6290,6 +6529,22 @@ if [ "${FM_TEST_FOCUSED:-}" = review-reaper-status ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = mergequeue-landing ]; then
+  test_rebased_merge_queue_head_landed_on_default_allows
+  test_squash_merged_branch_deleted_allows
+  test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
+  test_no_pr_recorded_discovers_merged_pr_by_branch_allows
+  test_squash_merged_pr_allows_replayed_unpushed_patch
+  test_merged_pr_with_later_local_commit_refuses
+  test_no_mistakes_truly_unpushed_refuses
+  test_dead_reap_landing_statuses_are_distinct
+  test_content_in_default_fallback_allows
+  test_content_fallback_refreshes_stale_origin_ref
+  test_content_fallback_uses_live_default
+  test_content_fallback_reprobes_live_default_after_fetch
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = treehouse-per-home ]; then
   test_never_created_direct_spawn_endpoint_is_not_quiesced
   test_never_created_scout_without_report_cleans_bookkeeping
@@ -6444,6 +6699,7 @@ TEARDOWN_FULL_SUITE_CASES=(
   test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
   test_no_pr_recorded_discovers_merged_pr_by_branch_allows
   test_squash_merged_pr_allows_replayed_unpushed_patch
+  test_rebased_merge_queue_head_landed_on_default_allows
   test_merged_pr_with_later_local_commit_refuses
   test_pr_check_does_not_refresh_stale_pr_head
   test_pr_check_records_remote_head_when_local_lags
