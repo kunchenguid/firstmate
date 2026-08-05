@@ -263,8 +263,7 @@ Because a restart restores the layout without the agents, reads never start the 
 An operation about to act on a pane ensures the server, so `send_*`, `kill`, and the launcher path still start a stopped one.
 A passive observation requires an already running server and fails instead: `capture`, `capture_ansi`, and `busy_state` report failure or `unknown` rather than reviving a layout whose panes no longer host the agents being observed.
 This also keeps a home's "no work left" condition reachable, since a probe that starts what it observes can never observe an ending.
-The watcher treats an unreadable pane as evidence: it confirms a genuinely gone endpoint with the side-effect-free existence probe and raises one `stale: <window> (endpoint gone)` wake, so a vanished fleet is reported instead of silently repaired.
-The verdict must hold on two consecutive polls with the task's `.meta` still present, because a teardown kills the pane several steps before it removes that meta and would otherwise look identical.
+A failed read is therefore real evidence; the watcher's backend-neutral handling of an unreadable pane and its endpoint-gone wake are owned by [`architecture.md`](architecture.md#event-driven-supervision).
 
 ## Push events and polling fallback
 

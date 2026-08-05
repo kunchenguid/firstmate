@@ -456,6 +456,97 @@ test_terminal_stale_surfaced() {
   pass "a stale pane sitting on a terminal status is surfaced (queue + exit)"
 }
 
+# --- unreadable pane: endpoint-gone confirmation, one wake, transient clears ---
+# Captures no longer start a backend server (herdr's
+# fm_backend_herdr_target_readable), so a failed read is real evidence rather
+# than a self-healing hiccup. The watcher must not drop the window silently:
+# it confirms the endpoint is genuinely gone with the side-effect-free existence
+# probe, requires the verdict to hold on two consecutive polls (a teardown kills
+# the pane well before it removes $ID.meta and looks identical for seconds), and
+# then raises exactly one `stale: <window> (endpoint gone)` wake. A pane that is
+# still there but momentarily unreadable is a transient and clears the marker.
+test_endpoint_gone_confirmed_then_surfaced_once() {
+  local dir state fakebin out drain_out window key marker pid
+  dir=$(make_case endpoint-gone); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  window="test:fm-vanished"
+  # An unreadable pane: capture fails, and the existence probe answers from
+  # FM_FAKE_TMUX_PANE_ALIVE so a test can separate "gone" from "transient".
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  capture-pane) exit 1 ;;
+  display-message)
+    [ "${FM_FAKE_TMUX_PANE_ALIVE:-0}" = "1" ] || exit 1
+    printf '%%0\n'
+    exit 0 ;;
+  list-windows)
+    [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "${FM_FAKE_TMUX_WINDOW#*:}"
+    exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/vanished.meta"
+  printf 'working: still compiling\n' > "$state/vanished.status"
+  printf '%s' "$(seen_sig "$state/vanished.status")" > "$state/.seen-vanished_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  marker="$state/.endpoint-gone-$key"
+
+  # Phase A: first sighting only records the verdict - no wake, watcher alive.
+  # A long poll keeps this run to a single pass over the window.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=30 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 25; then
+    reap "$pid"; fail "watcher woke on the FIRST unreadable poll; a gone endpoint must be confirmed twice: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "the first unreadable poll printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "the first unreadable poll enqueued a wake"
+  [ "$(cat "$marker" 2>/dev/null || true)" = seen ] || \
+    fail "the first unreadable poll did not record the pending endpoint-gone verdict, got '$(cat "$marker" 2>/dev/null || true)'"
+  reap "$pid"
+
+  # Phase B: the verdict holds on the next poll - one wake, queued and printed.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not exit for a confirmed gone endpoint"
+  grep -Fx "stale: $window (endpoint gone)" "$out" >/dev/null || \
+    fail "watcher did not print the endpoint-gone wake, got '$(cat "$out")'"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the endpoint-gone wake failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window (endpoint gone)" >/dev/null || \
+    fail "the endpoint-gone wake was not queued: $(cat "$drain_out")"
+  [ "$(cat "$marker" 2>/dev/null || true)" = fired ] || \
+    fail "the surfaced endpoint-gone verdict was not marked fired, got '$(cat "$marker" 2>/dev/null || true)'"
+
+  # Phase C: still gone on later polls - already surfaced, so no second wake.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 25; then
+    reap "$pid"; fail "a still-gone endpoint re-woke firstmate; the wake must fire exactly once: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a still-gone endpoint printed a second wake reason: $(cat "$out")"
+  reap "$pid"
+
+  # Phase D: the pane is present again but momentarily unreadable - a transient
+  # read error, not a vanished fleet: no wake, and the verdict marker is cleared.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_PANE_ALIVE=1 FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 25; then
+    reap "$pid"; fail "a transient read failure on a present pane woke firstmate: $(cat "$out")"
+  fi
+  [ ! -e "$marker" ] || fail "a present pane did not clear the endpoint-gone verdict, marker holds '$(cat "$marker")'"
+  reap "$pid"
+  pass "an unreadable pane is confirmed gone over two polls, surfaced once, and cleared when the endpoint is present"
+}
+
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
@@ -1813,6 +1904,7 @@ test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
+test_endpoint_gone_confirmed_then_surfaced_once
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
