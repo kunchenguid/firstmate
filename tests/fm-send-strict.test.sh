@@ -273,6 +273,34 @@ test_unknown_classified_composer_refuses_before_typing() {
   pass "fm-send strict: unknown remains unsafe when a backend has a composer classifier"
 }
 
+test_unknown_composer_classifier_capability_refuses_before_typing() {
+  local dir fb home err log fixture_root rc got
+  dir="$TMP_ROOT/unknown-composer-capability"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home unknowncapability); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fixture_root="$dir/fixture-root"
+  cp -R "$ROOT/bin" "$fixture_root"
+  cat >> "$fixture_root/fm-backend.sh" <<'SH'
+
+fm_backend_composer_classifier_capability() { printf 'unknown'; }
+SH
+  fm_write_meta "$home/state/unknown-capability.meta" "window=sess:fm-unknown-capability" "kind=ship" "harness=codex"
+
+  rc=0
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$fixture_root/fm-send.sh" unknown-capability "fresh order" >/dev/null 2>"$err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "unknown composer-classifier capability was accepted"
+  got=$(cat "$log")
+  assert_not_contains "$got" 'literal=1 arg=fresh order' \
+    "fm-send typed after the backend's composer-classifier capability became unknown"
+  assert_not_contains "$got" 'literal=0 arg=Enter' \
+    "fm-send submitted after the backend's composer-classifier capability became unknown"
+  assert_contains "$(cat "$err")" 'composer-classifier capability is not established' \
+    "unknown-capability refusal did not explain the delivery gap"
+  assert_contains "$(cat "$err")" 'capability=capability-unknown' \
+    "unknown-capability refusal did not preserve the preflight verdict"
+  pass "fm-send strict: unknown composer-classifier capability refuses before any typing or Enter"
+}
+
 test_remote_send_uses_host_local_composer_check() {
   local dir fb home err log rc decoded
   dir="$TMP_ROOT/remote"; mkdir -p "$dir"
@@ -316,5 +344,6 @@ test_unmatched_single_colon_target_must_exist
 test_fm_prefixed_herdr_session_is_an_explicit_target
 test_healthy_fm_id_send_still_works
 test_unknown_classified_composer_refuses_before_typing
+test_unknown_composer_classifier_capability_refuses_before_typing
 test_stale_composer_refuses_before_typing
 test_remote_send_uses_host_local_composer_check
