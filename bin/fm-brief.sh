@@ -358,7 +358,8 @@ case "$MODE" in
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, push your branch and open a DRAFT PR with \`gh-axi pr create --draft\`, then append \`done: PR {url}\` to the status file and stop.
+Never open a PR ready for review: ready pulls in reviewers, and only the captain promotes a draft.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;
@@ -397,7 +398,10 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+The pipeline opens the PR ready for review and exposes no draft option, so convert it yourself with \`gh pr ready --undo {number}\` as soon as the run reports the PR.
+Never leave a PR ready for review: ready pulls in reviewers, and only the captain promotes a draft.
+
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), confirm the PR is a draft, then append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
     ;;
 esac

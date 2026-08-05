@@ -354,6 +354,42 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
 }
 
+# Every PR-raising mode must carry the draft instruction structurally, so the
+# rule cannot depend on a supervisor remembering to add it by hand.
+test_ship_pr_modes_require_draft() {
+  local home id brief
+  home="$TMP_ROOT/pr-mode-home"
+  mkdir -p "$home/data"
+
+  id="brief-prmode-d1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "direct-PR brief was not scaffolded"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'open a DRAFT PR with `gh-axi pr create --draft`' "$brief" \
+    "direct-PR brief must name the concrete draft flag"
+  assert_grep "only the captain promotes a draft" "$brief" \
+    "direct-PR brief must forbid opening ready for review"
+
+  id="brief-prmode-d2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "no-mistakes brief was not scaffolded"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'convert it yourself with `gh pr ready --undo {number}`' "$brief" \
+    "no-mistakes brief must name the concrete demote command for the pipeline-opened PR"
+  assert_grep "only the captain promotes a draft" "$brief" \
+    "no-mistakes brief must forbid leaving a PR ready for review"
+
+  id="brief-prmode-d3"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "local-only brief was not scaffolded"
+  assert_no_grep "draft" "$brief" \
+    "local-only brief raises no PR and must stay free of draft wording"
+  pass "fm-brief.sh: every PR-raising mode instructs a draft PR"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -717,6 +753,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_ship_pr_modes_require_draft
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
