@@ -41,12 +41,13 @@
 # Classifier-only sources (never written into a record):
 #   endpoint-gone, herdr-native, grok-regex, muse-session-log, missing,
 #   malformed, gen-mismatch, source-mismatch, kimi-unverified,
+#   cursor-unverified,
 #   codex-unverified, capture-failed, no-target
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
 # with the producing source as the second token. Precedence:
 #   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone
-#   2. standalone Kimi before verification       -> unknown kimi-unverified
+#   2. standalone Kimi or Cursor before verification -> unknown kimi-unverified / cursor-unverified
 #   3. a valid, gen-matching, source-trusted record -> its state and source
 #   4. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the

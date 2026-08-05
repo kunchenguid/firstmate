@@ -85,16 +85,16 @@ Only a proven empty composer is a positive delivery acknowledgement.
 Text left in established structure remains `pending`, text in ambiguous structure remains unproven, and unreadable or unsafe state remains unknown.
 `fm-send.sh` reports every unconfirmed verdict as a failure instead of retyping or assuming delivery.
 
-OpenCode 1.18.4 has one busy-queue exception.
-While OpenCode is mid-turn, Enter queues the message but leaves its text visible until the turn completes.
-After the normal retry budget, only structurally proven pending text in a provably busy pane is accepted as queued, while an idle pane remains `pending` as a genuine swallowed Enter.
+OpenCode 1.18.4 and Cursor are the two verified busy-queue exceptions; every other harness keeps `pending` even when its pane is busy.
+While OpenCode or Cursor is mid-turn, Enter queues the message but leaves its text visible until the turn completes.
+After the normal retry budget, only structurally proven pending text in a provably busy pane of those two harnesses is accepted as queued, while an idle pane remains `pending` as a genuine swallowed Enter.
 Ambiguous pending text never receives the busy-queue conversion.
 `tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, and cleared composers.
 
 ## Limits and regression entry points
 
 - tmux is the reference path and supports secondmate homes.
-- The OpenCode busy-queue exception is tmux-specific; Herdr retains its separately documented gap.
+- The OpenCode and Cursor busy-queue exceptions are tmux-specific; Herdr retains its separately documented gap.
 
 ```sh
 tests/fm-backend-tmux-smoke.test.sh
