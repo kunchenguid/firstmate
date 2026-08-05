@@ -835,7 +835,7 @@ wedge_alarm_via_osascript() {  # <summary>
 # that delivery went unverified rather than passing silently for the same
 # reason: an unverified channel must never read as a confirmed one.
 wedge_alarm_via_herdr() {  # <summary>
-  local summary=$1 rc out verdict shown reason capture
+  local summary=$1 rc verdict shown reason capture
   wedge_alarm_os_notifier_override herdr "$summary"
   rc=$?
   case "$rc" in
@@ -853,9 +853,9 @@ wedge_alarm_via_herdr() {  # <summary>
   wedge_alarm_run_bounded herdr herdr notification show "firstmate: away-mode escalations WEDGED" \
     --body "$summary" --sound request > "$capture" 2>/dev/null
   rc=$?
-  out=$(cat "$capture" 2>/dev/null || printf '')
-  wedge_alarm_discard_capture
-  [ "$rc" -eq 0 ] || { log "wedge alarm: herdr notification failed"; return 1; }
+  [ "$rc" -eq 0 ] || {
+    wedge_alarm_discard_capture
+    log "wedge alarm: herdr notification failed"; return 1; }
   # Only a parseable result OBJECT proves anything about delivery. Unparseable
   # output, a missing result, or an absent `shown` field all mean "cannot
   # verify", which trusts the exit code exactly like the no-jq fallback above
@@ -874,10 +874,12 @@ wedge_alarm_via_herdr() {  # <summary>
   # stream, and log a reason belonging to something other than the result that
   # actually reported the failure.
   command -v jq >/dev/null 2>&1 || {
+    wedge_alarm_discard_capture
     log "wedge alarm: herdr notification delivery NOT verified - jq is unavailable, so herdr's own JSON result went unread; falling back to the exit code, which herdr can return 0 for without showing anything"
     return 0; }
-  verdict=$(printf '%s' "$out" \
-    | jq -n -r 'first(inputs | .result | objects | select(has("shown")) | [(.shown | tostring), (.reason // "" | tostring)] | @tsv)' 2>/dev/null)
+  verdict=$(jq -n -r 'first(inputs | .result | objects | select(has("shown")) | [(.shown | tostring), (.reason // "" | tostring)] | @tsv)' \
+    "$capture" 2>/dev/null)
+  wedge_alarm_discard_capture
   [ -n "$verdict" ] || {
     log "wedge alarm: herdr notification delivery NOT verified - herdr's output carried no readable result to confirm it; falling back to the exit code, which herdr can return 0 for without showing anything"
     return 0; }
