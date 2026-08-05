@@ -250,6 +250,7 @@ The live idle Claude row and public classifier were read with:
 ```sh
 claude --version
 tmux -V
+wall --version | head -1
 cy=$(tmux display-message -p -t %0 '#{cursor_y}')
 tmux capture-pane -p -t %0 -S "$cy" -E "$cy" | od -An -t u1
 (. bin/fm-backend.sh; fm_backend_composer_state tmux %0)
@@ -260,6 +261,7 @@ Exact output:
 ```text
 2.1.222 (Claude Code)
 tmux 3.4
+wall from util-linux 2.39.3
  226 157 175 194 160  10
 empty
 ```

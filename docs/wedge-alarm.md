@@ -43,4 +43,4 @@ When the daemon is sourced as a library, that seam defaults to `discard`, so a t
 Production leaves the seam unset and uses the configured real channels.
 
 `tests/fm-daemon.test.sh` covers directive parsing, rate limiting, timeout and process-group cleanup, argv-safe dispatch, channel fallback, and safe `command:` summary delivery.
-[`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) records the bounded manual macOS and Herdr channel proof.
+[`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) records the active classifier, tmux-overlay, and notification-channel evidence.
