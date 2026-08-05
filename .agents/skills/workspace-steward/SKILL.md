@@ -22,7 +22,7 @@ Start with the applicable Firstmate home records and targeted current task state
 Classify a workspace, tab, or pane as Firstmate-owned only when its recorded task identity and exact endpoint agree.
 Classify a registered secondmate's workspace separately from the primary's workspace and from each sibling home.
 Treat labels, names, ordering, and visible activity as display hints rather than ownership proof.
-Treat conflicting, incomplete, or label-only evidence as unknown and report it without acting.
+Classify any conflicting, incomplete, or label-only evidence as unknown, never as owned or unowned, and report it without acting.
 Never treat a quiet secondmate as failed, because an idle secondmate is healthy unless its own routed result or current-state reconciliation says otherwise.
 Never inspect or act on an unregistered external project, even when its workspace name, path, or agent appears familiar.
 
