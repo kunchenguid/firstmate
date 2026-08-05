@@ -24,6 +24,8 @@ SNAPSHOT_COMMAND = SCRIPT_DIR / "fm-dashboard-snapshot.sh"
 SECRET_RE = re.compile(
     r"(?i)(?:token|secret|password|passwd|api[_-]?key|authorization)"
     r"\s*[:=]\s*[^\s,;]+"
+    r"|(?:gh[pousr]_[a-z0-9_]+|github_pat_[a-z0-9_]+|glpat-[a-z0-9_-]+|"
+    r"xox[baprs]-[a-z0-9-]+|sk-[a-z0-9_-]{16,}|bearer\s+[a-z0-9._~+/=-]{16,})"
 )
 STATUS_RE = re.compile(
     r"^([a-z][a-z0-9-]*)(?:\s+\[key=([^\]]+)\])?(?::\s*(.*))?$"
@@ -380,8 +382,8 @@ class DashboardStore:
         retired = False
         for task_id in list(self.secondmate_status_sources):
             if task_id in active_secondmate_sources:
-                self.secondmate_transitions_consumed.discard(task_id)
-            elif task_id in self.secondmate_transitions_consumed:
+                continue
+            if task_id in self.secondmate_transitions_consumed:
                 del self.secondmate_status_sources[task_id]
                 del self.secondmate_source_metadata[task_id]
                 self.cursors.pop(task_id, None)

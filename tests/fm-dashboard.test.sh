@@ -154,6 +154,13 @@ test_status_event_cursor_and_restart_replay() {
     || fail "SSE payload omitted the status key: $stream"
   ! printf '%s' "$stream" | grep -F 'dashboard-sentinel' >/dev/null \
     || fail "SSE payload exposed a secret-looking status value: $stream"
+  printf 'working [key=dashboard]: working: token ghp_status_secret_ABC123456789\n' >> "$home/state/dashboard-task.status"
+  sleep 0.4
+  stream=$(curl -N -fsS --max-time 2 "${DASHBOARD_URL%/}/events?since=0" || true)
+  ! printf '%s' "$stream" | grep -F 'ghp_status_secret_ABC123456789' >/dev/null \
+    || fail "SSE payload exposed a token-shaped status value: $stream"
+  ! grep -F 'ghp_status_secret_ABC123456789' "$home/state/.dashboard/events.jsonl" >/dev/null \
+    || fail "event outbox persisted a token-shaped status value"
   kill "$DASHBOARD_PID"
   i=0
   while [ "$i" -lt 40 ] && [ -e "$home/state/.dashboard/service.pid" ]; do
@@ -215,13 +222,16 @@ test_secondmate_child_work_and_events() {
   printf '%s' "$stream" | grep -F 'child event arrived' >/dev/null \
     || fail "secondmate child status summary was not delivered: $stream"
   printf 'done [key=child]: child finished\n' >> "$mate/state/child.status"
+  sleep 0.4
+  stream=$(curl -N -fsS --max-time 2 "${DASHBOARD_URL%/}/events?since=0" || true)
+  printf '%s' "$stream" | grep -F '"task_id": "mate/child"' | grep -F 'child finished' >/dev/null \
+    || fail "secondmate terminal status event was not delivered while active: $stream"
   gen=$("$ROOT/bin/fm-busy-event.sh" arm "$mate/state" child)
   "$ROOT/bin/fm-busy-event.sh" apply "$mate/state" child idle --gen "$gen" \
     --source claude-hook --event stop
   sleep 0.4
-  stream=$(curl -N -fsS --max-time 2 "${DASHBOARD_URL%/}/events?since=0" || true)
-  printf '%s' "$stream" | grep -F '"task_id": "mate/child"' | grep -F 'child finished' >/dev/null \
-    || fail "secondmate terminal status event was not delivered: $stream"
+  jq -e 'has("mate/child") | not' "$home/state/.dashboard/status-cursors.json" >/dev/null \
+    || fail "consumed secondmate source was not retired after the child became inactive"
   pass "validated secondmate child work and status events are visible"
 }
 
