@@ -27,12 +27,19 @@ This skill owns Firstmate mate procedure and the colocated driver only.
 1. Local PlayStudio stack healthy:
    - `GET http://localhost:3000/api/healthz` → `ok:true`
    - `GET http://127.0.0.1:8081/health` → `status:ok` (preflight only; never drive turns here)
-2. Chrome attach where Entra can complete without a human click wait:
+2. Daytona org memory headroom (preflight capacity gate):
+   - Requires `DAYTONA_API_URL` + `DAYTONA_API_KEY` (or `PLAY_STUDIO_DAYTONA_*`), optionally `DAYTONA_ORG_ID`.
+   - Creds may come from the environment or from `$PS_PLAYSTUDIO_ROOT/.env.runtime.local` (default `$HOME/projects/PlayStudio`).
+   - Gate: `started_mem + PS_DAYTONA_NEED_MEM_GIB ≤ PS_DAYTONA_ORG_MEM_GIB` (defaults need `8`, org `10`).
+   - Optional `PS_DAYTONA_PRUNE_STARTED=1` deletes started sandboxes once when the gate fails, then rechecks.
+3. Chrome attach where Entra can complete without a human click wait:
    - Prefer `CHROME_DEVTOOLS_AXI_AUTO_CONNECT=1` against the captain's Chrome (remote debugging enabled).
    - Or `CHROME_DEVTOOLS_AXI_USER_DATA_DIR=...` / `CHROME_DEVTOOLS_AXI_BROWSER_URL=http://127.0.0.1:9222`.
-3. Same-origin page context on `http://localhost:3000` so `fetch` carries `ps_entry_session` and CSRF `Origin`/`Referer`.
+   - For a disposable headed launch, `unset CHROME_DEVTOOLS_AXI_AUTO_CONNECT` and set `CHROME_DEVTOOLS_AXI_HEADED=1` with a fresh `CHROME_DEVTOOLS_AXI_SESSION`.
+4. Same-origin page context on `http://localhost:3000` so `fetch` carries `ps_entry_session` and CSRF `Origin`/`Referer`.
 
 If studio-web or agent-host is down after a main pull, stop and report `blocked:` with the local restart command the captain's PlayStudio checkout already documents - do not invent stack ownership.
+If Daytona started memory leaves less than one create's headroom, stop with `blocked:` (or prune with `PS_DAYTONA_PRUNE_STARTED=1`) rather than burning turns on `sandbox_provider_capacity_exhausted`.
 
 If agent turns fail with an expired AWS SSO token, refresh the PlayStudio runtime profile (see that checkout's `.env.runtime.local` / `AWS_PROFILE`) via `aws sso login --profile <profile>`, then retry - do not put credentials in the skill or transcripts.
 
@@ -62,12 +69,12 @@ export FM_HOME="${FM_HOME:-$HOME/projects/firstmate}"   # or this home's path
 
 | Verb | Behavior |
 |---|---|
-| `preflight` | Health-check studio-web + agent-host |
+| `preflight` | Health-check studio-web + agent-host + Daytona started-mem headroom |
 | `ensureSession` | Attach Chrome; if unauthenticated, click Entra and poll `GET /api/entry-shell/session` until `authenticated:true` (block only on MFA/passkey) |
 | `newProject` | `POST /api/entry-shell/projects` → `{ project, workspaceUrl }` |
 | `openWorkspace` | Navigate workspace URL; optional `POST /api/runs/session` |
 | `sendTurn` | `POST /api/runs/start` with `{ projectId, prompt, sessionId? }` → `{ runId, sessionId }` |
-| `waitSettled` | In-page SSE until `done`/`error`; optional `--review-dir` for periodic viewport screenshots |
+| `waitSettled` | In-page SSE until `done`/`error`; tolerant JSON for control chars in frames; empty/invalid axi → `blocked:`; optional `--review-dir` for periodic viewport screenshots |
 | `snapshotMessages` | Read accumulated SSE frames from the wait job (no public message list API) |
 | `listCheckpoints` | Thin wrapper: `GET /api/runs/history` (may 501 when sandbox/history unavailable) |
 | `revertMessage` | Thin wrapper: `POST /api/runs/restore` with `mode:"revert"` |

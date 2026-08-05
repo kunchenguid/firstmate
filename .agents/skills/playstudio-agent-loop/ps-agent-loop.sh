@@ -25,11 +25,16 @@
 #   CHROME_DEVTOOLS_AXI_SESSION default playstudio-agent-loop
 #   FM_HOME                     artifact default under $FM_HOME/data/playstudio-agent-loop/
 #   PS_REVIEW_INTERVAL_SEC      screenshot cadence while waiting (default 5)
+#   PS_PLAYSTUDIO_ROOT          PlayStudio checkout for Daytona env files (optional)
+#   DAYTONA_API_URL/KEY/ORG_ID  Daytona capacity gate creds (or PLAY_STUDIO_DAYTONA_*)
+#   PS_DAYTONA_ORG_MEM_GIB      org memory ceiling GiB (default 10)
+#   PS_DAYTONA_NEED_MEM_GIB     headroom required for one create (default 8)
+#   PS_DAYTONA_PRUNE_STARTED=1  optional: DELETE started sandboxes when gate fails
 #
 # Review video: during waitSettled with --review-dir, capture periodic viewport
 # JPEGs; fixture stitches them with ffmpeg to <out-dir>/review.mp4.
 #
-# Exit codes: 0 ok, 1 usage/error, 2 blocked (auth/stack), 3 settle failed/timeout
+# Exit codes: 0 ok, 1 usage/error, 2 blocked (auth/stack/capacity/axi), 3 settle failed/timeout
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -39,9 +44,11 @@ PS_AXI_SESSION="${CHROME_DEVTOOLS_AXI_SESSION:-playstudio-agent-loop}"
 DEFAULT_SETTLE_TIMEOUT_SEC="${PS_SETTLE_TIMEOUT_SEC:-900}"
 DEFAULT_SESSION_TIMEOUT_SEC="${PS_SESSION_TIMEOUT_SEC:-120}"
 REVIEW_INTERVAL_SEC="${PS_REVIEW_INTERVAL_SEC:-5}"
+PS_DAYTONA_ORG_MEM_GIB="${PS_DAYTONA_ORG_MEM_GIB:-10}"
+PS_DAYTONA_NEED_MEM_GIB="${PS_DAYTONA_NEED_MEM_GIB:-8}"
 
 usage() {
-  sed -n '2,32p' "$0" | sed 's/^# \?//'
+  sed -n '2,40p' "$0" | sed 's/^# \?//'
 }
 
 die() {
@@ -63,11 +70,93 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
 }
 
+# Tolerant JSON load for SSE/agent frames that embed raw control characters.
+# Empty or unrecoverable payloads exit 2 with a one-line blocked message (no traceback).
+_py_loads_tolerant() {
+  python3 -c '
+import json, os, re, sys
+
+def loads_tolerant(text):
+    if text is None:
+        raise ValueError("empty")
+    raw = text if isinstance(text, str) else str(text)
+    if not raw.strip():
+        raise ValueError("empty")
+    try:
+        return json.loads(raw, strict=False)
+    except json.JSONDecodeError:
+        pass
+    # Drop illegal controls outside JSON string escapes; keep tab/LF/CR.
+    cleaned = "".join(
+        ch if (ord(ch) >= 32 or ch in "\t\n\r") else " "
+        for ch in raw
+    )
+    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", " ", cleaned)
+    return json.loads(cleaned, strict=False)
+
+mode = os.environ.get("PS_JSON_MODE", "get")
+try:
+    if mode == "get":
+        data = loads_tolerant(os.environ.get("JSON_IN", ""))
+        expr = os.environ["JSON_EXPR"]
+        print(eval(expr, {"json": json, "data": data}))  # noqa: S307 - caller-owned expr
+    elif mode == "loads":
+        data = loads_tolerant(sys.stdin.read())
+        print(json.dumps(data, separators=(",", ":")))
+    elif mode == "axi-unwrap":
+        text = sys.stdin.read()
+        m = re.search(r"^result:\s*(.*)$", text, re.M)
+        if not m:
+            raise ValueError("no result: line from chrome-devtools-axi")
+        raw = m.group(1).strip()
+        if not raw:
+            raise ValueError("empty axi result")
+        try:
+            val = loads_tolerant(raw)
+        except Exception:
+            val = raw
+        for _ in range(4):
+            if not isinstance(val, str):
+                break
+            s = val.strip()
+            if not s:
+                break
+            try:
+                val = loads_tolerant(s)
+            except Exception:
+                break
+        if isinstance(val, (dict, list, bool)) or val is None:
+            print(json.dumps(val, separators=(",", ":")))
+        else:
+            print(val)
+    else:
+        raise ValueError("unknown PS_JSON_MODE")
+except Exception as exc:
+    sys.stderr.write("ps-agent-loop: blocked: invalid or empty JSON/axi payload (%s)\n" % (exc,))
+    sys.exit(2)
+'
+}
+
 json_get() {
   # json_get <json> <python-expr-using-data>
   local json="$1"
   local expr="$2"
-  JSON_IN="$json" python3 -c "import json,os; data=json.loads(os.environ['JSON_IN']); print($expr)"
+  local out rc=0
+  out="$(PS_JSON_MODE=get JSON_IN="$json" JSON_EXPR="$expr" _py_loads_tolerant)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    exit 2
+  fi
+  printf '%s\n' "$out"
+}
+
+json_loads_stdout() {
+  # Read stdin JSON (tolerant) → compact JSON stdout; exit 2 on failure.
+  local out rc=0
+  out="$(PS_JSON_MODE=loads _py_loads_tolerant)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    exit 2
+  fi
+  printf '%s\n' "$out"
 }
 
 artifact_root() {
@@ -118,41 +207,19 @@ ps_axi_try() {
 
 axi_eval_raw() {
   local js="$1"
-  local out
+  local out rc=0
   out="$(ps_axi_try eval "$js" 2>&1)" || {
     printf '%s\n' "$out" >&2
     return 1
   }
   # chrome-devtools-axi prints result: "<json-escaped string>" plus help lines.
   # Page helpers often return JSON.stringify(...), which can be double-encoded.
-  printf '%s\n' "$out" | python3 -c '
-import json, re, sys
-text = sys.stdin.read()
-m = re.search(r"^result:\s*(.*)$", text, re.M)
-if not m:
-    sys.stderr.write("ps-agent-loop: no result: line from chrome-devtools-axi\n")
-    sys.stderr.write(text)
-    sys.exit(1)
-raw = m.group(1).strip()
-try:
-    val = json.loads(raw)
-except Exception:
-    val = raw
-for _ in range(4):
-    if not isinstance(val, str):
-        break
-    s = val.strip()
-    if not s:
-        break
-    try:
-        val = json.loads(s)
-    except Exception:
-        break
-if isinstance(val, (dict, list, bool)) or val is None:
-    print(json.dumps(val, separators=(",", ":")))
-else:
-    print(val)
-'
+  # SSE/agent frames may embed raw control characters - unwrap with a tolerant decoder.
+  printf '%s\n' "$out" | PS_JSON_MODE=axi-unwrap _py_loads_tolerant || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    return 2
+  fi
+  return 0
 }
 
 ensure_origin_page() {
@@ -181,7 +248,7 @@ cmd_preflight() {
   require_cmd curl
   require_cmd python3
   require_cmd chrome-devtools-axi
-  local web host
+  local web host daytona_json
   web="$(curl -fsS "$PS_BASE_URL/api/healthz" || true)"
   host="$(curl -fsS "$PS_AGENT_HOST_HEALTH_URL" || true)"
   if ! printf '%s' "$web" | grep -q '"ok":true'; then
@@ -190,7 +257,163 @@ cmd_preflight() {
   if ! printf '%s' "$host" | grep -q '"status":"ok"'; then
     blocked "agent-host unhealthy at $PS_AGENT_HOST_HEALTH_URL - restart PlayStudio agent-host on :8081, then retry"
   fi
-  printf '{"ok":true,"studioWeb":%s,"agentHostStatus":"ok"}\n' "$(printf '%s' "$web" | python3 -c 'import sys,json; print(json.dumps(json.load(sys.stdin)))')"
+  daytona_json="$(_daytona_capacity_gate)"
+  printf '{"ok":true,"studioWeb":%s,"agentHostStatus":"ok","daytona":%s}\n' \
+    "$(printf '%s' "$web" | PS_JSON_MODE=loads _py_loads_tolerant)" \
+    "$daytona_json"
+}
+
+# Ensure Daytona org memory has headroom for one create: started_mem + need ≤ org_cap.
+# Creds from env (DAYTONA_* / PLAY_STUDIO_DAYTONA_*) or PlayStudio .env.runtime.local / .env.local.
+# Optional PS_DAYTONA_PRUNE_STARTED=1 deletes started sandboxes once, then rechecks.
+_daytona_capacity_gate() {
+  local root="${PS_PLAYSTUDIO_ROOT:-}"
+  if [ -z "$root" ] && [ -n "${HOME:-}" ] && [ -d "$HOME/projects/PlayStudio" ]; then
+    root="$HOME/projects/PlayStudio"
+  fi
+  PS_DAYTONA_ORG_MEM_GIB="$PS_DAYTONA_ORG_MEM_GIB" \
+  PS_DAYTONA_NEED_MEM_GIB="$PS_DAYTONA_NEED_MEM_GIB" \
+  PS_DAYTONA_PRUNE_STARTED="${PS_DAYTONA_PRUNE_STARTED:-}" \
+  PS_PLAYSTUDIO_ROOT="$root" \
+  python3 -c '
+import json, os, sys, urllib.error, urllib.request
+
+ORG = float(os.environ.get("PS_DAYTONA_ORG_MEM_GIB") or "10")
+NEED = float(os.environ.get("PS_DAYTONA_NEED_MEM_GIB") or "8")
+PRUNE = (os.environ.get("PS_DAYTONA_PRUNE_STARTED") or "").strip() == "1"
+ROOT = (os.environ.get("PS_PLAYSTUDIO_ROOT") or "").strip()
+
+def load_env_file(path, env):
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError:
+        return
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or "=" not in s:
+            continue
+        k, v = s.split("=", 1)
+        k, v = k.strip(), v.strip()
+        if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+            v = v[1:-1]
+        if not k.startswith(("DAYTONA_", "PLAY_STUDIO_DAYTONA_")):
+            continue
+        env.setdefault(k, v)
+
+env = dict(os.environ)
+if ROOT:
+    for name in (".env.runtime.local", ".env.local"):
+        load_env_file(os.path.join(ROOT, name), env)
+
+api_url = (env.get("DAYTONA_API_URL") or env.get("PLAY_STUDIO_DAYTONA_API_URL") or "").strip().rstrip("/")
+api_key = (env.get("DAYTONA_API_KEY") or env.get("PLAY_STUDIO_DAYTONA_API_KEY") or "").strip()
+org_id = (env.get("DAYTONA_ORG_ID") or env.get("PLAY_STUDIO_DAYTONA_ORGANIZATION_ID") or "").strip()
+
+if not api_url or not api_key:
+    sys.stderr.write(
+        "ps-agent-loop: blocked: Daytona capacity gate missing DAYTONA_API_URL/KEY "
+        "(set env or PS_PLAYSTUDIO_ROOT to a checkout with .env.runtime.local)\n"
+    )
+    sys.exit(2)
+
+headers = {"Authorization": "Bearer " + api_key, "Accept": "application/json"}
+if org_id:
+    headers["X-Daytona-Organization-ID"] = org_id
+
+def call(path, method="GET"):
+    req = urllib.request.Request(api_url + path, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read().decode("utf-8", "replace")
+            return resp.status, json.loads(body) if body.strip() else None
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")
+        try:
+            payload = json.loads(body) if body.strip() else None
+        except Exception:
+            payload = body[:200]
+        return exc.code, payload
+    except Exception as exc:
+        sys.stderr.write("ps-agent-loop: blocked: Daytona API error (%s)\n" % (exc,))
+        sys.exit(2)
+
+def list_sandboxes():
+    status, payload = call("/sandbox")
+    if status != 200:
+        sys.stderr.write("ps-agent-loop: blocked: Daytona list sandboxes HTTP %s\n" % (status,))
+        sys.exit(2)
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        items = payload.get("items")
+        if isinstance(items, list):
+            return items
+    return []
+
+def state_of(s):
+    return str(s.get("state") or s.get("status") or "unknown").lower()
+
+def mem_of(s):
+    for key in ("memory", "memoryGib", "mem"):
+        if key in s and s[key] is not None:
+            try:
+                return float(s[key])
+            except (TypeError, ValueError):
+                pass
+    res = s.get("resources") if isinstance(s.get("resources"), dict) else {}
+    for key in ("memory", "memoryGib"):
+        if key in res and res[key] is not None:
+            try:
+                return float(res[key])
+            except (TypeError, ValueError):
+                pass
+    return 0.0
+
+def started_mem(sandboxes):
+    started = [s for s in sandboxes if state_of(s) == "started"]
+    total = sum(mem_of(s) for s in started)
+    return started, total
+
+sandboxes = list_sandboxes()
+started, total = started_mem(sandboxes)
+pruned = []
+if total + NEED > ORG:
+    if not PRUNE:
+        sys.stderr.write(
+            "ps-agent-loop: blocked: Daytona started_mem %.1fGiB + need %.1fGiB > org %.1fGiB "
+            "(%d started); free capacity or set PS_DAYTONA_PRUNE_STARTED=1\n"
+            % (total, NEED, ORG, len(started))
+        )
+        sys.exit(2)
+    for s in started:
+        sid = str(s.get("id") or "")
+        if not sid:
+            continue
+        # Stop first when needed; delete releases memory reservation.
+        st, _ = call("/sandbox/%s/stop" % sid, method="POST")
+        st2, _ = call("/sandbox/%s" % sid, method="DELETE")
+        pruned.append({"id": sid, "stopStatus": st, "deleteStatus": st2})
+    sandboxes = list_sandboxes()
+    started, total = started_mem(sandboxes)
+    if total + NEED > ORG:
+        sys.stderr.write(
+            "ps-agent-loop: blocked: Daytona still short after prune "
+            "(started_mem %.1fGiB + need %.1fGiB > org %.1fGiB)\n"
+            % (total, NEED, ORG)
+        )
+        sys.exit(2)
+
+out = {
+    "ok": True,
+    "orgMemGib": ORG,
+    "needMemGib": NEED,
+    "startedCount": len(started),
+    "startedMemGib": total,
+    "headroomGib": ORG - total,
+    "pruned": pruned,
+}
+print(json.dumps(out, separators=(",", ":")))
+'
 }
 
 cmd_ensure_session() {
@@ -490,7 +713,7 @@ _poll_wait_job() {
   local job_id="$1"
   local timeout_sec="$2"
   local review_dir="${3:-}"
-  local deadline now payload status js frame_idx=0 last_shot=0
+  local deadline now payload status js frame_idx=0 last_shot=0 rc
   deadline=$(( $(date +%s) + timeout_sec + 5 ))
   js="$(python3 -c 'import json,sys; print("""() => JSON.stringify((window.__psAgentLoopJobs && window.__psAgentLoopJobs[%s]) || {status:\"missing\"})""" % (json.dumps(sys.argv[1]),))' "$job_id")"
   # Capture an opening frame immediately when review is enabled.
@@ -500,8 +723,16 @@ _poll_wait_job() {
     last_shot="$(date +%s)"
   fi
   while true; do
-    payload="$(axi_eval_raw "$js")"
-    status="$(json_get "$payload" 'data.get("status")')"
+    rc=0
+    payload="$(axi_eval_raw "$js")" || rc=$?
+    if [ "$rc" -ne 0 ] || [ -z "${payload:-}" ]; then
+      blocked "waitSettled: empty or invalid axi payload while polling job $job_id (rc=$rc)"
+    fi
+    rc=0
+    status="$(json_get "$payload" 'data.get("status")')" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      exit 2
+    fi
     case "$status" in
       settled|timeout|error|stream_closed|missing)
         if [ -n "$review_dir" ]; then
@@ -545,7 +776,28 @@ cmd_wait_settled() {
   [ -n "$job_id" ] && [ "$job_id" != "None" ] || die "waitSettled: failed to start stream job: $started"
   payload="$(_poll_wait_job "$job_id" "$timeout_sec" "$review_dir")"
   # Attach jobId so snapshotMessages can reload frames from the page job.
-  payload="$(JOB_ID="$job_id" PAYLOAD="$payload" python3 -c 'import json,os; d=json.loads(os.environ["PAYLOAD"]); d["jobId"]=os.environ["JOB_ID"]; print(json.dumps(d, separators=(",", ":")))')"
+  payload="$(JOB_ID="$job_id" PAYLOAD="$payload" python3 -c '
+import json, os, re, sys
+
+def loads_tolerant(text):
+    raw = text if isinstance(text, str) else str(text)
+    if not raw.strip():
+        raise ValueError("empty")
+    try:
+        return json.loads(raw, strict=False)
+    except json.JSONDecodeError:
+        cleaned = "".join(ch if (ord(ch) >= 32 or ch in "\t\n\r") else " " for ch in raw)
+        cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", " ", cleaned)
+        return json.loads(cleaned, strict=False)
+
+try:
+    d = loads_tolerant(os.environ["PAYLOAD"])
+    d["jobId"] = os.environ["JOB_ID"]
+    print(json.dumps(d, separators=(",", ":")))
+except Exception as exc:
+    sys.stderr.write("ps-agent-loop: blocked: invalid waitSettled payload (%s)\n" % (exc,))
+    sys.exit(2)
+')" || exit 2
   status="$(json_get "$payload" 'data.get("status")')"
   if [ -n "$out" ]; then
     mkdir -p "$(dirname "$out")"
@@ -727,15 +979,27 @@ cmd_fixture_blackjack() {
     done
     TURN_IDX="$turn_idx" LABEL="$label" RUN_ID="$run_id" SESSION_ID="$session_id" PROJECT_ID="$project_id" \
       SETTLE="$settle_json" START="$start_json" python3 -c '
-import json, os
+import json, os, re, sys
+
+def loads_tolerant(text):
+    raw = text if isinstance(text, str) else str(text)
+    if not raw.strip():
+        raise ValueError("empty")
+    try:
+        return json.loads(raw, strict=False)
+    except json.JSONDecodeError:
+        cleaned = "".join(ch if (ord(ch) >= 32 or ch in "\t\n\r") else " " for ch in raw)
+        cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", " ", cleaned)
+        return json.loads(cleaned, strict=False)
+
 rec = {
   "turn": int(os.environ["TURN_IDX"]),
   "label": os.environ["LABEL"],
   "projectId": os.environ["PROJECT_ID"],
   "sessionId": os.environ["SESSION_ID"],
   "runId": os.environ["RUN_ID"],
-  "start": json.loads(os.environ["START"]),
-  "settle": json.loads(os.environ["SETTLE"]),
+  "start": loads_tolerant(os.environ["START"]),
+  "settle": loads_tolerant(os.environ["SETTLE"]),
 }
 print(json.dumps(rec, separators=(",", ":")))
 ' >>"$transcript"
