@@ -152,8 +152,10 @@ There is no shared learnings file by captain decision.
 The locked mutable bootstrap path materializes its visible default of `7500` estimated tokens in a primary home when the file is absent.
 To select another allowance, replace the primary home's file with one valid positive value in the exact format below; the next locked bootstrap convergence or `bin/fm-config-push.sh` propagates it to registered secondmates.
 A secondmate does not create an independent default and instead receives the primary value through the inherited-local-material contract in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
-The file must be one positive base-10 integer followed by exactly one newline in a regular, single-linked file beneath a non-symlinked `config/` directory.
-Malformed, multi-line, symlinked, hardlinked, special, or otherwise unsafe values are rejected rather than treated as a default.
+The file must be one positive base-10 integer followed by exactly one newline in a regular, single-linked file beneath a `config/` directory.
+Symlinks are resolved before validation, so `config/` or the file itself may be linked in from a separate tree - the common case being an operator who keeps private configuration outside a public checkout - and every safety check then applies to the resolved target rather than to the link.
+Malformed, multi-line, hardlinked, special, broken-link, cyclic, or otherwise unsafe values are rejected rather than treated as a default.
+The hardlink-count check is what refuses a substituted file; it applies to the resolved target and is unaffected by how the name was reached.
 Use `bin/fm-startup-memory-budget.sh read` to validate and print the effective value, or `bin/fm-startup-memory-budget.sh report` to account for the three files.
 The stable local estimate is `ceil(UTF-8 bytes / 3)` per file, a conservative portable approximation rather than a provider-exact tokenizer.
 An inherited `data/captain-shared.md` counts in a secondmate's total but remains primary-owned and read-only there.

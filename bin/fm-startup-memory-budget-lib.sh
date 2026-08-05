@@ -29,13 +29,43 @@ fm_startup_memory_budget_link_count() {
   fi
 }
 
+# fm_startup_memory_budget_resolve <path>
+# Prints <path> with every symlink resolved, so the safety checks below apply
+# to the real target rather than to the link.  A symlink is a legitimate local
+# layout (an operator may keep private config in a separate tree and link it
+# into the home); the property worth enforcing is that whatever the name finally
+# names is an ordinary, single-linked, well-formed artifact.  Fails on a broken
+# or cyclic chain.  BSD and GNU userlands disagree about `realpath` and
+# `readlink -f`, so the chain is walked here instead of shelling out to either.
+fm_startup_memory_budget_resolve() {
+  local path=$1 depth=0 target parent base
+  while [ -L "$path" ]; do
+    if [ "$depth" -ge 40 ]; then
+      return 1
+    fi
+    target=$(readlink "$path") || return 1
+    case "$target" in
+      /*) path=$target ;;
+      *) path="$(dirname -- "$path")/$target" ;;
+    esac
+    depth=$((depth + 1))
+  done
+  parent=$(dirname -- "$path")
+  base=$(basename -- "$path")
+  parent=$(cd -P -- "$parent" 2>/dev/null && pwd -P) || return 1
+  case "$parent" in
+    */) printf '%s%s\n' "$parent" "$base" ;;
+    *) printf '%s/%s\n' "$parent" "$base" ;;
+  esac
+}
+
 fm_startup_memory_budget_config_dir_safe() {
-  local dir=$1
-  if [ -L "$dir" ]; then
-    fm_startup_memory_budget_fail "config directory is symlinked"
+  local dir=$1 resolved
+  resolved=$(fm_startup_memory_budget_resolve "$dir") || {
+    fm_startup_memory_budget_fail "config directory link could not be resolved"
     return 1
-  fi
-  if [ ! -d "$dir" ]; then
+  }
+  if [ ! -d "$resolved" ]; then
     fm_startup_memory_budget_fail "config directory is not a directory"
     return 1
   fi
@@ -43,24 +73,31 @@ fm_startup_memory_budget_config_dir_safe() {
 }
 
 # fm_startup_memory_budget_file_valid <path>
-# Sets FM_STARTUP_MEMORY_BUDGET_VALUE only for a regular, single-linked file
-# containing exactly one positive decimal value and one terminating newline.
+# Sets FM_STARTUP_MEMORY_BUDGET_VALUE only when <path> finally names a regular,
+# single-linked file containing exactly one positive decimal value and one
+# terminating newline.  Symlinks are resolved first and every check applies to
+# the resolved target; the hardlink-count check below is the anti-substitution
+# guard, and it is strictly stronger than refusing the link itself.
 fm_startup_memory_budget_file_valid() {
-  local path=$1 links value
+  local path=$1 resolved links value
   FM_STARTUP_MEMORY_BUDGET_VALUE=""
-  if [ -L "$path" ]; then
-    fm_startup_memory_budget_fail "file is symlinked"
-    return 1
-  fi
-  if [ ! -e "$path" ]; then
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
     fm_startup_memory_budget_fail "file is absent"
     return 1
   fi
-  if [ ! -f "$path" ]; then
+  resolved=$(fm_startup_memory_budget_resolve "$path") || {
+    fm_startup_memory_budget_fail "file link could not be resolved"
+    return 1
+  }
+  if [ ! -e "$resolved" ]; then
+    fm_startup_memory_budget_fail "file is absent"
+    return 1
+  fi
+  if [ ! -f "$resolved" ]; then
     fm_startup_memory_budget_fail "file is not a regular file"
     return 1
   fi
-  links=$(fm_startup_memory_budget_link_count "$path") || {
+  links=$(fm_startup_memory_budget_link_count "$resolved") || {
     fm_startup_memory_budget_fail "could not inspect file link count"
     return 1
   }
@@ -68,7 +105,7 @@ fm_startup_memory_budget_file_valid() {
     fm_startup_memory_budget_fail "file is hardlinked"
     return 1
   fi
-  value=$(<"$path") || {
+  value=$(<"$resolved") || {
     fm_startup_memory_budget_fail "could not read file"
     return 1
   }
@@ -78,7 +115,7 @@ fm_startup_memory_budget_file_valid() {
       return 1
       ;;
   esac
-  if ! printf '%s\n' "$value" | cmp -s "$path" -; then
+  if ! printf '%s\n' "$value" | cmp -s "$resolved" -; then
     fm_startup_memory_budget_fail "file must contain exactly one value followed by one newline"
     return 1
   fi
@@ -161,11 +198,12 @@ fm_startup_memory_estimated_tokens_for_bytes() {
 }
 
 # fm_startup_memory_measure_file <path>
-# Prints "<bytes> <estimated-tokens> <present|absent>".  Memory files must be
-# ordinary files when present so a measurement never follows a symlink or reads
-# a special file.
+# Prints "<bytes> <estimated-tokens> <present|absent>".  Symlinks are resolved
+# first and the resolved target must be an ordinary regular file, so a
+# measurement still never reads a special file, a directory, or a broken link,
+# while a memory file legitimately linked into the home is measured normally.
 fm_startup_memory_measure_file() {
-  local path=$1 bytes tokens
+  local path=$1 resolved bytes tokens
   FM_STARTUP_MEMORY_MEASURE_BYTES=""
   FM_STARTUP_MEMORY_MEASURE_TOKENS=""
   FM_STARTUP_MEMORY_MEASURE_PRESENCE=""
@@ -176,11 +214,15 @@ fm_startup_memory_measure_file() {
     printf '0 0 absent\n'
     return 0
   fi
-  if [ -L "$path" ] || [ ! -f "$path" ]; then
+  resolved=$(fm_startup_memory_budget_resolve "$path") || {
+    fm_startup_memory_budget_fail "memory file link could not be resolved: $path"
+    return 1
+  }
+  if [ ! -f "$resolved" ]; then
     fm_startup_memory_budget_fail "memory file is not an ordinary regular file: $path"
     return 1
   fi
-  bytes=$(LC_ALL=C wc -c < "$path" 2>/dev/null | tr -d '[:space:]') || {
+  bytes=$(LC_ALL=C wc -c < "$resolved" 2>/dev/null | tr -d '[:space:]') || {
     fm_startup_memory_budget_fail "could not measure memory file: $path"
     return 1
   }

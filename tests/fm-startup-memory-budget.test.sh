@@ -147,20 +147,49 @@ test_safe_parser_rejects_ambiguous_and_unsafe_values() {
   printf '77\n' > "$outside"
   rm -f "$home/config/startup-memory-budget"
   ln -s "$outside" "$home/config/startup-memory-budget"
-  expect_rejected_read "$home" 'file is symlinked'
-  [ "$(<"$outside")" = 77 ] || fail "symlink rejection changed its external target"
+  [ "$(FM_HOME="$home" "$BUDGET" read)" = 77 ] \
+    || fail "a symlink to an otherwise safe budget file was not resolved"
+  [ "$(<"$outside")" = 77 ] || fail "resolving a symlink changed its external target"
 
   rm -f "$home/config/startup-memory-budget"
   ln "$outside" "$home/config/startup-memory-budget"
   expect_rejected_read "$home" 'file is hardlinked'
   [ "$(<"$outside")" = 77 ] || fail "hardlink rejection changed its external source"
 
+  # Resolving the link must not launder a target past the anti-substitution guard.
+  printf '99\n' > "$TMP_ROOT/parser-hardlinked"
+  ln "$TMP_ROOT/parser-hardlinked" "$TMP_ROOT/parser-hardlinked-second"
+  rm -f "$home/config/startup-memory-budget"
+  ln -s "$TMP_ROOT/parser-hardlinked" "$home/config/startup-memory-budget"
+  expect_rejected_read "$home" 'file is hardlinked'
+
+  rm -f "$home/config/startup-memory-budget"
+  ln -s "$TMP_ROOT/parser-missing-target" "$home/config/startup-memory-budget"
+  expect_rejected_read "$home" 'file is absent'
+
+  mkdir -p "$TMP_ROOT/parser-dir-target"
+  rm -f "$home/config/startup-memory-budget"
+  ln -s "$TMP_ROOT/parser-dir-target" "$home/config/startup-memory-budget"
+  expect_rejected_read "$home" 'file is not a regular file'
+
+  ln -s "$TMP_ROOT/parser-cycle-b" "$TMP_ROOT/parser-cycle-a"
+  ln -s "$TMP_ROOT/parser-cycle-a" "$TMP_ROOT/parser-cycle-b"
+  rm -f "$home/config/startup-memory-budget"
+  ln -s "$TMP_ROOT/parser-cycle-a" "$home/config/startup-memory-budget"
+  expect_rejected_read "$home" 'file link could not be resolved'
+
   rm -f "$home/config/startup-memory-budget"
   rm -rf "$home/config"
-  ln -s "$TMP_ROOT/parser-config-target" "$home/config"
   mkdir -p "$TMP_ROOT/parser-config-target"
   printf '88\n' > "$TMP_ROOT/parser-config-target/startup-memory-budget"
-  expect_rejected_read "$home" 'config directory is symlinked'
+  ln -s "$TMP_ROOT/parser-config-target" "$home/config"
+  [ "$(FM_HOME="$home" "$BUDGET" read)" = 88 ] \
+    || fail "a symlinked config directory was not resolved to its real target"
+
+  rm -f "$home/config"
+  printf 'not a directory\n' > "$TMP_ROOT/parser-config-file"
+  ln -s "$TMP_ROOT/parser-config-file" "$home/config"
+  expect_rejected_read "$home" 'config directory is not a directory'
   pass "budget parser accepts one exact positive value and rejects malformed or unsafe inputs"
 }
 
@@ -192,14 +221,31 @@ test_budget_accounting_reports_all_three_files_and_safe_failure() {
   printf 'outside\n' > "$outside"
   rm -f "$home/data/captain.md"
   ln -s "$outside" "$home/data/captain.md"
+  out=$(FM_HOME="$home" "$BUDGET" report)
+  assert_contains "$out" 'file=data/captain.md bytes=8 estimated_tokens=3 status=present' \
+    "a memory file linked into the home was not measured through its target"
+  [ "$(<"$outside")" = outside ] || fail "measuring a symlink changed its target"
+
+  rm -f "$home/data/captain.md"
+  ln -s "$TMP_ROOT/accounting-missing" "$home/data/captain.md"
   set +e
   out=$(FM_HOME="$home" "$BUDGET" report 2>&1)
   rc=$?
   set -e
-  expect_code 2 "$rc" "unsafe memory input should fail the accounting command"
+  expect_code 2 "$rc" "a broken memory-file link should fail the accounting command"
   assert_contains "$out" 'memory file is not an ordinary regular file' \
     "accounting failure did not identify the unsafe memory file"
-  [ "$(<"$outside")" = outside ] || fail "accounting failure changed a symlink target"
+
+  rm -f "$home/data/captain.md"
+  mkdir -p "$TMP_ROOT/accounting-dir"
+  ln -s "$TMP_ROOT/accounting-dir" "$home/data/captain.md"
+  set +e
+  out=$(FM_HOME="$home" "$BUDGET" report 2>&1)
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "a memory file linked to a directory should fail the accounting command"
+  assert_contains "$out" 'memory file is not an ordinary regular file' \
+    "accounting failure did not identify the non-regular memory target"
   pass "budget accounting sums the three startup files and reports safe failures"
 }
 
@@ -303,16 +349,23 @@ test_primary_budget_converges_with_exact_reread_and_safe_failures() {
   rm -f "$sm/config/startup-memory-budget"
   printf '555\n' > "$outside"
   ln -s "$outside" "$home/config/startup-memory-budget"
+  run_config_push "$root" "$home" "$fakebin" "$log" >/dev/null
+  [ "$(<"$sm/config/startup-memory-budget")" = 555 ] \
+    || fail "a primary budget linked into the home did not propagate its resolved bytes"
+  [ "$(<"$outside")" = 555 ] || fail "propagating a linked primary budget changed its target"
+
+  rm -f "$home/config/startup-memory-budget" "$sm/config/startup-memory-budget"
+  ln "$outside" "$home/config/startup-memory-budget"
   set +e
   out=$(run_config_push "$root" "$home" "$fakebin" "$log" 2>&1)
   rc=$?
   set -e
   expect_code 1 "$rc" "unsafe primary budget should stop propagation"
-  assert_contains "$out" 'startup-memory-budget: error - unsafe or invalid primary source: file is symlinked' \
+  assert_contains "$out" 'startup-memory-budget: error - unsafe or invalid primary source: file is hardlinked' \
     "unsafe primary budget did not produce a concrete propagation error"
   [ ! -e "$sm/config/startup-memory-budget" ] \
     || fail "unsafe primary budget changed the converged secondmate copy"
-  [ "$(<"$outside")" = 555 ] || fail "unsafe primary budget handling changed its symlink target"
+  [ "$(<"$outside")" = 555 ] || fail "unsafe primary budget handling changed its hardlinked source"
   pass "budget propagation converges through config push with exact rereads, absence, and safe rejection"
 }
 
