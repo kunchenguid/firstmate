@@ -133,6 +133,31 @@ test_real_text_is_pending() {
   pass "fm_composer_classify_content: real unsubmitted text reads pending (including a popup argument-hint fill)"
 }
 
+# --- Cursor agent glyph (→) ---
+
+test_cursor_agent_glyph_is_empty() {
+  local out
+  out=$(classify 0 '→'); [ "$out" = empty ] || fail "bare cursor '→' should read empty, got '$out'"
+  out=$(classify 1 '→'); [ "$out" = empty ] || fail "bordered cursor '→' should read empty, got '$out'"
+  pass "fm_composer_classify_content: cursor agent glyph (→) reads empty bordered or bare"
+}
+
+test_cursor_idle_placeholder_is_empty() {
+  local idle='Add a follow-up' out
+  out=$(classify 0 '→ Add a follow-up' "$idle")
+  [ "$out" = empty ] || fail "cursor idle placeholder '→ Add a follow-up' should read empty, got '$out'"
+  out=$(classify 0 '→ Add a follow-up')
+  [ "$out" = pending ] || fail "cursor idle placeholder without idle regex should be pending, got '$out'"
+  pass "fm_composer_classify_content: cursor idle placeholder 'Add a follow-up' reads empty"
+}
+
+test_cursor_real_text_is_pending() {
+  local out
+  out=$(classify 0 '→ Count slowly from 1 to 30')
+  [ "$out" = pending ] || fail "cursor '→ <real text>' should be pending, got '$out'"
+  pass "fm_composer_classify_content: cursor real text reads pending"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
@@ -142,3 +167,6 @@ test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
+test_cursor_agent_glyph_is_empty
+test_cursor_idle_placeholder_is_empty
+test_cursor_real_text_is_pending

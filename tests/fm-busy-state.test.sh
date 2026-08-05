@@ -272,6 +272,22 @@ test_kimi_unverified_gate() {
   pass "standalone kimi classifies unknown until the live verification gate opens"
 }
 
+# --- cursor verification gate -----------------------------------------------------
+
+test_cursor_unverified_gate() {
+  local state gen out
+  state=$(new_state_dir cursor-gate)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source cursor-hook --event user-prompt-submit
+  out=$(fm_busy_classify tmux w1 cursor t1 "$state")
+  [ "$out" = "unknown cursor-unverified" ] || fail "unverified cursor must classify unknown, got '$out'"
+  out=$(fm_busy_classify tmux w1 cursor t1 "$state" 'ctrl+c to stop')
+  [ "$out" = "unknown cursor-unverified" ] || fail "cursor must not classify from footer text, got '$out'"
+  [ -z "$(fm_busy_sources_for_harness cursor)" ] \
+    || fail "cursor must trust no semantic source until the verification gate opens"
+  pass "cursor classifies unknown cursor-unverified until a semantic source passes its verification gate"
+}
+
 # --- endpoint death and native fallbacks ----------------------------------------
 
 test_dead_endpoint_overrides() {
@@ -372,6 +388,7 @@ test_converted_adapters_ignore_footer_text
 test_grok_regex_isolated
 test_codex_unverified_gate
 test_kimi_unverified_gate
+test_cursor_unverified_gate
 test_dead_endpoint_overrides
 test_herdr_native_busy_only
 test_record_read_leaves_caller_shell_intact

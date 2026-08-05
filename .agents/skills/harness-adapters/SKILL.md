@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, and muse.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, muse, and cursor.
 user-invocable: false
 metadata:
   internal: true
@@ -126,6 +126,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
 | muse | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>`, and `ultra` only for an explicit `max` | Verified 2026-08-05 on Muse Code 0.1.0-R708.1. The flag accepts `none\|minimal\|low\|medium\|high\|xhigh\|ultra` and defaults to `high`. `ultra` is muse's max-class level, so it is reachable only through an explicit captain `max`, never from the generic fallback; `none` and `minimal` sit below the shared vocabulary and stay unreachable. |
+| cursor | `--model <model>` | none | Verified 2026-08-04 on cursor-agent 2026.07.23-e383d2b. Effort is baked into model id suffixes, so no effort flag exists; the requested axis stays in task metadata. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 No script resolves that split for you: establish which credential store a tuple reads from the discovery surfaces below plus `quota-axi auth --json`'s per-provider sources, and show that reasoning rather than inferring it from a harness, model, or source name.
@@ -143,6 +144,7 @@ Use the discovery surface in the current authenticated environment because suppo
 | pi / pi-signed | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
+| cursor | Do NOT trust `cursor-agent --list-models`: it under-reports (~29 entries vs ~180 accepted by the API). The authoritative set is revealed by the rejection error message when an invalid model name is passed. Cursor is a single-provider aggregator: all models bill to the Cursor account regardless of the model-name-prefix provider. |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
@@ -463,3 +465,53 @@ A teardown refusal naming muse scratch is therefore correct behavior: inspect it
 muse is a day-0 `0.1.0` beta whose launcher polls a release channel hourly and can replace the running binary underneath the fleet, changing the process name with it.
 The captain accepted that risk, so firstmate does NOT set `MUSE_NO_AUTO_UPDATE=1`; a fleet that later wants stability can set it in the launch environment without any adapter change.
 Its plugin/hook engine reports `plugins are not available in this build` unless `MUSE_EXPERIMENTAL_PLUGINS=on`, which is why the busy source reads the session log instead of installing a hook.
+## cursor (VERIFIED 2026-08-04, cursor-agent 2026.07.23-e383d2b)
+
+Cursor Agent CLI (`cursor-agent`), a standalone CLI from Cursor.
+Launch with a positional prompt: `cursor-agent --force --trust --model <m> "$(cat <brief>)"`.
+The positional prompt auto-submits (verified: no readiness-gated delivery needed).
+`--force` is the autonomy flag, `--trust` suppresses the per-directory workspace trust dialog.
+
+| Fact | Value |
+|---|---|
+| Binary | Executable `cursor-agent` from PATH; spawning refuses if absent. |
+| Busy state | Unknown until a semantic source is live-verified (hooks are phase 3, pending correct upstream manifest key discovery). The rendered `ctrl+c to stop` token is deliberately NOT a state source; supervision falls back to stale-pane detection. |
+| Exit command | `/exit` (or `/quit`); needs ~1.5s settle before Enter. |
+| Interrupt | `C-c` (single Ctrl+C). Escape does NOT interrupt (verified 2026-08-04). |
+| Skill invocation | `/<skill>` (e.g. `/no-mistakes`), same form as claude. Opens a popup on typing `/`; single Enter lands with popup settle (verified 2026-08-04). |
+| Autonomy | `--force` (alias `--yolo`); auto-approves every tool execution. |
+| Env marker | `CURSOR_AGENT=1`, set for child/tool processes. Ordered BEFORE `CLAUDECODE` in detection so a cursor worker launched from a claude firstmate is not misidentified (the leak is also sanitized at the launch template). |
+| Composer | Bare, unbordered row at the bottom. Prompt glyph is `→`. Idle placeholder: `Add a follow-up`. Busy footer: `ctrl+c to stop` with elapsed counter. |
+| Models | `--model <model>` forwarded verbatim when set; omitted entirely when unset (cursor uses its own configured default). `--list-models` under-reports (~29 entries vs ~180 accepted by the API); do not use it for model-support verification. Cursor is a single-provider aggregator: all models bill to the Cursor account, not to the model-name-prefix provider. |
+| Effort | No effort flag exists; effort is baked into model id suffixes (`-low`, `-medium`, `-high`, `-xhigh`, `-max`, `-fast`). Composing suffixes is unsafe (not every model supports every suffix), so effort is recorded in task metadata but never emitted. |
+| Resume | `cursor-agent --resume [chatId]` or `--continue` for most recent session. |
+
+First launch in a fresh worktree, or first ever on a machine, may show a workspace trust dialog ("Do you trust the contents of this directory?").
+`--trust` suppresses it entirely (verified: a `--trust` launch goes straight to the banner).
+
+**Composer defect (fixed):** an idle cursor pane formerly classified as `pending` because the `→` glyph was not a recognized agent prompt glyph.
+The `→` glyph is now recognized as an agent prompt glyph in the shared `fm_composer_classify_content`, and `Add a follow-up` is the idle placeholder.
+The reverse-video cursor cell inside a dim ghost run (a single character wrapped in SGR 7 between two SGR 2 dim runs) is now handled by the shared `fm_composer_strip_ghost` ghost extractor.
+Verification evidence: `docs/verification/runtime-backends.md`.
+
+**Liveness defect (fixed):** the tmux backend classified a live cursor-agent pane as `other` (both `MainThread` kernel exec name and `cursor-agent` pane command went unrecognized). `cursor-agent` is now in `FM_HARNESS_RE`, `FM_HARNESS_NAMES`, and the tmux `agent` classification case.
+
+**CLAUDECODE leak (fixed):** a cursor worker launched from a claude firstmate inherited `CLAUDECODE=1` and `CLAUDE_CODE_ENTRYPOINT=cli`, which would misidentify it as claude.
+The launch template now unsets both variables before launching cursor-agent.
+
+**Busy state (captain decision 2026-08-04, option a):** the MVP ships `unknown cursor-unverified` with an empty `FM_BUSY_CURSOR_VERIFIED_VERSIONS` version gate.
+No rendered-signal fallback is wired.
+Hooks are phase 3, pending correct upstream manifest key discovery.
+
+**Model support trap:** `--list-models` lists only ~29 models, but the API accepts ~180.
+Any model-support verdict taken from that short list would be falsely negative.
+The authoritative set is revealed by the rejection error message when an invalid model is passed.
+Do not use `--list-models` for model-support verification.
+
+**Crew wake signal (phase 3):** the `stop` event in cursor's bundled hook system maps directly to the per-task turn-end pattern.
+Cursor's `--plugin-dir` flag is per-launch and repeatable, which would be cleaner than grok's or kimi's global config installs.
+Phase 3 is blocked on correct upstream manifest key discovery.
+
+**Primary-session guard:** out of scope for the MVP.
+Firstmate running itself on cursor is a separate, larger effort (turn-end guard, PreToolUse seatbelt, session-start nudge, watcher supervision protocol).
+Cursor is crew/secondmate-only in the first release, matching Kimi's position.

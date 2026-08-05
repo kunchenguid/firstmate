@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|muse|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|muse|cursor|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -20,6 +20,11 @@
 # name and is never parsed for a model.
 # Detection layers: verified environment markers first, then process ancestry.
 # Record each newly verified env marker here.
+# cursor-agent sets CURSOR_AGENT=1 for its child/tool processes (verified 2026-08-04,
+# cursor-agent 2026.07.23-e383d2b). The marker is ordered BEFORE CLAUDECODE because
+# a cursor worker launched from a claude firstmate inherits CLAUDECODE=1 from its
+# parent, and CLAUDECODE would win if checked first (the precedence hazard that
+# bin/fm-session-lock-lib.sh's comment warns about, now concretely reproduced).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,11 +35,16 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
-  # Only claude, pi, and grok set verified markers of their own; codex, opencode,
+  # Only claude, pi, grok, and cursor set verified markers of their own; codex, opencode,
   # kimi, and muse are markerless, so a foreign marker retained in a terminal
   # multiplexer's stored environment can silently misidentify one of them before
   # ancestry is consulted. This is a precedence hazard, not evidence that
   # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
+  # cursor-agent sets CURSOR_AGENT=1, and it is ordered BEFORE CLAUDECODE because
+  # a cursor worker launched from a claude firstmate inherits CLAUDECODE=1 from its
+  # parent. The ordering alone is belt-and-braces: the launch template also unsets
+  # CLAUDECODE/CLAUDE_CODE_ENTRYPOINT (see fm-spawn.sh), so cursor never sees them.
+  [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
@@ -62,6 +72,7 @@ detect_own() {
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     case "$(basename -- "$comm")" in
+      *cursor-agent*) echo cursor; return ;;
       *claude*) echo claude; return ;;
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
@@ -75,10 +86,13 @@ detect_own() {
       muse|muse-bin-*) echo muse; return ;;
       pi-signed) echo pi; return ;;
       pi) echo pi; return ;;
-      node*|python*)
-        # Bare interpreter: match the harness name in its script path.
+      node*|python*|MainThread)
+        # Bare interpreter or a renamed main thread (cursor-agent's Node
+        # bundle execs with comm=MainThread): match the harness name in the
+        # full argument string, which still carries the versioned install path.
         args=$(ps -o args= -p "$pid" 2>/dev/null)
         case "$args" in
+          *cursor-agent*) echo cursor; return ;;
           *claude*) echo claude; return ;;
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;

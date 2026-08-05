@@ -100,8 +100,21 @@ FM_BUSY_LIB_VERSION=v1
 # and land the wiring in fm-spawn behind this same gate in the same change.
 FM_BUSY_KIMI_VERIFIED_VERSIONS=""
 
+# Cursor verification gate. Empty means no installed cursor-agent version has
+# passed live-verified semantic busy source (hooks are phase 3, pending correct
+# upstream manifest key discovery). Every cursor task classifies unknown
+# cursor-unverified, and supervision falls back to stale-pane detection.
+# The rendered ctrl+c to stop token is deliberately NOT a state source here:
+# the approved redesign forbids entrenching a second rendered-signal fallback
+# alongside the Grok arm (bin/fm-busy-lib.sh:53-58).
+FM_BUSY_CURSOR_VERIFIED_VERSIONS=""
+
 fm_busy_kimi_verified() {
   [ -n "$FM_BUSY_KIMI_VERIFIED_VERSIONS" ]
+}
+
+fm_busy_cursor_verified() {
+  [ -n "$FM_BUSY_CURSOR_VERIFIED_VERSIONS" ]
 }
 
 # fm_busy_codex_appserver_observable: capability/version negotiation for the
@@ -187,6 +200,10 @@ fm_busy_sources_for_harness() {  # <harness>
     kimi*)
       fm_busy_kimi_verified || { printf ''; return 0; }
       adapter='kimi-wire kimi-hook'
+      ;;
+    cursor*)
+      fm_busy_cursor_verified || { printf ''; return 0; }
+      adapter='cursor-hook'
       ;;
     *) printf ''; return 0 ;;
   esac
@@ -623,6 +640,12 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     codex*)
       if ! fm_busy_codex_semantic_source; then
         printf 'unknown codex-unverified'
+        return 0
+      fi
+      ;;
+    cursor*)
+      if ! fm_busy_cursor_verified; then
+        printf 'unknown cursor-unverified'
         return 0
       fi
       ;;
