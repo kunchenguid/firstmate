@@ -89,8 +89,13 @@
 # STATUS PROJECTION: raw state/*.status logs remain unchanged. For each present
 # log, this script emits the newest recognized lifecycle event and every open
 # keyed decision returned by fm-classify-lib.sh's authoritative
-# status_open_decisions fold. It also emits source/recognized/omitted counts and
-# the exact full-log path. Event text is bounded independently per record, per
+# status_open_decisions fold. When the newest recognized event IS one of those
+# open decisions, it is emitted once and back-referenced rather than repeated and
+# charged twice. A newest line carrying no lifecycle verb - a legacy free-text
+# event such as "PR ready" or "merged" - is projected separately so such a log
+# still contributes its most recent prose. It also emits source/recognized/
+# omitted counts (omitted counts every event NOT projected here) and the exact
+# full-log path. Event text is bounded independently per record, per
 # task, and across the whole fleet; the fixed recovery fields and truncation
 # receipts do not consume those text budgets and therefore remain visible after
 # text is exhausted. A receipt records original text bytes, emitted bytes, the
@@ -250,16 +255,35 @@ print_backlog_compact() {
   fi
 }
 
-status_projection_byte_count() {  # <text>
-  printf '%s' "$1" | wc -c | tr -d '[:space:]'
-}
-
 status_projection_is_recognized_verb() {  # <verb>
   case "$1" in
-    working|paused|done|needs-decision|blocked|failed|resolved|captain-held) return 0 ;;
+    working|done|needs-decision|blocked|failed) return 0 ;;
     "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}") return 0 ;;
+    "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}") return 0 ;;
+    "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}") return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# Drop a trailing incomplete UTF-8 sequence left by a byte-exact cut, so a
+# truncated crew note can never emit a partial code point. LC_ALL=C keeps every
+# expansion here byte-indexed, and the receipt still reports the bytes actually
+# emitted rather than switching the budget to characters.
+status_projection_trim_partial_utf8_into() {  # <var> <byte-truncated text>
+  local __text=$2 __len=${#2} __i=1 __byte __need
+  while [ "$__i" -le 4 ] && [ "$__i" -le "$__len" ]; do
+    __byte=${__text:__len-__i:1}
+    case "$__byte" in
+      [$'\x80'-$'\xbf']) __i=$((__i + 1)); continue ;;
+      [$'\xc2'-$'\xdf']) __need=2 ;;
+      [$'\xe0'-$'\xef']) __need=3 ;;
+      [$'\xf0'-$'\xf4']) __need=4 ;;
+      *) __need=1 ;;
+    esac
+    [ "$__need" -le "$__i" ] || __text=${__text:0:__len-__i}
+    break
+  done
+  printf -v "$1" '%s' "$__text"
 }
 
 status_projection_identity_fields() {  # <full, untruncated event text>
@@ -313,7 +337,7 @@ status_projection_identity_fields() {  # <full, untruncated event text>
 status_projection_record() {  # <label> <verb> <key> <text> <source-path>
   local label=$1 verb=$2 key=$3 text=$4 source=$5 original emitted allowance
   local task_remaining total_remaining causes='' truncated=''
-  original=$(status_projection_byte_count "$text")
+  original=${#text}
   task_remaining=$((STATUS_TASK_BYTES - STATUS_TASK_TEXT_USED))
   [ "$task_remaining" -ge 0 ] || task_remaining=0
   total_remaining=$((STATUS_TOTAL_BYTES - STATUS_TOTAL_TEXT_USED))
@@ -330,10 +354,9 @@ status_projection_record() {  # <label> <verb> <key> <text> <source-path>
     emitted=$original
     truncated=$text
   else
-    emitted=$allowance
-    if [ "$allowance" -gt 0 ]; then
-      truncated=$(printf '%s' "$text" | cut -b "1-$allowance")
-    fi
+    truncated=${text:0:allowance}
+    status_projection_trim_partial_utf8_into truncated "$truncated"
+    emitted=${#truncated}
   fi
   printf '  event_text=%s\n' "$truncated"
   STATUS_TASK_TEXT_USED=$((STATUS_TASK_TEXT_USED + emitted))
@@ -353,60 +376,98 @@ status_projection_record() {  # <label> <verb> <key> <text> <source-path>
 }
 
 print_status_projection() {
-  local status=$1 line stripped verb key open decision_text open_count=0 decision_index=0
-  local event_count=0 recognized_count=0 newest='' omitted
+  local status=$1 line stripped verb key note open decision_text
+  local open_count=0 decision_index=0 event_count=0 recognized_count=0 omitted projected
+  local newest='' newest_verb='' newest_key='' newest_note='' newest_dup=0
+  local tail_line='' tail_recognized=1 tail_key
   STATUS_TASK_TEXT_USED=0
 
   while IFS= read -r line || [ -n "$line" ]; do
     stripped=${line//[[:space:]]/}
     [ -n "$stripped" ] || continue
     event_count=$((event_count + 1))
-    verb=$(status_line_verb "$line")
+    tail_line=$line
+    _fm_status_line_verb_into verb "$line"
     if status_projection_is_recognized_verb "$verb"; then
       recognized_count=$((recognized_count + 1))
       newest=$line
+      tail_recognized=1
+    else
+      tail_recognized=0
     fi
   done < "$status"
 
   open=$(status_open_decisions "$status")
-  while IFS=$'\t' read -r key verb line; do
+  if [ -n "$newest" ]; then
+    _fm_status_line_verb_into newest_verb "$newest"
+    _fm_decision_key_into newest_key "$newest" || newest_key=invalid
+    _fm_status_line_note_into newest_note "$newest"
+  fi
+
+  # The newest recognized event is frequently the very decision the fold already
+  # reports as open. Locate that overlap before printing anything so the text is
+  # emitted once, charged once, and counted once as projected.
+  while IFS=$'\t' read -r key verb note; do
     [ -n "$key" ] || continue
     open_count=$((open_count + 1))
+    if [ "$newest_dup" -eq 0 ] && [ -n "$newest" ] && [ "$key" = "$newest_key" ] &&
+      [ "$verb" = "$newest_verb" ] && [ "$note" = "$newest_note" ]; then
+      newest_dup=$open_count
+    fi
   done <<EOF
 $open
 EOF
 
-  if [ "$recognized_count" -gt 0 ]; then
-    omitted=$((event_count - 1))
-  else
-    omitted=$event_count
+  projected=$open_count
+  if [ -n "$newest" ] && [ "$newest_dup" -eq 0 ]; then
+    projected=$((projected + 1))
   fi
+  if [ -n "$tail_line" ] && [ "$tail_recognized" -eq 0 ]; then
+    projected=$((projected + 1))
+  fi
+  omitted=$((event_count - projected))
+  [ "$omitted" -ge 0 ] || omitted=0
+
   printf 'status projection (wake-EVENT history, not current state; full log: %s):\n' "$status"
   printf '  source_event_count=%s recognized_event_count=%s omitted_event_count=%s open_decision_count=%s\n' \
     "$event_count" "$recognized_count" "$omitted" "$open_count"
   printf '  text_limits_bytes=event:%s task:%s total:%s\n' \
     "$STATUS_EVENT_BYTES" "$STATUS_TASK_BYTES" "$STATUS_TOTAL_BYTES"
 
-  while IFS=$'\t' read -r key verb line; do
+  while IFS=$'\t' read -r key verb note; do
     [ -n "$key" ] || continue
     decision_index=$((decision_index + 1))
     if [ "$key" = default ]; then
-      decision_text="$verb: $line"
+      decision_text="$verb: $note"
     else
-      decision_text="$verb [key=$key]: $line"
+      decision_text="$verb [key=$key]: $note"
     fi
     status_projection_record "open_decision_$decision_index" "$verb" "$key" "$decision_text" "$status"
   done <<EOF
 $open
 EOF
 
-  if [ -n "$newest" ]; then
-    verb=$(status_line_verb "$newest")
-    key=$(_fm_decision_key "$newest" 2>/dev/null) || key=invalid
-    status_projection_record newest_recognized_event "$verb" "$key" "$newest" "$status"
-  else
+  if [ -z "$newest" ]; then
     printf 'newest_recognized_event: (none)\n'
+  elif [ "$newest_dup" -ne 0 ]; then
+    printf 'newest_recognized_event:\n'
+    printf '  state_verb=%s\n' "$newest_verb"
+    printf '  decision_key=%s\n' "$newest_key"
+    printf '  same_as=open_decision_%s\n' "$newest_dup"
+  else
+    status_projection_record newest_recognized_event "$newest_verb" "$newest_key" "$newest" "$status"
   fi
+
+  # A legacy free-text line ("PR ready", "merged upstream at abc") carries no
+  # lifecycle verb, so it can never be the newest recognized event or open a
+  # keyed decision. Project the newest line whenever it is one of those, so a
+  # legacy-shaped log still contributes its most recent prose instead of only
+  # counts.
+  if [ -n "$tail_line" ] && [ "$tail_recognized" -eq 0 ]; then
+    _fm_decision_key_into tail_key "$tail_line" || tail_key=invalid
+    status_projection_record newest_unrecognized_event unrecognized "$tail_key" "$tail_line" "$status"
+  fi
+
   printf '  task_text_budget_used_bytes=%s task_text_budget_limit_bytes=%s\n' \
     "$STATUS_TASK_TEXT_USED" "$STATUS_TASK_BYTES"
 }

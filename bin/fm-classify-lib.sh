@@ -90,7 +90,7 @@ last_status_line() {
 status_is_terminal_verb() {
   local line=$1 verb
   [ -n "$line" ] || return 1
-  verb=$(status_line_verb "$line")
+  _fm_status_line_verb_into verb "$line"
   case "$verb" in
     done|needs-decision|blocked|failed) return 0 ;;
     *) return 1 ;;
@@ -106,7 +106,7 @@ status_is_captain_relevant() {
   local line=$1 verb
   [ -n "$line" ] || return 1
   status_is_paused "$line" && return 1
-  verb=$(status_line_verb "$line")
+  _fm_status_line_verb_into verb "$line"
   case "$verb" in
     working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
       return 1
@@ -127,7 +127,7 @@ status_is_captain_relevant() {
 status_is_paused() {  # <status-line>
   local line=$1 verb
   [ -n "$line" ] || return 1
-  verb=$(status_line_verb "$line")
+  _fm_status_line_verb_into verb "$line"
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
 }
 
@@ -140,7 +140,7 @@ status_is_paused_or_captain_held() {  # <status-line>
   local line=$1 verb
   status_is_paused "$line" && return 0
   [ -n "$line" ] || return 1
-  verb=$(status_line_verb "$line")
+  _fm_status_line_verb_into verb "$line"
   [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
 }
 
@@ -163,46 +163,80 @@ status_is_paused_or_captain_held() {  # <status-line>
 # one-open-decision-per-task behavior (a bare "resolved:" closes "default").
 # The three parsers are pure reads of a single line; the verb parser strips any
 # key token before the colon so the leading word is recovered cleanly.
+#
+# Each parser exists in two forms sharing ONE grammar: a `_into <var>` form that
+# assigns its result with no subshell, and the historical printing form that
+# simply delegates to it. Whole-file folds and the session-start projection use
+# the assigning form so their cost stays linear in bytes read rather than
+# forking a subshell per status line; a long-lived append-only log would
+# otherwise make every fold pay for its entire history. The `_into` forms own
+# their temporaries under `__`-prefixed names so a caller-named target variable
+# cannot collide with them.
+_fm_status_line_verb_into() {  # <var> <status-line>
+  local __v=${2%%:*}
+  __v=${__v%%\[key=*}
+  __v=${__v#"${__v%%[![:space:]]*}"}
+  __v=${__v%"${__v##*[![:space:]]}"}
+  printf -v "$1" '%s' "$__v"
+}
 status_line_verb() {  # <status-line> -> leading verb word
-  local v=${1%%:*}
-  v=${v%%\[key=*}
-  v=${v#"${v%%[![:space:]]*}"}
-  v=${v%"${v##*[![:space:]]}"}
+  local v
+  _fm_status_line_verb_into v "$1"
   printf '%s' "$v"
 }
-status_line_note() {  # <status-line> -> text after the first colon, trimmed
-  case "$1" in
-    *:*) local n=${1#*:}; printf '%s' "${n#"${n%%[![:space:]]*}"}" ;;
-    *) printf '%s' "$1" ;;
+_fm_status_line_note_into() {  # <var> <status-line>
+  local __n=$2
+  case "$2" in
+    *:*) __n=${2#*:}; __n=${__n#"${__n%%[![:space:]]*}"} ;;
   esac
+  printf -v "$1" '%s' "$__n"
 }
-_fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
-  local prefix=${1%%:*} k
-  case "$prefix" in
+status_line_note() {  # <status-line> -> text after the first colon, trimmed
+  local n
+  _fm_status_line_note_into n "$1"
+  printf '%s' "$n"
+}
+_fm_decision_key_into() {  # <var> <status-line> -> 1 when the key token is malformed
+  local __prefix=${2%%:*} __k=default
+  case "$__prefix" in
     *\[key=*\]*)
-      k=${prefix#*\[key=}
-      k=${k%%\]*}
-      case "$k" in
+      __k=${__prefix#*\[key=}
+      __k=${__k%%\]*}
+      case "$__k" in
         ''|*[!A-Za-z0-9._-]*) return 1 ;;
-        *) printf '%s' "$k" ;;
       esac
       ;;
-    *) printf 'default' ;;
   esac
+  printf -v "$1" '%s' "$__k"
+}
+_fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
+  local k
+  _fm_decision_key_into k "$1" || return 1
+  printf '%s' "$k"
 }
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
 # Portable (no associative arrays) so the fold runs on bash 3.2 as well as 4+.
-_fm_decision_drop() {  # <open-set> <key>
-  local set=$1 key=$2 line out=''
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    case "$line" in
-      "$key"$'\t'*) : ;;
-      *) out="${out}${line}"$'\n' ;;
+# The assigning form walks the set with parameter expansion alone, so a fold over
+# a decision-heavy log neither forks nor spills a here-document per event.
+_fm_decision_drop_into() {  # <var> <open-set> <key>
+  local __rest=$2 __key=$3 __line __out=''
+  while [ -n "$__rest" ]; do
+    __line=${__rest%%$'\n'*}
+    case "$__rest" in
+      *$'\n'*) __rest=${__rest#*$'\n'} ;;
+      *) __rest='' ;;
     esac
-  done <<EOF
-$set
-EOF
+    [ -n "$__line" ] || continue
+    case "$__line" in
+      "$__key"$'\t'*) : ;;
+      *) __out="${__out}${__line}"$'\n' ;;
+    esac
+  done
+  printf -v "$1" '%s' "${__out%$'\n'}"
+}
+_fm_decision_drop() {  # <open-set> <key>
+  local out
+  _fm_decision_drop_into out "$1" "$2"
   printf '%s' "$out"
 }
 # Fold ONE status line into an existing "<key>\t<verb>\t<note>\n"-per-line open
@@ -212,25 +246,33 @@ EOF
 # whole-file fold (status_open_decisions) and the incremental cursor-backed fold
 # (status_open_decisions_incremental) below call this instead of re-deriving the
 # rule, so the two consumption strategies can never drift apart on semantics.
+# Like the parsers above, this exists in an assigning `_into` form and a printing
+# form that delegates to it, so a whole-file fold can apply the rule without
+# forking a subshell per status line.
+_fm_decision_fold_line_into() {  # <var> <open-set> <status-line> <resolve-verb> <held-verb>
+  local __open=$2 __line=$3 __resolve=$4 __held=$5 __verb __key __note __stripped
+  __stripped=${__line//[[:space:]]/}
+  if [ -n "$__stripped" ] && _fm_decision_key_into __key "$__line"; then
+    _fm_status_line_verb_into __verb "$__line"
+    case "$__verb" in
+      needs-decision|blocked)
+        _fm_status_line_note_into __note "$__line"
+        _fm_decision_drop_into __open "$__open" "$__key"
+        [ -n "$__open" ] && __open="${__open}"$'\n'
+        __open="${__open}${__key}"$'\t'"${__verb}"$'\t'"${__note}"$'\n'
+        ;;
+      "$__resolve"|"$__held")
+        _fm_decision_drop_into __open "$__open" "$__key"
+        [ -n "$__open" ] && __open="${__open}"$'\n'
+        ;;
+    esac
+  fi
+  printf -v "$1" '%s' "$__open"
+}
 _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb>
-  local open=$1 line=$2 resolve=$3 held=$4 verb key note stripped
-  stripped=${line//[[:space:]]/}
-  [ -n "$stripped" ] || { printf '%s' "$open"; return 0; }
-  verb=$(status_line_verb "$line")
-  key=$(_fm_decision_key "$line") || { printf '%s' "$open"; return 0; }
-  case "$verb" in
-    needs-decision|blocked)
-      note=$(status_line_note "$line")
-      open=$(_fm_decision_drop "$open" "$key")
-      [ -n "$open" ] && open="${open}"$'\n'
-      open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
-      ;;
-    "$resolve"|"$held")
-      open=$(_fm_decision_drop "$open" "$key")
-      [ -n "$open" ] && open="${open}"$'\n'
-      ;;
-  esac
-  printf '%s' "$open"
+  local out
+  _fm_decision_fold_line_into out "$1" "$2" "$3" "$4"
+  printf '%s' "$out"
 }
 
 # Fold the WHOLE status stream into the set of decisions still open. Prints one
@@ -251,7 +293,7 @@ status_open_decisions() {  # <status-file>
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
-    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
+    _fm_decision_fold_line_into open "$open" "$line" "$resolve" "$held"
   done < "$f"
   printf '%s' "$open"
 }
@@ -476,17 +518,17 @@ _fm_status_open_activities_stream() {
   while IFS= read -r line || [ -n "$line" ]; do
     stripped=${line//[[:space:]]/}
     [ -n "$stripped" ] || continue
-    verb=$(status_line_verb "$line")
-    key=$(_fm_decision_key "$line") || continue
+    _fm_status_line_verb_into verb "$line"
+    _fm_decision_key_into key "$line" || continue
     case "$verb" in
       working|"$pause")
-        note=$(status_line_note "$line")
-        open=$(_fm_decision_drop "$open" "$key")
+        _fm_status_line_note_into note "$line"
+        _fm_decision_drop_into open "$open" "$key"
         [ -n "$open" ] && open="${open}"$'\n'
         open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
         ;;
       done|failed|needs-decision|blocked|"$resolve"|"$held")
-        open=$(_fm_decision_drop "$open" "$key")
+        _fm_decision_drop_into open "$open" "$key"
         [ -n "$open" ] && open="${open}"$'\n'
         ;;
     esac

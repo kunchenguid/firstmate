@@ -13,6 +13,8 @@
 #     watcher ownership
 #   - deterministic byte-bounded status projection, exact recovery identities,
 #     authoritative keyed decisions, omitted counts, and truncation receipts
+#   - a newest event that is itself the open decision, legacy free-text events,
+#     and truncation that never splits a UTF-8 code point
 #   - orphan, empty, and missing status logs
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
 #     tmux and herdr both
@@ -54,7 +56,7 @@ new_world() {
   fakebin="$w/fakebin"
   mkdir -p "$home/state" "$home/data" "$home/config" "$fakebin"
   git init -q -b main "$root"
-  git -C "$root" -c commit.gpgsign=false commit -q --allow-empty -m init
+  git -C "$root" commit -q --allow-empty -m init
   printf '%s|%s|%s\n' "$root" "$home" "$fakebin"
 }
 
@@ -948,8 +950,8 @@ done: normal small history completed
 EOF
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" 'source_event_count=4 recognized_event_count=4 omitted_event_count=3 open_decision_count=1' \
-    "projection did not count older events and the unresolved decision"
+  assert_contains "$out" 'source_event_count=4 recognized_event_count=4 omitted_event_count=2 open_decision_count=1' \
+    "omitted count did not exclude every projected record"
   assert_contains "$out" 'open_decision_1:' "older open decision was not projected"
   assert_contains "$out" 'decision_key=route' "older open decision lost its authoritative key"
   assert_contains "$out" 'event_text=needs-decision [key=route]: choose route alpha or beta' \
@@ -959,6 +961,64 @@ EOF
   assert_not_contains "$out" 'truncation=' "normal small history was unnecessarily truncated"
   assert_contains "$out" "$home/state/task-a.status" "projection omitted its exact full-log pointer"
   pass "the authoritative fold keeps an older unresolved decision while normal small text stays unchanged"
+}
+
+test_status_projection_dedups_newest_decision_and_keeps_legacy_events() {
+  local rec root home fakebin out prose_count
+  rec=$(new_world status-projection-dedup-legacy)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  printf 'kind=ship\n' > "$home/state/task-a.meta"
+  printf 'working: step one\nneeds-decision [key=api]: pick a or b\n' > "$home/state/task-a.status"
+  printf 'kind=ship\n' > "$home/state/task-legacy.meta"
+  printf 'PR ready for review\nmerged upstream at abc\n' > "$home/state/task-legacy.status"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" 'source_event_count=2 recognized_event_count=2 omitted_event_count=1 open_decision_count=1' \
+    "a newest event that is also the open decision was counted as omitted"
+  prose_count=$(printf '%s\n' "$out" | grep -F -c 'event_text=needs-decision [key=api]: pick a or b')
+  [ "$prose_count" -eq 1 ] || fail "still-open newest decision prose was emitted $prose_count times"
+  assert_contains "$out" 'same_as=open_decision_1' \
+    "newest event duplicating an open decision lacked a back-reference"
+  assert_contains "$out" 'task_text_budget_used_bytes=37 task_text_budget_limit_bytes=1536' \
+    "a newest event that is also the open decision was charged twice against the task budget"
+
+  assert_contains "$out" 'source_event_count=2 recognized_event_count=0 omitted_event_count=1 open_decision_count=0' \
+    "legacy free-text log counts were wrong"
+  assert_contains "$out" 'newest_recognized_event: (none)' "legacy free-text log invented a lifecycle verb"
+  assert_contains "$out" 'newest_unrecognized_event:' "legacy free-text log projected no event at all"
+  assert_contains "$out" 'state_verb=unrecognized' "legacy free-text event lost its explicit unrecognized marker"
+  assert_contains "$out" 'event_text=merged upstream at abc' "legacy free-text event prose was dropped"
+  pass "a still-open newest decision is projected once and legacy free-text events keep their prose"
+}
+
+test_status_projection_truncates_without_splitting_utf8() {
+  local rec root home fakebin out text
+  rec=$(new_world status-projection-utf8)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  printf 'kind=ship\n' > "$home/state/task-a.meta"
+  # 21 bytes: "done: caf" + 2-byte é + " " + 4-byte rocket + " ship".
+  printf 'done: caf\303\251 \360\237\232\200 ship\n' > "$home/state/task-a.status"
+
+  out=$(FM_SESSION_START_STATUS_EVENT_BYTES=14 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" 'truncation=original_bytes:21 emitted_bytes:12' \
+    "byte cut inside a code point was not reported as the smaller emitted size"
+  text=$(printf '%s\n' "$out" | grep -F 'event_text=done: caf')
+  [ -n "$text" ] || fail "truncated multi-byte event text was not projected: $out"
+  printf '%s' "$text" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 \
+    || fail "projected event text carried a partial UTF-8 sequence: $text"
+  pass "byte-bounded truncation never emits a partial UTF-8 code point"
 }
 
 test_status_projection_total_budget_and_deterministic_order() {
@@ -1539,6 +1599,8 @@ test_session_start_preserves_proven_bare_shell_recovery
 test_session_start_relaunches_herdr_husk_secondmate
 test_status_projection_bounds_8kb_and_preserves_exact_fields
 test_status_projection_keeps_open_decision_and_small_newest_event
+test_status_projection_dedups_newest_decision_and_keeps_legacy_events
+test_status_projection_truncates_without_splitting_utf8
 test_status_projection_total_budget_and_deterministic_order
 test_status_projection_empty_missing_and_orphan_logs
 test_endpoint_liveness_tmux
