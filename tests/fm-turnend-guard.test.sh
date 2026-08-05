@@ -863,6 +863,7 @@ install_failing_arm_stub() {
   cat > "$dir/bin/fm-watch-arm.sh" <<EOF
 #!/usr/bin/env bash
 printf 'arm-invoked\\n' >> "$dir/state/.arm-invocations"
+printf '%s\\n' "\${FM_CHECK_INTERVAL:-}" >> "$dir/state/.arm-cadence"
 exit 1
 EOF
   chmod +x "$dir/bin/fm-watch-arm.sh"
@@ -950,6 +951,34 @@ test_cursor_shim_loop_count_maps_to_stop_hook_active() {
   [ "$out" = '{}' ] || fail "cursor shim must not re-block a loop-count continuation, got: $out"
   [ ! -e "$dir/state/.arm-invocations" ] || fail "cursor shim must not arm on a loop-count continuation"
   pass "fm-turnend-guard-cursor: loop_count>0 maps to stop_hook_active so continuations are not re-blocked"
+}
+
+test_cursor_shim_arm_sources_x_mode_cadence() {
+  local dir out status cadence
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-xmode")
+  : > "$dir/state/task1.meta"
+  install_failing_arm_stub "$dir"
+  mkdir -p "$dir/config"
+  printf 'export FM_CHECK_INTERVAL=30\n' > "$dir/config/x-mode.env"
+  out=$(printf '{"session_id":"cur-session","loop_count":0,"workspace_roots":["%s"]}' "$dir" \
+    | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>&1); status=$?
+  expect_code 0 "$status" "cursor shim must exit 0 on a still-blind turn with X mode config"
+  cadence=$(cat "$dir/state/.arm-cadence" 2>/dev/null || true)
+  [ "$cadence" = 30 ] || fail "arm wrapper must inherit the X-mode cadence from config/x-mode.env, got: $cadence"
+  pass "fm-turnend-guard-cursor: arm inherits the X-mode 30s cadence from config/x-mode.env"
+}
+
+test_cursor_shim_arm_defaults_cadence_without_x_mode() {
+  local dir out status cadence
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-noxmode")
+  : > "$dir/state/task1.meta"
+  install_failing_arm_stub "$dir"
+  out=$(printf '{"session_id":"cur-session","loop_count":0,"workspace_roots":["%s"]}' "$dir" \
+    | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>&1); status=$?
+  expect_code 0 "$status" "cursor shim must exit 0 on a still-blind turn without X mode config"
+  cadence=$(cat "$dir/state/.arm-cadence" 2>/dev/null || true)
+  [ -z "$cadence" ] || fail "arm wrapper must keep the default cadence without config/x-mode.env, got: $cadence"
+  pass "fm-turnend-guard-cursor: arm leaves the default cadence when config/x-mode.env is absent"
 }
 
 test_cursor_shim_missing_payload_allows() {
@@ -1803,6 +1832,8 @@ test_cursor_shim_emits_followup_on_block
 test_cursor_shim_arms_then_allows
 test_cursor_shim_allows_when_healthy
 test_cursor_shim_loop_count_maps_to_stop_hook_active
+test_cursor_shim_arm_sources_x_mode_cadence
+test_cursor_shim_arm_defaults_cadence_without_x_mode
 test_cursor_shim_missing_payload_allows
 test_cursor_hooks_json_is_registered
 test_cursor_shim_anchor_resolves_via_cursor_project_dir
