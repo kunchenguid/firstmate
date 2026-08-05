@@ -22,8 +22,10 @@ from urllib.parse import parse_qs, urlparse
 SCRIPT_DIR = Path(__file__).resolve().parent
 SNAPSHOT_COMMAND = SCRIPT_DIR / "fm-dashboard-snapshot.sh"
 SECRET_RE = re.compile(
-    r"(?i)(?:token|secret|password|passwd|api[_-]?key|authorization)"
-    r"\s*[:=]\s*[^\s,;]+"
+    r"(?i)((?:token|secret|password|passwd|api[_-]?key|authorization|"
+    r"aws[_-]?(?:access[_-]?key[_-]?id|secret[_-]?access[_-]?key)))"
+    r"(\s*[:=]\s*)[^\s,;]+"
+    r"|(?:AKIA|ASIA)[0-9A-Z]{16}\b"
     r"|(?:gh[pousr]_[a-z0-9_]+|github_pat_[a-z0-9_]+|glpat-[a-z0-9_-]+|"
     r"xox[baprs]-[a-z0-9-]+|sk-[a-z0-9_-]{16,}|bearer\s+[a-z0-9._~+/=-]{16,})"
 )
@@ -50,7 +52,14 @@ def now_iso() -> str:
 def clean_text(value: object, limit: int = 500) -> str:
     text = str(value).replace("\x1b", "").replace("\r", " ").replace("\n", " ")
     text = "".join(char if (char == "\t" or ord(char) >= 32) else " " for char in text)
-    text = SECRET_RE.sub("<redacted>", text)
+    text = SECRET_RE.sub(
+        lambda match: (
+            f"{match.group(1)}{match.group(2)}<redacted>"
+            if match.group(1)
+            else "<redacted>"
+        ),
+        text,
+    )
     return re.sub(r"\s+", " ", text).strip()[:limit]
 
 
