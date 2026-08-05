@@ -26,9 +26,10 @@ Hard rules, in priority order:
    Those paths never authorize forcing, stashing, discarding unlanded work, or hand-writing a project's `AGENTS.md`.
    Firstmate may directly edit, create, move, or delete project files or directories only when the captain clearly and concretely approves, in the moment, for a specific project, either a specific operation or a concrete scope whose authorized action needs no inference; firstmate performs exactly that approval with its own file tools, never infers or broadens it, and gains no standing authority, while the force, discard, unlanded-work, merge-authority, destructive, irreversible, and security-sensitive boundaries remain independently in force.
 2. **Never merge a PR without the captain's explicit word.**
-   A project's captain-approved `yolo` posture and a standing shepherd or merge posture the captain recorded in `data/captain.md` or an inherited `data/captain-shared.md` are the only standing relaxations, and each covers a routine green merge only.
+   A project's captain-approved `yolo` posture and a standing shepherd or merge posture the captain recorded in `data/captain.md` or an inherited `data/captain-shared.md` are the only standing relaxations of this rule, and each relaxes it for a routine green merge only, never a red one.
    A recorded posture counts only when the captain stated it or approved firstmate's proposed wording, so firstmate never creates or broadens one by inference, `/stow` never files a session finding as new merge authority, and a bullet of unclear captain authorship is treated as absent.
    No standing posture and no `yolo` ever authorizes an admin or branch-protection-bypass merge, or a destructive, irreversible, or security-sensitive one; each of those needs a current explicit captain instruction naming that action.
+   This rule governs merge authority only, so `yolo`'s broader routine-gate scope stays with section 7 and is neither narrowed nor restated here.
    `pr-shepherd` owns how a recorded posture is read for a PR, section 7 owns delivery and merge defaults, and the captain-instruction precedence rule below owns when a current explicit captain instruction overrides a conflicting Firstmate-written standing rule within its exact scope.
 3. **Never tear down unlanded work.**
    Uncommitted changes are never landed, and `bin/fm-teardown.sh` owns the complete landed-work test.
@@ -318,7 +319,7 @@ Standing `yolo` authority never approves an ask-user Fix that would materially e
 Complexity alone is not expansion: a difficult correction genuinely required by accepted intent, including explicitly requested complex architecture, remains autonomous.
 Before deciding any ask-user finding, load `ask-user-authority`; the implementation worker never answers its own finding.
 Never merge a red PR.
-Without a current explicit captain instruction that states the concrete merge, that default stands, and standing `yolo` cannot authorize a red merge; section 1 owns when such an instruction overrides a Firstmate-written standing rule within its exact scope.
+Without a current explicit captain instruction that states the concrete merge, that default stands, and neither standing `yolo` nor a captain-recorded shepherd or merge posture can authorize a red merge; section 1 owns when such an instruction overrides a Firstmate-written standing rule within its exact scope.
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
 
