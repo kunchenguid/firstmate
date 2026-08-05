@@ -413,25 +413,46 @@ clear_pause_tracking() {  # <window>
 }
 
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class
+  local win=$1 task=$2 key last recheck_file statusf sig class
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
-  last=$(last_status_line "$STATE/$task.status")
+  statusf="$STATE/$task.status"
+  last=$(last_status_line "$statusf")
   recheck_file="$STATE/.paused-rechecked-$key"
   if ! status_is_paused "$last"; then
     rm -f "$recheck_file"
     crew_absorb_class "$task"
     return
   fi
-  if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
+  # Cached verdict: skip the costly authoritative re-read (an fm-crew-state.sh call
+  # plus the keyed open/resolved fold) while a recent recheck still stands AND the
+  # status stream it was taken from is byte-identical. Both halves of the pause proof
+  # are pure functions of that stream, so an unchanged signature means the earlier
+  # verdict is still exactly as true - while any append, including one that OPENS a
+  # decision after the pause flag was written, invalidates the cache and forces a
+  # fresh proof rather than riding out the age window behind a stale `paused`.
+  # The recheck marker carries the signature as its content; callers read only its
+  # mtime for the age bound, and a marker left by an older watcher simply mismatches
+  # and re-proves.
+  sig=$(stat_sig "$statusf")
+  if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ] \
+     && [ -n "$sig" ] && [ "$sig" = "$(cat "$recheck_file" 2>/dev/null || true)" ]; then
     printf 'paused'
     return
   fi
   class=$(crew_absorb_class "$task" "$last")
   case "$class" in
-    paused) date +%s > "$recheck_file" ;;
-    working|none) rm -f "$recheck_file" ;;
+    paused)
+      sig=$(stat_sig "$statusf")
+      if [ -z "$sig" ] || ! crew_declared_pause_absorbable "$task" "$last" \
+         || [ "$sig" != "$(stat_sig "$statusf")" ]; then
+        class=none
+        rm -f "$recheck_file"
+      else
+        printf '%s' "$sig" > "$recheck_file"
+      fi
+      ;;
     *) rm -f "$recheck_file" ;;
   esac
   printf '%s' "$class"

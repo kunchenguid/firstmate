@@ -92,6 +92,7 @@
 4597	tests/fm-wake-daemon-lifecycle-e2e.test.sh
 36178	tests/fm-wake-queue.test.sh
 4510	tests/fm-watch-checkpoint.test.sh
+180000	tests/fm-watch-pause-absorb.test.sh
 95645	tests/fm-watch-triage.test.sh
 20435	tests/fm-watcher-lock.test.sh
 23744	tests/fm-x-mode.test.sh

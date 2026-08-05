@@ -116,6 +116,8 @@ id=${1:-}
 key=$(printf '%s' "$id" | tr -c 'A-Za-z0-9' '_')
 var="FM_FAKE_CREW_STATE_$key"
 val=${!var:-${FM_FAKE_CREW_STATE:-}}
+[ -z "${FM_FAKE_CREW_STATE_APPEND_STATUS:-}" ] \
+  || printf '%s\n' "$FM_FAKE_CREW_STATE_APPEND_STATUS" >> "${FM_STATE_OVERRIDE:?}/$id.status"
 printf '%s\n' "${val:-state: unknown · source: none · fake default}"
 exit 0
 SH

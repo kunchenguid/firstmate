@@ -16,7 +16,8 @@
 #
 # Daemon-side classification/injection lives in fm-daemon.test.sh; watcher/lock
 # liveness in fm-watcher-lock.test.sh; the durable-queue safety matrix in
-# fm-wake-queue.test.sh.
+# fm-wake-queue.test.sh; the full declared-pause truth table - live-idle, dead,
+# open-decision, and closed-decision panes - in fm-watch-pause-absorb.test.sh.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -329,11 +330,17 @@ test_failure_pause_is_failure_classifier() {
 # reasons - working (active run/busy pane), paused (declared external wait), or none
 # (surface it) - so the watcher's stale path gets both for one bounded call.
 # crew_is_paused delegates to it exactly as crew_is_provably_working does.
+#
+# The pause half is proven from the crewmate's own durable status stream, not from
+# the fm-crew-state.sh verdict, so every pause case here needs a real status file;
+# the full pause truth table (including the run-step verdicts that used to veto a
+# pause) lives in tests/fm-watch-pause-absorb.test.sh.
 test_crew_absorb_class_classifier() {
-  local dir fakebin malformed
-  dir=$(make_case absorb-class); fakebin="$dir/fakebin"
+  local dir fakebin malformed state
+  dir=$(make_case absorb-class); fakebin="$dir/fakebin"; state="$dir/state"
   export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
-  export FM_FAKE_CREW_STATE
+  export FM_FAKE_CREW_STATE FM_STATE_OVERRIDE="$state"
+  printf 'working: compiling\n' > "$state/a.status"
   FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
   [ "$(crew_absorb_class a)" = working ] || fail "active run-step not classed working"
   FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running) · liveness: alive (2 procs) · step: test'
@@ -363,24 +370,47 @@ test_crew_absorb_class_classifier() {
     || fail "a state line without a liveness field changed classification"
   FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
   [ "$(crew_absorb_class a)" = working ] || fail "busy pane not classed working"
+  printf 'paused: awaiting upstream\n' > "$state/a.status"
   FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting upstream'
   [ "$(crew_absorb_class a)" = paused ] || fail "declared pause not classed paused"
   crew_is_paused a || fail "crew_is_paused did not recognize a paused verdict"
   ! crew_is_provably_working a || fail "a paused crew was treated as provably working"
+  # A terminal run-step with NO pause in the stream is not absorbable...
+  printf 'done: PR ready\n' > "$state/a.status"
   FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review'
   [ "$(crew_absorb_class a)" = none ] || fail "terminal run-step without pause context was absorbed"
+  # ...and yields to one when the caller supplies it.
+  printf 'paused: awaiting ordered PR merges\n' > "$state/a.status"
   [ "$(crew_absorb_class a 'paused: awaiting ordered PR merges')" = paused ] \
     || fail "terminal run-step did not yield to a declared pause for absorb classification"
+  # A FAILED run-step yields to a declared pause too, as of 2026-08-03. It used not
+  # to, which silenced nothing but did surface plenty: fm-crew-state.sh maps a
+  # routinely CANCELLED run onto `failed`, so ordinary teardown-cancelled runs
+  # wedge-escalated lanes that had legitimately declared a wait. A crewmate that
+  # genuinely failed reports it with the captain-relevant `failed:` verb, and a
+  # failure written under the pause verb is caught by status_pause_is_failure below -
+  # neither route depends on this veto.
   FM_FAKE_CREW_STATE='state: failed · source: run-step · validation failed'
+  [ "$(crew_absorb_class a 'paused: awaiting ordered PR merges')" = paused ] \
+    || fail "failed run-step did not yield to a declared external wait"
+  printf 'paused: error: drive run: read response: i/o timeout\n' > "$state/a.status"
+  [ "$(crew_absorb_class a 'paused: error: drive run: read response: i/o timeout')" = none ] \
+    || fail "a failure reported under the pause verb was absorbed behind a failed run-step"
+  printf 'blocked: stream advanced while pipeline state was read\n' > "$state/a.status"
   [ "$(crew_absorb_class a 'paused: awaiting ordered PR merges')" = none ] \
-    || fail "failed run-step was absorbed behind a declared pause"
+    || fail "a stale caller-supplied pause overrode the current status line"
+  printf 'paused: awaiting ordered PR merges\n' > "$state/a.status"
+  export FM_FAKE_CREW_STATE_APPEND_STATUS='blocked: stream advanced during pipeline state read'
+  [ "$(crew_absorb_class a 'paused: awaiting ordered PR merges')" = none ] \
+    || fail "a pause invalidated during the crew-state read was absorbed"
+  unset FM_FAKE_CREW_STATE_APPEND_STATUS
   FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling'
   [ "$(crew_absorb_class a)" = none ] || fail "stale working: status-log classed absorbable"
   FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
   [ "$(crew_absorb_class a)" = none ] || fail "unknown crew classed absorbable"
   ! crew_is_paused a || fail "unknown crew classed paused"
   [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
-  unset FM_FAKE_CREW_STATE
+  unset FM_FAKE_CREW_STATE FM_STATE_OVERRIDE
   pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
 }
 
