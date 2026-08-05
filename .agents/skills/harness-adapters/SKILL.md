@@ -93,7 +93,7 @@ Before inspecting or changing session-open behavior, read `docs/sessionstart-nud
 
 At session start, `bin/fm-session-start.sh` prints exactly one watcher supervision block for the detected primary harness.
 Do not substitute another harness's wait shape when resuming supervision.
-Claude's Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns tokenless re-arm around `bin/fm-watch-arm.sh`, and Grok uses tracked background-notify cycles around `bin/fm-watch-arm.sh`.
+Claude's Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns tokenless re-arm around `bin/fm-watch-arm.sh`. Grok and agy use background-notify cycles around `bin/fm-watch-arm.sh`.
 Codex uses bounded foreground checkpoints through `bin/fm-watch-checkpoint.sh` because Codex cannot reason while a foreground tool call is running.
 OpenCode uses `.opencode/plugins/fm-primary-watch-arm.js`, which coordinates with the turn-end guard plugin and wakes the TUI with `client.session.promptAsync`.
 Pi and pi-signed use the tracked `.pi/extensions/fm-primary-turnend-guard.ts` plus the tracked `.pi/extensions/fm-primary-pi-watch.ts`, both project-local extensions the Pi engine auto-discovers once trusted.
@@ -123,6 +123,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
 | muse | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>`, and `ultra` only for an explicit `max` | Verified 2026-08-05 on Muse Code 0.1.0-R708.1. The flag accepts `none\|minimal\|low\|medium\|high\|xhigh\|ultra` and defaults to `high`. `ultra` is muse's max-class level, so it is reachable only through an explicit captain `max`, never from the generic fallback; `none` and `minimal` sit below the shared vocabulary and stay unreachable. |
+| agy | `--model <model>` | `--effort <low\|medium\|high\|xhigh\|max>` | Verified on Antigravity CLI / AGY. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 No script resolves that split for you: establish which credential store a tuple reads from the discovery surfaces below plus `quota-axi auth --json`'s per-provider sources, and show that reasoning rather than inferring it from a harness, model, or source name.
