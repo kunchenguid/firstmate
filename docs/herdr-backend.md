@@ -67,18 +67,6 @@ Existing task operations use recorded endpoint ids and do not move a live task w
 The per-home workspace is reused while it has task tabs.
 Closing its last tab can remove the workspace, and the next spawn recreates it.
 
-### Crewmate display names
-
-After a ship or scout harness launch on Herdr, Firstmate best-effort renames the registered agent and its tab to a short role-plus-topic name (`scout-<slug>` or `ship-<slug>`) so the agents sidebar is readable without a manual rename.
-The name is pure-derived from the task id and kind (`fm_backend_herdr_display_name`), capped at 32 characters, and matches Herdr's agent-name grammar.
-It is also recorded as `herdr_display_name=` in task meta for recovery and debugging.
-Display names are never ownership authority: peeks, sends, teardown, and supervision keep using recorded pane and tab ids.
-Tabs are still created as `fm-<id>`; post-spawn rename is best-effort and must not fail the spawn.
-Husk re-spawn and list-live therefore match either the create label or the scout/ship display form so a renamed husk is not stranded.
-The primary seed tab labeled `1` is never renamed.
-Secondmate launches are out of scope for automatic display names.
-When presentation spaces are enabled and the task tab is a projected child, only the agent is renamed: the tab keeps its `fm-<id>` label so husk reclaim's exact-label match (see below) still finds it on re-spawn.
-
 ## Presentation spaces
 
 Each new crewmate or scout is placed in a disposable one-task workspace by default, on Herdr 0.8.0 and newer.

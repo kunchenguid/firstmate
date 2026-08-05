@@ -30,13 +30,16 @@ Merge authority is an input to this skill, not something the skill grants itself
 
 Phase 7 may merge only when at least one of these authority paths holds for the PR in front of you:
 
-- (a) A standing captain-authorized shepherd or merge posture recorded in this home's `data/captain.md`, or in an inherited `data/captain-shared.md` when secondmate inheritance applies.
+- (a) A standing captain-authored shepherd or merge posture recorded in this home's `data/captain.md`, or in an inherited `data/captain-shared.md` when secondmate inheritance applies.
 - (b) The project's captain-approved `yolo` posture, for routine green merges within its scope.
 - (c) A current explicit captain word to merge that PR.
 
 Path (a) is satisfied only by reading an explicit recorded preference in one of those two files that authorizes shepherded merges in clear wording.
-Read the file rather than inferring the posture: absence of such an entry makes path (a) false, and merge then needs path (b) or path (c).
+That bullet must be one the captain stated, or one the captain approved after firstmate proposed the wording; a posture firstmate inferred from conversation and filed itself, including through `/stow`, is not captain-authored.
+Read the file rather than inferring the posture: absence of such an entry, or unclear captain authorship, makes path (a) false, and merge then needs path (b) or path (c).
+Never write or widen such a bullet to create the authority this skill is about to rely on.
 Invoking `/pr-shepherd` is not by itself authority path (a).
+Paths (a) and (b) cover a routine green merge only, so an admin or branch-protection-bypass merge always needs path (c) naming that bypass, per Phase 7.
 When none of (a), (b), or (c) holds, finish the pipeline and stop at the merge-ready report, exactly as if `--no-merge` had been passed.
 `--no-merge` forces report-only even when authority exists.
 Merging is never the default for an environment that has granted none of these paths.
@@ -314,7 +317,8 @@ Use the project's merge path:
 - Standalone: `gh pr merge <n> --squash` or the repo default method.
 
 Prefer the normal merge path and do not reach for `--admin`.
-`--admin` bypasses branch protection the forge is actively enforcing, so it is allowed only when gates 3-5 already pass and either the recorded standing posture behind authority path (a) explicitly covers admin merge for that case, or the captain gives a current explicit instruction naming the admin merge for that PR.
+`--admin` bypasses branch protection the forge is actively enforcing, so it is allowed only when gates 3-5 already pass and the captain gives a current explicit instruction naming the admin merge, or an equivalent protection bypass, for that PR.
+Authority paths (a) and (b) never authorize it, no matter how the recorded posture or `yolo` scope is worded.
 An agent's own judgement that a required review is stale is never sufficient.
 
 After merge, confirm `state=MERGED`, report the full URL, and give a one-line outcome.
