@@ -413,6 +413,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --slurpfile pr_discovery_input "$PR_DISCOVERY_FILE" '
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
+  def normalized_pr_url: sub("/+$"; "");
   def effectively_working: (.current_state.state == "working" or .liveness.activity == "active");
   def portfolio_bound($surface; $shown; $total; $rest):
     {surface:$surface,shown:$shown,total:$total,omitted:($total-$shown),rest:$rest};
@@ -426,7 +427,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | (($fl | index("endpoints")) != null) as $f_endpoints
   | ([ $landed_selection.selected[] as $row
        | if $row.pr_url == null then $row
-         else ([ $candidate_prs[] | select(.url == $row.pr_url) ][0]) as $live_pr
+         else ([ $candidate_prs[]
+                  | select((.url | normalized_pr_url) == ($row.pr_url | normalized_pr_url)) ][0]) as $live_pr
          | select($live_pr.verification == "verified_live" and $live_pr.state == "MERGED")
          | $row
          end ]) as $done
