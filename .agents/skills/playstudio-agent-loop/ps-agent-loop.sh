@@ -678,13 +678,32 @@ print("""() => {
 
 _capture_review_frame() {
   # Best-effort viewport JPEG into <dir>/frame-NNNNNN.jpg. Never fails the turn.
+  # chrome-devtools-axi --format jpeg may write <path>.jpeg even when asked for .jpg.
   local dir="$1"
   local idx="$2"
-  local path
+  local path written
   [ -n "$dir" ] || return 0
   mkdir -p "$dir" || return 0
   path="$(printf '%s/frame-%06d.jpg' "$dir" "$idx")"
-  ps_axi_try screenshot "$path" --format jpeg >/dev/null 2>&1 || true
+  if ! ps_axi_try screenshot "$path" --format jpeg >/dev/null 2>&1; then
+    printf 'ps-agent-loop: review screenshot failed for %s\n' "$path" >&2
+    return 0
+  fi
+  written=""
+  if [ -f "$path" ]; then
+    written="$path"
+  elif [ -f "${path%.jpg}.jpeg" ]; then
+    written="${path%.jpg}.jpeg"
+  elif [ -f "${path}.jpeg" ]; then
+    written="${path}.jpeg"
+  fi
+  if [ -z "$written" ]; then
+    printf 'ps-agent-loop: review screenshot reported ok but file missing at %s\n' "$path" >&2
+    return 0
+  fi
+  if [ "$written" != "$path" ]; then
+    mv -f "$written" "$path" || cp -f "$written" "$path" || true
+  fi
 }
 
 _stitch_review_mp4() {
@@ -694,14 +713,21 @@ _stitch_review_mp4() {
   local count
   [ -d "$frames_dir" ] || return 1
   require_cmd ffmpeg
-  count="$(find "$frames_dir" -maxdepth 1 -name 'frame-*.jpg' 2>/dev/null | wc -l | tr -d '[:space:]')"
+  # Normalize any axi .jpeg siblings into .jpg names the glob expects.
+  local f
+  for f in "$frames_dir"/frame-*.jpeg; do
+    [ -e "$f" ] || continue
+    mv -f "$f" "${f%.jpeg}.jpg" 2>/dev/null || cp -f "$f" "${f%.jpeg}.jpg" 2>/dev/null || true
+  done
+  count="$(find "$frames_dir" -maxdepth 1 \( -name 'frame-*.jpg' -o -name 'frame-*.jpeg' \) 2>/dev/null | wc -l | tr -d '[:space:]')"
   if [ "${count:-0}" -lt 1 ]; then
     printf 'ps-agent-loop: review video skipped (no frames in %s)\n' "$frames_dir" >&2
     return 1
   fi
   # Duplicate a single frame so ffmpeg can emit a short clip.
   if [ "$count" -eq 1 ]; then
-    cp "$frames_dir"/frame-*.jpg "$frames_dir/frame-000001.jpg" 2>/dev/null || true
+    cp "$frames_dir"/frame-*.jpg "$frames_dir/frame-000001.jpg" 2>/dev/null || \
+      cp "$frames_dir"/frame-*.jpeg "$frames_dir/frame-000001.jpg" 2>/dev/null || true
   fi
   ffmpeg -y -hide_banner -loglevel error \
     -framerate 1 \
