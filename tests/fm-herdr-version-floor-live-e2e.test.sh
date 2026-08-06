@@ -43,14 +43,12 @@ case "$(uname -s)/$(uname -m)" in
   *) echo "skip: no pinned Herdr release asset for $(uname -s)/$(uname -m)"; exit 0 ;;
 esac
 
-# Digests are pinned for the macOS aarch64 assets measured on 2026-08-05; on any
-# other platform the asset is still exercised, with the digest recorded in the
-# output instead of enforced, because no measurement exists to pin it against.
-# tag<TAB>expected-version-prefix<TAB>expected-verdict<TAB>macos-aarch64-sha256
+# Digests are pinned for every supported asset measured on 2026-08-05.
+# tag<TAB>expected-version-prefix<TAB>expected-verdict<TAB>macos-aarch64-sha256<TAB>macos-x86_64-sha256<TAB>linux-aarch64-sha256<TAB>linux-x86_64-sha256
 RELEASES=$(cat <<'EOF'
-v0.7.5	0.7.5	below	37350546b0012555943b92eaf962665de4e264395baeb44227b8015e8ff5b0d6
-preview-2026-07-29-44b3adb12552	0.7.5-preview	below	99941b4a40e852c8f21694c7ec1e96f85abd4f764d9f667757c65fae6e4b065b
-v0.8.0	0.8.0	above	d53a9f93fccfdfcc55632927bf51002f5add0aa7990bcdf508ffbd84ac658178
+v0.7.5	0.7.5	below	37350546b0012555943b92eaf962665de4e264395baeb44227b8015e8ff5b0d6	3fe50c4a63dc8102306b1322178628ddb3655cd3ae56d784f094153408d69e62	32e763a1499a6b694b1d708e4f062b743be1da9f34fcfa4d212d6db6fe09a8b9	3dc83288073e4c2d3c679a30e7be97bcca9141c6fd17dbbb9219142e95c59253
+preview-2026-07-29-44b3adb12552	0.7.5-preview	below	99941b4a40e852c8f21694c7ec1e96f85abd4f764d9f667757c65fae6e4b065b	b9316cdff4802f325f6b77b83ea36cd33deb8da4ef9efa8454423b0ce8de77fc	2167fb9127d0a67c1dad368d54e6468fd7c2a3858b832922c7f0c264d012be13	2d50d64ab849c3d0f5d0d53e0bebd00fa94d5ed120797532c8fcfd1a679ebc19
+v0.8.0	0.8.0	above	d53a9f93fccfdfcc55632927bf51002f5add0aa7990bcdf508ffbd84ac658178	77cb5afd6c8fcaaaf3bc28e474ec01c209331ad08094e20d7f8aa9b0bb78d649	f647ac66468d9efbc642fe534fb284468f0aea60641606fc008dfc0d82a3ca87	b872ea7e40fa2cb17e857ac9b62b1bf26db7b403c622f5d2f3f5b35f6e9acd28
 EOF
 )
 
@@ -103,20 +101,25 @@ INSTALLED_VERDICT=$(floor_verdict "$INSTALLED_PROTOCOL" "$INSTALLED_VERSION")
 CHECKED=$((CHECKED + 1))
 pass "installed herdr $INSTALLED_VERSION protocol $INSTALLED_PROTOCOL classifies $INSTALLED_VERDICT the presentation floor"
 
-while IFS=$'\t' read -r TAG VERSION_PREFIX EXPECTED DIGEST; do
+while IFS=$'\t' read -r TAG VERSION_PREFIX EXPECTED MACOS_AARCH64_DIGEST MACOS_X86_64_DIGEST LINUX_AARCH64_DIGEST LINUX_X86_64_DIGEST; do
   [ -n "${TAG:-}" ] || continue
+  case "$ASSET" in
+    herdr-macos-aarch64) DIGEST=$MACOS_AARCH64_DIGEST ;;
+    herdr-macos-x86_64) DIGEST=$MACOS_X86_64_DIGEST ;;
+    herdr-linux-aarch64) DIGEST=$LINUX_AARCH64_DIGEST ;;
+    herdr-linux-x86_64) DIGEST=$LINUX_X86_64_DIGEST ;;
+    *) fail "no pinned digest field for $ASSET" ;;
+  esac
   DIR="$TMP_ROOT/$TAG"
   mkdir -p "$DIR"
   if ! curl -fsSL --max-time 300 -o "$DIR/herdr" \
     "https://github.com/ogulcancelik/herdr/releases/download/$TAG/$ASSET"; then
     fail "could not download the pinned Herdr $TAG $ASSET asset; the floor mapping is unverified"
   fi
-  chmod +x "$DIR/herdr"
   GOT_DIGEST=$(shasum -a 256 "$DIR/herdr" | awk '{print $1}')
-  if [ "$ASSET" = herdr-macos-aarch64 ]; then
-    [ "$GOT_DIGEST" = "$DIGEST" ] \
-      || fail "Herdr $TAG $ASSET digest changed (expected $DIGEST, got $GOT_DIGEST); re-measure the floor mapping before trusting it"
-  fi
+  [ "$GOT_DIGEST" = "$DIGEST" ] \
+    || fail "Herdr $TAG $ASSET digest changed (expected $DIGEST, got $GOT_DIGEST); re-measure the floor mapping before trusting it"
+  chmod +x "$DIR/herdr"
   RELEASE=$(probe_client "$DIR") \
     || fail "Herdr $TAG did not report a readable version and protocol"
   GOT_VERSION=${RELEASE%%$'\t'*}
