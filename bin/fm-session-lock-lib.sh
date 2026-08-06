@@ -184,6 +184,12 @@ fm_harness_ancestry_pid() {
 # fm_harness_pids_contain directly.
 fm_harness_ancestry_contains() {  # <pid>
   local want=$1 pids
+  # The guard runs before the walk: no ancestry can contain a non-numeric pid,
+  # and a missing or malformed lock is the normal state on the Stop-hook path
+  # (bin/fm-claude-stop-autoarm.sh), which asks this on every Stop firing.
+  case "$want" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
   pids=$(fm_harness_ancestry_pids) || return 1
   fm_harness_pids_contain "$pids" "$want"
 }
