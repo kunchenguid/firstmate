@@ -7,6 +7,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-pr-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-check-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-orca-tests)
 POLL="$ROOT/bin/fm-pr-poll.sh"
@@ -512,6 +514,49 @@ test_orca_cleanup_fallback_preserves_a_registered_pr_poll() {
   pass "Orca cleanup fallback preserves registered PR merge-poll ownership"
 }
 
+test_orca_cleanup_fallback_preserves_a_registered_validation_gate() {
+  local proj data state config id out status
+  id="orcavalidationpriorityz8"
+  proj="$TMP_ROOT/validation-cleanup-project"
+  data="$TMP_ROOT/validation-cleanup-data"
+  state="$TMP_ROOT/validation-cleanup-state"
+  config="$TMP_ROOT/validation-cleanup-config"
+  fm_git_init_commit "$proj"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "worktree=$proj" "project=$proj" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-validation-check.sh" "$id" >/dev/null \
+    || fail "could not arm registered validation-gate fixture"
+  fm_validation_check_registered "$state" "$id" \
+    "$ROOT/bin/fm-nm-run-lib.sh" "$ROOT/bin/fm-validation-poll.sh" \
+    || fail "registered validation-gate fixture was not valid"
+
+  orca_case validation-cleanup-priority
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-validation-cleanup"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-validation-cleanup"}}}\n' > "$RESP/3.out"
+  printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/4.out"
+  printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/5.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "pathless Orca spawn should fail"
+  assert_grep 'kind=ship' "$state/$id.meta" \
+    "Orca cleanup fallback discarded validation-gate ownership"
+  assert_grep 'mode=no-mistakes' "$state/$id.meta" \
+    "Orca cleanup fallback discarded no-mistakes delivery mode"
+  fm_validation_check_registered "$state" "$id" \
+    "$ROOT/bin/fm-nm-run-lib.sh" "$ROOT/bin/fm-validation-poll.sh" \
+    || fail "Orca cleanup fallback exposed the validation gate as a generic check"
+  pass "Orca cleanup fallback preserves registered validation-gate ownership"
+}
+
 test_spawn_writes_orca_metadata_and_launches_harness() {
   local proj wt data state config id out log
   id="orcaspawnz1"
@@ -729,7 +774,7 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "Orca spawn should fail when metadata cannot be written"
-  assert_contains "$out" "Is a directory" "spawn should fail at metadata publication"
+  assert_contains "$out" "could not publish task metadata for $id" "spawn should fail at metadata publication"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-meta-fail'$'\x1f''--json' \
     "Orca spawn should close the recorded terminal when a later abort occurs"
   assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-meta-fail'$'\x1f''--force'$'\x1f''--json' \
@@ -1346,6 +1391,7 @@ test_worktree_and_terminal_helpers_parse_json
 test_worktree_create_removes_worktree_when_path_missing
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails
 test_orca_cleanup_fallback_preserves_a_registered_pr_poll
+test_orca_cleanup_fallback_preserves_a_registered_validation_gate
 test_spawn_writes_orca_metadata_and_launches_harness
 test_spawn_refuses_orca_secondmate_before_home_mutation
 test_spawn_refuses_orca_when_runtime_not_ready

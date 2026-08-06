@@ -90,8 +90,6 @@ VALIDATION_TRUST_ABSENT=0
 PROMOTION_META_HASH=
 CHECK_SLOT_HELD=0
 MIGRATION_BOUNDARY_HELD=0
-PROMOTION_VALIDATION_CHILD_PID=
-PROMOTION_VALIDATION_SLOT_OWNER_PID=
 promotion_slot_release() {
   local failed=0
   if [ "$CHECK_SLOT_HELD" -eq 1 ]; then
@@ -121,15 +119,8 @@ promotion_candidate_current() {
   [ -f "$META" ] && [ ! -L "$META" ] && [ "$(fm_pr_file_link_count "$META")" = 1 ] || return 1
   [ "$(fm_pr_sha256 "$META")" = "$PROMOTION_META_HASH" ]
 }
-promotion_validation_handoff_stop() {
-  [ -n "$PROMOTION_VALIDATION_CHILD_PID" ] || return 0
-  kill -TERM "$PROMOTION_VALIDATION_CHILD_PID" 2>/dev/null || true
-  wait "$PROMOTION_VALIDATION_CHILD_PID" 2>/dev/null || true
-  PROMOTION_VALIDATION_CHILD_PID=
-}
 promote_cleanup() {
   [ -z "$TMP" ] || rm -f -- "$TMP"
-  promotion_validation_handoff_stop || true
   if [ "$PROMOTION_COMMITTED" -ne 1 ] && [ -n "$ORIGINAL_META" ]; then
     [ "$CHECK_SLOT_HELD" -eq 1 ] || promotion_slot_acquire || true
     if [ "$CHECK_SLOT_HELD" -eq 1 ] && promotion_candidate_current; then
@@ -181,16 +172,11 @@ mv -f -- "$TMP" "$META"
 TMP=
 
 if [ "$MODE" = no-mistakes ]; then
-  PROMOTION_VALIDATION_SLOT_OWNER_PID=${BASHPID:-$$}
-  FM_VALIDATION_SLOT_OWNER_PID="$PROMOTION_VALIDATION_SLOT_OWNER_PID" FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$FM_ROOT/bin/fm-validation-check.sh" --slot-held "$ID" &
-  PROMOTION_VALIDATION_CHILD_PID=$!
-  if ! wait "$PROMOTION_VALIDATION_CHILD_PID"; then
-    PROMOTION_VALIDATION_CHILD_PID=
+  if ! FM_VALIDATION_SLOT_OWNER_PID="${BASHPID:-$$}" FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$FM_ROOT/bin/fm-validation-check.sh" --slot-held "$ID"; then
     echo "error: could not arm validation check for $ID" >&2
     exit 1
   fi
-  PROMOTION_VALIDATION_CHILD_PID=
 fi
 PROMOTION_COMMITTED=1
 promotion_slot_release || exit 1

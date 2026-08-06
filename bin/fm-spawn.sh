@@ -647,8 +647,6 @@ SPAWN_META_PREVIOUS=
 SPAWN_META_PREVIOUS_PRESENT=0
 SPAWN_META_CANDIDATE_HASH=
 SPAWN_VALIDATION_HANDOFF=0
-SPAWN_VALIDATION_CHILD_PID=
-SPAWN_VALIDATION_SLOT_OWNER_PID=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -691,13 +689,6 @@ spawn_check_slot_acquire() {
     return 1
   fi
   SPAWN_CHECK_SLOT_HELD=1
-}
-
-spawn_validation_handoff_stop() {
-  [ -n "$SPAWN_VALIDATION_CHILD_PID" ] || return 0
-  kill -TERM "$SPAWN_VALIDATION_CHILD_PID" 2>/dev/null || true
-  wait "$SPAWN_VALIDATION_CHILD_PID" 2>/dev/null || true
-  SPAWN_VALIDATION_CHILD_PID=
 }
 
 spawn_meta_reset() {
@@ -925,6 +916,10 @@ spawn_orca_cleanup_meta_publish() {
     spawn_check_slot_release
     return 0
   fi
+  if fm_validation_check_slot_reserved "$STATE" "$ID"; then
+    spawn_check_slot_release
+    return 0
+  fi
   state_device=$(fm_pr_file_device "$STATE") || {
     spawn_meta_reset
     return 1
@@ -1026,7 +1021,6 @@ spawn_abort_cleanup() {
   local status=$?
   [ -z "$SPAWN_META_TMP" ] || rm -f -- "$SPAWN_META_TMP"
   SPAWN_META_TMP=
-  spawn_validation_handoff_stop || true
   spawn_meta_rollback || true
   spawn_check_slot_release || true
   spawn_meta_rollback_discard
@@ -2568,16 +2562,11 @@ SPAWN_META_ROLLBACK_CAPTURE=0
 # it later with the higher-priority authenticated merge poll.
 if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
   if [ "$SPAWN_VALIDATION_HANDOFF" -eq 1 ]; then
-    SPAWN_VALIDATION_SLOT_OWNER_PID=${BASHPID:-$$}
-    FM_VALIDATION_SLOT_OWNER_PID="$SPAWN_VALIDATION_SLOT_OWNER_PID" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-      "$SCRIPT_DIR/fm-validation-check.sh" --slot-held "$ID" &
-    SPAWN_VALIDATION_CHILD_PID=$!
-    if ! wait "$SPAWN_VALIDATION_CHILD_PID"; then
-      SPAWN_VALIDATION_CHILD_PID=
+    if ! FM_VALIDATION_SLOT_OWNER_PID="${BASHPID:-$$}" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-validation-check.sh" --slot-held "$ID"; then
       echo "error: could not arm validation check for $ID" >&2
       exit 1
     fi
-    SPAWN_VALIDATION_CHILD_PID=
     SPAWN_VALIDATION_HANDOFF=0
     spawn_check_slot_release || {
       echo "error: could not complete validation check handoff for $ID" >&2
