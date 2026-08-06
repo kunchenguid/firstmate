@@ -511,6 +511,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `decision-hold-lifecycle` - load before treating an investigation or visual review as complete, before ending a visual review that exposed a decision, and when recording or routing the captain's answer.
 - `process-event-sources` - load before arming a long-polling source, and on any `procevent <adapter> <source-id> <sequence>` check wake.
   Never run a registered source's blocking command yourself in a conversational turn.
+- `notion-board` - load on a `sprint-check` check wake before spawning the PM, and whenever sprint-board cards, delegation from the board, or an unclear card's escalation path are in play.
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the X-mode configuration blocker, on a `public-followup ...` `check:` wake or a startup-surfaced public commitment, and on any milestone or terminal wake for an X-mode-linked task before posting its completion follow-up; relevant only when X mode is on.
 - `notion-board` - load when the captain names the board, Notion, or a sprint, on a heartbeat or post-teardown re-evaluation that finds no dispatchable local work, on any terminal wake for a task carrying `notion_page=` in its meta, and before recycling a finished card; relevant only when the captain keeps work on the Notion board.
 - `frontend-evaluator` - load when a frontend, UI, or visual task in a project with a web interface reaches a green test gate but has not landed, before relaying evaluation findings or spawning a re-evaluation round, and when deciding whether a verdict blocks landing; relevant only for projects with a runnable web interface.
@@ -526,6 +527,10 @@ That token is consent for public replies and normal reversible lifecycle actions
 
 An X-only home still requires the live supervision cycle so mentions can wake it without fleet work.
 On an `x-mention <request_id>` or `x-mode-error ...` check wake, load `fmx-respond`, which owns classification, public-safety policy, reply or dismissal, task linking, and follow-ups.
+
+On a `sprint-check` check wake, SPAWN THE PM to scan the sprint board; do not read it yourself. The board is project work, and hard rule 1 keeps firstmate out of it - the wake is a dispatch trigger, not an invitation to look. The role is "PM"; which harness and model serve that role comes from `config/crew-dispatch.json`, never from this file, so the rule survives a change of vendor. `notion-board` owns what the PM does once awake: delegate what it finds, end the turn silently on an empty board, and route an unclear card back through firstmate as a specific question rather than guessing.
+
+Spawn at most ONE scanning PM per wake, and none at all while a scanning PM is still live: the signal only means "the moment to look has arrived", so a second scanner racing the first would have two agents claiming the same card.
 For every X-linked terminal outcome, load that owner and use the promised-final reconciliation when a typed public commitment exists, otherwise post the final completion follow-up before teardown.
 
 A promised final public reply is durable state, never conversation memory.

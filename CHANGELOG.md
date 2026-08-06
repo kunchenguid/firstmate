@@ -6,6 +6,17 @@ Versioning is semantic, and MAJOR is reserved for **contract** breaks that a
 running fleet would notice: the `state/<id>.meta` format, configuration file
 names, or a script's exit codes. MINOR adds capability, PATCH fixes behaviour.
 
+## [1.1.1] - 2026-08-06
+
+### Fixed
+
+- The scheduled sprint check shipped in 1.1.0 was never reachable. Three links
+  were missing: nothing invoked the poll (the watcher sweeps
+  `state/*.check.sh` and no shim existed), firstmate had no rule to spawn the
+  PM on a `sprint-check` wake, and the shim was hand-made so it would have been
+  absent in any other home. Bootstrap now owns the shim, `AGENTS.md` owns the
+  dispatch rule, and a test covers the wiring rather than only the behaviour.
+
 ## [1.1.0] - 2026-08-06
 
 ### Added
