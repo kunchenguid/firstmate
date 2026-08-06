@@ -244,7 +244,7 @@ fm_backend_herdr_presentation_release_supported() {
 # usable state dir is given. Without one the warning is emitted every call,
 # which is what a one-shot caller wants.
 fm_backend_herdr_presentation_floor_warn() {  # <state-dir> <verdict>
-  local state_dir=${1:-} verdict=${2:-2} release=${FM_BACKEND_HERDR_PRESENTATION_RELEASE:-an unreadable release} key marker reason
+  local state_dir=${1:-} verdict=${2:-2} release=${FM_BACKEND_HERDR_PRESENTATION_RELEASE:-an unreadable release} key marker reason tmp=""
   if [ "$verdict" -eq 1 ]; then
     reason="herdr $release is older than the $FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION floor for presentation spaces, where projected cleanup can steal the active workspace"
   else
@@ -253,8 +253,16 @@ fm_backend_herdr_presentation_floor_warn() {  # <state-dir> <verdict>
   if [ -n "$state_dir" ] && [ -d "$state_dir" ] && [ ! -L "$state_dir" ]; then
     key=${release//[^a-zA-Z0-9]/-}
     marker="$state_dir/$FM_BACKEND_HERDR_PRESENTATION_FLOOR_MARKER_PREFIX$key"
-    [ -e "$marker" ] && return 0
-    : > "$marker" 2>/dev/null || true
+    { [ -e "$marker" ] || [ -L "$marker" ]; } && return 0
+    tmp=$(umask 077; mktemp "$state_dir/.herdr-presentation-floor.XXXXXX" 2>/dev/null) || tmp=""
+    if [ -n "$tmp" ]; then
+      if ln "$tmp" "$marker" 2>/dev/null; then
+        rm -f -- "$tmp"
+      else
+        rm -f -- "$tmp"
+        { [ -e "$marker" ] || [ -L "$marker" ]; } && return 0
+      fi
+    fi
   fi
   echo "warning: $reason; using the ordinary flat layout instead. Upgrade herdr to $FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION or newer (herdr update) to restore the projection, or write \"on\" into config/$FM_BACKEND_HERDR_PRESENTATION_CONFIG to force it on this release." >&2
   return 0

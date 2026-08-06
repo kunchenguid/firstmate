@@ -988,6 +988,48 @@ test_presentation_floor_warning_is_one_per_release() {
   pass "herdr presentation: the below-floor warning is one per home per release, not one per spawn"
 }
 
+test_presentation_floor_warning_marker_is_atomic_and_symlink_safe() {
+  local dir config state fb i pid warnings marker outside symlink_warning failure_state failure_warning
+  local pids=()
+  dir="$TMP_ROOT/presentation-floor-marker-safety"; config="$dir/config"; state="$dir/state"
+  mkdir -p "$config" "$state"
+  fb=$(make_release_fakebin "$dir" "$BELOW_FLOOR_PROTOCOL" "$BELOW_FLOOR_VERSION")
+  for i in {1..20}; do
+    presentation_enabled_verdict "$config" "$fb" "$state" \
+      >"$dir/concurrent-$i.out" 2>"$dir/concurrent-$i.err" &
+    pids+=("$!")
+  done
+  for pid in "${pids[@]}"; do
+    wait "$pid" || fail "a concurrent presentation-floor verdict failed"
+  done
+  warnings=$(awk '/^warning:/ { count++ } END { print count + 0 }' "$dir"/concurrent-*.err)
+  [ "$warnings" -eq 1 ] \
+    || fail "concurrent below-floor spawns must publish exactly one warning, got $warnings"
+
+  state="$dir/symlink-state"
+  mkdir -p "$state"
+  marker="$state/.herdr-presentation-floor-version-0-7-5--protocol-17-"
+  outside="$dir/symlink-target"
+  ln -s "$outside" "$marker"
+  symlink_warning=$(presentation_enabled_verdict "$config" "$fb" "$state" 2>&1 >/dev/null)
+  [ -z "$symlink_warning" ] \
+    || fail "an existing dangling marker symlink must be treated as already claimed: $symlink_warning"
+  [ ! -e "$outside" ] \
+    || fail "publishing the floor marker followed a dangling symlink outside the state directory"
+
+  failure_state="$dir/failure-state"
+  mkdir -p "$failure_state"
+  cat > "$fb/ln" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fb/ln"
+  failure_warning=$(presentation_enabled_verdict "$config" "$fb" "$failure_state" 2>&1 >/dev/null)
+  [ -n "$failure_warning" ] \
+    || fail "a non-collision marker publication failure must not suppress the warning"
+  pass "herdr presentation: warning marker publication is atomic, symlink-safe, and fails visible"
+}
+
 # The floor classifier is pure, so these cases pin it against every release
 # identity measured from the real binaries plus the deliberate signal-loss and
 # signal-divergence shapes that decide which signal carried a verdict.
@@ -4147,6 +4189,7 @@ test_presentation_explicit_opt_in_survives_the_floor
 test_presentation_explicit_off_opts_out
 test_presentation_unrecognized_value_warns_and_keeps_the_default
 test_presentation_floor_warning_is_one_per_release
+test_presentation_floor_warning_marker_is_atomic_and_symlink_safe
 test_release_floor_verdict_matches_the_measured_releases
 test_release_floor_verdict_survives_losing_either_signal
 test_presentation_preference_reports_three_distinct_states
