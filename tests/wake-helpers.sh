@@ -94,12 +94,17 @@ SH
 # A per-id override FM_FAKE_CREW_STATE_<sanitized-id> wins; otherwise the shared
 # FM_FAKE_CREW_STATE; otherwise an unknown verdict (NOT provably working), the
 # safe default so a test that forgets to set one surfaces rather than absorbs.
+# Setting FM_FAKE_CREW_STATE_LOG makes the fake append one line per invocation to
+# that path, so a test can COUNT reads rather than reason about how many a code
+# path makes - the read is bounded-cost by contract, and a count is the only way
+# to witness that bound rather than assume it.
 make_fake_crew_state() {  # <fakebin>
   local fakebin=$1
   cat > "$fakebin/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
 id=${1:-}
+[ -n "${FM_FAKE_CREW_STATE_LOG:-}" ] && printf '%s\n' "$id" >> "$FM_FAKE_CREW_STATE_LOG"
 key=$(printf '%s' "$id" | tr -c 'A-Za-z0-9' '_')
 var="FM_FAKE_CREW_STATE_$key"
 val=${!var:-${FM_FAKE_CREW_STATE:-}}
