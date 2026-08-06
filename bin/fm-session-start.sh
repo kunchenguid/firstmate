@@ -640,7 +640,26 @@ if [ "$PRIMARY_HARNESS" = cursor ]; then
   CURSOR_HOOKS="$FM_ROOT/.cursor/hooks.json"
   CURSOR_HOOKS_OK=0
   if [ -f "$CURSOR_HOOKS" ] && command -v jq >/dev/null 2>&1; then
-    if jq -e '.version == 1 and (.hooks.stop | type) == "array" and (.hooks.preToolUse | type) == "array"' "$CURSOR_HOOKS" >/dev/null 2>&1; then
+    if jq -e '
+      .version == 1
+      and (.hooks | type) == "object"
+      and (.hooks.stop | type) == "array"
+      and (.hooks.stop | length) > 0
+      and all(.hooks.stop[];
+        type == "object"
+        and (.command | type == "string" and contains("fm-turnend-guard-cursor.sh"))
+        and (.timeout | type == "number" and . >= 600)
+        and (has("loop_limit") and .loop_limit == null)
+      )
+      and (.hooks.preToolUse | type) == "array"
+      and (.hooks.preToolUse | length) > 0
+      and all(.hooks.preToolUse[];
+        type == "object"
+        and (.matcher == "Shell")
+        and (.command | type == "string" and contains("fm-arm-pretool-check.sh") and contains("--cursor"))
+        and (.timeout | type == "number" and . > 0)
+      )
+    ' "$CURSOR_HOOKS" >/dev/null 2>&1; then
       CURSOR_HOOKS_OK=1
     fi
   fi

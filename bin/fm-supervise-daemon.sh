@@ -1377,6 +1377,8 @@ fm_super_main() {
   if [ -z "${FM_COMPOSER_IDLE_RE:-}" ] && [ "$(fm_daemon_primary_harness)" = cursor ]; then
     FM_COMPOSER_IDLE_RE='^Add a follow-up$'
   fi
+  FM_COMPOSER_HARNESS=$(fm_daemon_primary_harness)
+  export FM_COMPOSER_HARNESS
   export FM_COMPOSER_IDLE_RE
 
   # --- auto-discover the supervisor target (the pane running firstmate) -----

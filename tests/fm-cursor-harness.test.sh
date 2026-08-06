@@ -53,10 +53,13 @@ SH
   # process tree: ps -t <tty> reports a cursor-agent process, and pgrep -P
   # reports its worker-server child. The parent pid and child pid come from
   # env so each test controls the topology.
-  cat > "$fakebin/ps" <<'SH'
+cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
 case "$*" in
+  *"lstart="*)
+    printf 'Mon Jan  1 00:00:00 2001\n'
+    exit 0 ;;
   *"-t "*)
     printf '%s %s\n' "${FM_FAKE_CURSOR_AGENT_PID:-4242}" "${FM_FAKE_CURSOR_AGENT_ARGS:-"/opt/cursor-agent --force --trust brief"}"
     exit 0 ;;
@@ -72,7 +75,8 @@ SH
 set -u
 case "$*" in
   *"index.js worker-server"*)
-    printf '%s\n' "${FM_FAKE_CURSOR_WORKER_PID:-4243}"
+    [ -n "${FM_FAKE_CURSOR_WORKER_PID:-}" ] || exit 1
+    printf '%s\n' "$FM_FAKE_CURSOR_WORKER_PID"
     exit 0 ;;
 esac
 exit 1
@@ -321,7 +325,7 @@ SH
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR='' GROK_HOME="$HOME_DIR/grok-home" CURSOR_AGENT=1 \
-    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
   status=$?
   expect_code 0 "$status" "claude spawn under CURSOR_AGENT=1 should succeed"
@@ -373,6 +377,37 @@ test_cursor_worker_server_recorded_at_spawn() {
   pass "cursor spawn records the worker-server pid and starttime identity in meta"
 }
 
+test_cursor_worker_server_alias_uses_portable_identity() {
+  local rec id out status worker_pid
+  id=cursor-worker-alias-z8
+  rec=$(make_cursor_case cursor-worker-alias "$id")
+  read_case_record "$rec"
+  rm -f "$FAKEBIN_DIR/cursor-agent"
+  fm_fake_exit0 "$FAKEBIN_DIR" agent
+  ( exec sleep 300 ) &
+  worker_pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$worker_pid" 2>/dev/null || fail "cursor-worker-alias-z8: worker stand-in did not start"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_CURSOR_AGENT_ARGS='/opt/agent --force --trust brief' \
+    FM_FAKE_CURSOR_WORKER_PID=$worker_pid FM_PROC_ROOT_OVERRIDE="$CASE_DIR/no-proc" \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "cursor alias spawn without /proc should succeed"
+  assert_grep "cursor_worker_server=$worker_pid" "$HOME_DIR/state/$id.meta" \
+    "cursor alias spawn did not record the worker-server pid"
+  assert_grep 'cursor_worker_server_start=lstart=' "$HOME_DIR/state/$id.meta" \
+    "cursor alias spawn did not record the portable lstart identity"
+  kill -KILL "$worker_pid" 2>/dev/null || true
+  pass "cursor worker-server discovery handles agent alias and portable identity"
+}
+
 test_cursor_worker_server_absent_record_is_omitted() {
   local rec id out status
   id=cursor-worker-none-z9
@@ -408,4 +443,5 @@ test_cursor_resolver_unix_home_fallback
 test_cursor_missing_binary_refusal
 test_non_cursor_launch_unsets_cursor_agent
 test_cursor_worker_server_recorded_at_spawn
+test_cursor_worker_server_alias_uses_portable_identity
 test_cursor_worker_server_absent_record_is_omitted

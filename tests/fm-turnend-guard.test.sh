@@ -850,10 +850,10 @@ test_tracked_claude_entries_inert_under_grok() {
 # Cursor's stop hook does not honour exit 2 as a forced continuation, so the
 # shim translates the shared guard's blind-turn signal into a followup_message
 # body. Every stop is evaluated, including a loop_count>0 continuation, so a
-# follow-up turn that ends blind re-arms; loop_count only bounds consecutive
-# loud arm-failure followups. A typed actionable arm close gets a normal wake
-# followup; an arm failure keeps the loud blind banner. Verified against cursor-agent
-# 2026.07.23-e383d2b.
+# follow-up turn that ends blind re-arms; persistent state bounds repeated
+# failures and re-firing reasons without charging distinct progress. A typed
+# actionable arm close gets a normal wake followup; an arm failure keeps the
+# loud blind banner. Verified against cursor-agent 2026.07.23-e383d2b.
 
 # The shim runs bin/fm-watch-arm.sh inside the fixture. These stubs stand in
 # for the real arm wrapper so the test controls whether the arm succeeds
@@ -1020,6 +1020,20 @@ cursor_shim_stop() {
     | tail -n 1
 }
 
+cursor_shim_stop_without_loop_count() {
+  printf '{"session_id":"%s","workspace_roots":["%s"]}' \
+    "${CURSOR_FIXTURE_SESSION:-cur-session}" "$CURSOR_FIXTURE_DIR" \
+    | CURSOR_WORKSPACE_ROOT="$CURSOR_FIXTURE_DIR" "$@" bash "$CURSOR_FIXTURE_DIR/bin/fm-turnend-guard-cursor.sh" 2>&1 \
+    | tail -n 1
+}
+
+cursor_shim_stop_with_malformed_loop_count() {
+  printf '{"session_id":"%s","loop_count":"malformed","workspace_roots":["%s"]}' \
+    "${CURSOR_FIXTURE_SESSION:-cur-session}" "$CURSOR_FIXTURE_DIR" \
+    | CURSOR_WORKSPACE_ROOT="$CURSOR_FIXTURE_DIR" "$@" bash "$CURSOR_FIXTURE_DIR/bin/fm-turnend-guard-cursor.sh" 2>&1 \
+    | tail -n 1
+}
+
 # Each close reports a DIFFERENT typed actionable reason, the ordinary
 # supervision case: distinct events handled one after another.
 install_varying_actionable_arm_stub() {
@@ -1034,28 +1048,41 @@ EOF
   chmod +x "$dir/bin/fm-watch-arm.sh"
 }
 
+install_alternating_arm_stub() {
+  local dir=$1
+  cat > "$dir/bin/fm-watch-arm.sh" <<EOF
+#!/usr/bin/env bash
+printf 'arm-invoked\\n' >> "$dir/state/.arm-invocations"
+n=\$(wc -l < "$dir/state/.arm-invocations")
+if [ "\$((n % 2))" -eq 1 ]; then
+  printf 'signal: task.status\\n'
+  exit 0
+fi
+printf 'registration failure\\n' >&2
+exit 1
+EOF
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+}
+
 test_cursor_shim_bounds_loud_failure_followups() {
   local dir out i
   dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-fail-budget")
   CURSOR_FIXTURE_DIR=$dir
   : > "$dir/state/task1.meta"
   install_failing_arm_stub "$dir"
-  # Consecutive arm failures each keep the loud registration/startup guidance,
-  # up to the budget; only then does the chain end instead of looping forever
-  # on a broken arm.
-  for i in 1 2 3; do
+  # Consecutive arm failures keep loud registration/startup guidance, including
+  # after the per-failure budget rolls over into the unified chain count.
+  for i in 1 2 3 4; do
     out=$(cursor_shim_stop "$i" env)
     assert_contains "$out" "TURN WOULD END BLIND" \
       "arm failure $i of the budget must keep the loud failure followup"
   done
-  out=$(cursor_shim_stop 4 env)
-  [ "$out" = '{}' ] || fail "cursor shim must stop re-blocking past the failure budget, got: $out"
-  # The exhausted budget resets, so a later failure is diagnosable again rather
-  # than permanently silent.
+  assert_contains "$out" "repeatedly" \
+    "the failure budget rollover must add registration/startup guidance"
   out=$(cursor_shim_stop 5 env)
   assert_contains "$out" "TURN WOULD END BLIND" \
-    "the failure budget must reset after exhaustion instead of silencing the banner forever"
-  pass "fm-turnend-guard-cursor: consecutive arm failures are bounded by FM_CURSOR_TURNEND_BLOCK_BUDGET and reset"
+    "the failure budget must keep the banner after rollover instead of silencing it"
+  pass "fm-turnend-guard-cursor: repeated arm failures stay loud through budget rollover"
 }
 
 test_cursor_shim_wake_chain_does_not_consume_failure_budget() {
@@ -1132,19 +1159,47 @@ test_cursor_shim_fresh_turn_resets_the_wake_chain() {
 }
 
 test_cursor_shim_hard_bound_ends_a_runaway_chain() {
-  local dir out
+  local dir out i
   dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-hard-bound")
   CURSOR_FIXTURE_DIR=$dir
   : > "$dir/state/task1.meta"
-  install_actionable_arm_stub "$dir"
-  # An arm that flaps between actionable and failed closes keeps both per-branch
-  # counters at 1 forever; the unified loop_count bound is what ends the chain.
-  out=$(cursor_shim_stop 3 env FM_CURSOR_TURNEND_BLOCK_BUDGET=2 FM_CURSOR_WAKE_CHAIN_BUDGET=1)
-  [ "$out" = '{}' ] || fail "cursor shim must end a chain at the unified continuation bound, got: $out"
+  install_alternating_arm_stub "$dir"
+  # One real arm sequence alternates actionable and failed closes. Distinct
+  # progress does not consume the bound, but the failures eventually reach the
+  # unified ceiling and keep a diagnostic instead of emitting {}.
+  for i in 1 2 3 4 5 6 7; do
+    out=$(cursor_shim_stop_without_loop_count env FM_CURSOR_TURNEND_BLOCK_BUDGET=2 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
+    [ "$out" != '{}' ] || fail "alternating arm sequence emitted {} before its diagnostic ceiling"
+  done
+  out=$(cursor_shim_stop_without_loop_count env FM_CURSOR_TURNEND_BLOCK_BUDGET=2 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
+  [ "$out" != '{}' ] || fail "alternating arm sequence emitted {} at its diagnostic ceiling"
+  assert_contains "$out" "bounded chain" \
+    "alternating actionable/failed arms must reach the unified diagnostic ceiling"
+  assert_contains "$out" "TURN WOULD END BLIND" \
+    "alternating arm ceiling must retain loud failure guidance"
+  pass "fm-turnend-guard-cursor: alternating arm outcomes share one persistent hard bound"
+}
+
+test_cursor_shim_persists_bound_without_valid_loop_count() {
+  local dir out
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-invalid-loop-count")
+  CURSOR_FIXTURE_DIR=$dir
+  : > "$dir/state/task1.meta"
   install_failing_arm_stub "$dir"
-  out=$(cursor_shim_stop 3 env FM_CURSOR_TURNEND_BLOCK_BUDGET=2 FM_CURSOR_WAKE_CHAIN_BUDGET=1)
-  [ "$out" = '{}' ] || fail "the unified bound must apply to failing arms too, got: $out"
-  pass "fm-turnend-guard-cursor: one unified loop_count bound ends a runaway continuation chain"
+  out=$(cursor_shim_stop_without_loop_count env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=1)
+  assert_contains "$out" "TURN WOULD END BLIND" \
+    "an absent loop_count must use persistent failure state"
+  out=$(cursor_shim_stop_with_malformed_loop_count env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=1)
+  assert_contains "$out" "bounded chain" \
+    "a malformed loop_count must not reset the persistent hard bound"
+  assert_contains "$out" "TURN WOULD END BLIND" \
+    "the malformed loop_count ceiling must stay loud on arm failure"
+  out=$(cursor_shim_stop_without_loop_count env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=1)
+  assert_contains "$out" "TURN WOULD END BLIND" \
+    "the next invalid-loop chain must start normally after the ceiling clears state"
+  assert_not_contains "$out" "bounded chain" \
+    "the next invalid-loop chain must not inherit the cleared ceiling"
+  pass "fm-turnend-guard-cursor: absent and malformed loop_count preserve bounded state"
 }
 
 test_cursor_shim_distinct_wakes_do_not_hit_the_chain_ceiling() {
@@ -1196,14 +1251,16 @@ test_cursor_shim_falls_back_to_loop_count_without_writable_state() {
   : > "$dir/state/task1.meta"
   install_failing_arm_stub "$dir"
   chmod 500 "$dir/state"
-  # The chain record cannot be persisted, so every stop would otherwise compute
-  # count 1 and re-block forever. loop_count carries the bound instead.
+  # The chain record cannot be persisted, so a positive loop_count carries the
+  # fallback bound; absent loop_count fails closed with a loud diagnostic.
   out=$(cursor_shim_stop 0 env FM_CURSOR_TURNEND_BLOCK_BUDGET=3)
   assert_contains "$out" "TURN WOULD END BLIND" \
     "an unpersisted first failure must still raise the loud failure followup"
-  out=$(cursor_shim_stop 5 env FM_CURSOR_TURNEND_BLOCK_BUDGET=3)
+  out=$(cursor_shim_stop 8 env FM_CURSOR_TURNEND_BLOCK_BUDGET=3)
   chmod 700 "$dir/state"
-  [ "$out" = '{}' ] || fail "cursor shim must bound on loop_count when the chain record cannot persist, got: $out"
+  [ "$out" != '{}' ] || fail "cursor shim must keep a diagnostic when the chain record cannot persist"
+  assert_contains "$out" "TURN WOULD END BLIND" \
+    "the payload fallback ceiling must retain loud failure guidance"
   pass "fm-turnend-guard-cursor: an unwritable state dir degrades to the payload loop_count bound"
 }
 
@@ -2094,6 +2151,7 @@ test_cursor_shim_bounds_the_actionable_wake_chain
 test_cursor_shim_distinct_wakes_do_not_hit_the_chain_ceiling
 test_cursor_shim_fresh_turn_resets_the_wake_chain
 test_cursor_shim_hard_bound_ends_a_runaway_chain
+test_cursor_shim_persists_bound_without_valid_loop_count
 test_cursor_shim_failure_budget_is_session_scoped
 test_cursor_shim_falls_back_to_loop_count_without_writable_state
 test_cursor_shim_arm_sources_x_mode_cadence

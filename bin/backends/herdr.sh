@@ -2880,7 +2880,7 @@ EOF
   # The idle regex honors FM_COMPOSER_IDLE_RE first (per-harness cursor
   # default) and falls back to this backend's placeholder regex.
   fm_composer_classify_content "$bordered" "$stripped" \
-    "${FM_COMPOSER_IDLE_RE:-$FM_BACKEND_HERDR_IDLE_RE}" insensitive "$plain_row"
+    "${FM_COMPOSER_IDLE_RE:-$FM_BACKEND_HERDR_IDLE_RE}" insensitive "$plain_row" "${FM_COMPOSER_HARNESS:-}"
 }
 
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,

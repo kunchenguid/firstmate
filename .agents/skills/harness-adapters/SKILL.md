@@ -61,6 +61,7 @@ The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `
 `opencode`, `pi`, and `pi-signed` expose passive lifecycle callbacks and force one bounded follow-up when the shared predicate blocks.
 Grok selects native blocking or its pre-native bounded resume fallback from the exact running Stop payload; [`docs/turnend-guard.md`](../../../docs/turnend-guard.md) owns that contract.
 Cursor translates the shared guard's exit-2 signal into a `followup_message` body through `bin/fm-turnend-guard-cursor.sh`, because cursor's stop hook does not honour exit 2 as a forced continuation.
+Cursor primary and secondmate mid-turn liveness use stop-hook-owned autoarm; the cursor protocol owns typed wake handling, persistent bounds, and loud arm-failure guidance.
 Kimi is outside the primary turn-end guard scope, while `docs/turnend-guard.md` owns its separate guarded global hook for crew wake signals.
 muse is CREWMATE/SCOUT ONLY and has no primary integration at all: its plugin engine (its only hook surface) is disabled in the default build, and its Claude-compatible hook dialect names `asyncRewake` and model reawakening as explicitly unsupported, which is exactly what a firstmate primary's turn-end supervision needs.
 `bin/fm-spawn.sh` refuses a `--secondmate` launch on muse for that reason.

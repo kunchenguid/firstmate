@@ -2294,6 +2294,44 @@ test_recorded_cursor_worker_server_is_reaped() {
   pass "a cursor worker-server recorded at spawn is reaped by pid at teardown, cwd-independent"
 }
 
+test_recorded_cursor_worker_server_lstart_identity_is_reaped() {
+  local case_dir rc pid identity
+  case_dir=$(make_case cursor-worker-server-lstart-reap)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  ( exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "cursor-worker-server-lstart-reap: setup sleeper did not start"
+  identity='lstart=Mon Jan  1 00:00:00 2001'
+  printf 'cursor_worker_server=%s\ncursor_worker_server_start=%s\n' "$pid" "$identity" \
+    >> "$case_dir/state/task-x1.meta"
+  cat > "$case_dir/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -p ] && [ "${2:-}" = "${FM_FAKE_CURSOR_WORKER_PID:-}" ] \
+   && [ "${3:-}" = -o ] && [ "${4:-}" = lstart= ]; then
+  printf 'Mon Jan  1 00:00:00 2001\n'
+  exit 0
+fi
+exec "$REAL_PS_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/ps"
+
+  rc=0
+  FM_PROC_ROOT_OVERRIDE="$case_dir/no-proc" FM_FAKE_CURSOR_WORKER_PID="$pid" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "cursor-worker-server-lstart-reap: teardown should succeed"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "cursor-worker-server-lstart-reap: recorded lstart worker-server survived teardown"
+  fi
+  assert_grep "reaping recorded cursor worker-server" "$case_dir/stderr" \
+    "cursor-worker-server-lstart-reap: teardown did not consume lstart identity"
+  pass "teardown reaps a recorded Cursor worker-server with portable lstart identity"
+}
+
 test_recorded_cursor_worker_server_recycled_pid_not_killed() {
   local case_dir rc victim starttime
   case_dir=$(make_case cursor-worker-server-recycled)
@@ -2801,6 +2839,7 @@ test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
 test_recorded_cursor_worker_server_is_reaped
+test_recorded_cursor_worker_server_lstart_identity_is_reaped
 test_recorded_cursor_worker_server_recycled_pid_not_killed
 test_recorded_cursor_worker_server_is_reaped_for_secondmate
 test_cursor_worker_server_record_missing_falls_back_to_cwd_reaper

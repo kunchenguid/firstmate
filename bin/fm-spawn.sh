@@ -2078,7 +2078,7 @@ kimi_capture() {
 
 # cursor_worker_server_record: after a cursor-agent launch, find the CLI's
 # background `node .../index.js worker-server` child and record its pid plus a
-# starttime identity in state/<id>.meta so teardown can reap it by pid even
+# process identity in state/<id>.meta so teardown can reap it by pid even
 # after it detaches (reparents to init) and its cwd leaves the task worktree
 # (the observed cursor-worker-server-cleanup-gap incident, 2026-08-05).
 #
@@ -2089,8 +2089,18 @@ kimi_capture() {
 # detach. No match is not fatal: teardown falls back to its cwd-based reaper.
 # Never matched by a generic worker-server cmdline scan - the install dir and
 # cmdline are shared across homes and tasks.
-cursor_worker_server_find() {  # <backend> <target> -> pid on stdout
-  local backend=$1 target=$2 tty pid args
+cursor_process_matches() {  # <args> <cursor-binary>
+  local args=$1 binary=$2 name
+  name=${binary##*/}
+  case "$name" in cursor-agent|agent) ;; *) return 1 ;; esac
+  case "$args" in
+    "$name"|"$name "*|*/"$name"|*/"$name "*) return 0 ;;
+  esac
+  return 1
+}
+
+cursor_worker_server_find() {  # <backend> <target> <cursor-binary> -> pid on stdout
+  local backend=$1 target=$2 binary=${3:-${CURSOR_BIN:-cursor-agent}} tty pid args
   case "$backend" in
     tmux)
       tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
@@ -2099,9 +2109,9 @@ cursor_worker_server_find() {  # <backend> <target> -> pid on stdout
       # comm MainThread) is the group leader. Its worker-server child is NOT in
       # the foreground group once detached, so match by parent below instead.
       LC_ALL=C ps -t "${tty#/dev/}" -o pid=,args= 2>/dev/null | while read -r pid args; do
-        case "$args" in
-          *cursor-agent*) printf '%s\n' "$pid"; return 0 ;;
-        esac
+        cursor_process_matches "$args" "$binary" || continue
+        printf '%s\n' "$pid"
+        return 0
       done
       ;;
     herdr)
@@ -2117,34 +2127,49 @@ cursor_worker_server_find() {  # <backend> <target> -> pid on stdout
   esac
 }
 
+cursor_worker_server_identity() {  # <pid> -> identity value for meta
+  local pid=$1 proc_root stat_line starttime value
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$pid/stat" ]; then
+    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
+    starttime=$(awk '{print $22}' <<< "$stat_line")
+    case "$starttime" in ''|*[!0-9]*) return 1 ;; esac
+    printf '%s\n' "$starttime"
+    return 0
+  fi
+  value=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  [ -n "$value" ] || return 1
+  case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  printf 'lstart=%s\n' "$value"
+}
+
 cursor_worker_server_record() {  # <backend> <target> <meta>
-  local backend=$1 target=$2 meta=$3 agent_pid worker_pid starttime i
+  local backend=$1 target=$2 meta=$3 agent_pid worker_pid identity binary=${CURSOR_BIN:-cursor-agent} i
   for i in 1 2 3 4 5; do
     agent_pid=
     while IFS= read -r pid; do
       [ -n "$pid" ] || continue
-      # The cursor-agent process is the one whose own cmdline names
-      # cursor-agent (the worker-server's does not, even though its parent
-      # does).
-      if LC_ALL=C ps -p "$pid" -o args= 2>/dev/null | grep -q 'cursor-agent'; then
+      # The selected Cursor process names the selected binary; the
+      # worker-server's cmdline does not, even though its parent does.
+      if cursor_process_matches "$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null)" "$binary"; then
         agent_pid=$pid
         break
       fi
     done <<EOF
-$(cursor_worker_server_find "$backend" "$target")
+$(cursor_worker_server_find "$backend" "$target" "$binary")
 EOF
     [ -n "$agent_pid" ] || { sleep 0.3; continue; }
     worker_pid=$(pgrep -P "$agent_pid" -f 'index.js worker-server' 2>/dev/null | head -1 || true)
     [ -n "$worker_pid" ] || { sleep 0.3; continue; }
-    # Record the same starttime identity teardown's task_process_identity
-    # reads, so the reaper can verify the pid was not reused.
-    starttime=$(awk '{print $22}' "/proc/$worker_pid/stat" 2>/dev/null || true)
-    [ -n "$starttime" ] || return 0
+    identity=$(cursor_worker_server_identity "$worker_pid" 2>/dev/null || true)
+    [ -n "$identity" ] || return 0
     {
       echo "cursor_worker_server=$worker_pid"
-      echo "cursor_worker_server_start=$starttime"
+      echo "cursor_worker_server_start=$identity"
     } >> "$meta"
-    echo "cursor worker-server recorded for $ID: pid=$worker_pid start=$starttime" >&2
+    echo "cursor worker-server recorded for $ID: pid=$worker_pid start=$identity" >&2
     return 0
   done
   return 0
