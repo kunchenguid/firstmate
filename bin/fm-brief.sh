@@ -58,10 +58,14 @@
 # auto-memory store: at most one new or updated memory per durable non-obvious
 # finding, and a one-line/<200-char index entry (all detail stays in the memory
 # file) since the index loads whole into every future session under a hard size
-# cap that silently drops whatever falls past it. Every ship mode's definition of
-# done requires both outcomes in the closing status line so the checklist is
+# cap that silently drops whatever falls past it. That store lives outside the
+# task worktree, so each scaffold's stay-inside-the-worktree rule names it
+# alongside the status file, and item 2 stays open until the closing status line
+# instead of closing with the commit. Every ship mode's definition of done
+# requires both outcomes in the closing status line so the checklist is
 # verifiable from that line alone; the scout scaffold carries only the
-# auto-memory item, adapted to its report deliverable.
+# auto-memory item, adapted to its report deliverable. The wording shared by both
+# scaffolds is built once (auto_memory_index_rules) so the two copies cannot drift.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -305,6 +309,21 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+# The auto-memory half of the closing checklist is worded once here and reused by
+# both scaffolds, so the two generated copies cannot drift. Only the framing
+# differs: the ship copy is a numbered checklist item (hence the indent), the
+# scout copy a flat section under its report deliverable.
+AUTO_MEMORY_PATH_RULE="Your system prompt already told you this task's memory location; never hardcode a path here."
+auto_memory_index_rules() {
+  local indent=${1:-}
+  printf '%s\n' \
+    "${indent}Check the index first and prefer updating an existing memory over adding a new one; a new index line is only for knowledge no existing memory covers." \
+    "${indent}Keep the index line to one line under 200 characters - a pointer plus a one-sentence description - with all other detail in the memory file, never the index: the index loads whole into every future session and is capped at roughly 25KB or 200 lines, whichever comes first, with the overflow dropped silently, so a narrated index destroys the store it is meant to serve." \
+    "${indent}Never write secrets, credentials, or captain-private fleet strategy into a memory."
+}
+AUTO_MEMORY_INDEX_RULES=$(auto_memory_index_rules)
+AUTO_MEMORY_INDEX_RULES_ITEM=$(auto_memory_index_rules '   ')
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -318,11 +337,11 @@ $HERDR_SECTION
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
-The report is the only thing that survives, so anything worth keeping must be in it.
+The report is the only thing that survives from this worktree, so anything worth keeping must be in it.
 
 # Rules
 1. Never push to any remote and never open a PR.
-2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
+2. Stay inside this worktree; the only things you may write outside it are the report, the status file below, and the auto-memory store in \`# Project memory\`.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
@@ -344,11 +363,9 @@ The report is the only thing that survives, so anything worth keeping must be in
 
 # Project memory
 Your report is the deliverable, but a durable, non-obvious finding this task uncovered - a gotcha, a verified fact that cost time to establish, an approach that failed for a knowable reason - still belongs in the harness's separate per-repo auto-memory store, so it survives past this report for future sessions.
-Your system prompt already told you this task's memory location; never hardcode a path here.
+$AUTO_MEMORY_PATH_RULE
 Record exactly one memory for it; if this task uncovered none, say so explicitly in your closing status line.
-Check the index first and prefer updating an existing memory over adding a new one; a new index line is only for knowledge no existing memory covers.
-Keep the index line to one line under 200 characters - a pointer plus a one-sentence description - with all other detail in the memory file, never the index: the index loads whole into every future session and is capped at roughly 25KB or 200 lines, whichever comes first, with the overflow dropped silently, so a narrated index destroys the store it is meant to serve.
-Never write secrets, credentials, or captain-private fleet strategy into a memory.
+$AUTO_MEMORY_INDEX_RULES
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -375,7 +392,7 @@ case "$MODE" in
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-Complete the \`# Project memory\` checklist above as part of that commit and be ready to state both outcomes in your closing status line.
+Complete the \`# Project memory\` checklist above before you close: item 1 belongs in that commit, while item 2 writes outside the repo and stays open until your closing status line, which states both outcomes.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url} - project memory: {both checklist outcomes}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
@@ -389,7 +406,7 @@ Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-Complete the \`# Project memory\` checklist above as part of that commit and be ready to state both outcomes in your closing status line.
+Complete the \`# Project memory\` checklist above before you close: item 1 belongs in that commit, while item 2 writes outside the repo and stays open until your closing status line, which states both outcomes.
 When it is implemented and committed, append \`done: ready in branch fm/$ID - project memory: {both checklist outcomes}\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
@@ -402,7 +419,7 @@ EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
-Complete the \`# Project memory\` checklist above as part of that commit - no-mistakes never lets you hand-edit after a run starts, so this is your only window - and be ready to state both outcomes in your closing status line.
+Complete the \`# Project memory\` checklist above before you close: item 1 belongs in that commit - no-mistakes never lets you hand-edit the repo after a run starts, so this is your only window for it - while item 2 writes outside the repo and stays open through the pipeline, so it can still record what review and CI surface. Your closing status line states both outcomes.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
@@ -446,7 +463,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it.
+2. Stay inside this worktree; the only things you may write outside it are the status file below and the auto-memory store in \`# Project memory\`.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
@@ -477,11 +494,9 @@ This task closes only once both durable-knowledge stores below are checked, and 
    For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
    If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
    Keep it proportionate: skip this item for trivial tasks that produced no durable project knowledge.
-2. Harness auto-memory. Your system prompt already told you this task's memory location; never hardcode a path here.
+2. Harness auto-memory. $AUTO_MEMORY_PATH_RULE
    If this task produced a durable, non-obvious finding - a gotcha, a verified fact that cost time to establish, an approach that failed for a knowable reason - record exactly one memory for it; if it produced none, say so explicitly in your closing status line.
-   Check the index first and prefer updating an existing memory over adding a new one; a new index line is only for knowledge no existing memory covers.
-   Keep the index line to one line under 200 characters - a pointer plus a one-sentence description - with all other detail in the memory file, never the index: the index loads whole into every future session and is capped at roughly 25KB or 200 lines, whichever comes first, with the overflow dropped silently, so a narrated index destroys the store it is meant to serve.
-   Never write secrets, credentials, or captain-private fleet strategy into a memory.
+$AUTO_MEMORY_INDEX_RULES_ITEM
 
 $DOD
 EOF
