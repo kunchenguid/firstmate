@@ -70,7 +70,8 @@ It publishes to the remote's push URL rather than its fetch URL, and reconciles 
 The reconciliation merges the published ref instead of forcing over the local one, so an attestation recorded locally with `--no-push` survives the publishing of a later one.
 
 Its own refusals stay as distinct as the gate's.
-`no-run-record` means the pipeline reported no run, `run-record-unreadable` means the tool itself failed, and `run-record-unparsed` means it reported something no run identity could be read from; the last two quote the tool's own output, because a tool error read as an absent run sends a contributor to re-run a pipeline that already ran.
+`no-run-record` means the pipeline reported no run, `run-record-unreadable` means the tool itself failed, and `run-record-unparsed` means it reported something no run identity could be read from; all three quote the tool's own output, because a tool error read as an absent run sends a contributor to re-run a pipeline that already ran.
+Only what the tool writes to stdout decides which of the three it is, because unrelated notices such as its version-upgrade banner go to stderr and must never stand in for a run record; stderr is quoted alongside stdout purely as diagnostic detail.
 
 When `no-mistakes` publishes this note itself, the helper becomes redundant and nothing about the check changes: the note format is the contract, and which program writes it is not.
 

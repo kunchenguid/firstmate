@@ -330,23 +330,34 @@ cmd_write() {
   branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || die "HEAD is not on a branch"
   [ "$branch" != HEAD ] || die "attest from the branch the pipeline validated, not a detached HEAD"
 
-  # The tool reports its own errors on stdout, so its output is captured whether
-  # it succeeded or not and its exit status is kept. A tool that failed, a tool
-  # whose output this transcription cannot read, and a tool reporting no run at
-  # all are three different repairs, and none of them may be described as one of
-  # the others.
+  # A tool that failed, a tool whose output this transcription cannot read, and a
+  # tool reporting no run at all are three different repairs, and none of them
+  # may be described as one of the others.
+  #
+  # The two streams are therefore kept apart. The tool reports its own errors on
+  # stdout but writes unrelated notices there too, such as its version-upgrade
+  # banner, on stderr. Only stdout decides whether a run record was reported and
+  # only stdout is parsed, so a stderr notice can never stand in for a run
+  # record; stderr is quoted alongside it purely as diagnostic detail.
+  status_err_file=$(mktemp "${TMPDIR:-/tmp}/.fm-attest-status.XXXXXX") \
+    || die "could not create a temporary file"
   status_rc=0
   if [ -n "$run_id" ]; then
-    status=$(no-mistakes axi status --run "$run_id" 2>&1) || status_rc=$?
+    status=$(no-mistakes axi status --run "$run_id" 2>"$status_err_file") || status_rc=$?
   else
-    status=$(no-mistakes axi status 2>&1) || status_rc=$?
+    status=$(no-mistakes axi status 2>"$status_err_file") || status_rc=$?
   fi
+  status_err=$(cat "$status_err_file")
+  rm -f "$status_err_file"
+
   [ "$status_rc" -eq 0 ] || refuse run-record-unreadable \
-    "no-mistakes could not report a pipeline run (exit $status_rc). It said:" \
-    "$status" \
+    "no-mistakes exited $status_rc instead of reporting a pipeline run." \
+    "Its stdout: ${status:-(nothing)}" \
+    "Its stderr: ${status_err:-(nothing)}" \
     "That is a tool or setup failure rather than a missing run; fix it and re-run."
   [ -n "$status" ] || refuse no-run-record \
-    "no-mistakes reported no pipeline run for this repository." \
+    "no-mistakes reported no pipeline run for this repository: it wrote nothing to stdout." \
+    "Its stderr: ${status_err:-(nothing)}" \
     "Validate this branch with no-mistakes before attesting its head."
 
   run_field=
@@ -369,9 +380,10 @@ $(printf '%s\n' "$status" | parse_run_status)
 EOF
 
   is_run_id "$run_field" || refuse run-record-unparsed \
-    "no-mistakes reported a run, but no run identity could be read from it. It said:" \
-    "$status" \
-    "A run was reported, so this is not an absent one: either that record is not a run record, or its shape changed and this transcription needs updating."
+    "no-mistakes wrote a run record to stdout, but no run identity could be read from it." \
+    "Its stdout: $status" \
+    "Its stderr: ${status_err:-(nothing)}" \
+    "Its stdout was not empty, so this is not an absent run: either that output is not a run record, or its shape changed and this transcription needs updating."
   [ "$branch_field" = "$branch" ] || refuse run-covers-another-branch \
     "The most recent pipeline run covers branch '$branch_field', not '$branch'." \
     "Attest from the branch that run validated, or name the run with --run <id>."
@@ -421,13 +433,14 @@ EOF
   # The incoming ref is merged rather than forced over the local one, so an
   # attestation recorded locally with --no-push is not silently discarded by the
   # act of publishing a later one.
-  push_url=$remote
+  # Only the remote's name is ever printed. A resolved URL can embed credentials,
+  # and the name is what the caller passed and what they would re-run with.
   if [ "$push" -eq 1 ]; then
     push_url=$(git remote get-url --push "$remote" 2>/dev/null) || push_url=$remote
     incoming_ref="$notes_ref-incoming"
     if git fetch --quiet --no-tags --force "$push_url" "$notes_ref:$incoming_ref" 2>/dev/null; then
       git notes --ref="$notes_ref" merge -s ours "$incoming_ref" >/dev/null 2>&1 \
-        || die "could not reconcile $notes_ref with $push_url; resolve it and re-run"
+        || die "could not reconcile $notes_ref with the push target of $remote; resolve it and re-run"
       git update-ref -d "$incoming_ref" 2>/dev/null || true
     fi
   fi
@@ -437,8 +450,8 @@ EOF
 
   [ "$push" -eq 1 ] || return 0
   git push --quiet "$remote" "$notes_ref:$notes_ref" \
-    || die "could not publish $notes_ref to $push_url; re-run to reconcile with it and retry"
-  printf 'fm-attest: published %s to %s\n' "$notes_ref" "$push_url"
+    || die "could not publish $notes_ref to $remote; re-run to reconcile with its push target and retry"
+  printf 'fm-attest: published %s to %s\n' "$notes_ref" "$remote"
 }
 
 # ---------------------------------------------------------------------------

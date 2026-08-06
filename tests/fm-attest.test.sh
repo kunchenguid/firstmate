@@ -41,6 +41,12 @@ good_note() {
 # so the emitter is exercised against the tool's real output shape without a
 # pipeline run. The body goes to stdout and the exit status is the caller's,
 # because that is what the real tool does with its own errors.
+#
+# Every stub also writes the version-upgrade banner to stderr, as the real tool
+# does whenever an upgrade is available. That notice is unrelated to any run
+# record, so it must never decide, satisfy, or describe one.
+STUB_STDERR_NOTICE='A new version of no-mistakes is available: v1.40.3 -> v1.41.2'
+
 install_pipeline_stub() {
   local dir=$1 status=$2 rc=${3:-0}
   mkdir -p "$dir/bin"
@@ -48,7 +54,9 @@ install_pipeline_stub() {
     printf '#!/usr/bin/env bash\n'
     printf 'case "$*" in\n'
     printf '  "--version") echo "no-mistakes version v1.40.3 (d873960) 2026-07-22T01:41:41Z" ;;\n'
-    printf '  "axi status") cat <<%s\n' "'FM_STUB_TOON'"
+    printf '  "axi status")\n'
+    printf '    echo %s >&2\n' "'$STUB_STDERR_NOTICE'"
+    printf '    cat <<%s\n' "'FM_STUB_TOON'"
     printf '%s\n' "$status"
     printf 'FM_STUB_TOON\n'
     printf '    exit %s\n' "$rc"
@@ -327,6 +335,11 @@ test_write_refuses_without_a_run_record() {
   rc=$?
   [ "$rc" -ne 0 ] || fail "an attestation was emitted with no pipeline run record"
   assert_contains "$out" "no-run-record" "a missing run record was not reported distinctly"
+  # The stub reported nothing on stdout and only the upgrade banner on stderr.
+  # An absent run must stay an absent run, and the banner must still be shown.
+  assert_not_contains "$out" "run-record-unparsed" \
+    "an unrelated stderr notice was read as a run record"
+  assert_contains "$out" "$STUB_STDERR_NOTICE" "the tool's stderr was not surfaced as detail"
   pass "fm-attest.sh: write refuses when the pipeline reports no run"
 }
 
@@ -344,6 +357,7 @@ test_write_surfaces_a_tool_failure_instead_of_reporting_no_run() {
   [ "$rc" -ne 0 ] || fail "an attestation was emitted while the pipeline tool was failing"
   assert_contains "$out" "run-record-unreadable" "a failing tool was not reported distinctly"
   assert_contains "$out" "repo not initialized" "the tool's own message was swallowed"
+  assert_contains "$out" "$STUB_STDERR_NOTICE" "the tool's stderr was not surfaced as detail"
   assert_not_contains "$out" "no-run-record" "a failing tool was reported as an absent run"
   pass "fm-attest.sh: write surfaces a failing pipeline tool rather than reporting no run"
 }
@@ -360,6 +374,7 @@ test_write_reports_an_unreadable_run_record_distinctly() {
   [ "$rc" -ne 0 ] || fail "an attestation was emitted from an unreadable run record"
   assert_contains "$out" "run-record-unparsed" "an unreadable run record was not reported distinctly"
   assert_contains "$out" "none matching this worktree" "the reported record was not quoted back"
+  assert_contains "$out" "$STUB_STDERR_NOTICE" "the tool's stderr was not surfaced as detail"
   assert_not_contains "$out" "no-run-record" "an unreadable record was reported as an absent run"
   pass "fm-attest.sh: write distinguishes an unreadable run record from an absent one"
 }
@@ -396,6 +411,10 @@ test_write_publishes_to_the_push_target_it_reconciled_against() {
   out=$(publish_out "$repo")
   rc=$?
   [ "$rc" -eq 0 ] || fail "publishing to the remote's push target was refused: $out"
+  # The remote's name, never its resolved push URL, which can embed credentials.
+  assert_contains "$out" "published $NOTES_REF to origin" \
+    "the success line did not name the remote the caller passed"
+  assert_not_contains "$out" "$fork" "the resolved push URL was printed instead of the remote name"
   published=$(git -C "$fork" ls-tree -r --name-only "$NOTES_REF" | tr -d '/')
   assert_contains "$published" "$head" "the attested head never reached the push target"
   assert_contains "$published" "$fork_seed" "publishing discarded the push target's own attestation"
