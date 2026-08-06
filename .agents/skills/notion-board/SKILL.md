@@ -148,3 +148,42 @@ A card asking for one of those is a card to sharpen and escalate, not to dispatc
 When the captain corrects the PM, or asks for board behavior this file does not cover, write it down as a dated entry in `data/learnings.md` in that file's existing format, with an `**Apply:**` line naming the concrete change in behavior.
 Read `data/learnings.md` before acting on the board; entries there refine this skill and win over a general reading of it.
 Do not edit this skill mid-flight to capture a preference - `stow` owns that prohibition, and a structural change to the contract itself is ordinary firstmate-repo work under `firstmate-coding-guidelines`.
+
+## Waking on a sprint-check
+
+`bin/fm-sprint-poll.sh` wakes firstmate on a schedule so the board gets read
+without the captain having to ask. Understand what that signal is: it says **the
+moment to look has arrived**, never **a new task exists**. Nothing outside an
+agent turn can see this board, so the poll cannot know what is on it - you find
+that out yourself, in the turn the wake opened.
+
+On a `sprint-check` wake:
+
+1. Read the board. Cards already taken carry a `notion_page=` link in the
+   backlog (`bin/fm-notion-link.sh` owns that link) - skip them, or the same
+   card is picked up again every hour.
+2. **Delegate what you find; do not build it.** The PM runs the board and
+   assigns work. Implementation belongs to a crewmate, and a PM that starts
+   coding stops running the board.
+3. **Found nothing? End the turn silently.** Around eleven checks a weekday, each
+   reporting "nothing new", trains the captain to stop reading reports - and the
+   one that matters arrives in that noise.
+
+## When a card is unclear
+
+Do not guess, and do not start anyway. A task begun on a guess costs more than
+a task that waited for an answer.
+
+Do not approach the captain either: `AGENTS.md` hard rule 4 routes every
+crewmate's communication through firstmate, and this is no exception.
+
+- State a **specific question**, never "unclear": name what is ambiguous and
+  which readings are possible. "Should the export include archived rows?" is
+  actionable; "the export card is vague" is not.
+- Hand it over with a blocked status line carrying a key, the way the browser
+  evaluation gate does (`blocked [key=...]`), so the question lives in the
+  task's state rather than only in a chat someone has to remember.
+- Leave the card where it is until the answer comes back. It is not in progress.
+
+This is a different rule from "found nothing, stay silent". Silence is right
+when there is nothing to say; it is wrong when there is an unasked question.
