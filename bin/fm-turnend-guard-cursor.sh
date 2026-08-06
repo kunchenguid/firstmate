@@ -94,6 +94,20 @@ CHAIN_REASON=
 CHAIN_REASONS=()
 CHAIN_HAS_REASONS=0
 
+canonical_wake_reason() {
+  local reason=$1 check_reason
+  case "$reason" in
+    stale:*) reason=${reason%% (*} ;;
+    check:*)
+      check_reason=${reason#check: }
+      check_reason=${check_reason%%: *}
+      reason="check: $check_reason"
+      ;;
+    heartbeat:*) reason=heartbeat ;;
+  esac
+  printf '%s' "$reason"
+}
+
 chain_load() {
   local key value
   [ -f "$CHAIN_FILE" ] || { CHAIN_TOTAL=0; return 0; }
@@ -106,8 +120,9 @@ chain_load() {
       total) CHAIN_TOTAL=$value ;;
       fail) CHAIN_FAIL=$value ;;
       wake) CHAIN_WAKE=$value ;;
-      reason) CHAIN_REASON=$value ;;
+      reason) CHAIN_REASON=$(canonical_wake_reason "$value") ;;
       wake_reason)
+        value=$(canonical_wake_reason "$value")
         CHAIN_REASONS+=("$value")
         CHAIN_HAS_REASONS=1
         ;;
@@ -181,6 +196,7 @@ if [ -n "$ARM_OUT" ]; then
   cat "$ARM_OUT" >&2
   WAKE_REASON=$(grep -Em1 '^(signal:|stale:|check:|heartbeat($|:))' "$ARM_OUT" 2>/dev/null || true)
   if [ -n "$WAKE_REASON" ]; then
+    WAKE_REASON=$(canonical_wake_reason "$WAKE_REASON")
     ARM_ACTIONABLE=1
   fi
 else
@@ -195,7 +211,7 @@ RC=$?
 [ "$RC" -eq 2 ] || allow_stop
 
 if [ "$ARM_ACTIONABLE" -eq 1 ]; then
-  # Only a wake reason that keeps re-firing unchanged advances the chain count;
+  # Only a canonical wake reason that keeps re-firing advances the chain count;
   # a different reason is progress and restarts it.
   if [ "$WAKE_REASON" = "$CHAIN_REASON" ]; then
     COUNT=$((CHAIN_WAKE + 1))

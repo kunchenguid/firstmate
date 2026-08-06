@@ -1057,6 +1057,18 @@ EOF
   chmod +x "$dir/bin/fm-watch-arm.sh"
 }
 
+install_dynamic_stale_arm_stub() {
+  local dir=$1
+  cat > "$dir/bin/fm-watch-arm.sh" <<EOF
+#!/usr/bin/env bash
+printf 'arm-invoked\n' >> "$dir/state/.arm-invocations"
+n=\$(wc -l < "$dir/state/.arm-invocations")
+printf 'stale: task-window (idle %ss, escalation %s)\n' "\$n" "\$n"
+exit 0
+EOF
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+}
+
 install_alternating_arm_stub() {
   local dir=$1
   cat > "$dir/bin/fm-watch-arm.sh" <<EOF
@@ -1225,6 +1237,28 @@ test_cursor_shim_bounds_nonconsecutive_wake_refires() {
   assert_not_contains "$out" "bounded chain" \
     "the cleared re-fire ceiling must not latch"
   pass "fm-turnend-guard-cursor: non-consecutive wake re-fires share the persistent bound"
+}
+
+test_cursor_shim_bounds_dynamic_wake_refires() {
+  local dir out i
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-dynamic-wake-refires")
+  CURSOR_FIXTURE_DIR=$dir
+  : > "$dir/state/task1.meta"
+  install_dynamic_stale_arm_stub "$dir"
+  for i in 1 2; do
+    out=$(cursor_shim_stop "$i" env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
+    assert_not_contains "$out" "keeps re-firing" \
+      "dynamic stale wake $i under the chain ceiling must stay normal"
+  done
+  out=$(cursor_shim_stop 3 env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
+  assert_contains "$out" "keeps re-firing" \
+    "changing stale diagnostics must still count as one re-firing wake reason"
+  out=$(cursor_shim_stop 4 env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
+  assert_contains "$out" "firstmate watcher wake" \
+    "the dynamic wake ceiling must clear state before the next chain"
+  assert_not_contains "$out" "keeps re-firing" \
+    "the cleared dynamic wake ceiling must not latch"
+  pass "fm-turnend-guard-cursor: dynamic wake diagnostics share a canonical bound key"
 }
 
 test_cursor_shim_persists_bound_without_valid_loop_count() {
@@ -2239,6 +2273,7 @@ test_cursor_shim_distinct_wakes_do_not_hit_the_chain_ceiling
 test_cursor_shim_fresh_turn_resets_the_wake_chain
 test_cursor_shim_hard_bound_ends_a_runaway_chain
 test_cursor_shim_bounds_nonconsecutive_wake_refires
+test_cursor_shim_bounds_dynamic_wake_refires
 test_cursor_shim_persists_bound_without_valid_loop_count
 test_cursor_shim_failure_budget_is_session_scoped
 test_cursor_shim_prefers_conversation_id_for_persistent_scope
