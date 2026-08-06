@@ -14,16 +14,28 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-batch)
+# Only tmux is covered by the test fakes, so any spawn test must stay on it or it
+# reaches the machine's real backend. These cases stop at the missing-brief check
+# before any backend side effect, but the pin is kept as the cheap guarantee.
 export FM_BACKEND=tmux
 
-# Clear ambient firstmate overrides so the behavior test owns its environment.
+# An EMPTY config dir of our own, not an empty override. FM_CONFIG_OVERRIDE=''
+# does not isolate anything: it falls through to $FM_HOME/config, i.e. the real
+# firstmate home, so these tests silently inherited the operator's config. That
+# is not hypothetical - an active config/crew-dispatch.json made every spawn here
+# fail on the "pass an explicit harness" consultation backstop, breaking tests
+# that have nothing to do with dispatch. Clearing an override is the opposite of
+# isolating it.
+TEST_CONFIG="$TMP_ROOT/config"
+mkdir -p "$TEST_CONFIG"
+
 run_spawn() {
   FM_ROOT_OVERRIDE='' \
     FM_HOME='' \
     FM_STATE_OVERRIDE='' \
     FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' \
-    FM_CONFIG_OVERRIDE='' \
+    FM_CONFIG_OVERRIDE="$TEST_CONFIG" \
     FM_SPAWN_NO_GUARD=1 \
     "$SPAWN" "$@" 2>&1
 }
@@ -85,12 +97,12 @@ test_projects_path_scoping() {
     projects="$TMP_ROOT/$id projects"
     mkdir -p "$home/data" "$projects/alpha"
     if [ "$use_override" = yes ]; then
-      out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
+      out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_CONFIG_OVERRIDE="$TEST_CONFIG" \
         FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects" FM_SPAWN_NO_GUARD=1 \
         "$SPAWN" "$id" projects/alpha codex --mode no-mistakes --yolo off 2>&1)
     else
       mkdir -p "$home/projects/alpha"
-      out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
+      out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE="$TEST_CONFIG" \
         FM_HOME="$home" FM_SPAWN_NO_GUARD=1 \
         "$SPAWN" "$id" projects/alpha codex --mode no-mistakes --yolo off 2>&1)
     fi

@@ -192,6 +192,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/image-generation/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "AGENTS.md",
       "audience": "agent-runtime"
     },
