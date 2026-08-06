@@ -148,7 +148,23 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/frontend-evaluator/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/harness-adapters/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/image-generation/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/mui-design/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/notion-board/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -180,20 +196,12 @@
       "audience": "agent-runtime"
     },
     {
-      "path": ".agents/skills/notion-board/SKILL.md",
-      "audience": "agent-runtime"
-    },
-    {
-      "path": ".agents/skills/frontend-evaluator/SKILL.md",
-      "audience": "agent-runtime"
-    },
-    {
-      "path": ".agents/skills/mui-design/SKILL.md",
-      "audience": "agent-runtime"
-    },
-    {
       "path": "AGENTS.md",
       "audience": "agent-runtime"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "audience": "maintainer-architecture"
     },
     {
       "path": "CLAUDE.md",

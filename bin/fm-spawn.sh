@@ -309,6 +309,28 @@ else
   BACKEND=$(fm_backend_name)
 fi
 fm_backend_validate_spawn "$BACKEND" || exit 1
+# Ordered after validate_spawn deliberately: "that backend does not exist" is a
+# more fundamental answer than "that backend is not the configured one", so an
+# unknown name keeps reporting as unknown.
+if [ "$BACKEND_SET" -eq 1 ]; then
+  # config/backend is the captain's setting, not a default to route around.
+  # Paid for on 2026-08-05: with config/backend=herdr, a task was spawned with
+  # --backend tmux because herdr was briefly refusing commands. The machinery
+  # worked, but the task became invisible - the captain looked for it in herdr
+  # and it was not there, and the deviation reads as an ABSENT backend= line in
+  # meta (tmux is the implicit default) rather than as a statement. When the
+  # configured backend is unusable that is a condition to report, not to work
+  # around, so refuse the spawn instead of quietly relocating the task.
+  # Deliberate change stays available to an operator: edit config/backend, or
+  # set FM_BACKEND for a one-off. Neither is silent.
+  CONFIGURED_BACKEND=$(fm_backend_configured)
+  if [ -n "$CONFIGURED_BACKEND" ] && [ "$CONFIGURED_BACKEND" != "$BACKEND_ARG" ]; then
+    echo "error: --backend $BACKEND_ARG contradicts config/backend ($CONFIGURED_BACKEND); refusing to reroute this task" >&2
+    echo "hint: if $CONFIGURED_BACKEND is unusable, REPORT that - do not spawn elsewhere; a task running outside the configured backend is invisible where the captain looks for it" >&2
+    echo "hint: to move backends deliberately, edit config/backend (persistent) or FM_BACKEND=$BACKEND_ARG (one-off operator override)" >&2
+    exit 1
+  fi
+fi
 fm_backend_source "$BACKEND" || exit 1
 if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
   echo "error: backend=orca does not support --secondmate spawns yet" >&2
@@ -1718,10 +1740,14 @@ META_WINDOW=$T
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
-  # backend= is written only for a non-default (non-tmux) backend, so the
-  # default path's meta stays byte-identical (absent backend= means tmux;
-  # data/fm-backend-design-d7's P1 compatibility contract).
-  [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+  # backend= is ALWAYS written, tmux included. It used to be omitted for tmux so
+  # the default path's meta stayed byte-identical (data/fm-backend-design-d7's
+  # P1 compatibility contract), which made tmux the zero value: a task's backend
+  # was a statement for five backends and an ABSENCE for the sixth. That is what
+  # hid the 2026-08-05 reroute - the captain read a meta with no backend= line
+  # and had nothing to notice. Readers still treat an absent line as tmux for
+  # metas written before this change; new metas never rely on it.
+  echo "backend=$BACKEND"
   if [ "$BACKEND" = herdr ]; then
     echo "herdr_session=$HERDR_SES"
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
