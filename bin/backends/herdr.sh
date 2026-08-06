@@ -701,6 +701,16 @@ fm_backend_herdr_canonical_socket_path() {  # <socket-path>
   [ -n "$socket" ] || return 1
   case "$socket" in
     /*) ;;
+    [A-Za-z]:[\\/]*)
+      # Herdr on Windows injects and reports native drive paths
+      # (C:\...\herdr.sock); fold them into the same POSIX form so both sides
+      # of every socket-identity comparison canonicalize identically.
+      socket=$(cygpath -u "$socket" 2>/dev/null) || return 1
+      case "$socket" in
+        /*) ;;
+        *) return 1 ;;
+      esac
+      ;;
     *) return 1 ;;
   esac
   sock_dir=$(dirname "$socket")
