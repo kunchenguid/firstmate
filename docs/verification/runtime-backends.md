@@ -697,12 +697,16 @@ ok - node worker commands containing Astro words refuse exact-PID recovery
 ok - unknown commands and unrelated Windows repositories refuse without termination
 ok - unavailable Windows inspection refuses recovery without mutation
 ok - unavailable WSL inspection refuses recovery without mutation
+ok - unavailable Firstmate task-state inspection refuses recovery without termination
 ok - verify proves the listener pair before contacting localhost
 ok - fresh mutation-boundary source and task proof blocks termination
+ok - termination-boundary task proof blocks exact-PID termination
 ok - post-stop inspection failure blocks any restart
 ok - Astro launcher scripts with shell metacharacters refuse recovery
 ok - post-recovery Windows/WSL route fingerprint mismatch fails verification
+ok - post-route listener-pair changes fail verification
+ok - dirty expected checkout refuses restart after exact-PID termination
 ```
 
-The suite covers Windows listener JSON parsing, Windows drive and WSL UNC conversion, WSL-to-Windows conversion, exact Astro script/dev classification, Git source classification, command redaction, exact PID and full mutation-boundary re-resolution, unavailable inspection, route-proof ordering, unrelated, unknown, or production-like processes, active task association, the never-terminate relay boundary, the healthy relay pair, the stale native Astro recovery path, launcher shell validation and cleanup, and mismatched post-recovery route fingerprints.
+The suite covers Windows listener JSON parsing, Windows drive and WSL UNC conversion, WSL-to-Windows conversion, exact Astro script/dev classification, Git source classification, command redaction, exact PID and full mutation-boundary re-resolution, unavailable Windows, WSL, and Firstmate task-state inspection, route-proof ordering, unrelated, unknown, or production-like processes, active task association, the never-terminate relay boundary, the healthy relay pair, the stale native Astro recovery path, launcher shell validation and cleanup, post-route listener-pair changes, mismatched post-recovery route fingerprints, and expected-checkout revalidation before restart.
 Host-specific acceptance still requires `verify` against the actual project/port/expected-SHA tuple; private evidence remains under the active Firstmate home's gitignored `state/` tree rather than this maintained record.
