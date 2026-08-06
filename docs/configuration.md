@@ -34,7 +34,7 @@ This preference is local to each Firstmate home and is not part of secondmate in
 ## Context-mode WebFetch compatibility
 
 Context-mode denies native `WebFetch` by default and redirects it to `ctx_fetch_and_index`, which is a plain HTTP fetch without a browser or the caller's authenticated session.
-Firstmate's narrow compatibility patch allows native `WebFetch` only for `claude.ai` and its subdomains, because client-rendered or session-authenticated Claude pages otherwise return an unreadable shell.
+By default, Firstmate's narrow compatibility patch allows native `WebFetch` only for `claude.ai` and its subdomains, because client-rendered or session-authenticated Claude pages otherwise return an unreadable shell.
 It keeps all other hosts denied, including `example.com`, `notclaude.ai.evil.com`, and `myclaude.ai`, so suffix spoofing is refused.
 `bin/fm-context-mode-webfetch-fix.sh` is the source of the repair and uses the active installation listed in Claude's plugin registry rather than guessing a version.
 Run it after every `ctx upgrade`, because an upgrade replaces both the marketplace checkout at `~/.claude/plugins/marketplaces/context-mode/hooks/core/routing.mjs` and the active cache at `~/.claude/plugins/cache/context-mode/context-mode/<version>/hooks/core/routing.mjs`.
