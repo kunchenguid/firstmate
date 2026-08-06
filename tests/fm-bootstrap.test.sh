@@ -1214,6 +1214,51 @@ JSON
   pass "bootstrap surfaces a probe-sweep failure instead of reading it as a healthy empty sweep"
 }
 
+# An outcome record joining no wake record measures nothing while reading as
+# ordinary supervision cost, and it leaves queued=unknown, which a legitimately
+# wiped state/ also produces. Session start reporting the count is the only
+# thing that makes that visible, so the silent cases are asserted first: a line
+# printed unconditionally would pass the positive case while alarming nobody.
+test_wake_ledger_unjoined_outcomes_are_reported_at_session_start() {
+  local case_dir fakebin home out now
+  case_dir="$TMP_ROOT/wake-ledger-reconcile"
+  home="$case_dir/home"
+  mkdir -p "$home/config" "$home/data" "$home/state"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+  now=$(date +%s)
+
+  bootstrap_out() {
+    PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh"
+  }
+  ledger_call() {
+    FM_ROOT_OVERRIDE="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      "$ROOT/bin/fm-wake-ledger.sh" "$@"
+  }
+
+  out=$(bootstrap_out)
+  case "$out" in
+    *WAKE_LEDGER*) fail "wake ledger: an absent ledger must not report unjoined outcomes" ;;
+  esac
+
+  printf '%s\t1\tsignal\talpha.status\tsignal: a\n' "$((now - 10))" \
+    | ledger_call drain-record || fail "wake ledger: drain-record failed"
+  ledger_call outcome steered || fail "wake ledger: bare outcome failed"
+  out=$(bootstrap_out)
+  case "$out" in
+    *WAKE_LEDGER*) fail "wake ledger: a fully joined ledger must stay silent, got: $out" ;;
+  esac
+
+  ledger_call outcome absorbed 999999 --allow-unjoined \
+    || fail "wake ledger: the override was refused"
+  out=$(bootstrap_out)
+  assert_contains "$out" "WAKE_LEDGER: 1 outcome record(s) join no wake record" \
+    "an outcome joining no wake record must be reported at session start"
+  pass "session start reports outcome records that join no wake record, and stays silent otherwise"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version
@@ -1243,3 +1288,4 @@ test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
 test_model_probe_sweep_failure_is_loud_through_bootstrap
+test_wake_ledger_unjoined_outcomes_are_reported_at_session_start

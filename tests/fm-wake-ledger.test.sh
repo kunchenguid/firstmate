@@ -54,6 +54,20 @@ field_of() {  # <file> <record> <field>
   ' "$1"
 }
 
+# The value of <field> on the last line matching <record> kind, or empty. The
+# outcome cases below assert on the record just written, which is the last one.
+last_field_of() {  # <file> <record> <field>
+  LC_ALL=C awk -F '\t' -v want="$2" -v key="$3" '
+    $1 == "v1" && $2 == want {
+      for (i = 4; i <= NF; i++) {
+        p = index($i, "=")
+        if (p > 0 && substr($i, 1, p - 1) == key) { v = substr($i, p + 1) }
+      }
+    }
+    END { if (v != "") print v }
+  ' "$1"
+}
+
 
 test_record_format_for_all_three_kinds() {
   local home file now
@@ -95,14 +109,16 @@ test_outcome_vocabulary_is_closed() {
   home=$(make_home vocabulary)
   file=$(ledger_file "$home")
 
+  # --allow-unjoined isolates the vocabulary from the join: this fixture has no
+  # wake records, and an unjoinable sequence is refused on its own grounds.
   for token in absorbed inspected steered decided escalated repaired false-positive; do
-    ledger "$home" outcome "$token" 1 >/dev/null 2>&1 \
+    ledger "$home" outcome "$token" 1 --allow-unjoined >/dev/null 2>&1 \
       || fail "vocabulary: $token should be accepted"
   done
   [ "$(wc -l < "$file" | tr -d ' ')" -eq 7 ] || fail "vocabulary: expected seven accepted records"
 
   for token in handled ignored '' STEERED steered-ish; do
-    if ledger "$home" outcome "$token" 1 >/dev/null 2>&1; then
+    if ledger "$home" outcome "$token" 1 --allow-unjoined >/dev/null 2>&1; then
       fail "vocabulary: '$token' should have been refused"
     fi
   done
@@ -139,7 +155,9 @@ test_sanitization_keeps_one_record_per_line() {
   home=$(make_home sanitize)
   file=$(ledger_file "$home")
 
-  ledger "$home" outcome steered 1 --note "$(printf 'first\tsecond\nthird\rfourth')" \
+  # No wake records here on purpose: this case is about serialization, so the
+  # join is waived rather than staged.
+  ledger "$home" outcome steered 1 --allow-unjoined --note "$(printf 'first\tsecond\nthird\rfourth')" \
     || fail "sanitize: outcome with control characters should still record"
   lines=$(wc -l < "$file" | tr -d ' ')
   [ "$lines" -eq 1 ] || fail "sanitize: embedded newline split the record into $lines lines"
@@ -299,7 +317,7 @@ test_concurrent_appends_stay_whole_lines() {
   pids=
   i=1
   while [ "$i" -le 30 ]; do
-    ledger "$home" outcome steered "$i" --note "worker $i" &
+    ledger "$home" outcome steered "$i" --allow-unjoined --note "worker $i" &
     pids="$pids $!"
     i=$((i + 1))
   done
@@ -361,8 +379,9 @@ test_seq_reuse_across_a_state_reset_never_collapses_records() {
   home=$(make_home seq-reset)
   file=$(ledger_file "$home")
 
-  # An outcome whose wake record is unresolvable must say so explicitly.
-  ledger "$home" outcome absorbed 9 || fail "seq reset: unmatched outcome failed"
+  # An outcome whose wake record is unresolvable must say so explicitly. That
+  # is the genuine wiped-state/ case, so it needs the explicit override.
+  ledger "$home" outcome absorbed 9 --allow-unjoined || fail "seq reset: unmatched outcome failed"
   [ "$(field_of "$file" outcome queued)" = unknown ] \
     || fail "seq reset: an unmatched outcome must record queued=unknown"
   : > "$file"
@@ -387,6 +406,131 @@ test_seq_reuse_across_a_state_reset_never_collapses_records() {
 }
 
 
+test_a_bare_outcome_records_against_the_newest_unrecorded_wake() {
+  local home file now
+  home=$(make_home bare-outcome)
+  file=$(ledger_file "$home")
+  now=$(date +%s)
+
+  printf '%s\t1\tsignal\talpha.status\tsignal: a\n%s\t2\tsignal\tbeta.status\tsignal: b\n%s\t3\tsignal\tgamma.status\tsignal: c\n' \
+    "$((now - 30))" "$((now - 20))" "$((now - 10))" \
+    | ledger "$home" drain-record || fail "bare outcome: drain-record failed"
+
+  ledger "$home" outcome absorbed || fail "bare outcome: a bare outcome was refused"
+  [ "$(last_field_of "$file" outcome seq)" = 3 ] \
+    || fail "bare outcome: expected the newest unrecorded wake 3, got $(last_field_of "$file" outcome seq)"
+  [ "$(last_field_of "$file" outcome queued)" = "$((now - 10))" ] \
+    || fail "bare outcome: the resolved record lost the durable queued half of the join"
+
+  # The second bare call must move on rather than recording the same wake twice.
+  ledger "$home" outcome steered || fail "bare outcome: a second bare outcome was refused"
+  [ "$(last_field_of "$file" outcome seq)" = 2 ] \
+    || fail "bare outcome: a second bare call re-recorded wake $(last_field_of "$file" outcome seq)"
+  [ "$(last_field_of "$file" outcome queued)" = "$((now - 20))" ] \
+    || fail "bare outcome: the second resolved record lost its queued half"
+
+  ledger "$home" outcome absorbed || fail "bare outcome: a third bare outcome was refused"
+  [ "$(last_field_of "$file" outcome seq)" = 1 ] \
+    || fail "bare outcome: the third bare call did not reach the oldest unrecorded wake"
+
+  # Every wake is now recorded, so there is nothing left to name: that is a
+  # loud refusal, never a guessed sequence.
+  ledger "$home" outcome absorbed 2>/dev/null \
+    && fail "bare outcome: a bare call with no unrecorded wake left was accepted"
+  pass "a bare outcome records against the newest unrecorded wake and never repeats one"
+}
+
+test_an_unjoinable_sequence_is_refused_without_the_override() {
+  local home file now before
+  home=$(make_home unjoinable)
+  file=$(ledger_file "$home")
+  now=$(date +%s)
+  printf '%s\t4\tsignal\talpha.status\tsignal: a\n' "$((now - 10))" \
+    | ledger "$home" drain-record || fail "unjoinable: drain-record failed"
+  before=$(wc -l < "$file" | tr -d ' ')
+
+  # The incident in one line: a hand-supplied placeholder that joins no wake
+  # record used to store queued=unknown, which is indistinguishable from a
+  # legitimate wiped-state record.
+  ledger "$home" outcome absorbed 999999 2>/dev/null \
+    && fail "unjoinable: a sequence matching no wake record was accepted"
+  [ "$(wc -l < "$file" | tr -d ' ')" -eq "$before" ] \
+    || fail "unjoinable: a refused outcome still appended a record"
+
+  ledger "$home" outcome absorbed 999999 --allow-unjoined \
+    || fail "unjoinable: the explicit override was refused"
+  [ "$(wc -l < "$file" | tr -d ' ')" -eq "$((before + 1))" ] \
+    || fail "unjoinable: the override did not append exactly one record"
+  [ "$(last_field_of "$file" outcome queued)" = unknown ] \
+    || fail "unjoinable: an overridden outcome must still record queued=unknown"
+  pass "an unjoinable wake sequence is refused unless the override is explicit"
+}
+
+test_an_explicit_joinable_sequence_records_unchanged() {
+  local home file now after
+  home=$(make_home explicit-seq)
+  file=$(ledger_file "$home")
+  now=$(date +%s)
+  printf '%s\t5\tsignal\talpha.status\tsignal: a\n%s\t6\tsignal\tbeta.status\tsignal: b\n%s\t7\tsignal\tgamma.status\tsignal: c\n' \
+    "$((now - 30))" "$((now - 20))" "$((now - 10))" \
+    | ledger "$home" drain-record || fail "explicit seq: drain-record failed"
+
+  ledger "$home" outcome steered 6 || fail "explicit seq: a joinable sequence was refused"
+  [ "$(last_field_of "$file" outcome seq)" = 6 ] \
+    || fail "explicit seq: an explicit sequence was not honored"
+  [ "$(last_field_of "$file" outcome queued)" = "$((now - 20))" ] \
+    || fail "explicit seq: the (seq, queued) join was not resolved from the wake record"
+  [ "$(last_field_of "$file" outcome task)" = beta ] \
+    || fail "explicit seq: task attribution was lost"
+  after=$(last_field_of "$file" outcome after)
+  case "$after" in
+    ''|*[!0-9]*) fail "explicit seq: after must resolve to a number, got '$after'" ;;
+  esac
+
+  # Multiple sequences in one invocation stay supported.
+  ledger "$home" outcome inspected 5 7 || fail "explicit seq: a multi-sequence invocation was refused"
+  [ "$(grep -c "outcome=inspected" "$file")" -eq 2 ] \
+    || fail "explicit seq: a multi-sequence invocation did not append one record per sequence"
+  pass "an explicit joinable sequence, including several at once, records exactly as before"
+}
+
+test_reconcile_counts_outcomes_that_join_no_wake_record() {
+  local home out now
+  home=$(make_home reconcile)
+  now=$(date +%s)
+  printf '%s\t8\tsignal\talpha.status\tsignal: a\n' "$((now - 10))" \
+    | ledger "$home" drain-record || fail "reconcile: drain-record failed"
+
+  [ "$(ledger "$home" reconcile --count)" = 0 ] \
+    || fail "reconcile: a ledger with no outcome records is not unreconciled"
+
+  ledger "$home" outcome steered 8 || fail "reconcile: joinable outcome failed"
+  [ "$(ledger "$home" reconcile --count)" = 0 ] \
+    || fail "reconcile: a joined outcome was counted as unreconciled"
+
+  ledger "$home" outcome absorbed 999999 --allow-unjoined || fail "reconcile: override failed"
+  ledger "$home" outcome absorbed 999998 --allow-unjoined || fail "reconcile: override failed"
+  [ "$(ledger "$home" reconcile --count)" = 2 ] \
+    || fail "reconcile: expected 2 unreconciled outcome records, got $(ledger "$home" reconcile --count)"
+
+  out=$(ledger "$home" reconcile) || fail "reconcile: summary failed"
+  printf '%s\n' "$out" | grep -q '2' \
+    || fail "reconcile: the summary did not name the unreconciled count:"$'\n'"$out"
+
+  # An absent ledger is a real zero; a ledger that cannot be read is not. Both
+  # would otherwise print 0, and the second one is a silent all-clear over an
+  # instrument nobody could read.
+  [ "$(FM_WAKE_LEDGER="$home/data/absent.tsv" ledger "$home" reconcile --count)" = 0 ] \
+    || fail "reconcile: an absent ledger should count zero unreconciled records"
+  chmod 000 "$(ledger_file "$home")"
+  if FM_WAKE_LEDGER="$(ledger_file "$home")" ledger "$home" reconcile --count >/dev/null 2>&1; then
+    chmod 644 "$(ledger_file "$home")"
+    fail "reconcile: an unreadable ledger reported a count instead of refusing"
+  fi
+  chmod 644 "$(ledger_file "$home")"
+  pass "reconcile counts exactly the outcome records that join no wake record"
+}
+
 test_record_format_for_all_three_kinds
 test_outcome_vocabulary_is_closed
 test_terminal_outcome_and_escalation_are_validated
@@ -398,3 +542,7 @@ test_slow_ledger_never_blocks_a_wake_append
 test_concurrent_appends_stay_whole_lines
 test_report_counts_coverage_and_the_model_join
 test_seq_reuse_across_a_state_reset_never_collapses_records
+test_a_bare_outcome_records_against_the_newest_unrecorded_wake
+test_an_unjoinable_sequence_is_refused_without_the_override
+test_an_explicit_joinable_sequence_records_unchanged
+test_reconcile_counts_outcomes_that_join_no_wake_record
