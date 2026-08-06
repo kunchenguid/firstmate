@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Opt-in live guard for the Herdr presentation version floor.
 #
-# The floor's structural signal is the client protocol number, and its mapping
-# to real releases is a vendor-supplied fact that no fixture can prove. This
-# guard reads that mapping from the REAL release binaries: it fetches each
+# Protocol is the floor's structural signal, and its mapping to real releases
+# is a vendor-supplied fact that no fixture can prove. The runtime gate checks
+# both the client and any selected running server; this guard measures the
+# release mapping from each REAL release binary's client report by fetching each
 # pinned upstream asset, verifies its digest, asks it for its own
 # `status --json`, and checks the floor classifier's verdict for the release
 # identity the binary actually reports. It fails naming the version and protocol

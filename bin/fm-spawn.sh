@@ -51,9 +51,12 @@
 #   outside herdr has no workspace to inherit and uses this home's own labeled
 #   workspace, which must then match exactly one. --secondmate is the deliberate
 #   exception: it stands up that secondmate home's own workspace.
-#   Herdr additionally uses a default-on presentation-only layout unless the
-#   local config/herdr-presentation-spaces file says off. A clean fresh task first
-#   writes state/<id>.herdr-presentation atomically, then creates a disposable
+#   Herdr additionally uses a presentation-only layout by default when the
+#   selected client and running server meet the Herdr 0.8.0 floor. The local
+#   config/herdr-presentation-spaces file can say off to disable it or on to
+#   opt in below that floor; an empty file remains the historical opt-in form.
+#   A clean fresh task first writes state/<id>.herdr-presentation atomically,
+#   then creates a disposable
 #   workspace containing only the ordinary task pane. A successful clean create
 #   upgrades its attempt journal with exact home, session, workspace, tab, pane,
 #   parent, and label bindings. On a same-identity restart, that complete binding
