@@ -356,14 +356,6 @@ raw_launch_preflight() {
       return 1
       ;;
   esac
-  normalized=${raw//\'/}
-  normalized=${normalized//\"/}
-  case "$normalized" in
-    *claude*)
-      raw_launch_refuse
-      return 1
-      ;;
-  esac
   read -r -a words <<< "$raw"
   for word in "${words[@]}"; do
     if [[ "$word" =~ ^[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9_./,:+%@-]+$ ]]; then
@@ -372,15 +364,17 @@ raw_launch_preflight() {
     executable=$word
     break
   done
-  case "$executable" in
-    ''|*[!A-Za-z0-9_./+-]*)
+  normalized=${executable//\'/}
+  normalized=${normalized//\"/}
+  case "$normalized" in
+    ''|*[!A-Za-z0-9_./+-]*|*claude*)
       raw_launch_refuse
       return 1
       ;;
   esac
-  base=${executable##*/}
+  base=${normalized##*/}
   case "$base" in
-    claude|env|command|exec|builtin|eval|sh|bash|dash|zsh|ksh|fish|nohup|nice|ionice|chrt|setsid|stdbuf|timeout|time|sudo|doas|xargs|find|busybox|toybox)
+    claude|env|command|exec|builtin|eval|source|.|sh|bash|dash|zsh|ksh|fish|nohup|nice|ionice|chrt|setsid|stdbuf|timeout|time|sudo|doas|xargs|find|busybox|toybox)
       raw_launch_refuse
       return 1
       ;;

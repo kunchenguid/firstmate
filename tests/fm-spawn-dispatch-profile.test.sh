@@ -515,6 +515,54 @@ test_quoted_non_claude_raw_launch_is_unchanged() {
   pass "quoted non-Claude raw launch remains unchanged"
 }
 
+test_source_dispatcher_is_refused() {
+  local rec id raw out status
+  id=profile-raw-source-z15i
+  raw="source ./worker-launch"
+  rec=$(make_spawn_case profile-raw-source claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "$raw")
+  status=$?
+  assert_unsafe_claude_raw_refused "$out" "$status" "$HOME_DIR" "$LAUNCH_LOG" "$id" \
+    "source-dispatched raw launch"
+  pass "source dispatcher is refused before launch"
+}
+
+test_posix_dot_dispatcher_is_refused() {
+  local rec id raw out status
+  id=profile-raw-dot-z15j
+  raw=". ./worker-launch"
+  rec=$(make_spawn_case profile-raw-dot claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "$raw")
+  status=$?
+  assert_unsafe_claude_raw_refused "$out" "$status" "$HOME_DIR" "$LAUNCH_LOG" "$id" \
+    "POSIX dot-dispatched raw launch"
+  pass "POSIX dot dispatcher is refused before launch"
+}
+
+test_non_claude_raw_arguments_may_mention_claude() {
+  local rec id raw out status launch
+  id=profile-raw-custom-claude-model-z15k
+  raw="custom-agent --model anthropic/claude-sonnet-4-5"
+  rec=$(make_spawn_case profile-raw-custom-claude-model claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "$raw")
+  status=$?
+  expect_code 0 "$status" "non-Claude raw launch with a Claude model argument should succeed"
+  assert_contains "$out" "spawned $id harness=custom-agent" \
+    "non-Claude raw launch with a Claude model argument lost its adapter identity"
+  launch=$(cat "$LAUNCH_LOG")
+  [ "$launch" = "$raw" ] || fail "non-Claude raw launch with a Claude model argument changed"$'\n'"actual: $launch"
+  pass "non-Claude raw launch preserves Claude model arguments"
+}
+
 test_claude_threads_model_and_effort() {
   local rec id out status launch
   id=profile-claude-z2
@@ -870,6 +918,9 @@ test_quoted_concatenation_claude_bypass_is_refused
 test_env_wrapped_claude_bypass_is_refused
 test_shell_obfuscated_claude_bypass_is_refused
 test_quoted_non_claude_raw_launch_is_unchanged
+test_source_dispatcher_is_refused
+test_posix_dot_dispatcher_is_refused
+test_non_claude_raw_arguments_may_mention_claude
 test_claude_threads_model_and_effort
 test_claude_scout_uses_auto_permissions_and_delivers_profiled_prompt
 test_codex_threads_model_and_effort
