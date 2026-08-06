@@ -143,7 +143,7 @@ run_muse_spawn() {  # <home> <proj> <wt> <fakebin> <id> [extra args...]
     XDG_CONFIG_HOME="${FM_TEST_MUSE_CONFIG_HOME-$home/xdgconfig}" \
     XDG_DATA_HOME="${FM_TEST_MUSE_DATA_HOME-$home/xdgdata}" \
     PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id" "$proj" muse "$@" 2>&1
+    "$SPAWN" "$id" "$proj" muse "$@" --reason-code NL_RULE_CLASSIFICATION 2>&1
 }
 
 # --- detection --------------------------------------------------------------
