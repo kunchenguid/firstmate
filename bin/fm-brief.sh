@@ -317,6 +317,10 @@ The report is the only thing that survives, so anything worth keeping must be in
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+   This is a cost rule, not a style preference: the axi tools (https://axi.md) hold MCP-grade
+   reliability at CLI token cost. A previous fleet worker skipped this line for browser work and
+   used the MCP browser path instead, burning 662k tokens - the largest single context cost
+   measured in that run, paid again on every turn it kept running.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -335,6 +339,15 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. Manage your own context deliberately - it is billed every turn, not once. Once you are past
+   roughly 150k tokens of context AND you reach a natural phase boundary (a finding confirmed, a
+   section of the report drafted), write it down durably in the report or a working file - not
+   memory - then compact yourself, naming the report's open findings and the task's acceptance
+   criteria as what to preserve. Firstmate never injects a compact into your session; the
+   threshold is yours to act on.
+9. Read files with offset and limit rather than whole files, especially large specs and reports.
+   Do not re-read a file you already read unless it changed. Keep browser captures and tool output
+   targeted - a narrow query beats a broad dump.
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -430,6 +443,10 @@ If the top-level path is the primary checkout or not the worktree you were launc
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+   This is a cost rule, not a style preference: the axi tools (https://axi.md) hold MCP-grade
+   reliability at CLI token cost. A previous fleet worker skipped this line for browser work and
+   used the MCP browser path instead, burning 662k tokens - the largest single context cost
+   measured in that run, paid again on every turn it kept running.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -451,6 +468,16 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. Manage your own context deliberately - it is billed every turn, not once. Once you are past
+   roughly 150k tokens of context AND you reach a natural phase boundary (setup complete, a
+   component built, validation passed), write down where you are - durably, in the task's own
+   notes or working files, not memory - then compact yourself, naming the brief's acceptance
+   criteria, any open findings or decisions, and the delivery contract as what to preserve. Never
+   compact mid-validation-run or while holding a gate open: finding IDs and gate state must stay
+   stable. Firstmate never injects a compact into your session; the threshold is yours to act on.
+9. Read files with offset and limit rather than whole files, especially large specs and reports.
+   Do not re-read a file you already read unless it changed. Keep browser captures and tool output
+   targeted - a narrow query beats a broad dump.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
