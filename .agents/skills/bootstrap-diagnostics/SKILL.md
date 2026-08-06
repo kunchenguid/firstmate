@@ -29,7 +29,7 @@ When any diagnostic needs captain attention, report the plain consequence and re
   Treat GitHub auth as unproven rather than broken: do not dispatch work that needs it, and do not ask the captain to re-authenticate on this evidence alone.
   Ask the captain to run `! gh auth status` themselves to settle the state, since a wedged credential helper, an unreachable network, or a blocking keychain prompt are the usual causes.
   `FM_GH_AUTH_TIMEOUT_SECS` raises the 10 second bound when the home is merely slow rather than stuck.
-  The reported seconds are that bound, not the elapsed wall clock: a probe that ignores SIGTERM is escalated to SIGKILL after a further 2 second grace, and that escalated kill still reports indeterminate rather than unauthenticated.
+  The reported seconds are that bound, not the elapsed wall clock, so a probe held past it by a SIGKILL escalation still reports indeterminate rather than unauthenticated; `docs/configuration.md` "Toolchain" owns the escalation grace and worst-case timing.
 - `GH_AUTH: indeterminate (probe terminated abnormally with status <n>)` - the preflight was killed before it answered, so the credential state is unknown for the same reason the timeout case is.
   The status is reported raw because it cannot say whether the kill grace escalated to SIGKILL, the OOM killer fired, or something external killed the probe.
   Handle it exactly like the timeout case above, and treat a repeat across sessions as a sign the home itself is unhealthy rather than a GitHub auth problem.

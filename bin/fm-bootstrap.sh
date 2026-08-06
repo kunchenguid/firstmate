@@ -89,16 +89,22 @@
 #          overrides the 10s bound; non-numeric values, zero, and zero-padded
 #          zeros such as 00 all reset to 10 so the bound can never be disabled.
 #          A probe that ignores SIGTERM is escalated to SIGKILL after a further
-#          2s grace, so worst-case wall clock is the bound plus that grace rather
-#          than a flat 10s, and the escalated kill still reports indeterminate.
+#          grace - 2s on the timeout/gtimeout branch, 0.2s in the Perl fallback -
+#          so worst-case wall clock is the bound plus at most 2s rather than a
+#          flat 10s, and the escalated kill still reports indeterminate.
 #          An expired bound, a probe killed before it answered, or a home
 #          carrying none of those three bounding tools all report GH_AUTH:
 #          indeterminate and never NEEDS_GH_AUTH, because an unfinished probe
 #          proves nothing about the credential; the three causes carry distinct
 #          wording so the remediation is discoverable. Every bounding
 #          implementation classifies its result through one shared mapping, so a
-#          killed probe reads the same on stock macOS and on a coreutils host
-#          rather than depending on which bounding tool the home happens to have.
+#          probe killed from outside reads the same on stock macOS and on a
+#          coreutils host rather than depending on which bounding tool the home
+#          happens to have. Only the bound's own escalation is worded per branch:
+#          timeout/gtimeout can surface just the 137 it exited with, so it takes
+#          the abnormal-status line, while the Perl alarm knows the bound expired
+#          and takes the timed-out line. Both stay indeterminate, so neither
+#          branch ever turns an unfinished probe into a credential claim.
 #          The typed authenticated/not authenticated states print only under
 #          FM_BOOTSTRAP_GH_AUTH_DIAGNOSTICS=1, so default output for those two
 #          cases stays byte-identical for existing consumers.
@@ -292,12 +298,15 @@ gh_auth_probe() {
     GH_AUTH_INDETERMINATE_CAUSE=no-bounding-tool
     return 124
   fi
-  # One owner for what a status means, so every bounding implementation answers
-  # identically. A plain expiry arrives as 124; anything at or above 128 means
-  # the probe was killed rather than answered, whether that was the kill grace
-  # escalating to SIGKILL or an external kill, and a killed probe carries no
-  # information about the credential. Reporting either as unauthenticated is the
-  # exact failure this check exists to remove, so both collapse to indeterminate.
+  # One owner for what a status means, so a given status answers the same
+  # whichever bounding implementation returned it. A plain expiry arrives as 124;
+  # anything at or above 128 means the probe was killed rather than answered,
+  # whether that was the kill grace escalating to SIGKILL or an external kill,
+  # and a killed probe carries no information about the credential. Reporting
+  # either as unauthenticated is the exact failure this check exists to remove,
+  # so both collapse to indeterminate. Only the timeout/gtimeout branch can reach
+  # here after its own escalation; the Perl alarm exits 124 from its handler, so
+  # that branch words a self-escalated kill as an expiry instead.
   if [ "$status" -ge 128 ]; then
     GH_AUTH_INDETERMINATE_CAUSE=abnormal
     GH_AUTH_INDETERMINATE_STATUS=$status

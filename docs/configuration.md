@@ -303,9 +303,10 @@ An absent or too-old `quota-axi` reports `MISSING: quota-axi (install: npm insta
 The GitHub auth check issues exactly one `gh auth status`, bounded by `timeout`, `gtimeout`, or a Perl process-group alarm so a wedged credential helper cannot hang session start.
 A missing credential still reports `NEEDS_GH_AUTH`, but a probe that could not finish reports `GH_AUTH: indeterminate` instead, because an unfinished probe proves nothing about the credential.
 The three indeterminate causes carry distinct wording: an expired bound names the seconds it waited, a probe killed before it answered names the status it terminated with, and a home carrying none of those three bounding tools names the coreutils or perl install that would restore the check.
-A probe killed by a signal counts as unfinished no matter which bounding tool caught it, so the `timeout` path and the Perl fallback report it identically rather than one of them claiming the credential is missing.
+A probe killed from outside counts as unfinished no matter which bounding tool caught it, so the `timeout` path and the Perl fallback report it with the identical line rather than one of them claiming the credential is missing.
 `FM_GH_AUTH_TIMEOUT_SECS` overrides the 10 second bound, and `FM_BOOTSTRAP_GH_AUTH_DIAGNOSTICS=1` adds the otherwise-silent typed `authenticated` and `not authenticated` lines.
-A probe that ignores SIGTERM is escalated to SIGKILL after a further 2 second grace, so the worst case is the bound plus that grace rather than a flat 10 seconds, and that escalated kill still reports indeterminate rather than unauthenticated.
+A probe that ignores SIGTERM is escalated to SIGKILL after a further grace - 2 seconds on the `timeout` and `gtimeout` path, 0.2 seconds in the Perl fallback - so the worst case is the bound plus at most 2 seconds rather than a flat 10 seconds.
+That escalated kill still reports indeterminate rather than unauthenticated, but the two paths word it differently: `timeout` can surface only the SIGKILL status, so it takes the abnormal-status wording, while the Perl alarm knows the bound expired and takes the timed-out wording.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
 The locked session-start bootstrap step also runs a best-effort project clone refresh through `fm-fleet-sync.sh`.
@@ -504,7 +505,7 @@ FM_BACKEND_CMUX_IDLE_RE='^Type a message\.\.\.$'  # cmux-only: empty-composer pl
 CMUX_SOCKET_PASSWORD=   # cmux-only: socket password fallback when config/cmux-socket-password is absent (docs/cmux-backend.md)
 FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the session-start digest
 FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording
-FM_GH_AUTH_TIMEOUT_SECS=10   # seconds allowed for bootstrap's single bounded `gh auth status` preflight, plus a 2s SIGKILL grace when the probe ignores SIGTERM; non-numeric, zero, and zero-padded-zero values reset to 10
+FM_GH_AUTH_TIMEOUT_SECS=10   # seconds allowed for bootstrap's single bounded `gh auth status` preflight, plus a SIGKILL grace of at most 2s when the probe ignores SIGTERM; non-numeric, zero, and zero-padded-zero values reset to 10
 FM_BOOTSTRAP_GH_AUTH_DIAGNOSTICS=0   # set to 1 to also print the typed `GH_AUTH: authenticated` / `GH_AUTH: not authenticated` lines; the `GH_AUTH: indeterminate` line always prints
 FM_GUARD_READ_ONLY=0    # internal/read-only guard mode: keep alarms but suppress drain, supervision repair, and checkout repair commands
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the guarded operation WILL still run.'   # banner continuation line; fm-send.sh overrides it to name the requested message specifically
