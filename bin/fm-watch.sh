@@ -840,7 +840,7 @@ while :; do
             host=$FM_PR_POLL_SNAPSHOT_HOST
             path=$FM_PR_POLL_SNAPSHOT_PATH
             number=$FM_PR_POLL_SNAPSHOT_NUMBER
-            check_kind=pr
+            check_kind='pr'
           else
             check_kind=reject
           fi
@@ -851,7 +851,7 @@ while :; do
           host=$FM_PR_POLL_SNAPSHOT_HOST
           path=$FM_PR_POLL_SNAPSHOT_PATH
           number=$FM_PR_POLL_SNAPSHOT_NUMBER
-          check_kind=pr
+          check_kind='pr'
         elif fm_validation_check_slot_reserved "$STATE" "$id"; then
           if fm_validation_check_registered "$STATE" "$id" \
               "$SCRIPT_DIR/fm-nm-run-lib.sh" "$SCRIPT_DIR/fm-validation-poll.sh" \

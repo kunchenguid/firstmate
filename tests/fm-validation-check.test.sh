@@ -297,8 +297,11 @@ test_watcher_does_not_execute_an_unregistered_validation_check() {
   run_arm "$dir" >/dev/null || fail "could not arm unregistered-check fixture"
   rm -f "$state/task-a.check-trust"
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-pr-lib.sh"
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-check-lib.sh"
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_custom_check_slot_acquire "$state" task-a 100 || exit 1
     : > "$ready"
@@ -398,14 +401,14 @@ test_watcher_skips_a_stale_validation_gate() {
 }
 
 test_watcher_skips_a_validation_gate_retired_before_slot_acquisition() {
-  local dir state status marker ready release done real_basename watcher_pid attempt=0 tmp out rc=0
+  local dir state status marker ready release enumeration_done real_basename watcher_pid attempt=0 tmp out rc=0
   dir=$(make_case retired-before-slot)
   state="$dir/home/state"
   status="$dir/status"
   marker="$dir/executed"
   ready="$dir/enumeration-ready"
   release="$dir/enumeration-release"
-  done="$dir/enumeration-done"
+  enumeration_done="$dir/enumeration-done"
   real_basename=$(command -v basename)
   write_owned_status "$dir" "$status" 'status: passed'
   run_arm "$dir" >/dev/null || fail "could not arm retired-before-slot fixture"
@@ -425,7 +428,7 @@ SH
 
   FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_TEST_STATUS="$status" \
     FM_TEST_EXECUTED="$marker" FM_TEST_ENUMERATION_READY="$ready" \
-    FM_TEST_ENUMERATION_RELEASE="$release" FM_TEST_ENUMERATION_DONE="$done" \
+    FM_TEST_ENUMERATION_RELEASE="$release" FM_TEST_ENUMERATION_DONE="$enumeration_done" \
     FM_TEST_ENUMERATION_CHECK="$state/task-a.check.sh" FM_TEST_REAL_BASENAME="$real_basename" \
     FM_POLL=1 FM_CHECK_INTERVAL=1 FM_SIGNAL_GRACE=1 PATH="$dir/fakebin:$BASE_PATH" \
     "$CHECKPOINT" --seconds 3 > "$dir/watcher.out" 2> "$dir/watcher.err" &
@@ -445,14 +448,18 @@ SH
     local_tmp=
     migration_held=0
     slot_held=0
+    # shellcheck disable=SC2329 # Invoked by the scoped EXIT trap below.
     cleanup() {
       [ "$slot_held" -eq 0 ] || fm_custom_check_slot_release || true
       [ "$migration_held" -eq 0 ] || fm_custom_check_migration_release || true
       [ -z "$local_tmp" ] || rm -f -- "$local_tmp"
     }
     trap cleanup EXIT
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-pr-lib.sh"
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-check-lib.sh"
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_custom_check_migration_acquire "$state" 100 || exit 1
     migration_held=1
@@ -606,7 +613,7 @@ test_custom_registration_and_migration_preserve_pr_poll_priority() {
     PATH="$dir/fakebin:$BASE_PATH" "$PR_CHECK" task-a https://github.com/example/repo/pull/9 >/dev/null \
     || fail "could not arm PR merge poll before custom registration attempt"
 
-  printf '#!/usr/bin/env bash\nprintf "%s\\n" custom-ran\n' > "$state/task-a.check.sh"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" custom-ran\n' > "$state/task-a.check.sh"
   chmod 0700 "$state/task-a.check.sh"
   out=$(FM_TEST_REAL_MV="$REAL_MV" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
     PATH="$dir/fakebin:$BASE_PATH" "$REGISTER" task-a) \
@@ -616,7 +623,7 @@ test_custom_registration_and_migration_preserve_pr_poll_priority() {
   fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
     || fail "custom registration displaced the recorded PR merge poll"
 
-  printf '#!/usr/bin/env bash\nprintf "%s\\n" custom-ran\n' > "$state/task-a.check.sh"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" custom-ran\n' > "$state/task-a.check.sh"
   chmod 0700 "$state/task-a.check.sh"
   fm_custom_check_register_source "$state" task-a "$state/task-a.check.sh" \
     || fail "could not construct the legacy registered-custom fixture"
@@ -712,9 +719,12 @@ test_migration_repairs_unlocked_validation_gates_during_other_handoffs() {
   ready="$dir/slot-ready"
   release="$dir/slot-release"
   (
-    FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state"
+    export FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state"
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-pr-lib.sh"
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-check-lib.sh"
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_custom_check_slot_acquire "$state" task-b 100 || exit 1
     : > "$ready"
@@ -834,14 +844,17 @@ test_migration_defers_a_live_check_slot() {
     PATH="$dir/fakebin:$BASE_PATH" "$PR_CHECK" task-a https://github.com/example/repo/pull/9 >/dev/null \
     || fail "could not arm PR merge poll before migration deferral"
 
-  printf '#!/usr/bin/env bash\nprintf "%s\\n" stale-custom\n' > "$state/task-a.check.sh"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" stale-custom\n' > "$state/task-a.check.sh"
   chmod 0700 "$state/task-a.check.sh"
   source_hash=$(fm_custom_check_sha256 "$state/task-a.check.sh")
   ready="$dir/slot-ready"
   release="$dir/slot-release"
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-pr-lib.sh"
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-check-lib.sh"
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_custom_check_slot_acquire "$state" task-a 100 || exit 1
     : > "$ready"

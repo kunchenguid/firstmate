@@ -202,11 +202,11 @@ test_no_mistakes_spawn_arms_the_registered_validation_check() {
 }
 
 test_same_id_non_no_mistakes_spawns_retire_validation_checks() {
-  local rec scout direct local out status
+  local rec scout direct local_only out status
   scout=profile-validation-retire-scout-z1
   direct=profile-validation-retire-direct-z1
-  local=profile-validation-retire-local-z1
-  rec=$(make_spawn_case profile-validation-retire claude "$scout" "$direct" "$local")
+  local_only=profile-validation-retire-local-z1
+  rec=$(make_spawn_case profile-validation-retire claude "$scout" "$direct" "$local_only")
   read_case_record "$rec"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$scout" "$PROJ_DIR")
@@ -229,15 +229,15 @@ test_same_id_non_no_mistakes_spawns_retire_validation_checks() {
   assert_absent "$HOME_DIR/state/$direct.check.sh" "direct-PR transition retained a validation check"
   assert_absent "$HOME_DIR/state/$direct.check-trust" "direct-PR transition retained validation trust"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$local" "$PROJ_DIR")
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$local_only" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "no-mistakes local-transition fixture should arm its validation check"
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$local" "$PROJ_DIR" --mode local-only --yolo off)
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$local_only" "$PROJ_DIR" --mode local-only --yolo off)
   status=$?
   expect_code 0 "$status" "same-id local-only spawn should succeed"
-  assert_grep 'mode=local-only' "$HOME_DIR/state/$local.meta" "local-only transition did not publish its mode"
-  assert_absent "$HOME_DIR/state/$local.check.sh" "local-only transition retained a validation check"
-  assert_absent "$HOME_DIR/state/$local.check-trust" "local-only transition retained validation trust"
+  assert_grep 'mode=local-only' "$HOME_DIR/state/$local_only.meta" "local-only transition did not publish its mode"
+  assert_absent "$HOME_DIR/state/$local_only.check.sh" "local-only transition retained a validation check"
+  assert_absent "$HOME_DIR/state/$local_only.check-trust" "local-only transition retained validation trust"
   pass "same-id non-no-mistakes spawns retire validation checks"
 }
 
