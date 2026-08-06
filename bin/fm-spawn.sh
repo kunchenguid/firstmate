@@ -378,7 +378,7 @@ raw_launch_preflight() {
     return 1
   fi
   case "$base" in
-    claude|env|command|exec|builtin|eval|source|.|coproc|noglob|nocorrect|not|emulate|-|nohup|nice|ionice|chrt|setsid|stdbuf|timeout|time|sudo|doas|script|watch|strace|perf|flock|xargs|find|busybox|toybox)
+    claude|env|command|exec|builtin|eval|source|.|coproc|noglob|nocorrect|not|emulate|-|nohup|nice|ionice|chrt|setsid|stdbuf|timeout|time|sudo|doas|script|watch|strace|perf|flock|setpriv|prlimit|unshare|xargs|find|busybox|toybox)
       raw_launch_refuse
       return 1
       ;;

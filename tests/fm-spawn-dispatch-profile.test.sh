@@ -577,6 +577,9 @@ test_remaining_dispatchers_are_refused() {
     "fish-not|not claude --dangerously-skip-permissions"
     "zsh-emulate|emulate sh -c 'claude --dangerously-skip-permissions'"
     "flock|/usr/bin/flock .lock claude --dangerously-skip-permissions"
+    "setpriv|setpriv --no-new-privs claude --dangerously-skip-permissions"
+    "prlimit|prlimit --nofile=1024:1024 claude --dangerously-skip-permissions"
+    "unshare|unshare claude --dangerously-skip-permissions"
   )
 
   for spec in "${cases[@]}"; do
