@@ -2319,6 +2319,42 @@ test_recorded_cursor_worker_server_recycled_pid_not_killed() {
   pass "a worker-server record whose starttime no longer matches is never killed, and the stale record is removed"
 }
 
+test_recorded_cursor_worker_server_is_reaped_for_secondmate() {
+  local case_dir home rc pid starttime
+  case_dir=$(make_case cursor-worker-server-secondmate-reap)
+  write_meta "$case_dir" local-only secondmate
+  home="$case_dir/secondmate-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+
+  # Detached-style sleeper standing in for cursor's background worker-server
+  # under a secondmate: not rooted under the home, so only the recorded-pid
+  # reaper can see it.
+  ( exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "cursor-worker-server-secondmate-reap: setup sleeper did not start"
+  starttime=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)
+  [ -n "$starttime" ] || fail "cursor-worker-server-secondmate-reap: cannot read starttime"
+  printf 'cursor_worker_server=%s\ncursor_worker_server_start=%s\n' "$pid" "$starttime" \
+    >> "$case_dir/state/task-x1.meta"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "cursor-worker-server-secondmate-reap: secondmate teardown should succeed"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "cursor-worker-server-secondmate-reap: recorded cursor worker-server survived secondmate teardown"
+  fi
+  assert_grep "reaping recorded cursor worker-server" "$case_dir/stderr" \
+    "cursor-worker-server-secondmate-reap: secondmate teardown did not report reaping the recorded worker-server"
+  [ ! -d "$home" ] || fail "cursor-worker-server-secondmate-reap: secondmate home was not removed"
+  pass "a cursor worker-server recorded for a secondmate is reaped by pid at retire, cwd-independent"
+}
+
 test_cursor_worker_server_record_missing_falls_back_to_cwd_reaper() {
   local case_dir rc pid
   case_dir=$(make_case cursor-worker-server-no-record)
@@ -2766,6 +2802,7 @@ test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
 test_recorded_cursor_worker_server_is_reaped
 test_recorded_cursor_worker_server_recycled_pid_not_killed
+test_recorded_cursor_worker_server_is_reaped_for_secondmate
 test_cursor_worker_server_record_missing_falls_back_to_cwd_reaper
 test_cursor_worker_server_record_never_touches_other_home_daemon
 test_lsof_absent_reaps_tmux_process_group
