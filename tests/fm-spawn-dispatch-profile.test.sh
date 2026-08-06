@@ -575,6 +575,8 @@ test_remaining_dispatchers_are_refused() {
     "strace|strace claude --dangerously-skip-permissions"
     "perf|perf stat -n claude --dangerously-skip-permissions"
     "fish-not|not claude --dangerously-skip-permissions"
+    "zsh-emulate|emulate sh -c 'claude --dangerously-skip-permissions'"
+    "flock|/usr/bin/flock .lock claude --dangerously-skip-permissions"
   )
 
   for spec in "${cases[@]}"; do
