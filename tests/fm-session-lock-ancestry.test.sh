@@ -236,10 +236,10 @@ trap lock_test_cleanup EXIT
 trap 'lock_test_cleanup; exit 130' INT
 trap 'lock_test_cleanup; exit 143' TERM
 
-# Detached from this script's own stdio, so a stand-in cannot hold a pipe open
-# for whatever is reading the suite's output.
+# Detached from this script's own output streams, so a stand-in cannot hold a
+# pipe open for whatever is reading the suite's output.
 new_standin_pid() {
-  sleep 300 </dev/null >/dev/null 2>&1 &
+  sleep 300 >/dev/null 2>&1 &
   FM_STANDIN_PIDS+=("$!")
   printf '%s\n' "$!"
 }
