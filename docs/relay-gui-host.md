@@ -61,12 +61,25 @@ It changes no system setting and needs no authorization.
 
 What it costs is durability: the session does not come back by itself after a logout or a reboot, and dispatch refuses until someone starts it again - loudly, naming the command.
 
-The durable alternative is a real **Login Item** (System Settings > General > Login Items, or an app registered through `SMAppService`) running the same `start`.
-It survives reboots and keeps desktop ancestry.
-It is not done here because adding one changes the machine owner's system settings, which is the owner's decision rather than this code's.
-
 A **LaunchAgent is not an alternative.**
 It is the one shape that reintroduces the wedge, which is why `start` refuses launchd-job ancestry outright.
+
+### Why firstmate still does not install a Login Item
+
+The durable alternative is a real **Login Item** (System Settings > General > Login Items, or an app registered through `SMAppService`) running the same `start`.
+Two reasons it is still not installed from here, and the second is the load-bearing one:
+
+1. Adding one changes the machine owner's system settings, which is the owner's decision rather than this code's.
+2. **Nothing here can prove a Login Item keeps desktop ancestry**, and a wrong answer reintroduces the exact measured wedge.
+   On current macOS, login items are registered with `backgroundtaskmanagementagent` and started through launchd, so what a `.command` login item's process chain ends in - Terminal's `.app` bundle, or a launchd job with no `.app` in it - is an empirical question about that machine, not a fact this repository can assert.
+   Shipping an installer whose whole value is a claim it cannot support would be the dishonest half of "durable".
+
+The safe way to find out is to install one by hand and let `start` classify it: it records provenance at start and **refuses** `launchd-job` outright, so a Login Item that turns out to have the wrong ancestry is caught before it can accept work rather than after it has hung a task for ten minutes.
+If someone runs that experiment, the classifier's verdict and the chain it printed belong in this document.
+
+Until then, everything else is automated and the remaining action is reported rather than remembered: `bin/fm-relay-conn.sh ensure <host>` and `audit <host>` ask a GUI host's own `preflight` verb and print `SETUP NEEDED ON <host>: ...` carrying the host's own sentence and the exact `fmr-host-session.sh start` command.
+`bin/fm-bootstrap.sh` relays that as a `RELAY:` line when it restores a link.
+None of that weakens the ancestry check; it only stops the requirement being invisible until a dispatch is held.
 
 ## The three checks, and why they run before the claim
 
@@ -132,12 +145,13 @@ Classifying on exit status alone would file it as a successful spawn and then wr
 ## Ordered procedure
 
 The host has no inbound SSH, so the control machine cannot push anything to it.
-Steps 2 and 4 run on the host, by its own operator.
+Steps 2 and 5 run on the host, by its own operator.
 
 1. Register the host in the control machine's `config/relay-hosts.json` with `"gui": true` and a `tmux_socket`; [`docs/configuration.md`](configuration.md) owns that schema.
 2. On the host: `bin/fm-relay-conn.sh deploy-local <host>`, reading a matching record from its own home. Same files and same config text as the SSH path, only a different transport.
 3. On the control machine: `bifrost remote conn up --ssh-key <host key>`.
 4. On the host, immediately: `bin/fm-relay-conn.sh tighten-local fm-relay-verbs`, which binds every grant to the verb allowlist and asserts that none binds the built-in full-access policy.
+   Steps 3 and 4 are the narrow default. If the captain has instead marked this host `"trusted_full_access": true`, they collapse into `bin/fm-relay-conn.sh ensure <host>` on the control machine, with nobody at the host's keyboard; see "The pairing window this cannot close" below and [`relay-host.md`](relay-host.md) for what that trade actually is.
 5. On the host, from a desktop terminal window: `<control-root>/fmr-host-session.sh start`.
 6. On the control machine: `bin/fm-brief.sh <id> <repo> --scout --host-home <host FM_HOME> --host-root <host checkout> --gui-host`.
 7. `bin/fm-spawn.sh --host <host> <id> <project> --scout --harness claude`. Exit 3 means queued, and it will dispatch itself.
@@ -145,8 +159,13 @@ Steps 2 and 4 run on the host, by its own operator.
 
 ### The pairing window this cannot close
 
-`bin/fm-relay-conn.sh up` refuses a host it cannot reach by SSH, rather than reporting a pairing it could not secure, and that refusal is kept.
-Steps 3 and 4 are therefore two operators, and between them the host carries a full-access grant.
+`bin/fm-relay-conn.sh up` refuses a host it cannot reach by SSH, rather than reporting a pairing it could not secure, and that refusal is kept for every host the captain has not explicitly marked `trusted_full_access`.
+For an unmarked host, steps 3 and 4 are therefore two operators, and between them the host carries a full-access grant.
+
+A marked host does not close that window either - it declares that the window stays open on purpose, so there is nothing left to race.
+The two-operator ceremony was never buying a narrow *steady state* on a machine like this; it was buying a narrow steady state at the cost of a human standing at that machine after every 24-hour grant expiry, and skipping that human is exactly how a control plane ends up unable to see the other machine at all.
+The captain's decision is between "narrow, and re-secured by hand on a schedule nobody keeps" and "wide, on one named peer, and reconnected without ceremony".
+It is recorded per host, in one field, so it is visible rather than assumed.
 
 That window is not introduced here.
 `bifrost remote conn up` ADDS a grant bound to the built-in `ssh-key-full-access` policy and cannot be told to create a narrow one - `ssh-key create` still has no `--roots`, `--ops`, or `--shell-policy` on 0.0.167 - so the window exists on the SSH path too and is merely closed faster there.

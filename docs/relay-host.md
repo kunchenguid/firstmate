@@ -45,6 +45,7 @@ Without `--host`, none of those paths change.
 1. Register the host in `config/relay-hosts.json`; [`docs/configuration.md`](configuration.md) owns that schema.
 2. `bin/fm-relay-conn.sh deploy <host>` installs the verb entry point and its config over ordinary SSH.
 3. `bin/fm-relay-conn.sh up <host>` pairs, tightens on the target, and asserts that no authorization binds the built-in full-access policy.
+   Afterwards, `bin/fm-relay-conn.sh ensure <host>` is the command to reach for: it reuses a healthy link and re-pairs only a dead one.
 4. `bin/fm-brief.sh <id> <repo> [--scout] --host-home <host FM_HOME> --host-root <host firstmate checkout>` writes a brief whose paths are the host's.
 5. `bin/fm-spawn.sh --host <host> <id> <project-name-on-host> [--scout] --harness <name>` dispatches; the second positional is a project NAME under the host's own projects directory, not a local path.
 6. `bin/fm-relay-check-make.sh <id>` arms the wake path, which is a separate step because a remote crewmate's status file lives on its own machine.
@@ -146,6 +147,32 @@ A host with no SSH route gets `bin/fm-relay-conn.sh tighten-local` printed for i
 Pass one tightens what it can, and pass two revokes anything still bound to the full-access policy and prints every revocation.
 
 The window between pairing and tightening cannot be closed from outside Bifrost, because `ssh-key create` still has no `--roots`, `--ops`, or `--shell-policy` on 0.0.167.
+
+### The one host record that may keep its full-access grant
+
+A host record carrying `"trusted_full_access": true` ([`configuration.md`](configuration.md) owns the field) is the captain declaring, for that one peer, that this home may keep the grant `conn up` creates rather than tightening it away.
+That declaration is the only thing that selects the mode.
+`fleet` does not, `gui` does not, the hostname does not, and an absent `ssh` route emphatically does not - inferring trust from "this one is inconvenient to tighten" would silently promote every laptop host, which is the exact opposite of what the absent route means.
+
+Everything above still applies unchanged to every host without the field, including the universal `ssh-key-full-access` refusal and the two-operator ceremony a narrow no-SSH host needs.
+
+What the trusted mode changes, and only for a marked host:
+
+- `up` may pair a host with no SSH route, because it no longer needs one to secure the result.
+- There is no tighten step, so the assertion that the narrow path gets for free from reading the target's grants back is replaced by the only question this side can answer without SSH and the only one that matters operationally: does the verb channel now answer. A pairing that does not answer is unpaired, not reported as a success.
+- The `RELAY:` bootstrap audit stops asking that host's grant question, because this home's own record already answers it. `bin/fm-relay-conn.sh audit <host>` says so explicitly rather than reporting the configured state as a fault.
+
+What it costs is the standing pairing this document already tells you to evaluate honestly: that peer holds an authorization equivalent to this user's shell on it, for as long as the grant session lives.
+
+### `ensure`, and why reconnect has to be idempotent
+
+The grant session expires in 24 hours (below), so "the link does not answer" is the ordinary morning state of a fleet, not an incident.
+`bin/fm-relay-conn.sh ensure <host>` is the form that survives being run repeatedly: it pings first and pairs **only** when the channel is down.
+That ordering is the whole point, because `conn up` ADDS a grant every time - a reconnect that paired unconditionally at every session start would accumulate exactly the authorizations this layer spends its effort removing.
+
+`bin/fm-bootstrap.sh` runs it for a registered host that did not answer, and only when this session holds the fleet lock.
+When the record does not let this machine repair the link alone, nothing is paired and the refusal is reported verbatim, naming which machine the remaining one-time action belongs to.
+Recovery is never claimed on a key file that is missing or a key the peer has revoked.
 
 ### A "permanent" grant is neither permanent nor unmetered
 
@@ -307,6 +334,13 @@ The reverse leaves the caller with a 401, because revoking the key already dropp
 
 ## Not verified
 
+- **The trusted-full-access mode and the `ensure` reconnect, on the real pair.**
+  Both are covered hermetically by `tests/fm-relay-trusted-fleet.test.sh`, against a stub bifrost that models the connection lifecycle - down, `conn up`, up, `conn down` - and logs every call so a test can assert that nothing was paired.
+  What has NOT been run is a real `bifrost remote conn up` against the real Mac with no `tighten-local` afterwards, a real 24-hour grant-session expiry followed by an automatic reconnect at session start, or the reconnect's behaviour against a genuinely revoked device key.
+  The stub answers each of those the way the measured behaviour above says the real one does; nothing here proves it did.
+- **Automatic adoption at session start on the real pair.**
+  The sweep is exercised hermetically, including the exact observed failure - a helm claimed while the link was down, adopting nothing, then converging at the next session start.
+  It has not been run over the real relay, and the round-trip cost of one `task-list` per fleet peer at every session start is therefore bounded only by `FM_RELAY_BOOTSTRAP_TIMEOUT_MS` rather than measured.
 - The reverse direction as a task host, at the time this was written.
   It has since been built and partly measured: see [`docs/relay-gui-host.md`](relay-gui-host.md), which owns the desktop-session requirement, the checks a host with a screen runs before it claims, and its own list of what is still unverified.
 - Relay session-token lifetime.

@@ -96,6 +96,12 @@ So the new control plane **discovers** what is already running rather than recei
 - Event cursors resume from what the peer recorded as presented, so nothing is replayed from the beginning and nothing the old control plane never surfaced is skipped.
 - Nothing is restarted, and the task never learns a handover happened.
 
+**Adoption is not a command to remember.**
+`claim` runs it inline, and `bin/fm-bootstrap.sh` runs the same `adopt` at every session start on the machine that holds the helm.
+That is one discovery path invoked from three places, not three paths: the holder-only gate, the epoch fencing, and the id-collision refusal are the same code either way, and a machine that does not hold the helm stays silent and read-only.
+The reason it converges at session start is the failure it was built from: a claim made while the peer was unreachable - which is exactly what a lapsed relay grant produces - adopts nothing, and until this existed nothing would ever retry.
+A claim whose adoption hits a problem still succeeds as a claim; the problem is printed with the command to re-run.
+
 The truth about a task therefore always lives on the machine running it, which is why this is steadier than packaging work up and shipping it.
 
 **PR monitoring is a control-plane asset and does move.**
@@ -132,7 +138,7 @@ A registered host **without** that field is an ordinary Phase 1/2 task host: it 
 A control root left pointing at the sandboxed host home a Phase 1/2 deployment gave it answers every question correctly and lists nothing the captain is actually running, so the handover mechanism passes while the handover itself moves an empty set.
 The same field decides which home a dispatch to that machine lands in, so on a machine that is both a fleet member and a GUI task host the two roles now share one home; [`relay-gui-host.md`](relay-gui-host.md) owns why that home must not share a worktree pool with the dispatching machine's own repositories.
 
-Then, on the machine that should steer: `bin/fm-helm.sh claim`, followed by `bin/fm-helm.sh adopt`.
+Then, on the machine that should steer: `bin/fm-helm.sh claim`, which adopts the other machines' work itself.
 
 ## Everyday use
 
@@ -143,7 +149,7 @@ Then, on the machine that should steer: `bin/fm-helm.sh claim`, followed by `bin
 | `claim` | on a machine when nobody holds it | takes a free helm |
 | `claim --force` | on the captain's explicit instruction | takes a held helm. See below |
 | `demote` | on the holder | releases the helm so nobody holds it |
-| `adopt` | on the new holder | picks up the tasks running on the other machines |
+| `adopt` | on the new holder | picks up the tasks running on the other machines; `claim` and every session start on the holder already run it |
 | `audit` | anywhere | reads every machine's lease and flags disagreement |
 
 A handover is run **by the machine that holds the helm**, naming where it should go.
@@ -158,7 +164,7 @@ The captain's own words for how a switch is triggered are "through the `/stow` m
 - The handover names its destination. `/stow` has no idea which machine the captain is walking to, and guessing is not a thing a control-plane move should do.
 - On a machine in no fleet, coupling them would buy nothing at all: the handover is a no-op there.
 
-So the sequence is: `/stow` puts the session's durable knowledge on disk, then `bin/fm-helm.sh handover <machine>` moves the helm, then `bin/fm-helm.sh adopt` on the machine that received it.
+So the sequence is: `/stow` puts the session's durable knowledge on disk, then `bin/fm-helm.sh handover <machine>` moves the helm, then `bin/fm-helm.sh adopt` on the machine that received it - or simply that machine's next session start, which runs the same adoption.
 The `stow` skill points at this and does not perform it.
 
 ### `claim --force`
@@ -217,3 +223,5 @@ What that run did **not** exercise, and what therefore remains inference:
 - The PR-monitoring move. Neither probe carried a `pr=`, so the `handover`/`demote` stand-down and the `adopt` re-arm prompt were never reached.
 - `claim --force` itself. The stale control plane was produced by advancing the peer's lease directly, which leaves the same state a forced claim during a link break leaves, but the command was not run.
 - A real link break, a real sleep and wake cycle, and a real `bin/fm-watch.sh` executing an adopted task's notification check - that check was run by hand exactly as the watcher runs it, and it produced the wake line, but no watcher was armed.
+- The automatic adoption `claim` and session start now run.
+  That path shipped after this measurement and is covered hermetically only, including the case it was built for: a helm claimed while the peer was unreachable, adopting nothing, then converging at the next session start ([`relay-host.md`](relay-host.md) "Not verified" records what that leaves unproven on the real pair).

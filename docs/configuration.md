@@ -132,14 +132,20 @@ The name is the value passed to `fm-spawn.sh --host <name>` and must match `[A-Z
 | `tmux_socket` | GUI only | absolute path to the socket of the desktop host session a dispatched agent runs in; without it the host resolves its own default socket, and on macOS that risks the agent-wedging ancestry [`docs/relay-gui-host.md`](relay-gui-host.md) records |
 | `host_session` | no | absolute path to the host session's marker file; defaults to `<control_root>/host-session` |
 | `fleet` | no | the id of the fleet this host belongs to, matching this home's `config/fleet.json`. Only a host carrying it takes part in helm handovers; a host without it is an ordinary task host whose dispatch path is unchanged ([`docs/helm.md`](helm.md)) |
+| `trusted_full_access` | no | the JSON literal `true` declares that this home may KEEP the full-access authorization a pairing creates on that peer, instead of tightening it away. Absent or `false` is the default and every host stays narrow; any other value is refused rather than guessed at |
 
 Every path must be absolute and must be the REAL path.
 A symlinked home directory (`/home/user` -> `/data00/home/user`) makes the file policy reject its own root.
 
 Absent optional fields are safe; the record is read one field per line precisely so an empty `lang` cannot shift `key` and `ssh` left, and the parser carries a sentinel line so a record whose LAST optional fields are all absent - a laptop host with no `ssh` and no `key` - does not lose them to command substitution's trailing-newline stripping.
 
-A host with no `ssh` route cannot be paired from here at all, and `bin/fm-relay-conn.sh` says so rather than pairing without being able to secure the result.
+A host with no `ssh` route and no `trusted_full_access` cannot be paired from here at all, and `bin/fm-relay-conn.sh` says so rather than pairing without being able to secure the result.
 Such a host is deployed and secured by its own operator instead; [`docs/relay-gui-host.md`](relay-gui-host.md) owns that two-operator procedure.
+
+`trusted_full_access` is the captain's per-peer decision and is never inferred.
+Neither `fleet`, nor `gui`, nor the host's name, nor the absence of an `ssh` route selects it; a record without the field keeps the narrow default and the universal `ssh-key-full-access` refusal.
+What it declares is that this machine may leave a standing authorization equivalent to this user's shell on that peer, which is what makes a no-inbound-SSH machine re-pairable from here alone.
+[`docs/relay-host.md`](relay-host.md) owns the pairing behaviour behind it and the idempotent `ensure` reconnect that consumes it.
 
 ## Fleet membership and the helm (config/fleet.json)
 

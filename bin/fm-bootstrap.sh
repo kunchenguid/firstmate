@@ -23,6 +23,22 @@
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed: <reason>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...",
 #                 "RELAY: <host>: <what is wrong and how to repair it>".
+#          A registered relay host that does not answer on the verb channel is
+#          REPAIRED, not only reported, when its record says this machine may
+#          repair it alone: bin/fm-relay-conn.sh ensure pings first and pairs only
+#          when the link is down, so a healthy link creates no new authorization.
+#          A successful reconnect prints one BOOTSTRAP_INFO line; a reconnect this
+#          machine cannot perform prints the refusal verbatim as a RELAY line,
+#          naming the machine the remaining one-time action belongs to. Detect-only
+#          sessions never pair.
+#          On a machine that holds the helm of a fleet, bootstrap also runs
+#          bin/fm-helm.sh adopt - the existing single discovery path, with its own
+#          epoch fencing, id-collision refusal, and holder-only gate - so remote
+#          work is picked up without a second command to remember. Newly adopted
+#          tasks print as BOOTSTRAP_INFO and adoption problems as RELAY lines;
+#          a non-holder machine, a fleetless home, and a run with nothing new are
+#          all silent. FM_RELAY_BOOTSTRAP_TIMEOUT_MS bounds both the per-host relay
+#          probe and this sweep, default 20000 ms.
 #          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
 #          own current default-branch commit (a purely LOCAL fast-forward, never
 #          an origin fetch) AND its loaded instruction surface (AGENTS.md, bin/,
@@ -80,15 +96,16 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the five MUTATING sweeps
-#          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          x_mode_setup, fleet_sync) while still printing every read-only detect line
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the MUTATING sweeps
+#          (PR-check migration, relay reconnect, helm_adopt_sweep, secondmate_sync,
+#          secondmate_liveness_sweep, x_mode_setup, fleet_sync) while still printing
+#          every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
 #          the fleet lock, so a second concurrent session never race-mutates
 #          PR-check artifacts, secondmate homes, X-mode artifacts, project
-#          clones, or repair instructions.
+#          clones, peer authorizations, adopted task records, or repair instructions.
 #          Unset/0 (the default) runs every sweep exactly as before - this flag
 #          is purely additive.
 #        fm-bootstrap.sh install <tool>...
@@ -1026,6 +1043,14 @@ fi
 # has to be asked on the host itself: a second `bifrost remote conn up` ADDS a
 # fresh full-access grant and leaves the tightened one looking correct, so a
 # per-grant audit passes on a wide-open machine (bin/fm-relay-conn.sh).
+#
+# A host that does not answer is now REPAIRED rather than only reported, when its
+# record says this machine may repair it. The saved grant session expires in 24
+# hours, so "not answering" is the ordinary state of a fleet the captain came
+# back to the next morning, and leaving it as a line to read and a command to
+# type is what left a control plane blind to the other machine
+# (docs/relay-host.md). The repair is bin/fm-relay-conn.sh ensure, which pings
+# before it pairs, so a healthy link costs one round trip and creates nothing.
 relay_hosts_check() {
   local hosts host grants
   [ -f "$CONFIG/relay-hosts.json" ] || return 0
@@ -1042,8 +1067,15 @@ relay_hosts_check() {
       echo "RELAY: $host: its registry entry is incomplete; dispatch to it will refuse"
       continue
     fi
-    if ! fm_relay_exec ping >/dev/null 2>&1; then
-      echo "RELAY: $host: not answering on the verb channel; re-pair with bin/fm-relay-conn.sh up $host"
+    if ! FM_RELAY_TIMEOUT_MS="$RELAY_PROBE_TIMEOUT_MS" fm_relay_exec ping >/dev/null 2>&1; then
+      relay_reconnect_or_report "$host"
+      continue
+    fi
+    if fm_relay_host_trusts_full_access; then
+      # The universal grant question is answered by this home's own record for
+      # that peer: the captain declared it may keep the full-access grant. Asking
+      # the machine again would report the configured state as a fault at every
+      # session start, which is how a real full-access line stops being read.
       continue
     fi
     [ -n "$FM_RELAY_SSH" ] || continue
@@ -1059,6 +1091,85 @@ relay_hosts_check() {
     fm_relay_audit_grants_text "$grants" \
       || echo "RELAY: $host: a full-access authorization is live on it; re-run bin/fm-relay-conn.sh up $host"
   done
+}
+
+# Bounded, because this runs inside session start. fm_relay_exec's own default is
+# two minutes, which is a sensible ceiling for a dispatch and an unacceptable one
+# for a startup probe of a machine that may simply be asleep.
+RELAY_PROBE_TIMEOUT_MS=${FM_RELAY_BOOTSTRAP_TIMEOUT_MS:-20000}
+case "$RELAY_PROBE_TIMEOUT_MS" in ''|*[!0-9]*) RELAY_PROBE_TIMEOUT_MS=20000 ;; esac
+
+# One host that did not answer. Repair it when this machine may, and otherwise
+# say exactly which one-time action is missing and where it has to be performed.
+#
+# The detect-only path never pairs: a second concurrent session must not create
+# an authorization on a peer while the session holding the lock is doing the same
+# thing, and it is the lock holder's job to repair.
+relay_reconnect_or_report() {  # <host>, after a failed fm_relay_host_load-backed ping
+  local host=$1 out rc=0 note detail
+  if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" = 1 ]; then
+    echo "RELAY: $host: not answering on the verb channel; the session holding the fleet lock owns the reconnect"
+    return 0
+  fi
+  # No FM_ROOT_OVERRIDE: that script must resolve its own checkout to find
+  # control-root/, and it self-locates from its own path to do it.
+  out=$(FM_HOME="$FM_HOME" FM_RELAY_TIMEOUT_MS="$RELAY_PROBE_TIMEOUT_MS" \
+    "$SCRIPT_DIR/fm-relay-conn.sh" ensure "$host" 2>&1) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    # Never claim a recovery that did not happen. The whole refusal is relayed,
+    # flattened to one line, because it names the machine the missing action has
+    # to be performed on and dropping that is what sends someone to the wrong one.
+    echo "RELAY: $host: $(printf '%s' "$out" | tr '\n' ' ' | tr -s ' ' | cut -c1-400)"
+    return 0
+  fi
+  # `ensure` can also succeed by finding the link already healthy, when it came
+  # back between this sweep's ping and its own; then there is no detail to quote.
+  detail=$(printf '%s' "$out" | sed -n "s/^reconnected: $host //p" | tail -1)
+  echo "BOOTSTRAP_INFO: relay $host: reconnected - ${detail:-the verb channel answers again}"
+  # A GUI host's desktop session cannot be started from here at all, so when the
+  # restored channel reports one is missing that is the single remaining action.
+  note=$(printf '%s' "$out" | sed -n 's/^SETUP NEEDED ON //p' | head -1)
+  [ -z "$note" ] || echo "RELAY: ${note%%:*}: ${note#*: }"
+}
+
+# Cross-machine task discovery, run where it converges: a session start on the
+# machine that currently holds the helm.
+#
+# This adds no second discovery path - it runs `bin/fm-helm.sh adopt`, which
+# stays the single owner of the contract, including its epoch fencing, its
+# id-collision refusal, and its holder-only gate. What it removes is the
+# requirement that a captain remember to run it. The moment adoption is most
+# likely to have been missed is a claim made while the peer was unreachable,
+# which is exactly the state a lapsed relay grant produces, and nothing else in
+# the system would ever retry it.
+#
+# Silent on a home in no fleet, on a machine that is not the holder (which is
+# read-only and must stay that way), and when there was nothing new to pick up.
+helm_adopt_sweep() {
+  local out rc=0 line
+  [ -f "$CONFIG/fleet.json" ] || return 0
+  [ -x "$SCRIPT_DIR/fm-helm.sh" ] || return 0
+  # shellcheck source=bin/fm-helm-lib.sh disable=SC1091
+  . "$SCRIPT_DIR/fm-helm-lib.sh"
+  fm_helm_fleet_load "$FM_HOME" >/dev/null 2>&1 || return 0
+  # Asked locally, with no network call: fm-helm.sh adopt refuses on a non-holder
+  # anyway, but asking first keeps a read-only machine from printing a refusal at
+  # every session start.
+  fm_helm_lease_load
+  [ "$FM_HELM_HOLDER" = "$FM_HELM_MACHINE" ] || return 0
+  [ -f "$(fm_helm_lost_file "$FM_HOME")" ] && return 0
+  out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    FM_RELAY_TIMEOUT_MS="$RELAY_PROBE_TIMEOUT_MS" \
+    "$SCRIPT_DIR/fm-helm.sh" adopt 2>&1) || rc=$?
+  while IFS= read -r line; do
+    case "$line" in
+      '') ;;
+      adopted\ *) echo "BOOTSTRAP_INFO: helm: $line" ;;
+      adopt:\ *) ;;
+      *) echo "RELAY: $line" ;;
+    esac
+  done <<< "$out"
+  return 0
 }
 
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
@@ -1099,6 +1210,10 @@ nm_orphan_scan
 nm_unwatched_prs
 relay_hosts_check
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
+  # Immediately after relay_hosts_check, which is what may just have restored the
+  # link this needs: a control plane whose connection had lapsed can only
+  # discover the other machine's work once it can reach it again.
+  helm_adopt_sweep
   secondmate_liveness_sweep
   secondmate_sync
   x_mode_setup
