@@ -308,6 +308,53 @@ test_crew_absorb_class_classifier() {
   pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
 }
 
+# crew_absorb_class's SETTLED verdict: the reconciled current state says the
+# crew's own work is over, so an idle pane is the correct condition rather than a
+# wedge symptom. Keyed on bin/fm-crew-state.sh's reconciled state, never on the
+# status line's text, which is exactly what the measured false alarms keyed on.
+test_crew_absorb_class_settled_classifier() {
+  local dir state fakebin
+  dir=$(make_case absorb-settled); state="$dir/state"; fakebin="$dir/fakebin"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_STATE_OVERRIDE="$state"
+  export FM_FAKE_CREW_STATE
+
+  # done: nothing is left for the crew, whatever its last status line says.
+  printf 'working: still going\n' > "$state/a.status"
+  FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review'
+  [ "$(crew_absorb_class a)" = settled ] || fail "reconciled done not classed settled"
+  ! crew_is_provably_working a || fail "a settled crew was treated as provably working"
+  ! crew_is_paused a || fail "a settled crew was treated as a declared pause"
+
+  # parked/blocked: settled ONLY while a durable open decision proves the next
+  # move belongs above the crew.
+  FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review: 2 finding(s) (ask-user: authority decision)'
+  printf 'needs-decision: which landing path\n' > "$state/a.status"
+  [ "$(crew_absorb_class a)" = settled ] || fail "parked with an open decision not classed settled"
+  printf 'needs-decision: which landing path\nresolved: captain chose direct-PR\n' > "$state/a.status"
+  [ "$(crew_absorb_class a)" = none ] || fail "parked with every decision resolved classed settled"
+  printf 'working: driving the gate\n' > "$state/a.status"
+  [ "$(crew_absorb_class a)" = none ] || fail "parked at a gate the crew must answer itself classed settled"
+  FM_FAKE_CREW_STATE='state: blocked · source: status-log · needs a credential'
+  printf 'blocked: needs a credential\n' > "$state/a.status"
+  [ "$(crew_absorb_class a)" = settled ] || fail "blocked with an open decision not classed settled"
+
+  # failed also reconciles a CANCELLED run - the mid-supersession state in which
+  # the crew must recover custody and resume - so it keeps aging.
+  FM_FAKE_CREW_STATE='state: failed · source: run-step · run cancelled'
+  [ "$(crew_absorb_class a)" = none ] || fail "a cancelled/failed run classed settled"
+  FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  [ "$(crew_absorb_class a)" = none ] || fail "unknown crew classed settled"
+
+  # the pre-existing verdicts are unchanged.
+  FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
+  [ "$(crew_absorb_class a)" = working ] || fail "active run-step no longer classed working"
+  FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting upstream'
+  [ "$(crew_absorb_class a)" = paused ] || fail "declared pause no longer classed paused"
+  unset FM_FAKE_CREW_STATE FM_CREW_STATE_BIN FM_STATE_OVERRIDE
+  pass "crew_absorb_class: reconciled done and decision-open parked/blocked are settled; failed, unknown and gate-owned parked keep aging"
+}
+
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
 # task it references is provably working; if any crew has stopped, or no task can be
 # resolved, it surfaces. Files map to ids by stripping .status / .turn-ended.
@@ -513,6 +560,186 @@ test_stale_terminal_status_overridden_by_active_run() {
   grep -F "possible wedge" "$out" >/dev/null || fail "escalation did not flag a possible wedge"
   unset FM_FAKE_CREW_STATE
   pass "a stale terminal-looking status is overridden and absorbed while a run is actively working, then wedge-escalated"
+}
+
+# --- stale pane whose RECONCILED state is settled terminal: never wedged ------
+# The measured `stale-fires-on-finished-task` defect (17 recorded false-positive
+# wakes on 2026-08-04): a task whose current reconciled state is terminal - done,
+# or parked/blocked with a decision still open above the crew - kept producing
+# possible-wedge stale wakes because the stale path decided from the status
+# LINE TEXT. Every one of those wakes found nothing to do. The idle pane is the
+# correct condition for these tasks, so the wake carries no information.
+#
+# Nothing rots: the terminal status still reaches firstmate through the ordinary
+# captain-relevant signal path and the heartbeat backstop (an absorbed stale never
+# marks a status surfaced), and an open decision keeps surfacing on every wake
+# drain, so absorbing here removes only the false wedge.
+
+# Assert one watcher cycle absorbs the stale pane at <hash> without waking.
+assert_settled_stale_absorbed() {  # <label> <pid> <state> <out> <key> <hash>
+  local label=$1 pid=$2 state=$3 out=$4 key=$5 h=$6
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "$label: watcher exited for a settled terminal state (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "$label: a settled terminal state printed a wake reason"
+  [ ! -s "$state/.wake-queue" ] || fail "$label: a settled terminal state enqueued a wake"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$h" ] || fail "$label: stale suppressor not advanced on absorb"
+  [ ! -e "$state/.stale-since-$key" ] || fail "$label: a settled terminal state started a wedge timer"
+  [ -e "$state/.settled-$key" ] || fail "$label: settled absorb did not record its marker"
+  reap "$pid"
+}
+
+# The daemon's verdict for the same window and state, from a sourced subshell
+# (its main loop is BASH_SOURCE-guarded), so one fixture proves both consumers.
+daemon_stale_action() {  # <state> <window> <crew-state-bin>
+  local out
+  out=$(FM_STATE_OVERRIDE="$1" FM_CREW_STATE_BIN="$3" bash -c '
+    set -u
+    . "$1" || exit 1
+    classify_stale "$2" "$3"
+  ' _ "$ROOT/bin/fm-supervise-daemon.sh" "$2" "$1" 2>/dev/null) || return 1
+  printf '%s' "${out%%|*}"
+}
+
+# A task reported done with its PR open and green, awaiting merge approval: the
+# pane is idle because the work is finished. Absorbed on first sight and still
+# absorbed once the wedge threshold has passed, because no timer is ever started.
+test_settled_done_stale_absorbed() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case settled-done); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-shipped"
+  printf 'finished, awaiting merge approval' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/shipped.meta"
+  printf 'done: PR https://example.test/pr/9 checks green\n' > "$state/shipped.status"
+  sig=$(seen_sig "$state/shipped.status"); printf '%s' "$sig" > "$state/.seen-shipped_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "finished, awaiting merge approval")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review'
+
+  # Phase A: first sighting of this stale hash.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  assert_settled_stale_absorbed "done first sight" "$pid" "$state" "$out" "$key" "$pane_hash"
+  [ ! -e "$state/.hb-surfaced-shipped" ] || fail "an absorbed settled stale marked the status surfaced"
+
+  # Phase B: the same unchanged pane, well past the wedge threshold. A wedge
+  # timer would have escalated here; a settled state must not.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  assert_settled_stale_absorbed "done repeat poll" "$pid" "$state" "$out" "$key" "$pane_hash"
+
+  # The away-mode daemon reaches the same verdict for the same task.
+  [ "$(daemon_stale_action "$state" "$window" "$fakebin/fm-crew-state.sh")" = settled ] \
+    || fail "the away daemon did not reach the settled verdict the watcher reached"
+  unset FM_FAKE_CREW_STATE
+  pass "a task reconciled done with an idle pane is absorbed, never wedge-aged, and both supervisors agree"
+}
+
+# A task parked on a captain decision with its work committed: the pane is
+# correctly idle while the decision sits above the crew.
+test_settled_parked_stale_absorbed() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case settled-parked); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-held-decision"
+  printf 'awaiting the landing-path decision' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/held-decision.meta"
+  printf 'needs-decision: direct-PR or the full pipeline for this surface\n' > "$state/held-decision.status"
+  sig=$(seen_sig "$state/held-decision.status"); printf '%s' "$sig" > "$state/.seen-held-decision_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "awaiting the landing-path decision")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review: 2 finding(s) (ask-user: authority decision)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  assert_settled_stale_absorbed "parked on a captain decision" "$pid" "$state" "$out" "$key" "$pane_hash"
+  [ "$(daemon_stale_action "$state" "$window" "$fakebin/fm-crew-state.sh")" = settled ] \
+    || fail "the away daemon did not reach the settled verdict for a decision-open parked task"
+  unset FM_FAKE_CREW_STATE
+  pass "a task parked on an open captain decision is absorbed by both supervisors"
+}
+
+# The load-bearing negative control for the settled verdict: a run parked at a
+# gate the CREW itself must answer opens no durable decision, so the idle pane is
+# a genuine stall and must still surface.
+test_parked_without_open_decision_still_surfaces() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid
+  dir=$(make_case parked-no-decision); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-gate-stalled"
+  printf 'idle at the fix-review gate' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/gate-stalled.meta"
+  printf 'working: responding to the pipeline gates\n' > "$state/gate-stalled.status"
+  sig=$(seen_sig "$state/gate-stalled.status"); printf '%s' "$sig" > "$state/.seen-gate-stalled_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle at the fix-review gate")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at fix_review: 1 finding(s)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher absorbed a crew stalled at a gate it must answer itself"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "a gate-stalled crew did not print its stale wake"
+  [ ! -e "$state/.settled-$key" ] || fail "a gate-stalled crew was marked settled"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the gate-stall wake failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "gate-stall wake was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a run parked at a gate with no open decision still surfaces as a possible stall"
+}
+
+# A settled absorb must not outlive the state that justified it: once the pane
+# changes, the marker is dropped and the fresh reconciled state decides again -
+# here a crew that resumed and then genuinely wedged.
+test_settled_marker_cleared_when_pane_changes() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case settled-then-wedged); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-resumed"
+  printf 'finished, awaiting merge approval' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/resumed.meta"
+  printf 'done: PR https://example.test/pr/11 checks green\n' > "$state/resumed.status"
+  sig=$(seen_sig "$state/resumed.status"); printf '%s' "$sig" > "$state/.seen-resumed_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "finished, awaiting merge approval")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  assert_settled_stale_absorbed "settled before resuming" "$pid" "$state" "$out" "$key" "$pane_hash"
+
+  # The crew was steered back into work, then stopped responding: a new pane, a
+  # reconciled state that is no longer settled.
+  printf 'still here, nothing moving' > "$capture_file"
+  pane_hash=$(hash_text "still here, nothing moving")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a stale settled marker suppressed a crew that resumed and then wedged"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "the resumed-then-wedged crew did not surface"
+  [ ! -e "$state/.settled-$key" ] || fail "the settled marker survived a state that is no longer settled"
+  unset FM_FAKE_CREW_STATE
+  pass "a settled absorb is dropped as soon as the pane changes and the reconciled state stops being settled"
 }
 
 # --- non-terminal stale, crew provably working: absorbed, then wedge-escalated ---
@@ -1806,6 +2033,7 @@ test_classifier_primitives
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
+test_crew_absorb_class_settled_classifier
 test_signal_crew_provably_working_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
@@ -1814,6 +2042,10 @@ test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
+test_settled_done_stale_absorbed
+test_settled_parked_stale_absorbed
+test_parked_without_open_decision_still_surfaces
+test_settled_marker_cleared_when_pane_changes
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active

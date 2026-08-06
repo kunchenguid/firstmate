@@ -20,7 +20,11 @@
 #                          line, since the crew's own log gets no new entry once
 #                          firstmate hands it to a no-mistakes validation. A declared
 #                          external-wait pause is absorbed instead with its own long
-#                          re-surface cadence, never as a wedge. Only when neither
+#                          re-surface cadence, never as a wedge. A crew whose
+#                          RECONCILED state is settled terminal - done, or
+#                          parked/blocked with a decision still open above it - is
+#                          absorbed with no wedge timer at all, because the idle
+#                          pane is that task's correct condition. Only when no
 #                          absorb class applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
 #                          both surfaced at once. A provably-working stale past the
@@ -142,9 +146,10 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # busy pane is SURFACED, so a finish reported only through interactive pane menus
 # (no done: status) is never swallowed. An ACTIONABLE wake (a captain-relevant
 # signal, a no-verb signal whose crew is not provably working, any check, a stale
-# pane whose crew is not provably working, a provably-working stale past the
-# threshold, or anything unknown) is written to the durable queue and exits, which
-# is what wakes the LLM through the background-task completion. The same classifier
+# pane whose crew is neither provably working nor settled terminal, a
+# provably-working stale past the threshold, or anything unknown) is written to
+# the durable queue and exits, which is what wakes the LLM through the
+# background-task completion. The same classifier
 # (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
@@ -162,6 +167,8 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # turn-ended and resets the age. Set generously above any legitimate interval
 # between completed turns, including long tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
+# A crew whose reconciled state is settled terminal has finished its own work, so
+# its stale pane is absorbed with no wedge timer (absorb_settled_stale below).
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
@@ -351,7 +358,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
-  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.settled-$key"
   statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
@@ -365,6 +372,29 @@ handle_paused_stale() {  # <window> <task> <hash>
     wake "$reason"
   fi
   triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
+}
+
+# Absorb a stale pane whose RECONCILED current state is settled terminal - done,
+# or parked/blocked with a decision still open above the crew (crew_absorb_class's
+# `settled` verdict). The idle pane is the correct condition for such a task, so
+# this absorbs WITHOUT starting a wedge timer: unlike a provably-working crew,
+# there is no run that could freeze, and unlike a declared pause there is no
+# external wait to recheck. Nothing rots as a result - the terminal status still
+# reaches firstmate through the ordinary captain-relevant signal path and, if that
+# was missed, through the heartbeat catch-all scan, because an absorb deliberately
+# does NOT mark the status surfaced; a parked/blocked task additionally keeps its
+# open decision surfacing on every wake drain (scan_open_decisions). That is the
+# same net the existing already-surfaced terminal-stale absorb below relies on.
+# Records .settled-<key> so subsequent polls of this SAME hash absorb without
+# re-reading the crew state; any hash change drops the marker and reclassifies.
+absorb_settled_stale() {  # <window> <hash>
+  local win=$1 h=$2 key
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  : > "$STATE/.settled-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  clear_pause_state "$win"
+  triage_log "absorbed stale (settled terminal state, idle pane is the expected condition): $win"
 }
 
 clear_pause_state() {  # <window>
@@ -381,12 +411,15 @@ clear_pause_tracking() {  # <window>
   key=${key//\//_}
   key=${key//./_}
   clear_pause_state "$win"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.settled-$key"
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
 # Only a confidently dead ordinary crew may recover paused classification after
-# fm-crew-state has fallen back to stopped or unknown.
+# fm-crew-state has fallen back to stopped or unknown. A `working` or `settled`
+# verdict is positive authoritative evidence instead of that fallback, so it wins
+# outright and skips the agent-liveness gate: a crew that declared a pause but has
+# since finished its work is settled, not a wedge suspect with a live endpoint.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive
   key=${win//:/_}
@@ -396,7 +429,7 @@ pause_state_class() {  # <window> <task>
   recheck_file="$STATE/.paused-rechecked-$key"
   if ! status_is_paused_or_captain_held "$last"; then
     rm -f "$recheck_file"
-    crew_absorb_class "$task"
+    crew_absorb_class "$task" "$STATE"
     return
   fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
@@ -411,10 +444,10 @@ pause_state_class() {  # <window> <task>
     printf 'paused'
     return
   fi
-  class=$(crew_absorb_class "$task")
-  if [ "$class" = working ]; then
+  class=$(crew_absorb_class "$task" "$STATE")
+  if [ "$class" = working ] || [ "$class" = settled ]; then
     rm -f "$recheck_file"
-    printf 'working'
+    printf '%s' "$class"
     return
   fi
   if [ "$(window_kind "$win")" != secondmate ]; then
@@ -438,7 +471,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   key=$(printf '%s' "$win" | tr ':/.' '___')
   fm_wake_append stale "$win" "stale: $win" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
-  rm -f "$STATE/.stale-since-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.settled-$key"
   task=$(window_to_task "$win" "$STATE")
   last=$(last_status_line "$STATE/$task.status")
   if status_is_paused_or_captain_held "$last"; then
@@ -1006,6 +1039,7 @@ EOF
     ssf="$STATE/.stale-since-$key"
     ewf="$STATE/.wedge-escalations-$key"
     pf="$STATE/.paused-$key"   # flag: this key's stale is using the bounded pause cadence
+    stf="$STATE/.settled-$key" # flag: this key's stale was classified settled terminal
     prev=$(cat "$hf" 2>/dev/null || true)
     # Busy match: a backend's native semantic state when available (herdr), else
     # the last 6 non-blank lines only (the TUI footer area, where every verified
@@ -1047,17 +1081,34 @@ EOF
           # authoritative source fm-crew-state.sh itself already prioritizes
           # over the log) a chance to override before trusting the log.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
-              printf '%s' "$h" > "$sf"
-              date +%s > "$ssf"
-              triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
-            else
-              fm_wake_append stale "$w" "stale: $w" || exit 1
-              printf '%s' "$h" > "$sf"
-              rm -f "$ssf"
-              mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
-              wake "stale: $w"
-            fi
+            # One crew-state read serves both overrides, exactly as before: an
+            # active run outranks the log line, and a RECONCILED terminal state
+            # (done, or parked/blocked with the decision open above the crew)
+            # means the idle pane is the expected finished/waiting condition
+            # rather than a wedge - the measured stale-fires-on-finished-task
+            # false alarms.
+            case "$(crew_absorb_class "$(window_to_task "$w" "$STATE")" "$STATE")" in
+              working)
+                printf '%s' "$h" > "$sf"
+                date +%s > "$ssf"
+                rm -f "$stf"
+                triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
+                ;;
+              settled)
+                absorb_settled_stale "$w" "$h"
+                ;;
+              *)
+                fm_wake_append stale "$w" "stale: $w" || exit 1
+                printf '%s' "$h" > "$sf"
+                rm -f "$ssf" "$stf"
+                mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
+                wake "stale: $w"
+                ;;
+            esac
+          elif [ -e "$stf" ]; then
+            # Same hash, already classified settled: keep absorbing without
+            # re-reading the crew state, and without a wedge timer.
+            triage_log "absorbed stale (settled terminal state, unchanged pane): $w"
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a
             # wedge timer is running for it) - keep treating it that way
@@ -1095,10 +1146,15 @@ EOF
               paused)
                 handle_paused_stale "$w" "$task" "$h"
                 ;;
+              settled)
+                absorb_settled_stale "$w" "$h"
+                ;;
               *)
                 surface_nonterminal_stale "$w" "$h"
                 ;;
             esac
+          elif [ -e "$stf" ]; then
+            triage_log "absorbed non-terminal stale (settled terminal state, unchanged pane): $w"
           else
             task=$(window_to_task "$w" "$STATE")
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
@@ -1108,6 +1164,7 @@ EOF
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
+                settled) absorb_settled_stale "$w" "$h" ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else
@@ -1119,6 +1176,7 @@ EOF
         # Pane busy or not yet stably stale: reset pending escalation bookkeeping,
         # unless a genuinely busy pane has gone too long with no completed turn -
         # then route it through the same wedge timer instead of erasing it.
+        rm -f "$stf"
         if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
           wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
         else
@@ -1131,6 +1189,7 @@ EOF
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
+      rm -f "$stf"
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
         wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
       else
