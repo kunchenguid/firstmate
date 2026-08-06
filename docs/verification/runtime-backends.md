@@ -135,6 +135,52 @@ tests/fm-tmux-submit-busy.test.sh
 Expected structural matrix: real text on any content row is pending; all-empty complete boxes are empty; unreadable, incomplete, or unsafe boxes are unknown; and non-bordered panes retain cursor-row compatibility.
 Expected submit matrix: proven pending plus busy is accepted as queued; proven pending plus idle remains pending; ambiguous pending is never converted by the busy exception; and only a proven empty composer succeeds directly.
 
+### Rendered busy signatures
+
+The delivery-only rendered busy guard in [`bin/fm-tmux-lib.sh`](../../bin/fm-tmux-lib.sh) decides whether a pane is mid-turn when no semantic source is available, so both directions of drift are damaging: a signature that stops matching an active turn lets firstmate inject mid-turn, and one that starts matching an idle pane defers delivery forever, which is the away-mode wedge.
+
+Claude Code was re-observed on 2026-08-06 at 2.1.223 with tmux on Linux, capturing a real idle pane and a real turn on a private socket.
+
+| Pane state | Elapsed spinner | `esc to interrupt` | Verdict |
+| --- | --- | --- | --- |
+| Idle, never run a turn | absent | absent | idle |
+| Idle after a completed turn | absent | absent | idle |
+| Idle with background shells | absent | absent | idle |
+| Active turn | intermittent | present throughout | busy |
+
+The spinner row is only intermittently rendered: one 18-second turn was sampled every 0.6 seconds with the escape affordance present on every sample and the spinner on none.
+A spinner-only guard therefore has a blind window in which an active turn reads as idle, which is why Claude now takes either signal.
+
+Claude renders the affordance as one field of a `·`-separated hint row, and that adjacency is what the guard matches:
+
+```text
+busy   ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents
+idle   ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+idle   ⏵⏵ bypass permissions on · 2 shells · ← for agents · ↓ to manage
+```
+
+A bare, undelimited `esc to interrupt` line is deliberately not busy for Claude.
+That exact shape is the ambiguous Claude Code 2.1.221 idle footer, which `tests/fm-daemon.test.sh` pins as an idle pane that must still accept an away digest.
+An older Claude Code rendering the affordance with no separator and no spinner is byte-identical to it, so no function of the rendered text alone separates the two, and the guard resolves that collision toward delivery rather than toward a wedge.
+
+The portable regression is CI-enforced, while the real-harness drift guard is opt-in under the policy in `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
+Run the live guard after any harness upgrade and before trusting or refreshing the table above:
+
+```sh
+FM_BUSY_SIGNATURE_DRIFT=1 bin/fm-test-run.sh tests/fm-busy-signature-drift-live-e2e.test.sh
+```
+
+Bounded output from the run that produced the table:
+
+```text
+ok - busy signature: claude 2.1.223 (Claude Code) separates idle from an active turn
+ok - busy signature: codex codex-cli 0.146.1 separates idle from an active turn
+# installed but undrivable here, signature unproven: opencode
+# fully verified 2 installed harness(es)
+```
+
+OpenCode is installed on this host but its pane never presented a composer to this guard, so its signature is recorded as unproven rather than passed over silently; Pi, pi-signed, Grok, and Kimi are not installed here.
+
 ### Cleanup endpoint identity
 
 The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a and metadata fixtures for every supported backend.

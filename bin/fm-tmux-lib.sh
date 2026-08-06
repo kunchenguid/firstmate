@@ -67,12 +67,32 @@
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
 
 # Delivery-only rendered busy signatures per harness.
-# Claude uses its elapsed spinner because its idle footer also says "esc to interrupt".
 # Codex uses "esc to interrupt"; opencode uses "esc interrupt"; Pi uses "Working..."; Grok uses "Ctrl+c:cancel".
-# Claude's current spinner has a rotating glyph and word, but every active-turn
-# line has an ellipsis followed by a parenthesized elapsed duration. Keep this
-# signature separate from the shared default because that shape is not generic
-# enough to classify arbitrary harness output safely.
+# Claude carries TWO independent active-turn signals and either one alone proves
+# busy, so no single vendor string is load-bearing:
+#   1. the elapsed spinner - a rotating glyph and word, but every active-turn
+#      line has an ellipsis followed by a parenthesized elapsed duration;
+#   2. the "esc to interrupt" affordance in its footer hint row.
+# Both are required because each has a measured blind window. On Claude Code
+# 2.1.223 the spinner row is only rendered intermittently - a whole 18s turn was
+# observed with the escape affordance present on every sample and the spinner on
+# none - so a spinner-only guard reads an active turn as idle and can inject
+# mid-turn. Older Claude Code renders the escape affordance with no spinner at all.
+# The escape alternative is deliberately NOT a bare substring: it must sit next to
+# a "·" footer separator, which is how Claude renders it as one field of a
+# multi-field hint row. That adjacency is the discriminator, and it is what makes
+# the affordance safe to use at all. A bare, undelimited "esc to interrupt" line is
+# deliberately NOT matched, for two reasons that point the same way: ordinary
+# transcript prose can contain the phrase, and the ambiguous Claude Code 2.1.221
+# IDLE footer is exactly that bare shape - the shape tests/fm-daemon.test.sh pins as
+# an idle pane that MUST still accept an away digest. Matching it would reopen the
+# away-mode wedge. The residual gap is an older Claude Code that renders the
+# affordance with no separator and no spinner; that rendering is byte-identical to
+# the 2.1.221 idle footer, so no function of the rendered text alone can tell them
+# apart, and this guard resolves the collision toward delivery.
+# Verified live per harness in docs/verification/runtime-backends.md.
+# Keep these signatures separate from the shared default because neither shape is
+# generic enough to classify arbitrary harness output safely.
 # Kimi's anchored moon-phase spinner is separate because bare moon glyphs in
 # ordinary output must not classify another harness as busy. Leading whitespace is
 # OPTIONAL; whitespace on both sides of the separator is REQUIRED because every
@@ -84,7 +104,7 @@
 # The full moon-phase set remains locale- and emoji-font-sensitive because Kimi
 # exposes no stable ASCII busy token.
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
-FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT='…[[:space:]]+\([0-9]+[smh]'
+FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT='…[[:space:]]+\([0-9]+[smh]|·[[:space:]]*esc to interrupt|esc to interrupt[[:space:]]*·'
 FM_TMUX_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_TMUX_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'

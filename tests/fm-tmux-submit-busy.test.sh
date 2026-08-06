@@ -246,15 +246,66 @@ test_claude_busy_signature_uses_real_capture_shapes() {
   printf 'Ctrl+c:cancel\n' > "$composer"
   pane_busy unknown kimi && fail "idle Kimi must ignore Grok's cancel footer"
 
-  # Older Claude Code and the existing Pi and Grok signatures remain unchanged.
+  # Claude's escape affordance is busy as Claude actually renders it: one field of
+  # a "·"-separated hint row. The bare, undelimited line is deliberately NOT busy
+  # for Claude - that is the ambiguous 2.1.221 idle footer that tests/fm-daemon.test.sh
+  # pins as a pane which must still accept an away digest, and matching it would
+  # reopen the away-mode wedge. See bin/fm-tmux-lib.sh for the collision.
+  printf '  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents\n' > "$composer"
+  pane_busy old-claude claude || fail "Claude escape footer field should be busy"
   printf 'esc to interrupt\n' > "$composer"
-  pane_busy old-claude claude || fail "older Claude escape footer should be busy"
+  pane_busy bare-claude claude && fail "a bare undelimited escape line must stay idle for Claude, so the away digest still lands"
   printf 'Working...\n' > "$composer"
   pane_busy pi pi || fail "Pi Working footer should be busy"
   pane_busy pi-signed pi-signed || fail "pi-signed should share Pi's exact Working footer"
   printf 'Ctrl+c:cancel\n' > "$composer"
   pane_busy grok grok || fail "Grok cancel footer should be busy"
   pass "fm_pane_is_busy: Claude spinner is scoped, multi-frame, and backward-compatible"
+}
+
+# Claude carries two independent active-turn signals and either alone must prove
+# busy, because each has a measured blind window: the 2.1.223 spinner row renders
+# only intermittently, and older Claude Code renders no spinner at all. Drive the
+# two apart deliberately and assert the divergence itself, so a future capture
+# that happens to carry both cannot let one signal rot unnoticed.
+test_claude_busy_signals_are_independent() {
+  local dir fakebin composer
+  dir="$TMP_ROOT/claude-signal-independence"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+
+  pane_busy() {
+    PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" \
+      bash -c '. "$1/bin/fm-tmux-lib.sh"; fm_pane_is_busy "$2" "$3"' \
+      _ "$ROOT" "$1" "${2:-}"
+  }
+
+  # Signal 1 alone: elapsed spinner, escape affordance genuinely absent.
+  printf '✽ Coalescing… (15s · ↓ 395 tokens)\n' > "$composer"
+  grep -qF 'esc to interrupt' "$composer" \
+    && fail "spinner-only fixture must not also carry the escape affordance"
+  pane_busy spinner-only claude || fail "spinner alone must prove Claude busy"
+
+  # Signal 2 alone: live 2.1.223 footer hint row, spinner genuinely absent.
+  printf '  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents\n' > "$composer"
+  grep -qE '…[[:space:]]+\([0-9]+[smh]' "$composer" \
+    && fail "escape-only fixture must not also carry the elapsed spinner"
+  pane_busy escape-only claude || fail "escape affordance alone must prove Claude busy"
+
+  # Real idle rows captured from Claude Code 2.1.223 stay idle.
+  printf '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents\n' > "$composer"
+  pane_busy idle-clean claude && fail "clean 2.1.223 idle footer must not be busy"
+  printf '  ⏵⏵ bypass permissions on · 2 shells · ← for agents · ↓ to manage\n' > "$composer"
+  pane_busy idle-shells claude && fail "2.1.223 idle footer with shells must not be busy"
+  printf '✻ Cogitated for 44s\n' > "$composer"
+  pane_busy idle-completed claude && fail "a completed-turn summary must not be busy"
+
+  # The discriminator: the escape affordance counts only as a delimited footer
+  # field, so transcript prose that merely mentions it stays idle.
+  printf 'I will explain how esc to interrupt works in this transcript.\n' > "$composer"
+  pane_busy prose claude && fail "transcript prose must not classify an idle Claude pane busy"
+
+  pass "fm_pane_is_busy: Claude's spinner and escape affordance each prove busy independently"
 }
 
 test_busy_pane_pending_returns_empty
@@ -265,3 +316,4 @@ test_busy_pane_unknown_stays_unknown
 test_busy_pane_ambiguous_pending_retries_without_conversion
 test_unrecognized_state_skips_busy_conversion
 test_claude_busy_signature_uses_real_capture_shapes
+test_claude_busy_signals_are_independent
