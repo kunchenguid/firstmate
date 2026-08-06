@@ -532,6 +532,56 @@ test_housekeeping_working_gate_budget_defers_without_suppressing() {
   pass "a gate read deferred by the per-pass budget delays an escalation by one pass and never suppresses it"
 }
 
+# The guard is installed per test FILE, so two suites sharing one process would
+# install it twice. A re-wrap would derive the "unguarded" alias from the already
+# guarded function, leaving the alias calling itself: a forgotten stub would then
+# blow the stack instead of naming the reason, which is strictly worse than the
+# defect the guard exists to catch. Both halves are witnessed in child shells,
+# because the assertion is about the abort itself. FUNCNEST bounds a regression to
+# a fast error rather than an out-of-memory hang.
+test_crew_state_reader_guard_install_is_idempotent() {
+  local dir out code alias_body
+  dir="$TMP_ROOT/guard-idempotent"
+  mkdir -p "$dir"
+
+  # Structural: after two installs the alias must still be the ORIGINAL classifier,
+  # with none of the guard's own body folded into it.
+  alias_body=$(FUNCNEST=200 bash -c '
+    set -u
+    . "$1/tests/wake-helpers.sh"
+    . "$1/bin/fm-supervise-daemon.sh"
+    fm_guard_crew_state_reader
+    fm_guard_crew_state_reader
+    declare -f _fm_unguarded_crew_absorb_class
+  ' _ "$ROOT" 2>/dev/null)
+  [ -n "$alias_body" ] || fail "installing the guard twice left no unguarded alias behind"
+  case "$alias_body" in
+    *FM_TEST_CREW_STATE_UNREADABLE*)
+      fail "installing the guard twice re-wrapped the alias around the guard, so it now calls itself" ;;
+  esac
+
+  # Behavioural: the second install must leave the first one working - an unusable
+  # reader still aborts, with the diagnostic, rather than recursing.
+  out=$(FUNCNEST=200 bash -c '
+    set -u
+    . "$1/tests/wake-helpers.sh"
+    . "$1/bin/fm-supervise-daemon.sh"
+    fm_guard_crew_state_reader
+    fm_guard_crew_state_reader
+    FM_CREW_STATE_BIN="$2/no-such-crew-state.sh" crew_absorb_class some-task
+  ' _ "$ROOT" "$dir" 2>&1)
+  code=$?
+  case "$out" in
+    *"nesting level exceeded"*) fail "installing the guard twice recursed instead of aborting: $out" ;;
+  esac
+  case "$out" in
+    *"unusable FM_CREW_STATE_BIN"*) ;;
+    *) fail "installing the guard twice lost the abort diagnostic (exit $code): $out" ;;
+  esac
+  [ "$code" -ne 0 ] || fail "installing the guard twice let an unusable reader through with exit 0"
+  pass "installing the crew-state reader guard twice is a no-op that keeps the first install's abort intact"
+}
+
 test_handle_wake_paused_signal_records_pause_marker() {
   local dir state key win
   dir=$(make_supercase handle-paused-signal)
@@ -2175,6 +2225,7 @@ test_housekeeping_provably_working_stale_not_escalated
 test_housekeeping_working_stale_escalates_once_refresh_stops
 test_housekeeping_working_gate_read_is_bounded_per_threshold
 test_housekeeping_working_gate_budget_defers_without_suppressing
+test_crew_state_reader_guard_install_is_idempotent
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_paused_resumed_cleared

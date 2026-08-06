@@ -213,33 +213,43 @@ SH
 # The guard aborts the whole run rather than calling fail, because the classifier
 # is reached inside a command substitution where an exit would only kill that
 # subshell and leave the run green.
-# Its diagnostic goes to fd 9, duplicated from the suite's own stderr at install
-# time, NOT to fd 2: a call site that redirects the code under test's stderr to a
-# file (housekeeping does, to assert it stays silent) would otherwise swallow the
-# explanation and leave only a bare SIGTERM exit for whoever has to diagnose it.
+# Its diagnostic goes to a descriptor duplicated from the suite's own stderr at
+# install time, NOT to fd 2: a call site that redirects the code under test's
+# stderr to a file (housekeeping does, to assert it stays silent) would otherwise
+# swallow the explanation and leave only a bare SIGTERM exit for whoever has to
+# diagnose it. The descriptor is allocated by bash rather than named, because a
+# fixed number is a shared resource - bin/fm-pr-lib.sh and bin/fm-check-lib.sh
+# both claim fd 9 for their record readers and close it when done, which would
+# close this one underneath the guard.
+# Installing twice is a no-op rather than a re-wrap: re-deriving the alias from an
+# already-guarded crew_absorb_class would make the alias call itself, so a
+# forgotten stub would blow the stack instead of aborting with the reason.
 # A test that deliberately exercises the unreadable-reader leg opts in with
 # FM_TEST_CREW_STATE_UNREADABLE=1.
 fm_guard_crew_state_reader() {
+  if declare -f _fm_unguarded_crew_absorb_class >/dev/null 2>&1; then
+    return 0
+  fi
   declare -f crew_absorb_class >/dev/null 2>&1 \
     || fail "fm_guard_crew_state_reader: crew_absorb_class is not defined; source the classifier first"
   eval "_fm_unguarded_crew_absorb_class() $(declare -f crew_absorb_class | tail -n +2)"
   # Same cd/pwd resolution bin/fm-classify-lib.sh uses for its own default, so the
   # comparison below holds through a symlinked checkout.
   _FM_GUARD_REAL_CREW_STATE="$ROOT/bin/fm-crew-state.sh"
-  exec 9>&2
+  exec {_FM_GUARD_FD}>&2
   # Replaces the sourced classifier in place; every caller reaches it indirectly.
   # shellcheck disable=SC2329
   crew_absorb_class() {
     if [ "${FM_TEST_CREW_STATE_UNREADABLE:-0}" != 1 ]; then
       if [ ! -x "${FM_CREW_STATE_BIN:-}" ]; then
         printf 'not ok - crew_absorb_class reached with an unusable FM_CREW_STATE_BIN (%s): its verdict would be an error, not a verdict. Point it at a reader that exists (make_fake_crew_state), or set FM_TEST_CREW_STATE_UNREADABLE=1 to exercise the unreadable-reader leg on purpose.\n' \
-          "${FM_CREW_STATE_BIN:-<unset>}" >&9
+          "${FM_CREW_STATE_BIN:-<unset>}" >&"$_FM_GUARD_FD"
         kill -s TERM $$
         exit 1
       fi
       if [ "${FM_CREW_STATE_BIN:-}" = "$_FM_GUARD_REAL_CREW_STATE" ]; then
         printf 'not ok - crew_absorb_class reached with the REAL reader (%s): this test never stubbed FM_CREW_STATE_BIN, so its verdict comes from the fixture on disk rather than from the test. Point it at the per-case fake fm-crew-state.sh that make_case/make_supercase already installed in the fixture fakebin.\n' \
-          "$_FM_GUARD_REAL_CREW_STATE" >&9
+          "$_FM_GUARD_REAL_CREW_STATE" >&"$_FM_GUARD_FD"
         kill -s TERM $$
         exit 1
       fi
