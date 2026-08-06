@@ -591,6 +591,9 @@ test_remaining_dispatchers_are_refused() {
     "su|su root -c 'claude --dangerously-skip-permissions'"
     "sg|sg root -c 'claude --dangerously-skip-permissions'"
     "start-stop-daemon|start-stop-daemon --start --exec claude -- --dangerously-skip-permissions"
+    "systemd-run|systemd-run --scope claude --dangerously-skip-permissions"
+    "npx|npx -c 'claude --dangerously-skip-permissions'"
+    "npm|npm exec -c 'claude --dangerously-skip-permissions'"
   )
 
   for spec in "${cases[@]}"; do
