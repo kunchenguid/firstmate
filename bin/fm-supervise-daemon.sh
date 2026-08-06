@@ -44,7 +44,10 @@
 #     escalated only after it has been idle for STALE_ESCALATE_SECS
 #     (configurable), rechecked once. A wedged crewmate is therefore detected
 #     within STALE_ESCALATE_SECS + a tick, never lost. A declared pause instead
-#     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
+#     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation,
+#     and a crew whose reconciled state is settled terminal (fm-classify-lib.sh's
+#     crew_absorb_class) is dropped from wedge aging entirely, because its idle
+#     pane is the correct condition rather than a symptom.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
@@ -331,9 +334,12 @@ _collapse_newlines() {  # <text>
 # and dedup state below layer the daemon's escalation-digest concerns on top.
 #
 # Decision protocol: every classifier prints exactly one line on stdout of the
-# form "<action>|<distilled>" where action is "self" or "escalate". The distilled
-# field for "self" is informational (logged); for "escalate" it is the pre-read
-# summary firstmate would otherwise have to re-read.
+# form "<action>|<distilled>". The action is "escalate" (surface it), "self"
+# (routine; a stale also records/refreshes the wedge marker), "pause" (declared
+# external wait; record the long-cadence pause marker), or "settled" (reconciled
+# terminal state; drop both markers). The distilled field is the pre-read summary
+# firstmate would otherwise have to re-read for "escalate", and informational
+# (logged) for the self-handled actions.
 
 classify_signal() {  # <reason-after-colon> <state>
   local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen
@@ -379,6 +385,17 @@ classify_stale() {  # <window> <state>
     # status line already read, no fm-crew-state.sh call, mirroring the daemon's
     # existing status-log classification.
     printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
+    return
+  fi
+  if [ "$(crew_absorb_class "$task" "$state")" = settled ]; then
+    # The crew's RECONCILED current state is settled terminal - done, or
+    # parked/blocked with a decision still open above it - so the idle pane is
+    # that task's correct condition rather than a wedge symptom, whatever its
+    # status line happens to say. Self-handle, and let the caller drop rather
+    # than record wedge tracking. One fm-crew-state.sh read per stale wake: the
+    # watcher enqueues at most one stale wake per distinct pane hash, so this
+    # matches the always-on path's own one-read-per-newly-classified-hash bound.
+    printf 'settled|settled terminal state (idle pane is the expected condition): %s' "${last:-no status}"
     return
   fi
   if [ -n "$last" ] && status_is_captain_relevant "$last"; then
@@ -1049,8 +1066,19 @@ housekeeping() {  # <state>
     case "$?" in
       0) rm -f "$marker" ;;
       2) rm -f "$marker" ;;
-      *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
-         stale_marker_remove "$win" "$state" ;;
+      *) # A task can go stale while its status line is still non-terminal and
+         # only THEN settle (its run finishes, or its decision is handed up), so
+         # the marker recorded earlier outlives the reason for it. Consult the
+         # reconciled state at the one point that matters - immediately before
+         # escalating a possible wedge - which keeps the read off every tick and
+         # off every still-working pane.
+         if [ "$(crew_absorb_class "$task" "$state")" = settled ]; then
+           log "stale marker dropped (settled terminal state): $win"
+           rm -f "$marker"
+         else
+           escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
+           stale_marker_remove "$win" "$state"
+         fi ;;
     esac
   done
 
@@ -1278,6 +1306,19 @@ handle_wake() {  # <reason> <state>
         pause_marker_record "$arg" "$state"
       fi
       log "self-handle (paused): $reason -> $distilled"
+      ;;
+    settled)
+      # Reconciled terminal state: the crew's own work is over, so drop BOTH
+      # trackers rather than aging either. There is no run that could freeze and
+      # no external wait to recheck; the terminal status still reaches the
+      # captain through the signal path and, if that was missed, through
+      # housekeeping's heartbeat catch-all scan, and an open decision keeps
+      # surfacing on every wake drain. Only stale produces this action.
+      if [ "$kind" = "stale" ]; then
+        stale_marker_remove "$arg" "$state"
+        pause_marker_remove "$arg" "$state"
+      fi
+      log "self-handle (settled): $reason -> $distilled"
       ;;
     *)
       # Transient (non-terminal) stale: record/refresh the wedge marker so
