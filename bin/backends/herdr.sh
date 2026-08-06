@@ -327,6 +327,8 @@ fm_backend_herdr_presentation_default_supported() {  # <state-dir> [<session>]
 fm_backend_herdr_presentation_enabled() {  # <config-dir> [<state-dir>]
   local config_dir=${1:-} state_dir=${2:-} preference
   preference=$(fm_backend_herdr_presentation_preference "$config_dir")
+  # bin/fm-spawn.sh reads this out-parameter after sourcing this adapter.
+  # shellcheck disable=SC2034
   FM_BACKEND_HERDR_PRESENTATION_PREFERENCE=$preference
   case "$preference" in
     off) return 1 ;;
