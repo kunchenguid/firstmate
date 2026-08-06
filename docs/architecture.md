@@ -31,13 +31,15 @@ A declared external wait trades that silence for one bounded recheck per pause w
 Crew status files are append-only wake-event logs, not current-state fields.
 Because of that, a per-wake read of only the latest line can bury an earlier still-open `needs-decision`/`blocked` under later unrelated appends; `fm-wake-drain.sh` prints a separate, fleet-wide OPEN DECISIONS section on every drain (including the empty-queue path session-start relies on), built through `fm-classify-lib.sh`'s cursor-backed incremental scan using the authoritative `status_open_decisions` fold semantics so the buried decision keeps surfacing until it is explicitly resolved while each drain reads only new status-log appends.
 `bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes a no-mistakes run, active or terminal, only when it matches the crew's branch and current code identity, then keeps that run-step authoritative even if the pane has closed.
-The script header owns the exact run-head ancestry rules.
+The script header owns the exact run-head ancestry rules and the exact evidence-to-verdict mapping, while `FM_CREW_STATE_VOCABULARY` in `bin/fm-classify-lib.sh` owns the verdict set itself, so every consumer handles all of it instead of silently defaulting the verdicts it was never taught.
+Each condition gets its own verdict rather than borrowing another's: a step that judged the work and rejected it is `failed`, a deliberate cancel is `aborted`, a pipeline that broke without reaching a verdict is `interrupted`, an alive crew with nothing declared is `idle`, aged-out evidence is `stale`, and `unknown` is reserved for genuinely unusable evidence.
+`--json` emits that same derivation as typed fields, adding which rule selected the answer and how old the winning evidence was, so consumers read structure instead of substring-matching the prose line.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
 The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
-Only when no matching run exists does it consult semantic busy state; exact busy reports working, exact idle permits fallback to a status-log event whose verb maps to a recognized run-state, and unknown or a dead pane stays unknown instead of trusting a stale log.
-Decision-only events such as `resolved` never become current state or leak their prose into the current-state detail.
+Only when no matching run exists does it consult semantic busy state; exact busy reports working, exact idle permits fallback to a status-log event whose verb maps to a recognized run-state, an expired busy record reports `stale` with the age it measured, and an unusable verdict or a dead pane stays unknown instead of trusting a stale log.
+Decision-only events such as `resolved` never become current state or leak their prose into the current-state detail; a live, idle crew whose last event only closed a decision reports `idle`, while a verb outside the recognized vocabulary stays unknown and names the verb.
 In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.
-The semantic branch reports working only on an exact busy verdict and names the source that produced it; an unknown verdict never becomes working, never permits the status-log fallback, and never becomes a silent idle.
+The semantic branch reports working only on an exact busy verdict and names the source that produced it; neither an unknown nor a `stale` verdict ever becomes working, permits the status-log fallback, or becomes a silent idle.
 For whole-fleet read-only review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet-snapshot.v1` from the backlog, task metadata, current crew state, endpoint probes, PR/report pointers, scout reports, bounded current summaries from registered secondmate homes, and secondmate return-channel guidance.
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
 The script header owns the exact JSON schema.
@@ -49,7 +51,7 @@ The original cross-home projection instead treated the secondmate agent as an or
 The parent-status contract also required explicit keyed resolution for decisions and blockers but not for a material `working` phase, so a start event could remain unsuperseded after the corresponding home backlog had moved the work to Done.
 Generated secondmate charters reject generic receipt or start acknowledgements, key only supervisor-actionable material phase reports, and close an opened phase with a same-key later state or `resolved` event, while the structured home remains authoritative even if that closure is missing.
 Cross-home reads validate the seeded identity and operational-directory boundaries, use per-home time and output bounds, and classify unavailable, malformed, or inconsistent structured state as unknown rather than reviving a parent event as current work.
-When only an owned child's current classification is unavailable, the home classification stays unknown while independently trustworthy structured decisions, holds, queued and landed records, endpoint identities, counts, and provenance remain available; every other invalid path stays strict and exposes none of those child-derived surfaces.
+When only an owned child's current classification is unavailable or aged out, the home classification stays unknown while independently trustworthy structured decisions, holds, queued and landed records, endpoint identities, counts, and provenance remain available; every other invalid path stays strict and exposes none of those child-derived surfaces.
 A bounded direct-report terminal tail can help diagnose a mismatch by showing that historical parent wording is still visible, but it is untrusted supplemental evidence because scrollback, prompts, copied output, idle shells, and agent prose are not durable state.
 The snapshot strips control sequences, retains only capture metadata and literal event-corroboration flags, and never lets terminal evidence override a valid structured classification.
 The default path remains local-only; live GitHub enrichment exists only behind the bearings `--include-prs` opt-in.
@@ -91,13 +93,15 @@ On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, durable cat
 ## Busy state is semantic, per adapter
 
 `bin/fm-busy-lib.sh` is the single owner of what "this worker is busy" means, and `bin/fm-busy-event.sh` is the only writer of the per-task records it reads.
-Every classification returns a verdict of busy, idle, unknown, or dead together with the source that produced it, so a consumer or a diagnostic can never confuse semantic state with a fallback.
+Every classification returns a verdict of busy, idle, stale, unknown, or dead together with the source that produced it, so a consumer or a diagnostic can never confuse semantic state with a fallback.
 
 Each converted adapter reports its own turn lifecycle through a machine-readable contract the vendor already exposes, rather than through rendered footer text: Pi and pi-signed through the Firstmate-owned extension's `agent_start` and `agent_settled` confirmed by `ctx.isIdle()`, OpenCode through its plugin's semantic `session.status`, and Claude through owned `UserPromptSubmit`, `Stop`, `StopFailure`, and `SessionEnd` hooks.
 Kimi behind Pi inherits Pi's lifecycle.
 Codex and standalone Kimi classify unknown behind explicit probes until a semantic source is live-verified for them, and Grok keeps one clearly isolated rendered-tail fallback that can only ever classify a Grok task.
 
-Missing, malformed, stale, untrusted, or unverified semantic state is unknown, never idle, and unknown is never promoted to busy either.
+Missing, malformed, gen-mismatched, untrusted, or unverified semantic state is unknown, never idle, and unknown is never promoted to busy either.
+A busy record past `FM_BUSY_MAX_BUSY_AGE_SECS` is `stale`, not busy and not unknown, because evidence that existed and aged out is a different answer from having none; like a malformed record it is terminal, so no weaker source re-answers for that task.
+An idle record never expires, because age cannot make a finished turn unfinished.
 Ordinary task-state consumers act only on an exact busy verdict, so an unreadable worker surfaces for a closer look instead of being absorbed as still-working or written off as finished.
 Endpoint death is the only process-level override and yields dead; child processes, CPU, process sleep state, and marker modification times are not state signals.
 `state/<id>.turn-ended` files remain wake notifications, not current state.
