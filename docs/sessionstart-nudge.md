@@ -8,10 +8,10 @@ Firstmate ships two session-open tiers, and the tier is a property of the harnes
 | Tier | What the adapter does | Used by |
 | --- | --- | --- |
 | Run | Executes `bin/fm-session-start.sh` in the hook and lets its ordered digest land in model context before the first turn. | Claude, `codex exec`, Pi / pi-signed |
-| Nudge | Asks the agent to run the digest through the native adapter or the tracked session-start instruction. | Grok, OpenCode, Codex interactive TUI, and every run-tier harness on a context-preserving open |
+| Nudge | Asks the agent to run the digest through the native adapter or the tracked session-start instruction. | Grok, OpenCode, Codex interactive TUI, and run-tier sources routed to the nudge |
 
 The run tier exists because the nudge can only ask.
-An agent can defer an instruction: observed 2026-08-01, an `/ahoy`-first session followed the recap path and did not acquire the lock or print a digest until a later request forced it.
+An agent can defer an instruction, including when a first-command skill has its own read-only path.
 Running the digest inside the hook removes that discretion, so even a session whose first command is a skill has already taken the helm.
 The nudge tier remains the floor for harnesses that cannot carry hook stdout into model context, and it is never a second contract: both tiers end in the same `bin/fm-session-start.sh`.
 
@@ -83,11 +83,13 @@ That alternative expands trust and writes outside this repository, so Firstmate 
 
 ## Regression coverage
 
-`tests/fm-sessionstart-nudge.test.sh` proves both wrappers' silence for both gate signals, an unmarked linked worktree, and a missing state directory, plus the nudge wrapper's already-owned-lock silence and its exact U+2063 `FIRSTMATE_OP:`-prefixed, `session-start`-typed one-line output.
+`tests/fm-sessionstart-nudge.test.sh` proves the nudge wrapper's silence for both gate signals, an unmarked linked worktree, a missing state directory, and an already-owned lock, plus its exact U+2063 `FIRSTMATE_OP:`-prefixed, `session-start`-typed one-line output.
+It separately proves the run wrapper's silence for the gate environment and an unmarked linked worktree.
 It proves the run wrapper's source routing end to end against a real `fm-session-start.sh`, including completion-gated `--reemit` selection, resume delegation, an unrecognized source falling through to the full digest, and bounded loud delivery of an oversized Pi digest.
 `tests/fm-session-start.test.sh` proves the runtime bound through the forced pure-Bash fallback: a TERM-resistant digest that exceeds its budget is force-killed with its grandchild, still emits its completed stages, names the incomplete stage and every stage it never reached, leaves no completion proof, and exits 0.
 `tests/fm-pi-primary-live-e2e.test.sh` and `tests/fm-opencode-primary-live-e2e.test.sh` exercise native startup paths with first-message and later-message Ahoy regressions.
-`tests/fm-sessionstart-hook-live-e2e.test.sh` is the opt-in live guard that confirms, per installed run-tier harness, that the hook actually runs the digest and that resume is excluded.
+`tests/fm-sessionstart-hook-live-e2e.test.sh` is the opt-in live guard that confirms each installed run-tier adapter invokes the run wrapper and delivers its output into context.
+It verifies the context-preserving reopen source for every installed run-tier harness and context-reset delivery wherever the tracked TUI surface is reachable.
 `tests/fm-turnend-guard.test.sh`, `tests/fm-pi-watch-extension.test.sh`, and `tests/fm-daemon.test.sh` cover marked guard, monitoring, and away-mode delivery.
 
 [`verification/supervision.md`](verification/supervision.md#native-session-start-delivery) records the active version-scoped transport evidence.

@@ -5,11 +5,10 @@
 # the full digest, a context re-emit, or nothing at all.
 #
 # Why running beats nudging: bin/fm-sessionstart-nudge.sh can only ASK the agent
-# to take the helm, and an agent can defer that. Observed 2026-08-01: an
-# /ahoy-first session followed the recap path and did not acquire the lock or
-# print a digest until a later request forced it. When the harness injects hook
-# stdout into model context, running the digest here removes that discretion -
-# the helm is taken before the model's first turn, whatever the first turn is.
+# to take the helm, and an agent can defer that, including when a first-command
+# skill has its own read-only path. When the harness injects hook stdout into
+# model context, running the digest here removes that discretion - the helm is
+# taken before the model's first turn, whatever the first turn is.
 #
 # Usage: fm-sessionstart-run.sh [--source <source>]
 #   --source  The harness's own session-open source. When omitted, the source is

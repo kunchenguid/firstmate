@@ -12,7 +12,7 @@ Give the captain a concise session-only recap without gathering fresh state.
 
 0. Before anything else, check whether this session has already taken the helm: a `SESSION START` digest for this home must be visible in the session history.
    If it is not, run `bin/fm-session-start.sh` once and read its digest before producing any recap.
-   Hook-capable harnesses run it automatically at session open, so this step is normally already satisfied and costs one glance; it is the safety net for harnesses that cannot run it on a hook, and for any path where a skill would otherwise act first.
+   Run-tier harness surfaces run it automatically at session open, so this step is normally already satisfied and costs one glance; it is the safety net for surfaces that cannot run it on a hook, and for any path where a skill would otherwise act first.
    Taking the helm always precedes this skill's own logic, and the digest it produces is operational input, never a captain message or a recap event.
 
 1. Inspect only conversation or session history already visible to the current first mate.

@@ -84,16 +84,8 @@ The subagent tool presents to the model as `Agent`, and on Claude Code 2.1.217 b
 ## Primary session start
 
 AGENTS.md section 3 remains the behavioral owner for session start, while tracked native adapters enforce it idempotently at session open through one of two tiers.
-Run-tier adapters invoke `bin/fm-sessionstart-run.sh`, which executes `bin/fm-session-start.sh` so the digest is in model context before the first turn; nudge-tier adapters invoke `bin/fm-sessionstart-nudge.sh`, which only prints one canonically typed `session-start` instruction and never runs the digest, wake drain, bootstrap sweeps, lock, or supervision arm itself.
-Tier assignment, source routing, the runtime bound, and fail-open behavior live in `docs/sessionstart-nudge.md`.
+Before inspecting or changing session-open behavior, read `docs/sessionstart-nudge.md`, the single owner of tier assignment, per-surface transports, source routing, the runtime bound, and fail-open behavior.
 `docs/verification/supervision.md` "Native session-start delivery" owns active dated commands, payloads, and evidence.
-
-- `claude`: run tier; verified native `SessionStart` stdout injection, with one unmatched hook whose payload `source` drives the routing.
-- `codex exec`: run tier; the `SessionStart` payload carries the same `startup|resume|clear|compact` `source` vocabulary as Claude, and wrapper stdout reaches model context.
-- `codex` interactive TUI: nudge tier through the tracked session-start instruction; Codex 0.146.0 does not fire the project `SessionStart` hook there, and Firstmate ships no global replacement.
-- `opencode`: nudge tier; verified on 1.17.18, `session.created` plus `client.session.promptAsync` starts the nudge turn in the TUI, while `opencode run` can exit before that turn, which is also why it cannot run the digest in the hook.
-- `pi` and `pi-signed`: run tier; the primary extension maps `session_start` reasons `startup`, `new`, `resume`, and `fork` onto wrapper sources, handles `session_compact`, and uses `pi.sendMessage` to inject context without racing a positional launch prompt; because that is a message rather than hook stdout, the extension gives an unencoded digest `session-start` operational provenance first.
-- `grok`: nudge tier; the 0.2.103 project `SessionStart` event fires with `source=new`, but stdout does not reach model context, so it cannot run the digest either; the tracked project hook remains fail-open, and a global token-guarded fallback requires a captain decision.
 
 ## Primary watcher supervision
 
