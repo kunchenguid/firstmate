@@ -653,6 +653,7 @@ test_write_emits_only_positively_safe_urls() {
     'encoded-slash https://alice:s%2Fs@u9.invalid/o/r.git' \
     'explicit-port https://alice:pw@u7.invalid:8443/o/r.git' \
     'ipv6-host https://alice:pw@[2001:db8::1]/o/r.git' \
+    'scp-style git@u15.invalid:o/r.git' \
     "trailing-garbage 'https://alice:pw@u13.invalid/r.git')," \
     'unparseable https://alice:pa/ss@u8.invalid/x')"
   git -C "$repo" remote add origin "$fork"
@@ -672,6 +673,8 @@ test_write_emits_only_positively_safe_urls() {
   assert_contains "$out" "https://u9.invalid/o/r.git" "a percent-encoded slash was not rewritten"
   assert_contains "$out" "https://u7.invalid:8443/o/r.git" "an explicit port was not preserved"
   assert_contains "$out" "https://[2001:db8::1]/o/r.git" "an IPv6 literal host was not preserved"
+  assert_contains "$out" "u15.invalid:o/r.git" "an scp-style remote was not named by its host and path"
+  assert_not_contains "$out" "git@u15.invalid" "an scp-style remote kept its user"
   assert_contains "$out" "https://u13.invalid/r.git" "punctuation around a URL defeated the rewrite"
   # No fragment of any credential survives, whatever shape it took.
   assert_not_contains "$out" "alice" "a username reached the caller"
@@ -722,6 +725,40 @@ test_write_withholds_a_push_target_it_cannot_positively_parse() {
   pass "fm-attest.sh: a push target that cannot be positively parsed is withheld, not emitted"
 }
 
+test_write_names_an_scp_style_push_target() {
+  local repo parent head out rc
+  repo="$TMP_ROOT/scp-push-target"
+  parent="$TMP_ROOT/scp-push-target-parent.git"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  git init -q --bare "$parent"
+  git -C "$repo" remote add origin "$parent"
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${head:0:8}" completed)"
+  # The form CONTRIBUTING.md prescribes. It must be named, because a contributor
+  # who cannot see which repository the note reached cannot tell their fork from
+  # the parent, and this form has no password field to protect.
+  git -C "$repo" config remote.origin.pushurl 'git@u14.invalid:owner/repo.git'
+  out=$(cd "$repo" && GIT_SSH_COMMAND=false GIT_TERMINAL_PROMPT=0 \
+    PATH="$repo/stub/bin:$PATH" "$ATTEST" write 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an unreachable push target was published to"
+  assert_contains "$out" "u14.invalid:owner/repo.git" "an scp-style push target was not named"
+  assert_not_contains "$out" "git@u14.invalid" "the scp-style push target kept its user"
+  # The matched control, differing by one property: a colon before the @ means
+  # this is not that shape, because that is where a password lives. It must be
+  # withheld entirely rather than emitted with the password stripped off.
+  git -C "$repo" config remote.origin.pushurl 'someone:hunter2@u14.invalid:owner/repo.git'
+  out=$(cd "$repo" && GIT_SSH_COMMAND=false GIT_TERMINAL_PROMPT=0 \
+    PATH="$repo/stub/bin:$PATH" "$ATTEST" write 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an unreachable push target was published to"
+  assert_contains "$out" "url withheld" "a token with a colon before its @ was not withheld"
+  assert_not_contains "$out" "hunter2" "the password reached the caller"
+  assert_not_contains "$out" "u14.invalid:owner/repo.git" \
+    "a token with a colon before its @ was emitted with its password stripped instead of withheld"
+  pass "fm-attest.sh: an scp-style push target is named, and a colon before its user is not"
+}
+
 test_write_withholds_url_shapes_no_reader_models() {
   local repo fork head out rc
   repo="$TMP_ROOT/default-deny"
@@ -734,7 +771,7 @@ test_write_withholds_url_shapes_no_reader_models() {
     'refs/notes/* is blocked by a ruleset' \
     'safe https://safe.invalid/o/r.git' \
     'no-scheme alice:pw@u10.invalid/r.git' \
-    'scp-style git@u11.invalid:o/r.git' \
+    'colon-before-at bob:hunter2@u11.invalid:o/r.git' \
     'at-after-authority https://u6.invalid/o/r.git@v2' \
     'unfamiliar weird+scheme://a:b/c@d:e/f?g#h')"
   git -C "$repo" remote add origin "$fork"
@@ -745,7 +782,13 @@ test_write_withholds_url_shapes_no_reader_models() {
   assert_contains "$out" "url withheld" "a URL-shaped token was dropped without saying so"
   assert_not_contains "$out" "alice" "a credential in a URL with no scheme reached the caller"
   assert_not_contains "$out" "u10.invalid" "a URL with no scheme was emitted"
-  assert_not_contains "$out" "u11.invalid" "an scp-style URL carrying userinfo was emitted"
+  # The guard on the scp-style shape. Its colon separates host from path, which
+  # is what makes that form credential-free, so a colon BEFORE the @ means this
+  # is not that shape: it is where a password lives. Emitting anything at all
+  # here, even with the password stripped, is an unproven shape being emitted.
+  assert_not_contains "$out" "hunter2" "a password before the @ reached the caller"
+  assert_not_contains "$out" "u11.invalid" \
+    "a token with a colon before its @ was emitted as though it were an scp-style remote"
   assert_not_contains "$out" "u6.invalid" "a URL with an @ after its authority was emitted"
   # The class control: a deliberately unfamiliar URL-shaped token that no reader
   # models must be withheld. Emitting it is what "unmatched means safe" looks
@@ -979,6 +1022,7 @@ test_write_publishes_a_first_attestation_to_a_push_target_with_no_ref
 test_write_refuses_an_unreadable_push_target_without_leaking_credentials
 test_write_emits_only_positively_safe_urls
 test_write_withholds_a_push_target_it_cannot_positively_parse
+test_write_names_an_scp_style_push_target
 test_write_withholds_url_shapes_no_reader_models
 test_write_outside_a_repository_fails_as_such
 test_write_without_the_pipeline_tool_fails_as_such

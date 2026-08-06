@@ -329,15 +329,24 @@ EOF
 # does not model is emitted intact: absence of detection read as absence of a
 # credential, which is the same mistake as reading an empty check set as green.
 # Two such shapes reached the log before this inversion. So a word that could
-# carry a credential is emitted ONLY when it positively matches a URL with no
-# userinfo, or can be rewritten into one; unparseable, ambiguous, unfamiliar or
-# merely unmatched all withhold. An emitted URL therefore never contains an '@'
-# at all, so nothing turns on where a reader believes the authority ends.
+# carry a credential is emitted ONLY when it positively matches a shape that has
+# no place for one, or can be rewritten into one; unparseable, ambiguous,
+# unfamiliar or merely unmatched all withhold.
 #
-# The cost is deliberate: an ssh remote, an address, or a URL with an '@' after
-# its host is withheld even though it holds no secret. The marker says so in its
-# place, because an omission the reader knows about is recoverable and a silent
-# one is not. Words that are not URL-shaped are untouched, so the server's own
+# Two shapes are modelled. A scheme URL is emitted without its userinfo, and
+# never contains an '@' at all afterwards, so nothing turns on where a reader
+# believes the authority ends. An scp-style [user@]host:path is emitted without
+# its user, because that form has no password field: its colon separates host
+# from path. That last point is the whole guard, so it is stated as a rule
+# rather than left to the regex to imply - a colon BEFORE the '@' is exactly
+# where a password would live, so a token carrying one is not this shape and is
+# withheld. Adding a modelled shape is default deny working; excepting one from
+# it is not, and the difference is the entire safety of this function.
+#
+# The cost is deliberate: an address, or a URL with an '@' after its host, is
+# withheld even though it holds no secret. The marker says so in its place,
+# because an omission the reader knows about is recoverable and a silent one is
+# not. Words that are not URL-shaped are untouched, so the server's own
 # rejection reason still reaches the person who has to act on it.
 WITHHELD_URL='<url withheld: not provably credential-free>'
 
@@ -367,10 +376,20 @@ credential_safe_text() {
       sub(/^.*@/, "", host)
       return scheme host tail
     }
+    function is_safe_scp(t) {
+      return t ~ /^([A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\]):[^@]*$/
+    }
+    function without_scp_user(t,   at) {
+      if (t !~ /^[A-Za-z0-9._~-]+@/) return ""
+      at = index(t, "@")
+      return substr(t, at + 1)
+    }
     function render(t,   rebuilt) {
       if (is_safe(t)) return t
       rebuilt = without_userinfo(t)
       if (rebuilt != "" && is_safe(rebuilt)) return rebuilt
+      rebuilt = without_scp_user(t)
+      if (rebuilt != "" && is_safe_scp(rebuilt)) return rebuilt
       return withheld
     }
     function token(x,   pre, post, core, c) {
@@ -624,7 +643,7 @@ EOF
   [ "$push_rc" -eq 0 ] || fail attestation-not-published \
     "Could not publish $notes_ref to $push_target, the push target of $remote." \
     "git said: $(credential_safe_text "$push_err")" \
-    "Any credential in that text is redacted, and a line that still carried one is replaced by a notice rather than shown." \
+    "A URL in that text is shown only in a form that has no place for a credential, and any other URL-shaped word is replaced by a marker saying it was withheld." \
     "The attestation is evidence only on the repository holding the pull request head, so name that one with --remote <name> if this is not it, or re-run to reconcile if its $notes_ref moved since."
   printf 'fm-attest: published %s to %s (the push target of %s)\n' "$notes_ref" "$push_target" "$remote"
 }

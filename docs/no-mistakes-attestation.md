@@ -98,9 +98,14 @@ git quotes the push URL back in its messages and a credential in a log is a leak
 That is done by default deny, and the inversion is the design rather than a detail of it.
 Redacting what a reader recognises means every URL shape git accepts has to be modelled, and any shape it does not model is emitted intact, which reads absence of detection as absence of a credential: the same mistake as reading an empty check set as green.
 Two shapes reached the log that way before the inversion, one of them a password holding an unencoded `@`.
-So a word that could carry a credential is emitted only when it positively matches a URL with no userinfo, or can be rewritten into one; unparseable, ambiguous, unfamiliar and merely unmatched all withhold.
-An emitted URL therefore contains no `@` at all, so nothing turns on where a reader believes the authority ends, and an explicit port or an IPv6 literal host survives because those match positively.
-The cost is deliberate and stated rather than hidden: an ssh remote, an address, or a URL with an `@` after its host is withheld even though it holds no secret, and a marker says so in its place, because an omission the reader knows about is recoverable and a silent one is not.
+So a word that could carry a credential is emitted only when it positively matches a shape that has no place for one, or can be rewritten into one; unparseable, ambiguous, unfamiliar and merely unmatched all withhold.
+
+Two shapes are modelled.
+A scheme URL is emitted without its userinfo, and afterwards contains no `@` at all, so nothing turns on where a reader believes the authority ends, while an explicit port or an IPv6 literal host survives because those match positively.
+An scp-style `[user@]host:path` remote is emitted without its user, because that form has no password field: its colon separates host from path, which is what makes it provably credential-free.
+That is also its whole guard, so it is a rule rather than an implication of the pattern: a colon before the `@` is exactly where a password would live, so a token carrying one is not this shape and is withheld.
+Modelling a shape is default deny working as designed; excepting one from it is not, and that distinction is the safety of the whole function.
+The cost is deliberate and stated rather than hidden: an address, or a URL with an `@` after its host, is withheld even though it holds no secret, and a marker says so in its place, because an omission the reader knows about is recoverable and a silent one is not.
 Words that are not URL-shaped are untouched, so the server's own reason still reaches the person who has to act on it.
 One function does this for everything the command prints, git's output and the push target alike, because two mechanisms for the one job is how the disagreement that caused the first leak returns.
 A push target carrying no `refs/notes/no-mistakes` yet has nothing to reconcile against and is not an error, but a push target that cannot be read at all stops the command before anything is recorded: not reading a repository is not reading an absence, and that is the same line the gate draws when it fetches this ref.
