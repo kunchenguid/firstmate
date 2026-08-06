@@ -21,8 +21,10 @@
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
 #   2. Matching no-mistakes run for this crew's branch AND current code identity,
-#      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
-#      fallback)? Branch name alone is not enough: a historical run on a reused
+#      active or terminal (from `axi status`, re-resolved through the `axi` home
+#      surface when the bare answer is a stale same-branch terminal run, or
+#      falling back to the coarse `no-mistakes runs` list when no exact ID is
+#      exposed)? Branch name alone is not enough: a historical run on a reused
 #      branch whose head was rewritten or diverged must not be attributed.
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
 #      is an ancestor of the run head (pipeline fix commits advanced the run on

@@ -25,6 +25,10 @@
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
 #       proving the watcher's own absorb-only-when-provably-working predicate
 #       benefits from the fix in both directions.
+#   (l) same-branch same-code precedence: a newer parked run exposed by the
+#       `axi` home surface beats an older same-branch terminal run that the
+#       bare query would otherwise return; the single-run counterfactual must
+#       still report parked.
 set -u
 
 # shellcheck source=tests/lib.sh
