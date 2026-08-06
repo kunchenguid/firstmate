@@ -13,13 +13,17 @@
 #      evaluated on EVERY stop, including a forced follow-up turn: the arm is
 #      stop-hook-owned, so a continuation whose own supervision need is real
 #      must re-arm rather than end blind (the Claude --claude-mode lesson,
-#      bin/fm-turnend-guard.sh:41-46). The shim owns the bound instead, with
-#      two independent persisted counters under state/: consecutive loud
+#      bin/fm-turnend-guard.sh:41-46). The shim owns the bound instead, in one
+#      session-scoped chain record under state/ (.cursor-turnend-chain, keys
+#      session/fail/wake/reason, reset on session mismatch): consecutive loud
 #      arm-failure follow-ups (FM_CURSOR_TURNEND_BLOCK_BUDGET) and consecutive
-#      actionable wake follow-ups (FM_CURSOR_WAKE_CHAIN_BUDGET). Each kind
-#      resets the other and an allowed stop resets both, so a healthy wake
-#      chain can never consume the arm-failure diagnostic and a wake reason
-#      that re-fires every cycle cannot chain forever;
+#      repeats of the SAME unchanged wake reason (FM_CURSOR_WAKE_CHAIN_BUDGET,
+#      one final diagnostic follow-up at the ceiling). Each kind resets the
+#      other, a changed wake reason is progress and restarts the wake count,
+#      and an allowed stop clears the record. When the record cannot be
+#      persisted the payload's loop_count is the fallback bound, so a
+#      read-only state dir degrades to the pre-counter behaviour instead of an
+#      un-endable chain;
 #   3. runs bin/fm-turnend-guard.sh with the normalized payload;
 #   4. on exit 2 (a blind turn), foregrounds bin/fm-watch-arm.sh inside the
 #      hook-owned process tree - parked while the watcher arms, never shell
@@ -58,34 +62,61 @@ ROOT=${ROOT%/}
 [ -x "$ROOT/bin/fm-turnend-guard.sh" ] || exit 0
 
 STATE=${FM_STATE_OVERRIDE:-${FM_HOME:-$ROOT}/state}
-FAIL_FILE="$STATE/.cursor-turnend-arm-failures"
-WAKE_FILE="$STATE/.cursor-turnend-wake-chain"
+CHAIN_FILE="$STATE/.cursor-turnend-chain"
 
-counter_read() {
-  local value
-  value=$(cat "$1" 2>/dev/null || true)
-  case "$value" in ''|*[!0-9]*) value=0 ;; esac
-  printf '%s' "$value"
+SESSION=$(printf '%s' "$PAYLOAD" | jq -r '
+  if type == "object" and (.session_id | type) == "string" then .session_id else "unknown" end
+' 2>/dev/null) || SESSION=unknown
+LOOP_COUNT=$(printf '%s' "$PAYLOAD" | jq -r '
+  if type == "object" and (.loop_count | type) == "number" and .loop_count > 0
+  then (.loop_count | floor) else 0 end
+' 2>/dev/null) || LOOP_COUNT=0
+case "$LOOP_COUNT" in ''|*[!0-9]*) LOOP_COUNT=0 ;; esac
+
+CHAIN_SESSION=
+CHAIN_FAIL=0
+CHAIN_WAKE=0
+CHAIN_REASON=
+
+chain_load() {
+  local key value
+  [ -f "$CHAIN_FILE" ] || return 0
+  while IFS='=' read -r key value; do
+    case "$key" in
+      session) CHAIN_SESSION=$value ;;
+      fail) CHAIN_FAIL=$value ;;
+      wake) CHAIN_WAKE=$value ;;
+      reason) CHAIN_REASON=$value ;;
+    esac
+  done < "$CHAIN_FILE"
+  case "$CHAIN_FAIL" in ''|*[!0-9]*) CHAIN_FAIL=0 ;; esac
+  case "$CHAIN_WAKE" in ''|*[!0-9]*) CHAIN_WAKE=0 ;; esac
+  if [ "$CHAIN_SESSION" != "$SESSION" ]; then
+    CHAIN_FAIL=0
+    CHAIN_WAKE=0
+    CHAIN_REASON=
+  fi
 }
 
-counter_write() {
-  [ -d "$STATE" ] || return 0
-  printf '%s\n' "$2" > "$1" 2>/dev/null || true
-}
-
-counters_clear() {
-  rm -f "$FAIL_FILE" "$WAKE_FILE" 2>/dev/null || true
+chain_store() {
+  [ -d "$STATE" ] || return 1
+  printf 'session=%s\nfail=%s\nwake=%s\nreason=%s\n' \
+    "$SESSION" "$1" "$2" "$3" > "$CHAIN_FILE" 2>/dev/null || return 1
+  return 0
 }
 
 allow_stop() {
-  counters_clear
+  rm -f "$CHAIN_FILE" 2>/dev/null || true
   printf '{}\n'
   exit 0
 }
 
+chain_load
+
 ERR=$(mktemp "${TMPDIR:-/tmp}/fm-turnend-cursor.XXXXXX") || exit 0
 ARM_OUT=
 ARM_ACTIONABLE=0
+WAKE_REASON=
 ARM_OUT=$(mktemp "${TMPDIR:-/tmp}/fm-turnend-cursor-arm.XXXXXX") || ARM_OUT=
 trap 'rm -f "$ERR" "$ARM_OUT"' EXIT
 
@@ -102,7 +133,8 @@ RC=$?
 if [ -n "$ARM_OUT" ]; then
   "$ROOT/bin/fm-watch-arm.sh" >"$ARM_OUT" 2>&1 || true
   cat "$ARM_OUT" >&2
-  if grep -Eq '^(signal:|stale:|check:|heartbeat($|:))' "$ARM_OUT" 2>/dev/null; then
+  WAKE_REASON=$(grep -Em1 '^(signal:|stale:|check:|heartbeat($|:))' "$ARM_OUT" 2>/dev/null || true)
+  if [ -n "$WAKE_REASON" ]; then
     ARM_ACTIONABLE=1
   fi
 else
@@ -117,24 +149,33 @@ RC=$?
 [ "$RC" -eq 2 ] || allow_stop
 
 if [ "$ARM_ACTIONABLE" -eq 1 ]; then
-  COUNT=$(( $(counter_read "$WAKE_FILE") + 1 ))
-  rm -f "$FAIL_FILE" 2>/dev/null || true
+  # Only a wake reason that keeps re-firing unchanged advances the chain count;
+  # a different reason is progress and restarts it.
+  if [ "$WAKE_REASON" = "$CHAIN_REASON" ]; then
+    COUNT=$((CHAIN_WAKE + 1))
+  else
+    COUNT=1
+  fi
+  chain_store 0 "$COUNT" "$WAKE_REASON" || COUNT=$((LOOP_COUNT + 1))
+  if [ "$COUNT" -gt $((WAKE_BUDGET + 1)) ]; then
+    printf '{}\n'
+    exit 0
+  fi
   if [ "$COUNT" -gt "$WAKE_BUDGET" ]; then
-    rm -f "$WAKE_FILE" 2>/dev/null || true
-    printf '{}\n'
-    exit 0
+    REASON="firstmate watcher wake - the same wake reason has now repeated $COUNT times without clearing. Run bin/fm-wake-drain.sh first, handle the wake, and investigate why it keeps re-firing: this is the last automatic follow-up for this reason."
+  else
+    REASON='firstmate watcher wake - one supervision event needs a handling turn now. Run bin/fm-wake-drain.sh first and handle the wake. Stop-hook-owned continuity re-arms the next needed cycle automatically; do not manually arm the watcher.'
   fi
-  counter_write "$WAKE_FILE" "$COUNT"
-  REASON='firstmate watcher wake - one supervision event needs a handling turn now. Run bin/fm-wake-drain.sh first and handle the wake. Stop-hook-owned continuity re-arms the next needed cycle automatically; do not manually arm the watcher.'
 else
-  COUNT=$(( $(counter_read "$FAIL_FILE") + 1 ))
-  rm -f "$WAKE_FILE" 2>/dev/null || true
+  COUNT=$((CHAIN_FAIL + 1))
+  if ! chain_store "$COUNT" 0 ''; then
+    COUNT=$((LOOP_COUNT + 1))
+  fi
   if [ "$COUNT" -gt "$BLOCK_BUDGET" ]; then
-    rm -f "$FAIL_FILE" 2>/dev/null || true
+    chain_store 0 0 '' || true
     printf '{}\n'
     exit 0
   fi
-  counter_write "$FAIL_FILE" "$COUNT"
   REASON=$(cat "$ERR" 2>/dev/null || true)
   [ -n "$REASON" ] || REASON='tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn'
 fi

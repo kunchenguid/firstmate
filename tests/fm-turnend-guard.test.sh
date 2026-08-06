@@ -1014,9 +1014,24 @@ test_cursor_shim_wakes_after_actionable_arm_on_continuation() {
 cursor_shim_stop() {
   local loop=$1
   shift
-  printf '{"session_id":"cur-session","loop_count":%s,"workspace_roots":["%s"]}' "$loop" "$CURSOR_FIXTURE_DIR" \
+  printf '{"session_id":"%s","loop_count":%s,"workspace_roots":["%s"]}' \
+    "${CURSOR_FIXTURE_SESSION:-cur-session}" "$loop" "$CURSOR_FIXTURE_DIR" \
     | CURSOR_WORKSPACE_ROOT="$CURSOR_FIXTURE_DIR" "$@" bash "$CURSOR_FIXTURE_DIR/bin/fm-turnend-guard-cursor.sh" 2>&1 \
     | tail -n 1
+}
+
+# Each close reports a DIFFERENT typed actionable reason, the ordinary
+# supervision case: distinct events handled one after another.
+install_varying_actionable_arm_stub() {
+  local dir=$1
+  cat > "$dir/bin/fm-watch-arm.sh" <<EOF
+#!/usr/bin/env bash
+printf 'arm-invoked\\n' >> "$dir/state/.arm-invocations"
+n=\$(wc -l < "$dir/state/.arm-invocations")
+printf 'signal: task%s.status\\n' "\$n"
+exit 0
+EOF
+  chmod +x "$dir/bin/fm-watch-arm.sh"
 }
 
 test_cursor_shim_bounds_loud_failure_followups() {
@@ -1070,15 +1085,85 @@ test_cursor_shim_bounds_the_actionable_wake_chain() {
   CURSOR_FIXTURE_DIR=$dir
   : > "$dir/state/task1.meta"
   install_actionable_arm_stub "$dir"
-  # A wake reason that re-fires on every armed cycle must not chain forever.
+  # The SAME wake reason re-firing on every armed cycle must not chain forever:
+  # normal followups up to the ceiling, one diagnostic at it, then silence.
   for i in 1 2; do
     out=$(cursor_shim_stop "$i" env FM_CURSOR_WAKE_CHAIN_BUDGET=2)
     assert_contains "$out" "firstmate watcher wake" \
       "actionable wake $i under the chain ceiling must still deliver a followup"
+    assert_not_contains "$out" "keeps re-firing" \
+      "a wake under the ceiling must not carry the repeat diagnostic"
   done
   out=$(cursor_shim_stop 3 env FM_CURSOR_WAKE_CHAIN_BUDGET=2)
-  [ "$out" = '{}' ] || fail "cursor shim must end the wake chain at the ceiling, got: $out"
-  pass "fm-turnend-guard-cursor: the actionable wake chain is bounded by FM_CURSOR_WAKE_CHAIN_BUDGET"
+  assert_contains "$out" "bin/fm-wake-drain.sh" \
+    "the ceiling followup must still tell the model to drain the wake"
+  assert_contains "$out" "keeps re-firing" \
+    "the chain ceiling must deliver a diagnostic rather than silence"
+  assert_not_contains "$out" "TURN WOULD END BLIND" \
+    "the ceiling diagnostic must not present the blind-turn banner"
+  out=$(cursor_shim_stop 4 env FM_CURSOR_WAKE_CHAIN_BUDGET=2)
+  [ "$out" = '{}' ] || fail "cursor shim must end the wake chain past the ceiling, got: $out"
+  pass "fm-turnend-guard-cursor: a re-firing wake reason is bounded and gets a ceiling diagnostic"
+}
+
+test_cursor_shim_distinct_wakes_do_not_hit_the_chain_ceiling() {
+  local dir out i
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-wake-distinct")
+  CURSOR_FIXTURE_DIR=$dir
+  : > "$dir/state/task1.meta"
+  install_varying_actionable_arm_stub "$dir"
+  # Ordinary supervision: every cycle closes on a different actionable event.
+  # These are progress, not a stuck reason, so the ceiling must never fire and
+  # leave the primary with an undrained wake and no watcher.
+  for i in 1 2 3 4 5; do
+    out=$(cursor_shim_stop "$i" env FM_CURSOR_WAKE_CHAIN_BUDGET=2)
+    assert_contains "$out" "firstmate watcher wake" \
+      "distinct actionable wake $i must keep delivering a normal drain-and-handle followup"
+    assert_not_contains "$out" "keeps re-firing" \
+      "distinct actionable wakes must not accumulate toward the repeat ceiling"
+  done
+  pass "fm-turnend-guard-cursor: distinct wake reasons reset the chain instead of exhausting it"
+}
+
+test_cursor_shim_failure_budget_is_session_scoped() {
+  local dir out
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-session-scope")
+  CURSOR_FIXTURE_DIR=$dir
+  : > "$dir/state/task1.meta"
+  install_failing_arm_stub "$dir"
+  out=$(cursor_shim_stop 0 env FM_CURSOR_TURNEND_BLOCK_BUDGET=1)
+  assert_contains "$out" "TURN WOULD END BLIND" \
+    "the first arm failure of a session must raise the loud failure followup"
+  # A fresh session must not inherit the previous session's exhausted budget:
+  # a hooks.json registration failure is most likely on a session's first stop.
+  CURSOR_FIXTURE_SESSION=cur-session-2
+  out=$(cursor_shim_stop 0 env FM_CURSOR_TURNEND_BLOCK_BUDGET=1)
+  CURSOR_FIXTURE_SESSION=
+  assert_contains "$out" "TURN WOULD END BLIND" \
+    "a new session must reset the failure budget rather than inherit a stale count"
+  pass "fm-turnend-guard-cursor: the continuation budgets are session-scoped"
+}
+
+test_cursor_shim_falls_back_to_loop_count_without_writable_state() {
+  local dir out
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "fm-turnend-guard-cursor: loop_count fallback skipped (root ignores directory permissions)"
+    return 0
+  fi
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-ro-state")
+  CURSOR_FIXTURE_DIR=$dir
+  : > "$dir/state/task1.meta"
+  install_failing_arm_stub "$dir"
+  chmod 500 "$dir/state"
+  # The chain record cannot be persisted, so every stop would otherwise compute
+  # count 1 and re-block forever. loop_count carries the bound instead.
+  out=$(cursor_shim_stop 0 env FM_CURSOR_TURNEND_BLOCK_BUDGET=3)
+  assert_contains "$out" "TURN WOULD END BLIND" \
+    "an unpersisted first failure must still raise the loud failure followup"
+  out=$(cursor_shim_stop 5 env FM_CURSOR_TURNEND_BLOCK_BUDGET=3)
+  chmod 700 "$dir/state"
+  [ "$out" = '{}' ] || fail "cursor shim must bound on loop_count when the chain record cannot persist, got: $out"
+  pass "fm-turnend-guard-cursor: an unwritable state dir degrades to the payload loop_count bound"
 }
 
 test_cursor_shim_arm_sources_x_mode_cadence() {
@@ -1965,6 +2050,9 @@ test_cursor_shim_wakes_after_actionable_arm_on_continuation
 test_cursor_shim_bounds_loud_failure_followups
 test_cursor_shim_wake_chain_does_not_consume_failure_budget
 test_cursor_shim_bounds_the_actionable_wake_chain
+test_cursor_shim_distinct_wakes_do_not_hit_the_chain_ceiling
+test_cursor_shim_failure_budget_is_session_scoped
+test_cursor_shim_falls_back_to_loop_count_without_writable_state
 test_cursor_shim_arm_sources_x_mode_cadence
 test_cursor_shim_arm_defaults_cadence_without_x_mode
 test_cursor_shim_missing_payload_allows
