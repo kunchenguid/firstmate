@@ -117,7 +117,31 @@ print(hashlib.sha256(json.dumps(claims, sort_keys=True, separators=(",", ":")).e
     "head_sha": "$HEAD_SHA",
     "base_sha": "$BASE_SHA",
     "claims_sha256": "$claims_digest",
-    "reviewer": {"harness":"codex","model":"gpt-5.6-sol","effort":"xhigh","account_home":"/reviewer"},
+    "reviewer": {
+      "harness": "codex",
+      "model": "gpt-5.6-sol",
+      "effort": "xhigh",
+      "account_home": "/reviewer",
+      "executing_account_home": "/reviewer",
+      "execution_home": "/reviewer",
+      "account_selector": "CODEX_HOME",
+      "credential_source": "codex-home",
+      "credential_identifier": "/reviewer/auth.json",
+      "execution_proof": {
+        "test_path": ".crosscheck/reproductions/review-execution.sh",
+        "command": "bash .crosscheck/reproductions/review-execution.sh $BASE_SHA $HEAD_SHA",
+        "expected_exit": 0,
+        "actual_exit": 0,
+        "output_contains": "CROSSCHECK-REVIEW-EXECUTED",
+        "output": "CROSSCHECK-REVIEW-EXECUTED",
+        "reviewer_receipt": {
+          "path": ".crosscheck/reproductions/review-execution.receipt",
+          "contains": "CROSSCHECK-REVIEW-EXECUTED",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "output": "CROSSCHECK-REVIEW-EXECUTED"
+        }
+      }
+    },
     "state": "clear",
     "summary": "clear",
     "citations": [{"path":"app.txt","line":1}],
@@ -237,10 +261,44 @@ test_missing_or_malformed_ledger_blocks_merge() {
     expect_code 1 "$rc" "$mode ledger"
     assert_no_grep 'api PUT' "$case_dir/gh-axi.log" \
       "$mode ledger reached the merge API"
-    assert_grep 'CROSSCHECK UNREVIEWED' "$case_dir/err" \
-      "$mode ledger did not block loudly"
+    if [ "$mode" = missing ]; then
+      assert_grep 'CROSSCHECK UNREVIEWED' "$case_dir/err" \
+        "missing ledger did not report that no review exists"
+    else
+      assert_grep 'CROSSCHECK TOOL-FAILURE' "$case_dir/err" \
+        "malformed ledger did not report a tool failure"
+    fi
   done
-  pass "missing and malformed findings ledgers are unreviewed"
+  pass "missing findings ledgers are unreviewed while malformed ledgers are tool failures"
+}
+
+test_clear_without_reviewer_bash_receipt_blocks_merge() {
+  local case_dir rc
+  case_dir=$(make_case missing-reviewer-receipt)
+  python3 - "$case_dir/data/task-x1/crosscheck-ledger.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+value = json.load(open(path))
+del value["runs"][-1]["reviewer"]["execution_proof"]["reviewer_receipt"]
+with open(path, "w") as stream:
+    json.dump(value, stream)
+PY
+  : > "$case_dir/gh-axi.log"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$PR_URL" \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "clear ledger without reviewer Bash receipt"
+  assert_grep 'CROSSCHECK TOOL-FAILURE' "$case_dir/err" \
+    "a receipt-free clear ledger was not rejected as invalid tool evidence"
+  assert_grep 'has no reviewer Bash receipt' "$case_dir/err" \
+    "receipt-free clearance did not name the missing executed proof"
+  assert_no_grep 'api PUT' "$case_dir/gh-axi.log" \
+    "a receipt-free clear ledger reached the merge API"
+  pass "merge rejects a nominally clear verdict without a reviewer Bash receipt"
 }
 
 test_changed_head_blocks_before_merge() {
@@ -336,6 +394,7 @@ test_exact_head_is_recorded_and_merged_atomically
 test_draft_and_undeterminable_status_refuse_before_merge
 test_merge_queue_acceptance_is_enqueued_unconfirmed
 test_missing_or_malformed_ledger_blocks_merge
+test_clear_without_reviewer_bash_receipt_blocks_merge
 test_changed_head_blocks_before_merge
 test_post_verify_race_is_rejected_by_github
 test_merge_options_translate_to_api_fields

@@ -33,18 +33,26 @@ The file is local and gitignored at `config/crosscheck-reviewer.json`.
 }
 ```
 
-Crosscheck validates every configured entry and selects the first whose account home and model both differ from the author identity recorded in task metadata.
+Crosscheck resolves each configured account home and selects the first whose account home and model both differ from the routed author identity recorded in task metadata.
+It then binds the provider's executing credential selector to that exact path and requires the verdict plus a Bash-created receipt to report the selector and actual private `HOME`.
+Account separation therefore depends on the executing credential source rather than a configuration label.
+For a task explicitly marked `account_routing_emergency_bypass=1`, a reviewer on the other supported provider establishes both account-namespace and model separation without inventing an `account_home` for the author.
+A same-provider reviewer still fails closed for that structurally unrouted task because account independence cannot be proved.
 The accepted profiles are Codex `gpt-5.6-sol` xhigh and Claude `claude-opus-5` xhigh.
-Absent configuration, unavailable credentials, missing model separation, and missing account separation all produce `CROSSCHECK UNREVIEWED` and a nonzero exit.
+Absent configuration, unavailable credentials, missing model separation, and unprovable account separation all produce `CROSSCHECK TOOL-FAILURE` and a nonzero exit before reviewer launch.
 
 Start crosscheck as soon as a PR URL exists so it can overlap no-mistakes' remaining CI work.
+The reviewer is a real policy-grade agent invocation and normally takes minutes, so Crosscheck is not a fast local check.
 
 ```sh
 bin/fm-crosscheck.sh run <task-id> <https://github.com/owner/repo/pull/number>
 ```
 
 The run writes `data/<task-id>/crosscheck-ledger.json` and the readable `data/<task-id>/crosscheck.md` report.
-The run exits zero only when the exact head has a complete review, the durable ledger has no active blocker, and the reviewer returned no unreproduced suspicion.
+The run exits zero only when the exact head has a complete review, the reviewer supplied a successfully gate-reexecuted exact-base/exact-head reproduction, the durable ledger has no active blocker, and the reviewer returned no unreproduced suspicion.
+It fetches `refs/pull/<number>/head` from the base repository into a disposable Git checkout and requires that ref to resolve to the exact live API head SHA before reviewer launch.
+The authoring worktree is not cloned, checked for cleanliness, or required to match the PR head because no verdict about the remote PR may depend on mutable author-lane filesystem state.
+An empty `FM_STATE_OVERRIDE` falls back to the home state directory, so task metadata, the shared per-task lock, and the disposable review checkout cannot split across callers' current working directories.
 
 `bin/fm-pr-merge.sh` calls the verification form automatically after approval.
 Do not call the verification form as a substitute for running a reviewer.
@@ -76,8 +84,22 @@ A later review that omits a finding leaves its lifecycle unchanged.
 Silence never closes, supersedes, or deletes a finding.
 A `verified-fixed` lifecycle remains durable, but its proof clears only the exact head on which the gate executed it; a new head requires a fresh mutation proof.
 
+Each run has one outcome class.
+
+- `tool-failure` means environment, task metadata, reviewer configuration, exact-head fetch, executing-account binding, or required command-execution proof prevented a trustworthy verdict.
+- `unreviewed` means a reviewer ran but no valid exact-head verdict artifact exists.
+- `blocking` means a completed reviewer with successful command-execution evidence declined clearance through a suspicion or admitted finding.
+- `clear` means a completed reviewer with successful command-execution evidence earned clearance and no durable blocker remains.
+
+CLI banners preserve the same distinction as `CROSSCHECK TOOL-FAILURE`, `CROSSCHECK UNREVIEWED`, and `CROSSCHECK BLOCKING`.
+Only `blocking` is a review verdict about code.
+
 New findings must supply a helper under `.crosscheck/reproductions/`, a command naming that helper, an expected exit code, and a distinctive output marker.
 Crosscheck executes the command itself and stores its actual exit and bounded output in the ledger.
+Every verdict artifact must also carry one verdict-level reproduction whose command names the exact base and head SHAs.
+The reviewer must create and run that helper with its own command tool, and the helper must leave a receipt naming both SHAs, `HOME`, and the provider account selector.
+Crosscheck inspects that receipt before independently re-executing the helper, then stores the receipt digest and bounded content with the verdict.
+A missing or failed verdict-level reproduction is a `tool-failure`, so a reading-only concern from a reviewer with a dead command tool can never become a blocking code verdict.
 
 A `verified-fixed` update must name a tracked test and provide an implementation-only patch under `.crosscheck/mutations/`.
 It supplies an approved test runner plus a structured argument array, never a free-form shell command.
@@ -91,15 +113,24 @@ It cannot modify the named test, conventional test trees, fixtures, or Crosschec
 
 ## Refusal and liveness
 
-The reviewer is a synchronous Codex or Claude invocation with a bounded timeout and a JSON output schema.
+The reviewer is a synchronous Codex or Claude agent invocation with a bounded timeout and a JSON output schema.
+Normal runs take minutes and callers should budget them as remote agent work rather than a cheap local preflight.
 PR claims are delimited as untrusted data, and the reviewer is directed to ignore embedded instructions and use focused evidence rather than duplicate no-mistakes' broad suite.
 Later reviewers receive only a bounded projection of finding IDs, lifecycle state, severity, exact-head clearance, and proof digests.
 Finding prose, reproduction output, test output, and lifecycle notes remain durable in the ledger but are never reinjected into a later reviewer prompt.
-The Codex path pins `gpt-5.6-sol`, xhigh reasoning, noninteractive approval, an independent `CODEX_HOME`, and the exact review checkout.
-The Claude path pins `claude-opus-5`, xhigh effort, the installed unattended `--dangerously-skip-permissions` mode, a bounded tool list, no session persistence, an independent `CLAUDE_CONFIG_DIR`, and structured JSON output.
-Because that Claude mode disables its own permission prompts, Crosscheck places the process under the installed macOS `sandbox-exec` contract: reads, process execution, and provider network access remain available, while writes are limited to the disposable review checkout and `/dev/null`.
-An unavailable sandbox blocks the reviewer rather than launching it with ambient write authority.
-A nonzero exit, timeout, missing artifact, empty artifact, malformed artifact, wrong-head artifact, or unresolved suspicion records an `unreviewed` attempt and exits nonzero.
+The Codex path pins `gpt-5.6-sol`, xhigh reasoning, noninteractive approval, an independent `CODEX_HOME`, the same account-bound `HOME`, and the exact review checkout.
+The Claude path pins `claude-opus-5`, xhigh effort, the installed unattended `--dangerously-skip-permissions` mode, a Bash-required bounded tool list, no session persistence, an independent `CLAUDE_CONFIG_DIR`, the same `CLAUDE_SECURESTORAGE_CONFIG_DIR`, a disposable private `HOME`, and structured JSON output.
+That private `HOME` maps `.claude` and `.claude.json` to the selected reviewer account directory, so Claude's hard-coded `~/.claude/session-env` writes land in per-account state rather than shared operator state.
+For a Keychain-backed account, it maps only the current user's Keychain directory needed for secure-storage discovery, derives Claude's exact scoped service from the selected account directory, and verifies the non-secret service metadata before reviewer launch.
+An OAuth-file-backed account instead requires a regular non-symlink `.credentials.json` in the selected account directory.
+Because Claude's unattended mode disables its own permission prompts, Crosscheck places the process under the installed macOS `sandbox-exec` contract: reads, process execution, and provider network access remain available, while writes are limited to the disposable review checkout, the selected per-account reviewer directory, and `/dev/null`.
+The profile never grants the ambient operator `~/.claude` tree or its session scratch subtree.
+Claude's Bash engine otherwise creates workspace scratch under shared `/tmp/claude-<uid>` independently of ordinary `TMPDIR`.
+Crosscheck sets the supported `CLAUDE_CODE_TMPDIR` to a private directory inside the disposable checkout, keeping that scratch under the existing checkout write boundary instead of widening the sandbox to shared `/tmp`.
+It does not grant write access to the author worktree or the wider filesystem.
+An unavailable reviewer binary, sandbox, author-identity proof, executing-account binding, verdict-level execution proof, or exact remote PR head records a `tool-failure` attempt when the live head is already known, and otherwise emits the same tool-failure class without fabricating a ledger run.
+A nonzero reviewer exit, timeout, missing artifact, empty artifact, malformed artifact, or wrong-head artifact records an `unreviewed` attempt and exits nonzero.
+An unresolved suspicion comes from a completed reviewer and records a `blocking` attempt instead of being conflated with an invalid review artifact.
 This includes provider refusals that surface only as a stopped or silent agent.
 Reviewer stdout plus stderr use a separate 16 MiB capture ceiling because a full agent transcript routinely exceeds the ordinary command budget.
 `FM_CROSSCHECK_REVIEWER_MAX_CAPTURE_BYTES` can override that ceiling between 200,000 bytes and 64 MiB, and an invalid value fails closed before reviewer launch.
@@ -137,7 +168,7 @@ The merge form with optional `commit_title` and `commit_message` fields was sepa
 The read adapter exposes no merge subcommand; only the gate-refused `fm-crosscheck.sh merge` boundary can reach its private exact-SHA merge primitive, and that boundary freshly verifies the ledger before issuing the request.
 
 The installed reviewer invocation was exercised successfully with `--output-schema`, `--output-last-message`, `--model gpt-5.6-sol`, and `model_reasoning_effort="xhigh"` before production code used those flags.
-The installed Claude invocation was exercised successfully with `--model claude-opus-5`, `--effort xhigh`, `--dangerously-skip-permissions`, `--tools Bash,Read,Write,Edit,Glob,Grep`, `--no-session-persistence`, `--output-format json`, and `--json-schema` before production code used those flags.
+The installed Claude invocation was exercised successfully with a private `HOME`, selected-account `CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR`, `--model claude-opus-5`, `--effort xhigh`, `--dangerously-skip-permissions`, `--tools Bash,Read,Glob,Grep`, `--no-session-persistence`, `--output-format json`, and `--json-schema` before production code used those flags.
 The installed `/usr/bin/sandbox-exec` was also exercised with the generated profile: a write inside the allowed review directory succeeded, while sibling and `/private/tmp` writes failed with `Operation not permitted`.
 
 ## Validation evidence boundaries
@@ -145,6 +176,9 @@ The installed `/usr/bin/sandbox-exec` was also exercised with the generated prof
 `tests/fm-github-pr.test.sh` is hermetic coverage using checked-in TOON shapes observed from installed `gh-axi 0.1.25`.
 Most of `tests/fm-crosscheck.test.sh` is hermetic coverage using observed-shape GitHub, Codex, Claude, and sandbox fakes.
 Its `test_installed_sandbox_denies_shared_private_tmp` case is the exception: it invokes the real installed `/usr/bin/sandbox-exec` and verifies the generated proof profile denies shared host temporary state.
+Its tracked `test_real_claude_sandbox_executes_exact_sha_git_diff` case is an opt-in real-runtime guard: with `FM_TEST_REAL_CLAUDE_SANDBOX_GIT_DIFF=1` and `FM_TEST_REAL_CLAUDE_CONFIG_DIR` set to a credentialed independent Claude home, it creates the same private execution `HOME`, verifies the selected OAuth-file or scoped-Keychain source, launches installed Claude under the generated installed sandbox, requires Bash to execute `git diff` between two real exact SHAs, checks the selected config paths and isolated `CLAUDE_CODE_TMPDIR`, and rejects any profile grant for the ambient operator `~/.claude/session-env`.
+Ordinary CI prints a named skip for this network- and credential-dependent guard instead of substituting fake-only coverage.
+The retained live runtime proof is the change receipt for this patch; the opt-in test is the repeatable regression guard for future environments.
 Its `test_forged_git_diff_mutation_command_is_rejected` case is the named regression that fails if a free-form `git diff --quiet # tests/regression.test.sh` can replace real mutation verification.
 Its `test_baseline_readable_state_is_destroyed_before_mutation` and `test_mutation_is_bound_to_cited_non_test_implementation` cases cover the two mutation-causality bypasses found in the final review round.
 `tests/fm-github-pr.test.sh` includes named cases for fieldless-array grammar, complete timeout-child cleanup, and refusal of the former public merge subcommand.

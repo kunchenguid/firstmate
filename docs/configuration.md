@@ -106,7 +106,11 @@ It is gitignored and is not inferred from the author account or ambient Codex co
 The current schema has one nonempty `reviewers` array, whose entries require exactly `harness`, `model`, `effort`, and `account_home`.
 The accepted policy profiles are Codex `gpt-5.6-sol` at `xhigh` effort and Claude `claude-opus-5` at `xhigh` effort.
 Every `account_home` must be an existing absolute directory.
-Crosscheck selects the first entry whose account and model both differ from the author identity recorded in task metadata.
+Crosscheck resolves each configured account home and selects the first entry whose account home and model both differ from the routed author identity recorded in task metadata.
+Codex binds both `CODEX_HOME` and `HOME` to that path.
+Claude creates a disposable private `HOME` whose `.claude` resolves to that path, binds both `CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR` to it, and verifies the exact OAuth-file or scoped-Keychain credential source before launch.
+The verdict and its Bash-created receipt must report the executing selector and private `HOME`, so a configured label cannot establish separation from a different executing account.
+For an author task marked `account_routing_emergency_bypass=1`, a different supported provider proves both account namespace and model separation, while a same-provider reviewer fails closed without `account_home` proof.
 An absent or invalid file is an unavailable reviewer and therefore blocks crosscheck and merge.
 See [`crosscheck.md`](crosscheck.md) for the example file, reviewer capture control, evidence rules, and operator flow.
 
@@ -150,6 +154,9 @@ When it is unset, most scripts use the repo root as the home; when it is set, sc
 When `FM_HOME` is unset, it also behaves as the old whole-root override.
 `bin/fm-send.sh` is intentionally stricter than that general fallback: it requires `FM_HOME` to be set before resolving a target, so operator steers cannot silently resolve against the wrong home.
 `FM_STATE_OVERRIDE`, `FM_DATA_OVERRIDE`, `FM_PROJECTS_OVERRIDE`, and `FM_CONFIG_OVERRIDE` override individual operational directories for tests and specialized harness setup.
+Crosscheck treats an empty `FM_ROOT_OVERRIDE`, `FM_STATE_OVERRIDE`, or `FM_DATA_OVERRIDE` exactly as absent rather than resolving it as the current working directory.
+Its shared per-task lock and disposable review checkout therefore remain under the resolved state directory even when an inherited launcher exports those variables empty.
+Secondmate launch and seed subprocesses remove all five root, state, data, projects, and config overrides with `env -u` before setting the child `FM_HOME`; they do not export empty values for other consumers to reinterpret.
 For the herdr backend, `FM_HOME` also determines the workspace label used by the adapter.
 For the zellij backend, `FM_HOME` does not split containers, but it determines the readable home prefix embedded in visible tab titles; use `FM_ZELLIJ_SESSION` when a separate zellij session is needed.
 The full zellij home label also includes a short hash of the resolved `FM_ROOT` path.
@@ -520,6 +527,7 @@ FM_HOME=                 # optional operational home for most scripts, unset mea
 FM_ROOT_OVERRIDE=        # override firstmate repo root, tangle-guard target, and zellij/cmux home-title hash; also legacy whole-root override when FM_HOME is unset
 FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
+FM_CROSSCHECK_FETCH_REMOTE=  # alternate Git remote for exact refs/pull/<number>/head resolution; unset derives the base GitHub repository
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_BACKEND=             # optional runtime backend override; tmux/herdr/zellij/cmux support new ship/scout spawns, Orca is legacy-recovery-only, and codex-app is not accepted
