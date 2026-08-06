@@ -458,4 +458,41 @@ rebuild or create it per AGENTS.md), its contents looked unparseable/corrupt,
 or an individual full status log is needed for older wake-event history.
 EOF
 
+# --- supervision ------------------------------------------------------------
+# The watcher used to come up only via the Stop hook, which fires at the END of
+# a turn. Start firstmate and ask nothing, and there was no turn, no Stop, and
+# no watcher - supervision appeared exactly one turn after it was first needed.
+# The captain hit this twice: the beacon sat over an hour cold while the sprint
+# poll emitted a wake nobody collected.
+#
+# This script is the one thing firstmate is told to run before any other
+# instruction, so it is where the absence must become visible. It deliberately
+# does NOT arm the watcher itself: bin/fm-watch-arm.sh requires a mechanism that
+# survives the call and notifies on exit, and a watcher forked from here would
+# be reaped when this script returns - leaving nothing running and a false
+# "already running" off the dying process.
+watcher_grace=${FM_GUARD_GRACE:-300}
+case "$watcher_grace" in ''|*[!0-9]*) watcher_grace=300 ;; esac
+watcher_beat="$STATE/.last-watcher-beat"
+watcher_age=
+if [ -f "$watcher_beat" ]; then
+  watcher_mtime=$(stat -f %m "$watcher_beat" 2>/dev/null || stat -c %Y "$watcher_beat" 2>/dev/null || echo 0)
+  case "$watcher_mtime" in ''|*[!0-9]*) watcher_mtime=0 ;; esac
+  [ "$watcher_mtime" -eq 0 ] || watcher_age=$(( $(date +%s) - watcher_mtime ))
+fi
+
+if [ -n "$watcher_age" ] && [ "$watcher_age" -le "$watcher_grace" ]; then
+  printf 'supervision: watcher beacon fresh (%ss ago, grace %ss)\n' "$watcher_age" "$watcher_grace"
+else
+  if [ -n "$watcher_age" ]; then
+    watcher_why="beacon ${watcher_age}s old, grace ${watcher_grace}s"
+  else
+    watcher_why="no beacon at all"
+  fi
+  printf '\nFIRSTMATE_OP: v1 supervision-down: NO LIVE WATCHER (%s). Arm it NOW, before any other work.\n' "$watcher_why"
+  printf 'FIRSTMATE_OP: arm via bin/fm-watch-arm.sh as your harness OWN tracked background task - never with a shell &, which is reaped when the call returns and leaves no watcher plus a false "already running".\n'
+  printf 'FIRSTMATE_OP: then VERIFY: %s must be fresh. Having run the command is not evidence; a fresh beacon is.\n' "$watcher_beat"
+  printf 'FIRSTMATE_OP: without it there is no state/*.check.sh sweep, no wake queue and no stuck-task detection - the fleet looks healthy and is blind.\n\n'
+fi
+
 exit 0
