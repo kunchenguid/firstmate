@@ -160,6 +160,14 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
   base=${path##*/}
   base=${base#-}
   case "$base" in
+    # muse is anchored rather than globbed like its neighbours: its installed
+    # binary is muse-bin-<version> (the launcher execs it, so the version is the
+    # live process name and changes on every auto-update), and unlike `claude` or
+    # `codex` the substring `muse` is a common English fragment - a *muse* glob
+    # would classify musescore or amuse as a live agent pane. The install path
+    # cannot carry it either: ~/.local/bin/muse-bin-<version> has no `muse` path
+    # COMPONENT, so the fm_harness_path_name fallback below never fires for it.
+    muse|muse-bin-*) printf 'agent' ;;
     *claude*|*codex*|*opencode*|*grok*|*kimi*|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)

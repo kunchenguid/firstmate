@@ -154,6 +154,34 @@ test_strip_ghost_drops_dark_truecolor_ghost() {
   pass "fm_tmux_strip_ghost drops a dark/muted truecolor foreground (grok placeholder)"
 }
 
+# --- muse's composer sits closest to the ghost threshold ---------------------
+
+# These are muse 0.1.0-R708.1's real captured composer rows. Its prompt glyph
+# `⟩` is truecolor 38;2;90;160;255 (luminance ~149.9) and its typed text is
+# 38;2;204;211;219 (~209.8), so the glyph clears the 128 default by the
+# narrowest margin in the fleet - roughly a fifth of grok's real-input margin.
+# Both must survive stripping: dropping the glyph would empty an idle composer's
+# plain row, and dropping the typed text would read a pending pane as empty and
+# make it an injection target.
+test_strip_ghost_keeps_muse_composer_colors() {
+  local out glyph
+  glyph=$(printf '\xe2\x9f\xa9')
+  out=$(printf '\033[0m\033[38;2;90;160;255m\xe2\x9f\xa9 \033[39m\n' | fm_tmux_strip_ghost)
+  [ "$out" = "$(printf '%s ' "$glyph")" ] \
+    || fail "muse's idle composer glyph was stripped as ghost text: '$out'"
+  # The submitted-prompt row carries a background colour too; an SGR 48 payload
+  # must not be luminance-tested as if it were the foreground.
+  out=$(printf '\033[38;2;90;160;255m\033[48;2;38;56;84m\xe2\x9f\xa9 \033[38;2;204;211;219mhello from firstmate\033[39m\n' | fm_tmux_strip_ghost)
+  [ "$out" = "$(printf '%s hello from firstmate' "$glyph")" ] \
+    || fail "muse's typed text or background-coloured glyph row was stripped: '$out'"
+  # The restored prompt muse puts back into the composer after an Escape
+  # interrupt is real bright text and must stay visible as pending input.
+  out=$(printf '\033[0m\033[38;2;90;160;255m\xe2\x9f\xa9 \033[38;2;204;211;219msecond turn to interrupt\033[39m\n' | fm_tmux_strip_ghost)
+  [ "$out" = "$(printf '%s second turn to interrupt' "$glyph")" ] \
+    || fail "muse's restored post-interrupt prompt was stripped as ghost text: '$out'"
+  pass "fm_tmux_strip_ghost keeps muse's near-threshold glyph and its typed text"
+}
+
 # --- fm_pane_input_pending: dim ghost is not pending ------------------------
 
 test_dim_ghost_only_composer_is_not_pending() {
@@ -600,6 +628,7 @@ test_strip_ghost_drops_dim_keeps_normal
 test_strip_ghost_handles_combined_and_boundary_codes
 test_strip_ghost_keeps_colored_text_with_2_payloads
 test_strip_ghost_drops_dark_truecolor_ghost
+test_strip_ghost_keeps_muse_composer_colors
 test_dim_ghost_only_composer_is_not_pending
 test_dim_ghost_inside_bordered_composer_is_not_pending
 test_normal_text_still_pending
