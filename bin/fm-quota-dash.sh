@@ -2,7 +2,7 @@
 # fm-quota-dash.sh - an htop-style console dashboard of fleet resource headroom.
 #
 # Wraps `quota-axi --json`, which reports a snapshot and has no watch mode of
-# its own. This adds the gauges, the table, and the countdown.
+# its own. This adds the gauges, the table, and the refresh loop.
 #
 # Layout follows htop deliberately: a stack of fuel gauges at the top for the
 # glance, a detail table below for the answer, and a key bar at the bottom. The
@@ -11,7 +11,8 @@
 #
 # Refresh is ONE HOUR by default, not htop's one second. Quota windows are
 # weekly, so a fast poll would redraw an unchanged picture while hammering each
-# provider's endpoint. The countdown keeps a slow refresh from looking hung.
+# provider's endpoint. No countdown is shown: a ticking number invites watching
+# a clock instead of reading the gauges, and press `r` when you cannot wait.
 #
 # Three resources, not two: Claude tokens, Codex tokens, and money spent on
 # image generation. The image row reads the same state/image-gen-spend.tsv that
@@ -175,12 +176,6 @@ EOF
   printf '\n%s r %s%sRefresh%s  %s q %s%sQuit%s\n' "$KEY" "$R" "$LBL" "$R" "$KEY" "$R" "$LBL" "$R"
 }
 
-# Only this line changes between refreshes. Repainting the whole screen once a
-# second would flicker and burn CPU to redraw numbers that cannot have moved -
-# the data behind them is refetched once an hour.
-countdown_line() {  # <seconds-left>
-  printf '\r\033[K%snext refresh in %02d:%02d%s' "$D" $(( $1 / 60 )) $(( $1 % 60 )) "$R"
-}
 
 if [ "$ONCE" -eq 1 ]; then collect; draw; exit 0; fi
 
@@ -195,15 +190,17 @@ printf '\033[?1049h\033[?25l'
 while :; do
   collect
   draw
-  left=$INTERVAL
-  while [ "$left" -gt 0 ]; do
-    countdown_line "$left"
+  # Elapsed time is read from the CLOCK, never counted in loop iterations.
+  # A mouse wheel floods stdin with escape sequences; each one satisfies `read`
+  # immediately instead of costing its one-second timeout, so an iteration
+  # counter raced ahead and scrolling visibly pulled the refresh forward.
+  started=$(date +%s)
+  while [ $(( $(date +%s) - started )) -lt "$INTERVAL" ]; do
     if read -r -s -n 1 -t 1 key 2>/dev/null; then
       case "$key" in
         q|Q) exit 0 ;;
         r|R) break ;;
       esac
     fi
-    left=$(( left - 1 ))
   done
 done
