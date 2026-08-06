@@ -66,7 +66,12 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: session lock is unreadable; operate read-only until resolved" >&2
     exit 1
   }
-  if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
+  # Membership, not identity: the holder is foreign only when it is outside this
+  # session's whole harness ancestry (fm_harness_ancestry_contains). Comparing it
+  # to $me alone refuses a session its own lock, because $me is one pid of a
+  # contiguous Claude run whose extent legitimately differs between the read that
+  # wrote the lock and the read that re-acquires it.
+  if ! fm_harness_ancestry_contains "$old" && fm_harness_pid_alive "$old"; then
     echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
     exit 1
   fi

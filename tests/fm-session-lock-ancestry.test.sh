@@ -220,6 +220,133 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+# --- acquisition layer: the real fm-lock.sh behind a process table -----------
+
+# Live stand-in processes, so the holder-liveness half of acquisition is decided
+# by a real `kill -0` rather than by the fake table. Reaped on the way out.
+FM_STANDIN_PIDS=()
+lock_test_cleanup() {
+  local pid
+  for pid in "${FM_STANDIN_PIDS[@]:-}"; do
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null
+  done
+  fm_test_cleanup
+}
+trap lock_test_cleanup EXIT
+trap 'lock_test_cleanup; exit 130' INT
+trap 'lock_test_cleanup; exit 143' TERM
+
+# Detached from this script's own stdio, so a stand-in cannot hold a pipe open
+# for whatever is reading the suite's output.
+new_standin_pid() {
+  sleep 300 </dev/null >/dev/null 2>&1 &
+  FM_STANDIN_PIDS+=("$!")
+  printf '%s\n' "$!"
+}
+
+# A session whose harness ancestry is a contiguous two-pid Claude run reached
+# through a macOS login shell, plus one unrelated live Claude session. The login
+# shell reports itself as "-zsh": that leading dash is an option bundle to every
+# basename implementation, so this shape also proves acquisition resolves the
+# ancestry without a single line of process-name noise on stderr.
+make_acquisition_fixture() {  # <dir> -> echoes the fakebin
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid" in
+  "$FM_FAKE_INNER")
+    case "$field" in comm=|args=) echo claude ;; ppid=) echo "$FM_FAKE_OUTER" ;; esac ;;
+  "$FM_FAKE_OUTER")
+    case "$field" in comm=|args=) echo claude ;; ppid=) echo 1 ;; esac ;;
+  "$FM_FAKE_FOREIGN")
+    case "$field" in comm=|args=) echo claude ;; ppid=) echo 1 ;; esac ;;
+  *)
+    case "$field" in comm=|args=) echo -- '-zsh' ;; ppid=) echo "$FM_FAKE_INNER" ;; esac ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '%s\n' "$fakebin"
+}
+
+assert_no_process_name_noise() {  # <label> <stderr-file>
+  local label=$1 err=$2
+  case "$(cat "$err" 2>/dev/null)" in
+    *basename*|*"illegal option"*|*"usage:"*)
+      fail "$label: a dash-leading process name reached a command as an option: $(cat "$err")" ;;
+  esac
+}
+
+test_acquisition_accepts_this_sessions_own_harness_run() {
+  local dir fakebin inner outer foreign err out status resolved
+  dir="$TMP_ROOT/acquire-own-run"
+  fakebin=$(make_acquisition_fixture "$dir")
+  inner=$(new_standin_pid)
+  outer=$(new_standin_pid)
+  foreign=$(new_standin_pid)
+  export FM_FAKE_INNER="$inner" FM_FAKE_OUTER="$outer" FM_FAKE_FOREIGN="$foreign"
+
+  # The case that stopped a whole shift: the lock names an INNER pid of this
+  # session's own contiguous Claude run - the shape a bg-spare hook chain and a
+  # harness-parented session both produce - while the walk resolves the run's
+  # outermost pid. Refusing here leaves a session read-only in its own home.
+  resolved=$(PATH="$fakebin:$PATH" bash -c '. "$0"; fm_harness_ancestry_pid' "$LIB") \
+    || fail "the session's own harness run was not resolved at all"
+  [ "$resolved" = "$outer" ] \
+    || fail "ancestry resolved '$resolved', expected the run's outermost pid $outer"
+  [ "$resolved" != "$inner" ] \
+    || fail "fixture is vacuous: the resolved pid and the lock holder must differ"
+
+  printf '%s\n' "$inner" > "$dir/state/.lock"
+  err="$dir/own-run.err"
+  out=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-lock.sh" 2>"$err")
+  status=$?
+  expect_code 0 "$status" "a session was refused the lock its own harness run holds: $(cat "$err")"
+  assert_contains "$out" "lock acquired" "acquisition did not report success"
+  assert_no_process_name_noise "acquisition" "$err"
+
+  PATH="$fakebin:$PATH" bash -c '. "$0"; fm_session_lock_owned_by_self "$1"' "$LIB" "$dir/state" \
+    || fail "ownership and acquisition disagree about the same self-held lock"
+
+  pass "session-lock: acquisition accepts a lock held anywhere in this session's own harness run"
+}
+
+test_acquisition_still_refuses_a_foreign_live_session() {
+  local dir fakebin inner outer foreign err status before
+  dir="$TMP_ROOT/acquire-foreign"
+  fakebin=$(make_acquisition_fixture "$dir")
+  inner=$(new_standin_pid)
+  outer=$(new_standin_pid)
+  foreign=$(new_standin_pid)
+  export FM_FAKE_INNER="$inner" FM_FAKE_OUTER="$outer" FM_FAKE_FOREIGN="$foreign"
+
+  # Same session, but the lock is held by a live harness that is no ancestor of
+  # it. Widening ownership to the whole run must not widen it past the run.
+  printf '%s\n' "$foreign" > "$dir/state/.lock"
+  before=$(cat "$dir/state/.lock")
+  err="$dir/foreign.err"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-lock.sh" >/dev/null 2>"$err"
+  status=$?
+  expect_code 1 "$status" "a live foreign session's lock was taken over"
+  assert_contains "$(cat "$err")" "another live firstmate session" \
+    "the refusal did not name the competing session"
+  assert_no_process_name_noise "refusal" "$err"
+  [ "$(cat "$dir/state/.lock")" = "$before" ] \
+    || fail "the foreign session's lock was overwritten during a refused acquisition"
+
+  pass "session-lock: acquisition still refuses a lock held by a live session outside this ancestry"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -358,6 +485,8 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_acquisition_accepts_this_sessions_own_harness_run
+test_acquisition_still_refuses_a_foreign_live_session
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock

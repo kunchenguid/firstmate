@@ -52,7 +52,15 @@ FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
   FM_HARNESS_IS_CLAUDE=0
-  base=$(basename -- "$comm")
+  # Parameter expansion, never `basename`: a login shell reports its name with a
+  # leading dash ("-zsh"), which every basename implementation reads as an option
+  # bundle. `basename --` suppresses that, but only as long as every future
+  # caller remembers the guard, so the name is reduced structurally instead - the
+  # same idiom the other two process-name classifiers use (bin/backends/tmux.sh's
+  # fm_backend_tmux_classify_process_name, bin/backends/herdr.sh). The dash is
+  # then dropped so a login-shell-launched harness is judged by its real name.
+  base=${comm##*/}
+  base=${base#-}
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
@@ -129,6 +137,31 @@ EOF
   printf '%s\n' "$outermost"
 }
 
+# True when pid $1 is one of the pids in this session's contiguous
+# verified-harness ancestry.
+#
+# ONE owner of "is that pid this same session?", because identity against any
+# single pid of the run is not that question. Which pid of a contiguous Claude
+# run names the session is not knowable from the ancestry (see
+# fm_harness_ancestry_pids), and the run a session resolves can legitimately
+# differ between two reads of the same session - a hook fires inside a nested
+# bg-spare worker chain, and a harness-named daemon can parent the session - so
+# comparing one pid to one pid reports a session as foreign to itself. A
+# non-numeric pid and an unresolvable ancestry both fail closed.
+fm_harness_ancestry_contains() {  # <pid>
+  local want=$1 pids pid
+  case "$want" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  pids=$(fm_harness_ancestry_pids) || return 1
+  while IFS= read -r pid; do
+    [ "$pid" = "$want" ] && return 0
+  done <<EOF
+$pids
+EOF
+  return 1
+}
+
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
   local pid=$1 comm args
@@ -140,23 +173,11 @@ fm_harness_pid_alive() {
 
 # True when state dir $1 holds a session lock whose pid is ANY harness ancestor
 # of the current process: this script runs inside the session that owns the
-# home's fleet lock. Membership is the honest test of that question, because the
-# lock owner sits at an unknown depth in a contiguous Claude run - it is the
-# outermost pid when the hook fires inside the session's own nested worker chain,
-# and an inner pid when a harness-named daemon parents the session. A missing
-# lock, a malformed lock, a lock held by a harness outside this ancestry, or an
-# ancestry that cannot be resolved all fail closed.
+# home's fleet lock. Ownership is ancestry membership, per
+# fm_harness_ancestry_contains. A missing or malformed lock reads as a pid no
+# ancestry can contain, so it fails closed there.
 fm_session_lock_owned_by_self() {
-  local state=$1 lock_pid pids pid
+  local state=$1 lock_pid
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
-  case "$lock_pid" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  pids=$(fm_harness_ancestry_pids) || return 1
-  while IFS= read -r pid; do
-    [ "$pid" = "$lock_pid" ] && return 0
-  done <<EOF
-$pids
-EOF
-  return 1
+  fm_harness_ancestry_contains "$lock_pid"
 }

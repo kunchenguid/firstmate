@@ -52,10 +52,15 @@ detect_own() {
   # without verifying it reaches children AND that it cannot survive in a
   # multiplexer's stored environment, which is the precedence hazard above.
   # Layer 2: walk the parent chain and match the command name.
-  local pid=$$ comm args
+  # The name is reduced by parameter expansion rather than `basename`, and its
+  # leading dash dropped, because a macOS login shell reports itself as "-zsh":
+  # see fm_harness_process_matches in bin/fm-session-lock-lib.sh for why the
+  # structural form is preferred over remembering `basename --` at every site.
+  local pid=$$ comm args base
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
-    case "$(basename -- "$comm")" in
+    base=${comm##*/}
+    case "${base#-}" in
       *claude*) echo claude; return ;;
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
