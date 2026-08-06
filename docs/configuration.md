@@ -302,7 +302,8 @@ An absent or incompatible `lavish-axi` reports `MISSING: lavish-axi (install: np
 An absent or too-old `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; firstmate cannot resolve a profile array without a compatible binary.
 The GitHub auth check issues exactly one `gh auth status`, bounded by `timeout`, `gtimeout`, or a Perl process-group alarm so a wedged credential helper cannot hang session start.
 A missing credential still reports `NEEDS_GH_AUTH`, but a probe that could not finish reports `GH_AUTH: indeterminate` instead, because an unfinished probe proves nothing about the credential.
-The two indeterminate causes carry distinct wording: an expired bound names the seconds it waited, while a home carrying none of those three bounding tools names the coreutils or perl install that would restore the check.
+The three indeterminate causes carry distinct wording: an expired bound names the seconds it waited, a probe killed before it answered names the status it terminated with, and a home carrying none of those three bounding tools names the coreutils or perl install that would restore the check.
+A probe killed by a signal counts as unfinished no matter which bounding tool caught it, so the `timeout` path and the Perl fallback report it identically rather than one of them claiming the credential is missing.
 `FM_GH_AUTH_TIMEOUT_SECS` overrides the 10 second bound, and `FM_BOOTSTRAP_GH_AUTH_DIAGNOSTICS=1` adds the otherwise-silent typed `authenticated` and `not authenticated` lines.
 A probe that ignores SIGTERM is escalated to SIGKILL after a further 2 second grace, so the worst case is the bound plus that grace rather than a flat 10 seconds, and that escalated kill still reports indeterminate rather than unauthenticated.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.

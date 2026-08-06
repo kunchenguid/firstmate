@@ -19,7 +19,9 @@
 # scan.
 # Dedicated gh-auth cases pin the bounded probe's typed states and force each
 # branch of its timeout/gtimeout/perl/no-tool chain, since a host would otherwise
-# exercise only whichever bounding tool it happens to ship.
+# exercise only whichever bounding tool it happens to ship. A killed probe is
+# pinned on both bounding branches to the same line, because which tool caught it
+# must not change the answer a home reports.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -172,15 +174,24 @@ test_gh_auth_probe_forces_every_bounding_branch() {
   [ "$(cat "$record")" = "-k 2 7 gh auth status" ] \
     || fail "a zero-padded bound should be read as base 10, got: $(cat "$record")"
 
-  # Every way a bounder can say the bound fired must read as indeterminate: 124
-  # for a plain expiry, 137 for the SIGKILL the kill grace escalates to when the
-  # probe ignores SIGTERM, and 143 for implementations reporting the SIGTERM.
-  for forced in 124 137 143; do
+  # A plain expiry is the one status that provably names the bound.
+  set_fake_bounding_timeout "$fakebin" "$record" 124
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "GH_AUTH: indeterminate (probe timed out after 10s)" ] \
+    || fail "a plain bounder expiry should report the bound it waited, got: $out"
+
+  # A killed probe answered nothing, so every 128+N status reports indeterminate
+  # rather than a confident unauthenticated: 137 for the SIGKILL the kill grace
+  # escalates to, 143 for implementations reporting the SIGTERM, 139 for a
+  # SIGSEGV that the bound never caused. The status cannot say which, so the
+  # wording reports it raw instead of claiming a timeout that may not have run.
+  for forced in 137 143 139; do
     set_fake_bounding_timeout "$fakebin" "$record" "$forced"
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-    [ "$out" = "GH_AUTH: indeterminate (probe timed out after 10s)" ] \
-      || fail "bounder status $forced means the bound fired, so it must report indeterminate, got: $out"
+    [ "$out" = "GH_AUTH: indeterminate (probe terminated abnormally with status $forced)" ] \
+      || fail "bounder status $forced is a killed probe, so it must report indeterminate, got: $out"
   done
 
   # An ordinary non-zero status is still a finished probe with a real answer.
@@ -204,11 +215,20 @@ test_gh_auth_probe_forces_every_bounding_branch() {
       || fail "the Perl fallback should bound a hung probe, got: $out"
     [ "$elapsed" -lt 5 ] || fail "Perl fallback exceeded its 1s bound (elapsed ${elapsed}s)"
 
+    # The same SIGSEGV the bounder branch reported above, through the other
+    # implementation: both must produce the identical line, or a home's answer
+    # for an unanswered probe would depend on which bounding tool it ships.
     set_fake_gh_auth_status "$fakebin" signal
     out=$(PATH="$fakebin:$probe_path" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    [ "$out" = "GH_AUTH: indeterminate (probe terminated abnormally with status 139)" ] \
+      || fail "the Perl fallback must report a signal-killed probe exactly as the bounder branch does, got: $out"
+
+    set_fake_gh_auth_status "$fakebin" unauthenticated
+    out=$(PATH="$fakebin:$probe_path" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
     [ "$out" = "NEEDS_GH_AUTH" ] \
-      || fail "a signal-killed probe must not read as authenticated, got: $out"
+      || fail "a probe that answered should still report NEEDS_GH_AUTH on the Perl fallback, got: $out"
   else
     printf '# skipped Perl fallback branch: no perl under %s\n' "$BASE_PATH"
   fi
