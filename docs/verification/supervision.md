@@ -178,7 +178,8 @@ tests/fm-crew-state.test.sh
 
 ## Turn-end guard
 
-The direct and passive mechanisms were validated across all six harnesses on 2026-07-08 through 2026-07-12, with Claude's replacement Stop-owned path revalidated on 2026-07-24.
+The direct and passive mechanisms for Claude, Codex, OpenCode, Pi, and Grok were validated on 2026-07-08 through 2026-07-12, with Claude's replacement Stop-owned path revalidated on 2026-07-24.
+Cursor's stop-hook and parked-input behavior were validated on 2026-08-05.
 
 | Harness | Version verified | Mechanism | Observed result |
 | --- | --- | --- | --- |

@@ -13,8 +13,8 @@
 #      evaluated on EVERY stop, including a forced follow-up turn: the arm is
 #      stop-hook-owned, so a continuation whose own supervision need is real
 #      must re-arm rather than end blind (the Claude --claude-mode lesson,
-#      bin/fm-turnend-guard.sh:41-46). The shim owns the bound instead, in one
-#      session-scoped chain record under state/ (.cursor-turnend-chain, keys
+#      bin/fm-turnend-guard.sh:41-46). The shim owns the bound instead, in a
+#      per-session chain record under state/ (keys
 #      session/total/fail/wake/reason, reset on session mismatch): consecutive
 #      loud arm-failure follow-ups (FM_CURSOR_TURNEND_BLOCK_BUDGET) and
 #      consecutive repeats of the SAME unchanged wake reason
@@ -66,14 +66,29 @@ ROOT=${ROOT%/}
 [ -x "$ROOT/bin/fm-turnend-guard.sh" ] || exit 0
 
 STATE=${FM_STATE_OVERRIDE:-${FM_HOME:-$ROOT}/state}
-CHAIN_FILE="$STATE/.cursor-turnend-chain"
 
 SESSION=$(printf '%s' "$PAYLOAD" | jq -r '
-  if type != "object" then "unknown"
+  if type != "object" then empty
   elif (.conversation_id | type) == "string" and .conversation_id != "" then .conversation_id
   elif (.session_id | type) == "string" and .session_id != "" then .session_id
-  else "unknown" end
-' 2>/dev/null) || SESSION=unknown
+  else empty end
+' 2>/dev/null) || SESSION=
+if [ -z "$SESSION" ]; then
+  SESSION_CONTEXT=$(printf '%s' "$PAYLOAD" | jq -r '
+    if type != "object" then ""
+    else [
+      (if (.cwd | type) == "string" then .cwd else "" end),
+      (if (.workspace_roots | type) == "array" then (.workspace_roots | tojson) else "" end)
+    ] | @tsv end
+  ' 2>/dev/null) || SESSION_CONTEXT=
+  SESSION_KEY=$(printf '%s\037%s' "$ROOT" "$SESSION_CONTEXT" \
+    | cksum 2>/dev/null | awk '{print $1 ":" $2}')
+  [ -n "$SESSION_KEY" ] || SESSION_KEY="root:$ROOT"
+  SESSION="fallback:$SESSION_KEY"
+fi
+SESSION_KEY=$(printf '%s' "$SESSION" | cksum 2>/dev/null | awk '{print $1 ":" $2}')
+[ -n "$SESSION_KEY" ] || SESSION_KEY="root:$ROOT"
+CHAIN_FILE="$STATE/.cursor-turnend-chain-$SESSION_KEY"
 LOOP_COUNT_VALUE=$(printf '%s' "$PAYLOAD" | jq -r '
   if type == "object" and has("loop_count")
      and ((.loop_count | type) == "number") and .loop_count >= 0

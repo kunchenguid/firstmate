@@ -3073,6 +3073,25 @@ test_composer_state_cursor_idle_placeholder_is_empty() {
   pass "fm_backend_herdr_composer_state: cursor idle placeholder reads empty via the idle regex"
 }
 
+test_composer_state_cursor_arrow_leading_requires_context() {
+  local i=0 row dir log resp fb out
+  for row in '→Add a follow-up' $'→\tAdd a follow-up'; do
+    dir="$TMP_ROOT/composer-cursor-arrow-leading-$i"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    printf '  %s\n' "$row" > "$resp/1.out"
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_COMPOSER_IDLE_RE='^Add a follow-up$' \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+    [ "$out" = unknown ] || fail "unscoped leading arrow '$row' must stay unknown, got '$out'"
+    : > "$log"
+    rm -f "$resp/.count"
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_COMPOSER_HARNESS=cursor FM_COMPOSER_IDLE_RE='^Add a follow-up$' \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+    [ "$out" = empty ] || fail "Cursor leading arrow '$row' should read empty, got '$out'"
+    i=$((i + 1))
+  done
+  pass "fm_backend_herdr_composer_state: leading Cursor arrows stay harness-scoped"
+}
+
 test_composer_state_cursor_dimmed_bare_row_stays_unknown() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-cursor-unknown"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -4385,6 +4404,7 @@ test_composer_state_real_text_is_pending
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_cursor_bare_arrow_requires_context
 test_composer_state_cursor_idle_placeholder_is_empty
+test_composer_state_cursor_arrow_leading_requires_context
 test_composer_state_cursor_dimmed_bare_row_stays_unknown
 test_composer_state_cursor_real_text_is_pending
 test_composer_state_unknown_on_capture_failure
