@@ -217,6 +217,32 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+# Rule 8 must reach every ship brief regardless of delivery mode, and must not
+# leak into a scout brief (a scout's deliverable is a report, not project code
+# or docs, so the rule does not apply there).
+test_ship_rule8_forbids_issue_refs_and_decision_narrative() {
+  local home brief
+  home="$TMP_ROOT/rule8-home"
+  write_registry "$home"
+
+  for id_mode in "brief-rule8-a1:no-mistakes" "brief-rule8-a2:direct-PR" "brief-rule8-a3:local-only"; do
+    local id=${id_mode%%:*} mode=${id_mode##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_grep '8. Never reference an external issue tracker ID' "$brief" \
+      "$id: ship brief missing numbered rule 8 forbidding issue-tracker IDs"
+    assert_grep 'decision history' "$brief" \
+      "$id: ship brief missing the decision-history-narrative prohibition"
+  done
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-rule8-scout some-proj --scout >/dev/null 2>&1
+  brief="$home/data/brief-rule8-scout/brief.md"
+  assert_no_grep 'external issue tracker ID' "$brief" \
+    "scout brief should not carry the ship-only rule 8 (scout delivers a report, not project code/docs)"
+
+  pass "fm-brief.sh: rule 8 forbids issue-tracker IDs and decision-narrative in ship briefs only"
+}
+
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
@@ -712,6 +738,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_ship_rule8_forbids_issue_refs_and_decision_narrative
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
