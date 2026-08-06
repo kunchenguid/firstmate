@@ -451,7 +451,7 @@ Captain decision 2026-08-04, option (a).
 **Steering measurement (2026-08-04):**
 
 - `fm-send` message lands in composer, second Enter submits.
-- Enter-while-busy: **queued** (same as opencode 1.18.4). No separate submit core branch needed.
+- Enter-while-busy: **queued** (same as opencode 1.18.4). Tmux uses a harness-gated submit-core branch, while Herdr uses its native busy-state fallback.
 - `/no-mistakes` lands on a single Enter with popup settle.
 
 **Hook status (2026-08-04, superseded):**
