@@ -55,7 +55,8 @@ make_spawn_case() {
   wt="$case_dir/wt"
   launchlog="$case_dir/launch.log"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
-  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
+  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config" \
+    "$home/no-mistakes-home" "$home/user-home/.no-mistakes"
   printf '%s\n' "$harness" > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
@@ -92,6 +93,8 @@ run_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    HOME="${FM_TEST_HOME-$home/user-home}" \
+    NM_HOME="${FM_TEST_NM_HOME-$home/no-mistakes-home}" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
@@ -131,7 +134,11 @@ test_no_profile_keeps_claude_profile_defaults() {
   launch=$(cat "$LAUNCH_LOG")
   expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
-  pass "no --model/--effort records defaults and types the claude launch instructions"
+  assert_not_contains "$launch" "NM_HOME=" \
+    "non-Codex no-mistakes ship unexpectedly received the no-mistakes environment"
+  assert_not_contains "$launch" "--add-dir" \
+    "non-Codex no-mistakes ship unexpectedly received a Codex writable root"
+  pass "non-Codex launch excludes Codex roots while preserving default profile instructions"
 }
 
 test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
@@ -398,6 +405,199 @@ test_codex_threads_model_and_effort() {
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
+test_codex_no_mistakes_ship_receives_gate_state_and_git_writable_roots() {
+  local rec id out status launch state_real git_common_real data_real no_mistakes_real
+  id=profile-codex-roots-ship-z3a
+  rec=$(make_spawn_case profile-codex-roots-ship codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Codex ship spawn with writable roots should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  state_real=$(cd "$HOME_DIR/state" && pwd -P)
+  git_common_real=$(cd "$(git -C "$WT_DIR" rev-parse --git-common-dir)" && pwd -P)
+  data_real=$(cd "$HOME_DIR/data/$id" && pwd -P)
+  no_mistakes_real=$(cd "$HOME_DIR/no-mistakes-home" && pwd -P)
+  assert_contains "$launch" "--add-dir '$state_real' --add-dir '$git_common_real'" \
+    "Codex ship launch omitted the state or linked-worktree Git metadata root"
+  assert_contains "$launch" "--add-dir '$no_mistakes_real'" \
+    "Codex no-mistakes ship launch omitted the selected no-mistakes root"
+  assert_contains "$launch" "NM_HOME='$no_mistakes_real' codex" \
+    "Codex no-mistakes ship launch did not freeze the same selected root for the worker"
+  assert_not_contains "$launch" "--add-dir '$data_real'" \
+    "Codex ship launch must not receive a scout report directory"
+  pass "Codex no-mistakes ship receives only its gate, state, and Git metadata roots"
+}
+
+test_codex_non_gate_ship_modes_exclude_no_mistakes_root() {
+  local mode mode_slug rec id out status launch no_mistakes_real state_real git_common_real
+  for mode in direct-PR local-only; do
+    case "$mode" in
+      direct-PR) mode_slug=direct-pr ;;
+      local-only) mode_slug=local-only ;;
+    esac
+    id="profile-codex-roots-${mode_slug}-z3d"
+    rec=$(make_spawn_case "profile-codex-roots-$mode_slug" codex "$id")
+    read_case_record "$rec"
+
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --mode "$mode" --yolo off)
+    status=$?
+    expect_code 0 "$status" "Codex $mode ship spawn should succeed"
+    launch=$(cat "$LAUNCH_LOG")
+    no_mistakes_real=$(cd "$HOME_DIR/no-mistakes-home" && pwd -P)
+    state_real=$(cd "$HOME_DIR/state" && pwd -P)
+    git_common_real=$(cd "$(git -C "$WT_DIR" rev-parse --git-common-dir)" && pwd -P)
+    assert_contains "$launch" "--add-dir '$state_real' --add-dir '$git_common_real'" \
+      "Codex $mode ship lost its existing state or Git metadata root"
+    assert_not_contains "$launch" "--add-dir '$no_mistakes_real'" \
+      "Codex $mode ship unexpectedly received the no-mistakes root"
+    assert_not_contains "$launch" "NM_HOME=" \
+      "Codex $mode ship unexpectedly received the no-mistakes environment"
+  done
+  pass "Codex direct-PR and local-only ships preserve existing roots without gate access"
+}
+
+test_codex_scout_receives_task_local_report_root_without_no_mistakes_root() {
+  local rec id out status launch report_real no_mistakes_real state_real git_common_real
+  id=profile-codex-roots-scout-z3b
+  rec=$(make_spawn_case profile-codex-roots-scout codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "Codex scout spawn with writable roots should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  report_real=$(cd "$HOME_DIR/data/$id" && pwd -P)
+  no_mistakes_real=$(cd "$HOME_DIR/no-mistakes-home" && pwd -P)
+  state_real=$(cd "$HOME_DIR/state" && pwd -P)
+  git_common_real=$(cd "$(git -C "$WT_DIR" rev-parse --git-common-dir)" && pwd -P)
+  assert_contains "$launch" "--add-dir '$state_real' --add-dir '$git_common_real'" \
+    "Codex scout lost its existing state or Git metadata root"
+  assert_contains "$launch" "--add-dir '$report_real'" \
+    "Codex scout launch omitted its task-local report directory"
+  assert_not_contains "$launch" "--add-dir '$HOME_DIR/data' " \
+    "Codex scout launch must not receive the whole data directory"
+  assert_not_contains "$launch" "--add-dir '$no_mistakes_real'" \
+    "Codex scout launch unexpectedly received the no-mistakes root"
+  assert_not_contains "$launch" "NM_HOME=" \
+    "Codex scout launch unexpectedly received the no-mistakes environment"
+  pass "Codex scout keeps its report root without sibling data or gate access"
+}
+
+test_codex_writable_roots_are_physical_and_shell_quoted() {
+  local case_dir paths home_real home_link proj wt fakebin launchlog id out status launch
+  local state_real report_real git_common_real
+  id=profile-codex-roots-spaces-z3c
+  case_dir="$TMP_ROOT/profile-codex-roots-spaces"
+  paths="$case_dir/paths with spaces"
+  home_real="$paths/home"
+  home_link="$case_dir/home-link"
+  proj="$paths/project"
+  wt="$paths/worktree"
+  launchlog="$case_dir/launch.log"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  mkdir -p "$home_real/data/$id" "$home_real/projects" "$home_real/state" "$home_real/config"
+  printf '%s\n' codex > "$home_real/config/crew-harness"
+  printf 'brief for %s\n' "$id" > "$home_real/data/$id/brief.md"
+  touch "$home_real/state/.last-watcher-beat"
+  ln -s "$home_real" "$home_link"
+  fm_git_worktree "$proj" "$wt" wt-codex-roots-spaces
+
+  out=$(run_spawn "$home_link" "$wt" "$fakebin" "$launchlog" "$id" "$proj" --scout)
+  status=$?
+  expect_code 0 "$status" "Codex scout spawn with spaced and symlinked paths should succeed"
+  launch=$(cat "$launchlog")
+  state_real=$(cd "$home_real/state" && pwd -P)
+  report_real=$(cd "$home_real/data/$id" && pwd -P)
+  git_common_real=$(cd "$(git -C "$wt" rev-parse --git-common-dir)" && pwd -P)
+  assert_contains "$launch" "--add-dir '$state_real'" \
+    "Codex state writable root was not physically resolved and shell quoted"
+  assert_contains "$launch" "--add-dir '$git_common_real'" \
+    "Codex Git metadata writable root was not physically resolved and shell quoted"
+  assert_contains "$launch" "--add-dir '$report_real'" \
+    "Codex report writable root was not physically resolved and shell quoted"
+  assert_not_contains "$launch" "$home_link/state" \
+    "Codex launch leaked the symlink spelling instead of the physical state path"
+  pass "Codex writable roots are physical paths and remain one shell argument with spaces"
+}
+
+test_codex_no_mistakes_root_is_physical_and_shell_quoted() {
+  local case_dir paths home_real home_link proj wt fakebin launchlog id out status launch
+  local no_mistakes_real no_mistakes_link
+  id=profile-codex-no-mistakes-spaces-z3g
+  case_dir="$TMP_ROOT/profile-codex-no-mistakes-spaces"
+  paths="$case_dir/paths with spaces"
+  home_real="$paths/home"
+  home_link="$case_dir/home-link"
+  proj="$paths/project"
+  wt="$paths/worktree"
+  no_mistakes_real="$paths/no mistakes"
+  no_mistakes_link="$case_dir/no-mistakes-link"
+  launchlog="$case_dir/launch.log"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  mkdir -p "$home_real/data/$id" "$home_real/projects" "$home_real/state" \
+    "$home_real/config" "$home_real/user-home" "$no_mistakes_real"
+  printf '%s\n' codex > "$home_real/config/crew-harness"
+  printf 'brief for %s\n' "$id" > "$home_real/data/$id/brief.md"
+  touch "$home_real/state/.last-watcher-beat"
+  ln -s "$home_real" "$home_link"
+  ln -s "$no_mistakes_real" "$no_mistakes_link"
+  fm_git_worktree "$proj" "$wt" wt-codex-no-mistakes-spaces
+
+  out=$(FM_TEST_NM_HOME="$no_mistakes_link" \
+    run_ship_spawn "$home_link" "$wt" "$fakebin" "$launchlog" "$id" "$proj")
+  status=$?
+  expect_code 0 "$status" "Codex no-mistakes spawn with spaced and symlinked paths should succeed"
+  launch=$(cat "$launchlog")
+  no_mistakes_real=$(CDPATH='' cd -- "$no_mistakes_real" && pwd -P)
+  assert_contains "$launch" "--add-dir '$no_mistakes_real'" \
+    "Codex no-mistakes root was not physically resolved and shell quoted"
+  assert_contains "$launch" "NM_HOME='$no_mistakes_real' codex" \
+    "Codex no-mistakes environment did not use the physical shell-quoted root"
+  assert_not_contains "$launch" "$no_mistakes_link" \
+    "Codex launch leaked the no-mistakes symlink spelling instead of its physical path"
+  pass "Codex no-mistakes root is physical and remains one shell argument with spaces"
+}
+
+test_codex_no_mistakes_root_uses_home_default_when_nm_home_is_empty() {
+  local rec id out status launch expected
+  id=profile-codex-roots-home-default-z3e
+  rec=$(make_spawn_case profile-codex-roots-home-default codex "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_NM_HOME='' \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Codex no-mistakes spawn with the HOME default should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  expected=$(cd "$HOME_DIR/user-home/.no-mistakes" && pwd -P)
+  assert_contains "$launch" "--add-dir '$expected'" \
+    "Codex no-mistakes launch did not select HOME/.no-mistakes when NM_HOME was empty"
+  assert_contains "$launch" "NM_HOME='$expected' codex" \
+    "Codex no-mistakes launch did not freeze the HOME-derived root"
+  pass "Codex no-mistakes root follows the authoritative HOME default"
+}
+
+test_codex_no_mistakes_root_resolution_fails_closed() {
+  local rec id out status
+  id=profile-codex-roots-missing-z3f
+  rec=$(make_spawn_case profile-codex-roots-missing codex "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_NM_HOME="$CASE_DIR/missing-no-mistakes-home" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "Codex no-mistakes spawn with an unresolved root should fail"
+  assert_contains "$out" "no-mistakes root from NM_HOME is not an existing directory" \
+    "Codex no-mistakes refusal did not name the unresolved configured root"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "Codex no-mistakes root refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "Codex no-mistakes root refusal typed a launch command"
+  pass "Codex no-mistakes spawn fails closed before endpoint publication when its root is unresolved"
+}
+
 test_codex_omits_invalid_max_effort() {
   local rec id out status launch
   id=profile-codex-max-z4
@@ -656,7 +856,7 @@ test_non_claude_harness_ignores_config_dir() {
 }
 
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
-  local rec id sm out status
+  local rec id sm out status launch
   id=profile-secondmate-z16
   rec=$(make_spawn_case profile-secondmate codex "$id")
   read_case_record "$rec"
@@ -670,6 +870,11 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   assert_contains "$out" "spawned $id harness=codex kind=secondmate" "secondmate launch did not use secondmate harness resolution"
   assert_grep "kind=secondmate" "$HOME_DIR/state/$id.meta" "secondmate meta missing kind=secondmate"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex default default
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "--add-dir" \
+    "Codex secondmate launch must not receive parent-home worker writable roots"
+  assert_not_contains "$launch" "NM_HOME=" \
+    "Codex secondmate launch must not receive the parent no-mistakes environment"
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
@@ -685,6 +890,13 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
+test_codex_no_mistakes_ship_receives_gate_state_and_git_writable_roots
+test_codex_non_gate_ship_modes_exclude_no_mistakes_root
+test_codex_scout_receives_task_local_report_root_without_no_mistakes_root
+test_codex_writable_roots_are_physical_and_shell_quoted
+test_codex_no_mistakes_root_is_physical_and_shell_quoted
+test_codex_no_mistakes_root_uses_home_default_when_nm_home_is_empty
+test_codex_no_mistakes_root_resolution_fails_closed
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort

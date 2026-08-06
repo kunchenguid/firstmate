@@ -180,6 +180,55 @@ Valid cleanup removed only the exact task-bound target and left the control wind
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
+## Codex worker writable roots
+
+The shared backend-neutral launch path is covered by the portable spawn regression below.
+It checks ship and scout construction, physical path and symlink normalization, shell quoting for spaces, the task-local scout report boundary, and secondmate exclusion.
+
+```sh
+tests/fm-spawn-dispatch-profile.test.sh
+```
+
+The credentialed live control ran on 2026-08-04 with codex-cli 0.146.0 under an explicit workspace-write sandbox.
+Without additional roots, the control proved that the active home's state directory remained denied.
+With the narrow roots, the worker appended status, wrote its task-local report, created a linked-worktree branch and commit, and remained unable to write sibling-task data.
+
+```sh
+FM_CODEX_WRITABLE_ROOTS_LIVE_E2E=1 \
+  bin/fm-test-run.sh tests/fm-codex-writable-roots-live-e2e.test.sh
+```
+
+Bounded output from the successful run:
+
+```text
+ok - codex-cli 0.146.0 live E2E proved narrow Codex worker writable roots
+```
+
+The 2026-08-05 static extension adds no-mistakes ship inclusion, direct-PR and local-only exclusion, non-Codex exclusion, preserved existing roots, the `NM_HOME` and default `HOME/.no-mistakes` selection contract, and unresolved-root refusal.
+
+The no-mistakes socket control ran on 2026-08-05 with no-mistakes v1.41.2 and codex-cli 0.146.0 in a Firstmate Codex worker whose effective sandbox was workspace-write and whose launch lacked the no-mistakes root.
+The installed matching v1.41.2 module source established that `NM_HOME` selects the root when non-empty, otherwise `HOME/.no-mistakes` does, and the Unix socket is `<root>/socket`.
+The read-only commands produced the bounded evidence below without starting a pipeline.
+
+```sh
+no-mistakes doctor
+no-mistakes daemon status
+```
+
+```text
+✓ data directory  <home>/.no-mistakes
+connect to daemon socket: dial ipc: dial unix <home>/.no-mistakes/socket: connect: operation not permitted
+```
+
+The refreshed opt-in guard keeps telemetry and update checks disabled, suppresses the AXI home payload, requires the control's exact socket denial, and then requires the same read-only AXI home command to connect after the selected no-mistakes root is added.
+It never invokes `no-mistakes axi run` or another pipeline-starting command.
+
+Its additional bounded success marker is:
+
+```text
+ok - codex-cli 0.146.0 live E2E proved narrow Codex worker writable roots and read-only no-mistakes socket access
+```
+
 ## Herdr
 
 The compatibility floor is protocol 14.

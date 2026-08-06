@@ -218,6 +218,15 @@ Directory trust dialog on first run per repo root: "Do you trust the contents of
 Accept with Enter.
 The decision persists for the repo, so later worktrees of the same project skip it.
 
+Firstmate non-secondmate Codex workers retain the full-access autonomy flag and also receive explicit additional writable roots for the active home's state directory and the linked worktree's physical Git common directory.
+Scouts additionally receive only their task-local report directory, while secondmates receive none of these parent-home roots.
+This defense in depth preserves normal branch, commit, status, notification, and report operations when an outer policy reduces the effective worker sandbox to workspace-write.
+The static launch contract is covered by `tests/fm-spawn-dispatch-profile.test.sh`, and the opt-in credentialed control plus success path is `tests/fm-codex-writable-roots-live-e2e.test.sh`.
+The complete status, report, branch, and commit path was live-verified on 2026-08-04 with Codex 0.146.0 under an explicit workspace-write control.
+A Codex ship whose resolved mode is exactly `no-mistakes` additionally receives the physical root selected by `NM_HOME` or `HOME/.no-mistakes`, and the launch freezes that same root in `NM_HOME`.
+Direct-PR, local-only, scouts, secondmates, and every non-Codex harness receive no no-mistakes root.
+The 2026-08-05 socket control and refresh command are recorded in `docs/verification/runtime-backends.md`.
+
 Resume after exit with `codex resume <session-id>`.
 The session id is printed on quit.
 

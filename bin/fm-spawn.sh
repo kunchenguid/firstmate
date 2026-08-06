@@ -144,6 +144,9 @@
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
+#     __CODEXWRITEROOTS__ task-scoped additional writable roots for a non-secondmate
+#                  Codex worker's state, linked-worktree Git metadata, scout report,
+#                  and exact no-mistakes root when that ship's mode requires the gate
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
@@ -1065,7 +1068,7 @@ launch_template() {
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox __CODEXWRITEROOTS__-c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -1206,6 +1209,53 @@ shell_quote() {
   printf "'"
 }
 
+resolve_no_mistakes_root() {
+  local candidate source resolved
+  if [ -n "${NM_HOME:-}" ]; then
+    candidate=$NM_HOME
+    source=NM_HOME
+  elif [ -n "${HOME:-}" ]; then
+    candidate="$HOME/.no-mistakes"
+    source='HOME default'
+  else
+    echo "error: no-mistakes root cannot be resolved because neither NM_HOME nor HOME is set" >&2
+    return 1
+  fi
+  resolved=$(CDPATH='' cd -- "$candidate" 2>/dev/null && pwd -P) || {
+    echo "error: no-mistakes root from $source is not an existing directory: $candidate" >&2
+    return 1
+  }
+  printf '%s\n' "$resolved"
+}
+
+codex_writable_root_flags() {  # <kind> <worktree> <state-dir> <report-dir> [<no-mistakes-root>]
+  local kind=$1 worktree=$2 state_dir=$3 report_dir=$4 no_mistakes_root=${5:-}
+  local git_common_raw git_common_path git_common_real
+  [ "$kind" != secondmate ] || return 0
+
+  git_common_raw=$(git -C "$worktree" rev-parse --git-common-dir 2>/dev/null) || {
+    echo "error: could not resolve Codex worker Git metadata root for $worktree" >&2
+    return 1
+  }
+  case "$git_common_raw" in
+    /*) git_common_path=$git_common_raw ;;
+    *) git_common_path="$worktree/$git_common_raw" ;;
+  esac
+  git_common_real=$(cd "$git_common_path" 2>/dev/null && pwd -P) || {
+    echo "error: Codex worker Git metadata root is not a directory: $git_common_path" >&2
+    return 1
+  }
+
+  printf -- '--add-dir %s --add-dir %s ' \
+    "$(shell_quote "$state_dir")" "$(shell_quote "$git_common_real")"
+  if [ "$kind" = scout ]; then
+    printf -- '--add-dir %s ' "$(shell_quote "$report_dir")"
+  fi
+  if [ -n "$no_mistakes_root" ]; then
+    printf -- '--add-dir %s ' "$(shell_quote "$no_mistakes_root")"
+  fi
+}
+
 resolve_kimi_binary() {
   local candidate dir fallback
   candidate=$(command -v kimi 2>/dev/null || true)
@@ -1343,6 +1393,16 @@ effort_flag_for_harness() {
     # task metadata but never reaches the launch command.
   esac
 }
+
+# no-mistakes selects NM_HOME when non-empty and otherwise uses
+# $HOME/.no-mistakes, with its Unix socket directly under that root. Resolve
+# and freeze the physical directory before endpoint creation, then forward the
+# same value into the worker because long-lived session backends need not share
+# firstmate's current environment. No other mode, kind, or harness receives it.
+CODEX_NO_MISTAKES_ROOT=
+if [ "$HARNESS" = codex ] && [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+  CODEX_NO_MISTAKES_ROOT=$(resolve_no_mistakes_root) || exit 1
+fi
 
 case "$LAUNCH" in
   *__MUSEBIN__*)
@@ -2556,14 +2616,23 @@ sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+CODEXWRITEROOTS=
+if [ "$HARNESS" = codex ] && [ "$KIND" != secondmate ]; then
+  CODEXWRITEROOTS=$(codex_writable_root_flags \
+    "$KIND" "$WT" "$STATE_REAL" "$BRIEF_DIR_REAL" "$CODEX_NO_MISTAKES_ROOT") || exit 1
+fi
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+LAUNCH=${LAUNCH//__CODEXWRITEROOTS__/$CODEXWRITEROOTS}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+if [ -n "$CODEX_NO_MISTAKES_ROOT" ]; then
+  LAUNCH="NM_HOME=$(shell_quote "$CODEX_NO_MISTAKES_ROOT") $LAUNCH"
+fi
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a
