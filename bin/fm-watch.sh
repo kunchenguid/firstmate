@@ -7,8 +7,9 @@
 # actively-running no-mistakes step, or a backend busy signal), and surfaced
 # otherwise, so a crew that finishes (or stops and waits) without a current
 # working signal is never silently swallowed. A declared external-wait pause is
-# the separate idle absorb case and re-surfaces only on its long bounded cadence,
-# although its initial no-verb status signal still surfaces in normal mode.
+# the separate absorb case - idle, or busy past the turn-age bound below - and
+# re-surfaces only on its long bounded cadence, although its initial no-verb
+# status signal still surfaces in normal mode.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
@@ -157,16 +158,18 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # footer changes every poll. BUSY_TURN_MAX_SECS bounds how long any busy pane
 # may go with no completed turn: once its task's
 # state/<id>.turn-ended marker (or, before any turn has completed, the task's
-# spawn record) is this old, busy_turn_over_age routes the pane through the
-# same STALE_ESCALATE_SECS-paced wedge_timer_check used for a provably-working
-# non-busy stale, so it escalates via the existing stale reason, escalation
-# counter, and demand-deep-inspection marker for human inspection only - never
-# an automatic interrupt, signal, or restart. A completed turn touches
-# turn-ended and resets the age. Set generously above any legitimate interval
-# between completed turns, including long tool calls, builds, or test runs.
+# spawn record) is this old, busy_wedge_or_pause takes over. Unless a declared
+# pause diverts the pane onto the cadence below (see that function), it routes
+# through the same STALE_ESCALATE_SECS-paced wedge_timer_check used for a
+# provably-working non-busy stale, so it escalates via the existing stale reason,
+# escalation counter, and demand-deep-inspection marker for human inspection
+# only - never an automatic interrupt, signal, or restart. A completed turn
+# touches turn-ended and resets the age. Set generously above any legitimate
+# interval between completed turns, including long tool calls, builds, or tests.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
-# A crew that declared a pause is idling on a known external wait, so its stale
-# pane is absorbed rather than wedge-escalated.
+# A crew that declared a pause is waiting on a known external dependency, so its
+# pane is absorbed rather than wedge-escalated - whether it reads stale or the
+# wait holds the pane busy past the bound above.
 # A captain-held or paused crew whose agent has confidently exited uses the same
 # bounded cadence, while a live or ambiguously read agent still surfaces once.
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
@@ -319,8 +322,9 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # signal every verified harness's turn-end hook touches; before any turn has
 # completed, ages the task's spawn record instead so a fresh task still gets a
 # bound. The caller checks that the pane is busy and routes a crossed bound
-# through the existing wedge_timer_check, never anything that touches the
-# worker itself.
+# through busy_wedge_or_pause below - the existing wedge_timer_check, or the
+# bounded pause cadence when the crew declared a pause - never anything that
+# touches the worker itself.
 busy_turn_over_age() {  # <task>
   local task=$1 f
   f="$STATE/$task.turn-ended"
@@ -328,14 +332,15 @@ busy_turn_over_age() {  # <task>
   [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
 }
 
-# Absorb a stale pane under a declared external-wait pause (paused:) or a
-# dead-agent captain-held transfer, and re-surface it once every
-# PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
-# stale poll once pause_state_class permits the bounded cadence, so it must be
-# cheap: it NEVER re-reads crew state. The re-surface age is anchored on the
-# status file mtime, not a per-hash marker, so a churny idle pane (a ticking
-# clock, a token counter) cannot keep resetting the cadence the way a hash-tied
-# timer would. A .paused-resurfaced-<key> throttle marker records the last
+# Absorb a pane under a declared external-wait pause (paused:) or a dead-agent
+# captain-held transfer, and re-surface it once every PAUSE_RESURFACE_SECS for a
+# recheck so it cannot rot invisibly. Called on any poll whose caller has already
+# established that the bounded cadence applies - the idle stale paths through
+# pause_state_class, the busy path through busy_wedge_or_pause's cheap status
+# read - so it must be cheap: it NEVER re-reads crew state. The re-surface age is
+# anchored on the status file mtime, not a per-hash marker, so a churny idle pane
+# (a ticking clock, a token counter) cannot keep resetting the cadence the way a
+# hash-tied timer would. A .paused-resurfaced-<key> throttle marker records the last
 # re-surface epoch so, once past the window, it fires once per window rather than
 # every poll. Flags the key paused and retires any wedge timer; advancing the
 # stale suppressor is the CALLER's job, because only a caller that has itself
