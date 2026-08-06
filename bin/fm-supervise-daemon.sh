@@ -118,7 +118,11 @@
 #                                   max provably-working crew-state reads one
 #                                   housekeeping pass may make; markers past the
 #                                   budget stay aged for the next pass rather
-#                                   than escalating or being dropped (default 3)
+#                                   than escalating or being dropped (default 3).
+#                                   Unset, blank, or not a nonnegative integer
+#                                   uses that default, and an invalid value is
+#                                   logged rather than applied silently; 0 floors
+#                                   to 1
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
 #                                   digests; 0 = flush immediately (default 90)
 #          FM_HEARTBEAT_SCAN_SECS   cadence for the catch-all status scan
@@ -987,6 +991,34 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
   fi
 }
 
+# Effective per-pass budget for the provably-working gate's crew-state reads.
+# Unset or blank takes the default. A value that is not a nonnegative integer is
+# REPORTED and then takes the default too, matching how bin/fm-fleet-sync.sh and
+# bin/fm-bootstrap.sh treat their own invalid tunables: a typo such as a trailing
+# space would otherwise cut gate throughput threefold with nothing said, and a
+# silently wrong budget costs more than a log line. It re-reports every pass it is
+# read on, because the log is trimmed to its newest lines and a single startup
+# warning can age out before anyone reads it.
+# Zero is in range but is floored to one, since a budget of zero would defer every
+# marker on every pass, which is permanent silence - the one outcome this whole
+# path exists to prevent.
+stale_gate_read_budget() {  # -> crew-state reads one housekeeping pass may make
+  local raw=${FM_STALE_WORKING_GATE_READS:-} budget
+  if [ -z "$raw" ]; then
+    printf '%s' "$STALE_WORKING_GATE_READS_DEFAULT"
+    return 0
+  fi
+  case "$raw" in
+    *[!0-9]*)
+      log "invalid FM_STALE_WORKING_GATE_READS '$raw'; using $STALE_WORKING_GATE_READS_DEFAULT"
+      printf '%s' "$STALE_WORKING_GATE_READS_DEFAULT"
+      return 0 ;;
+  esac
+  budget=$raw
+  [ "$budget" -ge 1 ] || budget=1
+  printf '%s' "$budget"
+}
+
 # --- housekeeping (runs every tick while the watcher is mid-cycle) ----------
 # Four cheap jobs, each guarded so an empty/quiet fleet costs near zero:
 #  1) batch flush: if the escalation buffer's oldest content is older than
@@ -1004,11 +1036,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 housekeeping() {  # <state>
   local state=$1 now due f key task win marker age last max_defer oldest pause_secs
   local working_reads=0 working_reads_max
-  working_reads_max=${FM_STALE_WORKING_GATE_READS:-$STALE_WORKING_GATE_READS_DEFAULT}
-  # Floor of one. A budget of zero would defer every marker on every pass, which
-  # is permanent silence - the one outcome this whole path exists to prevent.
-  case "$working_reads_max" in ''|*[!0-9]*) working_reads_max=1 ;; esac
-  [ "$working_reads_max" -ge 1 ] || working_reads_max=1
+  working_reads_max=$(stale_gate_read_budget)
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 

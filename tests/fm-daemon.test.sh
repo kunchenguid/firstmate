@@ -540,9 +540,10 @@ test_housekeeping_working_gate_budget_defers_without_suppressing() {
 # because the assertion is about the abort itself. FUNCNEST bounds a regression to
 # a fast error rather than an out-of-memory hang.
 test_crew_state_reader_guard_install_is_idempotent() {
-  local dir out code alias_body
-  dir="$TMP_ROOT/guard-idempotent"
-  mkdir -p "$dir"
+  local dir fakebin out code alias_body
+  dir="$TMP_ROOT/guard-idempotent"; fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  make_fake_crew_state "$fakebin" >/dev/null
 
   # Structural: after two installs the alias must still be the ORIGINAL classifier,
   # with none of the guard's own body folded into it.
@@ -560,8 +561,29 @@ test_crew_state_reader_guard_install_is_idempotent() {
       fail "installing the guard twice re-wrapped the alias around the guard, so it now calls itself" ;;
   esac
 
-  # Behavioural: the second install must leave the first one working - an unusable
-  # reader still aborts, with the diagnostic, rather than recursing.
+  # Behavioural, the leg that can actually observe a re-wrap: a reader that EXISTS
+  # and answers, so both guard branches pass and control reaches the alias. Only
+  # this fixture recurses under a re-wrap - an unusable reader aborts in the first
+  # branch before the alias is ever entered, so it can never witness the nesting.
+  out=$(FUNCNEST=200 bash -c '
+    set -u
+    . "$1/tests/wake-helpers.sh"
+    . "$1/bin/fm-supervise-daemon.sh"
+    fm_guard_crew_state_reader
+    fm_guard_crew_state_reader
+    FM_CREW_STATE_BIN="$2/fm-crew-state.sh" \
+      FM_FAKE_CREW_STATE="state: working · source: run-step · running: tests" \
+      crew_absorb_class some-task
+  ' _ "$ROOT" "$fakebin" 2>&1)
+  case "$out" in
+    *"nesting level exceeded"*)
+      fail "installing the guard twice made the alias call itself: $out" ;;
+  esac
+  [ "$out" = working ] \
+    || fail "the alias did not return the reader's verdict after a second install: $out"
+
+  # And the second install must not have disarmed the first: an unusable reader
+  # still aborts with the diagnostic.
   out=$(FUNCNEST=200 bash -c '
     set -u
     . "$1/tests/wake-helpers.sh"
@@ -572,14 +594,76 @@ test_crew_state_reader_guard_install_is_idempotent() {
   ' _ "$ROOT" "$dir" 2>&1)
   code=$?
   case "$out" in
-    *"nesting level exceeded"*) fail "installing the guard twice recursed instead of aborting: $out" ;;
-  esac
-  case "$out" in
     *"unusable FM_CREW_STATE_BIN"*) ;;
     *) fail "installing the guard twice lost the abort diagnostic (exit $code): $out" ;;
   esac
   [ "$code" -ne 0 ] || fail "installing the guard twice let an unusable reader through with exit 0"
-  pass "installing the crew-state reader guard twice is a no-op that keeps the first install's abort intact"
+  pass "installing the crew-state reader guard twice leaves the alias unwrapped, answering, and still guarded"
+}
+
+# The budget sanitizer, both legs. An invalid value must restore the DEFAULT, not
+# floor to one - flooring a typo would cut gate throughput threefold - and it must
+# say so, because a silent correction teaches the operator nothing. Zero is in
+# range rather than invalid, so it floors to one and says nothing.
+test_stale_gate_read_budget_reports_invalid_and_floors_zero() {
+  local dir daemon_log budget
+  dir="$TMP_ROOT/gate-budget-sanitizer"
+  mkdir -p "$dir"
+  daemon_log="$dir/daemon.log"; : > "$daemon_log"
+
+  budget=$(LOG="$daemon_log" FM_STALE_WORKING_GATE_READS='3 ' stale_gate_read_budget)
+  [ "$budget" = 3 ] || fail "an invalid budget did not restore the default of 3: got '$budget'"
+  grep -F "invalid FM_STALE_WORKING_GATE_READS '3 '; using 3" "$daemon_log" >/dev/null \
+    || fail "an invalid budget was corrected silently: $(cat "$daemon_log")"
+
+  : > "$daemon_log"
+  budget=$(LOG="$daemon_log" FM_STALE_WORKING_GATE_READS=-5 stale_gate_read_budget)
+  [ "$budget" = 3 ] || fail "a negative budget did not restore the default of 3: got '$budget'"
+  [ -s "$daemon_log" ] || fail "a negative budget was corrected silently"
+
+  : > "$daemon_log"
+  budget=$(LOG="$daemon_log" FM_STALE_WORKING_GATE_READS=0 stale_gate_read_budget)
+  [ "$budget" = 1 ] || fail "a budget of 0 did not floor to 1: got '$budget'"
+  [ ! -s "$daemon_log" ] \
+    || fail "an in-range budget of 0 logged an invalid-value diagnostic: $(cat "$daemon_log")"
+
+  : > "$daemon_log"
+  budget=$(LOG="$daemon_log" FM_STALE_WORKING_GATE_READS='' stale_gate_read_budget)
+  [ "$budget" = 3 ] || fail "a blank budget did not use the default of 3: got '$budget'"
+  [ ! -s "$daemon_log" ] || fail "a blank budget logged an invalid-value diagnostic: $(cat "$daemon_log")"
+
+  budget=$(LOG="$daemon_log" FM_STALE_WORKING_GATE_READS=2 stale_gate_read_budget)
+  [ "$budget" = 2 ] || fail "a valid budget was not honoured: got '$budget'"
+  pass "an invalid gate budget restores the default and is logged, while 0 floors to 1 quietly"
+}
+
+# The sanitizer's verdict must be what housekeeping actually spends, counted
+# rather than asserted at the helper: four crews go due at once with an invalid
+# budget, and exactly the default of three reads may happen.
+test_housekeeping_spends_the_sanitized_budget() {
+  local dir state fakebin pane calls daemon_log i key n
+  dir=$(make_supercase gate-budget-sanitized-spend)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  pane="$dir/pane.txt"; calls="$dir/crew-state-calls"; daemon_log="$dir/daemon.log"
+  printf 'idle prompt $\n' > "$pane"
+  : > "$calls"; : > "$daemon_log"
+  for i in 1 2 3 4; do
+    fm_write_meta "$state/spend-w$i.meta" "window=sess:fm-spend-w$i" "backend=tmux"
+    printf 'working: awaiting the completion marker\n' > "$state/spend-w$i.status"
+    key=$(printf '%s' "spend-w$i" | tr ':/.' '___')
+    echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  done
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$pane" LOG="$daemon_log" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_STALE_WORKING_GATE_READS='3 ' \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE_LOG="$calls" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · running: tests' \
+    housekeeping "$state"
+  n=$(wc -l < "$calls" | tr -d ' ')
+  [ "$n" = 3 ] || fail "an invalid budget spent $n read(s); the sanitized default of 3 must be what housekeeping uses"
+  grep -F "invalid FM_STALE_WORKING_GATE_READS" "$daemon_log" >/dev/null \
+    || fail "housekeeping applied the corrected budget without reporting it: $(cat "$daemon_log")"
+  pass "housekeeping spends the sanitized budget and reports the invalid value it replaced"
 }
 
 test_handle_wake_paused_signal_records_pause_marker() {
@@ -2226,6 +2310,8 @@ test_housekeeping_working_stale_escalates_once_refresh_stops
 test_housekeeping_working_gate_read_is_bounded_per_threshold
 test_housekeeping_working_gate_budget_defers_without_suppressing
 test_crew_state_reader_guard_install_is_idempotent
+test_stale_gate_read_budget_reports_invalid_and_floors_zero
+test_housekeeping_spends_the_sanitized_budget
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_paused_resumed_cleared
