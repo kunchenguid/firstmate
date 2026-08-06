@@ -672,3 +672,31 @@ The host-tool sequence was:
 Observed guarantee: a Desktop-owned thread can write Firstmate lifecycle files when the prompt provides an authorized absolute path, and create, send, read, and archive work at the Desktop host-tool layer.
 The missing guarantee remains a supported shell-callable bridge that lets Firstmate perform those operations against the same visible Desktop endpoint.
 App-server partial methods and raw socket experiments do not satisfy that bridge contract.
+
+## Cross-kernel localhost routing
+
+`bin/fm-localhost.py --help` is the single procedural owner for cross-kernel inspection, exact-PID recovery, launcher selection, and route verification.
+This section carries only the repeatable evidence for that active runtime guarantee.
+
+On 2026-08-05, the behavior suite passed with Python 3.12.3, GNU Bash 5.2.21, and Git 2.43.0.
+It uses real Git repositories and executable fake Windows/WSL kernel boundaries, so no host process is inspected or terminated while the parser, classifier, re-resolution, evidence, launcher, and refusal paths remain deterministic.
+
+```sh
+bash tests/fm-localhost.test.sh
+```
+
+Observed output:
+
+```text
+ok - localhost inspect parses listeners, converts Windows/WSL paths, classifies Git source, and redacts commands
+ok - stale native Windows Astro shadow recovers by exact PID to wslrelay plus clean WSL and matching routes
+ok - healthy wslrelay plus clean WSL server passes with matching browser-like route fingerprints
+ok - active Firstmate task ownership refuses recovery without termination
+ok - PID or command change between observations refuses exact-PID recovery
+ok - unknown commands and unrelated Windows repositories refuse without termination
+ok - unavailable Windows inspection refuses recovery without mutation
+ok - post-recovery Windows/WSL route fingerprint mismatch fails verification
+```
+
+The suite covers Windows listener JSON parsing, Windows drive and WSL UNC conversion, WSL-to-Windows conversion, Git source classification, command redaction, exact PID and command re-resolution, unavailable inspection, unrelated, unknown, or production-like processes, active task association, the never-terminate relay boundary, the healthy relay pair, the stale native Astro recovery path, and mismatched post-recovery route fingerprints.
+Host-specific acceptance still requires `verify` against the actual project/port/expected-SHA tuple; private evidence remains under the active Firstmate home's gitignored `state/` tree rather than this maintained record.

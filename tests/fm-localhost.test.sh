@@ -1,0 +1,311 @@
+#!/usr/bin/env bash
+# Behavior coverage for the cross-kernel localhost owner. The suite drives the
+# public inspect/recover/verify interface through fake Windows kernel probes and
+# real Git repositories; it never calls internal Python functions.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+fm_git_identity localhost-tests localhost-tests@example.invalid
+
+HELPER="$ROOT/bin/fm-localhost.py"
+TMP_ROOT=$(fm_test_tmproot fm-localhost-tests)
+FAKEBIN=$(fm_fakebin "$TMP_ROOT")
+
+cat > "$FAKEBIN/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+set -u
+joined=$*
+case "$joined" in
+  *Stop-Process*)
+    [ "${FM_WINDOWS_STOP_FAIL:-0}" != 1 ] || exit 1
+    printf 'stop\n' >> "${FM_STOP_LOG:?}"
+    : > "${FM_KILLED_MARKER:?}"
+    printf 'terminated\n'
+    ;;
+  *HttpClient*)
+    cat "${FM_WIN_ROUTE_JSON:?}"
+    ;;
+  *Get-NetTCPConnection*)
+    [ "${FM_WINDOWS_INSPECTION_FAIL:-0}" != 1 ] || exit 1
+    if [ -f "${FM_KILLED_MARKER:?}" ] || [ "${FM_WIN_ALWAYS_RELAY:-0}" = 1 ]; then
+      cat "${FM_WIN_RELAY_JSON:?}"
+      exit 0
+    fi
+    count=0
+    [ ! -f "${FM_INSPECT_COUNT:?}" ] || count=$(cat "$FM_INSPECT_COUNT")
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$FM_INSPECT_COUNT"
+    if [ "$count" -ge 2 ] && [ -n "${FM_WIN_SECOND_JSON:-}" ]; then
+      cat "$FM_WIN_SECOND_JSON"
+    else
+      cat "${FM_WIN_INITIAL_JSON:?}"
+    fi
+    ;;
+  *) exit 2 ;;
+esac
+SH
+
+cat > "$FAKEBIN/ss" <<'SH'
+#!/usr/bin/env bash
+set -u
+show=0
+case "${FM_WSL_MODE:-none}" in
+  always) show=1 ;;
+  after-launch) [ -f "${FM_LAUNCH_MARKER:?}" ] && show=1 ;;
+esac
+if [ "$show" -eq 1 ]; then
+  printf 'LISTEN 0 4096 0.0.0.0:%s 0.0.0.0:* users:(("node",pid=%s,fd=20))\n' \
+    "${FM_TEST_PORT:?}" "${FM_WSL_PID:?}"
+fi
+SH
+
+cat > "$FAKEBIN/npm" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" > "${FM_NPM_LOG:?}"
+: > "${FM_LAUNCH_MARKER:?}"
+SH
+
+chmod +x "$FAKEBIN/powershell.exe" "$FAKEBIN/ss" "$FAKEBIN/npm"
+
+write_listener_json() {
+  local path=$1 port=$2 address=$3 pid=$4 process=$5 executable=$6 command=$7
+  python3 - "$path" "$port" "$address" "$pid" "$process" "$executable" "$command" <<'PY'
+import json, sys
+path, port, address, pid, process, executable, command = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump([{"address": address, "port": int(port), "pid": int(pid),
+                "process": process, "executable": executable or None,
+                "command": command or None}], handle)
+PY
+}
+
+make_case() {
+  local name=$1 dir="$TMP_ROOT/$1" seed="$TMP_ROOT/$1/seed"
+  mkdir -p "$dir" "$seed"
+  git -C "$seed" init -q -b main
+  cat > "$seed/package.json" <<'JSON'
+{"scripts":{"dev":"astro dev"}}
+JSON
+  printf 'node_modules/\n' > "$seed/.gitignore"
+  printf 'canonical\n' > "$seed/page.txt"
+  git -C "$seed" add package.json .gitignore page.txt
+  git -C "$seed" commit -qm canonical
+  git clone -q --bare "$seed" "$dir/origin.git"
+  git -C "$dir/origin.git" symbolic-ref HEAD refs/heads/main
+
+  mkdir -p "$dir/mount/c/repos"
+  git clone -q "$dir/origin.git" "$dir/mount/c/repos/stale checkout"
+  git clone -q "$dir/origin.git" "$dir/expected"
+  mkdir -p "$dir/mount/c/repos/stale checkout/node_modules/astro"
+  mkdir -p "$dir/expected/node_modules/astro"
+  : > "$dir/mount/c/repos/stale checkout/node_modules/astro/astro.js"
+  : > "$dir/expected/node_modules/astro/astro.js"
+  printf 'stale local edit\n' >> "$dir/mount/c/repos/stale checkout/page.txt"
+
+  mkdir -p "$dir/state" "$dir/proc/9200"
+  printf 'node\n' > "$dir/proc/9200/comm"
+  printf 'node\0%s\0dev\0--port\0%s\0' \
+    "$dir/expected/node_modules/astro/astro.js" 43123 > "$dir/proc/9200/cmdline"
+  ln -s "$dir/expected" "$dir/proc/9200/cwd"
+  printf '{"status":200,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","length":4}\n' > "$dir/wsl-route.json"
+  cp "$dir/wsl-route.json" "$dir/win-route.json"
+  : > "$dir/stop.log"
+
+  write_listener_json "$dir/win-initial.json" 43123 127.0.0.1 4100 node.exe \
+    'C:\Program Files\nodejs\node.exe' \
+    '"C:\Program Files\nodejs\node.exe" "C:\repos\stale checkout\node_modules\astro\astro.js" dev --token super-secret-value --vm-id {1f662e3a-0323-4e37-a59f-304f0161cf55}'
+  write_listener_json "$dir/win-relay.json" 43123 0.0.0.0 5100 wslrelay.exe \
+    'C:\Windows\System32\wslrelay.exe' ''
+  git -C "$dir/expected" rev-parse HEAD > "$dir/expected.sha"
+  printf '%s\n' "$dir"
+}
+
+run_case() {
+  local dir=$1 mode=$2 out=$3
+  shift 3
+  rm -f "$dir/inspect-count" "$dir/killed" "$dir/launched" "$dir/npm.log"
+  : > "$dir/stop.log"
+  env \
+    PATH="$FAKEBIN:$PATH" \
+    WSL_DISTRO_NAME=TestDistro \
+    FM_LOCALHOST_TESTING=1 \
+    FM_STATE_OVERRIDE="$dir/state" \
+    FM_LOCALHOST_WINDOWS_MOUNT_ROOT="$dir/mount" \
+    FM_LOCALHOST_PROC_ROOT="$dir/proc" \
+    FM_LOCALHOST_TEST_WSL_ROUTE_JSON="$dir/wsl-route.json" \
+    FM_LOCALHOST_START_TIMEOUT=1 \
+    FM_TEST_PORT=43123 \
+    FM_WSL_PID=9200 \
+    FM_INSPECT_COUNT="$dir/inspect-count" \
+    FM_WIN_INITIAL_JSON="$dir/win-initial.json" \
+    FM_WIN_RELAY_JSON="$dir/win-relay.json" \
+    FM_WIN_ROUTE_JSON="$dir/win-route.json" \
+    FM_KILLED_MARKER="$dir/killed" \
+    FM_STOP_LOG="$dir/stop.log" \
+    FM_LAUNCH_MARKER="$dir/launched" \
+    FM_NPM_LOG="$dir/npm.log" \
+    "$@" \
+    "$HELPER" "$mode" "$dir/expected" 43123 "$(cat "$dir/expected.sha")" > "$out" 2>&1
+}
+
+test_listener_parsing_path_conversion_source_and_redaction() {
+  local dir out
+  dir=$(make_case inspect)
+  out="$dir/out"
+  FM_WSL_MODE=none run_case "$dir" inspect "$out" || fail "inspect should complete: $(cat "$out")"
+  assert_grep 'owner_kernel=windows' "$out" "inspect omitted the Windows owner"
+  assert_grep "checkout=$dir/mount/c/repos/stale checkout" "$out" "Windows drive path did not resolve to its checkout"
+  assert_grep 'dirty=dirty' "$out" "inspect did not classify the stale source as dirty"
+  assert_contains "$(cat "$out")" 'checkout_windows=\\wsl.localhost\TestDistro\' "WSL checkout did not convert to its Windows UNC path"
+  assert_grep 'classification=native-windows-node-astro-dev' "$out" "Astro development server was not classified"
+  assert_grep '--token <redacted>' "$out" "sensitive command flag was not redacted"
+  assert_no_grep 'super-secret-value' "$out" "raw command secret reached output"
+  assert_no_grep '1f662e3a-0323-4e37-a59f-304f0161cf55' "$out" "raw local process identifier reached output"
+
+  local unc_command
+  unc_command="node.exe \"\\\\wsl.localhost\\TestDistro${dir//\//\\}\\mount\\c\\repos\\stale checkout\\node_modules\\astro\\astro.js\" dev"
+  write_listener_json "$dir/win-initial.json" 43123 127.0.0.1 4100 node.exe 'C:\Program Files\nodejs\node.exe' "$unc_command"
+  FM_WSL_MODE=none run_case "$dir" inspect "$out" || fail "UNC inspect should complete: $(cat "$out")"
+  assert_grep "checkout=$dir/mount/c/repos/stale checkout" "$out" "WSL UNC path did not resolve to its checkout"
+  pass "localhost inspect parses listeners, converts Windows/WSL paths, classifies Git source, and redacts commands"
+}
+
+test_native_stale_windows_shadow_recovers_to_verified_pair() {
+  local dir out
+  dir=$(make_case recover)
+  out="$dir/out"
+  FM_WSL_MODE=after-launch run_case "$dir" recover "$out" || fail "eligible recovery failed: $(cat "$out")"
+  [ "$(wc -l < "$dir/stop.log" | tr -d ' ')" = 1 ] || fail "recovery did not issue exactly one termination"
+  assert_grep 'recovered-and-verified' "$out" "recovery did not verify the final pair"
+  assert_grep 'terminated-exact-pid:4100' "$out" "recovery did not report the exact PID"
+  assert_grep 'run dev -- --host 0.0.0.0 --port 43123' "$dir/npm.log" "recovery used an unexpected launcher"
+  local evidence
+  evidence=$(find "$dir/state/localhost-evidence" -type f -name '*.evidence' -print -quit)
+  [ -n "$evidence" ] || fail "recovery did not write private evidence"
+  [ "$(stat -c %a "$evidence")" = 600 ] || fail "private evidence mode is not 0600"
+  pass "stale native Windows Astro shadow recovers by exact PID to wslrelay plus clean WSL and matching routes"
+}
+
+test_healthy_relay_and_clean_wsl_verify() {
+  local dir out
+  dir=$(make_case healthy)
+  out="$dir/out"
+  FM_WSL_MODE=always FM_WIN_ALWAYS_RELAY=1 run_case "$dir" verify "$out" || fail "healthy pair did not verify: $(cat "$out")"
+  assert_grep $'verification\tverdict=pass' "$out" "healthy verification did not pass"
+  [ ! -s "$dir/stop.log" ] || fail "verify attempted termination"
+  if FM_WSL_MODE=always FM_WIN_ALWAYS_RELAY=1 run_case "$dir" recover "$out"; then
+    fail "wslrelay owner was accepted as a recovery target"
+  fi
+  assert_grep 'refuse:wslrelay-is-never-terminated' "$out" "wslrelay recovery refusal was not reported"
+  [ ! -s "$dir/stop.log" ] || fail "wslrelay refusal still called termination"
+  pass "healthy wslrelay plus clean WSL server passes with matching browser-like route fingerprints"
+}
+
+test_active_task_refuses_without_termination() {
+  local dir out
+  dir=$(make_case active-task)
+  out="$dir/out"
+  printf 'window=fm-live\nworktree=%s\nproject=%s\n' \
+    "$dir/mount/c/repos/stale checkout" "$dir/mount/c/repos/stale checkout" > "$dir/state/live.meta"
+  if FM_WSL_MODE=none run_case "$dir" recover "$out"; then
+    fail "active task checkout was terminated"
+  fi
+  assert_grep 'refuse:active-firstmate-task-associated' "$out" "active task refusal was not reported"
+  [ ! -s "$dir/stop.log" ] || fail "active task refusal still called termination"
+  pass "active Firstmate task ownership refuses recovery without termination"
+}
+
+test_pid_or_command_change_refuses_on_immediate_reresolution() {
+  local dir out
+  dir=$(make_case reresolve)
+  out="$dir/out"
+  write_listener_json "$dir/win-second.json" 43123 127.0.0.1 4100 node.exe \
+    'C:\Program Files\nodejs\node.exe' \
+    '"C:\Program Files\nodejs\node.exe" "C:\repos\stale checkout\node_modules\astro\astro.js" dev --host 127.0.0.1'
+  if FM_WSL_MODE=none FM_WIN_SECOND_JSON="$dir/win-second.json" run_case "$dir" recover "$out"; then
+    fail "PID reuse/change was accepted"
+  fi
+  assert_grep 'refuse:pid-or-command-reresolution-changed' "$out" "PID change refusal was not reported"
+  [ ! -s "$dir/stop.log" ] || fail "PID change refusal still called termination"
+
+  write_listener_json "$dir/win-second.json" 43123 127.0.0.1 4101 node.exe \
+    'C:\Program Files\nodejs\node.exe' \
+    '"C:\Program Files\nodejs\node.exe" "C:\repos\stale checkout\node_modules\astro\astro.js" dev'
+  if FM_WSL_MODE=none FM_WIN_SECOND_JSON="$dir/win-second.json" run_case "$dir" recover "$out"; then
+    fail "changed PID was accepted"
+  fi
+  assert_grep 'refuse:pid-or-command-reresolution-changed' "$out" "changed PID refusal was not reported"
+  [ ! -s "$dir/stop.log" ] || fail "changed PID refusal still called termination"
+  pass "PID or command change between observations refuses exact-PID recovery"
+}
+
+test_unknown_and_unrelated_windows_processes_refuse() {
+  local dir out unrelated
+  dir=$(make_case unknown)
+  out="$dir/out"
+  write_listener_json "$dir/win-initial.json" 43123 127.0.0.1 4100 python.exe 'C:\Python\python.exe' ''
+  if FM_WSL_MODE=none run_case "$dir" recover "$out"; then
+    fail "unknown Windows command was accepted"
+  fi
+  assert_grep 'refuse:windows-process-is-not-proven-node-astro-dev' "$out" "unknown command refusal was not reported"
+  [ ! -s "$dir/stop.log" ] || fail "unknown command refusal still called termination"
+
+  write_listener_json "$dir/win-initial.json" 43123 127.0.0.1 4100 node.exe \
+    'C:\Program Files\nodejs\node.exe' \
+    '"C:\Program Files\nodejs\node.exe" "C:\repos\stale checkout\node_modules\astro\astro.js" preview'
+  if FM_WSL_MODE=none run_case "$dir" recover "$out"; then
+    fail "production-like Astro preview process was accepted"
+  fi
+  assert_grep 'refuse:windows-process-is-not-proven-node-astro-dev' "$out" "production-like refusal was not reported"
+  [ ! -s "$dir/stop.log" ] || fail "production-like refusal still called termination"
+
+  unrelated="$dir/unrelated.git"
+  git clone -q --bare "$dir/seed" "$unrelated"
+  git -C "$dir/mount/c/repos/stale checkout" remote set-url origin "$unrelated"
+  write_listener_json "$dir/win-initial.json" 43123 127.0.0.1 4100 node.exe \
+    'C:\Program Files\nodejs\node.exe' \
+    '"C:\Program Files\nodejs\node.exe" "C:\repos\stale checkout\node_modules\astro\astro.js" dev'
+  if FM_WSL_MODE=none run_case "$dir" recover "$out"; then
+    fail "unrelated Windows repository was accepted"
+  fi
+  assert_grep 'refuse:windows-process-is-unrelated' "$out" "unrelated repository refusal was not reported"
+  [ ! -s "$dir/stop.log" ] || fail "unrelated repository refusal still called termination"
+  pass "unknown commands and unrelated Windows repositories refuse without termination"
+}
+
+test_windows_inspection_failure_is_safe() {
+  local dir out
+  dir=$(make_case inspection-failure)
+  out="$dir/out"
+  if FM_WSL_MODE=none FM_WINDOWS_INSPECTION_FAIL=1 run_case "$dir" recover "$out"; then
+    fail "Windows inspection failure was accepted"
+  fi
+  assert_grep 'refuse:windows-inspection-unavailable' "$out" "Windows inspection failure did not produce a safe refusal"
+  [ ! -s "$dir/stop.log" ] || fail "inspection failure still called termination"
+  pass "unavailable Windows inspection refuses recovery without mutation"
+}
+
+test_post_recovery_fingerprint_mismatch_fails() {
+  local dir out
+  dir=$(make_case route-mismatch)
+  out="$dir/out"
+  printf '{"status":200,"sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","length":4}\n' > "$dir/win-route.json"
+  if FM_WSL_MODE=after-launch run_case "$dir" recover "$out"; then
+    fail "post-recovery route mismatch passed"
+  fi
+  assert_grep 'failed:post-recovery-verification' "$out" "post-recovery mismatch was not reported"
+  assert_grep 'route-fingerprint-mismatch' "$out" "route mismatch reason was not reported"
+  [ "$(wc -l < "$dir/stop.log" | tr -d ' ')" = 1 ] || fail "mismatch case did not preserve exact single-PID termination"
+  pass "post-recovery Windows/WSL route fingerprint mismatch fails verification"
+}
+
+test_listener_parsing_path_conversion_source_and_redaction
+test_native_stale_windows_shadow_recovers_to_verified_pair
+test_healthy_relay_and_clean_wsl_verify
+test_active_task_refuses_without_termination
+test_pid_or_command_change_refuses_on_immediate_reresolution
+test_unknown_and_unrelated_windows_processes_refuse
+test_windows_inspection_failure_is_safe
+test_post_recovery_fingerprint_mismatch_fails
