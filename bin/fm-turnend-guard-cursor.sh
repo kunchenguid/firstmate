@@ -18,12 +18,16 @@
 #      session/fail/wake/reason, reset on session mismatch): consecutive loud
 #      arm-failure follow-ups (FM_CURSOR_TURNEND_BLOCK_BUDGET) and consecutive
 #      repeats of the SAME unchanged wake reason (FM_CURSOR_WAKE_CHAIN_BUDGET,
-#      one final diagnostic follow-up at the ceiling). Each kind resets the
-#      other, a changed wake reason is progress and restarts the wake count,
-#      and an allowed stop clears the record. When the record cannot be
-#      persisted the payload's loop_count is the fallback bound, so a
-#      read-only state dir degrades to the pre-counter behaviour instead of an
-#      un-endable chain;
+#      a diagnostic follow-up at the ceiling that also clears the record so the
+#      next chain starts normal again). Each kind resets the other, a changed
+#      wake reason is progress and restarts the wake count, and an allowed stop
+#      or a non-continuation stop (loop_count 0, i.e. a captain-driven turn)
+#      clears the record. Over all of it sits one unified hard bound: a chain
+#      whose loop_count reaches BLOCK_BUDGET + WAKE_BUDGET ends, which no
+#      branch and no state-write failure can evade. When the record cannot be
+#      persisted the payload's loop_count is the fallback per-branch bound too,
+#      so a read-only state dir degrades to the pre-counter behaviour instead
+#      of an un-endable chain;
 #   3. runs bin/fm-turnend-guard.sh with the normalized payload;
 #   4. on exit 2 (a blind turn), foregrounds bin/fm-watch-arm.sh inside the
 #      hook-owned process tree - parked while the watcher arms, never shell
@@ -48,6 +52,7 @@ BLOCK_BUDGET=${FM_CURSOR_TURNEND_BLOCK_BUDGET:-3}
 case "$BLOCK_BUDGET" in ''|*[!0-9]*|0) BLOCK_BUDGET=3 ;; esac
 WAKE_BUDGET=${FM_CURSOR_WAKE_CHAIN_BUDGET:-5}
 case "$WAKE_BUDGET" in ''|*[!0-9]*|0) WAKE_BUDGET=5 ;; esac
+TOTAL_BUDGET=$((BLOCK_BUDGET + WAKE_BUDGET))
 
 # The shared guard always sees stop_hook_active false, so a continuation whose
 # supervision need is real still re-arms. A malformed payload passes through
@@ -91,7 +96,7 @@ chain_load() {
   done < "$CHAIN_FILE"
   case "$CHAIN_FAIL" in ''|*[!0-9]*) CHAIN_FAIL=0 ;; esac
   case "$CHAIN_WAKE" in ''|*[!0-9]*) CHAIN_WAKE=0 ;; esac
-  if [ "$CHAIN_SESSION" != "$SESSION" ]; then
+  if [ "$CHAIN_SESSION" != "$SESSION" ] || [ "$LOOP_COUNT" -eq 0 ]; then
     CHAIN_FAIL=0
     CHAIN_WAKE=0
     CHAIN_REASON=
@@ -148,6 +153,16 @@ printf '%s' "$NORMALIZED" | "$ROOT/bin/fm-turnend-guard.sh" 2>"$ERR"
 RC=$?
 [ "$RC" -eq 2 ] || allow_stop
 
+# One unified hard bound on the whole forced-continuation chain, taken from the
+# payload so no branch and no state failure can evade it. loop_count returns to
+# 0 on the next captain-driven turn, so this ends a runaway chain without
+# latching the session.
+if [ "$LOOP_COUNT" -ge "$TOTAL_BUDGET" ]; then
+  rm -f "$CHAIN_FILE" 2>/dev/null || true
+  printf '{}\n'
+  exit 0
+fi
+
 if [ "$ARM_ACTIONABLE" -eq 1 ]; then
   # Only a wake reason that keeps re-firing unchanged advances the chain count;
   # a different reason is progress and restarts it.
@@ -157,12 +172,9 @@ if [ "$ARM_ACTIONABLE" -eq 1 ]; then
     COUNT=1
   fi
   chain_store 0 "$COUNT" "$WAKE_REASON" || COUNT=$((LOOP_COUNT + 1))
-  if [ "$COUNT" -gt $((WAKE_BUDGET + 1)) ]; then
-    printf '{}\n'
-    exit 0
-  fi
   if [ "$COUNT" -gt "$WAKE_BUDGET" ]; then
-    REASON="firstmate watcher wake - the same wake reason has now repeated $COUNT times without clearing. Run bin/fm-wake-drain.sh first, handle the wake, and investigate why it keeps re-firing: this is the last automatic follow-up for this reason."
+    rm -f "$CHAIN_FILE" 2>/dev/null || true
+    REASON="firstmate watcher wake - the same wake reason has now repeated $COUNT times without clearing. Run bin/fm-wake-drain.sh first, handle the wake, and investigate why it keeps re-firing."
   else
     REASON='firstmate watcher wake - one supervision event needs a handling turn now. Run bin/fm-wake-drain.sh first and handle the wake. Stop-hook-owned continuity re-arms the next needed cycle automatically; do not manually arm the watcher.'
   fi
