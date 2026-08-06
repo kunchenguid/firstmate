@@ -570,6 +570,7 @@ done
 HOME="$CASE_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
   "$ROOT/bin/fm-remote-job-worker.sh" > "$CASE_STATE/worker.out" 2> "$CASE_STATE/worker.err" &
 DOCTOR_WORKER_PID=$!
+fm_test_track_child "$DOCTOR_WORKER_PID" || fail "could not register doctor fixture worker cleanup"
 for _ in $(seq 1 100); do
   [ -f "$CASE_HOME/.firstmate/remote-job/worker.ready" ] && break
   sleep 0.05
@@ -589,6 +590,7 @@ assert_contains "$DOCTOR_OUT" 'check remote-job-worker=ok:' "the refreshed worke
 assert_contains "$DOCTOR_OUT" 'check remote-job-probe=ok: the remote job worker completed the required-tool probe' \
   "doctor did not probe tools through the refreshed worker"
 DOCTOR_WORKER_PID=$(cat "$CASE_HOME/.firstmate/remote-job/worker.pid")
+fm_test_track_child "$DOCTOR_WORKER_PID" || fail "could not register refreshed doctor fixture worker cleanup"
 kill -TERM "$DOCTOR_WORKER_PID"
 for _ in $(seq 1 100); do
   kill -0 "$DOCTOR_WORKER_PID" 2>/dev/null || break

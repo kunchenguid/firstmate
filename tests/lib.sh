@@ -69,6 +69,8 @@ pass() {
 # real caller, never a subshell.
 
 FM_TEST_CLEANUP_DIRS=()
+FM_TEST_CHILD_PIDS=()
+FM_TEST_CHILD_IDENTITIES=()
 FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-cleanup.$$.XXXXXX") || return 1
 
 fm_test_pid_identity() {
@@ -82,8 +84,81 @@ FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
   return 1
 }
 
+# fm_test_track_child <pid>: register one exact child started by this test for
+# identity-safe cleanup on normal exit, assertion failure, INT, or TERM.
+# Tests still stop children at their natural lifecycle boundary; this trap-backed
+# registry is the fail-safe that prevents an early exit from leaking them.
+fm_test_track_child() {
+  local pid=$1 identity
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  identity=$(fm_test_pid_identity "$pid") || return 1
+  FM_TEST_CHILD_PIDS+=("$pid")
+  FM_TEST_CHILD_IDENTITIES+=("$identity")
+}
+
+# fm_test_track_remote_job_worker <state-root>: register the exact Linux
+# supervisor and serve child started for a fixture state root.
+# On Linux, /proc environment matching prevents a stale/reused pid from ever
+# turning fixture cleanup into a signal against another Firstmate home.
+fm_test_track_remote_job_worker() {
+  local state_root=$1 pid_file child supervisor command actual_state platform
+  state_root=$(cd "$state_root" 2>/dev/null && pwd -P) || return 1
+  pid_file="$state_root/worker.pid"
+  [ -f "$pid_file" ] && [ ! -L "$pid_file" ] || return 1
+  child=$(cat "$pid_file") || return 1
+  case "$child" in ''|*[!0-9]*) return 1 ;; esac
+  command=$(ps -p "$child" -o command= 2>/dev/null) || return 1
+  case "$command" in *fm-remote-job-worker.sh*) ;; *) return 1 ;; esac
+  supervisor=$(ps -p "$child" -o ppid= 2>/dev/null | tr -d ' ') || return 1
+  case "$supervisor" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$supervisor" -gt 1 ] || return 1
+  command=$(ps -p "$supervisor" -o command= 2>/dev/null) || return 1
+  case "$command" in *fm-remote-job-worker.sh*) ;; *) return 1 ;; esac
+  platform=$(uname -s 2>/dev/null) || return 1
+  if [ "$platform" = Linux ]; then
+    for pid in "$child" "$supervisor"; do
+      [ -r "/proc/$pid/environ" ] || return 1
+      actual_state=$(tr '\0' '\n' < "/proc/$pid/environ" \
+        | sed -n 's/^FM_REMOTE_JOB_STATE_ROOT=//p' | tail -1)
+      [ "$actual_state" = "$state_root" ] || return 1
+    done
+  fi
+  fm_test_track_child "$child" || return 1
+  fm_test_track_child "$supervisor"
+}
+
+fm_test_reap_tracked_children() {
+  local i pid expected current stat tick
+  for ((i = ${#FM_TEST_CHILD_PIDS[@]} - 1; i >= 0; i--)); do
+    pid=${FM_TEST_CHILD_PIDS[$i]}
+    expected=${FM_TEST_CHILD_IDENTITIES[$i]}
+    current=$(fm_test_pid_identity "$pid" 2>/dev/null) || continue
+    [ "$current" = "$expected" ] || continue
+    kill -TERM "$pid" 2>/dev/null || true
+    tick=0
+    while [ "$tick" -lt 50 ]; do
+      current=$(fm_test_pid_identity "$pid" 2>/dev/null) || break
+      [ "$current" = "$expected" ] || break
+      stat=$(ps -p "$pid" -o stat= 2>/dev/null || true)
+      case "$stat" in Z*) break ;; esac
+      sleep 0.1
+      tick=$((tick + 1))
+    done
+    current=$(fm_test_pid_identity "$pid" 2>/dev/null) || current=
+    if [ "$current" = "$expected" ]; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+    wait "$pid" 2>/dev/null || true
+  done
+  FM_TEST_CHILD_PIDS=()
+  FM_TEST_CHILD_IDENTITIES=()
+}
+
 fm_test_cleanup() {
   local d
+  fm_test_reap_tracked_children
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done

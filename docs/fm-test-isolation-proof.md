@@ -82,6 +82,11 @@ Each worker used a separate mode-`0700` temporary root and private `TMPDIR` and 
 The harness cleared ambient `FM_HOME` and `FM_*_OVERRIDE` values for every worker and verified that global Git configuration was unchanged.
 A candidate failure fails the aggregate run and requires investigation rather than a retry.
 
+## Upstream coverage boundary
+
+Commit `7ef26c4` covers task teardown and run cleanup, not fixture-home watcher or remote-worker cleanup.
+It is therefore not a substitute for the trap-backed fixture cleanup covered by `tests/fm-test-run.test.sh` and the remote fixture tests.
+
 ## Re-run
 
 ```sh

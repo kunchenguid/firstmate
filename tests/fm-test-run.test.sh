@@ -627,6 +627,107 @@ SH
   pass "jobs scheduler runs proven scripts; failure propagates; non-proven refused"
 }
 
+test_script_timeout_names_failure_and_reaps_its_group() {
+  local tmp repo runner leaker exit_leaker interruptor child_pid control_pid test_pid rc stat i
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-timeout.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  leaker="$repo/tests/deliberate-leak.test.sh"
+  mkdir -p "$repo/bin" "$repo/tests" "$tmp/fixture-home"
+  cp "$RUNNER" "$runner"
+  cat >"$leaker" <<SH
+#!/usr/bin/env bash
+env FM_HOME='$tmp/fixture-home' bash -c 'trap "" HUP INT TERM; while :; do sleep 30; done' \
+  </dev/null >/dev/null 2>&1 &
+printf '%s\n' "\$!" > '$tmp/leaked.pid'
+while :; do sleep 0.1; done
+SH
+  chmod +x "$runner" "$leaker"
+
+  env FM_HOME="$ROOT" sleep 30 &
+  control_pid=$!
+  fm_test_track_child "$control_pid" || fail "could not register timeout negative-control process"
+
+  set +e
+  FM_TEST_SCRIPT_TIMEOUT_SECONDS=1 "$runner" "$leaker" >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a deliberately hung test did not fail the suite"
+  grep -Fq "fm-test-run: TIMEOUT $leaker exceeded 1s" "$tmp/out" \
+    || fail "timeout did not name the stalled test: $(cat "$tmp/out" "$tmp/err")"
+  grep -F " $leaker exit=124 " "$tmp/out" >/dev/null \
+    || fail "timeout did not record exit 124 for the stalled test"
+  assert_present "$tmp/leaked.pid" "the deliberate leak fixture did not start"
+  child_pid=$(cat "$tmp/leaked.pid")
+  i=0
+  while kill -0 "$child_pid" 2>/dev/null && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$child_pid" 2>/dev/null \
+    && fail "the timed-out test's deliberately leaked child survived"
+  kill -0 "$control_pid" 2>/dev/null \
+    || fail "the timeout guard touched a process outside the test's process group"
+
+  exit_leaker="$repo/tests/deliberate-exit-leak.test.sh"
+  cat >"$exit_leaker" <<SH
+#!/usr/bin/env bash
+env FM_HOME='$tmp/fixture-home' bash -c 'trap "" HUP INT TERM; while :; do sleep 30; done' \
+  </dev/null >/dev/null 2>&1 &
+printf '%s\n' "\$!" > '$tmp/exit-leaked.pid'
+exit 0
+SH
+  chmod +x "$exit_leaker"
+  set +e
+  "$runner" "$exit_leaker" >"$tmp/exit-out" 2>"$tmp/exit-err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a test that exited while leaking a child did not fail the suite"
+  grep -Fq "fm-test-run: LEAK $exit_leaker left live processes in its test group" "$tmp/exit-out" \
+    || fail "leak guard did not name the test that exited: $(cat "$tmp/exit-out" "$tmp/exit-err")"
+  grep -F " $exit_leaker exit=125 " "$tmp/exit-out" >/dev/null \
+    || fail "leak guard did not record exit 125 for the leaking test"
+  child_pid=$(cat "$tmp/exit-leaked.pid")
+  stat=$(ps -p "$child_pid" -o stat= 2>/dev/null || true)
+  case "$stat" in ''|Z*) ;; *) fail "the deliberate exit leak survived the suite guard" ;; esac
+  kill -0 "$control_pid" 2>/dev/null \
+    || fail "the leak guard touched a process outside the test's process group"
+
+  interruptor="$repo/tests/tracked-interrupt.test.sh"
+  cat >"$interruptor" <<SH
+#!/usr/bin/env bash
+. '$ROOT/tests/lib.sh'
+fixture=\$(fm_test_tmproot fm-test-interrupt)
+env FM_HOME="\$fixture" sleep 30 &
+child=\$!
+fm_test_track_child "\$child" || exit 91
+printf '%s\n' "\$child" > '$tmp/interrupted-child.pid'
+while :; do sleep 0.1; done
+SH
+  chmod +x "$interruptor"
+  bash "$interruptor" &
+  test_pid=$!
+  fm_test_track_child "$test_pid" || fail "could not register interrupt fixture test"
+  i=0
+  while [ ! -f "$tmp/interrupted-child.pid" ] && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  assert_present "$tmp/interrupted-child.pid" "the interrupt cleanup fixture did not start"
+  child_pid=$(cat "$tmp/interrupted-child.pid")
+  kill -TERM "$test_pid"
+  set +e
+  wait "$test_pid"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] || fail "the interrupted test exited $rc instead of 143"
+  kill -0 "$child_pid" 2>/dev/null \
+    && fail "the interrupted test's tracked child survived its TERM trap"
+  fm_test_reap_tracked_children
+  rm -rf "$tmp"
+  pass "timeout and interrupt guards reap exact test children while leaving an outside process alone"
+}
+
 test_aggregate_json() {
   local tmp a b
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-aggjson.XXXXXX")
@@ -685,4 +786,5 @@ test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
 test_jobs_parallel_scheduler_and_failure_propagation
+test_script_timeout_names_failure_and_reaps_its_group
 test_aggregate_json

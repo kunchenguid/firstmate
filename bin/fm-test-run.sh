@@ -42,6 +42,10 @@
 #                   selected script is in the proven-isolated set
 #                   (bin/fm-test-isolation-proof.sh --list). Cap is 8. Stateful
 #                   families never schedule under --jobs.
+#   FM_TEST_SCRIPT_TIMEOUT_SECONDS
+#                   per-script silence/hang bound (default: 300 seconds).
+#                   A timeout names the script, records exit 124, and reaps the
+#                   exact process group started for that test.
 #   -h, --help      print this header
 #
 # Per-script machine-parseable markers (stdout):
@@ -88,6 +92,7 @@ EXCLUDE_FAMILIES=()
 FAIL_ON_GATE_SKIP=
 JOBS=1
 JOBS_MAX=8
+TEST_TIMEOUT_SECONDS=${FM_TEST_SCRIPT_TIMEOUT_SECONDS:-300}
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
@@ -114,6 +119,12 @@ die() {
 log() {
   printf 'fm-test-run: %s\n' "$*" >&2
 }
+
+case "$TEST_TIMEOUT_SECONDS" in
+  ''|*[!0-9]*) die "FM_TEST_SCRIPT_TIMEOUT_SECONDS must be a positive integer" ;;
+esac
+[ "$TEST_TIMEOUT_SECONDS" -gt 0 ] \
+  || die "FM_TEST_SCRIPT_TIMEOUT_SECONDS must be a positive integer"
 
 now_iso() {
   date -u +%Y-%m-%dT%H:%M:%SZ
@@ -1417,7 +1428,56 @@ RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
 RECORDS="$RUN_TMP/records.tsv"
 FAMILIES_TSV="$RUN_TMP/families.tsv"
 : >"$RECORDS"
-trap 'rm -rf "$RUN_TMP"' EXIT
+ACTIVE_TEST_GROUPS=()
+
+test_group_has_live_processes() { # <process-group-id>
+  ps -axo pgid=,stat= 2>/dev/null | awk -v want="$1" '
+    $1 == want && $2 !~ /^Z/ { found = 1 }
+    END { exit(found ? 0 : 1) }
+  '
+}
+
+reap_test_group() { # <session-leader-pid>
+  local pid=$1 tick=0
+  case "$pid" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  test_group_has_live_processes "$pid" || return 0
+  kill -TERM -- "-$pid" 2>/dev/null || return 0
+  while test_group_has_live_processes "$pid" && [ "$tick" -lt 20 ]; do
+    sleep 0.1
+    tick=$((tick + 1))
+  done
+  kill -KILL -- "-$pid" 2>/dev/null || true
+  return 1
+}
+
+# shellcheck disable=SC2329 # Reached through runner_cleanup's EXIT trap.
+reap_active_test_groups() {
+  local pid
+  for pid in "${ACTIVE_TEST_GROUPS[@]}"; do
+    reap_test_group "$pid" || true
+  done
+  for pid in "${ACTIVE_TEST_GROUPS[@]}"; do
+    case "$pid" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    kill -KILL -- "-$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  ACTIVE_TEST_GROUPS=()
+}
+
+# shellcheck disable=SC2329 # Invoked by the EXIT trap.
+runner_cleanup() {
+  reap_active_test_groups
+  rm -rf "$RUN_TMP"
+}
+
+trap runner_cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 RUN_STARTED_ISO=$(now_iso)
 RUN_STARTED_MS=$(now_ms)
@@ -1492,6 +1552,85 @@ record_script_result() {
   TOTAL=$((TOTAL + 1))
 }
 
+remove_active_test_group() {
+  local remove=$1 pid
+  local -a keep=()
+  for pid in "${ACTIVE_TEST_GROUPS[@]}"; do
+    [ "$pid" = "$remove" ] || keep+=("$pid")
+  done
+  ACTIVE_TEST_GROUPS=("${keep[@]}")
+}
+
+start_test_group() { # <script> <output> <stream: 0|1>
+  local script=$1 out=$2 stream=$3 ready="$RUN_TMP/group-ready.$BASHPID.$RANDOM"
+  local command
+  if [ "$stream" -eq 1 ]; then
+    # shellcheck disable=SC2016 # Expanded by the isolated bash child.
+    command='printf ready > "$3"; set -o pipefail; bash "$1" 2>&1 | tee "$2"'
+  else
+    # shellcheck disable=SC2016 # Expanded by the isolated bash child.
+    command='printf ready > "$3"; bash "$1" >"$2" 2>&1'
+  fi
+  if command -v setsid >/dev/null 2>&1; then
+    setsid bash -c "$command" _ "$script" "$out" "$ready" &
+  elif command -v perl >/dev/null 2>&1; then
+    perl -MPOSIX=setsid -e 'setsid() >= 0 or die "setsid: $!"; exec @ARGV' \
+      bash -c "$command" _ "$script" "$out" "$ready" &
+  else
+    die "cannot isolate test process group: neither setsid nor perl is available"
+  fi
+  TEST_GROUP_PID=$!
+  ACTIVE_TEST_GROUPS+=("$TEST_GROUP_PID")
+  while [ ! -e "$ready" ] && kill -0 "$TEST_GROUP_PID" 2>/dev/null; do
+    sleep 0.01
+  done
+  rm -f "$ready"
+}
+
+run_script_bounded() { # <script> <output> <stream: 0|1>
+  local script=$1 out=$2 stream=$3 pid deadline rc timed_out=0 leaked=0 message
+  start_test_group "$script" "$out" "$stream"
+  pid=$TEST_GROUP_PID
+  deadline=$((SECONDS + TEST_TIMEOUT_SECONDS))
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      timed_out=1
+      kill -TERM -- "-$pid" 2>/dev/null || true
+      sleep 1
+      kill -KILL -- "-$pid" 2>/dev/null || true
+      break
+    fi
+    sleep 0.05
+  done
+  if wait "$pid"; then rc=0; else rc=$?; fi
+  # The script can exit while a backgrounded worker remains reparented.
+  # Its session/process-group identity remains the exact group this runner
+  # created, so retire survivors without matching names or scanning other homes.
+  reap_test_group "$pid" || leaked=1
+  remove_active_test_group "$pid"
+  if [ "$timed_out" -eq 1 ]; then
+    message="fm-test-run: TIMEOUT $script exceeded ${TEST_TIMEOUT_SECONDS}s"
+    if [ "$stream" -eq 1 ]; then
+      printf '%s\n' "$message" | tee -a "$out"
+    else
+      printf '%s\n' "$message" >>"$out"
+      printf '%s\n' "$message" >&2
+    fi
+    return 124
+  fi
+  if [ "$leaked" -eq 1 ]; then
+    message="fm-test-run: LEAK $script left live processes in its test group"
+    if [ "$stream" -eq 1 ]; then
+      printf '%s\n' "$message" | tee -a "$out"
+    else
+      printf '%s\n' "$message" >>"$out"
+      printf '%s\n' "$message" >&2
+    fi
+    return 125
+  fi
+  return "$rc"
+}
+
 run_one_serial() {
   local script=$1
   local base family expected out begin_iso begin_ms end_ms end_iso duration rc
@@ -1505,12 +1644,7 @@ run_one_serial() {
   printf 'FM_TEST_BEGIN %s %s family=%s expected_gate_skip=%s\n' \
     "$begin_iso" "$script" "$family" "$expected"
 
-  set +e
-  # Stream live output while retaining a copy for gate-skip detection.
-  # PIPESTATUS[0] is the test script; tee's exit is ignored for aggregate.
-  bash "$script" 2>&1 | tee "$out"
-  rc=${PIPESTATUS[0]}
-  set -e
+  if run_script_bounded "$script" "$out" 1; then rc=0; else rc=$?; fi
   : "${rc:=1}"
 
   end_ms=$(now_ms)
@@ -1615,8 +1749,7 @@ else
         FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND 2>/dev/null || true
       cd "$ROOT" || exit 1
       begin_ms=$(now_ms)
-      bash "$script" >"$work/output" 2>&1
-      rc=$?
+      if run_script_bounded "$script" "$work/output" 0; then rc=0; else rc=$?; fi
       end_ms=$(now_ms)
       duration=$((end_ms - begin_ms))
       if [ "$duration" -lt 0 ]; then
