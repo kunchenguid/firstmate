@@ -598,6 +598,23 @@ test_teardown_prompts_tasks_axi_done_when_compatible() {
   pass "teardown prompts tasks-axi backlog refresh when compatible"
 }
 
+# A gate-merge task lands through the project's own merge gate, so it never has a
+# PR to record. Prompting for one would leave firstmate holding a `--pr PR_URL`
+# placeholder that can never be filled, so the reminder records the landing instead.
+test_teardown_records_a_landed_note_for_gate_merge() {
+  local case_dir out
+  case_dir=$(make_case tasks-axi-gate-merge)
+  write_meta "$case_dir" gate-merge ship
+  add_compatible_tasks_axi "$case_dir"
+
+  out=$(run_teardown "$case_dir") || fail "teardown failed for a gate-merge task"
+  printf '%s\n' "$out" | grep -F 'tasks-axi done task-x1 --note "landed via the project merge gate"' >/dev/null \
+    || fail "teardown did not record the gate-merge landing note: $out"
+  printf '%s\n' "$out" | grep -F -- '--pr' >/dev/null \
+    && fail "teardown prompted for a PR a gate-merge task will never have: $out"
+  pass "teardown records a landed note for gate-merge instead of prompting for a PR"
+}
+
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present() {
   local case_dir out
   case_dir=$(make_case tasks-axi-manual-optout)
@@ -2500,6 +2517,7 @@ EOF
 
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
+test_teardown_records_a_landed_note_for_gate_merge
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
