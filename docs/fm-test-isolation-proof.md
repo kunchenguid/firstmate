@@ -85,7 +85,7 @@ A candidate failure fails the aggregate run and requires investigation rather th
 ## Upstream coverage boundary
 
 Commit `7ef26c4` covers task teardown and run cleanup, not fixture-home watcher or remote-worker cleanup.
-It is therefore not a substitute for the trap-backed fixture cleanup verified here by `tests/fm-test-run.test.sh` and the remote fixture tests.
+It is therefore not a substitute for the trap-backed fixture cleanup covered by `tests/fm-test-run.test.sh` and the remote fixture tests.
 
 ## Re-run
 
