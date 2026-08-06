@@ -380,16 +380,23 @@ make_project() {  # <dir>
   git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
 }
 
+IDLE_AGENT="$TMP_ROOT/presentation-idle-agent"
+cat > "$IDLE_AGENT" <<'SH'
+#!/usr/bin/env bash
+sleep 120
+SH
+chmod +x "$IDLE_AGENT"
+
 spawn_task() {  # <id> <home> <project>
   local id=$1 home=$2 project=$3
   FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'sleep 120'" --mode no-mistakes --yolo off --backend herdr
+    "$ROOT/bin/fm-spawn.sh" "$id" "$project" --unverified-adapter "$IDLE_AGENT" --mode no-mistakes --yolo off --backend herdr
 }
 
 spawn_secondmate_task() {
   local id=$1 home=$2
   FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$home" "sh -c 'sleep 120'" --secondmate --backend herdr
+    "$ROOT/bin/fm-spawn.sh" "$id" "$home" --unverified-adapter "$IDLE_AGENT" --secondmate --backend herdr
 }
 
 teardown_task() {  # <id> <home>

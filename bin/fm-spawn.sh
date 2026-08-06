@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness] [--unverified-adapter <executable> [--adapter-arg <literal>]...] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness] [--unverified-adapter <executable> [--adapter-arg <literal>]...] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness] [--unverified-adapter <executable> [--adapter-arg <literal>]...] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -18,6 +18,15 @@
 #   refused as a flag value.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
+#   --unverified-adapter <executable> is the local-only escape path for verifying
+#   a new adapter. The executable basename must end in -agent or -adapter, must
+#   not name Claude, and must be the adapter itself rather than an interpreter or
+#   command runner. Each argument is passed separately with a repeated
+#   --adapter-arg <literal>; literals use only letters, digits, and _./,:+%@=-.
+#   Shell text, quotes, whitespace-bearing arguments, substitutions, globs,
+#   aliases, inline code, and legacy positional launch-command strings are
+#   rejected with migration guidance. This is an argv contract, not a shell
+#   grammar, and Firstmate never rewrites legacy input.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
@@ -87,18 +96,16 @@
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
-#   overrides it for this spawn (either kind). A non-flag string containing
-#   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. A raw command must directly name a plain non-Claude executable;
-#   shell dispatchers, command composition, substitutions, and unprovable executable
-#   tokens are refused. Verified Claude launches use the canonical template only.
+#   overrides it for this spawn (either kind). A new adapter uses the structured
+#   --unverified-adapter/--adapter-arg boundary described above. Verified Claude
+#   launches use the canonical template only.
 #   pi-signed launches that exact executable name from PATH and refuses before
 #   endpoint creation when it is unavailable; it never falls back to pi.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
 #   harness from config/secondmate-harness. An explicit per-spawn --harness,
-#   positional harness arg, or raw launch command starts with clean model/effort
+#   positional harness arg, or structured unverified-adapter launch starts with clean model/effort
 #   defaults unless the caller also passes explicit --model/--effort flags. When
 #   the file governs the spawn, its model/effort tokens are re-resolved on every
 #   respawn exactly like the harness axis, and explicit --model/--effort flags
@@ -119,10 +126,12 @@
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
 #   source of truth; shared --scout/--harness/--model/--effort/--backend/--mode/--yolo
-#   applies to every pair. A ship batch therefore carries one delivery contract, and each
-#   pair still checks it against its own brief; a batch spanning modes is two invocations.
-#   If config/crew-dispatch.json exists, shared --harness is required for crewmate
-#   and scout batches. The loop lives here, in bash, so callers never hand-write a
+#   or structured unverified-adapter selection applies to every pair. A ship batch
+#   therefore carries one delivery contract, and each pair still checks it against
+#   its own brief; a batch spanning modes is two invocations.
+#   If config/crew-dispatch.json exists, a shared verified or structured
+#   unverified-adapter selection is required for crewmate and scout batches.
+#   The loop lives here, in bash, so callers never hand-write a
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
@@ -228,6 +237,8 @@ fm_refuse_if_gate_agent
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 KIND=ship
 HARNESS_ARG=
+UNVERIFIED_ADAPTER=
+UNVERIFIED_ADAPTER_ARGS=()
 MODEL=
 EFFORT=
 BACKEND_ARG=
@@ -235,6 +246,7 @@ MODE=
 YOLO=
 TRACEPARENT_ARG=
 HARNESS_SET=0
+UNVERIFIED_ADAPTER_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
@@ -245,11 +257,15 @@ POS=()
 want_value=
 for a in "$@"; do
   if [ -n "$want_value" ]; then
-    case "$a" in
-      --*) echo "error: --$want_value requires a value" >&2; exit 1 ;;
-    esac
+    if [ "$want_value" != adapter-arg ]; then
+      case "$a" in
+        --*) echo "error: --$want_value requires a value" >&2; exit 1 ;;
+      esac
+    fi
     case "$want_value" in
       harness) HARNESS_ARG=$a; HARNESS_SET=1 ;;
+      unverified-adapter) UNVERIFIED_ADAPTER=$a; UNVERIFIED_ADAPTER_SET=1 ;;
+      adapter-arg) UNVERIFIED_ADAPTER_ARGS+=("$a") ;;
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
@@ -266,6 +282,10 @@ for a in "$@"; do
     --secondmate) KIND=secondmate ;;
     --harness) want_value=harness ;;
     --harness=*) HARNESS_ARG=${a#--harness=}; HARNESS_SET=1 ;;
+    --unverified-adapter) want_value=unverified-adapter ;;
+    --unverified-adapter=*) UNVERIFIED_ADAPTER=${a#--unverified-adapter=}; UNVERIFIED_ADAPTER_SET=1 ;;
+    --adapter-arg) want_value=adapter-arg ;;
+    --adapter-arg=*) UNVERIFIED_ADAPTER_ARGS+=("${a#--adapter-arg=}") ;;
     --model) want_value=model ;;
     --model=*) MODEL=${a#--model=}; MODEL_SET=1 ;;
     --effort) want_value=effort ;;
@@ -283,6 +303,9 @@ for a in "$@"; do
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || { echo "error: --harness requires a non-empty value" >&2; exit 1; }
+[ "$UNVERIFIED_ADAPTER_SET" -eq 0 ] || [ -n "$UNVERIFIED_ADAPTER" ] || { echo "error: --unverified-adapter requires a non-empty value" >&2; exit 1; }
+[ "$HARNESS_SET" -eq 0 ] || [ "$UNVERIFIED_ADAPTER_SET" -eq 0 ] || { echo "error: --harness and --unverified-adapter are mutually exclusive" >&2; exit 1; }
+[ "${#UNVERIFIED_ADAPTER_ARGS[@]}" -eq 0 ] || [ "$UNVERIFIED_ADAPTER_SET" -eq 1 ] || { echo "error: --adapter-arg requires --unverified-adapter" >&2; exit 1; }
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
@@ -342,88 +365,67 @@ else
   }
 fi
 
-raw_launch_refuse() {
-  echo "error: refusing raw launch command whose executable is not provably a direct non-Claude adapter; select the canonical 'claude' harness to use --permission-mode auto" >&2
+unverified_adapter_refuse() {
+  echo "error: refusing unverified adapter launch; legacy shell launch strings are not accepted - use --unverified-adapter <name-ending-in--agent-or--adapter> with repeated --adapter-arg=<literal>, or select a canonical verified harness such as --harness claude" >&2
   return 1
 }
 
-raw_launch_preflight() {
-  local raw=$1 forbidden=--dangerously-skip-permissions normalized_raw normalized_word normalized word executable= base
-  local -a words
-  case "$raw" in
-    *$'\n'*|*$'\r'*|*';'*|*'&'*|*'|'*|*'`'*|*'$'*|*'('*|*')'*|*'{'*|*'}'*|*'<'*|*'>'*|*'\'*)
-      raw_launch_refuse
-      return 1
-      ;;
+unverified_adapter_preflight() {
+  local executable=$1 base arg
+  case "$executable" in
+    ''|*[!A-Za-z0-9_./+-]*|*claude*) unverified_adapter_refuse; return 1 ;;
   esac
-  normalized_raw=${raw//\'/}
-  normalized_raw=${normalized_raw//\"/}
-  case "$normalized_raw" in
-    *--dangerously-skip-permissions*)
-      raw_launch_refuse
-      return 1
-      ;;
-  esac
-  read -r -a words <<< "$raw"
-  for word in "${words[@]}"; do
-    normalized_word=${word//\'/}
-    normalized_word=${normalized_word//\"/}
-    # shellcheck disable=SC2053
-    if [[ "$forbidden" == $normalized_word ]]; then
-      raw_launch_refuse
-      return 1
-    fi
-  done
-  for word in "${words[@]}"; do
-    if [[ "$word" =~ ^[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9_./,:+%@-]+$ ]]; then
-      continue
-    fi
-    executable=$word
-    break
-  done
-  normalized=${executable//\'/}
-  normalized=${normalized//\"/}
-  case "$normalized" in
-    ''|*[!A-Za-z0-9_./+-]*|*claude*)
-      raw_launch_refuse
-      return 1
-      ;;
-  esac
-  base=${normalized##*/}
-  if fm_backend_is_recognized_shell "$base"; then
-    raw_launch_refuse
-    return 1
-  fi
+  base=${executable##*/}
   case "$base" in
-    claude|env|command|exec|builtin|eval|source|.|coproc|noglob|nocorrect|not|emulate|-|nohup|nice|ionice|chrt|setsid|stdbuf|timeout|time|sudo|doas|script|watch|strace|perf|flock|setpriv|prlimit|unshare|taskset|nsenter|numactl|setarch|linux32|linux64|chroot|runuser|su|sg|start-stop-daemon|systemd-run|npx|npm|xargs|find|busybox|toybox)
-      raw_launch_refuse
-      return 1
-      ;;
+    *-agent|*-adapter) ;;
+    *) unverified_adapter_refuse; return 1 ;;
   esac
-  RAW_LAUNCH_HARNESS=$base
+  UNVERIFIED_ADAPTER_LAUNCH=$executable
+  for arg in "${UNVERIFIED_ADAPTER_ARGS[@]}"; do
+    case "$arg" in
+      ''|*[!A-Za-z0-9_./,:+%@=-]*|--dangerously-skip-permissions)
+        unverified_adapter_refuse
+        return 1
+        ;;
+    esac
+    UNVERIFIED_ADAPTER_LAUNCH+=" $arg"
+  done
+  UNVERIFIED_ADAPTER_HARNESS=$base
 }
 
-RAW_LAUNCH_HARNESS=
-RAW_LAUNCH_CANDIDATE=
+UNVERIFIED_ADAPTER_HARNESS=
+UNVERIFIED_ADAPTER_LAUNCH=
+if [ "$UNVERIFIED_ADAPTER_SET" -eq 1 ]; then
+  unverified_adapter_preflight "$UNVERIFIED_ADAPTER" || exit 1
+fi
+LEGACY_RAW_LAUNCH_CANDIDATE=
 if [ -n "$HARNESS_ARG" ]; then
-  RAW_LAUNCH_CANDIDATE=$HARNESS_ARG
+  LEGACY_RAW_LAUNCH_CANDIDATE=$HARNESS_ARG
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
     *' '*)
       if [ "${#POS[@]}" -gt 2 ] || [ -d "${POS[1]}" ]; then
-        RAW_LAUNCH_CANDIDATE=${POS[2]:-}
+        LEGACY_RAW_LAUNCH_CANDIDATE=${POS[2]:-}
       else
-        RAW_LAUNCH_CANDIDATE=${POS[1]}
+        LEGACY_RAW_LAUNCH_CANDIDATE=${POS[1]}
       fi
       ;;
-    *) RAW_LAUNCH_CANDIDATE=${POS[2]:-} ;;
+    *) LEGACY_RAW_LAUNCH_CANDIDATE=${POS[2]:-} ;;
   esac
 else
-  RAW_LAUNCH_CANDIDATE=${POS[2]:-}
+  LEGACY_RAW_LAUNCH_CANDIDATE=${POS[2]:-}
 fi
-case "$RAW_LAUNCH_CANDIDATE" in
-  *' '*) raw_launch_preflight "$RAW_LAUNCH_CANDIDATE" || exit 1 ;;
+case "$LEGACY_RAW_LAUNCH_CANDIDATE" in
+  *[[:space:]]*) unverified_adapter_refuse; exit 1 ;;
 esac
+idpart=${POS[0]:-}
+idpart=${idpart%%=*}
+if [ "$UNVERIFIED_ADAPTER_SET" -eq 1 ] && [ -n "$LEGACY_RAW_LAUNCH_CANDIDATE" ]; then
+  if [ "${#POS[@]}" -eq 0 ] || [ "${POS[0]}" = "$idpart" ] || case "$idpart" in */*) true ;; *) false ;; esac; then
+    echo "error: --unverified-adapter cannot be combined with a positional harness or legacy launch string" >&2
+    exit 1
+  fi
+fi
 
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
@@ -450,6 +452,12 @@ spawn_remote_secondmate() {
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     return 3
   fi
+  if [ "$UNVERIFIED_ADAPTER_SET" -eq 1 ]; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate spawn requires a verified harness adapter; --unverified-adapter is local-only" >&2
+    return 1
+  fi
   host=$(secondmate_registry_field "$DATA/secondmates.md" "$id" host)
   root=$(secondmate_registry_field "$DATA/secondmates.md" "$id" root)
   home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home)
@@ -472,7 +480,7 @@ spawn_remote_secondmate() {
     *)
       fm_lock_release "$registry_lock" || true
       fm_lock_release "$SPAWN_TASK_LOCK" || true
-      echo "error: remote secondmate spawn requires a verified harness adapter, not a raw launch command: $harness" >&2
+      echo "error: remote secondmate spawn requires a verified harness adapter: $harness" >&2
       return 1
       ;;
   esac
@@ -826,16 +834,20 @@ spawn_herdr_presentation_order_lock_release() {
 # the single path verbatim. A failed pair is reported and skipped; the rest still launch;
 # exit is non-zero if any pair failed. Single-task invocations never carry an '=' in arg
 # one (task ids are bare slugs), so they fall straight through to the logic below.
-idpart=${POS[0]:-}
-idpart=${idpart%%=*}
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
-  if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
-    echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
+  if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ "$UNVERIFIED_ADAPTER_SET" -eq 0 ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
+    echo "error: config/crew-dispatch.json is active - pass an explicit harness or structured unverified adapter resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
   fi
   rc=0
   shared_args=()
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
+  if [ "$UNVERIFIED_ADAPTER_SET" -eq 1 ]; then
+    shared_args+=(--unverified-adapter "$UNVERIFIED_ADAPTER")
+    for adapter_arg in "${UNVERIFIED_ADAPTER_ARGS[@]}"; do
+      shared_args+=(--adapter-arg "$adapter_arg")
+    done
+  fi
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
@@ -969,12 +981,16 @@ launch_template() {
   esac
 }
 
-case "$ARG3" in
-  *' '*)  # raw launch command (unverified-adapter escape hatch)
-    LAUNCH=$ARG3
-    HARNESS=$RAW_LAUNCH_HARNESS
-    ;;
-  '')
+if [ "$UNVERIFIED_ADAPTER_SET" -eq 1 ]; then
+  LAUNCH=$UNVERIFIED_ADAPTER_LAUNCH
+  HARNESS=$UNVERIFIED_ADAPTER_HARNESS
+else
+  case "$ARG3" in
+    *[[:space:]]*)
+      unverified_adapter_refuse
+      exit 1
+      ;;
+    '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
     # secondmate harness (config/secondmate-harness -> config/crew-harness -> own);
     # every other kind uses the crew harness only when no dispatch profile file is
@@ -988,19 +1004,20 @@ case "$ARG3" in
       harness_src='config/secondmate-harness (falling back to config/crew-harness)'
     else
       if [ -f "$CONFIG/crew-dispatch.json" ]; then
-        echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
+        echo "error: config/crew-dispatch.json is active - pass an explicit harness or structured unverified adapter resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
         exit 1
       fi
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
       harness_src='config/crew-harness'
     fi
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); use --unverified-adapter with literal --adapter-arg values to verify a new adapter" >&2; exit 1; }
     ;;
-  *)
+    *)
     HARNESS=$ARG3
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; use --unverified-adapter with literal --adapter-arg values to verify a new adapter" >&2; exit 1; }
     ;;
-esac
+  esac
+fi
 
 if [ "$HARNESS" = claude ]; then
   case "$LAUNCH" in
@@ -1036,11 +1053,11 @@ fi
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
-# --secondmate spawn and no explicit per-spawn harness/raw launch was supplied, so
+# --secondmate spawn and no explicit per-spawn harness or unverified adapter was supplied, so
 # the harness itself came from the secondmate config fallback chain. Resolving
 # here on every spawn makes the pin durable across respawns. Precedence: explicit
 # --model/--effort flags still win over the file's tokens.
-if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
+if [ "$KIND" = secondmate ] && [ -z "$ARG3" ] && [ "$UNVERIFIED_ADAPTER_SET" -eq 0 ]; then
   if [ "$MODEL_SET" -eq 0 ]; then
     SM_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model)
     [ -z "$SM_MODEL" ] || MODEL=$SM_MODEL

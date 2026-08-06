@@ -306,7 +306,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_ship() {
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "ship spawn without explicit harness should fail when dispatch profiles are active"
-  assert_contains "$out" "config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules" \
+  assert_contains "$out" "config/crew-dispatch.json is active - pass an explicit harness or structured unverified adapter resolved from the dispatch rules" \
     "spawn did not explain the dispatch-profile backstop"
   assert_absent "$HOME_DIR/state/$id.meta" "ship refusal should happen before meta is written"
   pass "active crew-dispatch profile requires an explicit harness for ship spawns"
@@ -322,7 +322,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout() {
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
   status=$?
   expect_code 1 "$status" "scout spawn without explicit harness should fail when dispatch profiles are active"
-  assert_contains "$out" "config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules" \
+  assert_contains "$out" "config/crew-dispatch.json is active - pass an explicit harness or structured unverified adapter resolved from the dispatch rules" \
     "scout refusal did not explain the dispatch-profile backstop"
   assert_absent "$HOME_DIR/state/$id.meta" "scout refusal should happen before meta is written"
   pass "active crew-dispatch profile requires an explicit harness for scout spawns"
@@ -363,7 +363,7 @@ test_active_dispatch_profile_allows_positional_harness() {
   pass "active crew-dispatch profile allows the legacy positional harness form"
 }
 
-test_active_dispatch_profile_allows_raw_launch_command() {
+test_active_dispatch_profile_allows_structured_unverified_adapter() {
   local rec id out status launch
   id=profile-raw-z15
   rec=$(make_spawn_case profile-raw claude "$id")
@@ -371,22 +371,24 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   enable_dispatch_profile "$HOME_DIR"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "custom-agent --flag")
+    "$id" "$PROJ_DIR" --unverified-adapter custom-agent --adapter-arg=--flag)
   status=$?
-  expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
-  assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
+  expect_code 0 "$status" "structured unverified adapter should satisfy active dispatch-profile requirement"
+  assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report unverified adapter identity"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
-  pass "active crew-dispatch profile allows the raw launch-command escape hatch"
+  [ "$launch" = "custom-agent --flag" ] || fail "structured unverified adapter launch changed"$'\n'"actual: $launch"
+  pass "active crew-dispatch profile allows the structured unverified-adapter escape path"
 }
 
 assert_unsafe_claude_raw_refused() {
   local out=$1 status=$2 home=$3 launchlog=$4 id=$5 context=$6
   expect_code 1 "$status" "$context should reject a non-canonical Claude launch"
-  assert_contains "$out" "refusing raw launch command whose executable is not provably a direct non-Claude adapter" \
-    "$context refusal did not identify the unprovable raw launch"
-  assert_contains "$out" "select the canonical 'claude' harness" \
+  assert_contains "$out" "refusing unverified adapter launch" \
+    "$context refusal did not identify the invalid unverified-adapter launch"
+  assert_contains "$out" "--unverified-adapter <name-ending-in--agent-or--adapter>" \
+    "$context refusal did not provide migration guidance"
+  assert_contains "$out" "--harness claude" \
     "$context refusal did not direct Claude launches to the canonical harness"
   assert_absent "$home/state/$id.meta" "$context refusal should happen before meta is written"
   assert_absent "$home/state/.spawn-$id.lock" "$context refusal should happen before task-lock acquisition"
@@ -497,8 +499,8 @@ test_shell_obfuscated_claude_bypass_is_refused() {
   pass "shell-obfuscated Claude bypass is refused before launch"
 }
 
-test_quoted_non_claude_raw_launch_is_unchanged() {
-  local rec id raw out status launch
+test_quoted_non_claude_legacy_launch_is_refused() {
+  local rec id raw out status
   id=profile-raw-custom-quoted-z15h
   raw="custom-agent --prompt 'harmless review'"
   rec=$(make_spawn_case profile-raw-custom-quoted claude "$id")
@@ -507,12 +509,9 @@ test_quoted_non_claude_raw_launch_is_unchanged() {
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" "$raw")
   status=$?
-  expect_code 0 "$status" "quoted non-Claude raw launch should succeed"
-  assert_contains "$out" "spawned $id harness=custom-agent" \
-    "quoted non-Claude raw launch lost its direct adapter identity"
-  launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "$raw" ] || fail "quoted non-Claude raw launch changed"$'\n'"actual: $launch"
-  pass "quoted non-Claude raw launch remains unchanged"
+  assert_unsafe_claude_raw_refused "$out" "$status" "$HOME_DIR" "$LAUNCH_LOG" "$id" \
+    "quoted legacy launch command"
+  pass "quoted legacy launch command is refused with migration guidance"
 }
 
 test_source_dispatcher_is_refused() {
@@ -653,22 +652,64 @@ test_forbidden_permission_glob_is_refused() {
   pass "glob-synthesized forbidden permission flag is refused before launch"
 }
 
-test_non_claude_raw_arguments_may_mention_claude() {
-  local rec id raw out status launch
+test_unverified_adapter_boundary_rejects_unsafe_forms() {
+  local rec id out status
+
+  id=profile-unverified-interpreter-z15p
+  rec=$(make_spawn_case profile-unverified-interpreter claude "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --unverified-adapter perl --adapter-arg=-e --adapter-arg=print)
+  status=$?
+  assert_unsafe_claude_raw_refused "$out" "$status" "$HOME_DIR" "$LAUNCH_LOG" "$id" \
+    "interpreter unverified adapter"
+
+  id=profile-unverified-inline-z15q
+  rec=$(make_spawn_case profile-unverified-inline claude "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --unverified-adapter custom-agent --adapter-arg='exec("claude")')
+  status=$?
+  assert_unsafe_claude_raw_refused "$out" "$status" "$HOME_DIR" "$LAUNCH_LOG" "$id" \
+    "inline-code unverified adapter argument"
+
+  id=profile-unverified-glob-z15r
+  rec=$(make_spawn_case profile-unverified-glob claude "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --unverified-adapter custom-agent --adapter-arg='src/*.sh')
+  status=$?
+  assert_unsafe_claude_raw_refused "$out" "$status" "$HOME_DIR" "$LAUNCH_LOG" "$id" \
+    "glob unverified adapter argument"
+
+  id=profile-unverified-forbidden-z15s
+  rec=$(make_spawn_case profile-unverified-forbidden claude "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --unverified-adapter custom-agent --adapter-arg=--dangerously-skip-permissions)
+  status=$?
+  assert_unsafe_claude_raw_refused "$out" "$status" "$HOME_DIR" "$LAUNCH_LOG" "$id" \
+    "forbidden permission unverified adapter argument"
+  pass "unverified adapter boundary rejects interpreters, inline code, globs, and forbidden permissions"
+}
+
+test_unverified_adapter_preserves_literal_non_claude_arguments() {
+  local rec id expected out status launch
   id=profile-raw-custom-claude-model-z15k
-  raw="custom-agent --include 'src/*.sh' --model anthropic/claude-sonnet-4-5"
+  expected="custom-agent --model anthropic/claude-sonnet-4-5"
   rec=$(make_spawn_case profile-raw-custom-claude-model claude "$id")
   read_case_record "$rec"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "$raw")
+    "$id" "$PROJ_DIR" --unverified-adapter custom-agent \
+    --adapter-arg=--model --adapter-arg=anthropic/claude-sonnet-4-5)
   status=$?
-  expect_code 0 "$status" "non-Claude raw launch with safe glob and Claude model arguments should succeed"
+  expect_code 0 "$status" "direct unverified adapter with literal Claude model argument should succeed"
   assert_contains "$out" "spawned $id harness=custom-agent" \
-    "non-Claude raw launch with safe glob and Claude model arguments lost its adapter identity"
+    "direct unverified adapter lost its identity"
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "$raw" ] || fail "non-Claude raw launch with safe glob and Claude model arguments changed"$'\n'"actual: $launch"
-  pass "non-Claude raw launch preserves safe glob and Claude model arguments"
+  [ "$launch" = "$expected" ] || fail "direct unverified adapter literal argv changed"$'\n'"actual: $launch"
+  pass "direct unverified adapter preserves literal non-Claude arguments"
 }
 
 test_claude_threads_model_and_effort() {
@@ -1017,7 +1058,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
-test_active_dispatch_profile_allows_raw_launch_command
+test_active_dispatch_profile_allows_structured_unverified_adapter
 test_claude_raw_bypass_refused_for_ship_before_launch
 test_claude_raw_bypass_refused_for_scout_before_launch
 test_claude_raw_bypass_refused_for_secondmate_before_launch
@@ -1025,14 +1066,15 @@ test_raw_claude_auto_mode_requires_canonical_harness
 test_quoted_concatenation_claude_bypass_is_refused
 test_env_wrapped_claude_bypass_is_refused
 test_shell_obfuscated_claude_bypass_is_refused
-test_quoted_non_claude_raw_launch_is_unchanged
+test_quoted_non_claude_legacy_launch_is_refused
 test_source_dispatcher_is_refused
 test_posix_dot_dispatcher_is_refused
 test_coproc_dispatcher_is_refused
 test_remaining_dispatchers_are_refused
 test_forbidden_permission_flag_is_refused_across_raw_commands
 test_forbidden_permission_glob_is_refused
-test_non_claude_raw_arguments_may_mention_claude
+test_unverified_adapter_boundary_rejects_unsafe_forms
+test_unverified_adapter_preserves_literal_non_claude_arguments
 test_claude_threads_model_and_effort
 test_claude_scout_uses_auto_permissions_and_delivers_profiled_prompt
 test_codex_threads_model_and_effort

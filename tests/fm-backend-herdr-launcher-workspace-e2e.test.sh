@@ -119,6 +119,12 @@ journal_field() {  # <presentation-journal> <key>
 # Composes exactly the Herdr identity Herdr itself injects into a pane's
 # processes. An empty launcher pane means "this firstmate is not running inside
 # Herdr at all".
+PROBE_AGENT="$TMP_ROOT/launcher-probe-agent"
+cat > "$PROBE_AGENT" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$1"
+SH
+chmod +x "$PROBE_AGENT"
 SPAWN_OUT=; SPAWN_ERR=; SPAWN_RC=
 spawn_from_launcher() {
   local pane=$1 home=$2 id=$3 proj=$4
@@ -128,12 +134,14 @@ spawn_from_launcher() {
     env HERDR_ENV=1 HERDR_PANE_ID="$pane" HERDR_SESSION="$HERDR_LAB_SESSION" \
       HERDR_SOCKET_PATH="$LAB_SOCKET" \
       FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-      "$ROOT/bin/fm-spawn.sh" "$id" "$proj" "sh -c 'echo launcher-ws-ok'" --backend herdr "$@" \
+      "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --unverified-adapter "$PROBE_AGENT" \
+      --adapter-arg=launcher-ws-ok --backend herdr "$@" \
       >"$SPAWN_OUT" 2>"$SPAWN_ERR"
   else
     env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SOCKET_PATH HERDR_SESSION="$HERDR_LAB_SESSION" \
       FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-      "$ROOT/bin/fm-spawn.sh" "$id" "$proj" "sh -c 'echo launcher-ws-ok'" --backend herdr "$@" \
+      "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --unverified-adapter "$PROBE_AGENT" \
+      --adapter-arg=launcher-ws-ok --backend herdr "$@" \
       >"$SPAWN_OUT" 2>"$SPAWN_ERR"
   fi
   SPAWN_RC=$?
@@ -279,7 +287,7 @@ cat > "$TMP_ROOT/spawn-in-pane.sh" <<SPAWN
 #!/usr/bin/env bash
 set -u
 FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \\
-  "$ROOT/bin/fm-spawn.sh" dupC "$PROJ" "sh -c 'echo launcher-ws-ok'" --mode no-mistakes --yolo off --backend herdr \\
+  "$ROOT/bin/fm-spawn.sh" dupC "$PROJ" --unverified-adapter "$PROBE_AGENT" --adapter-arg=launcher-ws-ok --mode no-mistakes --yolo off --backend herdr \\
   > "$TMP_ROOT/dupC.out" 2> "$TMP_ROOT/dupC.err"
 echo \$? > "$TMP_ROOT/dupC.rc"
 SPAWN
