@@ -36,7 +36,9 @@ $Rows = @()
 $Connections = @(Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object { [int]$_.LocalPort -eq $Port } | Sort-Object LocalAddress, OwningProcess)
 foreach ($Connection in $Connections) {
   $Process = $null
+  $NativeProcess = $null
   try { $Process = Get-CimInstance Win32_Process -Filter "ProcessId = $($Connection.OwningProcess)" -ErrorAction Stop } catch {}
+  try { $NativeProcess = Get-Process -Id $Connection.OwningProcess -ErrorAction Stop } catch {}
   $Rows += [pscustomobject]@{
     address = [string]$Connection.LocalAddress
     port = [int]$Connection.LocalPort
@@ -44,7 +46,7 @@ foreach ($Connection in $Connections) {
     process = if ($null -ne $Process) { [string]$Process.Name } else { $null }
     executable = if ($null -ne $Process) { [string]$Process.ExecutablePath } else { $null }
     command = if ($null -ne $Process) { [string]$Process.CommandLine } else { $null }
-    creation = if ($null -ne $Process -and $null -ne $Process.CreationDate) { ([datetime]$Process.CreationDate).ToUniversalTime().Ticks } else { $null }
+    creation = if ($null -ne $NativeProcess) { ([datetime]$NativeProcess.StartTime).ToUniversalTime().Ticks } else { $null }
   }
 }
 ConvertTo-Json -InputObject @($Rows) -Compress -Depth 3
@@ -66,9 +68,10 @@ foreach ($Connection in $Connections) {
 $Process = Get-CimInstance Win32_Process -Filter "ProcessId = $PidToStop" -ErrorAction Stop
 if ($null -eq $Process -or [string]$Process.Name -ieq 'wslrelay.exe') { throw 'wslrelay.exe is never a termination target' }
 if ([string]$Process.Name -ine 'node.exe' -or [IO.Path]::GetFileName([string]$Process.ExecutablePath) -ine 'node.exe') { throw 'target is not native Windows node.exe' }
+$BoundProcess = Get-Process -Id $PidToStop -ErrorAction Stop
 $Command = [string]$Process.CommandLine
 if ([string]::IsNullOrWhiteSpace($Command)) { throw 'target command is unavailable' }
-$Creation = ([datetime]$Process.CreationDate).ToUniversalTime().Ticks
+$Creation = ([datetime]$BoundProcess.StartTime).ToUniversalTime().Ticks
 if ([string]$Creation -ne $ExpectedCreation) { throw 'target process identity changed' }
 $Bytes = [Text.Encoding]::UTF8.GetBytes($Command)
 $Hash = ([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($Bytes))).Replace('-', '').ToLowerInvariant()
@@ -78,11 +81,11 @@ $NormalizedScript = $ExpectedAstroScript.Replace('\', '/')
 $NodePattern = '(?i)^\s*(?:"[^"]*/node\.exe"|(?:[^"\s]+/)?node\.exe)\s+'
 $AstroDevPattern = $NodePattern + '"?' + [regex]::Escape($NormalizedScript) + '"?\s+dev(?:\s|$)'
 if ($NormalizedCommand -notmatch $AstroDevPattern) { throw 'target is not the verified Astro development launcher' }
-if ($Command -match '(?i)(^|\s)(preview|build)(\s|$)' -or $Command -match '(?i)(node_env\s*=\s*production|--mode(?:=|\s+)production)') { throw 'target looks production-like' }
-$BoundProcess = Get-Process -Id $PidToStop -ErrorAction Stop
-$BoundCreation = ([datetime]$BoundProcess.StartTime).ToUniversalTime().Ticks
-if ([string]$BoundCreation -ne $ExpectedCreation) { throw 'target process identity changed' }
-Stop-Process -InputObject $BoundProcess -ErrorAction Stop
+if ($Command -match '(?i)(^|\s)(preview|build)(\s|$)' -or $Command -match '(?i)(node_env\s*=\s*[''"]?production[''"]?(?:\s|$)|--mode(?:=|\s+)[''"]?production[''"]?(?:\s|$))') { throw 'target looks production-like' }
+$FinalProcess = Get-Process -Id $PidToStop -ErrorAction Stop
+$FinalCreation = ([datetime]$FinalProcess.StartTime).ToUniversalTime().Ticks
+if ([string]$FinalCreation -ne $ExpectedCreation) { throw 'target process identity changed' }
+Stop-Process -InputObject $FinalProcess -ErrorAction Stop
 for ($i = 0; $i -lt 100; $i++) {
   if ($null -eq (Get-Process -Id $PidToStop -ErrorAction SilentlyContinue)) { 'terminated'; exit 0 }
   Start-Sleep -Milliseconds 100
@@ -97,6 +100,7 @@ $Url = [string]$args[0]
 Add-Type -AssemblyName System.Net.Http
 $Handler = [System.Net.Http.HttpClientHandler]::new()
 $Handler.UseProxy = $false
+$Handler.AllowAutoRedirect = $false
 $Client = [System.Net.Http.HttpClient]::new($Handler)
 $Client.MaxResponseContentBufferSize = 8388609
 $Client.Timeout = [TimeSpan]::FromSeconds(10)
@@ -436,10 +440,14 @@ def classify_windows(process: str, command: str, executable: str, checkout: str 
     return "unknown-node"
 
 
-def classify_wsl(process: str, command: str, checkout: str = "unknown") -> str:
+def classify_wsl(process: str, command: str, executable: str, checkout: str = "unknown") -> str:
     if production_like_command(command):
         return "production-like"
-    if Path(process).name.lower() in {"node", "nodejs"} and astro_dev_script(command, "", checkout):
+    if (
+        Path(process).name.casefold() in {"node", "nodejs"}
+        and Path(executable).name.casefold() in {"node", "nodejs"}
+        and astro_dev_script(command, "", checkout)
+    ):
         return "wsl-node-astro-dev"
     return "unknown-wsl-process"
 
@@ -573,6 +581,15 @@ def proc_root() -> Path:
     return Path("/proc")
 
 
+def proc_start_identity(pid_root: Path) -> str:
+    raw = (pid_root / "stat").read_text(encoding="utf-8", errors="replace").strip()
+    closing = raw.rfind(")")
+    fields = raw[closing + 1 :].split() if closing >= 0 else []
+    if len(fields) <= 19 or not fields[19].isdigit():
+        raise OSError("process start identity is unavailable")
+    return f"proc-start:{fields[19]}"
+
+
 def wsl_listeners(port: int, state: Path) -> list[Listener]:
     try:
         output = command_output(["ss", "-H", "-ltnp", f"sport = :{port}"])
@@ -595,25 +612,29 @@ def wsl_listeners(port: int, state: Path) -> list[Listener]:
         try:
             command_raw = (pid_root / "cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace").strip()
             process = (pid_root / "comm").read_text(encoding="utf-8", errors="replace").strip() or ss_process
+            executable = str((pid_root / "exe").resolve(strict=True))
+            creation = proc_start_identity(pid_root)
             cwd = (pid_root / "cwd").resolve(strict=True)
             info = git_info(cwd)
         except OSError:
             command_raw = ""
             process = ss_process or "unknown"
+            executable = ""
+            creation = "unknown"
             info = GitInfo()
         listeners.append(
             Listener(
                 kernel="wsl",
                 address=address,
                 pid=pid,
-                creation="unknown",
+                creation=creation,
                 process=process,
                 command=redact_command(command_raw),
                 command_raw=command_raw,
-                executable_raw="",
+                executable_raw=executable,
                 git=info,
                 tasks=task_associations(state, info.checkout, pid),
-                classification=classify_wsl(process, command_raw, info.checkout),
+                classification=classify_wsl(process, command_raw, executable, info.checkout),
             )
         )
     return listeners
@@ -670,7 +691,11 @@ def expected_checkout_verdict(expected: GitInfo, expected_sha: str) -> str:
 def production_like_command(command: str) -> bool:
     if re.search(r"(?:^|\s)(?:preview|build)(?:\s|$)", command, re.IGNORECASE):
         return True
-    if re.search(r"node_env\s*=\s*production|--mode(?:=|\s+)production", command, re.IGNORECASE):
+    if re.search(
+        r"node_env\s*=\s*['\"]?production['\"]?(?:\s|$)|--mode(?:=|\s+)['\"]?production['\"]?(?:\s|$)",
+        command,
+        re.IGNORECASE,
+    ):
         return True
     tokens = command_tokens(command)
     lowered = [token.casefold() for token in tokens]
@@ -701,6 +726,10 @@ def same_listener_identity(before: list[Listener], after: list[Listener]) -> boo
         )
 
     return identity(before) == identity(after)
+
+
+def same_inspection_identity(before: Inspection, after: Inspection) -> bool:
+    return same_listener_identity(before.windows, after.windows) and same_listener_identity(before.wsl, after.wsl)
 
 
 def listener_owner_identity(listener: Listener) -> tuple[object, ...]:
@@ -736,6 +765,8 @@ def canonical_wslrelay_identity(process: str, executable: str) -> bool:
 def expected_wsl_listener_identity(listener: Listener, expected: GitInfo, expected_sha: str) -> bool:
     return (
         listener.classification == "wsl-node-astro-dev"
+        and listener.creation != "unknown"
+        and Path(listener.executable_raw).name.casefold() in {"node", "nodejs"}
         and listener.git.checkout == expected.checkout
         and listener.git.branch == expected.default_branch
         and listener.git.sha == expected_sha
@@ -886,7 +917,9 @@ def launcher_command(project: Path, port: int) -> list[str]:
         raise SafeRefusal("project dev launcher is not proven to be Astro dev") from exc
     if not isinstance(script, str) or re.search(r"[\x00-\x1f\x7f;&|<>$`\\]", script) or production_like_command(script):
         raise SafeRefusal("project dev launcher is not proven to be Astro dev")
-    command_tokens = tokens[1:] if tokens[:1] == ["npx"] else tokens
+    if tokens and Path(tokens[0]).name.casefold() in {"npx", "npx.cmd"}:
+        raise SafeRefusal("project dev launcher is not proven to be Astro dev")
+    command_tokens = tokens
     is_astro_dev = (
         len(command_tokens) >= 2
         and Path(command_tokens[0]).name in {"astro", "astro.js", "astro.mjs"}
@@ -968,7 +1001,11 @@ def wsl_route_fingerprint(url: str) -> dict[str, object]:
             return json.loads(Path(test_fixture).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise SafeRefusal("WSL route fingerprint fixture failed") from exc
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+            return None
+
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     request = urllib.request.Request(
         url,
         headers={
@@ -1078,12 +1115,13 @@ def verify(project: Path, port: int, expected_sha: str, expected: GitInfo, state
         return False
     fingerprints_match = (
         wsl_fingerprint == windows_fingerprint
-        and 200 <= int(wsl_fingerprint["status"]) < 400
+        and 200 <= int(wsl_fingerprint["status"]) < 300
     )
     final = inspect_system(port, state)
     final_pair_ok, final_reason = verified_pair(final, expected, expected_sha)
+    listeners_stable = same_inspection_identity(inspection, final)
     _, final_checkout_verdict = revalidated_expected_checkout(project, expected, expected_sha)
-    verification_ok = pair_ok and final_pair_ok and fingerprints_match and final_checkout_verdict == "ready"
+    verification_ok = pair_ok and final_pair_ok and listeners_stable and fingerprints_match and final_checkout_verdict == "ready"
     if render:
         render_inspection("verify", project, port, expected_sha, expected, final)
         emit("route", origin_kernel="wsl", **wsl_fingerprint)
@@ -1094,7 +1132,7 @@ def verify(project: Path, port: int, expected_sha: str, expected: GitInfo, state
             reason=(
                 "pair-and-route-fingerprints-match"
                 if verification_ok
-                else (final_checkout_verdict.removeprefix("refuse:") if final_checkout_verdict != "ready" else (final_reason if not final_pair_ok else (reason if not pair_ok else "route-fingerprint-mismatch")))
+                else (final_checkout_verdict.removeprefix("refuse:") if final_checkout_verdict != "ready" else (final_reason if not final_pair_ok else ("listener-identity-changed" if not listeners_stable else (reason if not pair_ok else "route-fingerprint-mismatch"))))
             ),
         )
     return verification_ok
@@ -1102,7 +1140,7 @@ def verify(project: Path, port: int, expected_sha: str, expected: GitInfo, state
 
 def termination_boundary_listener(
     project: Path,
-    listener: Listener,
+    inspection: Inspection,
     port: int,
     expected: GitInfo,
     expected_sha: str,
@@ -1115,13 +1153,13 @@ def termination_boundary_listener(
     if recovery_verdict(boundary, current, expected_sha) != "eligible":
         raise SafeRefusal("pid-or-command-reresolution-changed")
     boundary_windows = consistent_listener_owner(boundary.windows)
-    if boundary_windows is None or any(listener_owner_identity(item) != listener_owner_identity(listener) for item in boundary_windows):
+    if boundary_windows is None or not same_inspection_identity(inspection, boundary):
         raise SafeRefusal("pid-or-command-reresolution-changed")
     return boundary_windows[0]
 
 
-def terminate_exact(project: Path, listener: Listener, port: int, expected: GitInfo, expected_sha: str, state: Path) -> None:
-    listener = termination_boundary_listener(project, listener, port, expected, expected_sha, state)
+def terminate_exact(project: Path, inspection: Inspection, port: int, expected: GitInfo, expected_sha: str, state: Path) -> None:
+    listener = termination_boundary_listener(project, inspection, port, expected, expected_sha, state)
     if listener.classification != "native-windows-node-astro-dev" or Path(listener.process).name.lower() != "node.exe":
         raise SafeRefusal("exact PID target is no longer a proven native Windows Astro dev server")
     if Path(listener.process).name.lower() == "wslrelay.exe":
@@ -1161,12 +1199,12 @@ def recover_locked(project: Path, port: int, expected_sha: str, expected: GitInf
         return False
     immediate = inspect_system(port, state)
     immediate_verdict = recovery_verdict(immediate, expected, expected_sha)
-    if immediate_verdict != "eligible" or not same_listener_identity(before.windows, immediate.windows):
+    if immediate_verdict != "eligible" or not same_inspection_identity(before, immediate):
         emit("recovery-result", verdict="refuse:pid-or-command-reresolution-changed", mutated="no")
         return False
     mutation = inspect_system(port, state)
     mutation_verdict = recovery_verdict(mutation, expected, expected_sha)
-    if mutation_verdict != "eligible" or not same_listener_identity(immediate.windows, mutation.windows):
+    if mutation_verdict != "eligible" or not same_inspection_identity(immediate, mutation):
         emit("recovery-result", verdict="refuse:pid-or-command-reresolution-changed", mutated="no")
         return False
     evidence_lines = [
@@ -1184,7 +1222,7 @@ def recover_locked(project: Path, port: int, expected_sha: str, expected: GitInf
         emit("recovery-result", verdict="refuse:private-evidence-write-failed", mutated="no")
         return False
     try:
-        terminate_exact(project, mutation.windows[0], port, expected, expected_sha, state)
+        terminate_exact(project, mutation, port, expected, expected_sha, state)
     except SafeRefusal as exc:
         emit(
             "recovery-result",
@@ -1262,9 +1300,10 @@ def parser() -> argparse.ArgumentParser:
   kernel, address, PID, process, redacted command, checkout, branch, SHA, dirty
   state, normalized Git source, task association, classification, and recovery
   verdict. It reads Windows listeners and process identity through fixed
-  non-interactive PowerShell, WSL listeners through ss and /proc, and task
-  associations from this Firstmate home's state/*.meta. It never reads a
-  process environment, credentials, production data, or hosted data.
+  non-interactive PowerShell, WSL listeners through ss plus /proc executable and
+  start identity, and task associations from this Firstmate home's state/*.meta.
+  It never reads a process environment, credentials, production data, or hosted
+  data.
 
   recover is deliberately narrower than inspect. It may stop exactly one PID
   only after complete observations, including a fresh mutation-boundary
@@ -1277,10 +1316,10 @@ def parser() -> argparse.ArgumentParser:
   PID for either kernel; every existing WSL binding has one consistent task-free
   owner at the requested checkout, repository default branch, source, and SHA;
   and the requested replacement is clean, on that branch, at expected-sha.
-  Unknown commands, changed PIDs or commands, distinct Windows or WSL owners,
-  unrelated sources, task records, missing identity, Windows inspection failure,
-  canonical Windows source, production-like commands, and every wslrelay.exe
-  owner refuse recovery.
+  Unknown commands, changed PIDs, process starts, or commands, distinct Windows
+  or WSL owners, unrelated sources, task records, missing identity, Windows
+  inspection failure, canonical Windows source, production-like commands, and
+  every wslrelay.exe owner refuse recovery.
   Recovery never kills by process name or port and never targets wslrelay.exe.
 
   Immediately before mutation, recover re-resolves listener, PID, command,
@@ -1294,15 +1333,16 @@ def parser() -> argparse.ArgumentParser:
   exact Astro script path followed by `dev`. After the exact PID exits, it
   re-resolves the clean expected checkout and runs only that project's package.json
   `scripts.dev` when that script is proven to be Astro, using `npm run dev --
-  --host 0.0.0.0 --port <port>`; an already-running expected WSL server is reused
-  rather than duplicated.
+  --host 0.0.0.0 --port <port>`; installer-capable npx scripts refuse recovery,
+  and an already-running expected WSL server is reused rather than duplicated.
 
   verify sends the same bounded browser-like request to http://localhost:<port>/
-  from WSL and native Windows, compares status/body-length/SHA-256 fingerprints,
-  then repeats the listener-pair inspection. It passes only when Windows reports
-  wslrelay.exe at C:\\Windows\\System32\\wslrelay.exe, WSL reports one consistent,
-  task-free clean expected Astro owner on the repository default branch, and both
-  route fingerprints match the post-route pair. A nonzero exit means
+  from WSL and native Windows without following redirects, compares successful
+  status/body-length/SHA-256 fingerprints, then repeats the listener-pair
+  inspection. It passes only when Windows reports wslrelay.exe at
+  C:\\Windows\\System32\\wslrelay.exe, WSL reports one consistent, task-free clean
+  expected Astro owner with unchanged executable/start identity on the repository
+  default branch, and both route fingerprints match the post-route pair. A nonzero exit means
   inspection, recovery, or verification did not prove the requested safe state.
 """
     result = argparse.ArgumentParser(

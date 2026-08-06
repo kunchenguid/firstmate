@@ -19,6 +19,11 @@ joined=$*
 case "$joined" in
   *Stop-Process*)
     [ "${FM_WINDOWS_STOP_FAIL:-0}" != 1 ] || exit 1
+    case "$joined" in
+      *Process.CreationDate*) exit 1 ;;
+      *StartTime*) ;;
+      *) exit 1 ;;
+    esac
     printf 'stop\n' >> "${FM_STOP_LOG:?}"
     : > "${FM_KILLED_MARKER:?}"
     if [ -n "${FM_MUTATE_EXPECTED_AFTER_STOP:-}" ]; then
@@ -29,6 +34,17 @@ case "$joined" in
   *HttpClient*)
     printf 'route\n' >> "${FM_ROUTE_LOG:?}"
     : > "${FM_ROUTE_DONE_MARKER:?}"
+    if [ -n "${FM_MUTATE_WSL_START_DURING_ROUTE:-}" ] && [ ! -f "${FM_WSL_START_MUTATION_MARKER:?}" ]; then
+      python3 - "${FM_MUTATE_WSL_START_DURING_ROUTE}" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+pid = path.parent.name
+path.write_text(f"{pid} (node) S " + " ".join(["0"] * 18 + ["999999"]) + "\n", encoding="utf-8")
+PY
+      : > "$FM_WSL_START_MUTATION_MARKER"
+    fi
     if [ -n "${FM_MUTATE_EXPECTED_DURING_ROUTE:-}" ] && [ ! -f "${FM_ROUTE_MUTATION_MARKER:?}" ]; then
       printf 'concurrent route edit\n' >> "$FM_MUTATE_EXPECTED_DURING_ROUTE"
       : > "$FM_ROUTE_MUTATION_MARKER"
@@ -120,6 +136,26 @@ with open(path, "w", encoding="utf-8") as handle:
 PY
 }
 
+write_proc_stat() {
+  local path=$1 pid=$2 name=$3 start=$4
+  python3 - "$path" "$pid" "$name" "$start" <<'PY'
+from pathlib import Path
+import sys
+
+path, pid, name, start = sys.argv[1:]
+Path(path).write_text(f"{pid} ({name}) S " + " ".join(["0"] * 18 + [start]) + "\n", encoding="utf-8")
+PY
+}
+
+write_wsl_process_identity() {
+  local dir=$1 pid=$2 name=${3:-node} start=${4:-$2}
+  mkdir -p "$dir/proc/$pid" "$dir/node-bin"
+  : > "$dir/node-bin/$name"
+  printf '%s\n' "$name" > "$dir/proc/$pid/comm"
+  ln -sf "$dir/node-bin/$name" "$dir/proc/$pid/exe"
+  write_proc_stat "$dir/proc/$pid/stat" "$pid" "$name" "$start"
+}
+
 append_listener_json() {
   local path=$1 port=$2 address=$3 pid=$4 process=$5 executable=$6 command=$7 creation=${8:-creation-$4}
   python3 - "$path" "$port" "$address" "$pid" "$process" "$executable" "$command" "$creation" <<'PY'
@@ -159,8 +195,8 @@ JSON
   : > "$dir/expected/node_modules/astro/astro.js"
   printf 'stale local edit\n' >> "$dir/mount/c/repos/stale checkout/page.txt"
 
-  mkdir -p "$dir/state" "$dir/proc/9200"
-  printf 'node\n' > "$dir/proc/9200/comm"
+  mkdir -p "$dir/state"
+  write_wsl_process_identity "$dir" 9200 node 9200
   printf 'node\0%s\0dev\0--port\0%s\0' \
     "$dir/expected/node_modules/astro/astro.js" 43123 > "$dir/proc/9200/cmdline"
   ln -s "$dir/expected" "$dir/proc/9200/cwd"
@@ -178,7 +214,7 @@ JSON
 }
 
 run_case() {
-  local dir=$1 mode=$2 out=$3
+  local dir=$1 mode=$2 out=$3 port=${FM_CASE_PORT:-43123}
   shift 3
   rm -f "$dir/inspect-count" "$dir/killed" "$dir/launched" "$dir/npm.log"
   rm -f "$dir/route.log" "$dir/route-done"
@@ -190,9 +226,9 @@ run_case() {
     FM_STATE_OVERRIDE="$dir/state" \
     FM_LOCALHOST_WINDOWS_MOUNT_ROOT="$dir/mount" \
     FM_LOCALHOST_PROC_ROOT="$dir/proc" \
-    FM_LOCALHOST_TEST_WSL_ROUTE_JSON="$dir/wsl-route.json" \
+    FM_LOCALHOST_TEST_WSL_ROUTE_JSON="${FM_WSL_ROUTE_FIXTURE-$dir/wsl-route.json}" \
     FM_LOCALHOST_START_TIMEOUT=1 \
-    FM_TEST_PORT=43123 \
+    FM_TEST_PORT="$port" \
     FM_WSL_PID=9200 \
     FM_WSL_SECOND_PID="${FM_WSL_SECOND_PID:-}" \
     FM_LOCALHOST_TEST_LOCK_ATTEMPTS="${FM_LOCALHOST_TEST_LOCK_ATTEMPTS:-50}" \
@@ -219,10 +255,12 @@ run_case() {
     FM_MUTATE_EXPECTED_AFTER_STOP="${FM_MUTATE_EXPECTED_AFTER_STOP:-}" \
     FM_MUTATE_EXPECTED_DURING_ROUTE="${FM_MUTATE_EXPECTED_DURING_ROUTE:-}" \
     FM_ROUTE_MUTATION_MARKER="$dir/route-mutated" \
+    FM_MUTATE_WSL_START_DURING_ROUTE="${FM_MUTATE_WSL_START_DURING_ROUTE:-}" \
+    FM_WSL_START_MUTATION_MARKER="$dir/wsl-start-mutated" \
     FM_POST_STOP_WINDOWS_FAIL="${FM_POST_STOP_WINDOWS_FAIL:-0}" \
     FM_POST_STOP_WSL_FAIL="${FM_POST_STOP_WSL_FAIL:-0}" \
     "$@" \
-    "$HELPER" "$mode" "$dir/expected" 43123 "$(cat "$dir/expected.sha")" > "$out" 2>&1
+    "$HELPER" "$mode" "$dir/expected" "$port" "$(cat "$dir/expected.sha")" > "$out" 2>&1
 }
 
 test_listener_parsing_path_conversion_source_and_redaction() {
@@ -363,8 +401,7 @@ test_multiple_wsl_owners_refuse_before_termination() {
   local dir out
   dir=$(make_case multiple-wsl-owners)
   out="$dir/out"
-  mkdir -p "$dir/proc/9300"
-  printf 'node\n' > "$dir/proc/9300/comm"
+  write_wsl_process_identity "$dir" 9300 node 9300
   printf 'node\0%s\0dev\0--port\0%s\0' \
     "$dir/expected/node_modules/astro/astro.js" 43123 > "$dir/proc/9300/cmdline"
   ln -s "$dir/expected" "$dir/proc/9300/cwd"
@@ -389,11 +426,43 @@ test_wsl_listener_must_remain_on_default_branch() {
   pass "WSL listener verification requires the default branch"
 }
 
+test_wsl_process_identity_is_required_and_stable() {
+  local dir out
+  dir=$(make_case wsl-process-identity)
+  out="$dir/out"
+  rm "$dir/proc/9200/exe"
+  if FM_WSL_MODE=always FM_WIN_ALWAYS_RELAY=1 run_case "$dir" verify "$out"; then
+    fail "WSL listener without executable identity passed verification"
+  fi
+  assert_grep 'reason=wsl-listener-identity-mismatch' "$out" "missing WSL executable identity did not refuse"
+  [ ! -s "$dir/route.log" ] || fail "missing WSL executable identity reached route verification"
+
+  ln -s "$dir/node-bin/node" "$dir/proc/9200/exe"
+  if FM_WSL_MODE=always FM_WIN_ALWAYS_RELAY=1 \
+    FM_MUTATE_WSL_START_DURING_ROUTE="$dir/proc/9200/stat" run_case "$dir" verify "$out"; then
+    fail "WSL PID reused after route inspection passed verification"
+  fi
+  assert_grep 'reason=listener-identity-changed' "$out" "changed WSL start identity did not refuse"
+}
+
 test_production_like_wsl_and_launcher_refuse() {
   local dir out
   dir=$(make_case production-like)
   out="$dir/out"
-  printf 'node\0%s\0dev\0--mode\0production\0' \
+
+  write_listener_json "$dir/win-initial.json" 43123 127.0.0.1 4100 node.exe \
+    'C:\Program Files\nodejs\node.exe' \
+    '"C:\Program Files\nodejs\node.exe" "C:\repos\stale checkout\node_modules\astro\astro.js" dev --mode '\''production'\'''
+  if FM_WSL_MODE=none run_case "$dir" recover "$out"; then
+    fail "quoted production-like Windows Astro command was accepted"
+  fi
+  assert_grep 'refuse:windows-process-is-not-proven-node-astro-dev' "$out" "quoted production-like Windows command did not refuse"
+  [ ! -s "$dir/stop.log" ] || fail "quoted production-like Windows command still called termination"
+
+  write_listener_json "$dir/win-initial.json" 43123 127.0.0.1 4100 node.exe \
+    'C:\Program Files\nodejs\node.exe' \
+    '"C:\Program Files\nodejs\node.exe" "C:\repos\stale checkout\node_modules\astro\astro.js" dev'
+  printf "node\0%s\0dev\0--mode='production'\0" \
     "$dir/expected/node_modules/astro/astro.js" > "$dir/proc/9200/cmdline"
   if FM_WSL_MODE=always run_case "$dir" recover "$out"; then
     fail "production-like WSL Astro command was accepted"
@@ -402,7 +471,7 @@ test_production_like_wsl_and_launcher_refuse() {
   [ ! -s "$dir/stop.log" ] || fail "production-like WSL command still called termination"
 
   cat > "$dir/expected/package.json" <<'JSON'
-{"scripts":{"dev":"astro dev --mode production"}}
+{"scripts":{"dev":"astro dev --mode 'production'"}}
 JSON
   git -C "$dir/expected" add package.json
   git -C "$dir/expected" commit -qm production-like
@@ -412,6 +481,18 @@ JSON
   fi
   assert_grep 'refuse:project dev launcher is not proven to be Astro dev' "$out" "production-like project launcher did not refuse"
   [ ! -s "$dir/stop.log" ] || fail "production-like project launcher still called termination"
+
+  cat > "$dir/expected/package.json" <<'JSON'
+{"scripts":{"dev":"npx astro dev"}}
+JSON
+  git -C "$dir/expected" add package.json
+  git -C "$dir/expected" commit -qm npx-launcher
+  git -C "$dir/expected" rev-parse HEAD > "$dir/expected.sha"
+  if FM_WSL_MODE=none run_case "$dir" recover "$out"; then
+    fail "installer-capable npx project launcher was accepted"
+  fi
+  assert_grep 'refuse:project dev launcher is not proven to be Astro dev' "$out" "npx project launcher did not refuse"
+  [ ! -s "$dir/stop.log" ] || fail "npx project launcher still called termination"
   pass "production-like WSL owners and project launchers refuse recovery"
 }
 
@@ -585,6 +666,64 @@ test_verify_proves_pair_before_route_requests() {
   pass "verify proves the listener pair before contacting localhost"
 }
 
+test_verify_refuses_route_redirects() {
+  local dir out port server_pid verified
+  dir=$(make_case route-redirect)
+  out="$dir/out"
+  python3 - "$dir/server-port" > "$dir/server.log" 2>&1 <<'PY' &
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+import sys
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/":
+            self.send_response(302)
+            self.send_header("Location", "/final")
+            self.end_headers()
+            return
+        body = b"final-body"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, _format, *_args):
+        return
+
+server = HTTPServer(("127.0.0.1", 0), Handler)
+server.timeout = 1
+Path(sys.argv[1]).write_text(str(server.server_address[1]), encoding="utf-8")
+server.handle_request()
+server.handle_request()
+PY
+  server_pid=$!
+  while [ ! -s "$dir/server-port" ]; do
+    kill -0 "$server_pid" 2>/dev/null || fail "redirect fixture server failed to start"
+    sleep 0.05
+  done
+  port=$(cat "$dir/server-port")
+  python3 - "$dir/win-route.json" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+body = b"final-body"
+Path(sys.argv[1]).write_text(json.dumps({"status": 200, "sha256": hashlib.sha256(body).hexdigest(), "length": len(body)}) + "\n", encoding="utf-8")
+PY
+  write_listener_json "$dir/win-relay.json" "$port" 0.0.0.0 5100 wslrelay.exe \
+    'C:\Windows\System32\wslrelay.exe' ''
+  verified=0
+  if FM_CASE_PORT="$port" FM_WSL_ROUTE_FIXTURE='' FM_WSL_MODE=always FM_WIN_ALWAYS_RELAY=1 \
+    run_case "$dir" verify "$out"; then
+    verified=1
+  fi
+  wait "$server_pid" || fail "redirect fixture server exited unsuccessfully"
+  [ "$verified" -eq 0 ] || fail "redirected localhost route passed verification"
+  assert_grep 'reason=WSL route fingerprint failed' "$out" "redirected WSL route did not refuse"
+}
+
 test_mutation_recheck_refuses_new_task() {
   local dir out
   dir=$(make_case mutation-task)
@@ -700,6 +839,7 @@ test_active_task_refuses_without_termination
 test_active_wsl_task_refuses_recovery_and_verification
 test_multiple_wsl_owners_refuse_before_termination
 test_wsl_listener_must_remain_on_default_branch
+test_wsl_process_identity_is_required_and_stable
 test_production_like_wsl_and_launcher_refuse
 test_task_state_lock_wait_is_bounded
 test_pid_or_command_change_refuses_on_immediate_reresolution
@@ -710,6 +850,7 @@ test_windows_inspection_failure_is_safe
 test_wsl_inspection_failure_is_safe
 test_task_state_inspection_failure_is_safe
 test_verify_proves_pair_before_route_requests
+test_verify_refuses_route_redirects
 test_mutation_recheck_refuses_new_task
 test_termination_boundary_refuses_new_task
 test_post_stop_inspection_failure_blocks_restart
