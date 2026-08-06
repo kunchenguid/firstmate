@@ -1292,18 +1292,24 @@ test_local_advanced_past_run_head_invalidates() {
 
 # A commit made in a SEPARATE clone of <worktree>: a real descendant of that
 # worktree's HEAD whose object the worktree has never fetched, which is exactly
-# what a no-mistakes pipeline fix commit is before the push step. Echoes a sha
-# that is genuinely unresolvable from <worktree>.
-unpushed_pipeline_tip() {  # <worktree> -> echoes an absent sha
-  local wt=$1 gate sha
+# what a no-mistakes pipeline fix commit is before the push step. Sets
+# UNPUSHED_TIP to a full sha that is genuinely unresolvable from <worktree>,
+# rather than echoing it: a fixture failure must abort the whole test file, and
+# `fail` inside a command substitution would only kill the subshell and hand
+# the caller an empty string.
+UNPUSHED_TIP=""
+unpushed_pipeline_tip() {  # <worktree>
+  local wt=$1 gate
   case "$wt" in "$TMP_ROOT"/*) ;; *) fail "unpushed_pipeline_tip: $wt is outside $TMP_ROOT" ;; esac
   gate="$wt.gate-clone"
   git clone -q "$wt" "$gate" 2>/dev/null || fail "could not clone a gate repo from $wt"
   git -C "$gate" commit -q --allow-empty -m 'pipeline fix commit'
-  sha=$(git -C "$gate" rev-parse HEAD)
-  git -C "$wt" cat-file -e "${sha}^{commit}" 2>/dev/null \
-    && fail "fixture is not honest: $sha is already reachable from $wt"
-  printf '%s\n' "$sha"
+  UNPUSHED_TIP=$(git -C "$gate" rev-parse HEAD)
+  printf '%s' "$UNPUSHED_TIP" | grep -qxE '[0-9a-f]{40}' \
+    || fail "unpushed_pipeline_tip: gate clone produced no full sha: '$UNPUSHED_TIP'"
+  git -C "$wt" cat-file -e "${UNPUSHED_TIP}^{commit}" 2>/dev/null \
+    && fail "fixture is not honest: $UNPUSHED_TIP is already reachable from $wt"
+  return 0
 }
 
 # Head-binding, coarse path: THE 2026-08-06 defect. A lane mid-validation has a
@@ -1317,7 +1323,8 @@ test_unresolvable_live_tip_never_loses_to_stale_failed_row() {
   d=$(new_case unpushed-tip-coarse)
   make_repo_on_branch "$d/wt" fm/wedge-aging
   short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
-  tip=$(unpushed_pipeline_tip "$d/wt")
+  unpushed_pipeline_tip "$d/wt"
+  tip=$UNPUSHED_TIP
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/wedge.meta" "window=fm:fm-wedge" "worktree=$d/wt" "kind=ship" "harness=claude"
   printf 'working: implementation committed, validating\n' > "$d/state/wedge.status"
@@ -1347,7 +1354,8 @@ test_unresolvable_active_tip_on_own_branch_is_attributed() {
   d=$(new_case unpushed-tip-primary)
   make_repo_on_branch "$d/wt" fm/feat-prepush
   short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
-  tip=$(unpushed_pipeline_tip "$d/wt")
+  unpushed_pipeline_tip "$d/wt"
+  tip=$UNPUSHED_TIP
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/prepush.meta" "window=fm:fm-prepush" "worktree=$d/wt" "kind=ship" "harness=claude"
   printf 'working: fix round under way\n' > "$d/state/prepush.status"
@@ -1376,7 +1384,8 @@ test_unresolvable_terminal_head_does_not_report_terminal_verdict() {
   local d tip out
   d=$(new_case unbindable-terminal)
   make_repo_on_branch "$d/wt" fm/feat-term
-  tip=$(unpushed_pipeline_tip "$d/wt")
+  unpushed_pipeline_tip "$d/wt"
+  tip=$UNPUSHED_TIP
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/term.meta" "window=fm:fm-term" "worktree=$d/wt" "kind=ship" "harness=claude"
   printf 'working: stage 2 under way\n' > "$d/state/term.status"
@@ -1393,6 +1402,33 @@ test_unresolvable_terminal_head_does_not_report_terminal_verdict() {
   pass "a terminal run whose head cannot be bound never becomes a terminal verdict"
 }
 
+# The same discipline when axi reports a terminal STATUS with the outcome not
+# yet written (a transient shape the no-outcome status mapping anticipates):
+# either terminal signal must block verdict-2 attribution, or the unresolvable
+# head would be repeated as done/failed by that mapping.
+test_unresolvable_head_with_terminal_status_only_is_not_attributed() {
+  reset_fakes
+  local d tip out
+  d=$(new_case unbindable-terminal-status-only)
+  make_repo_on_branch "$d/wt" fm/feat-termstat
+  unpushed_pipeline_tip "$d/wt"
+  tip=$UNPUSHED_TIP
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/termstat.meta" "window=fm:fm-termstat" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: stage 2 under way\n' > "$d/state/termstat.status"
+  FM_FAKE_RUN_HEAD="$tip"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-termstat | grep -v '^outcome:')"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" termstat
+  out=$(run_crew_state "$d" termstat)
+  assert_not_contains "$out" "state: done" "a terminal status with no outcome must not be repeated as a verdict"
+  assert_not_contains "$out" "source: run-step" "an unbindable terminal-status run is not attributed"
+  assert_contains "$out" "source: status-log" "falls back to current-state sources instead"
+  assert_contains "$out" "state: working" "the crew's own current state stands"
+  pass "a terminal status with no outcome never bypasses the unresolvable-head guard"
+}
+
 # Same discipline on the coarse row: "a run is active on this branch" is
 # answerable without resolving the tip, but a FINISHED row's verdict is not -
 # binding its head is the only thing that could have tied it to this worktree.
@@ -1401,7 +1437,8 @@ test_unresolvable_terminal_coarse_row_is_not_attributed() {
   local d tip out
   d=$(new_case unbindable-terminal-coarse)
   make_repo_on_branch "$d/wt" fm/feat-termcoarse
-  tip=$(unpushed_pipeline_tip "$d/wt")
+  unpushed_pipeline_tip "$d/wt"
+  tip=$UNPUSHED_TIP
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/termc.meta" "window=fm:fm-termc" "worktree=$d/wt" "kind=ship" "harness=claude"
   printf 'working: stage 2 under way\n' > "$d/state/termc.status"
@@ -1490,6 +1527,7 @@ test_missing_run_head_falls_back_to_current_state
 test_unresolvable_live_tip_never_loses_to_stale_failed_row
 test_unresolvable_active_tip_on_own_branch_is_attributed
 test_unresolvable_terminal_head_does_not_report_terminal_verdict
+test_unresolvable_head_with_terminal_status_only_is_not_attributed
 test_unresolvable_terminal_coarse_row_is_not_attributed
 
 echo "all fm-crew-state tests passed"

@@ -69,17 +69,21 @@ make_worktree() {  # <name>
 
 # A commit made in a SEPARATE clone of the same origin: a real commit, on a real
 # line of history, whose object this worktree has never fetched. That is the
-# shape of a no-mistakes pipeline fix commit before the push step.
-gate_clone_commit() {  # -> echoes a sha absent from $WT
-  local gate sha
+# shape of a no-mistakes pipeline fix commit before the push step. Sets
+# GATE_SHA rather than echoing it, for the same reason make_worktree sets its
+# globals: a fixture failure must abort the whole test file.
+GATE_SHA=""
+gate_clone_commit() {  # sets GATE_SHA to a full sha absent from $WT
+  local gate
   gate="$CASE_DIR/gate-clone"
   git clone -q "$CASE_DIR/origin.git" "$gate" 2>/dev/null
   wt_git "$gate" commit -q --allow-empty -m 'pipeline fix commit'
-  sha=$(wt_git "$gate" rev-parse HEAD)
-  [ -n "$sha" ] || fail "gate clone produced no commit"
-  wt_git "$WT" cat-file -e "${sha}^{commit}" 2>/dev/null \
-    && fail "fixture is not honest: $sha is already reachable from the worktree"
-  printf '%s\n' "$sha"
+  GATE_SHA=$(wt_git "$gate" rev-parse HEAD)
+  printf '%s' "$GATE_SHA" | grep -qxE '[0-9a-f]{40}' \
+    || fail "gate clone produced no full sha: '$GATE_SHA'"
+  wt_git "$WT" cat-file -e "${GATE_SHA}^{commit}" 2>/dev/null \
+    && fail "fixture is not honest: $GATE_SHA is already reachable from the worktree"
+  return 0
 }
 
 # Assert the rule's exit status for the current $WT against <head>.
@@ -141,10 +145,9 @@ test_absent_head_field_does_not_match() {
 # answer is UNRESOLVABLE. Answering NO MATCH here is what let a stale terminal
 # run at the worktree's own head win attribution instead.
 test_gate_clone_descendant_is_unresolvable() {
-  local sha
   make_worktree gate-clone-tip
-  sha=$(gate_clone_commit)
-  expect_verdict "$UNRESOLVABLE" "$sha" \
+  gate_clone_commit
+  expect_verdict "$UNRESOLVABLE" "$GATE_SHA" \
     "live run tip committed in the gate-repo clone, not pushed yet"
   pass "an unpushed pipeline tip is unresolvable, not a mismatch"
 }

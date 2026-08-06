@@ -394,6 +394,17 @@ nm_coarse_head_matches_worktree() {  # <short-sha>
   fm_nm_head_matches_worktree "$WT" "$1"
 }
 
+# Whether the axi-status run claims a terminal result by EITHER signal: a
+# non-empty outcome, or a terminal status word with the outcome absent (a
+# shape axi can emit transiently before the outcome is written).
+nm_run_claims_terminal() {
+  [ -n "$(strip_quotes "$(nm_field outcome)")" ] && return 0
+  case "$(strip_quotes "$(nm_field status)")" in
+    completed|failed|cancelled) return 0 ;;
+  esac
+  return 1
+}
+
 HAVE_RUN=0
 # RUN_SOURCE distinguishes the two ways HAVE_RUN=1 can happen: "full" means
 # $RUN_OUT is real `axi status` TOON with step/gate detail; "coarse" means only
@@ -414,7 +425,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     fi
     if [ "$head_verdict" = 0 ]; then
       HAVE_RUN=1
-    elif [ "$head_verdict" = 2 ] && [ -z "$(strip_quotes "$(nm_field outcome)")" ]; then
+    elif [ "$head_verdict" = 2 ] && ! nm_run_claims_terminal; then
       # This branch's run, still active, with a tip this worktree cannot see:
       # the normal pre-push state, because no-mistakes commits its fix rounds in
       # its own gate-repo clone. Bare `axi status` answers for the queried

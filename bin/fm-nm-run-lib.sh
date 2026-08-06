@@ -67,10 +67,11 @@ fm_nm_field() {  # <toon-output> <key>
 #                    is a strict ancestor of, or diverged from, local HEAD
 #                    (local work advanced outside the run, or the branch tip
 #                    was rewritten)
-#   2  UNRESOLVABLE  a run head was reported but this worktree cannot resolve
-#                    it into a commit - the object is not in reach, or the
-#                    worktree has no readable HEAD to compare against - so its
-#                    relation to local HEAD is genuinely UNKNOWN
+#   2  UNRESOLVABLE  a run head was reported but this worktree cannot answer
+#                    for it - the object is not in reach, the worktree has no
+#                    readable HEAD to compare against, or the ancestry check
+#                    itself errored instead of answering - so its relation to
+#                    local HEAD is genuinely UNKNOWN
 #
 # Why 2 exists (measured 2026-08-06): while a run validates, no-mistakes commits
 # its fix rounds in its own gate-repo clone and does not push until the push
@@ -87,10 +88,15 @@ fm_nm_field() {  # <toon-output> <key>
 # working/validating or unknown, and fm-teardown.sh declines to abort a run it
 # cannot positively attribute.
 fm_nm_head_matches_worktree() {  # <worktree> <run_head>
-  local wt=$1 run_head=$2 local_full run_full
+  local wt=$1 run_head=$2 local_full run_full rc=0
   [ -n "$run_head" ] || return 1
   local_full=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || return 2
   run_full=$(git -C "$wt" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 2
   [ "$run_full" = "$local_full" ] && return 0
-  git -C "$wt" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null
+  git -C "$wt" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) return 2 ;;
+  esac
 }
