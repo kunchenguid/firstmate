@@ -47,6 +47,18 @@
 #            model, effort, mode, kind, project, backend, outcome, route,
 #            escalated, findings, pr.
 #
+# THE COORDINATOR NAMES THE COST, NOT THE SEQUENCE. `outcome <token>` with no
+# sequence resolves the most recent wake record no outcome record joins, and
+# that is the normal path. The sequence was once positional and validated only
+# as an integer, so a coordinator recording after the fact supplied remembered
+# or placeholder numbers; each one stored queued=unknown, which is also what a
+# legitimately wiped state/ produces, so the corruption was invisible. On
+# 2026-08-04 that had fabricated 200 of 249 outcome records. An explicitly
+# passed sequence that joins no wake record is now refused; --allow-unjoined
+# keeps the genuine wiped-state/ case reachable and a guess unreachable, and
+# `reconcile` counts the records that join nothing so a silent corruption
+# becomes a number a session start can report.
+#
 # The wake half is written deterministically and the outcome half by the
 # coordinator ON PURPOSE. A single coordinator-written line would make measured
 # attention cost fall whenever the coordinator skipped the recording step, so
@@ -87,10 +99,13 @@
 #   fm-wake-ledger.sh drain-record
 #       Read deduped drained queue rows (epoch/seq/kind/key/payload TSV) on
 #       stdin and append one wake record each. Invalid rows are skipped.
-#   fm-wake-ledger.sh outcome <token> <seq> [<seq>...]
+#   fm-wake-ledger.sh outcome <token> [<seq>...] [--allow-unjoined]
 #                     [--task <id>] [--defect <class>] [--note <text>]
-#       Append one outcome record per seq. task and after are resolved from the
-#       matching wake record when --task is not given.
+#       With no seq, record against the most recent wake record no outcome
+#       joins - the normal path. With one or more seq, append one outcome
+#       record each; a seq matching no wake record is refused unless
+#       --allow-unjoined says the wake records are genuinely gone. task and
+#       after are resolved from the matching wake record when --task is absent.
 #   fm-wake-ledger.sh task <id> [--outcome landed|failed|abandoned]
 #                     [--harness H] [--model M] [--effort E] [--mode M]
 #                     [--kind K] [--project P] [--backend B] [--pr URL]
@@ -98,6 +113,10 @@
 #       Append one terminal task record. Absent facts record as unknown rather
 #       than being guessed. Called by teardown, which supplies them from the
 #       task metadata it is about to delete.
+#   fm-wake-ledger.sh reconcile [--count]
+#       Count the outcome records that join no wake record. --count prints that
+#       number alone, for a caller that formats its own line. Session-start
+#       bootstrap reports it so the corruption above cannot stay silent.
 #   fm-wake-ledger.sh report [--since-days <n>]
 #       Summarize the ledger: wake volume and coverage, response latency,
 #       outcome mix, terminal task outcomes, and the per-profile model join.
@@ -274,11 +293,15 @@ cmd_drain_record() {
 }
 
 # The wake record for <seq>, as "<epoch><TAB><task><TAB><queued>", from a
-# bounded tail read.
-ledger_lookup_wake() {  # <seq>
-  local seq=$1 found
+# bounded tail read. With <full> non-empty the whole file is read instead: that
+# is the refusal path only, where a wrong "no such wake" would be as damaging
+# as the guess it exists to stop, so accuracy outranks the constant-time bound.
+ledger_lookup_wake() {  # <seq> [<full>]
+  local seq=$1 full=${2-} found
   [ -f "$LEDGER" ] || return 1
-  found=$(tail -n "$LEDGER_LOOKUP_TAIL" "$LEDGER" 2>/dev/null | LC_ALL=C awk -F '\t' \
+  found=$(
+    if [ -n "$full" ]; then cat "$LEDGER"; else tail -n "$LEDGER_LOOKUP_TAIL" "$LEDGER"; fi 2>/dev/null \
+    | LC_ALL=C awk -F '\t' \
     -v want="seq=$seq" -v schema="$LEDGER_SCHEMA" '
     $1 == schema && $2 == "wake" {
       match_seq = 0
@@ -297,14 +320,87 @@ ledger_lookup_wake() {  # <seq>
   printf '%s' "$found"
 }
 
+# The sequence of the most recent wake record that no outcome record joins, from
+# the same bounded tail read. This is what a bare `outcome` names, and it is why
+# the coordinator no longer supplies a number: the file already knows which wake
+# is outstanding, and it cannot misremember. An outcome record is always written
+# after its wake record, so any wake inside the tail has its outcome inside the
+# tail too - the bound can never invent an unrecorded wake, only decline to
+# reach past one, which is a loud refusal rather than a wrong join.
+ledger_newest_unrecorded_seq() {
+  local found
+  [ -f "$LEDGER" ] || return 1
+  found=$(tail -n "$LEDGER_LOOKUP_TAIL" "$LEDGER" 2>/dev/null | LC_ALL=C awk -F '\t' \
+    -v schema="$LEDGER_SCHEMA" '
+    function fieldset(   i, p) {
+      split("", f)
+      for (i = 4; i <= NF; i++) {
+        p = index($i, "=")
+        if (p > 0) f[substr($i, 1, p - 1)] = substr($i, p + 1)
+      }
+    }
+    $1 != schema { next }
+    { fieldset() }
+    $2 == "wake" {
+      q = f["queued"]
+      if (q == "") q = "unknown"
+      n++
+      wseq[n] = f["seq"]
+      wq[n] = q
+      next
+    }
+    # The join identity is the (seq, queued) pair, exactly as the report uses
+    # it, so a sequence reused across a state wipe never masks the other wake.
+    $2 == "outcome" { done[f["seq"], (f["queued"] == "" ? "unknown" : f["queued"])] = 1 ; next }
+    END {
+      for (i = n; i >= 1; i--) {
+        if (!((wseq[i], wq[i]) in done)) { printf "%s", wseq[i]; exit }
+      }
+    }
+  ') || return 1
+  [ -n "$found" ] || return 1
+  printf '%s' "$found"
+}
+
+# Outcome records joining no wake record, and the total outcome count, as
+# "<unjoined><TAB><total>". A whole-file read: this is the reconciliation
+# instrument, and a bounded one would under-report the very corruption it
+# exists to expose. An absent ledger is a real zero; a ledger that exists and
+# cannot be read returns nonzero rather than that same zero, because reporting
+# "clean" for a file nobody could open is the silent all-clear this whole
+# subcommand exists to abolish.
+ledger_reconcile_counts() {
+  [ -f "$LEDGER" ] || { printf '0\t0'; return 0; }
+  LC_ALL=C awk -F '\t' -v schema="$LEDGER_SCHEMA" '
+    function fieldset(   i, p) {
+      split("", f)
+      for (i = 4; i <= NF; i++) {
+        p = index($i, "=")
+        if (p > 0) f[substr($i, 1, p - 1)] = substr($i, p + 1)
+      }
+    }
+    $1 != schema { next }
+    { fieldset() }
+    $2 == "wake" { wake[f["seq"], (f["queued"] == "" ? "unknown" : f["queued"])] = 1; next }
+    $2 == "outcome" {
+      total++
+      if (!((f["seq"], (f["queued"] == "" ? "unknown" : f["queued"])) in wake)) unjoined++
+      next
+    }
+    END { printf "%d\t%d", unjoined + 0, total + 0 }
+  ' "$LEDGER" 2>/dev/null
+}
+
 cmd_outcome() {
-  local token='' task='' defect='' note='' now seq wake_row wake_rest wake_ts wake_task wake_queued after
+  local token='' task='' defect='' note='' allow_unjoined='' resolved='' now seq
+  local wake_row wake_rest wake_ts wake_task wake_queued after
   local -a seqs=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --task) [ "$#" -ge 2 ] || die "--task needs a value"; task=$2; shift 2 ;;
       --defect) [ "$#" -ge 2 ] || die "--defect needs a value"; defect=$2; shift 2 ;;
       --note) [ "$#" -ge 2 ] || die "--note needs a value"; note=$2; shift 2 ;;
+      --allow-unjoined) allow_unjoined=1; shift ;;
       -h|--help) usage; exit 0 ;;
       -*) die "unknown flag for outcome: $1" ;;
       *)
@@ -318,17 +414,26 @@ cmd_outcome() {
     esac
   done
 
-  [ -n "$token" ] || die "outcome needs a token and at least one wake sequence"
+  [ -n "$token" ] || die "outcome needs an outcome token"
   case "$token" in
     absorbed|inspected|steered|decided|escalated|repaired|false-positive) ;;
     *) die "unknown outcome token: $token (absorbed inspected steered decided escalated repaired false-positive)" ;;
   esac
-  [ "${#seqs[@]}" -gt 0 ] || die "outcome needs at least one wake sequence"
-  for seq in "${seqs[@]}"; do
+  for seq in ${seqs[@]+"${seqs[@]}"}; do
     case "$seq" in
       ''|*[!0-9]*) die "wake sequence must be a number: $seq" ;;
     esac
   done
+  # No sequence given is the normal path: name the cost, and let the ledger
+  # name the wake. Resolving it here is the whole point - a number carried by
+  # hand, from memory, after the fact is exactly what fabricated 200 records.
+  if [ "${#seqs[@]}" -eq 0 ]; then
+    [ -z "$allow_unjoined" ] \
+      || die "--allow-unjoined applies to an explicit wake sequence, not a resolved one"
+    resolved=$(ledger_newest_unrecorded_seq) \
+      || die "no wake record without an outcome in the last $LEDGER_LOOKUP_TAIL ledger lines: nothing to record against"
+    seqs=("$resolved")
+  fi
   if [ -n "$task" ] && ! fm_task_id_path_safe "$task"; then
     die "unsafe task id: $task"
   fi
@@ -337,12 +442,24 @@ cmd_outcome() {
     *[!A-Za-z0-9._-]*) die "defect class must be [A-Za-z0-9._-]: $defect" ;;
   esac
 
+  # Refuse before writing anything, so a rejected sequence in a multi-sequence
+  # invocation cannot leave a half-recorded batch behind.
+  if [ -z "$allow_unjoined" ]; then
+    for seq in "${seqs[@]}"; do
+      ledger_lookup_wake "$seq" >/dev/null && continue
+      # The bounded read missed it; confirm against the whole file before
+      # refusing, so the refusal states a fact rather than a lookup horizon.
+      ledger_lookup_wake "$seq" full >/dev/null && continue
+      die "wake sequence $seq joins no wake record: pass no sequence to record against the most recent unrecorded wake, or --allow-unjoined if the wake records are genuinely gone"
+    done
+  fi
+
   now=$(date +%s)
   for seq in "${seqs[@]}"; do
     wake_task=$task
     wake_queued=unknown
     after=unknown
-    if wake_row=$(ledger_lookup_wake "$seq"); then
+    if wake_row=$(ledger_lookup_wake "$seq") || wake_row=$(ledger_lookup_wake "$seq" full); then
       wake_ts=${wake_row%%"$TAB"*}
       case "$wake_ts" in
         ''|*[!0-9]*) wake_ts= ;;
@@ -438,6 +555,37 @@ cmd_task() {
     printf 'error: could not append terminal record for task %s to %s\n' "$id" "$LEDGER" >&2
     return 1
   }
+  return 0
+}
+
+cmd_reconcile() {
+  local count_only='' counts unjoined total
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --count) count_only=1; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown flag for reconcile: $1" ;;
+    esac
+  done
+
+  counts=$(ledger_reconcile_counts) || die "could not read $LEDGER"
+  unjoined=${counts%%"$TAB"*}
+  total=${counts#*"$TAB"}
+  # A partial read must not become a fabricated number: this subcommand exists
+  # to expose fabricated numbers.
+  [ "$counts" = "$unjoined$TAB$total" ] || die "could not read $LEDGER"
+  case "$unjoined" in ''|*[!0-9]*) die "could not read $LEDGER" ;; esac
+  case "$total" in ''|*[!0-9]*) die "could not read $LEDGER" ;; esac
+  if [ -n "$count_only" ]; then
+    printf '%s\n' "$unjoined"
+    return 0
+  fi
+  if [ "$unjoined" -eq 0 ]; then
+    printf 'wake ledger: all %s outcome record(s) join a wake record\n' "$total"
+    return 0
+  fi
+  printf 'wake ledger: %s of %s outcome record(s) join no wake record\n' "$unjoined" "$total"
+  printf 'these record a cost against a wake that was never drained here; they are evidence of a bad join, not of supervision work\n'
   return 0
 }
 
@@ -646,7 +794,8 @@ case "$SUBCOMMAND" in
   drain-record) cmd_drain_record "$@" ;;
   outcome) cmd_outcome "$@" ;;
   task) cmd_task "$@" ;;
+  reconcile) cmd_reconcile "$@" ;;
   report) cmd_report "$@" ;;
   -h|--help|help) usage ;;
-  *) die "unknown subcommand: $SUBCOMMAND (drain-record outcome task report)" ;;
+  *) die "unknown subcommand: $SUBCOMMAND (drain-record outcome task reconcile report)" ;;
 esac
