@@ -37,6 +37,7 @@ GitHub Actions and Dependabot are exempt so their automation keeps working, but 
    ```
 
    Repeat this after any later push, because the attestation names one commit and a new commit is a new head.
+9. Re-trigger the check, because it already ran and refused before the note existed and publishing a note fires no pull request event: close and reopen the PR, or edit its title or body.
 
 See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick-start/) for the full first-run walkthrough.
 

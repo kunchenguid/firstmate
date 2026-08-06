@@ -57,13 +57,15 @@ die() {
 }
 
 # One machine-readable reason plus prose, so a caller can branch on the reason
-# and a human reading a CI log gets the explanation with it.
+# and a human reading a CI log gets the explanation with it. A multi-line detail
+# is indented line by line, so a refusal can quote a tool's own output verbatim
+# instead of paraphrasing it.
 refuse() {
   reason=$1
   shift
   printf 'fm-attest: not attested (%s)\n' "$reason" >&2
   while [ "$#" -gt 0 ]; do
-    printf '  %s\n' "$1" >&2
+    printf '%s\n' "$1" | sed 's/^/  /' >&2
     shift
   done
   exit 1
@@ -328,11 +330,21 @@ cmd_write() {
   branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || die "HEAD is not on a branch"
   [ "$branch" != HEAD ] || die "attest from the branch the pipeline validated, not a detached HEAD"
 
+  # The tool reports its own errors on stdout, so its output is captured whether
+  # it succeeded or not and its exit status is kept. A tool that failed, a tool
+  # whose output this transcription cannot read, and a tool reporting no run at
+  # all are three different repairs, and none of them may be described as one of
+  # the others.
+  status_rc=0
   if [ -n "$run_id" ]; then
-    status=$(no-mistakes axi status --run "$run_id" 2>/dev/null)
+    status=$(no-mistakes axi status --run "$run_id" 2>&1) || status_rc=$?
   else
-    status=$(no-mistakes axi status 2>/dev/null)
+    status=$(no-mistakes axi status 2>&1) || status_rc=$?
   fi
+  [ "$status_rc" -eq 0 ] || refuse run-record-unreadable \
+    "no-mistakes could not report a pipeline run (exit $status_rc). It said:" \
+    "$status" \
+    "That is a tool or setup failure rather than a missing run; fix it and re-run."
   [ -n "$status" ] || refuse no-run-record \
     "no-mistakes reported no pipeline run for this repository." \
     "Validate this branch with no-mistakes before attesting its head."
@@ -356,8 +368,10 @@ cmd_write() {
 $(printf '%s\n' "$status" | parse_run_status)
 EOF
 
-  is_run_id "$run_field" || refuse no-run-record \
-    "The pipeline run record has no usable identity."
+  is_run_id "$run_field" || refuse run-record-unparsed \
+    "no-mistakes reported a run, but no run identity could be read from it. It said:" \
+    "$status" \
+    "A run was reported, so this is not an absent one: either that record is not a run record, or its shape changed and this transcription needs updating."
   [ "$branch_field" = "$branch" ] || refuse run-covers-another-branch \
     "The most recent pipeline run covers branch '$branch_field', not '$branch'." \
     "Attest from the branch that run validated, or name the run with --run <id>."
@@ -385,7 +399,7 @@ EOF
     "The pipeline run for $head has not completed:$missing." \
     "Required steps: $REQUIRED_GATES."
 
-  tool=$(no-mistakes --version 2>/dev/null | awk 'NR == 1 { print $NF == "" ? "unknown" : $3; exit }')
+  tool=$(no-mistakes --version 2>/dev/null | awk 'NR == 1 { print $3; exit }')
   is_tool_token "$tool" || tool=unknown
 
   gates_csv=$(printf '%s' "${gates# }" | tr ' ' ',')
@@ -396,8 +410,26 @@ EOF
   # malformed note can never reach the forge and be discovered only in CI.
   verify_note_payload "$head" "$payload"
 
+  # Reconcile against the repository this is about to write to, which is the
+  # remote's push URL and not its fetch URL. The two are different repositories
+  # in the setup CONTRIBUTING.md describes: origin fetches the parent and pushes
+  # the contributor's fork, and the fork is the repository the gate reads.
+  # Reconciling against the parent would reset the local ref to a history the
+  # fork has never seen, so every push would be refused as a non-fast-forward
+  # and re-running would refuse identically.
+  #
+  # The incoming ref is merged rather than forced over the local one, so an
+  # attestation recorded locally with --no-push is not silently discarded by the
+  # act of publishing a later one.
+  push_url=$remote
   if [ "$push" -eq 1 ]; then
-    git fetch --quiet --no-tags "$remote" "+$notes_ref:$notes_ref" 2>/dev/null || true
+    push_url=$(git remote get-url --push "$remote" 2>/dev/null) || push_url=$remote
+    incoming_ref="$notes_ref-incoming"
+    if git fetch --quiet --no-tags --force "$push_url" "$notes_ref:$incoming_ref" 2>/dev/null; then
+      git notes --ref="$notes_ref" merge -s ours "$incoming_ref" >/dev/null 2>&1 \
+        || die "could not reconcile $notes_ref with $push_url; resolve it and re-run"
+      git update-ref -d "$incoming_ref" 2>/dev/null || true
+    fi
   fi
   git notes --ref="$notes_ref" add -f -m "$payload" "$head" >/dev/null \
     || die "could not record the attestation note"
@@ -405,8 +437,8 @@ EOF
 
   [ "$push" -eq 1 ] || return 0
   git push --quiet "$remote" "$notes_ref:$notes_ref" \
-    || die "could not publish $notes_ref to $remote; fetch it and re-run"
-  printf 'fm-attest: published %s to %s\n' "$notes_ref" "$remote"
+    || die "could not publish $notes_ref to $push_url; re-run to reconcile with it and retry"
+  printf 'fm-attest: published %s to %s\n' "$notes_ref" "$push_url"
 }
 
 # ---------------------------------------------------------------------------

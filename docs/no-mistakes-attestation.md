@@ -13,7 +13,9 @@ It is keyed by a commit sha, so it can name the commit it covers without changin
 It never rewrites the branch, so producing one cannot disturb the pipeline's custody of it.
 It reaches the forge as an ordinary ref, so a `pull_request` workflow can read it with `contents: read` and nothing more.
 
-Git notes do not travel with `refs/pull/*`, so the workflow fetches the ref from the repository the branch was pushed to: the base repository through the job's own token, or a fork anonymously.
+Git notes do not travel with `refs/pull/*`, so the workflow fetches the ref from the repository the branch was pushed to.
+The base repository is read through an explicit token URL and a fork through its plain `https` URL, which still carries the job's token because `actions/checkout` persists it in the workspace's git configuration.
+Neither read is anonymous; both are read-only and both go to the host that issued the token.
 A read that fails for any reason other than "the ref is not there" stops the job, so an unreachable head repository is never resolved as either an absent or a present attestation.
 
 ## The format
@@ -64,7 +66,24 @@ It is why the check's verdict is visible in the diff and why required-check conf
 `bin/fm-attest.sh write` reads the pipeline's own run record through `no-mistakes axi status`, refuses unless that run covers this exact `HEAD` on this branch and completed every required step, then records and pushes the note.
 It re-verifies its own payload with the same code path the gate uses, so a malformed note cannot reach the forge and be discovered only in CI.
 
+It publishes to the remote's push URL rather than its fetch URL, and reconciles against that same repository before writing, because those are two different repositories in the setup `CONTRIBUTING.md` describes and only the push target is the one the check reads.
+The reconciliation merges the published ref instead of forcing over the local one, so an attestation recorded locally with `--no-push` survives the publishing of a later one.
+
+Its own refusals stay as distinct as the gate's.
+`no-run-record` means the pipeline reported no run, `run-record-unreadable` means the tool itself failed, and `run-record-unparsed` means it reported something no run identity could be read from; the last two quote the tool's own output, because a tool error read as an absent run sends a contributor to re-run a pipeline that already ran.
+
 When `no-mistakes` publishes this note itself, the helper becomes redundant and nothing about the check changes: the note format is the contract, and which program writes it is not.
+
+## Re-evaluating a head after the note is published
+
+The note can only exist after the push it attests, and that push is what started the check, so the first evaluation of a genuinely pipeline-raised head runs before its evidence exists and correctly refuses.
+
+Publishing the note does not by itself repair that verdict.
+`refs/notes/no-mistakes` is not a pull request head, so pushing it fires no `pull_request` event and nothing re-reads the head.
+Close and reopen the pull request, or edit its title or body: `reopened` and `edited` are both subscribed for exactly this, and because the verdict is bound to the head commit, re-running against an unchanged head simply re-derives it from the evidence now present.
+
+This is why `edited` is subscribed even though the verdict no longer depends on any pull request text.
+It is also the only event GitHub fires when a pull request's base branch changes, so without it a pull request retargeted onto `main` would never run this check at all.
 
 ## Landing an already-validated change on a fork
 

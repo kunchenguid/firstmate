@@ -39,9 +39,10 @@ good_note() {
 
 # Installs a fake `no-mistakes` on PATH that prints the given `axi status` body,
 # so the emitter is exercised against the tool's real output shape without a
-# pipeline run.
+# pipeline run. The body goes to stdout and the exit status is the caller's,
+# because that is what the real tool does with its own errors.
 install_pipeline_stub() {
-  local dir=$1 status=$2
+  local dir=$1 status=$2 rc=${3:-0}
   mkdir -p "$dir/bin"
   {
     printf '#!/usr/bin/env bash\n'
@@ -50,6 +51,7 @@ install_pipeline_stub() {
     printf '  "axi status") cat <<%s\n' "'FM_STUB_TOON'"
     printf '%s\n' "$status"
     printf 'FM_STUB_TOON\n'
+    printf '    exit %s\n' "$rc"
     printf '  ;;\nesac\n'
   } > "$dir/bin/no-mistakes"
   chmod +x "$dir/bin/no-mistakes"
@@ -230,6 +232,11 @@ write_out() {
   ( cd "$repo" && PATH="$repo/stub/bin:$PATH" "$ATTEST" write --no-push 2>&1 )
 }
 
+publish_out() {
+  local repo=$1
+  ( cd "$repo" && PATH="$repo/stub/bin:$PATH" "$ATTEST" write 2>&1 )
+}
+
 test_write_refuses_a_run_covering_another_head() {
   local repo head out rc
   repo="$TMP_ROOT/write-other-head"
@@ -323,6 +330,82 @@ test_write_refuses_without_a_run_record() {
   pass "fm-attest.sh: write refuses when the pipeline reports no run"
 }
 
+test_write_surfaces_a_tool_failure_instead_of_reporting_no_run() {
+  local repo out rc
+  repo="$TMP_ROOT/write-tool-error"
+  new_repo "$repo"
+  # The real tool reports its own errors on stdout and exits non-zero, so the
+  # captured output looks like a run record to anything that only checks for
+  # emptiness.
+  install_pipeline_stub "$repo/stub" \
+    "error: repo not initialized (run 'no-mistakes init' first)" 1
+  out=$(write_out "$repo")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an attestation was emitted while the pipeline tool was failing"
+  assert_contains "$out" "run-record-unreadable" "a failing tool was not reported distinctly"
+  assert_contains "$out" "repo not initialized" "the tool's own message was swallowed"
+  assert_not_contains "$out" "no-run-record" "a failing tool was reported as an absent run"
+  pass "fm-attest.sh: write surfaces a failing pipeline tool rather than reporting no run"
+}
+
+test_write_reports_an_unreadable_run_record_distinctly() {
+  local repo out rc
+  repo="$TMP_ROOT/write-unparsed-run"
+  new_repo "$repo"
+  # A successful call whose output carries no run identity: a record that exists
+  # but cannot be read is a different repair from a record that does not exist.
+  install_pipeline_stub "$repo/stub" "runs: none matching this worktree"
+  out=$(write_out "$repo")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an attestation was emitted from an unreadable run record"
+  assert_contains "$out" "run-record-unparsed" "an unreadable run record was not reported distinctly"
+  assert_contains "$out" "none matching this worktree" "the reported record was not quoted back"
+  assert_not_contains "$out" "no-run-record" "an unreadable record was reported as an absent run"
+  pass "fm-attest.sh: write distinguishes an unreadable run record from an absent one"
+}
+
+test_write_publishes_to_the_push_target_it_reconciled_against() {
+  local repo parent fork head parent_seed fork_seed local_only out rc published
+  repo="$TMP_ROOT/write-push-target"
+  parent="$TMP_ROOT/write-push-target-parent.git"
+  fork="$TMP_ROOT/write-push-target-fork.git"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  git init -q --bare "$parent"
+  git init -q --bare "$fork"
+  # Two unrelated attestation histories, one already published in each
+  # repository, so reconciling against the wrong one cannot fast-forward into
+  # the other. This is the setup CONTRIBUTING.md describes: origin fetches the
+  # parent and pushes the contributor's fork.
+  parent_seed=$(git -C "$repo" commit-tree -m parent-seed "$(git -C "$repo" rev-parse 'HEAD^{tree}')")
+  add_note "$repo" "$parent_seed" "$(good_note "$parent_seed")"
+  git -C "$repo" push -q "$parent" "$NOTES_REF:$NOTES_REF"
+  git -C "$repo" update-ref -d "$NOTES_REF"
+  fork_seed=$(git -C "$repo" commit-tree -m fork-seed "$(git -C "$repo" rev-parse 'HEAD^{tree}')")
+  add_note "$repo" "$fork_seed" "$(good_note "$fork_seed")"
+  git -C "$repo" push -q "$fork" "$NOTES_REF:$NOTES_REF"
+  git -C "$repo" update-ref -d "$NOTES_REF"
+  # An attestation held locally only, which publishing a later one must not
+  # discard.
+  local_only=$(git -C "$repo" commit-tree -m local-only "$(git -C "$repo" rev-parse 'HEAD^{tree}')")
+  add_note "$repo" "$local_only" "$(good_note "$local_only")"
+
+  git -C "$repo" remote add origin "$parent"
+  git -C "$repo" config remote.origin.pushurl "$fork"
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${head:0:8}" completed)"
+  out=$(publish_out "$repo")
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "publishing to the remote's push target was refused: $out"
+  published=$(git -C "$fork" ls-tree -r --name-only "$NOTES_REF" | tr -d '/')
+  assert_contains "$published" "$head" "the attested head never reached the push target"
+  assert_contains "$published" "$fork_seed" "publishing discarded the push target's own attestation"
+  assert_not_contains "$published" "$parent_seed" \
+    "the fetch URL's attestation history was published to the push target"
+  assert_contains "$(git -C "$repo" notes --ref="$NOTES_REF" list)" "$local_only" \
+    "publishing discarded an attestation recorded with --no-push"
+  pass "fm-attest.sh: write reconciles with and publishes to the remote's push target"
+}
+
 test_absent_notes_ref_refuses_as_absent
 test_ref_without_note_for_head_refuses_distinctly
 test_note_naming_another_head_refuses_as_unbound
@@ -339,3 +422,6 @@ test_write_refuses_a_run_from_another_branch
 test_write_emits_an_attestation_the_gate_accepts
 test_write_refuses_a_later_commit_on_the_same_branch
 test_write_refuses_without_a_run_record
+test_write_surfaces_a_tool_failure_instead_of_reporting_no_run
+test_write_reports_an_unreadable_run_record_distinctly
+test_write_publishes_to_the_push_target_it_reconciled_against

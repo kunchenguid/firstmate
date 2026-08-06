@@ -3,9 +3,16 @@ run-name: "PR #${{ github.event.pull_request.number }} attestation - ${{ github.
 
 on:
   pull_request:
-    # No body-bearing event. This check reads evidence bound to the head commit,
-    # so editing the pull request text can neither satisfy nor invalidate it.
-    types: [opened, synchronize, reopened]
+    # This check reads evidence bound to the head commit, so editing the pull
+    # request text can neither satisfy nor invalidate it. `edited` is subscribed
+    # for two reasons that have nothing to do with the body, and removing it as
+    # "just the body trigger" breaks both. It is the cheap way to re-evaluate an
+    # unchanged head after the attestation is published, since pushing
+    # refs/notes/no-mistakes fires no pull request event of its own. And it is
+    # the activity type GitHub fires when a pull request's base branch changes,
+    # so without it a pull request retargeted onto main never runs this check at
+    # all and sits waiting for a status that can no longer be reported.
+    types: [opened, synchronize, reopened, edited]
     branches:
       - main
 
@@ -61,9 +68,11 @@ jobs:
               ;;
           esac
 
-          # The base repository is read with the job's own token; a fork is read
-          # anonymously, which is all a public head repository needs and is the
-          # least authority that can do the job.
+          # The base repository is read through an explicit token URL. A fork is
+          # read through its plain https URL, which still carries the job's token
+          # because actions/checkout persists it in this workspace's git config,
+          # so neither read is anonymous. Both are read-only and both go to the
+          # host the token was issued for.
           if [ "$HEAD_REPO" = "$BASE_REPO" ]; then
             url="https://x-access-token:${GH_TOKEN}@github.com/${HEAD_REPO}.git"
           else
@@ -113,6 +122,13 @@ jobs:
             echo "It reads the pipeline's own run record and refuses unless that run validated"
             echo "this exact commit, so it cannot be satisfied by editing text. A new commit is"
             echo "a new head and needs its own attestation."
+            echo
+            echo "Publishing the note does not re-run this check by itself. refs/notes/no-mistakes"
+            echo "is not a pull request head, so pushing it fires no pull request event and this"
+            echo "verdict stands until something re-evaluates the head. Once the note is published,"
+            echo "close and reopen this pull request, or edit its title or body; both re-run the"
+            echo "check, and because the verdict is bound to the head commit an unchanged head"
+            echo "simply re-derives its result from the evidence now present."
             echo
             echo "See CONTRIBUTING.md for setup and docs/no-mistakes-attestation.md for what"
             echo "this check does and does not establish."
