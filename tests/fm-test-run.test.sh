@@ -327,14 +327,8 @@ test_runtime_gate_required_and_optional_outcomes() {
   required_out="$tmp/required.out"
   optional_out="$tmp/optional.out"
   required_json="$tmp/required.json"
-  cat >"$skip_f" <<'SH'
-#!/usr/bin/env bash
-echo "skip: herdr not found"
-exit 0
-SH
+  printf '#!/usr/bin/env bash\necho "ok - unit coverage"\necho "FM_TEST_RUNTIME_GATE runtime=herdr outcome=exercised"\n' >"$skip_f"
   chmod +x "$skip_f"
-
-  printf '#!/usr/bin/env bash\necho "ok - Herdr gate exercised"\n' >"$skip_f"
   "$RUNNER" --runtime-gate herdr=required "$skip_f" >"$tmp/exercised.out" 2>"$tmp/exercised.err" \
     || { rm -rf "$tmp"; fail "an exercised required Herdr gate must pass"; }
   exercised_out="$tmp/exercised.out"
@@ -343,6 +337,7 @@ SH
 
   cat >"$skip_f" <<'SH'
 #!/usr/bin/env bash
+echo "FM_TEST_RUNTIME_GATE runtime=herdr outcome=unavailable"
 echo "skip: herdr not found"
 exit 0
 SH
@@ -375,8 +370,90 @@ assert script["exit"] == 1
     || fail "optional runtime skip lacks typed availability evidence: $(grep '^FM_TEST_GATE' "$optional_out")"
   grep -Eq '^FM_TEST_END .+ exit=0 duration_ms=[0-9]+ gate_skip=true gate_outcome=intentionally-unavailable$' "$optional_out" \
     || fail "optional runtime END marker is wrong: $(grep '^FM_TEST_END' "$optional_out")"
+
+  printf '#!/usr/bin/env bash\necho "ok - unit coverage passed before runtime skip"\n' >"$skip_f"
+  set +e
+  "$RUNNER" --runtime-gate herdr=required "$skip_f" >"$tmp/missing.out" 2>"$tmp/missing.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a mapped gate without explicit runtime evidence must fail"
+  grep -Eq '^FM_TEST_GATE .+ runtime=herdr requirement=required outcome=unexpectedly-skipped$' "$tmp/missing.out" \
+    || fail "missing runtime evidence lacks typed failure output: $(cat "$tmp/missing.out")"
+  grep -Fq 'runtime gate evidence missing or invalid' "$tmp/missing.err" \
+    || fail "missing runtime evidence lacks an actionable diagnostic: $(cat "$tmp/missing.err")"
+
+  cat >"$skip_f" <<'SH'
+#!/usr/bin/env bash
+echo "ok - unit coverage passed"
+echo "skip: herdr not found after unit coverage"
+echo "FM_TEST_RUNTIME_GATE runtime=herdr outcome=unavailable"
+SH
+  set +e
+  "$RUNNER" --runtime-gate herdr=required "$skip_f" >"$tmp/mixed.out" 2>"$tmp/mixed.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an explicitly unavailable mixed-suite runtime must fail when required"
+  grep -Eq '^FM_TEST_GATE .+ runtime=herdr requirement=required outcome=unexpectedly-skipped$' "$tmp/mixed.out" \
+    || fail "mixed-suite unavailable evidence was not consumed: $(cat "$tmp/mixed.out")"
   rm -rf "$tmp"
-  pass "runtime gate declarations distinguish required and intentionally unavailable coverage"
+  pass "runtime gates require explicit exercised or unavailable evidence"
+}
+
+test_runtime_gate_selection_validation_and_real_test_mapping() {
+  local tmp repo fixture rc out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-runtime-selection.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+
+  set +e
+  "$RUNNER" --runtime-gate herdr=required tests/fm-lint.test.sh >"$tmp/unrelated.out" 2>"$tmp/unrelated.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "required Herdr must fail when the selection has no Herdr gate"
+  grep -Fxq 'FM_TEST_GATE selection runtime=herdr requirement=required outcome=unexpectedly-skipped reason=no-selected-gate' "$tmp/unrelated.out" \
+    || fail "unrelated selection lacks typed no-selected-gate evidence: $(cat "$tmp/unrelated.out")"
+
+  set +e
+  "$RUNNER" --runtime-gate herdr=required --family real-herdr-gated \
+    --exclude-family real-herdr-gated >"$tmp/excluded.out" 2>"$tmp/excluded.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "required Herdr must fail after exclusions remove every Herdr gate"
+
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --runtime-gate herdr=required --changed --base HEAD) \
+    >"$tmp/empty.out" 2>"$tmp/empty.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "required Herdr must fail for an empty changed selection"
+  grep -Fq 'reason=no-selected-gate' "$tmp/empty.out" \
+    || fail "empty required selection lacks typed gate evidence: $(cat "$tmp/empty.out")"
+
+  fixture="$tmp/fm-backend-orca.test.sh"
+  printf '#!/usr/bin/env bash\necho "ok - fake Orca coverage"\n' >"$fixture"
+  chmod +x "$fixture"
+  set +e
+  "$RUNNER" --runtime-gate orca=required "$fixture" >"$tmp/orca.out" 2>"$tmp/orca.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "fake-only Orca coverage must not satisfy a required Orca runtime"
+  grep -Fq 'runtime=orca requirement=required outcome=unexpectedly-skipped reason=no-selected-gate' "$tmp/orca.out" \
+    || fail "fake-only Orca refusal lacks typed evidence: $(cat "$tmp/orca.out")"
+  "$RUNNER" --runtime-gate orca=optional "$fixture" >"$tmp/orca-optional.out" 2>"$tmp/orca-optional.err" \
+    || fail "an unmatched optional Orca declaration must preserve local fake-only coverage"
+  grep -Eq '^FM_TEST_BEGIN .+ family=orca runtime_gate=none gate_requirement=none$' "$tmp/orca-optional.out" \
+    || fail "fake Orca suite must be unmapped from runtime evidence: $(cat "$tmp/orca-optional.out")"
+
+  for fixture in "$tmp/fm-backend-cmux.test.sh" "$tmp/fm-backend-zellij.test.sh"; do
+    printf '#!/usr/bin/env bash\necho "ok - fake runtime coverage"\n' >"$fixture"
+    chmod +x "$fixture"
+    out=$("$RUNNER" "$fixture") || fail "fake runtime fixture must remain ordinary coverage: $fixture"
+    printf '%s\n' "$out" | grep -Eq '^FM_TEST_BEGIN .+ family=(cmux|zellij) runtime_gate=none gate_requirement=none$' \
+      || fail "fake runtime suite must be unmapped from runtime evidence: $out"
+  done
+
+  rm -rf "$tmp"
+  pass "required declarations validate selections and only real tests map runtimes"
 }
 
 test_runtime_gate_declaration_parser_refuses_malformed_input() {
@@ -772,6 +849,7 @@ test_timing_markers_and_json
 test_aggregate_exit_behavior
 test_gate_skip_accounting
 test_runtime_gate_required_and_optional_outcomes
+test_runtime_gate_selection_validation_and_real_test_mapping
 test_runtime_gate_declaration_parser_refuses_malformed_input
 test_fail_on_gate_skip_token
 test_exclude_family

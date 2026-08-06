@@ -34,9 +34,9 @@
 #                   dedicated required Herdr lane owns that coverage)
 #   --runtime-gate <runtime>=required|optional
 #                   declare whether a selected runtime gate must be exercised.
-#                   Required gates fail on a test's first-line skip and emit a
-#                   typed FM_TEST_GATE marker. Optional gates retain a successful
-#                   skip with typed intentionally-unavailable evidence.
+#                   Required gates need a selected real-runtime test and explicit
+#                   FM_TEST_RUNTIME_GATE evidence. Optional unavailable runtimes
+#                   retain a successful typed intentionally-unavailable outcome.
 #   --fail-on-gate-skip <token>
 #                   legacy free-text skip refusal, retained for compatibility.
 #   --jobs N        run the selected scripts with up to N concurrent workers.
@@ -48,6 +48,7 @@
 #
 # Per-script machine-parseable markers (stdout):
 #   FM_TEST_BEGIN <iso8601> <script> family=<family> runtime_gate=<runtime|none> gate_requirement=<required|optional|none>
+#   FM_TEST_RUNTIME_GATE runtime=<runtime> outcome=<exercised|unavailable>  (exactly once from mapped tests)
 #   FM_TEST_GATE <script> runtime=<runtime|none> requirement=<required|optional|none> outcome=<exercised|intentionally-unavailable|unexpectedly-skipped|legacy-skip|failed>
 #   FM_TEST_END <iso8601> <script> exit=<code> duration_ms=<n> gate_skip=<true|false> gate_outcome=<outcome>
 #
@@ -57,9 +58,10 @@
 #   FM_TEST_SLOWEST rank=<k> script=<path> duration_ms=<n>
 #
 # Exit status is non-zero if any selected script exits non-zero, a required
-# runtime gate is skipped, or a configured legacy --fail-on-gate-skip token
-# appears. A selected optional runtime reports intentionally-unavailable when
-# its first meaningful line matches ^skip:, while unmapped scripts retain the
+# runtime gate has no selected real-runtime test or lacks exercised evidence, a
+# mapped test omits typed evidence, or a configured legacy
+# --fail-on-gate-skip token appears. A mapped optional runtime may report
+# intentionally-unavailable explicitly, while unmapped scripts retain the
 # legacy successful skip behavior.
 #
 # Family labels, the changed-file map, and production portable-shard composition
@@ -224,13 +226,16 @@ family_for_basename() {
   esac
 }
 
-runtime_gate_for_family() {
+runtime_gate_for_basename() {
   case "$1" in
-    real-herdr-gated) printf '%s\n' herdr ;;
-    cmux) printf '%s\n' cmux ;;
-    zellij) printf '%s\n' zellij ;;
-    orca) printf '%s\n' orca ;;
-    *) printf '%s\n' none ;;
+    fm-backend-cmux-smoke.test.sh) printf '%s\n' cmux ;;
+    fm-backend-zellij-smoke.test.sh) printf '%s\n' zellij ;;
+    *)
+      case "$(family_for_basename "$1")" in
+        real-herdr-gated) printf '%s\n' herdr ;;
+        *) printf '%s\n' none ;;
+      esac
+      ;;
   esac
 }
 
@@ -277,6 +282,29 @@ runtime_gate_requirement() {
     fi
   done
   printf '%s\n' optional
+}
+
+validate_required_runtime_gate_selections() {
+  local declaration runtime requirement script selected_runtime matched
+  for declaration in "${RUNTIME_GATE_DECLARATIONS[@]+"${RUNTIME_GATE_DECLARATIONS[@]}"}"; do
+    runtime=${declaration%%$'\t'*}
+    requirement=${declaration#*$'\t'}
+    [ "$requirement" = required ] || continue
+    matched=0
+    for script in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
+      selected_runtime=$(runtime_gate_for_basename "$(basename "$script")")
+      if [ "$selected_runtime" = "$runtime" ]; then
+        matched=1
+        break
+      fi
+    done
+    if [ "$matched" -eq 0 ]; then
+      printf 'FM_TEST_GATE selection runtime=%s requirement=required outcome=unexpectedly-skipped reason=no-selected-gate\n' "$runtime"
+      log "required runtime gate has no selected real-runtime test: runtime=$runtime"
+      return 1
+    fi
+  done
+  return 0
 }
 
 list_known_families() {
@@ -1432,6 +1460,8 @@ if [ "$JOBS" -gt 1 ]; then
   SELECTION_DESC="${SELECTION_DESC};jobs=$JOBS"
 fi
 
+validate_required_runtime_gate_selections || exit 1
+
 if [ "$LIST_ONLY" -eq 1 ]; then
   for s in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
     printf '%s\n' "$s"
@@ -1518,35 +1548,58 @@ family_bump() {
 record_script_result() {
   local script=$1 rc=$2 duration=$3 out=$4 end_iso=$5
   local base family runtime requirement gate_skip gate_outcome fail_delta
+  local runtime_signal runtime_signal_count runtime_signal_line
   base=$(basename "$script")
   family=$(family_for_basename "$base")
-  runtime=$(runtime_gate_for_family "$family")
+  runtime=$(runtime_gate_for_basename "$base")
   requirement=$(runtime_gate_requirement "$runtime")
 
   gate_skip=false
-  if [ "$rc" -eq 0 ] && detect_gate_skip "$out"; then
+  runtime_signal=
+  runtime_signal_count=0
+  while IFS= read -r runtime_signal_line; do
+    runtime_signal=$runtime_signal_line
+    runtime_signal_count=$((runtime_signal_count + 1))
+  done < <(grep '^FM_TEST_RUNTIME_GATE ' "$out" 2>/dev/null || true)
+
+  if [ "$rc" -ne 0 ]; then
+    gate_outcome=failed
+  elif [ "$runtime" != none ]; then
+    case "$runtime_signal_count:$runtime_signal" in
+      "1:FM_TEST_RUNTIME_GATE runtime=$runtime outcome=exercised")
+        gate_outcome=exercised
+        ;;
+      "1:FM_TEST_RUNTIME_GATE runtime=$runtime outcome=unavailable")
+        gate_skip=true
+        SKIPPED_GATE=$((SKIPPED_GATE + 1))
+        if [ "$requirement" = required ]; then
+          gate_outcome=unexpectedly-skipped
+          rc=1
+          log "required runtime gate not exercised: runtime=$runtime script=$script"
+        else
+          gate_outcome=intentionally-unavailable
+        fi
+        ;;
+      *)
+        gate_skip=true
+        SKIPPED_GATE=$((SKIPPED_GATE + 1))
+        gate_outcome=unexpectedly-skipped
+        rc=1
+        log "runtime gate evidence missing or invalid: runtime=$runtime script=$script markers=$runtime_signal_count"
+        ;;
+    esac
+  elif detect_gate_skip "$out"; then
     gate_skip=true
     SKIPPED_GATE=$((SKIPPED_GATE + 1))
-    case "$requirement" in
-      required) gate_outcome=unexpectedly-skipped ;;
-      optional) gate_outcome=intentionally-unavailable ;;
-      none) gate_outcome=legacy-skip ;;
-    esac
-  elif [ "$rc" -eq 0 ]; then
-    gate_outcome=exercised
+    gate_outcome=legacy-skip
   else
-    gate_outcome=failed
+    gate_outcome=exercised
   fi
 
   if [ -n "$FAIL_ON_GATE_SKIP" ] && detect_gate_skip_token "$out" "$FAIL_ON_GATE_SKIP"; then
     log "required gate skip token seen in $script: skip: $FAIL_ON_GATE_SKIP"
     rc=1
     gate_outcome=unexpectedly-skipped
-  fi
-
-  if [ "$requirement" = required ] && [ "$gate_skip" = true ]; then
-    log "required runtime gate not exercised: runtime=$runtime script=$script"
-    rc=1
   fi
 
   printf 'FM_TEST_GATE %s runtime=%s requirement=%s outcome=%s\n' \
@@ -1573,7 +1626,7 @@ run_one_serial() {
   local base family runtime requirement out begin_iso begin_ms end_ms end_iso duration rc
   base=$(basename "$script")
   family=$(family_for_basename "$base")
-  runtime=$(runtime_gate_for_family "$family")
+  runtime=$(runtime_gate_for_basename "$base")
   requirement=$(runtime_gate_requirement "$runtime")
   out="$RUN_TMP/out.$TOTAL"
   begin_iso=$(now_iso)
@@ -1681,7 +1734,7 @@ else
     chmod 0700 "$work" "$work/tmp" || die "could not chmod 0700 worker root $work"
     base=$(basename "$script")
     family=$(family_for_basename "$base")
-    runtime=$(runtime_gate_for_family "$family")
+    runtime=$(runtime_gate_for_basename "$base")
     requirement=$(runtime_gate_requirement "$runtime")
     printf 'FM_TEST_BEGIN %s %s family=%s runtime_gate=%s gate_requirement=%s\n' \
       "$(now_iso)" "$script" "$family" "$runtime" "$requirement"
