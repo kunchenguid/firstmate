@@ -16,10 +16,28 @@
 # ingests it, acknowledges the captured generation, then registers the next
 # cursor-anchored source. A continuity break is escalated and not re-armed.
 #
-# Ingest accepts only bounded, printable status lines with an allowed lifecycle
-# verb and corr=<16hex>. Exact lines are appended at most once to the parent's
-# state/<id>.status. A data/*.md pointer is fetched through the path-confined
-# remote file reader and rewritten to its local private copy before append.
+# This channel is a status-stream MIRROR, not a correlated-reply channel. A local
+# secondmate appends its whole status stream straight into the parent's
+# state/<id>.status, and every parent consumer - the open-decision fold, wake
+# classification, crew-state reconciliation, and pending-reply resolution - reads
+# that one stream. A remote secondmate must present the same model, so ingest
+# reproduces its stream line for line and leaves every semantic judgement to
+# those same shared consumers. Correlation is a per-line property that
+# fm-pending-reply-lib.sh consumes; it is never a gate on the stream. Gating on
+# it here made a remote mate's own progress lines and newly raised decisions -
+# which carry no corr= by contract - unrepresentable, and rejecting one line
+# failed the whole delta, so the cursor could never advance past it.
+#
+# What remains here is only what crossing a machine boundary genuinely adds:
+#   - cursor continuity and identity (offset plus prefix digest)
+#   - data/*.md pointers fetched through the path-confined remote file reader and
+#     rewritten to their local copies, because the parent cannot read the remote
+#     filesystem
+#   - at-most-once append, because a captured generation can be replayed
+#   - control-byte normalization, so bytes from another machine cannot make the
+#     parent's status file unsafe to read; it rewrites bytes, never drops a line
+# Line framing and size bounding belong to bin/fm-remote-delta-read.sh, which
+# delivers only whole lines and breaks continuity on an over-long one.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,8 +48,11 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CURSOR_DIR="$STATE/remote-replies"
 REMOTE_LOG='state/parent-replies.status'
 WAIT_SECONDS=${FM_REMOTE_REPLY_WAIT_SECONDS:-55}
-MAX_LINE_BYTES=${FM_REMOTE_REPLY_MAX_LINE_BYTES:-2048}
 MAX_DOC_BYTES=${FM_REMOTE_REPLY_MAX_DOC_BYTES:-262144}
+# fm-on.sh returns ssh's status unchanged, so 255 alone means unavailable
+# transport or unknown remote completion. Any other nonzero status is the remote
+# reader's own refusal and will not change on a retry.
+SSH_UNAVAILABLE=255
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -41,7 +62,7 @@ MAX_DOC_BYTES=${FM_REMOTE_REPLY_MAX_DOC_BYTES:-262144}
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 sha256_file() {
   if command -v shasum >/dev/null 2>&1; then
@@ -207,8 +228,11 @@ safe_doc_path() {
   return 0
 }
 
+# Fetch one referenced remote document. Returns 0 on success, SSH_UNAVAILABLE
+# when the transport itself was unavailable and a retry is warranted, and 1 when
+# the remote reader refused the path or size, which no retry would change.
 fetch_document() { # <id> <remote-relative> <result-var>
-  local id=$1 rel=$2 result_var=$3 base destination parent parent_real tmp local_rel
+  local id=$1 rel=$2 result_var=$3 base destination parent parent_real tmp local_rel rc=0
   safe_doc_path "$rel" || return 1
   base="$DATA/remote-secondmates/$id"
   destination="$base/$rel"
@@ -219,8 +243,10 @@ fetch_document() { # <id> <remote-relative> <result-var>
   case "$parent_real" in "$base"|"$base"/*) ;; *) return 1 ;; esac
   [ ! -L "$destination" ] || return 1
   tmp=$(umask 077; mktemp "$parent/.remote-doc.XXXXXX") || return 1
-  if ! "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh get "$rel" "$MAX_DOC_BYTES" < /dev/null > "$tmp"; then
+  "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh get "$rel" "$MAX_DOC_BYTES" < /dev/null > "$tmp" || rc=$?
+  if [ "$rc" -ne 0 ]; then
     rm -f -- "$tmp"
+    [ "$rc" -ne "$SSH_UNAVAILABLE" ] || return "$SSH_UNAVAILABLE"
     return 1
   fi
   chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
@@ -229,19 +255,20 @@ fetch_document() { # <id> <remote-relative> <result-var>
   printf -v "$result_var" '%s' "$local_rel"
 }
 
-line_valid() { # <line>
-  local line=$1 bytes
-  [ -n "$line" ] || return 1
-  bytes=$(printf '%s' "$line" | LC_ALL=C wc -c | tr -d ' ')
-  [ "$bytes" -le "$MAX_LINE_BYTES" ] || return 1
-  [ -z "$(printf '%s' "$line" | LC_ALL=C tr -d '\11\40-\176')" ] || return 1
-  printf '%s' "$line" | grep -Eq '^(working|needs-decision|blocked|paused|done|failed|resolved)([[:space:]]+\[[^]]+\])?:' || return 1
-  printf '%s' "$line" | grep -Eq 'corr=[A-Fa-f0-9]{16}'
+# The one adaptation a machine boundary forces on the mirrored bytes: C0 control
+# characters and DEL become '?' so a transported line cannot make the parent's
+# status file unsafe to read or print. Tab, every printable ASCII byte, and every
+# high byte pass through untouched, so ordinary UTF-8 notes mirror exactly as a
+# local secondmate would have written them. This rewrites bytes and never drops a
+# line: no single line can stop the stream.
+mirror_line() { # <line> -> the exact bytes to append
+  printf '%s' "$1" | LC_ALL=C tr '\1-\10\13-\37\177' '?'
 }
 
 cmd_ingest() {
   local id=${1:-} result=${2:-} seq=${3:-} class blank payload schema status path from to from_hash to_hash payload_hash payload_bytes reason
   local actual_bytes actual_hash line doc local_doc rewritten appended=0 cursor_already=0 lock status_file tmp
+  local fetch_rc undelivered=''
   validate_id "$id"
   [ -f "$result" ] && [ ! -L "$result" ] || die "result file is unavailable or unsafe: $result"
   class=$(classify_result "$result")
@@ -294,11 +321,24 @@ cmd_ingest() {
   fi
   [ "$status" = delta ] && [ "$payload_bytes" -gt 0 ] || { fm_lock_release "$lock"; die "delta result has no payload"; }
   while IFS= read -r line || [ -n "$line" ]; do
-    line_valid "$line" || { fm_lock_release "$lock"; die "delta contains an invalid or uncorrelated status line"; }
-    rewritten=$line
+    [ -n "$line" ] || continue
+    rewritten=$(mirror_line "$line")
     while IFS= read -r doc; do
       [ -n "$doc" ] || continue
-      fetch_document "$id" "$doc" local_doc || { fm_lock_release "$lock"; die "could not fetch referenced remote document: $doc"; }
+      fetch_rc=0
+      fetch_document "$id" "$doc" local_doc || fetch_rc=$?
+      # Transport unavailable is unknown, not a verdict: leave the whole delta
+      # for the runner's existing retry rather than mirroring a pointer whose
+      # document may yet arrive.
+      [ "$fetch_rc" -ne "$SSH_UNAVAILABLE" ] \
+        || { fm_lock_release "$lock"; die "remote transport was unavailable while fetching $doc"; }
+      if [ "$fetch_rc" -ne 0 ]; then
+        # The remote reader refused this document and always will. Mirror the
+        # mate's line with its own pointer intact rather than inventing a local
+        # path or stalling the stream, and name the gap once for this delta.
+        undelivered="${undelivered}${undelivered:+, }$doc"
+        continue
+      fi
       rewritten=${rewritten//"$doc"/"$local_doc"}
     done < <(printf '%s\n' "$line" | grep -Eo 'data/[A-Za-z0-9._/-]+\.md' | awk '!seen[$0]++')
     if ! grep -Fqx -- "$rewritten" "$status_file" 2>/dev/null; then
@@ -306,6 +346,13 @@ cmd_ingest() {
       appended=$((appended + 1))
     fi
   done < "$payload"
+  if [ -n "$undelivered" ]; then
+    line="blocked [key=remote-reply-document-$id]: remote documents did not transfer for $id ($undelivered)"
+    if ! grep -Fqx -- "$line" "$status_file" 2>/dev/null; then
+      printf '%s\n' "$line" >> "$status_file" || { fm_lock_release "$lock"; die "cannot append document escalation"; }
+      appended=$((appended + 1))
+    fi
+  fi
   while IFS= read -r corr; do
     [ -n "$corr" ] || continue
     fm_pending_reply_try_resolve "$STATE" "$corr" "$status_file" >/dev/null 2>&1 || true
