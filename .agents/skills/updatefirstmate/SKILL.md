@@ -1,9 +1,9 @@
 ---
 name: updatefirstmate
 description: >-
-  Self-update a running firstmate and its secondmates to the latest from origin.
+  Self-update a running firstmate and its secondmates through its configured origin.
   Use when the captain invokes /updatefirstmate (e.g. "/updatefirstmate", "update firstmate", "pull the latest firstmate").
-  Fast-forwards this firstmate repo's default branch and every local or remote secondmate through its guarded update path (never forced, never disruptive), then re-reads AGENTS.md and nudges each updated secondmate to do the same, so the whole tree runs the latest bin/ and instructions.
+  When origin is a GitHub fork, first fast-forwards the fork from its parent with gh, then fast-forwards this firstmate repo's default branch and every local or remote secondmate through its guarded update path (never forced, never disruptive), re-reads AGENTS.md, and nudges each updated secondmate to do the same.
 user-invocable: true
 metadata:
   internal: true
@@ -11,10 +11,10 @@ metadata:
 
 # updatefirstmate
 
-Self-update firstmate in place.
+Self-update firstmate through its configured origin.
 Firstmate is its own repo, behind the same no-mistakes gate as any project, so new tracked material (`AGENTS.md`, `bin/`, `.agents/skills/`, and public `skills/`) reaches `main` and then sits there until each running firstmate pulls it.
 Only `AGENTS.md`, `bin/`, and `.agents/skills/` are a running firstmate instruction surface; public `skills/` is installer-facing and is not loaded by firstmate.
-This skill performs that pull for the running main firstmate and every secondmate, without disturbing any in-flight work.
+When `origin` is a GitHub fork, this skill first synchronizes that fork from its GitHub parent, then performs the pull for the running main firstmate and every secondmate without disturbing any in-flight work.
 
 The update is **fast-forward only** - the same sanctioned self-write as the fleet sync firstmate already runs.
 For a remote route, it updates the configured Firstmate code root on that host from its own origin, then guardedly fast-forwards the persistent home to that code-root commit.
@@ -24,21 +24,35 @@ This touches only the firstmate repo and its own worktrees, never anything under
 
 ## What it does
 
-1. **Run the updater:**
+1. **Resolve the configured origin and synchronize its fork when applicable.**
+   Read the exact origin URL with `git remote get-url origin`, then inspect that repository explicitly rather than letting `gh` choose among local remotes:
+   ```sh
+   gh repo view <origin-url> --json nameWithOwner,isFork,defaultBranchRef
+   ```
+   When `isFork` is `true`, fast-forward that fork's default branch from its GitHub parent:
+   ```sh
+   gh repo sync <nameWithOwner> --branch <defaultBranchRef.name>
+   ```
+   Never pass `--force`.
+   The default `gh repo sync` behavior is fast-forward only, so a diverged fork remains untouched and the update stops for captain attention.
+   When `isFork` is `false`, skip this step and continue with the configured origin as before.
+   If the origin cannot be resolved, GitHub authentication or metadata inspection fails, or fork synchronization fails, stop and report the concrete failure rather than updating around a stale or unknown origin.
+
+2. **Run the updater:**
    ```sh
    bin/fm-update.sh
    ```
-   It fast-forwards this firstmate repo's default branch from origin, then updates every registered local or remote secondmate home through its placement-specific guarded path.
+   It fetches the now-current origin, fast-forwards this firstmate repo's default branch, then updates every registered local or remote secondmate home through its placement-specific guarded path.
    It prints one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed by two action lines that tell you exactly what to do next:
    - `reread-firstmate: yes|no`
    - `nudge-secondmates: fm-<id>...|none`
 
-2. **Re-read AGENTS.md if your own instructions changed.**
+3. **Re-read AGENTS.md if your own instructions changed.**
    When the updater printed `reread-firstmate: yes`, the tracked instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) just advanced under you.
    **Read `AGENTS.md` now** (CLAUDE.md is a symlink to it) to refresh your operating instructions before doing anything else, so you are acting on the new instructions rather than the stale ones you were started with.
    When it printed `reread-firstmate: no`, nothing changed for you - skip the re-read.
 
-3. **Nudge each updated live secondmate.**
+4. **Nudge each updated live secondmate.**
    For every target listed on the `nudge-secondmates:` line (do nothing when it says `none`), send a one-line re-read nudge so that secondmate picks up its new instructions too:
    ```sh
    FM_HOME=<this-firstmate-home> bin/fm-send.sh <id> 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'
@@ -47,13 +61,16 @@ This touches only the firstmate repo and its own worktrees, never anything under
    This is a gentle steer, not an interruption: the secondmate already got a safe tracked-files fast-forward, and the nudge never forces, tears down, or discards its work.
    A secondmate that was skipped, already current, or has no live metadata is not on the list and needs no nudge.
 
-4. **Report to the captain in plain outcomes.**
-   Summarize what landed under `AGENTS.md` section 9 without firstmate's internal vocabulary: which parts of the fleet are now on the latest, and which were left as-is and why.
+5. **Report to the captain in plain outcomes.**
+   Summarize what landed under `AGENTS.md` section 9 without firstmate's internal vocabulary: whether the fork synchronized, which parts of the fleet are now on the latest, and which were left as-is and why.
    For example: "Captain, firstmate and both second mates are now on the latest."
    Surface any skipped target whose reason needs the captain's attention - for instance a home with its own un-landed changes (diverged) or local edits (dirty), which were left untouched on purpose.
 
 ## Safety
 
+- **Fork first.**
+  A GitHub fork is synchronized from its parent before local or secondmate updates, so every running home continues to consume its configured origin.
+  Fork divergence stops for captain attention; `--force` is never used.
 - **Fast-forward only.**
   A target that has diverged, is dirty, is offline, or is on a non-default branch is skipped and reported, never forced or stashed.
   Nothing with unlanded work is ever discarded - this is prime directive #3.
