@@ -448,6 +448,9 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. Never reference an external issue tracker ID (Linear, Jira, GitHub issue numbers, etc.) or narrate
+   decision history (e.g. "originally X, changed to Y", dated correction language) in this project's
+   own code comments or documentation. State only the current, durable technical truth.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
