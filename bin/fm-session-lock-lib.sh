@@ -74,6 +74,94 @@ fm_harness_process_matches() {  # <comm> <args>
   return 1
 }
 
+# --- Windows (Git Bash / MSYS) ancestry -------------------------------------
+# Git Bash's ps supports no -o format (exits 1) and cannot see native Windows
+# processes at all: a shell spawned by claude.exe reports PPID 1, so the POSIX
+# walk below can never reach the harness. On Windows the real process tree is
+# walked through PowerShell/CIM instead, starting from this shell's WINPID.
+# The session lock therefore stores Windows pids on this platform, and holder
+# liveness goes through CIM as well (kill -0 does not accept Windows pids).
+
+fm_session_lock_on_windows() {
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Print "pid|name|commandline" for each Windows ancestor of this shell,
+# innermost first, up to 16 MSYS hops plus 16 native hops, in one PowerShell
+# invocation.
+#
+# The walk is hybrid because MSYS fork emulation severs the native parent
+# chain: a bash forked by another bash records a transient stub as its Windows
+# parent, dead by the time anyone looks, so a pure CIM walk from this shell
+# stops one hop up. The MSYS pid table (ps PID/PPID/WINPID columns, stable
+# positions before the variable-width STIME) bridges exactly those gaps: climb
+# it to the MSYS root, collect every ancestor's WINPID, then resolve them all
+# through CIM and continue up the native chain from the root - whose Windows
+# parent (the harness that CreateProcess'd it) really is alive.
+#
+# The PowerShell script is fed on stdin as a single line because PowerShell's
+# stdin command mode silently drops multi-line blocks. CommandLine newlines
+# are flattened so each ancestor stays one parseable line; only the first two
+# | are separators, a command line containing | lands intact in the args field.
+fm_win_ancestry_chain() {
+  local table pid=$$ row ppid winpid winpids='' guard=0
+  table=$(ps 2>/dev/null) || return 1
+  while [ "$guard" -lt 16 ]; do
+    guard=$((guard + 1))
+    row=$(printf '%s\n' "$table" | awk -v p="$pid" '$1==p {print $2" "$4; exit}')
+    [ -n "$row" ] || break
+    ppid=${row% *}
+    winpid=${row#* }
+    case "$winpid" in ''|*[!0-9]*) break ;; esac
+    winpids="$winpids,$winpid"
+    case "$ppid" in ''|*[!0-9]*) break ;; esac
+    [ "$ppid" -gt 1 ] || break
+    pid=$ppid
+  done
+  winpids=${winpids#,}
+  [ -n "$winpids" ] || return 1
+  FM_WIN_WALK_PIDS=$winpids powershell.exe -NoProfile -NonInteractive -Command - <<'PSEOF' 2>/dev/null | tr -d '\r'
+$ErrorActionPreference='SilentlyContinue'; $last=$null; foreach($q in ($env:FM_WIN_WALK_PIDS -split ',')){ $proc=Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$q)"; if($proc){ Write-Output ("{0}|{1}|{2}" -f $proc.ProcessId,$proc.Name,($proc.CommandLine -replace "[\r\n]+"," ")); $last=$proc } }; if($last){ $p=$last.ParentProcessId; for($i=0; $i -lt 16 -and $p -gt 4; $i++){ $proc=Get-CimInstance Win32_Process -Filter "ProcessId=$p"; if(-not $proc){break}; Write-Output ("{0}|{1}|{2}" -f $proc.ProcessId,$proc.Name,($proc.CommandLine -replace "[\r\n]+"," ")); $p=$proc.ParentProcessId } }
+PSEOF
+}
+
+# Windows variant of fm_harness_ancestry_pids: identical contiguity contract
+# and fm_harness_process_matches evidence, applied to the CIM chain.
+fm_win_harness_ancestry_pids() {
+  local chain pid name args extending=0 printed=0
+  chain=$(fm_win_ancestry_chain) || return 1
+  [ -n "$chain" ] || return 1
+  while IFS='|' read -r pid name args; do
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    if fm_harness_process_matches "$name" "$args"; then
+      printf '%s\n' "$pid"
+      printed=1
+      [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
+      extending=1
+    elif [ "$extending" -eq 1 ]; then
+      break
+    fi
+  done <<EOF
+$chain
+EOF
+  [ "$printed" -eq 1 ]
+}
+
+# Print "name|commandline" for live Windows pid $1, or fail when it is gone.
+fm_win_process_info() {
+  local pid=$1 info
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  info=$(FM_WIN_QUERY_PID=$pid powershell.exe -NoProfile -NonInteractive -Command - <<'PSEOF' 2>/dev/null | tr -d '\r'
+$ErrorActionPreference='SilentlyContinue'; $proc=Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$env:FM_WIN_QUERY_PID)"; if($proc){ Write-Output ("{0}|{1}" -f $proc.Name,($proc.CommandLine -replace "[\r\n]+"," ")) }
+PSEOF
+)
+  [ -n "$info" ] || return 1
+  printf '%s\n' "$info"
+}
+
 # Walk the current process ancestry (up to 16 hops) and print this session's
 # contiguous verified-harness ancestry, innermost pid first.
 #
@@ -93,6 +181,10 @@ fm_harness_process_matches() {  # <comm> <args>
 # session cannot be read off the ancestry at all, so the whole contiguous run is
 # reported and the callers below decide what they need from it.
 fm_harness_ancestry_pids() {
+  if fm_session_lock_on_windows; then
+    fm_win_harness_ancestry_pids
+    return
+  fi
   local pid=$$ comm args extending=0 printed=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
@@ -132,6 +224,14 @@ EOF
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
   local pid=$1 comm args
+  if fm_session_lock_on_windows; then
+    local info
+    info=$(fm_win_process_info "$pid") || return 1
+    comm=${info%%|*}
+    args=${info#*|}
+    fm_harness_process_matches "$comm" "$args"
+    return
+  fi
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
