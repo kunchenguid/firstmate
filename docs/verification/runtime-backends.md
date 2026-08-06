@@ -678,7 +678,7 @@ App-server partial methods and raw socket experiments do not satisfy that bridge
 `bin/fm-localhost.py --help` is the single procedural owner for cross-kernel inspection, exact-PID recovery, launcher selection, and route verification.
 This section carries only the repeatable evidence for that active runtime guarantee.
 
-On 2026-08-05, the behavior suite passed with Python 3.12.3, GNU Bash 5.2.21, and Git 2.43.0.
+On 2026-08-06, the behavior suite passed with Python 3.12.3, GNU Bash 5.2.21, and Git 2.43.0.
 It uses real Git repositories and executable fake Windows/WSL kernel boundaries, so no host process is inspected or terminated while the parser, classifier, re-resolution, evidence, launcher, and refusal paths remain deterministic.
 
 ```sh
@@ -711,5 +711,5 @@ ok - post-route listener-pair changes fail verification
 ok - dirty expected checkout refuses restart after exact-PID termination
 ```
 
-The suite covers Windows listener JSON parsing, Windows drive and WSL UNC conversion, WSL-to-Windows conversion, exact Astro script/dev classification, Git source classification, command redaction, exact PID and full mutation-boundary re-resolution, unavailable Windows, WSL, and Firstmate task-state inspection, route-proof ordering, unrelated, unknown, or production-like processes, active task association, canonical relay identity, same-owner multiple bindings, the never-terminate relay boundary, the healthy relay pair, the stale native Astro recovery path, launcher shell validation and cleanup, post-route listener-pair changes, mismatched post-recovery route fingerprints, and expected-checkout revalidation before restart.
+The suite covers Windows listener JSON parsing, Windows drive and WSL UNC conversion, WSL-to-Windows conversion, exact Astro script/dev classification, Git source classification, command redaction, exact PID and full mutation-boundary re-resolution, unavailable Windows, WSL, and Firstmate task-state inspection, route-proof ordering, unrelated, unknown, or production-like processes, active task association and the shared task-state publication boundary, canonical relay identity, same-owner multiple bindings, the never-terminate relay boundary, the healthy relay pair, the stale native Astro recovery path, launcher shell validation and cleanup, post-route listener-pair changes, mismatched post-recovery route fingerprints, and expected-checkout revalidation before restart.
 Host-specific acceptance still requires `verify` against the actual project/port/expected-SHA tuple; private evidence remains under the active Firstmate home's gitignored `state/` tree rather than this maintained record.
