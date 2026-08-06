@@ -362,6 +362,19 @@ test_hook_blocks_when_unhealthy_in_primary() {
   pass "fm-turnend-guard: blocks with the exact required reason in the primary when unhealthy"
 }
 
+test_hook_blocks_during_checkpoint_rollover() {
+  local dir out status now
+  dir=$(make_primary_dir "$TMP_ROOT/hook-checkpoint-rollover")
+  : > "$dir/state/task1.meta"
+  now=$(date +%s)
+  printf 'version=1\ncheckpoint_pid=%s\nended_at=%s\n' "$$" "$now" > "$dir/state/.watch-checkpoint-rollover"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "turn-end guard must block during a quiet-checkpoint rollover gap"
+  assert_contains "$out" "TURN WOULD END BLIND" "rollover gap block omitted the blind-turn banner"
+  assert_present "$dir/state/.watch-checkpoint-rollover" "turn-end guard consumed the drain-only rollover marker"
+  pass "fm-turnend-guard: quiet-checkpoint rollover never becomes a false healthy turn end"
+}
+
 test_hook_blocks_from_fm_home_state() {
   local dir home out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-fm-home")
@@ -1550,6 +1563,7 @@ test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_non_claude_health_ignores_claude_budget_contention
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
+test_hook_blocks_during_checkpoint_rollover
 test_hook_blocks_from_fm_home_state
 test_hook_x_mode_reason_sources_cadence
 test_hook_x_mode_only_blocks_in_default_mode

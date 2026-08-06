@@ -12,6 +12,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRAIN_TMP=
 DRAIN_LOCK_HELD=false
 RAW_ROWS=
+ROLLOVER_MARKER="$STATE/.watch-checkpoint-rollover"
+ROLLOVER_GRACE=${FM_CHECKPOINT_ROLLOVER_GRACE:-60}
+case "$ROLLOVER_GRACE" in ''|*[!0-9]*|0) ROLLOVER_GRACE=60 ;; esac
 
 # Defense in depth for the supervision chain: this script runs at the top of
 # every wake-handling and recovery turn, so assert supervision health here too. A
@@ -21,10 +24,34 @@ RAW_ROWS=
 # its supervision verdict. Under Claude's between-turns auto-arm model, a normal
 # fire leaves a recent beacon well inside grace and stays silent mid-turn. Under
 # persistent-watcher models, the guard also requires the live identity-matched
-# watcher. Call after the queue is emptied so guard never re-prints its own
-# queued-wakes notice for the records this run just drained, and never let a
-# guard hiccup change the drain's exit status.
+# watcher. A Codex checkpoint deliberately ends its owned watcher before this
+# required drain, whether it surfaced a wake or reached its quiet bound.
+# The checkpoint publishes one fresh, single-use rollover marker so only this
+# immediate drain skips the otherwise misleading watcher-down alarm.
+# The marker is not a health claim, and the turn-end guard never consults it.
+# Call after the queue is emptied so guard never re-prints its own queued-wakes
+# notice for the records this run just drained, and never let a guard hiccup
+# change the drain's exit status.
+consume_checkpoint_rollover() {
+  local version checkpoint_pid ended_at line_count now age
+  [ -f "$ROLLOVER_MARKER" ] && [ ! -L "$ROLLOVER_MARKER" ] || return 1
+  version=$(sed -n '1s/^version=//p' "$ROLLOVER_MARKER" 2>/dev/null || true)
+  checkpoint_pid=$(sed -n '2s/^checkpoint_pid=//p' "$ROLLOVER_MARKER" 2>/dev/null || true)
+  ended_at=$(sed -n '3s/^ended_at=//p' "$ROLLOVER_MARKER" 2>/dev/null || true)
+  line_count=$(wc -l < "$ROLLOVER_MARKER" 2>/dev/null | tr -d '[:space:]')
+  rm -f "$ROLLOVER_MARKER"
+  [ "$version" = 1 ] || return 1
+  case "$checkpoint_pid" in ''|*[!0-9]*) return 1 ;; esac
+  case "$ended_at" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$line_count" = 3 ] || return 1
+  now=$(date +%s)
+  [ "$now" -ge "$ended_at" ] || return 1
+  age=$((now - ended_at))
+  [ "$age" -le "$ROLLOVER_GRACE" ]
+}
+
 assert_watcher_liveness() {
+  consume_checkpoint_rollover && return 0
   "$SCRIPT_DIR/fm-guard.sh" || true
 }
 
