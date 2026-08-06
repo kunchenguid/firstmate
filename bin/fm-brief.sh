@@ -297,6 +297,21 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+# The type rule, not a slogan. "An absent result is not a pass" was already
+# written down and produced ten instances of the same defect anyway, because it
+# names the symptom without naming the mechanism: a call that can fail to
+# OBSERVE returning the same type as one that observed a negative result.
+IFS= read -r -d '' VERIFICATION_DISCIPLINE <<EOF || true
+# Verification discipline
+An observation has three values, never two: observed-good, observed-bad, and could-not-observe.
+The third is a real result, not a missing one.
+An empty result set, an unreadable file, an absent artifact, an unreachable tool, a silent verifier, and an exit code that covers both a failure and a refusal are all could-not-observe, and none of them is a pass.
+Never narrow one into the other two: an empty violations log, no output, and no failures found are never success on their own, and a missing expected artifact is could-not-observe at collection time rather than work still in progress.
+Run a verifier through \`$FM_ROOT/bin/fm-verify.sh\` (\`--help\` lists the declared verifiers) and act on the \`PASS\` / \`FAIL\` / \`NO_VERIFIER_RAN\` result it returns, rather than interpreting a tool's exit status yourself.
+Before trusting a success reported only by absence, run a negative control, watch that same check go red, and only then run the real check.
+EOF
+VERIFICATION_DISCIPLINE=${VERIFICATION_DISCIPLINE%$'\n'}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -315,7 +330,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations, and run either through \`$FM_ROOT/bin/fm-verify.sh\` whenever its answer is evidence you will act on.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -333,6 +348,8 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+
+$VERIFICATION_DISCIPLINE
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -427,7 +444,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations, and run either through \`$FM_ROOT/bin/fm-verify.sh\` whenever its answer is evidence you will act on.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -448,6 +465,8 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+
+$VERIFICATION_DISCIPLINE
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

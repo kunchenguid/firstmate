@@ -708,6 +708,40 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# The verification-discipline block carries the TYPE rule, not the slogan that
+# already failed: ten instances of the same defect landed while "an absent
+# result is not a pass" was written into the shared instructions. It also keeps
+# the negative-control instruction, which fm-verify.sh deliberately does NOT
+# retire - a wrapper cannot run the control for you.
+test_verification_discipline_is_the_type_rule() {
+  local home id brief kind
+  home="$TMP_ROOT/verify-discipline-home"
+  mkdir -p "$home/data"
+  for kind in ship scout; do
+    id="brief-verify-$kind"
+    if [ "$kind" = ship ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    assert_grep "An observation has three values, never two" "$brief" \
+      "$kind brief lost the three-valued observation type rule"
+    assert_grep "none of them is a pass" "$brief" \
+      "$kind brief lost the enumeration of could-not-observe conditions"
+    assert_grep "bin/fm-verify.sh" "$brief" \
+      "$kind brief must route verifiers through the wrapper"
+    assert_grep "rather than interpreting a tool's exit status yourself" "$brief" \
+      "$kind brief must retire self-interpreted exit statuses"
+    assert_grep "run a negative control, watch that same check go red" "$brief" \
+      "$kind brief lost the negative-control instruction, which is not retired"
+    assert_no_grep "never process names" "$brief" \
+      "$kind brief still carries the exhortation the wrapper replaces"
+  done
+  pass "fm-brief.sh: briefs carry the three-valued type rule and the wrapper call site"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -728,3 +762,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_verification_discipline_is_the_type_rule
