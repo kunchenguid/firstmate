@@ -400,6 +400,44 @@ write_meta() {
     "generation_id=generation-task-x1"
 }
 
+write_scout_report_contract() {
+  local case_dir=$1
+  mkdir -p "$case_dir/data/task-x1"
+  printf '%s\n' \
+    '# Scout task' \
+    '' \
+    'Inspect disposable worktree scratch.' \
+    > "$case_dir/data/task-x1/brief.md"
+  printf '%s\n' \
+    '# Scout report' \
+    '' \
+    '## Summary' \
+    '' \
+    'The investigation is complete.' \
+    '' \
+    '## What changed' \
+    '' \
+    'Only disposable scratch was created.' \
+    '' \
+    '## Verification' \
+    '' \
+    'The scout findings were checked.' \
+    '' \
+    '## Visual evidence' \
+    '' \
+    'No visual evidence applies.' \
+    '' \
+    '## Artifacts' \
+    '' \
+    'This report is the durable artifact.' \
+    '' \
+    '## Follow-ups' \
+    '' \
+    'No follow-up is required.' \
+    > "$case_dir/data/task-x1/report.md"
+  printf '%s\n' 'report_required=1' >> "$case_dir/state/task-x1.meta"
+}
+
 # Commit something on the worktree's task branch. Args: case_dir [message]
 wt_commit() {
   local case_dir=$1 msg=${2:-wt work}
@@ -2192,6 +2230,85 @@ test_nonignored_untracked_work_refuses_without_preservation() {
   pass "non-ignored untracked work still requires preservation"
 }
 
+test_reported_scout_reclaims_untracked_scratch() {
+  local case_dir rc
+  case_dir=$(make_case reported-scout-untracked-scratch)
+  write_meta "$case_dir" no-mistakes scout
+  write_scout_report_contract "$case_dir"
+  mkdir -p "$case_dir/wt/.scratch/node_modules/example-package"
+  printf '%s\n' "re-installable dependency" \
+    > "$case_dir/wt/.scratch/node_modules/example-package/index.js"
+
+  set +e
+  FM_REPORT_STACK_ROOT="$case_dir/report-stack" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" \
+    "reported scout: untracked scratch should not block reclaim"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "reported scout: teardown left task metadata behind"
+  assert_present "$case_dir/report-stack/index.html" \
+    "reported scout: report was not published before reclaim"
+  assert_absent "$case_dir/data/task-x1/scratch" \
+    "reported scout: ordinary teardown archived disposable scratch"
+  pass "a reported scout reclaims untracked scratch without preserving it"
+}
+
+test_scout_without_report_retains_untracked_scratch() {
+  local case_dir rc
+  case_dir=$(make_case unreported-scout-untracked-scratch)
+  write_meta "$case_dir" no-mistakes scout
+  printf '%s\n' 'report_required=1' >> "$case_dir/state/task-x1.meta"
+  mkdir -p "$case_dir/wt/.scratch"
+  printf '%s\n' "unreported investigation state" \
+    > "$case_dir/wt/.scratch/finding.txt"
+
+  set +e
+  FM_REPORT_STACK_ROOT="$case_dir/report-stack" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" \
+    "unreported scout: teardown must refuse before discarding scratch"
+  assert_present "$case_dir/wt/.scratch/finding.txt" \
+    "unreported scout: teardown discarded scratch without its report"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "unreported scout: teardown cleared task metadata"
+  assert_present "$case_dir/fakebin/.tmux-live" \
+    "unreported scout: teardown stopped the endpoint before the report gate"
+  assert_grep 'has no report' "$case_dir/stderr" \
+    "unreported scout: refusal did not identify the missing report"
+  pass "a scout without its report retains untracked scratch and its endpoint"
+}
+
+test_reported_scout_retains_unlanded_commit() {
+  local case_dir rc
+  case_dir=$(make_case reported-scout-unlanded-commit)
+  write_meta "$case_dir" no-mistakes scout
+  write_scout_report_contract "$case_dir"
+  wt_commit_file "$case_dir" finding.txt "committed scout work" \
+    "scout accidentally committed work"
+
+  set +e
+  FM_REPORT_STACK_ROOT="$case_dir/report-stack" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" \
+    "reported scout: unlanded commits must remain protected"
+  assert_present "$case_dir/wt/finding.txt" \
+    "reported scout: teardown discarded an unlanded commit"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "reported scout: teardown cleared metadata for unlanded work"
+  assert_grep 'work not on any remote and not landed' "$case_dir/stderr" \
+    "reported scout: refusal did not identify the unlanded commit"
+  pass "a reported scout still retains committed-but-unlanded work"
+}
+
 test_already_returned_worktree_finishes_bookkeeping() {
   local case_dir rc
   case_dir=$(make_case already-returned)
@@ -2824,6 +2941,101 @@ test_preserve_scratch_captures_then_reclaims_dirty_worktree() {
   assert_absent "$case_dir/state/task-x1.meta" \
     "preserve-scratch: teardown left task metadata behind"
   pass "preserve-then-reclaim captures non-ignored work and summarizes ignored output"
+}
+
+test_preserve_scratch_tolerates_regenerated_captured_root() {
+  local case_dir rc scratch_capture
+  case_dir=$(make_case preserve-regenerated-root)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt landed "landed task work"
+  add_fork_with_pushed_branch "$case_dir"
+  mkdir -p "$case_dir/wt/.scratch/dependencies"
+  printf '%s\n' "captured dependency" \
+    > "$case_dir/wt/.scratch/dependencies/original.txt"
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+"$real" "$@"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+  case " $* " in
+    *" clean -fd -- .scratch/dependencies/original.txt "*)
+      mkdir -p "${FM_FAKE_REGENERATED_ROOT:?}/dependencies"
+      printf '%s\n' "regenerated after capture" \
+        > "$FM_FAKE_REGENERATED_ROOT/dependencies/regenerated.txt"
+      ;;
+  esac
+fi
+exit "$rc"
+SH
+  chmod +x "$case_dir/fakebin/git"
+
+  set +e
+  FM_FAKE_REGENERATED_ROOT="$case_dir/wt/.scratch" \
+    run_teardown "$case_dir" --preserve-scratch \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" \
+    "preserve regenerated root: captured scratch regeneration should not strand reclaim"
+  scratch_capture=$(find "$case_dir/data/task-x1/scratch" -mindepth 1 -maxdepth 1 \
+    -type d -print -quit)
+  [ -n "$scratch_capture" ] || fail \
+    "preserve regenerated root: no durable scratch capture was written"
+  tar -tf "$scratch_capture/untracked.tar" \
+    | grep -Fx '.scratch/dependencies/original.txt' >/dev/null \
+    || fail "preserve regenerated root: original scratch was not captured"
+  if tar -tf "$scratch_capture/untracked.tar" \
+    | grep -Fx '.scratch/dependencies/regenerated.txt' >/dev/null; then
+    fail "preserve regenerated root: post-capture bytes entered the completed archive"
+  fi
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "preserve regenerated root: teardown left task metadata behind"
+  pass "preservation tolerates regeneration confined to an already-captured scratch root"
+}
+
+test_preserve_scratch_refuses_regeneration_outside_captured_root() {
+  local case_dir rc
+  case_dir=$(make_case preserve-regenerated-outside-root)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt landed "landed task work"
+  add_fork_with_pushed_branch "$case_dir"
+  mkdir -p "$case_dir/wt/.scratch"
+  printf '%s\n' "captured dependency" > "$case_dir/wt/.scratch/original.txt"
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+"$real" "$@"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+  case " $* " in
+    *" clean -fd -- .scratch/original.txt "*)
+      printf '%s\n' "new work outside captured scratch" \
+        > "${FM_FAKE_REGENERATED_OUTSIDE:?}"
+      ;;
+  esac
+fi
+exit "$rc"
+SH
+  chmod +x "$case_dir/fakebin/git"
+
+  set +e
+  FM_FAKE_REGENERATED_OUTSIDE="$case_dir/wt/operator-note.txt" \
+    run_teardown "$case_dir" --preserve-scratch \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" \
+    "preserve outside root: unrelated new work must still refuse reclaim"
+  assert_present "$case_dir/wt/operator-note.txt" \
+    "preserve outside root: teardown discarded unrelated new work"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "preserve outside root: teardown cleared task metadata"
+  assert_grep 'worktree changed after scratch preservation' "$case_dir/stderr" \
+    "preserve outside root: refusal did not identify post-capture drift"
+  pass "preservation still refuses regeneration outside captured scratch roots"
 }
 
 test_preserve_scratch_never_cleans_unlanded_commits() {
@@ -6491,6 +6703,16 @@ if [ "${FM_TEST_FOCUSED:-}" = reclaim-regressions ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = scout-scratch ]; then
+  test_reported_scout_reclaims_untracked_scratch
+  test_scout_without_report_retains_untracked_scratch
+  test_nonignored_untracked_work_refuses_without_preservation
+  test_reported_scout_retains_unlanded_commit
+  test_preserve_scratch_tolerates_regenerated_captured_root
+  test_preserve_scratch_refuses_regeneration_outside_captured_root
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = dead-treehouse-reap ]; then
   test_dead_task_reaper_returns_only_clean_landed_work_without_force
   test_dead_task_reaper_treats_stale_status_as_no_liveness_evidence
@@ -6568,6 +6790,11 @@ fi
 
 if [ "${FM_TEST_FOCUSED:-}" = preserve-scratch ]; then
   test_preserve_scratch_captures_then_reclaims_dirty_worktree
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = preserve-outside-root ]; then
+  test_preserve_scratch_refuses_regeneration_outside_captured_root
   exit 0
 fi
 
@@ -6721,6 +6948,9 @@ TEARDOWN_FULL_SUITE_CASES=(
   test_dead_task_reaper_requires_exact_lease_and_closed_pr
   test_treehouse_capacity_reports_low_clean_availability
   test_nonignored_untracked_work_refuses_without_preservation
+  test_reported_scout_reclaims_untracked_scratch
+  test_scout_without_report_retains_untracked_scratch
+  test_reported_scout_retains_unlanded_commit
   test_already_returned_worktree_finishes_bookkeeping
   test_already_returned_worktree_refuses_preservation_without_mutation
   test_watchman_cookies_do_not_block_teardown
@@ -6743,6 +6973,8 @@ TEARDOWN_FULL_SUITE_CASES=(
   test_dead_reap_lock_refusal_and_cleanup_failure_are_distinct
   test_dead_reap_landing_statuses_are_distinct
   test_preserve_scratch_captures_then_reclaims_dirty_worktree
+  test_preserve_scratch_tolerates_regenerated_captured_root
+  test_preserve_scratch_refuses_regeneration_outside_captured_root
   test_preserve_scratch_never_cleans_unlanded_commits
   test_preserve_scratch_refuses_tracked_drift_before_cleanup
   test_preserve_scratch_refuses_index_drift_during_tracked_verification

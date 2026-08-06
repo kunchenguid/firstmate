@@ -29,6 +29,9 @@
 # FM_TREEHOUSE_RETURN_TIMEOUT while holding the same common checkout mutation
 # lock across its retry and stale-index-lock recovery sequence.
 # Uncommitted changes are never landed.
+# The report-satisfied scout carve-out discards only non-ignored untracked
+# scratch; tracked or staged changes, stashes, and committed-but-unlanded work
+# retain the ordinary protection.
 # Ordinary teardown first proves that metadata names the exact registered project,
 # worktree, and task lease, then quiesces the endpoint before its final safety checks.
 # Each locked Treehouse return repeats repository, lease, and landed-work checks
@@ -44,12 +47,17 @@
 # --preserve-scratch first proves committed work landed, captures tracked diffs
 # and non-ignored untracked payloads under data/<task-id>/scratch/, then cleans
 # and repeats the ordinary safety proof before reclaim proceeds.
+# If a process regenerates untracked content inside an untracked-only root that
+# the completed archive already captured, teardown may discard that regenerated
+# content instead of stranding the worktree after the expensive capture.
+# New paths outside captured roots and every form of tracked drift still refuse.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge on the captain's approval) as a fallback
 # for the common case where there is no remote at all.
-# Scout tasks (kind=scout in meta) carve out of that check: their worktree is
-# declared scratch and the report at data/<task-id>/report.md is the work
-# product. A pre-cutover scout proceeds once that report exists; a task carrying
+# Scout tasks (kind=scout in meta) carve non-ignored untracked paths out of that
+# check: their worktree is declared scratch and the report at
+# data/<task-id>/report.md is the work product.
+# A pre-cutover scout proceeds once that report exists; a task carrying
 # report_required=1 must satisfy the shared completion and publication contract
 # owned by docs/report-stack.md before teardown discards the scratch worktree.
 # Orca tasks use the same safety checks, then close the recorded terminal, prove
@@ -433,6 +441,7 @@ fi
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 REPORT_GATED=0
+SCOUT_SCRATCH_RELEASABLE=0
 REPORT_REQUIRED_COUNT=$(grep -c '^report_required=' "$META" 2>/dev/null || true)
 if [ "$BACKEND" = orca ] && [ "$REPORT_REQUIRED_COUNT" -ne 0 ]; then
   echo "error: invalid report_required metadata for legacy Orca task $ID; the marker must be absent" >&2
@@ -1986,13 +1995,34 @@ teardown_path_is_known_tool_artifact() {
   return 1
 }
 
+preserved_untracked_path_is_tolerated() {
+  local path=$1 root capture=${PRESERVED_SCRATCH_CAPTURE:-}
+  [ -n "$capture" ] && [ -f "$capture/untracked-roots.paths" ] || return 1
+  while IFS= read -r -d '' root; do
+    case "$root" in
+      */)
+        case "$path" in
+          "$root"*) return 0 ;;
+        esac
+        ;;
+      *) [ "$path" != "$root" ] || return 0 ;;
+    esac
+  done < "$capture/untracked-roots.paths"
+  return 1
+}
+
 first_actionable_dirty_status() {
-  local line path
+  local preserve_scout_untracked=${1:-0} line path
   while IFS= read -r line; do
     case "$line" in
       '?? '*)
         path=${line#?? }
         teardown_path_is_known_tool_artifact "$path" && continue
+        preserved_untracked_path_is_tolerated "$path" && continue
+        if [ "$SCOUT_SCRATCH_RELEASABLE" -eq 1 ] \
+          && [ "$preserve_scout_untracked" -ne 1 ]; then
+          continue
+        fi
         ;;
     esac
     printf '%s\n' "$line"
@@ -2251,7 +2281,7 @@ filter_preservable_untracked_paths() {
 }
 
 capture_worktree_scratch() {
-  local task_dir scratch_root capture_dir all_untracked
+  local task_dir scratch_root capture_dir all_untracked root_candidates
   [ -d "$DATA" ] || mkdir -p "$DATA" || return 1
   [ -d "$DATA" ] && [ ! -L "$DATA" ] || {
     echo "REFUSED: scratch data root is not a real directory: $DATA" >&2
@@ -2277,6 +2307,7 @@ capture_worktree_scratch() {
   umask 077
   mkdir "$capture_dir" || return 1
   all_untracked="$capture_dir/.all-untracked.paths"
+  root_candidates="$capture_dir/.untracked-root-candidates.paths"
 
   git -C "$WT" status --porcelain=v1 --untracked-files=all \
     > "$capture_dir/status.txt" || return 1
@@ -2288,9 +2319,11 @@ capture_worktree_scratch() {
     > "$capture_dir/unstaged.patch" || return 1
   git -C "$WT" ls-files --others --exclude-standard -z -- \
     > "$all_untracked" || return 1
+  git -C "$WT" ls-files --others --exclude-standard \
+    --directory --no-empty-directory -z -- \
+    > "$root_candidates" || return 1
   filter_preservable_untracked_paths \
     "$all_untracked" "$capture_dir/untracked.paths" || return 1
-  rm -f "$all_untracked"
 
   python3 - "$WT" "$capture_dir" <<'PY'
 import hashlib
@@ -2301,8 +2334,40 @@ import sys
 import tarfile
 
 root, capture = sys.argv[1:]
-with open(os.path.join(capture, "untracked.paths"), "rb") as stream:
-    paths = [item.decode("utf-8", "surrogateescape") for item in stream.read().split(b"\0") if item]
+
+def read_paths(name):
+    with open(os.path.join(capture, name), "rb") as stream:
+        return [
+            item.decode("utf-8", "surrogateescape")
+            for item in stream.read().split(b"\0")
+            if item
+        ]
+
+paths = read_paths("untracked.paths")
+all_paths = read_paths(".all-untracked.paths")
+root_candidates = read_paths(".untracked-root-candidates.paths")
+preserved = set(paths)
+excluded = set(all_paths) - preserved
+
+roots = []
+for candidate in root_candidates:
+    if candidate.endswith("/"):
+        safe = not any(path.startswith(candidate) for path in excluded)
+    else:
+        safe = candidate in preserved
+    if safe:
+        roots.append(candidate)
+
+root_set = set(roots)
+for path in paths:
+    components = path.split("/")
+    ancestors = {
+        "/".join(components[:index]) + "/"
+        for index in range(1, len(components))
+    }
+    if path not in root_set and not ancestors.intersection(root_set):
+        roots.append(path)
+        root_set.add(path)
 
 def snapshot(path):
     metadata = os.lstat(path)
@@ -2354,7 +2419,11 @@ with open(os.path.join(capture, "untracked.txt"), "w", encoding="utf-8") as stre
 with open(os.path.join(capture, "untracked-manifest.json"), "w", encoding="utf-8") as stream:
     json.dump(manifest, stream, indent=2, ensure_ascii=False)
     stream.write("\n")
+with open(os.path.join(capture, "untracked-roots.paths"), "wb") as stream:
+    for path in roots:
+        stream.write(path.encode("utf-8", "surrogateescape") + b"\0")
 PY
+  rm -f "$all_untracked" "$root_candidates"
   capture_preserved_tracked_snapshot "$capture_dir" || return 1
   verify_preserved_tracked_capture "$capture_dir" || return 1
   : > "$capture_dir/capture-complete"
@@ -2567,7 +2636,7 @@ clean_preserved_worktree_scratch() {
 }
 
 prepare_preserved_worktree_scratch_locked() {
-  local dirty_raw dirty
+  local handoff=${1:-} dirty_raw dirty
   validate_teardown_target_identity || return 1
   [ "$TREEHOUSE_TARGET_ALREADY_RETURNED" -eq 0 ] || {
     echo "REFUSED: --preserve-scratch cannot mutate an already-returned Treehouse worktree." >&2
@@ -2578,8 +2647,11 @@ prepare_preserved_worktree_scratch_locked() {
     echo "REFUSED: cannot inspect worktree $WT before scratch preservation." >&2
     return 1
   }
-  dirty=$(printf '%s\n' "$dirty_raw" | first_actionable_dirty_status || true)
-  [ -n "$dirty" ] || return 0
+  dirty=$(printf '%s\n' "$dirty_raw" | first_actionable_dirty_status 1 || true)
+  if [ -z "$dirty" ]; then
+    [ -z "$handoff" ] || : > "$handoff"
+    return 0
+  fi
   validate_worktree_committed_landing || return 1
   PRESERVED_SCRATCH_CAPTURE=
   capture_worktree_scratch || {
@@ -2596,12 +2668,26 @@ prepare_preserved_worktree_scratch_locked() {
     echo "Scratch capture: $PRESERVED_SCRATCH_CAPTURE" >&2
     return 1
   }
+  [ -z "$handoff" ] \
+    || printf '%s\n' "$PRESERVED_SCRATCH_CAPTURE" > "$handoff" \
+    || return 1
   echo "teardown: preserved worktree scratch at $PRESERVED_SCRATCH_CAPTURE"
 }
 
 prepare_preserved_worktree_scratch() {
-  fm_checkout_lock_run \
-    "$WT" "$CHECKOUT_LOCK_ROOT" prepare_preserved_worktree_scratch_locked
+  local handoff status
+  handoff=$(mktemp "$STATE/.${ID}.preserved-scratch.XXXXXX") || return 1
+  if fm_checkout_lock_run \
+    "$WT" "$CHECKOUT_LOCK_ROOT" prepare_preserved_worktree_scratch_locked "$handoff"; then
+    status=0
+  else
+    status=$?
+  fi
+  if [ "$status" -eq 0 ] && [ -s "$handoff" ]; then
+    IFS= read -r PRESERVED_SCRATCH_CAPTURE < "$handoff" || status=1
+  fi
+  rm -f "$handoff" || status=1
+  return "$status"
 }
 
 validate_child_worktree_landed_state() {
@@ -5255,6 +5341,7 @@ if [ "$KIND" = scout ] && [ "$SPAWN_NEVER_LAUNCHED" != 1 ]; then
     echo "The report is the work product. Have the crewmate write it, then retry teardown." >&2
     exit 1
   fi
+  SCOUT_SCRATCH_RELEASABLE=1
 fi
 
 if [ "$KIND" != secondmate ]; then

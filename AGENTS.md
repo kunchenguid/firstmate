@@ -35,7 +35,7 @@ Hard rules, in priority order:
    `bin/fm-teardown.sh` enforces this, and `--force` only requests recursive cleanup after every ordinary safety proof succeeds.
    Three ways work counts as "landed": `HEAD` reachable from any remote-tracking branch (a fork counts, so an upstream-contribution PR pushed to a fork satisfies this in any mode); for a normal ship task, its content present in the fetched live default branch, including a strictly corroborated conflict-adjusted PR rewrite whose merge commit is on that branch; for `local-only` ship tasks with no remote, merged into the local default branch.
    Uncommitted changes are never landed.
-   The scout carve-out: a scout task's worktree is declared scratch from the start - its deliverable is the report, and teardown lets the worktree go once the applicable report contract is satisfied (section 7; `docs/report-stack.md`).
+   The scout carve-out: once a scout satisfies its applicable report contract, teardown may discard non-ignored untracked scratch, but tracked or staged changes, stashes, and committed-but-unlanded work remain protected (section 7; `docs/report-stack.md`).
    The full PR-containment mechanics and the `pr=` discovery fallback are owned by `bin/fm-teardown.sh`'s header, not restated here.
 4. **Crewmates never address the captain.**
    All crewmate communication flows through you.
@@ -571,7 +571,7 @@ The approved local-only merge helper and completed-scout signal take the same au
 Auto-reaping cancels only an exactly attributed no-mistakes run, never guesses cross-branch process ownership, and then calls this ordinary teardown without `--force`.
 Persistent secondmates are excluded, and X-mode-linked tasks wait for their required final follow-up.
 An automatic refusal is an actionable wake and retains its metadata, worktree, and acquisition authority; after resolving the reported cause, retry with the ordinary command above.
-The script refuses if the worktree holds uncommitted changes or committed work that has not landed; treat a refusal as a stop-and-investigate, not an obstacle.
+The script refuses any worktree state that section 1 keeps protected; treat every refusal as a stop-and-investigate rather than an obstacle.
 Teardown validates that the recorded project and worktree are exact roots with the expected repository registration, quiesces every ordinary task endpoint, and then runs the final non-destructive safety checks before any Treehouse return.
 For a task whose metadata carries `report_required=1`, teardown also publishes the validated completion report before releasing the account lease or removing the worktree.
 A safety refusal after quiescence leaves the endpoint stopped while preserving all task state for repair and retry.
@@ -598,7 +598,7 @@ A scout task follows Intake, Spawn, and Supervise exactly as above - scaffold th
 - There is no Validate or PR-ready stage. When the crewmate's status says `done`, read `data/<id>/report.md`.
 - Relay the findings to the captain: plain chat for a focused answer, and a durable Lavish decision when multiple genuine choices need structured input.
 - The watcher automatically tears down on the terminal `done` signal - no merge gate.
-  For a post-cutover scout that ran, ordinary teardown still requires the report's completion sections and publishes it before removing the declared scratch worktree; a missing or incomplete report refuses auto-reaping because the findings are the work product.
+  For a post-cutover scout that ran, ordinary teardown still requires the report's completion sections and publishes it before applying section 1's narrow scratch carve-out; a missing or incomplete report refuses auto-reaping because the findings are the work product.
   A failed direct spawn whose endpoint was never created may clear its bookkeeping without a report because no scout ran.
 - Record it in Done with the report path instead of a PR link using `tasks-axi done` when the default tasks-axi backend is active and compatible, otherwise hand-edit `data/backlog.md` and keep Done to the 10 most recent, then re-evaluate the queue and dispatch only queued work whose blockers are gone and whose time/date gate, if any, has arrived.
 
