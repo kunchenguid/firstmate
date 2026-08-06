@@ -404,16 +404,32 @@ test_ship_modes_require_closing_checklist_in_done() {
       "$id: auto-memory item lost the check-the-index-first rule"
     assert_grep "one line under 200 characters" "$brief" \
       "$id: auto-memory item lost the one-line/200-character index constraint"
-    assert_grep "capped at roughly 25KB or 200 lines" "$brief" \
-      "$id: auto-memory item lost the hard index size cap"
-    assert_grep "overflow dropped silently" "$brief" \
+    assert_grep "size cap observed around 25KB or 200 lines on at least one version" "$brief" \
+      "$id: auto-memory item lost the index size cap"
+    assert_grep "treat that as an observed limit, not a guarantee" "$brief" \
+      "$id: auto-memory item states the index cap as a fixed contract instead of an observed, version-specific limit"
+    assert_grep "dropped silently" "$brief" \
       "$id: auto-memory item lost the silent-overflow consequence"
     assert_grep "Never write secrets, credentials, or captain-private fleet strategy into a memory." "$brief" \
       "$id: auto-memory item lost the secrets/credentials/fleet-strategy exclusion"
 
-    # No hardcoded memory directory path: only a pointer to the system prompt.
-    assert_grep "Your system prompt already told you this task's memory location; never hardcode a path here." "$brief" \
-      "$id: auto-memory item must point at the system prompt instead of a hardcoded path"
+    # No hardcoded memory directory path: only a pointer to the system prompt,
+    # and only conditionally - a runtime with no memory store at all must be
+    # able to satisfy this item too, purely by saying so in its closing status
+    # line, the same checkable shape as "found no durable finding to record".
+    # This pins the item runtime-agnostic: a future edit that reasserts the
+    # store as universal (drops either branch) fails this test.
+    assert_grep "If your runtime gives you a persistent per-repo memory store, your system prompt already told you its location - never hardcode a path here." "$brief" \
+      "$id: auto-memory item must point at the system prompt instead of a hardcoded path, conditioned on the store existing"
+    assert_grep "If your runtime provides no such store at all, satisfy this item the same way: say so explicitly in your closing status line." "$brief" \
+      "$id: auto-memory item lost its no-memory-store fallback, making it unsatisfiable on runtimes with no persistent store"
+
+    # The scaffold must stay harness-agnostic in wording: no harness name, no
+    # harness list, introduced to express the above.
+    for harness_name in codex opencode pi-signed grok kimi; do
+      assert_no_grep "$harness_name" "$brief" \
+        "$id: auto-memory item names a specific harness ($harness_name) instead of staying runtime-agnostic"
+    done
 
     # The mode's own definition of done must require the checklist before the
     # close, and the actual done-line template it hands the worker must carry
@@ -444,18 +460,30 @@ test_scout_carries_auto_memory_closing_item() {
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "scout brief was not scaffolded"
 
-  assert_grep "still belongs in the harness's separate per-repo auto-memory store" "$brief" \
+  assert_grep "a durable finding this task uncovered should still survive past it for future sessions" "$brief" \
     "scout brief lost the auto-memory closing item adapted to a report deliverable"
-  assert_grep "Record exactly one memory for it; if this task uncovered none, say so explicitly in your closing status line" "$brief" \
+  assert_grep "record exactly one memory for it; if it produced none, say so explicitly in your closing status line" "$brief" \
     "scout auto-memory item lost the record-one-or-say-so requirement"
   assert_grep "prefer updating an existing memory over adding a new one" "$brief" \
     "scout auto-memory item lost the prefer-update-over-new-memory rule"
   assert_grep "one line under 200 characters" "$brief" \
     "scout auto-memory item lost the one-line/200-character index constraint"
+  assert_grep "treat that as an observed limit, not a guarantee" "$brief" \
+    "scout auto-memory item states the index cap as a fixed contract instead of an observed, version-specific limit"
   assert_grep "Never write secrets, credentials, or captain-private fleet strategy into a memory." "$brief" \
     "scout auto-memory item lost the secrets/credentials/fleet-strategy exclusion"
-  assert_grep "Your system prompt already told you this task's memory location; never hardcode a path here." "$brief" \
-    "scout auto-memory item must point at the system prompt instead of a hardcoded path"
+
+  # Same runtime-agnostic pinning as the ship checklist (see
+  # test_ship_modes_require_closing_checklist_in_done): both the has-a-store
+  # and no-store branches must be present and harness names absent.
+  assert_grep "If your runtime gives you a persistent per-repo memory store, your system prompt already told you its location - never hardcode a path here." "$brief" \
+    "scout auto-memory item must point at the system prompt instead of a hardcoded path, conditioned on the store existing"
+  assert_grep "If your runtime provides no such store at all, satisfy this item the same way: say so explicitly in your closing status line." "$brief" \
+    "scout auto-memory item lost its no-memory-store fallback, making it unsatisfiable on runtimes with no persistent store"
+  for harness_name in codex opencode pi-signed grok kimi; do
+    assert_no_grep "$harness_name" "$brief" \
+      "scout auto-memory item names a specific harness ($harness_name) instead of staying runtime-agnostic"
+  done
 
   # The full two-item ship checklist (AGENTS.md item) must NOT appear on a scout.
   assert_no_grep "1. Project \`AGENTS.md\`." "$brief" \
@@ -465,6 +493,25 @@ test_scout_carries_auto_memory_closing_item() {
   assert_grep 'done: {one-line conclusion} - project memory: {outcome}' "$brief" \
     "scout final done-line template does not carry the closing memory-item outcome"
   pass "fm-brief.sh: scout scaffold carries the auto-memory closing item, adapted to its report deliverable"
+}
+
+# bin/fm-brief.sh takes no harness input and must not gain one to express the
+# runtime-agnostic auto-memory item: no --harness flag, no harness list. This
+# guards the script's own argument surface, distinct from the generated-brief
+# wording pinned in the two tests above. The prose is free to say "harness",
+# "runtime", or even "--harness" while describing the item's absence (the
+# header comment does); what it must never do is add a real --harness case
+# branch to the argument parser or name a specific harness.
+test_auto_memory_item_introduces_no_harness_flag() {
+  assert_no_grep "--harness)" "$ROOT/bin/fm-brief.sh" \
+    "bin/fm-brief.sh's argument parser must not gain a --harness case branch to express the runtime-agnostic auto-memory item"
+  assert_no_grep "--harness=" "$ROOT/bin/fm-brief.sh" \
+    "bin/fm-brief.sh's argument parser must not gain a --harness=* case branch to express the runtime-agnostic auto-memory item"
+  for harness_name in codex opencode pi-signed grok kimi; do
+    assert_no_grep "$harness_name" "$ROOT/bin/fm-brief.sh" \
+      "bin/fm-brief.sh's source must not name a specific harness ($harness_name) to express the runtime-agnostic auto-memory item"
+  done
+  pass "fm-brief.sh: the runtime-agnostic auto-memory item introduces no --harness flag or harness name into the script itself"
 }
 
 test_herdr_lab_contract_is_explicit_and_complete() {
@@ -816,6 +863,7 @@ test_no_mistakes_dod_wording
 test_ship_project_memory_wording
 test_ship_modes_require_closing_checklist_in_done
 test_scout_carries_auto_memory_closing_item
+test_auto_memory_item_introduces_no_harness_flag
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

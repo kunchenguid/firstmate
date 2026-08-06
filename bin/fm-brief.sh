@@ -54,18 +54,25 @@
 # AGENTS.md (through the project's delivery path; it carries the AGENTS.md
 # authoring bar - widely useful knowledge only, pointers over copied detail - and
 # has the crewmate add the fm-ensure-agents-md.sh self-governance section when a
-# touched project AGENTS.md lacks it). Item 2 is the harness's separate per-repo
-# auto-memory store: at most one new or updated memory per durable non-obvious
-# finding, and a one-line/<200-char index entry (all detail stays in the memory
-# file) since the index loads whole into every future session under a hard size
-# cap that silently drops whatever falls past it. That store lives outside the
-# task worktree, so each scaffold's stay-inside-the-worktree rule names it
-# alongside the status file, and item 2 stays open until the closing status line
-# instead of closing with the commit. Every ship mode's definition of done
-# requires both outcomes in the closing status line so the checklist is
-# verifiable from that line alone; the scout scaffold carries only the
-# auto-memory item, adapted to its report deliverable. The wording shared by both
-# scaffolds is built once (auto_memory_index_rules) so the two copies cannot drift.
+# touched project AGENTS.md lacks it). Item 2 is the current runtime's separate
+# per-repo auto-memory store, when that runtime provides one: at most one new or
+# updated memory per durable non-obvious finding, and a one-line/<200-char index
+# entry (all detail stays in the memory file) since the index loads whole into
+# every future session under a size cap observed on at least one runtime version
+# (not a version-independent guarantee) that silently drops whatever falls past
+# it. This scaffold takes no --harness input and cannot know which runtime is
+# reading the brief, so item 2's wording never assumes the store exists: a
+# runtime with none satisfies it by saying so explicitly in the closing status
+# line, the same checkable shape as a runtime that has the store but found no
+# durable finding to record. When a store does exist, it lives outside the
+# task worktree, so each scaffold's
+# stay-inside-the-worktree rule names it alongside the status file, and item 2
+# stays open until the closing status line instead of closing with the commit.
+# Every ship mode's definition of done requires both outcomes in the closing
+# status line so the checklist is verifiable from that line alone; the scout
+# scaffold carries only the auto-memory item, adapted to its report deliverable.
+# The wording shared by both scaffolds is built once (AUTO_MEMORY_PATH_RULE,
+# auto_memory_index_rules) so the two copies cannot drift.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -313,12 +320,12 @@ fi
 # both scaffolds, so the two generated copies cannot drift. Only the framing
 # differs: the ship copy is a numbered checklist item (hence the indent), the
 # scout copy a flat section under its report deliverable.
-AUTO_MEMORY_PATH_RULE="Your system prompt already told you this task's memory location; never hardcode a path here."
+AUTO_MEMORY_PATH_RULE="If your runtime gives you a persistent per-repo memory store, your system prompt already told you its location - never hardcode a path here. When you have that store: if this task produced a durable, non-obvious finding - a gotcha, a verified fact that cost time to establish, an approach that failed for a knowable reason - record exactly one memory for it; if it produced none, say so explicitly in your closing status line. If your runtime provides no such store at all, satisfy this item the same way: say so explicitly in your closing status line."
 auto_memory_index_rules() {
   local indent=${1:-}
   printf '%s\n' \
     "${indent}Check the index first and prefer updating an existing memory over adding a new one; a new index line is only for knowledge no existing memory covers." \
-    "${indent}Keep the index line to one line under 200 characters - a pointer plus a one-sentence description - with all other detail in the memory file, never the index: the index loads whole into every future session and is capped at roughly 25KB or 200 lines, whichever comes first, with the overflow dropped silently, so a narrated index destroys the store it is meant to serve." \
+    "${indent}Keep the index line to one line under 200 characters - a pointer plus a one-sentence description - with all other detail in the memory file, never the index: the index loads whole into every future session under a size cap observed around 25KB or 200 lines on at least one version, whichever comes first - treat that as an observed limit, not a guarantee - with everything past it dropped silently, so a narrated index destroys the store it is meant to serve." \
     "${indent}Never write secrets, credentials, or captain-private fleet strategy into a memory."
 }
 AUTO_MEMORY_INDEX_RULES=$(auto_memory_index_rules)
@@ -362,9 +369,8 @@ The report is the only thing that survives from this worktree, so anything worth
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
 # Project memory
-Your report is the deliverable, but a durable, non-obvious finding this task uncovered - a gotcha, a verified fact that cost time to establish, an approach that failed for a knowable reason - still belongs in the harness's separate per-repo auto-memory store, so it survives past this report for future sessions.
+Your report is the deliverable, but a durable finding this task uncovered should still survive past it for future sessions.
 $AUTO_MEMORY_PATH_RULE
-Record exactly one memory for it; if this task uncovered none, say so explicitly in your closing status line.
 $AUTO_MEMORY_INDEX_RULES
 
 # Definition of done
@@ -495,7 +501,6 @@ This task closes only once both durable-knowledge stores below are checked, and 
    If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
    Keep it proportionate: skip this item for trivial tasks that produced no durable project knowledge.
 2. Harness auto-memory. $AUTO_MEMORY_PATH_RULE
-   If this task produced a durable, non-obvious finding - a gotcha, a verified fact that cost time to establish, an approach that failed for a knowable reason - record exactly one memory for it; if it produced none, say so explicitly in your closing status line.
 $AUTO_MEMORY_INDEX_RULES_ITEM
 
 $DOD
