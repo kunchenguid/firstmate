@@ -27,7 +27,8 @@ Every run below used an isolated `XDG_CONFIG_HOME` and `XDG_DATA_HOME` in a scra
 
 ## What the model provider limits
 
-All live behavior below was observed against the built-in `--provider echo` startup provider.
+Live TUI and session behavior below was observed against the built-in `--provider echo` startup provider, except for the provider-authentication prompt.
+The credential paths and unauthenticated wait were probed separately against the default `meta` provider.
 Turn-boundary structure, the trust dialog, interrupt, exit, composer rendering, credential behavior, and the event-log schema are real and verified.
 **Busy-state behavior under a genuine multi-step, real-model tool loop is NOT verified** and is the deferred item below.
 
@@ -49,18 +50,7 @@ $ grep -nE 'muse-bin|exec ' launcher.sh
 That is why both `bin/fm-harness.sh` and `bin/backends/tmux.sh` match the anchored prefix `muse-bin-*` rather than an exact name, and why neither can rely on an install-path component: `~/.local/bin/muse-bin-<version>` contains no `muse` path component.
 The Muse launch clears `CLAUDECODE`, `PI_CODING_AGENT`, `GROK_AGENT`, and `FM_PI_HARNESS` before the worker starts so foreign primary markers cannot override the versioned ancestry.
 
-Live tmux liveness against the real binary renamed to its installed form:
-
-```
-foreground comms:
-  zsh
-  .../instbin/muse-bin-0.1.0-R708.1
-classify each:
-  zsh                            -> shell
-  muse-bin-0.1.0-R708.1          -> agent
-$ fm_backend_agent_state tmux museliv:zsh
-alive
-```
+[`runtime-backends.md`](runtime-backends.md#agent-liveness-name-sources) owns the resulting tmux liveness verdict and its relationship to the portable decoy regression.
 
 ### Turn lifecycle
 

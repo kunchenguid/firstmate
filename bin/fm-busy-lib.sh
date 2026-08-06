@@ -34,8 +34,6 @@
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
-#   muse-session-log  classifier-only: muse's own durable session event log
-#                     (see the muse arm below); never written into a record
 # Firstmate-owned sources accepted for every converted adapter:
 #   fm-spawn         the launch-brief turn seeded at spawn
 #   fm-interrupt     a firstmate-controlled interruption of the worker
@@ -52,7 +50,7 @@
 #   3. a valid, gen-matching, source-trusted record -> its state and source
 #   4. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
-#      muse session-log arm, then the Grok-only temporary regex fallback
+#      muse session-log pull source, then the Grok-only temporary regex fallback
 #      classifies a grok task from its rendered tail, then unknown missing
 #   5. malformed, stale, or untrusted records -> unknown, never a fallback
 # The Grok arm is the ONLY rendered-text classification that survives the
@@ -62,8 +60,8 @@
 # footers for submit acknowledgement and away-mode supervisor injection only;
 # neither is a recorded worker state source.
 #
-# The muse arm is semantic, not rendered: it folds muse's own durable session
-# event log. It is a PULL source with no writer, no arm, and no gen, because
+# The muse pull source is semantic, not rendered: it folds muse's own durable
+# session event log. It has no writer, no arm, and no gen, because
 # muse's default build ships no hook or plugin surface that could push events
 # (its plugin engine reports "plugins are not available in this build" without
 # MUSE_EXPERIMENTAL_PLUGINS). Nothing is armed for muse for the same reason
@@ -172,10 +170,10 @@ fm_busy_current_gen() {  # <state-dir> <id>
 # task recorded with <harness>. One line, space-separated, possibly empty.
 # The firstmate-owned sources are appended for every converted adapter.
 # Grok and muse deliberately trust nothing: neither has a semantic WRITER, so
-# neither is armed, and both classify through a classifier arm that reads the
-# live source on demand (grok's rendered tail, muse's session log) rather than
-# through a stored record. Listing a source here without a writer that can
-# clear it would seed a busy record nothing could ever settle.
+# neither is armed, and both read their live source on demand in the classifier
+# (grok's rendered tail, muse's session log) rather than through a stored
+# record. Listing a source here without a writer that can clear it would seed a
+# busy record nothing could ever settle.
 fm_busy_sources_for_harness() {  # <harness>
   local adapter=
   case "${1:-}" in

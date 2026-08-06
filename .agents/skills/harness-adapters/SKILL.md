@@ -425,7 +425,7 @@ Escalate that refusal to the captain as a needed credential.
 
 ### Foreign personal context is a real privacy boundary
 
-muse loads the OPERATOR's foreign personal rules from `~/.claude` into every run and ships them to Meta-hosted inference, printing `Including your Claude Code personal rules — manage with /settings.` on first launch.
+muse loads the OPERATOR's foreign personal rules from `~/.claude` into every run and ships them to Meta-hosted inference, printing a first-launch notice that names the included Claude Code personal rules and `/settings` control.
 An isolated `XDG_CONFIG_HOME` does NOT prevent this, and the notice is shown only once per config (`tui.foreign_context_notice_shown` in `settings.json`), so a silent later launch is still loading them.
 `--no-foreign-personal-context` is `muse exec` ONLY: the interactive TUI rejects it with `unexpected argument`.
 The control that reaches a pane worker is `MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on`, which `fm-spawn` sets on every muse launch.
