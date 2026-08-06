@@ -90,6 +90,7 @@ fm_run_external_timeout() {
   local runner=$1 seconds=$2 status_file runner_rc command_rc
   shift 2
   status_file=$(mktemp "${TMPDIR:-/tmp}/fm-timeout-status.XXXXXX" 2>/dev/null) || return 124
+  # shellcheck disable=SC2016  # Expansion is deliberately deferred to the child shell.
   if "$runner" -k 1 "$seconds" bash -c '
     status_file=$1
     shift
