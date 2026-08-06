@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, GH_RESOLVE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
   A silent bootstrap section, or a BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -27,7 +27,12 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
 - `TANGLE: <remediation>` - the primary checkout is stranded on a feature branch instead of its default branch; `AGENTS.md` section 8 explains why this guard exists and what it protects.
   The work is safe on that branch ref; restore the primary to its default branch with the printed `git -C <root> checkout <default>`, then re-validate that branch in a proper worktree.
-  This is the only sanctioned firstmate-initiated git write to the primary, and it is a non-destructive branch switch that strands nothing.
+  With the `gh` base-repo pin below, this is one of only two sanctioned firstmate-initiated git writes to the primary, and it is a non-destructive branch switch that strands nothing.
+- `GH_RESOLVE: <detail>` - the firstmate checkout has more than one GitHub remote and no pinned base repo, so `gh` picks the base repo by remote name and prefers a remote named `upstream` over `origin`.
+  Until it is pinned, default `gh`/`gh-axi` calls can read the fork parent's issues and pull requests as though they were this fleet's own, and a default-targeted `gh pr create` can propose this fleet's branch to that third party's repository.
+  A session holding the fleet lock pins it automatically, so a `GH_RESOLVE` line from a detect-only session means the read-only session cannot repair it: distrust any `gh`/`gh-axi` listing taken in that session, pass `-R <owner>/<repo>` explicitly for anything that matters, and rerun session start once the lock is available.
+  A line naming a checkout with no GitHub `origin` cannot be pinned automatically at all; establish the intended base repo with the captain before trusting any default-targeted `gh` call.
+  `bin/fm-gh-resolve.sh` owns the contract, including why a deliberate existing pin is never overwritten and why deliberate upstream contribution still works through an explicit `-R`.
 - `STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>` - the visible startup-memory budget is not a safe one-line positive decimal file; do not infer the default or propagate it.
   Correct the local primary file, then rerun session start so the normal convergence path can deliver the validated value to secondmate homes.
 - `CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>` - the optional dispatch profile file exists but failed low-cost bootstrap validation; stop profile-based dispatch, report the actionable error, and require correction of the malformed schema, unverified harness name, or invalid harness/effort pair rather than falling back around it or selecting a bad profile.

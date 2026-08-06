@@ -48,6 +48,10 @@
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
+#          A GH_RESOLVE line means gh has no pinned base repo for the firstmate
+#          checkout, so default gh/gh-axi calls may read or write the fork parent
+#          instead of this fleet's own fork; bin/fm-gh-resolve.sh owns the contract
+#          and a locked session pins it automatically.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
@@ -79,12 +83,14 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the seven MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          secondmate_handoff_resume, x_mode_setup, fleet_sync) while still
+#          secondmate_handoff_resume, x_mode_setup, fleet_sync, and the
+#          fm-gh-resolve.sh gh base-repo pin) while still
 #          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
-#          checkout command. Used by
+#          checkout command, and the gh base-repo check reports GH_RESOLVE
+#          instead of pinning. Used by
 #          fm-session-start.sh's read-only path when another live session holds
 #          the fleet lock, so a second concurrent session never race-mutates
 #          PR-check artifacts, secondmate homes, pending handoff outboxes,
@@ -1062,6 +1068,17 @@ if [ -n "$tangle_branch" ]; then
   else
     echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - restore the primary with: git -C $FM_ROOT checkout $tangle_default, then re-validate the branch in a proper worktree"
   fi
+fi
+# gh base-repo resolution for the firstmate checkout: a fork whose parent is
+# still a remote leaves gh choosing the base repo by remote NAME, which prefers
+# 'upstream' over 'origin' and silently points default gh/gh-axi calls at the
+# parent project. Repairing writes one local git config key and nothing else, so
+# it belongs with the other locked mutating sweeps; a detect-only session must
+# only warn. fm-gh-resolve.sh owns the whole contract.
+if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" = 1 ]; then
+  "$SCRIPT_DIR/fm-gh-resolve.sh" --check "$FM_ROOT" || true
+else
+  "$SCRIPT_DIR/fm-gh-resolve.sh" "$FM_ROOT" || true
 fi
 crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
