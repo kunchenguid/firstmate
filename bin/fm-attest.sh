@@ -85,12 +85,21 @@ KNOWN_KEYS="$ATTESTATION_KEY head run gates tool"
 # One function does it for everything this prints, git's output, the pipeline
 # tool's two streams and the push target alike, and that is enforced by where it
 # sits rather than by every author remembering it. emit() below is the only
-# place this script writes a line to a stream, and every line it writes passes
-# through the scrubber first, so a diagnostic carrying text from outside this
-# script cannot be constructed unscrubbed: a refusal added later is safe because
-# printing is what makes it safe. Scrubbing at each call site was the shape this
-# had, and it grew a channel that was never scrubbed, for the same reason
-# parse-then-redact grew shapes that were never modelled.
+# place this script constructs a line and writes it, and every line it writes
+# passes through the scrubber first, so a diagnostic carrying text from outside
+# this script cannot be constructed unscrubbed: a refusal added later is safe
+# because printing is what makes it safe. Scrubbing at each call site was the
+# shape this had, and it grew a channel that was never scrubbed, for the same
+# reason parse-then-redact grew shapes that were never modelled.
+#
+# A shell script also runs programs that hold streams of their own, and that
+# half is closed from the other side rather than left to the same claim: every
+# git call and every call to the pipeline tool has its stdout and stderr either
+# captured into a variable or discarded, so no stream that could carry external
+# text reaches a terminal except through emit(). The scratch-file helpers here
+# are discarded for the same reason bin/fm-timeout-lib.sh discards its own, and
+# nothing diagnostic is lost by it because the refusal that follows names the
+# condition in this script's own words.
 #
 # It is default deny, and that is the whole design. Redacting what a reader
 # recognises means every shape git accepts has to be modelled, and any shape it
@@ -197,8 +206,9 @@ credential_safe_stream() {
   '
 }
 
-# The one place a line leaves this script. Callers hand it whole lines and it
-# writes them safe; a caller that wants them on stderr redirects the call.
+# The one place this script constructs a line and writes it. Callers hand it
+# whole lines and it writes them safe; a caller that wants them on stderr
+# redirects the call.
 emit() {
   [ "$#" -gt 0 ] || return 0
   printf '%s\n' "$@" | credential_safe_stream
@@ -527,7 +537,7 @@ cmd_write() {
   # banner, on stderr. Only stdout decides whether a run record was reported and
   # only stdout is parsed, so a stderr notice can never stand in for a run
   # record; stderr is quoted alongside it purely as diagnostic detail.
-  status_err_file=$(mktemp "${TMPDIR:-/tmp}/.fm-attest-status.XXXXXX") \
+  status_err_file=$(mktemp "${TMPDIR:-/tmp}/.fm-attest-status.XXXXXX" 2>/dev/null) \
     || fail scratch-file-unavailable \
       "Could not create a temporary file to capture the pipeline tool's stderr." \
       "Check TMPDIR and its free space, then re-run."
@@ -537,8 +547,8 @@ cmd_write() {
   else
     status=$(fm_nm_run_bounded . "$NM_TIMEOUT" axi status 2>"$status_err_file") || status_rc=$?
   fi
-  status_err=$(cat "$status_err_file")
-  rm -f "$status_err_file"
+  status_err=$(cat "$status_err_file" 2>/dev/null || true)
+  rm -f "$status_err_file" 2>/dev/null || true
 
   [ "$status_rc" -eq 0 ] || refuse run-record-unreadable \
     "no-mistakes exited $status_rc instead of reporting a pipeline run." \

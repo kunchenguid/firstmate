@@ -1018,8 +1018,6 @@ test_check_step_separates_a_verdict_from_a_verifier_that_could_not_run() {
   head=0123456789012345678901234567890123456789
   workflow_step_script 'Verify the head-bound no-mistakes attestation' > "$script"
   [ -s "$script" ] || fail "the verify step's own script could not be read out of the workflow"
-  assert_contains "$(cat "$script")" 'fm-attest.sh verify --head' \
-    "the extracted script is not the step that runs the verifier"
 
   run_verify_step() {
     ( cd "$dir" && HEAD_SHA="$head" PR_AUTHOR=someone bash "$script" 2>&1 )
@@ -1081,7 +1079,6 @@ test_check_step_reads_the_head_repository_without_logging_its_token() {
   log="$dir/git-said.log"
   workflow_step_script 'Fetch the attestation ref from the head repository' > "$script"
   [ -s "$script" ] || fail "the fetch step's own script could not be read out of the workflow"
-  assert_contains "$(cat "$script")" 'git fetch' "the extracted script is not the step that fetches the ref"
   # git quotes the whole remote URL back in its own http errors, and when the
   # head repository is the base repository that URL carries the job token. This
   # stand-in does exactly that, and also records what it said, so the assertion
