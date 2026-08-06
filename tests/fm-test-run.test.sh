@@ -115,6 +115,7 @@ init_changed_fixture_repo() {
   done
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
+  : >"$repo/bin/fm-calm-lib.sh"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
   : >"$repo/bin/unmapped-source.sh"
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
@@ -158,6 +159,14 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-afk-return.test.sh" "supervisor target selects afk coverage"
   git -C "$repo" add bin/fm-supervisor-target-lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm supervisor-change
+
+  printf '\n' >>"$repo/bin/fm-calm-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-daemon.test.sh" "Calm helper selects watcher coverage"
+  assert_contains "$listed" "tests/fm-brief.test.sh" "Calm helper selects pure contract coverage"
+  assert_contains "$listed" "tests/fm-backend.test.sh" "Calm helper selects backend coverage"
+  git -C "$repo" add bin/fm-calm-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm calm-helper-change
 
   printf '\n' >>"$repo/.agents/skills/example/SKILL.md"
   printf '\n' >>"$repo/.claude/settings.json"
