@@ -165,6 +165,9 @@ Classify each wake this way:
   Nonterminal progress remains transient even when its prose contains a legacy free-text token or its seen-status marker already matches, so record a marker and self-handle.
   If the pane is still idle past `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a possible wedge.
   This bounds wedge-detection latency to the threshold plus a tick: a delay, never a loss.
+- `stale` for a crew `bin/fm-crew-state.sh` reports as provably working -> self-handle and drop it from wedge aging entirely, recording neither a wedge nor a pause marker.
+  A static pane is not evidence of a wedge when an attributed run step or the backend's own busy verdict proves the crew is progressing, so a long-running worker whose progress does not reach the pane no longer re-alarms every `FM_STALE_ESCALATE_SECS` for as long as its work runs.
+  Only a positive working verdict drops it: a stopped, parked, failed, or unreadable crew keeps aging and still escalates on the same schedule.
   Healthy crewmates are autonomous and do not wait on firstmate mid-task.
 - `heartbeat` -> self-handle. The daemon runs its own cheap bash fleet scan
   every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for a

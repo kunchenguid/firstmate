@@ -238,6 +238,59 @@ test_handle_wake_paused_records_pause_marker() {
   pass "handle_wake on a paused stale records a pause marker, drops the wedge marker, and does not escalate"
 }
 
+# The recorded incident, as a unit: a healthy long-running worker holds a static
+# pane because it is waiting on a completion ARTIFACT rather than printing, and
+# every wedge timer fired on it anyway. Wedge aging must ask whether the crew is
+# provably working (fm-classify-lib.sh's crew_absorb_class), not merely whether
+# the pane text changed. Both the wake classification and the marker bookkeeping
+# are asserted, plus the negative control on the same fixture: a crew with no
+# advancing evidence still ages toward its wedge escalation.
+test_stale_provably_working_self_handles() {
+  local dir state fakebin out win key
+  dir=$(make_supercase stale-provably-working); state="$dir/state"; fakebin="$dir/fakebin"
+  make_fake_crew_state "$fakebin" >/dev/null
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  win="sess:fm-longrun-w1"
+  key=$(printf '%s' "longrun-w1" | tr ':/.' '___')
+  printf 'working: rebuilding the fixture corpus, awaiting the completion marker\n' \
+    > "$state/longrun-w1.status"
+
+  # An attributed run-step is positive evidence of work in flight.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · running: tests'
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")
+  case "$out" in working\|*) ;; *) fail "an actively-running crew did not self-handle: $out" ;; esac
+
+  # So is the backend's own busy signal, which is what the incident reported
+  # while the pane text sat unchanged.
+  export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy (claude-hook)'
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")
+  case "$out" in working\|*) ;; *) fail "a busy-pane crew did not self-handle: $out" ;; esac
+
+  # Through handle_wake on real markers: no wedge tracking is recorded, no pause
+  # tracking is invented, and nothing reaches the captain.
+  date +%s > "$state/.subsuper-stale-$key"
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "a provably-working stale retained wedge tracking"
+  [ ! -e "$state/.subsuper-paused-$key" ] || fail "a provably-working stale invented pause tracking"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a provably-working stale escalated: $(cat "$state/.subsuper-escalations")"
+
+  # Negative control, same fixture: no advancing evidence keeps wedge aging. Only
+  # a POSITIVE working verdict drops it, so a stopped or unreadable crew is still
+  # found on the same schedule.
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")
+  case "$out" in working\|*) fail "an unreadable crew was classed provably working: $out" ;; esac
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
+  [ -e "$state/.subsuper-stale-$key" ] || fail "an unreadable crew lost its wedge tracking"
+
+  export FM_FAKE_CREW_STATE='state: done · source: status-log · done: PR opened'
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")
+  case "$out" in working\|*) fail "a finished crew was classed provably working: $out" ;; esac
+
+  unset FM_FAKE_CREW_STATE FM_CREW_STATE_BIN
+  pass "a provably-working stale drops out of wedge aging, while an unreadable or finished crew keeps aging"
+}
+
 test_handle_wake_paused_signal_records_pause_marker() {
   local dir state key win
   dir=$(make_supercase handle-paused-signal)
@@ -438,6 +491,48 @@ test_housekeeping_persistent_stale_escalates() {
   [ -s "$state/.subsuper-escalations" ] || fail "persistent stale was not escalated"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "stale marker not cleared after escalation"
   pass "persistent stale escalates after threshold and clears its marker"
+}
+
+# The second half of the incident: a marker recorded before the crew could prove
+# it was working must not fire once it can. housekeeping's own pane-text recheck
+# (stale_window_is_busy) cannot see this - the worker is waiting on a completion
+# artifact, so its pane is byte-identical - which is exactly why the reconciled
+# state is consulted at the escalation point. The negative control runs FIRST on
+# the same fixture so the escalation path is witnessed firing before the fix is
+# trusted to suppress it.
+test_housekeeping_provably_working_stale_not_escalated() {
+  local dir state fakebin win pane key
+  dir=$(make_supercase stale-provably-working-housekeeping)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  make_fake_crew_state "$fakebin" >/dev/null
+  win="sess:fm-longrun-w2"; pane="$dir/pane.txt"
+  printf 'working: waiting on the completion marker\n' > "$state/longrun-w2.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "longrun-w2" | tr ':/.' '___')
+
+  # Negative control: no advancing evidence, same aged marker and same threshold.
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' \
+    housekeeping "$state"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "a genuinely hung pane no longer wedge-escalates on the same schedule"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "wedge marker not cleared after escalation"
+  : > "$state/.subsuper-escalations"
+
+  # Same fixture, same aged marker, same static pane - now provably working.
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy (claude-hook)' \
+    housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a provably-working crew escalated a possible wedge: $(cat "$state/.subsuper-escalations")"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "a provably-working crew kept its wedge marker"
+  pass "housekeeping drops a persistent stale that is provably working, while an unreadable crew still escalates"
 }
 
 test_housekeeping_resumed_stale_cleared() {
@@ -1839,12 +1934,14 @@ test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_stale_terminal_escalates
 test_stale_paused_classifies_pause
 test_handle_wake_paused_records_pause_marker
+test_stale_provably_working_self_handles
 test_handle_wake_paused_signal_records_pause_marker
 test_handle_wake_terminal_signal_clears_pause_tracking
 test_housekeeping_migrates_watcher_pause_marker
 test_housekeeping_migrates_watcher_unpaused_marker_to_clear
 test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
+test_housekeeping_provably_working_stale_not_escalated
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_paused_resumed_cleared

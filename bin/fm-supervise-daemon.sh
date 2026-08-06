@@ -44,7 +44,13 @@
 #     escalated only after it has been idle for STALE_ESCALATE_SECS
 #     (configurable), rechecked once. A wedged crewmate is therefore detected
 #     within STALE_ESCALATE_SECS + a tick, never lost. A declared pause instead
-#     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
+#     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation,
+#     and a crew that is PROVABLY WORKING (fm-classify-lib.sh's crew_absorb_class
+#     reports `working`) is dropped from wedge aging entirely, because its static
+#     pane is the correct condition rather than a symptom. That retires the
+#     timer-only wedge alarm for such a crew: a long-running worker whose evidence
+#     of progress lives off the pane no longer re-alarms every STALE_ESCALATE_SECS
+#     for as long as its work runs.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
@@ -331,9 +337,12 @@ _collapse_newlines() {  # <text>
 # and dedup state below layer the daemon's escalation-digest concerns on top.
 #
 # Decision protocol: every classifier prints exactly one line on stdout of the
-# form "<action>|<distilled>" where action is "self" or "escalate". The distilled
-# field for "self" is informational (logged); for "escalate" it is the pre-read
-# summary firstmate would otherwise have to re-read.
+# form "<action>|<distilled>". The action is "escalate" (surface it), "self"
+# (routine; a stale also records/refreshes the wedge marker), "pause" (declared
+# external wait; record the long-cadence pause marker), or "working" (proven
+# still working; drop both markers). The distilled field is the pre-read summary
+# firstmate would otherwise have to re-read for "escalate", and informational
+# (logged) for the self-handled actions.
 
 classify_signal() {  # <reason-after-colon> <state>
   local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen
@@ -369,7 +378,7 @@ classify_signal() {  # <reason-after-colon> <state>
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state>
-  local win=$1 state=$2 task last seen
+  local win=$1 state=$2 task last seen transient=""
   task=$(window_to_task "$win" "$state")
   last=$(last_status_line "$state/$task.status")
   if [ -n "$last" ] && status_is_paused "$last"; then
@@ -389,23 +398,44 @@ classify_stale() {  # <window> <state>
     # captain lines without those verbs keep the terminal escalate/dedupe path.
     if ! status_is_terminal_verb "$last"; then
       case "$(status_line_verb "$last")" in
-        working|resolved|captain-held)
-          printf 'self|transient stale (%s): %s' "$win" "$last"
-          return
-          ;;
+        working|resolved|captain-held) transient=1 ;;
       esac
     fi
-    # Dedupe against the signal path: if this status was already escalated
-    # (seen marker matches), self-handle to avoid a duplicate in the digest.
-    seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
-    if [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ]; then
-      printf 'self|stale + terminal (already escalated by signal): %s' "$last"
+    if [ -z "$transient" ]; then
+      # Dedupe against the signal path: if this status was already escalated
+      # (seen marker matches), self-handle to avoid a duplicate in the digest.
+      seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
+      if [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ]; then
+        printf 'self|stale + terminal (already escalated by signal): %s' "$last"
+        return
+      fi
+      printf 'escalate|stale + terminal status: %s' "$last"
       return
     fi
-    printf 'escalate|stale + terminal status: %s' "$last"
+  fi
+  # Non-terminal (or no status): this is the one entry point to wedge aging, so
+  # it is the one place that must ask whether the pane is static because the crew
+  # is STUCK or because it is still working. crew_absorb_class answers that from
+  # the authoritative current state (an attributed run-step, or the backend's own
+  # busy signal), which is exactly the evidence a pane-hash comparison cannot see:
+  # a worker that is genuinely mid-run, or waiting on a completion artifact rather
+  # than printing, holds a static pane while being demonstrably alive. Only a
+  # POSITIVE working verdict drops it - stopped, parked, failed and unreadable all
+  # keep aging, so a real wedge is still found on the same schedule.
+  #
+  # This is the single wedge-aging drop, deliberately not a second suppression
+  # layer beside the pause branch above: a pause is a DECLARED wait that still
+  # re-surfaces on its own long cadence, while this is PROVEN progress with
+  # nothing to re-surface. Any future reconciled class that likewise explains a
+  # static pane belongs in this branch rather than in a new gate of its own.
+  # One fm-crew-state.sh read per stale wake: the watcher enqueues at most one
+  # stale wake per distinct pane hash, so this matches the always-on path's own
+  # one-read-per-newly-classified-hash bound.
+  if [ "$(crew_absorb_class "$task")" = working ]; then
+    printf 'working|provably working (static pane is not a wedge): %s' "${last:-no status}"
     return
   fi
-  # Non-terminal (or no status): defer to the persistence recheck. The caller
+  # Not provably working: defer to the persistence recheck. The caller
   # records/refreshes the stale marker so housekeeping can age it.
   printf 'self|transient stale (%s): %s' "$win" "${last:-no status}"
 }
@@ -1014,8 +1044,21 @@ housekeeping() {  # <state>
     case "$?" in
       0) rm -f "$marker" ;;
       2) rm -f "$marker" ;;
-      *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
-         stale_marker_remove "$win" "$state" ;;
+      *) # A task can go stale while it is not yet provably working and only THEN
+         # start proving it (its run gets attributed, or the backend reports the
+         # pane busy again without the pane text changing), so the marker recorded
+         # earlier can outlive the reason for it. stale_window_is_busy above only
+         # compares pane text, which a worker waiting on a completion artifact
+         # never changes. Consult the reconciled state at the one point that
+         # matters - immediately before escalating a possible wedge - which keeps
+         # the read off every tick and off every already-resumed pane.
+         if [ "$(crew_absorb_class "$task")" = working ]; then
+           log "stale marker dropped (provably working): $win"
+           rm -f "$marker"
+         else
+           escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
+           stale_marker_remove "$win" "$state"
+         fi ;;
     esac
   done
 
@@ -1243,6 +1286,17 @@ handle_wake() {  # <reason> <state>
         pause_marker_record "$arg" "$state"
       fi
       log "self-handle (paused): $reason -> $distilled"
+      ;;
+    working)
+      # Proven still working: drop BOTH trackers rather than aging either. There
+      # is no wedge to age (the crew is demonstrably progressing) and no external
+      # wait to recheck, and the crew's own next real event still reaches the
+      # captain through the signal path. Only stale produces this action.
+      if [ "$kind" = "stale" ]; then
+        stale_marker_remove "$arg" "$state"
+        pause_marker_remove "$arg" "$state"
+      fi
+      log "self-handle (working): $reason -> $distilled"
       ;;
     *)
       # Transient (non-terminal) stale: record/refresh the wedge marker so
