@@ -364,7 +364,9 @@ clear_pause_tracking() {  # <window>
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
 # Only a confidently dead ordinary crew may recover paused classification after
-# fm-crew-state has fallen back to stopped or unknown.
+# fm-crew-state has fallen back to stopped or unknown. A backend that exposes a
+# native semantic idle state (herdr agent_status idle) lets a declared pause keep
+# the bounded pause cadence even though the endpoint itself is still alive.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive
   key=${win//:/_}
@@ -380,6 +382,10 @@ pause_state_class() {  # <window> <task>
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
     if [ "$(window_kind "$win")" != secondmate ]; then
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
+      if fm_backend_agent_is_idle "$(window_backend "$win")" "$win" >/dev/null 2>&1; then
+        printf 'paused'
+        return
+      fi
       if [ "$agent_alive" != dead ]; then
         rm -f "$recheck_file"
         printf 'none'
@@ -397,7 +403,9 @@ pause_state_class() {  # <window> <task>
   fi
   if [ "$(window_kind "$win")" != secondmate ]; then
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-    if [ "$agent_alive" != dead ]; then
+    if fm_backend_agent_is_idle "$(window_backend "$win")" "$win" >/dev/null 2>&1; then
+      class=paused
+    elif [ "$agent_alive" != dead ]; then
       rm -f "$recheck_file"
       printf 'none'
       return

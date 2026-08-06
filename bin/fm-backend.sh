@@ -905,6 +905,25 @@ fm_backend_agent_alive() {  # <backend> <target>
   esac
 }
 
+# fm_backend_agent_is_idle: 0 only when a backend exposes a NATIVE semantic
+# idle state for the agent at <target> and that state is confidently idle.
+# Herdr is the first supported backend: its `agent get` surface reports an
+# explicit "idle" agent_status. Backends without such a primitive (tmux and
+# all others) always return 1, preserving the existing "live means not dead"
+# triage path for them.
+fm_backend_agent_is_idle() {  # <backend> <target>
+  local backend=$1 target=$2 status
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    herdr)
+      fm_backend_herdr_parse_target "$target" || return 1
+      status=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+      [ "$status" = idle ]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 # --- native event push (backend-extensible) ---------------------------------
 #
 # The watcher's event-wait splice (bin/fm-watch.sh) is backend-agnostic: it asks

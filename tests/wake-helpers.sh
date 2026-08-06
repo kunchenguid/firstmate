@@ -85,6 +85,79 @@ SH
   printf '%s\n' "$dir"
 }
 
+# Install a fake `herdr` CLI into <fakebin> so watcher tests can exercise the
+# herdr backend without a real server. The fake honors three environment knobs:
+#   FM_FAKE_HERDR_PANE_ALIVE=1 -> pane get returns a matching pane struct.
+#   FM_FAKE_HERDR_PANE_ALIVE=0 -> pane get returns pane_not_found.
+#   FM_FAKE_HERDR_AGENT_STATUS   -> agent get returns this agent_status.
+#   FM_FAKE_HERDR_AGENT_ERROR    -> agent get returns this error code instead.
+# The fake also answers the `status --json` call used by target_ready and
+# replies to `pane read`/`pane capture` with the contents of FM_FAKE_HERDR_CAPTURE.
+install_fake_herdr() {  # <fakebin>
+  local fakebin=$1
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+# Find the first positional subcommand, ignoring flags such as --session.
+sub=""
+for a in "$@"; do
+  case "$a" in
+    --*) continue ;;
+    status|pane|agent|server|api|workspace|tab|session)
+      sub="$a"
+      break
+      ;;
+    *)
+      sub="$a"
+      break
+      ;;
+  esac
+done
+case "$sub" in
+  status)
+    printf '{"client":{"protocol":16,"version":"fake"},"server":{"running":true}}\n'
+    exit 0
+    ;;
+  pane)
+    if [ "${FM_FAKE_HERDR_PANE_ALIVE:-1}" = "1" ]; then
+      pane_id=""
+      found_get=0
+      for a in "$@"; do
+        [ "$found_get" = 1 ] && { pane_id="$a"; break; }
+        [ "$a" = "get" ] && found_get=1
+      done
+      case "$*" in
+        *read*|*capture*)
+          [ -n "${FM_FAKE_HERDR_CAPTURE:-}" ] && cat "$FM_FAKE_HERDR_CAPTURE"
+          exit 0
+          ;;
+      esac
+      printf '{"result":{"pane":{"pane_id":"%s","workspace_id":"w1","tab_id":"t1"}}}\n' "$pane_id"
+    else
+      printf '{"error":{"code":"pane_not_found"}}\n'
+    fi
+    exit 0
+    ;;
+  agent)
+    if [ -n "${FM_FAKE_HERDR_AGENT_ERROR:-}" ]; then
+      printf '{"error":{"code":"%s"}}\n' "$FM_FAKE_HERDR_AGENT_ERROR"
+    else
+      printf '{"result":{"agent":{"agent":"fake-agent","agent_status":"%s"}}}\n' "${FM_FAKE_HERDR_AGENT_STATUS:-idle}"
+    fi
+    exit 0
+    ;;
+  server)
+    exit 0
+    ;;
+  *)
+    printf '{"error":{"code":"unsupported_fake_command"}}\n' >&2
+    exit 1
+    ;;
+esac
+SH
+  chmod +x "$fakebin/herdr"
+}
+
 # Install a hermetic fake fm-crew-state.sh into <fakebin> and echo its path. The
 # watcher's absorb-only-when-provably-working triage calls this (via
 # FM_CREW_STATE_BIN) to read a crew's current state on no-verb signal and stale

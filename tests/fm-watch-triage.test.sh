@@ -991,6 +991,167 @@ test_paused_authoritative_working_preserves_wedge_timer() {
   pass "a paused status overridden by authoritative working preserves its wedge timer and escalates"
 }
 
+# --- herdr native idle state shapes the declared-pause cadence ----------------
+# Regression for the 2026-08-06 p5 noise pattern: a herdr pane whose agent
+# reports `agent_status: idle` is semantically idle even though the endpoint is
+# still alive. A declared pause paired with that native idle signal must use the
+# bounded PAUSE_RESURFACE_SECS cadence instead of firing a bare stale on every
+# new pane hash. Dead-agent and unreadable-liveness cases preserve the existing
+# safety posture.
+
+test_herdr_declared_pause_live_idle_uses_pause_cadence() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case herdr-paused-live-idle); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  install_fake_herdr "$fakebin"
+  window="default:wA:p5"
+  printf 'idle pi footer render 1' > "$capture_file"
+  printf 'window=%s\nbackend=herdr\nharness=pi\nkind=ship\n' "$window" > "$state/herdr-paused.meta"
+  printf 'paused: holding for upstream after the 2026-08-06 p5 noise pattern\n' > "$state/herdr-paused.status"
+  sig=$(seen_sig "$state/herdr-paused.status"); printf '%s' "$sig" > "$state/.seen-herdr-paused_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle pi footer render 1")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for upstream'
+  export FM_FAKE_HERDR_PANE_ALIVE=1
+  export FM_FAKE_HERDR_AGENT_STATUS=idle
+  export FM_FAKE_HERDR_CAPTURE="$capture_file"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for a herdr live-idle declared pause (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "herdr live-idle declared pause printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "herdr live-idle declared pause enqueued a wake"
+  [ -e "$state/.paused-$key" ] || fail "herdr live-idle declared pause did not record the paused marker"
+  [ ! -e "$state/.stale-since-$key" ] || fail "herdr live-idle declared pause started the wedge timer"
+  reap "$pid"
+
+  printf 'idle pi footer render 2' > "$capture_file"
+  : > "$out"
+  pane_hash=$(hash_text "idle pi footer render 2")
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited on a new hash for a herdr live-idle declared pause: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a new pane hash surfaced a bare stale for a herdr live-idle declared pause: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a new pane hash enqueued a stale wake"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "new pane hash did not advance the stale suppressor under pause cadence"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE FM_FAKE_HERDR_PANE_ALIVE FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_CAPTURE
+  pass "a herdr live-idle declared pause uses the bounded pause cadence and survives new pane hashes"
+}
+
+test_herdr_declared_pause_dead_agent_unchanged() {
+  local dir state fakebin out capture_file window key pane_hash sig pid back wakes bare
+  dir=$(make_case herdr-paused-dead); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  install_fake_herdr "$fakebin"
+  window="default:wA:p5"
+  printf 'idle after agent exit' > "$capture_file"
+  printf 'window=%s\nbackend=herdr\nharness=pi\nkind=ship\n' "$window" > "$state/herdr-dead.meta"
+  printf 'paused: held while the agent is dead\n' > "$state/herdr-dead.status"
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$state/herdr-dead.status"
+  else touch -m -d "@$back" "$state/herdr-dead.status"; fi
+  sig=$(seen_sig "$state/herdr-dead.status"); printf '%s' "$sig" > "$state/.seen-herdr-dead_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle after agent exit")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell'
+  export FM_FAKE_HERDR_PANE_ALIVE=0
+  export FM_FAKE_HERDR_CAPTURE="$capture_file"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not resurface a herdr dead-agent declared pause"
+  grep -F "awaiting external" "$out" >/dev/null || fail "dead-agent herdr pause did not resurface as a paused recheck"
+  grep -F "possible wedge" "$out" >/dev/null && fail "dead-agent herdr pause was mislabeled a wedge"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$wakes" -le 1 ] || fail "dead-agent herdr pause flooded $wakes stale wakes"
+  [ "$bare" -eq 0 ] || fail "dead-agent herdr pause surfaced as $bare bare stale wakes"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE FM_FAKE_HERDR_PANE_ALIVE FM_FAKE_HERDR_CAPTURE
+  pass "a herdr declared pause with a dead agent keeps the bounded pause cadence unchanged"
+}
+
+test_herdr_declared_pause_unreadable_liveness_surfaces() {
+  local dir state fakebin out capture_file window key pane_hash sig pid wakes
+  dir=$(make_case herdr-paused-unreadable); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  install_fake_herdr "$fakebin"
+  window="default:wA:p5"
+  printf 'idle with unreadable liveness' > "$capture_file"
+  printf 'window=%s\nbackend=herdr\nharness=pi\nkind=ship\n' "$window" > "$state/herdr-unreadable.meta"
+  printf 'paused: held while agent liveness is unreadable\n' > "$state/herdr-unreadable.status"
+  sig=$(seen_sig "$state/herdr-unreadable.status"); printf '%s' "$sig" > "$state/.seen-herdr-unreadable_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle with unreadable liveness")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · unreadable agent'
+  export FM_FAKE_HERDR_PANE_ALIVE=1
+  export FM_FAKE_HERDR_AGENT_ERROR=server_error
+  export FM_FAKE_HERDR_CAPTURE="$capture_file"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface a herdr declared pause with unreadable liveness"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "unreadable liveness did not surface a stale wake"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$wakes" -ge 1 ] || fail "unreadable liveness did not enqueue a stale wake"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE FM_FAKE_HERDR_PANE_ALIVE FM_FAKE_HERDR_AGENT_ERROR FM_FAKE_HERDR_CAPTURE
+  pass "a herdr declared pause with unreadable liveness surfaces instead of using the pause cadence"
+}
+
+test_herdr_nonpaused_idle_agent_unchanged() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case herdr-nonpaused-idle); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  install_fake_herdr "$fakebin"
+  window="default:wA:p5"
+  printf 'idle while working' > "$capture_file"
+  printf 'window=%s\nbackend=herdr\nharness=pi\nkind=ship\n' "$window" > "$state/herdr-working.meta"
+  printf 'working: implementing\n' > "$state/herdr-working.status"
+  sig=$(seen_sig "$state/herdr-working.status"); printf '%s' "$sig" > "$state/.seen-herdr-working_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle while working")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_FAKE_HERDR_PANE_ALIVE=1
+  export FM_FAKE_HERDR_AGENT_STATUS=idle
+  export FM_FAKE_HERDR_CAPTURE="$capture_file"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for a non-paused herdr idle agent (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "non-paused herdr idle agent printed a wake reason: $(cat "$out")"
+  [ ! -e "$state/.paused-$key" ] || fail "non-paused herdr idle agent recorded a paused marker"
+  [ -s "$state/.stale-since-$key" ] || fail "non-paused herdr idle agent did not start wedge tracking"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE FM_FAKE_HERDR_PANE_ALIVE FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_CAPTURE
+  pass "a non-paused herdr idle agent is absorbed as working, not misclassed as paused"
+}
+
 # --- consecutive wedge escalations on the same pane demand deep inspection ----
 # Root cause of the PR #252 incident's ~20 minutes of unnoticed green: each
 # wedge escalation fires, gets classified as "still validating" one poll later
@@ -1832,6 +1993,10 @@ test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
 test_nonterminal_paused_rechecks_authoritative_state
 test_paused_authoritative_working_preserves_wedge_timer
+test_herdr_declared_pause_live_idle_uses_pause_cadence
+test_herdr_declared_pause_dead_agent_unchanged
+test_herdr_declared_pause_unreadable_liveness_surfaces
+test_herdr_nonpaused_idle_agent_unchanged
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_procevent_captured_result_surfaces_proactively
