@@ -10,6 +10,52 @@ The governing presentation policy allows genuine original user prompts, genuine 
 Working activity may be presented through Pi's stock row or through a supported Calm-owned widget, but Calm must leave the stock row untouched whenever Calm is off.
 Changing persisted context to remove hidden content, filtering provider context, patching installed harness code, or claiming coverage outside a supported renderer does not satisfy that boundary.
 
+## Codex CLI 0.146.0 feasibility
+
+Codex CLI 0.146.0 does not expose a project-owned presentation seam that can implement Firstmate Calm.
+The exact `rust-v0.146.0` source at commit `e363b08c9175ac1cbe5893615dd2cb9ddf95043b` was inspected on 2026-08-06 after reproducing the ordinary Codex captain TUI from the Firstmate checkout.
+The local reproduction used the newer bundled `codex-cli 0.147.0-alpha.1.2` only as a disconfirming comparison; every capability verdict below comes from the exact 0.146.0 tag.
+
+The inspected 0.146.0 configuration schema exposes `hide_agent_reasoning`, `model_reasoning_summary`, `tui.animations`, and `tui.show_tooltips`.
+Those settings can reduce reasoning and decorative activity after configuration is loaded, but none suppresses successful shell, patch, MCP, web-search, image, plan, or collaboration transcript cells.
+The TUI constructs those cells directly in `codex-rs/tui`, after Firstmate's hooks and tools have emitted their events.
+
+The slash-command registry is the compiled `SlashCommand` enum in `codex-rs/tui/src/slash_command.rs`.
+Project skills are invoked through Codex's `$skill` surface, while deprecated custom prompts are home-local `/prompts:name` entries loaded at session start.
+Neither surface can register a project-owned `/calm`, mutate the active TUI renderer, redraw existing transcript cells, or reverse a presentation filter during the same session.
+
+Firstmate's `.codex/hooks.json` can enforce session-start, pre-tool, permission, post-tool, and stop lifecycle behavior, but hook handlers do not receive transcript-cell ownership.
+Suppressing successful script stdout would reduce only Firstmate-owned command text and would not suppress the Codex-owned tool row that encloses it.
+It would also be unsafe as a general policy because failures, hook trust, permission decisions, sandbox denials, watcher failures, captain decisions, and final validation evidence must remain visible.
+
+The qualifying native seam is therefore a Codex-owned, same-session reversible transcript visibility policy.
+It must retain genuine captain prompts, assistant responses, active working state, failures, permission and security events, human decisions, meaningful status changes, and final evidence while allowing completed routine-success cells to render at zero height or in a compact aggregate.
+It must change presentation only: sandboxing, approvals, hooks, tool execution, model context, persisted session events, exports, fleet supervision, wake handling, and audit logs remain unchanged.
+
+Until Codex exposes that seam, a Firstmate `$calm` skill or launch profile would be a partial and misleading substitute because the principal tool-call noise would remain and the configuration-only parts could not be reversed in the same session.
+A custom app-server terminal client could own filtering, but it would also own approval UX, replay, interruption, session management, and security parity, making it a separate Codex frontend rather than a bounded Firstmate integration.
+Patching or vendoring the installed Codex binary is outside the qualifying boundary.
+
+Reproduction and source-inspection commands:
+
+```sh
+codex --version
+codex features list
+codex --no-alt-screen
+git clone --depth 1 --branch rust-v0.146.0 https://github.com/openai/codex.git codex-0.146.0
+rg -n 'hide_agent_reasoning|model_reasoning_summary|animations|show_tooltips' codex-0.146.0/codex-rs/core/config.schema.json
+sed -n '1,220p' codex-0.146.0/codex-rs/tui/src/slash_command.rs
+rg -n 'new_.*tool|add_to_history|active_cell' codex-0.146.0/codex-rs/tui/src/chatwidget codex-0.146.0/codex-rs/tui/src/history_cell
+```
+
+Observed version output:
+
+```text
+codex-cli 0.147.0-alpha.1.2
+```
+
+The requested 0.146.0 release exists as `rust-v0.146.0`; no 0.146.0 executable was installed on `PATH`, so the version-specific verdict uses its tagged source rather than claiming a live binary reproduction.
+
 ## Compatibility evidence
 
 [`calm.md`](calm.md#pi-compatibility) owns the current Pi compatibility contract.
