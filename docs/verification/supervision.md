@@ -155,6 +155,7 @@ Each pass polled `state/<id>.busy-state` while a real turn ran.
 | Codex | codex-cli 0.145.0 | None usable | See below; classifies `unknown codex-unverified`. |
 | Kimi (standalone) | not installed | None usable | No binary on `PATH`, so the gate stays closed and it classifies `unknown kimi-unverified`. |
 | Grok | 0.2.112 | Isolated rendered-tail fallback | Retained unconverted; the approved audit could not credit a live structured-lifecycle run. |
+| Cursor | 2026.07.23-e383d2b | None usable | No semantic busy source is live-verified; the rendered footer remains delivery-only, so Cursor classifies `unknown cursor-unverified`. |
 
 Codex was probed two ways, both refused:
 
@@ -188,7 +189,7 @@ Cursor's stop-hook and parked-input behavior were validated on 2026-08-05.
 | OpenCode | 1.17.6 | Passive `session.idle` callback | Throwing could not block, while `promptAsync` scheduled one TUI follow-up; headless remained fail-open. |
 | Pi | 0.80.5 | Passive `agent_settled` callback | Exactly one guard follow-up ran for an unhealthy cycle, with no recursion across tool turns. |
 | Grok | 0.2.112 native and 0.2.73 pre-native | Running-payload adaptive `Stop` | Native false-to-true continuation stayed in one process with two model turns and zero resume launches; the field-absent pre-native process launched exactly one guarded resume. |
-| Cursor | 2026.07.23-e383d2b | Translating `stop` hook (`bin/fm-turnend-guard-cursor.sh`) plus `preToolUse` Shell seatbelt | The stop hook parked 600 s and delivered a follow-up turn; `loop_count` advanced 0→1→2; a typed actionable arm close produced a normal drain-and-handle follow-up while arm failure retained loud registration guidance; the seatbelt denied a shell-`&` arm with `{"permission":"deny",...}`. |
+| Cursor | 2026.07.23-e383d2b | Translating `stop` hook (`bin/fm-turnend-guard-cursor.sh`) plus `preToolUse` Shell seatbelt for primary and secondmate sessions | The stop hook parked 600 s and delivered a follow-up turn; `loop_count` advanced 0→1→2; a typed actionable arm close produced a normal drain-and-handle follow-up while arm failure retained loud registration guidance; the seatbelt denied a shell-`&` arm with `{"permission":"deny",...}`. |
 
 Cursor parked-input measurement (2026-08-05, cursor-agent 2026.07.23-e383d2b): typing `CAPTAIN_TYPED_WHILE_PARKED` + Enter 8 s into a 30 s parked stop hook left the text unsubmitted in the composer; it survived the parked window and the forced follow-up turn; a second Enter after the follow-up delivered it. No text was lost or cleared.
 `CURSOR_PROJECT_DIR` is set by cursor for hook commands and equals the project root (the analogue of Claude's `CLAUDE_PROJECT_DIR`), verified live.
@@ -296,7 +297,7 @@ Observed output:
 
 ```text
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
-fm-doc-audience-check: ok surfaces=65 local_links=199
+fm-doc-audience-check: ok surfaces=65 local_links=203
 FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=171507
 ```
 
@@ -405,62 +406,5 @@ The safe command-channel contract is covered without a notification by `tests/fm
 
 ## Cursor Agent CLI
 
-Cursor Agent CLI is a full firstmate adapter (crew, primary, and herdr).
-Primary-session guard supervision ships in the tracked `.cursor/hooks.json` stop hook; see the Turn-end guard table above and docs/supervision-protocols/cursor.md.
-The shim distinguishes a typed actionable arm close from an arm failure: actionable close emits a normal drain-and-handle follow-up, while failure retains loud registration guidance.
-Liveness and composer verification was performed on 2026-08-04 against cursor-agent 2026.07.23-e383d2b on Linux, tmux backend.
-
-**Composer state (before fix):**
-
-An idle cursor pane with `→ Add a follow-up` classified as `pending` because the `→` glyph was unrecognized.
-The reverse-video cursor cell inside a dim ghost run (`A` in `→ Add a follow-up`) survived `fm_composer_strip_ghost` and classified as `pending`.
-
-```sh
-$ . bin/fm-composer-lib.sh
-$ fm_composer_classify_content 0 '→ Add a follow-up'                    -> pending
-$ fm_composer_classify_content 0 '→'                                    -> pending
-```
-
-**Composer state (after fix):**
-
-`→` is recognized as an agent prompt glyph, classifying as `empty`.
-`Add a follow-up` is the idle placeholder.
-The reverse-video cursor cell inside a dim ghost run is now handled by the shared `fm_composer_strip_ghost` ghost-gap buffer.
-
-**Liveness classification (before fix):**
-
-```sh
-$ . bin/fm-session-lock-lib.sh; . bin/backends/tmux.sh
-$ fm_backend_tmux_classify_process_name MainThread                -> other
-$ fm_backend_tmux_classify_process_name cursor-agent              -> other
-```
-
-**Liveness classification (after fix):**
-
-Both `MainThread` (kernel exec name) and `cursor-agent` (tmux pane command) classify as `agent`.
-
-**Environment marker leak (before fix):**
-
-A cursor-agent process launched from a Claude Code firstmate inherits `CLAUDECODE=1` and `CLAUDE_CODE_ENTRYPOINT=cli`.
-Detection ordering plus `env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT` in the launch template fix this.
-
-**Busy state:**
-
-MVP ships `unknown cursor-unverified` with an empty `FM_BUSY_CURSOR_VERIFIED_VERSIONS` version gate.
-Captain decision 2026-08-04, option (a).
-
-**Steering measurement (2026-08-04):**
-
-- `fm-send` message lands in composer, second Enter submits.
-- Enter-while-busy: **queued** (same as opencode 1.18.4). Tmux uses a harness-gated submit-core branch, while Herdr uses its native busy-state fallback.
-- `/no-mistakes` lands on a single Enter with popup settle.
-
-**Hook status (2026-08-04, superseded):**
-
-The first discovery attempt could not establish hooks: three locations were tried (`<project>/.cursor/hooks/hooks.json`, a `--plugin-dir` plugin manifest, `<project>/.cursor/hooks.json`), and the bundle's hook discovery code expects a manifest key format that was not found then.
-The primary-harness branch superseded this with the tracked project-root `.cursor/hooks.json` registration (load-bearing `"version": 1` key, `stop` hook, `preToolUse` Shell seatbelt), verified in the Turn-end guard table above.
-
-```sh
-$ cursor-agent --version
-2026.07.23-e383d2b
-```
+Cursor runtime and composer evidence lives in [`runtime-backends.md`](runtime-backends.md#cursor-agent-cli).
+Cursor primary and secondmate stop-hook evidence lives in the Turn-end guard record above and [`supervision-protocols/cursor.md`](../supervision-protocols/cursor.md).

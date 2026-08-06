@@ -481,7 +481,7 @@ The positional prompt auto-submits (verified: no readiness-gated delivery needed
 | Fact | Value |
 |---|---|
 | Binary | Resolved at spawn time, not assumed from PATH: `cursor-agent` from PATH, then the legacy alias `agent` from PATH (fallback only - the name is too generic to trust as the primary pick), then `$HOME/.local/bin/cursor-agent` and `$HOME/.local/bin/agent`; spawning refuses only if none of them exists. `agent` is never a standalone harness entry. `bin/fm-remote-doctor.sh` mirrors this exact order in `fm_remote_doctor_resolve_harness` so remote readiness and local spawn agree. |
-| Busy state | Unknown until a semantic source is live-verified (hooks are phase 3, pending correct upstream manifest key discovery). The rendered `ctrl+c to stop` token is deliberately NOT a state source; supervision falls back to stale-pane detection. |
+| Busy state | Unknown until a semantic source is live-verified. The rendered `ctrl+c to stop` token is deliberately NOT a state source; stop and `preToolUse` hooks are supervision controls, so supervision falls back to stale-pane detection. |
 | Exit command | `/exit` (or `/quit`); needs ~1.5s settle before Enter. |
 | Interrupt | `C-c` (single Ctrl+C). Escape does NOT interrupt (verified 2026-08-04). |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`), same form as claude. Opens a popup on typing `/`; single Enter lands with popup settle (verified 2026-08-04). |
@@ -500,32 +500,23 @@ The `→` glyph is now recognized as an agent prompt glyph in the shared `fm_com
 The reverse-video cursor cell inside a dim ghost run (a single character wrapped in SGR 7 between two SGR 2 dim runs) is now handled by the shared `fm_composer_strip_ghost` ghost extractor.
 Verification evidence: `docs/verification/runtime-backends.md`.
 
-**Liveness defect (fixed):** the tmux backend classified a live cursor-agent pane as `other` (both `MainThread` kernel exec name and `cursor-agent` pane command went unrecognized). `cursor-agent` is now in `FM_HARNESS_RE`, `FM_HARNESS_NAMES`, and the tmux `agent` classification case.
+**Liveness classification (fixed):** the tmux backend now recognizes Cursor's verified process identities through its harness and agent-name classifiers.
 
 **CLAUDECODE leak (fixed):** a cursor worker launched from a claude firstmate inherited `CLAUDECODE=1` and `CLAUDE_CODE_ENTRYPOINT=cli`, which would misidentify it as claude.
 The launch template now unsets both variables before launching cursor-agent.
 
 **Busy state (captain decision 2026-08-04, option a):** the MVP ships `unknown cursor-unverified` with an empty `FM_BUSY_CURSOR_VERIFIED_VERSIONS` version gate.
 No rendered-signal fallback is wired.
-Hooks are phase 3, pending correct upstream manifest key discovery.
+The stop and `preToolUse` hooks are supervision controls, not semantic busy-state sources.
 
 **Model support trap:** `--list-models` lists only ~29 models, but the API accepts ~180.
 Any model-support verdict taken from that short list would be falsely negative.
 The authoritative set is revealed by the rejection error message when an invalid model is passed.
 Do not use `--list-models` for model-support verification.
 
-**Primary-session guard fact (verified 2026-08-05, cursor-agent 2026.07.23-e383d2b).**
-Cursor is a verified PRIMARY harness since 2026-08-05: firstmate can run itself on cursor.
-The tracked `.cursor/hooks.json` registers a `stop` hook (long `timeout`, `loop_limit: null`) running `bin/fm-turnend-guard-cursor.sh`, and a `preToolUse` hook with a `Shell` matcher running `bin/fm-arm-pretool-check.sh --cursor`.
-The top-level `"version": 1` key is load-bearing: without it cursor silently discards the file and every hook is inert.
-Cursor's stop hook does not honour exit 2 as a forced continuation, so the shim translates the shared guard's blind-turn signal into a `{"followup_message": ...}` body that cursor auto-submits as a new turn; typed actionable arm closes get a normal drain-and-handle wake, while arm failures keep the loud registration and startup warning.
-The stop hook owns the watcher arm (the Shell tool's own 30 s timeout makes a foreground tool a poor arm host); see `docs/supervision-protocols/cursor.md`.
-Headless is not a supervision host: `cursor-agent -p` fires only `sessionStart`, never `stop`.
-Captain input typed while the stop hook is parked is buffered unsubmitted and needs a second Enter after the forced follow-up completes (nothing is lost).
-Verified against cursor-agent 2026.07.23-e383d2b only; re-verify after any cursor-agent upgrade.
+**Primary and secondmate supervision (verified 2026-08-05, cursor-agent 2026.07.23-e383d2b).**
+The tracked `.cursor/hooks.json` provides the stop-hook-owned autoarm and `preToolUse` seatbelt for Cursor primary and secondmate sessions; the exact wake, bound, headless, and parked-input contract lives in `docs/turnend-guard.md` and `docs/supervision-protocols/cursor.md`.
 
 **Crew wake signal (phase 3):** the per-task turn-end pattern remains unimplemented for cursor crewmates; the `stop` event and `--plugin-dir` flag are the natural carriers when it is built.
 
-**Remote secondmates:** cursor is a verified remote secondmate harness since 2026-08-05 (herdr + cursor live-verified in an isolated lab; see `docs/verification/runtime-backends.md`).
-`bin/fm-spawn.sh`, `bin/fm-remote-secondmate-control.sh`, and `bin/fm-remote-doctor.sh` all admit it; the doctor resolves cursor through the same name-and-path order as spawn (see the Binary row above), so a login PATH that omits `~/.local/bin` still passes readiness.
-Remote cursor spawns run through the same doctor readiness gate and control allowlist as every other verified harness; no cursor-specific exclusion remains.
+**Remote secondmates:** Cursor is admitted by the same doctor readiness gate and control allowlist as other verified harnesses; [`remote-secondmates.md`](../../../docs/remote-secondmates.md) owns its route and resolver details.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cursor Stop-hook adapter for the firstmate PRIMARY turn-end guard.
+# Cursor Stop-hook adapter for a firstmate primary or secondmate turn-end guard.
 #
 # Cursor's `stop` hook differs from Claude's and Codex's in exactly one
 # place: it does not honour exit code 2 as a forced continuation. A stop hook
@@ -19,12 +19,13 @@
 #      loud arm-failure follow-ups (FM_CURSOR_TURNEND_BLOCK_BUDGET) and
 #      consecutive repeats of the SAME unchanged wake reason
 #      (FM_CURSOR_WAKE_CHAIN_BUDGET, a diagnostic follow-up at the ceiling that
-#      also clears the record so the next chain starts normal again). Distinct
-#      wake reasons are progress and do not consume the unified count; failures
-#      and repeated reasons add to it, so alternating failures and wakes cannot
-#      evade the ceiling. An allowed stop or a non-continuation stop (loop_count
-#      0, i.e. a captain-driven turn) clears the record. If the record cannot be
-#      persisted, a positive payload loop_count supplies the fallback count;
+#      also clears the record so the next chain starts normal again). A new
+#      distinct wake reason is progress and does not consume the unified count;
+#      failures and re-firing any previously seen reason add to it, so alternating
+#      failures and wakes cannot evade the ceiling. An allowed stop or a
+#      non-continuation stop (loop_count 0, i.e. a captain-driven turn) clears the
+#      record. If the record cannot be persisted, a positive payload loop_count
+#      supplies the fallback count;
 #      absent or malformed loop_count never disables the persistent bound.
 #   3. runs bin/fm-turnend-guard.sh with the normalized payload;
 #   4. on exit 2 (a blind turn), foregrounds bin/fm-watch-arm.sh inside the
