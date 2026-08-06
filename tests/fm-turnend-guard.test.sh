@@ -1496,6 +1496,26 @@ SH
   pass "fm-turnend-guard-cursor: parent starttime prevents pid-reuse chain inheritance"
 }
 
+test_cursor_shim_without_parent_identity_fails_closed() {
+  local dir fakebin out
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-no-parent-identity")
+  CURSOR_FIXTURE_DIR=$dir
+  : > "$dir/state/task1.meta"
+  install_actionable_arm_stub "$dir"
+  fakebin=$(fm_fakebin "$TMP_ROOT/cursor-shim-no-parent-identity-bin")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  out=$(cursor_shim_stop_without_identity_parent 1 env \
+    PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$dir/no-proc" \
+    FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=1)
+  assert_contains "$out" "diagnostic ceiling" \
+    "missing parent identity must fail closed instead of persisting under a reusable pid"
+  pass "fm-turnend-guard-cursor: missing parent identity keeps supervision bounded"
+}
+
 test_cursor_shim_extreme_loop_count_stays_bounded_without_state() {
   local dir fakebin out
   dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-extreme-loop-count")
@@ -2477,6 +2497,7 @@ test_cursor_shim_prefers_conversation_id_for_persistent_scope
 test_cursor_shim_fallback_session_scope
 test_cursor_shim_fallback_without_identity_is_process_scoped
 test_cursor_shim_parent_starttime_scopes_identity_free_chain
+test_cursor_shim_without_parent_identity_fails_closed
 test_cursor_shim_extreme_loop_count_stays_bounded_without_state
 test_cursor_shim_falls_back_to_loop_count_without_writable_state
 test_cursor_shim_arm_sources_x_mode_cadence
