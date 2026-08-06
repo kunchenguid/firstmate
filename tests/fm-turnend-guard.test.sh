@@ -108,6 +108,7 @@ install_guard_scripts() {
   local dir=$1
   mkdir -p "$dir/bin"
   cp "$ROOT/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard.sh"
+  cp "$ROOT/bin/fm-codex-hook.mjs" "$dir/bin/fm-codex-hook.mjs"
   cp "$ROOT/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-turnend-guard-grok.sh"
   cp "$ROOT/bin/fm-operational-input.sh" "$dir/bin/fm-operational-input.sh"
   cp "$ROOT/bin/fm-supervision-instructions.sh" "$dir/bin/fm-supervision-instructions.sh"
@@ -601,13 +602,30 @@ test_hook_silent_without_jq() {
   local dir out status fakebin tool tool_path
   dir=$(make_primary_dir "$TMP_ROOT/hook-nojq")
   : > "$dir/state/task1.meta"
-  fakebin=$(fm_fakebin "$TMP_ROOT/hook-nojq-fake")
-  for tool in bash sh git cat printf date uname stat mkdir dirname; do
-    tool_path=$(command -v "$tool") || fail "test host must provide $tool"
-    ln -s "$tool_path" "$fakebin/$tool"
-  done
-  out=$(printf '{"stop_hook_active":false}' | PATH="$fakebin" bash "$dir/bin/fm-turnend-guard.sh" 2>&1)
-  status=$?
+  case "$(uname -s)" in
+    MSYS*|MINGW*|CYGWIN*)
+      # A symlinked bash cannot load msys-2.0.dll on Windows (the loader
+      # resolves DLLs beside the symlink, not the target), so the minimal
+      # symlink fakebin cannot host a live shell here. /usr/bin carries the
+      # core tools but not jq when jq is installed outside it, which is the
+      # native jq-less PATH this assertion needs.
+      [ ! -x /usr/bin/jq ] || {
+        pass "fm-turnend-guard: jq fail-open skipped (jq lives in /usr/bin on this host)"
+        return
+      }
+      out=$(printf '{"stop_hook_active":false}' | PATH=/usr/bin bash "$dir/bin/fm-turnend-guard.sh" 2>&1)
+      status=$?
+      ;;
+    *)
+      fakebin=$(fm_fakebin "$TMP_ROOT/hook-nojq-fake")
+      for tool in bash sh git cat printf date uname stat mkdir dirname; do
+        tool_path=$(command -v "$tool") || fail "test host must provide $tool"
+        ln -s "$tool_path" "$fakebin/$tool"
+      done
+      out=$(printf '{"stop_hook_active":false}' | PATH="$fakebin" bash "$dir/bin/fm-turnend-guard.sh" 2>&1)
+      status=$?
+      ;;
+  esac
   expect_code 0 "$status" "hook must fail open (exit 0) when jq is unavailable"
   [ -z "$out" ] || fail "hook produced output without jq: $out"
   pass "fm-turnend-guard: fails open (never blocks) when jq is missing"

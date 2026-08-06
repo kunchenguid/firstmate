@@ -104,6 +104,7 @@ make_lab() {  # <harness> -> echoes lab dir
     printf '#!/usr/bin/env bash\nexit 0\n' > "$lab/bin/$stub"
     chmod +x "$lab/bin/$stub"
   done
+  cp "$ROOT/bin/fm-codex-hook.mjs" "$lab/bin/fm-codex-hook.mjs"
 
   cat > "$lab/bin/fm-sessionstart-run.sh" <<'SH'
 #!/usr/bin/env bash
