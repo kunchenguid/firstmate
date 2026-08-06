@@ -108,7 +108,7 @@ PY
 }
 
 make_case() {
-  local name=$1 dir="$TMP_ROOT/$1" seed="$TMP_ROOT/$1/seed"
+  local dir="$TMP_ROOT/$1" seed="$TMP_ROOT/$1/seed"
   mkdir -p "$dir" "$seed"
   git -C "$seed" init -q -b main
   cat > "$seed/package.json" <<'JSON'
@@ -198,7 +198,7 @@ test_listener_parsing_path_conversion_source_and_redaction() {
   assert_grep 'owner_kernel=windows' "$out" "inspect omitted the Windows owner"
   assert_grep "checkout=$dir/mount/c/repos/stale checkout" "$out" "Windows drive path did not resolve to its checkout"
   assert_grep 'dirty=dirty' "$out" "inspect did not classify the stale source as dirty"
-  assert_contains "$(cat "$out")" 'checkout_windows=\\wsl.localhost\TestDistro\' "WSL checkout did not convert to its Windows UNC path"
+  assert_contains "$(cat "$out")" "checkout_windows=\\\\wsl.localhost\TestDistro\\" "WSL checkout did not convert to its Windows UNC path"
   assert_grep 'classification=native-windows-node-astro-dev' "$out" "Astro development server was not classified"
   assert_grep '--token <redacted>' "$out" "sensitive command flag was not redacted"
   assert_no_grep 'super-secret-value' "$out" "raw command secret reached output"
@@ -427,7 +427,9 @@ test_launcher_script_rejects_shell_metacharacters() {
   local dir out
   dir=$(make_case launcher-shell)
   out="$dir/out"
-  printf '%s\n' '{"scripts":{"dev":"astro dev $(touch injected-file)"}}' > "$dir/expected/package.json"
+  cat > "$dir/expected/package.json" <<'JSON'
+{"scripts":{"dev":"astro dev $(touch injected-file)"}}
+JSON
   git -C "$dir/expected" add package.json
   git -C "$dir/expected" commit -qm malicious-launcher
   git -C "$dir/expected" rev-parse HEAD > "$dir/expected.sha"
