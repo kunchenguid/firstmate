@@ -65,12 +65,13 @@ install_pipeline_stub() {
   chmod +x "$dir/bin/no-mistakes"
 }
 
-# A PATH carrying everything the emitter needs except a utility that can bound a
-# call, so the single property under test is the absence of that bound.
+# A PATH carrying everything the emitter needs except any utility that could
+# impose a timeout, so the single property under test is the absence of those
+# three. bin/fm-timeout-lib.sh's bash watchdog must still bound the call there.
 install_unbounded_path() {
   local dir=$1 tool
   mkdir -p "$dir"
-  for tool in bash sh git sed awk tr cat cut head rm mktemp dirname basename env uname grep; do
+  for tool in bash sh git sed awk tr cat cut head rm mktemp sleep dirname basename env uname grep; do
     command -v "$tool" >/dev/null 2>&1 || continue
     ln -sf "$(command -v "$tool")" "$dir/$tool"
   done
@@ -432,8 +433,8 @@ test_write_reports_a_record_with_no_head_as_a_record_fault() {
   pass "fm-attest.sh: a run record with no readable head is a record fault, not a diverged branch"
 }
 
-test_write_refuses_when_no_utility_can_bound_the_call() {
-  local repo bare head out rc tool
+test_write_attests_on_a_host_with_no_timeout_utility() {
+  local repo bare head out rc tool verified
   repo="$TMP_ROOT/write-unbounded"
   bare="$TMP_ROOT/write-unbounded-path"
   new_repo "$repo"
@@ -442,24 +443,24 @@ test_write_refuses_when_no_utility_can_bound_the_call() {
   install_unbounded_path "$bare"
   for tool in timeout gtimeout perl; do
     PATH="$repo/stub/bin:$bare" command -v "$tool" >/dev/null 2>&1 \
-      && fail "the fixture PATH still offers $tool, so the refusal would not be about its absence"
+      && fail "the fixture PATH still offers $tool, so this would not exercise the fallback"
   done
   out=$(cd "$repo" && PATH="$repo/stub/bin:$bare" "$ATTEST" write --no-push 2>&1)
   rc=$?
-  [ "$rc" -ne 0 ] || fail "a run record was transcribed with no way to bound the call"
-  assert_contains "$out" "run-record-unbounded" "an unbounded host was not reported distinctly"
-  # The tool never ran, so reporting an exit status for it would describe a
-  # process that never started.
-  assert_not_contains "$out" "run-record-unreadable" \
-    "a host that cannot bound the call was reported as a failing tool"
-  git -C "$repo" rev-parse --verify --quiet "$NOTES_REF" >/dev/null 2>&1 \
-    && fail "an attestation was recorded without ever reading the run record"
-  # The matched control: the same repository and the same run record, differing
-  # only in that this PATH can bound the call.
+  # The repository's own policy: bin/fm-timeout-lib.sh falls back to a
+  # dependency-free bash watchdog, so such a host is bounded rather than turned
+  # away from the one command CONTRIBUTING.md prescribes.
+  [ "$rc" -eq 0 ] || fail "a host with no timeout utility could not attest at all: $out"
+  verified=$(verify_out "$repo" "$head") \
+    || fail "the attestation written on that host was rejected by the gate: $verified"
+  assert_contains "$verified" "attested $head" "the round trip did not attest this head"
+  # The matched control: the same repository and record on a PATH that does
+  # offer one, which must reach the same verdict rather than a different one.
+  git -C "$repo" update-ref -d "$NOTES_REF"
   out=$(write_out "$repo")
   rc=$?
-  [ "$rc" -eq 0 ] || fail "the same run record was refused where the call can be bounded: $out"
-  pass "fm-attest.sh: no utility to bound the call refuses as its own state, not as a tool failure"
+  [ "$rc" -eq 0 ] || fail "the same run record was refused where a timeout utility exists: $out"
+  pass "fm-attest.sh: a host with no timeout, gtimeout or perl still attests under the shared bash bound"
 }
 
 test_write_reports_an_unreadable_run_record_distinctly() {
@@ -549,7 +550,7 @@ test_write_publishes_a_first_attestation_to_a_push_target_with_no_ref() {
   pass "fm-attest.sh: a push target with no attestation ref yet still receives the note"
 }
 
-test_write_withholds_the_remotes_own_push_error() {
+test_write_reports_the_rejection_reason_with_credentials_redacted() {
   local repo fork head out rc
   repo="$TMP_ROOT/write-push-rejected"
   fork="$TMP_ROOT/write-push-rejected-fork.git"
@@ -557,21 +558,33 @@ test_write_withholds_the_remotes_own_push_error() {
   head=$(git -C "$repo" rev-parse HEAD)
   git init -q --bare "$fork"
   git -C "$repo" remote add origin "$fork"
-  # A push target that reads fine but refuses the write, which is the shape of a
-  # real push failure: git names the push URL in its own message, and that URL
-  # can carry credentials, so its text must not reach the caller.
-  printf '#!/bin/sh\nexit 1\n' > "$fork/hooks/pre-receive"
+  # A push target that reads fine but refuses the write, and explains why in the
+  # server's own words. `remote:` text is passed through verbatim by git, so a
+  # credentialed URL inside it is the one form this fixture controls exactly:
+  # whatever redaction happens to it is ours, not git's.
+  {
+    printf '#!/bin/sh\n'
+    printf 'echo "refs/notes/* is blocked by a ruleset" >&2\n'
+    printf 'echo "retry against https://someone:s3cr3t@example.invalid/owner/repo.git" >&2\n'
+    printf 'exit 1\n'
+  } > "$fork/hooks/pre-receive"
   chmod +x "$fork/hooks/pre-receive"
   install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${head:0:8}" completed)"
   out=$(publish_out "$repo")
   rc=$?
   [ "$rc" -ne 0 ] || fail "a rejected push was reported as a publication"
-  assert_contains "$out" "could not publish $NOTES_REF to $fork" \
+  assert_contains "$out" "attestation-not-published" \
+    "a rejected push did not report its own reason"
+  assert_contains "$out" "Could not publish $NOTES_REF to $fork" \
     "the refusal did not name the repository it could not publish to"
-  assert_not_contains "$out" "failed to push some refs" \
-    "git's own push error, which quotes the push URL, reached the caller"
-  assert_not_contains "$out" "remote rejected" \
-    "git's own push error, which quotes the push URL, reached the caller"
+  # The reason the server gave must reach the person who has to act on it:
+  # suppressing it leaves a ruleset or quota rejection undiagnosable.
+  assert_contains "$out" "refs/notes/* is blocked by a ruleset" \
+    "the server's own rejection reason was discarded"
+  # And it must arrive with the credential stripped out of the URL it named.
+  assert_contains "$out" "https://example.invalid/owner/repo.git" \
+    "the redacted URL did not survive redaction"
+  assert_not_contains "$out" "s3cr3t" "a credential in the remote's text reached the caller"
   # The matched control: the same repository and the same remote, differing only
   # in that this push target accepts the write.
   rm -f "$fork/hooks/pre-receive"
@@ -580,7 +593,7 @@ test_write_withholds_the_remotes_own_push_error() {
   [ "$rc" -eq 0 ] || fail "publishing was refused once the same target accepted writes: $out"
   assert_contains "$out" "published $NOTES_REF to $fork" \
     "the success line did not name the repository the note reached"
-  pass "fm-attest.sh: a rejected push reports the stripped target rather than the remote's own message"
+  pass "fm-attest.sh: a rejected push reports the server's reason with credentials redacted"
 }
 
 test_write_refuses_an_unreadable_push_target_without_leaking_credentials() {
@@ -628,8 +641,8 @@ test_write_refuses_without_a_run_record
 test_write_surfaces_a_tool_failure_instead_of_reporting_no_run
 test_write_reports_an_unreadable_run_record_distinctly
 test_write_reports_a_record_with_no_head_as_a_record_fault
-test_write_refuses_when_no_utility_can_bound_the_call
+test_write_attests_on_a_host_with_no_timeout_utility
 test_write_publishes_to_the_push_target_it_reconciled_against
-test_write_withholds_the_remotes_own_push_error
+test_write_reports_the_rejection_reason_with_credentials_redacted
 test_write_publishes_a_first_attestation_to_a_push_target_with_no_ref
 test_write_refuses_an_unreadable_push_target_without_leaking_credentials

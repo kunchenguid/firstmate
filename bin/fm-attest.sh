@@ -26,6 +26,11 @@
 # and reports one distinct reason per failure, so an absent attestation is
 # never reported as a rejected one and never as a passing one.
 #
+# Every exit from either side names its own cause. A refusal (exit 1) is a
+# verdict on the evidence; a failure (exit 2) means no verdict was reached, and
+# the two are never worded as each other. docs/no-mistakes-attestation.md lists
+# the full set.
+#
 # The attestation records what the pipeline did to one commit. It is not a
 # proof of who ran the pipeline: a locally run pipeline holds only credentials
 # its own operator holds, so no artifact it emits can be unforgeable by that
@@ -38,6 +43,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Every call to the pipeline is bounded, so a tool blocked on a lock or on a
 # network read refuses with its own reason instead of hanging at a terminal.
+# bin/fm-timeout-lib.sh owns imposing that bound and falls back to a
+# dependency-free bash watchdog, so no host is refused for lacking a utility.
 NM_TIMEOUT=${FM_ATTEST_NM_TIMEOUT:-20}
 case "$NM_TIMEOUT" in '' | *[!0-9]*) NM_TIMEOUT=20 ;; esac
 
@@ -64,24 +71,49 @@ usage() {
   ' "$0" >&2
 }
 
+# Three exits, and the difference between them is the whole error model.
+#
+#   refuse <reason>   exit 1, "not attested": the evidence was examined and
+#                     found absent, unbound, or invalid. A verdict.
+#   fail <reason>     exit 2, "cannot attest": the command could not carry the
+#                     work out, so it reached no verdict and says nothing about
+#                     the evidence either way.
+#   die               exit 2, caller misuse: an argument this program cannot
+#                     act on at all, named in plain words because there is no
+#                     state to describe.
+#
+# Every refusal and every failure carries its own machine-readable reason, and
+# no condition borrows another's. That rule is the one this component keeps
+# having to relearn: an unreadable record reported as head divergence, or a
+# missing utility reported as a tool exit, sends a reader to repair something
+# that was never broken and to hit the identical message again.
+#
+# Both forms take prose details after the reason, indented line by line, so a
+# refusal can quote a tool's own output verbatim instead of paraphrasing it.
 die() {
   printf 'fm-attest: %s\n' "$*" >&2
   exit 2
 }
 
-# One machine-readable reason plus prose, so a caller can branch on the reason
-# and a human reading a CI log gets the explanation with it. A multi-line detail
-# is indented line by line, so a refusal can quote a tool's own output verbatim
-# instead of paraphrasing it.
-refuse() {
-  reason=$1
-  shift
-  printf 'fm-attest: not attested (%s)\n' "$reason" >&2
+report() {
+  headline=$1
+  reason=$2
+  shift 2
+  printf 'fm-attest: %s (%s)\n' "$headline" "$reason" >&2
   while [ "$#" -gt 0 ]; do
     printf '%s\n' "$1" | sed 's/^/  /' >&2
     shift
   done
+}
+
+refuse() {
+  report 'not attested' "$@"
   exit 1
+}
+
+fail() {
+  report 'cannot attest' "$@"
+  exit 2
 }
 
 is_full_sha() {
@@ -164,7 +196,8 @@ cmd_verify() {
   [ -n "$head" ] || die "verify needs --head <sha>"
   is_full_sha "$head" || die "--head must be a 40-character lowercase sha"
 
-  git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository"
+  git rev-parse --git-dir >/dev/null 2>&1 || fail not-a-git-repository \
+    "This directory is not inside a git repository."
 
   # A head whose commit object is absent cannot be attested or refuted here.
   # Report it as its own state rather than as a missing note, because the two
@@ -284,6 +317,50 @@ EOF
 # write - the contributor side
 # ---------------------------------------------------------------------------
 
+# git quotes the push URL back in its own messages, and the server's rejection
+# reason arrives in the same stream. Suppressing that stream keeps a credential
+# out of the log but throws the rejection reason away with it, which leaves a
+# contributor blocked by a ruleset or a quota with nothing to act on. So the
+# text is redacted rather than withheld: the userinfo is stripped from every URL
+# in it, and any line that still carries the secret verbatim after that is
+# replaced by a notice saying so, because an omission the reader knows about is
+# recoverable and a silent one is not.
+redact_secret=
+
+url_secret() {
+  case "$1" in
+    *://*) ;;
+    *) return 0 ;;
+  esac
+  us_authority=${1#*://}
+  us_authority=${us_authority%%/*}
+  case "$us_authority" in
+    *@*) us_userinfo=${us_authority%@*} ;;
+    *) return 0 ;;
+  esac
+  case "$us_userinfo" in
+    *:*) printf '%s' "${us_userinfo#*:}" ;;
+  esac
+}
+
+redact_text() {
+  [ -n "$1" ] || {
+    printf '(nothing)'
+    return 0
+  }
+  printf '%s\n' "$1" | sed 's#://[^/@[:space:]]*@#://#g' | while IFS= read -r rt_line; do
+    if [ -n "$redact_secret" ]; then
+      case "$rt_line" in
+        *"$redact_secret"*)
+          printf '(a line is withheld here: it still named a credential after redaction)\n'
+          continue
+          ;;
+      esac
+    fi
+    printf '%s\n' "$rt_line"
+  done
+}
+
 # The repository a git URL names, with any credentials it embeds removed, so the
 # published target can be reported rather than left implicit in a remote's name.
 # A local path is a path and is printed as it is; only a URL can carry a secret.
@@ -343,21 +420,21 @@ cmd_write() {
     esac
   done
 
-  git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository"
-  command -v no-mistakes >/dev/null 2>&1 || die "no-mistakes is not installed"
+  git rev-parse --git-dir >/dev/null 2>&1 || fail not-a-git-repository \
+    "This directory is not inside a git repository, so there is no head to attest."
+  command -v no-mistakes >/dev/null 2>&1 || fail pipeline-tool-missing \
+    "no-mistakes is not on PATH, so its run record cannot be read." \
+    "That is a missing tool rather than a missing run: install it and re-run."
 
-  head=$(git rev-parse --verify HEAD 2>/dev/null) || die "HEAD does not resolve to a commit"
-  branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || die "HEAD is not on a branch"
-  [ "$branch" != HEAD ] || die "attest from the branch the pipeline validated, not a detached HEAD"
-
-  # A call this host cannot bound is not a call that failed. fm_nm_run_bounded
-  # runs nothing at all when no bounding utility exists, so asking first keeps
-  # "the tool never ran" from being reported as "the tool exited 1" with no
-  # output to diagnose from, on a machine where the pipeline itself works.
-  fm_nm_bound_tool >/dev/null || refuse run-record-unbounded \
-    "No timeout, gtimeout or perl is available here to bound the call to no-mistakes." \
-    "The run record was therefore never read, rather than read and found wanting, so this says nothing about the pipeline or about this branch." \
-    "Install one of them and re-run."
+  head=$(git rev-parse --verify HEAD 2>/dev/null) || fail head-unresolvable \
+    "HEAD does not resolve to a commit, so there is nothing to attest yet." \
+    "Commit this work, validate it, then attest the head the pipeline pushes."
+  branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || fail head-detached \
+    "HEAD is not on a branch, and a run record is attributed to one." \
+    "Check out the branch the pipeline validated and attest from there."
+  [ "$branch" != HEAD ] || fail head-detached \
+    "HEAD is detached, and a run record is attributed to a branch." \
+    "Check out the branch the pipeline validated and attest from there."
 
   # A tool that failed, a tool whose output this transcription cannot read, and a
   # tool reporting no run at all are three different repairs, and none of them
@@ -369,7 +446,9 @@ cmd_write() {
   # only stdout is parsed, so a stderr notice can never stand in for a run
   # record; stderr is quoted alongside it purely as diagnostic detail.
   status_err_file=$(mktemp "${TMPDIR:-/tmp}/.fm-attest-status.XXXXXX") \
-    || die "could not create a temporary file"
+    || fail scratch-file-unavailable \
+      "Could not create a temporary file to capture the pipeline tool's stderr." \
+      "Check TMPDIR and its free space, then re-run."
   status_rc=0
   if [ -n "$run_id" ]; then
     status=$(fm_nm_run_bounded . "$NM_TIMEOUT" axi status --run "$run_id" 2>"$status_err_file") || status_rc=$?
@@ -475,13 +554,13 @@ EOF
   # That repository is named in everything this prints, because "published to
   # origin" does not say which repository was reached and the note is evidence
   # only on the one holding the pull request head. Credentials a URL embeds are
-  # stripped from the name, and the remote's own error text is never echoed on
-  # any of these calls, the final push included, because that text quotes the
-  # push URL back and a credential in a log is a leak wherever that log ends up.
+  # stripped from the name, and git's own text is redacted rather than withheld,
+  # so the reason a remote refused still reaches the person who has to act on it.
   push_target=$remote
   if [ "$push" -eq 1 ]; then
     push_url=$(git remote get-url --push "$remote" 2>/dev/null) || push_url=$remote
     push_target=$(display_repository "$push_url")
+    redact_secret=$(url_secret "$push_url")
     incoming_ref="$notes_ref-incoming"
     # Absence and unreadability are two different answers and only one of them is
     # a fact about the attestations there. A push target with no
@@ -491,31 +570,52 @@ EOF
     # and everything else as a failure, which is the same line the gate draws
     # when it fetches this ref.
     ls_rc=0
-    git ls-remote --exit-code "$push_url" "$notes_ref" >/dev/null 2>&1 || ls_rc=$?
+    ls_err=$(git ls-remote --exit-code "$push_url" "$notes_ref" 2>&1 >/dev/null) || ls_rc=$?
     case "$ls_rc" in
       0)
-        git fetch --quiet --no-tags --force "$push_url" "$notes_ref:$incoming_ref" 2>/dev/null \
-          || die "could not fetch $notes_ref from $push_target, the push target of $remote; it advertises that ref but would not serve it, so resolve that and re-run"
-        git notes --ref="$notes_ref" merge -s ours "$incoming_ref" >/dev/null 2>&1 \
-          || die "could not reconcile $notes_ref with $push_target, the push target of $remote; resolve it and re-run"
+        fetch_rc=0
+        fetch_err=$(git fetch --quiet --no-tags --force "$push_url" "$notes_ref:$incoming_ref" 2>&1 >/dev/null) \
+          || fetch_rc=$?
+        [ "$fetch_rc" -eq 0 ] || fail push-target-unfetchable \
+          "$push_target, the push target of $remote, advertises $notes_ref but would not serve it." \
+          "git said: $(redact_text "$fetch_err")" \
+          "Resolve that and re-run; nothing was recorded."
+        merge_rc=0
+        merge_err=$(git notes --ref="$notes_ref" merge -s ours "$incoming_ref" 2>&1 >/dev/null) \
+          || merge_rc=$?
+        [ "$merge_rc" -eq 0 ] || fail attestation-not-reconciled \
+          "Could not reconcile the local $notes_ref with the one on $push_target, the push target of $remote." \
+          "git said: $(redact_text "$merge_err")" \
+          "Resolve that and re-run; nothing was recorded."
         git update-ref -d "$incoming_ref" 2>/dev/null || true
         ;;
       2) ;;
       *)
-        die "could not read $notes_ref from $push_target, the push target of $remote (git exit $ls_rc); that is an unreadable repository rather than one with no attestations, so nothing was recorded; check access to it, or name another with --remote <name>, and re-run"
+        fail push-target-unreadable \
+          "Could not read $notes_ref from $push_target, the push target of $remote (git exit $ls_rc)." \
+          "git said: $(redact_text "$ls_err")" \
+          "That is a repository this could not read rather than one with no attestations, so nothing was recorded." \
+          "Check access to it, or name another with --remote <name>, then re-run."
         ;;
     esac
   fi
-  git notes --ref="$notes_ref" add -f -m "$payload" "$attest_head" >/dev/null \
-    || die "could not record the attestation note"
+  notes_err=$(git notes --ref="$notes_ref" add -f -m "$payload" "$attest_head" 2>&1 >/dev/null) \
+    || fail attestation-not-recorded \
+      "Could not record the attestation note on $attest_head." \
+      "git said: $(redact_text "$notes_err")"
   if [ "$attest_head" != "$head" ]; then
     printf 'fm-attest: the run tip is ahead of HEAD %s, as the pipeline advances it with its own fix commits\n' "$head"
   fi
   printf 'fm-attest: recorded %s for %s\n' "$notes_ref" "$attest_head"
 
   [ "$push" -eq 1 ] || return 0
-  git push --quiet "$remote" "$notes_ref:$notes_ref" 2>/dev/null \
-    || die "could not publish $notes_ref to $push_target, the push target of $remote; git's own message is withheld because it quotes the push URL, which can carry credentials; the attestation is evidence only on the repository holding the pull request head, so name that one with --remote <name> if this is not it, or re-run to reconcile if its $notes_ref moved since"
+  push_rc=0
+  push_err=$(git push --quiet "$remote" "$notes_ref:$notes_ref" 2>&1 >/dev/null) || push_rc=$?
+  [ "$push_rc" -eq 0 ] || fail attestation-not-published \
+    "Could not publish $notes_ref to $push_target, the push target of $remote." \
+    "git said: $(redact_text "$push_err")" \
+    "Any credential in that text is redacted, and a line that still carried one is replaced by a notice rather than shown." \
+    "The attestation is evidence only on the repository holding the pull request head, so name that one with --remote <name> if this is not it, or re-run to reconcile if its $notes_ref moved since."
   printf 'fm-attest: published %s to %s (the push target of %s)\n' "$notes_ref" "$push_target" "$remote"
 }
 
@@ -541,8 +641,10 @@ cmd_show() {
       *) die "unexpected argument: $1" ;;
     esac
   done
-  git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository"
-  sha=$(git rev-parse --verify "$commit^{commit}" 2>/dev/null) || die "no such commit: $commit"
+  git rev-parse --git-dir >/dev/null 2>&1 || fail not-a-git-repository \
+    "This directory is not inside a git repository."
+  sha=$(git rev-parse --verify "$commit^{commit}" 2>/dev/null) || fail commit-unknown \
+    "No such commit in this repository: $commit"
   git notes --ref="$notes_ref" show "$sha" 2>/dev/null \
     || refuse no-attestation-for-head "No attestation is recorded for $sha."
 }

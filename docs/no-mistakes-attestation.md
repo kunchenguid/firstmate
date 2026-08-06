@@ -37,6 +37,23 @@ Each failure reports its own reason: `no-attestation-ref`, `no-attestation-for-h
 Keeping them distinct is the point rather than a convenience.
 An absent attestation and a rejected one need different repairs, and neither may be reported as a pass.
 
+## The error model
+
+`bin/fm-attest.sh` exits three ways, and the difference between them is the contract rather than an implementation detail.
+
+A **refusal** exits 1 and prints `not attested (<reason>)`.
+The evidence was examined and found absent, unbound or invalid, so this is a verdict.
+`verify` refuses with the six reasons above.
+`write` refuses with `no-run-record`, `run-record-unreadable`, `run-record-unparsed`, `run-record-no-head`, `run-covers-another-branch`, `run-head-unavailable`, `run-covers-another-head` or `run-incomplete`.
+
+A **failure** exits 2 and prints `cannot attest (<reason>)`.
+No verdict was reached, so it says nothing about the evidence either way: `not-a-git-repository`, `pipeline-tool-missing`, `head-unresolvable`, `head-detached`, `scratch-file-unavailable`, `push-target-unreadable`, `push-target-unfetchable`, `attestation-not-reconciled`, `attestation-not-recorded`, `attestation-not-published`, or `commit-unknown` for `show`.
+
+A **usage error** exits 2 and names the argument in plain words, because there is no state to describe.
+
+No condition borrows another's reason or another's words.
+That rule is the one this component has had to relearn most often: an unreadable record reported as head divergence, or a missing utility reported as a tool exit, sends a reader to repair something that was never broken and to hit the identical message again.
+
 ## What it attests
 
 That some pipeline run completed review, test, lint and push against **this exact commit**, and recorded which run and which tool version did it.
@@ -75,7 +92,9 @@ A run tip that is not a commit in this checkout at all is refused separately as 
 It publishes to the remote's push URL rather than its fetch URL, and reconciles against that same repository before writing, because those are two different repositories in the setup `CONTRIBUTING.md` describes and only the push target is the one the check reads.
 The reconciliation merges the published ref instead of forcing over the local one, so an attestation recorded locally with `--no-push` survives the publishing of a later one.
 It names that repository in what it prints, with any credentials the remote's URL embeds stripped out, because "published to origin" does not say which repository was reached and the note is evidence only on the one holding the pull request head.
-The remote's own error text is never echoed on any of these calls, the final push included, because git quotes the push URL back in it and a credential in a log is a leak wherever that log ends up; the stripped name and the repair are printed instead.
+git's own text is redacted rather than withheld when a remote call fails.
+git quotes the push URL back in its messages and a credential in a log is a leak wherever that log ends up, but suppressing the text throws away the server's rejection reason with it, and a contributor blocked by a ruleset on `refs/notes/*`, a required-signature policy or a quota then has nothing to act on.
+So the userinfo is stripped from every URL in the text, and any line that still carries the secret after that is replaced by a notice saying a line was withheld, because an omission the reader knows about is recoverable and a silent one is not.
 A push target carrying no `refs/notes/no-mistakes` yet has nothing to reconcile against and is not an error, but a push target that cannot be read at all stops the command before anything is recorded: not reading a repository is not reading an absence, and that is the same line the gate draws when it fetches this ref.
 
 Its own refusals stay as distinct as the gate's.
@@ -84,7 +103,8 @@ Only what the tool writes to stdout decides which of them it is, because unrelat
 None of them may borrow a reason that describes the branch instead of the record.
 A record that cannot be read says nothing about whether the work here is covered, so reporting it as a diverged branch sends a contributor to re-validate a branch that is fine and to receive the identical refusal.
 Every call to the tool is time-bounded, so one blocked on a lock or a network read refuses as `run-record-unreadable` rather than hanging at a contributor's terminal.
-`run-record-unbounded` is the separate case where no `timeout`, `gtimeout` or `perl` exists to impose that bound, so the tool is never run: that is a fact about this host, and describing it as a tool failure would report an exit status for a process that never started.
+`bin/fm-timeout-lib.sh` owns imposing that bound, and its selection ends in a dependency-free bash watchdog, so a host without `timeout`, `gtimeout` or `perl` gets the same hard bound and process-group cleanup rather than an unbounded call or a refusal.
+`bin/fm-nm-run-lib.sh` owns reading and attributing the record and delegates the bound to it, because a second copy of the mechanism selection is how a host that one owner handles becomes a dead end for the other.
 
 When `no-mistakes` publishes this note itself, the helper becomes redundant and nothing about the check changes: the note format is the contract, and which program writes it is not.
 
