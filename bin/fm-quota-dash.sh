@@ -4,7 +4,7 @@
 # Wraps `quota-axi --json`, which reports a snapshot and has no watch mode of
 # its own. This adds the loop, the bars, and the countdown.
 #
-# Refresh is 10 MINUTES by default, deliberately not htop's one second. Quota
+# Refresh is ONE HOUR by default, deliberately not htop's one second. Quota
 # windows are weekly; polling them per second would show a frozen picture while
 # hammering each provider's endpoint, so a fast refresh buys nothing and risks
 # rate-limiting the very data it displays. The countdown exists so a slow
@@ -15,13 +15,19 @@
 # more alarming fact than "we could not ask" - and on 2026-08-06 exactly that
 # confusion sent a worker to report a dead API key that was working fine.
 #
+# Alongside the token providers it shows image-generation spend, because that is
+# the third consumable in this fleet and the only one billed in money rather
+# than in a refilling window. Its numbers come from the same ledger
+# bin/fm-image-gen.sh writes, so the dashboard and the tool's own cap can never
+# disagree.
+#
 # Usage:
 #   fm-quota-dash.sh [--interval <seconds>] [--provider <list>] [--once]
 #
 # Keys while running: r = refresh now, q = quit.
 set -u
 
-INTERVAL=600
+INTERVAL=3600
 PROVIDERS=claude,codex
 ONCE=0
 
@@ -123,6 +129,33 @@ render() {
   done <<EOF
 $rows
 EOF
+
+  render_image_spend
+}
+
+# Image generation is billed in money against a daily cap rather than in a
+# window that refills, so it gets its own row with the cap as the denominator.
+render_image_spend() {
+  local home ledger cap spent today pct
+  home="${FM_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+  ledger="${FM_STATE_OVERRIDE:-$home/state}/image-gen-spend.tsv"
+  cap=5
+  [ ! -f "$home/config/image-daily-usd-cap" ] || cap=$(tr -d '[:space:]' < "$home/config/image-daily-usd-cap")
+  case "$cap" in ''|*[!0-9.]*) cap=5 ;; esac
+
+  today=$(date -u +%Y-%m-%d)
+  spent=0
+  [ ! -f "$ledger" ] || spent=$(awk -F'\t' -v d="$today" '$1 == d { s += $4 } END { printf "%.4f", s + 0 }' "$ledger" 2>/dev/null)
+  case "$spent" in ''|*[!0-9.]*) spent=0 ;; esac
+
+  # Percent REMAINING, so the bar reads the same direction as the token rows
+  # above: full and green means plenty left, not plenty spent.
+  pct=$(awk -v s="$spent" -v c="$cap" 'BEGIN { if (c <= 0) { print 0; exit } r = (1 - s / c) * 100; if (r < 0) r = 0; printf "%d", r }')
+
+  printf '\n  %-8s %s%-12s%s %s%s%s %3s%%\n' \
+    "images" "$DIM" "nano-banana" "$RESET" "$(tone_for "$pct")" "$(bar "$pct" 28)" "$RESET" "$pct"
+  printf '           %sspent $%s of $%s today (UTC) - resets at midnight UTC%s\n' \
+    "$DIM" "$spent" "$cap" "$RESET"
 }
 
 [ "$ONCE" -eq 0 ] || { render; exit 0; }
