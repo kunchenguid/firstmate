@@ -64,16 +64,44 @@ function markLoaded(): void {
 // reload, resume, and fork all keep prior context. bin/fm-sessionstart-run.sh
 // owns what each source means; this maps Pi's vocabulary onto its --source
 // names and injects whatever it prints.
-function runSessionstartHook(source: string): string {
-  const result = spawnSync(`${root}/bin/fm-sessionstart-run.sh`, ["--source", source], {
-    encoding: "utf8",
+const sessionstartDeliveryBytes = 512 * 1024;
+const sessionstartTruncatedMarker =
+  "\n\nPI SESSION-START DELIVERY TRUNCATED - the digest exceeded 512 KiB. " +
+  "Treat omitted context as unread and inspect the named files directly before acting on it.";
+
+function runSessionstartHook(source: string): Promise<string> {
+  return new Promise((resolveResult) => {
+    const child = spawn(`${root}/bin/fm-sessionstart-run.sh`, ["--source", source], {
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const chunks: Buffer[] = [];
+    let retainedBytes = 0;
+    let truncated = false;
+    child.stdout.on("data", (chunk: Buffer) => {
+      if (retainedBytes >= sessionstartDeliveryBytes) {
+        truncated = true;
+        return;
+      }
+      const remaining = sessionstartDeliveryBytes - retainedBytes;
+      const retained = chunk.length <= remaining ? chunk : chunk.subarray(0, remaining);
+      chunks.push(retained);
+      retainedBytes += retained.length;
+      if (retained.length !== chunk.length) truncated = true;
+    });
+    child.on("error", () => resolveResult(""));
+    child.on("close", (code) => {
+      if (code !== 0) {
+        resolveResult("");
+        return;
+      }
+      const raw = Buffer.concat(chunks).toString("utf8").trim();
+      resolveResult(truncated ? `${raw}${sessionstartTruncatedMarker}` : raw);
+    });
   });
-  if (result.status !== 0) return "";
-  return result.stdout.trim();
 }
 
-function injectSessionstart(pi: ExtensionAPI, source: string): void {
-  const raw = runSessionstartHook(source);
+async function injectSessionstart(pi: ExtensionAPI, source: string): Promise<void> {
+  const raw = await runSessionstartHook(source);
   if (!raw) return;
   try {
     // Pi is the only adapter that injects a MESSAGE rather than hook stdout, so
@@ -139,18 +167,18 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.on?.("session_start", (event) => {
+  pi.on?.("session_start", async (event) => {
     const reason = String((event as { reason?: unknown }).reason ?? "");
     const source = { startup: "startup", new: "clear", resume: "resume", fork: "fork" }[reason];
     markLoaded();
     if (!source) return;
-    injectSessionstart(pi, source);
+    await injectSessionstart(pi, source);
   });
 
   // Pi's compaction equivalent. The digest is what a compacted session has just
   // lost, so re-emitting it here is the point rather than a side effect.
-  pi.on?.("session_compact", () => {
-    injectSessionstart(pi, "compact");
+  pi.on?.("session_compact", async () => {
+    await injectSessionstart(pi, "compact");
   });
 
   pi.on("tool_call", async (event) => {

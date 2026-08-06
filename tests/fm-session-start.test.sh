@@ -1236,6 +1236,7 @@ make_hanging_tool() {
   local fakebin=$1 name=$2
   cat > "$fakebin/$name" <<'SH'
 #!/usr/bin/env bash
+trap '' TERM
 sleep 600
 SH
   chmod +x "$fakebin/$name"
@@ -1263,6 +1264,8 @@ EOF
   assert_contains "$out" "wake-queue supervision-instructions context fleet-state next-step" \
     "the truncation banner did not list every stage that never ran"
   assert_not_contains "$out" "NEXT STEP" "a truncated digest claimed to have reached its closing reminder"
+  assert_absent "$home/state/.session-start-complete" \
+    "a truncated startup recorded itself as complete"
 
   # The bound must reach the whole process group: a hung grandchild that
   # outlives the digest would keep holding whatever the digest was waiting on.
@@ -1271,6 +1274,52 @@ EOF
   [ "$stray" -eq 0 ] || fail "the runtime bound left $stray hung subprocess(es) behind"
 
   pass "an over-budget session start emits its completed stages, names what it never reached, and exits 0"
+}
+
+test_coreutils_timeout_escalates_term_resistant_process() {
+  local fakebin="$TMP_ROOT/coreutils-kill-after" driver status=0
+  mkdir -p "$fakebin"
+  cat > "$fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+set -u
+kill_after=
+case "${1:-}" in
+  --kill-after=*) kill_after=${1#--kill-after=}; shift ;;
+esac
+seconds=${1:-}
+shift
+"$@" &
+child=$!
+sleep "$seconds"
+kill -TERM "$child" 2>/dev/null || true
+if [ -n "$kill_after" ]; then
+  sleep "$kill_after"
+  kill -KILL "$child" 2>/dev/null || true
+fi
+wait "$child" 2>/dev/null || true
+exit 124
+SH
+  chmod +x "$fakebin/timeout"
+  driver="$TMP_ROOT/coreutils-kill-after-driver.sh"
+  cat > "$driver" <<'SH'
+#!/usr/bin/env bash
+. "$1"
+fm_run_timed 1 perl -e '$SIG{TERM} = "IGNORE"; sleep 600'
+SH
+  chmod +x "$driver"
+
+  perl -e '
+    my $pid = fork;
+    die "fork failed" unless defined $pid;
+    if (!$pid) { setpgrp(0, 0); exec @ARGV }
+    local $SIG{ALRM} = sub { kill "KILL", -$pid; waitpid $pid, 0; exit 99 };
+    alarm 5;
+    waitpid $pid, 0;
+    exit($? >> 8);
+  ' env PATH="$fakebin:$BASE_PATH" "$driver" "$ROOT/bin/fm-timeout-lib.sh" || status=$?
+
+  expect_code 124 "$status" "coreutils timeout TERM-resistant escalation"
+  pass "the coreutils timeout path force-kills a command that ignores TERM"
 }
 
 test_runtime_bound_leaves_a_healthy_digest_untouched() {
@@ -1672,6 +1721,7 @@ test_pi_diagnostic_accepts_prelock_loaded_marker
 test_pi_diagnostic_rejects_missing_turnend_guard_marker
 test_pi_diagnostic_rejects_previous_session_loaded_marker
 test_runtime_bound_truncates_loudly_and_exits_zero
+test_coreutils_timeout_escalates_term_resistant_process
 test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain

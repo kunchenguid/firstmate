@@ -136,6 +136,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+COMPLETION_FILE="$STATE/.session-start-complete"
 
 REEMIT=0
 for arg in "$@"; do
@@ -403,6 +404,9 @@ if [ "$LOCK_RC" -ne 0 ]; then
   }
 fi
 if [ "$READ_ONLY" -eq 0 ]; then
+  if [ "$REEMIT" -eq 0 ]; then
+    rm -f "$COMPLETION_FILE" 2>/dev/null || true
+  fi
   fm_trace_context_session_start "$CONFIG" "$STATE/.trace-context-effective"
 fi
 
@@ -606,5 +610,21 @@ of this command. Re-read a file only if this digest flagged it ABSENT (then
 rebuild or create it per AGENTS.md), its contents looked unparseable/corrupt,
 or an individual full status log is needed for older wake-event history.
 EOF
+
+if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
+  COMPLETION_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
+  case "$COMPLETION_PID" in
+    ''|*[!0-9]*) COMPLETION_PID= ;;
+  esac
+  COMPLETION_TMP=$(mktemp "$STATE/.session-start-complete.XXXXXX" 2>/dev/null || true)
+  if [ -n "$COMPLETION_PID" ] && [ -n "$COMPLETION_TMP" ] \
+    && printf '%s\n' "$COMPLETION_PID" > "$COMPLETION_TMP" 2>/dev/null \
+    && mv -f "$COMPLETION_TMP" "$COMPLETION_FILE" 2>/dev/null; then
+    :
+  else
+    [ -z "$COMPLETION_TMP" ] || rm -f "$COMPLETION_TMP" 2>/dev/null || true
+    printf '\nSESSION_START_COMPLETION: not recorded - the next clear or compact will run a full startup.\n'
+  fi
+fi
 
 exit 0

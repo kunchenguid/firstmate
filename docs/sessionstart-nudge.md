@@ -23,15 +23,16 @@ It takes `--source <name>` when the adapter knows the source natively, and other
 | Source | Action | Why |
 | --- | --- | --- |
 | `startup`, `new` | Full digest | This process has not taken the helm. |
-| `clear`, `compact` | `--reemit` digest | This process HAS the helm and lost only its context. |
+| `clear`, `compact` | `--reemit` after a proven complete startup, otherwise full digest | This process normally has the helm and lost only its context, but an earlier hook may have been truncated after acquiring the lock. |
 | `resume`, `reload`, `fork` | Delegate to the nudge wrapper | Prior context is restored, so re-running is redundant when the lock is still ours and an instruction is enough when a new process resumed an old session. |
 | unreadable or unrecognized | Full digest | Taking the helm redundantly is cheap and idempotent; not taking it is the bug this tier exists to fix. |
 
 This deliberately inverts the previous nudge matcher, which fired on `startup|resume|clear` and excluded `compact`.
 Compaction is now covered because a compacted session has lost exactly the digest it needs, and resume is now excluded from the run because it restores that digest instead of losing it.
 
-The lock is the idempotency interlock for the whole scheme.
-`bin/fm-lock.sh` already treats a lock this session's own harness holds as its own, so a `clear` or `compact` re-emit re-verifies ownership and proceeds, while a lock another live session took meanwhile still produces the ordinary read-only digest.
+The lock and `state/.session-start-complete` together are the idempotency interlock for the whole scheme.
+The full digest clears that completion record after acquiring the lock and republishes the lock owner's pid only after every stage completes, so `clear` or `compact` cannot skip startup sweeps after a truncated run.
+`bin/fm-lock.sh` already treats a lock this session's own harness holds as its own, so a proven `clear` or `compact` re-emit re-verifies ownership and proceeds, while a lock another live session took meanwhile still produces the ordinary read-only digest.
 On a run-tier harness the nudge cannot also fire: `resume`, `reload`, and `fork` are the only sources routed to it, and on those its own ancestry check stays silent whenever this process already holds the lock.
 
 `bin/fm-session-start.sh --reemit` owns which work a re-emit skips; its header is the single owner of that list.
@@ -70,6 +71,7 @@ A lock another session holds, broken GitHub auth, and a truncated digest therefo
 
 Pi is the only adapter that injects a message rather than hook stdout, so whatever it injects must carry operational provenance or the Ahoy skill would have to guess whether it was captain-authored.
 The extension therefore encodes an unencoded digest as `session-start` operational input before sending it, and leaves the already-encoded nudge alone.
+It streams the hook to completion and retains at most 512 KiB for message delivery; an oversized digest keeps its prefix and gains a loud `PI SESSION-START DELIVERY TRUNCATED` marker instead of disappearing through Node's synchronous buffer limit.
 
 The OpenCode nudge runs only on `session.created`.
 The watcher-arm and turn-end plugins run later on `session.idle`, and the guard lets the watcher coordinator act first, so the plugins do not race for one lifecycle event.
@@ -80,8 +82,8 @@ That alternative expands trust and writes outside this repository, so Firstmate 
 ## Regression coverage
 
 `tests/fm-sessionstart-nudge.test.sh` proves both wrappers' silence for both gate signals, an unmarked linked worktree, and a missing state directory, plus the nudge wrapper's already-owned-lock silence and its exact U+2063 `FIRSTMATE_OP:`-prefixed, `session-start`-typed one-line output.
-It proves the run wrapper's source routing end to end against a real `fm-session-start.sh`, including argument and stdin-payload sources, the `--reemit` selection, resume delegation, and an unrecognized source falling through to the full digest.
-`tests/fm-session-start.test.sh` proves the runtime bound: a digest that exceeds its budget still emits its completed stages, names the incomplete stage and every stage it never reached, and exits 0.
+It proves the run wrapper's source routing end to end against a real `fm-session-start.sh`, including completion-gated `--reemit` selection, resume delegation, an unrecognized source falling through to the full digest, and bounded loud delivery of an oversized Pi digest.
+`tests/fm-session-start.test.sh` proves the runtime bound: a TERM-resistant digest that exceeds its budget is force-killed, still emits its completed stages, names the incomplete stage and every stage it never reached, leaves no completion proof, and exits 0.
 `tests/fm-pi-primary-live-e2e.test.sh` and `tests/fm-opencode-primary-live-e2e.test.sh` exercise native startup paths with first-message and later-message Ahoy regressions.
 `tests/fm-sessionstart-hook-live-e2e.test.sh` is the opt-in live guard that confirms, per installed run-tier harness, that the hook actually runs the digest and that resume is excluded.
 `tests/fm-turnend-guard.test.sh`, `tests/fm-pi-watch-extension.test.sh`, and `tests/fm-daemon.test.sh` cover marked guard, monitoring, and away-mode delivery.

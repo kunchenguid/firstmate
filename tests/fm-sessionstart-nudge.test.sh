@@ -201,6 +201,9 @@ test_run_clear_and_compact_reemit() {
   for source in clear compact; do
     root="$TMP_ROOT/run-$source"
     make_run_primary "$root"
+    run_hook "$root" --source startup </dev/null >/dev/null
+    assert_present "$root/state/.session-start-complete" \
+      "startup did not publish the completion proof needed by $source"
     status=0
     out=$(run_hook "$root" --source "$source" </dev/null) || status=$?
     expect_code 0 "$status" "run wrapper $source"
@@ -210,6 +213,74 @@ test_run_clear_and_compact_reemit() {
     assert_not_contains "$out" "FIRSTMATE_OP" "a $source open also emitted the nudge instruction"
   done
   pass "run wrapper: clear and compact re-emit the digest without repeating startup sweeps"
+}
+
+test_run_clear_without_completion_finishes_startup() {
+  local root="$TMP_ROOT/run-clear-incomplete" out status=0
+  make_run_primary "$root"
+  out=$(run_hook "$root" --source clear </dev/null) || status=$?
+  expect_code 0 "$status" "run wrapper clear without completion proof"
+  assert_contains "$out" "$FULL_BANNER$root" \
+    "clear skipped full startup when no completed startup could be proven"
+  assert_not_contains "$out" "$REEMIT_BANNER" \
+    "clear trusted lock ownership as proof that startup completed"
+  assert_present "$root/state/.session-start-complete" \
+    "the recovery full startup did not publish completion proof"
+  pass "run wrapper: clear falls back to full startup when completion is unproven"
+}
+
+test_pi_large_sessionstart_digest_is_delivered_loudly() {
+  local fixture out status=0
+  command -v node >/dev/null 2>&1 || {
+    echo "skip: node not found for Pi large session-start delivery test"
+    return 0
+  }
+  fixture="$TMP_ROOT/pi-large-digest"
+  mkdir -p "$fixture/.pi/extensions/lib" "$fixture/bin" "$fixture/state" "$fixture/data" "$fixture/config"
+  git init -q -b main "$fixture"
+  git -C "$fixture" commit -q --allow-empty -m init
+  : > "$fixture/AGENTS.md"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/"
+  cp "$ROOT/bin/fm-sessionstart-run.sh" "$ROOT/bin/fm-sessionstart-nudge.sh" \
+    "$ROOT/bin/fm-primary-scope-lib.sh" "$ROOT/bin/fm-gate-refuse-lib.sh" \
+    "$ROOT/bin/fm-operational-input.sh" "$fixture/bin/"
+  cat > "$fixture/bin/fm-session-start.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'PI_LARGE_DIGEST_PREFIX\n'
+i=0
+while [ "$i" -lt 700 ]; do
+  printf '%01024d' 0
+  i=$((i + 1))
+done
+printf '\nPI_LARGE_DIGEST_SUFFIX\n'
+SH
+  chmod +x "$fixture/bin/"*.sh
+
+  out=$(EXT="$fixture/.pi/extensions/fm-primary-turnend-guard.ts" \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" FM_GATE_REFUSE_BYPASS=1 \
+    node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+const handlers = new Map();
+const messages = [];
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  sendMessage(message) { messages.push(message); },
+};
+const extension = await import(`${pathToFileURL(process.env.EXT).href}?large=${Date.now()}`);
+extension.default(pi);
+await handlers.get("session_start")({ reason: "startup" });
+if (messages.length !== 1) throw new Error(`expected one message, got ${messages.length}`);
+const content = messages[0].content;
+if (!content.includes("PI_LARGE_DIGEST_PREFIX")) throw new Error("digest prefix was lost");
+if (!content.includes("PI SESSION-START DELIVERY TRUNCATED")) throw new Error("truncation marker was lost");
+if (content.includes("PI_LARGE_DIGEST_SUFFIX")) throw new Error("delivery exceeded its declared bound");
+if (!content.includes("FIRSTMATE_OP: v1 session-start:")) throw new Error("operational provenance was lost");
+JS
+  ) || status=$?
+  expect_code 0 "$status" "Pi large session-start delivery"
+  [ -z "$out" ] || fail "Pi large session-start delivery printed output: $out"
+  pass "Pi retains a bounded digest prefix and loudly marks oversized delivery"
 }
 
 test_run_resume_delegates_to_the_nudge() {
@@ -225,6 +296,7 @@ test_run_resume_delegates_to_the_nudge() {
 test_run_reads_source_from_the_hook_payload() {
   local root="$TMP_ROOT/run-payload" out status=0
   make_run_primary "$root"
+  run_hook "$root" --source startup </dev/null >/dev/null
   out=$(printf '{"session_id":"s1","hook_event_name":"SessionStart","source":"compact"}' |
     run_hook "$root") || status=$?
   expect_code 0 "$status" "run wrapper payload compact"
@@ -292,8 +364,10 @@ test_owned_lock_is_silent
 test_opencode_plugin_delivers_exact_nudge_once
 test_run_startup_runs_the_full_digest
 test_run_clear_and_compact_reemit
+test_run_clear_without_completion_finishes_startup
 test_run_resume_delegates_to_the_nudge
 test_run_reads_source_from_the_hook_payload
 test_run_unknown_source_takes_the_helm
 test_run_gate_and_scope_are_silent
 test_run_reports_a_failed_session_start_as_digest_text
+test_pi_large_sessionstart_digest_is_delivered_loudly

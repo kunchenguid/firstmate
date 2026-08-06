@@ -20,9 +20,9 @@
 #
 # Source routing (see docs/sessionstart-nudge.md for the per-harness names):
 #   startup, new            full digest - this process has not taken the helm
-#   clear, compact          `--reemit` digest - this process HAS the helm and
-#                           only lost its context, so the sweeps it already ran
-#                           are skipped (bin/fm-session-start.sh owns which)
+#   clear, compact          `--reemit` digest only when this lock owner recorded
+#                           a completed full startup; otherwise a full digest,
+#                           so a startup killed mid-sweep is finished first
 #   resume, reload, fork    delegate to the nudge wrapper. Prior context is
 #                           restored on these, so re-running is redundant when
 #                           this process still holds the lock (the nudge stays
@@ -40,6 +40,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+COMPLETION_FILE="$STATE/.session-start-complete"
 
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
@@ -66,6 +67,16 @@ done
 fm_is_gate_agent "$FM_ROOT" && exit 0
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
+session_start_completed() {
+  local lock_pid completion_pid
+  [ -f "$STATE/.lock" ] && [ ! -L "$STATE/.lock" ] || return 1
+  [ -f "$COMPLETION_FILE" ] && [ ! -L "$COMPLETION_FILE" ] || return 1
+  lock_pid=$(cat "$STATE/.lock" 2>/dev/null) || return 1
+  completion_pid=$(cat "$COMPLETION_FILE" 2>/dev/null) || return 1
+  case "$lock_pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$completion_pid" = "$lock_pid" ]
+}
+
 if [ -z "$SOURCE" ] && [ ! -t 0 ]; then
   # Claude and Codex both deliver a JSON SessionStart payload on stdin whose
   # `source` field carries startup|resume|clear|compact. Parsed without jq so a
@@ -90,7 +101,11 @@ case "$SOURCE" in
     exec "$SCRIPT_DIR/fm-sessionstart-nudge.sh"
     ;;
   clear|compact)
-    "$SCRIPT_DIR/fm-session-start.sh" --reemit || true
+    if session_start_completed; then
+      "$SCRIPT_DIR/fm-session-start.sh" --reemit || true
+    else
+      "$SCRIPT_DIR/fm-session-start.sh" || true
+    fi
     ;;
   *)
     "$SCRIPT_DIR/fm-session-start.sh" || true
