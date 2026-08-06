@@ -176,15 +176,15 @@ The shared symptom is a healthy-looking pane with no work in progress, so each a
 | Exit command | `/exit` |
 | Interrupt | single Escape |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
-| Permissions | `--permission-mode auto`; Claude's built-in classifier approves ordinary actions and may still request explicit approval for sensitive actions. |
+| Permissions | Classified auto mode; see the launch note below. |
 
 First launch in a fresh worktree, or first ever on a machine, may show a project-trust or permission confirmation.
 After every spawn, peek the pane within about 20 seconds.
 If such a dialog is showing, accept it from an active firstmate session using `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Enter`, or the choice the dialog requires, unless `FM_HOME` is already set to the active firstmate home; verify the brief started processing.
 
-Firstmate launches every Claude crewmate, scout, and secondmate in classified auto mode rather than unrestricted permission bypass.
-Claude Code 2.1.222 accepts that mode under root and completed a project-scoped `Read` tool call without a root refusal.
-Sensitive actions remain subject to Claude's classifier and can still require explicit approval.
+Firstmate launches every Claude crewmate, scout, and secondmate with `--permission-mode auto` rather than unrestricted permission bypass.
+Claude Code 2.1.222 accepts that mode under root and completed a harmless project-scoped `Read` tool call without a root refusal.
+Claude's built-in safety classifier remains active, so genuinely sensitive actions may still require explicit approval.
 
 Claude renders a predicted-next-prompt suggestion as dim/faint text inside an otherwise-empty composer after a turn completes.
 A plain `tmux capture-pane` cannot tell that ghost text apart from typed text.
