@@ -2363,24 +2363,39 @@ fm_backend_herdr_process_info_path() {  # <pane-json> <process-info-json> <pane-
 # command, and use the group leader's cwd only when it is a nested interactive
 # shell. If protocol 19 process inspection is unreadable, fail closed with an
 # empty path rather than reviving the transient foreground_cwd race.
+#
+# Protocol gate: pane.process_info is protocol-19 only. A server that does not
+# support it may still answer `pane process-info` with a non-process_info shape
+# (e.g. a real pane cwd), which would bypass a caller that armed its abort
+# through pane.foreground_cwd. So issue the call ONLY after confirming protocol
+# >= 19; protocols before 19 retain the established foreground_cwd read and
+# never issue a process-info call. The resolved protocol is cached in
+# _fm_backend_herdr_server_protocol so the fm-spawn poll loop does not re-query
+# `status --json` on every iteration (the protocol is stable for a session).
 fm_backend_herdr_current_path() {  # <target>
   local pane_out process_out path status protocol foreground
   fm_backend_herdr_target_ready "$1" || return 0
+  if [ -z "${_fm_backend_herdr_server_protocol:-}" ]; then
+    status=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" status --json 2>/dev/null || true)
+    protocol=$(printf '%s' "$status" | jq -r '.server.protocol // .client.protocol // empty' 2>/dev/null)
+    case "$protocol" in
+      ''|*[!0-9]*) protocol=0 ;;
+    esac
+    _fm_backend_herdr_server_protocol=$protocol
+  fi
+  protocol=$_fm_backend_herdr_server_protocol
   pane_out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 0
-  foreground=$(printf '%s' "$pane_out" | jq -r '.result.pane.foreground_cwd // .result.pane.cwd // empty' 2>/dev/null)
-  process_out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true)
-  if path=$(fm_backend_herdr_process_info_path "$pane_out" "$process_out" "$FM_BACKEND_HERDR_PANE"); then
-    printf '%s' "$path"
-    return 0
-  fi
-  status=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" status --json 2>/dev/null || true)
-  protocol=$(printf '%s' "$status" | jq -r '.server.protocol // .client.protocol // empty' 2>/dev/null)
-  case "$protocol" in
-    ''|*[!0-9]*) return 0 ;;
-  esac
   if [ "$protocol" -ge "$FM_BACKEND_HERDR_MIN_PROCESS_INFO_PROTOCOL" ]; then
+    process_out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true)
+    if path=$(fm_backend_herdr_process_info_path "$pane_out" "$process_out" "$FM_BACKEND_HERDR_PANE"); then
+      printf '%s' "$path"
+      return 0
+    fi
+    # protocol 19 but process-info unreadable: fail closed with an empty path
+    # rather than reviving the transient foreground_cwd race process_info fixes.
     return 0
   fi
+  foreground=$(printf '%s' "$pane_out" | jq -r '.result.pane.foreground_cwd // .result.pane.cwd // empty' 2>/dev/null)
   printf '%s' "$foreground"
 }
 
