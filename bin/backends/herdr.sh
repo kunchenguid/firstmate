@@ -190,6 +190,25 @@ fm_backend_herdr_version_check() {
     echo "error: herdr protocol $protocol (version ${version:-unknown}) is older than the verified minimum $FM_BACKEND_HERDR_MIN_PROTOCOL; update herdr (herdr update) before using backend=herdr" >&2
     return 1
   fi
+  # A healthy CLIENT does not prove herdr will accept commands. On 2026-08-05 a
+  # 0.8.0 client (protocol 19, far past the minimum) passed this check while the
+  # still-running 0.7.5 server rejected everything - a nix rebuild had upgraded
+  # the binary underneath the live server. The client-only check reported OK and
+  # the real failure surfaced later as unexplained command rejections, which is
+  # what pushed that task onto a fallback backend. herdr reports the pairing
+  # directly, so check it here and name which side is stale.
+  local running compatible restart_needed server_version
+  running=$(printf '%s' "$status" | jq -r '.server.running // false' 2>/dev/null)
+  compatible=$(printf '%s' "$status" | jq -r '.compatible // .server.compatible // empty' 2>/dev/null)
+  restart_needed=$(printf '%s' "$status" | jq -r '.server.restart_needed // false' 2>/dev/null)
+  server_version=$(printf '%s' "$status" | jq -r '.server.version // empty' 2>/dev/null)
+  # Only a RUNNING server can be incompatible; with none up herdr starts a
+  # matching one itself, so absence is not a failure.
+  if [ "$running" = true ] && { [ "$compatible" = false ] || [ "$restart_needed" = true ]; }; then
+    echo "error: herdr client ${version:-unknown} (protocol $protocol) cannot talk to the RUNNING herdr server ${server_version:-unknown}; refusing to spawn into a server that will reject commands" >&2
+    echo "hint: restart the herdr server so it picks up the upgraded binary - this happens when herdr is upgraded (nix rebuild, brew upgrade) underneath a live server: the client moves, the running server does not" >&2
+    return 1
+  fi
   return 0
 }
 

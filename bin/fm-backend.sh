@@ -232,7 +232,9 @@ fm_backend_detect_cmux_app_is_ancestor() {
 # (a single word on its first non-empty line, mirroring config/crew-harness),
 # then runtime auto-detection (fm_backend_detect), then default tmux. A
 # per-task `--backend` flag is parsed by the caller (fm-spawn.sh) and takes
-# precedence over this resolution entirely; it is not read here. Auto-detect
+# precedence over this resolution, though no longer unconditionally: fm-spawn.sh
+# refuses a `--backend` that contradicts a set config/backend, reading it via
+# fm_backend_configured below. Auto-detect
 # fires only when nothing was explicitly configured, so an explicit setting
 # always wins. Selecting herdr or cmux via auto-detect prints one loud stderr
 # notice (both are experimental); auto-detecting tmux stays silent - it is
@@ -240,6 +242,24 @@ fm_backend_detect_cmux_app_is_ancestor() {
 # notice names the winning signal, so a fallback-detected cmux (bundle id or
 # ancestry, after the claude wrapper stripped CMUX_WORKSPACE_ID) is visibly
 # distinct from the primary-marker case.
+# fm_backend_configured: the captain's config/backend value ALONE - no
+# FM_BACKEND, no auto-detection, no tmux default. Empty when unset. Kept
+# separate from fm_backend_name because the caller needs to know whether the
+# backend was chosen by the captain or merely landed on by resolution: only the
+# former may veto a per-task --backend.
+fm_backend_configured() {
+  local line v
+  [ -f "$FM_BACKEND_CONFIG_DIR/backend" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    v=$(printf '%s' "$line" | tr -d '[:space:]')
+    if [ -n "$v" ]; then
+      printf '%s' "$v"
+      return 0
+    fi
+  done < "$FM_BACKEND_CONFIG_DIR/backend"
+  return 0
+}
+
 fm_backend_name() {
   local line v detected marker
   if [ -n "${FM_BACKEND:-}" ]; then
@@ -260,7 +280,7 @@ fm_backend_name() {
   if fm_backend_detect >/dev/null; then
     detected=$FM_BACKEND_DETECTED
     if [ "$detected" = herdr ]; then
-      echo "NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the EXPERIMENTAL herdr backend. Set config/backend or pass --backend tmux to opt out." >&2
+      echo "NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the herdr backend, the fleet base. Set config/backend to make this explicit." >&2
     fi
     if [ "$detected" = cmux ]; then
       case "$FM_BACKEND_DETECT_SIGNAL" in
@@ -273,6 +293,19 @@ fm_backend_name() {
     printf '%s' "$detected"
     return 0
   fi
+  # Nothing configured and nothing detected: herdr is the fleet's base backend,
+  # so it is the default rather than tmux. tmux remains the last resort ONLY
+  # when herdr is not installed at all, because a home that cannot spawn at all
+  # is worse than one spawning into the reference backend - and unlike the
+  # per-spawn --backend reroute this file now refuses, that substitution is
+  # announced. Presence of the binary is a static fact; a herdr that is present
+  # but unusable is NOT worked around here - fm_backend_herdr_version_check
+  # fails the spawn loudly and names the reason.
+  if command -v herdr >/dev/null 2>&1; then
+    printf 'herdr'
+    return 0
+  fi
+  echo "NOTICE: no backend configured, none auto-detected, and herdr is not installed - falling back to tmux. Set config/backend to make this explicit." >&2
   printf 'tmux'
 }
 
@@ -342,7 +375,10 @@ fm_meta_get() {  # <meta-file> <key>
 }
 
 # fm_backend_of_meta: the backend recorded in <meta-file>, defaulting to
-# `tmux` when the field is absent - the P1 compatibility contract.
+# `tmux` when the field is absent - the P1 compatibility contract. LEGACY path
+# only: fm-spawn.sh now always writes backend=, so an absent field means the
+# meta predates that change (or was not written by fm-spawn). Keep the default
+# until no such metas can be in flight; do not build new behavior on it.
 fm_backend_of_meta() {  # <meta-file>
   local v
   v=$(fm_meta_get "$1" backend)
