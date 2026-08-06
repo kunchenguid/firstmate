@@ -367,8 +367,8 @@ tests/fm-subagent-pretool-check.test.sh
 
 This change does not close the deeper harness-agnostic defect.
 Every firstmate guard's in-flight-work branch keys off `state/<id>.meta`, and only `bin/fm-spawn.sh` writes that record.
-`bin/fm-supervision-lib.sh` also recognizes an X-mode relay poll as supervision need, but unaccounted primary work still contributes nothing to that predicate.
-Without an independent X-mode need, unaccounted primary work therefore reads as idle rather than suspicious.
+`bin/fm-supervision-lib.sh` also recognizes a Relay poll as supervision need, but unaccounted primary work still contributes nothing to that predicate.
+Without an independent Relay need, unaccounted primary work therefore reads as idle rather than suspicious.
 
 The durable fix for that class is to make the guards treat "the primary is doing project-shaped work with zero `state/*.meta` files" as a suspicious state rather than an idle one.
 That would catch this class on any harness, including work created through `Bash`.
