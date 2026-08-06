@@ -18,8 +18,10 @@
 # here, and there must never be one.
 #
 # Accepted forms:
-#   https://host[:port]/path, http://…, ssh://…, git://…
-#                                 any host, any port, any path
+#   https://[userinfo@]host[:port]/path, http://…, ssh://…, git://…
+#                                 a non-option-shaped plain host or bracketed
+#                                 IPv6 literal, an optional numeric port, and
+#                                 any path
 #   file:///path                  a repository this host can reach as a file
 #   [user@]host:path              scp-like syntax; host may be a name, an SSH
 #                                 config alias, an IPv4 address, or a bracketed
@@ -37,7 +39,7 @@
 #   be in on the other machine
 #   "/../" traversal inside a local or file: path
 fm_project_origin_safe() { # <url>; 0 when the URL is an accepted clone URL
-  local url=${1-} rest userpart hostpart inner host path
+  local url=${1-} rest authority userpart hostpart port inner host path
 
   case $url in
     '' | -*) return 1 ;;
@@ -47,7 +49,70 @@ fm_project_origin_safe() { # <url>; 0 when the URL is an accepted clone URL
   esac
 
   case $url in
-    https://?* | http://?* | ssh://?* | git://?*) return 0 ;;
+    https://?* | http://?* | ssh://?* | git://?*)
+      rest=${url#*://}
+      authority=${rest%%/*}
+      case $authority in
+        '') return 1 ;;
+      esac
+
+      hostpart=$authority
+      case $authority in
+        *@*)
+          userpart=${authority%@*}
+          hostpart=${authority##*@}
+          case $userpart in
+            '' | -* | *'['* | *']'*) return 1 ;;
+          esac
+          ;;
+      esac
+
+      case $hostpart in
+        '['*)
+          case $hostpart in
+            *']'*) ;;
+            *) return 1 ;;
+          esac
+          host=${hostpart%%']'*}']'
+          port=${hostpart#"$host"}
+          inner=${host#'['}
+          inner=${inner%']'}
+          case $inner in
+            *:*) ;;
+            *) return 1 ;;
+          esac
+          case $inner in
+            *[!0-9A-Fa-f:.%]*) return 1 ;;
+          esac
+          case $port in
+            '') ;;
+            :?*)
+              port=${port#:}
+              case $port in
+                *[!0-9]*) return 1 ;;
+              esac
+              ;;
+            *) return 1 ;;
+          esac
+          ;;
+        *)
+          case $hostpart in
+            *'['* | *']'*) return 1 ;;
+          esac
+          host=${hostpart%%:*}
+          case $host in
+            '' | -* | *[!A-Za-z0-9._-]*) return 1 ;;
+          esac
+          if [[ $hostpart == *:* ]]; then
+            port=${hostpart#*:}
+            case $port in
+              '' | *[!0-9]*) return 1 ;;
+            esac
+          fi
+          ;;
+      esac
+      return 0
+      ;;
     file:///?*)
       case "/${url#file://}/" in
         */../*) return 1 ;;
@@ -106,7 +171,7 @@ fm_project_origin_safe() { # <url>; 0 when the URL is an accepted clone URL
   host=${rest%%:*}
   path=${rest#*:}
   case $host in
-    '' | *[!A-Za-z0-9._-]*) return 1 ;;
+    '' | -* | *[!A-Za-z0-9._-]*) return 1 ;;
   esac
   case $path in
     '' | :*) return 1 ;;
