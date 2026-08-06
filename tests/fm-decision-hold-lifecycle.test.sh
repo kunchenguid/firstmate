@@ -550,6 +550,154 @@ test_resolve_matches_quoted_blocked_by_edges() {
   pass "resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id"
 }
 
+# Accept-as-is closes the hold with a durable decision record and explicitly
+# no routed task. A legitimate accept-as-is answer - a documented gap, an
+# accepted residual, a deliberate non-fix - must not require inventing a fake
+# task to satisfy the routing edge, and it must remain impossible to close a
+# hold with no recorded answer at all.
+test_accept_as_is_closes_hold_without_routing_followup() {
+  local home id hold_id show json
+  home=$(make_home accept-as-is)
+  id=sample-residual-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Review a documented residual" --kind scout --repo sample --start >/dev/null
+  write_origin_meta "$home" "$id"
+  cat > "$home/state/$id.status" <<'EOF'
+needs-decision [key=residual]: accept the documented residual or open a follow-up
+done: report and visual review complete
+EOF
+  cat > "$home/data/$id/report.md" <<'EOF'
+# Sample residual review
+
+A documented residual remains.
+The captain may either accept it as documented or open a follow-up to fix it.
+EOF
+
+  hold_id="sample-residual-review-decision-residual"
+  run_decisions "$home" hold "$id" residual \
+    --title "Accept or follow up on the documented residual" \
+    --reason "captain decision pending" --repo sample >/dev/null \
+    || fail "could not register residual hold"
+
+  # --accept-as-is with no decision file must refuse: a hold cannot be closed
+  # with no recorded answer.
+  if run_decisions "$home" resolve "$id" residual --accept-as-is \
+    > "$home/no-decision.out" 2> "$home/no-decision.err"; then
+    fail "accept-as-is without --decision-file closed a hold with no recorded answer"
+  fi
+  assert_grep "--decision-file is required" "$home/no-decision.err" \
+    "missing decision file must fail with the recorded-answer guarantee message"
+  show=$(tasks_in "$home" show "$hold_id" --full)
+  case "$show" in
+    *'state: queued'*'held: yes'*) : ;;
+    *) fail "rejected accept-as-is must leave the hold queued and held: $show" ;;
+  esac
+
+  # Empty decision file is also no recorded answer and must refuse.
+  : > "$home/empty.txt"
+  if run_decisions "$home" resolve "$id" residual \
+    --decision-file "$home/empty.txt" --accept-as-is \
+    > "$home/empty.out" 2> "$home/empty.err"; then
+    fail "accept-as-is with an empty decision file closed a hold with no recorded answer"
+  fi
+  assert_grep "decision file must not be empty" "$home/empty.err" \
+    "empty decision file must fail with the empty-content error"
+
+  # --accept-as-is combined with --routed-to is a contradiction: a hold cannot
+  # simultaneously route no work and route a task.
+  echo "Anything." > "$home/a.txt"
+  tasks_in "$home" add sample-followup "Follow up on the residual" --kind ship --repo sample >/dev/null
+  tasks_in "$home" block sample-followup --by "$hold_id" >/dev/null
+  if run_decisions "$home" resolve "$id" residual \
+    --decision-file "$home/a.txt" --accept-as-is --routed-to sample-followup \
+    > "$home/combined.out" 2> "$home/combined.err"; then
+    fail "accept-as-is combined with --routed-to was accepted"
+  fi
+  assert_grep "cannot be combined" "$home/combined.err" \
+    "accept-as-is with --routed-to must fail with a clear combination error"
+
+  # Neither --routed-to nor --accept-as-is must refuse loudly so a missing
+  # resolution mode never silently closes a hold.
+  if run_decisions "$home" resolve "$id" residual --decision-file "$home/a.txt" \
+    > "$home/none.out" 2> "$home/none.err"; then
+    fail "resolve without a resolution mode closed a hold"
+  fi
+  assert_grep "either --routed-to or --accept-as-is is required" "$home/none.err" \
+    "missing resolution mode must fail with an explicit mode error"
+
+  # Happy path: --accept-as-is closes the hold with a durable record and
+  # explicitly no routed task, and never touches the still-blocked follow-up.
+  printf 'Accept the documented residual; no follow-up work is needed.\n' > "$home/accept.txt"
+  if ! run_decisions "$home" resolve "$id" residual \
+    --decision-file "$home/accept.txt" --accept-as-is \
+    > "$home/accept.out" 2> "$home/accept.err"; then
+    fail "accept-as-is happy path failed: $(cat "$home/accept.err")"
+  fi
+  assert_grep "(accept-as-is)" "$home/accept.out" \
+    "accept-as-is must report the accept-as-is outcome on stdout"
+  show=$(tasks_in "$home" show "$hold_id" --full)
+  assert_contains "$show" "state: done" "accept-as-is must close the hold"
+  assert_contains "$show" "held: no" "accept-as-is must release the hold"
+  assert_contains "$show" 'Resolution recorded by fm-decision-hold' \
+    "accept-as-is must record the durable resolution marker"
+  assert_contains "$show" 'Routed identities: (none)' \
+    "accept-as-is must record '(none)' as the routed identities"
+  assert_contains "$show" 'Routed work: (none -- accept-as-is)' \
+    "accept-as-is must annotate the body with the explicit no-routed-work marker"
+  assert_contains "$show" "Accept the documented residual; no follow-up work is needed." \
+    "accept-as-is must preserve the captain's decision text"
+  show=$(tasks_in "$home" show sample-followup --full)
+  assert_contains "$show" 'blocked: no' \
+    "accept-as-is must let the followup proceed (the captain decided)"
+
+  # Idempotent retry with identical decision must succeed without mutation.
+  before=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
+  if ! run_decisions "$home" resolve "$id" residual \
+    --decision-file "$home/accept.txt" --accept-as-is \
+    > "$home/retry.out" 2> "$home/retry.err"; then
+    fail "identical accept-as-is retry failed: $(cat "$home/retry.err")"
+  fi
+  after=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
+  [ "$before" = "$after" ] || fail "identical accept-as-is retry mutated the backlog"
+
+  # Retry with a different decision text must refuse so the captain's recorded
+  # answer cannot drift after the hold is closed.
+  printf 'Accept but with a different rationale.\n' > "$home/drifted.txt"
+  if run_decisions "$home" resolve "$id" residual \
+    --decision-file "$home/drifted.txt" --accept-as-is \
+    > "$home/drift-decision.out" 2> "$home/drift-decision.err"; then
+    fail "accept-as-is retry with a different decision was accepted"
+  fi
+  assert_grep "different captain decision" "$home/drift-decision.err" \
+    "drifted accept-as-is retry must fail with a different-decision error"
+
+  # Retry with --routed-to on an accept-as-is hold must refuse so the routing
+  # mode cannot change after the hold is closed.
+  if run_decisions "$home" resolve "$id" residual \
+    --decision-file "$home/accept.txt" --routed-to sample-followup \
+    > "$home/drift-routes.out" 2> "$home/drift-routes.err"; then
+    fail "accept-as-is hold accepted a --routed-to retry"
+  fi
+  assert_grep "different routed work" "$home/drift-routes.err" \
+    "mode-drift retry must fail with a different-routed-work error"
+
+  # verify must still pass after an accept-as-is close, because the durable
+  # resolution record is what the next review pass reads.
+  run_decisions "$home" complete "$id" residual >/dev/null \
+    || fail "could not re-complete the reviewed origin after accept-as-is"
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "verify failed after accept-as-is close"
+
+  # Bearings must no longer surface the closed hold, even though the visual
+  # review still describes the residual in prose.
+  json=$(run_bearings "$home") || fail "Bearings failed after accept-as-is close"
+  printf '%s' "$json" | jq -e --arg hold "$hold_id" '
+    (.decisions_open | any(.id == $hold) | not)
+  ' >/dev/null || fail "accept-as-is hold kept surfacing in Bearings: $json"
+
+  pass "accept-as-is closes the hold with a durable record and routes no follow-up work"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
@@ -560,3 +708,4 @@ test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
+test_accept_as_is_closes_hold_without_routing_followup

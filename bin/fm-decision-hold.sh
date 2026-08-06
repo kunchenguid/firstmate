@@ -5,10 +5,11 @@
 # .agents/skills/decision-hold-lifecycle/SKILL.md. This script never reads report,
 # visual-review, chat, or terminal prose to guess whether a decision exists.
 # The invoking agent inventories unresolved decisions, assigns stable keys, and
-# routes dependent work. This script supplies deterministic identities, creates
-# and verifies structured tasks-axi captain holds, records completion attestation
-# in the originating task's metadata, and closes a hold only after a durable
-# decision record has been linked to existing dependent work.
+# routes any dependent work. This script supplies deterministic identities,
+# creates and verifies structured tasks-axi captain holds, records completion
+# attestation in the originating task's metadata, and closes a hold only after a
+# durable decision record exists, linked to existing dependent work when the
+# captain's answer routed any.
 #
 # A hold identity is <origin-id>-decision-<decision-key>. Origin ids and decision
 # keys must already be privacy-safe slugs. Repeating `hold` with the same identity
@@ -23,7 +24,7 @@
 #   fm-decision-hold.sh complete <origin-id> (--none | <decision-key>...)
 #   fm-decision-hold.sh verify <origin-id>
 #   fm-decision-hold.sh resolve <origin-id> <decision-key> \
-#     --decision-file <path> --routed-to <task-id> [--routed-to <task-id>...]
+#     --decision-file <path> (--routed-to <task-id> [--routed-to <task-id>...] | --accept-as-is)
 #
 # `complete` is the shared investigation and visual-review completion gate.
 # `--none` is an explicit semantic attestation that the just-reviewed surface has
@@ -33,10 +34,15 @@
 # `verify` is read-only and is called by scout teardown so teardown cannot erase a
 # source before this gate has succeeded.
 #
-# `resolve` requires every --routed-to task to exist and to be blocked by the hold.
-# It writes the captain decision and routed identities into the hold body, clears
-# those dependency edges, and only then marks the hold Done. A failure before the
-# final step leaves the captain hold open.
+# `resolve` requires the captain's decision file plus exactly one resolution
+# mode: one or more `--routed-to` tasks that exist and are blocked by the hold,
+# or the `--accept-as-is` flag for an accept-as-is resolution that closes the
+# hold without routing any follow-up work. The decision file is always required
+# so a hold cannot be closed with no recorded answer at all. It writes the
+# decision digest and either the routed task identities or the accept-as-is
+# marker into the hold body, clears the dependency edges for routed work, and
+# only then marks the hold Done. A failure before the final step leaves the
+# captain hold open.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -368,13 +374,14 @@ EOF
 }
 
 command_resolve() {
-  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0
+  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' routed_annotation='' accept_as_is=0 dep show blocked state hold_show hold_body resolution_recorded=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --decision-file) shift; decision_file=${1:-} ;;
       --routed-to) shift; validate_slug routed-task "${1:-}"; routed="${routed}${routed:+ }${1:-}" ;;
+      --accept-as-is) accept_as_is=1 ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -387,9 +394,15 @@ command_resolve() {
   [ -n "$decision" ] || fail "decision file must not be empty"
   [ "$(printf '%s' "$decision" | LC_ALL=C wc -c | tr -d ' ')" -le 8192 ] \
     || fail "decision file exceeds 8192 bytes"
-  [ -n "$routed" ] || fail "at least one --routed-to task is required"
-  routed=$(printf '%s\n' "$routed" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u | paste -sd' ' -)
-  routed_csv=$(printf '%s\n' "$routed" | tr ' ' ',')
+  if [ "$accept_as_is" = 1 ]; then
+    [ -z "$routed" ] || fail "--accept-as-is cannot be combined with --routed-to"
+    routed_csv='(none)'
+    routed_annotation=' (none -- accept-as-is)'
+  else
+    [ -n "$routed" ] || fail "either --routed-to or --accept-as-is is required"
+    routed=$(printf '%s\n' "$routed" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u | paste -sd' ' -)
+    routed_csv=$(printf '%s\n' "$routed" | tr ' ' ',')
+  fi
   decision_digest=$(sha256_text "$decision")
   require_tasks_axi
   id=$(hold_id "$origin" "$key")
@@ -430,7 +443,8 @@ command_resolve() {
     esac
   done
 
-  body=$(printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: %s\n\nCaptain decision:\n%s\n\nRouted work:\n' "$decision_digest" "$routed_csv" "$decision")
+  body=$(printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: %s\n\nCaptain decision:\n%s\n\nRouted work:%s\n' \
+    "$decision_digest" "$routed_csv" "$decision" "$routed_annotation")
   for dep in $routed; do
     body="${body}- ${dep}"$'\n'
   done
@@ -450,7 +464,11 @@ command_resolve() {
   done
   tasks_axi "done" "$id" >/dev/null || fail "could not close resolved captain hold $id"
   verify_hold_resolved "$id" || fail "captain hold $id did not retain its durable resolution record"
-  printf 'resolved: %s -> %s\n' "$id" "$routed"
+  if [ "$accept_as_is" = 1 ]; then
+    printf 'resolved: %s (accept-as-is)\n' "$id"
+  else
+    printf 'resolved: %s -> %s\n' "$id" "$routed"
+  fi
 }
 
 case "${1:-}" in

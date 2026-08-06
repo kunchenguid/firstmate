@@ -23,9 +23,11 @@ For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` 
 Scout teardown calls the script's read-only `verify` subcommand after checking for the report and before removing any source state.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
-The `resolve` subcommand requires a decision file and at least one existing dependent task whose structured `blocked-by` edge points to the hold.
-It records the decision digest and routed task identities as a retry identity in the hold body, clears each dependency edge through tasks-axi, and marks the hold Done only after those writes succeed.
-An exact retry can finish a partial routing operation, while a changed decision or routed-task set is rejected.
+The `resolve` subcommand requires a decision file and exactly one resolution mode: one or more `--routed-to` existing dependent tasks whose structured `blocked-by` edge points to the hold, or the `--accept-as-is` flag for an accept-as-is resolution that closes the hold without routing any follow-up work.
+For routed work, it records the decision digest and routed task identities as a retry identity in the hold body, clears each dependency edge through tasks-axi, and marks the hold Done only after those writes succeed.
+For accept-as-is, it records the decision digest and `(none)` as the routed identities, writes a single `Routed work: (none -- accept-as-is)` annotation in the body, and marks the hold Done without touching any `blocked_by` edges.
+The decision file is always required so a hold cannot be closed with no recorded answer at all.
+An exact retry can finish a partial routing operation, while a changed decision or routed-task set is rejected; a `--accept-as-is` resolution and a later `--routed-to` retry against the same hold reject each other because the recorded routed identities differ.
 A failed intermediate step leaves the hold open.
 
 ## Structured read surfaces
@@ -43,6 +45,7 @@ The projection remains read-only and does not inspect historical prose.
 Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
+Accept-as-is resolution verification date: 2026-08-06.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
@@ -62,6 +65,7 @@ ok - resolved findings and decision-like prose do not create false holds
 ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
+ok - accept-as-is closes the hold with a durable record and routes no follow-up work
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly
@@ -77,15 +81,11 @@ ok - main and secondmate captain actionability use the same blocker readiness
 $ bash tests/fm-brief.test.sh
 ok - fm-brief.sh: investigation and visual-review completions load the shared decision policy
 
-$ bash tests/fm-teardown.test.sh
-all teardown safety cases passed
-
 $ bin/fm-lint.sh
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
 
 $ git diff --check
 (no output)
-
-$ for test_script in tests/*.test.sh; do bash "$test_script"; done
-ALL 71 TEST SCRIPTS PASSED
 ```
+
+`bin/fm-test-run.sh` is the single owner of behavior-suite selection and execution, so this record carries only the focused command outputs that support the decision-hold guarantee.
