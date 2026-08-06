@@ -79,6 +79,7 @@ send_line() {  # <session> <text>
 }
 
 ASK='Reply with exactly the FMHOOKTOKEN value from your session-start context and nothing else.'
+LIVE_NONCE=$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')
 
 # --- lab ---------------------------------------------------------------------
 #
@@ -128,7 +129,7 @@ if [ -z "$source" ]; then
 fi
 [ -n "$source" ] || source=none
 printf '%s\n' "$source" >> "$record"
-printf 'FMHOOKTOKEN-%s-%s\n' "$source" "$(grep -c . "$record" | tr -d ' ')"
+printf 'FMHOOKTOKEN-%s-%s-%s\n' "$source" "$(grep -c . "$record" | tr -d ' ')" "${FM_LIVE_NONCE:?}"
 exit 0
 SH
   chmod +x "$lab/bin/fm-sessionstart-run.sh"
@@ -140,6 +141,7 @@ SH
       mkdir -p "$lab/.pi/extensions/lib"
       cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$lab/.pi/extensions/"
       cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$lab/.pi/extensions/lib/"
+      cp "$ROOT/bin/fm-operational-input.sh" "$lab/bin/"
       printf '%s\n' '{"compaction":{"keepRecentTokens":200}}' > "$lab/.pi/settings.json"
       ;;
   esac
@@ -163,7 +165,7 @@ probe_process_opens() {  # <harness> <version> <lab> <expect-resume> <cold-argv.
   done
 
   : > "$record"
-  out=$( cd "$lab" && FM_LIVE_RECORD="$record" FM_ROOT_OVERRIDE="$lab" FM_HOME="$lab" \
+  out=$( cd "$lab" && FM_LIVE_RECORD="$record" FM_LIVE_NONCE="$LIVE_NONCE" FM_ROOT_OVERRIDE="$lab" FM_HOME="$lab" \
     "${cold[@]}" "$ASK" < /dev/null 2>&1 )
   source=$(head -n 1 "$record")
   [ -n "$source" ] \
@@ -172,12 +174,12 @@ probe_process_opens() {  # <harness> <version> <lab> <expect-resume> <cold-argv.
     startup|new) : ;;
     *) fail "$harness $version: a cold open reported source '$source', which the run tier cannot classify as a startup" ;;
   esac
-  printf '%s' "$out" | grep -Fq "FMHOOKTOKEN-$source-1" \
-    || fail "$harness $version: hook stdout did not reach model context on a cold open"
+  printf '%s' "$out" | grep -Fq "FMHOOKTOKEN-$source-1-$LIVE_NONCE" \
+    || { printf '# cold-open model reply: %s\n' "$out" >&2; fail "$harness $version: hook stdout did not reach model context on a cold open"; }
   pass "$harness $version: a cold open reports source '$source' and its hook stdout reaches model context"
 
   : > "$record"
-  ( cd "$lab" && FM_LIVE_RECORD="$record" FM_ROOT_OVERRIDE="$lab" FM_HOME="$lab" \
+  ( cd "$lab" && FM_LIVE_RECORD="$record" FM_LIVE_NONCE="$LIVE_NONCE" FM_ROOT_OVERRIDE="$lab" FM_HOME="$lab" \
     "${resume[@]}" 'Say only OK.' < /dev/null >/dev/null 2>&1 ) || true
   source=$(head -n 1 "$record")
   [ -n "$source" ] \
@@ -202,6 +204,7 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
   : > "$record"
   tmux -L "$SOCKET" new-session -d -s "$session" -c "$lab" -x 200 -y 50 \
     -e FM_LIVE_RECORD="$record" -e FM_ROOT_OVERRIDE="$lab" -e FM_HOME="$lab" \
+    -e FM_LIVE_NONCE="$LIVE_NONCE" \
     "$*" \
     || fail "$harness $version: could not start an interactive lab session"
 
@@ -224,7 +227,7 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
   sleep 10
 
   send_line "$session" "$ASK"
-  wait_for_text "$session" "FMHOOKTOKEN-$(head -n 1 "$record")-1" \
+  wait_for_text "$session" "FMHOOKTOKEN-$(head -n 1 "$record")-1-$LIVE_NONCE" \
     || { capture "$session" >&2; fail "$harness $version: hook stdout did not reach interactive model context"; }
 
   send_line "$session" "$clear_cmd"
@@ -238,7 +241,7 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
     *) fail "$harness $version: '$clear_cmd' reported source '$reset', which the run tier would treat as a cold startup" ;;
   esac
   send_line "$session" "$ASK"
-  wait_for_text "$session" "FMHOOKTOKEN-$reset-2" \
+  wait_for_text "$session" "FMHOOKTOKEN-$reset-2-$LIVE_NONCE" \
     || { capture "$session" >&2; fail "$harness $version: hook stdout did not reach model context after '$clear_cmd'"; }
   pass "$harness $version: '$clear_cmd' reports source '$reset' and re-injects hook stdout into model context"
 
@@ -261,7 +264,7 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
   while [ "$n" -lt 40 ] && ! grep -qx compact "$record"; do sleep 3; n=$((n + 1)); done
   if grep -qx compact "$record"; then
     send_line "$session" "$ASK"
-    wait_for_text "$session" "FMHOOKTOKEN-compact-$(grep -c . "$record" | tr -d ' ')" \
+    wait_for_text "$session" "FMHOOKTOKEN-compact-$(grep -c . "$record" | tr -d ' ')-$LIVE_NONCE" \
       || { capture "$session" >&2; fail "$harness $version: hook stdout did not reach model context after a compaction"; }
     pass "$harness $version: a compaction reports source 'compact' and re-injects hook stdout into model context"
   elif [ "$harness" = pi ]; then
@@ -302,8 +305,8 @@ for harness in claude codex pi; do
       ;;
     pi)
       probe_process_opens pi "$version" "$lab" startup \
-        pi -p -e "$lab/.pi/extensions/fm-primary-turnend-guard.ts" --no-context-files --no-session \
-        -- pi -p -c -e "$lab/.pi/extensions/fm-primary-turnend-guard.ts" --no-context-files
+        pi -p -e "$lab/.pi/extensions/fm-primary-turnend-guard.ts" --no-context-files --no-tools --no-session \
+        -- pi -p -c -e "$lab/.pi/extensions/fm-primary-turnend-guard.ts" --no-context-files --no-tools
       probe_context_reset pi "$version" "$lab" /new \
         pi -e "$lab/.pi/extensions/fm-primary-turnend-guard.ts" --no-context-files
       ;;
