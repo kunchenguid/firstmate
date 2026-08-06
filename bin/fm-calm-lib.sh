@@ -11,6 +11,7 @@
 fm_calm_enabled() {  # [config-dir]
   local config value token
   config=${1:-${FM_CONFIG_OVERRIDE:-${FM_HOME:-${FM_ROOT_OVERRIDE:-.}}/config}}
+  value=
   local -a whitespace=(
     $'\011' $'\012' $'\013' $'\014' $'\015' $'\040'
     $'\302\240' $'\341\232\200'
