@@ -1369,24 +1369,40 @@ test_cursor_shim_missing_payload_allows() {
 }
 
 test_cursor_hooks_json_is_registered() {
-  local hooks
+  local hooks stop_command pretool_command
   hooks="$ROOT/.cursor/hooks.json"
+  stop_command='[ -n "${CURSOR_PROJECT_DIR:-}" ] && exec "${CURSOR_PROJECT_DIR:-}/bin/fm-turnend-guard-cursor.sh"; exit 0'
+  pretool_command='[ -n "${CURSOR_PROJECT_DIR:-}" ] && exec "${CURSOR_PROJECT_DIR:-}/bin/fm-arm-pretool-check.sh" --cursor; exit 0'
   [ -f "$hooks" ] || fail "tracked .cursor/hooks.json is missing"
   jq -e '.version == 1' "$hooks" >/dev/null || fail "cursor hooks.json must carry the load-bearing version key"
   jq -e '.hooks.stop | type == "array" and length > 0' "$hooks" >/dev/null \
     || fail "cursor hooks.json must register a stop hook"
   jq -e '.hooks.preToolUse | type == "array" and length > 0' "$hooks" >/dev/null \
     || fail "cursor hooks.json must register a preToolUse hook"
-  jq -e '.hooks.stop | all(.[]; type == "object" and (.timeout | type == "number" and . >= 600) and has("loop_limit") and .loop_limit == null)' "$hooks" >/dev/null \
-    || fail "cursor stop hooks must carry bounded timeout and loop_limit null"
-  jq -e '.hooks.preToolUse | all(.[]; type == "object" and .matcher == "Shell" and (.timeout | type == "number" and . > 0))' "$hooks" >/dev/null \
-    || fail "cursor preToolUse hooks must target Shell with positive timeout"
+  jq -e --arg required "$stop_command" '
+    .hooks.stop | any(.[];
+      type == "object"
+      and .command == $required
+      and (.timeout | type == "number" and . >= 600)
+      and has("loop_limit") and .loop_limit == null
+    )
+  ' "$hooks" >/dev/null || fail "cursor stop hook registration is missing its required command"
+  jq -e --arg required "$pretool_command" '
+    .hooks.preToolUse | any(.[];
+      type == "object"
+      and .matcher == "Shell"
+      and .command == $required
+      and (.timeout | type == "number" and . > 0)
+    )
+  ' "$hooks" >/dev/null || fail "cursor preToolUse registration is missing its required command"
   pass "fm-turnend-guard-cursor: tracked .cursor/hooks.json registers the shim, the seatbelt, and the load-bearing version key"
 }
 
 test_cursor_pretool_hook_executes_seatbelt() {
-  local command payload out status
-  command=$(jq -r '.hooks.preToolUse[] | select(.matcher == "Shell") | .command' "$ROOT/.cursor/hooks.json")
+  local command payload out status pretool_command
+  pretool_command='[ -n "${CURSOR_PROJECT_DIR:-}" ] && exec "${CURSOR_PROJECT_DIR:-}/bin/fm-arm-pretool-check.sh" --cursor; exit 0'
+  command=$(jq -r --arg required "$pretool_command" '[.hooks.preToolUse[] | select(.matcher == "Shell" and .command == $required)] | .[0].command // empty' "$ROOT/.cursor/hooks.json")
+  [ -n "$command" ] || fail "required Cursor preToolUse command is missing from .cursor/hooks.json"
   payload=$(jq -cn '{tool_name:"Shell",tool_input:{command:"bin/fm-watch-arm.sh &"}}')
   out=$(printf '%s' "$payload" | CURSOR_PROJECT_DIR="$ROOT" bash -c "$command" 2>&1); status=$?
   expect_code 2 "$status" "cursor preToolUse hook must execute the seatbelt"
@@ -1396,8 +1412,9 @@ test_cursor_pretool_hook_executes_seatbelt() {
 }
 
 test_cursor_shim_anchor_resolves_via_cursor_project_dir() {
-  local command dir payload out status
-  command=$(jq -r '.hooks.stop[0].command // empty' "$ROOT/.cursor/hooks.json")
+  local command dir payload out status stop_command
+  stop_command='[ -n "${CURSOR_PROJECT_DIR:-}" ] && exec "${CURSOR_PROJECT_DIR:-}/bin/fm-turnend-guard-cursor.sh"; exit 0'
+  command=$(jq -r --arg required "$stop_command" '[.hooks.stop[] | select(.command == $required)] | .[0].command // empty' "$ROOT/.cursor/hooks.json")
   [ -n "$command" ] || fail "stop hook command is missing from .cursor/hooks.json"
   dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-anchor")
   : > "$dir/state/task1.meta"
