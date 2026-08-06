@@ -135,6 +135,7 @@ class Listener:
 class Inspection:
     windows: list[Listener]
     wsl: list[Listener]
+    task_error: str = ""
     windows_error: str = ""
     wsl_error: str = ""
 
@@ -376,13 +377,26 @@ def classify_wsl(process: str, command: str, checkout: str = "unknown") -> str:
     return "unknown-wsl-process"
 
 
+def task_state_files(state: Path) -> list[Path]:
+    try:
+        if not state.is_dir():
+            raise SafeRefusal("Firstmate task-state inspection unavailable")
+        files = sorted(state.glob("*.meta"))
+        for meta in files:
+            with meta.open("rb"):
+                pass
+        return files
+    except OSError as exc:
+        raise SafeRefusal("Firstmate task-state inspection unavailable") from exc
+
+
 def task_associations(state: Path, checkout: str, pid: int) -> tuple[str, ...]:
     if checkout == "unknown":
         checkout_path = None
     else:
         checkout_path = Path(checkout).resolve()
     matches: list[str] = []
-    for meta in sorted(state.glob("*.meta")):
+    for meta in task_state_files(state):
         try:
             fields: dict[str, list[str]] = {}
             for line in meta.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -538,6 +552,11 @@ def wsl_listeners(port: int, state: Path) -> list[Listener]:
 def inspect_system(port: int, state: Path) -> Inspection:
     result = Inspection(windows=[], wsl=[])
     try:
+        task_state_files(state)
+    except SafeRefusal as exc:
+        result.task_error = str(exc)
+        return result
+    try:
         result.windows = windows_listeners(port, state)
     except SafeRefusal as exc:
         result.windows_error = str(exc)
@@ -603,6 +622,8 @@ def recovery_verdict(inspection: Inspection, expected: GitInfo, expected_sha: st
     expected_verdict = expected_checkout_verdict(expected, expected_sha)
     if expected_verdict != "ready":
         return expected_verdict
+    if inspection.task_error:
+        return "refuse:firstmate-task-state-inspection-unavailable"
     if inspection.windows_error:
         return "refuse:windows-inspection-unavailable"
     if inspection.wsl_error:
@@ -670,6 +691,8 @@ def render_inspection(mode: str, project: Path, port: int, expected_sha: str, ex
             recovery_verdict=expected_checkout_verdict(expected, expected_sha),
         ),
     ]
+    if inspection.task_error:
+        lines.append(emit("inspection", owner_kernel="firstmate", status="unavailable", error=inspection.task_error))
     if inspection.windows_error:
         lines.append(emit("inspection", owner_kernel="windows", status="unavailable", error=inspection.windows_error))
     if inspection.wsl_error:
@@ -748,8 +771,24 @@ def launcher_command(project: Path, port: int) -> list[str]:
     return [npm, "run", "dev", "--", "--host", "0.0.0.0", "--port", str(port)]
 
 
-def launch_expected(project: Path, port: int, evidence: Path) -> OwnedLaunch:
+def revalidated_expected_checkout(project: Path, expected: GitInfo, expected_sha: str) -> str:
+    current = git_info(project)
+    verdict = expected_checkout_verdict(current, expected_sha)
+    if verdict != "ready":
+        return verdict
+    if current.checkout != expected.checkout or current.source != expected.source:
+        return "refuse:expected-checkout-identity-changed"
+    return "ready"
+
+
+def launch_expected(project: Path, port: int, expected: GitInfo, expected_sha: str, evidence: Path) -> OwnedLaunch:
+    verdict = revalidated_expected_checkout(project, expected, expected_sha)
+    if verdict != "ready":
+        raise SafeRefusal(verdict.removeprefix("refuse:"))
     argv = launcher_command(project, port)
+    verdict = revalidated_expected_checkout(project, expected, expected_sha)
+    if verdict != "ready":
+        raise SafeRefusal(verdict.removeprefix("refuse:"))
     log_path = evidence.with_suffix(".launcher.log")
     descriptor = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     log = os.fdopen(descriptor, "wb", buffering=0)
@@ -835,6 +874,8 @@ def windows_route_fingerprint(url: str) -> dict[str, object]:
 
 
 def verified_pair(inspection: Inspection, expected: GitInfo, expected_sha: str) -> tuple[bool, str]:
+    if inspection.task_error:
+        return False, "firstmate-task-state-inspection-unavailable"
     if inspection.windows_error:
         return False, "windows-inspection-unavailable"
     if inspection.wsl_error:
@@ -856,6 +897,8 @@ def verified_pair(inspection: Inspection, expected: GitInfo, expected_sha: str) 
 
 
 def post_stop_restart_verdict(inspection: Inspection, expected: GitInfo, expected_sha: str) -> str:
+    if inspection.task_error:
+        return "refuse:firstmate-task-state-inspection-unavailable"
     if inspection.windows_error:
         return "refuse:windows-inspection-unavailable"
     if inspection.wsl_error:
@@ -895,19 +938,38 @@ def verify(project: Path, port: int, expected_sha: str, expected: GitInfo, state
         wsl_fingerprint == windows_fingerprint
         and 200 <= int(wsl_fingerprint["status"]) < 400
     )
+    final = inspect_system(port, state)
+    final_pair_ok, final_reason = verified_pair(final, expected, expected_sha)
+    verification_ok = pair_ok and final_pair_ok and fingerprints_match
     if render:
-        render_inspection("verify", project, port, expected_sha, expected, inspection)
+        render_inspection("verify", project, port, expected_sha, expected, final)
         emit("route", origin_kernel="wsl", **wsl_fingerprint)
         emit("route", origin_kernel="windows", **windows_fingerprint)
         emit(
             "verification",
-            verdict="pass" if pair_ok and fingerprints_match else "refuse",
-            reason="pair-and-route-fingerprints-match" if pair_ok and fingerprints_match else (reason if not pair_ok else "route-fingerprint-mismatch"),
+            verdict="pass" if verification_ok else "refuse",
+            reason="pair-and-route-fingerprints-match" if verification_ok else (final_reason if not final_pair_ok else (reason if not pair_ok else "route-fingerprint-mismatch")),
         )
-    return pair_ok and fingerprints_match
+    return verification_ok
 
 
-def terminate_exact(listener: Listener, port: int) -> None:
+def termination_boundary_listener(
+    listener: Listener,
+    port: int,
+    expected: GitInfo,
+    expected_sha: str,
+    state: Path,
+) -> Listener:
+    boundary = inspect_system(port, state)
+    if recovery_verdict(boundary, expected, expected_sha) != "eligible":
+        raise SafeRefusal("pid-or-command-reresolution-changed")
+    if len(boundary.windows) != 1 or not same_listener_identity([listener], boundary.windows):
+        raise SafeRefusal("pid-or-command-reresolution-changed")
+    return boundary.windows[0]
+
+
+def terminate_exact(listener: Listener, port: int, expected: GitInfo, expected_sha: str, state: Path) -> None:
+    listener = termination_boundary_listener(listener, port, expected, expected_sha, state)
     if listener.classification != "native-windows-node-astro-dev" or Path(listener.process).name.lower() != "node.exe":
         raise SafeRefusal("exact PID target is no longer a proven native Windows Astro dev server")
     if Path(listener.process).name.lower() == "wslrelay.exe":
@@ -960,7 +1022,7 @@ def recover(project: Path, port: int, expected_sha: str, expected: GitInfo, stat
         emit("recovery-result", verdict="refuse:private-evidence-write-failed", mutated="no")
         return False
     try:
-        terminate_exact(mutation.windows[0], port)
+        terminate_exact(mutation.windows[0], port, expected, expected_sha, state)
     except SafeRefusal as exc:
         emit(
             "recovery-result",
@@ -979,7 +1041,7 @@ def recover(project: Path, port: int, expected_sha: str, expected: GitInfo, stat
     launcher_process = None
     if post_stop_verdict == "restart-safe":
         try:
-            launcher_process = launch_expected(project, port, evidence)
+            launcher_process = launch_expected(project, port, expected, expected_sha, evidence)
             launcher_pid = launcher_process.process.pid
         except (OSError, SafeRefusal) as exc:
             emit("recovery-result", verdict=f"failed:{str(exc)}", mutated="windows-pid-terminated", evidence=evidence)
@@ -993,7 +1055,11 @@ def recover(project: Path, port: int, expected_sha: str, expected: GitInfo, stat
     while time.monotonic() < deadline:
         if verify(project, port, expected_sha, expected, state, render=False):
             final = inspect_system(port, state)
+            final_pair_ok, _ = verified_pair(final, expected, expected_sha)
             render_inspection("recover-post-verify", project, port, expected_sha, expected, final)
+            if not final_pair_ok:
+                time.sleep(0.2)
+                continue
             emit(
                 "recovery-result",
                 verdict="recovered-and-verified",
@@ -1045,18 +1111,21 @@ def parser() -> argparse.ArgumentParser:
   Recovery never kills by process name or port and never targets wslrelay.exe.
 
   Immediately before mutation, recover re-resolves listener, PID, command,
-  checkout, Git, and task evidence. It writes a mode-0600 record beneath
+  checkout, Git, and task evidence. The termination boundary repeats that
+  complete proof after the evidence is fsynced. It writes a mode-0600 record beneath
   $FM_HOME/state/localhost-evidence before invoking fixed PowerShell that again
   requires the exact PID, port, node.exe identity, unchanged command hash, and
-  exact Astro script path followed by `dev`. After the exact PID exits, it runs only the
-  project's package.json `scripts.dev` when that script is proven to be Astro,
-  using `npm run dev -- --host 0.0.0.0 --port <port>`; an already-running
-  expected WSL server is reused rather than duplicated.
+  exact Astro script path followed by `dev`. After the exact PID exits, it
+  re-resolves the clean expected checkout and runs only that project's package.json
+  `scripts.dev` when that script is proven to be Astro, using `npm run dev --
+  --host 0.0.0.0 --port <port>`; an already-running expected WSL server is reused
+  rather than duplicated.
 
   verify sends the same bounded browser-like request to http://localhost:<port>/
   from WSL and native Windows, compares status/body-length/SHA-256 fingerprints,
-  and passes only when Windows reports wslrelay.exe, WSL reports the clean
-  expected Astro server, and both route fingerprints match. A nonzero exit means
+  then repeats the listener-pair inspection. It passes only when Windows reports
+  wslrelay.exe, WSL reports the clean expected Astro server, and both route
+  fingerprints match the post-route pair. A nonzero exit means
   inspection, recovery, or verification did not prove the requested safe state.
 """
     result = argparse.ArgumentParser(

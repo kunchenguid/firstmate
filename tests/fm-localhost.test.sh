@@ -21,15 +21,23 @@ case "$joined" in
     [ "${FM_WINDOWS_STOP_FAIL:-0}" != 1 ] || exit 1
     printf 'stop\n' >> "${FM_STOP_LOG:?}"
     : > "${FM_KILLED_MARKER:?}"
+    if [ -n "${FM_MUTATE_EXPECTED_AFTER_STOP:-}" ]; then
+      printf 'concurrent edit\n' >> "$FM_MUTATE_EXPECTED_AFTER_STOP"
+    fi
     printf 'terminated\n'
     ;;
   *HttpClient*)
     printf 'route\n' >> "${FM_ROUTE_LOG:?}"
+    : > "${FM_ROUTE_DONE_MARKER:?}"
     cat "${FM_WIN_ROUTE_JSON:?}"
     ;;
   *Get-NetTCPConnection*)
     [ "${FM_WINDOWS_INSPECTION_FAIL:-0}" != 1 ] || exit 1
     [ ! -f "${FM_KILLED_MARKER:?}" ] || [ "${FM_POST_STOP_WINDOWS_FAIL:-0}" != 1 ] || exit 1
+    if [ -f "${FM_ROUTE_DONE_MARKER:?}" ] && [ -n "${FM_WIN_POST_ROUTE_JSON:-}" ]; then
+      cat "$FM_WIN_POST_ROUTE_JSON"
+      exit 0
+    fi
     if [ -f "${FM_KILLED_MARKER:?}" ] || [ "${FM_WIN_ALWAYS_RELAY:-0}" = 1 ]; then
       cat "${FM_WIN_RELAY_JSON:?}"
       exit 0
@@ -38,7 +46,12 @@ case "$joined" in
     [ ! -f "${FM_INSPECT_COUNT:?}" ] || count=$(cat "$FM_INSPECT_COUNT")
     count=$((count + 1))
     printf '%s\n' "$count" > "$FM_INSPECT_COUNT"
-    if [ "$count" -ge 3 ] && [ -n "${FM_WIN_THIRD_JSON:-}" ]; then
+    if [ "$count" -ge 4 ] && [ -n "${FM_WIN_FOURTH_JSON:-}" ]; then
+      if [ -n "${FM_FOURTH_TASK_FILE:-}" ]; then
+        printf 'project=%s\n' "${FM_FOURTH_TASK_PROJECT:?}" > "$FM_FOURTH_TASK_FILE"
+      fi
+      cat "$FM_WIN_FOURTH_JSON"
+    elif [ "$count" -ge 3 ] && [ -n "${FM_WIN_THIRD_JSON:-}" ]; then
       if [ -n "${FM_THIRD_TASK_FILE:-}" ]; then
         printf 'project=%s\n' "${FM_THIRD_TASK_PROJECT:?}" > "$FM_THIRD_TASK_FILE"
       fi
@@ -139,7 +152,7 @@ run_case() {
   local dir=$1 mode=$2 out=$3
   shift 3
   rm -f "$dir/inspect-count" "$dir/killed" "$dir/launched" "$dir/npm.log"
-  rm -f "$dir/route.log"
+  rm -f "$dir/route.log" "$dir/route-done"
   : > "$dir/stop.log"
   env \
     PATH="$FAKEBIN:$PATH" \
@@ -157,14 +170,20 @@ run_case() {
     FM_WIN_RELAY_JSON="$dir/win-relay.json" \
     FM_WIN_ROUTE_JSON="$dir/win-route.json" \
     FM_ROUTE_LOG="$dir/route.log" \
+    FM_ROUTE_DONE_MARKER="$dir/route-done" \
     FM_KILLED_MARKER="$dir/killed" \
     FM_STOP_LOG="$dir/stop.log" \
     FM_LAUNCH_MARKER="$dir/launched" \
     FM_NPM_LOG="$dir/npm.log" \
     FM_NPM_STAY_ALIVE="${FM_NPM_STAY_ALIVE:-0}" \
     FM_WIN_THIRD_JSON="${FM_WIN_THIRD_JSON:-}" \
+    FM_WIN_FOURTH_JSON="${FM_WIN_FOURTH_JSON:-}" \
     FM_THIRD_TASK_FILE="${FM_THIRD_TASK_FILE:-}" \
     FM_THIRD_TASK_PROJECT="${FM_THIRD_TASK_PROJECT:-}" \
+    FM_FOURTH_TASK_FILE="${FM_FOURTH_TASK_FILE:-}" \
+    FM_FOURTH_TASK_PROJECT="${FM_FOURTH_TASK_PROJECT:-}" \
+    FM_WIN_POST_ROUTE_JSON="${FM_WIN_POST_ROUTE_JSON:-}" \
+    FM_MUTATE_EXPECTED_AFTER_STOP="${FM_MUTATE_EXPECTED_AFTER_STOP:-}" \
     FM_POST_STOP_WINDOWS_FAIL="${FM_POST_STOP_WINDOWS_FAIL:-0}" \
     FM_POST_STOP_WSL_FAIL="${FM_POST_STOP_WSL_FAIL:-0}" \
     "$@" \
@@ -338,6 +357,19 @@ test_wsl_inspection_failure_is_safe() {
   pass "unavailable WSL inspection refuses recovery without mutation"
 }
 
+test_task_state_inspection_failure_is_safe() {
+  local dir out
+  dir=$(make_case task-state-inspection-failure)
+  out="$dir/out"
+  rmdir "$dir/state"
+  if FM_WSL_MODE=none run_case "$dir" recover "$out"; then
+    fail "missing Firstmate task state was accepted"
+  fi
+  assert_grep 'refuse:firstmate-task-state-inspection-unavailable' "$out" "missing task state did not produce a safe refusal"
+  [ ! -s "$dir/stop.log" ] || fail "missing task state still called termination"
+  pass "unavailable Firstmate task-state inspection refuses recovery without termination"
+}
+
 test_verify_proves_pair_before_route_requests() {
   local dir out
   dir=$(make_case verify-order)
@@ -362,6 +394,20 @@ test_mutation_recheck_refuses_new_task() {
   assert_grep 'refuse:pid-or-command-reresolution-changed' "$out" "mutation-boundary task was not refused"
   [ ! -s "$dir/stop.log" ] || fail "mutation-boundary task refusal still called termination"
   pass "fresh mutation-boundary source and task proof blocks termination"
+}
+
+test_termination_boundary_refuses_new_task() {
+  local dir out
+  dir=$(make_case termination-boundary-task)
+  out="$dir/out"
+  if FM_WSL_MODE=none FM_WIN_FOURTH_JSON="$dir/win-initial.json" \
+    FM_FOURTH_TASK_FILE="$dir/state/live.meta" FM_FOURTH_TASK_PROJECT="$dir/mount/c/repos/stale checkout" \
+    run_case "$dir" recover "$out"; then
+    fail "active task appearing at termination boundary was accepted"
+  fi
+  assert_grep 'refuse:pid-or-command-reresolution-changed' "$out" "termination-boundary task was not refused"
+  [ ! -s "$dir/stop.log" ] || fail "termination-boundary task refusal still called termination"
+  pass "termination-boundary task proof blocks exact-PID termination"
 }
 
 test_post_stop_inspection_failure_blocks_restart() {
@@ -412,6 +458,33 @@ test_post_recovery_fingerprint_mismatch_fails() {
   pass "post-recovery Windows/WSL route fingerprint mismatch fails verification"
 }
 
+test_post_route_pair_change_fails_verification() {
+  local dir out
+  dir=$(make_case post-route-pair-change)
+  out="$dir/out"
+  if FM_WSL_MODE=after-launch FM_NPM_STAY_ALIVE=1 FM_WIN_POST_ROUTE_JSON="$dir/win-initial.json" \
+    run_case "$dir" recover "$out"; then
+    fail "post-route listener-pair change passed verification"
+  fi
+  assert_grep 'failed:post-recovery-verification' "$out" "post-route listener-pair change was not reported"
+  assert_grep 'windows-owner-is-not-wslrelay' "$out" "post-route listener-pair reason was not reported"
+  [ "$(wc -l < "$dir/stop.log" | tr -d ' ')" = 1 ] || fail "post-route pair change did not preserve exact single-PID termination"
+  pass "post-route listener-pair changes fail verification"
+}
+
+test_checkout_revalidation_blocks_dirty_restart() {
+  local dir out
+  dir=$(make_case checkout-revalidation)
+  out="$dir/out"
+  if FM_WSL_MODE=none FM_MUTATE_EXPECTED_AFTER_STOP="$dir/expected/page.txt" run_case "$dir" recover "$out"; then
+    fail "dirty expected checkout was launched"
+  fi
+  assert_grep 'failed:expected-checkout-dirty' "$out" "dirty expected checkout was not refused before restart"
+  [ ! -e "$dir/npm.log" ] || fail "dirty expected checkout still launched npm"
+  [ "$(wc -l < "$dir/stop.log" | tr -d ' ')" = 1 ] || fail "checkout revalidation did not preserve exact single-PID termination"
+  pass "dirty expected checkout refuses restart after exact-PID termination"
+}
+
 test_listener_parsing_path_conversion_source_and_redaction
 test_native_stale_windows_shadow_recovers_to_verified_pair
 test_healthy_relay_and_clean_wsl_verify
@@ -421,8 +494,12 @@ test_worker_with_astro_words_refuses
 test_unknown_and_unrelated_windows_processes_refuse
 test_windows_inspection_failure_is_safe
 test_wsl_inspection_failure_is_safe
+test_task_state_inspection_failure_is_safe
 test_verify_proves_pair_before_route_requests
 test_mutation_recheck_refuses_new_task
+test_termination_boundary_refuses_new_task
 test_post_stop_inspection_failure_blocks_restart
 test_launcher_script_rejects_shell_metacharacters
 test_post_recovery_fingerprint_mismatch_fails
+test_post_route_pair_change_fails_verification
+test_checkout_revalidation_blocks_dirty_restart
