@@ -1012,13 +1012,18 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 # The two facts it remembers live in this process for the daemon's lifetime and
 # nowhere else: a durable file would need its own staleness, cleanup and
 # permission handling, and re-reporting once after a restart is correct anyway.
+# Remembering them is why this ASSIGNS STALE_GATE_READ_BUDGET rather than printing
+# the number: a caller writing `x=$(stale_gate_read_budget)` would run it in a
+# subshell, and every throttle fact it recorded would die with that subshell while
+# the number still looked right. It prints nothing, so that form yields an empty
+# budget and fails loudly instead of silently resetting the throttle each pass.
 # Zero is in range but is floored to one, since a budget of zero would defer every
 # marker on every pass, which is permanent silence - the one outcome this whole
 # path exists to prevent.
-stale_gate_read_budget() {  # -> crew-state reads one housekeeping pass may make
+stale_gate_read_budget() {  # sets STALE_GATE_READ_BUDGET; call directly, never in $( )
   local raw=${FM_STALE_WORKING_GATE_READS:-} budget now
   if [ -z "$raw" ]; then
-    printf '%s' "$STALE_WORKING_GATE_READS_DEFAULT"
+    STALE_GATE_READ_BUDGET=$STALE_WORKING_GATE_READS_DEFAULT
     return 0
   fi
   case "$raw" in
@@ -1030,12 +1035,12 @@ stale_gate_read_budget() {  # -> crew-state reads one housekeeping pass may make
         _fm_gate_budget_reported_at=$now
         log "invalid FM_STALE_WORKING_GATE_READS '$raw'; using $STALE_WORKING_GATE_READS_DEFAULT"
       fi
-      printf '%s' "$STALE_WORKING_GATE_READS_DEFAULT"
+      STALE_GATE_READ_BUDGET=$STALE_WORKING_GATE_READS_DEFAULT
       return 0 ;;
   esac
   budget=$raw
   [ "$budget" -ge 1 ] || budget=1
-  printf '%s' "$budget"
+  STALE_GATE_READ_BUDGET=$budget
 }
 
 # --- housekeeping (runs every tick while the watcher is mid-cycle) ----------
@@ -1055,7 +1060,8 @@ stale_gate_read_budget() {  # -> crew-state reads one housekeeping pass may make
 housekeeping() {  # <state>
   local state=$1 now due f key task win marker age last max_defer oldest pause_secs
   local working_reads=0 working_reads_max
-  working_reads_max=$(stale_gate_read_budget)
+  stale_gate_read_budget
+  working_reads_max=$STALE_GATE_READ_BUDGET
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 

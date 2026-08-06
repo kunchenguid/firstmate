@@ -611,28 +611,35 @@ test_stale_gate_read_budget_reports_invalid_and_floors_zero() {
   mkdir -p "$dir"
   daemon_log="$dir/daemon.log"; : > "$daemon_log"
 
-  budget=$(LOG="$daemon_log" FM_STALE_WORKING_GATE_READS='3 ' stale_gate_read_budget)
+  # Called directly, never through $( ): the helper ASSIGNS its answer so its
+  # throttle memory survives, and a substitution would discard both.
+  LOG="$daemon_log" FM_STALE_WORKING_GATE_READS='3 ' stale_gate_read_budget
+  budget=$STALE_GATE_READ_BUDGET
   [ "$budget" = 3 ] || fail "an invalid budget did not restore the default of 3: got '$budget'"
   grep -F "invalid FM_STALE_WORKING_GATE_READS '3 '; using 3" "$daemon_log" >/dev/null \
     || fail "an invalid budget was corrected silently: $(cat "$daemon_log")"
 
   : > "$daemon_log"
-  budget=$(LOG="$daemon_log" FM_STALE_WORKING_GATE_READS=-5 stale_gate_read_budget)
+  LOG="$daemon_log" FM_STALE_WORKING_GATE_READS=-5 stale_gate_read_budget
+  budget=$STALE_GATE_READ_BUDGET
   [ "$budget" = 3 ] || fail "a negative budget did not restore the default of 3: got '$budget'"
   [ -s "$daemon_log" ] || fail "a negative budget was corrected silently"
 
   : > "$daemon_log"
-  budget=$(LOG="$daemon_log" FM_STALE_WORKING_GATE_READS=0 stale_gate_read_budget)
+  LOG="$daemon_log" FM_STALE_WORKING_GATE_READS=0 stale_gate_read_budget
+  budget=$STALE_GATE_READ_BUDGET
   [ "$budget" = 1 ] || fail "a budget of 0 did not floor to 1: got '$budget'"
   [ ! -s "$daemon_log" ] \
     || fail "an in-range budget of 0 logged an invalid-value diagnostic: $(cat "$daemon_log")"
 
   : > "$daemon_log"
-  budget=$(LOG="$daemon_log" FM_STALE_WORKING_GATE_READS='' stale_gate_read_budget)
+  LOG="$daemon_log" FM_STALE_WORKING_GATE_READS='' stale_gate_read_budget
+  budget=$STALE_GATE_READ_BUDGET
   [ "$budget" = 3 ] || fail "a blank budget did not use the default of 3: got '$budget'"
   [ ! -s "$daemon_log" ] || fail "a blank budget logged an invalid-value diagnostic: $(cat "$daemon_log")"
 
-  budget=$(LOG="$daemon_log" FM_STALE_WORKING_GATE_READS=2 stale_gate_read_budget)
+  LOG="$daemon_log" FM_STALE_WORKING_GATE_READS=2 stale_gate_read_budget
+  budget=$STALE_GATE_READ_BUDGET
   [ "$budget" = 2 ] || fail "a valid budget was not honoured: got '$budget'"
   pass "an invalid gate budget restores the default and is logged, while 0 floors to 1 quietly"
 }
@@ -671,36 +678,57 @@ test_housekeeping_spends_the_sanitized_budget() {
 # The report must be neither silent nor a flood. It is read once per housekeeping
 # pass, so reporting unconditionally would emit thousands of identical lines a day
 # and evict, from a log trimmed to LOG_KEEP_LINES, exactly the watcher-crash and
-# escalation history an operator opens the log to find. All four cadence legs run
-# in ONE child shell, because the throttle's memory is per-process: a leg run in a
-# command substitution would start from a blank slate and could never observe a
-# suppressed repeat.
+# escalation history an operator opens the log to find.
+# Every leg drives HOUSEKEEPING, the daemon's own call site, not the helper: a
+# throttle can be perfectly correct inside the helper and still be discarded on
+# return, so only the production call path can show that its memory survives. The
+# legs share one child shell because that memory is per-process.
 test_stale_gate_read_budget_report_is_throttled() {
-  local dir
+  local dir msg n
   dir="$TMP_ROOT/gate-budget-report-cadence"
   mkdir -p "$dir"
+  msg="invalid FM_STALE_WORKING_GATE_READS"
 
   FUNCNEST=200 bash -c '
     set -u
     . "$1/tests/wake-helpers.sh"
     . "$1/bin/fm-supervise-daemon.sh"
-    LOG="$2/first.log";   FM_STALE_WORKING_GATE_READS=abc stale_gate_read_budget >/dev/null
-    LOG="$2/repeat.log";  FM_STALE_WORKING_GATE_READS=abc stale_gate_read_budget >/dev/null
-    LOG="$2/changed.log"; FM_STALE_WORKING_GATE_READS=zzz stale_gate_read_budget >/dev/null
-    LOG="$2/remind.log"
-    STALE_GATE_INVALID_REMIND_SECS=0 FM_STALE_WORKING_GATE_READS=zzz stale_gate_read_budget >/dev/null
+    state="$2/state"; mkdir -p "$state"
+    export FM_STATE_OVERRIDE="$state"
+
+    # Four passes, one standing typo: the daemon would emit four lines a minute.
+    LOG="$2/persist.log"
+    for _i in 1 2 3 4; do FM_STALE_WORKING_GATE_READS=abc housekeeping "$state"; done
+
+    LOG="$2/changed.log"; FM_STALE_WORKING_GATE_READS=zzz housekeeping "$state"
+
+    # A real interval decides both of the next two, so a broken elapsed
+    # computation cannot pass: back-dated inside it, then well past it.
+    # Defaulted, not bare: if the passes above failed to record a timestamp at
+    # all, these legs must still run and report it, not abort the probe.
+    STALE_GATE_INVALID_REMIND_SECS=30
+    LOG="$2/within.log"
+    _fm_gate_budget_reported_at=$(( ${_fm_gate_budget_reported_at:-0} - 2 ))
+    FM_STALE_WORKING_GATE_READS=zzz housekeeping "$state"
+    LOG="$2/elapsed.log"
+    _fm_gate_budget_reported_at=$(( ${_fm_gate_budget_reported_at:-0} - 60 ))
+    FM_STALE_WORKING_GATE_READS=zzz housekeeping "$state"
   ' _ "$ROOT" "$dir" 2>/dev/null || fail "the cadence probe did not run to completion"
 
-  grep -F "invalid FM_STALE_WORKING_GATE_READS 'abc'" "$dir/first.log" >/dev/null 2>&1 \
-    || fail "the first sighting of an invalid budget was not reported"
-  [ ! -s "$dir/repeat.log" ] \
-    || fail "an unchanged invalid budget was reported again on the next pass: $(cat "$dir/repeat.log")"
-  grep -F "invalid FM_STALE_WORKING_GATE_READS 'zzz'" "$dir/changed.log" >/dev/null 2>&1 \
+  n=$(grep -Fc "$msg" "$dir/persist.log" 2>/dev/null || echo 0)
+  [ "$n" = 1 ] \
+    || fail "four housekeeping passes with one standing invalid budget emitted $n report(s); exactly 1 is the bound"
+  n=$(grep -Fc "$msg 'zzz'" "$dir/changed.log" 2>/dev/null || echo 0)
+  [ "$n" -ge 1 ] \
     || fail "a changed invalid budget was not reported, so a re-botched edit would go unmentioned"
-  # Same value as the leg above, so only the elapsed-interval arm can speak here.
-  grep -F "invalid FM_STALE_WORKING_GATE_READS 'zzz'" "$dir/remind.log" >/dev/null 2>&1 \
-    || fail "the periodic reminder never fired, so a standing misconfiguration would rot invisibly"
-  pass "the invalid-budget report fires on first sight, on change, and on its reminder interval, never every pass"
+  # Same value from here on, so only the elapsed-interval arm can decide.
+  n=$(grep -Fc "$msg" "$dir/within.log" 2>/dev/null || echo 0)
+  [ "$n" = 0 ] \
+    || fail "the reminder fired $n time(s) inside its own interval, so the interval is not being honoured"
+  n=$(grep -Fc "$msg 'zzz'" "$dir/elapsed.log" 2>/dev/null || echo 0)
+  [ "$n" -ge 1 ] \
+    || fail "the periodic reminder never fired past its interval, so a standing misconfiguration would rot invisibly"
+  pass "through housekeeping itself, the invalid-budget report fires once per standing typo, again on change, and only past its reminder interval"
 }
 
 test_handle_wake_paused_signal_records_pause_marker() {
