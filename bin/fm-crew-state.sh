@@ -50,6 +50,7 @@
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
 set -u
+[ "${FM_CREW_STATE_DEBUG:-0}" = 1 ] && set -x
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -304,38 +305,144 @@ nm_ci_checks_state() {
     *) printf 'unknown' ;;
   esac
 }
+# A bare `axi status` normally resolves the active run for the current branch,
+# but it can return an older terminal run while a newer same-branch run owns the
+# pipeline head (for example, during a gate-fix round after a prior run failed).
+# The `axi` home surface carries run IDs, so the helpers below use it to recover
+# the newest code-matching active run and inspect that exact run by ID.
+nm_axi_active_run_id_for_branch() {  # <branch> <axi-home-output>
+  local branch=$1 home=$2 line trimmed in_active=0 id='' br='' head=''
+  while IFS= read -r line; do
+    trimmed=$(trim "$line")
+    if [ "$trimmed" = active_run: ]; then
+      in_active=1
+      id=''
+      br=''
+      head=''
+      continue
+    fi
+    if [ "$in_active" = 1 ]; then
+      case "$line" in
+        [![:space:]]*) break ;;
+      esac
+      case "$trimmed" in
+        id:*)     id=$(strip_quotes "${trimmed#id:}") ;;
+        branch:*) br=$(strip_quotes "${trimmed#branch:}") ;;
+        head:*)   head=$(strip_quotes "${trimmed#head:}") ;;
+      esac
+    fi
+  done <<EOF
+$home
+EOF
+  [ "$br" = "$branch" ] || return 1
+  [ -n "$id" ] || return 1
+  fm_nm_head_matches_worktree "$WT" "$head" || return 1
+  printf '%s' "$id"
+}
+
+# Parse the optional `runs[N]{id,branch,status,head,pr}:` table from `axi` home.
+# Prefer the first code-matching active row over every terminal row, regardless
+# of table ordering, so an old failed run cannot shadow a live replacement.
+nm_axi_run_id_for_branch_from_table() {  # <branch> <axi-home-output>
+  local branch=$1 home=$2 line trimmed row id rest br st head
+  local in_runs=0 active_id='' terminal_id=''
+  while IFS= read -r line; do
+    trimmed=$(trim "$line")
+    if [ "$in_runs" = 0 ]; then
+      if printf '%s\n' "$trimmed" | grep -Eq '^runs\[[0-9]+\]\{.*\}:$'; then
+        in_runs=1
+      fi
+      continue
+    fi
+    case "$line" in
+      '') continue ;;
+      [[:space:]]*) ;;
+      *) break ;;
+    esac
+    row=$trimmed
+    case "$row" in *,*) ;; *) continue ;; esac
+    id=${row%%,*}
+    id=$(strip_quotes "$id")
+    rest=${row#*,}
+    br=${rest%%,*}
+    br=$(strip_quotes "$br")
+    rest=${rest#*,}
+    st=${rest%%,*}
+    st=$(strip_quotes "$st")
+    rest=${rest#*,}
+    head=${rest%%,*}
+    head=$(strip_quotes "$head")
+    [ "$br" = "$branch" ] || continue
+    nm_coarse_head_matches_worktree "$head" || continue
+    case "$st" in
+      pending|running)
+        [ -n "$active_id" ] || active_id=$id
+        ;;
+      completed|failed|cancelled)
+        [ -n "$terminal_id" ] || terminal_id=$id
+        ;;
+    esac
+  done <<EOF
+$home
+EOF
+  if [ -n "$active_id" ]; then
+    printf '%s' "$active_id"
+  elif [ -n "$terminal_id" ]; then
+    printf '%s' "$terminal_id"
+  else
+    return 1
+  fi
+}
+
+# Resolve an exact current-branch run ID from the optional `axi` home output.
+# The active_run block is authoritative when present; the bounded recent-runs
+# table is the compatible fallback on surfaces that omit that block.
+nm_axi_run_id_for_branch() {  # <branch> <axi-home-output>
+  local branch=$1 home=$2 id
+  id=$(nm_axi_active_run_id_for_branch "$branch" "$home" || true)
+  [ -n "$id" ] && { printf '%s' "$id"; return 0; }
+  nm_axi_run_id_for_branch_from_table "$branch" "$home"
+}
+
+# 0 when an axi status object is terminal, so an ambiguous terminal answer can
+# be cross-checked against the newer exact-ID run before it becomes authoritative.
+nm_run_output_is_terminal() {
+  local outcome status
+  outcome=$(strip_quotes "$(nm_field outcome)")
+  case "$outcome" in
+    passed|checks-passed|failed|cancelled) return 0 ;;
+  esac
+  status=$(strip_quotes "$(nm_field status)")
+  case "$status" in
+    completed|failed|cancelled) return 0 ;;
+  esac
+  return 1
+}
+
+# Replace RUN_OUT with a verified exact-ID status for this branch, if the axi
+# home surface exposes one. A mismatched ID, branch, or code head is rejected.
+nm_refresh_run_from_axi_home() {  # <branch> <axi-home-output>
+  local branch=$1 home=$2 run_id candidate candidate_id candidate_branch
+  run_id=$(nm_axi_run_id_for_branch "$branch" "$home" || true)
+  [ -n "$run_id" ] || return 1
+  candidate=$(nm_run axi status --run "$run_id")
+  [ -n "$candidate" ] || return 1
+  RUN_OUT=$candidate
+  candidate_id=$(strip_quotes "$(nm_field id)")
+  candidate_branch=$(strip_quotes "$(nm_field branch)")
+  [ "$candidate_id" = "$run_id" ] || return 1
+  [ "$candidate_branch" = "$branch" ] || return 1
+  nm_run_head_matches_worktree || return 1
+  return 0
+}
+
 # Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
-# reports the active-or-most-recent run for the CURRENT branch when one
-# exists, else falls back to some other branch's run purely as informational
-# display (verified empirically: querying a worktree with its own active run
-# reliably returns that run, even under concurrent load from several other
-# validating crews on the same underlying repo). A crew whose branch genuinely
-# has no run yet therefore sees another branch's answer here.
-#
-# This fallback used to shell out to `no-mistakes axi` (bare, no subcommand)
-# expecting a `runs[N]{id,branch,status,...}:` TOON table and re-query the
-# matched id via `axi status --run <id>`. Verified against the real installed
-# CLI (v1.32.2): the `axi` surface exposes only abort/logs/respond/run/status -
-# there is no runs-listing subcommand under `axi` at all, so that table never
-# appears and the lookup was silently dead code; whenever the bare `axi
-# status` answer was not this crew's own branch, attribution always failed and
-# the caller fell straight through to the pane/log fallback below. (The
-# PRIMARY cause of the 2026-07 herdr false-surface incidents turned out to be
-# a separate bug in bin/fm-watch.sh's stale_is_terminal precedence - see that
-# file's history - but this cross-branch path was independently confirmed
-# dead code and is worth having actually work.)
-#
-# The real run-listing command is the top-level `no-mistakes runs` (verified:
-# `no-mistakes --help` lists it separately from `axi`). It is plain, human-
-# oriented text - no run id, no JSON/TOON, newest-first, columns
-# "<status> <branch> <short-sha> <date> [<pr-url>]" separated by runs of
-# spaces (verified: no quoting, so splitting on the first two whitespace runs
-# is exact) - but branch + coarse status is exactly what this predicate needs:
-# is a run for THIS branch active right now. Echoes the first (most recent)
-# matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+# may answer another branch, so the top-level `no-mistakes runs` listing supplies
+# a branch-filtered status when the exact-ID surface is unavailable.
+# It returns an active status if ANY matching code identity is active, otherwise
+# the first matching terminal status, preserving genuine failed/cancelled reads.
 nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br sha
+  local branch=$1 out row st rest br sha active='' terminal=''
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
@@ -348,17 +455,26 @@ nm_runs_status_for_branch() {  # <branch>
     rest=${rest#* }
     rest=$(trim "$rest")
     sha=${rest%% *}
-    if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status: skip a same-branch row whose
-      # short-sha does not match this worktree (rewritten or advanced tip).
-      if ! nm_coarse_head_matches_worktree "$sha"; then
-        continue
-      fi
-      printf '%s' "$st"
-      return 0
-    fi
-  done <<< "$out"
-  return 0
+    [ "$br" = "$branch" ] || continue
+    # Same code-identity rule as axi status: skip a same-branch row whose
+    # short-sha does not match this worktree (rewritten or advanced tip).
+    nm_coarse_head_matches_worktree "$sha" || continue
+    case "$st" in
+      pending|running)
+        [ -n "$active" ] || active=$st
+        ;;
+      completed|failed|cancelled)
+        [ -n "$terminal" ] || terminal=$st
+        ;;
+    esac
+  done <<EOF
+$out
+EOF
+  if [ -n "$active" ]; then
+    printf '%s' "$active"
+  elif [ -n "$terminal" ]; then
+    printf '%s' "$terminal"
+  fi
 }
 
 # CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
@@ -394,20 +510,38 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
+    run_matches=0
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
+      run_matches=1
+    fi
+
+    if [ "$run_matches" = 1 ]; then
+      # A terminal bare answer may be an older run left behind by a rerun on
+      # the same branch. Re-resolve through axi's exact run-ID surface before
+      # allowing that terminal state to outrank a newer active gate.
       HAVE_RUN=1
+      if nm_run_output_is_terminal; then
+        original_run_out=$RUN_OUT
+        axi_home_out=$(nm_run axi)
+        if [ -n "$axi_home_out" ] && ! nm_refresh_run_from_axi_home "$CREW_BRANCH" "$axi_home_out"; then
+          RUN_OUT=$original_run_out
+        fi
+      fi
     else
       # The active-or-most-recent run is for another branch, or same branch with
-      # a rewritten/diverged head (the CLI is alive and answered; only the
-      # attribution missed) - try the coarse fallback.
-      # Deliberately nested inside `[ -n "$RUN_OUT" ]`: an empty/timed-out
-      # primary call means the CLI itself did not respond, so retrying it
-      # immediately with a second bounded call would just double the wait
-      # for no better answer.
-      COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
-      if [ -n "$COARSE_STATUS" ]; then
+      # a rewritten/diverged head. Try the exact-ID home surface first, then
+      # the coarse branch/status fallback.
+      original_run_out=$RUN_OUT
+      axi_home_out=$(nm_run axi)
+      if [ -n "$axi_home_out" ] && nm_refresh_run_from_axi_home "$CREW_BRANCH" "$axi_home_out"; then
         HAVE_RUN=1
-        RUN_SOURCE=coarse
+      else
+        RUN_OUT=$original_run_out
+        COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
+        if [ -n "$COARSE_STATUS" ]; then
+          HAVE_RUN=1
+          RUN_SOURCE=coarse
+        fi
       fi
     fi
   fi

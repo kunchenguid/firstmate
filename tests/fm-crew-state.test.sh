@@ -49,13 +49,9 @@ make_repo_on_branch() {  # <dir> <branch>
   export FM_FAKE_RUN_HEAD
 }
 
-# A fakebin with a fake `no-mistakes` (serves the env-driven run output) and a
-# fake `tmux` (serves a busy or idle pane). The fake no-mistakes mirrors the real
-# command surface the helper uses: `axi status`, `axi status --run <id>` (the
-# `axi` surface - no runs-listing subcommand exists under it, verified against
-# the real CLI), and the actual top-level run-listing command, `no-mistakes
-# runs --limit N`, which is plain text - no run id, no quoting - serving
-# FM_FAKE_RUNS_LIST verbatim.
+# A fake `axi` home includes run IDs, matching the current no-mistakes surface.
+# Keep this separate from the top-level `runs` fixture because the repair must
+# inspect the exact newer run rather than trust a branch-only terminal row.
 make_fakebin() {  # <dir> -> echoes fakebin path
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -70,6 +66,7 @@ case "${1:-}" in
         shift
         if [ "${1:-}" = --run ]; then printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
         else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
+      '') printf '%s\n' "${FM_FAKE_AXI_HOME:-}" ;;
       logs)
         printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
     esac
@@ -162,6 +159,8 @@ arm_idle_record() {  # <state-dir> <id>
 reset_fakes() {
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_AXI_STATUS_RUN=""
+  FM_FAKE_AXI_HOME=""
+  FM_FAKE_RUN_ID=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=0
   FM_FAKE_BUSY_TEXT=
@@ -170,7 +169,7 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
-  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
+  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_AXI_HOME FM_FAKE_RUN_ID FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
 }
 
@@ -248,7 +247,7 @@ EOF
 run_parked_in_gate_block() {  # <branch>
   cat <<EOF
 run:
-  id: "01RUN"
+  id: "${FM_FAKE_RUN_ID:-01RUN}"
   branch: $1
   status: running
   head: "${FM_FAKE_RUN_HEAD:-abc1234}"
@@ -684,16 +683,70 @@ test_terminal_failed() {
   pass "terminal failed run is authoritative"
 }
 
+# Regression: an older failed run on the same branch can match the local head
+# while a newer pipeline run has advanced its head and is parked at fix_review.
+# Initiating trigger: bare `axi status` resolves the stale terminal run.
+# Masking condition: both runs share the branch and the local head is an
+# ancestor of the newer run head, so branch/head attribution alone is ambiguous.
+# Visible symptom: the helper emits failed/run failed instead of parked/run-step.
+test_newer_parked_run_beats_older_failed_run() {
+  reset_fakes
+  local d base_head run_head old_run current_run short; d=$(new_case newer-parked)
+  make_repo_on_branch "$d/wt" fm/aura-video-plan3-landing
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'pipeline fix commit'
+  run_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" reset -q --hard "$base_head"
+  short=$(git -C "$d/wt" rev-parse --short=8 "$run_head")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/landing.meta" "window=fm:fm-landing" "worktree=$d/wt" "kind=ship"
+
+  FM_FAKE_RUN_ID="01OLD"
+  FM_FAKE_RUN_HEAD="$base_head" old_run=$(run_failed fm/aura-video-plan3-landing)
+  FM_FAKE_RUN_ID="01CURRENT"
+  FM_FAKE_RUN_HEAD="$run_head" current_run=$(run_parked_in_gate_block fm/aura-video-plan3-landing)
+  # The bare query is the stale older run; the exact current run is available
+  # through the run-ID table, as it was in the observed no-mistakes state.
+  FM_FAKE_AXI_STATUS="$old_run"
+  FM_FAKE_AXI_STATUS_RUN="$current_run"
+  FM_FAKE_AXI_HOME="$(cat <<EOF
+runs[2]{id,branch,status,head,pr}:
+  "01CURRENT",fm/aura-video-plan3-landing,running,$short,""
+  "01OLD",fm/aura-video-plan3-landing,failed,${base_head:0:8},""
+EOF
+)"
+
+  local out; out=$(run_crew_state "$d" landing)
+  assert_contains "$out" "state: parked" "newer fix_review run must beat older failed run"
+  assert_contains "$out" "source: run-step" "newer parked run remains authoritative"
+  assert_contains "$out" "parked at review" "current run's gate is preserved"
+  pass "newer parked run beats older failed run on the same branch"
+}
+
+# Smallest counterfactual: remove the older run while keeping the same parked
+# current run and pipeline-head ancestry. The proven path must remain parked.
+test_single_parked_run_counterfactual() {
+  reset_fakes
+  local d base_head run_head current_run; d=$(new_case single-parked)
+  make_repo_on_branch "$d/wt" fm/aura-video-plan3-landing
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'pipeline fix commit'
+  run_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" reset -q --hard "$base_head"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/landing.meta" "window=fm:fm-landing" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_ID=""
+  FM_FAKE_RUN_HEAD="$run_head" current_run=$(run_parked_in_gate_block fm/aura-video-plan3-landing)
+  FM_FAKE_AXI_STATUS="$current_run"
+  local out; out=$(run_crew_state "$d" landing)
+  assert_contains "$out" "state: parked" "single current run -> parked"
+  assert_contains "$out" "source: run-step" "single current run -> run-step"
+  pass "single parked run counterfactual remains parked"
+}
+
 # (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
 # routine case once more than one crew validates the same underlying repo
 # concurrently - they share ONE no-mistakes repo registration), so the helper
-# falls back to the real top-level `no-mistakes runs` listing to learn whether
-# THIS branch has an active run of its own. Regression coverage for the
-# 2026-07-02 herdr incident: the old fallback shelled out to `no-mistakes axi`
-# (bare) expecting a `runs[N]{...}:` TOON table that the real CLI never emits
-# (verified against the installed v1.32.2 - the `axi` surface has no
-# runs-listing subcommand at all), so attribution silently failed every time
-# the repo-wide answer was not this crew's own branch.
 test_cross_branch_attribution_via_runs_list() {
   reset_fakes
   local d short; d=$(new_case crossbranch)
@@ -1329,6 +1382,8 @@ test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
+test_single_parked_run_counterfactual
+test_newer_parked_run_beats_older_failed_run
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
