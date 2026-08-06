@@ -300,9 +300,9 @@ test_claude_busy_signals_are_independent() {
   printf '✻ Cogitated for 44s\n' > "$composer"
   pane_busy idle-completed claude && fail "a completed-turn summary must not be busy"
 
-  # The discriminator: the affordance counts only on a line that BEGINS with the
-  # rendered permission-mode indicator. Transcript text cannot satisfy that anchor,
-  # so an agent that prints the footer and then goes idle is never read as busy.
+  # The discriminator: the affordance counts only on the last non-blank line,
+  # where Claude renders the live footer. Transcript text can contain the exact
+  # same unprefixed row, so its text shape cannot distinguish the two cases.
   # Without this the pane would look perpetually busy and the away digest would
   # never land, which is the away-mode wedge arriving from the other direction.
   printf 'I will explain how esc to interrupt works in this transcript.\n' > "$composer"
@@ -313,6 +313,22 @@ test_claude_busy_signals_are_independent() {
   pane_busy quoted-footer claude && fail "an agent quoting the whole footer row must not classify an idle pane busy"
   printf '> ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents\n' > "$composer"
   pane_busy fenced-footer claude && fail "a markdown-quoted footer row must not classify an idle pane busy"
+
+  footer_row='  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents'
+  printf '%s\nFurther transcript output\n' "$footer_row" > "$composer"
+  [ "$(grep -cF "$footer_row" "$composer")" = 1 ] \
+    || fail "transcript fixture must contain the exact unprefixed footer row once"
+  [ "$(tail -1 "$composer")" != "$footer_row" ] \
+    || fail "transcript fixture must place the affordance before the last line"
+  pane_busy transcript-footer claude \
+    && fail "an exact footer row earlier in the transcript must stay idle"
+  printf 'Earlier transcript output\n%s\n\n' "$footer_row" > "$composer"
+  [ "$(grep -cF "$footer_row" "$composer")" = 1 ] \
+    || fail "live-footer fixture must contain the same rendered row once"
+  [ "$(grep -v '^[[:space:]]*$' "$composer" | tail -1)" = "$footer_row" ] \
+    || fail "live-footer fixture must place the affordance on the last non-blank line"
+  pane_busy positional-footer claude \
+    || fail "the same footer row on the last non-blank line must classify busy"
 
   # Both real indicator glyphs still carry a genuine rendered footer.
   printf '  ⏸ manual mode on · esc to interrupt · ? for shortcuts\n' > "$composer"

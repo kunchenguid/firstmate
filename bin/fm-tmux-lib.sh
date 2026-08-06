@@ -78,14 +78,11 @@
 # observed with the escape affordance present on every sample and the spinner on
 # none - so a spinner-only guard reads an active turn as idle and can inject
 # mid-turn. Older Claude Code renders the escape affordance with no spinner at all.
-# The escape alternative is deliberately NOT a bare substring. It must appear on a
-# line that BEGINS with Claude's rendered permission-mode indicator and then reaches
-# the affordance across a "·" field separator, which is the complete shape of its
-# footer hint row. Anchoring at the line start is what transcript text cannot
-# satisfy: an agent that quotes or fences the footer adds a prefix character before
-# the glyph, and ordinary prose starts with a word. Without that anchor an agent
-# could print the footer text, go idle, and be read as perpetually busy - which
-# would recreate the away-mode wedge from the other direction.
+# The escape alternative is positional: it counts only on the last non-blank
+# captured line, where Claude renders its live footer hint row. Transcript content
+# can reproduce the footer bytes exactly, so text shape alone cannot distinguish
+# it from the live footer and would recreate the away-mode wedge from the other
+# direction.
 # A bare, undelimited "esc to interrupt" line is likewise NOT matched: that is the
 # ambiguous Claude Code 2.1.221 IDLE footer, the shape tests/fm-daemon.test.sh pins
 # as an idle pane that MUST still accept an away digest. The residual gap is an
@@ -107,7 +104,8 @@
 # The full moon-phase set remains locale- and emoji-font-sensitive because Kimi
 # exposes no stable ASCII busy token.
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
-FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT='…[[:space:]]+\([0-9]+[smh]|^[[:space:]]*(⏵⏵|⏸).*·[[:space:]]*esc to interrupt'
+FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT='…[[:space:]]+\([0-9]+[smh]'
+FM_TMUX_CLAUDE_ESCAPE_REGEX_DEFAULT='^[[:space:]]*(⏵⏵|⏸).*·[[:space:]]*esc to interrupt'
 FM_TMUX_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_TMUX_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
@@ -397,10 +395,17 @@ fm_pane_input_pending() {  # <target>
 # fm_pane_is_busy: 0 if the pane's last few non-blank lines show a busy footer
 # (an agent mid-turn). Scans a 40-line tail like fm-watch.sh.
 fm_pane_is_busy() {  # <target> [harness]
-  local win=$1 harness=${2:-} tail40
+  local win=$1 harness=${2:-} tail40 lines last_line
   tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || return 1
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
-    | fm_busy_lines_match "$harness"
+  lines=$(printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12)
+  if [ "$harness" = claude ] && [ -z "${FM_BUSY_REGEX:-}" ]; then
+    printf '%s' "$lines" | grep -qiE "$FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT" \
+      && return 0
+    last_line=$(printf '%s\n' "$lines" | tail -1)
+    printf '%s' "$last_line" | grep -qiE "$FM_TMUX_CLAUDE_ESCAPE_REGEX_DEFAULT"
+    return
+  fi
+  printf '%s' "$lines" | fm_busy_lines_match "$harness"
 }
 
 # fm_tmux_submit_core: type <text> into <target> ONCE, then submit with Enter,
