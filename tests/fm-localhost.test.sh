@@ -29,6 +29,10 @@ case "$joined" in
   *HttpClient*)
     printf 'route\n' >> "${FM_ROUTE_LOG:?}"
     : > "${FM_ROUTE_DONE_MARKER:?}"
+    if [ -n "${FM_MUTATE_EXPECTED_DURING_ROUTE:-}" ] && [ ! -f "${FM_ROUTE_MUTATION_MARKER:?}" ]; then
+      printf 'concurrent route edit\n' >> "$FM_MUTATE_EXPECTED_DURING_ROUTE"
+      : > "$FM_ROUTE_MUTATION_MARKER"
+    fi
     cat "${FM_WIN_ROUTE_JSON:?}"
     ;;
   *Get-NetTCPConnection*)
@@ -104,25 +108,27 @@ SH
 chmod +x "$FAKEBIN/powershell.exe" "$FAKEBIN/ss" "$FAKEBIN/npm"
 
 write_listener_json() {
-  local path=$1 port=$2 address=$3 pid=$4 process=$5 executable=$6 command=$7
-  python3 - "$path" "$port" "$address" "$pid" "$process" "$executable" "$command" <<'PY'
+  local path=$1 port=$2 address=$3 pid=$4 process=$5 executable=$6 command=$7 creation=${8:-creation-$4}
+  python3 - "$path" "$port" "$address" "$pid" "$process" "$executable" "$command" "$creation" <<'PY'
 import json, sys
-path, port, address, pid, process, executable, command = sys.argv[1:]
+path, port, address, pid, process, executable, command, creation = sys.argv[1:]
 with open(path, "w", encoding="utf-8") as handle:
     json.dump([{"address": address, "port": int(port), "pid": int(pid),
+                "creation": creation,
                 "process": process, "executable": executable or None,
                 "command": command or None}], handle)
 PY
 }
 
 append_listener_json() {
-  local path=$1 port=$2 address=$3 pid=$4 process=$5 executable=$6 command=$7
-  python3 - "$path" "$port" "$address" "$pid" "$process" "$executable" "$command" <<'PY'
+  local path=$1 port=$2 address=$3 pid=$4 process=$5 executable=$6 command=$7 creation=${8:-creation-$4}
+  python3 - "$path" "$port" "$address" "$pid" "$process" "$executable" "$command" "$creation" <<'PY'
 import json, sys
-path, port, address, pid, process, executable, command = sys.argv[1:]
+path, port, address, pid, process, executable, command, creation = sys.argv[1:]
 with open(path, encoding="utf-8") as handle:
     rows = json.load(handle)
 rows.append({"address": address, "port": int(port), "pid": int(pid),
+             "creation": creation,
              "process": process, "executable": executable or None,
              "command": command or None})
 with open(path, "w", encoding="utf-8") as handle:
@@ -211,6 +217,8 @@ run_case() {
     FM_FOURTH_TASK_PROJECT="${FM_FOURTH_TASK_PROJECT:-}" \
     FM_WIN_POST_ROUTE_JSON="${FM_WIN_POST_ROUTE_JSON:-}" \
     FM_MUTATE_EXPECTED_AFTER_STOP="${FM_MUTATE_EXPECTED_AFTER_STOP:-}" \
+    FM_MUTATE_EXPECTED_DURING_ROUTE="${FM_MUTATE_EXPECTED_DURING_ROUTE:-}" \
+    FM_ROUTE_MUTATION_MARKER="$dir/route-mutated" \
     FM_POST_STOP_WINDOWS_FAIL="${FM_POST_STOP_WINDOWS_FAIL:-0}" \
     FM_POST_STOP_WSL_FAIL="${FM_POST_STOP_WSL_FAIL:-0}" \
     "$@" \
@@ -381,6 +389,32 @@ test_wsl_listener_must_remain_on_default_branch() {
   pass "WSL listener verification requires the default branch"
 }
 
+test_production_like_wsl_and_launcher_refuse() {
+  local dir out
+  dir=$(make_case production-like)
+  out="$dir/out"
+  printf 'node\0%s\0dev\0--mode\0production\0' \
+    "$dir/expected/node_modules/astro/astro.js" > "$dir/proc/9200/cmdline"
+  if FM_WSL_MODE=always run_case "$dir" recover "$out"; then
+    fail "production-like WSL Astro command was accepted"
+  fi
+  assert_grep 'refuse:wsl-port-owned-by-unexpected-process' "$out" "production-like WSL command did not refuse"
+  [ ! -s "$dir/stop.log" ] || fail "production-like WSL command still called termination"
+
+  cat > "$dir/expected/package.json" <<'JSON'
+{"scripts":{"dev":"astro dev --mode production"}}
+JSON
+  git -C "$dir/expected" add package.json
+  git -C "$dir/expected" commit -qm production-like
+  git -C "$dir/expected" rev-parse HEAD > "$dir/expected.sha"
+  if FM_WSL_MODE=none run_case "$dir" recover "$out"; then
+    fail "production-like project launcher was accepted"
+  fi
+  assert_grep 'refuse:project dev launcher is not proven to be Astro dev' "$out" "production-like project launcher did not refuse"
+  [ ! -s "$dir/stop.log" ] || fail "production-like project launcher still called termination"
+  pass "production-like WSL owners and project launchers refuse recovery"
+}
+
 test_task_state_lock_wait_is_bounded() {
   local dir out holder
   dir=$(make_case task-state-lock-timeout)
@@ -424,7 +458,29 @@ test_pid_or_command_change_refuses_on_immediate_reresolution() {
   fi
   assert_grep 'refuse:pid-or-command-reresolution-changed' "$out" "changed PID refusal was not reported"
   [ ! -s "$dir/stop.log" ] || fail "changed PID refusal still called termination"
+
+  write_listener_json "$dir/win-second.json" 43123 127.0.0.1 4100 node.exe \
+    'C:\Program Files\nodejs\node.exe' \
+    '"C:\Program Files\nodejs\node.exe" "C:\repos\stale checkout\node_modules\astro\astro.js" dev' \
+    creation-reused
+  if FM_WSL_MODE=none FM_WIN_SECOND_JSON="$dir/win-second.json" run_case "$dir" recover "$out"; then
+    fail "reused PID with a different creation identity was accepted"
+  fi
+  assert_grep 'refuse:pid-or-command-reresolution-changed' "$out" "creation identity change was not reported"
+  [ ! -s "$dir/stop.log" ] || fail "creation identity change still called termination"
   pass "PID or command change between observations refuses exact-PID recovery"
+}
+
+test_verify_revalidates_expected_checkout() {
+  local dir out
+  dir=$(make_case verify-checkout-revalidation)
+  out="$dir/out"
+  if FM_WSL_MODE=always FM_WIN_ALWAYS_RELAY=1 FM_MUTATE_EXPECTED_DURING_ROUTE="$dir/expected/page.txt" \
+    run_case "$dir" verify "$out"; then
+    fail "verify accepted a checkout changed during route fingerprinting"
+  fi
+  assert_grep 'reason=expected-checkout-dirty' "$out" "verify did not report the changed expected checkout"
+  pass "verify revalidates the expected checkout after route inspection"
 }
 
 test_worker_with_astro_words_refuses() {
@@ -644,8 +700,10 @@ test_active_task_refuses_without_termination
 test_active_wsl_task_refuses_recovery_and_verification
 test_multiple_wsl_owners_refuse_before_termination
 test_wsl_listener_must_remain_on_default_branch
+test_production_like_wsl_and_launcher_refuse
 test_task_state_lock_wait_is_bounded
 test_pid_or_command_change_refuses_on_immediate_reresolution
+test_verify_revalidates_expected_checkout
 test_worker_with_astro_words_refuses
 test_unknown_and_unrelated_windows_processes_refuse
 test_windows_inspection_failure_is_safe

@@ -223,8 +223,21 @@ fm_refuse_if_gate_agent
 TASK_STATE_LOCK="$STATE/.task-state.lock"
 TASK_STATE_LOCK_HELD=0
 task_state_lock_acquire() {
-  fm_lock_acquire_wait "$TASK_STATE_LOCK"
-  TASK_STATE_LOCK_HELD=1
+  local attempt=0
+  mkdir -p "$STATE" || {
+    echo "error: could not create task-state directory" >&2
+    return 1
+  }
+  while [ "$attempt" -lt 50 ]; do
+    if fm_lock_try_acquire "$TASK_STATE_LOCK"; then
+      TASK_STATE_LOCK_HELD=1
+      return 0
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  echo "error: task-state publication lock timed out" >&2
+  return 1
 }
 task_state_lock_release() {
   if [ "$TASK_STATE_LOCK_HELD" -eq 1 ]; then

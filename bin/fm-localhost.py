@@ -44,6 +44,7 @@ foreach ($Connection in $Connections) {
     process = if ($null -ne $Process) { [string]$Process.Name } else { $null }
     executable = if ($null -ne $Process) { [string]$Process.ExecutablePath } else { $null }
     command = if ($null -ne $Process) { [string]$Process.CommandLine } else { $null }
+    creation = if ($null -ne $Process -and $null -ne $Process.CreationDate) { ([datetime]$Process.CreationDate).ToUniversalTime().Ticks } else { $null }
   }
 }
 ConvertTo-Json -InputObject @($Rows) -Compress -Depth 3
@@ -56,6 +57,7 @@ $Port = [int]$args[0]
 $PidToStop = [int]$args[1]
 $ExpectedCommandHash = [string]$args[2]
 $ExpectedAstroScript = [string]$args[3]
+$ExpectedCreation = [string]$args[4]
 $Connections = @(Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object { [int]$_.LocalPort -eq $Port })
 if ($Connections.Count -lt 1) { throw 'reserved port has no Windows listener' }
 foreach ($Connection in $Connections) {
@@ -66,6 +68,8 @@ if ($null -eq $Process -or [string]$Process.Name -ieq 'wslrelay.exe') { throw 'w
 if ([string]$Process.Name -ine 'node.exe' -or [IO.Path]::GetFileName([string]$Process.ExecutablePath) -ine 'node.exe') { throw 'target is not native Windows node.exe' }
 $Command = [string]$Process.CommandLine
 if ([string]::IsNullOrWhiteSpace($Command)) { throw 'target command is unavailable' }
+$Creation = ([datetime]$Process.CreationDate).ToUniversalTime().Ticks
+if ([string]$Creation -ne $ExpectedCreation) { throw 'target process identity changed' }
 $Bytes = [Text.Encoding]::UTF8.GetBytes($Command)
 $Hash = ([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($Bytes))).Replace('-', '').ToLowerInvariant()
 if ($Hash -ne $ExpectedCommandHash) { throw 'target command changed' }
@@ -75,7 +79,10 @@ $NodePattern = '(?i)^\s*(?:"[^"]*/node\.exe"|(?:[^"\s]+/)?node\.exe)\s+'
 $AstroDevPattern = $NodePattern + '"?' + [regex]::Escape($NormalizedScript) + '"?\s+dev(?:\s|$)'
 if ($NormalizedCommand -notmatch $AstroDevPattern) { throw 'target is not the verified Astro development launcher' }
 if ($Command -match '(?i)(^|\s)(preview|build)(\s|$)' -or $Command -match '(?i)(node_env\s*=\s*production|--mode(?:=|\s+)production)') { throw 'target looks production-like' }
-Stop-Process -Id $PidToStop -ErrorAction Stop
+$BoundProcess = Get-Process -Id $PidToStop -ErrorAction Stop
+$BoundCreation = ([datetime]$BoundProcess.StartTime).ToUniversalTime().Ticks
+if ([string]$BoundCreation -ne $ExpectedCreation) { throw 'target process identity changed' }
+Stop-Process -InputObject $BoundProcess -ErrorAction Stop
 for ($i = 0; $i -lt 100; $i++) {
   if ($null -eq (Get-Process -Id $PidToStop -ErrorAction SilentlyContinue)) { 'terminated'; exit 0 }
   Start-Sleep -Milliseconds 100
@@ -123,6 +130,7 @@ class Listener:
     kernel: str
     address: str
     pid: int
+    creation: str
     process: str
     command: str
     command_raw: str
@@ -415,16 +423,13 @@ def checkout_from_windows_command(command: str, executable: str) -> Path | None:
 def classify_windows(process: str, command: str, executable: str, checkout: str = "unknown") -> str:
     lower_name = Path(process).name.lower()
     lower_executable = re.split(r"[\\/]", executable)[-1].lower() if executable else ""
-    lower_command = command.lower()
     if canonical_wslrelay_identity(process, executable):
         return "wslrelay"
     if not command.strip():
         return "unknown-command"
     if lower_name != "node.exe" or lower_executable != "node.exe":
         return "unrelated-process"
-    if re.search(r"(?:^|\s)(?:preview|build)(?:\s|$)", lower_command) or re.search(
-        r"node_env\s*=\s*production|--mode(?:=|\s+)production", lower_command
-    ):
+    if production_like_command(command):
         return "production-like"
     if astro_dev_script(command, executable, checkout):
         return "native-windows-node-astro-dev"
@@ -432,6 +437,8 @@ def classify_windows(process: str, command: str, executable: str, checkout: str 
 
 
 def classify_wsl(process: str, command: str, checkout: str = "unknown") -> str:
+    if production_like_command(command):
+        return "production-like"
     if Path(process).name.lower() in {"node", "nodejs"} and astro_dev_script(command, "", checkout):
         return "wsl-node-astro-dev"
     return "unknown-wsl-process"
@@ -535,6 +542,7 @@ def windows_listeners(port: int, state: Path) -> list[Listener]:
             raise SafeRefusal("Windows listener identity was incomplete") from exc
         if row_port != port or pid <= 0:
             raise SafeRefusal("Windows listener identity was inconsistent")
+        creation = str(row.get("creation") or "unknown")
         process = str(row.get("process") or "unknown")
         command = str(row.get("command") or "")
         executable = str(row.get("executable") or "")
@@ -545,6 +553,7 @@ def windows_listeners(port: int, state: Path) -> list[Listener]:
                 kernel="windows",
                 address=f"{row.get('address') or 'unknown'}:{port}",
                 pid=pid,
+                creation=creation,
                 process=process,
                 command=redact_command(command),
                 command_raw=command,
@@ -597,6 +606,7 @@ def wsl_listeners(port: int, state: Path) -> list[Listener]:
                 kernel="wsl",
                 address=address,
                 pid=pid,
+                creation="unknown",
                 process=process,
                 command=redact_command(command_raw),
                 command_raw=command_raw,
@@ -657,12 +667,27 @@ def expected_checkout_verdict(expected: GitInfo, expected_sha: str) -> str:
     return "ready"
 
 
+def production_like_command(command: str) -> bool:
+    if re.search(r"(?:^|\s)(?:preview|build)(?:\s|$)", command, re.IGNORECASE):
+        return True
+    if re.search(r"node_env\s*=\s*production|--mode(?:=|\s+)production", command, re.IGNORECASE):
+        return True
+    tokens = command_tokens(command)
+    lowered = [token.casefold() for token in tokens]
+    return any(
+        token in {"preview", "build", "node_env=production", "--mode=production"}
+        or (token == "--mode" and index + 1 < len(lowered) and lowered[index + 1] == "production")
+        for index, token in enumerate(lowered)
+    )
+
+
 def same_listener_identity(before: list[Listener], after: list[Listener]) -> bool:
     def identity(items: list[Listener]) -> list[tuple[object, ...]]:
         return sorted(
             (
                 item.address,
                 item.pid,
+                item.creation,
                 item.process.lower(),
                 hashlib.sha256(item.command_raw.encode("utf-8")).hexdigest(),
                 item.executable_raw.lower(),
@@ -681,6 +706,7 @@ def same_listener_identity(before: list[Listener], after: list[Listener]) -> boo
 def listener_owner_identity(listener: Listener) -> tuple[object, ...]:
     return (
         listener.pid,
+        listener.creation,
         listener.process.casefold(),
         listener.command_raw,
         listener.executable_raw.casefold(),
@@ -737,6 +763,8 @@ def recovery_verdict(inspection: Inspection, expected: GitInfo, expected_sha: st
     pids = {listener.pid for listener in inspection.windows}
     if len(pids) != 1:
         return "refuse:ambiguous-windows-ownership"
+    if any(listener.creation == "unknown" for listener in inspection.windows):
+        return "refuse:windows-process-identity-unavailable"
     if any(listener.classification == "wslrelay" for listener in inspection.windows):
         return "refuse:wslrelay-is-never-terminated"
     if any(listener.classification != "native-windows-node-astro-dev" for listener in inspection.windows):
@@ -804,6 +832,7 @@ def render_inspection(mode: str, project: Path, port: int, expected_sha: str, ex
                 owner_kernel=listener.kernel,
                 address=listener.address,
                 pid=listener.pid,
+                creation=listener.creation,
                 process=listener.process,
                 command=listener.command,
                 checkout=listener.git.checkout,
@@ -855,7 +884,7 @@ def launcher_command(project: Path, port: int) -> list[str]:
         tokens = shlex.split(script) if isinstance(script, str) else []
     except ValueError as exc:
         raise SafeRefusal("project dev launcher is not proven to be Astro dev") from exc
-    if not isinstance(script, str) or re.search(r"[\x00-\x1f\x7f;&|<>$`\\]", script):
+    if not isinstance(script, str) or re.search(r"[\x00-\x1f\x7f;&|<>$`\\]", script) or production_like_command(script):
         raise SafeRefusal("project dev launcher is not proven to be Astro dev")
     command_tokens = tokens[1:] if tokens[:1] == ["npx"] else tokens
     is_astro_dev = (
@@ -871,22 +900,22 @@ def launcher_command(project: Path, port: int) -> list[str]:
     return [npm, "run", "dev", "--", "--host", "0.0.0.0", "--port", str(port)]
 
 
-def revalidated_expected_checkout(project: Path, expected: GitInfo, expected_sha: str) -> str:
+def revalidated_expected_checkout(project: Path, expected: GitInfo, expected_sha: str) -> tuple[GitInfo, str]:
     current = git_info(project)
     verdict = expected_checkout_verdict(current, expected_sha)
     if verdict != "ready":
-        return verdict
+        return current, verdict
     if current.checkout != expected.checkout or current.source != expected.source:
-        return "refuse:expected-checkout-identity-changed"
-    return "ready"
+        return current, "refuse:expected-checkout-identity-changed"
+    return current, "ready"
 
 
 def launch_expected(project: Path, port: int, expected: GitInfo, expected_sha: str, evidence: Path) -> OwnedLaunch:
-    verdict = revalidated_expected_checkout(project, expected, expected_sha)
+    _, verdict = revalidated_expected_checkout(project, expected, expected_sha)
     if verdict != "ready":
         raise SafeRefusal(verdict.removeprefix("refuse:"))
     argv = launcher_command(project, port)
-    verdict = revalidated_expected_checkout(project, expected, expected_sha)
+    _, verdict = revalidated_expected_checkout(project, expected, expected_sha)
     if verdict != "ready":
         raise SafeRefusal(verdict.removeprefix("refuse:"))
     log_path = evidence.with_suffix(".launcher.log")
@@ -982,6 +1011,8 @@ def verified_pair(inspection: Inspection, expected: GitInfo, expected_sha: str) 
         return False, "wsl-inspection-unavailable"
     if associated_tasks(inspection.windows, inspection.wsl):
         return False, "active-firstmate-task-associated"
+    if any(item.creation == "unknown" for item in inspection.windows):
+        return False, "windows-process-identity-unavailable"
     windows = consistent_listener_owner(inspection.windows)
     if windows is None or any(not canonical_wslrelay_identity(item.process, item.executable_raw) for item in windows):
         return False, "windows-owner-is-not-wslrelay"
@@ -1016,11 +1047,12 @@ def post_stop_restart_verdict(inspection: Inspection, expected: GitInfo, expecte
 
 
 def verify(project: Path, port: int, expected_sha: str, expected: GitInfo, state: Path, *, render: bool = True) -> bool:
-    if expected_checkout_verdict(expected, expected_sha) != "ready":
+    _, checkout_verdict = revalidated_expected_checkout(project, expected, expected_sha)
+    if checkout_verdict != "ready":
         inspection = inspect_system(port, state)
         if render:
             render_inspection("verify", project, port, expected_sha, expected, inspection)
-            emit("verification", verdict="refuse", reason=expected_checkout_verdict(expected, expected_sha))
+            emit("verification", verdict="refuse", reason=checkout_verdict)
         return False
     inspection = inspect_system(port, state)
     pair_ok, reason = verified_pair(inspection, expected, expected_sha)
@@ -1028,6 +1060,12 @@ def verify(project: Path, port: int, expected_sha: str, expected: GitInfo, state
         if render:
             render_inspection("verify", project, port, expected_sha, expected, inspection)
             emit("verification", verdict="refuse", reason=reason)
+        return False
+    _, checkout_verdict = revalidated_expected_checkout(project, expected, expected_sha)
+    if checkout_verdict != "ready":
+        if render:
+            render_inspection("verify", project, port, expected_sha, expected, inspection)
+            emit("verification", verdict="refuse", reason=checkout_verdict)
         return False
     url = f"http://localhost:{port}/"
     try:
@@ -1044,7 +1082,8 @@ def verify(project: Path, port: int, expected_sha: str, expected: GitInfo, state
     )
     final = inspect_system(port, state)
     final_pair_ok, final_reason = verified_pair(final, expected, expected_sha)
-    verification_ok = pair_ok and final_pair_ok and fingerprints_match
+    _, final_checkout_verdict = revalidated_expected_checkout(project, expected, expected_sha)
+    verification_ok = pair_ok and final_pair_ok and fingerprints_match and final_checkout_verdict == "ready"
     if render:
         render_inspection("verify", project, port, expected_sha, expected, final)
         emit("route", origin_kernel="wsl", **wsl_fingerprint)
@@ -1052,12 +1091,17 @@ def verify(project: Path, port: int, expected_sha: str, expected: GitInfo, state
         emit(
             "verification",
             verdict="pass" if verification_ok else "refuse",
-            reason="pair-and-route-fingerprints-match" if verification_ok else (final_reason if not final_pair_ok else (reason if not pair_ok else "route-fingerprint-mismatch")),
+            reason=(
+                "pair-and-route-fingerprints-match"
+                if verification_ok
+                else (final_checkout_verdict.removeprefix("refuse:") if final_checkout_verdict != "ready" else (final_reason if not final_pair_ok else (reason if not pair_ok else "route-fingerprint-mismatch")))
+            ),
         )
     return verification_ok
 
 
 def termination_boundary_listener(
+    project: Path,
     listener: Listener,
     port: int,
     expected: GitInfo,
@@ -1065,7 +1109,10 @@ def termination_boundary_listener(
     state: Path,
 ) -> Listener:
     boundary = inspect_system(port, state)
-    if recovery_verdict(boundary, expected, expected_sha) != "eligible":
+    current, checkout_verdict = revalidated_expected_checkout(project, expected, expected_sha)
+    if checkout_verdict != "ready":
+        raise SafeRefusal(checkout_verdict.removeprefix("refuse:"))
+    if recovery_verdict(boundary, current, expected_sha) != "eligible":
         raise SafeRefusal("pid-or-command-reresolution-changed")
     boundary_windows = consistent_listener_owner(boundary.windows)
     if boundary_windows is None or any(listener_owner_identity(item) != listener_owner_identity(listener) for item in boundary_windows):
@@ -1073,14 +1120,16 @@ def termination_boundary_listener(
     return boundary_windows[0]
 
 
-def terminate_exact(listener: Listener, port: int, expected: GitInfo, expected_sha: str, state: Path) -> None:
-    listener = termination_boundary_listener(listener, port, expected, expected_sha, state)
+def terminate_exact(project: Path, listener: Listener, port: int, expected: GitInfo, expected_sha: str, state: Path) -> None:
+    listener = termination_boundary_listener(project, listener, port, expected, expected_sha, state)
     if listener.classification != "native-windows-node-astro-dev" or Path(listener.process).name.lower() != "node.exe":
         raise SafeRefusal("exact PID target is no longer a proven native Windows Astro dev server")
     if Path(listener.process).name.lower() == "wslrelay.exe":
         raise SafeRefusal("wslrelay.exe is never a termination target")
     if listener.git.checkout == "unknown":
         raise SafeRefusal("exact PID target checkout is unavailable")
+    if listener.creation == "unknown":
+        raise SafeRefusal("exact PID target process identity is unavailable")
     astro_script = astro_dev_script(listener.command_raw, listener.executable_raw, listener.git.checkout)
     if astro_script is None:
         raise SafeRefusal("exact PID target Astro script path is unavailable")
@@ -1088,12 +1137,16 @@ def terminate_exact(listener: Listener, port: int, expected: GitInfo, expected_s
     if expected_script == "unknown":
         raise SafeRefusal("exact PID target Astro script path is unavailable")
     command_hash = hashlib.sha256(listener.command_raw.encode("utf-8")).hexdigest()
-    output = run_powershell(TERMINATE_PS, str(port), str(listener.pid), command_hash, expected_script, timeout=20).strip()
+    output = run_powershell(TERMINATE_PS, str(port), str(listener.pid), command_hash, expected_script, listener.creation, timeout=20).strip()
     if output != "terminated":
         raise SafeRefusal("exact PID termination was not confirmed")
 
 
 def recover_locked(project: Path, port: int, expected_sha: str, expected: GitInfo, state: Path) -> bool:
+    _, checkout_verdict = revalidated_expected_checkout(project, expected, expected_sha)
+    if checkout_verdict != "ready":
+        emit("recovery-result", verdict=checkout_verdict, mutated="no")
+        return False
     before = inspect_system(port, state)
     before_lines = render_inspection("recover", project, port, expected_sha, expected, before)
     verdict = recovery_verdict(before, expected, expected_sha)
@@ -1121,13 +1174,17 @@ def recover_locked(project: Path, port: int, expected_sha: str, expected: GitInf
         emit("immediate-recheck", verdict=immediate_verdict, pid=target.pid, identity="unchanged"),
         emit("mutation-recheck", verdict=mutation_verdict, pid=target.pid, identity="unchanged"),
     ]
+    _, checkout_verdict = revalidated_expected_checkout(project, expected, expected_sha)
+    if checkout_verdict != "ready":
+        emit("recovery-result", verdict=checkout_verdict, mutated="no")
+        return False
     try:
         evidence = write_evidence(state, project, port, target.pid, evidence_lines)
     except OSError:
         emit("recovery-result", verdict="refuse:private-evidence-write-failed", mutated="no")
         return False
     try:
-        terminate_exact(mutation.windows[0], port, expected, expected_sha, state)
+        terminate_exact(project, mutation.windows[0], port, expected, expected_sha, state)
     except SafeRefusal as exc:
         emit(
             "recovery-result",
