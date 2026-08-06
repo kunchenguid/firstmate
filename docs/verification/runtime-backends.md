@@ -389,7 +389,7 @@ ok - mitigation: every in-operation sample preserved exact focus while the doome
 ok - mitigation: no explicit close and no corrective focus were needed on the defective release
 ok - fallback: a doomed pane holding a persistent child exhausts the proof and takes the plain explicit close
 ok - fallback on a defective release: a bounded wrong-focus window of 4 samples was fully restored to the anchor
-ok - version floor: herdr 0.7.5 protocol 17 steals focus and is classified below the floor
+ok - version floor: herdr 0.7.5 protocol 17 remains conservatively below the floor with steal_live=1
 ok - version floor: an unconfigured home falls back flat on herdr 0.7.5 and the explicit opt-in still projects
 evidence: herdr=0.7.5 protocol=17 steal_live=1 floor_verdict=1 default-session-tripwire=armed
 ```
@@ -400,8 +400,8 @@ Observed output on Herdr 0.8.0:
 ok - old path note: this Herdr release preserves focus across the explicit close; continuing with outcome-only assertions
 ok - mitigation: every in-operation sample preserved exact focus while the doomed workspace was removed
 ok - fallback: a doomed pane holding a persistent child exhausts the proof and takes the plain explicit close
-ok - fallback at or above the floor: the plain explicit close preserved exact focus throughout
-ok - version floor: herdr 0.8.0 protocol 19 preserves focus and is classified at or above the floor
+ok - fallback on a focus-preserving release: the plain explicit close preserved exact focus throughout
+ok - version floor: herdr 0.8.0 protocol 19 is at or above the floor and preserves focus
 ok - version floor: an unconfigured home stays projected on herdr 0.8.0 and the explicit opt-in agrees
 evidence: herdr=0.8.0 protocol=19 steal_live=0 floor_verdict=0 default-session-tripwire=armed
 ```
