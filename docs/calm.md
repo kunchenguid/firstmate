@@ -1,7 +1,9 @@
-# Pi Calm mode
+# Calm mode
 
-Calm is a Pi-only conversation presentation toggle.
-It is off by default, and the last `/calm` choice persists for the effective Firstmate home across Pi session starts and resumes.
+Calm is a home-local conversation presentation toggle for Pi and Claude Code.
+It is off by default, and the last `/calm` choice persists for the effective Firstmate home across Pi and Claude session lifecycle transitions.
+
+## Pi
 
 While Calm is active and an agent run is under way, Calm hides Pi's built-in `Working...` row and shows a small two-row animated boat in its place, and no separate Calm status row is added.
 The water fills the usable width in standard ANSI blue and the complete boat is standard ANSI yellow.
@@ -35,7 +37,7 @@ The collapsed-thinking and operational-user-row presentation adapters probe the 
 If Pi removes one of those seams, Calm logs a diagnostic naming the unavailable adapter and skips only that adapter; `/calm`, the other adapter, and unrelated Pi extensions remain available.
 
 [`calm-mode-feasibility.md`](calm-mode-feasibility.md) owns the version-scoped renderer taxonomy and empirical evidence.
-[`configuration.md`](configuration.md#pi-calm-preference-configcalm) owns the persisted preference file and resolution rules.
+[`configuration.md`](configuration.md#calm-preference-configcalm) owns the persisted preference file and resolution rules.
 `.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy, `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter, and `.pi/extensions/lib/fm-calm-working-ship.ts` owns the animated working presentation.
 
 Regression entry points:
@@ -44,4 +46,24 @@ Regression entry points:
 tests/fm-calm-pi-extension.test.sh
 tests/fm-pi-primary-types.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
+```
+
+## Claude Code
+
+Claude Code exposes no supported project transcript renderer, so Calm changes Claude's response presentation rather than terminal rows.
+When Calm is active, its tracked SessionStart hook asks Claude to keep captain-facing updates outcome-first, concise, and free of incidental progress narration while preserving all operational instructions, safety boundaries, and material technical facts.
+That hook reloads the persisted preference on Claude startup, resume, clear, compact, and fork transitions.
+When Calm is inactive, the hook explicitly supersedes an earlier Calm-active instruction that may remain in a resumed transcript.
+The project-native `/calm` command atomically toggles the effective home preference and applies the matching presentation for the rest of the current session.
+The tracked `Firstmate Calm` output style is available through Claude's `/config` output-style picker and preserves Claude Code's coding instructions.
+Output-style selection takes effect at the next Claude session start, but the SessionStart hook honors the persisted `config/calm` preference even when that style is not selected.
+Calm does not alter Claude's tools, permissions, task execution, model context, session storage, or terminal transcript beyond the ordinary `/calm` confirmation.
+
+`.claude/commands/calm.md` owns the native command prompt, `.claude/output-styles/firstmate-calm.md` owns the optional system-prompt presentation style, and `bin/fm-claude-calm-nudge.sh` owns persisted-preference delivery at Claude session start.
+
+Regression entry points:
+
+```sh
+tests/fm-calm-claude-adapter.test.sh
+FM_CLAUDE_CALM_LIVE_E2E=1 tests/fm-calm-claude-adapter-live-e2e.test.sh
 ```

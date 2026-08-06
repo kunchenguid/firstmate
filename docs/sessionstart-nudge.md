@@ -7,7 +7,8 @@ The Ahoy skill owns the rule that this marked operational input is never a capta
 
 ## Shared wrapper and safety
 
-`bin/fm-sessionstart-nudge.sh` is the single command every harness adapter invokes.
+`bin/fm-sessionstart-nudge.sh` is the single command every harness adapter invokes for the session-start digest nudge.
+Claude additionally invokes `bin/fm-claude-calm-nudge.sh` to deliver its independent persisted presentation preference.
 It sources `bin/fm-gate-refuse-lib.sh` and stays silent for a no-mistakes gate agent identified by `NO_MISTAKES_GATE` or a `.no-mistakes/repos/*.git` git-common-dir.
 It shares `bin/fm-primary-scope-lib.sh` with `bin/fm-turnend-guard.sh`, so the hooks use one primary-detection owner.
 The Shared Predicate section of [`turnend-guard.md`](turnend-guard.md#shared-predicate) owns marker validation, plain-checkout detection, and required Firstmate-shaped paths.
@@ -20,7 +21,7 @@ Every path exits 0, including malformed state and adapter errors, because a Clau
 
 | Harness | Tracked transport | Current compatibility |
 | --- | --- | --- |
-| Claude | `.claude/settings.json` registers `SessionStart` for `startup`, `resume`, and `clear`, excludes `compact`, and invokes the wrapper through `CLAUDE_PROJECT_DIR`. | Native stdout context injection is supported. |
+| Claude | `.claude/settings.json` keeps the operational digest on `startup`, `resume`, and `clear`, while a separate Calm registration reloads the persisted presentation preference on `startup`, `resume`, `clear`, `compact`, and `fork`; both invoke their wrappers through `CLAUDE_PROJECT_DIR`. | Native stdout context injection is supported. |
 | Codex | `.codex/hooks.json` anchors to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and executes the wrapper. | Native stdout context injection is supported. |
 | OpenCode | `.opencode/plugins/fm-primary-sessionstart-nudge.js` listens for `session.created`, runs once per session id, and calls `client.session.promptAsync` only when the wrapper prints a nudge. | Interactive TUI delivery is supported; headless `opencode run` is intentionally fail-open because the process can exit before the queued turn. |
 | Pi / pi-signed | `.pi/extensions/fm-primary-turnend-guard.ts` handles `session_start` reasons `startup`, `new`, and `resume`, then injects the wrapper output with `pi.sendMessage`. | The custom message reaches model context without racing an initial positional prompt. |
