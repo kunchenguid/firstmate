@@ -135,7 +135,7 @@ SH
 }
 
 test_mainthread_cursor_session_is_identified() {
-  local dir fakebin got
+  local dir fakebin got binary
   dir="$TMP_ROOT/mainthread-cursor"
   fakebin=$(fm_fakebin "$dir")
   mkdir -p "$dir/state"
@@ -150,9 +150,10 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
+binary=${FM_TEST_CURSOR_BIN:-cursor-agent}
 case "$pid:$field" in
   710:comm=) printf '%s\n' MainThread ;;
-  710:args=) printf '%s\n' '/opt/cursor-agent/versions/current/cursor-agent --force' ;;
+  710:args=) printf '/opt/%s/versions/current/%s --force\n' "$binary" "$binary" ;;
   710:ppid=) printf '%s\n' 1 ;;
   *:comm=) printf '%s\n' bash ;;
   *:args=) printf '%s\n' 'bash tests/run.sh' ;;
@@ -161,12 +162,16 @@ esac
 SH
   chmod +x "$fakebin/ps"
   printf '710\n' > "$dir/state/.lock"
-  got=$(lib_eval "$fakebin" 'fm_harness_ancestry_pid') || fail "MainThread Cursor session was not found in ancestry"
-  [ "$got" = 710 ] || fail "MainThread Cursor ancestry resolved '$got', expected 710"
-  lib_eval "$fakebin" 'fm_harness_pid_alive 710' || fail "MainThread Cursor session was not live"
-  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
-    || fail "MainThread Cursor session did not own its lock"
-  pass "session-lock: Cursor MainThread ancestry identifies and owns its session lock"
+  for binary in cursor-agent agent; do
+    got=$(FM_TEST_CURSOR_BIN="$binary" lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+      || fail "$binary MainThread Cursor session was not found in ancestry"
+    [ "$got" = 710 ] || fail "$binary MainThread Cursor ancestry resolved '$got', expected 710"
+    FM_TEST_CURSOR_BIN="$binary" lib_eval "$fakebin" 'fm_harness_pid_alive 710' \
+      || fail "$binary MainThread Cursor session was not live"
+    FM_TEST_CURSOR_BIN="$binary" lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+      || fail "$binary MainThread Cursor session did not own its lock"
+  done
+  pass "session-lock: Cursor MainThread ancestry identifies primary and legacy alias"
 }
 
 test_harness_beyond_a_gap_never_owns_the_lock() {
