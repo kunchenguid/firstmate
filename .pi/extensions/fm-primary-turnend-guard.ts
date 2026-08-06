@@ -21,8 +21,25 @@ const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const marker = `${state}/.pi-turnend-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 
+// Windows cannot exec a .sh directly (spawn EFTYPE) and has no ps; route
+// scripts through Git Bash and ancestry lookups through CIM there, keeping
+// the direct exec on every other platform.
+const isWindows = process.platform === "win32";
+
+function spawnShellScript(script: string, args: string[], options: Parameters<typeof spawn>[2]) {
+  if (isWindows) return spawn("bash", [script.replace(/\\/g, "/"), ...args], options);
+  return spawn(script, args, options);
+}
+
 function parentPid(pid: string): string {
-  const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
+  if (!/^[0-9]+$/.test(pid)) return "";
+  const result = isWindows
+    ? spawnSync(
+        "powershell",
+        ["-NoProfile", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").ParentProcessId`],
+        { encoding: "utf8" },
+      )
+    : spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
   if (result.status !== 0) return "";
   return result.stdout.trim();
 }
@@ -71,7 +88,7 @@ const sessionstartTruncatedMarker =
 
 function runSessionstartHook(source: string): Promise<string> {
   return new Promise((resolveResult) => {
-    const child = spawn(`${root}/bin/fm-sessionstart-run.sh`, ["--source", source], {
+    const child = spawnShellScript(`${root}/bin/fm-sessionstart-run.sh`, ["--source", source], {
       stdio: ["ignore", "pipe", "ignore"],
     });
     const chunks: Buffer[] = [];
@@ -124,7 +141,7 @@ async function injectSessionstart(pi: ExtensionAPI, source: string): Promise<voi
 
 function runGuard(): Promise<{ code: number; stderr: string }> {
   return new Promise((resolveResult) => {
-    const child = spawn(`${root}/bin/fm-turnend-guard.sh`, {
+    const child = spawnShellScript(`${root}/bin/fm-turnend-guard.sh`, [], {
       stdio: ["pipe", "ignore", "pipe"],
     });
     let stderr = "";
@@ -146,7 +163,7 @@ function runGuard(): Promise<{ code: number; stderr: string }> {
 // script owns its own decision and is inert outside the real primary checkout.
 function runChecker(script: string, command: string): Promise<{ code: number; stderr: string }> {
   return new Promise((resolveResult) => {
-    const child = spawn(`${root}/bin/${script}`, ["--command", command], {
+    const child = spawnShellScript(`${root}/bin/${script}`, ["--command", command], {
       stdio: ["ignore", "ignore", "pipe"],
     });
     let stderr = "";

@@ -110,8 +110,17 @@ function positiveInteger(name: string, fallback: number): number {
   return Math.floor(value);
 }
 
+// Windows has no ps; route ancestry lookups through CIM there, keeping ps on
+// every other platform.
 function parentPid(pid: string): string {
-  const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
+  if (!/^[0-9]+$/.test(pid)) return "";
+  const result = process.platform === "win32"
+    ? spawnSync(
+        "powershell",
+        ["-NoProfile", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").ParentProcessId`],
+        { encoding: "utf8" },
+      )
+    : spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
   if (result.status !== 0) return "";
   return result.stdout.trim();
 }
