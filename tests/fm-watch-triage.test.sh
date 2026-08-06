@@ -1096,8 +1096,16 @@ test_wedge_escalation_resets_when_pane_becomes_active() {
 # how long a busy pane may run with no completed turn (state/<id>.turn-ended, or
 # the task's spawn record before any turn completes); past the bound the SAME
 # wedge_timer_check already used for a provably-working non-busy stale takes
-# over, so escalation reuses the identical stale reason, escalation counter, and
-# demand-deep-inspection marker - never an automatic interrupt or restart.
+# over. 2026-08-05 k3-256k incident: a legitimate long silent turn (a slow
+# high-effort model thinking with no pane output) tripped that bound and then
+# re-escalated every STALE_ESCALATE_SECS for the whole turn, all false alarms,
+# because the timer never re-read the busy signal at escalation time. The wedge
+# timer now gates escalation on the current poll's busy verdict: a still-busy
+# pane below the BUSY_TURN_HARD_MAX_SECS no-completed-turn ceiling is
+# suppressed (no wake, quiet recheck), while one past the ceiling escalates
+# with the existing reason, escalation counter, and demand-deep-inspection
+# marker, then stays quiet for one hard interval - never an automatic
+# interrupt or restart.
 
 test_busy_pane_below_turn_age_bound_is_absorbed() {
   local dir state fakebin out capture_file window key sig pid
@@ -1210,6 +1218,69 @@ test_busy_pane_changing_hash_escalates_past_turn_age_bound() {
   pass "a busy worker whose pane hash changes every poll still escalates once its completed-turn age reaches the bound"
 }
 
+# --- busy pane below the hard ceiling: the wedge escalation is suppressed ----
+# The 2026-08-05 k3-256k false alarm: a legitimate long silent turn (busy pane,
+# no completed turn past BUSY_TURN_MAX_SECS, pane hash static while the model
+# thinks) used to wake firstmate every STALE_ESCALATE_SECS because the wedge
+# timer never re-read the busy signal at escalation time. Now the escalation is
+# gated on the current poll's busy verdict: still busy below the
+# BUSY_TURN_HARD_MAX_SECS no-completed-turn ceiling means no wake, no counter
+# bump, and the wedge timer is preserved; the unknown/idle signal pole keeps
+# escalating (pinned by the provably-working stale tests above, whose fake
+# crew carries no busy record at all).
+
+test_busy_pane_below_hard_ceiling_suppresses_wedge_escalation() {
+  local dir state fakebin out capture_file window key pane_hash sig pid i
+  dir=$(make_case busy-below-hard-ceiling); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-silent"
+  printf 'Working...' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-silent.meta"
+  record_pi_busy "$state" busy-silent
+  printf 'working: setup complete\n' > "$state/busy-silent.status"
+  sig=$(seen_sig "$state/busy-silent.status"); printf '%s' "$sig" > "$state/.seen-busy-silent_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Working...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # The turn has run past the soft bound (60s) but is nowhere near the hard
+  # ceiling, and the wedge timer is already past the escalation threshold -
+  # exactly the state that used to wake firstmate every 240s.
+  set_mtime $(( $(date +%s) - 100 )) "$state/busy-silent.turn-ended"
+  prime_turnend_seen "$state/busy-silent.turn-ended"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+
+  # The crew is provably working throughout, so the turn-end signal the
+  # completion touch below produces is absorbed instead of surfacing.
+  export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy (pi-ext)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=60 FM_BUSY_TURN_HARD_MAX_SECS=999999 \
+    FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a busy pane below the hard ceiling was escalated instead of suppressed: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a suppressed busy wedge escalation printed a wake reason"
+  [ ! -s "$state/.wake-queue" ] || fail "a suppressed busy wedge escalation enqueued a wake"
+  [ -s "$state/.stale-since-$key" ] || fail "a suppressed busy wedge escalation lost the wedge timer"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "a suppressed busy wedge escalation bumped the escalation counter"
+  [ -e "$state/.wedge-suppressed-$key" ] || fail "a suppressed busy wedge escalation did not record the suppression marker"
+
+  # When the turn finally completes, the next poll clears the whole episode.
+  touch "$state/busy-silent.turn-ended"
+  i=0
+  while [ "$i" -lt 50 ] && { [ -e "$state/.stale-since-$key" ] || [ -e "$state/.wedge-suppressed-$key" ]; }; do
+    sleep 0.2
+    i=$((i + 1))
+  done
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "a completed turn did not clear the suppressed wedge timer"; }
+  [ ! -e "$state/.wedge-suppressed-$key" ] || { reap "$pid"; fail "a completed turn did not clear the suppression marker"; }
+  [ ! -s "$out" ] || fail "a completed turn after suppression printed a wake reason"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a busy pane below the hard no-turn ceiling suppresses the wedge escalation, and a completed turn clears the episode"
+}
+
 test_busy_pane_turn_end_touch_resets_age() {
   local dir state fakebin out capture_file window key pane_hash sig pid
   dir=$(make_case busy-turn-end-resets-age); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1226,6 +1297,7 @@ test_busy_pane_turn_end_touch_resets_age() {
   # A wedge is already mid-escalation, as if several over-age polls already ran.
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   printf '1\n' > "$state/.wedge-escalations-$key"
+  : > "$state/.wedge-suppressed-$key"
   # The worker's most recent turn just completed: touching turn-ended resets age.
   touch "$state/busy-reset.turn-ended"
   prime_turnend_seen "$state/busy-reset.turn-ended"
@@ -1240,6 +1312,7 @@ test_busy_pane_turn_end_touch_resets_age() {
   [ ! -s "$out" ] || fail "a freshly completed turn on a busy pane printed a wake reason"
   [ ! -e "$state/.stale-since-$key" ] || fail "a freshly completed turn did not clear the wedge timer"
   [ ! -e "$state/.wedge-escalations-$key" ] || fail "a freshly completed turn did not clear the escalation counter"
+  [ ! -e "$state/.wedge-suppressed-$key" ] || fail "a freshly completed turn did not clear the suppression marker"
   reap "$pid"
   pass "touching a busy worker's completed-turn marker resets the age and prevents an old-age escalation"
 }
@@ -1274,6 +1347,10 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection() {
   n=1
   while [ "$n" -le 3 ]; do
     echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    # A still-busy hard-ceiling escalation stays quiet for one hard interval
+    # (.wedge-suppressed-<key>); remove the marker between rounds to simulate
+    # that interval elapsing so the rounds escalate consecutively.
+    rm -f "$state/.wedge-suppressed-$key"
     : > "$out"
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
       FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -1335,6 +1412,60 @@ test_busy_pane_default_turn_age_bound_is_3600s() {
   [ -s "$state/.stale-since-$key" ] || fail "a 66-minute-old completed turn did not start a wedge timer under the default bound (default is not 3600s)"
   reap "$pid"
   pass "the production default busy-turn-age bound is 3600s (5min under does not wedge, 66min over does)"
+}
+
+# Behavioral proof that the production default (no FM_BUSY_TURN_HARD_MAX_SECS
+# override anywhere in this env) is 21600s: a still-busy pane 5 hours without a
+# completed turn must be SUPPRESSED at the wedge threshold, while one 7 hours
+# without a completed turn must escalate with the hard-ceiling reason -
+# bracketing the default around 21600 without waiting a literal six hours.
+test_busy_pane_default_hard_turn_age_ceiling_is_21600s() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case busy-default-hard-ceiling); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-hard-default"
+  printf 'Working...' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-hard-default.meta"
+  record_pi_busy "$state" busy-hard-default
+  printf 'working: setup complete\n' > "$state/busy-hard-default.status"
+  sig=$(seen_sig "$state/busy-hard-default.status"); printf '%s' "$sig" > "$state/.seen-busy-hard-default_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Working...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  # 5 hours without a completed turn: past the soft bound and the wedge
+  # threshold, but below the hard ceiling - suppressed, no wake.
+  set_mtime $(( $(date +%s) - 18000 )) "$state/busy-hard-default.turn-ended"
+  prime_turnend_seen "$state/busy-hard-default.turn-ended"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a 5-hour-old busy turn escalated under the default hard ceiling: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a 5-hour-old busy turn printed a wake reason under the default hard ceiling"
+  [ -e "$state/.wedge-suppressed-$key" ] || fail "a 5-hour-old busy turn was not suppressed under the default hard ceiling"
+  reap "$pid"
+
+  # 7 hours without a completed turn: past the hard ceiling - escalates with
+  # the hung-turn reason even though the pane is still busy.
+  set_mtime $(( $(date +%s) - 25200 )) "$state/busy-hard-default.turn-ended"
+  prime_turnend_seen "$state/busy-hard-default.turn-ended"
+  rm -f "$state/.wedge-suppressed-$key"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a 7-hour-old busy turn did not escalate past the default hard ceiling"
+  grep -F "stale: $window" "$out" >/dev/null || fail "hard-ceiling escalation did not print the stale wake"
+  grep -F "busy with no completed turn past the hard 21600s ceiling" "$out" >/dev/null \
+    || fail "hard-ceiling escalation did not carry the hung-turn reason (default is not 21600s): $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null || fail "hard-ceiling escalation did not flag a possible wedge"
+  pass "the production default busy-turn hard ceiling is 21600s (5h suppressed, 7h escalates with the hung-turn reason)"
 }
 
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
@@ -1820,9 +1951,11 @@ test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
+test_busy_pane_below_hard_ceiling_suppresses_wedge_escalation
 test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
+test_busy_pane_default_hard_turn_age_ceiling_is_21600s
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
