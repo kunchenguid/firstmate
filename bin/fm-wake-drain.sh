@@ -73,31 +73,15 @@ acknowledge_inactive_outcomes() { # <mode> <newline-separated-fingerprints>
   done <<< "$fingerprints"
 }
 
-# Print the consolidated OPEN DECISIONS section: every still-open
-# needs-decision/blocked, fleet-wide, folded from the durable status logs by
-# fm-classify-lib.sh's status_open_decisions fold (via its cursor-backed
-# scan_open_decisions_incremental wrapper) rather than from the latest-line
-# annotations above, so a decision buried under later unrelated appends cannot
-# be silently missed. Runs on every drain - including the empty-queue fast path
-# - because the decision can still be open even when nothing new is queued for
-# its task this turn. The incremental wrapper bounds this scan's cost to bytes
-# appended to each task's status log since the LAST drain, not that log's whole
-# lifetime, while still never dropping an old buried decision (see
-# fm-classify-lib.sh's "incremental (cursor-backed) open-decisions fold").
-# Bounded and silent: prints nothing when no decision is open, which is the
-# common case.
-print_open_decisions_section() {
-  local open task key verb note line item_bytes=220 global_bytes=4000
-  local output='' used=0 shown=0 omitted=0 bytes
+# Print pre-formatted rows read on stdin under <header>, truncating any over-long
+# row and dropping rows past the section's global byte cap. Prints NOTHING at all
+# when stdin holds no row, which is the common case for both sections below.
+print_capped_section() {  # <header> <omitted-label> <item-bytes> <global-bytes>
+  local header=$1 label=$2 item_bytes=$3 global_bytes=$4
+  local line output='' used=0 shown=0 omitted=0 bytes
 
-  open=$(scan_open_decisions_incremental "$STATE") || return 0
-  [ -n "$open" ] || return 0
-
-  while IFS=$(printf '\t') read -r task key verb note; do
-    [ -n "$task" ] || continue
-    line="$task"
-    [ "$key" = default ] || line="$line [key=$key]"
-    line="$line $verb: $note"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
     # The shared cut counts the item's own characters; the trailing newline this
     # section's global budget also pays for is this caller's, so the per-item
     # allowance passed down is one short of the cap.
@@ -112,21 +96,94 @@ print_open_decisions_section() {
 "
     used=$((used + bytes))
     shown=$((shown + 1))
+  done
+
+  [ "$shown" -gt 0 ] || [ "$omitted" -gt 0 ] || return 0
+  printf '%s\n' "$header"
+  printf '%s' "$output"
+  if [ "$omitted" -gt 0 ]; then
+    printf '%s: %d more omitted (byte cap)\n' "$label" "$omitted"
+  fi
+}
+
+# Emit one row per still-open needs-decision/blocked, fleet-wide, folded from the
+# durable status logs by fm-classify-lib.sh's status_open_decisions fold (via its
+# cursor-backed scan_open_decisions_incremental wrapper) rather than from the
+# latest-line annotations above, so a decision buried under later unrelated
+# appends cannot be silently missed. Runs on every drain - including the
+# empty-queue fast path - because the decision can still be open even when
+# nothing new is queued for its task this turn. The incremental wrapper bounds
+# this scan's cost to bytes appended to each task's status log since the LAST
+# drain, not that log's whole lifetime, while still never dropping an old buried
+# decision (see fm-classify-lib.sh's "incremental (cursor-backed) open-decisions
+# fold"). The same single pass fills <anomaly-sink> for the section below.
+print_open_decision_rows() {  # <anomaly-sink>
+  local open task key verb note line
+
+  open=$(scan_open_decisions_incremental "$STATE" "$1") || return 0
+  [ -n "$open" ] || return 0
+
+  while IFS=$(printf '\t') read -r task key verb note; do
+    [ -n "$task" ] || continue
+    line="$task"
+    [ "$key" = default ] || line="$line [key=$key]"
+    printf '%s %s: %s\n' "$line" "$verb" "$note"
   done <<EOF
 $open
 EOF
+}
 
-  [ "$shown" -gt 0 ] || [ "$omitted" -gt 0 ] || return 0
-  printf 'OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):\n'
-  printf '%s' "$output"
-  if [ "$omitted" -gt 0 ]; then
-    printf 'OPEN DECISIONS: %d more omitted (byte cap)\n' "$omitted"
+# Emit one row per status line the fold above refused or had to repair. These
+# are writer bugs on a safety surface: a refused line looks closed to whoever
+# wrote it while the open set keeps crying wolf, and a close for a key nothing
+# opened is the only trace that the OPENING line was filed under another key.
+# Reporting them here makes the bad writer visible on the next wake instead of
+# after the next lost decision. Because the incremental fold reads each appended
+# line exactly once, each anomaly is reported once, not on every drain.
+print_anomaly_rows() {  # <anomaly-sink>
+  local sink=$1 task kind key line
+
+  [ -s "$sink" ] || return 0
+  while IFS=$(printf '\t') read -r task kind key line; do
+    [ -n "$kind" ] || continue
+    case "$kind" in
+      malformed)
+        printf '%s NOT APPLIED - the verb is followed by prose, not a [key=<slug>] token: %s\n' \
+          "$task" "$line"
+        ;;
+      misplaced-key)
+        printf '%s applied to [key=%s] - the key token belongs BEFORE the colon: %s\n' \
+          "$task" "$key" "$line"
+        ;;
+      unmatched-close)
+        printf '%s closes [key=%s], which was never opened - the opening line likely named another key: %s\n' \
+          "$task" "$key" "$line"
+        ;;
+    esac
+  done < "$sink"
+}
+
+# Print both per-drain fold sections from one status-log pass.
+print_decision_sections() {
+  local sink open_rows
+  sink="$STATE/.decision-anomalies.$(fm_current_pid)"
+
+  rm -f "$sink"
+  open_rows=$(print_open_decision_rows "$sink")
+  if [ -n "$open_rows" ]; then
+    printf '%s\n' "$open_rows" | print_capped_section \
+      'OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):' \
+      'OPEN DECISIONS' 220 4000
+    # Answerer-closes hint, printed at exactly the moment an answer gets written:
+    # the send that answers a listed decision also closes it, so closure never
+    # depends on the busy worker writing a matching resolved line (contract:
+    # bin/fm-send.sh header).
+    printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n"
   fi
-  # Answerer-closes hint, printed at exactly the moment an answer gets written:
-  # the send that answers a listed decision also closes it, so closure never
-  # depends on the busy worker writing a matching resolved line (contract:
-  # bin/fm-send.sh header).
-  printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n"
+  print_anomaly_rows "$sink" | print_capped_section \
+    'STATUS LINE ANOMALIES (decision lines that did not classify as written - fix the writer):' \
+    'STATUS LINE ANOMALIES' 300 2000
+  rm -f "$sink"
 }
 
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
@@ -208,7 +265,7 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   esac
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
-  (print_open_decisions_section) || true
+  (print_decision_sections) || true
   if [ "$RECOVERY_ACK_REQUIRED" = true ]; then
     printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation %s\n' "${RECOVERY_MARKER_TOKEN##*:}" >&2
   fi
@@ -261,6 +318,6 @@ printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --a
   "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 
 (fm_wake_print_annotations "$RAW_ROWS") || true
-(print_open_decisions_section) || true
+(print_decision_sections) || true
 assert_watcher_liveness
 exit 0

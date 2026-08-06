@@ -236,6 +236,112 @@ EOF
   pass "classifier primitives: keyed decisions and activity phases, captain relevance, window-to-task, and overrides"
 }
 
+# The status line grammar "<verb>[ <token>]*: <note>". Two live incidents came
+# from reading the raw text before the colon instead of that grammar, and the
+# obvious "just take the first word" repair introduces a worse, symmetric one -
+# so both directions are pinned here, against the real classifier.
+test_status_line_grammar() {
+  local dir state open
+  dir=$(make_case status-grammar); state="$dir/state"
+
+  # A verb followed only by structured tokens is the grammar, whatever the
+  # tokens are: bin/fm-secondmate-report.sh emits "[corr=<16hex>]", and
+  # bin/fm-brief.sh tells a secondmate a bare "corr=<16hex>" is equally valid.
+  [ "$(status_line_verb 'resolved corr=db5363a1b2c3d4e5 [key=png]: ok')" = 'resolved' ] \
+    || fail "a bare token between the verb and the key broke the verb"
+  [ "$(status_line_verb 'resolved [corr=db5363a1b2c3d4e5]: ok')" = 'resolved' ] \
+    || fail "a bracketed token between the verb and the colon broke the verb"
+  [ "$(status_line_verb 'done [key=x]: y')" = 'done' ] || fail "a keyed terminal verb regressed"
+
+  # Prose that merely starts with a verb word is NOT the grammar. It must keep
+  # reading as the whole prefix, both so it never closes a key it did not claim
+  # to close and so the free-text captain-relevance fallback keeps its verdicts.
+  [ "$(status_line_verb 'resolved the conflict by hand: x')" = 'resolved the conflict by hand' ] \
+    || fail "prose beginning with a verb word collapsed to a bare verb"
+  [ "$(status_line_verb 'PR ready https://x/pull/2')" = 'PR ready https' ] \
+    || fail "a legacy free-text line stopped reading as its whole prefix"
+
+  # Non-regression on the free-text fallback: unchanged on every legacy shape.
+  status_is_captain_relevant 'resolved the conflict by hand: x' \
+    && fail "prose beginning with the resolution verb became captain-relevant"
+  status_is_captain_relevant 'blocked on upstream release: waiting' \
+    && fail "prose beginning with a terminal verb became captain-relevant"
+  status_is_captain_relevant 'PR ready https://x/pull/2' \
+    || fail "legacy bare PR ready free-text stopped being captain-relevant"
+  status_is_captain_relevant 'merged' || fail "legacy bare merged free-text stopped being captain-relevant"
+
+  # Token-carrying lines DO change, and must: a secondmate escalating through
+  # bin/fm-secondmate-report.sh writes "blocked [corr=...]:", which used to read
+  # as the verb "blocked [corr=...]" and so never reached the captain at all.
+  status_is_captain_relevant 'blocked [corr=db5363a1b2c3d4e5]: need the credential' \
+    || fail "a correlated blocked escalation is still invisible to the captain path"
+  status_is_captain_relevant 'done [corr=db5363a1b2c3d4e5]: shipped' \
+    || fail "a correlated done report is still invisible to the captain path"
+  status_is_paused 'paused [corr=db5363a1b2c3d4e5]: awaiting upstream' \
+    || fail "a correlated declared pause is still not recognized as a pause"
+  status_is_captain_relevant 'working [corr=db5363a1b2c3d4e5]: rebased onto merged #76' \
+    && fail "verb-aware suppression does not cover a correlated nonterminal line"
+
+  # Fold: form 1 (token before the key) closes; prose never closes; form 2 (key
+  # token after the colon) is honored rather than silently filed under default.
+  printf 'needs-decision [key=png]: zip or loose\nresolved corr=db5363a1b2c3d4e5 [key=png]: zip\n' \
+    > "$state/g1.status"
+  [ -z "$(status_open_decisions "$state/g1.status")" ] \
+    || fail "a closure carrying a correlation token did not close the decision"
+  printf 'needs-decision [key=api]: pick one\nresolved the conflict by hand: prose\n' > "$state/g2.status"
+  status_open_decisions "$state/g2.status" | grep -F $'api\t' >/dev/null \
+    || fail "prose beginning with the resolution verb closed a keyed decision"
+  printf 'needs-decision: [key=mis] parked\nresolved [key=mis]: decided\n' > "$state/g3.status"
+  open=$(status_open_decisions "$state/g3.status")
+  [ -z "$open" ] || fail "a key token after the colon was filed under default: $open"
+  printf 'needs-decision: [key=mis] parked\n' > "$state/g4.status"
+  status_open_decisions "$state/g4.status" | grep -F $'mis\t' >/dev/null \
+    || fail "a key token after the colon did not open its own key"
+  status_open_decisions "$state/g4.status" | grep -F 'key=mis' >/dev/null \
+    && fail "the honored key token was left inside the note text, reprinting the key"
+
+  # An ambiguous line is refused, not resolved by guesswork.
+  printf 'needs-decision [key=a]: pick one\nresolved [key=a] [key=b]: which one?\n' > "$state/g5.status"
+  status_open_decisions "$state/g5.status" | grep -F $'a\t' >/dev/null \
+    || fail "a line carrying two different key tokens closed one of them anyway"
+  pass "status line grammar: tokens parse, prose is refused, a misplaced key is honored not defaulted"
+}
+
+# Every line the fold refuses or repairs must be reported on the anomaly side
+# channel. A silent refusal is what let a perfect-looking closure sit next to a
+# decision that stayed open for a second day.
+test_status_line_anomalies_are_reported() {
+  local dir state sink
+  dir=$(make_case status-anomalies); state="$dir/state"
+  sink="$state/anomalies"
+
+  cat > "$state/an.status" <<'EOF'
+needs-decision [key=a]: pick one
+resolved the conflict by hand: prose
+needs-decision: [key=b] misplaced token
+resolved [key=ghost]: closes nothing
+working: routine, no anomaly
+EOF
+  : > "$sink"
+  status_open_decisions "$state/an.status" "$sink" >/dev/null
+
+  grep -F $'an\tmalformed\t-\tresolved the conflict by hand: prose' "$sink" >/dev/null \
+    || fail "the refused prose line produced no malformed record"
+  grep -F $'an\tmisplaced-key\tb\t' "$sink" >/dev/null \
+    || fail "the misplaced key token produced no misplaced-key record"
+  grep -F $'an\tunmatched-close\tghost\t' "$sink" >/dev/null \
+    || fail "closing a never-opened key produced no unmatched-close record"
+  [ "$(grep -c '' "$sink")" = 3 ] \
+    || fail "grammar-clean lines produced extra anomaly records: $(cat "$sink")"
+
+  # No sink wired means no file I/O and no behavior change for the callers that
+  # only want the open set.
+  : > "$sink"
+  status_open_decisions "$state/an.status" >/dev/null
+  [ ! -s "$sink" ] || fail "the fold wrote anomalies with no sink wired"
+  pass "refused, repaired, and unmatched-close status lines are all reported on the anomaly channel"
+}
+
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is
 # benign (absorb) ONLY when fm-crew-state.sh reports the crew as working from an
 # actively-running pipeline step (source run-step) or a busy pane (source pane);
@@ -1891,3 +1997,5 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
+test_status_line_grammar
+test_status_line_anomalies_are_reported

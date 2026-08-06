@@ -13,7 +13,7 @@
 # daemon keeps its escalation-digest seen-markers; the watcher keeps its .seen-*
 # signatures).
 #
-# There are two documented exceptions. The absorb classification
+# There are three documented exceptions. The absorb classification
 # (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
 # read: it reuses bin/fm-crew-state.sh, which may make a bounded no-mistakes call,
 # to decide whether a crew that just stopped its turn or went stale is working,
@@ -23,7 +23,9 @@
 # open-decisions fold" below) also writes: it persists a per-status-file byte
 # cursor and folded open-set as a side effect, so a per-drain fleet-wide scan
 # stays bounded by new appends instead of re-reading each task's whole lifetime
-# log every time.
+# log every time. Third, the decision fold appends to an anomaly sink when a
+# caller wires one (see "status-line anomalies" below); with no sink it stays a
+# pure transform.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -165,34 +167,207 @@ status_is_paused_or_captain_held() {  # <status-line>
 #   resolved       [key=api-shape]: <how it was decided>
 # A line with no token uses the key "default", preserving the historical
 # one-open-decision-per-task behavior (a bare "resolved:" closes "default").
-# The three parsers are pure reads of a single line; the verb parser strips any
-# key token before the colon so the leading word is recovered cleanly.
-status_line_verb() {  # <status-line> -> leading verb word
+# _fm_status_parse below is the ONE place that grammar is decided.
+
+# --- status line grammar ----------------------------------------------------
+#
+# Every status line is one event in the append-only log, shaped
+#
+#   <verb>[ <token>]*: <note>
+#
+# The verb is a SINGLE word. Between it and the colon a writer may attach
+# whitespace-free structured tokens: the "[key=<slug>]" decision key documented
+# above, plus any other "<name>=<value>" or "[<name>=<value>]" attribute a
+# writer needs - bin/fm-secondmate-report.sh emits "[corr=<16hex>]" on a
+# correlated reply, and a hand-written reply may carry a bare "corr=<16hex>".
+#
+# Reading only the raw text before the colon cannot tell those two apart from
+# prose, so a line that drifts off the grammar used to be classified anyway, in
+# silence: an extra token before the key made the verb unrecognizable so a
+# resolution never closed its key, and a key token written AFTER the colon was
+# invisible so the opening event was filed under "default" while the line
+# visibly named a key. Both failures are silent on a safety surface - the open
+# set keeps crying wolf, and the one genuinely open decision stops being read.
+#
+# _fm_status_parse therefore classifies each line into exactly one class and
+# never guesses. status_line_verb, status_line_note, _fm_decision_key and the
+# decision fold all read its result instead of re-deriving the shape:
+#
+#   strict        - the prefix is a verb plus structured tokens only. Verb and
+#                   key are read from it. An unknown verb still parses strictly:
+#                   the grammar is about shape, not vocabulary.
+#   misplaced-key - the prefix conforms and carries no key, and the note BEGINS
+#                   with a "[key=<slug>]" token, i.e. the token landed on the
+#                   wrong side of the colon. The key is HONORED, because filing
+#                   the event under "default" while the line visibly names a key
+#                   is exactly the silent mismatch this classification exists to
+#                   prevent; the line is reported as an anomaly so the writer
+#                   gets fixed. Only a LEADING token counts - a key mentioned
+#                   inside prose ("docs still mention [key=q1]") stays prose.
+#   malformed     - the first word IS a lifecycle verb but the rest of the
+#                   prefix is prose, e.g. "resolved the conflict by hand: ...".
+#                   Such a line is NEVER applied to the decision fold: reading
+#                   the first word alone would let that sentence close a key it
+#                   never claimed to close, and a wrongly CLOSED decision
+#                   vanishes with no review, which is worse than an unclosed one
+#                   that keeps surfacing. Reported as an anomaly instead.
+#   freeform      - the prefix does not conform and its first word is not a
+#                   lifecycle verb: an ordinary legacy line such as "merged" or
+#                   "PR ready https://...". Not an anomaly, and status_line_verb
+#                   keeps returning the whole trimmed prefix for it, so the
+#                   free-text captain-relevance fallback keeps its verdicts.
+
+# 0 if <word> is a lifecycle verb. Used ONLY to tell a malformed lifecycle line
+# (an anomaly worth reporting) from ordinary free text (not an anomaly).
+_fm_status_is_lifecycle_verb() {  # <word>
+  case "$1" in
+    working|needs-decision|blocked|done|failed) return 0 ;;
+  esac
+  case "$1" in
+    "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}") return 0 ;;
+  esac
+  case "$1" in
+    "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}") return 0 ;;
+  esac
+  case "$1" in
+    "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}") return 0 ;;
+  esac
+  return 1
+}
+
+# 0 if <word> is a structured prefix token: "<name>=<value>", or its bracketed
+# "[<name>=<value>]" form. A prose word ("the", "conflict", "by", "hand") never
+# matches, which is what keeps a prose line out of the keyed decision fold.
+_fm_status_is_token() {  # <word>
+  local w=$1
+  case "$w" in
+    \[*\]) w=${w#\[}; w=${w%\]} ;;
+  esac
+  case "$w" in
+    *\[*|*\]*) return 1 ;;
+    [A-Za-z][A-Za-z0-9_-]*=?*) return 0 ;;
+  esac
+  return 1
+}
+
+# 0 if <slug> is a valid decision key slug.
+_fm_status_valid_slug() {  # <slug>
+  case "$1" in
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  return 0
+}
+
+# Parse result of the last _fm_status_parse call. Globals rather than printed
+# output so the per-line folds below stay fork-free over long status logs; every
+# caller that must not leak them already runs inside a command substitution.
+_FM_STATUS_CLASS=freeform
+_FM_STATUS_VERB=
+_FM_STATUS_KEY=default
+_FM_STATUS_NOTE=
+
+_fm_status_parse() {  # <status-line>
+  local line=$1 prefix note rest word slug conforms=1 haskey=0
+
+  _FM_STATUS_CLASS=freeform
+  _FM_STATUS_VERB=
+  _FM_STATUS_KEY=default
+  _FM_STATUS_NOTE=
+
+  # A line with no colon has no note of its own; status_line_note has always
+  # returned the whole line verbatim for it, so keep that exactly.
+  case "$line" in
+    *:*) note=${line#*:}; note=${note#"${note%%[![:space:]]*}"}; prefix=${line%%:*} ;;
+    *)   note=$line; prefix=$line ;;
+  esac
+  _FM_STATUS_NOTE=$note
+
+  rest=${prefix#"${prefix%%[![:space:]]*}"}
+  rest=${rest%"${rest##*[![:space:]]}"}
+  _FM_STATUS_VERB=${rest%%[[:space:]]*}
+  rest=${rest#"$_FM_STATUS_VERB"}
+
+  while :; do
+    rest=${rest#"${rest%%[![:space:]]*}"}
+    [ -n "$rest" ] || break
+    word=${rest%%[[:space:]]*}
+    rest=${rest#"$word"}
+    _fm_status_is_token "$word" || { conforms=0; break; }
+    case "$word" in
+      \[key=*\]|key=*)
+        slug=${word#\[}
+        slug=${slug%\]}
+        slug=${slug#key=}
+        # A second key token makes the line genuinely ambiguous; refuse it
+        # rather than silently picking one of the two.
+        if [ "$haskey" = 1 ] || ! _fm_status_valid_slug "$slug"; then
+          conforms=0
+          break
+        fi
+        haskey=1
+        _FM_STATUS_KEY=$slug
+        ;;
+    esac
+  done
+
+  if [ "$conforms" != 1 ]; then
+    _FM_STATUS_KEY=default
+    if _fm_status_is_lifecycle_verb "$_FM_STATUS_VERB"; then
+      _FM_STATUS_CLASS=malformed
+    else
+      _FM_STATUS_CLASS=freeform
+    fi
+    return 0
+  fi
+
+  _FM_STATUS_CLASS=strict
+  if [ "$haskey" = 0 ]; then
+    case "$note" in
+      \[key=*\]*)
+        slug=${note#\[key=}
+        slug=${slug%%\]*}
+        if _fm_status_valid_slug "$slug"; then
+          _FM_STATUS_CLASS=misplaced-key
+          _FM_STATUS_KEY=$slug
+          note=${note#*\]}
+          _FM_STATUS_NOTE=${note#"${note%%[![:space:]]*}"}
+        fi
+        ;;
+    esac
+  fi
+  return 0
+}
+
+# The pre-grammar verb read: everything before the first colon minus a key
+# token, trimmed. Kept verbatim for lines the grammar does NOT accept, so
+# status_is_captain_relevant's free-text fallback keeps its existing verdicts on
+# prose and on legacy bare lines such as "PR ready https://x/pull/2".
+_fm_status_line_verb_legacy() {  # <status-line>
   local v=${1%%:*}
   v=${v%%\[key=*}
   v=${v#"${v%%[![:space:]]*}"}
   v=${v%"${v##*[![:space:]]}"}
   printf '%s' "$v"
 }
-status_line_note() {  # <status-line> -> text after the first colon, trimmed
-  case "$1" in
-    *:*) local n=${1#*:}; printf '%s' "${n#"${n%%[![:space:]]*}"}" ;;
-    *) printf '%s' "$1" ;;
+
+status_line_verb() {  # <status-line> -> leading verb word
+  _fm_status_parse "$1"
+  case "$_FM_STATUS_CLASS" in
+    strict|misplaced-key) printf '%s' "$_FM_STATUS_VERB" ;;
+    *) _fm_status_line_verb_legacy "$1" ;;
   esac
 }
-_fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
-  local prefix=${1%%:*} k
-  case "$prefix" in
-    *\[key=*\]*)
-      k=${prefix#*\[key=}
-      k=${k%%\]*}
-      case "$k" in
-        ''|*[!A-Za-z0-9._-]*) return 1 ;;
-        *) printf '%s' "$k" ;;
-      esac
-      ;;
-    *) printf 'default' ;;
-  esac
+status_line_note() {  # <status-line> -> text after the first colon, trimmed
+  # A honored misplaced key token is dropped from the note: leaving it in would
+  # print the key twice on a surface that already names it, which is what made
+  # a mismatched key look like a match.
+  _fm_status_parse "$1"
+  printf '%s' "$_FM_STATUS_NOTE"
+}
+_fm_decision_key() {  # <status-line> -> key slug; nonzero when out of grammar
+  _fm_status_parse "$1"
+  [ "$_FM_STATUS_CLASS" != malformed ] || return 1
+  printf '%s' "$_FM_STATUS_KEY"
 }
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
 # Portable (no associative arrays) so the fold runs on bash 3.2 as well as 4+.
@@ -209,9 +384,53 @@ $set
 EOF
   printf '%s' "$out"
 }
+# --- status-line anomalies --------------------------------------------------
+#
+# A line the grammar refuses, and a resolution that closes a key nothing ever
+# opened, are both direct symptoms of a writer bug. Neither may be classified in
+# silence: an unreported refusal reads as "closed" to whoever wrote it while the
+# open set keeps crying wolf, and an unreported unmatched close is the only
+# on-disk trace that an OPENING line was misfiled under another key. So the fold
+# reports them on an explicit side channel. Records are
+# "<task>\t<kind>\t<key>\t<line>", one per offending line, with these kinds:
+#
+#   malformed       out of grammar; NOT applied to the open set.
+#   misplaced-key   key token written after the colon; APPLIED to that key.
+#   unmatched-close a resolution or captain-held transfer for a key that was not
+#                   open; no effect on the open set.
+#
+# Wiring a sink is opt-in: callers that only need the open set (the fleet
+# snapshot, the decision-hold verifier, the away-mode return digest) pass none
+# and are unaffected. bin/fm-wake-drain.sh wires one and prints the records
+# beside OPEN DECISIONS, so a bad writer surfaces on the next wake instead of
+# after the second lost decision. Through the incremental fold each appended
+# line is read exactly once, so each anomaly reports once rather than on every
+# drain; the exceptions are the same ones that force a full re-fold there (no
+# cursor yet, or a truncated/replaced status file), which re-report that file's
+# history once under the drain's own byte cap.
+# The task and key fields default to "-" rather than staying empty: tab is an
+# IFS whitespace character, so a consumer splitting on tab would collapse an
+# empty field and shift the status line into the wrong column.
+_fm_decision_note_anomaly() {  # <sink> <task> <kind> <key> <status-line>
+  [ -n "$1" ] || return 0
+  printf '%s\t%s\t%s\t%s\n' "${2:--}" "$3" "${4:--}" "$5" >> "$1" 2>/dev/null || true
+}
+
+# 0 if <key> currently has a record in the "<key>\t<verb>\t<note>\n"-per-line
+# open set. Blank separator lines _fm_decision_drop can leave behind are why the
+# second pattern matches a key after ANY newline, not only after a record.
+_fm_decision_is_open() {  # <open-set> <key>
+  case "$1" in
+    "$2"$'\t'*|*$'\n'"$2"$'\t'*) return 0 ;;
+  esac
+  return 1
+}
+
 # Fold ONE status line into an existing "<key>\t<verb>\t<note>\n"-per-line open
 # set, applying the same needs-decision/blocked-opens, resolved/captain-held-closes
-# rule status_open_decisions documents above. Pure text transform, no file I/O.
+# rule status_open_decisions documents above. The optional sink and task label
+# carry the anomaly records described above; with no sink this is a pure text
+# transform, no file I/O.
 # This is the ONE place the per-line open/resolved rule is written; both the
 # whole-file fold (status_open_decisions) and the incremental cursor-backed fold
 # (status_open_decisions_incremental) below call this instead of re-deriving the
@@ -252,22 +471,35 @@ _fm_decision_key_transition_allowed() {  # <key> <note>
   return 0
 }
 
-_fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb>
-  local open=$1 line=$2 resolve=$3 held=$4 verb key note stripped
+_fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb> [<sink>] [<task>]
+  local open=$1 line=$2 resolve=$3 held=$4 sink=${5-} task=${6-} verb key note stripped
   stripped=${line//[[:space:]]/}
   [ -n "$stripped" ] || { printf '%s' "$open"; return 0; }
-  verb=$(status_line_verb "$line")
-  key=$(_fm_decision_key "$line") || { printf '%s' "$open"; return 0; }
-  _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" \
+  _fm_status_parse "$line"
+  case "$_FM_STATUS_CLASS" in
+    malformed)
+      _fm_decision_note_anomaly "$sink" "$task" malformed '' "$line"
+      printf '%s' "$open"
+      return 0
+      ;;
+    misplaced-key)
+      _fm_decision_note_anomaly "$sink" "$task" misplaced-key "$_FM_STATUS_KEY" "$line"
+      ;;
+  esac
+  verb=$_FM_STATUS_VERB
+  key=$_FM_STATUS_KEY
+  note=$_FM_STATUS_NOTE
+  _fm_decision_key_transition_allowed "$key" "$note" \
     || { printf '%s' "$open"; return 0; }
   case "$verb" in
     needs-decision|blocked)
-      note=$(status_line_note "$line")
       open=$(_fm_decision_drop "$open" "$key")
       [ -n "$open" ] && open="${open}"$'\n'
       open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
       ;;
     "$resolve"|"$held")
+      _fm_decision_is_open "$open" "$key" \
+        || _fm_decision_note_anomaly "$sink" "$task" unmatched-close "$key" "$line"
       open=$(_fm_decision_drop "$open" "$key")
       [ -n "$open" ] && open="${open}"$'\n'
       ;;
@@ -287,13 +519,14 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
 # before any read - a cheap builtin, unlike fm_wake_latest_event's O_NOFOLLOW
 # subprocess read, which exists for that function's much narrower payload-driven
 # path resolution rather than this directory-local glob.
-status_open_decisions() {  # <status-file>
-  local f=$1 line resolve held open=''
+status_open_decisions() {  # <status-file> [<anomaly-sink>]
+  local f=$1 sink=${2-} line resolve held open='' task
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+  task=${f##*/}; task=${task%.status}
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
-    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
+    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$sink" "$task")
   done < "$f"
   printf '%s' "$open"
 }
@@ -305,12 +538,12 @@ status_open_decisions() {  # <status-file>
 # above remains the ONE place the open/resolved semantics are decided. Prints
 # one "<task>\t<key>\t<verb>\t<note>" line per open decision, in glob (task id)
 # order; prints nothing when none are open.
-scan_open_decisions() {  # <state>
-  local state=$1 f task open line
+scan_open_decisions() {  # <state> [<anomaly-sink>]
+  local state=$1 sink=${2-} f task open line
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
-    open=$(status_open_decisions "$f") || continue
+    open=$(status_open_decisions "$f" "$sink") || continue
     [ -n "$open" ] || continue
     while IFS= read -r line; do
       [ -n "$line" ] || continue
@@ -396,10 +629,11 @@ _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure
   fi
 }
 
-status_open_decisions_incremental() {  # <status-file>
-  local f=$1 cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
-  local version='' size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0
+status_open_decisions_incremental() {  # <status-file> [<anomaly-sink>]
+  local f=$1 sink=${2-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
+  local version='' size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0 task
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+  task=${f##*/}; task=${task%.status}
   cf=$(_fm_open_decisions_cursor_path "$f")
   offset=0
   ident=''
@@ -479,7 +713,7 @@ status_open_decisions_incremental() {  # <status-file>
     resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
     held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
     while IFS= read -r line || [ -n "$line" ]; do
-      open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
+      open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$sink" "$task")
     done < "$chunk_file"
     rm -f "$chunk_file"
     offset=$size
@@ -505,12 +739,12 @@ status_open_decisions_incremental() {  # <status-file>
 # each task's status log through status_open_decisions_incremental instead of
 # the whole-file status_open_decisions, so a fleet-wide per-drain scan stays
 # bounded by new appends rather than total lifetime log size across every task.
-scan_open_decisions_incremental() {  # <state>
-  local state=$1 f task open line
+scan_open_decisions_incremental() {  # <state> [<anomaly-sink>]
+  local state=$1 sink=${2-} f task open line
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
-    open=$(status_open_decisions_incremental "$f") || continue
+    open=$(status_open_decisions_incremental "$f" "$sink") || continue
     [ -n "$open" ] || continue
     while IFS= read -r line; do
       [ -n "$line" ] || continue
@@ -539,11 +773,15 @@ _fm_status_open_activities_stream() {
   while IFS= read -r line || [ -n "$line" ]; do
     stripped=${line//[[:space:]]/}
     [ -n "$stripped" ] || continue
-    verb=$(status_line_verb "$line")
-    key=$(_fm_decision_key "$line") || continue
+    # Same grammar owner as the decision fold: a line it refuses never opens or
+    # closes a phase either.
+    _fm_status_parse "$line"
+    [ "$_FM_STATUS_CLASS" != malformed ] || continue
+    verb=$_FM_STATUS_VERB
+    key=$_FM_STATUS_KEY
     case "$verb" in
       working|"$pause")
-        note=$(status_line_note "$line")
+        note=$_FM_STATUS_NOTE
         open=$(_fm_decision_drop "$open" "$key")
         [ -n "$open" ] && open="${open}"$'\n'
         open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'

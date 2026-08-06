@@ -6,6 +6,13 @@
 # open/resolved statement); these tests exercise the real drain script over
 # crafted status logs and assert on its printed output, not on the fold's own
 # source text.
+#
+# The status-line grammar cases at the end cover the two ways a keyed closure
+# used to be swallowed in silence (an extra token before the key made the verb
+# unreadable; a key token written after the colon filed the event under
+# "default") plus the symmetric regression that a naive "first word wins" fix
+# would introduce, and the STATUS LINE ANOMALIES section that must name every
+# line the fold refuses or repairs.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -215,6 +222,144 @@ test_over_long_decision_note_is_capped_with_a_marker() {
   pass "an over-long open decision is cut to its per-item budget with the shared truncation marker"
 }
 
+# --- status line grammar ----------------------------------------------------
+
+test_closure_carrying_another_token_before_the_key_closes() {
+  local dir state out
+  dir=$(make_case token-before-key)
+  state="$dir/state"
+  out="$dir/drain.out"
+  # Form 1 of the incident: a correlation token sits between the verb and the
+  # key, exactly as bin/fm-brief.sh tells a secondmate to write a correlated
+  # reply. The verb used to read as "resolved corr=..." so the closure never
+  # landed and the decision stayed open forever.
+  printf 'needs-decision [key=png-sources-zip]: ship the zip or the loose files\n' > "$state/task-a.status"
+  printf 'resolved corr=db5363a1b2c3d4e5 [key=png-sources-zip]: captain chose the zip\n' >> "$state/task-a.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a token-carrying closure"
+
+  if grep -F 'png-sources-zip' "$out" | grep -F 'OPEN' >/dev/null; then
+    fail "a closure carrying a correlation token left the decision open: $(cat "$out")"
+  fi
+  if grep -F 'OPEN DECISIONS' "$out" >/dev/null; then
+    fail "a closure carrying a correlation token left the decision open: $(cat "$out")"
+  fi
+  # The bracketed form bin/fm-secondmate-report.sh actually emits must work too.
+  printf 'needs-decision [key=route]: pick the route\n' > "$state/task-b.status"
+  printf 'resolved [corr=db5363a1b2c3d4e5] [key=route]: took the direct route\n' >> "$state/task-b.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a bracketed-token closure"
+
+  if grep -F 'OPEN DECISIONS' "$out" >/dev/null; then
+    fail "a closure carrying a bracketed correlation token left the decision open: $(cat "$out")"
+  fi
+  pass "a closure carrying another structured token before the key still closes"
+}
+
+test_prose_starting_with_a_verb_word_does_not_close() {
+  local dir state out
+  dir=$(make_case prose-close)
+  state="$dir/state"
+  out="$dir/drain.out"
+  # The symmetric regression a naive "take the first word" fix would open: an
+  # ordinary sentence that happens to start with the resolution verb must never
+  # close a key it did not claim to close, because a wrongly closed decision
+  # disappears with no review at all.
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$state/task-c.status"
+  printf 'resolved the conflict by hand [key=api-shape] came up: still undecided\n' >> "$state/task-c.status"
+  printf 'needs-decision: which database\n' > "$state/task-d.status"
+  printf 'resolved the merge conflict by hand: no decision was made here\n' >> "$state/task-d.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a prose line"
+
+  grep -F 'task-c' "$out" | grep -F '[key=api-shape]' >/dev/null \
+    || fail "prose beginning with the resolution verb wrongly closed a keyed decision"
+  grep -F 'task-d' "$out" | grep -F 'which database' >/dev/null \
+    || fail "prose beginning with the resolution verb wrongly closed the default decision"
+  grep -F 'STATUS LINE ANOMALIES' "$out" >/dev/null \
+    || fail "an out-of-grammar line was refused silently instead of being reported"
+  grep -F 'NOT APPLIED' "$out" | grep -F 'resolved the merge conflict by hand' >/dev/null \
+    || fail "the refused prose line was not named in the anomaly section"
+  pass "prose beginning with a verb word never closes, and its refusal is reported"
+}
+
+test_key_token_after_the_colon_is_honored_and_reported() {
+  local dir state out
+  dir=$(make_case misplaced-key)
+  state="$dir/state"
+  out="$dir/drain.out"
+  # Form 2, the nastier one: the OPENING line put the key token after the colon,
+  # so it used to be filed under "default" while a later, perfectly written
+  # closure closed a key nothing had opened - and "default" stayed open forever.
+  printf 'needs-decision: [key=insert-ask-user] no-mistakes review parked\n' > "$state/task-e.status"
+  printf 'resolved [key=insert-ask-user]: captain decided FIX on both findings\n' >> "$state/task-e.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a misplaced key token"
+
+  if grep -F 'OPEN DECISIONS' "$out" >/dev/null; then
+    fail "a key token after the colon was filed under default and left it open: $(cat "$out")"
+  fi
+  grep -F 'STATUS LINE ANOMALIES' "$out" >/dev/null \
+    || fail "the misplaced key token was repaired silently instead of being reported"
+  grep -F 'applied to [key=insert-ask-user]' "$out" >/dev/null \
+    || fail "the anomaly section did not name the honored key or the writer to fix"
+  pass "a key token after the colon is honored, never filed under default, and reported"
+}
+
+test_close_of_a_never_opened_key_is_reported() {
+  local dir state out
+  dir=$(make_case unmatched-close)
+  state="$dir/state"
+  out="$dir/drain.out"
+  # The signal that was previously lost entirely: this is the direct, same-day
+  # symptom of an opening line that got misfiled under another key.
+  printf 'working: under way\n' > "$state/task-f.status"
+  printf 'resolved [key=never-opened]: closing something\n' >> "$state/task-f.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on an unmatched closure"
+
+  grep -F 'STATUS LINE ANOMALIES' "$out" >/dev/null \
+    || fail "a closure matching no open key produced no anomaly section"
+  grep -F 'closes [key=never-opened], which was never opened' "$out" >/dev/null \
+    || fail "the unmatched closure was not named in the anomaly section"
+  pass "a closure matching no open key is reported, not ignored"
+}
+
+test_terminal_done_still_does_not_close_a_key() {
+  local dir state out
+  dir=$(make_case done-does-not-close)
+  state="$dir/state"
+  out="$dir/drain.out"
+  # Deliberate, load-bearing behavior: a terminal line never cancels an open
+  # captain decision, even when it carries that decision's own key.
+  printf 'needs-decision [key=x]: pick one\n' > "$state/task-g.status"
+  printf 'done [key=x]: shipped anyway\n' >> "$state/task-g.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a keyed terminal line"
+
+  grep -F 'task-g' "$out" | grep -F '[key=x]' | grep -F 'pick one' >/dev/null \
+    || fail "a keyed done: line closed an open captain decision"
+  pass "done [key=x] still does not close the keyed decision"
+}
+
+test_clean_grammar_prints_no_anomaly_section() {
+  local dir state out
+  dir=$(make_case clean-grammar)
+  state="$dir/state"
+  out="$dir/drain.out"
+  cat > "$state/task-h.status" <<'EOF'
+needs-decision [key=a]: pick one
+resolved [key=a]: picked
+working [corr=db5363a1b2c3d4e5]: routed work under way
+done: shipped
+EOF
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a clean status log"
+
+  [ ! -s "$out" ] || fail "a status log that follows the grammar was not silent: $(cat "$out")"
+  pass "a status log that follows the grammar prints neither section"
+}
+
 test_buried_decision_still_surfaces
 test_over_long_decision_note_is_capped_with_a_marker
 test_explicit_resolution_closes_it
@@ -224,3 +369,9 @@ test_no_open_decisions_prints_nothing
 test_open_decision_surfaces_even_with_an_unrelated_queued_wake
 test_buried_decision_surfaces_on_the_empty_queue_fast_path
 test_status_symlink_is_not_followed
+test_closure_carrying_another_token_before_the_key_closes
+test_prose_starting_with_a_verb_word_does_not_close
+test_key_token_after_the_colon_is_honored_and_reported
+test_close_of_a_never_opened_key_is_reported
+test_terminal_done_still_does_not_close_a_key
+test_clean_grammar_prints_no_anomaly_section
