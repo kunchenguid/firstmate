@@ -80,7 +80,15 @@ case "${1:-}" in
   send-keys)
     prev=
     for arg in "$@"; do
-      if [ "$prev" = -l ]; then printf '%s\n' "$arg" >> "$FM_FAKE_LAUNCH_LOG"; break; fi
+      if [ "$prev" = -l ]; then
+        printf '%s\n' "$arg" >> "$FM_FAKE_LAUNCH_LOG"
+        if [ "${FM_FAKE_EXECUTE_MUSE_LAUNCH:-}" = 1 ]; then
+          case "$arg" in
+            *"$FM_FAKE_MUSE_EXECUTABLE"*) (cd "$FM_FAKE_PANE_PATH" && bash -c "$arg") ;;
+          esac
+        fi
+        break
+      fi
       prev=$arg
     done
     exit 0
@@ -89,11 +97,12 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  # A real executable named `muse` on PATH: fm-spawn resolves and absolutises it
-  # rather than trusting the bare name, so a stub file is what the code needs.
+  cp "$(command -v bash)" "$fakebin/muse-bin-test-version"
   cat > "$fakebin/muse" <<'SH'
 #!/usr/bin/env bash
-exit 0
+set -u
+[ -n "${FM_FAKE_HARNESS_RESULT:-}" ] || exit 0
+exec "$FM_FAKE_MUSE_VERSIONED" -c 'result=$($FM_FAKE_HARNESS_PROBE); printf "%s" "$result" > "$FM_FAKE_HARNESS_RESULT"'
 SH
   chmod +x "$fakebin/muse"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
@@ -123,6 +132,11 @@ run_muse_spawn() {  # <home> <proj> <wt> <fakebin> <id> [extra args...]
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$home/launch.log" \
+    FM_FAKE_MUSE_EXECUTABLE="$fakebin/muse" \
+    FM_FAKE_MUSE_VERSIONED="$fakebin/muse-bin-test-version" \
+    FM_FAKE_HARNESS_PROBE="$HARNESS" \
+    FM_FAKE_EXECUTE_MUSE_LAUNCH="${FM_FAKE_EXECUTE_MUSE_LAUNCH:-}" \
+    FM_FAKE_HARNESS_RESULT="${FM_FAKE_HARNESS_RESULT:-}" \
     FM_FAKE_WORKER_META_KEY="${FM_TEST_MUSE_WORKER_KEY-present}" \
     META_API_KEY="${FM_TEST_MUSE_KEY-test-key}" \
     XDG_CONFIG_HOME="$home/xdgconfig" \
@@ -172,6 +186,24 @@ test_detection_is_anchored() {
     [ "$out" != muse ] || fail "fm-harness.sh misdetected unrelated process '$bin' as muse"
   done
   pass "muse detection does not claim unrelated muse-containing commands"
+}
+
+test_spawn_clears_inherited_foreign_harness_markers() {
+  local rec case_dir home proj wt fakebin id result out status
+  rec=$(make_spawn_case inherited-markers)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  result="$case_dir/harness-result"
+  out=$(CLAUDECODE=1 PI_CODING_AGENT=true GROK_AGENT=1 FM_PI_HARNESS=pi-signed \
+    FM_FAKE_EXECUTE_MUSE_LAUNCH=1 FM_FAKE_HARNESS_RESULT="$result" \
+    run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "muse spawn from a marked backend should succeed: $out"
+  [ -f "$result" ] || fail "the generated muse launch never executed its harness probe"
+  [ "$(cat "$result")" = muse ] \
+    || fail "muse worker inherited a foreign harness identity: $(cat "$result")"
+  pass "muse launch clears foreign harness markers before ancestry detection"
 }
 
 # --- spawn ------------------------------------------------------------------
@@ -399,24 +431,26 @@ run_send_key() {  # <home> <fakebin> <id> <key> <keylog>
     "$ROOT/bin/fm-send.sh" "$3" --key "$4" 2>&1
 }
 
-test_muse_escape_clears_the_composer() {
-  local rec case_dir home fakebin id keylog out status
-  rec=$(make_send_case muse muse)
-  IFS='|' read -r case_dir home fakebin id <<EOF
+test_muse_escape_aliases_clear_the_composer() {
+  local entry name key rec case_dir home fakebin id keylog out status
+  for entry in exact:Escape lower:escape short:Esc short-lower:esc; do
+    name=${entry%%:*}
+    key=${entry#*:}
+    rec=$(make_send_case "muse-$name" muse)
+    IFS='|' read -r case_dir home fakebin id <<EOF
 $rec
 EOF
-  keylog="$case_dir/keys.log"
-  : > "$keylog"
-  out=$(run_send_key "$home" "$fakebin" "$id" Escape "$keylog")
-  status=$?
-  expect_code 0 "$status" "muse Escape send should succeed: $out"
-  assert_grep 'Escape' "$keylog" "Escape never reached the muse pane"
-  assert_grep 'C-u' "$keylog" "muse Escape did not clear the restored composer"
-  # Ordering matters: clearing before the interrupt lands would wipe nothing and
-  # leave the restored prompt behind.
-  [ "$(grep -c . "$keylog")" -ge 2 ] || fail "expected both the interrupt and the clear"
-  head -1 "$keylog" | grep -q 'Escape' || fail "the clear was sent before the interrupt"
-  pass "a muse interrupt clears the prompt muse restores into the composer"
+    keylog="$case_dir/keys.log"
+    : > "$keylog"
+    out=$(run_send_key "$home" "$fakebin" "$id" "$key" "$keylog")
+    status=$?
+    expect_code 0 "$status" "muse $key send should succeed: $out"
+    assert_grep "$key" "$keylog" "$key never reached the muse pane"
+    assert_grep 'C-u' "$keylog" "muse $key did not clear the restored composer"
+    [ "$(grep -c . "$keylog")" -ge 2 ] || fail "expected both the interrupt and the clear for $key"
+    head -1 "$keylog" | grep -q "$key" || fail "the clear was sent before the $key interrupt"
+  done
+  pass "every accepted muse Escape alias clears the restored composer"
 }
 
 test_non_muse_escape_does_not_clear() {
@@ -811,6 +845,7 @@ test_muse_trusts_no_record_sources() {
 
 test_detects_versioned_process_ancestor
 test_detection_is_anchored
+test_spawn_clears_inherited_foreign_harness_markers
 test_spawn_launch_shape
 test_spawn_maps_effort_and_model
 test_spawn_refuses_without_credential
@@ -818,7 +853,7 @@ test_spawn_refuses_caller_only_environment_credential
 test_spawn_accepts_stored_credential
 test_spawn_refuses_secondmate
 test_spawn_writes_busy_binding_and_teardown_removes_it
-test_muse_escape_clears_the_composer
+test_muse_escape_aliases_clear_the_composer
 test_non_muse_escape_does_not_clear
 test_failed_clear_is_reported
 test_run_fold_tracks_open_and_settled_turns

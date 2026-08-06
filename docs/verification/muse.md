@@ -47,6 +47,7 @@ $ grep -nE 'muse-bin|exec ' launcher.sh
 
 `ps -o comm= -p <pid>` returns the full executable path, whose basename is `muse-bin-<version>`.
 That is why both `bin/fm-harness.sh` and `bin/backends/tmux.sh` match the anchored prefix `muse-bin-*` rather than an exact name, and why neither can rely on an install-path component: `~/.local/bin/muse-bin-<version>` contains no `muse` path component.
+The Muse launch clears `CLAUDECODE`, `PI_CODING_AGENT`, `GROK_AGENT`, and `FM_PI_HARNESS` before the worker starts so foreign primary markers cannot override the versioned ancestry.
 
 Live tmux liveness against the real binary renamed to its installed form:
 
