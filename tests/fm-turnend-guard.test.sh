@@ -1011,23 +1011,74 @@ test_cursor_shim_wakes_after_actionable_arm_on_continuation() {
   pass "fm-turnend-guard-cursor: continuation wakes keep the drain-and-handle followup"
 }
 
+cursor_shim_stop() {
+  local loop=$1
+  shift
+  printf '{"session_id":"cur-session","loop_count":%s,"workspace_roots":["%s"]}' "$loop" "$CURSOR_FIXTURE_DIR" \
+    | CURSOR_WORKSPACE_ROOT="$CURSOR_FIXTURE_DIR" "$@" bash "$CURSOR_FIXTURE_DIR/bin/fm-turnend-guard-cursor.sh" 2>&1 \
+    | tail -n 1
+}
+
 test_cursor_shim_bounds_loud_failure_followups() {
-  local dir out status
-  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-loop-budget")
+  local dir out i
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-fail-budget")
+  CURSOR_FIXTURE_DIR=$dir
   : > "$dir/state/task1.meta"
   install_failing_arm_stub "$dir"
-  # Under budget the loud registration guidance still fires on a continuation.
-  out=$(printf '{"session_id":"cur-session","loop_count":1,"workspace_roots":["%s"]}' "$dir" \
-    | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>&1); status=$?
-  expect_code 0 "$status" "cursor shim must exit 0 on an under-budget failing continuation"
-  assert_contains "$(printf '%s\n' "$out" | tail -n 1)" "TURN WOULD END BLIND" \
-    "an under-budget failing continuation must keep the loud failure followup"
-  # At the budget the chain ends instead of looping forever on a broken arm.
-  out=$(printf '{"session_id":"cur-session","loop_count":3,"workspace_roots":["%s"]}' "$dir" \
-    | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>/dev/null); status=$?
-  expect_code 0 "$status" "cursor shim must exit 0 at the failure budget"
-  [ "$out" = '{}' ] || fail "cursor shim must stop re-blocking at the failure budget, got: $out"
-  pass "fm-turnend-guard-cursor: loud arm-failure followups are bounded by FM_CURSOR_TURNEND_BLOCK_BUDGET"
+  # Consecutive arm failures each keep the loud registration/startup guidance,
+  # up to the budget; only then does the chain end instead of looping forever
+  # on a broken arm.
+  for i in 1 2 3; do
+    out=$(cursor_shim_stop "$i" env)
+    assert_contains "$out" "TURN WOULD END BLIND" \
+      "arm failure $i of the budget must keep the loud failure followup"
+  done
+  out=$(cursor_shim_stop 4 env)
+  [ "$out" = '{}' ] || fail "cursor shim must stop re-blocking past the failure budget, got: $out"
+  # The exhausted budget resets, so a later failure is diagnosable again rather
+  # than permanently silent.
+  out=$(cursor_shim_stop 5 env)
+  assert_contains "$out" "TURN WOULD END BLIND" \
+    "the failure budget must reset after exhaustion instead of silencing the banner forever"
+  pass "fm-turnend-guard-cursor: consecutive arm failures are bounded by FM_CURSOR_TURNEND_BLOCK_BUDGET and reset"
+}
+
+test_cursor_shim_wake_chain_does_not_consume_failure_budget() {
+  local dir out i
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-wake-then-fail")
+  CURSOR_FIXTURE_DIR=$dir
+  : > "$dir/state/task1.meta"
+  install_actionable_arm_stub "$dir"
+  # Healthy actionable wakes advance loop_count on every continuation; they must
+  # not consume the arm-failure budget, or a later real arm failure ends the
+  # turn blind with no diagnostic.
+  for i in 1 2 3; do
+    out=$(cursor_shim_stop "$i" env)
+    assert_contains "$out" "firstmate watcher wake" \
+      "actionable wake $i must keep the drain-and-handle followup"
+  done
+  install_failing_arm_stub "$dir"
+  out=$(cursor_shim_stop 4 env)
+  assert_contains "$out" "TURN WOULD END BLIND" \
+    "an arm failure after a healthy wake chain must still raise the loud failure followup"
+  pass "fm-turnend-guard-cursor: a healthy wake chain never consumes the arm-failure diagnostic"
+}
+
+test_cursor_shim_bounds_the_actionable_wake_chain() {
+  local dir out i
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-wake-budget")
+  CURSOR_FIXTURE_DIR=$dir
+  : > "$dir/state/task1.meta"
+  install_actionable_arm_stub "$dir"
+  # A wake reason that re-fires on every armed cycle must not chain forever.
+  for i in 1 2; do
+    out=$(cursor_shim_stop "$i" env FM_CURSOR_WAKE_CHAIN_BUDGET=2)
+    assert_contains "$out" "firstmate watcher wake" \
+      "actionable wake $i under the chain ceiling must still deliver a followup"
+  done
+  out=$(cursor_shim_stop 3 env FM_CURSOR_WAKE_CHAIN_BUDGET=2)
+  [ "$out" = '{}' ] || fail "cursor shim must end the wake chain at the ceiling, got: $out"
+  pass "fm-turnend-guard-cursor: the actionable wake chain is bounded by FM_CURSOR_WAKE_CHAIN_BUDGET"
 }
 
 test_cursor_shim_arm_sources_x_mode_cadence() {
@@ -1912,6 +1963,8 @@ test_cursor_shim_allows_when_healthy
 test_cursor_shim_rearms_on_loop_count_continuation
 test_cursor_shim_wakes_after_actionable_arm_on_continuation
 test_cursor_shim_bounds_loud_failure_followups
+test_cursor_shim_wake_chain_does_not_consume_failure_budget
+test_cursor_shim_bounds_the_actionable_wake_chain
 test_cursor_shim_arm_sources_x_mode_cadence
 test_cursor_shim_arm_defaults_cadence_without_x_mode
 test_cursor_shim_missing_payload_allows
