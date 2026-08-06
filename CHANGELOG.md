@@ -6,6 +6,19 @@ Versioning is semantic, and MAJOR is reserved for **contract** breaks that a
 running fleet would notice: the `state/<id>.meta` format, configuration file
 names, or a script's exit codes. MINOR adds capability, PATCH fixes behaviour.
 
+## [1.1.2] - 2026-08-06
+
+### Fixed
+
+- The watcher came up only through the `Stop` hook, which fires at the END of a
+  turn - so starting firstmate and asking nothing left the fleet with no
+  supervision until one turn had completed. `bin/fm-session-start.sh`, the one
+  script firstmate runs before any other instruction, now reports the beacon and
+  demands an arm when it is stale. It deliberately does not arm itself: a
+  watcher forked from a hook is reaped when the hook returns.
+- Registered the local `captain-operations` skill in the load list; it had been
+  written but never referenced, so it was never read.
+
 ## [1.1.1] - 2026-08-06
 
 ### Fixed
