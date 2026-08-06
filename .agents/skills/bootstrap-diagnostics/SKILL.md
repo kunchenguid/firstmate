@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, MODEL_REGISTRY, MODEL_PRICE, MODEL_VERIFY, ADMISSION_CONTROL, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, MODEL_REGISTRY, MODEL_PRICE, MODEL_VERIFY, ADMISSION_CONTROL, WAKE_LEDGER, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
   A silent bootstrap section, or a BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -44,6 +44,12 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `ADMISSION_CONTROL: invalid config/crew-dispatch.json _scheduling.admission_control - <reason>` - the optional fleet-admission policy exists but failed schema validation, so the fleet's admission layer cannot resolve a band.
   Do not dispatch new work in this home until the named field is corrected; an unknown field is refused rather than ignored precisely so a typo cannot silently disable a safety condition.
   `docs/configuration.md` "Fleet admission control" owns the schema, and `fleet-admission` owns what firstmate does with a resolved band.
+- `WAKE_LEDGER: <n> outcome record(s) join no wake record` - that many recorded supervision costs point at a wake this home never drained, so every figure drawn from the ledger overcounts by up to that number.
+  Treat it as a measurement defect, never as supervision work: report the count rather than any rate or total computed from the file, until the captain decides what to purge.
+  The records are append-only evidence, so never rewrite or migrate the file to clear the count; `bin/fm-wake-ledger.sh reconcile` restates it on demand and that script owns the join.
+  A count that grows during a session means something is still recording against unresolvable sequences, which is a bug to escalate rather than a backlog of old damage.
+- `WAKE_LEDGER: the wake ledger could not be read ...` - the file exists but could not be opened, so the count above is unavailable rather than zero.
+  Repair its permissions or path before quoting any supervision-cost figure; an unreadable ledger is reported precisely so it cannot pass as a clean one.
 - `FLEET_SYNC: <repo>: skipped: <reason>` - a benign one-off skip (offline, no origin, local-only); bootstrap continued, investigate only if it blocks work.
   A skip can also report the bounded fleet-refresh timeout (`FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT`, or a fleet-size-aware default with a 20 second floor); a timeout never blocks startup.
 - `FLEET_SYNC: <repo>: recovered: <detail>` - the clone had drifted onto a clean detached HEAD holding no unique commits and the sync self-healed it (re-attached the default branch and fast-forwarded); no action needed, it is reported only so the self-heal is visible.

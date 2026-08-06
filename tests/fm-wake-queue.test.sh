@@ -17,6 +17,53 @@ DRAIN="$ROOT/bin/fm-wake-drain.sh"
 TMP_ROOT=$(fm_test_tmproot fm-wake-tests)
 
 
+# Sourcing fm-wake-lib.sh observes a home; only its write paths create one.
+# A source-time mkdir made every read-only consumer a writer - a ledger
+# reconcile count, a detect-only bootstrap - and that is invisible until
+# something asserts it. The write paths must still materialize the directory
+# on demand, and the lock path especially: fm_lock_acquire_wait retries
+# forever, so a missing directory it cannot create is a hang, not a failure.
+test_sourcing_is_read_only_and_writes_create_state() {
+  local dir lib state rows probe
+  dir="$TMP_ROOT/source-read-only"
+  lib="$ROOT/bin/fm-wake-lib.sh"
+  mkdir -p "$dir"
+
+  state="$dir/never-created"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    # shellcheck disable=SC1090,SC1091
+    . "$1"
+    fm_current_pid > /dev/null
+  ' _ "$lib" || fail "sourcing the wake library failed"
+  [ ! -e "$state" ] \
+    || fail "sourcing the wake library created its state directory"
+
+  state="$dir/created-by-append"
+  append_wake "$state" signal task.status "signal: task.status" \
+    || fail "fm_wake_append failed against a missing state directory"
+  [ -d "$state" ] || fail "fm_wake_append did not create the state directory"
+  rows=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$state/.wake-queue")
+  [ "$rows" -eq 1 ] || fail "fm_wake_append wrote $rows rows, expected 1"
+
+  # A bounded wait: without on-demand creation this spins rather than failing,
+  # so the timeout is the assertion.
+  state="$dir/created-by-lock"
+  probe="$dir/lock-probe.sh"
+  cat > "$probe" <<'PROBE'
+#!/usr/bin/env bash
+set -u
+# shellcheck disable=SC1090,SC1091
+. "$1"
+fm_lock_acquire_wait "$STATE/.demo.lock"
+fm_lock_release "$STATE/.demo.lock"
+PROBE
+  FM_STATE_OVERRIDE="$state" timeout 30 bash "$probe" "$lib" \
+    || fail "acquiring a lock under a missing state directory hung or failed"
+  [ -d "$state" ] || fail "the lock path did not create the state directory"
+
+  pass "sourcing the wake library creates nothing; its write paths create state on demand"
+}
+
 test_concurrent_append_and_drain() {
   local dir state out1 out2 all pids i pid count unique malformed
   dir=$(make_case concurrent)
@@ -437,6 +484,7 @@ test_interruption_before_and_after_raw_commit() {
   pass "interruptions restore before commitment and never replay after raw commitment"
 }
 
+test_sourcing_is_read_only_and_writes_create_state
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor

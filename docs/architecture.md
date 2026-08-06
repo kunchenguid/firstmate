@@ -60,6 +60,10 @@ The wake half is written deterministically by `bin/fm-wake-drain.sh` and the out
 That split is the point rather than an accident: a single coordinator-written line would make measured attention cost fall whenever the recording step was skipped, so the metric would move without the underlying quantity moving.
 Splitting it gives a denominator that is stable under no change and turns missing coverage into a reported number instead of a silent undercount.
 
+The coordinator names only what a wake cost, never which wake it was.
+The sequence was once supplied by hand and validated only as an integer, so a coordinator recording after the fact could pass a remembered or placeholder number; the resulting record stored an unresolvable join, which is indistinguishable from the legitimate record a wiped `state/` produces, and by 2026-08-04 that had fabricated 200 of 249 outcome records.
+The identifier is therefore resolved from the ledger rather than named, an explicitly passed sequence that joins no wake record is refused instead of stored, and session-start bootstrap reports how many outcome records join nothing, so the same corruption cannot recur silently or survive unmeasured.
+
 The ledger can never block, delay, alter, or fail a wake.
 The drain calls it only after its authoritative print-and-delete boundary, with stdout discarded and failure ignored, and the ledger itself takes no lock and writes one capped line per record.
 `bin/fm-teardown.sh` writes the terminal record immediately before deleting the task metadata, which is the last moment that task's harness, model, and effort are recoverable.
