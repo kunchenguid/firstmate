@@ -138,6 +138,17 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
+# Elapsed seconds an endpoint must stay absent before the Layer 1 unreadable-pane
+# branch calls it gone. This is a teardown race window, not a poll count: a
+# deliberate teardown kills the agent (and with it the pane) during its worktree
+# return, then still has to finish the treehouse lock retries, the leaked-process
+# reap grace, the no-mistakes abort call, the herdr endpoint confirmation, the
+# per-task temp/home removal, and the PR-poll and busy-state retirement before it
+# reaches the `rm -f "$STATE/$ID.meta"` that ends the race. 30s matches
+# fm-teardown.sh's own FM_STALE_WORKTREE_LOCK_AGE_SECS default for the same class
+# of teardown race, and is two cycles at the default 15s POLL, so default-cadence
+# behavior is unchanged while a short POLL can no longer confirm nothing.
+ENDPOINT_GONE_CONFIRM_SECS=${FM_ENDPOINT_GONE_CONFIRM_SECS:-30}
 # A busy pane is unconditional proof of liveness with no built-in duration bound,
 # so a hung foreground call can remain hidden even while its rendered busy
 # footer changes every poll. BUSY_TURN_MAX_SECS bounds how long any busy pane
@@ -952,19 +963,29 @@ EOF
       # A deliberate teardown looks identical to a vanished endpoint for a
       # multi-second window - fm-teardown.sh kills the pane well before it
       # removes $ID.meta, and recorded_windows() reads meta from disk - so the
-      # gone verdict must be confirmed on a second consecutive poll and against
-      # a still-present meta before it wakes anyone.
+      # gone verdict must outlive that race before it wakes anyone. The marker
+      # therefore records the WALL-CLOCK epoch of the first absent sighting and
+      # the verdict fires only once ENDPOINT_GONE_CONFIRM_SECS have really
+      # elapsed with the endpoint still absent and $ID.meta still present.
+      # Counting polls instead would confirm nothing: POLL is configurable and
+      # tests drive it to hundredths of a second, so two polls can span 40ms.
+      # `fired` (suppression, one wake per disappearance) and any unparsable
+      # value (restart the timer) are the only non-epoch marker states.
+      gone_marker="$STATE/.endpoint-gone-$key"
       if fm_backend_target_exists "$(window_backend "$w")" "$w"; then
-        rm -f "$STATE/.endpoint-gone-$key"
+        rm -f "$gone_marker"
       elif [ -e "$STATE/$task.meta" ]; then
-        case "$(cat "$STATE/.endpoint-gone-$key" 2>/dev/null || true)" in
+        gone_since=$(cat "$gone_marker" 2>/dev/null || true)
+        case "$gone_since" in
           fired) ;;
-          seen)
-            fm_wake_append stale "$w" "stale: $w (endpoint gone)" || exit 1
-            printf 'fired' > "$STATE/.endpoint-gone-$key"
-            wake "stale: $w (endpoint gone)"
+          ''|*[!0-9]*) date +%s > "$gone_marker" ;;
+          *)
+            if [ $(( $(date +%s) - gone_since )) -ge "$ENDPOINT_GONE_CONFIRM_SECS" ]; then
+              fm_wake_append stale "$w" "stale: $w (endpoint gone)" || exit 1
+              printf 'fired' > "$gone_marker"
+              wake "stale: $w (endpoint gone)"
+            fi
             ;;
-          *) printf 'seen' > "$STATE/.endpoint-gone-$key" ;;
         esac
       fi
       continue

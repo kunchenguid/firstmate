@@ -461,10 +461,15 @@ test_terminal_stale_surfaced() {
 # fm_backend_herdr_target_readable), so a failed read is real evidence rather
 # than a self-healing hiccup. The watcher must not drop the window silently:
 # it confirms the endpoint is genuinely gone with the side-effect-free existence
-# probe, requires the verdict to hold on two consecutive polls (a teardown kills
-# the pane well before it removes $ID.meta and looks identical for seconds), and
-# then raises exactly one `stale: <window> (endpoint gone)` wake. A pane that is
-# still there but momentarily unreadable is a transient and clears the marker.
+# probe, requires the verdict to hold for FM_ENDPOINT_GONE_CONFIRM_SECS of real
+# elapsed time (a teardown kills the pane well before it removes $ID.meta and
+# looks identical for seconds), and then raises exactly one
+# `stale: <window> (endpoint gone)` wake. A pane that is still there but
+# momentarily unreadable is a transient and clears the marker.
+# The time floor itself is covered by
+# test_endpoint_gone_floor_is_elapsed_time_not_poll_count; this test drives the
+# floor to 0 once the first sighting is recorded so it exercises only the
+# confirm/surface-once/clear sequence.
 test_endpoint_gone_confirmed_then_surfaced_once() {
   local dir state fakebin out drain_out window key marker pid
   dir=$(make_case endpoint-gone); state="$dir/state"; fakebin="$dir/fakebin"
@@ -500,17 +505,20 @@ SH
     FM_POLL=30 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if ! wait_live "$pid" 25; then
-    reap "$pid"; fail "watcher woke on the FIRST unreadable poll; a gone endpoint must be confirmed twice: $(cat "$out")"
+    reap "$pid"; fail "watcher woke on the FIRST unreadable poll; a gone endpoint must be time-confirmed: $(cat "$out")"
   fi
   [ ! -s "$out" ] || fail "the first unreadable poll printed a wake reason: $(cat "$out")"
   [ ! -s "$state/.wake-queue" ] || fail "the first unreadable poll enqueued a wake"
-  [ "$(cat "$marker" 2>/dev/null || true)" = seen ] || \
-    fail "the first unreadable poll did not record the pending endpoint-gone verdict, got '$(cat "$marker" 2>/dev/null || true)'"
+  case "$(cat "$marker" 2>/dev/null || true)" in
+    ''|*[!0-9]*)
+      fail "the first unreadable poll did not record the pending endpoint-gone epoch, got '$(cat "$marker" 2>/dev/null || true)'" ;;
+  esac
   reap "$pid"
 
-  # Phase B: the verdict holds on the next poll - one wake, queued and printed.
+  # Phase B: the floor has elapsed and the verdict holds - one wake, queued and printed.
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_STATE_OVERRIDE="$state" \
+    FM_ENDPOINT_GONE_CONFIRM_SECS=0 \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 40 || fail "watcher did not exit for a confirmed gone endpoint"
@@ -523,8 +531,10 @@ SH
     fail "the surfaced endpoint-gone verdict was not marked fired, got '$(cat "$marker" 2>/dev/null || true)'"
 
   # Phase C: still gone on later polls - already surfaced, so no second wake.
+  # The floor stays at 0 so only the fired suppression can hold the wake back.
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_STATE_OVERRIDE="$state" \
+    FM_ENDPOINT_GONE_CONFIRM_SECS=0 \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if ! wait_live "$pid" 25; then
@@ -544,7 +554,85 @@ SH
   fi
   [ ! -e "$marker" ] || fail "a present pane did not clear the endpoint-gone verdict, marker holds '$(cat "$marker")'"
   reap "$pid"
-  pass "an unreadable pane is confirmed gone over two polls, surfaced once, and cleared when the endpoint is present"
+  pass "an unreadable pane is confirmed gone over the time floor, surfaced once, and cleared when the endpoint is present"
+}
+
+# --- endpoint-gone confirmation is elapsed time, never a poll count ---
+# Regression for the 2026-08 fast-poll false-gone incident. The confirmation
+# window exists to outlive a deliberate teardown, which kills the pane many
+# steps before it removes $ID.meta. Counting polls cannot express that: POLL is
+# configurable and tests/CI drive it to hundredths of a second, so two polls can
+# span 40ms and confirm nothing. tests/fm-pr-check-security.test.sh caught this
+# the expensive way - its FM_POLL=0.02 watcher exited on a "vanished" fixture
+# pane before the publication it was actually watching became readable. Both
+# sides of the boundary are asserted here so the floor cannot silently revert to
+# a poll count: many fast polls below the floor must not fire, and the same
+# absent endpoint past the floor must fire exactly once.
+test_endpoint_gone_floor_is_elapsed_time_not_poll_count() {
+  local dir state fakebin out drain_out window key marker pid lines
+  dir=$(make_case endpoint-gone-floor); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  window="test:fm-fastpoll"
+  # A genuinely absent endpoint: the capture fails AND the side-effect-free
+  # existence probe says the target is gone, on every poll.
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  capture-pane) exit 1 ;;
+  display-message) exit 1 ;;
+  list-windows)
+    [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "${FM_FAKE_TMUX_WINDOW#*:}"
+    exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/fastpoll.meta"
+  printf 'working: still compiling\n' > "$state/fastpoll.status"
+  printf '%s' "$(seen_sig "$state/fastpoll.status")" > "$state/.seen-fastpoll_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  marker="$state/.endpoint-gone-$key"
+
+  # Side 1: below the floor. A 30s floor with a 0.02s poll gives well over a
+  # hundred consecutive absent sightings inside the ~3s this runs for; a
+  # poll-count rule would have fired on the second one.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_STATE_OVERRIDE="$state" \
+    FM_ENDPOINT_GONE_CONFIRM_SECS=30 \
+    FM_POLL=0.02 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "an absent endpoint fired before its time floor elapsed; the confirmation is counting polls, not seconds: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a sub-floor absent endpoint printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a sub-floor absent endpoint enqueued a wake"
+  case "$(cat "$marker" 2>/dev/null || true)" in
+    ''|*[!0-9]*)
+      reap "$pid"
+      fail "the pending endpoint-gone marker is not a wall-clock epoch, got '$(cat "$marker" 2>/dev/null || true)'" ;;
+  esac
+  reap "$pid"
+
+  # Side 2: the same absent endpoint, now past the floor. Side 1 ran for at
+  # least 3s of real time after stamping the marker, so a 1s floor is provably
+  # elapsed - and it is still a real floor, not the 0 the other test uses.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_STATE_OVERRIDE="$state" \
+    FM_ENDPOINT_GONE_CONFIRM_SECS=1 \
+    FM_POLL=0.02 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "an absent endpoint past its time floor never woke firstmate"
+  grep -Fx "stale: $window (endpoint gone)" "$out" >/dev/null || \
+    fail "watcher did not print the endpoint-gone wake past the floor, got '$(cat "$out")'"
+  lines=$(grep -c . "$out" || true)
+  [ "$lines" = 1 ] || fail "the endpoint-gone wake must fire exactly once, got $lines lines: $(cat "$out")"
+  [ "$(cat "$marker" 2>/dev/null || true)" = fired ] || \
+    fail "the surfaced endpoint-gone verdict was not marked fired, got '$(cat "$marker" 2>/dev/null || true)'"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the endpoint-gone wake failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window (endpoint gone)" >/dev/null || \
+    fail "the endpoint-gone wake was not queued past the floor: $(cat "$drain_out")"
+  pass "the endpoint-gone verdict is held by elapsed seconds, not by a poll count, on both sides of the floor"
 }
 
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
@@ -1905,6 +1993,7 @@ test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_endpoint_gone_confirmed_then_surfaced_once
+test_endpoint_gone_floor_is_elapsed_time_not_poll_count
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
