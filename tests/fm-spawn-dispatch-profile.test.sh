@@ -515,6 +515,7 @@ test_env_wrapped_claude_bypass_is_refused() {
 test_shell_obfuscated_claude_bypass_is_refused() {
   local rec id raw out status
   id=profile-raw-claude-shell-z15g
+  # shellcheck disable=SC2016 # This hostile command substitution must remain literal rejection input.
   raw='$(printf clau%s de) --dangerously-skip-permissions'
   rec=$(make_spawn_case profile-raw-claude-shell claude "$id")
   read_case_record "$rec"

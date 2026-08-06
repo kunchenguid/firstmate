@@ -287,7 +287,7 @@ for a in "$@"; do
     --harness=*) HARNESS_ARG=${a#--harness=}; HARNESS_SET=1 ;;
     --unverified-adapter) want_value=unverified-adapter ;;
     --unverified-adapter=*) UNVERIFIED_ADAPTER=${a#--unverified-adapter=}; UNVERIFIED_ADAPTER_SET=1 ;;
-    --adapter-arg) want_value=adapter-arg ;;
+    --adapter-arg) want_value='adapter-arg' ;;
     --adapter-arg=*) UNVERIFIED_ADAPTER_ARGS+=("${a#--adapter-arg=}") ;;
     --model) want_value=model ;;
     --model=*) MODEL=${a#--model=}; MODEL_SET=1 ;;
