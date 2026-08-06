@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# fm-test-run.sh - single owner of Firstmate's behavior-test runner, lane
-# composition for portable CI shards, local --jobs for the proven-isolated set,
-# timing markers, and the complete-regression coverage guard.
+# fm-test-run.sh - single owner of Firstmate's behavior-test runner, portable
+# CI lane composition, declarative runtime-gate evidence, local --jobs for the
+# proven-isolated set, timing markers, and the complete-regression coverage guard.
 #
 # Selection modes (exactly one of: --all, --family, --changed, --lane,
 # --proven-isolated, or script paths):
