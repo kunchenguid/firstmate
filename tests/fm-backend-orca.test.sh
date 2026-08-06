@@ -5,8 +5,11 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-orca-tests)
+POLL="$ROOT/bin/fm-pr-poll.sh"
 
 make_orca_fakebin() {  # <dir> -> echoes fakebin dir
   local fb="$1/fakebin"
@@ -467,6 +470,46 @@ test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
   assert_grep "orca_worktree_id=wt-pathless-cleanup" "$state/$id.meta" "preserved pathless metadata missing Orca worktree id"
   assert_no_grep "terminal=" "$state/$id.meta" "preserved pathless metadata should not invent a terminal handle"
   pass "fm-spawn.sh --backend orca: preserves metadata when pathless cleanup fails"
+}
+
+test_orca_cleanup_fallback_preserves_a_registered_pr_poll() {
+  local proj data state config id url out status
+  id="orcaprpriorityz7"
+  url=https://github.com/example/repo/pull/9
+  proj="$TMP_ROOT/pr-cleanup-project"
+  data="$TMP_ROOT/pr-cleanup-data"
+  state="$TMP_ROOT/pr-cleanup-state"
+  config="$TMP_ROOT/pr-cleanup-config"
+  fm_git_init_commit "$proj"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "worktree=$proj" "project=$proj" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" "pr=$url"
+  fm_pr_poll_prepare "$state" "$id" github "$url" github.com example/repo 9 "$POLL" \
+    || fail "could not prepare registered PR poll fixture"
+  fm_pr_poll_publish_prepared || fail "could not publish registered PR poll fixture"
+  fm_pr_poll_artifacts_valid "$state" "$id" "$POLL" \
+    || fail "registered PR poll fixture was not valid"
+
+  orca_case pr-cleanup-priority
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-pr-cleanup"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-pr-cleanup"}}}\n' > "$RESP/3.out"
+  printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/4.out"
+  printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/5.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "pathless Orca spawn should fail"
+  assert_grep "pr=$url" "$state/$id.meta" \
+    "Orca cleanup fallback discarded recorded PR metadata"
+  fm_pr_poll_artifacts_valid "$state" "$id" "$POLL" \
+    || fail "Orca cleanup fallback displaced the registered PR merge poll"
+  pass "Orca cleanup fallback preserves registered PR merge-poll ownership"
 }
 
 test_spawn_writes_orca_metadata_and_launches_harness() {
@@ -1302,6 +1345,7 @@ test_json_get_ignores_undocumented_terminal_id_shapes
 test_worktree_and_terminal_helpers_parse_json
 test_worktree_create_removes_worktree_when_path_missing
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails
+test_orca_cleanup_fallback_preserves_a_registered_pr_poll
 test_spawn_writes_orca_metadata_and_launches_harness
 test_spawn_refuses_orca_secondmate_before_home_mutation
 test_spawn_refuses_orca_when_runtime_not_ready

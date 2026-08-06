@@ -54,11 +54,95 @@ fi
 META_TMP=
 CHECK_SLOT_HELD=0
 MIGRATION_BOUNDARY_HELD=0
+PR_HANDOFF_ACTIVE=0
+PR_HANDOFF_COMMITTED=0
+PR_ROLLBACK_META=
+PR_ROLLBACK_CHECK=
+PR_ROLLBACK_DATA=
+PR_ROLLBACK_REGISTRATION=
+PR_ROLLBACK_META_PRESENT=0
+PR_ROLLBACK_CHECK_PRESENT=0
+PR_ROLLBACK_DATA_PRESENT=0
+PR_ROLLBACK_REGISTRATION_PRESENT=0
+
+pr_check_backup_file() {
+  local source=$1 label=$2 backup
+  PR_CHECK_BACKUP_PATH=
+  PR_CHECK_BACKUP_PRESENT=0
+  [ ! -e "$source" ] && [ ! -L "$source" ] && return 0
+  [ -f "$source" ] && [ ! -L "$source" ] && [ "$(fm_pr_file_link_count "$source")" = 1 ] || return 1
+  backup=$(mktemp "$STATE/.fm-pr-check-$label.XXXXXX") || return 1
+  if ! cp -p -- "$source" "$backup" \
+    || [ ! -f "$backup" ] || [ -L "$backup" ] \
+    || [ "$(fm_pr_file_link_count "$backup")" != 1 ] \
+    || [ "$(fm_pr_file_device "$backup")" != "$STATE_DEVICE" ]; then
+    rm -f -- "$backup"
+    return 1
+  fi
+  PR_CHECK_BACKUP_PATH=$backup
+  PR_CHECK_BACKUP_PRESENT=1
+}
+
+pr_check_restore_file() {
+  local destination=$1 backup=$2 present=$3
+  if [ "$present" -eq 1 ]; then
+    [ -n "$backup" ] || return 1
+    fm_pr_regular_destination_on_device_or_absent "$destination" "$STATE_DEVICE" || return 1
+    mv -f -- "$backup" "$destination" || return 1
+    return 0
+  fi
+  [ ! -e "$destination" ] && [ ! -L "$destination" ] && return 0
+  fm_pr_regular_destination_on_device_or_absent "$destination" "$STATE_DEVICE" || return 1
+  rm -f -- "$destination"
+}
+
+pr_check_rollback_discard() {
+  [ -z "$PR_ROLLBACK_META" ] || rm -f -- "$PR_ROLLBACK_META"
+  [ -z "$PR_ROLLBACK_CHECK" ] || rm -f -- "$PR_ROLLBACK_CHECK"
+  [ -z "$PR_ROLLBACK_DATA" ] || rm -f -- "$PR_ROLLBACK_DATA"
+  [ -z "$PR_ROLLBACK_REGISTRATION" ] || rm -f -- "$PR_ROLLBACK_REGISTRATION"
+  PR_ROLLBACK_META=
+  PR_ROLLBACK_CHECK=
+  PR_ROLLBACK_DATA=
+  PR_ROLLBACK_REGISTRATION=
+  PR_ROLLBACK_META_PRESENT=0
+  PR_ROLLBACK_CHECK_PRESENT=0
+  PR_ROLLBACK_DATA_PRESENT=0
+  PR_ROLLBACK_REGISTRATION_PRESENT=0
+}
+
+pr_check_rollback() {
+  local failed=0
+  [ "$PR_HANDOFF_ACTIVE" -eq 1 ] || return 0
+  [ "$PR_HANDOFF_COMMITTED" -eq 0 ] || return 0
+  pr_check_restore_file "$FM_PR_POLL_DATA_DEST" "$PR_ROLLBACK_DATA" "$PR_ROLLBACK_DATA_PRESENT" || failed=1
+  if [ "$PR_ROLLBACK_DATA_PRESENT" -eq 1 ] && [ "$failed" -eq 0 ]; then
+    PR_ROLLBACK_DATA=
+  fi
+  pr_check_restore_file "$FM_PR_POLL_REG_DEST" "$PR_ROLLBACK_REGISTRATION" "$PR_ROLLBACK_REGISTRATION_PRESENT" || failed=1
+  if [ "$PR_ROLLBACK_REGISTRATION_PRESENT" -eq 1 ] && [ "$failed" -eq 0 ]; then
+    PR_ROLLBACK_REGISTRATION=
+  fi
+  pr_check_restore_file "$FM_PR_POLL_CHECK_DEST" "$PR_ROLLBACK_CHECK" "$PR_ROLLBACK_CHECK_PRESENT" || failed=1
+  if [ "$PR_ROLLBACK_CHECK_PRESENT" -eq 1 ] && [ "$failed" -eq 0 ]; then
+    PR_ROLLBACK_CHECK=
+  fi
+  pr_check_restore_file "$META" "$PR_ROLLBACK_META" "$PR_ROLLBACK_META_PRESENT" || failed=1
+  if [ "$PR_ROLLBACK_META_PRESENT" -eq 1 ] && [ "$failed" -eq 0 ]; then
+    PR_ROLLBACK_META=
+  fi
+  return "$failed"
+}
+
 pr_check_cleanup() {
+  local status=$?
+  pr_check_rollback || true
   fm_pr_poll_cleanup
   [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
+  pr_check_rollback_discard
   [ "$CHECK_SLOT_HELD" -ne 1 ] || fm_custom_check_slot_release
   [ "$MIGRATION_BOUNDARY_HELD" -ne 1 ] || fm_custom_check_migration_release
+  return "$status"
 }
 trap pr_check_cleanup EXIT
 trap 'exit 1' HUP INT TERM
@@ -107,6 +191,19 @@ fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$N
 META_DEVICE=$(fm_pr_file_device "$META") || exit 1
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 [ "$META_DEVICE" = "$STATE_DEVICE" ] || { echo "error: task metadata is unavailable" >&2; exit 1; }
+pr_check_backup_file "$META" meta || exit 1
+PR_ROLLBACK_META=$PR_CHECK_BACKUP_PATH
+PR_ROLLBACK_META_PRESENT=$PR_CHECK_BACKUP_PRESENT
+pr_check_backup_file "$FM_PR_POLL_CHECK_DEST" check || exit 1
+PR_ROLLBACK_CHECK=$PR_CHECK_BACKUP_PATH
+PR_ROLLBACK_CHECK_PRESENT=$PR_CHECK_BACKUP_PRESENT
+pr_check_backup_file "$FM_PR_POLL_DATA_DEST" data || exit 1
+PR_ROLLBACK_DATA=$PR_CHECK_BACKUP_PATH
+PR_ROLLBACK_DATA_PRESENT=$PR_CHECK_BACKUP_PRESENT
+pr_check_backup_file "$FM_PR_POLL_REG_DEST" registration || exit 1
+PR_ROLLBACK_REGISTRATION=$PR_CHECK_BACKUP_PATH
+PR_ROLLBACK_REGISTRATION_PRESENT=$PR_CHECK_BACKUP_PRESENT
+PR_HANDOFF_ACTIVE=1
 META_TMP=$(mktemp "$STATE/.fm-pr-meta.XXXXXX") || exit 1
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
@@ -135,4 +232,7 @@ fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
+PR_HANDOFF_COMMITTED=1
+PR_HANDOFF_ACTIVE=0
+pr_check_rollback_discard
 printf 'armed: state/%s.check.sh\n' "$ID"

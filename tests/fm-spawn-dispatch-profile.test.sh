@@ -64,6 +64,9 @@ case "$src" in
       while [ ! -e "${FM_TEST_SPAWN_META_BLOCK_RELEASE:?}" ]; do sleep 0.02; done
     fi
     ;;
+  */.fm-validation-check.*)
+    [ -z "${FM_TEST_VALIDATION_FAIL_SOURCE_MOVE:-}" ] || exit 1
+    ;;
 esac
 exec "${FM_TEST_REAL_MV:-/bin/mv}" "$@"
 SH
@@ -174,6 +177,25 @@ test_no_mistakes_spawn_arms_the_registered_validation_check() {
   fm_custom_check_registered "$HOME_DIR/state" "$id" \
     || fail "no-mistakes spawn did not register its validation check"
   pass "no-mistakes spawn arms a registered validation check before launch"
+}
+
+test_failed_validation_arm_rolls_back_no_mistakes_metadata() {
+  local rec id out status
+  id=profile-validation-rollback-z1
+  rec=$(make_spawn_case profile-validation-rollback claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_VALIDATION_FAIL_SOURCE_MOVE=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn unexpectedly succeeded after validation arm failure"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "failed validation arm left a no-mistakes ship visible without its gate"
+  assert_absent "$HOME_DIR/state/$id.check.sh" \
+    "failed validation arm left a runnable check behind"
+  assert_absent "$HOME_DIR/state/$id.check-trust" \
+    "failed validation arm left a trust binding behind"
+  pass "failed validation arm rolls back no-mistakes ship metadata"
 }
 
 test_same_id_spawn_preserves_a_registered_pr_merge_poll() {
@@ -811,6 +833,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 
 test_no_profile_keeps_claude_profile_defaults
 test_no_mistakes_spawn_arms_the_registered_validation_check
+test_failed_validation_arm_rolls_back_no_mistakes_metadata
 test_same_id_spawn_preserves_a_registered_pr_merge_poll
 test_spawn_serializes_a_concurrent_pr_merge_poll
 test_relative_home_overrides_launch_with_absolute_cross_process_paths

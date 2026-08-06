@@ -15,6 +15,7 @@ REGISTER="$ROOT/bin/fm-check-register.sh"
 MIGRATE="$ROOT/bin/fm-pr-check-migrate.sh"
 CHECKPOINT="$ROOT/bin/fm-watch-checkpoint.sh"
 POLL="$ROOT/bin/fm-pr-poll.sh"
+X_LIB="$ROOT/bin/fm-x-lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-validation-check)
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 REAL_MV=$(command -v mv)
@@ -81,11 +82,22 @@ case "$src" in
       : > "$FM_TEST_VALIDATION_BLOCK_READY"
       while [ ! -e "${FM_TEST_VALIDATION_RELEASE:?}" ]; do sleep 0.02; done
     fi
+    [ -z "${FM_TEST_VALIDATION_FAIL_SOURCE_MOVE:-}" ] || exit 1
     ;;
   */.fm-pr-poll-check.*)
     if [ -n "${FM_TEST_PR_POLL_BLOCK_READY:-}" ]; then
       : > "$FM_TEST_PR_POLL_BLOCK_READY"
       while [ ! -e "${FM_TEST_PR_POLL_BLOCK_RELEASE:?}" ]; do sleep 0.02; done
+    fi
+    if [ -n "${FM_TEST_PR_POLL_INTERRUPT_PARENT:-}" ]; then
+      kill -TERM "$PPID"
+      exit 1
+    fi
+    ;;
+  */*.meta.fm-x.*)
+    if [ -n "${FM_TEST_X_META_BLOCK_READY:-}" ]; then
+      : > "$FM_TEST_X_META_BLOCK_READY"
+      while [ ! -e "${FM_TEST_X_META_BLOCK_RELEASE:?}" ]; do sleep 0.02; done
     fi
     ;;
 esac
@@ -221,6 +233,32 @@ test_publishes_trust_before_the_validation_source() {
   pass "validation source becomes visible only after its trust binding"
 }
 
+test_failed_validation_publication_leaves_no_mismatched_registration() {
+  local dir status out rc=0
+  dir=$(make_case validation-publication-rollback)
+  status="$dir/status"
+  write_owned_status "$dir" "$status" 'status: running' 'awaiting_agent: working 2m'
+  out=$(FM_TEST_REAL_MV="$REAL_MV" FM_TEST_VALIDATION_FAIL_SOURCE_MOVE=1 \
+    FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" PATH="$dir/fakebin:$BASE_PATH" \
+    "$ARM" task-a 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "forced validation source publication failure unexpectedly succeeded"
+  assert_absent "$dir/home/state/task-a.check.sh" \
+    "failed validation source publication left a runnable check"
+  assert_absent "$dir/home/state/task-a.check-trust" \
+    "failed validation source publication left a mismatched trust binding"
+  rc=0
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_TEST_STATUS="$status" \
+    FM_POLL=1 FM_CHECK_INTERVAL=1 FM_SIGNAL_GRACE=1 PATH="$dir/fakebin:$BASE_PATH" \
+    "$CHECKPOINT" --seconds 2 2>&1) || rc=$?
+  case "$rc" in
+    0|124) ;;
+    *) fail "validation rollback checkpoint exited $rc: $out" ;;
+  esac
+  assert_not_contains "$out" 'rejected unauthenticated state checks' \
+    "failed validation publication caused a false watcher rejection"
+  pass "failed validation publication rolls back source and trust together"
+}
+
 test_fails_silent_when_a_local_status_read_is_unavailable_or_unparseable() {
   local dir status out empty_path
   dir=$(make_case silent-failures)
@@ -329,6 +367,48 @@ test_pr_publication_wins_over_an_inflight_validation_arm() {
   fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
     || fail "PR merge poll did not own the slot after concurrent hand-off"
   pass "concurrent hand-off preserves PR merge poll priority"
+}
+
+test_x_metadata_rewrite_serializes_with_pr_publication() {
+  local dir state ready release x_pid pr_pid attempt=0
+  dir=$(make_case x-metadata-pr-transition)
+  state="$dir/home/state"
+  run_arm "$dir" >/dev/null || fail "could not arm X metadata transition fixture"
+  ready="$dir/x-meta-ready"
+  release="$dir/x-meta-release"
+
+  FM_TEST_REAL_MV="$REAL_MV" FM_TEST_X_META_BLOCK_READY="$ready" FM_TEST_X_META_BLOCK_RELEASE="$release" \
+    PATH="$dir/fakebin:$BASE_PATH" bash -c \
+    '. "$1"; fmx_meta_link_set "$2/task-a.meta" req-x 1700000000' _ "$X_LIB" "$state" \
+    > "$dir/x.out" 2> "$dir/x.err" &
+  x_pid=$!
+  while [ "$attempt" -lt 100 ]; do
+    [ -e "$ready" ] && break
+    sleep 0.02
+    attempt=$((attempt + 1))
+  done
+  if [ ! -e "$ready" ]; then
+    : > "$release"
+    wait "$x_pid" 2>/dev/null || true
+    fail "X metadata rewrite did not reach its check-slot boundary"
+  fi
+
+  FM_TEST_REAL_MV="$REAL_MV" FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    PATH="$dir/fakebin:$BASE_PATH" "$PR_CHECK" task-a https://github.com/example/repo/pull/9 \
+    > "$dir/pr.out" 2> "$dir/pr.err" &
+  pr_pid=$!
+  sleep 0.1
+  assert_absent "$state/task-a.pr-poll-registration" \
+    "PR publication entered an X-owned metadata boundary"
+
+  : > "$release"
+  wait "$x_pid" || fail "X metadata rewrite failed: $(cat "$dir/x.err")"
+  wait "$pr_pid" || fail "PR publication failed after X metadata release: $(cat "$dir/pr.err")"
+  assert_grep 'x_request=req-x' "$state/task-a.meta" \
+    "PR publication dropped the completed X metadata rewrite"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "X metadata rewrite displaced the registered PR merge poll"
+  pass "X metadata rewrites share the PR publication boundary"
 }
 
 test_custom_registration_and_migration_preserve_pr_poll_priority() {
@@ -470,6 +550,35 @@ test_watcher_skips_a_live_pr_publication_slot() {
   pass "watcher skips PR publication while its task slot is live"
 }
 
+test_interrupted_pr_publication_restores_validation_gate() {
+  local dir state status out rc=0
+  dir=$(make_case interrupted-pr-publication)
+  state="$dir/home/state"
+  status="$dir/status"
+  write_owned_status "$dir" "$status" 'status: running' 'awaiting_agent: working 2m'
+  run_arm "$dir" >/dev/null || fail "could not arm interrupted PR publication fixture"
+
+  out=$(FM_TEST_REAL_MV="$REAL_MV" FM_TEST_PR_POLL_INTERRUPT_PARENT=1 \
+    FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    PATH="$dir/fakebin:$BASE_PATH" "$PR_CHECK" task-a https://github.com/example/repo/pull/9 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "interrupted PR publication unexpectedly succeeded"
+  assert_no_grep '^pr=' "$state/task-a.meta" \
+    "interrupted PR publication left metadata claiming an unavailable merge poll"
+  fm_validation_check_registered "$state" task-a "$ROOT/bin/fm-nm-run-lib.sh" "$ROOT/bin/fm-validation-poll.sh" \
+    || fail "interrupted PR publication did not restore the validation gate"
+  rc=0
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_TEST_STATUS="$status" \
+    FM_POLL=1 FM_CHECK_INTERVAL=1 FM_SIGNAL_GRACE=1 PATH="$dir/fakebin:$BASE_PATH" \
+    "$CHECKPOINT" --seconds 2 2>&1) || rc=$?
+  case "$rc" in
+    0|124) ;;
+    *) fail "interrupted PR checkpoint exited $rc: $out" ;;
+  esac
+  assert_not_contains "$out" 'rejected unauthenticated state checks' \
+    "interrupted PR publication caused a false watcher rejection"
+  pass "interrupted PR publication restores the prior validation gate"
+}
+
 test_migration_defers_a_live_check_slot() {
   local dir state ready release holder_pid attempt=0 source_hash
   dir=$(make_case migration-live-slot)
@@ -530,12 +639,15 @@ test_arms_a_private_registered_check_and_stays_quiet_when_healthy
 test_wakes_only_for_terminal_or_over_age_parked_runs
 test_ignores_runs_not_owned_by_the_task_worktree
 test_publishes_trust_before_the_validation_source
+test_failed_validation_publication_leaves_no_mismatched_registration
 test_fails_silent_when_a_local_status_read_is_unavailable_or_unparseable
 test_watcher_does_not_execute_an_unregistered_validation_check
 test_pr_merge_poll_replaces_and_outprioritizes_validation_poll
 test_pr_publication_wins_over_an_inflight_validation_arm
+test_x_metadata_rewrite_serializes_with_pr_publication
 test_custom_registration_and_migration_preserve_pr_poll_priority
 test_no_mistakes_validation_ownership_rearms_custom_replacements
 test_migration_marker_rearms_a_missing_validation_gate
 test_watcher_skips_a_live_pr_publication_slot
+test_interrupted_pr_publication_restores_validation_gate
 test_migration_defers_a_live_check_slot

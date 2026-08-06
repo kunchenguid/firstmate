@@ -61,12 +61,72 @@ TRUST="$STATE/$ID.check-trust"
 }
 
 TMP=
+TRUST_TMP=
+CHECK_BACKUP=
+TRUST_BACKUP=
+CHECK_BACKUP_PRESENT=0
+TRUST_BACKUP_PRESENT=0
+VALIDATION_TRANSACTION_ACTIVE=0
+VALIDATION_COMMITTED=0
 CHECK_SLOT_HELD=0
 MIGRATION_BOUNDARY_HELD=0
+validation_backup_file() {
+  local source=$1 label=$2 backup
+  VALIDATION_BACKUP_PATH=
+  VALIDATION_BACKUP_PRESENT=0
+  [ ! -e "$source" ] && [ ! -L "$source" ] && return 0
+  [ -f "$source" ] && [ ! -L "$source" ] && [ "$(fm_pr_file_link_count "$source")" = 1 ] || return 1
+  backup=$(mktemp "$STATE/.fm-validation-$label.XXXXXX") || return 1
+  if ! cp -p -- "$source" "$backup" \
+    || [ ! -f "$backup" ] || [ -L "$backup" ] \
+    || [ "$(fm_pr_file_link_count "$backup")" != 1 ] \
+    || [ "$(fm_pr_file_device "$backup")" != "$STATE_DEVICE" ]; then
+    rm -f -- "$backup"
+    return 1
+  fi
+  VALIDATION_BACKUP_PATH=$backup
+  VALIDATION_BACKUP_PRESENT=1
+}
+
+validation_restore_file() {
+  local destination=$1 backup=$2 present=$3
+  if [ "$present" -eq 1 ]; then
+    [ -n "$backup" ] || return 1
+    fm_pr_regular_destination_on_device_or_absent "$destination" "$STATE_DEVICE" || return 1
+    mv -f -- "$backup" "$destination" || return 1
+    return 0
+  fi
+  [ ! -e "$destination" ] && [ ! -L "$destination" ] && return 0
+  fm_pr_regular_destination_on_device_or_absent "$destination" "$STATE_DEVICE" || return 1
+  rm -f -- "$destination"
+}
+
+validation_rollback() {
+  local failed=0
+  [ "$VALIDATION_TRANSACTION_ACTIVE" -eq 1 ] || return 0
+  [ "$VALIDATION_COMMITTED" -eq 0 ] || return 0
+  validation_restore_file "$CHECK" "$CHECK_BACKUP" "$CHECK_BACKUP_PRESENT" || failed=1
+  if [ "$CHECK_BACKUP_PRESENT" -eq 1 ] && [ "$failed" -eq 0 ]; then
+    CHECK_BACKUP=
+  fi
+  validation_restore_file "$TRUST" "$TRUST_BACKUP" "$TRUST_BACKUP_PRESENT" || failed=1
+  if [ "$TRUST_BACKUP_PRESENT" -eq 1 ] && [ "$failed" -eq 0 ]; then
+    TRUST_BACKUP=
+  fi
+  return "$failed"
+}
+
 cleanup() {
+  local status=$?
+  validation_rollback || true
   [ -z "${TMP:-}" ] || rm -f -- "$TMP"
+  [ -z "${TRUST_TMP:-}" ] || rm -f -- "$TRUST_TMP"
+  [ -z "${FM_CUSTOM_CHECK_TRUST_TMP:-}" ] || rm -f -- "$FM_CUSTOM_CHECK_TRUST_TMP"
+  [ -z "${CHECK_BACKUP:-}" ] || rm -f -- "$CHECK_BACKUP"
+  [ -z "${TRUST_BACKUP:-}" ] || rm -f -- "$TRUST_BACKUP"
   [ "$CHECK_SLOT_HELD" -ne 1 ] || fm_custom_check_slot_release
   [ "$MIGRATION_BOUNDARY_HELD" -ne 1 ] || fm_custom_check_migration_release
+  return "$status"
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
@@ -123,14 +183,27 @@ if fm_validation_check_registered "$STATE" "$ID" "$NM_RUN_LIB" "$TEMPLATE"; then
 fi
 
 umask 077
+validation_backup_file "$CHECK" check || exit 1
+CHECK_BACKUP=$VALIDATION_BACKUP_PATH
+CHECK_BACKUP_PRESENT=$VALIDATION_BACKUP_PRESENT
+validation_backup_file "$TRUST" trust || exit 1
+TRUST_BACKUP=$VALIDATION_BACKUP_PATH
+TRUST_BACKUP_PRESENT=$VALIDATION_BACKUP_PRESENT
+VALIDATION_TRANSACTION_ACTIVE=1
 TMP=$(mktemp "$STATE/.fm-validation-check.XXXXXX") || exit 1
 fm_validation_check_source_emit "$worktree" "$NM_RUN_LIB" "$TEMPLATE" > "$TMP" || exit 1
 chmod 0700 "$TMP" || exit 1
 fm_pr_private_file_valid "$TMP" 700 "$STATE_DEVICE" || exit 1
-if ! fm_custom_check_register_source "$STATE" "$ID" "$TMP"; then
+if ! fm_custom_check_trust_prepare "$STATE" "$ID" "$TMP"; then
   echo "error: could not register validation check" >&2
   exit 1
 fi
+TRUST_TMP=$FM_CUSTOM_CHECK_TRUST_TMP
+FM_CUSTOM_CHECK_TRUST_TMP=
+FM_CUSTOM_CHECK_TRUST_HASH=
+fm_pr_regular_destination_on_device_or_absent "$TRUST" "$STATE_DEVICE" || exit 1
+mv -f -- "$TRUST_TMP" "$TRUST" || exit 1
+TRUST_TMP=
 fm_pr_regular_destination_on_device_or_absent "$CHECK" "$STATE_DEVICE" || exit 1
 mv -f -- "$TMP" "$CHECK" || exit 1
 TMP=
@@ -139,4 +212,5 @@ fm_validation_check_registered "$STATE" "$ID" "$NM_RUN_LIB" "$TEMPLATE" || {
   echo "error: validation check registration could not be verified" >&2
   exit 1
 }
+VALIDATION_COMMITTED=1
 printf 'armed: state/%s.check.sh\n' "$ID"

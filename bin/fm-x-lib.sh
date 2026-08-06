@@ -928,6 +928,54 @@ fmx_meta_tmp() {
   mktemp "$dir/.${base}.fm-x.XXXXXX"
 }
 
+FMX_META_CHECK_SLOT_HELD=0
+FMX_META_MIGRATION_BOUNDARY_HELD=0
+
+fmx_meta_check_boundary_load() {
+  local lib_dir
+  lib_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || return 1
+  declare -F fm_pr_task_id_valid >/dev/null 2>&1 || . "$lib_dir/fm-pr-lib.sh" || return 1
+  declare -F fm_lock_try_acquire >/dev/null 2>&1 || . "$lib_dir/fm-wake-lib.sh" || return 1
+  declare -F fm_custom_check_slot_acquire >/dev/null 2>&1 || . "$lib_dir/fm-check-lib.sh" || return 1
+}
+
+fmx_meta_check_boundary_acquire() {
+  local meta=$1 state name id
+  state=${meta%/*}
+  name=${meta##*/}
+  [ "$state" != "$meta" ] || state=.
+  id=${name%.meta}
+  [ "$name" = "$id.meta" ] || return 1
+  fmx_meta_check_boundary_load || return 1
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  [ "$FMX_META_CHECK_SLOT_HELD" -eq 0 ] && [ "$FMX_META_MIGRATION_BOUNDARY_HELD" -eq 0 ] || return 1
+  [ -z "${FM_CUSTOM_CHECK_SLOT_LOCK:-}" ] && [ -z "${FM_CUSTOM_CHECK_MIGRATION_LOCK:-}" ] || return 1
+  if ! fm_custom_check_migration_acquire "$state" 100; then
+    return 1
+  fi
+  FMX_META_MIGRATION_BOUNDARY_HELD=1
+  if ! fm_custom_check_slot_acquire "$state" "$id" 100; then
+    fm_custom_check_migration_release || true
+    FMX_META_MIGRATION_BOUNDARY_HELD=0
+    return 1
+  fi
+  FMX_META_CHECK_SLOT_HELD=1
+}
+
+fmx_meta_check_boundary_release() {
+  local failed=0
+  if [ "$FMX_META_CHECK_SLOT_HELD" -eq 1 ]; then
+    fm_custom_check_slot_release || failed=1
+    FMX_META_CHECK_SLOT_HELD=0
+  fi
+  if [ "$FMX_META_MIGRATION_BOUNDARY_HELD" -eq 1 ]; then
+    fm_custom_check_migration_release || failed=1
+    FMX_META_MIGRATION_BOUNDARY_HELD=0
+  fi
+  return "$failed"
+}
+
 # fmx_meta_link_set <meta> <request_id> <epoch> [followups] [platform] [max]:
 # atomically (re)write the x_request/x_request_ts/x_followups lines plus optional
 # reply-platform context, dropping any prior link and preserving every other meta
@@ -938,21 +986,27 @@ fmx_meta_tmp() {
 fmx_meta_link_set() {
   local meta=$1 rid=$2 ts=$3 followups=${4:-0} platform=${5:-} reply_max=${6:-} tmp
   [ -f "$meta" ] || return 1
-  tmp=$(fmx_meta_tmp "$meta") || return 1
-  if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=' "$meta" || true; } > "$tmp"; then
-    rm -f "$tmp"; return 1
+  fmx_meta_check_boundary_acquire "$meta" || return 1
+  if [ ! -f "$meta" ]; then
+    fmx_meta_check_boundary_release || true
+    return 1
   fi
-  printf 'x_request=%s\n' "$rid" >> "$tmp" || { rm -f "$tmp"; return 1; }
-  printf 'x_request_ts=%s\n' "$ts" >> "$tmp" || { rm -f "$tmp"; return 1; }
-  printf 'x_followups=%s\n' "$followups" >> "$tmp" || { rm -f "$tmp"; return 1; }
+  tmp=$(fmx_meta_tmp "$meta") || { fmx_meta_check_boundary_release || true; return 1; }
+  if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=' "$meta" || true; } > "$tmp"; then
+    rm -f "$tmp"; fmx_meta_check_boundary_release || true; return 1
+  fi
+  printf 'x_request=%s\n' "$rid" >> "$tmp" || { rm -f "$tmp"; fmx_meta_check_boundary_release || true; return 1; }
+  printf 'x_request_ts=%s\n' "$ts" >> "$tmp" || { rm -f "$tmp"; fmx_meta_check_boundary_release || true; return 1; }
+  printf 'x_followups=%s\n' "$followups" >> "$tmp" || { rm -f "$tmp"; fmx_meta_check_boundary_release || true; return 1; }
   if [ -n "$platform" ]; then
-    printf 'x_platform=%s\n' "$platform" >> "$tmp" || { rm -f "$tmp"; return 1; }
+    printf 'x_platform=%s\n' "$platform" >> "$tmp" || { rm -f "$tmp"; fmx_meta_check_boundary_release || true; return 1; }
   fi
   case "$reply_max" in
     ''|*[!0-9]*) ;;
-    *) printf 'x_reply_max_chars=%s\n' "$reply_max" >> "$tmp" || { rm -f "$tmp"; return 1; } ;;
+    *) printf 'x_reply_max_chars=%s\n' "$reply_max" >> "$tmp" || { rm -f "$tmp"; fmx_meta_check_boundary_release || true; return 1; } ;;
   esac
-  mv -f "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$meta" || { rm -f "$tmp"; fmx_meta_check_boundary_release || true; return 1; }
+  fmx_meta_check_boundary_release
 }
 
 # fmx_meta_followups_set <meta> <n>: atomically rewrite just the x_followups
@@ -961,12 +1015,18 @@ fmx_meta_link_set() {
 fmx_meta_followups_set() {
   local meta=$1 n=$2 tmp
   [ -f "$meta" ] || return 1
-  tmp=$(fmx_meta_tmp "$meta") || return 1
-  if ! { grep -vE '^x_followups=' "$meta" || true; } > "$tmp"; then
-    rm -f "$tmp"; return 1
+  fmx_meta_check_boundary_acquire "$meta" || return 1
+  if [ ! -f "$meta" ]; then
+    fmx_meta_check_boundary_release || true
+    return 1
   fi
-  printf 'x_followups=%s\n' "$n" >> "$tmp" || { rm -f "$tmp"; return 1; }
-  mv -f "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
+  tmp=$(fmx_meta_tmp "$meta") || { fmx_meta_check_boundary_release || true; return 1; }
+  if ! { grep -vE '^x_followups=' "$meta" || true; } > "$tmp"; then
+    rm -f "$tmp"; fmx_meta_check_boundary_release || true; return 1
+  fi
+  printf 'x_followups=%s\n' "$n" >> "$tmp" || { rm -f "$tmp"; fmx_meta_check_boundary_release || true; return 1; }
+  mv -f "$tmp" "$meta" || { rm -f "$tmp"; fmx_meta_check_boundary_release || true; return 1; }
+  fmx_meta_check_boundary_release
 }
 
 # fmx_meta_link_clear <meta>: atomically remove the x_request/x_request_ts/
@@ -976,9 +1036,15 @@ fmx_meta_followups_set() {
 fmx_meta_link_clear() {
   local meta=$1 tmp
   [ -f "$meta" ] || return 0
-  tmp=$(fmx_meta_tmp "$meta") || return 1
-  if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=' "$meta" || true; } > "$tmp"; then
-    rm -f "$tmp"; return 1
+  fmx_meta_check_boundary_acquire "$meta" || return 1
+  if [ ! -f "$meta" ]; then
+    fmx_meta_check_boundary_release || true
+    return 0
   fi
-  mv -f "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
+  tmp=$(fmx_meta_tmp "$meta") || { fmx_meta_check_boundary_release || true; return 1; }
+  if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=' "$meta" || true; } > "$tmp"; then
+    rm -f "$tmp"; fmx_meta_check_boundary_release || true; return 1
+  fi
+  mv -f "$tmp" "$meta" || { rm -f "$tmp"; fmx_meta_check_boundary_release || true; return 1; }
+  fmx_meta_check_boundary_release
 }

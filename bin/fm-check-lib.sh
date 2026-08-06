@@ -4,6 +4,8 @@ FM_CUSTOM_CHECK_HASH=
 FM_CUSTOM_CHECK_SNAPSHOT=
 FM_CUSTOM_CHECK_SLOT_LOCK=
 FM_CUSTOM_CHECK_MIGRATION_LOCK=
+FM_CUSTOM_CHECK_TRUST_TMP=
+FM_CUSTOM_CHECK_TRUST_HASH=
 
 fm_custom_check_sha256() {
   local file=$1
@@ -37,8 +39,11 @@ fm_custom_check_trust_read() {
   FM_CUSTOM_CHECK_HASH=$hash
 }
 
-fm_custom_check_register_source() {
+fm_custom_check_trust_prepare() {
   local state=$1 id=$2 source=$3 trust state_device hash tmp
+  [ -z "$FM_CUSTOM_CHECK_TRUST_TMP" ] || rm -f -- "$FM_CUSTOM_CHECK_TRUST_TMP"
+  FM_CUSTOM_CHECK_TRUST_TMP=
+  FM_CUSTOM_CHECK_TRUST_HASH=
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
@@ -50,12 +55,35 @@ fm_custom_check_register_source() {
   tmp=$(mktemp "$state/.fm-custom-check-trust.XXXXXX") || return 1
   if ! printf '%s\n%s\n' fm-custom-check-v1 "$hash" > "$tmp" \
     || ! chmod 0600 "$tmp" \
-    || ! fm_pr_private_file_valid "$tmp" 600 "$state_device" \
-    || ! fm_pr_regular_destination_on_device_or_absent "$trust" "$state_device" \
-    || ! mv -f -- "$tmp" "$trust"; then
+    || ! fm_pr_private_file_valid "$tmp" 600 "$state_device"; then
     rm -f -- "$tmp"
     return 1
   fi
+  FM_CUSTOM_CHECK_TRUST_TMP=$tmp
+  FM_CUSTOM_CHECK_TRUST_HASH=$hash
+}
+
+fm_custom_check_register_source() {
+  local state=$1 id=$2 source=$3 trust state_device hash tmp
+  fm_custom_check_trust_prepare "$state" "$id" "$source" || return 1
+  trust="$state/$id.check-trust"
+  state_device=$(fm_pr_file_device "$state") || {
+    rm -f -- "$FM_CUSTOM_CHECK_TRUST_TMP"
+    FM_CUSTOM_CHECK_TRUST_TMP=
+    FM_CUSTOM_CHECK_TRUST_HASH=
+    return 1
+  }
+  hash=$FM_CUSTOM_CHECK_TRUST_HASH
+  tmp=$FM_CUSTOM_CHECK_TRUST_TMP
+  if ! fm_pr_regular_destination_on_device_or_absent "$trust" "$state_device" \
+    || ! mv -f -- "$tmp" "$trust"; then
+    rm -f -- "$tmp"
+    FM_CUSTOM_CHECK_TRUST_TMP=
+    FM_CUSTOM_CHECK_TRUST_HASH=
+    return 1
+  fi
+  FM_CUSTOM_CHECK_TRUST_TMP=
+  FM_CUSTOM_CHECK_TRUST_HASH=
   fm_custom_check_trust_read "$state" "$id" || return 1
   [ "$FM_CUSTOM_CHECK_HASH" = "$hash" ]
 }

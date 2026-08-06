@@ -641,6 +641,11 @@ SPAWN_META_PR_URL=
 SPAWN_META_PR_HOST=
 SPAWN_META_PR_PATH=
 SPAWN_META_PR_NUMBER=
+SPAWN_META_ROLLBACK_CAPTURE=0
+SPAWN_META_ROLLBACK_ACTIVE=0
+SPAWN_META_PREVIOUS=
+SPAWN_META_PREVIOUS_PRESENT=0
+SPAWN_META_CANDIDATE_HASH=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -689,6 +694,59 @@ spawn_meta_reset() {
   [ -z "$SPAWN_META_TMP" ] || rm -f -- "$SPAWN_META_TMP"
   SPAWN_META_TMP=
   spawn_check_slot_release || true
+}
+
+spawn_meta_rollback_discard() {
+  [ -z "$SPAWN_META_PREVIOUS" ] || rm -f -- "$SPAWN_META_PREVIOUS"
+  SPAWN_META_PREVIOUS=
+  SPAWN_META_PREVIOUS_PRESENT=0
+  SPAWN_META_CANDIDATE_HASH=
+  SPAWN_META_ROLLBACK_ACTIVE=0
+}
+
+spawn_meta_rollback_capture() {
+  local meta=$1 state_device=$2 previous
+  spawn_meta_rollback_discard
+  [ "$SPAWN_META_ROLLBACK_CAPTURE" -eq 1 ] || return 0
+  [ ! -e "$meta" ] && [ ! -L "$meta" ] && return 0
+  [ -f "$meta" ] && [ ! -L "$meta" ] && [ "$(fm_pr_file_link_count "$meta")" = 1 ] || return 1
+  previous=$(mktemp "$STATE/.fm-spawn-previous.XXXXXX") || return 1
+  if ! cp -- "$meta" "$previous" \
+    || ! chmod 0600 "$previous" \
+    || ! fm_pr_private_file_valid "$previous" 600 "$state_device"; then
+    rm -f -- "$previous"
+    return 1
+  fi
+  SPAWN_META_PREVIOUS=$previous
+  SPAWN_META_PREVIOUS_PRESENT=1
+}
+
+spawn_meta_rollback() {
+  local meta state_device current_hash failed=0
+  [ "$SPAWN_META_ROLLBACK_ACTIVE" -eq 1 ] || return 0
+  meta="$STATE/$ID.meta"
+  spawn_check_slot_acquire || return 1
+  state_device=$(fm_pr_file_device "$STATE") || {
+    spawn_check_slot_release || true
+    return 1
+  }
+  if [ -f "$meta" ] && [ ! -L "$meta" ] && [ "$(fm_pr_file_link_count "$meta")" = 1 ]; then
+    current_hash=$(fm_pr_sha256 "$meta" || true)
+    if [ "$current_hash" = "$SPAWN_META_CANDIDATE_HASH" ] && ! grep -q '^pr=' "$meta"; then
+      if [ "$SPAWN_META_PREVIOUS_PRESENT" -eq 1 ]; then
+        fm_pr_private_file_valid "$SPAWN_META_PREVIOUS" 600 "$state_device" \
+          && fm_pr_regular_destination_on_device_or_absent "$meta" "$state_device" \
+          && mv -f -- "$SPAWN_META_PREVIOUS" "$meta" || failed=1
+        [ "$failed" -ne 0 ] || SPAWN_META_PREVIOUS=
+      else
+        fm_pr_regular_destination_on_device_or_absent "$meta" "$state_device" \
+          && rm -f -- "$meta" || failed=1
+      fi
+    fi
+  fi
+  spawn_check_slot_release || failed=1
+  [ "$failed" -ne 0 ] || spawn_meta_rollback_discard
+  return "$failed"
 }
 
 spawn_meta_pr_current() {
@@ -745,6 +803,10 @@ spawn_meta_publish() {
     return 1
   fi
   state_device=$(fm_pr_file_device "$STATE") || {
+    spawn_meta_reset
+    return 1
+  }
+  spawn_meta_rollback_capture "$meta" "$state_device" || {
     spawn_meta_reset
     return 1
   }
@@ -809,11 +871,71 @@ spawn_meta_publish() {
     return 1
   }
   SPAWN_META_TMP=
+  if [ "$SPAWN_META_ROLLBACK_CAPTURE" -eq 1 ]; then
+    SPAWN_META_CANDIDATE_HASH=$(fm_pr_sha256 "$meta") || {
+      spawn_meta_reset
+      return 1
+    }
+    SPAWN_META_ROLLBACK_ACTIVE=1
+  fi
   if [ "$SPAWN_META_PR_PRESENT" -eq 1 ] \
     && ! fm_pr_poll_artifacts_valid "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh"; then
     spawn_meta_reset
     return 1
   fi
+  spawn_check_slot_release
+}
+
+spawn_orca_cleanup_meta_publish() {
+  local meta state_device
+  meta="$STATE/$ID.meta"
+  spawn_check_slot_acquire || return 1
+  if ! spawn_meta_pr_current "$meta"; then
+    spawn_meta_reset
+    return 1
+  fi
+  if [ "$SPAWN_META_PR_PRESENT" -eq 1 ]; then
+    spawn_check_slot_release
+    return 0
+  fi
+  state_device=$(fm_pr_file_device "$STATE") || {
+    spawn_meta_reset
+    return 1
+  }
+  SPAWN_META_TMP=$(mktemp "$STATE/.fm-orca-cleanup-meta.XXXXXX") || {
+    spawn_meta_reset
+    return 1
+  }
+  {
+    echo "window=$W"
+    echo "endpoint_task_id=$ID"
+    echo "worktree=${WT:-}"
+    echo "project=$PROJ_ABS"
+    echo "harness=$HARNESS"
+    echo "tasktmp=${TASK_TMP:-}"
+    echo "model=${MODEL:-default}"
+    echo "effort=${EFFORT:-default}"
+    echo "backend=orca"
+    echo "orca_worktree_id=$ORCA_WORKTREE_ID"
+    [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
+  } > "$SPAWN_META_TMP" || {
+    spawn_meta_reset
+    return 1
+  }
+  chmod 0600 "$SPAWN_META_TMP" || {
+    spawn_meta_reset
+    return 1
+  }
+  fm_pr_private_file_valid "$SPAWN_META_TMP" 600 "$state_device" \
+    && fm_pr_regular_destination_on_device_or_absent "$meta" "$state_device" || {
+    spawn_meta_reset
+    return 1
+  }
+  mv -f -- "$SPAWN_META_TMP" "$meta" || {
+    spawn_meta_reset
+    return 1
+  }
+  SPAWN_META_TMP=
   spawn_check_slot_release
 }
 
@@ -878,6 +1000,8 @@ spawn_abort_cleanup() {
   [ -z "$SPAWN_META_TMP" ] || rm -f -- "$SPAWN_META_TMP"
   SPAWN_META_TMP=
   spawn_check_slot_release || true
+  spawn_meta_rollback || true
+  spawn_meta_rollback_discard
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
@@ -905,21 +1029,7 @@ spawn_abort_cleanup() {
       if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
         mkdir -p "$STATE" 2>/dev/null || true
         if [ -d "$STATE" ]; then
-          {
-            echo "window=$W"
-            echo "worktree=${WT:-}"
-            echo "project=$PROJ_ABS"
-            echo "harness=$HARNESS"
-            echo "kind=$KIND"
-            [ -z "${MODE:-}" ] || echo "mode=$MODE"
-            [ -z "${YOLO:-}" ] || echo "yolo=$YOLO"
-            echo "tasktmp=${TASK_TMP:-}"
-            echo "model=${MODEL:-default}"
-            echo "effort=${EFFORT:-default}"
-            echo "backend=orca"
-            echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-            [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
-          } > "$STATE/$ID.meta" 2>/dev/null || true
+          spawn_orca_cleanup_meta_publish >/dev/null 2>&1 || true
         fi
       fi
     fi
@@ -2413,10 +2523,14 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+  SPAWN_META_ROLLBACK_CAPTURE=1
+fi
 spawn_meta_publish || {
   echo "error: could not publish task metadata for $ID" >&2
   exit 1
 }
+SPAWN_META_ROLLBACK_CAPTURE=0
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 # A no-mistakes worker can begin validation as soon as it receives this launch
@@ -2429,6 +2543,7 @@ if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
     echo "error: could not arm validation check for $ID" >&2
     exit 1
   }
+  spawn_meta_rollback_discard
 fi
 
 sq_brief=$(shell_quote "$BRIEF")
