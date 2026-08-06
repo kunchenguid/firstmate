@@ -38,19 +38,38 @@
 #                       when locked.
 #   4. supervision-instructions - the one emitted operating block for the
 #                       detected primary harness.
-#   5. context digest - data/projects.md, data/secondmates.md, data/captain.md,
-#                       data/captain-shared.md, data/learnings.md: read-only,
-#                       always safe, always runs.
+#   5. read-once contract - the do-not-re-read contract covering every source
+#                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       state/.afk, and a cheap per-task endpoint-liveness read:
 #                       read-only, always runs.
-#   7. closing reminder - prints the context-specific watcher next step; this
+#   7. context digest - data/projects.md, data/secondmates.md, data/captain.md,
+#                       data/captain-shared.md, data/learnings.md: read-only,
+#                       always safe, always runs.
+#   8. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
 #
-# Those seven names are also the runtime-bound stage list below, so a truncated
+# Those eight names are also the runtime-bound stage list below, so a truncated
 # startup can name exactly which of them never ran.
+#
+# ORDERING, and why FLEET STATE now runs before CONTEXT: this digest is
+# delivered through a harness that truncates an oversized payload from the TAIL,
+# and it has really been truncated in practice - a 70KB digest arrived as lines
+# 1-435 of 578, cutting off eight lines before the live-task inventory. What a
+# truncated tail drops must therefore be the CHEAPEST thing to lose. Curated
+# memory is stable session to session, is already governed by a captain-set
+# budget (config/startup-memory-budget), and is recoverable with one targeted
+# read; live fleet identity - which tasks exist, their windows, worktrees,
+# backends, and endpoint liveness - changes every session and is exactly what
+# recovery depends on. So fleet state goes first and the memory files absorb the
+# truncation. The read-once contract moves ahead of both for the same reason: a
+# contract that only arrives after the payload it governs is the first thing a
+# truncated digest loses, and it carries the truncation caveat that keeps it
+# honest when a stage below it never ran.
+# The LOCK/BOOTSTRAP/WAKE-QUEUE safety preamble keeps its order: it establishes
+# mutation authority and this turn's work queue before anything else is read.
 #
 # On a Pi primary, the supervision-block step also checks whether Pi's two
 # tracked primary extensions are loaded and prints a PI_WATCH_EXTENSION
@@ -77,19 +96,43 @@
 # The context and fleet-state digests
 # below are always read-only, so they run unconditionally in both modes.
 #
-# BACKLOG DIGEST: FM_SESSION_START_BACKLOG_LIMIT bounds the startup backlog
-# listing, default 80 items.
+# BACKLOG DIGEST: the startup listing is a RECOVERY input, not a reporting
+# surface, so it carries what this turn can act on and nothing else.
+#   - `done` rows are never listed. Retained completion history belongs to the
+#     reporting surfaces (bin/fm-bearings-snapshot.sh, /ahoy), and at startup it
+#     is pure weight - 10 done rows cost 3.3KB in an observed main-home digest.
+#   - Every in-flight, held, and blocked row is listed IN FULL, with its
+#     hold_kind/hold_reason and blocked_by. Those are the rows AGENTS.md
+#     sections 7 and 10 make actionable at startup, so they are never bounded
+#     away.
+#   - Only the plain queued (dispatchable-now) listing is bounded, by
+#     FM_SESSION_START_QUEUED_LIMIT, default 20. Anything it omits is disclosed
+#     with an exact remainder count and the command that shows the rest, so a
+#     deep queue costs a counter rather than kilobytes.
+#     (This replaces FM_SESSION_START_BACKLOG_LIMIT, which bounded the whole
+#     listing indiscriminately and so could drop a held or blocked row.)
 # When compatible tasks-axi is selected and available, the shared tasks-axi
 # backend probe remains the compatibility owner and this script asks
 # `tasks-axi list` for the compact identity fields plus blocked_by, hold_kind,
-# and hold_reason, never body.
+# and hold_reason, never body. The groups are the tool's own filters
+# (`--state in_flight`, `--state held`, `--state queued --blocked`, and
+# `tasks-axi ready`), so this script never reimplements task state; the groups
+# can overlap, because an in-flight item that is also held appears under both.
 # When manual mode is selected, or tasks-axi is unavailable or incompatible,
 # this script prints only backlog section headings and item title lines, so
 # title-line hold and blocked-by metadata remain visible while indented bodies
-# stay out of the startup digest.
+# stay out of the startup digest; the same never-bound-a-held-or-blocked-row
+# rule applies, recognized there from the title line's own hold/blocked-by
+# markers.
 # Full bodies are targeted follow-up only: `tasks-axi show <id> --full` when
 # compatible tasks-axi is available, or `data/backlog.md` when the file body is
 # truly needed.
+#
+# STATUS TAILS: FM_SESSION_START_STATUS_TAIL bounds how many lines each task's
+# tail prints, and bin/fm-line-cap-lib.sh bounds how long each of those lines
+# may be. Both bounds are safe because the section prints every task's full
+# status log path, and AGENTS.md section 8 treats a status line as a wake EVENT
+# rather than current state - bin/fm-crew-state.sh owns current state.
 #
 # RUNTIME BOUND: the digest is now executed on a session-open hook (see
 # bin/fm-sessionstart-run.sh), which blocks session initialization while it
@@ -158,7 +201,7 @@ done
 # The ordered stage list is the contract behind the truncation banner: the child
 # names the stage it is entering, and the parent reports every stage at or after
 # that one as never emitted. Keep it in the exact order the digest prints.
-SESSION_START_STAGES='lock bootstrap wake-queue supervision-instructions context fleet-state next-step'
+SESSION_START_STAGES='lock bootstrap wake-queue supervision-instructions read-once fleet-state context next-step'
 
 stage() {  # <stage-name>: breadcrumb for the parent's truncation banner
   [ -n "${FM_SESSION_START_STAGE_FILE:-}" ] || return 0
@@ -218,11 +261,14 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
+# shellcheck source=bin/fm-line-cap-lib.sh
+. "$SCRIPT_DIR/fm-line-cap-lib.sh"
 
 STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
 case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
-BACKLOG_LIMIT=${FM_SESSION_START_BACKLOG_LIMIT:-80}
-case "$BACKLOG_LIMIT" in ''|*[!0-9]*|0) BACKLOG_LIMIT=80 ;; esac
+QUEUED_LIMIT=${FM_SESSION_START_QUEUED_LIMIT:-20}
+case "$QUEUED_LIMIT" in ''|*[!0-9]*|0) QUEUED_LIMIT=20 ;; esac
+BACKLOG_FIELDS=blocked_by,hold_kind,hold_reason
 
 RULE='================================================================================'
 SUBRULE='--------------------------------------------------------------------------------'
@@ -254,10 +300,18 @@ print_backlog_pointer() {
   printf 'Full task bodies remain available on demand: tasks-axi show <id> --full when compatible tasks-axi is available, or data/backlog.md.\n'
 }
 
+# A queued title line whose own text already marks it held or blocked. The
+# manual renderer has no task model, so this is the only signal it gets, and it
+# is the one tasks-axi's markdown backend writes: "(hold: ...)", "(hold-kind:
+# ...)", and "blocked-by: ...". Bracket expressions rather than backslashes,
+# because awk's -v applies escape processing before the regex is ever compiled.
+MANUAL_KEEP_RE='[(]hold|blocked-by:'
+
 print_backlog_manual_compact() {
   local path=$1 reason=$2
-  printf 'compact backlog listing (%s; max %s item(s); indented task bodies omitted)\n' "$reason" "$BACKLOG_LIMIT"
-  awk -v max="$BACKLOG_LIMIT" '
+  printf 'compact backlog listing (%s; done rows omitted; every in-flight, held, and blocked title line kept; other queued bounded to %s; indented task bodies omitted)\n' \
+    "$reason" "$QUEUED_LIMIT"
+  awk -v max="$QUEUED_LIMIT" -v keep_re="$MANUAL_KEEP_RE" '
     function state_for_heading(line, heading) {
       heading = line
       sub(/^##[[:space:]]+/, "", heading)
@@ -269,42 +323,94 @@ print_backlog_manual_compact() {
     }
     /^##[[:space:]]+/ {
       state = state_for_heading($0)
-      if (state != "") print $0
+      # The Done heading is recognized so its items are skipped, never printed.
+      if (state != "" && state != "done") print $0
       next
     }
-    state != "" && /^[-*][[:space:]]+/ {
-      total++
-      if (shown < max) {
-        print $0
-        shown++
-      }
+    state == "in_flight" && /^[-*][[:space:]]+/ { in_flight++; print $0; next }
+    state == "done" && /^[-*][[:space:]]+/ { done_total++; next }
+    state == "queued" && /^[-*][[:space:]]+/ {
+      queued_total++
+      if ($0 ~ keep_re) { gated++; print $0; next }
+      if (plain_shown < max) { plain_shown++; print $0 }
       next
     }
     END {
-      if (total == 0) {
+      plain_total = queued_total - gated
+      if (in_flight + queued_total + done_total == 0) {
         print "(no backlog item title lines found)"
       } else {
-        printf "(shown %d of %d backlog item title line(s))\n", shown, total
-        if (total > shown) {
-          printf "(truncated %d item(s); increase FM_SESSION_START_BACKLOG_LIMIT for a larger startup listing)\n", total - shown
+        printf "(shown %d in-flight, %d held or blocked queued, %d of %d other queued title line(s); %d done row(s) omitted)\n", \
+          in_flight, gated, plain_shown, plain_total, done_total
+        if (plain_total > plain_shown) {
+          printf "(%d more queued - raise FM_SESSION_START_QUEUED_LIMIT or read data/backlog.md for the rest)\n", plain_total - plain_shown
         }
       }
     }
   ' "$path"
 }
 
+# tasks-axi closes every listing with its own help block. This section composes
+# four listings, so keeping them would repeat the same pointers four times, once
+# per group, each carrying this home's full backlog path. The section prints one
+# equivalent pointer of its own (print_backlog_pointer), so the per-group help
+# blocks stop at their `help[` header instead.
+strip_axi_help() {
+  awk '/^help\[/ { exit } { print }'
+}
+
+# Bound the dispatchable-now listing without rewriting the tool's own rendering:
+# `tasks-axi ready` rows are the indented lines under its ready[N]{...} header,
+# and every other line it prints (its count, its public-followup line) passes
+# through untouched. Whatever is cut is disclosed exactly.
+print_ready_queued_bounded() {
+  local ready=$1 path=$2
+  printf '%s\n' "$ready" | awk -v max="$QUEUED_LIMIT" -v path="$path" '
+    /^help\[/ { exit }
+    /^ready\[/ { rows = 1; print; next }
+    rows && /^[[:space:]]/ {
+      total++
+      if (shown < max) { print; shown++ }
+      next
+    }
+    { rows = 0; print }
+    END {
+      if (total > 0) {
+        printf "(shown %d of %d ready queued item(s))\n", shown, total
+        if (total > shown) {
+          printf "(%d more queued - tasks-axi ready --file %s)\n", total - shown, path
+        }
+      }
+    }
+  '
+}
+
 print_backlog_tasks_axi_compact() {
-  local path=$1 out rc
-  printf 'compact backlog listing (tasks-axi; max %s item(s); task bodies omitted)\n' "$BACKLOG_LIMIT"
-  out=$(tasks-axi list --file "$path" --limit "$BACKLOG_LIMIT" --fields blocked_by,hold_kind,hold_reason 2>&1)
-  rc=$?
-  if [ "$rc" -eq 0 ]; then
-    printf '%s\n' "$out"
+  local path=$1 in_flight held blocked ready err
+  if ! in_flight=$(tasks-axi list --file "$path" --state in_flight --fields "$BACKLOG_FIELDS" 2>&1); then
+    err=$in_flight
+  elif ! held=$(tasks-axi list --file "$path" --state held --fields "$BACKLOG_FIELDS" 2>&1); then
+    err=$held
+  elif ! blocked=$(tasks-axi list --file "$path" --state queued --blocked --fields "$BACKLOG_FIELDS" 2>&1); then
+    err=$blocked
+  elif ! ready=$(tasks-axi ready --file "$path" 2>&1); then
+    err=$ready
   else
-    printf 'tasks-axi compact listing failed; falling back to title-line rendering.\n'
-    printf '%s\n' "$out"
-    print_backlog_manual_compact "$path" "fallback"
+    printf 'compact backlog listing (tasks-axi; done rows omitted; every in-flight, held, and blocked row shown in full; ready queued bounded to %s; task bodies omitted)\n' \
+      "$QUEUED_LIMIT"
+    printf '\nin flight:\n'
+    printf '%s\n' "$in_flight" | strip_axi_help
+    printf '\nheld (captain- or time-gated; an in-flight item that is also held appears in both groups):\n'
+    printf '%s\n' "$held" | strip_axi_help
+    printf '\nblocked queued:\n'
+    printf '%s\n' "$blocked" | strip_axi_help
+    printf '\nready queued (dispatchable now):\n'
+    print_ready_queued_bounded "$ready" "$path"
+    return 0
   fi
+  printf 'tasks-axi compact listing failed; falling back to title-line rendering.\n'
+  printf '%s\n' "$err"
+  print_backlog_manual_compact "$path" "fallback"
 }
 
 print_backlog_compact() {
@@ -329,9 +435,16 @@ print_backlog_compact() {
 }
 
 print_status_tail() {
-  local status=$1
-  printf 'status tail (last %s line(s), wake-EVENT history, not current state; full log: %s):\n' "$STATUS_TAIL" "$status"
-  tail -n "$STATUS_TAIL" "$status"
+  local status=$1 line
+  printf 'status tail (last %s line(s), each capped at %s characters, wake-EVENT history, not current state; full log: %s):\n' \
+    "$STATUS_TAIL" "$FM_LINE_CAP_DEFAULT" "$status"
+  # A crewmate writes its own status lines, so their length is unbounded: one
+  # observed line ran 865 characters. Cap each one the way the wake digest's
+  # OPEN DECISIONS section does; the lede carries the state word and the key,
+  # and the full log path above reaches the rest.
+  while IFS= read -r line || [ -n "$line" ]; do
+    fm_cap_line "$line"
+  done < <(tail -n "$STATUS_TAIL" "$status")
 }
 
 hash_file() {
@@ -471,16 +584,38 @@ fi
   --afk "$AFK_PRESENT" \
   --x-mode "$X_MODE_PRESENT"
 
-# --- 5. context digest -----------------------------------------------------
-stage context
-section "CONTEXT"
-print_file_or_absent "$DATA/projects.md" "data/projects.md"
-print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
-print_file_or_absent "$DATA/captain.md" "data/captain.md"
-print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
-print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+# --- 5. read-once contract -------------------------------------------------
+# Ahead of the two digests it governs, not after them: a truncated tail is
+# exactly what drops a closing reminder, and this contract is what stops the
+# next turn from re-reading everything the digest just printed. Because it now
+# arrives BEFORE its subject, it also names the one condition that voids it -
+# a stage that never ran, which the truncation banner names by stage.
+stage read-once
+section "READ-ONCE CONTRACT"
+cat <<'EOF'
+Everything below is printed in full for this session start: every state/*.meta,
+a compact data/backlog.md listing, a bounded tail of every state/*.status,
+data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md,
+and data/learnings.md.
+Do NOT re-read any of them after reading this digest, and do NOT bulk-read
+data/backlog.md or state/*.status: re-reading everything defeats the entire
+point of this command.
+
+Go to a source directly only when:
+  - this digest flagged it ABSENT (then rebuild or create it per AGENTS.md),
+  - its contents looked unparseable or corrupt,
+  - an individual full status log is needed for older wake-event history, or a
+    status line was capped and its tail matters (each task's full log path is
+    printed with its tail),
+  - a full task body is needed (tasks-axi show <id> --full, or data/backlog.md),
+  - the backlog listing disclosed omitted queued items and this turn needs them,
+  - or a STARTUP TRUNCATED banner named the stage that would have printed it, in
+    which case that stage's sources were never emitted and must be reconciled.
+EOF
 
 # --- 6. fleet-state digest ---------------------------------------------
+# Before CONTEXT: see this file's ORDERING note. Live fleet identity is what a
+# truncated tail must never take.
 stage fleet-state
 section "FLEET STATE"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
@@ -552,7 +687,20 @@ if fm_pf_relay_active "$FM_HOME" \
   fi
 fi
 
-# --- 7. closing reminder -----------------------------------------------
+# --- 7. context digest -----------------------------------------------------
+# Last of the bulk sections deliberately: curated memory is stable session to
+# session, already governed by config/startup-memory-budget, and recoverable
+# with one targeted read, so it is the cheapest thing for a truncated tail to
+# take (see this file's ORDERING note).
+stage context
+section "CONTEXT"
+print_file_or_absent "$DATA/projects.md" "data/projects.md"
+print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
+print_file_or_absent "$DATA/captain.md" "data/captain.md"
+print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
+print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+
+# --- 8. closing reminder -----------------------------------------------
 stage next-step
 section "NEXT STEP"
 if [ "$READ_ONLY" -eq 1 ]; then
@@ -584,18 +732,8 @@ This script never starts supervision itself.
 EOF
 fi
 cat <<'EOF'
-The digest above is complete for this session start. Do NOT re-read
-data/projects.md, data/secondmates.md, data/captain.md,
-data/captain-shared.md, data/learnings.md,
-or state/*.meta now - they were just printed in full.
-Do NOT bulk-read data/backlog.md now either: the compact identity/metadata
-listing was just printed with a pointer for targeted full-body follow-up.
-Do NOT bulk-read state/*.status now either: their bounded tails were just
-printed with full log paths for targeted follow-up when older wake-event
-history is actually needed. Re-reading everything defeats the entire point
-of this command. Re-read a file only if this digest flagged it ABSENT (then
-rebuild or create it per AGENTS.md), its contents looked unparseable/corrupt,
-or an individual full status log is needed for older wake-event history.
+The digest above is complete for this session start. The READ-ONCE CONTRACT
+section near the top of it governs what may still be read from disk.
 EOF
 
 if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then

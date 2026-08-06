@@ -8,6 +8,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-line-cap-lib.sh
+. "$SCRIPT_DIR/fm-line-cap-lib.sh"
 
 DRAIN_TMP=
 DRAIN_LOCK_HELD=false
@@ -43,7 +45,7 @@ assert_watcher_liveness() {
 # common case.
 print_open_decisions_section() {
   local open task key verb note line item_bytes=220 global_bytes=4000
-  local output='' used=0 shown=0 omitted=0 bytes suffix keep
+  local output='' used=0 shown=0 omitted=0 bytes
 
   open=$(scan_open_decisions_incremental "$STATE") || return 0
   [ -n "$open" ] || return 0
@@ -53,11 +55,11 @@ print_open_decisions_section() {
     line="$task"
     [ "$key" = default ] || line="$line [key=$key]"
     line="$line $verb: $note"
-    if [ $(( ${#line} + 1 )) -gt "$item_bytes" ]; then
-      suffix=' [truncated]'
-      keep=$((item_bytes - ${#suffix} - 1))
-      line="${line:0:$keep}$suffix"
-    fi
+    # The shared cut counts the item's own characters; the trailing newline this
+    # section's global budget also pays for is this caller's, so the per-item
+    # allowance passed down is one short of the cap.
+    fm_cap_line_var "$line" $((item_bytes - 1))
+    line=$FM_LINE_CAP_LINE
     bytes=$(( ${#line} + 1 ))
     if [ $((used + bytes)) -gt "$global_bytes" ]; then
       omitted=$((omitted + 1))
