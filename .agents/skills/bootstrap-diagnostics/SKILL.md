@@ -30,8 +30,8 @@ When any diagnostic needs captain attention, report the plain consequence and re
   Ask the captain to run `! gh auth status` themselves to settle the state, since a wedged credential helper, an unreachable network, or a blocking keychain prompt are the usual causes.
   `FM_GH_AUTH_TIMEOUT_SECS` raises the 10 second bound when the home is merely slow rather than stuck.
   The reported seconds are that bound, not the elapsed wall clock, so a probe held past it by a SIGKILL escalation still reports indeterminate rather than unauthenticated; `docs/configuration.md` "Toolchain" owns the escalation grace and worst-case timing.
-- `GH_AUTH: indeterminate (probe terminated abnormally with status <n>)` - the preflight was killed before it answered, so the credential state is unknown for the same reason the timeout case is.
-  The status is reported raw because it cannot say whether the kill grace escalated to SIGKILL, the OOM killer fired, or something external killed the probe.
+- `GH_AUTH: indeterminate (probe was killed before it answered, status <n>)` - the preflight was killed before it answered, so the credential state is unknown for the same reason the timeout case is.
+  The line names no culprit on purpose: the status alone cannot say whether the kill grace escalated to SIGKILL, the OOM killer fired, or something external killed the probe, so do not report a cause the captain would have to unlearn.
   Handle it exactly like the timeout case above, and treat a repeat across sessions as a sign the home itself is unhealthy rather than a GitHub auth problem.
 - `GH_AUTH: indeterminate (no bounded-probe tool: install coreutils or perl)` - the home has none of `timeout`, `gtimeout`, or `perl`, so bootstrap skipped the auth check entirely rather than risk hanging session start on it.
   Report the missing bounding tool and the printed coreutils-or-perl remediation, then rerun session start once one is installed.

@@ -185,12 +185,13 @@ test_gh_auth_probe_forces_every_bounding_branch() {
   # rather than a confident unauthenticated: 137 for the SIGKILL the kill grace
   # escalates to, 143 for implementations reporting the SIGTERM, 139 for a
   # SIGSEGV that the bound never caused. The status cannot say which, so the
-  # wording reports it raw instead of claiming a timeout that may not have run.
+  # wording names no culprit and carries the number raw instead of claiming
+  # either a timeout that may not have run or a kill this bound may not have made.
   for forced in 137 143 139; do
     set_fake_bounding_timeout "$fakebin" "$record" "$forced"
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-    [ "$out" = "GH_AUTH: indeterminate (probe terminated abnormally with status $forced)" ] \
+    [ "$out" = "GH_AUTH: indeterminate (probe was killed before it answered, status $forced)" ] \
       || fail "bounder status $forced is a killed probe, so it must report indeterminate, got: $out"
   done
 
@@ -221,7 +222,7 @@ test_gh_auth_probe_forces_every_bounding_branch() {
     set_fake_gh_auth_status "$fakebin" signal
     out=$(PATH="$fakebin:$probe_path" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-    [ "$out" = "GH_AUTH: indeterminate (probe terminated abnormally with status 139)" ] \
+    [ "$out" = "GH_AUTH: indeterminate (probe was killed before it answered, status 139)" ] \
       || fail "the Perl fallback must report a signal-killed probe exactly as the bounder branch does, got: $out"
 
     set_fake_gh_auth_status "$fakebin" unauthenticated

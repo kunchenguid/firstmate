@@ -8,7 +8,7 @@
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
 #                 "GH_AUTH: indeterminate (probe timed out after <seconds>s)",
-#                 "GH_AUTH: indeterminate (probe terminated abnormally with status <n>)",
+#                 "GH_AUTH: indeterminate (probe was killed before it answered, status <n>)",
 #                 "GH_AUTH: indeterminate (no bounded-probe tool: install coreutils or perl)",
 #                 "GH_AUTH: authenticated" / "GH_AUTH: not authenticated" (opt-in only),
 #                 "BACKEND_INVALID: <name> (known: <names>)",
@@ -89,22 +89,19 @@
 #          overrides the 10s bound; non-numeric values, zero, and zero-padded
 #          zeros such as 00 all reset to 10 so the bound can never be disabled.
 #          A probe that ignores SIGTERM is escalated to SIGKILL after a further
-#          grace - 2s on the timeout/gtimeout branch, 0.2s in the Perl fallback -
-#          so worst-case wall clock is the bound plus at most 2s rather than a
-#          flat 10s, and the escalated kill still reports indeterminate.
+#          2s grace, so worst-case wall clock is the bound plus that grace rather
+#          than a flat 10s, and the escalated kill still reports indeterminate.
 #          An expired bound, a probe killed before it answered, or a home
 #          carrying none of those three bounding tools all report GH_AUTH:
 #          indeterminate and never NEEDS_GH_AUTH, because an unfinished probe
 #          proves nothing about the credential; the three causes carry distinct
 #          wording so the remediation is discoverable. Every bounding
-#          implementation classifies its result through one shared mapping, so a
-#          probe killed from outside reads the same on stock macOS and on a
-#          coreutils host rather than depending on which bounding tool the home
-#          happens to have. Only the bound's own escalation is worded per branch:
-#          timeout/gtimeout can surface just the 137 it exited with, so it takes
-#          the abnormal-status line, while the Perl alarm knows the bound expired
-#          and takes the timed-out line. Both stay indeterminate, so neither
-#          branch ever turns an unfinished probe into a credential claim.
+#          implementation enforces the same grace and classifies its result
+#          through one shared mapping, so an unanswered probe reads the same on
+#          stock macOS and on a coreutils host rather than depending on which
+#          bounding tool the home happens to have. The killed wording names no
+#          culprit, because the status alone cannot separate this bound's own
+#          SIGKILL escalation from an external kill.
 #          The typed authenticated/not authenticated states print only under
 #          FM_BOOTSTRAP_GH_AUTH_DIAGNOSTICS=1, so default output for those two
 #          cases stays byte-identical for existing consumers.
@@ -246,8 +243,11 @@ fleet_sync() {
   rm -f "$tmp"
 }
 
-# Seconds the bounding tool waits after SIGTERM before escalating to SIGKILL, so
-# a `gh` or credential helper that ignores SIGTERM cannot outlive the bound.
+# Seconds every bounding branch waits after SIGTERM before escalating to SIGKILL,
+# so a `gh` or credential helper that ignores SIGTERM cannot outlive the bound.
+# One value for both branches on purpose: a per-branch grace would decide which
+# report a slow-but-cooperative probe got purely from which bounder the home
+# ships, which is the divergence the shared status mapping below exists to close.
 GH_AUTH_KILL_GRACE_SECS=2
 # Why a 124 came back, so the report can tell an expired bound from a killed
 # probe and from a home that never had a bounding tool to expire.
@@ -274,15 +274,31 @@ gh_auth_probe() {
     status=$?
   elif command -v perl >/dev/null 2>&1; then
     GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 perl -e '
+      use POSIX ":sys_wait_h";
+      use Time::HiRes qw(time sleep);
       my $t = shift;
+      my $grace = shift;
       my $pid = fork;
       die "fork failed" unless defined $pid;
       if (!$pid) { setpgrp(0, 0); exec @ARGV; exit 127 }
       local $SIG{ALRM} = sub {
         kill "TERM", -$pid;
-        select undef, undef, undef, 0.2;
+        # Mirror what `timeout -k` reports, so the same wedged probe answers the
+        # same on both branches: a child that honours SIGTERM inside the grace is
+        # a plain expiry, and one that has to be SIGKILLed exits 128+SIGKILL.
+        # The wait is polled against a wall-clock deadline rather than counted in
+        # sleep slices because short sleeps overshoot enough on macOS to push the
+        # worst case well past the grace this bound promises.
+        # Only a literal 0 means still running: -1 means the main waitpid below
+        # already reaped it in the instant the bound expired, and escalating on
+        # that would report a kill this bound never made.
+        my $deadline = time + $grace;
+        while (time < $deadline) {
+          exit 124 if waitpid($pid, WNOHANG) != 0;
+          sleep 0.05;
+        }
         kill "KILL", -$pid;
-        exit 124;
+        exit 128 + 9;
       };
       alarm $t;
       waitpid $pid, 0;
@@ -292,7 +308,7 @@ gh_auth_probe() {
       # alone would read a crashed probe as authenticated. Reporting it the way
       # the shell does hands the caller the same 128+N every bounder uses.
       exit($st & 127 ? 128 + ($st & 127) : $st >> 8);
-    ' "$FM_GH_AUTH_TIMEOUT_SECS" gh auth status >/dev/null 2>&1
+    ' "$FM_GH_AUTH_TIMEOUT_SECS" "$GH_AUTH_KILL_GRACE_SECS" gh auth status >/dev/null 2>&1
     status=$?
   else
     GH_AUTH_INDETERMINATE_CAUSE=no-bounding-tool
@@ -301,14 +317,15 @@ gh_auth_probe() {
   # One owner for what a status means, so a given status answers the same
   # whichever bounding implementation returned it. A plain expiry arrives as 124;
   # anything at or above 128 means the probe was killed rather than answered,
-  # whether that was the kill grace escalating to SIGKILL or an external kill,
   # and a killed probe carries no information about the credential. Reporting
-  # either as unauthenticated is the exact failure this check exists to remove,
-  # so both collapse to indeterminate. Only the timeout/gtimeout branch can reach
-  # here after its own escalation; the Perl alarm exits 124 from its handler, so
-  # that branch words a self-escalated kill as an expiry instead.
+  # that as unauthenticated is the exact failure this check exists to remove, so
+  # both collapse to indeterminate. The status deliberately does not name a
+  # culprit: 137 is what this bound's own SIGKILL escalation exits with AND what
+  # an external SIGKILL leaves behind, so the report states only what the status
+  # proves - the probe was killed before it answered - and carries the raw number
+  # for whoever can correlate it with the rest of the home's state.
   if [ "$status" -ge 128 ]; then
-    GH_AUTH_INDETERMINATE_CAUSE=abnormal
+    GH_AUTH_INDETERMINATE_CAUSE=killed
     GH_AUTH_INDETERMINATE_STATUS=$status
     status=124
   fi
@@ -334,8 +351,8 @@ gh_auth_report() {
         no-bounding-tool)
           echo "GH_AUTH: indeterminate (no bounded-probe tool: install coreutils or perl)"
           ;;
-        abnormal)
-          echo "GH_AUTH: indeterminate (probe terminated abnormally with status ${GH_AUTH_INDETERMINATE_STATUS})"
+        killed)
+          echo "GH_AUTH: indeterminate (probe was killed before it answered, status ${GH_AUTH_INDETERMINATE_STATUS})"
           ;;
         *)
           echo "GH_AUTH: indeterminate (probe timed out after ${FM_GH_AUTH_TIMEOUT_SECS}s)"
