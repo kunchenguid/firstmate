@@ -256,7 +256,9 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+  # The marker is the self-drive sentence, which appears only in the no-mistakes
+  # definition of done, so it still discriminates that variant from direct-PR.
+  assert_grep "invoke /no-mistakes yourself to validate and ship the PR" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
@@ -368,13 +370,15 @@ test_faster_delivery_modes_do_not_wait_for_firstmate() {
   write_registry "$home"
 
   id="brief-direct-self-drive-b2"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "direct-PR self-drive brief should scaffold"
   brief="$home/data/$id/brief.md"
   assert_grep "Do not end your turn waiting for firstmate to tell you to push or open the PR - those delivery steps are yours." "$brief" \
     "direct-PR brief must make the worker drive its own push and PR creation"
 
   id="brief-local-self-drive-b2"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj --mode local-only >/dev/null 2>&1 \
+    || fail "local-only self-drive brief should scaffold"
   brief="$home/data/$id/brief.md"
   assert_grep "Do not end your turn waiting for firstmate to tell you to rebase or report the ready branch - those delivery steps are yours." "$brief" \
     "local-only brief must make the worker drive its own rebase and ready report"
