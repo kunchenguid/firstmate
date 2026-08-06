@@ -805,6 +805,52 @@ test_unverified_adapter_rejects_invalid_executables() {
   pass "unverified adapter rejects missing, non-executable, unsafe, and unresolvable paths"
 }
 
+test_unverified_adapter_rejects_mixed_case_claude_names() {
+  local rec id out status sm
+
+  id=profile-unverified-mixed-claude-ship-z15x
+  rec=$(make_spawn_case profile-unverified-mixed-claude-ship claude "$id")
+  read_case_record "$rec"
+  fm_fake_exit0 "$FAKEBIN_DIR" CLAUDE-adapter
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --unverified-adapter CLAUDE-adapter \
+    --adapter-arg=--permission-mode --adapter-arg=bypassPermissions)
+  status=$?
+  assert_unsafe_claude_raw_refused "$out" "$status" "$HOME_DIR" "$LAUNCH_LOG" "$id" \
+    "mixed-case Claude ship adapter"
+  assert_contains "$out" "Claude must use the canonical verified harness" \
+    "mixed-case Claude ship adapter did not reach the canonical Claude boundary"
+
+  id=profile-unverified-mixed-claude-scout-z15y
+  rec=$(make_spawn_case profile-unverified-mixed-claude-scout claude "$id")
+  read_case_record "$rec"
+  fm_fake_exit0 "$FAKEBIN_DIR" Claude-Agent
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --unverified-adapter Claude-Agent --scout)
+  status=$?
+  assert_unsafe_claude_raw_refused "$out" "$status" "$HOME_DIR" "$LAUNCH_LOG" "$id" \
+    "mixed-case Claude scout adapter"
+  assert_contains "$out" "Claude must use the canonical verified harness" \
+    "mixed-case Claude scout adapter did not reach the canonical Claude boundary"
+
+  id=profile-unverified-resolved-claude-secondmate-z15z
+  rec=$(make_spawn_case profile-unverified-resolved-claude-secondmate claude "$id")
+  read_case_record "$rec"
+  fm_fake_exit0 "$FAKEBIN_DIR" Claude-agent
+  ln -s "$FAKEBIN_DIR/Claude-agent" "$FAKEBIN_DIR/bridge-agent"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$sm" --unverified-adapter bridge-agent \
+    --adapter-arg=--permission-mode --adapter-arg=bypassPermissions --secondmate)
+  status=$?
+  assert_unsafe_claude_raw_refused "$out" "$status" "$HOME_DIR" "$LAUNCH_LOG" "$id" \
+    "mixed-case resolved Claude secondmate adapter"
+  assert_contains "$out" "Claude must use the canonical verified harness" \
+    "mixed-case resolved Claude secondmate adapter did not reach the canonical Claude boundary"
+  pass "unverified adapters reject requested and resolved mixed-case Claude names"
+}
+
 test_claude_threads_model_and_effort() {
   local rec id out status launch
   id=profile-claude-z2
@@ -1249,6 +1295,7 @@ test_forbidden_permission_glob_is_refused
 test_unverified_adapter_boundary_rejects_unsafe_forms
 test_unverified_adapter_preserves_literal_non_claude_arguments
 test_unverified_adapter_rejects_invalid_executables
+test_unverified_adapter_rejects_mixed_case_claude_names
 test_claude_threads_model_and_effort
 test_claude_scout_uses_auto_permissions_and_delivers_profiled_prompt
 test_codex_threads_model_and_effort

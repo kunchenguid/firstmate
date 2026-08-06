@@ -375,10 +375,13 @@ unverified_adapter_refuse() {
 }
 
 unverified_adapter_preflight() {
-  local executable=$1 base arg candidate parent leaf target hops
+  local executable=$1 base arg candidate parent leaf target hops normalized_executable normalized_leaf
+  normalized_executable=$(printf '%s' "$executable" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+  case "$normalized_executable" in
+    *claude*) unverified_adapter_refuse "Claude must use the canonical verified harness"; return 1 ;;
+  esac
   case "$executable" in
     ''|*[!A-Za-z0-9_./+-]*) unverified_adapter_refuse "the executable contains unsafe syntax"; return 1 ;;
-    *claude*) unverified_adapter_refuse "Claude must use the canonical verified harness"; return 1 ;;
   esac
   base=${executable##*/}
   case "$base" in
@@ -441,12 +444,13 @@ unverified_adapter_preflight() {
     return 1
   }
   leaf=${candidate##*/}
+  normalized_leaf=$(printf '%s' "$leaf" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+  case "$normalized_leaf" in
+    *claude*) unverified_adapter_refuse "Claude must use the canonical verified harness"; return 1 ;;
+  esac
   case "$leaf" in
     *-agent|*-adapter) ;;
     *) unverified_adapter_refuse "the resolved executable is not a direct adapter entrypoint"; return 1 ;;
-  esac
-  case "$leaf" in
-    *claude*) unverified_adapter_refuse "Claude must use the canonical verified harness"; return 1 ;;
   esac
 
   UNVERIFIED_ADAPTER_LAUNCH="'$candidate'"
