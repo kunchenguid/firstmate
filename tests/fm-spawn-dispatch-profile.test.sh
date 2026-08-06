@@ -391,6 +391,24 @@ test_active_dispatch_profile_allows_structured_unverified_adapter() {
   pass "active crew-dispatch profile allows the structured unverified-adapter escape path"
 }
 
+test_unverified_adapter_rejects_secondmate_positional_harness_conflict() {
+  local rec id out status
+  id=profile-unverified-secondmate-conflict-z15aa
+  rec=$(make_spawn_case profile-unverified-secondmate-conflict claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" claude --unverified-adapter custom-agent --secondmate)
+  status=$?
+  expect_code 1 "$status" "secondmate positional harness plus unverified adapter should be rejected"
+  assert_contains "$out" "--unverified-adapter cannot be combined with a positional harness" \
+    "secondmate positional harness conflict did not produce clear migration guidance"
+  assert_absent "$HOME_DIR/state/$id.meta" "secondmate positional harness conflict wrote task metadata"
+  assert_absent "$HOME_DIR/state/.spawn-$id.lock" "secondmate positional harness conflict acquired the task lock"
+  [ ! -s "$LAUNCH_LOG" ] || fail "secondmate positional harness conflict reached backend delivery"
+  pass "secondmate positional harness conflict is rejected before task lock"
+}
+
 assert_unsafe_claude_raw_refused() {
   local out=$1 status=$2 home=$3 launchlog=$4 id=$5 context=$6
   expect_code 1 "$status" "$context should reject a non-canonical Claude launch"
@@ -1056,6 +1074,27 @@ test_batch_forwards_shared_profile_flags() {
   pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
 }
 
+test_batch_preserves_project_paths_with_whitespace() {
+  local rec id1 id2 id3 spaced_project out status
+  id1=profile-batch-space-a-z9a
+  id2=profile-batch-space-b-z9b
+  id3=profile-batch-space-c-z9c
+  rec=$(make_spawn_case profile-batch-space claude "$id1" "$id2" "$id3")
+  read_case_record "$rec"
+  spaced_project="$CASE_DIR/project with space"
+  fm_git_init_commit "$spaced_project"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" "$id3=$spaced_project" --harness codex)
+  status=$?
+  expect_code 0 "$status" "batch spawn should preserve a quoted project path containing whitespace"
+  assert_contains "$out" "spawned $id1 harness=codex" "first whitespace-path batch task did not spawn"
+  assert_contains "$out" "spawned $id2 harness=codex" "second whitespace-path batch task did not spawn"
+  assert_contains "$out" "spawned $id3 harness=codex" "whitespace-path batch task did not spawn"
+  assert_meta_profile "$HOME_DIR/state/$id3.meta" codex default default
+  pass "batch dispatch preserves quoted project paths containing whitespace"
+}
+
 test_claude_forwards_firstmate_config_dir_when_set() {
   local rec id out status launch
   id=profile-claude-cfgdir-z17
@@ -1133,6 +1172,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_structured_unverified_adapter
+test_unverified_adapter_rejects_secondmate_positional_harness_conflict
 test_claude_raw_bypass_refused_for_ship_before_launch
 test_claude_raw_bypass_refused_for_scout_before_launch
 test_claude_raw_bypass_refused_for_secondmate_before_launch
@@ -1163,6 +1203,7 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
+test_batch_preserves_project_paths_with_whitespace
 test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir

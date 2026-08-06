@@ -461,33 +461,56 @@ UNVERIFIED_ADAPTER_LAUNCH=
 if [ "$UNVERIFIED_ADAPTER_SET" -eq 1 ]; then
   unverified_adapter_preflight "$UNVERIFIED_ADAPTER" || exit 1
 fi
+
+classify_secondmate_positionals() {
+  SECONDMATE_POSITIONAL_HOME=
+  SECONDMATE_POSITIONAL_HARNESS=
+  case "${POS[1]:-}" in
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+      SECONDMATE_POSITIONAL_HARNESS=${POS[1]:-}
+      ;;
+    *' '*)
+      if [ "${#POS[@]}" -gt 2 ] || [ -d "${POS[1]}" ]; then
+        SECONDMATE_POSITIONAL_HOME=${POS[1]}
+        SECONDMATE_POSITIONAL_HARNESS=${POS[2]:-}
+      else
+        SECONDMATE_POSITIONAL_HARNESS=${POS[1]}
+      fi
+      ;;
+    *)
+      SECONDMATE_POSITIONAL_HOME=${POS[1]}
+      SECONDMATE_POSITIONAL_HARNESS=${POS[2]:-}
+      ;;
+  esac
+}
+
+idpart=${POS[0]:-}
+idpart=${idpart%%=*}
+BATCH_DISPATCH=0
+if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
+  BATCH_DISPATCH=1
+fi
+SECONDMATE_POSITIONAL_HOME=
+SECONDMATE_POSITIONAL_HARNESS=
+if [ "$KIND" = secondmate ] && [ "$BATCH_DISPATCH" -eq 0 ]; then
+  classify_secondmate_positionals
+fi
 LEGACY_RAW_LAUNCH_CANDIDATE=
 if [ -n "$HARNESS_ARG" ]; then
   LEGACY_RAW_LAUNCH_CANDIDATE=$HARNESS_ARG
+elif [ "$BATCH_DISPATCH" -eq 1 ]; then
+  :
 elif [ "$KIND" = secondmate ]; then
-  case "${POS[1]:-}" in
-    *' '*)
-      if [ "${#POS[@]}" -gt 2 ] || [ -d "${POS[1]}" ]; then
-        LEGACY_RAW_LAUNCH_CANDIDATE=${POS[2]:-}
-      else
-        LEGACY_RAW_LAUNCH_CANDIDATE=${POS[1]}
-      fi
-      ;;
-    *) LEGACY_RAW_LAUNCH_CANDIDATE=${POS[2]:-} ;;
-  esac
+  LEGACY_RAW_LAUNCH_CANDIDATE=$SECONDMATE_POSITIONAL_HARNESS
 else
   LEGACY_RAW_LAUNCH_CANDIDATE=${POS[2]:-}
 fi
 case "$LEGACY_RAW_LAUNCH_CANDIDATE" in
   *[[:space:]]*) unverified_adapter_refuse; exit 1 ;;
 esac
-idpart=${POS[0]:-}
-idpart=${idpart%%=*}
 if [ "$UNVERIFIED_ADAPTER_SET" -eq 1 ] && [ -n "$LEGACY_RAW_LAUNCH_CANDIDATE" ]; then
-  if [ "${#POS[@]}" -eq 0 ] || [ "${POS[0]}" = "$idpart" ] || case "$idpart" in */*) true ;; *) false ;; esac; then
-    echo "error: --unverified-adapter cannot be combined with a positional harness or legacy launch string" >&2
-    exit 1
-  fi
+  echo "error: --unverified-adapter cannot be combined with a positional harness or legacy launch string" >&2
+  exit 1
 fi
 
 spawn_remote_secondmate() {
@@ -897,7 +920,7 @@ spawn_herdr_presentation_order_lock_release() {
 # the single path verbatim. A failed pair is reported and skipped; the rest still launch;
 # exit is non-zero if any pair failed. Single-task invocations never carry an '=' in arg
 # one (task ids are bare slugs), so they fall straight through to the logic below.
-if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
+if [ "$BATCH_DISPATCH" -eq 1 ]; then
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ "$UNVERIFIED_ADAPTER_SET" -eq 0 ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness or structured unverified adapter resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
@@ -949,23 +972,8 @@ ARG3=
 FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
-  case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
-      ARG3=${POS[1]:-}
-      ;;
-    *' '*)
-      if [ "${#POS[@]}" -gt 2 ] || [ -d "${POS[1]}" ]; then
-        FIRSTMATE_HOME=${POS[1]}
-        ARG3=${POS[2]:-}
-      else
-        ARG3=${POS[1]}
-      fi
-      ;;
-    *)
-      FIRSTMATE_HOME=${POS[1]}
-      ARG3=${POS[2]:-}
-      ;;
-  esac
+  FIRSTMATE_HOME=$SECONDMATE_POSITIONAL_HOME
+  ARG3=$SECONDMATE_POSITIONAL_HARNESS
 else
   PROJ=${POS[1]}
   ARG3=${POS[2]:-}
