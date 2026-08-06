@@ -232,7 +232,7 @@ Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committe
 
 ## Optional X mode
 
-X mode is opt-in presence for the shared `@myfirstmate` bot.
+X mode is opt-in presence for the shared `@myfirstmate` bot on both public surfaces the relay supports, X and Discord.
 A user enables it by putting `FMX_PAIRING_TOKEN` in the firstmate home's gitignored `.env`; `FMX_RELAY_URL` is optional and defaults to `https://myfirstmate.io`.
 That token is standing authorization for firstmate to answer public mentions and act autonomously on normal reversible mention requests.
 Destructive, irreversible, or security-sensitive asks are escalated for trusted-channel confirmation instead of being executed from a public mention.
