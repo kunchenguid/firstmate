@@ -234,6 +234,9 @@ When `config/crew-dispatch.json` exists, crewmate and scout spawns require an ex
 The inherited-local-material contract is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); its harness-relevant consequence is that a secondmate's own crewmates use the primary's dispatch profiles and static harness value.
 Those inherited values are defaults and rules only; `fm-spawn` still permits a consciously chosen explicit runtime outside the config.
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
+For claude crews, `fm-spawn.sh` keeps the per-task turn-end and busy-state hooks out of the project copy by writing them to `state/<task-id>.claude-settings.json` and loading them with `claude --settings`; only a raw launch command firstmate must not rewrite keeps that wiring through the copy's `.claude/settings.local.json`.
+A project that tracks `.claude/settings.local.json` therefore gets no hooks at all on that fallback, so those crewmates send no turn-end wake and classify unknown for busy state.
+The delivery contract is owned by the harness adapter knowledge linked above, and [`verification/supervision.md`](verification/supervision.md#claude-hook-delivery-through---settings) records the evidence.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Kimi crews, `fm-spawn.sh` runs `fm-kimi-turnend-hook.sh install`, drops a per-task `.fm-kimi-turnend` pointer in the worktree, and records the matching private registry token for teardown.
 Kimi continues to use the captain's normal Kimi home, including the existing config, skills, and memory; Firstmate does not create an isolated Kimi home.
