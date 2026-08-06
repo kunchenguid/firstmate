@@ -21,12 +21,13 @@
 # state/<id>.status, and every parent consumer - the open-decision fold, wake
 # classification, crew-state reconciliation, and pending-reply resolution - reads
 # that one stream. A remote secondmate must present the same model, so ingest
-# reproduces its stream line for line and leaves every semantic judgement to
-# those same shared consumers. Correlation is a per-line property that
-# fm-pending-reply-lib.sh consumes; it is never a gate on the stream. Gating on
-# it here made a remote mate's own progress lines and newly raised decisions -
-# which carry no corr= by contract - unrepresentable, and rejecting one line
-# failed the whole delta, so the cursor could never advance past it.
+# mirrors every content-bearing line at most once, omits blank separators, and
+# leaves every semantic judgement to those same shared consumers. Correlation is
+# a per-line property that fm-pending-reply-lib.sh consumes; it is never a gate
+# on the stream. Gating on it here made a remote mate's own progress lines and
+# newly raised decisions - which carry no corr= by contract - unrepresentable,
+# and rejecting one line failed the whole delta, so the cursor could never
+# advance past it. No single line can stop or wedge the stream.
 #
 # What remains here is only what crossing a machine boundary genuinely adds:
 #   - cursor continuity and identity (offset plus prefix digest)
@@ -34,8 +35,8 @@
 #     rewritten to their local copies, because the parent cannot read the remote
 #     filesystem
 #   - at-most-once append, because a captured generation can be replayed
-#   - control-byte normalization, so bytes from another machine cannot make the
-#     parent's status file unsafe to read; it rewrites bytes, never drops a line
+#   - control-byte normalization, so content-bearing bytes from another machine
+#     cannot make the parent's status file unsafe to read
 # Line framing and size bounding belong to bin/fm-remote-delta-read.sh, which
 # delivers only whole lines and breaks continuity on an over-long one.
 set -u
@@ -264,8 +265,8 @@ fetch_document() { # <id> <remote-relative> <result-var>
 # every other C0 control except tab and newline, plus DEL, become '?'. Printable
 # ASCII and every high byte pass through untouched, so ordinary UTF-8 notes
 # mirror exactly as a local secondmate would have written them. Newlines remain
-# framing rather than payload bytes, so this rewrites bytes and never drops a
-# line.
+# framing rather than payload bytes, and blank separators are not carried into
+# the parent status stream.
 normalize_payload() { # <source> <destination>
   LC_ALL=C tr '\000-\010\013-\037\177' '?' < "$1" > "$2"
 }

@@ -169,9 +169,9 @@ FM_HOME=<primary-home> bin/fm-send.sh fm-<id> '<request>'
 
 Marked requests keep the existing correlation contract.
 The remote charter appends replies to `state/parent-replies.status` in the remote home.
-A process-event source performs a non-destructive, cursor-anchored delta read, fetches only referenced `data/*.md` documents through the confined reader, and mirrors each line at most once into the primary status channel.
-The channel carries the mate's whole status stream, exactly as a local secondmate writes it: an uncorrelated progress line and a newly raised `needs-decision` travel the same path as a correlated answer, and reach the parent's open-decision fold identically.
-Correlation is a per-line property that settles a pending request; it is never a gate on the stream, so no single line can stop the relay or hold the cursor back.
+A process-event source performs a non-destructive, cursor-anchored delta read, fetches only referenced `data/*.md` documents through the confined reader, mirrors every content-bearing line at most once into the primary status channel, and does not carry blank separators.
+The channel carries the mate's status and decision model: an uncorrelated progress line and a newly raised `needs-decision` travel the same path as a correlated answer, and reach the parent's open-decision fold identically.
+Correlation is a per-line property that settles a pending request; it is never a gate on the stream, so no single line can stop or wedge the relay or hold the cursor back.
 Control characters in a transported line are normalized before the append so the parent's status file stays safe to read, and a document the remote reader refuses is named in one escalation rather than stalling the stream.
 The source log is never truncated or consumed.
 A shortened or changed prefix stops the relay and surfaces a continuity failure instead of silently resetting the cursor.

@@ -170,13 +170,13 @@ assert_contains "$out" 'handled: remote-reply-ios 2' "earlier generation remaine
   || fail "earlier generation replay duplicated its parent status"
 pass "later generations cannot invalidate an unacknowledged ingested result"
 
-# The channel mirrors the remote mate's whole status stream, exactly as a local
-# secondmate writes it. A remote mate's own progress line and a NEWLY raised
-# needs-decision carry no corr= by charter contract, and a delta carrying them
-# alongside a correlated answer must ingest whole: every line reaches the parent
-# stream, the new decision reaches the parent's open-decision fold, the
-# correlated line still settles its pending-reply record, and the cursor
-# advances so the channel cannot wedge on a line it once refused.
+# The channel mirrors the remote mate's content-bearing status lines at most once
+# while omitting blank separators. A remote mate's own progress line and a NEWLY
+# raised needs-decision carry no corr= by charter contract, and a delta carrying
+# them alongside a correlated answer must ingest whole: every content-bearing
+# line reaches the parent stream, the new decision reaches the parent's
+# open-decision fold, the correlated line still settles its pending-reply record,
+# and the cursor advances so the channel cannot wedge on a line it once refused.
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$ROOT/bin/fm-pending-reply-lib.sh"
 PENDING_CORR=$(fm_pending_reply_create "$PARENT" "$PARENT/state" ios 'audit the release chain')
@@ -199,7 +199,7 @@ assert_grep "done [corr=$PENDING_CORR]" "$PARENT/state/ios.status" "the correlat
 mirror_offset=$(LC_ALL=C wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
 assert_grep "offset=$mirror_offset" "$PARENT/state/remote-replies/ios.cursor" \
   "the cursor did not advance past an uncorrelated line"
-pass "the whole remote status stream mirrors, correlated or not, and the cursor advances"
+pass "the remote status and decision model mirrors and the cursor advances"
 
 # The newly raised decision must be indistinguishable from a local mate's, so the
 # shared fold - not this adapter - decides it is open.
