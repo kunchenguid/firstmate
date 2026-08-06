@@ -1219,13 +1219,15 @@ fi
 #   worktree-local  the flag cannot be placed - an unverified wrapper's argv is not
 #                   firstmate's to rewrite, and an operator who passes their own
 #                   --settings owns that slot - so the hooks go to the copy's
-#                   `.claude/settings.local.json`, the file claude reads with no
-#                   flag at all. That is how these launches were always wired, and
-#                   dropping the wiring would leave the watcher with no turn
-#                   boundary for the task. Written only when the project does NOT
-#                   track that path (settled below, before the busy arm): over a
-#                   tracked file firstmate would destroy the project's own hook
-#                   config, which is what moved the settings out of the copy.
+#                   `.claude/settings.local.json`. Claude loads that file with no
+#                   flag at all, and its hooks also fire alongside an operator's
+#                   own --settings file rather than being shadowed by it (verified
+#                   2026-08-06 on Claude Code 2.1.223; docs/verification/
+#                   supervision.md owns the evidence), so both launches keep the
+#                   turn boundary the watcher needs. Written only when the project
+#                   does NOT track that path (settled below, before the busy arm):
+#                   over a tracked file firstmate would destroy the project's own
+#                   hook config, which is what moved the settings out of the copy.
 #   none            no hook file this launch could load, so no wiring is claimed
 #                   and no busy record is armed that nothing could ever clear.
 CLAUDE_HOOK_MODE=none

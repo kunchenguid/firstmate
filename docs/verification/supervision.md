@@ -201,6 +201,17 @@ claude -p "say ok" --dangerously-skip-permissions --settings /nonexistent/path/x
 
 Observed result: `Error: Settings file not found: /nonexistent/path/x.json`.
 
+A fourth property, verified on 2026-08-06 with Claude Code 2.1.223, covers the fallback delivery: hooks in a copy's `.claude/settings.local.json` still fire when the launch also carries an operator-supplied `--settings` file, so the two layers merge rather than the flag shadowing the local one.
+That is what lets a raw launch command owning `--settings` keep firstmate's turn-end and busy-state wiring instead of running unwired.
+A project whose `.claude/settings.local.json` registers `UserPromptSubmit` and `Stop` hooks touching `LOCAL_UPS_FIRED` and `LOCAL_STOP_FIRED`, plus an unrelated external settings file whose own `UserPromptSubmit` and `Stop` hooks touch `EXTERNAL_UPS_FIRED` and `EXTERNAL_STOP_FIRED`:
+
+```sh
+cd <project> && claude -p "reply with the single word ok" \
+  --dangerously-skip-permissions --settings <outside-project>/external-settings.json
+```
+
+Observed result: the run printed `ok` and all four markers were created - `EXTERNAL_STOP_FIRED`, `EXTERNAL_UPS_FIRED`, `LOCAL_STOP_FIRED`, `LOCAL_UPS_FIRED`.
+
 Deterministic entry points:
 
 ```sh

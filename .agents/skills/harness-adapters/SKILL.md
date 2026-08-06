@@ -196,7 +196,8 @@ A crewmate's per-task hooks are written to `state/<task-id>.claude-settings.json
 That path is a generic one some projects TRACK, so writing scaffolding there destroyed the project's own hook config and left the copy permanently dirty.
 Hooks supplied through `--settings` fire, and the project's own `.claude/settings.json` hooks still fire alongside them; a missing `--settings` path is fatal, so a secondmate launch (which writes no per-task hook file) carries no such flag.
 Because the wiring rides that flag, a raw launch command (the unverified-adapter escape hatch) gets the flag inserted right after its command word, but only when that word is exactly `claude`.
-A wrapper such as `claude-yolo` keeps its argv untouched, and an operator who already passes their own `--settings` keeps theirs; those launches keep their turn-end and busy-state wiring through the copy's `.claude/settings.local.json`, the file claude reads with no flag at all, written only when the project does not track that path.
+A wrapper such as `claude-yolo` keeps its argv untouched, and an operator who already passes their own `--settings` keeps theirs; those launches keep their turn-end and busy-state wiring through the copy's `.claude/settings.local.json`, written only when the project does not track that path.
+That fallback is verified on both shapes: claude reads the local settings file with no flag at all, and (verified 2026-08-06, Claude Code 2.1.223) its hooks still fire alongside an operator-supplied `--settings` file rather than being shadowed by it.
 When the project DOES track it, firstmate installs no hook file and does not arm the busy-state contract, since it never overwrites project content and a busy record no hook could clear is worse than none.
 `docs/verification/supervision.md` "Claude hook delivery through `--settings`" owns the evidence.
 
