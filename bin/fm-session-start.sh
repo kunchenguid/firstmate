@@ -41,9 +41,12 @@
 #   5. read-once contract - the do-not-re-read contract covering every source
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
-#                       read-only, always runs.
+#                       one bounded RULING_RECONCILE line when open captain
+#                       decisions exist, every state/*.meta, a bounded
+#                       state/*.status tail, state/.afk, and a cheap per-task
+#                       endpoint-liveness read. Always runs, and read-only
+#                       except for the RULING_RECONCILE step, which publishes
+#                       its derived index only when locked (see below).
 #   7. context digest - data/projects.md, data/secondmates.md, data/captain.md,
 #                       data/captain-shared.md, data/learnings.md: read-only,
 #                       always safe, always runs.
@@ -91,10 +94,13 @@
 # tasks-axi and quota-axi tool checks, and tasks-axi availability - none of
 # which mutate shared state and all of which are safe to compute without
 # verified lock ownership.
-# Only projection cleanup, the six bootstrap mutating sweeps, and the
-# wake-queue drain are skipped.
-# The context and fleet-state digests
-# below are always read-only, so they run unconditionally in both modes.
+# Only projection cleanup, the six bootstrap mutating sweeps, the wake-queue
+# drain, and the ruling-index rebuild are skipped.
+# The context digest below is always read-only, and so is every part of the
+# fleet-state digest except its RULING_RECONCILE step: publishing the derived
+# ruling index is a mutation, so a refused session reports the count from the
+# existing index instead of rebuilding it, and does not go dark. Both digests
+# therefore run in both modes.
 #
 # BACKLOG DIGEST: the startup listing is a RECOVERY input, not a reporting
 # surface, so it carries what this turn can act on and nothing else.
