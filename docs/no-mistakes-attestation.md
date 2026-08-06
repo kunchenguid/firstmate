@@ -75,12 +75,16 @@ A run tip that is not a commit in this checkout at all is refused separately as 
 It publishes to the remote's push URL rather than its fetch URL, and reconciles against that same repository before writing, because those are two different repositories in the setup `CONTRIBUTING.md` describes and only the push target is the one the check reads.
 The reconciliation merges the published ref instead of forcing over the local one, so an attestation recorded locally with `--no-push` survives the publishing of a later one.
 It names that repository in what it prints, with any credentials the remote's URL embeds stripped out, because "published to origin" does not say which repository was reached and the note is evidence only on the one holding the pull request head.
+The remote's own error text is never echoed on any of these calls, the final push included, because git quotes the push URL back in it and a credential in a log is a leak wherever that log ends up; the stripped name and the repair are printed instead.
 A push target carrying no `refs/notes/no-mistakes` yet has nothing to reconcile against and is not an error, but a push target that cannot be read at all stops the command before anything is recorded: not reading a repository is not reading an absence, and that is the same line the gate draws when it fetches this ref.
 
 Its own refusals stay as distinct as the gate's.
-`no-run-record` means the pipeline reported no run, `run-record-unreadable` means the tool itself failed, and `run-record-unparsed` means it reported something no run identity could be read from; all three quote the tool's own output, because a tool error read as an absent run sends a contributor to re-run a pipeline that already ran.
-Only what the tool writes to stdout decides which of the three it is, because unrelated notices such as its version-upgrade banner go to stderr and must never stand in for a run record; stderr is quoted alongside stdout purely as diagnostic detail.
+`no-run-record` means the pipeline reported no run, `run-record-unreadable` means the tool itself failed, `run-record-unparsed` means it reported something no run identity could be read from, and `run-record-no-head` means it reported a run naming no usable head commit; all four quote the tool's own output, because a tool error read as an absent run sends a contributor to re-run a pipeline that already ran.
+Only what the tool writes to stdout decides which of them it is, because unrelated notices such as its version-upgrade banner go to stderr and must never stand in for a run record; stderr is quoted alongside stdout purely as diagnostic detail.
+None of them may borrow a reason that describes the branch instead of the record.
+A record that cannot be read says nothing about whether the work here is covered, so reporting it as a diverged branch sends a contributor to re-validate a branch that is fine and to receive the identical refusal.
 Every call to the tool is time-bounded, so one blocked on a lock or a network read refuses as `run-record-unreadable` rather than hanging at a contributor's terminal.
+`run-record-unbounded` is the separate case where no `timeout`, `gtimeout` or `perl` exists to impose that bound, so the tool is never run: that is a fact about this host, and describing it as a tool failure would report an exit status for a process that never started.
 
 When `no-mistakes` publishes this note itself, the helper becomes redundant and nothing about the check changes: the note format is the contract, and which program writes it is not.
 

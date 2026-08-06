@@ -65,6 +65,17 @@ install_pipeline_stub() {
   chmod +x "$dir/bin/no-mistakes"
 }
 
+# A PATH carrying everything the emitter needs except a utility that can bound a
+# call, so the single property under test is the absence of that bound.
+install_unbounded_path() {
+  local dir=$1 tool
+  mkdir -p "$dir"
+  for tool in bash sh git sed awk tr cat cut head rm mktemp dirname basename env uname grep; do
+    command -v "$tool" >/dev/null 2>&1 || continue
+    ln -sf "$(command -v "$tool")" "$dir/$tool"
+  done
+}
+
 run_status_toon() {
   local branch=$1 head=$2 review_state=$3
   printf 'run:\n  id: "01KZ5YTADR5YAXZSNKFXTW8W9F"\n  branch: %s\n  status: running\n  head: %s\n  steps[8]{step,status,findings,duration_ms}:\n    intent,completed,0,3\n    rebase,completed,0,581\n    review,%s,0,599904\n    test,completed,0,235507\n    document,completed,0,58499\n    lint,completed,0,78748\n    push,completed,0,2200\n    ci,awaiting_approval,1,99775564\ngate:\n  step: ci\n  status: awaiting_approval\n' \
@@ -393,6 +404,64 @@ test_write_surfaces_a_tool_failure_instead_of_reporting_no_run() {
   pass "fm-attest.sh: write surfaces a failing pipeline tool rather than reporting no run"
 }
 
+test_write_reports_a_record_with_no_head_as_a_record_fault() {
+  local repo head out rc
+  repo="$TMP_ROOT/write-record-no-head"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  # The passing record minus exactly one property: the head it covers.
+  install_pipeline_stub "$repo/stub" \
+    "$(run_status_toon fm/demo "${head:0:8}" completed | sed '/^  head: /d')"
+  out=$(write_out "$repo")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a run record naming no head was transcribed"
+  assert_contains "$out" "run-record-no-head" "a record with no readable head was not reported distinctly"
+  # Unreadability is not divergence. Saying the branch is uncovered sends a
+  # contributor to re-validate a branch that is fine, for the identical refusal.
+  assert_not_contains "$out" "run-covers-another-head" \
+    "a record this transcription cannot read was reported as a diverged branch"
+  assert_not_contains "$out" "run-head-unavailable" \
+    "a record with no head was reported as a commit missing from the checkout"
+  git -C "$repo" rev-parse --verify --quiet "$NOTES_REF" >/dev/null 2>&1 \
+    && fail "a refused attestation was still written"
+  # The matched control: the same record, differing only by that one line.
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${head:0:8}" completed)"
+  out=$(write_out "$repo")
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "the same record with its head line was refused: $out"
+  pass "fm-attest.sh: a run record with no readable head is a record fault, not a diverged branch"
+}
+
+test_write_refuses_when_no_utility_can_bound_the_call() {
+  local repo bare head out rc tool
+  repo="$TMP_ROOT/write-unbounded"
+  bare="$TMP_ROOT/write-unbounded-path"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${head:0:8}" completed)"
+  install_unbounded_path "$bare"
+  for tool in timeout gtimeout perl; do
+    PATH="$repo/stub/bin:$bare" command -v "$tool" >/dev/null 2>&1 \
+      && fail "the fixture PATH still offers $tool, so the refusal would not be about its absence"
+  done
+  out=$(cd "$repo" && PATH="$repo/stub/bin:$bare" "$ATTEST" write --no-push 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a run record was transcribed with no way to bound the call"
+  assert_contains "$out" "run-record-unbounded" "an unbounded host was not reported distinctly"
+  # The tool never ran, so reporting an exit status for it would describe a
+  # process that never started.
+  assert_not_contains "$out" "run-record-unreadable" \
+    "a host that cannot bound the call was reported as a failing tool"
+  git -C "$repo" rev-parse --verify --quiet "$NOTES_REF" >/dev/null 2>&1 \
+    && fail "an attestation was recorded without ever reading the run record"
+  # The matched control: the same repository and the same run record, differing
+  # only in that this PATH can bound the call.
+  out=$(write_out "$repo")
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "the same run record was refused where the call can be bounded: $out"
+  pass "fm-attest.sh: no utility to bound the call refuses as its own state, not as a tool failure"
+}
+
 test_write_reports_an_unreadable_run_record_distinctly() {
   local repo out rc
   repo="$TMP_ROOT/write-unparsed-run"
@@ -480,6 +549,40 @@ test_write_publishes_a_first_attestation_to_a_push_target_with_no_ref() {
   pass "fm-attest.sh: a push target with no attestation ref yet still receives the note"
 }
 
+test_write_withholds_the_remotes_own_push_error() {
+  local repo fork head out rc
+  repo="$TMP_ROOT/write-push-rejected"
+  fork="$TMP_ROOT/write-push-rejected-fork.git"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  git init -q --bare "$fork"
+  git -C "$repo" remote add origin "$fork"
+  # A push target that reads fine but refuses the write, which is the shape of a
+  # real push failure: git names the push URL in its own message, and that URL
+  # can carry credentials, so its text must not reach the caller.
+  printf '#!/bin/sh\nexit 1\n' > "$fork/hooks/pre-receive"
+  chmod +x "$fork/hooks/pre-receive"
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${head:0:8}" completed)"
+  out=$(publish_out "$repo")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a rejected push was reported as a publication"
+  assert_contains "$out" "could not publish $NOTES_REF to $fork" \
+    "the refusal did not name the repository it could not publish to"
+  assert_not_contains "$out" "failed to push some refs" \
+    "git's own push error, which quotes the push URL, reached the caller"
+  assert_not_contains "$out" "remote rejected" \
+    "git's own push error, which quotes the push URL, reached the caller"
+  # The matched control: the same repository and the same remote, differing only
+  # in that this push target accepts the write.
+  rm -f "$fork/hooks/pre-receive"
+  out=$(publish_out "$repo")
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "publishing was refused once the same target accepted writes: $out"
+  assert_contains "$out" "published $NOTES_REF to $fork" \
+    "the success line did not name the repository the note reached"
+  pass "fm-attest.sh: a rejected push reports the stripped target rather than the remote's own message"
+}
+
 test_write_refuses_an_unreadable_push_target_without_leaking_credentials() {
   local repo parent head out rc
   repo="$TMP_ROOT/write-unreadable-target"
@@ -524,6 +627,9 @@ test_write_refuses_a_later_commit_on_the_same_branch
 test_write_refuses_without_a_run_record
 test_write_surfaces_a_tool_failure_instead_of_reporting_no_run
 test_write_reports_an_unreadable_run_record_distinctly
+test_write_reports_a_record_with_no_head_as_a_record_fault
+test_write_refuses_when_no_utility_can_bound_the_call
 test_write_publishes_to_the_push_target_it_reconciled_against
+test_write_withholds_the_remotes_own_push_error
 test_write_publishes_a_first_attestation_to_a_push_target_with_no_ref
 test_write_refuses_an_unreadable_push_target_without_leaking_credentials

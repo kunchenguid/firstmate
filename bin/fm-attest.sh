@@ -350,6 +350,15 @@ cmd_write() {
   branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || die "HEAD is not on a branch"
   [ "$branch" != HEAD ] || die "attest from the branch the pipeline validated, not a detached HEAD"
 
+  # A call this host cannot bound is not a call that failed. fm_nm_run_bounded
+  # runs nothing at all when no bounding utility exists, so asking first keeps
+  # "the tool never ran" from being reported as "the tool exited 1" with no
+  # output to diagnose from, on a machine where the pipeline itself works.
+  fm_nm_bound_tool >/dev/null || refuse run-record-unbounded \
+    "No timeout, gtimeout or perl is available here to bound the call to no-mistakes." \
+    "The run record was therefore never read, rather than read and found wanting, so this says nothing about the pipeline or about this branch." \
+    "Install one of them and re-run."
+
   # A tool that failed, a tool whose output this transcription cannot read, and a
   # tool reporting no run at all are three different repairs, and none of them
   # may be described as one of the others.
@@ -416,8 +425,11 @@ EOF
   # head the pipeline pushed and therefore the head the gate reads; binding it to
   # a HEAD the run has already moved past would publish a note for a commit no
   # pull request is open on.
-  is_short_sha "$head_field" || refuse run-covers-another-head \
-    "The pipeline run record names no usable head commit."
+  is_short_sha "$head_field" || refuse run-record-no-head \
+    "no-mistakes reported run $run_field, but no usable head commit could be read from that record." \
+    "Its stdout: $status" \
+    "That is a record this transcription cannot read rather than a branch that diverged from it: nothing here says this branch carries uncovered work, so re-validating it would report the same." \
+    "Either that output is not a run record, or its shape changed and this transcription needs updating."
   attest_head=$(git rev-parse --verify --quiet "$head_field^{commit}" 2>/dev/null) \
     || refuse run-head-unavailable \
       "The pipeline run validated $head_field, which is not a commit in this checkout." \
@@ -463,8 +475,9 @@ EOF
   # That repository is named in everything this prints, because "published to
   # origin" does not say which repository was reached and the note is evidence
   # only on the one holding the pull request head. Credentials a URL embeds are
-  # stripped from the name, and the remote's own error text is never echoed,
-  # because that text quotes the URL back verbatim.
+  # stripped from the name, and the remote's own error text is never echoed on
+  # any of these calls, the final push included, because that text quotes the
+  # push URL back and a credential in a log is a leak wherever that log ends up.
   push_target=$remote
   if [ "$push" -eq 1 ]; then
     push_url=$(git remote get-url --push "$remote" 2>/dev/null) || push_url=$remote
@@ -501,8 +514,8 @@ EOF
   printf 'fm-attest: recorded %s for %s\n' "$notes_ref" "$attest_head"
 
   [ "$push" -eq 1 ] || return 0
-  git push --quiet "$remote" "$notes_ref:$notes_ref" \
-    || die "could not publish $notes_ref to $push_target, the push target of $remote; the attestation is evidence only on the repository holding the pull request head, so check that this is that repository or name it with --remote <name>, then re-run"
+  git push --quiet "$remote" "$notes_ref:$notes_ref" 2>/dev/null \
+    || die "could not publish $notes_ref to $push_target, the push target of $remote; git's own message is withheld because it quotes the push URL, which can carry credentials; the attestation is evidence only on the repository holding the pull request head, so name that one with --remote <name> if this is not it, or re-run to reconcile if its $notes_ref moved since"
   printf 'fm-attest: published %s to %s (the push target of %s)\n' "$notes_ref" "$push_target" "$remote"
 }
 
