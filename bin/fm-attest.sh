@@ -321,26 +321,49 @@ EOF
 # reason arrives in the same stream. Suppressing that stream keeps a credential
 # out of the log but throws the rejection reason away with it, which leaves a
 # contributor blocked by a ruleset or a quota with nothing to act on. So the
-# text is redacted rather than withheld: the userinfo is stripped from every URL
-# in it, and any line that still carries the secret verbatim after that is
-# replaced by a notice saying so, because an omission the reader knows about is
-# recoverable and a silent one is not.
-redact_secret=
-
-url_secret() {
+# text is redacted rather than withheld.
+#
+# ONE owner decides where a URL's userinfo ends, and everything that has to know
+# asks it. Two stages reading that boundary differently is not a detail: when
+# one split at the first '@' and the others at the last, a password holding an
+# unencoded '@' lost only its first character and the rest reached the log. The
+# authority is what follows '://' up to the first '/', and the boundary is the
+# last '@' inside it, which is how git reads it too.
+url_userinfo() {  # <url> -> the userinfo it carries, empty when it carries none
   case "$1" in
     *://*) ;;
     *) return 0 ;;
   esac
-  us_authority=${1#*://}
-  us_authority=${us_authority%%/*}
-  case "$us_authority" in
-    *@*) us_userinfo=${us_authority%@*} ;;
-    *) return 0 ;;
+  uu_authority=${1#*://}
+  uu_authority=${uu_authority%%/*}
+  case "$uu_authority" in
+    *@*) printf '%s' "${uu_authority%@*}" ;;
   esac
-  case "$us_userinfo" in
-    *:*) printf '%s' "${us_userinfo#*:}" ;;
+}
+
+# The same boundary as a pattern, because the redactor scans arbitrary text
+# rather than one known URL. Excluding '/' ends the match at the authority so it
+# can never reach into the path, and greedy matching inside it lands on the last
+# '@', exactly where url_userinfo puts it. The pattern both strips userinfo and
+# detects any that survived stripping.
+USERINFO_MATCH='://[^/[:space:]]*@'
+
+redact_secret=
+redact_confident=1
+
+# Fixes the redaction context from the URL whose output is about to be quoted.
+# If the pattern cannot find userinfo that url_userinfo says is there, the two
+# readings disagree about this URL, and text redacted by a reading that does not
+# understand it is exactly where a leak hides. Uncertainty withholds.
+redact_for_url() {  # <url>
+  redact_secret=
+  redact_confident=1
+  rfu_userinfo=$(url_userinfo "$1")
+  [ -n "$rfu_userinfo" ] || return 0
+  case "$rfu_userinfo" in
+    *:*) redact_secret=${rfu_userinfo#*:} ;;
   esac
+  printf '%s' "$1" | grep -q "$USERINFO_MATCH" || redact_confident=0
 }
 
 redact_text() {
@@ -348,15 +371,22 @@ redact_text() {
     printf '(nothing)'
     return 0
   }
-  printf '%s\n' "$1" | sed 's#://[^/@[:space:]]*@#://#g' | while IFS= read -r rt_line; do
+  [ "$redact_confident" -eq 1 ] || {
+    printf '(withheld in full: this push URL carries a credential whose extent the redactor cannot locate, and partly redacted text is how one leaks)'
+    return 0
+  }
+  printf '%s\n' "$1" | sed "s#$USERINFO_MATCH#://#g" | while IFS= read -r rt_line; do
+    rt_keep=1
+    printf '%s\n' "$rt_line" | grep -q "$USERINFO_MATCH" && rt_keep=0
     if [ -n "$redact_secret" ]; then
       case "$rt_line" in
-        *"$redact_secret"*)
-          printf '(a line is withheld here: it still named a credential after redaction)\n'
-          continue
-          ;;
+        *"$redact_secret"*) rt_keep=0 ;;
       esac
     fi
+    [ "$rt_keep" -eq 1 ] || {
+      printf '(a line is withheld here: a credential in it survived redaction)\n'
+      continue
+    }
     printf '%s\n' "$rt_line"
   done
 }
@@ -379,9 +409,8 @@ display_repository() {
           dr_path=
           ;;
       esac
-      case "$dr_authority" in
-        *@*) dr_authority=${dr_authority##*@} ;;
-      esac
+      dr_userinfo=$(url_userinfo "$1")
+      [ -z "$dr_userinfo" ] || dr_authority=${dr_authority#"$dr_userinfo"@}
       printf '%s://%s%s' "$dr_scheme" "$dr_authority" "$dr_path"
       ;;
     /* | ./* | ../*) printf '%s' "$1" ;;
@@ -560,7 +589,7 @@ EOF
   if [ "$push" -eq 1 ]; then
     push_url=$(git remote get-url --push "$remote" 2>/dev/null) || push_url=$remote
     push_target=$(display_repository "$push_url")
-    redact_secret=$(url_secret "$push_url")
+    redact_for_url "$push_url"
     incoming_ref="$notes_ref-incoming"
     # Absence and unreadability are two different answers and only one of them is
     # a fact about the attestations there. A push target with no

@@ -94,7 +94,12 @@ The reconciliation merges the published ref instead of forcing over the local on
 It names that repository in what it prints, with any credentials the remote's URL embeds stripped out, because "published to origin" does not say which repository was reached and the note is evidence only on the one holding the pull request head.
 git's own text is redacted rather than withheld when a remote call fails.
 git quotes the push URL back in its messages and a credential in a log is a leak wherever that log ends up, but suppressing the text throws away the server's rejection reason with it, and a contributor blocked by a ruleset on `refs/notes/*`, a required-signature policy or a quota then has nothing to act on.
-So the userinfo is stripped from every URL in the text, and any line that still carries the secret after that is replaced by a notice saying a line was withheld, because an omission the reader knows about is recoverable and a silent one is not.
+So the userinfo is stripped from every URL in the text, and any line that still carries a credential after that is replaced by a notice saying a line was withheld, because an omission the reader knows about is recoverable and a silent one is not.
+
+One rule decides where a URL's userinfo ends, and every stage asks it rather than reading the URL for itself.
+The authority is what follows `://` up to the first `/`, and the boundary is the last `@` inside it, which is how git reads it too.
+Two stages disagreeing about that boundary is not a detail: when one split at the first `@` and the others at the last, a password holding an unencoded `@` lost only its first character and the rest reached the log.
+When the text redactor cannot locate userinfo that the rule says is there, the two readings disagree about that URL and git's text is withheld whole rather than emitted partly redacted, because uncertainty is exactly where a leak hides.
 A push target carrying no `refs/notes/no-mistakes` yet has nothing to reconcile against and is not an error, but a push target that cannot be read at all stops the command before anything is recorded: not reading a repository is not reading an absence, and that is the same line the gate draws when it fetches this ref.
 
 Its own refusals stay as distinct as the gate's.

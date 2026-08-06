@@ -77,6 +77,22 @@ install_unbounded_path() {
   done
 }
 
+# A push target that reads fine but refuses the write, echoing the given text as
+# the server's own reason. git passes `remote:` lines through verbatim, so any
+# redaction observed on them is this script's rather than git's own.
+install_rejecting_fork() {
+  local fork=$1 message=$2
+  git init -q --bare "$fork"
+  {
+    printf '#!/bin/sh\n'
+    printf 'cat <<%s >&2\n' "'FM_HOOK_MSG'"
+    printf '%s\n' "$message"
+    printf 'FM_HOOK_MSG\n'
+    printf 'exit 1\n'
+  } > "$fork/hooks/pre-receive"
+  chmod +x "$fork/hooks/pre-receive"
+}
+
 run_status_toon() {
   local branch=$1 head=$2 review_state=$3
   printf 'run:\n  id: "01KZ5YTADR5YAXZSNKFXTW8W9F"\n  branch: %s\n  status: running\n  head: %s\n  steps[8]{step,status,findings,duration_ms}:\n    intent,completed,0,3\n    rebase,completed,0,581\n    review,%s,0,599904\n    test,completed,0,235507\n    document,completed,0,58499\n    lint,completed,0,78748\n    push,completed,0,2200\n    ci,awaiting_approval,1,99775564\ngate:\n  step: ci\n  status: awaiting_approval\n' \
@@ -621,6 +637,268 @@ test_write_refuses_an_unreadable_push_target_without_leaking_credentials() {
   pass "fm-attest.sh: an unreadable push target stops the command rather than reading as an absent one"
 }
 
+test_write_redacts_every_userinfo_shape_from_the_rejection_reason() {
+  local repo fork head out rc
+  repo="$TMP_ROOT/redact-shapes"
+  fork="$TMP_ROOT/redact-shapes-fork.git"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  install_rejecting_fork "$fork" "$(printf '%s\n' \
+    'none https://plain.invalid/o/r.git' \
+    'user https://alice@u1.invalid/o/r.git' \
+    'userpass https://alice:hunter2@u2.invalid/o/r.git' \
+    'at-in-pass https://alice:pw@word@u3.invalid/o/r.git' \
+    'colon-in-pass https://alice:pw:word@u4.invalid/o/r.git' \
+    'encoded-at https://alice:pw%40word@u5.invalid/o/r.git' \
+    'path-at https://u6.invalid/o/r.git@v2')"
+  git -C "$repo" remote add origin "$fork"
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${head:0:8}" completed)"
+  out=$(publish_out "$repo")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a rejected push was reported as a publication"
+  # The shape this control exists for: a password holding an unencoded @ used to
+  # lose only its first character, because the redactor split the userinfo at
+  # the first @ while every other reading split it at the last.
+  assert_not_contains "$out" "pw@word" "a password holding an unencoded @ reached the caller"
+  assert_not_contains "$out" "word@u3" "a fragment of that password reached the caller"
+  assert_contains "$out" "https://u3.invalid/o/r.git" \
+    "the at-in-password URL was not redacted down to its host"
+  # The shapes that already redacted correctly must not regress.
+  assert_not_contains "$out" "hunter2" "a plain password reached the caller"
+  assert_not_contains "$out" "alice" "a username reached the caller"
+  assert_not_contains "$out" "pw:word" "a password holding a colon reached the caller"
+  assert_not_contains "$out" "pw%40word" "a percent-encoded password reached the caller"
+  # And a URL with no userinfo, or an @ that belongs to the path, is left alone:
+  # over-redaction would quietly become the blanket suppression already refused.
+  assert_contains "$out" "https://plain.invalid/o/r.git" "a URL with no userinfo was altered"
+  assert_contains "$out" "https://u6.invalid/o/r.git@v2" "an @ in a path was read as userinfo"
+  pass "fm-attest.sh: every userinfo shape is redacted out of the server's rejection reason"
+}
+
+test_write_withholds_git_text_when_it_cannot_locate_the_credential() {
+  local repo parent head out rc
+  repo="$TMP_ROOT/redact-unlocatable"
+  parent="$TMP_ROOT/redact-unlocatable-parent.git"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  git init -q --bare "$parent"
+  git -C "$repo" remote add origin "$parent"
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${head:0:8}" completed)"
+  # A push URL whose userinfo the text redactor's pattern cannot locate, because
+  # the credential holds a space. Emitting partly redacted text is how a leak
+  # hides, so the whole of git's text is withheld instead.
+  git -C "$repo" config remote.origin.pushurl 'https://someone:pa ss@127.0.0.1:1/owner/repo.git'
+  out=$(cd "$repo" && GIT_TERMINAL_PROMPT=0 no_proxy='*' NO_PROXY='*' \
+    PATH="$repo/stub/bin:$PATH" "$ATTEST" write 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an unreadable push target was published to"
+  assert_contains "$out" "withheld in full" "text that could not be redacted with confidence was emitted"
+  assert_not_contains "$out" "pa ss" "the credential reached the caller"
+  assert_not_contains "$out" "someone" "the credential's user reached the caller"
+  # Deliberate rather than incidental: the same unreachable target, differing
+  # only in that this credential can be located, shows git's text instead.
+  git -C "$repo" config remote.origin.pushurl 'https://someone:passphrase@127.0.0.1:1/owner/repo.git'
+  out=$(cd "$repo" && GIT_TERMINAL_PROMPT=0 no_proxy='*' NO_PROXY='*' \
+    PATH="$repo/stub/bin:$PATH" "$ATTEST" write 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an unreadable push target was published to"
+  assert_not_contains "$out" "withheld in full" "text with a locatable credential was withheld"
+  assert_not_contains "$out" "passphrase" "the credential reached the caller"
+  pass "fm-attest.sh: a credential the redactor cannot locate withholds git's text rather than half of it"
+}
+
+# ---------------------------------------------------------------------------
+# write and show - the failure half of the error model. Every documented
+# `cannot attest` reason fires for its own condition and for no other's.
+# ---------------------------------------------------------------------------
+
+test_write_outside_a_repository_fails_as_such() {
+  local dir out rc
+  dir="$TMP_ROOT/no-repo"
+  mkdir -p "$dir"
+  out=$(cd "$dir" && "$ATTEST" write --no-push 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "write ran outside a git repository"
+  assert_contains "$out" "not-a-git-repository" "a non-repository was not reported as such"
+  assert_not_contains "$out" "head-unresolvable" "a non-repository was reported as an unresolvable head"
+  pass "fm-attest.sh: write outside a repository fails as a non-repository"
+}
+
+test_write_without_the_pipeline_tool_fails_as_such() {
+  local repo bare head out rc
+  repo="$TMP_ROOT/no-tool"
+  bare="$TMP_ROOT/no-tool-path"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  install_unbounded_path "$bare"
+  out=$(cd "$repo" && PATH="$bare" "$ATTEST" write --no-push 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "write ran with no pipeline tool on PATH"
+  assert_contains "$out" "pipeline-tool-missing" "an absent pipeline tool was not reported as such"
+  assert_not_contains "$out" "no-run-record" "an absent tool was reported as an absent run"
+  # The matched control: the same repository and PATH, plus the tool.
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${head:0:8}" completed)"
+  out=$(cd "$repo" && PATH="$repo/stub/bin:$bare" "$ATTEST" write --no-push 2>&1)
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "the same repository was refused once the tool was on PATH: $out"
+  pass "fm-attest.sh: an absent pipeline tool fails as a missing tool, not as a missing run"
+}
+
+test_write_on_an_unborn_head_fails_as_such() {
+  local repo out rc
+  repo="$TMP_ROOT/unborn-head"
+  mkdir -p "$repo"
+  git -C "$repo" init -q -b fm/demo .
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo deadbeef completed)"
+  out=$(write_out "$repo")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "write ran with no commit to attest"
+  assert_contains "$out" "head-unresolvable" "an unborn HEAD was not reported as such"
+  assert_not_contains "$out" "head-detached" "an unborn HEAD was reported as a detached one"
+  pass "fm-attest.sh: an unborn HEAD fails as unresolvable, not as detached"
+}
+
+test_write_on_a_detached_head_fails_as_such() {
+  local repo head out rc
+  repo="$TMP_ROOT/detached-head"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${head:0:8}" completed)"
+  git -C "$repo" checkout -q --detach
+  out=$(write_out "$repo")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "write ran from a detached HEAD"
+  assert_contains "$out" "head-detached" "a detached HEAD was not reported as such"
+  assert_not_contains "$out" "head-unresolvable" "a detached HEAD was reported as an unresolvable one"
+  # The matched control: the same repository back on the branch the run covers.
+  git -C "$repo" checkout -q fm/demo
+  out=$(write_out "$repo")
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "the same repository was refused once back on its branch: $out"
+  pass "fm-attest.sh: a detached HEAD fails as detached, not as unresolvable"
+}
+
+test_write_without_a_usable_scratch_directory_fails_as_such() {
+  local repo head out rc
+  repo="$TMP_ROOT/no-tmpdir"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${head:0:8}" completed)"
+  out=$(cd "$repo" && TMPDIR="$repo/absent" PATH="$repo/stub/bin:$PATH" \
+    "$ATTEST" write --no-push 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "write ran with no usable temporary directory"
+  assert_contains "$out" "scratch-file-unavailable" "an unusable TMPDIR was not reported as such"
+  assert_not_contains "$out" "run-record-unreadable" "an unusable TMPDIR was reported as a failing tool"
+  # The matched control: the same repository with a usable one.
+  out=$(write_out "$repo")
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "the same repository was refused with a usable TMPDIR: $out"
+  pass "fm-attest.sh: an unusable scratch directory fails as its own state, not as a tool failure"
+}
+
+test_write_reports_an_unfetchable_push_target_as_such() {
+  local repo fork head out rc
+  repo="$TMP_ROOT/unfetchable"
+  fork="$TMP_ROOT/unfetchable-fork.git"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  git init -q --bare "$fork"
+  git -C "$repo" remote add origin "$fork"
+  # A push target that advertises the ref but cannot serve it, because the ref
+  # names an object it does not have. Readable is not the same as fetchable.
+  mkdir -p "$fork/refs/notes"
+  printf '0123456789012345678901234567890123456789\n' > "$fork/refs/notes/no-mistakes"
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${head:0:8}" completed)"
+  out=$(publish_out "$repo")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an unfetchable push target was published to"
+  assert_contains "$out" "push-target-unfetchable" "an unfetchable push target was not reported as such"
+  assert_not_contains "$out" "push-target-unreadable" \
+    "a target that advertised the ref was reported as one that could not be read"
+  git -C "$repo" rev-parse --verify --quiet "$NOTES_REF" >/dev/null 2>&1 \
+    && fail "an attestation was recorded against a target that would not serve its ref"
+  # The matched control: the same target once that ref is serviceable.
+  rm -f "$fork/refs/notes/no-mistakes"
+  out=$(publish_out "$repo")
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "the same target was refused once its ref was serviceable: $out"
+  pass "fm-attest.sh: a push target that advertises a ref it cannot serve fails as unfetchable"
+}
+
+test_write_reports_an_unreconcilable_local_ref_as_such() {
+  local repo fork head seed out rc
+  repo="$TMP_ROOT/unreconcilable"
+  fork="$TMP_ROOT/unreconcilable-fork.git"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  git init -q --bare "$fork"
+  git -C "$repo" remote add origin "$fork"
+  # The push target holds a real attestation history, so the reconcile is
+  # reached; the local ref is broken, so it cannot complete.
+  seed=$(git -C "$repo" commit-tree -m seed "$(git -C "$repo" rev-parse 'HEAD^{tree}')")
+  add_note "$repo" "$seed" "$(good_note "$seed")"
+  git -C "$repo" push -q "$fork" "$NOTES_REF:$NOTES_REF"
+  # A local ref that resolves, so the fetch completes, but that names no notes
+  # tree, so only the reconcile itself can fail.
+  git -C "$repo" update-ref "$NOTES_REF" "$(printf 'x' | git -C "$repo" hash-object -w --stdin)"
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${head:0:8}" completed)"
+  out=$(publish_out "$repo")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a local ref naming no notes tree was published over"
+  assert_contains "$out" "attestation-not-reconciled" "a failed reconcile was not reported as such"
+  assert_not_contains "$out" "attestation-not-recorded" \
+    "a reconcile that failed was reported as a record that failed"
+  assert_not_contains "$out" "push-target-unfetchable" \
+    "a reconcile that failed was reported as a target that would not serve its ref"
+  # The matched control: the same target with a usable local ref.
+  git -C "$repo" update-ref -d "$NOTES_REF"
+  out=$(publish_out "$repo")
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "the same push target was refused with a usable local ref: $out"
+  pass "fm-attest.sh: a local ref that cannot be reconciled fails as unreconciled"
+}
+
+test_write_reports_an_unrecordable_note_as_such() {
+  local repo head out rc
+  repo="$TMP_ROOT/unrecordable"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${head:0:8}" completed)"
+  git -C "$repo" update-ref "$NOTES_REF" "$(printf 'x' | git -C "$repo" hash-object -w --stdin)"
+  out=$(write_out "$repo")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a note was recorded against a ref naming no notes tree"
+  assert_contains "$out" "attestation-not-recorded" "a failed record was not reported as such"
+  assert_not_contains "$out" "attestation-not-reconciled" \
+    "a record that failed with no push was reported as a failed reconcile"
+  # The matched control: the same repository with a usable ref.
+  git -C "$repo" update-ref -d "$NOTES_REF"
+  out=$(write_out "$repo")
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "the same repository was refused with a readable ref: $out"
+  pass "fm-attest.sh: a note that cannot be recorded fails as unrecorded"
+}
+
+test_show_reports_an_unknown_commit_as_such() {
+  local repo head out rc
+  repo="$TMP_ROOT/show-unknown"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  add_note "$repo" "$head" "$(good_note "$head")"
+  out=$(cd "$repo" && "$ATTEST" show --commit 0123456789012345678901234567890123456789 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "show accepted a commit this repository does not have"
+  assert_contains "$out" "commit-unknown" "an unknown commit was not reported as such"
+  assert_not_contains "$out" "no-attestation-for-head" \
+    "a commit this repository does not have was reported as one carrying no attestation"
+  # The matched control: the commit this repository does have.
+  out=$(cd "$repo" && "$ATTEST" show --commit "$head" 2>&1)
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "show refused the attested commit: $out"
+  pass "fm-attest.sh: show fails as commit-unknown rather than as an absent attestation"
+}
+
 test_absent_notes_ref_refuses_as_absent
 test_ref_without_note_for_head_refuses_distinctly
 test_note_naming_another_head_refuses_as_unbound
@@ -646,3 +924,14 @@ test_write_publishes_to_the_push_target_it_reconciled_against
 test_write_reports_the_rejection_reason_with_credentials_redacted
 test_write_publishes_a_first_attestation_to_a_push_target_with_no_ref
 test_write_refuses_an_unreadable_push_target_without_leaking_credentials
+test_write_redacts_every_userinfo_shape_from_the_rejection_reason
+test_write_withholds_git_text_when_it_cannot_locate_the_credential
+test_write_outside_a_repository_fails_as_such
+test_write_without_the_pipeline_tool_fails_as_such
+test_write_on_an_unborn_head_fails_as_such
+test_write_on_a_detached_head_fails_as_such
+test_write_without_a_usable_scratch_directory_fails_as_such
+test_write_reports_an_unfetchable_push_target_as_such
+test_write_reports_an_unreconcilable_local_ref_as_such
+test_write_reports_an_unrecordable_note_as_such
+test_show_reports_an_unknown_commit_as_such
