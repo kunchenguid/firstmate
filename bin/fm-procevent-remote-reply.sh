@@ -265,10 +265,20 @@ mirror_line() { # <line> -> the exact bytes to append
   printf '%s' "$1" | LC_ALL=C tr '\1-\10\13-\37\177' '?'
 }
 
+# The one place a line enters the parent status stream. A captured generation can
+# be replayed, so every append - a mirrored line or an escalation this adapter
+# raises itself - is at most once on exact bytes.
+# Returns 0 appended, 1 already present, 2 the write itself failed.
+append_status_once() { # <status-file> <line>
+  grep -Fqx -- "$2" "$1" 2>/dev/null && return 1
+  printf '%s\n' "$2" >> "$1" || return 2
+  return 0
+}
+
 cmd_ingest() {
   local id=${1:-} result=${2:-} seq=${3:-} class blank payload schema status path from to from_hash to_hash payload_hash payload_bytes reason
   local actual_bytes actual_hash line doc local_doc rewritten appended=0 cursor_already=0 lock status_file tmp
-  local fetch_rc undelivered=''
+  local fetch_rc append_rc undelivered=''
   validate_id "$id"
   [ -f "$result" ] && [ ! -L "$result" ] || die "result file is unavailable or unsafe: $result"
   class=$(classify_result "$result")
@@ -312,9 +322,9 @@ cmd_ingest() {
   fi
   if [ "$class" = continuity-broken ]; then
     line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason)"
-    if ! grep -Fqx -- "$line" "$status_file" 2>/dev/null; then
-      printf '%s\n' "$line" >> "$status_file" || { fm_lock_release "$lock"; die "cannot append continuity escalation"; }
-    fi
+    append_rc=0
+    append_status_once "$status_file" "$line" || append_rc=$?
+    [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append continuity escalation"; }
     fm_lock_release "$lock"
     printf 'continuity-broken: %s (%s)\n' "$id" "$reason"
     return 3
@@ -341,17 +351,17 @@ cmd_ingest() {
       fi
       rewritten=${rewritten//"$doc"/"$local_doc"}
     done < <(printf '%s\n' "$line" | grep -Eo 'data/[A-Za-z0-9._/-]+\.md' | awk '!seen[$0]++')
-    if ! grep -Fqx -- "$rewritten" "$status_file" 2>/dev/null; then
-      printf '%s\n' "$rewritten" >> "$status_file" || { fm_lock_release "$lock"; die "cannot append remote reply"; }
-      appended=$((appended + 1))
-    fi
+    append_rc=0
+    append_status_once "$status_file" "$rewritten" || append_rc=$?
+    [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append remote reply"; }
+    [ "$append_rc" -ne 0 ] || appended=$((appended + 1))
   done < "$payload"
   if [ -n "$undelivered" ]; then
     line="blocked [key=remote-reply-document-$id]: remote documents did not transfer for $id ($undelivered)"
-    if ! grep -Fqx -- "$line" "$status_file" 2>/dev/null; then
-      printf '%s\n' "$line" >> "$status_file" || { fm_lock_release "$lock"; die "cannot append document escalation"; }
-      appended=$((appended + 1))
-    fi
+    append_rc=0
+    append_status_once "$status_file" "$line" || append_rc=$?
+    [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append document escalation"; }
+    [ "$append_rc" -ne 0 ] || appended=$((appended + 1))
   fi
   while IFS= read -r corr; do
     [ -n "$corr" ] || continue
