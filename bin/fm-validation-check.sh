@@ -2,7 +2,8 @@
 # Arm a no-mistakes task's registered validation-gate watcher check.
 #
 # The task check is a private, ordinary mode-0700 file whose complete source is
-# generated from fm-validation-poll.sh plus one shell-quoted worktree literal.
+# generated from fm-validation-poll.sh and fm-nm-run-lib.sh plus one shell-quoted
+# worktree literal.
 # It is registered before this command returns, so the watcher can only execute
 # its hash-validated snapshot. The task's one check slot belongs to this poll
 # until fm-pr-check.sh records pr=; a PR-marked task is left untouched because
@@ -21,6 +22,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 TEMPLATE="$SCRIPT_DIR/fm-validation-poll.sh"
+NM_RUN_LIB="$SCRIPT_DIR/fm-nm-run-lib.sh"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -53,7 +55,31 @@ TRUST="$STATE/$ID.check-trust"
   echo "error: validation poll template is unavailable" >&2
   exit 1
 }
+[ -f "$NM_RUN_LIB" ] && [ ! -L "$NM_RUN_LIB" ] || {
+  echo "error: validation run attribution library is unavailable" >&2
+  exit 1
+}
 
+TMP=
+CHECK_SLOT_HELD=0
+cleanup() {
+  [ -z "${TMP:-}" ] || rm -f -- "$TMP"
+  [ "$CHECK_SLOT_HELD" -ne 1 ] || fm_custom_check_slot_release
+}
+trap cleanup EXIT HUP INT TERM
+
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+if ! fm_custom_check_slot_acquire "$STATE" "$ID" 100; then
+  echo "error: task check slot is busy" >&2
+  exit 1
+fi
+CHECK_SLOT_HELD=1
+
+[ -f "$META" ] && [ ! -L "$META" ] && [ "$(fm_pr_file_link_count "$META")" = 1 ] || {
+  echo "error: task metadata is unavailable" >&2
+  exit 1
+}
 kind=$(grep '^kind=' "$META" | tail -1 || true)
 mode=$(grep '^mode=' "$META" | tail -1 || true)
 worktree=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -94,26 +120,23 @@ fi
 
 umask 077
 TMP=$(mktemp "$STATE/.fm-validation-check.XXXXXX") || exit 1
-cleanup() {
-  [ -z "${TMP:-}" ] || rm -f -- "$TMP"
-}
-trap cleanup EXIT HUP INT TERM
 {
   printf '%s\n' '#!/usr/bin/env bash' '# fm-validation-gate-check-v1'
   printf 'FM_VALIDATION_WORKTREE=%q\n' "$worktree"
   printf '%s\n' 'export FM_VALIDATION_WORKTREE'
+  tail -n +2 "$NM_RUN_LIB"
   tail -n +2 "$TEMPLATE"
 } > "$TMP" || exit 1
 chmod 0700 "$TMP" || exit 1
 fm_pr_private_file_valid "$TMP" 700 "$STATE_DEVICE" || exit 1
+if ! fm_custom_check_register_source "$STATE" "$ID" "$TMP"; then
+  echo "error: could not register validation check" >&2
+  exit 1
+fi
 fm_pr_regular_destination_on_device_or_absent "$CHECK" "$STATE_DEVICE" || exit 1
 mv -f -- "$TMP" "$CHECK" || exit 1
 TMP=
 
-if ! "$SCRIPT_DIR/fm-check-register.sh" "$ID"; then
-  echo "error: could not register validation check" >&2
-  exit 1
-fi
 fm_custom_check_registered "$STATE" "$ID" || {
   echo "error: validation check registration could not be verified" >&2
   exit 1

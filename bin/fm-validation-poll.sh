@@ -35,7 +35,14 @@ export LC_ALL
 
 worktree=${FM_VALIDATION_WORKTREE:-}
 [ -n "$worktree" ] && [ -d "$worktree" ] || exit 0
+if ! declare -F fm_nm_run >/dev/null 2>&1; then
+  poll_script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  [ -f "$poll_script_dir/fm-nm-run-lib.sh" ] && [ ! -L "$poll_script_dir/fm-nm-run-lib.sh" ] || exit 0
+  . "$poll_script_dir/fm-nm-run-lib.sh" || exit 0
+fi
 command -v no-mistakes >/dev/null 2>&1 || exit 0
+worktree_branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+[ -n "$worktree_branch" ] || exit 0
 
 parked_secs=${FM_VALIDATION_PARKED_SECS:-240}
 query_timeout=5
@@ -47,38 +54,16 @@ check_timeout=${FM_CHECK_TIMEOUT:-30}
 [ "$query_timeout" -lt "$check_timeout" ] || query_timeout=$((check_timeout - 1))
 [ "$query_timeout" -ge 1 ] || exit 0
 
-run_status() {
-  if command -v timeout >/dev/null 2>&1; then
-    ( cd "$worktree" && timeout "$query_timeout" no-mistakes axi status )
-  elif command -v gtimeout >/dev/null 2>&1; then
-    ( cd "$worktree" && gtimeout "$query_timeout" no-mistakes axi status )
-  elif command -v perl >/dev/null 2>&1; then
-    (
-      cd "$worktree" || exit 1
-      perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
-        "$query_timeout" no-mistakes axi status
-    )
-  else
-    return 1
-  fi
-}
-
-run=$(run_status 2>/dev/null) || exit 0
+run=$(fm_nm_run "$worktree" "$query_timeout" axi status)
 [ -n "$run" ] || exit 0
 
-field() {
-  local key=$1 value
-  value=$(printf '%s\n' "$run" | sed -n "s/^[[:space:]]*$key:[[:space:]]*//p" | head -1)
-  value=${value#"${value%%[![:space:]]*}"}
-  value=${value%"${value##*[![:space:]]}"}
-  case "$value" in
-    \"*\") value=${value#\"}; value=${value%\"} ;;
-  esac
-  printf '%s' "$value"
-}
+run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$run" branch)")
+[ "$run_branch" = "$worktree_branch" ] || exit 0
+run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$run" head)")
+fm_nm_head_matches_worktree "$worktree" "$run_head" || exit 0
 
 terminal=
-for value in "$(field outcome)" "$(field status)"; do
+for value in "$(fm_nm_strip_quotes "$(fm_nm_field "$run" outcome)")" "$(fm_nm_strip_quotes "$(fm_nm_field "$run" status)")"; do
   case "$value" in
     passed|failed|cancelled|completed) terminal=$value ;;
   esac
@@ -88,24 +73,33 @@ if [ -n "$terminal" ]; then
   exit 0
 fi
 
-awaiting=$(field awaiting_agent)
+awaiting=$(fm_nm_strip_quotes "$(fm_nm_field "$run" awaiting_agent)")
 case "$awaiting" in
   parked\ *) parked_age=${awaiting#parked } ;;
   *) exit 0 ;;
 esac
-case "$parked_age" in
-  *' '*|'') exit 0 ;;
-esac
-parked_number=${parked_age%?}
-parked_unit=${parked_age#"$parked_number"}
-[[ "$parked_number" =~ ^[0-9]{1,8}$ ]] || exit 0
-case "$parked_unit" in
-  s) multiplier=1 ;;
-  m) multiplier=60 ;;
-  h) multiplier=3600 ;;
-  d) multiplier=86400 ;;
-  *) exit 0 ;;
-esac
-parked_age_secs=$((parked_number * multiplier))
+
+duration_seconds() {
+  local rest=$1 number unit multiplier rank previous_rank=5 total=0
+  [ -n "$rest" ] || return 1
+  while [ -n "$rest" ]; do
+    [[ "$rest" =~ ^([0-9]{1,8})([smhd])(.*)$ ]] || return 1
+    number=${BASH_REMATCH[1]}
+    unit=${BASH_REMATCH[2]}
+    rest=${BASH_REMATCH[3]}
+    case "$unit" in
+      s) multiplier=1; rank=1 ;;
+      m) multiplier=60; rank=2 ;;
+      h) multiplier=3600; rank=3 ;;
+      d) multiplier=86400; rank=4 ;;
+    esac
+    [ "$rank" -lt "$previous_rank" ] || return 1
+    total=$((total + 10#$number * multiplier))
+    previous_rank=$rank
+  done
+  printf '%s\n' "$total"
+}
+
+parked_age_secs=$(duration_seconds "$parked_age") || exit 0
 [ "$parked_age_secs" -gt "$parked_secs" ] || exit 0
 printf 'validation: awaiting_agent parked %ss\n' "$parked_age_secs"
