@@ -1,30 +1,30 @@
 #!/usr/bin/env bash
-# fm-quota-dash.sh - a live console dashboard of provider quota headroom.
+# fm-quota-dash.sh - an htop-style console dashboard of fleet resource headroom.
 #
 # Wraps `quota-axi --json`, which reports a snapshot and has no watch mode of
-# its own. This adds the loop, the bars, and the countdown.
+# its own. This adds the gauges, the table, and the countdown.
 #
-# Refresh is ONE HOUR by default, deliberately not htop's one second. Quota
-# windows are weekly; polling them per second would show a frozen picture while
-# hammering each provider's endpoint, so a fast refresh buys nothing and risks
-# rate-limiting the very data it displays. The countdown exists so a slow
-# refresh still looks alive, and `r` is there for when you cannot wait.
+# Layout follows htop deliberately: a stack of fuel gauges at the top for the
+# glance, a detail table below for the answer, and a key bar at the bottom. The
+# captain reads the gauges in a second and only drops to the table when one of
+# them has gone amber.
 #
-# A provider whose quota cannot be read is shown as UNREADABLE with its remedy,
-# never as 0%. Zero would mean "quota exhausted", which is a different and much
-# more alarming fact than "we could not ask" - and on 2026-08-06 exactly that
-# confusion sent a worker to report a dead API key that was working fine.
+# Refresh is ONE HOUR by default, not htop's one second. Quota windows are
+# weekly, so a fast poll would redraw an unchanged picture while hammering each
+# provider's endpoint. The countdown keeps a slow refresh from looking hung.
 #
-# Alongside the token providers it shows image-generation spend, because that is
-# the third consumable in this fleet and the only one billed in money rather
-# than in a refilling window. Its numbers come from the same ledger
+# Three resources, not two: Claude tokens, Codex tokens, and money spent on
+# image generation. The image row reads the same state/image-gen-spend.tsv that
 # bin/fm-image-gen.sh writes, so the dashboard and the tool's own cap can never
-# disagree.
+# drift apart.
+#
+# A provider whose quota cannot be read is shown as UNREADABLE, never as 0%.
+# Zero would claim "quota exhausted" - a different and far more alarming fact
+# than "we could not ask".
 #
 # Usage:
 #   fm-quota-dash.sh [--interval <seconds>] [--provider <list>] [--once]
-#
-# Keys while running: r = refresh now, q = quit.
+# Keys: r = refresh now, q = quit.
 set -u
 
 INTERVAL=3600
@@ -41,7 +41,7 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || { echo "fm-quota-dash: --provider requires a list" >&2; exit 2; }
       PROVIDERS=$2; shift 2 ;;
     --once) ONCE=1; shift ;;
-    -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "fm-quota-dash: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -50,128 +50,145 @@ command -v quota-axi >/dev/null 2>&1 || { echo "fm-quota-dash: quota-axi is not 
 command -v jq >/dev/null 2>&1 || { echo "fm-quota-dash: jq is required" >&2; exit 2; }
 
 if [ -t 1 ]; then
-  DIM=$'\033[2m'; BOLD=$'\033[1m'; RESET=$'\033[0m'
-  GREEN=$'\033[32m'; AMBER=$'\033[33m'; RED=$'\033[31m'
+  R=$'\033[0m'; B=$'\033[1m'; D=$'\033[2m'
+  GREEN=$'\033[32m'; AMBER=$'\033[33m'; RED=$'\033[31m'; CYAN=$'\033[36m'; BLUE=$'\033[34m'
+  HDR=$'\033[46m\033[30m'; KEY=$'\033[42m\033[30m'; LBL=$'\033[44m\033[37m'
 else
-  DIM=; BOLD=; RESET=; GREEN=; AMBER=; RED=
+  R=; B=; D=; GREEN=; AMBER=; RED=; CYAN=; BLUE=; HDR=; KEY=; LBL=
 fi
 
-# Colour follows the captain's own switching rule: at 20% remaining the plan is
-# to move work to another provider, so that is where the bar stops being calm.
-tone_for() {  # <percent-remaining>
-  if   [ "$1" -le 5 ];  then printf '%s' "$RED"
-  elif [ "$1" -le 20 ]; then printf '%s' "$AMBER"
-  else printf '%s' "$GREEN"
+# Colour follows the captain's own switching rule: below 20% remaining the plan
+# is to move work elsewhere, so that is where a gauge stops being calm.
+tone_for() {
+  awk -v p="$1" -v g="$GREEN" -v a="$AMBER" -v r="$RED" \
+    'BEGIN { if (p < 5) printf "%s", r; else if (p < 20) printf "%s", a; else printf "%s", g }'
+}
+
+pace_label() {
+  case "$1" in
+    on_pace) printf '%sв норме%s' "$GREEN" "$R" ;;
+    behind)  printf '%sперерасход%s' "$RED" "$R" ;;
+    ahead)   printf '%sэкономно%s' "$CYAN" "$R" ;;
+    *)       printf '%s-%s' "$D" "$R" ;;
+  esac
+}
+
+human_until() {
+  local t now d
+  [ -n "$1" ] && [ "$1" != null ] || { printf '?'; return; }
+  t=$(date -j -f '%Y-%m-%dT%H:%M:%S' "${1%%.*}" +%s 2>/dev/null) \
+    || t=$(date -d "$1" +%s 2>/dev/null) || { printf '?'; return; }
+  now=$(date +%s); d=$(( t - now ))
+  [ "$d" -gt 0 ] || { printf 'сейчас'; return; }
+  if   [ "$d" -ge 86400 ]; then printf '%dд %dч' $(( d / 86400 )) $(( d % 86400 / 3600 ))
+  elif [ "$d" -ge 3600 ];  then printf '%dч %dм' $(( d / 3600 )) $(( d % 3600 / 60 ))
+  else printf '%dм' $(( d / 60 ))
   fi
 }
 
-bar() {  # <percent> <width>
-  local pct=$1 width=$2 filled i out=
-  filled=$(( pct * width / 100 ))
-  [ "$filled" -ge 0 ] || filled=0
-  [ "$filled" -le "$width" ] || filled=$width
-  i=0; while [ "$i" -lt "$filled" ]; do out="$out█"; i=$((i + 1)); done
-  while [ "$i" -lt "$width" ]; do out="$out░"; i=$((i + 1)); done
-  printf '%s' "$out"
-}
+# Rows are collected once per refresh into a TSV cache, so the gauge block and
+# the detail table below it can never disagree about the same number.
+ROWS=
 
-human_until() {  # <iso8601>
-  local target now diff
-  [ -n "$1" ] && [ "$1" != null ] || { printf 'unknown'; return; }
-  target=$(date -j -f '%Y-%m-%dT%H:%M:%S' "${1%%.*}" +%s 2>/dev/null) \
-    || target=$(date -d "$1" +%s 2>/dev/null) || { printf 'unknown'; return; }
-  now=$(date +%s); diff=$(( target - now ))
-  [ "$diff" -gt 0 ] || { printf 'now'; return; }
-  if   [ "$diff" -ge 86400 ]; then printf '%dd %dh' $(( diff / 86400 )) $(( diff % 86400 / 3600 ))
-  elif [ "$diff" -ge 3600 ];  then printf '%dh %dm' $(( diff / 3600 )) $(( diff % 3600 / 60 ))
-  else printf '%dm' $(( diff / 60 ))
-  fi
-}
-
-render() {
-  local json rows
+collect() {
+  local json img
   json=$(quota-axi --provider "$PROVIDERS" --json 2>/dev/null)
-
-  printf '\033[H\033[2J'
-  printf '%sfm-quota-dash%s   %s%s%s\n\n' "$BOLD" "$RESET" "$DIM" "$(date '+%Y-%m-%d %H:%M')" "$RESET"
-
-  if [ -z "$json" ]; then
-    printf '  %squota-axi returned nothing - is it installed and authenticated?%s\n' "$AMBER" "$RESET"
-    return
-  fi
-
-  # One line per provider/window. A provider with no readable window still gets
-  # a row, because silence about a provider is worse than an honest "unknown".
-  rows=$(printf '%s' "$json" | jq -r '
-    .providers[]? |
-    (.provider) as $p | (.plan // "?") as $plan |
+  ROWS=$(printf '%s' "$json" | jq -r '
+    .providers[]? | (.provider) as $p | (.plan // "?") as $plan |
     if (.windows | length) > 0 then
       .windows[] | [$p, $plan, (.label // .id // "window"),
-                    (.percentRemaining // -1 | tostring),
+                    ((.percentRemaining // -1) | tostring),
                     (.resetsAt // ""), (.pace.status // "?")] | @tsv
-    else
-      [$p, $plan, "-", "-1", "", "unreadable"] | @tsv
-    end' 2>/dev/null)
+    else [$p, $plan, "-", "-1", "", "?"] | @tsv end' 2>/dev/null)
 
-  [ -n "$rows" ] || { printf '  %sno providers reported%s\n' "$AMBER" "$RESET"; return; }
-
-  while IFS=$'\t' read -r prov plan label pct resets pace; do
-    [ -n "$prov" ] || continue
-    if [ "$pct" -lt 0 ] 2>/dev/null; then
-      printf '  %-8s %s%-12s%s  %sUNREADABLE%s  %s\n' \
-        "$prov" "$DIM" "$plan" "$RESET" "$AMBER" "$RESET" "${DIM}quota-axi --allow-keychain-prompt${RESET}"
-      continue
-    fi
-    printf '  %-8s %s%-12s%s %s%s%s %3s%%\n' \
-      "$prov" "$DIM" "$plan" "$RESET" "$(tone_for "$pct")" "$(bar "$pct" 28)" "$RESET" "$pct"
-    printf '           %s%s window - resets in %s - pace: %s%s\n' \
-      "$DIM" "$label" "$(human_until "$resets")" "$pace" "$RESET"
-  done <<EOF
-$rows
-EOF
-
-  render_image_spend
+  img=$(image_row) && ROWS="${ROWS}${ROWS:+$'\n'}${img}"
 }
 
-# Image generation is billed in money against a daily cap rather than in a
-# window that refills, so it gets its own row with the cap as the denominator.
-render_image_spend() {
+image_row() {
   local home ledger cap spent today pct
   home="${FM_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
   ledger="${FM_STATE_OVERRIDE:-$home/state}/image-gen-spend.tsv"
   cap=5
   [ ! -f "$home/config/image-daily-usd-cap" ] || cap=$(tr -d '[:space:]' < "$home/config/image-daily-usd-cap")
   case "$cap" in ''|*[!0-9.]*) cap=5 ;; esac
-
-  today=$(date -u +%Y-%m-%d)
-  spent=0
+  today=$(date -u +%Y-%m-%d); spent=0
   [ ! -f "$ledger" ] || spent=$(awk -F'\t' -v d="$today" '$1 == d { s += $4 } END { printf "%.4f", s + 0 }' "$ledger" 2>/dev/null)
   case "$spent" in ''|*[!0-9.]*) spent=0 ;; esac
-
-  # Percent REMAINING, so the bar reads the same direction as the token rows
-  # above: full and green means plenty left, not plenty spent.
-  pct=$(awk -v s="$spent" -v c="$cap" 'BEGIN { if (c <= 0) { print 0; exit } r = (1 - s / c) * 100; if (r < 0) r = 0; printf "%d", r }')
-
-  printf '\n  %-8s %s%-12s%s %s%s%s %3s%%\n' \
-    "images" "$DIM" "nano-banana" "$RESET" "$(tone_for "$pct")" "$(bar "$pct" 28)" "$RESET" "$pct"
-  printf '           %sspent $%s of $%s today (UTC) - resets at midnight UTC%s\n' \
-    "$DIM" "$spent" "$cap" "$RESET"
+  pct=$(awk -v s="$spent" -v c="$cap" 'BEGIN { r = (c > 0) ? (1 - s / c) * 100 : 0; if (r < 0) r = 0; printf "%.1f", r }')
+  # Midnight UTC is a known reset, not an unknown one; emitting it as an ISO
+  # timestamp lets the same human_until() render it as every other row.
+  printf 'images\tnano-banana\tDaily $%s/$%s\t%s\t%sT00:00:00\tn/a' \
+    "$spent" "$cap" "$pct" "$(date -u -v+1d +%Y-%m-%d 2>/dev/null || date -u -d tomorrow +%Y-%m-%d)"
 }
 
-[ "$ONCE" -eq 0 ] || { render; exit 0; }
+gauge() {  # <n> <pct> <model> <window>
+  local n=$1 pct=$2 model=$3 win=$4 width=28 filled tone pipes spaces
+  filled=$(awk -v p="$pct" -v w="$width" 'BEGIN { f = int(p / 100 * w); if (f < 0) f = 0; if (f > w) f = w; print f }')
+  tone=$(tone_for "$pct")
+  pipes=$(printf '|%.0s' $(seq 1 "$filled") 2>/dev/null)
+  spaces=$(printf ' %.0s' $(seq 1 $(( width - filled ))) 2>/dev/null)
+  printf '%s%2d%s [%s%s%s%s %s%s%5.1f%%%s%s]%s %s%s%s %s(%s)%s\n' \
+    "$CYAN" "$n" "$R" "$tone" "$pipes" "$R" "$spaces" "$B" "$tone" "$pct" "$R" "$CYAN" "$R" \
+    "$B" "$model" "$R" "$D" "$win" "$R"
+}
 
-trap 'printf "\033[?25h\n"; exit 0' INT TERM
+draw() {  # <seconds-left>
+  local left=$1 n=0
+  printf '\033[H\033[J'
+
+  while IFS=$'\t' read -r prov plan win pct resets pace; do
+    [ -n "$prov" ] || continue
+    n=$(( n + 1 ))
+    if awk -v p="$pct" 'BEGIN { exit !(p < 0) }'; then
+      printf '%s%2d%s [%sНЕДОСТУПНО - quota-axi --allow-keychain-prompt%s] %s%s%s\n' \
+        "$CYAN" "$n" "$R" "$AMBER" "$R" "$B" "$prov" "$R"
+    else
+      gauge "$n" "$pct" "$prov" "$win"
+    fi
+  done <<EOF
+$ROWS
+EOF
+
+  printf '\n%sРесурсов:%s %s%d%s | %sАвто-обновление:%s %02d:%02d\n\n' \
+    "$CYAN" "$R" "$B" "$n" "$R" "$CYAN" "$R" $(( left / 60 )) $(( left % 60 ))
+
+  # printf pads by BYTES and Cyrillic is two bytes per character, so %-8s on a
+  # Russian header yields half the intended column. The header is padded by
+  # hand to match the ASCII data columns below it.
+  printf '%s%s%s\n' "$HDR" " ID МОДЕЛЬ   ТАРИФ        ОКНО               ОСТАТОК   СБРОС      ТЕМП        " "$R"
+
+  n=0
+  while IFS=$'\t' read -r prov plan win pct resets pace; do
+    [ -n "$prov" ] || continue
+    n=$(( n + 1 ))
+    if awk -v p="$pct" 'BEGIN { exit !(p < 0) }'; then
+      printf '%s%3d%s %s%-8s%s %s%-12s%s %-16s %s%9s%s   %-10s %s\n' \
+        "$CYAN" "$n" "$R" "$B" "$prov" "$R" "$BLUE" "$plan" "$R" "-" "$AMBER" "н/д" "$R" "-" "$(pace_label "$pace")"
+    else
+      printf '%s%3d%s %s%-8s%s %s%-12s%s %-16s %s%8.1f%%%s   %s%-10s%s %s\n' \
+        "$CYAN" "$n" "$R" "$B" "$prov" "$R" "$BLUE" "$plan" "$R" "$win" \
+        "$(tone_for "$pct")" "$pct" "$R" "$D" "$(human_until "$resets")" "$R" "$(pace_label "$pace")"
+    fi
+  done <<EOF
+$ROWS
+EOF
+
+  printf '\n%s r %s%sОбновить%s  %s q %s%sВыход%s\n' "$KEY" "$R" "$LBL" "$R" "$KEY" "$R" "$LBL" "$R"
+}
+
+if [ "$ONCE" -eq 1 ]; then collect; draw "$INTERVAL"; exit 0; fi
+
+trap 'printf "\033[?25h%s\n" "$R"; exit 0' INT TERM
 printf '\033[?25l'
 
 while :; do
-  render
+  collect
   left=$INTERVAL
   while [ "$left" -gt 0 ]; do
-    printf '\r  %snext refresh in %02d:%02d   -   r refresh now   -   q quit%s ' \
-      "$DIM" $(( left / 60 )) $(( left % 60 )) "$RESET"
+    draw "$left"
     if read -r -s -n 1 -t 1 key 2>/dev/null; then
       case "$key" in
-        q|Q) printf '\033[?25h\n'; exit 0 ;;
+        q|Q) printf '\033[?25h%s\n' "$R"; exit 0 ;;
         r|R) break ;;
       esac
     fi
