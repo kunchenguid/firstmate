@@ -374,7 +374,7 @@ raw_launch_preflight() {
   esac
   base=${normalized##*/}
   case "$base" in
-    claude|env|command|exec|builtin|eval|source|.|sh|bash|dash|zsh|ksh|fish|nohup|nice|ionice|chrt|setsid|stdbuf|timeout|time|sudo|doas|xargs|find|busybox|toybox)
+    claude|env|command|exec|builtin|eval|source|.|coproc|sh|bash|dash|zsh|ksh|fish|nohup|nice|ionice|chrt|setsid|stdbuf|timeout|time|sudo|doas|xargs|find|busybox|toybox)
       raw_launch_refuse
       return 1
       ;;

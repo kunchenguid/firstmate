@@ -545,6 +545,21 @@ test_posix_dot_dispatcher_is_refused() {
   pass "POSIX dot dispatcher is refused before launch"
 }
 
+test_coproc_dispatcher_is_refused() {
+  local rec id raw out status
+  id=profile-raw-coproc-z15l
+  raw="coproc claude --dangerously-skip-permissions"
+  rec=$(make_spawn_case profile-raw-coproc claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "$raw")
+  status=$?
+  assert_unsafe_claude_raw_refused "$out" "$status" "$HOME_DIR" "$LAUNCH_LOG" "$id" \
+    "coproc-dispatched Claude bypass"
+  pass "coproc dispatcher is refused before launch"
+}
+
 test_non_claude_raw_arguments_may_mention_claude() {
   local rec id raw out status launch
   id=profile-raw-custom-claude-model-z15k
@@ -920,6 +935,7 @@ test_shell_obfuscated_claude_bypass_is_refused
 test_quoted_non_claude_raw_launch_is_unchanged
 test_source_dispatcher_is_refused
 test_posix_dot_dispatcher_is_refused
+test_coproc_dispatcher_is_refused
 test_non_claude_raw_arguments_may_mention_claude
 test_claude_threads_model_and_effort
 test_claude_scout_uses_auto_permissions_and_delivers_profiled_prompt
