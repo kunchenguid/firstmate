@@ -4,7 +4,8 @@
 # The mapping fixture is local to each temporary test directory and contains
 # only generated fake paths. It verifies that an absent mapping is silent, a
 # missing configured source warns without stopping the caller, a mapped source
-# is copied, and a non-ignored target is refused before any copy occurs.
+# is copied under both the default and the stock system interpreter, and a
+# non-ignored target is refused before any copy occurs.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -40,8 +41,14 @@ write_mapping() {  # <target>
   printf '%s\t%s\t%s\n' "$PROJECT" "$SOURCE" "$1" > "$CONFIG/worktree-env-sync.tsv"
 }
 
-run_sync() {
-  "$SYNC" "$CONFIG" "$PROJECT" "$WORKTREE" 2>&1
+run_sync() {  # [interpreter]
+  "${1:-bash}" "$SYNC" "$CONFIG" "$PROJECT" "$WORKTREE" 2>&1
+}
+
+assert_no_staging_leftovers() {  # <context>
+  local leftover
+  leftover=$(git -C "$WORKTREE" status --porcelain 2>/dev/null | grep '\.fm-worktree-env\.' || true)
+  [ -z "$leftover" ] || fail "$1 left a commit-visible staging file: $leftover"
 }
 
 test_no_mapping_is_silent_noop() {
@@ -81,7 +88,28 @@ test_copy_places_the_configured_environment_file() {
   [ -z "$out" ] || fail "a successful synchronization should not expose paths or values: $out"
   cmp -s "$SOURCE" "$WORKTREE/.env" || fail "the worktree environment file did not match the configured source"
   git -C "$WORKTREE" check-ignore -q -- .env || fail "the copied environment file is not git-ignored"
+  assert_no_staging_leftovers "a successful synchronization"
   pass "a configured source is copied into the ignored worktree target"
+}
+
+# The worktree-root target is the common mapping and exercises the empty
+# parent-component path. Stock macOS Bash 3.2 aborts an empty array expansion
+# under `set -u`, and CI only parse-checks that interpreter, so run the helper
+# through /bin/bash directly to keep that runtime honest.
+test_worktree_root_target_copies_under_system_bash() {
+  local record out status
+  [ -x /bin/bash ] || { pass "worktree env sync system bash coverage skipped without /bin/bash"; return; }
+  record=$(make_case system-bash)
+  read_case "$record"
+  printf 'test-only-content\n' > "$SOURCE"
+  write_mapping .env
+  out=$(run_sync /bin/bash)
+  status=$?
+  expect_code 0 "$status" "a worktree-root target should synchronize under system bash"
+  [ -z "$out" ] || fail "synchronization under system bash should not warn or expose paths: $out"
+  cmp -s "$SOURCE" "$WORKTREE/.env" || fail "system bash did not copy the configured source to the worktree root"
+  assert_no_staging_leftovers "a system bash synchronization"
+  pass "a worktree-root target is copied under stock system bash"
 }
 
 test_nonignored_target_is_refused_before_copying() {
@@ -101,6 +129,7 @@ test_nonignored_target_is_refused_before_copying() {
 test_no_mapping_is_silent_noop
 test_missing_source_warns_without_copying
 test_copy_places_the_configured_environment_file
+test_worktree_root_target_copies_under_system_bash
 test_nonignored_target_is_refused_before_copying
 
 echo "# all fm-worktree-env-sync tests passed"

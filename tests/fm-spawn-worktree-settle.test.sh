@@ -128,22 +128,6 @@ test_single_stale_first_read_is_not_accepted() {
 # A pane that reports the real worktree from the very first read still only
 # costs the loop's existing one-second inter-poll sleep to confirm - not an
 # extra full cycle on top of that.
-test_spawn_syncs_a_configured_environment_file() {
-  local rec id out status
-  id=settle-env-sync-z3
-  rec=$(make_settle_case settle-env-sync "$id" 0)
-  read_settle_record "$rec"
-  printf 'test-only-content\n' > "$PROJ_DIR/.env"
-  printf '%s\t%s\t.env\n' "$PROJ_DIR" "$PROJ_DIR/.env" > "$HOME_DIR/config/worktree-env-sync.tsv"
-
-  out=$(run_settle_spawn "$id")
-  status=$?
-  expect_code 0 "$status" "spawn should synchronize a configured environment file"
-  cmp -s "$PROJ_DIR/.env" "$WT_DIR/.env" || fail "spawn did not copy the configured environment file into its worktree"
-  git -C "$WT_DIR" check-ignore -q -- .env || fail "spawn copied an environment file to a non-ignored worktree target"
-  pass "spawn synchronizes configured local environment files after worktree setup"
-}
-
 test_already_settled_pane_costs_one_confirm_sleep() {
   local rec id out status start end elapsed
   id=settle-already-settled-z2
@@ -162,8 +146,24 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
+test_spawn_syncs_a_configured_environment_file() {
+  local rec id out status
+  id=settle-env-sync-z3
+  rec=$(make_settle_case settle-env-sync "$id" 0)
+  read_settle_record "$rec"
+  printf 'test-only-content\n' > "$PROJ_DIR/.env"
+  printf '%s\t%s\t.env\n' "$PROJ_DIR" "$PROJ_DIR/.env" > "$HOME_DIR/config/worktree-env-sync.tsv"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should synchronize a configured environment file"
+  cmp -s "$PROJ_DIR/.env" "$WT_DIR/.env" || fail "spawn did not copy the configured environment file into its worktree"
+  git -C "$WT_DIR" check-ignore -q -- .env || fail "spawn copied an environment file to a non-ignored worktree target"
+  pass "spawn synchronizes configured local environment files after worktree setup"
+}
+
 test_single_stale_first_read_is_not_accepted
-test_spawn_syncs_a_configured_environment_file
 test_already_settled_pane_costs_one_confirm_sleep
+test_spawn_syncs_a_configured_environment_file
 
 echo "# all fm-spawn-worktree-settle tests passed"

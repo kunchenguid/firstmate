@@ -48,7 +48,7 @@ is_safe_target() {  # <relative-path>
     ''|/*|.|..|../*|*/../*|*/..|*//*) return 1 ;;
   esac
   read -r -a components <<< "$target"
-  for component in "${components[@]}"; do
+  for component in "${components[@]+"${components[@]}"}"; do
     [ -n "$component" ] && [ "$component" != . ] && [ "$component" != .. ] || return 1
   done
 }
@@ -61,11 +61,11 @@ prepare_target_parent() {  # <worktree-root> <relative-target>
   [ "$parent_rel" = "$target" ] && parent_rel=
   current=$root
   read -r -a components <<< "$parent_rel"
-  for component in "${components[@]}"; do
+  for component in "${components[@]+"${components[@]}"}"; do
     [ -n "$component" ] || continue
     [ ! -L "$current/$component" ] || return 1
     if [ ! -e "$current/$component" ]; then
-      mkdir "$current/$component" || return 1
+      mkdir "$current/$component" 2>/dev/null || return 1
     fi
     [ -d "$current/$component" ] || return 1
     current="$current/$component"
@@ -155,15 +155,22 @@ target_file="$worktree_real/$target_rel"
   exit 0
 }
 
+temp_file=
+cleanup_temp_file() {
+  [ -z "$temp_file" ] || rm -f -- "$temp_file" 2>/dev/null
+}
+trap cleanup_temp_file EXIT
+trap 'cleanup_temp_file; exit 143' HUP INT TERM
+
 old_umask=$(umask)
 umask 077
-temp_file=$(mktemp "$target_parent/.fm-worktree-env.XXXXXXXX") || {
+temp_file=$(mktemp "$target_parent/.fm-worktree-env.XXXXXXXX" 2>/dev/null) || {
   umask "$old_umask"
   warn 'could not prepare the environment-file copy; continuing without it'
   exit 0
 }
 umask "$old_umask"
-if ! cp "$source_file" "$temp_file" || ! mv -f "$temp_file" "$target_file"; then
+if ! cp "$source_file" "$temp_file" 2>/dev/null || ! mv -f "$temp_file" "$target_file" 2>/dev/null; then
   rm -f "$temp_file"
   warn 'could not copy the configured environment file; continuing without it'
   exit 0
