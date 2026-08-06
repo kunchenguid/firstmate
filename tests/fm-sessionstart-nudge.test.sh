@@ -8,6 +8,20 @@
 # tier assignment and the source table these pin.
 set -u
 
+# Run the whole suite beneath one long-lived fixture harness, matching the real
+# lifecycle in which startup and later clear/compact hooks share one harness
+# ancestor. This also prevents a developer's ambient harness from making the
+# portable regression pass locally while failing on a harness-free CI runner.
+if [ "${FM_SESSIONSTART_TEST_HARNESS:-0}" != 1 ]; then
+  HARNESS_FIXTURE=$(mktemp -d "${TMPDIR:-/tmp}/fm-sessionstart-harness.XXXXXX") || exit 1
+  ln -s /bin/bash "$HARNESS_FIXTURE/codex" || exit 1
+  FM_SESSIONSTART_TEST_HARNESS=1 "$HARNESS_FIXTURE/codex" \
+    -c '"$@"; rc=$?; :; exit "$rc"' _ "$0" "$@"
+  HARNESS_STATUS=$?
+  rm -rf "$HARNESS_FIXTURE"
+  exit "$HARNESS_STATUS"
+fi
+
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -190,6 +204,8 @@ test_run_startup_runs_the_full_digest() {
   out=$(run_hook "$root" --source startup </dev/null) || status=$?
   expect_code 0 "$status" "run wrapper startup"
   assert_contains "$out" "$FULL_BANNER$root" "startup did not run the full digest"
+  assert_contains "$out" "lock acquired: harness pid" \
+    "the portable startup fixture did not supply a real harness process"
   assert_not_contains "$out" "$REEMIT_BANNER" "startup was misrouted to a context re-emit"
   assert_not_contains "$out" "FIRSTMATE_OP" "a run-tier open also emitted the nudge instruction"
   assert_contains "$out" "NEXT STEP" "the run wrapper did not deliver a complete digest"
