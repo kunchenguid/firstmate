@@ -41,6 +41,14 @@
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# direct-PR and local-only ship briefs also require the worker to read the target
+# repository's own CI configuration and run the exact check commands CI runs rather
+# than substitutes, falling back to the repository's documented check commands when it
+# has no CI configuration. No command list is hardcoded here because each target
+# repository owns its own checks. no-mistakes briefs omit that rule: the pipeline alone
+# owns their checks (AGENTS.md, "Selected delivery path and approval authority"), and
+# the rule carries no reporting obligation, so the one-line status contract below is
+# never asked to carry command evidence.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns approval decisions, so yolo is
@@ -357,6 +365,16 @@ fi
 # delivery mode, validated above. The generated DOD opens with the fixed
 # "Delivery contract: mode=<mode>" line that bin/fm-spawn.sh checks against its own
 # explicit --mode before launching.
+
+# Last rule by construction: the mode that omits it must leave no numbering gap for
+# the ask-user escalation to point into.
+IFS= read -r -d '' CHECKS_RULE <<'EOF' || true
+8. Before you push anything or append your final `done:` line, inspect this repository's CI configuration and identify the exact check commands CI itself runs, including any repository-owned wrapper or script CI invokes.
+   Run those exact commands rather than substitutes.
+   If this repository has no CI configuration, run the check commands its own documentation defines instead (`AGENTS.md`, `CLAUDE.md`, `README`, or its package manifest's scripts); if it documents none either, there is no check set to run.
+EOF
+CHECKS_RULE=$'\n'${CHECKS_RULE%$'\n'}
+
 case "$MODE" in
   direct-PR)
     SETUP2=""
@@ -384,6 +402,9 @@ The configured merge authority approves the ready branch, then firstmate merges 
 EOF
     ;;
   *)  # no-mistakes
+    # The pipeline alone owns this mode's checks (AGENTS.md, "Selected delivery path
+    # and approval authority").
+    CHECKS_RULE=""
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
@@ -482,7 +503,7 @@ $RULE1
    When firstmate replies or a blocker clears and you resume, append \`resolved: {how it was decided or unblocked}\` (add the same \`[key=<slug>]\` if you opened it with one) so the decision or blocker is durably closed and does not keep resurfacing.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
-   daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+   daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.$CHECKS_RULE
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

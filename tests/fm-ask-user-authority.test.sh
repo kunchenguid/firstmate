@@ -36,4 +36,23 @@ test_primary_and_secondmate_instruction_generation() {
   pass "primary workers and secondmates receive the authority rule through generated instructions"
 }
 
+# The ask-user escalation cites the needs-decision rule by number, so any
+# renumbering of the Rules block must move the citation with it or the worker is
+# sent to the wrong rule.
+test_ask_user_escalation_cites_the_needs_decision_rule() {
+  local home ship pointer
+  home="$TMP_ROOT/pointer-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$BRIEF" pointer-worker sample --mode no-mistakes >/dev/null 2>&1
+  ship="$home/data/pointer-worker/brief.md"
+  pointer=$(sed -n 's/.*escalate to firstmate (rule \([0-9][0-9]*\)).*/\1/p' "$ship")
+  [ -n "$pointer" ] || fail "generated implementation brief lost the numbered ask-user escalation target"
+  grep -q "^$pointer\. If a decision belongs above the implementation worker" "$ship" \
+    || fail "ask-user escalation cites rule $pointer, which is not the needs-decision rule"
+  pass "ask-user escalation cites the needs-decision rule number"
+}
+
 test_primary_and_secondmate_instruction_generation
+test_ask_user_escalation_cites_the_needs_decision_rule

@@ -195,7 +195,7 @@ EOF
 # one of these DOD blocks, since a broken heredoc corrupts or empties the
 # generated brief content, not just the script's own syntax.
 test_ship_modes_generate_clean_briefs() {
-  local home id mode brief status
+  local home id mode brief status checks_rule
   home="$TMP_ROOT/ship-home"
   write_registry "$home"
 
@@ -212,6 +212,19 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
+    if [ "$mode" = no-mistakes ]; then
+      assert_no_grep "identify the exact check commands CI itself runs" "$brief" \
+        "$id: no-mistakes briefs must not carry a pre-handoff check rule; the pipeline owns that mode's checks"
+    else
+      assert_grep "identify the exact check commands CI itself runs" "$brief" \
+        "$id: brief must require repository CI-identical check commands"
+      assert_grep "If this repository has no CI configuration" "$brief" \
+        "$id: brief must define the check set for a repository with no CI configuration"
+      checks_rule=$(sed -n '/^[0-9][0-9]*\. Before you push anything/,/^$/p' "$brief")
+      [ -n "$checks_rule" ] || fail "$id: could not isolate the check rule to inspect its reporting obligations"
+      ! printf '%s\n' "$checks_rule" | grep -qi "status" \
+        || fail "$id: the check rule must place no reporting obligation on the status channel"
+    fi
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
