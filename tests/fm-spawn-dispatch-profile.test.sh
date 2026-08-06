@@ -560,6 +560,32 @@ test_coproc_dispatcher_is_refused() {
   pass "coproc dispatcher is refused before launch"
 }
 
+test_remaining_dispatchers_are_refused() {
+  local spec name raw rec id out status
+  local -a cases=(
+    "noglob|noglob claude --dangerously-skip-permissions"
+    "nocorrect|nocorrect claude --dangerously-skip-permissions"
+    "dash-precommand|- claude --dangerously-skip-permissions"
+    "script|script -c 'claude --dangerously-skip-permissions'"
+    "watch|watch claude --dangerously-skip-permissions"
+  )
+
+  for spec in "${cases[@]}"; do
+    name=${spec%%|*}
+    raw=${spec#*|}
+    id="profile-raw-${name}-z15m"
+    rec=$(make_spawn_case "profile-raw-$name" claude "$id")
+    read_case_record "$rec"
+
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "$raw")
+    status=$?
+    assert_unsafe_claude_raw_refused "$out" "$status" "$HOME_DIR" "$LAUNCH_LOG" "$id" \
+      "$name-dispatched Claude bypass"
+  done
+  pass "remaining raw-launch dispatchers are refused before launch"
+}
+
 test_non_claude_raw_arguments_may_mention_claude() {
   local rec id raw out status launch
   id=profile-raw-custom-claude-model-z15k
@@ -936,6 +962,7 @@ test_quoted_non_claude_raw_launch_is_unchanged
 test_source_dispatcher_is_refused
 test_posix_dot_dispatcher_is_refused
 test_coproc_dispatcher_is_refused
+test_remaining_dispatchers_are_refused
 test_non_claude_raw_arguments_may_mention_claude
 test_claude_threads_model_and_effort
 test_claude_scout_uses_auto_permissions_and_delivers_profiled_prompt
