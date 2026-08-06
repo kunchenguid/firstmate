@@ -120,14 +120,21 @@ fm_harness_ancestry_pids() {
 }
 
 # Print the one pid that identifies this session when the session lock is being
-# WRITTEN: the outermost pid of the contiguous run. That is the pid that lives as
-# long as the session - a Claude worker several levels in is reaped when its hook
-# returns, and a lock naming it would look stale moments later while the session
-# is still running. Every non-Claude harness reports a single pid, so this is its
-# innermost match unchanged.
-fm_harness_ancestry_pid() {
-  local pids pid outermost=''
-  pids=$(fm_harness_ancestry_pids) || return 1
+# WRITTEN: the outermost pid of the already-resolved ancestry list $1. That is the
+# pid that lives as long as the session - a Claude worker several levels in is
+# reaped when its hook returns, and a lock naming it would look stale moments
+# later while the session is still running. Every non-Claude harness reports a
+# single pid, so this is its innermost match unchanged.
+#
+# This and fm_harness_pids_contain take an already-resolved list so a caller that
+# needs both answers - bin/fm-lock.sh needs the pid to write and the membership
+# test for the pid it finds - decides both from ONE walk. Two walks are not just
+# a doubled `ps` sweep on the session-start path: an ancestor that exits between
+# them reparents the process, and the second list can then fail to contain the
+# pid the first one named, which is exactly the identity-vs-membership refusal
+# fm_harness_ancestry_contains exists to prevent.
+fm_harness_pids_outermost() {  # <pids>
+  local pids=$1 pid outermost=''
   while IFS= read -r pid; do
     [ -n "$pid" ] && outermost=$pid
   done <<EOF
@@ -135,6 +142,29 @@ $pids
 EOF
   [ -n "$outermost" ] || return 1
   printf '%s\n' "$outermost"
+}
+
+# True when pid $2 is one of the pids in the already-resolved ancestry list $1.
+# A non-numeric pid fails closed.
+fm_harness_pids_contain() {  # <pids> <pid>
+  local pids=$1 want=$2 pid
+  case "$want" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  while IFS= read -r pid; do
+    [ "$pid" = "$want" ] && return 0
+  done <<EOF
+$pids
+EOF
+  return 1
+}
+
+# Convenience: resolve this process's ancestry and print its outermost pid, for
+# callers that have no resolved list in hand.
+fm_harness_ancestry_pid() {
+  local pids
+  pids=$(fm_harness_ancestry_pids) || return 1
+  fm_harness_pids_outermost "$pids"
 }
 
 # True when pid $1 is one of the pids in this session's contiguous
@@ -148,18 +178,14 @@ EOF
 # bg-spare worker chain, and a harness-named daemon can parent the session - so
 # comparing one pid to one pid reports a session as foreign to itself. A
 # non-numeric pid and an unresolvable ancestry both fail closed.
+#
+# Convenience signature for callers with no resolved list in hand; a caller that
+# also needs the pid to write resolves the ancestry once and asks
+# fm_harness_pids_contain directly.
 fm_harness_ancestry_contains() {  # <pid>
-  local want=$1 pids pid
-  case "$want" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
+  local want=$1 pids
   pids=$(fm_harness_ancestry_pids) || return 1
-  while IFS= read -r pid; do
-    [ "$pid" = "$want" ] && return 0
-  done <<EOF
-$pids
-EOF
-  return 1
+  fm_harness_pids_contain "$pids" "$want"
 }
 
 # True if $1 is a live process that looks like a verified harness.

@@ -224,12 +224,21 @@ SH
 
 # Live stand-in processes, so the holder-liveness half of acquisition is decided
 # by a real `kill -0` rather than by the fake table. Reaped on the way out.
-FM_STANDIN_PIDS=()
+#
+# Every call site is `pid=$(new_standin_pid)`, which forks a subshell to capture
+# stdout, so an in-process array append would die with that subshell and the
+# stand-ins would outlive the suite - the pitfall tests/lib.sh documents for
+# fm_test_tmproot. The pids go to a `$$`-keyed registry file for the same reason,
+# and the trap that reaps it is armed here, in the real caller.
+FM_STANDIN_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-lock-standins.$$.XXXXXX") || exit 1
 lock_test_cleanup() {
   local pid
-  for pid in "${FM_STANDIN_PIDS[@]:-}"; do
-    [ -n "$pid" ] && kill "$pid" 2>/dev/null
-  done
+  if [ -f "$FM_STANDIN_REGISTRY" ]; then
+    while IFS= read -r pid; do
+      [ -n "$pid" ] && kill "$pid" 2>/dev/null
+    done < "$FM_STANDIN_REGISTRY"
+    rm -f "$FM_STANDIN_REGISTRY"
+  fi
   fm_test_cleanup
 }
 trap lock_test_cleanup EXIT
@@ -240,7 +249,7 @@ trap 'lock_test_cleanup; exit 143' TERM
 # pipe open for whatever is reading the suite's output.
 new_standin_pid() {
   sleep 300 >/dev/null 2>&1 &
-  FM_STANDIN_PIDS+=("$!")
+  printf '%s\n' "$!" >> "$FM_STANDIN_REGISTRY" || return 1
   printf '%s\n' "$!"
 }
 
@@ -272,11 +281,21 @@ case "$pid" in
   "$FM_FAKE_FOREIGN")
     case "$field" in comm=|args=) echo claude ;; ppid=) echo 1 ;; esac ;;
   *)
-    case "$field" in comm=|args=) echo -- '-zsh' ;; ppid=) echo "$FM_FAKE_INNER" ;; esac ;;
+    case "$field" in comm=|args=) printf '%s\n' '-zsh' ;; ppid=) printf '%s\n' "$FM_FAKE_INNER" ;; esac ;;
 esac
 SH
   chmod +x "$fakebin/ps"
   printf '%s\n' "$fakebin"
+}
+
+# The leading-dash name is the whole point of walking through this shell, and
+# `echo -- -zsh` would silently report "-- -zsh" instead. Pin the fixture's own
+# output so the dash-strip case cannot go vacuous unnoticed.
+assert_login_shell_reports_leading_dash() {  # <fakebin>
+  local fakebin=$1 name
+  name=$(PATH="$fakebin:$PATH" ps -o comm= -p $$)
+  [ "$name" = '-zsh' ] \
+    || fail "fixture is vacuous: the walk's login shell reports '$name', not the leading-dash name -zsh"
 }
 
 assert_no_process_name_noise() {  # <label> <stderr-file>
@@ -295,6 +314,7 @@ test_acquisition_accepts_this_sessions_own_harness_run() {
   outer=$(new_standin_pid)
   foreign=$(new_standin_pid)
   export FM_FAKE_INNER="$inner" FM_FAKE_OUTER="$outer" FM_FAKE_FOREIGN="$foreign"
+  assert_login_shell_reports_leading_dash "$fakebin"
 
   # The case that stopped a whole shift: the lock names an INNER pid of this
   # session's own contiguous Claude run - the shape a bg-spare hook chain and a
@@ -329,6 +349,7 @@ test_acquisition_still_refuses_a_foreign_live_session() {
   outer=$(new_standin_pid)
   foreign=$(new_standin_pid)
   export FM_FAKE_INNER="$inner" FM_FAKE_OUTER="$outer" FM_FAKE_FOREIGN="$foreign"
+  assert_login_shell_reports_leading_dash "$fakebin"
 
   # Same session, but the lock is held by a live harness that is no ancestor of
   # it. Widening ownership to the whole run must not widen it past the run.

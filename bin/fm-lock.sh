@@ -33,7 +33,12 @@ if [ "${1:-}" = "status" ]; then
   exit 0
 fi
 
-me=$(fm_harness_ancestry_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
+# ONE ancestry walk decides both questions below: the pid to write, and whether
+# an existing holder belongs to this same run. Resolving it twice would re-run
+# the whole `ps` sweep while the claim lock is held, and a reparenting between
+# the two walks could leave $me outside the list the membership test consults.
+ancestry=$(fm_harness_ancestry_pids) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
+me=$(fm_harness_pids_outermost "$ancestry") || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
 probe=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
@@ -67,11 +72,11 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     exit 1
   }
   # Membership, not identity: the holder is foreign only when it is outside this
-  # session's whole harness ancestry (fm_harness_ancestry_contains). Comparing it
-  # to $me alone refuses a session its own lock, because $me is one pid of a
-  # contiguous Claude run whose extent legitimately differs between the read that
-  # wrote the lock and the read that re-acquires it.
-  if ! fm_harness_ancestry_contains "$old" && fm_harness_pid_alive "$old"; then
+  # session's whole harness ancestry. Comparing it to $me alone refuses a session
+  # its own lock, because $me is one pid of a contiguous Claude run whose extent
+  # legitimately differs between the read that wrote the lock and the read that
+  # re-acquires it.
+  if ! fm_harness_pids_contain "$ancestry" "$old" && fm_harness_pid_alive "$old"; then
     echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
     exit 1
   fi
