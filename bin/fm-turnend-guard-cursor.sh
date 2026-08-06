@@ -17,11 +17,9 @@
 #   4. on exit 2 (a blind turn), foregrounds bin/fm-watch-arm.sh inside the
 #      hook-owned process tree - parked while the watcher arms, never shell
 #      & - then re-runs bin/fm-turnend-guard.sh against the post-arm state;
-#   5. emits {"followup_message": "<captured stderr>"} on stdout and exits 0
-#      (cursor auto-submits the message as a new turn) only when the re-run
-#      still reports a blind turn; after a successful arm it emits {} and
-#      exits 0 so the turn ends normally. Any other exit emits {} the same
-#      way.
+#   5. emits a normal wake followup when the arm reports a typed actionable
+#      reason but the re-run still needs the model; a failed or untyped arm
+#      keeps the loud guard banner, and any other exit emits {}.
 #
 # The translation layer is the grok-shim pattern (bin/fm-turnend-guard-grok.sh):
 # a thin layer, zero changes to the shared predicate. The arm/park follows the
@@ -57,7 +55,10 @@ ROOT=${ROOT%/}
 [ -x "$ROOT/bin/fm-turnend-guard.sh" ] || exit 0
 
 ERR=$(mktemp "${TMPDIR:-/tmp}/fm-turnend-cursor.XXXXXX") || exit 0
-trap 'rm -f "$ERR"' EXIT
+ARM_OUT=
+ARM_ACTIONABLE=0
+ARM_OUT=$(mktemp "${TMPDIR:-/tmp}/fm-turnend-cursor-arm.XXXXXX") || ARM_OUT=
+trap 'rm -f "$ERR" "$ARM_OUT"' EXIT
 
 printf '%s' "$NORMALIZED" | "$ROOT/bin/fm-turnend-guard.sh" 2>"$ERR"
 RC=$?
@@ -69,19 +70,31 @@ RC=$?
 # reaped at hook exit, leaving no watcher and a false "already running".
 # shellcheck source=/dev/null
 [ -f "$ROOT/config/x-mode.env" ] && . "$ROOT/config/x-mode.env"
-"$ROOT/bin/fm-watch-arm.sh" >&2 || true
+if [ -n "$ARM_OUT" ]; then
+  "$ROOT/bin/fm-watch-arm.sh" >"$ARM_OUT" 2>&1 || true
+  cat "$ARM_OUT" >&2
+  if grep -Eq '^(signal:|stale:|check:|heartbeat($|:))' "$ARM_OUT" 2>/dev/null; then
+    ARM_ACTIONABLE=1
+  fi
+else
+  "$ROOT/bin/fm-watch-arm.sh" >&2 || true
+fi
 
-# Re-run the guard against the post-arm state: a successful arm leaves a
-# healthy watcher (or the need vanished), so the turn may end normally; only
-# a still-blind turn earns the followup_message that wakes the model.
+# Re-run the guard against the post-arm state: a healthy watcher or vanished
+# need allows the turn; an actionable arm close needs a wake even though no
+# watcher remains; only an arm failure or untyped close keeps the blind banner.
 printf '%s' "$NORMALIZED" | "$ROOT/bin/fm-turnend-guard.sh" 2>"$ERR"
 RC=$?
 [ "$RC" -eq 2 ] || { printf '{}\n'; exit 0; }
 
-REASON=$(cat "$ERR" 2>/dev/null || true)
-[ -n "$REASON" ] || REASON='tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn'
-# Render the banner as one JSON string: cursor shows the followup_message
-# verbatim in the pane, so the actionable repair line must survive intact.
+if [ "$ARM_ACTIONABLE" -eq 1 ]; then
+  REASON='firstmate watcher wake - one supervision event needs a handling turn now. Run bin/fm-wake-drain.sh first and handle the wake. Stop-hook-owned continuity re-arms the next needed cycle automatically; do not manually arm the watcher.'
+else
+  REASON=$(cat "$ERR" 2>/dev/null || true)
+  [ -n "$REASON" ] || REASON='tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn'
+fi
+# Render the reason as one JSON string: cursor shows the followup_message
+# verbatim in the pane.
 REASON=${REASON//\\/\\\\}
 REASON=${REASON//\"/\\\"}
 REASON=$(printf '%s' "$REASON" | tr '\n' ' ')

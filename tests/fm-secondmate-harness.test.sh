@@ -851,7 +851,8 @@ test_spawned_secondmate_uses_its_harness_supervision_model() {
     # whether this assertion passes.
     cat > "$fakebin/$harness" <<SH
 #!/usr/bin/env bash
-FM_ROOT_OVERRIDE="$sm" "$ROOT/bin/fm-guard.sh"
+FM_ROOT_OVERRIDE="\$FM_HOME" \
+"$ROOT/bin/fm-guard.sh"
 SH
     chmod +x "$fakebin/$harness"
     launch=$(cat "$launchlog")
@@ -905,7 +906,7 @@ SH
     bash -c "$launch" 2>&1)
   [ -s "$envdump" ] || fail "cursor agent env dump empty or missing (isolation prefix dropped); launch: $launch"$'\n'"$out"
   assert_grep "FM_HOME=$sm" "$envdump" "cursor agent lost FM_HOME (env prefix dropped)"
-  assert_grep "FM_SUPERVISION_MODEL=persistent" "$envdump" "cursor agent lost FM_SUPERVISION_MODEL"
+  assert_grep "FM_SUPERVISION_MODEL=autoarm" "$envdump" "cursor agent lost FM_SUPERVISION_MODEL"
   assert_grep "FM_TRACE_CONTEXT=off" "$envdump" "cursor agent lost FM_TRACE_CONTEXT"
   assert_grep "FM_ROOT_OVERRIDE=" "$envdump" "cursor agent lost the cleared FM_ROOT_OVERRIDE"
   assert_grep "FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$w/home" "$envdump" "cursor agent lost the primary home pointer"

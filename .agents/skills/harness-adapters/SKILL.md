@@ -517,7 +517,7 @@ Do not use `--list-models` for model-support verification.
 Cursor is a verified PRIMARY harness since 2026-08-05: firstmate can run itself on cursor.
 The tracked `.cursor/hooks.json` registers a `stop` hook (long `timeout`, `loop_limit: null`) running `bin/fm-turnend-guard-cursor.sh`, and a `preToolUse` hook with a `Shell` matcher running `bin/fm-arm-pretool-check.sh --cursor`.
 The top-level `"version": 1` key is load-bearing: without it cursor silently discards the file and every hook is inert.
-Cursor's stop hook does not honour exit 2 as a forced continuation, so the shim translates the shared guard's blind-turn signal into a `{"followup_message": ...}` body that cursor auto-submits as a new turn; the shim maps `loop_count > 0` to `stop_hook_active: true` so the shared loop guard applies unchanged.
+Cursor's stop hook does not honour exit 2 as a forced continuation, so the shim translates the shared guard's blind-turn signal into a `{"followup_message": ...}` body that cursor auto-submits as a new turn; typed actionable arm closes get a normal drain-and-handle wake, while arm failures keep the loud registration and startup warning.
 The stop hook owns the watcher arm (the Shell tool's own 30 s timeout makes a foreground tool a poor arm host); see `docs/supervision-protocols/cursor.md`.
 Headless is not a supervision host: `cursor-agent -p` fires only `sessionStart`, never `stop`.
 Captain input typed while the stop hook is parked is buffered unsubmitted and needs a second Enter after the forced follow-up completes (nothing is lost).

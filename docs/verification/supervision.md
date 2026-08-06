@@ -187,7 +187,7 @@ The direct and passive mechanisms were validated across all five harnesses on 20
 | OpenCode | 1.17.6 | Passive `session.idle` callback | Throwing could not block, while `promptAsync` scheduled one TUI follow-up; headless remained fail-open. |
 | Pi | 0.80.5 | Passive `agent_settled` callback | Exactly one guard follow-up ran for an unhealthy cycle, with no recursion across tool turns. |
 | Grok | 0.2.112 native and 0.2.73 pre-native | Running-payload adaptive `Stop` | Native false-to-true continuation stayed in one process with two model turns and zero resume launches; the field-absent pre-native process launched exactly one guarded resume. |
-| Cursor | 2026.07.23-e383d2b | Translating `stop` hook (`bin/fm-turnend-guard-cursor.sh`) plus `preToolUse` Shell seatbelt | The stop hook parked 60 s and delivered a follow-up turn; `loop_count` advanced 0→1→2; the translating shim emitted `{"followup_message": ...}` on a shared-guard block; the seatbelt denied a shell-`&` arm with `{"permission":"deny",...}`. |
+| Cursor | 2026.07.23-e383d2b | Translating `stop` hook (`bin/fm-turnend-guard-cursor.sh`) plus `preToolUse` Shell seatbelt | The stop hook parked 60 s and delivered a follow-up turn; `loop_count` advanced 0→1→2; a typed actionable arm close produced a normal drain-and-handle follow-up while arm failure retained loud registration guidance; the seatbelt denied a shell-`&` arm with `{"permission":"deny",...}`. |
 
 Cursor parked-input measurement (2026-08-05, cursor-agent 2026.07.23-e383d2b): typing `CAPTAIN_TYPED_WHILE_PARKED` + Enter 8 s into a 30 s parked stop hook left the text unsubmitted in the composer; it survived the parked window and the forced follow-up turn; a second Enter after the follow-up delivered it. No text was lost or cleared.
 `CURSOR_PROJECT_DIR` is set by cursor for hook commands and equals the project root (the analogue of Claude's `CLAUDE_PROJECT_DIR`), verified live.
@@ -274,6 +274,22 @@ Observed output:
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
 fm-doc-audience-check: ok surfaces=64 local_links=188
 FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=80078
+```
+
+The Cursor actionable-close follow-up distinction and Cursor stop-hook auto-arm mapping were verified deterministically on 2026-08-06 with ShellCheck 0.11.0 and isolated behavior suites.
+
+```sh
+bin/fm-lint.sh
+bin/fm-doc-audience-check.sh
+bin/fm-test-run.sh tests/fm-turnend-guard.test.sh tests/fm-guard-stale-banner.test.sh tests/fm-secondmate-harness.test.sh tests/fm-supervision-instructions.test.sh
+```
+
+Observed output:
+
+```text
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-doc-audience-check: ok surfaces=65 local_links=199
+FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=171507
 ```
 
 The broader relevant regression pass was rerun on 2026-08-02 without live-home or daemon mutation.
@@ -383,6 +399,7 @@ The safe command-channel contract is covered without a notification by `tests/fm
 
 Cursor Agent CLI is a full firstmate adapter (crew, primary, and herdr).
 Primary-session guard supervision ships in the tracked `.cursor/hooks.json` stop hook; see the Turn-end guard table above and docs/supervision-protocols/cursor.md.
+The shim distinguishes a typed actionable arm close from an arm failure: actionable close emits a normal drain-and-handle follow-up, while failure retains loud registration guidance.
 Liveness and composer verification was performed on 2026-08-04 against cursor-agent 2026.07.23-e383d2b on Linux, tmux backend.
 
 **Composer state (before fix):**
