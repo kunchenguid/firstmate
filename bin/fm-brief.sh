@@ -396,11 +396,15 @@ fi
 # delivery mode, validated above. The generated DOD opens with the fixed
 # "Delivery contract: mode=<mode>" line that bin/fm-spawn.sh checks against its own
 # explicit --mode before launching.
-# Rules 1 and 2 must never contradict the definition of done: a worker told both to
+# Rules 1, 2 and 5 must never contradict the definition of done: a worker told both to
 # land its own work and never to push would stall or improvise. Rule 2 is worktree
 # isolation, and gate-merge is the one mode with an authorized way to act outside the
-# worktree - the gate itself, never the worker by hand.
+# worktree - the gate itself, never the worker by hand. Rule 5 is the stop-on-repeat
+# guard, and gate-merge's definition of done deliberately retries a queued gate in
+# turn, so that documented wait must not read as the same obstacle hit twice.
 RULE2='2. Stay inside this worktree; modify nothing outside it.'
+# shellcheck disable=SC2016  # literal backticks belong to the generated brief text
+RULE5='5. If you hit the same obstacle twice, append `blocked: {why}` and stop; firstmate will help.'
 case "$MODE" in
   direct-PR)
     SETUP2=""
@@ -418,6 +422,11 @@ EOF
     SETUP2=""
     RULE1="1. The merge gate named in Definition of done is the only thing that lands your work: never merge by hand, never push \`main\` or your branch yourself, and never open a PR."
     RULE2='2. Stay inside this worktree; modify nothing outside it yourself. Running the merge gate below is the one authorized exception, and the gate handles everything outside this worktree on its own.'
+    # shellcheck disable=SC2016  # literal backticks belong to the generated brief text
+    RULE5='5. If you hit the same obstacle twice, append `blocked: {why}` and stop; firstmate will help.
+   The one exception is the gate queue: while another gate run holds the lock, a repeated refusal is the
+   documented wait under Definition of done, not the same obstacle twice, so keep retrying in-turn for that
+   whole window and append `blocked: {the gate refusal}` only once the window is exhausted.'
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=gate-merge
@@ -510,7 +519,7 @@ $RULE2
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
    a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
    cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
-5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
+$RULE5
 6. If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will apply the configured authority and reply with the decision.
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.

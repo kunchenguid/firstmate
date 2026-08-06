@@ -261,6 +261,51 @@ test_gate_merge_brief_lands_through_the_gate_without_contradiction() {
   pass "fm-brief.sh: a gate-merge brief lands through the gate and its rules agree with it"
 }
 
+# Rule 5 stops a worker that hits the same obstacle twice, and the gate-merge
+# definition of done deliberately retries a queued gate in turn for about eight
+# minutes. Left unshaped, the two halves contradict each other on the second
+# consecutive lock refusal - the same self-consistency defect as the historical
+# rule 1, and the same stall this mode exists to prevent. Rule 5 is therefore
+# mode-shaped: byte-identical for every other brief, and exempting only the
+# documented gate-queue wait for gate-merge, which still ends in `blocked:`.
+test_stop_on_repeat_rule_is_mode_shaped() {
+  local home id brief kind rule5 baseline
+  home="$TMP_ROOT/rule5-home"
+  mkdir -p "$home/data"
+  # shellcheck disable=SC2016  # literal backticks belong to the generated brief text
+  baseline='5. If you hit the same obstacle twice, append `blocked: {why}` and stop; firstmate will help.'
+
+  for kind in no-mistakes direct-PR local-only scout; do
+    id="brief-rule5-$kind"
+    case "$kind" in
+      scout) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1 ;;
+      *) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$kind" >/dev/null 2>&1 ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind: brief was not scaffolded"
+    rule5=$(awk '/^5\. /{flag=1} /^6\. /{flag=0} flag' "$brief")
+    [ "$rule5" = "$baseline" ] \
+      || fail "$kind: rule 5 must stay the unchanged stop-on-repeat rule, got:"$'\n'"$rule5"
+  done
+
+  id="brief-rule5-gate-merge"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" gate-proj --mode gate-merge \
+    --gate ./scripts/merge-gate.sh >/dev/null 2>&1 \
+    || fail "gate-merge brief should scaffold when --gate is supplied"
+  brief="$home/data/$id/brief.md"
+  rule5=$(awk '/^5\. /{flag=1} /^6\. /{flag=0} flag' "$brief")
+  assert_contains "$rule5" "$baseline" \
+    "gate-merge rule 5 dropped the baseline stop-on-repeat rule"
+  assert_contains "$rule5" "The one exception is the gate queue" \
+    "gate-merge rule 5 did not exempt the documented gate-queue retry window"
+  assert_contains "$rule5" "not the same obstacle twice" \
+    "gate-merge rule 5 did not say a repeated gate refusal is the documented wait, not a repeat obstacle"
+  # shellcheck disable=SC2016  # literal backticks belong to the generated brief text
+  assert_contains "$rule5" 'append `blocked: {the gate refusal}` only once the window is exhausted' \
+    "gate-merge rule 5 must still end in blocked: once the retry window is exhausted"
+  pass "fm-brief.sh: rule 5 exempts only the gate-merge retry window and is unchanged elsewhere"
+}
+
 # The scaffold is project-agnostic and never reads data/projects.md, so the landing
 # command must be supplied rather than guessed, and a gate handed to a path that
 # lands through firstmate or a PR must be refused instead of silently discarded.
@@ -818,6 +863,7 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_ship_mode_is_required_and_closed_set
 test_gate_merge_brief_lands_through_the_gate_without_contradiction
+test_stop_on_repeat_rule_is_mode_shaped
 test_gate_flag_is_required_by_and_exclusive_to_gate_merge
 test_shared_machine_rule_is_in_every_crewmate_brief
 test_ship_mode_is_explicit_not_registry
