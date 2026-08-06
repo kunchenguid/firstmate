@@ -154,6 +154,8 @@ class DashboardStore:
         self.next_event_id = max([int(event["id"]) for event in self.events] or [0]) + 1
         self.last_error: str | None = None
         self.last_success_at: str | None = None
+        self.poller_error: str | None = None
+        self.poller_thread: threading.Thread | None = None
         self.initialized = bool(self.snapshot)
         self.status_sources: dict[str, Path] = {}
         self.secondmate_status_sources: dict[str, Path] = {}
@@ -404,8 +406,10 @@ class DashboardStore:
         if retired:
             self._persist_cursors()
         service = {
-            "state": "degraded" if self.last_error else "ready",
+            "state": "degraded" if self.last_error or self.poller_error else "ready",
             "snapshot_error": self.last_error,
+            "poller_state": "degraded" if self.poller_error else "healthy",
+            "poller_error": self.poller_error,
             "last_success_at": self.last_success_at,
             "poll_interval_seconds": self.interval,
         }
@@ -496,6 +500,26 @@ class DashboardStore:
                     atomic_json_write(self.snapshot_path, self.snapshot)
                 self.condition.notify_all()
 
+    def _record_poller_failure(self, error: Exception) -> None:
+        message = clean_text(str(error), 160) or "dashboard poller unavailable"
+        with self.lock:
+            self.poller_error = message
+            service = self.snapshot.get("service")
+            if not isinstance(service, dict):
+                service = {}
+            self.snapshot["service"] = {
+                **service,
+                "state": "degraded",
+                "poller_state": "degraded",
+                "poller_error": message,
+            }
+            snapshot = copy.deepcopy(self.snapshot)
+            self.condition.notify_all()
+        try:
+            atomic_json_write(self.snapshot_path, snapshot)
+        except Exception:
+            return
+
     def _scan_status_events(self) -> None:
         self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
         changed = False
@@ -566,7 +590,13 @@ class DashboardStore:
 
     def run(self) -> None:
         while not self.stop_event.is_set():
-            self.refresh()
+            try:
+                self.refresh()
+            except Exception as error:
+                self._record_poller_failure(error)
+            else:
+                with self.lock:
+                    self.poller_error = None
             self.stop_event.wait(self.interval)
 
     def events_after(self, cursor: int) -> list[dict[str, object]]:
@@ -646,8 +676,25 @@ class Handler(BaseHTTPRequestHandler):
             self._send("application/json; charset=utf-8", body)
             return
         if parsed.path == "/health":
-            body = json.dumps({"ok": True, "schema": "fm-dashboard-health.v1"}).encode("utf-8")
-            self._send("application/json; charset=utf-8", body)
+            poller = self.store.poller_thread
+            alive = poller is not None and poller.is_alive()
+            with self.store.lock:
+                poller_error = self.store.poller_error
+                snapshot_error = self.store.last_error
+            error = poller_error or snapshot_error
+            healthy = alive and error is None
+            body = json.dumps(
+                {
+                    "ok": healthy,
+                    "schema": "fm-dashboard-health.v1",
+                    "poller": {
+                        "state": "healthy" if healthy else "degraded",
+                        "alive": alive,
+                        "error": error,
+                    },
+                }
+            ).encode("utf-8")
+            self._send("application/json; charset=utf-8", body, 200 if healthy else 503)
             return
         if parsed.path == "/events":
             self._events(parsed)
@@ -700,13 +747,14 @@ def serve(args: argparse.Namespace) -> int:
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     httpd.store = store  # type: ignore[attr-defined]
     httpd.daemon_threads = True
+    thread = threading.Thread(target=store.run, name="dashboard-poll", daemon=True)
+    store.poller_thread = thread
     store.pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
     os.chmod(store.pid_path, 0o600)
     atomic_json_write(
         store.listen_path,
         {"host": args.host, "port": httpd.server_port, "url": f"http://{args.host}:{httpd.server_port}/"},
     )
-    thread = threading.Thread(target=store.run, name="dashboard-poll", daemon=True)
     thread.start()
 
     def stop(_signum, _frame) -> None:

@@ -431,12 +431,27 @@ with_remote_route_locks() { # <secondmate-id> <function> <args...>
 }
 
 resume_remote_outbox() { # <secondmate-id> <outbox-path>
-  local id=$1 outbox=$2
+  local id=$1 outbox=$2 key
+  local -a outbox_keys=()
   [ -e "$outbox" ] || [ -L "$outbox" ] || return 0
   if [ ! -f "$outbox" ] || [ -L "$outbox" ]; then
     echo "error: unsafe pending handoff outbox: $outbox" >&2
     return 1
   fi
+  validate_backlog_file "main backlog" "$MAIN_BACKLOG" || return 1
+  while IFS= read -r key; do
+    outbox_keys+=("$key")
+  done < <(
+    awk '
+      /^- \[[ x]\] / {
+        rest = $0
+        sub(/^- \[[ x]\] +/, "", rest)
+        sub(/[ \t].*/, "", rest)
+        print rest
+      }
+    ' "$outbox"
+  )
+  remove_interrupted_source_duplicates "$outbox" "${outbox_keys[@]}" || return 1
   remote_deliver_outbox "$id" "$outbox"
 }
 
