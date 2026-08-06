@@ -36,6 +36,9 @@ Until Codex exposes that seam, a Firstmate `$calm` skill or launch profile would
 A custom app-server terminal client could own filtering, but it would also own approval UX, replay, interruption, session management, and security parity, making it a separate Codex frontend rather than a bounded Firstmate integration.
 Patching or vendoring the installed Codex binary is outside the qualifying boundary.
 
+This investigation is tracked by Firstmate's open request [`kunchenguid/firstmate#1411`](https://github.com/kunchenguid/firstmate/issues/1411).
+The qualifying seam described above was filed as a native Codex proposal, [`openai/codex#37227`](https://github.com/openai/codex/issues/37227), which links back to the Firstmate request as its origin.
+
 Reproduction and source-inspection commands:
 
 ```sh
