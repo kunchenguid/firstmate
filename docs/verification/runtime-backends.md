@@ -413,7 +413,7 @@ The suite also cross-checks its own Part A measurement against the floor classif
 ### Presentation version floor
 
 Default-on presentation projection is floored at Herdr 0.8.0.
-The floor's structural signal is the client protocol number, and its mapping to real releases was measured on 2026-08-05 by running each pinned upstream macOS aarch64 release asset's own `status --json` through the guarded lab helper:
+The floor's structural signal is the selected running server's protocol number, falling back to the client protocol only when that selected session positively reports no running server, and the release mapping was measured on 2026-08-05 by running each pinned upstream macOS aarch64 release asset's own `status --json` through the guarded lab helper:
 
 | Release | Reported version | Protocol | Carries both upstream focus fixes | Floor verdict |
 |---|---|---|---|---|
@@ -440,7 +440,7 @@ The classifier itself, the config preference it composes with, and the one-warni
 tests/fm-backend-herdr.test.sh
 ```
 
-Observed guarantees: every measured release classifies as the table records; either the protocol or the version signal alone carries an at-or-above verdict, and each divergent pair flips once the carrying signal is removed; losing both signals reports indeterminate and falls back flat; an unconfigured home is projected only at or above the floor; an explicit `on`, including the historical empty opt-in file, is honored below it; and the below-floor warning is emitted once per home per detected release rather than once per spawn.
+Observed guarantees: every measured release classifies as the table records; either the protocol or the version signal alone carries an at-or-above verdict, and each divergent pair flips once the carrying signal is removed; a running selected-session server overrides conflicting client signals, an unreadable server-running state and losing both release signals report indeterminate and fall back flat, an unconfigured home is projected only at or above the floor, an explicit `on`, including the historical empty opt-in file, is honored below it, and the below-floor warning is emitted once per home per detected release rather than once per spawn.
 
 The whole real-Herdr lane was run on 2026-08-05 against both the CI-pinned Herdr 0.7.4 protocol 16, which is below the floor, and Herdr 0.8.0 protocol 19, which is at it:
 

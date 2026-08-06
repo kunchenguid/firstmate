@@ -834,11 +834,14 @@ test_create_task_creates_with_no_focus_flag() {
 # --- default-on disposable presentation projection --------------------------
 
 # make_release_fakebin: a `herdr` stub whose only job is `status --json`, so the
-# presentation version floor can be exercised against a scripted client release
-# with no herdr installed at all. An empty protocol or version omits that field;
-# the literal RELEASE value "unreadable" makes the whole call fail.
-make_release_fakebin() {  # <dir> <protocol> <version> -> echoes fakebin dir
-  local dir=$1 protocol=$2 version=$3 fb="$1/release-fakebin" fields=""
+# presentation version floor can be exercised against scripted client and
+# selected-session server releases with no herdr installed at all. An empty
+# protocol or version omits that field; the literal client value "unreadable"
+# makes the whole call fail, and a server-running value other than true or false
+# omits that state.
+make_release_fakebin() {  # <dir> <client-protocol> <client-version> [<server-running> <server-protocol> <server-version>] -> echoes fakebin dir
+  local dir=$1 protocol=$2 version=$3 server_running=${4:-false} server_protocol=${5:-} server_version=${6:-}
+  local fb="$1/release-fakebin" fields="" server_fields=""
   mkdir -p "$fb"
   if [ -n "$version" ]; then
     fields="\"version\":\"$version\""
@@ -846,6 +849,17 @@ make_release_fakebin() {  # <dir> <protocol> <version> -> echoes fakebin dir
   if [ -n "$protocol" ]; then
     [ -n "$fields" ] && fields="$fields,"
     fields="$fields\"protocol\":$protocol"
+  fi
+  case "$server_running" in
+    true|false) server_fields="\"running\":$server_running" ;;
+  esac
+  if [ -n "$server_version" ]; then
+    [ -n "$server_fields" ] && server_fields="$server_fields,"
+    server_fields="$server_fields\"version\":\"$server_version\""
+  fi
+  if [ -n "$server_protocol" ]; then
+    [ -n "$server_fields" ] && server_fields="$server_fields,"
+    server_fields="$server_fields\"protocol\":$server_protocol"
   fi
   cat > "$fb/herdr" <<SH
 #!/usr/bin/env bash
@@ -855,7 +869,7 @@ SH
   if [ "$protocol" = unreadable ] || [ "$version" = unreadable ]; then
     printf 'exit 4\n' >> "$fb/herdr"
   else
-    printf 'printf %s\n' "'{\"client\":{$fields}}\\n'" >> "$fb/herdr"
+    printf 'printf %s\n' "'{\"client\":{$fields},\"server\":{$server_fields}}\\n'" >> "$fb/herdr"
   fi
   chmod +x "$fb/herdr"
   printf '%s\n' "$fb"
@@ -865,8 +879,8 @@ SH
 # before projecting a crewmate or scout, so these cases pin the default-on
 # contract, its explicit opt-out, its explicit opt-in, and the version floor
 # that decides the unconfigured default at that interface.
-presentation_enabled_verdict() {  # <config-dir> <fakebin> [state-dir] -> "on"/"off"
-  PATH="$2:$PATH" bash -c '
+presentation_enabled_verdict() {  # <config-dir> <fakebin> [state-dir] [session] -> "on"/"off"
+  HERDR_SESSION="${4:-}" PATH="$2:$PATH" bash -c '
     . "$0/bin/backends/herdr.sh"
     if fm_backend_herdr_presentation_enabled "$1" "$2"; then printf "on\n"; else printf "off\n"; fi
   ' "$ROOT" "$1" "${3:-}"
@@ -1028,6 +1042,36 @@ SH
   [ -n "$failure_warning" ] \
     || fail "a non-collision marker publication failure must not suppress the warning"
   pass "herdr presentation: warning marker publication is atomic, symlink-safe, and fails visible"
+}
+
+test_presentation_running_server_release_is_load_bearing() {
+  local dir config fb verdict stderr
+  dir="$TMP_ROOT/presentation-running-server-floor"; config="$dir/config"
+  mkdir -p "$config"
+  stderr="$dir/server.err"
+
+  fb=$(make_release_fakebin "$dir/old-server" "$AT_FLOOR_PROTOCOL" "$AT_FLOOR_VERSION" \
+    true "$BELOW_FLOOR_PROTOCOL" "$BELOW_FLOOR_VERSION")
+  verdict=$(presentation_enabled_verdict "$config" "$fb" "" stale-session 2>"$stderr")
+  [ "$verdict" = off ] \
+    || fail "an old running server must keep a new client below the presentation floor, got '$verdict'"
+  assert_contains "$(cat "$stderr")" "server version $BELOW_FLOOR_VERSION" \
+    "the floor warning must name the selected running server release"
+
+  fb=$(make_release_fakebin "$dir/new-server" "$BELOW_FLOOR_PROTOCOL" "$BELOW_FLOOR_VERSION" \
+    true "$AT_FLOOR_PROTOCOL" "$AT_FLOOR_VERSION")
+  verdict=$(presentation_enabled_verdict "$config" "$fb" "" current-session 2>"$stderr")
+  [ "$verdict" = on ] \
+    || fail "a supported running server must carry the floor despite an older client, got '$verdict'"
+  [ ! -s "$stderr" ] || fail "a supported running server must not warn: $(cat "$stderr")"
+
+  fb=$(make_release_fakebin "$dir/unknown-server" "$AT_FLOOR_PROTOCOL" "$AT_FLOOR_VERSION" unknown)
+  verdict=$(presentation_enabled_verdict "$config" "$fb" "" unknown-session 2>"$stderr")
+  [ "$verdict" = off ] \
+    || fail "an unreadable selected-session server state must fail flat instead of substituting the client, got '$verdict'"
+  assert_contains "$(cat "$stderr")" "could not be read" \
+    "an unreadable selected-session server state must warn"
+  pass "herdr presentation: the selected running server release is load-bearing"
 }
 
 # The floor classifier is pure, so these cases pin it against every release
@@ -4190,6 +4234,7 @@ test_presentation_explicit_off_opts_out
 test_presentation_unrecognized_value_warns_and_keeps_the_default
 test_presentation_floor_warning_is_one_per_release
 test_presentation_floor_warning_marker_is_atomic_and_symlink_safe
+test_presentation_running_server_release_is_load_bearing
 test_release_floor_verdict_matches_the_measured_releases
 test_release_floor_verdict_survives_losing_either_signal
 test_presentation_preference_reports_three_distinct_states

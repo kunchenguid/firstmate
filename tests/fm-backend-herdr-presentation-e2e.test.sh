@@ -512,8 +512,8 @@ teardown_task shape "$HOME_DIR" > "$TMP_ROOT/off-teardown.out" 2> "$TMP_ROOT/off
 # whichever Herdr this lab is running.
 rm -f "$HOME_DIR/config/herdr-presentation-spaces"
 FLOOR_STATUS=$(lab status --json) || fail 'could not read the lab release for the presentation floor'
-FLOOR_VERSION=$(printf '%s' "$FLOOR_STATUS" | jq -r '.client.version')
-FLOOR_PROTOCOL=$(printf '%s' "$FLOOR_STATUS" | jq -r '.client.protocol')
+FLOOR_VERSION=$(printf '%s' "$FLOOR_STATUS" | jq -r 'if .server.running then .server.version else .client.version end')
+FLOOR_PROTOCOL=$(printf '%s' "$FLOOR_STATUS" | jq -r 'if .server.running then .server.protocol else .client.protocol end')
 FLOOR_VERDICT=$(bash -c '
   . "$0/bin/backends/herdr.sh"
   status=0

@@ -334,14 +334,14 @@ if [ "$STEAL_LIVE" = 1 ]; then
   pass "fallback on a defective release: a bounded wrong-focus window of $C_WRONG samples was fully restored to the anchor"
 else
   [ "$C_WRONG" -eq 0 ] \
-    || fail "a release at or above the floor exposed $C_WRONG wrong-focus samples on the fallback path"
-  pass 'fallback at or above the floor: the plain explicit close preserved exact focus throughout'
+    || fail "a focus-preserving release exposed $C_WRONG wrong-focus samples on the fallback path"
+  pass 'fallback on a focus-preserving release: the plain explicit close preserved exact focus throughout'
 fi
 
 # The live guard on the version floor itself: Part A measured whether THIS
-# release steals focus, so the floor classifier must agree with that
-# measurement. A disagreement means the protocol-to-release mapping drifted and
-# the floor is now gating on the wrong thing.
+# release steals focus. Every above-floor release must preserve focus, while a
+# below-floor release may conservatively include the known post-fix protocol-18
+# preview without weakening the stated 0.8.0 policy floor.
 STATUS=$(lab status --json) || fail 'could not read final named-lab version evidence'
 LIVE_VERSION=$(printf '%s' "$STATUS" | jq -r '.client.version')
 LIVE_PROTOCOL=$(printf '%s' "$STATUS" | jq -r '.client.protocol')
@@ -351,15 +351,17 @@ FLOOR_VERDICT=$(bash -c '
   fm_backend_herdr_release_floor_verdict "$1" "$2" || status=$?
   printf "%s\n" "$status"
 ' "$ROOT" "$LIVE_PROTOCOL" "$LIVE_VERSION")
-if [ "$STEAL_LIVE" = 1 ]; then
-  [ "$FLOOR_VERDICT" = 1 ] \
-    || fail "herdr $LIVE_VERSION (protocol $LIVE_PROTOCOL) steals focus on the explicit close but the floor classifier returned $FLOOR_VERDICT instead of below-floor"
-  pass "version floor: herdr $LIVE_VERSION protocol $LIVE_PROTOCOL steals focus and is classified below the floor"
-else
-  [ "$FLOOR_VERDICT" = 0 ] \
-    || fail "herdr $LIVE_VERSION (protocol $LIVE_PROTOCOL) preserves focus on the explicit close but the floor classifier returned $FLOOR_VERDICT instead of at-or-above-floor"
-  pass "version floor: herdr $LIVE_VERSION protocol $LIVE_PROTOCOL preserves focus and is classified at or above the floor"
-fi
+case "$FLOOR_VERDICT" in
+  0)
+    [ "$STEAL_LIVE" = 0 ] \
+      || fail "herdr $LIVE_VERSION (protocol $LIVE_PROTOCOL) is at or above the floor but steals focus on the explicit close"
+    pass "version floor: herdr $LIVE_VERSION protocol $LIVE_PROTOCOL is at or above the floor and preserves focus"
+    ;;
+  1)
+    pass "version floor: herdr $LIVE_VERSION protocol $LIVE_PROTOCOL remains conservatively below the floor with steal_live=$STEAL_LIVE"
+    ;;
+  *) fail "herdr $LIVE_VERSION (protocol $LIVE_PROTOCOL) could not be classified against the presentation floor" ;;
+esac
 
 # The end-user gate: an unconfigured home must project only at or above the
 # floor, and an explicit opt-in must survive either way.
@@ -378,9 +380,9 @@ printf 'on\n' > "$FLOOR_CONFIG/herdr-presentation-spaces"
 GATE_OPT_IN=$(gate_verdict "$FLOOR_CONFIG" 2>/dev/null)
 [ "$GATE_OPT_IN" = on ] \
   || fail "an explicit opt-in must stay on for herdr $LIVE_VERSION, got '$GATE_OPT_IN'"
-if [ "$STEAL_LIVE" = 1 ]; then
+if [ "$FLOOR_VERDICT" = 1 ]; then
   [ "$GATE_DEFAULT" = off ] \
-    || fail "an unconfigured home must not be projected on focus-stealing herdr $LIVE_VERSION, got '$GATE_DEFAULT'"
+    || fail "an unconfigured home must not be projected on below-floor herdr $LIVE_VERSION, got '$GATE_DEFAULT'"
   grep -q "$LIVE_VERSION" "$GATE_ERR" \
     || fail "the below-floor fallback must name herdr $LIVE_VERSION: $(cat "$GATE_ERR")"
   pass "version floor: an unconfigured home falls back flat on herdr $LIVE_VERSION and the explicit opt-in still projects"

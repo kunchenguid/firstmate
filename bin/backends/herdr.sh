@@ -220,22 +220,39 @@ fm_backend_herdr_release_floor_verdict() {  # <protocol> <version>
 }
 
 # fm_backend_herdr_presentation_release_supported: run the floor classifier
-# against the installed herdr client, which reports its own version and protocol
-# independently of any session. Same return codes as
+# against the selected session's running server when one exists, or against the
+# installed client only when status positively reports that no server is
+# running and that client will start it. Same return codes as
 # fm_backend_herdr_release_floor_verdict, and sets
 # FM_BACKEND_HERDR_PRESENTATION_RELEASE to the identifier a caller's warning
-# names.
+# names. An unreadable server-running state is indeterminate rather than
+# permission to substitute the client release.
 fm_backend_herdr_presentation_release_supported() {
-  local status protocol version
+  local session status running protocol version
   FM_BACKEND_HERDR_PRESENTATION_RELEASE="an unreadable release"
   command -v herdr >/dev/null 2>&1 || return 2
   command -v jq >/dev/null 2>&1 || return 2
-  status=$(herdr status --json 2>/dev/null) || return 2
-  protocol=$(printf '%s' "$status" | jq -r '.client.protocol // empty' 2>/dev/null)
-  version=$(printf '%s' "$status" | jq -r '.client.version // empty' 2>/dev/null)
-  if [ -n "$protocol" ] || [ -n "$version" ]; then
-    FM_BACKEND_HERDR_PRESENTATION_RELEASE="version ${version:-unknown} (protocol ${protocol:-unknown})"
-  fi
+  session=$(fm_backend_herdr_session)
+  status=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null) || return 2
+  running=$(printf '%s' "$status" | jq -r '
+    if .server.running == true then "true"
+    elif .server.running == false then "false"
+    else "unknown"
+    end
+  ' 2>/dev/null) || return 2
+  case "$running" in
+    true)
+      protocol=$(printf '%s' "$status" | jq -r '.server.protocol // empty' 2>/dev/null)
+      version=$(printf '%s' "$status" | jq -r '.server.version // empty' 2>/dev/null)
+      FM_BACKEND_HERDR_PRESENTATION_RELEASE="server version ${version:-unknown} (protocol ${protocol:-unknown})"
+      ;;
+    false)
+      protocol=$(printf '%s' "$status" | jq -r '.client.protocol // empty' 2>/dev/null)
+      version=$(printf '%s' "$status" | jq -r '.client.version // empty' 2>/dev/null)
+      FM_BACKEND_HERDR_PRESENTATION_RELEASE="version ${version:-unknown} (protocol ${protocol:-unknown})"
+      ;;
+    *) return 2 ;;
+  esac
   fm_backend_herdr_release_floor_verdict "$protocol" "$version"
 }
 
@@ -248,7 +265,7 @@ fm_backend_herdr_presentation_floor_warn() {  # <state-dir> <verdict>
   if [ "$verdict" -eq 1 ]; then
     reason="herdr $release is older than the $FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION floor for presentation spaces, where projected cleanup can steal the active workspace"
   else
-    reason="the installed herdr release could not be read, so the $FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION floor for presentation spaces cannot be verified"
+    reason="the selected herdr release could not be read, so the $FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION floor for presentation spaces cannot be verified"
   fi
   if [ -n "$state_dir" ] && [ -d "$state_dir" ] && [ ! -L "$state_dir" ]; then
     key=${release//[^a-zA-Z0-9]/-}
