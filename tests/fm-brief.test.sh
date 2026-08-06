@@ -412,6 +412,8 @@ test_ship_modes_require_closing_checklist_in_done() {
       "$id: auto-memory item lost the silent-overflow consequence"
     assert_grep "Never write secrets, credentials, or captain-private fleet strategy into a memory." "$brief" \
       "$id: auto-memory item lost the secrets/credentials/fleet-strategy exclusion"
+    assert_grep "re-read it immediately before you write" "$brief" \
+      "$id: auto-memory item lost the re-read-before-write rule that keeps parallel crewmates in sibling worktrees from overwriting each other's index lines"
 
     # No hardcoded memory directory path: only a pointer to the system prompt,
     # and only conditionally - a runtime with no memory store at all must be
@@ -425,8 +427,12 @@ test_ship_modes_require_closing_checklist_in_done() {
       "$id: auto-memory item lost its no-memory-store fallback, making it unsatisfiable on runtimes with no persistent store"
 
     # The scaffold must stay harness-agnostic in wording: no harness name, no
-    # harness list, introduced to express the above.
-    for harness_name in codex opencode pi-signed grok kimi; do
+    # harness list, introduced to express the above. The list leads with the
+    # harness whose behavior the pre-fix wording actually hardcoded, so a
+    # regression back to "your Claude Code memory directory" or a literal
+    # ~/.claude path fails here. Item 1's legitimate `CLAUDE.md` is uppercase
+    # and these are case-sensitive fixed-string greps, so it does not collide.
+    for harness_name in "Claude Code" claude codex opencode pi-signed grok kimi; do
       assert_no_grep "$harness_name" "$brief" \
         "$id: auto-memory item names a specific harness ($harness_name) instead of staying runtime-agnostic"
     done
@@ -472,6 +478,8 @@ test_scout_carries_auto_memory_closing_item() {
     "scout auto-memory item states the index cap as a fixed contract instead of an observed, version-specific limit"
   assert_grep "Never write secrets, credentials, or captain-private fleet strategy into a memory." "$brief" \
     "scout auto-memory item lost the secrets/credentials/fleet-strategy exclusion"
+  assert_grep "re-read it immediately before you write" "$brief" \
+    "scout auto-memory item lost the re-read-before-write rule that keeps parallel crewmates in sibling worktrees from overwriting each other's index lines"
 
   # Same runtime-agnostic pinning as the ship checklist (see
   # test_ship_modes_require_closing_checklist_in_done): both the has-a-store
@@ -480,7 +488,7 @@ test_scout_carries_auto_memory_closing_item() {
     "scout auto-memory item must point at the system prompt instead of a hardcoded path, conditioned on the store existing"
   assert_grep "If your runtime provides no such store at all, satisfy this item the same way: say so explicitly in your closing status line." "$brief" \
     "scout auto-memory item lost its no-memory-store fallback, making it unsatisfiable on runtimes with no persistent store"
-  for harness_name in codex opencode pi-signed grok kimi; do
+  for harness_name in "Claude Code" claude codex opencode pi-signed grok kimi; do
     assert_no_grep "$harness_name" "$brief" \
       "scout auto-memory item names a specific harness ($harness_name) instead of staying runtime-agnostic"
   done
@@ -507,7 +515,7 @@ test_auto_memory_item_introduces_no_harness_flag() {
     "bin/fm-brief.sh's argument parser must not gain a --harness case branch to express the runtime-agnostic auto-memory item"
   assert_no_grep "--harness=" "$ROOT/bin/fm-brief.sh" \
     "bin/fm-brief.sh's argument parser must not gain a --harness=* case branch to express the runtime-agnostic auto-memory item"
-  for harness_name in codex opencode pi-signed grok kimi; do
+  for harness_name in "Claude Code" claude codex opencode pi-signed grok kimi; do
     assert_no_grep "$harness_name" "$ROOT/bin/fm-brief.sh" \
       "bin/fm-brief.sh's source must not name a specific harness ($harness_name) to express the runtime-agnostic auto-memory item"
   done

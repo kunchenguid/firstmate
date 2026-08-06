@@ -65,14 +65,17 @@
 # runtime with none satisfies it by saying so explicitly in the closing status
 # line, the same checkable shape as a runtime that has the store but found no
 # durable finding to record. When a store does exist, it lives outside the
-# task worktree, so each scaffold's
-# stay-inside-the-worktree rule names it alongside the status file, and item 2
-# stays open until the closing status line instead of closing with the commit.
+# task worktree and is shared by every sibling worktree of the same repo, so
+# each scaffold's stay-inside-the-worktree rule names it alongside the status
+# file, item 2 requires a re-read of the index immediately before writing so
+# parallel crewmates do not overwrite each other, and item 2 stays open until
+# the closing status line instead of closing with the commit.
 # Every ship mode's definition of done requires both outcomes in the closing
 # status line so the checklist is verifiable from that line alone; the scout
 # scaffold carries only the auto-memory item, adapted to its report deliverable.
 # The wording shared by both scaffolds is built once (AUTO_MEMORY_PATH_RULE,
-# auto_memory_index_rules) so the two copies cannot drift.
+# auto_memory_index_rules, CLOSING_CHECKLIST_DOD,
+# CLOSING_CHECKLIST_DONE_SUFFIX) so the copies cannot drift.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -325,11 +328,18 @@ auto_memory_index_rules() {
   local indent=${1:-}
   printf '%s\n' \
     "${indent}Check the index first and prefer updating an existing memory over adding a new one; a new index line is only for knowledge no existing memory covers." \
+    "${indent}Sibling worktrees of this repo share one store, so other crewmates may be writing that index while you work: re-read it immediately before you write, then add or update only your own line - never write back a whole index you read earlier, which silently drops whatever they added in between." \
     "${indent}Keep the index line to one line under 200 characters - a pointer plus a one-sentence description - with all other detail in the memory file, never the index: the index loads whole into every future session under a size cap observed around 25KB or 200 lines on at least one version, whichever comes first - treat that as an observed limit, not a guarantee - with everything past it dropped silently, so a narrated index destroys the store it is meant to serve." \
     "${indent}Never write secrets, credentials, or captain-private fleet strategy into a memory."
 }
 AUTO_MEMORY_INDEX_RULES=$(auto_memory_index_rules)
 AUTO_MEMORY_INDEX_RULES_ITEM=$(auto_memory_index_rules '   ')
+
+# How the ship modes' definitions of done require that checklist, worded once so
+# the three modes cannot drift. no-mistakes overrides the requirement sentence
+# (its item 1 has a narrower window) but reuses the same done-line suffix.
+CLOSING_CHECKLIST_DOD="Complete the \`# Project memory\` checklist above before you close: item 1 belongs in that commit, while item 2 writes outside the repo and stays open until your closing status line, which states both outcomes."
+CLOSING_CHECKLIST_DONE_SUFFIX=' - project memory: {both checklist outcomes}'
 
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
@@ -398,8 +408,8 @@ case "$MODE" in
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-Complete the \`# Project memory\` checklist above before you close: item 1 belongs in that commit, while item 2 writes outside the repo and stays open until your closing status line, which states both outcomes.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url} - project memory: {both checklist outcomes}\` to the status file and stop.
+$CLOSING_CHECKLIST_DOD
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}$CLOSING_CHECKLIST_DONE_SUFFIX\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;
@@ -412,8 +422,8 @@ Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-Complete the \`# Project memory\` checklist above before you close: item 1 belongs in that commit, while item 2 writes outside the repo and stays open until your closing status line, which states both outcomes.
-When it is implemented and committed, append \`done: ready in branch fm/$ID - project memory: {both checklist outcomes}\` to the status file and stop.
+$CLOSING_CHECKLIST_DOD
+When it is implemented and committed, append \`done: ready in branch fm/$ID$CLOSING_CHECKLIST_DONE_SUFFIX\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
     ;;
@@ -440,7 +450,7 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green - project memory: {both checklist outcomes}\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green$CLOSING_CHECKLIST_DONE_SUFFIX\` and stop. You are finished.
 EOF
     ;;
 esac
