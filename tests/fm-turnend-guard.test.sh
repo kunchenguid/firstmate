@@ -1058,6 +1058,7 @@ cursor_shim_stop_without_session() {
 cursor_shim_stop_without_identity_parent() {
   local count=$1
   shift
+  # shellcheck disable=SC2016 # Variables expand in the inner bash process.
   CURSOR_SHIM_COUNT="$count" CURSOR_WORKSPACE_ROOT="$CURSOR_FIXTURE_DIR" env "$@" bash -c '
     i=0
     while [ "$i" -lt "$CURSOR_SHIM_COUNT" ]; do
@@ -1623,7 +1624,9 @@ test_cursor_shim_missing_payload_allows() {
 test_cursor_hooks_json_is_registered() {
   local hooks stop_command pretool_command
   hooks="$ROOT/.cursor/hooks.json"
+  # shellcheck disable=SC2016 # Variables expand in the generated hook command.
   stop_command='[ -n "${CURSOR_PROJECT_DIR:-}" ] && exec "${CURSOR_PROJECT_DIR:-}/bin/fm-turnend-guard-cursor.sh"; exit 0'
+  # shellcheck disable=SC2016 # Variables expand in the generated hook command.
   pretool_command='[ -n "${CURSOR_PROJECT_DIR:-}" ] && exec "${CURSOR_PROJECT_DIR:-}/bin/fm-arm-pretool-check.sh" --cursor; exit 0'
   [ -f "$hooks" ] || fail "tracked .cursor/hooks.json is missing"
   jq -e '.version == 1' "$hooks" >/dev/null || fail "cursor hooks.json must carry the load-bearing version key"
@@ -1652,6 +1655,7 @@ test_cursor_hooks_json_is_registered() {
 
 test_cursor_pretool_hook_executes_seatbelt() {
   local command payload out status pretool_command
+  # shellcheck disable=SC2016 # Variables expand in the generated hook command.
   pretool_command='[ -n "${CURSOR_PROJECT_DIR:-}" ] && exec "${CURSOR_PROJECT_DIR:-}/bin/fm-arm-pretool-check.sh" --cursor; exit 0'
   command=$(jq -r --arg required "$pretool_command" '[.hooks.preToolUse[] | select(.matcher == "Shell" and .command == $required)] | .[0].command // empty' "$ROOT/.cursor/hooks.json")
   [ -n "$command" ] || fail "required Cursor preToolUse command is missing from .cursor/hooks.json"
@@ -1665,6 +1669,7 @@ test_cursor_pretool_hook_executes_seatbelt() {
 
 test_cursor_shim_anchor_resolves_via_cursor_project_dir() {
   local command dir payload out status stop_command
+  # shellcheck disable=SC2016 # Variables expand in the generated hook command.
   stop_command='[ -n "${CURSOR_PROJECT_DIR:-}" ] && exec "${CURSOR_PROJECT_DIR:-}/bin/fm-turnend-guard-cursor.sh"; exit 0'
   command=$(jq -r --arg required "$stop_command" '[.hooks.stop[] | select(.command == $required)] | .[0].command // empty' "$ROOT/.cursor/hooks.json")
   [ -n "$command" ] || fail "stop hook command is missing from .cursor/hooks.json"

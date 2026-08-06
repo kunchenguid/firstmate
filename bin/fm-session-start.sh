@@ -638,7 +638,9 @@ if [ "$PRIMARY_HARNESS" = cursor ]; then
   # The stop hook must carry the long timeout and the preToolUse seatbelt must
   # be registered with the Shell matcher.
   CURSOR_HOOKS="$FM_ROOT/.cursor/hooks.json"
+  # shellcheck disable=SC2016 # Variables expand in the generated hook command.
   CURSOR_STOP_COMMAND='[ -n "${CURSOR_PROJECT_DIR:-}" ] && exec "${CURSOR_PROJECT_DIR:-}/bin/fm-turnend-guard-cursor.sh"; exit 0'
+  # shellcheck disable=SC2016 # Variables expand in the generated hook command.
   CURSOR_PRETOOL_COMMAND='[ -n "${CURSOR_PROJECT_DIR:-}" ] && exec "${CURSOR_PROJECT_DIR:-}/bin/fm-arm-pretool-check.sh" --cursor; exit 0'
   CURSOR_HOOKS_OK=0
   if [ -f "$CURSOR_HOOKS" ] && command -v jq >/dev/null 2>&1; then

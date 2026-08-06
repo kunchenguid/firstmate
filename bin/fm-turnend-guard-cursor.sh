@@ -57,7 +57,7 @@ normalize_budget() {
   done
   [ "$value" != 0 ] || value=$default
   if [ "${#value}" -gt "${#MAX_BUDGET}" ] \
-    || { [ "${#value}" -eq "${#MAX_BUDGET}" ] && [[ "$value" > "$MAX_BUDGET" ]]; }; then
+    || { [ "${#value}" -eq "${#MAX_BUDGET}" ] && [[ "$value" -gt "$MAX_BUDGET" ]]; }; then
     value=$MAX_BUDGET
   fi
   printf '%s' "$value"
@@ -183,7 +183,7 @@ normalize_counter() {
     value=${value#0}
   done
   if [ "${#value}" -gt "${#TOTAL_BUDGET}" ] \
-    || { [ "${#value}" -eq "${#TOTAL_BUDGET}" ] && [[ "$value" > "$TOTAL_BUDGET" ]]; }; then
+    || { [ "${#value}" -eq "${#TOTAL_BUDGET}" ] && [[ "$value" -gt "$TOTAL_BUDGET" ]]; }; then
     printf '%s' "$TOTAL_BUDGET"
   else
     printf '%s' "$value"
@@ -255,7 +255,7 @@ fallback_total_from_loop_count() {
     value=${value#0}
   done
   if [ "${#value}" -gt "${#TOTAL_BUDGET}" ] \
-    || { [ "${#value}" -eq "${#TOTAL_BUDGET}" ] && [[ "$value" > "$TOTAL_BUDGET" ]]; } \
+    || { [ "${#value}" -eq "${#TOTAL_BUDGET}" ] && [[ "$value" -gt "$TOTAL_BUDGET" ]]; } \
     || [ "$value" = "$TOTAL_BUDGET" ]; then
     printf '%s' "$TOTAL_BUDGET"
   else
