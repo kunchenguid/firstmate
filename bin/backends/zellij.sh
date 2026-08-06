@@ -40,9 +40,9 @@
 # (acceptable - recorded worktree paths do not survive a move either).
 #
 # Empirical verification (real zellij 0.44.0, macOS aarch64, 2026-07-02;
-# docs/zellij-backend.md has the full evidence log) resolved every "gaps to
-# verify" item in the design report, plus additional real findings not
-# anticipated by the report:
+# docs/verification/runtime-backends.md has the full evidence log) resolved
+# every "gaps to verify" item in the design report, plus additional real
+# findings not anticipated by the report:
 #
 #   1. dump-screen on a background session with NO attached client: WORKS.
 #   2. Key names: Enter -> "Enter", Escape -> "Esc" (NOT "Escape"), Ctrl-C ->
@@ -118,10 +118,12 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 # shellcheck source=bin/fm-backend-hometag-lib.sh
 . "$FM_BACKEND_ZELLIJ_ROOT/bin/fm-backend-hometag-lib.sh"
+# shellcheck source=bin/fm-composer-lib.sh
+. "$FM_BACKEND_ZELLIJ_ROOT/bin/fm-composer-lib.sh"
 
 # Verified minimum: report.md recommends "likely Zellij 0.44 or newer" for
 # returned pane/tab IDs and dump-screen --pane-id; empirically verified
-# against the installed 0.44.0 (docs/zellij-backend.md).
+# against the installed 0.44.0 (docs/verification/runtime-backends.md).
 FM_BACKEND_ZELLIJ_MIN_MAJOR=0
 FM_BACKEND_ZELLIJ_MIN_MINOR=44
 
@@ -495,33 +497,228 @@ fm_backend_zellij_capture() {  # <target> <lines> [expected-label]
   printf '%s' "$out" | tail -n "$lines"
 }
 
+# fm_backend_zellij_lifecycle_marker: the task-bound diagnostic marker the
+# spawn wrapper prints after the launched harness returns to its shell.
+fm_backend_zellij_lifecycle_marker() {  # <expected-label>
+  local label=$1 id
+  case "$label" in
+    fm-?*) id=${label#fm-} ;;
+    *) return 1 ;;
+  esac
+  printf '__FM_ZELLIJ_AGENT_EXITED__:%s:' "$id"
+}
+
+# fm_backend_zellij_lifecycle_paths: resolve the nonce authority and exit
+# receipt owned by one task label.
+fm_backend_zellij_lifecycle_paths() {  # <expected-label>
+  local label=$1 id state
+  case "$label" in
+    fm-?*) id=${label#fm-} ;;
+    *) return 1 ;;
+  esac
+  case "$id" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+  state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+  printf '%s\n%s\n' "$state/$id.zellij-lifecycle" "$state/$id.zellij-exited"
+}
+
+fm_backend_zellij_lifecycle_nonce() {
+  local nonce
+  nonce=$(LC_ALL=C od -An -v -tx1 -N 16 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
+  case "$nonce" in ''|*[!0-9a-f]*) return 1 ;; esac
+  [ "${#nonce}" -eq 32 ] || return 1
+  printf '%s' "$nonce"
+}
+
+fm_backend_zellij_lifecycle_arm() {  # <expected-label>
+  local paths authority receipt nonce tmp
+  paths=$(fm_backend_zellij_lifecycle_paths "$1") || return 1
+  authority=${paths%%$'\n'*}
+  receipt=${paths#*$'\n'}
+  nonce=$(fm_backend_zellij_lifecycle_nonce) || return 1
+  tmp=$(umask 077; mktemp "$authority.tmp.XXXXXX") || return 1
+  if ! printf '%s\n' "$nonce" > "$tmp" || ! mv -f -- "$tmp" "$authority"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  rm -f -- "$receipt"
+  printf '%s' "$nonce"
+}
+
+fm_backend_zellij_lifecycle_state() {  # <expected-label>
+  local paths authority receipt expected nonce status extra
+  paths=$(fm_backend_zellij_lifecycle_paths "$1" 2>/dev/null) || { printf 'absent'; return 0; }
+  authority=${paths%%$'\n'*}
+  receipt=${paths#*$'\n'}
+  [ -f "$authority" ] || { printf 'absent'; return 0; }
+  IFS= read -r expected < "$authority" 2>/dev/null || { printf 'unknown'; return 0; }
+  if ! printf '%s' "$expected" | grep -Eq '^[0-9a-f]{32}$'; then
+    printf 'unknown'
+    return 0
+  fi
+  [ -f "$receipt" ] || { printf 'running'; return 0; }
+  nonce='' status='' extra=''
+  IFS=' ' read -r nonce status extra < "$receipt" 2>/dev/null || { printf 'unknown'; return 0; }
+  if [ -n "$extra" ] || [ "$nonce" != "$expected" ]; then
+    printf 'unknown'
+    return 0
+  fi
+  case "$status" in ''|*[!0-9]*) printf 'unknown' ;; *) printf 'exited' ;; esac
+}
+
+fm_backend_zellij_shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+# fm_backend_zellij_wrap_launch: preserve the launch command's status, publish
+# a nonce-bound exit receipt, and emit the task-bound diagnostic marker.
+fm_backend_zellij_wrap_launch() {  # <expected-label> <launch-command> <nonce>
+  local marker paths authority receipt nonce=$3 authority_q receipt_q nonce_q marker_q
+  marker=$(fm_backend_zellij_lifecycle_marker "$1") || return 1
+  paths=$(fm_backend_zellij_lifecycle_paths "$1") || return 1
+  authority=${paths%%$'\n'*}
+  receipt=${paths#*$'\n'}
+  [ "$(cat "$authority" 2>/dev/null)" = "$nonce" ] || return 1
+  authority_q=$(fm_backend_zellij_shell_quote "$authority")
+  receipt_q=$(fm_backend_zellij_shell_quote "$receipt")
+  nonce_q=$(fm_backend_zellij_shell_quote "$nonce")
+  marker_q=$(fm_backend_zellij_shell_quote "$marker")
+  # shellcheck disable=SC2016 # Preserve the downstream shell's status expansion.
+  printf '( %s ); fm_zellij_exit=$?; if [ "$(cat %s 2>/dev/null)" = %s ]; then fm_zellij_tmp=$(mktemp %s.tmp.XXXXXX 2>/dev/null) && (umask 077; printf "%%s %%s\\n" %s "$fm_zellij_exit" > "$fm_zellij_tmp") && mv -f -- "$fm_zellij_tmp" %s || { [ -z "${fm_zellij_tmp:-}" ] || rm -f -- "$fm_zellij_tmp"; }; fi; printf "\\n%%s%%s\\n" %s "$fm_zellij_exit"' \
+    "$2" "$authority_q" "$nonce_q" "$receipt_q" "$nonce_q" "$receipt_q" "$marker_q"
+}
+
+# fm_backend_zellij_composer_layout_state: classify one plain Zellij screen
+# capture as idle|composing|ambiguous. This is deliberately the only owner of
+# Zellij's presentation parsing. It selects the bottom-most supported bordered
+# or bare Claude/Codex composer row from the full capture, but a later raw shell
+# prompt invalidates that stale composer candidate.
+fm_backend_zellij_composer_layout_state() {  # <capture> [expected-label]
+  local capture=$1 line trimmed candidate='' bordered=0 content verdict unsafe_after_candidate=0
+  while IFS= read -r line; do
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    [ -n "$trimmed" ] || continue
+    case "$trimmed" in
+      '│'*'│'|'┃'*'┃'|'|'*'|')
+        content=$trimmed
+        case "$content" in
+          '│'*'│') content=${content#│}; content=${content%│} ;;
+          '┃'*'┃') content=${content#┃}; content=${content%┃} ;;
+          '|'*'|') content=${content#|}; content=${content%|} ;;
+        esac
+        content="${content#"${content%%[![:space:]]*}"}"
+        case "$content" in
+          '>'|'>'\ *|'❯'|'❯ '*|'›'|'› '*) candidate=$trimmed; bordered=1; unsafe_after_candidate=0 ;;
+        esac
+        ;;
+      '❯'|'❯ '*|'›'|'› '*) candidate=$trimmed; bordered=0; unsafe_after_candidate=0 ;;
+    esac
+    case "$trimmed" in
+      '$'|'%'|'#'|'>'|*' $'|*' %'|*' #'|*' >')
+        [ -z "$candidate" ] || unsafe_after_candidate=1
+        ;;
+    esac
+  done < <(printf '%s\n' "$capture")
+  [ -n "$candidate" ] || { printf 'ambiguous'; return 0; }
+  [ "$unsafe_after_candidate" -eq 0 ] || { printf 'ambiguous'; return 0; }
+  content=$candidate
+  if [ "$bordered" -eq 1 ]; then
+    case "$content" in
+      '│'*'│') content=${content#│}; content=${content%│} ;;
+      '┃'*'┃') content=${content#┃}; content=${content%┃} ;;
+      '|'*'|') content=${content#|}; content=${content%|} ;;
+    esac
+  fi
+  content="${content#"${content%%[![:space:]]*}"}"
+  content="${content%"${content##*[![:space:]]}"}"
+  verdict=$(fm_composer_classify_content "$bordered" "$content")
+  case "$verdict" in
+    empty) printf 'idle' ;;
+    pending) printf 'composing' ;;
+    *) printf 'ambiguous' ;;
+  esac
+}
+
+# fm_backend_zellij_composer_state: the shared Zellij composer/lifecycle
+# classifier for spawn readiness, send acknowledgement, and recovery. It
+# prints exactly idle|composing|submitted|exited|ambiguous|unreachable.
+#
+# A supplied <typed-baseline> makes submitted meaningful: it must itself be a
+# proven composing layout, and the later capture must become a proven idle
+# layout. A changed but unrecognized screen stays ambiguous, never submitted.
+# No caller may parse dump-screen presentation text independently.
+fm_backend_zellij_composer_state() {  # <target> [typed-baseline] [expected-label]
+  local target=$1 baseline=${2:-} expected_label=${3:-} capture before after lifecycle
+  if [ -n "$expected_label" ]; then
+    lifecycle=$(fm_backend_zellij_lifecycle_state "$expected_label")
+    case "$lifecycle" in
+      exited) printf 'exited'; return 0 ;;
+      unknown) printf 'ambiguous'; return 0 ;;
+    esac
+  fi
+  fm_backend_zellij_target_ready "$target" "$expected_label" || { printf 'unreachable'; return 0; }
+  capture=$(fm_backend_zellij_capture "$target" 40 "$expected_label") || { printf 'unreachable'; return 0; }
+  after=$(fm_backend_zellij_composer_layout_state "$capture" "$expected_label")
+  if [ -n "$baseline" ]; then
+    before=$(fm_backend_zellij_composer_layout_state "$baseline" "$expected_label")
+    if [ "$before" = composing ] && [ "$after" = idle ] && [ "$capture" != "$baseline" ]; then
+      printf 'submitted'
+      return 0
+    fi
+  fi
+  printf '%s' "$after"
+}
+
+# fm_backend_zellij_agent_state: map the shared Zellij composer/lifecycle
+# vocabulary into fm_backend_agent_state's recovery vocabulary. Only an
+# authenticated nonce-bound exit receipt licenses recovery; unreachable and
+# unknown layouts remain non-actionable.
+fm_backend_zellij_agent_state() {  # <target> [expected-label]
+  case "$(fm_backend_zellij_composer_state "$1" '' "${2:-}")" in
+    idle|composing|submitted) printf 'alive' ;;
+    exited) printf 'dead' ;;
+    ambiguous) printf 'ambiguous' ;;
+    unreachable|*) printf 'unreadable' ;;
+  esac
+}
+
 # fm_backend_zellij_send_text_submit: type <text> into <target> once (raw,
 # unsubmitted, via send_literal), then submit with a named Enter key, retried
-# (Enter only, never retyped) until the pane visibly changes. Unlike herdr's
-# current native agent-state idle-baseline verifier and composer-state
-# fallback, zellij still uses a content-diff strategy because its CLI has no
-# cursor-row/ANSI capture primitive exposed:
-# capture the pane right after typing (before any Enter) as the TYPED baseline,
-# then after each Enter attempt capture again - unchanged means Enter was
-# swallowed (retry); changed means submitted. This content-diff approach is
-# also the load-bearing defense against the
-# unconditional-exit-0 CLI quirk documented in the file header: a truly dead
-# target never shows a change, so it correctly reports pending/unknown rather
-# than a false "sent". Echoes empty|pending|unknown|send-failed, a subset of the
+# (Enter only, never retyped) while the shared classifier reports composing.
+# It captures a known composing baseline before the first Enter, then accepts
+# only the classifier's submitted state: a changed known idle composer.
+# Unrecognized output, exit markers, and unreachable targets never become
+# delivery proof. This preserves the defense against Zellij's unconditional
+# exit-0 CLI quirk. Echoes empty|pending|unknown|send-failed, a subset of the
 # proof-carrying submit vocabulary.
 fm_backend_zellij_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} typed after i=0
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} typed state i=0
   fm_backend_zellij_send_literal "$target" "$text" "$expected_label" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   typed=$(fm_backend_zellij_capture "$target" 6 "$expected_label") || { printf 'unknown'; return 0; }
+  [ "$(fm_backend_zellij_composer_layout_state "$typed" "$expected_label")" = composing ] || { printf 'unknown'; return 0; }
   while :; do
     fm_backend_zellij_send_key "$target" Enter "$expected_label" || true
     sleep "$sleep_s"
-    after=$(fm_backend_zellij_capture "$target" 6 "$expected_label") || { printf 'unknown'; return 0; }
-    if [ "$after" != "$typed" ]; then
-      printf 'empty'
-      return 0
-    fi
+    state=$(fm_backend_zellij_composer_state "$target" "$typed" "$expected_label")
+    case "$state" in
+      submitted)
+        printf 'empty'
+        return 0
+        ;;
+      composing)
+        ;;
+      unreachable)
+        printf 'unknown'
+        return 0
+        ;;
+      *)
+        printf 'unknown'
+        return 0
+        ;;
+    esac
     i=$((i + 1))
     [ "$i" -lt "$retries" ] || { printf 'pending'; return 0; }
   done

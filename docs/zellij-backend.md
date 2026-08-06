@@ -76,8 +76,14 @@ There is a narrow visible race between those calls that no current Zellij flag c
 
 Literal send uses bracketed paste followed by a separate explicit Enter.
 The adapter supports `Enter`, `Esc`, and the one-argument key expression `Ctrl c` through the shared key vocabulary.
-Zellij exposes no cursor-row, ANSI composer style, or native agent-state signal, so submit acknowledgement remains content-delta based.
-This can distinguish no change from a changed screen but is less precise than tmux's structural box reader or Herdr's native state plus structural classifier.
+Zellij exposes no cursor-row, ANSI composer style, or native agent-state signal.
+`fm_backend_zellij_composer_state` in [`bin/backends/zellij.sh`](../bin/backends/zellij.sh) is therefore the sole owner of its fail-closed plain-screen contract for spawn readiness, send acknowledgement, and recovery.
+It emits `idle`, `composing`, `submitted`, `exited`, `ambiguous`, or `unreachable`.
+Only a known empty composer is idle, only a known typed composer is composing, and submitted requires a composing baseline followed by a changed known idle layout.
+Spawn arms a per-launch random nonce in private lifecycle state and wraps each Zellij harness command so its return publishes a matching exit receipt.
+Only a receipt matching the current launch nonce proves exited for recovery; the visible task-bound marker is diagnostic and never lifecycle authority.
+The presentation parser scans the full capture for the bottom-most supported composer row, so a lower box border or footer does not hide a known idle or composing layout, while a later raw shell prompt invalidates the candidate.
+Unknown layouts, raw shell prompts, absent sessions, unreadable panes, and visible exit-marker text never become delivery or recovery proof.
 
 Viewport capture has no line-bound option.
 Routine reads use `dump-screen` and larger peeks use `dump-screen --full`, followed by local trimming.
@@ -85,6 +91,7 @@ A short viewport may expose fewer lines than requested.
 
 Closing a pane leaves an empty tab.
 Cleanup resolves and verifies the owning tab, then uses `close-tab-by-id` so both the task pane and tab disappear.
+During session-start secondmate recovery, a nonce-proven exit reuses the recorded tab id plus expected task label to close an empty ghost tab before respawning, while every inconclusive state remains untouched.
 Real test cleanup uses only an isolated non-`firstmate` session and the guard in `tests/zellij-test-safety.sh`; it never calls all-session deletion commands.
 
 ## Active limits
@@ -93,7 +100,8 @@ Real test cleanup uses only an isolated non-`firstmate` session and the guard in
 - All homes share one session and tab bar; scoped titles prevent cross-home identity collisions but do not create per-home visual containers.
 - There is no native busy or push-event signal, so supervision uses capture/hash polling for screen changes and each harness adapter's semantic lifecycle for worker state.
   Grok alone retains its isolated rendered-tail fallback.
-- There is no verified agent-process liveness signal, so a dead Zellij secondmate is reported inconclusive rather than auto-respawned.
+- There is no native agent-process liveness signal.
+  Recovery accepts only the nonce-bound private exit receipt emitted by the spawn wrapper, and leaves every other Zellij state inconclusive.
 - New-tab focus restoration has a narrow visible race.
 - CLI exit status is not meaningful; a target can still disappear after structural readiness checks.
 - Worktree cwd discovery requires the spawn-time marker probe.
@@ -104,7 +112,8 @@ Real test cleanup uses only an isolated non-`firstmate` session and the guard in
 ```sh
 tests/fm-backend-zellij.test.sh
 tests/fm-backend-zellij-smoke.test.sh
+tests/fm-secondmate-liveness.test.sh
 ```
 
 The real smoke test uses a unique session and guarded deletion.
-[`verification/runtime-backends.md`](verification/runtime-backends.md#zellij) records the active CLI matrix and lifecycle evidence.
+[`verification/runtime-backends.md`](verification/runtime-backends.md#zellij) records the active CLI matrix, lifecycle evidence, and deferred live-rendering status.

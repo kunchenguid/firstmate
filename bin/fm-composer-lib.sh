@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # bin/fm-composer-lib.sh - the ONE fleet-wide owner of composer-content
 # classification, shared by every session-provider adapter: the tmux path
-# through bin/fm-tmux-lib.sh, and bin/backends/{herdr,orca,cmux}.sh directly.
+# through bin/fm-tmux-lib.sh, and
+# bin/backends/{herdr,zellij,orca,cmux}.sh directly.
 #
-# WHY THIS EXISTS (task fm-composer-shellglyph-safety): the four adapters each
+# WHY THIS EXISTS (task fm-composer-shellglyph-safety): the adapters each
 # carried their own copy of the "is this composer row empty / pending / not an
 # agent composer" decision, and the copies drifted. The dangerous drift: a BARE
 # shell prompt glyph (`>`, `$`, `%`, `#`) - what a pane shows once its agent has
@@ -44,15 +45,15 @@
 #
 # Each adapter still owns its own CAPTURE and structural row-finding, because
 # those use genuinely different primitives (tmux's visible-pane box scan,
-# herdr's ANSI tail scan, orca/cmux's plain read-screen). Once an adapter has a
-# candidate composer row it hands the RAW styled row to
-# fm_composer_strip_ghost for the real-typed-content extraction, strips the box
-# borders, trims, and hands the result plus a <bordered> flag to
+# herdr's ANSI tail scan, or zellij/orca/cmux's plain screen read). Once an
+# adapter has a candidate composer row, it strips ghost styling when available,
+# strips the box borders, trims, and hands the result plus a <bordered> flag to
 # fm_composer_classify_content for the shared
-# empty|pending|unknown verdict. orca/cmux read a plain (unstyled) screen so
-# they have no ghost styling to strip and rely on the idle-placeholder match
-# below. Re-sourcing is a cheap idempotent redefinition, so this file needs no
-# include guard (matching bin/fm-tmux-lib.sh).
+# empty|pending|unknown verdict. Zellij, Orca, and cmux read a plain unstyled
+# screen, so they have no ghost styling to strip and rely on structural prompt
+# recognition or the idle-placeholder match below. Re-sourcing is a cheap
+# idempotent redefinition, so this file needs no include guard (matching
+# bin/fm-tmux-lib.sh).
 
 # fm_composer_strip_ansi: drop every CSI escape sequence, leaving plain text.
 # Used for STRUCTURAL row/shape detection, where ghost text must be KEPT so the

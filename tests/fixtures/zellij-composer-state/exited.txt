@@ -1,0 +1,2 @@
+task complete
+__FM_ZELLIJ_AGENT_EXITED__:fixture:0
