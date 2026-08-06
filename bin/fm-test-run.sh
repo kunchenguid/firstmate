@@ -32,11 +32,13 @@
 #                   drop scripts whose primary family matches <name> after selection
 #                   (repeatable; portable CI lanes exclude real-herdr-gated so the
 #                   dedicated required Herdr lane owns that coverage)
+#   --runtime-gate <runtime>=required|optional
+#                   declare whether a selected runtime gate must be exercised.
+#                   Required gates fail on a test's first-line skip and emit a
+#                   typed FM_TEST_GATE marker. Optional gates retain a successful
+#                   skip with typed intentionally-unavailable evidence.
 #   --fail-on-gate-skip <token>
-#                   after each script, fail the run if any output line contains
-#                   "skip: <token>" (e.g. --fail-on-gate-skip 'herdr not found').
-#                   The required Herdr CI lane uses this so a missing pin cannot
-#                   silently pass as a gate skip.
+#                   legacy free-text skip refusal, retained for compatibility.
 #   --jobs N        run the selected scripts with up to N concurrent workers.
 #                   Default is 1 (serial). N>1 is allowed only when every
 #                   selected script is in the proven-isolated set
@@ -45,17 +47,20 @@
 #   -h, --help      print this header
 #
 # Per-script machine-parseable markers (stdout):
-#   FM_TEST_BEGIN <iso8601> <script> family=<family> expected_gate_skip=<class>
-#   FM_TEST_END <iso8601> <script> exit=<code> duration_ms=<n> gate_skip=<true|false>
+#   FM_TEST_BEGIN <iso8601> <script> family=<family> runtime_gate=<runtime|none> gate_requirement=<required|optional|none>
+#   FM_TEST_GATE <script> runtime=<runtime|none> requirement=<required|optional|none> outcome=<exercised|intentionally-unavailable|unexpectedly-skipped|legacy-skip|failed>
+#   FM_TEST_END <iso8601> <script> exit=<code> duration_ms=<n> gate_skip=<true|false> gate_outcome=<outcome>
 #
 # After all scripts (stdout):
 #   FM_TEST_SUMMARY total=<n> failed=<n> skipped_gate=<n> duration_ms=<n>
 #   FM_TEST_SUMMARY_FAMILY family=<name> count=<n> duration_ms=<n> failed=<n>
 #   FM_TEST_SLOWEST rank=<k> script=<path> duration_ms=<n>
 #
-# Exit status is non-zero if any selected script exits non-zero or a configured
-# --fail-on-gate-skip token appears. Other gate skips (first meaningful line
-# matching ^skip:) remain successful and are counted as skipped_gate.
+# Exit status is non-zero if any selected script exits non-zero, a required
+# runtime gate is skipped, or a configured legacy --fail-on-gate-skip token
+# appears. A selected optional runtime reports intentionally-unavailable when
+# its first meaningful line matches ^skip:, while unmapped scripts retain the
+# legacy successful skip behavior.
 #
 # Family labels, the changed-file map, and production portable-shard composition
 # live in this script only (one owner). The proven-isolated candidate set remains
@@ -86,6 +91,7 @@ JSON_PATH=
 SCRIPTS=()
 EXCLUDE_FAMILIES=()
 FAIL_ON_GATE_SKIP=
+RUNTIME_GATE_DECLARATIONS=()
 JOBS=1
 JOBS_MAX=8
 
@@ -218,14 +224,59 @@ family_for_basename() {
   esac
 }
 
-expected_gate_skip_for_family() {
+runtime_gate_for_family() {
   case "$1" in
     real-herdr-gated) printf '%s\n' herdr ;;
-    live-harness-optin) printf '%s\n' optin-env ;;
-    cmux|zellij|orca) printf '%s\n' optional-binary ;;
-    snapshot-bearings) printf '%s\n' optional-binary ;;
+    cmux) printf '%s\n' cmux ;;
+    zellij) printf '%s\n' zellij ;;
+    orca) printf '%s\n' orca ;;
     *) printf '%s\n' none ;;
   esac
+}
+
+known_runtime_gate() {
+  case "$1" in
+    herdr|cmux|zellij|orca) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+parse_runtime_gate_declaration() {
+  local declaration=$1 runtime requirement existing
+  case "$declaration" in
+    *=*) ;;
+    *) die "malformed --runtime-gate declaration '$declaration' (expected <runtime>=required|optional)" ;;
+  esac
+  runtime=${declaration%%=*}
+  requirement=${declaration#*=}
+  [ -n "$runtime" ] && [ -n "$requirement" ] \
+    || die "malformed --runtime-gate declaration '$declaration' (expected <runtime>=required|optional)"
+  case "$requirement" in
+    required|optional) ;;
+    *) die "malformed --runtime-gate declaration '$declaration' (requirement must be required or optional)" ;;
+  esac
+  known_runtime_gate "$runtime" \
+    || die "unknown runtime gate '$runtime' in declaration '$declaration'"
+  for existing in "${RUNTIME_GATE_DECLARATIONS[@]+"${RUNTIME_GATE_DECLARATIONS[@]}"}"; do
+    [ "${existing%%$'\t'*}" != "$runtime" ] \
+      || die "duplicate runtime gate declaration for '$runtime'"
+  done
+  RUNTIME_GATE_DECLARATIONS+=("$runtime"$'\t'"$requirement")
+}
+
+runtime_gate_requirement() {
+  local runtime=$1 declaration
+  [ "$runtime" != none ] || {
+    printf '%s\n' none
+    return
+  }
+  for declaration in "${RUNTIME_GATE_DECLARATIONS[@]+"${RUNTIME_GATE_DECLARATIONS[@]}"}"; do
+    if [ "${declaration%%$'\t'*}" = "$runtime" ]; then
+      printf '%s\n' "${declaration#*$'\t'}"
+      return
+    fi
+  done
+  printf '%s\n' optional
 }
 
 list_known_families() {
@@ -1105,14 +1156,16 @@ with open(records_file, encoding="utf-8") as fh:
         line = line.rstrip("\n")
         if not line:
             continue
-        path, family, expected, exit_s, dur_s, gate = line.split("\t")
+        path, family, runtime, requirement, exit_s, dur_s, gate, outcome = line.split("\t")
         scripts.append({
             "path": path,
             "family": family,
-            "expected_gate_skip": expected,
+            "runtime_gate": runtime,
+            "gate_requirement": requirement,
             "duration_ms": int(dur_s),
             "exit": int(exit_s),
             "gate_skip": gate == "true",
+            "gate_outcome": outcome,
         })
 
 families = []
@@ -1261,6 +1314,15 @@ while [ "$#" -gt 0 ]; do
       FAIL_ON_GATE_SKIP=${1#--fail-on-gate-skip=}
       shift
       ;;
+    --runtime-gate)
+      [ "$#" -gt 1 ] || die "--runtime-gate requires <runtime>=required|optional"
+      parse_runtime_gate_declaration "$2"
+      shift 2
+      ;;
+    --runtime-gate=*)
+      parse_runtime_gate_declaration "${1#--runtime-gate=}"
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -1362,6 +1424,10 @@ fi
 if [ -n "$FAIL_ON_GATE_SKIP" ]; then
   SELECTION_DESC="${SELECTION_DESC};fail-on-gate-skip=$FAIL_ON_GATE_SKIP"
 fi
+if [ "${#RUNTIME_GATE_DECLARATIONS[@]}" -gt 0 ]; then
+  runtime_gate_selection=$(printf '%s\n' "${RUNTIME_GATE_DECLARATIONS[@]}" | tr '\t' '=' | paste -sd, -)
+  SELECTION_DESC="${SELECTION_DESC};runtime-gate=$runtime_gate_selection"
+fi
 if [ "$JOBS" -gt 1 ]; then
   SELECTION_DESC="${SELECTION_DESC};jobs=$JOBS"
 fi
@@ -1451,24 +1517,43 @@ family_bump() {
 
 record_script_result() {
   local script=$1 rc=$2 duration=$3 out=$4 end_iso=$5
-  local base family expected gate_skip fail_delta
+  local base family runtime requirement gate_skip gate_outcome fail_delta
   base=$(basename "$script")
   family=$(family_for_basename "$base")
-  expected=$(expected_gate_skip_for_family "$family")
-
-  if [ -n "$FAIL_ON_GATE_SKIP" ] && detect_gate_skip_token "$out" "$FAIL_ON_GATE_SKIP"; then
-    log "required gate skip token seen in $script: skip: $FAIL_ON_GATE_SKIP"
-    rc=1
-  fi
+  runtime=$(runtime_gate_for_family "$family")
+  requirement=$(runtime_gate_requirement "$runtime")
 
   gate_skip=false
   if [ "$rc" -eq 0 ] && detect_gate_skip "$out"; then
     gate_skip=true
     SKIPPED_GATE=$((SKIPPED_GATE + 1))
+    case "$requirement" in
+      required) gate_outcome=unexpectedly-skipped ;;
+      optional) gate_outcome=intentionally-unavailable ;;
+      none) gate_outcome=legacy-skip ;;
+    esac
+  elif [ "$rc" -eq 0 ]; then
+    gate_outcome=exercised
+  else
+    gate_outcome=failed
   fi
 
-  printf 'FM_TEST_END %s %s exit=%s duration_ms=%s gate_skip=%s\n' \
-    "$end_iso" "$script" "$rc" "$duration" "$gate_skip"
+  if [ -n "$FAIL_ON_GATE_SKIP" ] && detect_gate_skip_token "$out" "$FAIL_ON_GATE_SKIP"; then
+    log "required gate skip token seen in $script: skip: $FAIL_ON_GATE_SKIP"
+    rc=1
+    gate_outcome=unexpectedly-skipped
+  fi
+
+  if [ "$requirement" = required ] && [ "$gate_skip" = true ]; then
+    log "required runtime gate not exercised: runtime=$runtime script=$script"
+    rc=1
+  fi
+
+  printf 'FM_TEST_GATE %s runtime=%s requirement=%s outcome=%s\n' \
+    "$script" "$runtime" "$requirement" "$gate_outcome"
+
+  printf 'FM_TEST_END %s %s exit=%s duration_ms=%s gate_skip=%s gate_outcome=%s\n' \
+    "$end_iso" "$script" "$rc" "$duration" "$gate_skip" "$gate_outcome"
 
   fail_delta=0
   if [ "$rc" -ne 0 ]; then
@@ -1477,24 +1562,25 @@ record_script_result() {
     AGG_RC=1
   fi
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$script" "$family" "$expected" "$rc" "$duration" "$gate_skip" >>"$RECORDS"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$script" "$family" "$runtime" "$requirement" "$rc" "$duration" "$gate_skip" "$gate_outcome" >>"$RECORDS"
   family_bump "$family" "$duration" "$fail_delta"
   TOTAL=$((TOTAL + 1))
 }
 
 run_one_serial() {
   local script=$1
-  local base family expected out begin_iso begin_ms end_ms end_iso duration rc
+  local base family runtime requirement out begin_iso begin_ms end_ms end_iso duration rc
   base=$(basename "$script")
   family=$(family_for_basename "$base")
-  expected=$(expected_gate_skip_for_family "$family")
+  runtime=$(runtime_gate_for_family "$family")
+  requirement=$(runtime_gate_requirement "$runtime")
   out="$RUN_TMP/out.$TOTAL"
   begin_iso=$(now_iso)
   begin_ms=$(now_ms)
 
-  printf 'FM_TEST_BEGIN %s %s family=%s expected_gate_skip=%s\n' \
-    "$begin_iso" "$script" "$family" "$expected"
+  printf 'FM_TEST_BEGIN %s %s family=%s runtime_gate=%s gate_requirement=%s\n' \
+    "$begin_iso" "$script" "$family" "$runtime" "$requirement"
 
   set +e
   # Stream live output while retaining a copy for gate-skip detection.
@@ -1595,9 +1681,10 @@ else
     chmod 0700 "$work" "$work/tmp" || die "could not chmod 0700 worker root $work"
     base=$(basename "$script")
     family=$(family_for_basename "$base")
-    expected=$(expected_gate_skip_for_family "$family")
-    printf 'FM_TEST_BEGIN %s %s family=%s expected_gate_skip=%s\n' \
-      "$(now_iso)" "$script" "$family" "$expected"
+    runtime=$(runtime_gate_for_family "$family")
+    requirement=$(runtime_gate_requirement "$runtime")
+    printf 'FM_TEST_BEGIN %s %s family=%s runtime_gate=%s gate_requirement=%s\n' \
+      "$(now_iso)" "$script" "$family" "$runtime" "$requirement"
     (
       set +e
       export TMPDIR="$work/tmp"
@@ -1648,7 +1735,7 @@ fi
 # Slowest scripts (top 15) from records.
 if [ -s "$RECORDS" ]; then
   rank=1
-  sort -t$'\t' -k5,5nr "$RECORDS" | head -n 15 | while IFS=$'\t' read -r path _family _expected _rc duration _gate; do
+  sort -t$'\t' -k6,6nr "$RECORDS" | head -n 15 | while IFS=$'\t' read -r path _family _runtime _requirement _rc duration _gate _outcome; do
     printf 'FM_TEST_SLOWEST rank=%s script=%s duration_ms=%s\n' \
       "$rank" "$path" "$duration"
     rank=$((rank + 1))
