@@ -645,7 +645,7 @@ test_forbidden_permission_flag_is_refused_across_raw_commands() {
   local -a cases=(
     "direct|custom-agent --dangerously-skip-permissions"
     "quote-split|custom-agent --dangerously-skip-permis''sions"
-    "git-alias|git -c alias.x='!/root/.local/bin/claude --dangerously-skip-permissions' x"
+    "git-alias|git -c alias.x='!/usr/local/bin/claude --dangerously-skip-permissions' x"
   )
 
   for spec in "${cases[@]}"; do
@@ -667,7 +667,7 @@ test_forbidden_permission_flag_is_refused_across_raw_commands() {
 test_forbidden_permission_glob_is_refused() {
   local rec id raw out status
   id=profile-raw-forbidden-glob-z15o
-  raw="git -c alias.x='!/root/.local/bin/claude --dangerously-skip-*' x"
+  raw="git -c alias.x='!/usr/local/bin/claude --dangerously-skip-*' x"
   rec=$(make_spawn_case profile-raw-forbidden-glob claude "$id")
   read_case_record "$rec"
   : > "$WT_DIR/--dangerously-skip-permissions"
