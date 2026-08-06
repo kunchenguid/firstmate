@@ -111,7 +111,10 @@
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
-#   git worktree root distinct from the primary project checkout.
+#   git worktree root that is not the project checkout itself. "Not the project"
+#   is decided by filesystem identity (device+inode), not by comparing path
+#   strings, so no symlinked or differently-cased spelling of the project can
+#   pass the gate; the gate runs before any hook, metadata, or launch write.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1367,15 +1370,13 @@ BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
 BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
-# /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
-# Every backend's own current-path read (tmux's pane_current_path, herdr's
-# foreground_cwd, zellij/cmux's active pwd probe against the live shell) can
-# report the OS-level, physically-resolved cwd, so comparing it against a
-# still-symlinked PROJ_ABS can misfire both ways: false-negative (the poll
-# below never notices the pane left the project) or false-positive (the
-# isolation guard refuses a spawn that never actually tangled). Canonicalize
-# once here so every downstream comparison uses the same physical form
-# (docs/herdr-backend.md "Known gaps").
+# /private/tmp) when it came from the ship/scout branch's logical `pwd` above,
+# while every backend's own current-path read (tmux's pane_current_path,
+# herdr's foreground_cwd, zellij/cmux's active pwd probe against the live
+# shell) reports the OS-level cwd. PROJ_ABS_REAL is that physical form, kept
+# for the settle loop's stability candidate and for operator-facing error text
+# (docs/herdr-backend.md "Known gaps"). It is NOT the authority on whether two
+# paths are the same directory - see same_dir below.
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
 
 real_path_or_raw() {  # <path>
@@ -1387,6 +1388,31 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+# same_dir answers "are these two paths ONE directory?" by filesystem identity
+# (device + inode via the `-ef` primary), never by comparing path strings.
+#
+# String comparison is not a sound answer to that question and shipping one is
+# what let a scout launch against the shared project checkout: `pwd -P` resolves
+# symlinks but does NOT normalize letter case, so on a case-insensitive
+# filesystem (macOS's default APFS, HFS+, exFAT) a firstmate home typed as
+# .../work/firstmate and the on-disk .../Work/firstmate canonicalize to two
+# different strings naming one directory. The settle loop below then read the
+# backend's canonical-case pane cwd, saw a string that differed from PROJ_ABS,
+# and concluded the pane had left the project - handing the project's own
+# directory to the isolation guard, which compared the same two spellings and
+# also called them distinct. The launch went on to overwrite the project's
+# .claude/settings.local.json with its turn-end hook.
+#
+# `-ef` is false whenever either operand is missing or unreadable, so every
+# caller must ALSO prove the path exists before treating "not the same
+# directory" as "a different directory" - otherwise a vanished path reads as
+# distinct. Callers below do that with an explicit -d test.
+same_dir() {  # <a> <b> -> 0 only when both exist and are one directory
+  [ -n "$1" ] && [ -n "$2" ] || return 1
+  [ -d "$1" ] && [ -d "$2" ] || return 1
+  [ "$1" -ef "$2" ]
+}
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -1395,22 +1421,30 @@ real_path_or_raw() {  # <path>
 # herdr-sm-spaces-k4). Both branches converge on the same $T ("target") string
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
+# The single isolation gate for ship/scout work: $WT must be an existing
+# directory that is the ROOT of a git worktree and is not the shared project
+# checkout. Every test is positive - an unknown answer refuses - and the two
+# directory-identity questions go through same_dir, so no spelling of the
+# project path can pass as an isolated worktree. Idempotent and cheap, so it is
+# also re-asserted immediately before the first write into $WT.
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
-  wt_real=
-  if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
-    wt_real=
+  local source=$1 inspect_target=$2 wt_real wt_top='' reason=''
+  wt_real=$(real_path_or_raw "${WT:-}")
+  if [ -z "${WT:-}" ] || [ ! -d "$WT" ]; then
+    reason="it is not an existing directory"
+  else
+    wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
+    if [ -z "$wt_top" ] || [ ! -d "$wt_top" ]; then
+      reason="it is not inside a git worktree"
+    elif ! same_dir "$WT" "$wt_top"; then
+      reason="it is not the worktree root"
+    elif same_dir "$WT" "$PROJ_ABS"; then
+      reason="it is the shared project checkout itself"
+    fi
   fi
-  proj_real=$PROJ_ABS_REAL
-  wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
-  wt_top_real=
-  if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
-    wt_top_real=
-  fi
-  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
-    echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
-    exit 1
-  fi
+  [ -n "$reason" ] || return 0
+  echo "error: $source did not yield an isolated worktree - $reason (resolved '$WT' -> '$wt_real'; worktree root '${wt_top:-none}'; project '$PROJ_ABS' -> '$PROJ_ABS_REAL'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
+  exit 1
 }
 
 herdr_projection_meta_field_exact() {  # <meta> <key>
@@ -1826,35 +1860,36 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
   # worktree and tangle a hook into the primary checkout. The window id never lies.
-  # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
-  # prefix would otherwise make the pane's OS-level cwd read differ from
-  # PROJ_ABS on the very first poll, before the pane has actually moved.
+  # "Has the pane left the project?" is a directory-identity question, so it goes
+  # through same_dir - a symlinked or differently-cased spelling of the project
+  # is still the project, however far the two strings diverge (see same_dir).
+  # The read must also name an existing directory: `-ef` is false for a path
+  # this process cannot stat, which would otherwise read as "somewhere else".
   #
-  # A single read that already differs from PROJ_ABS_REAL is not proof the pane
-  # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
-  # transiently reports an unrelated stale path (seen live as another real git
-  # checkout entirely) before the shell catches up with treehouse get's cd. That
-  # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
-  # below (it resolves to a real, distinct worktree top-level too), so accepting it
-  # on one read alone silently records the wrong worktree= in state/<id>.meta. Require
-  # two consecutive reads to agree on the same non-project path before accepting it;
-  # a mismatch just becomes the new candidate rather than resetting the wait, so a
-  # pane that is already settled by the first real read only costs the one existing
-  # inter-poll sleep as confirmation, not a whole extra cycle on top.
+  # A single read that already names a non-project directory is not proof the
+  # pane settled there: on some tmux/WSL setups a brand-new window's
+  # pane_current_path transiently reports an unrelated stale path (seen live as
+  # another real git checkout entirely) before the shell catches up with
+  # treehouse get's cd. That stale path passes both this check and
+  # validate_spawn_worktree below (it resolves to a real, distinct worktree
+  # top-level too), so accepting it on one read alone silently records the wrong
+  # worktree= in state/<id>.meta. Require two consecutive reads to agree on the
+  # same non-project path - compared in canonical physical form so one settled
+  # directory reported under two spellings still counts as agreement - before
+  # accepting it; a mismatch just becomes the new candidate rather than
+  # resetting the wait, so a pane that is already settled by the first real read
+  # only costs the one existing inter-poll sleep as confirmation, not a whole
+  # extra cycle on top.
   candidate=""
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ]; then
+    if [ -n "$p" ] && [ -d "$p" ] && ! same_dir "$p" "$PROJ_ABS"; then
       p_real=$(real_path_or_raw "$p")
-      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
-        if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
-          WT="$p"
-          break
-        fi
-        candidate="$p_real"
-      else
-        candidate=""
+      if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
+        WT="$p"
+        break
       fi
+      candidate="$p_real"
     else
       candidate=""
     fi
@@ -1887,10 +1922,25 @@ exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
   [ -n "$EXCL" ] || return 0
+  # `--git-path` answers relative to the REPOSITORY, not to this process's cwd,
+  # and a main checkout answers with a bare ".git/info/exclude". Resolving that
+  # inside $WT is what keeps the write in the task worktree: taken as-is it
+  # lands in whatever directory fm-spawn was invoked from, which is firstmate's
+  # own primary checkout for every ordinary dispatch.
+  case "$EXCL" in
+    /*) ;;
+    *) EXCL="$WT/$EXCL" ;;
+  esac
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
 if [ "$KIND" != secondmate ]; then
+  # Structural backstop: no hook, config, or metadata write may precede a
+  # passing isolation gate. Each backend branch already validated $WT before
+  # reaching here, and re-asserting at the write site keeps that true if the
+  # steps above are ever reordered - the resolved worktree cannot change in
+  # between, so a healthy spawn never notices this call.
+  validate_spawn_worktree "the resolved task worktree" "$T"
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
   # adapter with a verified semantic source. The launch brief sent below IS a
   # submitted turn, so the seed record is busy/fm-spawn. The minted gen is

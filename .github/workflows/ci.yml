@@ -363,6 +363,29 @@ jobs:
             exit 1
           }
 
+      # The spawn isolation gate's case-spelling regression needs a
+      # case-insensitive filesystem, which the Linux lanes cannot provide. macOS
+      # runners can, so require it here: FM_TEST_REQUIRE_CASE_INSENSITIVE=1 turns
+      # the skip into a failure, and the run doubles as stock-Bash 3.2 coverage
+      # for the gate itself.
+      - name: Require the spawn isolation case-spelling regression
+        shell: /bin/bash {0}
+        env:
+          PATH: /bin:/usr/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin
+          FM_TEST_REQUIRE_CASE_INSENSITIVE: '1'
+        run: |
+          set -eu
+          isolation_output=$(/bin/bash tests/fm-spawn-isolation.test.sh)
+          printf '%s\n' "$isolation_output"
+          if printf '%s\n' "$isolation_output" | grep -q '^skip:'; then
+            echo "::error::spawn isolation coverage skipped on a runner that must exercise it"
+            exit 1
+          fi
+          if ! printf '%s\n' "$isolation_output" | grep -q 'never accepted as the worktree'; then
+            echo "::error::case-spelling regression did not run"
+            exit 1
+          fi
+
   invariants:
     name: Repo invariants
     runs-on: ubuntu-latest
