@@ -114,22 +114,17 @@ if [ -z "$SESSION" ] && [ -n "${CURSOR_CONVERSATION_ID:-}" ]; then
   SESSION=$CURSOR_CONVERSATION_ID
 fi
 if [ -z "$SESSION" ]; then
-  SESSION_CONTEXT=$(printf '%s' "$PAYLOAD" | jq -r '
-    if type != "object" then ""
-    else [
-      (if (.cwd | type) == "string" then .cwd else "" end),
-      (if (.transcript_path | type) == "string" then .transcript_path else "" end),
-      (if (.workspace_roots | type) == "array" then (.workspace_roots | tojson) else "" end)
-    ] | @tsv end
-  ' 2>/dev/null) || SESSION_CONTEXT=
+  SESSION_SCOPE=$(printf '%s' "$PAYLOAD" | jq -cS '
+    if type != "object" then .
+    else del(.loop_count, .stop_hook_active, .stopHookActive) end
+  ' 2>/dev/null) || SESSION_SCOPE=
   SESSION_TRANSCRIPT=$(printf '%s' "$PAYLOAD" | jq -r '
     if type == "object" and (.transcript_path | type) == "string" and .transcript_path != ""
     then .transcript_path else empty end
   ' 2>/dev/null) || SESSION_TRANSCRIPT=
-  SESSION_SCOPE=$SESSION_CONTEXT
   if [ -z "$SESSION_TRANSCRIPT" ]; then
     if SESSION_PARENT=$(cursor_parent_identity); then
-      SESSION_SCOPE=$(printf '%s\037%s' "$SESSION_PARENT" "$SESSION_CONTEXT")
+      SESSION_SCOPE=$(printf '%s\037%s' "$SESSION_PARENT" "$SESSION_SCOPE")
     fi
   fi
   SESSION_KEY=$(printf '%s\037%s' "$ROOT" "$SESSION_SCOPE" \
