@@ -157,15 +157,15 @@ For `no-mistakes` projects, seeding initializes only projects newly cloned into 
 ## Record intake for an existing or inherited domain
 
 Classify the domain before seeding, because this step applies to only one of the two cases.
-A greenfield domain has no delivered work yet: no merged history in its projects, no live deployment, and no predecessor records to import.
+A greenfield domain has no delivered domain work yet: nothing already shipped in its projects, no live deployment, and no predecessor records to import.
 Seed a greenfield domain normally; there is nothing to reconcile and this section adds no work to it.
 An existing or inherited domain is any domain whose product is already in development, and any predecessor's domain a new mate takes over, including a consolidation after a retirement.
 Both of those cases require record intake before the new mate acts on any inherited plan.
 
 For an existing or inherited domain, the creating agent must:
 
-1. Reconcile every inherited plan against the domain's authoritative shipped state, which is `origin/main` for each owned project plus the live deployment.
-   A fetched clone of each owned project is a precondition of that reconciliation, so wire the home to its projects before reconciling rather than on first task.
+1. Reconcile every inherited plan against the domain's authoritative shipped state, which is `origin/main` for each relevant project plus the live deployment.
+   A fetched clone of each relevant project is a precondition of that reconciliation, so wire the home to its projects before reconciling rather than on first task.
    The imported backlog, the predecessor's own notes, instruction-surface prose, and an absent or unfetched local view are all inadmissible as shipped-state evidence.
 2. Seed the new home with only genuinely open work plus the domain's durable knowledge, meaning the learnings, decisions, and delivery posture that are still live.
 3. Never inherit a plan backlog blind.
