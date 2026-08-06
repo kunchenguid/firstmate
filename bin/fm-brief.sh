@@ -52,8 +52,9 @@
 # A gate-merge definition of done also carries the command in the fixed "Run the gate
 # from THIS worktree, with your branch checked out: `<command>`" step, so the worker
 # reads what to run without chasing metadata. That step is a fixed shape on purpose:
-# bin/fm-spawn.sh checks it against the same registry entry, so neither occurrence can
-# be hand-patched into an unauthorized landing command.
+# bin/fm-spawn.sh requires each shape exactly once and checks it against the same
+# registry entry, so no occurrence can be hand-patched, injected, or appended into an
+# unauthorized landing command.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.

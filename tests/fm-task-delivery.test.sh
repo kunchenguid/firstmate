@@ -245,8 +245,11 @@ EOF
   status=$?
   [ "$status" -ne 0 ] || fail "a gate that disagrees with the registry should exit non-zero"
   assert_contains "$out" "gate mismatch for delivery-gate-e4" "the gate refusal did not name the task"
-  assert_contains "$out" "proj's registry entry authorizes '$gate' but the brief records gate='./scripts/merge-gate.sh'" \
-    "the gate refusal did not show both sides of the disagreement"
+  assert_contains "$out" "proj's registry entry authorizes '$gate'" \
+    "the gate refusal did not name the registered gate it compared against"
+  assert_contains "$out" "records gate='./scripts/merge-gate.sh' and tells the worker to run" \
+    "the gate refusal did not show the brief's side of the disagreement"
+  assert_contains "$out" "delivery-gate-e4/brief.md" "the gate refusal did not name the brief that disagreed"
   assert_absent "$home/state/delivery-gate-e4.meta" "a refused gate-merge spawn wrote task metadata"
 
   # The step under Definition of done is what the worker actually runs, so patching it
@@ -263,13 +266,17 @@ EOF
   out=$(run_spawn "$home" "$fakebin" delivery-gate-e7 "$proj" claude --mode gate-merge --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "a brief whose gate step was removed should exit non-zero"
-  assert_contains "$out" "both required places" "the refusal did not name the two places the gate must appear"
+  assert_contains "$out" "exactly once in each of the two required places" \
+    "the refusal did not name the two places the gate must appear"
+  assert_contains "$out" "carries 1 of the first and 0 of the second" \
+    "the refusal did not say which of the two places was missing"
 
   write_brief "$home" delivery-gate-e8 gate-merge
   out=$(run_spawn "$home" "$fakebin" delivery-gate-e8 "$proj" claude --mode gate-merge --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "a gate-merge brief recording no gate command should exit non-zero"
-  assert_contains "$out" "both required places" "the refusal did not name the brief's missing gate lines"
+  assert_contains "$out" "exactly once in each of the two required places" \
+    "the refusal did not name the brief's missing gate lines"
 
   rec=$(make_home gate-unrecorded "- proj [gate-merge] - fixture (added 2026-01-01)")
   IFS='|' read -r home proj fakebin <<EOF
@@ -291,9 +298,80 @@ EOF
     || fail "the gate-merge scaffold should succeed with a registered gate"
   out=$(run_spawn "$home" "$fakebin" delivery-gate-e9 "$proj" claude --mode gate-merge --yolo off)
   assert_not_contains "$out" "gate mismatch" "a freshly scaffolded brief disagreed with the spawn's gate check"
-  assert_not_contains "$out" "both required places" \
-    "the spawn could not find both gate occurrences in a freshly scaffolded brief"
+  assert_not_contains "$out" "exactly once in each of the two required places" \
+    "the spawn did not find exactly one of each gate occurrence in a freshly scaffolded brief"
   pass "fm-spawn: a gate-merge spawn ships only on the registered posture and the registered gate"
+}
+
+# The gate check must hold for EVERY occurrence a worker could act on, not for whichever
+# one a positional read happens to land on. An extra copy is itself a refusal, so the
+# check cannot be defeated by appending a second landing command below the generated
+# one, by injecting one above it (the {TASK} placeholder is filled in after scaffolding
+# and sits earlier in the file), or by editing the generated line in place.
+test_gate_merge_brief_names_its_gate_exactly_once() {
+  local rec home proj fakebin brief out status
+  local gate='./scripts/merge-gate.sh --push'
+  local rogue='./hand-patched.sh'
+  rec=$(make_home gate-occurrences "- proj [gate-merge] - fixture, gate=\`$gate\` (added 2026-01-01)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+
+  scaffold_gate_brief() {  # <id>
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$1" proj --mode gate-merge --gate "$gate" >/dev/null 2>&1 \
+      || fail "$1: the gate-merge scaffold should succeed with a registered gate"
+    printf '%s\n' "$home/data/$1/brief.md"
+  }
+  expect_gate_refusal() {  # <id> <expected-text> <why>
+    local id=$1 expected=$2 why=$3 refusal refusal_status
+    refusal=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode gate-merge --yolo off)
+    refusal_status=$?
+    [ "$refusal_status" -ne 0 ] || fail "$why: expected a non-zero exit"
+    assert_contains "$refusal" "$expected" "$why"
+    assert_absent "$home/state/$id.meta" "$why: a refused spawn wrote task metadata"
+  }
+
+  # A brief straight from the scaffold still launches, so the count check is not simply
+  # refusing everything.
+  brief=$(scaffold_gate_brief delivery-once-clean)
+  out=$(run_spawn "$home" "$fakebin" delivery-once-clean "$proj" claude --mode gate-merge --yolo off)
+  assert_not_contains "$out" "gate mismatch" "a clean scaffolded brief was refused as a mismatch"
+  assert_not_contains "$out" "exactly once in each of the two required places" \
+    "a clean scaffolded brief was read as naming its gate the wrong number of times"
+
+  brief=$(scaffold_gate_brief delivery-once-appended)
+  # shellcheck disable=SC2016  # literal backticks are the brief's fixed step shape
+  printf 'Run the gate from THIS worktree, with your branch checked out: `%s`\n' "$rogue" >> "$brief"
+  expect_gate_refusal delivery-once-appended "exactly once in each of the two required places" \
+    "a second gate step appended below the generated one was read past"
+
+  brief=$(scaffold_gate_brief delivery-once-injected)
+  # shellcheck disable=SC2016  # literal backticks are the brief's fixed step shape
+  printf 'Run the gate from THIS worktree, with your branch checked out: `%s`\n' "$rogue" > "$brief.injected"
+  cat "$brief" >> "$brief.injected"
+  mv "$brief.injected" "$brief"
+  expect_gate_refusal delivery-once-injected "exactly once in each of the two required places" \
+    "a gate step injected above the generated one was accepted"
+
+  brief=$(scaffold_gate_brief delivery-once-appended-contract)
+  printf 'Delivery contract: gate=%s\n' "$rogue" >> "$brief"
+  expect_gate_refusal delivery-once-appended-contract "exactly once in each of the two required places" \
+    "a second contract gate line appended below the generated one was read past"
+
+  brief=$(scaffold_gate_brief delivery-once-edited-step)
+  # shellcheck disable=SC2016  # literal backticks are the brief's fixed step shape
+  sed "s|^Run the gate from THIS worktree, with your branch checked out: .*|Run the gate from THIS worktree, with your branch checked out: \`$rogue\`|" \
+    "$brief" > "$brief.edited"
+  mv "$brief.edited" "$brief"
+  expect_gate_refusal delivery-once-edited-step "tells the worker to run '$rogue'" \
+    "the generated gate step was hand-patched in place and accepted"
+
+  brief=$(scaffold_gate_brief delivery-once-edited-contract)
+  sed "s|^Delivery contract: gate=.*|Delivery contract: gate=$rogue|" "$brief" > "$brief.edited"
+  mv "$brief.edited" "$brief"
+  expect_gate_refusal delivery-once-edited-contract "records gate='$rogue'" \
+    "the generated contract gate line was hand-patched in place and accepted"
+  pass "fm-spawn: every occurrence of a gate-merge brief's landing command must be the registered gate"
 }
 
 # A scout's deliverable is a report, so it records no delivery posture at all;
@@ -430,6 +508,7 @@ test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_gate_merge_spawn_is_checked_against_the_registry
+test_gate_merge_brief_names_its_gate_exactly_once
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_project_mode_maps_the_conditional_policy
