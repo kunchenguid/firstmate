@@ -192,7 +192,35 @@ esac
 exit 1
 SH
   chmod +x "$fakebin/tmux"
+  make_fake_crew_state "$fakebin" >/dev/null
   printf '%s\n' "$dir"
+}
+
+# Install a whole-file guard over the shared crew_absorb_class classifier, so a
+# test that points FM_CREW_STATE_BIN at a reader that does not exist FAILS loudly
+# instead of absorbing the command-not-found. crew_absorb_class swallows that
+# error and returns "none", which is not "working", so an escalation assertion
+# downstream passes through the error rather than through the verdict the test
+# names - a control that cannot fail. The guard aborts the whole run rather than
+# calling fail, because the classifier is reached inside a command substitution
+# where an exit would only kill that subshell and leave the run green.
+# A test that deliberately exercises the unreadable-reader leg opts in with
+# FM_TEST_CREW_STATE_UNREADABLE=1.
+fm_guard_crew_state_reader() {
+  declare -f crew_absorb_class >/dev/null 2>&1 \
+    || fail "fm_guard_crew_state_reader: crew_absorb_class is not defined; source the classifier first"
+  eval "_fm_unguarded_crew_absorb_class() $(declare -f crew_absorb_class | tail -n +2)"
+  # Replaces the sourced classifier in place; every caller reaches it indirectly.
+  # shellcheck disable=SC2329
+  crew_absorb_class() {
+    if [ "${FM_TEST_CREW_STATE_UNREADABLE:-0}" != 1 ] && [ ! -x "${FM_CREW_STATE_BIN:-}" ]; then
+      printf 'not ok - crew_absorb_class reached with an unusable FM_CREW_STATE_BIN (%s): its verdict would be an error, not a verdict. Point it at a reader that exists (make_fake_crew_state), or set FM_TEST_CREW_STATE_UNREADABLE=1 to exercise the unreadable-reader leg on purpose.\n' \
+        "${FM_CREW_STATE_BIN:-<unset>}" >&2
+      kill -s TERM $$
+      exit 1
+    fi
+    _fm_unguarded_crew_absorb_class "$@"
+  }
 }
 
 make_bordered_case() {

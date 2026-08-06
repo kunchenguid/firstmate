@@ -20,6 +20,7 @@ if [ -z "${FM_TEST_DAEMON_SOURCED:-}" ]; then
   # shellcheck source=bin/fm-supervise-daemon.sh
   . "$DAEMON"
 fi
+fm_guard_crew_state_reader
 
 TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 FM_DAEMON_PRIMARY_HARNESS=claude
@@ -403,7 +404,7 @@ test_housekeeping_working_stale_escalates_once_refresh_stops() {
   age_existing_stale_marker "$marker" 500
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
-    FM_CREW_STATE_BIN="$dir/no-such-crew-state.sh" \
+    FM_CREW_STATE_BIN="$dir/no-such-crew-state.sh" FM_TEST_CREW_STATE_UNREADABLE=1 \
     housekeeping "$state"
   grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 \
     || fail "an unanswerable crew-state read stayed silent instead of escalating"
@@ -721,25 +722,29 @@ test_housekeeping_pause_marker_transitions_to_clear() {
 }
 
 test_housekeeping_persistent_stale_escalates() {
-  local dir state fakebin win pane key
+  local dir state fakebin win pane key calls
   dir=$(make_supercase stale-persistent)
   state="$dir/state"
   fakebin="$dir/fakebin"
   win="sess:fm-pers-w5"
   pane="$dir/pane.txt"
+  calls="$dir/crew-state-calls"
   printf 'working\n' > "$state/pers-w5.status"
   printf 'idle prompt $\n' > "$pane"
   key=$(printf '%s' "pers-w5" | tr ':/.' '___')
   echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
-  # The provably-working gate is stubbed EXPLICITLY to a non-working verdict.
-  # Without a stub this control still passed, but only because the unset library
-  # default made the reader unresolvable - an error, not a verdict. A control that
-  # can only pass proves nothing, so the premise is named here.
+  # The provably-working gate is stubbed to a non-working verdict, and the call
+  # log below proves the reader actually answered it. Asserting the escalation
+  # alone is not enough: an unresolvable reader also fails to equal "working", so
+  # this control would pass through an error rather than through the stopped
+  # verdict it names, which is exactly how it passed before.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
-    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE_LOG="$calls" \
     FM_FAKE_CREW_STATE='state: stopped · source: pane · agent exited' \
     housekeeping "$state"
+  grep -Fx "pers-w5" "$calls" >/dev/null 2>&1 \
+    || fail "the crew-state reader never answered, so the stopped verdict was never the reason for this escalation"
   [ -s "$state/.subsuper-escalations" ] || fail "persistent stale was not escalated"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "stale marker not cleared after escalation"
   pass "persistent stale escalates after threshold and clears its marker"
@@ -770,10 +775,11 @@ test_housekeeping_resumed_stale_cleared() {
 }
 
 test_housekeeping_herdr_persistent_stale_resolves_meta() {
-  local dir state fakebin key
+  local dir state fakebin key calls
   dir=$(make_supercase stale-herdr-persistent)
   state="$dir/state"
   fakebin="$dir/fakebin"
+  calls="$dir/crew-state-calls"
   fm_write_meta "$state/herdr-w7.meta" "window=default:w1:p2" "backend=herdr"
   printf 'working\n' > "$state/herdr-w7.status"
   key=$(printf '%s' "herdr-w7" | tr ':/.' '___')
@@ -792,10 +798,12 @@ test_housekeeping_herdr_persistent_stale_resolves_meta() {
     fm_backend_capture herdr default:w1:p2 40 >/dev/null
     [ "$(fm_backend_busy_state herdr default:w1:p2)" = idle ] || fail "herdr busy stub did not report idle"
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
-      FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE_LOG="$calls" \
       FM_FAKE_CREW_STATE='state: stopped · source: pane · agent exited' \
       housekeeping "$state"
   ) || fail "herdr persistent stale housekeeping failed"
+  grep -Fx "herdr-w7" "$calls" >/dev/null 2>&1 \
+    || fail "the crew-state reader never answered, so the stopped verdict was never the reason for this escalation"
   [ -s "$state/.subsuper-escalations" ] || fail "persistent herdr stale was not escalated"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "herdr stale marker not cleared after escalation"
   pass "persistent herdr stale resolves the target from metadata and escalates"
@@ -865,10 +873,11 @@ test_housekeeping_herdr_resumed_stale_cleared() {
 }
 
 test_housekeeping_orca_persistent_stale_resolves_terminal() {
-  local dir state fakebin key
+  local dir state fakebin key calls
   dir=$(make_supercase stale-orca-persistent)
   state="$dir/state"
   fakebin="$dir/fakebin"
+  calls="$dir/crew-state-calls"
   fm_write_meta "$state/orca-w8.meta" "window=fm-orca-w8" "terminal=term-orca-w8" "backend=orca"
   printf 'working\n' > "$state/orca-w8.status"
   key=$(printf '%s' "orca-w8" | tr ':/.' '___')
@@ -887,10 +896,12 @@ test_housekeeping_orca_persistent_stale_resolves_terminal() {
     fm_backend_capture orca term-orca-w8 40 >/dev/null
     [ "$(fm_backend_busy_state orca term-orca-w8)" = idle ] || fail "Orca busy stub did not report idle"
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
-      FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE_LOG="$calls" \
       FM_FAKE_CREW_STATE='state: stopped · source: pane · agent exited' \
       housekeeping "$state"
   ) || fail "Orca persistent stale housekeeping failed"
+  grep -Fx "orca-w8" "$calls" >/dev/null 2>&1 \
+    || fail "the crew-state reader never answered, so the stopped verdict was never the reason for this escalation"
   [ -s "$state/.subsuper-escalations" ] || fail "persistent Orca stale was not escalated"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "Orca stale marker not cleared after escalation"
   pass "persistent Orca stale resolves the terminal from metadata"
@@ -1317,10 +1328,11 @@ test_classify_stale_dedup_against_signal() {
 # aging. handle_wake must record the stale marker; housekeeping re-escalates
 # once at the configured bound.
 test_afk_nonterminal_working_merged_keeps_wedge_aging() {
-  local dir state key out win pane incident fakebin
+  local dir state key out win pane incident fakebin calls
   dir=$(make_supercase afk-working-merged-wedge)
   state="$dir/state"
   fakebin="$dir/fakebin"
+  calls="$dir/crew-state-calls"
   win="sess:fm-wishlist-w1"
   pane="$dir/pane.txt"
   incident='working: stage 2 setup complete on PR #74 exact source branch rebased onto merged #76; task dates preserved'
@@ -1349,9 +1361,11 @@ test_afk_nonterminal_working_merged_keeps_wedge_aging() {
   echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
-    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE_LOG="$calls" \
     FM_FAKE_CREW_STATE='state: stopped · source: pane · agent exited' \
     housekeeping "$state"
+  grep -Fx "wishlist-w1" "$calls" >/dev/null 2>&1 \
+    || fail "the crew-state reader never answered, so the stopped verdict was never the reason for this escalation"
   [ -s "$state/.subsuper-escalations" ] \
     || fail "housekeeping did not re-escalate aged nonterminal working: wedge"
   grep -q 'possible wedge' "$state/.subsuper-escalations" \

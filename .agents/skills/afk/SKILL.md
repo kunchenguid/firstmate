@@ -171,7 +171,8 @@ Classify each wake this way:
   Refreshing rather than dropping keeps this bounded: staying silent requires that working verdict to be re-earned every threshold, so a crew that freezes simply ages out and escalates, and detection after a freeze takes at most two thresholds rather than one.
   Only a positive working verdict refreshes it: a stopped, parked, failed, or unreadable crew still escalates on the same schedule.
   Because a refresh restarts the clock, the age in that escalation is time without progress evidence rather than time since the pane first went idle, which is what the line reports.
-  One housekeeping pass makes at most `FM_STALE_WORKING_GATE_READS` (default 3) of those state reads, since the pass runs inline in the daemon loop; a marker past that budget keeps its aged marker for the next pass, so the budget can delay a wedge escalation by a tick but never suppress one.
+  One housekeeping pass makes at most `FM_STALE_WORKING_GATE_READS` (default 3) of those state reads, since the pass runs inline in the daemon loop; a marker past that budget keeps its aged marker for the next pass, so the budget can delay a wedge escalation but never suppress one.
+  That delay is one pass per full budget of markers ahead of it: with `D` markers due at once and a budget of `B`, the last waits `ceil(D/B) - 1` passes of `FM_HOUSEKEEPING_TICK`, so ten simultaneously-due crews at the defaults put the last escalation about 45s late rather than 15s.
   Healthy crewmates are autonomous and do not wait on firstmate mid-task.
 - `heartbeat` -> self-handle. The daemon runs its own cheap bash fleet scan
   every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for a

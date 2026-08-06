@@ -64,7 +64,8 @@
 #     That gate is a bounded-cost read, so a single pass makes at most
 #     STALE_WORKING_GATE_READS of them; markers past the budget keep their aged
 #     marker and are reconsidered next pass, so the budget delays an escalation
-#     by a tick at worst and can never drop one.
+#     and can never drop one. With D markers due at once and a budget of B, the
+#     last of them waits ceil(D/B) - 1 passes, i.e. that many HOUSEKEEPING_TICKs.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
@@ -1091,10 +1092,14 @@ housekeeping() {  # <state>
          # marker is left aged and untouched - it is neither escalated nor
          # refreshed - so the next pass reconsiders it with a fresh budget.
          # That is the direction this fails: a deferred read delays an escalation
-         # by a housekeeping tick, and can never suppress one. Deferral cannot
-         # starve a marker either, because every marker that DID spend budget
-         # this pass leaves the due set - refreshed for a threshold, or escalated
-         # and removed - so the budget falls to the deferred ones next pass.
+         # and can never suppress one. The delay is one pass per full budget of
+         # markers ahead of it, not a single pass: with D markers due at once and
+         # a budget of B, the last waits ceil(D/B) - 1 passes, so at the defaults
+         # (B = 3, HOUSEKEEPING_TICK = 15s) ten due crews put the last escalation
+         # about 45s late. Deferral cannot starve a marker either, because every
+         # marker that DID spend budget this pass leaves the due set - refreshed
+         # for a threshold, or escalated and removed - so the budget drains to the
+         # deferred ones on the following passes.
          if [ "$working_reads" -ge "$working_reads_max" ]; then
            log "stale gate deferred to next pass (read budget ${working_reads_max} spent, marker kept aged): $win"
            continue
