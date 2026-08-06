@@ -34,6 +34,10 @@ case "$joined" in
   *Get-NetTCPConnection*)
     [ "${FM_WINDOWS_INSPECTION_FAIL:-0}" != 1 ] || exit 1
     [ ! -f "${FM_KILLED_MARKER:?}" ] || [ "${FM_POST_STOP_WINDOWS_FAIL:-0}" != 1 ] || exit 1
+    if [ -n "${FM_MUTATE_WSL_BRANCH_ON_INSPECT:-}" ] && [ ! -f "${FM_BRANCH_MUTATION_MARKER:?}" ]; then
+      git -C "$FM_MUTATE_WSL_BRANCH_ON_INSPECT" switch -q -c feature
+      : > "$FM_BRANCH_MUTATION_MARKER"
+    fi
     if [ -f "${FM_ROUTE_DONE_MARKER:?}" ] && [ -n "${FM_WIN_POST_ROUTE_JSON:-}" ]; then
       cat "$FM_WIN_POST_ROUTE_JSON"
       exit 0
@@ -79,6 +83,10 @@ esac
 if [ "$show" -eq 1 ]; then
   printf 'LISTEN 0 4096 0.0.0.0:%s 0.0.0.0:* users:(("node",pid=%s,fd=20))\n' \
     "${FM_TEST_PORT:?}" "${FM_WSL_PID:?}"
+  if [ -n "${FM_WSL_SECOND_PID:-}" ]; then
+    printf 'LISTEN 0 4096 [::]:%s [::]:* users:(("node",pid=%s,fd=21))\n' \
+      "${FM_TEST_PORT:?}" "$FM_WSL_SECOND_PID"
+  fi
 fi
 SH
 
@@ -180,6 +188,10 @@ run_case() {
     FM_LOCALHOST_START_TIMEOUT=1 \
     FM_TEST_PORT=43123 \
     FM_WSL_PID=9200 \
+    FM_WSL_SECOND_PID="${FM_WSL_SECOND_PID:-}" \
+    FM_LOCALHOST_TEST_LOCK_ATTEMPTS="${FM_LOCALHOST_TEST_LOCK_ATTEMPTS:-50}" \
+    FM_MUTATE_WSL_BRANCH_ON_INSPECT="${FM_MUTATE_WSL_BRANCH_ON_INSPECT:-}" \
+    FM_BRANCH_MUTATION_MARKER="$dir/branch-mutated" \
     FM_INSPECT_COUNT="$dir/inspect-count" \
     FM_WIN_INITIAL_JSON="$dir/win-initial.json" \
     FM_WIN_RELAY_JSON="$dir/win-relay.json" \
@@ -271,7 +283,15 @@ test_relay_identity_requires_canonical_executable() {
   fi
   assert_grep 'reason=windows-owner-is-not-wslrelay' "$out" "missing relay executable identity did not refuse"
   [ ! -s "$dir/route.log" ] || fail "missing relay executable identity reached route verification"
-  pass "relay verification requires complete canonical executable identity"
+
+  write_listener_json "$dir/win-relay.json" 43123 0.0.0.0 5100 wslrelay.exe \
+    'C:\Users\x\wslrelay.exe' ''
+  if FM_WSL_MODE=always FM_WIN_ALWAYS_RELAY=1 run_case "$dir" verify "$out"; then
+    fail "relay outside the trusted Windows system path passed verification"
+  fi
+  assert_grep 'reason=windows-owner-is-not-wslrelay' "$out" "untrusted relay path did not refuse"
+  [ ! -s "$dir/route.log" ] || fail "untrusted relay path reached route verification"
+  pass "relay verification requires the trusted canonical Windows system identity"
 }
 
 test_same_owner_multiple_bindings_verify() {
@@ -310,6 +330,77 @@ test_active_task_refuses_without_termination() {
   assert_grep 'refuse:active-firstmate-task-associated' "$out" "active task refusal was not reported"
   [ ! -s "$dir/stop.log" ] || fail "active task refusal still called termination"
   pass "active Firstmate task ownership refuses recovery without termination"
+}
+
+test_active_wsl_task_refuses_recovery_and_verification() {
+  local dir out
+  dir=$(make_case active-wsl-task)
+  out="$dir/out"
+  printf 'window=fm-live\nworktree=%s\nproject=%s\n' \
+    "$dir/expected" "$dir/expected" > "$dir/state/live.meta"
+  if FM_WSL_MODE=always run_case "$dir" recover "$out"; then
+    fail "active WSL task ownership allowed Windows termination"
+  fi
+  assert_grep 'refuse:active-firstmate-task-associated' "$out" "active WSL task did not refuse recovery"
+  [ ! -s "$dir/stop.log" ] || fail "active WSL task refusal still called termination"
+  if FM_WSL_MODE=always FM_WIN_ALWAYS_RELAY=1 run_case "$dir" verify "$out"; then
+    fail "active WSL task ownership passed verification"
+  fi
+  assert_grep 'reason=active-firstmate-task-associated' "$out" "active WSL task did not refuse verification"
+  [ ! -s "$dir/route.log" ] || fail "active WSL task reached route verification"
+  pass "active WSL task ownership refuses recovery and verification"
+}
+
+test_multiple_wsl_owners_refuse_before_termination() {
+  local dir out
+  dir=$(make_case multiple-wsl-owners)
+  out="$dir/out"
+  mkdir -p "$dir/proc/9300"
+  printf 'node\n' > "$dir/proc/9300/comm"
+  printf 'node\0%s\0dev\0--port\0%s\0' \
+    "$dir/expected/node_modules/astro/astro.js" 43123 > "$dir/proc/9300/cmdline"
+  ln -s "$dir/expected" "$dir/proc/9300/cwd"
+  if FM_WSL_MODE=always FM_WSL_SECOND_PID=9300 run_case "$dir" recover "$out"; then
+    fail "multiple WSL owners allowed Windows termination"
+  fi
+  assert_grep 'refuse:ambiguous-wsl-ownership' "$out" "multiple WSL owners did not refuse recovery"
+  [ ! -s "$dir/stop.log" ] || fail "ambiguous WSL ownership still called termination"
+  pass "multiple WSL owners refuse recovery before mutation"
+}
+
+test_wsl_listener_must_remain_on_default_branch() {
+  local dir out
+  dir=$(make_case wsl-feature-branch)
+  out="$dir/out"
+  if FM_WSL_MODE=always FM_WIN_ALWAYS_RELAY=1 FM_MUTATE_WSL_BRANCH_ON_INSPECT="$dir/expected" \
+    run_case "$dir" verify "$out"; then
+    fail "feature-branch WSL listener passed current-main verification"
+  fi
+  assert_grep 'reason=wsl-listener-identity-mismatch' "$out" "feature-branch WSL listener did not refuse"
+  [ ! -s "$dir/route.log" ] || fail "feature-branch WSL listener reached route verification"
+  pass "WSL listener verification requires the default branch"
+}
+
+test_task_state_lock_wait_is_bounded() {
+  local dir out holder
+  dir=$(make_case task-state-lock-timeout)
+  out="$dir/out"
+  mkfifo "$dir/lock-input"
+  bash "$ROOT/bin/fm-task-state-lock.sh" "$dir/state" 50 < "$dir/lock-input" > "$dir/lock-output" &
+  holder=$!
+  exec 9>"$dir/lock-input"
+  while ! grep -qx locked "$dir/lock-output" 2>/dev/null; do
+    kill -0 "$holder" 2>/dev/null || fail "task-state lock holder exited before acquiring the lock"
+    sleep 0.05
+  done
+  if FM_WSL_MODE=none FM_LOCALHOST_TEST_LOCK_ATTEMPTS=2 run_case "$dir" recover "$out"; then
+    fail "contended task-state lock was accepted"
+  fi
+  assert_grep 'refuse:firstmate-task-state-boundary-timeout' "$out" "lock timeout did not produce a safe refusal"
+  [ ! -s "$dir/stop.log" ] || fail "lock timeout still called termination"
+  exec 9>&-
+  wait "$holder" || fail "task-state lock holder did not release cleanly"
+  pass "task-state publication lock contention refuses within a fixed bound"
 }
 
 test_pid_or_command_change_refuses_on_immediate_reresolution() {
@@ -550,6 +641,10 @@ test_relay_identity_requires_canonical_executable
 test_same_owner_multiple_bindings_verify
 test_same_owner_multiple_bindings_recover
 test_active_task_refuses_without_termination
+test_active_wsl_task_refuses_recovery_and_verification
+test_multiple_wsl_owners_refuse_before_termination
+test_wsl_listener_must_remain_on_default_branch
+test_task_state_lock_wait_is_bounded
 test_pid_or_command_change_refuses_on_immediate_reresolution
 test_worker_with_astro_words_refuses
 test_unknown_and_unrelated_windows_processes_refuse

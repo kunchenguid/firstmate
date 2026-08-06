@@ -691,10 +691,14 @@ Observed output:
 ok - localhost inspect parses listeners, converts Windows/WSL paths, classifies Git source, and redacts commands
 ok - stale native Windows Astro shadow recovers by exact PID to wslrelay plus clean WSL and matching routes
 ok - healthy wslrelay plus clean WSL server passes with matching browser-like route fingerprints
-ok - relay verification requires complete canonical executable identity
+ok - relay verification requires the trusted canonical Windows system identity
 ok - same-owner multiple listener bindings remain a verified relay pair
 ok - same-owner multiple stale Windows bindings recover by one exact PID
 ok - active Firstmate task ownership refuses recovery without termination
+ok - active WSL task ownership refuses recovery and verification
+ok - multiple WSL owners refuse recovery before mutation
+ok - WSL listener verification requires the default branch
+ok - task-state publication lock contention refuses within a fixed bound
 ok - PID or command change between observations refuses exact-PID recovery
 ok - node worker commands containing Astro words refuse exact-PID recovery
 ok - unknown commands and unrelated Windows repositories refuse without termination
@@ -711,5 +715,5 @@ ok - post-route listener-pair changes fail verification
 ok - dirty expected checkout refuses restart after exact-PID termination
 ```
 
-The suite covers Windows listener JSON parsing, Windows drive and WSL UNC conversion, WSL-to-Windows conversion, exact Astro script/dev classification, Git source classification, command redaction, exact PID and full mutation-boundary re-resolution, unavailable Windows, WSL, and Firstmate task-state inspection, route-proof ordering, unrelated, unknown, or production-like processes, active task association and the shared task-state publication boundary, canonical relay identity, same-owner multiple bindings, the never-terminate relay boundary, the healthy relay pair, the stale native Astro recovery path, launcher shell validation and cleanup, post-route listener-pair changes, mismatched post-recovery route fingerprints, and expected-checkout revalidation before restart.
+The suite covers Windows listener JSON parsing, Windows drive and WSL UNC conversion, WSL-to-Windows conversion, exact Astro script/dev classification, Git source classification, command redaction, exact PID and full mutation-boundary re-resolution, unavailable Windows, WSL, and Firstmate task-state inspection, route-proof ordering, unrelated, unknown, or production-like processes, task associations on both kernels, bounded shared task-state publication locking, trusted Windows system relay identity, same-owner multiple bindings, distinct WSL-owner ambiguity, WSL default-branch identity, the never-terminate relay boundary, the healthy relay pair, the stale native Astro recovery path, launcher shell validation and cleanup, post-route listener-pair changes, mismatched post-recovery route fingerprints, and expected-checkout revalidation before restart.
 Host-specific acceptance still requires `verify` against the actual project/port/expected-SHA tuple; private evidence remains under the active Firstmate home's gitignored `state/` tree rather than this maintained record.

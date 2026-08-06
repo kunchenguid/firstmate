@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import signal
 import shlex
 import shutil
@@ -159,9 +160,15 @@ class TaskStateBoundary:
         if not self.state.is_dir():
             raise SafeRefusal("firstmate-task-state-inspection-unavailable")
         helper = Path(__file__).resolve().with_name("fm-task-state-lock.sh")
+        attempts = 50
+        if os.environ.get("FM_LOCALHOST_TESTING") == "1":
+            try:
+                attempts = max(1, min(50, int(os.environ.get("FM_LOCALHOST_TEST_LOCK_ATTEMPTS", "50"))))
+            except ValueError:
+                attempts = 50
         try:
             self.process = subprocess.Popen(
-                ["bash", str(helper), str(self.state)],
+                ["bash", str(helper), str(self.state), str(attempts)],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
@@ -169,13 +176,17 @@ class TaskStateBoundary:
                 encoding="utf-8",
                 errors="replace",
             )
-            ready = self.process.stdout.readline().strip() if self.process.stdout else ""
+            if self.process.stdout is None:
+                raise OSError("task-state boundary stdout is unavailable")
+            readable, _, _ = select.select([self.process.stdout], [], [], attempts * 0.1 + 1)
+            ready = self.process.stdout.readline().strip() if readable else ""
         except OSError as exc:
             self.close()
             raise SafeRefusal("Firstmate task-state boundary unavailable") from exc
         if ready != "locked":
             self.close()
-            raise SafeRefusal("Firstmate task-state boundary unavailable")
+            reason = "firstmate-task-state-boundary-timeout" if ready in {"", "timeout"} else "firstmate-task-state-boundary-unavailable"
+            raise SafeRefusal(reason)
         return self
 
     def close(self) -> None:
@@ -693,9 +704,22 @@ def consistent_listener_owner(listeners: list[Listener]) -> list[Listener] | Non
 def canonical_wslrelay_identity(process: str, executable: str) -> bool:
     process_name = Path(process).name.casefold()
     normalized = executable.strip().replace("/", "\\")
-    return process_name == "wslrelay.exe" and bool(
-        re.fullmatch(r"[A-Za-z]:\\(?:[^\\/:*?\"<>|\r\n]+\\)+wslrelay\.exe", normalized, re.IGNORECASE)
+    return process_name == "wslrelay.exe" and normalized.casefold() == r"c:\windows\system32\wslrelay.exe"
+
+
+def expected_wsl_listener_identity(listener: Listener, expected: GitInfo, expected_sha: str) -> bool:
+    return (
+        listener.classification == "wsl-node-astro-dev"
+        and listener.git.checkout == expected.checkout
+        and listener.git.branch == expected.default_branch
+        and listener.git.sha == expected_sha
+        and listener.git.dirty == "clean"
+        and listener.git.source == expected.source
     )
+
+
+def associated_tasks(*listener_groups: list[Listener]) -> list[str]:
+    return sorted({task for listeners in listener_groups for listener in listeners for task in listener.tasks})
 
 
 def recovery_verdict(inspection: Inspection, expected: GitInfo, expected_sha: str) -> str:
@@ -725,17 +749,13 @@ def recovery_verdict(inspection: Inspection, expected: GitInfo, expected_sha: st
         return "refuse:windows-process-is-unrelated"
     if "unknown" in states or "canonical" in states:
         return "refuse:windows-source-is-not-proven-stale"
-    tasks = sorted({task for listener in inspection.windows for task in listener.tasks})
-    if tasks:
+    if associated_tasks(inspection.windows, inspection.wsl):
         return "refuse:active-firstmate-task-associated"
-    for listener in inspection.wsl:
-        if (
-            listener.classification != "wsl-node-astro-dev"
-            or listener.git.checkout != expected.checkout
-            or listener.git.sha != expected_sha
-            or listener.git.dirty != "clean"
-            or listener.git.source != expected.source
-        ):
+    wsl = consistent_listener_owner(inspection.wsl) if inspection.wsl else []
+    if inspection.wsl and wsl is None:
+        return "refuse:ambiguous-wsl-ownership"
+    for listener in wsl or []:
+        if not expected_wsl_listener_identity(listener, expected, expected_sha):
             return "refuse:wsl-port-owned-by-unexpected-process"
     return "eligible"
 
@@ -960,6 +980,8 @@ def verified_pair(inspection: Inspection, expected: GitInfo, expected_sha: str) 
         return False, "windows-inspection-unavailable"
     if inspection.wsl_error:
         return False, "wsl-inspection-unavailable"
+    if associated_tasks(inspection.windows, inspection.wsl):
+        return False, "active-firstmate-task-associated"
     windows = consistent_listener_owner(inspection.windows)
     if windows is None or any(not canonical_wslrelay_identity(item.process, item.executable_raw) for item in windows):
         return False, "windows-owner-is-not-wslrelay"
@@ -970,14 +992,7 @@ def verified_pair(inspection: Inspection, expected: GitInfo, expected_sha: str) 
         return False, "wsl-listener-identity-mismatch"
     if not wsl:
         return False, "expected-wsl-listener-missing"
-    item = wsl[0]
-    if (
-        item.classification != "wsl-node-astro-dev"
-        or item.git.checkout != expected.checkout
-        or item.git.sha != expected_sha
-        or item.git.dirty != "clean"
-        or item.git.source != expected.source
-    ):
+    if any(not expected_wsl_listener_identity(item, expected, expected_sha) for item in wsl):
         return False, "wsl-listener-identity-mismatch"
     return True, "pair-proven"
 
@@ -1202,18 +1217,21 @@ def parser() -> argparse.ArgumentParser:
   node_modules/astro/astro.js or astro.mjs and is followed immediately by `dev`;
   that checkout is dirty,
   divergent, or otherwise noncanonical; no task record names that checkout or
-  PID; WSL has no unrelated port owner; and the requested replacement is clean,
-  on the repository default branch, at expected-sha. Unknown commands, changed
-  PIDs or commands, multiple Windows owners, unrelated sources, task records,
-  missing identity, Windows inspection failure, canonical Windows source,
-  production-like commands, and every wslrelay.exe owner refuse recovery.
+  PID for either kernel; every existing WSL binding has one consistent task-free
+  owner at the requested checkout, repository default branch, source, and SHA;
+  and the requested replacement is clean, on that branch, at expected-sha.
+  Unknown commands, changed PIDs or commands, distinct Windows or WSL owners,
+  unrelated sources, task records, missing identity, Windows inspection failure,
+  canonical Windows source, production-like commands, and every wslrelay.exe
+  owner refuse recovery.
   Recovery never kills by process name or port and never targets wslrelay.exe.
 
   Immediately before mutation, recover re-resolves listener, PID, command,
   checkout, Git, and task evidence. The termination boundary repeats that
-  complete proof after the evidence is fsynced while holding the shared
-  Firstmate task-state publication boundary; task creation and metadata
-  publication use that same boundary. It writes a mode-0600 record beneath
+  complete proof after the evidence is fsynced while holding the shared,
+  bounded-wait Firstmate task-state publication boundary; task creation and
+  metadata publication use that same boundary. Lock contention refuses without
+  mutation. It writes a mode-0600 record beneath
   $FM_HOME/state/localhost-evidence before invoking fixed PowerShell that again
   requires the exact PID, port, node.exe identity, unchanged command hash, and
   exact Astro script path followed by `dev`. After the exact PID exits, it
@@ -1225,8 +1243,9 @@ def parser() -> argparse.ArgumentParser:
   verify sends the same bounded browser-like request to http://localhost:<port>/
   from WSL and native Windows, compares status/body-length/SHA-256 fingerprints,
   then repeats the listener-pair inspection. It passes only when Windows reports
-  wslrelay.exe, WSL reports the clean expected Astro server, and both route
-  fingerprints match the post-route pair. A nonzero exit means
+  wslrelay.exe at C:\\Windows\\System32\\wslrelay.exe, WSL reports one consistent,
+  task-free clean expected Astro owner on the repository default branch, and both
+  route fingerprints match the post-route pair. A nonzero exit means
   inspection, recovery, or verification did not prove the requested safe state.
 """
     result = argparse.ArgumentParser(
