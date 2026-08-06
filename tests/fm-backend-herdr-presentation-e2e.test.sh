@@ -400,12 +400,17 @@ teardown_task() {  # <id> <home>
     "$ROOT/bin/fm-teardown.sh" "$id" --force
 }
 
+# Masks the two value classes that are unique per spawn by construction and so
+# say nothing about presentation: the Herdr container ids, and the opaque
+# model-run telemetry identifiers bin/fm-model-telemetry.sh mints per attempt.
 normalize_meta() {  # <meta>
   sed -E \
     -e 's|^window=.*$|window=<herdr-container-id>|' \
     -e 's|^herdr_workspace_id=.*$|herdr_workspace_id=<herdr-container-id>|' \
     -e 's|^herdr_tab_id=.*$|herdr_tab_id=<herdr-container-id>|' \
     -e 's|^herdr_pane_id=.*$|herdr_pane_id=<herdr-container-id>|' \
+    -e 's|^telemetry_attempt=.*$|telemetry_attempt=<per-attempt-id>|' \
+    -e 's|^telemetry_task_root=.*$|telemetry_task_root=<per-attempt-id>|' \
     "$1"
 }
 
@@ -692,7 +697,7 @@ PROJECTION_ORDER_START=$(log_line_count)
 normalize_meta "$OFF_META" > "$TMP_ROOT/off.meta.normalized"
 normalize_meta "$ON_META" > "$TMP_ROOT/on.meta.normalized"
 cmp -s "$TMP_ROOT/off.meta.normalized" "$TMP_ROOT/on.meta.normalized" \
-  || fail "metadata changed beyond Herdr container IDs between opted-out and projected paths"
+  || fail "metadata changed beyond Herdr container IDs and per-attempt telemetry IDs between opted-out and projected paths"
 
 # Two real concurrent primary spawns share the bounded presentation-order lock.
 # Their final relative order must match Herdr's actual serialized create order,
@@ -820,7 +825,7 @@ teardown_task shape "$HOME_DIR" > "$TMP_ROOT/on-teardown.out" 2> "$TMP_ROOT/on-t
   || fail "projected teardown failed: $(cat "$TMP_ROOT/on-teardown.err")"
 assert_focus_is "$CAPTAIN_FOCUS" "projected teardown"
 assert_cleanup_focus_preserved "$SHAPE_CLEANUP_AUDIT_START" "$PROJECTED_PANE" "$CAPTAIN_FOCUS"
-pass "real Herdr lab: Treehouse commands and metadata shape are byte-identical except for Herdr container IDs"
+pass "real Herdr lab: Treehouse commands and metadata shape are byte-identical except for Herdr container IDs and per-attempt telemetry IDs"
 if lab workspace get "$PROJECTED_WSID" >/dev/null 2>&1; then
   fail "closing the exact projected task pane did not remove its last-tab workspace"
 fi

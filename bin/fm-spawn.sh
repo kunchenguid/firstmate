@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -22,6 +22,9 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   --telemetry-task-root links a retry or escalation to an existing opaque task
+#   root, and --telemetry-parent names that root's immediately prior attempt.
+#   They are per-attempt values, so a batch dispatch refuses them.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -137,6 +140,13 @@
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
 # success line and state/<id>.meta omit them.
+# Before publishing the meta, every spawn records one privacy-safe model-attempt
+# intake in the private ledger owned by bin/fm-model-telemetry.sh, then writes that
+# attempt's opaque telemetry_attempt= and telemetry_task_root= identifiers into the
+# meta; the meta carries those identifiers only, never ledger payload content, and
+# teardown seals the attempt against them. A refused intake exits without submitting
+# the launch command, so no model attempt runs unrecorded; that owner's header owns
+# the refusal reasons and their repair route.
 # When the home session's frozen trace-context decision is enabled (see
 # docs/configuration.md and bin/fm-trace-context-lib.sh), the meta also records
 # one W3C traceparent= carrier, the same value injected into the pane as
@@ -225,6 +235,8 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+TELEMETRY_TASK_ROOT=
+TELEMETRY_PARENT=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -247,6 +259,8 @@ for a in "$@"; do
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
+      telemetry-task-root) TELEMETRY_TASK_ROOT=$a ;;
+      telemetry-parent) TELEMETRY_PARENT=$a ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -269,6 +283,10 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --telemetry-task-root) want_value=telemetry-task-root ;;
+    --telemetry-task-root=*) TELEMETRY_TASK_ROOT=${a#--telemetry-task-root=} ;;
+    --telemetry-parent) want_value=telemetry-parent ;;
+    --telemetry-parent=*) TELEMETRY_PARENT=${a#--telemetry-parent=} ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -280,6 +298,9 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+[ -z "$TELEMETRY_TASK_ROOT" ] || printf '%s' "$TELEMETRY_TASK_ROOT" | grep -Eq '^mrt_[0-9a-f-]{36}$' || { echo "error: --telemetry-task-root requires an opaque mrt UUID" >&2; exit 1; }
+[ -z "$TELEMETRY_PARENT" ] || printf '%s' "$TELEMETRY_PARENT" | grep -Eq '^mra_[0-9a-f-]{36}$' || { echo "error: --telemetry-parent requires an opaque mra UUID" >&2; exit 1; }
+[ -z "$TELEMETRY_PARENT" ] || [ -n "$TELEMETRY_TASK_ROOT" ] || { echo "error: --telemetry-parent requires --telemetry-task-root" >&2; exit 1; }
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -752,6 +773,10 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   # spanning several modes is two invocations rather than a silent mixed dispatch.
   [ "$MODE_SET" -eq 0 ] || shared_args+=(--mode "$MODE")
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
+  if [ -n "$TELEMETRY_TASK_ROOT" ] || [ -n "$TELEMETRY_PARENT" ]; then
+    echo "error: linked telemetry identifiers are per-attempt and are not supported by batch dispatch" >&2
+    exit 1
+  fi
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -2032,6 +2057,26 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+TELEMETRY_MODEL=${MODEL:-}
+TELEMETRY_EFFORT=${EFFORT:-default}
+TELEMETRY_PROJECT_REF=$(printf '%s' "$PROJ_ABS" | node -e 'const c=require("crypto");let s="";process.stdin.setEncoding("utf8");process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>process.stdout.write("project_"+c.createHash("sha256").update(s).digest("hex").slice(0,32)+"\n"));')
+TELEMETRY_CONFIG_SHA=
+if [ -f "$CONFIG/crew-dispatch.json" ] && [ ! -L "$CONFIG/crew-dispatch.json" ]; then
+  TELEMETRY_CONFIG_SHA=$(node -e 'const fs=require("fs"),c=require("crypto");process.stdout.write(c.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex")+"\n")' "$CONFIG/crew-dispatch.json")
+fi
+TELEMETRY_INTAKE=$(jq -cn \
+  --arg root "$TELEMETRY_TASK_ROOT" --arg parent "$TELEMETRY_PARENT" \
+  --arg project "$TELEMETRY_PROJECT_REF" --arg harness "$HARNESS" \
+  --arg model "$TELEMETRY_MODEL" --arg effort "$TELEMETRY_EFFORT" \
+  --arg config "$TELEMETRY_CONFIG_SHA" --arg started "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+  '{attemptClass:"real",source:"firstmate",taskRootId:(if $root=="" then null else $root end),parentAttemptId:(if $parent=="" then null else $parent end),projectRef:$project,taskClass:"unresolved",tuple:{harness:$harness,provider:null,model:(if $model=="" then null else $model end),effort:$effort,modelVersion:null,cliVersion:null},selection:{matchedRule:null,configSha256:(if $config=="" then null else $config end),fitReasons:[],candidateAssessments:[{tuple:{harness:$harness,provider:null,model:(if $model=="" then null else $model end),effort:$effort,modelVersion:null,cliVersion:null},eligibility:"selected",reasons:[]}],quota:{decision:"unknown",headroom:"unknown",runway:"unknown",observedAt:null}},neutralExecution:{correlation:null,capabilityProfile:"not-applicable",owner:"not-applicable",phase:null,behavioralResult:"not-applicable"},evaluation:{kind:"none",fixtureId:null,fixtureManifestSha256:null,oracleId:null,oracleSha256:null,sourceCommit:null},startedAt:$started,privacy:{classification:"operational-minimized",contentPolicy:"ids-codes-hashes-bounded-evidence-only"}}')
+if ! TELEMETRY_RESULT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$FM_ROOT/bin/fm-model-telemetry.sh" intake --state "$STATE" --task "$ID" --payload "$TELEMETRY_INTAKE"); then
+  echo "error: model telemetry intake refused; no model launch was submitted" >&2
+  exit 1
+fi
+TELEMETRY_ATTEMPT=$(printf '%s' "$TELEMETRY_RESULT" | jq -er '.attemptId | select(test("^mra_[0-9a-f-]{36}$"))') || { echo "error: invalid model telemetry intake receipt" >&2; exit 1; }
+TELEMETRY_TASK_ROOT=$(printf '%s' "$TELEMETRY_RESULT" | jq -er '.taskRootId | select(test("^mrt_[0-9a-f-]{36}$"))') || { echo "error: invalid model telemetry task root" >&2; exit 1; }
 {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
@@ -2044,6 +2089,8 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  echo "telemetry_attempt=$TELEMETRY_ATTEMPT"
+  echo "telemetry_task_root=$TELEMETRY_TASK_ROOT"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   # Default-off writes no traceparent= line (meta stays byte-identical).
   # backend= is written only for a non-default (non-tmux) backend, so the

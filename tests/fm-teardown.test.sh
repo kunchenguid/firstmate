@@ -56,6 +56,7 @@ set -u
 fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
+TELEMETRY="$ROOT/bin/fm-model-telemetry.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 REAL_GIT_FOR_TEST=$(command -v git)
@@ -2475,6 +2476,64 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+seed_teardown_telemetry() {
+  local case_dir=$1 result
+  mkdir -p "$case_dir/data"
+  result=$(FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+    "$TELEMETRY" intake --state "$case_dir/state" --task task-x1 --payload \
+    '{"attemptClass":"real","source":"firstmate","taskRootId":null,"parentAttemptId":null,"projectRef":"project_0123456789abcdef","taskClass":"unresolved","tuple":{"harness":"codex","provider":null,"model":null,"effort":"default","modelVersion":null,"cliVersion":null},"selection":{"matchedRule":null,"configSha256":null,"fitReasons":[],"candidateAssessments":[],"quota":{"decision":"unknown","headroom":"unknown","runway":"unknown","observedAt":null}},"neutralExecution":{"correlation":null,"capabilityProfile":"not-applicable","owner":"not-applicable","phase":null,"behavioralResult":"not-applicable"},"evaluation":{"kind":"none","fixtureId":null,"fixtureManifestSha256":null,"oracleId":null,"oracleSha256":null,"sourceCommit":null},"startedAt":"2026-08-02T00:00:00Z","privacy":{"classification":"operational-minimized","contentPolicy":"ids-codes-hashes-bounded-evidence-only"}}') || return 1
+  printf 'telemetry_attempt=%s\n' "$(printf '%s' "$result" | jq -r .attemptId)" >> "$case_dir/state/task-x1.meta"
+  printf 'telemetry_task_root=%s\n' "$(printf '%s' "$result" | jq -r .taskRootId)" >> "$case_dir/state/task-x1.meta"
+}
+
+test_teardown_seals_explicit_terminal_and_missing_as_incomplete() {
+  local case_dir terminal ledger rc
+  terminal='{"classification":"accepted","refusalQuality":"not-applicable","endedAt":"2026-08-02T00:01:00Z","wallSeconds":60,"firstPassAccepted":true,"correctionCount":0,"interventionCount":0,"evidence":{"tests":"pass","reviewer":"not-run","oracle":"not-run","refs":[{"kind":"test","id":"teardown-suite"}]},"outcomeLink":{"kind":"commit","id":"0123456789abcdef"},"usage":{"inputTokens":null,"outputTokens":null,"cost":null,"currency":null},"primaryFailureClass":"none","flags":{"tool":false,"transport":false,"environment":false,"externalWait":false,"scopeChange":false,"quota":false},"reclassification":{"fromTaskClass":null,"toTaskClass":null,"reasonCodes":["none"],"escalated":false}}'
+  case_dir=$(make_case telemetry-explicit-terminal)
+  write_meta "$case_dir" local-only ship
+  seed_teardown_telemetry "$case_dir" || fail "could not seed explicit teardown telemetry"
+  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" run_teardown "$case_dir" --force --terminal-payload "$terminal" >/dev/null || fail "teardown with explicit terminal failed"
+  ledger="$case_dir/data/routing-outcomes.jsonl"
+  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="accepted" and .terminal.evidence.refs[0].id=="teardown-suite")' "$ledger" >/dev/null || fail "teardown lost explicit terminal evidence"
+
+  case_dir=$(make_case telemetry-incomplete-terminal)
+  write_meta "$case_dir" local-only ship
+  seed_teardown_telemetry "$case_dir" || fail "could not seed incomplete teardown telemetry"
+  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" run_teardown "$case_dir" --force >/dev/null || fail "teardown incomplete seal failed"
+  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="incomplete" and .terminal.endedAt==null and .terminal.wallSeconds==null)' "$case_dir/data/routing-outcomes.jsonl" >/dev/null || fail "teardown inferred a terminal result instead of incomplete"
+
+  case_dir=$(make_case telemetry-safety-refusal)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unlanded telemetry boundary"
+  seed_teardown_telemetry "$case_dir" || fail "could not seed refused teardown telemetry"
+  rc=0
+  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" run_teardown "$case_dir" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "unlanded work unexpectedly passed teardown"
+  [ "$(jq -s 'map(select(.eventType=="attempt-terminal"))|length' "$case_dir/data/routing-outcomes.jsonl")" -eq 0 ] || fail "teardown sealed telemetry before its safety gates passed"
+  pass "teardown seals explicit terminal evidence and otherwise records null-timed incomplete before cleanup"
+}
+
+test_forced_teardown_still_requires_ledger_repair() {
+  local case_dir rc stderr
+  case_dir=$(make_case telemetry-ledger-damage)
+  write_meta "$case_dir" local-only ship
+  seed_teardown_telemetry "$case_dir" || fail "could not seed damaged-ledger teardown telemetry"
+  rm -f "$case_dir/data/routing-outcomes.jsonl"
+
+  set +e
+  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" run_teardown "$case_dir" --force >/dev/null 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  stderr=$(cat "$case_dir/stderr")
+  [ "$rc" -ne 0 ] || fail "--force bypassed the telemetry seal on a damaged ledger"
+  assert_contains "$stderr" "$case_dir/data/routing-outcomes.jsonl" "damaged-ledger refusal did not name the ledger to repair"
+  assert_contains "$stderr" "no flag bypasses this seal, --force included" "damaged-ledger refusal did not state that --force is no bypass"
+  assert_contains "$stderr" "re-run fm-teardown.sh task-x1" "damaged-ledger refusal did not name the retry after repair"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "damaged-ledger refusal discarded task state"
+  [ -d "$case_dir/wt" ] || fail "damaged-ledger refusal removed the worktree"
+  pass "a damaged ledger blocks even a forced teardown and prints its repair-then-re-run route"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -2493,6 +2552,8 @@ test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
+test_teardown_seals_explicit_terminal_and_missing_as_incomplete
+test_forced_teardown_still_requires_ledger_repair
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows

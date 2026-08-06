@@ -58,7 +58,9 @@ set -u
 # was launched from; every case states the marker it means to test.
 unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT
 
-BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+NODE_BIN_DIR=$(dirname "$(command -v node)") || fail "test needs node"
+JQ_BIN_DIR=$(dirname "$(command -v jq)") || fail "test needs jq"
+BASE_PATH=${FM_TEST_BASE_PATH:-$NODE_BIN_DIR:$JQ_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-harness)
 export FM_BACKEND=tmux

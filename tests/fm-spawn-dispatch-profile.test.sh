@@ -11,6 +11,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
+TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
 
 make_spawn_fakebin() {
@@ -42,7 +43,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse pi-signed
+  fm_fake_exit0 "$fakebin" treehouse pi-signed no-mistakes gh-axi gh tasks-axi
   printf '%s\n' "$fakebin"
 }
 
@@ -673,6 +674,90 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_telemetry_precedes_submission_and_metadata_is_opaque() {
+  local rec id out status meta ledger attempt terminal refusal_rec refusal_id
+  id=profile-telemetry-z20
+  rec=$(make_spawn_case profile-telemetry codex "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort high)
+  status=$?
+  expect_code 0 "$status" "telemetry-backed spawn should succeed"
+  meta="$HOME_DIR/state/$id.meta"
+  ledger="$HOME_DIR/data/routing-outcomes.jsonl"
+  grep -Eq '^telemetry_attempt=mra_' "$meta" || fail "spawn meta missing opaque telemetry attempt id"
+  grep -Eq '^telemetry_task_root=mrt_' "$meta" || fail "spawn meta missing opaque telemetry task root"
+  [ "$(grep -c '^telemetry_' "$meta")" -eq 2 ] || fail "spawn metadata contains telemetry fields beyond the two opaque ids"
+  jq -e 'select(.eventType=="attempt-intake" and .intake.tuple.model=="gpt-5" and .intake.tuple.effort=="high")' "$ledger" >/dev/null || fail "spawn did not durably record resolved tuple before submission"
+  ! grep -F -- "$PROJ_DIR" "$ledger" >/dev/null || fail "spawn telemetry exposed the project path instead of its opaque reference"
+
+  attempt=$(sed -n 's/^telemetry_attempt=//p' "$meta")
+  terminal='{"classification":"accepted","refusalQuality":"not-applicable","endedAt":"2026-08-02T00:01:00Z","wallSeconds":60,"firstPassAccepted":true,"correctionCount":0,"interventionCount":0,"evidence":{"tests":"pass","reviewer":"not-run","oracle":"not-run","refs":[{"kind":"test","id":"spawn-teardown-e2e"}]},"outcomeLink":{"kind":"commit","id":"0123456789abcdef"},"usage":{"inputTokens":null,"outputTokens":null,"cost":null,"currency":null},"primaryFailureClass":"none","flags":{"tool":false,"transport":false,"environment":false,"externalWait":false,"scopeChange":false,"quota":false},"reclassification":{"fromTaskClass":null,"toTaskClass":null,"reasonCodes":["none"],"escalated":false}}'
+  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" PATH="$FAKEBIN_DIR:$PATH" \
+    "$TEARDOWN" "$id" --force --terminal-payload "$terminal" >/dev/null 2>&1 \
+    || fail "telemetry-backed spawn could not complete through real teardown"
+  jq -es --arg attempt "$attempt" '
+    map(select(.attemptId==$attempt)) |
+    length==2 and .[0].eventType=="attempt-intake" and
+    .[1].eventType=="attempt-terminal" and
+    .[1].terminal.classification=="accepted" and
+    .[1].terminal.evidence.refs[0].id=="spawn-teardown-e2e"
+  ' "$ledger" >/dev/null || fail "spawn and teardown did not seal one end-to-end attempt"
+  assert_absent "$meta" "real teardown left the completed task metadata behind"
+
+  refusal_id=profile-telemetry-refusal-z21
+  refusal_rec=$(make_spawn_case profile-telemetry-refusal codex "$refusal_id")
+  read_case_record "$refusal_rec"
+  ln -s "$CASE_DIR/unsafe-ledger-target" "$HOME_DIR/data/routing-outcomes.jsonl"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$refusal_id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn proceeded after telemetry refusal"
+  assert_contains "$out" "model telemetry intake refused; no model launch was submitted" "spawn refusal did not name the telemetry boundary"
+  [ ! -s "$LAUNCH_LOG" ] || fail "telemetry refusal reached launch submission"
+  assert_absent "$HOME_DIR/state/$refusal_id.meta" "telemetry refusal published task metadata"
+  pass "spawn records only opaque telemetry ids and refuses telemetry failures before launch submission"
+}
+
+test_linked_telemetry_identifiers_chain_one_task_root() {
+  local rec first_id retry_id out status ledger attempt root
+  first_id=profile-telemetry-root-z22
+  retry_id=profile-telemetry-retry-z23
+  rec=$(make_spawn_case profile-telemetry-link codex "$first_id" "$retry_id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$first_id" "$PROJ_DIR" --model gpt-5 --effort medium)
+  status=$?
+  expect_code 0 "$status" "first linked-telemetry spawn should succeed"
+  attempt=$(sed -n 's/^telemetry_attempt=//p' "$HOME_DIR/state/$first_id.meta")
+  root=$(sed -n 's/^telemetry_task_root=//p' "$HOME_DIR/state/$first_id.meta")
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$retry_id" "$PROJ_DIR" \
+    --model gpt-5.6-sol --effort xhigh --telemetry-task-root "$root" --telemetry-parent "$attempt")
+  status=$?
+  expect_code 0 "$status" "linked retry spawn should succeed"
+  ledger="$HOME_DIR/data/routing-outcomes.jsonl"
+  [ "$(sed -n 's/^telemetry_task_root=//p' "$HOME_DIR/state/$retry_id.meta")" = "$root" ] || fail "linked retry left its task root"
+  jq -e --arg r "$root" --arg p "$attempt" 'select(.eventType=="attempt-intake" and .intake.taskRootId==$r and .intake.parentAttemptId==$p and .intake.tuple.model=="gpt-5.6-sol" and .intake.tuple.effort=="xhigh")' "$ledger" >/dev/null || fail "linked retry did not record its escalated tuple under the prior root and parent"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$retry_id" "$PROJ_DIR" --telemetry-task-root ../../etc/passwd)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a non-opaque telemetry task root"
+  assert_contains "$out" "--telemetry-task-root requires an opaque mrt UUID" "non-opaque root refusal did not name the identifier contract"
+  [ ! -s "$LAUNCH_LOG" ] || fail "non-opaque telemetry root reached launch submission"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$retry_id" "$PROJ_DIR" --telemetry-parent "$attempt")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a parent attempt without its task root"
+  assert_contains "$out" "--telemetry-parent requires --telemetry-task-root" "orphan parent refusal did not name the missing root"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$first_id=$PROJ_DIR" "$retry_id=$PROJ_DIR" --telemetry-task-root "$root")
+  status=$?
+  [ "$status" -ne 0 ] || fail "batch dispatch accepted per-attempt telemetry identifiers"
+  assert_contains "$out" "not supported by batch dispatch" "batch refusal did not name the per-attempt boundary"
+  [ ! -s "$LAUNCH_LOG" ] || fail "batch telemetry refusal reached launch submission"
+  pass "linked telemetry identifiers chain a retry under one task root and are refused when unsafe, orphaned, or batched"
+}
+
 test_no_profile_keeps_claude_profile_defaults
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
@@ -699,5 +784,7 @@ test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_telemetry_precedes_submission_and_metadata_is_opaque
+test_linked_telemetry_identifiers_chain_one_task_root
 
 echo "# all fm-spawn-dispatch-profile tests passed"

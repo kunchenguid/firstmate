@@ -230,6 +230,15 @@ The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, inv
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
 
+## Model-run telemetry records but never routes
+
+Every Firstmate-launched model attempt leaves one immutable intake row and at most one terminal row in the canonical private ledger `data/routing-outcomes.jsonl`.
+`bin/fm-model-telemetry.sh` is the single validator, writer, sealer, crash-recovery owner, and read-only sheet reader of that ledger; nothing else appends to it, repairs it, or reads it as an authority.
+The mechanism boundary is deliberately narrow: it hooks the resolved-profile spawn boundary in `bin/fm-spawn.sh` after the profile, backend, and worktree checks already passed, publishes only opaque attempt and task-root identifiers into the existing task metadata, and seals through `bin/fm-teardown.sh` after every existing safety, report, and public-followup gate but before any endpoint, worktree, or task state is deleted.
+Routing judgment, quota queries, model selection, scheduling, task-state ownership, runtime backend behavior, and harness behavior are untouched: the ledger records the axes and evidence a decision already produced and never becomes an input to the next one, so a selection candidate is still resolved exactly as the [dispatch profiles](#dispatch-profiles) section describes.
+Recording is fail-closed at both ends because a silently missing outcome is worse than a stopped lifecycle step: a refused intake stops before the launch command is submitted, and a refused seal preserves the endpoint, worktree, and task state instead of cleaning up, with no bypass flag, `--force` included.
+Absent terminal evidence is sealed as an explicit incomplete outcome rather than inferred from cleanup, and legacy rows written before this schema are preserved byte-for-byte and projected as opaque legacy records.
+
 ## Optional X mode
 
 X mode is opt-in presence for the shared `@myfirstmate` bot.

@@ -52,10 +52,16 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force]
+# Usage: fm-teardown.sh <task-id> [--force] [--terminal-payload <json>]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
+#   --terminal-payload passes one bounded explicit V1 terminal object to the
+#   model-telemetry owner. Without it, a recorded attempt is sealed incomplete.
+#   Sealing a recorded attempt is unconditional: no flag bypasses it, --force
+#   included, so a damaged or pruned ledger blocks cleanup until it is repaired.
+#   The refusal prints the ledger path, the failing line or attempt, and the
+#   repair-then-re-run route; bin/fm-model-telemetry.sh owns that contract.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -157,7 +163,21 @@ if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   exit 2
 fi
 ID=$1
-FORCE=${2:-}
+shift
+FORCE=
+TERMINAL_PAYLOAD=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --force) FORCE=--force ;;
+    --terminal-payload)
+      [ "$#" -ge 2 ] || { echo "error: --terminal-payload requires a value" >&2; exit 2; }
+      TERMINAL_PAYLOAD=$2
+      shift
+      ;;
+    *) echo "error: unknown teardown argument $1" >&2; exit 2 ;;
+  esac
+  shift
+done
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -2217,13 +2237,36 @@ if [ "$BACKEND" = herdr ]; then
   TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
 fi
+if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ] && [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
+  require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
+  ORCA_PATH_MATCH_VERIFIED=1
+fi
+
+# Model outcome is sealed only after every existing report, public-followup,
+# landed-work, and endpoint preflight gate passes, but before any endpoint,
+# worktree, or task state is deleted. Cleanup itself never supplies success.
+TELEMETRY_ATTEMPT=$(fm_meta_get "$META" telemetry_attempt)
+if [ -n "$TELEMETRY_ATTEMPT" ]; then
+  telemetry_args=(seal-or-incomplete --state "$STATE" --task "$ID" --attempt "$TELEMETRY_ATTEMPT")
+  [ -z "$TERMINAL_PAYLOAD" ] || telemetry_args+=(--terminal-payload "$TERMINAL_PAYLOAD")
+  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      "$FM_ROOT/bin/fm-model-telemetry.sh" "${telemetry_args[@]}" >/dev/null; then
+    echo "error: model telemetry terminal seal refused; teardown preserved the endpoint, worktree, and task state" >&2
+    [ -z "$TERMINAL_PAYLOAD" ] ||
+      echo "note: a --terminal-payload that contradicts the already recorded terminal is refused as such and needs no ledger repair; re-run fm-teardown.sh $ID without --terminal-payload to seal against the recorded outcome and finish cleanup" >&2
+    echo "recovery: no flag bypasses this seal, --force included. Repair the ledger, then re-run this teardown:" >&2
+    echo "  1. the refusal above names the ledger path and the failing line or attempt ($TELEMETRY_ATTEMPT)" >&2
+    echo "  2. repair $DATA/routing-outcomes.jsonl from a backup: restore the missing intake row or the malformed line, keep it a regular file with mode 600" >&2
+    echo "  3. confirm with 'FM_HOME=$FM_HOME FM_DATA_OVERRIDE=$DATA $FM_ROOT/bin/fm-model-telemetry.sh sheet --format json', then re-run fm-teardown.sh $ID" >&2
+    exit 1
+  fi
+elif [ -n "$TERMINAL_PAYLOAD" ]; then
+  echo "error: task $ID has no telemetry attempt for --terminal-payload" >&2
+  exit 1
+fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
-  if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
-    require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
-    ORCA_PATH_MATCH_VERIFIED=1
-  fi
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then

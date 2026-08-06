@@ -27,6 +27,8 @@ set -u
 
 SESSION_START="$ROOT/bin/fm-session-start.sh"
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+NODE_BIN=$(command -v node) || fail "test needs node"
+JQ_BIN=$(command -v jq) || fail "test needs jq"
 TMP_ROOT=$(fm_test_tmproot fm-session-start-tests)
 SESSION_START_SECOND_MATE_ID="fmtest-sm-${TMP_ROOT##*.}"
 SESSION_START_SECOND_MATE_TMP="/tmp/fm-$SESSION_START_SECOND_MATE_ID"
@@ -59,7 +61,14 @@ new_world() {
 # test deliberately breaks one. Mirrors fm-bootstrap.test.sh's fixture.
 make_fake_toolchain() {
   local fakebin=$1
-  fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi
+  fm_fake_exit0 "$fakebin" tmux chrome-devtools-axi
+  # The secondmate recovery cases drive the real fm-spawn.sh, which builds and
+  # validates its model-run telemetry intake with node and jq, so exit-0 stubs
+  # are not enough. Wrappers, not symlinks: a later fm_fake_exit0 for the same
+  # tool would write through a symlink into the real binary.
+  printf '#!/usr/bin/env bash\nexec '"'"'%s'"'"' "$@"\n' "$NODE_BIN" > "$fakebin/node"
+  printf '#!/usr/bin/env bash\nexec '"'"'%s'"'"' "$@"\n' "$JQ_BIN" > "$fakebin/jq"
+  chmod +x "$fakebin/node" "$fakebin/jq"
   fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.45
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash

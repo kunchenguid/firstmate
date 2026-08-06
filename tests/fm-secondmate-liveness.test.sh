@@ -36,6 +36,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+NODE_BIN=$(command -v node) || fail "test needs node"
+JQ_BIN=$(command -v jq) || fail "test needs jq"
 fm_git_identity fmtest fmtest@example.com
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-liveness)
@@ -206,7 +208,14 @@ test_agent_state_dispatcher_and_compatibility() {
 make_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
-  fm_fake_exit0 "$fakebin" node chrome-devtools-axi pi-signed
+  fm_fake_exit0 "$fakebin" chrome-devtools-axi pi-signed
+  # The respawn this sweep drives runs the real fm-spawn.sh, which builds and
+  # validates its model-run telemetry intake with node and jq, so exit-0 stubs
+  # are not enough. Wrappers, not symlinks: a later fm_fake_exit0 for the same
+  # tool would write through a symlink into the real binary.
+  printf '#!/usr/bin/env bash\nexec '"'"'%s'"'"' "$@"\n' "$NODE_BIN" > "$fakebin/node"
+  printf '#!/usr/bin/env bash\nexec '"'"'%s'"'"' "$@"\n' "$JQ_BIN" > "$fakebin/jq"
+  chmod +x "$fakebin/node" "$fakebin/jq"
   fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.45
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
