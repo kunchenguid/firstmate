@@ -213,6 +213,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-check-lib.sh
+. "$SCRIPT_DIR/fm-check-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
@@ -630,6 +632,15 @@ SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+SPAWN_META_TMP=
+SPAWN_CHECK_SLOT_HELD=0
+SPAWN_MIGRATION_BOUNDARY_HELD=0
+SPAWN_META_PR_PRESENT=0
+SPAWN_META_PR_PROVIDER=
+SPAWN_META_PR_URL=
+SPAWN_META_PR_HOST=
+SPAWN_META_PR_PATH=
+SPAWN_META_PR_NUMBER=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -648,8 +659,225 @@ parse_orca_worktree_result() {
   fi
 }
 
+spawn_check_slot_release() {
+  local failed=0
+  if [ "$SPAWN_CHECK_SLOT_HELD" -eq 1 ]; then
+    fm_custom_check_slot_release || failed=1
+    SPAWN_CHECK_SLOT_HELD=0
+  fi
+  if [ "$SPAWN_MIGRATION_BOUNDARY_HELD" -eq 1 ]; then
+    fm_custom_check_migration_release || failed=1
+    SPAWN_MIGRATION_BOUNDARY_HELD=0
+  fi
+  return "$failed"
+}
+
+spawn_check_slot_acquire() {
+  if ! fm_custom_check_migration_acquire "$STATE" 100; then
+    return 1
+  fi
+  SPAWN_MIGRATION_BOUNDARY_HELD=1
+  if ! fm_custom_check_slot_acquire "$STATE" "$ID" 100; then
+    fm_custom_check_migration_release || true
+    SPAWN_MIGRATION_BOUNDARY_HELD=0
+    return 1
+  fi
+  SPAWN_CHECK_SLOT_HELD=1
+}
+
+spawn_meta_reset() {
+  [ -z "$SPAWN_META_TMP" ] || rm -f -- "$SPAWN_META_TMP"
+  SPAWN_META_TMP=
+  spawn_check_slot_release || true
+}
+
+spawn_meta_pr_current() {
+  local meta=$1
+  SPAWN_META_PR_PRESENT=0
+  SPAWN_META_PR_PROVIDER=
+  SPAWN_META_PR_URL=
+  SPAWN_META_PR_HOST=
+  SPAWN_META_PR_PATH=
+  SPAWN_META_PR_NUMBER=
+  if [ ! -e "$meta" ] && [ ! -L "$meta" ]; then
+    return 0
+  fi
+  [ -f "$meta" ] && [ ! -L "$meta" ] && [ "$(fm_pr_file_link_count "$meta")" = 1 ] || return 1
+  if grep -q '^pr=' "$meta"; then
+    fm_pr_metadata_identity_parse "$meta" || return 1
+    fm_pr_poll_artifacts_valid "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
+    SPAWN_META_PR_PRESENT=1
+    SPAWN_META_PR_PROVIDER=$FM_PR_META_PROVIDER
+    SPAWN_META_PR_URL=$FM_PR_META_URL
+    SPAWN_META_PR_HOST=$FM_PR_META_HOST
+    SPAWN_META_PR_PATH=$FM_PR_META_PATH
+    SPAWN_META_PR_NUMBER=$FM_PR_META_NUMBER
+  fi
+}
+
+spawn_meta_pr_matches() {
+  local meta=$1
+  [ "$SPAWN_META_PR_PRESENT" -eq 1 ] || return 0
+  fm_pr_metadata_identity_parse "$meta" || return 1
+  [ "$FM_PR_META_PROVIDER" = "$SPAWN_META_PR_PROVIDER" ] \
+    && [ "$FM_PR_META_URL" = "$SPAWN_META_PR_URL" ] \
+    && [ "$FM_PR_META_HOST" = "$SPAWN_META_PR_HOST" ] \
+    && [ "$FM_PR_META_PATH" = "$SPAWN_META_PR_PATH" ] \
+    && [ "$FM_PR_META_NUMBER" = "$SPAWN_META_PR_NUMBER" ]
+}
+
+spawn_meta_copy_pr_lines() {
+  local meta=$1 line
+  [ "$SPAWN_META_PR_PRESENT" -eq 1 ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      pr=*|pr_head=*) printf '%s\n' "$line" ;;
+    esac
+  done < "$meta"
+}
+
+spawn_meta_publish() {
+  local meta state_device
+  meta="$STATE/$ID.meta"
+  spawn_check_slot_acquire || return 1
+  if ! spawn_meta_pr_current "$meta"; then
+    spawn_meta_reset
+    return 1
+  fi
+  state_device=$(fm_pr_file_device "$STATE") || {
+    spawn_meta_reset
+    return 1
+  }
+  SPAWN_META_TMP=$(mktemp "$STATE/.fm-spawn-meta.XXXXXX") || {
+    spawn_meta_reset
+    return 1
+  }
+  {
+    echo "window=$META_WINDOW"
+    echo "endpoint_task_id=$ID"
+    echo "worktree=$WT"
+    echo "project=$PROJ_ABS"
+    echo "harness=$HARNESS"
+    echo "kind=$KIND"
+    [ -z "$MODE" ] || echo "mode=$MODE"
+    [ -z "$YOLO" ] || echo "yolo=$YOLO"
+    echo "tasktmp=$TASK_TMP"
+    echo "model=${MODEL:-default}"
+    echo "effort=${EFFORT:-default}"
+    [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
+    [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+    if [ "$BACKEND" = herdr ]; then
+      echo "herdr_session=$HERDR_SES"
+      echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
+      echo "herdr_tab_id=$HERDR_TAB_ID"
+      echo "herdr_pane_id=$HERDR_PANE_ID"
+    fi
+    if [ "$BACKEND" = zellij ]; then
+      echo "zellij_session=$ZELLIJ_SES"
+      echo "zellij_tab_id=$ZELLIJ_TAB_ID"
+      echo "zellij_pane_id=$ZELLIJ_PANE_ID"
+    fi
+    if [ "$BACKEND" = orca ]; then
+      echo "orca_worktree_id=$ORCA_WORKTREE_ID"
+      echo "terminal=$ORCA_TERMINAL"
+    fi
+    if [ "$BACKEND" = cmux ]; then
+      echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
+      echo "cmux_surface_id=$CMUX_SURFACE_ID"
+    fi
+    if [ "$KIND" = secondmate ]; then
+      echo "home=$PROJ_ABS"
+      echo "projects=$SECONDMATE_PROJECTS"
+    fi
+    spawn_meta_copy_pr_lines "$meta"
+  } > "$SPAWN_META_TMP" || {
+    spawn_meta_reset
+    return 1
+  }
+  chmod 0600 "$SPAWN_META_TMP" || {
+    spawn_meta_reset
+    return 1
+  }
+  fm_pr_private_file_valid "$SPAWN_META_TMP" 600 "$state_device" \
+    && spawn_meta_pr_matches "$SPAWN_META_TMP" \
+    && fm_pr_regular_destination_on_device_or_absent "$meta" "$state_device" || {
+    spawn_meta_reset
+    return 1
+  }
+  mv -f -- "$SPAWN_META_TMP" "$meta" || {
+    spawn_meta_reset
+    return 1
+  }
+  SPAWN_META_TMP=
+  if [ "$SPAWN_META_PR_PRESENT" -eq 1 ] \
+    && ! fm_pr_poll_artifacts_valid "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+    spawn_meta_reset
+    return 1
+  fi
+  spawn_check_slot_release
+}
+
+spawn_meta_record_traceparent() {
+  local meta state_device line
+  meta="$STATE/$ID.meta"
+  spawn_check_slot_acquire || return 1
+  if ! spawn_meta_pr_current "$meta"; then
+    spawn_meta_reset
+    return 1
+  fi
+  state_device=$(fm_pr_file_device "$STATE") || {
+    spawn_meta_reset
+    return 1
+  }
+  fm_pr_private_file_valid "$meta" 600 "$state_device" || {
+    spawn_meta_reset
+    return 1
+  }
+  SPAWN_META_TMP=$(mktemp "$STATE/.fm-spawn-meta.XXXXXX") || {
+    spawn_meta_reset
+    return 1
+  }
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        traceparent=*|pr=*|pr_head=*) ;;
+        *) printf '%s\n' "$line" ;;
+      esac
+    done < "$meta"
+    printf 'traceparent=%s\n' "$SPAWN_TRACEPARENT"
+    spawn_meta_copy_pr_lines "$meta"
+  } > "$SPAWN_META_TMP" || {
+    spawn_meta_reset
+    return 1
+  }
+  chmod 0600 "$SPAWN_META_TMP" || {
+    spawn_meta_reset
+    return 1
+  }
+  fm_pr_private_file_valid "$SPAWN_META_TMP" 600 "$state_device" \
+    && spawn_meta_pr_matches "$SPAWN_META_TMP" \
+    && fm_pr_regular_destination_on_device_or_absent "$meta" "$state_device" || {
+    spawn_meta_reset
+    return 1
+  }
+  mv -f -- "$SPAWN_META_TMP" "$meta" || {
+    spawn_meta_reset
+    return 1
+  }
+  SPAWN_META_TMP=
+  if [ "$SPAWN_META_PR_PRESENT" -eq 1 ] \
+    && ! fm_pr_poll_artifacts_valid "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+    spawn_meta_reset
+    return 1
+  fi
+  spawn_check_slot_release
+}
+
 spawn_abort_cleanup() {
   local status=$?
+  [ -z "$SPAWN_META_TMP" ] || rm -f -- "$SPAWN_META_TMP"
+  SPAWN_META_TMP=
+  spawn_check_slot_release || true
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
@@ -2185,48 +2413,10 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
-{
-  echo "window=$META_WINDOW"
-  echo "endpoint_task_id=$ID"
-  echo "worktree=$WT"
-  echo "project=$PROJ_ABS"
-  echo "harness=$HARNESS"
-  echo "kind=$KIND"
-  [ -z "$MODE" ] || echo "mode=$MODE"
-  [ -z "$YOLO" ] || echo "yolo=$YOLO"
-  echo "tasktmp=$TASK_TMP"
-  echo "model=${MODEL:-default}"
-  echo "effort=${EFFORT:-default}"
-  [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
-  # Default-off writes no traceparent= line (meta stays byte-identical).
-  # backend= is written only for a non-default (non-tmux) backend, so the
-  # default path's meta stays byte-identical (absent backend= means tmux;
-  # data/fm-backend-design-d7's P1 compatibility contract).
-  [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
-  if [ "$BACKEND" = herdr ]; then
-    echo "herdr_session=$HERDR_SES"
-    echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
-    echo "herdr_tab_id=$HERDR_TAB_ID"
-    echo "herdr_pane_id=$HERDR_PANE_ID"
-  fi
-  if [ "$BACKEND" = zellij ]; then
-    echo "zellij_session=$ZELLIJ_SES"
-    echo "zellij_tab_id=$ZELLIJ_TAB_ID"
-    echo "zellij_pane_id=$ZELLIJ_PANE_ID"
-  fi
-  if [ "$BACKEND" = orca ]; then
-    echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-    echo "terminal=$ORCA_TERMINAL"
-  fi
-  if [ "$BACKEND" = cmux ]; then
-    echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
-    echo "cmux_surface_id=$CMUX_SURFACE_ID"
-  fi
-  if [ "$KIND" = secondmate ]; then
-    echo "home=$PROJ_ABS"
-    echo "projects=$SECONDMATE_PROJECTS"
-  fi
-} > "$STATE/$ID.meta"
+spawn_meta_publish || {
+  echo "error: could not publish task metadata for $ID" >&2
+  exit 1
+}
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 # A no-mistakes worker can begin validation as soon as it receives this launch
@@ -2292,7 +2482,7 @@ spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 # entirely when trace context is off.
 if [ -n "$SPAWN_TRACEPARENT" ]; then
   if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
-    if ! echo "traceparent=$SPAWN_TRACEPARENT" >> "$STATE/$ID.meta"; then
+    if ! spawn_meta_record_traceparent; then
       LAUNCH="unset TRACEPARENT; $LAUNCH"
     fi
   else

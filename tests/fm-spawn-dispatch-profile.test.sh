@@ -15,6 +15,8 @@ set -u
 . "$ROOT/bin/fm-check-lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
+PR_CHECK="$ROOT/bin/fm-pr-check.sh"
+POLL="$ROOT/bin/fm-pr-poll.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
 
 make_spawn_fakebin() {
@@ -46,6 +48,26 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+src=
+dst=
+for arg in "$@"; do
+  src=$dst
+  dst=$arg
+done
+case "$src" in
+  */.fm-spawn-meta.*)
+    if [ -n "${FM_TEST_SPAWN_META_BLOCK_READY:-}" ]; then
+      : > "$FM_TEST_SPAWN_META_BLOCK_READY"
+      while [ ! -e "${FM_TEST_SPAWN_META_BLOCK_RELEASE:?}" ]; do sleep 0.02; done
+    fi
+    ;;
+esac
+exec "${FM_TEST_REAL_MV:-/bin/mv}" "$@"
+SH
+  chmod +x "$fakebin/mv"
   fm_fake_exit0 "$fakebin" treehouse pi-signed
   printf '%s\n' "$fakebin"
 }
@@ -152,6 +174,100 @@ test_no_mistakes_spawn_arms_the_registered_validation_check() {
   fm_custom_check_registered "$HOME_DIR/state" "$id" \
     || fail "no-mistakes spawn did not register its validation check"
   pass "no-mistakes spawn arms a registered validation check before launch"
+}
+
+test_same_id_spawn_preserves_a_registered_pr_merge_poll() {
+  local rec id out status
+  id=profile-pr-respawn-z1
+  rec=$(make_spawn_case profile-pr-respawn claude "$id")
+  read_case_record "$rec"
+  mkdir -p "$CASE_DIR/root/bin"
+  cat > "$CASE_DIR/root/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$FAKEBIN_DIR/gh" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' headRefOid '*) printf '%s\n' deadbeefcafefeed0000000000000000deadbeef ;;
+  *) printf '%s\n' OPEN ;;
+esac
+SH
+  chmod +x "$CASE_DIR/root/bin/fm-guard.sh" "$FAKEBIN_DIR/gh"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "initial no-mistakes spawn should succeed"
+  FM_ROOT_OVERRIDE="$CASE_DIR/root" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    PATH="$FAKEBIN_DIR:$PATH" "$PR_CHECK" "$id" https://github.com/example/repo/pull/9 >/dev/null \
+    || fail "could not create the same-id PR merge-poll fixture"
+  fm_pr_poll_artifacts_valid "$HOME_DIR/state" "$id" "$POLL" \
+    || fail "same-id fixture did not create an authenticated PR merge poll"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "same-id spawn should preserve a PR-owned task"
+  fm_pr_poll_artifacts_valid "$HOME_DIR/state" "$id" "$POLL" \
+    || fail "same-id spawn displaced the registered PR merge poll"
+  pass "same-id spawn preserves a registered PR merge poll"
+}
+
+test_spawn_serializes_a_concurrent_pr_merge_poll() {
+  local rec id ready release spawn_pid pr_pid attempt=0
+  id=profile-pr-concurrent-z1
+  rec=$(make_spawn_case profile-pr-concurrent claude "$id")
+  read_case_record "$rec"
+  mkdir -p "$CASE_DIR/root/bin"
+  cat > "$CASE_DIR/root/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$FAKEBIN_DIR/gh" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' headRefOid '*) printf '%s\n' deadbeefcafefeed0000000000000000deadbeef ;;
+  *) printf '%s\n' OPEN ;;
+esac
+SH
+  chmod +x "$CASE_DIR/root/bin/fm-guard.sh" "$FAKEBIN_DIR/gh"
+  run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" >/dev/null \
+    || fail "could not arm the concurrent spawn fixture"
+  ready="$CASE_DIR/spawn-meta-ready"
+  release="$CASE_DIR/spawn-meta-release"
+
+  FM_TEST_SPAWN_META_BLOCK_READY="$ready" FM_TEST_SPAWN_META_BLOCK_RELEASE="$release" \
+    FM_TEST_REAL_MV="$(command -v mv)" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    > "$CASE_DIR/spawn.out" 2> "$CASE_DIR/spawn.err" &
+  spawn_pid=$!
+  while [ "$attempt" -lt 100 ]; do
+    [ -e "$ready" ] && break
+    sleep 0.02
+    attempt=$((attempt + 1))
+  done
+  if [ ! -e "$ready" ]; then
+    : > "$release"
+    wait "$spawn_pid" 2>/dev/null || true
+    fail "same-id spawn did not reach its metadata publication boundary"
+  fi
+
+  FM_ROOT_OVERRIDE="$CASE_DIR/root" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    PATH="$FAKEBIN_DIR:$PATH" "$PR_CHECK" "$id" https://github.com/example/repo/pull/9 \
+    > "$CASE_DIR/pr.out" 2> "$CASE_DIR/pr.err" &
+  pr_pid=$!
+  sleep 0.1
+  assert_absent "$HOME_DIR/state/$id.pr-poll-registration" \
+    "PR publication entered a spawn-owned metadata boundary"
+
+  : > "$release"
+  wait "$spawn_pid" || {
+    wait "$pr_pid" 2>/dev/null || true
+    fail "same-id spawn failed while preserving PR ownership"
+  }
+  wait "$pr_pid" || fail "PR publication failed after spawn released its task slot"
+  fm_pr_poll_artifacts_valid "$HOME_DIR/state" "$id" "$POLL" \
+    || fail "concurrent PR publication was displaced by the same-id spawn"
+  pass "same-id spawn serializes concurrent PR merge-poll publication"
 }
 
 test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
@@ -695,6 +811,8 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 
 test_no_profile_keeps_claude_profile_defaults
 test_no_mistakes_spawn_arms_the_registered_validation_check
+test_same_id_spawn_preserves_a_registered_pr_merge_poll
+test_spawn_serializes_a_concurrent_pr_merge_poll
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
 test_absolute_override_spelling_is_preserved_in_launch_paths

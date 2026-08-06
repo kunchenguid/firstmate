@@ -82,6 +82,12 @@ case "$src" in
       while [ ! -e "${FM_TEST_VALIDATION_RELEASE:?}" ]; do sleep 0.02; done
     fi
     ;;
+  */.fm-pr-poll-check.*)
+    if [ -n "${FM_TEST_PR_POLL_BLOCK_READY:-}" ]; then
+      : > "$FM_TEST_PR_POLL_BLOCK_READY"
+      while [ ! -e "${FM_TEST_PR_POLL_BLOCK_RELEASE:?}" ]; do sleep 0.02; done
+    fi
+    ;;
 esac
 exec "${FM_TEST_REAL_MV:-/bin/mv}" "$@"
 SH
@@ -399,6 +405,71 @@ test_no_mistakes_validation_ownership_rearms_custom_replacements() {
   pass "no-mistakes validation ownership survives custom registration and migration"
 }
 
+test_migration_marker_rearms_a_missing_validation_gate() {
+  local dir state
+  dir=$(make_case migration-marker-validation-repair)
+  state="$dir/home/state"
+  run_arm "$dir" >/dev/null || fail "could not arm migration-marker validation fixture"
+  FM_TEST_REAL_MV="$REAL_MV" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" --checks-safe >/dev/null \
+    || fail "could not establish the completed migration marker"
+  [ -f "$state/.pr-check-migration-v1" ] \
+    || fail "migration fixture did not establish its completion marker"
+  rm -f "$state/task-a.check.sh" "$state/task-a.check-trust"
+  FM_TEST_REAL_MV="$REAL_MV" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" --checks-safe >/dev/null \
+    || fail "migration did not repair a missing reserved validation gate"
+  fm_validation_check_registered "$state" task-a "$ROOT/bin/fm-nm-run-lib.sh" "$ROOT/bin/fm-validation-poll.sh" \
+    || fail "a completed migration marker left a no-mistakes ship unarmed"
+  pass "migration markers remain incomplete until reserved validation gates are armed"
+}
+
+test_watcher_skips_a_live_pr_publication_slot() {
+  local dir state status ready release pr_pid attempt=0 out rc=0
+  dir=$(make_case watcher-live-pr-publication)
+  state="$dir/home/state"
+  status="$dir/status"
+  ready="$dir/pr-poll-ready"
+  release="$dir/pr-poll-release"
+  write_owned_status "$dir" "$status" 'status: running' 'awaiting_agent: working 2m'
+  run_arm "$dir" >/dev/null || fail "could not arm watcher hand-off fixture"
+
+  FM_TEST_REAL_MV="$REAL_MV" FM_TEST_PR_POLL_BLOCK_READY="$ready" FM_TEST_PR_POLL_BLOCK_RELEASE="$release" \
+    FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    PATH="$dir/fakebin:$BASE_PATH" "$PR_CHECK" task-a https://github.com/example/repo/pull/9 \
+    > "$dir/pr.out" 2> "$dir/pr.err" &
+  pr_pid=$!
+  while [ "$attempt" -lt 100 ]; do
+    [ -e "$ready" ] && break
+    sleep 0.02
+    attempt=$((attempt + 1))
+  done
+  if [ ! -e "$ready" ]; then
+    : > "$release"
+    wait "$pr_pid" 2>/dev/null || true
+    fail "PR publication did not reach its final source hand-off"
+  fi
+
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_TEST_STATUS="$status" \
+    FM_POLL=1 FM_CHECK_INTERVAL=1 FM_SIGNAL_GRACE=1 PATH="$dir/fakebin:$BASE_PATH" \
+    "$CHECKPOINT" --seconds 2 2>&1) || rc=$?
+  case "$rc" in
+    0|124) ;;
+    *)
+      : > "$release"
+      wait "$pr_pid" 2>/dev/null || true
+      fail "watcher hand-off checkpoint exited $rc: $out"
+      ;;
+  esac
+  assert_not_contains "$out" 'rejected unauthenticated state checks' \
+    "watcher rejected a PR hand-off while the publisher held its task slot"
+  : > "$release"
+  wait "$pr_pid" || fail "PR publication did not finish after watcher checkpoint: $(cat "$dir/pr.err")"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "watcher hand-off fixture did not finish with a valid PR merge poll"
+  pass "watcher skips PR publication while its task slot is live"
+}
+
 test_migration_defers_a_live_check_slot() {
   local dir state ready release holder_pid attempt=0 source_hash
   dir=$(make_case migration-live-slot)
@@ -465,4 +536,6 @@ test_pr_merge_poll_replaces_and_outprioritizes_validation_poll
 test_pr_publication_wins_over_an_inflight_validation_arm
 test_custom_registration_and_migration_preserve_pr_poll_priority
 test_no_mistakes_validation_ownership_rearms_custom_replacements
+test_migration_marker_rearms_a_missing_validation_gate
+test_watcher_skips_a_live_pr_publication_slot
 test_migration_defers_a_live_check_slot

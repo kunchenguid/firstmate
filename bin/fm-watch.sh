@@ -736,6 +736,7 @@ watcher_cleanup() {
   fm_active_check_stop || return 1
   fm_check_output_cleanup
   fm_custom_check_snapshot_cleanup
+  fm_custom_check_slot_release || true
   fm_lock_release "$WATCH_LOCK"
 }
 trap watcher_cleanup EXIT
@@ -817,9 +818,15 @@ while :; do
         fi
       else
         id=$(basename "$c" .check.sh)
-        if fm_pr_task_id_valid "$id" && fm_custom_check_slot_held "$STATE" "$id"; then
+        if ! fm_pr_task_id_valid "$id"; then
+          rejected_checks="$rejected_checks $c"
           continue
-        elif fm_pr_metadata_identity_parse "$STATE/$id.meta"; then
+        fi
+        if ! fm_custom_check_slot_acquire "$STATE" "$id" 1; then
+          continue
+        fi
+        check_kind=
+        if fm_pr_metadata_identity_parse "$STATE/$id.meta"; then
           if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
             is_pr_poll=1
             provider=$FM_PR_POLL_SNAPSHOT_PROVIDER
@@ -827,12 +834,9 @@ while :; do
             host=$FM_PR_POLL_SNAPSHOT_HOST
             path=$FM_PR_POLL_SNAPSHOT_PATH
             number=$FM_PR_POLL_SNAPSHOT_NUMBER
-            run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
-              "$provider" "$url" "$host" "$path" "$number" || exit 1
-            out=$FM_CHECK_RESULT
+            check_kind=pr
           else
-            rejected_checks="$rejected_checks $c"
-            continue
+            check_kind=reject
           fi
         elif fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
           is_pr_poll=1
@@ -841,32 +845,43 @@ while :; do
           host=$FM_PR_POLL_SNAPSHOT_HOST
           path=$FM_PR_POLL_SNAPSHOT_PATH
           number=$FM_PR_POLL_SNAPSHOT_NUMBER
-          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
-            "$provider" "$url" "$host" "$path" "$number" || exit 1
-          out=$FM_CHECK_RESULT
-        elif fm_pr_task_id_valid "$id" && fm_validation_check_slot_reserved "$STATE" "$id"; then
+          check_kind=pr
+        elif fm_validation_check_slot_reserved "$STATE" "$id"; then
           if fm_validation_check_registered "$STATE" "$id" \
               "$SCRIPT_DIR/fm-nm-run-lib.sh" "$SCRIPT_DIR/fm-validation-poll.sh" \
             && fm_custom_check_snapshot_prepare "$STATE" "$id"; then
             custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
-            run_check_capture "$custom_snapshot" || exit 1
-            out=$FM_CHECK_RESULT
-            fm_custom_check_snapshot_cleanup
+            check_kind=custom
           else
             fm_custom_check_snapshot_cleanup
-            rejected_checks="$rejected_checks $c"
-            continue
+            check_kind=reject
           fi
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
-          run_check_capture "$custom_snapshot" || exit 1
-          out=$FM_CHECK_RESULT
-          fm_custom_check_snapshot_cleanup
+          check_kind=custom
         else
           fm_custom_check_snapshot_cleanup
-          rejected_checks="$rejected_checks $c"
-          continue
+          check_kind=reject
         fi
+        if ! fm_custom_check_slot_release; then
+          exit 1
+        fi
+        case "$check_kind" in
+          pr)
+            run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+              "$provider" "$url" "$host" "$path" "$number" || exit 1
+            out=$FM_CHECK_RESULT
+            ;;
+          custom)
+            run_check_capture "$custom_snapshot" || exit 1
+            out=$FM_CHECK_RESULT
+            fm_custom_check_snapshot_cleanup
+            ;;
+          *)
+            rejected_checks="$rejected_checks $c"
+            continue
+            ;;
+        esac
       fi
       if [ -n "$out" ]; then
         reason="check: $c: $out"

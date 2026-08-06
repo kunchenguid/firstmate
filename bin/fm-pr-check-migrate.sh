@@ -284,13 +284,6 @@ x_shim_locked_scan_needed() {
   return 0
 }
 
-# Marker short-circuits apply only when generated artifact identities are current.
-# Otherwise watcher exclusion comes before every check scan and state mutation.
-if ! x_shim_locked_scan_needed; then
-  migration_complete && exit 0
-  [ "$ALLOW_INCOMPLETE_REPAIRS" -eq 1 ] && scan_complete && exit 0
-fi
-
 # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
@@ -329,6 +322,10 @@ if ! repair_validation_checks; then
 fi
 if [ "$MIGRATION_DEFERRED" -ne 0 ] || fm_custom_check_any_slot_held "$STATE"; then
   exit 0
+fi
+if ! x_shim_locked_scan_needed; then
+  migration_complete && exit 0
+  [ "$ALLOW_INCOMPLETE_REPAIRS" -eq 1 ] && scan_complete && exit 0
 fi
 if ! fm_custom_check_migration_acquire "$STATE" 1; then
   exit 0
