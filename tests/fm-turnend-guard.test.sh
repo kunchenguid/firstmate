@@ -1392,13 +1392,13 @@ test_cursor_shim_fallback_session_scope() {
   CURSOR_FIXTURE_DIR=$dir
   : > "$dir/state/task1.meta"
   install_actionable_arm_stub "$dir"
-  out=$(cursor_shim_stop_without_session session-a env FM_CURSOR_WAKE_CHAIN_BUDGET=1)
+  out=$(cursor_shim_stop_without_session same-project env CURSOR_CONVERSATION_ID=conversation-a FM_CURSOR_WAKE_CHAIN_BUDGET=1)
   assert_contains "$out" "firstmate watcher wake" \
     "a payload without a session id must still deliver its first wake"
-  out=$(cursor_shim_stop_without_session session-b env FM_CURSOR_WAKE_CHAIN_BUDGET=1)
+  out=$(cursor_shim_stop_without_session same-project env CURSOR_CONVERSATION_ID=conversation-b FM_CURSOR_WAKE_CHAIN_BUDGET=1)
   assert_contains "$out" "firstmate watcher wake" \
     "a separate unidentified session must start a fresh wake chain"
-  out=$(cursor_shim_stop_without_session session-a env FM_CURSOR_WAKE_CHAIN_BUDGET=1)
+  out=$(cursor_shim_stop_without_session same-project env CURSOR_CONVERSATION_ID=conversation-a FM_CURSOR_WAKE_CHAIN_BUDGET=1)
   assert_contains "$out" "keeps re-firing" \
     "unidentified sessions must not share or clear each other's wake bounds"
   pass "fm-turnend-guard-cursor: unidentified payloads keep isolated persistent chains"
