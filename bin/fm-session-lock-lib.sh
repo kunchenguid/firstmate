@@ -129,10 +129,32 @@ EOF
   printf '%s\n' "$outermost"
 }
 
-# True if $1 is a live process that looks like a verified harness.
+# True if $1 is a zombie: exited but not yet reaped by its parent. A zombie
+# still passes `kill -0` and `ps` still reports its original comm/args, so a
+# lock holder pid must be checked for this before anything else - otherwise a
+# dead harness whose parent never reaped it reads as a live lock holder
+# forever, with no way to reclaim the lock short of deleting it by hand.
+#
+# The single-character process state is the portable signal: Linux procps'
+# "state" keyword and BSD/macOS ps's "state" (documented as an alias for
+# "stat") both report a leading Z for a zombie, though BSD appends extra flag
+# characters after it (e.g. "Z+"), hence the prefix match rather than an exact
+# comparison.
+fm_pid_is_zombie() {
+  local pid=$1 state
+  state=$(ps -o state= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+  case "$state" in
+    Z*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# True if $1 is a live process that looks like a verified harness. A zombie
+# pid is never alive: see fm_pid_is_zombie.
 fm_harness_pid_alive() {
   local pid=$1 comm args
   kill -0 "$pid" 2>/dev/null || return 1
+  fm_pid_is_zombie "$pid" && return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
   fm_harness_process_matches "$comm" "$args"
