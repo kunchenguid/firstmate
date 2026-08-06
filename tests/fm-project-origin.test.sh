@@ -27,14 +27,29 @@ refuses() {
 fm_git_init_commit "$TMP_ROOT/source"
 git clone --quiet --bare "$TMP_ROOT/source" "$TMP_ROOT/source.git"
 
+# Firstmate is a shared template, so acceptance is decided by structure alone.
+# No host, domain, or forge is privileged: this matrix deliberately leads with
+# non-GitHub forges and hosts nobody else has heard of, and every one of them
+# must pass for the same structural reason GitHub does.
+accepts 'https://bitbucket.org/team/app.git'
+accepts 'https://git.example.com/org/app.git'
+accepts 'https://git.example.com:8443/org/app.git'
+accepts 'https://gitlab.self.hosted/group/subgroup/app.git'
+accepts 'ssh://git@gitlab.self.hosted:2222/group/subgroup/app.git'
+accepts 'https://codeberg.org/user/app.git'
+accepts 'git://git.sr.ht/~user/app'
+accepts 'http://gitea.lan:3000/user/app.git'
+accepts 'git@host.internal:group/app.git'
+accepts 'build-mac.local:/srv/git/app.git'
+accepts 'git@my_host:app.git'
+accepts 'git@192.168.1.10:/srv/git/app.git'
+accepts 'ssh://git@[2001:db8::1]:22/srv/git/app.git'
+accepts '[2001:db8::1]:/srv/git/app.git'
+accepts 'git@[2001:db8::1]:/srv/git/app.git'
+accepts 'https://github.com/kunchenguid/firstmate.git'
+accepts 'git@github.com:kunchenguid/firstmate.git'
 accepts "file://$TMP_ROOT/source.git"
 accepts "$TMP_ROOT/source.git"
-accepts 'https://github.com/kunchenguid/firstmate.git'
-accepts 'http://git.example.internal/team/app.git'
-accepts 'ssh://git@github.com/kunchenguid/firstmate.git'
-accepts 'git://git.example.internal/app.git'
-accepts 'git@github.com:kunchenguid/firstmate.git'
-accepts 'build-mac.local:/srv/git/app.git'
 
 # The accepted forms are not just spellings: the two a fixture can reach really
 # do clone with the same plain command the remote host runs.
@@ -74,6 +89,13 @@ refuses 'https://example.com/a pp.git'
 refuses ''
 refuses 'relative/path.git'
 refuses 'file://relative.git'
+refuses '[notanaddress]:/srv/git/app.git'
+
+# A local or file: origin names a path on the cloning host's own filesystem, so
+# traversal out of the named directory is refused rather than transported.
+refuses '/srv/git/../../etc/app.git'
+refuses 'file:///srv/git/../../etc/app.git'
+refuses '/srv/git/..'
 pass "executable transports, option-shaped values, and unusable spellings are refused"
 
 echo "ALL TESTS PASSED"

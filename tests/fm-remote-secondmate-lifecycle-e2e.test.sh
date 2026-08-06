@@ -545,6 +545,96 @@ assert_grep 'not an accepted clone URL' "$TMP_ROOT/unsafe-origin.out" \
 assert_absent "$TMP_ROOT/unsafe-origin-home" "the rejected manifest left a remote home behind"
 pass "remote provisioning re-validates a supplied origin at the receiving host"
 
+# Firstmate is a shared template, so seeding must carry a project origin from any
+# forge or host, not a privileged one. These four URL shapes have to survive the
+# parent's validation, the manifest, the transport, and the receiving host's own
+# validation, and arrive at git unchanged. A fixture resolver records the exact
+# clone source the remote side hands to git and then serves it from a local bare
+# repository, because an offline run cannot reach bitbucket.org itself.
+FORGE_CLONE_LOG="$TMP_ROOT/forge-clone.log"
+FORGE_ORIGIN_MAP="$TMP_ROOT/forge-origin.map"
+: > "$FORGE_CLONE_LOG"
+: > "$FORGE_ORIGIN_MAP"
+forge_project() { # <project> <origin-url>
+  local project=$1 origin=$2 tab
+  tab=$(printf '\t')
+  fm_git_init_commit "$TMP_ROOT/forge-src-$project"
+  printf 'served from %s\n' "$origin" > "$TMP_ROOT/forge-src-$project/ORIGIN.txt"
+  git -C "$TMP_ROOT/forge-src-$project" add ORIGIN.txt
+  git -C "$TMP_ROOT/forge-src-$project" \
+    -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm origin
+  git clone --quiet --bare "$TMP_ROOT/forge-src-$project" "$TMP_ROOT/forge-$project.git"
+  rm -rf "$TMP_ROOT/forge-src-$project"
+  printf '%s%s%s\n' "$origin" "$tab" "$TMP_ROOT/forge-$project.git" >> "$FORGE_ORIGIN_MAP"
+  printf -- '- %s [direct-PR] - %s project (added 2026-08-06)\n' "$project" "$project" \
+    >> "$TMP_ROOT/seed-parent/data/projects.md"
+}
+forge_project bitbucket-app 'https://bitbucket.org/team/bitbucket-app.git'
+forge_project ghe-app 'https://git.example.com/org/ghe-app.git'
+forge_project gitlab-app 'ssh://git@gitlab.self.hosted:2222/group/subgroup/gitlab-app.git'
+forge_project scp-app 'git@host.internal:group/scp-app.git'
+
+cat > "$REMOTE_ROOT/bin/git" <<SH
+#!/usr/bin/env bash
+# Fixture origin resolver for the remote side: record the clone source exactly as
+# the production code hands it to git, then serve any recorded URL from a local
+# bare repository so the run stays offline. Everything else is real git.
+set -u
+if [ "\${1:-}" = clone ]; then
+  printf '%s\n' "\$*" >> '$FORGE_CLONE_LOG'
+  args=()
+  for arg in "\$@"; do
+    replacement=\$(awk -v k="\$arg" -F'\t' '\$1 == k { print \$2; exit }' '$FORGE_ORIGIN_MAP' 2>/dev/null)
+    if [ -n "\$replacement" ]; then args+=("\$replacement"); else args+=("\$arg"); fi
+  done
+  exec '$REAL_GIT' "\${args[@]}"
+fi
+exec '$REAL_GIT' "\$@"
+SH
+chmod +x "$REMOTE_ROOT/bin/git"
+
+FORGE_HOME="$TMP_ROOT/seed-forge-home"
+out=$(FM_SECONDMATE_CHARTER='Own delivery for projects hosted anywhere.' \
+  FM_SECONDMATE_SCOPE='multi-forge delivery' \
+  seed_env "$ROOT/bin/fm-remote-home-seed.sh" seed-forge remote-mac "$REMOTE_ROOT" \
+  "$FORGE_HOME" \
+  'bitbucket-app=https://bitbucket.org/team/bitbucket-app.git' \
+  'ghe-app=https://git.example.com/org/ghe-app.git' \
+  'gitlab-app=ssh://git@gitlab.self.hosted:2222/group/subgroup/gitlab-app.git' \
+  'scp-app=git@host.internal:group/scp-app.git' 2>&1) \
+  || fail "seeding refused origins hosted outside GitHub"$'\n'"$out"
+
+while IFS="$(printf '\t')" read -r forge_origin _; do
+  [ -n "$forge_origin" ] || continue
+  assert_grep "$forge_origin" "$FORGE_CLONE_LOG" \
+    "the remote host did not clone from the supplied origin $forge_origin"
+done < "$FORGE_ORIGIN_MAP"
+for forge_project_name in bitbucket-app ghe-app gitlab-app scp-app; do
+  assert_present "$FORGE_HOME/projects/$forge_project_name/.git" \
+    "the remote home has no clone for $forge_project_name"
+  assert_grep "$forge_project_name" "$FORGE_HOME/data/projects.md" \
+    "the remote registry omitted $forge_project_name"
+  assert_absent "$TMP_ROOT/seed-parent/projects/$forge_project_name" \
+    "seeding $forge_project_name cloned it into the primary project tree"
+done
+# Each clone must carry its own origin's content, so one shared fixture repo
+# cannot make a mismatched route look routed.
+[ "$(cat "$FORGE_HOME/projects/bitbucket-app/ORIGIN.txt")" = \
+  'served from https://bitbucket.org/team/bitbucket-app.git' ] \
+  || fail "the bitbucket route did not clone its own origin"
+[ "$(cat "$FORGE_HOME/projects/scp-app/ORIGIN.txt")" = \
+  'served from git@host.internal:group/scp-app.git' ] \
+  || fail "the scp-like route did not clone its own origin"
+[ "$(projects_snapshot "$TMP_ROOT/seed-parent/projects")" = "$PROJECTS_BEFORE" ] \
+  || fail "seeding non-GitHub projects changed the primary project tree"
+assert_grep '- seed-forge ' "$TMP_ROOT/seed-parent/data/secondmates.md" \
+  "the multi-forge route was not registered"
+
+rm -f "$REMOTE_ROOT/bin/git"
+[ -z "$(git -C "$REMOTE_ROOT" status --porcelain)" ] \
+  || fail "the fixture origin resolver was left behind in the remote code root"
+pass "seeding carries bitbucket, self-hosted, and scp-like origins through to the remote clone"
+
 # Provision and register the remote route from the captain-facing primary.
 out=$(FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
   FM_SECONDMATE_SCOPE='iOS implementation and Xcode validation' \
