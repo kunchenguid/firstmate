@@ -95,3 +95,35 @@ test_outside_window_is_silent
 test_emits_once_then_holds_for_the_interval
 test_emits_again_once_the_interval_has_passed
 test_corrupt_stamp_does_not_wedge_the_poll
+
+# The shim is what makes the poll reachable at all: the watcher sweeps
+# state/*.check.sh and nothing else. It was first created by hand, which worked
+# in one home and would have been silently absent in every other - so bootstrap
+# owning it is the actual fix, and this test is the one that would have caught
+# the omission.
+test_bootstrap_owns_the_shim() {
+  local d shim
+  d="$TMP_ROOT/shim"; mkdir -p "$d/config" "$d/state" "$d/data" "$d/projects"
+  shim="$d/state/sprint-watch.check.sh"
+
+  run_bootstrap() {
+    env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$d" FM_CONFIG_OVERRIDE="$d/config" \
+        FM_STATE_OVERRIDE="$d/state" FM_DATA_OVERRIDE="$d/data" \
+        FM_PROJECTS_OVERRIDE="$d/projects" bash "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
+  }
+
+  run_bootstrap
+  [ ! -e "$shim" ] || fail "with no config the shim must NOT exist - the watcher must be untouched until opt-in"
+
+  printf 'FM_SPRINT_INTERVAL=3600\n' > "$d/config/sprint-poll.env"
+  run_bootstrap
+  [ -x "$shim" ] || fail "bootstrap must create an executable shim once sprint-poll.env exists"
+  grep -q 'fm-sprint-poll.sh' "$shim" || fail "the shim must forward to the repository script, not reimplement it"
+
+  rm -f "$d/config/sprint-poll.env"
+  run_bootstrap
+  [ ! -e "$shim" ] || fail "removing the config must remove the shim, or the poll outlives its opt-in"
+  pass "fm-sprint-poll.sh: bootstrap creates and removes the watcher shim with the config"
+}
+
+test_bootstrap_owns_the_shim
