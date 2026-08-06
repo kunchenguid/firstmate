@@ -38,6 +38,14 @@ fm_git_identity fmtest fmtest@example.invalid
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-tests)
 
+# An EMPTY config dir of our own for the spawn-refusal cases below. Passing
+# FM_CONFIG_OVERRIDE='' does NOT isolate: it falls through to $FM_HOME/config,
+# so those tests read the operator's real config/backend and their outcome
+# depended on how this machine happens to be configured. Backend tests reading
+# the machine's backend setting is exactly the dependency they must not have.
+EMPTY_CONFIG="$TMP_ROOT/empty-config"
+mkdir -p "$EMPTY_CONFIG"
+
 # fm_backend_detect's cmux fallback (bundle id + process ancestry,
 # docs/cmux-backend.md "Runtime auto-detection") consults uname, lsappinfo,
 # and ps. FAKE_NONDARWIN_BIN pins uname to Linux so the whole fallback is
@@ -170,7 +178,7 @@ build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry p
 # --- fm-backend.sh unit tests ------------------------------------------------
 
 test_backend_name_precedence() {
-  local dir cfg
+  local dir cfg nohbin noherdr
   dir="$TMP_ROOT/name-precedence"; cfg="$dir/config"
   mkdir -p "$cfg"
 
@@ -182,8 +190,20 @@ test_backend_name_precedence() {
   # source time, from FM_CONFIG_OVERRIDE); a later FM_CONFIG_OVERRIDE=... prefix
   # on the function call itself does not re-bind it, so these calls set
   # FM_BACKEND_CONFIG_DIR directly.
-  [ "$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
-    || fail "fm_backend_name should default to tmux with no env/config/detection markers"
+  # The base default is herdr, not tmux: the fleet runs on herdr, so a home with
+  # nothing configured lands there rather than on the reference backend.
+  [ "$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = herdr ] \
+    || fail "fm_backend_name should default to herdr with no env/config/detection markers"
+
+  # ...unless herdr is not installed at all: a home that cannot spawn is worse
+  # than one on the reference backend. Unlike the per-spawn reroute fm-spawn.sh
+  # now refuses, this substitution announces itself.
+  nohbin="$TMP_ROOT/no-herdr-path"; mkdir -p "$nohbin"
+  noherdr=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$nohbin:/usr/bin:/bin" FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$TMP_ROOT/no-herdr.err")
+  [ "$noherdr" = tmux ] \
+    || fail "with herdr absent, fm_backend_name should fall back to tmux (got '$noherdr')"
+  assert_contains "$(cat "$TMP_ROOT/no-herdr.err")" "herdr is not installed" \
+    "the tmux fallback must announce itself rather than substituting silently"
 
   printf 'tmux\n' > "$cfg/backend"
   [ "$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID; FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
@@ -192,7 +212,7 @@ test_backend_name_precedence() {
   [ "$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID; FM_BACKEND=tmux FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
     || fail "FM_BACKEND env should win over config/backend"
 
-  pass "fm_backend_name: FM_BACKEND env > config/backend > default tmux"
+  pass "fm_backend_name: FM_BACKEND env > config/backend > default herdr (tmux only when herdr is absent, announced)"
 }
 
 # fm_backend_detect: environment-marker runtime auto-detection (mirrors
@@ -409,13 +429,16 @@ test_backend_name_autodetect_notice() {
 
   : > "$errfile"
   out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
-  [ "$out" = tmux ] || fail "fm_backend_name should default to tmux with no detection markers, got '$out'"
+  # herdr is the base default now; with it installed this stays as silent as the
+  # old tmux default was - silence is what makes the announced no-herdr fallback
+  # in test_backend_name_precedence meaningful.
+  [ "$out" = herdr ] || fail "fm_backend_name should default to herdr with no detection markers, got '$out'"
   [ -s "$errfile" ] && fail "fm_backend_name must stay silent with no detection markers"$'\n'"$(cat "$errfile")"
 
   : > "$errfile"
   out=$(unset TMUX CMUX_WORKSPACE_ID; HERDR_ENV=1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
   [ "$out" = herdr ] || fail "fm_backend_name should auto-detect herdr from HERDR_ENV=1, got '$out'"
-  assert_contains "$(cat "$errfile")" "EXPERIMENTAL herdr backend" \
+  assert_contains "$(cat "$errfile")" "herdr backend, the fleet base" \
     "fm_backend_name did not print a loud notice when auto-detecting herdr"
   assert_contains "$(cat "$errfile")" "config/backend" \
     "fm_backend_name's auto-detect notice did not name the opt-out"
@@ -1027,7 +1050,7 @@ test_spawn_refuses_unknown_backend_flag() {
   # bogus names a backend with no adapter at all; zellij and orca both
   # graduated to real adapters and have their own spawn tests.
   out=$(FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
-    FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
+    FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE="$EMPTY_CONFIG" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" nope-backend-z1 projects/none claude --mode no-mistakes --yolo off --backend bogus 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "fm-spawn --backend bogus should refuse"
@@ -1038,7 +1061,7 @@ test_spawn_refuses_unknown_backend_flag() {
 test_spawn_refuses_codex_app_backend_flag() {
   local out status
   out=$(FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
-    FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
+    FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE="$EMPTY_CONFIG" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" nope-codex-app-z1 projects/none claude --mode no-mistakes --yolo off --backend codex-app 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "fm-spawn --backend codex-app should refuse"
@@ -1049,7 +1072,7 @@ test_spawn_refuses_codex_app_backend_flag() {
 test_spawn_refuses_unknown_fm_backend_env() {
   local out status
   out=$(FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
-    FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 FM_BACKEND=bogus \
+    FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE="$EMPTY_CONFIG" FM_SPAWN_NO_GUARD=1 FM_BACKEND=bogus \
     "$ROOT/bin/fm-spawn.sh" nope-backend-z2 projects/none claude --mode no-mistakes --yolo off 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "FM_BACKEND=bogus should refuse"
@@ -1074,10 +1097,15 @@ test_spawn_default_backend_writes_no_meta_field() {
     FM_TMUX_LOG="$TMP_ROOT/nobackend.log" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend tmux 2>&1)
   expect_code 0 $? "explicit --backend tmux should spawn successfully"$'\n'"$out"
-  assert_no_grep 'backend=' "$state/$id.meta" \
-    "an explicit --backend tmux (the default) must not write backend= to meta (P1 compatibility contract)"
+  # Inverted from the old P1 compatibility contract, which omitted backend= for
+  # tmux so the default path's meta stayed byte-identical. That omission made
+  # tmux the zero value - a backend every other task STATES and tmux alone
+  # implies - and it is what hid the 2026-08-05 reroute from the captain. Every
+  # meta now names its backend, tmux included.
+  assert_grep 'backend=tmux' "$state/$id.meta" \
+    "every meta must state its backend, tmux included - an absent line is what made a rerouted task invisible"
   rm -rf "/tmp/fm-$id"
-  pass "fm-spawn.sh: an explicit --backend tmux resolves silently and writes no backend= (missing means tmux)"
+  pass "fm-spawn.sh: an explicit --backend tmux records backend=tmux (nothing is the zero value any more)"
 }
 
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
@@ -1098,10 +1126,60 @@ test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
     FM_TMUX_LOG="$TMP_ROOT/explicit-backend.log" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend tmux 2>&1)
   expect_code 0 $? "explicit --backend tmux should spawn successfully even with HERDR_ENV=1 set"$'\n'"$out"
-  assert_no_grep 'backend=' "$state/$id.meta" \
+  # Proof that tmux won is now a POSITIVE backend=tmux line rather than an
+  # absent one - the same inversion as the meta contract above.
+  assert_grep 'backend=tmux' "$state/$id.meta" \
     "an explicit --backend tmux must win over an ambient HERDR_ENV=1 auto-detect marker"
   rm -rf "/tmp/fm-$id"
   pass "fm-spawn.sh: explicit --backend tmux wins over an ambient HERDR_ENV=1 auto-detect marker"
+}
+
+test_spawn_backend_flag_cannot_contradict_configured_backend() {
+  local proj wt data id state config out fb status
+  proj="$TMP_ROOT/veto-project"; wt="$TMP_ROOT/veto-wt"; data="$TMP_ROOT/veto-data"
+  id="vetobackendz6"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  fb=$(make_spawn_fakebin "$TMP_ROOT/veto-fake" "$wt")
+  mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
+  state="$TMP_ROOT/veto-state"; config="$TMP_ROOT/veto-config"
+  mkdir -p "$state" "$config"
+  # The one difference from the autodetect case above: here the captain has SET
+  # a backend. An unconfigured home leaves --backend free; a configured one
+  # does not.
+  printf 'herdr\n' > "$config/backend"
+
+  # A task spawned into a backend nobody is watching is invisible even when the
+  # machinery works, so a contradicting flag must fail rather than relocate it.
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend tmux 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "--backend tmux must be refused when config/backend says herdr"$'\n'"$out"
+  assert_contains "$out" "contradicts config/backend (herdr)" \
+    "the refusal must name the configured backend it would have overridden"
+  assert_contains "$out" "REPORT that" \
+    "the refusal must say to report the broken backend rather than route around it"
+  [ ! -f "$state/$id.meta" ] || fail "a refused spawn must not leave task state behind"
+
+  # Agreement is not contradiction: passing the same value stays a no-op, so a
+  # caller that names the backend defensively is not punished for it.
+  # Deliberately exercised on tmux/tmux rather than herdr/herdr: an agreeing
+  # spawn RUNS, and only tmux is covered by the fake bin. Asserting agreement
+  # against a configured herdr reached the real herdr instead - it built a live
+  # treehouse worktree and left an actual claude agent parked in a pane, which
+  # is exactly the kind of side effect a unit test must not have.
+  printf 'tmux\n' > "$config/backend"
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    FM_TMUX_LOG="$TMP_ROOT/veto-agree.log" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend tmux 2>&1)
+  expect_code 0 $? "--backend tmux matching config/backend=tmux must spawn normally"$'\n'"$out"
+  assert_not_contains "$out" "contradicts config/backend" \
+    "--backend tmux matching config/backend=tmux must not be vetoed"
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh: --backend cannot contradict a set config/backend, but may agree with it"
 }
 
 test_spawn_autodetect_nesting_resolves_tmux_silently() {
@@ -1125,8 +1203,8 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
     FM_TMUX_LOG="$TMP_ROOT/nest.log" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off 2>&1)
   expect_code 0 $? "fm-spawn.sh should auto-detect tmux and spawn successfully for nested tmux-in-herdr"$'\n'"$out"
-  assert_no_grep 'backend=' "$state/$id.meta" \
-    "auto-detected nested tmux-in-herdr must resolve to tmux (missing backend= means tmux)"
+  assert_grep 'backend=tmux' "$state/$id.meta" \
+    "auto-detected nested tmux-in-herdr must resolve to tmux, and now say so explicitly"
   case "$out" in
     *NOTICE*) fail "auto-detecting tmux (even nested inside herdr) must stay silent, no NOTICE expected"$'\n'"$out" ;;
   esac
@@ -1160,4 +1238,5 @@ test_spawn_refuses_codex_app_backend_flag
 test_spawn_refuses_unknown_fm_backend_env
 test_spawn_default_backend_writes_no_meta_field
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env
+test_spawn_backend_flag_cannot_contradict_configured_backend
 test_spawn_autodetect_nesting_resolves_tmux_silently
