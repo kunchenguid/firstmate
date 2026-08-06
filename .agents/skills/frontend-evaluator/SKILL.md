@@ -22,9 +22,9 @@ It exists because a DOM assertion suite and an agent's own judgement both miss t
 An agent asked to judge work it produced praises it.
 The generator is the crewmate that wrote the code; the evaluator is a **separate spawn with its own context** that did not write it.
 Never ask the generator to confirm its own UI works, and never accept "I verified it visually" from the agent that built it as evidence.
-Independence comes from two places, and the second was added deliberately: the evaluator has its own context, **and it runs on a different vendor**. The generator builds on `claude`; the evaluator runs on `codex`. A critic that shares the builder's model shares its blind spots and its taste, so a separate vendor buys a genuinely different read of the same page rather than a second opinion from the same mind.
+Independence comes from two places, and the second was added deliberately: the evaluator has its own context, **and it runs on a different vendor**. Whatever vendor the generator runs on, the evaluator must run on a different one. A critic that shares the builder's model shares its blind spots and its taste, so a separate vendor buys a genuinely different read of the same page rather than a second opinion from the same mind.
 
-Model comes from the dispatch profile, not from this file - `config/crew-dispatch.json` carries `gpt-5.6-sol` as the primary with `gpt-5.6-terra` behind it, and `quota-array-dispatch` picks between them on remaining headroom.
+Which vendor that is comes from the dispatch profile, never from this file: `config/crew-dispatch.json` names the concrete harness and model for each role, and `quota-array-dispatch` picks between candidates on remaining headroom. Naming a vendor here would freeze today's fleet into a rule that outlives it - the requirement is *different from the generator's*, not *this particular brand*.
 
 Three traps, all paid for on 2026-08-05:
 
