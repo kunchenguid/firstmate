@@ -1215,7 +1215,7 @@ fi
 #   settings-flag   the launch carries `--settings <state file>`, so the whole
 #                   scaffolding stays outside the copy. The template adds the flag;
 #                   a raw launch command gets it inserted right after its command
-#                   word, but only when that word IS `claude`.
+#                   word, but only when that word's basename IS `claude`.
 #   worktree-local  the flag cannot be placed - an unverified wrapper's argv is not
 #                   firstmate's to rewrite, and an operator who passes their own
 #                   --settings owns that slot - so the hooks go to the copy's
