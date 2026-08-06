@@ -123,6 +123,20 @@ fm_validation_check_source_matches() {
   cmp -s "$check" <(fm_validation_check_source_emit "$worktree" "$nm_run_lib" "$template")
 }
 
+fm_validation_check_source_is_gate() {
+  local state=$1 id=$2 check state_device first second
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  check="$state/$id.check.sh"
+  fm_pr_private_file_valid "$check" 700 "$state_device" || return 1
+  exec 9< "$check" || return 1
+  IFS= read -r first <&9 || { exec 9<&-; return 1; }
+  IFS= read -r second <&9 || { exec 9<&-; return 1; }
+  exec 9<&-
+  [ "$first" = '#!/usr/bin/env bash' ] && [ "$second" = '# fm-validation-gate-check-v1' ]
+}
+
 fm_validation_check_registered() {
   local state=$1 id=$2 nm_run_lib=$3 template=$4
   fm_validation_check_source_matches "$state" "$id" "$nm_run_lib" "$template" \

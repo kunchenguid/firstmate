@@ -647,6 +647,12 @@ SPAWN_META_PREVIOUS=
 SPAWN_META_PREVIOUS_PRESENT=0
 SPAWN_META_CANDIDATE_HASH=
 SPAWN_VALIDATION_HANDOFF=0
+SPAWN_VALIDATION_RETIRE_HANDOFF=0
+SPAWN_VALIDATION_RETIRE_ACTIVE=0
+SPAWN_VALIDATION_RETIRE_CHECK=
+SPAWN_VALIDATION_RETIRE_TRUST=
+SPAWN_VALIDATION_RETIRE_CHECK_PRESENT=0
+SPAWN_VALIDATION_RETIRE_TRUST_PRESENT=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -692,17 +698,103 @@ spawn_check_slot_acquire() {
 }
 
 spawn_meta_reset() {
+  local failed=0
   [ -z "$SPAWN_META_TMP" ] || rm -f -- "$SPAWN_META_TMP"
   SPAWN_META_TMP=
-  spawn_check_slot_release || true
+  spawn_meta_rollback || failed=1
+  spawn_check_slot_release || failed=1
+  return "$failed"
+}
+
+spawn_validation_retire_discard() {
+  SPAWN_VALIDATION_RETIRE_HANDOFF=0
+  SPAWN_VALIDATION_RETIRE_ACTIVE=0
+  [ -z "$SPAWN_VALIDATION_RETIRE_CHECK" ] || rm -f -- "$SPAWN_VALIDATION_RETIRE_CHECK"
+  [ -z "$SPAWN_VALIDATION_RETIRE_TRUST" ] || rm -f -- "$SPAWN_VALIDATION_RETIRE_TRUST"
+  SPAWN_VALIDATION_RETIRE_CHECK=
+  SPAWN_VALIDATION_RETIRE_TRUST=
+  SPAWN_VALIDATION_RETIRE_CHECK_PRESENT=0
+  SPAWN_VALIDATION_RETIRE_TRUST_PRESENT=0
 }
 
 spawn_meta_rollback_discard() {
+  SPAWN_META_ROLLBACK_ACTIVE=0
   [ -z "$SPAWN_META_PREVIOUS" ] || rm -f -- "$SPAWN_META_PREVIOUS"
+  spawn_validation_retire_discard
   SPAWN_META_PREVIOUS=
   SPAWN_META_PREVIOUS_PRESENT=0
   SPAWN_META_CANDIDATE_HASH=
-  SPAWN_META_ROLLBACK_ACTIVE=0
+}
+
+spawn_validation_retire_capture_file() {
+  local source=$1 label=$2 mode=$3 state_device=$4 backup
+  SPAWN_VALIDATION_RETIRE_CAPTURE=
+  SPAWN_VALIDATION_RETIRE_CAPTURE_PRESENT=0
+  [ -f "$source" ] && [ ! -L "$source" ] && [ "$(fm_pr_file_link_count "$source")" = 1 ] || return 1
+  backup=$(mktemp "$STATE/.fm-spawn-validation-$label.XXXXXX") || return 1
+  if ! cp -- "$source" "$backup" \
+    || ! chmod "$mode" "$backup" \
+    || ! fm_pr_private_file_valid "$backup" "$mode" "$state_device"; then
+    rm -f -- "$backup"
+    return 1
+  fi
+  SPAWN_VALIDATION_RETIRE_CAPTURE=$backup
+  SPAWN_VALIDATION_RETIRE_CAPTURE_PRESENT=1
+}
+
+spawn_validation_retire_capture() {
+  local check trust state_device=$1
+  [ "$SPAWN_VALIDATION_RETIRE_HANDOFF" -eq 1 ] || return 0
+  fm_validation_check_registered "$STATE" "$ID" \
+    "$SCRIPT_DIR/fm-nm-run-lib.sh" "$SCRIPT_DIR/fm-validation-poll.sh" || return 0
+  check="$STATE/$ID.check.sh"
+  trust="$STATE/$ID.check-trust"
+  spawn_validation_retire_capture_file "$check" check 700 "$state_device" || return 1
+  SPAWN_VALIDATION_RETIRE_CHECK=$SPAWN_VALIDATION_RETIRE_CAPTURE
+  SPAWN_VALIDATION_RETIRE_CHECK_PRESENT=$SPAWN_VALIDATION_RETIRE_CAPTURE_PRESENT
+  if ! spawn_validation_retire_capture_file "$trust" trust 600 "$state_device"; then
+    spawn_validation_retire_discard
+    return 1
+  fi
+  SPAWN_VALIDATION_RETIRE_TRUST=$SPAWN_VALIDATION_RETIRE_CAPTURE
+  SPAWN_VALIDATION_RETIRE_TRUST_PRESENT=$SPAWN_VALIDATION_RETIRE_CAPTURE_PRESENT
+  SPAWN_VALIDATION_RETIRE_ACTIVE=1
+}
+
+spawn_validation_retire_restore() {
+  local state_device=$1 check trust failed=0
+  [ "$SPAWN_VALIDATION_RETIRE_ACTIVE" -eq 1 ] || return 0
+  check="$STATE/$ID.check.sh"
+  trust="$STATE/$ID.check-trust"
+  if [ "$SPAWN_VALIDATION_RETIRE_CHECK_PRESENT" -eq 1 ]; then
+    if fm_pr_regular_destination_on_device_or_absent "$check" "$state_device" \
+      && mv -f -- "$SPAWN_VALIDATION_RETIRE_CHECK" "$check"; then
+      SPAWN_VALIDATION_RETIRE_CHECK=
+      SPAWN_VALIDATION_RETIRE_CHECK_PRESENT=0
+    else
+      failed=1
+    fi
+  fi
+  if [ "$SPAWN_VALIDATION_RETIRE_TRUST_PRESENT" -eq 1 ]; then
+    if fm_pr_regular_destination_on_device_or_absent "$trust" "$state_device" \
+      && mv -f -- "$SPAWN_VALIDATION_RETIRE_TRUST" "$trust"; then
+      SPAWN_VALIDATION_RETIRE_TRUST=
+      SPAWN_VALIDATION_RETIRE_TRUST_PRESENT=0
+    else
+      failed=1
+    fi
+  fi
+  return "$failed"
+}
+
+spawn_validation_retire_apply() {
+  local state_device=$1 check trust
+  [ "$SPAWN_VALIDATION_RETIRE_ACTIVE" -eq 1 ] || return 0
+  check="$STATE/$ID.check.sh"
+  trust="$STATE/$ID.check-trust"
+  fm_pr_regular_destination_on_device_or_absent "$check" "$state_device" \
+    && fm_pr_regular_destination_on_device_or_absent "$trust" "$state_device" \
+    && rm -f -- "$check" "$trust"
 }
 
 spawn_meta_rollback_capture() {
@@ -745,14 +837,22 @@ spawn_meta_rollback() {
           "$SCRIPT_DIR/fm-nm-run-lib.sh" "$SCRIPT_DIR/fm-validation-poll.sh"; then
         :
       else
+        spawn_validation_retire_restore "$state_device" || failed=1
         if [ "$SPAWN_META_PREVIOUS_PRESENT" -eq 1 ]; then
-          fm_pr_private_file_valid "$SPAWN_META_PREVIOUS" 600 "$state_device" \
-            && fm_pr_regular_destination_on_device_or_absent "$meta" "$state_device" \
-            && mv -f -- "$SPAWN_META_PREVIOUS" "$meta" || failed=1
-          [ "$failed" -ne 0 ] || SPAWN_META_PREVIOUS=
+          if [ "$failed" -eq 0 ]; then
+            if fm_pr_private_file_valid "$SPAWN_META_PREVIOUS" 600 "$state_device" \
+              && fm_pr_regular_destination_on_device_or_absent "$meta" "$state_device" \
+              && mv -f -- "$SPAWN_META_PREVIOUS" "$meta"; then
+              SPAWN_META_PREVIOUS=
+            else
+              failed=1
+            fi
+          fi
         else
-          fm_pr_regular_destination_on_device_or_absent "$meta" "$state_device" \
-            && rm -f -- "$meta" || failed=1
+          if [ "$failed" -eq 0 ]; then
+            fm_pr_regular_destination_on_device_or_absent "$meta" "$state_device" \
+              && rm -f -- "$meta" || failed=1
+          fi
         fi
       fi
     fi
@@ -815,6 +915,10 @@ spawn_meta_publish() {
     spawn_meta_reset
     return 1
   fi
+  if [ "$SPAWN_META_ROLLBACK_CAPTURE" -eq 0 ] \
+    && fm_validation_check_slot_reserved "$STATE" "$ID"; then
+    SPAWN_META_ROLLBACK_CAPTURE=1
+  fi
   state_device=$(fm_pr_file_device "$STATE") || {
     spawn_meta_reset
     return 1
@@ -823,6 +927,10 @@ spawn_meta_publish() {
     spawn_meta_reset
     return 1
   }
+  if { [ "$KIND" != ship ] || [ "$MODE" != no-mistakes ]; } \
+    && fm_validation_check_slot_reserved "$STATE" "$ID"; then
+    SPAWN_VALIDATION_RETIRE_HANDOFF=1
+  fi
   SPAWN_META_TMP=$(mktemp "$STATE/.fm-spawn-meta.XXXXXX") || {
     spawn_meta_reset
     return 1
@@ -886,6 +994,10 @@ spawn_meta_publish() {
     }
     SPAWN_META_ROLLBACK_ACTIVE=1
   fi
+  spawn_validation_retire_capture "$state_device" || {
+    spawn_meta_reset
+    return 1
+  }
   mv -f -- "$SPAWN_META_TMP" "$meta" || {
     spawn_meta_reset
     return 1
@@ -896,7 +1008,12 @@ spawn_meta_publish() {
     spawn_meta_reset
     return 1
   fi
-  if [ "$SPAWN_META_ROLLBACK_CAPTURE" -eq 1 ] && [ "$SPAWN_META_PR_PRESENT" -eq 0 ]; then
+  spawn_validation_retire_apply "$state_device" || {
+    spawn_meta_reset
+    return 1
+  }
+  if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] \
+    && [ "$SPAWN_META_PR_PRESENT" -eq 0 ]; then
     SPAWN_VALIDATION_HANDOFF=1
     return 0
   fi

@@ -76,7 +76,23 @@ case "$src" in
 esac
 exec "${FM_TEST_REAL_MV:-/bin/mv}" "$@"
 SH
-  chmod +x "$fakebin/mv"
+  cat > "$fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+set -u
+validation_check=0
+for arg in "$@"; do
+  case "$arg" in
+    *.check.sh) validation_check=1 ;;
+  esac
+done
+"${FM_TEST_REAL_RM:-/bin/rm}" "$@"
+status=$?
+if [ "$validation_check" -eq 1 ] && [ -n "${FM_TEST_VALIDATION_RETIRE_FAIL:-}" ]; then
+  exit 1
+fi
+exit "$status"
+SH
+  chmod +x "$fakebin/mv" "$fakebin/rm"
   fm_fake_exit0 "$fakebin" treehouse pi-signed
   printf '%s\n' "$fakebin"
 }
@@ -183,6 +199,69 @@ test_no_mistakes_spawn_arms_the_registered_validation_check() {
   fm_custom_check_registered "$HOME_DIR/state" "$id" \
     || fail "no-mistakes spawn did not register its validation check"
   pass "no-mistakes spawn arms a registered validation check before launch"
+}
+
+test_same_id_non_no_mistakes_spawns_retire_validation_checks() {
+  local rec scout direct local out status
+  scout=profile-validation-retire-scout-z1
+  direct=profile-validation-retire-direct-z1
+  local=profile-validation-retire-local-z1
+  rec=$(make_spawn_case profile-validation-retire claude "$scout" "$direct" "$local")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$scout" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "no-mistakes scout-transition fixture should arm its validation check"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$scout" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "same-id scout spawn should succeed"
+  assert_grep 'kind=scout' "$HOME_DIR/state/$scout.meta" "scout transition did not publish scout metadata"
+  assert_absent "$HOME_DIR/state/$scout.check.sh" "scout transition retained a validation check"
+  assert_absent "$HOME_DIR/state/$scout.check-trust" "scout transition retained validation trust"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$direct" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "no-mistakes direct-transition fixture should arm its validation check"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$direct" "$PROJ_DIR" --mode direct-PR --yolo off)
+  status=$?
+  expect_code 0 "$status" "same-id direct-PR spawn should succeed"
+  assert_grep 'mode=direct-PR' "$HOME_DIR/state/$direct.meta" "direct-PR transition did not publish its mode"
+  assert_absent "$HOME_DIR/state/$direct.check.sh" "direct-PR transition retained a validation check"
+  assert_absent "$HOME_DIR/state/$direct.check-trust" "direct-PR transition retained validation trust"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$local" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "no-mistakes local-transition fixture should arm its validation check"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$local" "$PROJ_DIR" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "same-id local-only spawn should succeed"
+  assert_grep 'mode=local-only' "$HOME_DIR/state/$local.meta" "local-only transition did not publish its mode"
+  assert_absent "$HOME_DIR/state/$local.check.sh" "local-only transition retained a validation check"
+  assert_absent "$HOME_DIR/state/$local.check-trust" "local-only transition retained validation trust"
+  pass "same-id non-no-mistakes spawns retire validation checks"
+}
+
+test_failed_validation_retirement_restores_no_mistakes_ownership() {
+  local rec id out status
+  id=profile-validation-retire-interrupt-z1
+  rec=$(make_spawn_case profile-validation-retire-interrupt claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "validation-retirement fixture should arm its gate"
+  out=$(FM_TEST_VALIDATION_RETIRE_FAIL=1 FM_TEST_REAL_RM="$(command -v rm)" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "failed validation retirement unexpectedly succeeded"
+  assert_grep 'kind=ship' "$HOME_DIR/state/$id.meta" \
+    "failed validation retirement did not restore ship ownership"
+  assert_grep 'mode=no-mistakes' "$HOME_DIR/state/$id.meta" \
+    "failed validation retirement did not restore no-mistakes mode"
+  fm_validation_check_registered "$HOME_DIR/state" "$id" \
+    "$ROOT/bin/fm-nm-run-lib.sh" "$ROOT/bin/fm-validation-poll.sh" \
+    || fail "failed validation retirement did not restore its registered gate"
+  pass "failed validation retirement restores no-mistakes ownership"
 }
 
 test_failed_validation_arm_rolls_back_no_mistakes_metadata() {
@@ -858,6 +937,8 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 
 test_no_profile_keeps_claude_profile_defaults
 test_no_mistakes_spawn_arms_the_registered_validation_check
+test_same_id_non_no_mistakes_spawns_retire_validation_checks
+test_failed_validation_retirement_restores_no_mistakes_ownership
 test_failed_validation_arm_rolls_back_no_mistakes_metadata
 test_interrupted_metadata_handoff_leaves_no_unarmed_no_mistakes_ship
 test_same_id_spawn_preserves_a_registered_pr_merge_poll

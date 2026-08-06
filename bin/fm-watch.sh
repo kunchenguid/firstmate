@@ -826,6 +826,7 @@ while :; do
           continue
         fi
         check_kind=
+        validation_slot_held=0
         if fm_pr_metadata_identity_parse "$STATE/$id.meta"; then
           if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
             is_pr_poll=1
@@ -851,11 +852,14 @@ while :; do
               "$SCRIPT_DIR/fm-nm-run-lib.sh" "$SCRIPT_DIR/fm-validation-poll.sh" \
             && fm_custom_check_snapshot_prepare "$STATE" "$id"; then
             custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
-            check_kind=custom
+            check_kind=validation
+            validation_slot_held=1
           else
             fm_custom_check_snapshot_cleanup
             check_kind=reject
           fi
+        elif fm_validation_check_source_is_gate "$STATE" "$id"; then
+          check_kind=stale-validation
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
           check_kind=custom
@@ -863,8 +867,10 @@ while :; do
           fm_custom_check_snapshot_cleanup
           check_kind=reject
         fi
-        if ! fm_custom_check_slot_release; then
-          exit 1
+        if [ "$validation_slot_held" -eq 0 ]; then
+          if ! fm_custom_check_slot_release; then
+            exit 1
+          fi
         fi
         case "$check_kind" in
           pr)
@@ -876,6 +882,20 @@ while :; do
             run_check_capture "$custom_snapshot" || exit 1
             out=$FM_CHECK_RESULT
             fm_custom_check_snapshot_cleanup
+            ;;
+          validation)
+            run_check_capture "$custom_snapshot" || exit 1
+            out=$FM_CHECK_RESULT
+            fm_custom_check_snapshot_cleanup
+            if ! fm_validation_check_registered "$STATE" "$id" \
+                "$SCRIPT_DIR/fm-nm-run-lib.sh" "$SCRIPT_DIR/fm-validation-poll.sh"; then
+              fm_custom_check_slot_release || exit 1
+              validation_slot_held=0
+              continue
+            fi
+            ;;
+          stale-validation)
+            continue
             ;;
           *)
             rejected_checks="$rejected_checks $c"
@@ -895,7 +915,15 @@ while :; do
           fi
         fi
         touch "$STATE/.last-check"
+        if [ "${validation_slot_held:-0}" -eq 1 ]; then
+          fm_custom_check_slot_release || exit 1
+          validation_slot_held=0
+        fi
         wake "$reason"
+      fi
+      if [ "${validation_slot_held:-0}" -eq 1 ]; then
+        fm_custom_check_slot_release || exit 1
+        validation_slot_held=0
       fi
     done
     if [ -n "$rejected_checks" ]; then

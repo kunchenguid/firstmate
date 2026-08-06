@@ -47,6 +47,10 @@ make_case() {
 case "${1:-} ${2:-}" in
   'axi status')
     [ -z "${FM_TEST_EXECUTED:-}" ] || : > "$FM_TEST_EXECUTED"
+    if [ -n "${FM_TEST_VALIDATION_POLL_READY:-}" ]; then
+      : > "$FM_TEST_VALIDATION_POLL_READY"
+      while [ ! -e "${FM_TEST_VALIDATION_POLL_RELEASE:?}" ]; do sleep 0.02; done
+    fi
     cat "${FM_TEST_STATUS:?}"
     ;;
   *) exit 1 ;;
@@ -282,24 +286,115 @@ test_fails_silent_when_a_local_status_read_is_unavailable_or_unparseable() {
 }
 
 test_watcher_does_not_execute_an_unregistered_validation_check() {
-  local dir status marker out rc
+  local dir state status marker ready release holder_pid attempt=0 out rc
   dir=$(make_case unregistered)
+  state="$dir/home/state"
   status="$dir/status"
   marker="$dir/executed"
+  ready="$dir/slot-ready"
+  release="$dir/slot-release"
   write_owned_status "$dir" "$status" 'status: running' 'awaiting_agent: parked 5m'
   run_arm "$dir" >/dev/null || fail "could not arm unregistered-check fixture"
-  rm -f "$dir/home/state/task-a.check-trust"
+  rm -f "$state/task-a.check-trust"
+  (
+    . "$ROOT/bin/fm-pr-lib.sh"
+    . "$ROOT/bin/fm-check-lib.sh"
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_custom_check_slot_acquire "$state" task-a 100 || exit 1
+    : > "$ready"
+    while [ ! -e "$release" ]; do sleep 0.02; done
+    fm_custom_check_slot_release
+  ) &
+  holder_pid=$!
+  while [ "$attempt" -lt 100 ]; do
+    [ -e "$ready" ] && break
+    sleep 0.02
+    attempt=$((attempt + 1))
+  done
+  if [ ! -e "$ready" ]; then
+    : > "$release"
+    wait "$holder_pid" 2>/dev/null || true
+    fail "unregistered-check fixture did not acquire its task slot"
+  fi
 
   rc=0
-  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_TEST_STATUS="$status" \
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_TEST_STATUS="$status" \
     FM_TEST_EXECUTED="$marker" FM_POLL=1 FM_CHECK_INTERVAL=1 FM_SIGNAL_GRACE=1 \
     PATH="$dir/fakebin:$BASE_PATH" "$CHECKPOINT" --seconds 2 2>&1) || rc=$?
+  : > "$release"
+  wait "$holder_pid" || fail "unregistered-check fixture did not release its task slot"
   case "$rc" in
     0|124) ;;
     *) fail "watcher rejected-check fixture exited $rc: $out" ;;
   esac
   [ ! -e "$marker" ] || fail "watcher executed a validation check after its trust binding was removed"
   pass "watcher refuses an unregistered validation check without executing it"
+}
+
+test_watcher_keeps_validation_ownership_through_poll_completion() {
+  local dir state status ready release watcher_pid attempt=0
+  dir=$(make_case validation-slot-through-poll)
+  state="$dir/home/state"
+  status="$dir/status"
+  ready="$dir/validation-poll-ready"
+  release="$dir/validation-poll-release"
+  write_owned_status "$dir" "$status" 'status: passed'
+  run_arm "$dir" >/dev/null || fail "could not arm validation slot fixture"
+
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_TEST_STATUS="$status" \
+    FM_TEST_VALIDATION_POLL_READY="$ready" FM_TEST_VALIDATION_POLL_RELEASE="$release" \
+    FM_POLL=1 FM_CHECK_INTERVAL=1 FM_SIGNAL_GRACE=1 PATH="$dir/fakebin:$BASE_PATH" \
+    "$CHECKPOINT" --seconds 5 > "$dir/watcher.out" 2> "$dir/watcher.err" &
+  watcher_pid=$!
+  while [ "$attempt" -lt 100 ]; do
+    [ -e "$ready" ] && break
+    sleep 0.02
+    attempt=$((attempt + 1))
+  done
+  if [ ! -e "$ready" ]; then
+    : > "$release"
+    wait "$watcher_pid" 2>/dev/null || true
+    fail "watcher did not start the validation poll"
+  fi
+
+  if FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1"; . "$2"; . "$3"; if fm_custom_check_slot_acquire "$4" task-a 1; then fm_custom_check_slot_release; exit 0; fi; exit 1' \
+    _ "$ROOT/bin/fm-pr-lib.sh" "$ROOT/bin/fm-check-lib.sh" "$ROOT/bin/fm-wake-lib.sh" "$state"; then
+    : > "$release"
+    wait "$watcher_pid" 2>/dev/null || true
+    fail "watcher released validation ownership before its poll completed"
+  fi
+
+  : > "$release"
+  wait "$watcher_pid" || fail "watcher validation poll did not finish: $(cat "$dir/watcher.err")"
+  assert_grep 'validation: terminal passed' "$dir/watcher.out" \
+    "watcher did not surface the completed validation poll"
+  pass "watcher holds validation ownership through poll completion"
+}
+
+test_watcher_skips_a_stale_validation_gate() {
+  local dir state status marker tmp out rc=0
+  dir=$(make_case stale-validation-gate)
+  state="$dir/home/state"
+  status="$dir/status"
+  marker="$dir/executed"
+  write_owned_status "$dir" "$status" 'status: passed'
+  run_arm "$dir" >/dev/null || fail "could not arm stale-validation fixture"
+  tmp=$(mktemp "$state/.stale-meta.XXXXXX")
+  grep -v -e '^kind=' -e '^mode=' "$state/task-a.meta" > "$tmp"
+  mv -f -- "$tmp" "$state/task-a.meta"
+
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_TEST_STATUS="$status" \
+    FM_TEST_EXECUTED="$marker" FM_POLL=1 FM_CHECK_INTERVAL=1 FM_SIGNAL_GRACE=1 \
+    PATH="$dir/fakebin:$BASE_PATH" "$CHECKPOINT" --seconds 2 2>&1) || rc=$?
+  case "$rc" in
+    0|124) ;;
+    *) fail "stale-validation checkpoint exited $rc: $out" ;;
+  esac
+  [ ! -e "$marker" ] || fail "watcher executed a stale validation gate"
+  assert_not_contains "$out" 'rejected unauthenticated state checks' \
+    "watcher surfaced a stale validation gate after ownership changed"
+  pass "watcher skips validation gates outside no-mistakes ownership"
 }
 
 test_pr_merge_poll_replaces_and_outprioritizes_validation_poll() {
@@ -702,6 +797,8 @@ test_publishes_trust_before_the_validation_source
 test_failed_validation_publication_leaves_no_mismatched_registration
 test_fails_silent_when_a_local_status_read_is_unavailable_or_unparseable
 test_watcher_does_not_execute_an_unregistered_validation_check
+test_watcher_keeps_validation_ownership_through_poll_completion
+test_watcher_skips_a_stale_validation_gate
 test_pr_merge_poll_replaces_and_outprioritizes_validation_poll
 test_pr_publication_wins_over_an_inflight_validation_arm
 test_x_metadata_rewrite_serializes_with_pr_publication
