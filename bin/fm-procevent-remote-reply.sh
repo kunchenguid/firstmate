@@ -53,6 +53,7 @@ MAX_DOC_BYTES=${FM_REMOTE_REPLY_MAX_DOC_BYTES:-262144}
 # transport or unknown remote completion. Any other nonzero status is the remote
 # reader's own refusal and will not change on a retry.
 SSH_UNAVAILABLE=255
+DOCUMENT_LOCAL_FAILURE=2
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -228,29 +229,29 @@ safe_doc_path() {
   return 0
 }
 
-# Fetch one referenced remote document. Returns 0 on success, SSH_UNAVAILABLE
-# when the transport itself was unavailable and a retry is warranted, and 1 when
-# the remote reader refused the path or size, which no retry would change.
+# Fetch one referenced remote document. Returns 0 on success, 1 when the remote
+# reader refused the path or size, DOCUMENT_LOCAL_FAILURE when local storage
+# failed, and SSH_UNAVAILABLE when transport completion is unknown.
 fetch_document() { # <id> <remote-relative> <result-var>
   local id=$1 rel=$2 result_var=$3 base destination parent parent_real tmp local_rel rc=0
   safe_doc_path "$rel" || return 1
   base="$DATA/remote-secondmates/$id"
   destination="$base/$rel"
   parent=$(dirname "$destination")
-  mkdir -p "$parent" || return 1
-  [ ! -L "$base" ] && [ ! -L "$parent" ] || return 1
-  parent_real=$(CDPATH='' cd -- "$parent" 2>/dev/null && pwd -P) || return 1
-  case "$parent_real" in "$base"|"$base"/*) ;; *) return 1 ;; esac
-  [ ! -L "$destination" ] || return 1
-  tmp=$(umask 077; mktemp "$parent/.remote-doc.XXXXXX") || return 1
+  mkdir -p "$parent" || return "$DOCUMENT_LOCAL_FAILURE"
+  [ ! -L "$base" ] && [ ! -L "$parent" ] || return "$DOCUMENT_LOCAL_FAILURE"
+  parent_real=$(CDPATH='' cd -- "$parent" 2>/dev/null && pwd -P) || return "$DOCUMENT_LOCAL_FAILURE"
+  case "$parent_real" in "$base"|"$base"/*) ;; *) return "$DOCUMENT_LOCAL_FAILURE" ;; esac
+  [ ! -L "$destination" ] || return "$DOCUMENT_LOCAL_FAILURE"
+  tmp=$(umask 077; mktemp "$parent/.remote-doc.XXXXXX") || return "$DOCUMENT_LOCAL_FAILURE"
   "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh get "$rel" "$MAX_DOC_BYTES" < /dev/null > "$tmp" || rc=$?
   if [ "$rc" -ne 0 ]; then
     rm -f -- "$tmp"
     [ "$rc" -ne "$SSH_UNAVAILABLE" ] || return "$SSH_UNAVAILABLE"
     return 1
   fi
-  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
-  mv -f -- "$tmp" "$destination" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return "$DOCUMENT_LOCAL_FAILURE"; }
+  mv -f -- "$tmp" "$destination" || { rm -f -- "$tmp"; return "$DOCUMENT_LOCAL_FAILURE"; }
   local_rel="data/remote-secondmates/$id/$rel"
   printf -v "$result_var" '%s' "$local_rel"
 }
@@ -337,18 +338,17 @@ cmd_ingest() {
       [ -n "$doc" ] || continue
       fetch_rc=0
       fetch_document "$id" "$doc" local_doc || fetch_rc=$?
-      # Transport unavailable is unknown, not a verdict: leave the whole delta
-      # for the runner's existing retry rather than mirroring a pointer whose
-      # document may yet arrive.
-      [ "$fetch_rc" -ne "$SSH_UNAVAILABLE" ] \
-        || { fm_lock_release "$lock"; die "remote transport was unavailable while fetching $doc"; }
-      if [ "$fetch_rc" -ne 0 ]; then
+      if [ "$fetch_rc" -eq 1 ]; then
         # The remote reader refused this document and always will. Mirror the
         # mate's line with its own pointer intact rather than inventing a local
         # path or stalling the stream, and name the gap once for this delta.
         undelivered="${undelivered}${undelivered:+, }$doc"
         continue
       fi
+      [ "$fetch_rc" -ne "$SSH_UNAVAILABLE" ] \
+        || { fm_lock_release "$lock"; die "remote transport was unavailable while fetching $doc"; }
+      [ "$fetch_rc" -eq 0 ] \
+        || { fm_lock_release "$lock"; die "could not store referenced remote document: $doc"; }
       rewritten=${rewritten//"$doc"/"$local_doc"}
     done < <(printf '%s\n' "$line" | grep -Eo 'data/[A-Za-z0-9._/-]+\.md' | awk '!seen[$0]++')
     append_rc=0
