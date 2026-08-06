@@ -239,6 +239,13 @@ Current entry points:
 
 ```sh
 tests/fm-turnend-guard.test.sh
+tests/fm-cursor-harness.test.sh
+tests/fm-session-start.test.sh
+tests/fm-composer-lib.test.sh
+tests/fm-composer-ghost.test.sh
+tests/fm-backend-herdr.test.sh
+tests/fm-remote-doctor.test.sh
+tests/fm-teardown.test.sh
 tests/fm-supervision-instructions.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 FM_GROK_STOP_LIVE_E2E=1 FM_GROK_NATIVE_BIN="$native_grok" FM_GROK_LEGACY_BIN="$pre_native_grok" tests/fm-grok-stop-live-e2e.test.sh

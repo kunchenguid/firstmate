@@ -651,55 +651,46 @@ assert_contains "$DOCTOR_OUT" 'check entrypoint-link=human:' "an operator-owned 
 unset FM_ROOT_OVERRIDE
 pass "the entrypoint symlink is recreated when absent and never overwritten when operator-owned"
 
-# --- cursor executable resolution (fm_remote_doctor_resolve_harness) --------
+# --- cursor executable resolution through the public doctor probe ------------
 # The doctor must accept every Cursor executable the local spawn path does
 # (resolve_cursor_binary in bin/fm-spawn.sh): cursor-agent from PATH, the
 # legacy alias `agent` from PATH (fallback only), then the ~/.local/bin
-# installs for both names. These tests exercise the resolver function in
-# isolation with controlled PATH/HOME fixtures; the generic `agent` name is
-# never admitted as a harness on its own.
-
-CURSOR_RESOLVER_TMP=$(fm_test_tmproot fm-remote-doctor-resolver)
-awk '/^fm_remote_doctor_resolve_harness\(\)/ { p=1; print; next } p && /^}/ { print; exit } p { print }' \
-  "$ROOT/bin/fm-remote-doctor.sh" > "$CURSOR_RESOLVER_TMP/resolver.sh"
-# shellcheck source=/dev/null
-. "$CURSOR_RESOLVER_TMP/resolver.sh"
-
-resolver_case_home() {  # <dir> -> home
-  local dir=$1
-  mkdir -p "$dir/bin" "$dir/home/.local/bin"
-  printf '%s\n' "$dir"
-}
-
+# installs for both names. The public worker-tool-probe exercises the real
+# command path; the generic `agent` name is never admitted as a harness on its
+# own.
 resolver_make_exe() {  # <path>
   printf '#!/usr/bin/env bash\nexit 0\n' > "$1"
   chmod +x "$1"
 }
 
 # Only the legacy alias on PATH, no other harness anywhere.
-R_CASE=$(resolver_case_home "$CURSOR_RESOLVER_TMP/only-agent-path")
-resolver_make_exe "$R_CASE/bin/agent"
-res=$(PATH="$R_CASE/bin:$TOOLS" HOME="$R_CASE/home" \
-  fm_remote_doctor_resolve_harness cursor-agent) || fail "resolver rejected a host with only the agent alias on PATH"
-[ "$res" = "$R_CASE/bin/agent" ] || fail "resolver resolved '$res', expected '$R_CASE/bin/agent'"
-pass "fm_remote_doctor_resolve_harness: accepts the agent alias from PATH when it is the only Cursor executable"
+new_case Linux with-herdr no-gui
+rm -f "$CASE_BIN/claude"
+resolver_make_exe "$CASE_BIN/agent"
+doctor --worker-tool-probe hermetic
+assert_contains "$DOCTOR_OUT" "required harness=cursor-agent:$CASE_BIN/agent" \
+  "public worker probe rejected a host with only the agent alias on PATH"
+pass "worker-tool-probe: accepts the agent alias from PATH when it is the only Cursor executable"
 
 # Only ~/.local/bin/agent outside PATH.
-R_CASE=$(resolver_case_home "$CURSOR_RESOLVER_TMP/only-agent-home")
-resolver_make_exe "$R_CASE/home/.local/bin/agent"
-res=$(PATH="$TOOLS" HOME="$R_CASE/home" \
-  fm_remote_doctor_resolve_harness cursor-agent) || fail "resolver rejected a host with only ~/.local/bin/agent"
-[ "$res" = "$R_CASE/home/.local/bin/agent" ] || fail "resolver resolved '$res', expected '$R_CASE/home/.local/bin/agent'"
-pass "fm_remote_doctor_resolve_harness: finds ~/.local/bin/agent outside PATH"
+new_case Linux with-herdr no-gui
+rm -f "$CASE_BIN/claude"
+mkdir -p "$CASE_HOME/.local/bin"
+resolver_make_exe "$CASE_HOME/.local/bin/agent"
+doctor --worker-tool-probe hermetic
+assert_contains "$DOCTOR_OUT" "required harness=cursor-agent:$CASE_HOME/.local/bin/agent" \
+  "public worker probe rejected a host with only ~/.local/bin/agent"
+pass "worker-tool-probe: finds ~/.local/bin/agent outside PATH"
 
 # cursor-agent takes precedence over the agent alias when both exist on PATH.
-R_CASE=$(resolver_case_home "$CURSOR_RESOLVER_TMP/both")
-resolver_make_exe "$R_CASE/bin/cursor-agent"
-resolver_make_exe "$R_CASE/bin/agent"
-res=$(PATH="$R_CASE/bin:$TOOLS" HOME="$R_CASE/home" \
-  fm_remote_doctor_resolve_harness cursor-agent) || fail "resolver rejected a host with cursor-agent on PATH"
-[ "$res" = "$R_CASE/bin/cursor-agent" ] || fail "resolver resolved '$res', expected cursor-agent to win over the alias"
-pass "fm_remote_doctor_resolve_harness: cursor-agent takes precedence over the agent alias"
+new_case Linux with-herdr no-gui
+rm -f "$CASE_BIN/claude"
+resolver_make_exe "$CASE_BIN/cursor-agent"
+resolver_make_exe "$CASE_BIN/agent"
+doctor --worker-tool-probe hermetic
+assert_contains "$DOCTOR_OUT" "required harness=cursor-agent:$CASE_BIN/cursor-agent" \
+  "public worker probe did not prefer cursor-agent over the alias"
+pass "worker-tool-probe: cursor-agent takes precedence over the agent alias"
 
 # The generic `agent` name is never admitted to HARNESS_TOOLS: the harness
 # readiness loop can only consult it through the cursor-agent alias branch,

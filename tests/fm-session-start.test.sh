@@ -113,6 +113,20 @@ SH
 # listing must never ask for: a body field, an unfiltered whole-backlog listing,
 # or done rows. FM_FAKE_TASKS_AXI_READY sizes the ready set so the queued bound
 # can be driven past its limit.
+make_path_without_node() {
+  local path=$1 base_dir tool_path tool_name
+  mkdir -p "$path"
+  while IFS= read -r base_dir; do
+    [ -d "$base_dir" ] || continue
+    for tool_path in "$base_dir"/*; do
+      [ -f "$tool_path" ] && [ -x "$tool_path" ] || continue
+      tool_name=${tool_path##*/}
+      [ "$tool_name" = node ] || ln -s "$tool_path" "$path/$tool_name" 2>/dev/null || true
+    done
+  done < <(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+  printf '%s\n' "$path"
+}
+
 make_fake_tasks_axi_compact() {
   local fakebin=$1
   cat > "$fakebin/tasks-axi" <<'SH'
@@ -922,6 +936,7 @@ SH
 test_output_ordering_diagnostics_lead() {
   local rec root home fakebin out lock_line boot_line wake_line read_once_line
   local context_line fleet_line next_line inventory_line missing_line
+  local ordering_path base_dir tool_path tool_name
   rec=$(new_world ordering)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -931,10 +946,12 @@ EOF
   # Force a MISSING diagnostic line so the bootstrap section is non-trivial.
   rm -f "$fakebin/node"
 
+  ordering_path=$(make_path_without_node "$TMP_ROOT/ordering-path")
+
   printf 'window=fm-sess:w1\nkind=ship\n' > "$home/state/task-a.meta"
   printf 'Captain memory that may be truncated away safely.\n' > "$home/data/captain.md"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(run_session_start "$home" "$root" "$fakebin:$ordering_path")
 
   lock_line=$(printf '%s\n' "$out" | grep -n '^LOCK$' | head -1 | cut -d: -f1)
   boot_line=$(printf '%s\n' "$out" | grep -n '^BOOTSTRAP$' | head -1 | cut -d: -f1)
@@ -1326,7 +1343,7 @@ EOF
 # --- composition: real scripts run, not reimplemented ------------------------
 
 test_composition_invokes_real_scripts() {
-  local rec root home fakebin out
+  local rec root home fakebin out base_path
   rec=$(new_world composition)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -1334,11 +1351,12 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   rm -f "$fakebin/node"
+  base_path=$(make_path_without_node "$TMP_ROOT/composition-path")
 
   printf 'needs-decision: pick a library\n' > "$home/state/task-z.status"
   append_wake "$home/state" signal task-z.status "needs-decision: pick a library"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(run_session_start "$home" "$root" "$fakebin:$base_path")
 
   # fm-lock.sh's own exact success text.
   assert_contains "$out" "lock acquired: harness pid" "fm-lock.sh's real output did not appear (composition, not reimplementation)"
@@ -2118,6 +2136,26 @@ EOF
   pass "session start accepts a registered .cursor/hooks.json without a diagnostic"
 }
 
+test_cursor_primary_rejects_empty_or_malformed_hooks() {
+  local rec root home fakebin out
+  rec=$(new_world cursor-hooks-invalid)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" cursor
+  mkdir -p "$root/.cursor"
+  printf '%s\n' '{"version":1,"hooks":{"stop":[],"preToolUse":[]}}' > "$root/.cursor/hooks.json"
+  out=$(FM_FAKE_HARNESS=cursor run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "CURSOR_HOOKS: not registered or malformed" \
+    "empty Cursor hook arrays must produce a registration diagnostic"
+  printf '%s\n' '{"version":1,"hooks":{"stop":[{"command":"true","timeout":1}],"preToolUse":[{"matcher":"Bash","command":"true","timeout":1}]}}' > "$root/.cursor/hooks.json"
+  out=$(FM_FAKE_HARNESS=cursor run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "CURSOR_HOOKS: not registered or malformed" \
+    "wrong Cursor hook commands or matcher must produce a registration diagnostic"
+  pass "session start rejects empty and structurally wrong Cursor hooks"
+}
+
 test_pi_diagnostic_rejects_stale_loaded_marker() {
   local rec root home fakebin out marker holder_pid
   rec=$(new_world pi-stale-loaded-marker)
@@ -2257,6 +2295,7 @@ test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
 test_cursor_primary_reports_hooks_registration
 test_cursor_primary_accepts_registered_hooks
+test_cursor_primary_rejects_empty_or_malformed_hooks
 test_pi_diagnostic_rejects_stale_loaded_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker
 test_pi_diagnostic_rejects_missing_turnend_guard_marker

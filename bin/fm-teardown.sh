@@ -1431,20 +1431,25 @@ reap_task_backend_process_group() {  # <label>
 # `node .../index.js worker-server` child detaches from the pane (reparents to
 # init) and can leave the task worktree's cwd, so the cwd-based reaper below
 # cannot see it - the observed cursor-worker-server-cleanup-gap incident
-# (2026-08-05). The record carries the pid plus its starttime identity, so a
-# recycled pid is never killed. A missing record falls through to the cwd-based
-# reaper unchanged. Never matches a generic worker-server cmdline or the cursor
-# install dir: both are shared across homes and tasks.
+# (2026-08-05). The record carries the pid plus its process identity, using
+# Linux starttime or a portable `ps lstart` value, so a recycled pid is never
+# killed. A missing record falls through to the cwd-based reaper unchanged.
+# Never matches a generic worker-server cmdline or the cursor install dir: both
+# are shared across homes and tasks.
 reap_cursor_worker_server() {  # <meta>
-  local meta=$1 pid starttime current
+  local meta=$1 pid starttime identity current
   pid=$(grep '^cursor_worker_server=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   case "$pid" in ''|*[!0-9]*) pid= ;; esac
   [ -n "$pid" ] || return 0
   starttime=$(grep '^cursor_worker_server_start=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-  case "$starttime" in ''|*[!0-9]*) starttime= ;; esac
-  [ -n "$starttime" ] || return 0
+  case "$starttime" in
+    ''|*[!0-9]*)
+      case "$starttime" in starttime=*|lstart=*) identity=$starttime ;; *) return 0 ;; esac
+      ;;
+    *) identity="starttime=$starttime" ;;
+  esac
   if ! current=$(task_process_identity "$pid") \
-     || [ "$current" != "starttime=$starttime" ]; then
+     || [ "$current" != "$identity" ]; then
     # The pid was recycled or is gone; nothing to reap. Remove the stale
     # record so a later teardown does not re-consult it.
     remove_cursor_worker_server_record "$meta"
@@ -1453,7 +1458,7 @@ reap_cursor_worker_server() {  # <meta>
   echo "teardown: reaping recorded cursor worker-server for $ID: $pid" >&2
   kill -TERM "$pid" 2>/dev/null || true
   sleep 1
-  if task_process_identity_matches "$pid" "starttime=$starttime"; then
+  if task_process_identity_matches "$pid" "$identity"; then
     echo "teardown: force-killing recorded cursor worker-server for $ID: $pid" >&2
     kill -KILL "$pid" 2>/dev/null || true
   fi

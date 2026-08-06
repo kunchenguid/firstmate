@@ -9,8 +9,9 @@
 #      (unsafe-for-injection), never `empty`. This is the safety fix.
 #   2. The SAME shell glyph INSIDE a bordered composer box is the harness's own
 #      prompt and still reads `empty` (existing behavior preserved).
-#   3. The AGENT prompt glyphs `❯` (claude), `›` (codex), `⟩` (muse), and `→`
-#      (cursor) are a genuine empty agent composer either way, bordered or bare.
+#   3. The AGENT prompt glyphs `❯` (claude), `›` (codex), and `⟩` (muse) are a
+#      genuine empty agent composer either way, bordered or bare; Cursor's `→`
+#      needs Cursor context unless it is structurally bordered.
 #   4. Real unsubmitted text reads `pending`; a known idle placeholder reads
 #      `empty`.
 set -u
@@ -127,11 +128,13 @@ test_real_text_is_pending() {
 
 # --- Cursor agent glyph (→) ---
 
-test_cursor_agent_glyph_is_empty() {
+test_cursor_agent_glyph_requires_cursor_context() {
   local out
-  out=$(classify 0 '→'); [ "$out" = empty ] || fail "bare cursor '→' should read empty, got '$out'"
+  out=$(classify 0 '→'); [ "$out" = unknown ] || fail "bare unscoped '→' should read unknown, got '$out'"
+  out=$(classify 0 '→' '' sensitive '' cursor)
+  [ "$out" = empty ] || fail "bare Cursor '→' should read empty with Cursor context, got '$out'"
   out=$(classify 1 '→'); [ "$out" = empty ] || fail "bordered cursor '→' should read empty, got '$out'"
-  pass "fm_composer_classify_content: cursor agent glyph (→) reads empty bordered or bare"
+  pass "fm_composer_classify_content: bare cursor arrow needs Cursor context"
 }
 
 test_cursor_idle_placeholder_is_empty() {
@@ -167,6 +170,8 @@ test_cursor_stripped_ghost_plain_is_empty() {
   [ "$out" = unknown ] || fail "stripped '→ Add a follow-up' without an idle match must stay unknown, got '$out'"
   out=$(classify 0 '' '' sensitive '→')
   [ "$out" = unknown ] || fail "stripped bare '→' must stay unknown without an idle match, got '$out'"
+  out=$(classify 0 '' '' sensitive '→' cursor)
+  [ "$out" = empty ] || fail "stripped bare Cursor '→' must read empty with Cursor context, got '$out'"
   out=$(classify 0 '' '' sensitive '> ls')
   [ "$out" = unknown ] || fail "stripped shell-glyph row '> ls' must stay unknown, got '$out'"
   pass "fm_composer_classify_content: stripped ghost-only rows read empty only on an idle match, else unknown"
@@ -181,7 +186,7 @@ test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
-test_cursor_agent_glyph_is_empty
+test_cursor_agent_glyph_requires_cursor_context
 test_cursor_idle_placeholder_is_empty
 test_cursor_real_text_is_pending
 test_cursor_stripped_ghost_plain_is_empty

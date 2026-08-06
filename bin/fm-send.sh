@@ -473,6 +473,8 @@ else
   if [ -z "${FM_COMPOSER_IDLE_RE:-}" ] && [ "$TARGET_HARNESS" = cursor ]; then
     FM_COMPOSER_IDLE_RE='^Add a follow-up$'
   fi
+  FM_COMPOSER_HARNESS=$TARGET_HARNESS
+  export FM_COMPOSER_HARNESS
   export FM_COMPOSER_IDLE_RE
   # Type once, submit, verify. Only exact empty confirms delivery; every other
   # verdict preserves the loud refusal boundary.

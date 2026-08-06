@@ -275,6 +275,8 @@ fm_composer_strip_ghost() {
 #              "Type a message...") that reads as empty; matched both before and
 #              after a leading prompt glyph is stripped, so a pattern written
 #              with or without the glyph both land.
+#   [harness]  optional harness identity; bare Cursor arrow is empty only for
+#              Cursor or a structurally bordered composer.
 fm_composer_idle_matches() {
   local content=$1 idle_re=$2 idle_case=$3
   [ -n "$idle_re" ] || return 1
@@ -284,9 +286,10 @@ fm_composer_idle_matches() {
   esac
 }
 
-fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content]
-  local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
+fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content] [harness]
+  local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content harness remainder
   plain_content=${5:-$content}
+  harness=${6:-${FM_COMPOSER_HARNESS:-}}
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     # Ghost stripping emptied the row, so every byte was de-emphasised. A bare
     # de-emphasised row is a confirmed empty agent composer only when its
@@ -295,6 +298,16 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
     # "Add a follow-up" (verified cursor-agent 2026.07.23-e383d2b). Any other
     # fully de-emphasised bare row - a dimmed shell prompt, a dimmed prompt
     # glyph alone - stays unknown: never a safe injection target.
+    case "$plain_content" in
+      '→'|'→ '*)
+        remainder=${plain_content#'→'}
+        remainder="${remainder#"${remainder%%[![:space:]]*}"}"
+        if [ -z "$remainder" ]; then
+          if [ "$harness" = cursor ]; then printf 'empty'; else printf 'unknown'; fi
+          return 0
+        fi
+        ;;
+    esac
     case "$plain_content" in
       '→ '*) plain_content=${plain_content#'→ '} ;;
       '❯ '*) plain_content=${plain_content#'❯ '} ;;
@@ -315,11 +328,14 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   fi
   # A bare prompt glyph on its own row.
   case "$content" in
-    '→'|'❯'|'›'|'⟩')
-      # Agent prompt glyph: a genuine empty agent composer, bordered or bare.
-      # → is cursor-agent's bare prompt glyph (reproduced on cursor-agent
-      # 2026.07.23-e383d2b).
-      printf 'empty'; return 0 ;;
+    '→')
+      if [ "$bordered" = 1 ] || [ "$harness" = cursor ]; then
+        printf 'empty'
+      else
+        printf 'unknown'
+      fi
+      return 0 ;;
+    '❯'|'›'|'⟩') printf 'empty'; return 0 ;;
     '>'|'$'|'%'|'#')
       # Shell prompt glyph: empty ONLY inside a composer box (the harness's own
       # prompt). Bare, it is a dead-shell prompt - never a safe injection target.

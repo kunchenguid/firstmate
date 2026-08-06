@@ -729,11 +729,8 @@ This is deliberately NOT wired as a state source (captain decision 2026-08-04, o
 
 **Liveness state:**
 
-```sh
-$ LC_ALL=C ps -t pts/18 -o pid=,ppid=,pgid=,tpgid=,comm=,args=
- 564102 1790016 564102 564102 MainThread  ~/.local/share/cursor-agent/versions/<version>/cursor-agent ...
-$ tmux list-panes -t cursorlab -F '#{pane_current_command}'
-cursor-agent
+```text
+<Cursor liveness evidence redacted>
 ```
 
 Kernel exec name: `MainThread` (Node bundle).

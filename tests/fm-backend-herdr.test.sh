@@ -3045,6 +3045,21 @@ test_composer_state_popup_placeholder_fill_is_pending() {
 # (a dead-shell prompt is never an injection target) and real typed text
 # stays pending.
 
+test_composer_state_cursor_bare_arrow_requires_context() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-cursor-arrow"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '  →\n' > "$resp/1.out"
+  printf '  →\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = unknown ] || fail "an unscoped bare '→' row must stay unknown, got '$out'"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_COMPOSER_HARNESS=cursor \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "a bare Cursor '→' row must read empty with Cursor context, got '$out'"
+  pass "fm_backend_herdr_composer_state: bare arrow classification is scoped to Cursor"
+}
+
 test_composer_state_cursor_idle_placeholder_is_empty() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-cursor-idle"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -4368,6 +4383,7 @@ test_composer_state_bare_prompt_is_empty
 test_composer_state_ghost_placeholder_is_empty
 test_composer_state_real_text_is_pending
 test_composer_state_popup_placeholder_fill_is_pending
+test_composer_state_cursor_bare_arrow_requires_context
 test_composer_state_cursor_idle_placeholder_is_empty
 test_composer_state_cursor_dimmed_bare_row_stays_unknown
 test_composer_state_cursor_real_text_is_pending

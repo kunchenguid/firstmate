@@ -15,26 +15,25 @@
 #      must re-arm rather than end blind (the Claude --claude-mode lesson,
 #      bin/fm-turnend-guard.sh:41-46). The shim owns the bound instead, in one
 #      session-scoped chain record under state/ (.cursor-turnend-chain, keys
-#      session/fail/wake/reason, reset on session mismatch): consecutive loud
-#      arm-failure follow-ups (FM_CURSOR_TURNEND_BLOCK_BUDGET) and consecutive
-#      repeats of the SAME unchanged wake reason (FM_CURSOR_WAKE_CHAIN_BUDGET,
-#      a diagnostic follow-up at the ceiling that also clears the record so the
-#      next chain starts normal again). Each kind resets the other, a changed
-#      wake reason is progress and restarts the wake count, and an allowed stop
-#      or a non-continuation stop (loop_count 0, i.e. a captain-driven turn)
-#      clears the record. Over all of it sits one unified hard bound: a chain
-#      whose loop_count reaches BLOCK_BUDGET + WAKE_BUDGET ends, which no
-#      branch and no state-write failure can evade. When the record cannot be
-#      persisted the payload's loop_count is the fallback per-branch bound too,
-#      so a read-only state dir degrades to the pre-counter behaviour instead
-#      of an un-endable chain;
+#      session/total/fail/wake/reason, reset on session mismatch): consecutive
+#      loud arm-failure follow-ups (FM_CURSOR_TURNEND_BLOCK_BUDGET) and
+#      consecutive repeats of the SAME unchanged wake reason
+#      (FM_CURSOR_WAKE_CHAIN_BUDGET, a diagnostic follow-up at the ceiling that
+#      also clears the record so the next chain starts normal again). Distinct
+#      wake reasons are progress and do not consume the unified count; failures
+#      and repeated reasons add to it, so alternating failures and wakes cannot
+#      evade the ceiling. An allowed stop or a non-continuation stop (loop_count
+#      0, i.e. a captain-driven turn) clears the record. If the record cannot be
+#      persisted, a positive payload loop_count supplies the fallback count;
+#      absent or malformed loop_count never disables the persistent bound.
 #   3. runs bin/fm-turnend-guard.sh with the normalized payload;
 #   4. on exit 2 (a blind turn), foregrounds bin/fm-watch-arm.sh inside the
 #      hook-owned process tree - parked while the watcher arms, never shell
 #      & - then re-runs bin/fm-turnend-guard.sh against the post-arm state;
 #   5. emits a normal wake followup when the arm reports a typed actionable
 #      reason but the re-run still needs the model; a failed or untyped arm
-#      keeps the loud guard banner, and any other exit emits {}.
+#      keeps the loud guard banner, and only a vanished need or healthy watcher
+#      emits {}.
 #
 # The translation layer is the grok-shim pattern (bin/fm-turnend-guard-grok.sh):
 # a thin layer, zero changes to the shared predicate. The arm/park follows the
@@ -72,23 +71,32 @@ CHAIN_FILE="$STATE/.cursor-turnend-chain"
 SESSION=$(printf '%s' "$PAYLOAD" | jq -r '
   if type == "object" and (.session_id | type) == "string" then .session_id else "unknown" end
 ' 2>/dev/null) || SESSION=unknown
-LOOP_COUNT=$(printf '%s' "$PAYLOAD" | jq -r '
-  if type == "object" and (.loop_count | type) == "number" and .loop_count > 0
-  then (.loop_count | floor) else 0 end
-' 2>/dev/null) || LOOP_COUNT=0
-case "$LOOP_COUNT" in ''|*[!0-9]*) LOOP_COUNT=0 ;; esac
+LOOP_COUNT_VALUE=$(printf '%s' "$PAYLOAD" | jq -r '
+  if type == "object" and has("loop_count")
+     and ((.loop_count | type) == "number") and .loop_count >= 0
+  then (.loop_count | floor) else empty end
+' 2>/dev/null) || LOOP_COUNT_VALUE=
+LOOP_COUNT=0
+LOOP_COUNT_VALID=0
+case "$LOOP_COUNT_VALUE" in
+  ''|*[!0-9]*) ;;
+  *) LOOP_COUNT=$LOOP_COUNT_VALUE; LOOP_COUNT_VALID=1 ;;
+esac
 
 CHAIN_SESSION=
+CHAIN_TOTAL=0
 CHAIN_FAIL=0
 CHAIN_WAKE=0
 CHAIN_REASON=
 
 chain_load() {
   local key value
-  [ -f "$CHAIN_FILE" ] || return 0
+  [ -f "$CHAIN_FILE" ] || { CHAIN_TOTAL=0; return 0; }
+  CHAIN_TOTAL=
   while IFS='=' read -r key value; do
     case "$key" in
       session) CHAIN_SESSION=$value ;;
+      total) CHAIN_TOTAL=$value ;;
       fail) CHAIN_FAIL=$value ;;
       wake) CHAIN_WAKE=$value ;;
       reason) CHAIN_REASON=$value ;;
@@ -96,7 +104,11 @@ chain_load() {
   done < "$CHAIN_FILE"
   case "$CHAIN_FAIL" in ''|*[!0-9]*) CHAIN_FAIL=0 ;; esac
   case "$CHAIN_WAKE" in ''|*[!0-9]*) CHAIN_WAKE=0 ;; esac
-  if [ "$CHAIN_SESSION" != "$SESSION" ] || [ "$LOOP_COUNT" -eq 0 ]; then
+  case "$CHAIN_TOTAL" in ''|*[!0-9]*) CHAIN_TOTAL=$((CHAIN_FAIL + CHAIN_WAKE)) ;; esac
+  if [ "$CHAIN_SESSION" != "$SESSION" ] || {
+    [ "$LOOP_COUNT_VALID" -eq 1 ] && [ "$LOOP_COUNT" -eq 0 ];
+  }; then
+    CHAIN_TOTAL=0
     CHAIN_FAIL=0
     CHAIN_WAKE=0
     CHAIN_REASON=
@@ -104,9 +116,18 @@ chain_load() {
 }
 
 chain_store() {
+  local tmp
   [ -d "$STATE" ] || return 1
-  printf 'session=%s\nfail=%s\nwake=%s\nreason=%s\n' \
-    "$SESSION" "$1" "$2" "$3" > "$CHAIN_FILE" 2>/dev/null || return 1
+  tmp="$CHAIN_FILE.$$"
+  if ! printf 'session=%s\ntotal=%s\nfail=%s\nwake=%s\nreason=%s\n' \
+    "$SESSION" "$1" "$2" "$3" "$4" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! mv -f "$tmp" "$CHAIN_FILE" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
   return 0
 }
 
@@ -153,16 +174,6 @@ printf '%s' "$NORMALIZED" | "$ROOT/bin/fm-turnend-guard.sh" 2>"$ERR"
 RC=$?
 [ "$RC" -eq 2 ] || allow_stop
 
-# One unified hard bound on the whole forced-continuation chain, taken from the
-# payload so no branch and no state failure can evade it. loop_count returns to
-# 0 on the next captain-driven turn, so this ends a runaway chain without
-# latching the session.
-if [ "$LOOP_COUNT" -ge "$TOTAL_BUDGET" ]; then
-  rm -f "$CHAIN_FILE" 2>/dev/null || true
-  printf '{}\n'
-  exit 0
-fi
-
 if [ "$ARM_ACTIONABLE" -eq 1 ]; then
   # Only a wake reason that keeps re-firing unchanged advances the chain count;
   # a different reason is progress and restarts it.
@@ -171,8 +182,20 @@ if [ "$ARM_ACTIONABLE" -eq 1 ]; then
   else
     COUNT=1
   fi
-  chain_store 0 "$COUNT" "$WAKE_REASON" || COUNT=$((LOOP_COUNT + 1))
-  if [ "$COUNT" -gt "$WAKE_BUDGET" ]; then
+  TOTAL=$CHAIN_TOTAL
+  [ "$WAKE_REASON" = "$CHAIN_REASON" ] && TOTAL=$((TOTAL + 1))
+  if ! chain_store "$TOTAL" 0 "$COUNT" "$WAKE_REASON"; then
+    if [ "$LOOP_COUNT_VALID" -eq 1 ] && [ "$LOOP_COUNT" -gt 0 ]; then
+      FALLBACK_TOTAL=$((LOOP_COUNT + 1))
+      [ "$FALLBACK_TOTAL" -gt "$TOTAL" ] && TOTAL=$FALLBACK_TOTAL
+    else
+      TOTAL=$TOTAL_BUDGET
+    fi
+  fi
+  if [ "$TOTAL" -ge "$TOTAL_BUDGET" ]; then
+    rm -f "$CHAIN_FILE" 2>/dev/null || true
+    REASON="firstmate watcher wake - the bounded stop-hook chain reached its diagnostic ceiling. Run bin/fm-wake-drain.sh first, handle the wake, and investigate the repeated supervision cycle."
+  elif [ "$COUNT" -gt "$WAKE_BUDGET" ]; then
     rm -f "$CHAIN_FILE" 2>/dev/null || true
     REASON="firstmate watcher wake - the same wake reason has now repeated $COUNT times without clearing. Run bin/fm-wake-drain.sh first, handle the wake, and investigate why it keeps re-firing."
   else
@@ -180,16 +203,25 @@ if [ "$ARM_ACTIONABLE" -eq 1 ]; then
   fi
 else
   COUNT=$((CHAIN_FAIL + 1))
-  if ! chain_store "$COUNT" 0 ''; then
-    COUNT=$((LOOP_COUNT + 1))
-  fi
-  if [ "$COUNT" -gt "$BLOCK_BUDGET" ]; then
-    chain_store 0 0 '' || true
-    printf '{}\n'
-    exit 0
+  TOTAL=$((CHAIN_TOTAL + 1))
+  NEXT_FAIL=$COUNT
+  [ "$COUNT" -gt "$BLOCK_BUDGET" ] && NEXT_FAIL=0
+  if ! chain_store "$TOTAL" "$NEXT_FAIL" 0 ''; then
+    if [ "$LOOP_COUNT_VALID" -eq 1 ] && [ "$LOOP_COUNT" -gt 0 ]; then
+      FALLBACK_TOTAL=$((LOOP_COUNT + 1))
+      [ "$FALLBACK_TOTAL" -gt "$TOTAL" ] && TOTAL=$FALLBACK_TOTAL
+    else
+      TOTAL=$TOTAL_BUDGET
+    fi
   fi
   REASON=$(cat "$ERR" 2>/dev/null || true)
   [ -n "$REASON" ] || REASON='tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn'
+  if [ "$TOTAL" -ge "$TOTAL_BUDGET" ]; then
+    rm -f "$CHAIN_FILE" 2>/dev/null || true
+    REASON="${REASON}"$'\n'"Cursor stop-hook arm still fails after the bounded chain. Repair .cursor/hooks.json registration and watcher startup before ending blind."
+  elif [ "$COUNT" -gt "$BLOCK_BUDGET" ]; then
+    REASON="${REASON}"$'\n'"Cursor stop-hook arm has failed repeatedly. Repair .cursor/hooks.json registration and watcher startup before ending blind."
+  fi
 fi
 # Render the reason as one JSON string: cursor shows the followup_message
 # verbatim in the pane.
