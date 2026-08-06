@@ -638,16 +638,18 @@ if [ "$PRIMARY_HARNESS" = cursor ]; then
   # The stop hook must carry the long timeout and the preToolUse seatbelt must
   # be registered with the Shell matcher.
   CURSOR_HOOKS="$FM_ROOT/.cursor/hooks.json"
+  CURSOR_STOP_COMMAND='[ -n "${CURSOR_PROJECT_DIR:-}" ] && exec "${CURSOR_PROJECT_DIR:-}/bin/fm-turnend-guard-cursor.sh"; exit 0'
+  CURSOR_PRETOOL_COMMAND='[ -n "${CURSOR_PROJECT_DIR:-}" ] && exec "${CURSOR_PROJECT_DIR:-}/bin/fm-arm-pretool-check.sh" --cursor; exit 0'
   CURSOR_HOOKS_OK=0
   if [ -f "$CURSOR_HOOKS" ] && command -v jq >/dev/null 2>&1; then
-    if jq -e '
+    if jq -e --arg stop_command "$CURSOR_STOP_COMMAND" --arg pretool_command "$CURSOR_PRETOOL_COMMAND" '
       .version == 1
       and (.hooks | type) == "object"
       and (.hooks.stop | type) == "array"
       and (.hooks.stop | length) > 0
       and all(.hooks.stop[];
         type == "object"
-        and (.command | type == "string" and contains("fm-turnend-guard-cursor.sh"))
+        and (.command == $stop_command)
         and (.timeout | type == "number" and . >= 600)
         and (has("loop_limit") and .loop_limit == null)
       )
@@ -656,7 +658,7 @@ if [ "$PRIMARY_HARNESS" = cursor ]; then
       and all(.hooks.preToolUse[];
         type == "object"
         and (.matcher == "Shell")
-        and (.command | type == "string" and contains("fm-arm-pretool-check.sh") and contains("--cursor"))
+        and (.command == $pretool_command)
         and (.timeout | type == "number" and . > 0)
       )
     ' "$CURSOR_HOOKS" >/dev/null 2>&1; then

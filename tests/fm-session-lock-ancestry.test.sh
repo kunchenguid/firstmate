@@ -134,6 +134,41 @@ SH
   pass "session-lock: ordinary script paths under a harness directory are not harness processes"
 }
 
+test_mainthread_cursor_session_is_identified() {
+  local dir fakebin got
+  dir="$TMP_ROOT/mainthread-cursor"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  710:comm=) printf '%s\n' MainThread ;;
+  710:args=) printf '%s\n' '/opt/cursor-agent/versions/current/cursor-agent --force' ;;
+  710:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash tests/run.sh' ;;
+  *:ppid=) printf '%s\n' 710 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '710\n' > "$dir/state/.lock"
+  got=$(lib_eval "$fakebin" 'fm_harness_ancestry_pid') || fail "MainThread Cursor session was not found in ancestry"
+  [ "$got" = 710 ] || fail "MainThread Cursor ancestry resolved '$got', expected 710"
+  lib_eval "$fakebin" 'fm_harness_pid_alive 710' || fail "MainThread Cursor session was not live"
+  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "MainThread Cursor session did not own its lock"
+  pass "session-lock: Cursor MainThread ancestry identifies and owns its session lock"
+}
+
 test_harness_beyond_a_gap_never_owns_the_lock() {
   local dir fakebin got
   dir="$TMP_ROOT/gap"
@@ -356,6 +391,7 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
 
 test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
+test_mainthread_cursor_session_is_identified
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_e2e_version_named_session_claims_the_home

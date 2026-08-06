@@ -287,9 +287,10 @@ fm_composer_idle_matches() {
 }
 
 fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content] [harness]
-  local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content harness remainder
+  local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content harness remainder arrow_leading=0
   plain_content=${5:-$content}
   harness=${6:-${FM_COMPOSER_HARNESS:-}}
+  case "$plain_content" in '→'|'→ '*) arrow_leading=1 ;; esac
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     # Ghost stripping emptied the row, so every byte was de-emphasised. A bare
     # de-emphasised row is a confirmed empty agent composer only when its
@@ -319,7 +320,8 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
       '⟩'*) plain_content=${plain_content#'⟩'} ;;
     esac
     plain_content="${plain_content#"${plain_content%%[![:space:]]*}"}"
-    if fm_composer_idle_matches "$plain_content" "$idle_re" "$idle_case"; then
+    if { [ "$arrow_leading" -eq 0 ] || [ "$harness" = cursor ]; } \
+      && fm_composer_idle_matches "$plain_content" "$idle_re" "$idle_case"; then
       printf 'empty'
     else
       printf 'unknown'
@@ -345,7 +347,9 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   # Nothing on the row = empty composer.
   [ -n "$content" ] || { printf 'empty'; return 0; }
   # Known idle placeholder (matched before a leading glyph is stripped).
-  if fm_composer_idle_matches "$content" "$idle_re" "$idle_case"; then
+  case "$content" in '→'|'→ '*) arrow_leading=1 ;; esac
+  if { [ "$arrow_leading" -eq 0 ] || [ "$bordered" = 1 ] || [ "$harness" = cursor ]; } \
+    && fm_composer_idle_matches "$content" "$idle_re" "$idle_case"; then
     printf 'empty'; return 0
   fi
   # Strip a leading prompt glyph, then re-judge the remainder.
@@ -358,8 +362,13 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   [ -n "$content" ] || { printf 'empty'; return 0; }
   # Known idle placeholder (matched again after the leading glyph was stripped,
   # e.g. "❯ Type a message...").
-  if fm_composer_idle_matches "$content" "$idle_re" "$idle_case"; then
+  if { [ "$arrow_leading" -eq 0 ] || [ "$bordered" = 1 ] || [ "$harness" = cursor ]; } \
+    && fm_composer_idle_matches "$content" "$idle_re" "$idle_case"; then
     printf 'empty'; return 0
+  fi
+  if [ "$arrow_leading" -eq 1 ] && [ "$bordered" != 1 ] && [ "$harness" != cursor ] \
+    && fm_composer_idle_matches "$content" "$idle_re" "$idle_case"; then
+    printf 'unknown'; return 0
   fi
   # Real, unsubmitted content remains.
   printf 'pending'; return 0

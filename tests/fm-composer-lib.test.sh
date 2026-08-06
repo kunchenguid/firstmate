@@ -140,7 +140,9 @@ test_cursor_agent_glyph_requires_cursor_context() {
 test_cursor_idle_placeholder_is_empty() {
   local idle='Add a follow-up' out
   out=$(classify 0 '→ Add a follow-up' "$idle")
-  [ "$out" = empty ] || fail "cursor idle placeholder '→ Add a follow-up' should read empty, got '$out'"
+  [ "$out" = unknown ] || fail "an unscoped arrow idle placeholder must stay unknown, got '$out'"
+  out=$(classify 0 '→ Add a follow-up' "$idle" insensitive '' cursor)
+  [ "$out" = empty ] || fail "a Cursor arrow idle placeholder should read empty, got '$out'"
   out=$(classify 0 '→ Add a follow-up')
   [ "$out" = pending ] || fail "cursor idle placeholder without idle regex should be pending, got '$out'"
   pass "fm_composer_classify_content: cursor idle placeholder 'Add a follow-up' reads empty"
@@ -160,9 +162,11 @@ test_cursor_stripped_ghost_plain_is_empty() {
   # rests on the plain-content fallback, which requires an idle-placeholder
   # match (anchored or not, glyph stripped before matching).
   out=$(classify 0 '' 'Add a follow-up' sensitive '→ Add a follow-up')
-  [ "$out" = empty ] || fail "stripped '→ Add a follow-up' with an idle match should read empty, got '$out'"
-  out=$(classify 0 '' '^Add a follow-up$' sensitive '→ Add a follow-up')
-  [ "$out" = empty ] || fail "stripped '→ Add a follow-up' with an anchored idle match should read empty, got '$out'"
+  [ "$out" = unknown ] || fail "unscoped stripped '→ Add a follow-up' must stay unknown, got '$out'"
+  out=$(classify 0 '' 'Add a follow-up' sensitive '→ Add a follow-up' cursor)
+  [ "$out" = empty ] || fail "stripped Cursor '→ Add a follow-up' with an idle match should read empty, got '$out'"
+  out=$(classify 0 '' '^Add a follow-up$' sensitive '→ Add a follow-up' cursor)
+  [ "$out" = empty ] || fail "stripped Cursor '→ Add a follow-up' with an anchored idle match should read empty, got '$out'"
   # Without an idle match the ghost-stripped row stays unknown: a fully
   # de-emphasised bare row (dimmed shell prompt, dimmed glyph alone) is never
   # a safe injection target on glyph shape alone.

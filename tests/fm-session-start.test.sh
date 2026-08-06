@@ -2149,7 +2149,7 @@ EOF
   out=$(FM_FAKE_HARNESS=cursor run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "CURSOR_HOOKS: not registered or malformed" \
     "empty Cursor hook arrays must produce a registration diagnostic"
-  printf '%s\n' '{"version":1,"hooks":{"stop":[{"command":"true","timeout":1}],"preToolUse":[{"matcher":"Bash","command":"true","timeout":1}]}}' > "$root/.cursor/hooks.json"
+  printf '%s\n' '{"version":1,"hooks":{"stop":[{"command":"echo fm-turnend-guard-cursor.sh","timeout":600,"loop_limit":null}],"preToolUse":[{"matcher":"Shell","command":"echo fm-arm-pretool-check.sh --cursor","timeout":1}]}}' > "$root/.cursor/hooks.json"
   out=$(FM_FAKE_HARNESS=cursor run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "CURSOR_HOOKS: not registered or malformed" \
     "wrong Cursor hook commands or matcher must produce a registration diagnostic"

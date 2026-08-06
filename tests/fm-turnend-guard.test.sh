@@ -1064,6 +1064,22 @@ EOF
   chmod +x "$dir/bin/fm-watch-arm.sh"
 }
 
+install_alternating_actionable_arm_stub() {
+  local dir=$1
+  cat > "$dir/bin/fm-watch-arm.sh" <<EOF
+#!/usr/bin/env bash
+printf 'arm-invoked\\n' >> "$dir/state/.arm-invocations"
+n=\$(wc -l < "$dir/state/.arm-invocations")
+if [ "\$((n % 2))" -eq 1 ]; then
+  printf 'signal: task-a.status\\n'
+else
+  printf 'signal: task-b.status\\n'
+fi
+exit 0
+EOF
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+}
+
 test_cursor_shim_bounds_loud_failure_followups() {
   local dir out i
   dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-fail-budget")
@@ -1167,17 +1183,39 @@ test_cursor_shim_hard_bound_ends_a_runaway_chain() {
   # One real arm sequence alternates actionable and failed closes. Distinct
   # progress does not consume the bound, but the failures eventually reach the
   # unified ceiling and keep a diagnostic instead of emitting {}.
-  for i in 1 2 3 4 5 6 7; do
-    out=$(cursor_shim_stop_without_loop_count env FM_CURSOR_TURNEND_BLOCK_BUDGET=2 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
+  for i in 1 2 3 4 5; do
+    out=$(cursor_shim_stop_without_loop_count env FM_CURSOR_TURNEND_BLOCK_BUDGET=2 FM_CURSOR_WAKE_CHAIN_BUDGET=3)
     [ "$out" != '{}' ] || fail "alternating arm sequence emitted {} before its diagnostic ceiling"
   done
-  out=$(cursor_shim_stop_without_loop_count env FM_CURSOR_TURNEND_BLOCK_BUDGET=2 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
+  out=$(cursor_shim_stop_without_loop_count env FM_CURSOR_TURNEND_BLOCK_BUDGET=2 FM_CURSOR_WAKE_CHAIN_BUDGET=3)
   [ "$out" != '{}' ] || fail "alternating arm sequence emitted {} at its diagnostic ceiling"
   assert_contains "$out" "bounded chain" \
     "alternating actionable/failed arms must reach the unified diagnostic ceiling"
   assert_contains "$out" "TURN WOULD END BLIND" \
     "alternating arm ceiling must retain loud failure guidance"
   pass "fm-turnend-guard-cursor: alternating arm outcomes share one persistent hard bound"
+}
+
+test_cursor_shim_bounds_nonconsecutive_wake_refires() {
+  local dir out i
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-wake-refires")
+  CURSOR_FIXTURE_DIR=$dir
+  : > "$dir/state/task1.meta"
+  install_alternating_actionable_arm_stub "$dir"
+  for i in 1 2 3 4; do
+    out=$(cursor_shim_stop "$i" env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
+    assert_not_contains "$out" "bounded chain" \
+      "distinct first-seen wake $i must not reach the diagnostic ceiling"
+  done
+  out=$(cursor_shim_stop 5 env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
+  assert_contains "$out" "diagnostic ceiling" \
+    "non-consecutive wake re-fires must reach the diagnostic ceiling"
+  out=$(cursor_shim_stop 6 env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
+  assert_contains "$out" "firstmate watcher wake" \
+    "the next chain must restart after a non-consecutive re-fire ceiling"
+  assert_not_contains "$out" "bounded chain" \
+    "the cleared re-fire ceiling must not latch"
+  pass "fm-turnend-guard-cursor: non-consecutive wake re-fires share the persistent bound"
 }
 
 test_cursor_shim_persists_bound_without_valid_loop_count() {
@@ -1302,7 +1340,7 @@ test_cursor_shim_missing_payload_allows() {
 }
 
 test_cursor_hooks_json_is_registered() {
-  local hooks present
+  local hooks
   hooks="$ROOT/.cursor/hooks.json"
   [ -f "$hooks" ] || fail "tracked .cursor/hooks.json is missing"
   jq -e '.version == 1' "$hooks" >/dev/null || fail "cursor hooks.json must carry the load-bearing version key"
@@ -1310,19 +1348,22 @@ test_cursor_hooks_json_is_registered() {
     || fail "cursor hooks.json must register a stop hook"
   jq -e '.hooks.preToolUse | type == "array" and length > 0' "$hooks" >/dev/null \
     || fail "cursor hooks.json must register a preToolUse hook"
-  present=$(jq -r '.hooks.stop[0].command // empty' "$hooks")
-  case "$present" in
-    *fm-turnend-guard-cursor.sh*) : ;;
-    *) fail "cursor stop hook must invoke the translating shim, got: $present" ;;
-  esac
-  present=$(jq -r '.hooks.preToolUse[0].command // empty' "$hooks")
-  case "$present" in
-    *fm-arm-pretool-check.sh*) : ;;
-    *) fail "cursor preToolUse hook must invoke the arm-pretool check, got: $present" ;;
-  esac
-  present=$(jq -r '.hooks.preToolUse[0].matcher // empty' "$hooks")
-  [ "$present" = Shell ] || fail "cursor preToolUse hook must scope its matcher to Shell, got: $present"
+  jq -e '.hooks.stop | all(.[]; type == "object" and (.timeout | type == "number" and . >= 600) and has("loop_limit") and .loop_limit == null)' "$hooks" >/dev/null \
+    || fail "cursor stop hooks must carry bounded timeout and loop_limit null"
+  jq -e '.hooks.preToolUse | all(.[]; type == "object" and .matcher == "Shell" and (.timeout | type == "number" and . > 0))' "$hooks" >/dev/null \
+    || fail "cursor preToolUse hooks must target Shell with positive timeout"
   pass "fm-turnend-guard-cursor: tracked .cursor/hooks.json registers the shim, the seatbelt, and the load-bearing version key"
+}
+
+test_cursor_pretool_hook_executes_seatbelt() {
+  local command payload out status
+  command=$(jq -r '.hooks.preToolUse[] | select(.matcher == "Shell") | .command' "$ROOT/.cursor/hooks.json")
+  payload=$(jq -cn '{tool_name:"Shell",tool_input:{command:"bin/fm-watch-arm.sh &"}}')
+  out=$(printf '%s' "$payload" | CURSOR_PROJECT_DIR="$ROOT" bash -c "$command" 2>&1); status=$?
+  expect_code 2 "$status" "cursor preToolUse hook must execute the seatbelt"
+  assert_contains "$out" '"permission":"deny"' \
+    "cursor preToolUse hook must return the deny permission object"
+  pass "fm-turnend-guard-cursor: tracked preToolUse hook executes the Cursor seatbelt"
 }
 
 test_cursor_shim_anchor_resolves_via_cursor_project_dir() {
@@ -2151,6 +2192,7 @@ test_cursor_shim_bounds_the_actionable_wake_chain
 test_cursor_shim_distinct_wakes_do_not_hit_the_chain_ceiling
 test_cursor_shim_fresh_turn_resets_the_wake_chain
 test_cursor_shim_hard_bound_ends_a_runaway_chain
+test_cursor_shim_bounds_nonconsecutive_wake_refires
 test_cursor_shim_persists_bound_without_valid_loop_count
 test_cursor_shim_failure_budget_is_session_scoped
 test_cursor_shim_falls_back_to_loop_count_without_writable_state
@@ -2158,6 +2200,7 @@ test_cursor_shim_arm_sources_x_mode_cadence
 test_cursor_shim_arm_defaults_cadence_without_x_mode
 test_cursor_shim_missing_payload_allows
 test_cursor_hooks_json_is_registered
+test_cursor_pretool_hook_executes_seatbelt
 test_cursor_shim_anchor_resolves_via_cursor_project_dir
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
