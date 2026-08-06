@@ -151,7 +151,7 @@ Claude Code was re-observed on 2026-08-06 at 2.1.223 with tmux on Linux, capturi
 The spinner row is only intermittently rendered: one 18-second turn was sampled every 0.6 seconds with the escape affordance present on every sample and the spinner on none.
 A spinner-only guard therefore has a blind window in which an active turn reads as idle, which is why Claude now takes either signal.
 
-Claude renders the affordance as one field of a hint row that begins with its permission-mode indicator, and the guard matches that complete anchored shape:
+Claude renders the affordance as one field of a hint row that begins with its permission-mode indicator, and the guard matches that complete anchored shape only on the last non-blank captured line:
 
 ```text
 busy   ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents
@@ -160,9 +160,8 @@ idle   ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
 idle   ⏵⏵ bypass permissions on · 2 shells · ← for agents · ↓ to manage
 ```
 
-Anchoring at the line start is what keeps rendered output apart from transcript text.
-An agent can print the footer's words, or quote the whole row, and then go idle; without the anchor that pane would read as perpetually busy and the away digest would never land, which is the away-mode wedge arriving from the other direction.
-Quoting or fencing puts a character before the indicator glyph, and ordinary prose starts with a word, so neither satisfies the anchor.
+The line-start anchor excludes quoted, fenced, and ordinary prose, while the last-line position excludes an exact unprefixed footer row printed earlier in the transcript.
+Without both boundaries an agent could print the footer text, go idle, and leave the pane read as perpetually busy, so the away digest would never land and the away-mode wedge would return from the other direction.
 
 A bare, undelimited `esc to interrupt` line is deliberately not busy for Claude.
 That exact shape is the ambiguous Claude Code 2.1.221 idle footer, which `tests/fm-daemon.test.sh` pins as an idle pane that must still accept an away digest.
