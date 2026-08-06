@@ -12,6 +12,7 @@ OPERATIONAL_USER_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-operational-user-layou
 VISIBILITY="$ROOT/.pi/extensions/lib/fm-calm-visibility.ts"
 WORKING_SHIP="$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts"
 WATCH_EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
+CALM_HELPER="$ROOT/bin/fm-calm-lib.sh"
 OPERATIONAL_INPUT="$ROOT/bin/fm-operational-input.sh"
 PI_OPERATIONAL_INPUT="$ROOT/.pi/extensions/lib/fm-operational-input.ts"
 PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent"}
@@ -354,7 +355,7 @@ JS
   pass "missing Pi presentation class exports reach the independent adapter degradation path"
 }
 
-test_builtin_gate_load_time() {
+test_shared_preference_parsing_and_builtin_gate() {
   local fixture out output_file status
   if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
     echo "skip: node or npm not found for Pi calm gate test"
@@ -368,27 +369,29 @@ test_builtin_gate_load_time() {
   fixture="$TMP_ROOT/gate-load-time"
   mkdir -p \
     "$fixture/project/.pi/extensions/lib" \
+    "$fixture/project/bin" \
     "$fixture/project/node_modules/@earendil-works" \
-    "$fixture/home-off/config" \
-    "$fixture/home-on/config"
+    "$fixture/cases"
   cp "$EXT" "$fixture/project/.pi/extensions/fm-calm.ts"
   cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$CALM_HELPER" "$fixture/project/bin/fm-calm-lib.sh"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
   ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
   printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
-  printf '%s\n' on >"$fixture/home-on/config/calm"
 
   output_file="$fixture/node-output"
   (cd "$fixture/project" && \
     EXT="$fixture/project/.pi/extensions/fm-calm.ts" \
-    HOME_OFF="$fixture/home-off" \
-    HOME_ON="$fixture/home-on" \
+    CALM_HELPER="$fixture/project/bin/fm-calm-lib.sh" \
+    CASES_ROOT="$fixture/cases" \
     node --input-type=module) >"$output_file" 2>&1 <<'JS'
+import { spawnSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 function fakePi() {
@@ -411,34 +414,58 @@ function fakePi() {
   return { pi, tools, handlers };
 }
 
-// Calm-off (config/calm absent for this home): load-time registration must be
-// entirely skipped, so a non-Calm user contests nothing.
-process.env.FM_HOME = process.env.HOME_OFF;
-const offRun = fakePi();
-const extensionOff = await import(`${pathToFileURL(process.env.EXT).href}?gate-off=${Date.now()}`);
-extensionOff.default(offRun.pi);
-if (offRun.tools.length !== 0) {
-  throw new Error(`Calm registered ${offRun.tools.length} built-ins while config/calm was absent: ${offRun.tools.map((t) => t.name).join(",")}`);
-}
-
-// Calm-on (config/calm="on" for this home): registration must happen synchronously,
-// during this same factory call, exactly the timing /reload's pre-session_start
-// transcript render depends on - not deferred to session_start or later.
-process.env.FM_HOME = process.env.HOME_ON;
-const onRun = fakePi();
-const extensionOn = await import(`${pathToFileURL(process.env.EXT).href}?gate-on=${Date.now()}`);
-extensionOn.default(onRun.pi);
-const names = onRun.tools.map((t) => t.name).sort();
 const expected = ["bash", "edit", "find", "grep", "ls", "read", "write"];
-if (JSON.stringify(names) !== JSON.stringify(expected)) {
-  throw new Error(`Calm registered ${JSON.stringify(names)} synchronously at load with config/calm=on, expected ${JSON.stringify(expected)}`);
+const cases = [
+  { name: "missing", active: false },
+  { name: "canonical", content: "on\n", active: true },
+  { name: "no-final-newline", content: "on", active: true },
+  { name: "ascii-padding", content: " \t\r\non \n", active: true },
+  { name: "unicode-padding", content: "\ufeff\u00a0on\u3000", active: true },
+  { name: "off", content: "off\n", active: false },
+  { name: "unrecognized", content: "enabled\n", active: false },
+  { name: "internal-whitespace", content: "o\nn", active: false },
+  { name: "extra-line", content: "on\noff\n", active: false },
+  { name: "embedded-nul", content: Buffer.from([0x6f, 0x00, 0x6e]), active: false },
+];
+const extension = await import(`${pathToFileURL(process.env.EXT).href}?shared-preference=${Date.now()}`);
+
+for (const testCase of cases) {
+  const home = `${process.env.CASES_ROOT}/${testCase.name}`;
+  const config = `${home}/config`;
+  mkdirSync(config, { recursive: true });
+  if (testCase.content !== undefined) writeFileSync(`${config}/calm`, testCase.content);
+
+  process.env.FM_HOME = home;
+  delete process.env.FM_CONFIG_OVERRIDE;
+  const piRun = fakePi();
+  extension.default(piRun.pi);
+  const piActive = piRun.tools.length > 0;
+
+  const shellRun = spawnSync(
+    "bash",
+    ["-c", '. "$1"; fm_calm_enabled "$2"', "calm-reader", process.env.CALM_HELPER, config],
+    { encoding: "utf8" },
+  );
+  if (shellRun.status !== 0 && shellRun.status !== 1) {
+    throw new Error(`Claude Calm reader failed for ${testCase.name}: ${shellRun.stderr}`);
+  }
+  const claudeActive = shellRun.status === 0;
+  if (piActive !== testCase.active || claudeActive !== testCase.active) {
+    throw new Error(`${testCase.name}: expected active=${testCase.active}, Pi=${piActive}, Claude=${claudeActive}`);
+  }
+
+  const names = piRun.tools.map((tool) => tool.name).sort();
+  const expectedNames = testCase.active ? expected : [];
+  if (JSON.stringify(names) !== JSON.stringify(expectedNames)) {
+    throw new Error(`${testCase.name}: Pi registered ${JSON.stringify(names)}, expected ${JSON.stringify(expectedNames)}`);
+  }
 }
 JS
   status=$?
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm gate-at-load-time path failed: $out"
   [ -z "$out" ] || fail "Pi calm gate-at-load-time test printed output: $out"
-  pass "Calm registers none of its 7 built-in tool wrappers at load while config/calm is off, and all 7 synchronously at load while config/calm is on"
+  pass "Pi and Claude share trimmed Calm preference parsing while Pi preserves its synchronous load-time gate"
 }
 
 test_calm_activation_collision_and_regression_bound() {
@@ -3656,7 +3683,7 @@ test_home_resolution
 test_pi_compat_no_upper_bound
 test_pi_compat_degraded_adapter
 test_pi_compat_missing_adapter_exports
-test_builtin_gate_load_time
+test_shared_preference_parsing_and_builtin_gate
 test_calm_activation_collision_and_regression_bound
 test_rendering_and_session_lifecycle
 test_operational_followup_turn_e2e
