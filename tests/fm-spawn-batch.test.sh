@@ -4,8 +4,9 @@
 # These exercise argument routing only: each spawn attempt fails before endpoint
 # creation, so the tests create no windows or worktrees. FM_SPAWN_NO_GUARD=1 keeps
 # them off the live watcher guard, and every home-local path points into TMP_ROOT.
-# Parser and path-scoping cases are table-driven; the only behavior asserted on
-# its own is "a multi-pair batch does not stop after the first failure".
+# Parser and path-scoping cases are table-driven.
+# Standalone regressions pin both multi-pair completion and the active-profile
+# explicit-harness backstop.
 set -u
 
 # shellcheck source=tests/lib.sh
