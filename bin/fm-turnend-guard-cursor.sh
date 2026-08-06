@@ -67,6 +67,30 @@ ROOT=${ROOT%/}
 
 STATE=${FM_STATE_OVERRIDE:-${FM_HOME:-$ROOT}/state}
 
+cursor_parent_identity() {
+  local pid=${PPID:-} proc_root stat_line starttime
+  local -a stat_fields
+  case "$pid" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$pid/stat" ]; then
+    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null || true)
+    read -r -a stat_fields <<< "${stat_line##*)}"
+    if [ "${#stat_fields[@]}" -ge 20 ]; then
+      starttime=${stat_fields[19]}
+      case "$starttime" in
+        ''|*[!0-9]*) ;;
+        *) printf 'proc:%s:%s' "$pid" "$starttime"; return 0 ;;
+      esac
+    fi
+  fi
+  starttime=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//' || true)
+  if [ -n "$starttime" ]; then
+    printf 'ps:%s:%s' "$pid" "$starttime"
+  else
+    printf 'pid:%s' "$pid"
+  fi
+}
+
 SESSION=$(printf '%s' "$PAYLOAD" | jq -r '
   if type != "object" then empty
   elif (.conversation_id | type) == "string" and .conversation_id != "" then .conversation_id
@@ -91,8 +115,7 @@ if [ -z "$SESSION" ]; then
   ' 2>/dev/null) || SESSION_TRANSCRIPT=
   SESSION_SCOPE=$SESSION_CONTEXT
   if [ -z "$SESSION_TRANSCRIPT" ]; then
-    SESSION_PARENT=${PPID:-}
-    case "$SESSION_PARENT" in ''|*[!0-9]*) SESSION_PARENT=unknown ;; esac
+    SESSION_PARENT=$(cursor_parent_identity)
     SESSION_SCOPE=$(printf '%s\037%s' "$SESSION_PARENT" "$SESSION_CONTEXT")
   fi
   SESSION_KEY=$(printf '%s\037%s' "$ROOT" "$SESSION_SCOPE" \
@@ -199,6 +222,15 @@ chain_store() {
   return 0
 }
 
+fallback_total_from_loop_count() {
+  local value=$1
+  if [ "${#value}" -gt 18 ]; then
+    printf '%s' "$TOTAL_BUDGET"
+  else
+    printf '%s' "$((value + 1))"
+  fi
+}
+
 allow_stop() {
   rm -f "$CHAIN_FILE" 2>/dev/null || true
   printf '{}\n'
@@ -207,7 +239,13 @@ allow_stop() {
 
 chain_load
 
-ERR=$(mktemp "${TMPDIR:-/tmp}/fm-turnend-cursor.XXXXXX") || exit 0
+if ! ERR=$(mktemp "${TMPDIR:-/tmp}/fm-turnend-cursor.XXXXXX"); then
+  ERR="$STATE/.cursor-turnend-error.$$"
+  if ! : > "$ERR" 2>/dev/null; then
+    printf '{"followup_message":"TURN WOULD END BLIND: Cursor stop-hook supervision could not allocate temporary state. Repair .cursor/hooks.json registration and watcher startup before ending blind."}\n'
+    exit 0
+  fi
+fi
 ARM_OUT=
 ARM_ACTIONABLE=0
 WAKE_REASON=
@@ -266,7 +304,7 @@ if [ "$ARM_ACTIONABLE" -eq 1 ]; then
   fi
   if ! chain_store "$TOTAL" 0 "$COUNT" "$WAKE_REASON"; then
     if [ "$LOOP_COUNT_VALID" -eq 1 ] && [ "$LOOP_COUNT" -gt 0 ]; then
-      FALLBACK_TOTAL=$((LOOP_COUNT + 1))
+      FALLBACK_TOTAL=$(fallback_total_from_loop_count "$LOOP_COUNT")
       [ "$FALLBACK_TOTAL" -gt "$TOTAL" ] && TOTAL=$FALLBACK_TOTAL
     else
       TOTAL=$TOTAL_BUDGET
@@ -288,7 +326,7 @@ else
   [ "$COUNT" -gt "$BLOCK_BUDGET" ] && NEXT_FAIL=0
   if ! chain_store "$TOTAL" "$NEXT_FAIL" 0 ''; then
     if [ "$LOOP_COUNT_VALID" -eq 1 ] && [ "$LOOP_COUNT" -gt 0 ]; then
-      FALLBACK_TOTAL=$((LOOP_COUNT + 1))
+      FALLBACK_TOTAL=$(fallback_total_from_loop_count "$LOOP_COUNT")
       [ "$FALLBACK_TOTAL" -gt "$TOTAL" ] && TOTAL=$FALLBACK_TOTAL
     else
       TOTAL=$TOTAL_BUDGET

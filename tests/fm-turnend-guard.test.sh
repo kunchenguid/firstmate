@@ -944,6 +944,26 @@ test_cursor_shim_wakes_after_actionable_arm() {
   pass "fm-turnend-guard-cursor: typed actionable arm close emits a normal drain-and-handle wake"
 }
 
+test_cursor_shim_reports_temp_state_failure() {
+  local dir fakebin out status
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-temp-failure")
+  : > "$dir/state/task1.meta"
+  install_failing_arm_stub "$dir"
+  fakebin=$(fm_fakebin "$TMP_ROOT/cursor-shim-temp-failure-bin")
+  cat > "$fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/mktemp"
+  out=$(printf '{"session_id":"cur-session","loop_count":0,"workspace_roots":["%s"]}' "$dir" \
+    | PATH="$fakebin:$PATH" CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>&1); status=$?
+  expect_code 0 "$status" "cursor shim must keep a diagnostic when mktemp fails"
+  assert_contains "$out" "TURN WOULD END BLIND" \
+    "temporary-state failure must not silently allow a needed stop"
+  [ -s "$dir/state/.arm-invocations" ] || fail "temporary-state failure must still run guard and arm handling"
+  pass "fm-turnend-guard-cursor: mktemp failure stays loud"
+}
+
 test_cursor_shim_arms_then_allows() {
   local dir out status pid
   dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-arm-ok")
@@ -1437,6 +1457,64 @@ test_cursor_shim_fallback_without_identity_is_process_scoped() {
   assert_not_contains "$out" "keeps re-firing" \
     "separate identity-free parent sessions must not inherit another chain"
   pass "fm-turnend-guard-cursor: identity-free fallback chains are parent-session scoped"
+}
+
+test_cursor_shim_parent_starttime_scopes_identity_free_chain() {
+  local dir fakebin ps_count real_ps out first second
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-parent-starttime")
+  CURSOR_FIXTURE_DIR=$dir
+  : > "$dir/state/task1.meta"
+  install_actionable_arm_stub "$dir"
+  fakebin=$(fm_fakebin "$TMP_ROOT/cursor-shim-parent-starttime-bin")
+  ps_count="$dir/state/.fake-ps-count"
+  real_ps=$(command -v ps)
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -p ] && [ "${3:-}" = -o ] && [ "${4:-}" = lstart= ]; then
+  count=0
+  [ ! -f "$FM_FAKE_PS_COUNT" ] || count=$(/bin/cat "$FM_FAKE_PS_COUNT")
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$FM_FAKE_PS_COUNT"
+  printf 'synthetic-start-%s\n' "$count"
+  exit 0
+fi
+exec "$REAL_PS" "$@"
+SH
+  chmod +x "$fakebin/ps"
+  out=$(cursor_shim_stop_without_identity_parent 2 env \
+    PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$dir/no-proc" \
+    FM_FAKE_PS_COUNT="$ps_count" REAL_PS="$real_ps" \
+    FM_CURSOR_WAKE_CHAIN_BUDGET=1)
+  first=$(printf '%s\n' "$out" | sed -n '1p')
+  second=$(printf '%s\n' "$out" | sed -n '2p')
+  assert_contains "$first" "firstmate watcher wake" \
+    "the first identity-free parent observation must deliver its wake"
+  assert_contains "$second" "firstmate watcher wake" \
+    "a changed parent starttime must start a fresh chain"
+  assert_not_contains "$second" "keeps re-firing" \
+    "a reused parent pid with a new starttime must not inherit its old chain"
+  pass "fm-turnend-guard-cursor: parent starttime prevents pid-reuse chain inheritance"
+}
+
+test_cursor_shim_extreme_loop_count_stays_bounded_without_state() {
+  local dir fakebin out
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-extreme-loop-count")
+  CURSOR_FIXTURE_DIR=$dir
+  : > "$dir/state/task1.meta"
+  install_failing_arm_stub "$dir"
+  fakebin=$(fm_fakebin "$TMP_ROOT/cursor-shim-extreme-loop-count-bin")
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/mv"
+  out=$(cursor_shim_stop 9223372036854775807 env \
+    PATH="$fakebin:$PATH" FM_CURSOR_TURNEND_BLOCK_BUDGET=1 \
+    FM_CURSOR_WAKE_CHAIN_BUDGET=1)
+  [ "$out" != '{}' ] || fail "an extreme loop_count must not allow an unbounded blind chain"
+  assert_contains "$out" "bounded chain" \
+    "an extreme loop_count must saturate the diagnostic ceiling when state cannot persist"
+  pass "fm-turnend-guard-cursor: extreme loop_count fallback stays bounded"
 }
 
 test_cursor_shim_falls_back_to_loop_count_without_writable_state() {
@@ -2377,6 +2455,7 @@ test_grok_adapter_invalid_inputs_start_neither_path
 test_grok_adapter_missing_jq_and_no_supervision_allow
 test_tracked_claude_entries_inert_under_grok
 test_cursor_shim_emits_followup_on_block
+test_cursor_shim_reports_temp_state_failure
 test_cursor_shim_wakes_after_actionable_arm
 test_cursor_shim_arms_then_allows
 test_cursor_shim_allows_when_healthy
@@ -2397,6 +2476,8 @@ test_cursor_shim_failure_budget_is_session_scoped
 test_cursor_shim_prefers_conversation_id_for_persistent_scope
 test_cursor_shim_fallback_session_scope
 test_cursor_shim_fallback_without_identity_is_process_scoped
+test_cursor_shim_parent_starttime_scopes_identity_free_chain
+test_cursor_shim_extreme_loop_count_stays_bounded_without_state
 test_cursor_shim_falls_back_to_loop_count_without_writable_state
 test_cursor_shim_arm_sources_x_mode_cadence
 test_cursor_shim_arm_defaults_cadence_without_x_mode
