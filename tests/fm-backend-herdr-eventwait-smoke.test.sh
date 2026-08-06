@@ -130,7 +130,17 @@ handle_push_transition herdr "$SESSION" "$REC"
 grep -q 'stale' "$STATE/.wake-queue" || fail "the wake queue must carry a stale record: $(cat "$STATE/.wake-queue")"
 grep -q "$TARGET" "$STATE/.wake-queue" || fail "the stale record must name the task window $TARGET"
 grep -q 'herdr: agent blocked' "$STATE/.wake-queue" || fail "the stale payload must name the herdr-blocked cause"
-pass "real herdr: the watcher fast-path enqueues a stale wake naming the task window from the live blocked transition"
+# The away daemon exempts this wake from its status-line dedupe by recognizing
+# the detail through bin/fm-classify-lib.sh. Prove the recognizer accepts the
+# detail a REAL herdr transition produced, not a hand-built one: the agent-state
+# token in it comes from herdr, so a vendor rename would otherwise silently
+# reinstate the dedupe that leaves a crew parked on an unanswered prompt.
+QUEUED_PAYLOAD=$(tail -1 "$STATE/.wake-queue" | cut -f5-)
+QUEUED_DETAIL=${QUEUED_PAYLOAD#*" ("}
+QUEUED_DETAIL=${QUEUED_DETAIL%)}
+stale_detail_is_blocked_on_human "$QUEUED_DETAIL" \
+  || fail "the away daemon's shared recognizer rejects the detail a live herdr blocked transition produced: '$QUEUED_DETAIL'"
+pass "real herdr ($HERDR_VERSION): the watcher fast-path enqueues a stale wake naming the task window, and its blocked-on-human detail is recognized by the shared classifier that exempts it from status-line dedupe"
 
 cleanup_all
 trap - EXIT
