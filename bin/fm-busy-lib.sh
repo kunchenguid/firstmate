@@ -102,9 +102,9 @@ FM_BUSY_LIB_VERSION=v1
 FM_BUSY_KIMI_VERIFIED_VERSIONS=""
 
 # Cursor verification gate. Empty means no installed cursor-agent version has
-# passed live-verified semantic busy source (hooks are phase 3, pending correct
-# upstream manifest key discovery). Every cursor task classifies unknown
-# cursor-unverified, and supervision falls back to stale-pane detection.
+# passed a live-verified semantic busy source. Stop and preToolUse hooks are
+# supervision controls, not busy-state sources. Every cursor task classifies
+# unknown cursor-unverified, and supervision falls back to stale-pane detection.
 # The rendered ctrl+c to stop token is deliberately NOT a state source here:
 # the approved redesign forbids entrenching a second rendered-signal fallback
 # alongside the Grok arm (bin/fm-busy-lib.sh:53-58).
