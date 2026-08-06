@@ -296,6 +296,291 @@ SH
   pass "runner provisions a private real secret baseline for each script"
 }
 
+test_quoting_and_platform_temp_paths() {
+  local tmp repo fixture json out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-quoted.XXXXXX")
+  repo="$tmp/repo with spaces"
+  fixture="$repo/fixture with spaces.test.sh"
+  json="$tmp/artifact with spaces/timing.json"
+  mkdir -p "$repo/bin"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+printf 'ok - quoted fixture\n'
+SH
+  chmod +x "$fixture"
+  out=$(cd "$repo" && ./bin/fm-test-run.sh --json "$json" "$fixture") \
+    || { rm -rf "$tmp"; fail "runner rejected a script or artifact path containing spaces"; }
+  assert_contains "$out" "FM_TEST_SUMMARY total=1 failed=0" "quoted path summary"
+  [ -f "$json" ] || { rm -rf "$tmp"; fail "quoted JSON path was not created"; }
+  rm -rf "$tmp"
+  pass "quoting, temporary paths, and platform stat fallback stay portable"
+}
+
+test_stock_bash_wrapper_pins_nested_runner() {
+  local tmp fixture out
+  [ -n "${FM_STOCK_BASH_VERSION:-}" ] || return 0
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-stock-bash.XXXXXX")
+  fixture="$tmp/interpreter.test.sh"
+  out="$tmp/out"
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+if [ "$BASH_VERSION" != "$FM_STOCK_BASH_VERSION" ]; then
+  printf 'not ok - expected nested runner Bash %s, got %s\n' "$FM_STOCK_BASH_VERSION" "$BASH_VERSION"
+  exit 1
+fi
+printf 'ok - nested runner used stock Bash %s\n' "$BASH_VERSION"
+SH
+  chmod +x "$fixture"
+  "$RUNNER" "$fixture" >"$out" 2>&1 \
+    || { cat "$out"; rm -rf "$tmp"; fail "stock Bash wrapper did not pin the runner interpreter"; }
+  assert_contains "$(cat "$out")" "FM_TEST_SUMMARY total=1 failed=0" "stock Bash nested runner summary"
+  rm -rf "$tmp"
+  pass "stock Bash wrapper pins nested runner invocations to the verified interpreter"
+}
+
+test_parallel_child_can_signal_immediately() {
+  local tmp repo runner fixture evidence child_pid rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-pretrap.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  fixture=tests/fm-brief.test.sh
+  evidence="$tmp/evidence"
+  mkdir -p "$repo/bin" "$repo/tests" "$evidence"
+  cp "$RUNNER" "$runner"
+  cat >"$repo/$fixture" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" >"$SCHED_EVIDENCE/child.pid"
+kill -TERM "$PPID"
+while :; do
+  sleep 1
+done
+SH
+  chmod +x "$runner" "$repo/$fixture"
+  set +e
+  SCHED_EVIDENCE="$evidence" "$runner" --jobs 2 "$fixture" >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || { rm -rf "$tmp"; fail "signaled parallel fixture should aggregate as failure, got $rc"; }
+  child_pid=$(cat "$evidence/child.pid" 2>/dev/null || true)
+  [ -n "$child_pid" ] || { rm -rf "$tmp"; fail "immediate-signal fixture never started"; }
+  if kill -0 "$child_pid" 2>/dev/null; then
+    rm -rf "$tmp"
+    fail "immediate child signal escaped worker cleanup"
+  fi
+  rm -rf "$tmp"
+  pass "parallel workers own signals before launching test children"
+}
+
+test_interrupt_drains_serial_cleanup() {
+  local tmp fixture child_pid runner_pid rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-serial-signal.XXXXXX")
+  fixture="$tmp/serial.test.sh"
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+set -e
+cleanup_done=
+cleanup() {
+  [ -z "$cleanup_done" ] || return
+  printf 'serial cleanup diagnostic\n'
+  printf 'released\n' >"$SCHED_EVIDENCE/resource.released"
+  cleanup_done=1
+}
+trap 'cleanup; exit 0' TERM
+trap cleanup EXIT
+printf '%s\n' "$$" >"$SCHED_EVIDENCE/child.pid"
+while :; do
+  sleep 1
+done
+SH
+  chmod +x "$fixture"
+  SCHED_EVIDENCE="$tmp" "$RUNNER" "$fixture" >"$tmp/out" 2>"$tmp/err" &
+  runner_pid=$!
+  child_pid=
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if [ -s "$tmp/child.pid" ]; then
+      child_pid=$(cat "$tmp/child.pid")
+      break
+    fi
+    sleep 0.1
+  done
+  [ -n "$child_pid" ] || { kill "$runner_pid" 2>/dev/null || true; wait "$runner_pid" 2>/dev/null || true; rm -rf "$tmp"; fail "serial signal fixture never started"; }
+  kill -TERM "$runner_pid"
+  set +e
+  wait "$runner_pid"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] || { rm -rf "$tmp"; fail "serial runner TERM exit should be 143, got $rc"; }
+  grep -Fq 'serial cleanup diagnostic' "$tmp/out" \
+    || { rm -rf "$tmp"; fail "serial cleanup diagnostic was not drained"; }
+  [ "$(cat "$tmp/resource.released" 2>/dev/null || true)" = "released" ] \
+    || { rm -rf "$tmp"; fail "serial cleanup did not release its resource"; }
+  if kill -0 "$child_pid" 2>/dev/null; then
+    rm -rf "$tmp"
+    fail "runner TERM left its serial child alive"
+  fi
+  rm -rf "$tmp"
+  pass "serial cleanup drains diagnostics before releasing tee"
+}
+
+test_interrupt_cleans_parallel_process_tree() {
+  local tmp repo runner fixture evidence child_pid descendant_pid runner_pid waited rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-signal.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  fixture=tests/fm-brief.test.sh
+  evidence="$tmp/evidence"
+  mkdir -p "$repo/bin" "$repo/tests" "$evidence"
+  mkfifo "$evidence/term-ignored"
+  cp "$RUNNER" "$runner"
+  cat >"$repo/$fixture" <<'SH'
+#!/usr/bin/env bash
+(
+  trap '' TERM
+  : >"$SCHED_EVIDENCE/descendant.ready"
+  IFS= read -r _ <"$SCHED_EVIDENCE/term-ignored"
+) &
+descendant_pid=$!
+while [ ! -e "$SCHED_EVIDENCE/descendant.ready" ]; do
+  sleep 0.01
+done
+printf '%s\n' "$$" >"$SCHED_EVIDENCE/child.pid"
+printf '%s\n' "$descendant_pid" >"$SCHED_EVIDENCE/descendant.pid"
+while :; do
+  sleep 1
+done
+SH
+  chmod +x "$runner" "$repo/$fixture"
+  SCHED_EVIDENCE="$evidence" "$runner" --jobs 2 "$fixture" >"$tmp/out" 2>"$tmp/err" &
+  runner_pid=$!
+  child_pid=
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if [ -s "$evidence/child.pid" ]; then
+      child_pid=$(cat "$evidence/child.pid")
+      break
+    fi
+    sleep 0.1
+  done
+  [ -n "$child_pid" ] || { kill "$runner_pid" 2>/dev/null || true; wait "$runner_pid" 2>/dev/null || true; rm -rf "$tmp"; fail "signal fixture never started"; }
+  descendant_pid=$(cat "$evidence/descendant.pid" 2>/dev/null || true)
+  [ -n "$descendant_pid" ] || { kill "$runner_pid" 2>/dev/null || true; wait "$runner_pid" 2>/dev/null || true; rm -rf "$tmp"; fail "descendant fixture never started"; }
+  kill -TERM "$runner_pid"
+  waited=0
+  while kill -0 "$runner_pid" 2>/dev/null && [ "$waited" -lt 50 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if kill -0 "$runner_pid" 2>/dev/null; then
+    kill -KILL "$runner_pid" "$child_pid" "$descendant_pid" 2>/dev/null || true
+    wait "$runner_pid" 2>/dev/null || true
+    rm -rf "$tmp"
+    fail "runner TERM hung on a TERM-ignoring descendant"
+  fi
+  set +e
+  wait "$runner_pid"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] || { rm -rf "$tmp"; fail "runner TERM exit should be 143, got $rc"; }
+  if kill -0 "$child_pid" 2>/dev/null; then
+    rm -rf "$tmp"
+    fail "runner TERM left its worker child alive"
+  fi
+  if kill -0 "$descendant_pid" 2>/dev/null; then
+    rm -rf "$tmp"
+    fail "runner TERM left its worker descendant alive"
+  fi
+  rm -rf "$tmp"
+  pass "signals escalate and terminate complete parallel worker process trees"
+}
+
+test_interrupt_waits_for_parallel_cleanup() {
+  local tmp repo runner fixture evidence child_pid runner_pid rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-synchronous.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  fixture=tests/fm-brief.test.sh
+  evidence="$tmp/evidence"
+  mkdir -p "$repo/bin" "$repo/tests" "$evidence"
+  cp "$RUNNER" "$runner"
+  cat >"$repo/$fixture" <<'SH'
+#!/usr/bin/env bash
+finish_cleanup() {
+  sleep 0.2
+  printf 'done\n' >"$SCHED_EVIDENCE/cleanup.done"
+  exit 0
+}
+trap finish_cleanup TERM
+printf '%s\n' "$$" >"$SCHED_EVIDENCE/child.pid"
+while :; do
+  sleep 1
+done
+SH
+  chmod +x "$runner" "$repo/$fixture"
+  SCHED_EVIDENCE="$evidence" "$runner" --jobs 2 "$fixture" >"$tmp/out" 2>"$tmp/err" &
+  runner_pid=$!
+  child_pid=
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if [ -s "$evidence/child.pid" ]; then
+      child_pid=$(cat "$evidence/child.pid")
+      break
+    fi
+    sleep 0.1
+  done
+  [ -n "$child_pid" ] || { kill "$runner_pid" 2>/dev/null || true; wait "$runner_pid" 2>/dev/null || true; rm -rf "$tmp"; fail "synchronous cleanup fixture never started"; }
+  kill -TERM "$runner_pid"
+  set +e
+  wait "$runner_pid"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] || { rm -rf "$tmp"; fail "synchronous cleanup TERM exit should be 143, got $rc"; }
+  [ -f "$evidence/cleanup.done" ] || { rm -rf "$tmp"; fail "runner returned before child cleanup completed"; }
+  if kill -0 "$child_pid" 2>/dev/null; then
+    rm -rf "$tmp"
+    fail "runner returned before the cleanup child exited"
+  fi
+  rm -rf "$tmp"
+  pass "signal handling completes child cleanup before returning"
+}
+
+test_completed_parallel_worker_drains_process_group() {
+  local tmp repo runner fixture evidence descendant_pid state rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-completed-worker.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  fixture=tests/fm-brief.test.sh
+  evidence="$tmp/evidence"
+  mkdir -p "$repo/bin" "$repo/tests" "$evidence"
+  cp "$RUNNER" "$runner"
+  cat >"$repo/$fixture" <<'SH'
+#!/usr/bin/env bash
+bash -c 'trap "" HUP TERM; while :; do sleep 1; done' &
+descendant_pid=$!
+printf '%s\n' "$descendant_pid" >"$SCHED_EVIDENCE/descendant.pid"
+printf 'ok - fixture completed while descendant remained active\n'
+SH
+  chmod +x "$runner" "$repo/$fixture"
+  set +e
+  SCHED_EVIDENCE="$evidence" "$runner" --jobs 2 "$fixture" >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "completed parallel fixture should pass, got $rc"; }
+  assert_contains "$(cat "$tmp/out")" "FM_TEST_SUMMARY total=1 failed=0" "completed parallel fixture summary"
+  descendant_pid=$(cat "$evidence/descendant.pid" 2>/dev/null || true)
+  [ -n "$descendant_pid" ] || { rm -rf "$tmp"; fail "completed parallel fixture did not record its descendant"; }
+  state=$(ps -o stat= -p "$descendant_pid" 2>/dev/null | awk 'NR == 1 { print $1 }' || true)
+  case "$state" in
+    ""|Z*) ;;
+    *)
+      kill -KILL "$descendant_pid" 2>/dev/null || true
+      rm -rf "$tmp"
+      fail "completed parallel worker left a live descendant behind (pid=$descendant_pid state=$state)"
+      ;;
+  esac
+  rm -rf "$tmp"
+  pass "completed parallel workers drain their remaining process groups"
+}
+
 test_aggregate_exit_behavior() {
   local tmp pass_f fail_f rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-agg.XXXXXX")
@@ -890,6 +1175,13 @@ test_changed_dependency_selection_and_unmapped_failure
 test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_runner_provisions_private_operator_homes
+test_quoting_and_platform_temp_paths
+test_stock_bash_wrapper_pins_nested_runner
+test_parallel_child_can_signal_immediately
+test_interrupt_drains_serial_cleanup
+test_interrupt_cleans_parallel_process_tree
+test_interrupt_waits_for_parallel_cleanup
+test_completed_parallel_worker_drains_process_group
 test_aggregate_exit_behavior
 test_gate_skip_accounting
 test_runtime_gate_required_and_optional_outcomes

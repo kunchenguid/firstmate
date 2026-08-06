@@ -1565,8 +1565,174 @@ fi
 RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
 RECORDS="$RUN_TMP/records.tsv"
 FAMILIES_TSV="$RUN_TMP/families.tsv"
+SERIAL_CHILD_PID=
+SERIAL_TEE_PID=
 : >"$RECORDS"
-trap 'rm -rf "$RUN_TMP"' EXIT
+
+# shellcheck disable=SC2329 # Invoked indirectly by the cleanup and worker signal traps.
+terminate_and_reap_process_tree() {
+  local root=$1 idx=0 parent children child seen pid grace=0 running state
+  local -a process_tree_pids=()
+  if ! kill -STOP "$root" 2>/dev/null; then
+    wait "$root" 2>/dev/null || true
+    return
+  fi
+  process_tree_pids[0]=$root
+  while [ "$idx" -lt "${#process_tree_pids[@]}" ]; do
+    parent=${process_tree_pids[$idx]}
+    children=$(ps -eo pid=,ppid= 2>/dev/null | awk -v parent="$parent" '$2 == parent { print $1 }' || true)
+    while IFS= read -r child; do
+      [ -n "$child" ] || continue
+      seen=0
+      for pid in "${process_tree_pids[@]}"; do
+        if [ "$pid" = "$child" ]; then
+          seen=1
+          break
+        fi
+      done
+      if [ "$seen" -eq 0 ] && kill -STOP "$child" 2>/dev/null; then
+        process_tree_pids[${#process_tree_pids[@]}]=$child
+      fi
+    done <<<"$children"
+    idx=$((idx + 1))
+  done
+  for pid in "${process_tree_pids[@]}"; do
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  for pid in "${process_tree_pids[@]}"; do
+    kill -CONT "$pid" 2>/dev/null || true
+  done
+  while [ "$grace" -lt 100 ]; do
+    running=0
+    for pid in "${process_tree_pids[@]}"; do
+      state=$(ps -o stat= -p "$pid" 2>/dev/null | awk 'NR == 1 { print $1 }' || true)
+      case "$state" in
+        ""|Z*) ;;
+        *) running=1; break ;;
+      esac
+    done
+    [ "$running" -eq 1 ] || break
+    sleep 0.01
+    grace=$((grace + 1))
+  done
+  for pid in "${process_tree_pids[@]}"; do
+    kill -STOP "$pid" 2>/dev/null || true
+  done
+  idx=0
+  while [ "$idx" -lt "${#process_tree_pids[@]}" ]; do
+    parent=${process_tree_pids[$idx]}
+    children=$(ps -eo pid=,ppid= 2>/dev/null | awk -v parent="$parent" '$2 == parent { print $1 }' || true)
+    while IFS= read -r child; do
+      [ -n "$child" ] || continue
+      seen=0
+      for pid in "${process_tree_pids[@]}"; do
+        if [ "$pid" = "$child" ]; then
+          seen=1
+          break
+        fi
+      done
+      if [ "$seen" -eq 0 ] && kill -STOP "$child" 2>/dev/null; then
+        process_tree_pids[${#process_tree_pids[@]}]=$child
+      fi
+    done <<<"$children"
+    idx=$((idx + 1))
+  done
+  for pid in "${process_tree_pids[@]}"; do
+    state=$(ps -o stat= -p "$pid" 2>/dev/null | awk 'NR == 1 { print $1 }' || true)
+    case "$state" in
+      ""|Z*) ;;
+      *) kill -KILL "$pid" 2>/dev/null || true ;;
+    esac
+  done
+  wait "$root" 2>/dev/null || true
+  grace=0
+  while [ "$grace" -lt 100 ]; do
+    running=0
+    for pid in "${process_tree_pids[@]}"; do
+      state=$(ps -o stat= -p "$pid" 2>/dev/null | awk 'NR == 1 { print $1 }' || true)
+      case "$state" in
+        ""|Z*) ;;
+        *) running=1; break ;;
+      esac
+    done
+    [ "$running" -eq 1 ] || break
+    sleep 0.01
+    grace=$((grace + 1))
+  done
+}
+
+process_group_has_running_members() {
+  ps -eo pgid=,stat= 2>/dev/null \
+    | awk -v group="$1" '$1 == group && $2 !~ /^Z/ { found=1; exit } END { exit !found }'
+}
+
+terminate_and_reap_process_group() {
+  local group=$1 grace=0
+  if ! kill -STOP -- "-$group" 2>/dev/null; then
+    wait "$group" 2>/dev/null || true
+    return
+  fi
+  kill -TERM -- "-$group" 2>/dev/null || true
+  kill -CONT -- "-$group" 2>/dev/null || true
+  while [ "$grace" -lt 100 ] && process_group_has_running_members "$group"; do
+    sleep 0.01
+    grace=$((grace + 1))
+  done
+  kill -STOP -- "-$group" 2>/dev/null || true
+  kill -KILL -- "-$group" 2>/dev/null || true
+  wait "$group" 2>/dev/null || true
+  grace=0
+  while [ "$grace" -lt 100 ] && process_group_has_running_members "$group"; do
+    sleep 0.01
+    grace=$((grace + 1))
+  done
+}
+
+# shellcheck disable=SC2329 # Invoked indirectly by the EXIT and signal traps through cleanup_run.
+terminate_and_reap_background_job() {
+  local pid=$1 group
+  group=$(ps -o pgid= -p "$pid" 2>/dev/null | awk 'NR == 1 { gsub(/[[:space:]]/, "", $1); print $1 }' || true)
+  if [ "$group" = "$pid" ]; then
+    terminate_and_reap_process_group "$group"
+  else
+    terminate_and_reap_process_tree "$pid"
+  fi
+}
+
+# shellcheck disable=SC2329 # Registered by the EXIT and signal traps below.
+cleanup_run() {
+  local rc=$? pid serial_child_owned=0 cleanup_pids="$RUN_TMP/cleanup-pids"
+  trap - EXIT INT TERM HUP
+  jobs -p >"$cleanup_pids" 2>/dev/null || true
+  if [ -n "$SERIAL_CHILD_PID" ]; then
+    terminate_and_reap_process_group "$SERIAL_CHILD_PID"
+    serial_child_owned=1
+  fi
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    if [ "$pid" = "$SERIAL_CHILD_PID" ] || [ "$pid" = "$SERIAL_TEE_PID" ]; then
+      continue
+    fi
+    terminate_and_reap_background_job "$pid"
+    if [ -n "$SERIAL_TEE_PID" ]; then
+      serial_child_owned=1
+    fi
+  done <"$cleanup_pids"
+  if [ -n "$SERIAL_TEE_PID" ]; then
+    if [ "$serial_child_owned" -eq 1 ]; then
+      wait "$SERIAL_TEE_PID" 2>/dev/null || true
+    else
+      terminate_and_reap_process_tree "$SERIAL_TEE_PID"
+    fi
+  fi
+  rm -rf "$RUN_TMP"
+  exit "$rc"
+}
+
+trap cleanup_run EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 RUN_STARTED_ISO=$(now_iso)
 RUN_STARTED_MS=$(now_ms)
@@ -1685,7 +1851,7 @@ record_script_result() {
 
 run_one_serial() {
   local script=$1
-  local base family runtime requirement out begin_iso begin_ms end_ms end_iso duration rc script_home
+  local base family runtime requirement out fifo begin_iso begin_ms end_ms end_iso duration rc child_pid script_home monitor_mode=
   base=$(basename "$script")
   family=$(family_for_basename "$base")
   runtime=$(runtime_gate_for_basename "$base")
@@ -1700,10 +1866,21 @@ run_one_serial() {
   script_home="$RUN_TMP/home.$TOTAL"
   prepare_script_home "$script_home"
   set +e
-  # Stream live output while retaining a copy for gate-skip detection.
-  # PIPESTATUS[0] is the test script; tee's exit is ignored for aggregate.
-  HOME="$script_home" bash "$script" 2>&1 | tee "$out"
-  rc=${PIPESTATUS[0]}
+  fifo="$RUN_TMP/serial.$TOTAL.fifo"
+  mkfifo "$fifo"
+  tee "$out" <"$fifo" &
+  SERIAL_TEE_PID=$!
+  case $- in *m*) monitor_mode=1 ;; esac
+  set -m
+  HOME="$script_home" bash "$script" >"$fifo" 2>&1 &
+  SERIAL_CHILD_PID=$!
+  [ -n "$monitor_mode" ] || set +m
+  wait "$SERIAL_CHILD_PID"
+  rc=$?
+  wait "$SERIAL_TEE_PID" 2>/dev/null || true
+  SERIAL_CHILD_PID=
+  SERIAL_TEE_PID=
+  rm -f "$fifo"
   set -e
   : "${rc:=1}"
 
@@ -1741,6 +1918,7 @@ else
     active_workers=$((active_workers - 1))
     set +e
     wait "$pid"
+    terminate_and_reap_process_group "$pid"
     set -e
     work="$RUN_TMP/w$idx"
     rc=$(cat "$work/exit" 2>/dev/null || echo 1)
@@ -1803,8 +1981,31 @@ else
     requirement=$(runtime_gate_requirement "$runtime")
     printf 'FM_TEST_BEGIN %s %s family=%s runtime_gate=%s gate_requirement=%s\n' \
       "$(now_iso)" "$script" "$family" "$runtime" "$requirement"
+    monitor_mode=
+    case $- in *m*) monitor_mode=1 ;; esac
+    set -m
     (
+      set +m
       set +e
+      child_pid=
+      # shellcheck disable=SC2329 # Registered by the worker signal traps below.
+      worker_signal_exit() {
+        local signal_rc=$1 pid signal_pids="$work/signal-pids"
+        trap - INT TERM HUP
+        if [ -n "$child_pid" ]; then
+          terminate_and_reap_process_tree "$child_pid"
+        else
+          jobs -p >"$signal_pids" 2>/dev/null || true
+          while IFS= read -r pid; do
+            [ -n "$pid" ] || continue
+            terminate_and_reap_process_tree "$pid"
+          done <"$signal_pids"
+        fi
+        exit "$signal_rc"
+      }
+      trap 'worker_signal_exit 130' INT
+      trap 'worker_signal_exit 143' TERM
+      trap 'worker_signal_exit 129' HUP
       export TMPDIR="$work/tmp"
       export TMP="$work/tmp"
       export HOME="$work/home"
@@ -1812,8 +2013,11 @@ else
         FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND 2>/dev/null || true
       cd "$ROOT" || exit 1
       begin_ms=$(now_ms)
-      bash "$script" >"$work/output" 2>&1
+      bash "$script" >"$work/output" 2>&1 &
+      child_pid=$!
+      wait "$child_pid"
       rc=$?
+      trap - INT TERM HUP
       end_ms=$(now_ms)
       duration=$((end_ms - begin_ms))
       if [ "$duration" -lt 0 ]; then
@@ -1824,6 +2028,7 @@ else
       exit 0
     ) &
     WORKER_PIDS[worker_n]=$!
+    [ -n "$monitor_mode" ] || set +m
     WORKER_IDX[worker_n]=$worker_n
     WORKER_SCRIPTS[worker_n]=$script
     active_workers=$((active_workers + 1))
