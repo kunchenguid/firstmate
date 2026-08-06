@@ -166,16 +166,10 @@ Classify each wake this way:
   If the pane is still idle past `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a possible wedge.
   Absent the provably-working refresh below, this bounds wedge-detection latency to the threshold plus a tick; with it the bound is two thresholds.
   Either way it is a delay, never a loss - only the constant differs.
-- A wedge marker that reaches its escalation point is checked against `bin/fm-crew-state.sh` once, and a crew reported as provably working has its marker refreshed instead of escalated.
-  A static pane is not evidence of a wedge when an attributed run step or the backend's own busy verdict proves the crew is progressing, so a long-running worker whose progress does not reach the pane no longer re-alarms every `FM_STALE_ESCALATE_SECS` for as long as its work runs.
-  Refreshing rather than dropping keeps this bounded: staying silent requires that working verdict to be re-earned every threshold, so a crew that freezes simply ages out and escalates, and detection after a freeze takes at most two thresholds rather than one.
-  Only a positive working verdict refreshes it: a stopped, parked, failed, or unreadable crew still escalates on the same schedule.
-  Because a refresh restarts the clock, the age in that escalation is time without progress evidence rather than time since the pane first went idle, which is what the line reports.
-  One housekeeping pass makes at most `FM_STALE_WORKING_GATE_READS` (default 3) of those state reads, since the pass runs inline in the daemon loop; a marker past that budget keeps its aged marker for the next pass, so the budget can delay a wedge escalation but never suppress one.
-  For a burst of `D` markers due at once that delay is one pass per full budget of markers ahead of it: with a budget of `B` the last waits `ceil(D/B) - 1` passes of `FM_HOUSEKEEPING_TICK`, so ten simultaneously-due crews at the defaults put the last escalation about 45s late rather than 15s.
-  That bound needs the due set to drain, so it does not hold under sustained fleet-wide staleness: the gate does `B` reads per tick while each continuously-stale crew needs one read per `FM_STALE_ESCALATE_SECS`, and beyond roughly 48 simultaneously-stale crews at the defaults the backlog and the delay grow without bound.
-  Markers are walked in stable glob order rather than round-robin, so under that load the delay lands repeatedly on the same late-sorting task ids instead of being shared; raise `FM_STALE_WORKING_GATE_READS` for a fleet that large.
   Healthy crewmates are autonomous and do not wait on firstmate mid-task.
+- A wedge marker that reaches its escalation point is checked against `bin/fm-crew-state.sh` once: a crew reported as provably working has its marker refreshed instead of escalated, while a stopped, parked, failed, or unreadable crew still escalates on the unchanged schedule.
+  Those reads are budgeted per housekeeping pass, and a marker that does not get its read stays aged for the next pass, so the budget can delay a wedge escalation but never suppress one.
+  `docs/architecture.md` "Event-driven supervision" owns the rest: why the marker is refreshed rather than dropped, what the age in that escalation line measures, and the read budget's capacity arithmetic and tuning.
 - `heartbeat` -> self-handle. The daemon runs its own cheap bash fleet scan
   every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for a
   captain-relevant status line the per-wake classifier might miss.
