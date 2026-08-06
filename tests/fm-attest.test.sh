@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-# Behavior tests for bin/fm-attest.sh.
+# Behavior tests for the head-bound no-mistakes attestation: bin/fm-attest.sh,
+# which emits and verifies it, and the step scripts in
+# .github/workflows/no-mistakes-required.yml that drive it in CI. The workflow
+# belongs here rather than in a suite of its own because what the check tells a
+# contributor is decided jointly by the verifier's exit status and the step's
+# reading of it, and splitting them lets the two drift apart.
 #
 # Every refusal here is paired with a positive control that differs from it by
 # exactly one input, because a verifier that refuses everything would satisfy
@@ -10,8 +15,14 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# The repository's own bounded runner, used here to bound a call that must not
+# run unbounded. Its 124 is what an unbounded read looks like from outside.
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
+
 TMP_ROOT=$(fm_test_tmproot fm-attest)
 ATTEST="$ROOT/bin/fm-attest.sh"
+WORKFLOW="$ROOT/.github/workflows/no-mistakes-required.yml"
 NOTES_REF=refs/notes/no-mistakes
 
 # A repository with one commit and no attestation ref.
@@ -48,14 +59,14 @@ good_note() {
 STUB_STDERR_NOTICE='A new version of no-mistakes is available: v1.40.3 -> v1.41.2'
 
 install_pipeline_stub() {
-  local dir=$1 status=$2 rc=${3:-0}
+  local dir=$1 status=$2 rc=${3:-0} notice=${4:-$STUB_STDERR_NOTICE}
   mkdir -p "$dir/bin"
   {
     printf '#!/usr/bin/env bash\n'
     printf 'case "$*" in\n'
     printf '  "--version") echo "no-mistakes version v1.40.3 (d873960) 2026-07-22T01:41:41Z" ;;\n'
     printf '  "axi status")\n'
-    printf '    echo %s >&2\n' "'$STUB_STDERR_NOTICE'"
+    printf '    echo %s >&2\n' "'$notice'"
     printf '    cat <<%s\n' "'FM_STUB_TOON'"
     printf '%s\n' "$status"
     printf 'FM_STUB_TOON\n'
@@ -63,6 +74,56 @@ install_pipeline_stub() {
     printf '  ;;\nesac\n'
   } > "$dir/bin/no-mistakes"
   chmod +x "$dir/bin/no-mistakes"
+}
+
+# A pipeline tool that never answers, so the only thing that can end the call is
+# the bound the emitter imposes on it.
+install_hanging_pipeline_stub() {
+  local dir=$1
+  mkdir -p "$dir/bin"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'case "$*" in\n'
+    printf '  "--version") echo "no-mistakes version v1.40.3 (d873960) 2026-07-22T01:41:41Z" ;;\n'
+    printf '  "axi status") sleep 120 ;;\n'
+    printf 'esac\n'
+  } > "$dir/bin/no-mistakes"
+  chmod +x "$dir/bin/no-mistakes"
+}
+
+# One step's own script, lifted out of the workflow and run as the workflow runs
+# it, so what the check tells a contributor is exercised rather than asserted
+# against YAML text. The step is found by name, and an extraction that yields
+# nothing is a failure, so a renamed or restructured step cannot pass vacuously.
+workflow_step_script() {
+  local want=$1
+  awk -v want="$want" '
+    /^      - / { in_step = 0; collecting = 0 }
+    $0 == "      - name: " want { in_step = 1; next }
+    in_step && $0 == "        run: |" { collecting = 1; next }
+    !collecting { next }
+    $0 == "" { print ""; next }
+    substr($0, 1, 10) == "          " { print substr($0, 11); next }
+    { collecting = 0; in_step = 0 }
+  ' "$WORKFLOW"
+}
+
+# A verifier that reaches one chosen exit status, so the step's reading of that
+# status is the single property under test. --print-format still answers,
+# because the refusal branch prints the format and a stub that could not would
+# make that branch fail for a reason of the fixture's own making.
+install_verifier_stub() {
+  local dir=$1 rc=$2
+  mkdir -p "$dir/bin"
+  {
+    printf '#!/usr/bin/env bash\n'
+    # shellcheck disable=SC2016  # Expansion is deliberately deferred to the stub.
+    printf 'case "${1:-}" in\n'
+    printf '  --print-format) echo "no-mistakes-attestation: v1" ;;\n'
+    printf '  *) exit %s ;;\n' "$rc"
+    printf 'esac\n'
+  } > "$dir/bin/fm-attest.sh"
+  chmod +x "$dir/bin/fm-attest.sh"
 }
 
 # A PATH carrying everything the emitter needs except any utility that could
@@ -843,6 +904,248 @@ test_write_withholds_url_shapes_no_reader_models() {
   pass "fm-attest.sh: a URL-shaped token no reader models is withheld rather than emitted"
 }
 
+# The pipeline tool's own two streams are text from outside this script exactly
+# as git's are, and all four run-record refusals quote them. Redaction is a
+# property of printing rather than of each call site remembering, so these four
+# get it without asking for it.
+LEAKY_STDOUT_URL='https://alice:hunter2@u20.invalid/o/r.git'
+LEAKY_STDERR_URL='https://bob:s3cr3t@u21.invalid/o/r.git'
+
+assert_tool_stream_made_safe() {
+  local out=$1 reason=$2 kept=$3 host=$4
+  assert_contains "$out" "$reason" "the refusal lost its own reason"
+  assert_not_contains "$out" "hunter2" "a password on the tool's stdout reached the caller"
+  assert_not_contains "$out" "s3cr3t" "a password on the tool's stderr reached the caller"
+  assert_not_contains "$out" "alice" "a username on the tool's stdout reached the caller"
+  assert_not_contains "$out" "bob" "a username on the tool's stderr reached the caller"
+  # The pairing, so this cannot pass by suppressing the diagnostic instead of
+  # redacting it: what the tool said still reaches the person who has to act.
+  assert_contains "$out" "$kept" "the tool's own words were discarded rather than made safe"
+  assert_contains "$out" "$host" "the URL the tool named was withheld rather than shown without its userinfo"
+}
+
+test_write_makes_the_pipeline_tools_own_streams_safe_to_print() {
+  local repo head out
+  repo="$TMP_ROOT/tool-stream-redaction"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+
+  # run-record-unreadable: the tool failed, and reports its own error on stdout.
+  install_pipeline_stub "$repo/stub" \
+    "error: repo not initialized, retry against $LEAKY_STDOUT_URL" 1 \
+    "upgrade available from $LEAKY_STDERR_URL"
+  out=$(write_out "$repo")
+  assert_tool_stream_made_safe "$out" run-record-unreadable "repo not initialized" \
+    'https://u20.invalid/o/r.git'
+  assert_contains "$out" 'https://u21.invalid/o/r.git' \
+    "the tool's stderr was withheld rather than shown without its userinfo"
+
+  # no-run-record: nothing on stdout, so only stderr is quoted.
+  install_pipeline_stub "$repo/stub" "" 0 "upgrade available from $LEAKY_STDERR_URL"
+  out=$(write_out "$repo")
+  assert_tool_stream_made_safe "$out" no-run-record "upgrade available" \
+    'https://u21.invalid/o/r.git'
+
+  # run-record-unparsed: stdout was not empty, but no run identity is in it.
+  install_pipeline_stub "$repo/stub" \
+    "runs: none matching this worktree, see $LEAKY_STDOUT_URL" 0 \
+    "upgrade available from $LEAKY_STDERR_URL"
+  out=$(write_out "$repo")
+  assert_tool_stream_made_safe "$out" run-record-unparsed "none matching this worktree" \
+    'https://u20.invalid/o/r.git'
+
+  # run-record-no-head: a run record this transcription cannot read a head from.
+  install_pipeline_stub "$repo/stub" \
+    "$(run_status_toon fm/demo "${head:0:8}" completed | sed '/^  head: /d'
+      printf '  detail: %s\n' "$LEAKY_STDOUT_URL")"
+  out=$(write_out "$repo")
+  assert_tool_stream_made_safe "$out" run-record-no-head "01KZ5YTADR5YAXZSNKFXTW8W9F" \
+    'https://u20.invalid/o/r.git'
+
+  # The matched positive control: the same tool, the same streams, differing
+  # only in that this record is complete. Redaction must not have cost the
+  # emitter its ability to read a record at all.
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${head:0:8}" completed)" 0 \
+    "upgrade available from $LEAKY_STDERR_URL"
+  local rc=0
+  out=$(write_out "$repo") || rc=$?
+  [ "$rc" -eq 0 ] || fail "a complete run record was refused once its streams were redacted: $out"
+  pass "fm-attest.sh: every run-record refusal quotes the tool's streams with credentials made safe"
+}
+
+test_write_rejects_a_zero_bound_rather_than_running_the_read_unbounded() {
+  local repo head out rc
+  repo="$TMP_ROOT/zero-timeout"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  install_hanging_pipeline_stub "$repo/stub"
+  # bin/fm-timeout-lib.sh states the rule for every caller: `timeout 0` and the
+  # perl fallback's `alarm 0` both disable the deadline, so a zero that reached
+  # the runner would be no bound at all. The bound below is this test's own, and
+  # reaching it is exactly the regression.
+  out=$(cd "$repo" && fm_run_timed 60 \
+    env FM_ATTEST_NM_TIMEOUT=0 PATH="$repo/stub/bin:$PATH" \
+    "$ATTEST" write --no-push 2>&1)
+  rc=$?
+  [ "$rc" -ne 124 ] || fail "a zero bound left the run-record read unbounded: it outlived this test's own bound"
+  [ "$rc" -ne 0 ] || fail "a pipeline tool that never answered was transcribed"
+  assert_contains "$out" "run-record-unreadable" \
+    "a read that hit its bound was not reported as an unreadable record"
+  # The matched control, differing by one property: the same zero against a tool
+  # that answers at once must still attest. A zero read as an instant deadline,
+  # which is what it becomes on a host falling back to the bash watchdog, would
+  # refuse this too, and refusing every read is not a bound either.
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${head:0:8}" completed)"
+  out=$(cd "$repo" && FM_ATTEST_NM_TIMEOUT=0 PATH="$repo/stub/bin:$PATH" \
+    "$ATTEST" write --no-push 2>&1)
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a zero bound expired a run-record read that answered at once: $out"
+  pass "fm-attest.sh: a zero FM_ATTEST_NM_TIMEOUT falls back to the default bound rather than removing it"
+}
+
+# ---------------------------------------------------------------------------
+# The workflow's own step scripts. The check fails closed on every path below;
+# what these pin is what it tells the contributor, because a gate that reports
+# evidence it never examined as absent evidence is committing the defect the
+# whole check exists to remove.
+# ---------------------------------------------------------------------------
+
+test_check_step_separates_a_verdict_from_a_verifier_that_could_not_run() {
+  local dir script head out rc
+  dir="$TMP_ROOT/workflow-verify"
+  mkdir -p "$dir"
+  script="$dir/verify-step.sh"
+  head=0123456789012345678901234567890123456789
+  workflow_step_script 'Verify the head-bound no-mistakes attestation' > "$script"
+  [ -s "$script" ] || fail "the verify step's own script could not be read out of the workflow"
+  assert_contains "$(cat "$script")" 'fm-attest.sh verify --head' \
+    "the extracted script is not the step that runs the verifier"
+
+  run_verify_step() {
+    ( cd "$dir" && HEAD_SHA="$head" PR_AUTHOR=someone bash "$script" 2>&1 )
+  }
+
+  # Exit 1 is a refusal: the evidence was examined and found absent. That is a
+  # verdict, and it is told as one.
+  install_verifier_stub "$dir" 1
+  out=$(run_verify_step)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a refused attestation passed the check"
+  assert_contains "$out" "carries no verified no-mistakes attestation" \
+    "a refusal was not reported as an absent attestation"
+  assert_not_contains "$out" "could not evaluate" \
+    "a verdict about the evidence was reported as an inability to reach one"
+
+  # Exit 2 is a failure: no verdict was reached, so it says nothing about the
+  # evidence either way and must not borrow the refusal's words.
+  install_verifier_stub "$dir" 2
+  out=$(run_verify_step)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a verifier that reached no verdict passed the check"
+  assert_contains "$out" "could not evaluate" \
+    "a verifier that reached no verdict was not reported as such"
+  assert_contains "$out" "exited 2" "the failing exit status was not named"
+  assert_not_contains "$out" "carries no verified no-mistakes attestation" \
+    "evidence the check never examined was reported as absent evidence"
+
+  # The reachable case this was found on: a head where the verifier is not there
+  # to run at all. That is not exit 1 either, and the branch reporting it must
+  # not itself depend on the script that is missing.
+  rm -f "$dir/bin/fm-attest.sh"
+  out=$(run_verify_step)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a head carrying no verifier passed the check"
+  assert_contains "$out" "could not evaluate" \
+    "a head that carries no verifier was not reported as one the check could not evaluate"
+  assert_not_contains "$out" "carries no verified no-mistakes attestation" \
+    "a head that carries no verifier was reported as one carrying no attestation"
+
+  # The matched positive control: an attested head still passes, and is told
+  # neither of the two failure stories.
+  install_verifier_stub "$dir" 0
+  out=$(run_verify_step)
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "an attested head was failed by the check: $out"
+  assert_not_contains "$out" "could not evaluate" "a passing head was told the check could not look"
+  assert_not_contains "$out" "carries no verified no-mistakes attestation" \
+    "a passing head was told it carries no attestation"
+  unset -f run_verify_step
+  pass "no-mistakes-required.yml: a verifier that could not run is not reported as an absent attestation"
+}
+
+test_check_step_reads_the_head_repository_without_logging_its_token() {
+  local dir script log out rc
+  dir="$TMP_ROOT/workflow-fetch"
+  mkdir -p "$dir/bin"
+  script="$dir/fetch-step.sh"
+  log="$dir/git-said.log"
+  workflow_step_script 'Fetch the attestation ref from the head repository' > "$script"
+  [ -s "$script" ] || fail "the fetch step's own script could not be read out of the workflow"
+  assert_contains "$(cat "$script")" 'git fetch' "the extracted script is not the step that fetches the ref"
+  # git quotes the whole remote URL back in its own http errors, and when the
+  # head repository is the base repository that URL carries the job token. This
+  # stand-in does exactly that, and also records what it said, so the assertion
+  # below cannot pass merely because the fixture stayed quiet.
+  # shellcheck disable=SC2016  # Expansion is deliberately deferred to the stub.
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'case "${1:-}" in\n'
+    printf '  ls-remote) exit "${FM_FAKE_GIT_LS_RC:-0}" ;;\n'
+    printf '  fetch)\n'
+    printf '    printf "fatal: unable to access %%s: the server said no\\n" "$5" | tee -a %s >&2\n' "$log"
+    printf '    exit "${FM_FAKE_GIT_FETCH_RC:-0}"\n'
+    printf '  ;;\n'
+    printf 'esac\n'
+  } > "$dir/bin/git"
+  chmod +x "$dir/bin/git"
+
+  run_fetch_step() {
+    (
+      cd "$dir" || exit 1
+      PATH="$dir/bin:$PATH" HEAD_REPO=owner/repo BASE_REPO=owner/repo \
+        GH_TOKEN=ghs_fixturetokenvalue bash "$script" 2>&1
+    )
+  }
+
+  FM_FAKE_GIT_FETCH_RC=128
+  export FM_FAKE_GIT_FETCH_RC
+  out=$(run_fetch_step)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a fetch that failed was reported as a successful read"
+  assert_contains "$(cat "$log")" "ghs_fixturetokenvalue" \
+    "the fixture never quoted the tokenized URL back, so this assertion proves nothing"
+  assert_not_contains "$out" "ghs_fixturetokenvalue" "the job token reached the step's output"
+  assert_contains "$out" "owner/repo" "the failure did not name the head repository it could not read"
+  assert_contains "$out" "would not serve it" \
+    "a target that advertised the ref but would not serve it was not reported as such"
+
+  # The matched positive control: the same call, differing only in that this
+  # fetch succeeds, must say nothing about a failure and must not fail the job.
+  FM_FAKE_GIT_FETCH_RC=0
+  : > "$log"
+  out=$(run_fetch_step)
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a fetch that succeeded failed the step: $out"
+  assert_not_contains "$out" "would not serve it" "a successful fetch was reported as a failure"
+  assert_not_contains "$out" "ghs_fixturetokenvalue" "the job token reached the step's output"
+
+  # And the arm that must stay untouched: an absent ref is a fact about that
+  # repository, so it is left absent for the verifier to name in its own words
+  # rather than fetched or failed here.
+  FM_FAKE_GIT_LS_RC=2
+  export FM_FAKE_GIT_LS_RC
+  : > "$log"
+  out=$(run_fetch_step)
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "an absent attestation ref stopped the job instead of being left absent: $out"
+  assert_contains "$out" "No refs/notes/no-mistakes on owner/repo" \
+    "an absent ref was not reported as absent"
+  [ ! -s "$log" ] || fail "a ref the head repository does not advertise was fetched anyway"
+  unset FM_FAKE_GIT_LS_RC FM_FAKE_GIT_FETCH_RC
+  unset -f run_fetch_step
+  pass "no-mistakes-required.yml: a failed fetch is named by repository rather than by its tokenized URL"
+}
+
 # ---------------------------------------------------------------------------
 # write and show - the failure half of the error model. Every documented
 # `cannot attest` reason fires for its own condition and for no other's.
@@ -1065,6 +1368,10 @@ test_write_withholds_a_push_target_it_cannot_positively_parse
 test_write_names_an_scp_style_push_target
 test_write_withholds_the_whole_line_a_withheld_url_sat_on
 test_write_withholds_url_shapes_no_reader_models
+test_write_makes_the_pipeline_tools_own_streams_safe_to_print
+test_write_rejects_a_zero_bound_rather_than_running_the_read_unbounded
+test_check_step_separates_a_verdict_from_a_verifier_that_could_not_run
+test_check_step_reads_the_head_repository_without_logging_its_token
 test_write_outside_a_repository_fails_as_such
 test_write_without_the_pipeline_tool_fails_as_such
 test_write_on_an_unborn_head_fails_as_such

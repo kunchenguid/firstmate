@@ -959,6 +959,13 @@ families_for_changed_path() {
     .agents/skills/*/SKILL.md)
       printf '%s\n' pure-contract-unit
       ;;
+    .github/workflows/no-mistakes-required.yml)
+      # The required attestation gate. Its step scripts are exercised by
+      # tests/fm-attest.test.sh alongside the verifier they drive, so a change
+      # to the workflow has to select that suite and not only the doc lane.
+      printf '%s\n' pr-forge
+      printf '%s\n' pure-contract-unit
+      ;;
     .github/workflows/ci.yml|.no-mistakes.yaml)
       printf '%s\n' pure-contract-unit
       printf '%s\n' real-herdr-gated

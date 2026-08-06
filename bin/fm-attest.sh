@@ -45,8 +45,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # network read refuses with its own reason instead of hanging at a terminal.
 # bin/fm-timeout-lib.sh owns imposing that bound and falls back to a
 # dependency-free bash watchdog, so no host is refused for lacking a utility.
+#
+# A non-positive bound is not a bound, and that owner states the rule for every
+# caller: `timeout 0` and the perl fallback's `alarm 0` both disable the deadline
+# outright. A zero here would therefore not shorten the bound, it would remove it
+# on a host with timeout or gtimeout and expire every read instantly on one
+# falling back to the watchdog, so the same value would produce opposite failures
+# on two hosts. An unusable value falls back to the default rather than removing
+# the bound, which is the same reading the repository's other bounded callers
+# apply to their own knobs.
 NM_TIMEOUT=${FM_ATTEST_NM_TIMEOUT:-20}
-case "$NM_TIMEOUT" in '' | *[!0-9]*) NM_TIMEOUT=20 ;; esac
+case "$NM_TIMEOUT" in '' | *[!0-9]* | 0*) NM_TIMEOUT=20 ;; esac
 
 NOTES_REF_DEFAULT=refs/notes/no-mistakes
 ATTESTATION_VERSION=v1
@@ -63,12 +72,157 @@ REQUIRED_GATES='review test lint push'
 # ignored, so a future format can never be read as a weaker v1 one.
 KNOWN_KEYS="$ATTESTATION_KEY head run gates tool"
 
+# ---------------------------------------------------------------------------
+# printing - the one path text leaves this script by
+# ---------------------------------------------------------------------------
+
+# git quotes the push URL back in its own messages, and the server's rejection
+# reason arrives in the same stream. Suppressing that stream keeps a credential
+# out of the log but throws the rejection reason away with it, which leaves a
+# contributor blocked by a ruleset or a quota with nothing to act on. So text is
+# made safe to print rather than withheld wholesale.
+#
+# One function does it for everything this prints, git's output, the pipeline
+# tool's two streams and the push target alike, and that is enforced by where it
+# sits rather than by every author remembering it. emit() below is the only
+# place this script writes a line to a stream, and every line it writes passes
+# through the scrubber first, so a diagnostic carrying text from outside this
+# script cannot be constructed unscrubbed: a refusal added later is safe because
+# printing is what makes it safe. Scrubbing at each call site was the shape this
+# had, and it grew a channel that was never scrubbed, for the same reason
+# parse-then-redact grew shapes that were never modelled.
+#
+# It is default deny, and that is the whole design. Redacting what a reader
+# recognises means every shape git accepts has to be modelled, and any shape it
+# does not model is emitted intact: absence of detection read as absence of a
+# credential, which is the same mistake as reading an empty check set as green.
+# Two such shapes reached the log before this inversion. So a word that could
+# carry a credential is emitted ONLY when it positively matches a shape that has
+# no place for one, or can be rewritten into one; unparseable, ambiguous,
+# unfamiliar or merely unmatched all withhold.
+#
+# Withholding is by LINE, not by word. Words are split on spaces, so a URL whose
+# credential holds one arrives here as two words, and the tail of it can match a
+# shape the whole never would - emitting a host and path that were never a
+# remote, beside a marker, reading as two places when there was one. Partial
+# emission is what has bitten this twice, so a line holding anything withheld is
+# withheld entire. The alternatives, not splitting on spaces or letting a marker
+# absorb what follows it, are both more parsing, and parsing is the part that
+# keeps failing.
+#
+# Two shapes are modelled. A scheme URL is emitted without its userinfo, and
+# never contains an '@' at all afterwards, so nothing turns on where a reader
+# believes the authority ends. An scp-style [user@]host:path is emitted without
+# its user, because that form has no password field: its colon separates host
+# from path. That last point is the whole guard, so it is stated as a rule
+# rather than left to the regex to imply - a colon BEFORE the '@' is exactly
+# where a password would live, so a token carrying one is not this shape and is
+# withheld. Adding a modelled shape is default deny working; excepting one from
+# it is not, and the difference is the entire safety of this function.
+#
+# The cost is deliberate: an address, or a URL with an '@' after its host, is
+# withheld even though it holds no secret, and it takes its line with it. The
+# marker says so in its place, because an omission the reader knows about is
+# recoverable and a silent one is not. A line with no URL-shaped word is
+# untouched, so the server's own rejection reason still reaches the person who
+# has to act on it.
+WITHHELD_LINE='<withheld in full: a URL here is not provably credential-free>'
+
+credential_safe_stream() {
+  awk -v withheld_line="$WITHHELD_LINE" '
+    BEGIN {
+      quote = sprintf("%c", 39)
+      lead = "\"([{<" quote
+      trail = "\")]}>,.;:" quote
+    }
+    function is_safe(t) {
+      return t ~ /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]+)?(\/[^@]*)?$/
+    }
+    function without_userinfo(t,   mark, scheme, rest, host, tail) {
+      mark = index(t, "://")
+      if (mark == 0) return ""
+      scheme = substr(t, 1, mark + 2)
+      rest = substr(t, mark + 3)
+      host = rest
+      if (index(host, "/") > 0) host = substr(host, 1, index(host, "/") - 1)
+      tail = substr(rest, length(host) + 1)
+      if (index(host, "@") == 0) return ""
+      sub(/^.*@/, "", host)
+      return scheme host tail
+    }
+    function is_safe_scp(t) {
+      return t ~ /^([A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\]):[^@]*$/
+    }
+    function without_scp_user(t,   at) {
+      if (t !~ /^[A-Za-z0-9._~-]+@/) return ""
+      at = index(t, "@")
+      return substr(t, at + 1)
+    }
+    function render(t,   rebuilt) {
+      if (is_safe(t)) return t
+      rebuilt = without_userinfo(t)
+      if (rebuilt != "" && is_safe(rebuilt)) return rebuilt
+      rebuilt = without_scp_user(t)
+      if (rebuilt != "" && is_safe_scp(rebuilt)) return rebuilt
+      withheld_seen = 1
+      return ""
+    }
+    function token(x,   pre, post, core, c) {
+      if (index(x, "://") == 0 && index(x, "@") == 0) return x
+      core = x
+      pre = ""
+      post = ""
+      while (length(core) > 0) {
+        c = substr(core, 1, 1)
+        if (index(lead, c) == 0) break
+        pre = pre c
+        core = substr(core, 2)
+      }
+      while (length(core) > 0) {
+        c = substr(core, length(core), 1)
+        if (index(trail, c) == 0) break
+        post = c post
+        core = substr(core, 1, length(core) - 1)
+      }
+      return pre render(core) post
+    }
+    {
+      withheld_seen = 0
+      n = split($0, words, / /)
+      out = ""
+      for (i = 1; i <= n; i++) out = out (i > 1 ? " " : "") token(words[i])
+      if (withheld_seen) print withheld_line
+      else print out
+    }
+  '
+}
+
+# The one place a line leaves this script. Callers hand it whole lines and it
+# writes them safe; a caller that wants them on stderr redirects the call.
+emit() {
+  [ "$#" -gt 0 ] || return 0
+  printf '%s\n' "$@" | credential_safe_stream
+}
+
+# Names one repository safely, once, so that a target whose URL cannot be shown
+# is replaced by the marker inside the sentence naming it rather than taking the
+# whole sentence with it. This is the same scrubber emit() applies and not a
+# second one: emitting the result again changes nothing, because a form already
+# proved to have no place for a credential still positively matches.
+credential_safe_text() {
+  [ -n "$1" ] || {
+    printf '(nothing)'
+    return 0
+  }
+  printf '%s\n' "$1" | credential_safe_stream
+}
+
 usage() {
   awk '
     NR == 1 { next }
     /^#/ { sub(/^# ?/, ""); print; next }
     { exit }
-  ' "$0" >&2
+  ' "$0" | credential_safe_stream >&2
 }
 
 # Three exits, and the difference between them is the whole error model.
@@ -90,8 +244,11 @@ usage() {
 #
 # Both forms take prose details after the reason, indented line by line, so a
 # refusal can quote a tool's own output verbatim instead of paraphrasing it.
+# Verbatim means the wording is the tool's rather than a paraphrase of it; it
+# still leaves through emit(), so quoting a stream is safe by construction and a
+# reason added later inherits that without its author arranging anything.
 die() {
-  printf 'fm-attest: %s\n' "$*" >&2
+  emit "fm-attest: $*" >&2
   exit 2
 }
 
@@ -99,9 +256,9 @@ report() {
   headline=$1
   reason=$2
   shift 2
-  printf 'fm-attest: %s (%s)\n' "$headline" "$reason" >&2
+  emit "fm-attest: $headline ($reason)" >&2
   while [ "$#" -gt 0 ]; do
-    printf '%s\n' "$1" | sed 's/^/  /' >&2
+    emit "$1" | sed 's/^/  /' >&2
     shift
   done
 }
@@ -162,13 +319,12 @@ list_has() {
 }
 
 print_format() {
-  cat <<EOF
-$ATTESTATION_KEY: $ATTESTATION_VERSION
-head: <the 40-character lowercase sha of the commit this attests>
-run: <the pipeline run identity that validated it>
-gates: <comma-separated pipeline steps that completed for that head>
-tool: <the pipeline binary and version that ran them>
-EOF
+  emit \
+    "$ATTESTATION_KEY: $ATTESTATION_VERSION" \
+    'head: <the 40-character lowercase sha of the commit this attests>' \
+    'run: <the pipeline run identity that validated it>' \
+    'gates: <comma-separated pipeline steps that completed for that head>' \
+    'tool: <the pipeline binary and version that ran them>'
 }
 
 # ---------------------------------------------------------------------------
@@ -219,8 +375,7 @@ cmd_verify() {
 
   verify_note_payload "$head" "$note"
 
-  printf 'fm-attest: attested %s (run %s, gates %s, %s)\n' \
-    "$head" "$note_run" "$note_gates" "$note_tool"
+  emit "fm-attest: attested $head (run $note_run, gates $note_gates, $note_tool)"
 }
 
 # Parses and checks one note payload. Sets note_run/note_gates/note_tool for the
@@ -316,122 +471,6 @@ EOF
 # ---------------------------------------------------------------------------
 # write - the contributor side
 # ---------------------------------------------------------------------------
-
-# git quotes the push URL back in its own messages, and the server's rejection
-# reason arrives in the same stream. Suppressing that stream keeps a credential
-# out of the log but throws the rejection reason away with it, which leaves a
-# contributor blocked by a ruleset or a quota with nothing to act on. So text is
-# made safe to print rather than withheld wholesale, and one function does it for
-# everything this prints, git's output and the push target alike.
-#
-# It is default deny, and that is the whole design. Redacting what a reader
-# recognises means every shape git accepts has to be modelled, and any shape it
-# does not model is emitted intact: absence of detection read as absence of a
-# credential, which is the same mistake as reading an empty check set as green.
-# Two such shapes reached the log before this inversion. So a word that could
-# carry a credential is emitted ONLY when it positively matches a shape that has
-# no place for one, or can be rewritten into one; unparseable, ambiguous,
-# unfamiliar or merely unmatched all withhold.
-#
-# Withholding is by LINE, not by word. Words are split on spaces, so a URL whose
-# credential holds one arrives here as two words, and the tail of it can match a
-# shape the whole never would - emitting a host and path that were never a
-# remote, beside a marker, reading as two places when there was one. Partial
-# emission is what has bitten this twice, so a line holding anything withheld is
-# withheld entire. The alternatives, not splitting on spaces or letting a marker
-# absorb what follows it, are both more parsing, and parsing is the part that
-# keeps failing.
-#
-# Two shapes are modelled. A scheme URL is emitted without its userinfo, and
-# never contains an '@' at all afterwards, so nothing turns on where a reader
-# believes the authority ends. An scp-style [user@]host:path is emitted without
-# its user, because that form has no password field: its colon separates host
-# from path. That last point is the whole guard, so it is stated as a rule
-# rather than left to the regex to imply - a colon BEFORE the '@' is exactly
-# where a password would live, so a token carrying one is not this shape and is
-# withheld. Adding a modelled shape is default deny working; excepting one from
-# it is not, and the difference is the entire safety of this function.
-#
-# The cost is deliberate: an address, or a URL with an '@' after its host, is
-# withheld even though it holds no secret, and it takes its line with it. The
-# marker says so in its place, because an omission the reader knows about is
-# recoverable and a silent one is not. A line with no URL-shaped word is
-# untouched, so the server's own rejection reason still reaches the person who
-# has to act on it.
-WITHHELD_LINE='<withheld in full: a URL here is not provably credential-free>'
-
-credential_safe_text() {
-  [ -n "$1" ] || {
-    printf '(nothing)'
-    return 0
-  }
-  printf '%s\n' "$1" | awk -v withheld_line="$WITHHELD_LINE" '
-    BEGIN {
-      quote = sprintf("%c", 39)
-      lead = "\"([{<" quote
-      trail = "\")]}>,.;:" quote
-    }
-    function is_safe(t) {
-      return t ~ /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]+)?(\/[^@]*)?$/
-    }
-    function without_userinfo(t,   mark, scheme, rest, host, tail) {
-      mark = index(t, "://")
-      if (mark == 0) return ""
-      scheme = substr(t, 1, mark + 2)
-      rest = substr(t, mark + 3)
-      host = rest
-      if (index(host, "/") > 0) host = substr(host, 1, index(host, "/") - 1)
-      tail = substr(rest, length(host) + 1)
-      if (index(host, "@") == 0) return ""
-      sub(/^.*@/, "", host)
-      return scheme host tail
-    }
-    function is_safe_scp(t) {
-      return t ~ /^([A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\]):[^@]*$/
-    }
-    function without_scp_user(t,   at) {
-      if (t !~ /^[A-Za-z0-9._~-]+@/) return ""
-      at = index(t, "@")
-      return substr(t, at + 1)
-    }
-    function render(t,   rebuilt) {
-      if (is_safe(t)) return t
-      rebuilt = without_userinfo(t)
-      if (rebuilt != "" && is_safe(rebuilt)) return rebuilt
-      rebuilt = without_scp_user(t)
-      if (rebuilt != "" && is_safe_scp(rebuilt)) return rebuilt
-      withheld_seen = 1
-      return ""
-    }
-    function token(x,   pre, post, core, c) {
-      if (index(x, "://") == 0 && index(x, "@") == 0) return x
-      core = x
-      pre = ""
-      post = ""
-      while (length(core) > 0) {
-        c = substr(core, 1, 1)
-        if (index(lead, c) == 0) break
-        pre = pre c
-        core = substr(core, 2)
-      }
-      while (length(core) > 0) {
-        c = substr(core, length(core), 1)
-        if (index(trail, c) == 0) break
-        post = c post
-        core = substr(core, 1, length(core) - 1)
-      }
-      return pre render(core) post
-    }
-    {
-      withheld_seen = 0
-      n = split($0, words, / /)
-      out = ""
-      for (i = 1; i <= n; i++) out = out (i > 1 ? " " : "") token(words[i])
-      if (withheld_seen) print withheld_line
-      else print out
-    }
-  '
-}
 
 cmd_write() {
   run_id=
@@ -596,9 +635,12 @@ EOF
   #
   # That repository is named in everything this prints, because "published to
   # origin" does not say which repository was reached and the note is evidence
-  # only on the one holding the pull request head. Credentials a URL embeds are
-  # stripped from the name, and git's own text is redacted rather than withheld,
-  # so the reason a remote refused still reaches the person who has to act on it.
+  # only on the one holding the pull request head. The name is made safe once
+  # here so that a target which cannot be shown is replaced by the marker inside
+  # the sentence naming it, rather than taking that sentence with it; git's own
+  # text needs no such handling at these call sites, because emit() makes
+  # everything printed safe and the reason a remote refused still reaches the
+  # person who has to act on it.
   push_target=$remote
   if [ "$push" -eq 1 ]; then
     push_url=$(git remote get-url --push "$remote" 2>/dev/null) || push_url=$remote
@@ -620,14 +662,14 @@ EOF
           || fetch_rc=$?
         [ "$fetch_rc" -eq 0 ] || fail push-target-unfetchable \
           "$push_target, the push target of $remote, advertises $notes_ref but would not serve it." \
-          "git said: $(credential_safe_text "$fetch_err")" \
+          "git said: $fetch_err" \
           "Resolve that and re-run; nothing was recorded."
         merge_rc=0
         merge_err=$(git notes --ref="$notes_ref" merge -s ours "$incoming_ref" 2>&1 >/dev/null) \
           || merge_rc=$?
         [ "$merge_rc" -eq 0 ] || fail attestation-not-reconciled \
           "Could not reconcile the local $notes_ref with the one on $push_target, the push target of $remote." \
-          "git said: $(credential_safe_text "$merge_err")" \
+          "git said: $merge_err" \
           "Resolve that and re-run; nothing was recorded."
         git update-ref -d "$incoming_ref" 2>/dev/null || true
         ;;
@@ -635,7 +677,7 @@ EOF
       *)
         fail push-target-unreadable \
           "Could not read $notes_ref from $push_target, the push target of $remote (git exit $ls_rc)." \
-          "git said: $(credential_safe_text "$ls_err")" \
+          "git said: $ls_err" \
           "That is a repository this could not read rather than one with no attestations, so nothing was recorded." \
           "Check access to it, or name another with --remote <name>, then re-run."
         ;;
@@ -644,21 +686,21 @@ EOF
   notes_err=$(git notes --ref="$notes_ref" add -f -m "$payload" "$attest_head" 2>&1 >/dev/null) \
     || fail attestation-not-recorded \
       "Could not record the attestation note on $attest_head." \
-      "git said: $(credential_safe_text "$notes_err")"
+      "git said: $notes_err"
   if [ "$attest_head" != "$head" ]; then
-    printf 'fm-attest: the run tip is ahead of HEAD %s, as the pipeline advances it with its own fix commits\n' "$head"
+    emit "fm-attest: the run tip is ahead of HEAD $head, as the pipeline advances it with its own fix commits"
   fi
-  printf 'fm-attest: recorded %s for %s\n' "$notes_ref" "$attest_head"
+  emit "fm-attest: recorded $notes_ref for $attest_head"
 
   [ "$push" -eq 1 ] || return 0
   push_rc=0
   push_err=$(git push --quiet "$remote" "$notes_ref:$notes_ref" 2>&1 >/dev/null) || push_rc=$?
   [ "$push_rc" -eq 0 ] || fail attestation-not-published \
     "Could not publish $notes_ref to $push_target, the push target of $remote." \
-    "git said: $(credential_safe_text "$push_err")" \
+    "git said: $push_err" \
     "A URL in that text is shown only in a form that has no place for a credential, and any line holding one that is not is withheld whole rather than shown in part." \
     "The attestation is evidence only on the repository holding the pull request head, so name that one with --remote <name> if this is not it, or re-run to reconcile if its $notes_ref moved since."
-  printf 'fm-attest: published %s to %s (the push target of %s)\n' "$notes_ref" "$push_target" "$remote"
+  emit "fm-attest: published $notes_ref to $push_target (the push target of $remote)"
 }
 
 # ---------------------------------------------------------------------------
@@ -687,8 +729,9 @@ cmd_show() {
     "This directory is not inside a git repository."
   sha=$(git rev-parse --verify "$commit^{commit}" 2>/dev/null) || fail commit-unknown \
     "No such commit in this repository: $commit"
-  git notes --ref="$notes_ref" show "$sha" 2>/dev/null \
+  note=$(git notes --ref="$notes_ref" show "$sha" 2>/dev/null) \
     || refuse no-attestation-for-head "No attestation is recorded for $sha."
+  emit "$note"
 }
 
 # ---------------------------------------------------------------------------

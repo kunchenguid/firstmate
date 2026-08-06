@@ -79,12 +79,24 @@ jobs:
             url="https://github.com/${HEAD_REPO}.git"
           fi
 
+          # Both calls are made with their output suppressed and are reported by
+          # the head repository's name instead. When the head repository is the
+          # base repository the URL embeds the job token, and git quotes the
+          # whole remote URL back in its own http errors, so a stream left
+          # attached writes that token into the job log. Actions redacts the
+          # token from logs, which makes this defence in depth rather than the
+          # only thing standing between the token and the log; it is exactly the
+          # reason to keep the two calls consistent rather than to let one of
+          # them rely on that.
           status=0
           git ls-remote --exit-code "$url" refs/notes/no-mistakes >/dev/null 2>&1 || status=$?
           case "$status" in
             0)
-              git fetch --quiet --no-tags --force "$url" \
-                'refs/notes/no-mistakes:refs/notes/no-mistakes'
+              if ! git fetch --quiet --no-tags --force "$url" \
+                  'refs/notes/no-mistakes:refs/notes/no-mistakes' >/dev/null 2>&1; then
+                echo "::error::${HEAD_REPO} advertises refs/notes/no-mistakes but would not serve it." >&2
+                exit 1
+              fi
               ;;
             2)
               # No such ref. Leave it absent and let the verifier name that state
@@ -103,8 +115,43 @@ jobs:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -eu
-          if bin/fm-attest.sh verify --head "$HEAD_SHA"; then
+          # The verifier's two non-zero exits are two different statements and
+          # this check must not collapse them, because collapsing evidence it
+          # never examined into "no evidence" is the defect this whole check
+          # exists to remove. Exit 1 is a refusal: the evidence was examined and
+          # found absent, unbound or invalid, which is a verdict. Anything else
+          # is a failure to reach a verdict at all, and it says nothing about
+          # the evidence either way; a head that predates this check, or one
+          # where bin/fm-attest.sh is absent or has lost its executable bit,
+          # lands there. Both outcomes still fail the check, because a check
+          # that could not look must never report a pass. What differs is what
+          # the contributor is told to go and repair.
+          verify_rc=0
+          bin/fm-attest.sh verify --head "$HEAD_SHA" || verify_rc=$?
+          if [ "$verify_rc" -eq 0 ]; then
             exit 0
+          fi
+          if [ "$verify_rc" -ne 1 ]; then
+            {
+              echo "::error::This check could not evaluate the no-mistakes attestation for its head commit."
+              echo
+              echo "bin/fm-attest.sh exited ${verify_rc}, which is not a verdict on the evidence."
+              echo "It reached no conclusion, so this says nothing about whether this head carries"
+              echo "an attestation: it says the check was unable to look. Do not read it as an"
+              echo "absent attestation, and do not publish one expecting it to clear this."
+              echo
+              echo "The verifier runs from this pull request's own head, so the usual causes are"
+              echo "that bin/fm-attest.sh is missing at this head, has lost its executable bit,"
+              echo "or that this head predates the check entirely. Rebase onto the base branch so"
+              echo "the head carries the verifier, then re-run this check."
+              echo
+              echo "The check fails, because a check that could not look must not report a pass."
+              echo
+              echo "See docs/no-mistakes-attestation.md for the error model these exits belong to."
+              echo
+              echo "PR author: ${PR_AUTHOR}"
+            } >&2
+            exit 1
           fi
           {
             echo "::error::This pull request carries no verified no-mistakes attestation for its head commit."

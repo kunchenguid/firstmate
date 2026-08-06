@@ -17,6 +17,13 @@ Git notes do not travel with `refs/pull/*`, so the workflow fetches the ref from
 The base repository is read through an explicit token URL and a fork through its plain `https` URL, which still carries the job's token because `actions/checkout` persists it in the workspace's git configuration.
 Neither read is anonymous; both are read-only and both go to the host that issued the token.
 A read that fails for any reason other than "the ref is not there" stops the job, so an unreachable head repository is never resolved as either an absent or a present attestation.
+Both remote calls are made with their output suppressed and are reported by the head repository's name, because when the head repository is the base repository the URL carries the job token and git quotes the whole remote URL back in its own http errors.
+Actions redacts that token from logs, which makes the suppression defence in depth rather than the only thing between the token and the log, and is the reason to keep the two calls consistent rather than to let one of them rely on it.
+
+The workflow reads the verifier's exit status rather than only its success, because `bin/fm-attest.sh` separates a refusal from a failure and collapsing the two would have the check report evidence it never examined as absent evidence.
+Exit 1 is a verdict and is reported as no attestation for this head.
+Any other non-zero exit reached no verdict, and is reported as the check being unable to evaluate this head, naming the status and the causes that reach it: a head that predates this check, or one where `bin/fm-attest.sh` is missing or has lost its executable bit.
+Both outcomes fail the check, because a check that could not look must never report a pass; what differs is what the contributor is sent to repair.
 
 ## The format
 
@@ -112,16 +119,21 @@ Partial emission is what has bitten this twice, so a line holding anything withh
 The alternatives, not splitting on spaces or letting a marker absorb the words after it, are both more parsing, and parsing is the part that keeps failing.
 The cost is deliberate and stated rather than hidden: an address, or a URL with an `@` after its host, is withheld even though it holds no secret, and takes its line with it, and a marker says so in its place, because an omission the reader knows about is recoverable and a silent one is not.
 A line with no URL-shaped word is untouched, so the server's own reason still reaches the person who has to act on it.
-One function does this for everything the command prints, git's output and the push target alike, because two mechanisms for the one job is how the disagreement that caused the first leak returns.
+One function does this for everything the command prints, git's output, the pipeline tool's two streams and the push target alike, because two mechanisms for the one job is how the disagreement that caused the first leak returns.
+That is enforced by where it sits rather than by each author remembering it: one function is the only place the command writes a line to a stream, and everything it writes passes through the scrubber, so a diagnostic carrying text from outside cannot be constructed unscrubbed and a refusal added later is safe because printing is what makes it safe.
+Scrubbing at each call site was the shape this had, and it grew a channel that was never scrubbed, for the same reason parse-then-redact grew shapes that were never modelled.
 A push target carrying no `refs/notes/no-mistakes` yet has nothing to reconcile against and is not an error, but a push target that cannot be read at all stops the command before anything is recorded: not reading a repository is not reading an absence, and that is the same line the gate draws when it fetches this ref.
 
 Its own refusals stay as distinct as the gate's.
 `no-run-record` means the pipeline reported no run, `run-record-unreadable` means the tool itself failed, `run-record-unparsed` means it reported something no run identity could be read from, and `run-record-no-head` means it reported a run naming no usable head commit; all four quote the tool's own output, because a tool error read as an absent run sends a contributor to re-run a pipeline that already ran.
+They quote it made safe to print, by the same one function and for the same reason git's output is: `no-mistakes` manages pushes, so its error output can quote a remote URL carrying a credential, and a credential in a log is a leak wherever that log ends up.
 Only what the tool writes to stdout decides which of them it is, because unrelated notices such as its version-upgrade banner go to stderr and must never stand in for a run record; stderr is quoted alongside stdout purely as diagnostic detail.
 None of them may borrow a reason that describes the branch instead of the record.
 A record that cannot be read says nothing about whether the work here is covered, so reporting it as a diverged branch sends a contributor to re-validate a branch that is fine and to receive the identical refusal.
 Every call to the tool is time-bounded, so one blocked on a lock or a network read refuses as `run-record-unreadable` rather than hanging at a contributor's terminal.
 `bin/fm-timeout-lib.sh` owns imposing that bound, and its selection ends in a dependency-free bash watchdog, so a host without `timeout`, `gtimeout` or `perl` gets the same hard bound and process-group cleanup rather than an unbounded call or a refusal.
+A non-positive `FM_ATTEST_NM_TIMEOUT` falls back to the default rather than being passed on, because that owner states that `timeout 0` and the perl fallback's `alarm 0` both disable the deadline outright.
+A zero would therefore not shorten the bound: it would remove it on a host with `timeout` and expire every read at once on one falling back to the watchdog, so one value would produce opposite failures on two hosts.
 `bin/fm-nm-run-lib.sh` owns reading and attributing the record and delegates the bound to it, because a second copy of the mechanism selection is how a host that one owner handles becomes a dead end for the other.
 
 When `no-mistakes` publishes this note itself, the helper becomes redundant and nothing about the check changes: the note format is the contract, and which program writes it is not.
@@ -147,5 +159,6 @@ That is what separates the signature from upstream submission: previously the on
 
 ## Verification
 
-`tests/fm-attest.test.sh` pins every refusal and its matched positive control through the executable interface.
+`tests/fm-attest.test.sh` pins every refusal and its matched positive control through the executable interface, for `bin/fm-attest.sh` and for the workflow's own step scripts, which it lifts out of the workflow by step name and runs as the workflow runs them.
+The two live in one suite because what the check tells a contributor is decided jointly by the verifier's exit status and the step's reading of it, and splitting them lets the two drift apart.
 Each negative fixture differs from the passing one by exactly one property, because a verifier that refused everything would satisfy red-only assertions and would be a worse defect than the honour-system check it replaces.
