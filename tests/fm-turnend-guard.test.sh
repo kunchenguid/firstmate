@@ -1101,9 +1101,50 @@ test_cursor_shim_bounds_the_actionable_wake_chain() {
     "the chain ceiling must deliver a diagnostic rather than silence"
   assert_not_contains "$out" "TURN WOULD END BLIND" \
     "the ceiling diagnostic must not present the blind-turn banner"
+  # The ceiling clears the record instead of latching: the next chain starts
+  # from a normal drain-and-handle followup rather than silent {} forever.
   out=$(cursor_shim_stop 4 env FM_CURSOR_WAKE_CHAIN_BUDGET=2)
-  [ "$out" = '{}' ] || fail "cursor shim must end the wake chain past the ceiling, got: $out"
-  pass "fm-turnend-guard-cursor: a re-firing wake reason is bounded and gets a ceiling diagnostic"
+  assert_contains "$out" "firstmate watcher wake" \
+    "the wake chain must restart normally after the ceiling instead of latching"
+  assert_not_contains "$out" "keeps re-firing" \
+    "the restarted chain must begin from the normal wake followup"
+  pass "fm-turnend-guard-cursor: a re-firing wake reason gets a ceiling diagnostic and then restarts"
+}
+
+test_cursor_shim_fresh_turn_resets_the_wake_chain() {
+  local dir out i
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-wake-fresh-turn")
+  CURSOR_FIXTURE_DIR=$dir
+  : > "$dir/state/task1.meta"
+  install_actionable_arm_stub "$dir"
+  # Drive the same reason to (and past) the ceiling inside one chain.
+  for i in 1 2 3; do
+    cursor_shim_stop "$i" env FM_CURSOR_WAKE_CHAIN_BUDGET=2 >/dev/null
+  done
+  # A captain-driven turn ends with loop_count 0: that is a new chain, so the
+  # same recurring reason must still get a normal drain-and-handle followup.
+  out=$(cursor_shim_stop 0 env FM_CURSOR_WAKE_CHAIN_BUDGET=2)
+  assert_contains "$out" "firstmate watcher wake" \
+    "a non-continuation stop must start a fresh chain, not inherit an exhausted one"
+  assert_not_contains "$out" "keeps re-firing" \
+    "a non-continuation stop must reset the repeat count"
+  pass "fm-turnend-guard-cursor: a non-continuation stop resets the wake chain"
+}
+
+test_cursor_shim_hard_bound_ends_a_runaway_chain() {
+  local dir out
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-hard-bound")
+  CURSOR_FIXTURE_DIR=$dir
+  : > "$dir/state/task1.meta"
+  install_actionable_arm_stub "$dir"
+  # An arm that flaps between actionable and failed closes keeps both per-branch
+  # counters at 1 forever; the unified loop_count bound is what ends the chain.
+  out=$(cursor_shim_stop 3 env FM_CURSOR_TURNEND_BLOCK_BUDGET=2 FM_CURSOR_WAKE_CHAIN_BUDGET=1)
+  [ "$out" = '{}' ] || fail "cursor shim must end a chain at the unified continuation bound, got: $out"
+  install_failing_arm_stub "$dir"
+  out=$(cursor_shim_stop 3 env FM_CURSOR_TURNEND_BLOCK_BUDGET=2 FM_CURSOR_WAKE_CHAIN_BUDGET=1)
+  [ "$out" = '{}' ] || fail "the unified bound must apply to failing arms too, got: $out"
+  pass "fm-turnend-guard-cursor: one unified loop_count bound ends a runaway continuation chain"
 }
 
 test_cursor_shim_distinct_wakes_do_not_hit_the_chain_ceiling() {
@@ -1115,7 +1156,7 @@ test_cursor_shim_distinct_wakes_do_not_hit_the_chain_ceiling() {
   # Ordinary supervision: every cycle closes on a different actionable event.
   # These are progress, not a stuck reason, so the ceiling must never fire and
   # leave the primary with an undrained wake and no watcher.
-  for i in 1 2 3 4 5; do
+  for i in 1 2 3 4; do
     out=$(cursor_shim_stop "$i" env FM_CURSOR_WAKE_CHAIN_BUDGET=2)
     assert_contains "$out" "firstmate watcher wake" \
       "distinct actionable wake $i must keep delivering a normal drain-and-handle followup"
@@ -1137,7 +1178,7 @@ test_cursor_shim_failure_budget_is_session_scoped() {
   # A fresh session must not inherit the previous session's exhausted budget:
   # a hooks.json registration failure is most likely on a session's first stop.
   CURSOR_FIXTURE_SESSION=cur-session-2
-  out=$(cursor_shim_stop 0 env FM_CURSOR_TURNEND_BLOCK_BUDGET=1)
+  out=$(cursor_shim_stop 1 env FM_CURSOR_TURNEND_BLOCK_BUDGET=1)
   CURSOR_FIXTURE_SESSION=
   assert_contains "$out" "TURN WOULD END BLIND" \
     "a new session must reset the failure budget rather than inherit a stale count"
@@ -2051,6 +2092,8 @@ test_cursor_shim_bounds_loud_failure_followups
 test_cursor_shim_wake_chain_does_not_consume_failure_budget
 test_cursor_shim_bounds_the_actionable_wake_chain
 test_cursor_shim_distinct_wakes_do_not_hit_the_chain_ceiling
+test_cursor_shim_fresh_turn_resets_the_wake_chain
+test_cursor_shim_hard_bound_ends_a_runaway_chain
 test_cursor_shim_failure_budget_is_session_scoped
 test_cursor_shim_falls_back_to_loop_count_without_writable_state
 test_cursor_shim_arm_sources_x_mode_cadence
