@@ -65,11 +65,12 @@
 # runtime with none satisfies it by saying so explicitly in the closing status
 # line, the same checkable shape as a runtime that has the store but found no
 # durable finding to record. When a store does exist, it lives outside the
-# task worktree and is shared by every sibling worktree of the same repo, so
-# each scaffold's stay-inside-the-worktree rule names it alongside the status
-# file, item 2 requires a re-read of the index immediately before writing so
-# parallel crewmates do not overwrite each other, and item 2 stays open until
-# the closing status line instead of closing with the commit.
+# task worktree and may be shared with other agents, since sibling worktrees of
+# one repo often key the same store, so each scaffold's stay-inside-the-worktree
+# rule names it alongside the status file, item 2 requires a re-read of the
+# index immediately before writing so concurrent writers cannot silently drop
+# each other's lines, and item 2 stays open until the closing status line
+# instead of closing with the commit.
 # Every ship mode's definition of done requires both outcomes in the closing
 # status line so the checklist is verifiable from that line alone; the scout
 # scaffold carries only the auto-memory item, adapted to its report deliverable.
@@ -328,7 +329,7 @@ auto_memory_index_rules() {
   local indent=${1:-}
   printf '%s\n' \
     "${indent}Check the index first and prefer updating an existing memory over adding a new one; a new index line is only for knowledge no existing memory covers." \
-    "${indent}Sibling worktrees of this repo share one store, so other crewmates may be writing that index while you work: re-read it immediately before you write, then add or update only your own line - never write back a whole index you read earlier, which silently drops whatever they added in between." \
+    "${indent}Other agents may share this store (sibling worktrees of one repo often do) and may be writing that index while you work: re-read it immediately before you write, then add or update only your own line - never write back a whole index you read earlier, which silently drops whatever they added in between." \
     "${indent}Keep the index line to one line under 200 characters - a pointer plus a one-sentence description - with all other detail in the memory file, never the index: the index loads whole into every future session under a size cap observed around 25KB or 200 lines on at least one version, whichever comes first - treat that as an observed limit, not a guarantee - with everything past it dropped silently, so a narrated index destroys the store it is meant to serve." \
     "${indent}Never write secrets, credentials, or captain-private fleet strategy into a memory."
 }

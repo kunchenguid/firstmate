@@ -371,6 +371,19 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# The harness-name guards below grep a whole generated brief, which embeds
+# absolute paths built from $ROOT and from $TMPDIR (the status-file echo line,
+# the scout's report path, the fm-ensure-agents-md.sh invocations). A checkout
+# or scratch directory whose own path contains a harness name - a TMPDIR of
+# /tmp/claude-<uid>, say - would fail those guards as if the wording had
+# regressed, so they run against a copy with both roots stripped. Echoes the
+# scrubbed path.
+brief_without_paths() {
+  local brief=$1 scrubbed="$1.no-paths"
+  sed -e "s|$ROOT||g" -e "s|$TMP_ROOT||g" "$brief" > "$scrubbed"
+  printf '%s\n' "$scrubbed"
+}
+
 # The closing checklist (AGENTS.md item plus the new auto-memory item) must be a
 # numbered, verifiable part of every ship mode's definition of done, worded so a
 # reviewer can check it from the final status line alone (task requirement,
@@ -378,7 +391,7 @@ test_ship_project_memory_wording() {
 # fold in the checklist outcome, since the three modes end with different
 # status-line wording.
 test_ship_modes_require_closing_checklist_in_done() {
-  local home id mode brief expect_done
+  local home id mode brief brief_prose expect_done
   home="$TMP_ROOT/closing-checklist-home"
   mkdir -p "$home/data"
 
@@ -412,8 +425,8 @@ test_ship_modes_require_closing_checklist_in_done() {
       "$id: auto-memory item lost the silent-overflow consequence"
     assert_grep "Never write secrets, credentials, or captain-private fleet strategy into a memory." "$brief" \
       "$id: auto-memory item lost the secrets/credentials/fleet-strategy exclusion"
-    assert_grep "re-read it immediately before you write" "$brief" \
-      "$id: auto-memory item lost the re-read-before-write rule that keeps parallel crewmates in sibling worktrees from overwriting each other's index lines"
+    assert_grep "Other agents may share this store (sibling worktrees of one repo often do) and may be writing that index while you work: re-read it immediately before you write" "$brief" \
+      "$id: auto-memory item lost the conditionally-worded re-read-before-write rule that keeps concurrent writers from silently dropping each other's index lines, or restated shared-store keying as universal runtime behavior"
 
     # No hardcoded memory directory path: only a pointer to the system prompt,
     # and only conditionally - a runtime with no memory store at all must be
@@ -432,8 +445,9 @@ test_ship_modes_require_closing_checklist_in_done() {
     # regression back to "your Claude Code memory directory" or a literal
     # ~/.claude path fails here. Item 1's legitimate `CLAUDE.md` is uppercase
     # and these are case-sensitive fixed-string greps, so it does not collide.
+    brief_prose=$(brief_without_paths "$brief")
     for harness_name in "Claude Code" claude codex opencode pi-signed grok kimi; do
-      assert_no_grep "$harness_name" "$brief" \
+      assert_no_grep "$harness_name" "$brief_prose" \
         "$id: auto-memory item names a specific harness ($harness_name) instead of staying runtime-agnostic"
     done
 
@@ -458,7 +472,7 @@ test_ship_modes_require_closing_checklist_in_done() {
 # auto-memory closing item - adapted to "this task uncovered" wording - not
 # the full two-item ship checklist, and its own done line folds in the outcome.
 test_scout_carries_auto_memory_closing_item() {
-  local home id brief
+  local home id brief brief_prose
   home="$TMP_ROOT/scout-closing-memory-home"
   mkdir -p "$home/data"
   id="brief-scout-closing-e1"
@@ -478,8 +492,8 @@ test_scout_carries_auto_memory_closing_item() {
     "scout auto-memory item states the index cap as a fixed contract instead of an observed, version-specific limit"
   assert_grep "Never write secrets, credentials, or captain-private fleet strategy into a memory." "$brief" \
     "scout auto-memory item lost the secrets/credentials/fleet-strategy exclusion"
-  assert_grep "re-read it immediately before you write" "$brief" \
-    "scout auto-memory item lost the re-read-before-write rule that keeps parallel crewmates in sibling worktrees from overwriting each other's index lines"
+  assert_grep "Other agents may share this store (sibling worktrees of one repo often do) and may be writing that index while you work: re-read it immediately before you write" "$brief" \
+    "scout auto-memory item lost the conditionally-worded re-read-before-write rule that keeps concurrent writers from silently dropping each other's index lines, or restated shared-store keying as universal runtime behavior"
 
   # Same runtime-agnostic pinning as the ship checklist (see
   # test_ship_modes_require_closing_checklist_in_done): both the has-a-store
@@ -488,8 +502,9 @@ test_scout_carries_auto_memory_closing_item() {
     "scout auto-memory item must point at the system prompt instead of a hardcoded path, conditioned on the store existing"
   assert_grep "If your runtime provides no such store at all, satisfy this item the same way: say so explicitly in your closing status line." "$brief" \
     "scout auto-memory item lost its no-memory-store fallback, making it unsatisfiable on runtimes with no persistent store"
+  brief_prose=$(brief_without_paths "$brief")
   for harness_name in "Claude Code" claude codex opencode pi-signed grok kimi; do
-    assert_no_grep "$harness_name" "$brief" \
+    assert_no_grep "$harness_name" "$brief_prose" \
       "scout auto-memory item names a specific harness ($harness_name) instead of staying runtime-agnostic"
   done
 
