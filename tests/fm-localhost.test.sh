@@ -107,6 +107,21 @@ with open(path, "w", encoding="utf-8") as handle:
 PY
 }
 
+append_listener_json() {
+  local path=$1 port=$2 address=$3 pid=$4 process=$5 executable=$6 command=$7
+  python3 - "$path" "$port" "$address" "$pid" "$process" "$executable" "$command" <<'PY'
+import json, sys
+path, port, address, pid, process, executable, command = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    rows = json.load(handle)
+rows.append({"address": address, "port": int(port), "pid": int(pid),
+             "process": process, "executable": executable or None,
+             "command": command or None})
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(rows, handle)
+PY
+}
+
 make_case() {
   local dir="$TMP_ROOT/$1" seed="$TMP_ROOT/$1/seed"
   mkdir -p "$dir" "$seed"
@@ -246,6 +261,43 @@ test_healthy_relay_and_clean_wsl_verify() {
   pass "healthy wslrelay plus clean WSL server passes with matching browser-like route fingerprints"
 }
 
+test_relay_identity_requires_canonical_executable() {
+  local dir out
+  dir=$(make_case relay-identity)
+  out="$dir/out"
+  write_listener_json "$dir/win-relay.json" 43123 0.0.0.0 5100 wslrelay.exe '' ''
+  if FM_WSL_MODE=always FM_WIN_ALWAYS_RELAY=1 run_case "$dir" verify "$out"; then
+    fail "relay with missing executable identity passed verification"
+  fi
+  assert_grep 'reason=windows-owner-is-not-wslrelay' "$out" "missing relay executable identity did not refuse"
+  [ ! -s "$dir/route.log" ] || fail "missing relay executable identity reached route verification"
+  pass "relay verification requires complete canonical executable identity"
+}
+
+test_same_owner_multiple_bindings_verify() {
+  local dir out
+  dir=$(make_case multiple-bindings)
+  out="$dir/out"
+  append_listener_json "$dir/win-relay.json" 43123 :: 5100 wslrelay.exe \
+    'C:\Windows\System32\wslrelay.exe' ''
+  FM_WSL_MODE=always FM_WIN_ALWAYS_RELAY=1 run_case "$dir" verify "$out" || fail "same-owner multiple bindings did not verify: $(cat "$out")"
+  assert_grep $'verification\tverdict=pass' "$out" "same-owner multiple bindings did not pass"
+  pass "same-owner multiple listener bindings remain a verified relay pair"
+}
+
+test_same_owner_multiple_bindings_recover() {
+  local dir out
+  dir=$(make_case multiple-bindings-recover)
+  out="$dir/out"
+  append_listener_json "$dir/win-initial.json" 43123 :: 4100 node.exe \
+    'C:\Program Files\nodejs\node.exe' \
+    '"C:\Program Files\nodejs\node.exe" "C:\repos\stale checkout\node_modules\astro\astro.js" dev --token super-secret-value --header "X-Api-Key: header-secret" --json {"token":"json-secret"} --vm-id {1f662e3a-0323-4e37-a59f-304f0161cf55}'
+  FM_WSL_MODE=after-launch run_case "$dir" recover "$out" || fail "same-owner multiple stale bindings did not recover: $(cat "$out")"
+  [ "$(wc -l < "$dir/stop.log" | tr -d ' ')" = 1 ] || fail "same-owner multiple bindings did not issue one exact termination"
+  assert_grep 'recovered-and-verified' "$out" "same-owner multiple stale bindings did not verify"
+  pass "same-owner multiple stale Windows bindings recover by one exact PID"
+}
+
 test_active_task_refuses_without_termination() {
   local dir out
   dir=$(make_case active-task)
@@ -367,6 +419,10 @@ test_task_state_inspection_failure_is_safe() {
   fi
   assert_grep 'refuse:firstmate-task-state-inspection-unavailable' "$out" "missing task state did not produce a safe refusal"
   [ ! -s "$dir/stop.log" ] || fail "missing task state still called termination"
+  if FM_WSL_MODE=none run_case "$dir" inspect "$out"; then
+    fail "inspect accepted missing Firstmate task state"
+  fi
+  assert_grep $'owner_kernel=firstmate\tstatus=unavailable' "$out" "inspect did not report missing task state"
   pass "unavailable Firstmate task-state inspection refuses recovery without termination"
 }
 
@@ -490,6 +546,9 @@ test_checkout_revalidation_blocks_dirty_restart() {
 test_listener_parsing_path_conversion_source_and_redaction
 test_native_stale_windows_shadow_recovers_to_verified_pair
 test_healthy_relay_and_clean_wsl_verify
+test_relay_identity_requires_canonical_executable
+test_same_owner_multiple_bindings_verify
+test_same_owner_multiple_bindings_recover
 test_active_task_refuses_without_termination
 test_pid_or_command_change_refuses_on_immediate_reresolution
 test_worker_with_astro_words_refuses

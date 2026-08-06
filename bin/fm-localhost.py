@@ -150,6 +150,55 @@ class SafeRefusal(RuntimeError):
     pass
 
 
+class TaskStateBoundary:
+    def __init__(self, state: Path):
+        self.state = state
+        self.process: subprocess.Popen[str] | None = None
+
+    def __enter__(self) -> "TaskStateBoundary":
+        if not self.state.is_dir():
+            raise SafeRefusal("firstmate-task-state-inspection-unavailable")
+        helper = Path(__file__).resolve().with_name("fm-task-state-lock.sh")
+        try:
+            self.process = subprocess.Popen(
+                ["bash", str(helper), str(self.state)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            ready = self.process.stdout.readline().strip() if self.process.stdout else ""
+        except OSError as exc:
+            self.close()
+            raise SafeRefusal("Firstmate task-state boundary unavailable") from exc
+        if ready != "locked":
+            self.close()
+            raise SafeRefusal("Firstmate task-state boundary unavailable")
+        return self
+
+    def close(self) -> None:
+        if self.process is None:
+            return
+        if self.process.stdin:
+            try:
+                self.process.stdin.close()
+            except OSError:
+                pass
+        try:
+            self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait()
+        if self.process.stdout:
+            self.process.stdout.close()
+        self.process = None
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        self.close()
+
+
 def command_output(argv: list[str], *, cwd: Path | None = None, timeout: float = 15) -> str:
     completed = subprocess.run(
         argv,
@@ -356,7 +405,7 @@ def classify_windows(process: str, command: str, executable: str, checkout: str 
     lower_name = Path(process).name.lower()
     lower_executable = re.split(r"[\\/]", executable)[-1].lower() if executable else ""
     lower_command = command.lower()
-    if lower_name == "wslrelay.exe":
+    if canonical_wslrelay_identity(process, executable):
         return "wslrelay"
     if not command.strip():
         return "unknown-command"
@@ -616,6 +665,37 @@ def same_listener_identity(before: list[Listener], after: list[Listener]) -> boo
         )
 
     return identity(before) == identity(after)
+
+
+def listener_owner_identity(listener: Listener) -> tuple[object, ...]:
+    return (
+        listener.pid,
+        listener.process.casefold(),
+        listener.command_raw,
+        listener.executable_raw.casefold(),
+        listener.git.checkout,
+        listener.git.branch,
+        listener.git.sha,
+        listener.git.dirty,
+        listener.git.source,
+        listener.tasks,
+        listener.classification,
+    )
+
+
+def consistent_listener_owner(listeners: list[Listener]) -> list[Listener] | None:
+    if not listeners or len({listener.pid for listener in listeners}) != 1:
+        return None
+    identities = {listener_owner_identity(listener) for listener in listeners}
+    return listeners if len(identities) == 1 else None
+
+
+def canonical_wslrelay_identity(process: str, executable: str) -> bool:
+    process_name = Path(process).name.casefold()
+    normalized = executable.strip().replace("/", "\\")
+    return process_name == "wslrelay.exe" and bool(
+        re.fullmatch(r"[A-Za-z]:\\(?:[^\\/:*?\"<>|\r\n]+\\)+wslrelay\.exe", normalized, re.IGNORECASE)
+    )
 
 
 def recovery_verdict(inspection: Inspection, expected: GitInfo, expected_sha: str) -> str:
@@ -880,11 +960,17 @@ def verified_pair(inspection: Inspection, expected: GitInfo, expected_sha: str) 
         return False, "windows-inspection-unavailable"
     if inspection.wsl_error:
         return False, "wsl-inspection-unavailable"
-    if len(inspection.windows) != 1 or inspection.windows[0].classification != "wslrelay":
+    windows = consistent_listener_owner(inspection.windows)
+    if windows is None or any(not canonical_wslrelay_identity(item.process, item.executable_raw) for item in windows):
         return False, "windows-owner-is-not-wslrelay"
-    if len(inspection.wsl) != 1:
+    wsl = consistent_listener_owner(inspection.wsl)
+    if wsl is None:
+        if not inspection.wsl:
+            return False, "expected-wsl-listener-missing"
+        return False, "wsl-listener-identity-mismatch"
+    if not wsl:
         return False, "expected-wsl-listener-missing"
-    item = inspection.wsl[0]
+    item = wsl[0]
     if (
         item.classification != "wsl-node-astro-dev"
         or item.git.checkout != expected.checkout
@@ -906,7 +992,10 @@ def post_stop_restart_verdict(inspection: Inspection, expected: GitInfo, expecte
     if inspection.wsl:
         pair_ok, reason = verified_pair(inspection, expected, expected_sha)
         return "already-verified" if pair_ok else f"refuse:post-stop-reserved-port-not-safe:{reason}"
-    if len(inspection.windows) > 1 or any(item.classification != "wslrelay" for item in inspection.windows):
+    windows = consistent_listener_owner(inspection.windows)
+    if inspection.windows and (
+        windows is None or any(not canonical_wslrelay_identity(item.process, item.executable_raw) for item in windows)
+    ):
         return "refuse:post-stop-reserved-port-not-safe:windows-owner-is-not-wslrelay"
     return "restart-safe"
 
@@ -963,9 +1052,10 @@ def termination_boundary_listener(
     boundary = inspect_system(port, state)
     if recovery_verdict(boundary, expected, expected_sha) != "eligible":
         raise SafeRefusal("pid-or-command-reresolution-changed")
-    if len(boundary.windows) != 1 or not same_listener_identity([listener], boundary.windows):
+    boundary_windows = consistent_listener_owner(boundary.windows)
+    if boundary_windows is None or any(listener_owner_identity(item) != listener_owner_identity(listener) for item in boundary_windows):
         raise SafeRefusal("pid-or-command-reresolution-changed")
-    return boundary.windows[0]
+    return boundary_windows[0]
 
 
 def terminate_exact(listener: Listener, port: int, expected: GitInfo, expected_sha: str, state: Path) -> None:
@@ -988,7 +1078,7 @@ def terminate_exact(listener: Listener, port: int, expected: GitInfo, expected_s
         raise SafeRefusal("exact PID termination was not confirmed")
 
 
-def recover(project: Path, port: int, expected_sha: str, expected: GitInfo, state: Path) -> bool:
+def recover_locked(project: Path, port: int, expected_sha: str, expected: GitInfo, state: Path) -> bool:
     before = inspect_system(port, state)
     before_lines = render_inspection("recover", project, port, expected_sha, expected, before)
     verdict = recovery_verdict(before, expected, expected_sha)
@@ -1082,6 +1172,15 @@ def recover(project: Path, port: int, expected_sha: str, expected: GitInfo, stat
     return False
 
 
+def recover(project: Path, port: int, expected_sha: str, expected: GitInfo, state: Path) -> bool:
+    try:
+        with TaskStateBoundary(state):
+            return recover_locked(project, port, expected_sha, expected, state)
+    except SafeRefusal as exc:
+        emit("recovery-result", verdict=f"refuse:{str(exc)}", mutated="no")
+        return False
+
+
 def parser() -> argparse.ArgumentParser:
     description = "Inspect or narrowly recover localhost ownership across native Windows and WSL."
     epilog = """mechanics (authoritative):
@@ -1112,7 +1211,9 @@ def parser() -> argparse.ArgumentParser:
 
   Immediately before mutation, recover re-resolves listener, PID, command,
   checkout, Git, and task evidence. The termination boundary repeats that
-  complete proof after the evidence is fsynced. It writes a mode-0600 record beneath
+  complete proof after the evidence is fsynced while holding the shared
+  Firstmate task-state publication boundary; task creation and metadata
+  publication use that same boundary. It writes a mode-0600 record beneath
   $FM_HOME/state/localhost-evidence before invoking fixed PowerShell that again
   requires the exact PID, port, node.exe identity, unchanged command hash, and
   exact Astro script path followed by `dev`. After the exact PID exits, it
@@ -1161,7 +1262,7 @@ def main() -> int:
     if args.mode == "inspect":
         inspection = inspect_system(args.port, state)
         render_inspection("inspect", project, args.port, expected_sha, expected, inspection)
-        return 1 if inspection.windows_error or inspection.wsl_error else 0
+        return 1 if inspection.task_error or inspection.windows_error or inspection.wsl_error else 0
     if args.mode == "verify":
         return 0 if verify(project, args.port, expected_sha, expected, state) else 1
     return 0 if recover(project, args.port, expected_sha, expected, state) else 1
