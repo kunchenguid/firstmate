@@ -85,7 +85,17 @@ if [ -z "$SESSION" ]; then
       (if (.workspace_roots | type) == "array" then (.workspace_roots | tojson) else "" end)
     ] | @tsv end
   ' 2>/dev/null) || SESSION_CONTEXT=
-  SESSION_KEY=$(printf '%s\037%s' "$ROOT" "$SESSION_CONTEXT" \
+  SESSION_TRANSCRIPT=$(printf '%s' "$PAYLOAD" | jq -r '
+    if type == "object" and (.transcript_path | type) == "string" and .transcript_path != ""
+    then .transcript_path else empty end
+  ' 2>/dev/null) || SESSION_TRANSCRIPT=
+  SESSION_SCOPE=$SESSION_CONTEXT
+  if [ -z "$SESSION_TRANSCRIPT" ]; then
+    SESSION_PARENT=${PPID:-}
+    case "$SESSION_PARENT" in ''|*[!0-9]*) SESSION_PARENT=unknown ;; esac
+    SESSION_SCOPE=$(printf '%s\037%s' "$SESSION_PARENT" "$SESSION_CONTEXT")
+  fi
+  SESSION_KEY=$(printf '%s\037%s' "$ROOT" "$SESSION_SCOPE" \
     | cksum 2>/dev/null | awk '{print $1 ":" $2}')
   [ -n "$SESSION_KEY" ] || SESSION_KEY="root:$ROOT"
   SESSION="fallback:$SESSION_KEY"

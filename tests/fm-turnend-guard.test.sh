@@ -1035,6 +1035,20 @@ cursor_shim_stop_without_session() {
     | tail -n 1
 }
 
+cursor_shim_stop_without_identity_parent() {
+  local count=$1
+  shift
+  CURSOR_SHIM_COUNT="$count" CURSOR_WORKSPACE_ROOT="$CURSOR_FIXTURE_DIR" env "$@" bash -c '
+    i=0
+    while [ "$i" -lt "$CURSOR_SHIM_COUNT" ]; do
+      i=$((i + 1))
+      printf "{\"workspace_roots\":[\"%s\"]}" "$CURSOR_WORKSPACE_ROOT" \
+        | bash "$CURSOR_WORKSPACE_ROOT/bin/fm-turnend-guard-cursor.sh" 2>&1 \
+        | tail -n 1
+    done
+  '
+}
+
 cursor_shim_stop_for_conversation() {
   local conversation=$1
   shift
@@ -1402,6 +1416,27 @@ test_cursor_shim_fallback_session_scope() {
   assert_contains "$out" "keeps re-firing" \
     "unidentified sessions must not share or clear each other's wake bounds"
   pass "fm-turnend-guard-cursor: unidentified payloads keep isolated persistent chains"
+}
+
+test_cursor_shim_fallback_without_identity_is_process_scoped() {
+  local dir out first second
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-process-scope")
+  CURSOR_FIXTURE_DIR=$dir
+  : > "$dir/state/task1.meta"
+  install_actionable_arm_stub "$dir"
+  out=$(cursor_shim_stop_without_identity_parent 2 env -u CURSOR_CONVERSATION_ID FM_CURSOR_WAKE_CHAIN_BUDGET=1)
+  first=$(printf '%s\n' "$out" | sed -n '1p')
+  second=$(printf '%s\n' "$out" | sed -n '2p')
+  assert_contains "$first" "firstmate watcher wake" \
+    "an identity-free payload must deliver its first wake"
+  assert_contains "$second" "keeps re-firing" \
+    "repeated identity-free wakes in one parent session must remain bounded"
+  out=$(cursor_shim_stop_without_identity_parent 1 env -u CURSOR_CONVERSATION_ID FM_CURSOR_WAKE_CHAIN_BUDGET=1)
+  assert_contains "$out" "firstmate watcher wake" \
+    "a separate identity-free parent session must start a fresh chain"
+  assert_not_contains "$out" "keeps re-firing" \
+    "separate identity-free parent sessions must not inherit another chain"
+  pass "fm-turnend-guard-cursor: identity-free fallback chains are parent-session scoped"
 }
 
 test_cursor_shim_falls_back_to_loop_count_without_writable_state() {
@@ -2361,6 +2396,7 @@ test_cursor_shim_rejects_fractional_loop_count
 test_cursor_shim_failure_budget_is_session_scoped
 test_cursor_shim_prefers_conversation_id_for_persistent_scope
 test_cursor_shim_fallback_session_scope
+test_cursor_shim_fallback_without_identity_is_process_scoped
 test_cursor_shim_falls_back_to_loop_count_without_writable_state
 test_cursor_shim_arm_sources_x_mode_cadence
 test_cursor_shim_arm_defaults_cadence_without_x_mode
