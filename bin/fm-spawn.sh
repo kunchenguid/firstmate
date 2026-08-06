@@ -348,7 +348,7 @@ raw_launch_refuse() {
 }
 
 raw_launch_preflight() {
-  local raw=$1 normalized_raw normalized word executable= base
+  local raw=$1 forbidden=--dangerously-skip-permissions normalized_raw normalized_word normalized word executable= base
   local -a words
   case "$raw" in
     *$'\n'*|*$'\r'*|*';'*|*'&'*|*'|'*|*'`'*|*'$'*|*'('*|*')'*|*'{'*|*'}'*|*'<'*|*'>'*|*'\'*)
@@ -365,6 +365,15 @@ raw_launch_preflight() {
       ;;
   esac
   read -r -a words <<< "$raw"
+  for word in "${words[@]}"; do
+    normalized_word=${word//\'/}
+    normalized_word=${normalized_word//\"/}
+    # shellcheck disable=SC2053
+    if [[ "$forbidden" == $normalized_word ]]; then
+      raw_launch_refuse
+      return 1
+    fi
+  done
   for word in "${words[@]}"; do
     if [[ "$word" =~ ^[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9_./,:+%@-]+$ ]]; then
       continue

@@ -636,22 +636,39 @@ test_forbidden_permission_flag_is_refused_across_raw_commands() {
   pass "forbidden permission flags are refused across raw commands"
 }
 
+test_forbidden_permission_glob_is_refused() {
+  local rec id raw out status
+  id=profile-raw-forbidden-glob-z15o
+  raw="git -c alias.x='!/root/.local/bin/claude --dangerously-skip-*' x"
+  rec=$(make_spawn_case profile-raw-forbidden-glob claude "$id")
+  read_case_record "$rec"
+  : > "$WT_DIR/--dangerously-skip-permissions"
+  git -C "$WT_DIR" add -- --dangerously-skip-permissions
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "$raw")
+  status=$?
+  assert_unsafe_claude_raw_refused "$out" "$status" "$HOME_DIR" "$LAUNCH_LOG" "$id" \
+    "glob-synthesized forbidden-permission flag"
+  pass "glob-synthesized forbidden permission flag is refused before launch"
+}
+
 test_non_claude_raw_arguments_may_mention_claude() {
   local rec id raw out status launch
   id=profile-raw-custom-claude-model-z15k
-  raw="custom-agent --model anthropic/claude-sonnet-4-5"
+  raw="custom-agent --include 'src/*.sh' --model anthropic/claude-sonnet-4-5"
   rec=$(make_spawn_case profile-raw-custom-claude-model claude "$id")
   read_case_record "$rec"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" "$raw")
   status=$?
-  expect_code 0 "$status" "non-Claude raw launch with a Claude model argument should succeed"
+  expect_code 0 "$status" "non-Claude raw launch with safe glob and Claude model arguments should succeed"
   assert_contains "$out" "spawned $id harness=custom-agent" \
-    "non-Claude raw launch with a Claude model argument lost its adapter identity"
+    "non-Claude raw launch with safe glob and Claude model arguments lost its adapter identity"
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "$raw" ] || fail "non-Claude raw launch with a Claude model argument changed"$'\n'"actual: $launch"
-  pass "non-Claude raw launch preserves Claude model arguments"
+  [ "$launch" = "$raw" ] || fail "non-Claude raw launch with safe glob and Claude model arguments changed"$'\n'"actual: $launch"
+  pass "non-Claude raw launch preserves safe glob and Claude model arguments"
 }
 
 test_claude_threads_model_and_effort() {
@@ -1014,6 +1031,7 @@ test_posix_dot_dispatcher_is_refused
 test_coproc_dispatcher_is_refused
 test_remaining_dispatchers_are_refused
 test_forbidden_permission_flag_is_refused_across_raw_commands
+test_forbidden_permission_glob_is_refused
 test_non_claude_raw_arguments_may_mention_claude
 test_claude_threads_model_and_effort
 test_claude_scout_uses_auto_permissions_and_delivers_profiled_prompt
