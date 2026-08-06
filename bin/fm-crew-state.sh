@@ -379,7 +379,7 @@ nm_branch_sync_state() {
     | head -1)
   if [ -z "$state" ]; then
     state=$(printf '%s\n' "$RUN_OUT" \
-      | sed -n '/^[[:space:]]*branch_sync:[[:space:]]*$/,/^[^[:space:]][^:]*:/s/^[[:space:]]*state:[[:space:]]*\(.*\)/\1/p' \
+      | sed -n '/^[[:space:]]*branch_sync:[[:space:]]*$/,/^[^[:space:]][^:]*:/s/^[[:space:]]\{1,\}state:[[:space:]]*\(.*\)/\1/p' \
       | head -1)
   fi
   strip_quotes "$state"
@@ -390,6 +390,9 @@ nm_branch_sync_state() {
 # `no-mistakes axi sync --recover` returns custody, so `pipeline_owned` alone
 # cannot distinguish a retry in flight from custody parked on a dead run.
 nm_pipeline_owned_live_run() {
+  case "$(strip_quotes "$(nm_field status)")" in
+    completed|failed|cancelled) return 1 ;;
+  esac
   [ -z "$(strip_quotes "$(nm_field outcome)")" ] \
     && [ "$(nm_branch_sync_state)" = pipeline_owned ]
 }

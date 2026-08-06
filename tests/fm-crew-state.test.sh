@@ -292,6 +292,18 @@ outcome: failed
 EOF
 }
 
+run_failed_status_only() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: failed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+EOF
+}
+
 run_ci_monitoring() {  # <branch>
   cat <<EOF
 run:
@@ -1418,6 +1430,63 @@ branch_sync:
   pass "a terminal pipeline_owned run does not re-attach past the run head"
 }
 
+# Terminal direction, CLI shape variant: a dead run can also surface as
+# `status: failed|cancelled|completed` with no `outcome:` field at all. The
+# empty outcome must not read as liveness for the branch-sync escape.
+test_terminal_status_without_outcome_does_not_reattach() {
+  reset_fakes
+  local d run_head out
+  d=$(new_case terminal-status-no-outcome)
+  make_repo_on_branch "$d/wt" fm/feat-tstat
+  run_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'crew fix after failed run'
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/tstat.meta" "window=fm:fm-tstat" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: fix committed, preparing retry\n' > "$d/state/tstat.status"
+  FM_FAKE_RUN_HEAD="$run_head"
+  FM_FAKE_AXI_STATUS="$(run_failed_status_only fm/feat-tstat)
+branch_sync:
+  next_action: recover
+  code: recover_custody
+  state: pipeline_owned"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" tstat
+  out=$(run_crew_state "$d" tstat)
+  assert_not_contains "$out" "source: run-step" "terminal status without outcome must not relax head binding"
+  assert_not_contains "$out" "state: failed" "dead run must not resurface as a recovery signal"
+  assert_contains "$out" "source: status-log" "falls back to status-log after the crew moved on"
+  assert_contains "$out" "state: working" "status-log working: remains current"
+  pass "a terminal status with no outcome field does not re-attach past the run head"
+}
+
+# Nested-form parse edge: the sed block range's terminating line is itself in
+# the range, so a branch_sync block with no nested state key followed by a
+# top-level `state:` key must not read that value as the branch-sync state.
+test_branch_sync_range_end_not_captured_as_state() {
+  reset_fakes
+  local d run_head out
+  d=$(new_case branch-sync-range-end)
+  make_repo_on_branch "$d/wt" fm/feat-redge
+  run_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'crew fix past run head'
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/redge.meta" "window=fm:fm-redge" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: fix committed, preparing retry\n' > "$d/state/redge.status"
+  FM_FAKE_RUN_HEAD="$run_head"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-redge)
+branch_sync:
+  next_action: none
+  code: in_sync
+state: pipeline_owned"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" redge
+  out=$(run_crew_state "$d" redge)
+  assert_not_contains "$out" "source: run-step" "top-level state key must not relax head binding"
+  assert_contains "$out" "source: status-log" "falls back to status-log after head mismatch"
+  assert_contains "$out" "state: working" "status-log working: remains current"
+  pass "the block range terminator is not captured as branch-sync state"
+}
+
 test_missing_run_head_falls_back_to_current_state() {
   reset_fakes
   local d out
@@ -1489,6 +1558,8 @@ test_non_pipeline_owned_branch_sync_keeps_head_binding
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_terminal_pipeline_owned_run_does_not_reattach
+test_terminal_status_without_outcome_does_not_reattach
+test_branch_sync_range_end_not_captured_as_state
 test_missing_run_head_falls_back_to_current_state
 
 echo "all fm-crew-state tests passed"
