@@ -81,6 +81,7 @@ if [ -z "$SESSION" ]; then
     if type != "object" then ""
     else [
       (if (.cwd | type) == "string" then .cwd else "" end),
+      (if (.transcript_path | type) == "string" then .transcript_path else "" end),
       (if (.workspace_roots | type) == "array" then (.workspace_roots | tojson) else "" end)
     ] | @tsv end
   ' 2>/dev/null) || SESSION_CONTEXT=
@@ -95,7 +96,8 @@ CHAIN_FILE="$STATE/.cursor-turnend-chain-$SESSION_KEY"
 LOOP_COUNT_VALUE=$(printf '%s' "$PAYLOAD" | jq -r '
   if type == "object" and has("loop_count")
      and ((.loop_count | type) == "number") and .loop_count >= 0
-  then (.loop_count | floor) else empty end
+     and .loop_count == (.loop_count | floor)
+  then .loop_count else empty end
 ' 2>/dev/null) || LOOP_COUNT_VALUE=
 LOOP_COUNT=0
 LOOP_COUNT_VALID=0

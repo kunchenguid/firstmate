@@ -1028,9 +1028,9 @@ cursor_shim_stop_without_loop_count() {
 }
 
 cursor_shim_stop_without_session() {
-  local cwd=$1
-  shift
-  printf '{"cwd":"%s","workspace_roots":["%s"]}' "$cwd" "$CURSOR_FIXTURE_DIR" \
+  local cwd=$1 transcript=$2
+  shift 2
+  printf '{"cwd":"%s","transcript_path":"%s","workspace_roots":["%s"]}' "$cwd" "$transcript" "$CURSOR_FIXTURE_DIR" \
     | CURSOR_WORKSPACE_ROOT="$CURSOR_FIXTURE_DIR" "$@" bash "$CURSOR_FIXTURE_DIR/bin/fm-turnend-guard-cursor.sh" 2>&1 \
     | tail -n 1
 }
@@ -1392,13 +1392,13 @@ test_cursor_shim_fallback_session_scope() {
   CURSOR_FIXTURE_DIR=$dir
   : > "$dir/state/task1.meta"
   install_actionable_arm_stub "$dir"
-  out=$(cursor_shim_stop_without_session same-project env CURSOR_CONVERSATION_ID=conversation-a FM_CURSOR_WAKE_CHAIN_BUDGET=1)
+  out=$(cursor_shim_stop_without_session same-project transcript-a env -u CURSOR_CONVERSATION_ID FM_CURSOR_WAKE_CHAIN_BUDGET=1)
   assert_contains "$out" "firstmate watcher wake" \
     "a payload without a session id must still deliver its first wake"
-  out=$(cursor_shim_stop_without_session same-project env CURSOR_CONVERSATION_ID=conversation-b FM_CURSOR_WAKE_CHAIN_BUDGET=1)
+  out=$(cursor_shim_stop_without_session same-project transcript-b env -u CURSOR_CONVERSATION_ID FM_CURSOR_WAKE_CHAIN_BUDGET=1)
   assert_contains "$out" "firstmate watcher wake" \
     "a separate unidentified session must start a fresh wake chain"
-  out=$(cursor_shim_stop_without_session same-project env CURSOR_CONVERSATION_ID=conversation-a FM_CURSOR_WAKE_CHAIN_BUDGET=1)
+  out=$(cursor_shim_stop_without_session same-project transcript-a env -u CURSOR_CONVERSATION_ID FM_CURSOR_WAKE_CHAIN_BUDGET=1)
   assert_contains "$out" "keeps re-firing" \
     "unidentified sessions must not share or clear each other's wake bounds"
   pass "fm-turnend-guard-cursor: unidentified payloads keep isolated persistent chains"
@@ -1426,6 +1426,24 @@ test_cursor_shim_falls_back_to_loop_count_without_writable_state() {
   assert_contains "$out" "TURN WOULD END BLIND" \
     "the payload fallback ceiling must retain loud failure guidance"
   pass "fm-turnend-guard-cursor: an unwritable state dir degrades to the payload loop_count bound"
+}
+
+test_cursor_shim_rejects_fractional_loop_count() {
+  local dir out
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-fractional-loop-count")
+  CURSOR_FIXTURE_DIR=$dir
+  : > "$dir/state/task1.meta"
+  install_failing_arm_stub "$dir"
+  out=$(cursor_shim_stop_without_loop_count env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=1)
+  assert_contains "$out" "TURN WOULD END BLIND" \
+    "the first arm failure must establish persistent state before the fractional input"
+  out=$(cursor_shim_stop 0.5 env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=1)
+  assert_contains "$out" "bounded chain" \
+    "a fractional loop_count must not clear persistent bound state"
+  out=$(cursor_shim_stop_without_loop_count env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=1)
+  assert_not_contains "$out" "bounded chain" \
+    "the fractional-input ceiling must clear state for the next chain"
+  pass "fm-turnend-guard-cursor: fractional loop_count stays malformed"
 }
 
 test_cursor_shim_arm_sources_x_mode_cadence() {
@@ -2339,6 +2357,7 @@ test_cursor_shim_bounds_nonconsecutive_wake_refires
 test_cursor_shim_bounds_dynamic_wake_refires
 test_cursor_shim_bounds_procevent_wake_refires
 test_cursor_shim_persists_bound_without_valid_loop_count
+test_cursor_shim_rejects_fractional_loop_count
 test_cursor_shim_failure_budget_is_session_scoped
 test_cursor_shim_prefers_conversation_id_for_persistent_scope
 test_cursor_shim_fallback_session_scope
