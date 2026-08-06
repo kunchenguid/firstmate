@@ -42,13 +42,18 @@ make_home() {  # <name> [<registry-line>...]
   printf '%s\n' "$home|$projects/proj|$fakebin"
 }
 
-write_brief() {  # <home> <id> [<recorded-mode>] [<recorded-gate>]
-  local home=$1 id=$2 mode=${3:-} gate=${4:-}
+# A gate-merge brief carries its gate command twice, so the fixture writes both and
+# lets them differ: the step defaults to the contract line's command, and an explicit
+# fifth argument stands in for a hand-patched or missing step.
+write_brief() {  # <home> <id> [<recorded-mode>] [<recorded-gate>] [<gate-step-command>]
+  local home=$1 id=$2 mode=${3:-} gate=${4:-} step=${5-${4-}}
   mkdir -p "$home/data/$id"
   {
     printf 'You are a crewmate.\n\n# Definition of done\n'
     [ -z "$mode" ] || printf 'Delivery contract: mode=%s\n' "$mode"
     [ -z "$gate" ] || printf 'Delivery contract: gate=%s\n' "$gate"
+    # shellcheck disable=SC2016  # the literal backticks are the brief's fixed step shape
+    [ -z "$step" ] || printf 'Run the gate from THIS worktree, with your branch checked out: `%s`\n' "$step"
   } > "$home/data/$id/brief.md"
 }
 
@@ -190,9 +195,11 @@ ROWS
 # gate-merge is the one mode whose worker lands on the default branch with no approval
 # step in front of it, so it is the one downgrade that is checked instead of announced:
 # a conflicting registered posture refuses, and the brief may land only with the gate
-# command that project's registry entry authorizes. A posture that cannot be read at
-# all still only warns, because refusing every unregistered project would block
-# legitimate first-time work.
+# command that project's registry entry authorizes. The brief carries that command in
+# two places - the machine-readable contract line and the step the worker follows - so
+# both are checked; verifying one would leave the other hand-patchable into an
+# unauthorized landing. A posture that cannot be read at all still only warns, because
+# refusing every unregistered project would block legitimate first-time work.
 test_gate_merge_spawn_is_checked_against_the_registry() {
   local rec home proj fakebin out status
   local gate='./scripts/merge-gate.sh --push'
@@ -238,15 +245,31 @@ EOF
   status=$?
   [ "$status" -ne 0 ] || fail "a gate that disagrees with the registry should exit non-zero"
   assert_contains "$out" "gate mismatch for delivery-gate-e4" "the gate refusal did not name the task"
-  assert_contains "$out" "the brief lands with './scripts/merge-gate.sh' but proj's registry entry authorizes '$gate'" \
+  assert_contains "$out" "proj's registry entry authorizes '$gate' but the brief records gate='./scripts/merge-gate.sh'" \
     "the gate refusal did not show both sides of the disagreement"
   assert_absent "$home/state/delivery-gate-e4.meta" "a refused gate-merge spawn wrote task metadata"
 
-  write_brief "$home" delivery-gate-e5 gate-merge
+  # The step under Definition of done is what the worker actually runs, so patching it
+  # alone - leaving the machine-readable contract line registry-clean - must refuse too.
+  write_brief "$home" delivery-gate-e5 gate-merge "$gate" './hand-patched.sh'
   out=$(run_spawn "$home" "$fakebin" delivery-gate-e5 "$proj" claude --mode gate-merge --yolo off)
   status=$?
+  [ "$status" -ne 0 ] || fail "a hand-patched gate step should exit non-zero even when the contract line is clean"
+  assert_contains "$out" "tells the worker to run './hand-patched.sh'" \
+    "the refusal did not name the unauthorized command the worker would have run"
+  assert_absent "$home/state/delivery-gate-e5.meta" "a refused gate-merge spawn wrote task metadata"
+
+  write_brief "$home" delivery-gate-e7 gate-merge "$gate" ''
+  out=$(run_spawn "$home" "$fakebin" delivery-gate-e7 "$proj" claude --mode gate-merge --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a brief whose gate step was removed should exit non-zero"
+  assert_contains "$out" "both required places" "the refusal did not name the two places the gate must appear"
+
+  write_brief "$home" delivery-gate-e8 gate-merge
+  out=$(run_spawn "$home" "$fakebin" delivery-gate-e8 "$proj" claude --mode gate-merge --yolo off)
+  status=$?
   [ "$status" -ne 0 ] || fail "a gate-merge brief recording no gate command should exit non-zero"
-  assert_contains "$out" "records no gate command line" "the refusal did not name the brief's missing gate line"
+  assert_contains "$out" "both required places" "the refusal did not name the brief's missing gate lines"
 
   rec=$(make_home gate-unrecorded "- proj [gate-merge] - fixture (added 2026-01-01)")
   IFS='|' read -r home proj fakebin <<EOF
@@ -257,6 +280,19 @@ EOF
   status=$?
   [ "$status" -ne 0 ] || fail "a gate-merge project whose entry records no gate should exit non-zero"
   assert_contains "$out" "records no gate command" "the refusal did not point at the unrecorded registry gate"
+
+  # The scaffold and the spawn must agree on both fixed shapes, so this case launches a
+  # real generated brief rather than a fixture: rewording either half fails here.
+  rec=$(make_home gate-scaffolded "- proj [gate-merge] - fixture, gate=\`$gate\` (added 2026-01-01)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" delivery-gate-e9 proj --mode gate-merge --gate "$gate" >/dev/null 2>&1 \
+    || fail "the gate-merge scaffold should succeed with a registered gate"
+  out=$(run_spawn "$home" "$fakebin" delivery-gate-e9 "$proj" claude --mode gate-merge --yolo off)
+  assert_not_contains "$out" "gate mismatch" "a freshly scaffolded brief disagreed with the spawn's gate check"
+  assert_not_contains "$out" "both required places" \
+    "the spawn could not find both gate occurrences in a freshly scaffolded brief"
   pass "fm-spawn: a gate-merge spawn ships only on the registered posture and the registered gate"
 }
 
@@ -374,6 +410,11 @@ EOF
     && fail "--gate reported success for a project with no registry entry"
   FM_HOME="$home" "$PROJECT_MODE" --gate typoproj >/dev/null 2>&1 \
     && fail "--gate reported success for an entry whose mode annotation is unreadable"
+  # The --gate path exits without defaulting, so its diagnostic must not claim one was
+  # applied: a human running the accessor directly is the only reader of this stderr.
+  err=$(FM_HOME="$home" "$PROJECT_MODE" --gate typoproj 2>&1 >/dev/null)
+  assert_contains "$err" "unknown mode" "--gate stopped naming the unreadable annotation"
+  assert_not_contains "$err" "defaulting" "--gate claimed a default it never applied"
   FM_HOME="$TMP_ROOT/project-mode/absent" "$PROJECT_MODE" --gate gateproj >/dev/null 2>&1 \
     && fail "--gate reported success with no registry file at all"
 

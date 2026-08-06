@@ -16,8 +16,10 @@
 #   loud one-line deviation notice is printed and the spawn continues. gate-merge
 #   is the one exception: it lands on the default branch with no approval step, so
 #   a spawn REFUSES it when the project is registered under a conflicting posture,
-#   or when the brief's recorded gate is not the command that project's registry
-#   entry authorizes. A project with no readable entry still only gets the notice.
+#   or when either place the brief carries its gate command - the machine-readable
+#   contract line or the step the worker follows - is not the command that project's
+#   registry entry authorizes. A project with no readable entry still only gets the
+#   notice.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
@@ -1378,15 +1380,21 @@ if [ "$KIND" = ship ]; then
         echo "error: $ID passed --mode gate-merge but $PROJ_NAME is registered $STANDING_MODE; gate-merge lands work on the default branch with no approval step in front of it, so it ships only for a project the captain registered gate-merge - correct the flag, or have the captain re-register $PROJ_NAME first" >&2
         exit 1
       fi
+      # The command appears twice in a gate-merge brief: the machine-readable contract
+      # line, and the step the worker actually follows. Verifying only one of them
+      # would leave the other hand-patchable into an unauthorized landing command, so
+      # both must be present and both must be the registered gate.
       BRIEF_GATE=$(sed -n 's/^Delivery contract: gate=//p' "$BRIEF" | head -n 1)
+      # shellcheck disable=SC2016  # single quotes are deliberate: the backticks are the brief's literal step shape, not a command substitution.
+      BRIEF_GATE_STEP=$(sed -n 's/^Run the gate from THIS worktree, with your branch checked out: `\(.*\)`$/\1/p' "$BRIEF" | head -n 1)
       if [ -z "$REGISTERED_GATE" ]; then
         echo "error: $PROJ_NAME is registered gate-merge but its registry entry records no gate command; record the exact command in the entry's note as gate=\`<command>\` so every task lands the same way, then re-scaffold $ID's brief with that --gate" >&2
         exit 1
-      elif [ -z "$BRIEF_GATE" ]; then
-        echo "error: $BRIEF records no gate command line; re-scaffold it with bin/fm-brief.sh --mode gate-merge --gate '$REGISTERED_GATE' so the worker lands with the gate $PROJ_NAME's registry entry authorizes" >&2
+      elif [ -z "$BRIEF_GATE" ] || [ -z "$BRIEF_GATE_STEP" ]; then
+        echo "error: $BRIEF does not record its gate command in both required places (the machine-readable \"Delivery contract: gate=\" line and the \"Run the gate from THIS worktree\" step the worker follows); re-scaffold it with bin/fm-brief.sh --mode gate-merge --gate '$REGISTERED_GATE' so the worker lands with the gate $PROJ_NAME's registry entry authorizes" >&2
         exit 1
-      elif [ "$BRIEF_GATE" != "$REGISTERED_GATE" ]; then
-        echo "error: gate mismatch for $ID: the brief lands with '$BRIEF_GATE' but $PROJ_NAME's registry entry authorizes '$REGISTERED_GATE'; re-scaffold the brief with the registered gate, or have the captain change the registry entry - never hand-patch one brief" >&2
+      elif [ "$BRIEF_GATE" != "$REGISTERED_GATE" ] || [ "$BRIEF_GATE_STEP" != "$REGISTERED_GATE" ]; then
+        echo "error: gate mismatch for $ID: $PROJ_NAME's registry entry authorizes '$REGISTERED_GATE' but the brief records gate='$BRIEF_GATE' and tells the worker to run '$BRIEF_GATE_STEP'; re-scaffold the brief with the registered gate, or have the captain change the registry entry - never hand-patch one brief" >&2
         exit 1
       fi
     else

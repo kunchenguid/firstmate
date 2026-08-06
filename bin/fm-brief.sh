@@ -49,6 +49,11 @@
 # refuses a gate-merge task whose recorded gate is not the one the project's registry
 # entry authorizes. An adjusted brief and the recorded task delivery cannot drift apart,
 # and the gate stays the captain's registered command rather than a per-brief string.
+# A gate-merge definition of done also carries the command in the fixed "Run the gate
+# from THIS worktree, with your branch checked out: `<command>`" step, so the worker
+# reads what to run without chasing metadata. That step is a fixed shape on purpose:
+# bin/fm-spawn.sh checks it against the same registry entry, so neither occurrence can
+# be hand-patched into an unauthorized landing command.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.

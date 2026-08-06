@@ -118,7 +118,13 @@ EOF
 mode_known=1
 case "$mode" in
   no-mistakes|direct-PR|local-only|gate-merge|no-mistakes-prod-only) ;;
-  *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off; mode_known=0 ;;
+  *)
+    if [ "$GATE_ONLY" -eq 1 ]; then
+      echo "warn: unknown mode \"$mode\" for $NAME; its posture is unreadable, so no gate command is reported" >&2
+    else
+      echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2
+    fi
+    mode=no-mistakes; yolo=off; mode_known=0 ;;
 esac
 case "$yolo" in on|off) ;; *) yolo=off ;; esac
 
