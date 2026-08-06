@@ -24,7 +24,10 @@ Refreshing rather than dropping is what keeps that bounded, and it fails toward 
 The accepted cost is that detection after a freeze takes at most two thresholds instead of one; the guarantee that a wedge is found within a bounded time and never lost is unchanged.
 Because a refresh restarts the clock, the age carried in that escalation reads as time without progress evidence rather than time since the pane first went idle, and the operator-facing line is worded that way.
 That state read is bounded per crew per threshold but not per housekeeping pass, so a pass makes at most `FM_STALE_WORKING_GATE_READS` of them and leaves any remaining aged marker untouched for the next pass, which delays such an escalation rather than dropping it.
-The delay is one pass per full budget of markers ahead of it: with `D` markers due at once and a budget of `B`, the last waits `ceil(D/B) - 1` passes of `FM_HOUSEKEEPING_TICK`.
+For a burst of `D` markers due at once the delay is one pass per full budget of markers ahead of it, so the last waits `ceil(D/B) - 1` passes of `FM_HOUSEKEEPING_TICK` at a budget of `B`.
+That bound assumes the due set drains, and it stops holding under sustained fleet-wide staleness: the gate does `B` reads per tick while each continuously-stale crew needs one read per `FM_STALE_ESCALATE_SECS`, so beyond roughly 48 simultaneously-stale crews at the defaults the backlog grows without bound and the delay grows with it.
+Markers are also walked in stable glob order rather than round-robin, so that delay lands repeatedly on the same late-sorting task ids rather than being shared.
+No escalation is lost in either regime, because a deferred marker stays aged and is reconsidered every pass, but a fleet that large needs a larger `FM_STALE_WORKING_GATE_READS` to keep the burst bound.
 For an ordinary crew that has stopped, the normal-mode watcher first surfaces one stale wake, then applies that same cadence to an unchanged `paused:` or durable `captain-held` endpoint only when the backend confidently reports its agent dead.
 Live or inconclusive liveness remains fail-open at that initial surface, and the secondmate idle-endpoint exemption is unchanged.
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.

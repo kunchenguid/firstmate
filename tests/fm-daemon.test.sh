@@ -249,7 +249,6 @@ test_handle_wake_paused_records_pause_marker() {
 test_stale_transient_records_marker_without_reading_crew_state() {
   local dir state fakebin out win key calls i
   dir=$(make_supercase stale-provably-working); state="$dir/state"; fakebin="$dir/fakebin"
-  make_fake_crew_state "$fakebin" >/dev/null
   win="sess:fm-longrun-w1"
   key=$(printf '%s' "longrun-w1" | tr ':/.' '___')
   calls="$dir/crew-state-calls"
@@ -292,7 +291,6 @@ test_housekeeping_provably_working_stale_not_escalated() {
   local dir state fakebin win pane key before after
   dir=$(make_supercase stale-provably-working-housekeeping)
   state="$dir/state"; fakebin="$dir/fakebin"
-  make_fake_crew_state "$fakebin" >/dev/null
   win="sess:fm-longrun-w2"; pane="$dir/pane.txt"
   printf 'working: waiting on the completion marker\n' > "$state/longrun-w2.status"
   printf 'idle prompt $\n' > "$pane"
@@ -349,7 +347,6 @@ test_housekeeping_working_stale_escalates_once_refresh_stops() {
   local dir state fakebin win pane key marker
   dir=$(make_supercase stale-working-then-frozen)
   state="$dir/state"; fakebin="$dir/fakebin"
-  make_fake_crew_state "$fakebin" >/dev/null
   win="sess:fm-longrun-w3"; pane="$dir/pane.txt"
   key=$(printf '%s' "longrun-w3" | tr ':/.' '___')
   marker="$state/.subsuper-stale-$key"
@@ -422,7 +419,6 @@ test_housekeeping_working_gate_read_is_bounded_per_threshold() {
   local dir state fakebin win pane key watcher_key calls n i
   dir=$(make_supercase stale-working-read-budget)
   state="$dir/state"; fakebin="$dir/fakebin"
-  make_fake_crew_state "$fakebin" >/dev/null
   win="sess:fm-longrun-w4"; pane="$dir/pane.txt"
   key=$(printf '%s' "longrun-w4" | tr ':/.' '___')
   watcher_key=$(printf '%s' "$win" | tr ':/.' '___')
@@ -483,7 +479,6 @@ test_housekeeping_working_gate_budget_defers_without_suppressing() {
   local dir state fakebin pane calls key_a key_b before_a before_b after_a n
   dir=$(make_supercase stale-working-gate-pass-budget)
   state="$dir/state"; fakebin="$dir/fakebin"
-  make_fake_crew_state "$fakebin" >/dev/null
   pane="$dir/pane.txt"; calls="$dir/crew-state-calls"
   printf 'idle prompt $\n' > "$pane"
   : > "$calls"

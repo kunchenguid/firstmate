@@ -64,8 +64,11 @@
 #     That gate is a bounded-cost read, so a single pass makes at most
 #     STALE_WORKING_GATE_READS of them; markers past the budget keep their aged
 #     marker and are reconsidered next pass, so the budget delays an escalation
-#     and can never drop one. With D markers due at once and a budget of B, the
-#     last of them waits ceil(D/B) - 1 passes, i.e. that many HOUSEKEEPING_TICKs.
+#     and can never drop one. For a BURST of D markers due at once with a budget
+#     of B, the last of them waits ceil(D/B) - 1 passes, i.e. that many
+#     HOUSEKEEPING_TICKs. That formula holds only while the due set drains; it is
+#     not a bound under sustained fleet-wide staleness, where the wait grows with
+#     the backlog instead (see the gate itself for the arithmetic and threshold).
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
@@ -1092,14 +1095,24 @@ housekeeping() {  # <state>
          # marker is left aged and untouched - it is neither escalated nor
          # refreshed - so the next pass reconsiders it with a fresh budget.
          # That is the direction this fails: a deferred read delays an escalation
-         # and can never suppress one. The delay is one pass per full budget of
-         # markers ahead of it, not a single pass: with D markers due at once and
-         # a budget of B, the last waits ceil(D/B) - 1 passes, so at the defaults
-         # (B = 3, HOUSEKEEPING_TICK = 15s) ten due crews put the last escalation
-         # about 45s late. Deferral cannot starve a marker either, because every
-         # marker that DID spend budget this pass leaves the due set - refreshed
-         # for a threshold, or escalated and removed - so the budget drains to the
-         # deferred ones on the following passes.
+         # and can never suppress one. How LONG it delays depends on the load.
+         # For a BURST - D markers due at once, nothing else arriving - the delay
+         # is one pass per full budget of markers ahead of it: the last waits
+         # ceil(D/B) - 1 passes, so at the defaults (B = 3, HOUSEKEEPING_TICK =
+         # 15s) ten due crews put the last escalation about 45s late. That bound
+         # relies on the due set draining, which every spent read helps do: a
+         # marker that spends budget leaves the due set, refreshed for a threshold
+         # or escalated and removed.
+         # Under SUSTAINED staleness it does not hold. Throughput is B reads per
+         # tick (12/min at the defaults) while each continuously-stale crew needs
+         # one read per STALE_ESCALATE_SECS (0.25/min at the defaults), so beyond
+         # roughly 48 simultaneously-stale crews arrivals outpace reads and the
+         # backlog - and with it the delay - grows without bound. Markers are also
+         # walked in stable glob order rather than round-robin, so that delay is
+         # not shared fairly: it lands repeatedly on the same late-sorting task
+         # ids. Nothing is dropped even then, because a deferred marker stays aged
+         # and is reconsidered every pass, but a fleet that large loses the
+         # ceil(D/B) - 1 bound and should raise STALE_WORKING_GATE_READS.
          if [ "$working_reads" -ge "$working_reads_max" ]; then
            log "stale gate deferred to next pass (read budget ${working_reads_max} spent, marker kept aged): $win"
            continue

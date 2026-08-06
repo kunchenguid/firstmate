@@ -172,7 +172,9 @@ Classify each wake this way:
   Only a positive working verdict refreshes it: a stopped, parked, failed, or unreadable crew still escalates on the same schedule.
   Because a refresh restarts the clock, the age in that escalation is time without progress evidence rather than time since the pane first went idle, which is what the line reports.
   One housekeeping pass makes at most `FM_STALE_WORKING_GATE_READS` (default 3) of those state reads, since the pass runs inline in the daemon loop; a marker past that budget keeps its aged marker for the next pass, so the budget can delay a wedge escalation but never suppress one.
-  That delay is one pass per full budget of markers ahead of it: with `D` markers due at once and a budget of `B`, the last waits `ceil(D/B) - 1` passes of `FM_HOUSEKEEPING_TICK`, so ten simultaneously-due crews at the defaults put the last escalation about 45s late rather than 15s.
+  For a burst of `D` markers due at once that delay is one pass per full budget of markers ahead of it: with a budget of `B` the last waits `ceil(D/B) - 1` passes of `FM_HOUSEKEEPING_TICK`, so ten simultaneously-due crews at the defaults put the last escalation about 45s late rather than 15s.
+  That bound needs the due set to drain, so it does not hold under sustained fleet-wide staleness: the gate does `B` reads per tick while each continuously-stale crew needs one read per `FM_STALE_ESCALATE_SECS`, and beyond roughly 48 simultaneously-stale crews at the defaults the backlog and the delay grow without bound.
+  Markers are walked in stable glob order rather than round-robin, so under that load the delay lands repeatedly on the same late-sorting task ids instead of being shared; raise `FM_STALE_WORKING_GATE_READS` for a fleet that large.
   Healthy crewmates are autonomous and do not wait on firstmate mid-task.
 - `heartbeat` -> self-handle. The daemon runs its own cheap bash fleet scan
   every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for a
