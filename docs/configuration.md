@@ -116,6 +116,34 @@ An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisel
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) for active evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Producer-tag notifications (config/notify)
+
+Three supervision events earn a distinct desktop notification, so a sound the captain hears always carries signal: `pr-merged` when a task's pull request lands, `pr-ready` when a task's pull request is open and waiting on the captain's review, and `attention` when a task finishes, fails, needs a decision, or is blocked.
+Ordinary turn-ends, watcher polls, and routine progress stay silent.
+`bin/fm-notify.sh` owns the whole feature - the event classes, the status-to-class mapping, channel and sound resolution, the once-per-fact dedup, and the config below - and its header owns the exact mechanics and the manual smoke commands.
+
+The tag fires only from a genuine primary firstmate home whose state directory is that home's own `state/`, so a crewmate worktree and a secondmate home never reach the captain's desktop.
+Notification is always best-effort: the script exits 0 whatever happens, because the underlying event is already recorded durably and a missing binary or refused channel must never break a merge or a supervision cycle.
+
+`config/notify` (local, gitignored) holds one `key=value` per non-empty, non-comment line, last assignment wins.
+An absent file means all three classes are on with their default sounds.
+
+```
+enabled=off                     # global kill switch (on|off, default on)
+channel=<channel>               # default channel for every class (default auto)
+pr-merged=<sound>[,<channel>]   # per-class sound and optional channel override,
+pr-ready=<sound>[,<channel>]    # or the bare value `off` to silence that class
+attention=<sound>[,<channel>]
+```
+
+Channels are `auto` (default), `macos`, `herdr`, `both`, and `none`, and `FM_NOTIFY_CHANNEL` overrides every configured channel with one directive.
+`auto` resolves to the macOS Notification Center when `osascript` is available, else a herdr UI notification when the herdr CLI is available, else nothing.
+macOS wins even inside herdr because named system sounds are what make the three classes audibly distinct, while `herdr notification show` offers only `none`, `done`, and `request`; set `channel=both` for the herdr toast alongside the macOS sound.
+Sounds are named macOS system sounds and default to `Glass` for `pr-merged`, `Ping` for `pr-ready`, and `Sosumi` for `attention`; a value that is not a plain sound name is refused and the default is used.
+Herdr sounds are fixed per class (`done`, `done`, `request`) because the CLI accepts only three values.
+
+This is separate from the away-mode wedge alarm ([`wedge-alarm.md`](wedge-alarm.md)), which stays a louder, rate-limited alert for a supervision channel that has genuinely wedged.
+
 ## Trace context propagation (config/trace-context / FM_TRACE_CONTEXT)
 
 The optional local, gitignored `config/trace-context` presence flag enables default-off native W3C trace-context propagation.
@@ -571,6 +599,10 @@ FM_MAX_DEFER_SECS=300              # max buffered escalation age before retry pl
 FM_WEDGE_ALARM_CHANNEL=            # override config/wedge-alarm with one active-alert directive for the wedge alarm; off|auto|osascript|herdr|command:<cmd>; absent = auto (macOS -> an OS notification)
 FM_WEDGE_ALARM_EXEC=              # notifier seam: route every channel (osascript, herdr, command:) through this command as `<cmd> <channel> <summary>`; "discard" fires nothing; unset in production; the daemon defaults it to "discard" when sourced so no test posts a real notification (docs/wedge-alarm.md)
 FM_WEDGE_ALARM_TIMEOUT_SECS=10    # maximum seconds for each osascript, herdr, override, or command: notifier before its watchdog terminates it and continues to the next channel; invalid or zero values use 10
+FM_NOTIFY_CHANNEL=                 # override config/notify's channel for the captain's producer tags with one directive; auto|macos|herdr|both|none; absent = the configured channel, then auto
+FM_NOTIFY_EXEC=                    # producer-tag notifier seam: route every channel through this command as `<cmd> <channel> <sound> <title> <body>`; "discard" fires nothing; unset in production; tests/lib.sh exports "discard" so no test posts a real notification
+FM_NOTIFY_TIMEOUT_SECS=10          # maximum seconds for each producer-tag notification before it is terminated; invalid or zero values use 10
+FM_NOTIFY_ONCE_TTL_DAYS=30         # age at which a spent `--once` producer-tag marker under state/ is pruned; invalid values use 30
 FM_INJECT_FAIL_SLEEP=30            # seconds to back off when the supervisor pane is unavailable
 FM_INJECT_CONFIRM_RETRIES=3        # daemon Enter-retry attempts after typing a digest once
 FM_INJECT_CONFIRM_SLEEP=0.5        # seconds between daemon submit checks

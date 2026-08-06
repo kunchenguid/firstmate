@@ -593,12 +593,14 @@ run_check_capture() {
 # fm-push-transition-lib.sh because push and poll paths must write one format.
 # Mark every current captain-relevant status as surfaced. Called after the
 # heartbeat backstop enqueues its wake, so the same statuses are not re-surfaced
-# by the next heartbeat.
+# by the next heartbeat. Routed through mark_surfaced rather than writing the
+# marker directly, so the backstop shares the one owner of the surfaced marker
+# and of the captain's producer tag.
 mark_all_captain_relevant_surfaced() {
   local f task last
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
-    printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
+    mark_surfaced "$f"
   done < <(scan_captain_relevant_statuses "$STATE")
 }
 
@@ -842,6 +844,11 @@ while :; do
         reason="check: $c: $out"
         fm_wake_append check "$c" "$reason" || exit 1
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
+          # The captain's merged tag, keyed per task so a firstmate-driven merge
+          # (bin/fm-pr-merge.sh) and this poll observing the same landing beep once.
+          FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+            "$SCRIPT_DIR/fm-notify.sh" --once "pr-merged:$id" \
+            pr-merged "firstmate: PR merged" "$id: $url" >/dev/null 2>&1 || true
           if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$out"; then
             fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
               || triage_log "merged PR poll retirement remains recoverable for $id"

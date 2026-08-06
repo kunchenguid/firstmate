@@ -34,6 +34,13 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# No test may post a real desktop notification. bin/fm-notify.sh's scope guard
+# already refuses every temp home a test builds, and this is the second, blunter
+# lock: the `discard` seam fires no channel at all. A test that needs to observe
+# a tag sets FM_NOTIFY_EXEC to its own recorder for that one invocation, and the
+# few assertions about real channel resolution strip it with `env -u`.
+export FM_NOTIFY_EXEC=discard
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

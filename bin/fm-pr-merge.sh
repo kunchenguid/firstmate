@@ -81,4 +81,16 @@ if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
 fi
 
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+merge_status=0
+gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@" \
+  || merge_status=$?
+
+# The captain's merged producer tag, keyed per task so the watcher's merge poll
+# observing the same landing does not beep a second time. Best-effort only: the
+# notifier always exits 0 and never changes this script's merge outcome.
+if [ "$merge_status" -eq 0 ]; then
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-notify.sh" --once "pr-merged:$ID" \
+    pr-merged "firstmate: PR merged" "$ID: $URL" >/dev/null 2>&1 || true
+fi
+exit "$merge_status"
