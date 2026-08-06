@@ -1273,7 +1273,7 @@ SH
 }
 
 test_runtime_bound_truncates_loudly_and_exits_zero() {
-  local rec root home fakebin out status=0 stray
+  local rec root home fakebin out status=0 stray mechanism
   rec=$(new_world runtime-bound)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -1281,9 +1281,13 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   make_hanging_tool "$fakebin" git
-  make_term_escalating_timeout "$fakebin"
 
-  out=$(FM_SESSION_START_TIMEOUT=3 run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+  mechanism=$(FM_TIMEOUT_MECHANISM_OVERRIDE=bash bash -c '. "$1"; fm_timeout_mechanism' \
+    _ "$ROOT/bin/fm-timeout-lib.sh")
+  [ "$mechanism" = bash ] || fail "the forced pure-Bash timeout fixture selected '$mechanism'"
+
+  out=$(FM_TIMEOUT_MECHANISM_OVERRIDE=bash FM_SESSION_START_TIMEOUT=3 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
 
   expect_code 0 "$status" "a truncated session start must still exit 0 so the session can open"
   assert_contains "$out" "SESSION START - $home" "the truncated digest lost the output it had already produced"
@@ -1304,7 +1308,12 @@ EOF
   stray=$(pgrep -f "$fakebin/git" 2>/dev/null | wc -l | tr -d ' ')
   [ "$stray" -eq 0 ] || fail "the runtime bound left $stray hung subprocess(es) behind"
 
-  pass "an over-budget session start emits its completed stages, names what it never reached, and exits 0"
+  status=0
+  FM_TIMEOUT_MECHANISM_OVERRIDE=bash bash -c \
+    '. "$1"; fm_run_timed 2 bash -c "exit 137"' _ "$ROOT/bin/fm-timeout-lib.sh" || status=$?
+  expect_code 137 "$status" "pure-Bash natural command exit 137"
+
+  pass "the pure-Bash watchdog bounds session start, kills its hung grandchild, and emits the truncation contract"
 }
 
 test_portable_timeout_escalates_term_resistant_process() {

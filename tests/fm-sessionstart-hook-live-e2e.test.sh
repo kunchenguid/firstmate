@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Opt-in live guard for the RUN-tier session-open adapters (Claude, Codex, Pi).
+# Opt-in live guard for the RUN-tier session-open adapters (Claude, Codex exec, Pi).
 #
 # Two facts in this area come from the vendor, not from Firstmate, so a stub can
 # only confirm the assumption already written into the stub:
@@ -140,6 +140,7 @@ SH
       mkdir -p "$lab/.pi/extensions/lib"
       cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$lab/.pi/extensions/"
       cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$lab/.pi/extensions/lib/"
+      printf '%s\n' '{"compaction":{"keepRecentTokens":200}}' > "$lab/.pi/settings.json"
       ;;
   esac
   printf '%s\n' "$lab"
@@ -197,7 +198,7 @@ probe_process_opens() {  # <harness> <version> <lab> <expect-resume> <cold-argv.
 probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-argv...>
   local harness=$1 version=$2 lab=$3 clear_cmd=$4
   shift 4
-  local record="$lab/record" session="fmss-$harness" reset n
+  local record="$lab/record" session="fmss-$harness" reset n compact_seed compact_reply
   : > "$record"
   tmux -L "$SOCKET" new-session -d -s "$session" -c "$lab" -x 200 -y 50 \
     -e FM_LIVE_RECORD="$record" -e FM_ROOT_OVERRIDE="$lab" -e FM_HOME="$lab" \
@@ -241,12 +242,20 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
     || { capture "$session" >&2; fail "$harness $version: hook stdout did not reach model context after '$clear_cmd'"; }
   pass "$harness $version: '$clear_cmd' reports source '$reset' and re-injects hook stdout into model context"
 
-  # Compaction is reported, never assumed: a lab conversation is often below the
-  # harness's own compaction threshold, and a skipped check must say so.
-  for n in 1 2 3 4 5; do
-    send_line "$session" "Say only ping$n."
-    wait_for_text "$session" "ping$n" 30 >/dev/null 2>&1 || true
-  done
+  if [ "$harness" = pi ]; then
+    compact_seed="seed-$session-$$"
+    compact_reply="FMCOMPACTDONE-$compact_seed"
+    printf '%s\n' "$compact_seed" > "$lab/compact-seed.txt"
+    send_line "$session" "Read compact-seed.txt, then write at least 1800 words of substantial varied prose. End the final assistant response with FMCOMPACTDONE- immediately followed by the seed, with no space."
+    wait_for_text "$session" "$compact_reply" 300 \
+      || { capture "$session" >&2; fail "$harness $version: the substantial pre-compaction assistant turn did not complete"; }
+    sleep 5
+  else
+    for n in 1 2 3 4 5; do
+      send_line "$session" "Say only ping$n."
+      wait_for_text "$session" "ping$n" 30 >/dev/null 2>&1 || true
+    done
+  fi
   send_line "$session" /compact
   n=0
   while [ "$n" -lt 40 ] && ! grep -qx compact "$record"; do sleep 3; n=$((n + 1)); done
@@ -255,6 +264,9 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
     wait_for_text "$session" "FMHOOKTOKEN-compact-$(grep -c . "$record" | tr -d ' ')" \
       || { capture "$session" >&2; fail "$harness $version: hook stdout did not reach model context after a compaction"; }
     pass "$harness $version: a compaction reports source 'compact' and re-injects hook stdout into model context"
+  elif [ "$harness" = pi ]; then
+    capture "$session" >&2
+    fail "$harness $version: /compact did not raise session_compact after a completed substantial turn with keepRecentTokens=200"
   else
     note "$harness $version: compaction was NOT reached in this lab (recorded: $(tr '\n' ' ' < "$record")); its compact evidence was not refreshed"
   fi
@@ -286,10 +298,7 @@ for harness in claude codex pi; do
       probe_process_opens codex "$version" "$lab" resume \
         codex exec --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check \
         -- codex exec resume --last --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check
-      # Codex's interactive TUI does not fire PROJECT hooks, so its context-reset
-      # axis is unreachable from a tracked project registration. This is a named
-      # gap, not a silent pass; supervision.md owns the current statement of it.
-      note "codex $version: interactive project hooks do not fire, so its context-reset evidence cannot be refreshed from a tracked project registration"
+      note "codex $version: codex exec run-tier evidence refreshed; the interactive TUI is a documented nudge-tier surface because tracked project hooks do not fire there"
       ;;
     pi)
       probe_process_opens pi "$version" "$lab" startup \

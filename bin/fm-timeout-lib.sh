@@ -7,38 +7,83 @@
 #
 #   fm_timeout_mechanism
 #       Prints the mechanism fm_run_timed will use on this host: "timeout",
-#       "gtimeout", "perl", or "none". A caller that must not silently lose its
-#       work when no bound is available inspects this FIRST and decides; a
-#       caller for whom an unbounded call is worse than no call at all can
-#       ignore it and treat fm_run_timed's 124 as the refusal.
+#       "gtimeout", "perl", or "bash". Set FM_TIMEOUT_MECHANISM_OVERRIDE=bash
+#       to force the dependency-free fallback.
 #
 #   fm_run_timed <seconds> <command> [args...]
 #       Runs the command with a hard bound. Exit status is the command's own,
 #       except 124, which means the bound was hit (GNU timeout's convention,
-#       reproduced by the perl fallback). Returns 124 WITHOUT running anything
-#       when this host has no bounding mechanism at all - see
-#       fm_timeout_mechanism above.
+#       reproduced by the perl and bash fallbacks).
 #
 # A non-positive bound is not a bound: `timeout 0` and the perl fallback's
 # `alarm 0` both disable the deadline, so callers must reject 0 before calling.
 #
-# All three mechanisms terminate the whole process GROUP, not just the direct
+# All four mechanisms terminate the whole process GROUP, not just the direct
 # child, so a hung grandchild (a vendor CLI spawned by a wrapper script, a git
 # fetch spawned by a sweep) cannot outlive the bound. GNU/BSD `timeout` does
 # this by default because it does not run the command in the foreground process
-# group; the perl fallback does it explicitly with setpgrp plus a negative pid.
+# group; the perl fallback does it explicitly with setpgrp plus a negative pid,
+# and the bash fallback uses monitor mode to give the bounded child its own
+# process group before signaling its negative pid.
 set -u
 
 fm_timeout_mechanism() {
-  if command -v timeout >/dev/null 2>&1; then
+  if [ "${FM_TIMEOUT_MECHANISM_OVERRIDE:-}" = bash ]; then
+    printf 'bash\n'
+  elif command -v timeout >/dev/null 2>&1; then
     printf 'timeout\n'
   elif command -v gtimeout >/dev/null 2>&1; then
     printf 'gtimeout\n'
   elif command -v perl >/dev/null 2>&1; then
     printf 'perl\n'
   else
-    printf 'none\n'
+    printf 'bash\n'
   fi
+}
+
+fm_run_bash_timeout() {
+  local seconds=$1 command_status deadline_status child_pid watchdog_pid command_rc recorded_rc monitor_was_on=0
+  shift
+  command_status=$(mktemp "${TMPDIR:-/tmp}/fm-bash-timeout-command.XXXXXX" 2>/dev/null) || return 124
+  deadline_status="${command_status}.deadline"
+  case $- in *m*) monitor_was_on=1 ;; esac
+  set -m
+  (
+    set +m
+    "$@"
+    command_rc=$?
+    printf '%s\n' "$command_rc" > "$command_status"
+    exit "$command_rc"
+  ) &
+  child_pid=$!
+  (
+    set +m
+    sleep "$seconds"
+    printf 'expired\n' > "$deadline_status"
+    kill -TERM -- "-$child_pid" 2>/dev/null || true
+    sleep 0.2
+    kill -KILL -- "-$child_pid" 2>/dev/null || true
+    exit 124
+  ) &
+  watchdog_pid=$!
+  [ "$monitor_was_on" -eq 1 ] || set +m
+
+  if wait "$child_pid" 2>/dev/null; then
+    command_rc=0
+  else
+    command_rc=$?
+  fi
+  if [ -s "$deadline_status" ]; then
+    wait "$watchdog_pid" 2>/dev/null || true
+    command_rc=124
+  else
+    kill -TERM -- "-$watchdog_pid" 2>/dev/null || kill "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+    recorded_rc=$(cat "$command_status" 2>/dev/null || true)
+    case "$recorded_rc" in ''|*[!0-9]*) ;; *) command_rc=$recorded_rc ;; esac
+  fi
+  rm -f "$command_status" "$deadline_status" 2>/dev/null || true
+  return "$command_rc"
 }
 
 fm_run_external_timeout() {
@@ -79,6 +124,7 @@ fm_run_timed() {  # <seconds> <command...>
       perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
         "$seconds" "$@"
       ;;
+    bash) fm_run_bash_timeout "$seconds" "$@" ;;
     *) return 124 ;;
   esac
 }

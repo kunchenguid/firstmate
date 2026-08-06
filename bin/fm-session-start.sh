@@ -105,8 +105,8 @@
 # sections that were therefore never emitted, and still exits 0. The child
 # records its progress in FM_SESSION_START_STAGE_FILE, which is also the flag
 # that tells a child it is the child - the parent never recurses.
-# A host with no bounding mechanism at all (no timeout, gtimeout, or perl) runs
-# the digest unbounded rather than emitting nothing, and says so in the digest.
+# Hosts without timeout, gtimeout, or perl use the shared pure-Bash watchdog, so
+# the digest never runs without the same hard bound and process-group cleanup.
 #
 # Usage: fm-session-start.sh [--reemit]
 #   Prints the full ordered digest to stdout and always exits 0: this is a
@@ -168,52 +168,44 @@ stage() {  # <stage-name>: breadcrumb for the parent's truncation banner
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 
-SESSION_START_UNBOUNDED=0
 if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
   SESSION_START_BUDGET=${FM_SESSION_START_TIMEOUT:-120}
   # A non-positive or non-numeric budget is not a budget (`timeout 0` disables
   # the deadline outright), so an unusable value falls back to the default
   # rather than silently removing the bound.
   case "$SESSION_START_BUDGET" in ''|*[!0-9]*|0) SESSION_START_BUDGET=120 ;; esac
-  if [ "$(fm_timeout_mechanism)" = none ]; then
-    # No bounding mechanism on this host. Running unbounded in-process is
-    # strictly better than emitting no digest at all, and the digest says so
-    # inline so the fact reaches the agent instead of only this comment.
-    SESSION_START_UNBOUNDED=1
-  else
-    SESSION_START_STAGE_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-session-start-stage.XXXXXX" 2>/dev/null) || SESSION_START_STAGE_FILE=
-    if [ -z "$SESSION_START_STAGE_FILE" ]; then
-      # Without a breadcrumb the bound still holds; only the banner's precision
-      # is lost, so the child still runs bounded.
-      SESSION_START_STAGE_FILE=/dev/null
-    fi
-    fm_run_timed "$SESSION_START_BUDGET" \
-      env FM_SESSION_START_STAGE_FILE="$SESSION_START_STAGE_FILE" \
-      "$SCRIPT_DIR/fm-session-start.sh" "$@"
-    SESSION_START_RC=$?
-    if [ "$SESSION_START_RC" -eq 124 ]; then
-      SESSION_START_LAST_STAGE=$(cat "$SESSION_START_STAGE_FILE" 2>/dev/null) || SESSION_START_LAST_STAGE=
-      [ -n "$SESSION_START_LAST_STAGE" ] || SESSION_START_LAST_STAGE=unknown
-      SESSION_START_PENDING=$(
-        printf '%s\n' "$SESSION_START_STAGES" | tr ' ' '\n' |
-          awk -v from="$SESSION_START_LAST_STAGE" '$0 == from {seen = 1} seen' | tr '\n' ' '
-      )
-      [ -n "${SESSION_START_PENDING# }" ] || SESSION_START_PENDING='(unknown - the digest may be incomplete anywhere)'
-      BAR='●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
-      printf '\n%s\n' "$BAR"
-      printf '●  STARTUP TRUNCATED - SESSION START HIT ITS %ss RUNTIME BOUND\n' "$SESSION_START_BUDGET"
-      printf '●  It stopped during the "%s" stage, so everything above is COMPLETE\n' "$SESSION_START_LAST_STAGE"
-      printf '●  only up to that point.\n'
-      printf '●  RECONCILE these stages before acting on anything they would have shown:\n'
-      printf '●    %s\n' "${SESSION_START_PENDING% }"
-      printf '●  Rerun bin/fm-session-start.sh now to finish taking the helm. If it truncates\n'
-      printf '●  again, raise FM_SESSION_START_TIMEOUT and report the slow stage - a stage that\n'
-      printf '●  cannot finish inside the bound is a fleet problem, not a reporting detail.\n'
-      printf '%s\n' "$BAR"
-    fi
-    rm -f "$SESSION_START_STAGE_FILE" 2>/dev/null || true
-    exit 0
+  SESSION_START_STAGE_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-session-start-stage.XXXXXX" 2>/dev/null) || SESSION_START_STAGE_FILE=
+  if [ -z "$SESSION_START_STAGE_FILE" ]; then
+    # Without a breadcrumb the bound still holds; only the banner's precision
+    # is lost, so the child still runs bounded.
+    SESSION_START_STAGE_FILE=/dev/null
   fi
+  fm_run_timed "$SESSION_START_BUDGET" \
+    env FM_SESSION_START_STAGE_FILE="$SESSION_START_STAGE_FILE" \
+    "$SCRIPT_DIR/fm-session-start.sh" "$@"
+  SESSION_START_RC=$?
+  if [ "$SESSION_START_RC" -eq 124 ]; then
+    SESSION_START_LAST_STAGE=$(cat "$SESSION_START_STAGE_FILE" 2>/dev/null) || SESSION_START_LAST_STAGE=
+    [ -n "$SESSION_START_LAST_STAGE" ] || SESSION_START_LAST_STAGE=unknown
+    SESSION_START_PENDING=$(
+      printf '%s\n' "$SESSION_START_STAGES" | tr ' ' '\n' |
+        awk -v from="$SESSION_START_LAST_STAGE" '$0 == from {seen = 1} seen' | tr '\n' ' '
+    )
+    [ -n "${SESSION_START_PENDING# }" ] || SESSION_START_PENDING='(unknown - the digest may be incomplete anywhere)'
+    BAR='●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+    printf '\n%s\n' "$BAR"
+    printf '●  STARTUP TRUNCATED - SESSION START HIT ITS %ss RUNTIME BOUND\n' "$SESSION_START_BUDGET"
+    printf '●  It stopped during the "%s" stage, so everything above is COMPLETE\n' "$SESSION_START_LAST_STAGE"
+    printf '●  only up to that point.\n'
+    printf '●  RECONCILE these stages before acting on anything they would have shown:\n'
+    printf '●    %s\n' "${SESSION_START_PENDING% }"
+    printf '●  Rerun bin/fm-session-start.sh now to finish taking the helm. If it truncates\n'
+    printf '●  again, raise FM_SESSION_START_TIMEOUT and report the slow stage - a stage that\n'
+    printf '●  cannot finish inside the bound is a fleet problem, not a reporting detail.\n'
+    printf '%s\n' "$BAR"
+  fi
+  rm -f "$SESSION_START_STAGE_FILE" 2>/dev/null || true
+  exit 0
 fi
 
 PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
@@ -375,11 +367,6 @@ if [ "$REEMIT" -eq 1 ]; then
 else
   section "SESSION START - $FM_HOME"
 fi
-if [ "$SESSION_START_UNBOUNDED" -eq 1 ]; then
-  printf 'NOTICE: this host has no timeout, gtimeout, or perl, so the digest ran with no\n'
-  printf 'runtime bound. If it ever hangs, kill it and install coreutils.\n'
-fi
-
 # --- 1. lock -----------------------------------------------------------
 stage lock
 subsection "LOCK"
