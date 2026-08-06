@@ -106,8 +106,28 @@ When changing any primary watcher adapter, update `docs/supervision-protocols/`,
 
 ## Launch profile axes
 
-`bin/fm-spawn.sh` accepts concrete `--harness`, `--model`, and `--effort` values chosen by firstmate at intake.
+`bin/fm-spawn.sh` accepts concrete `--harness`, `--model`, `--effort`, and `--task-class` values chosen by firstmate at intake, plus the `--exploration` marker.
 Do not make the shell scripts parse or match natural-language dispatch rules.
+
+Pass `--task-class` on every crewmate and scout spawn, using the class that describes the task you just classified at intake: `rote-reversible-edit`, `bounded-implementation-proven-root-fix`, `unknown-root-diagnosis`, `adversarial-review-security-review`, `evidence-heavy-research`, `long-horizon-repository-work`, `visual-browser-sensitive-work`, `documentation-specification-decision-extraction`, or `external-wait-integration-work`.
+Omit it only when the task genuinely does not fit one of those classes; the flag then defaults to `unresolved`, which records the intake as unclassified rather than guessing.
+The class is telemetry, not routing: it never changes which harness, model, or effort you selected.
+
+`--exploration` records that the tuple you are launching is a deliberate rotation away from your default choice for this class, so the ledger can compare the rotated tuple against the usual one under the same observed machine load.
+`fm-spawn.sh` accepts it only on a `no-mistakes` ship whose `--task-class` is `bounded-implementation-proven-root-fix`, because that class is where a mechanical accepted/step-rerun result makes the comparison readable.
+Rotate on such a task when its bounded path leaves you free to choose, no captain instruction or standing dispatch profile pinned the model or effort, and the ledger has no comparable recent attempt for the alternative tuple; pass the rotated `--model` and `--effort` together with `--exploration`.
+
+Read the ledger to check that last precondition; it is a lookup, not a judgment call:
+
+```sh
+bin/fm-model-telemetry.sh sheet --format json |
+  jq '[.[] | select(.recordType=="attempt" and .taskClass=="bounded-implementation-proven-root-fix")
+      | {harness,model,effort,exploration,quality,stepReruns,wallSeconds,startedAt}]'
+```
+
+Compare `harness`/`model`/`effort` against the tuple you are considering: rotate when that tuple has no recent row, and skip the rotation when it already has one whose `quality` and `wallSeconds` answer the question you were about to ask.
+The sheet is read-only and never modifies the ledger, so running it at intake is always safe.
+Never rotate to satisfy curiosity on work whose blast radius, deadline, or captain instruction argues for the known-good tuple, and never present a rotation as the fit-based choice.
 
 Effort precedence is an explicit per-task captain instruction first, then any applicable standing dispatch profile or secondmate pin, then the generic fallback below.
 Never replace an effort value supplied by either higher-precedence source.

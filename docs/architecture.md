@@ -164,6 +164,7 @@ The intake and authority contract in `AGENTS.md` owns when separate scout resear
 
 Crewmate and scout dispatch can stay on the static crewmate harness resolved by `config/crew-harness`, or it can use local dispatch profiles in `config/crew-dispatch.json`.
 The dispatch file is intentionally judgment-based: firstmate reads the natural-language rules at intake, chooses the best matching rule, resolves profile arrays itself from current quota output under the `AGENTS.md` section 4 intake boundary and the `quota-array-dispatch` selection procedure, and passes only concrete `--harness`, `--model`, and `--effort` axes to `fm-spawn.sh`.
+Alongside those routing axes it passes the telemetry-only `--task-class` it classified at intake and, on a bounded-implementation task it deliberately rotated off its default tuple, the `--exploration` marker; `harness-adapters` owns when to classify and when to rotate.
 The shell scripts validate the JSON shape and verified harness/effort combinations, but they do not parse task intent, match natural-language rules, or own array selection.
 The session-start bootstrap step keeps valid dispatch configuration silent unless verbose facts are enabled and surfaces a concise invalid-config line when validation fails.
 When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without an explicit harness, so `config/crew-harness` is only automatic when no dispatch profile file is active.
@@ -230,12 +231,15 @@ The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, inv
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
 
-## Model-run telemetry records but never routes
+## Model-run telemetry informs judgment but never auto-tunes
 
 Every Firstmate-launched model attempt leaves one immutable intake row and at most one terminal row in the canonical private ledger `data/routing-outcomes.jsonl`.
 `bin/fm-model-telemetry.sh` is the single validator, writer, sealer, crash-recovery owner, and read-only sheet reader of that ledger; nothing else appends to it, repairs it, or reads it as an authority.
 The mechanism boundary is deliberately narrow: it hooks the resolved-profile spawn boundary in `bin/fm-spawn.sh` after the profile, backend, and worktree checks already passed, publishes only opaque attempt and task-root identifiers into the existing task metadata, and seals through `bin/fm-teardown.sh` after every existing safety, report, and public-followup gate but before any endpoint, worktree, or task state is deleted.
-Routing judgment, quota queries, model selection, scheduling, task-state ownership, runtime backend behavior, and harness behavior are untouched: the ledger records the axes and evidence a decision already produced and never becomes an input to the next one, so a selection candidate is still resolved exactly as the [dispatch profiles](#dispatch-profiles) section describes.
+Routing judgment, quota queries, model selection, scheduling, task-state ownership, runtime backend behavior, and harness behavior keep the owners they already had: the ledger records the axes and evidence a decision already produced, and firstmate may read that record back through the owner's read-only sheet as one inspectable input to its own next choice at intake.
+The deliberate exploration rotation owned by the [`harness-adapters` skill](../.agents/skills/harness-adapters/SKILL.md) is exactly that lookup, and the choice it informs stays firstmate's, made at intake and recorded on the attempt it produced.
+The forbidden thing is the closed loop, not the lookup: no code path derives, ranks, weights, or rewrites a routing rule, dispatch profile, effort default, or harness pin from ledger data, and no routing behavior changes without a human decision, so this mechanism holds no scheduler, scorer, control plane, or auto-tuner.
+A selection candidate is still resolved exactly as the [dispatch profiles](#dispatch-profiles) section describes.
 Recording is fail-closed at both ends because a silently missing outcome is worse than a stopped lifecycle step: a refused intake stops before the launch command is submitted, and a refused seal preserves the endpoint, worktree, and task state instead of cleaning up, with no bypass flag, `--force` included.
 Absent terminal evidence is sealed as an explicit incomplete outcome rather than inferred from cleanup, and legacy rows written before this schema are preserved byte-for-byte and projected as opaque legacy records.
 

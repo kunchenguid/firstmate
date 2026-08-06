@@ -25,6 +25,7 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
+  capture-pane) printf '%s\n' "${FM_FAKE_TMUX_CAPTURE:-}"; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
@@ -677,9 +678,9 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 test_telemetry_precedes_submission_and_metadata_is_opaque() {
   local rec id out status meta ledger attempt terminal refusal_rec refusal_id
   id=profile-telemetry-z20
-  rec=$(make_spawn_case profile-telemetry codex "$id")
+  rec=$(make_spawn_case profile-telemetry pi "$id")
   read_case_record "$rec"
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort high)
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort high --task-class bounded-implementation-proven-root-fix --exploration)
   status=$?
   expect_code 0 "$status" "telemetry-backed spawn should succeed"
   meta="$HOME_DIR/state/$id.meta"
@@ -687,14 +688,15 @@ test_telemetry_precedes_submission_and_metadata_is_opaque() {
   grep -Eq '^telemetry_attempt=mra_' "$meta" || fail "spawn meta missing opaque telemetry attempt id"
   grep -Eq '^telemetry_task_root=mrt_' "$meta" || fail "spawn meta missing opaque telemetry task root"
   [ "$(grep -c '^telemetry_' "$meta")" -eq 2 ] || fail "spawn metadata contains telemetry fields beyond the two opaque ids"
-  jq -e 'select(.eventType=="attempt-intake" and .intake.tuple.model=="gpt-5" and .intake.tuple.effort=="high")' "$ledger" >/dev/null || fail "spawn did not durably record resolved tuple before submission"
+  jq -e 'select(.eventType=="attempt-intake" and .intake.tuple.harness=="pi" and .intake.tuple.model=="gpt-5" and .intake.tuple.effort=="high" and .intake.taskClass=="bounded-implementation-proven-root-fix" and .intake.exploration.kind=="deliberate" and (.intake.exploration.machineCondition.loadAverage1m|type)=="number" and (.intake.exploration.machineCondition.logicalCpuCount|type)=="number")' "$ledger" >/dev/null || fail "spawn did not durably record the exploration tuple and observed machine condition before submission"
   ! grep -F -- "$PROJ_DIR" "$ledger" >/dev/null || fail "spawn telemetry exposed the project path instead of its opaque reference"
 
   attempt=$(sed -n 's/^telemetry_attempt=//p' "$meta")
   terminal='{"classification":"accepted","refusalQuality":"not-applicable","endedAt":"2026-08-02T00:01:00Z","wallSeconds":60,"firstPassAccepted":true,"correctionCount":0,"interventionCount":0,"evidence":{"tests":"pass","reviewer":"not-run","oracle":"not-run","refs":[{"kind":"test","id":"spawn-teardown-e2e"}]},"outcomeLink":{"kind":"commit","id":"0123456789abcdef"},"usage":{"inputTokens":null,"outputTokens":null,"cost":null,"currency":null},"primaryFailureClass":"none","flags":{"tool":false,"transport":false,"environment":false,"externalWait":false,"scopeChange":false,"quota":false},"reclassification":{"fromTaskClass":null,"toTaskClass":null,"reasonCodes":["none"],"escalated":false}}'
+  # shellcheck disable=SC2016 # Literal dollar spend is a captured harness fixture.
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
-    FM_CONFIG_OVERRIDE="$HOME_DIR/config" PATH="$FAKEBIN_DIR:$PATH" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_FAKE_TMUX_CAPTURE='↑109k ↓2.9k R383k CH87.9% $0.728 (sub) 38.5%/272k (auto)' PATH="$FAKEBIN_DIR:$PATH" \
     "$TEARDOWN" "$id" --force --terminal-payload "$terminal" >/dev/null 2>&1 \
     || fail "telemetry-backed spawn could not complete through real teardown"
   jq -es --arg attempt "$attempt" '
@@ -702,8 +704,9 @@ test_telemetry_precedes_submission_and_metadata_is_opaque() {
     length==2 and .[0].eventType=="attempt-intake" and
     .[1].eventType=="attempt-terminal" and
     .[1].terminal.classification=="accepted" and
-    .[1].terminal.evidence.refs[0].id=="spawn-teardown-e2e"
-  ' "$ledger" >/dev/null || fail "spawn and teardown did not seal one end-to-end attempt"
+    .[1].terminal.evidence.refs[0].id=="spawn-teardown-e2e" and
+    .[1].terminal.usage.cost==null and .[1].terminal.usage.currency==null
+  ' "$ledger" >/dev/null || fail "spawn and teardown did not seal one end-to-end attempt with cost left absent"
   assert_absent "$meta" "real teardown left the completed task metadata behind"
 
   refusal_id=profile-telemetry-refusal-z21
@@ -717,6 +720,32 @@ test_telemetry_precedes_submission_and_metadata_is_opaque() {
   [ ! -s "$LAUNCH_LOG" ] || fail "telemetry refusal reached launch submission"
   assert_absent "$HOME_DIR/state/$refusal_id.meta" "telemetry refusal published task metadata"
   pass "spawn records only opaque telemetry ids and refuses telemetry failures before launch submission"
+}
+
+test_exploration_requires_an_explicit_rotated_model_and_effort() {
+  local rec id out status
+  id=profile-exploration-missing-model-z24
+  rec=$(make_spawn_case profile-exploration-missing-model pi "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --effort xhigh --task-class bounded-implementation-proven-root-fix --exploration)
+  status=$?
+  [ "$status" -ne 0 ] || fail "exploration accepted a tuple with no explicit rotated model"
+  assert_contains "$out" "--exploration requires explicit --model and --effort values" "missing-model exploration refusal did not name the tuple contract"
+  [ ! -s "$LAUNCH_LOG" ] || fail "missing-model exploration reached launch submission"
+  assert_absent "$HOME_DIR/data/routing-outcomes.jsonl" "missing-model exploration recorded an attempt"
+
+  id=profile-exploration-missing-effort-z25
+  rec=$(make_spawn_case profile-exploration-missing-effort pi "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gpt-5.6-sol --task-class bounded-implementation-proven-root-fix --exploration)
+  status=$?
+  [ "$status" -ne 0 ] || fail "exploration accepted a tuple with no explicit rotated effort"
+  assert_contains "$out" "--exploration requires explicit --model and --effort values" "missing-effort exploration refusal did not name the tuple contract"
+  [ ! -s "$LAUNCH_LOG" ] || fail "missing-effort exploration reached launch submission"
+  assert_absent "$HOME_DIR/data/routing-outcomes.jsonl" "missing-effort exploration recorded an attempt"
+  pass "deliberate exploration requires an explicit rotated model and effort before intake or submission"
 }
 
 test_linked_telemetry_identifiers_chain_one_task_root() {
@@ -785,6 +814,7 @@ test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
 test_telemetry_precedes_submission_and_metadata_is_opaque
+test_exploration_requires_an_explicit_rotated_model_and_effort
 test_linked_telemetry_identifiers_chain_one_task_root
 
 echo "# all fm-spawn-dispatch-profile tests passed"

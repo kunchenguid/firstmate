@@ -56,8 +56,10 @@
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
-#   --terminal-payload passes one bounded explicit V1 terminal object to the
-#   model-telemetry owner. Without it, a recorded attempt is sealed incomplete.
+#   --terminal-payload is a compatibility fallback for a task with no observable
+#   delivery-gate result. A matching no-mistakes run always supplies mechanical
+#   quality facts instead, and says on stderr that the payload was not recorded.
+#   Without either quality source, the attempt is sealed incomplete.
 #   Sealing a recorded attempt is unconditional: no flag bypasses it, --force
 #   included, so a damaged or pruned ledger blocks cleanup until it is repaired.
 #   The refusal prints the ledger path, the failing line or attempt, and the
@@ -1208,6 +1210,69 @@ task_status_is_terminal_run() {  # <axi-status-output> <run-id>
   return 1
 }
 
+TELEMETRY_GATE_SOURCE=delivery
+TELEMETRY_GATE_RESULT=incomplete
+TELEMETRY_STEP_RERUNS=null
+TELEMETRY_GATE_RUN_ID=
+telemetry_status_is_own_terminal_run() {  # <worktree> <axi-status-output>
+  local wt=$1 out=$2 branch run_id run_branch run_head outcome
+  TELEMETRY_GATE_RUN_ID=
+  branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
+  run_id=$(fm_nm_strip_quotes "$(fm_nm_field "$out" id)")
+  [ -n "$run_id" ] || return 1
+  run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$out" branch)")
+  [ "$run_branch" = "$branch" ] || return 1
+  run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$out" head)")
+  fm_nm_head_matches_worktree "$wt" "$run_head" || return 1
+  outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$out" outcome)")
+  case "$outcome" in
+    passed|checks-passed) TELEMETRY_GATE_RESULT=green ;;
+    failed) TELEMETRY_GATE_RESULT=failed ;;
+    cancelled) TELEMETRY_GATE_RESULT=cancelled ;;
+    *) return 1 ;;
+  esac
+  TELEMETRY_GATE_RUN_ID=$run_id
+  return 0
+}
+
+# Counts delivery-gate step ROUNDS BEYOND THE FIRST, one per (step, round>1)
+# pair, so a review fix whose follow-up also re-runs `document` counts two. This
+# is a count of step reruns, never of correction cycles; a run with one review
+# fix can legitimately report more than one.
+telemetry_step_reruns_from_stats() {  # <worktree> <run-id>
+  local wt=$1 run_id=$2 out
+  out=$(fm_nm_run_bounded "$wt" "$NM_TEARDOWN_TIMEOUT" stats --run "$run_id" 2>/dev/null) || return 1
+  printf '%s\n' "$out" | awk '
+    $1=="STEP" && $2=="ROUND" && $3=="PURPOSE" { in_table=1; next }
+    in_table && NF==0 { exit }
+    in_table && $2 ~ /^[0-9]+$/ { rows++; if ($2 > 1) seen[$1 SUBSEP $2]=1 }
+    END {
+      if (!in_table || rows==0) exit 1
+      count=0
+      for (key in seen) count++
+      print count
+    }
+  '
+}
+
+observe_telemetry_gate_facts() {  # <worktree>
+  local wt=$1 out reruns
+  TELEMETRY_GATE_SOURCE=delivery
+  TELEMETRY_GATE_RESULT=incomplete
+  TELEMETRY_STEP_RERUNS=null
+  TELEMETRY_GATE_RUN_ID=
+  [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] && [ -d "$wt" ] || return 0
+  command -v no-mistakes >/dev/null 2>&1 || return 0
+  out=$(fm_nm_run "$wt" "$NM_TEARDOWN_TIMEOUT" axi status)
+  telemetry_status_is_own_terminal_run "$wt" "$out" || return 0
+  TELEMETRY_GATE_SOURCE=no-mistakes
+  # An unreadable step table leaves the count unknown; it never demotes an
+  # observed gate result, because the result and the count are separate facts.
+  if reruns=$(telemetry_step_reruns_from_stats "$wt" "$TELEMETRY_GATE_RUN_ID"); then
+    TELEMETRY_STEP_RERUNS=$reruns
+  fi
+}
+
 task_status_is_run_not_found() {  # <status-error> <run-id>
   local actual expected
   actual=$(fm_nm_trim "$1")
@@ -2244,11 +2309,41 @@ fi
 
 # Model outcome is sealed only after every existing report, public-followup,
 # landed-work, and endpoint preflight gate passes, but before any endpoint,
-# worktree, or task state is deleted. Cleanup itself never supplies success.
+# worktree, or task state is deleted. A matching no-mistakes run supplies the
+# quality result and step-rerun count mechanically. Spend stays absent because no
+# harness reports billed spend; every harness cost rendering is derived from its
+# own token counts and price catalog, which this ledger refuses on purpose.
+# Cleanup itself never supplies success.
 TELEMETRY_ATTEMPT=$(fm_meta_get "$META" telemetry_attempt)
 if [ -n "$TELEMETRY_ATTEMPT" ]; then
-  telemetry_args=(seal-or-incomplete --state "$STATE" --task "$ID" --attempt "$TELEMETRY_ATTEMPT")
-  [ -z "$TERMINAL_PAYLOAD" ] || telemetry_args+=(--terminal-payload "$TERMINAL_PAYLOAD")
+  TELEMETRY_USAGE='{"inputTokens":null,"outputTokens":null,"cost":null,"currency":null}'
+  if [ -n "$TERMINAL_PAYLOAD" ]; then
+    printf '%s' "$TERMINAL_PAYLOAD" | jq -e 'type=="object"' >/dev/null 2>&1 || {
+      echo "error: --terminal-payload is not a JSON object" >&2
+      exit 1
+    }
+  fi
+  observe_telemetry_gate_facts "$WT"
+  TELEMETRY_OUTCOME_KIND=none
+  TELEMETRY_OUTCOME_ID=null
+  if [ -n "$PR_URL" ]; then
+    TELEMETRY_OUTCOME_KIND=pull-request
+    TELEMETRY_OUTCOME_ID=$(jq -Rn --arg value "$PR_URL" '$value')
+  elif [ -d "$WT" ] && TELEMETRY_COMMIT=$(git -C "$WT" rev-parse HEAD 2>/dev/null); then
+    TELEMETRY_OUTCOME_KIND=commit
+    TELEMETRY_OUTCOME_ID=$(jq -Rn --arg value "$TELEMETRY_COMMIT" '$value')
+  fi
+  TELEMETRY_FACTS=$(jq -cn --arg source "$TELEMETRY_GATE_SOURCE" --arg result "$TELEMETRY_GATE_RESULT" \
+    --argjson reruns "$TELEMETRY_STEP_RERUNS" --arg kind "$TELEMETRY_OUTCOME_KIND" \
+    --argjson outcomeId "$TELEMETRY_OUTCOME_ID" --argjson usage "$TELEMETRY_USAGE" \
+    '{gate:{source:$source,result:$result,stepReruns:$reruns},outcomeLink:{kind:$kind,id:$outcomeId},usage:$usage}')
+  if [ "$TELEMETRY_GATE_SOURCE" = no-mistakes ] || [ -z "$TERMINAL_PAYLOAD" ]; then
+    [ -z "$TERMINAL_PAYLOAD" ] ||
+      echo "note: task $ID has an observed no-mistakes gate result ($TELEMETRY_GATE_RESULT), so its mechanical quality facts were sealed and --terminal-payload was not recorded" >&2
+    telemetry_args=(terminal-facts --state "$STATE" --task "$ID" --attempt "$TELEMETRY_ATTEMPT" --payload "$TELEMETRY_FACTS")
+  else
+    telemetry_args=(seal-or-incomplete --state "$STATE" --task "$ID" --attempt "$TELEMETRY_ATTEMPT" --terminal-payload "$TERMINAL_PAYLOAD")
+  fi
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       "$FM_ROOT/bin/fm-model-telemetry.sh" "${telemetry_args[@]}" >/dev/null; then
     echo "error: model telemetry terminal seal refused; teardown preserved the endpoint, worktree, and task state" >&2

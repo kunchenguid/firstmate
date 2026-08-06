@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--task-class <class>] [--exploration] [--backend <name>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--task-class <class>] [--backend <name>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -22,6 +22,13 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   --task-class records the intake classification in model telemetry; absent stays
+#   unresolved for compatibility. --exploration records firstmate's deliberate
+#   model/effort rotation, requires both axes explicitly, and is accepted only
+#   for a ship classified as bounded-implementation-proven-root-fix behind the
+#   no-mistakes delivery path.
+#   Spawn records the machine's one-minute load average and logical CPU count with
+#   every new intake so exploration results retain their observed load condition.
 #   --telemetry-task-root links a retry or escalation to an existing opaque task
 #   root, and --telemetry-parent names that root's immediately prior attempt.
 #   They are per-attempt values, so a batch dispatch refuses them.
@@ -115,8 +122,9 @@
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; shared --scout/--harness/--model/--effort/--backend/--mode/--yolo
-#   applies to every pair. A ship batch therefore carries one delivery contract, and each
+#   source of truth; shared --scout/--harness/--model/--effort/--task-class/
+#   --exploration/--backend/--mode/--yolo applies to every pair. A ship batch
+#   therefore carries one delivery contract, and each
 #   pair still checks it against its own brief; a batch spanning modes is two invocations.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
 #   and scout batches. The loop lives here, in bash, so callers never hand-write a
@@ -231,6 +239,8 @@ KIND=ship
 HARNESS_ARG=
 MODEL=
 EFFORT=
+TASK_CLASS=unresolved
+EXPLORATION=none
 BACKEND_ARG=
 MODE=
 YOLO=
@@ -240,6 +250,7 @@ TELEMETRY_PARENT=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+TASK_CLASS_SET=0
 BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
@@ -255,6 +266,7 @@ for a in "$@"; do
       harness) HARNESS_ARG=$a; HARNESS_SET=1 ;;
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
+      task-class) TASK_CLASS=$a; TASK_CLASS_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
@@ -275,6 +287,9 @@ for a in "$@"; do
     --model=*) MODEL=${a#--model=}; MODEL_SET=1 ;;
     --effort) want_value=effort ;;
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
+    --task-class) want_value=task-class ;;
+    --task-class=*) TASK_CLASS=${a#--task-class=}; TASK_CLASS_SET=1 ;;
+    --exploration) EXPLORATION=deliberate ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
     --mode) want_value=mode ;;
@@ -294,6 +309,7 @@ done
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || { echo "error: --harness requires a non-empty value" >&2; exit 1; }
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
+[ "$TASK_CLASS_SET" -eq 0 ] || [ -n "$TASK_CLASS" ] || { echo "error: --task-class requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
@@ -317,6 +333,10 @@ fi
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
+esac
+case "$TASK_CLASS" in
+  rote-reversible-edit|bounded-implementation-proven-root-fix|unknown-root-diagnosis|adversarial-review-security-review|evidence-heavy-research|long-horizon-repository-work|visual-browser-sensitive-work|documentation-specification-decision-extraction|external-wait-integration-work|unresolved) ;;
+  *) echo "error: --task-class is not a recognized model telemetry class" >&2; exit 1 ;;
 esac
 
 # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
@@ -350,6 +370,16 @@ else
   }
   [ "$YOLO_SET" -eq 0 ] || {
     echo "error: --yolo applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
+    exit 1
+  }
+fi
+if [ "$EXPLORATION" = deliberate ]; then
+  [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] && [ "$TASK_CLASS" = bounded-implementation-proven-root-fix ] || {
+    echo "error: --exploration requires a no-mistakes ship classified as bounded-implementation-proven-root-fix" >&2
+    exit 1
+  }
+  [ "$MODEL_SET" -eq 1 ] && [ "$EFFORT_SET" -eq 1 ] || {
+    echo "error: --exploration requires explicit --model and --effort values" >&2
     exit 1
   }
 fi
@@ -767,6 +797,8 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
+  [ "$TASK_CLASS_SET" -eq 0 ] || shared_args+=(--task-class "$TASK_CLASS")
+  [ "$EXPLORATION" = none ] || shared_args+=(--exploration)
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
@@ -2064,12 +2096,18 @@ TELEMETRY_CONFIG_SHA=
 if [ -f "$CONFIG/crew-dispatch.json" ] && [ ! -L "$CONFIG/crew-dispatch.json" ]; then
   TELEMETRY_CONFIG_SHA=$(node -e 'const fs=require("fs"),c=require("crypto");process.stdout.write(c.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex")+"\n")' "$CONFIG/crew-dispatch.json")
 fi
+TELEMETRY_MACHINE_CONDITION=$(node -e 'const os=require("os");const cpus=typeof os.availableParallelism==="function"?os.availableParallelism():os.cpus().length;const load=os.loadavg()[0];if(!Number.isFinite(load)||load<0||!Number.isInteger(cpus)||cpus<1)process.exit(1);process.stdout.write(JSON.stringify({observedAt:new Date().toISOString(),loadAverage1m:load,logicalCpuCount:cpus}));') || {
+  echo "error: model telemetry could not observe the machine condition; no model launch was submitted" >&2
+  exit 1
+}
 TELEMETRY_INTAKE=$(jq -cn \
   --arg root "$TELEMETRY_TASK_ROOT" --arg parent "$TELEMETRY_PARENT" \
   --arg project "$TELEMETRY_PROJECT_REF" --arg harness "$HARNESS" \
   --arg model "$TELEMETRY_MODEL" --arg effort "$TELEMETRY_EFFORT" \
+  --arg taskClass "$TASK_CLASS" --arg exploration "$EXPLORATION" \
+  --argjson machine "$TELEMETRY_MACHINE_CONDITION" \
   --arg config "$TELEMETRY_CONFIG_SHA" --arg started "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
-  '{attemptClass:"real",source:"firstmate",taskRootId:(if $root=="" then null else $root end),parentAttemptId:(if $parent=="" then null else $parent end),projectRef:$project,taskClass:"unresolved",tuple:{harness:$harness,provider:null,model:(if $model=="" then null else $model end),effort:$effort,modelVersion:null,cliVersion:null},selection:{matchedRule:null,configSha256:(if $config=="" then null else $config end),fitReasons:[],candidateAssessments:[{tuple:{harness:$harness,provider:null,model:(if $model=="" then null else $model end),effort:$effort,modelVersion:null,cliVersion:null},eligibility:"selected",reasons:[]}],quota:{decision:"unknown",headroom:"unknown",runway:"unknown",observedAt:null}},neutralExecution:{correlation:null,capabilityProfile:"not-applicable",owner:"not-applicable",phase:null,behavioralResult:"not-applicable"},evaluation:{kind:"none",fixtureId:null,fixtureManifestSha256:null,oracleId:null,oracleSha256:null,sourceCommit:null},startedAt:$started,privacy:{classification:"operational-minimized",contentPolicy:"ids-codes-hashes-bounded-evidence-only"}}')
+  '{attemptClass:"real",source:"firstmate",taskRootId:(if $root=="" then null else $root end),parentAttemptId:(if $parent=="" then null else $parent end),projectRef:$project,taskClass:$taskClass,tuple:{harness:$harness,provider:null,model:(if $model=="" then null else $model end),effort:$effort,modelVersion:null,cliVersion:null},selection:{matchedRule:null,configSha256:(if $config=="" then null else $config end),fitReasons:[],candidateAssessments:[{tuple:{harness:$harness,provider:null,model:(if $model=="" then null else $model end),effort:$effort,modelVersion:null,cliVersion:null},eligibility:"selected",reasons:[]}],quota:{decision:"unknown",headroom:"unknown",runway:"unknown",observedAt:null}},neutralExecution:{correlation:null,capabilityProfile:"not-applicable",owner:"not-applicable",phase:null,behavioralResult:"not-applicable"},evaluation:{kind:"none",fixtureId:null,fixtureManifestSha256:null,oracleId:null,oracleSha256:null,sourceCommit:null},exploration:{kind:$exploration,machineCondition:$machine},startedAt:$started,privacy:{classification:"operational-minimized",contentPolicy:"ids-codes-hashes-bounded-evidence-only"}}')
 if ! TELEMETRY_RESULT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
     "$FM_ROOT/bin/fm-model-telemetry.sh" intake --state "$STATE" --task "$ID" --payload "$TELEMETRY_INTAKE"); then
   echo "error: model telemetry intake refused; no model launch was submitted" >&2

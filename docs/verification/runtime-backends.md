@@ -583,3 +583,12 @@ The host-tool sequence was:
 Observed guarantee: a Desktop-owned thread can write Firstmate lifecycle files when the prompt provides an authorized absolute path, and create, send, read, and archive work at the Desktop host-tool layer.
 The missing guarantee remains a supported shell-callable bridge that lets Firstmate perform those operations against the same visible Desktop endpoint.
 App-server partial methods and raw socket experiments do not satisfy that bridge contract.
+
+## Harness spend rendering
+
+This evidence is harness-wide rather than backend-scoped: it holds for every adapter regardless of the runtime backend that launched it.
+
+No installed harness was found to report billed spend, so the routing ledger records no cost for any of them.
+Pi 0.83.0 renders a per-session dollar figure in its footer, and that figure is computed locally rather than reported. Paths below are relative to the installed `@earendil-works/pi-coding-agent` package: `dist/modes/interactive/components/footer.js:130` prints `usageTotals.cost`, `dist/core/usage-totals.js:15` sums `usage.cost.total`, and `node_modules/@earendil-works/pi-ai/dist/models.js:384-388` builds that total as `(rate / 1000000) * tokens` per usage bucket from the bundled price catalog.
+A token-times-price estimate is exactly what the ledger refuses, and the ` (sub)` suffix `footer.js:126-131` adds for subscription-backed providers marks the case where the figure is a notional list price for tokens already covered by a flat plan.
+Re-open this section only with a harness whose displayed spend traces to the provider's own billing report; until then `bin/fm-model-telemetry.sh` writes `usage.cost: null`, which its sheet projects as `costReported: false` and keeps distinct from a reported zero.

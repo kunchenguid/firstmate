@@ -4,6 +4,7 @@
 # Usage:
 #   fm-model-telemetry.sh intake --state <dir> --task <id> --payload <json>
 #   fm-model-telemetry.sh terminal --state <dir> --task <id> [--attempt <mra_uuid>] --payload <json>
+#   fm-model-telemetry.sh terminal-facts --state <dir> --task <id> [--attempt <mra_uuid>] --payload <json>
 #   fm-model-telemetry.sh seal-or-incomplete --state <dir> --task <id> [--attempt <mra_uuid>] [--terminal-payload <json>]
 #   fm-model-telemetry.sh sheet [--format json|csv|md]
 #
@@ -41,8 +42,31 @@
 # ledger itself (restore the intake row or the malformed line from a backup and
 # its regular-file form), confirm with
 # `fm-model-telemetry.sh sheet --format json`, then re-run the caller.
+# terminal-facts accepts only observable gate facts, outcome identity, and
+# directly reported usage. It derives classification, first-pass acceptance,
+# correction count, end time, and wall time at the immutable terminal seal.
+# gate.stepReruns is how many delivery-gate steps ran a round beyond their
+# first, counted once per extra round of a step. It is NOT a count of
+# correction cycles: one review fix whose follow-up also re-runs `document` is
+# two step reruns. The V1 correctionCount field mirrors it on this mechanical
+# path, but the sheet's stepReruns column reads gateFacts.stepReruns and nothing
+# else, because correctionCount also carries a caller-authored correction count
+# on the explicit terminal path and a hardcoded 0 on the incomplete seal. A row
+# with no observed gate therefore reports stepReruns absent, never 0, so a
+# superseded or caller-sealed attempt never reads like a clean first pass.
+# A green gate whose step-rerun count could not be read stays accepted with a
+# null correctionCount rather than being downgraded to incomplete; the sheet
+# reports that, and any accepted row with no gate-sourced count, as
+# accepted-step-reruns-unknown.
+# Usage cost is only ever a spend figure the harness itself reports as billed.
+# No verified harness reports one today: every installed harness renders a
+# cost computed from its own token counts and price catalog, which is the
+# estimate this ledger refuses. Cost therefore stays null until such a source
+# exists, and null stays distinct from a reported zero.
 # New events are at most 64 KiB, use schema firstmate.model-run-telemetry/v1,
-# and reject every field outside the V1 whitelist.
+# and reject every field outside the V1 whitelist. New intake events may carry
+# the explicit exploration decision and an OS-observed machine-load snapshot;
+# older V1 events without those additive fields remain valid.
 # Legacy rows, including rows carrying any other schemaVersion, are checked only
 # for being JSON objects and are never changed; sheet projects them as legacyRaw
 # and emits all formats to stdout without modifying the ledger.
@@ -182,14 +206,23 @@ validate_intake() {
       (.oracleId==null or (.oracleId|type=="string" and length<=96)) and
       (.oracleSha256==null or (.oracleSha256|sha)) and
       (.sourceCommit==null or (.sourceCommit|type=="string" and test("^[0-9a-f]{7,64}$")));
-    keys_are(["attemptClass","source","taskRootId","parentAttemptId","projectRef","taskClass","tuple","selection","neutralExecution","evaluation","startedAt","privacy"]) and
+    def exploration:
+      keys_are(["kind","machineCondition"]) and
+      (.kind|oneof(["none","deliberate"])) and
+      (.machineCondition|keys_are(["observedAt","loadAverage1m","logicalCpuCount"]) and
+        (.observedAt|dt) and (.loadAverage1m|type=="number" and .>=0) and
+        (.logicalCpuCount|type=="number" and floor==. and .>=1));
+    ((keys_are(["attemptClass","source","taskRootId","parentAttemptId","projectRef","taskClass","tuple","selection","neutralExecution","evaluation","startedAt","privacy"])) or
+     (keys_are(["attemptClass","source","taskRootId","parentAttemptId","projectRef","taskClass","tuple","selection","neutralExecution","evaluation","exploration","startedAt","privacy"]))) and
     (.attemptClass|oneof(["real","synthetic","pilot"])) and
     (.source|oneof(["firstmate","spec-kit"])) and
     (.taskRootId==null or (.taskRootId|type=="string" and test("^mrt_[0-9a-f-]{36}$"))) and
     (.parentAttemptId==null or (.parentAttemptId|type=="string" and test("^mra_[0-9a-f-]{36}$"))) and
     (.projectRef|type=="string" and test("^project_[0-9a-f]{16,64}$")) and
     (.taskClass|oneof(["rote-reversible-edit","bounded-implementation-proven-root-fix","unknown-root-diagnosis","adversarial-review-security-review","evidence-heavy-research","long-horizon-repository-work","visual-browser-sensitive-work","documentation-specification-decision-extraction","external-wait-integration-work","unresolved"])) and
-    (.tuple|tuple) and (.selection|selection) and (.neutralExecution|neutral) and (.evaluation|evaluation) and (.startedAt|dt) and
+    (.tuple|tuple) and (.selection|selection) and (.neutralExecution|neutral) and (.evaluation|evaluation) and
+    (if has("exploration") then (.exploration|exploration) and (.exploration.kind!="deliberate" or .taskClass=="bounded-implementation-proven-root-fix") else true end) and
+    (.startedAt|dt) and
     (.privacy|keys_are(["classification","contentPolicy"]) and
       (.classification|oneof(["operational-minimized","synthetic-fixture","pilot-live"])) and
       .contentPolicy=="ids-codes-hashes-bounded-evidence-only")
@@ -202,12 +235,14 @@ validate_terminal() {
     def oneof($a): . as $v | ($a|index($v))!=null;
     def safeid: type=="string" and length>=1 and length<=96 and test("^[A-Za-z0-9._:-]+$");
     def dt: type=="string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$");
-    keys_are(["classification","refusalQuality","endedAt","wallSeconds","firstPassAccepted","correctionCount","interventionCount","evidence","outcomeLink","usage","primaryFailureClass","flags","reclassification"]) and
+    ((keys_are(["classification","refusalQuality","endedAt","wallSeconds","firstPassAccepted","correctionCount","interventionCount","evidence","outcomeLink","usage","primaryFailureClass","flags","reclassification"])) or
+     (keys_are(["classification","refusalQuality","endedAt","wallSeconds","firstPassAccepted","correctionCount","interventionCount","evidence","outcomeLink","usage","primaryFailureClass","flags","reclassification","gateFacts"]))) and
     (.classification|oneof(["accepted","rejected","failed","refused","timed-out","quota-stopped","cancelled","incomplete"])) and
     (.refusalQuality|oneof(["compliant","noncompliant","not-applicable","unknown"])) and
     (.endedAt==null or (.endedAt|dt)) and (.wallSeconds==null or (.wallSeconds|type=="number" and .>=0)) and
     (.firstPassAccepted==null or (.firstPassAccepted|type=="boolean")) and
-    (.correctionCount|type=="number" and floor==. and .>=0) and (.interventionCount|type=="number" and floor==. and .>=0) and
+    (.correctionCount==null or (.correctionCount|type=="number" and floor==. and .>=0)) and
+    (.interventionCount|type=="number" and floor==. and .>=0) and
     (.evidence|keys_are(["tests","reviewer","oracle","refs"]) and
       (.tests|oneof(["pass","fail","not-run","unknown"])) and
       (.reviewer|oneof(["pass","fail","not-run","unknown"])) and
@@ -220,8 +255,33 @@ validate_terminal() {
     (.reclassification|keys_are(["fromTaskClass","toTaskClass","reasonCodes","escalated"]) and
       (.fromTaskClass==null or (.fromTaskClass|type=="string" and length<=96)) and (.toTaskClass==null or (.toTaskClass|type=="string" and length<=96)) and
       (.reasonCodes|type=="array" and length<=8 and all(.[]; oneof(["scope-expanded","root-unknown","oracle-changed","capability-miss","integrity-stop","quota-stop","external-block","none"]))) and
-      (.escalated|type=="boolean"))
+      (.escalated|type=="boolean")) and
+    (if has("gateFacts") then
+      (.gateFacts|keys_are(["source","result","stepReruns"]) and
+        (.source|oneof(["no-mistakes","delivery"])) and
+        (.result|oneof(["green","failed","cancelled","incomplete"])) and
+        (.stepReruns==null or (.stepReruns|type=="number" and floor==. and .>=0)))
+     else true end)
   ' >/dev/null || die "terminal payload violates the V1 whitelist"
+}
+
+validate_terminal_facts() {
+  printf '%s' "$1" | jq -e '
+    def keys_are($a): (keys|sort)==($a|sort);
+    def oneof($a): . as $v | ($a|index($v))!=null;
+    def safeid: type=="string" and length>=1 and length<=160;
+    keys_are(["gate","outcomeLink","usage"]) and
+    (.gate|keys_are(["source","result","stepReruns"]) and
+      (.source|oneof(["no-mistakes","delivery"])) and
+      (.result|oneof(["green","failed","cancelled","incomplete"])) and
+      (.stepReruns==null or (.stepReruns|type=="number" and floor==. and .>=0))) and
+    (.outcomeLink|keys_are(["kind","id"]) and
+      (.kind|oneof(["none","commit","pull-request","report","spec-kit-outcome"])) and
+      (.id==null or (.id|safeid))) and
+    (.usage|keys_are(["inputTokens","outputTokens","cost","currency"]) and
+      all([.inputTokens,.outputTokens,.cost][]; .==null or (type=="number" and .>=0)) and
+      (.currency==null or (.currency|type=="string" and test("^[A-Z]{3}$"))))
+  ' >/dev/null || die "terminal facts payload violates the whitelist"
 }
 
 validate_event() {
@@ -534,14 +594,62 @@ terminal_command() {
   jq -cn --arg status "$status" --arg attempt "$attempt" '{status:$status,attemptId:$attempt}'
 }
 
+terminal_facts_command() {
+  local task=$1 payload=$2 attempt_arg=${3:-} path attempt facts intake started ended wall terminal status
+  require_safe_task_id "$task"
+  facts=$(canonical_json "$payload")
+  validate_terminal_facts "$facts"
+  path=$(receipt_path "$task")
+  with_lock_begin
+  validate_ledger_for_write
+  attempt=$(resolve_attempt_for_task "$task" "$attempt_arg")
+  if find_terminal "$attempt" >/dev/null 2>&1; then
+    status=duplicate
+  else
+    intake=$(find_intake "$attempt") || die "terminal facts have no intake row"
+    started=$(printf '%s' "$intake" | jq -r .intake.startedAt)
+    ended=$(now_rfc3339)
+    wall=$(node -e 'const a=Date.parse(process.argv[1]),b=Date.parse(process.argv[2]);if(!Number.isFinite(a)||!Number.isFinite(b)||b<a)process.exit(1);process.stdout.write(String((b-a)/1000));' "$started" "$ended") || die "could not derive wall time from intake and terminal timestamps"
+    terminal=$(jq -cnS --arg ended "$ended" --argjson wall "$wall" --argjson facts "$facts" '
+      ($facts.gate.result) as $result |
+      ($facts.gate.stepReruns) as $reruns |
+      {classification:(if $result=="green" then "accepted" elif $result=="failed" then "failed" elif $result=="cancelled" then "cancelled" else "incomplete" end),
+       refusalQuality:(if $result=="incomplete" then "unknown" else "not-applicable" end),
+       endedAt:$ended,wallSeconds:$wall,
+       firstPassAccepted:(if $result=="green" then (if $reruns==null then null else $reruns==0 end) elif $result=="failed" then false else null end),
+       correctionCount:$reruns,interventionCount:0,
+       evidence:{tests:(if $facts.gate.source=="no-mistakes" and $result=="green" then "pass" elif $facts.gate.source=="no-mistakes" and $result=="failed" then "fail" else "unknown" end),reviewer:(if $facts.gate.source=="no-mistakes" and $result=="green" then "pass" else "unknown" end),oracle:"not-run",refs:[]},
+       outcomeLink:$facts.outcomeLink,usage:$facts.usage,
+       primaryFailureClass:(if $result=="green" then "none" else "unknown" end),
+       flags:{tool:false,transport:false,environment:false,externalWait:false,scopeChange:false,quota:false},
+       reclassification:{fromTaskClass:null,toTaskClass:null,reasonCodes:["none"],escalated:false},
+       gateFacts:$facts.gate}')
+    validate_terminal "$terminal"
+    append_terminal_event "$attempt" "$terminal"
+    status=recorded
+  fi
+  rm -f "$path"
+  with_lock_end
+  jq -cn --arg status "$status" --arg attempt "$attempt" '{status:$status,attemptId:$attempt}'
+}
+
 sheet_json() {
   [ -e "$LEDGER" ] || { printf '[]\n'; return; }
   jq -Rcs --arg v "$SCHEMA_VERSION" '
+    def blank($raw): {recordType:"legacy",schemaVersion:null,attemptId:null,taskRootId:null,parentAttemptId:null,source:null,attemptClass:null,projectRef:null,taskClass:null,harness:null,provider:null,model:null,effort:null,exploration:null,machineLoadAverage1m:null,machineLogicalCpuCount:null,state:"legacy",classification:null,quality:null,stepReruns:null,gateSource:null,primaryFailureClass:null,startedAt:null,endedAt:null,wallSeconds:null,costReported:false,cost:null,currency:null,costPerAcceptedDelivery:null,legacyRaw:$raw};
     split("\n") | map(select(length>0)|fromjson) as $rows |
-    ($rows | map(select(.schemaVersion!=$v) | {recordType:"legacy",schemaVersion:null,attemptId:null,taskRootId:null,parentAttemptId:null,source:null,attemptClass:null,projectRef:null,taskClass:null,harness:null,provider:null,model:null,effort:null,state:"legacy",classification:null,primaryFailureClass:null,startedAt:null,endedAt:null,wallSeconds:null,legacyRaw:.})) +
+    ($rows | map(select(.schemaVersion!=$v) | blank(.))) +
     ($rows | map(select(.schemaVersion==$v and .eventType=="attempt-intake")) | map(. as $i |
       ($rows | map(select(.schemaVersion==$v and .eventType=="attempt-terminal" and .attemptId==$i.attemptId)) | first) as $t |
-      {recordType:"attempt",schemaVersion:$v,attemptId:$i.attemptId,taskRootId:$i.intake.taskRootId,parentAttemptId:$i.intake.parentAttemptId,source:$i.intake.source,attemptClass:$i.intake.attemptClass,projectRef:$i.intake.projectRef,taskClass:$i.intake.taskClass,harness:$i.intake.tuple.harness,provider:$i.intake.tuple.provider,model:$i.intake.tuple.model,effort:$i.intake.tuple.effort,state:(if $t==null then "open" else "terminal" end),classification:($t.terminal.classification // null),primaryFailureClass:($t.terminal.primaryFailureClass // null),startedAt:$i.intake.startedAt,endedAt:($t.terminal.endedAt // null),wallSeconds:($t.terminal.wallSeconds // null),legacyRaw:null}))
+      ($t.terminal.classification // null) as $classification |
+      ($t.terminal.gateFacts.stepReruns // null) as $reruns |
+      ($t.terminal.usage.cost // null) as $cost |
+      {recordType:"attempt",schemaVersion:$v,attemptId:$i.attemptId,taskRootId:$i.intake.taskRootId,parentAttemptId:$i.intake.parentAttemptId,source:$i.intake.source,attemptClass:$i.intake.attemptClass,projectRef:$i.intake.projectRef,taskClass:$i.intake.taskClass,harness:$i.intake.tuple.harness,provider:$i.intake.tuple.provider,model:$i.intake.tuple.model,effort:$i.intake.tuple.effort,
+       exploration:($i.intake.exploration.kind // null),machineLoadAverage1m:($i.intake.exploration.machineCondition.loadAverage1m // null),machineLogicalCpuCount:($i.intake.exploration.machineCondition.logicalCpuCount // null),
+       state:(if $t==null then "open" else "terminal" end),classification:$classification,
+       quality:(if $t==null then null elif $classification!="accepted" then $classification elif $reruns==null then "accepted-step-reruns-unknown" elif $reruns==0 then "accepted-first-pass" else "accepted-after-step-reruns" end),
+       stepReruns:$reruns,gateSource:($t.terminal.gateFacts.source // null),primaryFailureClass:($t.terminal.primaryFailureClass // null),startedAt:$i.intake.startedAt,endedAt:($t.terminal.endedAt // null),wallSeconds:($t.terminal.wallSeconds // null),
+       costReported:($cost|type=="number"),cost:$cost,currency:($t.terminal.usage.currency // null),costPerAcceptedDelivery:(if $classification=="accepted" then $cost else null end),legacyRaw:null}))
   ' "$LEDGER"
 }
 
@@ -552,13 +660,13 @@ sheet_command() {
   case "$format" in
     json) printf '%s\n' "$json" ;;
     csv)
-      printf '%s\n' 'recordType,schemaVersion,attemptId,taskRootId,parentAttemptId,source,attemptClass,projectRef,taskClass,harness,provider,model,effort,state,classification,primaryFailureClass,startedAt,endedAt,wallSeconds,legacyRaw'
-      printf '%s' "$json" | jq -r '.[] | [.recordType,.schemaVersion,.attemptId,.taskRootId,.parentAttemptId,.source,.attemptClass,.projectRef,.taskClass,.harness,.provider,.model,.effort,.state,.classification,.primaryFailureClass,.startedAt,.endedAt,.wallSeconds,(.legacyRaw|if .==null then null else tojson end)] | @csv'
+      printf '%s\n' 'recordType,schemaVersion,attemptId,taskRootId,parentAttemptId,source,attemptClass,projectRef,taskClass,harness,provider,model,effort,exploration,machineLoadAverage1m,machineLogicalCpuCount,state,classification,quality,stepReruns,gateSource,primaryFailureClass,startedAt,endedAt,wallSeconds,costReported,cost,currency,costPerAcceptedDelivery,legacyRaw'
+      printf '%s' "$json" | jq -r '.[] | [.recordType,.schemaVersion,.attemptId,.taskRootId,.parentAttemptId,.source,.attemptClass,.projectRef,.taskClass,.harness,.provider,.model,.effort,.exploration,.machineLoadAverage1m,.machineLogicalCpuCount,.state,.classification,.quality,.stepReruns,.gateSource,.primaryFailureClass,.startedAt,.endedAt,.wallSeconds,.costReported,.cost,.currency,.costPerAcceptedDelivery,(.legacyRaw|if .==null then null else tojson end)] | @csv'
       ;;
     md)
-      printf '%s\n' '| type | attempt | root | parent | tuple | state | classification | failure | legacy |'
-      printf '%s\n' '|---|---|---|---|---|---|---|---|---|'
-      printf '%s' "$json" | jq -r '.[] | def esc: if .==null then "" else tostring|gsub("\\|";"\\\\|")|gsub("\\n";" ") end; "| \(.recordType|esc) | \(.attemptId|esc) | \(.taskRootId|esc) | \(.parentAttemptId|esc) | \(([.harness,.model,.effort]|map(select(.!=null))|join("/"))|esc) | \(.state|esc) | \(.classification|esc) | \(.primaryFailureClass|esc) | \((.legacyRaw|if .==null then "" else tojson end)|esc) |"'
+      printf '%s\n' '| type | attempt | root | parent | tuple | exploration | load | state | quality | step reruns | seconds | cost | cost/accepted | failure | legacy |'
+      printf '%s\n' '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|'
+      printf '%s' "$json" | jq -r '.[] | def esc: if .==null then "" else tostring|gsub("\\|";"\\\\|")|gsub("\\n";" ") end; "| \(.recordType|esc) | \(.attemptId|esc) | \(.taskRootId|esc) | \(.parentAttemptId|esc) | \(([.harness,.model,.effort]|map(select(.!=null))|join("/"))|esc) | \(.exploration|esc) | \(([.machineLoadAverage1m,.machineLogicalCpuCount]|map(select(.!=null))|join("/"))|esc) | \(.state|esc) | \(.quality|esc) | \(.stepReruns|esc) | \(.wallSeconds|esc) | \((if .costReported then ((.currency // "")+" "+(.cost|tostring)) else "absent" end)|esc) | \(.costPerAcceptedDelivery|esc) | \(.primaryFailureClass|esc) | \((.legacyRaw|if .==null then "" else tojson end)|esc) |"'
       ;;
     *) die "sheet format must be json, csv, or md" ;;
   esac
@@ -571,7 +679,7 @@ esac
 shift
 
 case "$COMMAND" in
-  intake|terminal|seal-or-incomplete)
+  intake|terminal|terminal-facts|seal-or-incomplete)
     # shellcheck source=bin/fm-wake-lib.sh
     . "$SCRIPT_DIR/fm-wake-lib.sh"
     secure_dirs
@@ -599,6 +707,7 @@ case "$COMMAND" in
     case "$COMMAND" in
       intake) [ -n "$payload" ] || die "--payload is required"; intake_command "$task" "$payload" ;;
       terminal) [ -n "$payload" ] || die "--payload is required"; terminal_command "$task" "$payload" "$attempt_arg" ;;
+      terminal-facts) [ -n "$payload" ] || die "--payload is required"; terminal_facts_command "$task" "$payload" "$attempt_arg" ;;
       seal-or-incomplete)
         [ -z "$payload" ] || die "seal-or-incomplete uses --terminal-payload"
         if [ -n "$terminal_payload" ]; then

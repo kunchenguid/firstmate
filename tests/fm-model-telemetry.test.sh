@@ -33,6 +33,15 @@ terminal_payload() {
   jq -cn --arg classification "$classification" --arg quality "$quality" --arg failure "$failure" '{classification:$classification,refusalQuality:$quality,endedAt:"2026-08-02T00:01:00Z",wallSeconds:60,firstPassAccepted:($classification=="accepted"),correctionCount:0,interventionCount:0,evidence:{tests:(if $classification=="accepted" then "pass" else "fail" end),reviewer:"not-run",oracle:"not-run",refs:[{kind:"test",id:"focused-suite"}]},outcomeLink:{kind:"commit",id:"0123456789abcdef"},usage:{inputTokens:null,outputTokens:null,cost:null,currency:null},primaryFailureClass:$failure,flags:{tool:false,transport:false,environment:false,externalWait:false,scopeChange:false,quota:($classification=="quota-stopped")},reclassification:{fromTaskClass:null,toTaskClass:null,reasonCodes:["none"],escalated:false}}'
 }
 
+exploration_intake_payload() {
+  intake_payload "$@" | jq -c '. + {exploration:{kind:"deliberate",machineCondition:{observedAt:"2026-08-02T00:00:00Z",loadAverage1m:7.25,logicalCpuCount:12}}}'
+}
+
+terminal_facts_payload() {
+  local result=$1 reruns=$2 cost=${3:-null} currency=${4:-null}
+  jq -cn --arg result "$result" --argjson reruns "$reruns" --argjson cost "$cost" --argjson currency "$currency" '{gate:{source:"no-mistakes",result:$result,stepReruns:$reruns},outcomeLink:{kind:"commit",id:"0123456789abcdef"},usage:{inputTokens:null,outputTokens:null,cost:$cost,currency:$currency}}'
+}
+
 run_intake() {
   local home=$1 task=$2 payload=$3
   FM_HOME="$home" "$TELEMETRY" intake --state "$home/state" --task "$task" --payload "$payload"
@@ -237,13 +246,95 @@ test_validation_privacy_and_private_files() {
   pass "model telemetry rejects privacy fields, unknowns, oversize, unsafe ids, malformed rows, symlinks, and unsafe modes"
 }
 
+test_mechanical_quality_cost_and_exploration_projection() {
+  local home result attempt ledger row sheet root retry retry_attempt md md_row
+  home=$(make_home scoreboard)
+  ledger="$home/data/routing-outcomes.jsonl"
+  result=$(run_intake "$home" exploration-a "$(exploration_intake_payload gpt-5.6-sol low)") || fail "exploration intake failed"
+  attempt=$(printf '%s' "$result" | jq -r .attemptId)
+  root=$(printf '%s' "$result" | jq -r .taskRootId)
+  FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task exploration-a --attempt "$attempt" \
+    --payload "$(terminal_facts_payload green 2 10.101 '"USD"')" >/dev/null || fail "terminal facts failed"
+  row=$(tail -n 1 "$ledger")
+  printf '%s' "$row" | jq -e '
+    .terminal.classification=="accepted" and .terminal.firstPassAccepted==false and
+    .terminal.correctionCount==2 and .terminal.gateFacts=={source:"no-mistakes",result:"green",stepReruns:2} and
+    .terminal.usage.cost==10.101 and .terminal.usage.currency=="USD" and
+    .terminal.endedAt!=null and .terminal.wallSeconds>=0
+  ' >/dev/null || fail "terminal facts did not mechanically derive accepted-after-two-step-reruns quality and reported cost"
+  if FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task invalid-prose --payload \
+    "$(terminal_facts_payload green 0 | jq -c '.classification="accepted"')" >/dev/null 2>&1; then
+    fail "terminal facts accepted a caller-authored classification"
+  fi
+  run_intake "$home" first-pass "$(intake_payload gpt-5.6-sol low)" >/dev/null || fail "first-pass intake failed"
+  FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task first-pass \
+    --payload "$(terminal_facts_payload green 0 0 '"USD"')" >/dev/null || fail "first-pass terminal facts failed"
+  run_intake "$home" failed-gate "$(intake_payload gpt-5.6-sol low)" >/dev/null || fail "failed-gate intake failed"
+  FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task failed-gate \
+    --payload "$(terminal_facts_payload failed null)" >/dev/null || fail "failed-gate terminal facts failed"
+  run_intake "$home" cancelled-gate "$(intake_payload gpt-5.6-sol low)" >/dev/null || fail "cancelled-gate intake failed"
+  FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task cancelled-gate \
+    --payload "$(terminal_facts_payload cancelled null)" >/dev/null || fail "cancelled-gate terminal facts failed"
+  run_intake "$home" green-unknown-reruns "$(intake_payload gpt-5.6-sol low)" >/dev/null || fail "unknown-step-rerun intake failed"
+  FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task green-unknown-reruns \
+    --payload "$(terminal_facts_payload green null)" >/dev/null || fail "a green gate with an unreadable step-rerun count was refused"
+  run_intake "$home" quota-wall "$(intake_payload gpt-5.6-sol low)" >/dev/null || fail "quota-stopped intake failed"
+  FM_HOME="$home" "$TELEMETRY" terminal --state "$home/state" --task quota-wall \
+    --payload "$(terminal_payload quota-stopped not-applicable quota)" >/dev/null || fail "quota-stopped terminal failed"
+  retry=$(run_intake "$home" exploration-retry "$(exploration_intake_payload gpt-5.6-sol xhigh "$root" "$attempt")") || fail "rotated retry intake failed"
+  retry_attempt=$(printf '%s' "$retry" | jq -r .attemptId)
+  FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task exploration-retry \
+    --payload "$(terminal_facts_payload green 0)" >/dev/null || fail "rotated retry terminal facts failed"
+  run_intake "$home" caller-counted "$(intake_payload gpt-5.6-sol low)" >/dev/null || fail "caller-counted intake failed"
+  FM_HOME="$home" "$TELEMETRY" terminal --state "$home/state" --task caller-counted \
+    --payload "$(terminal_payload accepted | jq -c '.correctionCount=3|.firstPassAccepted=false')" >/dev/null || fail "caller-counted terminal failed"
+  run_intake "$home" superseded "$(intake_payload gpt-5.6-sol low)" >/dev/null || fail "superseded intake failed"
+  run_intake "$home" superseded "$(intake_payload gpt-5.6-sol low)" >/dev/null || fail "relaunch after supersession failed"
+  sheet=$(FM_HOME="$home" "$TELEMETRY" sheet --format json) || fail "scoreboard sheet failed"
+  printf '%s' "$sheet" | jq -e '
+    .[0].exploration=="deliberate" and .[0].machineLoadAverage1m==7.25 and
+    .[0].machineLogicalCpuCount==12 and .[0].quality=="accepted-after-step-reruns" and
+    .[0].stepReruns==2 and .[0].gateSource=="no-mistakes" and .[0].wallSeconds>=0 and
+    .[0].costReported==true and .[0].cost==10.101 and .[0].currency=="USD" and
+    .[0].costPerAcceptedDelivery==10.101 and
+    .[1].quality=="accepted-first-pass" and .[1].stepReruns==0 and
+    .[1].costReported==true and .[1].cost==0 and .[1].costPerAcceptedDelivery==0 and
+    .[2].quality=="failed" and .[2].classification=="failed" and
+    .[2].costReported==false and .[2].cost==null and .[2].costPerAcceptedDelivery==null and
+    .[3].quality=="cancelled" and .[3].classification=="cancelled" and
+    .[4].quality=="accepted-step-reruns-unknown" and .[4].classification=="accepted" and .[4].stepReruns==null and
+    .[5].quality=="quota-stopped" and .[5].stepReruns==null and
+    .[6].taskRootId==.[0].taskRootId and .[6].parentAttemptId==.[0].attemptId and
+    .[7].classification=="accepted" and .[7].gateSource==null and
+    .[7].stepReruns==null and .[7].quality=="accepted-step-reruns-unknown" and
+    .[8].classification=="incomplete" and .[8].gateSource==null and .[8].stepReruns==null
+  ' >/dev/null || fail "sheet collapsed a distinct outcome, lost an unknown step-rerun count, or reported a step-rerun count no delivery gate produced"
+
+  # The markdown sheet is a generated read-only projection; parse its cells and
+  # assert the rotated retry still shows which attempt and root it escalated from.
+  md=$(FM_HOME="$home" "$TELEMETRY" sheet --format md) || fail "markdown sheet failed"
+  md_row=$(printf '%s\n' "$md" | awk -F'|' -v a="$retry_attempt" '
+    index($3, a) > 0 {
+      for (i = 4; i <= 5; i++) gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i)
+      print $4 "/" $5
+      exit
+    }')
+  [ "$md_row" = "$root/$attempt" ] || fail "markdown sheet dropped the retry lineage columns for the rotated attempt"
+  pass "mechanical gate facts, exploration load, distinct non-accepted outcomes, zero-versus-absent cost and step reruns, and markdown retry lineage stay comparable"
+}
+
 test_legacy_lossless_and_read_only_sheets() {
-  local home ledger legacy foreign checksum result attempt format empty_home
+  local home ledger legacy foreign checksum result attempt format empty_home n
   home=$(make_home sheets)
   ledger="$home/data/routing-outcomes.jsonl"
   legacy='  { "task" : "old", "note" : "preserve spacing" }  '
   foreign='{"schemaVersion":"other.writer/v9","attemptId":"not-ours","note":"foreign writer"}'
   printf '%s\n' "$legacy" "$foreign" > "$ledger"
+  n=3
+  while [ "$n" -le 34 ]; do
+    printf '{"legacyIndex":%s}\n' "$n" >> "$ledger"
+    n=$((n + 1))
+  done
   chmod 0600 "$ledger"
   run_intake "$home" sheet-a "$(intake_payload)" >/dev/null || fail "a foreign schema version blocked intake"
   [ "$(sed -n '1p' "$ledger")" = "$legacy" ] || fail "legacy bytes were rewritten"
@@ -255,8 +346,8 @@ test_legacy_lossless_and_read_only_sheets() {
     [ "$(shasum -a 256 "$ledger" | awk '{print $1}')" = "$checksum" ] || fail "$format sheet changed the ledger"
   done
   result=$(FM_HOME="$home" "$TELEMETRY" sheet --format json)
-  printf '%s' "$result" | jq -e '.[0].recordType=="legacy" and .[0].legacyRaw.task=="old" and .[1].recordType=="legacy" and .[1].legacyRaw.schemaVersion=="other.writer/v9" and .[2].recordType=="attempt"' >/dev/null || fail "JSON sheet did not project legacy, foreign-schema, and V1 rows"
-  attempt=$(printf '%s' "$result" | jq -r '.[2].attemptId')
+  printf '%s' "$result" | jq -e 'length==35 and (map(select(.recordType=="legacy"))|length)==34 and .[0].legacyRaw.task=="old" and .[1].legacyRaw.schemaVersion=="other.writer/v9" and .[33].legacyRaw.legacyIndex==34 and .[34].recordType=="attempt"' >/dev/null || fail "JSON sheet did not project all 34 legacy rows unchanged alongside V1"
+  attempt=$(printf '%s' "$result" | jq -r '.[34].attemptId')
   printf '%s' "$attempt" | grep -Eq '^mra_' || fail "sheet attempt projection missing id"
   empty_home="$TMP_ROOT/read-only-empty/home"
   mkdir -p "$empty_home/data"
@@ -272,5 +363,6 @@ test_reseal_after_explicit_terminal_never_deadlocks
 test_caller_attempt_outranks_a_diverging_receipt
 test_missing_intake_requires_ledger_repair
 test_validation_privacy_and_private_files
+test_mechanical_quality_cost_and_exploration_projection
 test_legacy_lossless_and_read_only_sheets
 printf 'All model telemetry tests passed.\n'

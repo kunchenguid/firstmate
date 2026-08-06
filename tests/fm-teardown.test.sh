@@ -88,6 +88,9 @@ exit 0
 SH
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = capture-pane ]; then
+  printf '%s\n' "${FM_FAKE_TMUX_CAPTURE:-}"
+fi
 # tmux kill-window etc.: succeed silently.
 exit 0
 SH
@@ -120,6 +123,9 @@ SH
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
+  stats)
+    printf '%s\n' "${FM_FAKE_NM_STATS:-}"
+    ;;
   axi)
     shift
     case "${1:-}" in
@@ -1922,6 +1928,44 @@ steps[1]{step,status,findings,summary}:
 EOF
 }
 
+terminal_axi_status_toon() {  # <branch> <head> <outcome> [run-id]
+  cat <<EOF
+run:
+  id: "${4:-01RUN}"
+  branch: $1
+  status: completed
+  head: "$2"
+  pr: ""
+  findings: none
+outcome: $3
+EOF
+}
+
+# One review fix cycle whose follow-up also re-ran document: review and document
+# each ran a second round, so this is two step reruns, not two correction cycles.
+step_rerun_stats_table() {
+  cat <<'EOF'
+run 01RUN (completed)
+STEP      ROUND  PURPOSE     AGENT
+review    1      review      claude
+review    2      review-fix  claude
+review    2      review      claude
+document  1      document    claude
+document  2      document    claude
+
+EOF
+}
+
+# A stats build whose per-step table this teardown cannot read: the header is
+# there but no step row follows it, so the step-rerun count stays unknown.
+unreadable_stats_table() {
+  cat <<'EOF'
+run 01RUN (completed)
+STEP      ROUND  PURPOSE     AGENT
+
+EOF
+}
+
 # Land a shippable commit on the task branch and push it to origin, the same
 # "definitely landed, teardown must ALLOW" shape test_no_mistakes_origin_remote_allows
 # uses, so these new cases exercise the abort/reap steps on a real successful
@@ -2486,6 +2530,60 @@ seed_teardown_telemetry() {
   printf 'telemetry_task_root=%s\n' "$(printf '%s' "$result" | jq -r .taskRootId)" >> "$case_dir/state/task-x1.meta"
 }
 
+test_teardown_derives_quality_and_cost_from_observable_facts() {
+  local case_dir terminal ledger head sheet stderr
+  case_dir=$(make_case telemetry-mechanical-scoreboard)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'harness=pi\n' >> "$case_dir/state/task-x1.meta"
+  land_shippable_commit "$case_dir"
+  seed_teardown_telemetry "$case_dir" || fail "could not seed mechanical teardown telemetry"
+  printf 'failed: prose must not classify the routing outcome\n' > "$case_dir/state/task-x1.status"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  terminal='{"classification":"failed","refusalQuality":"not-applicable","endedAt":"2026-08-02T00:01:00Z","wallSeconds":60,"firstPassAccepted":false,"correctionCount":99,"interventionCount":0,"evidence":{"tests":"fail","reviewer":"not-run","oracle":"not-run","refs":[]},"outcomeLink":{"kind":"commit","id":"caller-prose"},"usage":{"inputTokens":null,"outputTokens":null,"cost":999,"currency":"USD"},"primaryFailureClass":"capability","flags":{"tool":false,"transport":false,"environment":false,"externalWait":false,"scopeChange":false,"quota":false},"reclassification":{"fromTaskClass":null,"toTaskClass":null,"reasonCodes":["none"],"escalated":false}}'
+  stderr="$case_dir/seal.err"
+  # shellcheck disable=SC2016 # Literal dollar spend is a captured harness fixture.
+  FM_FAKE_AXI_STATUS="$(terminal_axi_status_toon fm/task-x1 "$head" passed)" \
+  FM_FAKE_NM_STATS="$(step_rerun_stats_table)" \
+  FM_FAKE_TMUX_CAPTURE='↑109k ↓2.9k R383k CH87.9% $0.728 (sub) 38.5%/272k (auto) (openai-codex) gpt-5.6-sol • low' \
+    FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" run_teardown "$case_dir" --terminal-payload "$terminal" >/dev/null 2>"$stderr" || fail "mechanical telemetry teardown failed"
+  ledger="$case_dir/data/routing-outcomes.jsonl"
+  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="accepted" and .terminal.firstPassAccepted==false and .terminal.correctionCount==2 and .terminal.gateFacts=={source:"no-mistakes",result:"green",stepReruns:2} and .terminal.evidence.tests=="pass" and .terminal.usage.cost==null and .terminal.usage.currency==null and .terminal.outcomeLink.id!="caller-prose")' "$ledger" >/dev/null || fail "prose overrode gate quality or the step-rerun count, or a token-derived pane figure was recorded as spend"
+  assert_grep "terminal-payload was not recorded" "$stderr" \
+    "teardown silently discarded the superseded --terminal-payload"
+  sheet=$(FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" "$TELEMETRY" sheet --format json) || fail "mechanical telemetry sheet failed"
+  printf '%s' "$sheet" | jq -e '.[0].quality=="accepted-after-step-reruns" and .[0].stepReruns==2 and .[0].costReported==false and .[0].cost==null and .[0].costPerAcceptedDelivery==null and .[0].wallSeconds>=0' >/dev/null || fail "sheet omitted mechanical quality or speed, or reported an unbacked cost"
+  pass "teardown seals quality from gate facts, leaves cost absent, and says when a payload was superseded"
+}
+
+test_teardown_keeps_a_green_gate_accepted_and_a_cancelled_gate_distinct() {
+  local case_dir ledger head sheet
+  case_dir=$(make_case telemetry-green-without-step-rerun-counts)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  seed_teardown_telemetry "$case_dir" || fail "could not seed green-gate teardown telemetry"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  FM_FAKE_AXI_STATUS="$(terminal_axi_status_toon fm/task-x1 "$head" passed)" \
+  FM_FAKE_NM_STATS="$(unreadable_stats_table)" \
+    FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" run_teardown "$case_dir" >/dev/null || fail "green-gate teardown failed"
+  ledger="$case_dir/data/routing-outcomes.jsonl"
+  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="accepted" and .terminal.correctionCount==null and .terminal.firstPassAccepted==null and .terminal.gateFacts=={source:"no-mistakes",result:"green",stepReruns:null})' "$ledger" >/dev/null || fail "an accepted delivery whose step-rerun count was unreadable was downgraded instead of recorded with an unknown count"
+  sheet=$(FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" "$TELEMETRY" sheet --format json) || fail "green-gate sheet failed"
+  printf '%s' "$sheet" | jq -e '.[0].quality=="accepted-step-reruns-unknown"' >/dev/null || fail "sheet did not report the accepted delivery with an unknown step-rerun count"
+
+  case_dir=$(make_case telemetry-cancelled-gate)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  seed_teardown_telemetry "$case_dir" || fail "could not seed cancelled-gate teardown telemetry"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  FM_FAKE_AXI_STATUS="$(terminal_axi_status_toon fm/task-x1 "$head" cancelled)" \
+    FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" run_teardown "$case_dir" >/dev/null || fail "cancelled-gate teardown failed"
+  ledger="$case_dir/data/routing-outcomes.jsonl"
+  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="cancelled")' "$ledger" >/dev/null || fail "a cancelled run was not sealed as cancelled"
+  sheet=$(FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" "$TELEMETRY" sheet --format json) || fail "cancelled-gate sheet failed"
+  printf '%s' "$sheet" | jq -e '.[0].quality=="cancelled"' >/dev/null || fail "sheet scored a cancelled run as a model quality failure"
+  pass "an unreadable step-rerun count keeps a green gate accepted and a cancelled run stays distinct from failed"
+}
+
 test_teardown_seals_explicit_terminal_and_missing_as_incomplete() {
   local case_dir terminal ledger rc
   terminal='{"classification":"accepted","refusalQuality":"not-applicable","endedAt":"2026-08-02T00:01:00Z","wallSeconds":60,"firstPassAccepted":true,"correctionCount":0,"interventionCount":0,"evidence":{"tests":"pass","reviewer":"not-run","oracle":"not-run","refs":[{"kind":"test","id":"teardown-suite"}]},"outcomeLink":{"kind":"commit","id":"0123456789abcdef"},"usage":{"inputTokens":null,"outputTokens":null,"cost":null,"currency":null},"primaryFailureClass":"none","flags":{"tool":false,"transport":false,"environment":false,"externalWait":false,"scopeChange":false,"quota":false},"reclassification":{"fromTaskClass":null,"toTaskClass":null,"reasonCodes":["none"],"escalated":false}}'
@@ -2500,7 +2598,7 @@ test_teardown_seals_explicit_terminal_and_missing_as_incomplete() {
   write_meta "$case_dir" local-only ship
   seed_teardown_telemetry "$case_dir" || fail "could not seed incomplete teardown telemetry"
   FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" run_teardown "$case_dir" --force >/dev/null || fail "teardown incomplete seal failed"
-  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="incomplete" and .terminal.endedAt==null and .terminal.wallSeconds==null)' "$case_dir/data/routing-outcomes.jsonl" >/dev/null || fail "teardown inferred a terminal result instead of incomplete"
+  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="incomplete" and .terminal.endedAt!=null and .terminal.wallSeconds>=0 and .terminal.gateFacts.result=="incomplete" and .terminal.usage.cost==null)' "$case_dir/data/routing-outcomes.jsonl" >/dev/null || fail "teardown did not record an explicit incomplete result with absent spend"
 
   case_dir=$(make_case telemetry-safety-refusal)
   write_meta "$case_dir" local-only ship
@@ -2510,7 +2608,7 @@ test_teardown_seals_explicit_terminal_and_missing_as_incomplete() {
   FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" run_teardown "$case_dir" >/dev/null 2>&1 || rc=$?
   [ "$rc" -ne 0 ] || fail "unlanded work unexpectedly passed teardown"
   [ "$(jq -s 'map(select(.eventType=="attempt-terminal"))|length' "$case_dir/data/routing-outcomes.jsonl")" -eq 0 ] || fail "teardown sealed telemetry before its safety gates passed"
-  pass "teardown seals explicit terminal evidence and otherwise records null-timed incomplete before cleanup"
+  pass "teardown seals explicit terminal evidence and otherwise records a timed incomplete before cleanup"
 }
 
 test_forced_teardown_still_requires_ledger_repair() {
@@ -2552,6 +2650,8 @@ test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
+test_teardown_derives_quality_and_cost_from_observable_facts
+test_teardown_keeps_a_green_gate_accepted_and_a_cancelled_gate_distinct
 test_teardown_seals_explicit_terminal_and_missing_as_incomplete
 test_forced_teardown_still_requires_ledger_repair
 test_squash_merged_branch_deleted_allows
