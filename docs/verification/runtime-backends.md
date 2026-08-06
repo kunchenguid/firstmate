@@ -424,7 +424,7 @@ FM_SEND_MARKER_HERDR_E2E=1 \
 
 ### Native blocked event
 
-The protocol-16 event path was measured on 2026-07-11 with Herdr 0.7.3 and Python 3.13:
+The protocol-16 event path was remeasured on 2026-08-04 with Herdr 0.7.5 and Python 3.13:
 
 ```sh
 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
@@ -434,9 +434,16 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 Observed output:
 
 ```text
-ok - real herdr: events.subscribe capability gate passes
-ok - real herdr: a driven idle->blocked transition returns the blocked record in 0.129s
-ok - real herdr: the watcher fast-path enqueues a stale wake naming the task window
+ok - real herdr (herdr 0.7.5): events.subscribe capability gate passes (protocol >= 16, events surface present in api schema)
+ok - real herdr (herdr 0.7.5): a driven idle->blocked transition returns the blocked record in 0.068s (pane w1:p2)
+ok - real herdr (herdr 0.7.5): the watcher fast-path enqueues a stale wake naming the task window, and its blocked-on-human detail is recognized by the shared classifier that exempts it from status-line dedupe
+```
+
+The third assertion is the away daemon's dedupe exemption measured on a live payload rather than a hand-built one.
+Diverging only the consumer (`stale_detail_is_blocked_on_human` demanding a token the producer never emits) fails it against the real record:
+
+```text
+not ok - the away daemon's shared recognizer rejects the detail a live herdr blocked transition produced: 'herdr: agent blocked - waiting on human, escalated immediately, not via wedge timer'
 ```
 
 Polling remained active and is covered as the fallback for capability, connect, subscribe, and repeated reader failure.

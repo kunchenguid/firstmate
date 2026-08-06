@@ -141,6 +141,45 @@ status_is_paused_or_captain_held() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
 }
 
+# --- backend-pushed blocked-on-human stale wakes ----------------------------
+#
+# A push-capable backend can report an agent-state edge to `blocked` - the
+# harness stopped for a human prompt (a permission dialog, a trust prompt, an
+# interactive menu). bin/fm-transition-lib.sh's policy table is the one owner of
+# that classification, and the producer already applies EDGE-triggered dedupe on
+# agent state: one wake per `->blocked` edge, cleared by the next `->working`
+# edge. The wake therefore arrives pre-deduplicated, and the ordinary stale
+# path's STATUS-LINE dedupe must not be layered on top of it. A task correctly
+# parked on a captain decision has an unchanged terminal status line by
+# definition, so keying on status text absorbs every block after the first and
+# the worker waits on a prompt nobody sees. Keying a second time on agent state
+# would duplicate the producer's dedupe in a second owner instead.
+#
+# The two functions below are the ONE owner of that wake's detail grammar: the
+# producer builds the detail with stale_detail_blocked_on_human and every
+# consumer recognizes it with stale_detail_is_blocked_on_human, so neither side
+# spells the text itself and a reworded producer cannot silently stop being
+# exempt. The invariant suffix carries the meaning; the backend and agent-state
+# prefix is telemetry for the reader.
+FM_CLASSIFY_BLOCKED_ON_HUMAN_DETAIL='waiting on human, escalated immediately, not via wedge timer'
+
+# Build the stale-wake detail for a backend-pushed blocked-on-human edge.
+stale_detail_blocked_on_human() {  # <backend> <agent-state>
+  printf '%s: agent %s - %s' "$1" "$2" "$FM_CLASSIFY_BLOCKED_ON_HUMAN_DETAIL"
+}
+
+# 0 if a stale wake's parenthesized detail is a backend-pushed blocked-on-human
+# edge. Suffix-anchored on the invariant above so an ordinary wedge detail, a
+# window name, or an empty detail never matches.
+stale_detail_is_blocked_on_human() {  # <stale-detail>
+  local detail=$1
+  [ -n "$detail" ] || return 1
+  case "$detail" in
+    *"$FM_CLASSIFY_BLOCKED_ON_HUMAN_DETAIL") return 0 ;;
+  esac
+  return 1
+}
+
 # --- durable keyed decisions ------------------------------------------------
 #
 # The status stream is an append-only EVENT log. Reading it last-event-wins
