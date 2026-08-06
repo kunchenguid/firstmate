@@ -30,7 +30,7 @@ It takes `--source <name>` when the adapter knows the source natively, and other
 This deliberately inverts the previous nudge matcher, which fired on `startup|resume|clear` and excluded `compact`.
 Compaction is now covered because a compacted session has lost exactly the digest it needs, and resume is now excluded from the run because it restores that digest instead of losing it.
 
-The lock and `state/.session-start-complete` together are the idempotency interlock for the whole scheme.
+Current harness ownership of the lock and its matching `state/.session-start-complete` record together are the idempotency interlock for the whole scheme.
 The full digest clears that completion record after acquiring the lock and republishes the lock owner's pid only after every stage completes, so `clear` or `compact` cannot skip startup sweeps after a truncated run.
 `bin/fm-lock.sh` already treats a lock this session's own harness holds as its own, so a proven `clear` or `compact` re-emit re-verifies ownership and proceeds, while a lock another live session took meanwhile still produces the ordinary read-only digest.
 On a run-tier harness the nudge cannot also fire: `resume`, `reload`, and `fork` are the only sources routed to it, and on those its own ancestry check stays silent whenever this process already holds the lock.

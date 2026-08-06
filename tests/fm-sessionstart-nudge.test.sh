@@ -229,6 +229,26 @@ test_run_clear_without_completion_finishes_startup() {
   pass "run wrapper: clear falls back to full startup when completion is unproven"
 }
 
+test_run_clear_rejects_previous_owner_completion() {
+  local root="$TMP_ROOT/run-clear-previous-owner" out status=0 previous_pid
+  make_run_primary "$root"
+  sleep 0 &
+  previous_pid=$!
+  wait "$previous_pid"
+  printf '%s\n' "$previous_pid" > "$root/state/.lock"
+  printf '%s\n' "$previous_pid" > "$root/state/.session-start-complete"
+
+  out=$(run_hook "$root" --source clear </dev/null) || status=$?
+  expect_code 0 "$status" "run wrapper clear with previous owner completion"
+  assert_contains "$out" "$FULL_BANNER$root" \
+    "clear treated a previous session's completion as current"
+  assert_not_contains "$out" "$REEMIT_BANNER" \
+    "clear skipped startup sweeps completed only by a previous session"
+  [ "$(cat "$root/state/.lock")" != "$previous_pid" ] \
+    || fail "the recovery startup did not replace the previous session's stale lock"
+  pass "run wrapper: clear accepts completion only from the current harness"
+}
+
 test_pi_large_sessionstart_digest_is_delivered_loudly() {
   local fixture out status=0
   command -v node >/dev/null 2>&1 || {
@@ -365,6 +385,7 @@ test_opencode_plugin_delivers_exact_nudge_once
 test_run_startup_runs_the_full_digest
 test_run_clear_and_compact_reemit
 test_run_clear_without_completion_finishes_startup
+test_run_clear_rejects_previous_owner_completion
 test_run_resume_delegates_to_the_nudge
 test_run_reads_source_from_the_hook_payload
 test_run_unknown_source_takes_the_helm

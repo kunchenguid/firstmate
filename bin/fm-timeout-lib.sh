@@ -45,8 +45,8 @@ fm_run_timed() {  # <seconds> <command...>
   local seconds=$1
   shift
   case "$(fm_timeout_mechanism)" in
-    timeout) timeout --kill-after=1 "$seconds" "$@" ;;
-    gtimeout) gtimeout --kill-after=1 "$seconds" "$@" ;;
+    timeout) timeout -k 1 "$seconds" "$@" ;;
+    gtimeout) gtimeout -k 1 "$seconds" "$@" ;;
     perl)
       perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
         "$seconds" "$@"

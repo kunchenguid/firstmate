@@ -1276,15 +1276,16 @@ EOF
   pass "an over-budget session start emits its completed stages, names what it never reached, and exits 0"
 }
 
-test_coreutils_timeout_escalates_term_resistant_process() {
-  local fakebin="$TMP_ROOT/coreutils-kill-after" driver status=0
+test_portable_timeout_escalates_term_resistant_process() {
+  local fakebin="$TMP_ROOT/portable-kill-after" driver status=0
   mkdir -p "$fakebin"
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
 set -u
 kill_after=
 case "${1:-}" in
-  --kill-after=*) kill_after=${1#--kill-after=}; shift ;;
+  -k) kill_after=${2:-}; shift 2 ;;
+  *) exit 64 ;;
 esac
 seconds=${1:-}
 shift
@@ -1300,7 +1301,7 @@ wait "$child" 2>/dev/null || true
 exit 124
 SH
   chmod +x "$fakebin/timeout"
-  driver="$TMP_ROOT/coreutils-kill-after-driver.sh"
+  driver="$TMP_ROOT/portable-kill-after-driver.sh"
   cat > "$driver" <<'SH'
 #!/usr/bin/env bash
 . "$1"
@@ -1318,8 +1319,8 @@ SH
     exit($? >> 8);
   ' env PATH="$fakebin:$BASE_PATH" "$driver" "$ROOT/bin/fm-timeout-lib.sh" || status=$?
 
-  expect_code 124 "$status" "coreutils timeout TERM-resistant escalation"
-  pass "the coreutils timeout path force-kills a command that ignores TERM"
+  expect_code 124 "$status" "portable timeout TERM-resistant escalation"
+  pass "the portable timeout path force-kills a command that ignores TERM"
 }
 
 test_runtime_bound_leaves_a_healthy_digest_untouched() {
@@ -1721,7 +1722,7 @@ test_pi_diagnostic_accepts_prelock_loaded_marker
 test_pi_diagnostic_rejects_missing_turnend_guard_marker
 test_pi_diagnostic_rejects_previous_session_loaded_marker
 test_runtime_bound_truncates_loudly_and_exits_zero
-test_coreutils_timeout_escalates_term_resistant_process
+test_portable_timeout_escalates_term_resistant_process
 test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
