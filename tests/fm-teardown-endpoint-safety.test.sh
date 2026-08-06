@@ -126,7 +126,8 @@ test_supported_backend_endpoint_records_validate() {
   id=orca-task
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
-    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" "orca_worktree_id=worktree-9"
+    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+    "orca_worktree_id=repo-9::/tmp/orca-worktree-9"
   fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid Orca endpoint refused"
   [ "$FM_BACKEND_VALIDATED_TARGET" = term-7 ] || fail "Orca validation did not select its terminal"
 
@@ -144,6 +145,38 @@ test_supported_backend_endpoint_records_validate() {
     [ "$target" -ne 0 ] || fail "$backend generic kill accepted an empty target"
   done
   pass "cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses"
+}
+
+test_orca_composite_endpoint_records_refuse_malformed_identity() {
+  local dir id=endpoint-a case_name worktree_id
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-backend.sh"
+
+  dir=$(make_case valid-orca-composite)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-composite" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    "backend=orca" "orca_worktree_id=repo-composite::/tmp/orca-worktree"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" \
+    || fail "well-formed composite Orca identity refused"
+
+  for case_name in missing-separator relative-path repeated-separator invalid-repo empty-path; do
+    dir=$(make_case "invalid-orca-$case_name")
+    case "$case_name" in
+      missing-separator) worktree_id='repo-composite:/tmp/orca-worktree' ;;
+      relative-path) worktree_id='repo-composite::tmp/orca-worktree' ;;
+      repeated-separator) worktree_id='repo-composite::/tmp/orca-worktree::extra' ;;
+      invalid-repo) worktree_id='repo/composite::/tmp/orca-worktree' ;;
+      empty-path) worktree_id='repo-composite::' ;;
+    esac
+    fm_write_meta "$dir/home/state/$id.meta" \
+      "window=fm-$id" "endpoint_task_id=$id" "terminal=term-composite" \
+      "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+      "backend=orca" "orca_worktree_id=$worktree_id"
+    assert_refused_without_mutation "$dir" "$id" \
+      "Orca $case_name composite identity"
+  done
+  pass "Orca endpoint identity: accepts one repo-id plus absolute path and refuses malformed or ambiguous composites"
 }
 
 test_tmux_empty_target_refuses_without_invocation() {
@@ -270,6 +303,7 @@ SH
 
 test_invalid_endpoint_records_refuse_before_mutation
 test_supported_backend_endpoint_records_validate
+test_orca_composite_endpoint_records_refuse_malformed_identity
 test_tmux_empty_target_refuses_without_invocation
 test_recorded_process_identity_cleanup_is_exact
 test_isolated_tmux_invalid_and_valid_cleanup
