@@ -22,6 +22,19 @@
 # landing target; fm_landed_default_branch_name resolves only the NAME, and each
 # caller applies its own policy for which refs carrying that name to test.
 #
+# WHY THE FORK TRUNK NEEDS A REF OF ITS OWN
+# In the fetch/push split above, NEITHER conventional ref is the fork trunk once
+# the fork advances at the forge: origin/<name> is upstream, and the local
+# branch is the fork trunk only while something keeps fast-forwarding it. When
+# that lags, work provably merged into the fork reads as unlanded and holds its
+# slot forever. The default fetch refspec cannot reach the fork - it points at
+# the fetch URL - so the trunk is fetched from the PUSH url into a ref of its
+# own under refs/fm-landing/. That ref is a landing target only because this
+# fleet demonstrably pushes there; it is never inferred from a remote's name.
+# fm_landed_refresh_push_target does the network read and is called only by a
+# caller that already refreshes remotes, so the purely local guard path keeps
+# whatever the last refresh left behind and never grows a network dependency.
+#
 # EXIT STATUS IS THREE-VALUED, ON PURPOSE
 # fm_landed_tree_contains distinguishes "proven contained" from "proven not
 # contained" from "could not tell". Collapsing the last two loses the difference
@@ -75,14 +88,66 @@ fm_landed_default_branch_name() {  # <dir>
   return 1
 }
 
+# Normalize a remote URL for comparison: trailing slash and .git suffix only.
+# Deliberately not a URL parser - scheme/host differences are real differences.
+fm_landed_normalize_url() {  # <url>
+  local url=${1%/}
+  printf '%s\n' "${url%.git}"
+}
+
+# The url this repo PUSHES to when that differs from where `origin` FETCHES,
+# which is the fetch/push split described above and the layout firstmate itself
+# uses. Returns 1 when there is no origin or the two urls agree, which is every
+# ordinary single-remote repository and the conventional `upstream`-remote fork
+# layout - in both, origin/<name> already tracks what this repo pushes.
+fm_landed_push_url() {  # <dir>
+  local dir=$1 fetch push
+  fetch=$(git --no-optional-locks -C "$dir" remote get-url origin 2>/dev/null) || return 1
+  push=$(git --no-optional-locks -C "$dir" remote get-url --push origin 2>/dev/null) || return 1
+  [ "$(fm_landed_normalize_url "$fetch")" != "$(fm_landed_normalize_url "$push")" ] || return 1
+  printf '%s\n' "$push"
+}
+
+# The private ref holding the push remote's <name> trunk, or 1 when this repo
+# has no distinct push url. Naming it does not make it exist; a caller that
+# needs it populated calls fm_landed_refresh_push_target first, and a caller
+# that only reads local state tests it like any other candidate.
+fm_landed_push_target_ref() {  # <dir> <name>
+  fm_landed_push_url "$1" >/dev/null || return 1
+  printf 'refs/fm-landing/origin/%s\n' "$2"
+}
+
+# Refresh the push remote's trunk into that private ref. TOUCHES THE NETWORK, so
+# only a caller that already refreshes remotes should call it.
+# 0 when there was nothing to refresh (no distinct push url) or the refresh
+# succeeded; 1 when a distinct push url exists but its trunk could not be read.
+# A caller must treat that 1 as unverifiable and refuse: the landing target is
+# precisely the ref it could not read, so nothing it can still reach is evidence
+# that the work landed.
+fm_landed_refresh_push_target() {  # <dir> <name>
+  local dir=$1 name=$2 url ref
+  url=$(fm_landed_push_url "$dir") || return 0
+  ref=$(fm_landed_push_target_ref "$dir" "$name") || return 0
+  git -C "$dir" fetch --quiet "$url" "+refs/heads/$name:$ref" >/dev/null 2>&1 || return 1
+  return 0
+}
+
 # Every existing ref carrying <name> that could be a landing target, most-local
 # first, one per line. The local branch leads because the two fleet shapes above
-# both land there; a caller that needs the remote to win can reorder, and a
-# caller that needs BOTH tested reads the whole list. Empty output (non-zero)
-# means the name resolved but no ref carrying it exists.
+# both land there; the push remote's trunk follows, because on a fetch/push
+# split it is where work actually lands and the local branch only mirrors it
+# when something keeps that up to date; origin/<name> is last. A caller that
+# needs the remote to win can reorder, and a caller that needs ALL of them
+# tested reads the whole list. Empty output (non-zero) means the name resolved
+# but no ref carrying it exists.
 fm_landed_candidate_refs() {  # <dir> <name>
-  local dir=$1 name=$2 found=1 ref
-  for ref in "refs/heads/$name" "refs/remotes/origin/$name"; do
+  local dir=$1 name=$2 found=1 ref push_ref
+  local -a candidates=("refs/heads/$name")
+  if push_ref=$(fm_landed_push_target_ref "$dir" "$name"); then
+    candidates+=("$push_ref")
+  fi
+  candidates+=("refs/remotes/origin/$name")
+  for ref in "${candidates[@]}"; do
     if git --no-optional-locks -C "$dir" rev-parse --verify --quiet "$ref" >/dev/null 2>&1; then
       printf '%s\n' "$ref"
       found=0

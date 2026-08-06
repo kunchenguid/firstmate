@@ -8,9 +8,10 @@
 # is already in the up-to-date default branch.
 #
 # That last containment step is the shared instrument in bin/fm-landed-lib.sh.
-# Teardown keeps its own policy on top of it (refresh the remote first, and
-# measure against that remote whenever an origin exists), so these cases are the
-# regression coverage for changes to that library reaching the releaser of work.
+# Teardown keeps its own policy on top of it (refresh before measuring, and
+# measure the refreshed remote trunks whenever an origin exists, preferring the
+# trunk this fleet pushes to), so these cases are the regression coverage for
+# changes to that library reaching the releaser of work.
 #
 # Covers three fixes:
 #   - local-only fork-remote: a fork IS a remote, so fork-pushed upstream-
@@ -43,6 +44,11 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (u) fetch/push split + content squash-merged on FORK trunk  -> ALLOW  (fork-landing fix)
+#   (v) fetch/push split + work landed nowhere                  -> REFUSE (safety preserved)
+#   (w) fetch/push split + push url unreadable                  -> REFUSE (unresolvable target)
+#   (x) fetch/push split + content only on upstream trunk       -> ALLOW  (fallback intact)
+#   (y) single remote (no push split)                           -> ALLOW  (identical path)
 #   (z) spawn-written turn-end artifacts, no info/exclude       -> ALLOW  (firstmate's own)
 #   (aa) untracked crew file beside a turn-end artifact         -> REFUSE (exact-path allowlist)
 #
@@ -279,6 +285,35 @@ land_on_origin_main() {
   local case_dir=$1 file=$2 content=$3 tmp
   tmp="$case_dir/_land"
   git clone -q "$case_dir/origin.git" "$tmp"
+  printf '%s\n' "$content" > "$tmp/$file"
+  git -C "$tmp" add -- "$file"
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "squash $file"
+  git -C "$tmp" push -q origin HEAD:main
+  rm -rf "$tmp"
+}
+
+# Turn a case into the fetch/push split: `origin` keeps FETCHING origin.git but
+# PUSHES to a second bare repo, so refs/remotes/origin/main tracks a trunk this
+# fleet never lands on and NO ref follows the trunk it does. That is firstmate's
+# own layout (origin fetches kunchenguid/firstmate, pushes the sbracewell64
+# fork). Pass a url to point the push somewhere unreadable instead.
+add_fork_push_remote() {  # <case-dir> [push-url]
+  local case_dir=$1 push=${2:-}
+  if [ -z "$push" ]; then
+    git clone -q --bare "$case_dir/origin.git" "$case_dir/fork.git"
+    push="$case_dir/fork.git"
+  fi
+  git -C "$case_dir/project" remote set-url --push origin "$push"
+}
+
+# Land <file>=<content> as ONE new commit on the FORK trunk, which is what a
+# squash merge at the forge does: the content is in the trunk, and the branch's
+# own commits are ancestors of nothing there. This is the exact shape that held
+# a pool slot - content demonstrably landed, ancestry demonstrably broken.
+land_squashed_on_fork() {  # <case-dir> <file> <content>
+  local case_dir=$1 file=$2 content=$3 tmp
+  tmp="$case_dir/_forkland"
+  git clone -q "$case_dir/fork.git" "$tmp"
   printf '%s\n' "$content" > "$tmp/$file"
   git -C "$tmp" add -- "$file"
   git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "squash $file"
@@ -1032,6 +1067,123 @@ test_content_fallback_refreshes_stale_origin_ref() {
   expect_code 0 "$rc" "content-stale-ref: teardown should use the freshly fetched default branch"
   ! grep -q REFUSED "$case_dir/stderr" || fail "content-stale-ref: teardown printed a REFUSED line"
   pass "content fallback refreshes origin default before comparing trees"
+}
+
+# (u) THE DEFECT. Measured 2026-08-05: PR 44 squash-merged, the slot's HEAD
+# content byte-identical to the fork trunk, and teardown refused anyway because
+# every ref it measured belonged to a trunk this fleet does not land on.
+test_fork_split_content_landed_on_fork_trunk_allows() {
+  local case_dir rc
+  case_dir=$(make_case fork-split-landed)
+  add_fork_push_remote "$case_dir"
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_squashed_on_fork "$case_dir" feature.txt hello
+
+  # Assert the fixture really is the defect shape before trusting the verdict:
+  # the content IS on the fork trunk and is on NEITHER ref the old check read.
+  git -C "$case_dir/wt" fetch -q "$case_dir/fork.git" main
+  git -C "$case_dir/wt" diff --quiet FETCH_HEAD HEAD -- feature.txt \
+    || fail "fork-split-landed: fixture does not have the content on the fork trunk"
+  ! git -C "$case_dir/wt" merge-base --is-ancestor HEAD FETCH_HEAD \
+    || fail "fork-split-landed: fixture is a fast-forward, not the squash shape"
+  git -C "$case_dir/wt" rev-parse --quiet --verify refs/remotes/origin/main >/dev/null \
+    || fail "fork-split-landed: fixture has no origin/main to be wrong about"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "fork-split-landed: teardown should succeed when the fork trunk holds the content"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "fork-split-landed: teardown printed a REFUSED line"
+  pass "work squash-merged into the fork trunk is torn down though no tracking ref follows it"
+}
+
+# (v) The refusal this must never trade away. Same fetch/push split, same
+# absence of any ref tracking the fork trunk - but the work genuinely never
+# landed anywhere, so the widened target set must not launder it.
+test_fork_split_unlanded_work_still_refuses() {
+  local case_dir rc
+  case_dir=$(make_case fork-split-unlanded)
+  add_fork_push_remote "$case_dir"
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "unpushed work"
+  # The fork trunk advances, but with entirely unrelated content, so it is
+  # freshly readable and still does not contain this branch's work.
+  land_squashed_on_fork "$case_dir" unrelated.txt other
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "fork-split-unlanded: teardown should refuse genuinely unlanded work"
+  grep -q REFUSED "$case_dir/stderr" || fail "fork-split-unlanded: no REFUSED line in stderr"
+  pass "genuinely unlanded work is still refused on a fetch/push split"
+}
+
+# (w) An unresolvable landing target must stay a refusal. The push url exists
+# but cannot be read, so the trunk this fleet lands on goes unread - and the
+# content sitting on the UPSTREAM trunk must not stand in for that answer.
+test_fork_split_unreadable_push_url_refuses() {
+  local case_dir rc
+  case_dir=$(make_case fork-split-unreadable)
+  add_fork_push_remote "$case_dir" "$TMP_ROOT/fork-split-unreadable/nonexistent.git"
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  # Landed upstream, which pre-fix was the whole answer. It is not the fleet's
+  # landing target, so an unreadable fork trunk still refuses.
+  land_on_origin_main "$case_dir" feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "fork-split-unreadable: teardown should refuse when the landing target cannot be read"
+  grep -q REFUSED "$case_dir/stderr" || fail "fork-split-unreadable: no REFUSED line in stderr"
+  pass "an unreadable landing target refuses rather than falling back to the upstream answer"
+}
+
+# (x) The upstream answer is not lost, only demoted: a readable fork trunk that
+# does not carry the content still falls through to the upstream trunk.
+test_fork_split_content_only_on_upstream_allows() {
+  local case_dir rc
+  case_dir=$(make_case fork-split-upstream)
+  add_fork_push_remote "$case_dir"
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "fork-split-upstream: teardown should still accept content landed upstream"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "fork-split-upstream: teardown printed a REFUSED line"
+  pass "content landed on the upstream trunk is still accepted when the fork trunk is readable"
+}
+
+# (y) An ordinary single-remote repository must take the identical path: no
+# push url to diverge, so no landing ref is named, fetched, or measured.
+test_single_remote_repo_names_no_landing_ref() {
+  local case_dir rc
+  case_dir=$(make_case single-remote-unchanged)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "single-remote-unchanged: teardown should succeed exactly as before"
+  [ -z "$(git -C "$case_dir/project" for-each-ref --format='%(refname)' refs/fm-landing/)" ] \
+    || fail "single-remote-unchanged: a landing ref was created for a repository with no push split"
+  pass "an ordinary single-remote repository names no landing ref and is unaffected"
 }
 
 test_dirty_worktree_refuses() {
@@ -2886,6 +3038,11 @@ test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
+test_fork_split_content_landed_on_fork_trunk_allows
+test_fork_split_unlanded_work_still_refuses
+test_fork_split_unreadable_push_url_refuses
+test_fork_split_content_only_on_upstream_allows
+test_single_remote_repo_names_no_landing_ref
 test_dirty_worktree_refuses
 test_spawn_turnend_artifacts_are_not_dirty_work
 test_untracked_work_beside_turnend_artifacts_refuses
