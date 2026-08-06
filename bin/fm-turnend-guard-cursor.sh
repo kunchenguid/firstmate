@@ -73,6 +73,9 @@ SESSION=$(printf '%s' "$PAYLOAD" | jq -r '
   elif (.session_id | type) == "string" and .session_id != "" then .session_id
   else empty end
 ' 2>/dev/null) || SESSION=
+if [ -z "$SESSION" ] && [ -n "${CURSOR_CONVERSATION_ID:-}" ]; then
+  SESSION=$CURSOR_CONVERSATION_ID
+fi
 if [ -z "$SESSION" ]; then
   SESSION_CONTEXT=$(printf '%s' "$PAYLOAD" | jq -r '
     if type != "object" then ""
