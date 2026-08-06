@@ -1153,6 +1153,13 @@ task_status_is_own_parked_run() {  # <worktree> <axi-status-output>
   run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$out" branch)")
   [ -n "$run_branch" ] && [ "$run_branch" = "$branch" ] || return 1
   run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$out" head)")
+  # Three-valued (bin/fm-nm-run-lib.sh): only a positive code-identity MATCH
+  # authorizes aborting this run. Both non-zero verdicts - a bound head that is
+  # not ours, and a head this worktree cannot resolve at all - decline, so
+  # teardown never aborts a run it cannot positively attribute. That direction
+  # is deliberate and unchanged by the three-value split: the cost of declining
+  # is a run left parked for firstmate to see, and the cost of guessing is
+  # killing another crew's live validation.
   fm_nm_head_matches_worktree "$wt" "$run_head" || return 1
   outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$out" outcome)")
   [ -z "$outcome" ] || return 1

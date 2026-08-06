@@ -1290,6 +1290,135 @@ test_local_advanced_past_run_head_invalidates() {
   pass "local work advanced past run head invalidates attribution"
 }
 
+# A commit made in a SEPARATE clone of <worktree>: a real descendant of that
+# worktree's HEAD whose object the worktree has never fetched, which is exactly
+# what a no-mistakes pipeline fix commit is before the push step. Echoes a sha
+# that is genuinely unresolvable from <worktree>.
+unpushed_pipeline_tip() {  # <worktree> -> echoes an absent sha
+  local wt=$1 gate sha
+  case "$wt" in "$TMP_ROOT"/*) ;; *) fail "unpushed_pipeline_tip: $wt is outside $TMP_ROOT" ;; esac
+  gate="$wt.gate-clone"
+  git clone -q "$wt" "$gate" 2>/dev/null || fail "could not clone a gate repo from $wt"
+  git -C "$gate" commit -q --allow-empty -m 'pipeline fix commit'
+  sha=$(git -C "$gate" rev-parse HEAD)
+  git -C "$wt" cat-file -e "${sha}^{commit}" 2>/dev/null \
+    && fail "fixture is not honest: $sha is already reachable from $wt"
+  printf '%s\n' "$sha"
+}
+
+# Head-binding, coarse path: THE 2026-08-06 defect. A lane mid-validation has a
+# live run whose tip lives only in no-mistakes' gate-repo clone, and an older,
+# genuinely failed run still sitting at the worktree's own head. Reading the
+# unresolvable live tip as "not mine" skipped the live row and handed the answer
+# to the stale failed one, reporting a working lane as dead.
+test_unresolvable_live_tip_never_loses_to_stale_failed_row() {
+  reset_fakes
+  local d short tip out
+  d=$(new_case unpushed-tip-coarse)
+  make_repo_on_branch "$d/wt" fm/wedge-aging
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  tip=$(unpushed_pipeline_tip "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/wedge.meta" "window=fm:fm-wedge" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementation committed, validating\n' > "$d/state/wedge.status"
+  # Repo-wide answer belongs to another crew, so attribution goes coarse.
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-06 14:10
+  running    fm/wedge-aging ${tip:0:7}  2026-08-06 14:05
+  failed     fm/wedge-aging ${short}  2026-08-05 09:00
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" wedge
+  out=$(run_crew_state "$d" wedge)
+  assert_not_contains "$out" "state: failed" "an older failed row must never answer for a live run"
+  assert_contains "$out" "state: working" "the branch's live run is still working"
+  assert_contains "$out" "source: run-step" "the live coarse row is attributed"
+  pass "an unresolvable live run tip never loses attribution to a stale failed row"
+}
+
+# Head-binding, primary path: the same pre-push tip reported by `axi status` for
+# this crew's OWN branch. An active run on our branch is ours regardless of
+# whether its tip is visible yet, and it must not be handed to the coarse scan.
+test_unresolvable_active_tip_on_own_branch_is_attributed() {
+  reset_fakes
+  local d short tip out
+  d=$(new_case unpushed-tip-primary)
+  make_repo_on_branch "$d/wt" fm/feat-prepush
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  tip=$(unpushed_pipeline_tip "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/prepush.meta" "window=fm:fm-prepush" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: fix round under way\n' > "$d/state/prepush.status"
+  FM_FAKE_RUN_HEAD="$tip"
+  FM_FAKE_AXI_STATUS="$(run_fixing fm/feat-prepush)"
+  # A stale failed row at the worktree's own head, to prove the coarse scan is
+  # not consulted at all once the live run is attributed.
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  failed     fm/feat-prepush ${short}  2026-08-05 09:00
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" prepush
+  out=$(run_crew_state "$d" prepush)
+  assert_not_contains "$out" "state: failed" "a pre-push tip must not read as a failed run"
+  assert_contains "$out" "state: working" "an active run on this branch is working"
+  assert_contains "$out" "source: run-step" "the active run is authoritative"
+  pass "an active run on this branch with an unresolvable tip is attributed, not rejected"
+}
+
+# The other direction of the three-value discipline: a TERMINAL run whose head
+# cannot be bound to this worktree is not evidence about this worktree's current
+# code, so its verdict is never repeated. Unknown must not become failed.
+test_unresolvable_terminal_head_does_not_report_terminal_verdict() {
+  reset_fakes
+  local d tip out
+  d=$(new_case unbindable-terminal)
+  make_repo_on_branch "$d/wt" fm/feat-term
+  tip=$(unpushed_pipeline_tip "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/term.meta" "window=fm:fm-term" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: stage 2 under way\n' > "$d/state/term.status"
+  FM_FAKE_RUN_HEAD="$tip"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-term)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" term
+  out=$(run_crew_state "$d" term)
+  assert_not_contains "$out" "state: failed" "an unbindable terminal run must not be repeated as a verdict"
+  assert_not_contains "$out" "source: run-step" "an unbindable terminal run is not attributed"
+  assert_contains "$out" "source: status-log" "falls back to current-state sources instead"
+  assert_contains "$out" "state: working" "the crew's own current state stands"
+  pass "a terminal run whose head cannot be bound never becomes a terminal verdict"
+}
+
+# Same discipline on the coarse row: "a run is active on this branch" is
+# answerable without resolving the tip, but a FINISHED row's verdict is not -
+# binding its head is the only thing that could have tied it to this worktree.
+test_unresolvable_terminal_coarse_row_is_not_attributed() {
+  reset_fakes
+  local d tip out
+  d=$(new_case unbindable-terminal-coarse)
+  make_repo_on_branch "$d/wt" fm/feat-termcoarse
+  tip=$(unpushed_pipeline_tip "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/termc.meta" "window=fm:fm-termc" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: stage 2 under way\n' > "$d/state/termc.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  failed     fm/feat-termcoarse ${tip:0:7}  2026-08-05 09:00
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" termc
+  out=$(run_crew_state "$d" termc)
+  assert_not_contains "$out" "state: failed" "an unbindable finished row must not become a verdict"
+  assert_not_contains "$out" "source: run-step" "an unbindable finished row is not attributed"
+  assert_contains "$out" "state: working" "the crew's own current state stands"
+  pass "an unbindable finished coarse row is not attributed either"
+}
+
 test_missing_run_head_falls_back_to_current_state() {
   reset_fakes
   local d out
@@ -1358,5 +1487,9 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
+test_unresolvable_live_tip_never_loses_to_stale_failed_row
+test_unresolvable_active_tip_on_own_branch_is_attributed
+test_unresolvable_terminal_head_does_not_report_terminal_verdict
+test_unresolvable_terminal_coarse_row_is_not_attributed
 
 echo "all fm-crew-state tests passed"
