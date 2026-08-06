@@ -169,6 +169,81 @@ fm_write_secondmate_meta() {
     "projects=$projects"
 }
 
+# --- stub relay -------------------------------------------------------------
+#
+# fm_test_make_stub_bifrost <dir> writes a `bifrost` into <dir> that implements
+# only the two shapes bin/fm-relay-lib.sh uses, against this filesystem:
+#   `remote ... exec --shell-text "<verb> <args>"` runs the verb HERE, with an
+#     EMPTY environment - the same condition the real policy layer imposes, and
+#     the one that would otherwise let a test pass because it inherited FM_HOME
+#     from the caller;
+#   `remote ... file write|hash|download|delete` copies within this filesystem.
+# Both machines are then real directories, so every cross-machine call in a test
+# goes through the real client, the real argument allowlist, and the real verb.
+fm_test_make_stub_bifrost() {  # <dir>
+  local dir=$1
+  mkdir -p "$dir"
+  cat > "$dir/bifrost" <<'SH'
+#!/usr/bin/env bash
+# Stub Bifrost. Only the two shapes bin/fm-relay-lib.sh uses are implemented.
+set -u
+mode=; text=; prev=; sub=; fargs=()
+for a in "$@"; do
+  case "$prev" in
+    --shell-text) text=$a ;;
+  esac
+  case "$a" in
+    exec) [ -z "$mode" ] && mode=exec ;;
+    file) [ -z "$mode" ] && mode=file ;;
+  esac
+  if [ "$mode" = file ] && [ "$a" != file ]; then
+    if [ -z "$sub" ]; then
+      case "$a" in write|hash|download|delete) sub=$a ;; esac
+    else
+      fargs+=("$a")
+    fi
+  fi
+  prev=$a
+done
+hash_of() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+  else sha256sum "$1" | awk '{print $1}'; fi
+}
+case "$mode" in
+  exec)
+    [ -n "$text" ] || { echo "stub: no shell text" >&2; exit 2; }
+    # An EMPTY environment, exactly like the policy layer: no HOME, no FM_HOME,
+    # nothing the caller happened to export. PATH is the one concession, because
+    # the real target has a login PATH the verb then replaces from its config.
+    env -i PATH="$PATH" bash -c "$text"
+    exit $?
+    ;;
+  file)
+    case "$sub" in
+      write)
+        dest=${fargs[0]}; src=
+        i=0
+        while [ "$i" -lt "${#fargs[@]}" ]; do
+          [ "${fargs[$i]}" = "--from-local" ] && src=${fargs[$((i+1))]}
+          i=$((i+1))
+        done
+        mkdir -p "$(dirname "$dest")"
+        cp "$src" "$dest"
+        ;;
+      hash) printf 'sha256: %s\n' "$(hash_of "${fargs[0]}")" ;;
+      download) cp "${fargs[0]}" "${fargs[1]}" ;;
+      delete) rm -f "${fargs[0]}" ;;
+      *) echo "stub: unsupported file op '$sub'" >&2; exit 2 ;;
+    esac
+    exit 0
+    ;;
+esac
+echo "stub: unsupported bifrost call: $*" >&2
+exit 2
+SH
+  chmod +x "$dir/bifrost"
+}
+
 # --- common assertions ------------------------------------------------------
 
 # assert_contains <haystack> <needle> <msg>

@@ -42,21 +42,73 @@
 # own hand-editing of its own backlog, not this validated helper. Idempotent:
 # re-running converges. Atomic: on any move failure nothing moves.
 # See AGENTS.md project management and task lifecycle.
+#
+# A secondmate whose registry entry carries `machine:` has its home - and its
+# backlog - on ANOTHER machine, while the main backlog is here. The move is then
+# genuinely two-sided and runs in one fixed order:
+#   1. `tasks-axi mv` the selected items out of the main backlog into a private
+#      staging fragment under state/<id>.backlog-handoff. Atomic, and the same
+#      block semantics as any other move.
+#   2. Ship the fragment and ask that machine to run ITS OWN copy of this script
+#      with --from-file, so the destination proof, the queued-only rule, and the
+#      atomic landing all happen where the destination backlog actually is.
+#   3. On success remove the fragment; on failure `tasks-axi mv` it back.
+# INSERT REMOTELY, THEN DELETE LOCALLY is the whole safety argument: a failure
+# after the remote landing leaves a duplicate, which the next run skips as
+# already-present, whereas the other order would lose the item outright. A crash
+# between the two leaves the fragment on disk and named in the error.
+#
+#   fm-backlog-handoff.sh <id> --from-file <fragment> [<item-key>...]
+# is the receiving half: it moves items out of <fragment> rather than the main
+# backlog. With no keys it takes every queued item in the fragment, which is
+# what the fragment is - the exact set the sending side already selected. It is
+# not a general-purpose flag: every validation above still applies.
 # Usage: fm-backlog-handoff.sh <secondmate-id> <item-key>...
+#        fm-backlog-handoff.sh <secondmate-id> --from-file <fragment> [<item-key>...]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 REG="$DATA/secondmates.md"
 MAIN_BACKLOG="$DATA/backlog.md"
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 
-[ $# -ge 2 ] || { echo "usage: fm-backlog-handoff.sh <secondmate-id> <item-key>..." >&2; exit 1; }
+usage() {
+  echo "usage: fm-backlog-handoff.sh <secondmate-id> <item-key>..." >&2
+  echo "       fm-backlog-handoff.sh <secondmate-id> --from-file <fragment> [<item-key>...]" >&2
+}
+
+[ $# -ge 2 ] || { usage; exit 1; }
 ID=$1
 shift
+FROM_FILE=
+KEYS=()
+want_from=0
+for arg in "$@"; do
+  if [ "$want_from" -eq 1 ]; then
+    FROM_FILE=$arg
+    want_from=0
+    continue
+  fi
+  case "$arg" in
+    --from-file) want_from=1 ;;
+    --from-file=*) FROM_FILE=${arg#--from-file=} ;;
+    --*) echo "error: unexpected argument '$arg'" >&2; usage; exit 1 ;;
+    *) KEYS+=("$arg") ;;
+  esac
+done
+[ "$want_from" -eq 0 ] || { echo "error: --from-file requires a path" >&2; exit 1; }
+if [ -n "$FROM_FILE" ]; then
+  [ -f "$FROM_FILE" ] || { echo "error: no backlog fragment at $FROM_FILE" >&2; exit 1; }
+  MAIN_BACKLOG=$FROM_FILE
+elif [ "${#KEYS[@]}" -eq 0 ]; then
+  usage
+  exit 1
+fi
 
 secondmate_home() {
   local id=$1 line
@@ -68,6 +120,40 @@ secondmate_home() {
   # ^[^(]* would leave those entries looking like "has no home". Greedy prefix so the
   # last (home: ...) on the line wins. Empty when the field is absent.
   printf '%s\n' "$line" | sed -n 's/.*(home:[[:space:]]*\([^;)]*\);.*/\1/p' | sed 's/[[:space:]]*$//'
+}
+
+# The optional machine: field. Empty means the home is on this machine, which is
+# every entry a single-machine home ever writes.
+secondmate_machine() {
+  local id=$1 line
+  [ -f "$REG" ] || return 0
+  line=$(grep -E "^- $id( |$)" "$REG" | tail -1 || true)
+  [ -n "$line" ] || return 0
+  printf '%s\n' "$line" | sed -n 's/.*;[[:space:]]*machine:[[:space:]]*\([^;)]*\);.*/\1/p' | sed 's/[[:space:]]*$//'
+}
+
+# Every queued item header in a file, in order. Used only for the receiving half
+# of a cross-machine handoff, where the fragment IS the selection the sending
+# side already made and validated.
+queued_keys_in() {
+  local file=$1
+  awk '
+    BEGIN { section = "## Queued" }
+    /^##[[:space:]]+/ {
+      section = $0
+      sub(/^##[[:space:]]+/, "## ", section)
+      sub(/[[:space:]]+$/, "", section)
+      next
+    }
+    /^- \[[ x]\] / {
+      if (section != "## Queued") next
+      rest = $0
+      sub(/^- \[[ x]\] +/, "", rest)
+      id = rest
+      sub(/[ \t].*/, "", id)
+      print id
+    }
+  ' "$file"
 }
 
 path_is_ancestor_of() {
@@ -229,12 +315,31 @@ backlog_key_noncanonical_body_lines() {
   ' "$file"
 }
 
+MACHINE=$(secondmate_machine "$ID")
+if [ -n "$MACHINE" ] && [ -n "$FROM_FILE" ]; then
+  echo "error: --from-file lands a fragment in a home on THIS machine, but secondmate $ID is registered on $MACHINE" >&2
+  exit 1
+fi
 RAW_HOME=$(secondmate_home "$ID") || exit 1
 [ -n "$RAW_HOME" ] || { echo "error: secondmate $ID has no home in $REG" >&2; exit 1; }
-SUB_HOME=$(validate_secondmate_home "$ID" "$RAW_HOME") || exit 1
-SUB_BACKLOG="$SUB_HOME/data/backlog.md"
+SUB_HOME=
+SUB_BACKLOG=
+if [ -z "$MACHINE" ]; then
+  SUB_HOME=$(validate_secondmate_home "$ID" "$RAW_HOME") || exit 1
+  SUB_BACKLOG="$SUB_HOME/data/backlog.md"
+  validate_backlog_file "secondmate backlog" "$SUB_BACKLOG" || exit 1
+fi
 validate_backlog_file "main backlog" "$MAIN_BACKLOG" || exit 1
-validate_backlog_file "secondmate backlog" "$SUB_BACKLOG" || exit 1
+
+# The fragment IS the selection the sending side already made, so no key list
+# has to travel with it.
+if [ -n "$FROM_FILE" ] && [ "${#KEYS[@]}" -eq 0 ]; then
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    KEYS+=("$key")
+  done < <(queued_keys_in "$FROM_FILE")
+  [ "${#KEYS[@]}" -gt 0 ] || { echo "error: the backlog fragment at $FROM_FILE holds no queued item" >&2; exit 1; }
+fi
 
 # Classify every key before changing anything: move-from-main, already-in-sub, or
 # missing. Abort with no changes if any key matches neither backlog.
@@ -244,8 +349,12 @@ MISSING=()
 IN_FLIGHT=()
 DONE=()
 NOT_QUEUED=()
-for key in "$@"; do
-  if backlog_key_section "$SUB_BACKLOG" "$key" >/dev/null; then
+for key in "${KEYS[@]}"; do
+  # The already-present check needs the destination backlog, which for a home on
+  # another machine is over there. It is not skipped, only deferred: the peer
+  # runs this same script against its own destination and reports the same
+  # already-present skip, which is also what makes a retried handoff idempotent.
+  if [ -z "$MACHINE" ] && backlog_key_section "$SUB_BACKLOG" "$key" >/dev/null; then
     ALREADY+=("$key")
   elif section=$(backlog_key_section "$MAIN_BACKLOG" "$key"); then
     case "$section" in
@@ -282,7 +391,7 @@ if [ "$FAILED" -ne 0 ]; then
 fi
 
 if [ "${#TO_MOVE[@]}" -eq 0 ]; then
-  echo "nothing to move: ${ALREADY[*]:-no keys} already present in $SUB_BACKLOG"
+  echo "nothing to move: ${ALREADY[*]:-no keys} already present in ${SUB_BACKLOG:-the secondmate backlog}"
   exit 0
 fi
 
@@ -301,6 +410,45 @@ fi
 
 if ! fm_tasks_axi_compatible; then
   echo "error: tasks-axi with atomic multi-ID mv support (0.2.2+) is required to move backlog items" >&2
+  exit 1
+fi
+
+# --- cross-machine handoff ---------------------------------------------------
+#
+# Move out to a private fragment, land the fragment over there, and only then
+# drop the fragment. See the header for why that order, and only that order, is
+# safe across a link.
+if [ -n "$MACHINE" ]; then
+  mkdir -p "$STATE"
+  FRAGMENT="$STATE/$ID.backlog-handoff"
+  if [ -e "$FRAGMENT" ]; then
+    echo "error: a previous handoff fragment is still at $FRAGMENT" >&2
+    echo "       inspect it: its items are in neither backlog, so either land it with bin/fm-relay-host.sh backlog-mv $ID $FRAGMENT or move them back with tasks-axi mv ... --file $FRAGMENT --to $MAIN_BACKLOG" >&2
+    exit 1
+  fi
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$FRAGMENT"
+  if ! MV_OUT=$(tasks-axi mv "${TO_MOVE[@]}" --file "$MAIN_BACKLOG" --to "$FRAGMENT" 2>&1); then
+    rm -f "$FRAGMENT"
+    [ -z "$MV_OUT" ] || printf '%s\n' "$MV_OUT" >&2
+    echo "error: tasks-axi mv failed; nothing was moved." >&2
+    exit 1
+  fi
+  if RELAY_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$FM_ROOT/bin/fm-relay-host.sh" backlog-mv "$ID" "$FRAGMENT" 2>&1); then
+    rm -f "$FRAGMENT"
+    printf 'handed off %d item(s) to %s on %s: %s\n' "${#TO_MOVE[@]}" "$ID" "$MACHINE" "${TO_MOVE[*]}"
+    printf '%s\n' "$RELAY_OUT"
+    exit 0
+  fi
+  printf '%s\n' "$RELAY_OUT" >&2
+  if BACK_OUT=$(tasks-axi mv "${TO_MOVE[@]}" --file "$FRAGMENT" --to "$MAIN_BACKLOG" 2>&1); then
+    rm -f "$FRAGMENT"
+    echo "error: $MACHINE refused or could not take the handoff; the items were put back in $MAIN_BACKLOG and nothing moved." >&2
+    exit 1
+  fi
+  [ -z "$BACK_OUT" ] || printf '%s\n' "$BACK_OUT" >&2
+  echo "error: $MACHINE refused or could not take the handoff, AND the items could not be put back." >&2
+  echo "       they are in neither backlog right now; they are all in $FRAGMENT, which is intact." >&2
   exit 1
 fi
 

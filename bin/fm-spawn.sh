@@ -3,6 +3,7 @@
 # secondmate in its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--launch <variant>] [--backend <name>] [--scout]
 #        fm-spawn.sh --host <name> <task-id> <project-name-on-host> [--harness <name>] [--model <name>] [--effort <level>] [--scout]
+#        fm-spawn.sh --host <name> <secondmate-id> --secondmate [--harness <name>] [--model <name>] [--effort <level>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--launch <variant>] [--backend <name>] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
@@ -93,8 +94,14 @@
 #   and returns. Arm the wake path afterwards with bin/fm-relay-check-make.sh,
 #   because a remote crewmate's status file and turn-end marker live on ITS
 #   machine and this home's signal scan cannot see them. --host is mutually
-#   exclusive with --secondmate, --backend, and --launch, and WITHOUT --host not
+#   exclusive with --backend and --launch, and WITHOUT --host not
 #   one byte of the local path changes (bin/fm-relay-host.sh, docs/relay-host.md).
+#   --host --secondmate <id> launches a PERSISTENT secondmate in a home that
+#   machine already holds, provisioned by bin/fm-home-seed.sh <id> - --machine
+#   <host>. It takes no project positional (a secondmate's subject is its home)
+#   and moves no backlog row (a secondmate is not a backlog item). Re-running it
+#   for a live id is the documented recovery respawn, so it is not refused for
+#   having metadata already; the host's own spawn owns duplicate-agent safety.
 #   Exit 3 means a GUI-capable host declined for a reason that passes - locked
 #   screen, no desktop host session, or asleep and unable to answer. The task is
 #   NOT live and NOT lost: it is queued and its wake check is armed here, so it
@@ -149,7 +156,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,102p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,115p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -262,18 +269,30 @@ esac
 # the trust-dialog handling all happen locally over there rather than being
 # reimplemented across the link (bin/fm-relay-host.sh, docs/relay-host.md).
 if [ "$HOST_SET" -eq 1 ]; then
-  [ "$KIND" != secondmate ] || { echo "error: --host does not support --secondmate spawns" >&2; exit 1; }
   [ "$BACKEND_SET" -eq 0 ] || { echo "error: --backend selects a LOCAL session provider and cannot combine with --host" >&2; exit 1; }
   [ "$LAUNCH_SET" -eq 0 ] || { echo "error: --launch names a local launch variant and cannot combine with --host" >&2; exit 1; }
-  [ "${#POS[@]}" -ge 2 ] || { echo "error: --host needs <task-id> <project-name-on-host>" >&2; exit 1; }
+  # A secondmate takes no project positional: its subject is its home, which
+  # bin/fm-home-seed.sh --machine already provisioned on that machine with the
+  # charter in it. Everything else about the dispatch is the ordinary remote
+  # path, because the host runs its own bin/fm-spawn.sh either way.
+  if [ "$KIND" = secondmate ]; then
+    [ "${#POS[@]}" -ge 1 ] || { echo "error: --host --secondmate needs <secondmate-id>" >&2; exit 1; }
+  else
+    [ "${#POS[@]}" -ge 2 ] || { echo "error: --host needs <task-id> <project-name-on-host>" >&2; exit 1; }
+  fi
   HOST_ID=${POS[0]}
   # Same task-id gate as the local path below, deliberately identical in check,
   # message, and exit code. A remote task still gets a state/<id>.meta here, so a
   # dot-leading name would write a HIDDEN record that every "$STATE"/*.meta glob
   # skips, leaving a live remote task nothing on this side can find or steer.
   fm_task_id_creation_valid "$HOST_ID" || { echo "error: invalid task id" >&2; exit 2; }
-  HOST_PROJECT=${POS[1]}
-  host_spawn_args=("$HOST_ARG" "$HOST_ID" "$HOST_PROJECT")
+  host_spawn_args=("$HOST_ARG" "$HOST_ID")
+  if [ "$KIND" = secondmate ]; then
+    host_spawn_args+=(--secondmate)
+  else
+    HOST_PROJECT=${POS[1]}
+    host_spawn_args+=("$HOST_PROJECT")
+  fi
   [ "$KIND" = scout ] && host_spawn_args+=(--scout)
   [ -z "$HARNESS_ARG" ] || host_spawn_args+=(--harness "$HARNESS_ARG")
   [ -z "$MODEL" ] || host_spawn_args+=(--model "$MODEL")
@@ -312,7 +331,9 @@ if [ "$HOST_SET" -eq 1 ]; then
   printf '%s\n' "$host_out"
   # Same durable backlog transition the local path makes below; a failure here is
   # reported, never fatal, because the task is already live on the host.
-  if [ -f "$DATA/backlog.md" ] && command -v tasks-axi >/dev/null 2>&1; then
+  # A secondmate is not a backlog item in any home, so it is skipped here for
+  # exactly the reason backlog_mark_started skips it locally.
+  if [ "$KIND" != secondmate ] && [ -f "$DATA/backlog.md" ] && command -v tasks-axi >/dev/null 2>&1; then
     (cd "$FM_HOME" && tasks-axi start "$HOST_ID" --file "$DATA/backlog.md" >/dev/null 2>&1) \
       || echo "warning: $HOST_ID is live on $HOST_ARG but data/backlog.md was not moved to In progress" >&2
   fi
@@ -716,7 +737,11 @@ secondmate_registry_value() {
   [ -n "$line" ] || return 1
   case "$key" in
     home) value=$(printf '%s\n' "$line" | sed -n 's/^[^(]*(home: \([^;)]*\);.*/\1/p') ;;
-    projects) value=$(printf '%s\n' "$line" | sed -n 's/^[^(]*(home: [^;)]*; scope: [^;)]*; projects: \([^;)]*\); added .*/\1/p') ;;
+    machine) value=$(printf '%s\n' "$line" | sed -n 's/.*;[[:space:]]*machine:[[:space:]]*\([^;)]*\);.*/\1/p') ;;
+    # Anchored on the projects: field itself rather than on the exact sequence of
+    # fields before it, so the optional machine: field between home: and scope:
+    # does not silently make every remote entry look like it has no projects.
+    projects) value=$(printf '%s\n' "$line" | sed -n 's/.*; projects: \([^;)]*\); added .*/\1/p') ;;
     *) return 1 ;;
   esac
   [ -n "$value" ] || return 1
@@ -1054,6 +1079,18 @@ fi
 RESOLVED_LAUNCH_VARIANT=$(resolve_launch_variant "$HARNESS") || exit 1
 
 if [ "$KIND" = secondmate ]; then
+  # A home on another machine is refused here by name rather than by symptom.
+  # Without this the remote path below is entered with a path that does not
+  # exist on this filesystem, and the failure reads as a broken home instead of
+  # a command sent to the wrong machine.
+  SM_MACHINE=$(secondmate_registry_value "$ID" machine || true)
+  if [ -z "$SM_MACHINE" ] && [ -f "$STATE/$ID.meta" ]; then
+    SM_MACHINE=$(grep '^host=' "$STATE/$ID.meta" | tail -1 | cut -d= -f2- || true)
+  fi
+  if [ -n "$SM_MACHINE" ]; then
+    echo "error: secondmate $ID lives on $SM_MACHINE; launch it there with bin/fm-spawn.sh --host $SM_MACHINE $ID --secondmate" >&2
+    exit 1
+  fi
   if [ -z "$FIRSTMATE_HOME" ] && [ -f "$STATE/$ID.meta" ]; then
     FIRSTMATE_HOME=$(grep '^home=' "$STATE/$ID.meta" | cut -d= -f2- || true)
   fi

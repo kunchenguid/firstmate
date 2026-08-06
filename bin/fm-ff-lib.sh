@@ -231,6 +231,11 @@ dirty_status() {
   fi
 }
 
+# Read one field out of a data/secondmates.md entry. `machine` is optional and
+# names the FLEET MACHINE the home lives on; an entry without it is a home on
+# this machine, which is every entry a single-machine home ever writes.
+# The optional field sits between home: and scope:, which leaves the home: and
+# projects: patterns below unchanged for an entry that does not carry it.
 secondmate_registry_field() {
   local reg=$1 id=$2 key=$3 line value
   [ -f "$reg" ] || return 1
@@ -238,6 +243,7 @@ secondmate_registry_field() {
   [ -n "$line" ] || return 1
   case "$key" in
     home) value=$(printf '%s\n' "$line" | sed -n 's/.*(home:[[:space:]]*\([^;)]*\);.*/\1/p' | sed 's/[[:space:]]*$//') ;;
+    machine) value=$(printf '%s\n' "$line" | sed -n 's/.*;[[:space:]]*machine:[[:space:]]*\([^;)]*\);.*/\1/p' | sed 's/[[:space:]]*$//') ;;
     projects) value=$(printf '%s\n' "$line" | sed -n 's/.*; projects:[[:space:]]*\([^;)]*\); added .*/\1/p' | sed 's/[[:space:]]*$//') ;;
     *) return 1 ;;
   esac
@@ -248,9 +254,13 @@ secondmate_registry_field() {
 # List this home's LIVE secondmate direct reports from state/<id>.meta records.
 # The meta file is the liveness signal; data/secondmates.md is only the fallback
 # for durable fields such as home= when an older/incomplete meta lacks them.
-# Output is pipe-delimited: id|home|window|meta-file.
+# Output is pipe-delimited: id|home|window|meta-file|machine.
+# machine is empty for a home on THIS machine and names the fleet machine
+# otherwise, read from the meta's own host= line (the same field every other
+# cross-machine reader follows) and falling back to the registry's machine: for
+# a record that predates or lacks it.
 live_secondmate_meta_records() {
-  local state=$1 registry=${2:-} meta id home window
+  local state=$1 registry=${2:-} meta id home window machine
   [ -d "$state" ] || return 0
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] || continue
@@ -260,8 +270,12 @@ live_secondmate_meta_records() {
     if [ -z "$home" ] && [ -n "$registry" ]; then
       home=$(secondmate_registry_field "$registry" "$id" home || true)
     fi
+    machine=$(grep '^host=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    if [ -z "$machine" ] && [ -n "$registry" ]; then
+      machine=$(secondmate_registry_field "$registry" "$id" machine || true)
+    fi
     window=$(grep '^window=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-    printf '%s|%s|%s|%s\n' "$id" "$home" "$window" "$meta"
+    printf '%s|%s|%s|%s|%s\n' "$id" "$home" "$window" "$meta" "$machine"
   done
 }
 
@@ -380,16 +394,26 @@ FF_SEEN_HOMES=""
 # Validate and fast-forward one secondmate home, accumulating its stable
 # fm-<id> task selector into FF_NUDGE_WINDOWS when it should be live-converged.
 # Args:
-#   id home window base_mode nudge_requires_instr
+#   id home window base_mode nudge_requires_instr [machine]
 # A home is nudged only when it ACTUALLY advanced (FF_STATUS=updated) and has a
 # live window. With nudge_requires_instr=yes the advance must also have changed
 # the instruction surface (FF_INSTR non-empty): an already-current home, or one
 # whose only change was non-instruction tracked files, is left undisturbed. The
 # firstmate repo itself (FM_ROOT) is never processed as its own secondmate, and
 # each resolved home is processed at most once.
+#
+# A non-empty machine means the home lives on ANOTHER machine, and this function
+# returns immediately and silently. That early return is the whole point: every
+# step below - resolve_path, validate_secondmate_home, git -C - reads the LOCAL
+# filesystem at that path, so without it a remote home is at best reported as
+# "not a directory" at every session start, and at worst a same-named local
+# directory is mistaken for it and advanced. The peer advances its own checkout
+# through its own /updatefirstmate, which is the same rule that keeps this
+# machine from reaching into a peer's worktrees anywhere else.
 process_secondmate() {
-  local id=$1 home=$2 window=${3:-} base_mode=$4 nudge_requires_instr=${5:-no} home_real fm_root_real
+  local id=$1 home=$2 window=${3:-} base_mode=$4 nudge_requires_instr=${5:-no} machine=${6:-} home_real fm_root_real
   [ -n "$id" ] || return 0
+  [ -z "$machine" ] || return 0
   [ -n "$home" ] || return 0
   fm_root_real=$(resolve_path "$FM_ROOT")
   home_real=$(resolve_path "$home")
@@ -423,9 +447,9 @@ process_secondmate() {
 # FF_NUDGE_WINDOWS / FF_SEEN_HOMES, which the caller resets before and reads after.
 # The registry argument is only for home= fallback on older or incomplete meta records.
 sweep_live_secondmate_metas() {
-  local state=$1 base_mode=$2 nudge_requires_instr=${3:-no} registry=${4:-$FM_HOME/data/secondmates.md} id home window meta
+  local state=$1 base_mode=$2 nudge_requires_instr=${3:-no} registry=${4:-$FM_HOME/data/secondmates.md} id home window meta machine
   [ -d "$state" ] || return 0
-  while IFS='|' read -r id home window meta; do
-    process_secondmate "$id" "$home" "$window" "$base_mode" "$nudge_requires_instr"
+  while IFS='|' read -r id home window meta machine; do
+    process_secondmate "$id" "$home" "$window" "$base_mode" "$nudge_requires_instr" "$machine"
   done < <(live_secondmate_meta_records "$state" "$registry")
 }

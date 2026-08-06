@@ -26,9 +26,26 @@
 #       when no filled charter brief exists. Set FM_SECONDMATE_SCOPE='<scope>'
 #       to override the registry routing scope. Otherwise the registry summary
 #       and scope are derived from the filled charter brief.
+#   fm-home-seed.sh <id> - --machine <host> {<project>...|--no-projects}
+#       Provision the home on a REMOTE fleet machine registered in
+#       config/relay-hosts.json instead of here. The home spec must be "-": a
+#       remote secondmate home is the same object as a local one, a firstmate
+#       worktree leased on that machine with "treehouse get --lease", so there is
+#       no second layout to keep in step. Nothing about the seed happens here.
+#       The filled charter brief and a short spec are staged into that machine's
+#       exchange area and it runs its OWN fm-home-seed.sh, so the transactional
+#       seed, the rollback, the home validation, the .fm-secondmate-home marker,
+#       the project-clone restrictions, and the no-mistakes initialization all
+#       run on the filesystem that owns the home. Its project names are that
+#       machine's project names. What is written here is one routing entry
+#       carrying "machine: <host>", which is what every local sweep reads to know
+#       the home is not on this filesystem. Requires a filled charter brief at
+#       data/<id>/brief.md, or FM_SECONDMATE_CHARTER to generate one.
 #   fm-home-seed.sh validate
 #       Refuse duplicate ids, duplicate homes, and nested or overlapping homes in
-#       data/secondmates.md.
+#       data/secondmates.md. Home identity is (machine, path): two machines may
+#       legitimately hold the same path, and the same path on the same machine is
+#       still exactly one home.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,11 +62,44 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
+  echo "       fm-home-seed.sh <id> - --machine <host> {<project>...|--no-projects}" >&2
   echo "       fm-home-seed.sh validate" >&2
 }
 
 registry_home_for_line() {
   sed -n 's/^[^(]*(home: \([^;)]*\);.*/\1/p'
+}
+
+# The optional machine: field, which sits between home: and scope:. Empty for
+# every entry a single-machine home writes, so the patterns above are unchanged.
+registry_machine_for_line() {
+  sed -n 's/.*;[[:space:]]*machine:[[:space:]]*\([^;)]*\);.*/\1/p'
+}
+
+# The identity of a registered home, for the duplicate and overlap checks.
+#
+# A home is identified by (machine, path), not by path alone. Two machines of one
+# fleet legitimately hold the same path - a leased firstmate worktree lands under
+# the same pool layout on each of them - so comparing paths alone would refuse a
+# perfectly good second home, or worse, accept a genuine duplicate on one machine
+# because the strings differed only by a symlink this machine cannot resolve.
+# A local path is canonicalized against this filesystem, exactly as before. A
+# remote path is NOT: it names a directory on another machine, and resolving it
+# here would silently answer with whatever happens to sit at that path locally.
+registry_home_key() {  # <machine> <home>
+  local machine=$1 home=$2
+  if [ -n "$machine" ]; then
+    printf '%s:%s\n' "$machine" "${home%/}"
+  else
+    resolved_path "$home"
+  fi
+}
+
+# Whether two home keys overlap - one containing the other. Only meaningful
+# within one machine, which the shared prefix already guarantees because a key
+# carries its machine.
+home_keys_overlap() {  # <key-a> <key-b>
+  path_is_ancestor_of "$1" "$2" || path_is_ancestor_of "$2" "$1"
 }
 
 normalize_registry_text() {
@@ -180,9 +230,9 @@ path_is_ancestor_of() {
 }
 
 registry_home_conflict_for_assignment() {
-  local id=$1 home=$2 target line registered_id registered_home registered_key
+  local id=$1 home=$2 machine=${3:-} target line registered_id registered_home registered_machine registered_key
   [ -f "$REG" ] || return 1
-  target=$(resolved_path "$home")
+  target=$(registry_home_key "$machine" "$home")
   while IFS= read -r line; do
     case "$line" in
       "- "*)
@@ -190,13 +240,14 @@ registry_home_conflict_for_assignment() {
         registered_id=${registered_id%% *}
         registered_home=$(printf '%s\n' "$line" | registry_home_for_line)
         [ -n "$registered_home" ] || continue
-        registered_key=$(resolved_path "$registered_home")
+        registered_machine=$(printf '%s\n' "$line" | registry_machine_for_line)
+        registered_key=$(registry_home_key "$registered_machine" "$registered_home")
         if [ "$registered_key" = "$target" ]; then
           [ "$registered_id" = "$id" ] && continue
           printf 'exact\t%s\t%s\n' "$registered_id" "$registered_key"
           return 0
         fi
-        if path_is_ancestor_of "$registered_key" "$target" || path_is_ancestor_of "$target" "$registered_key"; then
+        if home_keys_overlap "$registered_key" "$target"; then
           printf 'overlap\t%s\t%s\n' "$registered_id" "$registered_key"
           return 0
         fi
@@ -207,9 +258,9 @@ registry_home_conflict_for_assignment() {
 }
 
 registry_id_conflict_for_assignment() {
-  local id=$1 home=$2 target line registered_id registered_home registered_key
+  local id=$1 home=$2 machine=${3:-} target line registered_id registered_home registered_machine registered_key
   [ -f "$REG" ] || return 1
-  target=$(resolved_path "$home")
+  target=$(registry_home_key "$machine" "$home")
   while IFS= read -r line; do
     case "$line" in
       "- "*)
@@ -218,7 +269,8 @@ registry_id_conflict_for_assignment() {
         [ "$registered_id" = "$id" ] || continue
         registered_home=$(printf '%s\n' "$line" | registry_home_for_line)
         [ -n "$registered_home" ] || continue
-        registered_key=$(resolved_path "$registered_home")
+        registered_machine=$(printf '%s\n' "$line" | registry_machine_for_line)
+        registered_key=$(registry_home_key "$registered_machine" "$registered_home")
         [ "$registered_key" = "$target" ] && continue
         printf '%s\n' "$registered_key"
         return 0
@@ -229,7 +281,7 @@ registry_id_conflict_for_assignment() {
 }
 
 validate_registry() {
-  local tmp line id registered_home home_key duplicate_homes duplicate_ids overlaps
+  local tmp line id registered_home registered_machine home_key duplicate_homes duplicate_ids overlaps
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-firstmates.XXXXXX")
   if [ -f "$REG" ]; then
     while IFS= read -r line; do
@@ -239,7 +291,8 @@ validate_registry() {
           id=${id%% *}
           registered_home=$(printf '%s\n' "$line" | registry_home_for_line)
           [ -n "$registered_home" ] || continue
-          home_key=$(resolved_path "$registered_home")
+          registered_machine=$(printf '%s\n' "$line" | registry_machine_for_line)
+          home_key=$(registry_home_key "$registered_machine" "$registered_home")
           printf '%s\t%s\n' "$home_key" "$id" >> "$tmp"
           ;;
       esac
@@ -511,20 +564,23 @@ verify_firstmate_home() {
 }
 
 validate_home_assignment() {
-  local id=$1 home=$2 marker_id id_conflict conflict conflict_type owner registered_home
-  if [ -f "$home/$SUB_HOME_MARKER" ]; then
+  local id=$1 home=$2 machine=${3:-} marker_id id_conflict conflict conflict_type owner registered_home
+  # The identity marker lives on the machine that holds the home, so it is
+  # checked there. For a remote assignment the peer's own seed makes that check
+  # against the real file; here only the registry questions can be answered.
+  if [ -z "$machine" ] && [ -f "$home/$SUB_HOME_MARKER" ]; then
     marker_id=$(cat "$home/$SUB_HOME_MARKER" 2>/dev/null || true)
     if [ "$marker_id" != "$id" ]; then
       echo "error: secondmate home $home is already marked for ${marker_id:-unknown}" >&2
       return 1
     fi
   fi
-  id_conflict=$(registry_id_conflict_for_assignment "$id" "$home" || true)
+  id_conflict=$(registry_id_conflict_for_assignment "$id" "$home" "$machine" || true)
   if [ -n "$id_conflict" ]; then
     echo "error: secondmate id $id is already registered to home $id_conflict; retire it before assigning $home" >&2
     return 1
   fi
-  conflict=$(registry_home_conflict_for_assignment "$id" "$home" || true)
+  conflict=$(registry_home_conflict_for_assignment "$id" "$home" "$machine" || true)
   [ -n "$conflict" ] || return 0
   IFS=$'\t' read -r conflict_type owner registered_home <<EOF
 $conflict
@@ -798,18 +854,22 @@ initialize_no_mistakes_project() {
 }
 
 write_registry() {
-  local id=$1 home=$2 projects_csv=$3 brief=$4 scope summary tmp today
+  local id=$1 home=$2 projects_csv=$3 brief=$4 machine=${5:-} scope summary tmp today machine_field
   mkdir -p "$DATA"
   scope=$(registry_scope_for_brief "$brief")
   summary=$(registry_summary_for_brief "$brief")
   today=$(date +%F)
+  # Omitted entirely for a home on this machine, so a single-machine registry
+  # keeps writing the exact line it always wrote.
+  machine_field=""
+  [ -z "$machine" ] || machine_field=" machine: $machine;"
   tmp="$REG.tmp.$$"
   if [ -f "$REG" ]; then
     grep -vE "^- $id( |$)" "$REG" > "$tmp" || true
   else
     : > "$tmp"
   fi
-  printf -- '- %s - %s (home: %s; scope: %s; projects: %s; added %s)\n' "$id" "$summary" "$home" "$scope" "$projects_csv" "$today" >> "$tmp"
+  printf -- '- %s - %s (home: %s;%s scope: %s; projects: %s; added %s)\n' "$id" "$summary" "$home" "$machine_field" "$scope" "$projects_csv" "$today" >> "$tmp"
   mv "$tmp" "$REG"
 }
 
@@ -867,20 +927,137 @@ refuse_projectful_projectless_charter() {
   return 1
 }
 
+# Provision the home on another fleet machine.
+#
+# This function performs NO seeding. Everything that touches a home - leasing the
+# worktree, cloning projects, writing the marker, initializing no-mistakes,
+# rolling all of it back on failure - happens on the machine that owns the
+# filesystem, running its own copy of this script. What is done here is the part
+# only the control plane can do: prove the charter is filled, ask that machine to
+# seed, and record one routing entry. That split is why there is no second
+# seeding implementation to keep in step with this one.
+#
+# Failure ordering is deliberate. The peer seeds transactionally and rolls its
+# own work back, so a failed seed leaves nothing behind there and only the
+# charter this side may have generated behind here. The one case that cannot be
+# undone from here is a registry write that fails AFTER the peer seeded: the home
+# exists and this side cannot route to it, so that is reported loudly with the
+# exact command to retire it, never swallowed.
+seed_home_remote() {
+  local id=$1 machine=$2 no_projects=$3
+  shift 3
+  local brief brief_created=0 brief_dir_created=0 out rc home projects_csv conflict
+  local seed_args=()
+
+  validate_registry
+  # A registered id is refused outright rather than compared against the target
+  # home, because there is no target home yet: the peer leases a FRESH worktree,
+  # so a second seed for an id that already has one leaks a home on that machine
+  # with nothing routing to it. The local path can compare because its home is
+  # named up front.
+  if [ -f "$REG" ] && grep -qE "^- $id( |$)" "$REG"; then
+    echo "error: secondmate id $id is already registered in $REG; retire it before seeding a home on $machine" >&2
+    return 1
+  fi
+
+  brief="$DATA/$id/brief.md"
+  if [ ! -f "$brief" ]; then
+    [ -n "${FM_SECONDMATE_CHARTER:-}" ] || {
+      echo "error: no filled secondmate charter brief at $brief; set FM_SECONDMATE_CHARTER or scaffold one and replace {TASK}" >&2
+      return 1
+    }
+    [ -d "$DATA/$id" ] || brief_dir_created=1
+    if [ "$no_projects" -eq 1 ]; then
+      "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects
+    else
+      "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate "$@"
+    fi
+    brief_created=1
+  fi
+  remote_seed_rollback_brief() {
+    [ "$brief_created" = 1 ] || return 0
+    rm -f "$brief" 2>/dev/null || true
+    [ "$brief_dir_created" = 1 ] && rmdir "$DATA/$id" 2>/dev/null
+    return 0
+  }
+  if grep -F '{TASK}' "$brief" >/dev/null 2>&1; then
+    echo "error: secondmate charter brief at $brief still contains {TASK}; fill it before seeding" >&2
+    remote_seed_rollback_brief
+    return 1
+  fi
+  if [ -z "$(registry_summary_for_brief "$brief")" ]; then
+    echo "error: secondmate charter brief at $brief has an empty Charter section; fill it before seeding" >&2
+    remote_seed_rollback_brief
+    return 1
+  fi
+  if [ -z "$(registry_scope_for_brief "$brief")" ]; then
+    echo "error: secondmate charter brief at $brief has an empty Routing scope section; fill it before seeding" >&2
+    remote_seed_rollback_brief
+    return 1
+  fi
+
+  seed_args=("$machine" "$id")
+  if [ "$no_projects" -eq 1 ]; then
+    seed_args+=(--no-projects)
+  else
+    seed_args+=("$@")
+  fi
+  rc=0
+  out=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" \
+    "$FM_ROOT/bin/fm-relay-host.sh" home-seed "${seed_args[@]}") || rc=$?
+  printf '%s\n' "$out"
+  if [ "$rc" -ne 0 ]; then
+    remote_seed_rollback_brief
+    return 1
+  fi
+  home=$(printf '%s\n' "$out" | sed -n 's/^home=//p' | tail -1)
+  [ -n "$home" ] || {
+    echo "error: $machine seeded $id but reported no home path; inspect it there before retrying" >&2
+    return 1
+  }
+  validate_registry_home_text "$home" || return 1
+  conflict=$(registry_home_conflict_for_assignment "$id" "$home" "$machine" || true)
+  if [ -n "$conflict" ]; then
+    echo "error: $machine seeded $id at $home, but that home is already registered here: $conflict" >&2
+    echo "       the home exists on $machine and nothing here routes to it; retire it there with bin/fm-teardown.sh $id --force run on $machine, or fix the duplicate entry in $REG" >&2
+    return 1
+  fi
+  projects_csv=$(join_projects "$@")
+  [ "$no_projects" -eq 0 ] || projects_csv=""
+  if ! write_registry "$id" "$home" "$projects_csv" "$brief" "$machine"; then
+    echo "error: $machine seeded $id at $home but the routing entry could not be written to $REG" >&2
+    echo "       nothing here routes to that home; add the entry by hand, or retire it with bin/fm-teardown.sh $id --force run on $machine" >&2
+    return 1
+  fi
+  validate_registry
+  printf 'machine=%s\n' "$machine"
+}
+
 seed_home() {
   local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst charter_summary charter_scope
-  local no_projects=0 arg
+  local no_projects=0 arg machine="" want_machine=0
   local filtered=()
   shift 2
   # A deliberate --no-projects signal (anywhere in the project position) seeds a
   # project-less home; an accidental omission with no signal still fails loudly.
+  # --machine <host> moves the whole seed to that fleet machine; without it not
+  # one byte of the path below changes.
   for arg in "$@"; do
-    if [ "$arg" = "--no-projects" ]; then
+    if [ "$want_machine" -eq 1 ]; then
+      machine=$arg
+      want_machine=0
+    elif [ "$arg" = "--no-projects" ]; then
       no_projects=1
+    elif [ "$arg" = "--machine" ]; then
+      want_machine=1
     else
-      filtered+=("$arg")
+      case "$arg" in
+        --machine=*) machine=${arg#--machine=} ;;
+        *) filtered+=("$arg") ;;
+      esac
     fi
   done
+  [ "$want_machine" -eq 0 ] || { echo "error: --machine requires a host name" >&2; return 1; }
   if [ "${#filtered[@]}" -gt 0 ]; then
     set -- "${filtered[@]}"
   else
@@ -890,6 +1067,18 @@ seed_home() {
     [ $# -eq 0 ] || { echo "error: --no-projects cannot be combined with a project list" >&2; return 1; }
   else
     [ $# -gt 0 ] || { echo "error: secondmate needs at least one project, or --no-projects for a project-less home" >&2; return 1; }
+  fi
+
+  if [ -n "$machine" ]; then
+    # One home layout, two machines. A remote home is the same leased firstmate
+    # worktree a local one is, so an explicit path here would be a second layout
+    # to keep in step - and this side cannot check it anyway.
+    [ "$requested_home" = "-" ] || {
+      echo "error: --machine requires the home spec '-'; a home on another machine is leased there with treehouse, not placed at a path this machine names" >&2
+      return 1
+    }
+    seed_home_remote "$id" "$machine" "$no_projects" "$@"
+    return
   fi
 
   validate_registry
