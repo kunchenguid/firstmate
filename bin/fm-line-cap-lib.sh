@@ -18,9 +18,9 @@
 # The cap counts characters, so a plain-ASCII line - what status lines are in
 # practice - is bounded to the same number of bytes, and a multibyte character
 # is never cut in half into an invalid sequence.
-# Truncation is always safe here because both callers print the full source
-# alongside the bounded view: the session-start digest prints each task's full
-# status log path, and OPEN DECISIONS is folded from those same logs.
+# Truncation stays recoverable because the session-start digest prints each
+# task's full status log path, while every OPEN DECISIONS entry begins with the
+# task id that identifies its durable state/<id>.status source.
 
 FM_LINE_CAP_DEFAULT=220
 FM_LINE_CAP_SUFFIX=' [truncated]'
