@@ -199,10 +199,15 @@ test_ship_modes_generate_clean_briefs() {
   home="$TMP_ROOT/ship-home"
   write_registry "$home"
 
-  for id_mode in "brief-nomistakes-a1:no-mistakes" "brief-directpr-a2:direct-PR" "brief-localonly-a3:local-only"; do
+  for id_mode in "brief-nomistakes-a1:no-mistakes" "brief-directpr-a2:direct-PR" "brief-localonly-a3:local-only" "brief-gatemerge-a4:gate-merge"; do
     id=${id_mode%%:*}
     mode=${id_mode##*:}
-    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1; status=$?
+    if [ "$mode" = gate-merge ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" \
+        --gate ./scripts/merge-gate.sh >/dev/null 2>&1; status=$?
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1; status=$?
+    fi
     expect_code 0 "$status" "fm-brief.sh $id --mode $mode should exit 0"
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$id: brief was not scaffolded"
@@ -214,7 +219,103 @@ test_ship_modes_generate_clean_briefs() {
       "$id: brief missing nonterminal working:/setup-complete gate protection"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
-  pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
+  pass "fm-brief.sh: no-mistakes/direct-PR/local-only/gate-merge briefs generate cleanly"
+}
+
+# A gate-merge worker lands its own work, so the rules and the definition of done
+# must agree that it runs the gate. The historical hand-patched shape - a generated
+# "never push to any remote" rule sitting above a definition of done whose final step
+# is a push - is exactly what stalls or improvises a worker, so both halves are pinned.
+test_gate_merge_brief_lands_through_the_gate_without_contradiction() {
+  local home id brief rules
+  home="$TMP_ROOT/gate-merge-home"
+  mkdir -p "$home/data"
+  id="brief-gate-merge-e1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" gate-proj --mode gate-merge \
+    --gate './scripts/merge-gate.sh' >/dev/null 2>&1 \
+    || fail "gate-merge brief should scaffold when --gate is supplied"
+  brief="$home/data/$id/brief.md"
+  grep -qx "Delivery contract: mode=gate-merge" "$brief" \
+    || fail "gate-merge brief did not record its machine-readable delivery contract line"
+  assert_grep 'Run the gate from THIS worktree, with your branch checked out: `./scripts/merge-gate.sh`' "$brief" \
+    "gate-merge definition of done did not name the exact landing command"
+  assert_grep "Firstmate never merges it for you" "$brief" \
+    "gate-merge brief did not say the worker lands its own work"
+  assert_grep "retry IN-TURN" "$brief" \
+    "gate-merge brief did not require in-turn retry while another gate run is live"
+  assert_grep "A failing gate parks your branch" "$brief" \
+    "gate-merge brief lost the parked-branch outcome"
+
+  # The rules block must not contradict the gate. Both historical rule-1 shapes are
+  # refused by name, and rule 2 must carve out the gate it tells the worker to run.
+  rules=$(awk '/^# Rules$/{flag=1;next} /^# /{flag=0} flag' "$brief")
+  assert_not_contains "$rules" "Never push to any remote and never open a PR." \
+    "gate-merge rules forbade the push its own definition of done performs"
+  assert_not_contains "$rules" "firstmate handles the merge" \
+    "gate-merge rules handed the merge back to firstmate"
+  assert_contains "$rules" "The merge gate named in Definition of done is the only thing that lands your work" \
+    "gate-merge rule 1 did not point at the gate as the single landing path"
+  assert_contains "$rules" "Running the merge gate below is the one authorized exception" \
+    "gate-merge rule 2 did not except the gate from strict worktree confinement"
+  pass "fm-brief.sh: a gate-merge brief lands through the gate and its rules agree with it"
+}
+
+# The scaffold is project-agnostic and never reads data/projects.md, so the landing
+# command must be supplied rather than guessed, and a gate handed to a path that
+# lands through firstmate or a PR must be refused instead of silently discarded.
+test_gate_flag_is_required_by_and_exclusive_to_gate_merge() {
+  local home out status label args expect n=0
+  home="$TMP_ROOT/gate-flag-home"
+  mkdir -p "$home/data"
+  while IFS='|' read -r label args expect; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    # shellcheck disable=SC2086  # args is an intentional word-split arg list
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "brief-gate-flag-$n" some-proj $args 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$label: expected a non-zero exit"
+    assert_contains "$out" "$expect" "$label: refusal did not explain the contract"
+    assert_absent "$home/data/brief-gate-flag-$n/brief.md" "$label: refused scaffold still wrote a brief"
+  done <<'ROWS'
+gate-merge without a gate|--mode gate-merge|requires --gate <command>
+gate-merge with an empty gate|--mode gate-merge --gate=|requires --gate <command>
+gate on a no-mistakes brief|--mode no-mistakes --gate ./scripts/merge-gate.sh|--gate applies only to --mode gate-merge
+gate on a local-only brief|--mode local-only --gate ./scripts/merge-gate.sh|--gate applies only to --mode gate-merge
+gate on a scout brief|--scout --gate ./scripts/merge-gate.sh|--gate applies only to --mode gate-merge
+empty --gate value|--mode gate-merge --gate|requires a value
+ROWS
+  pass "fm-brief.sh: --gate is required by gate-merge and refused everywhere else"
+}
+
+# Worktree isolation covers a working tree and nothing else, so every crewmate brief
+# carries the shared-machine rule: a broad pattern kill reaches sibling crews' agent
+# sessions, and the stash stack lives in the shared .git. Both are live incidents, and
+# both apply to every project and to scouts as much as to ship tasks.
+test_shared_machine_rule_is_in_every_crewmate_brief() {
+  local home id brief kind
+  home="$TMP_ROOT/shared-machine-home"
+  mkdir -p "$home/data"
+  for kind in no-mistakes direct-PR local-only gate-merge scout; do
+    id="brief-shared-machine-$kind"
+    case "$kind" in
+      scout) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1 ;;
+      gate-merge) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode gate-merge \
+        --gate ./scripts/merge-gate.sh >/dev/null 2>&1 ;;
+      *) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$kind" >/dev/null 2>&1 ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind: brief was not scaffolded"
+    assert_grep "SHARED MACHINE" "$brief" "$kind: brief lost the shared-machine rule"
+    # shellcheck disable=SC2016  # literal backticks belong to the generated brief text
+    assert_grep 'Never `pkill`/`killall` by pattern' "$brief" \
+      "$kind: brief did not forbid a broad pattern kill"
+    assert_grep "Kill only exact pids you started yourself" "$brief" \
+      "$kind: brief did not give the safe alternative to a pattern kill"
+    # shellcheck disable=SC2016  # literal backticks belong to the generated brief text
+    assert_grep 'Never bare `git stash`' "$brief" \
+      "$kind: brief did not forbid the shared stash stack"
+  done
+  pass "fm-brief.sh: every crewmate brief carries the shared-machine kill and stash rule"
 }
 
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
@@ -238,7 +339,7 @@ test_ship_mode_is_required_and_closed_set() {
   done <<'ROWS'
 missing --mode||ship briefs require --mode
 empty --mode value|--mode|requires a value
-unknown mode value|--mode nope|must be one of no-mistakes, direct-PR, local-only
+unknown mode value|--mode nope|must be one of no-mistakes, direct-PR, local-only, gate-merge
 conditional policy is not a task mode|--mode no-mistakes-prod-only|classify this task's surface
 ROWS
   pass "fm-brief.sh: ship --mode is required and closed-set validated"
@@ -715,6 +816,9 @@ test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_ship_mode_is_required_and_closed_set
+test_gate_merge_brief_lands_through_the_gate_without_contradiction
+test_gate_flag_is_required_by_and_exclusive_to_gate_merge
+test_shared_machine_rule_is_in_every_crewmate_brief
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review

@@ -839,6 +839,9 @@ backlog_refresh_reminder() {
       *)
         if [ "$MODE" = local-only ]; then
           done_cmd="tasks-axi done $ID --note \"local main\""
+        elif [ "$MODE" = gate-merge ]; then
+          # gate-merge lands through the project's own gate, so there is no PR to record.
+          done_cmd="tasks-axi done $ID --note \"landed via the project merge gate\""
         else
           pr=$PR_URL
           if [ -n "$pr" ]; then

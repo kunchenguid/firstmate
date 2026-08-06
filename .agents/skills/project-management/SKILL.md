@@ -41,6 +41,7 @@ Choose that posture when adding or creating the project:
 - `no-mistakes` runs the full validation pipeline before a PR.
 - `direct-PR` pushes and opens a PR without the no-mistakes pipeline.
 - `local-only` has no required remote or PR and lands only through the approved local fast-forward path.
+- `gate-merge` has the crewmate land its own work by running the project's own merge gate, with no PR and no firstmate merge; register it only when the captain has made that gate the project's standing way to land work, and record the exact gate command in the entry's note so every brief passes the same `bin/fm-brief.sh --gate <command>`.
 - `no-mistakes-prod-only` is a conditional policy rather than one flat mode: genuinely internal-only tooling, automation, contributor or operator process, and release or submission work ships `direct-PR`, while product-facing, mixed, and uncertain work ships `no-mistakes`.
 
 `no-mistakes-prod-only` is the default for a newly added or created remote-backed project when the captain specifies nothing, and a project with no remote defaults to `local-only`.
@@ -58,6 +59,7 @@ Confirm the source URL, local project name, delivery posture, and autonomy postu
 Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
 A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because a conditional policy's product-facing work runs the pipeline while its internal-only work still takes the direct PR.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
+A `gate-merge` project owns its landing path, so it skips no-mistakes initialization and needs whatever remote its own gate pushes to.
 A `local-only` project may have no remote and skips no-mistakes initialization.
 
 ## Create a project

@@ -298,6 +298,7 @@ The path's worker, automated gates, and captain approval remain authoritative:
 - **no-mistakes** runs the full pipeline through a PR, then waits for the configured merge authority.
 - **direct-PR** has the worker push and open a PR without the no-mistakes pipeline, then waits for the configured merge authority.
 - **local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority before firstmate uses the guarded fast-forward merge path.
+- **gate-merge** has the worker land its own work by running the project's own merge gate, named per task as `bin/fm-brief.sh --gate <command>`; registering that posture is the captain's standing authorization for that gate, firstmate never merges the work itself, and a failing gate parks the branch.
 
 Delivery mode and `yolo` are orthogonal.
 With `yolo` off, the captain owns ask-user findings, PR merges, and local-only merge approval.

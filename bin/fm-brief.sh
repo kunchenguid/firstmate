@@ -6,7 +6,7 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only|gate-merge> [--gate <command>] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -34,8 +34,14 @@
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                the configured merge authority approves, firstmate merges to local main
+#   gate-merge   implement on branch, then land it by running the project's own merge
+#                gate (no PR, no pipeline, no firstmate merge); registering that posture
+#                is the captain's standing authorization for the gate to land the work
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
-# the three concrete modes at intake before calling this script.
+# the four concrete modes at intake before calling this script.
+# --gate <command> names the exact command that lands the work. It is REQUIRED by and
+# exclusive to gate-merge: the scaffold is project-agnostic and never guesses a project's
+# gate, and a gate passed to any other mode is refused rather than silently dropped.
 # The generated ship brief records the chosen mode as a fixed machine-readable
 # "Delivery contract: mode=<mode>" line. bin/fm-spawn.sh reads that line and refuses
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
@@ -106,6 +112,8 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+GATE=
+GATE_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -115,6 +123,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      gate) GATE=$a; GATE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -127,6 +136,8 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --gate) want_value=gate ;;
+    --gate=*) GATE=${a#--gate=}; GATE_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's approval authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -140,18 +151,31 @@ done
 # missing or invalid value stops the scaffold rather than silently defaulting.
 if [ "$KIND" = ship ]; then
   [ "$MODE_SET" -eq 1 ] || {
-    echo "error: ship briefs require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
+    echo "error: ship briefs require --mode <no-mistakes|direct-PR|local-only|gate-merge>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
     exit 1
   }
   case "$MODE" in
-    no-mistakes|direct-PR|local-only) ;;
+    no-mistakes|direct-PR|local-only|gate-merge) ;;
     no-mistakes-prod-only)
       echo "error: no-mistakes-prod-only is a registry policy, not a task mode; classify this task's surface and resolve it to no-mistakes or direct-PR at intake" >&2
       exit 1 ;;
-    *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
+    *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only, gate-merge (got '$MODE')" >&2; exit 1 ;;
   esac
 elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
+  exit 1
+fi
+
+# The landing command is the whole substance of a gate-merge definition of done, and
+# this scaffold never reads data/projects.md, so it must be given rather than guessed.
+# Every other mode lands through a firstmate-owned path and would silently discard it.
+if [ "$KIND" = ship ] && [ "$MODE" = gate-merge ]; then
+  { [ "$GATE_SET" -eq 1 ] && [ -n "$GATE" ]; } || {
+    echo "error: --mode gate-merge requires --gate <command>; pass the project's own landing command (for example --gate ./scripts/merge-gate.sh) so the definition of done names the exact command that lands the work" >&2
+    exit 1
+  }
+elif [ "$GATE_SET" -eq 1 ]; then
+  echo "error: --gate applies only to --mode gate-merge; every other delivery path lands through firstmate or a PR, so a gate command here would be recorded nowhere" >&2
   exit 1
 fi
 ID=${POS[0]}
@@ -266,6 +290,26 @@ fi
 
 REPO=${POS[1]}
 
+# Shared-machine rule, rendered into every crewmate brief (ship and scout alike).
+# Worktree isolation covers a working tree and nothing else: the process table and
+# the repo's `.git` are shared by every concurrent lane on this host. Both halves are
+# live incidents - a broad `pkill -f vite` killed four sibling crews' agent sessions
+# outright, and a bare `git stash pop` pops whatever a sibling pushed last, leaving no
+# reflog entry to recover from.
+# Spawning each crew into its own process group would not help: `pkill -f`/`pgrep -f`
+# select on the command line, and a process in its own session and process group is
+# still matched from outside it, so the instruction is the control that fits.
+# shellcheck disable=SC2016  # single quotes are deliberate: `$!` and the backticked commands are literal brief text for the reading agent, never expanded at scaffold time.
+SHARED_MACHINE_RULE=$(printf '%s\n' \
+'8. SHARED MACHINE: other crews work on this host and in sibling worktrees of this repo at the' \
+'   same time, and worktree isolation does not cover either the process table or `.git`.' \
+'   Never `pkill`/`killall` by pattern - a pattern as ordinary as `vite` or `node` also matches' \
+'   sibling crews'"'"' processes and their agent sessions. Kill only exact pids you started yourself' \
+'   (capture `$!` when you background a dev server, then `kill "$pid"`).' \
+'   Never bare `git stash`/`git stash pop`/`git stash drop` - the stash stack lives in the shared' \
+'   `.git` and a popped stash leaves no reflog entry, so you can destroy a sibling'"'"'s uncommitted' \
+'   work unrecoverably. Commit work in progress to your own branch instead.')
+
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -335,6 +379,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$SHARED_MACHINE_RULE
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -347,10 +392,15 @@ echo "scaffolded: $BRIEF (scout; replace {TASK})"
 exit 0
 fi
 
-# Ship task: shape Setup / Rule 1 / Definition of done by this task's explicit
+# Ship task: shape Setup / rules 1-2 / Definition of done by this task's explicit
 # delivery mode, validated above. The generated DOD opens with the fixed
 # "Delivery contract: mode=<mode>" line that bin/fm-spawn.sh checks against its own
 # explicit --mode before launching.
+# Rules 1 and 2 must never contradict the definition of done: a worker told both to
+# land its own work and never to push would stall or improvise. Rule 2 is worktree
+# isolation, and gate-merge is the one mode with an authorized way to act outside the
+# worktree - the gate itself, never the worker by hand.
+RULE2='2. Stay inside this worktree; modify nothing outside it.'
 case "$MODE" in
   direct-PR)
     SETUP2=""
@@ -362,6 +412,23 @@ This task ships **direct-PR**: you raise the PR yourself, without the no-mistake
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+EOF
+    ;;
+  gate-merge)
+    SETUP2=""
+    RULE1="1. The merge gate named in Definition of done is the only thing that lands your work: never merge by hand, never push \`main\` or your branch yourself, and never open a PR."
+    RULE2='2. Stay inside this worktree; modify nothing outside it yourself. Running the merge gate below is the one authorized exception, and the gate handles everything outside this worktree on its own.'
+    IFS= read -r -d '' DOD <<EOF || true
+# Definition of done
+Delivery contract: mode=gate-merge
+This task ships **gate-merge**: you land your own work by running the project's merge gate. Firstmate never merges it for you, so stopping at a ready branch leaves the task unfinished.
+The task is complete only when it is committed on your branch \`fm/$ID\` AND the gate reports it landed.
+Run the gate from THIS worktree, with your branch checked out: \`$GATE\`
+Never cd into the project's primary checkout and never run git commands there yourself; the gate is the only thing authorized to act outside this worktree.
+If the gate refuses because another gate run is already live, retry IN-TURN (\`sleep 30\`, then run it again, for up to about 8 minutes) and land as soon as it clears. Do NOT append \`$PAUSED_VERB:\` and end your turn for a gate queue; that idles until a supervisor intervenes. If it is still refusing after that, append \`blocked: {the gate refusal}\` and stop.
+A failing gate parks your branch and leaves the default branch untouched: fix what it reported and run the gate again. Never bypass it, hand-merge, or push around it.
+If the gate reports an outcome you cannot read as clearly landed or clearly parked, append \`blocked:\` with its exact exit code and message rather than assuming either.
+When the gate reports the work landed, append \`done: landed via the merge gate from fm/$ID\` to the status file and stop.
 EOF
     ;;
   local-only)
@@ -428,7 +495,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it.
+$RULE2
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
@@ -451,6 +518,7 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$SHARED_MACHINE_RULE
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

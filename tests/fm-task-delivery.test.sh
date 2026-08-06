@@ -81,7 +81,7 @@ EOF
 missing both flags||ship spawns require --mode
 missing --yolo|--mode no-mistakes|ship spawns require --yolo
 missing --mode|--yolo off|ship spawns require --mode
-unknown mode|--mode nope --yolo off|must be one of no-mistakes, direct-PR, local-only
+unknown mode|--mode nope --yolo off|must be one of no-mistakes, direct-PR, local-only, gate-merge
 unknown yolo|--mode no-mistakes --yolo maybe|--yolo must be on or off
 conditional policy as a task mode|--mode no-mistakes-prod-only --yolo off|classify this task's surface
 ROWS
@@ -179,6 +179,9 @@ no-mistakes project shipped no-mistakes|- proj [no-mistakes] - fixture (added 20
 local-only project shipped no-mistakes|- proj [local-only] - fixture (added 2026-01-01)|no-mistakes|quiet|local-only
 conditional policy shipped direct-PR|- proj [no-mistakes-prod-only] - fixture (added 2026-01-01)|direct-PR|quiet|no-mistakes-prod-only
 unregistered project resolves to the no-mistakes standing default|- other [no-mistakes] - fixture (added 2026-01-01)|direct-PR|notice|no-mistakes
+no-mistakes project shipped gate-merge|- proj [no-mistakes] - fixture (added 2026-01-01)|gate-merge|notice|no-mistakes
+gate-merge project shipped gate-merge|- proj [gate-merge] - fixture (added 2026-01-01)|gate-merge|quiet|gate-merge
+gate-merge project shipped no-mistakes|- proj [gate-merge] - fixture (added 2026-01-01)|no-mistakes|quiet|gate-merge
 ROWS
   pass "fm-spawn: a rigor downgrade against the registered posture is announced, never blocked"
 }
@@ -235,6 +238,16 @@ test_promote_requires_and_records_the_delivery_contract() {
   assert_grep 'yolo=on' "$meta" "promotion did not record the decided approval posture"
   assert_contains "$out" "ship instructions for mode=direct-PR" "promotion hint did not carry the decided mode"
   [ "$(grep -c '^mode=' "$meta")" = 1 ] || fail "promotion left more than one mode= line in the task record"
+
+  # A scout on a gate-merge project promotes to the same landing path its project
+  # already uses, so the mode must be accepted and recorded like any other.
+  meta="$home/state/promote-d2.meta"
+  printf 'window=fm-promote-d2\nkind=scout\nworktree=/tmp/wt\n' > "$meta"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d2 --mode gate-merge --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "a gate-merge promotion should succeed"
+  assert_grep 'mode=gate-merge' "$meta" "promotion did not record the gate-merge delivery mode"
+  assert_contains "$out" "ship instructions for mode=gate-merge" "promotion hint did not carry the gate-merge mode"
   pass "fm-promote: promotion requires the delivery contract and records it exactly once"
 }
 
@@ -250,6 +263,7 @@ test_project_mode_maps_the_conditional_policy() {
 - yoloproj [no-mistakes-prod-only +yolo] - fixture (added 2026-01-01)
 - flatproj [direct-PR] - fixture (added 2026-01-01)
 - typoproj [no-mistakez] - fixture (added 2026-01-01)
+- gateproj [gate-merge] - fixture (added 2026-01-01)
 EOF
   out=$(FM_HOME="$home" "$PROJECT_MODE" prodproj 2>/dev/null)
   [ "$out" = "no-mistakes off" ] || fail "conditional policy did not map to its most rigorous leg (got '$out')"
@@ -264,6 +278,11 @@ EOF
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" --raw flatproj 2>/dev/null)
   [ "$out" = "direct-PR off" ] || fail "--raw altered a flat registered mode (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" gateproj 2>/dev/null)
+  [ "$out" = "gate-merge off" ] || fail "a registered gate-merge posture did not survive the parser (got '$out')"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" gateproj 2>&1 >/dev/null)
+  [ -z "$err" ] || fail "a registered gate-merge posture warned as unknown: $err"
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" typoproj 2>/dev/null)
   [ "$out" = "no-mistakes off" ] || fail "a typo'd mode no longer falls back to the most rigorous default"
