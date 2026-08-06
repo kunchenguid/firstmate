@@ -684,6 +684,63 @@ EOF
   pass "session start stays read-only when lock ownership cannot be published"
 }
 
+test_startup_sprint_check_queues_due_wake() {
+  local rec root home fakebin out expected
+  rec=$(new_world startup-sprint-check)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  cat > "$home/config/sprint-poll.env" <<'EOF'
+FM_SPRINT_HOURS=0-23
+FM_SPRINT_DAYS=1-7
+FM_SPRINT_INTERVAL=3600
+EOF
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  expected=$(printf '\tcheck\t%s\tcheck: %s: sprint-check' "$home/state/sprint-watch.check.sh" "$home/state/sprint-watch.check.sh")
+  assert_contains "$out" "$expected" "startup sprint check did not queue the same check wake shape as the watcher"
+  [ ! -s "$home/state/.wake-queue" ] || fail "startup sprint check left a wake queued after session-start drained it"
+  [ -s "$home/state/sprint-poll.last" ] || fail "startup sprint check did not claim its interval stamp"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$out" "$expected" "startup sprint check fired twice inside the configured interval"
+
+  pass "configured session start queues one due sprint-check wake before draining"
+}
+
+test_read_only_startup_sprint_check_does_not_mutate() {
+  local rec root home fakebin holder_pid out expected
+  rec=$(new_world readonly-startup-sprint-check)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  cat > "$home/config/sprint-poll.env" <<'EOF'
+FM_SPRINT_HOURS=0-23
+FM_SPRINT_DAYS=1-7
+FM_SPRINT_INTERVAL=3600
+EOF
+
+  sleep 300 &
+  holder_pid=$!
+  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  expected=$(printf '\tcheck\t%s\tcheck: %s: sprint-check' "$home/state/sprint-watch.check.sh" "$home/state/sprint-watch.check.sh")
+  assert_contains "$out" "READ-ONLY SESSION" "fixture did not enter read-only mode"
+  assert_not_contains "$out" "$expected" "read-only session start must not queue or drain a startup sprint check"
+  [ ! -e "$home/state/sprint-poll.last" ] || fail "read-only session start advanced the sprint poll stamp"
+  [ ! -s "$home/state/.wake-queue" ] || fail "read-only session start mutated the wake queue"
+
+  pass "read-only session start leaves startup sprint-check state untouched"
+}
+
 test_session_lock_concurrent_single_winner() {
   local rec root home fakebin ready completed winners pids i pid count
   rec=$(new_world lock-concurrency)
@@ -1394,6 +1451,8 @@ EOF
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
+test_startup_sprint_check_queues_due_wake
+test_read_only_startup_sprint_check_does_not_mutate
 test_session_lock_concurrent_single_winner
 test_output_ordering_diagnostics_lead
 test_herdr_backend_diagnostics_follow_real_session_start

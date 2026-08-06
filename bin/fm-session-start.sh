@@ -12,9 +12,9 @@
 # belong in a script, not in N agent turns.
 #
 # COMPOSITION, NOT DUPLICATION: this script calls fm-lock.sh, fm-bootstrap.sh,
-# and fm-wake-drain.sh as real subprocesses and prints their real output. It
-# never re-implements their logic; all sequencing/formatting logic added here
-# stays local to this file. Those three scripts remain fully working
+# fm-sprint-poll.sh, and fm-wake-drain.sh as real subprocesses and prints their
+# real output. It never re-implements their logic; all sequencing/formatting
+# logic added here stays local to this file. Those scripts remain fully working
 # standalone with unchanged default behavior - other flows (fm-bootstrap.sh
 # install <tools> after consent, /updatefirstmate, the afk daemon, existing
 # tests) still call them directly. The one seam this script needed -
@@ -33,16 +33,20 @@
 #                       (legacy PR-check migration, secondmate fast-forward,
 #                       secondmate liveness, X-mode artifact writes, fleet sync)
 #                       also run only when locked.
-#   3. wake-drain     - mutates the durable wake queue, so it also only runs
-#                       when locked.
-#   4. context digest - data/projects.md, data/secondmates.md, data/captain.md,
+#   3. startup sprint - when locked, asks fm-sprint-poll.sh whether a configured
+#                       sprint-board PM scan is due and, if so, queues the same
+#                       check wake the watcher would have queued.
+#   4. wake-drain     - mutates the durable wake queue, so it also only runs
+#                       when locked. If the startup sprint check queued a wake,
+#                       this same drain surfaces it immediately.
+#   5. context digest - data/projects.md, data/secondmates.md, data/captain.md,
 #                       data/captain-shared.md, data/learnings.md: read-only,
 #                       always safe, always runs.
-#   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
+#   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       state/.afk, and a cheap per-task endpoint-liveness read:
 #                       read-only, always runs.
-#   6. closing reminder - prints the context-specific watcher next step; this
+#   7. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
 #
@@ -105,6 +109,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
 case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
@@ -243,6 +249,16 @@ pi_extension_loaded() {
   [ "$marker_version" = "$expected_version" ] && [ "$marker_pid" = "$lock_pid" ]
 }
 
+queue_startup_sprint_check() {
+  local out shim
+  out=$("$SCRIPT_DIR/fm-sprint-poll.sh" 2>/dev/null || true)
+  [ "$out" = sprint-check ] || return 0
+  shim="$STATE/sprint-watch.check.sh"
+  if ! fm_wake_append check "$shim" "check: $shim: $out"; then
+    printf 'STARTUP_SPRINT_CHECK: due but could not queue wake\n'
+  fi
+}
+
 section "SESSION START - $FM_HOME"
 
 # --- 1. lock -----------------------------------------------------------
@@ -281,6 +297,10 @@ if [ -n "$BOOT_OUT" ]; then
   printf '%s\n' "$BOOT_OUT"
 else
   printf '(silent - all good)\n'
+fi
+
+if [ "$READ_ONLY" -eq 0 ]; then
+  queue_startup_sprint_check
 fi
 
 # --- 3. wake-drain -------------------------------------------------------
