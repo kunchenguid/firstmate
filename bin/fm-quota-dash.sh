@@ -66,9 +66,9 @@ tone_for() {
 
 pace_label() {
   case "$1" in
-    on_pace) printf '%sв норме%s' "$GREEN" "$R" ;;
-    behind)  printf '%sперерасход%s' "$RED" "$R" ;;
-    ahead)   printf '%sэкономно%s' "$CYAN" "$R" ;;
+    on_pace) printf '%son pace%s' "$GREEN" "$R" ;;
+    behind)  printf '%sover-spending%s' "$RED" "$R" ;;
+    ahead)   printf '%sunder budget%s' "$CYAN" "$R" ;;
     *)       printf '%s-%s' "$D" "$R" ;;
   esac
 }
@@ -79,10 +79,10 @@ human_until() {
   t=$(date -j -f '%Y-%m-%dT%H:%M:%S' "${1%%.*}" +%s 2>/dev/null) \
     || t=$(date -d "$1" +%s 2>/dev/null) || { printf '?'; return; }
   now=$(date +%s); d=$(( t - now ))
-  [ "$d" -gt 0 ] || { printf 'сейчас'; return; }
-  if   [ "$d" -ge 86400 ]; then printf '%dд %dч' $(( d / 86400 )) $(( d % 86400 / 3600 ))
-  elif [ "$d" -ge 3600 ];  then printf '%dч %dм' $(( d / 3600 )) $(( d % 3600 / 60 ))
-  else printf '%dм' $(( d / 60 ))
+  [ "$d" -gt 0 ] || { printf 'now'; return; }
+  if   [ "$d" -ge 86400 ]; then printf '%dd %dh' $(( d / 86400 )) $(( d % 86400 / 3600 ))
+  elif [ "$d" -ge 3600 ];  then printf '%dh %dm' $(( d / 3600 )) $(( d % 3600 / 60 ))
+  else printf '%dm' $(( d / 60 ))
   fi
 }
 
@@ -132,15 +132,15 @@ gauge() {  # <n> <pct> <model> <window>
     "$B" "$model" "$R" "$D" "$win" "$R"
 }
 
-draw() {  # <seconds-left>
-  local left=$1 n=0
+draw() {
+  local n=0
   printf '\033[H\033[J'
 
   while IFS=$'\t' read -r prov plan win pct resets pace; do
     [ -n "$prov" ] || continue
     n=$(( n + 1 ))
     if awk -v p="$pct" 'BEGIN { exit !(p < 0) }'; then
-      printf '%s%2d%s [%sНЕДОСТУПНО - quota-axi --allow-keychain-prompt%s] %s%s%s\n' \
+      printf '%s%2d%s [%sUNREADABLE - run: quota-axi --allow-keychain-prompt%s] %s%s%s\n' \
         "$CYAN" "$n" "$R" "$AMBER" "$R" "$B" "$prov" "$R"
     else
       gauge "$n" "$pct" "$prov" "$win"
@@ -149,13 +149,12 @@ draw() {  # <seconds-left>
 $ROWS
 EOF
 
-  printf '\n%sРесурсов:%s %s%d%s | %sАвто-обновление:%s %02d:%02d\n\n' \
-    "$CYAN" "$R" "$B" "$n" "$R" "$CYAN" "$R" $(( left / 60 )) $(( left % 60 ))
+  printf '\n%sResources:%s %s%d%s\n\n' "$CYAN" "$R" "$B" "$n" "$R"
 
   # printf pads by BYTES and Cyrillic is two bytes per character, so %-8s on a
   # Russian header yields half the intended column. The header is padded by
   # hand to match the ASCII data columns below it.
-  printf '%s%s%s\n' "$HDR" " ID МОДЕЛЬ   ТАРИФ        ОКНО               ОСТАТОК   СБРОС      ТЕМП        " "$R"
+  printf '%s%s%s\n' "$HDR" " ID MODEL    PLAN         WINDOW           REMAINING   RESETS     PACE        " "$R"
 
   n=0
   while IFS=$'\t' read -r prov plan win pct resets pace; do
@@ -163,7 +162,7 @@ EOF
     n=$(( n + 1 ))
     if awk -v p="$pct" 'BEGIN { exit !(p < 0) }'; then
       printf '%s%3d%s %s%-8s%s %s%-12s%s %-16s %s%9s%s   %-10s %s\n' \
-        "$CYAN" "$n" "$R" "$B" "$prov" "$R" "$BLUE" "$plan" "$R" "-" "$AMBER" "н/д" "$R" "-" "$(pace_label "$pace")"
+        "$CYAN" "$n" "$R" "$B" "$prov" "$R" "$BLUE" "$plan" "$R" "-" "$AMBER" "n/a" "$R" "-" "$(pace_label "$pace")"
     else
       printf '%s%3d%s %s%-8s%s %s%-12s%s %-16s %s%8.1f%%%s   %s%-10s%s %s\n' \
         "$CYAN" "$n" "$R" "$B" "$prov" "$R" "$BLUE" "$plan" "$R" "$win" \
@@ -173,19 +172,27 @@ EOF
 $ROWS
 EOF
 
-  printf '\n%s r %s%sОбновить%s  %s q %s%sВыход%s\n' "$KEY" "$R" "$LBL" "$R" "$KEY" "$R" "$LBL" "$R"
+  printf '\n%s r %s%sRefresh%s  %s q %s%sQuit%s\n' "$KEY" "$R" "$LBL" "$R" "$KEY" "$R" "$LBL" "$R"
 }
 
-if [ "$ONCE" -eq 1 ]; then collect; draw "$INTERVAL"; exit 0; fi
+# Only this line changes between refreshes. Repainting the whole screen once a
+# second would flicker and burn CPU to redraw numbers that cannot have moved -
+# the data behind them is refetched once an hour.
+countdown_line() {  # <seconds-left>
+  printf '\r\033[K%snext refresh in %02d:%02d%s' "$D" $(( $1 / 60 )) $(( $1 % 60 )) "$R"
+}
+
+if [ "$ONCE" -eq 1 ]; then collect; draw; exit 0; fi
 
 trap 'printf "\033[?25h%s\n" "$R"; exit 0' INT TERM
 printf '\033[?25l'
 
 while :; do
   collect
+  draw
   left=$INTERVAL
   while [ "$left" -gt 0 ]; do
-    draw "$left"
+    countdown_line "$left"
     if read -r -s -n 1 -t 1 key 2>/dev/null; then
       case "$key" in
         q|Q) printf '\033[?25h%s\n' "$R"; exit 0 ;;
