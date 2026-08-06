@@ -2097,7 +2097,7 @@ EOF
       # muse's turn lifecycle is neither a hook nor a launch flag: its plugin
       # engine (the only hook surface) is disabled in the default build, so
       # firstmate reads muse's own durable session event log instead
-      # (bin/fm-busy-lib.sh owns the fold and the idle gate). That is a PULL
+      # (bin/fm-busy-lib.sh owns the fold). That is a PULL
       # source with no writer, so nothing is armed and no record is seeded -
       # exactly the reason standalone Kimi is not armed either.
       # This sidecar is the whole binding: it pins the sessions root, the

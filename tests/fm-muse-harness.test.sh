@@ -615,8 +615,8 @@ EOF
   printf 'sessions_root=%s\nworkspace_root=%s\n' "$root" "$dir/my-ws" > "$state/$id.muse-session"
   verdict=$(classify_muse "$state" "$id")
   # This task's own log is settled; the OTHER task's open run must not leak in
-  # as busy. With the idle half still gated, settled reads unknown.
-  [ "$verdict" = "unknown muse-session-log" ] \
+  # as busy. With the idle half verified, this task's settled log reads idle.
+  [ "$verdict" = "idle muse-session-log" ] \
     || fail "binding leaked another workspace's run state: got '$verdict'"
 
   printf 'sessions_root=%s\nworkspace_root=%s\n' "$root" "$dir/other-ws" > "$state/$id.muse-session"
@@ -645,7 +645,7 @@ EOF
   printf 'sessions_root=%s\nworkspace_root=%s\n' \
     "$root" "$dir/ws[1]" > "$state/$id.muse-session"
   verdict=$(classify_muse "$state" "$id")
-  [ "$verdict" = "unknown muse-session-log" ] \
+  [ "$verdict" = "idle muse-session-log" ] \
     || fail "a bracketed workspace imported another session's busy state: got '$verdict'"
   pass "workspace bindings compare decoded paths literally"
 }
@@ -855,44 +855,30 @@ EOF
   pass "every unproven muse binding classifies unknown rather than idle"
 }
 
-# The idle half stays gated until a credentialed multi-step run proves one turn
-# stays inside one run. Until then a settled log must not read idle.
-test_settled_log_stays_unknown_while_the_idle_gate_is_closed() {
-  local dir state id root verdict gate
-  dir="$TMP_ROOT/idlegate"
+# The credentialed multi-step smoke proved one real turn stays inside one run
+# pair, so a settled log is a finished turn and reads idle with no opt-in. Both
+# terminal shapes settle: a completed turn and an interrupted one.
+test_settled_log_reads_idle() {
+  local dir state id root verdict terminal
+  dir="$TMP_ROOT/idle"
   state="$dir/state"
   root="$dir/sessions"
-  id=gatetask
   mkdir -p "$state"
-  write_session_log "$root" 2026 08 05 settled "$dir/ws" >/dev/null <<EOF
+
+  for terminal in completed cancelled; do
+    id="idle-$terminal"
+    write_session_log "$root" 2026 08 05 "settled-$terminal" "$dir/ws-$terminal" >/dev/null <<EOF
 $(muse_log_run_started r1)
-$(muse_log_run_terminal r1 completed)
+$(muse_log_run_terminal r1 "$terminal")
 EOF
-  printf 'sessions_root=%s\nworkspace_root=%s\n' "$root" "$dir/ws" > "$state/$id.muse-session"
+    printf 'sessions_root=%s\nworkspace_root=%s\n' \
+      "$root" "$dir/ws-$terminal" > "$state/$id.muse-session"
 
-  verdict=$(classify_muse "$state" "$id")
-  [ "$verdict" = "unknown muse-session-log" ] \
-    || fail "a settled log classified '$verdict' while the idle gate is closed"
-
-  gate=$(
-    # shellcheck source=bin/fm-busy-lib.sh
-    . "$ROOT/bin/fm-busy-lib.sh"
-    fm_busy_muse_idle_verified && printf open || printf closed
-  )
-  [ "$gate" = closed ] \
-    || fail "the muse idle gate is open; docs/verification/muse.md must carry the credentialed evidence"
-
-  # Opening the gate must flip exactly this verdict and nothing else, so the
-  # deferred smoke has a one-line landing point rather than a redesign.
-  verdict=$(
-    # shellcheck source=bin/fm-busy-lib.sh
-    . "$ROOT/bin/fm-busy-lib.sh"
-    FM_BUSY_MUSE_IDLE_VERIFIED_VERSIONS='0.1.0-R708.1'
-    fm_busy_classify tmux fake:0 muse "$id" "$state"
-  )
-  [ "$verdict" = "idle muse-session-log" ] \
-    || fail "opening the idle gate did not make a settled log idle: got '$verdict'"
-  pass "a settled log stays unknown until the idle gate opens, then reads idle"
+    verdict=$(classify_muse "$state" "$id")
+    [ "$verdict" = "idle muse-session-log" ] \
+      || fail "a log settled by a '$terminal' terminal classified '$verdict'"
+  done
+  pass "a settled session log reads idle for both completed and interrupted turns"
 }
 
 # muse records nothing, so it must trust no record source. A trusted source with
@@ -931,5 +917,5 @@ test_session_log_cache_reuses_and_refreshes_binding
 test_cached_session_revalidates_after_namespace_change
 test_subagent_logs_are_excluded
 test_missing_and_unreadable_bindings_are_unknown_never_idle
-test_settled_log_stays_unknown_while_the_idle_gate_is_closed
+test_settled_log_reads_idle
 test_muse_trusts_no_record_sources

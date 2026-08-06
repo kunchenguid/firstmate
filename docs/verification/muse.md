@@ -8,7 +8,7 @@ Active empirical evidence for firstmate's muse adapter.
 | Field | Value |
 |---|---|
 | Version | `Muse Code 0.1.0 (0.1.0-R708.1)`, build sha `427a430436` |
-| Verified | 2026-08-05 |
+| Verified | 2026-08-05, extended 2026-08-06 with the credentialed multi-step smoke |
 | Artifact | `muse-aarch64-macos`, sha256 `4290bfafa5bbb81a6fd493aaea12f848c789b1d22edfa0c4b849151deba3e70c` |
 | Platform | macOS arm64 (Darwin 25.5.0) |
 
@@ -30,7 +30,7 @@ Every run below used an isolated `XDG_CONFIG_HOME` and `XDG_DATA_HOME` in a scra
 Live TUI and session behavior below was observed against the built-in `--provider echo` startup provider, except for the provider-authentication prompt.
 The credential paths and unauthenticated wait were probed separately against the default `meta` provider.
 Turn-boundary structure, the trust dialog, interrupt, exit, composer rendering, credential behavior, and the event-log schema are real and verified.
-**Busy-state behavior under a genuine multi-step, real-model tool loop is NOT verified** and is the deferred item below.
+Busy-state behavior under a genuine multi-step, real-model tool loop was verified separately on 2026-08-06 against the default `meta` provider with a live model, and is recorded under [the credentialed multi-step smoke](#the-credentialed-multi-step-smoke-verified-2026-08-06).
 
 ## Verified facts
 
@@ -154,24 +154,53 @@ Captured with `tmux capture-pane -p -e`:
 Prompt glyph `⟩` (U+27E9) at luminance ~149.9 against the 128 default ghost threshold; typed text at ~209.8.
 After a single Escape the interrupted prompt is restored into the composer at the same bright ~209.8, and `C-u` clears it.
 
-## Deferred: the credentialed multi-step smoke
+## The credentialed multi-step smoke (verified 2026-08-06)
 
-This is the one item the captain deferred until a `META_API_KEY` is available, and it is the only thing standing between the current adapter and a full busy-state signal.
+This was the one item deferred until a `META_API_KEY` was available, because it is what decides whether a settled log may classify `idle`.
+An open run was always positive proof of a turn in flight, but a settled log only proves no run is open at that instant, so the classifier held idle behind an opt-in in case a real turn spanned several runs.
+The smoke below answered that: one run brackets a whole multi-step turn, and an Escape interrupt closes that run with `terminal=cancelled` rather than leaving the turn to continue in another run.
+The credentialed result gives a settled Muse log the same idle trust as the Claude and Pi push sources, so the opt-in was removed and `bin/fm-busy-lib.sh` classifies a settled log `idle` outright.
+Muse auto-updates its vendor binary underneath the fleet, firstmate normalizes the versioned process identity to the `muse` harness before busy classification, and the session log's own metadata carries semver `0.1.0` plus a build SHA that cannot be matched to that normalized identity.
+A verified-build allowlist against this coarse identity would be false precision because it could not distinguish the running build, as well as a maintenance treadmill against the auto-updating binary.
 
-Until it lands, `fm_busy_muse_idle_verified` in `bin/fm-busy-lib.sh` stays closed: an open run classifies `busy`, and everything else classifies `unknown`, never `idle`.
-Busy needs no gate because an open run is positive proof of a turn in flight.
-Idle does, because a settled log only proves no run is open at that instant; if a real turn turned out to span several runs, an ungated idle would report a working crewmate as finished.
+Both runs below used the default `meta` provider with model `muse-spark-1.2-contributor`, on a real firstmate-launched crewmate pane, authenticated through the stored `~/.config/muse/auth.json` written by `muse auth set --provider meta --api-key-stdin` so the key never entered `argv`.
 
-To open the gate:
+### One turn stays inside one run
 
-1. Set `META_API_KEY` and spawn a real muse crewmate through `bin/fm-spawn.sh` on a task whose first turn makes several tool calls.
-2. While that turn runs, sample `fm_busy_muse_run_state` on the bound log repeatedly and confirm it stays `busy` for the whole turn.
-3. Confirm the finished turn produced exactly ONE `started`/`terminal` pair, not one pair per model step:
-   `grep -c '"event":{"kind":"started"' <log>` and the same for `terminal`.
-4. Confirm an Escape interrupt mid-tool-loop still yields `terminal` with `cancelled`.
-5. Record the version, exact commands, and observed counts in this file, then add the verified version string to `FM_BUSY_MUSE_IDLE_VERIFIED_VERSIONS`.
+A single 8-step tool loop (shell, file reads, a file write, a shell append) ran as one submitted turn in session `629b3bc1-5dd7-4a0d-a901-69701850922c`, log `~/.local/share/muse/sessions/2026/08/06/629b3bc1-5dd7-4a0d-a901-69701850922c/session.jsonl`.
+The whole 828-record turn is bracketed by exactly one run pair, 23 tool batches deep:
 
-`tests/fm-muse-harness.test.sh` already pins that opening the gate flips exactly the settled verdict and nothing else, so this is a one-line landing rather than a redesign.
+```
+$ grep -cE '"kind":"run","run_id":"[^"]*","event":\{"kind":"started"' session.jsonl
+1
+$ grep -cE '"kind":"run","run_id":"[^"]*","event":\{"kind":"terminal"' session.jsonl
+1
+$ grep -c '"payload_type":"tool_batch.effect.started"' session.jsonl
+23
+
+10  {"kind":"run","run_id":"db5869ed-...","event":{"kind":"started","prompt":"...launch-brief..."
+827 {"kind":"run","run_id":"db5869ed-...","event":{"kind":"terminal","terminal":"completed",
+      "reason":null,"turn_duration_ms":75243,"time_to_first_token_ms":69583,"eot_gate_ms":3907}
+```
+
+Scope the count to `"kind":"run"` as above.
+A bare `grep -c '"event":{"kind":"started"'` returns 56 on the same log, because every tool batch effect reuses that inner event shape.
+
+### Busy sampling and interrupt
+
+Session `e4e0b4f4-38d0-46dc-b669-dfb5de92e0e0` sampled the fold while a multi-step turn was in flight, then interrupted it with Escape mid tool loop.
+Five consecutive samples of `fm_busy_muse_run_state` on the bound log returned `busy`, and `fm_busy_classify` returned `busy muse-session-log` for the same samples; the fold settled immediately after the interrupt.
+Its run closed as cancelled rather than staying open:
+
+```
+10  {"kind":"run","run_id":"a098d532-...","event":{"kind":"started","prompt":"...launch-brief..."
+103 {"kind":"run","run_id":"a098d532-...","event":{"kind":"terminal","terminal":"cancelled",
+      "reason":"cancelled during model step","turn_duration_ms":7849}
+```
+
+That is the same terminal shape the `echo`-provider interrupt produced, now confirmed against a live model mid tool loop.
+
+`tests/fm-muse-harness.test.sh` pins the resulting classifier behavior: a log settled by either terminal reads `idle`, an open run reads `busy`, and only a resolution failure reads `unknown`.
 
 ## Refreshing this record
 
@@ -182,7 +211,11 @@ FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-l
 FM_MUSE_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-muse-signals-live-e2e.test.sh
 ```
 
-The Muse signals guard requires a real `muse` binary and tmux but uses `--provider echo`, so it does not require `META_API_KEY` and does not open the deferred real-model idle gate.
+The Muse signals guard requires a real `muse` binary and tmux but uses `--provider echo`, so it does not require `META_API_KEY` and cannot re-check the real-model turn-to-run relationship on its own.
 The guard follows SGR state through the final prompt glyph and rejects both bright-then-dark and malformed-RGB negative controls before accepting that glyph's effective luminance.
+
+muse's launcher can replace the running binary underneath the fleet, so an upgrade that changes the session protocol also invalidates the credentialed evidence above.
+Repeat that smoke after a protocol-affecting upgrade: run one real multi-step tool-loop turn with credentials in place, confirm the run-scoped `started`/`terminal` counts are still exactly one each, and confirm an Escape still yields `terminal` with `cancelled`.
+A build that ever split one turn across several runs would make a settled log ambiguous, which is a classifier change rather than a note in this file.
 
 The portable counterparts that run in ordinary CI are `tests/fm-muse-harness.test.sh`, `tests/fm-tmux-agent-liveness.test.sh`, `tests/fm-composer-lib.test.sh`, and `tests/fm-composer-ghost.test.sh`.
