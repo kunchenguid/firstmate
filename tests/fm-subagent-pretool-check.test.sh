@@ -139,7 +139,8 @@ test_guard_never_classifies_mcp_tools() {
   # has nothing to do with fleet dispatch.
   local tool
   for tool in mcp__linear__list_issues mcp__tracker__create_task \
-              mcp__acme__spawn_agent mcp__slack__slack_send_message; do
+              mcp__acme__spawn_agent mcp__slack__slack_send_message \
+              MCP:slack_send_message MCP:slack_send_message_draft MCP:agent_run_shell; do
     expect_allow "MCP tool" "$tool"
   done
   pass "MCP tool names are never classified as harness delegation"

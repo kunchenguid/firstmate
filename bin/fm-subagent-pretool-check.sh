@@ -150,6 +150,8 @@ LC_ALL=C NORMALIZED=$(printf '%s' "$TOOL" | tr '[:upper:]' '[:lower:]' | tr -cd 
 # blocking it would be a false positive with no bearing on fleet dispatch.
 case "$TOOL" in
   mcp__*) exit 0 ;;
+  # Cursor uses MCP: while Claude Code uses mcp__.
+  [Mm][Cc][Pp]:*) exit 0 ;;
 esac
 
 for allowed in $OBSERVE_ONLY_TOOLS $PLAN_ONLY_TOOLS; do
