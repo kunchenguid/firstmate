@@ -1,7 +1,8 @@
 # Pi Calm mode
 
-Calm is a Pi-only conversation presentation toggle.
+This page covers Pi's `/calm` conversation presentation toggle.
 It is off by default, and the last `/calm` choice persists for the effective Firstmate home across Pi session starts and resumes.
+The shared preference also controls Firstmate's Claude Code presentation; [`configuration.md`](configuration.md#calm-preference-configcalm) owns that setup and behavior.
 
 While Calm is active and an agent run is under way, Calm hides Pi's built-in `Working...` row and shows a small two-row animated boat in its place, and no separate Calm status row is added.
 The water fills the usable width in standard ANSI blue and the complete boat is standard ANSI yellow.

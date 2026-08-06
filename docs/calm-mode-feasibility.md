@@ -304,6 +304,9 @@ Commands:
 
 ## Regression coverage
 
+`tests/fm-calm-pi-extension.test.sh` verifies that Pi and the shell helper make identical decisions for canonical, whitespace-padded, absent, malformed, and disabled preference values.
+`tests/fm-claude-stop-autoarm.test.sh`, `tests/fm-guard-stale-banner.test.sh`, and `tests/fm-turnend-guard.test.sh` prove Claude Calm keeps each wake, watcher-down alarm, blind-turn block, and terminal supervision alarm actionable on one line without changing exit or fail-open semantics.
+`tests/fm-wake-queue.test.sh` proves Claude Calm batches authoritative wake rows, bounded status context, and fleet-wide open decisions without changing queue consumption, and that the effective config override and default-off cases keep ordinary output.
 `tests/fm-calm-pi-extension.test.sh` compares wrapped and stock renderers, verifies all seven built-ins plus `fm_watch_arm_pi`, exercises redraw of already-rendered tool, thinking, current operational-user, and legacy synthetic rows, and covers every policy class.
 It covers persisted preference restoration across every session-start reason and a real restart, proves the working-ship presentation and Calm-off stock `Working...` row through a delayed deterministic provider, asserts no Calm status row, verifies operational messages remain exact ordinary user-role session entries and complete exports, and drives genuine 100 by 44, 160 by 36, and 180 by 44 terminal fixtures.
 A native deterministic `/skill:ahoy` turn produces thinking, tool-call, and tool-result blocks, asserts that the collapsed skill-to-final gap equals the two-row visible-only baseline, expands and re-collapses original thinking, restores Calm-off rendering, verifies persisted hidden history, and repeats the geometry assertion after restart with `terminal.clearOnShrink` explicitly off.
@@ -317,6 +320,10 @@ The relevant commands are:
 
 ```sh
 tests/fm-calm-pi-extension.test.sh
+tests/fm-claude-stop-autoarm.test.sh
+tests/fm-guard-stale-banner.test.sh
+tests/fm-turnend-guard.test.sh
+tests/fm-wake-queue.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 tests/fm-pi-primary-types.test.sh
 ```

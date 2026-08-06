@@ -109,7 +109,8 @@ For Pi, approve the project trust prompt once per clone on first launch so the t
 Pi's `/calm` toggle hides supported transcript chrome, including canonically classified Firstmate operational user rows, and uses a Calm-only animated working boat during active runs while preserving all model context and session data.
 The hidden operational inputs remain ordinary user-role messages with unchanged delivery, ordering, authority, persistence, and exports.
 The preference persists for the effective Firstmate home, and toggling it off restores ordinary rendering.
-[Calm's current behavior and supported limits](docs/calm.md) are separate from its [version-scoped maintainer evidence](docs/calm-mode-feasibility.md).
+[Pi Calm's current behavior and supported limits](docs/calm.md) are separate from its [version-scoped maintainer evidence](docs/calm-mode-feasibility.md).
+The same home-local preference can compact Firstmate's own operational output in a Claude Code primary; [`docs/configuration.md`](docs/configuration.md#calm-preference-configcalm) owns that setup and behavior.
 
 ### Talk to it
 
