@@ -369,7 +369,7 @@ FLOOR_CONFIG="$TMP_ROOT/floor-config"
 FLOOR_STATE="$TMP_ROOT/floor-state"
 mkdir -p "$FLOOR_CONFIG" "$FLOOR_STATE"
 gate_verdict() {  # <config-dir> -> on|off, warnings on stderr
-  bash -c '
+  PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" HERDR_SESSION="$HERDR_LAB_SESSION" bash -c '
     . "$0/bin/backends/herdr.sh"
     if fm_backend_herdr_presentation_enabled "$1" "$2"; then printf "on\n"; else printf "off\n"; fi
   ' "$ROOT" "$1" "$FLOOR_STATE"
