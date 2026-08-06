@@ -45,8 +45,16 @@ new_world() {
 
   printf 'v1\n' > "$w/seed/AGENTS.md"
   printf 'r1\n' > "$w/seed/README.md"
+  printf 'state/\n' > "$w/seed/.gitignore"
   mkdir -p "$w/seed/bin" "$w/seed/.agents/skills"
   printf 'echo a\n' > "$w/seed/bin/tool.sh"
+  cat > "$w/seed/bin/fm-pr-check-migrate.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --validation-repair ] || exit 2
+[ -z "${FM_UPDATE_RECONCILE_LOG:-}" ] || \
+  printf '%s|%s|%s\n' "${FM_ROOT_OVERRIDE:-}" "${FM_HOME:-}" "$1" >> "$FM_UPDATE_RECONCILE_LOG"
+SH
+  chmod +x "$w/seed/bin/fm-pr-check-migrate.sh"
   printf 's1\n' > "$w/seed/.agents/skills/note.md"
   git -C "$w/seed" add -A
   git -C "$w/seed" commit -qm c1
@@ -63,6 +71,7 @@ new_world() {
 add_sm() {
   local w=$1 id=$2
   git -C "$w/main" worktree add -q --detach "$w/$id" main
+  mkdir -p "$w/$id/state"
   {
     printf 'window=main:fm-%s\n' "$id"
     printf 'kind=secondmate\n'
@@ -291,6 +300,56 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
   pass "T11 unsafe secondmate home is not fast-forwarded"
 }
 
+test_validation_reconciliation_mode_stays_narrow() {
+  local home state
+  home="$TMP_ROOT/t12-home"
+  state="$home/state"
+  mkdir -p "$state"
+
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-pr-check-migrate.sh" \
+    --validation-repair >/dev/null \
+    || fail "validation-only reconciliation did not complete"
+  [ ! -e "$state/.pr-check-migration-v1" ] \
+    || fail "validation-only reconciliation ran the broad migration"
+  pass "T12 validation reconciliation does not run the broad migration"
+}
+
+test_live_update_reconciles_validation_checks() {
+  local w out log
+  w=$(new_world t12)
+  log="$w/validation-reconcile.log"
+
+  FM_UPDATE_RECONCILE_LOG="$log" run_update "$w" >/dev/null
+  [ ! -e "$log" ] || fail "already-current firstmate reconciled validation checks"
+
+  bump_origin "$w" readme
+  out=$(FM_UPDATE_RECONCILE_LOG="$log" run_update "$w")
+
+  assert_contains "$out" "firstmate: updated " "firstmate fast-forwarded before validation reconciliation"
+  [ "$(cat "$log")" = "$w/main|$w/home|--validation-repair" ] \
+    || fail "live update did not reconcile the active home with the updated migration helper"
+  pass "T13 live update reconciles validation checks after a fast-forward"
+}
+
+test_live_update_reconciles_local_secondmate_validation_checks() {
+  local w out log expected sm_home
+  w=$(new_world t14)
+  add_sm "$w" sm1
+  log="$w/validation-reconcile.log"
+  bump_origin "$w" readme
+
+  out=$(FM_UPDATE_RECONCILE_LOG="$log" run_update "$w")
+
+  assert_contains "$out" "secondmate sm1: updated " "live secondmate fast-forwarded before validation reconciliation"
+  sm_home=$(cd "$w/sm1" && pwd -P)
+  expected=$(printf '%s\n%s' \
+    "$w/main|$w/home|--validation-repair" \
+    "$sm_home|$sm_home|--validation-repair")
+  [ "$(cat "$log")" = "$expected" ] \
+    || fail "live update did not reconcile the local secondmate home with its updated helper"
+  pass "T14 live update reconciles local secondmate validation checks"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
@@ -300,5 +359,8 @@ test_registry_backstop_dedup_and_self_exclusion
 test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
+test_validation_reconciliation_mode_stays_narrow
+test_live_update_reconciles_validation_checks
+test_live_update_reconciles_local_secondmate_validation_checks
 
 echo "# all fm-update tests passed"

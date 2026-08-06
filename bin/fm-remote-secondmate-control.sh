@@ -62,6 +62,21 @@ validate_home() { # <id> [allow-absent]
   [ -f "$TARGET_HOME/AGENTS.md" ] && [ -d "$TARGET_HOME/bin" ] || die "remote home is not a Firstmate checkout"
 }
 
+reconcile_validation_checks() {
+  local home=$1 state migrate
+  state="$home/state"
+  if [ ! -e "$state" ] && [ ! -L "$state" ]; then
+    return 0
+  fi
+  [ -d "$state" ] && [ ! -L "$state" ] \
+    || die "remote secondmate state directory is unavailable"
+  migrate="$home/bin/fm-pr-check-migrate.sh"
+  [ -x "$migrate" ] || die "remote validation check migration helper is unavailable"
+  FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    "$migrate" --validation-repair >/dev/null \
+    || die "remote validation check reconciliation failed"
+}
+
 meta_path() { printf '%s/%s.meta\n' "$CONTROL_STATE" "$1"; }
 
 remote_endpoint_load() {
@@ -228,6 +243,7 @@ cmd_sync() {
   head=$(git -C "$FM_ROOT" rev-parse HEAD 2>/dev/null) || die "remote code root HEAD is unreadable"
   current=$(git -C "$target" rev-parse HEAD 2>/dev/null) || die "remote home HEAD is unreadable"
   if [ "$current" = "$head" ]; then
+    reconcile_validation_checks "$target"
     printf 'current: %s\n' "$head"
     return 0
   fi
@@ -238,6 +254,7 @@ cmd_sync() {
   git -C "$target" cat-file -e "$head^{commit}" 2>/dev/null || die "remote home does not contain the code-root commit"
   git -C "$target" merge-base --is-ancestor HEAD "$head" || die "remote secondmate checkout is not a fast-forward"
   git -C "$target" checkout --detach -q "$head" || die "remote secondmate fast-forward failed"
+  reconcile_validation_checks "$target"
   printf 'synced: %s\n' "$head"
 }
 

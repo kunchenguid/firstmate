@@ -819,7 +819,17 @@ git clone -q "file://$REMOTE_ORIGIN" "$REMOTE_SEED"
 git -C "$REMOTE_SEED" config user.email test@example.com
 git -C "$REMOTE_SEED" config user.name Test
 printf 'remote update probe\n' > "$REMOTE_SEED/REMOTE_UPDATE_PROBE"
-git -C "$REMOTE_SEED" add REMOTE_UPDATE_PROBE
+mv "$REMOTE_SEED/bin/fm-pr-check-migrate.sh" "$REMOTE_SEED/bin/fm-pr-check-migrate-real.sh"
+cat > "$REMOTE_SEED/bin/fm-pr-check-migrate.sh" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --validation-repair ]; then
+  printf '%s|%s|%s\\n' "\${FM_ROOT_OVERRIDE:-}" "\${FM_HOME:-}" "\$1" > "$TMP_ROOT/remote-validation-reconcile.log"
+  exit 0
+fi
+exec "\$(dirname "\$0")/fm-pr-check-migrate-real.sh" "\$@"
+SH
+chmod +x "$REMOTE_SEED/bin/fm-pr-check-migrate.sh"
+git -C "$REMOTE_SEED" add REMOTE_UPDATE_PROBE bin/fm-pr-check-migrate.sh bin/fm-pr-check-migrate-real.sh
 git -C "$REMOTE_SEED" commit -qm 'advance remote code root'
 git -C "$REMOTE_SEED" push -q origin main
 UPDATE_OUT=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh update ios)
@@ -827,6 +837,8 @@ assert_contains "$UPDATE_OUT" 'synced:' "remote update did not report a host-loc
 [ "$(git -C "$REMOTE_HOME" rev-parse HEAD)" = "$(git -C "$REMOTE_ROOT" rev-parse HEAD)" ] \
   || fail "remote persistent home did not fast-forward to its code-root commit"
 assert_present "$REMOTE_HOME/REMOTE_UPDATE_PROBE" "remote update did not materialize the code-root commit"
+[ "$(cat "$TMP_ROOT/remote-validation-reconcile.log")" = "$REMOTE_HOME|$REMOTE_HOME|--validation-repair" ] \
+  || fail "remote update did not reconcile the persistent home after its fast-forward"
 pass "remote update imports and fast-forwards the persistent home on its configured host"
 
 rm -f "$TMP_ROOT/doctor.repaired"

@@ -42,6 +42,29 @@ SECONDMATES_MD="$FM_HOME/data/secondmates.md"
 
 usage() { echo "usage: fm-update.sh [--help]" >&2; }
 
+reconcile_validation_checks() {
+  local root=$1 home=$2 state migrate
+  state="$home/state"
+  if [ ! -e "$state" ] && [ ! -L "$state" ]; then
+    return 0
+  fi
+  if [ ! -d "$state" ] || [ -L "$state" ]; then
+    echo "validation check reconciliation: state directory is unavailable" >&2
+    return 1
+  fi
+  migrate="$root/bin/fm-pr-check-migrate.sh"
+  if [ ! -x "$migrate" ]; then
+    echo "validation check reconciliation: migration helper is unavailable" >&2
+    return 1
+  fi
+  FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    "$migrate" --validation-repair >/dev/null
+}
+
+fm_ff_after_target_update() {
+  reconcile_validation_checks "$2" "$2"
+}
+
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   usage
   exit 0
@@ -52,6 +75,9 @@ fi
 
 reread_firstmate="no"
 ff_target "$FM_ROOT" "firstmate" origin no no
+if [ "$FF_STATUS" = "updated" ]; then
+  reconcile_validation_checks "$FM_ROOT" "$FM_HOME"
+fi
 if [ "$FF_STATUS" = "updated" ] && [ -n "$FF_INSTR" ]; then
   reread_firstmate="yes"
 fi

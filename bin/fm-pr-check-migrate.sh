@@ -6,7 +6,7 @@
 # registered custom checks remain armed, and every other task poll is
 # quarantined for private review. A current X-mode shim is preserved by exact
 # content, while the recognized older byte-static shim is refreshed in place.
-# Usage: fm-pr-check-migrate.sh [--checks-safe]
+# Usage: fm-pr-check-migrate.sh [--checks-safe|--validation-repair]
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,12 +28,16 @@ NONCANONICAL_PREFIX='!noncanonical'
 LEGACY_NONCANONICAL_PREFIX=_noncanonical
 
 ALLOW_INCOMPLETE_REPAIRS=0
-if [ "$#" -eq 1 ] && [ "$1" = --checks-safe ]; then
-  ALLOW_INCOMPLETE_REPAIRS=1
-elif [ "$#" -ne 0 ]; then
-  echo "error: invalid PR check migration request" >&2
-  exit 2
-fi
+VALIDATION_REPAIR_ONLY=0
+case "$#:${1:-}" in
+  0:) ;;
+  1:--checks-safe) ALLOW_INCOMPLETE_REPAIRS=1 ;;
+  1:--validation-repair) VALIDATION_REPAIR_ONLY=1 ;;
+  *)
+    echo "error: invalid PR check migration request" >&2
+    exit 2
+    ;;
+esac
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -309,6 +313,13 @@ repair_validation_checks() {
 if ! repair_validation_checks; then
   echo "PR_CHECK_MIGRATION: validation gate repair could not be completed safely" >&2
   exit 1
+fi
+if [ "$VALIDATION_REPAIR_ONLY" -eq 1 ]; then
+  if [ "$MIGRATION_DEFERRED" -ne 0 ]; then
+    echo "PR_CHECK_MIGRATION: validation gate repair is busy" >&2
+    exit 1
+  fi
+  exit 0
 fi
 if [ "$MIGRATION_DEFERRED" -ne 0 ] || fm_custom_check_any_slot_held "$STATE"; then
   exit 0
