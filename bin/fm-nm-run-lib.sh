@@ -55,6 +55,25 @@ fm_nm_field() {  # <toon-output> <key>
   printf '%s\n' "$1" | sed -n "s/^[[:space:]]*$2:[[:space:]]*\(.*\)/\1/p" | head -1
 }
 
+# Names of the steps a run has completed, one per line, read from the
+# steps[N]{step,status,...} table in captured `axi status` output $1. The table
+# ends at the next key line, so a scalar or a later block is never read as a row.
+fm_nm_completed_steps() {  # <toon-output>
+  printf '%s\n' "$1" | awk '
+    /steps\[[0-9]+\]\{/ { in_steps = 1; next }
+    !in_steps { next }
+    /^[ \t]*[A-Za-z_]+[:[]/ { in_steps = 0; next }
+    {
+      row = $0
+      sub(/^[ \t]+/, "", row)
+      if (split(row, f, ",") < 2) next
+      gsub(/[ \t"]/, "", f[1])
+      gsub(/[ \t"]/, "", f[2])
+      if (f[2] == "completed") print f[1]
+    }
+  '
+}
+
 # 0 if run head $2 matches worktree $1's code identity, per the same rule
 # everywhere this attribution is needed:
 #   - missing/empty head: cannot bind; reject

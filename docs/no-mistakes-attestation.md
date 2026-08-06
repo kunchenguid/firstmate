@@ -63,15 +63,24 @@ It is why the check's verdict is visible in the diff and why required-check conf
 
 ## Producing one
 
-`bin/fm-attest.sh write` reads the pipeline's own run record through `no-mistakes axi status`, refuses unless that run covers this exact `HEAD` on this branch and completed every required step, then records and pushes the note.
+`bin/fm-attest.sh write` reads the pipeline's own run record through `no-mistakes axi status`, refuses unless that run covers this branch and completed every required step, then records and pushes the note on the head that run validated.
 It re-verifies its own payload with the same code path the gate uses, so a malformed note cannot reach the forge and be discovered only in CI.
+
+The head it attests is not always `HEAD`.
+The pipeline commits its own fixes and advances the run tip past the local checkout, so a run tip ahead of `HEAD` on the same history is the normal state, it is the head the pull request is opened on, and it is what gets attested.
+A run tip behind or beside `HEAD` is refused as `run-covers-another-head`, because this branch then carries work that run never saw or its tip was rewritten.
+A run tip that is not a commit in this checkout at all is refused separately as `run-head-unavailable`, because that is a fetch rather than a re-validation.
+`bin/fm-nm-run-lib.sh` owns that directional rule for every caller that has to decide whether a run belongs to a worktree, and owns reading this tool's output; both are read from there rather than re-derived here, so a change to the tool's shape moves every reader at once.
 
 It publishes to the remote's push URL rather than its fetch URL, and reconciles against that same repository before writing, because those are two different repositories in the setup `CONTRIBUTING.md` describes and only the push target is the one the check reads.
 The reconciliation merges the published ref instead of forcing over the local one, so an attestation recorded locally with `--no-push` survives the publishing of a later one.
+It names that repository in what it prints, with any credentials the remote's URL embeds stripped out, because "published to origin" does not say which repository was reached and the note is evidence only on the one holding the pull request head.
+A push target carrying no `refs/notes/no-mistakes` yet has nothing to reconcile against and is not an error, but a push target that cannot be read at all stops the command before anything is recorded: not reading a repository is not reading an absence, and that is the same line the gate draws when it fetches this ref.
 
 Its own refusals stay as distinct as the gate's.
 `no-run-record` means the pipeline reported no run, `run-record-unreadable` means the tool itself failed, and `run-record-unparsed` means it reported something no run identity could be read from; all three quote the tool's own output, because a tool error read as an absent run sends a contributor to re-run a pipeline that already ran.
 Only what the tool writes to stdout decides which of the three it is, because unrelated notices such as its version-upgrade banner go to stderr and must never stand in for a run record; stderr is quoted alongside stdout purely as diagnostic detail.
+Every call to the tool is time-bounded, so one blocked on a lock or a network read refuses as `run-record-unreadable` rather than hanging at a contributor's terminal.
 
 When `no-mistakes` publishes this note itself, the helper becomes redundant and nothing about the check changes: the note format is the contract, and which program writes it is not.
 

@@ -15,8 +15,12 @@
 #   fm-attest.sh --help
 #
 # write reads the local pipeline run record through `no-mistakes axi status`,
-# refuses unless that run covers this exact HEAD and completed every required
-# validation step, then writes the note and pushes the ref.
+# refuses unless that run covers this branch and completed every required
+# validation step, then writes the note on the head that run validated and
+# pushes the ref. That head is not always HEAD: the pipeline's own fix commits
+# advance the run tip past the local checkout, and bin/fm-nm-run-lib.sh owns the
+# rule that decides whether a run belongs to a worktree for every caller that
+# has to ask, so this reads it from there rather than re-deriving it.
 #
 # verify is the CI side. It reads a note already fetched into this repository
 # and reports one distinct reason per failure, so an absent attestation is
@@ -27,6 +31,15 @@
 # its own operator holds, so no artifact it emits can be unforgeable by that
 # operator. docs/no-mistakes-attestation.md owns that boundary in full.
 set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-nm-run-lib.sh
+. "$SCRIPT_DIR/fm-nm-run-lib.sh"
+
+# Every call to the pipeline is bounded, so a tool blocked on a lock or on a
+# network read refuses with its own reason instead of hanging at a terminal.
+NM_TIMEOUT=${FM_ATTEST_NM_TIMEOUT:-20}
+case "$NM_TIMEOUT" in '' | *[!0-9]*) NM_TIMEOUT=20 ;; esac
 
 NOTES_REF_DEFAULT=refs/notes/no-mistakes
 ATTESTATION_VERSION=v1
@@ -271,26 +284,33 @@ EOF
 # write - the contributor side
 # ---------------------------------------------------------------------------
 
-# Reads `no-mistakes axi status` and emits validated "field value" lines. Every
-# token is re-checked by the caller, because this is tool output, not input the
-# note format may inherit unchecked.
-parse_run_status() {
-  awk '
-    /^[^ \t]/ { in_run = ($0 == "run:"); in_steps = 0; next }
-    !in_run { next }
-    /^  steps\[/ { in_steps = 1; next }
-    /^  [A-Za-z_]+[:[]/ { in_steps = 0 }
-    !in_steps && /^  id:[ \t]/ { v = $0; sub(/^  id:[ \t]*/, "", v); gsub(/"/, "", v); print "id " v; next }
-    !in_steps && /^  branch:[ \t]/ { v = $0; sub(/^  branch:[ \t]*/, "", v); gsub(/"/, "", v); print "branch " v; next }
-    !in_steps && /^  head:[ \t]/ { v = $0; sub(/^  head:[ \t]*/, "", v); gsub(/"/, "", v); print "head " v; next }
-    in_steps && /^    [A-Za-z]/ {
-      row = $0
-      sub(/^[ \t]+/, "", row)
-      n = split(row, f, ",")
-      if (n >= 2 && f[2] == "completed") print "gate " f[1]
-      next
-    }
-  '
+# The repository a git URL names, with any credentials it embeds removed, so the
+# published target can be reported rather than left implicit in a remote's name.
+# A local path is a path and is printed as it is; only a URL can carry a secret.
+display_repository() {
+  case "$1" in
+    *://*)
+      dr_scheme=${1%%://*}
+      dr_rest=${1#*://}
+      case "$dr_rest" in
+        */*)
+          dr_authority=${dr_rest%%/*}
+          dr_path=/${dr_rest#*/}
+          ;;
+        *)
+          dr_authority=$dr_rest
+          dr_path=
+          ;;
+      esac
+      case "$dr_authority" in
+        *@*) dr_authority=${dr_authority##*@} ;;
+      esac
+      printf '%s://%s%s' "$dr_scheme" "$dr_authority" "$dr_path"
+      ;;
+    /* | ./* | ../*) printf '%s' "$1" ;;
+    *@*:*) printf '%s' "${1#*@}" ;;
+    *) printf '%s' "$1" ;;
+  esac
 }
 
 cmd_write() {
@@ -343,9 +363,9 @@ cmd_write() {
     || die "could not create a temporary file"
   status_rc=0
   if [ -n "$run_id" ]; then
-    status=$(no-mistakes axi status --run "$run_id" 2>"$status_err_file") || status_rc=$?
+    status=$(fm_nm_run_bounded . "$NM_TIMEOUT" axi status --run "$run_id" 2>"$status_err_file") || status_rc=$?
   else
-    status=$(no-mistakes axi status 2>"$status_err_file") || status_rc=$?
+    status=$(fm_nm_run_bounded . "$NM_TIMEOUT" axi status 2>"$status_err_file") || status_rc=$?
   fi
   status_err=$(cat "$status_err_file")
   rm -f "$status_err_file"
@@ -360,23 +380,21 @@ cmd_write() {
     "Its stderr: ${status_err:-(nothing)}" \
     "Validate this branch with no-mistakes before attesting its head."
 
-  run_field=
-  branch_field=
-  head_field=
+  # The run record is read through bin/fm-nm-run-lib.sh, the one owner of this
+  # tool's output shape, so a change to that shape moves every reader at once
+  # instead of leaving this one refusing what the others still understand. Every
+  # token it yields is re-checked below, because this is tool output rather than
+  # input the note format may inherit unchecked.
+  run_field=$(fm_nm_strip_quotes "$(fm_nm_field "$status" id)")
+  branch_field=$(fm_nm_strip_quotes "$(fm_nm_field "$status" branch)")
+  head_field=$(fm_nm_strip_quotes "$(fm_nm_field "$status" head)")
   gates=
-  while read -r field value; do
-    case "$field" in
-      id) run_field=$value ;;
-      branch) branch_field=$value ;;
-      head) head_field=$value ;;
-      gate)
-        is_gate_name "$value" || continue
-        list_has "$value" "$gates" && continue
-        gates="$gates $value"
-        ;;
-    esac
+  while IFS= read -r step; do
+    is_gate_name "$step" || continue
+    list_has "$step" "$gates" && continue
+    gates="$gates $step"
   done <<EOF
-$(printf '%s\n' "$status" | parse_run_status)
+$(fm_nm_completed_steps "$status")
 EOF
 
   is_run_id "$run_field" || refuse run-record-unparsed \
@@ -388,19 +406,27 @@ EOF
     "The most recent pipeline run covers branch '$branch_field', not '$branch'." \
     "Attest from the branch that run validated, or name the run with --run <id>."
 
-  # The run record abbreviates the head it pushed. Requiring the local head to
-  # extend that prefix keeps the note bound to a commit the pipeline actually
-  # handled instead of to whatever HEAD happens to be now.
+  # The run record abbreviates the head it pushed, and the pipeline's own fix
+  # commits routinely advance that tip past the local HEAD, so a run tip ahead of
+  # HEAD on the same history is the normal state rather than a stale record.
+  # fm_nm_head_matches_worktree owns that directional rule for every caller that
+  # has to decide whether a run belongs to a worktree: equal matches, HEAD an
+  # ancestor of the run tip matches, and a run tip behind or beside HEAD does
+  # not. The note is then bound to the commit that run validated, which is the
+  # head the pipeline pushed and therefore the head the gate reads; binding it to
+  # a HEAD the run has already moved past would publish a note for a commit no
+  # pull request is open on.
   is_short_sha "$head_field" || refuse run-covers-another-head \
     "The pipeline run record names no usable head commit."
-  case "$head" in
-    "$head_field"*) ;;
-    *)
-      refuse run-covers-another-head \
-        "The pipeline run validated $head_field, but HEAD is $head." \
-        "Commits made after that run are not covered by it; validate them first."
-      ;;
-  esac
+  attest_head=$(git rev-parse --verify --quiet "$head_field^{commit}" 2>/dev/null) \
+    || refuse run-head-unavailable \
+      "The pipeline run validated $head_field, which is not a commit in this checkout." \
+      "That is a commit this repository does not have rather than one it has not validated." \
+      "Fetch the branch the pipeline pushed so that commit is present, then attest again."
+  fm_nm_head_matches_worktree . "$head_field" || refuse run-covers-another-head \
+    "The pipeline run validated $attest_head, but HEAD is $head, which that run does not cover." \
+    "HEAD is neither that commit nor an ancestor of it, so this branch carries work the run never saw, or its tip was rewritten." \
+    "Validate this branch again and attest the head that run pushes."
 
   missing=
   for gate in $REQUIRED_GATES; do
@@ -408,19 +434,19 @@ EOF
     missing="$missing $gate"
   done
   [ -z "$missing" ] || refuse run-incomplete \
-    "The pipeline run for $head has not completed:$missing." \
+    "The pipeline run for $attest_head has not completed:$missing." \
     "Required steps: $REQUIRED_GATES."
 
-  tool=$(no-mistakes --version 2>/dev/null | awk 'NR == 1 { print $3; exit }')
+  tool=$(fm_nm_run_bounded . "$NM_TIMEOUT" --version 2>/dev/null | awk 'NR == 1 { print $3; exit }')
   is_tool_token "$tool" || tool=unknown
 
   gates_csv=$(printf '%s' "${gates# }" | tr ' ' ',')
   payload=$(printf '%s: %s\nhead: %s\nrun: %s\ngates: %s\ntool: %s\n' \
-    "$ATTESTATION_KEY" "$ATTESTATION_VERSION" "$head" "$run_field" "$gates_csv" "no-mistakes/$tool")
+    "$ATTESTATION_KEY" "$ATTESTATION_VERSION" "$attest_head" "$run_field" "$gates_csv" "no-mistakes/$tool")
 
   # Refuse to publish anything this repository's own gate would reject, so a
   # malformed note can never reach the forge and be discovered only in CI.
-  verify_note_payload "$head" "$payload"
+  verify_note_payload "$attest_head" "$payload"
 
   # Reconcile against the repository this is about to write to, which is the
   # remote's push URL and not its fetch URL. The two are different repositories
@@ -433,25 +459,51 @@ EOF
   # The incoming ref is merged rather than forced over the local one, so an
   # attestation recorded locally with --no-push is not silently discarded by the
   # act of publishing a later one.
-  # Only the remote's name is ever printed. A resolved URL can embed credentials,
-  # and the name is what the caller passed and what they would re-run with.
+  #
+  # That repository is named in everything this prints, because "published to
+  # origin" does not say which repository was reached and the note is evidence
+  # only on the one holding the pull request head. Credentials a URL embeds are
+  # stripped from the name, and the remote's own error text is never echoed,
+  # because that text quotes the URL back verbatim.
+  push_target=$remote
   if [ "$push" -eq 1 ]; then
     push_url=$(git remote get-url --push "$remote" 2>/dev/null) || push_url=$remote
+    push_target=$(display_repository "$push_url")
     incoming_ref="$notes_ref-incoming"
-    if git fetch --quiet --no-tags --force "$push_url" "$notes_ref:$incoming_ref" 2>/dev/null; then
-      git notes --ref="$notes_ref" merge -s ours "$incoming_ref" >/dev/null 2>&1 \
-        || die "could not reconcile $notes_ref with the push target of $remote; resolve it and re-run"
-      git update-ref -d "$incoming_ref" 2>/dev/null || true
-    fi
+    # Absence and unreadability are two different answers and only one of them is
+    # a fact about the attestations there. A push target with no
+    # refs/notes/no-mistakes has nothing to reconcile against; a push target that
+    # cannot be read at all has told us nothing, so it stops the command before
+    # anything is recorded. git ls-remote --exit-code reports the first as exit 2
+    # and everything else as a failure, which is the same line the gate draws
+    # when it fetches this ref.
+    ls_rc=0
+    git ls-remote --exit-code "$push_url" "$notes_ref" >/dev/null 2>&1 || ls_rc=$?
+    case "$ls_rc" in
+      0)
+        git fetch --quiet --no-tags --force "$push_url" "$notes_ref:$incoming_ref" 2>/dev/null \
+          || die "could not fetch $notes_ref from $push_target, the push target of $remote; it advertises that ref but would not serve it, so resolve that and re-run"
+        git notes --ref="$notes_ref" merge -s ours "$incoming_ref" >/dev/null 2>&1 \
+          || die "could not reconcile $notes_ref with $push_target, the push target of $remote; resolve it and re-run"
+        git update-ref -d "$incoming_ref" 2>/dev/null || true
+        ;;
+      2) ;;
+      *)
+        die "could not read $notes_ref from $push_target, the push target of $remote (git exit $ls_rc); that is an unreadable repository rather than one with no attestations, so nothing was recorded; check access to it, or name another with --remote <name>, and re-run"
+        ;;
+    esac
   fi
-  git notes --ref="$notes_ref" add -f -m "$payload" "$head" >/dev/null \
+  git notes --ref="$notes_ref" add -f -m "$payload" "$attest_head" >/dev/null \
     || die "could not record the attestation note"
-  printf 'fm-attest: recorded %s for %s\n' "$notes_ref" "$head"
+  if [ "$attest_head" != "$head" ]; then
+    printf 'fm-attest: the run tip is ahead of HEAD %s, as the pipeline advances it with its own fix commits\n' "$head"
+  fi
+  printf 'fm-attest: recorded %s for %s\n' "$notes_ref" "$attest_head"
 
   [ "$push" -eq 1 ] || return 0
   git push --quiet "$remote" "$notes_ref:$notes_ref" \
-    || die "could not publish $notes_ref to $remote; re-run to reconcile with its push target and retry"
-  printf 'fm-attest: published %s to %s\n' "$notes_ref" "$remote"
+    || die "could not publish $notes_ref to $push_target, the push target of $remote; the attestation is evidence only on the repository holding the pull request head, so check that this is that repository or name it with --remote <name>, then re-run"
+  printf 'fm-attest: published %s to %s (the push target of %s)\n' "$notes_ref" "$push_target" "$remote"
 }
 
 # ---------------------------------------------------------------------------

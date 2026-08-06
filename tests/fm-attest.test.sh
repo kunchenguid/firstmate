@@ -245,7 +245,7 @@ publish_out() {
   ( cd "$repo" && PATH="$repo/stub/bin:$PATH" "$ATTEST" write 2>&1 )
 }
 
-test_write_refuses_a_run_covering_another_head() {
+test_write_refuses_a_run_head_absent_from_this_checkout() {
   local repo head out rc
   repo="$TMP_ROOT/write-other-head"
   new_repo "$repo"
@@ -253,11 +253,42 @@ test_write_refuses_a_run_covering_another_head() {
   install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo deadbeef completed)"
   out=$(write_out "$repo")
   rc=$?
-  [ "$rc" -ne 0 ] || fail "a run record covering another head was transcribed"
-  assert_contains "$out" "run-covers-another-head" "a stale run record was not reported distinctly"
+  [ "$rc" -ne 0 ] || fail "a run record naming a commit this checkout lacks was transcribed"
+  assert_contains "$out" "run-head-unavailable" "an absent run head was not reported distinctly"
+  # A commit this repository does not have is a fetch, not a re-validation, so
+  # it must not borrow the reason for a run that covers different work.
+  assert_not_contains "$out" "run-covers-another-head" \
+    "a commit absent from the checkout was reported as a run covering other work"
   git -C "$repo" rev-parse --verify --quiet "$NOTES_REF" >/dev/null 2>&1 \
     && fail "a refused attestation was still written"
-  pass "fm-attest.sh: write refuses a run record that covers another head"
+  pass "fm-attest.sh: write refuses a run head that is not a commit in this checkout"
+}
+
+test_write_attests_the_run_tip_the_pipeline_advanced_past_head() {
+  local repo head tip out rc verified
+  repo="$TMP_ROOT/write-tip-ahead"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  # The pipeline's own fix commits advance the run tip past the local checkout,
+  # so a run head ahead of HEAD on the same history is the normal state and the
+  # tip is the head the pull request is opened on.
+  tip=$(git -C "$repo" commit-tree -p "$head" -m "no-mistakes(review): fix" \
+    "$(git -C "$repo" rev-parse 'HEAD^{tree}')")
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${tip:0:8}" completed)"
+  out=$(write_out "$repo")
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a run tip ahead of HEAD on the same history was refused: $out"
+  assert_contains "$out" "recorded $NOTES_REF for $tip" \
+    "the note was not bound to the head that run validated"
+  verified=$(verify_out "$repo" "$tip") \
+    || fail "the gate rejected the attestation for the run tip: $verified"
+  assert_contains "$verified" "attested $tip" "the run tip was not attested"
+  rc=0
+  out=$(verify_out "$repo" "$head") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a commit the run advanced past was attested too"
+  assert_contains "$out" "no-attestation-for-head" \
+    "the commit the run advanced past was not refused for its own reason"
+  pass "fm-attest.sh: write attests the run tip the pipeline advanced past HEAD"
 }
 
 test_write_refuses_an_incomplete_run() {
@@ -411,10 +442,12 @@ test_write_publishes_to_the_push_target_it_reconciled_against() {
   out=$(publish_out "$repo")
   rc=$?
   [ "$rc" -eq 0 ] || fail "publishing to the remote's push target was refused: $out"
-  # The remote's name, never its resolved push URL, which can embed credentials.
-  assert_contains "$out" "published $NOTES_REF to origin" \
-    "the success line did not name the remote the caller passed"
-  assert_not_contains "$out" "$fork" "the resolved push URL was printed instead of the remote name"
+  # The repository the note actually reached, because a remote's name does not
+  # say which repository that is and only one of these two is the one the gate
+  # reads.
+  assert_contains "$out" "published $NOTES_REF to $fork" \
+    "the success line did not name the repository the note reached"
+  assert_not_contains "$out" "$parent" "the fetch URL was reported as the published target"
   published=$(git -C "$fork" ls-tree -r --name-only "$NOTES_REF" | tr -d '/')
   assert_contains "$published" "$head" "the attested head never reached the push target"
   assert_contains "$published" "$fork_seed" "publishing discarded the push target's own attestation"
@@ -423,6 +456,53 @@ test_write_publishes_to_the_push_target_it_reconciled_against() {
   assert_contains "$(git -C "$repo" notes --ref="$NOTES_REF" list)" "$local_only" \
     "publishing discarded an attestation recorded with --no-push"
   pass "fm-attest.sh: write reconciles with and publishes to the remote's push target"
+}
+
+test_write_publishes_a_first_attestation_to_a_push_target_with_no_ref() {
+  local repo fork head out rc published
+  repo="$TMP_ROOT/write-first-publish"
+  fork="$TMP_ROOT/write-first-publish-fork.git"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  git init -q --bare "$fork"
+  git -C "$repo" remote add origin "$fork"
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${head:0:8}" completed)"
+  out=$(publish_out "$repo")
+  rc=$?
+  # A push target that carries no attestation ref yet genuinely has nothing to
+  # reconcile against, which is the one reading of a failed read that is a fact
+  # about that repository rather than about our ability to reach it.
+  [ "$rc" -eq 0 ] || fail "a push target with no attestation ref yet was refused: $out"
+  assert_contains "$out" "published $NOTES_REF to $fork" \
+    "the success line did not name the repository the note reached"
+  published=$(git -C "$fork" ls-tree -r --name-only "$NOTES_REF" | tr -d '/')
+  assert_contains "$published" "$head" "the first attestation never reached the push target"
+  pass "fm-attest.sh: a push target with no attestation ref yet still receives the note"
+}
+
+test_write_refuses_an_unreadable_push_target_without_leaking_credentials() {
+  local repo parent head out rc
+  repo="$TMP_ROOT/write-unreadable-target"
+  parent="$TMP_ROOT/write-unreadable-target-parent.git"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  git init -q --bare "$parent"
+  git -C "$repo" remote add origin "$parent"
+  # A push target that cannot be read at all, carrying a secret in its URL as a
+  # remote's configuration may. Nothing listens on port 1, so the read fails
+  # locally without reaching any network.
+  git -C "$repo" config remote.origin.pushurl 'https://someone:s3cr3t@127.0.0.1:1/owner/repo.git'
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${head:0:8}" completed)"
+  out=$(cd "$repo" && GIT_TERMINAL_PROMPT=0 no_proxy='*' NO_PROXY='*' \
+    PATH="$repo/stub/bin:$PATH" "$ATTEST" write 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an unreadable push target was treated as one with no attestations"
+  assert_contains "$out" "127.0.0.1:1/owner/repo.git" \
+    "the refusal did not name the repository it could not read"
+  assert_not_contains "$out" "s3cr3t" "the push target's credentials were printed"
+  git -C "$repo" rev-parse --verify --quiet "$NOTES_REF" >/dev/null 2>&1 \
+    && fail "an attestation was recorded against a push target that was never read"
+  pass "fm-attest.sh: an unreadable push target stops the command rather than reading as an absent one"
 }
 
 test_absent_notes_ref_refuses_as_absent
@@ -435,7 +515,8 @@ test_missing_required_step_refuses_distinctly
 test_unusable_gate_list_refuses_as_malformed
 test_absent_head_commit_refuses_as_its_own_state
 test_head_bound_attestation_passes
-test_write_refuses_a_run_covering_another_head
+test_write_refuses_a_run_head_absent_from_this_checkout
+test_write_attests_the_run_tip_the_pipeline_advanced_past_head
 test_write_refuses_an_incomplete_run
 test_write_refuses_a_run_from_another_branch
 test_write_emits_an_attestation_the_gate_accepts
@@ -444,3 +525,5 @@ test_write_refuses_without_a_run_record
 test_write_surfaces_a_tool_failure_instead_of_reporting_no_run
 test_write_reports_an_unreadable_run_record_distinctly
 test_write_publishes_to_the_push_target_it_reconciled_against
+test_write_publishes_a_first_attestation_to_a_push_target_with_no_ref
+test_write_refuses_an_unreadable_push_target_without_leaking_credentials
