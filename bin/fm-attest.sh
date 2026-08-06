@@ -8,7 +8,7 @@
 # that a pull_request workflow can read with contents: read.
 #
 # Usage:
-#   fm-attest.sh write [--run <id>] [--remote <name>] [--no-push]
+#   fm-attest.sh write [--run <id>] [--remote <name>] [--no-push] [--notes-ref <ref>]
 #   fm-attest.sh show [--commit <rev>] [--notes-ref <ref>]
 #   fm-attest.sh verify --head <sha> [--notes-ref <ref>]
 #   fm-attest.sh --print-format
