@@ -502,7 +502,7 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
     "spawn should reuse the implicit terminal returned by Orca worktree creation"
   assert_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-spawn'$'\x1f''--text'$'\x1f''export GOTMPDIR=/tmp/fm-orcaspawnz1/gotmp'$'\x1f''--enter'$'\x1f''--json' \
     "spawn did not export GOTMPDIR through the Orca terminal"
-  assert_contains "$(cat "$log")" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --permission-mode auto" \
+  assert_contains "$(cat "$log")" "'/usr/bin/env' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --permission-mode auto" \
     "spawn did not send the selected Claude auto-mode launch command through Orca"
   assert_not_contains "$(cat "$log")" "--dangerously-skip-permissions" \
     "Orca-backed Claude launch retained the root-incompatible unrestricted bypass"
