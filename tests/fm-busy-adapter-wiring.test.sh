@@ -56,8 +56,12 @@ make_spawn_case() {  # <name> <harness> <id>
 }
 
 run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
+  # Every case here is a ship spawn, which carries an explicit delivery contract
+  # (AGENTS.md section 7); these tests are about busy-state wiring, so they pass a
+  # fixed valid one.
   local home=$1 wt=$2 fakebin=$3
   shift 3
+  set -- "$@" --mode no-mistakes --yolo off
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
