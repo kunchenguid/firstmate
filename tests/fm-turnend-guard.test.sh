@@ -1027,6 +1027,14 @@ cursor_shim_stop_without_loop_count() {
     | tail -n 1
 }
 
+cursor_shim_stop_without_session() {
+  local cwd=$1
+  shift
+  printf '{"cwd":"%s","workspace_roots":["%s"]}' "$cwd" "$CURSOR_FIXTURE_DIR" \
+    | CURSOR_WORKSPACE_ROOT="$CURSOR_FIXTURE_DIR" "$@" bash "$CURSOR_FIXTURE_DIR/bin/fm-turnend-guard-cursor.sh" 2>&1 \
+    | tail -n 1
+}
+
 cursor_shim_stop_for_conversation() {
   local conversation=$1
   shift
@@ -1361,18 +1369,39 @@ test_cursor_shim_prefers_conversation_id_for_persistent_scope() {
   CURSOR_FIXTURE_DIR=$dir
   : > "$dir/state/task1.meta"
   install_actionable_arm_stub "$dir"
-  out=$(cursor_shim_stop_for_conversation conversation-a env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=1)
+  out=$(cursor_shim_stop_for_conversation conversation-a env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
   assert_contains "$out" "firstmate watcher wake" \
     "the first conversation wake must stay normal"
-  out=$(cursor_shim_stop_for_conversation conversation-a env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=1)
+  out=$(cursor_shim_stop_for_conversation conversation-a env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
   assert_contains "$out" "firstmate watcher wake" \
     "a repeated wake in one conversation must stay below its ceiling"
-  out=$(cursor_shim_stop_for_conversation conversation-b env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=1)
+  out=$(cursor_shim_stop_for_conversation conversation-b env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
   assert_contains "$out" "firstmate watcher wake" \
     "a separate conversation must start a fresh persistent chain"
   assert_not_contains "$out" "diagnostic ceiling" \
     "a separate conversation must not inherit another conversation's bound"
+  out=$(cursor_shim_stop_for_conversation conversation-a env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
+  assert_contains "$out" "keeps re-firing" \
+    "a separate conversation must not clear the first conversation's persistent chain"
   pass "fm-turnend-guard-cursor: conversation_id isolates persistent chain state"
+}
+
+test_cursor_shim_fallback_session_scope() {
+  local dir out
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-fallback-scope")
+  CURSOR_FIXTURE_DIR=$dir
+  : > "$dir/state/task1.meta"
+  install_actionable_arm_stub "$dir"
+  out=$(cursor_shim_stop_without_session session-a env FM_CURSOR_WAKE_CHAIN_BUDGET=1)
+  assert_contains "$out" "firstmate watcher wake" \
+    "a payload without a session id must still deliver its first wake"
+  out=$(cursor_shim_stop_without_session session-b env FM_CURSOR_WAKE_CHAIN_BUDGET=1)
+  assert_contains "$out" "firstmate watcher wake" \
+    "a separate unidentified session must start a fresh wake chain"
+  out=$(cursor_shim_stop_without_session session-a env FM_CURSOR_WAKE_CHAIN_BUDGET=1)
+  assert_contains "$out" "keeps re-firing" \
+    "unidentified sessions must not share or clear each other's wake bounds"
+  pass "fm-turnend-guard-cursor: unidentified payloads keep isolated persistent chains"
 }
 
 test_cursor_shim_falls_back_to_loop_count_without_writable_state() {
@@ -2312,6 +2341,7 @@ test_cursor_shim_bounds_procevent_wake_refires
 test_cursor_shim_persists_bound_without_valid_loop_count
 test_cursor_shim_failure_budget_is_session_scoped
 test_cursor_shim_prefers_conversation_id_for_persistent_scope
+test_cursor_shim_fallback_session_scope
 test_cursor_shim_falls_back_to_loop_count_without_writable_state
 test_cursor_shim_arm_sources_x_mode_cadence
 test_cursor_shim_arm_defaults_cadence_without_x_mode

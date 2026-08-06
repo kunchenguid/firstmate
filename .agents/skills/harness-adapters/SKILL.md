@@ -261,8 +261,8 @@ to `fm_pane_is_busy` once the Enter-retry budget is spent, scoped to the two
 harnesses with verified Enter-while-busy queuing (opencode and cursor; a busy
 kimi or claude pane keeps `pending`): a busy pane means the Enter was accepted
 and queued (reported as `empty` so the caller does not re-send), while an idle
-pane keeps `pending` as a genuine swallow. The herdr adapter has the same fallback through its native busy state
-(`fm_backend_herdr_send_text_submit` consults `fm_backend_herdr_busy_state` on
+pane keeps `pending` as a genuine swallow. The herdr adapter has the same fallback through its native submit-status classifier
+(`fm_backend_herdr_send_text_submit` consults `fm_backend_herdr_classify_submit_agent_status` on
 the exhausted-retry pending path for opencode and cursor, verified live on
 herdr 2026-08-05), so queued Enters report as delivered on both backends.
 Regression coverage: `tests/fm-tmux-submit-busy.test.sh` covers the four

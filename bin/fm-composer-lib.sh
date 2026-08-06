@@ -290,7 +290,7 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content harness remainder arrow_leading=0
   plain_content=${5:-$content}
   harness=${6:-${FM_COMPOSER_HARNESS:-}}
-  case "$plain_content" in '→'|'→ '*) arrow_leading=1 ;; esac
+  case "$plain_content" in '→'*) arrow_leading=1 ;; esac
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     # Ghost stripping emptied the row, so every byte was de-emphasised. A bare
     # de-emphasised row is a confirmed empty agent composer only when its
@@ -347,7 +347,7 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   # Nothing on the row = empty composer.
   [ -n "$content" ] || { printf 'empty'; return 0; }
   # Known idle placeholder (matched before a leading glyph is stripped).
-  case "$content" in '→'|'→ '*) arrow_leading=1 ;; esac
+  case "$content" in '→'*) arrow_leading=1 ;; esac
   if { [ "$arrow_leading" -eq 0 ] || [ "$bordered" = 1 ] || [ "$harness" = cursor ]; } \
     && fm_composer_idle_matches "$content" "$idle_re" "$idle_case"; then
     printf 'empty'; return 0
