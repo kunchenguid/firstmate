@@ -164,10 +164,14 @@ write_ingest_receipt() { # <id> <sequence> <result>
 }
 
 result_field() { # <result> <field>
-  local count
-  count=$(grep -c "^$2=" "$1" 2>/dev/null || true)
-  [ "$count" -eq 1 ] || return 1
-  grep "^$2=" "$1" | cut -d= -f2-
+  LC_ALL=C awk -v prefix="$2=" '
+    $0 == "" { exit }
+    index($0, prefix) == 1 { count++; value = substr($0, length(prefix) + 1) }
+    END {
+      if (count != 1) exit 1
+      print value
+    }
+  ' "$1"
 }
 
 classify_result() {
@@ -256,14 +260,14 @@ fetch_document() { # <id> <remote-relative> <result-var>
   printf -v "$result_var" '%s' "$local_rel"
 }
 
-# The one adaptation a machine boundary forces on the mirrored bytes: C0 control
-# characters and DEL become '?' so a transported line cannot make the parent's
-# status file unsafe to read or print. Tab, every printable ASCII byte, and every
-# high byte pass through untouched, so ordinary UTF-8 notes mirror exactly as a
-# local secondmate would have written them. This rewrites bytes and never drops a
-# line: no single line can stop the stream.
-mirror_line() { # <line> -> the exact bytes to append
-  printf '%s' "$1" | LC_ALL=C tr '\1-\10\13-\37\177' '?'
+# The one adaptation a machine boundary forces on the mirrored bytes: NUL and
+# every other C0 control except tab and newline, plus DEL, become '?'. Printable
+# ASCII and every high byte pass through untouched, so ordinary UTF-8 notes
+# mirror exactly as a local secondmate would have written them. Newlines remain
+# framing rather than payload bytes, so this rewrites bytes and never drops a
+# line.
+normalize_payload() { # <source> <destination>
+  LC_ALL=C tr '\000-\010\013-\037\177' '?' < "$1" > "$2"
 }
 
 # The one place a line enters the parent status stream. A captured generation can
@@ -277,7 +281,7 @@ append_status_once() { # <status-file> <line>
 }
 
 cmd_ingest() {
-  local id=${1:-} result=${2:-} seq=${3:-} class blank payload schema status path from to from_hash to_hash payload_hash payload_bytes reason
+  local id=${1:-} result=${2:-} seq=${3:-} class blank payload normalized_payload schema status path from to from_hash to_hash payload_hash payload_bytes reason
   local actual_bytes actual_hash line doc local_doc rewritten appended=0 cursor_already=0 lock status_file tmp
   local fetch_rc append_rc undelivered=''
   validate_id "$id"
@@ -300,7 +304,7 @@ cmd_ingest() {
     case "$hash" in *[!A-Fa-f0-9]*|'') die "result carries an invalid SHA-256 value" ;; esac
     [ "${#hash}" -eq 64 ] || die "result carries an invalid SHA-256 length"
   done
-  blank=$(grep -n -m 1 '^$' "$result" | cut -d: -f1)
+  blank=$(LC_ALL=C awk '$0 == "" { print NR; exit }' "$result")
   case "$blank" in ''|*[!0-9]*) die "result has no payload boundary" ;; esac
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-remote-reply-ingest.XXXXXX") || die "cannot create ingest staging directory"
   trap 'rm -rf -- "$tmp"' EXIT
@@ -310,6 +314,8 @@ cmd_ingest() {
   actual_hash=$(sha256_file "$payload")
   [ "$actual_bytes" -eq "$payload_bytes" ] && [ "$actual_hash" = "$payload_hash" ] \
     || die "result payload bytes do not match its committed digest"
+  normalized_payload="$tmp/normalized-payload"
+  normalize_payload "$payload" "$normalized_payload" || die "cannot normalize remote reply payload"
   status_file="$STATE/$id.status"
   mkdir -p "$STATE" || die "cannot create parent state directory"
   [ ! -L "$status_file" ] || die "parent status log is a symlink"
@@ -333,7 +339,7 @@ cmd_ingest() {
   [ "$status" = delta ] && [ "$payload_bytes" -gt 0 ] || { fm_lock_release "$lock"; die "delta result has no payload"; }
   while IFS= read -r line || [ -n "$line" ]; do
     [ -n "$line" ] || continue
-    rewritten=$(mirror_line "$line")
+    rewritten=$line
     while IFS= read -r doc; do
       [ -n "$doc" ] || continue
       fetch_rc=0
@@ -355,7 +361,7 @@ cmd_ingest() {
     append_status_once "$status_file" "$rewritten" || append_rc=$?
     [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append remote reply"; }
     [ "$append_rc" -ne 0 ] || appended=$((appended + 1))
-  done < "$payload"
+  done < "$normalized_payload"
   if [ -n "$undelivered" ]; then
     line="blocked [key=remote-reply-document-$id]: remote documents did not transfer for $id ($undelivered)"
     append_rc=0
@@ -366,7 +372,7 @@ cmd_ingest() {
   while IFS= read -r corr; do
     [ -n "$corr" ] || continue
     fm_pending_reply_try_resolve "$STATE" "$corr" "$status_file" >/dev/null 2>&1 || true
-  done < <(grep -Eo 'corr=[A-Fa-f0-9]{16}' "$payload" | cut -d= -f2- | tr 'A-F' 'a-f' | awk '!seen[$0]++')
+  done < <(grep -Eo 'corr=[A-Fa-f0-9]{16}' "$normalized_payload" | cut -d= -f2- | tr 'A-F' 'a-f' | awk '!seen[$0]++')
   if [ -n "$seq" ]; then
     write_ingest_receipt "$id" "$seq" "$result" \
       || { fm_lock_release "$lock"; die "cannot commit remote reply ingestion receipt"; }

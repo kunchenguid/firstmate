@@ -242,19 +242,45 @@ assert_grep "offset=$ctl_offset" "$PARENT/state/remote-replies/ios.cursor" \
   "the cursor did not advance past a control-character line"
 pass "transported control bytes are normalized in place and never stop the stream"
 
+printf 'status=delta\n' >> "$REMOTE/state/parent-replies.status"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
+  || fail "the header-collision line was not captured"
+RESULT_SIX="$PARENT/state/procevent-inbox/$SID.6.result"
+remote_env "$ADAPTER" handle ios 6 "$RESULT_SIX" >/dev/null 2>&1 \
+  || fail "a payload protocol-field name stopped the stream"
+assert_grep 'status=delta' "$PARENT/state/ios.status" \
+  "the payload protocol-field line did not reach the parent stream"
+collision_offset=$(LC_ALL=C wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
+assert_grep "offset=$collision_offset" "$PARENT/state/remote-replies/ios.cursor" \
+  "the cursor did not advance past a payload protocol-field line"
+pass "payload protocol-field names cannot collide with transport metadata"
+
+printf 'working [key=nul-byte]: before\000after\n' >> "$REMOTE/state/parent-replies.status"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
+  || fail "the NUL-bearing line was not captured"
+RESULT_SEVEN="$PARENT/state/procevent-inbox/$SID.7.result"
+remote_env "$ADAPTER" handle ios 7 "$RESULT_SEVEN" >/dev/null 2>&1 \
+  || fail "a NUL byte stopped the stream"
+assert_grep 'working [key=nul-byte]: before?after' "$PARENT/state/ios.status" \
+  "the NUL byte was not normalized in place"
+nul_offset=$(LC_ALL=C wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
+assert_grep "offset=$nul_offset" "$PARENT/state/remote-replies/ios.cursor" \
+  "the cursor did not advance past a NUL-bearing line"
+pass "NUL bytes are normalized in place before shell line processing"
+
 printf '# Retryable remote answer\n' > "$REMOTE/data/reply/retry.md"
 printf 'done [key=retry-document]: retry local storage (data/reply/retry.md)\n' \
   >> "$REMOTE/state/parent-replies.status"
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
   || fail "the retryable document line was not captured"
-RESULT_SIX="$PARENT/state/procevent-inbox/$SID.6.result"
+RESULT_EIGHT="$PARENT/state/procevent-inbox/$SID.8.result"
 retry_cursor_before=$(cat "$PARENT/state/remote-replies/ios.cursor")
 retry_destination="$PARENT/data/remote-secondmates/ios/data/reply/retry.md"
 retry_decoy="$TMP_ROOT/retry-decoy.md"
 printf 'local decoy\n' > "$retry_decoy"
 ln -s "$retry_decoy" "$retry_destination"
 set +e
-remote_env "$ADAPTER" handle ios 6 "$RESULT_SIX" > "$TMP_ROOT/handle-local-document-failure.out" 2>&1
+remote_env "$ADAPTER" handle ios 8 "$RESULT_EIGHT" > "$TMP_ROOT/handle-local-document-failure.out" 2>&1
 local_document_rc=$?
 set -e
 [ "$local_document_rc" -ne 0 ] || fail "local document storage failure committed the delta"
@@ -267,7 +293,7 @@ assert_no_grep 'done [key=retry-document]' "$PARENT/state/ios.status" \
 assert_no_grep 'blocked [key=remote-reply-document-ios]' "$PARENT/state/ios.status" \
   "local document storage failure raised a permanent remote refusal"
 rm -f "$retry_destination"
-remote_env "$ADAPTER" handle ios 6 "$RESULT_SIX" >/dev/null \
+remote_env "$ADAPTER" handle ios 8 "$RESULT_EIGHT" >/dev/null \
   || fail "the document delta did not succeed after local storage recovered"
 assert_grep 'data/remote-secondmates/ios/data/reply/retry.md' "$PARENT/state/ios.status" \
   "the retried document pointer was not rewritten locally"
@@ -285,23 +311,23 @@ printf 'failed [corr=fedcba9876543210]: source was replaced\n' > "$REMOTE/state/
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/start-two.out" 2>&1 &
 RUNNER=$!
 wait "$RUNNER" || fail "continuity break was not captured as a structured result"
-RESULT_SEVEN=$(find "$PARENT/state/procevent-inbox" -name "$SID.7.result" -print -quit)
-[ -n "$RESULT_SEVEN" ] || fail "continuity break produced no durable result"
-[ "$(remote_env "$ADAPTER" classify "$RESULT_SEVEN")" = continuity-broken ] \
+RESULT_NINE=$(find "$PARENT/state/procevent-inbox" -name "$SID.9.result" -print -quit)
+[ -n "$RESULT_NINE" ] || fail "continuity break produced no durable result"
+[ "$(remote_env "$ADAPTER" classify "$RESULT_NINE")" = continuity-broken ] \
   || fail "truncated source was not classified as a continuity break"
 set +e
-remote_env "$ADAPTER" handle ios 7 "$RESULT_SEVEN" > "$TMP_ROOT/handle-seven.out" 2>&1
+remote_env "$ADAPTER" handle ios 9 "$RESULT_NINE" > "$TMP_ROOT/handle-nine.out" 2>&1
 handle_rc=$?
 set -e
 [ "$handle_rc" -eq 3 ] || fail "continuity handling returned an unexpected status: $handle_rc"
 assert_grep 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status" "continuity break did not escalate"
 assert_absent "$PARENT/state/procevent/$SID.source" "continuity break was re-armed without an operator rebase"
-remote_env "$ADAPTER" ingest ios "$RESULT_SEVEN" >/dev/null 2>&1 || true
+remote_env "$ADAPTER" ingest ios "$RESULT_NINE" >/dev/null 2>&1 || true
 [ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "continuity replay duplicated the escalation"
 pass "truncation is detected, escalated once, and not silently rebased"
 
-rm -f "$PARENT/state/procevent-inbox/$SID.7.handled"
+rm -f "$PARENT/state/procevent-inbox/$SID.9.handled"
 if remote_env "$ADAPTER" retire ios > "$TMP_ROOT/retire-pending.out" 2>&1; then
   fail "remote reply retirement accepted an unhandled captured result"
 fi
@@ -309,7 +335,7 @@ assert_grep 'unhandled captured result' "$TMP_ROOT/retire-pending.out" \
   "remote reply retirement did not explain its pending-result refusal"
 assert_absent "$PARENT/state/procevent/$SID.source" \
   "refused retirement left the reply source running past its pending-result check"
-remote_env "$ADAPTER" handle ios 7 "$RESULT_SEVEN" >/dev/null 2>&1 || [ "$?" -eq 3 ] \
+remote_env "$ADAPTER" handle ios 9 "$RESULT_NINE" >/dev/null 2>&1 || [ "$?" -eq 3 ] \
   || fail "pending continuity result could not be acknowledged after retirement refusal"
 remote_env "$ADAPTER" retire ios >/dev/null
 assert_absent "$PARENT/state/remote-replies/ios.cursor" "adapter retirement left its cursor"
