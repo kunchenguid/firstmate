@@ -141,8 +141,9 @@ does not re-send), while an idle pane keeps `pending` as a genuine swallow.
 The strict-buffer-clears-only-on-`empty` policy above still holds for the daemon
 and the lenient-`pending`-fails-for-`fm-send` policy still holds for steer
 verification - a queued Enter is treated as a delivered Enter, not a swallowed
-one. The herdr adapter has the same fallback through its native busy state
-(`fm_backend_herdr_busy_state` on the exhausted-retry pending path), so queued
+one. The herdr adapter has the same fallback through its native submit-status
+classifier (`fm_backend_herdr_classify_submit_agent_status` on the exhausted-
+retry pending path), so queued
 Enters report as delivered on both backends; the owner is `docs/tmux-backend.md`
 with herdr detail in `docs/herdr-backend.md`.
 
