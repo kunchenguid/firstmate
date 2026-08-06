@@ -1214,9 +1214,23 @@ handle_wake() {  # <reason> <state>
     stale:*)  kind=stale; arg="${reason#stale: }"; stale_detail="${arg#"$arg"}"
               case "$arg" in *" ("*) stale_detail="${arg#*" ("}"; arg="${arg%% \(*}" ;; esac
               decision=$(classify_stale "$arg" "$state")
-              case "$stale_detail" in
-                idle\ *s,\ possible\ wedge,\ escalation\ *)
-                  decision="escalate|${reason#stale: }" ;;
+              # An enriched wedge reason carries the watcher's own escalation
+              # count and its "do not re-absorb on the run-step/pane state alone"
+              # demand, so it overrides this daemon's cheaper status-log
+              # absorption - EXCEPT under a current declared pause. A `pause`
+              # verdict from classify_stale is not run-step or pane state at all:
+              # it is the crew's explicit declaration that this pane idles by
+              # design, which is exactly the cadence question the wedge timer
+              # cannot answer for itself. Overriding it wedge-escalated declared
+              # pauses every STALE_ESCALATE_SECS for hours (2026-08-05 incident).
+              # The pause action's bounded PAUSE_RESURFACE_SECS recheck still
+              # re-surfaces it, so a forgotten pause cannot rot invisibly.
+              case "${decision%%|*}" in
+                pause) : ;;
+                *) case "$stale_detail" in
+                     idle\ *s,\ possible\ wedge,\ escalation\ *)
+                       decision="escalate|${reason#stale: }" ;;
+                   esac ;;
               esac ;;
     check:*)  decision=$(classify_check "$reason") ;;
     heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;
