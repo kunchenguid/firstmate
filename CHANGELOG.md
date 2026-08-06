@@ -6,6 +6,19 @@ Versioning is semantic, and MAJOR is reserved for **contract** breaks that a
 running fleet would notice: the `state/<id>.meta` format, configuration file
 names, or a script's exit codes. MINOR adds capability, PATCH fixes behaviour.
 
+## [1.1.0] - 2026-08-06
+
+### Added
+
+- `bin/fm-sprint-poll.sh` - a scheduled wake so the PM checks the sprint board
+  without being asked. It emits a *scheduling* signal, not a content one: the
+  board lives behind MCP and cannot be read outside an agent turn, so the poll
+  can only say "time to look". Inert until `config/sprint-poll.env` exists, so
+  the watcher is unchanged for anyone who has not opted in.
+- Board skill gains the PM's rules: delegate rather than build, stay silent on
+  an empty board, and route an unclear card to the captain **through firstmate**
+  as a specific question rather than guessing at it.
+
 ## [1.0.0] - 2026-08-06
 
 First numbered release. The harness was mature well before this point - 100+
