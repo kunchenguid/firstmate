@@ -21,7 +21,8 @@
 #
 # Sourced by bin/fm-spawn.sh (resolves and records them) and bin/fm-brief.sh
 # (states them to the worker). Depends on bin/fm-ff-lib.sh for default_branch
-# and primary_head_commit.
+# and primary_head_commit, and on bin/fm-landed-lib.sh for the one
+# fetch-url-versus-push-url comparison both libraries reason about.
 #
 # task_base_resolve <repo-dir> sets, and clears first:
 #   TASK_BASE_SLOT          slot base commit SHA
@@ -43,12 +44,8 @@
 # shellcheck disable=SC2034 # The resolution outputs are read by callers (fm-spawn.sh) and tests, not by this lib.
 TASK_BASE_SLOT='' TASK_BASE_SLOT_REF='' TASK_BASE_CONTRIB='' TASK_BASE_CONTRIB_REF='' TASK_BASE_STATE='' TASK_BASE_ERROR=''
 
-# Normalize a remote URL for comparison: trailing slash and .git suffix only.
-# Deliberately not a URL parser - scheme/host differences are real differences.
-task_base_normalize_url() {  # <url>
-  local url=${1%/}
-  printf '%s\n' "${url%.git}"
-}
+# shellcheck source=bin/fm-landed-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-landed-lib.sh"
 
 # Name the remote-tracking ref that holds the UPSTREAM trunk, when this repo
 # contributes somewhere other than where it pushes. Two shapes are recognized:
@@ -57,9 +54,12 @@ task_base_normalize_url() {  # <url>
 #      layout firstmate itself uses - origin FETCHES upstream and PUSHES the
 #      fork, so `origin/<default>` is the upstream trunk while local
 #      `<default>` is the fork trunk.
+# The fetch/push comparison in shape 2 is bin/fm-landed-lib.sh's
+# fm_landed_push_url, so the two libraries that care about that split read it
+# the same way: this one names the upstream side, that one the landing side.
 # Prints the ref name, or returns 1 when no distinct upstream exists.
 task_base_upstream_ref() {  # <repo-dir>
-  local dir=$1 default fetch push
+  local dir=$1 default
   if git -C "$dir" remote get-url upstream >/dev/null 2>&1; then
     default=$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/upstream/HEAD 2>/dev/null) \
       && { printf '%s\n' "$default"; return 0; }
@@ -67,9 +67,7 @@ task_base_upstream_ref() {  # <repo-dir>
     printf 'upstream/%s\n' "$default"
     return 0
   fi
-  fetch=$(git -C "$dir" remote get-url origin 2>/dev/null) || return 1
-  push=$(git -C "$dir" remote get-url --push origin 2>/dev/null) || return 1
-  [ "$(task_base_normalize_url "$fetch")" != "$(task_base_normalize_url "$push")" ] || return 1
+  fm_landed_push_url "$dir" >/dev/null || return 1
   default=$(default_branch "$dir") || return 1
   printf 'origin/%s\n' "$default"
 }

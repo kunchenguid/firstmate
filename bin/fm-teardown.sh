@@ -768,16 +768,29 @@ pr_is_merged() {
 }
 
 # Is the branch's content already present in the up-to-date default branch?
-# Teardown owns the POLICY here - refresh the remote first, and measure against
-# that remote whenever an origin exists - while bin/fm-landed-lib.sh owns the
+# Teardown owns the POLICY here - refresh before measuring, and measure against
+# the refreshed remote trunks whenever an origin exists, preferring the trunk
+# this fleet actually pushes to - while bin/fm-landed-lib.sh owns the
 # containment instrument itself and why content beats commit reachability.
 # Returns non-zero when inconclusive (no default ref, unreadable refs, or a
 # merge conflict), so the caller refuses rather than guesses.
 content_in_default() {
-  local name ref
+  local name ref push_ref
   name=$(default_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+    # When origin FETCHES an upstream but PUSHES a fork, the ref just refreshed
+    # is the upstream trunk - a trunk this fleet never lands on - so measuring
+    # only it reports provably merged work as unlanded. Refresh the push
+    # remote's trunk as well and measure that first. A push url that exists but
+    # cannot be read is the landing target itself going unread, so it refuses
+    # rather than falling back to the upstream answer.
+    fm_landed_refresh_push_target "$WT" "$name" || return 1
+    if push_ref=$(fm_landed_push_target_ref "$WT" "$name"); then
+      if fm_landed_tree_contains "$WT" "$push_ref"; then
+        return 0
+      fi
+    fi
     ref="refs/remotes/origin/$name"
   elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
     ref="refs/heads/$name"
