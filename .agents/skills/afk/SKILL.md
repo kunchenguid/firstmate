@@ -164,11 +164,14 @@ Classify each wake this way:
 - `stale` with a terminal status or bare legacy captain-relevant line -> escalate.
   Nonterminal progress remains transient even when its prose contains a legacy free-text token or its seen-status marker already matches, so record a marker and self-handle.
   If the pane is still idle past `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a possible wedge.
-  This bounds wedge-detection latency to the threshold plus a tick: a delay, never a loss.
+  Absent the provably-working refresh below, this bounds wedge-detection latency to the threshold plus a tick; with it the bound is two thresholds.
+  Either way it is a delay, never a loss - only the constant differs.
 - A wedge marker that reaches its escalation point is checked against `bin/fm-crew-state.sh` once, and a crew reported as provably working has its marker refreshed instead of escalated.
   A static pane is not evidence of a wedge when an attributed run step or the backend's own busy verdict proves the crew is progressing, so a long-running worker whose progress does not reach the pane no longer re-alarms every `FM_STALE_ESCALATE_SECS` for as long as its work runs.
   Refreshing rather than dropping keeps this bounded: staying silent requires that working verdict to be re-earned every threshold, so a crew that freezes simply ages out and escalates, and detection after a freeze takes at most two thresholds rather than one.
   Only a positive working verdict refreshes it: a stopped, parked, failed, or unreadable crew still escalates on the same schedule.
+  Because a refresh restarts the clock, the age in that escalation is time without progress evidence rather than time since the pane first went idle, which is what the line reports.
+  One housekeeping pass makes at most `FM_STALE_WORKING_GATE_READS` (default 3) of those state reads, since the pass runs inline in the daemon loop; a marker past that budget keeps its aged marker for the next pass, so the budget can delay a wedge escalation by a tick but never suppress one.
   Healthy crewmates are autonomous and do not wait on firstmate mid-task.
 - `heartbeat` -> self-handle. The daemon runs its own cheap bash fleet scan
   every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for a

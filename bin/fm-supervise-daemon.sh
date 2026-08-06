@@ -42,8 +42,10 @@
 #     routine is escalated.
 #   - Bounded wedge latency: a stale pane without a declared external wait is
 #     escalated only after it has been idle for STALE_ESCALATE_SECS
-#     (configurable), rechecked once. A wedged crewmate is therefore detected
-#     within STALE_ESCALATE_SECS + a tick, never lost. A declared pause instead
+#     (configurable), rechecked once. Absent the provably-working refresh below,
+#     a wedged crewmate is therefore detected within STALE_ESCALATE_SECS + a
+#     tick; with it the bound is two thresholds (see below). Either way the
+#     wedge is never lost - only the constant differs. A declared pause instead
 #     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
 #     At the escalation point, and only there, a marker whose crew is PROVABLY
 #     WORKING (fm-classify-lib.sh's crew_absorb_class reports `working`) is
@@ -56,7 +58,13 @@
 #     threshold, so a crew that freezes - or a reader that stops answering -
 #     simply ages out and escalates, with nothing needing to notice and re-arm.
 #     The accepted cost is that detection after a freeze takes at most TWO
-#     thresholds rather than one; still bounded, still never lost.
+#     thresholds rather than one; still bounded, still never lost. The age in the
+#     escalation line correspondingly measures time since positive evidence was
+#     last seen, not time since the pane first went idle, and the line says so.
+#     That gate is a bounded-cost read, so a single pass makes at most
+#     STALE_WORKING_GATE_READS of them; markers past the budget keep their aged
+#     marker and are reconsidered next pass, so the budget delays an escalation
+#     by a tick at worst and can never drop one.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
@@ -102,6 +110,11 @@
 #                                   as a possible wedge (default 240)
 #          FM_PAUSE_RESURFACE_SECS  idle seconds before a declared external wait
 #                                   re-surfaces as a recheck (default 3600)
+#          FM_STALE_WORKING_GATE_READS
+#                                   max provably-working crew-state reads one
+#                                   housekeeping pass may make; markers past the
+#                                   budget stay aged for the next pass rather
+#                                   than escalating or being dropped (default 3)
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
 #                                   digests; 0 = flush immediately (default 90)
 #          FM_HEARTBEAT_SCAN_SECS   cadence for the catch-all status scan
@@ -203,6 +216,13 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 FM_SUPERVISOR_SUPPORTED_BACKENDS="tmux herdr"
 INJECT_SKIP_DEFAULT="heartbeat"
 STALE_ESCALATE_SECS_DEFAULT=240
+# Per-PASS budget for the provably-working gate's crew-state reads. The gate is
+# one read per crew per STALE_ESCALATE_SECS, but housekeeping runs inline in the
+# daemon's main loop, so without a per-pass cap N simultaneously-due crews cost N
+# serial reads - each of which may make a bounded no-mistakes call - and stall
+# watcher-exit detection, wake handling and escalation flush for that whole time.
+# Capping the count makes the added stall a constant instead of fleet-sized.
+STALE_WORKING_GATE_READS_DEFAULT=3
 ESCALATE_BATCH_SECS_DEFAULT=90
 HEARTBEAT_SCAN_SECS_DEFAULT=300
 HOUSEKEEPING_TICK_DEFAULT=15
@@ -979,6 +999,12 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
   local state=$1 now due f key task win marker age last max_defer oldest pause_secs
+  local working_reads=0 working_reads_max
+  working_reads_max=${FM_STALE_WORKING_GATE_READS:-$STALE_WORKING_GATE_READS_DEFAULT}
+  # Floor of one. A budget of zero would defer every marker on every pass, which
+  # is permanent silence - the one outcome this whole path exists to prevent.
+  case "$working_reads_max" in ''|*[!0-9]*) working_reads_max=1 ;; esac
+  [ "$working_reads_max" -ge 1 ] || working_reads_max=1
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -1056,11 +1082,32 @@ housekeeping() {  # <state>
          # within a bounded time and never lost is preserved, the constant doubles.
          # Only a POSITIVE working verdict refreshes; stopped, parked, failed and
          # unreadable crews all escalate exactly as before.
+         #
+         # The read is bounded per crew per threshold but housekeeping runs
+         # INLINE in the main loop, so N simultaneously-due crews would otherwise
+         # cost N serial bounded reads and stall wake handling for their sum.
+         # STALE_WORKING_GATE_READS caps how many one pass may make. Past the
+         # budget the gate is SKIPPED rather than decided either way, and the
+         # marker is left aged and untouched - it is neither escalated nor
+         # refreshed - so the next pass reconsiders it with a fresh budget.
+         # That is the direction this fails: a deferred read delays an escalation
+         # by a housekeeping tick, and can never suppress one. Deferral cannot
+         # starve a marker either, because every marker that DID spend budget
+         # this pass leaves the due set - refreshed for a threshold, or escalated
+         # and removed - so the budget falls to the deferred ones next pass.
+         if [ "$working_reads" -ge "$working_reads_max" ]; then
+           log "stale gate deferred to next pass (read budget ${working_reads_max} spent, marker kept aged): $win"
+           continue
+         fi
+         working_reads=$(( working_reads + 1 ))
          if [ "$(crew_absorb_class "$task")" = working ]; then
            log "stale marker refreshed (provably working, wedge aging restarts): $win"
            _now > "$marker"
          else
-           escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
+           # ${age} is time since positive evidence was last seen, NOT time since
+           # the pane first went idle: a refresh restarts it. The wording says so
+           # because this line is what a human reads for triage.
+           escalate_add "$state" "no progress evidence for ${age}s (possible wedge): $win"
            stale_marker_remove "$win" "$state"
          fi ;;
     esac
