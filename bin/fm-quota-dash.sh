@@ -184,8 +184,13 @@ countdown_line() {  # <seconds-left>
 
 if [ "$ONCE" -eq 1 ]; then collect; draw; exit 0; fi
 
-trap 'printf "\033[?25h%s\n" "$R"; exit 0' INT TERM
-printf '\033[?25l'
+# Alternate screen buffer, the same one htop, vim and less use: the dashboard
+# draws on a scratch screen and leaving restores whatever the terminal held
+# before it started. Clearing the real screen instead - which is what this did -
+# destroys the captain's scrollback and leaves the dashboard behind on exit.
+restore_terminal() { printf '\033[?25h\033[?1049l%s' "$R"; }
+trap 'restore_terminal; exit 0' INT TERM EXIT
+printf '\033[?1049h\033[?25l'
 
 while :; do
   collect
@@ -195,7 +200,7 @@ while :; do
     countdown_line "$left"
     if read -r -s -n 1 -t 1 key 2>/dev/null; then
       case "$key" in
-        q|Q) printf '\033[?25h%s\n' "$R"; exit 0 ;;
+        q|Q) exit 0 ;;
         r|R) break ;;
       esac
     fi
