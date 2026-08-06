@@ -29,19 +29,38 @@ muse_prompt_glyph_is_bright() {  # <capture-path|--self-test>
 const fs = require("fs");
 
 function applySgr(foreground, raw) {
-  const params = raw === "" ? [0] : raw.split(";").map((value) => Number(value));
+  const fields = raw === "" ? ["0"] : raw.split(";");
+  const params = fields.map((value) => value === "" ? 0 : Number(value));
   for (let index = 0; index < params.length; index += 1) {
     const code = params[index];
     if (code === 0 || code === 39) {
       foreground = null;
     } else if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97)) {
       foreground = { kind: "indexed" };
-    } else if (code === 38 && params[index + 1] === 2 && params.slice(index + 2, index + 5).every(Number.isFinite)) {
-      foreground = { kind: "rgb", values: params.slice(index + 2, index + 5) };
-      index += 4;
-    } else if (code === 38 && params[index + 1] === 5 && Number.isFinite(params[index + 2])) {
-      foreground = { kind: "indexed" };
-      index += 2;
+    } else if (code === 48 || code === 58) {
+      const mode = params[index + 1];
+      const channels = params.slice(index + 2, index + 5);
+      const channelFields = fields.slice(index + 2, index + 5);
+      if (mode === 2 && channels.length === 3 && channelFields.every((value) => /^[0-9]+$/.test(value)) && channels.every((value) => Number.isInteger(value) && value >= 0 && value <= 255)) {
+        index += 4;
+      } else if (mode === 5 && /^[0-9]+$/.test(fields[index + 2] ?? "") && Number.isInteger(params[index + 2]) && params[index + 2] >= 0 && params[index + 2] <= 255) {
+        index += 2;
+      } else {
+        break;
+      }
+    } else if (code === 38) {
+      const mode = params[index + 1];
+      const channels = params.slice(index + 2, index + 5);
+      const channelFields = fields.slice(index + 2, index + 5);
+      if (mode === 2 && channels.length === 3 && channelFields.every((value) => /^[0-9]+$/.test(value)) && channels.every((value) => Number.isInteger(value) && value >= 0 && value <= 255)) {
+        foreground = { kind: "rgb", values: channels };
+        index += 4;
+      } else if (mode === 5 && /^[0-9]+$/.test(fields[index + 2] ?? "") && Number.isInteger(params[index + 2]) && params[index + 2] >= 0 && params[index + 2] <= 255) {
+        foreground = { kind: "indexed" };
+        index += 2;
+      } else {
+        foreground = { kind: "invalid" };
+      }
     }
   }
   return foreground;
@@ -70,7 +89,9 @@ function isBrightTruecolor(pane) {
 
 const positive = "\x1b[38;2;90;160;255m\x1b[48;2;38;56;84m⟩";
 const brightThenDark = "\x1b[38;2;204;211;219mearlier bright\x1b[38;2;30;30;30m⟩";
-if (!isBrightTruecolor(positive) || isBrightTruecolor(brightThenDark)) process.exit(2);
+const brightThenMalformed = "\x1b[38;2;204;211;219mearlier bright\x1b[38;2m⟩";
+const brightThenOutOfRange = "\x1b[38;2;204;211;219mearlier bright\x1b[38;2;256;160;255m⟩";
+if (!isBrightTruecolor(positive) || isBrightTruecolor(brightThenDark) || isBrightTruecolor(brightThenMalformed) || isBrightTruecolor(brightThenOutOfRange)) process.exit(2);
 if (process.argv[2] === "--self-test") process.exit(0);
 
 const pane = fs.readFileSync(process.argv[2], "utf8");
@@ -90,7 +111,7 @@ NODE
 
 if [ "${1:-}" = --ansi-self-test ]; then
   command -v node >/dev/null 2>&1 || fail "node is required to test Muse prompt glyph ANSI state"
-  muse_prompt_glyph_is_bright --self-test || fail "Muse glyph color parser accepted a bright-then-dark negative control"
+  muse_prompt_glyph_is_bright --self-test || fail "Muse glyph color parser accepted a dark or malformed negative control"
   pass "Muse glyph color parser follows effective foreground state"
   exit 0
 fi

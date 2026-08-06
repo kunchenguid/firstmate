@@ -1110,8 +1110,8 @@ effort_flag_for_harness() {
 case "$LAUNCH" in
   *__MUSEBIN__*)
     MUSE_BIN=$(resolve_muse_binary) || exit 1
-    MUSE_CONFIG_HOME=${XDG_CONFIG_HOME:-${HOME:-}/.config}
-    MUSE_DATA_HOME=${XDG_DATA_HOME:-${HOME:-}/.local/share}
+    MUSE_CONFIG_HOME=$(resolve_directory_input XDG_CONFIG_HOME "${XDG_CONFIG_HOME:-${HOME:-}/.config}") || exit 1
+    MUSE_DATA_HOME=$(resolve_directory_input XDG_DATA_HOME "${XDG_DATA_HOME:-${HOME:-}/.local/share}") || exit 1
     MUSE_AUTH_FILE="$MUSE_CONFIG_HOME/muse/auth.json"
     if ! muse_credential_present "$MUSE_AUTH_FILE"; then
       if [ -n "${META_API_KEY:-}" ]; then

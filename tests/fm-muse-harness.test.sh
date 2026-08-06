@@ -117,7 +117,8 @@ make_spawn_case() {
   wt="$case_dir/wt"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   id="muse-$name-x1"
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" \
+    "$home/xdgconfig" "$home/xdgdata"
   printf 'brief\n' > "$home/data/$id/brief.md"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   touch "$home/state/.last-watcher-beat"
@@ -139,7 +140,7 @@ run_muse_spawn() {  # <home> <proj> <wt> <fakebin> <id> [extra args...]
     FM_FAKE_HARNESS_RESULT="${FM_FAKE_HARNESS_RESULT:-}" \
     FM_FAKE_WORKER_META_KEY="${FM_TEST_MUSE_WORKER_KEY-present}" \
     META_API_KEY="${FM_TEST_MUSE_KEY-test-key}" \
-    XDG_CONFIG_HOME="$home/xdgconfig" \
+    XDG_CONFIG_HOME="${FM_TEST_MUSE_CONFIG_HOME-$home/xdgconfig}" \
     XDG_DATA_HOME="${FM_TEST_MUSE_DATA_HOME-$home/xdgdata}" \
     PATH="$fakebin:$PATH" \
     "$SPAWN" "$id" "$proj" muse "$@" 2>&1
@@ -332,6 +333,32 @@ EOF
   status=$?
   expect_code 0 "$status" "muse spawn should accept a stored credential"
   pass "muse spawn accepts a stored credential without META_API_KEY"
+}
+
+test_spawn_resolves_relative_xdg_roots() {
+  local rec case_dir home proj wt fakebin id caller resolved_caller launch binding out status
+  rec=$(make_spawn_case relative-xdg)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  caller="$case_dir/caller"
+  mkdir -p "$caller/cfg/muse" "$caller/data"
+  resolved_caller=$(cd "$caller" && pwd -P)
+  printf '{"schema_version":1}\n' > "$caller/cfg/muse/auth.json"
+  out=$(cd "$caller" && FM_TEST_MUSE_KEY='' FM_TEST_MUSE_WORKER_KEY='' \
+    FM_TEST_MUSE_CONFIG_HOME=cfg FM_TEST_MUSE_DATA_HOME=data \
+    run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "muse spawn with relative XDG roots should succeed: $out"
+  launch=$(cat "$home/launch.log")
+  assert_contains "$launch" "XDG_CONFIG_HOME='$resolved_caller/cfg'" \
+    "muse launch did not forward the resolved config root"
+  assert_contains "$launch" "XDG_DATA_HOME='$resolved_caller/data'" \
+    "muse launch did not forward the resolved data root"
+  binding="$home/state/$id.muse-session"
+  assert_grep "sessions_root=$resolved_caller/data/muse/sessions" "$binding" \
+    "muse busy binding did not use the worker's resolved data root"
+  pass "muse resolves relative XDG roots before preflight and launch"
 }
 
 # muse has no primary supervision protocol, and its Claude-compatible hook
@@ -711,6 +738,44 @@ EOF
   pass "the Muse session cache avoids rescans and refreshes safely across incarnations"
 }
 
+test_cached_session_revalidates_after_namespace_change() {
+  local dir state id root second_log verdict today year month day
+  dir="$TMP_ROOT/cache-ambiguity"
+  state="$dir/state"
+  root="$dir/sessions"
+  id=cacheambiguity
+  mkdir -p "$state"
+  today=$(date '+%Y/%m/%d')
+  year=${today%%/*}
+  today=${today#*/}
+  month=${today%%/*}
+  day=${today#*/}
+
+  write_session_log "$root" "$year" "$month" "$day" first "$dir/ws" >/dev/null <<EOF
+$(muse_log_run_started first-run)
+EOF
+  printf 'sessions_root=%s\nworkspace_root=%s\nbinding_id=cache-ambiguity\n' \
+    "$root" "$dir/ws" > "$state/$id.muse-session"
+  verdict=$(classify_muse "$state" "$id")
+  [ "$verdict" = "busy muse-session-log" ] \
+    || fail "the first session did not resolve before the ambiguity check: got '$verdict'"
+
+  second_log="$root/$year/$month/$day/second/session.jsonl"
+  mkdir -p "${second_log%/*}"
+  : > "$second_log"
+  verdict=$(classify_muse "$state" "$id")
+  [ "$verdict" = "busy muse-session-log" ] \
+    || fail "an uninitialized second session changed the resolved verdict to '$verdict'"
+
+  write_session_log "$root" "$year" "$month" "$day" second "$dir/ws" >/dev/null <<EOF
+$(muse_log_run_started second-run)
+EOF
+  verdict=$(classify_muse "$state" "$id")
+  [ "$verdict" = "unknown muse-session-log" ] \
+    || fail "a second concurrent main session left the cached verdict at '$verdict'"
+  pass "a changed Muse namespace revalidates cached session uniqueness"
+}
+
 # muse's own native sub-agents write independent run lifecycles one directory
 # deeper, under subagent/<child-session-id>/. Folding a child's log would report
 # the parent busy long after the parent's turn ended.
@@ -851,6 +916,7 @@ test_spawn_maps_effort_and_model
 test_spawn_refuses_without_credential
 test_spawn_refuses_caller_only_environment_credential
 test_spawn_accepts_stored_credential
+test_spawn_resolves_relative_xdg_roots
 test_spawn_refuses_secondmate
 test_spawn_writes_busy_binding_and_teardown_removes_it
 test_muse_escape_aliases_clear_the_composer
@@ -862,6 +928,7 @@ test_binding_selects_the_matching_main_log
 test_workspace_binding_treats_glob_characters_literally
 test_binding_excludes_preexisting_log_when_mtimes_tie
 test_session_log_cache_reuses_and_refreshes_binding
+test_cached_session_revalidates_after_namespace_change
 test_subagent_logs_are_excluded
 test_missing_and_unreadable_bindings_are_unknown_never_idle
 test_settled_log_stays_unknown_while_the_idle_gate_is_closed

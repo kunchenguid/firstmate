@@ -419,7 +419,7 @@ Muse Code is a CREWMATE and SCOUT adapter only.
 
 muse reads `META_API_KEY` (which always wins) or a stored credential at `${XDG_CONFIG_HOME:-$HOME/.config}/muse/auth.json`, written by `muse login` (an OIDC device-code flow) or `muse auth set --api-key-stdin`.
 `bin/fm-spawn.sh` accepts `META_API_KEY` only when it can prove the backend worker already has it, because a command-scoped caller variable does not cross a long-lived backend daemon and the secret must never enter launch argv.
-The supported fleet path is the stored credential, and `fm-spawn` forwards only the resolved non-secret `XDG_CONFIG_HOME` and `XDG_DATA_HOME` roots to keep authentication and session-log binding aligned with the worker.
+The supported fleet path is the stored credential, and `fm-spawn` resolves the non-secret `XDG_CONFIG_HOME` and `XDG_DATA_HOME` roots to absolute paths before preflight and forwarding to keep authentication and session-log binding aligned with the worker.
 `bin/fm-spawn.sh` refuses the launch when neither worker-reachable path is present, because an unauthenticated pane does NOT exit: it sits on `Sign in at this page: https://auth.meta.com/oauth/device/?code=XXXX-XXXX` / `Waiting for approval…` indefinitely, which supervision would read as a wedged worker rather than a missing credential.
 Escalate that refusal to the captain as a needed credential.
 
@@ -434,7 +434,7 @@ It was verified to drop the foreign `rules_file` context block while KEEPING a p
 ### Session event log and the busy fold
 
 Sessions persist to `${XDG_DATA_HOME:-$HOME/.local/share}/muse/sessions/YYYY/MM/DD/<session-uuid>/session.jsonl`, and `fm-spawn` writes `state/<id>.muse-session` pinning that root, the task worktree, its binding incarnation, and every pre-existing matching main log so the classifier binds a pane to its one new log.
-After unique resolution, the classifier persists the exact main log in `state/<id>.muse-session-current` and folds that path directly until it disappears or a new spawn binding marks it as belonging to the prior incarnation.
+After unique resolution, the classifier persists the exact main log in `state/<id>.muse-session-current`, folds that path directly while the bounded current-day main-session namespace is unchanged, and requires unique resolution again when that namespace changes, the path disappears, or a new spawn binding supersedes the incarnation.
 Each submitted turn is bracketed by `{"payload":{"kind":"run","run_id":"<uuid>","event":{"kind":"started"` and a matching `"event":{"kind":"terminal"`, whose `terminal` value was observed as `completed` and `cancelled`.
 Because the interrupt path produces a real terminal, this source covers interruption, which Claude's `Stop` hook does not.
 Never use `--no-session-log` for a crewmate: it disables the only busy source muse has.

@@ -93,7 +93,7 @@ T+30s fold=settled
 
 Two decoys were observed in real logs and are pinned by regressions in `tests/fm-muse-harness.test.sh`:
 a nested `"record":{"kind":"terminal"}` cleanup-effect payload that is not a run terminal, and independent sub-agent run lifecycles under `subagent/<child-session-id>/session.jsonl`.
-The same regression suite verifies that unique resolution is cached, a replacement spawn binding selects its fresh main log, missing cached logs fail closed, and cached sub-agent paths are rejected.
+The same regression suite verifies that unique resolution is cached, a changed current-day main-session namespace restores ambiguity to unknown, a replacement spawn binding selects its fresh main log, missing cached logs fail closed, and cached sub-agent paths are rejected.
 
 ### Autonomy, trust, and sandbox
 
@@ -122,7 +122,7 @@ An unauthenticated launch does not exit; it waits indefinitely:
 ```
 
 That is why `bin/fm-spawn.sh` preflights worker-reachable `META_API_KEY` or `<config>/muse/auth.json` and refuses before creating an endpoint.
-A caller-only `META_API_KEY` is refused because a long-lived backend daemon does not inherit it, while the non-secret resolved `XDG_CONFIG_HOME` and `XDG_DATA_HOME` roots are forwarded so the stored credential and session-log binding reach the same worker environment.
+A caller-only `META_API_KEY` is refused because a long-lived backend daemon does not inherit it, while the non-secret `XDG_CONFIG_HOME` and `XDG_DATA_HOME` roots are resolved to absolute paths before preflight and forwarding so the stored credential and session-log binding reach the same worker environment.
 
 ### Foreign personal context
 
@@ -193,6 +193,6 @@ FM_MUSE_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-muse-signals-live-e2e.test.sh
 ```
 
 The Muse signals guard requires a real `muse` binary and tmux but uses `--provider echo`, so it does not require `META_API_KEY` and does not open the deferred real-model idle gate.
-The guard follows SGR state through the final prompt glyph and runs a bright-then-dark negative control before accepting that glyph's effective luminance.
+The guard follows SGR state through the final prompt glyph and rejects both bright-then-dark and malformed-RGB negative controls before accepting that glyph's effective luminance.
 
 The portable counterparts that run in ordinary CI are `tests/fm-muse-harness.test.sh`, `tests/fm-tmux-agent-liveness.test.sh`, `tests/fm-composer-lib.test.sh`, and `tests/fm-composer-ghost.test.sh`.
