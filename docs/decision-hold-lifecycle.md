@@ -43,13 +43,21 @@ The index is content-fingerprinted over the open-hold set and the ruling-documen
 It is derived and never authority: deleting it is always safe, decision truth stays in the ruling documents, and hold truth stays in the backlog.
 
 The script produces candidates, excerpts, and an eligibility verdict, and never grades or closes.
-Document class is decided structurally from naming - a ruling declares itself in the `<who>-rulings-<when>` or `<who>-ruling-<when>` form, a commission in the `<what>commission.md` suffix form - and an unrecognised name is `other`, which escalates.
-A verdict token counts only inside single-line markdown emphasis, and a markdown table row is scanned alone rather than through a window, because a windowed scan attributed one table row's verdict to a different row six lines above it.
+Document class is decided structurally from naming: the `<what>commission.md` suffix form is tested first and is decisive, then the anchored `<who>-rulings-<when>` or `<who>-ruling-<when>` prefix form, then the containing directory.
+The commission suffix wins because a document that declares itself a commission must never satisfy the captain's condition 1, however much the rest of its name resembles a ruling, and an unrecognised name is `other`, which escalates.
+A hold identifier matches only when it is bounded by delimiters, so a row that rules a longer identifier containing this one cannot stand in for it, and the index scan and the closure test share that single pattern.
+A verdict token counts only inside single-line markdown emphasis and only as a whole word with an optional verb inflection, so an emphasised word that merely contains a token does not qualify.
+A markdown table row is scanned alone rather than through a window, because a windowed scan attributed one table row's verdict to a different row six lines above it.
 Eligibility is necessary and not sufficient: closure additionally requires a caller grade of `rules` and a separate `fm-decision-hold.sh resolve` call.
 
-The empty-set law is enforced as a terminal refusal.
-A ruling-class document that is symlinked, outside the corpus root, or unreadable yields `verdict=NO_RULING_READ` and exit 3, and no index is published, because an unmatched hold must never rest on a ruling nobody read.
+The empty-set law is enforced as a terminal refusal, over both inputs.
+A ruling-class document that is symlinked, outside the corpus root, or unreadable yields `verdict=NO_RULING_READ` and exit 3, and a `tasks-axi` hold listing that fails yields `verdict=NO_HOLD_READ` and exit 3.
+No index is published in either case, because an unmatched hold must never rest on a ruling nobody read and `open_holds=0` must never rest on a backlog nobody could list.
 Symlinks are listed by the corpus walk specifically so they can be refused rather than silently dropped.
+
+`closure-test` enforces corpus containment on its own `--ruling` argument rather than trusting the caller, because that argument is what authorises a closure.
+An absolute path outside the corpus root, a `../` traversal, and a symlinked path component are each refused with `reason=ruling-document-outside-corpus-root`.
+`resolve --from-ruling` then reads the `closure=` field of that test's stdout and requires it to be exactly `permitted`, because the caller-supplied path is echoed back in the same output and any search of the whole stream can be satisfied by a crafted filename.
 
 `bin/fm-session-start.sh` surfaces one bounded line when open captain decisions exist and stays silent otherwise.
 A read-only session reads the existing index instead of rebuilding it, because publishing the index is a mutation.
@@ -75,9 +83,14 @@ Every case in `tests/fm-ruling-reconcile.test.sh` was shown able to reject its d
 Each assertion was re-run against a deliberately broken copy of the production script and observed failing, then re-run against the real code and observed passing.
 Two of those controls found real defects that the green suite alone had hidden: a `find -type f` corpus walk that dropped a symlinked ruling document instead of refusing it, and two `grep -qv` assertions that could never fail on multi-line output.
 
+Closure-gate hardening verification date: 2026-08-06.
+Six further cases cover the ways the two-condition test could be satisfied without being met, and each was mutation-controlled the same way by reverting exactly one guard in the production script and observing the case fail.
+They cover a hold identifier that is only a prefix of the identifier the cited row actually rules, an emphasised English word that merely contains a verdict token, a ruling document reached by absolute path, `../` traversal, or symlink from outside the corpus root, a commission whose filename resembles a ruling, a `--from-ruling` path crafted to plant `closure=permitted` in the closure test's own echoed output, and a `tasks-axi` hold listing that fails.
+The fixture corpus gained three ruling rows and one commission that exist only to be refused, so the suite fails rather than passes if any of those guards is removed.
+
 `bin/fm-ruling-reconcile.sh` was additionally measured against this home's real corpus rather than fixtures alone.
-Across the twelve documents it classifies as rulings, the flagship ruling table yields 15 eligible rows of 24; the other nine state their verdict without emphasis and therefore escalate.
-That number is reported rather than tuned, because widening the token vocabulary until it reproduced a hoped-for count would defeat the condition it implements.
+Across the twelve documents it classifies as rulings, the flagship ruling table yielded 15 eligible rows of 24 when measured; the other nine state their verdict without emphasis and therefore escalate.
+That figure is an upper bound now that tokens match only as whole words, and it is reported rather than tuned, because widening the token vocabulary until it reproduced a hoped-for count would defeat the condition it implements.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.

@@ -383,7 +383,7 @@ EOF
 }
 
 command_resolve() {
-  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0 from_ruling='' ruling_path='' ruling_line='' closure_out=''
+  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0 from_ruling='' ruling_path='' ruling_line='' closure_out='' closure_err='' closure_verdict='' closure_reason=''
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -423,14 +423,28 @@ command_resolve() {
     esac
     [ -x "$SCRIPT_DIR/fm-ruling-reconcile.sh" ] \
       || fail "fm-ruling-reconcile.sh is required to verify --from-ruling"
-    closure_out=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+    closure_err=$(mktemp "${TMPDIR:-/tmp}/fm-decision-hold-closure.XXXXXX") \
+      || fail "could not create a work file to verify --from-ruling"
+    if ! closure_out=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
       "$SCRIPT_DIR/fm-ruling-reconcile.sh" closure-test "$id" \
-      --ruling "$ruling_path" --line "$ruling_line" --grade rules 2>&1) \
-      || fail "could not verify --from-ruling provenance: $from_ruling"
-    case "$closure_out" in
-      *"closure=permitted"*) : ;;
-      *) fail "--from-ruling $from_ruling fails the captain closure test: $(printf '%s' "$closure_out" | sed -n 's/^reason=//p' | head -1)" ;;
-    esac
+      --ruling "$ruling_path" --line "$ruling_line" --grade rules 2>"$closure_err"); then
+      closure_reason=$(tr '\n' ' ' < "$closure_err")
+      rm -f "$closure_err"
+      fail "could not verify --from-ruling provenance: $from_ruling: $closure_reason"
+    fi
+    rm -f "$closure_err"
+    # The verdict is read as a FIELD of the closure test's own stdout, never as
+    # text found somewhere in its output. closure-test echoes the caller-supplied
+    # path back on `ruling_file=`, so a search of the whole stream is satisfied by
+    # a crafted filename - a mutable, caller-influenced string treated as an
+    # attestation is exactly the honour system this flag exists to retire. Every
+    # `closure=` line is collected, so a verdict smuggled in beside the real one
+    # fails this comparison rather than shadowing it.
+    closure_verdict=$(printf '%s\n' "$closure_out" | sed -n 's/^closure=//p')
+    if [ "$closure_verdict" != permitted ]; then
+      closure_reason=$(printf '%s\n' "$closure_out" | sed -n 's/^reason=//p' | head -1)
+      fail "--from-ruling $from_ruling fails the captain closure test: ${closure_reason:-closure verdict was not exactly permitted}"
+    fi
   fi
   if verify_hold_resolved "$id"; then
     hold_show=$(task_show "$id")

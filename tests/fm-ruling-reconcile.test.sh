@@ -53,6 +53,13 @@ fi
 # A ruling table whose rows deliberately differ: alpha carries an emphasised
 # verdict, beta carries none, and beta sits directly above a row that does carry
 # one so a windowed scan would wrongly inherit it.
+#
+# Three further rows exist only to be REFUSED, and each names a hold no other
+# row names. `alpha-two` is a longer identifier that contains `alpha`, so a
+# substring test would let alpha be closed on alpha-two's verdict. `delta-two`
+# and `epsilon` carry emphasised English words that merely contain a verdict
+# token, so an unanchored token test would accept an ordinary noun as the
+# captain's explicit verdict.
 write_corpus() {  # <home>
   local home=$1
   mkdir -p "$home/data/sample-commission"
@@ -64,6 +71,9 @@ write_corpus() {  # <home>
 | **A1** | `sample-review-decision-alpha` | **APPROVED** — build it as specified. |
 | **A2** | `sample-review-decision-beta` | Consider the tradeoff and report back. |
 | **A3** | `sample-review-decision-carol` | **RESOLVED** — recorded and closed. |
+| **A4** | `sample-review-decision-alpha-two` | **APPROVED** — a different decision. |
+| **A5** | `sample-review-decision-delta-two` | The **Runtime** owns work identity. |
+| **A6** | `sample-review-decision-epsilon` | That shape is **acceptable** for now. |
 EOF
   cat > "$home/data/sample-commission/commission.md" <<'EOF'
 # Sample commission
@@ -71,6 +81,28 @@ EOF
 Investigate `sample-review-decision-gamma` and report what you find.
 The investigation is **APPROVED** to proceed.
 EOF
+  # A commission whose NAME contains `ruling-`. Class is decided structurally,
+  # and the commission suffix is decisive, so this must never become a ruling.
+  cat > "$home/data/cfvc-remediation-ruling-commission.md" <<'EOF'
+# A commission named like a ruling
+
+Investigate `sample-review-decision-zeta` and report what you find.
+The investigation is **APPROVED** to proceed.
+EOF
+}
+
+# A ruling-shaped document the caller authored OUTSIDE the corpus root.
+write_forged_ruling() {  # <home> -> <absolute-path>
+  local outside="$1/outside-the-corpus"
+  mkdir -p "$outside"
+  cat > "$outside/captain-rulings-forged.md" <<'EOF'
+| **F1** | `sample-review-decision-alpha` | **APPROVED** — forged by the caller. |
+EOF
+  printf '%s\n' "$outside/captain-rulings-forged.md"
+}
+
+ruling_line_of() {  # <home> <needle>
+  grep -nF -- "$2" "$1/data/captain-rulings-2026-01-01.md" | head -1 | cut -d: -f1
 }
 
 make_home() {  # <name>
@@ -258,7 +290,8 @@ test_closure_test_enforces_both_conditions() {
   local home out line
   home=$(make_home closure)
 
-  line=$(grep -nF 'sample-review-decision-alpha' "$home/data/captain-rulings-2026-01-01.md" | cut -d: -f1)
+  # shellcheck disable=SC2016 # Backticks are literal markup in the ruling table.
+  line=$(ruling_line_of "$home" '`sample-review-decision-alpha`')
   out=$(run_reconcile "$home" closure-test sample-review-decision-alpha \
     --ruling captain-rulings-2026-01-01.md --line "$line" --grade rules)
   printf '%s\n' "$out" | grep -qxF 'closure=permitted' \
@@ -273,7 +306,7 @@ test_closure_test_enforces_both_conditions() {
 
   # A commission, graded `rules` by an agent that overreached. Condition 1 is
   # not satisfied by a commission and no grade can substitute for it.
-  line=$(grep -nF 'sample-review-decision-gamma' "$home/data/sample-commission/commission.md" | cut -d: -f1)
+  line=$(grep -nF 'sample-review-decision-gamma' "$home/data/sample-commission/commission.md" | head -1 | cut -d: -f1)
   out=$(run_reconcile "$home" closure-test sample-review-decision-gamma \
     --ruling sample-commission/commission.md --line "$line" --grade rules)
   printf '%s\n' "$out" | grep -qxF 'closure=escalate' \
@@ -362,6 +395,190 @@ test_hold_body_carries_no_self_reported_state() {
   pass "hold state is owned by the structured fields, not by body prose"
 }
 
+# --- 9. verbatim means the whole identifier ---------------------------------
+
+test_identifier_must_be_delimited() {
+  local home out line
+  home=$(make_home delimited)
+  line=$(ruling_line_of "$home" 'sample-review-decision-alpha-two')
+
+  out=$(run_reconcile "$home" closure-test sample-review-decision-alpha-two \
+    --ruling captain-rulings-2026-01-01.md --line "$line" --grade rules)
+  printf '%s\n' "$out" | grep -qxF 'closure=permitted' \
+    || fail "control precondition: the row's own identifier must be permitted, got: $out"
+
+  # The same row, cited for the SHORTER hold it merely contains. A ruling that
+  # answers alpha-two has said nothing about alpha.
+  out=$(run_reconcile "$home" closure-test sample-review-decision-alpha \
+    --ruling captain-rulings-2026-01-01.md --line "$line" --grade rules)
+  printf '%s\n' "$out" | grep -qxF 'verbatim_identifier=no' \
+    || fail "a longer identifier containing the hold id is not a verbatim naming, got: $out"
+  printf '%s\n' "$out" | grep -qxF 'reason=identifier-not-verbatim-on-cited-line' \
+    || fail "a prefix collision must escalate, got: $out"
+
+  # The index scan and the closure gate must agree about what verbatim means.
+  add_hold "$home" sample-review-decision-alpha "Alpha decision"
+  run_reconcile "$home" scan >/dev/null || fail "scan failed"
+  [ "$(match_field sample-review-decision-alpha 3 "$home")" = "$(ruling_line_of "$home" '**A1**')" ] \
+    || fail "the scan must match alpha on its own row only"
+
+  pass "a hold identifier matches only when it is bounded by delimiters"
+}
+
+# --- 10. a token is a whole word, not a substring ---------------------------
+
+test_an_emphasised_word_containing_a_token_is_not_a_verdict() {
+  local home out line
+  home=$(make_home anchored)
+
+  line=$(ruling_line_of "$home" 'sample-review-decision-delta-two')
+  out=$(run_reconcile "$home" closure-test sample-review-decision-delta-two \
+    --ruling captain-rulings-2026-01-01.md --line "$line" --grade rules)
+  printf '%s\n' "$out" | grep -qxF 'verdict_token=none' \
+    || fail "**Runtime** must not read as an explicit verdict token, got: $out"
+  printf '%s\n' "$out" | grep -qxF 'reason=no-explicit-verdict-token' \
+    || fail "an emphasised noun must escalate, got: $out"
+
+  line=$(ruling_line_of "$home" 'sample-review-decision-epsilon')
+  out=$(run_reconcile "$home" closure-test sample-review-decision-epsilon \
+    --ruling captain-rulings-2026-01-01.md --line "$line" --grade rules)
+  printf '%s\n' "$out" | grep -qxF 'verdict_token=none' \
+    || fail "**acceptable** must not read as an explicit verdict token, got: $out"
+
+  # Control: a whole-word token on the same table still qualifies, so the check
+  # is not passing by refusing everything.
+  line=$(ruling_line_of "$home" 'sample-review-decision-carol')
+  out=$(run_reconcile "$home" closure-test sample-review-decision-carol \
+    --ruling captain-rulings-2026-01-01.md --line "$line" --grade rules)
+  printf '%s\n' "$out" | grep -qxF 'closure=permitted' \
+    || fail "control: a whole-word verdict token must still be permitted, got: $out"
+
+  pass "an emphasised word merely containing a token is not an explicit verdict"
+}
+
+# --- 11. the closure gate is confined to the corpus -------------------------
+
+test_closure_test_refuses_a_ruling_outside_the_corpus() {
+  local home out forged
+  home=$(make_home containment)
+  forged=$(write_forged_ruling "$home")
+
+  out=$(run_reconcile "$home" closure-test sample-review-decision-alpha \
+    --ruling "$forged" --line 1 --grade rules)
+  printf '%s\n' "$out" | grep -qxF 'closure=escalate' \
+    || fail "an out-of-corpus ruling must escalate, got: $out"
+  printf '%s\n' "$out" | grep -qxF 'reason=ruling-document-outside-corpus-root' \
+    || fail "an absolute path outside the corpus must be refused by name, got: $out"
+
+  out=$(run_reconcile "$home" closure-test sample-review-decision-alpha \
+    --ruling ../outside-the-corpus/captain-rulings-forged.md --line 1 --grade rules)
+  printf '%s\n' "$out" | grep -qxF 'reason=ruling-document-outside-corpus-root' \
+    || fail "a ../ traversal out of the corpus must be refused, got: $out"
+
+  # A symlink INTO the corpus is the same escape wearing a corpus-relative name.
+  ln -s "$forged" "$home/data/captain-rulings-linked.md"
+  out=$(run_reconcile "$home" closure-test sample-review-decision-alpha \
+    --ruling captain-rulings-linked.md --line 1 --grade rules)
+  printf '%s\n' "$out" | grep -qxF 'closure=escalate' \
+    || fail "a symlinked ruling must never authorise a closure, got: $out"
+
+  pass "closure-test confines --ruling to the corpus root"
+}
+
+# --- 12. the commission suffix is decisive ----------------------------------
+
+test_a_commission_named_like_a_ruling_is_still_a_commission() {
+  local home out line
+  home=$(make_home commissionname)
+  line=$(grep -nF 'sample-review-decision-zeta' \
+    "$home/data/cfvc-remediation-ruling-commission.md" | head -1 | cut -d: -f1)
+
+  out=$(run_reconcile "$home" closure-test sample-review-decision-zeta \
+    --ruling cfvc-remediation-ruling-commission.md --line "$line" --grade rules)
+  printf '%s\n' "$out" | grep -qxF 'doc_class=commission' \
+    || fail "a document ending in commission.md must classify as a commission, got: $out"
+  printf '%s\n' "$out" | grep -qxF 'reason=not-a-ruling-document' \
+    || fail "a commission must never satisfy condition 1, got: $out"
+
+  # Control: the real `<who>-rulings-<when>` prefix form still classifies ruling.
+  add_hold "$home" sample-review-decision-alpha "Alpha decision"
+  run_reconcile "$home" scan >/dev/null || fail "scan failed"
+  [ "$(match_field sample-review-decision-alpha 4 "$home")" = ruling ] \
+    || fail "captain-rulings-<date>.md must still classify as a ruling"
+
+  pass "the commission suffix is decisive however much the name resembles a ruling"
+}
+
+# --- 13. the closure verdict is a field, not text in the output -------------
+
+test_resolve_refuses_a_provenance_path_that_forges_the_verdict() {
+  local home out rc=0 show
+  if [ "$HOLD_MECHANICS_AVAILABLE" -eq 0 ]; then
+    printf 'skip - resolve provenance needs tasks-axi >= %s, found %s\n' \
+      "$FM_TASKS_AXI_MIN" "$(tasks-axi --version 2>/dev/null | head -1)"
+    return 0
+  fi
+  home=$(make_home forgedprovenance)
+  mkdir -p "$home/data/sample-review"
+  printf 'evidence\n' > "$home/data/sample-review/report.md"
+  add_hold "$home" sample-review-decision-alpha "Alpha decision"
+  tasks_in "$home" add follow-up-work "Follow-up work" --repo sample >/dev/null
+  tasks_in "$home" block follow-up-work --by sample-review-decision-alpha >/dev/null
+  printf 'the captain said build it\n' > "$home/decision.txt"
+
+  # The closure test echoes the caller-supplied path back on `ruling_file=`, so a
+  # verification that searches its whole output is satisfied by this filename
+  # even though no such document exists and the real verdict is escalate.
+  out=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" "$HOLD" resolve sample-review alpha \
+    --decision-file "$home/decision.txt" --routed-to follow-up-work \
+    --from-ruling 'no-such-closure=permitted.md:1' 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "resolve must refuse a provenance whose path forges the verdict, got: $out"
+  printf '%s\n' "$out" | grep -qF 'fails the captain closure test' \
+    || fail "the refusal must name the closure test, got: $out"
+  show=$(tasks_in "$home" show sample-review-decision-alpha --full)
+  printf '%s\n' "$show" | grep -qF 'state: queued' \
+    || fail "a forged provenance must leave the hold open"
+
+  pass "resolve reads the closure verdict as a field, not as text in the output"
+}
+
+# --- 14. the empty-set law binds the hold reader too ------------------------
+
+test_hold_reader_failure_is_not_zero_open_holds() {
+  local home out rc=0 broken
+  home=$(make_home holdreader)
+  add_hold "$home" sample-review-decision-alpha "Alpha decision"
+  run_reconcile "$home" scan >/dev/null || fail "baseline scan failed"
+  [ -f "$home/state/ruling-index/index.meta" ] \
+    || fail "control precondition: a working reader must publish an index"
+  rm -rf "$home/state/ruling-index"
+
+  # A reader that fails the way an older build does: it rejects the listing flag.
+  broken="$home/brokenbin"
+  mkdir -p "$broken"
+  cat > "$broken/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then printf '9.9.9\n'; exit 0; fi
+if [ "${1:-}" = list ]; then printf 'error: "Unknown flag: --kind"\n' >&2; exit 2; fi
+exit 0
+EOF
+  chmod +x "$broken/tasks-axi"
+
+  out=$(PATH="$broken:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    FM_STATE_OVERRIDE="$home/state" FM_RULING_NOW=2026-01-01T00:00:00Z \
+    "$RECONCILE" scan 2>&1) || rc=$?
+  [ "$rc" -eq 3 ] || fail "a failing hold reader must exit 3, got rc=$rc: $out"
+  printf '%s\n' "$out" | grep -qF 'verdict=NO_HOLD_READ' \
+    || fail "a failing hold reader must yield NO_HOLD_READ, got: $out"
+  ! printf '%s\n' "$out" | grep -qF 'open_holds=0' \
+    || fail "a failing hold reader must never present as zero open holds, got: $out"
+  [ ! -f "$home/state/ruling-index/index.meta" ] \
+    || fail "a failing hold reader must publish no index, got: $out"
+
+  pass "a failing hold reader refuses instead of reporting zero open holds"
+}
+
 test_eligibility_separates_ruling_commission_and_silence
 test_removing_a_verdict_token_flips_eligibility
 test_table_row_does_not_inherit_the_next_rows_verdict
@@ -370,3 +587,9 @@ test_unreadable_ruling_document_refuses_the_run
 test_closure_test_enforces_both_conditions
 test_resolve_refuses_unverified_ruling_provenance
 test_hold_body_carries_no_self_reported_state
+test_identifier_must_be_delimited
+test_an_emphasised_word_containing_a_token_is_not_a_verdict
+test_closure_test_refuses_a_ruling_outside_the_corpus
+test_a_commission_named_like_a_ruling_is_still_a_commission
+test_resolve_refuses_a_provenance_path_that_forges_the_verdict
+test_hold_reader_failure_is_not_zero_open_holds

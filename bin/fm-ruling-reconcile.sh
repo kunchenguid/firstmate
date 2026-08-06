@@ -86,20 +86,31 @@ VERDICT_WINDOW="${FM_RULING_VERDICT_WINDOW:-12}"
 # increment exists to avoid. Common English words were therefore removed after
 # measurement: `OPTION` matched the attribution span
 # `**Captain, 2026-08-06, choosing option (c) verbatim:**`, and `RUN` matches
-# ordinary instruction prose. Structural emphasis in this corpus
+# ordinary instruction prose (`**Run the migration**`) as a whole word, so
+# anchoring cannot rescue it. Structural emphasis in this corpus
 # (`**Captain, verbatim:**`, `**One owner:**`, `**not met**`) matches nothing
 # here, which is the intended behaviour.
 #
+# A token is matched as a WHOLE WORD, never as a substring of a longer one, and
+# only a verb inflection may follow it. Without that anchoring the set accepts
+# any emphasised word that merely CONTAINS a token - `**Runtime**` for `RUN`,
+# `**sparkline**` for `PARK`, `**acceptable**` for `ACCEPT`, `**adoption**` for
+# `ADOPT` - which is precisely the condition-2 vacuity this set exists to avoid.
+# The inflection tail keeps the intended readings (`**ADOPTED**`, `**PARKED**`,
+# `**REPLACED**`) while refusing the accidental ones.
+#
 # Recall is deliberately NOT tuned up to a target count. On this home's flagship
-# ruling table the set recognises 15 of 24 rows; the other nine state their
-# verdict without emphasis ("Replace the fictional cap of 3 with an **enforced
-# ceiling of 10**" emphasises the ceiling, not the verb) and therefore escalate.
+# ruling table the set recognised 15 of 24 rows when measured, an upper bound now
+# that tokens are whole-word anchored; the other nine state their verdict without
+# emphasis ("Replace the fictional cap of 3 with an **enforced ceiling of 10**"
+# emphasises the ceiling, not the verb) and therefore escalate.
 # Widening the vocabulary until it reproduced a hoped-for number would be the
 # exact failure this increment exists to avoid.
 #
 # Both conditions together remain NECESSARY AND NOT SUFFICIENT: a match makes a
 # row eligible for grading, never closed.
-VERDICT_TOKENS="${FM_RULING_VERDICT_TOKENS:-APPROVED|AUTHORI[SZ]ED|RESOLVED|REJECTED|DECLINED|DEFERRED|WITHDRAWN|SUPERSEDED|ADOPT|ACCEPT|PARK|RETAIN|RETARGET|REPLACE|PRUNE|CONSOLIDATE|ACTIVATE|RUN|DO NOT|NOT READY|NO-GO|GO-AHEAD|FAIL CLOSED|DECISION:|RULING:}"
+VERDICT_TOKENS="${FM_RULING_VERDICT_TOKENS:-APPROVED|AUTHORI[SZ]ED|RESOLVED|REJECTED|DECLINED|DEFERRED|WITHDRAWN|SUPERSEDED|ADOPT|ACCEPT|PARK|RETAIN|RETARGET|REPLACE|PRUNE|CONSOLIDATE|ACTIVATE|DO NOT|NOT READY|NO-GO|GO-AHEAD|FAIL CLOSED|DECISION:|RULING:}"
+VERDICT_RE='(^|[^A-Za-z])('"$VERDICT_TOKENS"')(E?[DS]|ING)?([^A-Za-z]|$)'
 
 GRADES='rules commissions cites defers'
 
@@ -151,6 +162,19 @@ tsv_cell() {  # <text>
   printf '%s' "$1" | tr '\t\r\n' '   ' | cut -c "1-$EXCERPT_CHARS"
 }
 
+# The hold identifier as an extended regex that matches only a WHOLE identifier.
+# Hold ids are `<origin>-decision-<key>`, so one id is routinely a prefix of
+# another and a bare substring test satisfies the captain's condition 1 with the
+# WRONG row: `sample-review-decision-alpha` would be "named verbatim" by a row
+# that rules `sample-review-decision-alpha-two`. The index scan and the closure
+# gate share this one pattern so they can never disagree about what verbatim
+# means.
+hold_pattern() {  # <hold-id>
+  local esc
+  esc=$(printf '%s' "$1" | sed 's/[^A-Za-z0-9_-]/\\&/g')
+  printf '(^|[^A-Za-z0-9._-])%s([^A-Za-z0-9._-]|$)' "$esc"
+}
+
 # --- corpus scope -----------------------------------------------------------
 
 resolve_data_root() {
@@ -182,24 +206,43 @@ ruling_candidates() {  # <resolved-root>
 # (captain-rulings-2026-08-04-commission-32.md) and a commission INSIDE a
 # rulings directory (captain-rulings-2026-08-06/cfvc-remediation-commission.md).
 # Naming carries the class in two stable positions: a ruling declares itself in
-# the `<who>-rulings-<when>` prefix form, a commission declares itself in the
-# `<what>commission.md` suffix form. Prefix wins, then suffix, then the
-# directory. Anything else is `other` and escalates, so an unrecognised naming
-# convention costs a human read and can never let a commission satisfy the
-# captain's condition 1.
+# the `<who>-rulings-<when>` PREFIX form, evaluated only over the leading one or
+# two dash-separated segments, and a commission declares itself in the
+# `<what>commission.md` SUFFIX form.
+#
+# The commission suffix is decisive and is therefore tested first: a document
+# that ends in `commission.md` is a commission however much its name resembles a
+# ruling elsewhere, because letting a commission satisfy the captain's
+# condition 1 is the exact inversion this two-position design exists to prevent.
+# The prefix form is anchored for the same reason - an unanchored `*ruling-*`
+# matches `cfvc-remediation-ruling-commission.md` and makes the commission
+# branch unreachable. The directory is consulted last and only when the name
+# itself declares nothing. Anything else is `other` and escalates, so an
+# unrecognised naming convention costs a human read and can never close a hold.
+declares_ruling() {  # <basename-or-directory-name>
+  local n
+  n=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case "$n" in
+    ruling|rulings|ruling-*|rulings-*|ruling.*|rulings.*) return 0 ;;
+  esac
+  case "$n" in
+    *-*) case "${n#*-}" in ruling-*|rulings-*) return 0 ;; esac ;;
+  esac
+  return 1
+}
+
 doc_class() {  # <path>
-  local base parent
+  local base parent lower
   base=$(basename "$1")
   parent=$(basename "$(dirname "$1")")
-  case "$base" in
-    *ruling-*|*rulings-*|ruling*|Ruling*|RULING*) printf 'ruling\n'; return ;;
+  lower=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')
+  case "$lower" in
+    *commission.md) printf 'commission\n'; return ;;
   esac
-  case "$base" in
-    *commission.md|*commission.MD|*Commission.md) printf 'commission\n'; return ;;
-  esac
-  case "$parent" in
-    *rulings-*|*ruling*|*Ruling*) printf 'ruling\n'; return ;;
-  esac
+  if declares_ruling "$base" || declares_ruling "$parent"; then
+    printf 'ruling\n'
+    return
+  fi
   printf 'other\n'
 }
 
@@ -208,23 +251,36 @@ doc_class() {  # <path>
 # Open captain holds come from tasks-axi, which is the backlog's owner. Rows are
 # accepted only when the identifier is a slug and the state is one this script
 # recognises, so the listing's count/help decoration can never enter the index.
+#
+# THE EMPTY-SET LAW APPLIES TO THIS READER TOO. A `list` that fails - an older
+# build that rejects a flag, a broken backlog, any runtime error - is a terminal
+# refusal, never an empty hold set. Absorbing it would publish `open_holds=0`,
+# and session start's quiet path would then say nothing at all, which reads as
+# "no captain decision is waiting" on exactly the evidence that no one could
+# tell. A genuinely empty backlog exits 0 with a count of 0 and stays distinct.
 
 tasks_axi() {
   (cd "$FM_HOME" && tasks-axi "$@")
 }
 
-collect_holds() {  # -> <hold-id>\t<state>
-  local state out
+collect_holds() {  # <out-tsv> <err-file>
+  local out=$1 err=$2 state raw
+  : > "$out"
   for state in queued held in_flight; do
-    out=$(tasks_axi list --kind captain --state "$state" 2>/dev/null) || continue
-    printf '%s\n' "$out" | awk -F',' '
+    if ! raw=$(tasks_axi list --kind captain --state "$state" 2>"$err"); then
+      printf 'schema=%s\nverdict=NO_HOLD_READ\nunreadable=tasks-axi list --kind captain --state %s\nreason=%s\n' \
+        "$SCHEMA_INDEX" "$state" "$(tr '\t\r\n' '   ' < "$err")" >&2
+      return 3
+    fi
+    printf '%s\n' "$raw" | awk -F',' '
       /^  [A-Za-z0-9]/ {
         id = $1; sub(/^  +/, "", id)
         if (id !~ /^[A-Za-z0-9._-]+$/) next
         if ($2 != "queued" && $2 != "held" && $2 != "in_flight") next
         printf "%s\t%s\n", id, $2
-      }'
-  done | LC_ALL=C sort -u
+      }' >> "$out"
+  done
+  LC_ALL=C sort -u -o "$out" "$out"
 }
 
 # --- fingerprints -----------------------------------------------------------
@@ -285,7 +341,7 @@ build_ruling_inventory() {  # <resolved-root> <out-tsv>
 # against the document rather than trusting this classifier.
 
 verdict_in_window() {  # <file> <line> -> "<line>\t<token>" or ""
-  local file=$1 line=$2 end n span text
+  local file=$1 line=$2 end span text hit
   # A markdown table row is self-contained: one ruling per line, verdict in its
   # own cells. Scanning a window from a table row would attribute a NEIGHBOURING
   # row's verdict to this hold - measured, on the real corpus, where row A4's
@@ -296,27 +352,24 @@ verdict_in_window() {  # <file> <line> -> "<line>\t<token>" or ""
     '|'*|' '*'|'*|$'\t'*'|'*)
       span=$(printf '%s' "$text" \
         | grep -oE '\*\*[^*]+\*\*' 2>/dev/null \
-        | grep -inE "$VERDICT_TOKENS" 2>/dev/null \
-        | head -n1 | cut -d: -f2-)
+        | grep -iE "$VERDICT_RE" 2>/dev/null \
+        | head -n1)
       [ -n "$span" ] || return 1
       printf '%s\t%s\n' "$line" "$(tsv_cell "$span")"
       return 0
       ;;
   esac
+  # The window is read once, as a range, and the emphasised spans it contains
+  # are numbered relative to its first line. Re-reading the file once per window
+  # line costs a full scan from the start per candidate, and this runs inline in
+  # fm-session-start.sh for every hold in every document.
   end=$((line + VERDICT_WINDOW))
-  n=$line
-  while [ "$n" -le "$end" ]; do
-    span=$(sed -n "${n}p" "$file" 2>/dev/null \
-      | grep -oE '\*\*[^*]+\*\*' 2>/dev/null \
-      | grep -inE "$VERDICT_TOKENS" 2>/dev/null \
-      | head -n1 | cut -d: -f2-)
-    if [ -n "$span" ]; then
-      printf '%s\t%s\n' "$n" "$(tsv_cell "$span")"
-      return 0
-    fi
-    n=$((n + 1))
-  done
-  return 1
+  hit=$(sed -n "${line},${end}p" "$file" 2>/dev/null \
+    | grep -noE '\*\*[^*]+\*\*' 2>/dev/null \
+    | grep -iE "$VERDICT_RE" 2>/dev/null \
+    | head -n1)
+  [ -n "$hit" ] || return 1
+  printf '%s\t%s\n' "$((line + ${hit%%:*} - 1))" "$(tsv_cell "${hit#*:}")"
 }
 
 eligibility_of() {  # <doc-class> <verdict-token>
@@ -351,7 +404,12 @@ cmd_scan() {
   WORK=$(mktemp -d "${TMPDIR:-/tmp}/fm-ruling-reconcile.XXXXXX") || die "cannot create work directory"
   local tmp=$WORK rc=0
 
-  collect_holds > "$tmp/holds.tsv"
+  collect_holds "$tmp/holds.tsv" "$tmp/holds.err" || rc=$?
+  if [ "$rc" -eq 3 ]; then
+    # The empty-set law, applied to the hold reader: a backlog nobody could read
+    # is not an empty hold set.
+    exit 3
+  fi
   build_ruling_inventory "$root" "$tmp/rulings.tsv" || rc=$?
   if [ "$rc" -eq 3 ]; then
     # The empty-set law: refuse the whole run rather than publish an index whose
@@ -375,11 +433,12 @@ cmd_scan() {
 
   mkdir -p "$INDEX" || die "cannot create index directory: $INDEX"
 
-  local hold state path rel class line text vline vtoken vout elig hits matched=0 candidates=0
+  local hold state path rel class line text vline vtoken vout elig hits pattern matched=0 candidates=0
   : > "$tmp/matches.tsv"
   while IFS=$'\t' read -r hold state; do
     [ -n "$hold" ] || continue
     hits=0
+    pattern=$(hold_pattern "$hold")
     while IFS=$'\t' read -r rel class; do
       [ -n "$rel" ] || continue
       path="$root/$rel"
@@ -399,7 +458,7 @@ cmd_scan() {
           >> "$tmp/matches.tsv"
         hits=$((hits + 1))
         matched=$((matched + 1))
-      done < <(grep -nF -- "$hold" "$path" 2>/dev/null | head -n "$MAX_MATCHES")
+      done < <(grep -nE -- "$pattern" "$path" 2>/dev/null | head -n "$MAX_MATCHES")
     done < <(cut -f1,2 "$tmp/rulings.tsv")
     if [ "$hits" -eq 0 ]; then
       # An unmatched hold is REPORTED, never dropped. Durable-source silence is
@@ -472,6 +531,12 @@ index_is_current() {  # <hold-fp> <ruling-fp> <fresh-holds> <fresh-rulings>
 # caller must READ and grade. No row carries a grade, because this script does
 # not grade; `grade` is emitted as `ungraded` and stays that way until a caller
 # supplies one to closure-test.
+#
+# The excerpt and the verdict token are the two cells whose content comes from
+# the ruling document, and an excerpt is a markdown table row, which routinely
+# contains commas. They are therefore RFC 4180 double-quoted so the declared
+# nine-field row stays honest; the column order is fixed by the schema and does
+# not move.
 
 cmd_propose() {
   [ -f "$INDEX/matches.tsv" ] || die "no index; run: fm-ruling-reconcile.sh scan" 2
@@ -481,9 +546,12 @@ cmd_propose() {
   printf 'authority=none\n'
   printf 'grading=required\n'
   printf 'closure_rule=verbatim-identifier-in-ruling AND explicit-verdict-token AND grade=rules\n'
+  printf 'quoted_fields=excerpt,verdict_token\n'
   printf 'stale_holds[%s]{hold_id,ruling_file,ruling_line,excerpt,grade,doc_class,verdict_token,verdict_line,eligibility}:\n' "$n"
-  awk -F'\t' '{ printf "  %s,%s,%s,%s,ungraded,%s,%s,%s,%s\n", $1, $2, $3, $8, $4, $5, $6, $7 }' \
-    "$INDEX/matches.tsv"
+  awk -F'\t' '
+    function q(s) { gsub(/"/, "\"\"", s); return "\"" s "\"" }
+    { printf "  %s,%s,%s,%s,ungraded,%s,%s,%s,%s\n", $1, $2, $3, q($8), $4, q($5), $6, $7 }
+  ' "$INDEX/matches.tsv"
 }
 
 # --- closure test -----------------------------------------------------------
@@ -495,7 +563,7 @@ cmd_propose() {
 
 cmd_closure_test() {
   [ "$#" -ge 1 ] || die "closure-test requires a hold id" 2
-  local hold=$1 ruling='' line='' grade='' g root path class vout vtoken vline known text verbatim
+  local hold=$1 ruling='' line='' grade='' g root path dir class vout vtoken vline known text verbatim
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -510,6 +578,11 @@ cmd_closure_test() {
     ''|*[!A-Za-z0-9._-]*) die "hold id must be a privacy-safe slug: $hold" 2 ;;
   esac
   [ -n "$ruling" ] || die "--ruling is required" 2
+  # The path is echoed back on `ruling_file=` for auditability, so it must not be
+  # able to forge a line of this script's own output.
+  case "$ruling" in
+    *[[:cntrl:]]*) die "--ruling must not contain control characters" 2 ;;
+  esac
   [ -n "$line" ] || die "--line is required" 2
   case "$line" in ''|*[!0-9]*) die "--line must be a line number: $line" 2 ;; esac
   [ -n "$grade" ] || die "--grade is required" 2
@@ -529,6 +602,19 @@ cmd_closure_test() {
   printf 'ruling_line=%s\n' "$line"
   printf 'grade=%s\n' "$grade"
 
+  # Corpus containment, enforced here and not only in build_ruling_inventory,
+  # because THIS is the path that authorises a closure. Without it a caller
+  # satisfies the captain's condition 1 with a ruling it authored anywhere on
+  # disk, by absolute path or by `../` traversal. The directory is resolved
+  # physically, so a symlinked path component cannot step outside either.
+  dir=$(cd "$(dirname "$path")" 2>/dev/null && pwd -P) || dir=''
+  case "$dir" in
+    "$root"|"$root"/*) : ;;
+    *)
+      printf 'closure=escalate\nreason=ruling-document-outside-corpus-root\n'
+      return 0 ;;
+  esac
+
   if [ -L "$path" ] || [ ! -f "$path" ] || [ ! -r "$path" ]; then
     printf 'closure=escalate\nreason=NO_RULING_READ\n'
     return 0
@@ -539,13 +625,15 @@ cmd_closure_test() {
 
   # Condition 1: the named line names the hold identifier VERBATIM. A
   # paraphrase, a near-match, or a semantically equivalent identifier is not
-  # verbatim and is not detected here by construction - this is a literal
-  # substring test against the exact line the caller cited.
+  # verbatim and is not detected here by construction - this is a literal,
+  # delimiter-bounded test against the exact line the caller cited, sharing the
+  # index scan's pattern so a longer identifier that merely CONTAINS this one
+  # cannot stand in for it.
   verbatim=no
   text=$(sed -n "${line}p" "$path" 2>/dev/null)
-  case "$text" in
-    *"$hold"*) verbatim=yes ;;
-  esac
+  if printf '%s\n' "$text" | grep -qE -- "$(hold_pattern "$hold")"; then
+    verbatim=yes
+  fi
   printf 'verbatim_identifier=%s\n' "$verbatim"
 
   # Condition 2: an explicit verdict token in the bounded window.
@@ -617,8 +705,10 @@ Invalidation: the index is current only when both fingerprints match and both
 inventories are byte-identical. Any hold or ruling change forces a rescan.
 
 Empty-set law: a ruling-class document that cannot be read yields
-verdict=NO_RULING_READ and exit 3. No index is published, because "unmatched"
-must never rest on a ruling nobody read.
+verdict=NO_RULING_READ and exit 3, and a tasks-axi hold listing that fails
+yields verdict=NO_HOLD_READ and exit 3. No index is published in either case,
+because "unmatched" must never rest on a ruling nobody read and open_holds=0
+must never rest on a backlog nobody could list.
 EOF
 }
 
