@@ -67,6 +67,7 @@ RC=$?
 # Never shell &: the harness owns this process group, so the hook timeout and
 # turn end tear arm and watcher down together; a backgrounded child would be
 # reaped at hook exit, leaving no watcher and a false "already running".
+# shellcheck source=/dev/null
 [ -f "$ROOT/config/x-mode.env" ] && . "$ROOT/config/x-mode.env"
 "$ROOT/bin/fm-watch-arm.sh" >&2 || true
 

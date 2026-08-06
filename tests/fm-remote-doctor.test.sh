@@ -662,6 +662,7 @@ pass "the entrypoint symlink is recreated when absent and never overwritten when
 CURSOR_RESOLVER_TMP=$(fm_test_tmproot fm-remote-doctor-resolver)
 awk '/^fm_remote_doctor_resolve_harness\(\)/ { p=1; print; next } p && /^}/ { print; exit } p { print }' \
   "$ROOT/bin/fm-remote-doctor.sh" > "$CURSOR_RESOLVER_TMP/resolver.sh"
+# shellcheck source=/dev/null
 . "$CURSOR_RESOLVER_TMP/resolver.sh"
 
 resolver_case_home() {  # <dir> -> home
