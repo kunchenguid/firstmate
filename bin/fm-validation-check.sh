@@ -62,15 +62,22 @@ TRUST="$STATE/$ID.check-trust"
 
 TMP=
 CHECK_SLOT_HELD=0
+MIGRATION_BOUNDARY_HELD=0
 cleanup() {
   [ -z "${TMP:-}" ] || rm -f -- "$TMP"
   [ "$CHECK_SLOT_HELD" -ne 1 ] || fm_custom_check_slot_release
+  [ "$MIGRATION_BOUNDARY_HELD" -ne 1 ] || fm_custom_check_migration_release
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+if ! fm_custom_check_migration_acquire "$STATE" 100; then
+  echo "error: validation check publication is busy" >&2
+  exit 1
+fi
+MIGRATION_BOUNDARY_HELD=1
 if ! fm_custom_check_slot_acquire "$STATE" "$ID" 100; then
   echo "error: task check slot is busy" >&2
   exit 1
@@ -110,24 +117,14 @@ fm_pr_regular_destination_on_device_or_absent "$TRUST" "$STATE_DEVICE" || {
   echo "error: task check trust path is unavailable" >&2
   exit 1
 }
-if [ -e "$CHECK" ]; then
-  if fm_custom_check_registered "$STATE" "$ID"; then
-    echo "error: task check slot is already registered" >&2
-  else
-    echo "error: task check slot is already occupied" >&2
-  fi
-  exit 1
+if fm_validation_check_registered "$STATE" "$ID" "$NM_RUN_LIB" "$TEMPLATE"; then
+  printf 'armed: state/%s.check.sh\n' "$ID"
+  exit 0
 fi
 
 umask 077
 TMP=$(mktemp "$STATE/.fm-validation-check.XXXXXX") || exit 1
-{
-  printf '%s\n' '#!/usr/bin/env bash' '# fm-validation-gate-check-v1'
-  printf 'FM_VALIDATION_WORKTREE=%q\n' "$worktree"
-  printf '%s\n' 'export FM_VALIDATION_WORKTREE'
-  tail -n +2 "$NM_RUN_LIB"
-  tail -n +2 "$TEMPLATE"
-} > "$TMP" || exit 1
+fm_validation_check_source_emit "$worktree" "$NM_RUN_LIB" "$TEMPLATE" > "$TMP" || exit 1
 chmod 0700 "$TMP" || exit 1
 fm_pr_private_file_valid "$TMP" 700 "$STATE_DEVICE" || exit 1
 if ! fm_custom_check_register_source "$STATE" "$ID" "$TMP"; then
@@ -138,7 +135,7 @@ fm_pr_regular_destination_on_device_or_absent "$CHECK" "$STATE_DEVICE" || exit 1
 mv -f -- "$TMP" "$CHECK" || exit 1
 TMP=
 
-fm_custom_check_registered "$STATE" "$ID" || {
+fm_validation_check_registered "$STATE" "$ID" "$NM_RUN_LIB" "$TEMPLATE" || {
   echo "error: validation check registration could not be verified" >&2
   exit 1
 }

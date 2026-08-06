@@ -14,6 +14,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 TEMPLATE="$SCRIPT_DIR/fm-pr-poll.sh"
+VALIDATION_TEMPLATE="$SCRIPT_DIR/fm-validation-poll.sh"
+NM_RUN_LIB="$SCRIPT_DIR/fm-nm-run-lib.sh"
 LOG="$STATE/.pr-check-migration.log"
 QUARANTINE="$STATE/.pr-check-quarantine"
 MARKER="$STATE/.pr-check-migration-v1"
@@ -107,6 +109,10 @@ current_checks_authenticated() {
     id=$(basename "$check" .check.sh)
     if fm_pr_task_id_valid "$id" && metadata_pr_is_canonical "$STATE/$id.meta"; then
       fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" || return 1
+      continue
+    fi
+    if fm_pr_task_id_valid "$id" && fm_validation_check_slot_reserved "$STATE" "$id"; then
+      fm_validation_check_registered "$STATE" "$id" "$NM_RUN_LIB" "$VALIDATION_TEMPLATE" || return 1
       continue
     fi
     fm_custom_check_registered "$STATE" "$id" && continue
@@ -288,6 +294,55 @@ fi
 # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
+MIGRATION_DEFERRED=0
+MIGRATION_BOUNDARY_HELD=0
+repair_validation_checks() {
+  local meta id check
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || [ -L "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    fm_pr_task_id_valid "$id" || continue
+    fm_validation_check_slot_reserved "$STATE" "$id" || continue
+    fm_validation_check_registered "$STATE" "$id" "$NM_RUN_LIB" "$VALIDATION_TEMPLATE" && continue
+    check="$STATE/$id.check.sh"
+    if [ -e "$check" ] || [ -L "$check" ]; then
+      if fm_validation_check_source_matches "$STATE" "$id" "$NM_RUN_LIB" "$VALIDATION_TEMPLATE" \
+        || ! fm_custom_check_registered "$STATE" "$id"; then
+        continue
+      fi
+    fi
+    if fm_custom_check_slot_held "$STATE" "$id"; then
+      MIGRATION_DEFERRED=1
+      continue
+    fi
+    FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-validation-check.sh" "$id" || return 1
+    fm_validation_check_registered "$STATE" "$id" "$NM_RUN_LIB" "$VALIDATION_TEMPLATE" || return 1
+  done
+}
+if fm_custom_check_any_slot_held "$STATE"; then
+  exit 0
+fi
+if ! repair_validation_checks; then
+  echo "PR_CHECK_MIGRATION: validation gate repair could not be completed safely" >&2
+  exit 1
+fi
+if [ "$MIGRATION_DEFERRED" -ne 0 ] || fm_custom_check_any_slot_held "$STATE"; then
+  exit 0
+fi
+if ! fm_custom_check_migration_acquire "$STATE" 1; then
+  exit 0
+fi
+MIGRATION_BOUNDARY_HELD=1
+migration_boundary_cleanup() {
+  [ "$MIGRATION_BOUNDARY_HELD" -ne 1 ] || fm_custom_check_migration_release
+}
+trap migration_boundary_cleanup EXIT
+trap 'exit 1' HUP INT TERM
+if fm_custom_check_any_slot_held "$STATE"; then
+  exit 0
+fi
+
 stopped_watcher=0
 pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
 if fm_pid_alive "$pid"; then
@@ -348,6 +403,7 @@ migration_cleanup() {
   [ -z "$MIGRATION_MARKER_TMP" ] || rm -f -- "$MIGRATION_MARKER_TMP"
   [ -z "$MIGRATION_SCAN_MARKER_TMP" ] || rm -f -- "$MIGRATION_SCAN_MARKER_TMP"
   [ "$lock_held" -ne 1 ] || fm_lock_release "$WATCH_LOCK"
+  [ "$MIGRATION_BOUNDARY_HELD" -ne 1 ] || fm_custom_check_migration_release
 }
 trap migration_cleanup EXIT
 trap 'exit 1' HUP INT TERM
@@ -396,6 +452,10 @@ if [ -e "$SCAN_MARKER" ] || [ -L "$SCAN_MARKER" ]; then
 fi
 migration_needed() {
   local check id
+  if fm_custom_check_any_slot_held "$STATE"; then
+    MIGRATION_DEFERRED=1
+    return 0
+  fi
   for check in "$STATE"/*.check.sh; do
     [ -e "$check" ] || [ -L "$check" ] || continue
     if [ "$(basename "$check")" = x-watch.check.sh ] \
@@ -405,6 +465,10 @@ migration_needed() {
     id=$(basename "$check" .check.sh)
     if fm_pr_task_id_valid "$id" && metadata_pr_is_canonical "$STATE/$id.meta"; then
       fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" || return 0
+      continue
+    fi
+    if fm_pr_task_id_valid "$id" && fm_validation_check_slot_reserved "$STATE" "$id"; then
+      fm_validation_check_registered "$STATE" "$id" "$NM_RUN_LIB" "$VALIDATION_TEMPLATE" || return 0
       continue
     fi
     fm_custom_check_registered "$STATE" "$id" && continue
@@ -417,6 +481,10 @@ migration_needed() {
 
 unsafe_checks_absent() {
   local check id
+  if fm_custom_check_any_slot_held "$STATE"; then
+    MIGRATION_DEFERRED=1
+    return 1
+  fi
   for check in "$STATE"/*.check.sh; do
     [ -e "$check" ] || [ -L "$check" ] || continue
     if [ "$(basename "$check")" = x-watch.check.sh ] \
@@ -426,6 +494,10 @@ unsafe_checks_absent() {
     id=$(basename "$check" .check.sh)
     if fm_pr_task_id_valid "$id" && metadata_pr_is_canonical "$STATE/$id.meta"; then
       fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" || return 1
+      continue
+    fi
+    if fm_pr_task_id_valid "$id" && fm_validation_check_slot_reserved "$STATE" "$id"; then
+      fm_validation_check_registered "$STATE" "$id" "$NM_RUN_LIB" "$VALIDATION_TEMPLATE" || return 1
       continue
     fi
     fm_custom_check_registered "$STATE" "$id" && continue
@@ -1040,8 +1112,14 @@ if migration_needed; then
       continue
     fi
     id=$(basename "$check" .check.sh)
+    if fm_pr_task_id_valid "$id" && fm_custom_check_slot_held "$STATE" "$id"; then
+      MIGRATION_DEFERRED=1
+      continue
+    fi
     if fm_pr_task_id_valid "$id" && metadata_pr_is_canonical "$STATE/$id.meta"; then
       fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" && continue
+    elif fm_pr_task_id_valid "$id" && fm_validation_check_slot_reserved "$STATE" "$id"; then
+      fm_validation_check_registered "$STATE" "$id" "$NM_RUN_LIB" "$VALIDATION_TEMPLATE" && continue
     else
       fm_custom_check_registered "$STATE" "$id" && continue
       fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" && continue
@@ -1112,6 +1190,12 @@ if migration_needed; then
       fi
     fi
   done
+fi
+
+if [ "$MIGRATION_DEFERRED" -ne 0 ]; then
+  revoke_migration_marker || true
+  revoke_scan_marker || true
+  exit 0
 fi
 
 if ! quarantine_tree_repair_and_validate \

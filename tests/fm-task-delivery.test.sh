@@ -23,6 +23,7 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
+PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 PROJECT_MODE="$ROOT/bin/fm-project-mode.sh"
 TMP_ROOT=$(fm_test_tmproot fm-task-delivery)
 
@@ -274,6 +275,83 @@ test_promote_no_mistakes_arms_or_rolls_back_the_validation_gate() {
   pass "fm-promote: no-mistakes promotions arm validation or roll back"
 }
 
+test_promote_preserves_a_concurrent_pr_merge_poll() {
+  local home state meta wt fakebin ready release promotion_pid pr_pid attempt=0 real_mv
+  home="$TMP_ROOT/promote-pr-priority/home"
+  state="$home/state"
+  wt="$TMP_ROOT/promote-pr-priority/wt"
+  fakebin="$TMP_ROOT/promote-pr-priority/fakebin"
+  meta="$state/promote-pr-priority.meta"
+  real_mv=$(command -v mv)
+  mkdir -p "$state" "$wt" "$fakebin"
+  fm_git_init_commit "$wt"
+  git -C "$wt" checkout -q -b fm/promote-pr-priority
+  printf 'window=fm-promote-pr-priority\nkind=scout\nworktree=%s\n' "$wt" > "$meta"
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+src=
+dst=
+for arg in "$@"; do
+  src=$dst
+  dst=$arg
+done
+case "$src" in
+  */.fm-promote-meta.*)
+    if [ -n "${FM_TEST_PROMOTION_READY:-}" ]; then
+      : > "$FM_TEST_PROMOTION_READY"
+      while [ ! -e "${FM_TEST_PROMOTION_RELEASE:?}" ]; do sleep 0.02; done
+    fi
+    ;;
+esac
+exec "${FM_TEST_REAL_MV:?}" "$@"
+SH
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' headRefOid '*) printf '%s\n' deadbeefcafefeed0000000000000000deadbeef ;;
+  *) printf '%s\n' OPEN ;;
+esac
+SH
+  chmod +x "$fakebin/mv" "$fakebin/gh"
+  ready="$TMP_ROOT/promote-pr-priority/promotion-ready"
+  release="$TMP_ROOT/promote-pr-priority/promotion-release"
+
+  FM_TEST_REAL_MV="$real_mv" FM_TEST_PROMOTION_READY="$ready" FM_TEST_PROMOTION_RELEASE="$release" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$state" PATH="$fakebin:$PATH" \
+    "$PROMOTE" promote-pr-priority --mode no-mistakes --yolo off \
+    > "$TMP_ROOT/promote-pr-priority/promotion.out" 2> "$TMP_ROOT/promote-pr-priority/promotion.err" &
+  promotion_pid=$!
+  while [ "$attempt" -lt 100 ]; do
+    [ -e "$ready" ] && break
+    sleep 0.02
+    attempt=$((attempt + 1))
+  done
+  if [ ! -e "$ready" ]; then
+    : > "$release"
+    wait "$promotion_pid" 2>/dev/null || true
+    fail "promotion did not reach its metadata publication boundary"
+  fi
+
+  FM_TEST_REAL_MV="$real_mv" FM_HOME="$home" FM_STATE_OVERRIDE="$state" PATH="$fakebin:$PATH" \
+    "$PR_CHECK" promote-pr-priority https://github.com/example/repo/pull/9 \
+    > "$TMP_ROOT/promote-pr-priority/pr.out" 2> "$TMP_ROOT/promote-pr-priority/pr.err" &
+  pr_pid=$!
+  sleep 0.1
+  assert_absent "$state/promote-pr-priority.pr-poll-registration" \
+    "PR publication entered the promotion-owned check slot"
+
+  : > "$release"
+  wait "$promotion_pid" || {
+    wait "$pr_pid" 2>/dev/null || true
+    fail "promotion failed while preserving PR ownership"
+  }
+  wait "$pr_pid" || fail "PR publication failed after promotion released its task slot"
+  fm_pr_poll_artifacts_valid "$state" promote-pr-priority "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "promotion displaced the concurrent PR merge poll"
+  pass "fm-promote: concurrent PR hand-off preserves merge-poll priority"
+}
+
 # The registry parser survives for the mechanical consumers only. It accepts the
 # conditional policy, maps it to its most rigorous leg for them, and exposes the
 # raw annotation for the one caller that must tell a policy from a flat mode.
@@ -315,5 +393,6 @@ test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_promote_no_mistakes_arms_or_rolls_back_the_validation_gate
+test_promote_preserves_a_concurrent_pr_merge_poll
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"

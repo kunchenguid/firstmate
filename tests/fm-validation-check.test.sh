@@ -358,6 +358,103 @@ test_custom_registration_and_migration_preserve_pr_poll_priority() {
   pass "custom registration and migration preserve PR merge poll priority"
 }
 
+test_no_mistakes_validation_ownership_rearms_custom_replacements() {
+  local dir state status marker out
+  dir=$(make_case validation-ownership)
+  state="$dir/home/state"
+  status="$dir/status"
+  marker="$dir/custom-ran"
+  write_owned_status "$dir" "$status" 'status: running' 'awaiting_agent: working 2m'
+  run_arm "$dir" >/dev/null || fail "could not arm validation ownership fixture"
+
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf ': > %q\n' "$marker"
+  } > "$state/task-a.check.sh"
+  chmod 0700 "$state/task-a.check.sh"
+  out=$(FM_TEST_REAL_MV="$REAL_MV" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    PATH="$dir/fakebin:$BASE_PATH" "$REGISTER" task-a) \
+    || fail "custom registration did not restore validation ownership"
+  assert_contains "$out" 'armed: state/task-a.check.sh' \
+    "custom registration did not hand the slot back to validation"
+  fm_validation_check_registered "$state" task-a "$ROOT/bin/fm-nm-run-lib.sh" "$ROOT/bin/fm-validation-poll.sh" \
+    || fail "custom registration displaced the validation gate"
+  run_poll "$dir" "$status" >/dev/null || fail "restored validation gate did not run"
+  [ ! -e "$marker" ] || fail "restored validation gate executed the custom replacement"
+
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf ': > %q\n' "$marker"
+  } > "$state/task-a.check.sh"
+  chmod 0700 "$state/task-a.check.sh"
+  fm_custom_check_register_source "$state" task-a "$state/task-a.check.sh" \
+    || fail "could not construct a registered custom replacement"
+  FM_TEST_REAL_MV="$REAL_MV" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" --checks-safe >/dev/null \
+    || fail "migration did not restore validation ownership"
+  fm_validation_check_registered "$state" task-a "$ROOT/bin/fm-nm-run-lib.sh" "$ROOT/bin/fm-validation-poll.sh" \
+    || fail "migration preserved a custom replacement over validation"
+  run_poll "$dir" "$status" >/dev/null || fail "migrated validation gate did not run"
+  [ ! -e "$marker" ] || fail "migrated validation gate executed the custom replacement"
+  pass "no-mistakes validation ownership survives custom registration and migration"
+}
+
+test_migration_defers_a_live_check_slot() {
+  local dir state ready release holder_pid attempt=0 source_hash
+  dir=$(make_case migration-live-slot)
+  state="$dir/home/state"
+  run_arm "$dir" >/dev/null || fail "could not arm validation check before PR hand-off"
+  FM_TEST_REAL_MV="$REAL_MV" FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    PATH="$dir/fakebin:$BASE_PATH" "$PR_CHECK" task-a https://github.com/example/repo/pull/9 >/dev/null \
+    || fail "could not arm PR merge poll before migration deferral"
+
+  printf '#!/usr/bin/env bash\nprintf "%s\\n" stale-custom\n' > "$state/task-a.check.sh"
+  chmod 0700 "$state/task-a.check.sh"
+  source_hash=$(fm_custom_check_sha256 "$state/task-a.check.sh")
+  ready="$dir/slot-ready"
+  release="$dir/slot-release"
+  (
+    . "$ROOT/bin/fm-pr-lib.sh"
+    . "$ROOT/bin/fm-check-lib.sh"
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_custom_check_slot_acquire "$state" task-a 100 || exit 1
+    : > "$ready"
+    while [ ! -e "$release" ]; do sleep 0.02; done
+    fm_custom_check_slot_release
+  ) &
+  holder_pid=$!
+  while [ "$attempt" -lt 100 ]; do
+    [ -e "$ready" ] && break
+    sleep 0.02
+    attempt=$((attempt + 1))
+  done
+  if [ ! -e "$ready" ]; then
+    : > "$release"
+    wait "$holder_pid" 2>/dev/null || true
+    fail "live-slot migration fixture did not acquire the task slot"
+  fi
+
+  FM_TEST_REAL_MV="$REAL_MV" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" --checks-safe >/dev/null || {
+      : > "$release"
+      wait "$holder_pid" 2>/dev/null || true
+      fail "migration did not defer the live task slot"
+    }
+  [ "$(fm_custom_check_sha256 "$state/task-a.check.sh")" = "$source_hash" ] || {
+    : > "$release"
+    wait "$holder_pid" 2>/dev/null || true
+    fail "migration changed a check while its task slot was live"
+  }
+  : > "$release"
+  wait "$holder_pid" || fail "live-slot migration fixture did not release the task slot"
+  FM_TEST_REAL_MV="$REAL_MV" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" --checks-safe >/dev/null \
+    || fail "migration did not retry after the task slot released"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "migration did not restore the PR merge poll after the task slot released"
+  pass "migration defers live task slots before rebuilding PR polls"
+}
+
 test_arms_a_private_registered_check_and_stays_quiet_when_healthy
 test_wakes_only_for_terminal_or_over_age_parked_runs
 test_ignores_runs_not_owned_by_the_task_worktree
@@ -367,3 +464,5 @@ test_watcher_does_not_execute_an_unregistered_validation_check
 test_pr_merge_poll_replaces_and_outprioritizes_validation_poll
 test_pr_publication_wins_over_an_inflight_validation_arm
 test_custom_registration_and_migration_preserve_pr_poll_priority
+test_no_mistakes_validation_ownership_rearms_custom_replacements
+test_migration_defers_a_live_check_slot

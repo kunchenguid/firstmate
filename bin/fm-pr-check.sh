@@ -41,17 +41,32 @@ if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" !=
   exit 1
 fi
 
+if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
+  echo "error: watching a GitLab merge request requires glab on PATH" >&2
+  exit 1
+fi
+
+"$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || exit 1
+"$FM_ROOT/bin/fm-guard.sh" || true
+
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 META_TMP=
 CHECK_SLOT_HELD=0
+MIGRATION_BOUNDARY_HELD=0
 pr_check_cleanup() {
   fm_pr_poll_cleanup
   [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
   [ "$CHECK_SLOT_HELD" -ne 1 ] || fm_custom_check_slot_release
+  [ "$MIGRATION_BOUNDARY_HELD" -ne 1 ] || fm_custom_check_migration_release
 }
 trap pr_check_cleanup EXIT
 trap 'exit 1' HUP INT TERM
+if ! fm_custom_check_migration_acquire "$STATE" 100; then
+  echo "error: PR check publication is busy" >&2
+  exit 1
+fi
+MIGRATION_BOUNDARY_HELD=1
 if ! fm_custom_check_slot_acquire "$STATE" "$ID" 100; then
   echo "error: task check slot is busy" >&2
   exit 1
@@ -69,21 +84,6 @@ fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || 
   echo "error: pending PR poll retirement could not be validated" >&2
   exit 1
 }
-
-# Refuse to arm a GitLab watch with no glab on PATH. The poll is silent on
-# every error by design, so a missing CLI would be indistinguishable from a
-# merge request that is never merged. Arming is the one point where that can be
-# reported, so the absent tool stops the watch here instead of watching nothing.
-if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
-  echo "error: watching a GitLab merge request requires glab on PATH" >&2
-  exit 1
-fi
-
-# Neutralize any pre-fix poll before recording or arming this task. The
-# migration never executes legacy artifacts and holds watcher exclusion while
-# it quarantines or rebuilds them.
-"$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || exit 1
-"$FM_ROOT/bin/fm-guard.sh" || true
 
 # pr_head is recorded only when the forge's CLI can supply it. gh exposes the
 # head commit as a selectable field; plain glab exposes it only inside its JSON

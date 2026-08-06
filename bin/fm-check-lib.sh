@@ -3,6 +3,7 @@
 FM_CUSTOM_CHECK_HASH=
 FM_CUSTOM_CHECK_SNAPSHOT=
 FM_CUSTOM_CHECK_SLOT_LOCK=
+FM_CUSTOM_CHECK_MIGRATION_LOCK=
 
 fm_custom_check_sha256() {
   local file=$1
@@ -59,6 +60,47 @@ fm_custom_check_register_source() {
   [ "$FM_CUSTOM_CHECK_HASH" = "$hash" ]
 }
 
+fm_validation_check_slot_reserved() {
+  local state=$1 id=$2 meta
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  meta="$state/$id.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] && [ "$(fm_pr_file_link_count "$meta")" = 1 ] || return 1
+  grep -qx 'kind=ship' "$meta" || return 1
+  grep -qx 'mode=no-mistakes' "$meta" || return 1
+  ! grep -q '^pr=' "$meta"
+}
+
+fm_validation_check_source_emit() {
+  local worktree=$1 nm_run_lib=$2 template=$3
+  [ -n "$worktree" ] || return 1
+  [ -f "$nm_run_lib" ] && [ ! -L "$nm_run_lib" ] || return 1
+  [ -f "$template" ] && [ ! -L "$template" ] || return 1
+  printf '%s\n' '#!/usr/bin/env bash' '# fm-validation-gate-check-v1'
+  printf 'FM_VALIDATION_WORKTREE=%q\n' "$worktree"
+  printf '%s\n' 'export FM_VALIDATION_WORKTREE'
+  tail -n +2 "$nm_run_lib"
+  tail -n +2 "$template"
+}
+
+fm_validation_check_source_matches() {
+  local state=$1 id=$2 nm_run_lib=$3 template=$4 meta check state_device worktree
+  fm_validation_check_slot_reserved "$state" "$id" || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  meta="$state/$id.meta"
+  check="$state/$id.check.sh"
+  fm_pr_private_file_valid "$check" 700 "$state_device" || return 1
+  worktree=$(grep '^worktree=' "$meta" | tail -1 | cut -d= -f2- || true)
+  [ -n "$worktree" ] || return 1
+  cmp -s "$check" <(fm_validation_check_source_emit "$worktree" "$nm_run_lib" "$template")
+}
+
+fm_validation_check_registered() {
+  local state=$1 id=$2 nm_run_lib=$3 template=$4
+  fm_validation_check_source_matches "$state" "$id" "$nm_run_lib" "$template" \
+    && fm_custom_check_registered "$state" "$id"
+}
+
 fm_custom_check_slot_acquire() {
   local state=$1 id=$2 max_attempts=${3:-100} lock attempt=0
   FM_CUSTOM_CHECK_SLOT_LOCK=
@@ -82,6 +124,28 @@ fm_custom_check_slot_release() {
   FM_CUSTOM_CHECK_SLOT_LOCK=
 }
 
+fm_custom_check_migration_acquire() {
+  local state=$1 max_attempts=${2:-100} lock attempt=0
+  FM_CUSTOM_CHECK_MIGRATION_LOCK=
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  [[ "$max_attempts" =~ ^[1-9][0-9]{0,3}$ ]] || return 1
+  declare -F fm_lock_try_acquire >/dev/null 2>&1 || return 1
+  lock="$state/.check-migration.lock"
+  while ! fm_lock_try_acquire "$lock"; do
+    [ "$attempt" -lt "$max_attempts" ] || return 1
+    sleep 0.05
+    attempt=$((attempt + 1))
+  done
+  FM_CUSTOM_CHECK_MIGRATION_LOCK=$lock
+}
+
+fm_custom_check_migration_release() {
+  local lock=${FM_CUSTOM_CHECK_MIGRATION_LOCK:-}
+  [ -n "$lock" ] || return 0
+  fm_lock_release "$lock" || return 1
+  FM_CUSTOM_CHECK_MIGRATION_LOCK=
+}
+
 fm_custom_check_slot_held() {
   local state=$1 id=$2 lock owner pid
   fm_pr_task_id_valid "$id" || return 1
@@ -95,6 +159,21 @@ fm_custom_check_slot_held() {
   fm_lock_points_to_owner "$lock" "$owner" || return 1
   pid=$(cat "$owner/pid" 2>/dev/null || true)
   fm_pid_alive "$pid"
+}
+
+fm_custom_check_any_slot_held() {
+  local state=$1 lock name id
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  for lock in "$state"/.*.check-slot.lock; do
+    [ -L "$lock" ] || continue
+    name=${lock##*/}
+    id=${name#.}
+    id=${id%.check-slot.lock}
+    [ ".$id.check-slot.lock" = "$name" ] || continue
+    fm_pr_task_id_valid "$id" || continue
+    fm_custom_check_slot_held "$state" "$id" && return 0
+  done
+  return 1
 }
 
 fm_custom_check_registered() {

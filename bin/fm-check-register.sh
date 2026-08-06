@@ -27,12 +27,19 @@ META="$STATE/$ID.meta"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 CHECK_SLOT_HELD=0
+MIGRATION_BOUNDARY_HELD=0
 check_register_cleanup() {
   fm_pr_poll_cleanup
   [ "$CHECK_SLOT_HELD" -ne 1 ] || fm_custom_check_slot_release
+  [ "$MIGRATION_BOUNDARY_HELD" -ne 1 ] || fm_custom_check_migration_release
 }
 trap check_register_cleanup EXIT
 trap 'exit 1' HUP INT TERM
+if ! fm_custom_check_migration_acquire "$STATE" 100; then
+  echo "error: custom check registration is busy" >&2
+  exit 1
+fi
+MIGRATION_BOUNDARY_HELD=1
 if ! fm_custom_check_slot_acquire "$STATE" "$ID" 100; then
   echo "error: task check slot is busy" >&2
   exit 1
@@ -59,6 +66,15 @@ if [ -e "$META" ] || [ -L "$META" ]; then
     printf 'preserved: state/%s.check.sh is reserved for PR merge polling\n' "$ID"
     exit 0
   fi
+fi
+
+if fm_validation_check_slot_reserved "$STATE" "$ID"; then
+  fm_custom_check_slot_release
+  CHECK_SLOT_HELD=0
+  fm_custom_check_migration_release
+  MIGRATION_BOUNDARY_HELD=0
+  FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    exec "$SCRIPT_DIR/fm-validation-check.sh" "$ID"
 fi
 
 [ -f "$CHECK" ] && [ ! -L "$CHECK" ] || { echo "error: custom check is unavailable" >&2; exit 1; }

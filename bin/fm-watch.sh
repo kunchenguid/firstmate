@@ -817,7 +817,9 @@ while :; do
         fi
       else
         id=$(basename "$c" .check.sh)
-        if fm_pr_metadata_identity_parse "$STATE/$id.meta"; then
+        if fm_pr_task_id_valid "$id" && fm_custom_check_slot_held "$STATE" "$id"; then
+          continue
+        elif fm_pr_metadata_identity_parse "$STATE/$id.meta"; then
           if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
             is_pr_poll=1
             provider=$FM_PR_POLL_SNAPSHOT_PROVIDER
@@ -828,8 +830,6 @@ while :; do
             run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
               "$provider" "$url" "$host" "$path" "$number" || exit 1
             out=$FM_CHECK_RESULT
-          elif fm_custom_check_slot_held "$STATE" "$id"; then
-            continue
           else
             rejected_checks="$rejected_checks $c"
             continue
@@ -844,6 +844,19 @@ while :; do
           run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
+        elif fm_pr_task_id_valid "$id" && fm_validation_check_slot_reserved "$STATE" "$id"; then
+          if fm_validation_check_registered "$STATE" "$id" \
+              "$SCRIPT_DIR/fm-nm-run-lib.sh" "$SCRIPT_DIR/fm-validation-poll.sh" \
+            && fm_custom_check_snapshot_prepare "$STATE" "$id"; then
+            custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
+            run_check_capture "$custom_snapshot" || exit 1
+            out=$FM_CHECK_RESULT
+            fm_custom_check_snapshot_cleanup
+          else
+            fm_custom_check_snapshot_cleanup
+            rejected_checks="$rejected_checks $c"
+            continue
+          fi
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
           run_check_capture "$custom_snapshot" || exit 1
