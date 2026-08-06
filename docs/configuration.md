@@ -298,6 +298,11 @@ An absent or incompatible `lavish-axi` reports `MISSING: lavish-axi (install: np
 An absent or too-old `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; firstmate cannot resolve a profile array without a compatible binary.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
+When the firstmate checkout has multiple GitHub remotes and no deliberate base-repo pin, locked bootstrap pins default `gh` and `gh-axi` calls to its GitHub `origin` without changing any remote.
+A linked worktree inherits that local Git configuration, while a fresh clone receives it on its first locked firstmate session start; before then, or in a clone that never runs session start, run `bin/fm-gh-resolve.sh` manually.
+An existing pin is preserved so explicit upstream work remains possible, and `-R <owner>/<repo>` can always target a different repository deliberately.
+A read-only session reports `GH_RESOLVE:` instead of writing the pin; distrust default-targeted GitHub listings in that session and use `-R` explicitly until a locked session repairs it.
+The script header in [`bin/fm-gh-resolve.sh`](../bin/fm-gh-resolve.sh) owns the complete pinning and diagnostic contract.
 The locked session-start bootstrap step also runs a best-effort project clone refresh through `fm-fleet-sync.sh`.
 It emits `FLEET_SYNC:` for skipped refreshes that may matter, recovered self-heals, and `STUCK:` alarms.
 Normal completed runs keep local-only and no-origin skips silent.
@@ -493,7 +498,7 @@ FM_BACKEND_CMUX_COMPOSER_LINES=20  # cmux-only: tail lines scanned to locate the
 FM_BACKEND_CMUX_IDLE_RE='^Type a message\.\.\.$'  # cmux-only: empty-composer placeholder regex after border/prompt stripping
 CMUX_SOCKET_PASSWORD=   # cmux-only: socket password fallback when config/cmux-socket-password is absent (docs/cmux-backend.md)
 FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the session-start digest
-FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording
+FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and make TANGLE/GH_RESOLVE checks advisory-only
 FM_GUARD_READ_ONLY=0    # internal/read-only guard mode: keep alarms but suppress drain, supervision repair, and checkout repair commands
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the guarded operation WILL still run.'   # banner continuation line; fm-send.sh overrides it to name the requested message specifically
 FM_POLL=15              # seconds between watcher poll cycles
