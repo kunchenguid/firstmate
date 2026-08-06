@@ -620,6 +620,21 @@ stage fleet-state
 section "FLEET STATE"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 
+# Open captain decisions that a ruling document may already have answered. One
+# bounded line, and silence when there is nothing open, because a hold the
+# captain has already ruled is the failure this surfaces - not a routine count.
+# Writing the derived index is a mutation, so a read-only session reads the
+# existing index instead of rebuilding it. An unreadable ruling document is
+# reported rather than absorbed: an unread ruling must never present as "unruled".
+if [ -x "$SCRIPT_DIR/fm-ruling-reconcile.sh" ]; then
+  if [ "$READ_ONLY" -eq 1 ]; then
+    RECONCILE_OUT=$("$SCRIPT_DIR/fm-ruling-reconcile.sh" status 2>&1 | sed -n 's/^open_holds=\([1-9][0-9]*\)$/RULING_RECONCILE: \1 open captain decision(s) in the last index; rerun when locked to refresh/p')
+  else
+    RECONCILE_OUT=$("$SCRIPT_DIR/fm-ruling-reconcile.sh" scan --quiet 2>&1) || true
+  fi
+  [ -n "$RECONCILE_OUT" ] && printf '\n%s\n' "$RECONCILE_OUT"
+fi
+
 subsection "Work under way (state/*.meta)"
 META_FOUND=0
 for meta in "$STATE"/*.meta; do

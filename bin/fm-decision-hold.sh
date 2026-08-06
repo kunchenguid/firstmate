@@ -23,7 +23,8 @@
 #   fm-decision-hold.sh complete <origin-id> (--none | <decision-key>...)
 #   fm-decision-hold.sh verify <origin-id>
 #   fm-decision-hold.sh resolve <origin-id> <decision-key> \
-#     --decision-file <path> --routed-to <task-id> [--routed-to <task-id>...]
+#     --decision-file <path> --routed-to <task-id> [--routed-to <task-id>...] \
+#     [--from-ruling <path>:<line>]
 #
 # `complete` is the shared investigation and visual-review completion gate.
 # `--none` is an explicit semantic attestation that the just-reviewed surface has
@@ -37,6 +38,14 @@
 # It writes the captain decision and routed identities into the hold body, clears
 # those dependency edges, and only then marks the hold Done. A failure before the
 # final step leaves the captain hold open.
+#
+# `--from-ruling <path>:<line>` records WHICH ruling document answered the hold,
+# and is verified rather than trusted. The captain ruled on 2026-08-06 that a
+# hold may be closed on the strength of a ruling only when the ruling names the
+# hold identifier VERBATIM and carries an EXPLICIT VERDICT TOKEN. That rule has
+# one owner, bin/fm-ruling-reconcile.sh, and this flag calls it: a provenance
+# that fails either condition refuses the close instead of stamping it. The flag
+# is optional, so a resolution reached any other way is unaffected.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -264,7 +273,13 @@ command_hold() {
     fi
     [ -n "$repo" ] || repo=firstmate
     validate_one_line repo "$repo"
-    body=$(printf 'Origin: %s\nDecision key: %s\nState: awaiting captain decision.' "$origin" "$key")
+    # RETIRED 2026-08-06: this body used to carry "State: awaiting captain
+    # decision." A hold asserting its own state is a claim, not a verdict, and
+    # it outlived the answer - an investigation read that string and treated a
+    # hold the captain had already ruled as still open. The structured
+    # state/held/hold_kind fields are the only state owner; nothing else may
+    # restate them here.
+    body=$(printf 'Origin: %s\nDecision key: %s' "$origin" "$key")
     tasks_axi add "$id" "$title" --kind captain --repo "$repo" --body "$body" >/dev/null \
       || fail "could not create captain decision item $id"
   fi
@@ -368,13 +383,14 @@ EOF
 }
 
 command_resolve() {
-  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0
+  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0 from_ruling='' ruling_path='' ruling_line='' closure_out=''
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --decision-file) shift; decision_file=${1:-} ;;
       --routed-to) shift; validate_slug routed-task "${1:-}"; routed="${routed}${routed:+ }${1:-}" ;;
+      --from-ruling) shift; from_ruling=${1:-} ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -393,6 +409,29 @@ command_resolve() {
   decision_digest=$(sha256_text "$decision")
   require_tasks_axi
   id=$(hold_id "$origin" "$key")
+
+  # Verify ruling provenance BEFORE any mutation, so a provenance that fails the
+  # captain's closure test leaves the hold exactly as it was.
+  if [ -n "$from_ruling" ]; then
+    case "$from_ruling" in
+      *:*) ruling_line=${from_ruling##*:}; ruling_path=${from_ruling%:*} ;;
+      *) fail "--from-ruling must be <path>:<line>: $from_ruling" ;;
+    esac
+    [ -n "$ruling_path" ] || fail "--from-ruling must name a ruling document: $from_ruling"
+    case "$ruling_line" in
+      ''|*[!0-9]*) fail "--from-ruling must end in a line number: $from_ruling" ;;
+    esac
+    [ -x "$SCRIPT_DIR/fm-ruling-reconcile.sh" ] \
+      || fail "fm-ruling-reconcile.sh is required to verify --from-ruling"
+    closure_out=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-ruling-reconcile.sh" closure-test "$id" \
+      --ruling "$ruling_path" --line "$ruling_line" --grade rules 2>&1) \
+      || fail "could not verify --from-ruling provenance: $from_ruling"
+    case "$closure_out" in
+      *"closure=permitted"*) : ;;
+      *) fail "--from-ruling $from_ruling fails the captain closure test: $(printf '%s' "$closure_out" | sed -n 's/^reason=//p' | head -1)" ;;
+    esac
+  fi
   if verify_hold_resolved "$id"; then
     hold_show=$(task_show "$id")
     hold_body=$(show_field "$hold_show" body)
@@ -430,7 +469,15 @@ command_resolve() {
     esac
   done
 
-  body=$(printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: %s\n\nCaptain decision:\n%s\n\nRouted work:\n' "$decision_digest" "$routed_csv" "$decision")
+  # The blank line before "Captain decision:" is load-bearing: verify_resolution_identity
+  # parses on it. The provenance line is inserted above it, never in place of it.
+  if [ -n "$from_ruling" ]; then
+    body=$(printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: %s\nRuling provenance: %s\n\nCaptain decision:\n%s\n\nRouted work:\n' \
+      "$decision_digest" "$routed_csv" "$from_ruling" "$decision")
+  else
+    body=$(printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: %s\n\nCaptain decision:\n%s\n\nRouted work:\n' \
+      "$decision_digest" "$routed_csv" "$decision")
+  fi
   for dep in $routed; do
     body="${body}- ${dep}"$'\n'
   done

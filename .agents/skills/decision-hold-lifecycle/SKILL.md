@@ -2,7 +2,7 @@
 name: decision-hold-lifecycle
 description: >-
   Agent-only policy for completing investigations and visual reviews without losing unresolved captain decisions.
-  Load before treating an investigation, scout report, structured review, or Lavish review as complete, before ending a visual review that exposed a decision, and when recording or routing the captain's answer.
+  Load before treating an investigation, scout report, structured review, or Lavish review as complete, before ending a visual review that exposed a decision, when recording or routing the captain's answer, and before closing a hold on the strength of a ruling document.
 user-invocable: false
 metadata:
   internal: true
@@ -36,5 +36,17 @@ Bearings reads the resulting structured state and must never compensate by scrap
 7. Put the captain's exact durable decision in a file and use the script's `resolve` command with every routed task.
 8. Confirm Bearings no longer shows the closed hold and that routed work remains in structured backlog state.
 
+## Ruling-to-hold reconciliation
+
+A captain answer recorded in a ruling document does not close the hold that asked the question, and a hold left open after it was answered gets the captain re-asked and feeds investigations a stale premise.
+Run `bin/fm-ruling-reconcile.sh` to find open captain holds that a ruling document already names; it produces the candidate excerpts deterministically and never grades or closes.
+Grade each emitted excerpt yourself as rules, commissions, cites, or defers, because deciding whether a row answers a hold is a natural-language judgement no script may make.
+
+The captain ruled the closure test on 2026-08-06, and it binds every closure.
+Close a hold on the strength of a ruling only when the ruling names the hold identifier verbatim and carries an explicit verdict token, and escalate everything else to the captain rather than closing it provisionally or with a note.
+A paraphrased or semantically equivalent identifier is not verbatim, a hold named in a commission is graded cites and never rules, and a grading pass may propose a closure but never perform one that fails either condition.
+Record an accepted closure with `resolve --from-ruling <path>:<line>`, which re-verifies both conditions and refuses rather than stamping an unverified provenance.
+
 `bin/fm-decision-hold.sh --help` owns command syntax, identity construction, completion attestation, retry behavior, and close ordering.
+`bin/fm-ruling-reconcile.sh --help` owns the derived index, the grading envelope, and the empty-set refusal.
 `docs/decision-hold-lifecycle.md` records the mechanism and regression evidence without restating this policy.
