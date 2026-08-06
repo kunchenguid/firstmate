@@ -22,16 +22,16 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
-command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the cmux adapter)"; exit 0; }
+command -v jq >/dev/null 2>&1 || { printf 'FM_TEST_RUNTIME_GATE runtime=cmux outcome=unavailable\nskip: jq not found (required by the cmux adapter)\n'; exit 0; }
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
-fm_backend_source cmux || { echo "skip: could not source the cmux adapter"; exit 0; }
+fm_backend_source cmux || { printf 'FM_TEST_RUNTIME_GATE runtime=cmux outcome=unavailable\nskip: could not source the cmux adapter\n'; exit 0; }
 
-fm_backend_cmux_tool_check >/dev/null 2>&1 || { echo "skip: cmux CLI not found on PATH or at the bundle path"; exit 0; }
-fm_backend_cmux_version_check >/dev/null 2>&1 || { echo "skip: installed cmux is older than the verified minimum"; exit 0; }
+fm_backend_cmux_tool_check >/dev/null 2>&1 || { printf 'FM_TEST_RUNTIME_GATE runtime=cmux outcome=unavailable\nskip: cmux CLI not found on PATH or at the bundle path\n'; exit 0; }
+fm_backend_cmux_version_check >/dev/null 2>&1 || { printf 'FM_TEST_RUNTIME_GATE runtime=cmux outcome=unavailable\nskip: installed cmux is older than the verified minimum\n'; exit 0; }
 PING_STATE=$(fm_backend_cmux_ping_state)
-[ "$PING_STATE" = ok ] || { echo "skip: cmux socket not reachable/authenticated (state=$PING_STATE) - see docs/cmux-backend.md 'Setup'"; exit 0; }
+[ "$PING_STATE" = ok ] || { printf "FM_TEST_RUNTIME_GATE runtime=cmux outcome=unavailable\nskip: cmux socket not reachable/authenticated (state=%s) - see docs/cmux-backend.md 'Setup'\n" "$PING_STATE"; exit 0; }
 
 # shellcheck source=tests/cmux-test-safety.sh
 . "$ROOT/tests/cmux-test-safety.sh"
@@ -186,3 +186,4 @@ pass "real cmux: list_live discovers a live task workspace by fm-<id> title"
 
 cleanup_all
 trap - EXIT
+printf 'FM_TEST_RUNTIME_GATE runtime=cmux outcome=exercised\n'

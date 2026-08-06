@@ -826,8 +826,8 @@ unit_flag_write_failure_aborts() {
 # E2E herdr: topology invariant.
 # ---------------------------------------------------------------------------
 e2e_herdr() {
-  command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found (herdr e2e)"; return 0; }
-  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (herdr e2e)"; return 0; }
+  command -v herdr >/dev/null 2>&1 || { printf 'FM_TEST_RUNTIME_GATE runtime=herdr outcome=unavailable\nskip: herdr not found (herdr e2e)\n'; return 0; }
+  command -v jq >/dev/null 2>&1 || { printf 'FM_TEST_RUNTIME_GATE runtime=herdr outcome=unavailable\nskip: jq not found (herdr e2e)\n'; return 0; }
   # shellcheck source=tests/herdr-test-safety.sh
   . "$ROOT/tests/herdr-test-safety.sh"
   # shellcheck source=/dev/null
@@ -881,6 +881,7 @@ e2e_herdr() {
   if [ ! -e "$home_tmp/state/.afk-daemon-terminal" ] && [ ! -e "$home_tmp/state/.afk" ]; then pass "herdr e2e: record + .afk cleared on stop"; else fail "herdr e2e: record or .afk not cleared"; fi
 
   E2E_HERDR_CLEANUP
+  printf 'FM_TEST_RUNTIME_GATE runtime=herdr outcome=exercised\n'
 }
 
 # ---------------------------------------------------------------------------

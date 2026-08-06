@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Contract tests for bin/fm-test-run.sh - the single owner of behavior suite
-# selection, portable lane composition, proven-isolated --jobs, timing markers,
-# JSON artifacts, coverage guard, and aggregate exit status.
+# selection, portable lane composition, declarative runtime-gate evidence,
+# proven-isolated --jobs, timing markers, JSON artifacts, coverage guard, and
+# aggregate exit status.
 #
 # These tests intentionally exercise the runner with fixtures, --list, and
 # focused scheduler checks, not the complete Firstmate suite.
@@ -224,10 +225,12 @@ SH
   end_n=$(grep -c '^FM_TEST_END ' "$out" || true)
   [ "$begin_n" -eq 1 ] || fail "expected one FM_TEST_BEGIN, got $begin_n"
   [ "$end_n" -eq 1 ] || fail "expected one FM_TEST_END, got $end_n"
-  grep -Eq '^FM_TEST_BEGIN .+ family=unclassified expected_gate_skip=none$' "$out" \
-    || fail "BEGIN line missing family/expected_gate_skip: $(grep '^FM_TEST_BEGIN' "$out")"
-  grep -Eq '^FM_TEST_END .+ exit=0 duration_ms=[0-9]+ gate_skip=false$' "$out" \
-    || fail "END line missing exit/duration/gate_skip: $(grep '^FM_TEST_END' "$out")"
+  grep -Eq '^FM_TEST_BEGIN .+ family=unclassified runtime_gate=none gate_requirement=none$' "$out" \
+    || fail "BEGIN line missing runtime gate contract: $(grep '^FM_TEST_BEGIN' "$out")"
+  grep -Eq '^FM_TEST_GATE .+ runtime=none requirement=none outcome=exercised$' "$out" \
+    || fail "gate marker missing exercised evidence: $(grep '^FM_TEST_GATE' "$out")"
+  grep -Eq '^FM_TEST_END .+ exit=0 duration_ms=[0-9]+ gate_skip=false gate_outcome=exercised$' "$out" \
+    || fail "END line missing typed gate outcome: $(grep '^FM_TEST_END' "$out")"
   summary=$(grep '^FM_TEST_SUMMARY ' "$out" || true)
   assert_contains "$summary" "total=1" "summary total"
   assert_contains "$summary" "failed=0" "summary failed"
@@ -243,6 +246,9 @@ doc = json.load(open(sys.argv[1]))
 assert "scripts" in doc and len(doc["scripts"]) == 1, doc
 assert doc["scripts"][0]["exit"] == 0
 assert doc["scripts"][0]["gate_skip"] is False
+assert doc["scripts"][0]["runtime_gate"] == "none"
+assert doc["scripts"][0]["gate_requirement"] == "none"
+assert doc["scripts"][0]["gate_outcome"] == "exercised"
 assert doc["summary"]["total"] == 1
 assert doc["summary"]["failed"] == 0
 assert "duration_ms" in doc["scripts"][0]
@@ -337,7 +343,9 @@ SH
   chmod +x "$skip_f"
   "$RUNNER" --json "$json" "$skip_f" >"$out" 2>"$tmp/err.txt" \
     || fail "gate-skip fixture must exit 0 from the runner"
-  grep -Eq '^FM_TEST_END .+ exit=0 duration_ms=[0-9]+ gate_skip=true$' "$out" \
+  grep -Eq '^FM_TEST_GATE .+ runtime=none requirement=none outcome=legacy-skip$' "$out" \
+    || fail "legacy skip must carry typed compatibility evidence: $(grep '^FM_TEST_GATE' "$out")"
+  grep -Eq '^FM_TEST_END .+ exit=0 duration_ms=[0-9]+ gate_skip=true gate_outcome=legacy-skip$' "$out" \
     || fail "END must mark gate_skip=true: $(grep '^FM_TEST_END' "$out")"
   grep -q 'FM_TEST_SUMMARY total=1 failed=0 skipped_gate=1' "$out" \
     || fail "summary must count skipped_gate=1: $(grep FM_TEST_SUMMARY "$out")"
@@ -345,11 +353,174 @@ SH
 import json, sys
 doc = json.load(open(sys.argv[1]))
 assert doc["scripts"][0]["gate_skip"] is True
+assert doc["scripts"][0]["gate_outcome"] == "legacy-skip"
 assert doc["summary"]["skipped_gate"] == 1
 assert doc["summary"]["failed"] == 0
 ' "$json" || { rm -rf "$tmp"; fail "JSON gate_skip accounting is wrong"; }
   rm -rf "$tmp"
   pass "gate-skip accounting is honest and non-failing"
+}
+
+test_runtime_gate_required_and_optional_outcomes() {
+  local tmp skip_f required_out optional_out required_json exercised_out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-runtime-gate.XXXXXX")
+  skip_f="$tmp/fm-backend-herdr-smoke.test.sh"
+  required_out="$tmp/required.out"
+  optional_out="$tmp/optional.out"
+  required_json="$tmp/required.json"
+  printf '#!/usr/bin/env bash\necho "ok - unit coverage"\necho "FM_TEST_RUNTIME_GATE runtime=herdr outcome=exercised"\n' >"$skip_f"
+  chmod +x "$skip_f"
+  "$RUNNER" --runtime-gate herdr=required "$skip_f" >"$tmp/exercised.out" 2>"$tmp/exercised.err" \
+    || { rm -rf "$tmp"; fail "an exercised required Herdr gate must pass"; }
+  exercised_out="$tmp/exercised.out"
+  grep -Eq '^FM_TEST_GATE .+ runtime=herdr requirement=required outcome=exercised$' "$exercised_out" \
+    || fail "required coverage lacks exercised evidence: $(grep '^FM_TEST_GATE' "$exercised_out")"
+
+  cat >"$skip_f" <<'SH'
+#!/usr/bin/env bash
+echo "FM_TEST_RUNTIME_GATE runtime=herdr outcome=unavailable"
+echo "skip: herdr not found"
+exit 0
+SH
+  chmod +x "$skip_f"
+
+  set +e
+  "$RUNNER" --runtime-gate herdr=required --json "$required_json" "$skip_f" >"$required_out" 2>"$tmp/required.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a skipped required Herdr gate must fail"
+  grep -Eq '^FM_TEST_GATE .+ runtime=herdr requirement=required outcome=unexpectedly-skipped$' "$required_out" \
+    || fail "required skip lacks typed failure evidence: $(grep '^FM_TEST_GATE' "$required_out")"
+  grep -Eq '^FM_TEST_END .+ exit=1 duration_ms=[0-9]+ gate_skip=true gate_outcome=unexpectedly-skipped$' "$required_out" \
+    || fail "required skip END marker is wrong: $(grep '^FM_TEST_END' "$required_out")"
+  grep -Fq 'required runtime gate not exercised: runtime=herdr' "$tmp/required.err" \
+    || fail "required skip diagnostic is missing: $(cat "$tmp/required.err")"
+  python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+script = doc["scripts"][0]
+assert script["runtime_gate"] == "herdr"
+assert script["gate_requirement"] == "required"
+assert script["gate_outcome"] == "unexpectedly-skipped"
+assert script["exit"] == 1
+' "$required_json" || { rm -rf "$tmp"; fail "required gate JSON evidence is wrong"; }
+
+  "$RUNNER" "$skip_f" >"$optional_out" 2>"$tmp/optional.err" \
+    || { rm -rf "$tmp"; fail "an unavailable optional runtime must remain successful"; }
+  grep -Eq '^FM_TEST_GATE .+ runtime=herdr requirement=optional outcome=intentionally-unavailable$' "$optional_out" \
+    || fail "optional runtime skip lacks typed availability evidence: $(grep '^FM_TEST_GATE' "$optional_out")"
+  grep -Eq '^FM_TEST_END .+ exit=0 duration_ms=[0-9]+ gate_skip=true gate_outcome=intentionally-unavailable$' "$optional_out" \
+    || fail "optional runtime END marker is wrong: $(grep '^FM_TEST_END' "$optional_out")"
+
+  printf '#!/usr/bin/env bash\necho "ok - unit coverage passed before runtime skip"\n' >"$skip_f"
+  set +e
+  "$RUNNER" --runtime-gate herdr=required "$skip_f" >"$tmp/missing.out" 2>"$tmp/missing.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a mapped gate without explicit runtime evidence must fail"
+  grep -Eq '^FM_TEST_GATE .+ runtime=herdr requirement=required outcome=unexpectedly-skipped$' "$tmp/missing.out" \
+    || fail "missing runtime evidence lacks typed failure output: $(cat "$tmp/missing.out")"
+  grep -Fq 'runtime gate evidence missing or invalid' "$tmp/missing.err" \
+    || fail "missing runtime evidence lacks an actionable diagnostic: $(cat "$tmp/missing.err")"
+
+  cat >"$skip_f" <<'SH'
+#!/usr/bin/env bash
+echo "ok - unit coverage passed"
+echo "skip: herdr not found after unit coverage"
+echo "FM_TEST_RUNTIME_GATE runtime=herdr outcome=unavailable"
+SH
+  set +e
+  "$RUNNER" --runtime-gate herdr=required "$skip_f" >"$tmp/mixed.out" 2>"$tmp/mixed.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an explicitly unavailable mixed-suite runtime must fail when required"
+  grep -Eq '^FM_TEST_GATE .+ runtime=herdr requirement=required outcome=unexpectedly-skipped$' "$tmp/mixed.out" \
+    || fail "mixed-suite unavailable evidence was not consumed: $(cat "$tmp/mixed.out")"
+  rm -rf "$tmp"
+  pass "runtime gates require explicit exercised or unavailable evidence"
+}
+
+test_runtime_gate_selection_validation_and_real_test_mapping() {
+  local tmp repo fixture rc out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-runtime-selection.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+
+  set +e
+  "$RUNNER" --runtime-gate herdr=required tests/fm-lint.test.sh >"$tmp/unrelated.out" 2>"$tmp/unrelated.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "required Herdr must fail when the selection has no Herdr gate"
+  grep -Fxq 'FM_TEST_GATE selection runtime=herdr requirement=required outcome=unexpectedly-skipped reason=no-selected-gate' "$tmp/unrelated.out" \
+    || fail "unrelated selection lacks typed no-selected-gate evidence: $(cat "$tmp/unrelated.out")"
+
+  set +e
+  "$RUNNER" --runtime-gate herdr=required --family real-herdr-gated \
+    --exclude-family real-herdr-gated >"$tmp/excluded.out" 2>"$tmp/excluded.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "required Herdr must fail after exclusions remove every Herdr gate"
+
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --runtime-gate herdr=required --changed --base HEAD) \
+    >"$tmp/empty.out" 2>"$tmp/empty.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "required Herdr must fail for an empty changed selection"
+  grep -Fq 'reason=no-selected-gate' "$tmp/empty.out" \
+    || fail "empty required selection lacks typed gate evidence: $(cat "$tmp/empty.out")"
+
+  fixture="$tmp/fm-backend-orca.test.sh"
+  printf '#!/usr/bin/env bash\necho "ok - fake Orca coverage"\n' >"$fixture"
+  chmod +x "$fixture"
+  set +e
+  "$RUNNER" --runtime-gate orca=required "$fixture" >"$tmp/orca.out" 2>"$tmp/orca.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "fake-only Orca coverage must not satisfy a required Orca runtime"
+  grep -Fq 'runtime=orca requirement=required outcome=unexpectedly-skipped reason=no-selected-gate' "$tmp/orca.out" \
+    || fail "fake-only Orca refusal lacks typed evidence: $(cat "$tmp/orca.out")"
+  "$RUNNER" --runtime-gate orca=optional "$fixture" >"$tmp/orca-optional.out" 2>"$tmp/orca-optional.err" \
+    || fail "an unmatched optional Orca declaration must preserve local fake-only coverage"
+  grep -Eq '^FM_TEST_BEGIN .+ family=orca runtime_gate=none gate_requirement=none$' "$tmp/orca-optional.out" \
+    || fail "fake Orca suite must be unmapped from runtime evidence: $(cat "$tmp/orca-optional.out")"
+
+  for fixture in "$tmp/fm-backend-cmux.test.sh" "$tmp/fm-backend-zellij.test.sh"; do
+    printf '#!/usr/bin/env bash\necho "ok - fake runtime coverage"\n' >"$fixture"
+    chmod +x "$fixture"
+    out=$("$RUNNER" "$fixture") || fail "fake runtime fixture must remain ordinary coverage: $fixture"
+    printf '%s\n' "$out" | grep -Eq '^FM_TEST_BEGIN .+ family=(cmux|zellij) runtime_gate=none gate_requirement=none$' \
+      || fail "fake runtime suite must be unmapped from runtime evidence: $out"
+  done
+
+  rm -rf "$tmp"
+  pass "required declarations validate selections and only real tests map runtimes"
+}
+
+test_runtime_gate_declaration_parser_refuses_malformed_input() {
+  local tmp fixture declaration rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-runtime-gate-parse.XXXXXX")
+  fixture="$tmp/fm-backend-herdr-smoke.test.sh"
+  printf '#!/usr/bin/env bash\necho "ok - fixture"\n' >"$fixture"
+  chmod +x "$fixture"
+  for declaration in herdr herdr=must-run unknown=required '=optional'; do
+    set +e
+    "$RUNNER" --runtime-gate "$declaration" "$fixture" >"$tmp/out" 2>"$tmp/err"
+    rc=$?
+    set -e
+    [ "$rc" -eq 2 ] || fail "malformed declaration '$declaration' must exit 2, got $rc"
+    grep -Eq 'malformed --runtime-gate declaration|unknown runtime gate' "$tmp/err" \
+      || fail "malformed declaration '$declaration' lacks an actionable error: $(cat "$tmp/err")"
+  done
+  set +e
+  "$RUNNER" --runtime-gate herdr=required --runtime-gate herdr=optional "$fixture" >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "duplicate runtime declaration must exit 2, got $rc"
+  grep -Fq "duplicate runtime gate declaration for 'herdr'" "$tmp/err" \
+    || fail "duplicate declaration lacks an actionable error: $(cat "$tmp/err")"
+  rm -rf "$tmp"
+  pass "runtime gate declaration parser rejects malformed and duplicate contracts"
 }
 
 test_fail_on_gate_skip_token() {
@@ -660,7 +831,7 @@ SH
 
   "$runner" --jobs 2 "$d" >"$tmp/out6" 2>"$tmp/err6" \
     || { rm -rf "$tmp"; fail "ordinary parallel stderr gate skip must remain successful"; }
-  grep -Eq '^FM_TEST_END .+ exit=0 duration_ms=[0-9]+ gate_skip=true$' "$tmp/out6" \
+  grep -Eq '^FM_TEST_END .+ exit=0 duration_ms=[0-9]+ gate_skip=true gate_outcome=legacy-skip$' "$tmp/out6" \
     || { rm -rf "$tmp"; fail "parallel stderr gate skip was not recorded"; }
   grep -q 'FM_TEST_SUMMARY total=1 failed=0 skipped_gate=1' "$tmp/out6" \
     || { rm -rf "$tmp"; fail "parallel stderr skip summary wrong: $(grep FM_TEST_SUMMARY "$tmp/out6")"; }
@@ -721,6 +892,9 @@ test_timing_markers_and_json
 test_runner_provisions_private_operator_homes
 test_aggregate_exit_behavior
 test_gate_skip_accounting
+test_runtime_gate_required_and_optional_outcomes
+test_runtime_gate_selection_validation_and_real_test_mapping
+test_runtime_gate_declaration_parser_refuses_malformed_input
 test_fail_on_gate_skip_token
 test_exclude_family
 test_portable_shard_union_and_coverage_guard

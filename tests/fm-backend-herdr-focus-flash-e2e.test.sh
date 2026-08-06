@@ -24,10 +24,10 @@ HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
-command -v herdr >/dev/null 2>&1 || { echo 'skip: herdr not found'; exit 0; }
-command -v jq >/dev/null 2>&1 || { echo 'skip: jq not found'; exit 0; }
-command -v python3 >/dev/null 2>&1 || { echo 'skip: python3 not found'; exit 0; }
-[ -x "$HERDR_LAB_HELPER" ] || { echo "skip: Herdr lab helper not executable at $HERDR_LAB_HELPER"; exit 0; }
+command -v herdr >/dev/null 2>&1 || { printf 'FM_TEST_RUNTIME_GATE runtime=herdr outcome=unavailable\nskip: herdr not found\n'; exit 0; }
+command -v jq >/dev/null 2>&1 || { printf 'FM_TEST_RUNTIME_GATE runtime=herdr outcome=unavailable\nskip: jq not found\n'; exit 0; }
+command -v python3 >/dev/null 2>&1 || { printf 'FM_TEST_RUNTIME_GATE runtime=herdr outcome=unavailable\nskip: python3 not found\n'; exit 0; }
+[ -x "$HERDR_LAB_HELPER" ] || { printf 'FM_TEST_RUNTIME_GATE runtime=herdr outcome=unavailable\nskip: Herdr lab helper not executable at %s\n' "$HERDR_LAB_HELPER"; exit 0; }
 
 HERDR_ORIGINAL_PATH=$PATH
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-focus-flash-e2e.XXXXXX")
@@ -407,3 +407,4 @@ fi
 
 printf 'evidence: herdr=%s protocol=%s steal_live=%s floor_verdict=%s default-session-tripwire=armed\n' \
   "$LIVE_VERSION" "$LIVE_PROTOCOL" "$STEAL_LIVE" "$FLOOR_VERDICT"
+printf 'FM_TEST_RUNTIME_GATE runtime=herdr outcome=exercised\n'

@@ -12,10 +12,10 @@ HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
-command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
-command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
-command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found"; exit 0; }
-[ -x "$HERDR_LAB_HELPER" ] || { echo "skip: Herdr lab helper not executable at $HERDR_LAB_HELPER"; exit 0; }
+command -v herdr >/dev/null 2>&1 || { printf 'FM_TEST_RUNTIME_GATE runtime=herdr outcome=unavailable\nskip: herdr not found\n'; exit 0; }
+command -v jq >/dev/null 2>&1 || { printf 'FM_TEST_RUNTIME_GATE runtime=herdr outcome=unavailable\nskip: jq not found\n'; exit 0; }
+command -v treehouse >/dev/null 2>&1 || { printf 'FM_TEST_RUNTIME_GATE runtime=herdr outcome=unavailable\nskip: treehouse not found\n'; exit 0; }
+[ -x "$HERDR_LAB_HELPER" ] || { printf 'FM_TEST_RUNTIME_GATE runtime=herdr outcome=unavailable\nskip: Herdr lab helper not executable at %s\n' "$HERDR_LAB_HELPER"; exit 0; }
 
 REAL_HERDR=$(command -v herdr)
 REAL_TREEHOUSE=$(command -v treehouse)
@@ -1569,3 +1569,4 @@ pass "real Herdr lab validation completed on Herdr $HERDR_VERSION with the defau
 
 cleanup_all
 trap - EXIT
+printf 'FM_TEST_RUNTIME_GATE runtime=herdr outcome=exercised\n'
