@@ -9,10 +9,10 @@
 # runtime-backend default for future spawns, primary config/startup-memory-budget
 # bounds that home's startup-memory curation, and primary
 # config/herdr-presentation-spaces carries the same Herdr presentation-projection
-# choice - that item is default-ON, so an absent primary file and an absent
-# destination file both mean on and the generic absence mirror below already
-# converges a secondmate to the primary's default rather than turning it off;
-# only an explicit primary "off" propagates an opt-out, and primary
+# preference - an absent primary file and an absent destination file both mean
+# the same unconfigured default, so the generic absence mirror below converges
+# a secondmate without deciding the release-dependent floor; explicit "on" and
+# "off" preferences propagate as files. Primary
 # config/trace-context is copied at the launch convergence point as part of the
 # default-off W3C trace-context setup, while live convergence leaves it unchanged.
 # The primary passes its frozen home-session decision into a newly launched
