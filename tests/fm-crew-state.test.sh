@@ -1893,6 +1893,61 @@ test_every_verdict_has_a_declared_decision_clearing_answer() {
   pass "every verdict in the vocabulary has an explicit decision-clearing answer"
 }
 
+# The same gate for the OTHER consumer of the vocabulary, the watcher's absorb
+# path. Its fallback answer is `none`, which is the safe direction and therefore
+# indistinguishable from a correct `none` in the printed token - so the mapper
+# reports HOW it answered, and this walks the vocabulary against that. A verdict
+# added to FM_CREW_STATE_VOCABULARY without a branch in crew_state_absorb_class
+# fails here rather than being silently absorbed into the fallback.
+test_every_verdict_has_a_declared_absorb_class() {
+  local state rc src
+  for state in $FM_CREW_STATE_VOCABULARY; do
+    for src in run-step pane status-log none; do
+      crew_state_absorb_class "$state" "$src" >/dev/null; rc=$?
+      [ "$rc" != 3 ] || \
+        fail "verdict '$state' reaches no arm of crew_state_absorb_class (source $src); add one"
+      [ "$rc" = 0 ] || \
+        fail "verdict '$state' is not answered by an explicit absorb arm (source $src, rc $rc)"
+    done
+  done
+  # Red-capable, once per outcome the gate distinguishes. A verdict this fleet
+  # DECLARES but the mapper does not handle is the failure this gate exists to
+  # catch, so prove the mapper actually reports it by declaring one temporarily.
+  local saved=$FM_CREW_STATE_VOCABULARY
+  FM_CREW_STATE_VOCABULARY="$saved frobnicated"
+  crew_state_absorb_class frobnicated run-step >/dev/null; rc=$?
+  FM_CREW_STATE_VOCABULARY=$saved
+  [ "$rc" = 3 ] || \
+    fail "a declared-but-unhandled verdict must be reported as a gap, got rc $rc"
+  # Outside the vocabulary entirely is the fallback's one legitimate case.
+  crew_state_absorb_class frobnicated run-step >/dev/null; rc=$?
+  [ "$rc" = 2 ] || \
+    fail "an out-of-vocabulary verdict must reach the untaught fallback, got rc $rc"
+  pass "every verdict in the vocabulary has an explicit absorb-class answer"
+}
+
+# The absorb classes themselves, which decide whether a wake is swallowed.
+# Absorbing is the unsafe direction here: it drops a supervisor's chance to see
+# a crew that stopped, so only positive evidence of work in flight may absorb.
+test_only_positive_evidence_absorbs_a_wake() {
+  local state
+  [ "$(crew_state_absorb_class working run-step)" = working ] \
+    || fail "an active run step is provable work"
+  [ "$(crew_state_absorb_class working pane)" = working ] \
+    || fail "a busy pane is provable work"
+  [ "$(crew_state_absorb_class working status-log)" = none ] \
+    || fail "a status-log working claim is not evidence, and must surface"
+  [ "$(crew_state_absorb_class paused status-log)" = paused ] \
+    || fail "a declared external wait is expected to idle"
+  for state in parked blocked "done" failed aborted interrupted idle stale unknown; do
+    [ "$(crew_state_absorb_class "$state" run-step)" = none ] \
+      || fail "verdict '$state' must surface the wake, not be absorbed (run-step)"
+    [ "$(crew_state_absorb_class "$state" pane)" = none ] \
+      || fail "verdict '$state' must surface the wake, not be absorbed (pane)"
+  done
+  pass "a wake is absorbed only on positive evidence of work in flight"
+}
+
 # Only POSITIVE evidence that the crew moved past the gate clears an open
 # decision. The unsafe direction is the one that matters: dropping an open
 # decision loses a captain's question, while keeping a spurious one costs a
@@ -1980,5 +2035,7 @@ test_help_flag_stays_an_unknown_id
 test_control_characters_in_terminal_error_stay_valid_json
 test_every_verdict_has_a_declared_decision_clearing_answer
 test_only_positive_evidence_clears_an_open_decision
+test_every_verdict_has_a_declared_absorb_class
+test_only_positive_evidence_absorbs_a_wake
 
 echo "all fm-crew-state tests passed"

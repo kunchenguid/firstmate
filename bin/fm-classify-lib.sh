@@ -203,6 +203,53 @@ crew_state_clears_open_decision() {  # <state> <source>
   return 2
 }
 
+# May an idle-looking crew at this verdict be ABSORBED instead of surfaced to a
+# supervisor? Owned here beside the vocabulary for the same reason as
+# crew_state_clears_open_decision: it is a statement about the verdict set, and
+# the watcher's absorb path (crew_absorb_class below) is the consumer that
+# applies it. Prints exactly one token:
+#   working - a running no-mistakes step or a busy pane, so the crew is
+#             legitimately mid-work behind a static-looking pane;
+#   paused  - a declared external wait, which is EXPECTED to idle;
+#   none    - surface the wake.
+# Only run-step and pane are POSITIVE evidence of work in flight; a `working`
+# derived from the status log is the crew's own claim, and a claim is not a
+# verdict.
+#
+# Exit codes carry what the printed token cannot, because `none` is both the
+# right answer for most verdicts AND the safe fallback: 0 an explicit arm
+# answered, 3 the verdict is one this fleet DECLARES but this consumer was never
+# taught, 2 the verdict is outside FM_CREW_STATE_VOCABULARY entirely. Only 2 is
+# a legitimate steady state - a reader newer than this consumer, or a stubbed
+# verdict - and crew_state_is_known is what separates the two, so the claim that
+# the fallback is unreachable for a declared verdict is executed rather than
+# asserted in prose. The coverage gate in tests/fm-crew-state.test.sh walks the
+# vocabulary and fails on any 3.
+crew_state_absorb_class() {  # <state> <source>
+  case "${1:-}" in
+    paused) printf 'paused'; return 0 ;;
+    working)
+      case "${2:-}" in run-step|pane) printf 'working'; return 0 ;; esac
+      printf 'none'; return 0
+      ;;
+    # Terminal, waiting, or unproven: all must reach a supervisor.
+    #   parked/blocked        need a decision or help
+    #   done/failed/aborted   are outcomes to act on
+    #   interrupted           needs a re-run, and is NOT a rejection
+    #   idle                  alive but doing nothing, so a wake still matters
+    #   stale                 nothing has touched the crew's turn record since
+    #                         its timestamp, so there is no evidence of activity
+    #                         to absorb against and the crew must surface
+    #   unknown               unproven, and unproven never absorbs
+    parked|blocked|done|failed|aborted|interrupted|idle|stale|unknown)
+      printf 'none'; return 0
+      ;;
+  esac
+  printf 'none'
+  crew_state_is_known "${1:-}" && return 3
+  return 2
+}
+
 # Read one string field out of bin/fm-crew-state.sh's --json object. The object
 # is flat and this reader owns its shape, so a bounded extraction is exact for
 # the TOKEN fields (state, source, precedence_applied), whose values are
@@ -660,34 +707,13 @@ crew_absorb_class() {  # <id>
   json=$("$FM_CREW_STATE_BIN" --json "$id" 2>/dev/null) || true
   [ -n "$json" ] || { printf 'none'; return; }
   state=$(crew_state_json_token "$json" state) || { printf 'none'; return; }
-  # Every verdict is enumerated. `none` means "surface this wake", which is the
-  # safe direction, but each case says so ON PURPOSE rather than falling into a
-  # default - a silent default is precisely how a new verdict would start being
-  # mishandled without anything failing.
-  case "$state" in
-    paused) printf 'paused'; return ;;
-    working)
-      # Only run-step and pane are POSITIVE evidence of work in flight. A
-      # `working` derived from the status log is a crew's own claim, and a
-      # claim is not a verdict.
-      src=$(crew_state_json_token "$json" source) || src=''
-      case "$src" in run-step|pane) printf 'working'; return ;; esac
-      printf 'none'; return ;;
-    # Terminal, waiting, or unproven: all must reach a supervisor.
-    #   parked/blocked        need a decision or help
-    #   done/failed/aborted   are outcomes to act on
-    #   interrupted           needs a re-run, and is NOT a rejection
-    #   idle                  alive but doing nothing, so a wake still matters
-    #   stale                 the evidence aged out; a worker that died
-    #                         mid-turn must surface, never be absorbed as work
-    #   unknown               unproven, and unproven never absorbs
-    parked|blocked|done|failed|aborted|interrupted|idle|stale|unknown)
-      printf 'none'; return ;;
-  esac
-  # A verdict this consumer has not been taught. Surfacing is the safe answer,
-  # but it is a real gap: crew_state_is_known plus the conformance test exist so
-  # this is unreachable in a tested tree.
-  printf 'none'
+  src=$(crew_state_json_token "$json" source) || src=''
+  # crew_state_absorb_class owns the verdict-to-class mapping, beside the
+  # vocabulary it must cover. This function's job is the read, and its contract
+  # to its callers stays "prints one token, always exits 0"; the mapper's
+  # three-valued code is for the coverage gate, not for the watcher.
+  crew_state_absorb_class "$state" "$src"
+  return 0
 }
 
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class

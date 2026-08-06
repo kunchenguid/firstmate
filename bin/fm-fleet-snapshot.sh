@@ -218,16 +218,20 @@ crew_state_json() {  # <id>
       FM_DATA_OVERRIDE="$DATA" \
       FM_PROJECTS_OVERRIDE="$PROJECTS" \
       FM_CONFIG_OVERRIDE="$CONFIG" \
-      "$SCRIPT_DIR/fm-crew-state.sh" --json "$id" 2>/dev/null || true
+      "$FM_CREW_STATE_BIN" --json "$id" 2>/dev/null || true
   )
   out=$(printf '%s\n' "$out" | head -1)
-  # One jq per task, not two: the projection itself fails on anything jq could
-  # not parse (and on valid JSON that is not an object), so a separate `jq -e .`
-  # validation pass was a second process per crew per snapshot proving what this
-  # one already proves. The empty guard stays because jq exits 0 on empty input.
+  # One jq per task, not two. The guard is explicit rather than inferred from
+  # what the projection happens to reject: `type == "object"` admits exactly the
+  # shape this reader promises, and everything else - unparseable output, a bare
+  # scalar, an array, and the JSON literal `null`, which jq's null-indexing rule
+  # would otherwise project into an all-null object - raises and falls through
+  # to the unknown record below. Absence of a usable answer must never surface
+  # as a state. The empty guard stays because jq exits 0 on empty input.
   if [ -n "$out" ] && projected=$(printf '%s' "$out" \
-    | jq '{state,source,detail,precedence_applied,busy_signal,run_step,
-           terminal_error,evidence_age_secs}' 2>/dev/null); then
+    | jq 'if type == "object" then {state,source,detail,precedence_applied,busy_signal,
+                                    run_step,terminal_error,evidence_age_secs}
+          else error("crew-state answer is not a JSON object") end' 2>/dev/null); then
     printf '%s' "$projected"
     return
   fi
