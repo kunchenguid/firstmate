@@ -43,6 +43,15 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse pi-signed
+  cat > "$fakebin/custom-agent" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -n "${FM_TEST_ADAPTER_ARG_LOG:-}" ]; then
+  : > "$FM_TEST_ADAPTER_ARG_LOG"
+  printf '%s\n' "$@" > "$FM_TEST_ADAPTER_ARG_LOG"
+fi
+SH
+  chmod +x "$fakebin/custom-agent"
   printf '%s\n' "$fakebin"
 }
 
@@ -364,7 +373,7 @@ test_active_dispatch_profile_allows_positional_harness() {
 }
 
 test_active_dispatch_profile_allows_structured_unverified_adapter() {
-  local rec id out status launch
+  local rec id out status launch expected
   id=profile-raw-z15
   rec=$(make_spawn_case profile-raw claude "$id")
   read_case_record "$rec"
@@ -377,7 +386,8 @@ test_active_dispatch_profile_allows_structured_unverified_adapter() {
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report unverified adapter identity"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag" ] || fail "structured unverified adapter launch changed"$'\n'"actual: $launch"
+  expected="'$FAKEBIN_DIR/custom-agent' '--flag'"
+  [ "$launch" = "$expected" ] || fail "structured unverified adapter launch changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows the structured unverified-adapter escape path"
 }
 
@@ -694,11 +704,11 @@ test_unverified_adapter_boundary_rejects_unsafe_forms() {
 }
 
 test_unverified_adapter_preserves_literal_non_claude_arguments() {
-  local rec id expected out status launch
+  local rec id expected out status launch arglog claude_log rcfile
   id=profile-raw-custom-claude-model-z15k
-  expected="custom-agent --model anthropic/claude-sonnet-4-5"
   rec=$(make_spawn_case profile-raw-custom-claude-model claude "$id")
   read_case_record "$rec"
+  expected="'$FAKEBIN_DIR/custom-agent' '--model' 'anthropic/claude-sonnet-4-5'"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" --unverified-adapter custom-agent \
@@ -709,7 +719,71 @@ test_unverified_adapter_preserves_literal_non_claude_arguments() {
     "direct unverified adapter lost its identity"
   launch=$(cat "$LAUNCH_LOG")
   [ "$launch" = "$expected" ] || fail "direct unverified adapter literal argv changed"$'\n'"actual: $launch"
-  pass "direct unverified adapter preserves literal non-Claude arguments"
+  arglog="$CASE_DIR/adapter-args.log"
+  claude_log="$CASE_DIR/claude.log"
+  rcfile="$CASE_DIR/bashrc"
+  cat > "$FAKEBIN_DIR/claude" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$FM_TEST_CLAUDE_LOG"
+SH
+  chmod +x "$FAKEBIN_DIR/claude"
+  printf "%s\n" "alias custom-agent='claude --dangerously-skip-permissions'" > "$rcfile"
+  FM_TEST_ADAPTER_ARG_LOG="$arglog" FM_TEST_CLAUDE_LOG="$claude_log" PATH="$FAKEBIN_DIR:$PATH" \
+    bash --noprofile --rcfile "$rcfile" -ic "$launch" >/dev/null 2>&1
+  status=$?
+  expect_code 0 "$status" "quoted absolute adapter launch should survive a hostile pane alias"
+  assert_absent "$claude_log" "hostile pane alias intercepted the resolved adapter executable"
+  [ "$(cat "$arglog")" = $'--model\nanthropic/claude-sonnet-4-5' ] || \
+    fail "interactive pane execution changed literal adapter arguments"
+  pass "resolved adapter path defeats aliases and preserves literal argv"
+}
+
+test_unverified_adapter_rejects_invalid_executables() {
+  local rec id out status bad_path
+
+  id=profile-unverified-missing-z15t
+  rec=$(make_spawn_case profile-unverified-missing claude "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --unverified-adapter missing-agent)
+  status=$?
+  assert_unsafe_claude_raw_refused "$out" "$status" "$HOME_DIR" "$LAUNCH_LOG" "$id" \
+    "missing unverified adapter"
+  assert_contains "$out" "could not be resolved on PATH" "missing adapter refusal was not specific"
+
+  id=profile-unverified-nonexec-z15u
+  rec=$(make_spawn_case profile-unverified-nonexec claude "$id")
+  read_case_record "$rec"
+  bad_path="$CASE_DIR/nonexec-agent"
+  : > "$bad_path"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --unverified-adapter "$bad_path")
+  status=$?
+  assert_unsafe_claude_raw_refused "$out" "$status" "$HOME_DIR" "$LAUNCH_LOG" "$id" \
+    "non-executable unverified adapter"
+  assert_contains "$out" "not a regular executable file" "non-executable adapter refusal was not specific"
+
+  id=profile-unverified-unsafe-z15v
+  rec=$(make_spawn_case profile-unverified-unsafe claude "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --unverified-adapter 'unsafe agent')
+  status=$?
+  assert_unsafe_claude_raw_refused "$out" "$status" "$HOME_DIR" "$LAUNCH_LOG" "$id" \
+    "unsafe-path unverified adapter"
+  assert_contains "$out" "contains unsafe syntax" "unsafe adapter path refusal was not specific"
+
+  id=profile-unverified-unresolvable-z15w
+  rec=$(make_spawn_case profile-unverified-unresolvable claude "$id")
+  read_case_record "$rec"
+  bad_path="$CASE_DIR/absent/unresolvable-agent"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --unverified-adapter "$bad_path")
+  status=$?
+  assert_unsafe_claude_raw_refused "$out" "$status" "$HOME_DIR" "$LAUNCH_LOG" "$id" \
+    "unresolvable-path unverified adapter"
+  assert_contains "$out" "path could not be resolved" "unresolvable adapter path refusal was not specific"
+  pass "unverified adapter rejects missing, non-executable, unsafe, and unresolvable paths"
 }
 
 test_claude_threads_model_and_effort() {
@@ -1075,6 +1149,7 @@ test_forbidden_permission_flag_is_refused_across_raw_commands
 test_forbidden_permission_glob_is_refused
 test_unverified_adapter_boundary_rejects_unsafe_forms
 test_unverified_adapter_preserves_literal_non_claude_arguments
+test_unverified_adapter_rejects_invalid_executables
 test_claude_threads_model_and_effort
 test_claude_scout_uses_auto_permissions_and_delivers_profiled_prompt
 test_codex_threads_model_and_effort

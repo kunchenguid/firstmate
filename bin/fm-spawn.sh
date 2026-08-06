@@ -21,7 +21,10 @@
 #   --unverified-adapter <executable> is the local-only escape path for verifying
 #   a new adapter. The executable basename must end in -agent or -adapter, must
 #   not name Claude, and must be the adapter itself rather than an interpreter or
-#   command runner. Each argument is passed separately with a repeated
+#   command runner. Firstmate resolves it to a regular executable at an absolute
+#   path, resolves symbolic links, and shell-quotes that path and every argument
+#   before pane delivery so aliases, functions, and expansion cannot change argv.
+#   Each argument is passed separately with a repeated
 #   --adapter-arg <literal>; literals use only letters, digits, and _./,:+%@=-.
 #   Shell text, quotes, whitespace-bearing arguments, substitutions, globs,
 #   aliases, inline code, and legacy positional launch-command strings are
@@ -366,29 +369,89 @@ else
 fi
 
 unverified_adapter_refuse() {
-  echo "error: refusing unverified adapter launch; legacy shell launch strings are not accepted - use --unverified-adapter <name-ending-in--agent-or--adapter> with repeated --adapter-arg=<literal>, or select a canonical verified harness such as --harness claude" >&2
+  local reason=${1:-legacy shell launch strings are not accepted}
+  echo "error: refusing unverified adapter launch: $reason; use --unverified-adapter <name-ending-in--agent-or--adapter> with repeated --adapter-arg=<literal>, or select a canonical verified harness such as --harness claude" >&2
   return 1
 }
 
 unverified_adapter_preflight() {
-  local executable=$1 base arg
+  local executable=$1 base arg candidate parent leaf target hops
   case "$executable" in
-    ''|*[!A-Za-z0-9_./+-]*|*claude*) unverified_adapter_refuse; return 1 ;;
+    ''|*[!A-Za-z0-9_./+-]*) unverified_adapter_refuse "the executable contains unsafe syntax"; return 1 ;;
+    *claude*) unverified_adapter_refuse "Claude must use the canonical verified harness"; return 1 ;;
   esac
   base=${executable##*/}
   case "$base" in
     *-agent|*-adapter) ;;
-    *) unverified_adapter_refuse; return 1 ;;
+    *) unverified_adapter_refuse "the executable basename must end in -agent or -adapter"; return 1 ;;
   esac
-  UNVERIFIED_ADAPTER_LAUNCH=$executable
   for arg in "${UNVERIFIED_ADAPTER_ARGS[@]}"; do
     case "$arg" in
       ''|*[!A-Za-z0-9_./,:+%@=-]*|--dangerously-skip-permissions)
-        unverified_adapter_refuse
+        unverified_adapter_refuse "an adapter argument is empty, unsafe, or forbidden"
         return 1
         ;;
     esac
-    UNVERIFIED_ADAPTER_LAUNCH+=" $arg"
+  done
+
+  case "$executable" in
+    */*) candidate=$executable ;;
+    *)
+      candidate=$(builtin type -P -- "$executable" 2>/dev/null || true)
+      [ -n "$candidate" ] || {
+        unverified_adapter_refuse "the executable could not be resolved on PATH"
+        return 1
+      }
+      ;;
+  esac
+  case "$candidate" in
+    /*) ;;
+    *) candidate=$PWD/$candidate ;;
+  esac
+  hops=0
+  while :; do
+    parent=${candidate%/*}
+    leaf=${candidate##*/}
+    [ -n "$parent" ] || parent=/
+    parent=$(CDPATH='' cd -P -- "$parent" 2>/dev/null && pwd -P) || {
+      unverified_adapter_refuse "the executable path could not be resolved"
+      return 1
+    }
+    candidate=$parent/$leaf
+    [ -L "$candidate" ] || break
+    [ "$hops" -lt 40 ] || {
+      unverified_adapter_refuse "the executable symlink chain could not be resolved"
+      return 1
+    }
+    target=$(readlink "$candidate" 2>/dev/null) || {
+      unverified_adapter_refuse "the executable symlink could not be resolved"
+      return 1
+    }
+    case "$target" in
+      /*) candidate=$target ;;
+      *) candidate=$parent/$target ;;
+    esac
+    hops=$((hops + 1))
+  done
+  case "$candidate" in
+    *[!A-Za-z0-9_./+-]*) unverified_adapter_refuse "the resolved executable path contains unsafe syntax"; return 1 ;;
+  esac
+  [ -f "$candidate" ] && [ -x "$candidate" ] || {
+    unverified_adapter_refuse "the resolved path is not a regular executable file"
+    return 1
+  }
+  leaf=${candidate##*/}
+  case "$leaf" in
+    *-agent|*-adapter) ;;
+    *) unverified_adapter_refuse "the resolved executable is not a direct adapter entrypoint"; return 1 ;;
+  esac
+  case "$leaf" in
+    *claude*) unverified_adapter_refuse "Claude must use the canonical verified harness"; return 1 ;;
+  esac
+
+  UNVERIFIED_ADAPTER_LAUNCH="'$candidate'"
+  for arg in "${UNVERIFIED_ADAPTER_ARGS[@]}"; do
+    UNVERIFIED_ADAPTER_LAUNCH+=" '$arg'"
   done
   UNVERIFIED_ADAPTER_HARNESS=$base
 }

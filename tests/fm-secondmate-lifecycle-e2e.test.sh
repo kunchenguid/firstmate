@@ -60,6 +60,7 @@ EOF
   # (gamma initialization during seed).
   FAKEBIN=$(make_fake_tmux "$TMP_ROOT/fake")
   make_fake_no_mistakes "$TMP_ROOT/fake" >/dev/null
+  fm_fake_exit0 "$FAKEBIN" relaunch-agent
 
   # A filled charter brief whose routing scope differs from the charter summary,
   # so the registry must read the scope from the brief, not invent a generic one.
