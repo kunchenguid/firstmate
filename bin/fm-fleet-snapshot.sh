@@ -197,35 +197,34 @@ last_nonempty_line() {  # <file>
   grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -1
 }
 
+# The crew's current state as typed fields. CFVC-05 retires the old shape of
+# this function, which re-derived `state`, `source`, and `detail` by splitting
+# the reader's human prose line on its middle-dot separators. The reader emits
+# those fields directly now, so the snapshot passes them through instead of
+# reconstructing them, and gains the freshness and precedence fields that the
+# prose line never carried.
 crew_state_json() {  # <id>
-  local id=$1 raw rest state source detail sep
-  raw=$(
+  local id=$1 out
+  out=$(
     FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_HOME="$FM_HOME" \
       FM_STATE_OVERRIDE="$STATE" \
       FM_DATA_OVERRIDE="$DATA" \
       FM_PROJECTS_OVERRIDE="$PROJECTS" \
       FM_CONFIG_OVERRIDE="$CONFIG" \
-      "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null || true
+      "$SCRIPT_DIR/fm-crew-state.sh" --json "$id" 2>/dev/null || true
   )
-  raw=$(printf '%s\n' "$raw" | head -1)
-  sep=' · '
-  state=unknown
-  source=none
-  detail=
-  case "$raw" in
-    state:\ *"$sep"source:\ *)
-      rest=${raw#state: }
-      state=${rest%%"$sep"source: *}
-      rest=${rest#*"$sep"source: }
-      case "$rest" in
-        *"$sep"*) source=${rest%%"$sep"*}; detail=${rest#*"$sep"} ;;
-        *) source=$rest ;;
-      esac
-      ;;
-  esac
-  jq -n --arg raw "$raw" --arg state "$state" --arg source "$source" --arg detail "$detail" \
-    '{state:$state,source:$source,detail:$detail,raw:$raw}'
+  out=$(printf '%s\n' "$out" | head -1)
+  # A reader that could not answer at all is reported as unknown rather than
+  # allowed to emit malformed JSON into the snapshot.
+  if [ -z "$out" ] || ! printf '%s' "$out" | jq -e . >/dev/null 2>&1; then
+    jq -n '{state:"unknown",source:"none",detail:"crew-state reader produced no usable answer",
+            precedence_applied:null,busy_signal:null,run_step:null,
+            terminal_error:null,evidence_age_secs:null}'
+    return
+  fi
+  printf '%s' "$out" | jq '{state,source,detail,precedence_applied,busy_signal,run_step,
+                            terminal_error,evidence_age_secs}'
 }
 
 status_event_json() {  # <status-log>
@@ -466,6 +465,15 @@ task_json_lines() {
     # never clear another concern's keyed decision. A parked/blocked state, or a
     # non-authoritative status-log/none read on a still-live task, keeps the fold's
     # open decision surfacing.
+    #
+    # The clearing set is done/failed ONLY, and the remaining verdicts are held
+    # out deliberately rather than by omission. `aborted` and `interrupted` are
+    # run-level, not task-level: the run stopped without judging the work and the
+    # worker may still re-run it, so the deliverable that would justify clearing
+    # a decision does not exist yet. `stale` and `unknown` are the absence of a
+    # reliable read, and an absent result is never a pass. `idle` means the crew
+    # declared nothing, which is not evidence it moved past the gate. All of
+    # those keep the decision surfacing, which is the safe direction.
     open_decisions_tsv=$(status_open_decisions "$status_log")
     if [ "$kind" != secondmate ] && \
        { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
@@ -667,7 +675,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
             report_path:((.report_path // null) | if . == null then null else trunc(500) end),
             local_note:((.local_note // null) | if . == null then null else trunc(120) end),completion} ]
        | sort_by([(.completion.date // ""), .id]) | reverse) as $landed_all
-    | ([ $tasks[] | select(.current_state.state == "unknown") ]) as $unknown_children
+    | ([ $tasks[] | select(.current_state.state == "unknown" or .current_state.state == "stale") ]) as $unknown_children
     | ([ $owned_in_flight[]
          | select(.requires_child_metadata)
          | select(.id as $id | [$tasks[].id] | index($id) | not) ]) as $orphan_in_flight

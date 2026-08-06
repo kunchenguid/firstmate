@@ -144,6 +144,58 @@ status_is_paused_or_captain_held() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
 }
 
+# The COMPLETE crew-state verdict vocabulary, in one place. bin/fm-crew-state.sh
+# derives these and every consumer must handle all of them: a consumer that
+# silently defaults an unlisted verdict is how a correct reader still produced a
+# wrong supervision outcome (wedge aging tested one class and defaulted the
+# rest). Adding a verdict means adding it here, which makes the conformance test
+# in tests/fm-crew-state.test.sh fail until every consumer handles it - the
+# whole point is that the next verdict cannot be added silently.
+FM_CREW_STATE_VOCABULARY='working parked blocked paused done failed aborted interrupted idle stale unknown'
+
+# 0 if <state> is a verdict this fleet knows about.
+crew_state_is_known() {  # <state>
+  [ -n "${1:-}" ] || return 1
+  case " $FM_CREW_STATE_VOCABULARY " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
+# Read one string field out of bin/fm-crew-state.sh's --json object. The object
+# is flat and this reader owns its shape, so a bounded extraction is exact for
+# the TOKEN fields (state, source, precedence_applied), whose values are
+# constrained identifiers that never contain a quote or backslash. Free-text
+# fields (detail, terminal_error) are deliberately NOT read through this:
+# consumers branch on the typed fields, which is the entire point of retiring
+# prose matching.
+crew_state_json_token() {  # <json> <field>
+  local json=$1 field=$2 frag
+  frag=${json##*\""$field"\":\"}
+  case "$frag" in
+    "$json") printf ''; return 1 ;;
+  esac
+  printf '%s' "${frag%%\"*}"
+}
+
+# 0 if a verb CLOSES a keyed decision rather than declaring a state. These verbs
+# are legitimate and sanctioned - bin/fm-brief.sh instructs every crew to write
+# `resolved:` when a decision is answered - but they say "that decision is
+# settled", not "here is what I am doing now". A reader must therefore not
+# derive a current state from them, and must equally not mistake them for an
+# UNRECOGNIZED verb: "the crew closed a decision and declared nothing since" is
+# a known condition, while an unrecognized verb genuinely is not. This library
+# owns the verb vocabulary, so the membership test lives here instead of being
+# restated by each reader that needs it.
+status_verb_is_decision_closing() {  # <verb>
+  [ -n "${1:-}" ] || return 1
+  case "$1" in
+    "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}") return 0 ;;
+    "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}") return 0 ;;
+  esac
+  return 1
+}
+
 # --- durable keyed decisions ------------------------------------------------
 #
 # The status stream is an append-only EVENT log. Reading it last-event-wins
@@ -558,16 +610,42 @@ signal_reason_is_actionable() {  # <file> ...
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_absorb_class() {  # <id>
-  local id=$1 line state src
+  local id=$1 json state src
   [ -n "$id" ] || { printf 'none'; return; }
-  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
-  case "$line" in state:*) ;; *) printf 'none'; return ;; esac
-  state=${line#state: }; state=${state%% *}
-  if [ "$state" = paused ]; then printf 'paused'; return; fi
-  if [ "$state" = working ]; then
-    src=${line#*source: }; src=${src%% *}
-    case "$src" in run-step|pane) printf 'working'; return ;; esac
-  fi
+  # Typed read. This used to recover `state` and `source` by slicing the prose
+  # line apart on its separators, which is what CFVC-05 retires: the reader now
+  # emits the same derivation as fields, so no consumer reconstructs structure
+  # from a sentence written for a human.
+  json=$("$FM_CREW_STATE_BIN" --json "$id" 2>/dev/null) || true
+  [ -n "$json" ] || { printf 'none'; return; }
+  state=$(crew_state_json_token "$json" state) || { printf 'none'; return; }
+  # Every verdict is enumerated. `none` means "surface this wake", which is the
+  # safe direction, but each case says so ON PURPOSE rather than falling into a
+  # default - a silent default is precisely how a new verdict would start being
+  # mishandled without anything failing.
+  case "$state" in
+    paused) printf 'paused'; return ;;
+    working)
+      # Only run-step and pane are POSITIVE evidence of work in flight. A
+      # `working` derived from the status log is a crew's own claim, and a
+      # claim is not a verdict.
+      src=$(crew_state_json_token "$json" source) || src=''
+      case "$src" in run-step|pane) printf 'working'; return ;; esac
+      printf 'none'; return ;;
+    # Terminal, waiting, or unproven: all must reach a supervisor.
+    #   parked/blocked        need a decision or help
+    #   done/failed/aborted   are outcomes to act on
+    #   interrupted           needs a re-run, and is NOT a rejection
+    #   idle                  alive but doing nothing, so a wake still matters
+    #   stale                 the evidence aged out; a worker that died
+    #                         mid-turn must surface, never be absorbed as work
+    #   unknown               unproven, and unproven never absorbs
+    parked|blocked|done|failed|aborted|interrupted|idle|stale|unknown)
+      printf 'none'; return ;;
+  esac
+  # A verdict this consumer has not been taught. Surfacing is the safe answer,
+  # but it is a real gap: crew_state_is_known plus the conformance test exist so
+  # this is unreachable in a tested tree.
   printf 'none'
 }
 

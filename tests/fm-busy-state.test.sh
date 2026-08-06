@@ -356,6 +356,63 @@ test_boolean_view_never_promotes_unknown() {
   pass "the boolean view reports busy only on an exact busy verdict"
 }
 
+backdate_record() {  # <state-dir> <id> <seconds-ago>
+  local now old
+  now=$(date +%s)
+  old=$(( now - $3 ))
+  sed -i.bak "s/ts=[0-9][0-9]*/ts=$old/" "$1/$2.busy-state"
+  rm -f "$1/$2.busy-state.bak"
+}
+
+# A busy record is a claim about the PRESENT - "a turn is in flight right now" -
+# so it expires. An idle record is a settled fact about a turn that already
+# ended, and age cannot make a finished turn unfinished, so it must NOT expire.
+# Before this, ts= was parsed for format and never compared to the clock, so a
+# worker killed mid-turn classified busy forever.
+test_busy_record_expires_idle_record_does_not() {
+  local state gen out
+  state=$(new_state_dir busy-expiry)
+  gen=$("$EV" arm "$state" t1 --state busy --source claude-hook --event user-prompt-submit)
+  out=$(fm_busy_classify tmux w1 claude t1 "$state")
+  [ "$out" = "busy claude-hook" ] || fail "a fresh busy record should classify busy, got '$out'"
+  backdate_record "$state" t1 7200
+  out=$(fm_busy_classify tmux w1 claude t1 "$state")
+  [ "$out" = "stale record-expired" ] \
+    || fail "an aged busy record should classify 'stale record-expired', got '$out'"
+  # Red-capable control: the ONLY thing that changed the answer is the bound, so
+  # raising it past the record's age must restore the pre-expiry verdict.
+  out=$(FM_BUSY_MAX_BUSY_AGE_SECS=86400 fm_busy_classify tmux w1 claude t1 "$state")
+  [ "$out" = "busy claude-hook" ] \
+    || fail "raising the bound should restore busy, got '$out' (the check is not the deciding factor)"
+  # An equally old IDLE record is still idle: a finished turn stays finished.
+  "$EV" apply "$state" t1 idle --gen "$gen" --source claude-hook --event stop \
+    || fail "apply idle failed"
+  backdate_record "$state" t1 7200
+  out=$(fm_busy_classify tmux w1 claude t1 "$state")
+  [ "$out" = "idle claude-hook" ] \
+    || fail "an aged idle record must stay idle, got '$out'"
+  pass "a busy record expires, an idle record does not, and the bound is what decides"
+}
+
+# `stale` is terminal, exactly like malformed and gen-mismatch. If an expired
+# record fell through to the fallbacks, a weaker source could re-answer for a
+# worker this task's own record just proved had died - reporting it busy again.
+test_expired_record_does_not_fall_through_to_a_weaker_source() {
+  local state out
+  state=$(new_state_dir busy-expiry-terminal)
+  "$EV" arm "$state" t1 --state busy --source fm-spawn --event launch-brief >/dev/null
+  backdate_record "$state" t1 7200
+  # herdr would otherwise answer `busy herdr-native` from its live generation
+  # state; the expired record must win and stop the walk.
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_busy_state() { printf 'busy'; }
+  out=$(fm_busy_classify herdr w1 claude t1 "$state")
+  unset -f fm_backend_busy_state
+  [ "$out" = "stale record-expired" ] \
+    || fail "an expired record must be terminal, not fall through to a native verdict, got '$out'"
+  pass "an expired record is terminal and no weaker source may re-answer for it"
+}
+
 test_arm_seeds_busy_spawn
 test_apply_advances_seq_and_source
 test_apply_current_gen_reset
@@ -376,5 +433,8 @@ test_dead_endpoint_overrides
 test_herdr_native_busy_only
 test_record_read_leaves_caller_shell_intact
 test_boolean_view_never_promotes_unknown
+
+test_busy_record_expires_idle_record_does_not
+test_expired_record_does_not_fall_through_to_a_weaker_source
 
 echo "all fm-busy-state tests passed"
