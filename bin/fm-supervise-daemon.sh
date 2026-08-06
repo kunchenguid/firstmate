@@ -109,9 +109,9 @@
 #                                   active-alert directive for that wedge alarm
 #                                   (off|auto|osascript|herdr|command:<cmd>). An
 #                                   absent file/var means auto: on macOS that is
-#                                   an OS-level notification, so the alarm is
-#                                   never silent. See wedge_alarm_notify below
-#                                   and docs/configuration.md.
+#                                   an OS-level notification. See
+#                                   wedge_alarm_notify below and
+#                                   docs/configuration.md.
 #          FM_WEDGE_ALARM_EXEC      notifier seam: when set, every notifier
 #                                   channel routes through this command as
 #                                   `<cmd> <channel> <summary>` instead of
@@ -580,16 +580,31 @@ fm_daemon_primary_harness() {
   printf '%s' "$FM_DAEMON_PRIMARY_HARNESS"
 }
 
-pane_is_busy() {  # <target> [backend]
-  local target=$1 backend=${2:-tmux} native tail40 harness
+pane_busy_observation() {  # <target> [backend]
+  local target=$1 backend=${2:-tmux} native tail40 harness rendered=idle
   harness=$(fm_daemon_primary_harness)
   native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)
   case "$native" in
-    busy) return 0 ;;
+    busy) printf 'harness=%s native=busy rendered=not-read' "$harness"; return 0 ;;
   esac
-  tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
-    | fm_busy_lines_match "$harness"
+  if ! tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null); then
+    printf 'harness=%s native=%s rendered=capture-failed' "$harness" "${native:-unknown}"
+    return 1
+  fi
+  if printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 | fm_busy_lines_match "$harness"; then
+    rendered=busy
+  fi
+  printf 'harness=%s native=%s rendered=%s' "$harness" "${native:-unknown}" "$rendered"
+  [ "$rendered" = busy ]
+}
+
+PANE_BUSY_OBSERVATION=
+pane_is_busy() {  # <target> [backend]
+  local observation status
+  observation=$(pane_busy_observation "$@")
+  status=$?
+  PANE_BUSY_OBSERVATION=$observation
+  return "$status"
 }
 
 # pane_input_pending dispatches through fm_backend_composer_state and treats
@@ -655,8 +670,8 @@ escalate_flush() {  # <state>
 }
 
 # --- backend-independent active wedge alert ---------------------------------
-# The tmux status-line flash in inject_wedge_alarm below is a cosmetic,
-# client-side OSD with no cross-backend equivalent, so a wedged non-tmux primary
+# The tmux status overlay in inject_wedge_alarm below is an on-host signal with
+# no cross-backend equivalent, so a wedged non-tmux primary
 # (the 2026-07-10 overnight incident: a claude-on-herdr primary) got NO active
 # signal - only the passive state/.subsuper-inject-wedged marker, which nothing
 # surfaces until the next fleet action (that night, 20 escalations sat buffered
@@ -665,13 +680,13 @@ escalate_flush() {  # <state>
 # herdr notification, or a captain-supplied command (push to a phone, etc.).
 # Every channel is best-effort - a missing or failing channel logs and is
 # skipped, never crashing the daemon loop - and the durable marker plus the tmux
-# flash stay exactly as before.
+# overlay stay available on the tmux path.
 #
 # Config: config/wedge-alarm (local, gitignored), one channel directive per
 # non-empty, non-comment line. FM_WEDGE_ALARM_CHANNEL overrides the file with a
 # single directive. Directives:
 #   off              disable the active alert entirely, regardless of position
-#                    (marker + flash remain)
+#                    (marker + tmux overlay remain)
 #   auto | default   platform default: macOS -> osascript; otherwise none
 #   osascript        macOS Notification Center banner (backend-independent)
 #   herdr            herdr UI notification (herdr notification show)
@@ -703,10 +718,10 @@ wedge_alarm_configured_channels() {
   [ -n "$found" ] || printf 'auto\n'
 }
 
-# Resolve the platform's default OS-level channel for `auto`. macOS reaches the
-# captain via an osascript Notification Center banner; other platforms have no
-# built-in OS channel (the captain wires a command: directive), so this prints
-# nothing and wedge_alarm_notify logs that the marker is the only signal.
+# Resolve the platform's default OS-level channel for `auto`.
+# macOS reaches the captain via an osascript Notification Center banner.
+# Other platforms have no built-in out-of-band channel, so this prints nothing
+# and wedge_alarm_notify logs that the marker is the only signal.
 wedge_alarm_platform_default() {
   case "$(uname)" in
     Darwin) command -v osascript >/dev/null 2>&1 && printf 'osascript' ;;
@@ -893,7 +908,7 @@ wedge_alarm_notify() {  # <summary> <marker>
 # is lost - the buffer and the
 # wake-queue both survive - but the stall stops being invisible.
 inject_wedge_alarm() {  # <state> <age-seconds>
-  local state=$1 age=$2 marker target backend max_defer now notify=1
+  local state=$1 age=$2 marker target backend max_defer display_ms now notify=1
   marker="$state/.subsuper-inject-wedged"
   max_defer="${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}"
   # Re-alarm at most once per max-defer window so a long wedge does not spam.
@@ -914,14 +929,19 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   } 2>/dev/null > "$marker" || true
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
   backend="${FM_SUPERVISOR_BACKEND:-$FM_SUPERVISOR_BACKEND_DEFAULT}"
-  # Best-effort status-line flash. tmux's display-message is a client-side OSD
-  # with no herdr equivalent; the log line + durable marker above are already
-  # the primary, backend-independent signal, so a non-tmux backend just skips
-  # this cosmetic extra rather than attempting an unsupported call.
+  # Best-effort persistent status overlay.
+  # tmux has no out-of-band alert channel, but this on-host signal stays visible
+  # until the next rate-limited refresh.
+  # A non-tmux backend skips it because there is no equivalent primitive.
   if [ "$backend" = tmux ]; then
-    tmux display-message -t "$target" "fm: away-mode escalations WEDGED ${age}s — see $marker" 2>/dev/null || true
+    # Keep the status overlay visible until the next rate-limited alarm refresh.
+    # Unlike wall or terminal output, display-message never writes into an agent
+    # pane or its composer.
+    display_ms=$(((max_defer + ${FM_HOUSEKEEPING_TICK:-$HOUSEKEEPING_TICK_DEFAULT} + 1) * 1000))
+    tmux display-message -d "$display_ms" -t "$target" \
+      "fm: away-mode escalations WEDGED ${age}s - see $marker" 2>/dev/null || true
   fi
-  # Backend-independent active alert. Unlike the tmux flash above (skipped on
+  # Backend-independent active alert. Unlike the tmux overlay above (skipped on
   # every non-tmux backend), this can reach the captain even when every pane and
   # its backend status-line is unreadable - the gap the 2026-07-10 overnight
   # incident fell through. Configurable and best-effort; the marker above stays
@@ -1112,12 +1132,12 @@ window_for_task() {  # <task-key> [state]
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
 inject_msg() {  # <message> [state]
-  local msg=$1 state target backend retries sleep_s verdict composer encoded
+  local msg=$1 state target backend retries sleep_s verdict composer encoded busy_observation override_set=no
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
   # watcher triage. Escalations buffer and survive for the next catch-up flush.
-  afk_active "$state" || { log "inject deferred: afk inactive"; return 1; }
+  afk_active "$state" || { log "inject deferred: gate=presence verdict=afk-inactive"; return 1; }
   # (2) Single-line digest: collapse any embedded newlines so submission via
   # send-keys + Enter is unambiguous regardless of how the TUI composer treats
   # them. Then use the canonical typed envelope so downstream consumers retain
@@ -1132,12 +1152,18 @@ inject_msg() {  # <message> [state]
   # when unset (sourced/test contexts that never ran fm_super_main's startup
   # discovery), matching this function's pre-existing default assumption.
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
-  fm_backend_target_exists "$backend" "$target" || return 1
-  # (3) Busy-guard: never inject into an in-use supervisor pane.
-  if pane_is_busy "$target" "$backend"; then
-    log "inject deferred: supervisor pane busy (agent mid-turn)"
+  if ! fm_backend_target_exists "$backend" "$target"; then
+    log "inject deferred: gate=target backend=$backend verdict=missing"
     return 1
   fi
+  # (3) Busy-guard: never inject into an in-use supervisor pane.
+  PANE_BUSY_OBSERVATION=
+  if pane_is_busy "$target" "$backend"; then
+    busy_observation=${PANE_BUSY_OBSERVATION:-harness=unknown native=unknown rendered=busy}
+    log "inject deferred: gate=busy backend=$backend $busy_observation"
+    return 1
+  fi
+  busy_observation=${PANE_BUSY_OBSERVATION:-harness=unknown native=unknown rendered=idle}
   #   b) Composer-guard: inject ONLY into a confirmed-empty GENUINE agent
   #      composer. The shared classifier (fm_backend_composer_state ->
   #      fm_composer_classify_content, bin/fm-composer-lib.sh) reports 'pending'
@@ -1148,8 +1174,9 @@ inject_msg() {  # <message> [state]
   #      on anything that is not affirmatively 'empty'. A deferred escalation
   #      stays buffered for the next cycle or the catch-up flush.
   composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
+  [ -n "${FM_COMPOSER_IDLE_RE+x}" ] && override_set=yes
   if [ "$composer" != empty ]; then
-    log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
+    log "inject deferred: gate=composer backend=$backend $busy_observation verdict=${composer:-unknown} idle_override=$override_set"
     return 1
   fi
   # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never
@@ -1165,7 +1192,7 @@ inject_msg() {  # <message> [state]
   if [ "$verdict" = empty ]; then
     return 0  # Backend confirmed the submit.
   fi
-  log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
+  log "inject failed: gate=submit-ack backend=$backend $busy_observation composer=empty idle_override=$override_set verdict=${verdict:-unknown} retries=$retries text_may_be_in_composer=yes"
   return 1
 }
 
