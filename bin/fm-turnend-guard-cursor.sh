@@ -13,9 +13,13 @@
 #      evaluated on EVERY stop, including a forced follow-up turn: the arm is
 #      stop-hook-owned, so a continuation whose own supervision need is real
 #      must re-arm rather than end blind (the Claude --claude-mode lesson,
-#      bin/fm-turnend-guard.sh:41-46). The shim owns the bound instead:
-#      `loop_count` only caps how many consecutive loud failure follow-ups a
-#      single continuation chain may emit (FM_CURSOR_TURNEND_BLOCK_BUDGET);
+#      bin/fm-turnend-guard.sh:41-46). The shim owns the bound instead, with
+#      two independent persisted counters under state/: consecutive loud
+#      arm-failure follow-ups (FM_CURSOR_TURNEND_BLOCK_BUDGET) and consecutive
+#      actionable wake follow-ups (FM_CURSOR_WAKE_CHAIN_BUDGET). Each kind
+#      resets the other and an allowed stop resets both, so a healthy wake
+#      chain can never consume the arm-failure diagnostic and a wake reason
+#      that re-fires every cycle cannot chain forever;
 #   3. runs bin/fm-turnend-guard.sh with the normalized payload;
 #   4. on exit 2 (a blind turn), foregrounds bin/fm-watch-arm.sh inside the
 #      hook-owned process tree - parked while the watcher arms, never shell
@@ -36,20 +40,14 @@ PAYLOAD=$(cat 2>/dev/null || true)
 
 command -v jq >/dev/null 2>&1 || exit 0
 
-# loop_count > 0 means a previous stop-hook follow-up started this turn: the
-# cursor spelling of a continuation. It bounds the loud failure follow-up only;
-# the shared guard always sees stop_hook_active false so a continuation with a
-# real supervision need still re-arms. A malformed payload passes through
-# unchanged so the guard's own validation decides.
-LOOP_COUNT=$(printf '%s' "$PAYLOAD" | jq -r '
-  if type == "object" and (.loop_count | type) == "number" and .loop_count > 0
-  then (.loop_count | floor) else 0 end
-' 2>/dev/null) || LOOP_COUNT=0
-case "$LOOP_COUNT" in ''|*[!0-9]*) LOOP_COUNT=0 ;; esac
-
 BLOCK_BUDGET=${FM_CURSOR_TURNEND_BLOCK_BUDGET:-3}
 case "$BLOCK_BUDGET" in ''|*[!0-9]*|0) BLOCK_BUDGET=3 ;; esac
+WAKE_BUDGET=${FM_CURSOR_WAKE_CHAIN_BUDGET:-5}
+case "$WAKE_BUDGET" in ''|*[!0-9]*|0) WAKE_BUDGET=5 ;; esac
 
+# The shared guard always sees stop_hook_active false, so a continuation whose
+# supervision need is real still re-arms. A malformed payload passes through
+# unchanged so the guard's own validation decides.
 NORMALIZED=$(printf '%s' "$PAYLOAD" | jq -c '
   if type != "object" then . else . + {stop_hook_active: false} end
 ' 2>/dev/null) || NORMALIZED=$PAYLOAD
@@ -59,6 +57,32 @@ ROOT=${CURSOR_WORKSPACE_ROOT:-${CURSOR_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-}}}
 ROOT=${ROOT%/}
 [ -x "$ROOT/bin/fm-turnend-guard.sh" ] || exit 0
 
+STATE=${FM_STATE_OVERRIDE:-${FM_HOME:-$ROOT}/state}
+FAIL_FILE="$STATE/.cursor-turnend-arm-failures"
+WAKE_FILE="$STATE/.cursor-turnend-wake-chain"
+
+counter_read() {
+  local value
+  value=$(cat "$1" 2>/dev/null || true)
+  case "$value" in ''|*[!0-9]*) value=0 ;; esac
+  printf '%s' "$value"
+}
+
+counter_write() {
+  [ -d "$STATE" ] || return 0
+  printf '%s\n' "$2" > "$1" 2>/dev/null || true
+}
+
+counters_clear() {
+  rm -f "$FAIL_FILE" "$WAKE_FILE" 2>/dev/null || true
+}
+
+allow_stop() {
+  counters_clear
+  printf '{}\n'
+  exit 0
+}
+
 ERR=$(mktemp "${TMPDIR:-/tmp}/fm-turnend-cursor.XXXXXX") || exit 0
 ARM_OUT=
 ARM_ACTIONABLE=0
@@ -67,7 +91,7 @@ trap 'rm -f "$ERR" "$ARM_OUT"' EXIT
 
 printf '%s' "$NORMALIZED" | "$ROOT/bin/fm-turnend-guard.sh" 2>"$ERR"
 RC=$?
-[ "$RC" -eq 2 ] || { printf '{}\n'; exit 0; }
+[ "$RC" -eq 2 ] || allow_stop
 
 # Blind turn: park in the hook-owned foreground tree while the watcher arms.
 # Never shell &: the harness owns this process group, so the hook timeout and
@@ -90,16 +114,27 @@ fi
 # watcher remains; only an arm failure or untyped close keeps the blind banner.
 printf '%s' "$NORMALIZED" | "$ROOT/bin/fm-turnend-guard.sh" 2>"$ERR"
 RC=$?
-[ "$RC" -eq 2 ] || { printf '{}\n'; exit 0; }
-
-if [ "$ARM_ACTIONABLE" -eq 0 ] && [ "$LOOP_COUNT" -ge "$BLOCK_BUDGET" ]; then
-  printf '{}\n'
-  exit 0
-fi
+[ "$RC" -eq 2 ] || allow_stop
 
 if [ "$ARM_ACTIONABLE" -eq 1 ]; then
+  COUNT=$(( $(counter_read "$WAKE_FILE") + 1 ))
+  rm -f "$FAIL_FILE" 2>/dev/null || true
+  if [ "$COUNT" -gt "$WAKE_BUDGET" ]; then
+    rm -f "$WAKE_FILE" 2>/dev/null || true
+    printf '{}\n'
+    exit 0
+  fi
+  counter_write "$WAKE_FILE" "$COUNT"
   REASON='firstmate watcher wake - one supervision event needs a handling turn now. Run bin/fm-wake-drain.sh first and handle the wake. Stop-hook-owned continuity re-arms the next needed cycle automatically; do not manually arm the watcher.'
 else
+  COUNT=$(( $(counter_read "$FAIL_FILE") + 1 ))
+  rm -f "$WAKE_FILE" 2>/dev/null || true
+  if [ "$COUNT" -gt "$BLOCK_BUDGET" ]; then
+    rm -f "$FAIL_FILE" 2>/dev/null || true
+    printf '{}\n'
+    exit 0
+  fi
+  counter_write "$FAIL_FILE" "$COUNT"
   REASON=$(cat "$ERR" 2>/dev/null || true)
   [ -n "$REASON" ] || REASON='tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn'
 fi

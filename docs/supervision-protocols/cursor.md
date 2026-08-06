@@ -25,7 +25,8 @@ When this session owns supervision and away mode is not active:
    If the arm closes with `signal:`, `stale:`, `check:`, or `heartbeat` while supervision is still needed, the shim emits a normal wake follow-up that tells you to drain and handle the wake.
    If the arm fails or closes without a typed actionable reason, the shim emits the loud guard banner so hook registration and startup remain diagnosable.
    If the need vanishes or a healthy watcher remains, the shim emits `{}`.
-   The `loop_limit: null` registration leaves the continuation budget to the shim: `loop_count` bounds only consecutive loud arm-failure follow-ups (`FM_CURSOR_TURNEND_BLOCK_BUDGET`, default 3), after which the turn ends rather than looping on a broken arm.
+   The `loop_limit: null` registration leaves the continuation budget to the shim, which keeps two independent persisted counters under `state/`: consecutive loud arm-failure follow-ups (`FM_CURSOR_TURNEND_BLOCK_BUDGET`, default 3) and consecutive actionable wake follow-ups (`FM_CURSOR_WAKE_CHAIN_BUDGET`, default 5).
+   Each kind resets the other and an allowed stop resets both, so a long healthy wake chain never consumes the arm-failure diagnostic, a wake reason that re-fires every cycle cannot chain forever, and an exhausted failure budget resets rather than silencing the banner permanently.
 8. Waiting on the hook-owned cycle is silent: do not send idle progress while the watcher is parked.
 9. Captain input while the stop hook is parked is buffered, not delivered (verified 2026-08-05): text typed with Enter during a parked stop hook sits unsubmitted in the composer until the forced follow-up turn completes, then needs a second Enter to submit.
    Nothing is lost or cleared - the draft survives the parked window and the follow-up turn.
