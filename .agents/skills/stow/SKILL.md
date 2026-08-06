@@ -59,7 +59,7 @@ The goal is a session that is safe to reset or destroy because everything durabl
 ## Scope exclusion: this never moves the control plane
 
 When this machine belongs to a fleet, `/stow` is the step that comes **before** a control-plane switch, and it is never the step that performs one.
-A sweep leaves the session safe to reset; moving the helm to another machine is `bin/fm-helm.sh handover <machine>`, run afterwards, and then `bin/fm-helm.sh adopt` on the machine that received it.
+A sweep leaves the session safe to reset; moving the helm to another machine is `bin/fm-helm.sh handover <machine>`, run afterwards, and then `bin/fm-helm.sh adopt` on the machine that received it - or simply that machine's next session start, which runs the same adoption.
 `docs/helm.md` owns that sequence.
 
 The two are kept separate on purpose.

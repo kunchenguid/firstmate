@@ -45,11 +45,13 @@ Without `--host`, none of those paths change.
 1. Register the host in `config/relay-hosts.json`; [`docs/configuration.md`](configuration.md) owns that schema.
 2. `bin/fm-relay-conn.sh deploy <host>` installs the verb entry point and its config over ordinary SSH.
 3. `bin/fm-relay-conn.sh up <host>` pairs, tightens on the target, and asserts that no authorization binds the built-in full-access policy.
+   Afterwards, `bin/fm-relay-conn.sh ensure <host>` is the command to reach for: it reuses a healthy link and re-pairs only a dead one.
 4. `bin/fm-brief.sh <id> <repo> [--scout] --host-home <host FM_HOME> --host-root <host firstmate checkout>` writes a brief whose paths are the host's.
 5. `bin/fm-spawn.sh --host <host> <id> <project-name-on-host> [--scout] --harness <name>` dispatches; the second positional is a project NAME under the host's own projects directory, not a local path.
 6. `bin/fm-relay-check-make.sh <id>` arms the wake path, which is a separate step because a remote crewmate's status file lives on its own machine.
 7. Supervise with the ordinary `bin/fm-send.sh`, `bin/fm-peek.sh`, and `bin/fm-crew-state.sh`, which follow `host=` themselves.
 8. For a scout, run `bin/fm-relay-host.sh report-pull <id>` before `bin/fm-teardown.sh <id>`; teardown refuses until this side holds a byte-identical copy.
+   `--force` is the captain-authorized discard and travels to the host; see [Discarding a remote task](#discarding-a-remote-task).
 
 ## Layout on a task host
 
@@ -147,6 +149,32 @@ Pass one tightens what it can, and pass two revokes anything still bound to the 
 
 The window between pairing and tightening cannot be closed from outside Bifrost, because `ssh-key create` still has no `--roots`, `--ops`, or `--shell-policy` on 0.0.167.
 
+### The one host record that may keep its full-access grant
+
+A host record carrying `"trusted_full_access": true` ([`configuration.md`](configuration.md) owns the field) is the captain declaring, for that one peer, that this home may keep the grant `conn up` creates rather than tightening it away.
+That declaration is the only thing that selects the mode.
+`fleet` does not, `gui` does not, the hostname does not, and an absent `ssh` route emphatically does not - inferring trust from "this one is inconvenient to tighten" would silently promote every laptop host, which is the exact opposite of what the absent route means.
+
+Everything above still applies unchanged to every host without the field, including the universal `ssh-key-full-access` refusal and the two-operator ceremony a narrow no-SSH host needs.
+
+What the trusted mode changes, and only for a marked host:
+
+- `up` may pair a host with no SSH route, because it no longer needs one to secure the result.
+- There is no tighten step, so the assertion that the narrow path gets for free from reading the target's grants back is replaced by the only question this side can answer without SSH and the only one that matters operationally: does the verb channel now answer. A pairing that does not answer is unpaired, not reported as a success.
+- The `RELAY:` bootstrap audit stops asking that host's grant question, because this home's own record already answers it. `bin/fm-relay-conn.sh audit <host>` says so explicitly rather than reporting the configured state as a fault.
+
+What it costs is the standing pairing this document already tells you to evaluate honestly: that peer holds an authorization equivalent to this user's shell on it, for as long as the grant session lives.
+
+### `ensure`, and why reconnect has to be idempotent
+
+The grant session expires in 24 hours (below), so "the link does not answer" is the ordinary morning state of a fleet, not an incident.
+`bin/fm-relay-conn.sh ensure <host>` is the form that survives being run repeatedly: it pings first and pairs **only** when the channel is down.
+That ordering is the whole point, because `conn up` ADDS a grant every time - a reconnect that paired unconditionally at every session start would accumulate exactly the authorizations this layer spends its effort removing.
+
+`bin/fm-bootstrap.sh` runs it for a registered host that did not answer, and only when this session holds the fleet lock.
+When the record does not let this machine repair the link alone, nothing is paired and the refusal is reported verbatim, naming which machine the remaining one-time action belongs to.
+Recovery is never claimed on a key file that is missing or a key the peer has revoked.
+
 ### A "permanent" grant is neither permanent nor unmetered
 
 The grant record reads `grant_mode: permanent`, but it also carries `grant_session_expires_at` 24 hours out and `max_calls: 1000`.
@@ -190,6 +218,36 @@ It is not silently swallowed forever either: after `FM_RELAY_FAIL_WAKE_AFTER` co
 The cost, stated plainly: a remote task has no turn-end wake, so wake latency is 0 to `FM_CHECK_INTERVAL`, 300 s by default, instead of seconds.
 
 Crew-authored status text becomes a wake reason on the control machine, so the verb strips control characters, caps each line at 200 characters, and caps the batch before that text ever crosses the link.
+
+## Discarding a remote task
+
+The host's own teardown refuses dirty work and unlanded commits, which is correct and is not being relaxed.
+What was missing is the other half: a way to tell that machine the captain has authorized discarding it anyway.
+
+Measured 2026-08-06 on the real pair.
+Two expired tasks on 151 were refused - one with uncommitted changes, one with five unpushed commits.
+The authorization could not travel: the deployed verb ran `fm-teardown.sh <id>` with no flag of any kind, and the control side had nothing to send.
+Running 151's own teardown directly instead was refused by the helm gate, because the helm was on the Mac.
+So a remote task that ran off the rails could be started, supervised, and completed normally, but never cleaned up.
+
+`bin/fm-teardown.sh <id> --force` now travels, as the extra verb token `force` on `teardown <id> <hash> force`.
+Two properties make that safe to state plainly:
+
+- **The authorization travels; the judgement does not.**
+  The host runs its own `bin/fm-teardown.sh --force`, against the worktree that actually holds the work.
+  Nothing about dirty-versus-clean is decided on the control side, and nothing about it is skipped remotely that is not skipped locally.
+- **It carries no credential of its own.**
+  `teardown` is already epoch-fenced, so a caller that may send this may already spawn and steer on that machine, and the weaker power gets the same fence rather than a second one.
+  A call with a stale epoch, or none, is refused before the host's teardown is reached at all.
+
+`force` also releases this layer's own extra gate, the one that refuses a scout teardown until the control machine provably holds a byte-identical copy of the report.
+That gate protects a deliverable; a scout whose worker died before writing one has no deliverable to protect, only a scratch worktree that would otherwise be permanently un-cleanable.
+The unforced path is unchanged, hash comparison included.
+Because the host's forced teardown also skips its unresolved-decision gate, a forced discard is additionally the one teardown that does not depend on the host's `path` reaching `tasks-axi` (see Known warts).
+
+**`control-root/` is a deployed copy, not run from a checkout.**
+Landing this change does nothing on a host until `bin/fm-relay-conn.sh deploy <host>` - or, for a host with no inbound SSH, `deploy-local` run by its own operator - installs the new verb there.
+Until then that host answers `ERR badarg` to the third token, which is the safe direction: an undeployed host refuses the discard rather than silently ignoring the authorization and reporting a teardown it did not force.
 
 ## Acceptance run, 2026-08-01
 
@@ -298,6 +356,7 @@ The reverse leaves the caller with a 401, because revoking the key already dropp
   Measured 2026-08-02: with `tasks-axi` installed under a host's nvm directory and that directory absent from `path`, teardown returned `ERR teardownrefused` plus `fm-decision-hold: compatible tasks-axi is required`, and an already-recorded `complete --none` attestation changed nothing because the gate could not read it.
   Adding the directory to `path` and redeploying made the identical command succeed.
   Pinning an nvm version directory there is itself brittle: the host's next node upgrade moves it and breaks this again.
+  A captain-authorized `--force` is the one teardown that gets past this, because the host's forced path skips that gate entirely; that is an escape hatch for a task already being discarded, not a fix for the `path`.
 - `bin/fm-relay-host.sh spawn` does not update the host's backlog, and host teardown prints a `NOT_FOUND` backlog error when the control machine owns the row.
   Teardown itself still completes.
 - The control side records `host=` in the task metadata but no fleet identifier.
@@ -307,6 +366,16 @@ The reverse leaves the caller with a 401, because revoking the key already dropp
 
 ## Not verified
 
+- **The trusted-full-access mode and the `ensure` reconnect, on the real pair.**
+  Both are covered hermetically by `tests/fm-relay-trusted-fleet.test.sh`, against a stub bifrost that models the connection lifecycle - down, `conn up`, up, `conn down` - and logs every call so a test can assert that nothing was paired.
+  What has NOT been run is a real `bifrost remote conn up` against the real Mac with no `tighten-local` afterwards, a real 24-hour grant-session expiry followed by an automatic reconnect at session start, or the reconnect's behaviour against a genuinely revoked device key.
+  The stub answers each of those the way the measured behaviour above says the real one does; nothing here proves it did.
+- **The forced cross-machine discard, end to end on the real pair.**
+  The refusals that motivated it were measured on 151; the flag that answers them is covered hermetically only, including that it reaches the host's own teardown as `--force`, that the unforced path is unchanged, and that the helm fence still refuses it.
+  It has not been run over the real relay, and cannot be until the new `control-root/` is deployed to that host.
+- **Automatic adoption at session start on the real pair.**
+  The sweep is exercised hermetically, including the exact observed failure - a helm claimed while the link was down, adopting nothing, then converging at the next session start.
+  It has not been run over the real relay, and the round-trip cost of one `task-list` per fleet peer at every session start is therefore bounded only by `FM_RELAY_BOOTSTRAP_TIMEOUT_MS` rather than measured.
 - The reverse direction as a task host, at the time this was written.
   It has since been built and partly measured: see [`docs/relay-gui-host.md`](relay-gui-host.md), which owns the desktop-session requirement, the checks a host with a screen runs before it claims, and its own list of what is still unverified.
 - Relay session-token lifetime.

@@ -694,14 +694,33 @@ case "$verb" in
     ;;
 
   teardown)
-    # teardown <id> <sha256-of-the-copy-the-control-side-holds>
+    # teardown <id> <sha256-of-the-copy-the-control-side-holds> [force]
+    #
+    # The third token is the captain's explicit discard authority, travelling the
+    # same way every other verb argument does. Without it nothing below changes by
+    # one byte. With it, two gates step aside and no others:
+    #   - this side runs the host's own fm-teardown.sh --force, so the dirty and
+    #     unlanded-work judgement is still made by the machine that holds the
+    #     work, on that work, and merely told that discard was authorized;
+    #   - the scout report gate below, for the same reason it exists at all. That
+    #     gate protects a deliverable, and a scout whose worker died BEFORE it
+    #     wrote one has no deliverable to protect - only a scratch worktree that
+    #     can then never be cleaned up from anywhere.
+    # It needs no authorization of its own: `teardown` is already epoch-fenced
+    # above, so a caller that may send this may already spawn and steer here, and
+    # inventing a second credential for the weaker of those powers would be a
+    # layer that protects nothing.
     require_id "${1-}"
-    tid=$1; want=${2-}
+    tid=$1; want=${2-}; discard=${3-}
+    case "$discard" in
+      ''|force) ;;
+      *) emit_err badarg "teardown takes an optional third token 'force' and nothing else" ;;
+    esac
     meta="$STATE/$tid.meta"
     [ -f "$meta" ] || emit_err nometa "no metadata for task $tid on this host"
     kind=$(grep '^kind=' "$meta" | cut -d= -f2- | head -1)
     [ -n "$kind" ] || kind=ship
-    if [ "$kind" = scout ]; then
+    if [ "$kind" = scout ] && [ "$discard" != force ]; then
       # The extra gate the design requires: a remote scout's worktree is scratch,
       # so nothing may discard it until the control machine provably holds an
       # identical copy of the only deliverable.
@@ -711,7 +730,9 @@ case "$verb" in
       have=$(sha256_of "$report") || emit_err io "cannot hash report"
       [ "$want" = "$have" ] || emit_err reportgate "control-side report copy does not match the host report ($want != $have)"
     fi
-    if out=$("$BIN/fm-teardown.sh" "$tid" 2>&1); then
+    td_args=("$tid")
+    [ "$discard" = force ] && td_args+=(--force)
+    if out=$("$BIN/fm-teardown.sh" "${td_args[@]}" 2>&1); then
       rm -rf "${TASKS:?}/$tid"
       # The exchange area holds this task's brief, its steers, and the staged
       # copy of its report. Once teardown has succeeded the control machine

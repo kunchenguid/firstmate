@@ -72,5 +72,8 @@ When any diagnostic needs captain attention, report the plain consequence and re
   Repair with `bin/fm-relay-conn.sh up <host>`, which re-pairs and re-tightens transactionally.
   A full-access line is not cosmetic: that host is currently accepting arbitrary commands from anyone holding its key, and the wording is universal because a second `bifrost remote conn up` ADDS such a grant while leaving the tightened one in place looking correct.
   A host whose authorization "could not be audited from here" has no usable SSH route from this machine; audit it on that machine with `bin/fm-relay-conn.sh tighten-local`.
+  A host that did not answer has already had the automatic reconnect tried, so this line means it could not be restored from here: read what it says is missing and act on the machine it names, rather than re-running the pairing command it just refused.
+  A line naming a desktop host session is that machine's own one-time action and needs its operator; nothing on this side can start it (`docs/relay-gui-host.md`).
+  `RELAY:` lines can also come from fleet task adoption on a machine that holds the helm - "could not ask `<machine>` what it is running", an id collision, or a `bin/fm-pr-check.sh` re-arm instruction for adopted work carrying an open change - and each is handled as `docs/helm.md` describes rather than by re-running adoption blind.
   `docs/relay-host.md` owns the mechanism and the evidence.
   Only when a running watcher needs the cadence transition applied immediately, restart the home-scoped watcher through the emitted harness supervision protocol; bootstrap deliberately never restarts the watcher itself.

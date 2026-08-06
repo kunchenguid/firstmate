@@ -4,7 +4,7 @@
 # Usage:
 #   fm-helm.sh status [--refresh] [--brief]  who holds the helm, and do the copies agree
 #   fm-helm.sh handover <machine>            give the helm to <machine> (run on the holder)
-#   fm-helm.sh claim [--force]               take the helm (only when nobody holds it)
+#   fm-helm.sh claim [--force]               take the helm, and adopt with it
 #   fm-helm.sh demote                        give the helm up so nobody holds it
 #   fm-helm.sh adopt                         pick up the tasks already running on the peers
 #   fm-helm.sh audit                         read every machine's lease and compare
@@ -25,6 +25,11 @@
 # transfer, and the truth about a task stays on the machine running it. Nothing
 # is restarted by a handover, and nothing has to be, which is the property that
 # makes this safer than packaging work up and shipping it.
+#
+# That discovery is not a command to remember: `claim` runs it inline and
+# bin/fm-bootstrap.sh runs it at every session start on the holder. Both call the
+# same adopt_peers below, so the holder-only gate, the epoch fencing, and the
+# id-collision refusal have one implementation rather than three.
 #
 # WRITE ORDER. The anchor machine's lease is authoritative because the anchor is
 # the always-on machine, so every write goes to the anchor FIRST and the other
@@ -245,6 +250,107 @@ disarm_control_assets() {
   [ "$removed" -eq 0 ] || printf 'stood down %s monitor(s) here; the new control plane rebuilds them with adopt.\n' "$removed"
 }
 
+# Pick up the tasks already running on the other machines of this fleet.
+#
+# A function rather than only a subcommand because `claim` runs it too. Discovery
+# that a captain has to REMEMBER is discovery that gets skipped exactly when it
+# matters most: the machine taking the helm may have been unable to reach the
+# peer at that instant - a lapsed relay grant produces precisely that - and
+# nothing would ever retry. So `claim` adopts inline and bin/fm-bootstrap.sh runs
+# the same command at every session start on the holder. Both call THIS, so there
+# is still one discovery path, one id-collision refusal, and one holder-only gate.
+#
+# Returns non-zero when something needs a human; every caller decides how loud
+# that is, because a claim that succeeded is still a claim that succeeded.
+adopt_peers() {
+  local ADOPTED=0 SKIPPED=0 FAILED=0 PEER LIST LINE ID ACK META_OUT PR
+  local -a TASK_LINES
+  for PEER in $PEERS; do
+    [ "$PEER" = "$FM_HELM_MACHINE" ] && continue
+    if ! LIST=$(fm_helm_verb "$FM_HOME" "$PEER" task-list 2>&1); then
+      printf 'could not ask %s what it is running (%s)\n' "$PEER" "${FM_HELM_ERR:-unreachable}" >&2
+      FAILED=$((FAILED + 1))
+      continue
+    fi
+    case "${LIST%%$'\n'*}" in
+      OK*) ;;
+      *) printf 'could not ask %s what it is running: %s\n' "$PEER" "${LIST%%$'\n'*}" >&2
+         FAILED=$((FAILED + 1)); continue ;;
+    esac
+    # The list is collected BEFORE the loop rather than piped into it. Each
+    # iteration below runs another verb, and over a real relay that is a
+    # `bifrost` process which may read stdin - which here would be the rest of
+    # the task list. One task would adopt and the others would vanish.
+    TASK_LINES=()
+    while IFS= read -r LINE; do
+      [ -n "$LINE" ] || continue
+      TASK_LINES+=("$LINE")
+    done <<< "$(printf '%s' "$LIST" | sed -n '2,$p')"
+    for LINE in ${TASK_LINES[@]+"${TASK_LINES[@]}"}; do
+      ID=${LINE%% *}
+      fm_relay_id_valid "$ID" || continue
+      ACK=$(printf '%s' "$LINE" | tr ' ' '\n' | sed -n 's/^ack=//p' | head -1)
+      case "$ACK" in ''|*[!0-9]*) ACK=0 ;; esac
+      if [ -f "$STATE/$ID.meta" ]; then
+        # Already known here. A record with no host= line is a LOCAL task of
+        # the same name, which is an id collision between two machines, not
+        # something to overwrite: overwriting it would point every steer and
+        # every cleanup for the local task at the peer's task instead.
+        if grep -q '^host=' "$STATE/$ID.meta"; then
+          SKIPPED=$((SKIPPED + 1))
+        else
+          printf 'REFUSED to adopt %s from %s: a DIFFERENT local task already uses that id here\n' \
+            "$ID" "$PEER" >&2
+          FAILED=$((FAILED + 1))
+        fi
+        continue
+      fi
+      if ! META_OUT=$(fm_helm_verb "$FM_HOME" "$PEER" task-meta "$ID" 2>&1); then
+        printf 'could not read the record for %s on %s (%s)\n' "$ID" "$PEER" "${FM_HELM_ERR:-unreachable}" >&2
+        FAILED=$((FAILED + 1)); continue
+      fi
+      case "${META_OUT%%$'\n'*}" in
+        OK\ *) ;;
+        *) printf 'could not read the record for %s on %s: %s\n' "$ID" "$PEER" "${META_OUT%%$'\n'*}" >&2
+           FAILED=$((FAILED + 1)); continue ;;
+      esac
+      mkdir -p "$STATE"
+      {
+        printf '%s\n' "$META_OUT" | sed -n '2,$p' | grep -v '^host='
+        printf 'host=%s\n' "$PEER"
+      } > "$STATE/$ID.meta"
+      if ! grep -q '^worktree=' "$STATE/$ID.meta"; then
+        rm -f "$STATE/$ID.meta"
+        printf 'REFUSED to adopt %s from %s: its record has no worktree line\n' "$ID" "$PEER" >&2
+        FAILED=$((FAILED + 1)); continue
+      fi
+      # Start reading events from what the PEER recorded as presented, not
+      # from zero and not from the end. That cursor is the reason a handover
+      # neither replays a hundred old lines nor silently swallows the ones the
+      # old control plane never got round to showing anyone.
+      printf '%s\n' "$ACK" > "$STATE/$ID.relay-ack"
+      printf '%s\n' "$ACK" > "$STATE/$ID.relay-seen"
+      rm -f "$STATE/$ID.check.sh" "$STATE/$ID.check-trust"
+      if FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+        "$SCRIPT_DIR/fm-relay-check-make.sh" "$ID" >/dev/null 2>&1; then
+        ADOPTED=$((ADOPTED + 1))
+        printf 'adopted %s from %s (watching from event offset %s)\n' "$ID" "$PEER" "$ACK"
+      else
+        printf 'adopted %s from %s BUT could not arm its notifications; it is unobserved here\n' \
+          "$ID" "$PEER" >&2
+        FAILED=$((FAILED + 1))
+      fi
+      PR=$(grep '^pr=' "$STATE/$ID.meta" | cut -d= -f2- | head -1 || true)
+      if [ -n "$PR" ]; then
+        printf '%s carries an open change at %s - re-arm its checks here with:\n' "$ID" "$PR"
+        printf '  bin/fm-pr-check.sh %s %s\n' "$ID" "$PR"
+      fi
+    done
+  done
+  printf 'adopt: %s picked up, %s already known, %s problem(s)\n' "$ADOPTED" "$SKIPPED" "$FAILED"
+  [ "$FAILED" -eq 0 ]
+}
+
 # --- subcommands -------------------------------------------------------------
 
 case "$CMD" in
@@ -428,7 +534,14 @@ EOF
     propagate "$NEXT" "$FM_HELM_MACHINE" || true
     rm -f "$(fm_helm_lost_file "$FM_HOME")"
     fm_helm_lease_load
-    printf 'Next: bin/fm-helm.sh adopt - it picks up the tasks running on the other machines.\n'
+    # Adopt right here rather than printing the command and hoping. The claim
+    # succeeded either way, so a problem below is reported and does not fail the
+    # claim; bin/fm-bootstrap.sh runs the same sweep at every session start on
+    # the holder, so a claim made while a peer was unreachable still converges.
+    if ! adopt_peers; then
+      printf 'The helm is held here, but some work above could not be picked up.\n'
+      printf 'Re-run bin/fm-helm.sh adopt once that is resolved.\n'
+    fi
     exit 0
     ;;
 
@@ -453,91 +566,7 @@ EOF
 
   adopt)
     require_holder "adopt work from the other machines"
-    ADOPTED=0; SKIPPED=0; FAILED=0
-    for PEER in $PEERS; do
-      [ "$PEER" = "$FM_HELM_MACHINE" ] && continue
-      if ! LIST=$(fm_helm_verb "$FM_HOME" "$PEER" task-list 2>&1); then
-        printf 'could not ask %s what it is running (%s)\n' "$PEER" "${FM_HELM_ERR:-unreachable}" >&2
-        FAILED=$((FAILED + 1))
-        continue
-      fi
-      case "${LIST%%$'\n'*}" in
-        OK*) ;;
-        *) printf 'could not ask %s what it is running: %s\n' "$PEER" "${LIST%%$'\n'*}" >&2
-           FAILED=$((FAILED + 1)); continue ;;
-      esac
-      # The list is collected BEFORE the loop rather than piped into it. Each
-      # iteration below runs another verb, and over a real relay that is a
-      # `bifrost` process which may read stdin - which here would be the rest of
-      # the task list. One task would adopt and the others would vanish.
-      TASK_LINES=()
-      while IFS= read -r LINE; do
-        [ -n "$LINE" ] || continue
-        TASK_LINES+=("$LINE")
-      done <<< "$(printf '%s' "$LIST" | sed -n '2,$p')"
-      for LINE in ${TASK_LINES[@]+"${TASK_LINES[@]}"}; do
-        ID=${LINE%% *}
-        fm_relay_id_valid "$ID" || continue
-        ACK=$(printf '%s' "$LINE" | tr ' ' '\n' | sed -n 's/^ack=//p' | head -1)
-        case "$ACK" in ''|*[!0-9]*) ACK=0 ;; esac
-        if [ -f "$STATE/$ID.meta" ]; then
-          # Already known here. A record with no host= line is a LOCAL task of
-          # the same name, which is an id collision between two machines, not
-          # something to overwrite: overwriting it would point every steer and
-          # every cleanup for the local task at the peer's task instead.
-          if grep -q '^host=' "$STATE/$ID.meta"; then
-            SKIPPED=$((SKIPPED + 1))
-          else
-            printf 'REFUSED to adopt %s from %s: a DIFFERENT local task already uses that id here\n' \
-              "$ID" "$PEER" >&2
-            FAILED=$((FAILED + 1))
-          fi
-          continue
-        fi
-        if ! META_OUT=$(fm_helm_verb "$FM_HOME" "$PEER" task-meta "$ID" 2>&1); then
-          printf 'could not read the record for %s on %s (%s)\n' "$ID" "$PEER" "${FM_HELM_ERR:-unreachable}" >&2
-          FAILED=$((FAILED + 1)); continue
-        fi
-        case "${META_OUT%%$'\n'*}" in
-          OK\ *) ;;
-          *) printf 'could not read the record for %s on %s: %s\n' "$ID" "$PEER" "${META_OUT%%$'\n'*}" >&2
-             FAILED=$((FAILED + 1)); continue ;;
-        esac
-        mkdir -p "$STATE"
-        {
-          printf '%s\n' "$META_OUT" | sed -n '2,$p' | grep -v '^host='
-          printf 'host=%s\n' "$PEER"
-        } > "$STATE/$ID.meta"
-        if ! grep -q '^worktree=' "$STATE/$ID.meta"; then
-          rm -f "$STATE/$ID.meta"
-          printf 'REFUSED to adopt %s from %s: its record has no worktree line\n' "$ID" "$PEER" >&2
-          FAILED=$((FAILED + 1)); continue
-        fi
-        # Start reading events from what the PEER recorded as presented, not
-        # from zero and not from the end. That cursor is the reason a handover
-        # neither replays a hundred old lines nor silently swallows the ones the
-        # old control plane never got round to showing anyone.
-        printf '%s\n' "$ACK" > "$STATE/$ID.relay-ack"
-        printf '%s\n' "$ACK" > "$STATE/$ID.relay-seen"
-        rm -f "$STATE/$ID.check.sh" "$STATE/$ID.check-trust"
-        if FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-          "$SCRIPT_DIR/fm-relay-check-make.sh" "$ID" >/dev/null 2>&1; then
-          ADOPTED=$((ADOPTED + 1))
-          printf 'adopted %s from %s (watching from event offset %s)\n' "$ID" "$PEER" "$ACK"
-        else
-          printf 'adopted %s from %s BUT could not arm its notifications; it is unobserved here\n' \
-            "$ID" "$PEER" >&2
-          FAILED=$((FAILED + 1))
-        fi
-        PR=$(grep '^pr=' "$STATE/$ID.meta" | cut -d= -f2- | head -1 || true)
-        if [ -n "$PR" ]; then
-          printf '%s carries an open change at %s - re-arm its checks here with:\n' "$ID" "$PR"
-          printf '  bin/fm-pr-check.sh %s %s\n' "$ID" "$PR"
-        fi
-      done
-    done
-    printf 'adopt: %s picked up, %s already known, %s problem(s)\n' "$ADOPTED" "$SKIPPED" "$FAILED"
-    [ "$FAILED" -eq 0 ] || exit 1
+    adopt_peers || exit 1
     exit 0
     ;;
 

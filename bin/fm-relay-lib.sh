@@ -86,6 +86,7 @@ FM_RELAY_GUI=
 FM_RELAY_TMUX_SOCKET=
 FM_RELAY_HOST_SESSION=
 FM_RELAY_FLEET=
+FM_RELAY_TRUSTED_FULL=
 
 fm_relay_bifrost() {
   printf '%s' "${FM_RELAY_BIFROST:-bifrost}"
@@ -115,6 +116,7 @@ fm_relay_host_load() {  # <home> <host-name>
   FM_RELAY_HOST_HOME=; FM_RELAY_HOST_ROOT=; FM_RELAY_HOST_DIR=; FM_RELAY_HOST_PATH=
   FM_RELAY_HOST_LANG=; FM_RELAY_KEY=; FM_RELAY_SSH=; FM_RELAY_VERB=
   FM_RELAY_GUI=; FM_RELAY_TMUX_SOCKET=; FM_RELAY_HOST_SESSION=; FM_RELAY_FLEET=
+  FM_RELAY_TRUSTED_FULL=
   fm_relay_arg_valid "$name" || { echo "error: invalid relay host name '$name'" >&2; return 1; }
   file=$(fm_relay_hosts_file "$home")
   [ -f "$file" ] || { echo "error: no relay host registry at $file" >&2; return 1; }
@@ -139,7 +141,12 @@ fm_relay_host_load() {  # <home> <host-name>
           ($h.lang // ""), ($h.key // ""), ($h.ssh // ""),
           (if ($h.gui // false) then "1" else "" end),
           ($h.tmux_socket // ""), ($h.host_session // ""),
-          ($h.fleet // ""), "." ]
+          ($h.fleet // ""),
+          (if ($h | has("trusted_full_access") | not) then ""
+           elif $h.trusted_full_access == true then "1"
+           elif $h.trusted_full_access == false then ""
+           else "?" end),
+          "." ]
       | .[]
     end' "$file" 2>/dev/null) || {
     echo "error: $file is not valid JSON" >&2; return 1; }
@@ -149,8 +156,17 @@ fm_relay_host_load() {  # <home> <host-name>
     read -r FM_RELAY_HOST_HOME; read -r FM_RELAY_HOST_ROOT; read -r FM_RELAY_HOST_DIR
     read -r FM_RELAY_HOST_PATH; read -r FM_RELAY_HOST_LANG; read -r FM_RELAY_KEY
     read -r FM_RELAY_SSH; read -r FM_RELAY_GUI; read -r FM_RELAY_TMUX_SOCKET
-    read -r FM_RELAY_HOST_SESSION; read -r FM_RELAY_FLEET
+    read -r FM_RELAY_HOST_SESSION; read -r FM_RELAY_FLEET; read -r FM_RELAY_TRUSTED_FULL
   } <<< "$raw"
+  # A declaration that this home may leave a full-access authorization on that
+  # peer is the one field where "unreadable" must not quietly read as "off".
+  # Off IS the safe answer, but a captain who wrote `"trusted_full_access":
+  # "yes"` would then be told nothing while the narrow path silently stayed in
+  # force, and would go looking for the bug in the wrong place.
+  if [ "$FM_RELAY_TRUSTED_FULL" = '?' ]; then
+    echo "error: relay host '$name' trusted_full_access must be the JSON literal true or false" >&2
+    return 1
+  fi
   FM_RELAY_HOST=$name
   [ -n "$FM_RELAY_HOST_PATH" ] || FM_RELAY_HOST_PATH=/usr/local/bin:/usr/bin:/bin
   # A UTF-8 locale is load-bearing on the host, not cosmetic; see fmr-verb.sh.
@@ -173,6 +189,16 @@ fm_relay_host_load() {  # <home> <host-name>
 }
 
 fm_relay_host_is_gui() { [ "$FM_RELAY_GUI" = 1 ]; }
+
+# Whether the captain has declared THIS home may keep the full-access grant that
+# `bifrost remote conn up` creates on that peer, instead of tightening it away.
+#
+# It is one explicit field and nothing else. Not `fleet`, not `gui`, not the
+# hostname, and emphatically not "the record has no ssh route so tightening is
+# inconvenient" - that last one is the inference that would turn every laptop
+# host into a trusted one by accident, which is the opposite of what the absent
+# route means. A host that does not carry the field is narrow, exactly as before.
+fm_relay_host_trusts_full_access() { [ "$FM_RELAY_TRUSTED_FULL" = 1 ]; }
 
 fm_relay_hosts_list() {  # <home>
   local file

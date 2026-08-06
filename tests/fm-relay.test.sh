@@ -14,13 +14,31 @@
 #   - the grant audit must be UNIVERSAL, because a per-grant audit passes on a
 #     machine that a second pairing reopened;
 #   - --host must be refused, not silently reinterpreted, when combined with a
-#     flag that only means something locally.
+#     flag that only means something locally;
+#   - the captain's discard authority must CROSS the link while the judgement it
+#     authorizes stays on the machine holding the work, and must remain covered
+#     by the helm fence rather than by a credential of its own.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-relay)
+
+# A bifrost that echoes back the shell text it was asked to run, so a test can
+# inspect exactly what would go over the wire instead of inferring it.
+# The mkdir is not redundant: fm_test_tmproot runs inside a command substitution,
+# so its own EXIT trap fires when that subshell ends and removes the directory it
+# just made. Every other user of TMP_ROOT here happens to recreate it with a
+# `mkdir -p` of a subdirectory; this file is the first to write into the root.
+mkdir -p "$TMP_ROOT"
+cat > "$TMP_ROOT/echo-bifrost" <<'SH'
+#!/usr/bin/env bash
+prev=
+for a in "$@"; do [ "$prev" = "--shell-text" ] && { printf '%s\n' "$a"; exit 0; }; prev=$a; done
+exit 1
+SH
+chmod +x "$TMP_ROOT/echo-bifrost"
 
 # shellcheck source=bin/fm-relay-lib.sh
 . "$ROOT/bin/fm-relay-lib.sh"
@@ -300,6 +318,155 @@ test_verb_teardown_gate_needs_a_matching_report_hash() {
   pass "fmr-verb teardown: the scout report gate refuses a missing or mismatched copy"
 }
 
+# --- crossing the link with the captain's discard authority -------------------
+#
+# The hole this closes, measured 2026-08-06: the host's teardown refused two
+# expired tasks - one dirty, one with five unpushed commits - which is exactly
+# what it is for, and there was no way to tell it the captain had authorized
+# discarding them. Running the host's teardown directly instead was refused by
+# the helm gate, because the helm was on the other machine. A remote task that
+# ran off the rails could therefore never be cleaned up from anywhere.
+#
+# What is asserted here is that authorization travels and JUDGEMENT DOES NOT: the
+# host is handed --force and applies its own rules to its own worktree.
+
+# A teardown stub in the host's fake bin/ that records the arguments it was given,
+# so a test can tell "the flag crossed the link" from "the flag was swallowed".
+install_teardown_recorder() {  # <fmroot>
+  local fmroot=$1
+  cat > "$fmroot/bin/fm-teardown.sh" <<'STUB'
+#!/usr/bin/env bash
+printf 'stub-teardown args: %s\n' "$*"
+printf '%s\n' "$*" > "$(dirname "$0")/../teardown.args"
+STUB
+  chmod +x "$fmroot/bin/fm-teardown.sh"
+}
+
+test_verb_teardown_force_passes_discard_authority_to_the_host() {
+  local croot home fmroot out
+  croot=$(setup_verb_host)
+  home="$TMP_ROOT/verbhost/home"
+  fmroot="$TMP_ROOT/verbhost/fmroot"
+  install_teardown_recorder "$fmroot"
+  rm -f "$fmroot/teardown.args"
+  printf 'kind=ship\nworktree=/nowhere\n' > "$home/state/tf1.meta"
+
+  out=$(env -i /bin/bash "$croot/verbs/fmr-verb.sh" teardown tf1 none 2>&1)
+  assert_contains "$out" "OK torndown=tf1" "an ordinary teardown must still work"
+  [ "$(cat "$fmroot/teardown.args")" = tf1 ] \
+    || fail "without the token the host must be asked for an ORDINARY teardown, with no flag: got [$(cat "$fmroot/teardown.args")]"
+
+  printf 'kind=ship\nworktree=/nowhere\n' > "$home/state/tf2.meta"
+  out=$(env -i /bin/bash "$croot/verbs/fmr-verb.sh" teardown tf2 none force 2>&1)
+  assert_contains "$out" "OK torndown=tf2" "a forced teardown must succeed"
+  [ "$(cat "$fmroot/teardown.args")" = "tf2 --force" ] \
+    || fail "the token must reach the host's OWN teardown as --force, so it makes the judgement: got [$(cat "$fmroot/teardown.args")]"
+  rm -f "$fmroot/bin/fm-teardown.sh"
+  pass "fmr-verb teardown: force crosses as authorization, and the host still judges"
+}
+
+test_verb_teardown_force_releases_only_the_report_gate() {
+  local croot home fmroot out
+  croot=$(setup_verb_host)
+  home="$TMP_ROOT/verbhost/home"
+  fmroot="$TMP_ROOT/verbhost/fmroot"
+  install_teardown_recorder "$fmroot"
+  # A scout whose worker died BEFORE writing a report: no deliverable exists, so
+  # the gate that protects one has nothing to protect and would otherwise make
+  # this task permanently un-cleanable.
+  printf 'kind=scout\nworktree=/nowhere\n' > "$home/state/tf3.meta"
+  rm -rf "$home/data/tf3"
+  out=$(env -i /bin/bash "$croot/verbs/fmr-verb.sh" teardown tf3 none 2>&1)
+  assert_contains "$out" "ERR noreport" "without the token a reportless scout must still refuse"
+  out=$(env -i /bin/bash "$croot/verbs/fmr-verb.sh" teardown tf3 none force 2>&1)
+  assert_contains "$out" "OK torndown=tf3" "with the token a reportless scout must tear down"
+
+  # The gate is released, not weakened: the unforced path is byte-identical.
+  mkdir -p "$home/data/tf4"
+  printf 'kind=scout\nworktree=/nowhere\n' > "$home/state/tf4.meta"
+  printf 'the deliverable\n' > "$home/data/tf4/report.md"
+  out=$(env -i /bin/bash "$croot/verbs/fmr-verb.sh" teardown tf4 none 2>&1)
+  assert_contains "$out" "ERR reportgate" "an unforced scout teardown must still demand the hash"
+  out=$(env -i /bin/bash "$croot/verbs/fmr-verb.sh" teardown tf4 \
+    0000000000000000000000000000000000000000000000000000000000000000 2>&1)
+  assert_contains "$out" "ERR reportgate" "an unforced scout teardown must still compare the hash"
+  rm -f "$fmroot/bin/fm-teardown.sh"
+  pass "fmr-verb teardown: force releases the report gate and nothing else"
+}
+
+# An unknown third token must not be read as "not force" and quietly ignored: a
+# typo would then look like it worked while the authorization never travelled.
+test_verb_teardown_refuses_an_unknown_third_token() {
+  local croot home out
+  croot=$(setup_verb_host)
+  home="$TMP_ROOT/verbhost/home"
+  printf 'kind=ship\nworktree=/nowhere\n' > "$home/state/tf5.meta"
+  out=$(env -i /bin/bash "$croot/verbs/fmr-verb.sh" teardown tf5 none FORCE 2>&1)
+  assert_contains "$out" "ERR badarg" "an unrecognised discard token must refuse"
+  assert_present "$home/state/tf5.meta" "a refused teardown must change nothing"
+  pass "fmr-verb teardown: an unknown third token refuses instead of being ignored"
+}
+
+# The forced path gets NO authorization of its own, so it must be covered by the
+# one that already guards teardown. A caller with no current helm epoch is
+# refused by the machine it is commanding, before anything is discarded.
+test_verb_teardown_force_is_covered_by_the_existing_helm_fence() {
+  local croot home fmroot out
+  croot=$(setup_verb_host)
+  home="$TMP_ROOT/verbhost/home"
+  fmroot="$TMP_ROOT/verbhost/fmroot"
+  install_teardown_recorder "$fmroot"
+  rm -f "$fmroot/teardown.args"
+  printf 'kind=ship\nworktree=/nowhere\n' > "$home/state/tf6.meta"
+  mkdir -p "$croot/helm"
+  printf 'helm-v1\nfleet=f\nepoch=7\nholder=other\n' > "$croot/helm/lease"
+
+  out=$(env -i /bin/bash "$croot/verbs/fmr-verb.sh" teardown tf6 none force 2>&1)
+  assert_contains "$out" "EPOCH_STALE" "a forced discard carrying no helm epoch must be refused"
+  assert_absent "$fmroot/teardown.args" "a fenced forced discard must not reach the host's teardown at all"
+  assert_present "$home/state/tf6.meta" "a fenced forced discard must change nothing"
+
+  out=$(env -i /bin/bash "$croot/verbs/fmr-verb.sh" teardown@3 tf6 none force 2>&1)
+  assert_contains "$out" "EPOCH_STALE" "a forced discard from a stale control plane must be refused"
+
+  # And the current epoch is accepted, so the fence is a fence and not a wall.
+  out=$(env -i /bin/bash "$croot/verbs/fmr-verb.sh" teardown@7 tf6 none force 2>&1)
+  assert_contains "$out" "OK torndown=tf6" "the current epoch must be accepted"
+  rm -rf "$croot/helm"
+  rm -f "$fmroot/bin/fm-teardown.sh"
+  pass "fmr-verb teardown: forced discard rides the existing helm fence, not a new credential"
+}
+
+# The control side's own half: the flag has to reach the wire, and the local
+# report precondition has to step aside with it.
+test_relay_host_teardown_force_reaches_the_wire() {
+  local home out
+  home="$TMP_ROOT/tdforce"
+  mkdir -p "$home/state" "$home/data" "$home/config"
+  write_registry "$home" ''
+  printf 'window=w\nworktree=/nowhere\nkind=scout\nhost=box\n' > "$home/state/t8.meta"
+
+  # Without discard authority, and with no report pulled, this side refuses
+  # before it spends a round trip - unchanged.
+  out=$(FM_HOME="$home" FM_RELAY_BIFROST="$TMP_ROOT/echo-bifrost" \
+    "$ROOT/bin/fm-relay-host.sh" teardown t8 2>&1) && fail "an unpulled scout teardown must refuse"
+  assert_contains "$out" "run report-pull first" "the refusal must name the fix"
+
+  # With it, there may be no report to pull at all, so this side sends none and
+  # the flag rides along as its own token.
+  out=$(FM_HOME="$home" FM_RELAY_BIFROST="$TMP_ROOT/echo-bifrost" \
+    "$ROOT/bin/fm-relay-host.sh" teardown t8 --force 2>&1) \
+    || fail "a forced remote teardown must not refuse locally: $out"
+  assert_contains "$out" "teardown t8 none force" \
+    "the forced teardown must reach the wire with the discard token"
+  assert_not_contains "$out" "report-pull" "a forced teardown must not demand a report copy"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-relay-host.sh" teardown t8 --wat 2>&1) \
+    && fail "an unknown teardown flag must refuse"
+  assert_contains "$out" "unexpected argument" "an unknown teardown flag must say so"
+  pass "fm-relay-host teardown: --force reaches the wire and stands the report precondition down"
+}
+
 # --- host= branches in the existing scripts -----------------------------------
 
 test_spawn_host_flag_refusals() {
@@ -351,16 +518,25 @@ test_spawn_help_documents_host() {
   pass "fm-spawn --help: documents --host without truncating the existing header"
 }
 
-test_teardown_refuses_force_on_a_relay_task() {
-  local home out rc
+# This used to refuse. It refused on the reasoning that discard authority had to
+# be exercised on the host itself - true of the mechanism, false as advice for a
+# host with no inbound SSH, and the reason a remote task that ran off the rails
+# could never be cleaned up from anywhere. What the entry point owes now is that
+# the flag REACHES the relay path rather than being swallowed or reinterpreted.
+test_teardown_delegates_force_to_the_host() {
+  local home out
   home="$TMP_ROOT/tdhome"
-  mkdir -p "$home/state" "$home/data"
+  mkdir -p "$home/state" "$home/data" "$home/config"
+  write_registry "$home" ''
   printf 'window=w\nworktree=/nowhere\nkind=scout\nhost=box\n' > "$home/state/t4.meta"
-  out=$(FM_HOME="$home" "$ROOT/bin/fm-teardown.sh" t4 --force 2>&1); rc=$?
-  expect_code 1 "$rc" "--force on a relay task must refuse"
-  assert_contains "$out" "not available for a relay task" \
-    "--force on a relay task must say discard authority belongs on the host"
-  pass "fm-teardown: --force is refused for a task owned by another machine"
+  out=$(FM_HOME="$home" FM_RELAY_BIFROST="$TMP_ROOT/echo-bifrost" \
+    "$ROOT/bin/fm-teardown.sh" t4 --force 2>&1) \
+    || fail "--force on a relay task must no longer refuse here: $out"
+  assert_contains "$out" "teardown t4 none force" \
+    "the entry point must relay the discard authority to the machine holding the work"
+  assert_not_contains "$out" "not available for a relay task" \
+    "the old refusal must be gone, not merely bypassed"
+  pass "fm-teardown: --force on a relay task travels to the machine holding the work"
 }
 
 test_brief_host_variant() {
@@ -445,10 +621,15 @@ test_verb_events_are_byte_offset_incremental
 test_verb_sanitizes_crew_authored_event_text
 test_verb_crew_state_reports_failure_as_err
 test_verb_teardown_gate_needs_a_matching_report_hash
+test_verb_teardown_force_passes_discard_authority_to_the_host
+test_verb_teardown_force_releases_only_the_report_gate
+test_verb_teardown_refuses_an_unknown_third_token
+test_verb_teardown_force_is_covered_by_the_existing_helm_fence
+test_relay_host_teardown_force_reaches_the_wire
 test_spawn_host_flag_refusals
 test_spawn_host_applies_the_local_task_id_gate
 test_spawn_help_documents_host
-test_teardown_refuses_force_on_a_relay_task
+test_teardown_delegates_force_to_the_host
 test_brief_host_variant
 test_check_make_requires_a_relay_task
 test_check_make_writes_a_thin_registered_check
