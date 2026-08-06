@@ -20,8 +20,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
-command -v zellij >/dev/null 2>&1 || { echo "skip: zellij not found"; exit 0; }
-command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the zellij adapter)"; exit 0; }
+command -v zellij >/dev/null 2>&1 || { printf 'FM_TEST_RUNTIME_GATE runtime=zellij outcome=unavailable\nskip: zellij not found\n'; exit 0; }
+command -v jq >/dev/null 2>&1 || { printf 'FM_TEST_RUNTIME_GATE runtime=zellij outcome=unavailable\nskip: jq not found (required by the zellij adapter)\n'; exit 0; }
 
 # shellcheck source=tests/zellij-test-safety.sh
 . "$ROOT/tests/zellij-test-safety.sh"
@@ -203,3 +203,4 @@ fm_backend_zellij_kill "$SESSION:$PANE_ID2"
 
 cleanup_all
 trap - EXIT
+printf 'FM_TEST_RUNTIME_GATE runtime=zellij outcome=exercised\n'

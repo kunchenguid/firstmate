@@ -255,10 +255,11 @@ jobs:
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          # Serial only. Fail if any script reports herdr not found. Live
-          # harness credential tests stay outside this family (opt-in env only).
+          # Serial only. Herdr is required in this lane, so an unavailable
+          # runtime becomes a typed runner failure. Live harness credential
+          # tests stay outside this family (opt-in env only).
           bin/fm-test-run.sh --family real-herdr-gated \
-            --fail-on-gate-skip 'herdr not found' \
+            --runtime-gate herdr=required \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-herdr.json"
       - name: Cleanup job-owned Herdr lab sessions
         if: always()

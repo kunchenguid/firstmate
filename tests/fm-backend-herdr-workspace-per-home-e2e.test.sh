@@ -47,9 +47,9 @@ assert_not_contains_local() {  # <haystack> <needle> <msg>
   esac
 }
 
-command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
-command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
-command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (required by fm-spawn.sh)"; exit 0; }
+command -v herdr >/dev/null 2>&1 || { printf 'FM_TEST_RUNTIME_GATE runtime=herdr outcome=unavailable\nskip: herdr not found\n'; exit 0; }
+command -v jq >/dev/null 2>&1 || { printf 'FM_TEST_RUNTIME_GATE runtime=herdr outcome=unavailable\nskip: jq not found (required by the herdr adapter)\n'; exit 0; }
+command -v treehouse >/dev/null 2>&1 || { printf 'FM_TEST_RUNTIME_GATE runtime=herdr outcome=unavailable\nskip: treehouse not found (required by fm-spawn.sh)\n'; exit 0; }
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
@@ -243,3 +243,4 @@ fm_backend_herdr_kill "$SESSION:$SM_PANE"
 
 cleanup_all
 trap - EXIT
+printf 'FM_TEST_RUNTIME_GATE runtime=herdr outcome=exercised\n'
