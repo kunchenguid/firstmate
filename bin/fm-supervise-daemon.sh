@@ -1050,6 +1050,12 @@ housekeeping() {  # <state>
     fi
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
     [ "$age" -ge "$pause_secs" ] || continue
+    # Endpoint-readability probe ONLY: just exit code 2 (capture failed, so the
+    # pane is gone) changes the outcome here. The busy/idle verdict is deliberately
+    # discarded - do NOT reinstate a `0)` arm dropping the marker on busy, because a
+    # busy pane under a still-declared pause would then clear its window every
+    # recheck while migrate_watcher_pause_markers recreated it fresh on the next
+    # tick, and the away supervisor would go permanently silent for that pane.
     stale_window_is_busy "$win" "$state"
     case "$?" in
       2) rm -f "$marker" ;;

@@ -435,9 +435,14 @@ test_housekeeping_paused_resurfaces_and_resets() {
 }
 
 # A crew that RESUMED - its latest status line is no longer a pause - drops its
-# pause tracking without escalating, even though its pane also reads busy. The
-# status append is what ends the pause; the busy pane alone never does (see
-# test_housekeeping_busy_declared_pause_matures_its_window).
+# pause tracking without escalating. The dimension pinned here is that pane busy
+# state does not GATE that clear: the status append alone ends the pause, on the
+# reconcile path housekeeping runs before its pause recheck ever reads a pane, so a
+# crew that resumed into a genuinely busy pane cannot hold a stale pause window
+# open. The fixture asserts its own busy verdict first, so it cannot silently decay
+# into an idle-pane case and keep claiming that dimension. The inverse - a busy pane
+# that is STILL declaring the pause - is
+# test_housekeeping_busy_declared_pause_matures_its_window.
 test_housekeeping_paused_resumed_cleared() {
   local dir state fakebin win pane key
   dir=$(make_supercase paused-resumed)
@@ -453,10 +458,13 @@ test_housekeeping_paused_resumed_cleared() {
   key=$(printf '%s' "held-w12" | tr ':/.' '___')
   echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" stale_window_is_busy "$win" "$state" \
+    || fail "resumed-pause fixture does not actually read busy, so it pins nothing about busy state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
   [ -e "$state/.subsuper-paused-$key" ] && fail "resumed (busy, no longer paused) pause marker was not cleared"
   [ ! -s "$state/.subsuper-escalations" ] || fail "a resumed pause was escalated"
-  pass "housekeeping clears a busy pane's pause marker once its status is no longer a pause"
+  pass "a busy pane cannot gate the pause clear once its crew's status is no longer a pause"
 }
 
 # The other half of the 2026-08-05 declared-pause incident. The watcher's enriched
