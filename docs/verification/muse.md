@@ -72,7 +72,7 @@ A two-turn session produced exactly two run brackets, the second closed by an Es
 78 {"kind":"run","run_id":"b50dac92-...","event":{"kind":"terminal","terminal":"cancelled","reason":"cancelled during model step"}}
 ```
 
-The log's first record carries the binding key:
+The log's first record carries the workspace binding key:
 
 ```
 "payload_type": "runtime.session.metadata",

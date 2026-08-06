@@ -295,7 +295,8 @@ fm_busy_muse_idle_verified() {
 
 # fm_busy_muse_binding_path: the per-task sidecar fm-spawn writes so the
 # classifier binds a pane to its session log without re-deriving muse's data
-# directory. Two lines: sessions_root=<abs> and workspace_root=<abs>.
+# directory. It records sessions_root=<abs>, workspace_root=<abs>, and one
+# prior_log=<abs> for each matching main log that predates this pane.
 fm_busy_muse_binding_path() {  # <state-dir> <id>
   printf '%s/%s.muse-session' "$1" "$2"
 }
@@ -318,41 +319,54 @@ fm_busy_muse_binding_field() {  # <state-dir> <id> <key>
   return 1
 }
 
-# fm_busy_file_mtime: epoch mtime, BSD and GNU stat, else fail.
-fm_busy_file_mtime() {  # <path>
-  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || return 1
-}
-
-# fm_busy_muse_session_log: the newest MAIN session log whose recorded
+# fm_busy_muse_matching_logs: every MAIN session log whose recorded
 # workspace_root is this task's worktree. The depth bounds are what exclude
 # muse's own native sub-agent logs, which live one directory deeper under
 # subagent/<child-session-id>/session.jsonl and carry their own independent run
 # lifecycle - folding a child's log would report the parent busy long after the
-# parent's turn ended. Prints the path, or fails when nothing matches.
-fm_busy_muse_session_log() {  # <state-dir> <id>
-  local root ws candidate first mtime
-  local best='' best_mtime=''
-  root=$(fm_busy_muse_binding_field "$1" "$2" sessions_root) || return 1
-  ws=$(fm_busy_muse_binding_field "$1" "$2" workspace_root) || return 1
+# parent's turn ended.
+fm_busy_muse_matching_logs() {  # <sessions-root> <workspace-root>
+  local root=$1 ws=$2 candidate first
   [ -d "$root" ] || return 1
   while IFS= read -r candidate; do
     [ -n "$candidate" ] || continue
-    # The metadata record is the log's first line and carries workspace_root.
     IFS= read -r first < "$candidate" 2>/dev/null || continue
     case "$first" in
-      *"\"workspace_root\":\"$ws\""*) : ;;
+      *"\"workspace_root\":\"$ws\""*) printf '%s\n' "$candidate" ;;
       *) continue ;;
     esac
-    mtime=$(fm_busy_file_mtime "$candidate") || continue
-    if [ -z "$best_mtime" ] || [ "$mtime" -gt "$best_mtime" ]; then
-      best=$candidate
-      best_mtime=$mtime
-    fi
   done <<EOF
 $(find "$root" -mindepth 5 -maxdepth 5 -name session.jsonl -type f 2>/dev/null)
 EOF
-  [ -n "$best" ] || return 1
-  printf '%s' "$best"
+}
+
+fm_busy_muse_binding_has_prior_log() {  # <state-dir> <id> <session-log>
+  local path line
+  path=$(fm_busy_muse_binding_path "$1" "$2")
+  [ -f "$path" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ "$line" = "prior_log=$3" ] && return 0
+  done < "$path"
+  return 1
+}
+
+# fm_busy_muse_session_log: the one matching MAIN session log that did not
+# exist when fm-spawn created this pane's binding. Multiple candidates are
+# ambiguous and fail closed rather than guessing which pane owns either log.
+fm_busy_muse_session_log() {  # <state-dir> <id>
+  local root ws candidate selected=''
+  root=$(fm_busy_muse_binding_field "$1" "$2" sessions_root) || return 1
+  ws=$(fm_busy_muse_binding_field "$1" "$2" workspace_root) || return 1
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    fm_busy_muse_binding_has_prior_log "$1" "$2" "$candidate" && continue
+    [ -z "$selected" ] || return 1
+    selected=$candidate
+  done <<EOF
+$(fm_busy_muse_matching_logs "$root" "$ws")
+EOF
+  [ -n "$selected" ] || return 1
+  printf '%s' "$selected"
 }
 
 # fm_busy_muse_run_state: fold one session log to busy|settled|none.

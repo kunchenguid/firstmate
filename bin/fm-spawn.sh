@@ -2070,16 +2070,22 @@ EOF
       # (bin/fm-busy-lib.sh owns the fold and the idle gate). That is a PULL
       # source with no writer, so nothing is armed and no record is seeded -
       # exactly the reason standalone Kimi is not armed either.
-      # This sidecar is the whole binding: it pins the sessions root and the
-      # workspace root that muse records in each log's metadata, so the
-      # classifier never has to re-derive muse's data directory or guess which
-      # of several session logs belongs to this pane. Recording the resolved
-      # root here also means a later change to XDG_DATA_HOME cannot silently
-      # re-point an already-running task at a different log tree.
+      # This sidecar is the whole binding: it pins the sessions root, the
+      # workspace root that muse records in each log's metadata, and every
+      # matching main log that predates this pane. The classifier then accepts
+      # only one new matching log, so it never guesses between pane
+      # incarnations. Recording the resolved root here also means a later
+      # change to XDG_DATA_HOME cannot silently re-point an already-running
+      # task at a different log tree.
       MUSE_SESSIONS_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/muse/sessions"
       {
         printf 'sessions_root=%s\n' "$MUSE_SESSIONS_ROOT"
         printf 'workspace_root=%s\n' "$WT"
+        while IFS= read -r MUSE_PRIOR_LOG; do
+          [ -n "$MUSE_PRIOR_LOG" ] && printf 'prior_log=%s\n' "$MUSE_PRIOR_LOG"
+        done <<EOF
+$(fm_busy_muse_matching_logs "$MUSE_SESSIONS_ROOT" "$WT" || true)
+EOF
       } > "$STATE/$ID.muse-session"
       ;;
     kimi*)

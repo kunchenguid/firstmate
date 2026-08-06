@@ -294,11 +294,12 @@ test_spawn_refuses_secondmate() {
 }
 
 test_spawn_writes_busy_binding_and_teardown_removes_it() {
-  local rec case_dir home proj wt fakebin id binding
+  local rec case_dir home proj wt fakebin id binding prior
   rec=$(make_spawn_case binding)
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $rec
 EOF
+  prior=$(write_session_log "$case_dir/xdgdata/muse/sessions" 2026 08 05 prior "$wt" </dev/null)
   XDG_DATA_HOME="$case_dir/xdgdata" \
     run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode no-mistakes --yolo off >/dev/null \
     || fail "muse spawn failed"
@@ -308,6 +309,7 @@ EOF
   assert_grep "sessions_root=$case_dir/xdgdata/muse/sessions" "$binding" \
     "muse binding did not record the resolved sessions root"
   assert_grep "workspace_root=$wt" "$binding" "muse binding did not record the task worktree"
+  assert_grep "prior_log=$prior" "$binding" "muse binding did not exclude the pre-existing session"
   # No busy record is armed for muse: the source is pull-only with no writer, so
   # a seeded busy record could never be settled.
   assert_absent "$home/state/$id.busy-gen" "muse spawn armed a busy record it can never clear"
@@ -527,6 +529,35 @@ EOF
   pass "the session binding folds only the log matching this task's worktree"
 }
 
+test_binding_excludes_preexisting_log_when_mtimes_tie() {
+  local dir state id root old current verdict
+  dir="$TMP_ROOT/mtime-tie"
+  state="$dir/state"
+  root="$dir/sessions"
+  id=tietask
+  mkdir -p "$state"
+
+  old=$(write_session_log "$root" 2026 08 05 aaaa-old "$dir/ws" <<EOF
+$(muse_log_run_started old-run)
+$(muse_log_run_terminal old-run completed)
+EOF
+)
+  current=$(write_session_log "$root" 2026 08 05 zzzz-current "$dir/ws" <<EOF
+$(muse_log_run_started current-run)
+EOF
+)
+  touch -t 202608050101.01 "$old" "$current"
+  { [ ! "$old" -nt "$current" ] && [ ! "$current" -nt "$old" ]; } \
+    || fail "the session-selection regression does not reproduce equal mtimes"
+
+  printf 'sessions_root=%s\nworkspace_root=%s\nprior_log=%s\n' \
+    "$root" "$dir/ws" "$old" > "$state/$id.muse-session"
+  verdict=$(classify_muse "$state" "$id")
+  [ "$verdict" = "busy muse-session-log" ] \
+    || fail "the current open session lost an mtime tie to the prior settled session: got '$verdict'"
+  pass "spawn-time exclusions select the current session across equal mtimes"
+}
+
 # muse's own native sub-agents write independent run lifecycles one directory
 # deeper, under subagent/<child-session-id>/. Folding a child's log would report
 # the parent busy long after the parent's turn ended.
@@ -667,6 +698,7 @@ test_failed_clear_is_reported
 test_run_fold_tracks_open_and_settled_turns
 test_nested_terminal_record_does_not_settle_a_run
 test_binding_selects_the_matching_main_log
+test_binding_excludes_preexisting_log_when_mtimes_tie
 test_subagent_logs_are_excluded
 test_missing_and_unreadable_bindings_are_unknown_never_idle
 test_settled_log_stays_unknown_while_the_idle_gate_is_closed

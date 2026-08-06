@@ -431,7 +431,7 @@ It was verified to drop the foreign `rules_file` context block while KEEPING a p
 
 ### Session event log and the busy fold
 
-Sessions persist to `${XDG_DATA_HOME:-$HOME/.local/share}/muse/sessions/YYYY/MM/DD/<session-uuid>/session.jsonl`, and `fm-spawn` writes `state/<id>.muse-session` pinning that root plus the task worktree so the classifier binds a pane to its own log.
+Sessions persist to `${XDG_DATA_HOME:-$HOME/.local/share}/muse/sessions/YYYY/MM/DD/<session-uuid>/session.jsonl`, and `fm-spawn` writes `state/<id>.muse-session` pinning that root, the task worktree, and every pre-existing matching main log so the classifier binds a pane to its one new log.
 Each submitted turn is bracketed by `{"payload":{"kind":"run","run_id":"<uuid>","event":{"kind":"started"` and a matching `"event":{"kind":"terminal"`, whose `terminal` value was observed as `completed` and `cancelled`.
 Because the interrupt path produces a real terminal, this source covers interruption, which Claude's `Stop` hook does not.
 Never use `--no-session-log` for a crewmate: it disables the only busy source muse has.
