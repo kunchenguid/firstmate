@@ -127,9 +127,9 @@ fm_watcher_healthy() {
 
 # fm_supervision_model
 # Print the supervision model of this home's PRIMARY harness:
-#   autoarm     Claude Stop-hook auto-arm: the watcher is armed at each turn end
-#               and exits on its wake, so it runs only BETWEEN turns. Mid-turn a
-#               fresh beacon with no live watcher process is the healthy state.
+#   autoarm     Claude/Cursor stop-hook auto-arm: the watcher is armed at each
+#               turn end and exits on its wake, so it runs only BETWEEN turns.
+#               Mid-turn a fresh beacon with no live watcher process is healthy.
 #   persistent  every other harness (codex foreground checkpoint, opencode/pi/grok
 #               background arm, tmux, unknown): the watcher runs as a tracked live
 #               process, so a live identity-matched pid is the real liveness signal.
@@ -143,7 +143,7 @@ fm_supervision_model() {
   esac
   harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
   case "$harness" in
-    claude) printf 'autoarm\n' ;;
+    claude|cursor) printf 'autoarm\n' ;;
     *) printf 'persistent\n' ;;
   esac
 }

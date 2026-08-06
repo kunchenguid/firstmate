@@ -74,6 +74,16 @@ run_guard_case_autoarm() {
     "$ROOT/bin/fm-guard.sh" 2>&1
 }
 
+run_guard_case_cursor_autoarm() {
+  local dir=$1
+  env -u FM_SUPERVISION_MODEL \
+    CURSOR_AGENT=1 \
+    FM_ROOT_OVERRIDE="$(case_root "$dir")" \
+    FM_HOME="$(case_home "$dir")" \
+    FM_GUARD_GRACE=999 \
+    "$ROOT/bin/fm-guard.sh" 2>&1
+}
+
 count_text() {
   local haystack=$1 needle=$2
   awk -v needle="$needle" 'index($0, needle) { c++ } END { print c + 0 }' <<EOF
@@ -311,6 +321,16 @@ test_autoarm_fresh_beacon_without_watcher_is_healthy() {
   pass "fm-guard stale banner: auto-arm fresh beacon without a live watcher is healthy"
 }
 
+test_cursor_autoarm_fresh_beacon_without_watcher_is_healthy() {
+  local dir out
+  dir=$(make_guard_case cursor-autoarm-fresh)
+  touch "$(case_home "$dir")/state/.last-watcher-beat"
+  out=$(run_guard_case_cursor_autoarm "$dir")
+  [ -z "$out" ] \
+    || fail "Cursor auto-arm with a fresh beacon and no live watcher must stay silent, got: $out"
+  pass "fm-guard stale banner: Cursor auto-arm treats a fresh beacon without a live watcher as healthy"
+}
+
 test_autoarm_stale_beacon_alarms_with_correct_reason() {
   local dir out
   dir=$(make_guard_case autoarm-stale)
@@ -376,6 +396,7 @@ test_persistent_no_watcher_episode_survives_beacon_touch() {
 test_first_stale_call_prints_full_banner
 test_repeated_same_episode_prints_reminder_only
 test_autoarm_fresh_beacon_without_watcher_is_healthy
+test_cursor_autoarm_fresh_beacon_without_watcher_is_healthy
 test_autoarm_stale_beacon_alarms_with_correct_reason
 test_autoarm_stale_episode_is_stable
 test_persistent_no_watcher_banner_names_missing_process

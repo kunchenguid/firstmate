@@ -850,9 +850,9 @@ test_tracked_claude_entries_inert_under_grok() {
 # Cursor's stop hook does not honour exit 2 as a forced continuation, so the
 # shim translates the shared guard's blind-turn signal into a followup_message
 # body. loop_count > 0 maps to stop_hook_active so the shared loop guard
-# applies unchanged. On a blind turn the shim foregrounds bin/fm-watch-arm.sh,
-# re-runs the shared guard, and emits the followup_message only when the turn
-# would still end blind. Verified against cursor-agent 2026.07.23-e383d2b.
+# applies unchanged. A typed actionable arm close gets a normal wake followup;
+# an arm failure keeps the loud blind banner. Verified against cursor-agent
+# 2026.07.23-e383d2b.
 
 # The shim runs bin/fm-watch-arm.sh inside the fixture. These stubs stand in
 # for the real arm wrapper so the test controls whether the arm succeeds
@@ -865,6 +865,17 @@ install_failing_arm_stub() {
 printf 'arm-invoked\\n' >> "$dir/state/.arm-invocations"
 printf '%s\\n' "\${FM_CHECK_INTERVAL:-}" >> "$dir/state/.arm-cadence"
 exit 1
+EOF
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+}
+
+install_actionable_arm_stub() {
+  local dir=$1
+  cat > "$dir/bin/fm-watch-arm.sh" <<EOF
+#!/usr/bin/env bash
+printf 'arm-invoked\\n' >> "$dir/state/.arm-invocations"
+printf 'signal: task.status\\n'
+exit 0
 EOF
   chmod +x "$dir/bin/fm-watch-arm.sh"
 }
@@ -906,6 +917,30 @@ test_cursor_shim_emits_followup_on_block() {
   grep -q '^arm-invoked$' "$dir/state/.arm-invocations" 2>/dev/null \
     || fail "cursor shim must attempt the arm before deciding the turn still ends blind"
   pass "fm-turnend-guard-cursor: translates a still-blind post-arm turn into a followup_message body"
+}
+
+test_cursor_shim_wakes_after_actionable_arm() {
+  local dir out json status
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-actionable")
+  : > "$dir/state/task1.meta"
+  install_actionable_arm_stub "$dir"
+  out=$(printf '{"session_id":"cur-session","loop_count":0,"workspace_roots":["%s"]}' "$dir" \
+    | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>&1); status=$?
+  json=$(printf '%s\n' "$out" | tail -n 1)
+  expect_code 0 "$status" "cursor shim must exit 0 after an actionable arm close"
+  assert_contains "$json" "firstmate watcher wake" \
+    "cursor shim must identify an actionable arm close as a normal wake"
+  assert_contains "$json" "bin/fm-wake-drain.sh" \
+    "cursor wake followup must instruct wake draining"
+  assert_not_contains "$json" "TURN WOULD END BLIND" \
+    "cursor actionable wake must not reuse the blind-turn banner"
+  assert_not_contains "$json" ".cursor/hooks.json" \
+    "cursor actionable wake must not suggest hook repair"
+  assert_not_contains "$json" "bin/fm-watch-arm.sh" \
+    "cursor actionable wake must not suggest manual watcher arming"
+  grep -q '^arm-invoked$' "$dir/state/.arm-invocations" 2>/dev/null \
+    || fail "cursor shim must invoke the arm before delivering an actionable wake"
+  pass "fm-turnend-guard-cursor: typed actionable arm close emits a normal drain-and-handle wake"
 }
 
 test_cursor_shim_arms_then_allows() {
@@ -1829,6 +1864,7 @@ test_grok_adapter_invalid_inputs_start_neither_path
 test_grok_adapter_missing_jq_and_no_supervision_allow
 test_tracked_claude_entries_inert_under_grok
 test_cursor_shim_emits_followup_on_block
+test_cursor_shim_wakes_after_actionable_arm
 test_cursor_shim_arms_then_allows
 test_cursor_shim_allows_when_healthy
 test_cursor_shim_loop_count_maps_to_stop_hook_active
