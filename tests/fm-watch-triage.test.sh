@@ -1362,6 +1362,238 @@ test_busy_pane_default_turn_age_bound_is_3600s() {
   pass "the production default busy-turn-age bound is 3600s (5min under does not wedge, 66min over does)"
 }
 
+# --- busy pane under a DECLARED pause: bounded recheck, never a repeat wedge --
+# Sibling of the away-daemon pause/wedge gap, observed live 2026-08-05: a crew can
+# declare `paused: <external wait>` while its pane still reads BUSY (a worker
+# holding a background monitor shell), so the turn-age bound trips and the busy
+# path wedge-escalated that healthy pane every FM_STALE_ESCALATE_SECS - ~22 repeat
+# escalations on one declared-paused pane in one evening, outside away mode. The
+# declaration must outrank the wedge timer on BOTH busy call sites (the stable-hash
+# branch and the ticking-footer changing-hash branch), while the bounded
+# FM_PAUSE_RESURFACE_SECS recheck still re-surfaces the pause so it cannot rot.
+# The status file is aged with the pause-cadence anchor in mind: handle_paused_stale
+# measures the wait from the status file's own mtime, not a per-hash marker.
+test_busy_pane_declared_pause_absorbs_repeat_wedge_nags() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid round wakes back
+  dir=$(make_case busy-declared-pause); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/busy-paused.status"
+  window="test:fm-busy-paused"
+  printf 'Working... (7200.4s)' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-paused.meta"
+  record_pi_busy "$state" busy-paused
+  printf 'paused: holding while the upstream release lands\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-busy-paused_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Working... (7200.4s)")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  touch -t 200001010000 "$state/busy-paused.turn-ended"
+  prime_turnend_seen "$state/busy-paused.turn-ended"
+
+  # Phase A: stable-hash busy path, three consecutive over-threshold rounds. Each
+  # round re-arms with the wedge timer already past FM_STALE_ESCALATE_SECS, the
+  # exact cadence that produced the repeat nagging. The declared pause must absorb
+  # every one of them.
+  round=1
+  while [ "$round" -le 3 ]; do
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 \
+      FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    if ! wait_live "$pid" 30; then
+      reap "$pid"
+      fail "a declared-paused busy pane wedge-escalated on round $round: $(cat "$out")"
+    fi
+    [ ! -s "$out" ] || { reap "$pid"; fail "declared-paused busy round $round printed a wake reason: $(cat "$out")"; }
+    [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "declared-paused busy round $round did not record the pause cadence marker"; }
+    [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "declared-paused busy round $round kept the wedge timer running"; }
+    [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "declared-paused busy round $round kept a wedge escalation count"; }
+    reap "$pid"
+    round=$((round + 1))
+  done
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 0 ] || fail "a declared-paused busy pane queued $wakes wedge wakes across three over-threshold rounds"
+
+  # Phase B: the ticking-footer branch - the pane hash changes every poll, so the
+  # watcher never reaches the stable-hash branch at all. Same declared pause, same
+  # over-threshold wedge timer, same required absorb.
+  printf 'Working... (7260.9s)' > "$capture_file"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "a declared-paused busy pane with a changing hash wedge-escalated: $(cat "$out")"
+  fi
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "changing-hash declared pause lost its pause cadence marker"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "changing-hash declared pause kept the wedge timer running"; }
+  reap "$pid"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 0 ] || fail "a changing-hash declared-paused busy pane queued $wakes wedge wakes"
+
+  # Phase C: absorbed is not silenced. Age the pause past FM_PAUSE_RESURFACE_SECS
+  # and it re-surfaces once, as a long-cadence recheck rather than a wedge.
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-busy-paused_status"
+  printf 'Working... (7320.2s)' > "$capture_file"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=240 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a declared-paused busy pane never re-surfaced on the bounded recheck cadence"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the bounded recheck did not print a stale wake"
+  grep -F "awaiting external" "$out" >/dev/null || fail "the bounded recheck was not labeled a declared-pause recheck"
+  grep -F "possible wedge" "$out" >/dev/null && fail "the bounded recheck mislabeled a declared pause as a possible wedge"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "the bounded recheck did not record its re-surface throttle marker"
+
+  # Phase D: the throttle survives the busy path's own pause-tracking cleanup, so
+  # the recheck fires once per window rather than on every poll of a busy pane.
+  printf 'Working... (7380.7s)' > "$capture_file"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=240 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "a declared-paused busy pane re-surfaced again inside its own recheck window: $(cat "$out")"
+  fi
+  [ -e "$state/.paused-resurfaced-$key" ] || { reap "$pid"; fail "the busy path discarded the pause re-surface throttle marker"; }
+  reap "$pid"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 1 ] || fail "a declared-paused busy pane should re-surface exactly once per window, got $wakes wakes"
+  pass "a declared-paused busy pane absorbs repeat wedge nags on both busy paths and still rechecks once per bounded window"
+}
+
+# The disconfirming half of the fix: the declared pause is the ONLY thing that
+# diverts an over-age busy pane, and only while it is still declared. Same
+# fixture, same over-threshold wedge timer - a non-pause status verb wedges, and
+# so does the same pane once the crew appends a later non-pause line.
+test_busy_pane_wedge_survives_without_and_after_a_declared_pause() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid
+  dir=$(make_case busy-pause-absent); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/busy-nopause.status"
+  window="test:fm-busy-nopause"
+  printf 'Working... (7200.4s)' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-nopause.meta"
+  record_pi_busy "$state" busy-nopause
+  # Deliberately NOT the pause verb: prose that merely mentions a pause must not
+  # buy the pause cadence, so this control diverges from the paused fixture in
+  # exactly one signal - the leading status verb.
+  printf 'working: holding while the upstream release lands, paused on it\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-busy-nopause_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Working... (7200.4s)")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  touch -t 200001010000 "$state/busy-nopause.turn-ended"
+  prime_turnend_seen "$state/busy-nopause.turn-ended"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=240 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "an over-age busy pane with no declared pause stopped wedge-escalating"
+  grep -F "possible wedge" "$out" >/dev/null || fail "an over-age busy pane with no declared pause lost its wedge reason: $(cat "$out")"
+  [ ! -e "$state/.paused-$key" ] || fail "a non-pause status verb was given the pause cadence"
+
+  # A pane that WAS paused and then reported progress returns to wedge detection:
+  # the later non-pause line, not a separate reset, restores it.
+  dir=$(make_case busy-pause-lifted); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/busy-lifted.status"
+  window="test:fm-busy-lifted"
+  printf 'Working... (7200.4s)' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-lifted.meta"
+  record_pi_busy "$state" busy-lifted
+  printf 'paused: holding while the upstream release lands\nworking: the release landed, resuming\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-busy-lifted_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Working... (7200.4s)")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  touch -t 200001010000 "$state/busy-lifted.turn-ended"
+  prime_turnend_seen "$state/busy-lifted.turn-ended"
+  # Left over from the pause that has since been lifted.
+  : > "$state/.paused-$key"
+  : > "$state/.paused-resurfaced-$key"
+
+  # Round 1: the lifted pause drops its cadence markers and hands the pane back to
+  # a FRESH wedge timer rather than escalating on the pause's own leftovers.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=240 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a lifted pause escalated before its fresh wedge threshold: $(cat "$out")"
+  fi
+  [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "a lifted pause kept its pause cadence marker on a busy pane"; }
+  [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "a lifted pause did not hand the busy pane back to the wedge timer"; }
+  reap "$pid"
+
+  # Round 2: past that fresh threshold, the pane wedge-escalates exactly as an
+  # over-age busy pane that never declared a pause does.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=240 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a lifted pause did not restore wedge escalation on an over-age busy pane"
+  grep -F "possible wedge" "$out" >/dev/null || fail "a lifted pause left the busy pane on the pause cadence: $(cat "$out")"
+  pass "an over-age busy pane still wedge-escalates with no declared pause, and again once a declared pause is lifted"
+}
+
+# Away mode keeps its one-shot handoff: the daemon owns triage there and applies
+# the same declared-pause precedence to the enriched wedge reason itself (see
+# bin/fm-supervise-daemon.sh), so the watcher must still enqueue and exit rather
+# than absorb the pane and record normal-mode pause tracking behind the daemon.
+test_afk_declared_pause_busy_pane_hands_off_the_wedge() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid
+  dir=$(make_case afk-busy-declared-pause); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/busy-afk.status"
+  window="test:fm-busy-afk"
+  printf 'Working... (7200.4s)' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-afk.meta"
+  record_pi_busy "$state" busy-afk
+  printf 'paused: holding while the upstream release lands\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-busy-afk_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Working... (7200.4s)")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  touch -t 200001010000 "$state/busy-afk.turn-ended"
+  prime_turnend_seen "$state/busy-afk.turn-ended"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$state/.afk"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=240 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "an AFK declared-paused busy pane did not hand its wedge off to the daemon"
+  grep -F "possible wedge" "$out" >/dev/null || fail "an AFK declared-paused busy pane absorbed instead of handing off: $(cat "$out")"
+  [ ! -e "$state/.paused-$key" ] || fail "an AFK watcher recorded normal-mode pause tracking on a busy pane instead of handing off"
+  pass "in away mode a declared-paused busy pane still hands its wedge to the daemon rather than absorbing it"
+}
+
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
   local dir state fakebin out capture_file window key pane_hash sig pid since
   dir=$(make_case nonterminal-stale-timer-repair); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1869,6 +2101,8 @@ test_busy_pane_changing_hash_escalates_past_turn_age_bound
 test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
+test_busy_pane_declared_pause_absorbs_repeat_wedge_nags
+test_busy_pane_wedge_survives_without_and_after_a_declared_pause
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
@@ -1891,3 +2125,4 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
+test_afk_declared_pause_busy_pane_hands_off_the_wedge

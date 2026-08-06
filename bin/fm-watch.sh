@@ -40,6 +40,12 @@
 #                          count, and demand-deep-inspection marker, for human
 #                          inspection only - never an automatic interrupt,
 #                          signal, or restart of the worker or its tool process.
+#                          In normal mode a crew that declared a pause takes the
+#                          same bounded external-wait cadence at that bound
+#                          instead of the wedge timer (busy_wedge_or_pause),
+#                          since a declared wait can legitimately hold a busy
+#                          pane open; while afk is active the wedge is handed to
+#                          the daemon, which applies that precedence itself.
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
@@ -350,6 +356,39 @@ handle_paused_stale() {  # <window> <task> <hash>
     wake "$reason"
   fi
   triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
+}
+
+# Bound an over-age BUSY pane, letting a declared pause outrank the wedge timer.
+# A busy pane is not evidence that the crew is unpaused: a crew that declared
+# `paused: <external wait>` can hold a live foreground call - a background monitor
+# shell, a long watch - for as long as that wait lasts, so busy_turn_over_age
+# trips and the wedge timer then re-escalates a healthy pane every
+# STALE_ESCALATE_SECS (2026-08-05 incident: 22 repeat escalations on one
+# declared-paused pane in one evening). The declaration is the crew's own
+# statement that this pane runs long by design - the one cadence question the
+# wedge timer cannot answer for itself, and exactly why the stale paths above
+# divert a declared pause - so it takes handle_paused_stale's bounded
+# PAUSE_RESURFACE_SECS recheck instead. Absorbed, never silenced: the recheck
+# still re-surfaces the pause once per window, and a later non-pause status line
+# hands the pane straight back to ordinary wedge detection. Deliberately the CHEAP
+# status read and not pause_state_class: this runs on every poll of an over-age
+# pane, and pause_state_class resolves a busy pane to `working` through
+# crew_absorb_class's run-step precedence - the one verdict that cannot separate a
+# wedge from a declared wait here. Skipped entirely while afk is active, exactly as
+# the other normal-mode pause routing is: the daemon owns triage there and applies
+# the same declared-pause precedence to the enriched wedge reason itself, so
+# absorbing here would record normal-mode pause tracking behind its back.
+# Returns 0 when it absorbed on the pause cadence, so the caller keeps the pause
+# bookkeeping just written; 1 when the pane went through the wedge timer exactly as
+# before.
+busy_wedge_or_pause() {  # <window> <task> <hash> <since-file> <escalation-count-file>
+  local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5
+  if ! afk_present && status_is_paused "$(last_status_line "$STATE/$task.status")"; then
+    handle_paused_stale "$win" "$task" "$h"
+    return 0
+  fi
+  wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file"
+  return 1
 }
 
 clear_pause_state() {  # <window>
@@ -1135,21 +1174,28 @@ EOF
       else
         # Pane busy or not yet stably stale: reset pending escalation bookkeeping,
         # unless a genuinely busy pane has gone too long with no completed turn -
-        # then route it through the same wedge timer instead of erasing it.
+        # then route it through the same wedge timer instead of erasing it, or
+        # through the bounded pause cadence when the crew declared a pause.
+        paused_busy=1
         if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-          wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
+          busy_wedge_or_pause "$w" "$task" "$h" "$ssf" "$ewf" && paused_busy=0
         else
           rm -f "$ssf" "$ewf"
         fi
-        if [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
+        # A busy pane normally retires pause tracking, since the wedge timer owns
+        # it from here - but not when busy_wedge_or_pause just put this pane ON the
+        # pause cadence, whose re-surface throttle lives in exactly those files.
+        if [ "$paused_busy" -ne 0 ] && [ -e "$pf" ] &&
+           { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
           clear_pause_tracking "$w"
         fi
       fi
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
+      paused_busy=1
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-        wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
+        busy_wedge_or_pause "$w" "$task" "$h" "$ssf" "$ewf" && paused_busy=0
       else
         rm -f "$ssf" "$ewf"
       fi
@@ -1159,8 +1205,8 @@ EOF
           paused) handle_paused_stale "$w" "$task" "$h" ;;
           *)      clear_pause_tracking "$w" ;;
         esac
-      else
-        [ -e "$pf" ] && clear_pause_tracking "$w"
+      elif [ "$paused_busy" -ne 0 ] && [ -e "$pf" ]; then
+        clear_pause_tracking "$w"
       fi
     fi
   done < <(recorded_windows)
