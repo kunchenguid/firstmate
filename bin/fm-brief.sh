@@ -49,11 +49,19 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
-# Ship tasks include a project-memory section so durable project-intrinsic
-# learnings can be committed to AGENTS.md through the project's delivery path;
-# it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
-# over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
-# self-governance section when a touched project AGENTS.md lacks it.
+# Ship tasks include a numbered "Project memory" closing checklist covering both
+# durable-knowledge stores a task can produce. Item 1 is the project's committed
+# AGENTS.md (through the project's delivery path; it carries the AGENTS.md
+# authoring bar - widely useful knowledge only, pointers over copied detail - and
+# has the crewmate add the fm-ensure-agents-md.sh self-governance section when a
+# touched project AGENTS.md lacks it). Item 2 is the harness's separate per-repo
+# auto-memory store: at most one new or updated memory per durable non-obvious
+# finding, and a one-line/<200-char index entry (all detail stays in the memory
+# file) since the index loads whole into every future session under a hard size
+# cap that silently drops whatever falls past it. Every ship mode's definition of
+# done requires both outcomes in the closing status line so the checklist is
+# verifiable from that line alone; the scout scaffold carries only the
+# auto-memory item, adapted to its report deliverable.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -334,11 +342,20 @@ The report is the only thing that survives, so anything worth keeping must be in
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
+# Project memory
+Your report is the deliverable, but a durable, non-obvious finding this task uncovered - a gotcha, a verified fact that cost time to establish, an approach that failed for a knowable reason - still belongs in the harness's separate per-repo auto-memory store, so it survives past this report for future sessions.
+Your system prompt already told you this task's memory location; never hardcode a path here.
+Record exactly one memory for it; if this task uncovered none, say so explicitly in your closing status line.
+Check the index first and prefer updating an existing memory over adding a new one; a new index line is only for knowledge no existing memory covers.
+Keep the index line to one line under 200 characters - a pointer plus a one-sentence description - with all other detail in the memory file, never the index: the index loads whole into every future session and is capped at roughly 25KB or 200 lines, whichever comes first, with the overflow dropped silently, so a narrated index destroys the store it is meant to serve.
+Never write secrets, credentials, or captain-private fleet strategy into a memory.
+
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
-When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
+Complete the \`# Project memory\` item above and be ready to state its outcome in your closing status line.
+When the report is complete, append \`done: {one-line conclusion} - project memory: {outcome}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
 echo "scaffolded: $BRIEF (scout; replace {TASK})"
@@ -358,7 +375,8 @@ case "$MODE" in
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+Complete the \`# Project memory\` checklist above as part of that commit and be ready to state both outcomes in your closing status line.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url} - project memory: {both checklist outcomes}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;
@@ -371,7 +389,8 @@ Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
+Complete the \`# Project memory\` checklist above as part of that commit and be ready to state both outcomes in your closing status line.
+When it is implemented and committed, append \`done: ready in branch fm/$ID - project memory: {both checklist outcomes}\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
     ;;
@@ -383,6 +402,7 @@ EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
+Complete the \`# Project memory\` checklist above as part of that commit - no-mistakes never lets you hand-edit after a run starts, so this is your only window - and be ready to state both outcomes in your closing status line.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
@@ -397,7 +417,7 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green - project memory: {both checklist outcomes}\` and stop. You are finished.
 EOF
     ;;
 esac
@@ -450,11 +470,18 @@ $RULE1
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
 # Project memory
-If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
-Record only project knowledge useful to almost every future session.
-For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
-If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
-Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+This task closes only once both durable-knowledge stores below are checked, and your closing status line states each outcome so the checklist is verifiable from that line alone.
+
+1. Project \`AGENTS.md\`. If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
+   Record only project knowledge useful to almost every future session.
+   For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
+   If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
+   Keep it proportionate: skip this item for trivial tasks that produced no durable project knowledge.
+2. Harness auto-memory. Your system prompt already told you this task's memory location; never hardcode a path here.
+   If this task produced a durable, non-obvious finding - a gotcha, a verified fact that cost time to establish, an approach that failed for a knowable reason - record exactly one memory for it; if it produced none, say so explicitly in your closing status line.
+   Check the index first and prefer updating an existing memory over adding a new one; a new index line is only for knowledge no existing memory covers.
+   Keep the index line to one line under 200 characters - a pointer plus a one-sentence description - with all other detail in the memory file, never the index: the index loads whole into every future session and is capped at roughly 25KB or 200 lines, whichever comes first, with the overflow dropped silently, so a narrated index destroys the store it is meant to serve.
+   Never write secrets, credentials, or captain-private fleet strategy into a memory.
 
 $DOD
 EOF

@@ -371,6 +371,102 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# The closing checklist (AGENTS.md item plus the new auto-memory item) must be a
+# numbered, verifiable part of every ship mode's definition of done, worded so a
+# reviewer can check it from the final status line alone (task requirement,
+# not just the section that lists it). Each mode's own done-line template must
+# fold in the checklist outcome, since the three modes end with different
+# status-line wording.
+test_ship_modes_require_closing_checklist_in_done() {
+  local home id mode brief expect_done
+  home="$TMP_ROOT/closing-checklist-home"
+  mkdir -p "$home/data"
+
+  for id_mode in "brief-closing-nm-d1:no-mistakes" "brief-closing-dp-d2:direct-PR" "brief-closing-lo-d3:local-only"; do
+    id=${id_mode%%:*}
+    mode=${id_mode##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+
+    # Numbered checklist, both items present.
+    assert_grep "1. Project \`AGENTS.md\`." "$brief" \
+      "$id: closing checklist lost its numbered AGENTS.md item"
+    assert_grep "2. Harness auto-memory." "$brief" \
+      "$id: closing checklist lost its numbered auto-memory item"
+
+    # Auto-memory item: every bullet from the task's "What to change" list.
+    assert_grep "record exactly one memory for it; if it produced none, say so explicitly in your closing status line" "$brief" \
+      "$id: auto-memory item lost the record-one-or-say-so requirement"
+    assert_grep "prefer updating an existing memory over adding a new one" "$brief" \
+      "$id: auto-memory item lost the prefer-update-over-new-memory rule"
+    assert_grep "Check the index first" "$brief" \
+      "$id: auto-memory item lost the check-the-index-first rule"
+    assert_grep "one line under 200 characters" "$brief" \
+      "$id: auto-memory item lost the one-line/200-character index constraint"
+    assert_grep "capped at roughly 25KB or 200 lines" "$brief" \
+      "$id: auto-memory item lost the hard index size cap"
+    assert_grep "overflow dropped silently" "$brief" \
+      "$id: auto-memory item lost the silent-overflow consequence"
+    assert_grep "Never write secrets, credentials, or captain-private fleet strategy into a memory." "$brief" \
+      "$id: auto-memory item lost the secrets/credentials/fleet-strategy exclusion"
+
+    # No hardcoded memory directory path: only a pointer to the system prompt.
+    assert_grep "Your system prompt already told you this task's memory location; never hardcode a path here." "$brief" \
+      "$id: auto-memory item must point at the system prompt instead of a hardcoded path"
+
+    # The mode's own definition of done must require the checklist before the
+    # close, and the actual done-line template it hands the worker must carry
+    # the checklist outcome so it is checkable from that final line alone.
+    assert_grep "Complete the \`# Project memory\` checklist above" "$brief" \
+      "$id: definition of done does not require the closing checklist"
+    case "$mode" in
+      no-mistakes) expect_done='done: PR {url} checks green - project memory: {both checklist outcomes}' ;;
+      direct-PR) expect_done='done: PR {url} - project memory: {both checklist outcomes}' ;;
+      local-only) expect_done="done: ready in branch fm/$id - project memory: {both checklist outcomes}" ;;
+    esac
+    # shellcheck disable=SC2016  # literal brief text; backticks must stay unexpanded
+    assert_grep "$expect_done" "$brief" \
+      "$id: final done-line template does not carry the closing checklist outcome"
+  done
+  pass "fm-brief.sh: all three ship modes require the closing checklist and fold its outcome into the final done line"
+}
+
+# A scout's deliverable is a report, not AGENTS.md, so it carries only the
+# auto-memory closing item - adapted to "this task uncovered" wording - not
+# the full two-item ship checklist, and its own done line folds in the outcome.
+test_scout_carries_auto_memory_closing_item() {
+  local home id brief
+  home="$TMP_ROOT/scout-closing-memory-home"
+  mkdir -p "$home/data"
+  id="brief-scout-closing-e1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+
+  assert_grep "still belongs in the harness's separate per-repo auto-memory store" "$brief" \
+    "scout brief lost the auto-memory closing item adapted to a report deliverable"
+  assert_grep "Record exactly one memory for it; if this task uncovered none, say so explicitly in your closing status line" "$brief" \
+    "scout auto-memory item lost the record-one-or-say-so requirement"
+  assert_grep "prefer updating an existing memory over adding a new one" "$brief" \
+    "scout auto-memory item lost the prefer-update-over-new-memory rule"
+  assert_grep "one line under 200 characters" "$brief" \
+    "scout auto-memory item lost the one-line/200-character index constraint"
+  assert_grep "Never write secrets, credentials, or captain-private fleet strategy into a memory." "$brief" \
+    "scout auto-memory item lost the secrets/credentials/fleet-strategy exclusion"
+  assert_grep "Your system prompt already told you this task's memory location; never hardcode a path here." "$brief" \
+    "scout auto-memory item must point at the system prompt instead of a hardcoded path"
+
+  # The full two-item ship checklist (AGENTS.md item) must NOT appear on a scout.
+  assert_no_grep "1. Project \`AGENTS.md\`." "$brief" \
+    "scout brief should not carry the ship-only numbered AGENTS.md checklist item"
+
+  # shellcheck disable=SC2016  # literal brief text; backticks must stay unexpanded
+  assert_grep 'done: {one-line conclusion} - project memory: {outcome}' "$brief" \
+    "scout final done-line template does not carry the closing memory-item outcome"
+  pass "fm-brief.sh: scout scaffold carries the auto-memory closing item, adapted to its report deliverable"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -718,6 +814,8 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_ship_modes_require_closing_checklist_in_done
+test_scout_carries_auto_memory_closing_item
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
