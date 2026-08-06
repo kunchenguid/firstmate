@@ -745,7 +745,7 @@ This is deliberately NOT wired as a state source (captain decision 2026-08-04, o
 
 ```sh
 $ LC_ALL=C ps -t pts/18 -o pid=,ppid=,pgid=,tpgid=,comm=,args=
- 564102 1790016 564102 564102 MainThread  /home/agent-runner/.local/share/cursor-agent/versions/2026.07.23-e383d2b/cursor-agent ...
+ 564102 1790016 564102 564102 MainThread  ~/.local/share/cursor-agent/versions/<version>/cursor-agent ...
 $ tmux list-panes -t cursorlab -F '#{pane_current_command}'
 cursor-agent
 ```
@@ -759,7 +759,7 @@ Both now classify as `agent`.
 ```sh
 CURSOR_AGENT=1
 CURSOR_INVOKED_AS=cursor-agent
-CURSOR_CONVERSATION_ID=bc5f0f1a-b8fc-45a4-b2f5-9e14c259c8b2
+CURSOR_CONVERSATION_ID=<conversation-uuid>
 ```
 
 `CLAUDECODE=1` and `CLAUDE_CODE_ENTRYPOINT=cli` leaked from a parent claude process.

@@ -9,10 +9,13 @@
 #
 # This shim (verified against cursor-agent 2026.07.23-e383d2b, 2026-08-05):
 #   1. reads the cursor stop payload from stdin;
-#   2. maps `loop_count > 0` to `stop_hook_active: true` so the shared
-#      guard's existing loop guard applies unchanged (a forced follow-up is
-#      a continuation, exactly like Claude's stop_hook_active / Codex's
-#      stop_hook_active, and must not re-block on every rewake);
+#   2. pins `stop_hook_active: false` for the shared guard so the predicate is
+#      evaluated on EVERY stop, including a forced follow-up turn: the arm is
+#      stop-hook-owned, so a continuation whose own supervision need is real
+#      must re-arm rather than end blind (the Claude --claude-mode lesson,
+#      bin/fm-turnend-guard.sh:41-46). The shim owns the bound instead:
+#      `loop_count` only caps how many consecutive loud failure follow-ups a
+#      single continuation chain may emit (FM_CURSOR_TURNEND_BLOCK_BUDGET);
 #   3. runs bin/fm-turnend-guard.sh with the normalized payload;
 #   4. on exit 2 (a blind turn), foregrounds bin/fm-watch-arm.sh inside the
 #      hook-owned process tree - parked while the watcher arms, never shell
@@ -33,20 +36,22 @@ PAYLOAD=$(cat 2>/dev/null || true)
 
 command -v jq >/dev/null 2>&1 || exit 0
 
-# Normalize the cursor payload for the shared guard: loop_count > 0 means a
-# previous stop-hook follow-up started this turn, which is the cursor spelling
-# of stop_hook_active. Loop_count 0 (or absent) is a first turn end and stays
-# false. A malformed payload passes through unchanged so the guard's own
-# validation decides.
+# loop_count > 0 means a previous stop-hook follow-up started this turn: the
+# cursor spelling of a continuation. It bounds the loud failure follow-up only;
+# the shared guard always sees stop_hook_active false so a continuation with a
+# real supervision need still re-arms. A malformed payload passes through
+# unchanged so the guard's own validation decides.
+LOOP_COUNT=$(printf '%s' "$PAYLOAD" | jq -r '
+  if type == "object" and (.loop_count | type) == "number" and .loop_count > 0
+  then (.loop_count | floor) else 0 end
+' 2>/dev/null) || LOOP_COUNT=0
+case "$LOOP_COUNT" in ''|*[!0-9]*) LOOP_COUNT=0 ;; esac
+
+BLOCK_BUDGET=${FM_CURSOR_TURNEND_BLOCK_BUDGET:-3}
+case "$BLOCK_BUDGET" in ''|*[!0-9]*|0) BLOCK_BUDGET=3 ;; esac
+
 NORMALIZED=$(printf '%s' "$PAYLOAD" | jq -c '
-  if type != "object" then .
-  else
-    if ((.loop_count | type) == "number" and .loop_count > 0) then
-      . + {stop_hook_active: true}
-    else
-      .
-    end
-  end
+  if type != "object" then . else . + {stop_hook_active: false} end
 ' 2>/dev/null) || NORMALIZED=$PAYLOAD
 
 ROOT=${CURSOR_WORKSPACE_ROOT:-${CURSOR_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-}}}
@@ -86,6 +91,11 @@ fi
 printf '%s' "$NORMALIZED" | "$ROOT/bin/fm-turnend-guard.sh" 2>"$ERR"
 RC=$?
 [ "$RC" -eq 2 ] || { printf '{}\n'; exit 0; }
+
+if [ "$ARM_ACTIONABLE" -eq 0 ] && [ "$LOOP_COUNT" -ge "$BLOCK_BUDGET" ]; then
+  printf '{}\n'
+  exit 0
+fi
 
 if [ "$ARM_ACTIONABLE" -eq 1 ]; then
   REASON='firstmate watcher wake - one supervision event needs a handling turn now. Run bin/fm-wake-drain.sh first and handle the wake. Stop-hook-owned continuity re-arms the next needed cycle automatically; do not manually arm the watcher.'

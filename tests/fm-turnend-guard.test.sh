@@ -849,9 +849,10 @@ test_tracked_claude_entries_inert_under_grok() {
 # --- HOOK: bin/fm-turnend-guard-cursor.sh -----------------------------------
 # Cursor's stop hook does not honour exit 2 as a forced continuation, so the
 # shim translates the shared guard's blind-turn signal into a followup_message
-# body. loop_count > 0 maps to stop_hook_active so the shared loop guard
-# applies unchanged. A typed actionable arm close gets a normal wake followup;
-# an arm failure keeps the loud blind banner. Verified against cursor-agent
+# body. Every stop is evaluated, including a loop_count>0 continuation, so a
+# follow-up turn that ends blind re-arms; loop_count only bounds consecutive
+# loud arm-failure followups. A typed actionable arm close gets a normal wake
+# followup; an arm failure keeps the loud blind banner. Verified against cursor-agent
 # 2026.07.23-e383d2b.
 
 # The shim runs bin/fm-watch-arm.sh inside the fixture. These stubs stand in
@@ -973,19 +974,60 @@ test_cursor_shim_allows_when_healthy() {
   pass "fm-turnend-guard-cursor: emits {} without arming when the shared guard allows the stop"
 }
 
-test_cursor_shim_loop_count_maps_to_stop_hook_active() {
-  local dir out status
-  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-loop")
-  install_failing_arm_stub "$dir"
-  # A forced-follow-up turn (loop_count>0) must be treated as a continuation:
-  # the shared guard's loop guard sees stop_hook_active=true and allows the
-  # stop even with no watcher, exactly like Claude/Codex rewakes.
+test_cursor_shim_rearms_on_loop_count_continuation() {
+  local dir out status pid
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-loop-rearm")
+  : > "$dir/state/task1.meta"
+  install_succeeding_arm_stub "$dir"
+  # The wake follow-up turn ends with loop_count>0 and no live watcher: the
+  # stop-hook-owned arm must run again, otherwise the primary sits blind until
+  # some later turn happens to end with loop_count 0.
   out=$(printf '{"session_id":"cur-session","loop_count":1,"workspace_roots":["%s"]}' "$dir" \
     | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>&1); status=$?
-  expect_code 0 "$status" "cursor shim must allow a loop-count continuation"
-  [ "$out" = '{}' ] || fail "cursor shim must not re-block a loop-count continuation, got: $out"
-  [ ! -e "$dir/state/.arm-invocations" ] || fail "cursor shim must not arm on a loop-count continuation"
-  pass "fm-turnend-guard-cursor: loop_count>0 maps to stop_hook_active so continuations are not re-blocked"
+  pid=$(cat "$dir/state/.watch.lock/pid" 2>/dev/null || true)
+  kill "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "cursor shim must exit 0 on a loop-count continuation"
+  [ "$out" = '{}' ] || fail "cursor shim must emit {} once the continuation arm succeeded, got: $out"
+  grep -q '^arm-invoked$' "$dir/state/.arm-invocations" 2>/dev/null \
+    || fail "cursor shim must re-arm on a blind loop-count continuation"
+  pass "fm-turnend-guard-cursor: a blind loop-count continuation re-arms the stop-hook-owned watcher"
+}
+
+test_cursor_shim_wakes_after_actionable_arm_on_continuation() {
+  local dir out json status
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-loop-actionable")
+  : > "$dir/state/task1.meta"
+  install_actionable_arm_stub "$dir"
+  out=$(printf '{"session_id":"cur-session","loop_count":1,"workspace_roots":["%s"]}' "$dir" \
+    | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>&1); status=$?
+  json=$(printf '%s\n' "$out" | tail -n 1)
+  expect_code 0 "$status" "cursor shim must exit 0 after an actionable continuation arm close"
+  assert_contains "$json" "firstmate watcher wake" \
+    "a continuation whose arm closes actionable must still get the normal wake followup"
+  assert_not_contains "$json" "TURN WOULD END BLIND" \
+    "continuation wake must not reuse the blind-turn banner"
+  assert_not_contains "$json" "bin/fm-watch-arm.sh" \
+    "continuation wake must not suggest manual watcher arming"
+  pass "fm-turnend-guard-cursor: continuation wakes keep the drain-and-handle followup"
+}
+
+test_cursor_shim_bounds_loud_failure_followups() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-loop-budget")
+  : > "$dir/state/task1.meta"
+  install_failing_arm_stub "$dir"
+  # Under budget the loud registration guidance still fires on a continuation.
+  out=$(printf '{"session_id":"cur-session","loop_count":1,"workspace_roots":["%s"]}' "$dir" \
+    | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>&1); status=$?
+  expect_code 0 "$status" "cursor shim must exit 0 on an under-budget failing continuation"
+  assert_contains "$(printf '%s\n' "$out" | tail -n 1)" "TURN WOULD END BLIND" \
+    "an under-budget failing continuation must keep the loud failure followup"
+  # At the budget the chain ends instead of looping forever on a broken arm.
+  out=$(printf '{"session_id":"cur-session","loop_count":3,"workspace_roots":["%s"]}' "$dir" \
+    | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>/dev/null); status=$?
+  expect_code 0 "$status" "cursor shim must exit 0 at the failure budget"
+  [ "$out" = '{}' ] || fail "cursor shim must stop re-blocking at the failure budget, got: $out"
+  pass "fm-turnend-guard-cursor: loud arm-failure followups are bounded by FM_CURSOR_TURNEND_BLOCK_BUDGET"
 }
 
 test_cursor_shim_arm_sources_x_mode_cadence() {
@@ -1867,7 +1909,9 @@ test_cursor_shim_emits_followup_on_block
 test_cursor_shim_wakes_after_actionable_arm
 test_cursor_shim_arms_then_allows
 test_cursor_shim_allows_when_healthy
-test_cursor_shim_loop_count_maps_to_stop_hook_active
+test_cursor_shim_rearms_on_loop_count_continuation
+test_cursor_shim_wakes_after_actionable_arm_on_continuation
+test_cursor_shim_bounds_loud_failure_followups
 test_cursor_shim_arm_sources_x_mode_cadence
 test_cursor_shim_arm_defaults_cadence_without_x_mode
 test_cursor_shim_missing_payload_allows
