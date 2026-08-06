@@ -20,12 +20,12 @@ When this session owns supervision and away mode is not active:
 6. The durable wake queue preserves actionable events between a wake and the next stop-launched arm, while the bounded turn-end guard prevents a blind stop when recovery did not start.
    The `preToolUse` hook (matcher `Shell`) denies watcher-arm anti-patterns through `bin/fm-arm-pretool-check.sh --cursor`.
 7. The turn-end guard (`bin/fm-turnend-guard.sh`, via the cursor shim) remains the final backstop.
-   The shim maps cursor's `loop_count > 0` to `stop_hook_active: true`, so the shared loop guard treats every forced follow-up as a continuation and does not re-block on every rewake.
-   On an initial blind turn the shim foregrounds the arm and classifies its typed actionable reason lines.
+   The shim evaluates the shared predicate on every stop, including a forced follow-up turn (`loop_count > 0`): the arm is stop-hook-owned, so a wake follow-up that itself ends blind re-arms instead of leaving the primary unsupervised until some later turn ends with `loop_count 0`.
+   On any blind turn the shim foregrounds the arm and classifies its typed actionable reason lines.
    If the arm closes with `signal:`, `stale:`, `check:`, or `heartbeat` while supervision is still needed, the shim emits a normal wake follow-up that tells you to drain and handle the wake.
    If the arm fails or closes without a typed actionable reason, the shim emits the loud guard banner so hook registration and startup remain diagnosable.
    If the need vanishes or a healthy watcher remains, the shim emits `{}`.
-   The `loop_limit: null` registration leaves the continuation budget to the shared guard's own bounded progression.
+   The `loop_limit: null` registration leaves the continuation budget to the shim: `loop_count` bounds only consecutive loud arm-failure follow-ups (`FM_CURSOR_TURNEND_BLOCK_BUDGET`, default 3), after which the turn ends rather than looping on a broken arm.
 8. Waiting on the hook-owned cycle is silent: do not send idle progress while the watcher is parked.
 9. Captain input while the stop hook is parked is buffered, not delivered (verified 2026-08-05): text typed with Enter during a parked stop hook sits unsubmitted in the composer until the forced follow-up turn completes, then needs a second Enter to submit.
    Nothing is lost or cleared - the draft survives the parked window and the follow-up turn.
