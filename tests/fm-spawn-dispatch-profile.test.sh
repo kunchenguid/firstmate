@@ -580,6 +580,17 @@ test_remaining_dispatchers_are_refused() {
     "setpriv|setpriv --no-new-privs claude --dangerously-skip-permissions"
     "prlimit|prlimit --nofile=1024:1024 claude --dangerously-skip-permissions"
     "unshare|unshare claude --dangerously-skip-permissions"
+    "taskset|taskset -c 0 claude --dangerously-skip-permissions"
+    "nsenter|nsenter claude --dangerously-skip-permissions"
+    "numactl|numactl --localalloc claude --dangerously-skip-permissions"
+    "setarch|setarch x86_64 claude --dangerously-skip-permissions"
+    "linux32|linux32 claude --dangerously-skip-permissions"
+    "linux64|linux64 claude --dangerously-skip-permissions"
+    "chroot|chroot / claude --dangerously-skip-permissions"
+    "runuser|runuser -u root -- claude --dangerously-skip-permissions"
+    "su|su root -c 'claude --dangerously-skip-permissions'"
+    "sg|sg root -c 'claude --dangerously-skip-permissions'"
+    "start-stop-daemon|start-stop-daemon --start --exec claude -- --dangerously-skip-permissions"
   )
 
   for spec in "${cases[@]}"; do
