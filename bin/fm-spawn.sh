@@ -373,8 +373,12 @@ raw_launch_preflight() {
       ;;
   esac
   base=${normalized##*/}
+  if fm_backend_is_recognized_shell "$base"; then
+    raw_launch_refuse
+    return 1
+  fi
   case "$base" in
-    claude|env|command|exec|builtin|eval|source|.|coproc|noglob|nocorrect|-|sh|bash|dash|zsh|ksh|fish|nohup|nice|ionice|chrt|setsid|stdbuf|timeout|time|sudo|doas|script|watch|xargs|find|busybox|toybox)
+    claude|env|command|exec|builtin|eval|source|.|coproc|noglob|nocorrect|-|nohup|nice|ionice|chrt|setsid|stdbuf|timeout|time|sudo|doas|script|watch|strace|xargs|find|busybox|toybox)
       raw_launch_refuse
       return 1
       ;;

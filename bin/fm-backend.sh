@@ -68,6 +68,7 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
 FM_BACKEND_KNOWN="tmux herdr zellij orca cmux"
 FM_BACKEND_SPAWN="tmux herdr zellij orca cmux"
+FM_BACKEND_RECOGNIZED_SHELLS="zsh bash sh dash ash ksh mksh tcsh csh fish"
 
 # fm_backend_list_contains: whitespace-delimited membership without relying on
 # shell word splitting. fm-backend.sh is normally sourced by bash scripts, but
@@ -85,6 +86,10 @@ fm_backend_list_contains() {  # <list> <name>
 
 fm_backend_is_known() {  # <name>
   fm_backend_list_contains "$FM_BACKEND_KNOWN" "$1"
+}
+
+fm_backend_is_recognized_shell() {  # <name>
+  fm_backend_list_contains "$FM_BACKEND_RECOGNIZED_SHELLS" "$1"
 }
 
 # fm_backend_detect: detect the runtime firstmate itself is CURRENTLY executing

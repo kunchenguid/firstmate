@@ -568,6 +568,11 @@ test_remaining_dispatchers_are_refused() {
     "dash-precommand|- claude --dangerously-skip-permissions"
     "script|script -c 'claude --dangerously-skip-permissions'"
     "watch|watch claude --dangerously-skip-permissions"
+    "ash|ash -c 'claude --dangerously-skip-permissions'"
+    "mksh|mksh -c 'claude --dangerously-skip-permissions'"
+    "csh|csh -c 'claude --dangerously-skip-permissions'"
+    "tcsh|tcsh -c 'claude --dangerously-skip-permissions'"
+    "strace|strace claude --dangerously-skip-permissions"
   )
 
   for spec in "${cases[@]}"; do
