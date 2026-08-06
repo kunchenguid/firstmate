@@ -84,6 +84,25 @@ fm_send_id_from_meta() {  # <meta-file>
   printf '%s' "${base%.meta}"
 }
 
+# fm_send_clear_after_interrupt: muse RESTORES the interrupted prompt back into
+# the composer when Escape cancels a turn, as real bright text (verified: fg
+# 38;2;204;211;219, luminance ~210, muse 0.1.0-R708.1), not de-emphasised ghost
+# text. Classifying that as pending input is correct - the text really is
+# unsubmitted - but leaving it there means the NEXT steer types onto the end of
+# it and submits both as one garbled message. Ctrl-U clears the composer
+# (verified), so the interrupt is not complete until it has been sent. A failed
+# clear is loud rather than silent, because the alternative is a corrupted steer.
+fm_send_clear_after_interrupt() {  # <key>
+  local key=$1
+  [ "$key" = Escape ] || return 0
+  case "$TARGET_HARNESS" in muse*) : ;; *) return 0 ;; esac
+  [ "$TARGET_BACKEND" != remote ] || return 0
+  if ! fm_backend_send_key "$TARGET_BACKEND" "$T" C-u "$EXPECTED_LABEL"; then
+    echo "error: Escape reached $T, but the muse composer could not be cleared; it still holds the restored prompt. Clear it before sending the next message." >&2
+    return 1
+  fi
+}
+
 fm_send_record_interrupt() {  # <key>
   local key=$1 id gen
   [ "$key" = Escape ] || return 0
@@ -269,6 +288,7 @@ if [ "${1:-}" = "--key" ]; then
     echo "error: key '$2' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
   fi
+  fm_send_clear_after_interrupt "$2" || exit 1
   fm_send_record_interrupt "$2" || exit 1
 else
   MESSAGE=$*
