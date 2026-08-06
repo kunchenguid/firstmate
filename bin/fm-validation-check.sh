@@ -66,7 +66,8 @@ cleanup() {
   [ -z "${TMP:-}" ] || rm -f -- "$TMP"
   [ "$CHECK_SLOT_HELD" -ne 1 ] || fm_custom_check_slot_release
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"

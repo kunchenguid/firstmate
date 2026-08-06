@@ -11,6 +11,8 @@ set -u
 
 ARM="$ROOT/bin/fm-validation-check.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
+REGISTER="$ROOT/bin/fm-check-register.sh"
+MIGRATE="$ROOT/bin/fm-pr-check-migrate.sh"
 CHECKPOINT="$ROOT/bin/fm-watch-checkpoint.sh"
 POLL="$ROOT/bin/fm-pr-poll.sh"
 TMP_ROOT=$(fm_test_tmproot fm-validation-check)
@@ -323,6 +325,39 @@ test_pr_publication_wins_over_an_inflight_validation_arm() {
   pass "concurrent hand-off preserves PR merge poll priority"
 }
 
+test_custom_registration_and_migration_preserve_pr_poll_priority() {
+  local dir state out
+  dir=$(make_case custom-registration-priority)
+  state="$dir/home/state"
+  run_arm "$dir" >/dev/null || fail "could not arm validation check before PR hand-off"
+  FM_TEST_REAL_MV="$REAL_MV" FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    PATH="$dir/fakebin:$BASE_PATH" "$PR_CHECK" task-a https://github.com/example/repo/pull/9 >/dev/null \
+    || fail "could not arm PR merge poll before custom registration attempt"
+
+  printf '#!/usr/bin/env bash\nprintf "%s\\n" custom-ran\n' > "$state/task-a.check.sh"
+  chmod 0700 "$state/task-a.check.sh"
+  out=$(FM_TEST_REAL_MV="$REAL_MV" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    PATH="$dir/fakebin:$BASE_PATH" "$REGISTER" task-a) \
+    || fail "custom registration did not preserve the recorded PR poll"
+  assert_contains "$out" 'reserved for PR merge polling' \
+    "custom registration did not disclose PR poll precedence"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "custom registration displaced the recorded PR merge poll"
+
+  printf '#!/usr/bin/env bash\nprintf "%s\\n" custom-ran\n' > "$state/task-a.check.sh"
+  chmod 0700 "$state/task-a.check.sh"
+  fm_custom_check_register_source "$state" task-a "$state/task-a.check.sh" \
+    || fail "could not construct the legacy registered-custom fixture"
+  fm_custom_check_registered "$state" task-a \
+    || fail "legacy registered-custom fixture was not authenticated"
+  FM_TEST_REAL_MV="$REAL_MV" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" --checks-safe >/dev/null \
+    || fail "migration did not recover PR poll priority from a registered custom source"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "migration preserved a registered custom source over the recorded PR poll"
+  pass "custom registration and migration preserve PR merge poll priority"
+}
+
 test_arms_a_private_registered_check_and_stays_quiet_when_healthy
 test_wakes_only_for_terminal_or_over_age_parked_runs
 test_ignores_runs_not_owned_by_the_task_worktree
@@ -331,3 +366,4 @@ test_fails_silent_when_a_local_status_read_is_unavailable_or_unparseable
 test_watcher_does_not_execute_an_unregistered_validation_check
 test_pr_merge_poll_replaces_and_outprioritizes_validation_poll
 test_pr_publication_wins_over_an_inflight_validation_arm
+test_custom_registration_and_migration_preserve_pr_poll_priority

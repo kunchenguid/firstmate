@@ -16,6 +16,10 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-check-lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
@@ -238,6 +242,38 @@ test_promote_requires_and_records_the_delivery_contract() {
   pass "fm-promote: promotion requires the delivery contract and records it exactly once"
 }
 
+test_promote_no_mistakes_arms_or_rolls_back_the_validation_gate() {
+  local home meta out status failed_home failed_meta failed_root
+  home="$TMP_ROOT/promote-validation/home"
+  mkdir -p "$home/state" "$home/wt"
+  meta="$home/state/promote-validation.meta"
+  printf 'window=fm-promote-validation\nkind=scout\nworktree=%s\n' "$home/wt" > "$meta"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-validation --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "no-mistakes promotion should arm its validation check"
+  assert_grep 'kind=ship' "$meta" "no-mistakes promotion did not record ship kind"
+  assert_grep 'mode=no-mistakes' "$meta" "no-mistakes promotion did not record its mode"
+  fm_custom_check_registered "$home/state" promote-validation \
+    || fail "no-mistakes promotion did not register a validation check"
+  assert_contains "$out" 'promoted promote-validation to ship mode=no-mistakes' \
+    "no-mistakes promotion did not report its lifecycle transition"
+
+  failed_home="$TMP_ROOT/promote-validation-failure/home"
+  failed_root="$TMP_ROOT/promote-validation-failure/root"
+  mkdir -p "$failed_home/state" "$failed_home/wt" "$failed_root/bin"
+  failed_meta="$failed_home/state/promote-validation-failure.meta"
+  printf 'window=fm-promote-validation-failure\nkind=scout\nworktree=%s\n' "$failed_home/wt" > "$failed_meta"
+  out=$(FM_ROOT_OVERRIDE="$failed_root" FM_HOME="$failed_home" FM_STATE_OVERRIDE="$failed_home/state" \
+    "$PROMOTE" promote-validation-failure --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion with no validation armer should fail"
+  assert_grep 'kind=scout' "$failed_meta" "failed promotion left an unarmed no-mistakes ship"
+  assert_absent "$failed_home/state/promote-validation-failure.check.sh" \
+    "failed promotion left a validation check behind"
+  pass "fm-promote: no-mistakes promotions arm validation or roll back"
+}
+
 # The registry parser survives for the mechanical consumers only. It accepts the
 # conditional policy, maps it to its most rigorous leg for them, and exposes the
 # raw annotation for the one caller that must tell a policy from a flat mode.
@@ -278,5 +314,6 @@ test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
+test_promote_no_mistakes_arms_or_rolls_back_the_validation_gate
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"

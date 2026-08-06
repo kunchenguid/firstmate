@@ -40,6 +40,26 @@ fi
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
 
+MIGRATION_PROVIDER=
+MIGRATION_URL=
+MIGRATION_HOST=
+MIGRATION_PATH=
+MIGRATION_NUMBER=
+metadata_pr_is_canonical() {
+  local meta=$1
+  MIGRATION_PROVIDER=
+  MIGRATION_URL=
+  MIGRATION_HOST=
+  MIGRATION_PATH=
+  MIGRATION_NUMBER=
+  fm_pr_metadata_identity_parse "$meta" || return 1
+  MIGRATION_PROVIDER=$FM_PR_META_PROVIDER
+  MIGRATION_URL=$FM_PR_META_URL
+  MIGRATION_HOST=$FM_PR_META_HOST
+  MIGRATION_PATH=$FM_PR_META_PATH
+  MIGRATION_NUMBER=$FM_PR_META_NUMBER
+}
+
 umask 077
 if [ ! -e "$STATE" ] && [ ! -L "$STATE" ]; then
   mkdir -p "$STATE" || {
@@ -85,6 +105,10 @@ current_checks_authenticated() {
       continue
     fi
     id=$(basename "$check" .check.sh)
+    if fm_pr_task_id_valid "$id" && metadata_pr_is_canonical "$STATE/$id.meta"; then
+      fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" || return 1
+      continue
+    fi
     fm_custom_check_registered "$STATE" "$id" && continue
     fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" || return 1
   done
@@ -379,6 +403,10 @@ migration_needed() {
       continue
     fi
     id=$(basename "$check" .check.sh)
+    if fm_pr_task_id_valid "$id" && metadata_pr_is_canonical "$STATE/$id.meta"; then
+      fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" || return 0
+      continue
+    fi
     fm_custom_check_registered "$STATE" "$id" && continue
     if ! fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE"; then
       return 0
@@ -396,6 +424,10 @@ unsafe_checks_absent() {
       continue
     fi
     id=$(basename "$check" .check.sh)
+    if fm_pr_task_id_valid "$id" && metadata_pr_is_canonical "$STATE/$id.meta"; then
+      fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" || return 1
+      continue
+    fi
     fm_custom_check_registered "$STATE" "$id" && continue
     fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" || return 1
   done
@@ -491,26 +523,6 @@ quarantine_tree_repair_and_validate() {
     [ "$(fm_pr_file_link_count "$artifact")" = 1 ] || return 1
   done
   quarantine_dir_valid
-}
-
-MIGRATION_PROVIDER=
-MIGRATION_URL=
-MIGRATION_HOST=
-MIGRATION_PATH=
-MIGRATION_NUMBER=
-metadata_pr_is_canonical() {
-  local meta=$1
-  MIGRATION_PROVIDER=
-  MIGRATION_URL=
-  MIGRATION_HOST=
-  MIGRATION_PATH=
-  MIGRATION_NUMBER=
-  fm_pr_metadata_identity_parse "$meta" || return 1
-  MIGRATION_PROVIDER=$FM_PR_META_PROVIDER
-  MIGRATION_URL=$FM_PR_META_URL
-  MIGRATION_HOST=$FM_PR_META_HOST
-  MIGRATION_PATH=$FM_PR_META_PATH
-  MIGRATION_NUMBER=$FM_PR_META_NUMBER
 }
 
 quarantine_artifact() {
@@ -1028,8 +1040,12 @@ if migration_needed; then
       continue
     fi
     id=$(basename "$check" .check.sh)
-    fm_custom_check_registered "$STATE" "$id" && continue
-    fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" && continue
+    if fm_pr_task_id_valid "$id" && metadata_pr_is_canonical "$STATE/$id.meta"; then
+      fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" && continue
+    else
+      fm_custom_check_registered "$STATE" "$id" && continue
+      fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" && continue
+    fi
 
     if fm_pr_task_id_valid "$id"; then
       prefix=$id

@@ -82,6 +82,21 @@ fm_custom_check_slot_release() {
   FM_CUSTOM_CHECK_SLOT_LOCK=
 }
 
+fm_custom_check_slot_held() {
+  local state=$1 id=$2 lock owner pid
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  declare -F fm_lock_link_owner >/dev/null 2>&1 || return 1
+  declare -F fm_lock_points_to_owner >/dev/null 2>&1 || return 1
+  declare -F fm_pid_alive >/dev/null 2>&1 || return 1
+  lock="$state/.$id.check-slot.lock"
+  [ -L "$lock" ] || return 1
+  owner=$(fm_lock_link_owner "$lock") || return 1
+  fm_lock_points_to_owner "$lock" "$owner" || return 1
+  pid=$(cat "$owner/pid" 2>/dev/null || true)
+  fm_pid_alive "$pid"
+}
+
 fm_custom_check_registered() {
   local state=$1 id=$2 check hash state_device
   check="$state/$id.check.sh"
