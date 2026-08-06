@@ -1058,12 +1058,29 @@ test_presentation_running_server_release_is_load_bearing() {
   assert_contains "$(cat "$stderr")" "server version $BELOW_FLOOR_VERSION" \
     "the floor warning must name the selected running server release"
 
-  fb=$(make_release_fakebin "$dir/new-server" "$BELOW_FLOOR_PROTOCOL" "$BELOW_FLOOR_VERSION" \
+  fb=$(make_release_fakebin "$dir/new-server" "$AT_FLOOR_PROTOCOL" "$AT_FLOOR_VERSION" \
     true "$AT_FLOOR_PROTOCOL" "$AT_FLOOR_VERSION")
   verdict=$(presentation_enabled_verdict "$config" "$fb" "" current-session 2>"$stderr")
   [ "$verdict" = on ] \
-    || fail "a supported running server must carry the floor despite an older client, got '$verdict'"
-  [ ! -s "$stderr" ] || fail "a supported running server must not warn: $(cat "$stderr")"
+    || fail "an at-floor client and running server must project, got '$verdict'"
+  [ ! -s "$stderr" ] || fail "an at-floor client and running server must not warn: $(cat "$stderr")"
+
+  fb=$(make_release_fakebin "$dir/old-client" "$BELOW_FLOOR_PROTOCOL" "$BELOW_FLOOR_VERSION" \
+    true "$AT_FLOOR_PROTOCOL" "$AT_FLOOR_VERSION")
+  verdict=$(presentation_enabled_verdict "$config" "$fb" "" current-session 2>"$stderr")
+  [ "$verdict" = off ] \
+    || fail "a below-floor client must conservatively block projection despite an at-floor server, got '$verdict'"
+  assert_contains "$(cat "$stderr")" "$BELOW_FLOOR_VERSION" \
+    "the conservative client/server warning must name the below-floor client"
+
+  printf 'on\n' > "$config/herdr-presentation-spaces"
+  fb=$(make_release_fakebin "$dir/opt-in-old-server" "$AT_FLOOR_PROTOCOL" "$AT_FLOOR_VERSION" \
+    true "$BELOW_FLOOR_PROTOCOL" "$BELOW_FLOOR_VERSION")
+  verdict=$(presentation_enabled_verdict "$config" "$fb" "" stale-session 2>"$stderr")
+  [ "$verdict" = on ] \
+    || fail "an explicit opt-in must survive a below-floor running server, got '$verdict'"
+  [ ! -s "$stderr" ] || fail "an explicit opt-in below the server floor must not warn: $(cat "$stderr")"
+  unlink "$config/herdr-presentation-spaces"
 
   fb=$(make_release_fakebin "$dir/unknown-server" "$AT_FLOOR_PROTOCOL" "$AT_FLOOR_VERSION" unknown)
   verdict=$(presentation_enabled_verdict "$config" "$fb" "" unknown-session 2>"$stderr")
@@ -1071,7 +1088,7 @@ test_presentation_running_server_release_is_load_bearing() {
     || fail "an unreadable selected-session server state must fail flat instead of substituting the client, got '$verdict'"
   assert_contains "$(cat "$stderr")" "could not be read" \
     "an unreadable selected-session server state must warn"
-  pass "herdr presentation: the selected running server release is load-bearing"
+  pass "herdr presentation: client and selected server floors compose conservatively without overriding explicit opt-in"
 }
 
 # The floor classifier is pure, so these cases pin it against every release

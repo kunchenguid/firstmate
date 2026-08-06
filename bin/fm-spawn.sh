@@ -1577,6 +1577,9 @@ case "$BACKEND" in
         # live named-session socket before journal publication.
         if ! fm_backend_herdr_server_ensure "$HERDR_SES"; then
           echo "warning: herdr presentation could not ensure its session server; using the ordinary flat layout without projection" >&2
+        elif [ "${FM_BACKEND_HERDR_PRESENTATION_PREFERENCE:-default}" = default ] \
+          && ! fm_backend_herdr_presentation_default_supported "$STATE" "$HERDR_SES"; then
+          :
         elif spawn_herdr_presentation_order_lock_acquire "$HERDR_SES"; then
           # The projected child is placed and bound UNDER this launcher's exact
           # parent workspace. Its own herdr pane identity names that workspace

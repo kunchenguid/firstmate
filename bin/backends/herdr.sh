@@ -220,20 +220,25 @@ fm_backend_herdr_release_floor_verdict() {  # <protocol> <version>
 }
 
 # fm_backend_herdr_presentation_release_supported: run the floor classifier
-# against the selected session's running server when one exists, or against the
-# installed client only when status positively reports that no server is
-# running and that client will start it. Same return codes as
+# against the installed client and, when one exists, the selected session's
+# running server. A running server and client compose conservatively: both must
+# be supported. When status positively reports no running server, only the
+# client that will start it is applicable. Same return codes as
 # fm_backend_herdr_release_floor_verdict, and sets
 # FM_BACKEND_HERDR_PRESENTATION_RELEASE to the identifier a caller's warning
 # names. An unreadable server-running state is indeterminate rather than
 # permission to substitute the client release.
-fm_backend_herdr_presentation_release_supported() {
-  local session status running protocol version
+fm_backend_herdr_presentation_release_supported() {  # [<session>]
+  local session=${1:-} status running client_protocol client_version client_verdict=0
+  local server_protocol server_version server_verdict=0
   FM_BACKEND_HERDR_PRESENTATION_RELEASE="an unreadable release"
   command -v herdr >/dev/null 2>&1 || return 2
   command -v jq >/dev/null 2>&1 || return 2
-  session=$(fm_backend_herdr_session)
+  [ -n "$session" ] || session=$(fm_backend_herdr_session)
   status=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null) || return 2
+  client_protocol=$(printf '%s' "$status" | jq -r '.client.protocol // empty' 2>/dev/null) || return 2
+  client_version=$(printf '%s' "$status" | jq -r '.client.version // empty' 2>/dev/null) || return 2
+  fm_backend_herdr_release_floor_verdict "$client_protocol" "$client_version" || client_verdict=$?
   running=$(printf '%s' "$status" | jq -r '
     if .server.running == true then "true"
     elif .server.running == false then "false"
@@ -242,18 +247,33 @@ fm_backend_herdr_presentation_release_supported() {
   ' 2>/dev/null) || return 2
   case "$running" in
     true)
-      protocol=$(printf '%s' "$status" | jq -r '.server.protocol // empty' 2>/dev/null)
-      version=$(printf '%s' "$status" | jq -r '.server.version // empty' 2>/dev/null)
-      FM_BACKEND_HERDR_PRESENTATION_RELEASE="server version ${version:-unknown} (protocol ${protocol:-unknown})"
+      server_protocol=$(printf '%s' "$status" | jq -r '.server.protocol // empty' 2>/dev/null) || return 2
+      server_version=$(printf '%s' "$status" | jq -r '.server.version // empty' 2>/dev/null) || return 2
+      fm_backend_herdr_release_floor_verdict "$server_protocol" "$server_version" || server_verdict=$?
+      if [ "$server_verdict" -eq 1 ]; then
+        FM_BACKEND_HERDR_PRESENTATION_RELEASE="server version ${server_version:-unknown} (protocol ${server_protocol:-unknown})"
+        return 1
+      fi
+      if [ "$client_verdict" -eq 1 ]; then
+        FM_BACKEND_HERDR_PRESENTATION_RELEASE="version ${client_version:-unknown} (protocol ${client_protocol:-unknown})"
+        return 1
+      fi
+      if [ "$server_verdict" -ne 0 ]; then
+        FM_BACKEND_HERDR_PRESENTATION_RELEASE="server version ${server_version:-unknown} (protocol ${server_protocol:-unknown})"
+        return 2
+      fi
+      if [ "$client_verdict" -ne 0 ]; then
+        FM_BACKEND_HERDR_PRESENTATION_RELEASE="version ${client_version:-unknown} (protocol ${client_protocol:-unknown})"
+        return 2
+      fi
+      return 0
       ;;
     false)
-      protocol=$(printf '%s' "$status" | jq -r '.client.protocol // empty' 2>/dev/null)
-      version=$(printf '%s' "$status" | jq -r '.client.version // empty' 2>/dev/null)
-      FM_BACKEND_HERDR_PRESENTATION_RELEASE="version ${version:-unknown} (protocol ${protocol:-unknown})"
+      FM_BACKEND_HERDR_PRESENTATION_RELEASE="version ${client_version:-unknown} (protocol ${client_protocol:-unknown})"
+      return "$client_verdict"
       ;;
     *) return 2 ;;
   esac
-  fm_backend_herdr_release_floor_verdict "$protocol" "$version"
 }
 
 # fm_backend_herdr_presentation_floor_warn <state-dir> <verdict>: emit the one
@@ -285,23 +305,34 @@ fm_backend_herdr_presentation_floor_warn() {  # <state-dir> <verdict>
   return 0
 }
 
+# fm_backend_herdr_presentation_default_supported <state-dir> [<session>]:
+# compose the applicable release verdict and the shared warning contract for
+# one unconfigured home.
+fm_backend_herdr_presentation_default_supported() {  # <state-dir> [<session>]
+  local state_dir=${1:-} session=${2:-} verdict=0
+  fm_backend_herdr_presentation_release_supported "$session" || verdict=$?
+  [ "$verdict" -eq 0 ] && return 0
+  fm_backend_herdr_presentation_floor_warn "$state_dir" "$verdict"
+  return 1
+}
+
 # fm_backend_herdr_presentation_enabled <config-dir> [<state-dir>]: the one gate
 # bin/fm-spawn.sh consults before projecting this home's children into
 # disposable one-task workspaces (docs/herdr-backend.md "Presentation spaces"
 # owns the full contract). An explicit "off" or "on" is obeyed as written; a
 # home that configured nothing is projected only at or above the version floor,
-# and otherwise falls back to the flat layout with one warning.
+# and otherwise falls back to the flat layout with one warning. Sets
+# FM_BACKEND_HERDR_PRESENTATION_PREFERENCE for the new-projection boundary to
+# distinguish an unconfigured default from an explicit opt-in.
 fm_backend_herdr_presentation_enabled() {  # <config-dir> [<state-dir>]
-  local config_dir=${1:-} state_dir=${2:-} preference verdict=0
+  local config_dir=${1:-} state_dir=${2:-} preference
   preference=$(fm_backend_herdr_presentation_preference "$config_dir")
+  FM_BACKEND_HERDR_PRESENTATION_PREFERENCE=$preference
   case "$preference" in
     off) return 1 ;;
     on) return 0 ;;
   esac
-  fm_backend_herdr_presentation_release_supported || verdict=$?
-  [ "$verdict" -eq 0 ] && return 0
-  fm_backend_herdr_presentation_floor_warn "$state_dir" "$verdict"
-  return 1
+  fm_backend_herdr_presentation_default_supported "$state_dir"
 }
 
 # fm_backend_herdr_workspace_label: the per-firstmate-HOME herdr workspace
