@@ -982,7 +982,7 @@ test_cursor_shim_rearms_on_loop_count_continuation() {
   # The wake follow-up turn ends with loop_count>0 and no live watcher: the
   # stop-hook-owned arm must run again, otherwise the primary sits blind until
   # some later turn happens to end with loop_count 0.
-  out=$(printf '{"session_id":"cur-session","loop_count":1,"workspace_roots":["%s"]}' "$dir" \
+  out=$(printf '{"session_id":"cur-session","loop_count":1,"stopHookActive":true,"workspace_roots":["%s"]}' "$dir" \
     | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>&1); status=$?
   pid=$(cat "$dir/state/.watch.lock/pid" 2>/dev/null || true)
   kill "$pid" 2>/dev/null || true
@@ -1064,6 +1064,18 @@ install_dynamic_stale_arm_stub() {
 printf 'arm-invoked\n' >> "$dir/state/.arm-invocations"
 n=\$(wc -l < "$dir/state/.arm-invocations")
 printf 'stale: task-window (idle %ss, escalation %s)\n' "\$n" "\$n"
+exit 0
+EOF
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+}
+
+install_dynamic_procevent_arm_stub() {
+  local dir=$1
+  cat > "$dir/bin/fm-watch-arm.sh" <<EOF
+#!/usr/bin/env bash
+printf 'arm-invoked\n' >> "$dir/state/.arm-invocations"
+n=\$(wc -l < "$dir/state/.arm-invocations")
+printf 'check: procevent cursor source-id %s\n' "\$n"
 exit 0
 EOF
   chmod +x "$dir/bin/fm-watch-arm.sh"
@@ -1259,6 +1271,28 @@ test_cursor_shim_bounds_dynamic_wake_refires() {
   assert_not_contains "$out" "keeps re-firing" \
     "the cleared dynamic wake ceiling must not latch"
   pass "fm-turnend-guard-cursor: dynamic wake diagnostics share a canonical bound key"
+}
+
+test_cursor_shim_bounds_procevent_wake_refires() {
+  local dir out i
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-procevent-refires")
+  CURSOR_FIXTURE_DIR=$dir
+  : > "$dir/state/task1.meta"
+  install_dynamic_procevent_arm_stub "$dir"
+  for i in 1 2; do
+    out=$(cursor_shim_stop "$i" env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
+    assert_not_contains "$out" "keeps re-firing" \
+      "process-event wake $i under the chain ceiling must stay normal"
+  done
+  out=$(cursor_shim_stop 3 env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
+  assert_contains "$out" "keeps re-firing" \
+    "new process-event sequences must still count as one re-firing wake reason"
+  out=$(cursor_shim_stop 4 env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
+  assert_contains "$out" "firstmate watcher wake" \
+    "the process-event wake ceiling must clear state before the next chain"
+  assert_not_contains "$out" "keeps re-firing" \
+    "the cleared process-event wake ceiling must not latch"
+  pass "fm-turnend-guard-cursor: process-event sequence details share a canonical bound key"
 }
 
 test_cursor_shim_persists_bound_without_valid_loop_count() {
@@ -2274,6 +2308,7 @@ test_cursor_shim_fresh_turn_resets_the_wake_chain
 test_cursor_shim_hard_bound_ends_a_runaway_chain
 test_cursor_shim_bounds_nonconsecutive_wake_refires
 test_cursor_shim_bounds_dynamic_wake_refires
+test_cursor_shim_bounds_procevent_wake_refires
 test_cursor_shim_persists_bound_without_valid_loop_count
 test_cursor_shim_failure_budget_is_session_scoped
 test_cursor_shim_prefers_conversation_id_for_persistent_scope

@@ -2946,7 +2946,7 @@ EOF
 # literally "the composer read empty".
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
-  local queue_harness queue_identity
+  local queue_harness queue_identity queue_status
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
@@ -2982,7 +2982,9 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   queue_harness=${queue_identity%%$'\t'*}
   case "$queue_harness" in
     opencode|cursor)
-      if [ "$(fm_backend_herdr_busy_state "$target")" = busy ]; then
+      queue_status=$(fm_backend_herdr_classify_submit_agent_status \
+        "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
+      if [ "$queue_status" = busy ]; then
         printf 'empty'
       else
         printf 'pending'
