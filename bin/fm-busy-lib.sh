@@ -326,18 +326,57 @@ fm_busy_muse_binding_field() {  # <state-dir> <id> <key>
 # lifecycle - folding a child's log would report the parent busy long after the
 # parent's turn ended.
 fm_busy_muse_matching_logs() {  # <sessions-root> <workspace-root>
-  local root=$1 ws=$2 candidate first
+  local root=$1 ws=$2
   [ -d "$root" ] || return 1
-  while IFS= read -r candidate; do
-    [ -n "$candidate" ] || continue
-    IFS= read -r first < "$candidate" 2>/dev/null || continue
-    case "$first" in
-      *"\"workspace_root\":\"$ws\""*) printf '%s\n' "$candidate" ;;
-      *) continue ;;
-    esac
-  done <<EOF
-$(find "$root" -mindepth 5 -maxdepth 5 -name session.jsonl -type f 2>/dev/null)
-EOF
+  command -v node >/dev/null 2>&1 || return 1
+  node - "$root" "$ws" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const [root, workspace] = process.argv.slice(2);
+
+function directories(parent) {
+  try {
+    return fs.readdirSync(parent, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => path.join(parent, entry.name));
+  } catch {
+    return [];
+  }
+}
+
+function metadataWorkspace(file) {
+  let descriptor;
+  try {
+    descriptor = fs.openSync(file, "r");
+    const buffer = Buffer.alloc(65536);
+    const length = fs.readSync(descriptor, buffer, 0, buffer.length, 0);
+    const newline = buffer.indexOf(10, 0);
+    if (newline < 0 || newline >= length) return null;
+    const record = JSON.parse(buffer.subarray(0, newline).toString("utf8"));
+    return record?.payload?.record?.workspace_root ?? null;
+  } catch {
+    return null;
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+
+for (const year of directories(root)) {
+  for (const month of directories(year)) {
+    for (const day of directories(month)) {
+      for (const session of directories(day)) {
+        const file = path.join(session, "session.jsonl");
+        try {
+          if (!fs.lstatSync(file).isFile()) continue;
+        } catch {
+          continue;
+        }
+        if (metadataWorkspace(file) === workspace) process.stdout.write(`${file}\n`);
+      }
+    }
+  }
+}
+NODE
 }
 
 fm_busy_muse_binding_has_prior_log() {  # <state-dir> <id> <session-log>
