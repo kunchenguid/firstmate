@@ -57,6 +57,7 @@ FM_REASON_TOKEN_GAP_ITEM_REFUSED=FM_SPAWN_TOOLING_GAP_ITEM_REFUSED
 FM_REASON_TOKEN_GAP_ITEM_UNFILED=FM_SPAWN_TOOLING_GAP_ITEM_UNFILED
 FM_REASON_TOKEN_FLOOR_UNKNOWN=FM_SPAWN_CAPABILITY_FLOOR_UNKNOWN
 FM_REASON_TOKEN_FLOOR_UNVERIFIABLE=FM_SPAWN_CAPABILITY_FLOOR_UNVERIFIABLE
+FM_REASON_TOKEN_VALUE_MALFORMED=FM_SPAWN_JUSTIFICATION_VALUE_MALFORMED
 
 # Recorded when this home configures no dispatch profiles, so an unconfigured
 # floor is never confused with a floor that was checked and matched.
@@ -90,19 +91,43 @@ fm_reasoning_required_for() {  # <code>
 # Derived from the delivery contract this spawn already validates
 # (AGENTS.md section 7), so the record cannot claim an authority the task does
 # not have. A scout produces a report and holds no merge authority at all.
+# The delivery mode is the other half of that contract: a local-only task never
+# reaches a PR merge gate, it lands through the guarded fast-forward path, so
+# with yolo off it records the local merge approval the captain actually owns
+# rather than a gate it never arrives at. With yolo on, firstmate decides
+# routine gates on either path, which is one posture rather than two.
 fm_escalation_policy_for() {  # <kind> <mode> <yolo>
-  local kind=$1 yolo=$3
+  local kind=$1 mode=$2 yolo=$3
   case "$kind" in
     scout) printf 'report-only\n' ;;
     secondmate) printf 'captain-approves-gates\n' ;;
     *)
       case "$yolo" in
         on) printf 'firstmate-routine-gates\n' ;;
-        *) printf 'captain-approves-gates\n' ;;
+        *)
+          case "$mode" in
+            local-only) printf 'captain-approves-local-merge\n' ;;
+            *) printf 'captain-approves-gates\n' ;;
+          esac
+          ;;
       esac
       ;;
   esac
 }
+
+# A route's `use` and the top-level `default` each carry either one profile
+# object or a non-empty array of them (docs/configuration.md "Crew dispatch
+# profiles"). bin/fm-bootstrap.sh validates that file against exactly this
+# normalization, so reading it any other way would make a config the validator
+# calls good unreadable here.
+# shellcheck disable=SC2016 # $value is a jq parameter, deliberately unexpanded.
+FM_JQ_DISPATCH_PROFILES='
+  def profiles($value):
+    if ($value | type) == "array" then $value
+    elif ($value | type) == "object" then [$value]
+    else []
+    end;
+'
 
 # The floor vocabulary comes verbatim from this home's own dispatch profiles,
 # so a recorded floor is one the routing config actually defines rather than a
@@ -115,33 +140,61 @@ fm_capability_floor_vocabulary() {  # <config-dir>
   file="$config/crew-dispatch.json"
   [ -f "$file" ] || return 1
   command -v jq >/dev/null 2>&1 || return 2
-  jq -r '
+  jq -r "$FM_JQ_DISPATCH_PROFILES"'
     [ (._floors // {} | keys[]?),
-      (.rules // [] | .[]?.floor // empty),
-      (.default.floor // empty) ]
+      (.rules // [] | .[]? | (.floor // empty), (profiles(.use?)[]? | .floor // empty)),
+      (profiles(.default)[]? | .floor // empty) ]
     | map(select(type == "string" and length > 0)) | unique | .[]
   ' "$file" 2>/dev/null || return 2
 }
 
 # The floor a dispatch inherits when the caller names none: the configured
-# default route's floor. Empty when this home configures no default floor.
+# default route's floor. A default written as a profile array names one route
+# with several interchangeable profiles, so its floor is the first one those
+# profiles define. Empty when this home configures no default floor.
 fm_capability_floor_default() {  # <config-dir>
   local config=$1 file
   file="$config/crew-dispatch.json"
   [ -f "$file" ] || return 1
   command -v jq >/dev/null 2>&1 || return 2
-  jq -r '.default.floor // empty' "$file" 2>/dev/null || return 2
+  jq -r "$FM_JQ_DISPATCH_PROFILES"'
+    [ profiles(.default)[]? | .floor? | select(type == "string" and length > 0) ]
+    | first // empty
+  ' "$file" 2>/dev/null || return 2
+}
+
+# Every recorded field is one line of state/<id>.meta, a file teardown,
+# supervision and backend resolution all read as authority. A value carrying a
+# newline would append forged key lines to it, so a value that cannot be
+# recorded as exactly one line is not recordable at all.
+fm_justification_value_recordable() {  # <value>
+  case "$1" in
+    *[[:cntrl:]]*) return 1 ;;
+    *) return 0 ;;
+  esac
 }
 
 # TOOLING_GAP's certification: the repair has to exist as OPEN work in this
 # home's backlog before the dispatch that the gap forced is recorded. A closed
 # or absent item is not a filed repair, and without this check the code becomes
 # a laundering label for turns nobody ever fixes.
+#
+# The wanted id is compared as a literal string against the id field parsed out
+# of each open checkbox line, never spliced into a pattern. A caller's value is
+# the thing being checked, so letting it carry match syntax would let `|` alone
+# certify against any backlog at all.
 fm_backlog_item_open() {  # <data-dir> <item-id>
   local data=$1 id=$2 file
   file="$data/backlog.md"
+  [ -n "$id" ] || return 1
   [ -f "$file" ] || return 1
-  grep -qE "^[[:space:]]*-[[:space:]]+\[[[:space:]]\][[:space:]]+$(
-    printf '%s' "$id" | sed 's/[][\.*^$/&]/\\&/g'
-  )([[:space:]]|$)" "$file"
+  awk -v want="$id" '
+    /^[[:space:]]*-[[:space:]]+\[[[:space:]]\][[:space:]]+/ {
+      item = $0
+      sub(/^[[:space:]]*-[[:space:]]+\[[[:space:]]\][[:space:]]+/, "", item)
+      sub(/[[:space:]].*$/, "", item)
+      if (item == want) { open_item = 1; exit }
+    }
+    END { exit open_item ? 0 : 1 }
+  ' "$file"
 }

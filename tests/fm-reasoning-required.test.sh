@@ -43,6 +43,24 @@ write_dispatch_config() {  # <home>
 JSON
 }
 
+# The same home, with `default` written as the profile ARRAY that
+# docs/configuration.md documents and docs/examples/crew-dispatch.json ships.
+# One default route, several interchangeable profiles.
+write_dispatch_config_array_default() {  # <home>
+  cat > "$1/config/crew-dispatch.json" <<'JSON'
+{
+  "_floors": { "F-UTIL": {}, "F-IMPL-MED": {}, "F-GEN": {} },
+  "rules": [
+    { "when": "implementation", "use": { "harness": "codex" }, "floor": "F-IMPL-MED" }
+  ],
+  "default": [
+    { "harness": "codex", "model": "gpt-5.5", "effort": "medium", "floor": "F-GEN" },
+    { "harness": "pi", "model": "anthropic/claude-sonnet-5", "effort": "medium", "floor": "F-GEN" }
+  ]
+}
+JSON
+}
+
 # A home with a fake tmux that refuses, so a spawn that clears the justification
 # checks still creates nothing. Echoes "<home>|<project-dir>|<fakebin>".
 make_refusal_home() {  # <name>
@@ -193,6 +211,26 @@ an item that is already closed|--tooling-gap-item already-repaired-reader|FM_SPA
 a prefix of a real item|--tooling-gap-item fleet-view|FM_SPAWN_TOOLING_GAP_ITEM_UNFILED
 ROWS
 
+  # The item id is data, never match syntax. An id built from regex
+  # metacharacters names no filed repair, so it is refused exactly like any
+  # other unfiled id rather than matching the backlog by construction: a bare
+  # alternation that certifies against any non-empty backlog would clear this
+  # gate with no repair work filed at all.
+  local injected
+  for injected in '|' '(' ')' '+' '?' '.*' 'fleet-view|' '.*|x'; do
+    n=$((n + 1))
+    write_brief "$home" "tooling-gap-$n" no-mistakes
+    out=$(run_spawn "$home" "$fakebin" "tooling-gap-$n" "$proj" claude \
+      --mode no-mistakes --yolo off --reason-code TOOLING_GAP \
+      --tooling-gap-item "$injected")
+    status=$?
+    [ "$status" -ne 0 ] || fail "the item id '$injected' certified as filed open work"
+    assert_contains "$out" FM_SPAWN_TOOLING_GAP_ITEM_UNFILED \
+      "the item id '$injected' did not refuse with its stable token"
+    assert_absent "$home/state/tooling-gap-$n.meta" \
+      "the item id '$injected' let a refused spawn write task metadata"
+  done
+
   # Negative control: the same dispatch naming the OPEN item must clear the gate.
   write_brief "$home" tooling-gap-control no-mistakes
   out=$(run_spawn "$home" "$fakebin" tooling-gap-control "$proj" claude \
@@ -314,7 +352,7 @@ run_record_spawn() {  # <home> <project> <worktree> <fakebin> <spawn-args...>
 # Completion criterion (a): every new task-dispatch record carries all four
 # fields, and the two derived ones follow their sources rather than a caller.
 test_every_task_dispatch_record_carries_the_fields() {
-  local rec home proj wt fakebin out status meta
+  local rec home proj wt fakebin out status meta gated_policy local_policy
   rec=$(make_record_case record-fields)
   IFS='|' read -r home proj wt fakebin <<EOF
 $rec
@@ -343,6 +381,21 @@ EOF
   # An omitted floor falls back to the dispatch config's own default route floor.
   assert_grep "capability_floor=F-GEN" "$home/state/record-yolo.meta" \
     "an omitted floor did not fall back to the configured default route floor"
+
+  # The delivery mode is the other half of the contract this field is derived
+  # from. A local-only ship lands through the guarded fast-forward path and
+  # never reaches a PR merge gate, so recording the gated ship's posture for it
+  # would claim an authority boundary the task never arrives at.
+  write_brief "$home" record-local local-only
+  out=$(run_record_spawn "$home" "$proj" "$wt" "$fakebin" record-local "$proj" codex \
+    --mode local-only --yolo off --reason-code UNFAMILIAR_CODE)
+  expect_code 0 "$?" "local-only ship spawn should succeed: $out"
+  assert_grep "escalation_policy=captain-approves-local-merge" "$home/state/record-local.meta" \
+    "a local-only ship must record the local merge approval the captain actually owns"
+  gated_policy=$(grep '^escalation_policy=' "$meta")
+  local_policy=$(grep '^escalation_policy=' "$home/state/record-local.meta")
+  [ "$gated_policy" != "$local_policy" ] || fail \
+    "a local-only yolo=off ship recorded the same policy as a no-mistakes yolo=off ship ($gated_policy)"
 
   # A scout holds no merge authority at all, and that is derived, not passed.
   write_brief "$home" record-scout
@@ -388,6 +441,105 @@ EOF
   assert_no_grep "tooling_gap_item=" "$home/state/gap-control.meta" \
     "a non-gap dispatch recorded a tooling gap item"
   pass "fm-spawn: TOOLING_GAP is counted separately and never as justified reasoning"
+}
+
+# The array form of `default` is the shape docs/configuration.md documents and
+# docs/examples/crew-dispatch.json ships, so a home that copied the example must
+# be readable here. A floor read that only understands the object form refuses
+# EVERY ship and scout dispatch in such a home, including one that named no
+# floor at all.
+test_an_array_form_default_route_resolves_its_floor() {
+  local rec home proj wt fakebin out status
+  rec=$(make_record_case array-default)
+  IFS='|' read -r home proj wt fakebin <<EOF
+$rec
+EOF
+  write_dispatch_config_array_default "$home"
+
+  write_brief "$home" array-omitted no-mistakes
+  out=$(run_record_spawn "$home" "$proj" "$wt" "$fakebin" array-omitted "$proj" codex \
+    --mode no-mistakes --yolo off --reason-code UNFAMILIAR_CODE)
+  expect_code 0 "$?" "an array-form default refused a dispatch that named no floor: $out"
+  assert_grep "capability_floor=F-GEN" "$home/state/array-omitted.meta" \
+    "an omitted floor did not fall back to the array-form default route's floor"
+
+  # A floor the same array-form config defines is accepted.
+  write_brief "$home" array-explicit no-mistakes
+  out=$(run_record_spawn "$home" "$proj" "$wt" "$fakebin" array-explicit "$proj" codex \
+    --mode no-mistakes --yolo off --reason-code UNFAMILIAR_CODE --capability-floor F-IMPL-MED)
+  expect_code 0 "$?" "an array-form config refused a floor it defines: $out"
+  assert_grep "capability_floor=F-IMPL-MED" "$home/state/array-explicit.meta" \
+    "an explicit floor did not reach the record under an array-form default"
+
+  # Negative control: the array form is read rather than waved through, so a
+  # floor it never defines is still refused.
+  write_brief "$home" array-invented no-mistakes
+  out=$(run_record_spawn "$home" "$proj" "$wt" "$fakebin" array-invented "$proj" codex \
+    --mode no-mistakes --yolo off --reason-code UNFAMILIAR_CODE --capability-floor F-INVENTED)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an array-form config accepted a floor it never defines"
+  assert_contains "$out" FM_SPAWN_CAPABILITY_FLOOR_UNKNOWN \
+    "an undefined floor under an array-form default lost its stable token"
+  assert_absent "$home/state/array-invented.meta" \
+    "a refused floor under an array-form default still wrote task metadata"
+
+  # The shipped example is what a new home copies into config/, so the file the
+  # docs hand out has to be readable by the code that reads it.
+  cp "$ROOT/docs/examples/crew-dispatch.json" "$home/config/crew-dispatch.json"
+  write_brief "$home" array-shipped no-mistakes
+  out=$(run_record_spawn "$home" "$proj" "$wt" "$fakebin" array-shipped "$proj" codex \
+    --mode no-mistakes --yolo off --reason-code UNFAMILIAR_CODE)
+  expect_code 0 "$?" "the shipped example dispatch config refused an ordinary spawn: $out"
+  assert_grep "capability_floor=" "$home/state/array-shipped.meta" \
+    "a home running the shipped example recorded no capability floor at all"
+  assert_no_grep "capability_floor=unconfigured" "$home/state/array-shipped.meta" \
+    "the shipped example defines floors but the record still read as unconfigured"
+  pass "fm-spawn: an array-form default route resolves its floor instead of refusing every dispatch"
+}
+
+# Each justification field is one line of state/<id>.meta, a file teardown,
+# supervision and backend resolution read as authority. A value carrying a
+# newline would append forged key lines to it, so it is refused before the
+# record is written rather than trimmed afterwards.
+test_a_justification_value_can_never_forge_a_meta_line() {
+  local rec home proj wt fakebin out status
+  rec=$(make_record_case meta-line)
+  IFS='|' read -r home proj wt fakebin <<EOF
+$rec
+EOF
+
+  write_brief "$home" forged-floor no-mistakes
+  out=$(run_record_spawn "$home" "$proj" "$wt" "$fakebin" forged-floor "$proj" codex \
+    --mode no-mistakes --yolo off --reason-code SYNTHESIS \
+    --capability-floor "$(printf 'F-GEN\nkind=secondmate')")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a newline-bearing --capability-floor was accepted"
+  assert_contains "$out" FM_SPAWN_JUSTIFICATION_VALUE_MALFORMED \
+    "a newline-bearing floor did not refuse with its stable token"
+  assert_absent "$home/state/forged-floor.meta" \
+    "a newline-bearing floor still wrote task metadata, forging a kind= line into it"
+
+  write_brief "$home" forged-item no-mistakes
+  out=$(run_record_spawn "$home" "$proj" "$wt" "$fakebin" forged-item "$proj" codex \
+    --mode no-mistakes --yolo off --reason-code TOOLING_GAP \
+    --tooling-gap-item "$(printf 'fleet-view-exits-nonzero\nkind=secondmate')")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a newline-bearing --tooling-gap-item was accepted"
+  assert_contains "$out" FM_SPAWN_JUSTIFICATION_VALUE_MALFORMED \
+    "a newline-bearing gap item did not refuse with its stable token"
+  assert_absent "$home/state/forged-item.meta" \
+    "a newline-bearing gap item still wrote task metadata, forging a kind= line into it"
+
+  # Negative control: the same fields carrying ordinary single-line values are
+  # recorded, so the refusals above come from the newline and nothing else.
+  write_brief "$home" single-line no-mistakes
+  out=$(run_record_spawn "$home" "$proj" "$wt" "$fakebin" single-line "$proj" codex \
+    --mode no-mistakes --yolo off --reason-code TOOLING_GAP \
+    --capability-floor F-GEN --tooling-gap-item fleet-view-exits-nonzero)
+  expect_code 0 "$?" "single-line justification values were refused: $out"
+  assert_grep "capability_floor=F-GEN" "$home/state/single-line.meta" \
+    "a single-line floor did not reach the record"
+  pass "fm-spawn: a justification value can never forge a second line of the record"
 }
 
 # A --secondmate spawn provisions a standing home rather than dispatching a
@@ -443,6 +595,25 @@ META
   # The reason the agent turn was necessary did not change, so it is preserved.
   assert_grep "reason_code=MULTIPLE_PLAUSIBLE_ROOT_CAUSES" "$meta" \
     "promotion dropped the recorded reason code"
+
+  # The recomputation reads the whole new contract, not just yolo: promoting the
+  # same scout into local-only work records the local merge approval instead of
+  # the gated ship's posture.
+  local local_meta
+  local_meta="$home/state/promoted-local.meta"
+  cat > "$local_meta" <<'META'
+window=fm-fake:1
+kind=scout
+reasoning_required=yes
+reason_code=MULTIPLE_PLAUSIBLE_ROOT_CAUSES
+capability_floor=F-GEN
+escalation_policy=report-only
+META
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$PROMOTE" promoted-local --mode local-only --yolo off 2>&1)
+  expect_code 0 "$?" "local-only promotion should succeed: $out"
+  assert_grep "escalation_policy=captain-approves-local-merge" "$local_meta" \
+    "promotion into local-only work did not recompute the policy from the new mode"
   pass "fm-promote: promotion recomputes the derived escalation policy"
 }
 
@@ -452,5 +623,7 @@ test_tooling_gap_requires_open_filed_work
 test_capability_floor_matches_its_config_source
 test_every_task_dispatch_record_carries_the_fields
 test_tooling_gap_is_never_recorded_as_justified_reasoning
+test_an_array_form_default_route_resolves_its_floor
+test_a_justification_value_can_never_forge_a_meta_line
 test_secondmate_provisioning_carries_no_justification_record
 test_promotion_recomputes_the_derived_escalation_policy

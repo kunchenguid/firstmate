@@ -326,6 +326,15 @@ done
 [ "$REASON_CODE_SET" -eq 0 ] || [ -n "$REASON_CODE" ] || { echo "error: --reason-code requires a non-empty value" >&2; exit 1; }
 [ "$CAPABILITY_FLOOR_SET" -eq 0 ] || [ -n "$CAPABILITY_FLOOR" ] || { echo "error: --capability-floor requires a non-empty value" >&2; exit 1; }
 [ "$TOOLING_GAP_ITEM_SET" -eq 0 ] || [ -n "$TOOLING_GAP_ITEM" ] || { echo "error: --tooling-gap-item requires a non-empty value" >&2; exit 1; }
+# Each justification value becomes one line of state/<id>.meta, so a value that
+# is not one line is refused here, before anything downstream can read a forged
+# key line as authority (bin/fm-reasoning-lib.sh).
+for justification_flag in "reason-code=$REASON_CODE" "capability-floor=$CAPABILITY_FLOOR" "tooling-gap-item=$TOOLING_GAP_ITEM"; do
+  fm_justification_value_recordable "${justification_flag#*=}" || {
+    echo "error: $FM_REASON_TOKEN_VALUE_MALFORMED: --${justification_flag%%=*} must be a single line without control characters; each justification field is one line of state/<id>.meta and a newline would forge further key lines in it" >&2
+    exit 1
+  }
+done
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
