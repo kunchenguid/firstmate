@@ -76,6 +76,7 @@ It never raw-deletes an Orca worktree.
 ## Regression entry points
 
 ```sh
+tests/fm-teardown-endpoint-safety.test.sh
 tests/fm-backend-orca.test.sh
 tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
