@@ -45,7 +45,9 @@
 #     escalated only after it has been idle for STALE_ESCALATE_SECS
 #     (configurable), rechecked once. A wedged crewmate is therefore detected
 #     within STALE_ESCALATE_SECS + a tick, never lost. A declared pause instead
-#     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
+#     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation,
+#     whether its pane reads idle or busy; only a non-paused status append ends
+#     that routing.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
@@ -954,8 +956,9 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  2) stale recheck: for each pending stale marker past STALE_ESCALATE_SECS,
 #     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
 #  2b) pause re-surface: for each declared-pause marker past PAUSE_RESURFACE_SECS,
-#     re-peek; busy/gone -> clear; still idle + still paused -> escalate a recheck
+#     re-peek; gone -> clear; still paused (idle OR busy) -> escalate a recheck
 #     digest and reset the window (repeating bounded re-surface, never a wedge).
+#     Only a non-paused status append clears the pause; pane busy state does not.
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
@@ -1024,9 +1027,13 @@ housekeeping() {  # <state>
   # (2b) pause re-surface recheck. A DECLARED external-wait pause idles by design,
   # so it is rechecked on a much longer cadence than a wedge (PAUSE_RESURFACE_SECS)
   # and never escalated as one - but it MUST re-surface, so a forgotten pause cannot
-  # rot invisibly. Past the window: busy (resumed) or gone -> drop; still idle and
-  # still declaring the pause -> escalate a recheck digest and reset the marker so
-  # the window repeats.
+  # rot invisibly. Past the window: gone -> drop; still declaring the pause ->
+  # escalate a recheck digest and reset the marker so the window repeats. Pane busy
+  # state does NOT end the pause: the crew's own latest status line is the declared
+  # state, and a pane that renders busy while its declared wait blocks (a hung
+  # subprocess behind `paused: audit running`) is exactly the case this recheck
+  # exists for. Only a non-paused status append resumes it, which the loop head and
+  # reconcile_pause_tracking already own.
   pause_secs=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
   for marker in "$state"/.subsuper-paused-*; do
     [ -e "$marker" ] || continue
@@ -1045,7 +1052,6 @@ housekeeping() {  # <state>
     [ "$age" -ge "$pause_secs" ] || continue
     stale_window_is_busy "$win" "$state"
     case "$?" in
-      0) rm -f "$marker" ;;
       2) rm -f "$marker" ;;
       *)
         last=$(last_status_line "$state/$task.status")
@@ -1223,8 +1229,11 @@ handle_wake() {  # <reason> <state>
               # design, which is exactly the cadence question the wedge timer
               # cannot answer for itself. Overriding it wedge-escalated declared
               # pauses every STALE_ESCALATE_SECS for hours (2026-08-05 incident).
-              # The pause action's bounded PAUSE_RESURFACE_SECS recheck still
-              # re-surfaces it, so a forgotten pause cannot rot invisibly.
+              # Housekeeping (2b) then owns the re-surface on the declared-pause
+              # cadence, and it ages that window on the crew's status line rather
+              # than on pane busy state, so the enriched wedges this branch
+              # absorbs - which the watcher only ever emits for a BUSY pane - are
+              # still bounded by one PAUSE_RESURFACE_SECS recheck.
               case "${decision%%|*}" in
                 pause) : ;;
                 *) case "$stale_detail" in
