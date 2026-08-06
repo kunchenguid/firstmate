@@ -25,10 +25,11 @@
 #      fallback)? Branch name alone is not enough: a historical run on a reused
 #      branch whose head was rewritten or diverged must not be attributed.
 #      A run matches when its head equals the worktree HEAD, the worktree HEAD
-#      is an ancestor of the run head, or its detailed branch-sync state says
-#      the pipeline owns commits not synchronized into the worktree yet. Local
-#      work that advanced past the run head, or diverged from it without that
-#      explicit pipeline ownership, invalidates attribution.
+#      is an ancestor of the run head, or the run is still live (no terminal
+#      outcome yet) and its detailed branch-sync state says the pipeline owns
+#      commits not synchronized into the worktree yet. Local work that advanced
+#      past the run head, or diverged from it without that explicit live
+#      pipeline ownership, invalidates attribution.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -384,6 +385,15 @@ nm_branch_sync_state() {
   strip_quotes "$state"
 }
 
+# The head-binding escape above only applies while the run is live: after a
+# terminal outcome the pipeline still owns preserved unpublished commits until
+# `no-mistakes axi sync --recover` returns custody, so `pipeline_owned` alone
+# cannot distinguish a retry in flight from custody parked on a dead run.
+nm_pipeline_owned_live_run() {
+  [ -z "$(strip_quotes "$(nm_field outcome)")" ] \
+    && [ "$(nm_branch_sync_state)" = pipeline_owned ]
+}
+
 # CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
@@ -419,7 +429,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] \
-       && { nm_run_head_matches_worktree || [ "$(nm_branch_sync_state)" = pipeline_owned ]; }; then
+       && { nm_run_head_matches_worktree || nm_pipeline_owned_live_run; }; then
       HAVE_RUN=1
     else
       # The active-or-most-recent run is for another branch, or same branch with

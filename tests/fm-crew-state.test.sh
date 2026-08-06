@@ -1388,6 +1388,36 @@ test_local_advanced_past_run_head_invalidates() {
   pass "local work advanced past run head invalidates attribution"
 }
 
+# Head-binding, terminal direction: `pipeline_owned` persists after a terminal
+# run while the pipeline retains custody of preserved commits, so it proves
+# nothing about liveness. A failed run must not re-attach through the
+# branch-sync escape once the crew has committed past the run head.
+test_terminal_pipeline_owned_run_does_not_reattach() {
+  reset_fakes
+  local d run_head out
+  d=$(new_case terminal-pipeline-owned)
+  make_repo_on_branch "$d/wt" fm/feat-term
+  run_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'crew fix after failed run'
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/term.meta" "window=fm:fm-term" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: fix committed, preparing retry\n' > "$d/state/term.status"
+  FM_FAKE_RUN_HEAD="$run_head"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-term)
+branch_sync:
+  next_action: recover
+  code: recover_custody
+  state: pipeline_owned"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" term
+  out=$(run_crew_state "$d" term)
+  assert_not_contains "$out" "source: run-step" "terminal pipeline_owned run must not relax head binding"
+  assert_not_contains "$out" "state: failed" "dead run must not resurface as a recovery signal"
+  assert_contains "$out" "source: status-log" "falls back to status-log after the crew moved on"
+  assert_contains "$out" "state: working" "status-log working: remains current"
+  pass "a terminal pipeline_owned run does not re-attach past the run head"
+}
+
 test_missing_run_head_falls_back_to_current_state() {
   reset_fakes
   local d out
@@ -1458,6 +1488,7 @@ test_historical_same_branch_rewritten_head_not_current
 test_non_pipeline_owned_branch_sync_keeps_head_binding
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
+test_terminal_pipeline_owned_run_does_not_reattach
 test_missing_run_head_falls_back_to_current_state
 
 echo "all fm-crew-state tests passed"
