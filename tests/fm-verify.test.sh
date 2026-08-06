@@ -266,13 +266,84 @@ with_path "$GH_SKIPPED:$PATH" expect_verify NO_VERIFIER_RAN no_verdict_reached \
   'skipped checks' -- pr-checks "$PR"
 pass "a check set that only skipped is NO_VERIFIER_RAN, not PASS"
 
-with_path "$GH_NO_CONCLUSION:$PATH" expect_verify NO_VERIFIER_RAN no_verdict_reached \
-  'completed with no conclusion' -- pr-checks "$PR"
-pass "a completed check carrying no conclusion is NO_VERIFIER_RAN, not PASS"
-
 with_path "$GH_ONE_STALE:$PATH" expect_verify NO_VERIFIER_RAN no_verdict_reached \
   'one stale check among successes' -- pr-checks "$PR"
 pass "passing means EVERY member succeeded, so one unconcluded check withholds it"
+
+# --- the conclusion partition, one conclusion at a time ----------------------
+#
+# The partition is what the three values are worth: a conclusion in the wrong
+# list produces a value for a condition that never earned it. Each conclusion is
+# asserted on its own so a misplacement names itself instead of hiding inside an
+# aggregate.
+
+# gh_with_conclusion <json-conclusion> <slug>: a gh whose pull request carries
+# exactly one COMPLETED check with that conclusion.
+gh_with_conclusion() {
+  make_gh "$TMP/gh-conclusion-$2" \
+    "{\"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":$1}]}"
+}
+
+while read -r conclusion want; do
+  [ -n "$conclusion" ] || continue
+  bin=$(gh_with_conclusion "\"$conclusion\"" "$(printf '%s' "$conclusion" | tr '[:upper:]' '[:lower:]')")
+  with_path "$bin:$PATH" expect_verify "$want" - "conclusion $conclusion" -- pr-checks "$PR"
+  pass "a check concluding $conclusion is $want"
+done <<'EOF'
+SUCCESS PASS
+FAILURE FAIL
+STARTUP_FAILURE FAIL
+TIMED_OUT NO_VERIFIER_RAN
+CANCELLED NO_VERIFIER_RAN
+ACTION_REQUIRED NO_VERIFIER_RAN
+SKIPPED NO_VERIFIER_RAN
+STALE NO_VERIFIER_RAN
+NEUTRAL NO_VERIFIER_RAN
+EOF
+
+with_path "$GH_NO_CONCLUSION:$PATH" expect_verify NO_VERIFIER_RAN no_verdict_reached \
+  'absent conclusion' -- pr-checks "$PR"
+pass "a check completing with no conclusion at all is NO_VERIFIER_RAN"
+
+# ERROR is not a check-run conclusion: it comes from the older commit-status
+# state vocabulary, which is why the rule reads .conclusion // .state. Asserted
+# in its own shape so repartitioning cannot quietly drop one vocabulary.
+GH_STATE_ERROR=$(make_gh "$TMP/gh-state-error" \
+  '{"statusCheckRollup":[{"state":"ERROR"}]}')
+with_path "$GH_STATE_ERROR:$PATH" expect_verify FAIL verifier_reported_failure \
+  'commit status ERROR' -- pr-checks "$PR"
+pass "a commit status in the ERROR state is FAIL, so both GitHub vocabularies stay live"
+
+# A cancelled or timed-out run observed nothing: a superseding push killed it,
+# or the clock did. Calling either FAIL asserts a verdict about the pull request
+# that nothing earned, and hides a broken verifier among real failures.
+for conclusion in TIMED_OUT CANCELLED; do
+  bin=$(gh_with_conclusion "\"$conclusion\"" "notfail-$conclusion")
+  with_path "$bin:$PATH" run_verify pr-checks "$PR"
+  [ "$RESULT" != FAIL ] ||
+    fail "$conclusion must not read as FAIL: nothing about the pull request was observed"
+  with_path "$bin:$PATH" expect_verify NO_VERIFIER_RAN no_verdict_reached \
+    "$conclusion is not a verdict" -- pr-checks "$PR"
+done
+pass "a cancelled or timed-out run is NO_VERIFIER_RAN, never a FAIL it did not earn"
+
+# The mirror: a workflow that failed to start is terminal. Reporting it as
+# could-not-observe sends the reader to "wait or re-run", the one action that
+# cannot help, and the failure never resolves.
+GH_STARTUP=$(gh_with_conclusion '"STARTUP_FAILURE"' notunverified-startup)
+with_path "$GH_STARTUP:$PATH" run_verify pr-checks "$PR"
+[ "$RESULT" != NO_VERIFIER_RAN ] ||
+  fail "STARTUP_FAILURE must not read as could-not-observe: it is terminal and re-running reproduces it"
+with_path "$GH_STARTUP:$PATH" expect_verify FAIL verifier_reported_failure \
+  'startup failure' -- pr-checks "$PR"
+pass "a workflow that failed to start is FAIL, not parked as unobservable"
+
+# The default branch fails closed: a conclusion this rule has never heard of
+# cannot fall into a verdict on its way past the last elif.
+GH_UNKNOWN=$(gh_with_conclusion '"QUANTUM_INDETERMINATE"' unknown)
+with_path "$GH_UNKNOWN:$PATH" expect_verify NO_VERIFIER_RAN no_verdict_reached \
+  'unknown conclusion' -- pr-checks "$PR"
+pass "a conclusion the rule does not know is NO_VERIFIER_RAN by design, not by omission"
 
 # An unreachable forge is not a failing pull request. The exit-status wrapper
 # calls it FAIL, which is a verdict nobody earned.

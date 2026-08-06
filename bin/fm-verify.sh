@@ -61,8 +61,9 @@
 #   empty_result_set          the verifier returned no results at all
 #   verification_incomplete   results exist but no verdict has been reached yet
 #   no_verdict_reached        the verifier finished and reached no verdict, and
-#                             none is coming: checks that completed SKIPPED,
-#                             STALE, NEUTRAL, or with no conclusion at all
+#                             none is coming: checks that completed TIMED_OUT,
+#                             CANCELLED, ACTION_REQUIRED, SKIPPED, STALE,
+#                             NEUTRAL, or with no conclusion at all
 #   no_evidence               the verifier's output could not be captured
 #   usage_error               the call itself was malformed
 #

@@ -38,16 +38,31 @@
 #                 is broken, or whose runs were pruned looks exactly like a
 #                 pull request that passed, unless the empty set is named
 #                 separately.
-#   failing       at least one check reached a failing conclusion.
+#   failing       at least one check reached a terminal negative verdict:
+#                 FAILURE, STARTUP_FAILURE, or ERROR. A workflow that failed to
+#                 start never clears by waiting and re-running reproduces it
+#                 until someone fixes the workflow, so it is a verdict and not
+#                 a could-not-observe.
 #   pending       checks exist but at least one has not completed. No verdict
 #                 yet, and one may still arrive.
 #   inconclusive  every check completed, none failed, and at least one ended
-#                 without earning a verdict - SKIPPED, STALE, NEUTRAL, an
-#                 absent conclusion, or a conclusion this rule does not know.
-#                 A check skipped by a path filter proves nothing about the
-#                 pull request, so folding it into "passing" is the empty set's
-#                 defect one level down. No verdict, and none is coming.
+#                 without earning a verdict - TIMED_OUT, CANCELLED,
+#                 ACTION_REQUIRED, SKIPPED, STALE, NEUTRAL, an absent
+#                 conclusion, or any conclusion this rule does not know, which
+#                 reaches this label by design rather than by omission. None of
+#                 them observed the pull request: a run cancelled by a
+#                 superseding push or killed by a timeout says nothing about
+#                 the code, and ACTION_REQUIRED completed only to say a human
+#                 must act. Folding any of them into "passing" is the empty
+#                 set's defect one level down, and folding them into "failing"
+#                 asserts a verdict nothing earned. No verdict, and none is
+#                 coming.
 #   passing       the set is non-empty and EVERY member completed successfully.
+#
+# Two GitHub vocabularies meet here, which is why the rule reads
+# .conclusion // .state: FAILURE, TIMED_OUT, CANCELLED, ACTION_REQUIRED,
+# STARTUP_FAILURE, NEUTRAL, SKIPPED, STALE and SUCCESS are check-run
+# conclusions, while ERROR belongs to the older commit-status state vocabulary.
 #
 # It lives here rather than inside either caller because it is a contract, and
 # two copies of a contract drift the moment only one is edited. Consumers map
@@ -66,7 +81,7 @@
 FM_VERIFY_CHECK_ROLLUP_EXPR='
   (.statusCheckRollup // []) as $c
   | if ($c|length) == 0 then "none"
-    elif any($c[]; (.conclusion // .state // "") as $s | ($s=="FAILURE" or $s=="ERROR" or $s=="TIMED_OUT" or $s=="CANCELLED" or $s=="ACTION_REQUIRED")) then "failing"
+    elif any($c[]; (.conclusion // .state // "") as $s | ($s=="FAILURE" or $s=="STARTUP_FAILURE" or $s=="ERROR")) then "failing"
     elif any($c[]; ((.status // "") != "COMPLETED") and ((.state // "") != "SUCCESS")) then "pending"
     elif all($c[]; (.conclusion // .state // "") == "SUCCESS") then "passing"
     else "inconclusive" end'
