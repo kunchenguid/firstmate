@@ -48,13 +48,51 @@ The earlier `sendUserMessage` counterfactual raced the positional prompt; the cu
 The installed pi-signed 0.82.0 wrapper repeated the Pi primary extension and session-start path on 2026-07-27.
 [`runtime-backends.md`](runtime-backends.md#tmux) owns the shared-ancestry evidence and authoritative selection-marker boundary.
 
+### Run-tier source vocabulary and context-reset injection
+
+The run tier depends on two facts only the vendor can supply: the session-open source it reports, and whether hook stdout reaches model context on a context-RESET open rather than only a cold one.
+Both were measured on 2026-08-05 against a throwaway Firstmate-shaped lab carrying each harness's own tracked registration with a recorder standing in for `bin/fm-sessionstart-run.sh`.
+Each open printed a source-stamped token, and the model was asked to quote that token back, so producing hook stdout could never be mistaken for delivering it.
+
+| Harness | Version verified | Cold open | Context reset | Context-preserving reopen |
+| --- | --- | --- | --- | --- |
+| Claude | 2.1.222 (Claude Code) | `source=startup`, token quoted back in both `-p` and the TUI | `/clear` reports `source=clear` and `/compact` reports `source=compact`; both re-injected a fresh token that the model quoted back | `claude --continue` reports `source=resume` |
+| Codex | codex-cli 0.146.0 | `source=startup` under `codex exec`, token quoted back | Not reachable from a tracked project registration; see the limit below | `codex exec resume --last` reports `source=resume` |
+| Pi | 0.82.0 | `source=startup`, token quoted back in both `-p` and the TUI | `/new` raises `session_start` reason `new`, which the extension maps to `clear`; `/compact` raises `session_compact`, and both freshly injected source-stamped tokens were quoted back | `pi -c` reports reason `startup`, not `resume` |
+
+Two harness-specific consequences are load-bearing rather than incidental.
+
+Codex's interactive TUI fired no project `SessionStart` hook at all in the same lab where `codex exec` fired it reliably, which matches the earlier 2026-07-28 finding for 0.145.0.
+Codex's run tier is therefore verified only for `codex exec`.
+The interactive TUI remains on the tracked nudge floor through `AGENTS.md` and the Ahoy fallback; Firstmate ships no global hook and does not depend on one.
+
+Pi compaction was verified on 2026-08-05 with Pi 0.82.0 in the same throwaway lab after setting `.pi/settings.json` `compaction.keepRecentTokens` to 200 and completing one substantial assistant-prose turn before issuing `/compact`.
+Pi reported `Compacted from 7,697 tokens`, the recorder observed `session_compact`, and the model quoted the freshly injected `source=compact` token back.
+Both preconditions are load-bearing: the stock 20,000-token keep window exceeds a small lab session, and `AgentSession.compact()` aborts an in-flight turn before measuring compactable history, which otherwise discards that turn and reports `Nothing to compact (session too small)`.
+Tool output alone does not grow compactable context; the completed assistant prose does.
+
+Observed compaction output and recorder source:
+
+```text
+Compacted from 7,697 tokens
+compact
+```
+
+Pi disagrees with Claude and Codex on `resume`: a NEW Pi process continuing a session reports `startup`, and Pi's `resume` reason is reserved for an in-process session switch.
+That is correct for the run tier rather than a problem, because a new process holds no lock and must take the helm; the routing table in [`../sessionstart-nudge.md`](../sessionstart-nudge.md#source-routing) is written to whichever source each harness actually reports.
+
 Current deterministic and live entry points:
 
 ```sh
 tests/fm-sessionstart-nudge.test.sh
+tests/fm-session-start.test.sh
+FM_SESSIONSTART_HOOK_LIVE_E2E=1 tests/fm-sessionstart-hook-live-e2e.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh
 ```
+
+`tests/fm-sessionstart-hook-live-e2e.test.sh` is the command that refreshes the table above; run it after every run-tier harness upgrade.
+It reports an absent harness explicitly, asserts Pi compaction rather than noting it, and refuses to pass when no run-tier harness was installed at all.
 
 The Ahoy first-message boundary was reverified on 2026-07-22 with Pi 0.81.1 and OpenCode 1.17.18.
 Marked current operational input and the two exact legacy compatibility shapes selected Bearings, while genuine near-miss captain messages remained real boundaries.
@@ -82,7 +120,7 @@ codex exec --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-
 ```
 
 The daemon refused with `managed standalone Codex install not found`, and an interactive TUI worker neither starts nor attaches to the app-server control socket, so no client can observe its turns.
-Firstmate-written project hooks under `<worktree>/.codex/hooks.json` fired for neither an interactive pane whose directory trust was granted nor `codex exec`, in both cases with `--dangerously-bypass-hook-trust`, while global `~/.codex/hooks.json` `SessionStart` hooks fired in the same runs.
+In this 2026-07-28 Codex 0.145.0 semantic-busy probe, Firstmate-written lifecycle project hooks under `<worktree>/.codex/hooks.json` fired for neither an interactive pane whose directory trust was granted nor `codex exec`, in both cases with `--dangerously-bypass-hook-trust`, while an untracked global probe fired in the same runs; Firstmate does not ship, install, recommend, or depend on that global path.
 Codex also exposes no `StopFailure` hook, so an API-error turn end would need separate coverage even after hook discovery works.
 The app-server protocol schema does define the required lifecycle (`turn/started`, plus a `turn/completed` status of `completed`, `interrupted`, `failed`, or `inProgress`), so the gate is a reachability problem rather than a protocol gap.
 

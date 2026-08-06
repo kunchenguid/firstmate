@@ -2,11 +2,11 @@
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "startup|resume|clear",
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/bin/fm-sessionstart-nudge.sh"
+            "command": "\"$CLAUDE_PROJECT_DIR\"/bin/fm-sessionstart-run.sh",
+            "timeout": 180
           }
         ]
       }

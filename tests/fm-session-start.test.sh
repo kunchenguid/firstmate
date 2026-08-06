@@ -1220,6 +1220,289 @@ EOF
   pass "unavailable or incompatible tasks-axi falls back to compact manual backlog rendering"
 }
 
+# --- runtime bound -----------------------------------------------------------
+#
+# The digest runs on a session-open hook that blocks session initialization, so
+# it must have a guaranteed upper bound. These cases drive REAL processes that
+# really hang, and assert the outcome the hook depends on: whatever the digest
+# already emitted survives, the agent is told exactly what it never saw, and
+# the command still exits 0 so the session can open.
+
+# make_hanging_tool <fakebin> <name>: a real, unkillable-by-timeout-alone
+# subprocess of the digest. `git` is the honest choice - the bootstrap stage
+# shells out to it - and it also proves the bound reaches a GRANDCHILD, because
+# bootstrap runs it inside its own command substitution.
+make_hanging_tool() {
+  local fakebin=$1 name=$2
+  cat > "$fakebin/$name" <<'SH'
+#!/usr/bin/env bash
+trap '' TERM
+sleep 600
+SH
+  chmod +x "$fakebin/$name"
+}
+
+make_term_escalating_timeout() {
+  local fakebin=$1
+  cat > "$fakebin/timeout" <<'SH'
+#!/usr/bin/env perl
+use strict;
+use warnings;
+(shift @ARGV) eq '-k' or exit 64;
+my $kill_after = shift @ARGV;
+my $seconds = shift @ARGV;
+my $pid = fork;
+defined $pid or die "fork failed";
+if (!$pid) {
+  setpgrp(0, 0);
+  exec @ARGV;
+}
+local $SIG{ALRM} = sub {
+  kill 'TERM', -$pid;
+  select undef, undef, undef, $kill_after;
+  kill 'KILL', -$pid;
+  waitpid $pid, 0;
+  exit 137;
+};
+alarm $seconds;
+waitpid $pid, 0;
+alarm 0;
+exit($? >> 8);
+SH
+  chmod +x "$fakebin/timeout"
+}
+
+test_runtime_bound_truncates_loudly_and_exits_zero() {
+  local rec root home fakebin out status=0 stray mechanism
+  rec=$(new_world runtime-bound)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_hanging_tool "$fakebin" git
+
+  mechanism=$(FM_TIMEOUT_MECHANISM_OVERRIDE=bash bash -c '. "$1"; fm_timeout_mechanism' \
+    _ "$ROOT/bin/fm-timeout-lib.sh")
+  [ "$mechanism" = bash ] || fail "the forced pure-Bash timeout fixture selected '$mechanism'"
+
+  out=$(FM_TIMEOUT_MECHANISM_OVERRIDE=bash FM_SESSION_START_TIMEOUT=3 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+
+  expect_code 0 "$status" "a truncated session start must still exit 0 so the session can open"
+  assert_contains "$out" "SESSION START - $home" "the truncated digest lost the output it had already produced"
+  assert_contains "$out" "LOCK" "the truncated digest lost a stage that had completed"
+  assert_contains "$out" "STARTUP TRUNCATED" "a truncated session start did not say so"
+  assert_contains "$out" "RUNTIME BOUND" "the truncation banner did not name the bound it hit"
+  assert_contains "$out" 'stopped during the "bootstrap" stage' "the truncation banner did not name the incomplete stage"
+  assert_contains "$out" "RECONCILE these stages" "the truncation banner did not tell the agent what to reconcile"
+  assert_contains "$out" "wake-queue supervision-instructions context fleet-state next-step" \
+    "the truncation banner did not list every stage that never ran"
+  assert_not_contains "$out" "NEXT STEP" "a truncated digest claimed to have reached its closing reminder"
+  assert_absent "$home/state/.session-start-complete" \
+    "a truncated startup recorded itself as complete"
+
+  # The bound must reach the whole process group: a hung grandchild that
+  # outlives the digest would keep holding whatever the digest was waiting on.
+  sleep 1
+  stray=$(pgrep -f "$fakebin/git" 2>/dev/null | wc -l | tr -d ' ')
+  [ "$stray" -eq 0 ] || fail "the runtime bound left $stray hung subprocess(es) behind"
+
+  status=0
+  FM_TIMEOUT_MECHANISM_OVERRIDE=bash bash -c \
+    '. "$1"; fm_run_timed 2 bash -c "exit 137"' _ "$ROOT/bin/fm-timeout-lib.sh" || status=$?
+  expect_code 137 "$status" "pure-Bash natural command exit 137"
+
+  pass "the pure-Bash watchdog bounds session start, kills its hung grandchild, and emits the truncation contract"
+}
+
+test_portable_timeout_escalates_term_resistant_process() {
+  local fakebin="$TMP_ROOT/portable-kill-after" driver status=0
+  mkdir -p "$fakebin"
+  make_term_escalating_timeout "$fakebin"
+  driver="$TMP_ROOT/portable-kill-after-driver.sh"
+  cat > "$driver" <<'SH'
+#!/usr/bin/env bash
+. "$1"
+shift
+fm_run_timed 1 "$@"
+SH
+  chmod +x "$driver"
+
+  perl -e '
+    my $pid = fork;
+    die "fork failed" unless defined $pid;
+    if (!$pid) { setpgrp(0, 0); exec @ARGV }
+    local $SIG{ALRM} = sub { kill "KILL", -$pid; waitpid $pid, 0; exit 99 };
+    alarm 5;
+    waitpid $pid, 0;
+    exit($? >> 8);
+  ' env PATH="$fakebin:$BASE_PATH" "$driver" "$ROOT/bin/fm-timeout-lib.sh" \
+    perl -e '$SIG{TERM} = "IGNORE"; sleep 600' || status=$?
+
+  expect_code 124 "$status" "portable timeout TERM-resistant escalation"
+  status=0
+  env PATH="$fakebin:$BASE_PATH" "$driver" "$ROOT/bin/fm-timeout-lib.sh" \
+    bash -c 'exit 137' || status=$?
+  expect_code 137 "$status" "natural command exit 137"
+  pass "the portable timeout path force-kills a command that ignores TERM"
+}
+
+test_runtime_bound_leaves_a_healthy_digest_untouched() {
+  local rec root home fakebin out
+  rec=$(new_world runtime-bound-healthy)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_not_contains "$out" "STARTUP TRUNCATED" "a digest that finished in time reported itself truncated"
+  assert_contains "$out" "NEXT STEP" "a digest that finished in time lost its closing reminder"
+  assert_absent "${TMPDIR:-/tmp}/fm-session-start-stage" "the stage breadcrumb leaked a fixed-name file"
+
+  pass "a session start inside its budget prints no truncation banner"
+}
+
+test_runtime_bound_leaves_harness_ancestry_headroom() {
+  local rec root home fakebin nest out
+  rec=$(new_world runtime-bound-ancestry)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+
+  # Only ONE pid in the whole tree is the harness, and it sits at the very top.
+  # fm-session-lock-lib.sh walks a BOUNDED sixteen parents to find it, and the
+  # runtime bound spends some of that budget on its own wrapper processes, so
+  # this pins that the budget still reaches a realistically deep session.
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+pid=
+previous=
+for argument in "$@"; do
+  [ "$previous" = -p ] && pid=$argument
+  previous=$argument
+done
+case "$*" in
+  *"comm="*)
+    if [ "$pid" = "${FM_FAKE_HARNESS_PID:-}" ]; then printf '%s\n' /usr/local/bin/claude
+    else printf '%s\n' /bin/bash; fi
+    ;;
+  *"args="*)
+    if [ "$pid" = "${FM_FAKE_HARNESS_PID:-}" ]; then printf '%s\n' claude
+    else printf '%s\n' bash; fi
+    ;;
+  *"ppid="*) /bin/ps -o ppid= -p "$pid" ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  # Each level forks rather than execs, so the counter really is process depth.
+  nest="$home/nest.sh"
+  cat > "$nest" <<'SH'
+#!/usr/bin/env bash
+set -u
+levels=$1
+shift
+if [ "$levels" -gt 0 ]; then
+  bash "$0" $((levels - 1)) "$@"
+  exit $?
+fi
+exec "$@"
+SH
+  chmod +x "$nest"
+
+  # shellcheck disable=SC2016 # $$ must expand in the launched shell, not here.
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
+    bash -c 'export FM_FAKE_HARNESS_PID=$$; exec "$1" 8 "$2"' _ "$nest" "$SESSION_START")
+
+  assert_contains "$out" "lock acquired: harness pid" \
+    "the runtime bound's wrapper processes pushed the harness out of the bounded ancestry walk"
+  assert_not_contains "$out" "READ-ONLY SESSION" \
+    "a session start eight shells below its harness was wrongly refused the lock"
+
+  pass "the runtime bound leaves enough ancestry headroom for a deeply nested session to take the lock"
+}
+
+# --- context re-emit (--reemit) ----------------------------------------------
+
+test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain() {
+  local rec root home fakebin full reemit
+  rec=$(new_world reemit)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  mkdir -p "$home/other-secondmate/state"
+  fm_write_secondmate_meta "$home/state/sm-r.meta" "$home/other-secondmate" "firstmate:fm-sm-r" alpha
+  append_wake "$home/state" signal task-r "done: queued after startup" || fail "seed wake failed"
+
+  # A full startup reconciles the secondmate sweep and reports it.
+  full=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$full" "SECONDMATE_LIVENESS" "the full startup fixture did not exercise a mutating sweep"
+
+  append_wake "$home/state" signal task-r "done: queued after the re-emit too" || fail "seed second wake failed"
+  reemit=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
+    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    "$SESSION_START" --reemit)
+
+  assert_contains "$reemit" "SESSION START (CONTEXT RE-EMIT) - $home" "--reemit did not label itself"
+  assert_not_contains "$reemit" "SECONDMATE_LIVENESS" "--reemit repeated a mutating sweep startup already ran"
+  assert_contains "$reemit" "done: queued after the re-emit too" "--reemit did not drain the wake queue"
+  [ ! -s "$home/state/.wake-queue" ] || fail "--reemit left queued wakes behind: $(cat "$home/state/.wake-queue")"
+  assert_contains "$reemit" "CONTEXT" "--reemit dropped the context digest"
+  assert_contains "$reemit" "FLEET STATE" "--reemit dropped the fleet-state digest"
+  assert_contains "$reemit" "NEXT STEP" "--reemit dropped the closing reminder"
+
+  pass "--reemit reprints the digest without repeating startup's mutating sweeps and still drains queued wakes"
+}
+
+test_reemit_keeps_repair_ownership_with_the_lock_holder() {
+  local rec root home fakebin reemit readonly_out holder_pid
+  rec=$(new_world reemit-tangle)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  git -C "$root" checkout -q -B fm/reemit-tangle
+
+  reemit=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
+    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    "$SESSION_START" --reemit)
+
+  # A re-emit skips the sweeps because it ALREADY ran them, not because it lacks
+  # the lock, so it must still own repair rather than deferring to a lock holder.
+  assert_contains "$reemit" "restore the primary with: git -C $root checkout main" \
+    "--reemit disowned a repair it is entitled to perform"
+  assert_not_contains "$reemit" "must leave restore work to the session holding the fleet lock" \
+    "--reemit misreported itself as an unlocked read-only session"
+
+  rm -f "$home/state/.lock"
+  sleep 300 &
+  holder_pid=$!
+  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+  readonly_out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
+    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    "$SESSION_START" --reemit)
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  assert_contains "$readonly_out" "READ-ONLY SESSION" \
+    "--reemit assumed lock ownership instead of re-verifying it"
+  assert_contains "$readonly_out" "must leave restore work to the session holding the fleet lock" \
+    "a lock-refused --reemit still claimed repair ownership"
+
+  pass "--reemit re-verifies lock ownership and keeps repair ownership with whoever holds it"
+}
+
 # --- fleet-state digest: no in-flight tasks ----------------------------------
 
 test_fleet_digest_empty_fleet() {
@@ -1463,5 +1746,11 @@ test_pi_diagnostic_rejects_stale_loaded_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker
 test_pi_diagnostic_rejects_missing_turnend_guard_marker
 test_pi_diagnostic_rejects_previous_session_loaded_marker
+test_runtime_bound_truncates_loudly_and_exits_zero
+test_portable_timeout_escalates_term_resistant_process
+test_runtime_bound_leaves_a_healthy_digest_untouched
+test_runtime_bound_leaves_harness_ancestry_headroom
+test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
+test_reemit_keeps_repair_ownership_with_the_lock_holder
 
 echo "# fm-session-start.test.sh: all assertions passed"

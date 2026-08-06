@@ -91,6 +91,13 @@
 #          X-mode artifacts, project clones, or repair instructions.
 #          Unset/0 (the default) runs every sweep exactly as before - this flag
 #          is purely additive.
+#          Set FM_BOOTSTRAP_LOCKED=1 alongside it when the sweeps are skipped
+#          because THIS session already ran them while holding the fleet lock,
+#          rather than because it has no lock at all. The two cases differ in
+#          exactly one place: repair ownership. A locked session is told to
+#          restore a tangled primary checkout itself, while an unlocked one is
+#          told to leave that work to the lock holder. Unset/0 (the default)
+#          keeps detect-only meaning unlocked, exactly as before.
 #        fm-bootstrap.sh install <tool>...
 #          Install the named tools (only ones the captain approved).
 set -u
@@ -1057,7 +1064,7 @@ gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
 tangle_branch=$(fm_primary_tangle_branch "$FM_ROOT" 2>/dev/null || true)
 if [ -n "$tangle_branch" ]; then
   tangle_default=$(fm_default_branch "$FM_ROOT" 2>/dev/null || echo main)
-  if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" = 1 ]; then
+  if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" = 1 ] && [ "${FM_BOOTSTRAP_LOCKED:-0}" != 1 ]; then
     echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - read-only session must leave restore work to the session holding the fleet lock"
   else
     echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - restore the primary with: git -C $FM_ROOT checkout $tangle_default, then re-validate the branch in a proper worktree"

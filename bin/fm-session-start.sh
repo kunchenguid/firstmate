@@ -36,16 +36,21 @@
 #                       locked.
 #   3. wake-drain     - mutates the durable wake queue, so it also only runs
 #                       when locked.
-#   4. context digest - data/projects.md, data/secondmates.md, data/captain.md,
+#   4. supervision-instructions - the one emitted operating block for the
+#                       detected primary harness.
+#   5. context digest - data/projects.md, data/secondmates.md, data/captain.md,
 #                       data/captain-shared.md, data/learnings.md: read-only,
 #                       always safe, always runs.
-#   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
+#   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       state/.afk, and a cheap per-task endpoint-liveness read:
 #                       read-only, always runs.
-#   6. closing reminder - prints the context-specific watcher next step; this
+#   7. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
+#
+# Those seven names are also the runtime-bound stage list below, so a truncated
+# startup can name exactly which of them never ran.
 #
 # On a Pi primary, the supervision-block step also checks whether Pi's two
 # tracked primary extensions are loaded and prints a PI_WATCH_EXTENSION
@@ -67,7 +72,7 @@
 # tasks-axi and quota-axi tool checks, and tasks-axi availability - none of
 # which mutate shared state and all of which are safe to compute without
 # verified lock ownership.
-# Only projection cleanup, the five bootstrap mutating sweeps, and the
+# Only projection cleanup, the six bootstrap mutating sweeps, and the
 # wake-queue drain are skipped.
 # The context and fleet-state digests
 # below are always read-only, so they run unconditionally in both modes.
@@ -86,11 +91,43 @@
 # compatible tasks-axi is available, or `data/backlog.md` when the file body is
 # truly needed.
 #
-# Usage: fm-session-start.sh
+# RUNTIME BOUND: the digest is now executed on a session-open hook (see
+# bin/fm-sessionstart-run.sh), which blocks session initialization while it
+# runs, so an unbounded digest is no longer merely slow - it can strand a whole
+# session behind one hung subprocess. Not every step is individually bounded:
+# bootstrap's fleet sync is, but its `gh auth status` probe, tool version
+# probes, and secondmate liveness reads are not, and neither are the backlog
+# listing or the per-task endpoint reads. So the whole digest runs as ONE
+# bounded child of this script (FM_SESSION_START_TIMEOUT, default 120s). The
+# child writes the digest straight to this script's stdout, so everything it
+# emitted before the bound was hit is already delivered; the parent then prints
+# a loud STARTUP TRUNCATED banner naming the stage that did not finish and the
+# sections that were therefore never emitted, and still exits 0. The child
+# records its progress in FM_SESSION_START_STAGE_FILE, which is also the flag
+# that tells a child it is the child - the parent never recurses.
+# Hosts without timeout, gtimeout, or perl use the shared pure-Bash watchdog, so
+# the digest never runs without the same hard bound and process-group cleanup.
+#
+# Usage: fm-session-start.sh [--reemit]
 #   Prints the full ordered digest to stdout and always exits 0: this is a
 #   reporting command, not a gate. A lock refusal is reported as a loud
 #   banner inline, never a silent failure or a non-zero exit that would make
 #   an agent skip the rest of the digest.
+#
+#   --reemit  This process ALREADY took the helm at its own startup and has
+#             only lost its context (a /clear or a compaction). Skip the
+#             mutating sweeps that startup already reconciled - the stale Herdr
+#             projection cleanup and bootstrap's six mutating sweeps (fleet
+#             sync, secondmate convergence and liveness, PR-check migration,
+#             pending remote handoff retry, X-mode artifact writes) - and
+#             re-emit the rest. The wake-queue drain is NOT skipped: queued
+#             records are this turn's work queue, they arrived after startup,
+#             and a session that owns the lock is exactly the session that must
+#             take them. Lock acquisition still runs, because ownership must be
+#             re-verified rather than assumed: fm-lock.sh already treats a lock
+#             this session's own harness holds as its own, so the re-emit
+#             proceeds, while a lock another live session took meanwhile still
+#             produces the ordinary read-only path.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -99,6 +136,78 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+COMPLETION_FILE="$STATE/.session-start-complete"
+
+REEMIT=0
+for arg in "$@"; do
+  case "$arg" in
+    --reemit) REEMIT=1 ;;
+    -h|--help)
+      sed -n '2,/^set -u$/p' "$SCRIPT_DIR/fm-session-start.sh" | sed 's/^# \{0,1\}//; $d'
+      exit 0
+      ;;
+    *)
+      printf 'fm-session-start: unknown argument: %s\n' "$arg" >&2
+      printf 'usage: fm-session-start.sh [--reemit]\n' >&2
+      exit 2
+      ;;
+  esac
+done
+
+# --- 0. runtime bound ---------------------------------------------------------
+# The ordered stage list is the contract behind the truncation banner: the child
+# names the stage it is entering, and the parent reports every stage at or after
+# that one as never emitted. Keep it in the exact order the digest prints.
+SESSION_START_STAGES='lock bootstrap wake-queue supervision-instructions context fleet-state next-step'
+
+stage() {  # <stage-name>: breadcrumb for the parent's truncation banner
+  [ -n "${FM_SESSION_START_STAGE_FILE:-}" ] || return 0
+  printf '%s\n' "$1" > "$FM_SESSION_START_STAGE_FILE" 2>/dev/null || true
+}
+
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
+
+if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
+  SESSION_START_BUDGET=${FM_SESSION_START_TIMEOUT:-120}
+  # A non-positive or non-numeric budget is not a budget (`timeout 0` disables
+  # the deadline outright), so an unusable value falls back to the default
+  # rather than silently removing the bound.
+  case "$SESSION_START_BUDGET" in ''|*[!0-9]*|0) SESSION_START_BUDGET=120 ;; esac
+  SESSION_START_STAGE_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-session-start-stage.XXXXXX" 2>/dev/null) || SESSION_START_STAGE_FILE=
+  if [ -z "$SESSION_START_STAGE_FILE" ]; then
+    # Without a breadcrumb the bound still holds; only the banner's precision
+    # is lost, so the child still runs bounded.
+    SESSION_START_STAGE_FILE=/dev/null
+  fi
+  fm_run_timed "$SESSION_START_BUDGET" \
+    env FM_SESSION_START_STAGE_FILE="$SESSION_START_STAGE_FILE" \
+    "$SCRIPT_DIR/fm-session-start.sh" "$@"
+  SESSION_START_RC=$?
+  if [ "$SESSION_START_RC" -eq 124 ]; then
+    SESSION_START_LAST_STAGE=$(cat "$SESSION_START_STAGE_FILE" 2>/dev/null) || SESSION_START_LAST_STAGE=
+    [ -n "$SESSION_START_LAST_STAGE" ] || SESSION_START_LAST_STAGE=unknown
+    SESSION_START_PENDING=$(
+      printf '%s\n' "$SESSION_START_STAGES" | tr ' ' '\n' |
+        awk -v from="$SESSION_START_LAST_STAGE" '$0 == from {seen = 1} seen' | tr '\n' ' '
+    )
+    [ -n "${SESSION_START_PENDING# }" ] || SESSION_START_PENDING='(unknown - the digest may be incomplete anywhere)'
+    BAR='●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+    printf '\n%s\n' "$BAR"
+    printf '●  STARTUP TRUNCATED - SESSION START HIT ITS %ss RUNTIME BOUND\n' "$SESSION_START_BUDGET"
+    printf '●  It stopped during the "%s" stage, so everything above is COMPLETE\n' "$SESSION_START_LAST_STAGE"
+    printf '●  only up to that point.\n'
+    printf '●  RECONCILE these stages before acting on anything they would have shown:\n'
+    printf '●    %s\n' "${SESSION_START_PENDING% }"
+    printf '●  Rerun bin/fm-session-start.sh now to finish taking the helm. If it truncates\n'
+    printf '●  again, raise FM_SESSION_START_TIMEOUT and report the slow stage - a stage that\n'
+    printf '●  cannot finish inside the bound is a fleet problem, not a reporting detail.\n'
+    printf '%s\n' "$BAR"
+  fi
+  rm -f "$SESSION_START_STAGE_FILE" 2>/dev/null || true
+  exit 0
+fi
+
 PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 
 # shellcheck source=bin/fm-backend.sh
@@ -247,9 +356,19 @@ pi_extension_loaded() {
   [ "$marker_version" = "$expected_version" ] && [ "$marker_pid" = "$lock_pid" ]
 }
 
-section "SESSION START - $FM_HOME"
-
+if [ "$REEMIT" -eq 1 ]; then
+  section "SESSION START (CONTEXT RE-EMIT) - $FM_HOME"
+  printf 'This session already took the helm at its own startup and has only lost its\n'
+  printf 'context. Lock ownership is re-verified and the durable records below are\n'
+  printf 'reprinted, but the sweeps startup already reconciled - project clone refresh,\n'
+  printf 'secondmate convergence and liveness, PR-check migration, pending remote handoff\n'
+  printf 'retry, X-mode artifact writes, and stale Herdr child cleanup - are NOT repeated.\n'
+  printf 'Queued wakes ARE still drained: they arrived after startup and are this turn work.\n'
+else
+  section "SESSION START - $FM_HOME"
+fi
 # --- 1. lock -----------------------------------------------------------
+stage lock
 subsection "LOCK"
 LOCK_OUT=$("$SCRIPT_DIR/fm-lock.sh" 2>&1)
 LOCK_RC=$?
@@ -272,13 +391,19 @@ if [ "$LOCK_RC" -ne 0 ]; then
   }
 fi
 if [ "$READ_ONLY" -eq 0 ]; then
+  if [ "$REEMIT" -eq 0 ]; then
+    rm -f "$COMPLETION_FILE" 2>/dev/null || true
+  fi
   fm_trace_context_session_start "$CONFIG" "$STATE/.trace-context-effective"
 fi
 
 # --- 2. bootstrap --------------------------------------------------------
+stage bootstrap
 subsection "BOOTSTRAP"
 if [ "$READ_ONLY" -eq 1 ]; then
   BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
+elif [ "$REEMIT" -eq 1 ]; then
+  BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_LOCKED=1 "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
 else
   BOOT_OUT=$(
     "$SCRIPT_DIR/fm-herdr-session-cleanup.sh" 2>&1 || true
@@ -301,6 +426,7 @@ fi
 # authority, and another session may be actively draining it. It still runs
 # fm-guard.sh directly with non-mutating advisory text, so the same alarms
 # surface without repair commands.
+stage wake-queue
 subsection "WAKE QUEUE"
 if [ "$READ_ONLY" -eq 1 ]; then
   QLEN=0
@@ -318,6 +444,7 @@ else
 fi
 
 # --- 4. supervision operating instructions ----------------------------------
+stage supervision-instructions
 AFK_PRESENT=0
 [ -e "$STATE/.afk" ] && AFK_PRESENT=1
 X_MODE_PRESENT=0
@@ -344,7 +471,8 @@ fi
   --afk "$AFK_PRESENT" \
   --x-mode "$X_MODE_PRESENT"
 
-# --- 4. context digest -----------------------------------------------------
+# --- 5. context digest -----------------------------------------------------
+stage context
 section "CONTEXT"
 print_file_or_absent "$DATA/projects.md" "data/projects.md"
 print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
@@ -352,7 +480,8 @@ print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
 
-# --- 5. fleet-state digest ---------------------------------------------
+# --- 6. fleet-state digest ---------------------------------------------
+stage fleet-state
 section "FLEET STATE"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 
@@ -423,7 +552,8 @@ if fm_pf_relay_active "$FM_HOME" \
   fi
 fi
 
-# --- 6. closing reminder -----------------------------------------------
+# --- 7. closing reminder -----------------------------------------------
+stage next-step
 section "NEXT STEP"
 if [ "$READ_ONLY" -eq 1 ]; then
   cat <<'EOF'
@@ -467,5 +597,21 @@ of this command. Re-read a file only if this digest flagged it ABSENT (then
 rebuild or create it per AGENTS.md), its contents looked unparseable/corrupt,
 or an individual full status log is needed for older wake-event history.
 EOF
+
+if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
+  COMPLETION_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
+  case "$COMPLETION_PID" in
+    ''|*[!0-9]*) COMPLETION_PID= ;;
+  esac
+  COMPLETION_TMP=$(mktemp "$STATE/.session-start-complete.XXXXXX" 2>/dev/null || true)
+  if [ -n "$COMPLETION_PID" ] && [ -n "$COMPLETION_TMP" ] \
+    && printf '%s\n' "$COMPLETION_PID" > "$COMPLETION_TMP" 2>/dev/null \
+    && mv -f "$COMPLETION_TMP" "$COMPLETION_FILE" 2>/dev/null; then
+    :
+  else
+    [ -z "$COMPLETION_TMP" ] || rm -f "$COMPLETION_TMP" 2>/dev/null || true
+    printf '\nSESSION_START_COMPLETION: not recorded - the next clear or compact will run a full startup.\n'
+  fi
+fi
 
 exit 0
