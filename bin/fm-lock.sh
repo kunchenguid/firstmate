@@ -23,13 +23,31 @@ mkdir -p "$STATE" 2>/dev/null || {
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
+# Human-readable reason a non-live lock-holder pid $1 was classified stale, for
+# the status command's diagnostic output only; never consulted for acquire
+# decisions, which rely solely on fm_harness_pid_alive.
+fm_stale_reason() {
+  local pid=$1
+  if ! kill -0 "$pid" 2>/dev/null; then
+    echo "dead"
+  elif fm_pid_is_zombie "$pid"; then
+    echo "zombie, never reaped by its parent"
+  else
+    echo "not a harness"
+  fi
+}
+
 if [ "${1:-}" = "status" ]; then
   if [ ! -f "$LOCK" ]; then echo "lock: free"; exit 0; fi
   old=$(cat "$LOCK" 2>/dev/null) || {
     echo "lock: unreadable"
     exit 0
   }
-  if fm_harness_pid_alive "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
+  if fm_harness_pid_alive "$old"; then
+    echo "lock: held by live harness pid $old"
+  else
+    echo "lock: stale (pid $old $(fm_stale_reason "$old"))"
+  fi
   exit 0
 fi
 
