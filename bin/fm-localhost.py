@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import shlex
 import shutil
 import subprocess
@@ -53,6 +54,7 @@ $OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($f
 $Port = [int]$args[0]
 $PidToStop = [int]$args[1]
 $ExpectedCommandHash = [string]$args[2]
+$ExpectedAstroScript = [string]$args[3]
 $Connections = @(Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object { [int]$_.LocalPort -eq $Port })
 if ($Connections.Count -lt 1) { throw 'reserved port has no Windows listener' }
 foreach ($Connection in $Connections) {
@@ -66,7 +68,11 @@ if ([string]::IsNullOrWhiteSpace($Command)) { throw 'target command is unavailab
 $Bytes = [Text.Encoding]::UTF8.GetBytes($Command)
 $Hash = ([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($Bytes))).Replace('-', '').ToLowerInvariant()
 if ($Hash -ne $ExpectedCommandHash) { throw 'target command changed' }
-if ($Command -notmatch '(?i)astro' -or $Command -notmatch '(?i)(^|\s)dev(\s|$)') { throw 'target is not an Astro development server' }
+$NormalizedCommand = $Command.Replace('\', '/')
+$NormalizedScript = $ExpectedAstroScript.Replace('\', '/')
+$NodePattern = '(?i)^\s*(?:"[^"]*/node\.exe"|(?:[^"\s]+/)?node\.exe)\s+'
+$AstroDevPattern = $NodePattern + '"?' + [regex]::Escape($NormalizedScript) + '"?\s+dev(?:\s|$)'
+if ($NormalizedCommand -notmatch $AstroDevPattern) { throw 'target is not the verified Astro development launcher' }
 if ($Command -match '(?i)(^|\s)(preview|build)(\s|$)' -or $Command -match '(?i)(node_env\s*=\s*production|--mode(?:=|\s+)production)') { throw 'target looks production-like' }
 Stop-Process -Id $PidToStop -ErrorAction Stop
 for ($i = 0; $i -lt 100; $i++) {
@@ -131,6 +137,12 @@ class Inspection:
     wsl: list[Listener]
     windows_error: str = ""
     wsl_error: str = ""
+
+
+@dataclasses.dataclass(frozen=True)
+class OwnedLaunch:
+    process: subprocess.Popen
+    pgid: int
 
 
 class SafeRefusal(RuntimeError):
@@ -264,12 +276,48 @@ def redact_command(raw: str) -> str:
     sensitive = r"(?:token|secret|password|passwd|api[-_]?key|authorization|credential|cookie|session)"
     value = re.sub(rf"(?i)({sensitive}\s*=\s*)(?:\"[^\"]*\"|'[^']*'|[^\s]+)", r"\1<redacted>", value)
     value = re.sub(rf"(?i)(--?{sensitive}(?:=|\s+))(?:\"[^\"]*\"|'[^']*'|[^\s]+)", r"\1<redacted>", value)
+    value = re.sub(
+        rf'''(?i)(["']?{sensitive}["']?\s*:\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^,\s}}]+)''',
+        r"\1<redacted>",
+        value,
+    )
     value = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1<redacted>", value)
     value = re.sub(r"(?i)\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?", "<redacted-id>", value)
     value = re.sub(r"\b[A-Za-z0-9_-]{48,}\b", "<redacted>", value)
     if len(value) > 512:
         value = value[:500] + " <truncated>"
     return value
+
+
+def command_tokens(raw: str) -> list[str]:
+    if not raw or raw.count('"') % 2:
+        return []
+    return [
+        match.group(1) if match.group(1) is not None else match.group(2)
+        for match in re.finditer(r'"([^"]*)"|([^\s]+)', raw)
+    ]
+
+
+def astro_dev_script(command: str, executable: str, checkout: str) -> Path | None:
+    tokens = command_tokens(command)
+    executable_name = re.split(r"[\\/]", executable)[-1].lower() if executable else ""
+    first_name = re.split(r"[\\/]", tokens[0])[-1].lower() if tokens else ""
+    if len(tokens) < 3 or first_name not in {"node", "node.exe"} or (executable and executable_name != "node.exe"):
+        return None
+    script = windows_to_wsl(tokens[1])
+    if script is None or checkout == "unknown":
+        return None
+    try:
+        script = script.resolve(strict=True)
+        relative = script.relative_to(Path(checkout).resolve())
+    except (OSError, ValueError):
+        return None
+    parts = tuple(part.casefold() for part in relative.parts)
+    if parts[:2] != ("node_modules", "astro") or parts[2:] not in (("astro.js",), ("astro.mjs",)):
+        return None
+    if tokens[2].casefold() != "dev":
+        return None
+    return script
 
 
 def command_paths(command: str, executable: str) -> list[Path]:
@@ -303,7 +351,7 @@ def checkout_from_windows_command(command: str, executable: str) -> Path | None:
     return next(iter(found)) if len(found) == 1 else None
 
 
-def classify_windows(process: str, command: str, executable: str) -> str:
+def classify_windows(process: str, command: str, executable: str, checkout: str = "unknown") -> str:
     lower_name = Path(process).name.lower()
     lower_executable = re.split(r"[\\/]", executable)[-1].lower() if executable else ""
     lower_command = command.lower()
@@ -317,14 +365,13 @@ def classify_windows(process: str, command: str, executable: str) -> str:
         r"node_env\s*=\s*production|--mode(?:=|\s+)production", lower_command
     ):
         return "production-like"
-    if "astro" in lower_command and re.search(r"(?:^|\s)dev(?:\s|$)", lower_command):
+    if astro_dev_script(command, executable, checkout):
         return "native-windows-node-astro-dev"
     return "unknown-node"
 
 
-def classify_wsl(process: str, command: str) -> str:
-    lower = command.lower()
-    if Path(process).name.lower() in {"node", "nodejs"} and "astro" in lower and re.search(r"(?:^|\s)dev(?:\s|$)", lower):
+def classify_wsl(process: str, command: str, checkout: str = "unknown") -> str:
+    if Path(process).name.lower() in {"node", "nodejs"} and astro_dev_script(command, "", checkout):
         return "wsl-node-astro-dev"
     return "unknown-wsl-process"
 
@@ -385,6 +432,8 @@ def run_powershell(script: str, *args: str, timeout: float = 20) -> str:
         )
     except subprocess.TimeoutExpired as exc:
         raise SafeRefusal("Windows inspection timed out") from exc
+    except OSError as exc:
+        raise SafeRefusal("Windows inspection unavailable") from exc
     except SafeRefusal as exc:
         if str(exc) == "Windows inspection unavailable":
             raise
@@ -428,7 +477,7 @@ def windows_listeners(port: int, state: Path) -> list[Listener]:
                 executable_raw=executable,
                 git=info,
                 tasks=task_associations(state, info.checkout, pid),
-                classification=classify_windows(process, command, executable),
+                classification=classify_windows(process, command, executable, info.checkout),
             )
         )
     return listeners
@@ -444,8 +493,8 @@ def proc_root() -> Path:
 def wsl_listeners(port: int, state: Path) -> list[Listener]:
     try:
         output = command_output(["ss", "-H", "-ltnp", f"sport = :{port}"])
-    except (SafeRefusal, subprocess.TimeoutExpired) as exc:
-        raise SafeRefusal("WSL listener inspection failed") from exc
+    except (OSError, SafeRefusal, subprocess.TimeoutExpired) as exc:
+        raise SafeRefusal("WSL listener inspection unavailable") from exc
     found: dict[tuple[int, str], tuple[str, str]] = {}
     for line in output.splitlines():
         address_match = re.search(r"\s([^\s]+:%s)\s" % port, line)
@@ -480,7 +529,7 @@ def wsl_listeners(port: int, state: Path) -> list[Listener]:
                 executable_raw="",
                 git=info,
                 tasks=task_associations(state, info.checkout, pid),
-                classification=classify_wsl(process, command_raw),
+                classification=classify_wsl(process, command_raw, info.checkout),
             )
         )
     return listeners
@@ -492,10 +541,14 @@ def inspect_system(port: int, state: Path) -> Inspection:
         result.windows = windows_listeners(port, state)
     except SafeRefusal as exc:
         result.windows_error = str(exc)
+    except OSError:
+        result.windows_error = "Windows inspection unavailable"
     try:
         result.wsl = wsl_listeners(port, state)
     except SafeRefusal as exc:
         result.wsl_error = str(exc)
+    except OSError:
+        result.wsl_error = "WSL listener inspection unavailable"
     return result
 
 
@@ -679,7 +732,7 @@ def launcher_command(project: Path, port: int) -> list[str]:
         tokens = shlex.split(script) if isinstance(script, str) else []
     except ValueError as exc:
         raise SafeRefusal("project dev launcher is not proven to be Astro dev") from exc
-    if any(token in {";", "&&", "||", "|", ">", ">>", "<"} for token in tokens):
+    if not isinstance(script, str) or re.search(r"[\x00-\x1f\x7f;&|<>$`\\]", script):
         raise SafeRefusal("project dev launcher is not proven to be Astro dev")
     command_tokens = tokens[1:] if tokens[:1] == ["npx"] else tokens
     is_astro_dev = (
@@ -695,22 +748,49 @@ def launcher_command(project: Path, port: int) -> list[str]:
     return [npm, "run", "dev", "--", "--host", "0.0.0.0", "--port", str(port)]
 
 
-def launch_expected(project: Path, port: int, evidence: Path) -> int:
+def launch_expected(project: Path, port: int, evidence: Path) -> OwnedLaunch:
     argv = launcher_command(project, port)
     log_path = evidence.with_suffix(".launcher.log")
     descriptor = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     log = os.fdopen(descriptor, "wb", buffering=0)
-    process = subprocess.Popen(
-        argv,
-        cwd=project,
-        stdin=subprocess.DEVNULL,
-        stdout=log,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-        close_fds=True,
-    )
-    log.close()
-    return process.pid
+    try:
+        process = subprocess.Popen(
+            argv,
+            cwd=project,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+        )
+    finally:
+        log.close()
+    try:
+        pgid = os.getpgid(process.pid)
+    except OSError:
+        process.kill()
+        process.wait()
+        raise
+    if pgid != process.pid:
+        process.kill()
+        process.wait()
+        raise SafeRefusal("owned launcher process group was not isolated")
+    return OwnedLaunch(process=process, pgid=pgid)
+
+
+def cleanup_owned_launch(launch: OwnedLaunch) -> None:
+    try:
+        os.killpg(launch.pgid, signal.SIGTERM)
+    except (OSError, ProcessLookupError):
+        return
+    try:
+        launch.process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(launch.pgid, signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        pass
 
 
 def wsl_route_fingerprint(url: str) -> dict[str, object]:
@@ -759,20 +839,33 @@ def verified_pair(inspection: Inspection, expected: GitInfo, expected_sha: str) 
         return False, "windows-inspection-unavailable"
     if inspection.wsl_error:
         return False, "wsl-inspection-unavailable"
-    if not inspection.windows or any(item.classification != "wslrelay" for item in inspection.windows):
+    if len(inspection.windows) != 1 or inspection.windows[0].classification != "wslrelay":
         return False, "windows-owner-is-not-wslrelay"
-    if not inspection.wsl:
+    if len(inspection.wsl) != 1:
         return False, "expected-wsl-listener-missing"
-    for item in inspection.wsl:
-        if (
-            item.classification != "wsl-node-astro-dev"
-            or item.git.checkout != expected.checkout
-            or item.git.sha != expected_sha
-            or item.git.dirty != "clean"
-            or item.git.source != expected.source
-        ):
-            return False, "wsl-listener-identity-mismatch"
+    item = inspection.wsl[0]
+    if (
+        item.classification != "wsl-node-astro-dev"
+        or item.git.checkout != expected.checkout
+        or item.git.sha != expected_sha
+        or item.git.dirty != "clean"
+        or item.git.source != expected.source
+    ):
+        return False, "wsl-listener-identity-mismatch"
     return True, "pair-proven"
+
+
+def post_stop_restart_verdict(inspection: Inspection, expected: GitInfo, expected_sha: str) -> str:
+    if inspection.windows_error:
+        return "refuse:windows-inspection-unavailable"
+    if inspection.wsl_error:
+        return "refuse:wsl-inspection-unavailable"
+    if inspection.wsl:
+        pair_ok, reason = verified_pair(inspection, expected, expected_sha)
+        return "already-verified" if pair_ok else f"refuse:post-stop-reserved-port-not-safe:{reason}"
+    if len(inspection.windows) > 1 or any(item.classification != "wslrelay" for item in inspection.windows):
+        return "refuse:post-stop-reserved-port-not-safe:windows-owner-is-not-wslrelay"
+    return "restart-safe"
 
 
 def verify(project: Path, port: int, expected_sha: str, expected: GitInfo, state: Path, *, render: bool = True) -> bool:
@@ -782,18 +875,22 @@ def verify(project: Path, port: int, expected_sha: str, expected: GitInfo, state
             render_inspection("verify", project, port, expected_sha, expected, inspection)
             emit("verification", verdict="refuse", reason=expected_checkout_verdict(expected, expected_sha))
         return False
+    inspection = inspect_system(port, state)
+    pair_ok, reason = verified_pair(inspection, expected, expected_sha)
+    if not pair_ok:
+        if render:
+            render_inspection("verify", project, port, expected_sha, expected, inspection)
+            emit("verification", verdict="refuse", reason=reason)
+        return False
     url = f"http://localhost:{port}/"
     try:
         wsl_fingerprint = wsl_route_fingerprint(url)
         windows_fingerprint = windows_route_fingerprint(url)
     except SafeRefusal as exc:
-        inspection = inspect_system(port, state)
         if render:
             render_inspection("verify", project, port, expected_sha, expected, inspection)
             emit("verification", verdict="refuse", reason=str(exc))
         return False
-    inspection = inspect_system(port, state)
-    pair_ok, reason = verified_pair(inspection, expected, expected_sha)
     fingerprints_match = (
         wsl_fingerprint == windows_fingerprint
         and 200 <= int(wsl_fingerprint["status"]) < 400
@@ -815,8 +912,16 @@ def terminate_exact(listener: Listener, port: int) -> None:
         raise SafeRefusal("exact PID target is no longer a proven native Windows Astro dev server")
     if Path(listener.process).name.lower() == "wslrelay.exe":
         raise SafeRefusal("wslrelay.exe is never a termination target")
+    if listener.git.checkout == "unknown":
+        raise SafeRefusal("exact PID target checkout is unavailable")
+    astro_script = astro_dev_script(listener.command_raw, listener.executable_raw, listener.git.checkout)
+    if astro_script is None:
+        raise SafeRefusal("exact PID target Astro script path is unavailable")
+    expected_script = wsl_to_windows(astro_script)
+    if expected_script == "unknown":
+        raise SafeRefusal("exact PID target Astro script path is unavailable")
     command_hash = hashlib.sha256(listener.command_raw.encode("utf-8")).hexdigest()
-    output = run_powershell(TERMINATE_PS, str(port), str(listener.pid), command_hash, timeout=20).strip()
+    output = run_powershell(TERMINATE_PS, str(port), str(listener.pid), command_hash, expected_script, timeout=20).strip()
     if output != "terminated":
         raise SafeRefusal("exact PID termination was not confirmed")
 
@@ -829,20 +934,33 @@ def recover(project: Path, port: int, expected_sha: str, expected: GitInfo, stat
         emit("recovery-result", verdict=verdict, mutated="no")
         return False
     target = before.windows[0]
-    launcher_command(project, port)  # Prove the only allowed restart command before mutation.
+    try:
+        launcher_command(project, port)
+    except SafeRefusal as exc:
+        emit("recovery-result", verdict=f"refuse:{str(exc)}", mutated="no")
+        return False
     immediate = inspect_system(port, state)
     immediate_verdict = recovery_verdict(immediate, expected, expected_sha)
     if immediate_verdict != "eligible" or not same_listener_identity(before.windows, immediate.windows):
         emit("recovery-result", verdict="refuse:pid-or-command-reresolution-changed", mutated="no")
         return False
-    evidence_lines = [*before_lines, emit("immediate-recheck", verdict=immediate_verdict, pid=target.pid, identity="unchanged")]
+    mutation = inspect_system(port, state)
+    mutation_verdict = recovery_verdict(mutation, expected, expected_sha)
+    if mutation_verdict != "eligible" or not same_listener_identity(immediate.windows, mutation.windows):
+        emit("recovery-result", verdict="refuse:pid-or-command-reresolution-changed", mutated="no")
+        return False
+    evidence_lines = [
+        *before_lines,
+        emit("immediate-recheck", verdict=immediate_verdict, pid=target.pid, identity="unchanged"),
+        emit("mutation-recheck", verdict=mutation_verdict, pid=target.pid, identity="unchanged"),
+    ]
     try:
         evidence = write_evidence(state, project, port, target.pid, evidence_lines)
     except OSError:
         emit("recovery-result", verdict="refuse:private-evidence-write-failed", mutated="no")
         return False
     try:
-        terminate_exact(immediate.windows[0], port)
+        terminate_exact(mutation.windows[0], port)
     except SafeRefusal as exc:
         emit(
             "recovery-result",
@@ -852,18 +970,17 @@ def recover(project: Path, port: int, expected_sha: str, expected: GitInfo, stat
         )
         return False
     post_stop = inspect_system(port, state)
-    expected_running = bool(post_stop.wsl) and all(
-        item.classification == "wsl-node-astro-dev"
-        and item.git.checkout == expected.checkout
-        and item.git.sha == expected_sha
-        and item.git.dirty == "clean"
-        and item.git.source == expected.source
-        for item in post_stop.wsl
-    )
+    post_stop_verdict = post_stop_restart_verdict(post_stop, expected, expected_sha)
+    render_inspection("recover-post-stop", project, port, expected_sha, expected, post_stop)
+    if post_stop_verdict not in {"restart-safe", "already-verified"}:
+        emit("recovery-result", verdict=f"failed:{post_stop_verdict.removeprefix('refuse:')}", mutated="windows-pid-terminated", evidence=evidence)
+        return False
     launcher_pid: int | str = "already-running"
-    if not expected_running:
+    launcher_process = None
+    if post_stop_verdict == "restart-safe":
         try:
-            launcher_pid = launch_expected(project, port, evidence)
+            launcher_process = launch_expected(project, port, evidence)
+            launcher_pid = launcher_process.process.pid
         except (OSError, SafeRefusal) as exc:
             emit("recovery-result", verdict=f"failed:{str(exc)}", mutated="windows-pid-terminated", evidence=evidence)
             return False
@@ -887,6 +1004,8 @@ def recover(project: Path, port: int, expected_sha: str, expected: GitInfo, stat
             return True
         time.sleep(0.2)
     verify(project, port, expected_sha, expected, state, render=True)
+    if launcher_process is not None:
+        cleanup_owned_launch(launcher_process)
     emit(
         "recovery-result",
         verdict="failed:post-recovery-verification",
@@ -911,10 +1030,12 @@ def parser() -> argparse.ArgumentParser:
   process environment, credentials, production data, or hosted data.
 
   recover is deliberately narrower than inspect. It may stop exactly one PID
-  only after two complete observations independently prove that the same PID
-  still owns every native-Windows binding of the reserved port; the unchanged
-  process is node.exe running `astro ... dev`; its command path resolves to a
-  checkout of the same normalized Git source; that checkout is dirty,
+  only after complete observations, including a fresh mutation-boundary
+  recheck, independently prove that the same PID still owns every
+  native-Windows binding of the reserved port; the unchanged
+  process is node.exe whose first script argument resolves to that checkout's
+  node_modules/astro/astro.js or astro.mjs and is followed immediately by `dev`;
+  that checkout is dirty,
   divergent, or otherwise noncanonical; no task record names that checkout or
   PID; WSL has no unrelated port owner; and the requested replacement is clean,
   on the repository default branch, at expected-sha. Unknown commands, changed
@@ -927,7 +1048,7 @@ def parser() -> argparse.ArgumentParser:
   checkout, Git, and task evidence. It writes a mode-0600 record beneath
   $FM_HOME/state/localhost-evidence before invoking fixed PowerShell that again
   requires the exact PID, port, node.exe identity, unchanged command hash, and
-  Astro dev classification. After the exact PID exits, it runs only the
+  exact Astro script path followed by `dev`. After the exact PID exits, it runs only the
   project's package.json `scripts.dev` when that script is proven to be Astro,
   using `npm run dev -- --host 0.0.0.0 --port <port>`; an already-running
   expected WSL server is reused rather than duplicated.

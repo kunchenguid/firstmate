@@ -693,10 +693,16 @@ ok - stale native Windows Astro shadow recovers by exact PID to wslrelay plus cl
 ok - healthy wslrelay plus clean WSL server passes with matching browser-like route fingerprints
 ok - active Firstmate task ownership refuses recovery without termination
 ok - PID or command change between observations refuses exact-PID recovery
+ok - node worker commands containing Astro words refuse exact-PID recovery
 ok - unknown commands and unrelated Windows repositories refuse without termination
 ok - unavailable Windows inspection refuses recovery without mutation
+ok - unavailable WSL inspection refuses recovery without mutation
+ok - verify proves the listener pair before contacting localhost
+ok - fresh mutation-boundary source and task proof blocks termination
+ok - post-stop inspection failure blocks any restart
+ok - Astro launcher scripts with shell metacharacters refuse recovery
 ok - post-recovery Windows/WSL route fingerprint mismatch fails verification
 ```
 
-The suite covers Windows listener JSON parsing, Windows drive and WSL UNC conversion, WSL-to-Windows conversion, Git source classification, command redaction, exact PID and command re-resolution, unavailable inspection, unrelated, unknown, or production-like processes, active task association, the never-terminate relay boundary, the healthy relay pair, the stale native Astro recovery path, and mismatched post-recovery route fingerprints.
+The suite covers Windows listener JSON parsing, Windows drive and WSL UNC conversion, WSL-to-Windows conversion, exact Astro script/dev classification, Git source classification, command redaction, exact PID and full mutation-boundary re-resolution, unavailable inspection, route-proof ordering, unrelated, unknown, or production-like processes, active task association, the never-terminate relay boundary, the healthy relay pair, the stale native Astro recovery path, launcher shell validation and cleanup, and mismatched post-recovery route fingerprints.
 Host-specific acceptance still requires `verify` against the actual project/port/expected-SHA tuple; private evidence remains under the active Firstmate home's gitignored `state/` tree rather than this maintained record.

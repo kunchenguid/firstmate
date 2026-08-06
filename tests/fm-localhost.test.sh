@@ -24,10 +24,12 @@ case "$joined" in
     printf 'terminated\n'
     ;;
   *HttpClient*)
+    printf 'route\n' >> "${FM_ROUTE_LOG:?}"
     cat "${FM_WIN_ROUTE_JSON:?}"
     ;;
   *Get-NetTCPConnection*)
     [ "${FM_WINDOWS_INSPECTION_FAIL:-0}" != 1 ] || exit 1
+    [ ! -f "${FM_KILLED_MARKER:?}" ] || [ "${FM_POST_STOP_WINDOWS_FAIL:-0}" != 1 ] || exit 1
     if [ -f "${FM_KILLED_MARKER:?}" ] || [ "${FM_WIN_ALWAYS_RELAY:-0}" = 1 ]; then
       cat "${FM_WIN_RELAY_JSON:?}"
       exit 0
@@ -36,7 +38,12 @@ case "$joined" in
     [ ! -f "${FM_INSPECT_COUNT:?}" ] || count=$(cat "$FM_INSPECT_COUNT")
     count=$((count + 1))
     printf '%s\n' "$count" > "$FM_INSPECT_COUNT"
-    if [ "$count" -ge 2 ] && [ -n "${FM_WIN_SECOND_JSON:-}" ]; then
+    if [ "$count" -ge 3 ] && [ -n "${FM_WIN_THIRD_JSON:-}" ]; then
+      if [ -n "${FM_THIRD_TASK_FILE:-}" ]; then
+        printf 'project=%s\n' "${FM_THIRD_TASK_PROJECT:?}" > "$FM_THIRD_TASK_FILE"
+      fi
+      cat "$FM_WIN_THIRD_JSON"
+    elif [ "$count" -ge 2 ] && [ -n "${FM_WIN_SECOND_JSON:-}" ]; then
       cat "$FM_WIN_SECOND_JSON"
     else
       cat "${FM_WIN_INITIAL_JSON:?}"
@@ -54,6 +61,8 @@ case "${FM_WSL_MODE:-none}" in
   always) show=1 ;;
   after-launch) [ -f "${FM_LAUNCH_MARKER:?}" ] && show=1 ;;
 esac
+[ "${FM_WSL_INSPECTION_FAIL:-0}" != 1 ] || exit 1
+[ ! -f "${FM_KILLED_MARKER:?}" ] || [ "${FM_POST_STOP_WSL_FAIL:-0}" != 1 ] || exit 1
 if [ "$show" -eq 1 ]; then
   printf 'LISTEN 0 4096 0.0.0.0:%s 0.0.0.0:* users:(("node",pid=%s,fd=20))\n' \
     "${FM_TEST_PORT:?}" "${FM_WSL_PID:?}"
@@ -65,6 +74,10 @@ cat > "$FAKEBIN/npm" <<'SH'
 set -u
 printf '%s\n' "$*" > "${FM_NPM_LOG:?}"
 : > "${FM_LAUNCH_MARKER:?}"
+if [ "${FM_NPM_STAY_ALIVE:-0}" = 1 ]; then
+  trap 'exit 0' TERM INT
+  while :; do sleep 1; done
+fi
 SH
 
 chmod +x "$FAKEBIN/powershell.exe" "$FAKEBIN/ss" "$FAKEBIN/npm"
@@ -115,7 +128,7 @@ JSON
 
   write_listener_json "$dir/win-initial.json" 43123 127.0.0.1 4100 node.exe \
     'C:\Program Files\nodejs\node.exe' \
-    '"C:\Program Files\nodejs\node.exe" "C:\repos\stale checkout\node_modules\astro\astro.js" dev --token super-secret-value --vm-id {1f662e3a-0323-4e37-a59f-304f0161cf55}'
+    '"C:\Program Files\nodejs\node.exe" "C:\repos\stale checkout\node_modules\astro\astro.js" dev --token super-secret-value --header "X-Api-Key: header-secret" --json {"token":"json-secret"} --vm-id {1f662e3a-0323-4e37-a59f-304f0161cf55}'
   write_listener_json "$dir/win-relay.json" 43123 0.0.0.0 5100 wslrelay.exe \
     'C:\Windows\System32\wslrelay.exe' ''
   git -C "$dir/expected" rev-parse HEAD > "$dir/expected.sha"
@@ -126,6 +139,7 @@ run_case() {
   local dir=$1 mode=$2 out=$3
   shift 3
   rm -f "$dir/inspect-count" "$dir/killed" "$dir/launched" "$dir/npm.log"
+  rm -f "$dir/route.log"
   : > "$dir/stop.log"
   env \
     PATH="$FAKEBIN:$PATH" \
@@ -142,10 +156,17 @@ run_case() {
     FM_WIN_INITIAL_JSON="$dir/win-initial.json" \
     FM_WIN_RELAY_JSON="$dir/win-relay.json" \
     FM_WIN_ROUTE_JSON="$dir/win-route.json" \
+    FM_ROUTE_LOG="$dir/route.log" \
     FM_KILLED_MARKER="$dir/killed" \
     FM_STOP_LOG="$dir/stop.log" \
     FM_LAUNCH_MARKER="$dir/launched" \
     FM_NPM_LOG="$dir/npm.log" \
+    FM_NPM_STAY_ALIVE="${FM_NPM_STAY_ALIVE:-0}" \
+    FM_WIN_THIRD_JSON="${FM_WIN_THIRD_JSON:-}" \
+    FM_THIRD_TASK_FILE="${FM_THIRD_TASK_FILE:-}" \
+    FM_THIRD_TASK_PROJECT="${FM_THIRD_TASK_PROJECT:-}" \
+    FM_POST_STOP_WINDOWS_FAIL="${FM_POST_STOP_WINDOWS_FAIL:-0}" \
+    FM_POST_STOP_WSL_FAIL="${FM_POST_STOP_WSL_FAIL:-0}" \
     "$@" \
     "$HELPER" "$mode" "$dir/expected" 43123 "$(cat "$dir/expected.sha")" > "$out" 2>&1
 }
@@ -162,6 +183,9 @@ test_listener_parsing_path_conversion_source_and_redaction() {
   assert_grep 'classification=native-windows-node-astro-dev' "$out" "Astro development server was not classified"
   assert_grep '--token <redacted>' "$out" "sensitive command flag was not redacted"
   assert_no_grep 'super-secret-value' "$out" "raw command secret reached output"
+  assert_grep 'X-Api-Key: <redacted>' "$out" "header credential was not redacted"
+  assert_no_grep 'header-secret' "$out" "header credential reached output"
+  assert_no_grep 'json-secret' "$out" "JSON credential reached output"
   assert_no_grep '1f662e3a-0323-4e37-a59f-304f0161cf55' "$out" "raw local process identifier reached output"
 
   local unc_command
@@ -241,6 +265,21 @@ test_pid_or_command_change_refuses_on_immediate_reresolution() {
   pass "PID or command change between observations refuses exact-PID recovery"
 }
 
+test_worker_with_astro_words_refuses() {
+  local dir out
+  dir=$(make_case worker)
+  out="$dir/out"
+  write_listener_json "$dir/win-initial.json" 43123 127.0.0.1 4100 node.exe \
+    'C:\Program Files\nodejs\node.exe' \
+    '"C:\Program Files\nodejs\node.exe" "C:\repos\stale checkout\worker.js" --name astro dev'
+  if FM_WSL_MODE=none run_case "$dir" recover "$out"; then
+    fail "worker command containing Astro words was accepted"
+  fi
+  assert_grep 'refuse:windows-process-is-not-proven-node-astro-dev' "$out" "worker command did not refuse"
+  [ ! -s "$dir/stop.log" ] || fail "worker command refusal still called termination"
+  pass "node worker commands containing Astro words refuse exact-PID recovery"
+}
+
 test_unknown_and_unrelated_windows_processes_refuse() {
   local dir out unrelated
   dir=$(make_case unknown)
@@ -287,17 +326,89 @@ test_windows_inspection_failure_is_safe() {
   pass "unavailable Windows inspection refuses recovery without mutation"
 }
 
+test_wsl_inspection_failure_is_safe() {
+  local dir out
+  dir=$(make_case wsl-inspection-failure)
+  out="$dir/out"
+  if FM_WSL_MODE=none FM_WSL_INSPECTION_FAIL=1 run_case "$dir" recover "$out"; then
+    fail "WSL inspection failure was accepted"
+  fi
+  assert_grep 'refuse:wsl-inspection-unavailable' "$out" "WSL inspection failure did not produce a safe refusal"
+  [ ! -s "$dir/stop.log" ] || fail "WSL inspection failure still called termination"
+  pass "unavailable WSL inspection refuses recovery without mutation"
+}
+
+test_verify_proves_pair_before_route_requests() {
+  local dir out
+  dir=$(make_case verify-order)
+  out="$dir/out"
+  if FM_WSL_MODE=none run_case "$dir" verify "$out"; then
+    fail "unverified localhost route passed"
+  fi
+  [ ! -s "$dir/route.log" ] || fail "verify fingerprinted localhost before proving ownership"
+  assert_grep 'reason=windows-owner-is-not-wslrelay' "$out" "verify did not report the unverified owner"
+  pass "verify proves the listener pair before contacting localhost"
+}
+
+test_mutation_recheck_refuses_new_task() {
+  local dir out
+  dir=$(make_case mutation-task)
+  out="$dir/out"
+  if FM_WSL_MODE=none FM_WIN_THIRD_JSON="$dir/win-initial.json" \
+    FM_THIRD_TASK_FILE="$dir/state/live.meta" FM_THIRD_TASK_PROJECT="$dir/mount/c/repos/stale checkout" \
+    run_case "$dir" recover "$out"; then
+    fail "active task appearing at mutation boundary was accepted"
+  fi
+  assert_grep 'refuse:pid-or-command-reresolution-changed' "$out" "mutation-boundary task was not refused"
+  [ ! -s "$dir/stop.log" ] || fail "mutation-boundary task refusal still called termination"
+  pass "fresh mutation-boundary source and task proof blocks termination"
+}
+
+test_post_stop_inspection_failure_blocks_restart() {
+  local dir out
+  dir=$(make_case post-stop-failure)
+  out="$dir/out"
+  if FM_WSL_MODE=after-launch FM_POST_STOP_WINDOWS_FAIL=1 run_case "$dir" recover "$out"; then
+    fail "post-stop inspection failure was accepted"
+  fi
+  assert_grep 'failed:windows-inspection-unavailable' "$out" "post-stop inspection failure was not reported"
+  [ ! -e "$dir/npm.log" ] || fail "post-stop inspection failure launched npm"
+  [ "$(wc -l < "$dir/stop.log" | tr -d ' ')" = 1 ] || fail "post-stop inspection failure did not preserve exact termination"
+  pass "post-stop inspection failure blocks any restart"
+}
+
+test_launcher_script_rejects_shell_metacharacters() {
+  local dir out
+  dir=$(make_case launcher-shell)
+  out="$dir/out"
+  printf '%s\n' '{"scripts":{"dev":"astro dev $(touch injected-file)"}}' > "$dir/expected/package.json"
+  git -C "$dir/expected" add package.json
+  git -C "$dir/expected" commit -qm malicious-launcher
+  git -C "$dir/expected" rev-parse HEAD > "$dir/expected.sha"
+  if FM_WSL_MODE=none run_case "$dir" recover "$out"; then
+    fail "shell metacharacters in the launcher were accepted"
+  fi
+  assert_grep 'refuse:project dev launcher is not proven to be Astro dev' "$out" "launcher shell metacharacters did not refuse"
+  assert_no_grep 'Traceback' "$out" "launcher refusal escaped as a traceback"
+  [ ! -s "$dir/stop.log" ] || fail "launcher refusal still called termination"
+  pass "Astro launcher scripts with shell metacharacters refuse recovery"
+}
+
 test_post_recovery_fingerprint_mismatch_fails() {
   local dir out
   dir=$(make_case route-mismatch)
   out="$dir/out"
   printf '{"status":200,"sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","length":4}\n' > "$dir/win-route.json"
-  if FM_WSL_MODE=after-launch run_case "$dir" recover "$out"; then
+  if FM_WSL_MODE=after-launch FM_NPM_STAY_ALIVE=1 run_case "$dir" recover "$out"; then
     fail "post-recovery route mismatch passed"
   fi
   assert_grep 'failed:post-recovery-verification' "$out" "post-recovery mismatch was not reported"
   assert_grep 'route-fingerprint-mismatch' "$out" "route mismatch reason was not reported"
   [ "$(wc -l < "$dir/stop.log" | tr -d ' ')" = 1 ] || fail "mismatch case did not preserve exact single-PID termination"
+  local launcher_pid
+  launcher_pid=$(sed -n 's/.*launcher_pid=\([0-9][0-9]*\).*/\1/p' "$out" | tail -1)
+  [ -n "$launcher_pid" ] || fail "failed recovery did not report the owned launcher PID"
+  ! kill -0 "$launcher_pid" 2>/dev/null || fail "failed recovery left the owned launcher running"
   pass "post-recovery Windows/WSL route fingerprint mismatch fails verification"
 }
 
@@ -306,6 +417,12 @@ test_native_stale_windows_shadow_recovers_to_verified_pair
 test_healthy_relay_and_clean_wsl_verify
 test_active_task_refuses_without_termination
 test_pid_or_command_change_refuses_on_immediate_reresolution
+test_worker_with_astro_words_refuses
 test_unknown_and_unrelated_windows_processes_refuse
 test_windows_inspection_failure_is_safe
+test_wsl_inspection_failure_is_safe
+test_verify_proves_pair_before_route_requests
+test_mutation_recheck_refuses_new_task
+test_post_stop_inspection_failure_blocks_restart
+test_launcher_script_rejects_shell_metacharacters
 test_post_recovery_fingerprint_mismatch_fails
