@@ -698,8 +698,10 @@ ok - active Firstmate task ownership refuses recovery without termination
 ok - active WSL task ownership refuses recovery and verification
 ok - multiple WSL owners refuse recovery before mutation
 ok - WSL listener verification requires the default branch
+ok - production-like WSL owners and project launchers refuse recovery
 ok - task-state publication lock contention refuses within a fixed bound
 ok - PID or command change between observations refuses exact-PID recovery
+ok - verify revalidates the expected checkout after route inspection
 ok - node worker commands containing Astro words refuse exact-PID recovery
 ok - unknown commands and unrelated Windows repositories refuse without termination
 ok - unavailable Windows inspection refuses recovery without mutation
