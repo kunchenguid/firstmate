@@ -1353,14 +1353,22 @@ delivery_rigor_rank() {  # <mode> -> 4 (most rigor) .. 1 (least); 0 = not a task
 # fm-brief.sh records a ship brief's mode as a fixed "Delivery contract: mode=<mode>"
 # line. A spawn that disagrees would launch a worker whose instructions and whose
 # recorded task delivery differ, which is the exact drift this contract prevents.
+# Like the gate command below, the line is counted before it is read: comparing only
+# some occurrence would let a second, contradictory one through unexamined.
 if [ "$KIND" = ship ]; then
   PROJ_NAME=$(basename "$PROJ_ABS")
-  BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
-  if [ -z "$BRIEF_MODE" ]; then
+  BRIEF_MODE_N=$(grep -c '^Delivery contract: mode=' "$BRIEF") || BRIEF_MODE_N=0
+  if [ "$BRIEF_MODE_N" -eq 0 ]; then
     echo "warning: $BRIEF records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode $MODE - confirm its definition of done matches" >&2
-  elif [ "$BRIEF_MODE" != "$MODE" ]; then
-    echo "error: delivery mismatch for $ID: the brief says mode=$BRIEF_MODE but this spawn passed --mode $MODE; correct the flag or re-scaffold the brief so the worker's instructions and the task record agree" >&2
+  elif [ "$BRIEF_MODE_N" -ne 1 ]; then
+    echo "error: $BRIEF must record its delivery contract exactly once, but it carries $BRIEF_MODE_N \"Delivery contract: mode=\" lines; re-scaffold it with bin/fm-brief.sh instead of editing it, so exactly one recorded mode governs $ID" >&2
     exit 1
+  else
+    BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF")
+    if [ "$BRIEF_MODE" != "$MODE" ]; then
+      echo "error: delivery mismatch for $ID: the brief says mode=$BRIEF_MODE but this spawn passed --mode $MODE; correct the flag or re-scaffold the brief so the worker's instructions and the task record agree" >&2
+      exit 1
+    fi
   fi
   # The registry holds the captain's standing posture, so dropping below it is
   # allowed (a current explicit captain instruction wins) but never silent. An

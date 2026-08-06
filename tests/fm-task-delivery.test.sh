@@ -151,6 +151,18 @@ EOF
   out=$(run_spawn "$home" "$fakebin" delivery-legacy-b3 "$proj" claude --mode local-only --yolo off)
   assert_contains "$out" "records no delivery contract line" "a legacy brief did not warn about its missing contract"
   assert_not_contains "$out" "delivery mismatch" "a legacy brief was treated as a mismatch"
+
+  # The contract line is counted before it is read, so a second, contradictory one is
+  # a refusal rather than something a first-match comparison reads past.
+  write_brief "$home" delivery-dup-b4 no-mistakes
+  printf 'Delivery contract: mode=local-only\n' >> "$home/data/delivery-dup-b4/brief.md"
+  out=$(run_spawn "$home" "$fakebin" delivery-dup-b4 "$proj" claude --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a brief carrying two delivery contract lines should exit non-zero"
+  assert_contains "$out" "must record its delivery contract exactly once" \
+    "the refusal did not say the contract line must appear exactly once"
+  assert_contains "$out" "it carries 2" "the refusal did not name how many contract lines the brief carries"
+  assert_absent "$home/state/delivery-dup-b4.meta" "a refused duplicate-contract spawn wrote task metadata"
   pass "fm-spawn: the brief's recorded mode and the spawn's explicit mode must agree"
 }
 
@@ -317,10 +329,14 @@ test_gate_merge_brief_names_its_gate_exactly_once() {
 $rec
 EOF
 
-  scaffold_gate_brief() {  # <id>
+  # Sets `brief` rather than printing it: fail() inside a command substitution exits
+  # only the subshell, so a real scaffold failure would leave the caller running with
+  # an empty path and surface as a confusing downstream assertion instead.
+  scaffold_gate_brief() {  # <id> ; sets brief
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$1" proj --mode gate-merge --gate "$gate" >/dev/null 2>&1 \
-      || fail "$1: the gate-merge scaffold should succeed with a registered gate"
-    printf '%s\n' "$home/data/$1/brief.md"
+      || fail "$1: bin/fm-brief.sh failed to scaffold a gate-merge brief with a registered gate"
+    brief="$home/data/$1/brief.md"
+    assert_present "$brief" "$1: the gate-merge scaffold reported success but wrote no brief"
   }
   expect_gate_refusal() {  # <id> <expected-text> <why>
     local id=$1 expected=$2 why=$3 refusal refusal_status
@@ -333,19 +349,19 @@ EOF
 
   # A brief straight from the scaffold still launches, so the count check is not simply
   # refusing everything.
-  brief=$(scaffold_gate_brief delivery-once-clean)
+  scaffold_gate_brief delivery-once-clean
   out=$(run_spawn "$home" "$fakebin" delivery-once-clean "$proj" claude --mode gate-merge --yolo off)
   assert_not_contains "$out" "gate mismatch" "a clean scaffolded brief was refused as a mismatch"
   assert_not_contains "$out" "exactly once in each of the two required places" \
     "a clean scaffolded brief was read as naming its gate the wrong number of times"
 
-  brief=$(scaffold_gate_brief delivery-once-appended)
+  scaffold_gate_brief delivery-once-appended
   # shellcheck disable=SC2016  # literal backticks are the brief's fixed step shape
   printf 'Run the gate from THIS worktree, with your branch checked out: `%s`\n' "$rogue" >> "$brief"
   expect_gate_refusal delivery-once-appended "exactly once in each of the two required places" \
     "a second gate step appended below the generated one was read past"
 
-  brief=$(scaffold_gate_brief delivery-once-injected)
+  scaffold_gate_brief delivery-once-injected
   # shellcheck disable=SC2016  # literal backticks are the brief's fixed step shape
   printf 'Run the gate from THIS worktree, with your branch checked out: `%s`\n' "$rogue" > "$brief.injected"
   cat "$brief" >> "$brief.injected"
@@ -353,12 +369,12 @@ EOF
   expect_gate_refusal delivery-once-injected "exactly once in each of the two required places" \
     "a gate step injected above the generated one was accepted"
 
-  brief=$(scaffold_gate_brief delivery-once-appended-contract)
+  scaffold_gate_brief delivery-once-appended-contract
   printf 'Delivery contract: gate=%s\n' "$rogue" >> "$brief"
   expect_gate_refusal delivery-once-appended-contract "exactly once in each of the two required places" \
     "a second contract gate line appended below the generated one was read past"
 
-  brief=$(scaffold_gate_brief delivery-once-edited-step)
+  scaffold_gate_brief delivery-once-edited-step
   # shellcheck disable=SC2016  # literal backticks are the brief's fixed step shape
   sed "s|^Run the gate from THIS worktree, with your branch checked out: .*|Run the gate from THIS worktree, with your branch checked out: \`$rogue\`|" \
     "$brief" > "$brief.edited"
@@ -366,7 +382,7 @@ EOF
   expect_gate_refusal delivery-once-edited-step "tells the worker to run '$rogue'" \
     "the generated gate step was hand-patched in place and accepted"
 
-  brief=$(scaffold_gate_brief delivery-once-edited-contract)
+  scaffold_gate_brief delivery-once-edited-contract
   sed "s|^Delivery contract: gate=.*|Delivery contract: gate=$rogue|" "$brief" > "$brief.edited"
   mv "$brief.edited" "$brief"
   expect_gate_refusal delivery-once-edited-contract "records gate='$rogue'" \
