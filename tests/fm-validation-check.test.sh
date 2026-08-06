@@ -397,6 +397,97 @@ test_watcher_skips_a_stale_validation_gate() {
   pass "watcher skips validation gates outside no-mistakes ownership"
 }
 
+test_watcher_skips_a_validation_gate_retired_before_slot_acquisition() {
+  local dir state status marker ready release done real_basename watcher_pid attempt=0 tmp out rc=0
+  dir=$(make_case retired-before-slot)
+  state="$dir/home/state"
+  status="$dir/status"
+  marker="$dir/executed"
+  ready="$dir/enumeration-ready"
+  release="$dir/enumeration-release"
+  done="$dir/enumeration-done"
+  real_basename=$(command -v basename)
+  write_owned_status "$dir" "$status" 'status: passed'
+  run_arm "$dir" >/dev/null || fail "could not arm retired-before-slot fixture"
+  cat > "$dir/fakebin/basename" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -n "${FM_TEST_ENUMERATION_READY:-}" ] \
+  && [ "${1:-}" = "${FM_TEST_ENUMERATION_CHECK:-}" ] \
+  && [ ! -e "${FM_TEST_ENUMERATION_DONE:?}" ]; then
+  : > "$FM_TEST_ENUMERATION_READY"
+  while [ ! -e "${FM_TEST_ENUMERATION_RELEASE:?}" ]; do sleep 0.02; done
+  : > "$FM_TEST_ENUMERATION_DONE"
+fi
+exec "${FM_TEST_REAL_BASENAME:?}" "$@"
+SH
+  chmod +x "$dir/fakebin/basename"
+
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_TEST_STATUS="$status" \
+    FM_TEST_EXECUTED="$marker" FM_TEST_ENUMERATION_READY="$ready" \
+    FM_TEST_ENUMERATION_RELEASE="$release" FM_TEST_ENUMERATION_DONE="$done" \
+    FM_TEST_ENUMERATION_CHECK="$state/task-a.check.sh" FM_TEST_REAL_BASENAME="$real_basename" \
+    FM_POLL=1 FM_CHECK_INTERVAL=1 FM_SIGNAL_GRACE=1 PATH="$dir/fakebin:$BASE_PATH" \
+    "$CHECKPOINT" --seconds 3 > "$dir/watcher.out" 2> "$dir/watcher.err" &
+  watcher_pid=$!
+  while [ "$attempt" -lt 100 ]; do
+    [ -e "$ready" ] && break
+    sleep 0.02
+    attempt=$((attempt + 1))
+  done
+  if [ ! -e "$ready" ]; then
+    : > "$release"
+    wait "$watcher_pid" 2>/dev/null || true
+    fail "watcher did not enumerate the validation check"
+  fi
+
+  (
+    local_tmp=
+    migration_held=0
+    slot_held=0
+    cleanup() {
+      [ "$slot_held" -eq 0 ] || fm_custom_check_slot_release || true
+      [ "$migration_held" -eq 0 ] || fm_custom_check_migration_release || true
+      [ -z "$local_tmp" ] || rm -f -- "$local_tmp"
+    }
+    trap cleanup EXIT
+    . "$ROOT/bin/fm-pr-lib.sh"
+    . "$ROOT/bin/fm-check-lib.sh"
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_custom_check_migration_acquire "$state" 100 || exit 1
+    migration_held=1
+    fm_custom_check_slot_acquire "$state" task-a 100 || exit 1
+    slot_held=1
+    local_tmp=$(mktemp "$state/.retired-meta.XXXXXX") || exit 1
+    grep -v -e '^kind=' -e '^mode=' "$state/task-a.meta" > "$local_tmp" || exit 1
+    printf '%s\n' 'kind=scout' >> "$local_tmp" || exit 1
+    chmod 0600 "$local_tmp" || exit 1
+    mv -f -- "$local_tmp" "$state/task-a.meta" || exit 1
+    local_tmp=
+    rm -f -- "$state/task-a.check.sh" "$state/task-a.check-trust" || exit 1
+    fm_custom_check_slot_release || exit 1
+    slot_held=0
+    fm_custom_check_migration_release || exit 1
+    migration_held=0
+  ) || {
+    : > "$release"
+    wait "$watcher_pid" 2>/dev/null || true
+    fail "could not retire the enumerated validation check"
+  }
+
+  : > "$release"
+  wait "$watcher_pid" || rc=$?
+  case "$rc" in
+    0|124) ;;
+    *) fail "retired-validation checkpoint exited $rc: $(cat "$dir/watcher.err")" ;;
+  esac
+  [ ! -e "$marker" ] || fail "watcher executed a validation check after retirement"
+  out=$(cat "$dir/watcher.out")
+  assert_not_contains "$out" 'rejected unauthenticated state checks' \
+    "watcher surfaced a retired validation check after slot acquisition"
+  pass "watcher skips validation gates retired before slot acquisition"
+}
+
 test_pr_merge_poll_replaces_and_outprioritizes_validation_poll() {
   local dir status out
   dir=$(make_case pr-transition)
@@ -799,6 +890,7 @@ test_fails_silent_when_a_local_status_read_is_unavailable_or_unparseable
 test_watcher_does_not_execute_an_unregistered_validation_check
 test_watcher_keeps_validation_ownership_through_poll_completion
 test_watcher_skips_a_stale_validation_gate
+test_watcher_skips_a_validation_gate_retired_before_slot_acquisition
 test_pr_merge_poll_replaces_and_outprioritizes_validation_poll
 test_pr_publication_wins_over_an_inflight_validation_arm
 test_x_metadata_rewrite_serializes_with_pr_publication

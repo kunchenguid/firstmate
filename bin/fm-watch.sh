@@ -825,6 +825,10 @@ while :; do
         if ! fm_custom_check_slot_acquire "$STATE" "$id" 1; then
           continue
         fi
+        if [ ! -e "$c" ] && [ ! -L "$c" ]; then
+          fm_custom_check_slot_release || exit 1
+          continue
+        fi
         check_kind=
         validation_slot_held=0
         if fm_pr_metadata_identity_parse "$STATE/$id.meta"; then
