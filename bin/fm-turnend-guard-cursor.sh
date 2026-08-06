@@ -88,11 +88,15 @@ CHAIN_TOTAL=0
 CHAIN_FAIL=0
 CHAIN_WAKE=0
 CHAIN_REASON=
+CHAIN_REASONS=()
+CHAIN_HAS_REASONS=0
 
 chain_load() {
   local key value
   [ -f "$CHAIN_FILE" ] || { CHAIN_TOTAL=0; return 0; }
   CHAIN_TOTAL=
+  CHAIN_REASONS=()
+  CHAIN_HAS_REASONS=0
   while IFS='=' read -r key value; do
     case "$key" in
       session) CHAIN_SESSION=$value ;;
@@ -100,11 +104,18 @@ chain_load() {
       fail) CHAIN_FAIL=$value ;;
       wake) CHAIN_WAKE=$value ;;
       reason) CHAIN_REASON=$value ;;
+      wake_reason)
+        CHAIN_REASONS+=("$value")
+        CHAIN_HAS_REASONS=1
+        ;;
     esac
   done < "$CHAIN_FILE"
   case "$CHAIN_FAIL" in ''|*[!0-9]*) CHAIN_FAIL=0 ;; esac
   case "$CHAIN_WAKE" in ''|*[!0-9]*) CHAIN_WAKE=0 ;; esac
   case "$CHAIN_TOTAL" in ''|*[!0-9]*) CHAIN_TOTAL=$((CHAIN_FAIL + CHAIN_WAKE)) ;; esac
+  if [ "$CHAIN_HAS_REASONS" -eq 0 ] && [ -n "$CHAIN_REASON" ]; then
+    CHAIN_REASONS=("$CHAIN_REASON")
+  fi
   if [ "$CHAIN_SESSION" != "$SESSION" ] || {
     [ "$LOOP_COUNT_VALID" -eq 1 ] && [ "$LOOP_COUNT" -eq 0 ];
   }; then
@@ -112,6 +123,7 @@ chain_load() {
     CHAIN_FAIL=0
     CHAIN_WAKE=0
     CHAIN_REASON=
+    CHAIN_REASONS=()
   fi
 }
 
@@ -119,8 +131,13 @@ chain_store() {
   local tmp
   [ -d "$STATE" ] || return 1
   tmp="$CHAIN_FILE.$$"
-  if ! printf 'session=%s\ntotal=%s\nfail=%s\nwake=%s\nreason=%s\n' \
-    "$SESSION" "$1" "$2" "$3" "$4" > "$tmp" 2>/dev/null; then
+  if ! {
+    printf 'session=%s\ntotal=%s\nfail=%s\nwake=%s\nreason=%s\n' \
+      "$SESSION" "$1" "$2" "$3" "$4"
+    if [ "${#CHAIN_REASONS[@]}" -gt 0 ]; then
+      printf 'wake_reason=%s\n' "${CHAIN_REASONS[@]}"
+    fi
+  } > "$tmp" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null || true
     return 1
   fi
@@ -182,8 +199,19 @@ if [ "$ARM_ACTIONABLE" -eq 1 ]; then
   else
     COUNT=1
   fi
+  WAKE_SEEN=0
+  for KNOWN_REASON in "${CHAIN_REASONS[@]}"; do
+    if [ "$KNOWN_REASON" = "$WAKE_REASON" ]; then
+      WAKE_SEEN=1
+      break
+    fi
+  done
   TOTAL=$CHAIN_TOTAL
-  [ "$WAKE_REASON" = "$CHAIN_REASON" ] && TOTAL=$((TOTAL + 1))
+  if [ "$WAKE_SEEN" -eq 1 ]; then
+    TOTAL=$((TOTAL + 1))
+  else
+    CHAIN_REASONS+=("$WAKE_REASON")
+  fi
   if ! chain_store "$TOTAL" 0 "$COUNT" "$WAKE_REASON"; then
     if [ "$LOOP_COUNT_VALID" -eq 1 ] && [ "$LOOP_COUNT" -gt 0 ]; then
       FALLBACK_TOTAL=$((LOOP_COUNT + 1))
