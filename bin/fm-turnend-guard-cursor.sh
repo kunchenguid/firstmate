@@ -69,7 +69,10 @@ STATE=${FM_STATE_OVERRIDE:-${FM_HOME:-$ROOT}/state}
 CHAIN_FILE="$STATE/.cursor-turnend-chain"
 
 SESSION=$(printf '%s' "$PAYLOAD" | jq -r '
-  if type == "object" and (.session_id | type) == "string" then .session_id else "unknown" end
+  if type != "object" then "unknown"
+  elif (.conversation_id | type) == "string" and .conversation_id != "" then .conversation_id
+  elif (.session_id | type) == "string" and .session_id != "" then .session_id
+  else "unknown" end
 ' 2>/dev/null) || SESSION=unknown
 LOOP_COUNT_VALUE=$(printf '%s' "$PAYLOAD" | jq -r '
   if type == "object" and has("loop_count")

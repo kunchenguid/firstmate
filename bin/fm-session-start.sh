@@ -647,7 +647,7 @@ if [ "$PRIMARY_HARNESS" = cursor ]; then
       and (.hooks | type) == "object"
       and (.hooks.stop | type) == "array"
       and (.hooks.stop | length) > 0
-      and all(.hooks.stop[];
+      and any(.hooks.stop[];
         type == "object"
         and (.command == $stop_command)
         and (.timeout | type == "number" and . >= 600)
@@ -655,7 +655,7 @@ if [ "$PRIMARY_HARNESS" = cursor ]; then
       )
       and (.hooks.preToolUse | type) == "array"
       and (.hooks.preToolUse | length) > 0
-      and all(.hooks.preToolUse[];
+      and any(.hooks.preToolUse[];
         type == "object"
         and (.matcher == "Shell")
         and (.command == $pretool_command)

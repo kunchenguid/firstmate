@@ -232,11 +232,10 @@ make_fake_ps_harness() {
 #!/usr/bin/env bash
 set -u
 harness=${FM_FAKE_HARNESS:-claude}
-# fm-harness.sh's ancestry matcher recognizes the real cursor process by its
-# verified comm name cursor-agent (or MainThread with a cursor-agent path),
-# never by the bare name cursor - so the fake comm must carry the -agent
-# suffix for ancestry detection to resolve the harness.
+# fm-harness.sh's ancestry matcher recognizes Cursor's verified executable name,
+# including its legacy agent alias, or MainThread with that path.
 [ "$harness" = cursor ] && harness=cursor-agent
+[ "$harness" = cursor-alias ] && harness=agent
 pid=
 previous=
 for argument in "$@"; do
@@ -2119,21 +2118,26 @@ EOF
 }
 
 test_cursor_primary_accepts_registered_hooks() {
-  local rec root home fakebin out
-  rec=$(new_world cursor-hooks-ok)
-  IFS='|' read -r root home fakebin <<EOF
+  local rec root home fakebin out fake_harness
+  for fake_harness in cursor cursor-alias; do
+    rec=$(new_world "cursor-hooks-ok-$fake_harness")
+    IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
-  make_fake_toolchain "$fakebin"
-  make_fake_ps_harness "$fakebin" cursor
-  mkdir -p "$root/.cursor"
-  cp "$ROOT/.cursor/hooks.json" "$root/.cursor/hooks.json"
+    make_fake_toolchain "$fakebin"
+    make_fake_ps_harness "$fakebin" "$fake_harness"
+    mkdir -p "$root/.cursor"
+    jq '.hooks.stop += [{"command":"echo extra-stop","timeout":600,"loop_limit":null}] | .hooks.preToolUse += [{"matcher":"Shell","command":"echo extra-pretool","timeout":10}]' \
+      "$ROOT/.cursor/hooks.json" > "$root/.cursor/hooks.json"
 
-  out=$(FM_FAKE_HARNESS=cursor run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+    out=$(FM_FAKE_HARNESS="$fake_harness" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: cursor" "cursor supervision block missing"
-  assert_not_contains "$out" "CURSOR_HOOKS: not registered or malformed" "cursor hooks diagnostic fired for a registered fixture"
-  pass "session start accepts a registered .cursor/hooks.json without a diagnostic"
+    assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: cursor" \
+      "$fake_harness supervision block missing"
+    assert_not_contains "$out" "CURSOR_HOOKS: not registered or malformed" \
+      "$fake_harness hooks diagnostic fired for a registered fixture with additions"
+  done
+  pass "session start accepts Cursor hooks with additional declarations and legacy alias identity"
 }
 
 test_cursor_primary_rejects_empty_or_malformed_hooks() {

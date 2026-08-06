@@ -72,7 +72,7 @@ detect_own() {
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     case "$(basename -- "$comm")" in
-      *cursor-agent*) echo cursor; return ;;
+      agent|*cursor-agent*) echo cursor; return ;;
       *claude*) echo claude; return ;;
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
@@ -92,7 +92,7 @@ detect_own() {
         # full argument string, which still carries the versioned install path.
         args=$(ps -o args= -p "$pid" 2>/dev/null)
         case "$args" in
-          *cursor-agent*) echo cursor; return ;;
+          *cursor-agent*|*/agent|*/agent\ *|*/agent/*|agent|agent\ *) echo cursor; return ;;
           *claude*) echo claude; return ;;
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;

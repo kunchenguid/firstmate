@@ -65,6 +65,7 @@ ln -s "$SLEEP_BIN" "$LAB/bin/musescore"
 ln -s "$SLEEP_BIN" "$LAB/bin/amuse"
 ln -s "$SLEEP_BIN" "$LAB/bin/muse-binary"
 ln -s "$SLEEP_BIN" "$LAB/bin/muse-bind"
+ln -s "$SLEEP_BIN" "$LAB/bin/agent"
 
 # A launcher whose own process identity is a bare shell, running the harness as
 # a child in the same foreground process group - the shape the real Pi Launcher
@@ -275,6 +276,14 @@ wait_for_state "$SESSION:cursorargv0" alive 2>/dev/null \
   || fail "a 'MainThread' process with cursor-agent argv0 must classify alive"
 "$REAL_TMUX" -L "$SOCKET" kill-window -t "$SESSION:cursorargv0" 2>/dev/null || true
 pass "tmux liveness: MainThread with cursor-agent argv0 classifies alive"
+
+# --- cursor legacy alias: agent ---------------------------------------------
+
+"$REAL_TMUX" -L "$SOCKET" new-window -t "$SESSION" -n cursoralias bash -c "exec -a '$LAB/bin/agent' '$LAB/bin/agent' 30"
+wait_for_state "$SESSION:cursoralias" alive 2>/dev/null \
+  || fail "a legacy agent alias process must classify alive"
+"$REAL_TMUX" -L "$SOCKET" kill-window -t "$SESSION:cursoralias" 2>/dev/null || true
+pass "tmux liveness: the Cursor legacy agent alias classifies alive"
 
 # --- cursor-agent: cursor-agent pane command ---------------------------------
 
