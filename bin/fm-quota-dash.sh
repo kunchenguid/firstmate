@@ -133,9 +133,10 @@ gauge() {  # <n> <pct> <model> <window>
     "$B" "$model" "$R" "$D" "$win" "$R"
 }
 
-draw() {
+# Renders the full dashboard to stdout. draw() then shows it through a
+# viewport, so nothing can be pushed off the top of a short terminal.
+render_all() {
   local n=0
-  printf '\033[H\033[J'
 
   while IFS=$'\t' read -r prov plan win pct resets pace; do
     [ -n "$prov" ] || continue
@@ -173,11 +174,37 @@ EOF
 $ROWS
 EOF
 
-  printf '\n%s r %s%sRefresh%s  %s q %s%sQuit%s\n' "$KEY" "$R" "$LBL" "$R" "$KEY" "$R" "$LBL" "$R"
+}
+
+OUT=(); SCROLL=0
+
+# The gauges ARE the dashboard; the table is detail behind them. On a short
+# terminal the content ran past the top and left the captain looking at the
+# table alone - exactly backwards. A viewport with scrolling keeps every part
+# reachable regardless of window size.
+build() { OUT=(); while IFS= read -r l; do OUT+=("$l"); done < <(render_all); }
+
+draw() {
+  local rows avail i last
+  rows=$( { tput lines; } 2>/dev/null || echo 24 )
+  avail=$(( rows - 3 ))
+  [ "$avail" -ge 3 ] || avail=3
+  last=$(( ${#OUT[@]} - avail )); [ "$last" -ge 0 ] || last=0
+  [ "$SCROLL" -le "$last" ] || SCROLL=$last
+  [ "$SCROLL" -ge 0 ] || SCROLL=0
+
+  printf '\033[H\033[J'
+  i=$SCROLL
+  while [ "$i" -lt $(( SCROLL + avail )) ] && [ "$i" -lt "${#OUT[@]}" ]; do
+    printf '%s\n' "${OUT[$i]}"; i=$(( i + 1 ))
+  done
+  [ "${#OUT[@]}" -le "$avail" ] || \
+    printf '%s  j/k scroll - %d-%d of %d%s\n' "$D" $(( SCROLL + 1 )) "$i" "${#OUT[@]}" "$R"
+  printf '%s r %s%sRefresh%s  %s q %s%sQuit%s\n' "$KEY" "$R" "$LBL" "$R" "$KEY" "$R" "$LBL" "$R"
 }
 
 
-if [ "$ONCE" -eq 1 ]; then collect; draw; exit 0; fi
+if [ "$ONCE" -eq 1 ]; then collect; render_all; exit 0; fi
 
 # Alternate screen buffer, the same one htop, vim and less use: the dashboard
 # draws on a scratch screen and leaving restores whatever the terminal held
@@ -189,6 +216,7 @@ printf '\033[?1049h\033[?25l'
 
 while :; do
   collect
+  build
   draw
   # Elapsed time is read from the CLOCK, never counted in loop iterations.
   # A mouse wheel floods stdin with escape sequences; each one satisfies `read`
@@ -200,6 +228,8 @@ while :; do
       case "$key" in
         q|Q) exit 0 ;;
         r|R) break ;;
+        j|J) SCROLL=$(( SCROLL + 1 )); draw ;;
+        k|K) SCROLL=$(( SCROLL - 1 )); draw ;;
       esac
     fi
   done
