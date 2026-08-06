@@ -28,7 +28,11 @@
 # rather than run, because a name this script cannot interpret is a name whose
 # output it cannot judge):
 #   browser <subcommand> [args...]
-#       Runs chrome-devtools-axi with the given arguments.
+#       Runs chrome-devtools-axi with the given arguments. This adapter never
+#       returns FAIL, and that is deliberate rather than an omission:
+#       chrome-devtools-axi is a control tool, not an assertion tool, so it has
+#       no way to report "the page is bad" - only "here is what I saw" or a
+#       failure to see it. The verdict on what it saw belongs to the caller.
 #   pr-checks <pr-url>
 #       Reads the pull request's check-run set through gh and classifies it with
 #       bin/fm-verify-lib.sh.
@@ -56,6 +60,9 @@
 #                             (ruling D3's token for the unreachable browser)
 #   empty_result_set          the verifier returned no results at all
 #   verification_incomplete   results exist but no verdict has been reached yet
+#   no_verdict_reached        the verifier finished and reached no verdict, and
+#                             none is coming: checks that completed SKIPPED,
+#                             STALE, NEUTRAL, or with no conclusion at all
 #   no_evidence               the verifier's output could not be captured
 #   usage_error               the call itself was malformed
 #
@@ -205,6 +212,15 @@ run_verifier() {
   return 0
 }
 
+# require_tool <name>: one availability guard for every adapter, so that a
+# missing tool always reports the same reason and a new adapter cannot get the
+# token wrong. Used as `require_tool <name> || return 0`.
+require_tool() {
+  command -v "$1" >/dev/null 2>&1 && return 0
+  set_result NO_VERIFIER_RAN verifier_unavailable
+  return 1
+}
+
 # --- browser ----------------------------------------------------------------
 
 # Transport failures chrome-devtools-axi reports while exiting 0. See the
@@ -237,10 +253,7 @@ EOF
 
 verify_browser() {
   [ "$#" -ge 1 ] || refuse usage_error
-  command -v chrome-devtools-axi >/dev/null 2>&1 || {
-    set_result NO_VERIFIER_RAN verifier_unavailable
-    return 0
-  }
+  require_tool chrome-devtools-axi || return 0
   run_verifier chrome-devtools-axi "$@" || {
     set_result NO_VERIFIER_RAN no_evidence
     return 0
@@ -251,8 +264,14 @@ verify_browser() {
     set_result NO_VERIFIER_RAN verification_unreachable
     return 0
   fi
+  # A non-zero exit for a reason no signature names - a chrome crash, a
+  # page-load timeout, a DNS failure - is could-not-observe, the same as the
+  # unreachable forge in verify_pr_checks below. chrome-devtools-axi is a
+  # control tool, not an assertion tool, so it has no failing page to report:
+  # calling this FAIL would assert a verdict the evidence never earned and
+  # would hide a broken verifier among real failures.
   if [ "$VERIFIER_STATUS" -ne 0 ]; then
-    set_result FAIL verifier_reported_failure
+    set_result NO_VERIFIER_RAN verification_unreachable
     return 0
   fi
   if [ -z "$VERIFIER_ALL" ]; then
@@ -267,14 +286,8 @@ verify_browser() {
 verify_pr_checks() {
   local label
   [ "$#" -eq 1 ] || refuse usage_error
-  command -v gh >/dev/null 2>&1 || {
-    set_result NO_VERIFIER_RAN verifier_unavailable
-    return 0
-  }
-  command -v jq >/dev/null 2>&1 || {
-    set_result NO_VERIFIER_RAN verifier_unavailable
-    return 0
-  }
+  require_tool gh || return 0
+  require_tool jq || return 0
   run_verifier gh pr view "$1" --json statusCheckRollup || {
     set_result NO_VERIFIER_RAN no_evidence
     return 0
@@ -290,6 +303,7 @@ verify_pr_checks() {
     passing) set_result PASS verified ;;
     failing) set_result FAIL verifier_reported_failure ;;
     pending) set_result NO_VERIFIER_RAN verification_incomplete ;;
+    inconclusive) set_result NO_VERIFIER_RAN no_verdict_reached ;;
     none) set_result NO_VERIFIER_RAN empty_result_set ;;
     *) set_result NO_VERIFIER_RAN verification_unreachable ;;
   esac
@@ -305,10 +319,7 @@ verify_merge_clean() {
   local repo first
   [ "$#" -ge 2 ] && [ "$#" -le 3 ] || refuse usage_error
   repo=${3:-.}
-  command -v git >/dev/null 2>&1 || {
-    set_result NO_VERIFIER_RAN verifier_unavailable
-    return 0
-  }
+  require_tool git || return 0
   run_verifier git -C "$repo" merge-tree --write-tree "$1" "$2" || {
     set_result NO_VERIFIER_RAN no_evidence
     return 0

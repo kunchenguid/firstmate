@@ -170,6 +170,28 @@ with_path "$BROWSER_SILENT_BIN:$PATH" expect_verify NO_VERIFIER_RAN empty_result
   'browser silent' -- browser open https://example.invalid
 pass "silent browser is NO_VERIFIER_RAN, not PASS"
 
+BROWSER_CRASH_BIN=$(fm_fakebin "$TMP/browser-crash")
+cat >"$BROWSER_CRASH_BIN/chrome-devtools-axi" <<'SH'
+#!/usr/bin/env bash
+# A non-zero exit for a reason no signature names: a crash, a page-load
+# timeout, a DNS failure. None of them is a statement about the page.
+printf 'chrome exited unexpectedly while loading the page\n' >&2
+exit 3
+SH
+chmod +x "$BROWSER_CRASH_BIN/chrome-devtools-axi"
+
+# chrome-devtools-axi is a control tool, not an assertion tool: it has no way to
+# report a bad page, so an exit status nobody can interpret is could-not-observe.
+# The exit-status wrapper calls it FAIL, which is a verdict about the page that
+# nothing in the evidence earned - and it hides a broken verifier among real
+# failures.
+expect_naive_wrong naive_exit_strict FAIL \
+  'uninterpretable browser exit, exit-status wrapper' -- \
+  "$BROWSER_CRASH_BIN/chrome-devtools-axi" open https://example.invalid
+with_path "$BROWSER_CRASH_BIN:$PATH" expect_verify NO_VERIFIER_RAN verification_unreachable \
+  'uninterpretable browser exit' -- browser open https://example.invalid
+pass "a browser exit matching no signature is NO_VERIFIER_RAN, not a verdict about the page"
+
 BARE_PATH=$(minimal_path "$TMP/bare-bin")
 with_path "$BARE_PATH" expect_verify NO_VERIFIER_RAN verifier_unavailable \
   'browser absent' -- browser open https://example.invalid
@@ -196,6 +218,12 @@ GH_FAILING=$(make_gh "$TMP/gh-failing" \
   '{"statusCheckRollup":[{"status":"COMPLETED","conclusion":"FAILURE"}]}')
 GH_PENDING=$(make_gh "$TMP/gh-pending" \
   '{"statusCheckRollup":[{"status":"IN_PROGRESS","conclusion":null}]}')
+GH_SKIPPED=$(make_gh "$TMP/gh-skipped" \
+  '{"statusCheckRollup":[{"status":"COMPLETED","conclusion":"SKIPPED"}]}')
+GH_NO_CONCLUSION=$(make_gh "$TMP/gh-no-conclusion" \
+  '{"statusCheckRollup":[{"status":"COMPLETED","conclusion":null}]}')
+GH_ONE_STALE=$(make_gh "$TMP/gh-one-stale" \
+  '{"statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"},{"status":"COMPLETED","conclusion":"STALE"}]}')
 GH_DOWN=$(make_gh "$TMP/gh-down" 'gh: could not reach api.github.com' 1)
 
 PR=https://github.com/example/repo/pull/1
@@ -222,6 +250,29 @@ pass "a failing check set is FAIL, and never borrows NO_VERIFIER_RAN"
 with_path "$GH_PENDING:$PATH" expect_verify NO_VERIFIER_RAN verification_incomplete \
   'pending checks' -- pr-checks "$PR"
 pass "a pending check set is NO_VERIFIER_RAN, not PASS and not FAIL"
+
+# The empty set's defect one level down, inside the rule that owns the PASS
+# verdict: a check skipped by a path filter, or gone stale, completed without
+# earning a verdict, and zero failing checks still looks exactly like every
+# check passing. Both naive wrappers read the same gh success and say PASS.
+expect_naive_wrong naive_exit_strict PASS \
+  'skipped checks, exit-status wrapper' -- \
+  "$GH_SKIPPED/gh" pr view "$PR" --json statusCheckRollup
+expect_naive_wrong naive_output_presence PASS \
+  'skipped checks, output-presence wrapper' -- \
+  "$GH_SKIPPED/gh" pr view "$PR" --json statusCheckRollup
+
+with_path "$GH_SKIPPED:$PATH" expect_verify NO_VERIFIER_RAN no_verdict_reached \
+  'skipped checks' -- pr-checks "$PR"
+pass "a check set that only skipped is NO_VERIFIER_RAN, not PASS"
+
+with_path "$GH_NO_CONCLUSION:$PATH" expect_verify NO_VERIFIER_RAN no_verdict_reached \
+  'completed with no conclusion' -- pr-checks "$PR"
+pass "a completed check carrying no conclusion is NO_VERIFIER_RAN, not PASS"
+
+with_path "$GH_ONE_STALE:$PATH" expect_verify NO_VERIFIER_RAN no_verdict_reached \
+  'one stale check among successes' -- pr-checks "$PR"
+pass "passing means EVERY member succeeded, so one unconcluded check withholds it"
 
 # An unreachable forge is not a failing pull request. The exit-status wrapper
 # calls it FAIL, which is a verdict nobody earned.
@@ -350,6 +401,17 @@ code=$?
 expect_code 3 "$code" "unparseable record"
 assert_contains "$err" 'unreadable result record' "unparseable record refusal"
 pass "an unreadable record is refused, never read as an empty pass"
+
+# Rejecting a record is only half the promise. A record refused on its LAST
+# field must leave nothing behind either, or a consumer that reads the fields
+# without the status sees a PASS extracted from a record just refused - the
+# unparseable record read as an empty pass, one layer in.
+REJECTED_RECORD=$(printf 'verify[1]{verifier,result,reason,evidence_ref}:\n  browser,PASS,,/tmp/e.log\n')
+! fm_verify_parse "$REJECTED_RECORD" || fail "a record with an empty reason must be rejected"
+[ -z "$FM_VERIFY_RESULT" ] && [ -z "$FM_VERIFY_VERIFIER" ] &&
+  [ -z "$FM_VERIFY_REASON" ] && [ -z "$FM_VERIFY_EVIDENCE" ] ||
+  fail "a rejected record left fields behind: verifier='$FM_VERIFY_VERIFIER' result='$FM_VERIFY_RESULT' reason='$FM_VERIFY_REASON' evidence='$FM_VERIFY_EVIDENCE'"
+pass "a rejected record leaves no partially-populated fields behind"
 
 # --- the one sanctioned narrowing, which is loud and logged ------------------
 

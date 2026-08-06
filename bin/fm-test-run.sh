@@ -915,6 +915,13 @@ families_for_changed_path() {
       printf '%s\n' snapshot-bearings
       printf '%s\n' pure-contract-unit
       ;;
+    bin/fm-verify-lib.sh)
+      # The shared three-valued observation type and check-set rule: the
+      # wrapper's own suite, and the bearings snapshot, which splices that same
+      # rule and asserts on the label it produces.
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' snapshot-bearings
+      ;;
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge

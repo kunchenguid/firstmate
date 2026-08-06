@@ -33,31 +33,43 @@
 # request object carrying GitHub's statusCheckRollup field. It produces exactly
 # one of:
 #
-#   none      no check ran at all - the empty set. NOT green, ever. A pull
-#             request whose checks were never created, whose workflow file is
-#             broken, or whose runs were pruned looks exactly like a pull
-#             request that passed, unless the empty set is named separately.
-#   failing   at least one check reached a failing conclusion.
-#   pending   checks exist but at least one has not completed. No verdict yet.
-#   passing   the set is non-empty and every member completed successfully.
+#   none          no check ran at all - the empty set. NOT green, ever. A pull
+#                 request whose checks were never created, whose workflow file
+#                 is broken, or whose runs were pruned looks exactly like a
+#                 pull request that passed, unless the empty set is named
+#                 separately.
+#   failing       at least one check reached a failing conclusion.
+#   pending       checks exist but at least one has not completed. No verdict
+#                 yet, and one may still arrive.
+#   inconclusive  every check completed, none failed, and at least one ended
+#                 without earning a verdict - SKIPPED, STALE, NEUTRAL, an
+#                 absent conclusion, or a conclusion this rule does not know.
+#                 A check skipped by a path filter proves nothing about the
+#                 pull request, so folding it into "passing" is the empty set's
+#                 defect one level down. No verdict, and none is coming.
+#   passing       the set is non-empty and EVERY member completed successfully.
 #
 # It lives here rather than inside either caller because it is a contract, and
 # two copies of a contract drift the moment only one is edited. Consumers map
-# these four labels onto their own vocabulary and must never collapse "none" or
-# "pending" into a pass:
-#   - bin/fm-verify.sh maps none/pending to NO_VERIFIER_RAN and passing to PASS.
+# these five labels onto their own vocabulary and must never collapse "none",
+# "pending", or "inconclusive" into a pass:
+#   - bin/fm-verify.sh maps none/pending/inconclusive to NO_VERIFIER_RAN and
+#     passing to PASS.
 #   - bin/fm-bearings-snapshot.sh renders them as a per-pull-request label.
 #
 # The expression takes no jq arguments, so a caller splices it into a larger
 # single-quoted program without disturbing that program's own jq variables.
 
-# shellcheck disable=SC2034  # consumed by sourcing scripts, not by this file.
+# shellcheck disable=SC2034,SC2016  # consumed by sourcing scripts, not by this
+# file, and the $-prefixed names inside are jq variables that must reach jq
+# unexpanded - the single quotes are the point.
 FM_VERIFY_CHECK_ROLLUP_EXPR='
   (.statusCheckRollup // []) as $c
   | if ($c|length) == 0 then "none"
     elif any($c[]; (.conclusion // .state // "") as $s | ($s=="FAILURE" or $s=="ERROR" or $s=="TIMED_OUT" or $s=="CANCELLED" or $s=="ACTION_REQUIRED")) then "failing"
     elif any($c[]; ((.status // "") != "COMPLETED") and ((.state // "") != "SUCCESS")) then "pending"
-    else "passing" end'
+    elif all($c[]; (.conclusion // .state // "") == "SUCCESS") then "passing"
+    else "inconclusive" end'
 
 # --- the three-valued observation type --------------------------------------
 
@@ -68,26 +80,34 @@ FM_VERIFY_CHECK_ROLLUP_EXPR='
 # could-not-observe, and a consumer that treated it as an empty PASS would be
 # the very defect this file exists to prevent.
 fm_verify_parse() {
-  local record=$1 row rest
+  local record=$1 row rest verifier result reason evidence
   FM_VERIFY_VERIFIER=''
   FM_VERIFY_RESULT=''
   FM_VERIFY_REASON=''
   FM_VERIFY_EVIDENCE=''
   row=$(printf '%s\n' "$record" | sed -n 's/^  //p' | head -1)
   [ -n "$row" ] || return 1
-  FM_VERIFY_VERIFIER=${row%%,*}
+  verifier=${row%%,*}
   rest=${row#*,}
   [ "$rest" != "$row" ] || return 1
-  FM_VERIFY_RESULT=${rest%%,*}
+  result=${rest%%,*}
   rest=${rest#*,}
-  FM_VERIFY_REASON=${rest%%,*}
+  reason=${rest%%,*}
   rest=${rest#*,}
-  FM_VERIFY_EVIDENCE=$rest
-  case "$FM_VERIFY_RESULT" in
+  evidence=$rest
+  case "$result" in
     PASS|FAIL|NO_VERIFIER_RAN) ;;
     *) return 1 ;;
   esac
-  [ -n "$FM_VERIFY_VERIFIER" ] && [ -n "$FM_VERIFY_REASON" ] || return 1
+  [ -n "$verifier" ] && [ -n "$reason" ] || return 1
+  # Published only once every field has been accepted: a record rejected on its
+  # last field must leave nothing behind either, or a consumer reading the
+  # globals without the status still sees a result extracted from a record this
+  # function just refused.
+  FM_VERIFY_VERIFIER=$verifier
+  FM_VERIFY_RESULT=$result
+  FM_VERIFY_REASON=$reason
+  FM_VERIFY_EVIDENCE=$evidence
   return 0
 }
 
