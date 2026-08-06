@@ -1868,6 +1868,13 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 
+# Task-specific local environment files are copied only after every backend has produced and validated an isolated worktree.
+# The helper makes an absent mapping a silent no-op.
+# Unsafe or unavailable configured inputs become warnings, so environment synchronization cannot block a ship or scout launch.
+if [ "$KIND" != secondmate ] && ! "$SCRIPT_DIR/fm-worktree-env-sync.sh" "$CONFIG" "$PROJ_ABS" "$WT"; then
+  echo "warning: worktree environment synchronization could not complete; continuing without a copied environment file" >&2
+fi
+
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside

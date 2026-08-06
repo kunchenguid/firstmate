@@ -94,6 +94,18 @@ The caller-facing label remains `fm-<id>`, but the actual cmux workspace title i
 Test cleanup must use the guarded path in [`docs/cmux-backend.md`](cmux-backend.md#current-operation-and-safety), never enumerate-and-close every workspace.
 `config/backend` is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
 
+## Worktree environment synchronization (config/worktree-env-sync.tsv)
+
+The optional local, gitignored `config/worktree-env-sync.tsv` maps one project root to one local source environment file and one relative target path in a task worktree.
+Each tab-separated row has those three fields in that order, while comments and blank rows are ignored.
+`bin/fm-worktree-env-sync.sh --help` owns the exact row syntax, path validation, and copy mechanics.
+`fm-spawn.sh` runs it only after ship and scout worktrees have been proven isolated, so all supported worktree providers get the same behavior.
+An absent mapping file preserves today's behavior without output.
+A matching missing source, unsafe mapping, unignored target, or copy failure prints a warning without preventing the worker from starting.
+The target must already be ignored in the task worktree before the file is copied, and the helper removes it if a post-copy ignore check fails.
+The helper never prints configured paths or environment-file contents.
+Secondmate homes are not task worktrees and are not affected.
+
 ## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
 
 The `/afk` sub-supervisor injects escalation digests into firstmate's own pane independently of where new task endpoints are spawned.
