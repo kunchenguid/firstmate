@@ -36,9 +36,13 @@ NAMED_CLAUDE="$FAKEBIN/claude"
 
 # Run one library expression with <fakebin> shadowing ps. kill is stubbed so
 # liveness questions are decided by the process table alone.
+# FM_LOCK_OS_OVERRIDE=posix pins the POSIX ancestry walk so this fake-ps unit
+# contract is exercised on ANY host: without it a Windows/MSYS box resolves
+# through the native WINPID path and ignores the fixture entirely. No-op on
+# POSIX CI, where the platform already selects that path.
 lib_eval() {  # <fakebin> <expression>
   local fakebin=$1 expr=$2
-  PATH="$fakebin:$PATH" bash -c "
+  FM_LOCK_OS_OVERRIDE=posix PATH="$fakebin:$PATH" bash -c "
     . \"\$0\"
     kill() { return 0; }
     $expr
