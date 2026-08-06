@@ -1242,6 +1242,36 @@ SH
   chmod +x "$fakebin/$name"
 }
 
+make_term_escalating_timeout() {
+  local fakebin=$1
+  cat > "$fakebin/timeout" <<'SH'
+#!/usr/bin/env perl
+use strict;
+use warnings;
+(shift @ARGV) eq '-k' or exit 64;
+my $kill_after = shift @ARGV;
+my $seconds = shift @ARGV;
+my $pid = fork;
+defined $pid or die "fork failed";
+if (!$pid) {
+  setpgrp(0, 0);
+  exec @ARGV;
+}
+local $SIG{ALRM} = sub {
+  kill 'TERM', -$pid;
+  select undef, undef, undef, $kill_after;
+  kill 'KILL', -$pid;
+  waitpid $pid, 0;
+  exit 137;
+};
+alarm $seconds;
+waitpid $pid, 0;
+alarm 0;
+exit($? >> 8);
+SH
+  chmod +x "$fakebin/timeout"
+}
+
 test_runtime_bound_truncates_loudly_and_exits_zero() {
   local rec root home fakebin out status=0 stray
   rec=$(new_world runtime-bound)
@@ -1251,6 +1281,7 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   make_hanging_tool "$fakebin" git
+  make_term_escalating_timeout "$fakebin"
 
   out=$(FM_SESSION_START_TIMEOUT=3 run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
 
@@ -1279,33 +1310,13 @@ EOF
 test_portable_timeout_escalates_term_resistant_process() {
   local fakebin="$TMP_ROOT/portable-kill-after" driver status=0
   mkdir -p "$fakebin"
-  cat > "$fakebin/timeout" <<'SH'
-#!/usr/bin/env bash
-set -u
-kill_after=
-case "${1:-}" in
-  -k) kill_after=${2:-}; shift 2 ;;
-  *) exit 64 ;;
-esac
-seconds=${1:-}
-shift
-"$@" &
-child=$!
-sleep "$seconds"
-kill -TERM "$child" 2>/dev/null || true
-if [ -n "$kill_after" ]; then
-  sleep "$kill_after"
-  kill -KILL "$child" 2>/dev/null || true
-fi
-wait "$child" 2>/dev/null || true
-exit 124
-SH
-  chmod +x "$fakebin/timeout"
+  make_term_escalating_timeout "$fakebin"
   driver="$TMP_ROOT/portable-kill-after-driver.sh"
   cat > "$driver" <<'SH'
 #!/usr/bin/env bash
 . "$1"
-fm_run_timed 1 perl -e '$SIG{TERM} = "IGNORE"; sleep 600'
+shift
+fm_run_timed 1 "$@"
 SH
   chmod +x "$driver"
 
@@ -1317,9 +1328,14 @@ SH
     alarm 5;
     waitpid $pid, 0;
     exit($? >> 8);
-  ' env PATH="$fakebin:$BASE_PATH" "$driver" "$ROOT/bin/fm-timeout-lib.sh" || status=$?
+  ' env PATH="$fakebin:$BASE_PATH" "$driver" "$ROOT/bin/fm-timeout-lib.sh" \
+    perl -e '$SIG{TERM} = "IGNORE"; sleep 600' || status=$?
 
   expect_code 124 "$status" "portable timeout TERM-resistant escalation"
+  status=0
+  env PATH="$fakebin:$BASE_PATH" "$driver" "$ROOT/bin/fm-timeout-lib.sh" \
+    bash -c 'exit 137' || status=$?
+  expect_code 137 "$status" "natural command exit 137"
   pass "the portable timeout path force-kills a command that ignores TERM"
 }
 

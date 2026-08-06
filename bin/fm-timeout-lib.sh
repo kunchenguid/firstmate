@@ -41,12 +41,40 @@ fm_timeout_mechanism() {
   fi
 }
 
+fm_run_external_timeout() {
+  local runner=$1 seconds=$2 status_file runner_rc command_rc
+  shift 2
+  status_file=$(mktemp "${TMPDIR:-/tmp}/fm-timeout-status.XXXXXX" 2>/dev/null) || return 124
+  if "$runner" -k 1 "$seconds" bash -c '
+    status_file=$1
+    shift
+    "$@"
+    command_rc=$?
+    printf "%s\n" "$command_rc" > "$status_file"
+    exit "$command_rc"
+  ' _ "$status_file" "$@"; then
+    runner_rc=0
+  else
+    runner_rc=$?
+  fi
+  command_rc=$(cat "$status_file" 2>/dev/null || true)
+  rm -f "$status_file" 2>/dev/null || true
+  case "$command_rc" in
+    ''|*[!0-9]*) ;;
+    *) [ "$command_rc" -le 255 ] && return "$command_rc" ;;
+  esac
+  case "$runner_rc" in
+    124|137) return 124 ;;
+    *) return "$runner_rc" ;;
+  esac
+}
+
 fm_run_timed() {  # <seconds> <command...>
   local seconds=$1
   shift
   case "$(fm_timeout_mechanism)" in
-    timeout) timeout -k 1 "$seconds" "$@" ;;
-    gtimeout) gtimeout -k 1 "$seconds" "$@" ;;
+    timeout) fm_run_external_timeout timeout "$seconds" "$@" ;;
+    gtimeout) fm_run_external_timeout gtimeout "$seconds" "$@" ;;
     perl)
       perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
         "$seconds" "$@"
