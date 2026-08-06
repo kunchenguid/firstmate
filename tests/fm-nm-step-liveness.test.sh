@@ -40,7 +40,7 @@ mkdir -p "$WT"
 # Descendants are killed too, not just the tracked pid: a leaked grandchild
 # inherits this suite's stdout and holds the pipe open until it exits on its
 # own, which makes a passing suite look like a hung one to whatever is reading
-# it - including the gate's serial test loop.
+# it - including the gate's sharded test run, which is serial within each shard.
 STARTED_PIDS=""
 kill_tree() {  # <pid>
   local child
@@ -168,8 +168,8 @@ kill_started
 # step's current unit of work and its age, and bin/fm-crew-state.sh carries that
 # onto every heartbeat read, so the field is load-bearing rather than cosmetic.
 #
-# The shape mirrors the real one: a root shell the daemon owns, running one
-# child at a time - the suite's `for t in tests/*.test.sh` loop.
+# The shape mirrors one behavior shard's run: a root shell the daemon owns,
+# running one child at a time. The suite fans those shards out eight ways.
 ( cd "$WT" && exec bash -c 'sleep 120 & wait' ) &
 PARENT=$!
 STARTED_PIDS="$STARTED_PIDS $PARENT"

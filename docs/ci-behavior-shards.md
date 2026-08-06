@@ -8,9 +8,7 @@ The 2026-07-31 `main` behavior job ran all 80 scripts serially from 16:41:30 UTC
 
 The source run is [GitHub Actions run 30648119449](https://github.com/ruby-dlee/firstmate/actions/runs/30648119449).
 
-`tests/behavior-test-durations.tsv` records the per-script measurements derived from that run.
-
-The current inventory contains 87 behavior-test scripts, including the runner contract test and every test added on `main` since the baseline run.
+`tests/behavior-test-durations.tsv` is the current behavior-test inventory and per-script weight source.
 
 ## Assignment
 
@@ -18,24 +16,13 @@ The planner uses deterministic longest-processing-time assignment.
 
 It sorts by descending recorded duration, uses the test path as the stable secondary key, assigns the next test to the currently lightest shard, and breaks load ties by the lowest shard number.
 
-The eight-shard checked-in plan has these estimated serial loads.
-
-| Shard | Tests | Estimated load |
-|---:|---:|---:|
-| 1 | 1 | 475500 ms (7m56s) |
-| 2 | 11 | 436053 ms (7m16s) |
-| 3 | 15 | 436051 ms (7m16s) |
-| 4 | 13 | 436048 ms (7m16s) |
-| 5 | 12 | 436056 ms (7m16s) |
-| 6 | 10 | 436296 ms (7m16s) |
-| 7 | 10 | 436222 ms (7m16s) |
-| 8 | 15 | 436053 ms (7m16s) |
+`bin/fm-behavior-shards.sh --check 8` validates that source against the complete `tests/*.test.sh` inventory and prints the current per-shard counts and estimated loads.
 
 The account-routing and report-stack suites keep their original test functions and assertions in shared suite files, while two runner wrappers partition each call list deterministically between isolated runners.
 
 The report-stack partition keeps the persistent-retention-owner setup in the same wrapper as its generation-interruption dependent.
 
-The largest remaining indivisible test file, `tests/fm-checkout-refresh.test.sh`, sets the 7-minute-56-second floor.
+The largest remaining indivisible test file, `tests/fm-checkout-refresh.test.sh`, sets the floor at any shard count; reducing it requires a partition wrapper of the kind the helper already supports.
 
 ## Measured GitHub Actions result
 

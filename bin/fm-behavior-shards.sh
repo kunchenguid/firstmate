@@ -13,8 +13,9 @@
 # Override it with FM_BEHAVIOR_DURATIONS_FILE for fixture tests only.
 # Planning uses deterministic longest-processing-time assignment: descending
 # duration, path as the stable secondary key, and lowest shard number for load
-# ties. Each shard runs its assigned files serially. CI supplies one isolated
-# runner, TMPDIR, and TMUX_TMPDIR per shard.
+# ties. Each shard runs its assigned files serially. Concurrent callers must
+# supply an isolated TMPDIR and TMUX_TMPDIR per shard; CI also isolates shards
+# on separate runners.
 set -eu
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)

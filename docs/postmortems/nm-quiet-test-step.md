@@ -84,7 +84,7 @@ It sometimes returns a plausible number, so it looks like a working check, and i
 ## Why the timing looked damning but was not
 
 The firstmate behavior suite is genuinely slow.
-`tests/behavior-test-durations.tsv` records **59.2 minutes of serial runtime** measured on an unloaded CI runner across 92 scripts, and the gate runs them serially in one loop.
+At the time of the incident, `tests/behavior-test-durations.tsv` recorded **59.2 minutes of serial runtime** measured on an unloaded CI runner across 92 scripts, and the gate ran them serially in one loop.
 Locally the same suite shares a 14-core laptop with the rest of the fleet.
 
 Historical `test` step durations for this repo: 116, 121, 124, 129, 136, 187, 226, 228, 335, 347 and 401 minutes.
@@ -196,7 +196,9 @@ They are competing for 14 cores, at a load average of 26-31 during this incident
 Three separate problems compounded, and only the first is fixed here.
 
 1. **No liveness signal for a configured-command step.** The subject of this postmortem, fixed by `bin/fm-nm-step-liveness.sh`.
-2. **The suite is an hour long serially.** `tests/behavior-test-durations.tsv` sums to 59.2 minutes across 92 scripts, and the gate runs them in one serial loop. Tracked separately as `fm-gate-serial-e2e-bottleneck`; deliberately not addressed here.
+2. **The suite was an hour long serially.**
+   At incident time, `tests/behavior-test-durations.tsv` summed to 59.2 minutes across 92 scripts, and the gate ran them in one serial loop.
+   Tracked separately as `fm-gate-serial-e2e-bottleneck`; deliberately not addressed here.
 3. **Nothing bounds how many validation runs share the machine.** See the correction below.
 
 A slow step, with no liveness signal, whose slowness is amplified by unbounded parallel runs, is indistinguishable from a hang.

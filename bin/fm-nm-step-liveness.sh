@@ -398,11 +398,10 @@ PIDS_T0=$(procs_in_worktree) || \
 COUNT_T0=$(printf '%s' "$PIDS_T0" | grep -c . || true)
 case "$COUNT_T0" in ''|*[!0-9]*) COUNT_T0=0 ;; esac
 
-# A single empty scan is NOT proof of death. The step's loop replaces its child
-# between units of work (`for t in tests/*.test.sh; do bash "$t"; done` is empty
-# for the instant between two scripts), so one unlucky sample lands in that gap
-# and reads zero on a perfectly healthy step. `dead` is the only verdict that
-# authorizes discarding a run, so it must survive a CONFIRMING rescan.
+# A single empty scan is NOT proof of death. A behavior shard replaces its child
+# between assigned scripts, so one unlucky sample lands in that gap and reads
+# zero on a perfectly healthy step. `dead` is the only verdict that authorizes
+# discarding a run, so it must survive a CONFIRMING rescan.
 #
 # The confirm delay is paid only when the first scan is already empty, so the
 # common alive case - and the ~0.2s presence-only path on the heartbeat read -

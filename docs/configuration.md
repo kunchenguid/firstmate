@@ -96,8 +96,10 @@ See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verif
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` so no-mistakes runs firstmate's bash behavior suite directly.
 That evidence policy is specific to the firstmate repo: target projects may legitimately commit `.no-mistakes/evidence/` from their own no-mistakes pipeline, but firstmate keeps `.no-mistakes/` local and CI rejects tracked entries under that path.
-That command requires `tmux` on `PATH`, prints `tmux -V`, runs every `tests/*.test.sh` with `bash`, and fails if any script exits non-zero.
-It intentionally runs the complete behavior-test inventory serially instead of reproducing the duration-balanced CI sharding owned by [`bin/fm-behavior-shards.sh`](../bin/fm-behavior-shards.sh) or delegating the test step to an agent.
+That command requires `tmux` on `PATH`, prints `tmux -V`, dispatches the behavior tests through [`bin/fm-behavior-shards.sh`](../bin/fm-behavior-shards.sh) `--run` across eight concurrent shards, and fails if any script exits non-zero.
+Each shard runs its assigned scripts serially, and the command finishes with the helper's `--verify` pass to prove the executed union is complete and disjoint.
+The gate gives each shard private `TMPDIR` and `TMUX_TMPDIR` roots, captures output per shard, and prints those logs in shard order after every shard finishes.
+Reusing the same planner and runner as CI restores local-CI parity without duplicating the helper's shard-planning contract here.
 
 ## Crosscheck reviewer
 
