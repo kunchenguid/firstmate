@@ -113,13 +113,18 @@ FM_TMUX_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 FM_TMUX_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
 
 fm_busy_lines_match() {  # [harness]
-  local harness=${1:-} lines regex
+  local harness=${1:-} lines regex last_line
   IFS= read -r -d '' lines || true
   if [ -n "${FM_BUSY_REGEX:-}" ]; then
     regex=$FM_BUSY_REGEX
+  elif [ "$harness" = claude ]; then
+    printf '%s' "$lines" | grep -qiE "$FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT" \
+      && return 0
+    last_line=$(printf '%s\n' "$lines" | awk 'NF { line=$0 } END { print line }')
+    printf '%s' "$last_line" | grep -qiE "$FM_TMUX_CLAUDE_ESCAPE_REGEX_DEFAULT"
+    return
   else
     case "$harness" in
-      claude) regex=$FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT ;;
       codex) regex=$FM_TMUX_CODEX_BUSY_REGEX_DEFAULT ;;
       opencode) regex=$FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT ;;
       pi|pi-signed) regex=$FM_TMUX_PI_BUSY_REGEX_DEFAULT ;;
@@ -395,17 +400,10 @@ fm_pane_input_pending() {  # <target>
 # fm_pane_is_busy: 0 if the pane's last few non-blank lines show a busy footer
 # (an agent mid-turn). Scans a 40-line tail like fm-watch.sh.
 fm_pane_is_busy() {  # <target> [harness]
-  local win=$1 harness=${2:-} tail40 lines last_line
+  local win=$1 harness=${2:-} tail40
   tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || return 1
-  lines=$(printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12)
-  if [ "$harness" = claude ] && [ -z "${FM_BUSY_REGEX:-}" ]; then
-    printf '%s' "$lines" | grep -qiE "$FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT" \
-      && return 0
-    last_line=$(printf '%s\n' "$lines" | tail -1)
-    printf '%s' "$last_line" | grep -qiE "$FM_TMUX_CLAUDE_ESCAPE_REGEX_DEFAULT"
-    return
-  fi
-  printf '%s' "$lines" | fm_busy_lines_match "$harness"
+  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
+    | fm_busy_lines_match "$harness"
 }
 
 # fm_tmux_submit_core: type <text> into <target> ONCE, then submit with Enter,

@@ -280,6 +280,11 @@ test_claude_busy_signals_are_independent() {
       _ "$ROOT" "$1" "${2:-}"
   }
 
+  lines_busy() {
+    bash -c '. "$1/bin/fm-tmux-lib.sh"; fm_busy_lines_match "$2"' \
+      _ "$ROOT" "$1" < "$composer"
+  }
+
   # Signal 1 alone: elapsed spinner, escape affordance genuinely absent.
   printf '✽ Coalescing… (15s · ↓ 395 tokens)\n' > "$composer"
   grep -qF 'esc to interrupt' "$composer" \
@@ -322,6 +327,8 @@ test_claude_busy_signals_are_independent() {
     || fail "transcript fixture must place the affordance before the last line"
   pane_busy transcript-footer claude \
     && fail "an exact footer row earlier in the transcript must stay idle"
+  lines_busy claude \
+    && fail "the shared matcher must ignore an exact footer row before the last line"
   printf 'Earlier transcript output\n%s\n\n' "$footer_row" > "$composer"
   [ "$(grep -cF "$footer_row" "$composer")" = 1 ] \
     || fail "live-footer fixture must contain the same rendered row once"
@@ -329,6 +336,8 @@ test_claude_busy_signals_are_independent() {
     || fail "live-footer fixture must place the affordance on the last non-blank line"
   pane_busy positional-footer claude \
     || fail "the same footer row on the last non-blank line must classify busy"
+  lines_busy claude \
+    || fail "the shared matcher must accept the footer row on the last non-blank line"
 
   # Both real indicator glyphs still carry a genuine rendered footer.
   printf '  ⏸ manual mode on · esc to interrupt · ? for shortcuts\n' > "$composer"
