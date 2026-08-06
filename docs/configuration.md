@@ -31,6 +31,18 @@ The `/calm` command replaces the file atomically before changing live presentati
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+## Context-mode WebFetch compatibility
+
+Context-mode denies native `WebFetch` by default and redirects it to `ctx_fetch_and_index`, which is a plain HTTP fetch without a browser or the caller's authenticated session.
+Firstmate's narrow compatibility patch allows native `WebFetch` only for `claude.ai` and its subdomains, because client-rendered or session-authenticated Claude pages otherwise return an unreadable shell.
+It keeps all other hosts denied, including `example.com`, `notclaude.ai.evil.com`, and `myclaude.ai`, so suffix spoofing is refused.
+`bin/fm-context-mode-webfetch-fix.sh` is the source of the repair and uses the active installation listed in Claude's plugin registry rather than guessing a version.
+Run it after every `ctx upgrade`, because an upgrade replaces both the marketplace checkout at `~/.claude/plugins/marketplaces/context-mode/hooks/core/routing.mjs` and the active cache at `~/.claude/plugins/cache/context-mode/context-mode/<version>/hooks/core/routing.mjs`.
+Use `bin/fm-context-mode-webfetch-fix.sh --check` to verify that both copies carry the patch.
+The patcher fails before writing either copy if the expected context-mode source anchors changed, so a new upstream shape requires a deliberate repair instead of a silent no-op.
+The compatibility boundary can be extended only through context-mode's `CONTEXT_MODE_WEBFETCH_ALLOW_HOSTS` comma-separated setting, while the default remains `claude.ai`.
+Context-mode intercepts `curl` and `wget` in Bash, so use `python3` with `urllib` as the standing fallback for HTTP API work in a context-mode session.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
