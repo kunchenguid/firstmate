@@ -298,7 +298,8 @@ remote_secondmate_teardown() {
   tmp="$SECONDMATE_REG.tmp.$$"
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
-  rm -f -- "$STATE/$ID.status" "$STATE/$ID.meta" "$STATE/$ID.turn-ended"
+  rm -f -- "$STATE/$ID.status" "$STATE/$ID.meta" "$STATE/$ID.turn-ended" \
+    "$STATE/$ID.zellij-lifecycle" "$STATE/$ID.zellij-exited"
   printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
   return 0
 }
@@ -1649,7 +1650,8 @@ cleanup_firstmate_home_children() {
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
     rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" \
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
-      "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token"
+      "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
+      "$sub_state/$child_id.zellij-lifecycle" "$sub_state/$child_id.zellij-exited"
   done
 }
 
@@ -1900,7 +1902,8 @@ remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
-  "$STATE/$ID.kimi-turnend-token"
+  "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.zellij-lifecycle" \
+  "$STATE/$ID.zellij-exited"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

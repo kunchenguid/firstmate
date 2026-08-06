@@ -741,7 +741,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
 # fm_backend_kill: remove the task's session endpoint (best-effort; a
 # nonexistent/already-gone target is not an error - callers already swallow
 # failures here exactly as the inline `tmux kill-window ... || true` did).
-fm_backend_kill() {  # <backend> <target>
+fm_backend_kill() {  # <backend> <backend-specific endpoint identity...>
   local backend=$1
   shift
   [ -n "${1:-}" ] || { echo "error: refusing empty backend kill target" >&2; return 1; }
@@ -801,10 +801,10 @@ fm_backend_busy_state() {  # <backend> <target>
 # without duplicating per-backend composer-reading logic. tmux and herdr both
 # expose a named classifier already (fm_tmux_composer_state,
 # fm_backend_herdr_composer_state), as do orca and cmux
-# (fm_backend_orca_composer_state, fm_backend_cmux_composer_state); zellij's
-# submit path uses an internal content-diff approach with no separately named
-# classifier, so it reports unknown here - callers fall back to their own
-# policy, exactly as an unknown fm_backend_busy_state already does.
+# (fm_backend_orca_composer_state, fm_backend_cmux_composer_state). Zellij
+# translates its richer shared lifecycle vocabulary through the same interface:
+# only idle and submitted are empty, composing is pending, and every unsafe
+# state remains unknown.
 fm_backend_composer_state() {  # <backend> <target> -> empty|pending|pending-unproven|unknown
   local backend=$1
   shift
@@ -812,6 +812,13 @@ fm_backend_composer_state() {  # <backend> <target> -> empty|pending|pending-unp
   case "$backend" in
     tmux) fm_tmux_composer_state "$@" ;;
     herdr) fm_backend_herdr_composer_state "$@" ;;
+    zellij)
+      case "$(fm_backend_zellij_composer_state "$@")" in
+        idle|submitted) printf 'empty' ;;
+        composing) printf 'pending' ;;
+        *) printf 'unknown' ;;
+      esac
+      ;;
     orca) fm_backend_orca_composer_state "$@" ;;
     cmux) fm_backend_cmux_composer_state "$@" ;;
     *) printf 'unknown' ;;
@@ -880,16 +887,17 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 #   unverified - this backend has no recovery classifier.
 # Only `dead` and `missing` license recovery. The tmux adapter requires a
 # successful session inventory and returns `missing` only when it omits the
-# exact window; the Herdr adapter reuses its husk
-# classifier. Zellij remains unverified because its secondmate ghost-tab and
-# agent-process recovery path has not been empirically validated. Orca and cmux
-# do not support secondmate spawns.
-fm_backend_agent_state() {  # <backend> <target>
-  local backend=$1 target=$2
+# exact window; the Herdr adapter reuses its husk classifier. Zellij accepts
+# only its authenticated nonce-bound exit receipt as dead proof; a missing
+# screen or an unknown layout remains unreadable. Orca and cmux do not support
+# secondmate spawns.
+fm_backend_agent_state() {  # <backend> <target> [expected-label]
+  local backend=$1 target=$2 expected_label=${3:-}
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   case "$backend" in
     tmux) fm_backend_tmux_agent_state "$target" ;;
     herdr) fm_backend_herdr_agent_state "$target" ;;
+    zellij) fm_backend_zellij_agent_state "$target" "$expected_label" ;;
     *) printf 'unverified' ;;
   esac
 }

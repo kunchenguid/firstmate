@@ -190,12 +190,12 @@ test_agent_state_dispatcher_and_compatibility() {
   out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_pane_agent_state() { printf "live"; }; fm_backend_agent_state herdr sess:p1' "$ROOT")
   [ "$out" = alive ] || fail "detailed dispatcher should route Herdr, got '$out'"
 
-  out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state zellij sess:7' "$ROOT")
-  [ "$out" = unverified ] || fail "Zellij should remain unverified, got '$out'"
-  out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive zellij sess:7' "$ROOT")
-  [ "$out" = unknown ] || fail "the compatibility dispatcher should map unverified to unknown, got '$out'"
+  out=$(bash -c '. "$0/bin/fm-backend.sh"; _FM_BACKEND_ZELLIJ_SOURCED=1; fm_backend_zellij_agent_state() { [ "$2" = fm-sm1 ] || exit 1; printf dead; }; fm_backend_agent_state zellij sess:7 fm-sm1' "$ROOT")
+  [ "$out" = dead ] || fail "Zellij should route its marker-proven exit through the detailed dispatcher, got '$out'"
+  out=$(bash -c '. "$0/bin/fm-backend.sh"; _FM_BACKEND_ZELLIJ_SOURCED=1; fm_backend_zellij_agent_state() { printf ambiguous; }; fm_backend_agent_alive zellij sess:7' "$ROOT")
+  [ "$out" = unknown ] || fail "the compatibility dispatcher should keep ambiguous Zellij state unknown, got '$out'"
 
-  pass "fm_backend_agent_state: routes tmux/Herdr and keeps Zellij unverified"
+  pass "fm_backend_agent_state: routes tmux, Herdr, and marker-proven Zellij recovery state"
 }
 
 # --- sweep level: bin/fm-bootstrap.sh's secondmate_liveness_sweep -----------
@@ -294,6 +294,40 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+make_liveness_zellij() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/zellij" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "${FM_ZELLIJ_CALL_LOG:?}"
+case "${1:-}" in
+  --version)
+    printf '%s\n' 'zellij 0.44.0'
+    ;;
+  list-sessions)
+    printf '%s\n' firstmate
+    ;;
+  --session)
+    case "$*" in
+      *' action list-panes --json') printf '%s\n' '[]' ;;
+      *' action list-tabs --json')
+        if [ -e "${FM_ZELLIJ_CALL_LOG}.closed" ]; then
+          printf '%s\n' '[]'
+        else
+          printf '%s\n' '[{"tab_id":3,"name":"fm-sm1"}]'
+        fi
+        ;;
+      *' action close-tab-by-id 3') : > "${FM_ZELLIJ_CALL_LOG}.closed" ;;
+    esac
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/zellij"
+  printf '%s\n' "$fakebin"
+}
+
 # new_world <name>: a scratch firstmate HOME (state/, watcher beacon, pinned
 # harness) with no kind=secondmate meta yet. FM_ROOT is left to resolve
 # naturally to the real checkout under test ($ROOT), exactly as production
@@ -338,6 +372,12 @@ run_bootstrap() {  # <fakebin> <home> <pane-cmd> <call-log> [extra env...] -> st
     env "$@" "$ROOT/bin/fm-bootstrap.sh" 2>&1
 }
 
+run_bootstrap_zellij() {  # <fakebin> <home> <root> <call-log> -> stdout
+  local fb=$1 home=$2 root=$3 log=$4
+  PATH="$fb:$BASE_PATH" TMUX='' FM_BACKEND=zellij FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_ZELLIJ_CALL_LOG="$log" "$ROOT/bin/fm-bootstrap.sh" 2>&1
+}
+
 test_sweep_respawns_confirmed_dead_secondmate() {
   local w fb tmuxfb log out
   w=$(new_world sweep-dead)
@@ -354,6 +394,47 @@ test_sweep_respawns_confirmed_dead_secondmate() {
   assert_contains "$(cat "$log")" "new-window" \
     "a confirmed-dead secondmate should actually be relaunched"
   pass "sweep: a confirmed-dead secondmate endpoint is killed and respawned"
+}
+
+test_sweep_closes_recorded_zellij_ghost_tab_before_respawn() {
+  local w fb zellijfb log out nonce fake_root
+  w=$(new_world sweep-zellij-ghost)
+  add_sm_home "$w" sm1 firstmate:7 codex
+  {
+    printf '%s\n' 'backend=zellij'
+    printf '%s\n' 'zellij_session=firstmate'
+    printf '%s\n' 'zellij_tab_id=3'
+    printf '%s\n' 'zellij_pane_id=7'
+  } >> "$w/home/state/sm1.meta"
+  nonce=00000000000000000000000000000001
+  printf '%s\n' "$nonce" > "$w/home/state/sm1.zellij-lifecycle"
+  printf '%s 0\n' "$nonce" > "$w/home/state/sm1.zellij-exited"
+  fake_root="$w/root"
+  mkdir -p "$fake_root/bin"
+  cat > "$fake_root/bin/fm-spawn.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -e "${FM_ZELLIJ_CALL_LOG:?}.closed" ] || {
+  printf '%s\n' 'error: respawn reached before the ghost tab was closed' >&2
+  exit 1
+}
+printf '%s\n' 'spawn' >> "$FM_ZELLIJ_CALL_LOG"
+SH
+  chmod +x "$fake_root/bin/fm-spawn.sh"
+  fb=$(make_toolchain "$w"); zellijfb=$(make_liveness_zellij "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap_zellij "$zellijfb:$fb" "$w/home" "$fake_root" "$log")
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawn failed" \
+    "a marker-proven Zellij exit should close its ghost tab before relaunch"
+  assert_contains "$(cat "$log")" "action close-tab-by-id 3" \
+    "the recovery sweep did not close the recorded Zellij tab after its pane disappeared"
+  assert_contains "$(cat "$log")" "spawn" \
+    "the recovery sweep did not relaunch after closing the recorded Zellij ghost tab"
+  assert_not_contains "$(cat "$log")" "action close-pane" \
+    "the recovery sweep should use the verified recorded tab instead of a missing pane"
+  pass "sweep: closes a marker-proven Zellij ghost tab before respawn"
 }
 
 test_sweep_leaves_alive_secondmate_untouched() {
@@ -531,6 +612,7 @@ test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
 test_sweep_respawns_confirmed_dead_secondmate
+test_sweep_closes_recorded_zellij_ghost_tab_before_respawn
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate
 test_sweep_respawns_authoritatively_missing_pi_signed_secondmate

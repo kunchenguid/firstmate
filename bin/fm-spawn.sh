@@ -1651,12 +1651,21 @@ kimi_capture_has_empty_composer() {  # <plain-pane-capture>
     | grep -Eq '^[[:space:]]*(│|┃|\|)[[:space:]]*>[[:space:]]*(│|┃|\|)[[:space:]]*$'
 }
 
+kimi_composer_is_idle() {
+  local pane state
+  if [ "$BACKEND" = zellij ]; then
+    state=$(fm_backend_zellij_composer_state "$T" '' "$W")
+    [ "$state" = idle ]
+    return
+  fi
+  pane=$(kimi_capture)
+  kimi_capture_has_empty_composer "$pane"
+}
+
 kimi_wait_for_ready() {
-  local pane i=0 max=${FM_KIMI_READY_POLLS:-60} interval=${FM_KIMI_POLL_INTERVAL:-0.5}
+  local i=0 max=${FM_KIMI_READY_POLLS:-60} interval=${FM_KIMI_POLL_INTERVAL:-0.5}
   while [ "$i" -lt "$max" ]; do
-    pane=$(kimi_capture)
-    if printf '%s\n' "$pane" | grep -Fq 'Welcome to Kimi Code!' \
-       || kimi_capture_has_empty_composer "$pane"; then
+    if kimi_composer_is_idle; then
       return 0
     fi
     i=$((i + 1))
@@ -1667,7 +1676,11 @@ kimi_wait_for_ready() {
 
 kimi_delivery_is_confirmed() {  # <plain-pane-capture>
   local pane=$1
-  kimi_capture_has_empty_composer "$pane" || return 1
+  if [ "$BACKEND" = zellij ]; then
+    [ "$(fm_backend_zellij_composer_state "$T" '' "$W")" = idle ] || return 1
+  else
+    kimi_capture_has_empty_composer "$pane" || return 1
+  fi
   if { printf '%s\n' "$pane" | grep -Fq '✨' \
        && printf '%s\n' "$pane" | grep -Fq 'Read the brief at'; } \
      || printf '%s\n' "$pane" \
@@ -2032,6 +2045,13 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+ZELLIJ_LIFECYCLE_NONCE=
+if [ "$BACKEND" = zellij ]; then
+  ZELLIJ_LIFECYCLE_NONCE=$(fm_backend_zellij_lifecycle_arm "$W") || {
+    echo "error: could not arm the Zellij lifecycle state for $W" >&2
+    exit 1
+  }
+fi
 {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
@@ -2133,6 +2153,12 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
       exit 1
     fi
   fi
+fi
+if [ "$BACKEND" = zellij ]; then
+  LAUNCH=$(fm_backend_zellij_wrap_launch "$W" "$LAUNCH" "$ZELLIJ_LIFECYCLE_NONCE") || {
+    echo "error: could not bind the Zellij lifecycle state for $W" >&2
+    exit 1
+  }
 fi
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"

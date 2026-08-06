@@ -371,6 +371,22 @@
     {
       "path": "skills/stow/SKILL.md",
       "audience": "public-product"
+    },
+    {
+      "path": "tests/fixtures/zellij-composer-state/ambiguous.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/zellij-composer-state/composing.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/zellij-composer-state/exited.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/zellij-composer-state/idle.txt",
+      "audience": "maintainer-verification"
     }
   ]
 }

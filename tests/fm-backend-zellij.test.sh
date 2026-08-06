@@ -16,6 +16,10 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the zel
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-zellij-tests)
 
+# shellcheck disable=SC2153 # tests/lib.sh initializes ROOT.
+# shellcheck source=/dev/null
+. "$ROOT/bin/backends/zellij.sh"
+
 # make_zellij_fakebin: a `zellij` stub that logs every invocation (one line,
 # unit-separated args, to $FM_ZELLIJ_LOG) and returns the canned response for
 # that call read from $FM_ZELLIJ_RESPONSES/<n>.out, consumed IN ORDER (call 1
@@ -585,6 +589,145 @@ test_capture_fails_when_session_absent() {
   pass "fm_backend_zellij_capture: fails when the target session is not listed as active (session_exists pre-check)"
 }
 
+# --- shared composer/lifecycle classifier -----------------------------------
+# Live screen-rendering verification status is owned by
+# docs/verification/runtime-backends.md#zellij.
+
+test_composer_layout_classifies_known_fixtures() {
+  local fixture expected out exited
+  for fixture in idle composing ambiguous; do
+    case "$fixture" in
+      idle) expected=idle ;;
+      composing) expected=composing ;;
+      ambiguous) expected=ambiguous ;;
+    esac
+    out=$(fm_backend_zellij_composer_layout_state "$(cat "$ROOT/tests/fixtures/zellij-composer-state/$fixture.txt")" fm-fixture)
+    [ "$out" = "$expected" ] || fail "fixture $fixture should classify as $expected, got $out"
+  done
+  exited=$(cat "$ROOT/tests/fixtures/zellij-composer-state/exited.txt")
+  out=$(fm_backend_zellij_composer_layout_state "$exited" fm-fixture)
+  [ "$out" = ambiguous ] || fail "pane output must not prove lifecycle exit, got $out"
+  pass "fm_backend_zellij_composer_layout_state: recognizes only the fixture-proven layouts"
+}
+
+test_composer_layout_finds_supported_row_above_border_and_footer() {
+  local capture out
+  capture=$'agent output\n╭────────────╮\n│ > captain │\n╰────────────╯\n│ context: 4.2% │'
+  out=$(fm_backend_zellij_composer_layout_state "$capture" fm-fixture)
+  [ "$out" = composing ] || fail "a bordered composer above its border and footer should be composing, got $out"
+  capture=$'agent output\n╭────────────╮\n│ >          │\n╰────────────╯\n│ context: 4.2% │'
+  out=$(fm_backend_zellij_composer_layout_state "$capture" fm-fixture)
+  [ "$out" = idle ] || fail "an empty composer above its border and footer should be idle, got $out"
+  pass "fm_backend_zellij_composer_layout_state: scans the full capture for the supported composer row"
+}
+
+test_composer_layout_rejects_stale_row_above_shell_prompt() {
+  local capture out
+  capture=$'agent output\n│ > │\nzsh %\nlast login banner'
+  out=$(fm_backend_zellij_composer_layout_state "$capture" fm-fixture)
+  [ "$out" = ambiguous ] || fail "a raw shell prompt below stale composer history must fail closed, got $out"
+  pass "fm_backend_zellij_composer_layout_state: a later shell prompt invalidates stale composer history"
+}
+
+test_composer_layout_never_accepts_exit_marker_output() {
+  local capture out
+  capture=$'__FM_ZELLIJ_AGENT_EXITED__:fixture:0\nzsh %'
+  out=$(fm_backend_zellij_composer_layout_state "$capture" fm-fixture)
+  [ "$out" = ambiguous ] || fail "a final diagnostic marker must not prove exit, got $out"
+  pass "fm_backend_zellij_composer_layout_state: pane text cannot forge lifecycle exit"
+}
+
+test_composer_state_requires_known_transition_for_submission() {
+  local dir fb out baseline
+  dir="$TMP_ROOT/composer-submitted"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  zellij_pane_response "$dir" 2 7 3
+  cp "$ROOT/tests/fixtures/zellij-composer-state/idle.txt" "$dir/responses/3.out"
+  baseline=$(cat "$ROOT/tests/fixtures/zellij-composer-state/composing.txt")
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=firstmate \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_composer_state firstmate:7 "$1"' "$ROOT" "$baseline" )
+  [ "$out" = submitted ] || fail "a composing fixture followed by a changed idle fixture should be submitted, got $out"
+
+  : > "$dir/log"; rm -f "$dir/responses/.count"
+  zellij_pane_response "$dir" 1 7 3
+  zellij_pane_response "$dir" 2 7 3
+  cp "$ROOT/tests/fixtures/zellij-composer-state/ambiguous.txt" "$dir/responses/3.out"
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=firstmate \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_composer_state firstmate:7 "$1"' "$ROOT" "$baseline" )
+  [ "$out" = ambiguous ] || fail "a changed unknown layout must fail closed as ambiguous, got $out"
+  pass "fm_backend_zellij_composer_state: accepts only a proven composing-to-idle transition as submitted"
+}
+
+test_composer_state_reports_unreachable_target() {
+  local dir fb out
+  dir="$TMP_ROOT/composer-unreachable"; mkdir -p "$dir/responses"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST='' \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_composer_state firstmate:7' "$ROOT" )
+  [ "$out" = unreachable ] || fail "an absent session should be unreachable, got $out"
+  pass "fm_backend_zellij_composer_state: an unavailable endpoint is unreachable"
+}
+
+test_lifecycle_wrapper_publishes_nonce_bound_exit() {
+  local dir nonce command out state
+  dir="$TMP_ROOT/lifecycle-wrapper"; mkdir -p "$dir/state"
+  nonce=$(FM_STATE_OVERRIDE="$dir/state" fm_backend_zellij_lifecycle_arm fm-fixture) \
+    || fail "the lifecycle state could not be armed"
+  command=$(FM_STATE_OVERRIDE="$dir/state" fm_backend_zellij_wrap_launch fm-fixture 'printf launch' "$nonce") \
+    || fail "the lifecycle wrapper could not be built"
+  out=$(bash -c "$command; printf 'shell prompt\n'")
+  [ "$out" = $'launch\n__FM_ZELLIJ_AGENT_EXITED__:fixture:0\nshell prompt' ] \
+    || fail "the wrapper should preserve launch output and return to its shell, got '$out'"
+  state=$(FM_STATE_OVERRIDE="$dir/state" fm_backend_zellij_lifecycle_state fm-fixture)
+  [ "$state" = exited ] || fail "the wrapper did not publish an authenticated exit receipt, got $state"
+  pass "fm_backend_zellij_wrap_launch: publishes nonce-bound exit before the shell resumes"
+}
+
+test_lifecycle_state_rejects_stale_and_malformed_receipts() {
+  local dir nonce state
+  dir="$TMP_ROOT/lifecycle-auth"; mkdir -p "$dir/state"
+  nonce=$(FM_STATE_OVERRIDE="$dir/state" fm_backend_zellij_lifecycle_arm fm-fixture) \
+    || fail "the lifecycle state could not be armed"
+  printf '%032d 0\n' 0 > "$dir/state/fixture.zellij-exited"
+  state=$(FM_STATE_OVERRIDE="$dir/state" fm_backend_zellij_lifecycle_state fm-fixture)
+  [ "$state" = unknown ] || fail "a receipt from another launch should be unknown, got $state"
+  printf '%s not-a-status\n' "$nonce" > "$dir/state/fixture.zellij-exited"
+  state=$(FM_STATE_OVERRIDE="$dir/state" fm_backend_zellij_lifecycle_state fm-fixture)
+  [ "$state" = unknown ] || fail "a malformed receipt should be unknown, got $state"
+  pass "fm_backend_zellij_lifecycle_state: rejects stale and malformed exit receipts"
+}
+
+test_composer_state_prefers_trusted_exit_over_shell_prompt() {
+  local dir nonce command out
+  dir="$TMP_ROOT/composer-exited"; mkdir -p "$dir/state"
+  nonce=$(FM_STATE_OVERRIDE="$dir/state" fm_backend_zellij_lifecycle_arm fm-fixture) \
+    || fail "the lifecycle state could not be armed"
+  command=$(FM_STATE_OVERRIDE="$dir/state" fm_backend_zellij_wrap_launch fm-fixture ':' "$nonce") \
+    || fail "the lifecycle wrapper could not be built"
+  bash -c "$command" >/dev/null
+  out=$(FM_STATE_OVERRIDE="$dir/state" fm_backend_zellij_composer_state firstmate:7 '' fm-fixture)
+  [ "$out" = exited ] || fail "trusted exit state should survive a later shell prompt, got $out"
+  pass "fm_backend_zellij_composer_state: trusted lifecycle state proves exit independently of pane layout"
+}
+
+test_agent_state_maps_only_marker_proven_exit_to_dead() {
+  local state out
+  for state in idle composing submitted exited ambiguous unreachable; do
+    out=$(FM_ZELLIJ_TEST_STATE="$state" bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_composer_state() { printf "%s" "$FM_ZELLIJ_TEST_STATE"; }; fm_backend_zellij_agent_state firstmate:7 fm-fixture' "$ROOT")
+    case "$state" in
+      idle|composing|submitted) [ "$out" = alive ] || fail "$state should map to alive, got $out" ;;
+      exited) [ "$out" = dead ] || fail "exited should map to dead, got $out" ;;
+      ambiguous) [ "$out" = ambiguous ] || fail "ambiguous should remain ambiguous, got $out" ;;
+      unreachable) [ "$out" = unreadable ] || fail "unreachable should remain non-actionable, got $out" ;;
+    esac
+  done
+  pass "fm_backend_zellij_agent_state: only the task-bound exited state licenses recovery"
+}
+
 test_send_key_normalizes_and_targets_pane() {
   local dir fb
   dir="$TMP_ROOT/sendkey"; mkdir -p "$dir/responses"
@@ -848,6 +991,8 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill() {
     "kind=scout" \
     "decisions_reviewed=1" \
     "decision_keys="
+  printf '%032d\n' 1 > "$state/zghost.zellij-lifecycle"
+  printf '%032d 0\n' 1 > "$state/zghost.zellij-exited"
   printf '[]\n' > "$dir/responses/1.out"
   printf '[{"tab_id":3,"name":"fm-zghost"}]\n' > "$dir/responses/2.out"
   fb=$(make_zellij_fakebin "$dir")
@@ -862,7 +1007,11 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill() {
     "fm-teardown did not pass a verified recorded zellij_tab_id through to kill"
   assert_not_contains "$(cat "$dir/log")" $'\x1f''close-pane' \
     "fm-teardown should close the recorded tab id instead of falling back to close-pane"
-  pass "fm-teardown.sh: passes recorded zellij_tab_id with the expected task label"
+  assert_absent "$state/zghost.zellij-lifecycle" \
+    "fm-teardown should remove the task's Zellij lifecycle authority"
+  assert_absent "$state/zghost.zellij-exited" \
+    "fm-teardown should remove the task's Zellij exit receipt"
+  pass "fm-teardown.sh: passes the recorded tab id and retires Zellij lifecycle state"
 }
 
 test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag() {
@@ -908,7 +1057,7 @@ test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag() {
   pass "fm-teardown.sh: force cleanup kills zellij children using the child home tag"
 }
 
-# --- send_text_submit: delta-based verify-and-retry --------------------------
+# --- send_text_submit: classifier-based verify-and-retry ---------------------
 
 test_send_text_submit_detects_landed_send() {
   local dir fb out
@@ -917,19 +1066,20 @@ test_send_text_submit_detects_landed_send() {
   zellij_pane_response "$dir" 3 7 3
   zellij_pane_response "$dir" 5 7 3
   zellij_pane_response "$dir" 7 7 3
+  zellij_pane_response "$dir" 8 7 3
   printf '%s' $'❯ hello captain' > "$dir/responses/4.out"
-  printf '%s' $'hello captain\n❯' > "$dir/responses/8.out"
+  printf '%s' $'hello captain\n❯' > "$dir/responses/9.out"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
     bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_text_submit firstmate:7 "hello captain" 3 0.01 0.01' "$ROOT" )
-  [ "$out" = empty ] || fail "send_text_submit should report empty (submitted) once the pane visibly changes, got '$out'"
+  [ "$out" = empty ] || fail "send_text_submit should report empty once the classifier proves submitted, got '$out'"
   zellij_assert_call_order "$dir/log" $'\x1f''list-panes'$'\x1f''--json' $'\x1f''paste' \
     "send_text_submit did not verify the pane before paste"
   zellij_assert_call_order "$dir/log" $'\x1f''list-panes'$'\x1f''--json' $'\x1f''dump-screen' \
     "send_text_submit did not verify the pane before capture"
   assert_contains "$(cat "$dir/log")" $'\x1f''paste'$'\x1f''--pane-id'$'\x1f''7'$'\x1f''--'$'\x1f''hello captain' "send_text_submit did not type the literal text first"
-  pass "fm_backend_zellij_send_text_submit: reports 'empty' once the pane content changes after Enter (submitted)"
+  pass "fm_backend_zellij_send_text_submit: reports 'empty' after the shared classifier proves submitted"
 }
 
 test_send_text_submit_detects_swallowed_enter() {
@@ -939,16 +1089,18 @@ test_send_text_submit_detects_swallowed_enter() {
   zellij_pane_response "$dir" 3 7 3
   zellij_pane_response "$dir" 5 7 3
   zellij_pane_response "$dir" 7 7 3
-  zellij_pane_response "$dir" 9 7 3
-  zellij_pane_response "$dir" 11 7 3
+  zellij_pane_response "$dir" 8 7 3
+  zellij_pane_response "$dir" 10 7 3
+  zellij_pane_response "$dir" 12 7 3
+  zellij_pane_response "$dir" 13 7 3
   printf '%s' $'❯ hello captain' > "$dir/responses/4.out"
-  printf '%s' $'❯ hello captain' > "$dir/responses/8.out"
-  printf '%s' $'❯ hello captain' > "$dir/responses/12.out"
+  printf '%s' $'❯ hello captain' > "$dir/responses/9.out"
+  printf '%s' $'❯ hello captain' > "$dir/responses/14.out"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
     bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_text_submit firstmate:7 "hello captain" 2 0.01 0.01' "$ROOT" )
-  [ "$out" = pending ] || fail "send_text_submit should report pending once retries are exhausted with no visible change, got '$out'"
+  [ "$out" = pending ] || fail "send_text_submit should report pending once retries are exhausted while composing, got '$out'"
   zellij_assert_call_order "$dir/log" $'\x1f''list-panes'$'\x1f''--json' $'\x1f''send-keys' \
     "send_text_submit did not verify the pane before send-keys"
   pass "fm_backend_zellij_send_text_submit: reports 'pending' when the pane never changes after retried Enters (swallowed)"
@@ -1096,6 +1248,16 @@ test_capture_small_reads_use_viewport_and_trim
 test_capture_large_reads_use_full_scrollback_and_trim
 test_capture_fails_when_pane_absent
 test_capture_fails_when_session_absent
+test_composer_layout_classifies_known_fixtures
+test_composer_layout_finds_supported_row_above_border_and_footer
+test_composer_layout_rejects_stale_row_above_shell_prompt
+test_composer_layout_never_accepts_exit_marker_output
+test_composer_state_requires_known_transition_for_submission
+test_composer_state_reports_unreachable_target
+test_lifecycle_wrapper_publishes_nonce_bound_exit
+test_lifecycle_state_rejects_stale_and_malformed_receipts
+test_composer_state_prefers_trusted_exit_over_shell_prompt
+test_agent_state_maps_only_marker_proven_exit_to_dead
 test_send_key_normalizes_and_targets_pane
 test_send_literal_uses_paste_separator_for_option_shaped_text
 test_send_text_line_clears_partial_input_when_enter_fails
