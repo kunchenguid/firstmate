@@ -919,6 +919,15 @@ case "$ARG3" in
     ;;
 esac
 
+if [ "$HARNESS" = claude ]; then
+  case "$LAUNCH" in
+    *--dangerously-skip-permissions*)
+      echo "error: refusing Claude launch containing --dangerously-skip-permissions; use --permission-mode auto so Claude's safety classifier remains active" >&2
+      exit 1
+      ;;
+  esac
+fi
+
 case "$HARNESS" in
   pi|pi-signed) LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH" ;;
 esac

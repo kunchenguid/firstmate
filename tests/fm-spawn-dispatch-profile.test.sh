@@ -381,6 +381,79 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
+assert_unsafe_claude_raw_refused() {
+  local out=$1 status=$2 home=$3 launchlog=$4 id=$5 context=$6
+  expect_code 1 "$status" "$context should reject Claude's unrestricted bypass"
+  assert_contains "$out" "refusing Claude launch containing --dangerously-skip-permissions" \
+    "$context refusal did not name the forbidden Claude flag"
+  assert_contains "$out" "use --permission-mode auto" \
+    "$context refusal did not name the safe Claude permission mode"
+  assert_absent "$home/state/$id.meta" "$context refusal should happen before meta is written"
+  [ ! -s "$launchlog" ] || fail "$context refusal reached backend launch delivery"
+}
+
+test_claude_raw_bypass_refused_for_ship_before_launch() {
+  local rec id out status
+  id=profile-raw-claude-ship-z15a
+  rec=$(make_spawn_case profile-raw-claude-ship claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "claude --dangerously-skip-permissions --model sonnet")
+  status=$?
+  assert_unsafe_claude_raw_refused "$out" "$status" "$HOME_DIR" "$LAUNCH_LOG" "$id" \
+    "raw Claude ship launch"
+  pass "raw Claude ship bypass is refused before launch"
+}
+
+test_claude_raw_bypass_refused_for_scout_before_launch() {
+  local rec id out status
+  id=profile-raw-claude-scout-z15b
+  rec=$(make_spawn_case profile-raw-claude-scout claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "claude --dangerously-skip-permissions --model sonnet" --scout)
+  status=$?
+  assert_unsafe_claude_raw_refused "$out" "$status" "$HOME_DIR" "$LAUNCH_LOG" "$id" \
+    "raw Claude scout launch"
+  pass "raw Claude scout bypass is refused before launch"
+}
+
+test_claude_raw_bypass_refused_for_secondmate_before_launch() {
+  local rec id sm out status
+  id=profile-raw-claude-secondmate-z15c
+  rec=$(make_spawn_case profile-raw-claude-secondmate claude "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$sm" "claude --dangerously-skip-permissions --model sonnet" --secondmate)
+  status=$?
+  assert_unsafe_claude_raw_refused "$out" "$status" "$HOME_DIR" "$LAUNCH_LOG" "$id" \
+    "raw Claude secondmate launch"
+  pass "raw Claude secondmate bypass is refused before launch"
+}
+
+test_legitimate_claude_raw_launch_is_unchanged() {
+  local rec id raw out status launch
+  id=profile-raw-claude-auto-z15d
+  raw="claude --permission-mode auto --model sonnet"
+  rec=$(make_spawn_case profile-raw-claude-auto claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "$raw")
+  status=$?
+  expect_code 0 "$status" "legitimate raw Claude launch should succeed"
+  assert_contains "$out" "spawned $id harness=claude" \
+    "legitimate raw Claude launch did not retain Claude harness resolution"
+  launch=$(cat "$LAUNCH_LOG")
+  [ "$launch" = "$raw" ] || fail "legitimate raw Claude launch changed"$'\n'"actual: $launch"
+  pass "legitimate raw Claude launch remains unchanged"
+}
+
 test_claude_threads_model_and_effort() {
   local rec id out status launch
   id=profile-claude-z2
@@ -728,6 +801,10 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
+test_claude_raw_bypass_refused_for_ship_before_launch
+test_claude_raw_bypass_refused_for_scout_before_launch
+test_claude_raw_bypass_refused_for_secondmate_before_launch
+test_legitimate_claude_raw_launch_is_unchanged
 test_claude_threads_model_and_effort
 test_claude_scout_uses_auto_permissions_and_delivers_profiled_prompt
 test_codex_threads_model_and_effort
