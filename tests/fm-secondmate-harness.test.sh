@@ -1342,13 +1342,19 @@ test_backend_inheritance_present_and_absent() {
 }
 
 # config/herdr-presentation-spaces is default-ON, so this item's convergence is
-# asserted through the verdict the spawn gate actually reads in the destination
-# home, not through file presence alone: mirroring the primary's absence must
-# converge a secondmate to the same default rather than turning its projection off.
+# asserted through the preference the spawn gate actually reads in the
+# destination home, not through file presence alone: mirroring the primary's
+# absence must converge a secondmate to the same unconfigured default rather
+# than turning its projection off. The Herdr version floor that decides what
+# that default resolves to is a property of the running release, not of
+# inheritance, so it is pinned in tests/fm-backend-herdr.test.sh instead.
 sm_presentation_verdict() {  # <config-dir> -> on|off
   bash -c '
     . "$0/bin/backends/herdr.sh"
-    if fm_backend_herdr_presentation_enabled "$1"; then printf "on\n"; else printf "off\n"; fi
+    case "$(fm_backend_herdr_presentation_preference "$1")" in
+      off) printf "off\n" ;;
+      *) printf "on\n" ;;
+    esac
   ' "$ROOT" "$1" 2>/dev/null
 }
 

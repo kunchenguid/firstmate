@@ -33,7 +33,8 @@
 # (upstream discussion #1328, fixed by PR #1877), while a pane-death removal
 # preserves focus exactly when the dying workspace sits behind the focused
 # one or the focused one is last (upstream issue #1621, fixed by PR #1912);
-# both fixes are merged upstream but in no release. Projected cleanup
+# both fixes first shipped in Herdr 0.8.0, which is the version floor for
+# default-on projection (FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION). Projected cleanup
 # therefore serializes under the session lock, repositions a doomed workspace
 # behind the focused one when needed, and ends its verified lone idle shell
 # so Herdr removes the emptied workspace through the focus-preserving
@@ -99,6 +100,28 @@ FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL=16
 # presentation path uses one narrowly whitelisted raw-socket request after
 # verifying the exact method and parameter schema.
 FM_BACKEND_HERDR_MIN_WORKSPACE_MOVE_PROTOCOL=16
+# The version floor for DEFAULT-ON presentation projection. Projection turns
+# every crewmate teardown into a workspace-emptying removal, and the focus-safe
+# removal plan can only avoid Herdr's focus-stealing explicit close while the
+# doomed pane holds a provably lone idle childless shell; a persistent child of
+# that shell (gitstatusd, a zsh-async worker, direnv) makes the plan fall back
+# to the plain explicit close, which steals focus on every release without the
+# two upstream focus fixes (PR #1877 commit 165dca45, PR #1912 commit a979916).
+# Herdr 0.8.0 is the first release carrying both, so a home that configured
+# nothing is projected only at or above it. An explicit "on" is still honored
+# below the floor.
+# Protocol 19 is the structural signal for that floor, measured against the real
+# macOS aarch64 release binaries (docs/verification/runtime-backends.md
+# "Presentation version floor"): 0.7.3 and 0.7.4 report 16, 0.7.5 reports 17,
+# the first post-fix preview reports 18, and 0.8.0 reports 19. No build lacking
+# both fixes reaches 19, and the pre-fix builds top out at 17.
+FM_BACKEND_HERDR_MIN_PRESENTATION_PROTOCOL=19
+FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION=0.8.0
+# One-warning-per-release dedupe marker prefix, under the state dir. The
+# projection decision is remade on every spawn, so an undeduplicated
+# below-floor warning would repeat on every crewmate; the key is the detected
+# release, so an upgrade or a downgrade is announced again.
+FM_BACKEND_HERDR_PRESENTATION_FLOOR_MARKER_PREFIX=".herdr-presentation-floor-"
 # Per-pane escalation dedupe marker prefix, under the state dir. One marker per
 # window (keyed like the watcher's own .stale-<key>): set when a ->blocked edge
 # is enqueued, cleared on any working edge, so exactly one wake fires per
@@ -119,34 +142,141 @@ FM_BACKEND_HERDR_SECONDMATE_MARKER=".fm-secondmate-home"
 # No send, capture, Treehouse, or general task-ownership path reads it.
 FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX=".herdr-presentation"
 
-# The config item a home writes to opt OUT of the projection.
+# The config item a home writes to opt out of, or explicitly in to, the
+# projection.
 FM_BACKEND_HERDR_PRESENTATION_CONFIG="herdr-presentation-spaces"
 
-# fm_backend_herdr_presentation_enabled <config-dir>: true when this home's
-# children should be projected into disposable one-task workspaces
-# (docs/herdr-backend.md "Presentation spaces" owns the full contract).
-# Projection is ON by default, so an absent config file enables it; a home opts
-# out by writing "off". Values are read with the whole-file whitespace-stripped
-# convention the other scalar config items already use (config/backlog-backend,
-# config/crew-harness), plus case folding. An empty file is the historical
-# presence-based opt-in form and still means on, so no home that had the
-# projection enabled can be turned off by the default flip. An unrecognized
-# value warns and keeps the default rather than failing a spawn over a purely
-# visual setting, so a typo is visible instead of silently disabling anything.
-fm_backend_herdr_presentation_enabled() {  # <config-dir>
+# fm_backend_herdr_presentation_preference <config-dir>: the single owner of
+# config/herdr-presentation-spaces parsing. Echoes exactly one of "off", "on"
+# (a deliberate opt-in, honored even below the version floor), or "default"
+# (this home configured nothing, so the floor decides).
+# Values are read with the whole-file whitespace-stripped convention the other
+# scalar config items already use (config/backlog-backend, config/crew-harness),
+# plus case folding. An empty file is the historical presence-based opt-in form
+# and still means an explicit "on", so no home that deliberately enabled the
+# projection can lose it. An unrecognized value warns and falls back to the
+# default rather than failing a spawn over a purely visual setting, so a typo is
+# visible instead of silently deciding anything.
+fm_backend_herdr_presentation_preference() {  # <config-dir>
   local config_dir=${1:-} file value
-  [ -n "$config_dir" ] || return 0
+  [ -n "$config_dir" ] || { printf 'default\n'; return 0; }
   file="$config_dir/$FM_BACKEND_HERDR_PRESENTATION_CONFIG"
-  [ -f "$file" ] || return 0
+  [ -f "$file" ] || { printf 'default\n'; return 0; }
   value=$(tr -d '[:space:]' < "$file" 2>/dev/null | tr '[:upper:]' '[:lower:]') || value=""
   case "$value" in
-    off) return 1 ;;
-    ''|on) return 0 ;;
+    off) printf 'off\n' ;;
+    ''|on) printf 'on\n' ;;
     *)
-      echo "warning: $file: unrecognized value \"$value\"; herdr presentation spaces stay on (write \"off\" to opt out)" >&2
-      return 0
+      echo "warning: $file: unrecognized value \"$value\"; herdr presentation spaces fall back to the default (write \"off\" to opt out, \"on\" to force the projection on)" >&2
+      printf 'default\n'
       ;;
   esac
+}
+
+# fm_backend_herdr_version_at_least <candidate> <floor>: numeric dotted-release
+# comparison. Return codes: 0 candidate >= floor, 1 candidate < floor, 2 the
+# candidate is unparseable. Any prerelease or build suffix is stripped first, so
+# a 0.8.0-preview build compares as 0.8.0 (it is built from the 0.8.0 line and
+# carries its fixes) while a 0.7.5-preview build compares as 0.7.5.
+fm_backend_herdr_version_at_least() {  # <candidate> <floor>
+  local candidate=${1:-} floor=${2:-} c f
+  candidate=${candidate%%[-+]*}
+  case "$candidate" in ''|*[!0-9.]*) return 2 ;; esac
+  while [ -n "$floor" ]; do
+    c=${candidate%%.*}
+    f=${floor%%.*}
+    [ -n "$c" ] || c=0
+    [ "$c" -gt "$f" ] 2>/dev/null && return 0
+    [ "$c" -lt "$f" ] 2>/dev/null && return 1
+    case "$candidate" in *.*) candidate=${candidate#*.} ;; *) candidate= ;; esac
+    case "$floor" in *.*) floor=${floor#*.} ;; *) floor= ;; esac
+  done
+  return 0
+}
+
+# fm_backend_herdr_release_floor_verdict <protocol> <version>: the pure
+# classifier for the presentation version floor. Return codes: 0 at or above the
+# floor, 1 provably below it, 2 indeterminate.
+# Two independent signals are read so no single field is load-bearing, and
+# either one can carry a positive verdict: the protocol number, which is the
+# structural signal this adapter already uses for every other capability gate,
+# and the release core of the version string. A signal that is unreadable or
+# unparseable simply cannot carry a verdict; a readable protocol below the floor
+# is decisive on its own, and only losing BOTH signals reports indeterminate.
+fm_backend_herdr_release_floor_verdict() {  # <protocol> <version>
+  local protocol=${1:-} version=${2:-} protocol_known=0 version_status=0
+  case "$protocol" in
+    ''|*[!0-9]*) ;;
+    *)
+      protocol_known=1
+      [ "$protocol" -ge "$FM_BACKEND_HERDR_MIN_PRESENTATION_PROTOCOL" ] && return 0
+      ;;
+  esac
+  fm_backend_herdr_version_at_least "$version" "$FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION" \
+    || version_status=$?
+  [ "$version_status" -eq 0 ] && return 0
+  { [ "$protocol_known" -eq 1 ] || [ "$version_status" -eq 1 ]; } && return 1
+  return 2
+}
+
+# fm_backend_herdr_presentation_release_supported: run the floor classifier
+# against the installed herdr client, which reports its own version and protocol
+# independently of any session. Same return codes as
+# fm_backend_herdr_release_floor_verdict, and sets
+# FM_BACKEND_HERDR_PRESENTATION_RELEASE to the identifier a caller's warning
+# names.
+fm_backend_herdr_presentation_release_supported() {
+  local status protocol version
+  FM_BACKEND_HERDR_PRESENTATION_RELEASE="an unreadable release"
+  command -v herdr >/dev/null 2>&1 || return 2
+  command -v jq >/dev/null 2>&1 || return 2
+  status=$(herdr status --json 2>/dev/null) || return 2
+  protocol=$(printf '%s' "$status" | jq -r '.client.protocol // empty' 2>/dev/null)
+  version=$(printf '%s' "$status" | jq -r '.client.version // empty' 2>/dev/null)
+  if [ -n "$protocol" ] || [ -n "$version" ]; then
+    FM_BACKEND_HERDR_PRESENTATION_RELEASE="version ${version:-unknown} (protocol ${protocol:-unknown})"
+  fi
+  fm_backend_herdr_release_floor_verdict "$protocol" "$version"
+}
+
+# fm_backend_herdr_presentation_floor_warn <state-dir> <verdict>: emit the one
+# clear below-floor warning, deduplicated per home per detected release when a
+# usable state dir is given. Without one the warning is emitted every call,
+# which is what a one-shot caller wants.
+fm_backend_herdr_presentation_floor_warn() {  # <state-dir> <verdict>
+  local state_dir=${1:-} verdict=${2:-2} release=${FM_BACKEND_HERDR_PRESENTATION_RELEASE:-an unreadable release} key marker reason
+  if [ "$verdict" -eq 1 ]; then
+    reason="herdr $release is older than the $FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION floor for presentation spaces, where projected cleanup can steal the active workspace"
+  else
+    reason="the installed herdr release could not be read, so the $FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION floor for presentation spaces cannot be verified"
+  fi
+  if [ -n "$state_dir" ] && [ -d "$state_dir" ] && [ ! -L "$state_dir" ]; then
+    key=${release//[^a-zA-Z0-9]/-}
+    marker="$state_dir/$FM_BACKEND_HERDR_PRESENTATION_FLOOR_MARKER_PREFIX$key"
+    [ -e "$marker" ] && return 0
+    : > "$marker" 2>/dev/null || true
+  fi
+  echo "warning: $reason; using the ordinary flat layout instead. Upgrade herdr to $FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION or newer (herdr update) to restore the projection, or write \"on\" into config/$FM_BACKEND_HERDR_PRESENTATION_CONFIG to force it on this release." >&2
+  return 0
+}
+
+# fm_backend_herdr_presentation_enabled <config-dir> [<state-dir>]: the one gate
+# bin/fm-spawn.sh consults before projecting this home's children into
+# disposable one-task workspaces (docs/herdr-backend.md "Presentation spaces"
+# owns the full contract). An explicit "off" or "on" is obeyed as written; a
+# home that configured nothing is projected only at or above the version floor,
+# and otherwise falls back to the flat layout with one warning.
+fm_backend_herdr_presentation_enabled() {  # <config-dir> [<state-dir>]
+  local config_dir=${1:-} state_dir=${2:-} preference verdict=0
+  preference=$(fm_backend_herdr_presentation_preference "$config_dir")
+  case "$preference" in
+    off) return 1 ;;
+    on) return 0 ;;
+  esac
+  fm_backend_herdr_presentation_release_supported || verdict=$?
+  [ "$verdict" -eq 0 ] && return 0
+  fm_backend_herdr_presentation_floor_warn "$state_dir" "$verdict"
+  return 1
 }
 
 # fm_backend_herdr_workspace_label: the per-firstmate-HOME herdr workspace
@@ -740,13 +870,24 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
 #   sat behind it (or the focused workspace was last), and moves focus to the
 #   focused workspace's right neighbor otherwise (upstream issue #1621, fixed
 #   by PR #1912, commit a979916).
-# Both fixes are merged upstream but in no release as of 2026-07-28.
+# Both fixes first shipped in Herdr 0.8.0 (protocol 19), verified 2026-08-05.
 # Firstmate therefore removes a doomed non-focused workspace by ending its
 # verified lone idle shell (the pane-death path), repositioning it behind the
 # focused workspace first when needed. Moving it to the end preserves every
 # other workspace's relative order, so no presentation ordering change
-# persists. A release carrying both fixes preserves focus on both paths, so
-# this stays safe without any version gate.
+# persists.
+# That reasoning covers the pane-death route only. The plan's plain-close
+# FALLBACK is reachable exactly when the doomed pane's shell cannot be proved
+# lone, childless, and idle - a persistent gitstatusd, zsh-async worker, or
+# direnv fails that proof permanently - and on a release without both fixes the
+# fallback is the focus-stealing close itself, so the mitigation is conditional
+# rather than unconditional and a version gate IS required. Default-on
+# projection is therefore floored at FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION,
+# where every removal primitive preserves focus and the proof stops being
+# load-bearing. That floor has ONE owner, the spawn-time gate
+# fm_backend_herdr_presentation_enabled, so a projection that exists at all is
+# either on a supported release or a home's deliberate below-floor opt-in; the
+# exact-tab restore stays the backstop for the latter.
 
 # fm_backend_herdr_workspace_move_capable: verify that one guarded raw
 # workspace.move request is possible in <session>: python3 for the transport,
@@ -772,9 +913,10 @@ fm_backend_herdr_workspace_move_capable() {  # <session>
 
 # fm_backend_herdr_emptying_close_plan: choose the focus-safe removal for one
 # exact pane. The LAST echoed line is the plan: "plain" (use the ordinary
-# explicit close; the exact-tab restore backstop masks 0.7.5's focus move)
-# or "death <shell-pid>" (end the proved lone idle shell so Herdr removes
-# the emptied workspace through its focus-preserving pane-death path).
+# explicit close; below the presentation version floor the exact-tab restore
+# backstop masks the focus move it causes when it empties a non-focused
+# workspace) or "death <shell-pid>" (end the proved lone idle shell so Herdr
+# removes the emptied workspace through its focus-preserving pane-death path).
 # Whenever the repositioning mover was invoked, a preceding
 # "moved<TAB><ws><TAB><original-index><TAB><socket><TAB><focused><TAB><pre-move-order-json>"
 # record line is echoed first so the caller can hand it to
