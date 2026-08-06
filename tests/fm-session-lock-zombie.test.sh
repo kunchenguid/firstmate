@@ -28,6 +28,7 @@ LIB="$ROOT/bin/fm-session-lock-lib.sh"
 # --- fixture plumbing --------------------------------------------------------
 
 ZOMBIE_PARENT_PIDS=()
+ZOMBIE_PID=
 
 cleanup_zombie_parents() {
   local pid
@@ -74,7 +75,7 @@ make_zombie_pid() {
   done
   [ "$(ps -o state= -p "$pid" 2>/dev/null | tr -d '[:space:]')" = Z ] \
     || fail "zombie fixture ($name) did not produce a defunct process (pid $pid)"
-  printf '%s\n' "$pid"
+  ZOMBIE_PID=$pid
 }
 
 # make_live_named_pid <name> <seconds>: background a real, live process whose
@@ -110,7 +111,8 @@ run_lib() {  # <expression>
 
 test_zombie_harness_pid_is_not_alive() {
   local zpid
-  zpid=$(make_zombie_pid claude)
+  make_zombie_pid claude
+  zpid=$ZOMBIE_PID
   run_lib "fm_pid_is_zombie $zpid" \
     || fail "a real zombie process was not classified as a zombie (pid $zpid)"
   if run_lib "fm_harness_pid_alive $zpid"; then
@@ -171,7 +173,8 @@ test_e2e_fm_lock_reclaims_a_zombie_held_lock() {
   # ps table anywhere in this test.
   ln -sf /bin/bash "$fakebin/claude"
 
-  zpid=$(make_zombie_pid claude)
+  make_zombie_pid claude
+  zpid=$ZOMBIE_PID
   printf '%s\n' "$zpid" > "$dir/state/.lock"
 
   out=$(FM_HOME="$dir" "$fakebin/claude" "$ROOT/bin/fm-lock.sh" 2>&1)
