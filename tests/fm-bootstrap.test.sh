@@ -928,12 +928,14 @@ unsupported grok max effort is flagged^{"rules":[{"when":"deep current work","us
 unsupported grok xhigh effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"xhigh"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:xhigh
 pi max effort is accepted^{"rules":[{"when":"deep coding","use":{"harness":"pi","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
 pi-signed max effort is accepted^{"rules":[{"when":"signed coding","use":{"harness":"pi-signed","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
+unsupported pi effort is flagged^{"rules":[{"when":"bad pi effort","use":{"harness":"pi","model":"anthropic/claude-sonnet-5","effort":"garbage"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: pi:garbage
 muse shared efforts are accepted^{"rules":[{"when":"muse low","use":{"harness":"muse","effort":"low"}},{"when":"muse medium","use":{"harness":"muse","effort":"medium"}},{"when":"muse high","use":{"harness":"muse","effort":"high"}},{"when":"muse xhigh","use":{"harness":"muse","effort":"xhigh"}},{"when":"muse max","use":{"harness":"muse","effort":"max"}}]}^empty^
 unsupported muse ultra effort is flagged^{"rules":[{"when":"muse ultra","use":{"harness":"muse","effort":"ultra"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: muse:ultra
 opencode effort is now accepted as documentation^{"rules":[{"when":"opencode work","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5","effort":"high"}}]}^empty^
 opencode effort custom value is accepted^{"rules":[{"when":"opencode work","use":{"harness":"opencode","effort":"custom"}}]}^empty^
 kimi effort is now accepted as documentation^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3","effort":"high"}}]}^empty^
 kimi effort custom value is accepted^{"rules":[{"when":"kimi work","use":{"harness":"kimi","effort":"custom"}}]}^empty^
+kimi model profile is accepted^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3"}}]}^empty^
 array use with quota-balanced is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}],"select":"quota-balanced"}]}^empty^
 array use without select is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}]}]}^empty^
 one-element array use is accepted^{"rules":[{"when":"focused feature","use":[{"harness":"claude"}]}]}^empty^
