@@ -170,7 +170,8 @@ The app-server protocol schema does define the required lifecycle (`turn/started
 
 ### Claude hook delivery through `--settings`
 
-Claude's per-task hooks are written to `state/<task-id>.claude-settings.json` and loaded with `claude --settings <path>`, so firstmate never writes `.claude/settings.local.json` inside a project copy.
+Claude's per-task hooks are written to `state/<task-id>.claude-settings.json` and loaded with `claude --settings <path>` on every launch whose command line firstmate composes, so the scaffolding stays out of the project copy.
+Only a raw launch command firstmate must not rewrite - an unverified `claude` wrapper, or one already carrying its own `--settings` - keeps the older delivery through the copy's `.claude/settings.local.json`, and then only when the project does not track that path; a tracked one is left alone and the task runs unwired.
 Three properties were verified on 2026-08-03 with Claude Code 2.1.220.
 
 Hooks supplied through `--settings` fire, and the project's own `.claude/settings.json` hooks still fire alongside them (they merge, they do not replace).

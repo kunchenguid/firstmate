@@ -22,11 +22,14 @@
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed. A dirty `git status` is not always an
-# uncommitted change, though: when a follow-up task points a second worktree at the
-# same branch (`git checkout -B <branch> origin/<branch>`) and commits, the branch
-# ref advances under the ORIGINAL worktree, whose index and files stay at the commit
-# it last wrote, so git reports every file that changed in between as a staged
-# modification. That copy holds no work - its content IS an already-landed commit.
+# uncommitted change, though: when a follow-up task puts a second copy on the same
+# branch and commits, the branch ref advances under the ORIGINAL worktree, whose
+# index and files stay at the commit it last wrote, so git reports every file that
+# changed in between as a staged modification. That copy holds no work - its
+# content IS an already-landed commit. (`git checkout -B` and `git branch -f` both
+# refuse a branch another worktree holds, so the ref moves by some other route -
+# `git update-ref`, a ref-updating fetch, or a checkout that ignores other
+# worktrees. The guard keys on the resulting shape, never on the mechanism.)
 # Teardown clears that signal only on exact proof: the index and the working tree
 # must agree, and their one shared content tree must BE the tree of a commit
 # reachable from a remote (or, for a local-only task, from the local default
@@ -939,7 +942,16 @@ work_is_landed() {
 # Bound for the ancestry scan in dirty_is_landed_stale_content. The stale content
 # is the commit THIS copy last wrote, so it sits in HEAD's recent ancestry; the cap
 # keeps the scan cheap on a large history and can only ever cost a refusal.
+# A non-numeric or zero override does not fail loudly: `git log` parses
+# --max-count leniently and simply lists nothing, so the scan comes back empty, no
+# candidate is ever examined, and the clearance silently disappears - reinstating
+# the very false refusal this guard removes. Such a value falls back to the default.
 STALE_CONTENT_SCAN_LIMIT=${FM_TEARDOWN_STALE_CONTENT_SCAN_LIMIT:-500}
+case "$STALE_CONTENT_SCAN_LIMIT" in
+  ''|*[!0-9]*) STALE_CONTENT_SCAN_LIMIT=500 ;;
+  *[!0]*) ;;
+  *) STALE_CONTENT_SCAN_LIMIT=500 ;;
+esac
 
 # Echo the porcelain-line pattern matching an UNTRACKED firstmate scaffold path.
 # The dirty check reads porcelain with --untracked-files=all, so every untracked
@@ -1004,12 +1016,34 @@ worktree_content_trees() {
   printf '%s %s\n' "$index_tree" "$work_tree"
 }
 
+# Could a dirty result be the collision shape at all? That shape is index-side
+# only: the branch ref moved, while this copy's index and working tree still agree,
+# so every porcelain line carries a space in column 2. Any other line - an untracked
+# file (`??`), a worktree-side edit, an unmerged entry - already proves the index and
+# the working tree differ, so the content proof below could never hold. Rejecting
+# those here keeps the ordinary genuine-dirty refusal read-only: no `git add -A`,
+# so no blobs and trees written into the shared object store by a check that only
+# validates. Takes the ALREADY-FILTERED porcelain lines, so firstmate's own
+# tolerated scaffolding is not mistaken for a worktree-side difference.
+dirty_shape_is_index_only() {
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      ?' '*) ;;
+      *) return 1 ;;
+    esac
+  done <<EOF
+$1
+EOF
+}
+
 # Is a non-empty `git status` a stale index/HEAD artifact rather than real work?
-# A follow-up task that runs `git checkout -B <branch> origin/<branch>` in a second
-# copy advances the branch ref under this one: HEAD jumps forward while this copy's
-# index and files stay at the commit it last wrote, so git reports every file that
-# changed in between as a staged modification. Nothing is at risk there, because the
-# content on disk IS an already-landed commit.
+# A follow-up task that puts a second copy on the same branch and commits advances
+# the branch ref under this one: HEAD jumps forward while this copy's index and
+# files stay at the commit it last wrote, so git reports every file that changed in
+# between as a staged modification. Nothing is at risk there, because the content on
+# disk IS an already-landed commit.
 # The proof is exact and narrow. The index and the working tree must agree, and that
 # one shared content tree must BE the tree of a commit already reachable from a
 # remote - plus the local default branch for a local-only task, whose landing target
@@ -1017,10 +1051,12 @@ worktree_content_trees() {
 # file the project could own changes the content tree, so it matches no landed
 # commit and teardown refuses exactly as before. Firstmate's own untracked
 # scaffolding is the sole exception, matching the dirty filter exactly.
-# Echoes the matching commit on success.
+# Takes the filtered porcelain lines the dirty check produced; echoes the matching
+# commit on success.
 dirty_is_landed_stale_content() {
-  local trees index_tree work_tree scan commit tree name unlanded
+  local dirty_lines=$1 trees index_tree work_tree scan commit tree name unlanded
   local -a exclude=(--not --remotes)
+  dirty_shape_is_index_only "$dirty_lines" || return 1
   if [ "$MODE" = local-only ] && name=$(default_branch 2>/dev/null) && [ -n "$name" ] \
     && git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
     exclude+=("refs/heads/$name")
@@ -1288,7 +1324,7 @@ teardown_treehouse_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch stale_commit
+  local dirty_raw dirty_lines dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch stale_commit
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -1306,8 +1342,9 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE "$(tolerated_untracked_pattern)" | head -1 || true)
-  if [ -n "$dirty" ] && stale_commit=$(dirty_is_landed_stale_content); then
+  dirty_lines=$(printf '%s\n' "$dirty_raw" | grep -vE "$(tolerated_untracked_pattern)" || true)
+  dirty=$(printf '%s\n' "$dirty_lines" | head -1)
+  if [ -n "$dirty" ] && stale_commit=$(dirty_is_landed_stale_content "$dirty_lines"); then
     echo "teardown: worktree $WT reports differences only because its branch advanced in another copy; its content is exactly commit $stale_commit, which is already landed, so nothing here is unlanded work" >&2
     dirty=
   fi

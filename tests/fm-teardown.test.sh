@@ -45,6 +45,7 @@
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
 #   (z) stale index from a second worktree on the same branch   -> ALLOW  (collision fix)
+#   (ag) same, with a non-numeric scan-limit override           -> ALLOW  (default fallback)
 #   (aa) same, plus a genuine uncommitted edit                  -> REFUSE (safety)
 #   (ab) same, plus an untracked file                           -> REFUSE (safety)
 #   (ad) same, plus leftover firstmate hook scaffolding         -> ALLOW  (collision fix)
@@ -944,17 +945,17 @@ test_dirty_worktree_refuses() {
   pass "dirty worktree is refused even when its committed work has landed (dirty always wins)"
 }
 
-# Reproduce the two-worktrees-on-one-branch collision: a follow-up task points a
-# SECOND copy at the same branch with `git checkout -B <branch> origin/<branch>`
-# and commits. The branch ref advances under the original copy, whose index and
-# files stay at the commit it wrote, so `git status` there reports every file that
-# changed in between as a staged modification. Args: case_dir [push_second]
-# push_second defaults to "push"; pass "nopush" to leave the advanced head off
-# every remote.
+# Reproduce the two-worktrees-on-one-branch collision: a follow-up task puts a
+# SECOND copy on the same branch and commits. The branch ref advances under the
+# original copy, whose index and files stay at the commit it wrote, so `git status`
+# there reports every file that changed in between as a staged modification.
+# Args: case_dir [push_second]; push_second defaults to "push", pass "nopush" to
+# leave the advanced head off every remote.
 # The second copy stays detached and moves the branch ref with `git update-ref`.
-# `git checkout -B` and `git branch -f` both refuse a branch that another
-# worktree already holds, and the original copy holds it for every case here,
-# so they are not a portable way to advance the ref.
+# `git checkout -B` and `git branch -f` both refuse a branch that another worktree
+# already holds, and the original copy holds it for every case here, so they are
+# not a portable way to advance the ref. The guard keys on the resulting shape, so
+# any route that moves the ref reproduces it.
 advance_branch_from_second_worktree() {
   local case_dir=$1 push_second=${2:-push}
   local second="$case_dir/wt2"
@@ -994,6 +995,31 @@ test_stale_index_from_second_worktree_allows() {
   grep -q "already landed" "$case_dir/stderr" \
     || fail "stale-index-allow: teardown did not explain why the stale signal was cleared"
   pass "a copy left stale by a second worktree on the same branch is torn down (no false refusal)"
+}
+
+# (ag) A typo'd scan-limit override must not silently disable the clearance. It
+# fails quietly: `git log --max-count=<junk>` exits 0 and lists nothing, so the
+# ancestry scan comes back empty, no candidate is examined, and the copy is refused
+# again for exactly the reason this guard exists to remove.
+test_stale_index_survives_a_bad_scan_limit_override() {
+  local case_dir rc
+  case_dir=$(make_case stale-index-bad-limit)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  git -C "$case_dir/wt" push -q -u origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  advance_branch_from_second_worktree "$case_dir"
+
+  set +e
+  FM_TEARDOWN_STALE_CONTENT_SCAN_LIMIT=five-hundred \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "stale-index-bad-limit: a non-numeric scan limit must fall back to the default, not refuse"
+  grep -q "already landed" "$case_dir/stderr" \
+    || fail "stale-index-bad-limit: a non-numeric scan limit silently disabled the clearance"
+  pass "a non-numeric scan-limit override falls back to the default instead of disabling the proof"
 }
 
 # (aa) The same collision, plus a genuine uncommitted edit. The content tree no
@@ -2847,6 +2873,7 @@ test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_stale_index_from_second_worktree_allows
+test_stale_index_survives_a_bad_scan_limit_override
 test_stale_index_with_real_edit_refuses
 test_stale_index_with_untracked_file_refuses
 test_stale_index_with_leftover_scaffold_allows

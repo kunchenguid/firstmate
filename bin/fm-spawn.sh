@@ -153,7 +153,10 @@
 #                  per-task hook settings, written by this script; outside the worktree so
 #                  firstmate never writes a path the project may track. A raw claude
 #                  launch command gets the --settings flag inserted after its command
-#                  word, so the escape hatch keeps the same hook wiring)
+#                  word, so the escape hatch keeps the same hook wiring; a raw command
+#                  whose argv firstmate must not rewrite - an unverified claude wrapper,
+#                  or one that already carries its own --settings - keeps its wiring
+#                  through the copy's untracked .claude/settings.local.json instead)
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -1208,33 +1211,42 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   exit 1
 fi
 
-# Claude's per-task turn-end and busy-state hooks are loaded by `--settings`, so
-# the wiring exists only on a launch that carries the flag. The template adds it;
-# a raw launch command is the operator's own string, so the flag is inserted right
-# after the command word - but only when that word IS `claude`. A wrapper whose
-# name merely starts with claude is an unverified adapter firstmate does not know:
-# rewriting its argv could stop it launching at all, so firstmate leaves the
-# command untouched and installs no wiring. An operator who already passes
-# --settings owns claude's settings for that task - a second flag would silently
-# lose to theirs, so again firstmate installs no wiring at all rather than arm a
-# busy record no hook can ever clear.
-CLAUDE_HOOK_SETTINGS=0
+# Where Claude's per-task turn-end and busy-state hooks are delivered from.
+#   settings-flag   the launch carries `--settings <state file>`, so the whole
+#                   scaffolding stays outside the copy. The template adds the flag;
+#                   a raw launch command gets it inserted right after its command
+#                   word, but only when that word IS `claude`.
+#   worktree-local  the flag cannot be placed - an unverified wrapper's argv is not
+#                   firstmate's to rewrite, and an operator who passes their own
+#                   --settings owns that slot - so the hooks go to the copy's
+#                   `.claude/settings.local.json`, the file claude reads with no
+#                   flag at all. That is how these launches were always wired, and
+#                   dropping the wiring would leave the watcher with no turn
+#                   boundary for the task. Written only when the project does NOT
+#                   track that path (settled below, before the busy arm): over a
+#                   tracked file firstmate would destroy the project's own hook
+#                   config, which is what moved the settings out of the copy.
+#   none            no hook file this launch could load, so no wiring is claimed
+#                   and no busy record is armed that nothing could ever clear.
+CLAUDE_HOOK_MODE=none
 case "$HARNESS" in
   claude*)
     if [ "$KIND" = secondmate ]; then
       :
     elif [ "$RAW_LAUNCH" != 1 ]; then
-      CLAUDE_HOOK_SETTINGS=1
+      CLAUDE_HOOK_MODE=settings-flag
     elif [ "$HARNESS" != claude ]; then
-      echo "warn: raw launch command '$HARNESS' is an unverified claude wrapper; firstmate leaves its argv untouched and installs no turn-end or busy-state hooks for this task" >&2
+      CLAUDE_HOOK_MODE=worktree-local
+      echo "warn: raw launch command '$HARNESS' is an unverified claude wrapper; firstmate leaves its argv untouched and wires its turn-end and busy-state hooks through the copy's .claude/settings.local.json instead" >&2
     else
       case " $LAUNCH " in
         *' --settings '*|*' --settings='*)
-          echo "warn: raw claude launch command already passes --settings; firstmate installs no turn-end or busy-state hooks for this task" >&2
+          CLAUDE_HOOK_MODE=worktree-local
+          echo "warn: raw claude launch command already passes --settings; firstmate keeps that flag and wires its turn-end and busy-state hooks through the copy's .claude/settings.local.json instead" >&2
           ;;
         *)
           if LAUNCH=$(launch_insert_flag_after_command "$LAUNCH" '--settings __CLAUDESETTINGS__'); then
-            CLAUDE_HOOK_SETTINGS=1
+            CLAUDE_HOOK_MODE=settings-flag
           else
             echo "error: could not place --settings into the raw claude launch command" >&2
             exit 1
@@ -2275,11 +2287,20 @@ if [ "$KIND" != secondmate ]; then
     }
     [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
   }
+  # A project that TRACKS .claude/settings.local.json owns that file: firstmate
+  # never writes project content, so the fallback delivery has nowhere to go and
+  # the task runs unwired. Settled before the arm below, because arming without
+  # wiring seeds a busy record nothing could ever clear.
+  if [ "$CLAUDE_HOOK_MODE" = worktree-local ] \
+    && git -C "$WT" ls-files --error-unmatch -- .claude/settings.local.json >/dev/null 2>&1; then
+    echo "warn: this project tracks .claude/settings.local.json, so firstmate installs no turn-end or busy-state hooks for this task rather than overwrite the project's own hook config" >&2
+    CLAUDE_HOOK_MODE=none
+  fi
   case "$HARNESS" in
     claude*)
-      # Claude's wiring rides --settings; without it there are no hooks, so an
-      # arm would seed a busy record nothing could ever clear.
-      [ "$CLAUDE_HOOK_SETTINGS" != 1 ] || arm_busy_state
+      # Claude's wiring rides a settings file; without one there are no hooks, so
+      # an arm would seed a busy record nothing could ever clear.
+      [ "$CLAUDE_HOOK_MODE" = none ] || arm_busy_state
       ;;
     opencode*|pi|pi-signed)
       arm_busy_state
@@ -2297,12 +2318,13 @@ if [ "$KIND" != secondmate ]; then
   esac
   case "$HARNESS" in
     claude*)
-      # No --settings on the launch means no hook file can be loaded, so writing
-      # one would leave dead scaffolding in state/ and claim wiring that is not
-      # there. The launch resolution above already reported why.
-      if [ "$CLAUDE_HOOK_SETTINGS" != 1 ]; then
-        :
-      else
+      # Claude Code writes .claude/settings.local.json itself when a session
+      # changes its local settings, so the path stays excluded whether or not
+      # firstmate delivers hooks through it - otherwise a crewmate's `git add -A`
+      # sweeps the task's local claude settings into the project's commit. An
+      # ignore entry is inert for a project that TRACKS the path, which is exactly
+      # the case that must keep behaving as the project's own file.
+      exclude_path '.claude/settings.local.json'
       # Semantic busy-state hooks (bin/fm-busy-lib.sh): UserPromptSubmit opens
       # a turn; Stop (normal completion), StopFailure (API-error turn end),
       # and SessionEnd (process shutdown) all close it, so an abnormal end can
@@ -2312,23 +2334,31 @@ if [ "$KIND" != secondmate ]; then
       # the turn-ended NOTIFICATION touch for the watcher. Every
       # hook command tolerates a refused event (|| true) so a stale-gen writer
       # can never break Claude's own lifecycle.
-      # Written OUTSIDE the worktree and loaded with `claude --settings`, for the
-      # same reason pi's extension lives in state/: `.claude/settings.local.json`
-      # is a generic path a project may TRACK, and writing firstmate scaffolding
-      # over a tracked file both destroys the project's own hook config for the
-      # task and leaves the copy permanently dirty, which false-refuses cleanup
-      # for every task in that project. A gitignore entry cannot help, because
-      # ignore rules never apply to a tracked file. state/ is firstmate's own
-      # space, so the scaffolding is invisible to the project in every repo.
-      # Verified on Claude Code 2.1.220: hooks supplied through --settings fire,
-      # and the project's own .claude/settings.json hooks still fire alongside.
-      busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
-      busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
-      j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
-      j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
-      j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
-      j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
-      cat > "$CLAUDE_SETTINGS" <<EOF
+      # The file goes OUTSIDE the worktree whenever the launch can carry
+      # `--settings`, for the same reason pi's extension lives in state/:
+      # `.claude/settings.local.json` is a generic path a project may TRACK, and
+      # writing firstmate scaffolding over a tracked file both destroys the
+      # project's own hook config for the task and leaves the copy permanently
+      # dirty, which false-refuses cleanup for every task in that project. A
+      # gitignore entry cannot help there, because ignore rules never apply to a
+      # tracked file. Verified on Claude Code 2.1.220: hooks supplied through
+      # --settings fire, and the project's own .claude/settings.json hooks still
+      # fire alongside. The worktree-local fallback (launch resolution above) only
+      # ever writes the untracked path, so it too leaves project content alone.
+      if [ "$CLAUDE_HOOK_MODE" != none ]; then
+        if [ "$CLAUDE_HOOK_MODE" = worktree-local ]; then
+          claude_hook_file="$WT/.claude/settings.local.json"
+          mkdir -p "$WT/.claude"
+        else
+          claude_hook_file="$CLAUDE_SETTINGS"
+        fi
+        busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
+        busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
+        j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
+        j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
+        j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
+        j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
+        cat > "$claude_hook_file" <<EOF
 {"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
       fi

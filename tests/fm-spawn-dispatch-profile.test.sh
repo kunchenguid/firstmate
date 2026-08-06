@@ -393,15 +393,17 @@ test_raw_claude_launch_command_carries_hook_settings() {
   pass "a raw claude launch command carries firstmate's hook settings"
 }
 
-# An operator who passes their own --settings owns claude's settings for that task.
-# A second flag would silently lose, so firstmate installs no wiring at all rather
-# than arm a busy record nothing can clear.
-test_raw_claude_launch_with_own_settings_installs_no_wiring() {
-  local rec id out status launch state_real
+# An operator who passes their own --settings owns that flag, so firstmate leaves
+# the command alone - but the task still needs turn-end and busy-state wiring, so
+# the hooks go to the copy's own .claude/settings.local.json, the file claude reads
+# with no flag at all. Dropping them would leave the watcher with no turn boundary.
+test_raw_claude_launch_with_own_settings_wires_through_the_copy() {
+  local rec id out status launch state_real local_settings
   id=profile-raw-claude-z17
   rec=$(make_spawn_case profile-raw-own-settings claude "$id")
   read_case_record "$rec"
   state_real=$(cd "$HOME_DIR/state" && pwd -P)
+  local_settings="$WT_DIR/.claude/settings.local.json"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" "claude --settings /tmp/own.json")
@@ -412,21 +414,24 @@ test_raw_claude_launch_with_own_settings_installs_no_wiring() {
     || fail "firstmate rewrote a raw claude launch that already owns --settings"$'\n'"actual: $launch"
   [ ! -f "$state_real/$id.claude-settings.json" ] \
     || fail "firstmate wrote hook settings no launch can load"
-  ! grep -q "busy_gen=" "$HOME_DIR/state/$id.meta" \
-    || fail "firstmate armed a busy record no hook could ever clear"
-  assert_contains "$out" "already passes --settings" "spawn did not report the skipped wiring"
-  pass "a raw claude launch owning --settings gets no unwireable firstmate hooks"
+  [ -f "$local_settings" ] || fail "firstmate installed no hooks the launch can load"
+  assert_grep "turn-ended" "$local_settings" "the copy's hook settings carry no turn-end touch"
+  assert_grep "busy_gen=" "$HOME_DIR/state/$id.meta" "firstmate did not arm the busy-state contract"
+  assert_contains "$out" "already passes --settings" "spawn did not report the fallback delivery"
+  pass "a raw claude launch owning --settings keeps its hooks through the copy's settings file"
 }
 
 # A raw command whose name merely starts with claude is an unverified wrapper.
-# Firstmate must not rewrite its argv with a flag the wrapper may not accept, and
-# must not claim wiring the launch cannot load.
+# Firstmate must not rewrite its argv with a flag the wrapper may not accept, yet
+# the wrapper still execs claude in the copy, so the untracked
+# .claude/settings.local.json keeps the wiring the flag would have carried.
 test_raw_claude_wrapper_command_is_left_untouched() {
-  local rec id out status launch state_real
+  local rec id out status launch state_real local_settings
   id=profile-raw-claude-z18
   rec=$(make_spawn_case profile-raw-wrapper claude "$id")
   read_case_record "$rec"
   state_real=$(cd "$HOME_DIR/state" && pwd -P)
+  local_settings="$WT_DIR/.claude/settings.local.json"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" "claude-yolo --dangerously-skip-permissions")
@@ -437,10 +442,48 @@ test_raw_claude_wrapper_command_is_left_untouched() {
     || fail "firstmate rewrote an unverified claude wrapper command"$'\n'"actual: $launch"
   [ ! -f "$state_real/$id.claude-settings.json" ] \
     || fail "firstmate wrote hook settings the wrapper launch cannot load"
+  [ -f "$local_settings" ] || fail "the wrapper launch got no turn-end or busy-state wiring"
+  assert_grep "turn-ended" "$local_settings" "the copy's hook settings carry no turn-end touch"
+  assert_grep "busy_gen=" "$HOME_DIR/state/$id.meta" "firstmate did not arm the busy-state contract"
+  assert_contains "$out" "unverified claude wrapper" "spawn did not report the fallback delivery"
+  # The fallback path must never show up as work: teardown's dirty check would
+  # refuse the copy, which is exactly what moving the settings out was for.
+  [ -z "$(git -C "$WT_DIR" status --porcelain)" ] \
+    || fail "the fallback hook file dirtied the copy: $(git -C "$WT_DIR" status --porcelain)"
+  pass "an unverified claude wrapper keeps its argv and still gets turn-end and busy-state hooks"
+}
+
+# The one case where the fallback has nowhere to go: the project TRACKS
+# .claude/settings.local.json. Firstmate never overwrites project content, so the
+# task runs unwired rather than destroy the project's own hook config - and must
+# not arm a busy record no hook could then clear.
+test_raw_claude_wrapper_leaves_a_tracked_settings_file_alone() {
+  local rec id out status tracked
+  id=profile-raw-claude-z19
+  rec=$(make_spawn_case profile-raw-wrapper-tracked claude "$id")
+  read_case_record "$rec"
+  tracked="$WT_DIR/.claude/settings.local.json"
+  # A developer's global ignore file commonly covers this exact path; then `git add`
+  # refuses it and the case would silently stop tracking the file it is about.
+  git -C "$WT_DIR" config core.excludesFile /dev/null
+  mkdir -p "$WT_DIR/.claude"
+  printf '%s\n' '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"true"}]}]}}' > "$tracked"
+  git -C "$WT_DIR" add -- .claude/settings.local.json \
+    || fail "setup could not track .claude/settings.local.json"
+  git -C "$WT_DIR" -c user.email=t@t -c user.name=t commit -q -m "project tracks claude settings"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "claude-yolo --dangerously-skip-permissions")
+  status=$?
+  expect_code 0 "$status" "raw claude wrapper launch should succeed: $out"
+  grep -q '"command":"true"' "$tracked" \
+    || fail "firstmate overwrote the project's own tracked hook config"
+  [ -z "$(git -C "$WT_DIR" status --porcelain)" ] \
+    || fail "firstmate dirtied the copy: $(git -C "$WT_DIR" status --porcelain)"
   ! grep -q "busy_gen=" "$HOME_DIR/state/$id.meta" \
     || fail "firstmate armed a busy record no hook could ever clear"
-  assert_contains "$out" "unverified claude wrapper" "spawn did not report the skipped wiring"
-  pass "an unverified claude wrapper command keeps its argv and gets no firstmate hooks"
+  assert_contains "$out" "tracks .claude/settings.local.json" "spawn did not report the skipped wiring"
+  pass "a project-tracked claude settings file is never overwritten by the fallback wiring"
 }
 
 test_claude_threads_model_and_effort() {
@@ -763,8 +806,9 @@ test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_raw_claude_launch_command_carries_hook_settings
-test_raw_claude_launch_with_own_settings_installs_no_wiring
+test_raw_claude_launch_with_own_settings_wires_through_the_copy
 test_raw_claude_wrapper_command_is_left_untouched
+test_raw_claude_wrapper_leaves_a_tracked_settings_file_alone
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
