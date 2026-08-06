@@ -64,7 +64,7 @@ JSON
 
 webfetch_matrix() {
   local routing=$1
-  node --input-type=module - "$routing" <<'JS'
+  env -u CONTEXT_MODE_WEBFETCH_ALLOW_HOSTS node --input-type=module - "$routing" <<'JS'
 import { pathToFileURL } from "node:url";
 
 const routing = await import(pathToFileURL(process.argv[2]).href);
@@ -78,6 +78,19 @@ const cases = [
 for (const [host, url] of cases) {
   const result = routing.routePreToolUse("WebFetch", { url });
   console.log(`${host}=${result === null ? "allowed" : result.action}`);
+}
+JS
+}
+
+webfetch_override_matrix() {
+  local routing=$1
+  CONTEXT_MODE_WEBFETCH_ALLOW_HOSTS=example.com node --input-type=module - "$routing" <<'JS'
+import { pathToFileURL } from "node:url";
+
+const routing = await import(pathToFileURL(process.argv[2]).href);
+for (const url of ["https://example.com", "https://sub.example.com", "https://myexample.com"]) {
+  const result = routing.routePreToolUse("WebFetch", { url });
+  console.log(`${new URL(url).hostname}=${result === null ? "allowed" : result.action}`);
 }
 JS
 }
@@ -99,6 +112,10 @@ test_applies_to_both_copies_and_refuses_suffix_spoofs() {
   assert_contains "$output" "example.com=deny" "unrelated hosts must remain denied"
   assert_contains "$output" "notclaude.ai.evil.com=deny" "suffix spoofing must remain denied"
   assert_contains "$output" "myclaude.ai=deny" "lookalike suffixes must remain denied"
+  output=$(webfetch_override_matrix "$marketplace") || fail "operator override fixture did not load: $output"
+  assert_contains "$output" "example.com=allowed" "operator override must allow the selected host"
+  assert_contains "$output" "sub.example.com=allowed" "operator override must allow selected subdomains"
+  assert_contains "$output" "myexample.com=deny" "operator override must still refuse lookalike suffixes"
   output=$(webfetch_matrix "$cache") || fail "cache fixture did not load: $output"
   assert_contains "$output" "claude.ai=allowed" "cache copy must allow claude.ai"
   assert_contains "$output" "notclaude.ai.evil.com=deny" "cache copy must refuse suffix spoofing"

@@ -50,7 +50,8 @@ HELPERS = '''// Hosts whose pages a plain HTTP fetch cannot materialize: they re
 // ctx_fetch_and_index returns only the SPA shell, so redirecting WebFetch there
 // does not protect context - it just makes the page unreadable. context-mode's
 // own guidance already excludes SPA-rendered pages ("no headless browser").
-// Override or extend with CONTEXT_MODE_WEBFETCH_ALLOW_HOSTS (comma-separated).
+// Setting CONTEXT_MODE_WEBFETCH_ALLOW_HOSTS deliberately widens this boundary
+// to the comma-separated hosts selected by the operator.
 const DEFAULT_WEBFETCH_ALLOW_HOSTS = ["claude.ai"];
 
 function getWebFetchAllowHosts(env = process.env) {

@@ -40,7 +40,8 @@ It keeps all other hosts denied, including `example.com`, `notclaude.ai.evil.com
 Run it after every `ctx upgrade`, because an upgrade replaces both the marketplace checkout at `~/.claude/plugins/marketplaces/context-mode/hooks/core/routing.mjs` and the active cache at `~/.claude/plugins/cache/context-mode/context-mode/<version>/hooks/core/routing.mjs`.
 Use `bin/fm-context-mode-webfetch-fix.sh --check` to verify that both copies carry the patch.
 The patcher fails before writing either copy if the expected context-mode source anchors changed, so a new upstream shape requires a deliberate repair instead of a silent no-op.
-The compatibility boundary can be extended only through context-mode's `CONTEXT_MODE_WEBFETCH_ALLOW_HOSTS` comma-separated setting, while the default remains `claude.ai`.
+With `CONTEXT_MODE_WEBFETCH_ALLOW_HOSTS` unset, the effective allowlist is only `claude.ai` and its subdomains.
+Setting this comma-separated environment variable is a widening vector: every added host is a deliberate operator act that allows native `WebFetch` for that host and its subdomains.
 Context-mode intercepts `curl` and `wget` in Bash, so use `python3` with `urllib` as the standing fallback for HTTP API work in a context-mode session.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
