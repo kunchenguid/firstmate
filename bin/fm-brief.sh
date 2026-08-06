@@ -45,6 +45,11 @@
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns approval decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
+# Every scaffold opens with a "What you publish" section, before Task or Charter,
+# that forbids firstmate's internal role vocabulary and nautical flavor in anything
+# the worker publishes outside the fleet (PR title or body, commit message, review
+# comment, issue, committed file) and gives "the repository owner" as the wording to
+# use instead. It governs published text only, not how the brief addresses the worker.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
