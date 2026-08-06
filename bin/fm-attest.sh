@@ -333,6 +333,15 @@ EOF
 # no place for one, or can be rewritten into one; unparseable, ambiguous,
 # unfamiliar or merely unmatched all withhold.
 #
+# Withholding is by LINE, not by word. Words are split on spaces, so a URL whose
+# credential holds one arrives here as two words, and the tail of it can match a
+# shape the whole never would - emitting a host and path that were never a
+# remote, beside a marker, reading as two places when there was one. Partial
+# emission is what has bitten this twice, so a line holding anything withheld is
+# withheld entire. The alternatives, not splitting on spaces or letting a marker
+# absorb what follows it, are both more parsing, and parsing is the part that
+# keeps failing.
+#
 # Two shapes are modelled. A scheme URL is emitted without its userinfo, and
 # never contains an '@' at all afterwards, so nothing turns on where a reader
 # believes the authority ends. An scp-style [user@]host:path is emitted without
@@ -344,18 +353,19 @@ EOF
 # it is not, and the difference is the entire safety of this function.
 #
 # The cost is deliberate: an address, or a URL with an '@' after its host, is
-# withheld even though it holds no secret. The marker says so in its place,
-# because an omission the reader knows about is recoverable and a silent one is
-# not. Words that are not URL-shaped are untouched, so the server's own
-# rejection reason still reaches the person who has to act on it.
-WITHHELD_URL='<url withheld: not provably credential-free>'
+# withheld even though it holds no secret, and it takes its line with it. The
+# marker says so in its place, because an omission the reader knows about is
+# recoverable and a silent one is not. A line with no URL-shaped word is
+# untouched, so the server's own rejection reason still reaches the person who
+# has to act on it.
+WITHHELD_LINE='<withheld in full: a URL here is not provably credential-free>'
 
 credential_safe_text() {
   [ -n "$1" ] || {
     printf '(nothing)'
     return 0
   }
-  printf '%s\n' "$1" | awk -v withheld="$WITHHELD_URL" '
+  printf '%s\n' "$1" | awk -v withheld_line="$WITHHELD_LINE" '
     BEGIN {
       quote = sprintf("%c", 39)
       lead = "\"([{<" quote
@@ -390,7 +400,8 @@ credential_safe_text() {
       if (rebuilt != "" && is_safe(rebuilt)) return rebuilt
       rebuilt = without_scp_user(t)
       if (rebuilt != "" && is_safe_scp(rebuilt)) return rebuilt
-      return withheld
+      withheld_seen = 1
+      return ""
     }
     function token(x,   pre, post, core, c) {
       if (index(x, "://") == 0 && index(x, "@") == 0) return x
@@ -412,10 +423,12 @@ credential_safe_text() {
       return pre render(core) post
     }
     {
+      withheld_seen = 0
       n = split($0, words, / /)
       out = ""
       for (i = 1; i <= n; i++) out = out (i > 1 ? " " : "") token(words[i])
-      print out
+      if (withheld_seen) print withheld_line
+      else print out
     }
   '
 }
@@ -643,7 +656,7 @@ EOF
   [ "$push_rc" -eq 0 ] || fail attestation-not-published \
     "Could not publish $notes_ref to $push_target, the push target of $remote." \
     "git said: $(credential_safe_text "$push_err")" \
-    "A URL in that text is shown only in a form that has no place for a credential, and any other URL-shaped word is replaced by a marker saying it was withheld." \
+    "A URL in that text is shown only in a form that has no place for a credential, and any line holding one that is not is withheld whole rather than shown in part." \
     "The attestation is evidence only on the repository holding the pull request head, so name that one with --remote <name> if this is not it, or re-run to reconcile if its $notes_ref moved since."
   printf 'fm-attest: published %s to %s (the push target of %s)\n' "$notes_ref" "$push_target" "$remote"
 }

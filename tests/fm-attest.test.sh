@@ -688,7 +688,7 @@ test_write_emits_only_positively_safe_urls() {
   # here that cannot be positively parsed is withheld while the rest are shown.
   assert_not_contains "$out" "pa/ss" "a password holding an unencoded slash reached the caller"
   assert_not_contains "$out" "u8.invalid" "a URL that could not be positively parsed was emitted"
-  assert_contains "$out" "url withheld" "the withheld URL was dropped without saying so"
+  assert_contains "$out" "withheld in full" "the withheld URL was dropped without saying so"
   pass "fm-attest.sh: a URL reaches the caller only in a form with no userinfo at all"
 }
 
@@ -709,9 +709,16 @@ test_write_withholds_a_push_target_it_cannot_positively_parse() {
     PATH="$repo/stub/bin:$PATH" "$ATTEST" write 2>&1)
   rc=$?
   [ "$rc" -ne 0 ] || fail "an unreadable push target was published to"
-  assert_contains "$out" "url withheld" "a URL that could not be positively parsed was emitted"
+  assert_contains "$out" "withheld in full" "a URL that could not be positively parsed was emitted"
   assert_not_contains "$out" "pa ss" "the credential reached the caller"
   assert_not_contains "$out" "someone" "the credential's user reached the caller"
+  # The space splits this URL into two words, and its tail alone matches the
+  # scp-style shape. Emitting that beside the marker names a host and path that
+  # were never a remote, so the whole target must go, not the half that parsed.
+  assert_not_contains "$out" "credential-free> 127.0.0.1" \
+    "the tail of a split URL was emitted beside the marker as a remote of its own"
+  assert_contains "$out" "credential-free>, the push target of origin" \
+    "the marker was not the whole target, so part of a split URL survived beside it"
   # Deliberate rather than incidental: the same unreachable target, differing
   # only in that this URL does positively parse, is named rather than withheld.
   git -C "$repo" config remote.origin.pushurl 'https://someone:passphrase@127.0.0.1:1/owner/repo.git'
@@ -752,11 +759,44 @@ test_write_names_an_scp_style_push_target() {
     PATH="$repo/stub/bin:$PATH" "$ATTEST" write 2>&1)
   rc=$?
   [ "$rc" -ne 0 ] || fail "an unreachable push target was published to"
-  assert_contains "$out" "url withheld" "a token with a colon before its @ was not withheld"
+  assert_contains "$out" "withheld in full" "a token with a colon before its @ was not withheld"
   assert_not_contains "$out" "hunter2" "the password reached the caller"
   assert_not_contains "$out" "u14.invalid:owner/repo.git" \
     "a token with a colon before its @ was emitted with its password stripped instead of withheld"
   pass "fm-attest.sh: an scp-style push target is named, and a colon before its user is not"
+}
+
+test_write_withholds_the_whole_line_a_withheld_url_sat_on() {
+  local repo fork head out rc
+  repo="$TMP_ROOT/line-withheld"
+  fork="$TMP_ROOT/line-withheld-fork.git"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  # Words are split on spaces, so half a URL can match a shape the whole never
+  # would. Emitting the safe half beside a marker reads as two places where
+  # there was one, so the line goes whole.
+  install_rejecting_fork "$fork" "$(printf '%s\n' \
+    'mixed push failed for https://user:pa/ss@bad.invalid/x see https://companion.invalid/o/r.git' \
+    'clean see https://alone.invalid/o/r.git' \
+    'refs/notes/* is blocked by a ruleset')"
+  git -C "$repo" remote add origin "$fork"
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${head:0:8}" completed)"
+  out=$(publish_out "$repo")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a rejected push was reported as a publication"
+  assert_contains "$out" "withheld in full" "a line holding a withheld URL was dropped without saying so"
+  assert_not_contains "$out" "pa/ss" "the credential reached the caller"
+  assert_not_contains "$out" "bad.invalid" "the URL that could not be parsed was emitted"
+  # The control that proves line granularity rather than reworded marker text:
+  # this URL is safe on its own and would survive per-word withholding.
+  assert_not_contains "$out" "companion.invalid" \
+    "a safe URL sharing a line with a withheld one survived, so withholding is still per word"
+  # The pairing, so this is not blanket suppression: a clean line is untouched,
+  # and so is the server's own reason.
+  assert_contains "$out" "https://alone.invalid/o/r.git" "a line with nothing withheld was suppressed"
+  assert_contains "$out" "refs/notes/* is blocked by a ruleset" \
+    "the server's own rejection reason was suppressed along with the URLs"
+  pass "fm-attest.sh: a line holding a URL that cannot be parsed is withheld whole"
 }
 
 test_write_withholds_url_shapes_no_reader_models() {
@@ -779,7 +819,7 @@ test_write_withholds_url_shapes_no_reader_models() {
   out=$(publish_out "$repo")
   rc=$?
   [ "$rc" -ne 0 ] || fail "a rejected push was reported as a publication"
-  assert_contains "$out" "url withheld" "a URL-shaped token was dropped without saying so"
+  assert_contains "$out" "withheld in full" "a URL-shaped token was dropped without saying so"
   assert_not_contains "$out" "alice" "a credential in a URL with no scheme reached the caller"
   assert_not_contains "$out" "u10.invalid" "a URL with no scheme was emitted"
   # The guard on the scp-style shape. Its colon separates host from path, which
@@ -1023,6 +1063,7 @@ test_write_refuses_an_unreadable_push_target_without_leaking_credentials
 test_write_emits_only_positively_safe_urls
 test_write_withholds_a_push_target_it_cannot_positively_parse
 test_write_names_an_scp_style_push_target
+test_write_withholds_the_whole_line_a_withheld_url_sat_on
 test_write_withholds_url_shapes_no_reader_models
 test_write_outside_a_repository_fails_as_such
 test_write_without_the_pipeline_tool_fails_as_such
