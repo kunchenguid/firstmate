@@ -4,6 +4,11 @@
 # This command intentionally does not parse fleet state itself.
 # It shells out to fm-fleet-snapshot.sh --json and renders that stable
 # structured contract for humans.
+#
+# It inherits that command's exit-status contract: an empty fleet renders and
+# exits 0, while a snapshot that failed or produced nothing exits nonzero and
+# says so, because supervision reviews the fleet from this view and must never
+# read a failed read as a healthy fleet.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,7 +31,20 @@ esac
 
 command -v jq >/dev/null 2>&1 || { echo "fm-fleet-view: jq not found" >&2; exit 1; }
 
-SNAPSHOT=$("$SCRIPT_DIR/fm-fleet-snapshot.sh" --json) || exit $?
+# A failed snapshot must never render as a healthy fleet. An empty FLEET is
+# valid and still produces a full snapshot object, so empty OUTPUT can only mean
+# the snapshot did not complete - and reporting that as success would let fleet
+# supervision degrade silently as the fleet and backlog grow.
+SNAPSHOT=$("$SCRIPT_DIR/fm-fleet-snapshot.sh" --json)
+SNAPSHOT_RC=$?
+if [ "$SNAPSHOT_RC" -ne 0 ]; then
+  echo "fm-fleet-view: fleet snapshot failed (exit $SNAPSHOT_RC); no fleet state was read" >&2
+  exit "$SNAPSHOT_RC"
+fi
+if [ -z "$SNAPSHOT" ]; then
+  echo "fm-fleet-view: fleet snapshot produced no output; no fleet state was read" >&2
+  exit 1
+fi
 
 printf '%s\n' "$SNAPSHOT" | jq -r '
   def dash($v): if $v == null or $v == "" then "-" else $v end;
@@ -93,4 +111,4 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
   "",
   "## Secondmates",
   .secondmate_guidance.note
-'
+' || { echo "fm-fleet-view: rendering the fleet snapshot failed" >&2; exit 1; }
