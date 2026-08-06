@@ -504,6 +504,66 @@ test_migration_marker_rearms_a_missing_validation_gate() {
   pass "migration markers remain incomplete until reserved validation gates are armed"
 }
 
+test_migration_rearms_an_expected_source_with_invalid_trust() {
+  local dir state
+  dir=$(make_case migration-invalid-validation-trust)
+  state="$dir/home/state"
+  run_arm "$dir" >/dev/null || fail "could not arm invalid-trust migration fixture"
+  rm -f "$state/task-a.check-trust"
+
+  FM_TEST_REAL_MV="$REAL_MV" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" --checks-safe >/dev/null \
+    || fail "migration did not repair an expected validation source with missing trust"
+  fm_validation_check_registered "$state" task-a "$ROOT/bin/fm-nm-run-lib.sh" "$ROOT/bin/fm-validation-poll.sh" \
+    || fail "migration left an expected validation source unregistered"
+  pass "migration rearms expected validation sources with invalid trust"
+}
+
+test_migration_repairs_unlocked_validation_gates_during_other_handoffs() {
+  local dir state ready release holder_pid attempt=0
+  dir=$(make_case migration-unrelated-live-slot)
+  state="$dir/home/state"
+  ready="$dir/slot-ready"
+  release="$dir/slot-release"
+  (
+    FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state"
+    . "$ROOT/bin/fm-pr-lib.sh"
+    . "$ROOT/bin/fm-check-lib.sh"
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_custom_check_slot_acquire "$state" task-b 100 || exit 1
+    : > "$ready"
+    while [ ! -e "$release" ]; do sleep 0.02; done
+    fm_custom_check_slot_release
+  ) &
+  holder_pid=$!
+  while [ "$attempt" -lt 100 ]; do
+    [ -e "$ready" ] && break
+    sleep 0.02
+    attempt=$((attempt + 1))
+  done
+  if [ ! -e "$ready" ]; then
+    : > "$release"
+    wait "$holder_pid" 2>/dev/null || true
+    fail "unrelated live-slot fixture did not acquire its task slot"
+  fi
+
+  FM_TEST_REAL_MV="$REAL_MV" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" --checks-safe >/dev/null || {
+      : > "$release"
+      wait "$holder_pid" 2>/dev/null || true
+      fail "migration did not repair an unlocked validation gate during another handoff"
+    }
+  fm_validation_check_registered "$state" task-a "$ROOT/bin/fm-nm-run-lib.sh" "$ROOT/bin/fm-validation-poll.sh" \
+    || {
+      : > "$release"
+      wait "$holder_pid" 2>/dev/null || true
+      fail "an unrelated task slot left the validation gate unarmed"
+    }
+  : > "$release"
+  wait "$holder_pid" || fail "unrelated live-slot fixture did not release its task slot"
+  pass "migration repairs unlocked validation gates during other handoffs"
+}
+
 test_watcher_skips_a_live_pr_publication_slot() {
   local dir state status ready release pr_pid attempt=0 out rc=0
   dir=$(make_case watcher-live-pr-publication)
@@ -648,6 +708,8 @@ test_x_metadata_rewrite_serializes_with_pr_publication
 test_custom_registration_and_migration_preserve_pr_poll_priority
 test_no_mistakes_validation_ownership_rearms_custom_replacements
 test_migration_marker_rearms_a_missing_validation_gate
+test_migration_rearms_an_expected_source_with_invalid_trust
+test_migration_repairs_unlocked_validation_gates_during_other_handoffs
 test_watcher_skips_a_live_pr_publication_slot
 test_interrupted_pr_publication_restores_validation_gate
 test_migration_defers_a_live_check_slot

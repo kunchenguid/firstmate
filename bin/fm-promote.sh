@@ -87,10 +87,11 @@ ORIGINAL_META=
 PROMOTION_COMMITTED=0
 VALIDATION_CHECK_ABSENT=0
 VALIDATION_TRUST_ABSENT=0
-PROMOTION_META_IDENTITY=
 PROMOTION_META_HASH=
 CHECK_SLOT_HELD=0
 MIGRATION_BOUNDARY_HELD=0
+PROMOTION_VALIDATION_CHILD_PID=
+PROMOTION_VALIDATION_SLOT_OWNER_PID=
 promotion_slot_release() {
   local failed=0
   if [ "$CHECK_SLOT_HELD" -eq 1 ]; then
@@ -116,20 +117,32 @@ promotion_slot_acquire() {
   CHECK_SLOT_HELD=1
 }
 promotion_candidate_current() {
-  [ -n "$PROMOTION_META_IDENTITY" ] && [ -n "$PROMOTION_META_HASH" ] || return 1
+  [ -n "$PROMOTION_META_HASH" ] || return 1
   [ -f "$META" ] && [ ! -L "$META" ] && [ "$(fm_pr_file_link_count "$META")" = 1 ] || return 1
-  [ "$(fm_pr_file_identity "$META")" = "$PROMOTION_META_IDENTITY" ] \
-    && [ "$(fm_pr_sha256 "$META")" = "$PROMOTION_META_HASH" ]
+  [ "$(fm_pr_sha256 "$META")" = "$PROMOTION_META_HASH" ]
+}
+promotion_validation_handoff_stop() {
+  [ -n "$PROMOTION_VALIDATION_CHILD_PID" ] || return 0
+  kill -TERM "$PROMOTION_VALIDATION_CHILD_PID" 2>/dev/null || true
+  wait "$PROMOTION_VALIDATION_CHILD_PID" 2>/dev/null || true
+  PROMOTION_VALIDATION_CHILD_PID=
 }
 promote_cleanup() {
   [ -z "$TMP" ] || rm -f -- "$TMP"
+  promotion_validation_handoff_stop || true
   if [ "$PROMOTION_COMMITTED" -ne 1 ] && [ -n "$ORIGINAL_META" ]; then
     [ "$CHECK_SLOT_HELD" -eq 1 ] || promotion_slot_acquire || true
     if [ "$CHECK_SLOT_HELD" -eq 1 ] && promotion_candidate_current; then
-      [ "$VALIDATION_CHECK_ABSENT" -ne 1 ] || rm -f -- "$STATE/$ID.check.sh"
-      [ "$VALIDATION_TRUST_ABSENT" -ne 1 ] || rm -f -- "$STATE/$ID.check-trust"
-      mv -f -- "$ORIGINAL_META" "$META" || true
-      ORIGINAL_META=
+      if [ "$MODE" = no-mistakes ] \
+        && fm_validation_check_registered "$STATE" "$ID" \
+          "$FM_ROOT/bin/fm-nm-run-lib.sh" "$FM_ROOT/bin/fm-validation-poll.sh"; then
+        PROMOTION_COMMITTED=1
+      else
+        [ "$VALIDATION_CHECK_ABSENT" -ne 1 ] || rm -f -- "$STATE/$ID.check.sh"
+        [ "$VALIDATION_TRUST_ABSENT" -ne 1 ] || rm -f -- "$STATE/$ID.check-trust"
+        mv -f -- "$ORIGINAL_META" "$META" || true
+        ORIGINAL_META=
+      fi
     fi
   fi
   promotion_slot_release || true
@@ -159,25 +172,28 @@ grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
 } >> "$TMP"
-mv -f -- "$TMP" "$META"
-TMP=
-PROMOTION_META_IDENTITY=$(fm_pr_file_identity "$META") || exit 1
-PROMOTION_META_HASH=$(fm_pr_sha256 "$META") || exit 1
-
 if [ "$MODE" = no-mistakes ]; then
   [ -e "$STATE/$ID.check.sh" ] || [ -L "$STATE/$ID.check.sh" ] || VALIDATION_CHECK_ABSENT=1
   [ -e "$STATE/$ID.check-trust" ] || [ -L "$STATE/$ID.check-trust" ] || VALIDATION_TRUST_ABSENT=1
 fi
-promotion_slot_release || exit 1
+PROMOTION_META_HASH=$(fm_pr_sha256 "$TMP") || exit 1
+mv -f -- "$TMP" "$META"
+TMP=
 
 if [ "$MODE" = no-mistakes ]; then
-  FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$FM_ROOT/bin/fm-validation-check.sh" "$ID" || {
-      echo "error: could not arm validation check for $ID" >&2
-      exit 1
-    }
+  PROMOTION_VALIDATION_SLOT_OWNER_PID=${BASHPID:-$$}
+  FM_VALIDATION_SLOT_OWNER_PID="$PROMOTION_VALIDATION_SLOT_OWNER_PID" FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$FM_ROOT/bin/fm-validation-check.sh" --slot-held "$ID" &
+  PROMOTION_VALIDATION_CHILD_PID=$!
+  if ! wait "$PROMOTION_VALIDATION_CHILD_PID"; then
+    PROMOTION_VALIDATION_CHILD_PID=
+    echo "error: could not arm validation check for $ID" >&2
+    exit 1
+  fi
+  PROMOTION_VALIDATION_CHILD_PID=
 fi
 PROMOTION_COMMITTED=1
+promotion_slot_release || exit 1
 rm -f -- "$ORIGINAL_META"
 ORIGINAL_META=
 trap - EXIT HUP INT TERM

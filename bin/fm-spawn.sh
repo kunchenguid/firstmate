@@ -646,6 +646,9 @@ SPAWN_META_ROLLBACK_ACTIVE=0
 SPAWN_META_PREVIOUS=
 SPAWN_META_PREVIOUS_PRESENT=0
 SPAWN_META_CANDIDATE_HASH=
+SPAWN_VALIDATION_HANDOFF=0
+SPAWN_VALIDATION_CHILD_PID=
+SPAWN_VALIDATION_SLOT_OWNER_PID=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -690,6 +693,13 @@ spawn_check_slot_acquire() {
   SPAWN_CHECK_SLOT_HELD=1
 }
 
+spawn_validation_handoff_stop() {
+  [ -n "$SPAWN_VALIDATION_CHILD_PID" ] || return 0
+  kill -TERM "$SPAWN_VALIDATION_CHILD_PID" 2>/dev/null || true
+  wait "$SPAWN_VALIDATION_CHILD_PID" 2>/dev/null || true
+  SPAWN_VALIDATION_CHILD_PID=
+}
+
 spawn_meta_reset() {
   [ -z "$SPAWN_META_TMP" ] || rm -f -- "$SPAWN_META_TMP"
   SPAWN_META_TMP=
@@ -722,29 +732,41 @@ spawn_meta_rollback_capture() {
 }
 
 spawn_meta_rollback() {
-  local meta state_device current_hash failed=0
+  local meta state_device current_hash failed=0 release_slot=0
   [ "$SPAWN_META_ROLLBACK_ACTIVE" -eq 1 ] || return 0
   meta="$STATE/$ID.meta"
-  spawn_check_slot_acquire || return 1
+  if [ "$SPAWN_CHECK_SLOT_HELD" -eq 1 ] && [ "$SPAWN_MIGRATION_BOUNDARY_HELD" -eq 1 ]; then
+    :
+  elif [ "$SPAWN_CHECK_SLOT_HELD" -eq 0 ] && [ "$SPAWN_MIGRATION_BOUNDARY_HELD" -eq 0 ]; then
+    spawn_check_slot_acquire || return 1
+    release_slot=1
+  else
+    return 1
+  fi
   state_device=$(fm_pr_file_device "$STATE") || {
-    spawn_check_slot_release || true
+    [ "$release_slot" -eq 0 ] || spawn_check_slot_release || true
     return 1
   }
   if [ -f "$meta" ] && [ ! -L "$meta" ] && [ "$(fm_pr_file_link_count "$meta")" = 1 ]; then
     current_hash=$(fm_pr_sha256 "$meta" || true)
     if [ "$current_hash" = "$SPAWN_META_CANDIDATE_HASH" ] && ! grep -q '^pr=' "$meta"; then
-      if [ "$SPAWN_META_PREVIOUS_PRESENT" -eq 1 ]; then
-        fm_pr_private_file_valid "$SPAWN_META_PREVIOUS" 600 "$state_device" \
-          && fm_pr_regular_destination_on_device_or_absent "$meta" "$state_device" \
-          && mv -f -- "$SPAWN_META_PREVIOUS" "$meta" || failed=1
-        [ "$failed" -ne 0 ] || SPAWN_META_PREVIOUS=
+      if fm_validation_check_registered "$STATE" "$ID" \
+          "$SCRIPT_DIR/fm-nm-run-lib.sh" "$SCRIPT_DIR/fm-validation-poll.sh"; then
+        :
       else
-        fm_pr_regular_destination_on_device_or_absent "$meta" "$state_device" \
-          && rm -f -- "$meta" || failed=1
+        if [ "$SPAWN_META_PREVIOUS_PRESENT" -eq 1 ]; then
+          fm_pr_private_file_valid "$SPAWN_META_PREVIOUS" 600 "$state_device" \
+            && fm_pr_regular_destination_on_device_or_absent "$meta" "$state_device" \
+            && mv -f -- "$SPAWN_META_PREVIOUS" "$meta" || failed=1
+          [ "$failed" -ne 0 ] || SPAWN_META_PREVIOUS=
+        else
+          fm_pr_regular_destination_on_device_or_absent "$meta" "$state_device" \
+            && rm -f -- "$meta" || failed=1
+        fi
       fi
     fi
   fi
-  spawn_check_slot_release || failed=1
+  [ "$release_slot" -eq 0 ] || spawn_check_slot_release || failed=1
   [ "$failed" -ne 0 ] || spawn_meta_rollback_discard
   return "$failed"
 }
@@ -866,23 +888,28 @@ spawn_meta_publish() {
     spawn_meta_reset
     return 1
   }
-  mv -f -- "$SPAWN_META_TMP" "$meta" || {
-    spawn_meta_reset
-    return 1
-  }
-  SPAWN_META_TMP=
   if [ "$SPAWN_META_ROLLBACK_CAPTURE" -eq 1 ]; then
-    SPAWN_META_CANDIDATE_HASH=$(fm_pr_sha256 "$meta") || {
+    SPAWN_META_CANDIDATE_HASH=$(fm_pr_sha256 "$SPAWN_META_TMP") || {
       spawn_meta_reset
       return 1
     }
     SPAWN_META_ROLLBACK_ACTIVE=1
   fi
+  mv -f -- "$SPAWN_META_TMP" "$meta" || {
+    spawn_meta_reset
+    return 1
+  }
+  SPAWN_META_TMP=
   if [ "$SPAWN_META_PR_PRESENT" -eq 1 ] \
     && ! fm_pr_poll_artifacts_valid "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh"; then
     spawn_meta_reset
     return 1
   fi
+  if [ "$SPAWN_META_ROLLBACK_CAPTURE" -eq 1 ] && [ "$SPAWN_META_PR_PRESENT" -eq 0 ]; then
+    SPAWN_VALIDATION_HANDOFF=1
+    return 0
+  fi
+  spawn_meta_rollback_discard
   spawn_check_slot_release
 }
 
@@ -999,8 +1026,9 @@ spawn_abort_cleanup() {
   local status=$?
   [ -z "$SPAWN_META_TMP" ] || rm -f -- "$SPAWN_META_TMP"
   SPAWN_META_TMP=
-  spawn_check_slot_release || true
+  spawn_validation_handoff_stop || true
   spawn_meta_rollback || true
+  spawn_check_slot_release || true
   spawn_meta_rollback_discard
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
@@ -2539,10 +2567,23 @@ SPAWN_META_ROLLBACK_CAPTURE=0
 # fm-validation-check.sh owns the no-PR-only slot claim; fm-pr-check.sh replaces
 # it later with the higher-priority authenticated merge poll.
 if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
-  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-validation-check.sh" "$ID" || {
-    echo "error: could not arm validation check for $ID" >&2
-    exit 1
-  }
+  if [ "$SPAWN_VALIDATION_HANDOFF" -eq 1 ]; then
+    SPAWN_VALIDATION_SLOT_OWNER_PID=${BASHPID:-$$}
+    FM_VALIDATION_SLOT_OWNER_PID="$SPAWN_VALIDATION_SLOT_OWNER_PID" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-validation-check.sh" --slot-held "$ID" &
+    SPAWN_VALIDATION_CHILD_PID=$!
+    if ! wait "$SPAWN_VALIDATION_CHILD_PID"; then
+      SPAWN_VALIDATION_CHILD_PID=
+      echo "error: could not arm validation check for $ID" >&2
+      exit 1
+    fi
+    SPAWN_VALIDATION_CHILD_PID=
+    SPAWN_VALIDATION_HANDOFF=0
+    spawn_check_slot_release || {
+      echo "error: could not complete validation check handoff for $ID" >&2
+      exit 1
+    }
+  fi
   spawn_meta_rollback_discard
 fi
 

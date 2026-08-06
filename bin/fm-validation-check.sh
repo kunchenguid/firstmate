@@ -34,12 +34,32 @@ if [ "${1:-}" = --help ] || [ "${1:-}" = -h ]; then
   exit 0
 fi
 
-if [ "$#" -ne 1 ] || ! fm_pr_task_id_valid "$1"; then
+VALIDATION_SLOT_HELD_EXTERNALLY=0
+VALIDATION_SLOT_OWNER_PID=
+case "${1:-}" in
+  --slot-held)
+    if [ "$#" -ne 2 ] || ! fm_pr_task_id_valid "$2"; then
+      echo "error: invalid validation check request" >&2
+      exit 2
+    fi
+    VALIDATION_SLOT_HELD_EXTERNALLY=1
+    VALIDATION_SLOT_OWNER_PID=${FM_VALIDATION_SLOT_OWNER_PID:-}
+    ID=$2
+    ;;
+  *)
+    if [ "$#" -ne 1 ] || ! fm_pr_task_id_valid "$1"; then
+      echo "error: invalid validation check request" >&2
+      exit 2
+    fi
+    ID=$1
+    ;;
+esac
+if [ "$VALIDATION_SLOT_HELD_EXTERNALLY" -eq 1 ] \
+  && { [ -z "$VALIDATION_SLOT_OWNER_PID" ] || [[ "$VALIDATION_SLOT_OWNER_PID" = *[!0-9]* ]]; }; then
   echo "error: invalid validation check request" >&2
   exit 2
 fi
 
-ID=$1
 META="$STATE/$ID.meta"
 CHECK="$STATE/$ID.check.sh"
 TRUST="$STATE/$ID.check-trust"
@@ -70,6 +90,18 @@ VALIDATION_TRANSACTION_ACTIVE=0
 VALIDATION_COMMITTED=0
 CHECK_SLOT_HELD=0
 MIGRATION_BOUNDARY_HELD=0
+validation_handoff_locks_held() {
+  local lock owner pid
+  [ "$VALIDATION_SLOT_HELD_EXTERNALLY" -eq 1 ] || return 1
+  for lock in "$STATE/.check-migration.lock" "$STATE/.$ID.check-slot.lock"; do
+    [ -L "$lock" ] || return 1
+    owner=$(fm_lock_link_owner "$lock") || return 1
+    fm_lock_points_to_owner "$lock" "$owner" || return 1
+    pid=$(cat "$owner/pid" 2>/dev/null || true)
+    [ "$pid" = "$VALIDATION_SLOT_OWNER_PID" ] || return 1
+    fm_pid_alive "$pid" || return 1
+  done
+}
 validation_backup_file() {
   local source=$1 label=$2 backup
   VALIDATION_BACKUP_PATH=
@@ -124,8 +156,10 @@ cleanup() {
   [ -z "${FM_CUSTOM_CHECK_TRUST_TMP:-}" ] || rm -f -- "$FM_CUSTOM_CHECK_TRUST_TMP"
   [ -z "${CHECK_BACKUP:-}" ] || rm -f -- "$CHECK_BACKUP"
   [ -z "${TRUST_BACKUP:-}" ] || rm -f -- "$TRUST_BACKUP"
-  [ "$CHECK_SLOT_HELD" -ne 1 ] || fm_custom_check_slot_release
-  [ "$MIGRATION_BOUNDARY_HELD" -ne 1 ] || fm_custom_check_migration_release
+  if [ "$VALIDATION_SLOT_HELD_EXTERNALLY" -ne 1 ]; then
+    [ "$CHECK_SLOT_HELD" -ne 1 ] || fm_custom_check_slot_release
+    [ "$MIGRATION_BOUNDARY_HELD" -ne 1 ] || fm_custom_check_migration_release
+  fi
   return "$status"
 }
 trap cleanup EXIT
@@ -133,16 +167,23 @@ trap 'exit 1' HUP INT TERM
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
-if ! fm_custom_check_migration_acquire "$STATE" 100; then
-  echo "error: validation check publication is busy" >&2
-  exit 1
+if [ "$VALIDATION_SLOT_HELD_EXTERNALLY" -eq 1 ]; then
+  validation_handoff_locks_held || {
+    echo "error: validation check handoff is unavailable" >&2
+    exit 1
+  }
+else
+  if ! fm_custom_check_migration_acquire "$STATE" 100; then
+    echo "error: validation check publication is busy" >&2
+    exit 1
+  fi
+  MIGRATION_BOUNDARY_HELD=1
+  if ! fm_custom_check_slot_acquire "$STATE" "$ID" 100; then
+    echo "error: task check slot is busy" >&2
+    exit 1
+  fi
+  CHECK_SLOT_HELD=1
 fi
-MIGRATION_BOUNDARY_HELD=1
-if ! fm_custom_check_slot_acquire "$STATE" "$ID" 100; then
-  echo "error: task check slot is busy" >&2
-  exit 1
-fi
-CHECK_SLOT_HELD=1
 
 [ -f "$META" ] && [ ! -L "$META" ] && [ "$(fm_pr_file_link_count "$META")" = 1 ] || {
   echo "error: task metadata is unavailable" >&2
@@ -202,12 +243,21 @@ TRUST_TMP=$FM_CUSTOM_CHECK_TRUST_TMP
 FM_CUSTOM_CHECK_TRUST_TMP=
 FM_CUSTOM_CHECK_TRUST_HASH=
 fm_pr_regular_destination_on_device_or_absent "$TRUST" "$STATE_DEVICE" || exit 1
+if [ "$VALIDATION_SLOT_HELD_EXTERNALLY" -eq 1 ]; then
+  validation_handoff_locks_held || exit 1
+fi
 mv -f -- "$TRUST_TMP" "$TRUST" || exit 1
 TRUST_TMP=
 fm_pr_regular_destination_on_device_or_absent "$CHECK" "$STATE_DEVICE" || exit 1
+if [ "$VALIDATION_SLOT_HELD_EXTERNALLY" -eq 1 ]; then
+  validation_handoff_locks_held || exit 1
+fi
 mv -f -- "$TMP" "$CHECK" || exit 1
 TMP=
 
+if [ "$VALIDATION_SLOT_HELD_EXTERNALLY" -eq 1 ]; then
+  validation_handoff_locks_held || exit 1
+fi
 fm_validation_check_registered "$STATE" "$ID" "$NM_RUN_LIB" "$TEMPLATE" || {
   echo "error: validation check registration could not be verified" >&2
   exit 1

@@ -290,20 +290,13 @@ x_shim_locked_scan_needed() {
 MIGRATION_DEFERRED=0
 MIGRATION_BOUNDARY_HELD=0
 repair_validation_checks() {
-  local meta id check
+  local meta id
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || [ -L "$meta" ] || continue
     id=$(basename "$meta" .meta)
     fm_pr_task_id_valid "$id" || continue
     fm_validation_check_slot_reserved "$STATE" "$id" || continue
     fm_validation_check_registered "$STATE" "$id" "$NM_RUN_LIB" "$VALIDATION_TEMPLATE" && continue
-    check="$STATE/$id.check.sh"
-    if [ -e "$check" ] || [ -L "$check" ]; then
-      if fm_validation_check_source_matches "$STATE" "$id" "$NM_RUN_LIB" "$VALIDATION_TEMPLATE" \
-        || ! fm_custom_check_registered "$STATE" "$id"; then
-        continue
-      fi
-    fi
     if fm_custom_check_slot_held "$STATE" "$id"; then
       MIGRATION_DEFERRED=1
       continue
@@ -313,9 +306,6 @@ repair_validation_checks() {
     fm_validation_check_registered "$STATE" "$id" "$NM_RUN_LIB" "$VALIDATION_TEMPLATE" || return 1
   done
 }
-if fm_custom_check_any_slot_held "$STATE"; then
-  exit 0
-fi
 if ! repair_validation_checks; then
   echo "PR_CHECK_MIGRATION: validation gate repair could not be completed safely" >&2
   exit 1

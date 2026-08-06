@@ -275,6 +275,50 @@ test_promote_no_mistakes_arms_or_rolls_back_the_validation_gate() {
   pass "fm-promote: no-mistakes promotions arm validation or roll back"
 }
 
+test_promote_rolls_back_an_interrupted_no_mistakes_handoff() {
+  local home state meta wt fakebin real_mv out status
+  home="$TMP_ROOT/promote-validation-interrupt/home"
+  state="$home/state"
+  meta="$state/promote-validation-interrupt.meta"
+  wt="$TMP_ROOT/promote-validation-interrupt/wt"
+  fakebin="$TMP_ROOT/promote-validation-interrupt/fakebin"
+  real_mv=$(command -v mv)
+  mkdir -p "$state" "$wt" "$fakebin"
+  printf 'window=fm-promote-validation-interrupt\nkind=scout\nworktree=%s\n' "$wt" > "$meta"
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+src=
+dst=
+for arg in "$@"; do
+  src=$dst
+  dst=$arg
+done
+case "$src" in
+  */.fm-promote-meta.*)
+    "${FM_TEST_REAL_MV:?}" "$@"
+    status=$?
+    kill -TERM "$PPID"
+    exit "$status"
+    ;;
+esac
+exec "${FM_TEST_REAL_MV:?}" "$@"
+SH
+  chmod +x "$fakebin/mv"
+
+  out=$(FM_TEST_REAL_MV="$real_mv" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    PATH="$fakebin:$PATH" "$PROMOTE" promote-validation-interrupt --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "interrupted promotion unexpectedly succeeded"
+  assert_grep 'kind=scout' "$meta" \
+    "interrupted promotion left a no-mistakes ship without its gate"
+  assert_absent "$state/promote-validation-interrupt.check.sh" \
+    "interrupted promotion left a runnable validation check"
+  assert_absent "$state/promote-validation-interrupt.check-trust" \
+    "interrupted promotion left a trust binding"
+  pass "fm-promote: interrupted no-mistakes handoff restores scout state"
+}
+
 test_promote_preserves_a_concurrent_pr_merge_poll() {
   local home state meta wt fakebin ready release promotion_pid pr_pid attempt=0 real_mv
   home="$TMP_ROOT/promote-pr-priority/home"
@@ -393,6 +437,7 @@ test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_promote_no_mistakes_arms_or_rolls_back_the_validation_gate
+test_promote_rolls_back_an_interrupted_no_mistakes_handoff
 test_promote_preserves_a_concurrent_pr_merge_poll
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"

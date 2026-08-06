@@ -63,6 +63,12 @@ case "$src" in
       : > "$FM_TEST_SPAWN_META_BLOCK_READY"
       while [ ! -e "${FM_TEST_SPAWN_META_BLOCK_RELEASE:?}" ]; do sleep 0.02; done
     fi
+    if [ -n "${FM_TEST_SPAWN_META_INTERRUPT_PARENT:-}" ]; then
+      "${FM_TEST_REAL_MV:-/bin/mv}" "$@"
+      status=$?
+      kill -TERM "$PPID"
+      exit "$status"
+    fi
     ;;
   */.fm-validation-check.*)
     [ -z "${FM_TEST_VALIDATION_FAIL_SOURCE_MOVE:-}" ] || exit 1
@@ -196,6 +202,25 @@ test_failed_validation_arm_rolls_back_no_mistakes_metadata() {
   assert_absent "$HOME_DIR/state/$id.check-trust" \
     "failed validation arm left a trust binding behind"
   pass "failed validation arm rolls back no-mistakes ship metadata"
+}
+
+test_interrupted_metadata_handoff_leaves_no_unarmed_no_mistakes_ship() {
+  local rec id out status
+  id=profile-validation-interrupt-z1
+  rec=$(make_spawn_case profile-validation-interrupt claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_SPAWN_META_INTERRUPT_PARENT=1 FM_TEST_REAL_MV="$(command -v mv)" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn unexpectedly succeeded after metadata handoff interruption"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "interrupted metadata handoff left a no-mistakes ship without its gate"
+  assert_absent "$HOME_DIR/state/$id.check.sh" \
+    "interrupted metadata handoff left a runnable validation check"
+  assert_absent "$HOME_DIR/state/$id.check-trust" \
+    "interrupted metadata handoff left a trust binding"
+  pass "interrupted metadata handoff rolls back no-mistakes visibility"
 }
 
 test_same_id_spawn_preserves_a_registered_pr_merge_poll() {
@@ -834,6 +859,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 test_no_profile_keeps_claude_profile_defaults
 test_no_mistakes_spawn_arms_the_registered_validation_check
 test_failed_validation_arm_rolls_back_no_mistakes_metadata
+test_interrupted_metadata_handoff_leaves_no_unarmed_no_mistakes_ship
 test_same_id_spawn_preserves_a_registered_pr_merge_poll
 test_spawn_serializes_a_concurrent_pr_merge_poll
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
