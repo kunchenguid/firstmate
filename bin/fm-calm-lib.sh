@@ -9,7 +9,8 @@
 # preference does not change another primary harness's shell presentation.
 
 fm_calm_enabled() {  # [config-dir]
-  local config=${1:-${FM_CONFIG_OVERRIDE:-${FM_HOME:-${FM_ROOT_OVERRIDE:-.}}/config}} value= token
+  local config value token
+  config=${1:-${FM_CONFIG_OVERRIDE:-${FM_HOME:-${FM_ROOT_OVERRIDE:-.}}/config}}
   local -a whitespace=(
     $'\011' $'\012' $'\013' $'\014' $'\015' $'\040'
     $'\302\240' $'\341\232\200'
