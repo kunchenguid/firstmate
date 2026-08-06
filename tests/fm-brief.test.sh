@@ -237,6 +237,7 @@ test_gate_merge_brief_lands_through_the_gate_without_contradiction() {
   brief="$home/data/$id/brief.md"
   grep -qx "Delivery contract: mode=gate-merge" "$brief" \
     || fail "gate-merge brief did not record its machine-readable delivery contract line"
+  # shellcheck disable=SC2016  # literal backticks belong to the generated brief text
   assert_grep 'Run the gate from THIS worktree, with your branch checked out: `./scripts/merge-gate.sh`' "$brief" \
     "gate-merge definition of done did not name the exact landing command"
   assert_grep "Firstmate never merges it for you" "$brief" \
