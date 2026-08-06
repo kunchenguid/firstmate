@@ -300,10 +300,23 @@ test_claude_busy_signals_are_independent() {
   printf '✻ Cogitated for 44s\n' > "$composer"
   pane_busy idle-completed claude && fail "a completed-turn summary must not be busy"
 
-  # The discriminator: the escape affordance counts only as a delimited footer
-  # field, so transcript prose that merely mentions it stays idle.
+  # The discriminator: the affordance counts only on a line that BEGINS with the
+  # rendered permission-mode indicator. Transcript text cannot satisfy that anchor,
+  # so an agent that prints the footer and then goes idle is never read as busy.
+  # Without this the pane would look perpetually busy and the away digest would
+  # never land, which is the away-mode wedge arriving from the other direction.
   printf 'I will explain how esc to interrupt works in this transcript.\n' > "$composer"
   pane_busy prose claude && fail "transcript prose must not classify an idle Claude pane busy"
+  printf 'The footer reads: · esc to interrupt ·\n' > "$composer"
+  pane_busy prose-delimited claude && fail "prose carrying the field separators must not classify busy"
+  printf '  "⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents"\n' > "$composer"
+  pane_busy quoted-footer claude && fail "an agent quoting the whole footer row must not classify an idle pane busy"
+  printf '> ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents\n' > "$composer"
+  pane_busy fenced-footer claude && fail "a markdown-quoted footer row must not classify an idle pane busy"
+
+  # Both real indicator glyphs still carry a genuine rendered footer.
+  printf '  ⏸ manual mode on · esc to interrupt · ? for shortcuts\n' > "$composer"
+  pane_busy manual-mode claude || fail "the manual-mode rendered footer should be busy"
 
   pass "fm_pane_is_busy: Claude's spinner and escape affordance each prove busy independently"
 }

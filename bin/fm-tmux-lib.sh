@@ -78,18 +78,21 @@
 # observed with the escape affordance present on every sample and the spinner on
 # none - so a spinner-only guard reads an active turn as idle and can inject
 # mid-turn. Older Claude Code renders the escape affordance with no spinner at all.
-# The escape alternative is deliberately NOT a bare substring: it must sit next to
-# a "·" footer separator, which is how Claude renders it as one field of a
-# multi-field hint row. That adjacency is the discriminator, and it is what makes
-# the affordance safe to use at all. A bare, undelimited "esc to interrupt" line is
-# deliberately NOT matched, for two reasons that point the same way: ordinary
-# transcript prose can contain the phrase, and the ambiguous Claude Code 2.1.221
-# IDLE footer is exactly that bare shape - the shape tests/fm-daemon.test.sh pins as
-# an idle pane that MUST still accept an away digest. Matching it would reopen the
-# away-mode wedge. The residual gap is an older Claude Code that renders the
-# affordance with no separator and no spinner; that rendering is byte-identical to
-# the 2.1.221 idle footer, so no function of the rendered text alone can tell them
-# apart, and this guard resolves the collision toward delivery.
+# The escape alternative is deliberately NOT a bare substring. It must appear on a
+# line that BEGINS with Claude's rendered permission-mode indicator and then reaches
+# the affordance across a "·" field separator, which is the complete shape of its
+# footer hint row. Anchoring at the line start is what transcript text cannot
+# satisfy: an agent that quotes or fences the footer adds a prefix character before
+# the glyph, and ordinary prose starts with a word. Without that anchor an agent
+# could print the footer text, go idle, and be read as perpetually busy - which
+# would recreate the away-mode wedge from the other direction.
+# A bare, undelimited "esc to interrupt" line is likewise NOT matched: that is the
+# ambiguous Claude Code 2.1.221 IDLE footer, the shape tests/fm-daemon.test.sh pins
+# as an idle pane that MUST still accept an away digest. The residual gap is an
+# older Claude Code that renders the affordance with no mode indicator and no
+# spinner; that rendering is byte-identical to the 2.1.221 idle footer, so no
+# function of the rendered text alone can tell them apart, and this guard resolves
+# the collision toward delivery.
 # Verified live per harness in docs/verification/runtime-backends.md.
 # Keep these signatures separate from the shared default because neither shape is
 # generic enough to classify arbitrary harness output safely.
@@ -104,7 +107,7 @@
 # The full moon-phase set remains locale- and emoji-font-sensitive because Kimi
 # exposes no stable ASCII busy token.
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
-FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT='…[[:space:]]+\([0-9]+[smh]|·[[:space:]]*esc to interrupt|esc to interrupt[[:space:]]*·'
+FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT='…[[:space:]]+\([0-9]+[smh]|^[[:space:]]*(⏵⏵|⏸).*·[[:space:]]*esc to interrupt'
 FM_TMUX_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_TMUX_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'

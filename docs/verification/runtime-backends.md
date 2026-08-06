@@ -151,17 +151,22 @@ Claude Code was re-observed on 2026-08-06 at 2.1.223 with tmux on Linux, capturi
 The spinner row is only intermittently rendered: one 18-second turn was sampled every 0.6 seconds with the escape affordance present on every sample and the spinner on none.
 A spinner-only guard therefore has a blind window in which an active turn reads as idle, which is why Claude now takes either signal.
 
-Claude renders the affordance as one field of a `·`-separated hint row, and that adjacency is what the guard matches:
+Claude renders the affordance as one field of a hint row that begins with its permission-mode indicator, and the guard matches that complete anchored shape:
 
 ```text
 busy   ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents
+busy   ⏸ manual mode on · esc to interrupt · ? for shortcuts
 idle   ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
 idle   ⏵⏵ bypass permissions on · 2 shells · ← for agents · ↓ to manage
 ```
 
+Anchoring at the line start is what keeps rendered output apart from transcript text.
+An agent can print the footer's words, or quote the whole row, and then go idle; without the anchor that pane would read as perpetually busy and the away digest would never land, which is the away-mode wedge arriving from the other direction.
+Quoting or fencing puts a character before the indicator glyph, and ordinary prose starts with a word, so neither satisfies the anchor.
+
 A bare, undelimited `esc to interrupt` line is deliberately not busy for Claude.
 That exact shape is the ambiguous Claude Code 2.1.221 idle footer, which `tests/fm-daemon.test.sh` pins as an idle pane that must still accept an away digest.
-An older Claude Code rendering the affordance with no separator and no spinner is byte-identical to it, so no function of the rendered text alone separates the two, and the guard resolves that collision toward delivery rather than toward a wedge.
+An older Claude Code rendering the affordance with no mode indicator and no spinner is byte-identical to it, so no function of the rendered text alone separates the two, and the guard resolves that collision toward delivery rather than toward a wedge.
 
 The portable regression is CI-enforced, while the real-harness drift guard is opt-in under the policy in `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
 Run the live guard after any harness upgrade and before trusting or refreshing the table above:
