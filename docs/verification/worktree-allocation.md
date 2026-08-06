@@ -91,6 +91,25 @@ $ git -C slot2 rev-list --count refs/heads/main..HEAD         # after its conten
 Containment in any trunk proves the content outlives the slot.
 That widening cannot launder unlanded work: content no candidate carries is reported contained by no candidate, which `tests/fm-worktree-guard.test.sh` cases (q) and (q2) pin against a slot in this same stale-remote shape.
 
+### The fork trunk needs a ref of its own
+
+Measured 2026-08-05 in the firstmate home, where `origin` fetches `kunchenguid/firstmate` but pushes `sbracewell64/firstmate`.
+Both conventional refs were wrong at once: `refs/remotes/origin/main` tracked upstream, and `refs/heads/main` had not been fast-forwarded since the fork trunk advanced five times that day.
+Pull request 44 was squash-merged, its recorded head `2582c15` was byte-identical to the fork trunk `f90ed1d`, and the slot still refused teardown:
+
+```
+$ git diff --stat 2582c15 f90ed1d                    # content demonstrably landed
+$ git merge-base --is-ancestor 2582c15 f90ed1d ; echo $?
+1                                                    # squash: ancestry cannot hold
+```
+
+The default fetch refspec cannot reach the fork, because it points at the fetch url.
+`fm_landed_push_url` therefore resolves the push url when it differs from the fetch url, and `fm_landed_refresh_push_target` fetches that trunk into `refs/fm-landing/origin/<name>`, which `fm_landed_candidate_refs` then offers like any other candidate.
+The ref is a landing target only because this fleet demonstrably pushes there; it is never inferred from a remote's name.
+Only a caller that already refreshes remotes performs that fetch, so the guard stays local and never grows a network dependency.
+A push url that exists but cannot be read leaves the landing target unread, and `bin/fm-teardown.sh` refuses rather than falling back to the upstream answer.
+`tests/fm-worktree-guard.test.sh` cases (o6) through (o8) and `tests/fm-teardown.test.sh` cases (u) through (y) pin the fix, the preserved refusals, and the unchanged single-remote path.
+
 ## What the guard writes
 
 Verified 2026-08-03, against git 2.53.0.

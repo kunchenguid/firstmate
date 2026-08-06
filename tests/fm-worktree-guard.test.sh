@@ -107,6 +107,52 @@ make_pool_stale_origin() {  # <case-name> <slot-count> [default-branch] [trunk-c
   printf '%s\n' "$proj"
 }
 
+# A project in the FETCH/PUSH SPLIT: origin fetches upstream.git and pushes
+# fork.git, so refs/remotes/origin/main is the upstream trunk and the local
+# branch is only the fork trunk while something keeps fast-forwarding it. Here
+# nothing does. The slot's content is squash-landed on the fork trunk, so it is
+# demonstrably landed while NEITHER conventional ref carries it - the shape that
+# held a real pool slot after PR 44 merged on 2026-08-05.
+# Pass "populate" to also leave behind the landing ref a teardown refresh writes;
+# the guard is purely local and never fetches one itself.
+make_pool_fork_split() {  # <case-name> populate|bare
+  local name=$1 populate=$2 base proj slot
+  base="$TMP_ROOT/$name"
+  proj="$base/proj"
+  mkdir -p "$proj"
+  git init -q --bare "$base/upstream.git"
+  git -C "$base/upstream.git" symbolic-ref HEAD refs/heads/main
+  git -C "$proj" init -q -b main
+  printf 'base\n' > "$proj/README.md"
+  git -C "$proj" add README.md
+  git -C "$proj" commit -qm initial
+  git -C "$proj" remote add origin "$base/upstream.git"
+  git -C "$proj" push -q origin main
+  git -C "$proj" remote set-head origin main
+  # The fork starts as a bare clone of upstream, so it carries main AND a HEAD
+  # that resolves - a bare init would leave HEAD dangling and every later push
+  # to it would silently land nothing.
+  git clone -q --bare "$base/upstream.git" "$base/fork.git"
+  git -C "$proj" remote set-url --push origin "$base/fork.git"
+  # The slot's own work, on its own commit.
+  slot="$base/slots/1"
+  git -C "$proj" worktree add --quiet --detach "$slot" main
+  printf 'hello\n' > "$slot/feature.txt"
+  git -C "$slot" add feature.txt
+  git -C "$slot" commit -qm "slot work"
+  # The same net content, landed on the fork trunk under a DIFFERENT commit.
+  git clone -q "$base/fork.git" "$base/forkwt"
+  printf 'hello\n' > "$base/forkwt/feature.txt"
+  git -C "$base/forkwt" add feature.txt
+  git -C "$base/forkwt" commit -qm "squash land"
+  git -C "$base/forkwt" push -q origin main
+  rm -rf "$base/forkwt"
+  if [ "$populate" = populate ]; then
+    git -C "$proj" fetch -q "$base/fork.git" '+refs/heads/main:refs/fm-landing/origin/main'
+  fi
+  printf '%s\n' "$proj"
+}
+
 # Assert the fixture really is the reported defect shape: the slot carries <n>
 # commits "not on" the remote-tracking ref, which is exactly the count the old
 # commit-reachability test turned into a refusal.
@@ -573,6 +619,71 @@ out=$(run_guard "$proj" "$(slot_json 1 available "$slot")") \
   || fail "(o4) guard refused a landed slot because origin was configured but unreadable: $out"
 [ -z "$out" ] || fail "(o4) guard was not silent when origin is unusable: $out"
 pass "(o4) a configured but unreadable origin falls back to the local default branch"
+
+# --- (o6) the fork trunk is a landing target when a ref follows it -----------
+#
+# Measured 2026-08-05: with origin fetching upstream and pushing a fork, BOTH
+# conventional refs are wrong at once - origin/main is upstream, and the local
+# branch had not been fast-forwarded since the fork advanced. Work proven merged
+# read as unlanded and held its slot. The landing ref left by a teardown refresh
+# is the only ref that carries it.
+
+proj=$(make_pool_fork_split fork-split-landed populate)
+slot=$(slot_path "$proj" 1)
+# Pin the fixture: neither conventional ref carries the content, and the
+# landing ref does. Without this the pass below could be vacuous.
+[ "$(git -C "$slot" rev-list --count main..HEAD)" = 1 ] \
+  || fail "(o6) fixture slot is not ahead of the stale local trunk"
+[ "$(git -C "$slot" rev-list --count refs/remotes/origin/main..HEAD)" = 1 ] \
+  || fail "(o6) fixture slot is not ahead of the upstream remote ref"
+git -C "$slot" diff --quiet refs/fm-landing/origin/main HEAD \
+  || fail "(o6) fixture fork trunk does not carry the slot's content"
+! git -C "$slot" merge-base --is-ancestor HEAD refs/fm-landing/origin/main \
+  || fail "(o6) fixture is a fast-forward, not the squash shape"
+out=$(run_guard "$proj" "$(slot_json 1 available "$slot")") \
+  || fail "(o6) guard refused a slot whose content is on the fork trunk: $out"
+[ -z "$out" ] || fail "(o6) guard was not silent for fork-landed content: $out"
+pass "(o6) a slot landed on the fork trunk passes though both conventional refs are wrong"
+
+# --- (o7) with no landing ref the guard still refuses, never fetches ----------
+#
+# The guard is deliberately local: it reads whatever the last teardown refresh
+# left and never opens the network. With no landing ref it cannot prove the
+# content survives, so it must refuse rather than assume.
+
+proj=$(make_pool_fork_split fork-split-bare bare)
+slot=$(slot_path "$proj" 1)
+out=$(run_guard "$proj" "$(slot_json 1 available "$slot")") \
+  && fail "(o7) guard accepted a slot it had no landing evidence for"
+assert_contains "$out" "slot 1: $slot" "(o7) names the unprovable slot"
+[ -z "$(git -C "$proj" for-each-ref --format='%(refname)' refs/fm-landing/)" ] \
+  || fail "(o7) the guard fetched a landing ref instead of staying local"
+pass "(o7) without a landing ref the guard refuses and never reaches the network"
+
+# --- (o8) NEGATIVE CONTROL: a landing ref never launders extra work ----------
+#
+# The widened target set must not become a way to discard work. The fork trunk
+# carries the slot's FIRST commit but not the second, so the slot must refuse.
+
+proj=$(make_pool_fork_split fork-split-extra populate)
+slot=$(slot_path "$proj" 1)
+git -C "$slot" checkout -q -b fm/fork-extra
+printf 'not landed anywhere\n' > "$slot/extra.txt"
+git -C "$slot" add extra.txt
+git -C "$slot" commit -qm "genuinely unlanded"
+# The landing ref is present and really does carry the slot's FIRST commit, so
+# this refusal is the widened target set being consulted and still saying no -
+# not the ref being absent and the case never arising.
+git -C "$slot" rev-parse --verify --quiet refs/fm-landing/origin/main >/dev/null \
+  || fail "(o8) fixture has no landing ref, so it cannot prove one does not launder work"
+git -C "$slot" diff --quiet refs/fm-landing/origin/main HEAD~1 \
+  || fail "(o8) fixture landing ref does not carry the slot's first commit"
+out=$(run_guard "$proj" "$(slot_json 1 available "$slot")") \
+  && fail "(o8) guard accepted a slot carrying work no trunk has"
+assert_contains "$out" "slot 1: $slot" "(o8) names the slot with unlanded work"
+assert_contains "$out" "branch fm/fork-extra with 2 commits not on" \
+  "(o8) reports the unlanded work rather than passing it off the landing ref"
+pass "(o8) a landing ref does not launder work the fork trunk never received"
 
 # --- (p) content, not commit reachability: the squash case -------------------
 #
