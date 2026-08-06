@@ -995,8 +995,10 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    # --permission-mode auto is root-compatible and leaves tool approval with
-    # Claude's built-in safety classifier, including prompts for sensitive actions.
+    # --permission-mode auto leaves tool approval with Claude's built-in safety
+    # classifier, including prompts for sensitive actions.
+    # The absolute env entrypoint is deliberate: it prevents pane-local aliases or
+    # functions from replacing Claude and injecting unrestricted permission flags.
     claude) printf '%s' "'/usr/bin/env' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --permission-mode auto __MODELFLAG____EFFORTFLAG__\"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"" ;;
     codex)
       if [ "$kind" = secondmate ]; then
