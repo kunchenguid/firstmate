@@ -46,11 +46,17 @@
 #     within STALE_ESCALATE_SECS + a tick, never lost. A declared pause instead
 #     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation,
 #     and a crew that is PROVABLY WORKING (fm-classify-lib.sh's crew_absorb_class
-#     reports `working`) is dropped from wedge aging entirely, because its static
-#     pane is the correct condition rather than a symptom. That retires the
-#     timer-only wedge alarm for such a crew: a long-running worker whose evidence
-#     of progress lives off the pane no longer re-alarms every STALE_ESCALATE_SECS
-#     for as long as its work runs.
+#     reports `working`) is dropped from wedge aging, because its static pane is
+#     the correct condition rather than a symptom. That retires the timer-only
+#     wedge alarm for such a crew: a long-running worker whose evidence of
+#     progress lives off the pane no longer re-alarms every STALE_ESCALATE_SECS
+#     for as long as its work runs. The drop is RE-ARMED, not permanent: it
+#     clears the watcher's per-hash surfaced marker along with the daemon's own,
+#     so the same unchanged pane is enqueued as a stale wake again and the
+#     working verdict is re-read rather than trusted forever. A crew that stops
+#     being provably working therefore resumes wedge aging and still escalates on
+#     the unchanged schedule, so a run that freezes after proving itself is found
+#     rather than lost.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
@@ -330,11 +336,18 @@ _collapse_newlines() {  # <text>
 # them exactly as before; the away launcher reuses the identical resolution to
 # pass the captain pane in as FM_SUPERVISOR_TARGET.
 
-# --- classification helpers (PURE: no side effects, testable) ---------------
+# --- classification helpers (PURE apart from one documented exception) -------
 # last_status_line, status_is_captain_relevant, window_to_task, and
 # scan_captain_relevant_statuses come from bin/fm-classify-lib.sh (sourced above),
 # the single classifier shared with bin/fm-watch.sh. The decision-string wrappers
 # and dedup state below layer the daemon's escalation-digest concerns on top.
+#
+# The exception carries over from that library's own header: classify_stale's
+# provably-working test calls crew_absorb_class, which is NOT a pure status-file
+# read - it reuses bin/fm-crew-state.sh and may make a bounded no-mistakes call.
+# Everything else here is a side-effect-free read and safe to call anywhere;
+# classify_stale must be run ONLY on first sighting of a stale hash, never on a
+# hot path, so per-wake triage stays cheap.
 #
 # Decision protocol: every classifier prints exactly one line on stdout of the
 # form "<action>|<distilled>". The action is "escalate" (surface it), "self"
@@ -425,12 +438,13 @@ classify_stale() {  # <window> <state>
   #
   # This is the single wedge-aging drop, deliberately not a second suppression
   # layer beside the pause branch above: a pause is a DECLARED wait that still
-  # re-surfaces on its own long cadence, while this is PROVEN progress with
-  # nothing to re-surface. Any future reconciled class that likewise explains a
-  # static pane belongs in this branch rather than in a new gate of its own.
-  # One fm-crew-state.sh read per stale wake: the watcher enqueues at most one
-  # stale wake per distinct pane hash, so this matches the always-on path's own
-  # one-read-per-newly-classified-hash bound.
+  # re-surfaces on its own long cadence, while this is PROVEN progress that the
+  # handler re-arms instead of re-surfacing. Any future reconciled class that
+  # likewise explains a static pane belongs in this branch rather than in a new
+  # gate of its own. The drop is bounded, not permanent: handle_wake clears the
+  # watcher's per-hash surfaced marker with the daemon's own, so the same
+  # unchanged pane is enqueued again and re-read here rather than trusted once
+  # and forever - a run that freezes after proving itself resumes wedge aging.
   if [ "$(crew_absorb_class "$task")" = working ]; then
     printf 'working|provably working (static pane is not a wedge): %s' "${last:-no status}"
     return
@@ -1052,9 +1066,15 @@ housekeeping() {  # <state>
          # never changes. Consult the reconciled state at the one point that
          # matters - immediately before escalating a possible wedge - which keeps
          # the read off every tick and off every already-resumed pane.
+         #
+         # Cleared through clear_pause_tracking rather than by removing the
+         # marker file, so the WATCHER's per-hash surfaced marker goes with it and
+         # the same unchanged pane is enqueued as a stale wake again. That re-arms
+         # the drop: if this crew freezes later it no longer answers `working`,
+         # records a wedge marker again, and escalates on the unchanged schedule.
          if [ "$(crew_absorb_class "$task")" = working ]; then
            log "stale marker dropped (provably working): $win"
-           rm -f "$marker"
+           clear_pause_tracking "$win" "$state"
          else
            escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
            stale_marker_remove "$win" "$state"
@@ -1254,10 +1274,16 @@ handle_wake() {  # <reason> <state>
               decision=$(classify_signal "$arg" "$state") ;;
     stale:*)  kind=stale; arg="${reason#stale: }"; stale_detail="${arg#"$arg"}"
               case "$arg" in *" ("*) stale_detail="${arg#*" ("}"; arg="${arg%% \(*}" ;; esac
-              decision=$(classify_stale "$arg" "$state")
+              # The watcher's enriched demand-deep-inspection wedge escalates
+              # unconditionally, so it is tested FIRST: classify_stale would only
+              # have its result discarded, and it is no longer a cheap file read
+              # (crew_absorb_class may make a bounded no-mistakes call). Skipping
+              # it is observationally identical - it has no side effects - and
+              # keeps that latency off the most urgent wedge signal.
               case "$stale_detail" in
                 idle\ *s,\ possible\ wedge,\ escalation\ *)
                   decision="escalate|${reason#stale: }" ;;
+                *) decision=$(classify_stale "$arg" "$state") ;;
               esac ;;
     check:*)  decision=$(classify_check "$reason") ;;
     heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;
@@ -1288,13 +1314,22 @@ handle_wake() {  # <reason> <state>
       log "self-handle (paused): $reason -> $distilled"
       ;;
     working)
-      # Proven still working: drop BOTH trackers rather than aging either. There
-      # is no wedge to age (the crew is demonstrably progressing) and no external
-      # wait to recheck, and the crew's own next real event still reaches the
-      # captain through the signal path. Only stale produces this action.
+      # Proven still working: drop the wedge and pause trackers rather than aging
+      # either. There is no wedge to age (the crew is demonstrably progressing)
+      # and no external wait to recheck, and the crew's own next real event still
+      # reaches the captain through the signal path. Only stale produces this
+      # action.
+      #
+      # clear_pause_tracking, not the two marker removals on their own, because
+      # it also clears the WATCHER's per-hash surfaced marker for this window.
+      # That is the re-arm: the watcher enqueues a stale wake only when its
+      # recorded hash differs from the pane's, so clearing it makes the same
+      # unchanged pane arrive again and this verdict be re-read. A crew that
+      # freezes after being classed working therefore stops answering `working`,
+      # falls through to ordinary wedge aging, and escalates on the unchanged
+      # schedule instead of being trusted forever on one stale read.
       if [ "$kind" = "stale" ]; then
-        stale_marker_remove "$arg" "$state"
-        pause_marker_remove "$arg" "$state"
+        clear_pause_tracking "$arg" "$state"
       fi
       log "self-handle (working): $reason -> $distilled"
       ;;

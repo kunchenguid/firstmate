@@ -291,6 +291,97 @@ test_stale_provably_working_self_handles() {
   pass "a provably-working stale drops out of wedge aging, while an unreadable or finished crew keeps aging"
 }
 
+# The drop must be RE-ARMED, not permanent. In away mode the watcher enqueues a
+# stale wake only when its recorded per-hash marker differs from the pane's hash,
+# so a crew that is working at check time and freezes afterwards on an unchanged
+# pane would never be re-examined: no second wake, no wedge marker, nothing for
+# housekeeping to age, and the crew's state can keep reading working for an
+# attributed run that has stopped advancing. Clearing the watcher's marker with
+# the daemon's own is what makes the verdict re-readable. All three legs are
+# asserted here: the re-arm mechanism itself, the frozen-after-working transition
+# escalating on the unchanged schedule, and - so this is a bound rather than a
+# revert - a crew that keeps proving it works still never escalating.
+test_stale_working_drop_is_rearmed() {
+  local dir state fakebin win pane key watcher_key
+  dir=$(make_supercase stale-working-rearm)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  make_fake_crew_state "$fakebin" >/dev/null
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  win="sess:fm-longrun-w3"; pane="$dir/pane.txt"
+  key=$(printf '%s' "longrun-w3" | tr ':/.' '___')
+  watcher_key=$(printf '%s' "$win" | tr ':/.' '___')
+  printf 'working: waiting on the completion marker\n' > "$state/longrun-w3.status"
+  printf 'idle prompt $\n' > "$pane"
+
+  # The watcher has already surfaced this pane hash and recorded it, which is
+  # what suppresses a second stale wake for the same unchanged pane.
+  printf 'PANEHASH' > "$state/.stale-$watcher_key"
+  date +%s > "$state/.subsuper-stale-$key"
+
+  export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy (claude-hook)'
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "a provably-working stale retained wedge tracking"
+  [ ! -e "$state/.stale-$watcher_key" ] \
+    || fail "the working drop kept the watcher's per-hash stale marker, so this pane can never be re-surfaced"
+
+  # A continuously-working crew is re-read and dropped again: the re-arm does not
+  # restore the repeated possible-wedge alarm this change exists to remove.
+  printf 'PANEHASH' > "$state/.stale-$watcher_key"
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "a still-working crew resumed wedge aging"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a still-working crew escalated: $(cat "$state/.subsuper-escalations")"
+
+  # Now it freezes. The pane text never changed, so this is the SAME hash the
+  # watcher can only re-enqueue because the drop cleared its marker.
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
+  [ -e "$state/.subsuper-stale-$key" ] \
+    || fail "a crew that froze after being classed working did not resume wedge aging"
+
+  # And it ages into an escalation on the unchanged schedule.
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' \
+    housekeeping "$state"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "a crew that froze after being classed working never escalated a possible wedge"
+
+  unset FM_FAKE_CREW_STATE FM_CREW_STATE_BIN
+  pass "the provably-working drop re-arms: a frozen crew wedge-escalates again while a still-working one does not"
+}
+
+# housekeeping's own drop must re-arm the same way, or a marker that ages out
+# under a working verdict leaves the watcher's per-hash marker in place and the
+# pane is never surfaced again.
+test_housekeeping_working_drop_clears_watcher_marker() {
+  local dir state fakebin win pane key watcher_key
+  dir=$(make_supercase stale-working-rearm-housekeeping)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  make_fake_crew_state "$fakebin" >/dev/null
+  win="sess:fm-longrun-w4"; pane="$dir/pane.txt"
+  key=$(printf '%s' "longrun-w4" | tr ':/.' '___')
+  watcher_key=$(printf '%s' "$win" | tr ':/.' '___')
+  printf 'working: waiting on the completion marker\n' > "$state/longrun-w4.status"
+  printf 'idle prompt $\n' > "$pane"
+  printf 'PANEHASH' > "$state/.stale-$watcher_key"
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · running: tests' \
+    housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a provably-working crew escalated a possible wedge: $(cat "$state/.subsuper-escalations")"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "a provably-working crew kept its wedge marker"
+  [ ! -e "$state/.stale-$watcher_key" ] \
+    || fail "housekeeping's working drop kept the watcher's per-hash stale marker, so this pane can never be re-surfaced"
+  pass "housekeeping's provably-working drop re-arms the watcher's per-hash stale marker"
+}
+
 test_handle_wake_paused_signal_records_pause_marker() {
   local dir state key win
   dir=$(make_supercase handle-paused-signal)
@@ -1935,6 +2026,7 @@ test_stale_terminal_escalates
 test_stale_paused_classifies_pause
 test_handle_wake_paused_records_pause_marker
 test_stale_provably_working_self_handles
+test_stale_working_drop_is_rearmed
 test_handle_wake_paused_signal_records_pause_marker
 test_handle_wake_terminal_signal_clears_pause_tracking
 test_housekeeping_migrates_watcher_pause_marker
@@ -1942,6 +2034,7 @@ test_housekeeping_migrates_watcher_unpaused_marker_to_clear
 test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_provably_working_stale_not_escalated
+test_housekeeping_working_drop_clears_watcher_marker
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_paused_resumed_cleared
