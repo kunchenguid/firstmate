@@ -19,6 +19,7 @@ POLL="$ROOT/bin/fm-pr-poll.sh"
 WATCH="$ROOT/bin/fm-watch.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 REGISTER="$ROOT/bin/fm-check-register.sh"
+BODY_COMPLIANCE="$ROOT/bin/fm-pr-body-compliance.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-check-security)
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 REAL_CP=$(command -v cp)
@@ -37,6 +38,79 @@ ack_watcher_cycle() {  # <state>
   [ -n "$sequence" ] && [ -n "$generation" ] || return 1
   FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" --ack-through "$sequence" \
     --recovery-generation "$generation"
+}
+
+test_no_mistakes_body_compliance_preserves_same_head_attestation() {
+  local dir fakebin head other out rc marker
+  dir="$TMP_ROOT/no-mistakes-body-compliance"
+  fakebin=$(fm_fakebin "$dir")
+  head=acfab5b82b8f2ca48ed0b7976c1d0d18d3022401
+  other=6530f93dcd2a9c6ab898caf4e1c70319595707bd
+  marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
+[ "${FM_TEST_GH_RC:-0}" -eq 0 ] || exit "$FM_TEST_GH_RC"
+printf '{"check_runs":[{"name":"%s","conclusion":"%s","head_sha":"%s","app":{"slug":"%s"}}]}\n' \
+  "${FM_TEST_CHECK_NAME:-PR must be raised via no-mistakes}" \
+  "${FM_TEST_CHECK_CONCLUSION:-success}" \
+  "${FM_TEST_PRIOR_SUCCESS_HEAD:-}" \
+  "${FM_TEST_CHECK_APP:-github-actions}"
+SH
+  chmod +x "$fakebin/gh"
+  : > "$dir/gh.log"
+
+  set +e
+  out=$(PR_BODY="ordinary description\n\n$marker" PR_AUTHOR=alice PR_NUMBER=42 \
+    PR_HEAD_SHA="$head" GH_REPOSITORY=o/r GH_TOKEN=test \
+    FM_TEST_GH_LOG="$dir/gh.log" PATH="$fakebin:$PATH" \
+    "$BODY_COMPLIANCE" 2>&1)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "body compliance: current marker"
+  [ ! -s "$dir/gh.log" ] || fail "body compliance queried prior checks despite a current marker"
+
+  set +e
+  out=$(PR_BODY='edited description without the marker' PR_AUTHOR=alice PR_NUMBER=42 \
+    PR_HEAD_SHA="$head" GH_REPOSITORY=o/r GH_TOKEN=test \
+    FM_TEST_PRIOR_SUCCESS_HEAD="$head" FM_TEST_GH_LOG="$dir/gh.log" \
+    PATH="$fakebin:$PATH" "$BODY_COMPLIANCE" 2>&1)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "body compliance: successful prior attestation for the same head"
+  assert_contains "$out" "same head" "body compliance explains preserved same-head attestation"
+
+  set +e
+  out=$(PR_BODY='edited description without the marker' PR_AUTHOR=alice PR_NUMBER=42 \
+    PR_HEAD_SHA="$head" GH_REPOSITORY=o/r GH_TOKEN=test \
+    FM_TEST_PRIOR_SUCCESS_HEAD="$other" FM_TEST_GH_LOG="$dir/gh.log" \
+    PATH="$fakebin:$PATH" "$BODY_COMPLIANCE" 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "body compliance: prior success for another head"
+  assert_contains "$out" "was not raised through no-mistakes" "body compliance rejects a different-head attestation"
+
+  set +e
+  out=$(PR_BODY='edited description without the marker' PR_AUTHOR=alice PR_NUMBER=42 \
+    PR_HEAD_SHA="$head" GH_REPOSITORY=o/r GH_TOKEN=test \
+    FM_TEST_PRIOR_SUCCESS_HEAD="$head" FM_TEST_CHECK_APP=untrusted \
+    FM_TEST_GH_LOG="$dir/gh.log" PATH="$fakebin:$PATH" \
+    "$BODY_COMPLIANCE" 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "body compliance: successful foreign check for the same head"
+  assert_contains "$out" "was not raised through no-mistakes" "body compliance rejects a foreign check provider"
+
+  set +e
+  out=$(PR_BODY='edited description without the marker' PR_AUTHOR=alice PR_NUMBER=42 \
+    PR_HEAD_SHA="$head" GH_REPOSITORY=o/r GH_TOKEN=test \
+    FM_TEST_GH_RC=1 FM_TEST_GH_LOG="$dir/gh.log" \
+    PATH="$fakebin:$PATH" "$BODY_COMPLIANCE" 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "body compliance: prior-check lookup failure"
+  assert_contains "$out" "was not raised through no-mistakes" "body compliance fails closed when evidence is unavailable"
+  pass "PR body compliance preserves only a successful same-head attestation"
 }
 
 file_mode() {
@@ -3356,6 +3430,7 @@ test_gitlab_merged_poll_retires() {
   pass "GitHub and GitLab exact merged results share one retirement path"
 }
 
+test_no_mistakes_body_compliance_preserves_same_head_attestation
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
