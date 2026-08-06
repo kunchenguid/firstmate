@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
 set -u
 
-if [ "${FM_MUSE_SIGNALS_LIVE:-0}" != 1 ]; then
-  echo "skip: set FM_MUSE_SIGNALS_LIVE=1 to run the real Muse signal drift guard"
-  exit 0
-fi
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MUSE_BIN=$(command -v muse 2>/dev/null || true)
 REAL_TMUX=$(command -v tmux 2>/dev/null || true)
@@ -28,6 +23,82 @@ fail() {
 pass() {
   printf 'ok - %s\n' "$1"
 }
+
+muse_prompt_glyph_is_bright() {  # <capture-path|--self-test>
+  node - "$1" <<'NODE'
+const fs = require("fs");
+
+function applySgr(foreground, raw) {
+  const params = raw === "" ? [0] : raw.split(";").map((value) => Number(value));
+  for (let index = 0; index < params.length; index += 1) {
+    const code = params[index];
+    if (code === 0 || code === 39) {
+      foreground = null;
+    } else if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97)) {
+      foreground = { kind: "indexed" };
+    } else if (code === 38 && params[index + 1] === 2 && params.slice(index + 2, index + 5).every(Number.isFinite)) {
+      foreground = { kind: "rgb", values: params.slice(index + 2, index + 5) };
+      index += 4;
+    } else if (code === 38 && params[index + 1] === 5 && Number.isFinite(params[index + 2])) {
+      foreground = { kind: "indexed" };
+      index += 2;
+    }
+  }
+  return foreground;
+}
+
+function lastGlyphForeground(pane) {
+  const tokens = /\x1b\[([0-9;]*)m|⟩/gu;
+  let foreground = null;
+  let glyphForeground;
+  for (const match of pane.matchAll(tokens)) {
+    if (match[0] === "⟩") {
+      glyphForeground = foreground;
+    } else {
+      foreground = applySgr(foreground, match[1]);
+    }
+  }
+  return glyphForeground;
+}
+
+function isBrightTruecolor(pane) {
+  const foreground = lastGlyphForeground(pane);
+  if (!foreground || foreground.kind !== "rgb") return false;
+  const [r, g, b] = foreground.values;
+  return (r * 299 + g * 587 + b * 114) / 1000 >= 128;
+}
+
+const positive = "\x1b[38;2;90;160;255m\x1b[48;2;38;56;84m⟩";
+const brightThenDark = "\x1b[38;2;204;211;219mearlier bright\x1b[38;2;30;30;30m⟩";
+if (!isBrightTruecolor(positive) || isBrightTruecolor(brightThenDark)) process.exit(2);
+if (process.argv[2] === "--self-test") process.exit(0);
+
+const pane = fs.readFileSync(process.argv[2], "utf8");
+const foreground = lastGlyphForeground(pane);
+if (!foreground || foreground.kind !== "rgb") {
+  console.error("the final Muse prompt glyph has no effective truecolor foreground");
+  process.exit(1);
+}
+const [r, g, b] = foreground.values;
+const luminance = (r * 299 + g * 587 + b * 114) / 1000;
+if (luminance < 128) {
+  console.error(`the final Muse prompt glyph foreground is dark: ${r};${g};${b}, luminance ${luminance}`);
+  process.exit(1);
+}
+NODE
+}
+
+if [ "${1:-}" = --ansi-self-test ]; then
+  command -v node >/dev/null 2>&1 || fail "node is required to test Muse prompt glyph ANSI state"
+  muse_prompt_glyph_is_bright --self-test || fail "Muse glyph color parser accepted a bright-then-dark negative control"
+  pass "Muse glyph color parser follows effective foreground state"
+  exit 0
+fi
+
+if [ "${FM_MUSE_SIGNALS_LIVE:-0}" != 1 ]; then
+  echo "skip: set FM_MUSE_SIGNALS_LIVE=1 to run the real Muse signal drift guard"
+  exit 0
+fi
 
 [ -x "$MUSE_BIN" ] || fail "FM_MUSE_SIGNALS_LIVE=1 but no real muse executable is installed on PATH"
 [ -x "$REAL_TMUX" ] || fail "FM_MUSE_SIGNALS_LIVE=1 but tmux is not installed"
@@ -105,14 +176,8 @@ done
 CAPTURE="$LAB/muse-pane.ansi"
 tmux capture-pane -e -p -t "$TARGET" -S 0 -E - > "$CAPTURE" \
   || fail "could not capture Muse's styled pane"
-node - "$CAPTURE" <<'NODE' || fail "Muse's real prompt glyph is missing a bright truecolor foreground"
-const fs = require("fs");
-const pane = fs.readFileSync(process.argv[2], "utf8");
-const match = pane.match(/\x1b\[38;2;(\d+);(\d+);(\d+)m[^\n]*?⟩/);
-if (!match) process.exit(1);
-const [r, g, b] = match.slice(1).map(Number);
-if ((r * 299 + g * 587 + b * 114) / 1000 < 128) process.exit(1);
-NODE
+muse_prompt_glyph_is_bright "$CAPTURE" \
+  || fail "Muse's real prompt glyph is missing a bright effective truecolor foreground"
 pass "Muse's real bright prompt glyph classifies as an empty composer"
 
 cleanup

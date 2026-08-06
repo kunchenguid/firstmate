@@ -193,5 +193,6 @@ FM_MUSE_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-muse-signals-live-e2e.test.sh
 ```
 
 The Muse signals guard requires a real `muse` binary and tmux but uses `--provider echo`, so it does not require `META_API_KEY` and does not open the deferred real-model idle gate.
+The guard follows SGR state through the final prompt glyph and runs a bright-then-dark negative control before accepting that glyph's effective luminance.
 
 The portable counterparts that run in ordinary CI are `tests/fm-muse-harness.test.sh`, `tests/fm-tmux-agent-liveness.test.sh`, `tests/fm-composer-lib.test.sh`, and `tests/fm-composer-ghost.test.sh`.
