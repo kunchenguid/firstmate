@@ -31,6 +31,7 @@ A failed intermediate step leaves the hold open.
 The optional `--from-ruling <path>:<line>` argument records which ruling document answered the hold.
 It is verified before any mutation rather than trusted: the argument is passed to `bin/fm-ruling-reconcile.sh closure-test`, and a provenance that fails either closure condition refuses the resolve and leaves the hold open.
 The hold body then carries a `Ruling provenance:` line above the blank line that `verify_resolution_identity` parses on, so retry identity is unaffected.
+The work file that verification uses is removed on a signal as well as on exit, and the signal still terminates the process rather than being absorbed, so an interrupted `resolve` leaves the hold open exactly as any other failure before the final step does.
 
 A hold body no longer carries a `State:` line.
 A hold that reports its own state is a claim rather than a verdict, and that string outlived the captain's answer often enough for an investigation to build on a hold that had already been ruled.
@@ -92,6 +93,10 @@ The fixture corpus gained three ruling rows and one commission that exist only t
 
 A further case covers the identifier boundary itself, and asserts all three of its outcomes together because they once shared one wrong answer.
 It requires that an identifier ending a sentence is matched, that a shorter dotted hold is still not matched by a longer dotted identifier, and that a hold named nowhere still reports its unmatched row, so a boundary widened until everything matches fails it just as a boundary that refuses everything does.
+
+Interrupt handling verification date: 2026-08-06.
+A further case interrupts `resolve` while its closure-test subprocess is open and requires that the process terminates with a signal status, that the captain hold is left open, and that the work file is gone, with the ordinary refusal and ordinary success paths asserted alongside it.
+Both halves are needed together: removing the trap satisfies the interrupt half while reopening the leak it closed, and a handler that absorbs the signal satisfies the cleanup half while letting the resolve run on and close the hold the operator was aborting.
 
 `bin/fm-ruling-reconcile.sh` was additionally measured against this home's real corpus rather than fixtures alone.
 Across the twelve documents it classifies as rulings, the flagship ruling table yielded 15 eligible rows of 24 when measured; the other nine state their verdict without emphasis and therefore escalate.

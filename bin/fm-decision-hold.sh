@@ -69,7 +69,16 @@ cleanup_closure_err() {
   [ -z "$CLOSURE_ERR" ] || rm -f -- "$CLOSURE_ERR"
   CLOSURE_ERR=
 }
-trap cleanup_closure_err EXIT HUP INT TERM
+# A signal handler that neither exits nor re-raises would let bash resume the
+# script after the signal. That is intolerable here: command_resolve mutates
+# backlog state in sequence, and this script's header promises that a failure
+# before the final step leaves the captain hold open. A swallowed interrupt
+# would instead run the resolve to completion and close the hold the operator
+# was trying to abort. Cleanup is idempotent, so re-raising after it is safe.
+trap cleanup_closure_err EXIT
+trap 'cleanup_closure_err; trap - HUP; kill -HUP $$' HUP
+trap 'cleanup_closure_err; trap - INT; kill -INT $$' INT
+trap 'cleanup_closure_err; trap - TERM; kill -TERM $$' TERM
 
 usage() {
   awk '

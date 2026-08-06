@@ -118,7 +118,15 @@ die() { printf 'fm-ruling-reconcile.sh: %s\n' "$1" >&2; exit "${2:-1}"; }
 
 WORK=
 cleanup_work() { [ -n "$WORK" ] && rm -rf -- "$WORK"; WORK=; }
-trap cleanup_work EXIT HUP INT TERM
+# Cleanup on EXIT, but a signal must still terminate the process rather than be
+# absorbed: a handler that neither exits nor re-raises lets bash resume the
+# script once it returns, so an interrupted scan would go on to publish an index
+# the operator meant to stop. Cleanup is idempotent, so re-raising after it is
+# safe, and the exit status stays the signal's rather than zero.
+trap cleanup_work EXIT
+trap 'cleanup_work; trap - HUP; kill -HUP $$' HUP
+trap 'cleanup_work; trap - INT; kill -INT $$' INT
+trap 'cleanup_work; trap - TERM; kill -TERM $$' TERM
 
 usage() {
   awk '

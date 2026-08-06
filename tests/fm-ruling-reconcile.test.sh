@@ -674,6 +674,130 @@ test_identifier_must_be_delimited
 test_an_emphasised_word_containing_a_token_is_not_a_verdict
 test_closure_test_refuses_a_ruling_outside_the_corpus
 test_a_commission_named_like_a_ruling_is_still_a_commission
+# --- 16. an interrupt stops the resolve, and cleanup still happens ----------
+#
+# The work file that holds the closure test's stderr is cleaned up on a signal,
+# but the signal must still terminate the process. A handler that neither exits
+# nor re-raises lets bash resume the script once it returns, and `resolve` would
+# then run on and CLOSE the captain hold the operator was interrupting.
+#
+# The two halves are asserted together on purpose: deleting the trap outright
+# would satisfy the interrupt half while reopening the temp-file leak it was
+# added to close, and a swallowing trap satisfies the cleanup half while losing
+# the interrupt. Neither passes both.
+
+# A stand-in bin/ that runs the REAL fm-decision-hold.sh while letting the test
+# hold its closure-test subprocess open. Only the subprocess is substituted.
+install_reconcile_shim() {  # <home>
+  local home=$1 script shim="$1/shimbin"
+  mkdir -p "$shim"
+  for script in "$ROOT"/bin/*.sh; do
+    ln -sf "$script" "$shim/$(basename "$script")"
+  done
+  # The stub REPLACES the symlink rather than being written through it: `cat >`
+  # onto a symlink follows it and would truncate the real script in bin/.
+  rm -f "$shim/fm-ruling-reconcile.sh"
+  [ ! -L "$shim/fm-ruling-reconcile.sh" ] \
+    || fail "the reconcile stub must not be a symlink into bin/"
+  cat > "$shim/fm-ruling-reconcile.sh" <<EOF
+#!/usr/bin/env bash
+if [ -e "$home/block-closure-test" ]; then
+  : > "$home/closure-test-started"
+  sleep 2
+fi
+exec "$ROOT/bin/fm-ruling-reconcile.sh" "\$@"
+EOF
+  chmod +x "$shim/fm-ruling-reconcile.sh"
+  grep -q 'fm-ruling-reconcile.sh - deterministic' "$ROOT/bin/fm-ruling-reconcile.sh" \
+    || fail "the stub overwrote the real bin/fm-ruling-reconcile.sh"
+}
+
+test_interrupt_stops_the_resolve_and_still_cleans_up() {
+  local home rc=0 show pid waited tmp leaked
+  if [ "$HOLD_MECHANICS_AVAILABLE" -eq 0 ]; then
+    printf 'skip - resolve provenance needs tasks-axi >= %s, found %s\n' \
+      "$FM_TASKS_AXI_MIN" "$(tasks-axi --version 2>/dev/null | head -1)"
+    return 0
+  fi
+  home=$(make_home interrupt)
+  mkdir -p "$home/data/sample-review"
+  printf 'evidence\n' > "$home/data/sample-review/report.md"
+  add_hold "$home" sample-review-decision-alpha "Alpha decision"
+  tasks_in "$home" add follow-up-work "Follow-up work" --repo sample >/dev/null
+  tasks_in "$home" block follow-up-work --by sample-review-decision-alpha >/dev/null
+  printf 'the captain said build it\n' > "$home/decision.txt"
+  install_reconcile_shim "$home"
+  tmp="$home/tmpdir"
+  mkdir -p "$tmp"
+
+  # A provenance that WOULD be accepted, so nothing but the interrupt can stop
+  # the close. Line 5 is the alpha row of the fixture ruling table.
+  #
+  # Job control is enabled for the launch because a non-interactive shell starts
+  # background jobs with SIGINT ignored, and a signal ignored on entry cannot be
+  # trapped at all. Without `set -m` this case would pass against any handler,
+  # including no handler, because the signal would never reach the script.
+  : > "$home/block-closure-test"
+  set -m
+  TMPDIR="$tmp" PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$home/shimbin/fm-decision-hold.sh" resolve sample-review alpha \
+    --decision-file "$home/decision.txt" --routed-to follow-up-work \
+    --from-ruling captain-rulings-2026-01-01.md:5 >/dev/null 2>&1 &
+  pid=$!
+  waited=0
+  while [ ! -e "$home/closure-test-started" ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+    [ "$waited" -lt 300 ] || fail "the closure-test subprocess never started"
+  done
+  # Only the script is interrupted; its subprocess is left to finish normally and
+  # report closure=permitted. Nothing but the signal can stop the close, so a
+  # handler that returns instead of terminating closes the hold here.
+  kill -INT "$pid" 2>/dev/null || true
+  wait "$pid" || rc=$?
+  set +m
+  rm -f "$home/block-closure-test"
+
+  [ "$rc" -ne 0 ] || fail "an interrupted resolve must not exit 0"
+  [ "$rc" -ge 128 ] \
+    || fail "an interrupted resolve must exit with a signal status, got: $rc"
+  show=$(tasks_in "$home" show sample-review-decision-alpha --full)
+  printf '%s\n' "$show" | grep -qF 'state: queued' \
+    || fail "an interrupted resolve must leave the captain hold open, got: $show"
+  leaked=$(find "$tmp" -name 'fm-decision-hold-closure.*' | grep -c . || true)
+  [ "$leaked" -eq 0 ] \
+    || fail "an interrupted resolve must not leave its work file behind"
+
+  # Controls: the ordinary refusal and the ordinary success still clean up, so
+  # the interrupt fix cannot regress into having no trap at all.
+  rc=0
+  TMPDIR="$tmp" PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$home/shimbin/fm-decision-hold.sh" resolve sample-review alpha \
+    --decision-file "$home/decision.txt" --routed-to follow-up-work \
+    --from-ruling sample-commission/commission.md:3 >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "control: a commission provenance must still be refused"
+  leaked=$(find "$tmp" -name 'fm-decision-hold-closure.*' | grep -c . || true)
+  [ "$leaked" -eq 0 ] || fail "a refused resolve must not leave its work file behind"
+
+  rc=0
+  TMPDIR="$tmp" PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$home/shimbin/fm-decision-hold.sh" resolve sample-review alpha \
+    --decision-file "$home/decision.txt" --routed-to follow-up-work \
+    --from-ruling captain-rulings-2026-01-01.md:5 >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || fail "control: an uninterrupted verified resolve must succeed"
+  show=$(tasks_in "$home" show sample-review-decision-alpha --full)
+  printf '%s\n' "$show" | grep -qF 'state: done' \
+    || fail "control: an uninterrupted verified resolve must still close the hold"
+  leaked=$(find "$tmp" -name 'fm-decision-hold-closure.*' | grep -c . || true)
+  [ "$leaked" -eq 0 ] || fail "a successful resolve must not leave its work file behind"
+
+  pass "an interrupt terminates the resolve, leaves the hold open, and still cleans up"
+}
+
 test_resolve_refuses_a_provenance_path_that_forges_the_verdict
 test_hold_reader_failure_is_not_zero_open_holds
 test_identifier_boundary_separates_sentence_end_from_shadowing
+test_interrupt_stops_the_resolve_and_still_cleans_up
