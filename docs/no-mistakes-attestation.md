@@ -99,43 +99,22 @@ A run tip that is not a commit in this checkout at all is refused separately as 
 It publishes to the remote's push URL rather than its fetch URL, and reconciles against that same repository before writing, because those are two different repositories in the setup `CONTRIBUTING.md` describes and only the push target is the one the check reads.
 The reconciliation merges the published ref instead of forcing over the local one, so an attestation recorded locally with `--no-push` survives the publishing of a later one.
 It names that repository in what it prints, because "published to origin" does not say which repository was reached and the note is evidence only on the one holding the pull request head.
+A push target carrying no `refs/notes/no-mistakes` yet has nothing to reconcile against and is not an error, but a push target that cannot be read at all stops the command before anything is recorded: not reading a repository is not reading an absence, and that is the same line the gate draws when it fetches this ref.
+
 git's own text is made safe to print rather than withheld wholesale when a remote call fails.
 git quotes the push URL back in its messages and a credential in a log is a leak wherever that log ends up, but suppressing the text throws away the server's rejection reason with it, and a contributor blocked by a ruleset on `refs/notes/*`, a required-signature policy or a quota then has nothing to act on.
-
-That is done by default deny, and the inversion is the design rather than a detail of it.
-Redacting what a reader recognises means every URL shape git accepts has to be modelled, and any shape it does not model is emitted intact, which reads absence of detection as absence of a credential: the same mistake as reading an empty check set as green.
-Two shapes reached the log that way before the inversion, one of them a password holding an unencoded `@`.
-So a word that could carry a credential is emitted only when it positively matches a shape that has no place for one, or can be rewritten into one; unparseable, ambiguous, unfamiliar and merely unmatched all withhold.
-
-Two shapes are modelled.
-A scheme URL is emitted without its userinfo, and afterwards contains no `@` at all, so nothing turns on where a reader believes the authority ends, while an explicit port or an IPv6 literal host survives because those match positively.
-An scp-style `[user@]host:path` remote is emitted without its user, because that form has no password field: its colon separates host from path, which is what makes it provably credential-free.
-That is also its whole guard, so it is a rule rather than an implication of the pattern: a colon before the `@` is exactly where a password would live, so a token carrying one is not this shape and is withheld.
-Modelling a shape is default deny working as designed; excepting one from it is not, and that distinction is the safety of the whole function.
-
-Withholding is by line rather than by word.
-Words are split on spaces, so a URL whose credential holds one arrives as two words, and the tail of it can match a shape the whole never would: a host and path that were never a remote, printed beside a marker, reading as two places where there was one.
-Partial emission is what has bitten this twice, so a line holding anything withheld is withheld entire.
-The alternatives, not splitting on spaces or letting a marker absorb the words after it, are both more parsing, and parsing is the part that keeps failing.
-The cost is deliberate and stated rather than hidden: an address, or a URL with an `@` after its host, is withheld even though it holds no secret, and takes its line with it, and a marker says so in its place, because an omission the reader knows about is recoverable and a silent one is not.
-A line with no URL-shaped word is untouched, so the server's own reason still reaches the person who has to act on it.
-One function does this for everything the command prints, git's output, the pipeline tool's two streams and the push target alike, because two mechanisms for the one job is how the disagreement that caused the first leak returns.
-That is enforced by where it sits rather than by each author remembering it: one function is the only place the command constructs a line and writes it, and everything it writes passes through the scrubber, so a diagnostic carrying text from outside cannot be constructed unscrubbed and a refusal added later is safe because printing is what makes it safe.
-Scrubbing at each call site was the shape this had, and it grew a channel that was never scrubbed, for the same reason parse-then-redact grew shapes that were never modelled.
-The programs the command runs hold streams of their own, and that half is closed from the other side rather than left to the same claim: every git call and every call to the pipeline tool has its stdout and stderr either captured or discarded, so no stream that could carry external text reaches a terminal except through that one function.
-A push target carrying no `refs/notes/no-mistakes` yet has nothing to reconcile against and is not an error, but a push target that cannot be read at all stops the command before anything is recorded: not reading a repository is not reading an absence, and that is the same line the gate draws when it fetches this ref.
+Making it safe is default deny, and that inversion is the safety property rather than a detail of it: a word that could carry a credential is emitted only when it positively matches a shape with no place for one, and a line holding anything withheld is withheld entire rather than shown in part.
+Redacting what a reader recognises instead emits intact every shape it failed to model, which reads absence of detection as absence of a credential, and that is how credentials reached a log before the inversion.
+This covers everything the command prints, git's output and the pipeline tool's two streams alike, so a refusal added later is safe because printing is what makes it safe.
+`bin/fm-attest.sh`'s header comment is the single owner of the mechanism: the shapes that are modelled, why each guard is a rule rather than an implication of its pattern, the cost of withholding by line, and why one function is the only path text leaves the command by.
 
 Its own refusals stay as distinct as the gate's.
 `no-run-record` means the pipeline reported no run, `run-record-unreadable` means the tool itself failed, `run-record-unparsed` means it reported something no run identity could be read from, and `run-record-no-head` means it reported a run naming no usable head commit; all four quote the tool's own output, because a tool error read as an absent run sends a contributor to re-run a pipeline that already ran.
-They quote it made safe to print, by the same one function and for the same reason git's output is: `no-mistakes` manages pushes, so its error output can quote a remote URL carrying a credential, and a credential in a log is a leak wherever that log ends up.
+That output is quoted through the same scrubbing as git's, because `no-mistakes` manages pushes and its error output can therefore carry a remote URL with a credential in it.
 Only what the tool writes to stdout decides which of them it is, because unrelated notices such as its version-upgrade banner go to stderr and must never stand in for a run record; stderr is quoted alongside stdout purely as diagnostic detail.
-None of them may borrow a reason that describes the branch instead of the record.
-A record that cannot be read says nothing about whether the work here is covered, so reporting it as a diverged branch sends a contributor to re-validate a branch that is fine and to receive the identical refusal.
 Every call to the tool is time-bounded, so one blocked on a lock or a network read refuses as `run-record-unreadable` rather than hanging at a contributor's terminal.
-`bin/fm-timeout-lib.sh` owns imposing that bound, and its selection ends in a dependency-free bash watchdog, so a host without `timeout`, `gtimeout` or `perl` gets the same hard bound and process-group cleanup rather than an unbounded call or a refusal.
-A non-positive `FM_ATTEST_NM_TIMEOUT` falls back to the default rather than being passed on, because that owner states that `timeout 0` and the perl fallback's `alarm 0` both disable the deadline outright.
-A zero would therefore not shorten the bound: it would remove it on a host with `timeout` and expire every read at once on one falling back to the watchdog, so one value would produce opposite failures on two hosts.
-`bin/fm-nm-run-lib.sh` owns reading and attributing the record and delegates the bound to it, because a second copy of the mechanism selection is how a host that one owner handles becomes a dead end for the other.
+`bin/fm-timeout-lib.sh` owns imposing that bound, and `bin/fm-nm-run-lib.sh` delegates to it rather than carrying a second copy of the mechanism.
+`docs/configuration.md` owns the `FM_ATTEST_NM_TIMEOUT` knob, including why a non-positive value falls back to the default rather than shortening the bound.
 
 When `no-mistakes` publishes this note itself, the helper becomes redundant and nothing about the check changes: the note format is the contract, and which program writes it is not.
 

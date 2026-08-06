@@ -82,6 +82,11 @@ KNOWN_KEYS="$ATTESTATION_KEY head run gates tool"
 # contributor blocked by a ruleset or a quota with nothing to act on. So text is
 # made safe to print rather than withheld wholesale.
 #
+# This comment is the single owner of that mechanism. Keep the shapes, the guards
+# and their reasons here; docs/no-mistakes-attestation.md carries the short
+# safety rationale and points at this file rather than restating it, so the two
+# cannot drift apart the way a second copy did.
+#
 # One function does it for everything this prints, git's output, the pipeline
 # tool's two streams and the push target alike, and that is enforced by where it
 # sits rather than by every author remembering it. emit() below is the only
