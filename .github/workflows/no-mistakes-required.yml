@@ -1,21 +1,21 @@
 name: Require no-mistakes
-run-name: "PR #${{ github.event.pull_request.number }} body compliance - ${{ github.event.action }} - event ${{ github.run_number }} (run ${{ github.run_id }})"
+run-name: "PR #${{ github.event.pull_request.number }} attestation - ${{ github.event.action }} - event ${{ github.run_number }} (run ${{ github.run_id }})"
 
 on:
   pull_request:
-    types: [opened, edited, synchronize, reopened]
+    # No body-bearing event. This check reads evidence bound to the head commit,
+    # so editing the pull request text can neither satisfy nor invalidate it.
+    types: [opened, synchronize, reopened]
     branches:
       - main
 
 permissions:
   contents: read
 
-# GitHub concurrency groups retain at most one pending run, replacing older
-# pending runs even when cancel-in-progress is false. Give body-bearing events
-# an immutable per-event group so first-time-fork approvals can never collapse
-# opened/edited checks. Keep synchronize/reopened coalescing as before.
+# One group per head commit, so a check for one head can never replace or cancel
+# the check for another. Re-running the same head coalesces as usual.
 concurrency:
-  group: no-mistakes-required-${{ github.event.pull_request.number }}-${{ (github.event.action == 'opened' || github.event.action == 'edited') && github.run_id || 'head-change' }}
+  group: no-mistakes-required-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -26,28 +26,96 @@ jobs:
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
-      - name: Verify no-mistakes signature in PR body
+      # The head commit itself, not the merge commit: the attestation names this
+      # exact sha, and bin/fm-attest.sh must be the copy under review.
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+
+      # Git notes do not travel with refs/pull/*, so the attestation ref is read
+      # from the repository the branch was pushed to. A read that fails for any
+      # reason other than "the ref is not there" stops the job, so an
+      # unreachable head repository is never silently treated as an absent
+      # attestation and never as a present one.
+      - name: Fetch the attestation ref from the head repository
         env:
-          PR_BODY: ${{ github.event.pull_request.body }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
-          if printf '%s' "${PR_BODY:-}" | grep -qF -- "$marker"; then
-            echo "Found no-mistakes signature in PR #${PR_NUMBER} body."
+          case "$HEAD_REPO" in
+            '' | */*/* | /* | */)
+              echo "::error::The pull request head repository is unavailable, so its attestation cannot be read." >&2
+              exit 1
+              ;;
+            *[!A-Za-z0-9._/-]* | *//*)
+              echo "::error::The pull request head repository name is not a usable repository path." >&2
+              exit 1
+              ;;
+            */*) ;;
+            *)
+              echo "::error::The pull request head repository is unavailable, so its attestation cannot be read." >&2
+              exit 1
+              ;;
+          esac
+
+          # The base repository is read with the job's own token; a fork is read
+          # anonymously, which is all a public head repository needs and is the
+          # least authority that can do the job.
+          if [ "$HEAD_REPO" = "$BASE_REPO" ]; then
+            url="https://x-access-token:${GH_TOKEN}@github.com/${HEAD_REPO}.git"
+          else
+            url="https://github.com/${HEAD_REPO}.git"
+          fi
+
+          status=0
+          git ls-remote --exit-code "$url" refs/notes/no-mistakes >/dev/null 2>&1 || status=$?
+          case "$status" in
+            0)
+              git fetch --quiet --no-tags --force "$url" \
+                'refs/notes/no-mistakes:refs/notes/no-mistakes'
+              ;;
+            2)
+              # No such ref. Leave it absent and let the verifier name that state
+              # in its own words rather than deciding the outcome here.
+              echo "No refs/notes/no-mistakes on ${HEAD_REPO}."
+              ;;
+            *)
+              echo "::error::Could not read refs/notes/no-mistakes from ${HEAD_REPO} (git exit ${status})." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Verify the head-bound no-mistakes attestation
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -eu
+          if bin/fm-attest.sh verify --head "$HEAD_SHA"; then
             exit 0
           fi
           {
-            echo "::error::This PR was not raised through no-mistakes."
+            echo "::error::This pull request carries no verified no-mistakes attestation for its head commit."
             echo
-            echo "Contributions to this repository must be submitted via 'git push no-mistakes'."
-            echo "That pipeline runs the required review/test/lint/CI steps and writes a"
-            echo "deterministic '## Pipeline' section into the PR body containing:"
+            echo "Contributions to this repository must be validated by 'git push no-mistakes',"
+            echo "which reviews, tests and lints the change before it is pushed. The proof of"
+            echo "that is a git note on refs/notes/no-mistakes naming the exact commit it covers:"
             echo
-            echo "    $marker"
+            bin/fm-attest.sh --print-format | sed 's/^/    /'
             echo
-            echo "See CONTRIBUTING.md for setup and the full workflow."
+            echo "Publish it for the head under review with:"
+            echo
+            echo "    bin/fm-attest.sh write"
+            echo
+            echo "It reads the pipeline's own run record and refuses unless that run validated"
+            echo "this exact commit, so it cannot be satisfied by editing text. A new commit is"
+            echo "a new head and needs its own attestation."
+            echo
+            echo "See CONTRIBUTING.md for setup and docs/no-mistakes-attestation.md for what"
+            echo "this check does and does not establish."
             echo
             echo "PR author: ${PR_AUTHOR}"
           } >&2

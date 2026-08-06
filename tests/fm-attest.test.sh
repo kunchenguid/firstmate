@@ -1,0 +1,341 @@
+#!/usr/bin/env bash
+# Behavior tests for bin/fm-attest.sh.
+#
+# Every refusal here is paired with a positive control that differs from it by
+# exactly one input, because a verifier that refuses everything would satisfy
+# red-only assertions and would be a worse defect than the honour-system check
+# it replaces.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+TMP_ROOT=$(fm_test_tmproot fm-attest)
+ATTEST="$ROOT/bin/fm-attest.sh"
+NOTES_REF=refs/notes/no-mistakes
+
+# A repository with one commit and no attestation ref.
+new_repo() {
+  local repo=$1
+  mkdir -p "$repo"
+  git -C "$repo" init -q -b fm/demo .
+  git -C "$repo" config user.email attest@example.invalid
+  git -C "$repo" config user.name "Attest Test"
+  printf 'one\n' > "$repo/a.txt"
+  git -C "$repo" add a.txt
+  git -C "$repo" commit -qm one
+}
+
+add_note() {
+  local repo=$1 commit=$2 body=$3
+  git -C "$repo" notes --ref="$NOTES_REF" add -f -m "$body" "$commit" >/dev/null 2>&1
+}
+
+# The exact payload the gate accepts, so every negative fixture below can be
+# written as this minus one property.
+good_note() {
+  printf 'no-mistakes-attestation: v1\nhead: %s\nrun: 01KZ5YTADR5YAXZSNKFXTW8W9F\ngates: intent,rebase,review,test,document,lint,push\ntool: no-mistakes/v1.40.3\n' "$1"
+}
+
+# Installs a fake `no-mistakes` on PATH that prints the given `axi status` body,
+# so the emitter is exercised against the tool's real output shape without a
+# pipeline run.
+install_pipeline_stub() {
+  local dir=$1 status=$2
+  mkdir -p "$dir/bin"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'case "$*" in\n'
+    printf '  "--version") echo "no-mistakes version v1.40.3 (d873960) 2026-07-22T01:41:41Z" ;;\n'
+    printf '  "axi status") cat <<%s\n' "'FM_STUB_TOON'"
+    printf '%s\n' "$status"
+    printf 'FM_STUB_TOON\n'
+    printf '  ;;\nesac\n'
+  } > "$dir/bin/no-mistakes"
+  chmod +x "$dir/bin/no-mistakes"
+}
+
+run_status_toon() {
+  local branch=$1 head=$2 review_state=$3
+  printf 'run:\n  id: "01KZ5YTADR5YAXZSNKFXTW8W9F"\n  branch: %s\n  status: running\n  head: %s\n  steps[8]{step,status,findings,duration_ms}:\n    intent,completed,0,3\n    rebase,completed,0,581\n    review,%s,0,599904\n    test,completed,0,235507\n    document,completed,0,58499\n    lint,completed,0,78748\n    push,completed,0,2200\n    ci,awaiting_approval,1,99775564\ngate:\n  step: ci\n  status: awaiting_approval\n' \
+    "$branch" "$head" "$review_state"
+}
+
+verify_out() {
+  local repo=$1 head=$2
+  ( cd "$repo" && "$ATTEST" verify --head "$head" 2>&1 )
+}
+
+# ---------------------------------------------------------------------------
+# verify - absence, mis-binding and malformed evidence each refuse in their own
+# words, and none of them can be reached by editing pull request text.
+# ---------------------------------------------------------------------------
+
+test_absent_notes_ref_refuses_as_absent() {
+  local repo head out rc
+  repo="$TMP_ROOT/absent-ref"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  out=$(verify_out "$repo" "$head")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an absent attestation ref was accepted"
+  assert_contains "$out" "no-attestation-ref" "absent ref did not report its own reason"
+  pass "fm-attest.sh: an absent attestation ref refuses as absent"
+}
+
+test_ref_without_note_for_head_refuses_distinctly() {
+  local repo head other out rc
+  repo="$TMP_ROOT/ref-no-note"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  other=$(git -C "$repo" commit-tree -m other "$(git -C "$repo" rev-parse 'HEAD^{tree}')")
+  add_note "$repo" "$other" "$(good_note "$other")"
+  out=$(verify_out "$repo" "$head")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a head with no attestation was accepted"
+  assert_contains "$out" "no-attestation-for-head" "missing note for the head was not reported distinctly"
+  assert_not_contains "$out" "no-attestation-ref" "a present ref was reported as an absent one"
+  pass "fm-attest.sh: an attestation for another commit is not evidence for this one"
+}
+
+test_note_naming_another_head_refuses_as_unbound() {
+  local repo head other out rc
+  repo="$TMP_ROOT/unbound"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  other=$(git -C "$repo" commit-tree -m other "$(git -C "$repo" rev-parse 'HEAD^{tree}')")
+  # A well-formed attestation for a different commit, attached to this one.
+  add_note "$repo" "$head" "$(good_note "$other")"
+  out=$(verify_out "$repo" "$head")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an attestation naming another commit was accepted"
+  assert_contains "$out" "attestation-not-bound" "a mis-bound attestation was not reported as such"
+  pass "fm-attest.sh: an attestation must name the commit it is attached to"
+}
+
+test_genuine_attestation_does_not_survive_a_rewrite() {
+  local repo head rewritten before after
+  repo="$TMP_ROOT/rewrite"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  add_note "$repo" "$head" "$(good_note "$head")"
+  before=$(verify_out "$repo" "$head")
+  case "$before" in
+    *"attested $head"*) ;;
+    *) fail "the positive control did not pass before the rewrite: $before" ;;
+  esac
+  # Reword the commit and carry the genuine attestation across verbatim. This is
+  # the copy that the replaced body marker permitted and this check must not.
+  git -C "$repo" commit -q --amend -m "one (reworded)"
+  rewritten=$(git -C "$repo" rev-parse HEAD)
+  [ "$rewritten" != "$head" ] || fail "the rewrite did not change the head commit"
+  git -C "$repo" notes --ref="$NOTES_REF" show "$head" > "$repo/carried.note"
+  git -C "$repo" notes --ref="$NOTES_REF" add -f -F "$repo/carried.note" "$rewritten" >/dev/null 2>&1
+  local rc=0
+  after=$(verify_out "$repo" "$rewritten") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a genuine attestation copied onto a rewritten head was accepted"
+  assert_contains "$after" "attestation-not-bound" "a carried attestation was not reported as unbound"
+  pass "fm-attest.sh: a genuine attestation copied onto a rewritten head is refused"
+}
+
+test_legacy_body_marker_is_not_an_attestation() {
+  local repo head out rc
+  repo="$TMP_ROOT/legacy-marker"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  add_note "$repo" "$head" \
+    'Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
+  out=$(verify_out "$repo" "$head")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "the replaced honour-system marker was accepted as an attestation"
+  assert_contains "$out" "attestation-malformed" "the legacy marker was not reported as malformed"
+  pass "fm-attest.sh: the replaced honour-system marker is not an attestation"
+}
+
+test_unknown_field_refuses_rather_than_being_ignored() {
+  local repo head out rc
+  repo="$TMP_ROOT/unknown-field"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  add_note "$repo" "$head" "$(good_note "$head"; printf 'override: please-pass\n')"
+  out=$(verify_out "$repo" "$head")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an attestation carrying an unknown field was accepted"
+  assert_contains "$out" "attestation-malformed" "an unknown field was not reported as malformed"
+  pass "fm-attest.sh: an unknown field is refused rather than ignored"
+}
+
+test_missing_required_step_refuses_distinctly() {
+  local repo head out rc
+  repo="$TMP_ROOT/missing-gate"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  add_note "$repo" "$head" \
+    "$(good_note "$head" | sed 's/^gates: .*/gates: intent,rebase,test,document,lint,push/')"
+  out=$(verify_out "$repo" "$head")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an attestation with no completed review step was accepted"
+  assert_contains "$out" "attestation-missing-gate" "a skipped required step was not reported distinctly"
+  assert_contains "$out" "review" "the refusal did not name the missing step"
+  pass "fm-attest.sh: an attestation that skipped a required step is refused"
+}
+
+test_unusable_gate_list_refuses_as_malformed() {
+  local repo head out rc
+  repo="$TMP_ROOT/bad-gates"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  add_note "$repo" "$head" \
+    "$(good_note "$head" | sed 's/^gates: .*/gates: review,,test,lint,push/')"
+  out=$(verify_out "$repo" "$head")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an attestation with an unusable step list was accepted"
+  assert_contains "$out" "attestation-malformed" "an unusable step list was not reported as malformed"
+  pass "fm-attest.sh: an unusable step list is refused"
+}
+
+test_absent_head_commit_refuses_as_its_own_state() {
+  local repo out rc missing
+  repo="$TMP_ROOT/no-head-object"
+  new_repo "$repo"
+  missing=0123456789012345678901234567890123456789
+  add_note "$repo" "$(git -C "$repo" rev-parse HEAD)" "$(good_note "$(git -C "$repo" rev-parse HEAD)")"
+  out=$(verify_out "$repo" "$missing")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "verification of an absent commit was accepted"
+  assert_contains "$out" "head-commit-unavailable" "an absent head commit was not reported as its own state"
+  pass "fm-attest.sh: a head commit missing from the checkout is its own refusal"
+}
+
+test_head_bound_attestation_passes() {
+  local repo head out rc
+  repo="$TMP_ROOT/positive"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  add_note "$repo" "$head" "$(good_note "$head")"
+  out=$(verify_out "$repo" "$head")
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a well-formed head-bound attestation was refused: $out"
+  assert_contains "$out" "attested $head" "the success line did not name the attested head"
+  pass "fm-attest.sh: a well-formed head-bound attestation passes"
+}
+
+# ---------------------------------------------------------------------------
+# write - the emitter transcribes the pipeline's own run record and refuses to
+# publish anything that record does not support.
+# ---------------------------------------------------------------------------
+
+write_out() {
+  local repo=$1
+  ( cd "$repo" && PATH="$repo/stub/bin:$PATH" "$ATTEST" write --no-push 2>&1 )
+}
+
+test_write_refuses_a_run_covering_another_head() {
+  local repo head out rc
+  repo="$TMP_ROOT/write-other-head"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo deadbeef completed)"
+  out=$(write_out "$repo")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a run record covering another head was transcribed"
+  assert_contains "$out" "run-covers-another-head" "a stale run record was not reported distinctly"
+  git -C "$repo" rev-parse --verify --quiet "$NOTES_REF" >/dev/null 2>&1 \
+    && fail "a refused attestation was still written"
+  pass "fm-attest.sh: write refuses a run record that covers another head"
+}
+
+test_write_refuses_an_incomplete_run() {
+  local repo head out rc
+  repo="$TMP_ROOT/write-incomplete"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${head:0:8}" running)"
+  out=$(write_out "$repo")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a run with no completed review step was transcribed"
+  assert_contains "$out" "run-incomplete" "an incomplete run was not reported distinctly"
+  assert_contains "$out" "review" "the refusal did not name the incomplete step"
+  pass "fm-attest.sh: write refuses a run that has not completed a required step"
+}
+
+test_write_refuses_a_run_from_another_branch() {
+  local repo head out rc
+  repo="$TMP_ROOT/write-other-branch"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/elsewhere "${head:0:8}" completed)"
+  out=$(write_out "$repo")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a run record for another branch was transcribed"
+  assert_contains "$out" "run-covers-another-branch" "a foreign branch run was not reported distinctly"
+  pass "fm-attest.sh: write refuses a run record for another branch"
+}
+
+test_write_emits_an_attestation_the_gate_accepts() {
+  local repo head out rc verified
+  repo="$TMP_ROOT/write-positive"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${head:0:8}" completed)"
+  out=$(write_out "$repo")
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a complete run covering this exact head was refused: $out"
+  verified=$(verify_out "$repo" "$head") \
+    || fail "the emitted attestation was rejected by the gate: $verified"
+  assert_contains "$verified" "attested $head" "the round trip did not attest this head"
+  assert_contains "$verified" "01KZ5YTADR5YAXZSNKFXTW8W9F" "the attestation lost the run identity"
+  pass "fm-attest.sh: write emits an attestation the gate accepts for that exact head"
+}
+
+test_write_refuses_a_later_commit_on_the_same_branch() {
+  local repo head later out rc
+  repo="$TMP_ROOT/write-later-commit"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${head:0:8}" completed)"
+  write_out "$repo" >/dev/null || fail "the positive control failed before the later commit"
+  printf 'two\n' > "$repo/b.txt"
+  git -C "$repo" add b.txt
+  git -C "$repo" commit -qm two
+  later=$(git -C "$repo" rev-parse HEAD)
+  [ "$later" != "$head" ] || fail "the later commit did not move the head"
+  out=$(write_out "$repo")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an unvalidated later commit was attested from the earlier run"
+  assert_contains "$out" "run-covers-another-head" "the stale run was not reported distinctly"
+  rc=0
+  out=$(verify_out "$repo" "$later") || rc=$?
+  [ "$rc" -ne 0 ] || fail "the gate accepted a head the pipeline never validated"
+  assert_contains "$out" "no-attestation-for-head" "the unvalidated head was not refused for its own reason"
+  pass "fm-attest.sh: work committed after a run is not covered by it"
+}
+
+test_write_refuses_without_a_run_record() {
+  local repo out rc
+  repo="$TMP_ROOT/write-no-run"
+  new_repo "$repo"
+  install_pipeline_stub "$repo/stub" ""
+  out=$(write_out "$repo")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an attestation was emitted with no pipeline run record"
+  assert_contains "$out" "no-run-record" "a missing run record was not reported distinctly"
+  pass "fm-attest.sh: write refuses when the pipeline reports no run"
+}
+
+test_absent_notes_ref_refuses_as_absent
+test_ref_without_note_for_head_refuses_distinctly
+test_note_naming_another_head_refuses_as_unbound
+test_genuine_attestation_does_not_survive_a_rewrite
+test_legacy_body_marker_is_not_an_attestation
+test_unknown_field_refuses_rather_than_being_ignored
+test_missing_required_step_refuses_distinctly
+test_unusable_gate_list_refuses_as_malformed
+test_absent_head_commit_refuses_as_its_own_state
+test_head_bound_attestation_passes
+test_write_refuses_a_run_covering_another_head
+test_write_refuses_an_incomplete_run
+test_write_refuses_a_run_from_another_branch
+test_write_emits_an_attestation_the_gate_accepts
+test_write_refuses_a_later_commit_on_the_same_branch
+test_write_refuses_without_a_run_record
