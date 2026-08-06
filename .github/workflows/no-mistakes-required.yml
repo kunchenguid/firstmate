@@ -3,6 +3,8 @@ run-name: "PR #${{ github.event.pull_request.number }} body compliance - ${{ git
 
 on:
   pull_request:
+    # Every lifecycle event creates the latest-head required check.
+    # Only an edit creates a body-compliance opportunity when the marker is absent.
     types: [opened, edited, synchronize, reopened]
     branches:
       - main
@@ -11,9 +13,9 @@ permissions:
   contents: read
 
 # GitHub concurrency groups retain at most one pending run, replacing older
-# pending runs even when cancel-in-progress is false. Give body-bearing events
-# an immutable per-event group so first-time-fork approvals can never collapse
-# opened/edited checks. Keep synchronize/reopened coalescing as before.
+# pending runs even when cancel-in-progress is false. Give opening and body-edit
+# checks immutable per-event groups so first-time-fork approvals can never
+# collapse their lifecycle coverage. Keep synchronize/reopened coalescing as before.
 concurrency:
   group: no-mistakes-required-${{ github.event.pull_request.number }}-${{ (github.event.action == 'opened' || github.event.action == 'edited') && github.run_id || 'head-change' }}
   cancel-in-progress: true
@@ -29,6 +31,7 @@ jobs:
       - name: Verify no-mistakes signature in PR body
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
+          PR_ACTION: ${{ github.event.action }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
@@ -38,6 +41,12 @@ jobs:
             echo "Found no-mistakes signature in PR #${PR_NUMBER} body."
             exit 0
           fi
+          case "$PR_ACTION" in
+            opened|synchronize|reopened)
+              echo "::notice::No no-mistakes signature in PR #${PR_NUMBER} during ${PR_ACTION}; this lifecycle event did not create a body-compliance opportunity."
+              exit 0
+              ;;
+          esac
           {
             echo "::error::This PR was not raised through no-mistakes."
             echo
