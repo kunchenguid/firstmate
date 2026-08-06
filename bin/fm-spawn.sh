@@ -856,6 +856,7 @@ launch_template() {
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
+    LAUNCH_IS_RAW=1
     HARNESS=""
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
@@ -2101,6 +2102,26 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 # an unset value is the single-store default and needs no prefix.
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+fi
+# Name the task in the lane's own environment.
+#
+# A spawned lane exists to do exactly one named thing for its whole life, which
+# is what makes a fixed environment variable the right carrier here - and why
+# the session that SPAWNED it needs the separate, rewritable declaration that
+# bin/fm-declare-work.sh writes instead.
+#
+# A time-capture tool reading this labels the lane's hours with the task rather
+# than with whatever branch the worktree happens to sit on, so the captain's own
+# direction and the work it produced share one identifier and can be reported
+# against each other. Nothing firstmate does depends on it; a tool that does not
+# read it is unaffected.
+#
+# Deliberately skipped for a raw launch command. That escape hatch's guarantee
+# is that the operator's command is used exactly as given, and a lane attributed
+# by task is not worth weakening it. Such a lane simply binds by its worktree,
+# as every lane did before this.
+if [ "${LAUNCH_IS_RAW:-0}" != 1 ]; then
+  LAUNCH="FM_TASK=$(shell_quote "$ID") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")

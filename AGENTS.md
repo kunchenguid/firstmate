@@ -242,6 +242,8 @@ The delivery lifecycle is an always-loaded operational contract; referenced scri
 Resolve the project independently for every request.
 An explicit project wins, a clear follow-up inherits its referent, and otherwise match the request against the registry, work under way, and project code or README.
 Proceed on one confident match while naming the project in plain language; ask one concise question when multiple or no projects plausibly match.
+Once resolved, run `bin/fm-declare-work.sh` so a time-capture tool can attribute the captain's own directing time to the work it directs rather than to the firstmate home he types in; it is inert when no such tool is installed, never fails a caller, and its header owns the arguments.
+Re-run it whenever the work in hand changes, because the declaration expires rather than persisting.
 
 Route by the nature of the work against each registered secondmate scope, not by a non-exclusive clone list.
 Keep `local-only` work in the main home.
