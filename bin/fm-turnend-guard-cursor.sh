@@ -47,10 +47,23 @@ PAYLOAD=$(cat 2>/dev/null || true)
 
 command -v jq >/dev/null 2>&1 || exit 0
 
-BLOCK_BUDGET=${FM_CURSOR_TURNEND_BLOCK_BUDGET:-3}
-case "$BLOCK_BUDGET" in ''|*[!0-9]*|0) BLOCK_BUDGET=3 ;; esac
-WAKE_BUDGET=${FM_CURSOR_WAKE_CHAIN_BUDGET:-5}
-case "$WAKE_BUDGET" in ''|*[!0-9]*|0) WAKE_BUDGET=5 ;; esac
+MAX_BUDGET=1000000
+normalize_budget() {
+  local value=$1 default=$2
+  case "$value" in ''|*[!0-9]*|0) value=$default ;; esac
+  while [ "${#value}" -gt 1 ] && [ "${value:0:1}" = 0 ]; do
+    value=${value#0}
+  done
+  [ "$value" != 0 ] || value=$default
+  if [ "${#value}" -gt "${#MAX_BUDGET}" ] \
+    || { [ "${#value}" -eq "${#MAX_BUDGET}" ] && [[ "$value" > "$MAX_BUDGET" ]]; }; then
+    value=$MAX_BUDGET
+  fi
+  printf '%s' "$value"
+}
+
+BLOCK_BUDGET=$(normalize_budget "${FM_CURSOR_TURNEND_BLOCK_BUDGET:-3}" 3)
+WAKE_BUDGET=$(normalize_budget "${FM_CURSOR_WAKE_CHAIN_BUDGET:-5}" 5)
 TOTAL_BUDGET=$((BLOCK_BUDGET + WAKE_BUDGET))
 
 # The shared guard always sees stop_hook_active false, so a continuation whose
@@ -70,7 +83,7 @@ STATE=${FM_STATE_OVERRIDE:-${FM_HOME:-$ROOT}/state}
 cursor_parent_identity() {
   local pid=${PPID:-} proc_root stat_line starttime
   local -a stat_fields
-  case "$pid" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
+  case "$pid" in ''|*[!0-9]*|0) return 1 ;; esac
   proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
   if [ -r "$proc_root/$pid/stat" ]; then
     stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null || true)
@@ -86,11 +99,12 @@ cursor_parent_identity() {
   starttime=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//' || true)
   if [ -n "$starttime" ]; then
     printf 'ps:%s:%s' "$pid" "$starttime"
-  else
-    printf 'pid:%s' "$pid"
+    return 0
   fi
+  return 1
 }
 
+SESSION_IDENTITY_UNAVAILABLE=0
 SESSION=$(printf '%s' "$PAYLOAD" | jq -r '
   if type != "object" then empty
   elif (.conversation_id | type) == "string" and .conversation_id != "" then .conversation_id
@@ -115,13 +129,20 @@ if [ -z "$SESSION" ]; then
   ' 2>/dev/null) || SESSION_TRANSCRIPT=
   SESSION_SCOPE=$SESSION_CONTEXT
   if [ -z "$SESSION_TRANSCRIPT" ]; then
-    SESSION_PARENT=$(cursor_parent_identity)
-    SESSION_SCOPE=$(printf '%s\037%s' "$SESSION_PARENT" "$SESSION_CONTEXT")
+    if SESSION_PARENT=$(cursor_parent_identity); then
+      SESSION_SCOPE=$(printf '%s\037%s' "$SESSION_PARENT" "$SESSION_CONTEXT")
+    else
+      SESSION_IDENTITY_UNAVAILABLE=1
+    fi
   fi
-  SESSION_KEY=$(printf '%s\037%s' "$ROOT" "$SESSION_SCOPE" \
-    | cksum 2>/dev/null | awk '{print $1 ":" $2}')
-  [ -n "$SESSION_KEY" ] || SESSION_KEY="root:$ROOT"
-  SESSION="fallback:$SESSION_KEY"
+  if [ "$SESSION_IDENTITY_UNAVAILABLE" -eq 1 ]; then
+    SESSION=unscoped
+  else
+    SESSION_KEY=$(printf '%s\037%s' "$ROOT" "$SESSION_SCOPE" \
+      | cksum 2>/dev/null | awk '{print $1 ":" $2}')
+    [ -n "$SESSION_KEY" ] || SESSION_KEY="root:$ROOT"
+    SESSION="fallback:$SESSION_KEY"
+  fi
 fi
 SESSION_KEY=$(printf '%s' "$SESSION" | cksum 2>/dev/null | awk '{print $1 ":" $2}')
 [ -n "$SESSION_KEY" ] || SESSION_KEY="root:$ROOT"
@@ -138,6 +159,8 @@ case "$LOOP_COUNT_VALUE" in
   ''|*[!0-9]*) ;;
   *) LOOP_COUNT=$LOOP_COUNT_VALUE; LOOP_COUNT_VALID=1 ;;
 esac
+LOOP_COUNT_POSITIVE=0
+case "$LOOP_COUNT" in *[1-9]*) LOOP_COUNT_POSITIVE=1 ;; esac
 
 CHAIN_SESSION=
 CHAIN_TOTAL=0
@@ -164,8 +187,23 @@ canonical_wake_reason() {
   printf '%s' "$reason"
 }
 
+normalize_counter() {
+  local value=$1
+  case "$value" in ''|*[!0-9]*) printf '0'; return 0 ;; esac
+  while [ "${#value}" -gt 1 ] && [ "${value:0:1}" = 0 ]; do
+    value=${value#0}
+  done
+  if [ "${#value}" -gt "${#TOTAL_BUDGET}" ] \
+    || { [ "${#value}" -eq "${#TOTAL_BUDGET}" ] && [[ "$value" > "$TOTAL_BUDGET" ]]; }; then
+    printf '%s' "$TOTAL_BUDGET"
+  else
+    printf '%s' "$value"
+  fi
+}
+
 chain_load() {
   local key value
+  [ "$SESSION_IDENTITY_UNAVAILABLE" -eq 0 ] || return 0
   [ -f "$CHAIN_FILE" ] || { CHAIN_TOTAL=0; return 0; }
   CHAIN_TOTAL=
   CHAIN_REASONS=()
@@ -184,14 +222,15 @@ chain_load() {
         ;;
     esac
   done < "$CHAIN_FILE"
-  case "$CHAIN_FAIL" in ''|*[!0-9]*) CHAIN_FAIL=0 ;; esac
-  case "$CHAIN_WAKE" in ''|*[!0-9]*) CHAIN_WAKE=0 ;; esac
+  CHAIN_FAIL=$(normalize_counter "$CHAIN_FAIL")
+  CHAIN_WAKE=$(normalize_counter "$CHAIN_WAKE")
   case "$CHAIN_TOTAL" in ''|*[!0-9]*) CHAIN_TOTAL=$((CHAIN_FAIL + CHAIN_WAKE)) ;; esac
+  CHAIN_TOTAL=$(normalize_counter "$CHAIN_TOTAL")
   if [ "$CHAIN_HAS_REASONS" -eq 0 ] && [ -n "$CHAIN_REASON" ]; then
     CHAIN_REASONS=("$CHAIN_REASON")
   fi
   if [ "$CHAIN_SESSION" != "$SESSION" ] || {
-    [ "$LOOP_COUNT_VALID" -eq 1 ] && [ "$LOOP_COUNT" -eq 0 ];
+    [ "$LOOP_COUNT_VALID" -eq 1 ] && [ "$LOOP_COUNT" = 0 ];
   }; then
     CHAIN_TOTAL=0
     CHAIN_FAIL=0
@@ -224,7 +263,12 @@ chain_store() {
 
 fallback_total_from_loop_count() {
   local value=$1
-  if [ "${#value}" -gt 18 ]; then
+  while [ "${#value}" -gt 1 ] && [ "${value:0:1}" = 0 ]; do
+    value=${value#0}
+  done
+  if [ "${#value}" -gt "${#TOTAL_BUDGET}" ] \
+    || { [ "${#value}" -eq "${#TOTAL_BUDGET}" ] && [[ "$value" > "$TOTAL_BUDGET" ]]; } \
+    || [ "$value" = "$TOTAL_BUDGET" ]; then
     printf '%s' "$TOTAL_BUDGET"
   else
     printf '%s' "$((value + 1))"
@@ -302,8 +346,10 @@ if [ "$ARM_ACTIONABLE" -eq 1 ]; then
   else
     CHAIN_REASONS+=("$WAKE_REASON")
   fi
-  if ! chain_store "$TOTAL" 0 "$COUNT" "$WAKE_REASON"; then
-    if [ "$LOOP_COUNT_VALID" -eq 1 ] && [ "$LOOP_COUNT" -gt 0 ]; then
+  if [ "$SESSION_IDENTITY_UNAVAILABLE" -eq 1 ]; then
+    TOTAL=$TOTAL_BUDGET
+  elif ! chain_store "$TOTAL" 0 "$COUNT" "$WAKE_REASON"; then
+    if [ "$LOOP_COUNT_POSITIVE" -eq 1 ]; then
       FALLBACK_TOTAL=$(fallback_total_from_loop_count "$LOOP_COUNT")
       [ "$FALLBACK_TOTAL" -gt "$TOTAL" ] && TOTAL=$FALLBACK_TOTAL
     else
@@ -324,8 +370,10 @@ else
   TOTAL=$((CHAIN_TOTAL + 1))
   NEXT_FAIL=$COUNT
   [ "$COUNT" -gt "$BLOCK_BUDGET" ] && NEXT_FAIL=0
-  if ! chain_store "$TOTAL" "$NEXT_FAIL" 0 ''; then
-    if [ "$LOOP_COUNT_VALID" -eq 1 ] && [ "$LOOP_COUNT" -gt 0 ]; then
+  if [ "$SESSION_IDENTITY_UNAVAILABLE" -eq 1 ]; then
+    TOTAL=$TOTAL_BUDGET
+  elif ! chain_store "$TOTAL" "$NEXT_FAIL" 0 ''; then
+    if [ "$LOOP_COUNT_POSITIVE" -eq 1 ]; then
       FALLBACK_TOTAL=$(fallback_total_from_loop_count "$LOOP_COUNT")
       [ "$FALLBACK_TOTAL" -gt "$TOTAL" ] && TOTAL=$FALLBACK_TOTAL
     else

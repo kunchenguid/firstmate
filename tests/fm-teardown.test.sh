@@ -1781,6 +1781,39 @@ test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed() {
   pass "forced secondmate teardown retains Herdr child identity until exact pane disappearance"
 }
 
+test_forced_secondmate_child_cursor_worker_server_is_reaped() {
+  local case_dir home log closed rc pid starttime
+  case_dir=$(make_case cursor-worker-server-child-reap)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_herdr_child "$case_dir"
+  home="$case_dir/secondmate-home"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; : > "$log"
+  ( exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "cursor-worker-server-child-reap: setup sleeper did not start"
+  starttime=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)
+  [ -n "$starttime" ] || fail "cursor-worker-server-child-reap: cannot read starttime"
+  printf 'cursor_worker_server=%s\ncursor_worker_server_start=%s\n' "$pid" "$starttime" \
+    >> "$home/state/child-herdr.meta"
+
+  rc=0
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "cursor-worker-server-child-reap: teardown should succeed"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "cursor-worker-server-child-reap: child worker-server survived forced secondmate teardown"
+  fi
+  assert_grep "reaping recorded cursor worker-server" "$case_dir/stderr" \
+    "cursor-worker-server-child-reap: child worker-server was not reaped before metadata removal"
+  [ ! -e "$home/state/child-herdr.meta" ] \
+    || fail "cursor-worker-server-child-reap: child metadata survived forced cleanup"
+  pass "forced secondmate teardown reaps recorded child Cursor worker-server"
+}
+
 configure_nested_secondmate_with_herdr_grandchild() {  # <case-dir>
   local case_dir=$1 home="$1/secondmate-home" nested_home="$1/secondmate-home/nested-home"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
@@ -2804,6 +2837,7 @@ test_herdr_flat_teardown_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
+test_forced_secondmate_child_cursor_worker_server_is_reaped
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
