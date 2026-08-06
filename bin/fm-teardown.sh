@@ -90,6 +90,8 @@
 #   checks, discards secondmate child work for kind=secondmate, and aborts the
 #   task's own live no-mistakes runs. Only use it when the captain has explicitly
 #   said to discard the work.
+#   For a task running on another machine it travels over the relay as the
+#   authorization, and the host applies all of the above itself.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -179,11 +181,19 @@ META="$STATE/$ID.meta"
 # gate on top: the host refuses until this side proves it holds a byte-identical
 # copy of the report, because that scratch worktree is the only other place the
 # deliverable exists (bin/fm-relay-host.sh, control-root/verbs/fmr-verb.sh).
+#
+# --force travels too, rather than being refused here. It used to be refused,
+# on the reasoning that discard authority had to be exercised on the host
+# itself - which was true of the mechanism and false as advice, because a host
+# with no inbound SSH has nobody to exercise it. The effect was that a remote
+# task that ran off the rails could never be cleaned up from anywhere. What
+# crosses the link is the authorization, not the judgement: the host still runs
+# its own bin/fm-teardown.sh --force, on the worktree that actually holds the
+# work (bin/fm-relay-host.sh, control-root/verbs/fmr-verb.sh).
 if grep -q '^host=' "$META" 2>/dev/null; then
-  [ "$FORCE" != "--force" ] || {
-    echo "REFUSED: --force is not available for a relay task; discard authority must be exercised on the host itself" >&2
-    exit 1
-  }
+  if [ "$FORCE" = "--force" ]; then
+    exec "$SCRIPT_DIR/fm-relay-host.sh" teardown "$ID" --force
+  fi
   exec "$SCRIPT_DIR/fm-relay-host.sh" teardown "$ID"
 fi
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)

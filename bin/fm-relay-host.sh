@@ -16,10 +16,21 @@
 #   fm-relay-host.sh events <id>            print everything not yet acknowledged
 #   fm-relay-host.sh ack <id> [offset]      record what has been presented
 #   fm-relay-host.sh report-pull <id>       fetch + verify the scout report
-#   fm-relay-host.sh teardown <id>          gated remote teardown, then local cleanup
+#   fm-relay-host.sh teardown <id> [--force]  gated remote teardown, then local cleanup
 #
 # Every subcommand after `spawn` finds its host through state/<id>.meta's host=
 # line, so callers name the task, never the machine.
+#
+# `teardown --force` carries the captain's explicit discard authority across the
+# link, as the extra verb token `force`. It is the answer to a hole this layer
+# had: the host's own teardown refuses dirty or unlanded work, correctly, and
+# until this existed there was no way to say "the captain has authorized
+# discarding it" to a machine with no inbound SSH - so a remote task that ran off
+# the rails could never be cleaned up from anywhere. The judgement itself does not
+# move: the host still runs its own bin/fm-teardown.sh --force against the
+# worktree that actually holds the work. It needs no new credential either,
+# because `teardown` is already epoch-fenced, so a caller that may send it may
+# already spawn and steer on that machine.
 #
 # Cursors. state/<id>.relay-ack mirrors the offset the HOST records as presented,
 # and state/<id>.relay-seen is what the wake check has already reported. They are
@@ -54,7 +65,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 usage() {
-  sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 # shellcheck source=bin/fm-relay-lib.sh
@@ -336,17 +347,32 @@ case "$CMD" in
     ;;
 
   teardown)
-    ID=${1:?usage: fm-relay-host.sh teardown <id>}
+    ID=${1:?usage: fm-relay-host.sh teardown <id> [--force]}; shift
+    FORCE=0
+    for a in "$@"; do
+      case "$a" in
+        --force) FORCE=1 ;;
+        *) die "unexpected argument '$a'" ;;
+      esac
+    done
     load_host_for_task "$ID"
     KIND=$(grep '^kind=' "$STATE/$ID.meta" | cut -d= -f2- | head -1 || true)
     [ -n "$KIND" ] || KIND=ship
     HASH=none
-    if [ "$KIND" = scout ]; then
+    # Without discard authority the report copy is a hard local precondition, and
+    # staying that way is the point: the host refuses anyway, and refusing here
+    # saves a round trip and names the fix. With it, there may be no report to
+    # copy at all - a worker that died before writing one is exactly the task that
+    # could otherwise never be cleaned up - so this side sends none and the host
+    # skips the matching gate.
+    if [ "$KIND" = scout ] && [ "$FORCE" -eq 0 ]; then
       [ -f "$DATA/$ID/report.md" ] \
         || die "no local report copy at $DATA/$ID/report.md; run report-pull first"
       HASH=$(fm_relay_sha256 "$DATA/$ID/report.md") || die "cannot hash the local report copy"
     fi
-    fm_relay_exec teardown "$ID" "$HASH" || { printf '%s\n' "$FM_RELAY_ERR"; exit 1; }
+    TD_ARGS=("$ID" "$HASH")
+    [ "$FORCE" -eq 1 ] && TD_ARGS+=(force)
+    fm_relay_exec teardown "${TD_ARGS[@]}" || { printf '%s\n' "$FM_RELAY_ERR"; exit 1; }
     printf '%s\n' "$FM_RELAY_OUT"
     rm -f "$STATE/$ID.meta" "$STATE/$ID.relay-ack" "$STATE/$ID.relay-seen" \
       "$STATE/$ID.check.sh" "$STATE/$ID.check-trust" "$STATE/$ID.status"
