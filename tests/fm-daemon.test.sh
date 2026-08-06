@@ -191,6 +191,135 @@ test_stale_diagnostic_wedge_survives_busy_housekeeping() {
   pass "enriched stale wedges bypass status absorption without disturbing busy workers"
 }
 
+# A push-capable backend reports an agent-state edge to `blocked` - the harness
+# stopped for a human prompt - through a stale wake whose detail is built by
+# stale_detail_blocked_on_human. A task correctly parked on a captain decision
+# has an UNCHANGED terminal status line by definition, so the ordinary
+# status-line dedupe would absorb every such edge after the first and the worker
+# would sit on an unanswered prompt forever. The whole matrix is asserted here on
+# one task: the blocked-on-human edge escalates with the seen marker already
+# matching, the same task's ordinary stale tick still dedupes, and a declared
+# pause still self-handles.
+test_stale_blocked_on_human_escalates_despite_unchanged_status() {
+  local dir state key out detail parked before after
+  dir=$(make_supercase stale-blocked-on-human)
+  state="$dir/state"
+  parked='needs-decision: pick A or B'
+  detail=$(stale_detail_blocked_on_human herdr blocked)
+  [ -n "$detail" ] || fail "stale_detail_blocked_on_human produced no detail"
+  printf '%s\n' "$parked" > "$state/park-b1.status"
+  key=$(printf '%s' "park-b1" | tr ':/.' '___')
+  printf '%s' "$parked" > "$state/.subsuper-seen-status-$key"
+  before=$(cat "$state/park-b1.status")
+
+  # Negative control: WITHOUT the blocked-on-human detail the same already-seen
+  # terminal status must still dedupe to a single digest entry.
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-park-b1" "$state")
+  case "$out" in self\|*already\ escalated*) ;; *) fail "ordinary stale tick stopped deduping an already-escalated terminal status: $out" ;; esac
+
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-park-b1" "$state" "$detail")
+  case "$out" in escalate\|*) ;; *) fail "blocked-on-human edge was absorbed by the status-line dedupe: $out" ;; esac
+
+  after=$(cat "$state/park-b1.status")
+  [ "$before" = "$after" ] || fail "the regression requires an unchanged status line across the transition"
+
+  # A declared external-wait pause stays self-handled even when a backend pushes
+  # a blocked edge for it.
+  printf 'paused: awaiting the upstream release\n' > "$state/park-b2.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-park-b2" "$state" "$detail")
+  case "$out" in pause\|*) ;; *) fail "a declared pause was escalated by a blocked-on-human edge: $out" ;; esac
+
+  pass "a blocked-on-human edge escalates on an unchanged status line while ordinary stale dedupe and declared pauses are untouched"
+}
+
+# The same matrix through handle_wake, on real marker state, counting digest
+# entries rather than reading a classifier string.
+test_handle_wake_blocked_on_human_keeps_one_entry_per_edge() {
+  local dir state key win detail parked
+  dir=$(make_supercase handle-blocked-on-human)
+  state="$dir/state"
+  win="sess:fm-park-b3"
+  parked='needs-decision: pick A or B'
+  detail=$(stale_detail_blocked_on_human herdr blocked)
+  printf '%s\n' "$parked" > "$state/park-b3.status"
+  key=$(printf '%s' "park-b3" | tr ':/.' '___')
+
+  # A first signal wake escalates the parked decision and records the seen marker.
+  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/park-b3.status" "$state"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 1 ] \
+    || fail "the parked decision did not produce exactly one digest entry"
+
+  # Negative control: an ordinary stale tick on the same unchanged status must
+  # NOT add a second entry.
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 1 ] \
+    || fail "an ordinary duplicate signal/stale pair stopped deduping to one digest entry"
+
+  # The blocked-on-human edge is a genuinely new event and MUST escalate.
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win ($detail)" "$state"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 2 ] \
+    || fail "the blocked-on-human edge was swallowed: $(cat "$state/.subsuper-escalations")"
+  [ ! -e "$state/.subsuper-stale-$key" ] \
+    || fail "the blocked-on-human escalation left wedge aging behind"
+
+  # A declared pause absorbs the same edge and records pause tracking instead.
+  printf 'paused: awaiting the upstream release\n' > "$state/park-b4.status"
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: sess:fm-park-b4 ($detail)" "$state"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 2 ] \
+    || fail "a declared pause was escalated by a blocked-on-human edge: $(cat "$state/.subsuper-escalations")"
+  [ -e "$state/.subsuper-paused-$(printf '%s' park-b4 | tr ':/.' '___')" ] \
+    || fail "a declared pause did not record pause tracking under a blocked-on-human edge"
+
+  pass "handle_wake escalates each blocked-on-human edge once while ordinary duplicates and declared pauses stay self-handled"
+}
+
+# The interaction between the two absorb classes that describe the SAME crew. A
+# task parked on a captain decision reconciles as settled terminal (parked with
+# that decision still open), so if the settled absorb ran first it would swallow a
+# backend-pushed blocked-on-human edge exactly as the status-line dedupe once did,
+# and the defect would return through a different key. The fixture proves the
+# collision is real rather than assumed: the SAME task and state are classified
+# without the detail first, and that call must return `settled`.
+test_stale_blocked_on_human_outranks_settled_absorb() {
+  local dir state fakebin out key detail
+  dir=$(make_supercase blocked-on-human-vs-settled); state="$dir/state"; fakebin="$dir/fakebin"
+  make_fake_crew_state "$fakebin" >/dev/null
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  detail=$(stale_detail_blocked_on_human herdr blocked)
+  fm_write_meta "$state/park-s2.meta" "window=sess:fm-park-s2" "backend=herdr"
+  printf 'needs-decision: which landing path\n' > "$state/park-s2.status"
+  key=$(printf '%s' "park-s2" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review: 2 finding(s) (ask-user: authority decision)'
+
+  # Precondition, not decoration: this exact task IS settled, so the branches
+  # genuinely compete. If this ever stops holding, the assertion below would pass
+  # for the wrong reason and silently stop testing the ordering.
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-park-s2" "$state")
+  case "$out" in settled\|*) ;; *) fail "fixture no longer reconciles as settled, so the ordering is untested: $out" ;; esac
+
+  # The pushed edge must outrank it: the harness is stopped on a human prompt, and
+  # only a human can clear it, however settled the crew's own work is.
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-park-s2" "$state" "$detail")
+  case "$out" in escalate\|*) ;; *) fail "the settled absorb swallowed a blocked-on-human edge: $out" ;; esac
+
+  # Through handle_wake on real markers: the settled wake self-handles and the
+  # pushed edge on the same task escalates, leaving no wedge aging behind.
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: sess:fm-park-s2" "$state"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a settled stale escalated: $(cat "$state/.subsuper-escalations")"
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: sess:fm-park-s2 ($detail)" "$state"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 1 ] \
+    || fail "the blocked-on-human edge was swallowed by the settled absorb: $(cat "$state/.subsuper-escalations")"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "the blocked-on-human escalation left wedge aging behind"
+
+  # A declared pause still outranks BOTH: it is checked before either.
+  printf 'paused: awaiting the upstream release\n' > "$state/park-s3.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-park-s3" "$state" "$detail")
+  case "$out" in pause\|*) ;; *) fail "a declared pause lost precedence to the blocked-on-human edge: $out" ;; esac
+
+  unset FM_FAKE_CREW_STATE FM_CREW_STATE_BIN
+  pass "a blocked-on-human edge outranks the settled absorb on the same crew, while a declared pause still outranks both"
+}
+
 test_stale_terminal_escalates() {
   local dir state out
   dir=$(make_supercase stale-terminal)
@@ -1994,6 +2123,9 @@ test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
+test_stale_blocked_on_human_escalates_despite_unchanged_status
+test_handle_wake_blocked_on_human_keeps_one_entry_per_edge
+test_stale_blocked_on_human_outranks_settled_absorb
 test_stale_terminal_escalates
 test_stale_paused_classifies_pause
 test_stale_settled_terminal_self_handles

@@ -374,8 +374,8 @@ classify_signal() {  # <reason-after-colon> <state>
 # classify_stale decides the WAKE itself (one-shot per distinct hash). On a
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
-classify_stale() {  # <window> <state>
-  local win=$1 state=$2 task last seen
+classify_stale() {  # <window> <state> [<stale-detail>]
+  local win=$1 state=$2 detail=${3:-} task last seen
   task=$(window_to_task "$win" "$state")
   last=$(last_status_line "$state/$task.status")
   if [ -n "$last" ] && status_is_paused "$last"; then
@@ -385,6 +385,27 @@ classify_stale() {  # <window> <state>
     # status line already read, no fm-crew-state.sh call, mirroring the daemon's
     # existing status-log classification.
     printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
+    return
+  fi
+  if stale_detail_is_blocked_on_human "$detail"; then
+    # A backend-pushed blocked-on-human edge (fm-classify-lib.sh): the harness
+    # stopped for a human prompt. The producer already deduped this on AGENT
+    # STATE - one wake per ->blocked edge - so the status-line dedupe below must
+    # not run. It keys on what the crew last SAID, and a crew parked on a captain
+    # decision has an unchanged terminal line by definition, so keying on it here
+    # absorbed every block after the first and left the crew on a dead prompt.
+    #
+    # This sits BEFORE the settled check below, and the order is load-bearing.
+    # Both absorb classes describe the SAME crew: one parked on a captain
+    # decision reconciles as settled (parked with that decision still open), so
+    # settling first would swallow this edge exactly as the status-line dedupe
+    # once did. The two tests differ in what they observe. Settled reads a
+    # standing condition - work is over, the next move is above the crew - and
+    # rightly drops an IDLE pane from wedge aging. This reads a backend-reported
+    # EDGE: the harness affirmatively stopped on a prompt, so the pane is not
+    # merely idle and no one but a human can clear it. A new blocking event on a
+    # settled crew is still a new blocking event.
+    printf 'escalate|stale + blocked on human: %s (%s): %s' "$win" "$detail" "${last:-no status}"
     return
   fi
   if [ "$(crew_absorb_class "$task" "$state")" = settled ]; then
@@ -1276,7 +1297,8 @@ handle_wake() {  # <reason> <state>
               decision=$(classify_signal "$arg" "$state") ;;
     stale:*)  kind=stale; arg="${reason#stale: }"; stale_detail="${arg#"$arg"}"
               case "$arg" in *" ("*) stale_detail="${arg#*" ("}"; arg="${arg%% \(*}" ;; esac
-              decision=$(classify_stale "$arg" "$state")
+              stale_detail="${stale_detail%)}"
+              decision=$(classify_stale "$arg" "$state" "$stale_detail")
               case "$stale_detail" in
                 idle\ *s,\ possible\ wedge,\ escalation\ *)
                   decision="escalate|${reason#stale: }" ;;

@@ -59,6 +59,22 @@ grep -q 'herdr: agent blocked' "$STATE_DIR/.wake-queue" || fail "the stale paylo
 [ -e "$STATE_DIR/.herdr-escalated-default_wG_pQ" ] || fail "handle_push_transition must commit dedupe only after enqueue"
 pass "handle_push_transition: a blocked crew enqueues a stale wake naming its window and wakes the supervisor"
 
+# The enqueued detail and the away daemon's recognizer must come from ONE owner
+# in bin/fm-classify-lib.sh, or a reworded producer would silently stop exempting
+# the wake from the daemon's status-line dedupe.
+BLOCKED_DETAIL=$(stale_detail_blocked_on_human herdr blocked)
+grep -qF "$BLOCKED_DETAIL" "$STATE_DIR/.wake-queue" \
+  || fail "the enqueued blocked-on-human detail is not the shared owner's text: $(cat "$STATE_DIR/.wake-queue")"
+grep -qF "$BLOCKED_DETAIL" "$WAKE_LOG" \
+  || fail "the fast wake reason is not the shared owner's blocked-on-human text: $(cat "$WAKE_LOG")"
+stale_detail_is_blocked_on_human "$BLOCKED_DETAIL" \
+  || fail "the shared recognizer rejects the detail the shared builder produced"
+stale_detail_is_blocked_on_human "idle 500s, possible wedge, escalation 3" \
+  && fail "the shared recognizer accepted an ordinary wedge detail"
+stale_detail_is_blocked_on_human "" \
+  && fail "the shared recognizer accepted an empty detail"
+pass "handle_push_transition: the blocked-on-human detail is built and recognized through one shared owner"
+
 reset_state
 fm_write_meta "$STATE_DIR/tk1.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
 (
