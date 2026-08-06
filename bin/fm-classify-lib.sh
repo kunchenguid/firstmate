@@ -17,9 +17,10 @@
 # (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
 # read: it reuses bin/fm-crew-state.sh, which may make a bounded no-mistakes call,
 # to decide whether a crew that just stopped its turn or went stale is working,
-# deliberately paused, or neither. Callers run it ONLY on no-verb signal handling
-# and first sighting of a stale hash, never on every wake, so the per-wake triage
-# stays cheap. status_open_decisions_incremental (see "incremental (cursor-backed)
+# deliberately paused, settled in a terminal state, or none of those. Callers run
+# it ONLY on no-verb signal handling, first sighting of a stale hash, and
+# immediately before escalating a possible wedge - never on every wake - so the
+# per-wake triage stays cheap. status_open_decisions_incremental (see "incremental (cursor-backed)
 # open-decisions fold" below) also writes: it persists a per-status-file byte
 # cursor and folded open-set as a side effect, so a per-drain fleet-wide scan
 # stays bounded by new appends instead of re-reading each task's whole lifetime
@@ -604,6 +605,42 @@ signal_reason_is_actionable() {  # <file> ...
   return 1
 }
 
+# 0 if <reconciled-state> is a SETTLED terminal state for crew <id>: the crew's
+# own work is over and the next move belongs above it, so an idle pane is the
+# CORRECT condition rather than a wedge symptom. The state word comes from
+# bin/fm-crew-state.sh, which reconciles the run-step and pane against the status
+# log - so, unlike a read of the log's last line, a leftover terminal line under
+# an ACTIVE run never reaches here (that crew reconciles as working and keeps its
+# wedge timer).
+#
+#   done            - the run passed or its checks are green, or the log reports
+#                     done and the pane is exactly idle. Nothing is left for the
+#                     crew to do on its own.
+#   parked, blocked - the next move belongs above the crew, but ONLY while a
+#                     durable open decision proves it. status_open_decisions is
+#                     the one owner of that fold. A crew idling at a pipeline gate
+#                     it is supposed to answer ITSELF opens no decision, so it
+#                     keeps aging and still escalates as a possible wedge.
+#
+# `failed` is deliberately NOT settled: it also reconciles a CANCELLED run, the
+# mid-supersession state in which a crew is expected to recover custody and
+# resume, so an idle pane there is a genuine stall. `unknown` is never settled
+# either - a dead endpoint or torn-down worktree must keep aging.
+#
+# A missing or unreadable status file yields no open decision, so parked/blocked
+# stay unsettled and keep escalating.
+crew_state_is_settled() {  # <id> <reconciled-state> [state-dir]
+  local id=$1 s=$2 dir=${3:-${STATE:-${FM_STATE_OVERRIDE:-}}}
+  case "$s" in
+    done) return 0 ;;
+    parked|blocked)
+      [ -n "$id" ] || return 1
+      [ -n "$(status_open_decisions "$dir/$id.status")" ]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 # Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
 # from bin/fm-crew-state.sh's one authoritative current-state line
 # ("state: <s> · source: <src> · <detail>"). Prints exactly one token:
@@ -612,16 +649,20 @@ signal_reason_is_actionable() {  # <file> ...
 #             (e.g. waiting on CI);
 #   paused  - the crew's authoritative current state is a declared external-wait
 #             pause (paused:), which is EXPECTED to idle;
-#   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
-#             torn-down/unknown crew, or an unreadable verdict).
-# One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
+#   settled - the crew's reconciled state is terminal and the idle pane is the
+#             expected finished/waiting condition (crew_state_is_settled above);
+#   none    - none of those, so the wake must surface (a stopped/failed/
+#             torn-down/unknown crew, a run parked at a gate the crew owns, or an
+#             unreadable verdict).
+# One fm-crew-state.sh read serves EVERY absorb reason at once. Reading the state
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
-# that appended paused: but then STARTED a run reports working, never paused.
+# that appended paused: but then STARTED a run reports working, never paused, and
+# a crew whose log still shows a pre-validation done: reports working, not settled.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
-crew_absorb_class() {  # <id>
-  local id=$1 line state src
+crew_absorb_class() {  # <id> [state-dir]
+  local id=$1 dir=${2:-} line state src
   [ -n "$id" ] || { printf 'none'; return; }
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
@@ -631,6 +672,7 @@ crew_absorb_class() {  # <id>
     src=${line#*source: }; src=${src%% *}
     case "$src" in run-step|pane) printf 'working'; return ;; esac
   fi
+  crew_state_is_settled "$id" "$state" ${dir:+"$dir"} && { printf 'settled'; return; }
   printf 'none'
 }
 

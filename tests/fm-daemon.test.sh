@@ -205,6 +205,68 @@ test_stale_terminal_escalates() {
   pass "stale + terminal status escalates immediately"
 }
 
+# The away-mode half of the measured `stale-fires-on-finished-task` defect. A
+# task whose RECONCILED state is settled terminal - done, or parked/blocked with
+# a decision still open above the crew - has an idle pane for the correct reason,
+# so the daemon self-handles it instead of escalating a possible wedge, and
+# leaves no persistence marker for housekeeping to age. The shared owner of that
+# verdict is fm-classify-lib.sh's crew_absorb_class, the same one the always-on
+# watcher reads, so both supervisors reach the identical verdict.
+test_stale_settled_terminal_self_handles() {
+  local dir state fakebin out key
+  dir=$(make_supercase stale-settled); state="$dir/state"; fakebin="$dir/fakebin"
+  make_fake_crew_state "$fakebin" >/dev/null
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  fm_write_meta "$state/fin-s1.meta" "window=sess:fm-fin-s1" "backend=tmux"
+  printf 'done: PR https://example.test/pr/12 checks green\n' > "$state/fin-s1.status"
+  key=$(printf '%s' "fin-s1" | tr ':/.' '___')
+
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review'
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-fin-s1" "$state")
+  case "$out" in settled\|*) ;; *) fail "a settled terminal state did not self-handle: $out" ;; esac
+
+  # A decision-open parked task reaches the same verdict.
+  printf 'needs-decision: which landing path\n' > "$state/fin-s1.status"
+  export FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review: 2 finding(s) (ask-user: authority decision)'
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-fin-s1" "$state")
+  case "$out" in settled\|*) ;; *) fail "a decision-open parked task did not self-handle: $out" ;; esac
+
+  # handle_wake must clear rather than record wedge tracking, and escalate nothing.
+  date +%s > "$state/.subsuper-stale-$key"
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: sess:fm-fin-s1" "$state"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "a settled stale retained wedge tracking"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a settled stale escalated to the captain"
+
+  # Negative control on the same fixture: an unreadable crew is NOT settled.
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-fin-s1" "$state")
+  case "$out" in settled\|*) fail "an unknown crew was classed settled: $out" ;; esac
+  unset FM_FAKE_CREW_STATE FM_CREW_STATE_BIN
+  pass "settled terminal stales self-handle without wedge tracking, while an unknown crew still does not"
+}
+
+# The dedupe path the settled verdict must not disturb: a terminal status the
+# signal path already escalated stays one digest entry, not two.
+test_stale_terminal_dedupes_against_signal() {
+  local dir state fakebin out key
+  dir=$(make_supercase stale-terminal-dedupe); state="$dir/state"; fakebin="$dir/fakebin"
+  make_fake_crew_state "$fakebin" >/dev/null
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  fm_write_meta "$state/dup-s2.meta" "window=sess:fm-dup-s2" "backend=tmux"
+  printf 'done: ready in branch fm/dup\n' > "$state/dup-s2.status"
+  key=$(printf '%s' "dup-s2" | tr ':/.' '___')
+  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/dup-s2.status" "$state"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 1 ] || fail "the signal did not escalate exactly once"
+  [ -e "$state/.subsuper-seen-status-$key" ] || fail "the signal did not record its seen marker"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-dup-s2" "$state")
+  case "$out" in self\|*) ;; *) fail "the duplicate stale did not dedupe against the signal: $out" ;; esac
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: sess:fm-dup-s2" "$state"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 1 ] || fail "the duplicate signal/stale pair produced more than one entry"
+  unset FM_FAKE_CREW_STATE FM_CREW_STATE_BIN
+  pass "a duplicate signal/stale pair on a terminal status still de-duplicates to one entry"
+}
+
 # A DECLARED external-wait pause (paused:) is neither a wedge nor a terminal
 # escalation: classify_stale returns the `pause` action so handle_wake records a
 # pause marker (long re-surface cadence) rather than a wedge stale marker.
@@ -438,6 +500,43 @@ test_housekeeping_persistent_stale_escalates() {
   [ -s "$state/.subsuper-escalations" ] || fail "persistent stale was not escalated"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "stale marker not cleared after escalation"
   pass "persistent stale escalates after threshold and clears its marker"
+}
+
+# A task can go stale while its status line is still non-terminal and only then
+# settle (its run finishes, or its decision is handed up). Housekeeping ages the
+# marker recorded earlier, so the reconciled state has to be consulted at the one
+# point that matters - immediately before escalating a possible wedge - or the
+# same false alarm returns through the away-mode path.
+test_housekeeping_settled_stale_not_escalated() {
+  local dir state fakebin win pane key
+  dir=$(make_supercase stale-settled-housekeeping); state="$dir/state"; fakebin="$dir/fakebin"
+  make_fake_crew_state "$fakebin" >/dev/null
+  win="sess:fm-set-w7"
+  pane="$dir/pane.txt"
+  fm_write_meta "$state/set-w7.meta" "window=$win" "backend=tmux"
+  printf 'working: driving the pipeline\n' > "$state/set-w7.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "set-w7" | tr ':/.' '___')
+
+  # Negative control first: the identical fixture with an unreadable crew still
+  # escalates its possible wedge.
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] || fail "the unknown-crew control did not escalate its persistent stale"
+
+  # Same pane, same aged marker, but the run has since finished green.
+  : > "$state/.subsuper-escalations"
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review' \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a settled terminal state escalated a possible wedge: $(cat "$state/.subsuper-escalations")"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "a settled terminal state kept its wedge marker"
+  pass "housekeeping drops a persistent stale that has since settled, while an unreadable crew still escalates"
 }
 
 test_housekeeping_resumed_stale_cleared() {
@@ -1897,6 +1996,8 @@ test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_stale_terminal_escalates
 test_stale_paused_classifies_pause
+test_stale_settled_terminal_self_handles
+test_stale_terminal_dedupes_against_signal
 test_handle_wake_paused_records_pause_marker
 test_handle_wake_paused_signal_records_pause_marker
 test_handle_wake_terminal_signal_clears_pause_tracking
@@ -1904,6 +2005,7 @@ test_housekeeping_migrates_watcher_pause_marker
 test_housekeeping_migrates_watcher_unpaused_marker_to_clear
 test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
+test_housekeeping_settled_stale_not_escalated
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_paused_resumed_cleared
