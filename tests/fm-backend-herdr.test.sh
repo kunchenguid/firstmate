@@ -3067,7 +3067,7 @@ test_composer_state_cursor_idle_placeholder_is_empty() {
   # is exercised by the ghost-strip fixtures in fm-composer-ghost.test.sh).
   printf '  → Add a follow-up\n\n  ctrl+c to stop\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_COMPOSER_IDLE_RE='^Add a follow-up$' \
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_COMPOSER_HARNESS=cursor FM_COMPOSER_IDLE_RE='^Add a follow-up$' \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
   [ "$out" = empty ] || fail "cursor idle '→ Add a follow-up' should read empty, got '$out'"
   pass "fm_backend_herdr_composer_state: cursor idle placeholder reads empty via the idle regex"
@@ -4432,7 +4432,7 @@ test_send_text_submit_busy_queued_fallback_empty_for_cursor() {
   dir="$TMP_ROOT/submit-busy-queued-cursor"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   # 1: send-text  2: baseline agent get -> idle  3: send-keys enter
   # 4,5: wait_for_working agent gets -> idle (never working)
-  # 6: agent identity get -> cursor  7: busy_state agent get -> working
+  # 6: agent identity get -> cursor  7: submit-state agent get -> blocked
   printf '{"result":{"agent":{"agent_status":"idle"}}}
 ' > "$resp/2.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}
@@ -4441,7 +4441,7 @@ test_send_text_submit_busy_queued_fallback_empty_for_cursor() {
 ' > "$resp/5.out"
   printf '{"result":{"agent":{"agent":"cursor","agent_status":"working"}}}
 ' > "$resp/6.out"
-  printf '{"result":{"agent":{"agent":"cursor","agent_status":"working"}}}
+  printf '{"result":{"agent":{"agent":"cursor","agent_status":"blocked"}}}
 ' > "$resp/7.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=2 \

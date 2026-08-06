@@ -57,7 +57,7 @@ TOTAL_BUDGET=$((BLOCK_BUDGET + WAKE_BUDGET))
 # supervision need is real still re-arms. A malformed payload passes through
 # unchanged so the guard's own validation decides.
 NORMALIZED=$(printf '%s' "$PAYLOAD" | jq -c '
-  if type != "object" then . else . + {stop_hook_active: false} end
+  if type != "object" then . else . + {stop_hook_active: false, stopHookActive: false} end
 ' 2>/dev/null) || NORMALIZED=$PAYLOAD
 
 ROOT=${CURSOR_WORKSPACE_ROOT:-${CURSOR_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-}}}
@@ -100,7 +100,10 @@ canonical_wake_reason() {
     stale:*) reason=${reason%% (*} ;;
     check:*)
       check_reason=${reason#check: }
-      check_reason=${check_reason%%: *}
+      case "$check_reason" in
+        procevent\ *\ *\ *) check_reason=${check_reason% *} ;;
+        *': '*) check_reason=${check_reason%%: *} ;;
+      esac
       reason="check: $check_reason"
       ;;
     heartbeat:*) reason=heartbeat ;;
