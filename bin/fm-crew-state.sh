@@ -153,16 +153,41 @@ RUN_ID=""
 # redesign exists precisely because rendered output is not turn state.
 BUSY_SEQ=""
 
+# Every C0 control character that the named escapes below do not cover, in one
+# string. JSON forbids a RAW control character inside a string, and this object
+# carries verbatim tool output: terminal_error is the pipeline's own `error:`
+# text, which routinely contains ANSI escape sequences. One raw byte of that
+# produced an object bin/fm-fleet-snapshot.sh's jq validation rejected, which
+# replaced a correct failed/interrupted verdict with `unknown` - a reader
+# defeated by the shape of the evidence it was quoting. NUL is absent because a
+# bash variable cannot hold one.
+FM_CREW_STATE_JSON_CONTROLS=$'\001\002\003\004\005\006\007\010\013\014\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034\035\036\037'
+
 # Minimal JSON string escaping. Hand-rolled rather than shelling out to jq
 # because this reader runs on every heartbeat and jq is not a required tool for
 # a home that has not opted into the features that need it.
 json_escape() {  # <text>
-  local s=$1
+  local s=$1 c hex i
   s=${s//\\/\\\\}
   s=${s//\"/\\\"}
   s=${s//$'\t'/\\t}
   s=${s//$'\r'/\\r}
   s=${s//$'\n'/\\n}
+  # The scan runs only when a control byte actually survived the named escapes
+  # above, so the ordinary all-printable answer pays one glob match.
+  case "$s" in
+    *[[:cntrl:]]*)
+      for (( i = 0; i < ${#FM_CREW_STATE_JSON_CONTROLS}; i++ )); do
+        c=${FM_CREW_STATE_JSON_CONTROLS:i:1}
+        case "$s" in
+          *"$c"*)
+            printf -v hex '\\u%04x' "'$c"
+            s=${s//"$c"/"$hex"}
+            ;;
+        esac
+      done
+      ;;
+  esac
   printf '%s' "$s"
 }
 
@@ -737,10 +762,27 @@ fi
 # log, grok rendered tail) are read fresh and have none, and reporting a made-up
 # age for them would be a freshness reading that was never taken.
 # Sets EVIDENCE_AGE and BUSY_SEQ from this task's busy record when it has one.
-# fm_busy_record_read prints "<state> <source> <event> <seq> <age>".
+# fm_busy_record_read prints "<state> <source> <event> <seq> <age>" for a usable
+# record, and names its reason on the failure path.
+#
+# The EXPIRED reason is read too, and that is the point: expiry is a judgement
+# ABOUT the evidence, so discarding the evidence that produced it left the one
+# verdict whose whole meaning is "this aged out" unable to say by how much. A
+# `stale` answer that cannot distinguish a record 61 minutes old from one 3 days
+# old is barely better than the boolean this replaced. Every other reason
+# (missing, malformed, gen-mismatch) names a record there is nothing to measure.
 read_busy_evidence() {
   local rec
-  rec=$(fm_busy_record_read "$STATE" "$ID") || return 0
+  if ! rec=$(fm_busy_record_read "$STATE" "$ID"); then
+    case "$rec" in
+      'expired '*)
+        rec=${rec#expired }
+        BUSY_SEQ=${rec%% *}
+        EVIDENCE_AGE=${rec##* }
+        ;;
+    esac
+    return 0
+  fi
   EVIDENCE_AGE=${rec##* }
   rec=${rec% *}
   BUSY_SEQ=${rec##* }
@@ -762,13 +804,18 @@ if [ "$KIND" != secondmate ]; then
       ;;
     idle) ;;
     # The record existed and aged out, which is a different answer from never
-    # having had one: this worker was mid-turn and stopped without closing it.
-    # Reporting `unknown` here would understate a dead worker into "cannot
-    # tell", and reporting `working` from that record is the defect this
-    # replaces - a killed worker read as busy forever.
+    # having had one. What the age establishes is exactly this and no more:
+    # nothing has touched the record since its timestamp. It does NOT establish
+    # that the worker stopped - nothing observed that - and the detail must not
+    # say so, because the record's timestamp is stamped when a turn opens and
+    # does not tick within it (see FM_BUSY_MAX_BUSY_AGE_SECS in
+    # bin/fm-busy-lib.sh, which records that bound and the advancing-evidence
+    # signal that would remove it). Reporting `unknown` here would throw away a
+    # measurement that was actually taken, and reporting `working` from that
+    # record is the defect this replaces - a stopped worker read as busy forever.
     stale)
       PRECEDENCE='busy-signal-expired'
-      emit stale pane "harness turn evidence expired (${BUSY_VERDICT#* }); worker stopped mid-turn"
+      emit stale pane "harness turn evidence expired (${BUSY_VERDICT#* }); no evidence of activity since the recorded timestamp (${EVIDENCE_AGE:-unknown}s ago)"
       ;;
     *)
       PRECEDENCE='busy-signal-unusable'

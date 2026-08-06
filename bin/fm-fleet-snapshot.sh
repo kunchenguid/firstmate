@@ -21,8 +21,14 @@
 #     captain_actionable fields. Repeated blocker tokens remain ordered; a blocker
 #     resolves only when its structured record is Done, and missing ids stay open.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
-#     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
-#     state, source, detail, and raw line separately.
+#     current_state is bin/fm-crew-state.sh --json's typed answer, projected to
+#     {state,source,detail,precedence_applied,busy_signal,run_step,
+#     terminal_error,evidence_age_secs}. precedence_applied names the rule that
+#     selected the answer, and evidence_age_secs how old the winning evidence
+#     was; both are null when the reader did not measure them. The reader's
+#     busy_seq and run_id are deliberately NOT projected: they are cross-read
+#     correlation handles for a caller polling one crew, and a snapshot is a
+#     single observation.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
 #     hints.open_decisions is the keyed open-decision set returned by
@@ -204,7 +210,7 @@ last_nonempty_line() {  # <file>
 # reconstructing them, and gains the freshness and precedence fields that the
 # prose line never carried.
 crew_state_json() {  # <id>
-  local id=$1 out
+  local id=$1 out projected
   out=$(
     FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_HOME="$FM_HOME" \
@@ -215,16 +221,21 @@ crew_state_json() {  # <id>
       "$SCRIPT_DIR/fm-crew-state.sh" --json "$id" 2>/dev/null || true
   )
   out=$(printf '%s\n' "$out" | head -1)
-  # A reader that could not answer at all is reported as unknown rather than
-  # allowed to emit malformed JSON into the snapshot.
-  if [ -z "$out" ] || ! printf '%s' "$out" | jq -e . >/dev/null 2>&1; then
-    jq -n '{state:"unknown",source:"none",detail:"crew-state reader produced no usable answer",
-            precedence_applied:null,busy_signal:null,run_step:null,
-            terminal_error:null,evidence_age_secs:null}'
+  # One jq per task, not two: the projection itself fails on anything jq could
+  # not parse (and on valid JSON that is not an object), so a separate `jq -e .`
+  # validation pass was a second process per crew per snapshot proving what this
+  # one already proves. The empty guard stays because jq exits 0 on empty input.
+  if [ -n "$out" ] && projected=$(printf '%s' "$out" \
+    | jq '{state,source,detail,precedence_applied,busy_signal,run_step,
+           terminal_error,evidence_age_secs}' 2>/dev/null); then
+    printf '%s' "$projected"
     return
   fi
-  printf '%s' "$out" | jq '{state,source,detail,precedence_applied,busy_signal,run_step,
-                            terminal_error,evidence_age_secs}'
+  # A reader that could not answer at all is reported as unknown rather than
+  # allowed to emit malformed JSON into the snapshot.
+  jq -n '{state:"unknown",source:"none",detail:"crew-state reader produced no usable answer",
+          precedence_applied:null,busy_signal:null,run_step:null,
+          terminal_error:null,evidence_age_secs:null}'
 }
 
 status_event_json() {  # <status-log>
@@ -462,23 +473,18 @@ task_json_lines() {
     #     report POINTER, never as a reopened pending decision.
     # Secondmates are excluded from lifecycle clearing: they are persistent and
     # multiplex many concerns onto one stream, so activity on one concern must
-    # never clear another concern's keyed decision. A parked/blocked state, or a
-    # non-authoritative status-log/none read on a still-live task, keeps the fold's
-    # open decision surfacing.
+    # never clear another concern's keyed decision.
     #
-    # The clearing set is done/failed ONLY, and the remaining verdicts are held
-    # out deliberately rather than by omission. `aborted` and `interrupted` are
-    # run-level, not task-level: the run stopped without judging the work and the
-    # worker may still re-run it, so the deliverable that would justify clearing
-    # a decision does not exist yet. `stale` and `unknown` are the absence of a
-    # reliable read, and an absent result is never a pass. `idle` means the crew
-    # declared nothing, which is not evidence it moved past the gate. All of
-    # those keep the decision surfacing, which is the safe direction.
+    # Which verdicts clear is NOT decided here. crew_state_clears_open_decision
+    # (fm-classify-lib.sh) owns that rule beside FM_CREW_STATE_VOCABULARY, the
+    # single owner of the verdict set, and handles every member explicitly - a
+    # verdict it does not recognize returns 2 and keeps the decision, so a
+    # verdict added later cannot fall into the clearing branch by omission the
+    # way the negative-condition chain this replaces let interrupted, stale, and
+    # idle do.
     open_decisions_tsv=$(status_open_decisions "$status_log")
-    if [ "$kind" != secondmate ] && \
-       { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
-           && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
-         || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
+    if [ "$kind" != secondmate ] \
+      && crew_state_clears_open_decision "$current_state" "$current_source"; then
       open_decisions_tsv=""
     fi
     open_decisions_json=$(printf '%s' "$open_decisions_tsv" | jq -R -s '

@@ -162,6 +162,47 @@ crew_state_is_known() {  # <state>
   return 1
 }
 
+# Does a crew's current verdict CLEAR a keyed open decision, or does the decision
+# keep surfacing? Owned here, next to the vocabulary it must cover, because the
+# rule is a statement about the verdict set rather than about any one consumer.
+#
+# Only POSITIVE evidence that the crew moved PAST the gate clears a decision:
+#   - `working` read from an authoritative live source (run-step or pane), so a
+#     crew that answered the gate and resumed is not still reported as parked; or
+#   - a terminal `done`/`failed`, whose deliverable is the report or PR, so a
+#     COMPLETED single-owner task surfaces as a pointer rather than a reopened
+#     decision.
+# Every other verdict keeps it. `parked` and `blocked` are the gate itself.
+# `aborted` and `interrupted` are run-level, not task-level: the run stopped
+# without judging the work and the deliverable that would justify clearing does
+# not exist yet. `stale` and `unknown` are the absence of a reliable read, and an
+# absent result is never a pass. `paused` is a declared wait, and `idle` means
+# the crew declared nothing - neither is evidence it moved past the gate.
+#
+# Exit codes are THREE-valued on purpose: 0 clear, 1 keep, 2 the verdict matched
+# no arm above. The previous form of this rule lived in bin/fm-fleet-snapshot.sh
+# as a chain of negative conditions that named only parked and blocked as
+# exceptions, so every verdict added afterwards fell into the CLEARING branch by
+# omission - silently, and in the unsafe direction, since a dropped open decision
+# loses a captain's question while a spurious one only costs a glance. A default
+# branch that quietly picks either answer is exactly that defect, so an unhandled
+# verdict is its own reportable outcome: callers treat 2 as keep, and the
+# coverage gate in tests/fm-crew-state.test.sh fails when any member of
+# FM_CREW_STATE_VOCABULARY reaches it.
+crew_state_clears_open_decision() {  # <state> <source>
+  case "${1:-}" in
+    working)
+      case "${2:-}" in
+        run-step|pane) return 0 ;;
+        *) return 1 ;;
+      esac
+      ;;
+    done|failed) return 0 ;;
+    parked|blocked|paused|aborted|interrupted|idle|stale|unknown) return 1 ;;
+  esac
+  return 2
+}
+
 # Read one string field out of bin/fm-crew-state.sh's --json object. The object
 # is flat and this reader owns its shape, so a bounded extraction is exact for
 # the TOKEN fields (state, source, precedence_applied), whose values are

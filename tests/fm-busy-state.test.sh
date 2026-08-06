@@ -396,7 +396,8 @@ test_busy_record_expires_idle_record_does_not() {
 
 # `stale` is terminal, exactly like malformed and gen-mismatch. If an expired
 # record fell through to the fallbacks, a weaker source could re-answer for a
-# worker this task's own record just proved had died - reporting it busy again.
+# worker whose own record shows no activity since its timestamp - reporting it
+# busy again from evidence that never measured the turn.
 test_expired_record_does_not_fall_through_to_a_weaker_source() {
   local state out
   state=$(new_state_dir busy-expiry-terminal)

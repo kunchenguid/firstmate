@@ -1408,7 +1408,9 @@ test_missing_run_head_falls_back_to_current_state() {
 # production - the four defects this closes were each a condition with no row.
 #
 # Every row asserts, for both output modes:
-#   - the prose state and the structured state are the SAME derivation
+#   - the prose state, source, and detail equal the structured state, source,
+#     and detail - field by field, not state alone, so a future change that
+#     formats either mode separately is caught here
 #   - the structured state, source, and precedence_applied match expectation
 #   - the state is a member of the declared vocabulary
 #
@@ -1566,22 +1568,57 @@ cf_json_field() {  # <json> <field>
   printf '%s' "$1" | sed -n "s/.*\"$2\":\"\\([^\"]*\\)\".*/\\1/p"
 }
 
+# Split the prose line into its three rendered fields. The reader emits
+#   state: <state> · source: <source>[ · <detail>]
+# and a detail may itself contain the separator, so only the FIRST two are split
+# on: everything after them is the detail, verbatim.
+CF_SEP=' · '
+cf_prose_field() {  # <prose-line> <state|source|detail>
+  local rest=${1#state: } state source detail=''
+  state=${rest%%"$CF_SEP"*}
+  rest=${rest#*"$CF_SEP"}
+  source=${rest#source: }
+  case "$source" in
+    *"$CF_SEP"*)
+      detail=${source#*"$CF_SEP"}
+      source=${source%%"$CF_SEP"*}
+      ;;
+  esac
+  case "$2" in
+    state)  printf '%s' "$state" ;;
+    source) printf '%s' "$source" ;;
+    detail) printf '%s' "$detail" ;;
+  esac
+}
+
 # Evaluate one row. Echoes "PASS" or a diagnosis; never exits, so the verifier
 # can be pointed at a deliberately wrong expectation to prove it goes red.
 cf_check_row() {  # <name> <setup-fn> <want-state> <want-source> <want-precedence>
   local name=$1 setup=$2 want_state=$3 want_source=$4 want_prec=$5
-  local d id prose json got_state got_source got_prec prose_state
+  local d id prose json got_state got_source got_prec got_detail
+  local prose_state prose_source prose_detail
   reset_fakes
   d=$(cf_new_case)
   CF_ID=""; "$setup" "$d"; id=$CF_ID
   prose=$(run_crew_state "$d" "$id")
   json=$(run_crew_state_json "$d" "$id")
-  prose_state=${prose#state: }; prose_state=${prose_state%% *}
+  prose_state=$(cf_prose_field "$prose" state)
+  prose_source=$(cf_prose_field "$prose" source)
+  prose_detail=$(cf_prose_field "$prose" detail)
   got_state=$(cf_json_field "$json" state)
   got_source=$(cf_json_field "$json" source)
   got_prec=$(cf_json_field "$json" precedence_applied)
+  got_detail=$(cf_json_field "$json" detail)
+  # Field-by-field equivalence, not state alone. Both modes render from the same
+  # emit call today, which is exactly why the assertion has to cover every
+  # rendered field: the cheap check would still pass after a change that gave
+  # one mode its own formatting.
   [ "$prose_state" = "$got_state" ] || {
-    printf '%s: prose said %s, structured said %s' "$name" "$prose_state" "$got_state"; return; }
+    printf '%s: prose state %s, structured state %s' "$name" "$prose_state" "$got_state"; return; }
+  [ "$prose_source" = "$got_source" ] || {
+    printf '%s: prose source %s, structured source %s' "$name" "$prose_source" "$got_source"; return; }
+  [ "$prose_detail" = "$got_detail" ] || {
+    printf '%s: prose detail [%s], structured detail [%s]' "$name" "$prose_detail" "$got_detail"; return; }
   [ "$got_state" = "$want_state" ] || {
     printf '%s: want state %s, got %s' "$name" "$want_state" "$got_state"; return; }
   [ "$got_source" = "$want_source" ] || {
@@ -1747,6 +1784,140 @@ test_busy_verdict_carries_its_evidence_age() {
   pass "a record-backed verdict reports evidence age and the advancing counter, and an ageless one reports neither"
 }
 
+# The verdict whose entire meaning is "this evidence aged out" must be able to
+# say BY HOW MUCH. Expiry is a judgement ABOUT the evidence, so the path that
+# reaches it must not discard the evidence that produced it: a `stale` that
+# cannot distinguish a record 61 minutes old from one 3 days old is barely
+# better than the boolean it replaced.
+test_stale_verdict_reports_how_stale() {
+  reset_fakes
+  local d json age seq
+  d=$(new_case stale-age)
+  cf_no_run_case "$d" staleage scout
+  arm_expired_busy_record "$d/state" staleage
+  json=$(run_crew_state_json "$d" staleage)
+  [ "$(cf_json_field "$json" state)" = stale ] \
+    || fail "an expired busy record must report stale, got '$(cf_json_field "$json" state)'"
+  age=$(printf '%s' "$json" | sed -n 's/.*"evidence_age_secs":\([0-9]*\).*/\1/p')
+  [ -n "$age" ] || fail "a stale verdict must report how old the expired evidence was, got null"
+  # arm_expired_busy_record backdates by 7200s. The assertion is on the MEASURED
+  # age, not merely on non-null, so a fabricated 0 (or the record's own bound
+  # echoed back) is red here too.
+  [ "$age" -ge 7000 ] \
+    || fail "a stale verdict must report the record's real age, got '$age'"
+  seq=$(printf '%s' "$json" | sed -n 's/.*"busy_seq":\([0-9]*\).*/\1/p')
+  [ -n "$seq" ] || fail "a stale verdict must report the expired record's advancing counter"
+  pass "a stale verdict carries the age and sequence of the evidence that expired"
+}
+
+# The reader answers an ARBITRARY string with a verdict rather than a usage
+# error, and `--json` is the only flag it recognizes. Callers that pass a
+# caller-supplied token already depend on that: a later greedy option handler
+# (or a `--help` arm) would break them with every other test still green.
+test_help_flag_stays_an_unknown_id() {
+  reset_fakes
+  local d out json rc
+  d=$(new_case help-contract)
+  mkdir -p "$d/state"
+  make_fakebin "$d" >/dev/null
+  out=$(run_crew_state "$d" --help); rc=$?
+  expect_code 0 "$rc" "--help must be read as an id, not a usage error"
+  assert_contains "$out" "state: unknown" "--help must still report state: unknown"
+  assert_contains "$out" "source: none" "--help must still report source: none"
+  json=$(run_crew_state_json "$d" --help)
+  [ "$(cf_json_field "$json" state)" = unknown ] \
+    || fail "--json --help must report state unknown, got '$(cf_json_field "$json" state)'"
+  [ "$(cf_json_field "$json" source)" = none ] \
+    || fail "--json --help must report source none, got '$(cf_json_field "$json" source)'"
+  pass "--help stays an unknown id and still reports state: unknown, source: none"
+}
+
+# terminal_error is VERBATIM pipeline output, so it can carry an ANSI escape -
+# an ordinary thing for captured tool output. JSON forbids a raw control
+# character inside a string, so emitting one produced an object the snapshot's
+# jq validation rejected, degrading a correct `interrupted` verdict to
+# `unknown`. The reader must not be defeated by the shape of the evidence it is
+# quoting.
+test_control_characters_in_terminal_error_stay_valid_json() {
+  command -v jq >/dev/null 2>&1 || { pass "skip: jq not found for JSON validity check"; return; }
+  reset_fakes
+  local d json esc
+  d=$(new_case control-chars)
+  make_repo_on_branch "$d/wt" fm/cf-ansi
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/ansi.meta" "window=fm:fm-ansi" "worktree=$d/wt" \
+    "kind=ship" "harness=claude"
+  esc=$'\033'
+  FM_FAKE_AXI_STATUS="$(cat <<EOF
+run:
+  id: "01RUN"
+  branch: fm/cf-ansi
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+outcome: failed
+error: daemon crashed during execution ${esc}[31mred${esc}[0m
+EOF
+)"
+  json=$(run_crew_state_json "$d" ansi)
+  printf '%s' "$json" | jq -e . >/dev/null 2>&1 \
+    || fail "a terminal error carrying an ANSI escape produced invalid JSON: $json"
+  printf '%s' "$json" | jq -e '.state == "interrupted"' >/dev/null 2>&1 \
+    || fail "the verdict must survive the escape sequence intact: $json"
+  printf '%s' "$json" | jq -e '.terminal_error | contains("\u001b")' >/dev/null 2>&1 \
+    || fail "the escape must survive as an escaped code point, not be dropped: $json"
+  pass "control characters in verbatim pipeline output stay valid, decodable JSON"
+}
+
+# PROPERTY 3 coverage gate: every consumer must handle the WHOLE verdict set.
+# crew_state_clears_open_decision (fm-classify-lib.sh) owns the rule that
+# bin/fm-fleet-snapshot.sh applies to keyed open decisions, and it answers 2 for
+# a verdict it does not recognize. A verdict added to the vocabulary without an
+# arm there fails HERE rather than silently taking the clearing branch in
+# production, which is how the previous negative-condition chain dropped a
+# captain's question on interrupted, stale, and idle.
+test_every_verdict_has_a_declared_decision_clearing_answer() {
+  local state rc
+  for state in $FM_CREW_STATE_VOCABULARY; do
+    crew_state_clears_open_decision "$state" run-step; rc=$?
+    [ "$rc" != 2 ] || \
+      fail "verdict '$state' reaches no arm of crew_state_clears_open_decision; add one"
+    crew_state_clears_open_decision "$state" status-log; rc=$?
+    [ "$rc" != 2 ] || \
+      fail "verdict '$state' reaches no arm of crew_state_clears_open_decision (status-log)"
+  done
+  # The gate is red-capable: a verdict outside the vocabulary must reach 2.
+  crew_state_clears_open_decision frobnicated run-step; rc=$?
+  [ "$rc" = 2 ] || fail "an unrecognized verdict must be reported, not silently answered"
+  pass "every verdict in the vocabulary has an explicit decision-clearing answer"
+}
+
+# Only POSITIVE evidence that the crew moved past the gate clears an open
+# decision. The unsafe direction is the one that matters: dropping an open
+# decision loses a captain's question, while keeping a spurious one costs a
+# glance.
+test_only_positive_evidence_clears_an_open_decision() {
+  local state
+  crew_state_clears_open_decision working run-step \
+    || fail "a working run-step must clear a superseded decision"
+  crew_state_clears_open_decision working pane \
+    || fail "a working pane must clear a superseded decision"
+  crew_state_clears_open_decision "done" status-log \
+    || fail "a terminal done must clear on a single-owner task"
+  crew_state_clears_open_decision failed run-step \
+    || fail "a terminal failed must clear on a single-owner task"
+  crew_state_clears_open_decision working status-log \
+    && fail "a non-authoritative working read must not clear a decision"
+  for state in parked blocked paused aborted interrupted idle stale unknown; do
+    crew_state_clears_open_decision "$state" run-step \
+      && fail "verdict '$state' must keep an open decision surfacing (run-step)"
+    crew_state_clears_open_decision "$state" pane \
+      && fail "verdict '$state' must keep an open decision surfacing (pane)"
+  done
+  pass "an open decision clears only on positive evidence the crew moved past the gate"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1804,5 +1975,10 @@ test_structured_mode_never_diverges_from_prose
 test_every_answer_declares_its_precedence
 test_source_disagreement_names_the_winning_rule
 test_busy_verdict_carries_its_evidence_age
+test_stale_verdict_reports_how_stale
+test_help_flag_stays_an_unknown_id
+test_control_characters_in_terminal_error_stay_valid_json
+test_every_verdict_has_a_declared_decision_clearing_answer
+test_only_positive_evidence_clears_an_open_decision
 
 echo "all fm-crew-state tests passed"
