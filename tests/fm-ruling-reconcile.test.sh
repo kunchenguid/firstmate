@@ -89,6 +89,24 @@ EOF
 Investigate `sample-review-decision-zeta` and report what you find.
 The investigation is **APPROVED** to proceed.
 EOF
+  # The one name both positions claim: the anchored ruling PREFIX and the
+  # commission SUFFIX both fire. The suffix has to win, because that is the only
+  # order that can never let a commission satisfy the captain's condition 1.
+  cat > "$home/data/rulings-2026-01-03-commission.md" <<'EOF'
+# A commission a ruling prefix would also claim
+
+Investigate `sample-review-decision-eta` and report what you find.
+The investigation is **APPROVED** to proceed.
+EOF
+  # Prose namings rather than table rows, so the identifier boundary is exercised
+  # where it actually bites. theta ends a sentence; kappa.extra is a longer
+  # dotted identifier that must not stand in for the shorter dotted hold.
+  cat > "$home/data/captain-rulings-2026-01-02.md" <<'EOF'
+# Captain rulings — 2026-01-02
+
+The captain has **RESOLVED** the question of sample-review-decision-theta.
+The captain has **RESOLVED** the dotted matter of sample.review.decision.kappa.extra as stated.
+EOF
 }
 
 # A ruling-shaped document the caller authored OUTSIDE the corpus root.
@@ -500,6 +518,17 @@ test_a_commission_named_like_a_ruling_is_still_a_commission() {
   printf '%s\n' "$out" | grep -qxF 'reason=not-a-ruling-document' \
     || fail "a commission must never satisfy condition 1, got: $out"
 
+  # The order itself: this name satisfies the ruling PREFIX form as well, so it
+  # pins which position wins rather than merely which names are recognised.
+  line=$(grep -nF 'sample-review-decision-eta' \
+    "$home/data/rulings-2026-01-03-commission.md" | head -1 | cut -d: -f1)
+  out=$(run_reconcile "$home" closure-test sample-review-decision-eta \
+    --ruling rulings-2026-01-03-commission.md --line "$line" --grade rules)
+  printf '%s\n' "$out" | grep -qxF 'doc_class=commission' \
+    || fail "the commission suffix must beat the ruling prefix, got: $out"
+  printf '%s\n' "$out" | grep -qxF 'closure=escalate' \
+    || fail "a name both positions claim must escalate, got: $out"
+
   # Control: the real `<who>-rulings-<when>` prefix form still classifies ruling.
   add_hold "$home" sample-review-decision-alpha "Alpha decision"
   run_reconcile "$home" scan >/dev/null || fail "scan failed"
@@ -579,6 +608,60 @@ EOF
   pass "a failing hold reader refuses instead of reporting zero open holds"
 }
 
+# --- 15. the identifier boundary, driven three ways -------------------------
+#
+# All three of these once returned verbatim_identifier=no, so a fix that made
+# them all `yes` would be exactly as wrong as the boundary that refused them.
+# They are asserted together for that reason.
+
+test_identifier_boundary_separates_sentence_end_from_shadowing() {
+  local home out line
+
+  home=$(make_home boundary)
+  line=$(grep -nF 'sample-review-decision-theta' \
+    "$home/data/captain-rulings-2026-01-02.md" | head -1 | cut -d: -f1)
+
+  # 1. An identifier that ends a sentence IS a verbatim naming.
+  out=$(run_reconcile "$home" closure-test sample-review-decision-theta \
+    --ruling captain-rulings-2026-01-02.md --line "$line" --grade rules)
+  printf '%s\n' "$out" | grep -qxF 'verbatim_identifier=yes' \
+    || fail "an identifier ending a sentence must be a verbatim naming, got: $out"
+  printf '%s\n' "$out" | grep -qxF 'closure=permitted' \
+    || fail "a sentence-ending naming beside a verdict token must be permitted, got: $out"
+
+  # 2. A shorter dotted identifier still cannot stand in for a longer one.
+  line=$(grep -nF 'sample.review.decision.kappa.extra' \
+    "$home/data/captain-rulings-2026-01-02.md" | head -1 | cut -d: -f1)
+  out=$(run_reconcile "$home" closure-test sample.review.decision.kappa \
+    --ruling captain-rulings-2026-01-02.md --line "$line" --grade rules)
+  printf '%s\n' "$out" | grep -qxF 'verbatim_identifier=no' \
+    || fail "a longer dotted identifier must not name the shorter hold, got: $out"
+  printf '%s\n' "$out" | grep -qxF 'reason=identifier-not-verbatim-on-cited-line' \
+    || fail "a dotted prefix collision must escalate, got: $out"
+  out=$(run_reconcile "$home" closure-test sample.review.decision.kappa.extra \
+    --ruling captain-rulings-2026-01-02.md --line "$line" --grade rules)
+  printf '%s\n' "$out" | grep -qxF 'closure=permitted' \
+    || fail "control: the dotted identifier's own naming must be permitted, got: $out"
+
+  # 3. The index scan shares the boundary, and a hold named nowhere stays
+  # reported open rather than being quietly matched by the widened rule.
+  add_hold "$home" sample-review-decision-theta "Theta decision"
+  add_hold "$home" sample.review.decision.kappa "Kappa decision"
+  add_hold "$home" sample-review-decision-delta "Delta decision"
+  run_reconcile "$home" scan >/dev/null || fail "scan failed"
+  [ "$(match_field sample-review-decision-theta 2 "$home")" = captain-rulings-2026-01-02.md ] \
+    || fail "the scan must find the sentence-ending naming, not report it unmatched"
+  [ "$(match_field sample.review.decision.kappa 2 "$home")" = none ] \
+    || fail "the scan must not match the shorter dotted hold on the longer identifier"
+  [ "$(match_field sample-review-decision-delta 2 "$home")" = none ] \
+    || fail "a hold named nowhere must still be reported unmatched"
+  run_reconcile "$home" propose \
+    | grep -qF 'unmatched: no ruling document names this hold' \
+    || fail "the unmatched row must still appear in the grading envelope"
+
+  pass "the identifier boundary accepts a sentence end without accepting a longer identifier"
+}
+
 test_eligibility_separates_ruling_commission_and_silence
 test_removing_a_verdict_token_flips_eligibility
 test_table_row_does_not_inherit_the_next_rows_verdict
@@ -593,3 +676,4 @@ test_closure_test_refuses_a_ruling_outside_the_corpus
 test_a_commission_named_like_a_ruling_is_still_a_commission
 test_resolve_refuses_a_provenance_path_that_forges_the_verdict
 test_hold_reader_failure_is_not_zero_open_holds
+test_identifier_boundary_separates_sentence_end_from_shadowing

@@ -46,6 +46,8 @@ The script produces candidates, excerpts, and an eligibility verdict, and never 
 Document class is decided structurally from naming: the `<what>commission.md` suffix form is tested first and is decisive, then the anchored `<who>-rulings-<when>` or `<who>-ruling-<when>` prefix form, then the containing directory.
 The commission suffix wins because a document that declares itself a commission must never satisfy the captain's condition 1, however much the rest of its name resembles a ruling, and an unrecognised name is `other`, which escalates.
 A hold identifier matches only when it is bounded by delimiters, so a row that rules a longer identifier containing this one cannot stand in for it, and the index scan and the closure test share that single pattern.
+A dot is legal inside a hold identifier, so a trailing dot counts as a boundary only when it ends the line or is followed by whitespace: an identifier ending a sentence is recognised, while `a.b` still cannot stand in for a line naming `a.b.c`.
+That distinction matters because a silent false-unmatch reports `unmatched: no ruling document names this hold` and is believed, which is the failure this increment exists to eliminate rather than merely a missed closure.
 A verdict token counts only inside single-line markdown emphasis and only as a whole word with an optional verb inflection, so an emphasised word that merely contains a token does not qualify.
 A markdown table row is scanned alone rather than through a window, because a windowed scan attributed one table row's verdict to a different row six lines above it.
 Eligibility is necessary and not sufficient: closure additionally requires a caller grade of `rules` and a separate `fm-decision-hold.sh resolve` call.
@@ -87,6 +89,9 @@ Closure-gate hardening verification date: 2026-08-06.
 Six further cases cover the ways the two-condition test could be satisfied without being met, and each was mutation-controlled the same way by reverting exactly one guard in the production script and observing the case fail.
 They cover a hold identifier that is only a prefix of the identifier the cited row actually rules, an emphasised English word that merely contains a verdict token, a ruling document reached by absolute path, `../` traversal, or symlink from outside the corpus root, a commission whose filename resembles a ruling, a `--from-ruling` path crafted to plant `closure=permitted` in the closure test's own echoed output, and a `tasks-axi` hold listing that fails.
 The fixture corpus gained three ruling rows and one commission that exist only to be refused, so the suite fails rather than passes if any of those guards is removed.
+
+A further case covers the identifier boundary itself, and asserts all three of its outcomes together because they once shared one wrong answer.
+It requires that an identifier ending a sentence is matched, that a shorter dotted hold is still not matched by a longer dotted identifier, and that a hold named nowhere still reports its unmatched row, so a boundary widened until everything matches fails it just as a boundary that refuses everything does.
 
 `bin/fm-ruling-reconcile.sh` was additionally measured against this home's real corpus rather than fixtures alone.
 Across the twelve documents it classifies as rulings, the flagship ruling table yielded 15 eligible rows of 24 when measured; the other nine state their verdict without emphasis and therefore escalate.

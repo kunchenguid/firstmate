@@ -169,10 +169,21 @@ tsv_cell() {  # <text>
 # that rules `sample-review-decision-alpha-two`. The index scan and the closure
 # gate share this one pattern so they can never disagree about what verbatim
 # means.
+#
+# A dot is legal inside a hold id, so it has to be excluded from the boundary to
+# keep `a.b` from standing in for a line that names `a.b.c`. Excluding it
+# outright, though, refused every prose naming that ends in a full stop, and the
+# hold was then reported `unmatched: no ruling document names this hold`. A
+# silent false-unmatch is the exact failure this increment exists to eliminate:
+# it tells the reader nothing names the hold and the reader believes it, so
+# "safe for closure" is not a sufficient bar when the scan's whole job is to
+# find the naming. A trailing dot is therefore a boundary only when the dot
+# itself ends the line or is followed by whitespace, which recognises the
+# sentence-ending naming while leaving the anti-shadowing property intact.
 hold_pattern() {  # <hold-id>
   local esc
   esc=$(printf '%s' "$1" | sed 's/[^A-Za-z0-9_-]/\\&/g')
-  printf '(^|[^A-Za-z0-9._-])%s([^A-Za-z0-9._-]|$)' "$esc"
+  printf '(^|[^A-Za-z0-9._-])%s([^A-Za-z0-9._-]|[.]([[:space:]]|$)|$)' "$esc"
 }
 
 # --- corpus scope -----------------------------------------------------------
@@ -208,16 +219,20 @@ ruling_candidates() {  # <resolved-root>
 # Naming carries the class in two stable positions: a ruling declares itself in
 # the `<who>-rulings-<when>` PREFIX form, evaluated only over the leading one or
 # two dash-separated segments, and a commission declares itself in the
-# `<what>commission.md` SUFFIX form.
+# `<what>commission.md` SUFFIX form. The directory is a third, weaker signal.
 #
-# The commission suffix is decisive and is therefore tested first: a document
-# that ends in `commission.md` is a commission however much its name resembles a
-# ruling elsewhere, because letting a commission satisfy the captain's
-# condition 1 is the exact inversion this two-position design exists to prevent.
-# The prefix form is anchored for the same reason - an unanchored `*ruling-*`
-# matches `cfvc-remediation-ruling-commission.md` and makes the commission
-# branch unreachable. The directory is consulted last and only when the name
-# itself declares nothing. Anything else is `other` and escalates, so an
+# THE IMPLEMENTED ORDER IS SUFFIX, THEN PREFIX, THEN DIRECTORY, AND IT MUST NOT
+# BE REORDERED. The commission suffix is decisive and is therefore tested first:
+# a document that ends in `commission.md` is a commission however much its name
+# resembles a ruling elsewhere. That order can only ever bias a name toward
+# `commission`, and a commission escalates rather than closes, so it fails safe
+# by construction. Testing the ruling prefix first would let a commission-suffixed
+# name classify as a ruling and satisfy the captain's condition 1, which is the
+# exact inversion this two-position design exists to prevent - do not "correct"
+# the order back. The prefix form is anchored for the same reason: an unanchored
+# `*ruling-*` matches `cfvc-remediation-ruling-commission.md` and makes the
+# commission branch unreachable. The directory is consulted last and only when
+# the name itself declares nothing. Anything else is `other` and escalates, so an
 # unrecognised naming convention costs a human read and can never close a hold.
 declares_ruling() {  # <basename-or-directory-name>
   local n

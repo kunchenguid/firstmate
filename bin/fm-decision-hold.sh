@@ -61,6 +61,16 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 
+# The only work file this script creates holds the closure test's stderr while
+# --from-ruling is verified. An interrupt during that subprocess is the one
+# window in which it could otherwise be left behind in TMPDIR.
+CLOSURE_ERR=
+cleanup_closure_err() {
+  [ -z "$CLOSURE_ERR" ] || rm -f -- "$CLOSURE_ERR"
+  CLOSURE_ERR=
+}
+trap cleanup_closure_err EXIT HUP INT TERM
+
 usage() {
   awk '
     NR == 1 { next }
@@ -383,7 +393,7 @@ EOF
 }
 
 command_resolve() {
-  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0 from_ruling='' ruling_path='' ruling_line='' closure_out='' closure_err='' closure_verdict='' closure_reason=''
+  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0 from_ruling='' ruling_path='' ruling_line='' closure_out='' closure_verdict='' closure_reason=''
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -423,16 +433,16 @@ command_resolve() {
     esac
     [ -x "$SCRIPT_DIR/fm-ruling-reconcile.sh" ] \
       || fail "fm-ruling-reconcile.sh is required to verify --from-ruling"
-    closure_err=$(mktemp "${TMPDIR:-/tmp}/fm-decision-hold-closure.XXXXXX") \
+    CLOSURE_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-decision-hold-closure.XXXXXX") \
       || fail "could not create a work file to verify --from-ruling"
     if ! closure_out=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
       "$SCRIPT_DIR/fm-ruling-reconcile.sh" closure-test "$id" \
-      --ruling "$ruling_path" --line "$ruling_line" --grade rules 2>"$closure_err"); then
-      closure_reason=$(tr '\n' ' ' < "$closure_err")
-      rm -f "$closure_err"
+      --ruling "$ruling_path" --line "$ruling_line" --grade rules 2>"$CLOSURE_ERR"); then
+      closure_reason=$(tr '\n' ' ' < "$CLOSURE_ERR")
+      cleanup_closure_err
       fail "could not verify --from-ruling provenance: $from_ruling: $closure_reason"
     fi
-    rm -f "$closure_err"
+    cleanup_closure_err
     # The verdict is read as a FIELD of the closure test's own stdout, never as
     # text found somewhere in its output. closure-test echoes the caller-supplied
     # path back on `ruling_file=`, so a search of the whole stream is satisfied by
