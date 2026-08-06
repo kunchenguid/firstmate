@@ -22,6 +22,7 @@ let launchInFlight = null;
 let restorationInFlight = null;
 let armClose = new WeakMap();
 let armReadiness = new WeakMap();
+let notPrimaryReported = false;
 
 function positiveInteger(name, fallback) {
   const value = Number(process.env[name]);
@@ -89,25 +90,39 @@ function effectivePaths(root) {
   return { root: fmRoot, home: fmHome, state, config };
 }
 
-async function isPrimaryRoot(root, home) {
+function hasTaskMetadata(state) {
+  try {
+    return readdirSync(state).some((name) => name.endsWith(".meta"));
+  } catch {
+    return false;
+  }
+}
+
+function hasSecondmateMarker(root) {
+  try {
+    const id = readFileSync(`${root}/.fm-secondmate-home`, "utf8")
+      .split(/\r?\n/, 1)[0]
+      .replace(/\s/g, "");
+    return /^[A-Za-z0-9._-]+$/.test(id);
+  } catch {
+    return false;
+  }
+}
+
+async function isPrimaryRoot(root, home, state) {
   if (!root) return false;
   if (!existsSync(`${root}/AGENTS.md`) || !existsSync(`${root}/bin`)) return false;
-  if (existsSync(`${root}/.fm-secondmate-home`)) return false;
+  if (!existsSync(`${root}/.opencode/plugins`) && !existsSync(`${root}/bin/fm-watch-arm.sh`)) return false;
+  if (existsSync(`${root}/.fm-secondmate-home`) && !hasSecondmateMarker(root)) return false;
   if (home && home !== root && existsSync(`${home}/.fm-secondmate-home`)) return false;
-  const gitDir = await runProcess("git", ["-C", root, "rev-parse", "--git-dir"]);
-  const commonDir = await runProcess("git", ["-C", root, "rev-parse", "--git-common-dir"]);
-  if (gitDir.code !== 0 || commonDir.code !== 0) return false;
-  return gitDir.stdout.trim() === commonDir.stdout.trim();
+  if (!state || !hasTaskMetadata(state)) return false;
+  return sessionOwnsLock({ state });
 }
 
 function shouldArm(paths) {
   if (existsSync(`${paths.state}/.afk`)) return false;
   if (existsSync(`${paths.config}/x-mode.env`)) return true;
-  try {
-    return readdirSync(paths.state).some((name) => name.endsWith(".meta"));
-  } catch {
-    return false;
-  }
+  return hasTaskMetadata(paths.state);
 }
 
 async function sessionOwnsLock(paths) {
@@ -200,6 +215,17 @@ function wakePrompt(reason) {
 function surfaceFailure(paths, client, sessionID, reason) {
   void sendPrompt(paths, client, sessionID, wakePrompt(reason)).catch(() => {
   });
+}
+
+function reportNotPrimary(paths, client, sessionID) {
+  if (notPrimaryReported) return;
+  notPrimaryReported = true;
+  surfaceFailure(
+    paths,
+    client,
+    sessionID,
+    "watcher: FAILED - OpenCode primary scope is not-primary; session no longer owns the lock or primary evidence is incomplete; verify session lock ownership, primary hook paths, state metadata, and marker validity",
+  );
 }
 
 function retryDelay(attempt) {
@@ -379,8 +405,10 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
 
 async function beginArm(paths, sessionID, client, predecessorArmPid) {
   if (!sessionID) return { status: "skipped", armChild: null };
-  if (!(await isPrimaryRoot(paths.root, paths.home))) return { status: "not-primary", armChild: null };
-  if (!(await sessionOwnsLock(paths))) return { status: "read-only", armChild: null };
+  if (!(await isPrimaryRoot(paths.root, paths.home, paths.state))) {
+    reportNotPrimary(paths, client, sessionID);
+    return { status: "not-primary", armChild: null };
+  }
   if (child) return { status: "existing", armChild: child };
   if (retryTimer) return { status: "retrying", armChild: null };
   if (!shouldArm(paths)) return { status: "not-needed", armChild: null };

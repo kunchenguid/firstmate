@@ -67,7 +67,7 @@ done
 # agent and an unmarked task worktree can never run a session start for a home
 # they do not own.
 fm_is_gate_agent "$FM_ROOT" && exit 0
-fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+fm_primary_scope_matches "$FM_ROOT" "$STATE" --prelock || exit 0
 
 session_start_completed() {
   local lock_pid completion_pid

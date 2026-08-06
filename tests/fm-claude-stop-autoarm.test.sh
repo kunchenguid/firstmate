@@ -41,6 +41,7 @@ make_primary_dir() {
   git init -q "$dir"
   git -C "$dir" commit -q --allow-empty -m init
   : > "$dir/AGENTS.md"
+  printf '%s\n' "$$" > "$dir/state/.lock"
   install_autoarm_scripts "$dir"
   printf '%s\n' "$dir"
 }
@@ -183,7 +184,7 @@ test_inert_in_child_worktree() {
   make_crewmate_worktree_dir "$base" "$dir" >/dev/null
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" actionable
-  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  out=$(printf '%s\n' '{"session_id":"s"}' | FM_HOME="$dir" bash "$dir/bin/fm-claude-stop-autoarm.sh" 2>/dev/null); status=$?
   expect_code 0 "$status" "hook must stay inert in a child task worktree"
   [ ! -e "$dir/state/arm-ran" ] || fail "hook armed inside a child worktree"
   [ ! -e "$dir/state/.claude-autoarm-epoch" ] || fail "hook wrote an epoch inside a child worktree"
@@ -194,6 +195,7 @@ test_inert_without_session_lock() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/no-lock")
   : > "$dir/state/task.meta"
+  rm -f "$dir/state/.lock"
   write_arm_fixture "$dir" actionable
   # No state/.lock: run the hook directly (no fake harness, no lock file).
   out=$(printf '%s\n' '{"session_id":"s"}' | FM_HOME="$dir" bash "$dir/bin/fm-claude-stop-autoarm.sh" 2>&1); status=$?

@@ -18,7 +18,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-operational-input.sh"
 
 fm_is_gate_agent "$FM_ROOT" && exit 0
-fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+fm_primary_scope_matches "$FM_ROOT" "$STATE" --prelock || exit 0
 
 lock_is_in_ancestry() {
   local lock_pid pid=$$ _

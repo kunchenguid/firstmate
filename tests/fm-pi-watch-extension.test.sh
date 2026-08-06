@@ -1255,6 +1255,7 @@ test_opencode_primary_watch_plugin_sources_effective_config() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
   printf 'export FM_POLL=7\n' > "$home/config/x-mode.env"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1308,7 +1309,7 @@ test_opencode_primary_watch_plugin_requires_session_lock() {
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'arm\n' >> "${FM_ARM_LOG:?}"
-printf 'watcher: healthy pid=1 (beacon 0s)\n'
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
@@ -1316,27 +1317,47 @@ import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-const client = { session: { promptAsync: async () => {} } };
+let prompts = 0;
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      prompts += 1;
+      if (!request.body.parts[0].text.includes("primary scope is not-primary")) {
+        throw new Error(`unexpected diagnostic: ${request.body.parts[0].text}`);
+      }
+    },
+  },
+};
 const hooks = await mod.FmPrimaryWatchArm({
   client,
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
 });
-const event = { event: { type: "session.idle", properties: { sessionID: "session-test" } } };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, "999999\n");
-await hooks.event(event);
-await new Promise((resolve) => setTimeout(resolve, 120));
+const first = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+if (first !== "not-primary") {
+  console.error(`expected not-primary without lock ownership, got ${first}`);
+  process.exit(1);
+}
 if (existsSync(process.env.FM_ARM_LOG)) {
   console.error("watch arm ran without owning the session lock");
   process.exit(1);
 }
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await hooks.event(event);
+const second = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+if (second !== "armed") {
+  console.error(`expected armed after the session lock matched, got ${second}`);
+  process.exit(1);
+}
 for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
 if (!existsSync(process.env.FM_ARM_LOG)) {
   console.error("watch arm did not run after the session lock matched");
+  process.exit(1);
+}
+if (prompts !== 1) {
+  console.error(`expected one not-primary diagnostic, got ${prompts}`);
   process.exit(1);
 }
 EOF
@@ -1347,13 +1368,14 @@ EOF
   pass "OpenCode watcher plugin requires session lock ownership"
 }
 
-test_opencode_watch_arm_coordinator_respects_primary_scope() {
-  local plugin base repo home log out status
+test_opencode_watch_arm_coordinator_accepts_linked_primary_scope() {
+  local plugin base repo home log stop out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
   base="$TMP_ROOT/opencode-coordinator-base"
   repo="$TMP_ROOT/opencode-coordinator-wt"
   home="$TMP_ROOT/opencode-coordinator-home"
   log="$TMP_ROOT/opencode-coordinator.log"
+  stop="$TMP_ROOT/opencode-coordinator.stop"
   fm_git_worktree "$base" "$repo" fm/opencode-coordinator
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   : > "$repo/AGENTS.md"
@@ -1361,37 +1383,53 @@ test_opencode_watch_arm_coordinator_respects_primary_scope() {
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'arm\n' >> "${FM_ARM_LOG:?}"
-printf 'watcher: healthy pid=1 (beacon 0s)\n'
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "${FM_STOP_FILE:?}" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node 2>&1 <<'EOF'
 import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-const client = { session: { promptAsync: async () => {} } };
+let prompts = 0;
+const client = { session: { promptAsync: async () => { prompts += 1; } } };
 await mod.FmPrimaryWatchArm({
   client,
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
 });
-writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-const status = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
-await new Promise((resolve) => setTimeout(resolve, 120));
-if (status !== "not-primary") {
-  console.error(`expected not-primary, got ${status}`);
+const beforeLock = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+if (beforeLock !== "not-primary") {
+  console.error(`expected not-primary without lock, got ${beforeLock}`);
   process.exit(1);
 }
 if (existsSync(process.env.FM_ARM_LOG)) {
-  console.error("coordinator armed from a linked worktree");
+  console.error("watch arm ran from a linked worktree without primary evidence");
   process.exit(1);
 }
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const status = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+if (status !== "armed") {
+  console.error(`expected armed, got ${status}`);
+  process.exit(1);
+}
+if (!existsSync(process.env.FM_ARM_LOG)) {
+  console.error("watch arm did not run from a linked primary worktree");
+  process.exit(1);
+}
+if (prompts !== 1) {
+  console.error(`expected one not-primary diagnostic, got ${prompts}`);
+  process.exit(1);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 EOF
-)
+  )
   status=$?
-  expect_code 0 "$status" "OpenCode watch coordinator must keep primary scope checks in the shared arm path"
-  [ -z "$out" ] || fail "OpenCode coordinator-scope test printed output: $out"
-  pass "OpenCode watcher coordinator respects primary scope"
+  expect_code 0 "$status" "OpenCode watch coordinator must accept positive primary evidence in a linked worktree"
+  [ -z "$out" ] || fail "OpenCode coordinator linked-primary test printed output: $out"
+  pass "OpenCode watcher coordinator accepts a linked primary worktree"
 }
 
 test_opencode_primary_watch_plugin_rearms_after_wake() {
@@ -2143,7 +2181,7 @@ test_opencode_plugin_package_boundary_is_explicit_esm
 test_opencode_primary_watch_plugin_uses_effective_state_home
 test_opencode_primary_watch_plugin_sources_effective_config
 test_opencode_primary_watch_plugin_requires_session_lock
-test_opencode_watch_arm_coordinator_respects_primary_scope
+test_opencode_watch_arm_coordinator_accepts_linked_primary_scope
 test_opencode_primary_watch_plugin_rearms_after_wake
 test_opencode_pre_ready_actionable_close_preserves_its_successor
 test_opencode_hung_successor_falls_back_to_typed_wake

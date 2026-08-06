@@ -134,6 +134,7 @@ make_primary_dir() {
   git init -q "$dir"
   git -C "$dir" commit -q --allow-empty -m init
   : > "$dir/AGENTS.md"
+  printf '%s\n' "$$" > "$dir/state/.lock"
   install_guard_scripts "$dir"
   printf '%s\n' "$dir"
 }
@@ -185,6 +186,7 @@ make_secondmate_linked_home_dir() {
   : > "$dir/AGENTS.md"
   install_guard_scripts "$dir"
   printf 'sm-linked-1\n' > "$dir/.fm-secondmate-home"
+  printf '%s\n' "$$" > "$dir/state/.lock"
   printf '%s\n' "$dir"
 }
 
@@ -367,6 +369,7 @@ test_hook_blocks_from_fm_home_state() {
   dir=$(make_primary_dir "$TMP_ROOT/hook-fm-home")
   home="$TMP_ROOT/hook-fm-home-op"
   mkdir -p "$home/state"
+  printf '%s\n' "$$" > "$home/state/.lock"
   : > "$home/state/task1.meta"
   out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
   expect_code 2 "$status" "hook must inspect the active FM_HOME state dir"
@@ -415,6 +418,7 @@ test_hook_uses_state_override() {
   home="$TMP_ROOT/hook-state-override-home"
   state="$TMP_ROOT/hook-state-override-active"
   mkdir -p "$home/state" "$state"
+  printf '%s\n' "$$" > "$state/.lock"
   : > "$state/task1.meta"
   out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
   expect_code 2 "$status" "hook must let FM_STATE_OVERRIDE win over FM_HOME/state"
@@ -517,7 +521,8 @@ test_hook_secondmate_reinvoke_recovery_loop() {
 # The marker force-include must guard only the secondmate's OWN home, never its
 # children: a secondmate's linked crew/scout worktree carries no marker, so it
 # stays exempt by the same git-dir/git-common-dir test that exempts the main
-# home's children.
+# home's children. An inherited secondmate FM_HOME must not make that child
+# primary either.
 test_hook_silent_in_secondmate_child_worktree() {
   local home dir out status
   home=$(make_secondmate_dir "$TMP_ROOT/hook-sm-child-home")
@@ -527,7 +532,27 @@ test_hook_silent_in_secondmate_child_worktree() {
   out=$(run_hook "$dir" false); status=$?
   expect_code 0 "$status" "hook must stay exempt in a secondmate's own child crew/scout worktree"
   [ -z "$out" ] || fail "hook produced output inside a secondmate's child worktree: $out"
+  : > "$home/state/task1.meta"
+  out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "a child worktree must stay exempt when it inherits its secondmate parent's FM_HOME"
+  [ -z "$out" ] || fail "inherited secondmate FM_HOME spoofed primary scope in child worktree: $out"
   pass "fm-turnend-guard: inert in a secondmate's own child worktree (linked git worktree) even when unhealthy"
+}
+
+test_primary_scope_accepts_linked_primary_home() {
+  local base dir out
+  base="$TMP_ROOT/scope-linked-primary-base"
+  dir="$TMP_ROOT/scope-linked-primary-home"
+  fm_git_worktree "$base" "$dir" fm/turnend-linked-primary
+  mkdir -p "$dir/state"
+  : > "$dir/AGENTS.md"
+  install_guard_scripts "$dir"
+  printf '%s\n' "$$" > "$dir/state/.lock"
+  : > "$dir/state/task1.meta"
+  out=$(bash -c '. "$1"; fm_primary_scope_matches "$2" "$3" && printf matched' _ \
+    "$dir/bin/fm-primary-scope-lib.sh" "$dir" "$dir/state")
+  [ "$out" = matched ] || fail "linked primary scope rejected positive evidence: $out"
+  pass "fm-primary-scope-lib: accepts a linked primary home from lock, hooks, and task metadata"
 }
 
 # THE regression the plain git-init fixtures masked: a treehouse-leased secondmate
@@ -1561,6 +1586,7 @@ test_hook_silent_in_idle_secondmate_home
 test_hook_secondmate_loop_guard_allows_retry
 test_hook_secondmate_reinvoke_recovery_loop
 test_hook_silent_in_secondmate_child_worktree
+test_primary_scope_accepts_linked_primary_home
 test_hook_blocks_in_treehouse_leased_secondmate_home
 test_hook_exempts_linked_worktree_with_stray_marker
 test_hook_exempts_linked_worktree_with_non_ascii_marker
