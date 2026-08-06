@@ -40,7 +40,7 @@
 #                          count, and demand-deep-inspection marker, for human
 #                          inspection only - never an automatic interrupt,
 #                          signal, or restart of the worker or its tool process.
-#   check: <script>: <out> authenticated check output, always actionable
+#   check: <script>: <out> validated or registered check output, always actionable
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
 #                          and has not been surfaced yet; reported once per
@@ -795,7 +795,8 @@ while :; do
   # published while this watcher was between cycles.
   procevent_surface_queued
 
-  # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
+  # Slow per-task checks (firstmate generates these, including local validation-gate
+  # and authenticated PR merge polls).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed
   # after the signal scan would be starved whenever a chatty sibling crewmate

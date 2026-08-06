@@ -91,14 +91,14 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-busy-event.sh`       | The only writer of a task's semantic busy-state record; arms an incarnation and applies lifecycle events |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for composer capture, verified submit, and the submit-time busy check |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
-| `fm-check-register.sh`   | Bind an intentional custom watcher check to its current bytes                       |
-| `fm-check-lib.sh`        | Validate custom-check registrations and prepare private execution snapshots          |
-| `fm-validation-poll.sh`  | Read a no-mistakes validation run for terminal or over-age parked gates             |
-| `fm-validation-check.sh` | Generate and register a no-mistakes validation-gate task check                       |
+| `fm-check-register.sh`   | Bind intentional custom checks while preserving validation-gate and PR-poll ownership |
+| `fm-check-lib.sh`        | Validate custom and validation-gate registrations and prepare private execution snapshots |
+| `fm-validation-poll.sh`  | Read a matching local no-mistakes run for terminal or over-age parked gates          |
+| `fm-validation-check.sh` | Generate and register a no-mistakes validation-gate check for a ship task            |
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll publication and identity-bound retirement |
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR/MR-poll sidecars           |
-| `fm-pr-check-migrate.sh` | Quarantine older task polls without execution and rebuild only canonical polls       |
-| `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
+| `fm-pr-check-migrate.sh` | Repair reserved validation checks, rebuild canonical PR polls, and quarantine older task polls without execution |
+| `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically hand a task check slot to a static merge poll |
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full GitHub URL                    |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |

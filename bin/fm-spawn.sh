@@ -16,6 +16,9 @@
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
+#   Every no-mistakes ship receives its registered local validation-gate check
+#   before the worker brief is delivered; bin/fm-validation-check.sh owns its
+#   source, registration, and PR-poll handoff.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile

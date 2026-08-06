@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Bind an intentional custom watcher check to its current bytes.
+# Bind an intentional custom watcher check to its current bytes while preserving
+# automatic no-mistakes validation or recorded PR-poll ownership of the task slot.
 # Usage: fm-check-register.sh <id>
 set -eu
 

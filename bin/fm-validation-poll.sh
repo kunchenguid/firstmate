@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Read one no-mistakes validation run for a registered task check.
 #
-# This program is copied into state/<id>.check.sh by fm-validation-check.sh
-# after that script pins FM_VALIDATION_WORKTREE as a shell-quoted literal and
-# binds the resulting bytes with fm-check-register.sh. It is intentionally
-# read-only: it queries only the local no-mistakes CLI, never a provider, and
-# prints exactly one line only for a terminal run or an over-age parked gate.
+# This program is copied into state/<id>.check.sh by fm-validation-check.sh after it pins
+# FM_VALIDATION_WORKTREE as a shell-quoted literal and binds the resulting bytes through
+# fm-check-lib.sh's private registration contract.
+# It is intentionally read-only and credential-free: it queries only the local no-mistakes CLI,
+# never a provider, and creates no state outside the private registration artifacts that bind it.
+# It prints exactly one line only for a terminal run or an over-age parked gate.
 #
 # Environment:
 #   FM_VALIDATION_WORKTREE        required existing task worktree
