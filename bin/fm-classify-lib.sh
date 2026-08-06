@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Shared wake classifier: the common source of truth for captain-relevant status
-# tests, declared-external-wait vocabulary, and the working/paused absorb
-# classification that makes no-verb signal and stale-pane wakes safe to absorb.
+# tests, declared-external-wait vocabulary, the captain-gated-versus-external pause
+# kind, and the working/paused absorb classification that makes no-verb signal and
+# stale-pane wakes safe to absorb.
 # Sourced by BOTH the always-on watcher
 # (bin/fm-watch.sh) and the away-mode daemon (bin/fm-supervise-daemon.sh) so the
 # overlapping triage policy lives in one place instead of two copies that can
@@ -13,7 +14,9 @@
 # daemon keeps its escalation-digest seen-markers; the watcher keeps its .seen-*
 # signatures).
 #
-# There are two documented exceptions. The absorb classification
+# There are three documented exceptions. task_hold_kind reads the backlog
+# through its own tool; see its own comment for the callers' cost contract.
+# The absorb classification
 # (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
 # read: it reuses bin/fm-crew-state.sh, which may make a bounded no-mistakes call,
 # to decide whether a crew that just stopped its turn or went stale is working,
@@ -64,10 +67,10 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
 # Bounded re-surface cadence for a declared pause or a dead-agent captain hold.
 # Far longer than the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), it
-# avoids nagging a deliberate wait while ensuring a forgotten hold cannot rot
-# invisibly - it re-surfaces once for a recheck every window. One hour by default;
-# both consumers read FM_PAUSE_RESURFACE_SECS with this default so the cadence has
-# one owner.
+# avoids nagging a deliberate wait while ensuring a forgotten external wait cannot
+# rot invisibly. One hour by default; both consumers read FM_PAUSE_RESURFACE_SECS
+# with this default so the cadence has one owner, while away mode suppresses only
+# captain-gated rechecks as owned by the /afk skill.
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 
@@ -182,6 +185,58 @@ stale_detail_is_blocked_on_human() {  # <stale-detail>
     *"$FM_CLASSIFY_BLOCKED_ON_HUMAN_DETAIL") return 0 ;;
   esac
   return 1
+}
+
+# --- pause kind: can this wait change without the captain? -------------------
+#
+# status_is_paused answers "does this pane idle by design". It does NOT answer the
+# question a re-surface cadence actually asks: can the thing being waited on change
+# without the captain acting? An external wait can, so rechecking it is real work.
+# A captain-gated wait cannot - it clears only when the captain acts, and the
+# captain acting is already the away-mode exit signal, which runs the full return
+# catch-up, so a timed recheck can never surface anything that exit does not.
+#
+# The backlog already records exactly this distinction per work item as hold_kind
+# (captain|external|load|parked|future), so these read that existing vocabulary
+# instead of parsing pause prose or inventing a parallel one.
+#
+# NOT a pure read: task_hold_kind shells out to the backlog reader in FM_HOME, the
+# same tool and field bin/fm-decision-hold.sh verifies a captain hold with. Callers
+# run it only once a pause has already aged past its window, never on every wake.
+FM_CLASSIFY_CAPTAIN_HOLD_KIND_DEFAULT='captain'
+
+_fm_show_field() {  # <tasks-axi-show-output> <field> -> value, or empty
+  printf '%s\n' "$1" | sed -n "s/^[[:space:]]*$2: //p" | head -1
+}
+
+# Print the backlog hold kind recorded for <task-id>, or `unknown` when it cannot
+# be established: no reader, an unreadable or absent item, or an item that carries
+# no active hold at all. `unknown` is deliberately never a kind a caller may treat
+# as captain-gated, so an indeterminate wait keeps its ordinary handling.
+task_hold_kind() {  # <task-id> [home]
+  local id=$1 home=${2:-${FM_HOME:-}} out kind
+  case "$id" in ''|*[!A-Za-z0-9._-]*) printf 'unknown'; return ;; esac
+  command -v tasks-axi >/dev/null 2>&1 || { printf 'unknown'; return; }
+  if [ -n "$home" ] && [ -d "$home" ]; then
+    out=$(cd "$home" && tasks-axi show "$id" --full 2>/dev/null) || out=''
+  else
+    out=$(tasks-axi show "$id" --full 2>/dev/null) || out=''
+  fi
+  [ -n "$out" ] || { printf 'unknown'; return; }
+  [ "$(_fm_show_field "$out" held)" = yes ] || { printf 'unknown'; return; }
+  kind=$(_fm_show_field "$out" hold_kind)
+  case "$kind" in
+    ''|*[!A-Za-z0-9._-]*) printf 'unknown' ;;
+    *) printf '%s' "$kind" ;;
+  esac
+}
+
+# 0 if <task-id>'s declared wait is gated on the captain rather than on something
+# that can clear by itself. Consumers use it to decide CADENCE only: a captain-gated
+# wait stays exactly as visible as before in the backlog digest, the fleet view, and
+# the away-mode return catch-up - it simply stops being re-asked on a timer.
+pause_is_captain_gated() {  # <task-id> [home]
+  [ "$(task_hold_kind "$@")" = "${FM_CLASSIFY_CAPTAIN_HOLD_KIND:-$FM_CLASSIFY_CAPTAIN_HOLD_KIND_DEFAULT}" ]
 }
 
 # --- durable keyed decisions ------------------------------------------------
