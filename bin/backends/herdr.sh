@@ -885,9 +885,17 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
 # projection is therefore floored at FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION,
 # where every removal primitive preserves focus and the proof stops being
 # load-bearing. That floor has ONE owner, the spawn-time gate
-# fm_backend_herdr_presentation_enabled, so a projection that exists at all is
-# either on a supported release or a home's deliberate below-floor opt-in; the
-# exact-tab restore stays the backstop for the latter.
+# fm_backend_herdr_presentation_enabled, so every new projection is either on a
+# supported release or is a home's deliberate below-floor opt-in. Session-start
+# cleanup deliberately retires a leftover projection husk on every release,
+# including below the floor. The accepted exposure is limited to the rare
+# downgrade path where a home projected on Herdr 0.8.0 or newer and then moved
+# to a 0.7.x release, and occurs once per leftover workspace at session start
+# rather than once per task teardown; the exact prior-tab restore bounds it.
+# Refusing that close below the floor would leak workspaces that nothing else
+# removes and block teardown because fm-teardown treats an unconfirmed close as
+# a hard stop. That cleanup is therefore authorized containment rather than a
+# second gate, and the spawn-time gate remains the floor's sole owner.
 
 # fm_backend_herdr_workspace_move_capable: verify that one guarded raw
 # workspace.move request is possible in <session>: python3 for the transport,
