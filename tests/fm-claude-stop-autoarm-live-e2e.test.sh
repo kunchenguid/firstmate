@@ -44,7 +44,7 @@ mkdir -p "$LAB"
 git clone -q "$ROOT" "$PROJECT"
 cp -R "$ROOT/bin/." "$PROJECT/bin/"
 cp "$ROOT/.claude/settings.json" "$PROJECT/.claude/settings.json"
-# The lab keeps the real tracked .claude/settings.json SessionStart nudge,
+# The lab keeps the real tracked .claude/settings.json SessionStart digest run,
 # Stop guard, and asyncRewake auto-arm registration.
 # The only local hook records model-issued Bash calls without acquiring the
 # session lock or otherwise changing lifecycle behavior.
@@ -93,14 +93,17 @@ printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'stale: fixture-rapid-%s\n' "$N"
 exit 0
 SH
-# Drain fixture: session start invokes it once, then the model invokes it once
-# per rewake. The third total drain ends the in-flight need after two complete
-# Stop-owned cycles.
+# Drain fixture: the model invokes it once per rewake, and every session-start
+# digest drains too. The tracked SessionStart hook now runs the digest itself,
+# so a session start drain no longer maps one-to-one onto the model's own
+# session-start call and a raw total would end the in-flight need a cycle early.
+# It therefore ends on the arm count this test actually asserts: the need clears
+# only once two complete Stop-owned cycles have armed, whatever the digest did.
 cat > "$PROJECT/bin/fm-wake-drain.sh" <<'SH'
 #!/usr/bin/env bash
 N=$(cat "$FM_HOME/state/drain-count" 2>/dev/null || echo 0); N=$((N+1)); echo "$N" > "$FM_HOME/state/drain-count"
 echo "drain-run=$N" >> "$FM_HOME/state/drain-ran"
-if [ "$N" -ge 3 ]; then
+if [ "$(cat "$FM_HOME/state/arm-count" 2>/dev/null || echo 0)" -ge 2 ]; then
   rm -f "$FM_HOME/state/task.meta"
 fi
 printf 'stale: fixture-rapid drained\n'
@@ -117,8 +120,11 @@ PROMPT='Run exactly `bin/fm-session-start.sh` with Bash as your first tool call.
 
 ARM_RUNS=$(wc -l < "$HOME_DIR/state/arm-ran" 2>/dev/null | tr -d ' ')
 [ "$ARM_RUNS" = 2 ] || fail "expected exactly 2 hook-owned arm cycles, got $ARM_RUNS: $(cat "$HOME_DIR/state/arm-ran" 2>/dev/null)"
+MODEL_DRAINS=$(grep -c 'fm-wake-drain.sh' "$HOME_DIR/state/tool-calls.log" 2>/dev/null || true)
+[ "$MODEL_DRAINS" = 2 ] || fail "expected exactly two model wake drains, one per rewake, got $MODEL_DRAINS: $(cat "$HOME_DIR/state/tool-calls.log" 2>/dev/null)"
 DRAIN_RUNS=$(wc -l < "$HOME_DIR/state/drain-ran" 2>/dev/null | tr -d ' ')
-[ "$DRAIN_RUNS" = 3 ] || fail "expected one session-start drain plus two model wake drains, got $DRAIN_RUNS drains"
+[ "$DRAIN_RUNS" -gt "$MODEL_DRAINS" ] \
+  || fail "expected at least one session-start digest drain on top of the model's wake drains, got $DRAIN_RUNS total: $(cat "$HOME_DIR/state/drain-ran" 2>/dev/null)"
 REWAKES=$(grep -c 'Stop hook feedback' "$TRANSCRIPT" 2>/dev/null || true)
 [ "$REWAKES" -ge 2 ] || fail "expected at least 2 exit-2 rewake deliveries, got $REWAKES"
 grep -q 'stale: fixture-rapid-1' "$TRANSCRIPT" || fail "first rapid rewake reason missing from the transcript"
