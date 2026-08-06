@@ -84,7 +84,10 @@ Ruling-to-hold reconciliation verification date: 2026-08-06.
 
 Every case in `tests/fm-ruling-reconcile.test.sh` was shown able to reject its defect before being trusted.
 Each assertion was re-run against a deliberately broken copy of the production script and observed failing, then re-run against the real code and observed passing.
-Two of those controls found real defects that the green suite alone had hidden: a `find -type f` corpus walk that dropped a symlinked ruling document instead of refusing it, and two `grep -qv` assertions that could never fail on multi-line output.
+Three real defects surfaced during that work, listed here by how each was actually discovered, because crediting a defect to a control that did not find it would overstate what the controls prove.
+Exactly one was hidden by a green suite and revealed by its mutation control: the two `grep -qv` assertions were passing, and restoring the retired `State: awaiting captain decision.` string failed to turn the case red, which exposed that `grep -qv` succeeds whenever any line differs and so asserted nothing at all.
+One was an ordinary first-run failure and never hidden: the new case requiring an unreadable ruling document to exit 3 failed immediately with `rc=0`, exposing a `find -type f` corpus walk that skipped a symlinked ruling document instead of refusing it.
+One came from measuring the real corpus before any test for it existed: running the closure test across every row of this home's flagship ruling table showed a hold reporting the `**RESOLVED**` verdict that belongs to a different row six lines below its own, and `test_table_row_does_not_inherit_the_next_rows_verdict` was written afterwards as a regression and only then proven red-capable.
 
 Closure-gate hardening verification date: 2026-08-06.
 Six further cases cover the ways the two-condition test could be satisfied without being met, and each was mutation-controlled the same way by reverting exactly one guard in the production script and observing the case fail.
