@@ -212,9 +212,16 @@ fm_relay_hosts_list() {  # <home>
 # carry this machine's helm epoch so the peer can refuse a stale control plane.
 # Read-only verbs are deliberately absent: a demoted machine must still be able
 # to look at what is running, it just may not touch it.
+# The secondmate verbs (home-seed, home-config, backlog-mv) reuse this one fence
+# rather than inventing an authorization of their own: a caller that may seed or
+# supply a secondmate on that machine may already spawn and steer there, and a
+# second credential for the weaker powers would protect nothing. agent-alive is
+# a read and stays callable from a demoted machine, like every other read.
+# This list must stay identical to the one in control-root/verbs/fmr-verb.sh;
+# the host's copy is the enforcing one, this copy only decides what to attach.
 fm_relay_verb_is_fenced() {  # <verb>
   case "$1" in
-    spawn|send|key|ack|teardown) return 0 ;;
+    spawn|send|key|ack|teardown|home-seed|home-config|backlog-mv) return 0 ;;
   esac
   return 1
 }

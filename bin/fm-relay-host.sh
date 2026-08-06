@@ -6,6 +6,11 @@
 #   fm-relay-host.sh preflight <host>       ask whether it can take work right now
 #   fm-relay-host.sh task-list <host>
 #   fm-relay-host.sh spawn <host> <id> <project> [--scout] [--harness N] [--model N] [--effort N]
+#   fm-relay-host.sh spawn <host> <id> --secondmate [--harness N] [--model N] [--effort N]
+#   fm-relay-host.sh home-seed <host> <id> {<project>...|--no-projects}
+#   fm-relay-host.sh home-config <id> [--force]   converge inherited local material
+#   fm-relay-host.sh backlog-mv <id> <fragment>   land a staged backlog fragment
+#   fm-relay-host.sh agent-alive <id>       alive|dead|unknown, from the host's own probe
 #   fm-relay-host.sh dispatch <id>          retry a dispatch the host held off
 #   fm-relay-host.sh queued [<id>]          show what is waiting to dispatch
 #   fm-relay-host.sh cancel <id>            drop a queued dispatch
@@ -19,7 +24,18 @@
 #   fm-relay-host.sh teardown <id> [--force]  gated remote teardown, then local cleanup
 #
 # Every subcommand after `spawn` finds its host through state/<id>.meta's host=
-# line, so callers name the task, never the machine.
+# line, so callers name the task, never the machine. A persistent secondmate is
+# the one thing that can be addressed before it has any metadata here, so
+# `home-seed` names the machine and `home-config`/`backlog-mv` fall back to the
+# `machine:` field of that secondmate's data/secondmates.md entry.
+#
+# The SECONDMATE subcommands are all the same shape as the task ones: this side
+# stages long or arbitrary input as a file and asks the peer to run its own
+# bin/fm-home-seed.sh, bin/fm-config-inherit-apply.sh, or
+# bin/fm-backlog-handoff.sh. Nothing about the secondmate contract - the
+# transactional seed and its rollback, the home validation and identity marker,
+# the inheritance guards and quarantine, the queued-only backlog rule - is
+# reimplemented here or on the wire (the secondmate-provisioning skill owns it).
 #
 # `teardown --force` carries the captain's explicit discard authority across the
 # link, as the extra verb token `force`. It is the answer to a hole this layer
@@ -63,13 +79,20 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 usage() {
-  sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 # shellcheck source=bin/fm-relay-lib.sh
 . "$SCRIPT_DIR/fm-relay-lib.sh"
+# For secondmate_registry_field: data/secondmates.md is where a secondmate's
+# machine is recorded, and this is the one parser for that file.
+# shellcheck source=bin/fm-ff-lib.sh
+. "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-config-inherit-lib.sh
+. "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 
 CMD=${1:-}
 case "$CMD" in
@@ -85,6 +108,21 @@ load_host_for_task() {  # <id>
   [ -f "$STATE/$id.meta" ] || die "no metadata for task $id in $STATE"
   host=$(fm_relay_meta_host "$STATE/$id.meta")
   [ -n "$host" ] || die "task $id has no host= line; it is not a relay task"
+  fm_relay_host_load "$FM_HOME" "$host"
+}
+
+# A persistent secondmate is addressable before it is running - inherited config
+# can be pushed to a seeded-but-not-yet-launched home, and backlog items can be
+# handed to it the moment it is seeded - so its machine is read from the durable
+# routing entry when there is no runtime record yet.
+load_host_for_secondmate() {  # <id>
+  local id=$1 host=""
+  fm_relay_id_valid "$id" || die "invalid secondmate id '$id'"
+  if [ -f "$STATE/$id.meta" ]; then
+    host=$(fm_relay_meta_host "$STATE/$id.meta")
+  fi
+  [ -n "$host" ] || host=$(secondmate_registry_field "$DATA/secondmates.md" "$id" machine || true)
+  [ -n "$host" ] || die "secondmate $id is not registered on another machine; its home is on this one"
   fm_relay_host_load "$FM_HOME" "$host"
 }
 
@@ -133,8 +171,15 @@ case "$CMD" in
   spawn|queue)
     HOST=${1:?usage: fm-relay-host.sh spawn <host> <id> <project> ...}; shift
     ID=${1:?usage: fm-relay-host.sh spawn <host> <id> <project> ...}; shift
-    PROJECT=${1:?usage: fm-relay-host.sh spawn <host> <id> <project> ...}; shift
     KIND=ship; HARNESS=default; MODEL=default; EFFORT=default
+    # A secondmate takes no project: its home already exists on that machine
+    # with its charter in it, so `-` fills the slot rather than a second verb.
+    PROJECT=
+    case "${1:-}" in
+      --secondmate) KIND=secondmate; PROJECT='-'; shift ;;
+      '') die "usage: fm-relay-host.sh spawn <host> <id> <project> ..." ;;
+      *) PROJECT=$1; shift ;;
+    esac
     want=
     for a in "$@"; do
       if [ -n "$want" ]; then
@@ -143,6 +188,7 @@ case "$CMD" in
       fi
       case "$a" in
         --scout) KIND=scout ;;
+        --secondmate) KIND=secondmate; PROJECT='-' ;;
         --harness) want=harness ;;
         --harness=*) HARNESS=${a#--harness=} ;;
         --model) want=model ;;
@@ -157,10 +203,18 @@ case "$CMD" in
     # Load the host record here so an unregistered host, a malformed record, or
     # an unusable brief is refused BEFORE anything durable is written.
     fm_relay_host_load "$FM_HOME" "$HOST"
-    BRIEF="$DATA/$ID/brief.md"
-    [ -f "$BRIEF" ] || die "no brief at $BRIEF; scaffold it before dispatching"
-    grep -q '{TASK}' "$BRIEF" && die "brief at $BRIEF still contains the {TASK} placeholder"
-    [ -f "$STATE/$ID.meta" ] && die "task $ID already has metadata in $STATE; tear it down before re-dispatching"
+    if [ "$KIND" = secondmate ]; then
+      # No brief to check and no existing-metadata refusal. A secondmate reads
+      # data/charter.md from its own home, and RESPAWNING a live-metadata
+      # secondmate is the documented recovery action rather than a mistake -
+      # refusing it here would break exactly the call recovery has to make.
+      :
+    else
+      BRIEF="$DATA/$ID/brief.md"
+      [ -f "$BRIEF" ] || die "no brief at $BRIEF; scaffold it before dispatching"
+      grep -q '{TASK}' "$BRIEF" && die "brief at $BRIEF still contains the {TASK} placeholder"
+      [ -f "$STATE/$ID.meta" ] && die "task $ID already has metadata in $STATE; tear it down before re-dispatching"
+    fi
     mkdir -p "$STATE"
     PENDING=$(fm_relay_pending_file "$STATE" "$ID")
     {
@@ -190,7 +244,7 @@ case "$CMD" in
     [ -n "$HOST" ] || die "the queued dispatch for $ID names no host"
     fm_relay_host_load "$FM_HOME" "$HOST"
     BRIEF="$DATA/$ID/brief.md"
-    [ -f "$BRIEF" ] || die "no brief at $BRIEF; scaffold it before dispatching"
+    [ "$KIND" = secondmate ] || [ -f "$BRIEF" ] || die "no brief at $BRIEF; scaffold it before dispatching"
 
     # Ask first on a GUI host. This is the courteous half - it keeps a refused
     # dispatch from pushing a brief onto a machine that will not use it, and it
@@ -212,9 +266,13 @@ case "$CMD" in
       fi
     fi
 
-    fm_relay_put "$BRIEF" "tasks/$ID/in/brief.md" || die "could not stage the brief: $FM_RELAY_ERR"
+    BRIEFREF='-'
+    if [ "$KIND" != secondmate ]; then
+      fm_relay_put "$BRIEF" "tasks/$ID/in/brief.md" || die "could not stage the brief: $FM_RELAY_ERR"
+      BRIEFREF=brief.md
+    fi
     SPAWN_RC=0
-    fm_relay_exec spawn "$ID" "$KIND" "$PROJECT" brief.md "$HARNESS" "$MODEL" "$EFFORT" || SPAWN_RC=$?
+    fm_relay_exec spawn "$ID" "$KIND" "$PROJECT" "$BRIEFREF" "$HARNESS" "$MODEL" "$EFFORT" || SPAWN_RC=$?
     CLASS=$(fm_relay_dispatch_class "$FM_RELAY_OUT" "$SPAWN_RC")
     case "$CLASS" in
       ok) ;;
@@ -346,6 +404,141 @@ case "$CMD" in
     printf 'pulled: %s (sha256 %s, verified against the host copy)\n' "$DATA/$ID/report.md" "$WANT"
     ;;
 
+  home-seed)
+    HOST=${1:?usage: fm-relay-host.sh home-seed <host> <id> {<project>...|--no-projects\}}; shift
+    ID=${1:?usage: fm-relay-host.sh home-seed <host> <id> {<project>...|--no-projects\}}; shift
+    NO_PROJECTS=0
+    PROJECTS=()
+    for a in "$@"; do
+      case "$a" in
+        --no-projects) NO_PROJECTS=1 ;;
+        --*) die "unexpected argument '$a'" ;;
+        *) PROJECTS+=("$a") ;;
+      esac
+    done
+    fm_relay_id_valid "$ID" || die "invalid secondmate id '$ID'"
+    fm_relay_host_load "$FM_HOME" "$HOST"
+    BRIEF="$DATA/$ID/brief.md"
+    [ -f "$BRIEF" ] || die "no charter at $BRIEF; scaffold and fill it before seeding"
+    grep -q '{TASK}' "$BRIEF" && die "charter at $BRIEF still contains the {TASK} placeholder"
+    if [ "$NO_PROJECTS" -eq 1 ]; then
+      [ "${#PROJECTS[@]}" -eq 0 ] || die "--no-projects cannot be combined with a project list"
+    else
+      [ "${#PROJECTS[@]}" -gt 0 ] \
+        || die "a secondmate needs at least one project name on $HOST, or --no-projects"
+    fi
+    # Validate before opening the spec, so no failure path has to reach back into
+    # a file that is being written.
+    if [ "$NO_PROJECTS" -eq 0 ]; then
+      for p in "${PROJECTS[@]}"; do
+        fm_relay_ref_valid "$p" || die "invalid project name '$p'"
+      done
+    fi
+    SPEC=$(mktemp)
+    {
+      printf 'fmseed-v1\n'
+      printf 'home=-\n'
+      if [ "$NO_PROJECTS" -eq 1 ]; then
+        printf 'no_projects=1\n'
+      else
+        for p in "${PROJECTS[@]}"; do
+          printf 'project=%s\n' "$p"
+        done
+      fi
+    } > "$SPEC"
+    REF="seed$(date -u +%Y%m%d%H%M%S)-$$"
+    if ! fm_relay_put "$BRIEF" "tasks/$ID/in/charter.md"; then
+      rm -f "$SPEC"
+      die "could not stage the charter on $HOST: $FM_RELAY_ERR"
+    fi
+    if ! fm_relay_put "$SPEC" "tasks/$ID/in/$REF"; then
+      rm -f "$SPEC"
+      die "could not stage the seed spec on $HOST: $FM_RELAY_ERR"
+    fi
+    rm -f "$SPEC"
+    fm_relay_exec home-seed "$ID" charter.md "$REF" \
+      || { printf '%s\n' "$FM_RELAY_ERR" >&2; exit 1; }
+    FIRST=${FM_RELAY_OUT%%$'\n'*}
+    case "$FIRST" in
+      OK\ *) ;;
+      *) printf '%s\n' "$FM_RELAY_OUT" >&2; exit 1 ;;
+    esac
+    HOMEPATH=$(printf '%s' "$FIRST" | sed -n 's/.*home=\([^ ]*\).*/\1/p')
+    [ -n "$HOMEPATH" ] || die "$HOST seeded $ID but reported no home path"
+    printf 'seeded: %s on %s\n' "$ID" "$HOST"
+    printf 'home=%s\n' "$HOMEPATH"
+    printf '%s\n' "$FM_RELAY_OUT" | sed -n '2,$p'
+    ;;
+
+  home-config)
+    ID=${1:?usage: fm-relay-host.sh home-config <id> [--force]}; shift
+    FORCE=0
+    for a in "$@"; do
+      case "$a" in
+        --force) FORCE=1 ;;
+        *) die "unexpected argument '$a'" ;;
+      esac
+    done
+    load_host_for_secondmate "$ID"
+    LOCAL_DIGEST=$(fm_config_inherit_surface_digest "$CONFIG" "$DATA") \
+      || die "cannot digest this home's inheritance surface"
+    # Ask before shipping. Convergence is the steady state, so the ordinary cost
+    # of this at every session start is ONE round trip rather than one transfer
+    # per declared item. --force skips the question, for the case where the
+    # destination bytes are suspect rather than merely equal.
+    if [ "$FORCE" -eq 0 ] && fm_relay_exec home-config "$ID"; then
+      REMOTE_DIGEST=$(printf '%s\n' "$FM_RELAY_OUT" | sed -n 's/^digest=//p' | tail -1)
+      if [ -n "$REMOTE_DIGEST" ] && [ "$REMOTE_DIGEST" = "$LOCAL_DIGEST" ]; then
+        printf 'unchanged: %s on %s already holds this home inherited material\n' \
+          "$ID" "$FM_RELAY_HOST"
+        exit 0
+      fi
+    fi
+    # A SOURCE-HOME SKELETON, not a diff: an item this home does not set is
+    # simply absent from it, and the peer's own propagation mirrors that absence
+    # downstream exactly as a local push does (bin/fm-config-inherit-lib.sh).
+    REF="inh$(date -u +%Y%m%d%H%M%S)-$$"
+    MANIFEST=$(mktemp)
+    fm_config_inherit_declared_manifest > "$MANIFEST"
+    if ! fm_relay_put "$MANIFEST" "tasks/$ID/in/$REF/manifest"; then
+      rm -f "$MANIFEST"
+      die "could not stage the inheritance manifest on $FM_RELAY_HOST: $FM_RELAY_ERR"
+    fi
+    rm -f "$MANIFEST"
+    for item in $FM_INHERITABLE_CONFIG; do
+      [ -f "$CONFIG/$item" ] || continue
+      fm_relay_put "$CONFIG/$item" "tasks/$ID/in/$REF/config/$item" \
+        || die "could not stage config/$item on $FM_RELAY_HOST: $FM_RELAY_ERR"
+    done
+    if [ -f "$DATA/$FM_SHARED_CAPTAIN_FILE" ]; then
+      fm_relay_put "$DATA/$FM_SHARED_CAPTAIN_FILE" "tasks/$ID/in/$REF/$FM_SHARED_CAPTAIN_REL" \
+        || die "could not stage $FM_SHARED_CAPTAIN_REL on $FM_RELAY_HOST: $FM_RELAY_ERR"
+    fi
+    fm_relay_verb_ok home-config "$ID" "$REF" || die "$FM_RELAY_ERR"
+    ;;
+
+  backlog-mv)
+    ID=${1:?usage: fm-relay-host.sh backlog-mv <id> <fragment-file>}
+    FRAG=${2:?usage: fm-relay-host.sh backlog-mv <id> <fragment-file>}
+    [ -f "$FRAG" ] || die "no backlog fragment at $FRAG"
+    load_host_for_secondmate "$ID"
+    REF="bl$(date -u +%Y%m%d%H%M%S)-$$"
+    fm_relay_put "$FRAG" "tasks/$ID/in/$REF" \
+      || die "could not stage the backlog fragment on $FM_RELAY_HOST: $FM_RELAY_ERR"
+    fm_relay_verb_ok backlog-mv "$ID" "$REF" || die "$FM_RELAY_ERR"
+    ;;
+
+  agent-alive)
+    ID=${1:?usage: fm-relay-host.sh agent-alive <id>}
+    load_host_for_task "$ID"
+    fm_relay_exec agent-alive "$ID" || { printf '%s\n' "$FM_RELAY_ERR" >&2; exit 1; }
+    FIRST=${FM_RELAY_OUT%%$'\n'*}
+    case "$FIRST" in
+      OK\ alive=*) printf '%s\n' "${FIRST#OK alive=}" ;;
+      *) printf '%s\n' "$FM_RELAY_OUT" >&2; exit 1 ;;
+    esac
+    ;;
+
   teardown)
     ID=${1:?usage: fm-relay-host.sh teardown <id> [--force]}; shift
     FORCE=0
@@ -376,6 +569,24 @@ case "$CMD" in
     printf '%s\n' "$FM_RELAY_OUT"
     rm -f "$STATE/$ID.meta" "$STATE/$ID.relay-ack" "$STATE/$ID.relay-seen" \
       "$STATE/$ID.check.sh" "$STATE/$ID.check-trust" "$STATE/$ID.status"
+    # A retired secondmate's ROUTE is a control-side record too, and the only
+    # one the host cannot clear: its own teardown removed its own registry entry
+    # over there, and this side's data/secondmates.md is what intake reads.
+    # Leaving it would keep routing work to a home that no longer exists.
+    if [ "$KIND" = secondmate ] && [ -f "$DATA/secondmates.md" ]; then
+      REG_TMP="$DATA/secondmates.md.tmp.$$"
+      REG_RC=0
+      grep -vE "^- $ID( |$)" "$DATA/secondmates.md" > "$REG_TMP" || REG_RC=$?
+      # grep exits 1 when it selected nothing, which is the ordinary result of
+      # retiring the only registered secondmate; only a real read error is a
+      # failure to report.
+      if [ "$REG_RC" -le 1 ]; then
+        mv -f "$REG_TMP" "$DATA/secondmates.md"
+      else
+        rm -f "$REG_TMP"
+        echo "warning: $ID was retired on $FM_RELAY_HOST but its route could not be removed from $DATA/secondmates.md" >&2
+      fi
+    fi
     printf 'cleaned: control-side records for %s\n' "$ID"
     ;;
 

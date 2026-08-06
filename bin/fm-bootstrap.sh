@@ -376,10 +376,14 @@ secondmate_sync() {
   # running home, send its literal-content reread instruction pointer so the
   # live agent does not keep applying stale defaults. Spawn/respawn already
   # re-reads at launch and needs no redundant nudge unless files changed after launch.
-  local id home home_real home_lock propagated_homes report reread_out reread_skip_pending
+  local id home home_real home_lock propagated_homes report reread_out reread_skip_pending machine
   propagated_homes=""
   SECONDMATE_RESPAWNED_IDS=${SECONDMATE_RESPAWNED_IDS:-}
-  while IFS='|' read -r id home _window _meta; do
+  while IFS='|' read -r id home _window _meta machine; do
+    # A home on another machine gets the same inherited material over the link
+    # instead; secondmate_remote_sync below owns that. Nothing in this loop may
+    # touch it, because every line of it reads or writes the LOCAL path.
+    [ -z "$machine" ] || continue
     validate_secondmate_home "$id" "$home" || continue
     home_real="$VALIDATED_HOME"
     case " $FF_SEEN_HOMES " in
@@ -441,6 +445,76 @@ secondmate_sync() {
     rm -f "$report"
     fm_lock_release "$home_lock" || true
   done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
+  secondmate_remote_sync
+  return 0
+}
+
+secondmate_remote_sync() {
+  # The cross-machine half of the sweep above. There is no tracked-file
+  # fast-forward here on purpose: a home on another machine is a checkout of the
+  # firstmate repo on THAT machine, advanced by that machine's own
+  # /updatefirstmate, and reaching into it from here is the thing every other
+  # boundary in this layer exists to prevent.
+  #
+  # What does converge is the inherited local material, because that is
+  # primary-authoritative by contract and the primary is here. It costs ONE
+  # round trip in the steady state: bin/fm-relay-host.sh home-config compares
+  # the two sides' surface digests first and ships nothing when they agree.
+  # A machine that cannot be reached, or that refuses because it runs a build
+  # with a different declared item set, is REPORTED and left alone - never
+  # retried into a partial apply.
+  local id machine out
+  [ -d "$STATE" ] || return 0
+  while IFS='|' read -r id _home _window _meta machine; do
+    [ -n "$machine" ] || continue
+    if ! out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
+      FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-relay-host.sh" home-config "$id" 2>&1); then
+      echo "SECONDMATE_SYNC: secondmate $id on $machine: skipped: inherited material not converged: $(first_line "$out")"
+    fi
+  done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
+  return 0
+}
+
+secondmate_remote_liveness() {  # <id> <machine>
+  # The same guarantee for a secondmate whose home is on another machine, asked
+  # of the machine that can actually answer it.
+  #
+  # The local probe below MUST NOT run for one of these. Its target is an
+  # endpoint on the peer, so reading it here reports a confident `dead` for a
+  # perfectly healthy secondmate and then tries to respawn it into a home this
+  # filesystem does not have.
+  #
+  # bin/fm-crew-state.sh cannot stand in for this either, even though it already
+  # crosses the link: it deliberately skips the busy-pane read for
+  # kind=secondmate (an idle secondmate pane is healthy by design), so a healthy
+  # idle secondmate and one whose agent exited into a bare shell both come back
+  # as `unknown - no current-state source available`. The verb below runs the
+  # peer's own fm_backend_agent_alive, which is the probe that tells them apart.
+  #
+  # `dead` is acted on exactly as locally - the respawn is that machine's own
+  # bin/fm-spawn.sh --secondmate, reached through --host. Anything else is
+  # reported, never acted on: a link that could not answer is not a dead agent.
+  local id=$1 machine=$2 verdict out
+  if ! verdict=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
+    FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-relay-host.sh" agent-alive "$id" 2>&1); then
+    echo "SECONDMATE_LIVENESS: secondmate $id on $machine: skipped: liveness could not be read: $(first_line "$verdict")"
+    return 0
+  fi
+  verdict=$(printf '%s' "$verdict" | tail -1)
+  case "$verdict" in
+    alive) return 0 ;;
+    dead)
+      if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" --host "$machine" "$id" --secondmate 2>&1); then
+        SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
+      else
+        echo "SECONDMATE_LIVENESS: secondmate $id on $machine: respawn failed: $(first_line "$out")"
+      fi
+      ;;
+    *)
+      echo "SECONDMATE_LIVENESS: secondmate $id on $machine: skipped: liveness probe inconclusive"
+      ;;
+  esac
   return 0
 }
 
@@ -476,12 +550,17 @@ secondmate_liveness_sweep() {
   # MID-SESSION is a harder follow-on needing a periodic liveness beacon -
   # explicitly out of scope here.
   [ -d "$STATE" ] || return 0
-  local meta id window harness backend target verdict out
+  local meta id window harness backend target verdict out machine
   SECONDMATE_RESPAWNED_IDS=""
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     grep -q '^kind=secondmate$' "$meta" 2>/dev/null || continue
     id=$(basename "$meta" .meta)
+    machine=$(fm_meta_get "$meta" host)
+    if [ -n "$machine" ]; then
+      secondmate_remote_liveness "$id" "$machine"
+      continue
+    fi
     window=$(fm_meta_get "$meta" window)
     [ -n "$window" ] || continue
     harness=$(fm_meta_get "$meta" harness)

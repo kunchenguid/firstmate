@@ -219,6 +219,47 @@ The cost, stated plainly: a remote task has no turn-end wake, so wake latency is
 
 Crew-authored status text becomes a wake reason on the control machine, so the verb strips control characters, caps each line at 200 characters, and caps the batch before that text ever crosses the link.
 
+## A persistent secondmate on a task host
+
+The same machine that takes tasks can also hold a persistent secondmate, which is the answer to "the laptop closes and the always-on box does not".
+Four verbs carry it, and every one of them is the shape this document already argues for: the peer runs its own script, and one short verb plus a staged file is what crosses.
+
+| verb | what runs there | fenced |
+|---|---|---|
+| `home-seed <id> <briefref> <specref>` | that machine's `bin/fm-home-seed.sh <id> - <projects>` | yes |
+| `spawn <id> secondmate - -` | that machine's `bin/fm-spawn.sh <id> --secondmate` | yes |
+| `home-config <id> [<ref>]` | that machine's `bin/fm-config-inherit-apply.sh` | yes |
+| `backlog-mv <id> <fragref>` | that machine's `bin/fm-backlog-handoff.sh --from-file` | yes |
+| `agent-alive <id>` | that machine's `bin/fm-agent-alive.sh` | no, it is a read |
+
+The four state-changing ones join the existing `spawn|send|key|ack|teardown` fence rather than carrying an authorization of their own: a caller that may seed or supply a secondmate on that machine may already spawn and steer there.
+`.agents/skills/secondmate-provisioning/SKILL.md` owns the contract itself - the routing field, what each side is responsible for, and what the local sweeps do with a home that is not on this machine.
+`bin/fm-home-seed.sh`, `bin/fm-relay-host.sh`, and `bin/fm-config-inherit-apply.sh` own their flags.
+
+Four things about the wire are worth stating here, because they are consequences of this layer rather than of the secondmate contract:
+
+**The argument budget did not move.**
+`spawn` still uses all eight allowlisted tokens, so the secondmate form fills the project and brief slots with `-` instead of asking for a ninth.
+The other three take at most four tokens, and everything long or arbitrary - a charter, a seed spec, an inheritance surface, a backlog fragment - travels as a file, exactly like a brief or a steer.
+Widening the allowlist would invalidate every grant and force a re-pair, which is the reason that budget is treated as fixed.
+
+**A secondmate takes no claim.**
+A claim exists so a blind re-dispatch of a work item loses the race on the machine that owns it.
+A secondmate respawn is the documented recovery action, so a claim would refuse exactly the call recovery has to make; what guards against a duplicate agent is the host's own per-id spawn lock and a session provider that will not create a second endpoint over a live one.
+
+**Inherited local material costs one round trip when nothing changed.**
+`home-config` with no staged reference asks the peer for the digest of its own inheritance surface, and ships the declared items only when that digest differs from this side's.
+That matters because the grant budget is finite - 1000 calls per session, and a single polled task already spends 288 a day - so a per-item transfer at every session start would be a real cost for no change.
+A peer whose build declares a different inheritable item set refuses the push outright rather than applying part of it, because a missing source item is propagated as a deletion.
+
+**A backlog handoff is the one genuinely two-sided operation.**
+The main backlog is on the control machine and the destination queue is on the peer, so `bin/fm-backlog-handoff.sh` moves the items into a private fragment, lands the fragment over there, and only then drops it.
+Land remotely first, delete locally second: a failure after the landing leaves a duplicate the next run skips as already-present, while the other order would lose the item outright.
+
+**`control-root/` is a deployed copy.**
+None of these verbs exist on a host until `bin/fm-relay-conn.sh deploy <host>` installs the new table there.
+Until then that host answers `ERR badverb`, and the control side reports that refusal as a failure - an undeployed host refuses the seed rather than appearing to do it.
+
 ## Discarding a remote task
 
 The host's own teardown refuses dirty work and unlanded commits, which is correct and is not being relaxed.
@@ -373,6 +414,10 @@ The reverse leaves the caller with a 401, because revoking the key already dropp
 - **The forced cross-machine discard, end to end on the real pair.**
   The refusals that motivated it were measured on 151; the flag that answers them is covered hermetically only, including that it reaches the host's own teardown as `--force`, that the unforced path is unchanged, and that the helm fence still refuses it.
   It has not been run over the real relay, and cannot be until the new `control-root/` is deployed to that host.
+- **Every part of the persistent-secondmate path, on the real pair.**
+  Nothing in "A persistent secondmate on a task host" has been run over the real relay, and it cannot be until the new `control-root/` is deployed to that host.
+  What is covered hermetically, through the stub relay that runs each verb with an empty environment: a seed that reaches the peer's own `fm-home-seed.sh` with its own project names and comes back as one route carrying `machine:`; a secondmate spawn that needs no project, no brief, and no claim; the four state-changing verbs refused by the existing helm fence while `agent-alive` stays readable; a backlog handoff that lands in the peer's queue and puts the items back when the peer refuses; and an undeployed host answering `ERR badverb` with this side reporting it as a failure.
+  What has NOT been observed anywhere: a real `treehouse get --lease` on 151, a real agent launching and idling in a home over there, the digest comparison against a real converged home, a real config-reread pointer reaching a live remote secondmate, and a real retirement releasing that lease.
 - **Automatic adoption at session start on the real pair.**
   The sweep is exercised hermetically, including the exact observed failure - a helm claimed while the link was down, adopting nothing, then converging at the next session start.
   It has not been run over the real relay, and the round-trip cost of one `task-list` per fleet peer at every session start is therefore bounded only by `FM_RELAY_BOOTSTRAP_TIMEOUT_MS` rather than measured.

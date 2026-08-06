@@ -200,6 +200,12 @@ The record stays on disk; re-queue it on the machine taking over, or come back t
 **Undrained wake notifications.** They are local to the machine that queued them, so `handover` reports the count and expects them to be read before the captain leaves.
 Events belonging to remote tasks are not affected: those replay from the host's own cursor.
 
+**A persistent secondmate's route.** `task-list` deliberately excludes `kind=secondmate`, because a secondmate is a domain agent and not a work item, and adopting one would put an agent in a backlog.
+That exclusion is right and is not being relaxed, but it does mean adoption never discovers a secondmate - including one whose home is on another machine of this fleet.
+The agent itself keeps running in its own home and is not disturbed; what does not move is the `data/secondmates.md` entry that tells intake to route work to it, which is local and gitignored like every other home record.
+Re-register it on the machine taking over, or hand the helm back.
+`.agents/skills/secondmate-provisioning/SKILL.md` owns that entry's format and the rest of the cross-machine contract.
+
 ## Verification status
 
 Everything above is covered by the hermetic two-machine suite.

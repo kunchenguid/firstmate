@@ -40,6 +40,12 @@ exit 1
 SH
 chmod +x "$TMP_ROOT/echo-bifrost"
 
+# A stub relay that actually carries the call: `exec` runs the real verb with an
+# empty environment and `file` copies within this filesystem, so a cross-machine
+# test here goes through the real client, allowlist, and verb table.
+STUB_BIFROST="$TMP_ROOT/stub"
+fm_test_make_stub_bifrost "$STUB_BIFROST"
+
 # shellcheck source=bin/fm-relay-lib.sh
 . "$ROOT/bin/fm-relay-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -437,6 +443,387 @@ test_verb_teardown_force_is_covered_by_the_existing_helm_fence() {
   pass "fmr-verb teardown: forced discard rides the existing helm fence, not a new credential"
 }
 
+# --- a persistent secondmate on the other machine -----------------------------
+#
+# The design rule under test is one sentence: nothing about the secondmate
+# contract is reimplemented on the wire. Every assertion below is a form of it -
+# the peer runs its OWN fm-home-seed.sh, its OWN fm-spawn.sh --secondmate, its
+# OWN fm-config-inherit-apply.sh, its OWN fm-backlog-handoff.sh, and this side
+# holds a route plus a mirror.
+#
+# The other half is the deployed-copy problem. control-root/ is installed on each
+# host, so a host that has not been redeployed has an OLD verb table. It must
+# REFUSE, and this side must report that refusal as a failure rather than as a
+# quiet success - which is what the last test here pins.
+
+# A recorder in the host's fake bin/ that logs its arguments and answers.
+install_recorder() {  # <fmroot> <script-name> <stdout-lines>
+  local fmroot=$1 name=$2 out=$3
+  cat > "$fmroot/bin/$name" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" > "\$(dirname "\$0")/../$name.args"
+[ -z "$out" ] || printf '%s\n' "$out"
+exit \${STUB_RC:-0}
+STUB
+  chmod +x "$fmroot/bin/$name"
+}
+
+test_verb_spawn_takes_a_secondmate_with_no_project_and_no_brief() {
+  local croot home fmroot out
+  croot=$(setup_verb_host)
+  home="$TMP_ROOT/verbhost/home"
+  fmroot="$TMP_ROOT/verbhost/fmroot"
+  install_recorder "$fmroot" fm-spawn.sh ''
+  install_recorder "$fmroot" fm-peek.sh 'esc to interrupt'
+  install_recorder "$fmroot" fm-send.sh ''
+  printf 'kind=secondmate\nhome=%s/sm\nwindow=firstmate:fm-sm1\n' "$home" > "$home/state/sm1.meta"
+
+  out=$(env -i /bin/bash "$croot/verbs/fmr-verb.sh" spawn sm1 secondmate - - 2>&1)
+  assert_contains "$out" "OK spawned=sm1" "a secondmate spawn must succeed with no project and no staged brief"
+  assert_contains "$out" "kind=secondmate" "the host's own metadata must come back for the control side to mirror"
+  assert_grep "sm1 --secondmate" "$fmroot/fm-spawn.sh.args" \
+    "the host must run its OWN fm-spawn.sh --secondmate"
+  # A claim would refuse exactly the call recovery has to make.
+  out=$(env -i /bin/bash "$croot/verbs/fmr-verb.sh" spawn sm1 secondmate - - 2>&1)
+  assert_contains "$out" "OK spawned=sm1" "respawning a secondmate must not be refused as already-claimed"
+  rm -f "$fmroot/bin/fm-spawn.sh" "$fmroot/bin/fm-peek.sh" "$fmroot/bin/fm-send.sh"
+  pass "fmr-verb spawn: a secondmate needs no project, no brief, and no claim"
+}
+
+test_verb_home_seed_validates_its_spec_before_seeding() {
+  local croot fmroot fleet out
+  croot=$(setup_verb_host)
+  fmroot="$TMP_ROOT/verbhost/fmroot"
+  fleet="$TMP_ROOT/verbhost/fleet-root"
+  install_recorder "$fmroot" fm-home-seed.sh 'home=/leased/home'
+  mkdir -p "$fleet/tasks/sm2/in"
+  printf 'charter body\n' > "$fleet/tasks/sm2/in/charter.md"
+
+  printf 'home=-\nproject=alpha\n' > "$fleet/tasks/sm2/in/spec"
+  out=$(env -i /bin/bash "$croot/verbs/fmr-verb.sh" home-seed sm2 charter.md spec 2>&1)
+  assert_contains "$out" "ERR badarg" "a spec with no protocol line must refuse"
+
+  printf 'fmseed-v1\nhome=/somewhere/else\nproject=alpha\n' > "$fleet/tasks/sm2/in/spec"
+  out=$(env -i /bin/bash "$croot/verbs/fmr-verb.sh" home-seed sm2 charter.md spec 2>&1)
+  assert_contains "$out" "ERR badarg" "a spec naming a home path must refuse; a remote home is leased there"
+
+  printf 'fmseed-v1\nhome=-\nproject=../escape\n' > "$fleet/tasks/sm2/in/spec"
+  out=$(env -i /bin/bash "$croot/verbs/fmr-verb.sh" home-seed sm2 charter.md spec 2>&1)
+  assert_contains "$out" "ERR badarg" "a spec naming an unsafe project must refuse"
+
+  printf 'fmseed-v1\nhome=-\nno_projects=1\nproject=alpha\n' > "$fleet/tasks/sm2/in/spec"
+  out=$(env -i /bin/bash "$croot/verbs/fmr-verb.sh" home-seed sm2 charter.md spec 2>&1)
+  assert_contains "$out" "ERR badarg" "a spec combining no_projects with a project list must refuse"
+
+  printf 'fmseed-v1\nhome=-\n' > "$fleet/tasks/sm2/in/spec"
+  out=$(env -i /bin/bash "$croot/verbs/fmr-verb.sh" home-seed sm2 charter.md spec 2>&1)
+  assert_contains "$out" "ERR badarg" "a spec naming neither a project nor no_projects must refuse"
+
+  assert_absent "$fmroot/fm-home-seed.sh.args" "a refused spec must never reach the host's own seed"
+  rm -f "$fmroot/bin/fm-home-seed.sh"
+  pass "fmr-verb home-seed: every spec field is re-validated before the seed runs"
+}
+
+test_verb_home_seed_runs_the_hosts_own_seed_and_cleans_up_on_failure() {
+  local croot home fmroot fleet out
+  croot=$(setup_verb_host)
+  home="$TMP_ROOT/verbhost/home"
+  fmroot="$TMP_ROOT/verbhost/fmroot"
+  fleet="$TMP_ROOT/verbhost/fleet-root"
+  mkdir -p "$fleet/tasks/sm3/in"
+  printf 'charter body\n' > "$fleet/tasks/sm3/in/charter.md"
+  printf 'fmseed-v1\nhome=-\nproject=alpha\nproject=beta\n' > "$fleet/tasks/sm3/in/spec"
+
+  install_recorder "$fmroot" fm-home-seed.sh 'home=/leased/sm3'
+  out=$(env -i /bin/bash "$croot/verbs/fmr-verb.sh" home-seed sm3 charter.md spec 2>&1)
+  assert_contains "$out" "OK seeded=sm3 home=/leased/sm3" "the verb must report the home the host leased"
+  assert_grep "sm3 - alpha beta" "$fmroot/fm-home-seed.sh.args" \
+    "the host must run its OWN fm-home-seed.sh with the leased-home form"
+  assert_grep 'charter body' "$home/data/sm3/brief.md" "the charter must be installed where the host's seed reads it"
+
+  # A failed seed must not leave this machine holding a charter it never used.
+  rm -f "$home/data/sm3/brief.md" "$fmroot/fm-home-seed.sh.args"
+  cat > "$fmroot/bin/fm-home-seed.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "error: project alpha not found" >&2
+exit 1
+STUB
+  chmod +x "$fmroot/bin/fm-home-seed.sh"
+  out=$(env -i /bin/bash "$croot/verbs/fmr-verb.sh" home-seed sm3 charter.md spec 2>&1)
+  assert_contains "$out" "ERR seedfailed" "a refused seed must answer ERR"
+  assert_contains "$out" "project alpha not found" "a refused seed must relay the host's own reason"
+  assert_absent "$home/data/sm3/brief.md" "a failed seed must not leave the charter it installed behind"
+  rm -f "$fmroot/bin/fm-home-seed.sh"
+  pass "fmr-verb home-seed: the host seeds itself, and a failure leaves nothing behind"
+}
+
+test_new_secondmate_verbs_ride_the_existing_helm_fence() {
+  local croot fmroot out v
+  croot=$(setup_verb_host)
+  fmroot="$TMP_ROOT/verbhost/fmroot"
+  mkdir -p "$croot/helm"
+  printf 'helm-v1\nfleet=f\nepoch=9\nholder=other\n' > "$croot/helm/lease"
+  install_recorder "$fmroot" fm-home-seed.sh 'home=/leased/x'
+  install_recorder "$fmroot" fm-config-inherit-apply.sh 'digest=abc'
+  install_recorder "$fmroot" fm-backlog-handoff.sh 'moved'
+  install_recorder "$fmroot" fm-agent-alive.sh 'alive'
+  rm -f "$fmroot"/fm-*.args
+
+  for v in home-seed home-config backlog-mv; do
+    out=$(env -i /bin/bash "$croot/verbs/fmr-verb.sh" "$v" smf ref1 ref2 2>&1)
+    assert_contains "$out" "EPOCH_STALE" "$v carrying no helm epoch must be refused"
+    out=$(env -i /bin/bash "$croot/verbs/fmr-verb.sh" "$v@3" smf ref1 ref2 2>&1)
+    assert_contains "$out" "EPOCH_STALE" "$v from a stale control plane must be refused"
+  done
+  assert_absent "$fmroot/fm-home-seed.sh.args" "a fenced call must not reach the host's own scripts"
+  assert_absent "$fmroot/fm-config-inherit-apply.sh.args" "a fenced call must not reach the host's own scripts"
+  assert_absent "$fmroot/fm-backlog-handoff.sh.args" "a fenced call must not reach the host's own scripts"
+
+  # Reading stays allowed from a demoted machine, exactly like every other read.
+  out=$(env -i /bin/bash "$croot/verbs/fmr-verb.sh" agent-alive smf 2>&1)
+  assert_contains "$out" "OK alive=alive" "agent-alive is a read and must not be fenced"
+  rm -rf "$croot/helm"
+  rm -f "$fmroot/bin/fm-home-seed.sh" "$fmroot/bin/fm-config-inherit-apply.sh" \
+    "$fmroot/bin/fm-backlog-handoff.sh" "$fmroot/bin/fm-agent-alive.sh"
+  pass "fmr-verb: the secondmate verbs reuse the helm fence, and the read stays readable"
+}
+
+# --- control side, end to end against a stub relay ----------------------------
+
+# Two real directories and the real verb between them, so a "cross-machine" seed
+# here exercises the real client, the real allowlist, and the real verb table.
+setup_two_machines() {  # echoes the control home
+  local root="$TMP_ROOT/2m" here="$TMP_ROOT/2m/here" peer="$TMP_ROOT/2m/peer"
+  rm -rf "$root"
+  mkdir -p "$here/state" "$here/data" "$here/config" \
+    "$peer/state" "$peer/data" "$peer/config" "$peer/projects" \
+    "$peer/cr/verbs" "$peer/cr/tasks" "$peer/fr/tasks" "$peer/fmroot/bin"
+  cp "$ROOT/control-root/verbs/fmr-verb.sh" "$peer/cr/verbs/fmr-verb.sh"
+  chmod 755 "$peer/cr/verbs/fmr-verb.sh"
+  {
+    printf 'FM_ROOT=%s\n' "$peer/fmroot"
+    printf 'FM_HOME=%s\n' "$peer"
+    printf 'HOME_DIR=%s\n' "$peer"
+    printf 'PATH=%s\n' "$PATH"
+    printf 'PROJECTS=%s\n' "$peer/projects"
+    printf 'FLEET_ROOT=%s\n' "$peer/fr"
+  } > "$peer/cr/config"
+  cat > "$here/config/relay-hosts.json" <<EOF
+{
+  "box151": {
+    "client_id": "cid-box151",
+    "control_root": "$peer/cr",
+    "fleet_root": "$peer/fr",
+    "home": "$peer",
+    "root": "$peer/fmroot",
+    "path": "$PATH"
+  }
+}
+EOF
+  printf '%s' "$here"
+}
+
+test_home_seed_over_the_link_records_a_route_carrying_the_machine() {
+  local here peer out rc=0
+  here=$(setup_two_machines)
+  peer="$TMP_ROOT/2m/peer"
+  install_recorder "$peer/fmroot" fm-home-seed.sh 'home=/leased/sm-far'
+  mkdir -p "$here/data/sm-far"
+  cat > "$here/data/sm-far/brief.md" <<'EOF'
+# Charter
+
+Keep three upstreams in step.
+
+# Routing scope
+
+upstream sync work
+EOF
+  out=$(FM_HOME="$here" FM_RELAY_BIFROST="$STUB_BIFROST/bifrost" \
+    "$ROOT/bin/fm-home-seed.sh" sm-far - --machine box151 alpha 2>&1) || rc=$?
+  expect_code 0 "$rc" "a cross-machine seed must succeed: $out"
+  assert_contains "$out" "home=/leased/sm-far" "the seed must report the home the peer leased"
+  assert_grep "- sm-far - " "$here/data/secondmates.md" "the route must be recorded here"
+  assert_grep 'machine: box151;' "$here/data/secondmates.md" "the route must name the machine"
+  assert_grep 'home: /leased/sm-far;' "$here/data/secondmates.md" "the route must carry the peer's home path"
+  assert_grep "sm-far - alpha" "$peer/fmroot/fm-home-seed.sh.args" \
+    "the peer must have run its OWN seed with its own project name"
+  assert_grep 'Keep three upstreams' "$peer/data/sm-far/brief.md" "the charter must reach the peer"
+
+  # And re-seeding a registered id is refused rather than leaking a second lease.
+  rm -f "$peer/fmroot/fm-home-seed.sh.args"
+  rc=0
+  out=$(FM_HOME="$here" FM_RELAY_BIFROST="$STUB_BIFROST/bifrost" \
+    "$ROOT/bin/fm-home-seed.sh" sm-far - --machine box151 alpha 2>&1) || rc=$?
+  expect_code 1 "$rc" "re-seeding a registered id must refuse"
+  assert_contains "$out" "already registered" "the refusal must say why"
+  assert_absent "$peer/fmroot/fm-home-seed.sh.args" "a refused re-seed must never reach the peer"
+  pass "fm-home-seed --machine: the peer seeds itself and this side records one route"
+}
+
+test_home_seed_refuses_a_named_home_path_and_an_unfilled_charter() {
+  local here out rc=0
+  here=$(setup_two_machines)
+  mkdir -p "$here/data/sm-bad"
+  printf '# Charter\n\n{TASK}\n\n# Routing scope\n\nx\n' > "$here/data/sm-bad/brief.md"
+  out=$(FM_HOME="$here" "$ROOT/bin/fm-home-seed.sh" sm-bad /tmp/somewhere --machine box151 alpha 2>&1) || rc=$?
+  expect_code 1 "$rc" "--machine with an explicit home path must refuse"
+  assert_contains "$out" "requires the home spec '-'" "the refusal must name the one accepted form"
+  rc=0
+  out=$(FM_HOME="$here" "$ROOT/bin/fm-home-seed.sh" sm-bad - --machine box151 alpha 2>&1) || rc=$?
+  expect_code 1 "$rc" "an unfilled charter must refuse before anything travels"
+  assert_contains "$out" "{TASK}" "the refusal must name the placeholder"
+  assert_absent "$here/data/secondmates.md" "a refused seed must write no route"
+  pass "fm-home-seed --machine: refuses a named path and an unfilled charter, before the link"
+}
+
+# The deployed-copy problem, stated as a test: a host that has not been
+# redeployed does not know these verbs, and the only safe answer is a refusal
+# this side reports as a failure.
+test_an_undeployed_host_refuses_the_new_verbs_loudly() {
+  local here peer out rc=0
+  here=$(setup_two_machines)
+  peer="$TMP_ROOT/2m/peer"
+  # An older deployment: a verb table that knows nothing but ping.
+  cat > "$peer/cr/verbs/fmr-verb.sh" <<'OLD'
+#!/usr/bin/env bash
+set -u
+case "${1%%@*}" in
+  ping) printf 'OK pong host=old proto=fmr-v1\n' ;;
+  *) printf 'ERR badverb unknown verb\n'; exit 1 ;;
+esac
+OLD
+  chmod 755 "$peer/cr/verbs/fmr-verb.sh"
+  mkdir -p "$here/data/sm-old"
+  printf '# Charter\n\nc\n\n# Routing scope\n\ns\n' > "$here/data/sm-old/brief.md"
+  out=$(FM_HOME="$here" FM_RELAY_BIFROST="$STUB_BIFROST/bifrost" \
+    "$ROOT/bin/fm-home-seed.sh" sm-old - --machine box151 alpha 2>&1) || rc=$?
+  expect_code 1 "$rc" "an undeployed host must make the seed FAIL, not succeed quietly"
+  assert_contains "$out" "badverb" "the peer's own refusal must be relayed verbatim"
+  assert_not_contains "$out" "seeded:" "nothing may claim a seed that did not happen"
+  assert_absent "$here/data/secondmates.md" "no route may be recorded for a seed the peer refused"
+  pass "an undeployed host: the new verbs are refused, and this side reports the refusal"
+}
+
+test_spawn_host_secondmate_launches_over_there_and_moves_no_backlog_row() {
+  local here peer out rc=0
+  here=$(setup_two_machines)
+  peer="$TMP_ROOT/2m/peer"
+  install_recorder "$peer/fmroot" fm-spawn.sh ''
+  install_recorder "$peer/fmroot" fm-peek.sh 'esc to interrupt'
+  install_recorder "$peer/fmroot" fm-send.sh ''
+  printf 'kind=secondmate\nwindow=firstmate:fm-sm-far\nworktree=/leased/sm-far\nhome=/leased/sm-far\n' \
+    > "$peer/state/sm-far.meta"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$here/data/backlog.md"
+
+  out=$(FM_HOME="$here" FM_RELAY_BIFROST="$STUB_BIFROST/bifrost" \
+    "$ROOT/bin/fm-spawn.sh" --host box151 sm-far --secondmate 2>&1) || rc=$?
+  expect_code 0 "$rc" "a cross-machine secondmate launch must succeed: $out"
+  assert_grep "sm-far --secondmate" "$peer/fmroot/fm-spawn.sh.args" \
+    "the peer must run its OWN fm-spawn.sh --secondmate"
+  assert_grep 'kind=secondmate' "$here/state/sm-far.meta" "this side must mirror the peer's metadata"
+  assert_grep 'host=box151' "$here/state/sm-far.meta" "the mirror must record which machine holds it"
+  assert_no_grep 'sm-far' "$here/data/backlog.md" "a secondmate is not a backlog item on either machine"
+
+  # A launch with no project positional is the point; a task still needs one.
+  rc=0
+  out=$("$ROOT/bin/fm-spawn.sh" --host box151 onlyid 2>&1) || rc=$?
+  expect_code 1 "$rc" "a remote TASK must still name its project"
+  assert_contains "$out" "project-name-on-host" "the task refusal must name what is missing"
+  pass "fm-spawn --host --secondmate: the peer launches it, and no backlog row moves"
+}
+
+test_teardown_of_a_remote_secondmate_drops_the_route_here() {
+  local here peer out rc=0
+  here=$(setup_two_machines)
+  peer="$TMP_ROOT/2m/peer"
+  install_recorder "$peer/fmroot" fm-teardown.sh 'retired'
+  printf 'kind=secondmate\nwindow=w\nworktree=/leased/sm-far\nhome=/leased/sm-far\nhost=box151\n' \
+    > "$here/state/sm-far.meta"
+  printf 'kind=secondmate\nwindow=w\nworktree=/leased/sm-far\nhome=/leased/sm-far\n' \
+    > "$peer/state/sm-far.meta"
+  {
+    printf -- '- sm-far - upstream work (home: /leased/sm-far; machine: box151; scope: s; projects: alpha; added 2026-08-06)\n'
+    printf -- '- sm-here - local work (home: /homes/local; scope: s; projects: beta; added 2026-08-06)\n'
+  } > "$here/data/secondmates.md"
+
+  out=$(FM_HOME="$here" FM_RELAY_BIFROST="$STUB_BIFROST/bifrost" \
+    "$ROOT/bin/fm-teardown.sh" sm-far 2>&1) || rc=$?
+  expect_code 0 "$rc" "retiring a remote secondmate must succeed: $out"
+  assert_grep "sm-far" "$peer/fmroot/fm-teardown.sh.args" \
+    "the peer must run its OWN teardown, which owns the in-flight-children refusal"
+  assert_absent "$here/state/sm-far.meta" "the local mirror must be cleared"
+  assert_no_grep '- sm-far ' "$here/data/secondmates.md" \
+    "a retired secondmate's route must not keep routing work to a home that is gone"
+  assert_grep '- sm-here ' "$here/data/secondmates.md" "another secondmate's route must survive"
+  pass "fm-teardown: retiring a remote secondmate clears the route this side owns"
+}
+
+# The real receiving half, not a recorder: the peer runs the real
+# bin/fm-config-inherit-apply.sh against a real seeded home, so the guards and
+# the read-only destination mode are exercised where they run.
+test_home_config_applies_the_real_surface_into_a_real_home() {
+  local here peer sm out rc=0 mode
+  here=$(setup_two_machines)
+  peer="$TMP_ROOT/2m/peer"
+  sm="$TMP_ROOT/2m/sm"
+  # The peer's own firstmate root is the real one, so the real scripts run there.
+  sed -i.bak "s|^FM_ROOT=.*|FM_ROOT=$ROOT|" "$peer/cr/config" && rm -f "$peer/cr/config.bak"
+  mkdir -p "$sm/data" "$sm/state" "$sm/config" "$sm/projects" "$sm/bin"
+  printf 'sm-far\n' > "$sm/.fm-secondmate-home"
+  printf 'instructions\n' > "$sm/AGENTS.md"
+  printf -- '- sm-far - upstream work (home: %s; scope: s; projects: alpha; added 2026-08-06)\n' "$sm" \
+    > "$peer/data/secondmates.md"
+  printf 'kind=secondmate\nhome=%s\nhost=box151\n' "$sm" > "$here/state/sm-far.meta"
+  printf 'codex\n' > "$here/config/crew-harness"
+  cat > "$here/data/captain-shared.md" <<'EOF'
+# Shared captain preferences
+
+This file is main-authoritative and read-only in secondmate homes.
+It must not be edited there; route a new captain-preference discovery to the
+main firstmate through marked status or a document pointer.
+
+- prefer plain answers
+EOF
+
+  out=$(FM_HOME="$here" FM_RELAY_BIFROST="$STUB_BIFROST/bifrost" \
+    "$ROOT/bin/fm-relay-host.sh" home-config sm-far 2>&1) || rc=$?
+  # The bytes must land whatever the reread send does in a fixture with no agent.
+  assert_present "$sm/config/crew-harness" "the declared config item must reach the remote home"
+  cmp -s "$here/config/crew-harness" "$sm/config/crew-harness" \
+    || fail "the remote copy must be byte-identical to the primary's"
+  assert_present "$sm/data/captain-shared.md" "the shared captain file must reach the remote home"
+  mode=$(fm_pr_file_mode "$sm/data/captain-shared.md")
+  [ "$mode" = "444" ] || fail "the shared captain copy must be read-only in the secondmate home, got $mode"
+  # And a converged home then costs one round trip: the digests agree.
+  out=$(FM_HOME="$here" FM_RELAY_BIFROST="$STUB_BIFROST/bifrost" \
+    "$ROOT/bin/fm-relay-host.sh" home-config sm-far 2>&1) || true
+  assert_contains "$out" "unchanged:" "a converged home must ship nothing on the next push"
+  pass "home-config: the peer applies the real surface, read-only, and then reports convergence"
+}
+
+test_home_config_ships_nothing_when_the_two_sides_already_agree() {
+  local here peer out
+  here=$(setup_two_machines)
+  peer="$TMP_ROOT/2m/peer"
+  printf 'codex\n' > "$here/config/crew-harness"
+  printf 'kind=secondmate\nhome=%s/sm\nhost=box151\n' "$peer" > "$here/state/sm-cfg.meta"
+  # The peer answers with the digest of a home that is already converged.
+  cat > "$peer/fmroot/bin/fm-config-inherit-apply.sh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$(dirname "$0")/../apply.args"
+printf 'home=/leased/sm\n'
+printf 'digest=%s\n' "${STUB_DIGEST:-nomatch}"
+STUB
+  chmod +x "$peer/fmroot/bin/fm-config-inherit-apply.sh"
+  # First, digests differ, so the surface is staged and applied.
+  out=$(FM_HOME="$here" FM_RELAY_BIFROST="$STUB_BIFROST/bifrost" \
+    "$ROOT/bin/fm-relay-host.sh" home-config sm-cfg 2>&1) \
+    || fail "a differing digest must push: $out"
+  assert_grep "--from" "$peer/fmroot/apply.args" "a differing digest must stage and apply the surface"
+  assert_no_grep "unchanged:" "$peer/fmroot/apply.args" "the apply args must not carry the caller's wording"
+  pass "fm-relay-host home-config: a differing digest stages the declared surface"
+}
+
 # The control side's own half: the flag has to reach the wire, and the local
 # report precondition has to step aside with it.
 test_relay_host_teardown_force_reaches_the_wire() {
@@ -474,9 +861,6 @@ test_spawn_host_flag_refusals() {
   out=$("$ROOT/bin/fm-spawn.sh" --host 2>&1); rc=$?
   expect_code 1 "$rc" "--host with no value must refuse"
   assert_contains "$out" "--host requires a value" "--host with no value must say so"
-  out=$("$ROOT/bin/fm-spawn.sh" --host box id proj --secondmate 2>&1); rc=$?
-  expect_code 1 "$rc" "--host with --secondmate must refuse"
-  assert_contains "$out" "does not support --secondmate" "--host + --secondmate must say so"
   out=$("$ROOT/bin/fm-spawn.sh" --host box id proj --backend tmux 2>&1); rc=$?
   expect_code 1 "$rc" "--host with --backend must refuse"
   assert_contains "$out" "cannot combine with --host" "--host + --backend must say so"
@@ -625,6 +1009,17 @@ test_verb_teardown_force_passes_discard_authority_to_the_host
 test_verb_teardown_force_releases_only_the_report_gate
 test_verb_teardown_refuses_an_unknown_third_token
 test_verb_teardown_force_is_covered_by_the_existing_helm_fence
+test_verb_spawn_takes_a_secondmate_with_no_project_and_no_brief
+test_verb_home_seed_validates_its_spec_before_seeding
+test_verb_home_seed_runs_the_hosts_own_seed_and_cleans_up_on_failure
+test_new_secondmate_verbs_ride_the_existing_helm_fence
+test_home_seed_over_the_link_records_a_route_carrying_the_machine
+test_home_seed_refuses_a_named_home_path_and_an_unfilled_charter
+test_an_undeployed_host_refuses_the_new_verbs_loudly
+test_spawn_host_secondmate_launches_over_there_and_moves_no_backlog_row
+test_teardown_of_a_remote_secondmate_drops_the_route_here
+test_home_config_applies_the_real_surface_into_a_real_home
+test_home_config_ships_nothing_when_the_two_sides_already_agree
 test_relay_host_teardown_force_reaches_the_wire
 test_spawn_host_flag_refusals
 test_spawn_host_applies_the_local_task_id_gate

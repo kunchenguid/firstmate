@@ -78,6 +78,61 @@ fm_inherit_sha256() {
   fi
 }
 
+fm_inherit_sha256_stdin() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 2>/dev/null | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum 2>/dev/null | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+# The exact item set this build propagates, one per line, in declared order.
+# Both ends of a cross-machine push print this and compare: a peer whose build
+# declares a different set must REFUSE the push rather than apply it, because
+# applying it would either miss an item the peer inherits or delete one the
+# sender never knew about (propagate_inheritable_config mirrors a missing source
+# item as a deletion). bin/fm-config-inherit-apply.sh owns that refusal.
+fm_config_inherit_declared_manifest() {
+  local item
+  printf 'fminherit-v1\n'
+  for item in $FM_INHERITABLE_CONFIG; do
+    printf 'config/%s\n' "$item"
+  done
+  printf '%s\n' "$FM_SHARED_CAPTAIN_REL"
+}
+
+# A content digest of one side's inheritance SURFACE - every declared config
+# item plus the shared captain file, each as its sha256 or the literal ABSENT.
+# Equal digests on the primary and a secondmate home mean that home is already
+# converged, which is what lets a cross-machine push cost one round trip in the
+# steady state instead of shipping every file on every session start.
+# Absence is part of the digest on purpose: clearing an item on the primary is a
+# change that must still be propagated (primary-authoritative).
+fm_config_inherit_surface_digest() {  # <config-dir> <data-dir>
+  local config_dir=$1 data_dir=$2 item path h
+  {
+    printf 'fminherit-v1\n'
+    for item in $FM_INHERITABLE_CONFIG; do
+      path="$config_dir/$item"
+      if [ -f "$path" ]; then
+        h=$(fm_inherit_sha256 "$path") || return 1
+      else
+        h=ABSENT
+      fi
+      printf 'config/%s\t%s\n' "$item" "$h"
+    done
+    path="$data_dir/$FM_SHARED_CAPTAIN_FILE"
+    if [ -f "$path" ]; then
+      h=$(fm_inherit_sha256 "$path") || return 1
+    else
+      h=ABSENT
+    fi
+    printf '%s\t%s\n' "$FM_SHARED_CAPTAIN_REL" "$h"
+  } | fm_inherit_sha256_stdin
+}
+
 copy_inheritable_file() {
   local src=$1 dest=$2 dest_parent tmp
   if [ -e "$dest" ] && [ ! -f "$dest" ] && [ ! -L "$dest" ]; then

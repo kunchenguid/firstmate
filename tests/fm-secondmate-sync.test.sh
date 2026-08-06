@@ -841,6 +841,141 @@ test_repo_gitignores_seed_marker() {
   pass "T15 the firstmate repo gitignores the secondmate seed marker"
 }
 
+# --- a home on ANOTHER machine ------------------------------------------------
+#
+# The regression these guard is the quiet one. A secondmate whose home is on
+# another fleet machine still has a kind=secondmate record HERE, so every local
+# sweep walks straight into it - and every step of those sweeps (resolve_path,
+# validate_secondmate_home, git -C, the inheritance cp) reads THIS filesystem at
+# a path that belongs to another machine. The worst shape is not "not a
+# directory": it is a directory of the same name that does exist here and gets
+# advanced, converged, or reported on as if it were the remote home.
+#
+# So the fixture below is deliberately the worst shape: the remote home's path
+# is a REAL local worktree that is behind the primary and would be fast-forwarded
+# if anything treated it as local.
+
+# add_remote_sm <w> <id> <commit> <machine>: a live kind=secondmate record whose
+# home is declared to be on <machine>, with a real local directory sitting at the
+# recorded path.
+add_remote_sm() {
+  local w=$1 id=$2 commit=$3 machine=$4
+  add_sm_worktree "$w" "$id" "$commit"
+  printf 'host=%s\n' "$machine" >> "$w/home/state/$id.meta"
+}
+
+test_registry_machine_field_is_optional_and_parsed() {
+  local reg="$TMP_ROOT/reg-machine.md"
+  mkdir -p "$TMP_ROOT"
+  {
+    printf -- '- sm-local - runs the thing (home: /homes/local; scope: local work; projects: alpha, beta; added 2026-08-06)\n'
+    printf -- '- sm-far - runs the far thing (home: /homes/far; machine: box151; scope: far work; projects: gamma; added 2026-08-06)\n'
+  } > "$reg"
+  [ "$(secondmate_registry_field "$reg" sm-local home)" = /homes/local ] \
+    || fail "an entry without machine: must still parse its home"
+  [ "$(secondmate_registry_field "$reg" sm-local projects)" = "alpha, beta" ] \
+    || fail "an entry without machine: must still parse its projects"
+  secondmate_registry_field "$reg" sm-local machine >/dev/null 2>&1 \
+    && fail "an entry without machine: must report no machine, not an empty one"
+  [ "$(secondmate_registry_field "$reg" sm-far machine)" = box151 ] \
+    || fail "machine: must be parsed: got [$(secondmate_registry_field "$reg" sm-far machine)]"
+  [ "$(secondmate_registry_field "$reg" sm-far home)" = /homes/far ] \
+    || fail "the optional machine: field must not shift home:"
+  [ "$(secondmate_registry_field "$reg" sm-far projects)" = gamma ] \
+    || fail "the optional machine: field must not shift projects:"
+  pass "secondmates.md: machine: is optional, and does not shift home: or projects:"
+}
+
+test_live_records_carry_the_machine() {
+  local w c1 rec
+  w=$(new_world rec-machine)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-here "$c1"
+  add_remote_sm "$w" sm-there "$c1" box151
+  rec=$(live_secondmate_meta_records "$w/home/state" "$w/home/data/secondmates.md" | grep '^sm-here|')
+  [ "${rec##*|}" = "" ] || fail "a local secondmate record must carry an empty machine field: [$rec]"
+  rec=$(live_secondmate_meta_records "$w/home/state" "$w/home/data/secondmates.md" | grep '^sm-there|')
+  [ "${rec##*|}" = box151 ] || fail "a remote secondmate record must carry its machine: [$rec]"
+  pass "live_secondmate_meta_records: the machine rides on every record"
+}
+
+test_ff_skips_a_home_on_another_machine() {
+  local w c1 base before out
+  w=$(new_world ff-remote)
+  c1=$(head_of "$w/main")
+  add_remote_sm "$w" sm-far "$c1" box151
+  bump_primary "$w" instr
+  base=$(primary_head_commit "$w/main")
+  before=$(head_of "$w/sm-far")
+  [ "$before" != "$base" ] || fail "precondition: the home must start behind the primary"
+
+  FF_NUDGE_WINDOWS=""
+  FF_SEEN_HOMES=""
+  out=$(sweep_live_secondmate_metas "$w/home/state" "$base" yes "$w/home/data/secondmates.md" 2>&1)
+  [ -z "$out" ] || fail "the local sweep must say nothing about a home on another machine, got: $out"
+  [ "$(head_of "$w/sm-far")" = "$before" ] \
+    || fail "the local sweep fast-forwarded a home that lives on another machine"
+  case " $FF_SEEN_HOMES " in
+    *sm-far*) fail "a home on another machine must not enter the local converged set" ;;
+  esac
+  pass "local fast-forward sweep: a home on another machine is skipped whole"
+}
+
+test_bootstrap_never_touches_a_remote_home_locally() {
+  local w c1 base before fakebin out
+  w=$(new_world boot-remote)
+  c1=$(head_of "$w/main")
+  add_remote_sm "$w" sm-far "$c1" box151
+  mkdir -p "$w/home/config" "$w/sm-far/config"
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  bump_primary "$w" instr
+  base=$(primary_head_commit "$w/main")
+  before=$(head_of "$w/sm-far")
+
+  fakebin=$(make_fake_toolchain "$w")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  [ "$(head_of "$w/sm-far")" = "$before" ] || fail "bootstrap advanced a home on another machine"
+  [ "$(head_of "$w/main")" = "$base" ] || fail "primary HEAD changed during bootstrap"
+  assert_absent "$w/sm-far/config/crew-harness" \
+    "bootstrap copied inherited config into a path that belongs to another machine"
+  assert_not_contains "$out" "secondmate sm-far: skipped: unsafe home" \
+    "a home on another machine must not be reported as a broken local home"
+  assert_not_contains "$out" "not a directory" \
+    "a home on another machine must not be probed as a local path"
+  # It is skipped, not hidden: the link could not be reached in this fixture, and
+  # that is reported as exactly what it is.
+  assert_contains "$out" "SECONDMATE_SYNC: secondmate sm-far on box151:" \
+    "an unconverged remote home must be reported, naming the machine"
+  pass "bootstrap: a home on another machine is never read or written locally"
+}
+
+test_bootstrap_liveness_never_probes_a_remote_endpoint_locally() {
+  local w c1 fakebin out
+  w=$(new_world boot-remote-live)
+  c1=$(head_of "$w/main")
+  add_remote_sm "$w" sm-far "$c1" box151
+  printf 'harness=claude\n' >> "$w/home/state/sm-far.meta"
+
+  fakebin=$(make_fake_toolchain "$w")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  # The local probe would read an endpoint that is not here, call it confidently
+  # dead, and respawn a duplicate into a home this filesystem does not have.
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm-far on box151: skipped:" \
+    "a remote secondmate's liveness must be asked of its own machine and reported when unreadable"
+  assert_not_contains "$out" "respawn failed" \
+    "a remote secondmate must never be respawned from a local probe"
+  pass "bootstrap liveness: a remote secondmate is asked of its own machine, never probed here"
+}
+
+test_registry_machine_field_is_optional_and_parsed
+test_live_records_carry_the_machine
+test_ff_skips_a_home_on_another_machine
+test_bootstrap_never_touches_a_remote_home_locally
+test_bootstrap_liveness_never_probes_a_remote_endpoint_locally
 test_ff_updated
 test_ff_current
 test_ff_dirty

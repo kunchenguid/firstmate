@@ -33,6 +33,15 @@
 # re-dispatch of the same id therefore loses the race on the host that owns the
 # task, which is the only place the answer can be authoritative.
 #
+# A PERSISTENT SECONDMATE on this machine is driven the same way and by the same
+# rule: home-seed, spawn <id> secondmate, home-config, and backlog-mv each run
+# THIS machine's own bin/ script against its own filesystem, and the control
+# plane holds only a routing entry plus a mirror of the metadata this side
+# returns. Nothing about the secondmate contract is reimplemented on the wire -
+# what crosses it is a short verb plus, where the input is long or arbitrary, a
+# staged file. Every one of those four is a state change here and is fenced
+# below; agent-alive is a read and is not.
+#
 # EPOCH FENCING. Once this machine has a helm lease at <control-root>/helm/lease,
 # every verb that CHANGES state here must arrive as `<verb>@<epoch>` with an
 # epoch matching that lease, and answers `ERR EPOCH_STALE ...` without doing
@@ -356,7 +365,7 @@ shift || true
 # Read-only verbs stay callable from a demoted control plane on purpose: it must
 # still be able to see what is here, it just may not touch it.
 case "$verb" in
-  spawn|send|key|ack|teardown) helm_require_epoch "$verb" ;;
+  spawn|send|key|ack|teardown|home-seed|home-config|backlog-mv) helm_require_epoch "$verb" ;;
 esac
 
 case "$verb" in
@@ -538,10 +547,50 @@ case "$verb" in
 
   spawn)
     # spawn <id> <kind> <project> <briefref> [<harness> <model> <effort>]
+    #
+    # kind=secondmate launches a PERSISTENT domain agent in a home this machine
+    # already seeded (see home-seed below). Two things are deliberately not
+    # required for it, and both fall out of the same fact - the home already
+    # exists here with its charter in it:
+    #   - no project directory, because a secondmate's subject is its home;
+    #   - no staged brief, because bin/fm-spawn.sh reads data/charter.md from
+    #     that home. The control side sends `-` in both slots rather than a
+    #     second verb, so the argument budget and the shell allowlist are
+    #     untouched.
+    # It also takes no CLAIM. A claim exists to make a blind re-dispatch of a
+    # work item lose the race; a secondmate respawn is the documented recovery
+    # action (secondmate-provisioning), so a claim would refuse exactly the call
+    # recovery has to make. What guards a duplicate agent instead is this
+    # machine's own spawn: its per-id lock, and a session provider that refuses
+    # to create a second endpoint over a live one.
     require_id "${1-}"
     tid=$1; kind=${2-}; project=${3-}; briefref=${4-}
     harness=${5-default}; model=${6-default}; effort=${7-default}
-    case "$kind" in ship|scout) ;; *) emit_err badarg "kind must be ship or scout" ;; esac
+    case "$kind" in ship|scout|secondmate) ;; *) emit_err badarg "kind must be ship, scout, or secondmate" ;; esac
+    if [ "$kind" = secondmate ]; then
+      if gui_required; then
+        gui_preflight
+        [ -z "$GUI_REFUSAL" ] || emit_err "${GUI_REFUSAL%% *}" "${GUI_REFUSAL#* }"
+      fi
+      mkdir -p "$TASKS/$tid" 2>/dev/null || true
+      spawn_args=("$tid" --secondmate)
+      [ "$harness" = default ] || spawn_args+=(--harness "$harness")
+      [ "$model" = default ] || spawn_args+=(--model "$model")
+      [ "$effort" = default ] || spawn_args+=(--effort "$effort")
+      spawn_log="$TASKS/$tid/spawn.log"
+      if ! "$BIN/fm-spawn.sh" "${spawn_args[@]}" > "$spawn_log" 2>&1; then
+        spawn_detail=$(tail -n 20 "$spawn_log" 2>/dev/null)
+        printf 'ERR spawnfailed fm-spawn.sh refused or failed on the host\n'
+        printf '%s\n' "$spawn_detail" | sanitize_events
+        exit 1
+      fi
+      trust_note=$(settle_trust_dialog "$tid")
+      printf 'OK spawned=%s trust=%s\n' "$tid" "$trust_note"
+      if [ -f "$STATE/$tid.meta" ]; then
+        cat "$STATE/$tid.meta"
+      fi
+      exit 0
+    fi
     ref_ok "$project" || emit_err badarg "invalid project name"
     ref_ok "$briefref" || emit_err badarg "invalid brief reference"
     proj_dir="$CFG_PROJECTS/$project"
@@ -679,6 +728,158 @@ case "$verb" in
     mkdir -p "$TASKS/$tid" || emit_err io "cannot create the task record"
     printf '%s\n' "$off" > "$TASKS/$tid/ack" || emit_err io "cannot record ack"
     printf 'OK ack=%s\n' "$off"
+    ;;
+
+  home-seed)
+    # home-seed <id> <briefref> <specref>
+    #
+    # Provision a persistent secondmate home ON THIS MACHINE. The control plane
+    # never reaches across to build one: it stages the filled charter and a short
+    # spec, and this runs THIS machine's own bin/fm-home-seed.sh, so the
+    # transactional seed, the rollback, the home validation, the .fm-secondmate-home
+    # marker, the project-clone restrictions, and the no-mistakes initialization
+    # are all the same code a local seed runs, on the filesystem that owns the
+    # home. The control side keeps only a routing entry.
+    #
+    # The home is always the leased worktree form (`-`), which is the captain's
+    # decision that a remote secondmate home is the same kind of object as a
+    # local one; the spec still carries the field so a refusal names it rather
+    # than silently ignoring an unexpected value.
+    require_id "${1-}"
+    tid=$1; briefref=${2-}; specref=${3-}
+    ref_ok "$briefref" || emit_err badarg "invalid charter reference"
+    ref_ok "$specref" || emit_err badarg "invalid seed spec reference"
+    brief_src="$FLEET_ROOT/tasks/$tid/in/$briefref"
+    spec_src="$FLEET_ROOT/tasks/$tid/in/$specref"
+    [ -f "$brief_src" ] || emit_err nobrief "no staged charter at tasks/$tid/in/$briefref"
+    [ -f "$spec_src" ] || emit_err nospec "no staged seed spec at tasks/$tid/in/$specref"
+    seed_home_spec=; seed_no_projects=0; seed_projects=(); seed_proto=
+    while IFS= read -r line; do
+      case "$line" in
+        ''|'#'*) continue ;;
+        fmseed-v1) seed_proto=1; continue ;;
+        home=*) seed_home_spec=${line#home=} ;;
+        no_projects=*) [ "${line#no_projects=}" = 1 ] && seed_no_projects=1 ;;
+        project=*)
+          value=${line#project=}
+          ref_ok "$value" || emit_err badarg "seed spec names an invalid project"
+          seed_projects+=("$value")
+          ;;
+        *) emit_err badarg "seed spec carries an unknown field" ;;
+      esac
+    done < "$spec_src"
+    [ "$seed_proto" = 1 ] || emit_err badarg "seed spec is not fmseed-v1"
+    [ "$seed_home_spec" = "-" ] || emit_err badarg "seed spec home must be '-' (a leased worktree on this machine)"
+    if [ "$seed_no_projects" = 1 ]; then
+      [ "${#seed_projects[@]}" -eq 0 ] || emit_err badarg "seed spec combines no_projects with a project list"
+    else
+      [ "${#seed_projects[@]}" -gt 0 ] || emit_err badarg "seed spec names no project and does not set no_projects"
+    fi
+    # The charter must be in place before the seed runs, because that is where
+    # fm-home-seed.sh reads it from. Remember whether one was already there so a
+    # failed seed does not leave this machine holding a charter it never used;
+    # the seed's own rollback only removes a brief the seed itself generated.
+    brief_existed=0
+    [ -f "$DATA/$tid/brief.md" ] && brief_existed=1
+    mkdir -p "$DATA/$tid" || emit_err io "cannot create data dir"
+    cp "$brief_src" "$DATA/$tid/brief.md" || emit_err io "cannot install the charter"
+    seed_args=("$tid" "-")
+    if [ "$seed_no_projects" = 1 ]; then
+      seed_args+=(--no-projects)
+    else
+      seed_args+=("${seed_projects[@]}")
+    fi
+    if seed_out=$("$BIN/fm-home-seed.sh" "${seed_args[@]}" 2>&1); then
+      seed_path=$(printf '%s\n' "$seed_out" | sed -n 's/^home=//p' | tail -1)
+      [ -n "$seed_path" ] || emit_err seedfailed "fm-home-seed.sh reported no home"
+      printf 'OK seeded=%s home=%s\n' "$tid" "$seed_path"
+      printf '%s\n' "$seed_out" | sanitize_events
+    else
+      [ "$brief_existed" = 1 ] || rm -f "$DATA/$tid/brief.md"
+      printf 'ERR seedfailed fm-home-seed.sh refused or failed on the host\n'
+      printf '%s\n' "$seed_out" | sanitize_events
+      exit 1
+    fi
+    ;;
+
+  home-config)
+    # home-config <id> [<ref>]
+    #
+    # With no ref: report this machine's current inheritance-surface digest for
+    # that secondmate home, so the control side can skip the transfer entirely
+    # when the two sides already agree - which is the steady state.
+    # With a ref: apply the staged surface under tasks/<id>/in/<ref>.
+    # bin/fm-config-inherit-apply.sh owns both, so the guards, the quarantine of
+    # divergent secondmate bytes, the read-only destination mode, and the reread
+    # instruction are the local contract run locally.
+    require_id "${1-}"
+    tid=$1; ref=${2-}
+    apply_args=("$tid")
+    if [ -n "$ref" ]; then
+      ref_ok "$ref" || emit_err badarg "invalid inheritance reference"
+      stage_src="$FLEET_ROOT/tasks/$tid/in/$ref"
+      [ -d "$stage_src" ] || emit_err nostage "no staged inheritance at tasks/$tid/in/$ref"
+      apply_args+=(--from "$stage_src")
+    fi
+    config_rc=0
+    out=$("$BIN/fm-config-inherit-apply.sh" "${apply_args[@]}" 2>&1) || config_rc=$?
+    # The staged copy has served its purpose either way, and it is the primary's
+    # local config sitting in the one directory the peer can read. Remove it
+    # before answering, on the failure path too.
+    [ -z "$ref" ] || rm -rf "${FLEET_ROOT:?}/tasks/$tid/in/$ref"
+    if [ "$config_rc" -eq 0 ]; then
+      printf 'OK\n'
+      printf '%s\n' "$out" | sanitize_events
+    else
+      printf 'ERR configfailed fm-config-inherit-apply.sh refused or failed on the host\n'
+      printf '%s\n' "$out" | sanitize_events
+      exit 1
+    fi
+    ;;
+
+  backlog-mv)
+    # backlog-mv <id> <fragref>
+    #
+    # Land a staged backlog fragment in that secondmate's own queue. The control
+    # machine holds the main backlog, so the items travel as a FILE and this side
+    # runs the host's own bin/fm-backlog-handoff.sh against it - which keeps the
+    # destination proof (a genuine seeded secondmate home), the queued-only rule,
+    # the in-flight and Done refusals, the body-indentation refusal, and the
+    # atomic tasks-axi move exactly where they already are.
+    require_id "${1-}"
+    tid=$1; fragref=${2-}
+    ref_ok "$fragref" || emit_err badarg "invalid backlog fragment reference"
+    frag_src="$FLEET_ROOT/tasks/$tid/in/$fragref"
+    [ -f "$frag_src" ] || emit_err nofragment "no staged backlog fragment at tasks/$tid/in/$fragref"
+    if out=$("$BIN/fm-backlog-handoff.sh" "$tid" --from-file "$frag_src" 2>&1); then
+      # The fragment has landed in the secondmate's queue, so the copy in the
+      # exchange area is residue. A FAILED move keeps it: the control side has
+      # to be able to see what it sent when it decides whether to roll back.
+      rm -f "$frag_src"
+      printf 'OK moved=%s\n' "$tid"
+      printf '%s\n' "$out" | sanitize_events
+    else
+      printf 'ERR backlogrefused fm-backlog-handoff.sh refused or failed on the host\n'
+      printf '%s\n' "$out" | sanitize_events
+      exit 1
+    fi
+    ;;
+
+  agent-alive)
+    # Whether a real agent PROCESS is running under that task's endpoint here.
+    # Read-only and therefore unfenced: a demoted control plane may still look.
+    # The answer is this machine's own probe, because a pane's contents are the
+    # only place the difference between a healthy idle secondmate and one whose
+    # agent has exited into a bare shell exists (bin/fm-agent-alive.sh).
+    require_id "${1-}"
+    tid=$1
+    if out=$("$BIN/fm-agent-alive.sh" "$tid" 2>&1); then
+      printf 'OK alive=%s\n' "$(printf '%s' "$out" | tail -1)"
+    else
+      printf 'ERR alivefailed fm-agent-alive.sh could not read the liveness of %s\n' "$tid"
+      printf '%s\n' "$out" | sanitize_events
+      exit 1
+    fi
     ;;
 
   report-stage)

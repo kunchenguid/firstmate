@@ -15,6 +15,11 @@ command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found (requi
 
 TMP_ROOT=$(fm_test_tmproot fm-backlog-handoff)
 
+# A stub relay that carries the call for real: `exec` runs the peer's own verb
+# with an empty environment, `file` copies within this filesystem.
+STUB_BIFROST="$TMP_ROOT/stub"
+fm_test_make_stub_bifrost "$STUB_BIFROST"
+
 setup_homes() {
   local home=$1 subhome=$2 id=${3:-design}
   mkdir -p "$home/data" "$home/state"
@@ -537,6 +542,203 @@ EOF
   pass "registry entry without (home: ...) fails cleanly with has no home"
 }
 
+# --- handing off to a secondmate on another machine ---------------------------
+#
+# The main backlog is here and the destination queue is over there, so this is
+# the one part of the secondmate contract that genuinely runs on both machines.
+# The order is the safety argument and is what these pin: move out to a private
+# fragment, land it remotely, then drop the fragment. A failure after the landing
+# leaves a duplicate the next run skips; the other order would lose the item.
+
+# A two-machine fixture whose peer runs the REAL verb and the REAL receiving half
+# of this same script, so the queued-only rule and the destination proof are
+# exercised where they actually run.
+setup_remote_handoff() {  # <name> -> echoes "<here> <peer>"
+  local name=$1 here peer
+  here="$TMP_ROOT/$name-here"
+  peer="$TMP_ROOT/$name-peer"
+  mkdir -p "$here/data" "$here/state" "$here/config" \
+    "$peer/data" "$peer/state" "$peer/cr/verbs" "$peer/cr/tasks" "$peer/fr/tasks" \
+    "$peer/fmroot/bin"
+  cp "$ROOT/control-root/verbs/fmr-verb.sh" "$peer/cr/verbs/fmr-verb.sh"
+  chmod 755 "$peer/cr/verbs/fmr-verb.sh"
+  # The peer's own firstmate root: the real handoff script plus what it sources.
+  local f
+  for f in fm-backlog-handoff.sh fm-tasks-axi-lib.sh; do
+    cp "$ROOT/bin/$f" "$peer/fmroot/bin/$f"
+  done
+  {
+    printf 'FM_ROOT=%s\n' "$peer/fmroot"
+    printf 'FM_HOME=%s\n' "$peer"
+    printf 'HOME_DIR=%s\n' "$peer"
+    printf 'PATH=%s\n' "$PATH"
+    printf 'FLEET_ROOT=%s\n' "$peer/fr"
+  } > "$peer/cr/config"
+  cat > "$here/config/relay-hosts.json" <<EOF
+{
+  "box151": {
+    "client_id": "cid-box151",
+    "control_root": "$peer/cr",
+    "fleet_root": "$peer/fr",
+    "home": "$peer",
+    "root": "$peer/fmroot",
+    "path": "$PATH"
+  }
+}
+EOF
+  # The peer's own home for the secondmate, and its own registry entry - written
+  # by its own seed in real life.
+  # OUTSIDE the peer's own firstmate home: a secondmate home nested inside the
+  # active home is refused by the destination proof, on either machine.
+  seed_secondmate_home_marker "$TMP_ROOT/$name-sm" far
+  local sm_abs
+  sm_abs=$(cd "$TMP_ROOT/$name-sm" && pwd -P)
+  printf -- '- far - upstream work (home: %s; scope: upstream work; projects: alpha; added 2026-08-06)\n' \
+    "$sm_abs" > "$peer/data/secondmates.md"
+  # This side holds only a route, and it names the machine.
+  printf -- '- far - upstream work (home: %s; machine: box151; scope: upstream work; projects: alpha; added 2026-08-06)\n' \
+    "$sm_abs" > "$here/data/secondmates.md"
+  printf '%s %s' "$here" "$peer"
+}
+
+run_remote_handoff() {  # <here> <args...>
+  local here=$1
+  shift
+  FM_HOME="$here" FM_RELAY_BIFROST="$STUB_BIFROST/bifrost" \
+    "$ROOT/bin/fm-backlog-handoff.sh" "$@" 2>&1
+}
+
+test_remote_handoff_lands_in_the_peer_queue_and_leaves_no_fragment() {
+  local here peer out rc=0
+  read -r here peer <<EOF
+$(setup_remote_handoff remote-ok)
+EOF
+  cat > "$here/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] sync-upstreams - keep three repos in step (repo: alpha)
+  Spec detail one.
+  ## Intent
+  Move the whole block.
+- [ ] stays-here - not in scope (repo: beta)
+
+## Done
+EOF
+  out=$(run_remote_handoff "$here" far sync-upstreams) || rc=$?
+  expect_code 0 "$rc" "a cross-machine handoff must succeed: $out"
+  assert_grep 'sync-upstreams' "$TMP_ROOT/remote-ok-sm/data/backlog.md" "the item must land in the peer's secondmate queue"
+  assert_grep '  Move the whole block.' "$TMP_ROOT/remote-ok-sm/data/backlog.md" "the item's whole block must travel"
+  assert_no_grep 'sync-upstreams' "$here/data/backlog.md" "the item must leave the main backlog"
+  assert_grep 'stays-here' "$here/data/backlog.md" "an unselected item must stay put"
+  assert_absent "$here/state/far.backlog-handoff" "a landed handoff must leave no fragment behind"
+  pass "cross-machine handoff: the block lands in the peer's queue and the fragment is gone"
+}
+
+test_remote_handoff_puts_the_items_back_when_the_peer_refuses() {
+  local here peer out rc=0
+  read -r here peer <<EOF
+$(setup_remote_handoff remote-refuse)
+EOF
+  # The peer's registry no longer knows this secondmate, so its own copy of the
+  # receiving half refuses - the same refusal a local handoff would give.
+  : > "$peer/data/secondmates.md"
+  cat > "$here/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] sync-upstreams - keep three repos in step (repo: alpha)
+  Spec detail one.
+
+## Done
+EOF
+  out=$(run_remote_handoff "$here" far sync-upstreams) || rc=$?
+  expect_code 1 "$rc" "a peer refusal must fail the handoff"
+  assert_contains "$out" "put back" "the failure must say the items were restored"
+  assert_grep 'sync-upstreams' "$here/data/backlog.md" "a refused handoff must leave the item in the main backlog"
+  assert_grep '  Spec detail one.' "$here/data/backlog.md" "the restored item must keep its body"
+  assert_absent "$here/state/far.backlog-handoff" "a rolled-back handoff must leave no fragment behind"
+  pass "cross-machine handoff: a peer refusal puts the items back, byte for byte"
+}
+
+test_remote_handoff_keeps_the_existing_refusals() {
+  local here peer out rc=0
+  read -r here peer <<EOF
+$(setup_remote_handoff remote-refusals)
+EOF
+  cat > "$here/data/backlog.md" <<'EOF'
+## In flight
+- [ ] running-now - already under way (repo: alpha)
+
+## Queued
+- [ ] tabbed - has a tab continuation (repo: alpha)
+	tab indented body
+
+## Done
+- [x] finished - historical (repo: alpha)
+EOF
+  rc=0
+  out=$(run_remote_handoff "$here" far running-now) || rc=$?
+  expect_code 1 "$rc" "an in-flight item must still be refused across the link"
+  assert_contains "$out" "in-flight" "the in-flight refusal must say so"
+  rc=0
+  out=$(run_remote_handoff "$here" far finished) || rc=$?
+  expect_code 1 "$rc" "a Done item must still be refused across the link"
+  assert_contains "$out" "Done" "the Done refusal must say so"
+  rc=0
+  out=$(run_remote_handoff "$here" far nosuchkey) || rc=$?
+  expect_code 1 "$rc" "an unknown key must still be refused across the link"
+  rc=0
+  out=$(run_remote_handoff "$here" far tabbed) || rc=$?
+  expect_code 1 "$rc" "a tab-indented continuation must still be refused across the link"
+  assert_contains "$out" "non-2-space continuation" "the indentation refusal must say so"
+  assert_absent "$here/state/far.backlog-handoff" "a refused handoff must never open a fragment"
+  assert_grep 'running-now' "$here/data/backlog.md" "nothing may move on a refusal"
+  assert_grep 'tabbed' "$here/data/backlog.md" "nothing may move on a refusal"
+  pass "cross-machine handoff: every existing refusal still refuses, before anything moves"
+}
+
+test_remote_handoff_refuses_a_stale_fragment_rather_than_overwriting_it() {
+  local here peer out rc=0
+  read -r here peer <<EOF
+$(setup_remote_handoff remote-stale)
+EOF
+  cat > "$here/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] sync-upstreams - keep three repos in step (repo: alpha)
+
+## Done
+EOF
+  mkdir -p "$here/state"
+  printf '## In flight\n\n## Queued\n- [ ] earlier-item - stranded (repo: alpha)\n\n## Done\n' \
+    > "$here/state/far.backlog-handoff"
+  out=$(run_remote_handoff "$here" far sync-upstreams) || rc=$?
+  expect_code 1 "$rc" "a stale fragment must stop a new handoff"
+  assert_contains "$out" "previous handoff fragment" "the refusal must name the situation"
+  assert_grep 'earlier-item' "$here/state/far.backlog-handoff" "a stale fragment must not be overwritten"
+  assert_grep 'sync-upstreams' "$here/data/backlog.md" "nothing may move while a fragment is stranded"
+  pass "cross-machine handoff: a stranded fragment refuses instead of being overwritten"
+}
+
+test_from_file_refuses_a_secondmate_on_another_machine() {
+  local here peer out rc=0
+  read -r here peer <<EOF
+$(setup_remote_handoff remote-fromfile)
+EOF
+  printf '## In flight\n\n## Queued\n- [ ] x - y (repo: alpha)\n\n## Done\n' > "$TMP_ROOT/frag.md"
+  out=$(FM_HOME="$here" "$ROOT/bin/fm-backlog-handoff.sh" far --from-file "$TMP_ROOT/frag.md" 2>&1) || rc=$?
+  expect_code 1 "$rc" "the receiving half must refuse a secondmate that is not on this machine"
+  assert_contains "$out" "registered on box151" "the refusal must name the machine"
+  pass "cross-machine handoff: the receiving half refuses a home that is not on this machine"
+}
+
+test_remote_handoff_lands_in_the_peer_queue_and_leaves_no_fragment
+test_remote_handoff_puts_the_items_back_when_the_peer_refuses
+test_remote_handoff_keeps_the_existing_refusals
+test_remote_handoff_refuses_a_stale_fragment_rather_than_overwriting_it
+test_from_file_refuses_a_secondmate_on_another_machine
 test_body_moves_when_followed_by_another_item
 test_body_moves_when_followed_by_section_heading
 test_multi_paragraph_body_with_internal_blanks_moves_whole

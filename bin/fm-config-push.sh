@@ -14,6 +14,10 @@
 # (fm_config_send_reread_nudge).
 # Unchanged config and data/captain-shared.md-only updates send no reread
 # message unless a previous send failure is pending for that home.
+# A home on ANOTHER fleet machine is converged through bin/fm-relay-host.sh
+# home-config, which compares the two sides' inheritance-surface digests, stages
+# the same declared surface only when they differ, and lets that machine apply
+# it with the same library. Nothing here ever copies into a remote path.
 # Warnings-only skips exit 0; real propagation or reread-send errors exit non-zero.
 set -u
 
@@ -36,6 +40,10 @@ This is local-material-only:
 Live homes come from state/*.meta records with kind=secondmate.
 data/secondmates.md is only a fallback for missing home= fields in older or
 incomplete meta records.
+
+A home on another fleet machine is converged over the relay instead of by a
+local copy: this side compares the two inheritance-surface digests first and
+ships nothing when they already agree.
 
 Environment overrides follow the rest of firstmate:
   FM_HOME            active firstmate home
@@ -110,8 +118,24 @@ echo "config-push: $FM_HOME -> live secondmate homes"
 
 seen_homes=""
 errors=0
-while IFS='|' read -r id home _window meta; do
+while IFS='|' read -r id home _window meta machine; do
   [ -n "$id" ] || continue
+  # A home on another machine is converged through the link, by the same
+  # digest-then-push path session start uses. Nothing below may run for it: it
+  # all reads and writes the LOCAL path.
+  if [ -n "$machine" ]; then
+    printf 'secondmate %s (on %s):\n' "$id" "$machine"
+    if relay_out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
+      FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-relay-host.sh" home-config "$id" 2>&1); then
+      printf '%s\n' "$relay_out" | sed 's/^/  /'
+    else
+      errors=1
+      printf '%s\n' "$relay_out" | sed 's/^/  /'
+      printf '  home: error - inherited material was not converged on %s\n' "$machine"
+    fi
+    continue
+  fi
   if [ -z "$home" ]; then
     printf 'secondmate %s: skipped - no home= in %s and no registry home\n' "$id" "$meta"
     continue

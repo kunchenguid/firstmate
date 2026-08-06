@@ -3,7 +3,8 @@ name: secondmate-provisioning
 description: >-
   Agent-only reference for persistent secondmate setup and retirement.
   Use when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited local material into, or retiring a secondmate home, or when editing data/secondmates.md.
-  Covers home leases, transactional seeding, project clone restrictions, secondmate harness pins, inherited local-material push, idle charter, handoff helper, and teardown safety.
+  Also use when that home is, or should be, on another fleet machine.
+  Covers home leases, transactional seeding, project clone restrictions, secondmate harness pins, inherited local-material push, idle charter, handoff helper, teardown safety, and the cross-machine contract.
 user-invocable: false
 metadata:
   internal: true
@@ -22,6 +23,9 @@ Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natu
 ```markdown
 - <id> - <one-sentence charter summary> (home: <absolute-home-path>; scope: <natural-language responsibility>; projects: <project-a>, <project-b>; added <date>)
 ```
+
+One optional field, `machine: <host>`, may sit between `home:` and `scope:`; it means the home is on that fleet machine rather than this one, and its absence is what every entry on a single-machine home looks like.
+See "A secondmate on another fleet machine" below.
 
 Each registry entry stays concise and single-line: the summary is one sentence naming the durable charter, `scope:` is the natural-language intake responsibility, `projects:` is the non-exclusive clone list, and any extra prose is limited to genuinely domain-specific hard rules that change routing or safety for that secondmate.
 The `home:` path points to the seeded home containing `data/charter.md`; no extra registry pointer field is needed.
@@ -123,6 +127,52 @@ Secondmate project lists may include `no-mistakes` and `direct-PR` projects only
 `local-only` projects stay with the main firstmate.
 For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
 
+## A secondmate on another fleet machine
+
+A persistent secondmate can live on another machine of this fleet - a machine that stays on while the captain's laptop does not.
+This section is the whole cross-machine contract; everything above still applies unless it says otherwise, because every step below runs the SAME script on the machine that owns the home rather than a second implementation reaching across the link.
+`docs/relay-host.md` owns the link itself, its pairing and authorization, and its measured limits.
+
+A remote home is the same object as a local one: a firstmate worktree leased on that machine with `treehouse get --lease`.
+There is no second layout, so `--machine` requires the `-` home spec and refuses a path this machine names.
+
+```sh
+bin/fm-brief.sh <id> --secondmate {<project-name-on-that-machine>...|--no-projects}   # fill the charter
+bin/fm-home-seed.sh <id> - --machine <host> {<project>...|--no-projects}              # seed it over there
+bin/fm-spawn.sh --host <host> <id> --secondmate                                       # launch it over there
+bin/fm-relay-check-make.sh <id>                                                       # arm its wake path
+```
+
+The project names are that machine's project names, under its own projects directory, and `--secondmate` takes no project positional at spawn.
+Seeding requires a filled charter at `data/<id>/brief.md`, or `FM_SECONDMATE_CHARTER` to generate one; `bin/fm-brief.sh --secondmate` has no host-path variant and needs none, because the home paths are resolved by the seed on the far side.
+Arming the wake path is a separate step for the same reason it is for a remote task: the status file a routed reply lands in is on that machine.
+
+**Where each thing happens, and why that split is the design.**
+
+| Step | Runs where | What it means |
+|---|---|---|
+| seed | that machine's own `bin/fm-home-seed.sh` | the transactional seed, its rollback, home validation, the `.fm-secondmate-home` marker, the project-clone restrictions, and no-mistakes initialization are the same code a local seed runs |
+| launch, steer, peek, state, retire | that machine's own `bin/fm-spawn.sh`, `fm-send.sh`, `fm-peek.sh`, `fm-crew-state.sh`, `fm-teardown.sh` | reached by the ordinary commands, which follow `host=` in the task record themselves |
+| inherited local material | that machine's own `bin/fm-config-inherit-apply.sh` | the gitignore guard, the shared-captain header check, the quarantine of divergent secondmate bytes, and the read-only destination mode all apply, on the filesystem that holds the home |
+| backlog handoff | both, in one fixed order | the main backlog is here and the destination queue is there; see below |
+
+**Routing.** `data/secondmates.md` gains one optional field, `machine: <host>`, between `home:` and `scope:`.
+An entry without it is a home on this machine, which is every entry a single-machine home ever writes.
+The registry here is a ROUTE; the machine that holds the home has its own entry for it, written by its own seed, exactly as a remote task's real metadata lives there and this side keeps a mirror.
+Home identity for the duplicate and overlap checks is `(machine, path)`, because two machines legitimately hold the same path.
+
+**What the local sweeps do with one.** Nothing.
+The session-start fast-forward skips it, because a home on another machine is a checkout advanced by that machine's own `/updatefirstmate`, and every step of the local sweep would read this filesystem at that path.
+The local liveness probe skips it and asks that machine instead, then respawns only on that machine's own confident `dead`.
+The inherited-material push compares the two sides' surface digests first and ships nothing when they agree, so the ordinary session-start cost is one round trip.
+A push is refused outright when the peer's build declares a different inheritable item set, rather than applying part of it.
+
+**Retiring one** is the ordinary `bin/fm-teardown.sh <id>`: it follows `host=` to that machine, which applies its own in-flight-children refusal, its own `--force` discard rule, and its own lease release, and this side then drops the route.
+
+**What does not travel.** A handover of the helm does not carry a secondmate route: `task-list` deliberately excludes `kind=secondmate`, so adoption never picks one up.
+Re-register it by hand on the machine taking over, or hand the helm back.
+`local-only` work still stays in the main home, on any machine.
+
 ## Backlog handoff
 
 Apply `AGENTS.md` section 10's work-items-only backlog contract before creation or handoff.
@@ -144,6 +194,11 @@ Done records stay with their home for pruning or archiving.
 It is idempotent; an item already in the secondmate backlog is skipped.
 It refuses any destination that is not a genuine seeded firstmate home with safe operational directories and a matching `.fm-secondmate-home` marker, so a move can never land in a project.
 Do not hand off `local-only` items.
+
+For a secondmate whose entry carries `machine:`, the same command does the move in one fixed order: `tasks-axi mv` the items out of the main backlog into a private fragment at `state/<id>.backlog-handoff`, ship the fragment, have that machine run its own copy of this helper against it, and only then drop the fragment.
+Land remotely first and delete locally second, never the other way round: a failure after the landing leaves a duplicate that the next run skips as already-present, while the other order would lose the item.
+A failure before the landing puts the items back.
+If both the landing and the put-back fail, the items are in neither backlog, all of them are in the named fragment, and the command says so rather than reporting a move.
 
 ## Recovery
 
