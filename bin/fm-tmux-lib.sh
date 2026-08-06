@@ -67,12 +67,32 @@
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
 
 # Delivery-only rendered busy signatures per harness.
-# Claude uses its elapsed spinner because its idle footer also says "esc to interrupt".
 # Codex uses "esc to interrupt"; opencode uses "esc interrupt"; Pi uses "Working..."; Grok uses "Ctrl+c:cancel".
-# Claude's current spinner has a rotating glyph and word, but every active-turn
-# line has an ellipsis followed by a parenthesized elapsed duration. Keep this
-# signature separate from the shared default because that shape is not generic
-# enough to classify arbitrary harness output safely.
+# Claude carries TWO independent active-turn signals and either one alone proves
+# busy, so no single vendor string is load-bearing:
+#   1. the elapsed spinner - a rotating glyph and word, but every active-turn
+#      line has an ellipsis followed by a parenthesized elapsed duration;
+#   2. the "esc to interrupt" affordance in its footer hint row.
+# Both are required because each has a measured blind window. On Claude Code
+# 2.1.223 the spinner row is only rendered intermittently - a whole 18s turn was
+# observed with the escape affordance present on every sample and the spinner on
+# none - so a spinner-only guard reads an active turn as idle and can inject
+# mid-turn. Older Claude Code renders the escape affordance with no spinner at all.
+# The escape alternative is positional: it counts only on the last non-blank
+# captured line, where Claude renders its live footer hint row. Transcript content
+# can reproduce the footer bytes exactly, so text shape alone cannot distinguish
+# it from the live footer and would recreate the away-mode wedge from the other
+# direction.
+# A bare, undelimited "esc to interrupt" line is likewise NOT matched: that is the
+# ambiguous Claude Code 2.1.221 IDLE footer, the shape tests/fm-daemon.test.sh pins
+# as an idle pane that MUST still accept an away digest. The residual gap is an
+# older Claude Code that renders the affordance with no mode indicator and no
+# spinner; that rendering is byte-identical to the 2.1.221 idle footer, so no
+# function of the rendered text alone can tell them apart, and this guard resolves
+# the collision toward delivery.
+# Verified live per harness in docs/verification/runtime-backends.md.
+# Keep these signatures separate from the shared default because neither shape is
+# generic enough to classify arbitrary harness output safely.
 # Kimi's anchored moon-phase spinner is separate because bare moon glyphs in
 # ordinary output must not classify another harness as busy. Leading whitespace is
 # OPTIONAL; whitespace on both sides of the separator is REQUIRED because every
@@ -85,6 +105,7 @@
 # exposes no stable ASCII busy token.
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
 FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT='…[[:space:]]+\([0-9]+[smh]'
+FM_TMUX_CLAUDE_ESCAPE_REGEX_DEFAULT='^[[:space:]]*(⏵⏵|⏸).*·[[:space:]]*esc to interrupt'
 FM_TMUX_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_TMUX_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
@@ -92,13 +113,18 @@ FM_TMUX_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 FM_TMUX_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
 
 fm_busy_lines_match() {  # [harness]
-  local harness=${1:-} lines regex
+  local harness=${1:-} lines regex last_line
   IFS= read -r -d '' lines || true
   if [ -n "${FM_BUSY_REGEX:-}" ]; then
     regex=$FM_BUSY_REGEX
+  elif [ "$harness" = claude ]; then
+    printf '%s' "$lines" | grep -qiE "$FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT" \
+      && return 0
+    last_line=$(printf '%s\n' "$lines" | awk 'NF { line=$0 } END { print line }')
+    printf '%s' "$last_line" | grep -qiE "$FM_TMUX_CLAUDE_ESCAPE_REGEX_DEFAULT"
+    return
   else
     case "$harness" in
-      claude) regex=$FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT ;;
       codex) regex=$FM_TMUX_CODEX_BUSY_REGEX_DEFAULT ;;
       opencode) regex=$FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT ;;
       pi|pi-signed) regex=$FM_TMUX_PI_BUSY_REGEX_DEFAULT ;;

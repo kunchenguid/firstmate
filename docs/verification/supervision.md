@@ -171,6 +171,22 @@ fm-doc-audience-check: ok surfaces=61 local_links=174
 FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=102585
 ```
 
+The model-aware pull-guard predicate correction (`bin/fm-guard.sh` no longer reports a false watcher-down mid-turn under the Claude Stop auto-arm model, where the watcher runs only between turns) was verified on 2026-08-04 with the installed ShellCheck 0.11.0 and the same isolated behavior suites.
+
+```sh
+bin/fm-lint.sh
+bin/fm-doc-audience-check.sh
+bin/fm-test-run.sh tests/fm-claude-stop-autoarm.test.sh tests/fm-guard-stale-banner.test.sh tests/fm-turnend-guard.test.sh tests/fm-supervision-instructions.test.sh
+```
+
+Observed output:
+
+```text
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-doc-audience-check: ok surfaces=64 local_links=188
+FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=80078
+```
+
 The broader relevant regression pass was rerun on 2026-08-02 without live-home or daemon mutation.
 
 ```sh
@@ -344,7 +360,9 @@ This Linux host has no verified default off-host alert, so remote notification s
 Content stability does not authorize forced injection because a real half-typed line can remain byte-identical indefinitely.
 
 A 2026-08-05 live incident left an away digest buffered for 1558 seconds while each daemon retry passed the rendered busy guard and then reported `composer=pending` despite the same daemon environment's `FM_COMPOSER_IDLE_RE` and a direct public classifier call both reporting `empty`.
-Claude Code 2.1.221 also rendered `esc to interrupt` while idle, so Claude's delivery-only busy guard now relies on its live-verified elapsed spinner instead of that ambiguous footer.
+Claude Code 2.1.221 also rendered `esc to interrupt` while idle, which is why Claude's delivery-only busy guard briefly relied on its elapsed spinner alone.
+That single-signal guard was itself unsafe and has been replaced: Claude's rendered busy verdict now takes the elapsed spinner OR the escape affordance as a delimited footer field on the last non-blank captured line, because 2.1.223 renders the spinner row only intermittently while the affordance is present for a whole turn.
+[`docs/verification/runtime-backends.md`](runtime-backends.md) owns the current per-harness busy-signature evidence and the command that refreshes it.
 Each delivery defer now records its exact gate, backend, detected harness, native and rendered busy verdicts, composer verdict, idle-override presence, or post-submit acknowledgement without recording composer content.
 Busy detection remains independent of `FM_COMPOSER_IDLE_RE`; the override applies only to the inject-time composer proof and the post-submit acknowledgement.
 

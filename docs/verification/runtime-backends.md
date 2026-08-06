@@ -28,9 +28,55 @@ zsh
 ```
 
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
-Claude, Codex, OpenCode, and Grok were observed under their own process names.
-Kimi Code CLI 0.29.1 was observed under `kimi` on 2026-07-25.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
+
+### Agent liveness name sources
+
+The earlier record that every harness is observed under its own `#{pane_current_command}` no longer holds and has been replaced by the per-harness evidence below.
+In this macOS run that reading reflected a rewritable process title rather than stable executable identity, so it is now one of two independent name sources rather than the sole basis of a verdict.
+
+All seven verified adapters were relaunched on 2026-08-03 with tmux 3.6a on macOS 26.5.2 arm64, each on a private socket in an isolated lab.
+
+```sh
+tmux -L "$socket" new-window -d -t "$session:" -n "$harness" -c "$wt" -- "$bin"
+tmux -L "$socket" display-message -p -t "$session:$harness" '#{pane_current_command}'
+ps -t "${tty#/dev/}" -o pgid=,tpgid=,comm=      # rows where pgid = tpgid
+```
+
+Observed identities, and the resulting verdict:
+
+| Harness | Version | `#{pane_current_command}` | Foreground `comm` | Verdict |
+| --- | --- | --- | --- | --- |
+| claude | 2.1.220 | `2.1.220` | `claude` | alive |
+| codex | codex-cli 0.146.0 | `codex` | `codex` | alive |
+| opencode | 1.18.11 | `opencode` | `opencode` | alive |
+| pi | 0.82.0 | `pi-launcher` | `pi-signed`, `pi` | alive |
+| pi-signed | 0.82.0 | `pi-launcher` | `pi-signed`, `pi` | alive |
+| grok | 0.2.118 | `grok-0.2.118-ma` | `grok` | alive |
+| kimi | 0.31.1 | `kimi` | `kimi` | alive |
+
+Claude Code is the harness whose title no longer attributes it at all; every other adapter is currently attributed by both sources.
+Codex reported `codex-aarch64-a` at 0.145.0 and `codex` at 0.146.0, and Kimi Code reported `kimi-code` as its foreground `comm` at 0.29.1 and `kimi` at 0.31.1, so these identities move between ordinary patch releases in both directions.
+That is the evidence for treating any single process name as a surface under vendor control rather than a stable contract.
+
+`#{pane_current_command}` and foreground `ps -o comm=` read different name fields, but which one preserves executable identity is platform-dependent.
+On macOS the pane command reflected the rewritable title while the full install path could survive in `ps -o comm=`; in the Linux portable regression those roles reversed for the version-named native executable, with the identifying path retained in argv[0].
+The classifier therefore accepts a harness basename first, then an exact harness path component in the full executable path, then the same component in argv[0], without depending on which field carries it on a given platform.
+
+The portable regression is CI-enforced, while the real-harness drift guard is opt-in under the policy in `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
+Run the live guard after any harness upgrade and before trusting or refreshing the table above:
+
+```sh
+FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
+```
+
+Bounded output from the run that produced the table:
+
+```text
+ok - harness liveness: claude 2.1.220 (Claude Code) classifies alive
+# claude 2.1.220 (Claude Code): title='2.1.220' foreground=[claude ]
+# checked 7 installed harness(es)
+```
 
 Installed-wrapper checks:
 
@@ -89,6 +135,56 @@ tests/fm-tmux-submit-busy.test.sh
 Expected structural matrix: real text on any content row is pending; all-empty complete boxes are empty; unreadable, incomplete, or unsafe boxes are unknown; and non-bordered panes retain cursor-row compatibility.
 Expected submit matrix: proven pending plus busy is accepted as queued; proven pending plus idle remains pending; ambiguous pending is never converted by the busy exception; and only a proven empty composer succeeds directly.
 
+### Rendered busy signatures
+
+The delivery-only rendered busy guard in [`bin/fm-tmux-lib.sh`](../../bin/fm-tmux-lib.sh) decides whether a pane is mid-turn when no semantic source is available, so both directions of drift are damaging: a signature that stops matching an active turn lets firstmate inject mid-turn, and one that starts matching an idle pane defers delivery forever, which is the away-mode wedge.
+
+Claude Code was re-observed on 2026-08-06 at 2.1.223 with tmux on Linux, capturing a real idle pane and a real turn on a private socket.
+
+| Pane state | Elapsed spinner | `esc to interrupt` | Verdict |
+| --- | --- | --- | --- |
+| Idle, never run a turn | absent | absent | idle |
+| Idle after a completed turn | absent | absent | idle |
+| Idle with background shells | absent | absent | idle |
+| Active turn | intermittent | present throughout | busy |
+
+The spinner row is only intermittently rendered: one 18-second turn was sampled every 0.6 seconds with the escape affordance present on every sample and the spinner on none.
+A spinner-only guard therefore has a blind window in which an active turn reads as idle, which is why Claude now takes either signal.
+
+Claude renders the affordance as one field of a hint row that begins with its permission-mode indicator, and the guard matches that complete anchored shape only on the last non-blank captured line:
+
+```text
+busy   ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents
+busy   ⏸ manual mode on · esc to interrupt · ? for shortcuts
+idle   ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+idle   ⏵⏵ bypass permissions on · 2 shells · ← for agents · ↓ to manage
+```
+
+The line-start anchor excludes quoted, fenced, and ordinary prose, while the last-line position excludes an exact unprefixed footer row printed earlier in the transcript.
+Without both boundaries an agent could print the footer text, go idle, and leave the pane read as perpetually busy, so the away digest would never land and the away-mode wedge would return from the other direction.
+
+A bare, undelimited `esc to interrupt` line is deliberately not busy for Claude.
+That exact shape is the ambiguous Claude Code 2.1.221 idle footer, which `tests/fm-daemon.test.sh` pins as an idle pane that must still accept an away digest.
+An older Claude Code rendering the affordance with no mode indicator and no spinner is byte-identical to it, so no function of the rendered text alone separates the two, and the guard resolves that collision toward delivery rather than toward a wedge.
+
+The portable regression is CI-enforced, while the real-harness drift guard is opt-in under the policy in `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
+Run the live guard after any harness upgrade and before trusting or refreshing the table above:
+
+```sh
+FM_BUSY_SIGNATURE_DRIFT=1 bin/fm-test-run.sh tests/fm-busy-signature-drift-live-e2e.test.sh
+```
+
+Bounded output from the run that produced the table:
+
+```text
+ok - busy signature: claude 2.1.223 (Claude Code) separates idle from an active turn
+ok - busy signature: codex codex-cli 0.146.1 separates idle from an active turn
+# installed but undrivable here, signature unproven: opencode
+# fully verified 2 installed harness(es)
+```
+
+OpenCode is installed on this host but its pane never presented a composer to this guard, so its signature is recorded as unproven rather than passed over silently; Pi, pi-signed, Grok, and Kimi are not installed here.
+
 ### Cleanup endpoint identity
 
 The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a and metadata fixtures for every supported backend.
@@ -120,7 +216,7 @@ Claude, Codex, OpenCode, Pi, pi-signed, Grok, and Kimi share that backend cleanu
 ## Herdr
 
 The compatibility floor is protocol 14.
-The latest active verification uses Herdr 0.7.5 protocol 17 on macOS aarch64, with earlier 0.7.5 protocol-16, 0.7.4, protocol-14, and 0.7.3 evidence retained where they define current behavior or fallbacks.
+The presentation-projection suite's latest active verification uses Herdr 0.8.0 protocol 19 on macOS aarch64, every other section's latest uses Herdr 0.7.5 protocol 17 on macOS aarch64, and earlier 0.7.5 protocol-16, 0.7.4, protocol-14, and 0.7.3 evidence is retained where it defines current behavior or fallbacks.
 Protocol 17 keeps every protocol-16 feature gate satisfied; the event and workspace-move floors remain 16.
 
 Core read-only probes:
@@ -278,6 +374,25 @@ ok - real Herdr lab: concurrent cross-home recoveries replace exact husks under 
 ok - real Herdr lab: missing, renamed, and duplicate tokens trigger zero destructive or adoptive calls, and live duplicate risk refuses launch
 ok - real Herdr lab validation completed on Herdr 0.7.5 with the default-session tripwire intact
 ```
+
+The projection suite ran again on 2026-08-04 against Herdr 0.8.0 protocol 19 for the default-on flip, where an absent `config/herdr-presentation-spaces` enables the projection and only the value `off` opts out:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  tests/fm-backend-herdr-presentation-e2e.test.sh
+```
+
+Observed default and opt-out guarantees:
+
+```text
+ok - real Herdr lab: an opted-out spawn retains the Stage 1 Herdr command sequence with zero ordering calls
+ok - real Herdr lab: a home that configured nothing is projected by default
+ok - real Herdr lab: the primary presentation setting inherits into real secondmate homes
+ok - real Herdr lab validation completed on Herdr 0.8.0 with the default-session tripwire intact
+```
+
+The projected spawn in that run used the historical empty opt-in file, so a home that had already enabled the projection keeps it without any migration step.
+One concurrent cross-home recovery case refused under contention on a loaded machine and passed on an immediate rerun; recovery-path presentation lock contention is a deliberate hard refusal rather than a flat fallback, which default-on now makes reachable from any Herdr home.
 
 The restored-shell session-start cleanup ran on 2026-07-24 against Herdr 0.7.5 protocol 17:
 
