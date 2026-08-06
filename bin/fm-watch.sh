@@ -44,8 +44,9 @@
 #                          same bounded external-wait cadence at that bound
 #                          instead of the wedge timer (busy_wedge_or_pause),
 #                          since a declared wait can legitimately hold a busy
-#                          pane open; while afk is active the wedge is handed to
-#                          the daemon, which applies that precedence itself.
+#                          pane open; while afk is active that divert is skipped
+#                          and the wedge is handed to the away-mode daemon, which
+#                          owns triage there.
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
@@ -336,11 +337,15 @@ busy_turn_over_age() {  # <task>
 # clock, a token counter) cannot keep resetting the cadence the way a hash-tied
 # timer would. A .paused-resurfaced-<key> throttle marker records the last
 # re-surface epoch so, once past the window, it fires once per window rather than
-# every poll. Advances the stale suppressor to <hash> and flags the key paused.
-handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason
+# every poll. Flags the key paused and retires any wedge timer; advancing the
+# stale suppressor is the CALLER's job, because only a caller that has itself
+# just classified this pane's hash as stale may spend the one first-sight surface
+# the idle path still owes that hash (handle_paused_stale below does;
+# busy_wedge_or_pause, whose busy verdict says nothing about pane content, does
+# not).
+absorb_on_pause_cadence() {  # <window> <task>
+  local win=$1 task=$2 key statusf mtime age rf rf_age reason
   key=$(printf '%s' "$win" | tr ':/.' '___')
-  printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   statusf="$STATE/$task.status"
@@ -358,6 +363,15 @@ handle_paused_stale() {  # <window> <task> <hash>
   triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
 }
 
+# The idle stale paths' entry point into that cadence: <hash> is the hash this
+# poll just classified, so advance the stale suppressor to it before absorbing.
+handle_paused_stale() {  # <window> <task> <hash>
+  local win=$1 task=$2 h=$3 key
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  absorb_on_pause_cadence "$win" "$task"
+}
+
 # Bound an over-age BUSY pane, letting a declared pause outrank the wedge timer.
 # A busy pane is not evidence that the crew is unpaused: a crew that declared
 # `paused: <external wait>` can hold a live foreground call - a background monitor
@@ -367,7 +381,7 @@ handle_paused_stale() {  # <window> <task> <hash>
 # declared-paused pane in one evening). The declaration is the crew's own
 # statement that this pane runs long by design - the one cadence question the
 # wedge timer cannot answer for itself, and exactly why the stale paths above
-# divert a declared pause - so it takes handle_paused_stale's bounded
+# divert a declared pause - so it takes absorb_on_pause_cadence's bounded
 # PAUSE_RESURFACE_SECS recheck instead. Absorbed, never silenced: the recheck
 # still re-surfaces the pause once per window, and a later non-pause status line
 # hands the pane straight back to ordinary wedge detection. Deliberately the CHEAP
@@ -375,16 +389,20 @@ handle_paused_stale() {  # <window> <task> <hash>
 # pane, and pause_state_class resolves a busy pane to `working` through
 # crew_absorb_class's run-step precedence - the one verdict that cannot separate a
 # wedge from a declared wait here. Skipped entirely while afk is active, exactly as
-# the other normal-mode pause routing is: the daemon owns triage there and applies
-# the same declared-pause precedence to the enriched wedge reason itself, so
-# absorbing here would record normal-mode pause tracking behind its back.
+# the other normal-mode pause routing is: away mode hands the wedge to the daemon,
+# which owns triage there, so absorbing here would record normal-mode pause
+# tracking behind its back. Absorbs WITHOUT advancing the stale suppressor: a busy
+# verdict is a semantic event about the agent, not a statement about pane content,
+# so the very same bytes can go idle later - and at that moment the idle path still
+# owes this pane the one first-sight stale surface it has never spent, rather than
+# inheriting a classification made here.
 # Returns 0 when it absorbed on the pause cadence, so the caller keeps the pause
 # bookkeeping just written; 1 when the pane went through the wedge timer exactly as
 # before.
-busy_wedge_or_pause() {  # <window> <task> <hash> <since-file> <escalation-count-file>
-  local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5
+busy_wedge_or_pause() {  # <window> <task> <since-file> <escalation-count-file>
+  local win=$1 task=$2 since_file=$3 escalation_file=$4
   if ! afk_present && status_is_paused "$(last_status_line "$STATE/$task.status")"; then
-    handle_paused_stale "$win" "$task" "$h"
+    absorb_on_pause_cadence "$win" "$task"
     return 0
   fi
   wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file"
@@ -1178,7 +1196,7 @@ EOF
         # through the bounded pause cadence when the crew declared a pause.
         paused_busy=1
         if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-          busy_wedge_or_pause "$w" "$task" "$h" "$ssf" "$ewf" && paused_busy=0
+          busy_wedge_or_pause "$w" "$task" "$ssf" "$ewf" && paused_busy=0
         else
           rm -f "$ssf" "$ewf"
         fi
@@ -1195,7 +1213,7 @@ EOF
       echo 0 > "$cf"
       paused_busy=1
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-        busy_wedge_or_pause "$w" "$task" "$h" "$ssf" "$ewf" && paused_busy=0
+        busy_wedge_or_pause "$w" "$task" "$ssf" "$ewf" && paused_busy=0
       else
         rm -f "$ssf" "$ewf"
       fi
