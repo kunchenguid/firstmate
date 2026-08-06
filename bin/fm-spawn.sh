@@ -786,7 +786,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -872,7 +872,7 @@ launch_template() {
     # plugin engine is off in the default build, so firstmate folds muse's own
     # session event log instead (bin/fm-busy-lib.sh), bound by the sidecar
     # written below. Nothing to place in the template for it.
-    muse) printf '%s' 'MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    muse) printf '%s' 'XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -1020,11 +1020,25 @@ resolve_muse_binary() {
 # on an OAuth device-code prompt ("Sign in at this page ... Waiting for
 # approval...") waiting for a human who is not there, which would look to
 # supervision like a wedged worker rather than a missing credential.
+muse_worker_meta_api_key_present() {
+  local session worker_env
+  [ "$BACKEND" = tmux ] || return 1
+  if [ -n "${TMUX:-}" ]; then
+    session=$(tmux display-message -p '#S' 2>/dev/null) || return 1
+  else
+    tmux has-session -t firstmate 2>/dev/null || return 1
+    session=firstmate
+  fi
+  worker_env=$(tmux show-environment -t "$session" META_API_KEY 2>/dev/null) || return 1
+  case "$worker_env" in
+    META_API_KEY=?*) return 0 ;;
+  esac
+  return 1
+}
+
 muse_credential_present() {
-  local auth
-  [ -z "${META_API_KEY:-}" ] || return 0
-  auth="${XDG_CONFIG_HOME:-${HOME:-}/.config}/muse/auth.json"
-  [ -s "$auth" ]
+  local auth=$1
+  [ -s "$auth" ] || muse_worker_meta_api_key_present
 }
 
 model_flag_for_harness() {
@@ -1095,11 +1109,20 @@ effort_flag_for_harness() {
 case "$LAUNCH" in
   *__MUSEBIN__*)
     MUSE_BIN=$(resolve_muse_binary) || exit 1
-    if ! muse_credential_present; then
-      echo "error: muse has no usable credential; an unauthenticated pane stops on an interactive sign-in prompt instead of working. Set META_API_KEY for the spawn, or run 'muse login' once so the credential is stored." >&2
+    MUSE_CONFIG_HOME=${XDG_CONFIG_HOME:-${HOME:-}/.config}
+    MUSE_DATA_HOME=${XDG_DATA_HOME:-${HOME:-}/.local/share}
+    MUSE_AUTH_FILE="$MUSE_CONFIG_HOME/muse/auth.json"
+    if ! muse_credential_present "$MUSE_AUTH_FILE"; then
+      if [ -n "${META_API_KEY:-}" ]; then
+        echo "error: muse has no worker-reachable credential; META_API_KEY is set for fm-spawn but cannot be proven present in the $BACKEND worker environment. Store the fleet credential at '$MUSE_AUTH_FILE' with 'muse login' or 'muse auth set --api-key-stdin'. The secret will not be copied into the launch command." >&2
+      else
+        echo "error: muse has no worker-reachable credential; META_API_KEY cannot be proven present in the $BACKEND worker environment and '$MUSE_AUTH_FILE' is absent or empty. Store the fleet credential with 'muse login' or 'muse auth set --api-key-stdin'." >&2
+      fi
       exit 1
     fi
     LAUNCH=${LAUNCH//__MUSEBIN__/$(shell_quote "$MUSE_BIN")}
+    LAUNCH=${LAUNCH//__MUSECONFIG__/$(shell_quote "$MUSE_CONFIG_HOME")}
+    LAUNCH=${LAUNCH//__MUSEDATA__/$(shell_quote "$MUSE_DATA_HOME")}
     ;;
 esac
 
@@ -2077,7 +2100,7 @@ EOF
       # incarnations. Recording the resolved root here also means a later
       # change to XDG_DATA_HOME cannot silently re-point an already-running
       # task at a different log tree.
-      MUSE_SESSIONS_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/muse/sessions"
+      MUSE_SESSIONS_ROOT="${MUSE_DATA_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}}/muse/sessions"
       {
         printf 'sessions_root=%s\n' "$MUSE_SESSIONS_ROOT"
         printf 'workspace_root=%s\n' "$WT"

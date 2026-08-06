@@ -63,6 +63,8 @@ ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
 ln -s "$SLEEP_BIN" "$LAB/bin/muse-bin-0.1.0-R708.1"
 ln -s "$SLEEP_BIN" "$LAB/bin/musescore"
 ln -s "$SLEEP_BIN" "$LAB/bin/amuse"
+ln -s "$SLEEP_BIN" "$LAB/bin/muse-binary"
+ln -s "$SLEEP_BIN" "$LAB/bin/muse-bind"
 
 # A launcher whose own process identity is a bare shell, running the harness as
 # a child in the same foreground process group - the shape the real Pi Launcher
@@ -163,7 +165,7 @@ wait_for_state "$SESSION:muse" alive \
   || fail "muse's version-suffixed binary name must classify alive"
 pass "tmux liveness: muse's version-suffixed muse-bin-<version> classifies alive"
 
-for decoy in musescore amuse; do
+for decoy in musescore amuse muse-binary muse-bind; do
   new_window "decoy-$decoy" "$LAB/bin/$decoy" 900
   wait_for_state "$SESSION:decoy-$decoy" ambiguous \
     || fail "'$decoy' merely contains 'muse' and must not classify as a live agent pane"

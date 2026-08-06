@@ -46,7 +46,7 @@ $ grep -nE 'muse-bin|exec ' launcher.sh
 ```
 
 `ps -o comm= -p <pid>` returns the full executable path, whose basename is `muse-bin-<version>`.
-That is why both `bin/fm-harness.sh` and `bin/backends/tmux.sh` match the anchored prefix `muse-bin*` rather than an exact name, and why neither can rely on an install-path component: `~/.local/bin/muse-bin-<version>` contains no `muse` path component.
+That is why both `bin/fm-harness.sh` and `bin/backends/tmux.sh` match the anchored prefix `muse-bin-*` rather than an exact name, and why neither can rely on an install-path component: `~/.local/bin/muse-bin-<version>` contains no `muse` path component.
 
 Live tmux liveness against the real binary renamed to its installed form:
 
@@ -119,7 +119,8 @@ An unauthenticated launch does not exit; it waits indefinitely:
   Esc cancel
 ```
 
-That is why `bin/fm-spawn.sh` preflights `META_API_KEY` or `<config>/muse/auth.json` and refuses before creating an endpoint.
+That is why `bin/fm-spawn.sh` preflights worker-reachable `META_API_KEY` or `<config>/muse/auth.json` and refuses before creating an endpoint.
+A caller-only `META_API_KEY` is refused because a long-lived backend daemon does not inherit it, while the non-secret resolved `XDG_CONFIG_HOME` and `XDG_DATA_HOME` roots are forwarded so the stored credential and session-log binding reach the same worker environment.
 
 ### Foreign personal context
 
@@ -182,10 +183,13 @@ To open the gate:
 
 ## Refreshing this record
 
-Run the opt-in live guard after any muse upgrade, because the version-suffixed process name is the surface most likely to drift:
+Run both opt-in live guards after any muse upgrade, because the version-suffixed process name, session protocol, and styled composer are vendor-controlled surfaces:
 
 ```
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
+FM_MUSE_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-muse-signals-live-e2e.test.sh
 ```
+
+The Muse signals guard requires a real `muse` binary and tmux but uses `--provider echo`, so it does not require `META_API_KEY` and does not open the deferred real-model idle gate.
 
 The portable counterparts that run in ordinary CI are `tests/fm-muse-harness.test.sh`, `tests/fm-tmux-agent-liveness.test.sh`, `tests/fm-composer-lib.test.sh`, and `tests/fm-composer-ghost.test.sh`.

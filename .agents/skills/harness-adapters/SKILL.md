@@ -410,7 +410,7 @@ Muse Code is a CREWMATE and SCOUT adapter only.
 | Skill invocation | `/<skill>`, the claude/grok form. |
 | Autonomy | `--yolo`, which disables approval, disables the sandbox, and trusts the workspace for the run. |
 | Trust dialog | `Do you trust this workspace?` with `1 Trust and continue` preselected, accepted by Enter. `--yolo` suppresses it entirely, which is what firstmate relies on because every task gets a fresh worktree path. |
-| Environment marker | None. Detection is process ancestry on the anchored prefix `muse-bin*`. `MUSE_CURRENT_SESSION_LOG` is a session-log PATH rather than an identity, and its export to tool subprocesses is unverified. |
+| Environment marker | None. Detection is process ancestry on the anchored prefix `muse-bin-*`. `MUSE_CURRENT_SESSION_LOG` is a session-log PATH rather than an identity, and its export to tool subprocesses is unverified. |
 | Composer | Bordered box whose prompt glyph is `⟩` (U+27E9) in truecolor `38;2;90;160;255`, luminance ~149.9 - the narrowest margin over the 128 ghost threshold in the fleet. Typed text is `38;2;204;211;219` (~209.8). No idle placeholder or ghost text was observed. |
 | Effort | `--reasoning-effort`, default `high`; see the launch-profile table above for the mapping. |
 | Resume | `muse resume --last` or `muse resume <session-uuid>`; bare `muse resume` opens a picker. |
@@ -418,7 +418,9 @@ Muse Code is a CREWMATE and SCOUT adapter only.
 ### Credentials are a spawn preflight, not a screen check
 
 muse reads `META_API_KEY` (which always wins) or a stored credential at `${XDG_CONFIG_HOME:-$HOME/.config}/muse/auth.json`, written by `muse login` (an OIDC device-code flow) or `muse auth set --api-key-stdin`.
-`bin/fm-spawn.sh` refuses the launch when neither is present, because an unauthenticated pane does NOT exit: it sits on `Sign in at this page: https://auth.meta.com/oauth/device/?code=XXXX-XXXX` / `Waiting for approval…` indefinitely, which supervision would read as a wedged worker rather than a missing credential.
+`bin/fm-spawn.sh` accepts `META_API_KEY` only when it can prove the backend worker already has it, because a command-scoped caller variable does not cross a long-lived backend daemon and the secret must never enter launch argv.
+The supported fleet path is the stored credential, and `fm-spawn` forwards only the resolved non-secret `XDG_CONFIG_HOME` and `XDG_DATA_HOME` roots to keep authentication and session-log binding aligned with the worker.
+`bin/fm-spawn.sh` refuses the launch when neither worker-reachable path is present, because an unauthenticated pane does NOT exit: it sits on `Sign in at this page: https://auth.meta.com/oauth/device/?code=XXXX-XXXX` / `Waiting for approval…` indefinitely, which supervision would read as a wedged worker rather than a missing credential.
 Escalate that refusal to the captain as a needed credential.
 
 ### Foreign personal context is a real privacy boundary
@@ -440,8 +442,7 @@ Two traps the fold already handles, which any change here must preserve.
 muse also emits nested `"record":{"kind":"terminal"}` cleanup-effect payloads that are NOT run terminals, so the match is anchored on the full structural prefix rather than a `"kind":"terminal"` search.
 muse's own native sub-agents write independent run lifecycles one directory deeper under `subagent/<child-session-id>/session.jsonl`, so the resolver is depth-bounded and folds only the main log.
 
-The recorded sessions root is whatever `XDG_DATA_HOME` resolved to in firstmate's own environment at spawn time.
-If a pane ends up with a different `XDG_DATA_HOME` - a session provider that does not inherit firstmate's environment could do this - the binding simply resolves nothing and the task classifies `unknown`, never a wrong `busy` or `idle`; keep the variable consistent rather than widening the search.
+The recorded sessions root is the resolved `XDG_DATA_HOME` that `fm-spawn` also forwards to the worker launch, so the binding and pane remain aligned across a long-lived backend daemon.
 
 The IDLE half is gated behind `fm_busy_muse_idle_verified` in `bin/fm-busy-lib.sh` and is currently CLOSED, so a settled log reads `unknown`, never `idle`.
 Busy needs no gate because an open run is positive proof a turn is in flight.

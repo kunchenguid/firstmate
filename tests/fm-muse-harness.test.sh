@@ -69,6 +69,11 @@ case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
+  show-environment)
+    [ "${FM_FAKE_WORKER_META_KEY:-}" = present ] || exit 1
+    printf 'META_API_KEY=worker-key\n'
+    exit 0
+    ;;
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
@@ -118,8 +123,10 @@ run_muse_spawn() {  # <home> <proj> <wt> <fakebin> <id> [extra args...]
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$home/launch.log" \
+    FM_FAKE_WORKER_META_KEY="${FM_TEST_MUSE_WORKER_KEY-present}" \
     META_API_KEY="${FM_TEST_MUSE_KEY-test-key}" \
     XDG_CONFIG_HOME="$home/xdgconfig" \
+    XDG_DATA_HOME="${FM_TEST_MUSE_DATA_HOME-$home/xdgdata}" \
     PATH="$fakebin:$PATH" \
     "$SPAWN" "$id" "$proj" muse "$@" 2>&1
 }
@@ -143,7 +150,7 @@ test_detects_versioned_process_ancestor() {
   local dir bin out
   dir="$TMP_ROOT/detect"
   mkdir -p "$dir"
-  for bin in muse-bin-0.1.0-R708.1 muse-bin-9.9.9-RZZZ.9 muse-bin muse; do
+  for bin in muse-bin-0.1.0-R708.1 muse-bin-9.9.9-RZZZ.9 muse; do
     cp "$(command -v bash)" "$dir/$bin"
     out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
       "$dir/$bin" -c "r=\$(\"$HARNESS\"); printf '%s' \"\$r\"")
@@ -158,7 +165,7 @@ test_detection_is_anchored() {
   local dir bin out
   dir="$TMP_ROOT/detect-neg"
   mkdir -p "$dir"
-  for bin in musescore amuse notmuse-bin; do
+  for bin in musescore amuse notmuse-bin muse-binary muse-bind; do
     cp "$(command -v bash)" "$dir/$bin"
     out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
       "$dir/$bin" -c "r=\$(\"$HARNESS\"); printf '%s' \"\$r\"")
@@ -194,6 +201,12 @@ EOF
   # The captain accepted muse's self-update risk, so firstmate must not pin it.
   assert_not_contains "$launch" 'MUSE_NO_AUTO_UPDATE' \
     "muse launch pinned auto-update, which the captain declined"
+  assert_contains "$launch" "XDG_CONFIG_HOME='$home/xdgconfig'" \
+    "muse launch did not forward its non-secret config root"
+  assert_contains "$launch" "XDG_DATA_HOME='$home/xdgdata'" \
+    "muse launch did not forward its non-secret data root"
+  assert_not_contains "$launch" 'META_API_KEY' "muse launch exposed META_API_KEY in worker argv"
+  assert_not_contains "$launch" 'test-key' "muse launch exposed the credential value in worker argv"
   assert_contains "$launch" 'encode launch-brief' "muse launch did not deliver the brief positionally"
   assert_grep 'harness=muse' "$home/state/$id.meta" "muse harness was not recorded in meta"
   pass "muse spawn launches with autonomy, privacy control, and a positional brief"
@@ -246,13 +259,31 @@ test_spawn_refuses_without_credential() {
 $rec
 EOF
   mkdir -p "$home/xdgconfig/muse"
-  out=$(FM_TEST_MUSE_KEY='' run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
+  out=$(FM_TEST_MUSE_KEY='' FM_TEST_MUSE_WORKER_KEY='' run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
     --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "muse spawn succeeded with no credential available"
-  assert_contains "$out" "no usable credential" "muse spawn did not name the missing credential"
+  assert_contains "$out" "no worker-reachable credential" "muse spawn did not name the missing credential"
   assert_absent "$home/state/$id.meta" "refused muse spawn still published task metadata"
   pass "muse spawn refuses when no credential can reach the provider"
+}
+
+test_spawn_refuses_caller_only_environment_credential() {
+  local rec case_dir home proj wt fakebin id out status
+  rec=$(make_spawn_case caller-only-cred)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  out=$(FM_TEST_MUSE_KEY='caller-only-secret' FM_TEST_MUSE_WORKER_KEY='' \
+    run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "muse spawn accepted a caller-only META_API_KEY"
+  assert_contains "$out" "set for fm-spawn but cannot be proven present" \
+    "muse spawn did not explain that the caller credential cannot reach the worker"
+  assert_contains "$out" "$home/xdgconfig/muse/auth.json" \
+    "muse spawn did not name the supported stored credential path"
+  assert_absent "$home/launch.log" "caller-only credential refusal created an endpoint"
+  pass "muse spawn refuses a META_API_KEY that cannot reach the worker"
 }
 
 test_spawn_accepts_stored_credential() {
@@ -263,7 +294,8 @@ $rec
 EOF
   mkdir -p "$home/xdgconfig/muse"
   printf '{"schema_version":1}\n' > "$home/xdgconfig/muse/auth.json"
-  FM_TEST_MUSE_KEY='' run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
+  FM_TEST_MUSE_KEY='' FM_TEST_MUSE_WORKER_KEY='' \
+    run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" \
     --mode no-mistakes --yolo off >/dev/null
   status=$?
   expect_code 0 "$status" "muse spawn should accept a stored credential"
@@ -279,14 +311,14 @@ test_spawn_refuses_secondmate() {
   home="$case_dir/home"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   id="muse-secondmate-x1"
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" "$case_dir/subhome"
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" "$case_dir/muse"
   printf 'charter\n' > "$home/data/$id/brief.md"
-  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+  out=$(cd "$case_dir" && FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" META_API_KEY=test-key \
     PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id" "$case_dir/subhome" muse --secondmate 2>&1)
+    "$SPAWN" "$id" muse --secondmate 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "muse was accepted as a secondmate harness"
   assert_contains "$out" "crewmate/scout adapter only" "muse secondmate refusal did not explain the boundary"
@@ -301,7 +333,7 @@ $rec
 EOF
   prior=$(write_session_log "$case_dir/xdgdata/muse/sessions" 2026 08 05 prior "$wt" </dev/null)
   prior=$(printf '%s\n' "$prior" | sed 's://*:/:g')
-  XDG_DATA_HOME="$case_dir/xdgdata" \
+  FM_TEST_MUSE_DATA_HOME="$case_dir/xdgdata" \
     run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode no-mistakes --yolo off >/dev/null \
     || fail "muse spawn failed"
 
@@ -717,6 +749,7 @@ test_detection_is_anchored
 test_spawn_launch_shape
 test_spawn_maps_effort_and_model
 test_spawn_refuses_without_credential
+test_spawn_refuses_caller_only_environment_credential
 test_spawn_accepts_stored_credential
 test_spawn_refuses_secondmate
 test_spawn_writes_busy_binding_and_teardown_removes_it
