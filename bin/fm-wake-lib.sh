@@ -13,7 +13,18 @@ FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
 _FM_UNAME=$(uname 2>/dev/null || echo unknown)
-mkdir -p "$STATE"
+
+# Sourcing this library observes a home; it never creates one. The state
+# directory is materialized by the paths that write into it, so a read-only
+# consumer - a ledger reconcile count, a detect-only bootstrap - can source
+# this library and read state without leaving a directory behind. A source-time
+# mkdir made every such consumer a writer, which is invisible until something
+# asserts read-only behavior. Callers that write into $STATE without going
+# through fm_wake_append or a lock call this first.
+fm_state_ensure() {
+  [ -d "$STATE" ] || mkdir -p "$STATE" 2>/dev/null || return 1
+  return 0
+}
 
 fm_current_pid() {
   printf '%s\n' "${BASHPID:-$$}"
@@ -229,7 +240,13 @@ fm_lock_abs_path() {
 }
 
 fm_lock_owner_dir() {
-  local lockdir=$1 lock_abs
+  local lockdir=$1 lock_abs dir
+  # Taking a lock is a write, so the directory that will hold it is created
+  # here rather than at source time. Without this, a missing parent makes
+  # fm_lock_abs_path fail forever and fm_lock_acquire_wait spins instead of
+  # progressing; a read-only consumer never reaches this path at all.
+  dir=$(dirname "$lockdir")
+  [ -d "$dir" ] || mkdir -p "$dir" 2>/dev/null || return 1
   lock_abs=$(fm_lock_abs_path "$lockdir") || return 1
   mktemp -d "${lock_abs}.owner.XXXXXX" 2>/dev/null
 }
@@ -814,6 +831,11 @@ fm_wake_append() {
   seq_file="$STATE/.wake-queue.seq"
   recovery_marker="$STATE/.watcher-down"
   status=0
+
+  # The sequence file lives in $STATE unconditionally, so this write path
+  # materializes the directory even when the queue and its lock are overridden
+  # elsewhere.
+  fm_state_ensure || return 1
 
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   _fm_recovery_marker_publish "$recovery_marker" downtime || status=$?

@@ -1074,6 +1074,29 @@ admission_control_validate() {
   fi
 }
 
+# Outcome records in the wake ledger that join no wake record. They read as
+# ordinary supervision cost while measuring nothing, and the state they leave -
+# queued=unknown - is also what a legitimately wiped state/ produces, so the
+# only way the fleet ever notices is a count reported at session start.
+# bin/fm-wake-ledger.sh owns the join and the number; this only reports it.
+wake_ledger_reconcile() {
+  local unjoined
+  # A code root without the ledger script predates this check; that is a missing
+  # feature, not an unreadable ledger, so say nothing rather than misreport it.
+  [ -x "$SCRIPT_DIR/fm-wake-ledger.sh" ] || return 0
+  # An absent ledger reports a real 0 and stays silent here. A failure means the
+  # ledger exists and could not be read, which must not read as "clean".
+  if ! unjoined=$("$SCRIPT_DIR/fm-wake-ledger.sh" reconcile --count 2>/dev/null); then
+    echo "WAKE_LEDGER: the wake ledger could not be read, so unjoined outcome records cannot be counted - treat supervision-cost figures as unverified until it is readable"
+    return 0
+  fi
+  case "$unjoined" in
+    ''|*[!0-9]*) return 0 ;;
+    0) return 0 ;;
+  esac
+  echo "WAKE_LEDGER: $unjoined outcome record(s) join no wake record - supervision-cost figures drawn from this ledger overcount until they are purged (bin/fm-wake-ledger.sh reconcile)"
+}
+
 # The entitlement probe half of the observation floor. A MUTATING sweep: it makes
 # live requests and writes state/model-health.json, so it runs only when this
 # session actually holds the fleet lock, alongside the other mutating sweeps.
@@ -1287,6 +1310,7 @@ detect_local_config() {
   crew_dispatch_validate
   model_registry_validate
   admission_control_validate
+  wake_ledger_reconcile
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
     echo "BOOTSTRAP_INFO: tasks-axi available"
