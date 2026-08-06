@@ -348,10 +348,18 @@ raw_launch_refuse() {
 }
 
 raw_launch_preflight() {
-  local raw=$1 normalized word executable= base
+  local raw=$1 normalized_raw normalized word executable= base
   local -a words
   case "$raw" in
     *$'\n'*|*$'\r'*|*';'*|*'&'*|*'|'*|*'`'*|*'$'*|*'('*|*')'*|*'{'*|*'}'*|*'<'*|*'>'*|*'\'*)
+      raw_launch_refuse
+      return 1
+      ;;
+  esac
+  normalized_raw=${raw//\'/}
+  normalized_raw=${normalized_raw//\"/}
+  case "$normalized_raw" in
+    *--dangerously-skip-permissions*)
       raw_launch_refuse
       return 1
       ;;

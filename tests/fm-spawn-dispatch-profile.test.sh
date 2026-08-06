@@ -612,6 +612,30 @@ test_remaining_dispatchers_are_refused() {
   pass "remaining raw-launch dispatchers are refused before launch"
 }
 
+test_forbidden_permission_flag_is_refused_across_raw_commands() {
+  local spec name raw rec id out status
+  local -a cases=(
+    "direct|custom-agent --dangerously-skip-permissions"
+    "quote-split|custom-agent --dangerously-skip-permis''sions"
+    "git-alias|git -c alias.x='!/root/.local/bin/claude --dangerously-skip-permissions' x"
+  )
+
+  for spec in "${cases[@]}"; do
+    name=${spec%%|*}
+    raw=${spec#*|}
+    id="profile-raw-forbidden-${name}-z15n"
+    rec=$(make_spawn_case "profile-raw-forbidden-$name" claude "$id")
+    read_case_record "$rec"
+
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "$raw")
+    status=$?
+    assert_unsafe_claude_raw_refused "$out" "$status" "$HOME_DIR" "$LAUNCH_LOG" "$id" \
+      "$name forbidden-permission flag"
+  done
+  pass "forbidden permission flags are refused across raw commands"
+}
+
 test_non_claude_raw_arguments_may_mention_claude() {
   local rec id raw out status launch
   id=profile-raw-custom-claude-model-z15k
@@ -989,6 +1013,7 @@ test_source_dispatcher_is_refused
 test_posix_dot_dispatcher_is_refused
 test_coproc_dispatcher_is_refused
 test_remaining_dispatchers_are_refused
+test_forbidden_permission_flag_is_refused_across_raw_commands
 test_non_claude_raw_arguments_may_mention_claude
 test_claude_threads_model_and_effort
 test_claude_scout_uses_auto_permissions_and_delivers_profiled_prompt
