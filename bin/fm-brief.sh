@@ -49,6 +49,13 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# Ship and scout scaffolds carry context-discipline rules: the worker compacts
+# itself only past a token threshold AND at a phase boundary, never mid-validation
+# or mid-gate. Compaction stays worker-owned because firstmate cannot see from
+# outside whether a worker is mid-write, mid-gate, or holding pipeline ownership,
+# so nothing here or in firstmate injects a compact into a running worker. The
+# secondmate charter omits both rules: it is a persistent home, not a short-lived
+# task worker with phase boundaries to compact at.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
