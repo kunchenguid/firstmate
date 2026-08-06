@@ -180,12 +180,14 @@ test_guard_warnings() {
 }
 
 test_lock_single_winner_under_concurrency() {
-  local dir state lockdir marker i pids pid wins
+  local dir state lockdir marker attempts i pids pid wins
   dir=$(make_case lock-concurrency)
   state="$dir/state"
   lockdir="$state/.contend.lock"
   marker="$dir/wins"
+  attempts="$dir/attempts"
   : > "$marker"
+  : > "$attempts"
   pids=
   i=1
   while [ "$i" -le 40 ]; do
@@ -193,11 +195,23 @@ test_lock_single_winner_under_concurrency() {
       . "$1"
       if fm_lock_try_acquire "$2"; then
         printf "%s\n" "$$" >> "$3"
-        # Stay alive so the held lock names a live pid for the whole window;
-        # otherwise a late contender could legitimately reclaim a dead-pid lock.
-        sleep 1
+        printf "%s\n" "$$" >> "$4"
+        # Stay alive so the held lock names a live pid until every contender
+        # has finished its acquisition attempt; otherwise a late contender
+        # could legitimately reclaim a dead-pid lock and look like a second
+        # simultaneous winner. No fixed sleep is a sound bound here: one
+        # acquire under 40-way contention exceeds 10s on ARM Windows Git
+        # Bash, so the winner waits on the attempts ledger instead.
+        n=0
+        while [ "$n" -lt 1200 ]; do
+          [ "$(awk "NF { c++ } END { print c + 0 }" "$4")" -lt 40 ] || break
+          sleep 0.1
+          n=$((n + 1))
+        done
+      else
+        printf "%s\n" "$$" >> "$4"
       fi
-    ' _ "$LIB" "$lockdir" "$marker" &
+    ' _ "$LIB" "$lockdir" "$marker" "$attempts" &
     pids="$pids $!"
     i=$((i + 1))
   done
@@ -259,6 +273,37 @@ test_lock_stale_steal_single_winner_under_concurrency() {
   pass "concurrent stale-lock steal yields exactly one winner"
 }
 
+test_lock_reclaims_stale_steal_mutex_without_recursive_suffixes() {
+  local dir state lockdir stale dead rc newpid i
+  dir=$(make_case lock-stale-steal-mutex)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+  mkdir "$lockdir"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  stale=$lockdir
+  i=0
+  while [ "$i" -lt 35 ]; do
+    stale="$stale.steal"
+    mkdir "$stale"
+    printf '%s\n' "$dead" > "$stale/pid"
+    i=$((i + 1))
+  done
+  rc=0
+  # Deep stale trees are renamed atomically, but starting Git Bash and probing
+  # 35 Windows paths can exceed five seconds on ARM Windows under load.
+  newpid=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" timeout 30 bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then cat "$2/pid"; else exit 7; fi
+  ' _ "$LIB" "$lockdir") || rc=$?
+  [ "$rc" -eq 0 ] || fail "acquirer did not recover a stale steal mutex promptly (rc=$rc)"
+  [ -n "$newpid" ] && [ "$newpid" != "$dead" ] \
+    || fail "stale steal-mutex recovery did not publish a live owner"
+  [ ! -e "$stale.steal" ] \
+    || fail "stale steal-mutex recovery extended the recursive .steal suffix"
+  pass "stale steal mutex is reclaimed without recursive suffixes"
+}
+
 test_lock_live_steal_mutex_is_not_reclaimed() {
   local dir state lockdir dead holder_file holder out i lockpid stealpid
   dir=$(make_case lock-live-stealer)
@@ -272,7 +317,9 @@ test_lock_live_steal_mutex_is_not_reclaimed() {
     . "$1"
     fm_lock_try_acquire "$2.steal" || exit 7
     printf "%s\n" "${BASHPID:-$$}" > "$3"
-    sleep 2
+    # Keep the steal mutex live while the inspecting Git Bash starts; process
+    # startup alone can exceed two seconds on Windows under load.
+    sleep 10
     fm_lock_release "$2.steal"
   ' _ "$LIB" "$lockdir" "$holder_file" &
   holder=$!
@@ -1032,16 +1079,41 @@ test_msys_pid_identity_uses_proc() {
   pass "MSYS process identity uses compatible /proc fields"
 }
 
+test_msys_lock_enables_real_directory_symlinks() {
+  local dir state lockdir
+  case "$(uname)" in
+    MSYS*|MINGW*|CYGWIN*) ;;
+    *)
+      pass "MSYS directory-symlink lock regression skipped on non-Windows host"
+      return
+      ;;
+  esac
+  dir=$(make_case msys-directory-symlink)
+  state="$dir/state"
+  lockdir="$state/.probe.lock"
+  env -u MSYS FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 1
+    [ -L "$2" ] || exit 2
+    readlink "$2" >/dev/null || exit 3
+    fm_lock_release "$2"
+    [ ! -e "$2" ] && [ ! -L "$2" ]
+  ' _ "$LIB" "$lockdir" || fail "MSYS lock library did not publish and release a real directory symlink without ambient MSYS options"
+  pass "MSYS lock library enables real directory symlinks without ambient configuration"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc
+test_msys_lock_enables_real_directory_symlinks
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
+test_lock_reclaims_stale_steal_mutex_without_recursive_suffixes
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace

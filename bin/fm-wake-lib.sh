@@ -13,6 +13,17 @@ FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
 _FM_UNAME=$(uname 2>/dev/null || echo unknown)
+# Git for Windows emulates directory symlinks by copying the directory unless
+# winsymlinks is enabled for the child `ln` process. Lock publication relies on
+# `ln -s` plus `readlink` being an atomic owner pointer, so the copy emulation
+# otherwise leaves a plain directory behind and every waiter spins forever.
+case "$_FM_UNAME:${MSYS:-}" in
+  MSYS*:*winsymlinks:*|MINGW*:*winsymlinks:*|CYGWIN*:*winsymlinks:*) ;;
+  MSYS*:*|MINGW*:*|CYGWIN*:*)
+    MSYS="${MSYS:+$MSYS }winsymlinks:nativestrict"
+    export MSYS
+    ;;
+esac
 mkdir -p "$STATE"
 
 fm_current_pid() {
@@ -275,6 +286,7 @@ fm_lock_remove_stray_owner_link() {
 
 fm_lock_claim_blocked_by_steal() {
   local lockdir=$1 allowed_steal_owner=${2:-} steal
+  [ "$allowed_steal_owner" != __fm_no_steal_guard__ ] || return 1
   steal="$lockdir.steal"
   [ -e "$steal" ] || [ -L "$steal" ] || return 1
   if [ -n "$allowed_steal_owner" ] && fm_lock_points_to_owner "$steal" "$allowed_steal_owner"; then
@@ -354,6 +366,15 @@ fm_lock_mid_acquire_is_fresh() {
     ''|*[!0-9]*)
       mid_acquire_stale=$FM_LOCK_STALE_AFTER
       [ "$mid_acquire_stale" -lt 2 ] && mid_acquire_stale=2
+      case "$_FM_UNAME" in
+        MSYS*|MINGW*|CYGWIN*)
+          # Git Bash process startup alone takes 1-3s and one acquire under
+          # contention exceeds 10s on ARM Windows, so a 2s floor lets a live
+          # mid-acquire peer be robbed of its lock. A longer floor only delays
+          # takeover of a crashed mid-acquire, which is rare and benign.
+          [ "$mid_acquire_stale" -lt 10 ] && mid_acquire_stale=10
+          ;;
+      esac
       [ "$(fm_path_age "$lockdir")" -lt "$mid_acquire_stale" ]
       return
       ;;
@@ -379,6 +400,44 @@ fm_lock_recheck_stale_owner() {
   return 0
 }
 
+# Acquire the one steal mutex used to replace a stale primary lock. Recover a
+# stale steal mutex by atomically moving that exact path aside instead of calling
+# fm_lock_try_acquire recursively: recursive "$lockdir.steal" arbitration grows
+# an unbounded .steal.steal... chain after interrupted hook processes and can hit
+# the Windows path limit, leaving every later Stop hook blocked forever.
+fm_lock_try_acquire_steal() {
+  local steal=$1 pid owner reap
+  FM_LOCK_HELD_PID=
+  FM_LOCK_OWNER_DIR=
+
+  if fm_lock_try_create "$steal" __fm_no_steal_guard__; then
+    return 0
+  fi
+
+  pid=$(cat "$steal/pid" 2>/dev/null || true)
+  if fm_pid_alive "$pid" || fm_lock_mid_acquire_is_fresh "$steal" "$pid"; then
+    FM_LOCK_HELD_PID=$pid
+    return 1
+  fi
+  owner=
+  if [ -L "$steal" ]; then
+    owner=$(fm_lock_link_owner "$steal" 2>/dev/null || true)
+  fi
+  fm_lock_recheck_stale_owner "$steal" "$owner" "$pid" || return 1
+
+  reap=$(fm_lock_owner_dir "$steal.reap") || return 1
+  rmdir "$reap" 2>/dev/null || { fm_lock_discard_owner "$reap"; return 1; }
+  if ! mv "$steal" "$reap" 2>/dev/null; then
+    return 1
+  fi
+  if fm_lock_try_create "$steal" __fm_no_steal_guard__; then
+    fm_lock_remove_path "$reap" 2>/dev/null || true
+    return 0
+  fi
+  fm_lock_remove_path "$reap" 2>/dev/null || true
+  return 1
+}
+
 fm_lock_try_acquire() {
   local lockdir=$1 pid steal cur rc steal_owner primary_owner
   FM_LOCK_HELD_PID=
@@ -399,7 +458,7 @@ fm_lock_try_acquire() {
   fi
 
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  if ! fm_lock_try_acquire_steal "$steal"; then
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
     return 1
