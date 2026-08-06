@@ -36,12 +36,14 @@ The normal isolation and unlanded-work refusal rules still apply.
 backend=orca
 window=fm-<id>
 terminal=<orca terminal handle>
-orca_worktree_id=<orca worktree id>
+orca_worktree_id=<repo-id>::<absolute Orca worktree path>
 worktree=<absolute Orca worktree path>
 ```
 
 `window=` remains the caller-facing Firstmate alias.
 `terminal=` and `orca_worktree_id=` are the backend authority used by operation and cleanup paths.
+`orca_worktree_id=` is Orca's composite identity: one registered repository id, one literal `::` separator, and the absolute worktree path returned by Orca.
+Only one separator and an absolute path are valid; missing, malformed, or ambiguous composite identities are refused before endpoint operations.
 
 ## Current lifecycle and safety
 
@@ -57,7 +59,7 @@ Grok alone retains its isolated rendered-tail fallback.
 Cleanup keeps all shared Firstmate safety checks.
 A scout still requires its report and completed decision inventory.
 A ship still refuses dirty or unlanded work.
-Before release, cleanup resolves the recorded Orca worktree id and verifies its path matches the recorded worktree path.
+Before release, cleanup resolves the recorded composite Orca worktree identity and verifies that Orca's returned path matches the recorded worktree path.
 A missing, unreadable, or mismatched identity preserves metadata and stops rather than deleting anything.
 After those checks, Firstmate closes the exact terminal and releases the exact worktree with Orca's worktree command.
 It never raw-deletes an Orca worktree.

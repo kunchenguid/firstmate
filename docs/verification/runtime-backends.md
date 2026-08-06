@@ -436,11 +436,13 @@ result.runtime.state=ready
 Speculative bare ids and nested terminal fields were deliberately rejected.
 
 ```sh
+tests/fm-teardown-endpoint-safety.test.sh
 tests/fm-backend-orca.test.sh
 tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
 ```
 
+The endpoint-safety suite covers valid, malformed, and ambiguous Orca composite identities before mutation.
 The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
 
 ## cmux
