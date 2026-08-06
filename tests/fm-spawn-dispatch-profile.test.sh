@@ -9,6 +9,10 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-check-lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
@@ -132,6 +136,22 @@ test_no_profile_keeps_claude_profile_defaults() {
   expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
+}
+
+test_no_mistakes_spawn_arms_the_registered_validation_check() {
+  local rec id out status
+  id=profile-validation-check-z1
+  rec=$(make_spawn_case profile-validation-check claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "no-mistakes spawn should arm its validation check"
+  [ "$(fm_pr_file_mode "$HOME_DIR/state/$id.check.sh")" = 700 ] \
+    || fail "no-mistakes spawn did not create a mode-0700 validation check"
+  fm_custom_check_registered "$HOME_DIR/state" "$id" \
+    || fail "no-mistakes spawn did not register its validation check"
+  pass "no-mistakes spawn arms a registered validation check before launch"
 }
 
 test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
@@ -674,6 +694,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 }
 
 test_no_profile_keeps_claude_profile_defaults
+test_no_mistakes_spawn_arms_the_registered_validation_check
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
 test_absolute_override_spelling_is_preserved_in_launch_paths

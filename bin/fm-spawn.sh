@@ -2229,6 +2229,18 @@ META_WINDOW=$T
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
+# A no-mistakes worker can begin validation as soon as it receives this launch
+# brief. Arm its registered, silent validation-gate poll before delivery so a
+# parked gate cannot hide in the interval between first run and first turn end.
+# fm-validation-check.sh owns the no-PR-only slot claim; fm-pr-check.sh replaces
+# it later with the higher-priority authenticated merge poll.
+if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-validation-check.sh" "$ID" || {
+    echo "error: could not arm validation check for $ID" >&2
+    exit 1
+  }
+fi
+
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
