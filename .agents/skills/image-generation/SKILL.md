@@ -65,6 +65,36 @@ The model comes from `config/image-model`, defaulting to `gemini-3.1-flash-image
 
 The tool verifies the model against the API's own live catalogue before spending anything, and **fails loudly** when it is not offered. Do not work around that failure by picking a different model yourself. This rule is paid for: `agy` silently downgraded any unrecognized slug to its cheapest tier and warned only in the TUI, never headless, so a full day of design work ran on the wrong model with no visible sign. A tool that quietly substitutes is worse than one that stops.
 
+## Parameters
+
+```sh
+bin/fm-image-gen.sh --prompt-file <path> --out <dir> \
+                    [--model <id>] [--size 1K|2K|4K] [--aspect <ratio>]
+```
+
+**`--size`** defaults to `1K` (HD) and that is almost always right. Left to the
+API this surface picks its own resolution, and `gemini-3-pro-image` will happily
+return 4K unasked - which is how one dashboard mockup cost $0.24 instead of
+$0.134. Reach for `2K` only when the image will be viewed large, and `4K`
+practically never: it is the single biggest multiplier on the bill.
+
+Size changes price only on `gemini-3-pro-image` ($0.134 at 1K-2K, $0.240 at 4K).
+The flash models charge one flat rate whatever the size, so there is no saving
+in asking them for a small image - ask for what the design needs.
+
+**`--aspect`** accepts `auto`, `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3`,
+`21:9`. Choose it from the destination, not from habit: `16:9` for a hero or an
+OG card, `9:16` for a story, `1:1` for an avatar or a tile, `4:3` for an
+in-article illustration. `auto` lets the model decide and is fine for a sketch.
+
+Both are validated before the call, so a typo costs nothing.
+
+**`--check-models`** prints the catalogue and spends nothing. With an
+express-mode key it will report `API_KEY_SERVICE_BLOCKED` and say so plainly:
+that is EXPECTED and does not mean the key is dead - express keys generate
+images but cannot read the catalogue service. **Do not report a blocked key on
+the strength of that message, and never regenerate the key because of it.**
+
 ## Writing the prompt
 
 Read the project's brand documentation before writing a single prompt. In `parlino` that is `docs/brand.md` and `docs/brand/`, and the image must sit inside the same system the UI already uses rather than beside it - the `frontend-evaluator` gate scores "a new colour, shadow, or style invented where the project already has a token" as a blocking defect, and a generated asset is not exempt.

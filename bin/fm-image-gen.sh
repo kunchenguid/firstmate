@@ -84,6 +84,17 @@ API_BASE="https://aiplatform.googleapis.com/v1/publishers/google/models"
 CATALOGUE_BASE="https://generativelanguage.googleapis.com/v1beta/models"
 DEFAULT_MODEL=gemini-3.1-flash-image
 
+# Image models recorded from a live catalogue read on 2026-08-06. This list is
+# the FALLBACK, used only when the catalogue cannot be read - an express-mode key
+# is refused by the metadata endpoint even though it generates fine, so on that
+# key there is no catalogue to consult.
+RECORDED_MODELS='gemini-2.5-flash-image
+gemini-3-pro-image
+gemini-3-pro-image-preview
+gemini-3.1-flash-image
+gemini-3.1-flash-image-preview
+gemini-3.1-flash-lite-image'
+
 usage() {
   cat <<'EOF'
 fm-image-gen.sh - one hard-bounded image generation call to the Gemini API
@@ -131,6 +142,8 @@ die() {  # <exit-code> <message>
 PROMPT_FILE=
 OUT_DIR=.
 MODEL_ARG=
+SIZE_ARG=
+ASPECT_ARG=
 CHECK_MODELS=0
 
 while [ $# -gt 0 ]; do
@@ -150,10 +163,28 @@ while [ $# -gt 0 ]; do
     --model)
       [ $# -ge 2 ] || die_usage "--model requires an id"
       MODEL_ARG=$2; shift 2 ;;
+    --size)
+      [ $# -ge 2 ] || die_usage "--size requires 1K, 2K or 4K"
+      case "$2" in 1K|2K|4K) SIZE_ARG=$2 ;; *) die_usage "--size must be 1K, 2K or 4K (got $2)" ;; esac
+      shift 2 ;;
+    --aspect)
+      [ $# -ge 2 ] || die_usage "--aspect requires a ratio such as 16:9"
+      case "$2" in
+        auto|1:1|16:9|9:16|4:3|3:4|3:2|2:3|21:9) ASPECT_ARG=$2 ;;
+        *) die_usage "--aspect must be one of auto 1:1 16:9 9:16 4:3 3:4 3:2 2:3 21:9 (got $2)" ;;
+      esac
+      shift 2 ;;
     -*) die_usage "unknown option: $1" ;;
     *) die_usage "unexpected argument: $1 (the prompt is never passed in argv)" ;;
   esac
 done
+
+# HD by default. Left unset, this surface picks its own resolution and pro can
+# land on 4K unasked - which is how one mockup cost $0.24 instead of $0.134.
+# Verified 2026-08-06: imageConfig accepts aspectRatio and imageSize on Vertex;
+# outputMimeType is a Gemini-API-only field and is rejected here.
+SIZE=${SIZE_ARG:-1K}
+ASPECT=${ASPECT_ARG:-auto}
 
 for tool in curl jq; do
   command -v "$tool" >/dev/null 2>&1 || die 2 "$tool is required but not on PATH"
@@ -212,6 +243,19 @@ list_image_models() {
 if [ "$CHECK_MODELS" -eq 1 ]; then
   models=$(list_image_models)
   if [ -z "$models" ]; then
+    # An express-mode key generates fine but is refused by the catalogue service,
+    # which answers API_KEY_SERVICE_BLOCKED. That phrase reads as "your key is
+    # blocked" and sent a worker to report a dead key on 2026-08-06 while the
+    # very same key was generating images. Name the distinction here rather than
+    # letting the raw wording mislead the next reader.
+    raw=$(curl_keyed "$CATALOGUE_BASE" 2>/dev/null)
+    if printf '%s' "$raw" | grep -q 'API_KEY_SERVICE_BLOCKED'; then
+      printf 'fm-image-gen: the catalogue service refuses this key (API_KEY_SERVICE_BLOCKED)\n' >&2
+      printf 'fm-image-gen: this is EXPECTED for an express-mode key and does NOT mean the key is blocked - express keys generate images but cannot read the model catalogue\n' >&2
+      printf 'fm-image-gen: generation is unaffected; do not regenerate the key. Known image models:\n' >&2
+      printf '%s\n' "$RECORDED_MODELS" | sed 's/^/  /' >&2
+      exit 0
+    fi
     die 3 "the API returned no image models - the key may be invalid, or generativelanguage.googleapis.com may not be enabled on the project"
   fi
   printf '%s\n' "$models"
@@ -240,16 +284,6 @@ if [ -z "$MODEL" ] && [ -f "$CONFIG/image-model" ]; then
 fi
 [ -n "$MODEL" ] || MODEL=$DEFAULT_MODEL
 
-# Image models recorded from a live catalogue read on 2026-08-06. This list is
-# the FALLBACK, used only when the catalogue cannot be read - an express-mode key
-# is refused by the metadata endpoint even though it generates fine, so on that
-# key there is no catalogue to consult.
-RECORDED_MODELS='gemini-2.5-flash-image
-gemini-3-pro-image
-gemini-3-pro-image-preview
-gemini-3.1-flash-image
-gemini-3.1-flash-image-preview
-gemini-3.1-flash-lite-image'
 
 AVAILABLE=$(list_image_models)
 CATALOGUE_SOURCE=live
@@ -291,9 +325,12 @@ fi
 # Deliberately CONSERVATIVE: where a model has a price range, the highest is
 # used, so the cap can never be overshot by picking the expensive resolution.
 # An unknown model is charged at the dearest known rate rather than free.
-price_per_image() {  # <model>
+price_per_image() {  # <model> <size>
   case "$1" in
-    gemini-3-pro-image*)           printf '0.240' ;;   # 4K rate; 1K-2K is 0.134
+    gemini-3-pro-image*)
+      # pro is the only model priced by resolution, and now that --size is
+      # always sent the estimate can be exact instead of worst-case.
+      case "${2:-4K}" in 1K|2K) printf '0.134' ;; *) printf '0.240' ;; esac ;;
     gemini-3.1-flash-lite-image*)  printf '0.034' ;;
     gemini-3.1-flash-image*)       printf '0.067' ;;
     gemini-2.5-flash-image*)       printf '0.039' ;;
@@ -308,7 +345,7 @@ if [ -f "$LEDGER" ]; then
   case "$SPENT_TODAY" in ''|*[!0-9.]*) SPENT_TODAY=0 ;; esac
 fi
 
-UNIT_PRICE=$(price_per_image "$MODEL")
+UNIT_PRICE=$(price_per_image "$MODEL" "$SIZE")
 if awk -v s="$SPENT_TODAY" -v u="$UNIT_PRICE" -v c="$DAILY_USD_CAP" 'BEGIN { exit !(c > 0 && s + u > c) }'; then
   printf 'fm-image-gen: daily spend cap would be exceeded - $%s already spent today (UTC), this call adds ~$%s, cap is $%s\n' \
     "$SPENT_TODAY" "$UNIT_PRICE" "$DAILY_USD_CAP" >&2
@@ -335,8 +372,10 @@ cleanup() {
   rm -f "$BODY_TMP" "$RESP_TMP"
 }
 
-jq -n --rawfile prompt "$PROMPT_FILE" \
-  '{contents: [{role: "user", parts: [{text: $prompt}]}], generationConfig: {responseModalities: ["TEXT", "IMAGE"]}}' \
+jq -n --rawfile prompt "$PROMPT_FILE" --arg size "$SIZE" --arg aspect "$ASPECT" \
+  '{contents: [{role: "user", parts: [{text: $prompt}]}],
+    generationConfig: {responseModalities: ["TEXT", "IMAGE"],
+                       imageConfig: {imageSize: $size, aspectRatio: $aspect}}}' \
   > "$BODY_TMP" || die 2 "could not build the request body"
 
 mkdir -p "$OUT_DIR" || die 2 "could not create the output directory: $OUT_DIR"
@@ -410,5 +449,5 @@ mkdir -p "$STATE" 2>/dev/null || true
 printf '%s\t%s\t%d\t%s\n' "$TODAY" "$MODEL" "$count" "$CALL_USD" >> "$LEDGER" 2>/dev/null || true
 
 TOTAL_USD=$(awk -v s="$SPENT_TODAY" -v c="$CALL_USD" 'BEGIN { printf "%.4f", s + c }')
-printf 'cost= model=%s images=%d usd=%s today=$%s/$%s\n' \
-  "$MODEL" "$count" "$CALL_USD" "$TOTAL_USD" "$DAILY_USD_CAP" >&2
+printf 'cost= model=%s size=%s aspect=%s images=%d usd=%s today=$%s/$%s\n' \
+  "$MODEL" "$SIZE" "$ASPECT" "$count" "$CALL_USD" "$TOTAL_USD" "$DAILY_USD_CAP" >&2

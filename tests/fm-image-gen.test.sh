@@ -351,3 +351,33 @@ test_model_comes_from_config
 test_cost_line_is_emitted
 test_missing_credential_is_named
 test_prompt_text_in_argv_is_refused
+
+# Paid for on 2026-08-06: a pro mockup came back at 4K unasked and cost $0.24
+# instead of $0.134. Size is now always sent, so the default must be HD.
+test_size_and_aspect_reach_the_request() {
+  local d bin home out size aspect
+  d="$TMP_ROOT/sizing"; bin="$d/bin"; home="$d/home"; out="$d/out"
+  mkdir -p "$home" "$out"
+  make_fake_curl "$bin" normal
+  printf 'GEMINI_IMAGE_API_KEY=k\n' > "$home/.env"
+  printf 'x\n' > "$d/prompt.txt"
+
+  FAKE_CURL_CFG="$d/cfg.txt" FAKE_CURL_BODY="$d/body.json" \
+    PATH="$bin:$PATH" FM_HOME="$home" FM_CONFIG_OVERRIDE="$d/config" FM_STATE_OVERRIDE="$d/state" \
+    "$GEN" --prompt-file "$d/prompt.txt" --out "$out" --aspect 16:9 >/dev/null 2>&1
+  expect_code 0 $? "a call with --aspect should succeed"
+  size=$(jq -r '.generationConfig.imageConfig.imageSize' "$d/body.json")
+  aspect=$(jq -r '.generationConfig.imageConfig.aspectRatio' "$d/body.json")
+  [ "$size" = "1K" ] || fail "size must default to HD so 4K never happens unasked, got '$size'"
+  [ "$aspect" = "16:9" ] || fail "--aspect must reach the request, got '$aspect'"
+
+  # outputMimeType belongs to the other surface and is rejected here.
+  [ "$(jq -r '.generationConfig.imageConfig.outputMimeType // "absent"' "$d/body.json")" = absent ] \
+    || fail "outputMimeType must not be sent - this surface rejects it"
+
+  "$GEN" --prompt-file "$d/prompt.txt" --size 8K >/dev/null 2>&1
+  expect_code 2 $? "an unsupported --size must be refused before any call"
+  pass "fm-image-gen.sh: size defaults to 1K, --aspect reaches the request, and a bad size is refused"
+}
+
+test_size_and_aspect_reach_the_request
