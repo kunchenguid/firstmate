@@ -371,6 +371,42 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# The target-repo PR contract belongs only to the modes that end in a PR. A
+# local-only task ships none, so it must carry no PR-body contract and must keep
+# the exact single blank line between project memory and the definition of done
+# that its brief had before this section existed - that byte framing is the whole
+# reason PR_BODY_SECTION carries its own surrounding newlines.
+test_pr_requirements_section_is_scoped_to_pr_modes() {
+  local home id mode brief framing expected
+  home="$TMP_ROOT/pr-requirements-home"
+  mkdir -p "$home/data"
+  for id_mode in "brief-pr-req-e1:no-mistakes" "brief-pr-req-e2:direct-PR"; do
+    id=${id_mode%%:*}
+    mode=${id_mode##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_grep "# PR requirements" "$brief" \
+      "$mode brief lost the target-repo PR requirements section"
+    assert_grep "Before your commit window closes" "$brief" \
+      "$mode brief did not anchor the PR-rules lookup to the commit window"
+    assert_grep "treat every rule you find as binding rather than stopping at the first source" "$brief" \
+      "$mode brief let the worker stop at the first PR-rules source"
+    assert_grep "mark it as pending and name who provides it" "$brief" \
+      "$mode brief lost the pending-instead-of-invented-evidence contract"
+  done
+
+  id="brief-pr-req-e3"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_no_grep "# PR requirements" "$brief" \
+    "local-only brief carries a PR-body contract for a PR it never opens"
+  expected="Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge."$'\n\n'"# Definition of done"
+  framing=$(grep -B2 -Fx -- "# Definition of done" "$brief")
+  [ "$framing" = "$expected" ] \
+    || fail "local-only brief changed the blank-line framing before its definition of done"
+  pass "fm-brief.sh: the PR requirements section is scoped to the modes that open a PR"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -718,6 +754,7 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_pr_requirements_section_is_scoped_to_pr_modes
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

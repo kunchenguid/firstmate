@@ -54,6 +54,14 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Ship tasks that end in a PR (no-mistakes, direct-PR) also include a PR
+# requirements section: the worker must find and follow the target repository's
+# own PR submission rules before its commit window closes, treat every rule it
+# finds as binding, and state plainly in the PR body which paths it checked when
+# the repo has none. That section also forbids invented evidence: anything a
+# required section needs but the worker cannot produce (a demo video, a
+# benchmark, a human sign-off) is marked pending and names who provides it.
+# local-only ships no PR, so its brief carries no PR-body contract.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -407,6 +415,33 @@ esac
 # briefs stay byte-identical to the historical Bash 5 output.
 DOD=${DOD%$'\n'}
 
+# Ship tasks that end in a PR must satisfy the target repository's own PR
+# submission rules, which vary per repo and may be absent entirely. The brief
+# makes the worker look for them and follow them, and say plainly when none
+# exist, so a generic body is never mistaken for a sufficient one. It also
+# forbids fabricating evidence it does not have. local-only ships no PR, so it
+# gets no PR-body contract. PR_BODY_SECTION carries its own surrounding blank
+# lines so a local-only brief (single newline) stays byte-identical to one
+# built before this section existed.
+case "$MODE" in
+  no-mistakes|direct-PR)
+    IFS= read -r -d '' PR_BODY_SECTION_BODY <<'PR_BODY_EOF' || true
+# PR requirements
+Before your commit window closes, look in the target repository for its own PR submission rules and follow them, because a rule that requires a committed file or artifact can only be satisfied while you are still committing.
+They may live anywhere the repo chooses and are commonly split across several files, so read every place that can hold them (`.agents/`, `.github/`, a `PULL_REQUEST_TEMPLATE.md`, `CONTRIBUTING.md`, `docs/`) plus any file those reference, and treat every rule you find as binding rather than stopping at the first source.
+A generic PR body is not enough if the repo requires more: every required section, file, or artifact must be present in the form the repo asks for, or the repo's own gate can reject the PR after you call it done.
+If you find no repo-specific PR rules, say so plainly in the PR body in one line naming the paths you checked (for example "No repo-specific PR rules found; checked .agents/, .github/, CONTRIBUTING.md") rather than silently assuming a generic body is enough.
+Never invent evidence you do not have.
+If a required section needs something you cannot produce (a demo video, a benchmark, a human review sign-off), mark it as pending and name who provides it (for example "Demo video: pending - recording from <person>") instead of fabricating a link, value, or sign-off.
+PR_BODY_EOF
+    PR_BODY_SECTION_BODY=${PR_BODY_SECTION_BODY%$'\n'}
+    PR_BODY_SECTION=$'\n'"$PR_BODY_SECTION_BODY"$'\n\n'
+    ;;
+  local-only)
+    PR_BODY_SECTION=$'\n'
+    ;;
+esac
+
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
@@ -455,7 +490,6 @@ Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
-
-$DOD
+$PR_BODY_SECTION$DOD
 EOF
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
