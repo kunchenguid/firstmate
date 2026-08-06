@@ -102,8 +102,8 @@ test_preserves_a_deliberate_choice() {
   pass "fm-gh-resolve: a deliberate existing pin - including one aimed at the parent - is never overwritten"
 }
 
-# Nothing to disambiguate means nothing to write.
-test_no_op_when_unambiguous() {
+# No GitHub remote at all means nothing for gh to resolve either way.
+test_no_op_without_a_github_remote() {
   local repo n=0 label spec out
   while IFS='|' read -r label spec; do
     [ -n "$label" ] || continue
@@ -115,15 +115,29 @@ test_no_op_when_unambiguous() {
     [ -z "$out" ] || fail "$label: expected silence, got: $out"
     [ -z "$(pin_of "$repo")" ] || fail "$label: should not have written a pin"
   done <<ROWS
-only origin, no parent to confuse gh|origin=$ORIGIN_URL
 no remotes at all|
-second remote is not on a GitHub host|origin=$ORIGIN_URL fork2=https://gitlab.com/someone/firstmate.git
-both remotes are non-GitHub|a=https://gitlab.com/x/y.git b=https://bitbucket.org/x/y.git
+every remote is non-GitHub|a=https://gitlab.com/x/y.git b=https://bitbucket.org/x/y.git
 ROWS
   # A path that is not a git work tree is silent and successful, not an error.
   out=$("$RESOLVE" "$TMP_ROOT"); expect_code 0 $? "a non-git path should exit 0"
   [ -z "$out" ] || fail "a non-git path should print nothing, got: $out"
-  pass "fm-gh-resolve: silent no-op for one GitHub remote, non-GitHub remotes, and a non-git path"
+  pass "fm-gh-resolve: silent no-op with no GitHub remote, and for a non-git path"
+}
+
+# A single-origin clone of a FORK is still exposed: gh reads the fork
+# relationship from the GitHub API, not from local remotes, so `gh pr create`
+# defaults its base to the parent with no second remote anywhere. This is the
+# case that opened three pull requests on the fork parent on 2026-08-06, and an
+# earlier revision of this script skipped it by requiring two GitHub remotes.
+test_single_origin_fork_is_still_pinned() {
+  local repo out
+  repo=$(make_repo "$TMP_ROOT/single-origin" "origin=$ORIGIN_URL")
+  out=$("$RESOLVE" --check "$repo")
+  assert_contains "$out" "GH_RESOLVE:" "a single-origin checkout should still be reported as unpinned"
+  assert_contains "$out" "pull request" "the report should name the pull-request half of the exposure"
+  "$RESOLVE" "$repo" >/dev/null
+  [ "$(pin_of "$repo")" = base ] || fail "a single-origin checkout was left unpinned"
+  pass "fm-gh-resolve: a single-origin checkout is pinned too, because the fork relationship needs no second remote"
 }
 
 # Ambiguous but unpinnable: report it rather than guessing a base repo.
@@ -224,6 +238,19 @@ test_inheritance() {
   out=$("$RESOLVE" --check "$wt")
   [ -z "$out" ] || fail "--check warned inside an inheriting worktree, got: $out"
 
+  # The converse, and the reason the write is refused from a worktree: because
+  # the config is SHARED, repairing from a disposable task worktree would mutate
+  # the primary every crewmate is working against. It must report, not write.
+  local unpinned uwt
+  unpinned=$(make_repo "$TMP_ROOT/wt-guard" "origin=$ORIGIN_URL" "upstream=$PARENT_URL")
+  uwt="$TMP_ROOT/wt-guard-wt"
+  git -C "$unpinned" worktree add -q --detach "$uwt" >/dev/null 2>&1
+  out=$("$RESOLVE" "$uwt")
+  assert_contains "$out" "GH_RESOLVE:" "repair from a linked worktree should report instead of writing"
+  assert_contains "$out" "linked worktree" "the report should say why it refused"
+  [ -z "$(pin_of "$unpinned")" ] || fail "repair from a linked worktree wrote into the shared primary config"
+  [ -z "$(pin_of "$uwt")" ] || fail "repair from a linked worktree wrote a pin"
+
   # A fresh clone does NOT inherit it: git clone carries no local config. This is
   # the honest limit of the config value, and the reason the repair is wired into
   # bootstrap rather than done once by hand.
@@ -268,7 +295,8 @@ test_gh_honors_the_pin() {
 
 test_pins_the_fork_and_touches_nothing_else
 test_preserves_a_deliberate_choice
-test_no_op_when_unambiguous
+test_no_op_without_a_github_remote
+test_single_origin_fork_is_still_pinned
 test_reports_when_origin_is_unusable
 test_check_never_writes
 test_url_forms

@@ -298,8 +298,12 @@ An absent or incompatible `lavish-axi` reports `MISSING: lavish-axi (install: np
 An absent or too-old `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; firstmate cannot resolve a profile array without a compatible binary.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
-When the firstmate checkout has multiple GitHub remotes and no deliberate base-repo pin, locked bootstrap pins default `gh` and `gh-axi` calls to its GitHub `origin` without changing any remote.
-A linked worktree inherits that local Git configuration, while a fresh clone receives it on its first locked firstmate session start; before then, or in a clone that never runs session start, run `bin/fm-gh-resolve.sh` manually.
+When the firstmate checkout has a GitHub `origin` and no deliberate base-repo pin, locked bootstrap pins default `gh` and `gh-axi` calls to that `origin` without changing any remote.
+This applies even to a checkout whose only remote is `origin`, because a second remote is not required to send calls to the wrong project: when `origin` names a real GitHub fork, `gh pr create` defaults the pull-request base to that fork's parent from the GitHub API rather than from local remotes.
+Repointing a push target does not address that, since the branch then lands on the fork while the pull request still opens on the parent.
+A linked worktree inherits that local Git configuration, while a fresh clone receives it on its first locked firstmate session start; before then, or in a clone that never runs session start, run `bin/fm-gh-resolve.sh <repo>` manually.
+The no-mistakes gate's private clone under `~/.no-mistakes/repos/` is such a clone, and it is the clone that opens pull requests, so pin it once by hand.
+Bootstrap repairs only a primary checkout: a linked worktree shares its primary's configuration, so repairing from a disposable task worktree would mutate the repository every crewmate is working against, and the check reports the owning primary instead.
 An existing pin is preserved so explicit upstream work remains possible, and `-R <owner>/<repo>` can always target a different repository deliberately.
 A read-only session reports `GH_RESOLVE:` instead of writing the pin; distrust default-targeted GitHub listings in that session and use `-R` explicitly until a locked session repairs it.
 The script header in [`bin/fm-gh-resolve.sh`](../bin/fm-gh-resolve.sh) owns the complete pinning and diagnostic contract.

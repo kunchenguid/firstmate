@@ -6,13 +6,27 @@
 # THE FAILURE THIS PREVENTS
 # A firstmate home commonly runs from a FORK: `origin` is the fork the fleet
 # actually ships to, and `upstream` is the fork parent, a third party's repo.
-# When no remote carries a `gh-resolved` config key, `gh` resolves the base repo
-# by REMOTE NAME and prefers a remote literally named `upstream` over `origin`.
-# Every default `gh`/`gh-axi` call then silently reads the PARENT project:
-# `gh pr list` returns the parent's pull requests as though they were ours, and
-# a default-targeted `gh pr create` proposes our branch to the parent's repo.
-# Both were observed on 2026-08-06 against VirtualRoboticHands/firstmate, whose
-# parent is kunchenguid/firstmate (gh 2.97.0).
+# TWO INDEPENDENT mechanisms then aim default `gh` calls at that parent, and
+# fixing only one leaves the other live. Both were observed on 2026-08-06
+# against VirtualRoboticHands/firstmate, whose parent is kunchenguid/firstmate
+# (gh 2.97.0).
+#
+#   1. REMOTE-NAME PREFERENCE, when several GitHub remotes exist. With no remote
+#      carrying a `gh-resolved` key, gh resolves the base repo by remote NAME and
+#      prefers one literally named `upstream` over `origin`, so `gh pr list`
+#      returns the parent's pull requests as though they were ours.
+#   2. THE FORK RELATIONSHIP ITSELF, which needs NO second remote at all. When
+#      the repo behind `origin` is a real GitHub fork, `gh pr create` defaults
+#      the PR BASE to that fork's PARENT, because the relationship comes from the
+#      GitHub API (`repos/<owner>/<repo>` reports `fork: true` with a `parent`),
+#      not from local remotes. A checkout whose ONLY remote is our own fork is
+#      still fully exposed to this one.
+#
+# Mechanism 2 is why repointing a push target is not sufficient: the branch then
+# lands on our fork while the pull request still opens on the parent's repo. It
+# is also why this script does NOT require two GitHub remotes before acting - an
+# earlier revision did, and a single-origin clone proceeded to open a pull
+# request on the parent anyway.
 #
 # THE FIX
 # Set `remote.origin.gh-resolved=base`, which is exactly what `gh repo
@@ -29,12 +43,21 @@
 # `projects/` are never written to (AGENTS.md hard rule 1).
 #
 # NON-CLOBBERING AND IDEMPOTENT
-# If ANY remote already carries `gh-resolved`, that is a deliberate operator
-# choice - including deliberately pinning the parent to contribute upstream -
-# and this script is a silent no-op. It is also a no-op when the checkout has
-# fewer than two GitHub remotes, because `gh` already resolves unambiguously and
-# there is nothing to disambiguate. Re-running after a successful pin changes
-# nothing and prints nothing.
+# If ANY remote already carries `gh-resolved`, in any config scope, that is a
+# deliberate operator choice - including deliberately pinning the parent to
+# contribute upstream - and this script is a silent no-op. Re-running after a
+# successful pin changes nothing and prints nothing.
+#
+# Pinning `origin` is a no-op for a checkout that is NOT a fork, because origin
+# is already what gh would resolve there. It only changes behavior for the fork
+# case, which is the case that is wrong.
+#
+# ONLY THE PRIMARY CHECKOUT IS WRITTEN
+# Linked `git worktree`s share one `.git/config` with their primary, so writing
+# from a disposable task worktree would silently mutate the real repo every
+# crewmate is working against. It refuses to write from a linked worktree for
+# that reason and reports instead, naming the primary that owns the pin. This
+# also keeps `bin/fm-test-run.sh` from mutating a developer's own checkout.
 #
 # SURVIVING A FRESH CLONE OR A NEW WORKTREE
 # `gh-resolved` is LOCAL git config, so it is not carried by `git clone`. It IS
@@ -44,7 +67,16 @@
 # than the config value: `fm-bootstrap.sh` runs it on every LOCKED session
 # start, so a fresh clone is pinned the first time firstmate opens a session in
 # it. A clone that never runs a firstmate session start needs one manual
-# `bin/fm-gh-resolve.sh` (or an equivalent `gh repo set-default <owner>/<repo>`).
+# `bin/fm-gh-resolve.sh <repo>` (or an equivalent `gh repo set-default`).
+#
+# THE CLONE THAT CREATES PULL REQUESTS IS SUCH A CLONE
+# The no-mistakes gate validates and pushes from its OWN private clone under
+# `~/.no-mistakes/repos/`, which firstmate's session start never runs in, so it
+# never receives this pin. Being a single-`origin` clone does not protect it:
+# mechanism 2 above still applies, and on 2026-08-06 that clone opened three
+# pull requests on the fork parent. Pin that clone once, by hand, with
+# `bin/fm-gh-resolve.sh <that clone>`; this script deliberately does not reach
+# into another tool's private data directory on its own.
 #
 # MODES
 #   (default)  Repair. Pins origin when the checkout is ambiguous and unpinned.
@@ -160,16 +192,25 @@ while IFS= read -r remote; do
   [ "$remote" = origin ] && origin_slug=$slug
 done < <(git -C "$REPO" remote 2>/dev/null)
 
-# One GitHub remote (or none) leaves gh nothing to disambiguate.
-[ "$github_remotes" -ge 2 ] || exit 0
+# No GitHub remote at all leaves gh nothing to resolve either way.
+[ "$github_remotes" -ge 1 ] || exit 0
 
 if [ -z "$origin_slug" ]; then
-  report "$REPO has $github_remotes GitHub remotes but no GitHub 'origin', so gh picks the base repo by remote name and may target the wrong project; set the intended base with: gh repo set-default <owner>/<repo>"
+  report "$REPO has $github_remotes GitHub remote(s) but no GitHub 'origin', so gh picks the base repo itself and may target the wrong project; set the intended base with: gh repo set-default <owner>/<repo>"
   exit 0
 fi
 
 if [ "$CHECK_ONLY" -eq 1 ]; then
-  report "$REPO has $github_remotes GitHub remotes and no pinned base repo, so default gh/gh-axi calls may target another project instead of $origin_slug; a session holding the fleet lock pins it, or pin it by hand with: gh repo set-default $origin_slug"
+  report "$REPO has no pinned base repo, so default gh/gh-axi calls - including the repo a new pull request opens on - may target another project instead of $origin_slug; a session holding the fleet lock pins it, or pin it by hand with: gh repo set-default $origin_slug"
+  exit 0
+fi
+
+# Linked worktrees share the primary's .git/config, so writing here would mutate
+# the repo every crewmate is working against. Report and let the primary own it.
+git_dir=$(git -C "$REPO" rev-parse --absolute-git-dir 2>/dev/null || true)
+common_dir=$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+if [ -n "$git_dir" ] && [ -n "$common_dir" ] && [ "$git_dir" != "$common_dir" ]; then
+  report "$REPO is a linked worktree sharing the config of ${common_dir%/.git}, which has no pinned base repo; pin it from that primary checkout with: gh repo set-default $origin_slug"
   exit 0
 fi
 
