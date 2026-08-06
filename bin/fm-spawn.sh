@@ -134,8 +134,8 @@
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
-# it writes only state/<id>.muse-session, the sidecar binding the pane to muse's own
-# session event log; muse is crewmate/scout only and is refused for --secondmate.
+# it writes state/<id>.muse-session to bind the pane to muse's own session event
+# log; muse is crewmate/scout only and is refused for --secondmate.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
@@ -2094,16 +2094,19 @@ EOF
       # source with no writer, so nothing is armed and no record is seeded -
       # exactly the reason standalone Kimi is not armed either.
       # This sidecar is the whole binding: it pins the sessions root, the
-      # workspace root that muse records in each log's metadata, and every
-      # matching main log that predates this pane. The classifier then accepts
-      # only one new matching log, so it never guesses between pane
-      # incarnations. Recording the resolved root here also means a later
-      # change to XDG_DATA_HOME cannot silently re-point an already-running
-      # task at a different log tree.
+      # workspace root that muse records in each log's metadata, this pane's
+      # binding identity, and every matching main log that predates this pane.
+      # The classifier then accepts only one new matching log, so it never
+      # guesses between pane incarnations. Recording the resolved root here
+      # also means a later change to XDG_DATA_HOME cannot silently re-point an
+      # already-running task at a different log tree.
       MUSE_SESSIONS_ROOT="${MUSE_DATA_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}}/muse/sessions"
+      MUSE_BINDING_ID="$$.$RANDOM.$(date +%s)"
+      rm -f "$STATE/$ID.muse-session-current"
       {
         printf 'sessions_root=%s\n' "$MUSE_SESSIONS_ROOT"
         printf 'workspace_root=%s\n' "$WT"
+        printf 'binding_id=%s\n' "$MUSE_BINDING_ID"
         while IFS= read -r MUSE_PRIOR_LOG; do
           [ -n "$MUSE_PRIOR_LOG" ] && printf 'prior_log=%s\n' "$MUSE_PRIOR_LOG"
         done <<EOF

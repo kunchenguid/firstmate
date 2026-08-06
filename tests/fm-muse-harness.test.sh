@@ -347,11 +347,13 @@ EOF
   # No busy record is armed for muse: the source is pull-only with no writer, so
   # a seeded busy record could never be settled.
   assert_absent "$home/state/$id.busy-gen" "muse spawn armed a busy record it can never clear"
+  printf 'binding_id=retired\nsession_log=%s\n' "$prior" > "$home/state/$id.muse-session-current"
 
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     PATH="$fakebin:$PATH" "$TEARDOWN" "$id" --force >/dev/null 2>&1 \
     || fail "muse teardown failed"
   assert_absent "$binding" "muse session binding survived teardown"
+  assert_absent "$home/state/$id.muse-session-current" "muse session cache survived teardown"
   pass "muse spawn writes a session binding that teardown removes"
 }
 
@@ -618,6 +620,63 @@ EOF
   pass "spawn-time exclusions select the current session across equal mtimes"
 }
 
+test_session_log_cache_reuses_and_refreshes_binding() {
+  local dir state id root old fresh verdict fakebin
+  dir="$TMP_ROOT/cache"
+  state="$dir/state"
+  root="$dir/sessions"
+  id=cachetask
+  mkdir -p "$state"
+
+  old=$(write_session_log "$root" 2026 08 05 old "$dir/ws" <<EOF
+$(muse_log_run_started old-run)
+EOF
+)
+  old=$(printf '%s\n' "$old" | sed 's://*:/:g')
+  printf 'sessions_root=%s\nworkspace_root=%s\nbinding_id=incarnation-one\n' \
+    "$root" "$dir/ws" > "$state/$id.muse-session"
+  verdict=$(classify_muse "$state" "$id")
+  [ "$verdict" = "busy muse-session-log" ] \
+    || fail "the initial session did not resolve before caching: got '$verdict'"
+
+  fakebin=$(fm_fakebin "$dir/fake")
+  cat > "$fakebin/node" <<'SH'
+#!/usr/bin/env bash
+exit 97
+SH
+  chmod +x "$fakebin/node"
+  verdict=$(PATH="$fakebin:$PATH" classify_muse "$state" "$id")
+  [ "$verdict" = "busy muse-session-log" ] \
+    || fail "a cached session triggered another tree resolution: got '$verdict'"
+
+  muse_log_run_terminal old-run completed >> "$old"
+  fresh=$(write_session_log "$root" 2026 08 05 fresh "$dir/ws" <<EOF
+$(muse_log_run_started fresh-run)
+EOF
+)
+  printf 'sessions_root=%s\nworkspace_root=%s\nbinding_id=incarnation-two\nprior_log=%s\n' \
+    "$root" "$dir/ws" "$old" > "$state/$id.muse-session"
+  verdict=$(classify_muse "$state" "$id")
+  [ "$verdict" = "busy muse-session-log" ] \
+    || fail "a fresh session did not supersede the prior cached session: got '$verdict'"
+
+  rm -f "$fresh"
+  verdict=$(classify_muse "$state" "$id")
+  [ "$verdict" = "unknown muse-session-log" ] \
+    || fail "a missing cached session produced '$verdict' instead of unknown"
+
+  write_session_log "$root" 2026 08 05 ambiguous-a "$dir/ws" >/dev/null <<EOF
+$(muse_log_run_started ambiguous-a)
+EOF
+  write_session_log "$root" 2026 08 05 ambiguous-b "$dir/ws" >/dev/null <<EOF
+$(muse_log_run_started ambiguous-b)
+EOF
+  verdict=$(classify_muse "$state" "$id")
+  [ "$verdict" = "unknown muse-session-log" ] \
+    || fail "ambiguous replacement sessions produced '$verdict' instead of unknown"
+  pass "the Muse session cache avoids rescans and refreshes safely across incarnations"
+}
+
 # muse's own native sub-agents write independent run lifecycles one directory
 # deeper, under subagent/<child-session-id>/. Folding a child's log would report
 # the parent busy long after the parent's turn ended.
@@ -649,7 +708,8 @@ EOF
   [ "$(run_state "$child/session.jsonl")" = busy ] \
     || fail "the sub-agent fixture is not an open run, so the exclusion case would be vacuous"
 
-  printf 'sessions_root=%s\nworkspace_root=%s\n' "$root" "$dir/ws" > "$state/$id.muse-session"
+  printf 'sessions_root=%s\nworkspace_root=%s\nbinding_id=subagent-incarnation\n' \
+    "$root" "$dir/ws" > "$state/$id.muse-session"
   verdict=$(classify_muse "$state" "$id")
   [ "$verdict" != "busy muse-session-log" ] \
     || fail "a sub-agent's open run was folded as the parent task's busy state"
@@ -657,6 +717,11 @@ EOF
   # the exclusion working rather than the binding silently failing.
   [ "$(run_state "$root/2026/08/05/parent/session.jsonl")" = settled ] \
     || fail "the parent fixture did not fold as settled"
+  printf 'binding_id=subagent-incarnation\nsession_log=%s\n' \
+    "$child/session.jsonl" > "$state/$id.muse-session-current"
+  verdict=$(classify_muse "$state" "$id")
+  [ "$verdict" != "busy muse-session-log" ] \
+    || fail "a cached sub-agent log was folded as the parent task's busy state"
   pass "sub-agent session logs are excluded from the parent's busy fold"
 }
 
@@ -761,6 +826,7 @@ test_nested_terminal_record_does_not_settle_a_run
 test_binding_selects_the_matching_main_log
 test_workspace_binding_treats_glob_characters_literally
 test_binding_excludes_preexisting_log_when_mtimes_tie
+test_session_log_cache_reuses_and_refreshes_binding
 test_subagent_logs_are_excluded
 test_missing_and_unreadable_bindings_are_unknown_never_idle
 test_settled_log_stays_unknown_while_the_idle_gate_is_closed

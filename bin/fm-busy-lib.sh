@@ -295,10 +295,15 @@ fm_busy_muse_idle_verified() {
 
 # fm_busy_muse_binding_path: the per-task sidecar fm-spawn writes so the
 # classifier binds a pane to its session log without re-deriving muse's data
-# directory. It records sessions_root=<abs>, workspace_root=<abs>, and one
-# prior_log=<abs> for each matching main log that predates this pane.
+# directory. It records sessions_root=<abs>, workspace_root=<abs>, one
+# binding_id=<token>, and one prior_log=<abs> for each matching main log that
+# predates this pane.
 fm_busy_muse_binding_path() {  # <state-dir> <id>
   printf '%s/%s.muse-session' "$1" "$2"
+}
+
+fm_busy_muse_cache_path() {  # <state-dir> <id>
+  printf '%s/%s.muse-session-current' "$1" "$2"
 }
 
 # fm_busy_muse_binding_field: read one field from the sidecar, or fail.
@@ -389,13 +394,82 @@ fm_busy_muse_binding_has_prior_log() {  # <state-dir> <id> <session-log>
   return 1
 }
 
+fm_busy_muse_cache_field() {  # <state-dir> <id> <key>
+  local path line key=$3
+  path=$(fm_busy_muse_cache_path "$1" "$2")
+  [ -f "$path" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$key="*)
+        line=${line#"$key="}
+        [ -n "$line" ] || return 1
+        printf '%s' "$line"
+        return 0
+        ;;
+    esac
+  done < "$path"
+  return 1
+}
+
+fm_busy_muse_main_log_path_valid() {  # <sessions-root> <session-log>
+  local root=${1%/} log=$2 rel year month day session leaf
+  while :; do
+    case "$root" in
+      *'//'*) root=${root//\/\//\/} ;;
+      *) break ;;
+    esac
+  done
+  [ -n "$root" ] && [ -f "$log" ] && [ ! -L "$log" ] || return 1
+  case "$log" in
+    "$root"/*) rel=${log#"$root"/} ;;
+    *) return 1 ;;
+  esac
+  year=${rel%%/*}; rel=${rel#*/}
+  month=${rel%%/*}; rel=${rel#*/}
+  day=${rel%%/*}; rel=${rel#*/}
+  session=${rel%%/*}; leaf=${rel#*/}
+  [ -n "$year" ] && [ -n "$month" ] && [ -n "$day" ] && [ -n "$session" ] \
+    && [ "$leaf" = session.jsonl ]
+}
+
+fm_busy_muse_cached_session_log() {  # <state-dir> <id> <root> <binding-id>
+  local cache_binding log
+  [ -n "$4" ] || return 1
+  cache_binding=$(fm_busy_muse_cache_field "$1" "$2" binding_id) || return 1
+  [ "$cache_binding" = "$4" ] || return 1
+  log=$(fm_busy_muse_cache_field "$1" "$2" session_log) || return 1
+  fm_busy_muse_main_log_path_valid "$3" "$log" || return 1
+  fm_busy_muse_binding_has_prior_log "$1" "$2" "$log" && return 1
+  printf '%s' "$log"
+}
+
+fm_busy_muse_cache_session_log() {  # <state-dir> <id> <binding-id> <session-log>
+  local cache tmp current
+  [ -n "$3" ] || return 0
+  current=$(fm_busy_muse_binding_field "$1" "$2" binding_id) || return 1
+  [ "$current" = "$3" ] || return 1
+  cache=$(fm_busy_muse_cache_path "$1" "$2")
+  tmp="$cache.tmp.$$"
+  {
+    printf 'binding_id=%s\n' "$3"
+    printf 'session_log=%s\n' "$4"
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f -- "$tmp" "$cache"
+}
+
 # fm_busy_muse_session_log: the one matching MAIN session log that did not
 # exist when fm-spawn created this pane's binding. Multiple candidates are
 # ambiguous and fail closed rather than guessing which pane owns either log.
 fm_busy_muse_session_log() {  # <state-dir> <id>
-  local root ws candidate selected=''
+  local root ws binding_id='' candidate selected='' cache
   root=$(fm_busy_muse_binding_field "$1" "$2" sessions_root) || return 1
   ws=$(fm_busy_muse_binding_field "$1" "$2" workspace_root) || return 1
+  binding_id=$(fm_busy_muse_binding_field "$1" "$2" binding_id 2>/dev/null || true)
+  if cache=$(fm_busy_muse_cached_session_log "$1" "$2" "$root" "$binding_id"); then
+    printf '%s' "$cache"
+    return 0
+  fi
+  rm -f "$(fm_busy_muse_cache_path "$1" "$2")"
   while IFS= read -r candidate; do
     [ -n "$candidate" ] || continue
     fm_busy_muse_binding_has_prior_log "$1" "$2" "$candidate" && continue
@@ -405,6 +479,7 @@ fm_busy_muse_session_log() {  # <state-dir> <id>
 $(fm_busy_muse_matching_logs "$root" "$ws")
 EOF
   [ -n "$selected" ] || return 1
+  fm_busy_muse_cache_session_log "$1" "$2" "$binding_id" "$selected" || return 1
   printf '%s' "$selected"
 }
 

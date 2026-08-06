@@ -92,6 +92,7 @@ T+30s fold=settled
 
 Two decoys were observed in real logs and are pinned by regressions in `tests/fm-muse-harness.test.sh`:
 a nested `"record":{"kind":"terminal"}` cleanup-effect payload that is not a run terminal, and independent sub-agent run lifecycles under `subagent/<child-session-id>/session.jsonl`.
+The same regression suite verifies that unique resolution is cached, a replacement spawn binding selects its fresh main log, missing cached logs fail closed, and cached sub-agent paths are rejected.
 
 ### Autonomy, trust, and sandbox
 
