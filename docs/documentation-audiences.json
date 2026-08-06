@@ -30,8 +30,7 @@
     "docs/herdr-backend.md",
     "docs/zellij-backend.md",
     "docs/orca-backend.md",
-    "docs/cmux-backend.md",
-    "docs/remote-secondmates.md"
+    "docs/cmux-backend.md"
   ],
   "requiredOwnerPointers": [
     {
@@ -101,10 +100,6 @@
     {
       "source": "docs/codex-app-backend.md",
       "target": "docs/verification/runtime-backends.md"
-    },
-    {
-      "source": "docs/trace-context.md",
-      "target": "docs/verification/trace-context.md"
     }
   ],
   "surfaces": [
@@ -157,15 +152,75 @@
       "audience": "agent-runtime"
     },
     {
-      "path": ".agents/skills/process-event-sources/SKILL.md",
+      "path": ".agents/skills/orchestrator/CONTRACT.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/orchestrator/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/paired-review/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/planner/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/planner/matt/PROVENANCE.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/planner/matt/domain-modeling.ADR-FORMAT.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/planner/matt/domain-modeling.CONTEXT-FORMAT.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/planner/matt/domain-modeling.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/planner/matt/grill-me.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/planner/matt/grill-with-docs.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/planner/matt/grilling.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/planner/matt/tdd.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/planner/matt/tdd.mocking.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/planner/matt/tdd.tests.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/planner/matt/to-spec.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/planner/matt/to-tickets.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/program-orchestration/SKILL.md",
       "audience": "agent-runtime"
     },
     {
       "path": ".agents/skills/project-management/SKILL.md",
-      "audience": "agent-runtime"
-    },
-    {
-      "path": ".agents/skills/quota-array-dispatch/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -269,10 +324,6 @@
       "audience": "operator-current"
     },
     {
-      "path": "docs/remote-secondmates.md",
-      "audience": "operator-current"
-    },
-    {
       "path": "docs/scripts.md",
       "audience": "operator-current"
     },
@@ -313,43 +364,15 @@
       "audience": "operator-current"
     },
     {
-      "path": "docs/trace-context.md",
-      "audience": "maintainer-architecture"
-    },
-    {
       "path": "docs/turnend-guard.md",
       "audience": "operator-current"
-    },
-    {
-      "path": "docs/verification/dispatch-auth.md",
-      "audience": "maintainer-verification"
-    },
-    {
-      "path": "docs/verification/muse.md",
-      "audience": "maintainer-verification"
-    },
-    {
-      "path": "docs/verification/process-event-sources.md",
-      "audience": "maintainer-verification"
-    },
-    {
-      "path": "docs/verification/public-followup.md",
-      "audience": "maintainer-verification"
     },
     {
       "path": "docs/verification/runtime-backends.md",
       "audience": "maintainer-verification"
     },
     {
-      "path": "docs/verification/stow-memory.md",
-      "audience": "maintainer-verification"
-    },
-    {
       "path": "docs/verification/supervision.md",
-      "audience": "maintainer-verification"
-    },
-    {
-      "path": "docs/verification/trace-context.md",
       "audience": "maintainer-verification"
     },
     {

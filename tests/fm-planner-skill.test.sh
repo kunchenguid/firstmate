@@ -40,8 +40,8 @@ test_direct_conversation_exception_is_always_loaded() {
     "AGENTS.md lost the planner direct-conversation exception"
   assert_grep 'monitors only whether the session is alive, waiting, finished, or failed' "$AGENTS" \
     "AGENTS.md lost the lifecycle-only monitoring limit"
-  assert_grep "two narrow exceptions" "$AGENTS" \
-    "AGENTS.md still claims a single crewmate-communication exception"
+  assert_grep "three narrow exceptions" "$AGENTS" \
+    "AGENTS.md no longer enumerates a closed set of crewmate-communication exceptions"
   pass "the narrowed direct-conversation exception survives with no skill loaded"
 }
 
