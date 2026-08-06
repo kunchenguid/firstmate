@@ -104,7 +104,6 @@ cursor_parent_identity() {
   return 1
 }
 
-SESSION_IDENTITY_UNAVAILABLE=0
 SESSION=$(printf '%s' "$PAYLOAD" | jq -r '
   if type != "object" then empty
   elif (.conversation_id | type) == "string" and .conversation_id != "" then .conversation_id
@@ -131,18 +130,12 @@ if [ -z "$SESSION" ]; then
   if [ -z "$SESSION_TRANSCRIPT" ]; then
     if SESSION_PARENT=$(cursor_parent_identity); then
       SESSION_SCOPE=$(printf '%s\037%s' "$SESSION_PARENT" "$SESSION_CONTEXT")
-    else
-      SESSION_IDENTITY_UNAVAILABLE=1
     fi
   fi
-  if [ "$SESSION_IDENTITY_UNAVAILABLE" -eq 1 ]; then
-    SESSION=unscoped
-  else
-    SESSION_KEY=$(printf '%s\037%s' "$ROOT" "$SESSION_SCOPE" \
-      | cksum 2>/dev/null | awk '{print $1 ":" $2}')
-    [ -n "$SESSION_KEY" ] || SESSION_KEY="root:$ROOT"
-    SESSION="fallback:$SESSION_KEY"
-  fi
+  SESSION_KEY=$(printf '%s\037%s' "$ROOT" "$SESSION_SCOPE" \
+    | cksum 2>/dev/null | awk '{print $1 ":" $2}')
+  [ -n "$SESSION_KEY" ] || SESSION_KEY="root:$ROOT"
+  SESSION="fallback:$SESSION_KEY"
 fi
 SESSION_KEY=$(printf '%s' "$SESSION" | cksum 2>/dev/null | awk '{print $1 ":" $2}')
 [ -n "$SESSION_KEY" ] || SESSION_KEY="root:$ROOT"
@@ -203,7 +196,6 @@ normalize_counter() {
 
 chain_load() {
   local key value
-  [ "$SESSION_IDENTITY_UNAVAILABLE" -eq 0 ] || return 0
   [ -f "$CHAIN_FILE" ] || { CHAIN_TOTAL=0; return 0; }
   CHAIN_TOTAL=
   CHAIN_REASONS=()
@@ -346,9 +338,7 @@ if [ "$ARM_ACTIONABLE" -eq 1 ]; then
   else
     CHAIN_REASONS+=("$WAKE_REASON")
   fi
-  if [ "$SESSION_IDENTITY_UNAVAILABLE" -eq 1 ]; then
-    TOTAL=$TOTAL_BUDGET
-  elif ! chain_store "$TOTAL" 0 "$COUNT" "$WAKE_REASON"; then
+  if ! chain_store "$TOTAL" 0 "$COUNT" "$WAKE_REASON"; then
     if [ "$LOOP_COUNT_POSITIVE" -eq 1 ]; then
       FALLBACK_TOTAL=$(fallback_total_from_loop_count "$LOOP_COUNT")
       [ "$FALLBACK_TOTAL" -gt "$TOTAL" ] && TOTAL=$FALLBACK_TOTAL
@@ -370,9 +360,7 @@ else
   TOTAL=$((CHAIN_TOTAL + 1))
   NEXT_FAIL=$COUNT
   [ "$COUNT" -gt "$BLOCK_BUDGET" ] && NEXT_FAIL=0
-  if [ "$SESSION_IDENTITY_UNAVAILABLE" -eq 1 ]; then
-    TOTAL=$TOTAL_BUDGET
-  elif ! chain_store "$TOTAL" "$NEXT_FAIL" 0 ''; then
+  if ! chain_store "$TOTAL" "$NEXT_FAIL" 0 ''; then
     if [ "$LOOP_COUNT_POSITIVE" -eq 1 ]; then
       FALLBACK_TOTAL=$(fallback_total_from_loop_count "$LOOP_COUNT")
       [ "$FALLBACK_TOTAL" -gt "$TOTAL" ] && TOTAL=$FALLBACK_TOTAL
