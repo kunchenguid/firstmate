@@ -779,6 +779,160 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+# --- scale, and the success/failure signal ----------------------------------
+#
+# Two properties are tested together because the fleet view fails at both ends.
+# A fleet-sized home must actually render, and a genuine failure must be
+# distinguishable from an empty fleet by exit status alone.
+# The second is the load-bearing one: supervision reviews the fleet from this
+# view, so a snapshot that reports success while producing nothing - or while
+# silently dropping rows - degrades supervision with no signal that it has.
+#
+# Linux caps a single argv entry at MAX_ARG_STRLEN (131072 bytes) regardless of
+# the far larger ARG_MAX total, so any bulk value handed to a child process as
+# one argument fails once it crosses that cap.
+# The fixtures below are generated rather than copied from a real home so the
+# size guarantee is explicit and reproducible.
+# On platforms with no per-argument cap these cases still assert correct
+# rendering and correct exit status; only the argv failure mode is
+# Linux-specific.
+FM_TEST_MAX_ARG_STRLEN=131072
+
+# write_oversized_backlog <home> <record-count>: a canonical backlog whose
+# markdown alone clears the per-argument cap, so its JSON expansion - strictly
+# larger - cannot travel as one argv entry.
+write_oversized_backlog() {  # <home> <record-count>
+  local home=$1 count=$2 i pad bytes
+  pad=$(printf 'holds this record above the per-argument cap. %.0s' $(seq 1 24))
+  {
+    printf '## In flight\n\n## Queued\n'
+    for i in $(seq 1 "$count"); do
+      printf -- '- [ ] bulk-%03d - Bulk task %03d (repo: alpha) (kind: ship) (since 2026-07-08)\n' "$i" "$i"
+      printf '  Retained note %03d: %s\n' "$i" "$pad"
+    done
+    printf '\n## Done\n'
+  } > "$home/data/backlog.md"
+  bytes=$(LC_ALL=C wc -c < "$home/data/backlog.md" | tr -d ' ')
+  [ "$bytes" -gt "$FM_TEST_MAX_ARG_STRLEN" ] \
+    || fail "fixture is vacuous: backlog is $bytes bytes, must exceed $FM_TEST_MAX_ARG_STRLEN"
+}
+
+test_oversized_backlog_still_renders() {
+  local home out rc view
+  home=$(make_home oversized-backlog)
+  write_oversized_backlog "$home" 120
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json)
+  rc=$?
+  expect_code 0 "$rc" "an oversized but valid backlog must snapshot successfully"
+  printf '%s' "$out" | jq -e '
+    ([.backlog.records[] | select(.state == "queued")] | length) == 120
+      and .backlog.present == true
+      and .main_inventory.valid == true
+      and .main_inventory.unstructured_current_count == 0
+  ' >/dev/null || fail "every oversized-backlog record must survive the snapshot"
+  view=$(FM_HOME="$home" "$VIEW")
+  rc=$?
+  expect_code 0 "$rc" "an oversized but valid backlog must render successfully"
+  assert_contains "$view" "bulk-001" "the first oversized-backlog record must render"
+  assert_contains "$view" "bulk-120" "the last oversized-backlog record must render"
+  pass "an oversized backlog snapshots and renders every record"
+}
+
+# The serious half: a task row too large to hand a child process as one
+# argument must never disappear from a snapshot that still reports success.
+# A vanished task reads to a supervisor as a task that does not exist.
+test_oversized_task_row_is_never_silently_dropped() {
+  local home out rc i pad
+  home=$(make_home oversized-task-row)
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  fm_write_meta "$home/state/small-task.meta" \
+    "project=alpha" "harness=claude" "kind=ship" "mode=ship"
+  printf 'working: ordinary sized stream\n' > "$home/state/small-task.status"
+  fm_write_meta "$home/state/wide-task.meta" \
+    "project=alpha" "harness=claude" "kind=ship" "mode=ship"
+  pad=$(printf 'decision detail that widens the open-decision fold. %.0s' $(seq 1 24))
+  : > "$home/state/wide-task.status"
+  for i in $(seq 1 200); do
+    printf 'needs-decision [key=k%03d]: %s\n' "$i" "$pad" >> "$home/state/wide-task.status"
+  done
+  [ "$(LC_ALL=C wc -c < "$home/state/wide-task.status" | tr -d ' ')" -gt "$FM_TEST_MAX_ARG_STRLEN" ] \
+    || fail "fixture is vacuous: the wide task stream must exceed $FM_TEST_MAX_ARG_STRLEN bytes"
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json)
+  rc=$?
+  expect_code 0 "$rc" "a large but valid task stream must snapshot successfully"
+  printf '%s' "$out" | jq -e '
+    (.tasks | map(.id) | sort) == ["small-task","wide-task"]
+      and ((.tasks[] | select(.id == "wide-task") | .hints.open_decisions | length) == 200)
+  ' >/dev/null \
+    || fail "a task with an oversized row must not vanish from a successful snapshot: $(printf '%s' "$out" | jq -c '.tasks | map(.id)')"
+  pass "an oversized task row stays in the snapshot instead of vanishing silently"
+}
+
+test_empty_fleet_is_success_not_failure() {
+  local home rc
+  home=$(make_home empty-exit-status)
+  FM_HOME="$home" "$SNAPSHOT" --json >/dev/null 2>&1
+  rc=$?
+  expect_code 0 "$rc" "an empty fleet is not a snapshot failure"
+  FM_HOME="$home" "$VIEW" >/dev/null 2>&1
+  rc=$?
+  expect_code 0 "$rc" "an empty fleet is not a render failure"
+  pass "an empty fleet exits 0 and is not confused with failure"
+}
+
+# A home whose data directory cannot be read is a genuine failure, not an empty
+# fleet. Root ignores the permission bits, so the case reports itself skipped
+# rather than passing vacuously.
+test_unreadable_home_data_fails_loudly() {
+  local home out rc
+  if [ "$(id -u)" = 0 ]; then
+    pass "skipped: running as root ignores the unreadable-data permission bits"
+    return 0
+  fi
+  home=$(make_home unreadable-data)
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  chmod 000 "$home/data"
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json 2>&1)
+  rc=$?
+  chmod 755 "$home/data"
+  [ "$rc" -ne 0 ] || fail "an unreadable home data directory must not report success: $out"
+  assert_contains "$out" "fm-fleet-snapshot:" "a snapshot failure must say what failed"
+  pass "an unreadable home data directory fails loudly instead of reporting an empty fleet"
+}
+
+# The renderer's own half of the contract, driven through a stub snapshot so the
+# two failure shapes are exercised independently of any real fleet state:
+# an explicit nonzero snapshot, and the measured symptom - a snapshot that
+# reports success while producing nothing at all.
+test_view_never_reports_success_for_a_failed_snapshot() {
+  local sandbox out rc
+  sandbox=$TMP_ROOT/view-failure-sandbox
+  mkdir -p "$sandbox"
+  cp "$VIEW" "$sandbox/fm-fleet-view.sh"
+
+  cat > "$sandbox/fm-fleet-snapshot.sh" <<'SH'
+#!/usr/bin/env bash
+echo "fm-fleet-snapshot: simulated read failure" >&2
+exit 1
+SH
+  chmod +x "$sandbox/fm-fleet-snapshot.sh"
+  out=$("$sandbox/fm-fleet-view.sh" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "the fleet view must not report success when the snapshot fails: $out"
+  assert_contains "$out" "fm-fleet-view:" "a failed snapshot must be reported by the view"
+
+  cat > "$sandbox/fm-fleet-snapshot.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$sandbox/fm-fleet-snapshot.sh"
+  out=$("$sandbox/fm-fleet-view.sh" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a snapshot that produced nothing must not render as a healthy empty fleet: $out"
+  assert_contains "$out" "fm-fleet-view:" "an empty snapshot must be reported by the view"
+  pass "the fleet view refuses to report success for a failed or empty snapshot"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
@@ -794,3 +948,8 @@ test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
+test_oversized_backlog_still_renders
+test_oversized_task_row_is_never_silently_dropped
+test_empty_fleet_is_success_not_failure
+test_unreadable_home_data_fails_loudly
+test_view_never_reports_success_for_a_failed_snapshot
