@@ -32,6 +32,8 @@ test_buried_decision_still_surfaces() {
   grep -F 'OPEN DECISIONS' "$out" >/dev/null || fail "buried decision produced no OPEN DECISIONS section"
   grep -F 'task1' "$out" | grep -F '[key=api-shape]' | grep -F 'pick REST or RPC' >/dev/null \
     || fail "buried needs-decision was not surfaced with its task, key, and note"
+  grep -F "close one by answering it: bin/fm-send.sh <task> --resolve-key <key>" "$out" >/dev/null \
+    || fail "open section is missing the answerer-closes hint"
   pass "a needs-decision buried under later routine/other-key lines still reports as open"
 }
 
