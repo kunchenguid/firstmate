@@ -43,9 +43,12 @@
 # exclusive to gate-merge: the scaffold is project-agnostic and never guesses a project's
 # gate, and a gate passed to any other mode is refused rather than silently dropped.
 # The generated ship brief records the chosen mode as a fixed machine-readable
-# "Delivery contract: mode=<mode>" line. bin/fm-spawn.sh reads that line and refuses
-# to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
-# recorded task metadata cannot drift apart.
+# "Delivery contract: mode=<mode>" line, and a gate-merge brief records its landing
+# command as a second fixed "Delivery contract: gate=<command>" line. bin/fm-spawn.sh
+# reads both: it refuses to launch a ship task whose explicit --mode disagrees, and it
+# refuses a gate-merge task whose recorded gate is not the one the project's registry
+# entry authorizes. An adjusted brief and the recorded task delivery cannot drift apart,
+# and the gate stays the captain's registered command rather than a per-brief string.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
@@ -168,10 +171,12 @@ fi
 
 # The landing command is the whole substance of a gate-merge definition of done, and
 # this scaffold never reads data/projects.md, so it must be given rather than guessed.
+# It is not a free-form string: bin/fm-spawn.sh refuses to launch the task unless the
+# recorded gate is the one the project's registry entry authorizes.
 # Every other mode lands through a firstmate-owned path and would silently discard it.
 if [ "$KIND" = ship ] && [ "$MODE" = gate-merge ]; then
   { [ "$GATE_SET" -eq 1 ] && [ -n "$GATE" ]; } || {
-    echo "error: --mode gate-merge requires --gate <command>; pass the project's own landing command (for example --gate ./scripts/merge-gate.sh) so the definition of done names the exact command that lands the work" >&2
+    echo "error: --mode gate-merge requires --gate <command>; pass the landing command recorded in the project's data/projects.md entry as gate=\`<command>\` (for example --gate ./scripts/merge-gate.sh) so the definition of done names the exact command that lands the work" >&2
     exit 1
   }
 elif [ "$GATE_SET" -eq 1 ]; then
@@ -308,7 +313,8 @@ SHARED_MACHINE_RULE=$(printf '%s\n' \
 '   (capture `$!` when you background a dev server, then `kill "$pid"`).' \
 '   Never bare `git stash`/`git stash pop`/`git stash drop` - the stash stack lives in the shared' \
 '   `.git` and a popped stash leaves no reflog entry, so you can destroy a sibling'"'"'s uncommitted' \
-'   work unrecoverably. Commit work in progress to your own branch instead.')
+'   work unrecoverably. Commit work in progress in this worktree instead - a commit here is yours alone,' \
+'   whether you are on your own branch or at the detached HEAD a scout worktree runs at.')
 
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
@@ -395,7 +401,9 @@ fi
 # Ship task: shape Setup / rules 1-2 / Definition of done by this task's explicit
 # delivery mode, validated above. The generated DOD opens with the fixed
 # "Delivery contract: mode=<mode>" line that bin/fm-spawn.sh checks against its own
-# explicit --mode before launching.
+# explicit --mode before launching, and a gate-merge DOD adds the fixed
+# "Delivery contract: gate=<command>" line that the same spawn checks against the
+# gate command the project's registry entry authorizes.
 # Rules 1, 2 and 5 must never contradict the definition of done: a worker told both to
 # land its own work and never to push would stall or improvise. Rule 2 is worktree
 # isolation, and gate-merge is the one mode with an authorized way to act outside the
@@ -423,13 +431,14 @@ EOF
     RULE1="1. The merge gate named in Definition of done is the only thing that lands your work: never merge by hand, never push \`main\` or your branch yourself, and never open a PR."
     RULE2='2. Stay inside this worktree; modify nothing outside it yourself. Running the merge gate below is the one authorized exception, and the gate handles everything outside this worktree on its own.'
     # shellcheck disable=SC2016  # literal backticks belong to the generated brief text
-    RULE5='5. If you hit the same obstacle twice, append `blocked: {why}` and stop; firstmate will help.
+    RULE5="$RULE5"'
    The one exception is the gate queue: while another gate run holds the lock, a repeated refusal is the
    documented wait under Definition of done, not the same obstacle twice, so keep retrying in-turn for that
    whole window and append `blocked: {the gate refusal}` only once the window is exhausted.'
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=gate-merge
+Delivery contract: gate=$GATE
 This task ships **gate-merge**: you land your own work by running the project's merge gate. Firstmate never merges it for you, so stopping at a ready branch leaves the task unfinished.
 The task is complete only when it is committed on your branch \`fm/$ID\` AND the gate reports it landed.
 Run the gate from THIS worktree, with your branch checked out: \`$GATE\`

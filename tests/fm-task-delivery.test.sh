@@ -7,7 +7,9 @@
 # validate them against a closed set, and the spawn additionally refuses to launch
 # when the brief it is about to hand the worker records a different mode. Scout
 # spawns carry no delivery posture at all. The registry keeps only the captain's
-# standing posture, for the mechanical consumers and for one advisory notice.
+# standing posture, for the mechanical consumers and for one advisory notice - except
+# for gate-merge, whose worker lands on the default branch with no approval step, so
+# there the registered posture and the registered gate command are enforced.
 #
 # Every spawn case here stops before any endpoint exists: the delivery checks run
 # ahead of backend creation, and a fake `tmux` that exits non-zero backstops the
@@ -40,12 +42,13 @@ make_home() {  # <name> [<registry-line>...]
   printf '%s\n' "$home|$projects/proj|$fakebin"
 }
 
-write_brief() {  # <home> <id> [<recorded-mode>]
-  local home=$1 id=$2 mode=${3:-}
+write_brief() {  # <home> <id> [<recorded-mode>] [<recorded-gate>]
+  local home=$1 id=$2 mode=${3:-} gate=${4:-}
   mkdir -p "$home/data/$id"
   {
     printf 'You are a crewmate.\n\n# Definition of done\n'
     [ -z "$mode" ] || printf 'Delivery contract: mode=%s\n' "$mode"
+    [ -z "$gate" ] || printf 'Delivery contract: gate=%s\n' "$gate"
   } > "$home/data/$id/brief.md"
 }
 
@@ -179,11 +182,82 @@ no-mistakes project shipped no-mistakes|- proj [no-mistakes] - fixture (added 20
 local-only project shipped no-mistakes|- proj [local-only] - fixture (added 2026-01-01)|no-mistakes|quiet|local-only
 conditional policy shipped direct-PR|- proj [no-mistakes-prod-only] - fixture (added 2026-01-01)|direct-PR|quiet|no-mistakes-prod-only
 unregistered project resolves to the no-mistakes standing default|- other [no-mistakes] - fixture (added 2026-01-01)|direct-PR|notice|no-mistakes
-no-mistakes project shipped gate-merge|- proj [no-mistakes] - fixture (added 2026-01-01)|gate-merge|notice|no-mistakes
-gate-merge project shipped gate-merge|- proj [gate-merge] - fixture (added 2026-01-01)|gate-merge|quiet|gate-merge
 gate-merge project shipped no-mistakes|- proj [gate-merge] - fixture (added 2026-01-01)|no-mistakes|quiet|gate-merge
 ROWS
   pass "fm-spawn: a rigor downgrade against the registered posture is announced, never blocked"
+}
+
+# gate-merge is the one mode whose worker lands on the default branch with no approval
+# step in front of it, so it is the one downgrade that is checked instead of announced:
+# a conflicting registered posture refuses, and the brief may land only with the gate
+# command that project's registry entry authorizes. A posture that cannot be read at
+# all still only warns, because refusing every unregistered project would block
+# legitimate first-time work.
+test_gate_merge_spawn_is_checked_against_the_registry() {
+  local rec home proj fakebin out status
+  local gate='./scripts/merge-gate.sh --push'
+
+  rec=$(make_home gate-conflict "- proj [no-mistakes] - fixture (added 2026-01-01)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  write_brief "$home" delivery-gate-e1 gate-merge "$gate"
+  out=$(run_spawn "$home" "$fakebin" delivery-gate-e1 "$proj" claude --mode gate-merge --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a gate-merge spawn against a conflicting registered posture should exit non-zero"
+  assert_contains "$out" "delivery-gate-e1 passed --mode gate-merge but proj is registered no-mistakes" \
+    "the refusal did not name the project, its recorded posture, and the requested mode"
+  assert_absent "$home/state/delivery-gate-e1.meta" "a refused gate-merge spawn wrote task metadata"
+
+  rec=$(make_home gate-unverifiable)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  write_brief "$home" delivery-gate-e2 gate-merge "$gate"
+  out=$(run_spawn "$home" "$fakebin" delivery-gate-e2 "$proj" claude --mode gate-merge --yolo off)
+  assert_contains "$out" "no readable registry entry" \
+    "an unverifiable posture did not say the registry entry could not be read"
+  assert_contains "$out" "could be verified against the registry" \
+    "the notice did not name what it failed to verify"
+  assert_not_contains "$out" "is registered" "an unverifiable posture was reported as a registry conflict"
+
+  rec=$(make_home gate-match "- proj [gate-merge] - fixture, gate=\`$gate\` (added 2026-01-01)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  write_brief "$home" delivery-gate-e3 gate-merge "$gate"
+  out=$(run_spawn "$home" "$fakebin" delivery-gate-e3 "$proj" claude --mode gate-merge --yolo off)
+  assert_not_contains "$out" "gate mismatch" "a brief carrying the registered gate was reported as a mismatch"
+  assert_not_contains "$out" "is registered" "a matching gate-merge posture was reported as a conflict"
+  assert_not_contains "$out" "no readable registry entry" "a registered gate-merge posture was reported as unverifiable"
+  assert_not_contains "$out" "less rigor than the captain's standing posture" \
+    "a matching gate-merge posture printed a downgrade notice"
+
+  write_brief "$home" delivery-gate-e4 gate-merge './scripts/merge-gate.sh'
+  out=$(run_spawn "$home" "$fakebin" delivery-gate-e4 "$proj" claude --mode gate-merge --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a gate that disagrees with the registry should exit non-zero"
+  assert_contains "$out" "gate mismatch for delivery-gate-e4" "the gate refusal did not name the task"
+  assert_contains "$out" "the brief lands with './scripts/merge-gate.sh' but proj's registry entry authorizes '$gate'" \
+    "the gate refusal did not show both sides of the disagreement"
+  assert_absent "$home/state/delivery-gate-e4.meta" "a refused gate-merge spawn wrote task metadata"
+
+  write_brief "$home" delivery-gate-e5 gate-merge
+  out=$(run_spawn "$home" "$fakebin" delivery-gate-e5 "$proj" claude --mode gate-merge --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a gate-merge brief recording no gate command should exit non-zero"
+  assert_contains "$out" "records no gate command line" "the refusal did not name the brief's missing gate line"
+
+  rec=$(make_home gate-unrecorded "- proj [gate-merge] - fixture (added 2026-01-01)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  write_brief "$home" delivery-gate-e6 gate-merge "$gate"
+  out=$(run_spawn "$home" "$fakebin" delivery-gate-e6 "$proj" claude --mode gate-merge --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a gate-merge project whose entry records no gate should exit non-zero"
+  assert_contains "$out" "records no gate command" "the refusal did not point at the unrecorded registry gate"
+  pass "fm-spawn: a gate-merge spawn ships only on the registered posture and the registered gate"
 }
 
 # A scout's deliverable is a report, so it records no delivery posture at all;
@@ -263,7 +337,8 @@ test_project_mode_maps_the_conditional_policy() {
 - yoloproj [no-mistakes-prod-only +yolo] - fixture (added 2026-01-01)
 - flatproj [direct-PR] - fixture (added 2026-01-01)
 - typoproj [no-mistakez] - fixture (added 2026-01-01)
-- gateproj [gate-merge] - fixture (added 2026-01-01)
+- gateproj [gate-merge] - fixture, gate=`./scripts/merge-gate.sh --push` (added 2026-01-01)
+- gatelessproj [gate-merge] - fixture (added 2026-01-01)
 EOF
   out=$(FM_HOME="$home" "$PROJECT_MODE" prodproj 2>/dev/null)
   [ "$out" = "no-mistakes off" ] || fail "conditional policy did not map to its most rigorous leg (got '$out')"
@@ -284,6 +359,24 @@ EOF
   err=$(FM_HOME="$home" "$PROJECT_MODE" gateproj 2>&1 >/dev/null)
   [ -z "$err" ] || fail "a registered gate-merge posture warned as unknown: $err"
 
+  # --gate is a separate accessor, so the two-word line every mechanical consumer
+  # reads stays exactly two words even for an entry that records a gate command.
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --gate gateproj 2>/dev/null)
+  [ "$out" = "./scripts/merge-gate.sh --push" ] || fail "--gate did not read the recorded landing command (got '$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --gate gatelessproj 2>/dev/null)
+  [ -z "$out" ] || fail "--gate invented a gate for an entry that records none (got '$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --gate flatproj 2>/dev/null)
+  [ -z "$out" ] || fail "--gate invented a gate for a non-gate-merge entry (got '$out')"
+
+  # A posture that cannot be read at all is reported by exit status, so a caller can
+  # tell "the captain registered something conflicting" from "nothing to check against".
+  FM_HOME="$home" "$PROJECT_MODE" --gate missingproj >/dev/null 2>&1 \
+    && fail "--gate reported success for a project with no registry entry"
+  FM_HOME="$home" "$PROJECT_MODE" --gate typoproj >/dev/null 2>&1 \
+    && fail "--gate reported success for an entry whose mode annotation is unreadable"
+  FM_HOME="$TMP_ROOT/project-mode/absent" "$PROJECT_MODE" --gate gateproj >/dev/null 2>&1 \
+    && fail "--gate reported success with no registry file at all"
+
   out=$(FM_HOME="$home" "$PROJECT_MODE" typoproj 2>/dev/null)
   [ "$out" = "no-mistakes off" ] || fail "a typo'd mode no longer falls back to the most rigorous default"
   err=$(FM_HOME="$home" "$PROJECT_MODE" typoproj 2>&1 >/dev/null)
@@ -295,6 +388,7 @@ test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
+test_gate_merge_spawn_is_checked_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_project_mode_maps_the_conditional_policy

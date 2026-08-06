@@ -237,6 +237,10 @@ test_gate_merge_brief_lands_through_the_gate_without_contradiction() {
   brief="$home/data/$id/brief.md"
   grep -qx "Delivery contract: mode=gate-merge" "$brief" \
     || fail "gate-merge brief did not record its machine-readable delivery contract line"
+  # The gate is recorded machine-readably too: bin/fm-spawn.sh is where data/projects.md
+  # is readable, and it refuses to launch a brief that lands with an unauthorized gate.
+  grep -qx "Delivery contract: gate=./scripts/merge-gate.sh" "$brief" \
+    || fail "gate-merge brief did not record its machine-readable gate command line"
   # shellcheck disable=SC2016  # literal backticks belong to the generated brief text
   assert_grep 'Run the gate from THIS worktree, with your branch checked out: `./scripts/merge-gate.sh`' "$brief" \
     "gate-merge definition of done did not name the exact landing command"
@@ -360,6 +364,13 @@ test_shared_machine_rule_is_in_every_crewmate_brief() {
     # shellcheck disable=SC2016  # literal backticks belong to the generated brief text
     assert_grep 'Never bare `git stash`' "$brief" \
       "$kind: brief did not forbid the shared stash stack"
+    # The safe alternative must name something the reader actually has. A scout
+    # worktree runs at a detached HEAD and never creates a branch, so advice that
+    # names only a branch invites it to improvise back toward `git stash`.
+    assert_grep "Commit work in progress in this worktree instead" "$brief" \
+      "$kind: brief did not give the safe alternative to the shared stash stack"
+    assert_grep "whether you are on your own branch or at the detached HEAD" "$brief" \
+      "$kind: the stash alternative named a branch a scout worktree does not have"
   done
   pass "fm-brief.sh: every crewmate brief carries the shared-machine kill and stash rule"
 }

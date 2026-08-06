@@ -13,7 +13,11 @@
 #   instructions and the recorded task delivery cannot drift apart; a brief
 #   scaffolded before that line existed warns once and launches on the flag. When
 #   the explicit mode carries less rigor than the project's standing posture, a
-#   loud one-line deviation notice is printed and the spawn continues.
+#   loud one-line deviation notice is printed and the spawn continues. gate-merge
+#   is the one exception: it lands on the default branch with no approval step, so
+#   a spawn REFUSES it when the project is registered under a conflicting posture,
+#   or when the brief's recorded gate is not the command that project's registry
+#   entry authorizes. A project with no readable entry still only gets the notice.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
@@ -1362,7 +1366,33 @@ if [ "$KIND" = ship ]; then
   # is why the notice names the standing posture rather than the registry line. A
   # conditional policy is excluded: both of its legs are legitimate classifications.
   STANDING_MODE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" 2>/dev/null | cut -d' ' -f1) || STANDING_MODE=
-  if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] \
+  if [ "$MODE" = gate-merge ]; then
+    # gate-merge is the one mode whose worker lands on the default branch with no
+    # approval step in front of it, so its authorization is checked rather than
+    # announced: the registry entry IS that authorization (AGENTS.md section 7), and
+    # the entry's recorded gate is the only command allowed to do the landing. A
+    # posture that could not be read at all still proceeds on a notice, because
+    # refusing every unregistered project would block legitimate first-time work.
+    if REGISTERED_GATE=$("$FM_ROOT/bin/fm-project-mode.sh" --gate "$PROJ_NAME" 2>/dev/null); then
+      if [ "$STANDING_MODE" != gate-merge ]; then
+        echo "error: $ID passed --mode gate-merge but $PROJ_NAME is registered $STANDING_MODE; gate-merge lands work on the default branch with no approval step in front of it, so it ships only for a project the captain registered gate-merge - correct the flag, or have the captain re-register $PROJ_NAME first" >&2
+        exit 1
+      fi
+      BRIEF_GATE=$(sed -n 's/^Delivery contract: gate=//p' "$BRIEF" | head -n 1)
+      if [ -z "$REGISTERED_GATE" ]; then
+        echo "error: $PROJ_NAME is registered gate-merge but its registry entry records no gate command; record the exact command in the entry's note as gate=\`<command>\` so every task lands the same way, then re-scaffold $ID's brief with that --gate" >&2
+        exit 1
+      elif [ -z "$BRIEF_GATE" ]; then
+        echo "error: $BRIEF records no gate command line; re-scaffold it with bin/fm-brief.sh --mode gate-merge --gate '$REGISTERED_GATE' so the worker lands with the gate $PROJ_NAME's registry entry authorizes" >&2
+        exit 1
+      elif [ "$BRIEF_GATE" != "$REGISTERED_GATE" ]; then
+        echo "error: gate mismatch for $ID: the brief lands with '$BRIEF_GATE' but $PROJ_NAME's registry entry authorizes '$REGISTERED_GATE'; re-scaffold the brief with the registered gate, or have the captain change the registry entry - never hand-patch one brief" >&2
+        exit 1
+      fi
+    else
+      echo "notice: $ID ships mode=gate-merge but $PROJ_NAME has no readable registry entry, so neither the captain's standing authorization for a gate landing nor this brief's gate command could be verified against the registry; proceed only on a current explicit captain instruction, and register $PROJ_NAME so the next task is checked" >&2
+    fi
+  elif [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] \
      && [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
   fi

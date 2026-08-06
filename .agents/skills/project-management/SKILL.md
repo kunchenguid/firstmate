@@ -41,7 +41,8 @@ Choose that posture when adding or creating the project:
 - `no-mistakes` runs the full validation pipeline before a PR.
 - `direct-PR` pushes and opens a PR without the no-mistakes pipeline.
 - `local-only` has no required remote or PR and lands only through the approved local fast-forward path.
-- `gate-merge` has the crewmate land its own work by running the project's own merge gate, with no PR and no firstmate merge; register it only when the captain has made that gate the project's standing way to land work, and record the exact gate command in the entry's note so every brief passes the same `bin/fm-brief.sh --gate <command>`.
+- `gate-merge` has the crewmate land its own work by running the project's own merge gate, with no PR and no firstmate merge; register it only when the captain has made that gate the project's standing way to land work, and record the exact gate command in the entry's note as ``gate=`<command>` `` so every brief passes the same `bin/fm-brief.sh --gate <command>`.
+That recorded command is the authorization rather than a reminder: `bin/fm-spawn.sh` refuses a `gate-merge` spawn whose project is registered under a conflicting posture, and refuses one whose brief lands with any command other than the registered one, so a gate changes by editing the entry and never by hand-patching a brief.
 - `no-mistakes-prod-only` is a conditional policy rather than one flat mode: genuinely internal-only tooling, automation, contributor or operator process, and release or submission work ships `direct-PR`, while product-facing, mixed, and uncertain work ships `no-mistakes`.
 
 `no-mistakes-prod-only` is the default for a newly added or created remote-backed project when the captain specifies nothing, and a project with no remote defaults to `local-only`.
