@@ -655,15 +655,52 @@ test_housekeeping_spends_the_sanitized_budget() {
   done
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$pane" LOG="$daemon_log" \
-    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_STALE_WORKING_GATE_READS='3 ' \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_STALE_WORKING_GATE_READS='4 ' \
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE_LOG="$calls" \
     FM_FAKE_CREW_STATE='state: working · source: run-step · running: tests' \
     housekeeping "$state"
   n=$(wc -l < "$calls" | tr -d ' ')
   [ "$n" = 3 ] || fail "an invalid budget spent $n read(s); the sanitized default of 3 must be what housekeeping uses"
-  grep -F "invalid FM_STALE_WORKING_GATE_READS" "$daemon_log" >/dev/null \
+  # Names the value, so the in-process report throttle cannot let this pass on a
+  # line some earlier test's misconfiguration emitted.
+  grep -F "invalid FM_STALE_WORKING_GATE_READS '4 '; using 3" "$daemon_log" >/dev/null \
     || fail "housekeeping applied the corrected budget without reporting it: $(cat "$daemon_log")"
   pass "housekeeping spends the sanitized budget and reports the invalid value it replaced"
+}
+
+# The report must be neither silent nor a flood. It is read once per housekeeping
+# pass, so reporting unconditionally would emit thousands of identical lines a day
+# and evict, from a log trimmed to LOG_KEEP_LINES, exactly the watcher-crash and
+# escalation history an operator opens the log to find. All four cadence legs run
+# in ONE child shell, because the throttle's memory is per-process: a leg run in a
+# command substitution would start from a blank slate and could never observe a
+# suppressed repeat.
+test_stale_gate_read_budget_report_is_throttled() {
+  local dir
+  dir="$TMP_ROOT/gate-budget-report-cadence"
+  mkdir -p "$dir"
+
+  FUNCNEST=200 bash -c '
+    set -u
+    . "$1/tests/wake-helpers.sh"
+    . "$1/bin/fm-supervise-daemon.sh"
+    LOG="$2/first.log";   FM_STALE_WORKING_GATE_READS=abc stale_gate_read_budget >/dev/null
+    LOG="$2/repeat.log";  FM_STALE_WORKING_GATE_READS=abc stale_gate_read_budget >/dev/null
+    LOG="$2/changed.log"; FM_STALE_WORKING_GATE_READS=zzz stale_gate_read_budget >/dev/null
+    LOG="$2/remind.log"
+    STALE_GATE_INVALID_REMIND_SECS=0 FM_STALE_WORKING_GATE_READS=zzz stale_gate_read_budget >/dev/null
+  ' _ "$ROOT" "$dir" 2>/dev/null || fail "the cadence probe did not run to completion"
+
+  grep -F "invalid FM_STALE_WORKING_GATE_READS 'abc'" "$dir/first.log" >/dev/null 2>&1 \
+    || fail "the first sighting of an invalid budget was not reported"
+  [ ! -s "$dir/repeat.log" ] \
+    || fail "an unchanged invalid budget was reported again on the next pass: $(cat "$dir/repeat.log")"
+  grep -F "invalid FM_STALE_WORKING_GATE_READS 'zzz'" "$dir/changed.log" >/dev/null 2>&1 \
+    || fail "a changed invalid budget was not reported, so a re-botched edit would go unmentioned"
+  # Same value as the leg above, so only the elapsed-interval arm can speak here.
+  grep -F "invalid FM_STALE_WORKING_GATE_READS 'zzz'" "$dir/remind.log" >/dev/null 2>&1 \
+    || fail "the periodic reminder never fired, so a standing misconfiguration would rot invisibly"
+  pass "the invalid-budget report fires on first sight, on change, and on its reminder interval, never every pass"
 }
 
 test_handle_wake_paused_signal_records_pause_marker() {
@@ -2312,6 +2349,7 @@ test_housekeeping_working_gate_budget_defers_without_suppressing
 test_crew_state_reader_guard_install_is_idempotent
 test_stale_gate_read_budget_reports_invalid_and_floors_zero
 test_housekeeping_spends_the_sanitized_budget
+test_stale_gate_read_budget_report_is_throttled
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_paused_resumed_cleared

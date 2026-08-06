@@ -121,8 +121,10 @@
 #                                   than escalating or being dropped (default 3).
 #                                   Unset, blank, or not a nonnegative integer
 #                                   uses that default, and an invalid value is
-#                                   logged rather than applied silently; 0 floors
-#                                   to 1
+#                                   logged rather than applied silently: on first
+#                                   sight, again whenever it changes, and
+#                                   otherwise at most once per
+#                                   STALE_GATE_INVALID_REMIND_SECS; 0 floors to 1
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
 #                                   digests; 0 = flush immediately (default 90)
 #          FM_HEARTBEAT_SCAN_SECS   cadence for the catch-all status scan
@@ -231,6 +233,12 @@ STALE_ESCALATE_SECS_DEFAULT=240
 # watcher-exit detection, wake handling and escalation flush for that whole time.
 # Capping the count makes the added stall a constant instead of fleet-sized.
 STALE_WORKING_GATE_READS_DEFAULT=3
+# Longest a persistent FM_STALE_WORKING_GATE_READS misconfiguration may go
+# unmentioned in the daemon log. Far above HOUSEKEEPING_TICK on purpose: the
+# substitution is read once per pass, so reporting it every pass would emit
+# thousands of identical lines a day and evict the watcher-crash and escalation
+# history that LOG_KEEP_LINES exists to retain.
+STALE_GATE_INVALID_REMIND_SECS=3600
 ESCALATE_BATCH_SECS_DEFAULT=90
 HEARTBEAT_SCAN_SECS_DEFAULT=300
 HOUSEKEEPING_TICK_DEFAULT=15
@@ -996,21 +1004,32 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 # REPORTED and then takes the default too, matching how bin/fm-fleet-sync.sh and
 # bin/fm-bootstrap.sh treat their own invalid tunables: a typo such as a trailing
 # space would otherwise cut gate throughput threefold with nothing said, and a
-# silently wrong budget costs more than a log line. It re-reports every pass it is
-# read on, because the log is trimmed to its newest lines and a single startup
-# warning can age out before anyone reads it.
+# silently wrong budget costs more than a log line.
+# The report is never silent but is bounded: it fires on first sight, again
+# whenever the supplied value CHANGES so a re-botched edit is called out, and
+# otherwise at most once per STALE_GATE_INVALID_REMIND_SECS, so a persistent
+# misconfiguration stays visible in any recent log window without becoming it.
+# The two facts it remembers live in this process for the daemon's lifetime and
+# nowhere else: a durable file would need its own staleness, cleanup and
+# permission handling, and re-reporting once after a restart is correct anyway.
 # Zero is in range but is floored to one, since a budget of zero would defer every
 # marker on every pass, which is permanent silence - the one outcome this whole
 # path exists to prevent.
 stale_gate_read_budget() {  # -> crew-state reads one housekeeping pass may make
-  local raw=${FM_STALE_WORKING_GATE_READS:-} budget
+  local raw=${FM_STALE_WORKING_GATE_READS:-} budget now
   if [ -z "$raw" ]; then
     printf '%s' "$STALE_WORKING_GATE_READS_DEFAULT"
     return 0
   fi
   case "$raw" in
     *[!0-9]*)
-      log "invalid FM_STALE_WORKING_GATE_READS '$raw'; using $STALE_WORKING_GATE_READS_DEFAULT"
+      now=$(_now)
+      if [ "${_fm_gate_budget_last_invalid:-}" != "$raw" ] \
+         || [ "$(( now - ${_fm_gate_budget_reported_at:-0} ))" -ge "$STALE_GATE_INVALID_REMIND_SECS" ]; then
+        _fm_gate_budget_last_invalid=$raw
+        _fm_gate_budget_reported_at=$now
+        log "invalid FM_STALE_WORKING_GATE_READS '$raw'; using $STALE_WORKING_GATE_READS_DEFAULT"
+      fi
       printf '%s' "$STALE_WORKING_GATE_READS_DEFAULT"
       return 0 ;;
   esac
