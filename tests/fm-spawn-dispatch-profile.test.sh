@@ -573,6 +573,8 @@ test_remaining_dispatchers_are_refused() {
     "csh|csh -c 'claude --dangerously-skip-permissions'"
     "tcsh|tcsh -c 'claude --dangerously-skip-permissions'"
     "strace|strace claude --dangerously-skip-permissions"
+    "perf|perf stat -n claude --dangerously-skip-permissions"
+    "fish-not|not claude --dangerously-skip-permissions"
   )
 
   for spec in "${cases[@]}"; do
