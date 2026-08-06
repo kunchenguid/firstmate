@@ -320,103 +320,85 @@ EOF
 # git quotes the push URL back in its own messages, and the server's rejection
 # reason arrives in the same stream. Suppressing that stream keeps a credential
 # out of the log but throws the rejection reason away with it, which leaves a
-# contributor blocked by a ruleset or a quota with nothing to act on. So the
-# text is redacted rather than withheld.
+# contributor blocked by a ruleset or a quota with nothing to act on. So text is
+# made safe to print rather than withheld wholesale, and one function does it for
+# everything this prints, git's output and the push target alike.
 #
-# ONE owner decides where a URL's userinfo ends, and everything that has to know
-# asks it. Two stages reading that boundary differently is not a detail: when
-# one split at the first '@' and the others at the last, a password holding an
-# unencoded '@' lost only its first character and the rest reached the log. The
-# authority is what follows '://' up to the first '/', and the boundary is the
-# last '@' inside it, which is how git reads it too.
-url_userinfo() {  # <url> -> the userinfo it carries, empty when it carries none
-  case "$1" in
-    *://*) ;;
-    *) return 0 ;;
-  esac
-  uu_authority=${1#*://}
-  uu_authority=${uu_authority%%/*}
-  case "$uu_authority" in
-    *@*) printf '%s' "${uu_authority%@*}" ;;
-  esac
-}
+# It is default deny, and that is the whole design. Redacting what a reader
+# recognises means every shape git accepts has to be modelled, and any shape it
+# does not model is emitted intact: absence of detection read as absence of a
+# credential, which is the same mistake as reading an empty check set as green.
+# Two such shapes reached the log before this inversion. So a word that could
+# carry a credential is emitted ONLY when it positively matches a URL with no
+# userinfo, or can be rewritten into one; unparseable, ambiguous, unfamiliar or
+# merely unmatched all withhold. An emitted URL therefore never contains an '@'
+# at all, so nothing turns on where a reader believes the authority ends.
+#
+# The cost is deliberate: an ssh remote, an address, or a URL with an '@' after
+# its host is withheld even though it holds no secret. The marker says so in its
+# place, because an omission the reader knows about is recoverable and a silent
+# one is not. Words that are not URL-shaped are untouched, so the server's own
+# rejection reason still reaches the person who has to act on it.
+WITHHELD_URL='<url withheld: not provably credential-free>'
 
-# The same boundary as a pattern, because the redactor scans arbitrary text
-# rather than one known URL. Excluding '/' ends the match at the authority so it
-# can never reach into the path, and greedy matching inside it lands on the last
-# '@', exactly where url_userinfo puts it. The pattern both strips userinfo and
-# detects any that survived stripping.
-USERINFO_MATCH='://[^/[:space:]]*@'
-
-redact_secret=
-redact_confident=1
-
-# Fixes the redaction context from the URL whose output is about to be quoted.
-# If the pattern cannot find userinfo that url_userinfo says is there, the two
-# readings disagree about this URL, and text redacted by a reading that does not
-# understand it is exactly where a leak hides. Uncertainty withholds.
-redact_for_url() {  # <url>
-  redact_secret=
-  redact_confident=1
-  rfu_userinfo=$(url_userinfo "$1")
-  [ -n "$rfu_userinfo" ] || return 0
-  case "$rfu_userinfo" in
-    *:*) redact_secret=${rfu_userinfo#*:} ;;
-  esac
-  printf '%s' "$1" | grep -q "$USERINFO_MATCH" || redact_confident=0
-}
-
-redact_text() {
+credential_safe_text() {
   [ -n "$1" ] || {
     printf '(nothing)'
     return 0
   }
-  [ "$redact_confident" -eq 1 ] || {
-    printf '(withheld in full: this push URL carries a credential whose extent the redactor cannot locate, and partly redacted text is how one leaks)'
-    return 0
-  }
-  printf '%s\n' "$1" | sed "s#$USERINFO_MATCH#://#g" | while IFS= read -r rt_line; do
-    rt_keep=1
-    printf '%s\n' "$rt_line" | grep -q "$USERINFO_MATCH" && rt_keep=0
-    if [ -n "$redact_secret" ]; then
-      case "$rt_line" in
-        *"$redact_secret"*) rt_keep=0 ;;
-      esac
-    fi
-    [ "$rt_keep" -eq 1 ] || {
-      printf '(a line is withheld here: a credential in it survived redaction)\n'
-      continue
+  printf '%s\n' "$1" | awk -v withheld="$WITHHELD_URL" '
+    BEGIN {
+      quote = sprintf("%c", 39)
+      lead = "\"([{<" quote
+      trail = "\")]}>,.;:" quote
     }
-    printf '%s\n' "$rt_line"
-  done
-}
-
-# The repository a git URL names, with any credentials it embeds removed, so the
-# published target can be reported rather than left implicit in a remote's name.
-# A local path is a path and is printed as it is; only a URL can carry a secret.
-display_repository() {
-  case "$1" in
-    *://*)
-      dr_scheme=${1%%://*}
-      dr_rest=${1#*://}
-      case "$dr_rest" in
-        */*)
-          dr_authority=${dr_rest%%/*}
-          dr_path=/${dr_rest#*/}
-          ;;
-        *)
-          dr_authority=$dr_rest
-          dr_path=
-          ;;
-      esac
-      dr_userinfo=$(url_userinfo "$1")
-      [ -z "$dr_userinfo" ] || dr_authority=${dr_authority#"$dr_userinfo"@}
-      printf '%s://%s%s' "$dr_scheme" "$dr_authority" "$dr_path"
-      ;;
-    /* | ./* | ../*) printf '%s' "$1" ;;
-    *@*:*) printf '%s' "${1#*@}" ;;
-    *) printf '%s' "$1" ;;
-  esac
+    function is_safe(t) {
+      return t ~ /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]+)?(\/[^@]*)?$/
+    }
+    function without_userinfo(t,   mark, scheme, rest, host, tail) {
+      mark = index(t, "://")
+      if (mark == 0) return ""
+      scheme = substr(t, 1, mark + 2)
+      rest = substr(t, mark + 3)
+      host = rest
+      if (index(host, "/") > 0) host = substr(host, 1, index(host, "/") - 1)
+      tail = substr(rest, length(host) + 1)
+      if (index(host, "@") == 0) return ""
+      sub(/^.*@/, "", host)
+      return scheme host tail
+    }
+    function render(t,   rebuilt) {
+      if (is_safe(t)) return t
+      rebuilt = without_userinfo(t)
+      if (rebuilt != "" && is_safe(rebuilt)) return rebuilt
+      return withheld
+    }
+    function token(x,   pre, post, core, c) {
+      if (index(x, "://") == 0 && index(x, "@") == 0) return x
+      core = x
+      pre = ""
+      post = ""
+      while (length(core) > 0) {
+        c = substr(core, 1, 1)
+        if (index(lead, c) == 0) break
+        pre = pre c
+        core = substr(core, 2)
+      }
+      while (length(core) > 0) {
+        c = substr(core, length(core), 1)
+        if (index(trail, c) == 0) break
+        post = c post
+        core = substr(core, 1, length(core) - 1)
+      }
+      return pre render(core) post
+    }
+    {
+      n = split($0, words, / /)
+      out = ""
+      for (i = 1; i <= n; i++) out = out (i > 1 ? " " : "") token(words[i])
+      print out
+    }
+  '
 }
 
 cmd_write() {
@@ -588,8 +570,7 @@ EOF
   push_target=$remote
   if [ "$push" -eq 1 ]; then
     push_url=$(git remote get-url --push "$remote" 2>/dev/null) || push_url=$remote
-    push_target=$(display_repository "$push_url")
-    redact_for_url "$push_url"
+    push_target=$(credential_safe_text "$push_url")
     incoming_ref="$notes_ref-incoming"
     # Absence and unreadability are two different answers and only one of them is
     # a fact about the attestations there. A push target with no
@@ -607,14 +588,14 @@ EOF
           || fetch_rc=$?
         [ "$fetch_rc" -eq 0 ] || fail push-target-unfetchable \
           "$push_target, the push target of $remote, advertises $notes_ref but would not serve it." \
-          "git said: $(redact_text "$fetch_err")" \
+          "git said: $(credential_safe_text "$fetch_err")" \
           "Resolve that and re-run; nothing was recorded."
         merge_rc=0
         merge_err=$(git notes --ref="$notes_ref" merge -s ours "$incoming_ref" 2>&1 >/dev/null) \
           || merge_rc=$?
         [ "$merge_rc" -eq 0 ] || fail attestation-not-reconciled \
           "Could not reconcile the local $notes_ref with the one on $push_target, the push target of $remote." \
-          "git said: $(redact_text "$merge_err")" \
+          "git said: $(credential_safe_text "$merge_err")" \
           "Resolve that and re-run; nothing was recorded."
         git update-ref -d "$incoming_ref" 2>/dev/null || true
         ;;
@@ -622,7 +603,7 @@ EOF
       *)
         fail push-target-unreadable \
           "Could not read $notes_ref from $push_target, the push target of $remote (git exit $ls_rc)." \
-          "git said: $(redact_text "$ls_err")" \
+          "git said: $(credential_safe_text "$ls_err")" \
           "That is a repository this could not read rather than one with no attestations, so nothing was recorded." \
           "Check access to it, or name another with --remote <name>, then re-run."
         ;;
@@ -631,7 +612,7 @@ EOF
   notes_err=$(git notes --ref="$notes_ref" add -f -m "$payload" "$attest_head" 2>&1 >/dev/null) \
     || fail attestation-not-recorded \
       "Could not record the attestation note on $attest_head." \
-      "git said: $(redact_text "$notes_err")"
+      "git said: $(credential_safe_text "$notes_err")"
   if [ "$attest_head" != "$head" ]; then
     printf 'fm-attest: the run tip is ahead of HEAD %s, as the pipeline advances it with its own fix commits\n' "$head"
   fi
@@ -642,7 +623,7 @@ EOF
   push_err=$(git push --quiet "$remote" "$notes_ref:$notes_ref" 2>&1 >/dev/null) || push_rc=$?
   [ "$push_rc" -eq 0 ] || fail attestation-not-published \
     "Could not publish $notes_ref to $push_target, the push target of $remote." \
-    "git said: $(redact_text "$push_err")" \
+    "git said: $(credential_safe_text "$push_err")" \
     "Any credential in that text is redacted, and a line that still carried one is replaced by a notice rather than shown." \
     "The attestation is evidence only on the repository holding the pull request head, so name that one with --remote <name> if this is not it, or re-run to reconcile if its $notes_ref moved since."
   printf 'fm-attest: published %s to %s (the push target of %s)\n' "$notes_ref" "$push_target" "$remote"

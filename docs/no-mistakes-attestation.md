@@ -91,15 +91,18 @@ A run tip that is not a commit in this checkout at all is refused separately as 
 
 It publishes to the remote's push URL rather than its fetch URL, and reconciles against that same repository before writing, because those are two different repositories in the setup `CONTRIBUTING.md` describes and only the push target is the one the check reads.
 The reconciliation merges the published ref instead of forcing over the local one, so an attestation recorded locally with `--no-push` survives the publishing of a later one.
-It names that repository in what it prints, with any credentials the remote's URL embeds stripped out, because "published to origin" does not say which repository was reached and the note is evidence only on the one holding the pull request head.
-git's own text is redacted rather than withheld when a remote call fails.
+It names that repository in what it prints, because "published to origin" does not say which repository was reached and the note is evidence only on the one holding the pull request head.
+git's own text is made safe to print rather than withheld wholesale when a remote call fails.
 git quotes the push URL back in its messages and a credential in a log is a leak wherever that log ends up, but suppressing the text throws away the server's rejection reason with it, and a contributor blocked by a ruleset on `refs/notes/*`, a required-signature policy or a quota then has nothing to act on.
-So the userinfo is stripped from every URL in the text, and any line that still carries a credential after that is replaced by a notice saying a line was withheld, because an omission the reader knows about is recoverable and a silent one is not.
 
-One rule decides where a URL's userinfo ends, and every stage asks it rather than reading the URL for itself.
-The authority is what follows `://` up to the first `/`, and the boundary is the last `@` inside it, which is how git reads it too.
-Two stages disagreeing about that boundary is not a detail: when one split at the first `@` and the others at the last, a password holding an unencoded `@` lost only its first character and the rest reached the log.
-When the text redactor cannot locate userinfo that the rule says is there, the two readings disagree about that URL and git's text is withheld whole rather than emitted partly redacted, because uncertainty is exactly where a leak hides.
+That is done by default deny, and the inversion is the design rather than a detail of it.
+Redacting what a reader recognises means every URL shape git accepts has to be modelled, and any shape it does not model is emitted intact, which reads absence of detection as absence of a credential: the same mistake as reading an empty check set as green.
+Two shapes reached the log that way before the inversion, one of them a password holding an unencoded `@`.
+So a word that could carry a credential is emitted only when it positively matches a URL with no userinfo, or can be rewritten into one; unparseable, ambiguous, unfamiliar and merely unmatched all withhold.
+An emitted URL therefore contains no `@` at all, so nothing turns on where a reader believes the authority ends, and an explicit port or an IPv6 literal host survives because those match positively.
+The cost is deliberate and stated rather than hidden: an ssh remote, an address, or a URL with an `@` after its host is withheld even though it holds no secret, and a marker says so in its place, because an omission the reader knows about is recoverable and a silent one is not.
+Words that are not URL-shaped are untouched, so the server's own reason still reaches the person who has to act on it.
+One function does this for everything the command prints, git's output and the push target alike, because two mechanisms for the one job is how the disagreement that caused the first leak returns.
 A push target carrying no `refs/notes/no-mistakes` yet has nothing to reconcile against and is not an error, but a push target that cannot be read at all stops the command before anything is recorded: not reading a repository is not reading an absence, and that is the same line the gate draws when it fetches this ref.
 
 Its own refusals stay as distinct as the gate's.

@@ -637,7 +637,7 @@ test_write_refuses_an_unreadable_push_target_without_leaking_credentials() {
   pass "fm-attest.sh: an unreadable push target stops the command rather than reading as an absent one"
 }
 
-test_write_redacts_every_userinfo_shape_from_the_rejection_reason() {
+test_write_emits_only_positively_safe_urls() {
   local repo fork head out rc
   repo="$TMP_ROOT/redact-shapes"
   fork="$TMP_ROOT/redact-shapes-fork.git"
@@ -650,32 +650,46 @@ test_write_redacts_every_userinfo_shape_from_the_rejection_reason() {
     'at-in-pass https://alice:pw@word@u3.invalid/o/r.git' \
     'colon-in-pass https://alice:pw:word@u4.invalid/o/r.git' \
     'encoded-at https://alice:pw%40word@u5.invalid/o/r.git' \
-    'path-at https://u6.invalid/o/r.git@v2')"
+    'encoded-slash https://alice:s%2Fs@u9.invalid/o/r.git' \
+    'explicit-port https://alice:pw@u7.invalid:8443/o/r.git' \
+    'ipv6-host https://alice:pw@[2001:db8::1]/o/r.git' \
+    "trailing-garbage 'https://alice:pw@u13.invalid/r.git')," \
+    'unparseable https://alice:pa/ss@u8.invalid/x')"
   git -C "$repo" remote add origin "$fork"
   install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${head:0:8}" completed)"
   out=$(publish_out "$repo")
   rc=$?
   [ "$rc" -ne 0 ] || fail "a rejected push was reported as a publication"
-  # The shape this control exists for: a password holding an unencoded @ used to
-  # lose only its first character, because the redactor split the userinfo at
-  # the first @ while every other reading split it at the last.
+  # A URL is emitted only in a form that positively matches a shape with no
+  # userinfo at all, so what reaches the caller is the repository it names.
+  assert_contains "$out" "https://plain.invalid/o/r.git" "a URL with no userinfo was altered"
+  assert_contains "$out" "https://u1.invalid/o/r.git" "a user-only URL was not rewritten to its host"
+  assert_contains "$out" "https://u2.invalid/o/r.git" "a user:password URL was not rewritten to its host"
+  assert_contains "$out" "https://u3.invalid/o/r.git" \
+    "a password holding an unencoded @ was not rewritten to its host"
+  assert_contains "$out" "https://u4.invalid/o/r.git" "a password holding a colon was not rewritten"
+  assert_contains "$out" "https://u5.invalid/o/r.git" "a percent-encoded password was not rewritten"
+  assert_contains "$out" "https://u9.invalid/o/r.git" "a percent-encoded slash was not rewritten"
+  assert_contains "$out" "https://u7.invalid:8443/o/r.git" "an explicit port was not preserved"
+  assert_contains "$out" "https://[2001:db8::1]/o/r.git" "an IPv6 literal host was not preserved"
+  assert_contains "$out" "https://u13.invalid/r.git" "punctuation around a URL defeated the rewrite"
+  # No fragment of any credential survives, whatever shape it took.
+  assert_not_contains "$out" "alice" "a username reached the caller"
+  assert_not_contains "$out" "hunter2" "a plain password reached the caller"
   assert_not_contains "$out" "pw@word" "a password holding an unencoded @ reached the caller"
   assert_not_contains "$out" "word@u3" "a fragment of that password reached the caller"
-  assert_contains "$out" "https://u3.invalid/o/r.git" \
-    "the at-in-password URL was not redacted down to its host"
-  # The shapes that already redacted correctly must not regress.
-  assert_not_contains "$out" "hunter2" "a plain password reached the caller"
-  assert_not_contains "$out" "alice" "a username reached the caller"
   assert_not_contains "$out" "pw:word" "a password holding a colon reached the caller"
   assert_not_contains "$out" "pw%40word" "a percent-encoded password reached the caller"
-  # And a URL with no userinfo, or an @ that belongs to the path, is left alone:
-  # over-redaction would quietly become the blanket suppression already refused.
-  assert_contains "$out" "https://plain.invalid/o/r.git" "a URL with no userinfo was altered"
-  assert_contains "$out" "https://u6.invalid/o/r.git@v2" "an @ in a path was read as userinfo"
-  pass "fm-attest.sh: every userinfo shape is redacted out of the server's rejection reason"
+  assert_not_contains "$out" "s%2Fs" "a percent-encoded slash password reached the caller"
+  # The pairing that stops this passing under blanket suppression: the one shape
+  # here that cannot be positively parsed is withheld while the rest are shown.
+  assert_not_contains "$out" "pa/ss" "a password holding an unencoded slash reached the caller"
+  assert_not_contains "$out" "u8.invalid" "a URL that could not be positively parsed was emitted"
+  assert_contains "$out" "url withheld" "the withheld URL was dropped without saying so"
+  pass "fm-attest.sh: a URL reaches the caller only in a form with no userinfo at all"
 }
 
-test_write_withholds_git_text_when_it_cannot_locate_the_credential() {
+test_write_withholds_a_push_target_it_cannot_positively_parse() {
   local repo parent head out rc
   repo="$TMP_ROOT/redact-unlocatable"
   parent="$TMP_ROOT/redact-unlocatable-parent.git"
@@ -684,27 +698,66 @@ test_write_withholds_git_text_when_it_cannot_locate_the_credential() {
   git init -q --bare "$parent"
   git -C "$repo" remote add origin "$parent"
   install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${head:0:8}" completed)"
-  # A push URL whose userinfo the text redactor's pattern cannot locate, because
-  # the credential holds a space. Emitting partly redacted text is how a leak
-  # hides, so the whole of git's text is withheld instead.
+  # A push URL no reader here models, because the credential holds a space.
+  # Emitting it because nothing recognised a credential in it is the fail-open
+  # hole this design exists to close.
   git -C "$repo" config remote.origin.pushurl 'https://someone:pa ss@127.0.0.1:1/owner/repo.git'
   out=$(cd "$repo" && GIT_TERMINAL_PROMPT=0 no_proxy='*' NO_PROXY='*' \
     PATH="$repo/stub/bin:$PATH" "$ATTEST" write 2>&1)
   rc=$?
   [ "$rc" -ne 0 ] || fail "an unreadable push target was published to"
-  assert_contains "$out" "withheld in full" "text that could not be redacted with confidence was emitted"
+  assert_contains "$out" "url withheld" "a URL that could not be positively parsed was emitted"
   assert_not_contains "$out" "pa ss" "the credential reached the caller"
   assert_not_contains "$out" "someone" "the credential's user reached the caller"
   # Deliberate rather than incidental: the same unreachable target, differing
-  # only in that this credential can be located, shows git's text instead.
+  # only in that this URL does positively parse, is named rather than withheld.
   git -C "$repo" config remote.origin.pushurl 'https://someone:passphrase@127.0.0.1:1/owner/repo.git'
   out=$(cd "$repo" && GIT_TERMINAL_PROMPT=0 no_proxy='*' NO_PROXY='*' \
     PATH="$repo/stub/bin:$PATH" "$ATTEST" write 2>&1)
   rc=$?
   [ "$rc" -ne 0 ] || fail "an unreadable push target was published to"
-  assert_not_contains "$out" "withheld in full" "text with a locatable credential was withheld"
+  assert_contains "$out" "https://127.0.0.1:1/owner/repo.git" \
+    "a push target that positively parses was not named"
   assert_not_contains "$out" "passphrase" "the credential reached the caller"
-  pass "fm-attest.sh: a credential the redactor cannot locate withholds git's text rather than half of it"
+  pass "fm-attest.sh: a push target that cannot be positively parsed is withheld, not emitted"
+}
+
+test_write_withholds_url_shapes_no_reader_models() {
+  local repo fork head out rc
+  repo="$TMP_ROOT/default-deny"
+  fork="$TMP_ROOT/default-deny-fork.git"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  # Shapes that no reader here models. Under redact-what-you-recognise each of
+  # these was emitted verbatim, because nothing recognised a credential in them.
+  install_rejecting_fork "$fork" "$(printf '%s\n' \
+    'refs/notes/* is blocked by a ruleset' \
+    'safe https://safe.invalid/o/r.git' \
+    'no-scheme alice:pw@u10.invalid/r.git' \
+    'scp-style git@u11.invalid:o/r.git' \
+    'at-after-authority https://u6.invalid/o/r.git@v2' \
+    'unfamiliar weird+scheme://a:b/c@d:e/f?g#h')"
+  git -C "$repo" remote add origin "$fork"
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${head:0:8}" completed)"
+  out=$(publish_out "$repo")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a rejected push was reported as a publication"
+  assert_contains "$out" "url withheld" "a URL-shaped token was dropped without saying so"
+  assert_not_contains "$out" "alice" "a credential in a URL with no scheme reached the caller"
+  assert_not_contains "$out" "u10.invalid" "a URL with no scheme was emitted"
+  assert_not_contains "$out" "u11.invalid" "an scp-style URL carrying userinfo was emitted"
+  assert_not_contains "$out" "u6.invalid" "a URL with an @ after its authority was emitted"
+  # The class control: a deliberately unfamiliar URL-shaped token that no reader
+  # models must be withheld. Emitting it is what "unmatched means safe" looks
+  # like, and it is the shape that proves the default is deny.
+  assert_not_contains "$out" "a:b/c@d:e" "an unfamiliar URL-shaped token was emitted"
+  assert_not_contains "$out" "weird+scheme" "an unfamiliar URL-shaped token was emitted"
+  # The pairing, twice over: withholding is not blanket. A URL that positively
+  # parses still reaches the caller, and so does the server's own reason.
+  assert_contains "$out" "https://safe.invalid/o/r.git" "a positively safe URL was withheld"
+  assert_contains "$out" "refs/notes/* is blocked by a ruleset" \
+    "the server's own rejection reason was withheld along with the URLs"
+  pass "fm-attest.sh: a URL-shaped token no reader models is withheld rather than emitted"
 }
 
 # ---------------------------------------------------------------------------
@@ -924,8 +977,9 @@ test_write_publishes_to_the_push_target_it_reconciled_against
 test_write_reports_the_rejection_reason_with_credentials_redacted
 test_write_publishes_a_first_attestation_to_a_push_target_with_no_ref
 test_write_refuses_an_unreadable_push_target_without_leaking_credentials
-test_write_redacts_every_userinfo_shape_from_the_rejection_reason
-test_write_withholds_git_text_when_it_cannot_locate_the_credential
+test_write_emits_only_positively_safe_urls
+test_write_withholds_a_push_target_it_cannot_positively_parse
+test_write_withholds_url_shapes_no_reader_models
 test_write_outside_a_repository_fails_as_such
 test_write_without_the_pipeline_tool_fails_as_such
 test_write_on_an_unborn_head_fails_as_such
