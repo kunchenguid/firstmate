@@ -89,8 +89,11 @@
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. pi-signed launches that exact executable name from PATH and
-#   refuses before endpoint creation when it is unavailable; it never falls back to pi.
+#   new adapters. A raw command must directly name a plain non-Claude executable;
+#   shell dispatchers, command composition, substitutions, and unprovable executable
+#   tokens are refused. Verified Claude launches use the canonical template only.
+#   pi-signed launches that exact executable name from PATH and refuses before
+#   endpoint creation when it is unavailable; it never falls back to pi.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
@@ -338,6 +341,74 @@ else
     exit 1
   }
 fi
+
+raw_launch_refuse() {
+  echo "error: refusing raw launch command whose executable is not provably a direct non-Claude adapter; select the canonical 'claude' harness to use --permission-mode auto" >&2
+  return 1
+}
+
+raw_launch_preflight() {
+  local raw=$1 normalized word executable= base
+  local -a words
+  case "$raw" in
+    *$'\n'*|*$'\r'*|*';'*|*'&'*|*'|'*|*'`'*|*'$'*|*'('*|*')'*|*'{'*|*'}'*|*'<'*|*'>'*|*'\'*)
+      raw_launch_refuse
+      return 1
+      ;;
+  esac
+  normalized=${raw//\'/}
+  normalized=${normalized//\"/}
+  case "$normalized" in
+    *claude*)
+      raw_launch_refuse
+      return 1
+      ;;
+  esac
+  read -r -a words <<< "$raw"
+  for word in "${words[@]}"; do
+    if [[ "$word" =~ ^[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9_./,:+%@-]+$ ]]; then
+      continue
+    fi
+    executable=$word
+    break
+  done
+  case "$executable" in
+    ''|*[!A-Za-z0-9_./+-]*)
+      raw_launch_refuse
+      return 1
+      ;;
+  esac
+  base=${executable##*/}
+  case "$base" in
+    claude|env|command|exec|builtin|eval|sh|bash|dash|zsh|ksh|fish|nohup|nice|ionice|chrt|setsid|stdbuf|timeout|time|sudo|doas|xargs|find|busybox|toybox)
+      raw_launch_refuse
+      return 1
+      ;;
+  esac
+  RAW_LAUNCH_HARNESS=$base
+}
+
+RAW_LAUNCH_HARNESS=
+RAW_LAUNCH_CANDIDATE=
+if [ -n "$HARNESS_ARG" ]; then
+  RAW_LAUNCH_CANDIDATE=$HARNESS_ARG
+elif [ "$KIND" = secondmate ]; then
+  case "${POS[1]:-}" in
+    *' '*)
+      if [ "${#POS[@]}" -gt 2 ] || [ -d "${POS[1]}" ]; then
+        RAW_LAUNCH_CANDIDATE=${POS[2]:-}
+      else
+        RAW_LAUNCH_CANDIDATE=${POS[1]}
+      fi
+      ;;
+    *) RAW_LAUNCH_CANDIDATE=${POS[2]:-} ;;
+  esac
+else
+  RAW_LAUNCH_CANDIDATE=${POS[2]:-}
+fi
+case "$RAW_LAUNCH_CANDIDATE" in
+  *' '*) raw_launch_preflight "$RAW_LAUNCH_CANDIDATE" || exit 1 ;;
+esac
 
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
@@ -886,10 +957,7 @@ launch_template() {
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
-    HARNESS=""
-    for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
-    done
+    HARNESS=$RAW_LAUNCH_HARNESS
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the

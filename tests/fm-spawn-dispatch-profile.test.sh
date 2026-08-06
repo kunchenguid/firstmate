@@ -383,12 +383,13 @@ test_active_dispatch_profile_allows_raw_launch_command() {
 
 assert_unsafe_claude_raw_refused() {
   local out=$1 status=$2 home=$3 launchlog=$4 id=$5 context=$6
-  expect_code 1 "$status" "$context should reject Claude's unrestricted bypass"
-  assert_contains "$out" "refusing Claude launch containing --dangerously-skip-permissions" \
-    "$context refusal did not name the forbidden Claude flag"
-  assert_contains "$out" "use --permission-mode auto" \
-    "$context refusal did not name the safe Claude permission mode"
+  expect_code 1 "$status" "$context should reject a non-canonical Claude launch"
+  assert_contains "$out" "refusing raw launch command whose executable is not provably a direct non-Claude adapter" \
+    "$context refusal did not identify the unprovable raw launch"
+  assert_contains "$out" "select the canonical 'claude' harness" \
+    "$context refusal did not direct Claude launches to the canonical harness"
   assert_absent "$home/state/$id.meta" "$context refusal should happen before meta is written"
+  assert_absent "$home/state/.spawn-$id.lock" "$context refusal should happen before task-lock acquisition"
   [ ! -s "$launchlog" ] || fail "$context refusal reached backend launch delivery"
 }
 
@@ -436,8 +437,8 @@ test_claude_raw_bypass_refused_for_secondmate_before_launch() {
   pass "raw Claude secondmate bypass is refused before launch"
 }
 
-test_legitimate_claude_raw_launch_is_unchanged() {
-  local rec id raw out status launch
+test_raw_claude_auto_mode_requires_canonical_harness() {
+  local rec id raw out status
   id=profile-raw-claude-auto-z15d
   raw="claude --permission-mode auto --model sonnet"
   rec=$(make_spawn_case profile-raw-claude-auto claude "$id")
@@ -446,12 +447,72 @@ test_legitimate_claude_raw_launch_is_unchanged() {
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" "$raw")
   status=$?
-  expect_code 0 "$status" "legitimate raw Claude launch should succeed"
-  assert_contains "$out" "spawned $id harness=claude" \
-    "legitimate raw Claude launch did not retain Claude harness resolution"
+  assert_unsafe_claude_raw_refused "$out" "$status" "$HOME_DIR" "$LAUNCH_LOG" "$id" \
+    "raw Claude auto-mode launch"
+  pass "raw Claude auto mode is redirected to the canonical harness"
+}
+
+test_quoted_concatenation_claude_bypass_is_refused() {
+  local rec id raw out status
+  id=profile-raw-claude-quoted-z15e
+  raw="clau''de --dangerously-skip-permis''sions --model sonnet"
+  rec=$(make_spawn_case profile-raw-claude-quoted claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "$raw")
+  status=$?
+  assert_unsafe_claude_raw_refused "$out" "$status" "$HOME_DIR" "$LAUNCH_LOG" "$id" \
+    "quoted-concatenation Claude bypass"
+  pass "quoted-concatenation Claude bypass is refused before launch"
+}
+
+test_env_wrapped_claude_bypass_is_refused() {
+  local rec id raw out status
+  id=profile-raw-claude-env-z15f
+  raw="env CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions"
+  rec=$(make_spawn_case profile-raw-claude-env claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "$raw")
+  status=$?
+  assert_unsafe_claude_raw_refused "$out" "$status" "$HOME_DIR" "$LAUNCH_LOG" "$id" \
+    "env-wrapped Claude bypass"
+  pass "env-wrapped Claude bypass is refused before launch"
+}
+
+test_shell_obfuscated_claude_bypass_is_refused() {
+  local rec id raw out status
+  id=profile-raw-claude-shell-z15g
+  raw='$(printf clau%s de) --dangerously-skip-permissions'
+  rec=$(make_spawn_case profile-raw-claude-shell claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "$raw")
+  status=$?
+  assert_unsafe_claude_raw_refused "$out" "$status" "$HOME_DIR" "$LAUNCH_LOG" "$id" \
+    "shell-obfuscated Claude bypass"
+  pass "shell-obfuscated Claude bypass is refused before launch"
+}
+
+test_quoted_non_claude_raw_launch_is_unchanged() {
+  local rec id raw out status launch
+  id=profile-raw-custom-quoted-z15h
+  raw="custom-agent --prompt 'harmless review'"
+  rec=$(make_spawn_case profile-raw-custom-quoted claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "$raw")
+  status=$?
+  expect_code 0 "$status" "quoted non-Claude raw launch should succeed"
+  assert_contains "$out" "spawned $id harness=custom-agent" \
+    "quoted non-Claude raw launch lost its direct adapter identity"
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "$raw" ] || fail "legitimate raw Claude launch changed"$'\n'"actual: $launch"
-  pass "legitimate raw Claude launch remains unchanged"
+  [ "$launch" = "$raw" ] || fail "quoted non-Claude raw launch changed"$'\n'"actual: $launch"
+  pass "quoted non-Claude raw launch remains unchanged"
 }
 
 test_claude_threads_model_and_effort() {
@@ -804,7 +865,11 @@ test_active_dispatch_profile_allows_raw_launch_command
 test_claude_raw_bypass_refused_for_ship_before_launch
 test_claude_raw_bypass_refused_for_scout_before_launch
 test_claude_raw_bypass_refused_for_secondmate_before_launch
-test_legitimate_claude_raw_launch_is_unchanged
+test_raw_claude_auto_mode_requires_canonical_harness
+test_quoted_concatenation_claude_bypass_is_refused
+test_env_wrapped_claude_bypass_is_refused
+test_shell_obfuscated_claude_bypass_is_refused
+test_quoted_non_claude_raw_launch_is_unchanged
 test_claude_threads_model_and_effort
 test_claude_scout_uses_auto_permissions_and_delivers_profiled_prompt
 test_codex_threads_model_and_effort
