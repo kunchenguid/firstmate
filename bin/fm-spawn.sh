@@ -1236,19 +1236,19 @@ case "$HARNESS" in
     if [ "$KIND" = secondmate ]; then
       :
     elif [ "$RAW_LAUNCH" != 1 ]; then
-      CLAUDE_HOOK_MODE=settings-flag
+      CLAUDE_HOOK_MODE='settings-flag'
     elif [ "$HARNESS" != claude ]; then
-      CLAUDE_HOOK_MODE=worktree-local
+      CLAUDE_HOOK_MODE='worktree-local'
       echo "warn: raw launch command '$HARNESS' is an unverified claude wrapper; firstmate leaves its argv untouched and wires its turn-end and busy-state hooks through the copy's .claude/settings.local.json instead" >&2
     else
       case " $LAUNCH " in
         *' --settings '*|*' --settings='*)
-          CLAUDE_HOOK_MODE=worktree-local
+          CLAUDE_HOOK_MODE='worktree-local'
           echo "warn: raw claude launch command already passes --settings; firstmate keeps that flag and wires its turn-end and busy-state hooks through the copy's .claude/settings.local.json instead" >&2
           ;;
         *)
           if LAUNCH=$(launch_insert_flag_after_command "$LAUNCH" '--settings __CLAUDESETTINGS__'); then
-            CLAUDE_HOOK_MODE=settings-flag
+            CLAUDE_HOOK_MODE='settings-flag'
           else
             echo "error: could not place --settings into the raw claude launch command" >&2
             exit 1
