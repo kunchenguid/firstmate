@@ -71,6 +71,8 @@ The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYC
 
 The default 300-second grace is unchanged.
 Only the watcher process touches `state/.last-watcher-beat`; no helper process can make a wedged watcher appear healthy.
+Watcher health and restart ownership compare the lock's home and watcher path by canonical physical identity, so filesystem-case and symlink aliases share one owner while different homes and unresolvable paths remain isolated.
+An absent final watcher leaf is compared beneath its canonical existing parent, and the separate live-PID and PID-identity checks remain fail-closed.
 
 ## Regression coverage
 
