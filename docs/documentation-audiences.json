@@ -265,8 +265,16 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/no-mistakes-pr-credential.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/orca-backend.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/proposals/nm-pr-step-interception.md",
+      "audience": "maintainer-architecture"
     },
     {
       "path": "docs/remote-secondmates.md",
@@ -322,6 +330,10 @@
     },
     {
       "path": "docs/verification/dispatch-auth.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/gh-pr-credential.md",
       "audience": "maintainer-verification"
     },
     {
