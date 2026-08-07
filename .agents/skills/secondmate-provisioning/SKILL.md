@@ -137,14 +137,20 @@ A remote home is the same object as a local one: a firstmate worktree leased on 
 There is no second layout, so `--machine` requires the `-` home spec and refuses a path this machine names.
 
 ```sh
-bin/fm-brief.sh <id> --secondmate {<project-name-on-that-machine>...|--no-projects}   # fill the charter
-bin/fm-home-seed.sh <id> - --machine <host> {<project>...|--no-projects}              # seed it over there
-bin/fm-spawn.sh --host <host> <id> --secondmate                                       # launch it over there
-bin/fm-relay-check-make.sh <id>                                                       # arm its wake path
+bin/fm-brief.sh <id> --secondmate {<project-name-on-that-machine>...|--no-projects} \
+  --host-home <that machine's FM_HOME> --host-root <that machine's firstmate checkout>   # fill the charter
+bin/fm-home-seed.sh <id> - --machine <host> {<project>...|--no-projects}                 # seed it over there
+bin/fm-spawn.sh --host <host> <id> --secondmate --harness <name>                         # launch it over there
+bin/fm-relay-check-make.sh <id>                                                          # arm its wake path
 ```
 
 The project names are that machine's project names, under its own projects directory, and `--secondmate` takes no project positional at spawn.
-Seeding requires a filled charter at `data/<id>/brief.md`, or `FM_SECONDMATE_CHARTER` to generate one; `bin/fm-brief.sh --secondmate` has no host-path variant and needs none, because the home paths are resolved by the seed on the far side.
+Seeding requires a filled charter at `data/<id>/brief.md`, or `FM_SECONDMATE_CHARTER` to generate one.
+Scaffold that charter with the remote-host pair, taken from that machine's `home` and `root` fields in `config/relay-hosts.json`.
+The seed resolves the HOME on the far side and does not rewrite the charter body, so the one absolute path a charter spells - the status file it reports to - is whatever machine the charter was written on unless this pair says otherwise.
+Measured 2026-08-06: a charter scaffolded without it sent the secondmate on 151 to the Mac's `state/<id>.status`, and its first act was to report that the path did not exist.
+`bin/fm-home-seed.sh --machine` generates the charter with that pair itself when it generates one, and refuses a hand-written charter that reports anywhere other than that machine.
+Pass `--harness <name>` at spawn unless that machine already carries its own `config/secondmate-harness`: the harness is resolved by the machine that runs the agent and is deliberately never filled in from this one, so a machine with no such config resolves nothing and refuses (`docs/relay-host.md` owns the reasoning and the measured refusal).
 Arming the wake path is a separate step for the same reason it is for a remote task: the status file a routed reply lands in is on that machine.
 
 **Where each thing happens, and why that split is the design.**

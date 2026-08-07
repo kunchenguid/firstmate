@@ -732,6 +732,58 @@ test_spawn_host_secondmate_launches_over_there_and_moves_no_backlog_row() {
   pass "fm-spawn --host --secondmate: the peer launches it, and no backlog row moves"
 }
 
+# The harness for a cross-machine secondmate is resolved BY THAT MACHINE, and
+# this side deliberately does not fill it in from its own configuration: an
+# adapter installed here need not be installed there, and a harness sent
+# unconditionally would also override that machine's own config/secondmate-harness
+# and void the model and effort tokens that file carries (an explicit per-spawn
+# harness starts clean on both axes by design). docs/relay-host.md records the
+# reasoning; this pins the two halves of it.
+#
+# What this side owes instead is the way out, because the caller cannot read that
+# machine's config to work out why nothing resolved.
+test_spawn_host_secondmate_leaves_the_harness_to_that_machine() {
+  local here peer err rc=0
+  here=$(setup_two_machines)
+  peer="$TMP_ROOT/2m/peer"
+  err="$TMP_ROOT/2m/spawn.err"
+  cat > "$peer/fmroot/bin/fm-spawn.sh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$(dirname "$0")/../fm-spawn.sh.args"
+echo "error: no harness resolved for this secondmate spawn: config/secondmate-harness (falling back to config/crew-harness) names none" >&2
+exit 1
+STUB
+  chmod +x "$peer/fmroot/bin/fm-spawn.sh"
+
+  FM_HOME="$here" FM_RELAY_BIFROST="$STUB_BIFROST/bifrost" \
+    "$ROOT/bin/fm-spawn.sh" --host box151 sm-nh --secondmate >/dev/null 2>"$err" || rc=$?
+  expect_code 1 "$rc" "a peer that cannot resolve a harness must make the dispatch fail"
+  assert_no_grep "--harness" "$peer/fmroot/fm-spawn.sh.args" \
+    "this machine must not fill in a harness the peer never asked for"
+  assert_contains "$(cat "$err")" "no harness resolved" "the peer's own reason must be relayed"
+  assert_contains "$(cat "$err")" "the harness is resolved on box151, not here" \
+    "the caller must be told where the harness comes from"
+  assert_contains "$(cat "$err")" "bin/fm-spawn.sh --host box151 sm-nh --secondmate --harness <name>" \
+    "the caller must be given the exact retry, since it cannot read that machine's config"
+
+  # And an explicit pin travels, with no advice attached to a spawn that worked.
+  rm -f "$peer/fmroot/fm-spawn.sh.args"
+  install_recorder "$peer/fmroot" fm-spawn.sh ''
+  install_recorder "$peer/fmroot" fm-peek.sh 'esc to interrupt'
+  install_recorder "$peer/fmroot" fm-send.sh ''
+  printf 'kind=secondmate\nwindow=w\nworktree=/leased/sm-nh\nhome=/leased/sm-nh\n' \
+    > "$peer/state/sm-nh.meta"
+  rc=0
+  FM_HOME="$here" FM_RELAY_BIFROST="$STUB_BIFROST/bifrost" \
+    "$ROOT/bin/fm-spawn.sh" --host box151 sm-nh --secondmate --harness claude >/dev/null 2>"$err" || rc=$?
+  expect_code 0 "$rc" "an explicitly pinned harness must launch: $(cat "$err")"
+  assert_grep "--harness claude" "$peer/fmroot/fm-spawn.sh.args" \
+    "an explicit harness must reach the machine that launches the agent"
+  assert_not_contains "$(cat "$err")" "the harness is resolved on box151" \
+    "a spawn that worked must not carry harness advice"
+  pass "fm-spawn --host --secondmate: the harness stays that machine's, and the refusal names the flag"
+}
+
 test_teardown_of_a_remote_secondmate_drops_the_route_here() {
   local here peer out rc=0
   here=$(setup_two_machines)
@@ -955,6 +1007,92 @@ test_brief_host_variant() {
   pass "fm-brief: the remote-host variant respells every path and the default is untouched"
 }
 
+# A charter spells exactly one absolute path - where the secondmate reports - and
+# the seed on the far side resolves the HOME rather than rewriting the charter
+# body. Measured 2026-08-06: a charter scaffolded without this variant sent the
+# secondmate on 151 to the Mac's state directory, and its first act was to report
+# that the path did not exist. The variant respells that one path; a charter with
+# no host pair must stay byte-identical to what it always was.
+test_brief_secondmate_host_variant() {
+  local home charter out rc=0
+  home="$TMP_ROOT/briefhome-sm"
+  mkdir -p "$home/data" "$home/state"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='keep three upstreams in step' \
+    "$ROOT/bin/fm-brief.sh" sm-local --secondmate alpha >/dev/null
+  charter=$(cat "$home/data/sm-local/brief.md")
+  assert_contains "$charter" "$home/state/sm-local.status" "a local charter must point at this home"
+  assert_not_contains "$charter" "# Where you are running" \
+    "a local charter must not carry the cross-machine section"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='keep three upstreams in step' \
+    "$ROOT/bin/fm-brief.sh" sm-far --secondmate alpha \
+    --host-home /srv/h --host-root /srv/r >/dev/null
+  charter=$(cat "$home/data/sm-far/brief.md")
+  assert_contains "$charter" "/srv/h/state/sm-far.status" \
+    "a cross-machine charter must report to the status file on the machine that runs it"
+  assert_not_contains "$charter" "$home/state/sm-far.status" \
+    "a cross-machine charter must not leak the control-side path"
+  assert_contains "$charter" "# Where you are running" \
+    "a cross-machine charter must say which machine it is on"
+  assert_contains "$charter" "persistent second mate" \
+    "the cross-machine charter must still be a charter, not a task brief"
+
+  out=$(FM_HOME="$home" FM_SECONDMATE_CHARTER=c "$ROOT/bin/fm-brief.sh" sm-bad --secondmate alpha \
+    --host-home /srv/h 2>&1) || rc=$?
+  expect_code 1 "$rc" "a charter must apply the same both-or-neither rule as a task brief"
+  out=$(FM_HOME="$home" FM_SECONDMATE_CHARTER=c "$ROOT/bin/fm-brief.sh" sm-bad --secondmate alpha \
+    --host-home /srv/h --host-root /srv/r --gui-host 2>&1) && rc=0 || rc=$?
+  expect_code 1 "$rc" "--gui-host must not apply to a charter"
+  assert_contains "$out" "ship or scout brief" "the --gui-host refusal must say what it is for"
+  assert_absent "$home/data/sm-bad/brief.md" "a refused charter must not be written"
+  pass "fm-brief --secondmate: the cross-machine variant respells the reporting path only"
+}
+
+# The enforcement half. A charter is written by hand more often than it is
+# generated, so the seed refuses one that reports anywhere other than the machine
+# it is about to run on, and generates its own with that machine's paths.
+test_home_seed_guards_the_charter_reporting_path() {
+  local here peer out rc=0
+  here=$(setup_two_machines)
+  peer="$TMP_ROOT/2m/peer"
+  install_recorder "$peer/fmroot" fm-home-seed.sh 'home=/leased/sm-path'
+  mkdir -p "$here/data/sm-path"
+  cat > "$here/data/sm-path/brief.md" <<EOF
+# Charter
+
+Keep three upstreams in step.
+
+# Routing scope
+
+upstream sync work
+
+# Escalation to main firstmate
+   \`echo "{state}: {one short line}" >> '$here/state/sm-path.status'\`
+EOF
+  out=$(FM_HOME="$here" FM_RELAY_BIFROST="$STUB_BIFROST/bifrost" \
+    "$ROOT/bin/fm-home-seed.sh" sm-path - --machine box151 alpha 2>&1) || rc=$?
+  expect_code 1 "$rc" "a charter reporting to this machine must be refused before it travels"
+  assert_contains "$out" "not on box151" "the refusal must name the machine the path is wrong for"
+  assert_contains "$out" "$peer/state/sm-path.status" "the refusal must name the path it must be"
+  assert_contains "$out" "bin/fm-brief.sh sm-path --secondmate --host-home" \
+    "the refusal must name the command that re-scaffolds it"
+  assert_absent "$peer/fmroot/fm-home-seed.sh.args" "a refused charter must never reach the peer"
+  assert_absent "$here/data/secondmates.md" "a refused charter must write no route"
+
+  # And a charter this side generates is generated with that machine's paths.
+  rc=0
+  out=$(FM_HOME="$here" FM_RELAY_BIFROST="$STUB_BIFROST/bifrost" \
+    FM_SECONDMATE_CHARTER='keep three upstreams in step' \
+    "$ROOT/bin/fm-home-seed.sh" sm-gen - --machine box151 alpha 2>&1) || rc=$?
+  expect_code 0 "$rc" "a generated charter must seed: $out"
+  assert_grep "$peer/state/sm-gen.status" "$here/data/sm-gen/brief.md" \
+    "a charter generated for another machine must report to that machine"
+  assert_no_grep "$here/state/sm-gen.status" "$here/data/sm-gen/brief.md" \
+    "a generated charter must not point the agent at the control machine"
+  pass "fm-home-seed --machine: the charter reports to the machine that runs it, or is refused"
+}
+
 test_check_make_requires_a_relay_task() {
   local home out rc
   home="$TMP_ROOT/checkhome"
@@ -1017,6 +1155,7 @@ test_home_seed_over_the_link_records_a_route_carrying_the_machine
 test_home_seed_refuses_a_named_home_path_and_an_unfilled_charter
 test_an_undeployed_host_refuses_the_new_verbs_loudly
 test_spawn_host_secondmate_launches_over_there_and_moves_no_backlog_row
+test_spawn_host_secondmate_leaves_the_harness_to_that_machine
 test_teardown_of_a_remote_secondmate_drops_the_route_here
 test_home_config_applies_the_real_surface_into_a_real_home
 test_home_config_ships_nothing_when_the_two_sides_already_agree
@@ -1026,5 +1165,7 @@ test_spawn_host_applies_the_local_task_id_gate
 test_spawn_help_documents_host
 test_teardown_delegates_force_to_the_host
 test_brief_host_variant
+test_brief_secondmate_host_variant
+test_home_seed_guards_the_charter_reporting_path
 test_check_make_requires_a_relay_task
 test_check_make_writes_a_thin_registered_check

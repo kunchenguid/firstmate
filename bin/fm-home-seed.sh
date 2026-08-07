@@ -41,6 +41,12 @@
 #       carrying "machine: <host>", which is what every local sweep reads to know
 #       the home is not on this filesystem. Requires a filled charter brief at
 #       data/<id>/brief.md, or FM_SECONDMATE_CHARTER to generate one.
+#       The charter BODY is not rewritten by the far side's seed, and the one
+#       absolute path it spells is where the secondmate reports, so a charter
+#       generated here is generated with fm-brief.sh's remote-host variant
+#       pointed at that machine, and a pre-written charter that reports anywhere
+#       other than <that machine's FM_HOME>/state/<id>.status is refused with the
+#       command that re-scaffolds it.
 #   fm-home-seed.sh validate
 #       Refuse duplicate ids, duplicate homes, and nested or overlapping homes in
 #       data/secondmates.md. Home identity is (machine, path): two machines may
@@ -949,6 +955,16 @@ seed_home_remote() {
   local brief brief_created=0 brief_dir_created=0 out rc home projects_csv conflict
   local seed_args=()
 
+  # The peer's own FM_HOME, from this home's record of that machine. It is what
+  # the charter's escalation path has to name: the secondmate appends to a status
+  # file on the machine it runs on, and the wake check reads that file across the
+  # link (docs/relay-host.md, "The wake path"). Loaded here rather than at the
+  # relay call because the two charter rules below both need it, and a --machine
+  # seed cannot proceed without the record in any case.
+  # shellcheck source=bin/fm-relay-lib.sh
+  . "$SCRIPT_DIR/fm-relay-lib.sh"
+  fm_relay_host_load "$FM_HOME" "$machine" || return 1
+
   validate_registry
   # A registered id is refused outright rather than compared against the target
   # home, because there is no target home yet: the peer leases a FRESH worktree,
@@ -968,9 +984,11 @@ seed_home_remote() {
     }
     [ -d "$DATA/$id" ] || brief_dir_created=1
     if [ "$no_projects" -eq 1 ]; then
-      "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects
+      "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects \
+        --host-home "$FM_RELAY_HOST_HOME" --host-root "$FM_RELAY_HOST_ROOT"
     else
-      "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate "$@"
+      "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate "$@" \
+        --host-home "$FM_RELAY_HOST_HOME" --host-root "$FM_RELAY_HOST_ROOT"
     fi
     brief_created=1
   fi
@@ -992,6 +1010,21 @@ seed_home_remote() {
   fi
   if [ -z "$(registry_scope_for_brief "$brief")" ]; then
     echo "error: secondmate charter brief at $brief has an empty Routing scope section; fill it before seeding" >&2
+    remote_seed_rollback_brief
+    return 1
+  fi
+  # The one path a charter spells absolutely is where the secondmate reports, and
+  # the seed on the far side does not rewrite the charter body. A charter written
+  # without the remote-host variant therefore sends the agent to a status file on
+  # the machine the charter was WRITTEN on - measured 2026-08-06, the secondmate
+  # seeded on box151 reported that path as missing as its first act. Refused here
+  # rather than shipped, and only when the charter names a reporting path that is
+  # not the peer's: a charter that names none is left alone.
+  if grep -q "/state/$id\.status" "$brief" \
+    && ! grep -qF "$FM_RELAY_HOST_HOME/state/$id.status" "$brief"; then
+    echo "error: the charter at $brief reports to a status file that is not on $machine" >&2
+    echo "       it must be $FM_RELAY_HOST_HOME/state/$id.status, the path the wake check reads over the link" >&2
+    echo "       re-scaffold it with: bin/fm-brief.sh $id --secondmate --host-home $FM_RELAY_HOST_HOME --host-root $FM_RELAY_HOST_ROOT {<project>...|--no-projects}" >&2
     remote_seed_rollback_brief
     return 1
   fi

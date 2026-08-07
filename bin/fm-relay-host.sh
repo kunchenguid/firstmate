@@ -288,6 +288,22 @@ case "$CMD" in
         # keeps it and alerts once.
         fm_relay_pending_set_reason "$PENDING" "${CLASS#fail }"
         printf '%s\n' "$FM_RELAY_OUT" >&2
+        # The harness is resolved by the machine that runs the agent and is
+        # deliberately not defaulted from here (docs/relay-host.md says why), so
+        # a refusal over harness resolution has a remedy the caller must supply -
+        # and the caller is on another machine and cannot read that machine's
+        # config to work it out. The peer's own words are relayed above; this
+        # adds the flag they do not name. Printed only when this dispatch pinned
+        # no harness, so a refusal about anything else stays quiet.
+        if [ "$HARNESS" = default ] && printf '%s' "$FM_RELAY_OUT" | grep -qi harness; then
+          if [ "$KIND" = secondmate ]; then
+            printf 'fix: the harness is resolved on %s, not here, and it refused over one; retry with: bin/fm-spawn.sh --host %s %s --secondmate --harness <name>\n' \
+              "$HOST" "$HOST" "$ID" >&2
+          else
+            printf 'fix: the harness is resolved on %s, not here, and it refused over one; retry with: bin/fm-spawn.sh --host %s %s %s --harness <name>\n' \
+              "$HOST" "$HOST" "$ID" "$PROJECT" >&2
+          fi
+        fi
         exit 1 ;;
     esac
     # The host answers with its own state/<id>.meta after the OK line. Recording

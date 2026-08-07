@@ -59,6 +59,10 @@
 # not-watching reading demotes it; an unreadable verification says so in the line
 # rather than being resolved either way.
 #
+# The checkout the watch is armed FROM is resolved here rather than taken from
+# the task record alone, because a task dispatched with `fm-spawn --host` records
+# the other machine's paths. See the candidate list below.
+#
 # Usage: fm-nm-watch.sh <task-id> <pr-url> [--branch <name>]
 #   --branch  source branch of the PR; defaults to the task worktree's current
 #             branch, then to fm/<task-id>. The branch keys the watcher's
@@ -78,6 +82,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 NM_BIN="${FM_NM_BIN:-no-mistakes}"
 # The durable per-home ledger of run ids this home armed. It outlives the task
 # meta, which teardown deletes, so bin/fm-nm-orphan-scan.sh can still tell one
@@ -215,20 +220,43 @@ esac
 # initialization. The old code picked the first READABLE candidate and stopped,
 # so a failure in the task copy ended the arm without the project clone ever
 # being asked.
+#
+# The recorded worktree= and project= are paths on the machine that RAN the task,
+# which for a task dispatched with `fm-spawn --host` is not this one. Measured
+# 2026-08-06: a cross-machine direct-PR task reached the PR record with both
+# recorded paths pointing at box151, both `-d` tests failed here, and the PR was
+# left with no CI monitoring while the merge poll reported `armed`. So after the
+# recorded paths, this home's OWN clone of the same project NAME is tried. That
+# is sound for the same reason the project clone is: the watch is bound to the
+# PR's URL, and the checkout only chooses whose config answers. The project name
+# is the basename of the recorded project path, and firstmate's own repo is
+# included by name because it is not a clone under projects/ - it is this home's
+# code root.
 WT=$(meta_field "$META" worktree)
 PROJECT=$(meta_field "$META" project)
+PROJECT_NAME=
+[ -z "$PROJECT" ] || PROJECT_NAME=$(basename "$PROJECT")
+LOCAL_CLONE=
+LOCAL_ROOT=
+if [ -n "$PROJECT_NAME" ]; then
+  LOCAL_CLONE="$PROJECTS/$PROJECT_NAME"
+  [ "$PROJECT_NAME" = "$(basename "$FM_ROOT")" ] && LOCAL_ROOT=$FM_ROOT
+fi
 DIRS=()
-for candidate in "$WT" "$PROJECT"; do
+for candidate in "$WT" "$PROJECT" "$LOCAL_CLONE" "$LOCAL_ROOT"; do
   [ -n "$candidate" ] || continue
   [ -d "$candidate" ] || continue
   git -C "$candidate" rev-parse --is-inside-work-tree >/dev/null 2>&1 || continue
-  # Only two candidates, so the only possible duplicate is the first one.
-  if [ "${#DIRS[@]}" -gt 0 ] && [ "${DIRS[0]}" = "$candidate" ]; then
-    continue
+  seen=no
+  if [ "${#DIRS[@]}" -gt 0 ]; then
+    for known in "${DIRS[@]}"; do
+      [ "$known" = "$candidate" ] && { seen=yes; break; }
+    done
   fi
+  [ "$seen" = no ] || continue
   DIRS+=("$candidate")
 done
-[ "${#DIRS[@]}" -gt 0 ] || unwatched "neither the task worktree nor its project clone is a readable git checkout"
+[ "${#DIRS[@]}" -gt 0 ] || unwatched "no readable git checkout to run the watch from: the task records worktree=${WT:-none} project=${PROJECT:-none}, and this home has no checkout of '${PROJECT_NAME:-?}' either (a task that ran on another machine records THAT machine's paths)"
 
 if [ -z "$BRANCH" ]; then
   BRANCH=$(git -C "${DIRS[0]}" symbolic-ref --quiet --short HEAD 2>/dev/null || true)

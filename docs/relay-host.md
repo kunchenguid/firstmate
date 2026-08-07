@@ -197,6 +197,28 @@ A consumer that saved that content without comparing hashes would keep a silentl
 
 Artifacts therefore always travel by `download`, never by `read`, and every transfer is hash-compared in both directions.
 
+### A mirrored `state/<id>.meta` holds the HOST's paths, and a local tool will read them as local
+
+The control side records the host's own metadata verbatim, which is what keeps every reader pointed at the machine that owns the task.
+The cost is that `worktree=` and `project=` are absolute paths on that machine, and a control-side tool that tests them with `-d` gets a false negative rather than an error.
+
+Measured 2026-08-06 on `fm-trusted-fleet-auto-relay`, a direct-PR task on 151.
+`bin/fm-pr-check.sh` recorded MR 51 and armed the merge poll, and `bin/fm-nm-watch.sh` answered:
+
+```
+armed: state/fm-trusted-fleet-auto-relay.check.sh
+watch not armed - this PR has no CI monitoring:
+  neither the task worktree nor its project clone is a readable git checkout
+```
+
+Both recorded paths were 151's, both `-d` tests failed here, and the command exited 0 because the arm was called with `|| true`.
+So the PR was delivered with its merge poll armed and nothing watching its CI, review threads, or mergeability.
+
+Two changes, and the second matters more than the first:
+
+- `bin/fm-nm-watch.sh` falls back to this home's own checkout of the same project NAME - `projects/<name>`, and this home's code root when the name is firstmate's own repo, which is not a clone under `projects/`. That is sound because `no-mistakes watch --pr <url>` is bound to the PR's URL; the checkout only decides whose no-mistakes configuration answers.
+- A failed arm is no longer only a line in a run that otherwise reads as success. `bin/fm-pr-check.sh` restates it on stderr as the same `NM_UNWATCHED:` line `bin/fm-bootstrap.sh` will print at every later session start, so a hole that appears for some future reason is still visible at the moment it appears.
+
 ## The wake path
 
 A remote crewmate's status file and turn-end marker live on its machine, so this home's signal scan cannot see them.
@@ -259,6 +281,25 @@ Land remotely first, delete locally second: a failure after the landing leaves a
 **`control-root/` is a deployed copy.**
 None of these verbs exist on a host until `bin/fm-relay-conn.sh deploy <host>` installs the new table there.
 Until then that host answers `ERR badverb`, and the control side reports that refusal as a failure - an undeployed host refuses the seed rather than appearing to do it.
+
+**The harness is that machine's, and is not defaulted from here.**
+Measured 2026-08-06 seeding `upstream-sync` on 151: the spawn failed with `no launch template for harness 'unknown'`, because a spawn started by a verb inherits no environment and no terminal, so nothing detected a harness and that machine carried no `config/secondmate-harness`.
+Passing `--harness claude` succeeded.
+The obvious-looking fix - have the control machine fill in the harness it resolved for itself - is not taken, for three reasons:
+
+1. An adapter installed here need not be installed there, so the refusal would only move from a clear message to a launch of a binary that is not on that machine.
+2. The control side cannot tell whether the peer resolved nothing or resolved its own pin, so it would have to send the harness on every dispatch - overriding that machine's own `config/secondmate-harness` whenever it has one, and additionally voiding the model and effort tokens that file carries, because an explicit per-spawn harness deliberately starts clean on both axes.
+3. Sending it only as a hint, to be used when the peer resolves nothing, needs a ninth wire token. `spawn` already uses all eight the shell allowlist permits, and widening the allowlist invalidates every grant and forces a re-pair.
+
+So the harness stays the property of the machine that runs the agent, and what this layer owes instead is a refusal that names the way out.
+That is said twice, deliberately, because the two halves reach the caller at different times: the host's own `bin/fm-spawn.sh` names `--harness` and the adapters it accepts, and the control side adds the exact retry command, which is the half that works before the host's firstmate checkout has been updated.
+Either fix the machine once by writing an adapter name into its `config/secondmate-harness`, or pin it per spawn.
+
+**A charter carries a path, and it is the peer's.**
+`bin/fm-brief.sh --secondmate` takes the same `--host-home`/`--host-root` pair a task brief takes, and it is required for a home on another machine.
+Measured 2026-08-06: the secondmate seeded on 151 reported, as its first act, that the escalation status file its charter named did not exist there - because the charter had been scaffolded on the Mac and the seed resolves the HOME, not the charter body.
+A charter spells exactly one absolute path, the status file it reports to, and that file has to be on the machine the agent runs on: the wake path reads it there over the link.
+`bin/fm-home-seed.sh --machine` now generates the charter with that pair itself, and refuses a hand-written charter that reports anywhere else rather than shipping it.
 
 ## Discarding a remote task
 
@@ -418,6 +459,11 @@ The reverse leaves the caller with a 401, because revoking the key already dropp
   Nothing in "A persistent secondmate on a task host" has been run over the real relay, and it cannot be until the new `control-root/` is deployed to that host.
   What is covered hermetically, through the stub relay that runs each verb with an empty environment: a seed that reaches the peer's own `fm-home-seed.sh` with its own project names and comes back as one route carrying `machine:`; a secondmate spawn that needs no project, no brief, and no claim; the four state-changing verbs refused by the existing helm fence while `agent-alive` stays readable; a backlog handoff that lands in the peer's queue and puts the items back when the peer refuses; and an undeployed host answering `ERR badverb` with this side reporting it as a failure.
   What has NOT been observed anywhere: a real `treehouse get --lease` on 151, a real agent launching and idling in a home over there, the digest comparison against a real converged home, a real config-reread pointer reaching a live remote secondmate, and a real retirement releasing that lease.
+- **The three cross-machine edge repairs, on the real pair.**
+  All three failures above were observed on the real Mac-to-151 pair on 2026-08-06; none of the repairs has been run there.
+  What is covered hermetically: a task whose recorded paths are on another machine arming its watch from this home's clone and from this home's code root, an unresolvable checkout reported as `NM_UNWATCHED:` by `bin/fm-pr-check.sh` while the PR record and the poll still succeed, a cross-machine secondmate spawn that ships no harness of its own and whose refusal names the retry command, a charter that reports to the peer's status path, and a hand-written charter reporting elsewhere being refused before it travels.
+  What has NOT been observed: a real cross-machine direct-PR task arming a real `no-mistakes watch` run from a Mac-side checkout, a real spawn refusal on 151 carrying the new message, or a real secondmate on 151 appending to the path its charter names.
+  The first of those additionally needs 151's own firstmate checkout advanced, because the improved spawn refusal is printed by the host's copy of `bin/fm-spawn.sh`.
 - **Automatic adoption at session start on the real pair.**
   The sweep is exercised hermetically, including the exact observed failure - a helm claimed while the link was down, adopting nothing, then converging at the next session start.
   It has not been run over the real relay, and the round-trip cost of one `task-list` per fleet peer at every session start is therefore bounded only by `FM_RELAY_BOOTSTRAP_TIMEOUT_MS` rather than measured.

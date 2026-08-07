@@ -691,6 +691,7 @@ case "$ARG3" in
     if [ "$KIND" = secondmate ]; then
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
       harness_src='config/secondmate-harness (falling back to config/crew-harness)'
+      harness_cfg='config/secondmate-harness'
     else
       if [ -f "$CONFIG/crew-dispatch.json" ]; then
         echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
@@ -698,8 +699,27 @@ case "$ARG3" in
       fi
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
       harness_src='config/crew-harness'
+      harness_cfg='config/crew-harness'
     fi
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    # Two different failures used to share one message that named neither remedy.
+    # `unknown` is not an adapter this build lacks a template for: it is the
+    # resolver reporting that nothing answered - no config file, and no harness
+    # detectable from the process tree. That is exactly the shape a spawn started
+    # by a relay verb has, because it inherits no environment and no terminal
+    # (measured 2026-08-06 seeding a secondmate on box151), and the caller is on
+    # another machine and cannot read this machine's config to find out. So say
+    # which flag fixes it, in both branches.
+    if ! LAUNCH=$(launch_template "$HARNESS" "$KIND"); then
+      if [ "$HARNESS" = unknown ]; then
+        echo "error: no harness resolved for this $KIND spawn: $harness_src names none, and no harness is detectable from this process (a non-interactive launcher, such as a relay verb, never has one)" >&2
+        echo "       fix: pass --harness <claude|codex|opencode|pi|grok|traex> on this spawn, or put that adapter name in this machine's $harness_cfg" >&2
+        echo "       from another machine that means: bin/fm-spawn.sh --host <this host> <id> ... --harness <name>" >&2
+      else
+        echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection)" >&2
+        echo "       fix: pass --harness <claude|codex|opencode|pi|grok|traex> on this spawn, or a raw launch command to use an unverified adapter" >&2
+      fi
+      exit 1
+    fi
     ;;
   *)
     HARNESS=$ARG3
