@@ -154,6 +154,10 @@ status_is_paused_or_captain_held() {  # <status-line>
 # line OPENS a keyed decision, and only an explicit resolution or a verified
 # captain-held backlog transfer referencing that key CLOSES it; a later unrelated
 # terminal line never clears an open captain decision.
+# Who WRITES the closing line is owned elsewhere: the answering firstmate closes
+# at answer time through fm-send's --resolve-key (bin/fm-send.sh header), and a
+# worker self-closes only a blocker that cleared without an answer (bin/fm-brief.sh
+# rule 6), so closure never depends on a busy worker's discipline.
 #
 # Decision key grammar (backward-compatible with the existing "<verb>: <note>"
 # format): an OPTIONAL "[key=<slug>]" token sits between the verb and the colon,
@@ -212,12 +216,50 @@ EOF
 # whole-file fold (status_open_decisions) and the incremental cursor-backed fold
 # (status_open_decisions_incremental) below call this instead of re-deriving the
 # rule, so the two consumption strategies can never drift apart on semantics.
+# Reserved decision-key namespaces, and the rule that makes them mean something.
+#
+# A key like `pending-reply-<id>` names a decision that one library raises and is
+# the only thing that ever closes it. Every writer reaches this same stream: a
+# local mate appends straight into it, and a remote mate's lines are mirrored
+# into it verbatim. So without a rule here, any writer could claim a reserved
+# key with an unrelated note, take the key over in this fold, and permanently
+# block the owner's close - leaving a decision nothing will ever resolve - or
+# clear the owner's decision with a bare resolution.
+#
+# The rule is deliberately generic, so this fold needs no knowledge of any
+# particular owner: a reserved key may only be opened or closed by a line whose
+# note speaks that namespace's own vocabulary, which its owner states by
+# beginning the note with a `<namespace>...:` token. A line failing that is not a
+# decision transition at all here and is folded as ordinary status. This is a
+# consumer-side rule on purpose - it protects local and remote writers
+# identically, and it can never fail a whole delta or wedge a stream the way a
+# writer-side rejection would.
+FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT='pending-reply-'
+
+# 0 when <key> is not reserved, or is reserved and <note> speaks its vocabulary.
+_fm_decision_key_transition_allowed() {  # <key> <note>
+  local key=$1 note=$2 prefix
+  for prefix in ${FM_CLASSIFY_RESERVED_KEY_PREFIXES:-$FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT}; do
+    case "$key" in
+      "$prefix"*)
+        case "$note" in
+          "$prefix"*:*) return 0 ;;
+          *) return 1 ;;
+        esac
+        ;;
+    esac
+  done
+  return 0
+}
+
 _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb>
   local open=$1 line=$2 resolve=$3 held=$4 verb key note stripped
   stripped=${line//[[:space:]]/}
   [ -n "$stripped" ] || { printf '%s' "$open"; return 0; }
   verb=$(status_line_verb "$line")
   key=$(_fm_decision_key "$line") || { printf '%s' "$open"; return 0; }
+  _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" \
+    || { printf '%s' "$open"; return 0; }
   case "$verb" in
     needs-decision|blocked)
       note=$(status_line_note "$line")

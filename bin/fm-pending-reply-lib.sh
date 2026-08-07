@@ -61,6 +61,10 @@
 # fm_pending_reply_close_escalation closes it once the record resolves. Resolving
 # the record alone would leave the decision open forever, re-surfacing a settled
 # request in every later OPEN DECISIONS fold.
+# That per-request key lives in a namespace the fold reserves to this library, so
+# no other writer into the same status stream - a local mate appending directly,
+# or a remote mate's mirrored line - can take the key over or clear it; see the
+# reserved-key rule in bin/fm-classify-lib.sh.
 #
 # Sourced by bin/fm-send.sh, bin/fm-watch.sh, bin/fm-secondmate-report.sh, and
 # tests. No side effects on source. set -u / set -e safe.
@@ -485,16 +489,25 @@ fm_pending_reply_resolve_via_of_line() {  # <line>
 
 # Idempotently resolve an expectation from a correlated parent report.
 # Returns 0 when the record is resolved after the call (already or newly).
-fm_pending_reply_try_resolve() (  # <state-dir> <corr_id> [status-file-override]
-  local state=$1 corr=$2 lock
-  lock="$state/.pending-reply-$corr.lock"
+fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
+  # Serialized per correlation so a resolution and an escalation cannot interleave.
+  # bin/fm-wake-lib.sh owns the lock primitives but assigns its own globals when
+  # sourced, so they are declared local here: that contains them to this call
+  # instead of leaking into every script that sources this library, without the
+  # subshell that would make every later use of them read as a lost write.
+  # The lock is released explicitly rather than from an EXIT trap, because a trap
+  # in a plain function would clobber the caller's own.
+  local state=$1 corr=$2 lock rc=0
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   STATE=$state
+  lock="$state/.pending-reply-$corr.lock"
   # shellcheck source=bin/fm-wake-lib.sh
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
   fm_lock_acquire_wait "$lock" || return 1
-  trap 'fm_lock_release "$lock"' EXIT
-  _fm_pending_reply_try_resolve_locked "$@"
-)
+  _fm_pending_reply_try_resolve_locked "$@" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
+}
 
 _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-override]
   local state=$1 corr=$2 status_override=${3-}
@@ -870,16 +883,25 @@ fm_pending_reply_escalation_line() {  # <status-file> <record-path> <corr_id>
 # Idempotent, and safe to retry until it succeeds: it appends the closing line
 # only while that exact keyed decision is still open in
 # bin/fm-classify-lib.sh's fold. Records that never escalated are left untouched.
-fm_pending_reply_close_escalation() (  # <state-dir> <corr_id>
-  local state=$1 corr=$2 lock
-  lock="$state/.pending-reply-$corr.lock"
+fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
+  # Serialized per correlation so a resolution and an escalation cannot interleave.
+  # bin/fm-wake-lib.sh owns the lock primitives but assigns its own globals when
+  # sourced, so they are declared local here: that contains them to this call
+  # instead of leaking into every script that sources this library, without the
+  # subshell that would make every later use of them read as a lost write.
+  # The lock is released explicitly rather than from an EXIT trap, because a trap
+  # in a plain function would clobber the caller's own.
+  local state=$1 corr=$2 lock rc=0
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   STATE=$state
+  lock="$state/.pending-reply-$corr.lock"
   # shellcheck source=bin/fm-wake-lib.sh
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
   fm_lock_acquire_wait "$lock" || return 1
-  trap 'fm_lock_release "$lock"' EXIT
-  _fm_pending_reply_close_escalation_locked "$@"
-)
+  _fm_pending_reply_close_escalation_locked "$@" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
+}
 
 _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
   local state=$1 corr=$2 rec escalated closed parent_status escalation key note
@@ -919,16 +941,25 @@ EOF
 
 # Escalate once after a missed recovery report or failed delivery outcome.
 # Retains the durable unresolved record. Never loops.
-fm_pending_reply_maybe_escalate() (  # <state-dir> <corr_id>
-  local state=$1 corr=$2 lock
-  lock="$state/.pending-reply-$corr.lock"
+fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
+  # Serialized per correlation so a resolution and an escalation cannot interleave.
+  # bin/fm-wake-lib.sh owns the lock primitives but assigns its own globals when
+  # sourced, so they are declared local here: that contains them to this call
+  # instead of leaking into every script that sources this library, without the
+  # subshell that would make every later use of them read as a lost write.
+  # The lock is released explicitly rather than from an EXIT trap, because a trap
+  # in a plain function would clobber the caller's own.
+  local state=$1 corr=$2 lock rc=0
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   STATE=$state
+  lock="$state/.pending-reply-$corr.lock"
   # shellcheck source=bin/fm-wake-lib.sh
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
   fm_lock_acquire_wait "$lock" || return 1
-  trap 'fm_lock_release "$lock"' EXIT
-  _fm_pending_reply_maybe_escalate_locked "$@"
-)
+  _fm_pending_reply_maybe_escalate_locked "$@" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
+}
 
 _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   local state=$1 corr=$2
