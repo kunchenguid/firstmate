@@ -242,7 +242,9 @@
 #   TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH HERDR_PANE_ID
 #   CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID CMUX_SOCKET_PATH
 #   ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION, plus the task
-#   marker FM_TASK_ID that ship and scout panes receive above.
+#   marker FM_TASK_ID that ship and scout panes receive above, plus
+#   CHROME_DEVTOOLS_AXI_BROWSER_URL when the shared browser workaround
+#   (docs/browser-workaround.md) resolved one.
 #   An enabled task trace also retains TRACEPARENT. Explicit Firstmate launch
 #   assignments still apply inside the filtered environment. Raw commands must
 #   be POSIX sh compatible under this opt-in; the absent-file path is unchanged.
@@ -4141,17 +4143,6 @@ spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   spawn_send_text_line "$T" "export FM_TASK_ID=$ID"
 fi
-# chrome-devtools-axi's own browser launch is broken on some machines, so use a
-# best-effort machine-shared loopback browser when the operator did not provide
-# an ambient endpoint. The helper failure is intentionally non-fatal because a
-# task may not need browser verification.
-SPAWN_BROWSER_URL=${CHROME_DEVTOOLS_AXI_BROWSER_URL:-}
-if [ -z "$SPAWN_BROWSER_URL" ]; then
-  SPAWN_BROWSER_URL=$("$FM_ROOT/bin/fm-browser.sh" url 2>/dev/null || true)
-fi
-if [ -n "$SPAWN_BROWSER_URL" ]; then
-  spawn_send_text_line "$T" "export CHROME_DEVTOOLS_AXI_BROWSER_URL=$(shell_quote "$SPAWN_BROWSER_URL")"
-fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
 # entirely when trace context is off.
@@ -4169,13 +4160,24 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
     LAUNCH="unset TRACEPARENT; $LAUNCH"
   fi
 fi
+# chrome-devtools-axi's own browser launch is broken on some machines, so use a
+# best-effort machine-shared loopback browser when the operator did not provide
+# an ambient endpoint. The helper failure is intentionally non-fatal because a
+# task may not need browser verification.
+SPAWN_BROWSER_URL=${CHROME_DEVTOOLS_AXI_BROWSER_URL:-}
+if [ -z "$SPAWN_BROWSER_URL" ]; then
+  SPAWN_BROWSER_URL=$("$FM_ROOT/bin/fm-browser.sh" url 2>/dev/null || true)
+fi
+if [ -n "$SPAWN_BROWSER_URL" ]; then
+  spawn_send_text_line "$T" "export CHROME_DEVTOOLS_AXI_BROWSER_URL=$(shell_quote "$SPAWN_BROWSER_URL")"
+fi
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH_ENV_PREFIX='/usr/bin/env -i'
   for env_name in HOME PATH USER LOGNAME SHELL TERM COLORTERM LANG LC_ALL LC_CTYPE \
     TMPDIR TMP TEMP GOTMPDIR TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH \
     HERDR_PANE_ID CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID \
     CMUX_SOCKET_PATH ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION \
-    FM_TASK_ID \
+    FM_TASK_ID CHROME_DEVTOOLS_AXI_BROWSER_URL \
     $LAUNCH_ENV_NAMES; do
     # Only validated names enter shell syntax. Values expand once, quoted, in
     # the pane shell and never become source text or spawn-process snapshots.

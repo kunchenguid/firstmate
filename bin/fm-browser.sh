@@ -48,7 +48,8 @@ ensure_runtime_dir() {
   local owner mode permissions current_uid
   current_uid=${UID:-$(id -u)}
   if [ ! -e "$RUNTIME_DIR" ] && [ ! -L "$RUNTIME_DIR" ]; then
-    mkdir -p -m 700 "$RUNTIME_DIR"
+    mkdir -p "$RUNTIME_DIR"
+    chmod 700 "$RUNTIME_DIR"
   fi
   if [ ! -d "$RUNTIME_DIR" ] || [ -L "$RUNTIME_DIR" ]; then
     printf 'fm-browser: runtime path is not a real directory: %s\n' "$RUNTIME_DIR" >&2
@@ -248,6 +249,7 @@ launch_browser() {
     wait "$pid" 2>/dev/null || true
   fi
   printf 'fm-browser: Chrome did not expose %s/json/version within 10 seconds.\n' "$URL" >&2
+  printf 'fm-browser: if this persists, install a known-good browser with: npx -y puppeteer@latest browsers install chrome\n' >&2
   return 1
 }
 
