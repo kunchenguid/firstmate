@@ -28,6 +28,15 @@
 #      counted as foreign activity. Requires lsof; when lsof is absent the
 #      process check is skipped and documented as unavailable, not half-done.
 #
+# Checks 1 to 3 answer for the whole work tree, not just <dir>: git status and
+# the git op markers are repo-wide by nature, and the mtime scan is listed from
+# the work-tree root to match them. Passing a subdirectory therefore narrows
+# nothing; it only names which tree to ask about.
+#
+# When a check cannot read git state (git exits non-zero, the mtime scan
+# fails), the answer is busy with its own reason, never quiet. A quiet result
+# must mean "the checks ran and saw nothing", not "a check could not run".
+#
 # Performance: does not walk the whole tree naively. Dirty and lock checks use
 # git (index-backed). The mtime scan iterates only paths git reports as tracked
 # or untracked-and-not-ignored (`git ls-files --cached --others --exclude-standard`),
@@ -42,17 +51,21 @@
 #
 # Usage:
 #   fm-workspace-busy.sh <dir> [--window SECS] [--process] [--no-process]
+#   fm-workspace-busy.sh [--window SECS] -- <dir>
 #   fm-workspace-busy.sh -h | --help
 #
 # Flags:
 #   --window SECS   recent-mtime window (default: FM_WORKSPACE_BUSY_WINDOW_SECS or 180)
 #   --process       also treat a foreign live cwd under <dir> as busy
 #   --no-process    explicit default: skip the process scan
+#   --              end of flags; the next argument is <dir>, even if it
+#                   starts with a dash
 set -eu
 
 usage() {
   cat <<'EOF' >&2
 usage: fm-workspace-busy.sh <dir> [--window SECS] [--process] [--no-process]
+       fm-workspace-busy.sh [--window SECS] -- <dir>
 
 Advisory, read-only: print one short reason line and exit 1 when <dir> looks
 mid-work; print nothing and exit 0 when it looks quiet; exit 2 on usage errors
@@ -63,6 +76,7 @@ This is not a lock. Same-user agents can still write at any time.
   --window SECS   recent-mtime window (default 180, or FM_WORKSPACE_BUSY_WINDOW_SECS)
   --process       also scan for a live process cwd under <dir> (needs lsof)
   --no-process    skip the process scan (default)
+  --              end of flags; the next argument is <dir>
 EOF
 }
 
@@ -111,11 +125,17 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-if [ $# -gt 0 ]; then
-  echo "error: unexpected argument: $1" >&2
-  usage
-  exit 2
-fi
+# Anything left came after `--`: the first such operand is <dir> (this is the
+# only way to name a directory whose own name starts with a dash).
+while [ $# -gt 0 ]; do
+  if [ -n "$DIR" ]; then
+    echo "error: unexpected argument: $1" >&2
+    usage
+    exit 2
+  fi
+  DIR=$1
+  shift
+done
 
 [ -n "$DIR" ] || { usage; exit 2; }
 
@@ -200,14 +220,25 @@ for marker in "${git_ops_markers[@]}"; do
 done
 
 # --- 2. uncommitted changes -------------------------------------------------
-# Porcelain is index-backed and skips ignored paths by design.
-if [ -n "$(git -C "$DIR" status --porcelain --untracked-files=normal 2>/dev/null | head -1)" ]; then
+# Porcelain is index-backed and skips ignored paths by design. The output is
+# captured whole rather than piped through `head`, so a git failure stays
+# distinguishable from a clean tree: empty output would otherwise read as
+# "nothing to report" for a git that never reported anything.
+status_out=$(git -C "$DIR" status --porcelain --untracked-files=normal 2>/dev/null) ||
+  busy "could not read git state (status failed)"
+
+if [ -n "$status_out" ]; then
   busy "uncommitted changes"
 fi
 
 # --- 3. recent non-ignored file mtime ---------------------------------------
 # Iterate only paths git cares about: tracked files and untracked files that
 # are not ignored. Never walks ignored bulk directories.
+#
+# `git ls-files` prints paths relative to its own working directory, so it is
+# listed from $ROOT and joined against $ROOT. Listing from a subdirectory would
+# yield paths that do not resolve against the root, every stat would miss, and
+# the scan would report quiet on a tree written to seconds ago.
 #
 # A per-file `stat` fork is too slow on multi-thousand-file trees (tens of
 # seconds). Prefer one python3 process over the null-delimited path list; fall
@@ -231,14 +262,20 @@ file_mtime() {
   return 1
 }
 
+# Both paths report failure through the substitution's exit status: a non-zero
+# `git ls-files` (PIPESTATUS[0]) or a crashed reader means the scan could not
+# establish a result, which is not the same as finding nothing. Note that a
+# found path wins over a failed status on purpose: the shell reader breaks out
+# early, which can hand `git ls-files` a SIGPIPE it did not deserve.
 recent_rel=
+scan_failed=0
 if command -v python3 >/dev/null 2>&1; then
   # Prints the first relative path with mtime >= cutoff, or nothing.
-  # Exit 0 always from python; empty stdout means no recent non-ignored file.
+  # Reads stdin to EOF before deciding, so git is never handed a SIGPIPE here.
   recent_rel=$(
-    git -C "$DIR" ls-files -z --cached --others --exclude-standard 2>/dev/null \
+    git -C "$ROOT" ls-files -z --cached --others --exclude-standard 2>/dev/null \
       | FM_WB_ROOT="$ROOT" FM_WB_CUTOFF="$cutoff" python3 -c '
-import os, sys
+import os, stat, sys
 root = os.environ["FM_WB_ROOT"]
 cutoff = float(os.environ["FM_WB_CUTOFF"])
 data = sys.stdin.buffer.read().split(b"\0")
@@ -252,30 +289,43 @@ for raw in data:
         st = os.stat(path)
     except OSError:
         continue
-    if not os.path.isfile(path):
+    if not stat.S_ISREG(st.st_mode):
         continue
     if st.st_mtime >= cutoff:
         sys.stdout.write(rel)
         break
 '
-  ) || recent_rel=
+    scan_st=("${PIPESTATUS[@]}")
+    [ "${scan_st[0]}" -eq 0 ] && [ "${scan_st[1]}" -eq 0 ]
+  ) || scan_failed=1
 else
   # Slow path: one stat(1) per path. Acceptable on small trees only.
-  while IFS= read -r -d '' rel; do
-    [ -n "$rel" ] || continue
-    full="$ROOT/$rel"
-    [ -f "$full" ] || continue
-    mtime=$(file_mtime "$full") || continue
-    case "$mtime" in ''|*[!0-9]*) continue ;; esac
-    if [ "$mtime" -ge "$cutoff" ]; then
-      recent_rel=$rel
-      break
-    fi
-  done < <(git -C "$DIR" ls-files -z --cached --others --exclude-standard 2>/dev/null)
+  recent_rel=$(
+    git -C "$ROOT" ls-files -z --cached --others --exclude-standard 2>/dev/null \
+      | {
+        while IFS= read -r -d '' rel; do
+          [ -n "$rel" ] || continue
+          full="$ROOT/$rel"
+          [ -f "$full" ] || continue
+          mtime=$(file_mtime "$full") || continue
+          case "$mtime" in ''|*[!0-9]*) continue ;; esac
+          if [ "$mtime" -ge "$cutoff" ]; then
+            printf '%s' "$rel"
+            break
+          fi
+        done
+      }
+    scan_st=("${PIPESTATUS[@]}")
+    [ "${scan_st[0]}" -eq 0 ] && [ "${scan_st[1]}" -eq 0 ]
+  ) || scan_failed=1
 fi
 
-if [ -n "${recent_rel:-}" ]; then
+if [ -n "$recent_rel" ]; then
   busy "recent write: $recent_rel"
+fi
+
+if [ "$scan_failed" -eq 1 ]; then
+  busy "could not read git state (recent-write scan failed)"
 fi
 
 # --- 4. optional live process cwd -------------------------------------------

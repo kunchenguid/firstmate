@@ -33,6 +33,32 @@ run_busy() {  # <dir> [extra args...] -> sets RC, OUT, ERR
   ERR=$(cat "$TMP_ROOT/err" 2>/dev/null || true)
 }
 
+run_raw() {  # <args...> -> sets RC, OUT, ERR (no implied <dir>)
+  OUT=$("$BUSY" "$@" 2>"$TMP_ROOT/err") && RC=0 || RC=$?
+  ERR=$(cat "$TMP_ROOT/err" 2>/dev/null || true)
+}
+
+# A git shim that fails one subcommand and delegates everything else to the
+# real git. Blanket failure is useless here: rev-parse runs first and would
+# turn every case into a usage error.
+make_failing_git() {  # <subcommand> -> prints a dir to prepend to PATH
+  local sub=$1 dir="$TMP_ROOT/shim-git-$1" real
+  real=$(command -v git)
+  mkdir -p "$dir"
+  cat >"$dir/git" <<EOF
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  if [ "\$arg" = "$sub" ]; then
+    echo "shim: forced $sub failure" >&2
+    exit 1
+  fi
+done
+exec "$real" "\$@"
+EOF
+  chmod +x "$dir/git"
+  printf '%s' "$dir"
+}
+
 expect_quiet() {  # <label>
   [ "$RC" -eq 0 ] || fail "$1: expected quiet exit 0, got $RC (out='$OUT' err='$ERR')"
   [ -z "$OUT" ] || fail "$1: expected empty stdout when quiet, got '$OUT'"
@@ -156,6 +182,68 @@ test_old_mtime_quiet() {
   run_busy "$d" --window 60
   expect_quiet "old mtime"
   pass "aged mtime outside the window is quiet"
+}
+
+# --- subdirectory target ----------------------------------------------------
+
+# git ls-files prints paths relative to its own working directory. A scan
+# listed from <dir> but joined against the work-tree root resolves to nothing
+# when <dir> is a subdirectory, and every recent write reads as quiet.
+make_multi_dir_repo() {  # <name> -> prints path
+  local d
+  d=$(make_repo "$1")
+  mkdir -p "$d/sub" "$d/other"
+  printf 'a\n' >"$d/sub/a.txt"
+  printf 'b\n' >"$d/other/b.txt"
+  git -C "$d" add sub/a.txt other/b.txt
+  git -C "$d" commit -q -m 'two dirs'
+  touch -t 202001011200 "$d/README" "$d/sub/a.txt" "$d/other/b.txt"
+  printf '%s' "$d"
+}
+
+test_subdir_recent_write_busy() {
+  local d
+  d=$(make_multi_dir_repo subdir-recent)
+  touch "$d/sub/a.txt"
+  run_busy "$d/sub" --window 300
+  expect_busy "subdir recent write" "recent write"
+  case "$OUT" in
+    *sub/a.txt*) ;;
+    *) fail "subdir recent write: expected the touched path in '$OUT'" ;;
+  esac
+  pass "recent write under a subdirectory target reports busy"
+}
+
+test_subdir_quiet() {
+  local d
+  d=$(make_multi_dir_repo subdir-quiet)
+  run_busy "$d/sub" --window 60
+  expect_quiet "subdir quiet"
+  pass "aged subdirectory target is quiet"
+}
+
+# --- unreadable git state is busy, never quiet ------------------------------
+
+test_status_failure_is_busy() {
+  local d shim
+  d=$(make_repo status-failure)
+  touch -t 202001011200 "$d/README"
+  shim=$(make_failing_git status)
+  OUT=$(PATH="$shim:$PATH" "$BUSY" "$d" --window 60 2>"$TMP_ROOT/err") && RC=0 || RC=$?
+  ERR=$(cat "$TMP_ROOT/err" 2>/dev/null || true)
+  expect_busy "status failure" "could not read git state"
+  pass "a failing git status reports busy, not quiet"
+}
+
+test_ls_files_failure_is_busy() {
+  local d shim
+  d=$(make_repo ls-files-failure)
+  touch -t 202001011200 "$d/README"
+  shim=$(make_failing_git ls-files)
+  OUT=$(PATH="$shim:$PATH" "$BUSY" "$d" --window 60 2>"$TMP_ROOT/err") && RC=0 || RC=$?
+  ERR=$(cat "$TMP_ROOT/err" 2>/dev/null || true)
+  expect_busy "ls-files failure" "could not read git state"
+  pass "a failing mtime scan reports busy, not quiet"
 }
 
 # --- ignored paths do not false-busy ----------------------------------------
@@ -282,6 +370,52 @@ test_process_flag_accepted() {
   pass "--process is accepted and returns quiet or a concrete busy reason"
 }
 
+# --- end of options ---------------------------------------------------------
+
+test_end_of_options() {
+  local d
+  d=$(make_repo end-of-options)
+  touch -t 202001011200 "$d/README"
+  run_raw --window 60 -- "$d"
+  expect_quiet "-- <dir> quiet"
+  printf 'edit\n' >"$d/README"
+  run_raw --window 60 -- "$d"
+  expect_busy "-- <dir> busy" "uncommitted changes"
+  run_raw --
+  expect_usage "-- with no operand"
+  run_raw -- "$d" "$d"
+  expect_usage "-- with two operands"
+  pass "-- consumes the following argument as <dir>"
+}
+
+# --- shell fallback when python3 is absent ----------------------------------
+
+test_shell_fallback_scan() {
+  local d shim tool p
+  d=$(make_multi_dir_repo fallback-scan)
+  shim="$TMP_ROOT/shim-nopython"
+  mkdir -p "$shim"
+  for tool in bash git date stat; do
+    p=$(command -v "$tool") || continue
+    ln -sf "$p" "$shim/$tool"
+  done
+  if PATH="$shim" bash -c 'command -v git >/dev/null && git --version >/dev/null' 2>/dev/null; then
+    OUT=$(PATH="$shim" "$BUSY" "$d/sub" --window 60 2>"$TMP_ROOT/err") && RC=0 || RC=$?
+    ERR=$(cat "$TMP_ROOT/err" 2>/dev/null || true)
+    expect_quiet "fallback quiet"
+    # README sorts first in ls-files order, so the reader breaks out with paths
+    # still unread and hands git a SIGPIPE. A found path must still win over
+    # that failed status.
+    touch "$d/README"
+    OUT=$(PATH="$shim" "$BUSY" "$d/sub" --window 300 2>"$TMP_ROOT/err") && RC=0 || RC=$?
+    ERR=$(cat "$TMP_ROOT/err" 2>/dev/null || true)
+    expect_busy "fallback recent" "recent write: README"
+    pass "the no-python3 shell scan agrees with the python scan"
+  else
+    pass "skipped: git does not run under a minimal PATH on this machine"
+  fi
+}
+
 # --- help -------------------------------------------------------------------
 
 test_help() {
@@ -305,12 +439,18 @@ test_uncommitted_tracked
 test_uncommitted_untracked
 test_recent_mtime
 test_old_mtime_quiet
+test_subdir_recent_write_busy
+test_subdir_quiet
+test_status_failure_is_busy
+test_ls_files_failure_is_busy
 test_ignored_path_not_busy
 test_index_lock_busy
 test_merge_head_busy
 test_rebase_head_busy
 test_writes_nothing
 test_process_flag_accepted
+test_end_of_options
+test_shell_fallback_scan
 test_help
 
 echo "# fm-workspace-busy.test.sh: all assertions passed"

@@ -29,6 +29,12 @@ Do not add a daemon, a marker file, or a charter change that pretends this is ex
 Callers branch on exit status.
 Print nothing when quiet so the tool is safe in `if bin/fm-workspace-busy.sh "$dir"; then ...`.
 
+A path that starts with a dash is passed after `--`: `bin/fm-workspace-busy.sh --window 60 -- "$dir"`.
+
+One busy reason is not about the other agent at all: `could not read git state (...)` means a check itself could not run (git exited non-zero, the mtime scan failed).
+Uncertainty is reported as busy rather than quiet, because a check that could not run is not evidence that nothing is happening.
+A caller that retries on busy should therefore cap its retries: a genuinely broken repository stays busy forever, and that reason line is the signal to escalate instead of spinning.
+
 ## What it checks
 
 In order, first match wins:
@@ -39,6 +45,10 @@ In order, first match wins:
 4. **Optional live process cwd** - only with `--process`, via one bounded `lsof -a -d cwd` scan (never a recursive tree walk). Off by default so a reader whose own shell sits in the tree is not counted as foreign activity. When `lsof` is missing, the process scan is skipped rather than half-implemented.
 
 Ignored paths never contribute a busy reason: porcelain and `git ls-files --exclude-standard` both skip them, so a cache write under an ignored directory does not look like activity.
+
+Checks 1 to 3 answer for the **whole work tree**, not only for the directory you pass.
+`git status` and the git operation markers are repo-wide by nature, and the mtime scan is listed from the work-tree root so it agrees with them.
+Passing a subdirectory therefore narrows nothing; it only names which tree to ask about, and the path in `recent write: <path>` is relative to the work-tree root.
 
 The script **writes nothing**, anywhere, ever: no lock file, no state, no marker under the target tree or elsewhere.
 
@@ -53,6 +63,13 @@ if reason=$(bin/fm-workspace-busy.sh /path/to/record-repo 2>&1); then
 else
   status=$?
   if [ "$status" -eq 1 ]; then
+    case "$reason" in
+      'could not read git state'*)
+        # a check could not run: not a peaceful wait, escalate
+        echo "blocked: workspace-busy check could not answer: $reason" >&2
+        exit 1
+        ;;
+    esac
     # busy: stand down. This is a correct, useful result - not a failure.
     echo "paused: someone is working here ($reason)"
     exit 0
@@ -91,18 +108,24 @@ so cost scales with tracked plus non-ignored untracked files, not with `node_mod
 ### Measured cost (2026-08-07, macOS)
 
 Commands run from a disposable firstmate worktree on this machine.
-Times are wall-clock from `/usr/bin/time -p` (real seconds); each figure is the median of five runs after a warm cache.
+Times are wall-clock from `/usr/bin/time -p` (real seconds); each figure is the median of seven runs after a warm cache.
 The mtime scan uses one `python3` process over the git path list when available (a per-file `stat` fork is deliberately avoided).
+
+These figures were re-measured after the scan moved to listing from the work-tree root.
+Other agents were active on the machine during the run, so read every number as an upper bound rather than a floor.
 
 | Target | Signal | real (s) |
 | --- | --- | --- |
-| Small quiet fixture (1 tracked file, aged mtime) | quiet | 0.11 |
-| Same small tree with a dirty file | busy: uncommitted changes | 0.08 |
-| Same small tree with a fresh `touch` on a tracked file (clean porcelain) | busy: recent write | 0.11 |
-| This firstmate worktree (~370 tracked files; dirty during measurement) | busy: uncommitted changes | 0.09 |
-| Synthetic tree: 5_000 tracked files, quiet, aged mtimes | quiet | 0.17 |
-| Synthetic tree: 5_000 tracked files plus ignored `cache/` with 2_000 hot files | quiet (ignored) | 0.17 |
-| Synthetic tree: 5_000 tracked files with one dirty file | busy: uncommitted changes | 0.09 |
+| Small quiet fixture (1 tracked file, aged mtime) | quiet | 0.17 |
+| Same small tree with a dirty file | busy: uncommitted changes | 0.18 |
+| Same small tree with a fresh `touch` on a tracked file (clean porcelain) | busy: recent write | 0.22 |
+| This firstmate worktree (~370 tracked files; dirty during measurement) | busy: uncommitted changes | 0.21 |
+| Synthetic tree: 5_000 tracked files, quiet, aged mtimes | quiet | 0.43 |
+| Synthetic tree: 5_000 tracked files plus ignored `cache/` with 2_000 hot files | quiet (ignored) | 0.28 |
+| Synthetic tree: 5_000 tracked files with one dirty file | busy: uncommitted changes | 0.24 |
+
+The quiet 5_000-file case is the worst one, because quiet is the only verdict that has to stat every candidate path.
+Both the current and the previous spelling of the scan were measured on the same fixtures in the same run, and neither showed a material cost difference.
 
 Re-measure after material changes to the scan:
 
