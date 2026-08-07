@@ -53,9 +53,10 @@ fm_primary_scope_matches() {
     fi
     return 0
   fi
-  [ -f "$state/.lock" ] || return 1
+  [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] || return 1
   lock_pid=$(cat "$state/.lock" 2>/dev/null) || return 1
   case "$lock_pid" in ''|*[!0-9]*) return 1 ;; esac
+  ((10#$lock_pid > 1)) || return 1
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] && return 0
   done

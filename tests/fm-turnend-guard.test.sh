@@ -565,6 +565,25 @@ test_primary_scope_accepts_linked_primary_home() {
   pass "fm-primary-scope-lib: accepts a linked primary home from lock and active task metadata"
 }
 
+test_primary_scope_rejects_unsafe_lock_evidence() {
+  local dir target out
+  dir=$(make_primary_dir "$TMP_ROOT/scope-unsafe-lock")
+  : > "$dir/state/task1.meta"
+  target="$TMP_ROOT/scope-unsafe-lock-target"
+  printf '%s\n' "$$" > "$target"
+  rm "$dir/state/.lock"
+  ln -s "$target" "$dir/state/.lock"
+  out=$(bash -c '. "$1"; fm_primary_scope_matches "$2" "$3" && printf matched' _ \
+    "$dir/bin/fm-primary-scope-lib.sh" "$dir" "$dir/state")
+  [ -z "$out" ] || fail "linked lock evidence spoofed primary scope: $out"
+  rm "$dir/state/.lock"
+  printf '1\n' > "$dir/state/.lock"
+  out=$(bash -c '. "$1"; fm_primary_scope_matches "$2" "$3" && printf matched' _ \
+    "$dir/bin/fm-primary-scope-lib.sh" "$dir" "$dir/state")
+  [ -z "$out" ] || fail "PID 1 lock evidence spoofed primary scope: $out"
+  pass "fm-primary-scope-lib: rejects symlinked and PID 1 lock evidence"
+}
+
 # THE regression the plain git-init fixtures masked: a treehouse-leased secondmate
 # home is a genuine LINKED worktree (git-dir != git-common-dir), which the
 # remove-only form wrongly exempted. With the marker force-include, its own
@@ -1598,6 +1617,7 @@ test_hook_secondmate_reinvoke_recovery_loop
 test_hook_silent_in_secondmate_child_worktree
 test_hook_silent_in_main_child_worktree_with_inherited_home
 test_primary_scope_accepts_linked_primary_home
+test_primary_scope_rejects_unsafe_lock_evidence
 test_hook_blocks_in_treehouse_leased_secondmate_home
 test_hook_exempts_linked_worktree_with_stray_marker
 test_hook_exempts_linked_worktree_with_non_ascii_marker
