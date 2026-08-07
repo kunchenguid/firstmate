@@ -88,7 +88,7 @@ fm_cursor_probe_is_cursor() {  # <path>
   if [ -n "$runner" ]; then
     out=$("$runner" "$FM_CURSOR_PROBE_TIMEOUT" "$path" --help 2>/dev/null) || return 1
   else
-    out=$("$path" --help 2>/dev/null) || return 1
+    return 1
   fi
   [ -n "$out" ] || return 1
   case "$out" in

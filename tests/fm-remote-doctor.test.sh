@@ -39,6 +39,12 @@ for _tool in bash sh env cat chmod date dirname id kill ln mkdir nohup printf re
     ln -sf "$_resolved" "$TOOLS/$_tool"
   fi
 done
+cat > "$TOOLS/timeout" <<'SH'
+#!/usr/bin/env bash
+shift
+exec "$@"
+SH
+chmod +x "$TOOLS/timeout"
 BASE_PATH="$TOOLS:/usr/bin:/bin:/usr/sbin:/sbin"
 
 # new_case <Darwin|Linux> [with-herdr] [gui]
@@ -675,6 +681,17 @@ doctor --worker-tool-probe hermetic
 assert_contains "$DOCTOR_OUT" "required harness=cursor-agent:$CASE_BIN/agent" \
   "public worker probe rejected a host whose agent alias identifies as Cursor"
 pass "worker-tool-probe: accepts an agent alias that identifies itself as the Cursor CLI"
+
+new_case Linux with-herdr no-gui
+rm -f "$CASE_BIN/claude"
+fm_fake_cursor_alias "$CASE_BIN" agent
+mv "$TOOLS/timeout" "$TOOLS/timeout.disabled"
+doctor --worker-tool-probe hermetic
+mv "$TOOLS/timeout.disabled" "$TOOLS/timeout"
+expect_code 1 "$DOCTOR_RC" "a Cursor alias passed without a bounded probe runner"
+assert_contains "$DOCTOR_OUT" 'required harness=MISSING' \
+  "a Cursor alias was probed without a timeout runner"
+pass "worker-tool-probe: refuses a probe when no timeout runner exists"
 
 # The other proof: the alias resolves into Cursor's versioned install tree, so
 # no probe is needed. Either signal alone carries the verdict.
