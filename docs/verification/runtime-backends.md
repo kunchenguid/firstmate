@@ -6,6 +6,14 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Shared task custody axis
+
+The custody integration was reviewed on 2026-08-07 across all five spawn adapters.
+tmux, Herdr, Zellij, and cmux acquire a Treehouse copy and converge on the shared check before metadata publication; Orca creates its managed worktree first and converges on the same check, while a conflict disables abort removal so an already-owned path is never deleted.
+Same-task automatic recovery remains available only where the existing recovery-grade agent-state contract can prove `dead` or `missing`: tmux and Herdr.
+Zellij, Orca, and cmux are applicable but deliberately refuse an existing-record respawn because their agent-process classifier is unverified, which is the safe result rather than a duplicate delivery process.
+[`task-lifecycle-identity.md`](task-lifecycle-identity.md) owns the executable public-interface output for this cross-backend guarantee.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.

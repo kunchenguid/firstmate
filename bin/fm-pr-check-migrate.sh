@@ -2,7 +2,9 @@
 # Non-executing migration for watcher PR checks created by older Firstmate
 # versions. Legacy check files are never run, sourced, or parsed by Bash.
 # Pending validated merged-poll retirements finish first. Canonical polls are
-# then rebuilt from validated metadata, remaining provenance-bound polls and
+# then rebuilt only from metadata with one validated PR URL and equal exact
+# pr_head=/ready_head= bindings; pre-binding metadata is quarantined rather than
+# inheriting approval for an unknown revision. Remaining provenance-bound polls and
 # registered custom checks remain armed, and every other task poll is
 # quarantined for private review. A current X-mode shim is preserved by exact
 # content, while the recognized older byte-static shim is refreshed in place.

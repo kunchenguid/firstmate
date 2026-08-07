@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Record a PR-ready task: store one validated canonical pr=<url> and the forge's
-# exact pr_head=<sha> when available, then atomically arm a static merge poll.
+# Record a PR-ready task: store one validated canonical pr=<url> and bind both
+# pr_head= and ready_head= to the forge's exact immutable source revision, then
+# atomically arm a static merge poll for that binding.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
@@ -64,20 +65,21 @@ fi
 "$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || exit 1
 "$FM_ROOT/bin/fm-guard.sh" || true
 
-# pr_head is recorded only when the forge's CLI can supply it. gh exposes the
-# head commit as a selectable field; plain glab exposes it only inside its JSON
-# output, which would need a JSON processor firstmate does not require, so a
-# GitLab task records no pr_head. Both consumers already treat it as optional:
-# bin/fm-teardown.sh reads the head from the forge at teardown rather than from
-# metadata and falls back to its provider-agnostic content check, and
-# bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
-WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
-PR_HEAD=
-if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
-  if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
-    && fm_pr_head_valid "$REMOTE_HEAD"; then
-    PR_HEAD=$REMOTE_HEAD
-  fi
+# Migration and watcher exclusion can take long enough for an intentional force
+# push to race the first lookup. Resolve once more at the publication boundary;
+# this explicit registration binds the latest exact revision it observed.
+if ! PR_HEAD=$(fm_pr_remote_head "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER"); then
+  echo "error: cannot revalidate the forge head at readiness publication; retry registration" >&2
+  exit 1
+fi
+
+# A readiness registration without an immutable forge head would let a later
+# force-push inherit old review or green-check evidence. Both supported forges
+# must therefore resolve an exact head now; failure leaves metadata and the
+# existing poll untouched so the operator can retry without a false binding.
+if ! PR_HEAD=$(fm_pr_remote_head "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER"); then
+  echo "error: cannot bind PR readiness to the forge's current immutable head; restore forge access and retry" >&2
+  exit 1
 fi
 
 META_TMP=
@@ -107,12 +109,13 @@ STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 META_TMP=$(mktemp "$STATE/.fm-pr-meta.XXXXXX") || exit 1
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
-    pr=*|pr_head=*) ;;
+    pr=*|pr_head=*|ready_head=*) ;;
     *) printf '%s\n' "$line" >> "$META_TMP" || exit 1 ;;
   esac
 done < "$META"
 printf 'pr=%s\n' "$URL" >> "$META_TMP" || exit 1
-[ -z "$PR_HEAD" ] || printf 'pr_head=%s\n' "$PR_HEAD" >> "$META_TMP" || exit 1
+printf 'pr_head=%s\n' "$PR_HEAD" >> "$META_TMP" || exit 1
+printf 'ready_head=%s\n' "$PR_HEAD" >> "$META_TMP" || exit 1
 chmod 0600 "$META_TMP" || exit 1
 fm_pr_private_file_valid "$META_TMP" 600 "$STATE_DEVICE" || exit 1
 fm_pr_metadata_identity_parse "$META_TMP" || exit 1

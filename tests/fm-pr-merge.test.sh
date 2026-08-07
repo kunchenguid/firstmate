@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
 # Tests for bin/fm-pr-merge.sh: the one path firstmate uses to merge a task's
-# PR, which must always record pr= and any available pr_head= into the task's
-# meta before merging so fm-teardown.sh's landed-check has a PR reference to
-# verify against, even on repos with no PR CI where the usual "checks green"
-# fm-pr-check.sh trigger never fires.
+# PR. It must consume an existing exact readiness binding, refuse moved heads
+# or non-green checks, and pass the immutable head to the atomic forge merge.
 #
 # Matrix:
-#   (a) merge records pr= and pr_head= before merging, and merges
+#   (a) merge consumes pr=/pr_head=/ready_head= without changing them
 #   (b) merge is refused when gh-axi pr merge itself fails (no silent success)
 #   (c) extra gh-axi pr merge args are forwarded after number and --repo
 #   (d) merge is refused before gh-axi when task meta is missing
@@ -20,6 +18,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
+PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-merge-tests)
 
@@ -53,22 +52,18 @@ exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
-case "\${1:-} \${2:-}" in
-  "pr view")
-    case " \$* " in
-      *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
-    esac
-    ;;
+case " \$* " in
+  *headRefOid*) printf '%s\n' '$head' ;;
+  *statusCheckRollup*) printf '%s\n' '{"state":"OPEN","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}]}' ;;
 esac
-exit 0
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
 # gh-axi mock that fails the merge call but succeeds everything else, so a
-# real merge failure is distinguishable from the recording step.
+# real merge failure is distinguishable from readiness verification.
 add_gh_mocks_merge_fails() {
-  local case_dir=$1
+  local case_dir=$1 head=$2
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
@@ -77,11 +72,23 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 SH
-  cat > "$case_dir/fakebin/gh" <<'SH'
+  cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
-exit 0
+case " \$* " in
+  *headRefOid*) printf '%s\n' '$head' ;;
+  *statusCheckRollup*) printf '%s\n' '{"state":"OPEN","statusCheckRollup":[]}' ;;
+esac
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+bind_pr_meta() {
+  local case_dir=$1 url=$2 head=$3
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    PATH="$case_dir/fakebin:$PATH" "$PR_CHECK" task-x1 "$url" >/dev/null \
+    || fail "could not register PR readiness fixture for $url"
+  grep -qxF "ready_head=$head" "$case_dir/state/task-x1.meta" \
+    || fail "readiness fixture did not bind expected head $head"
 }
 
 run_pr_merge() {
@@ -99,11 +106,12 @@ run_pr_merge() {
   return "$rc"
 }
 
-test_records_pr_and_head_before_merging() {
+test_consumes_bound_pr_and_head_before_merging() {
   local case_dir rc
   case_dir=$(make_case records-before-merge)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" deadbeefcafefeed0000000000000000deadbeef
+  bind_pr_meta "$case_dir" https://github.com/example/repo/pull/9 deadbeefcafefeed0000000000000000deadbeef
   : > "$case_dir/gh-axi.log"
 
   set +e
@@ -117,16 +125,17 @@ test_records_pr_and_head_before_merging() {
     "records-before-merge: pr= was not recorded"
   assert_grep 'pr_head=deadbeefcafefeed0000000000000000deadbeef' "$case_dir/state/task-x1.meta" \
     "records-before-merge: pr_head= was not recorded"
-  grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 9 --repo example/repo --match-head-commit deadbeefcafefeed0000000000000000deadbeef --squash' "$case_dir/gh-axi.log" \
     || fail "records-before-merge: gh-axi pr merge was not invoked with number, --repo, and default --squash"
-  pass "fm-pr-merge records pr= and pr_head= before invoking gh-axi pr merge"
+  pass "fm-pr-merge consumes the pre-registered revision before invoking gh-axi"
 }
 
-test_merge_failure_propagates_after_recording() {
+test_merge_failure_propagates_after_verification() {
   local case_dir rc
   case_dir=$(make_case merge-fails)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks_merge_fails "$case_dir"
+  add_gh_mocks_merge_fails "$case_dir" 1313131313131313131313131313131313131313
+  bind_pr_meta "$case_dir" https://github.com/example/repo/pull/13 1313131313131313131313131313131313131313
   : > "$case_dir/gh-axi.log"
 
   set +e
@@ -146,12 +155,13 @@ test_extra_merge_args_forwarded() {
   case_dir=$(make_case extra-args)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" 2222222222222222222222222222222222222222
+  bind_pr_meta "$case_dir" https://github.com/example/repo/pull/15 2222222222222222222222222222222222222222
   : > "$case_dir/gh-axi.log"
 
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/15 -- --squash --delete-branch \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "extra-args: fm-pr-merge failed"
 
-  grep -qxF 'pr merge 15 --repo example/repo --squash --delete-branch' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 15 --repo example/repo --match-head-commit 2222222222222222222222222222222222222222 --squash --delete-branch' "$case_dir/gh-axi.log" \
     || fail "extra-args: extra gh-axi pr merge flags were not forwarded"
   pass "fm-pr-merge forwards extra flags to gh-axi pr merge after the -- separator"
 }
@@ -261,12 +271,13 @@ test_explicit_merge_method_not_overridden() {
   case_dir=$(make_case explicit-merge-method)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" 5555555555555555555555555555555555555555
+  bind_pr_meta "$case_dir" https://github.com/example/repo/pull/22 5555555555555555555555555555555555555555
   : > "$case_dir/gh-axi.log"
 
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/22 -- --merge \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "explicit-merge-method: fm-pr-merge failed"
 
-  grep -qxF 'pr merge 22 --repo example/repo --merge' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 22 --repo example/repo --match-head-commit 5555555555555555555555555555555555555555 --merge' "$case_dir/gh-axi.log" \
     || fail "explicit-merge-method: caller --merge was not forwarded without an extra default --squash"
   pass "fm-pr-merge does not add default --squash when the caller passes an explicit merge method"
 }
@@ -276,14 +287,67 @@ test_method_equals_merge_method_not_overridden() {
   case_dir=$(make_case method-equals-merge-method)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" 7777777777777777777777777777777777777777
+  bind_pr_meta "$case_dir" https://github.com/example/repo/pull/23 7777777777777777777777777777777777777777
   : > "$case_dir/gh-axi.log"
 
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/23 -- --method=merge \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "method-equals-merge-method: fm-pr-merge failed"
 
-  grep -qxF 'pr merge 23 --repo example/repo --method=merge' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 23 --repo example/repo --match-head-commit 7777777777777777777777777777777777777777 --method=merge' "$case_dir/gh-axi.log" \
     || fail "method-equals-merge-method: caller --method=merge was not forwarded without an extra default --squash"
   pass "fm-pr-merge respects --method=<value> as an explicit merge method"
+}
+
+test_moved_head_refuses_without_rebinding() {
+  local case_dir rc approved moved
+  case_dir=$(make_case moved-head)
+  approved=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  moved=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  add_gh_mocks "$case_dir" "$approved"
+  bind_pr_meta "$case_dir" https://github.com/example/repo/pull/31 "$approved"
+  add_gh_mocks "$case_dir" "$moved"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/31 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "moved-head: stale approval must refuse"
+  assert_grep "PR head moved from approved revision $approved to $moved" "$case_dir/stderr" \
+    "moved-head: diagnostic omitted immutable revisions"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" "moved-head: merge reached gh-axi"
+  grep -qxF "ready_head=$approved" "$case_dir/state/task-x1.meta" \
+    || fail "moved-head: refusal refreshed the old approval binding"
+  pass "fm-pr-merge refuses GitHub head movement without silently rebinding approval"
+}
+
+test_red_or_pending_checks_refuse() {
+  local case_dir rc head
+  case_dir=$(make_case red-checks)
+  head=cccccccccccccccccccccccccccccccccccccccc
+  add_gh_mocks "$case_dir" "$head"
+  bind_pr_meta "$case_dir" https://github.com/example/repo/pull/32 "$head"
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *headRefOid*) printf '%s\n' '$head' ;;
+  *statusCheckRollup*) printf '%s\n' '{"state":"OPEN","statusCheckRollup":[{"status":"COMPLETED","conclusion":"FAILURE"}]}' ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/gh"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/32 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "red-checks: red work must refuse"
+  assert_grep 'PR checks are pending, red, unavailable' "$case_dir/stderr" \
+    "red-checks: refusal did not explain the check requirement"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" "red-checks: merge reached gh-axi"
+  pass "fm-pr-merge refuses red or pending work before the atomic merge"
 }
 
 test_parses_pr_url_for_gh_axi() {
@@ -291,18 +355,19 @@ test_parses_pr_url_for_gh_axi() {
   case_dir=$(make_case url-parsing)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" 6666666666666666666666666666666666666666
+  bind_pr_meta "$case_dir" https://github.com/my-org/my-repo/pull/126 6666666666666666666666666666666666666666
   : > "$case_dir/gh-axi.log"
 
   run_pr_merge "$case_dir" task-x1 https://github.com/my-org/my-repo/pull/126 \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "url-parsing: fm-pr-merge failed"
 
-  grep -qxF 'pr merge 126 --repo my-org/my-repo --squash' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 126 --repo my-org/my-repo --match-head-commit 6666666666666666666666666666666666666666 --squash' "$case_dir/gh-axi.log" \
     || fail "url-parsing: gh-axi pr merge was not invoked as number + --repo + default --squash"
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
-test_records_pr_and_head_before_merging
-test_merge_failure_propagates_after_recording
+test_consumes_bound_pr_and_head_before_merging
+test_merge_failure_propagates_after_verification
 test_extra_merge_args_forwarded
 test_missing_meta_refuses_before_merge
 test_malformed_url_refuses_before_merge
@@ -310,4 +375,6 @@ test_rejects_unsafe_url_segments_before_recording
 test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
+test_moved_head_refuses_without_rebinding
+test_red_or_pending_checks_refuse
 test_parses_pr_url_for_gh_axi

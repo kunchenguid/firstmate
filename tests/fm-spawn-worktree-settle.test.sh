@@ -141,7 +141,107 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
+test_conflicting_task_record_refuses_same_copy() {
+  local rec id out status
+  id=custody-new-z3
+  rec=$(make_settle_case custody-conflict "$id" 0)
+  read_settle_record "$rec"
+  fm_write_meta "$HOME_DIR/state/older-task.meta" \
+    'window=firstmate:fm-older-task' \
+    'endpoint_task_id=older-task' \
+    "worktree=$WT_DIR" \
+    "project=$PROJ_DIR" \
+    'kind=ship' \
+    'mode=no-mistakes'
+
+  set +e
+  out=$(run_settle_spawn "$id")
+  status=$?
+  set -e
+  expect_code 1 "$status" "spawn must refuse another task record on the same copy"
+  assert_contains "$out" 'still owned by task older-task' "custody refusal did not name the owner"
+  assert_absent "$HOME_DIR/state/$id.meta" "refused spawn published a second task record"
+  assert_present "$HOME_DIR/state/older-task.meta" "refused spawn changed the authoritative older record"
+  pass "spawn refuses a second task record for one isolated copy"
+}
+
+test_malformed_stale_record_refuses_reuse() {
+  local rec id out status
+  id=custody-malformed-z4
+  rec=$(make_settle_case custody-malformed "$id" 0)
+  read_settle_record "$rec"
+  fm_write_meta "$HOME_DIR/state/stale-task.meta" \
+    'window=firstmate:fm-stale-task' \
+    "worktree=$WT_DIR" \
+    "worktree=$WT_DIR" \
+    "project=$PROJ_DIR"
+
+  set +e
+  out=$(run_settle_spawn "$id")
+  status=$?
+  set -e
+  expect_code 1 "$status" "ambiguous stale custody must refuse reuse"
+  assert_contains "$out" 'ambiguous custody record' "malformed custody refusal was not actionable"
+  assert_absent "$HOME_DIR/state/$id.meta" "malformed stale record allowed a replacement task"
+  pass "spawn refuses pooled reuse while an old custody identity is malformed"
+}
+
+test_reused_copy_succeeds_after_owner_record_removed() {
+  local rec id out status
+  id=custody-reused-z5
+  rec=$(make_settle_case custody-reused "$id" 0)
+  read_settle_record "$rec"
+  fm_write_meta "$HOME_DIR/state/finished-task.meta" \
+    'window=firstmate:fm-finished-task' \
+    "worktree=$WT_DIR" \
+    "project=$PROJ_DIR"
+  rm -f "$HOME_DIR/state/finished-task.meta"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "cleaned pooled copy should be reusable"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" "reused copy was not recorded"
+  pass "a pooled copy is reusable only after its prior authoritative record is gone"
+}
+
+test_same_task_recovery_reuses_exact_copy() {
+  local rec id first_meta out status
+  id=custody-recover-z6
+  rec=$(make_settle_case custody-recover "$id" 0)
+  read_settle_record "$rec"
+  run_settle_spawn "$id" >/dev/null || fail "initial spawn for recovery fixture failed"
+  cat >> "$HOME_DIR/state/$id.meta" <<'EOF'
+ready_head=0123456789abcdef0123456789abcdef01234567
+x_request=req-recovery
+x_request_ts=1700000000
+x_followups=2
+decisions_reviewed=1
+decision_keys=layout
+EOF
+  first_meta=$(grep '^worktree=' "$HOME_DIR/state/$id.meta")
+  rm -f "$COUNTFILE"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "safe same-task recovery should succeed"
+  [ "$(grep '^worktree=' "$HOME_DIR/state/$id.meta")" = "$first_meta" ] \
+    || fail "same-task recovery switched isolated copies"
+  assert_contains "$out" "worktree=$WT_DIR" "recovery outcome did not retain the exact copy"
+  assert_grep 'ready_head=0123456789abcdef0123456789abcdef01234567' "$HOME_DIR/state/$id.meta" \
+    "same-task recovery erased revision readiness"
+  assert_grep 'x_request=req-recovery' "$HOME_DIR/state/$id.meta" \
+    "same-task recovery erased Relay linkage"
+  assert_grep 'decision_keys=layout' "$HOME_DIR/state/$id.meta" \
+    "same-task recovery erased decision inventory"
+  assert_absent "$COUNTFILE" "same-task recovery allocated a fresh Treehouse copy"
+  pass "safe same-task recovery reuses the exact recorded isolated copy"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_conflicting_task_record_refuses_same_copy
+test_malformed_stale_record_refuses_reuse
+test_reused_copy_succeeds_after_owner_record_removed
+test_same_task_recovery_reuses_exact_copy
 
 echo "# all fm-spawn-worktree-settle tests passed"

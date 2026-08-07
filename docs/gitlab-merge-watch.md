@@ -36,8 +36,9 @@ Two things about plain `glab` were established by running it, because assuming e
 
 First, plain `glab` has no field selector.
 `gh` reads one field with `--json state -q .state`; `glab mr view` offers only `-F, --output string  Format output as: text, json`.
-Its JSON would need a JSON processor, and `jq` is not one of firstmate's common tools, so the state is read from glab's own field output instead.
-Only an exact `merged` wakes firstmate, so a changed output format produces no wake rather than a false merge.
+The merge state therefore remains read from glab's own field output, where only exact `merged` can wake firstmate.
+Immutable revision binding separately calls `glab api projects/<encoded-path>/merge_requests/<number> --hostname <host>` and parses the API's `sha` with Node, which is already part of Firstmate's universal toolchain.
+A missing or malformed `sha` refuses readiness registration, and a current `sha` that differs from the registered revision produces an actionable mismatch rather than a merged notification.
 
 Second, `glab` cannot take a merge request URL the way `gh pr view` can.
 That form shells out to git for the current repository, and the watcher runs in no repository:
@@ -164,37 +165,27 @@ armed: state/e6.check.sh
 
 ## Upgrade path from an existing armed watch
 
-The stored record gained the provider tag, so its version moved to `fm-pr-poll-registration-v2` and a record written by the previous release no longer parses.
-The existing non-executing migration handles that: it never runs the old artifact, and rebuilds the poll from the task's recorded pull request URL.
-Starting from a poll armed exactly as the previous release wrote it:
+The earlier provider-tag upgrade moved the stored record to `fm-pr-poll-registration-v2` and the non-executing migration rebuilt canonical v1 polls without running old bytes.
+Immutable revision binding deliberately tightens that path: metadata written before `ready_head=` existed cannot prove which revision received review or approval, so migration quarantines its runnable poll rather than infer a binding.
+Rerun `bin/fm-pr-check.sh <id> <MR url>` after inspecting the current merge-request head; that explicit operation records equal `pr_head=` and `ready_head=` values and publishes a fresh authenticated poll.
+A task whose existing metadata already contains a valid equal pair remains eligible for canonical crash recovery and migration.
 
-```
-$ head -1 state/t1.pr-poll-registration
-fm-pr-poll-registration-v1
-$ fm-pr-check-migrate.sh --checks-safe
-PR_CHECK_MIGRATION: canonical polls rebuilt and armed; resume supervision for this home
-$ head -2 state/t1.pr-poll-registration
-fm-pr-poll-registration-v2
-t1
-$ cat state/.pr-check-migration.log
-task t1: migration outcome tracking started before legacy poll handling
-task t1: canonical legacy poll rebuilt and armed
-```
+## Immutable revision binding refresh
 
-The rebuilt poll works, verified against a pull request that is genuinely merged:
+On 2026-08-07, the public-interface regression was refreshed after GitLab readiness became revision-bound.
+The hermetic `glab` fixture exposes both the field-output merge state and API `sha`, then proves exact merged output, moved-head diagnostics, custom-host routing, missing-CLI silence at poll time, and arming refusal without `glab`.
+The current command and selected output are:
 
-```
-$ fm-pr-poll.sh --validated $(tr '\n' ' ' < state/t1.pr-poll)
-merged
+```text
+$ tests/fm-pr-check-security.test.sh | grep -E 'GitLab merge requests|GitHub and GitLab exact'
+ok - GitLab merge requests are followed on any instance and never wake falsely
+ok - GitHub and GitLab exact merged results share one retirement path
 ```
 
-No armed watch is lost by upgrading.
+A successful registration now records equal `pr_head=` and `ready_head=` values for GitLab exactly as for GitHub.
+The provider-tagged sidecar remains URL identity data, while the private poll snapshot binds that registration to the metadata revision before execution and revalidates it before retirement.
 
 ## What this change does not cover
 
 `bin/fm-pr-merge.sh` still addresses GitHub only, by owner and repository.
 It refuses a GitLab merge request URL rather than sending it to the wrong forge, so merging a merge request stays a deliberate manual step until merge parity lands separately.
-
-A GitLab task records no `pr_head=`.
-`gh` exposes the head commit as a selectable field, while plain `glab` exposes it only inside its JSON output, which would need a JSON processor firstmate does not require.
-Both consumers already treat it as optional: `bin/fm-teardown.sh` reads the head from the forge at teardown rather than from metadata and falls back to its provider-agnostic content check, and `bin/fm-review-diff.sh` resolves the head from the remote when none is recorded.

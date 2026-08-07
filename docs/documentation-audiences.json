@@ -105,6 +105,10 @@
     {
       "source": "docs/trace-context.md",
       "target": "docs/verification/trace-context.md"
+    },
+    {
+      "source": "docs/architecture.md",
+      "target": "docs/verification/task-lifecycle-identity.md"
     }
   ],
   "surfaces": [
@@ -354,6 +358,10 @@
     },
     {
       "path": "docs/verification/supervision.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/task-lifecycle-identity.md",
       "audience": "maintainer-verification"
     },
     {

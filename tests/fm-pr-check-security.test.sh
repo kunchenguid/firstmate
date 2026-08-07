@@ -78,6 +78,13 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
+  *statusCheckRollup*)
+    if [ -n "${FM_TEST_GH_CHECKS_JSON:-}" ]; then
+      printf '%s\n' "$FM_TEST_GH_CHECKS_JSON"
+    else
+      printf '%s\n' '{"state":"OPEN","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}]}'
+    fi
+    ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
     [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
@@ -97,6 +104,10 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_FAIL:-0}" = 0 ] || exit 1
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
+if [ "${1:-}" = api ]; then
+  printf '{"sha":"%s"}\n' "${FM_TEST_GLAB_HEAD:-0123456789abcdef0123456789abcdef01234567}"
+  exit 0
+fi
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
 SH
   chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
@@ -119,10 +130,12 @@ write_task_meta() {
 }
 
 write_poll_meta() {
-  local state=$1 id=$2 url=$3
+  local state=$1 id=$2 url=$3 head=${4:-0123456789abcdef0123456789abcdef01234567}
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" \
-    "pr=$url"
+    "pr=$url" \
+    "pr_head=$head" \
+    "ready_head=$head"
 }
 
 write_ambiguous_poll() {
@@ -561,7 +574,7 @@ test_valid_recording_and_merge_derivation() {
   : > "$dir/gh-axi.log"
   run_merge_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 -- --merge \
     >/dev/null 2>/dev/null || fail "valid merge wrapper failed"
-  grep -qxF 'pr merge 37 --repo my-org/repo_name.with-dots --merge' "$dir/gh-axi.log" \
+  grep -qxF "pr merge 37 --repo my-org/repo_name.with-dots --match-head-commit $expected --merge" "$dir/gh-axi.log" \
     || fail "merge wrapper did not preserve repository derivation and method"
   set +e
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/merged-watch.out" 2> "$dir/merged-watch.err"
@@ -576,14 +589,19 @@ test_valid_recording_and_merge_derivation() {
 
   dir=$(make_case newline-head)
   write_task_meta "$dir"
+  set +e
   FM_TEST_GH_HEAD=$'0123456789abcdef0123456789abcdef01234567\nwindow=unexpected' \
-    run_check_entry "$dir" task-a https://github.com/o/r/pull/2 >/dev/null 2>/dev/null \
-    || fail "valid check with malformed remote head failed"
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/2 >/dev/null 2>/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "check accepted a malformed remote head"
   assert_no_grep 'pr_head=' "$dir/home/state/task-a.meta" "multiline PR head reached metadata"
   assert_no_grep 'window=unexpected' "$dir/home/state/task-a.meta" "newline metadata key was injected"
 
   dir=$(make_case lifecycle-compatible-id)
   write_task_meta "$dir" Task_A.1
+  run_check_entry "$dir" Task_A.1 https://github.com/o/r/pull/3 >/dev/null 2>/dev/null \
+    || fail "safe lifecycle-compatible task ID could not register PR readiness"
   run_merge_entry "$dir" Task_A.1 https://github.com/o/r/pull/3 \
     > "$dir/stdout" 2> "$dir/stderr" \
     || fail "safe lifecycle-compatible task ID could not use the PR merge flow"
@@ -638,6 +656,9 @@ SH
       --carry-count 0 --carry-ts 1700000000 --carry-platform x --carry-max 280 \
       > "$dir/x-link.out" 2> "$dir/x-link.err" \
       || fail "path-safe legacy task ID could not link an X request"
+    run_check_entry "$dir" "$id" https://github.com/o/r/pull/4 \
+      > "$dir/check.out" 2> "$dir/check.err" \
+      || fail "path-safe legacy task ID could not register PR readiness"
     run_merge_entry "$dir" "$id" https://github.com/o/r/pull/4 \
       > "$dir/merge.out" 2> "$dir/merge.err" \
       || fail "path-safe legacy task ID could not use the PR merge flow"
@@ -659,6 +680,29 @@ run_watcher_bounded() {
   perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 10; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
     env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT=1 \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
+}
+
+test_fresh_registration_rebinds_moved_revision() {
+  local dir first second
+  dir=$(make_case fresh-revision-binding)
+  write_task_meta "$dir"
+  first=1111111111111111111111111111111111111111
+  second=2222222222222222222222222222222222222222
+  FM_TEST_GH_HEAD=$first run_check_entry "$dir" task-a https://github.com/o/r/pull/44 >/dev/null 2>/dev/null \
+    || fail "initial immutable readiness registration failed"
+  FM_TEST_GH_HEAD=$second run_check_entry "$dir" task-a https://github.com/o/r/pull/44 >/dev/null 2>/dev/null \
+    || fail "fresh immutable readiness registration failed after head movement"
+  [ "$(grep -c '^pr_head=' "$dir/home/state/task-a.meta")" -eq 1 ] \
+    || fail "fresh registration retained duplicate PR revisions"
+  [ "$(grep -c '^ready_head=' "$dir/home/state/task-a.meta")" -eq 1 ] \
+    || fail "fresh registration retained duplicate review revisions"
+  grep -qxF "pr_head=$second" "$dir/home/state/task-a.meta" \
+    || fail "fresh registration did not bind the new forge revision"
+  grep -qxF "ready_head=$second" "$dir/home/state/task-a.meta" \
+    || fail "fresh registration did not invalidate the old review revision"
+  fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+    || fail "fresh registration did not republish a valid bound poll"
+  pass "an intentional PR update requires and receives one explicit fresh revision binding"
 }
 
 test_rejected_metacharacter_bytes_are_inert() {
@@ -708,6 +752,7 @@ test_rejected_metacharacter_bytes_are_inert() {
 
 make_poll_fixture() {
   local dir=$1
+  write_poll_meta "$dir/home/state" task-a https://github.com/o/r/pull/1
   cp "$POLL" "$dir/home/state/task-a.check.sh"
   printf '%s\n%s\n%s\n%s\n%s\n' \
     github https://github.com/o/r/pull/1 github.com o/r 1 > "$dir/home/state/task-a.pr-poll"
@@ -737,6 +782,9 @@ test_static_poll_contract() {
   done
   out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
   [ "$out" = merged ] || fail "static poll did not emit exactly one merged line"
+  out=$(FM_TEST_GH_HEAD=ffffffffffffffffffffffffffffffffffffffff FM_TEST_GH_STATE=MERGED run_poll "$dir")
+  [ "$out" = 'revision-mismatch expected=0123456789abcdef0123456789abcdef01234567 current=ffffffffffffffffffffffffffffffffffffffff' ] \
+    || fail "static poll did not surface an exact moved-head diagnostic"
   out=$(FM_TEST_GH_FAIL=1 run_poll "$dir")
   [ -z "$out" ] || fail "static poll emitted after gh failure"
 
@@ -855,9 +903,7 @@ test_migration_excludes_older_watcher_before_scan() {
   state="$dir/home/state"
   gate="$dir/scan-started"
   sentinel="$dir/legacy-ran"
-  fm_write_meta "$state/task-a.meta" \
-    'window=fm-task-a' \
-    'pr=https://github.com/o/r/pull/9'
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/9
   cat > "$state/task-a.check.sh" <<SH
 #!/usr/bin/env bash
 printf 'seen\n' > '$sentinel'
@@ -1725,9 +1771,7 @@ test_failed_outcomes_block_every_retry_until_repaired() {
     dir=$(make_case "retry-state-$classification")
     state="$dir/home/state"
     if [ "$classification" = canonical ]; then
-      fm_write_meta "$state/task-a.meta" \
-        'window=fm-task-a' \
-        'pr=https://github.com/o/r/pull/12'
+      write_poll_meta "$state" task-a https://github.com/o/r/pull/12
       printf 'legacy canonical bytes\n' > "$state/task-a.check.sh"
       pending="$state/.pr-check-quarantine/task-a.diagnostic.pending-canonical"
       success="$state/.pr-check-quarantine/task-a.diagnostic.canonical"
@@ -1796,9 +1840,7 @@ test_canonical_publication_failure_recovers_only_on_retry() {
   local dir state destination link_target gate rc pending success failure
   dir=$(make_case canonical-publication-retry)
   state="$dir/home/state"
-  fm_write_meta "$state/task-a.meta" \
-    'window=fm-task-a' \
-    'pr=https://github.com/o/r/pull/13'
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/13
   printf 'legacy canonical bytes\n' > "$state/task-a.check.sh"
   destination="$state/task-a.check.sh"
   link_target="$dir/external-sentinel"
@@ -1988,9 +2030,7 @@ SH
 
   dir=$(make_case diagnostic-delimiter-id)
   state="$dir/home/state"
-  fm_write_meta "$state/foo.diagnostic.bar.meta" \
-    'window=fm-foo.diagnostic.bar' \
-    'pr=https://github.com/o/r/pull/41'
+  write_poll_meta "$state" foo.diagnostic.bar https://github.com/o/r/pull/41
   printf 'legacy delimiter bytes\n' > "$state/foo.diagnostic.bar.check.sh"
   FM_HOME="$dir/home" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err" \
     || fail "migration could not decode an obligation for a delimiter-bearing task ID"
@@ -2012,7 +2052,9 @@ test_nonexecuting_migration() {
   fm_write_meta "$state/task-a.meta" \
     'window=fm-task-a' \
     'worktree=/private/unused' \
-    'pr=https://github.com/o/r/pull/9'
+    'pr=https://github.com/o/r/pull/9' \
+    'pr_head=0123456789abcdef0123456789abcdef01234567' \
+    'ready_head=0123456789abcdef0123456789abcdef01234567'
   printf 'printf legacy > %q\n' "$marker" > "$state/task-a.check.sh"
   chmod 0644 "$state/task-a.check.sh"
   fmx_poll_shim_content "$dir/home" "$ROOT" > "$state/x-watch.check.sh"
@@ -2058,6 +2100,7 @@ test_nonexecuting_migration() {
     'window=fm-task-x' \
     'pr=https://github.com/o/r/pull/12' \
     'pr_head=0123456789abcdef0123456789abcdef01234567' \
+    'ready_head=0123456789abcdef0123456789abcdef01234567' \
     'x_request=req-42' \
     'x_request_ts=1700000000' \
     'x_followups=1' \
@@ -2310,9 +2353,7 @@ test_bootstrap_migrates_before_other_mutations() {
   local dir state
   dir=$(make_case bootstrap-boundary)
   state="$dir/home/state"
-  fm_write_meta "$state/task-a.meta" \
-    'window=fm-task-a' \
-    'pr=https://github.com/o/r/pull/11'
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/11
   printf 'legacy bytes\n' > "$state/task-a.check.sh"
 
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
@@ -2330,9 +2371,7 @@ test_bootstrap_isolates_incomplete_poll_migration() {
   fakebin="$dir/fakebin"
   fleet_marker="$dir/fleet-ran"
   x_poll_marker="$dir/x-poll-ran"
-  fm_write_meta "$state/task-a.meta" \
-    'window=fm-task-a' \
-    'pr=https://github.com/o/r/pull/12'
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/12
   printf 'legacy bytes\n' > "$state/task-a.check.sh"
   mkdir "$state/task-a.pr-poll"
   write_poll_meta "$state" z-healthy https://github.com/o/r/pull/13
@@ -2825,6 +2864,9 @@ group/subgroup/project
   done
   out=$(FM_TEST_GLAB_STATE=merged run_poll "$dir")
   [ "$out" = merged ] || fail "GitLab poll did not emit exactly one merged line"
+  out=$(FM_TEST_GLAB_HEAD=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee FM_TEST_GLAB_STATE=merged run_poll "$dir")
+  [ "$out" = 'revision-mismatch expected=0123456789abcdef0123456789abcdef01234567 current=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' ] \
+    || fail "GitLab poll did not surface exact merge-request head movement"
   out=$(FM_TEST_GLAB_FAIL=1 run_poll "$dir")
   [ -z "$out" ] || fail "GitLab poll emitted after a glab failure"
 
@@ -2900,8 +2942,19 @@ EOF
 }
 
 seed_canonical_poll() {
-  local dir=$1 id=$2 url=$3 template=${4:-$POLL} state provider host path number
+  local dir=$1 id=$2 url=$3 template=${4:-$POLL} state provider host path number meta tmp
   state="$dir/home/state"
+  meta="$state/$id.meta"
+  tmp="$meta.seed"
+  if [ -f "$meta" ]; then
+    grep -vE '^(pr|pr_head|ready_head)=' "$meta" > "$tmp" || true
+  else
+    printf 'window=fm-%s\n' "$id" > "$tmp"
+  fi
+  printf 'pr=%s\npr_head=%s\nready_head=%s\n' "$url" \
+    0123456789abcdef0123456789abcdef01234567 \
+    0123456789abcdef0123456789abcdef01234567 >> "$tmp"
+  mv "$tmp" "$meta"
   fm_pr_url_parse "$url" || fail "retirement fixture URL was invalid"
   provider=$FM_PR_PROVIDER
   host=$FM_PR_HOST
@@ -2996,7 +3049,8 @@ test_persistent_secondmate_retirement_is_poll_only() {
     'backend=tmux' \
     "home=$dir/secondmate-home" \
     'pr=https://github.com/o/r/pull/2' \
-    'pr_head=0123456789abcdef0123456789abcdef01234567'
+    'pr_head=0123456789abcdef0123456789abcdef01234567' \
+    'ready_head=0123456789abcdef0123456789abcdef01234567'
   mkdir -p "$dir/secondmate-home"
   printf 'working: persistent endpoint remains healthy\n' > "$state/domain.status"
   printf -- '- domain | scope: test | home: %s\n' "$dir/secondmate-home" > "$dir/home/data/secondmates.md"
@@ -3367,6 +3421,7 @@ test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
+test_fresh_registration_rebinds_moved_revision
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact

@@ -10,7 +10,10 @@
 # the sidecar carries the whole path instead. GitLab also runs on self-hosted
 # instances, so the host is part of that identity rather than a constant. Every
 # consumer re-derives the identity from the stored URL and refuses any record
-# whose parts do not reconstruct that exact URL.
+# whose parts do not reconstruct that exact URL. The sidecar remains URL
+# identity data; equal exact pr_head=/ready_head= values in task metadata are
+# mandatory, and watcher snapshots bind and revalidate that revision around
+# poll execution and retirement.
 #
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
@@ -34,6 +37,8 @@ FM_PR_META_URL=
 FM_PR_META_HOST=
 FM_PR_META_PATH=
 FM_PR_META_NUMBER=
+FM_PR_META_HEAD=
+FM_PR_META_READY_HEAD=
 FM_PR_REG_ID=
 FM_PR_REG_PROVIDER=
 FM_PR_REG_URL=
@@ -68,6 +73,7 @@ FM_PR_POLL_SNAPSHOT_URL=
 FM_PR_POLL_SNAPSHOT_HOST=
 FM_PR_POLL_SNAPSHOT_PATH=
 FM_PR_POLL_SNAPSHOT_NUMBER=
+FM_PR_POLL_SNAPSHOT_HEAD=
 FM_PR_POLL_SNAPSHOT_DATA_HASH=
 FM_PR_POLL_SNAPSHOT_TEMPLATE_HASH=
 FM_PR_POLL_SNAPSHOT_DATA_IDENTITY=
@@ -213,6 +219,63 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
+# Resolve the forge's current immutable source revision for one validated PR/MR
+# identity. A missing CLI, malformed response, or unavailable forge is a hard
+# failure for readiness and merge-facing callers; no local branch fallback may
+# inherit old review evidence.
+fm_pr_remote_head() {  # <provider> <url> <host> <path> <number>
+  local provider=$1 url=$2 host=$3 path=$4 number=$5 raw encoded head
+  case "$provider" in
+    github)
+      command -v gh >/dev/null 2>&1 || return 1
+      head=$(gh pr view "$url" --json headRefOid -q .headRefOid 2>/dev/null) || return 1
+      ;;
+    gitlab)
+      command -v glab >/dev/null 2>&1 || return 1
+      command -v node >/dev/null 2>&1 || return 1
+      encoded=$(node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$path") || return 1
+      raw=$(glab api "projects/$encoded/merge_requests/$number" --hostname "$host" 2>/dev/null) || return 1
+      head=$(printf '%s' "$raw" | node -e '
+const fs = require("fs");
+let data;
+try { data = JSON.parse(fs.readFileSync(0, "utf8")); } catch (_) { process.exit(1); }
+const head = data && data.sha;
+if (typeof head !== "string") process.exit(1);
+process.stdout.write(head);
+' 2>/dev/null) || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  fm_pr_head_valid "$head" || return 1
+  printf '%s\n' "$head"
+}
+
+# GitHub merge readiness for the exact revision is intentionally stricter than
+# forge mergeability: any pending or red check refuses, while a PR with no
+# reported checks remains eligible for repositories that deliberately have no
+# CI. Captain approval remains an independent caller-side authority boundary.
+fm_pr_github_checks_green() {  # <url>
+  local url=$1 raw
+  command -v gh >/dev/null 2>&1 || return 1
+  command -v node >/dev/null 2>&1 || return 1
+  raw=$(gh pr view "$url" --json state,statusCheckRollup 2>/dev/null) || return 1
+  printf '%s' "$raw" | node -e '
+const fs = require("fs");
+let data;
+try { data = JSON.parse(fs.readFileSync(0, "utf8")); } catch (_) { process.exit(1); }
+if (!data || data.state !== "OPEN" || !Array.isArray(data.statusCheckRollup)) process.exit(1);
+const allowed = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
+for (const check of data.statusCheckRollup) {
+  if (!check) process.exit(1);
+  if (typeof check.state === "string") {
+    if (check.state !== "SUCCESS") process.exit(1);
+    continue;
+  }
+  if (check.status !== "COMPLETED" || !allowed.has(check.conclusion)) process.exit(1);
+}
+' >/dev/null 2>&1
+}
+
 fm_pr_file_mode() {
   if [ "$(uname)" = Darwin ]; then
     stat -f %Lp "$1" 2>/dev/null
@@ -286,12 +349,14 @@ fm_pr_regular_destination_on_device_or_absent() {
 }
 
 fm_pr_metadata_identity_parse() {
-  local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
+  local file=$1 line value pr_count=0 head_count=0 ready_count=0 seen_pr=0 post_pr_invalid=0
   FM_PR_META_PROVIDER=
   FM_PR_META_URL=
   FM_PR_META_HOST=
   FM_PR_META_PATH=
   FM_PR_META_NUMBER=
+  FM_PR_META_HEAD=
+  FM_PR_META_READY_HEAD=
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
@@ -310,9 +375,25 @@ fm_pr_metadata_identity_parse() {
         seen_pr=1
         ;;
       pr_head=*)
-        if [ "$seen_pr" -eq 1 ]; then
+        head_count=$((head_count + 1))
+        if [ "$seen_pr" -eq 1 ] && [ "$head_count" -eq 1 ]; then
           value=${line#pr_head=}
-          fm_pr_head_valid "$value" || post_pr_invalid=1
+          if fm_pr_head_valid "$value"; then
+            FM_PR_META_HEAD=$value
+          else
+            post_pr_invalid=1
+          fi
+        fi
+        ;;
+      ready_head=*)
+        ready_count=$((ready_count + 1))
+        if [ "$seen_pr" -eq 1 ] && [ "$ready_count" -eq 1 ]; then
+          value=${line#ready_head=}
+          if fm_pr_head_valid "$value"; then
+            FM_PR_META_READY_HEAD=$value
+          else
+            post_pr_invalid=1
+          fi
         fi
         ;;
       x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
@@ -322,9 +403,9 @@ fm_pr_metadata_identity_parse() {
         ;;
     esac
   done < "$file"
-  [ "$pr_count" -eq 1 ] || return 1
+  [ "$pr_count" -eq 1 ] && [ "$head_count" -eq 1 ] && [ "$ready_count" -eq 1 ] || return 1
   [ "$post_pr_invalid" -eq 0 ] || return 1
-  [ -n "$FM_PR_META_URL" ]
+  [ -n "$FM_PR_META_URL" ] && [ "$FM_PR_META_HEAD" = "$FM_PR_META_READY_HEAD" ]
 }
 
 # Sidecar layout: provider, url, host, path, number, one per line. A sidecar
@@ -630,6 +711,7 @@ fm_pr_poll_snapshot_capture() {
   FM_PR_POLL_SNAPSHOT_HOST=$FM_PR_DATA_HOST
   FM_PR_POLL_SNAPSHOT_PATH=$FM_PR_DATA_PATH
   FM_PR_POLL_SNAPSHOT_NUMBER=$FM_PR_DATA_NUMBER
+  FM_PR_POLL_SNAPSHOT_HEAD=$FM_PR_META_HEAD
   FM_PR_POLL_SNAPSHOT_DATA_HASH=$FM_PR_REG_DATA_HASH
   FM_PR_POLL_SNAPSHOT_TEMPLATE_HASH=$FM_PR_REG_TEMPLATE_HASH
   FM_PR_POLL_SNAPSHOT_DATA_IDENTITY=$FM_PR_REG_DATA_IDENTITY
@@ -648,6 +730,8 @@ fm_pr_poll_snapshot_matches() {
   [ "$FM_PR_DATA_HOST" = "$FM_PR_POLL_SNAPSHOT_HOST" ] || return 1
   [ "$FM_PR_DATA_PATH" = "$FM_PR_POLL_SNAPSHOT_PATH" ] || return 1
   [ "$FM_PR_DATA_NUMBER" = "$FM_PR_POLL_SNAPSHOT_NUMBER" ] || return 1
+  [ "$FM_PR_META_HEAD" = "$FM_PR_POLL_SNAPSHOT_HEAD" ] || return 1
+  [ "$FM_PR_META_READY_HEAD" = "$FM_PR_POLL_SNAPSHOT_HEAD" ] || return 1
   [ "$FM_PR_REG_DATA_HASH" = "$FM_PR_POLL_SNAPSHOT_DATA_HASH" ] || return 1
   [ "$FM_PR_REG_TEMPLATE_HASH" = "$FM_PR_POLL_SNAPSHOT_TEMPLATE_HASH" ] || return 1
   [ "$FM_PR_REG_DATA_IDENTITY" = "$FM_PR_POLL_SNAPSHOT_DATA_IDENTITY" ] || return 1

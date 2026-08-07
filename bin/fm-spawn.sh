@@ -98,6 +98,14 @@
 #   even when they select different backends. A fresh spawn first takes the
 #   per-home task-set lock and refuses rather than waits when forced teardown owns
 #   it; relaunch is exempt because the existing task's control lock covers it.
+#   After any backend yields a task
+#   worktree, the shared custody owner compares its physical root and absolute
+#   worktree Git directory against every task record under one cross-task lock.
+#   Another owner or ambiguous matching record refuses without returning that
+#   copy. A repeated same-task spawn reuses its exact recorded copy only when the
+#   backend's recovery-grade agent-state verdict is dead or missing; tmux and
+#   Herdr support that proof, while Zellij, Orca, and cmux refuse inconclusive
+#   automatic recovery.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -245,6 +253,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-task-custody-lib.sh
+. "$SCRIPT_DIR/fm-task-custody-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
@@ -659,6 +669,8 @@ RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
 RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
+SPAWN_CUSTODY_LOCK=
+SPAWN_CUSTODY_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -751,6 +763,10 @@ spawn_abort_cleanup() {
       fi
     fi
   fi
+  if [ "$SPAWN_CUSTODY_LOCK_HELD" = 1 ]; then
+    SPAWN_CUSTODY_LOCK_HELD=0
+    fm_lock_release "$SPAWN_CUSTODY_LOCK" || true
+  fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -827,6 +843,29 @@ spawn_herdr_presentation_order_lock_release() {
   [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ] || return 0
   HERDR_PRESENTATION_ORDER_LOCK_HELD=0
   fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
+}
+
+# Serialize only the custody scan plus metadata publication across task ids.
+# Worktree allocation and ordinary endpoint setup stay concurrent.
+spawn_custody_lock_acquire() {
+  local attempt=0
+  SPAWN_CUSTODY_LOCK="$STATE/.task-custody.lock"
+  while [ "$attempt" -lt 100 ]; do
+    if fm_lock_try_acquire "$SPAWN_CUSTODY_LOCK"; then
+      SPAWN_CUSTODY_LOCK_HELD=1
+      return 0
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  echo "error: task custody validation is busy; retry after the current task publication finishes" >&2
+  return 1
+}
+
+spawn_custody_lock_release() {
+  [ "$SPAWN_CUSTODY_LOCK_HELD" = 1 ] || return 0
+  SPAWN_CUSTODY_LOCK_HELD=0
+  fm_lock_release "$SPAWN_CUSTODY_LOCK" || true
 }
 
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
@@ -1659,6 +1698,71 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+# A repeated spawn for the same task is recovery, never a request for another
+# pooled copy. Reuse the exact recorded worktree only after its custody and
+# endpoint are both reconciled. Only recovery-grade dead/missing verdicts may
+# replace an endpoint; inconclusive backends refuse rather than duplicate an
+# agent. This keeps every unlanded commit in the original isolated copy.
+RECOVERY_EXISTING=0
+RECOVERY_WT=
+RECOVERY_META_EXTENSIONS=
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && { [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; }; then
+  EXISTING_META="$STATE/$ID.meta"
+  EXISTING_PROJECT=$(fm_backend_meta_exact_value "$EXISTING_META" project) || {
+    echo "error: existing task $ID has an absent or ambiguous project identity; preserve it for reconciliation" >&2
+    exit 1
+  }
+  EXISTING_PROJECT_REAL=$(cd "$EXISTING_PROJECT" 2>/dev/null && pwd -P) || {
+    echo "error: existing task $ID project is unavailable at $EXISTING_PROJECT; preserve it for reconciliation" >&2
+    exit 1
+  }
+  [ "$EXISTING_PROJECT_REAL" = "$PROJ_ABS_REAL" ] || {
+    echo "error: task $ID already belongs to project $EXISTING_PROJECT_REAL, not $PROJ_ABS_REAL; refusing a second task record" >&2
+    exit 1
+  }
+  EXISTING_BACKEND=$(fm_backend_of_meta "$EXISTING_META")
+  [ "$EXISTING_BACKEND" = "$BACKEND" ] || {
+    echo "error: task $ID recovery must use its recorded backend $EXISTING_BACKEND, not $BACKEND" >&2
+    exit 1
+  }
+  RECOVERY_WT=$(fm_backend_meta_exact_value "$EXISTING_META" worktree) || {
+    echo "error: existing task $ID has an absent or ambiguous worktree identity; preserve it for reconciliation" >&2
+    exit 1
+  }
+  # Preserve lifecycle extensions owned outside spawn (PR/local readiness,
+  # Relay linkage, and decision inventory) while replacing endpoint fields.
+  # Unknown extension keys survive too, so adding a future metadata owner does
+  # not make safe recovery erase its durable state.
+  RECOVERY_META_EXTENSIONS=$(while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      window=*|endpoint_task_id=*|worktree=*|project=*|harness=*|kind=*|mode=*|yolo=*|tasktmp=*|model=*|effort=*|busy_gen=*|traceparent=*|backend=*|herdr_*=*|zellij_*=*|orca_worktree_id=*|terminal=*|cmux_*=*|home=*|projects=*) ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done < "$EXISTING_META")
+  fm_task_custody_validate "$STATE" "$ID" "$RECOVERY_WT" || exit 1
+  RECOVERY_WT=$FM_TASK_CUSTODY_WORKTREE
+  fm_backend_validate_task_endpoint "$EXISTING_META" "$ID" || exit 1
+  EXISTING_TARGET=$FM_BACKEND_VALIDATED_TARGET
+  EXISTING_STATE=$(fm_backend_agent_state "$EXISTING_BACKEND" "$EXISTING_TARGET")
+  case "$EXISTING_STATE" in
+    dead|missing) ;;
+    *)
+      echo "error: task $ID endpoint is $EXISTING_STATE; safe same-task recovery requires a recovery-grade dead or missing verdict" >&2
+      exit 1
+      ;;
+  esac
+  # A dead tmux endpoint is an agent-free shell whose exact window name would
+  # block replacement. Herdr owns its exact husk reclaim below.
+  if [ "$EXISTING_BACKEND" = tmux ] && [ "$EXISTING_STATE" = dead ]; then
+    fm_backend_kill "$EXISTING_BACKEND" "$EXISTING_TARGET" || {
+      echo "error: task $ID dead endpoint could not be retired for recovery" >&2
+      exit 1
+    }
+  fi
+  RECOVERY_EXISTING=1
+fi
+SPAWN_CWD=${RECOVERY_WT:-$PROJ_ABS}
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -1826,7 +1930,7 @@ case "$BACKEND" in
     # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
-    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$SPAWN_CWD") || exit 1
     WT_TARGET="$WID"
     ;;
   herdr)
@@ -1878,7 +1982,7 @@ case "$BACKEND" in
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
             "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
             "$HERDR_RECOVERY_WORKSPACE_ID" "$HERDR_RECOVERY_TAB_ID" "$HERDR_RECOVERY_PANE_ID" \
-            "$HERDR_PARENT_LABEL" "$W" "$PROJ_ABS"
+            "$HERDR_PARENT_LABEL" "$W" "$SPAWN_CWD"
           HERDR_RECLAIM_STATUS=$?
           set -e
           case "$HERDR_RECLAIM_STATUS" in
@@ -1932,7 +2036,7 @@ case "$BACKEND" in
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
             HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
-              "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
+              "$SPAWN_CWD" "$HERDR_PROJECTION_LABEL" "$W"; then
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
                 HERDR_PROJECTION_ABORT_CLEANUP=1
                 HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
@@ -1985,7 +2089,7 @@ case "$BACKEND" in
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$SPAWN_CWD" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -1998,7 +2102,7 @@ EOF
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
-    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS") || exit 1
+    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$SPAWN_CWD") || exit 1
     read -r ZELLIJ_TAB_ID ZELLIJ_PANE_ID <<EOF
 $ZELLIJ_TASK_IDS
 EOF
@@ -2010,7 +2114,7 @@ EOF
     ;;
   cmux)
     fm_backend_cmux_container_ensure || exit 1
-    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
+    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$SPAWN_CWD") || exit 1
     read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
 $CMUX_TASK_IDS
 EOF
@@ -2169,7 +2273,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
-elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$RECOVERY_EXISTING" != 1 ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -2217,6 +2321,21 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+elif [ "$KIND" != secondmate ] && [ "$RECOVERY_EXISTING" = 1 ]; then
+  WT=$RECOVERY_WT
+  validate_spawn_worktree "same-task recovery" "$T"
+fi
+
+if [ "$KIND" != secondmate ]; then
+  spawn_custody_lock_acquire || exit 1
+  if ! fm_task_custody_validate "$STATE" "$ID" "$WT"; then
+    # This endpoint has no authority over a conflicting isolated copy.
+    # Remove only the new endpoint and preserve every worktree and task record.
+    fm_backend_kill "$BACKEND" "$T" 2>/dev/null || true
+    [ "$BACKEND" != orca ] || ORCA_ABORT_CLEANUP=0
+    exit 1
+  fi
+  WT=$FM_TASK_CUSTODY_WORKTREE
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
@@ -2617,6 +2736,8 @@ preserve_relaunch_meta() {
   fi
   if [ "$RELAUNCH" -eq 1 ]; then
     preserve_relaunch_meta
+  elif [ -n "$RECOVERY_META_EXTENSIONS" ]; then
+    printf '%s\n' "$RECOVERY_META_EXTENSIONS"
   fi
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
@@ -2639,6 +2760,7 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
 fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+spawn_custody_lock_release
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

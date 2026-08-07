@@ -37,12 +37,30 @@ make_spawn_fakebin() {
 #!/usr/bin/env bash
 set -u
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*)
+    pane_path=${FM_FAKE_PANE_PATH:-}
+    if [ -n "${FM_FAKE_PANE_ALT_ID:-}" ] && [ -f "${FM_FAKE_WINDOW_FILE:-}" ] \
+      && [ "$(cat "$FM_FAKE_WINDOW_FILE")" = "fm-$FM_FAKE_PANE_ALT_ID" ]; then
+      pane_path=${FM_FAKE_PANE_PATH_ALT:-$pane_path}
+    fi
+    printf '%s\n' "$pane_path"
+    exit 0
+    ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  new-window)
+    if [ -n "${FM_FAKE_WINDOW_FILE:-}" ]; then
+      prev=
+      for a in "$@"; do
+        [ "$prev" != -n ] || printf '%s\n' "$a" > "$FM_FAKE_WINDOW_FILE"
+        prev=$a
+      done
+    fi
+    exit 0
+    ;;
+  has-session|new-session|kill-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -110,7 +128,10 @@ run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" \
+    FM_FAKE_PANE_PATH_ALT="${FM_TEST_PANE_PATH_ALT:-}" \
+    FM_FAKE_PANE_ALT_ID="${FM_TEST_PANE_ALT_ID:-}" \
+    FM_FAKE_WINDOW_FILE="$home/state/.fake-current-window" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
@@ -210,6 +231,9 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   assert_contains "$launch" "< '$home_real/data/$relative_id/brief.md'" \
     "relative FM_HOME leaked into the default cross-process brief path"
 
+  # The fake provider returns one fixed slot. Complete the first task's custody
+  # record before reusing it for this independent path-spelling assertion.
+  rm -f "$HOME_DIR/state/$relative_id.meta"
   linked_home="$CASE_DIR/home-link"
   ln -s "$HOME_DIR" "$linked_home"
   : > "$LAUNCH_LOG"
@@ -639,15 +663,18 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
 }
 
 test_batch_forwards_shared_profile_flags() {
-  local rec id1 id2 out status
+  local rec id1 id2 out status wt2
   id1=profile-batch-a-z9
   id2=profile-batch-b-z10
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  wt2="$CASE_DIR/wt2"
+  git -C "$PROJ_DIR" worktree add -q -b wt-profile-batch-2 "$wt2" HEAD
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
+  out=$(FM_TEST_PANE_ALT_ID="$id2" FM_TEST_PANE_PATH_ALT="$wt2" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
   status=$?
   expect_code 0 "$status" "batch spawn with shared profile flags should succeed"
   assert_contains "$out" "spawned $id1 harness=codex" "first batch task did not use shared harness"
