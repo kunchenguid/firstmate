@@ -33,7 +33,10 @@ A configured remote secondmate reply source is armed and handled through `bin/fm
 Its header owns exact commands, while the adapter owns cursor continuity, validated deduplicated status ingest, path-confined document fetch, acknowledgement, and re-arming after a good delta.
 A continuity break is escalated once and stays unarmed until an operator deliberately rebases it.
 
-`bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, and `bin/fm-procevent-remote-reply.sh --help` own the exact commands and flags.
+An operator's Telegram replies are armed through `bin/fm-procevent-telegram.sh arm`, so a phone reply wakes firstmate instead of sitting unseen.
+Its header owns the token and cursor file contract; the two rules that matter here are that only the handler advances the cursor, after fully handling a captured result, and that a restart before that advance re-captures the same updates, so any update id at or below the cursor is already seen and must be treated as a no-op.
+
+`bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, `bin/fm-procevent-remote-reply.sh --help`, and `bin/fm-procevent-telegram.sh --help` own the exact commands and flags.
 
 Two rules the commands cannot enforce for you:
 
