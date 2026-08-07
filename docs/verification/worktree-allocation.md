@@ -70,6 +70,21 @@ $ treehouse get --lease --lease-holder pick2
 🌳 Leased worktree at .../proj-43a5c8/3/proj      # 2 was skipped
 ```
 
+Measured 2026-08-07 against the same v2.1.0, in the same isolated throwaway pool: with the holder process running, the slot reports `in-use`, and `enter` still acquires it by name in both forms the code uses - the `--print-path` form and the interactive form the pane actually runs:
+
+```
+$ treehouse status
+2     in-use       .../proj-43a5c8/2/proj
+                   sleep (880066)
+$ treehouse enter --print-path 2
+.../proj-43a5c8/2/proj                            # exit 0
+$ treehouse enter 2
+Entered worktree 2 at .../proj-43a5c8/2/proj. Type 'exit' to leave.
+Left worktree. Pool state unchanged.
+```
+
+This is treehouse's documented behavior, not an accident of version: `treehouse enter --help` states it opens a worktree by name "including worktrees that are already in use".
+
 `bin/fm-spawn.sh` therefore holds the chosen slot with one short-lived process of its own from the moment it chooses the slot until the pane's own shell is inside it, which is the only window in which another home's `get` could still take it.
 `get` and `enter` differ in nothing else that matters here: neither removes ignored files, and treehouse's config carries no setup hooks (`treehouse init` writes only `max_trees` and `root`).
 The slot is still placed at the resolved slot base by `fm-spawn.sh` itself, under its own guards, so nothing depends on `get`'s reset.

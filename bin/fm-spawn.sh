@@ -684,6 +684,8 @@ SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 SLOT_HOLDER_PID=
+WT_POOL_LOCK=
+WT_POOL_LOCK_HELD=0
 
 # Stop occupying the chosen pool slot. Called as soon as the pane's own shell is
 # inside it, and again from the abort path so an aborted spawn never leaves the
@@ -761,6 +763,10 @@ spawn_abort_cleanup() {
       fi
     fi
   fi
+  if [ "$WT_POOL_LOCK_HELD" = 1 ]; then
+    WT_POOL_LOCK_HELD=0
+    fm_lock_release "$WT_POOL_LOCK" || true
+  fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -797,6 +803,90 @@ spawn_herdr_presentation_order_lock_release() {
   [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ] || return 0
   HERDR_PRESENTATION_ORDER_LOCK_HELD=0
   fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
+}
+
+# One machine-private exclusive lock per physical pool, keyed by the resolved
+# project path. Unlike `treehouse get`, the select-then-enter allocation claims
+# nothing until the holder process occupies the chosen slot, so two spawns
+# selecting concurrently would both pick the same first-clean slot. The
+# contenders are every home spawning into the pool, so the lock can never live
+# under $STATE, which is per-home; it uses the same machine-private /tmp
+# namespace shape as the herdr presentation lock (bin/backends/herdr.sh), with
+# the same ownership and mode validation before use.
+spawn_pool_select_lock_namespace_mode() {
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    stat -f '%Lp' "$1" 2>/dev/null
+  else
+    stat -c '%a' "$1" 2>/dev/null
+  fi
+}
+
+spawn_pool_select_lock_namespace_uid() {
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    stat -f '%u' "$1" 2>/dev/null
+  else
+    stat -c '%u' "$1" 2>/dev/null
+  fi
+}
+
+spawn_pool_select_lock_namespace_valid() {
+  local dir=$1 expected_uid owner mode
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  expected_uid=$(id -u 2>/dev/null) || return 1
+  owner=$(spawn_pool_select_lock_namespace_uid "$dir") || return 1
+  mode=$(spawn_pool_select_lock_namespace_mode "$dir") || return 1
+  [ "$owner" = "$expected_uid" ] && [ "$mode" = 700 ]
+}
+
+spawn_pool_select_lock_path() {  # <pool-real>
+  local pool=$1 hash key dir
+  [ -n "$pool" ] || return 1
+  if command -v shasum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$pool" | shasum -a 256 2>/dev/null | awk '{print $1}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$pool" | sha256sum 2>/dev/null | awk '{print $1}')
+  else
+    return 1
+  fi
+  [ -n "$hash" ] || return 1
+  key=${hash:0:32}
+  dir=/tmp/firstmate-worktree-pool
+  if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
+    if ! mkdir -m 700 "$dir" 2>/dev/null; then
+      spawn_pool_select_lock_namespace_valid "$dir" || return 1
+    fi
+  fi
+  spawn_pool_select_lock_namespace_valid "$dir" || return 1
+  printf '%s/select-%s.lock' "$dir" "$key"
+}
+
+# A lock that cannot be acquired refuses the spawn: proceeding unlocked would
+# reopen the very race the lock closes. The wait is bounded well above the
+# window one holder spans (selection through the pane settling into the slot).
+spawn_pool_select_lock_acquire() {  # <pool-real>
+  local pool=$1 attempt max
+  if ! WT_POOL_LOCK=$(spawn_pool_select_lock_path "$pool"); then
+    echo "error: cannot resolve the pool selection lock for $pool: /tmp/firstmate-worktree-pool is not this user's mode-700 directory and could not be created; refusing to choose a slot unserialized" >&2
+    return 1
+  fi
+  attempt=0
+  max=${FM_SPAWN_POOL_LOCK_POLLS:-1200}
+  while [ "$attempt" -lt "$max" ]; do
+    if fm_lock_try_acquire "$WT_POOL_LOCK"; then
+      WT_POOL_LOCK_HELD=1
+      return 0
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  echo "error: another spawn is choosing a slot in this pool (lock $WT_POOL_LOCK held by pid ${FM_LOCK_HELD_PID:-unknown}); refusing to choose a slot unserialized" >&2
+  return 1
+}
+
+spawn_pool_select_lock_release() {
+  [ "$WT_POOL_LOCK_HELD" = 1 ] || return 0
+  WT_POOL_LOCK_HELD=0
+  fm_lock_release "$WT_POOL_LOCK" || true
 }
 
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
@@ -1354,9 +1444,17 @@ real_path_or_raw() {  # <path>
 # blockade a pool whose later slots are empty. A named slot is entered by name
 # below; empty output means the pool offered nothing to steer to and the
 # allocation falls back to `treehouse get`.
+#
+# The whole select-to-enter window runs under the cross-home pool lock:
+# `select` claims nothing by itself, so a second spawn selecting concurrently
+# would deterministically choose the same slot. The lock is released once the
+# pane has settled into the slot, alongside the holder, or by the abort path;
+# when nothing was selected it is released right here, because the `treehouse
+# get` fallback claims its slot atomically.
 WT_SLOT_NAME=
 WT_SLOT_REAL=
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  spawn_pool_select_lock_acquire "$PROJ_ABS_REAL" || exit 1
   wt_selection=$("$FM_ROOT/bin/fm-worktree-guard.sh" select "$PROJ_ABS_REAL") || exit 1
   if [ -n "$wt_selection" ]; then
     WT_SLOT_NAME=${wt_selection%%$'\t'*}
@@ -1369,6 +1467,8 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     # too, so a spawn that never got started leaves nothing occupied.
     ( cd "$WT_SLOT_REAL" 2>/dev/null && exec sleep 300 ) >/dev/null 2>&1 &
     SLOT_HOLDER_PID=$!
+  else
+    spawn_pool_select_lock_release
   fi
 fi
 
@@ -1855,6 +1955,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   release_slot_holder
+  spawn_pool_select_lock_release
   if [ -z "$WT" ]; then
     if [ -n "$WT_SLOT_NAME" ]; then
       echo "error: 'treehouse enter $WT_SLOT_NAME' did not enter $WT_SLOT_REAL within 60s; inspect window $T" >&2
@@ -1864,7 +1965,11 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     exit 1
   fi
 
-  validate_spawn_worktree "treehouse get" "$T"
+  if [ -n "$WT_SLOT_NAME" ]; then
+    validate_spawn_worktree "treehouse enter $WT_SLOT_NAME" "$T"
+  else
+    validate_spawn_worktree "treehouse get" "$T"
+  fi
 fi
 
 # Place the slot at the resolved slot base, so the worker reads the code the

@@ -28,6 +28,9 @@
 # therefore names a demonstrably empty slot for the caller to acquire BY NAME
 # (`treehouse enter <name>`, which does not reset it), and an occupied slot is
 # then simply skipped rather than reset or turned into a refusal.
+# Naming a slot claims nothing, so concurrent selections would all name the
+# same slot; bin/fm-spawn.sh serializes the whole select-to-enter window under
+# one machine-private lock per pool and holds the slot until its pane arrives.
 # The refusal is unchanged where it still matters: with no empty slot to steer
 # to, the caller falls back to `treehouse get`, so every available slot must be
 # demonstrably empty or explicitly authorized, exactly as before.
