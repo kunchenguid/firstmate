@@ -2687,7 +2687,9 @@ FM_BACKEND_HERDR_COMPOSER_LINES=${FM_BACKEND_HERDR_COMPOSER_LINES:-20}
 # herdr-verified harness needs its own idle placeholder recognized.
 FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 # Known bare (unbordered) prompt glyphs a composer row may start with: ❯
-# (claude), › (codex), and → (cursor-agent, live-verified on herdr 2026-08-05).
+# (claude) and › (codex). Cursor's → is admitted only as a structural candidate
+# when FM_COMPOSER_HARNESS=cursor (live-verified on herdr 2026-08-05); an
+# unscoped lower → transcript line must never shadow a real non-Cursor composer.
 # Generic shell-style glyphs > $ % # are still recognized after a bordered
 # composer row has already been structurally found.
 # Deliberately an alternation, not a `[...]` bracket expression: under a C/POSIX
@@ -2698,7 +2700,10 @@ FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 # misclassifying a bordered composer's bottom border row as the bare shape.
 # An alternation's branches are matched as whole literal byte sequences and
 # stay correct regardless of locale.
-FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^(❯|›|→)'}
+FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^(❯|›)'}
+# Cursor-only structural bare-prompt regex: same global glyphs plus Cursor's →.
+# Used only when FM_COMPOSER_HARNESS=cursor; bordered detection is unchanged.
+FM_BACKEND_HERDR_BARE_PROMPT_CURSOR_RE=${FM_BACKEND_HERDR_BARE_PROMPT_CURSOR_RE:-'^(❯|›|→)'}
 # Pi allows a multi-line composer between its horizontal separators. Bound the
 # structural candidate so two unrelated transcript rules with an arbitrarily
 # large region between them can never be promoted into a composer.
@@ -2767,10 +2772,14 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
 
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   local target=$1 session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped plain_row=""
-  local identity agent agent_status row=0 generic_line=0
+  local identity agent agent_status row=0 generic_line=0 bare_prompt_re
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE
+  # Bare → is Cursor's prompt glyph only. Admit it structurally when the
+  # composer harness is cursor; never infer Cursor from idle regex alone.
+  bare_prompt_re=$FM_BACKEND_HERDR_BARE_PROMPT_RE
+  [ "${FM_COMPOSER_HARNESS:-}" = cursor ] && bare_prompt_re=$FM_BACKEND_HERDR_BARE_PROMPT_CURSOR_RE
   cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
     || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
   # Structural scan: locate the bottom-most composer row and remember its RAW
@@ -2792,7 +2801,7 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
         found=1
         ;;
       *)
-        if printf '%s' "$trimmed" | grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE"; then
+        if printf '%s' "$trimmed" | grep -qE "$bare_prompt_re"; then
           shape=bare
           raw_match=$line
           plain_row=$trimmed

@@ -151,18 +151,20 @@ fm_cursor_resolve_binary() {
 # Used by every process-scanning caller, so it never executes anything.
 #
 # Cursor's Node bundle runs with kernel comm MainThread and an argument string
-# that still names the versioned cursor-agent install path, which is the first
-# and cheapest signal. When the argument string carries no cursor-agent token,
-# argv[0] is resolved on disk instead, which is what proves a legacy `agent`
-# alias without trusting its name.
+# whose argv0 still names the versioned cursor-agent install path, which is the
+# first and cheapest signal. Structural evidence comes only from argv0: a later
+# argument path/token named cursor-agent must never classify an unrelated
+# process as Cursor. When argv0 carries no cursor-agent token, it is resolved
+# on disk instead, which is what proves a legacy `agent` alias without trusting
+# its name.
 fm_cursor_args_are_cursor() {  # <args>
   local args=$1 argv0
   [ -n "$args" ] || return 1
-  case "$args" in
-    cursor-agent|"cursor-agent "*|*/cursor-agent|*/cursor-agent\ *) return 0 ;;
-  esac
   argv0=${args%% *}
-  case "$argv0" in ''|MainThread) return 1 ;; esac
+  case "$argv0" in
+    ''|MainThread) return 1 ;;
+    cursor-agent) return 0 ;;
+  esac
   fm_cursor_path_is_cursor "$argv0"
 }
 
