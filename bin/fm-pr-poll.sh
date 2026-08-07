@@ -119,20 +119,11 @@ case "$provider" in
     # comes from the validated record rather than glab's configured default.
     # It cannot take a merge request URL the way gh does: that form shells out
     # to git for the current repository, and the watcher runs in no repository.
-    # The state is read from glab's own field output rather than its JSON,
-    # because plain glab has no field selector and firstmate does not require a
-    # JSON processor; only an exact "merged" wakes, so a changed format or an
-    # unreadable merge request stays silent instead of reporting a merge.
-    command -v node >/dev/null 2>&1 || exit 0
-    encoded=$(node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$path" 2>/dev/null) || exit 0
-    api=$(glab api "projects/$encoded/merge_requests/$number" --hostname "$host" 2>/dev/null) || exit 0
-    current_head=$(printf '%s' "$api" | node -e '
-const fs = require("fs");
-let data;
-try { data = JSON.parse(fs.readFileSync(0, "utf8")); } catch (_) { process.exit(1); }
-if (!data || typeof data.sha !== "string") process.exit(1);
-process.stdout.write(data.sha);
-' 2>/dev/null) || exit 0
+    # glab api's built-in --jq selector yields the exact head without adding a
+    # separate JSON processor dependency.
+    # Only an exact "merged" state wakes, so changed output or an unreadable
+    # merge request stays silent instead of reporting a merge.
+    current_head=$(glab api "projects/$path/merge_requests/$number" --hostname "$host" --jq .sha 2>/dev/null) || exit 0
     case "$current_head" in *[!0-9a-f]*|'') exit 0 ;; esac
     if [ "$current_head" != "$expected_head" ]; then
       printf 'revision-mismatch expected=%s current=%s\n' "$expected_head" "$current_head"

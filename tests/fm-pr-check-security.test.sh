@@ -105,7 +105,10 @@ printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_FAIL:-0}" = 0 ] || exit 1
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
 if [ "${1:-}" = api ]; then
-  printf '{"sha":"%s"}\n' "${FM_TEST_GLAB_HEAD:-0123456789abcdef0123456789abcdef01234567}"
+  case " $* " in
+    *" --jq .sha "*) printf '%s\n' "${FM_TEST_GLAB_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
+    *) printf '{"sha":"%s"}\n' "${FM_TEST_GLAB_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
+  esac
   exit 0
 fi
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
