@@ -50,5 +50,6 @@ Regression entry points:
 ```sh
 tests/fm-calm-pi-extension.test.sh
 tests/fm-pi-primary-types.test.sh
+FM_PI_LIVE_E2E=1 tests/fm-calm-pi-conflict-live-e2e.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 ```
