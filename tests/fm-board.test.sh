@@ -157,6 +157,23 @@ assert_contains "$BOARD_HTML" "Waiting for your merge" "recorded work awaiting a
 assert_contains "$BOARD_HTML" "Held for your word" "a captain-held queued item is not surfaced"
 pass "the mechanical half of Waiting on you comes from durable state"
 
+# --- muted sub-text is legible wherever it appears ---------------------------
+# A held card carries its reason as muted sub-text inside a list item, where
+# nothing stacks it the way the flex column of a Queued row does.
+# An inline .sub therefore welds onto the title it follows and the column reads
+# "Ship the mesh accuracy notewaiting on the captain's word".
+# The property belongs to the class rather than to the two cards that showed it,
+# so it is asserted once against the rule every muted line goes through.
+assert_grep 'class="sub">waiting on the captain' "$OUT" \
+  "a held card does not carry its reason as muted sub-text"
+SUB_RULE=$(grep -oE '\.sub\{[^}]*\}' "$OUT") \
+  || fail "the artifact styles muted sub-text with no .sub rule"
+case "$SUB_RULE" in
+  *display:block*) ;;
+  *) fail "muted sub-text is inline, so it welds onto the title it follows: $SUB_RULE" ;;
+esac
+pass "muted sub-text takes its own line wherever it appears"
+
 # --- an unelaborated decision key still appears ------------------------------
 
 assert_contains "$BOARD_HTML" "listen-b:blind-src" "an unresolved decision key was dropped from the board"

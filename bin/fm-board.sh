@@ -768,7 +768,8 @@ h2{margin:0;font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:u
   padding:16px;display:flex;flex-direction:column;gap:12px;font-size:14px;min-width:0}
 .row{display:flex;flex-direction:column;gap:2px;overflow-wrap:anywhere}
 .row.dim{opacity:.6}
-.sub{font-size:12px;color:var(--muted)}
+/* block, not inline: a .sub in a list item would otherwise weld onto its title */
+.sub{display:block;font-size:12px;color:var(--muted)}
 .empty{font-size:13px;color:var(--muted)}
 .stale .meta{color:var(--warning);font-weight:600}
 .expired .meta{color:var(--error);font-weight:600}
