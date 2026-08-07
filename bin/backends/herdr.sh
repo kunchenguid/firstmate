@@ -2878,7 +2878,8 @@ EOF
   fi
   # Delegate the empty/pending/unknown decision to the shared owner. The bare
   # shape only ever starts with an AGENT glyph (FM_BACKEND_HERDR_BARE_PROMPT_RE
-  # is '^(❯|›|→)'), so a bare shell prompt never reaches here - it stays 'unknown'
+  # is '^(❯|›)'; Cursor also admits `→` via FM_BACKEND_HERDR_BARE_PROMPT_CURSOR_RE),
+  # so a bare shell prompt never reaches here - it stays 'unknown'
   # via the no-composer-row path above, exactly as before.
   # The plain (ANSI-stripped, border-stripped, trimmed) form of the winning row
   # is passed as plain_content so the shared classifier can distinguish a

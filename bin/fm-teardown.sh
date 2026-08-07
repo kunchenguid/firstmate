@@ -179,8 +179,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
-# shellcheck source=bin/fm-cursor-lib.sh
-. "$SCRIPT_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-process-identity-lib.sh
+. "$SCRIPT_DIR/fm-process-identity-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
@@ -1338,16 +1338,9 @@ $out
 EOF
 }
 
-# The parse itself is owned by fm_process_identity (bin/fm-cursor-lib.sh), so
-# the identity recorded at spawn and the identity re-checked here are produced
-# by the same code and can never drift.
-task_process_identity() {  # <pid>
-  fm_process_identity "$1"
-}
-
-task_process_identity_matches() {  # <pid> <identity>
-  fm_process_identity_matches "$1" "$2"
-}
+# The parse itself is owned by fm_process_identity
+# (bin/fm-process-identity-lib.sh), so the identity recorded at spawn and the
+# identity re-checked here are produced by the same code and can never drift.
 
 task_pid_list_contains() {  # <pid-list> <pid>
   printf '%s\n' "$1" | grep -Fxq "$2"
@@ -1381,7 +1374,7 @@ reap_task_backend_process_group() {  # <label>
     return 0
     ;;
   esac
-  leader_start=$(task_process_identity "$leader") || {
+  leader_start=$(fm_process_identity "$leader") || {
     echo "warning: lsof is unavailable; cannot identify the tmux pane process group for $ID" >&2
     return 0
   }
@@ -1398,14 +1391,14 @@ reap_task_backend_process_group() {  # <label>
     echo "warning: lsof is unavailable; refusing to signal teardown's own process group for $ID" >&2
     return 0
   fi
-  task_process_identity_matches "$leader" "$leader_start" || return 0
+  fm_process_identity_matches "$leader" "$leader_start" || return 0
   current_pgid=$(ps -o pgid= -p "$leader" 2>/dev/null) || current_pgid=""
   current_pgid=$(printf '%s' "$current_pgid" | tr -d '[:space:]')
   [ "$current_pgid" = "$pgid" ] || return 0
   echo "teardown: reaping leaked $label process group for $ID: $pgid" >&2
   kill -TERM -- "-$pgid" 2>/dev/null || true
   sleep 1
-  if task_process_identity_matches "$leader" "$leader_start" \
+  if fm_process_identity_matches "$leader" "$leader_start" \
      && [ "$(ps -o pgid= -p "$leader" 2>/dev/null | tr -d '[:space:]')" = "$pgid" ] \
      && kill -0 -- "-$pgid" 2>/dev/null; then
     echo "teardown: force-killing leaked $label process group for $ID: $pgid" >&2
@@ -1435,7 +1428,7 @@ reap_cursor_worker_server() {  # <meta>
       ;;
     *) identity="starttime=$starttime" ;;
   esac
-  if ! current=$(task_process_identity "$pid") \
+  if ! current=$(fm_process_identity "$pid") \
      || [ "$current" != "$identity" ]; then
     # The pid was recycled or is gone; nothing to reap. Remove the stale
     # record so a later teardown does not re-consult it.
@@ -1445,7 +1438,7 @@ reap_cursor_worker_server() {  # <meta>
   echo "teardown: reaping recorded cursor worker-server for $ID: $pid" >&2
   kill -TERM "$pid" 2>/dev/null || true
   sleep 1
-  if task_process_identity_matches "$pid" "$identity"; then
+  if fm_process_identity_matches "$pid" "$identity"; then
     echo "teardown: force-killing recorded cursor worker-server for $ID: $pid" >&2
     kill -KILL "$pid" 2>/dev/null || true
   fi
@@ -1487,7 +1480,7 @@ reap_task_worktree_processes() {  # <label> <dir>...
     tracked_identities=()
     while IFS= read -r pid; do
       [ -n "$pid" ] || continue
-      if ! identity=$(task_process_identity "$pid"); then
+      if ! identity=$(fm_process_identity "$pid"); then
         if ! task_pids_under_roots "$@"; then
           echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
           return 1
@@ -1517,7 +1510,7 @@ EOF
       pid=${tracked_pids[$i]}
       identity=${tracked_identities[$i]}
       if task_pid_list_contains "$current_pids" "$pid" \
-         && task_process_identity_matches "$pid" "$identity"; then
+         && fm_process_identity_matches "$pid" "$identity"; then
         kill -TERM "$pid" 2>/dev/null || true
       fi
     done
@@ -1533,7 +1526,7 @@ EOF
       pid=${tracked_pids[$i]}
       identity=${tracked_identities[$i]}
       if task_pid_list_contains "$current_pids" "$pid" \
-         && task_process_identity_matches "$pid" "$identity"; then
+         && fm_process_identity_matches "$pid" "$identity"; then
         remaining_pids+=("$pid")
         remaining_identities+=("$identity")
       fi
@@ -1549,7 +1542,7 @@ EOF
         pid=${remaining_pids[$i]}
         identity=${remaining_identities[$i]}
         if task_pid_list_contains "$current_pids" "$pid" \
-           && task_process_identity_matches "$pid" "$identity"; then
+           && fm_process_identity_matches "$pid" "$identity"; then
           kill -KILL "$pid" 2>/dev/null || true
         fi
       done

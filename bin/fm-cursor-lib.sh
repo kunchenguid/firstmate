@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Cursor executable resolution, Cursor process identity, and the shared
-# process-identity parse. Sourced by bin/fm-spawn.sh, bin/fm-teardown.sh,
-# bin/fm-harness.sh, bin/fm-session-lock-lib.sh, and bin/backends/tmux.sh.
+# Cursor executable resolution and Cursor process identity.
+# Sourced by bin/fm-spawn.sh, bin/fm-harness.sh, bin/fm-session-lock-lib.sh,
+# and bin/backends/tmux.sh.
 # This file is sourced by scripts and has no side effects on source.
+# Generic spawn/teardown PID reuse guards live in bin/fm-process-identity-lib.sh.
 #
 # Why one owner: cursor ships TWO executable names - `cursor-agent`, plus the
 # legacy alias `agent` it installs on every platform. `agent` is far too
@@ -198,43 +199,4 @@ fm_cursor_process_matches() {  # <comm> <args>
   # its install path.
   case "$comm" in */*) fm_cursor_path_is_cursor "$comm" && return 0 ;; esac
   return 1
-}
-
-# The process identity recorded at spawn and re-checked at teardown, so a
-# recycled pid is never mistaken for the process that was recorded.
-#
-# Linux /proc/<pid>/stat is authoritative when readable. The parse must strip
-# through the FINAL `)` before splitting, because field 2 is the parenthesized
-# comm and a comm containing spaces (or parentheses) shifts every positional
-# field after it - reading `$22` from the raw line records the wrong number and
-# silently breaks the recycled-pid check. `starttime` is field 22 overall,
-# which is index 19 of the remainder after the comm.
-#
-# `ps -o lstart=` is the portable fallback for platforms without /proc. Both
-# forms are self-describing, so a recorded value always states which it is.
-fm_process_identity() {  # <pid>
-  local pid=$1 proc_root stat_line starttime value
-  local -a stat_fields
-  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
-  if [ -r "$proc_root/$pid/stat" ]; then
-    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
-    read -r -a stat_fields <<< "${stat_line##*)}"
-    [ "${#stat_fields[@]}" -ge 20 ] || return 1
-    starttime=${stat_fields[19]}
-    case "$starttime" in ''|*[!0-9]*) return 1 ;; esac
-    printf 'starttime=%s\n' "$starttime"
-    return 0
-  fi
-  value=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
-  value="${value#"${value%%[![:space:]]*}"}"
-  value="${value%"${value##*[![:space:]]}"}"
-  [ -n "$value" ] || return 1
-  case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
-  printf 'lstart=%s\n' "$value"
-}
-
-fm_process_identity_matches() {  # <pid> <identity>
-  local current
-  current=$(fm_process_identity "$1") || return 1
-  [ "$current" = "$2" ]
 }

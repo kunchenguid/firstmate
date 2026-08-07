@@ -239,6 +239,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-process-identity-lib.sh
+. "$SCRIPT_DIR/fm-process-identity-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -2162,12 +2164,8 @@ cursor_worker_server_find() {  # <backend> <target> <cursor-binary> -> pid on st
 }
 
 # The recorded identity is produced by the SAME parse teardown re-checks
-# (fm_process_identity, bin/fm-cursor-lib.sh), so a comm containing spaces
-# cannot make the two disagree and silently defeat the recycled-pid check.
-cursor_worker_server_identity() {  # <pid> -> identity value for meta
-  fm_process_identity "$1"
-}
-
+# (fm_process_identity, bin/fm-process-identity-lib.sh), so a comm containing
+# spaces cannot make the two disagree and silently defeat the recycled-pid check.
 cursor_worker_server_record() {  # <backend> <target> <meta>
   local backend=$1 target=$2 meta=$3 agent_pid worker_pid identity binary=${CURSOR_BIN:-cursor-agent} i
   for i in 1 2 3 4 5; do
@@ -2186,7 +2184,7 @@ EOF
     [ -n "$agent_pid" ] || { sleep 0.3; continue; }
     worker_pid=$(pgrep -P "$agent_pid" -f 'index.js worker-server' 2>/dev/null | head -1 || true)
     [ -n "$worker_pid" ] || { sleep 0.3; continue; }
-    identity=$(cursor_worker_server_identity "$worker_pid" 2>/dev/null || true)
+    identity=$(fm_process_identity "$worker_pid" 2>/dev/null || true)
     [ -n "$identity" ] || return 0
     {
       echo "cursor_worker_server=$worker_pid"

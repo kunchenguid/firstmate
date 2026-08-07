@@ -39,12 +39,30 @@ test_bare_shell_glyphs_are_unknown() {
 
 test_stripped_unbordered_content_uses_plain_content() {
   local plain out
-  for plain in '$' 'user@host $' '❯' '›' '→' '⟩'; do
+  # Shell glyphs and unscoped Cursor arrow stay unknown without an idle match.
+  for plain in '$' 'user@host $' '→'; do
     out=$(classify 0 '' '' sensitive "$plain")
     [ "$out" = unknown ] \
       || fail "stripped unbordered content '$plain' must stay unknown without an idle match, got '$out'"
   done
-  pass "fm_composer_classify_content: stripped unbordered content stays unknown without an idle match"
+  pass "fm_composer_classify_content: stripped unbordered shell/arrow content stays unknown without an idle match"
+}
+
+test_ghost_only_agent_glyphs_match_main_empty() {
+  # Regression vs main: ghost-stripped bare established agent glyphs are empty
+  # composers; Cursor's `→` stays unknown unscoped and empty with Cursor context.
+  local out
+  out=$(classify 0 '' '' sensitive '❯')
+  [ "$out" = empty ] || fail "ghost-only '❯' must read empty, got '$out'"
+  out=$(classify 0 '' '' sensitive '›')
+  [ "$out" = empty ] || fail "ghost-only '›' must read empty, got '$out'"
+  out=$(classify 0 '' '' sensitive '⟩')
+  [ "$out" = empty ] || fail "ghost-only '⟩' must read empty, got '$out'"
+  out=$(classify 0 '' '' sensitive '→')
+  [ "$out" = unknown ] || fail "unscoped ghost-only '→' must read unknown, got '$out'"
+  out=$(classify 0 '' '' sensitive '→' cursor)
+  [ "$out" = empty ] || fail "Cursor ghost-only '→' must read empty, got '$out'"
+  pass "fm_composer_classify_content: ghost-only ❯/›/⟩ empty; unscoped → unknown; Cursor → empty"
 }
 
 test_bare_shell_prompt_with_command_is_not_empty() {
@@ -167,9 +185,10 @@ test_cursor_stripped_ghost_plain_is_empty() {
   [ "$out" = empty ] || fail "stripped Cursor '→ Add a follow-up' with an idle match should read empty, got '$out'"
   out=$(classify 0 '' '^Add a follow-up$' sensitive '→ Add a follow-up' cursor)
   [ "$out" = empty ] || fail "stripped Cursor '→ Add a follow-up' with an anchored idle match should read empty, got '$out'"
-  # Without an idle match the ghost-stripped row stays unknown: a fully
-  # de-emphasised bare row (dimmed shell prompt, dimmed glyph alone) is never
-  # a safe injection target on glyph shape alone.
+  # Without an idle match, unscoped ghost-stripped Cursor arrow rows stay
+  # unknown. Established agent glyphs (❯/›/⟩) are empty on glyph shape alone
+  # (see test_ghost_only_agent_glyphs_match_main_empty); that safety rule does
+  # not extend to Cursor's common bare `→` decoration.
   out=$(classify 0 '' '' sensitive '→ Add a follow-up')
   [ "$out" = unknown ] || fail "stripped '→ Add a follow-up' without an idle match must stay unknown, got '$out'"
   out=$(classify 0 '' '' sensitive '→')
@@ -178,7 +197,7 @@ test_cursor_stripped_ghost_plain_is_empty() {
   [ "$out" = empty ] || fail "stripped bare Cursor '→' must read empty with Cursor context, got '$out'"
   out=$(classify 0 '' '' sensitive '> ls')
   [ "$out" = unknown ] || fail "stripped shell-glyph row '> ls' must stay unknown, got '$out'"
-  pass "fm_composer_classify_content: stripped ghost-only rows read empty only on an idle match, else unknown"
+  pass "fm_composer_classify_content: stripped Cursor ghost rows need idle match or Cursor bare arrow; shell stays unknown"
 }
 
 # --- Shared composer env contract (fm_composer_export_env) ------------------
@@ -246,6 +265,7 @@ test_queued_submit_verdict_never_widens_to_other_harnesses() {
 
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
+test_ghost_only_agent_glyphs_match_main_empty
 test_bare_shell_prompt_with_command_is_not_empty
 test_bordered_shell_glyph_is_empty
 test_agent_glyphs_are_empty_bordered_and_bare

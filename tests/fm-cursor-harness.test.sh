@@ -582,27 +582,43 @@ test_worker_server_identity_survives_spaced_comm() {
   make_spaced_comm_proc "$proc_root" 4242 987654
 
   spawn_id=$(FM_PROC_ROOT_OVERRIDE="$proc_root" bash -c \
-    ". '$ROOT/bin/fm-cursor-lib.sh'; fm_process_identity 4242")
+    ". '$ROOT/bin/fm-process-identity-lib.sh'; fm_process_identity 4242")
   [ "$spawn_id" = "starttime=987654" ] \
     || fail "spaced comm parsed as '$spawn_id', expected starttime=987654"
 
   teardown_id=$(FM_PROC_ROOT_OVERRIDE="$proc_root" bash -c \
-    ". '$ROOT/bin/fm-cursor-lib.sh'; fm_process_identity 4242")
+    ". '$ROOT/bin/fm-process-identity-lib.sh'; fm_process_identity 4242")
   [ "$spawn_id" = "$teardown_id" ] \
     || fail "spawn recorded '$spawn_id' but teardown read '$teardown_id'"
 
   FM_PROC_ROOT_OVERRIDE="$proc_root" bash -c \
-    ". '$ROOT/bin/fm-cursor-lib.sh'; fm_process_identity_matches 4242 '$spawn_id'" \
+    ". '$ROOT/bin/fm-process-identity-lib.sh'; fm_process_identity_matches 4242 '$spawn_id'" \
     || fail "the recorded identity must match the process it was recorded from"
 
   # Same pid, different starttime: a recycled pid must never match.
   recycled="$TMP_ROOT/spaced-proc-recycled"
   make_spaced_comm_proc "$recycled" 4242 111111
   if FM_PROC_ROOT_OVERRIDE="$recycled" bash -c \
-    ". '$ROOT/bin/fm-cursor-lib.sh'; fm_process_identity_matches 4242 '$spawn_id'"; then
+    ". '$ROOT/bin/fm-process-identity-lib.sh'; fm_process_identity_matches 4242 '$spawn_id'"; then
     fail "a recycled pid with a different starttime must not match the recorded identity"
   fi
   pass "worker-server identity is parsed identically at spawn and teardown for a spaced comm"
+}
+
+test_process_identity_portable_lstart_fallback() {
+  # When /proc is absent (override to an empty root), the neutral owner falls
+  # back to a self-describing lstart= identity from ps.
+  local identity
+  identity=$(FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-proc-here" bash -c \
+    ". '$ROOT/bin/fm-process-identity-lib.sh'; fm_process_identity $$")
+  case "$identity" in
+    lstart=*) ;;
+    *) fail "portable path must emit lstart=..., got '$identity'" ;;
+  esac
+  FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-proc-here" bash -c \
+    ". '$ROOT/bin/fm-process-identity-lib.sh'; fm_process_identity_matches $$ '$identity'" \
+    || fail "portable lstart identity must match the live process"
+  pass "fm_process_identity: portable no-/proc path emits matching lstart identity"
 }
 
 test_cursor_worker_server_reaped_after_spaced_comm_record() {
@@ -695,5 +711,6 @@ test_cursor_worker_server_recorded_at_spawn
 test_cursor_worker_server_alias_uses_portable_identity
 test_cursor_worker_server_absent_record_is_omitted
 test_worker_server_identity_survives_spaced_comm
+test_process_identity_portable_lstart_fallback
 test_cursor_worker_server_reaped_after_spaced_comm_record
 test_cursor_refuses_backends_without_worker_server_discovery
