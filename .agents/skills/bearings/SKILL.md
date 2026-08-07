@@ -3,7 +3,7 @@ name: bearings
 description: >-
   Generate a "pick up where I left off" fleet digest from firstmate's live fleet state.
   Use when the captain invokes /bearings or asks for a bearings report, morning brief, status report, catch-up, "where did I leave off", or "what's in the works".
-  Plain /bearings is chat-only by default, while /bearings file explicitly writes the dated data/status-report-<YYYY-MM-DD>.md artifact; additional open-PR discovery remains opt-in and composes with file mode.
+  Plain /bearings is chat-only by default, while /bearings file explicitly writes a dated data/status-report-<YYYY-MM-DD>[-<HHMMSS>[-N]].md artifact; additional open-PR discovery remains opt-in and composes with file mode.
 user-invocable: true
 metadata:
   internal: true
@@ -20,7 +20,7 @@ It never tears down a task, merges a PR, dispatches new work, steers a worker, a
 ## Invocation modes
 
 - Plain `/bearings` gathers a fresh bounded snapshot and renders the four-section chat digest without creating, deleting, reading, or replacing `data/status-report-<YYYY-MM-DD>.md`.
-- `/bearings file` gathers a fresh bounded snapshot, replaces today's `data/status-report-<YYYY-MM-DD>.md` from scratch, and renders the four-section chat digest with a link or path to that report.
+- `/bearings file` gathers a fresh bounded snapshot, creates a non-destructive dated report, and renders the four-section chat digest with a link or path to that report.
 - Treat `file` only as an explicit invocation option in the slash command.
 - Do not treat natural-language requests such as "write a report", "save this", "persist it", or "make a file" as file mode unless the invocation explicitly includes the standalone `file` option.
 - When the captain asks to include PRs, pass the snapshot command's additional open-PR discovery opt-in.
@@ -52,11 +52,14 @@ It never tears down a task, merges a PR, dispatches new work, steers a worker, a
    The chat response uses the four complete sections in the chat-response contract below, in the same order, each always present.
    Plain mode stops here and writes no report artifact.
 
-3. **In explicit file mode only, compose and replace the detailed report file.**
+3. **In explicit file mode only, compose and write a new detailed report file.**
    The report uses the same four complete sections as the chat, in the same order, and adds the detail the chat omits.
    Never read an earlier `data/status-report-*.md` to decide what to omit, include, describe as changed, or call current.
-   Write the full report to `data/status-report-<YYYY-MM-DD>.md` using today's date.
-   If today's file already exists, delete it first, then create a new file from scratch.
+   Pipe the complete report to `bin/fm-bearings-report-write.sh`, with `FM_HOME` set to the current home, and use its returned path in the chat digest.
+   The writer uses `data/status-report-<YYYY-MM-DD>.md` only when that path is absent.
+   If it already exists, it preserves it and creates `data/status-report-<YYYY-MM-DD>-<HHMMSS>.md`, then the first available `-N` suffix if needed.
+   Never delete, truncate, replace, or derive the new report from an earlier report.
+   This preserves same-day snapshots that may already be cited and have no git history because `data/` is gitignored.
    This is the only write allowed by the skill.
    The detailed report includes:
    - **Title** - `# Bearings - <day> <YYYY-MM-DD>` (use "Morning status" only when the captain specifically asks for a morning brief), followed by two or three sentences framing where things stand.
