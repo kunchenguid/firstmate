@@ -181,15 +181,21 @@ fi
 # and the validation domain for a card's `binds` field. A decision held in a
 # delegated home is namespaced by that home so the two sets cannot collide; the
 # renderer folds both into the same column off the same identity.
+# This read decides what an authored `binds` may name, so it must never fail
+# quietly: an empty domain would turn a genuinely open decision into the refusal
+# "there are no open decisions right now", which is the silence the board exists
+# to prevent, arriving through the error path.
 DURABLE_KEYS=$(printf '%s' "$SNAPSHOT" | jq -r '
   ([ .tasks[]? | select(.kind != "secondmate") | . as $t
-     | (.hints.open_decisions // [])[]? | select(.key != null)
+     | ((.hints.open_decisions // []) | if type == "array" then . else [] end)[]
+     | select(type == "object" and .key != null)
      | "\($t.id):\(.key)" ]
    + [ .secondmate_current.records[]? | . as $m
-       | (if ((.decisions_open // []) | type) == "array" then .decisions_open else [] end)[]
+       | ((.decisions_open // []) | if type == "array" then . else [] end)[]
        | select(type == "object" and .id != null and .key != null)
        | "\($m.id)/\(.id):\(.key)" ])
-  | unique | .[]')
+  | unique | .[]') \
+  || die "could not read the open decisions this snapshot holds, so a card's 'binds' cannot be checked against them"
 
 # --- authored cards ---------------------------------------------------------
 #
@@ -403,7 +409,8 @@ CARDS_JSON=$(printf '%s' "$CARDS_ROWS" | jq -R -s '
 
 REDACT_HOME=${HOME:-}
 case "$REDACT_HOME" in ''|/) REDACT_HOME="" ;; esac
-SNAPSHOT_HOME=$(printf '%s' "$SNAPSHOT" | jq -r '.fm_home // ""')
+SNAPSHOT_HOME=$(printf '%s' "$SNAPSHOT" | jq -r '.fm_home // ""') \
+  || die "could not read the snapshot's own home path, so the leak boundary cannot be enforced"
 case "$SNAPSHOT_HOME" in /) SNAPSHOT_HOME="" ;; esac
 
 # The board now reads delegated state, so a delegated home's path is on the same
@@ -411,7 +418,8 @@ case "$SNAPSHOT_HOME" in /) SNAPSHOT_HOME="" ;; esac
 # survives.
 MATE_HOMES=$(printf '%s' "$SNAPSHOT" | jq -c '
   ([ .secondmate_current.records[]? | .home ] + [ .secondmate_landed.records[]? | .home ])
-  | map(select(type == "string" and . != "" and . != "/")) | unique')
+  | map(select(type == "string" and . != "" and . != "/")) | unique') \
+  || die "could not read the delegated home paths, so the leak boundary cannot be enforced"
 
 # The renderer is a quoted heredoc rather than an inline argument: the emitted
 # page carries JavaScript full of single quotes, which no single-quoted shell
@@ -472,7 +480,8 @@ def when($iso): ($iso | hhmm) as $t | (if $t == "" then "" else "state as of " +
 # the home it came from; a main-home entry carries no home.
 | ( [ $work[]
     | . as $t
-    | (.hints.open_decisions // [])[]
+    | ((.hints.open_decisions // []) | if type == "array" then . else [] end)[]
+    | select(type == "object")
     | { kind: "decision",
         id: "\($t.id):\(.key)",
         home: null,
@@ -480,10 +489,11 @@ def when($iso): ($iso | hhmm) as $t | (if $t == "" then "" else "state as of " +
         task_title: ($t.backlog.title // $t.id),
         project: ($t.project | basename),
         verb: .verb,
-        summary: .summary } ]
+        summary: .summary,
+        reason: null } ]
   + [ $s.secondmate_current.records[]?
       | . as $m
-      | (if ((.decisions_open // []) | type) == "array" then .decisions_open else [] end)[]
+      | ((.decisions_open // []) | if type == "array" then . else [] end)[]
       | select(type == "object" and .id != null and .key != null)
       | { kind: "decision",
           id: "\($m.id)/\(.id):\(.key)",
@@ -492,7 +502,8 @@ def when($iso): ($iso | hhmm) as $t | (if $t == "" then "" else "state as of " +
           task_title: ((.summary // .key) | tostring),
           project: ($m.id | tostring),
           verb: (.verb // "needs-decision"),
-          summary: ((.reason // "") | tostring) } ] ) as $durable
+          summary: ((.summary // "") | tostring),
+          reason: (if (.reason // "") == "" then null else (.reason | tostring) end) } ] ) as $durable
 
 # A delegated home the snapshot could not read whole cannot be reported as
 # holding no decisions, so what was not read is stated rather than assumed.
@@ -501,7 +512,7 @@ def when($iso): ($iso | hhmm) as $t | (if $t == "" then "" else "state as of " +
     | { id: (.id | tostring), reason: ((.current.reason // "state unavailable") | tostring) } ]
   + [ $s.secondmate_current.records[]?
       | . as $m
-      | (if ((.omitted // []) | type) == "array" then .omitted else [] end)[]
+      | ((.omitted // []) | if type == "array" then . else [] end)[]
       | select(type == "object" and .surface == "decisions_open")
       | { id: ($m.id | tostring),
           reason: "\(.count) more open decisions than this snapshot carries" } ] ) as $unread_homes
@@ -554,6 +565,7 @@ def when($iso): ($iso | hhmm) as $t | (if $t == "" then "" else "state as of " +
     + (if $d.home != null then " &middot; held in delegated home \($d.home | esc)" else "" end)
     + "</p>"
     + (if ($d.summary // "") != "" then "<p>\($d.summary | escn(700))</p>" else "" end)
+    + (if ($d.reason // "") != "" then "<p>\($d.reason | escn(700))</p>" else "" end)
     + "<p class=\"callout\">Not written up yet - there are no options on this card. "
     + "Ask for it to be laid out before answering.</p>"
     + "</article>";
@@ -663,15 +675,17 @@ def when($iso): ($iso | hhmm) as $t | (if $t == "" then "" else "state as of " +
    | reverse) as $landed_all
 | ($landed_all[0:$landed]) as $landed_shown
 
-# The Waiting-on-you column, cards and count from one list. The count is what is
-# actually waiting - each authored decision, each unelaborated one, each chore -
-# and the empty state is read off the rendered cards, so it cannot claim nothing
-# is waiting while a card sits under it.
+# The Waiting-on-you column, cards and count from one list. The count is every
+# entry actually waiting, not every card: a card listing five pull requests is
+# five things to do, the same as five chores. The empty state is read off the
+# rendered cards, so it cannot claim nothing is waiting while a card sits under
+# it.
 | ( [ $authored[] | { html: authored_card(.), n: 1 } ]
   + [ $unelaborated[] | { html: unelaborated_card(.), n: 1 } ]
-  + (if ($prs | length) > 0 then [ { html: pr_card, n: 1 } ] else [] end)
-  + (if ($held | length) > 0 then [ { html: held_card, n: 1 } ] else [] end)
-  + (if ($unread_homes | length) > 0 then [ { html: unread_homes_card, n: 1 } ] else [] end)
+  + (if ($prs | length) > 0 then [ { html: pr_card, n: ($prs | length) } ] else [] end)
+  + (if ($held | length) > 0 then [ { html: held_card, n: ($held | length) } ] else [] end)
+  + (if ($unread_homes | length) > 0
+     then [ { html: unread_homes_card, n: ($unread_homes | length) } ] else [] end)
   + [ $chores[] | { html: chores_card(.), n: (.item | length) } ] ) as $waiting
 | ($waiting | map(.html) | join("")) as $waiting_html
 | ($waiting | map(.n) | add // 0) as $waiting_count

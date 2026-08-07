@@ -551,6 +551,126 @@ assert_no_grep "$TMP_ROOT" "$OUT9" "an absolute fixture path reached the artifac
 assert_no_grep "$TMP_ROOT" "$OUT12" "an absolute fixture path reached the artifact"
 pass "delegated home paths do not reach the artifact"
 
+# --- a delegated home of an unexpected shape is skipped, not fatal -----------
+#
+# `--snapshot <file>` accepts any saved snapshot, so a delegated record from an
+# older schema can carry no decision list at all. Such a home must drop out of
+# the column the way an unreadable one does, rather than killing the render.
+shape_case() {  # <label> <jq-program>
+  local label=$1 program=$2 snap out
+  snap="$TMP_ROOT/snap-shape.json"
+  out="$TMP_ROOT/board-shape.html"
+  rm -f "$out"
+  jq "$program" "$SNAP3" > "$snap" || fail "$label: the shape fixture could not be built"
+  PATH="$FAKEBIN:$PATH" FM_HOME="$DELEGATING" "$BOARD" --snapshot "$snap" --out "$out" >/dev/null \
+    || fail "$label: the board aborted instead of skipping the home"
+  assert_present "$out" "$label: no artifact was written"
+  assert_grep "Tile mating corners" "$out" "$label: the rest of the board was lost with the home"
+}
+shape_case "a delegated home with a null decision list" \
+  '.secondmate_current.records[0].decisions_open = null'
+shape_case "a delegated home with no decision list at all" \
+  'del(.secondmate_current.records[0].decisions_open)'
+shape_case "a delegated home whose decision list is not a list" \
+  '.secondmate_current.records[0].decisions_open = "unavailable"'
+shape_case "a delegated home with a null omission list" \
+  '.secondmate_current.records[0].omitted = null'
+shape_case "a main-home task with a null decision list" \
+  '.tasks[0].hints.open_decisions = null'
+pass "a delegated home of an unexpected shape is skipped rather than aborting the render"
+
+# --- a delegated decision carries its full text ------------------------------
+#
+# A status-sourced decision carries its text in `summary` and nothing in
+# `reason`. Clipping that text into the heading and dropping the rest would be
+# the same silence in smaller form, so the body has to carry it.
+LONG_SUMMARY="Prose above the blind clips needs a decision about which of the two sitting surfaces the answered set collapses into before the tier-2 session can be staged"
+DELEGATED_LONG="$TMP_ROOT/snap-delegated-long.json"
+jq --arg s "$LONG_SUMMARY" '
+  .secondmate_current.records[0].decisions_open =
+    [{id:"listen-b",key:"blind-src",verb:"needs-decision",summary:$s,reason:null,source:"status"}]
+' "$SNAP3" > "$DELEGATED_LONG" || fail "the long-summary fixture could not be built"
+OUT14="$TMP_ROOT/board-delegated-long.html"
+PATH="$FAKEBIN:$PATH" FM_HOME="$DELEGATING" "$BOARD" --snapshot "$DELEGATED_LONG" --out "$OUT14" >/dev/null \
+  || fail "the board did not render a delegated status decision"
+assert_grep "before the tier-2 session can be staged" "$OUT14" \
+  "a delegated decision's text was clipped into its heading and the rest dropped"
+assert_grep "sample-mate/listen-b:blind-src" "$OUT14" \
+  "the delegated status decision carries no durable identity"
+pass "a delegated decision's full text reaches the card body, not just its heading"
+
+# --- the count reports entries, not cards ------------------------------------
+#
+# Each pull request awaiting a merge and each held item is its own act, the same
+# as each chore, so a card listing several of them counts as several.
+MANY="$TMP_ROOT/many-home"
+mkdir -p "$MANY/state" "$MANY/data" "$MANY/config" "$MANY/projects/tung"
+cat > "$MANY/data/backlog.md" <<'EOF'
+## In flight
+- [ ] pr-one - First merge (repo: tung) (kind: ship) (since 2026-07-11)
+- [ ] pr-two - Second merge (repo: tung) (kind: ship) (since 2026-07-11)
+
+## Queued
+- [ ] held-one - First held item (repo: tung) (kind: captain) (hold: waiting on the captain's word) (hold-kind: captain)
+- [ ] held-two - Second held item (repo: tung) (kind: captain) (hold: waiting on the captain's word) (hold-kind: captain)
+- [ ] held-three - Third held item (repo: tung) (kind: captain) (hold: waiting on the captain's word) (hold-kind: captain)
+EOF
+for id in pr-one pr-two; do
+  fm_write_meta "$MANY/state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "worktree=$MANY/projects/tung" \
+    "project=$MANY/projects/tung" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "pr=https://github.com/notno/tung/pull/7"
+  record_claude_state "$MANY/state" "$id" busy
+done
+MANY_CHORES="$TMP_ROOT/many-chores.txt"
+cat > "$MANY_CHORES" <<'EOF'
+[chores]
+item: Sign the release note.
+item: Re-pair the bench radio.
+EOF
+OUT15="$TMP_ROOT/board-many.html"
+PATH="$FAKEBIN:$PATH" FM_HOME="$MANY" "$BOARD" --out "$OUT15" --cards "$MANY_CHORES" >/dev/null \
+  || fail "the board did not render a fleet with several entries per card"
+# Two pull requests, three held items and two chores are seven acts on three cards.
+assert_grep ">7 items<" "$OUT15" \
+  "the count reported cards rather than the entries waiting inside them"
+assert_no_grep "Nothing is waiting on you." "$OUT15" \
+  "the column claimed nothing is waiting while three cards were rendered under it"
+pass "the count reports every waiting entry, not every card"
+
+# --- the decision domain never fails into a false claim ----------------------
+#
+# The bind check is only as honest as the read behind it. If that read fails the
+# refusal must name the read, because reporting "there are no open decisions"
+# for a decision that is genuinely open is the one thing this board cannot say.
+BROKEN_DOMAIN="$TMP_ROOT/snap-broken-domain.json"
+jq '.tasks += ["not-a-task"]' "$SNAP" > "$BROKEN_DOMAIN" \
+  || fail "the broken-domain fixture could not be built"
+jq -e '[.tasks[] | select(type == "object") | (.hints.open_decisions // [])[]] | length > 0' \
+  "$BROKEN_DOMAIN" >/dev/null \
+  || fail "the broken-domain fixture carries no genuinely open decision"
+printf '[decision]\nkey: a\ntitle: t\noption: x | X\nbinds: listen-b:blind-src\n' \
+  > "$TMP_ROOT/genuine.txt"
+DOMAIN_OUT="$TMP_ROOT/board-broken-domain.html"
+DOMAIN_ERR="$TMP_ROOT/broken-domain.err"
+rm -f "$DOMAIN_OUT"
+PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" "$BOARD" --snapshot "$BROKEN_DOMAIN" \
+  --out "$DOMAIN_OUT" --cards "$TMP_ROOT/genuine.txt" >/dev/null 2>"$DOMAIN_ERR"
+DOMAIN_CODE=$?
+[ "$DOMAIN_CODE" -ne 0 ] || fail "an unreadable decision domain was not a failure at all"
+assert_absent "$DOMAIN_OUT" "an artifact was written from an unreadable decision domain"
+grep -q "could not read the open decisions" "$DOMAIN_ERR" \
+  || fail "the failure does not name what could not be read: $(cat "$DOMAIN_ERR")"
+grep -q "there are no open decisions right now" "$DOMAIN_ERR" \
+  && fail "an unreadable decision domain was reported as a fleet with no open decisions"
+grep -q "binds names no open decision" "$DOMAIN_ERR" \
+  && fail "an unreadable decision domain was blamed on the authored card instead"
+pass "an unreadable decision domain fails loudly instead of claiming nothing is pending"
+
 # --- counts are normalised where the flag is still named ---------------------
 
 OUT13="$TMP_ROOT/board-zeros.html"
