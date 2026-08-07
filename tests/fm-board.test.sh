@@ -214,6 +214,32 @@ assert_grep "&lt;script&gt;alert(1)&lt;/script&gt;" "$OUT3" "authored markup was
 assert_no_grep "<b>bold</b>" "$OUT3" "authored markup reached the page unescaped"
 pass "authored text cannot inject markup"
 
+# Snapshot prose is bounded on the text a reader sees, not on its escaped form,
+# so a summary dense in characters that expand when escaped is not cut short of
+# its own budget and a cut can never land inside an entity.
+ENTITY_HOME="$TMP_ROOT/entity-home"
+mkdir -p "$ENTITY_HOME/state" "$ENTITY_HOME/data" "$ENTITY_HOME/config" "$ENTITY_HOME/projects/tung"
+printf '## In flight\n- [ ] dense-h - Dense summary (repo: tung) (kind: ship) (since 2026-07-11)\n' \
+  > "$ENTITY_HOME/data/backlog.md"
+fm_write_meta "$ENTITY_HOME/state/dense-h.meta" \
+  "window=firstmate:fm-dense-h" \
+  "worktree=$ENTITY_HOME/projects/tung" \
+  "project=$ENTITY_HOME/projects/tung" \
+  "harness=claude" \
+  "kind=ship" \
+  "mode=no-mistakes"
+record_claude_state "$ENTITY_HOME/state" dense-h idle
+DENSE=$(awk 'BEGIN{for(i=0;i<300;i++) printf "&"}')
+printf 'needs-decision [key=dense]: %s TAILMARK\n' "$DENSE" > "$ENTITY_HOME/state/dense-h.status"
+OUT_DENSE="$TMP_ROOT/board-dense.html"
+PATH="$FAKEBIN:$PATH" FM_HOME="$ENTITY_HOME" "$BOARD" --out "$OUT_DENSE" >/dev/null \
+  || fail "the board did not render an entity-dense summary"
+assert_grep "TAILMARK" "$OUT_DENSE" \
+  "an entity-dense summary was cut short of its own character budget"
+assert_no_grep "&am…" "$OUT_DENSE" "a truncation landed inside an HTML entity"
+assert_no_grep "&amp…" "$OUT_DENSE" "a truncation landed inside an HTML entity"
+pass "snapshot prose is bounded before escaping, so no cut splits an entity"
+
 # --- malformed authored input is refused, never half-rendered ----------------
 
 refuses() {  # <label> <cards-body>
@@ -263,7 +289,26 @@ key: a
 title: t
 option: x | X
 binds: listen-b:no-such-key'
+# The option value is an identifier that has to survive into the answer payload
+# unchanged, so a value the payload could not carry back is refused at parse time
+# rather than mis-rendered.
+refuses "an option value that is not a slug" '[decision]
+key: a
+title: t
+option: a|b | Label'
+refuses "an option value carrying a space" '[decision]
+key: a
+title: t
+option: two words | Label'
 pass "malformed authored input is refused rather than half-rendered"
+
+# A label may itself contain the separator; only the first one splits the line.
+printf '[decision]\nkey: a\ntitle: t\noption: x | left | right\n' > "$TMP_ROOT/pipe.txt"
+render "$TMP_ROOT/pipe.html" --cards "$TMP_ROOT/pipe.txt" >/dev/null \
+  || fail "an option label containing the separator was rejected"
+assert_grep 'value="x"' "$TMP_ROOT/pipe.html" "the option value did not survive a label containing the separator"
+assert_grep ">left | right" "$TMP_ROOT/pipe.html" "the option label lost everything after its own separator"
+pass "an option splits on its first separator and the label keeps the rest"
 
 # A binding that names a real decision is accepted, so the refusal above is about
 # the binding being wrong and not about bindings being rejected wholesale.
@@ -277,6 +322,12 @@ pass "a binding to a real open decision is accepted"
 assert_grep 'name="blind-prose"' "$OUT2" "an answer is not identified by its question key"
 assert_grep 'data-question="Prose above blind clips"' "$OUT2" "an answer carries no readable question"
 assert_grep 'value="audit"' "$OUT2" "an option carries no answer value"
+# The durable decision an answer resolves travels with the click, so the answer
+# maps back to the identity that was validated rather than to a card key alone.
+assert_grep 'data-binds="listen-b:blind-src"' "$OUT2" \
+  "an answer carries no link to the durable decision it answers"
+assert_grep "getAttribute('data-binds')" "$OUT2" \
+  "the answer payload drops the durable decision identity"
 SEND_CONTROLS=$(grep -c 'id="send"' "$OUT2")
 [ "$SEND_CONTROLS" = 1 ] || fail "expected exactly one send control, found $SEND_CONTROLS"
 assert_grep "sendQueuedPrompts" "$OUT2" "the send control queues nothing"
@@ -369,5 +420,148 @@ PATH="$FAKEBIN:$PATH" FM_HOME="$EMPTY" "$BOARD" --out "$OUT7" >/dev/null \
 assert_grep "Nothing is waiting on you." "$OUT7" "an empty board does not say so"
 assert_grep "Nothing under way." "$OUT7" "an empty board does not say so"
 pass "an empty fleet renders an honest empty board"
+
+# --- the empty state cannot outrank a card that is there ---------------------
+#
+# On an otherwise empty fleet the only thing in the column is one authored chores
+# card, so this is exactly the case where a separately kept counter would let the
+# column claim nothing is waiting while a card sits under it. Each chore counts
+# as its own act, so the pill reports items and not cards.
+CHORES_ONLY="$TMP_ROOT/chores-only.txt"
+cat > "$CHORES_ONLY" <<'EOF'
+[chores]
+title: Only you can do these
+item: **Tier-2 listening session.** 22 clips staged.
+item: Sign the release note.
+item: Re-pair the bench radio.
+EOF
+OUT8="$TMP_ROOT/chores-only.html"
+PATH="$FAKEBIN:$PATH" FM_HOME="$EMPTY" "$BOARD" --out "$OUT8" --cards "$CHORES_ONLY" >/dev/null \
+  || fail "the board did not render a chores-only column"
+assert_grep "Only you can do these" "$OUT8" "the only card in the column is missing"
+assert_no_grep "Nothing is waiting on you." "$OUT8" \
+  "the column claimed nothing is waiting while a card was rendered under it"
+assert_grep ">3 items<" "$OUT8" "the count does not report each chore as its own act"
+pass "the empty state cannot render while a card exists, and chores count per item"
+
+# --- delegated homes reach the same column -----------------------------------
+#
+# A decision held in a delegated home is a pending decision like any other. The
+# board already rolls up delegated landings, so reading landings but not pending
+# decisions would leave exactly the silence the unelaborated-key rule exists to
+# prevent. This home is seeded for real and read through one live snapshot.
+MATE="$TMP_ROOT/mate-home"
+mkdir -p "$MATE/state" "$MATE/data" "$MATE/config" "$MATE/projects" "$MATE/bin"
+printf 'sample-mate\n' > "$MATE/.fm-secondmate-home"
+printf '# Agents\n' > "$MATE/AGENTS.md"
+cat > "$MATE/data/backlog.md" <<'EOF'
+## Queued
+- [ ] mesh-note - Ship the mesh accuracy note (repo: tung) (kind: captain) (hold: waiting on the captain's word) (hold-kind: captain)
+
+## Done
+- [x] mate-land - Delegated landing https://github.com/notno/tung/pull/99 (repo: tung) (kind: ship) (merged 2026-07-20)
+EOF
+DELEGATING="$TMP_ROOT/delegating-home"
+mkdir -p "$DELEGATING/state" "$DELEGATING/data" "$DELEGATING/config" "$DELEGATING/projects"
+cat > "$DELEGATING/data/backlog.md" <<'EOF'
+## Done
+- [x] corners-f - Tile mating corners https://github.com/notno/tung/pull/13 (repo: tung) (kind: ship) (merged 2026-07-10)
+EOF
+printf -- '- sample-mate - synthetic scope (home: %s; scope: sample reviews; projects: sample; added 2026-07-14)\n' \
+  "$MATE" > "$DELEGATING/data/secondmates.md"
+fm_write_secondmate_meta "$DELEGATING/state/sample-mate.meta" "$MATE" \
+  "firstmate:fm-sample-mate" sample
+
+SNAP3="$TMP_ROOT/snap-delegated.json"
+PATH="$FAKEBIN:$PATH" FM_HOME="$DELEGATING" "$SNAPSHOT_CMD" --json > "$SNAP3" \
+  || fail "the delegated-home snapshot could not be taken"
+printf '%s' "$(jq -r '.secondmate_current.records[0].provenance.selected' "$SNAP3")" \
+  | grep -qx "structured-home" \
+  || fail "the fixture delegated home was not read as a structured home"
+
+OUT9="$TMP_ROOT/board-delegated.html"
+PATH="$FAKEBIN:$PATH" FM_HOME="$DELEGATING" "$BOARD" --snapshot "$SNAP3" --out "$OUT9" >/dev/null \
+  || fail "the board did not render a fleet with a delegated home"
+assert_grep "sample-mate/mesh-note:mesh-note" "$OUT9" \
+  "a decision open in a delegated home never reached the board"
+assert_grep "held in delegated home sample-mate" "$OUT9" \
+  "a delegated decision is not marked with the home it came from"
+assert_grep "Not written up yet" "$OUT9" \
+  "a delegated decision with no authored card is not marked unelaborated"
+assert_no_grep "Nothing is waiting on you." "$OUT9" \
+  "a delegated decision was rendered under a claim that nothing is waiting"
+pass "a decision held in a delegated home reaches Waiting on you, marked with its home"
+
+# The same identity is bindable, so a delegated decision can be elaborated by an
+# authored card exactly as a main-home one is.
+DELEGATED_CARD="$TMP_ROOT/delegated-card.txt"
+cat > "$DELEGATED_CARD" <<'EOF'
+[decision]
+key: mesh
+binds: sample-mate/mesh-note:mesh-note
+title: The mesh accuracy note
+option: ship | **Ship it** as written.
+option: hold | **Hold** for the next bench pass.
+EOF
+OUT10="$TMP_ROOT/board-delegated-card.html"
+PATH="$FAKEBIN:$PATH" FM_HOME="$DELEGATING" "$BOARD" --snapshot "$SNAP3" --out "$OUT10" \
+  --cards "$DELEGATED_CARD" >/dev/null \
+  || fail "an authored card binding a delegated decision was rejected"
+assert_grep 'data-binds="sample-mate/mesh-note:mesh-note"' "$OUT10" \
+  "the delegated decision identity did not travel with the answer"
+assert_no_grep "Not written up yet" "$OUT10" \
+  "an elaborated delegated decision is still marked unelaborated"
+pass "an authored card binds a delegated decision by its durable identity"
+
+# Landed merges two differently ordered sources - the main backlog in file order,
+# a delegated home already newest-first - so the bound has to cut a sorted union
+# or a recent delegated landing falls past it.
+OUT11="$TMP_ROOT/board-delegated-landed.html"
+PATH="$FAKEBIN:$PATH" FM_HOME="$DELEGATING" "$BOARD" --snapshot "$SNAP3" --out "$OUT11" \
+  --landed 1 >/dev/null || fail "the board did not render a bounded merged Landed column"
+assert_grep "Delegated landing" "$OUT11" \
+  "the newest landing fell past the bound because the merged sources were not sorted"
+assert_no_grep "Tile mating corners" "$OUT11" \
+  "an older landing displaced the newest one in a bounded Landed column"
+assert_grep "older landings not shown" "$OUT11" \
+  "a bounded merged Landed column hides what it dropped"
+pass "merged landings are ordered newest-first before the bound is applied"
+
+# A delegated home the snapshot could not read whole must not render as a home
+# holding nothing.
+UNREADABLE="$TMP_ROOT/unreadable-home"
+mkdir -p "$UNREADABLE/state" "$UNREADABLE/data" "$UNREADABLE/config" "$UNREADABLE/projects"
+printf '## Queued\n' > "$UNREADABLE/data/backlog.md"
+printf -- '- broken-mate - synthetic scope (home: %s; scope: sample reviews; projects: sample; added 2026-07-14)\n' \
+  "$TMP_ROOT/no-such-home" > "$UNREADABLE/data/secondmates.md"
+fm_write_secondmate_meta "$UNREADABLE/state/broken-mate.meta" "$TMP_ROOT/no-such-home" \
+  "firstmate:fm-broken-mate" sample
+OUT12="$TMP_ROOT/board-unreadable.html"
+PATH="$FAKEBIN:$PATH" FM_HOME="$UNREADABLE" "$BOARD" --out "$OUT12" >/dev/null \
+  || fail "the board did not render a fleet with an unreadable delegated home"
+assert_grep "could not read whole" "$OUT12" "an unreadable delegated home was passed over in silence"
+assert_grep "broken-mate" "$OUT12" "the unreadable delegated home is not named"
+assert_no_grep "Nothing is waiting on you." "$OUT12" \
+  "an unreadable delegated home rendered as a fleet with nothing waiting"
+pass "an unreadable delegated home is named rather than reported as holding nothing"
+
+# The delegated homes are on the same leak boundary as the operator's own.
+assert_no_grep "$MATE" "$OUT9" "a delegated home path reached the artifact"
+assert_no_grep "$TMP_ROOT" "$OUT9" "an absolute fixture path reached the artifact"
+assert_no_grep "$TMP_ROOT" "$OUT12" "an absolute fixture path reached the artifact"
+pass "delegated home paths do not reach the artifact"
+
+# --- counts are normalised where the flag is still named ---------------------
+
+OUT13="$TMP_ROOT/board-zeros.html"
+render "$OUT13" --landed 08 --stale-mins 030 >/dev/null \
+  || fail "a zero-padded count was not accepted at the boundary that names the flag"
+pass "zero-padded counts are normalised rather than failing inside the renderer"
+
+BAD_ERR="$TMP_ROOT/badcount.err"
+render "$TMP_ROOT/nope.html" --stale-mins 0 >/dev/null 2>"$BAD_ERR"
+expect_code 2 $? "a zero --stale-mins"
+grep -q -- "--stale-mins" "$BAD_ERR" || fail "the refusal did not name the flag it was about"
+pass "a bad count is refused where the flag is still named"
 
 echo "all fm-board tests passed"

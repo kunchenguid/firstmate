@@ -21,7 +21,9 @@
 #               landings rolled up from delegated homes.
 #   Waiting on you, the mechanical half: work with a locally recorded pull request,
 #               captain-held queued items, and every unresolved decision key folded
-#               out of the durable status logs.
+#               out of the durable status logs, here and in every delegated home.
+#               A delegated home the snapshot could not read whole is named rather
+#               than reported as holding nothing.
 #
 # The script does NOT derive the judgment half.
 # Option lists, recommendations, the reasoning for preferring one option, and the
@@ -83,7 +85,9 @@ BOARD CARDS
     warn: Three rounds on one theme.
                                    repeatable; renders as a callout
     option: ship | **Ship it** - one paragraph recording a measured fact
-                                   repeatable, at least one; `<value> | <label>`
+                                   repeatable, at least one; `<value> | <label>`,
+                                   where the value is a slug and the label is
+                                   everything after the first ' | '
     recommend: ship                optional; must name one of this card's options
     footnote: Why not the other one today ...
                                    repeatable; small print under the options
@@ -100,9 +104,10 @@ BOARD CARDS
   can never inject markup of its own. Backticks must be balanced.
 
   The file is validated as a whole before anything is written: an unknown field,
-  a card missing a required field, a duplicate key, a recommendation that names
-  no option, or a `binds` naming a decision the durable logs do not have all
-  refuse the render rather than producing a partial board.
+  a card missing a required field, a duplicate key, an option value that is not a
+  slug, a recommendation that names no option, or a `binds` naming a decision the
+  durable logs do not have all refuse the render rather than producing a partial
+  board. A decision open in a delegated home is bound as <home>/<task-id>:<key>.
 EOF
 }
 
@@ -119,10 +124,20 @@ STALE_MINS=30
 require_value() {  # <flag> <count>
   [ "$2" -gt 1 ] || usage_error "$1 requires a value"
 }
+# Counts reach jq as --argjson, where a leading zero is not valid JSON, so the
+# canonical form is settled here where a complaint can still name the flag.
+COUNT_VALUE=0
 require_count() {  # <flag> <value>
   case "$2" in
     ''|*[!0-9]*) usage_error "$1 must be a non-negative integer" ;;
   esac
+  COUNT_VALUE=$2
+  while [ "${#COUNT_VALUE}" -gt 1 ]; do
+    case "$COUNT_VALUE" in
+      0*) COUNT_VALUE=${COUNT_VALUE#0} ;;
+      *) break ;;
+    esac
+  done
 }
 
 while [ "$#" -gt 0 ]; do
@@ -130,12 +145,14 @@ while [ "$#" -gt 0 ]; do
     --cards) require_value --cards "$#"; CARDS_FILE=$2; shift 2 ;;
     --out) require_value --out "$#"; OUT=$2; shift 2 ;;
     --snapshot) require_value --snapshot "$#"; SNAPSHOT_FILE=$2; shift 2 ;;
-    --landed) require_value --landed "$#"; require_count --landed "$2"; LANDED=$2; shift 2 ;;
+    --landed) require_value --landed "$#"; require_count --landed "$2"; LANDED=$COUNT_VALUE; shift 2 ;;
     --title) require_value --title "$#"; TITLE=$2; shift 2 ;;
     --stale-mins)
       require_value --stale-mins "$#"
-      case "$2" in ''|*[!0-9]*|0) usage_error "--stale-mins must be a positive integer" ;; esac
-      STALE_MINS=$2; shift 2 ;;
+      case "$2" in ''|*[!0-9]*) usage_error "--stale-mins must be a positive integer" ;; esac
+      require_count --stale-mins "$2"
+      [ "$COUNT_VALUE" != 0 ] || usage_error "--stale-mins must be a positive integer"
+      STALE_MINS=$COUNT_VALUE; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage_error "unknown option: $1" ;;
   esac
@@ -160,10 +177,19 @@ else
   SNAPSHOT=$("$SCRIPT_DIR/fm-fleet-snapshot.sh" --json) || die "fleet snapshot failed"
 fi
 
-# Every durable open decision, as the <task-id>:<key> identifiers an authored
-# card may bind to. Also the validation domain for a card's `binds` field.
-DURABLE_KEYS=$(printf '%s' "$SNAPSHOT" \
-  | jq -r '[.tasks[]? | . as $t | (.hints.open_decisions // [])[] | "\($t.id):\(.key)"] | .[]')
+# Every durable open decision, as the identifiers an authored card may bind to,
+# and the validation domain for a card's `binds` field. A decision held in a
+# delegated home is namespaced by that home so the two sets cannot collide; the
+# renderer folds both into the same column off the same identity.
+DURABLE_KEYS=$(printf '%s' "$SNAPSHOT" | jq -r '
+  ([ .tasks[]? | select(.kind != "secondmate") | . as $t
+     | (.hints.open_decisions // [])[]? | select(.key != null)
+     | "\($t.id):\(.key)" ]
+   + [ .secondmate_current.records[]? | . as $m
+       | (if ((.decisions_open // []) | type) == "array" then .decisions_open else [] end)[]
+       | select(type == "object" and .id != null and .key != null)
+       | "\($m.id)/\(.id):\(.key)" ])
+  | unique | .[]')
 
 # --- authored cards ---------------------------------------------------------
 #
@@ -176,7 +202,7 @@ CARDS_ROWS=""
 parse_cards() {  # <file>
   local file=$1 line lineno=0 idx=0 field value type="" rows="" known
   local -a keys=() opts=() recommends=() reclines=() bindvals=() bindlines=()
-  local -a have_title=() have_option=() have_item=() have_key=() blocklines=()
+  local -a have_title=() have_option=() have_item=() have_key=() blocklines=() types=()
 
   card_error() { printf 'fm-board: %s:%s: %s\n' "$file" "$1" "$2" >&2; exit 2; }
 
@@ -194,7 +220,7 @@ parse_cards() {  # <file>
         esac
         idx=$((idx + 1))
         keys+=("") ; have_title+=(0) ; have_option+=(0) ; have_item+=(0) ; have_key+=(0)
-        blocklines+=("$lineno")
+        blocklines+=("$lineno") ; types+=("$type")
         rows+="$idx"$'\t'"type"$'\t'"$type"$'\n'
         continue
         ;;
@@ -266,6 +292,11 @@ parse_cards() {  # <file>
         optlabel=${value#* | }
         [ -n "$optval" ] || card_error "$lineno" "option has an empty value"
         [ -n "$optlabel" ] || card_error "$lineno" "option has an empty label"
+        # The value is an identifier that has to survive into the answer payload
+        # unchanged, so it is held to the same slug shape as a card key.
+        case "$optval" in
+          *[!A-Za-z0-9._-]*|-*|.*) card_error "$lineno" "option value must be a slug of letters, digits, '.', '_' or '-': '$optval'" ;;
+        esac
         for seen in ${opts[@]+"${opts[@]}"}; do
           [ "$seen" = "$idx/$optval" ] && card_error "$lineno" "duplicate option value in one card: '$optval'"
         done
@@ -292,7 +323,7 @@ parse_cards() {  # <file>
   n=$idx
   i=1
   while [ "$i" -le "$n" ]; do
-    if printf '%s' "$rows" | grep -qxF "$i	type	decision"; then
+    if [ "${types[i-1]}" = decision ]; then
       [ "${have_key[i-1]}" = 1 ] || card_error "${blocklines[i-1]}" "this [decision] is missing a 'key'"
       [ "${have_title[i-1]}" = 1 ] || card_error "${blocklines[i-1]}" "[decision] ${keys[i-1]} is missing a 'title'"
       [ "${have_option[i-1]}" = 1 ] || card_error "${blocklines[i-1]}" "[decision] ${keys[i-1]} has no 'option'"
@@ -361,10 +392,10 @@ CARDS_JSON=$(printf '%s' "$CARDS_ROWS" | jq -R -s '
       footnote: fields("footnote"),
       item: fields("item"),
       recommend: field("recommend"),
-      options: (fields("option") | map({
-        value: (. | split(" | ") | .[0]),
-        label: (. | sub("^[^|]* \\| "; ""))
-      }))
+      options: (fields("option") | map(
+        split(" | ")
+        | { value: .[0], label: (.[1:] | join(" | ")) }
+      ))
     })
 ') || die "could not assemble the authored cards"
 
@@ -373,6 +404,14 @@ CARDS_JSON=$(printf '%s' "$CARDS_ROWS" | jq -R -s '
 REDACT_HOME=${HOME:-}
 case "$REDACT_HOME" in ''|/) REDACT_HOME="" ;; esac
 SNAPSHOT_HOME=$(printf '%s' "$SNAPSHOT" | jq -r '.fm_home // ""')
+case "$SNAPSHOT_HOME" in /) SNAPSHOT_HOME="" ;; esac
+
+# The board now reads delegated state, so a delegated home's path is on the same
+# leak boundary as the operator's own: reduced per field, and refused if it
+# survives.
+MATE_HOMES=$(printf '%s' "$SNAPSHOT" | jq -c '
+  ([ .secondmate_current.records[]? | .home ] + [ .secondmate_landed.records[]? | .home ])
+  | map(select(type == "string" and . != "" and . != "/")) | unique')
 
 # The renderer is a quoted heredoc rather than an inline argument: the emitted
 # page carries JavaScript full of single quotes, which no single-quoted shell
@@ -385,6 +424,7 @@ RENDER=$(cat <<'JQ_RENDER'
 # replacement, never a pattern.
 def redact:
   (if . == null then "" else tostring end)
+  | reduce $mates[] as $m (.; split($m) | join("~/…"))
   | (if ($fmhome | length) > 0 and ($fmhome != $home) then split($fmhome) | join("~/…") else . end)
   | (if ($home | length) > 0 then split($home) | join("~") else . end);
 
@@ -407,6 +447,12 @@ def md:
   | join("");
 
 def clip($n): if (. | length) > $n then (.[0:$n] | rtrimstr(" ")) + "…" else . end;
+
+# Bounded snapshot prose. The cut lands after redaction and before escaping, so
+# it can neither split an entity nor spend the budget on escape expansion, and a
+# home path can never be cut into a fragment the leak guard would not recognise.
+def escn($n): redact | clip($n) | @html;
+
 def basename: (. // "") | split("/") | last // "";
 def hhmm: (. // "") | (try (fromdateiso8601 | strflocaltime("%H:%M")) catch "");
 def when($iso): ($iso | hhmm) as $t | (if $t == "" then "" else "state as of " + $t end);
@@ -419,16 +465,46 @@ def when($iso): ($iso | hhmm) as $t | (if $t == "" then "" else "state as of " +
 | [$s.backlog.records[]? | select(.structured)] as $records
 
 # Waiting on you, mechanical half.
-| [ $work[]
+#
+# A decision held in a delegated home is a pending decision like any other, and
+# the board already reaches into delegated state for its landings, so the two
+# sources are folded into one list off one identity. A delegated entry carries
+# the home it came from; a main-home entry carries no home.
+| ( [ $work[]
     | . as $t
     | (.hints.open_decisions // [])[]
     | { kind: "decision",
         id: "\($t.id):\(.key)",
+        home: null,
         task: $t.id,
         task_title: ($t.backlog.title // $t.id),
         project: ($t.project | basename),
         verb: .verb,
-        summary: .summary } ] as $durable
+        summary: .summary } ]
+  + [ $s.secondmate_current.records[]?
+      | . as $m
+      | (if ((.decisions_open // []) | type) == "array" then .decisions_open else [] end)[]
+      | select(type == "object" and .id != null and .key != null)
+      | { kind: "decision",
+          id: "\($m.id)/\(.id):\(.key)",
+          home: $m.id,
+          task: .id,
+          task_title: ((.summary // .key) | tostring),
+          project: ($m.id | tostring),
+          verb: (.verb // "needs-decision"),
+          summary: ((.reason // "") | tostring) } ] ) as $durable
+
+# A delegated home the snapshot could not read whole cannot be reported as
+# holding no decisions, so what was not read is stated rather than assumed.
+| ( [ $s.secondmate_current.records[]?
+    | select((.provenance.selected // "") != "structured-home")
+    | { id: (.id | tostring), reason: ((.current.reason // "state unavailable") | tostring) } ]
+  + [ $s.secondmate_current.records[]?
+      | . as $m
+      | (if ((.omitted // []) | type) == "array" then .omitted else [] end)[]
+      | select(type == "object" and .surface == "decisions_open")
+      | { id: ($m.id | tostring),
+          reason: "\(.count) more open decisions than this snapshot carries" } ] ) as $unread_homes
 | [ $work[]
     | select(.pr.url != null)
     | { id: .id,
@@ -446,18 +522,15 @@ def when($iso): ($iso | hhmm) as $t | (if $t == "" then "" else "state as of " +
 | [ $durable[] | select(.id as $d | ($bound | index($d)) | not) ] as $unelaborated
 | [ $cards[] | select(.type == "chores") ] as $chores
 
-# The count that has to be honest: everything actually waiting on the operator.
-| (($authored | length) + ($unelaborated | length)
-   + (if ($prs | length) > 0 then 1 else 0 end)
-   + (if ($held | length) > 0 then 1 else 0 end)) as $waiting_count
-
 # --- fragments --------------------------------------------------------------
 
 | def option_html($card):
     [ $card.options[]
       | "<label class=\"opt\">"
         + "<input type=\"radio\" name=\"\($card.key | esc)\""
-        + " data-question=\"\($card.title | esc)\" value=\"\(.value | esc)\">"
+        + " data-question=\"\($card.title | esc)\""
+        + (if $card.binds != null then " data-binds=\"\($card.binds | esc)\"" else "" end)
+        + " value=\"\(.value | esc)\">"
         + "<span>\(.label | md)"
         + (if $card.recommend == .value then " <span class=\"pill pill-primary\">my pick</span>" else "" end)
         + "</span></label>" ] | join("");
@@ -475,12 +548,26 @@ def when($iso): ($iso | hhmm) as $t | (if $t == "" then "" else "state as of " +
 
   def unelaborated_card($d):
     "<article class=\"card accent-warning\">"
-    + "<div class=\"card-head\"><h3>\($d.task_title | esc | clip(90))</h3>"
+    + "<div class=\"card-head\"><h3>\($d.task_title | escn(90))</h3>"
     + "<span class=\"pill\">\($d.project | esc)</span></div>"
-    + "<p class=\"fine\">Open decision <code>\($d.id | esc)</code> &middot; \($d.verb | esc)</p>"
-    + "<p>\($d.summary | esc | clip(700))</p>"
+    + "<p class=\"fine\">Open decision <code>\($d.id | esc)</code> &middot; \($d.verb | esc)"
+    + (if $d.home != null then " &middot; held in delegated home \($d.home | esc)" else "" end)
+    + "</p>"
+    + (if ($d.summary // "") != "" then "<p>\($d.summary | escn(700))</p>" else "" end)
     + "<p class=\"callout\">Not written up yet - there are no options on this card. "
     + "Ask for it to be laid out before answering.</p>"
+    + "</article>";
+
+  def unread_homes_card:
+    "<article class=\"card accent-warning\">"
+    + "<div class=\"card-head\"><h3>Delegated homes this snapshot could not read whole</h3></div>"
+    + "<ul>"
+    + ([ $unread_homes[]
+         | "<li><strong>\(.id | escn(120))</strong>"
+           + "<span class=\"sub\">\(.reason | escn(160))</span></li>" ] | join(""))
+    + "</ul>"
+    + "<p class=\"fine\">These homes are not being reported as holding nothing. "
+    + "Ask for a fresh board once they read cleanly.</p>"
     + "</article>";
 
   def pr_card:
@@ -488,7 +575,7 @@ def when($iso): ($iso | hhmm) as $t | (if $t == "" then "" else "state as of " +
     + "<div class=\"card-head\"><h3>Waiting for your merge</h3></div>"
     + "<ul>"
     + ([ $prs[]
-         | "<li><strong>\(.title | esc | clip(110))</strong> "
+         | "<li><strong>\(.title | escn(110))</strong> "
            + "<span class=\"pill\">\(.project | esc)</span><br>"
            + "<a href=\"\(.url | esc)\">\(.url | esc)</a></li>" ] | join(""))
     + "</ul>"
@@ -501,8 +588,8 @@ def when($iso): ($iso | hhmm) as $t | (if $t == "" then "" else "state as of " +
     + "<div class=\"card-head\"><h3>Held for your word</h3></div>"
     + "<ul>"
     + ([ $held[]
-         | "<li><strong>\(.title | esc | clip(140))</strong>"
-           + (if .reason != null then "<span class=\"sub\">\(.reason | esc | clip(160))</span>" else "" end)
+         | "<li><strong>\(.title | escn(140))</strong>"
+           + (if .reason != null then "<span class=\"sub\">\(.reason | escn(160))</span>" else "" end)
            + "</li>" ] | join(""))
     + "</ul></article>";
 
@@ -521,10 +608,10 @@ def when($iso): ($iso | hhmm) as $t | (if $t == "" then "" else "state as of " +
     "<article class=\"card\">"
     + "<div class=\"card-head\">"
     + "<span class=\"dot \(state_class($t.current_state.state))\" title=\"\($t.current_state.state | esc)\"></span>"
-    + "<h3>\(($t.backlog.title // $t.id) | esc | clip(90))</h3>"
+    + "<h3>\(($t.backlog.title // $t.id) | escn(90))</h3>"
     + "<span class=\"pill\">\(($t.project | basename) | esc)</span></div>"
     + "<p>\($t.current_state.state | esc)"
-    + (if ($t.current_state.detail // "") != "" then " - \($t.current_state.detail | esc | clip(160))" else "" end)
+    + (if ($t.current_state.detail // "") != "" then " - \($t.current_state.detail | escn(160))" else "" end)
     + (if (($t.hints.open_decisions // []) | length) > 0 then " <strong>Holding for your call.</strong>" else "" end)
     + "</p>"
     + "<p class=\"fine age\">\(when($t.current_state.observed_at) | esc)"
@@ -536,22 +623,20 @@ def when($iso): ($iso | hhmm) as $t | (if $t == "" then "" else "state as of " +
     # row; collecting it keeps a gateless item rendering.
     ([($r.raw // "") | capture("hold-until: (?<d>[0-9-]+)") | .d] | .[0]) as $until
     | "<div class=\"row\(if $r.hold_reason != null or $until != null then " dim" else "" end)\">"
-      + "<strong>\($r.title | esc | clip(200))</strong>"
+      + "<strong>\($r.title | escn(200))</strong>"
       + (if (($r.unresolved_blocker_ids // []) | length) > 0
          then "<span class=\"sub\">waits on \(($r.unresolved_blocker_ids | join(", ")) | esc)</span>"
          else "" end)
       + (if $until != null
          then "<span class=\"sub\">held until \($until | esc)</span>"
-         elif $r.hold_reason != null
-         then "<span class=\"sub\">\($r.hold_reason | esc | clip(120))</span>"
          else "" end)
-      + (if $until != null and $r.hold_reason != null
-         then "<span class=\"sub\">\($r.hold_reason | esc | clip(120))</span>"
+      + (if $r.hold_reason != null
+         then "<span class=\"sub\">\($r.hold_reason | escn(120))</span>"
          else "" end)
       + "</div>";
 
   def landed_item($r):
-    "<div class=\"row\"><strong>\($r.title | esc | clip(140))</strong>"
+    "<div class=\"row\"><strong>\($r.title | escn(140))</strong>"
     + (if $r.home_id != null then " <span class=\"pill\">\($r.home_id | esc)</span>" else "" end)
     + (if $r.pr_url != null
        then "<span class=\"sub\"><a href=\"\($r.pr_url | esc)\">\($r.pr_url | esc)</a></span>"
@@ -567,9 +652,29 @@ def when($iso): ($iso | hhmm) as $t | (if $t == "" then "" else "state as of " +
 
   [ $records[] | select(.state == "queued")
     | select((.captain_actionable == true or .hold_kind == "captain") | not) ] as $queued
+
+# The two landed sources arrive ordered differently - the main backlog in file
+# order, a delegated home already newest-first - so the union is put on one
+# deterministic key before it is bounded. Otherwise the bound is a cut through
+# file order and a recent delegated landing falls past it.
 | ([ $records[] | select(.state == "done") ]
-   + [ $s.secondmate_landed.records[]? ]) as $landed_all
+   + [ $s.secondmate_landed.records[]? ]
+   | sort_by([((.completion.date // "") | tostring), ((.id // "") | tostring)])
+   | reverse) as $landed_all
 | ($landed_all[0:$landed]) as $landed_shown
+
+# The Waiting-on-you column, cards and count from one list. The count is what is
+# actually waiting - each authored decision, each unelaborated one, each chore -
+# and the empty state is read off the rendered cards, so it cannot claim nothing
+# is waiting while a card sits under it.
+| ( [ $authored[] | { html: authored_card(.), n: 1 } ]
+  + [ $unelaborated[] | { html: unelaborated_card(.), n: 1 } ]
+  + (if ($prs | length) > 0 then [ { html: pr_card, n: 1 } ] else [] end)
+  + (if ($held | length) > 0 then [ { html: held_card, n: 1 } ] else [] end)
+  + (if ($unread_homes | length) > 0 then [ { html: unread_homes_card, n: 1 } ] else [] end)
+  + [ $chores[] | { html: chores_card(.), n: (.item | length) } ] ) as $waiting
+| ($waiting | map(.html) | join("")) as $waiting_html
+| ($waiting | map(.n) | add // 0) as $waiting_count
 
 | "<!doctype html>
 <html lang=\"en\">
@@ -668,13 +773,9 @@ h2{margin:0;font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:u
     (if $waiting_count > 0
      then "<span class=\"pill count\">\($waiting_count) \(if $waiting_count == 1 then "item" else "items" end)</span>"
      else "" end) + "</div>" +
-    (if $waiting_count == 0 and ($chores | length) == 0
+    (if ($waiting | length) == 0
      then "<p class=\"empty\">Nothing is waiting on you.</p>" else "" end) +
-    ([$authored[] | authored_card(.)] | join("")) +
-    ([$unelaborated[] | unelaborated_card(.)] | join("")) +
-    (if ($prs | length) > 0 then pr_card else "" end) +
-    (if ($held | length) > 0 then held_card else "" end) +
-    ([$chores[] | chores_card(.)] | join("")) +
+    $waiting_html +
 "  </section>
 
   <section>
@@ -742,7 +843,11 @@ h2{margin:0;font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:u
         document.querySelectorAll('.opt input[name=\"' + input.name + '\"]'),
         function (sib) { sib.closest('.opt').classList.remove('picked'); });
       label.classList.add('picked');
-      answers[input.name] = { question: input.getAttribute('data-question') || input.name, answer: input.value };
+      answers[input.name] = {
+        question: input.getAttribute('data-question') || input.name,
+        binds: input.getAttribute('data-binds') || null,
+        answer: input.value
+      };
       refresh();
     });
   });
@@ -750,11 +855,16 @@ h2{margin:0;font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:u
   sendBtn.addEventListener('click', function () {
     var keys = Object.keys(answers);
     if (!keys.length) return;
-    var lines = keys.map(function (k) { return k + ' (' + answers[k].question + '): ' + answers[k].answer; });
-    var text = lines.join(' | ');
+    // One answer per line: a separator an answer can contain would make the
+    // prompt ambiguous, and an ambiguous answer is worse than none.
+    var lines = keys.map(function (k) {
+      var a = answers[k];
+      return k + (a.binds ? ' [' + a.binds + ']' : '') + ' (' + a.question + '): ' + a.answer;
+    });
+    var text = lines.join('\\n');
     var payload = { tag: 'board-answers', text: text, data: { answers: JSON.parse(JSON.stringify(answers)) } };
     if (window.lavish && typeof window.lavish.queuePrompt === 'function') {
-      window.lavish.queuePrompt('Answers from the board - ' + text, payload);
+      window.lavish.queuePrompt('Answers from the board:\\n' + text, payload);
       window.lavish.sendQueuedPrompts();
       pending.textContent = 'on its way';
     } else {
@@ -788,6 +898,7 @@ HTML=$(printf '%s' "$SNAPSHOT" | jq -r \
   --argjson stale "$STALE_MINS" \
   --arg home "$REDACT_HOME" \
   --arg fmhome "$SNAPSHOT_HOME" \
+  --argjson mates "$MATE_HOMES" \
   "$RENDER") || die "rendering the board failed"
 
 # --- write ------------------------------------------------------------------
@@ -799,11 +910,20 @@ TMP="$OUT.tmp.$$"
 printf '%s\n' "$HTML" > "$TMP" || { rm -f "$TMP"; die "cannot write: $TMP"; }
 
 # The last guard on the leak boundary: redaction runs per field, so a field that
-# escaped it must never reach the operator's screen or a shared link.
-if [ -n "$REDACT_HOME" ] && grep -qF -- "$REDACT_HOME" "$TMP"; then
-  rm -f "$TMP"
-  die "refusing to write the board: a home path survived redaction"
-fi
+# escaped it must never reach the operator's screen or a shared link. Every home
+# the render touched is checked, not just the account home: FM_HOME can sit
+# outside it, and a delegated home can sit outside both.
+while IFS= read -r guarded; do
+  [ -n "$guarded" ] || continue
+  if grep -qF -- "$guarded" "$TMP"; then
+    rm -f "$TMP"
+    die "refusing to write the board: a home path survived redaction"
+  fi
+done <<EOF
+$REDACT_HOME
+$SNAPSHOT_HOME
+$(printf '%s' "$MATE_HOMES" | jq -r '.[]')
+EOF
 
 mv -f "$TMP" "$OUT" || { rm -f "$TMP"; die "cannot write: $OUT"; }
 printf '%s\n' "$OUT"
