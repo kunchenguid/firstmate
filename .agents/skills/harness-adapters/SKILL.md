@@ -39,7 +39,7 @@ If the captain asks for a new harness, propose verifying it first: spawn a trivi
 
 ## Detection
 
-`bin/fm-harness.sh` prints firstmate's own harness, using verified env markers first and then process ancestry; conflicting ambient markers (e.g. a shell-profile `CLAUDECODE=1` leaked into a Pi session) are resolved by ancestry because no env marker alone is then trustworthy — ancestry settles the family, so the Pi-family signed selection below still applies.
+`bin/fm-harness.sh` prints firstmate's own harness, using verified env markers first and then process ancestry; conflicting ambient markers (e.g. a shell-profile `CLAUDECODE=1` leaked into a Pi session) are resolved by ancestry because no env marker alone is then trustworthy - ancestry settles the family, so the Pi-family signed selection below still applies.
 Within the Pi family, only the exact launch-boundary marker `FM_PI_HARNESS=pi-signed` alongside `PI_CODING_AGENT=true` selects the signed identity; unmarked shared launcher ancestry remains `pi`.
 `bin/fm-harness.sh crew` resolves the effective crewmate harness from `config/crew-harness` (absent or `default` -> own).
 `bin/fm-harness.sh secondmate` resolves the secondmate-launch harness through the chain `config/secondmate-harness` -> `config/crew-harness` -> own, so an unset `config/secondmate-harness` matches the crew harness.
