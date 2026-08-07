@@ -1146,6 +1146,84 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+# The terminal sweep's session-start wiring. A locked session records declared
+# failures and reports how many records it actually wrote; a read-only session
+# reports the same tasks without recording them; a home with no declared
+# failure stays silent on both paths. The unwritable-ledger control pins the
+# count's provenance: a sweep that discovers a failure but cannot append must
+# not report records as written.
+test_wake_ledger_terminal_sweep_reports_only_durable_records() {
+  local case_dir fakebin home file out
+  case_dir="$TMP_ROOT/wake-ledger-terminal-sweep"
+  home="$case_dir/home"
+  mkdir -p "$home/config" "$home/data" "$home/state"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  file="$home/data/wake-ledger.tsv"
+
+  bootstrap_out() {
+    PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+      FM_BOOTSTRAP_DETECT_ONLY="${1:-0}" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh"
+  }
+
+  # Negative control first: a task with no declared failure must keep both
+  # branches silent, so the positive cases below cannot be the sweep firing
+  # indiscriminately over every task in state/.
+  printf 'window=fm-alpha\n' > "$home/state/alpha.meta"
+  printf 'working: running\n' > "$home/state/alpha.status"
+  out=$(bootstrap_out)
+  assert_not_contains "$out" "BOOTSTRAP_INFO: recorded" \
+    "a home with no declared failure must not report recorded failures"
+  out=$(bootstrap_out 1)
+  assert_not_contains "$out" "WAKE_LEDGER" \
+    "a read-only session with no declared failure must stay silent"
+  [ ! -f "$file" ] || fail "terminal sweep: a home with no declared failure grew a ledger"
+
+  printf 'harness=pi\nmodel=sol\nbackend=tmux\n' > "$home/state/beta.meta"
+  printf 'working: running\nfailed: the approach does not work\n' > "$home/state/beta.status"
+
+  # The read-only branch reports the failure it declined to record and must
+  # write neither a record nor a receipt.
+  out=$(bootstrap_out 1)
+  assert_contains "$out" "WAKE_LEDGER: 1 task(s) declared failure with no terminal record" \
+    "a read-only session must report the failure it declined to record"
+  assert_not_contains "$out" "BOOTSTRAP_INFO: recorded" \
+    "a read-only session must not claim records were written"
+  [ ! -f "$file" ] || fail "terminal sweep: a read-only session wrote a record"
+  [ ! -e "$home/state/beta.terminal-recorded" ] \
+    || fail "terminal sweep: a read-only session left a receipt"
+
+  # A discovered failure whose append cannot land must not read as success.
+  chmod 500 "$home/data"
+  out=$(bootstrap_out)
+  chmod 700 "$home/data"
+  assert_not_contains "$out" "BOOTSTRAP_INFO: recorded" \
+    "a failed append must not be reported as a written record"
+  [ ! -e "$home/state/beta.terminal-recorded" ] \
+    || fail "terminal sweep: a failed append left a receipt"
+
+  # With the ledger writable again the same locked session start records the
+  # failure, so the failed append above genuinely retried.
+  out=$(bootstrap_out)
+  assert_contains "$out" "BOOTSTRAP_INFO: recorded 1 declared task failure(s) that no teardown would have recorded" \
+    "a locked session must record and report the declared failure"
+  grep -q 'task=beta' "$file" || fail "terminal sweep: the failed task was not recorded"
+  grep -q 'outcome=failed' "$file" || fail "terminal sweep: the outcome was not recorded as failed"
+  grep -q 'outcome_source=unreleased' "$file" \
+    || fail "terminal sweep: the record did not say it came from an unreleased task"
+  [ -e "$home/state/beta.terminal-recorded" ] || fail "terminal sweep: no receipt was written"
+
+  # Receipt idempotence through bootstrap: a rerun must not record or report
+  # the same failure again.
+  out=$(bootstrap_out)
+  assert_not_contains "$out" "BOOTSTRAP_INFO: recorded" \
+    "a rerun re-reported an already recorded failure"
+  [ "$(grep -c 'task=beta' "$file")" -eq 1 ] \
+    || fail "terminal sweep: a rerun appended a second record for the same task"
+  pass "session start records declared failures when locked, reports them read-only, and counts only durable appends"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version
@@ -1174,3 +1252,4 @@ test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_wake_ledger_terminal_sweep_reports_only_durable_records

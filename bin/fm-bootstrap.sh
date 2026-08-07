@@ -999,17 +999,19 @@ wake_ledger_terminal_sweep() {
   [ -x "$SCRIPT_DIR/fm-wake-ledger.sh" ] || return 0
   if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" = 1 ]; then
     out=$("$SCRIPT_DIR/fm-wake-ledger.sh" sweep --dry-run 2>/dev/null) || return 0
-  else
-    out=$("$SCRIPT_DIR/fm-wake-ledger.sh" sweep 2>/dev/null) || return 0
-  fi
-  n=$(printf '%s\n' "$out" | grep -c '^unreleased failure: ' || true)
-  case "$n" in
-    ''|*[!0-9]*|0) return 0 ;;
-  esac
-  if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" = 1 ]; then
+    n=$(printf '%s\n' "$out" | grep -c '^unreleased failure: ' || true)
+    case "$n" in
+      ''|*[!0-9]*|0) return 0 ;;
+    esac
     echo "WAKE_LEDGER: $n task(s) declared failure with no terminal record - read-only session left the recording to the session holding the fleet lock (bin/fm-wake-ledger.sh sweep)"
     return 0
   fi
+  out=$("$SCRIPT_DIR/fm-wake-ledger.sh" sweep 2>/dev/null) || return 0
+  n=$(printf '%s\n' "$out" \
+    | sed -n 's/^recorded \([0-9][0-9]*\) unreleased failure(s) as terminal records$/\1/p')
+  case "$n" in
+    ''|*[!0-9]*|0) return 0 ;;
+  esac
   echo "BOOTSTRAP_INFO: recorded $n declared task failure(s) that no teardown would have recorded"
 }
 
