@@ -1211,7 +1211,14 @@ EOF
               || wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf"
           else
             crew_state=$(crew_state_line "$task" || true)
-            surface_actionable_run_state_if_new "$w" "$task" "$h" "$crew_state" || true
+            if [ "$(crew_absorb_class_from_state_line "$crew_state")" = working ]; then
+              printf '%s' "$h" > "$sf"
+              date +%s > "$ssf"
+              clear_actionable_run_state_surfaced "$task"
+              triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
+            else
+              surface_actionable_run_state_if_new "$w" "$task" "$h" "$crew_state" || true
+            fi
           fi
         else
           # Non-terminal stale: a crew gone quiet without a captain-relevant status.

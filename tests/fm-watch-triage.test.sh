@@ -901,7 +901,24 @@ test_same_hash_run_outcomes_surface_once_after_working_state() {
     wait_live "$pid" 30 || { reap "$pid"; fail "$item same-hash working state woke: $(cat "$out")"; }
     [ ! -s "$out" ] || { reap "$pid"; fail "$item same-hash working state printed a wake: $(cat "$out")"; }
     [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "$item same-hash working state queued a wake"; }
+    wait_numeric_file "$state/.stale-since-$key" 30 \
+      || { reap "$pid"; fail "$item same-hash working state did not start wedge tracking"; }
     reap "$pid"
+
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    : > "$out"
+    : > "$state/.wake-queue"
+    printf '1\n' > "$state/.count-$key"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE="$working" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
+      FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 40 || fail "$item same-hash working state did not wedge-escalate"
+    grep -F "stale: $window" "$out" >/dev/null || fail "$item same-hash wedge did not print a stale wake"
+    grep -F "possible wedge" "$out" >/dev/null || fail "$item same-hash wedge did not flag a possible wedge"
+    FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after $item same-hash wedge failed"
+    grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "$item same-hash wedge was not queued"
 
     : > "$out"
     : > "$state/.wake-queue"
@@ -931,7 +948,7 @@ test_same_hash_run_outcomes_surface_once_after_working_state() {
     reap "$pid"
   done
 
-  pass "same-hash PR-ready and failed run outcomes surface once after working state"
+  pass "same-hash working states wedge-track, and PR-ready and failed outcomes surface once"
 }
 
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
