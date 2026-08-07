@@ -551,33 +551,55 @@ assert_no_grep "$TMP_ROOT" "$OUT9" "an absolute fixture path reached the artifac
 assert_no_grep "$TMP_ROOT" "$OUT12" "an absolute fixture path reached the artifact"
 pass "delegated home paths do not reach the artifact"
 
-# --- a delegated home of an unexpected shape is skipped, not fatal -----------
+# --- an entry of an unexpected shape is skipped, not fatal -------------------
 #
-# `--snapshot <file>` accepts any saved snapshot, so a delegated record from an
-# older schema can carry no decision list at all. Such a home must drop out of
-# the column the way an unreadable one does, rather than killing the render.
-shape_case() {  # <label> <jq-program>
-  local label=$1 program=$2 snap out
+# `--snapshot <file>` accepts any saved snapshot, so a record from an older
+# schema can carry a decision list that is absent, null, or not a list at all.
+# Such an entry must drop out of the column the way an unreadable home does,
+# rather than killing the render. Decisions are read at two independent sites,
+# the main home's tasks and each delegated home's record, so both are covered.
+shape_case() {  # <label> <source-snapshot> <home> <survivor> <jq-program>
+  local label=$1 source=$2 home=$3 survivor=$4 program=$5 snap out
   snap="$TMP_ROOT/snap-shape.json"
   out="$TMP_ROOT/board-shape.html"
   rm -f "$out"
-  jq "$program" "$SNAP3" > "$snap" || fail "$label: the shape fixture could not be built"
-  PATH="$FAKEBIN:$PATH" FM_HOME="$DELEGATING" "$BOARD" --snapshot "$snap" --out "$out" >/dev/null \
-    || fail "$label: the board aborted instead of skipping the home"
+  jq "$program" "$source" > "$snap" || fail "$label: the shape fixture could not be built"
+  PATH="$FAKEBIN:$PATH" FM_HOME="$home" "$BOARD" --snapshot "$snap" --out "$out" >/dev/null \
+    || fail "$label: the board aborted instead of skipping the entry"
   assert_present "$out" "$label: no artifact was written"
-  assert_grep "Tile mating corners" "$out" "$label: the rest of the board was lost with the home"
+  assert_grep "$survivor" "$out" "$label: the rest of the board was lost with the entry"
 }
 shape_case "a delegated home with a null decision list" \
+  "$SNAP3" "$DELEGATING" "Tile mating corners" \
   '.secondmate_current.records[0].decisions_open = null'
 shape_case "a delegated home with no decision list at all" \
+  "$SNAP3" "$DELEGATING" "Tile mating corners" \
   'del(.secondmate_current.records[0].decisions_open)'
 shape_case "a delegated home whose decision list is not a list" \
+  "$SNAP3" "$DELEGATING" "Tile mating corners" \
   '.secondmate_current.records[0].decisions_open = "unavailable"'
 shape_case "a delegated home with a null omission list" \
+  "$SNAP3" "$DELEGATING" "Tile mating corners" \
   '.secondmate_current.records[0].omitted = null'
+
+# The main home has its own guard on the same field, so it needs its own cases
+# against a snapshot whose tasks are actually main-home ones. $SNAP carries
+# ship-a and listen-b, both kind: ship, which the delegated filter keeps.
+jq -e '[.tasks[] | select(.kind != "secondmate")] | length > 0' "$SNAP" >/dev/null \
+  || fail "the main-home shape fixture carries no main-home task to guard"
 shape_case "a main-home task with a null decision list" \
-  '.tasks[0].hints.open_decisions = null'
-pass "a delegated home of an unexpected shape is skipped rather than aborting the render"
+  "$SNAP" "$HOME_DIR" "Ship the mating corners" \
+  '.tasks |= map(.hints.open_decisions = null)'
+shape_case "a main-home task with no decision list at all" \
+  "$SNAP" "$HOME_DIR" "Ship the mating corners" \
+  '.tasks |= map(del(.hints.open_decisions))'
+shape_case "a main-home task whose decision list is not a list" \
+  "$SNAP" "$HOME_DIR" "Ship the mating corners" \
+  '.tasks |= map(.hints.open_decisions = "unavailable")'
+shape_case "a main-home decision list holding something that is not a decision" \
+  "$SNAP" "$HOME_DIR" "Ship the mating corners" \
+  '.tasks |= map(if .kind != "secondmate" then .hints.open_decisions = ["not-an-object"] else . end)'
+pass "an entry of an unexpected shape is skipped rather than aborting the render"
 
 # --- a delegated decision carries its full text ------------------------------
 #
@@ -598,6 +620,27 @@ assert_grep "before the tier-2 session can be staged" "$OUT14" \
 assert_grep "sample-mate/listen-b:blind-src" "$OUT14" \
   "the delegated status decision carries no durable identity"
 pass "a delegated decision's full text reaches the card body, not just its heading"
+
+# Which slot a delegated entry's text belongs in follows from the kind of entry
+# it is, not from comparing rendered strings: the snapshot puts the item title in
+# `summary` for a captain hold and the decision text in `summary` for a status
+# decision. Neither card may say the same thing twice, and a hold's reason has to
+# stay on the card.
+occurrences() {  # <needle> <file>
+  grep -o -- "$1" "$2" | wc -l | tr -d ' '
+}
+HOLD_TITLE="Ship the mesh accuracy note"
+[ "$(occurrences "$HOLD_TITLE" "$OUT9")" = 1 ] \
+  || fail "a delegated captain hold rendered its title $(occurrences "$HOLD_TITLE" "$OUT9") times"
+assert_grep "waiting on the captain" "$OUT9" \
+  "a delegated captain hold dropped the reason it is being held for"
+pass "a delegated captain hold shows its title once and its hold reason beside it"
+
+# The same property for the other kind, whose text is long enough that a heading
+# clip would make two near-copies rather than two identical ones.
+[ "$(occurrences "which of the two sitting surfaces" "$OUT14")" = 1 ] \
+  || fail "a delegated status decision rendered its text more than once"
+pass "a delegated status decision shows its text once, in full"
 
 # --- the count reports entries, not cards ------------------------------------
 #

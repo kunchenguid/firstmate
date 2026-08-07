@@ -478,6 +478,13 @@ def when($iso): ($iso | hhmm) as $t | (if $t == "" then "" else "state as of " +
 # the board already reaches into delegated state for its landings, so the two
 # sources are folded into one list off one identity. A delegated entry carries
 # the home it came from; a main-home entry carries no home.
+# A delegated entry's `summary` carries two different things depending on how the
+# snapshot built it, so which slot it belongs in is read off the entry's own kind
+# rather than guessed from the text. A captain hold carries the item title in
+# `summary` and the hold reason in `reason`; a status decision carries the
+# decision text in `summary` and no reason. Either way the heading names the work
+# and the body carries what is actually being decided, so no card says the same
+# thing twice and nothing the snapshot carried is dropped.
 | ( [ $work[]
     | . as $t
     | ((.hints.open_decisions // []) | if type == "array" then . else [] end)[]
@@ -489,21 +496,21 @@ def when($iso): ($iso | hhmm) as $t | (if $t == "" then "" else "state as of " +
         task_title: ($t.backlog.title // $t.id),
         project: ($t.project | basename),
         verb: .verb,
-        summary: .summary,
-        reason: null } ]
+        summary: .summary } ]
   + [ $s.secondmate_current.records[]?
       | . as $m
       | ((.decisions_open // []) | if type == "array" then . else [] end)[]
       | select(type == "object" and .id != null and .key != null)
+      | . as $e
+      | (($e.source // "") == "backlog" or ($e.verb // "") == "captain-hold") as $held
       | { kind: "decision",
-          id: "\($m.id)/\(.id):\(.key)",
+          id: "\($m.id)/\($e.id):\($e.key)",
           home: $m.id,
-          task: .id,
-          task_title: ((.summary // .key) | tostring),
+          task: $e.id,
+          task_title: (if $held then (($e.summary // $e.id) | tostring) else ($e.id | tostring) end),
           project: ($m.id | tostring),
-          verb: (.verb // "needs-decision"),
-          summary: ((.summary // "") | tostring),
-          reason: (if (.reason // "") == "" then null else (.reason | tostring) end) } ] ) as $durable
+          verb: ($e.verb // "needs-decision"),
+          summary: (if $held then (($e.reason // "") | tostring) else (($e.summary // "") | tostring) end) } ] ) as $durable
 
 # A delegated home the snapshot could not read whole cannot be reported as
 # holding no decisions, so what was not read is stated rather than assumed.
@@ -565,7 +572,6 @@ def when($iso): ($iso | hhmm) as $t | (if $t == "" then "" else "state as of " +
     + (if $d.home != null then " &middot; held in delegated home \($d.home | esc)" else "" end)
     + "</p>"
     + (if ($d.summary // "") != "" then "<p>\($d.summary | escn(700))</p>" else "" end)
-    + (if ($d.reason // "") != "" then "<p>\($d.reason | escn(700))</p>" else "" end)
     + "<p class=\"callout\">Not written up yet - there are no options on this card. "
     + "Ask for it to be laid out before answering.</p>"
     + "</article>";
