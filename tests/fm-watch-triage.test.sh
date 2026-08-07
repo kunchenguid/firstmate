@@ -1630,6 +1630,97 @@ test_paused_status_wakes_once_for_actionable_run_outcomes() {
   pass "paused last-status panes wake once for PR-ready or failed run outcomes"
 }
 
+test_afk_paused_status_wakes_once_for_actionable_run_outcomes() {
+  local dir state fakebin out capture_file drain_out task window statusf key pane_hash sig pid item outcome marker marker_file back wakes
+  for item in ready failed; do
+    dir=$(make_case "afk-paused-actionable-run-outcome-$item")
+    state="$dir/state"
+    fakebin="$dir/fakebin"
+    out="$dir/watch.out"
+    capture_file="$dir/pane.txt"
+    drain_out="$dir/drain.out"
+    task="afk-paused-outcome-$item"
+    window="test:fm-$task"
+    statusf="$state/$task.status"
+    case "$item" in
+      ready) outcome='state: done · source: run-step · checks green: PR ready for review · run-id=afk-paused-ready run-head=aaa111' ;;
+      *)     outcome='state: failed · source: run-step · checks failed · run-id=afk-paused-failed run-head=bbb222' ;;
+    esac
+    marker=$(crew_actionable_run_state_marker_from_state_line "$outcome")
+    printf 'paused: awaiting external validation slot\n' > "$statusf"
+    back=$(( $(date +%s) - 500 ))
+    set_mtime "$back" "$statusf"
+    sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-${task}_status"
+    printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/$task.meta"
+    printf 'afk paused actionable outcome %s\n' "$item" > "$capture_file"
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    pane_hash=$(hash_text "afk paused actionable outcome $item")
+    printf '%s' "$pane_hash" > "$state/.hash-$key"
+    printf '%s' "$pane_hash" > "$state/.stale-$key"
+    printf '1\n' > "$state/.count-$key"
+    : > "$state/.paused-$key"
+    date +%s > "$state/.paused-rechecked-$key"
+    date +%s > "$state/.afk"
+    marker_file="$state/.run-state-surfaced-$task"
+
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE="$outcome" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 40 || fail "$item AFK paused run outcome did not wake"
+    grep -Fx "stale: $window" "$out" >/dev/null || fail "$item AFK paused run outcome did not print a plain stale wake"
+    [ "$(cat "$marker_file" 2>/dev/null || true)" = "$marker" ] || fail "$item AFK paused run outcome marker was not recorded"
+    FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after $item AFK paused run outcome failed"
+    wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$drain_out")
+    [ "$wakes" -eq 1 ] || fail "$item AFK paused run outcome queued $wakes stale wakes"
+
+    : > "$state/.wake-queue"
+    : > "$out"
+    printf '1\n' > "$state/.count-$key"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE="$outcome" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_live "$pid" 30 || { reap "$pid"; fail "$item AFK paused run outcome duplicate re-woke: $(cat "$out")"; }
+    [ ! -s "$out" ] || { reap "$pid"; fail "$item AFK paused run outcome duplicate printed a wake: $(cat "$out")"; }
+    [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "$item AFK paused run outcome duplicate queued a wake"; }
+    reap "$pid"
+  done
+
+  dir=$(make_case "afk-paused-nonactionable-stale")
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  capture_file="$dir/pane.txt"
+  task="afk-paused-benign"
+  window="test:fm-$task"
+  statusf="$state/$task.status"
+  printf 'paused: awaiting external validation slot\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-${task}_status"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/$task.meta"
+  printf 'afk paused nonactionable stale\n' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "afk paused nonactionable stale")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.paused-$key"
+  date +%s > "$state/.afk"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting external validation slot' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 30 || { reap "$pid"; fail "non-actionable AFK paused stale woke: $(cat "$out")"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "non-actionable AFK paused stale printed a wake: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "non-actionable AFK paused stale queued a wake"; }
+  reap "$pid"
+
+  pass "AFK paused stale panes wake once for PR-ready or failed run outcomes"
+}
+
 # --- consecutive wedge escalations on the same pane demand deep inspection ----
 # Root cause of the PR #252 incident's ~20 minutes of unnoticed green: each
 # wedge escalation fires, gets classified as "still validating" one poll later
@@ -2626,6 +2717,7 @@ test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
 test_nonterminal_paused_rechecks_authoritative_state
 test_paused_authoritative_working_preserves_wedge_timer
 test_paused_status_wakes_once_for_actionable_run_outcomes
+test_afk_paused_status_wakes_once_for_actionable_run_outcomes
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_procevent_captured_result_surfaces_proactively

@@ -1169,7 +1169,7 @@ EOF
       if [ "$n" -ge 2 ] && [ "$busy_now" -ne 0 ]; then
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
-        if ! afk_present && surface_paused_actionable_run_state_if_new "$w" "$task" "$h"; then
+        if surface_paused_actionable_run_state_if_new "$w" "$task" "$h"; then
           :
         elif [ "$kind" = secondmate ]; then
           case "$(pause_state_class "$w" "$task")" in
