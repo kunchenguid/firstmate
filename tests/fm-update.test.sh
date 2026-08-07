@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Tests for bin/fm-update.sh: fast-forward-only self-update of a running
-# firstmate repo and every registered secondmate home.
+# firstmate repo and every registered secondmate home, including guarded GitHub
+# fork synchronization and inherited-config convergence ordering.
 #
 # The guarantees under test mirror fm-fleet-sync.sh and prime directive #3:
 #   - The running firstmate repo (on its default branch) fast-forwards from
@@ -17,12 +18,18 @@
 #   - Secondmate homes resolve from both state/<id>.meta and the
 #     data/secondmates.md registry, deduped, and the firstmate repo is never
 #     re-processed as one of its own secondmates.
+#   - github.com forks synchronize through gh before the local fetch; current
+#     forks are harmless, while API/authentication failure and fork divergence
+#     stop before any local or config convergence.
+#   - Non-GitHub and local origins never invoke gh and retain direct origin
+#     fast-forward behavior.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 UPDATE="$ROOT/bin/fm-update.sh"
+CONFIG_PUSH_REAL="$ROOT/bin/fm-config-push.sh"
 
 # Deterministic, isolated git identity for fixture commits.
 fm_git_identity fmtest fmtest@example.com
@@ -48,12 +55,39 @@ new_world() {
   mkdir -p "$w/seed/bin" "$w/seed/.agents/skills"
   printf 'echo a\n' > "$w/seed/bin/tool.sh"
   printf 's1\n' > "$w/seed/.agents/skills/note.md"
+  {
+    printf 'config/crew-dispatch.json\nconfig/crew-harness\nconfig/backlog-backend\n'
+    printf 'config/backend\nconfig/herdr-presentation-spaces\nconfig/startup-memory-budget\n'
+  } > "$w/seed/.gitignore"
   git -C "$w/seed" add -A
   git -C "$w/seed" commit -qm c1
   git -C "$w/seed" push -q origin main
 
   git clone -q "$w/origin.git" "$w/main"
   git -C "$w/main" remote set-head origin main >/dev/null 2>&1 || true
+
+cat > "$w/config-push" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ "$*" = "--include-registered" ] \
+  || { echo "config convergence omitted registered homes" >&2; exit 1; }
+if [ -n "${FM_TEST_EXPECTED_HEAD:-}" ]; then
+  [ "$(git -C "$FM_ROOT_OVERRIDE" rev-parse HEAD)" = "$FM_TEST_EXPECTED_HEAD" ] \
+    || { echo "config convergence ran before firstmate update" >&2; exit 1; }
+fi
+if [ -n "${FM_TEST_SECOND_HOME:-}" ]; then
+  [ "$(git -C "$FM_TEST_SECOND_HOME" rev-parse HEAD)" = "$FM_TEST_EXPECTED_HEAD" ] \
+    || { echo "config convergence ran before secondmate update" >&2; exit 1; }
+fi
+if [ -n "${FM_TEST_ORDER_LOG:-}" ]; then
+  printf 'config\n' >> "$FM_TEST_ORDER_LOG"
+fi
+if [ "${FM_TEST_CONFIG_FAIL:-0}" = 1 ]; then
+  echo "configured convergence failure" >&2
+  exit 1
+fi
+SH
+  chmod +x "$w/config-push"
 
   printf '%s\n' "$w"
 }
@@ -89,7 +123,71 @@ bump_origin() {
 
 run_update() {
   local w=$1
-  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    FM_CONFIG_PUSH_OVERRIDE="$w/config-push" "$UPDATE"
+}
+
+configure_github_world() {
+  local w=$1 origin_url=${2:-https://github.com/acme/firstmate-fork.git}
+  git clone -q --bare "$w/origin.git" "$w/upstream.git"
+  git clone -q "$w/upstream.git" "$w/upstream-seed"
+  git -C "$w/main" remote set-url origin "$origin_url"
+  git -C "$w/main" remote add upstream https://github.com/acme/firstmate.git
+  git -C "$w/main" config \
+    url."file://$w/origin.git".insteadOf "$origin_url"
+
+  mkdir -p "$w/fake-bin"
+  cat > "$w/fake-bin/gh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
+case "${1:-} ${2:-}" in
+  "repo view")
+    if [ "${FM_TEST_GH_MODE:-fork}" = api-fail ]; then
+      echo "authentication required" >&2
+      exit 1
+    fi
+    if [ "${FM_TEST_GH_MODE:-fork}" = direct ]; then
+      printf 'acme/firstmate-fork\tfalse\tmain\t\n'
+    else
+      printf 'acme/firstmate-fork\ttrue\tmain\tacme/firstmate\n'
+    fi
+    ;;
+  "repo sync")
+    git --git-dir="$FM_TEST_UPSTREAM_REPO" push -q "$FM_TEST_FORK_REPO" \
+      "refs/heads/$FM_TEST_DEFAULT:refs/heads/$FM_TEST_DEFAULT"
+    ;;
+  "api repos/"*)
+    git --git-dir="$FM_TEST_FORK_REPO" rev-parse "refs/heads/$FM_TEST_DEFAULT"
+    ;;
+  *)
+    echo "unexpected gh invocation: $*" >&2
+    exit 2
+    ;;
+esac
+SH
+  chmod +x "$w/fake-bin/gh"
+}
+
+bump_upstream() {
+  local w=$1 label=$2
+  printf '%s\n' "$label" >> "$w/upstream-seed/AGENTS.md"
+  git -C "$w/upstream-seed" add AGENTS.md
+  git -C "$w/upstream-seed" commit -qm "$label"
+  git -C "$w/upstream-seed" push -q origin main
+}
+
+run_github_update() {
+  local w=$1
+  PATH="$w/fake-bin:$PATH" \
+    FM_TEST_GH_LOG="$w/gh.log" \
+    FM_TEST_UPSTREAM_REPO="$w/upstream.git" \
+    FM_TEST_FORK_REPO="$w/origin.git" \
+    FM_TEST_DEFAULT=main \
+    FM_ROOT_OVERRIDE="$w/main" \
+    FM_HOME="$w/home" \
+    FM_CONFIG_PUSH_OVERRIDE="$w/config-push" \
+    "$UPDATE"
 }
 
 # --- T1: main + secondmate behind, instruction change; FF, not a merge ------
@@ -235,35 +333,66 @@ test_registry_backstop_dedup_and_self_exclusion() {
   pass "T7 registry backstop resolves, dedups meta+registry, excludes the firstmate repo"
 }
 
+test_config_convergence_includes_registered_idle_home() {
+  local w c1 out rc
+  w=$(new_world config-idle)
+  c1=$(git -C "$w/main" rev-parse HEAD)
+  git -C "$w/main" worktree add -q --detach "$w/idle" "$c1"
+  printf 'idle\n' > "$w/idle/.fm-secondmate-home"
+  printf -- '- idle - registered idle home (home: %s/idle; scope: config; projects: p; added 2026-08-07)\n' \
+    "$w" > "$w/home/data/secondmates.md"
+  mkdir -p "$w/home/config"
+  printf 'manual\n' > "$w/home/config/backlog-backend"
+
+  out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    "$CONFIG_PUSH_REAL" --include-registered 2>&1)
+  rc=$?
+
+  [ "$rc" -eq 0 ] || fail "registered-idle config convergence failed: $out"
+  assert_contains "$out" "config-push: $w/home -> registered secondmate homes" \
+    "registered convergence mode was not reported"
+  assert_contains "$out" "secondmate idle ($w/idle):" \
+    "registered idle home was not discovered"
+  [ "$(cat "$w/idle/config/backlog-backend")" = manual ] \
+    || fail "registered idle home did not receive inherited config"
+  assert_not_contains "$out" "config-reread: sent" \
+    "registered idle home received a live reread nudge"
+  pass "T8 inherited config converges for a registered idle home without a live nudge"
+}
+
 # --- T9: firstmate repo on a feature branch is skipped ---------------------
 test_firstmate_wrong_branch_skipped() {
-  local w out before
+  local w out before rc
   w=$(new_world t9)
   bump_origin "$w" instr
   # Simulate firstmate mid-shipping its own change: not on the default branch.
   git -C "$w/main" checkout -q -b feature/wip
   before=$(git -C "$w/main" rev-parse HEAD)
 
-  out=$(run_update "$w")
+  out=$(run_update "$w" 2>&1)
+  rc=$?
 
-  assert_contains "$out" "firstmate: skipped: on feature/wip, expected main" "off-default firstmate skipped"
-  assert_contains "$out" "reread-firstmate: no" "no reread when firstmate was skipped"
+  [ "$rc" -ne 0 ] || fail "off-default firstmate update unexpectedly succeeded"
+  assert_contains "$out" "update refused: firstmate checkout is on feature/wip, expected main" \
+    "off-default firstmate refused"
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
     || fail "skipped firstmate HEAD moved"
   pass "T9 firstmate off its default branch is skipped, not forced"
 }
 
 test_firstmate_detached_head_skipped() {
-  local w out before
+  local w out before rc
   w=$(new_world t10)
   bump_origin "$w" instr
   git -C "$w/main" checkout -q --detach HEAD
   before=$(git -C "$w/main" rev-parse HEAD)
 
-  out=$(run_update "$w")
+  out=$(run_update "$w" 2>&1)
+  rc=$?
 
-  assert_contains "$out" "firstmate: skipped: detached HEAD, expected main" "detached firstmate skipped"
-  assert_contains "$out" "reread-firstmate: no" "no reread when detached firstmate was skipped"
+  [ "$rc" -ne 0 ] || fail "detached firstmate update unexpectedly succeeded"
+  assert_contains "$out" "update refused: firstmate checkout has detached HEAD, expected main" \
+    "detached firstmate refused"
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
     || fail "detached firstmate HEAD moved"
   pass "T10 firstmate detached HEAD is skipped"
@@ -281,14 +410,288 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
     "$bad" > "$w/home/data/secondmates.md"
   bump_origin "$w" instr
 
-  out=$(run_update "$w")
+  out=$(run_update "$w" 2>&1)
 
   assert_contains "$out" "secondmate bad: skipped: unsafe home: secondmate home cannot be inside the active firstmate home" \
     "unsafe project-like home skipped"
-  assert_contains "$out" "nudge-secondmates: none" "unsafe home is not nudged"
+  assert_not_contains "$out" "fm-bad" "unsafe home is not nudged"
+  assert_contains "$out" "update refused: one or more registered secondmate homes could not fast-forward" \
+    "unsafe home makes the overall update refuse"
   [ "$(git -C "$bad" rev-parse HEAD)" = "$before" ] \
     || fail "unsafe secondmate home HEAD moved"
   pass "T11 unsafe secondmate home is not fast-forwarded"
+}
+
+test_github_fork_ahead_sync_and_convergence_order() {
+  local w out expected order rc
+  w=$(new_world github-ahead)
+  add_sm "$w" sm1
+  configure_github_world "$w"
+  bump_upstream "$w" upstream-ahead
+  expected=$(git --git-dir="$w/upstream.git" rev-parse refs/heads/main)
+
+  out=$(FM_TEST_EXPECTED_HEAD="$expected" \
+    FM_TEST_SECOND_HOME="$w/sm1" \
+    FM_TEST_ORDER_LOG="$w/order.log" \
+    run_github_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -eq 0 ] || fail "GitHub fork-ahead update failed: $out"
+  assert_contains "$out" "origin: github acme/firstmate-fork (fork)" "GitHub fork identified"
+  assert_contains "$out" "upstream: github acme/firstmate" "GitHub parent identified"
+  assert_contains "$out" "fork-sync: updated " \
+    "GitHub fork synchronized"
+  assert_contains "$out" "firstmate: updated " "local firstmate advanced after fork sync"
+  assert_contains "$out" "secondmate sm1: updated " "secondmate advanced after firstmate"
+  order=$(cat "$w/order.log")
+  [ "$order" = config ] || fail "config convergence did not run exactly once after tracked updates"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$expected" ] \
+    || fail "firstmate did not reach synchronized fork tip"
+  [ "$(git -C "$w/sm1" rev-parse HEAD)" = "$expected" ] \
+    || fail "secondmate did not reach synchronized fork tip"
+  grep -q '^repo view ' "$w/gh.log" || fail "GitHub metadata inspection was not invoked"
+  grep -q '^repo sync acme/firstmate-fork --branch main$' "$w/gh.log" \
+    || fail "guarded GitHub fork sync was not invoked"
+  pass "T12 GitHub fork sync precedes local, secondmate, and config convergence"
+}
+
+test_github_fork_already_current() {
+  local w out before rc
+  w=$(new_world github-current)
+  configure_github_world "$w"
+  before=$(git -C "$w/main" rev-parse HEAD)
+
+  out=$(FM_TEST_ORDER_LOG="$w/order.log" run_github_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -eq 0 ] || fail "already-current GitHub fork update failed: $out"
+  assert_contains "$out" "fork-sync: already current acme/firstmate-fork with acme/firstmate" \
+    "already-current fork reported accurately"
+  assert_contains "$out" "firstmate: already current" "already-current local checkout preserved"
+  [ "$(cat "$w/order.log")" = config ] || fail "config convergence skipped for current fork"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] || fail "current checkout moved"
+  pass "T13 already-current GitHub fork is an idempotent update"
+}
+
+test_github_fork_divergence_refused() {
+  local w out local_before fork_before rc
+  w=$(new_world github-diverged)
+  configure_github_world "$w"
+  bump_upstream "$w" upstream-change
+  printf 'fork divergence\n' >> "$w/seed/README.md"
+  git -C "$w/seed" add README.md
+  git -C "$w/seed" commit -qm fork-change
+  git -C "$w/seed" push -q origin main
+  local_before=$(git -C "$w/main" rev-parse HEAD)
+  fork_before=$(git --git-dir="$w/origin.git" rev-parse refs/heads/main)
+
+  out=$(FM_TEST_ORDER_LOG="$w/order.log" run_github_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -ne 0 ] || fail "diverged GitHub fork update unexpectedly succeeded"
+  assert_contains "$out" "update refused: GitHub fork sync failed without changing divergence" \
+    "diverged GitHub fork refused"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$local_before" ] \
+    || fail "local checkout moved after fork divergence"
+  [ "$(git --git-dir="$w/origin.git" rev-parse refs/heads/main)" = "$fork_before" ] \
+    || fail "diverged fork was changed"
+  [ ! -e "$w/order.log" ] || fail "config convergence ran after fork divergence"
+  pass "T14 diverged GitHub fork is refused without mutation"
+}
+
+test_github_api_failure_refused() {
+  local w out before rc
+  w=$(new_world github-api-fail)
+  configure_github_world "$w"
+  before=$(git -C "$w/main" rev-parse HEAD)
+
+  out=$(FM_TEST_GH_MODE=api-fail FM_TEST_ORDER_LOG="$w/order.log" \
+    run_github_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -ne 0 ] || fail "GitHub API failure unexpectedly succeeded"
+  assert_contains "$out" "update refused: GitHub origin inspection failed: authentication required" \
+    "GitHub authentication/API failure refused"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
+    || fail "local checkout moved after GitHub API failure"
+  [ ! -e "$w/order.log" ] || fail "config convergence ran after GitHub API failure"
+  assert_not_contains "$(cat "$w/gh.log")" "repo sync" "fork sync not attempted after API failure"
+  pass "T15 GitHub authentication/API failure stops before mutation"
+}
+
+test_non_github_origin_bypasses_gh() {
+  local w out rc
+  w=$(new_world non-github)
+  bump_origin "$w" instr
+  mkdir -p "$w/fake-bin"
+  cat > "$w/fake-bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf 'called\n' > "$FM_TEST_GH_CALLED"
+exit 97
+SH
+  chmod +x "$w/fake-bin/gh"
+
+  out=$(PATH="$w/fake-bin:$PATH" FM_TEST_GH_CALLED="$w/gh.called" \
+    run_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -eq 0 ] || fail "non-GitHub direct update failed: $out"
+  assert_contains "$out" "origin: non-GitHub local:" "non-GitHub origin identified"
+  assert_contains "$out" "fork-sync: not applicable" "non-GitHub fork sync bypassed"
+  assert_contains "$out" "firstmate: updated " "non-GitHub origin fast-forwarded directly"
+  [ ! -e "$w/gh.called" ] || fail "non-GitHub origin invoked gh"
+  pass "T16 non-GitHub origin retains direct fast-forward behavior"
+}
+
+test_stale_origin_tracking_is_refreshed_before_github_api() {
+  local w out rc old
+  w=$(new_world github-stale-origin)
+  configure_github_world "$w"
+  old=$(git -C "$w/main" rev-parse HEAD)
+  printf 'landed local commit\n' >> "$w/main/README.md"
+  git -C "$w/main" add README.md
+  git -C "$w/main" commit -qm landed-local
+  git -C "$w/main" push -q "file://$w/origin.git" main:main
+  git -C "$w/main" update-ref refs/remotes/origin/main "$old"
+
+  out=$(FM_TEST_GH_MODE=direct run_github_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -eq 0 ] || fail "fresh remote truth was not accepted: $out"
+  assert_contains "$out" "origin: github acme/firstmate-fork (direct)" \
+    "GitHub inspection did not run after origin refresh"
+  [ "$(git -C "$w/main" rev-parse origin/main)" = "$(git -C "$w/main" rev-parse HEAD)" ] \
+    || fail "preflight did not refresh stale origin/main"
+  pass "T23 stale origin tracking is refreshed before GitHub mutation"
+}
+
+test_missing_origin_default_refused_before_github_api() {
+  local w out rc
+  w=$(new_world github-missing-origin)
+  configure_github_world "$w"
+  git --git-dir="$w/origin.git" update-ref -d refs/heads/main
+
+  out=$(run_github_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -ne 0 ] || fail "missing origin/main unexpectedly succeeded"
+  assert_contains "$out" "update refused: refreshed origin/main does not exist" \
+    "missing refreshed origin/main was not refused"
+  [ ! -e "$w/gh.log" ] || fail "GitHub API ran before missing origin/main refusal"
+  pass "T24 missing origin/default is refused before GitHub mutation"
+}
+
+test_direct_github_origin_bypasses_fork_sync() {
+  local w out gh_log rc
+  w=$(new_world github-direct)
+  configure_github_world "$w"
+  bump_origin "$w" instr
+
+  out=$(FM_TEST_GH_MODE=direct run_github_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -eq 0 ] || fail "direct GitHub origin update failed: $out"
+  assert_contains "$out" "origin: github acme/firstmate-fork (direct)" \
+    "direct GitHub origin identified"
+  assert_contains "$out" "fork-sync: not applicable" "direct GitHub origin skipped fork sync"
+  assert_contains "$out" "firstmate: updated " "direct GitHub origin fast-forwarded normally"
+  gh_log=$(cat "$w/gh.log")
+  assert_contains "$gh_log" "repo view" "direct GitHub origin inspected"
+  assert_not_contains "$gh_log" "repo sync" "direct GitHub origin did not invoke fork sync"
+  pass "T17 direct GitHub origin retains ordinary fast-forward behavior"
+}
+
+test_mixed_case_github_host_uses_fork_sync() {
+  local w out expected rc
+  w=$(new_world github-mixed-case)
+  configure_github_world "$w" https://GitHub.com/acme/firstmate-fork.git
+  bump_upstream "$w" mixed-case-upstream
+  expected=$(git --git-dir="$w/upstream.git" rev-parse refs/heads/main)
+
+  out=$(run_github_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -eq 0 ] || fail "mixed-case GitHub host update failed: $out"
+  assert_contains "$out" "origin: github acme/firstmate-fork (fork)" \
+    "mixed-case github.com host classified as GitHub"
+  assert_contains "$out" "fork-sync: updated " \
+    "mixed-case github.com host used guarded fork sync"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$expected" ] \
+    || fail "mixed-case GitHub checkout did not reach synchronized tip"
+  pass "T21 GitHub hostname matching is case-insensitive"
+}
+
+test_credentialed_github_origin_uses_fork_sync() {
+  local w out expected rc
+  w=$(new_world github-credentialed)
+  configure_github_world "$w" https://fixture:fixture@github.com/acme/firstmate-fork.git
+  bump_upstream "$w" credentialed-upstream
+  expected=$(git --git-dir="$w/upstream.git" rev-parse refs/heads/main)
+
+  out=$(run_github_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -eq 0 ] || fail "credentialed GitHub origin update failed: $out"
+  assert_contains "$out" "origin: github acme/firstmate-fork (fork)" \
+    "credentialed GitHub origin classified as GitHub"
+  assert_contains "$out" "fork-sync: updated " \
+    "credentialed GitHub origin used guarded fork sync"
+  assert_not_contains "$out" "fixture:fixture" "origin credentials were not printed"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$expected" ] \
+    || fail "credentialed GitHub checkout did not reach synchronized tip"
+  pass "T22 credential-bearing GitHub HTTPS origins use guarded fork sync"
+}
+
+test_local_divergence_refused_before_remote_work() {
+  local w out before rc
+  w=$(new_world local-diverged)
+  printf 'local work\n' >> "$w/main/README.md"
+  git -C "$w/main" add README.md
+  git -C "$w/main" commit -qm local-work
+  before=$(git -C "$w/main" rev-parse HEAD)
+
+  out=$(run_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -ne 0 ] || fail "local-ahead update unexpectedly succeeded"
+  assert_contains "$out" "update refused: local main has unlanded or divergent commits relative to origin/main" \
+    "local unlanded commit refused"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] || fail "local commit was moved"
+  pass "T18 local unlanded work is refused before remote mutation"
+}
+
+test_dirty_firstmate_refused_before_github_api() {
+  local w out rc
+  w=$(new_world github-dirty)
+  configure_github_world "$w"
+  printf 'dirty work\n' >> "$w/main/README.md"
+
+  out=$(run_github_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -ne 0 ] || fail "dirty firstmate update unexpectedly succeeded"
+  assert_contains "$out" "update refused: firstmate checkout has a dirty working tree" \
+    "dirty firstmate refused"
+  [ ! -e "$w/gh.log" ] || fail "GitHub API was called before dirty-work refusal"
+  pass "T19 dirty firstmate is refused before GitHub fork mutation"
+}
+
+test_config_convergence_failure_refused_after_fast_forward() {
+  local w out expected rc
+  w=$(new_world config-fail)
+  bump_origin "$w" instr
+  expected=$(git --git-dir="$w/origin.git" rev-parse refs/heads/main)
+
+  out=$(FM_TEST_CONFIG_FAIL=1 run_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -ne 0 ] || fail "config convergence failure unexpectedly succeeded"
+  assert_contains "$out" "firstmate: updated " "tracked update completed before config convergence"
+  assert_contains "$out" "update refused: inherited config convergence failed" \
+    "config convergence failure refused"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$expected" ] \
+    || fail "safe tracked fast-forward was rolled back after config failure"
+  pass "T20 config convergence failure is reported after safe tracked update"
 }
 
 test_updates_main_and_secondmate
@@ -297,8 +700,22 @@ test_dirty_secondmate_skipped
 test_diverged_secondmate_skipped
 test_idempotent_already_current
 test_registry_backstop_dedup_and_self_exclusion
+test_config_convergence_includes_registered_idle_home
 test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
+test_github_fork_ahead_sync_and_convergence_order
+test_github_fork_already_current
+test_github_fork_divergence_refused
+test_github_api_failure_refused
+test_non_github_origin_bypasses_gh
+test_stale_origin_tracking_is_refreshed_before_github_api
+test_missing_origin_default_refused_before_github_api
+test_direct_github_origin_bypasses_fork_sync
+test_mixed_case_github_host_uses_fork_sync
+test_credentialed_github_origin_uses_fork_sync
+test_local_divergence_refused_before_remote_work
+test_dirty_firstmate_refused_before_github_api
+test_config_convergence_failure_refused_after_fast_forward
 
 echo "# all fm-update tests passed"

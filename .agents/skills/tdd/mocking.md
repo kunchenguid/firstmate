@@ -1,5 +1,6 @@
 # When to Mock
 
+This file owns the mocking boundary used by [SKILL.md](SKILL.md).
 Mock at **system boundaries** only:
 
 - External APIs (payment, email, etc.)
