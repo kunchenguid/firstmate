@@ -27,9 +27,9 @@ The file must be a regular, single-linked file beneath a non-symlinked `config/`
 
 The selection applies only to the exact target home that contains it.
 For the running primary code root, the selection comes from the effective `FM_HOME`, even when that operational home is separate from the tracked root selected by `FM_ROOT_OVERRIDE`.
-A local second mate uses its own home's file.
+A local secondmate uses its own home's file.
 A remote code root and its persistent remote second-mate home each use their own file independently.
-This setting is deliberately absent from the inherited-local-material allowlist, so a primary opt-in never propagates to second mates.
+This setting is deliberately absent from the inherited-local-material allowlist, so a primary opt-in never propagates to secondmates.
 
 Under `default`, each target retains the existing guarded update byte-for-byte where practical: the updater fetches origin and advances only a clean, non-diverged default-branch primary or valid detached second-mate home by fast-forward.
 Dirty, diverged, wrong-branch, detached-primary, offline, missing-origin, and otherwise unsafe targets are reported and left unchanged.
@@ -45,7 +45,7 @@ It never runs an ignored-file clean, force-pushes, stashes, merges, alters origi
 A fetch, remote, branch, private-path, ignored-obstruction, or reset failure never falls back to a destructive local operation.
 
 Status lines report `replaced ... (remote-authoritative)` for this path, distinct from ordinary `updated`, `already current`, and `skipped` results.
-The caller action lines remain `reread-firstmate: yes|no` and `nudge-secondmates: ...|none`, with a replacement treated as an update when loaded instructions changed or a live second mate needs a re-read.
+The caller action lines remain `reread-firstmate: yes|no` and `nudge-secondmates: ...|none`, with a replacement treated as an update when loaded instructions changed or a live secondmate needs a re-read.
 `bin/fm-update.sh` and `bin/fm-ff-lib.sh` own the exact mechanics, and `tests/fm-update.test.sh` exercises the policy through the public updater interface.
 
 `bin/fm-session-start.sh`'s header is the single owner of session-start ordering, composed commands, digest contents, and the digest's startup mechanism.

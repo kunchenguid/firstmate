@@ -44,7 +44,7 @@ This touches only Firstmate code roots and homes, never anything under `projects
    FM_HOME=<this-firstmate-home> bin/fm-send.sh <id> 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'
    ```
    Include `FM_HOME=<this-firstmate-home>` unless `FM_HOME` is already set to the active firstmate home.
-   This is a gentle steer, not an interruption: the second mate's selected update already completed, and the nudge performs no repository operation.
+   This is a gentle steer, not an interruption: the secondmate's selected update already completed, and the nudge performs no repository operation.
    A secondmate that was skipped, already current, or has no live metadata is not on the list and needs no nudge.
 
 4. **Report to the captain in plain outcomes.**
