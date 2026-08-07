@@ -157,7 +157,9 @@ done < "$BRIEF" > "$TMP/charter.remote"
 PROJECTS_CSV=
 : > "$TMP/project.records"
 PROJECT_INDEX=0
-for project in "${PROJECT_NAMES[@]}"; do
+# Stock macOS Bash 3.2 treats an empty array expansion as unbound under set -u.
+# The + form keeps --no-projects as zero iterations without weakening nounset.
+for project in ${PROJECT_NAMES[@]+"${PROJECT_NAMES[@]}"}; do
   ORIGIN=${PROJECT_ORIGINS[$PROJECT_INDEX]}
   PROJECT_INDEX=$((PROJECT_INDEX + 1))
   MODE_LINE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$project")

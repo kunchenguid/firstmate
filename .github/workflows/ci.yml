@@ -321,12 +321,12 @@ jobs:
           if-no-files-found: warn
 
   macos-stock-bash:
-    name: Stock macOS Bash snapshot compatibility
+    name: Stock macOS Bash compatibility
     runs-on: macos-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
-      - name: Run snapshot consumers with stock Bash
+      - name: Run compatibility paths with stock Bash
         shell: /bin/bash {0}
         env:
           PATH: /bin:/usr/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin
@@ -346,6 +346,14 @@ jobs:
             /bin/bash -n "$f" || { echo "::error::stock macOS Bash 3.2 failed to parse $f"; parse_fail=1; }
           done < "$shell_inventory"
           [ "$parse_fail" -eq 0 ] || { echo "::error::stock macOS Bash 3.2 parse sweep failed"; exit 1; }
+
+          remote_seed_output=$(FM_TEST_SEED_ONLY=1 /bin/bash tests/fm-remote-secondmate-lifecycle-e2e.test.sh)
+          printf '%s\n' "$remote_seed_output"
+          remote_seed_count=$(printf '%s\n' "$remote_seed_output" | grep -c '^ok - ')
+          [ "$remote_seed_count" -eq 2 ] || {
+            echo "::error::expected 2 remote project-less seed tests, got $remote_seed_count"
+            exit 1
+          }
 
           snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-view.test.sh)
           printf '%s\n' "$snapshot_output"

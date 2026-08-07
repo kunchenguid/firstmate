@@ -302,6 +302,7 @@ seed_env() {
 }
 
 REAL_GIT=$(command -v git)
+REAL_SLEEP=$(command -v sleep)
 cat > "$FAKEBIN/git" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = clone ] && [ "\${!#}" = "$TMP_ROOT/concurrent-home" ]; then
@@ -314,6 +315,14 @@ fi
 exec "$REAL_GIT" "\$@"
 SH
 chmod +x "$FAKEBIN/git"
+cat > "$FAKEBIN/sleep" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = 0.1 ] && [ -n "\${FM_TEST_LOCK_WAIT_MARKER:-}" ]; then
+  : > "\$FM_TEST_LOCK_WAIT_MARKER"
+fi
+exec "$REAL_SLEEP" "\$@"
+SH
+chmod +x "$FAKEBIN/sleep"
 printf 'schema=fm-remote-home-provision.v1\nid_b64=%s\ncharter_b64=%s\nproject_count=0\n' \
   "$(printf ios | base64 | tr -d '\n')" \
   "$(printf 'Concurrent provisioning charter.\n' | base64 | tr -d '\n')" \
@@ -362,12 +371,23 @@ while [ ! -f "$TMP_ROOT/seed.entered" ]; do
   [ "$seed_wait" -le 250 ] || fail "failing seed never reached remote provisioning"
   sleep 0.02
 done
+[ "$(cat "$DOCTOR_LOG")" = 'provision-block-fail -' ] \
+  || fail "project-less seed reached provisioning without one successful readiness check"
 FM_SECONDMATE_CHARTER='Successful seed charter.' FM_SECONDMATE_SCOPE='successful seed' \
+  FM_TEST_LOCK_WAIT_MARKER="$TMP_ROOT/seed-lock-waiting" PATH="$FAKEBIN:$PATH" \
   seed_env "$ROOT/bin/fm-remote-home-seed.sh" seed-keep remote-mac "$REMOTE_ROOT" \
   "$TMP_ROOT/seed-keep-home" --no-projects > "$TMP_ROOT/seed-keep.out" 2>&1 &
 seed_keep_pid=$!
-sleep 0.2
-kill -0 "$seed_keep_pid" 2>/dev/null || fail "competing seed bypassed the shared registry transaction"
+seed_lock_wait=0
+while [ ! -f "$TMP_ROOT/seed-lock-waiting" ]; do
+  kill -0 "$seed_keep_pid" 2>/dev/null \
+    || fail "competing seed exited before waiting on the shared registry transaction"
+  seed_lock_wait=$((seed_lock_wait + 1))
+  [ "$seed_lock_wait" -le 250 ] || fail "competing seed never waited on the shared registry transaction"
+  sleep 0.02
+done
+[ "$(cat "$DOCTOR_LOG")" = 'provision-block-fail -' ] \
+  || fail "competing seed passed readiness before acquiring the shared registry transaction"
 touch "$TMP_ROOT/seed.release"
 if wait "$seed_fail_pid"; then
   fail "known-failing seed unexpectedly succeeded"
@@ -377,6 +397,10 @@ assert_no_grep '- seed-fail ' "$TMP_ROOT/seed-parent/data/secondmates.md" "faile
 assert_grep '- seed-keep ' "$TMP_ROOT/seed-parent/data/secondmates.md" "failed seed rollback removed a competing successful route"
 assert_present "$TMP_ROOT/seed-keep-home/.fm-secondmate-home" "serialized seed lost its published remote home"
 pass "remote seed rollback preserves serialized competing routes"
+if [ "${FM_TEST_SEED_ONLY:-0}" = 1 ]; then
+  echo "ALL TESTS PASSED"
+  exit 0
+fi
 
 : > "$DOCTOR_LOG"
 if FM_SECONDMATE_CHARTER='Unknown readiness charter.' FM_SECONDMATE_SCOPE='unknown readiness' \
