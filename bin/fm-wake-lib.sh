@@ -13,7 +13,32 @@ FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
 _FM_UNAME=$(uname 2>/dev/null || echo unknown)
+case "$_FM_UNAME" in
+  MSYS*|MINGW*|CYGWIN*) _FM_LOCK_WINLINKS=1 ;;
+  *) _FM_LOCK_WINLINKS= ;;
+esac
 mkdir -p "$STATE"
+
+# Create $link as a symbolic link to directory $target, failing atomically when
+# $link already exists. On Git Bash/MSYS without symlink privilege, 'ln -s'
+# silently COPIES the target directory instead of linking: readlink then fails
+# the ownership handshake, the copy is never cleaned up, and the acquire loop
+# spins forever treating its own copied claim (whose pid file names the live
+# acquiring shell) as a foreign live holder. A directory junction requires no
+# privilege, satisfies [ -L ], round-trips the owner path through readlink, and
+# is removed by 'rm -f' like any symlink.
+fm_lock_symlink() {
+  local target=$1 link=$2 win_target win_link
+  if [ -z "$_FM_LOCK_WINLINKS" ]; then
+    ln -s "$target" "$link" 2>/dev/null
+    return
+  fi
+  win_target=$(cygpath -w -- "$target" 2>/dev/null) || return 1
+  win_link=$(cygpath -w -- "$link" 2>/dev/null) || return 1
+  # MSYS2_ARG_CONV_EXCL='*' stops the MSYS runtime from rewriting /J and the
+  # Windows paths on their way to cmd.exe, which otherwise mangles the call.
+  MSYS2_ARG_CONV_EXCL='*' cmd /c mklink /J "$win_link" "$win_target" >/dev/null 2>&1
+}
 
 fm_current_pid() {
   printf '%s\n' "${BASHPID:-$$}"
@@ -321,7 +346,7 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+  if fm_lock_symlink "$ownerdir" "$lockdir" && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
       FM_LOCK_OWNER_DIR=$ownerdir
       return 0
