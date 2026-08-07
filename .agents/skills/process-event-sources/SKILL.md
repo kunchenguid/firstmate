@@ -35,6 +35,7 @@ A continuity break is escalated once and stays unarmed until an operator deliber
 
 An operator's Telegram replies are armed through `bin/fm-procevent-telegram.sh arm`, so a phone reply wakes firstmate instead of sitting unseen.
 Its header owns the token and cursor file contract; the two rules that matter here are that only the handler advances the cursor, after fully handling a captured result, and that a restart before that advance re-captures the same updates, so any update id at or below the cursor is already seen and must be treated as a no-op.
+You advance that cursor yourself with the adapter's `ack` subcommand, naming the highest update id you fully handled, and until you do the armed source keeps re-capturing those same updates.
 
 `bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, `bin/fm-procevent-remote-reply.sh --help`, and `bin/fm-procevent-telegram.sh --help` own the exact commands and flags.
 
