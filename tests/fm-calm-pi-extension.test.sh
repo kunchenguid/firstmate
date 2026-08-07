@@ -256,6 +256,12 @@ const pi = {
     if (name === "calm") calmCommand = command;
   },
   registerEntryRenderer() {},
+  getAllTools() {
+    return ["read", "bash", "edit", "write", "grep", "find", "ls"].map((name) => ({
+      name,
+      sourceInfo: { source: "builtin" },
+    }));
+  },
   registerTool() {},
 };
 
@@ -354,7 +360,7 @@ JS
   pass "missing Pi presentation class exports reach the independent adapter degradation path"
 }
 
-test_builtin_gate_load_time() {
+test_builtin_gate_after_extension_load() {
   local fixture out output_file status
   if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
     echo "skip: node or npm not found for Pi calm gate test"
@@ -391,9 +397,14 @@ test_builtin_gate_load_time() {
     node --input-type=module) >"$output_file" 2>&1 <<'JS'
 import { pathToFileURL } from "node:url";
 
-function fakePi() {
+const diagnostics = [];
+const originalConsoleError = console.error;
+console.error = (...args) => diagnostics.push(args.join(" "));
+const builtinNames = ["bash", "edit", "find", "grep", "ls", "read", "write"];
+function fakePi(foreignRead = false) {
   const tools = [];
   const handlers = new Map();
+  const notifications = [];
   const pi = {
     events: { emit() {}, on() {} },
     on(event, handler) {
@@ -405,40 +416,78 @@ function fakePi() {
       tools.push(tool);
     },
     getAllTools() {
-      return tools.map((tool) => ({ name: tool.name, sourceInfo: { source: "extension", path: "self" } }));
+      return builtinNames.map((name) => ({
+        name,
+        sourceInfo: name === "read" && foreignRead
+          ? { source: "auto", path: "/global/pdf-read/index.ts" }
+          : { source: "builtin", path: `<builtin:${name}>` },
+      }));
     },
   };
-  return { pi, tools, handlers };
+  const ctx = {
+    ui: {
+      getEditorText: () => "",
+      getToolsExpanded: () => false,
+      onTerminalInput: () => () => {},
+      setHiddenThinkingLabel() {},
+      setStatus() {},
+      setToolsExpanded() {},
+      setWorkingVisible() {},
+      notify(message, type) {
+        notifications.push({ message, type });
+      },
+    },
+  };
+  return { pi, tools, handlers, notifications, ctx };
 }
 
-// Calm-off (config/calm absent for this home): load-time registration must be
-// entirely skipped, so a non-Calm user contests nothing.
+delete process.env.FM_CONFIG_OVERRIDE;
+delete process.env.FM_ROOT_OVERRIDE;
+
+// Neither preference state may register tool wrappers during extension discovery,
+// because Pi 0.84 rejects duplicate extension-owned names before startup completes.
 process.env.FM_HOME = process.env.HOME_OFF;
 const offRun = fakePi();
 const extensionOff = await import(`${pathToFileURL(process.env.EXT).href}?gate-off=${Date.now()}`);
 extensionOff.default(offRun.pi);
 if (offRun.tools.length !== 0) {
-  throw new Error(`Calm registered ${offRun.tools.length} built-ins while config/calm was absent: ${offRun.tools.map((t) => t.name).join(",")}`);
+  throw new Error(`Calm registered ${offRun.tools.length} built-ins at load while config/calm was absent`);
+}
+await offRun.handlers.get("session_start")({ reason: "startup" }, offRun.ctx);
+if (offRun.tools.length !== 0) {
+  throw new Error("Calm claimed built-ins when the session started with Calm off");
 }
 
-// Calm-on (config/calm="on" for this home): registration must happen synchronously,
-// during this same factory call, exactly the timing /reload's pre-session_start
-// transcript render depends on - not deferred to session_start or later.
 process.env.FM_HOME = process.env.HOME_ON;
-const onRun = fakePi();
+const onRun = fakePi(true);
 const extensionOn = await import(`${pathToFileURL(process.env.EXT).href}?gate-on=${Date.now()}`);
 extensionOn.default(onRun.pi);
-const names = onRun.tools.map((t) => t.name).sort();
-const expected = ["bash", "edit", "find", "grep", "ls", "read", "write"];
-if (JSON.stringify(names) !== JSON.stringify(expected)) {
-  throw new Error(`Calm registered ${JSON.stringify(names)} synchronously at load with config/calm=on, expected ${JSON.stringify(expected)}`);
+if (onRun.tools.length !== 0) {
+  throw new Error(`Calm registered ${onRun.tools.length} built-ins during extension discovery with config/calm=on`);
 }
+await onRun.handlers.get("session_start")({ reason: "startup" }, onRun.ctx);
+const names = onRun.tools.map((tool) => tool.name).sort();
+const expected = ["bash", "edit", "find", "grep", "ls", "write"];
+if (JSON.stringify(names) !== JSON.stringify(expected)) {
+  throw new Error(`Calm did not preserve extension-owned read on session start: ${JSON.stringify(names)}`);
+}
+if (
+  onRun.notifications.length !== 1 ||
+  onRun.notifications[0].type !== "warning" ||
+  !onRun.notifications[0].message.includes("read")
+) {
+  throw new Error(`Calm did not warn about the extension-owned read tool: ${JSON.stringify(onRun.notifications)}`);
+}
+if (!diagnostics.some((line) => line.includes("read"))) {
+  throw new Error(`Calm did not log the extension-owned read tool: ${JSON.stringify(diagnostics)}`);
+}
+console.error = originalConsoleError;
 JS
   status=$?
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm gate-at-load-time path failed: $out"
   [ -z "$out" ] || fail "Pi calm gate-at-load-time test printed output: $out"
-  pass "Calm registers none of its 7 built-in tool wrappers at load while config/calm is off, and all 7 synchronously at load while config/calm is on"
+  pass "Calm registers no tool wrappers during extension discovery, leaves an extension-owned read tool untouched when a persisted Calm session starts, and wraps the other built-ins"
 }
 
 test_calm_activation_collision_and_regression_bound() {
@@ -827,6 +876,7 @@ const operationalMode = {
   chatContainer: operationalChat,
   editor: { addToHistory: (value) => operationalHistory.push(value) },
   getMarkdownThemeWithSettings: () => undefined,
+  getMarkdownTransformers: () => [],
   getUserMessageText: (message) => typeof message.content === "string"
     ? message.content
     : message.content.filter((item) => item.type === "text").map((item) => item.text).join(""),
@@ -1888,15 +1938,6 @@ TS
   grep -Fq 'tool result one' "$session_file" \
     || fail "Calm removed hidden tool results from persisted history"
 
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/reload'
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
-  wait_for_geometry_transition \
-    "$snapshot" \
-    "Reloading keybindings, extensions, skills, prompts, themes, and context files..." \
-    "CALM_GEOMETRY_FINAL" \
-    || fail "Pi Calm hidden-block geometry E2E did not complete the /reload viewport transition"
-  assert_geometry_gap "$snapshot" "reloaded native Calm transcript"
-
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
   wait_for_geometry_text "$expanded_snapshot" "CALM_GEOMETRY_THINKING_ONE" \
     || fail "thinking expansion did not restore Calm-hidden reasoning"
@@ -1930,6 +1971,16 @@ TS
   done
   assert_geometry_gap "$snapshot" "Calm redraw of existing transcript"
 
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/reload'
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+  wait_for_geometry_transition \
+    "$snapshot" \
+    "Reloading keybindings, extensions, skills, prompts, themes, and context files..." \
+    "CALM_GEOMETRY_FINAL" \
+    || fail "Pi Calm hidden-block geometry E2E did not complete the /reload viewport transition"
+  assert_not_contains "$(cat "$snapshot")" "Thinking..." "reload restored a collapsed thinking label under Calm"
+  assert_contains "$(cat "$snapshot")" "probe-one.txt" "reload did not preserve the documented pre-registration tool-row boundary"
+
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/quit'
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   sleep 0.2
@@ -1944,7 +1995,7 @@ TS
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
   sleep 0.2
   tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
-  pass "Pi Calm native /skill:ahoy geometry keeps every collapsed thinking and tool block at zero height while preserving expansion, history, restart, and Calm-off rendering"
+  pass "Pi Calm native /skill:ahoy geometry keeps live and restarted thinking/tool blocks at zero height, preserves expansion and Calm-off rendering, and leaves reload-restored pre-registration tool rows stock-visible"
 }
 
 test_working_ship_geometry_and_lifecycle() {
@@ -3656,7 +3707,7 @@ test_home_resolution
 test_pi_compat_no_upper_bound
 test_pi_compat_degraded_adapter
 test_pi_compat_missing_adapter_exports
-test_builtin_gate_load_time
+test_builtin_gate_after_extension_load
 test_calm_activation_collision_and_regression_bound
 test_rendering_and_session_lifecycle
 test_operational_followup_turn_e2e
