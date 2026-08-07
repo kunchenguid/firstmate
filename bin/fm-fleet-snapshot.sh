@@ -55,6 +55,8 @@
 #
 # Compatibility: JSON is the primary machine-readable surface.
 # Human views must render this output instead of parsing state files again.
+# Transport invariant: payload-sized JSON documents enter jq through file-backed inputs because Linux limits each process argument independently of the total command-line allowance.
+# Reserve --argjson for bounded booleans and numeric scalars.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
