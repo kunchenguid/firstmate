@@ -226,7 +226,7 @@ No generic remote delete or write surface exists: remote writes are confined to 
 ## Verification
 
 The portable tests use the real entrypoint protocol, real git repositories, a deterministic SSH boundary, a stateful host-local Herdr CLI fixture, and a controlled account fixture for the readiness gate.
-The lifecycle test covers seeding a registered project that this machine has never cloned, asserts that the local project tree is unchanged afterwards, and carries Bitbucket, self-hosted, and scp-like origins through to the remote clone:
+The lifecycle test covers project-less readiness, transactional rollback and serialized publication under stock macOS Bash, plus seeding a registered project that this machine has never cloned without changing the local project tree and carrying Bitbucket, self-hosted, and scp-like origins through to the remote clone:
 
 ```sh
 bin/fm-test-run.sh tests/fm-on.test.sh
