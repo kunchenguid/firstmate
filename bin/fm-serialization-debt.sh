@@ -4,6 +4,7 @@
 # Usage:
 #   fm-serialization-debt.sh --project <path> [--base <ref>]
 #                            [--shift-seconds <n>] [--now <epoch>]
+#                            [--lane-checker <path>]
 #
 # Prints nothing and exits 0 when evidence is available and no debt exists.
 # Prints one explained SERIALIZATION-DEBT line per debt item and exits 1 when
@@ -21,6 +22,18 @@
 # an old branch cannot false-positive. A transition older than the reflog
 # window, or missing, malformed, or unreadable reflog evidence, fails closed
 # as SERIALIZATION-DEBT-EVIDENCE-UNAVAILABLE.
+#
+# Lane-contract checker debt: the probe also invokes the project's executable
+# lane-contract checker, <project>/scripts/check_lane_contract.py by default
+# (override with --lane-checker or FM_LANE_CONTRACT_CHECKER), with
+# --repo <project>. The checker owns its invariants; this probe only maps its
+# exit code to debt: 0 adds nothing, 1 surfaces each stdout violation line as a
+# SERIALIZATION-DEBT source=lane-contract-checker line, and any other nonzero
+# exit surfaces each stderr reason as SERIALIZATION-DEBT-EVIDENCE-UNAVAILABLE
+# source=lane-contract-checker line. A checker that cannot be launched (missing,
+# not executable, timed out, over-bounded output) is the same evidence-
+# unavailable debt with the concrete condition named. Checker debt is appended
+# to any other collected debt, never printed instead of it.
 set -u
 
 exec python3 - "$@" <<'PY'
@@ -37,7 +50,10 @@ parser.add_argument("--project", default=os.environ.get("FM_SERIALIZATION_PROJEC
 parser.add_argument("--base", default=os.environ.get("FM_SERIALIZATION_BASE_REF", "main"))
 parser.add_argument("--shift-seconds", type=int, default=int(os.environ.get("FM_SERIALIZATION_SHIFT_SECONDS", "28800")))
 parser.add_argument("--now", type=int, default=int(os.environ.get("FM_SERIALIZATION_NOW_EPOCH", str(int(dt.datetime.now(dt.timezone.utc).timestamp())))))
+parser.add_argument("--lane-checker", default=os.environ.get("FM_LANE_CONTRACT_CHECKER"))
 args = parser.parse_args()
+if not args.lane_checker:
+    args.lane_checker = os.path.join(args.project, "scripts", "check_lane_contract.py")
 
 if args.shift_seconds < 0 or args.now < 0:
     print("SERIALIZATION-DEBT-EVIDENCE-UNAVAILABLE: source=arguments reason=negative-age-input")
@@ -46,6 +62,10 @@ if args.shift_seconds < 0 or args.now < 0:
 timeout_seconds = 5
 output_limit = 1_000_000
 reflog_window = 200
+# The checker bounds every internal git/janitor call (5s, with one 30s cherry
+# containment call); this is the probe's total outer bound so the cadence stays
+# bounded even when a repository carries many tracker-touching branches.
+lane_checker_timeout_seconds = 90
 min_plausible_epoch = 1104537600  # 2005-01-01: a real reflog date, not a selector index
 
 
@@ -172,6 +192,42 @@ def has_path_proof(task):
     return any(path.search(item) for item in evidence)
 
 
+def run_lane_checker(args):
+    """(status, payload) from one lane-contract checker run.
+
+    clean: no debt. violation: stdout lines to surface. cannot-run: nonzero
+    exit (usually 2) with stderr reasons to surface. unavailable: the checker
+    could not be launched at all, with the concrete condition in the payload.
+    """
+    try:
+        result = subprocess.run(
+            [args.lane_checker, "--repo", args.project],
+            cwd=args.project,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=lane_checker_timeout_seconds,
+            check=False,
+        )
+    except OSError as error:
+        return "unavailable", f"checker-cannot-launch:{type(error).__name__}:{args.lane_checker}"
+    except subprocess.TimeoutExpired:
+        return "unavailable", f"checker-timeout:{lane_checker_timeout_seconds}s:{args.lane_checker}"
+    if len(result.stdout) > output_limit or len(result.stderr) > output_limit:
+        return "unavailable", f"checker-output-exceeded-bound:{args.lane_checker}"
+    try:
+        stdout = result.stdout.decode("utf-8")
+        stderr = result.stderr.decode("utf-8")
+    except UnicodeDecodeError as error:
+        return "unavailable", f"checker-output-not-utf8:{args.lane_checker}"
+    if result.returncode == 0:
+        return "clean", ""
+    if result.returncode == 1:
+        return "violation", stdout.strip() or "checker-exit-1-no-output"
+    reasons = stderr.strip() or stdout.strip() or f"checker-exit-{result.returncode}"
+    return "cannot-run", reasons
+
+
 try:
     run("git-repository", ["git", "rev-parse", "--git-dir"])
     run("git-base", ["git", "rev-parse", "--verify", f"{args.base}^{{commit}}"])
@@ -250,6 +306,16 @@ try:
             debt.append(
                 f"SERIALIZATION-DEBT: bead={task['id']} class=op-direction-proof age_seconds={age} "
                 f"limit_seconds={args.shift_seconds} reason=required-file-path-proof-missing"
+            )
+
+    checker_status, checker_payload = run_lane_checker(args)
+    if checker_status == "violation":
+        for line in checker_payload.splitlines():
+            debt.append(f"SERIALIZATION-DEBT: source=lane-contract-checker {line}")
+    elif checker_status in ("cannot-run", "unavailable"):
+        for line in checker_payload.splitlines():
+            debt.append(
+                f"SERIALIZATION-DEBT-EVIDENCE-UNAVAILABLE: source=lane-contract-checker reason={line}"
             )
 except EvidenceUnavailable as error:
     print(f"SERIALIZATION-DEBT-EVIDENCE-UNAVAILABLE: source=authoritative-records reason={error}")

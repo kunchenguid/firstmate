@@ -25,6 +25,14 @@ cat "$TASKS_JSON"
 SH
 chmod +x "$FAKEBIN/br"
 
+# Default clean lane-contract checker: the probe now always invokes the project
+# checker, so probe fixtures need a clean one unless a test overrides it.
+cat > "$FAKEBIN/lane-checker" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+chmod +x "$FAKEBIN/lane-checker"
+
 epoch_iso() {
   python3 - "$1" <<'PY'
 import datetime as dt
@@ -36,6 +44,7 @@ PY
 run_probe() {
   local now=$1 shift_seconds=$2 out rc
   out=$(PATH="$FAKEBIN:$PATH" TASKS_JSON="$TASKS_JSON" FM_SERIALIZATION_TASK_CLI="$FAKEBIN/br" \
+    FM_LANE_CONTRACT_CHECKER="${FM_LANE_CONTRACT_CHECKER:-$FAKEBIN/lane-checker}" \
     "$ROOT/bin/fm-serialization-debt.sh" --project "$PROJECT" --now "$now" --shift-seconds "$shift_seconds" 2>&1)
   rc=$?
   printf '%s\037%s' "$rc" "$out"
@@ -109,7 +118,8 @@ test_malformed_and_unavailable_evidence_fail_loudly() {
   result=$(run_probe 100000 100); rc=${result%%$'\037'*}; out=${result#*$'\037'}
   expect_code 1 "$rc" "malformed task evidence should require action"
   assert_contains "$out" "SERIALIZATION-DEBT-EVIDENCE-UNAVAILABLE" "malformed evidence looked clean"
-  out=$(FM_SERIALIZATION_TASK_CLI="$TMP_ROOT/missing-br" "$ROOT/bin/fm-serialization-debt.sh" \
+  out=$(FM_LANE_CONTRACT_CHECKER="$FAKEBIN/lane-checker" FM_SERIALIZATION_TASK_CLI="$TMP_ROOT/missing-br" \
+    "$ROOT/bin/fm-serialization-debt.sh" \
     --project "$PROJECT" --now 100000 --shift-seconds 100 2>&1); rc=$?
   expect_code 1 "$rc" "unavailable task evidence should require action"
   assert_contains "$out" "SERIALIZATION-DEBT-EVIDENCE-UNAVAILABLE" "unavailable evidence looked clean"
@@ -211,19 +221,117 @@ test_refill_cadence_propagates_checkout_debt() {
   checkout_switch fm/refill-checkout 1700000000
   out=$(PATH="$FAKEBIN:$PATH" TASKS_JSON="$TASKS_JSON" FM_REFILL_PROJECT="$PROJECT" \
     FM_SERIALIZATION_DEBT_PROBE="$ROOT/bin/fm-serialization-debt.sh" \
-    FM_SERIALIZATION_TASK_CLI="$FAKEBIN/br" \
+    FM_SERIALIZATION_TASK_CLI="$FAKEBIN/br" FM_LANE_CONTRACT_CHECKER="$FAKEBIN/lane-checker" \
     "$ROOT/bin/fm-fleet-refill.sh" 2>&1); rc=$?
   expect_code 1 "$rc" "refill cadence should propagate checkout debt"
   assert_contains "$out" "SERIALIZATION-DEBT: checkout=fm/refill-checkout" "refill cadence hid checkout debt"
   git -C "$PROJECT" checkout -q main
   out=$(PATH="$FAKEBIN:$PATH" TASKS_JSON="$TASKS_JSON" FM_REFILL_PROJECT="$PROJECT" \
     FM_SERIALIZATION_DEBT_PROBE="$ROOT/bin/fm-serialization-debt.sh" \
-    FM_SERIALIZATION_TASK_CLI="$FAKEBIN/br" \
+    FM_SERIALIZATION_TASK_CLI="$FAKEBIN/br" FM_LANE_CONTRACT_CHECKER="$FAKEBIN/lane-checker" \
     "$ROOT/bin/fm-fleet-refill.sh" 2>&1); rc=$?
   expect_code 0 "$rc" "clean base checkout should preserve calm refill behavior"
   assert_not_contains "$out" "SERIALIZATION-DEBT" "clean refill cadence emitted checkout debt"
   git -C "$PROJECT" branch -D fm/refill-checkout >/dev/null
   pass "fleet refill cadence propagates canonical checkout debt"
+}
+
+test_lane_checker_clean_keeps_probe_calm_and_invokes_project() {
+  local result rc out invoked
+  printf '[]\n' > "$TASKS_JSON"
+  cat > "$FAKEBIN/lane-checker" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$LANE_CHECKER_ARGS_FILE"
+exit 0
+SH
+  chmod +x "$FAKEBIN/lane-checker"
+  invoked="$TMP_ROOT/lane-checker-args"
+  result=$(TASKS_JSON="$TASKS_JSON" FM_LANE_CONTRACT_CHECKER="$FAKEBIN/lane-checker" LANE_CHECKER_ARGS_FILE="$invoked" \
+    FM_SERIALIZATION_TASK_CLI="$FAKEBIN/br" \
+    "$ROOT/bin/fm-serialization-debt.sh" --project "$PROJECT" --now 100000 --shift-seconds 100 2>&1); rc=$?
+  expect_code 0 "$rc" "clean lane contract checker should keep the probe calm"
+  [ -z "$result" ] || fail "clean probe emitted output: $result"
+  assert_contains "$(cat "$invoked" 2>/dev/null)" "--repo $PROJECT" "probe did not invoke the checker against the project"
+  pass "clean lane contract checker keeps the probe calm and runs against the configured project"
+}
+
+test_lane_checker_exit_1_violation_surfaces_debt() {
+  local result rc out
+  printf '[]\n' > "$TASKS_JSON"
+  cat > "$FAKEBIN/lane-checker" <<'SH'
+#!/usr/bin/env bash
+echo "violation A: HEAD is on fm/fixture, off main for 130.0 min (> LANE_CONTRACT_DWELL_MIN=120 min)"
+exit 1
+SH
+  chmod +x "$FAKEBIN/lane-checker"
+  result=$(TASKS_JSON="$TASKS_JSON" FM_LANE_CONTRACT_CHECKER="$FAKEBIN/lane-checker" FM_SERIALIZATION_TASK_CLI="$FAKEBIN/br" \
+    "$ROOT/bin/fm-serialization-debt.sh" --project "$PROJECT" --now 100000 --shift-seconds 100 2>&1); rc=$?
+  expect_code 1 "$rc" "checker exit 1 should surface as serialization debt"
+  assert_contains "$result" "SERIALIZATION-DEBT: source=lane-contract-checker violation A: HEAD is on fm/fixture" "checker violation was not surfaced as debt"
+  pass "lane contract checker exit 1 surfaces its violation line as debt"
+}
+
+test_lane_checker_exit_2_cannot_run_surfaces_debt() {
+  local result rc out
+  printf '[]\n' > "$TASKS_JSON"
+  cat > "$FAKEBIN/lane-checker" <<'SH'
+#!/usr/bin/env bash
+echo "invariant A cannot run: no 'checkout: moving from main to <X>' line in .git/logs/HEAD (rotated reflog)" >&2
+exit 2
+SH
+  chmod +x "$FAKEBIN/lane-checker"
+  result=$(TASKS_JSON="$TASKS_JSON" FM_LANE_CONTRACT_CHECKER="$FAKEBIN/lane-checker" FM_SERIALIZATION_TASK_CLI="$FAKEBIN/br" \
+    "$ROOT/bin/fm-serialization-debt.sh" --project "$PROJECT" --now 100000 --shift-seconds 100 2>&1); rc=$?
+  expect_code 1 "$rc" "checker exit 2 should surface as debt"
+  assert_contains "$result" "SERIALIZATION-DEBT-EVIDENCE-UNAVAILABLE: source=lane-contract-checker reason=invariant A cannot run: no 'checkout: moving from main to <X>'" "checker cannot-run condition was not surfaced"
+  pass "lane contract checker exit 2 surfaces its cannot-run reason as debt"
+}
+
+test_unavailable_lane_checker_reports_condition_without_hiding_other_debt() {
+  local result rc out
+  printf '[]\n' > "$TASKS_JSON"
+  make_branch_commit fm/tracker-close 99899 "chore: tracker closure"
+  result=$(TASKS_JSON="$TASKS_JSON" FM_LANE_CONTRACT_CHECKER="$TMP_ROOT/missing-lane-checker" FM_SERIALIZATION_TASK_CLI="$FAKEBIN/br" \
+    "$ROOT/bin/fm-serialization-debt.sh" --project "$PROJECT" --now 100000 --shift-seconds 100 2>&1); rc=$?
+  expect_code 1 "$rc" "unavailable lane checker should require action"
+  assert_contains "$result" "SERIALIZATION-DEBT: branch=fm/tracker-close class=tracker" "unavailable checker hid the branch debt"
+  assert_contains "$result" "SERIALIZATION-DEBT-EVIDENCE-UNAVAILABLE: source=lane-contract-checker reason=checker-cannot-launch:FileNotFoundError:$TMP_ROOT/missing-lane-checker" "unavailable checker did not name the concrete condition"
+  git -C "$PROJECT" branch -D fm/tracker-close >/dev/null
+  pass "unavailable lane checker names its condition without hiding other debt"
+}
+
+test_lane_checker_defaults_to_project_scripts_path() {
+  local result rc out
+  printf '[]\n' > "$TASKS_JSON"
+  mkdir -p "$PROJECT/scripts"
+  cat > "$PROJECT/scripts/check_lane_contract.py" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$PROJECT/scripts/check_lane_contract.py"
+  result=$(TASKS_JSON="$TASKS_JSON" FM_SERIALIZATION_TASK_CLI="$FAKEBIN/br" \
+    "$ROOT/bin/fm-serialization-debt.sh" --project "$PROJECT" --now 100000 --shift-seconds 100 2>&1); rc=$?
+  expect_code 0 "$rc" "default checker path should resolve under the project"
+  [ -z "$result" ] || fail "clean default-checker run emitted output: $result"
+  pass "lane checker defaults to <project>/scripts/check_lane_contract.py"
+}
+
+test_refill_cadence_propagates_lane_contract_debt() {
+  local result rc out
+  printf '[]\n' > "$TASKS_JSON"
+  cat > "$FAKEBIN/lane-checker" <<'SH'
+#!/usr/bin/env bash
+echo "violation B: branch fm/fixture holds tracker commit abc123 (130.0 min old) not contained in main"
+exit 1
+SH
+  chmod +x "$FAKEBIN/lane-checker"
+  result=$(PATH="$FAKEBIN:$PATH" TASKS_JSON="$TASKS_JSON" FM_REFILL_PROJECT="$PROJECT" \
+    FM_SERIALIZATION_DEBT_PROBE="$ROOT/bin/fm-serialization-debt.sh" \
+    FM_SERIALIZATION_TASK_CLI="$FAKEBIN/br" FM_LANE_CONTRACT_CHECKER="$FAKEBIN/lane-checker" \
+    "$ROOT/bin/fm-fleet-refill.sh" 2>&1); rc=$?
+  expect_code 1 "$rc" "refill cadence should propagate lane contract checker debt"
+  assert_contains "$result" "source=lane-contract-checker violation B: branch fm/fixture" "refill cadence hid lane contract checker debt"
+  pass "fleet refill cadence self-surfaces lane contract checker debt"
 }
 
 test_clean_is_silent
@@ -236,3 +344,9 @@ test_checkout_age_boundary_is_exact
 test_over_age_detached_head_checkout_is_debt
 test_missing_and_truncated_reflog_evidence_fail_loudly
 test_refill_cadence_propagates_checkout_debt
+test_lane_checker_clean_keeps_probe_calm_and_invokes_project
+test_lane_checker_exit_1_violation_surfaces_debt
+test_lane_checker_exit_2_cannot_run_surfaces_debt
+test_unavailable_lane_checker_reports_condition_without_hiding_other_debt
+test_lane_checker_defaults_to_project_scripts_path
+test_refill_cadence_propagates_lane_contract_debt
