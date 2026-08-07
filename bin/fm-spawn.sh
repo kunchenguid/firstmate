@@ -32,6 +32,18 @@
 #   or herdr), refuses unless the endpoint's shell is sitting in the recorded
 #   worktree, and clears the previous harness's per-task wiring before arming
 #   the new incarnation.
+#   Every ship and scout spawn runs the DUPLICATE-WORK OVERLAP SCAN before any
+#   endpoint exists: open tasks, live local and remote branches, and open pull
+#   request titles that share normalised subject tokens with this task are
+#   printed as candidates, strongest evidence first, and recorded in the task's
+#   metadata as overlap=,
+#   overlap_refs=, and overlap_ack=. Code emits the candidate set and NEVER
+#   decides equivalence, which is firstmate's judgment. A source that cannot be
+#   read yields overlap=unavailable, never overlap=none. config/spawn-overlap
+#   selects advisory (the default: printed and recorded, never refused),
+#   enforce (--overlap-ack must name every surfaced ref), or off; any other
+#   value refuses. --overlap-ack <ref>[,<ref>...] is that acknowledgement and is
+#   refused on --secondmate spawns, which are homes rather than work items.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
@@ -252,6 +264,8 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+OVERLAP_ACK_ARG=
+OVERLAP_ACK_SET=0
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -275,6 +289,7 @@ for a in "$@"; do
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
+      overlap-ack) OVERLAP_ACK_ARG=$a; OVERLAP_ACK_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -298,6 +313,8 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --overlap-ack) want_value=overlap-ack ;;
+    --overlap-ack=*) OVERLAP_ACK_ARG=${a#--overlap-ack=}; OVERLAP_ACK_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -321,6 +338,11 @@ if [ "$TRACEPARENT_SET" -eq 1 ]; then
     echo "error: --traceparent is not a valid W3C traceparent" >&2
     exit 1
   }
+fi
+[ "$OVERLAP_ACK_SET" -eq 0 ] || [ -n "$OVERLAP_ACK_ARG" ] || { echo "error: --overlap-ack requires a non-empty value" >&2; exit 1; }
+if [ "$OVERLAP_ACK_SET" -eq 1 ] && [ "$KIND" = secondmate ]; then
+  echo "error: --overlap-ack applies only to ship and scout spawns; a secondmate is a persistent home rather than a work item, so no work overlaps it" >&2
+  exit 1
 fi
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
@@ -1597,6 +1619,268 @@ if [ "$KIND" = ship ]; then
   fi
 fi
 
+# DUPLICATE-WORK OVERLAP SCAN. fm-spawn already refuses a duplicate LAUNCH -
+# the same task id twice - and nothing compared a new task's SUBJECT against
+# work already open. That gap was paid for once already: one fix, two tasks,
+# two branches, two workers, nothing detected. This is that comparison, placed
+# at the existing last gate before dispatch rather than in a new component.
+#
+# THE DIVISION OF LABOUR IS THE DESIGN. Code emits the CANDIDATE set - open
+# tasks, live branches, and open pull request titles sharing normalised tokens
+# with this task's subject - and never decides equivalence. "Is this the same
+# work" compares two prose descriptions, so it is firstmate's judgment, made
+# from a surfaced set instead of from memory.
+#
+# THE EMPTY-SET LAW BINDS. A source that cannot be read yields
+# overlap=unavailable, never overlap=none. An absent set is not a pass.
+#
+# ENFORCEMENT SCOPE, on bin/fm-model-registry-lib.sh's additive-inert pattern:
+#   config/spawn-overlap absent or "advisory" -> scan, print, record; never
+#       refuse. Unenforced is never SILENT, but it is not a refusal.
+#   "enforce" -> additionally require --overlap-ack to name every surfaced ref
+#       before dispatch, so a live overlap cannot be dispatched onto without an
+#       explicit acknowledgement in the task's own spawn record.
+#   "off"   -> skip the scan and say so.
+# A value that is none of those REFUSES: a broken safety knob must never read
+# as an absent one. docs/configuration.md "Duplicate-work overlap scan" owns it.
+OVERLAP_STATE=off
+OVERLAP_REFS=
+OVERLAP_ROWS=
+
+# Words that carry no signal about WHICH work a task is. Without them every
+# task matches every other task and the acknowledgement decays into a reflex,
+# which is worse than no scan at all.
+OVERLAP_STOPWORDS='the and for are was were has have had been being this that with when then than they them their there here will must never always only also from into out over under about after before while where which what does done doing not but its our your you can may per via each both same other more most much many some any all one two new old add adds added get gets got run runs ran use uses used using make makes made take takes took give gives gave keep keeps kept let lets set sets put puts task tasks work works working worked item items job jobs thing things stuff bug bugs fix fixes fixed fixing issue issues error errors problem problems change changes changed changing update updates updated support supports supported feature features code codes file files line lines path paths dir dirs repo repos project projects branch branches test tests testing spec specs report reports section sections doc docs data note notes readme agent agents firstmate crewmate crewmates scout scouts captain wip tmp temp misc main master trunk head base ref refs pull request requests draft chore refactor'
+
+# Everything downstream of this is one awk program on purpose: it holds the ONE
+# copy of the token normaliser, so the subject and every candidate are reduced
+# by identical rules. Two copies would drift and the scan would quietly stop
+# matching.
+#
+# A candidate must clear BOTH a floor and a ratio, and the ratio is what makes
+# this usable. Measured against a real 140-item backlog, 254 branches, and 95
+# open pull requests, a bare two-token floor surfaced 61 candidates for one
+# task: in a fleet whose work all shares a house vocabulary, "two words in
+# common" is met by almost everything, and a set nobody can read is a set
+# nobody reads. Requiring a candidate to cover half of the SUBJECT's own
+# tokens is scale-free - it stays satisfied by the short ids of the recorded
+# incident, where two shared tokens are two thirds of the subject, and drops
+# the coincidental matches, whose share is a quarter or less.
+overlap_match() {  # <subject-text> <min-tokens> <min-percent>; candidate rows on stdin
+  awk -v subject="$1" -v min="$2" -v pct="$3" -v stop=" $OVERLAP_STOPWORDS " '
+    function norm(w) {
+      if (length(w) < 3) return ""
+      if (length(w) > 3 && substr(w, length(w), 1) == "s" && substr(w, length(w) - 1, 1) != "s")
+        w = substr(w, 1, length(w) - 1)
+      if (length(w) < 3) return ""
+      if (index(stop, " " w " ") > 0) return ""
+      return w
+    }
+    BEGIN {
+      FS = "\t"; OFS = "\t"
+      n = split(tolower(subject), parts, /[^a-z0-9]+/)
+      for (i = 1; i <= n; i++) {
+        w = norm(parts[i])
+        if (w == "" || (w in subj)) continue
+        subj[w] = 1
+        ordered[++subjn] = w
+      }
+      # Insertion sort keeps the shared-token list stable across runs, so two
+      # spawns of the same task print the same evidence.
+      for (i = 2; i <= subjn; i++) {
+        v = ordered[i]
+        for (j = i - 1; j >= 1 && ordered[j] > v; j--) ordered[j + 1] = ordered[j]
+        ordered[j + 1] = v
+      }
+    }
+    # An unreadable source passes straight through: it is evidence of a gap in
+    # the candidate set, not a candidate, and it must survive to the caller.
+    # The leading score sorts it to the top, where an incomplete set belongs.
+    $1 == "unavailable" { print 9999, $1, $2, $3, $4; next }
+    {
+      split("", cand)
+      candn = 0
+      n = split(tolower($4), parts, /[^a-z0-9]+/)
+      for (i = 1; i <= n; i++) {
+        w = norm(parts[i])
+        if (w == "" || (w in cand)) continue
+        cand[w] = 1
+        candn++
+      }
+      shared = ""; count = 0
+      for (i = 1; i <= subjn; i++) {
+        if (!(ordered[i] in cand)) continue
+        shared = (shared == "" ? ordered[i] : shared "|" ordered[i])
+        count++
+      }
+      if (count < min) next
+      # Denominate by the SMALLER vocabulary. Denominating by the subject alone
+      # would make a branch unreachable - a branch name carries four or five
+      # words against a subject and a task body carrying dozens - and branches
+      # are the earliest evidence that somebody already started this.
+      smaller = (subjn < candn ? subjn : candn)
+      if (smaller > 0 && count * 100 < smaller * pct) next
+      print count, $1, $2, substr($3, 1, 120), shared
+    }'
+}
+
+# Every candidate source emits the same four TAB-separated fields, so one
+# matcher serves all three and a new source costs no new failure semantics:
+#   <kind>\t<ref>\t<title>\t<searchable text>
+# A source that cannot answer emits kind "unavailable" with its reason.
+overlap_candidates() {  # <task-id> <project-dir>
+  local id=$1 proj=$2 backlog="$DATA/backlog.md" meta tid ref num title out limit prlist
+
+  # Open tasks: this home's durable queue, plus any task with live runtime
+  # metadata, so a task dispatched without a backlog row is still visible.
+  if [ -d "$DATA" ]; then
+    if [ -f "$backlog" ]; then
+      # Field separators are stripped inside awk rather than by a downstream
+      # pipeline, so a tab in a task body can never shift a later field.
+      awk -v self="$id" '
+        function emit() {
+          if (id != "" && id != self) {
+            gsub(/\t/, " ", title); gsub(/\t/, " ", body)
+            printf "task\t%s\t%s\t%s %s %s\n", id, title, id, title, body
+          }
+          id = ""; title = ""; body = ""
+        }
+        /^- \[ \] / {
+          emit()
+          rest = substr($0, 7)
+          p = index(rest, " - ")
+          if (p > 0) { id = substr(rest, 1, p - 1); title = substr(rest, p + 3) }
+          else { id = rest; title = "" }
+          next
+        }
+        /^- \[[xX]\] / { emit(); next }
+        /^#/ { emit(); next }
+        /^[ \t]/ { if (id != "") body = body " " $0; next }
+        { next }
+        END { emit() }
+      ' "$backlog"
+    fi
+  else
+    printf 'unavailable\ttask\tthis home has no readable data directory at %s\t\n' "$DATA"
+  fi
+  if [ -d "$STATE" ]; then
+    for meta in "$STATE"/*.meta; do
+      [ -f "$meta" ] || continue
+      tid=$(basename "$meta" .meta)
+      [ "$tid" != "$id" ] || continue
+      grep -q '^kind=secondmate$' "$meta" && continue
+      if [ -f "$backlog" ] && grep -qF -- "- [ ] $tid " "$backlog"; then
+        continue
+      fi
+      printf 'task\t%s\t(under way, no backlog row)\t%s\n' "$tid" "$tid"
+    done
+  else
+    printf 'unavailable\ttask\tthis home has no readable runtime state directory at %s\t\n' "$STATE"
+  fi
+
+  # Live branches, local and remote. A branch is the cheapest proof that
+  # somebody already started this, and it exists before any pull request does.
+  if out=$(git -C "$proj" for-each-ref --format='%(refname:short)' refs/heads refs/remotes 2>&1); then
+    while IFS= read -r ref; do
+      [ -n "$ref" ] || continue
+      case "$ref" in
+        *"$id") continue ;;
+        */HEAD|HEAD) continue ;;
+      esac
+      printf 'branch\t%s\t\t%s\n' "$ref" "$ref"
+    done <<EOF
+$out
+EOF
+  else
+    printf 'unavailable\tbranch\t%s\t\n' "$(printf '%s' "$out" | head -n 1 | tr '\t' ' ' | cut -c 1-200)"
+  fi
+
+  # Open pull requests, read through fm-pr-lib.sh's single forge reader so this
+  # scan adds no second forge failure mode of its own. The listing goes to a
+  # file rather than a command substitution because FM_PR_LIST_ERROR - the
+  # reason a forge could not answer, and the whole difference between
+  # "unavailable" and "none" - would not survive the subshell.
+  limit=${FM_SPAWN_OVERLAP_PR_LIMIT:-100}
+  if ! prlist=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-overlap-pr.XXXXXX" 2>/dev/null); then
+    printf 'unavailable\tpr\tno temporary file could be created for the pull request listing\t\n'
+  elif fm_pr_open_request_titles "$proj" "$limit" > "$prlist" 2>/dev/null; then
+    while IFS=$'\t' read -r num title; do
+      [ -n "$num" ] || continue
+      printf 'pr\t%s\t%s\t%s\n' "$num" "$title" "$title"
+    done < "$prlist"
+    rm -f "$prlist"
+  else
+    rm -f "$prlist"
+    printf 'unavailable\tpr\t%s\t\n' "$(printf '%s' "$FM_PR_LIST_ERROR" | tr '\t' ' ' | cut -c 1-200)"
+  fi
+}
+
+if [ "$KIND" != secondmate ]; then
+  OVERLAP_MODE=advisory
+  if [ -f "$CONFIG/spawn-overlap" ]; then
+    OVERLAP_MODE=$(head -n 1 "$CONFIG/spawn-overlap" 2>/dev/null | tr -d '[:space:]')
+    [ -n "$OVERLAP_MODE" ] || OVERLAP_MODE=advisory
+  fi
+  case "$OVERLAP_MODE" in
+    advisory|enforce|off) ;;
+    *)
+      echo "error: config/spawn-overlap says '$OVERLAP_MODE'; it must be advisory, enforce, or off. A safety knob that cannot be read must never be treated as an absent one" >&2
+      exit 1 ;;
+  esac
+  if [ "$OVERLAP_MODE" = off ]; then
+    OVERLAP_STATE=off
+    echo "overlap=off (config/spawn-overlap); nothing compared this task's subject against work already open" >&2
+  else
+    # The subject is the task id plus the first line of the brief's task
+    # statement - the same words the worker is being sent to act on.
+    OVERLAP_SUBJECT="$ID $(awk '/^# Task[[:space:]]*$/ {intask = 1; next} intask && NF {print; exit}' "$BRIEF" 2>/dev/null | cut -c 1-300)"
+    # Strongest evidence first, so the reader meets the likeliest duplicate at
+    # the top rather than somewhere down a list. The sort is on the matcher's
+    # score column, which is dropped again immediately: it orders the set and
+    # never bounds it, so nothing is hidden from the reader or the gate.
+    OVERLAP_ROWS=$(overlap_candidates "$ID" "$PROJ_ABS" \
+      | overlap_match "$OVERLAP_SUBJECT" "${FM_SPAWN_OVERLAP_MIN_TOKENS:-2}" "${FM_SPAWN_OVERLAP_MIN_PERCENT:-50}" \
+      | LC_ALL=C sort -t"$(printf '\t')" -k1,1nr -k2,2 -k3,3 \
+      | cut -f2-)
+    if printf '%s\n' "$OVERLAP_ROWS" | awk -F'\t' '$1 == "unavailable" { found = 1 } END { exit found ? 0 : 1 }'; then
+      OVERLAP_STATE=unavailable
+    elif [ -n "$OVERLAP_ROWS" ]; then
+      OVERLAP_STATE=candidates
+    else
+      OVERLAP_STATE=none
+    fi
+    OVERLAP_REFS=$(printf '%s\n' "$OVERLAP_ROWS" | awk -F'\t' 'NF >= 2 {printf "%s%s:%s", sep, $1, $2; sep = ","}')
+    if [ "$OVERLAP_STATE" = none ]; then
+      echo "overlap=none - no open task, live branch, or open pull request shares this task's subject tokens" >&2
+    else
+      {
+        echo "overlap=$OVERLAP_STATE"
+        printf 'overlap[%s]{kind,ref,title,shared_tokens}:\n' "$(printf '%s\n' "$OVERLAP_ROWS" | grep -c .)"
+        printf '%s\n' "$OVERLAP_ROWS" | awk -F'\t' 'NF >= 2 {printf "  %s,%s,\"%s\",%s\n", $1, $2, $3, $4}'
+        echo "These are CANDIDATES, not a verdict: read each one and decide whether it is the same work. An 'unavailable' row means a source could not be read, so the set is incomplete - it is never a pass."
+      } >&2
+    fi
+    # Enforcement: every surfaced ref must be named in --overlap-ack before this
+    # task may be dispatched onto work already open.
+    if [ "$OVERLAP_MODE" = enforce ] && [ "$OVERLAP_STATE" != none ]; then
+      OVERLAP_UNACKED=$(printf '%s\n' "$OVERLAP_REFS" | tr ',' '\n' | grep -v '^$' | while IFS= read -r ref; do
+        case ",$OVERLAP_ACK_ARG," in
+          *",$ref,"*) continue ;;
+          *) printf '%s\n' "$ref" ;;
+        esac
+      done)
+      if [ -n "$OVERLAP_UNACKED" ]; then
+        {
+          echo "error: $ID would dispatch against work already open, and --overlap-ack does not name:"
+          printf '%s\n' "$OVERLAP_UNACKED" | sed 's/^/  /'
+          echo "Read each candidate above, decide whether it is the same work, and either route this task onto the existing work or re-run with --overlap-ack '$OVERLAP_REFS'. Code lists candidates; it never decides equivalence."
+        } >&2
+        exit 1
+      fi
+    fi
+  fi
+fi
+
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
 BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 
@@ -2489,6 +2773,13 @@ preserve_relaunch_meta() {
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
+  # What the intake overlap scan saw, and what firstmate acknowledged before
+  # this task was allowed to run alongside it. Recorded even when the scan found
+  # nothing, so "nobody checked" and "checked, found nothing" stay distinct
+  # after the fact - the same reason overlap=unavailable is not overlap=none.
+  [ "$KIND" = secondmate ] || echo "overlap=$OVERLAP_STATE"
+  [ -z "$OVERLAP_REFS" ] || echo "overlap_refs=$OVERLAP_REFS"
+  [ "$OVERLAP_ACK_SET" -eq 0 ] || echo "overlap_ack=$OVERLAP_ACK_ARG"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"

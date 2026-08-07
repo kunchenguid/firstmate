@@ -166,6 +166,11 @@ The helper's header owns the exact signal detection, relocated-home limitation, 
 Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks leave standalone investigation reports at `data/<id>/report.md` and never push.
 The intake and authority contract in `AGENTS.md` owns when separate scout research is warranted.
 
+Either shape can be dispatched onto work somebody already started, so `fm-spawn.sh` compares the new task's subject against the open backlog, the tasks holding live runtime metadata, the project's branches, and its open pull request titles before any endpoint exists, and records the result in task metadata.
+The split of responsibility is the point: code emits candidates because ids, branches, and titles are structured, and firstmate decides whether two prose descriptions are the same work.
+A source that cannot be read is reported as unavailable rather than empty, on the same law the merge path applies to check runs.
+[`docs/configuration.md`](configuration.md) "Duplicate-work overlap scan" owns the posture knob and the advisory default.
+
 ## Dispatch profiles
 
 Crewmate and scout dispatch can stay on the static crewmate harness resolved by `config/crew-harness`, or it can use local dispatch profiles in `config/crew-dispatch.json`.

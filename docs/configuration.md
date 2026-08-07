@@ -126,6 +126,26 @@ A Secondmate on a remote route is covered the same way: the primary resolves and
 The presence flag is session-scoped enablement, so it transfers at launch and is left unchanged by live convergence into a running home.
 See [`trace-context.md`](trace-context.md) for carrier semantics, supported routes, the manual fleet-restart requirement, the session boundary, and safety limits; `bin/fm-trace-context-lib.sh`'s header owns the exact mechanics, and [`verification/trace-context.md`](verification/trace-context.md) records repeatable evidence.
 
+## Duplicate-work overlap scan (config/spawn-overlap)
+
+Every ship and scout spawn compares the new task's subject against work that is already open before any endpoint or worktree exists.
+The candidate set is the open tasks in this home's backlog, the tasks that hold live runtime metadata, the project's local and remote branches, and the project's open pull request titles.
+The task's subject is its id plus the first line of its brief's task statement, and a candidate is kept when it shares at least two normalised tokens with that subject and those shared tokens cover at least half of the smaller of the two vocabularies.
+Both conditions matter: a bare token floor is met by almost everything in a fleet whose work shares one house vocabulary, and denominating by the subject alone would put short branch names permanently out of reach.
+Candidates are listed strongest evidence first, and the list is ordered rather than bounded, so the reader meets the likeliest duplicate at the top without anything being dropped.
+`bin/fm-spawn.sh`'s header owns the normalisation and the exact emitted fields; `bin/fm-pr-lib.sh`'s `fm_pr_open_request_titles` is the single forge reader behind the pull request source.
+Code emits candidates and never decides equivalence: whether two prose descriptions are the same work is firstmate's judgment, made from a surfaced set.
+
+A source that cannot be read yields `overlap=unavailable` and never `overlap=none`, so an incomplete set is never mistaken for a clean one.
+The result is recorded in the task's own metadata as `overlap=`, plus `overlap_refs=` when candidates exist and `overlap_ack=` when an acknowledgement was given, which keeps "nothing was compared" and "compared, found nothing" distinguishable afterwards.
+
+The local, gitignored `config/spawn-overlap` file selects the posture and is inherited by secondmate homes.
+Absent or `advisory` prints and records the result and never refuses.
+`enforce` additionally requires `bin/fm-spawn.sh --overlap-ack <ref>[,<ref>...]` to name every surfaced ref before the dispatch proceeds; the refusal prints the exact value to reuse.
+`off` skips the scan and says so.
+Any other value refuses the spawn, because a safety knob that cannot be read must never be treated as an absent one.
+`FM_SPAWN_OVERLAP_PR_LIMIT` bounds the pull requests listed per spawn (default 100), `FM_SPAWN_OVERLAP_MIN_TOKENS` sets the shared-token floor (default 2), and `FM_SPAWN_OVERLAP_MIN_PERCENT` sets the coverage threshold (default 50).
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.
@@ -518,6 +538,9 @@ FM_ZELLIJ_SESSION=firstmate  # zellij-only: named session for normal backend ops
 FM_BACKEND_CMUX_COMPOSER_LINES=20  # cmux-only: tail lines scanned to locate the composer row for submit verification
 FM_BACKEND_CMUX_IDLE_RE='^Type a message\.\.\.$'  # cmux-only: empty-composer placeholder regex after border/prompt stripping
 CMUX_SOCKET_PASSWORD=   # cmux-only: socket password fallback when config/cmux-socket-password is absent (docs/cmux-backend.md)
+FM_SPAWN_OVERLAP_PR_LIMIT=100   # open pull requests listed per spawn by the duplicate-work overlap scan
+FM_SPAWN_OVERLAP_MIN_TOKENS=2   # shared normalised tokens required before a candidate is surfaced as an overlap
+FM_SPAWN_OVERLAP_MIN_PERCENT=50  # percent of the smaller vocabulary those shared tokens must cover
 FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the session-start digest; each line is capped by bin/fm-line-cap-lib.sh
 FM_SESSION_START_QUEUED_LIMIT=20   # plain queued backlog rows in the session-start digest; in-flight, held, and blocked rows are never bounded and done rows are never listed
 FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording

@@ -327,6 +327,45 @@ fm_pr_metadata_identity_parse() {
   [ -n "$FM_PR_META_URL" ]
 }
 
+# List a repository's OPEN pull requests as "<number>\t<title>" rows, one per
+# line, on stdout. This is the single forge reader for title-level work
+# discovery: bin/fm-research-scan.sh's --landing prover already listens for
+# delivery this way, and bin/fm-spawn.sh's intake overlap scan asks the same
+# question about work already in flight, so both ask it through one place
+# rather than growing a second forge reader with its own failure semantics.
+#
+# The empty-set law binds here and is the whole reason this returns a status.
+# A missing CLI, an unauthenticated CLI, a network failure, or a rejected
+# listing all return non-zero with FM_PR_LIST_ERROR set to a one-line reason.
+# A caller must render that as "unknown" and NEVER as "no open requests": the
+# absence of an answer is not an answer. A successful listing with no rows is
+# the only thing that means no open requests, and it returns zero.
+#
+# No --fields is passed: the default gh-axi listing already carries number,
+# title, and state, and a rejected field list would fail the whole call.
+fm_pr_open_request_titles() {  # <repo-dir> [limit]
+  local repo=$1 limit=${2:-100} out
+  FM_PR_LIST_ERROR=
+  case "$limit" in
+    ''|*[!0-9]*) FM_PR_LIST_ERROR="pull request limit '$limit' is not a number"; return 1 ;;
+  esac
+  [ "$limit" -gt 0 ] 2>/dev/null || { FM_PR_LIST_ERROR="pull request limit must be positive"; return 1; }
+  [ -d "$repo" ] || { FM_PR_LIST_ERROR="no repository directory at $repo"; return 1; }
+  command -v gh-axi >/dev/null 2>&1 || { FM_PR_LIST_ERROR="gh-axi is not on PATH"; return 1; }
+  if ! out=$( (cd "$repo" && gh-axi pr list --state open --limit "$limit") 2>&1 ); then
+    FM_PR_LIST_ERROR=$(printf '%s' "$out" | head -n 1 | cut -c 1-200)
+    [ -n "$FM_PR_LIST_ERROR" ] || FM_PR_LIST_ERROR="gh-axi pr list failed with no output"
+    return 1
+  fi
+  # gh-axi prints a TOON block: a "pull_requests[N]{...}:" header, then one
+  # indented "<number>,\"<title>\",<state>,<author>,<draft>,<review>" row each.
+  # The title is matched greedily up to the last quote that is followed by the
+  # four trailing scalar fields, so a comma or quote inside a title cannot
+  # truncate it.
+  printf '%s\n' "$out" \
+    | sed -n 's/^[[:space:]]\{1,\}\([0-9]\{1,\}\),"\(.*\)",[^,]*,[^,]*,[^,]*,[^,]*$/\1\t\2/p'
+}
+
 # Sidecar layout: provider, url, host, path, number, one per line. A sidecar
 # written before the provider tag existed has a URL on its first line and one
 # line fewer, so it fails both the field count and the provider comparison and
