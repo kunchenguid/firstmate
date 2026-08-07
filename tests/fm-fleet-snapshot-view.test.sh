@@ -7,10 +7,12 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SNAPSHOT="$ROOT/bin/fm-fleet-snapshot.sh"
+BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
 VIEW="$ROOT/bin/fm-fleet-view.sh"
 TMP_ROOT=$(fm_test_tmproot fm-fleet-snapshot)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
+REAL_JQ=$(command -v jq)
 
 make_fakebin() {  # <dir>
   local fb
@@ -54,6 +56,29 @@ exit 0
 SH
   chmod +x "$fb/no-mistakes" "$fb/tmux"
   printf '%s\n' "$fb"
+}
+
+install_producer_fault_jq() {  # <fakebin>
+  cat > "$1/jq" <<'SH'
+#!/usr/bin/env bash
+set -u
+mode=${FM_TEST_PRODUCER_MODE:-}
+if [ "${1:-}" = -Rn ]; then
+  case "$mode" in
+    malformed-backlog) printf '{malformed'; exit 0 ;;
+    extra-values-backlog) printf '[] []'; exit 0 ;;
+    failed-backlog) exit 47 ;;
+  esac
+fi
+if [ "${1:-}" = -s ] && [ "${2:-}" = 'sort_by(.id)' ]; then
+  case "$mode" in
+    malformed-tasks) printf '{malformed'; exit 0 ;;
+    failed-tasks) exit 48 ;;
+  esac
+fi
+exec "${FM_TEST_REAL_JQ:?}" "$@"
+SH
+  chmod +x "$1/jq"
 }
 
 make_home() {  # <name>
@@ -133,7 +158,7 @@ EOF
 }
 
 test_empty_fleet_json() {
-  local home out view
+  local home out summary view
   home=$(make_home empty)
   out=$(FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
@@ -146,9 +171,206 @@ test_empty_fleet_json() {
       and .main_inventory.unstructured_current_count == 0
   ' >/dev/null \
     || fail "empty snapshot schema or absence markers wrong: $out"
+  summary=$(FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$summary" | jq -e '
+    .schema == "fm-secondmate-home-summary.v1"
+      and .valid == false
+      and .invalidity.kind == "missing_backlog"
+      and .active_children == []
+      and .decisions_open == []
+      and .holds == []
+      and .queued == []
+      and .landed == []
+      and .endpoints == []
+  ' >/dev/null || fail "empty secondmate summary arrays or absence markers wrong: $summary"
   view=$(FM_HOME="$home" "$VIEW")
   assert_contains "$view" "No live task metadata found." "empty fleet view should say no live metadata"
-  pass "empty fleet snapshot and view use explicit absence markers"
+  pass "empty fleet snapshot, summary, and view use explicit absence markers"
+}
+
+# Small canonical inputs prove stdin binding preserves schema, ordering, and nulls
+# before the oversized case exercises the same public interfaces.
+test_json_transport_small_semantic_equivalence() {
+  local home snapshot summary
+  home=$(make_home json-transport-small)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+- [x] alpha - Alpha release (repo: firstmate) (kind: ship) (done 2026-01-01)
+- [x] beta - Beta release (repo: firstmate) (kind: ship) (done 2026-01-01)
+EOF
+  snapshot="$home/snapshot.json"
+  summary="$home/summary.json"
+  FM_SNAPSHOT_NOW=2026-01-02T00:00:00Z FM_HOME="$home" "$SNAPSHOT" --json > "$snapshot" \
+    || fail "small canonical snapshot failed"
+  FM_SNAPSHOT_NOW=2026-01-02T00:00:00Z FM_HOME="$home" \
+    FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 \
+    "$SNAPSHOT" --secondmate-home-summary > "$summary" \
+    || fail "small canonical secondmate summary failed"
+  jq -s -e --arg home "$home" '
+    .[0] as $snapshot | .[1] as $summary
+    | $snapshot.schema == "fm-fleet-snapshot.v1"
+      and $snapshot.generated == "2026-01-02T00:00:00Z"
+      and $snapshot.fm_home == $home
+      and $snapshot.tasks == []
+      and [$snapshot.backlog.records[].id] == ["alpha", "beta"]
+      and $snapshot.main_inventory == {
+        valid:true,
+        reason:null,
+        orphan_in_flight:[],
+        unstructured_current_count:0
+      }
+      and $summary.schema == "fm-secondmate-home-summary.v1"
+      and $summary.generated == $snapshot.generated
+      and $summary.home == $snapshot.fm_home
+      and $summary.valid == true
+      and $summary.landed == [
+        {id:"beta",title:"Beta release",pr_url:null,report_path:null,local_note:null,
+         completion:{verb:"done",date:"2026-01-01"}},
+        {id:"alpha",title:"Alpha release",pr_url:null,report_path:null,local_note:null,
+         completion:{verb:"done",date:"2026-01-01"}}
+      ]
+      and $summary.counts == {
+        active_children:0,
+        decisions_open:0,
+        holds:0,
+        queued:0,
+        landed:2,
+        endpoints:0
+      }
+  ' "$snapshot" "$summary" >/dev/null \
+    || fail "small snapshot and secondmate summary changed canonical semantics"
+  pass "small snapshot and secondmate summary preserve canonical JSON semantics"
+}
+
+# The fixture crosses the OS argv ceiling, proves a shell variable can hold the
+# serialized data, demonstrates that the former jq argv transport cannot execute,
+# and then requires every operator-facing read-only interface to succeed.
+test_oversized_json_transport_avoids_argv_limit() {
+  local home fakebin arg_max title row_bytes rows input_bytes serialized serialized_bytes
+  local legacy_rc snapshot summary bearings bearings_bytes
+  home=$(make_home json-transport-oversized)
+  fakebin=$(make_fakebin "$home")
+  arg_max=$(getconf ARG_MAX 2>/dev/null || printf '2097152')
+  title=$(printf '%0800d' 0 | tr 0 x)
+  row_bytes=$(printf -- '- [x] item-00001 - %s (repo: firstmate) (kind: ship) (done 2026-01-01)\n' "$title" \
+    | LC_ALL=C wc -c | tr -d ' ')
+  rows=$(((arg_max + 131072) / row_bytes + 2))
+  awk -v rows="$rows" -v title="$title" 'BEGIN {
+    print "## In flight\n\n## Queued\n\n## Done"
+    for (i = 1; i <= rows; i++)
+      printf "- [x] item-%05d - %s (repo: firstmate) (kind: ship) (done 2026-01-01)\n", i, title
+  }' > "$home/data/backlog.md"
+  input_bytes=$(LC_ALL=C wc -c < "$home/data/backlog.md" | tr -d ' ')
+  [ "$input_bytes" -gt "$arg_max" ] \
+    || fail "oversized backlog fixture did not exceed ARG_MAX: $input_bytes <= $arg_max"
+
+  serialized=$(jq -Rn '[inputs]' < "$home/data/backlog.md") \
+    || fail "oversized shell-expansion control could not serialize its input"
+  serialized_bytes=$(printf '%s' "$serialized" | LC_ALL=C wc -c | tr -d ' ')
+  [ "$serialized_bytes" -gt "$arg_max" ] \
+    || fail "serialized shell variable did not exceed ARG_MAX: $serialized_bytes <= $arg_max"
+  printf '%s' "$serialized" | jq -e --argjson rows "$rows" 'length == $rows + 5' >/dev/null \
+    || fail "oversized shell variable was not valid JSON before jq invocation"
+  set +e
+  jq -n --argjson payload "$serialized" '$payload | length' \
+    > "$home/legacy-argv.out" 2> "$home/legacy-argv.err"
+  legacy_rc=$?
+  set -e
+  [ "$legacy_rc" -ne 0 ] || fail "legacy jq argv control unexpectedly accepted an over-ARG_MAX document"
+  grep -qi 'argument list too long' "$home/legacy-argv.err" \
+    || fail "legacy jq argv control did not prove the expected exec failure"
+  serialized=
+
+  snapshot="$home/snapshot.json"
+  summary="$home/summary.json"
+  bearings="$home/bearings.json"
+  PATH="$fakebin:$PATH" FM_SNAPSHOT_NOW=2026-01-02T00:00:00Z FM_HOME="$home" \
+    "$SNAPSHOT" --json > "$snapshot" 2> "$home/snapshot.err" \
+    || fail "oversized public fleet snapshot failed: $(tail -n 2 "$home/snapshot.err")"
+  PATH="$fakebin:$PATH" FM_SNAPSHOT_NOW=2026-01-02T00:00:00Z FM_HOME="$home" \
+    FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 \
+    "$SNAPSHOT" --secondmate-home-summary > "$summary" 2> "$home/summary.err" \
+    || fail "oversized public secondmate summary failed: $(tail -n 2 "$home/summary.err")"
+  PATH="$fakebin:$PATH" FM_BEARINGS_NOW=2026-01-02T00:00:00Z FM_HOME="$home" \
+    "$BEARINGS" --json > "$bearings" 2> "$home/bearings.err" \
+    || fail "oversized public bearings snapshot failed: $(tail -n 2 "$home/bearings.err")"
+  if grep -qi 'argument list too long' "$home/snapshot.err" "$home/summary.err" "$home/bearings.err"; then
+    fail "an oversized public snapshot path still exposed an argv failure"
+  fi
+  bearings_bytes=$(LC_ALL=C wc -c < "$bearings" | tr -d ' ')
+  [ "$bearings_bytes" -lt 65536 ] \
+    || fail "oversized fleet produced an unbounded bearings summary: $bearings_bytes bytes"
+  jq -s -e --argjson rows "$rows" '
+    def trunc($n):
+      tostring | gsub("\\s+"; " ")
+      | if length > $n then .[:$n] + "…" else . end;
+    .[0] as $snapshot | .[1] as $summary | .[2] as $bearings
+    | ([ $snapshot.backlog.records[]
+         | select(.state == "done" and .structured and .kind != "captain")
+         | {id:(.id | trunc(120)),title:(.title | trunc(120)),
+            pr_url:((.pr_url // null) | if . == null then null else trunc(500) end),
+            report_path:((.report_path // null) | if . == null then null else trunc(500) end),
+            local_note:((.local_note // null) | if . == null then null else trunc(120) end),
+            completion} ]
+       | sort_by([(.completion.date // ""), .id]) | reverse) as $expected_landed
+    | $snapshot.schema == "fm-fleet-snapshot.v1"
+      and ($snapshot.backlog.records | length) == $rows
+      and $snapshot.tasks == []
+      and $snapshot.main_inventory == {
+        valid:true,
+        reason:null,
+        orphan_in_flight:[],
+        unstructured_current_count:0
+      }
+      and $summary.schema == "fm-secondmate-home-summary.v1"
+      and $summary.valid == true
+      and $summary.counts.landed == $rows
+      and $summary.landed == $expected_landed
+      and $summary.active_children == []
+      and $summary.endpoints == []
+      and $bearings.schema == "fm-bearings.v1"
+      and ($bearings.landed | length) == 6
+      and ($bearings.omitted | any(.surface | test("landed per-home capped at 6")))
+  ' "$snapshot" "$summary" "$bearings" >/dev/null \
+    || fail "oversized snapshot paths changed records, ordering, nulls, or bounds"
+  pass "oversized snapshot, secondmate summary, and bearings avoid argv while preserving records"
+}
+
+# Fault injection stays at the executable boundary and proves malformed, extra,
+# and failed backlog/task producers retain the public failure diagnostics.
+test_json_transport_rejects_malformed_and_failed_producers() {
+  local home fakebin mode interface expected rc err
+  home=$(make_home json-transport-faults)
+  printf '## Done\n- [x] one - One (repo: firstmate) (kind: ship) (done 2026-01-01)\n' \
+    > "$home/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+  install_producer_fault_jq "$fakebin"
+  while IFS='|' read -r mode interface expected; do
+    set +e
+    PATH="$fakebin:$PATH" FM_HOME="$home" FM_TEST_REAL_JQ="$REAL_JQ" \
+      FM_TEST_PRODUCER_MODE="$mode" "$SNAPSHOT" "$interface" \
+      > "$home/fault.out" 2> "$home/fault.err"
+    rc=$?
+    set -e
+    err=$(< "$home/fault.err")
+    [ "$rc" -ne 0 ] || fail "$mode $interface unexpectedly succeeded"
+    [ ! -s "$home/fault.out" ] || fail "$mode $interface emitted a partial snapshot"
+    assert_contains "$err" "$expected" "$mode $interface lost its failure diagnostic"
+    assert_not_contains "$err" "Argument list too long" "$mode $interface regressed to argv transport"
+  done <<'EOF'
+malformed-backlog|--json|fm-fleet-snapshot: main inventory summary failed
+malformed-backlog|--secondmate-home-summary|fm-fleet-snapshot: secondmate home summary failed
+extra-values-backlog|--json|fm-fleet-snapshot: main inventory summary failed
+failed-backlog|--json|fm-fleet-snapshot: backlog read failed
+malformed-tasks|--json|fm-fleet-snapshot: main inventory summary failed
+malformed-tasks|--secondmate-home-summary|fm-fleet-snapshot: secondmate home summary failed
+failed-tasks|--json|fm-fleet-snapshot: task snapshot failed
+EOF
+  pass "snapshot interfaces reject malformed, extra, and failed JSON producers safely"
 }
 
 test_fixture_snapshot_json() {
@@ -780,6 +1002,9 @@ test_parked_scout_decision_stays_pending() {
 }
 
 test_empty_fleet_json
+test_json_transport_small_semantic_equivalence
+test_oversized_json_transport_avoids_argv_limit
+test_json_transport_rejects_malformed_and_failed_producers
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
