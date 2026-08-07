@@ -277,6 +277,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/mission-control.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/orca-backend.md",
       "audience": "operator-current"
     },
