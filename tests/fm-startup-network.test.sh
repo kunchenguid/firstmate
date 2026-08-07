@@ -218,6 +218,41 @@ EOF
   pass "fm-startup-network: a claimant crash after publication still surfaces the result"
 }
 
+test_a_report_publication_failure_is_failed_and_still_wakes() {
+  local rec home root log claimant output state
+  rec=$(new_world report-publication-failure)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  mkdir "$home/state/.startup-network.report"
+  chmod 500 "$home/state/.startup-network.report"
+  sleep 10 &
+  claimant=$!
+
+  FM_SESSION_START_TIMEOUT=4 FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_OUT='unpublishable result' \
+    run_stage "$home" "$root" start --locked 0 --harvest-pid "$claimant"
+  run_stage "$home" "$root" wait 30 >/dev/null || fail "the report-publication failure never settled"
+  state=$(sed -n 's/^state=//p' "$home/state/.startup-network.status")
+  [ "$state" = failed ] || fail "a report-publication failure was published as $state"
+
+  output=$(run_stage "$home" "$root" report)
+  assert_contains "$output" "NETWORK_CHECKS: could not publish the deferred check report" \
+    "report did not surface the report-publication failure: $output"
+  output=$(run_stage "$home" "$root" harvest --pid "$claimant")
+  assert_contains "$output" "NETWORK_CHECKS: could not publish the deferred check report" \
+    "harvest did not surface the report-publication failure: $output"
+  assert_absent "$home/state/.startup-network.delivered" \
+    "harvest acknowledged a result whose report was not published"
+  wait_for_startup_network_wake "$home" || fail "the report-publication failure suppressed the wake"
+  assert_grep 'check	startup-network' "$home/state/.wake-queue" \
+    "the report-publication failure did not reach the wake queue"
+
+  kill "$claimant" 2>/dev/null || true
+  wait "$claimant" 2>/dev/null || true
+  chmod 700 "$home/state/.startup-network.report"
+  pass "fm-startup-network: a report-publication failure is failed, diagnosed, and still wakes"
+}
+
 # The worker outlives the command that launched it. If another session took the
 # lock meanwhile, running the mutating sweeps would sweep underneath that
 # session, so they are refused - and the refusal is reported, not silent.
@@ -426,6 +461,7 @@ test_wait_fails_without_a_published_stage
 test_start_returns_without_holding_the_callers_stdout
 test_harvest_acknowledgement_suppresses_the_wake_and_no_claim_produces_it
 test_a_claimant_crash_after_publish_still_queues_the_wake
+test_a_report_publication_failure_is_failed_and_still_wakes
 test_mutating_sweeps_are_refused_when_the_lock_changed_hands
 test_the_stage_bound_is_reported_not_swallowed
 test_an_abandoned_run_reads_as_needing_a_rerun

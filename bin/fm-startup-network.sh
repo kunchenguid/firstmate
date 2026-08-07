@@ -57,9 +57,9 @@
 #
 # STATE, all under this home's state/ and gitignored with it:
 #   .startup-network.status   key=value record - generation, lock_pid, state,
-#                             pid, started, finished, rc, locked, phases. The
-#                             single source of truth for what ran and how it
-#                             ended.
+#                             pid, started, finished, rc, locked, phases, and
+#                             whether the report was published. The single
+#                             source of truth for what ran and how it ended.
 #   .startup-network.report   the sweep output, byte for byte as
 #                             bin/fm-bootstrap.sh produced it, plus a
 #                             NETWORK_CHECKS: line whenever the stage itself
@@ -324,13 +324,17 @@ EOF
 }
 
 publish() {  # <generation> <state> <phases> <locked> <started> <rc> <output-file>
-  local generation=$1 state=$2 phases=$3 locked=$4 started=$5 rc=$6 out=$7
+  local generation=$1 state=$2 phases=$3 locked=$4 started=$5 rc=$6 out=$7 report_published=1
   fm_lock_acquire_wait "$PUBLISH_LOCK"
   if [ "$(status_get generation)" != "$generation" ]; then
     fm_lock_release "$PUBLISH_LOCK"
     return 0
   fi
-  write_atomic "$REPORT_FILE" < "$out" || true
+  if ! write_atomic "$REPORT_FILE" < "$out"; then
+    state=failed
+    rc=1
+    report_published=0
+  fi
   rm -f "$DELIVERED_FILE" 2>/dev/null || true
   write_atomic "$STATUS_FILE" <<EOF || true
 state=$state
@@ -342,6 +346,7 @@ locked=$locked
 phases=$phases
 generation=$generation
 lock_pid=$(status_get lock_pid)
+report_published=$report_published
 EOF
   fm_lock_release "$PUBLISH_LOCK"
   await_delivery "$generation" "$state"
@@ -438,17 +443,21 @@ EOF
 # --- harvest / report --------------------------------------------------------
 
 print_finished() {  # <state>
-  local state=$1 phases started finished took=unknown
+  local state=$1 phases started finished took=unknown report_published
   phases=$(status_get phases)
   started=$(status_get started)
   finished=$(status_get finished)
+  report_published=$(status_get report_published)
   case "$started$finished" in
     ''|*[!0-9]*) ;;
     *) took=$((finished - started)) ;;
   esac
   printf 'completed off the startup path in %ss: %s.\n' "$took" "$(phase_label "$phases")"
   [ "$state" = 'done' ] || printf 'The stage itself did not finish cleanly (%s) - the NETWORK_CHECKS line below names what to rerun.\n' "$state"
-  if [ -s "$REPORT_FILE" ]; then
+  if [ "$report_published" = 0 ]; then
+    printf 'NETWORK_CHECKS: could not publish the deferred check report, so %s results are unavailable; rerun %s/bin/fm-startup-network.sh run --locked %s\n' \
+      "$(phase_label "$phases")" "$FM_ROOT" "$(status_get locked)"
+  elif [ -s "$REPORT_FILE" ]; then
     cat "$REPORT_FILE"
     printf 'These ran AFTER the sections above were composed, so re-read any record a line here names.\n'
   else
@@ -502,7 +511,7 @@ EOF
   state=$(status_get state)
   print_state
   case "$state" in
-    done|timeout|failed) write_atomic "$DELIVERED_FILE" <<EOF || true
+    done|timeout|failed) [ "$(status_get report_published)" = 0 ] || write_atomic "$DELIVERED_FILE" <<EOF || true
 delivered
 EOF
       ;;
