@@ -54,7 +54,7 @@ grok:     FM_HOME= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PRO
 ```
 
 The declaration precedes each adapter's own environment and flags, so an adapter cannot opt out of it.
-Kimi is launched bare and then sent a readiness-gated pointer, so its declaration is asserted in `tests/fm-kimi-harness.test.sh` alongside that adapter's delivery gates rather than here.
+Every harness in `FM_HARNESS_RE` (`bin/fm-session-lock-lib.sh`) appears above, so no verified adapter is left unproven.
 
 ## Provider axis: per-pane process id
 

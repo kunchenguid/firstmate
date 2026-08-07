@@ -90,23 +90,10 @@ fm_worker_launch_env_prefix() {
   printf 'FM_AGENT_OWNER_HOME=%s ' "$(fm_worker_shell_quote "$home")"
 }
 
-# fm_worker_declared_role: the current process's declared role, or empty when
-# it declares none (a primary firstmate, or a pre-declaration legacy agent).
-fm_worker_declared_role() {
-  case "${FM_AGENT_ROLE:-}" in
-    crewmate|secondmate) printf '%s' "$FM_AGENT_ROLE" ;;
-  esac
-}
-
 # fm_worker_is_task_worker: 0 when this process is a declared task child that
 # must never act as a firstmate primary in any home.
 fm_worker_is_task_worker() {
   [ "${FM_AGENT_ROLE:-}" = crewmate ]
-}
-
-# fm_worker_owning_home: the home that declared this agent, or empty.
-fm_worker_owning_home() {
-  printf '%s' "${FM_AGENT_OWNER_HOME:-}"
 }
 
 # fm_worker_refuse_primary_operation <operation>

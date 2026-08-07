@@ -15,9 +15,8 @@
 #   - a pane cwd field named the wrong process and reported an isolated worker
 #     as living in the primary checkout.
 #
-# Kimi's launch declaration is asserted in tests/fm-kimi-harness.test.sh, which
-# owns that adapter's readiness and delivery gates; the five adapters that need
-# no readiness gate are driven end to end here.
+# Every verified harness in FM_HARNESS_RE (bin/fm-session-lock-lib.sh) is driven
+# end to end here, so no adapter can quietly opt out of the declaration.
 set -u
 
 # shellcheck source=tests/lib.sh

@@ -40,7 +40,10 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || {
+  echo "error: could not serialize the wake queue; refusing to drain" >&2
+  exit 1
+}
 DRAIN_LOCK_HELD=true
 
 if [ ! -s "$FM_WAKE_QUEUE" ]; then

@@ -16,8 +16,12 @@
 #      the observed incident, and it needs no cooperation from the occupant;
 #   2. the slot's ownership stamp names a different task or home - the metadata
 #      being trusted is positively stale because the slot was reissued;
-#   3. a live agent declared for a DIFFERENT task is running inside the slot
-#      (bin/fm-agent-cwd-lib.sh's authoritative process cwd).
+#   3. the process bound to THIS task's own backend endpoint is running inside
+#      the slot but is not this task's declared worker (bin/fm-agent-cwd-lib.sh's
+#      authoritative process cwd). The check is endpoint-scoped on purpose: a
+#      durable task lease already stops the pool from handing the slot to
+#      another task, so a host-wide /proc census adds no ownership proof while
+#      letting any unrelated unreadable process block every clean teardown.
 #
 # Retain means the lease is not returned to the pool: firstmate finishes the
 # rest of the teardown (records and endpoint) and leaves the directory on disk,
@@ -235,30 +239,6 @@ fm_slot_meta_referencing_tasks() {
     found=0
   done
   return "$found"
-}
-
-# fm_slot_live_occupant_tasks <worktree> <task-id>: other tasks whose declared
-# live agent process is running inside the slot right now, newline separated
-# and deduplicated. Requires procfs; a host without it simply contributes no
-# evidence from this source.
-fm_slot_live_occupant_tasks() {
-  local wt=$1 self=$2 wt_real entry pid task cwd hits
-  wt_real=$(fm_agent_canonical_dir "$wt") || return 1
-  [ -d /proc ] || return 1
-  hits=
-  for entry in /proc/[0-9]*; do
-    [ -d "$entry" ] || continue
-    pid=${entry#/proc/}
-    task=$(fm_agent_proc_env "$pid" FM_AGENT_TASK) || continue
-    [ -n "$task" ] || continue
-    [ "$task" != "$self" ] || continue
-    cwd=$(fm_agent_proc_cwd "$pid") || continue
-    cwd=$(fm_agent_canonical_dir "$cwd") || continue
-    fm_agent_path_within "$wt_real" "$cwd" || continue
-    hits="$hits$task"$'\n'
-  done
-  [ -n "$hits" ] || return 1
-  printf '%s' "$hits" | LC_ALL=C sort -u
 }
 
 # fm_slot_endpoint_occupant_tasks <worktree> <task-id> <home> <role> <backend> <target>:

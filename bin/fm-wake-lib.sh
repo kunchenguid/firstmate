@@ -574,9 +574,20 @@ fm_lock_try_acquire() {
   return "$rc"
 }
 
+# Waits only for CONTENTION. fm_lock_try_acquire returns 2 when the lock's
+# owner directory cannot be prepared at all - an unwritable or full filesystem -
+# which no amount of waiting resolves, so retrying there spins forever on the
+# spawn and teardown hot paths instead of letting the caller take its
+# fail-closed refusal. Returns nonzero for that case so every caller can refuse.
 fm_lock_acquire_wait() {
-  local lockdir=$1
-  while ! fm_lock_try_acquire "$lockdir"; do
+  local lockdir=$1 rc
+  while :; do
+    rc=0
+    fm_lock_try_acquire "$lockdir" || rc=$?
+    case "$rc" in
+      0) return 0 ;;
+      2) return 1 ;;
+    esac
     sleep 0.1
   done
 }
@@ -617,7 +628,10 @@ fm_wake_append() {
   seq_file="$STATE/.wake-queue.seq"
   status=0
 
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || {
+    printf 'fm_wake_append: could not serialize the wake queue; refusing to append unlocked\n' >&2
+    return 1
+  }
   seq=$(cat "$seq_file" 2>/dev/null || echo 0)
   case "$seq" in
     ''|*[!0-9]*) seq=0 ;;

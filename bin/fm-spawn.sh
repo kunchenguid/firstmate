@@ -1278,22 +1278,22 @@ case "$BACKEND" in
       exit 1
     fi
     if ! fm_backend_set_task_option "$BACKEND" "$WID" automatic-rename off; then
-      cleanup_spawn_window "$WID"
+      cleanup_spawn_window "$WID" || true
       echo "error: tmux failed to disable automatic window renaming for $T" >&2
       exit 1
     fi
     if ! fm_backend_set_task_option "$BACKEND" "$WID" allow-rename off; then
-      cleanup_spawn_window "$WID"
+      cleanup_spawn_window "$WID" || true
       echo "error: tmux failed to disable window renaming for $T" >&2
       exit 1
     fi
     if ! fm_backend_rename_task "$BACKEND" "$WID" "$W"; then
-      cleanup_spawn_window "$WID"
+      cleanup_spawn_window "$WID" || true
       echo "error: tmux failed to restore canonical window name $T" >&2
       exit 1
     fi
     if [ "$(fm_backend_task_name "$BACKEND" "$WID")" != "$W" ]; then
-      cleanup_spawn_window "$WID"
+      cleanup_spawn_window "$WID" || true
       echo "error: tmux did not retain canonical window name $T" >&2
       exit 1
     fi

@@ -187,7 +187,6 @@ A sweep that cries wolf on a normal fleet is worse than no sweep, because the `b
 ## Regression coverage
 
 `tests/fm-worker-isolation.test.sh` covers all four mechanisms: the declaration's exact bytes and its refusals, the launch declaration for every verified harness, each consuming refusal, the process-cwd method of record against a deliberately lying pane path, the provider matrix, the stable-window-id resolution and its refusal to answer from a lost window name, all three slot-conflict forms plus the clean-disposal case, teardown retiring a contested lease under `--force`, the contested-then-released and still-blocked stamp sequences, and the sweep outcomes including a healthy secondmate staying silent.
-Kimi's launch declaration is asserted in `tests/fm-kimi-harness.test.sh`, which owns that adapter's readiness and delivery gates.
 
 ## Maintaining this file
 

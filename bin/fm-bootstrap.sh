@@ -846,9 +846,23 @@ if [ "${1:-}" = "install" ]; then
   exit 0
 fi
 
+# The sweep's own stderr is kept, not discarded: a sweep that could not RUN at
+# all (a missing interpreter, an unreadable library, a broken PATH) exits
+# nonzero with no findings on stdout, and that status blocks every bootstrap
+# mutation below. Without the captured diagnostic the whole home drops to a
+# read-only session with nothing to act on.
 isolation_sweep_status=0
-isolation_sweep_output=$("$SCRIPT_DIR/fm-isolation-sweep.sh" 2>/dev/null) \
-  || isolation_sweep_status=$?
+isolation_sweep_diag=
+isolation_sweep_err=$(mktemp "${TMPDIR:-/tmp}/fm-isolation-sweep.XXXXXX" 2>/dev/null || true)
+if [ -n "$isolation_sweep_err" ]; then
+  isolation_sweep_output=$("$SCRIPT_DIR/fm-isolation-sweep.sh" 2>"$isolation_sweep_err") \
+    || isolation_sweep_status=$?
+  isolation_sweep_diag=$(tr '\n' ' ' < "$isolation_sweep_err" 2>/dev/null | sed 's/ *$//')
+  rm -f "$isolation_sweep_err"
+else
+  isolation_sweep_output=$("$SCRIPT_DIR/fm-isolation-sweep.sh" 2>/dev/null) \
+    || isolation_sweep_status=$?
+fi
 [ -z "$isolation_sweep_output" ] || printf '%s\n' "$isolation_sweep_output"
 
 # This is the first mutating sweep at a locked session boundary. It pauses an
@@ -908,6 +922,9 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
 fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   if [ "$isolation_sweep_status" -ne 0 ]; then
+    if [ -z "$isolation_sweep_output" ]; then
+      echo "ISOLATION: worker isolation sweep could not run (exit $isolation_sweep_status), so isolation is unproven: ${isolation_sweep_diag:-no diagnostic was produced}; run $SCRIPT_DIR/fm-isolation-sweep.sh directly to see why"
+    fi
     echo "ISOLATION: bootstrap mutations blocked until worker isolation is clean"
     exit 1
   fi
