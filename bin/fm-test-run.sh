@@ -183,7 +183,8 @@ family_for_basename() {
     fm-grok-stop-live-e2e.test.sh|fm-harness-liveness-drift-live-e2e.test.sh|\
     fm-muse-signals-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
-    fm-opencode-primary-live-e2e.test.sh|fm-pi-primary-live-e2e.test.sh|\
+    fm-opencode-primary-live-e2e.test.sh|fm-calm-pi-conflict-live-e2e.test.sh|\
+    fm-pi-primary-live-e2e.test.sh|\
     fm-sessionstart-hook-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh)
       printf '%s\n' live-harness-optin
@@ -390,6 +391,7 @@ tests/fm-calm-pi-extension.test.sh 203
 tests/fm-claude-stop-autoarm-live-e2e.test.sh 19
 tests/fm-claude-stop-autoarm.test.sh 60521
 tests/fm-codex-continuity-live-e2e.test.sh 19
+tests/fm-calm-pi-conflict-live-e2e.test.sh 19
 tests/fm-daemon.test.sh 15140
 tests/fm-documentation-audiences.test.sh 572
 tests/fm-fleet-snapshot-view.test.sh 5902
