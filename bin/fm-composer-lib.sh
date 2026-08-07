@@ -286,6 +286,40 @@ fm_composer_idle_matches() {
   esac
 }
 
+# fm_composer_cursor_arrow_ok: the single owner of when a leading `→` may read
+# as an agent composer at all. `→` is Cursor's own prompt glyph, but unlike the
+# other agent glyphs it is a common bare decoration, so an unscoped bare arrow
+# is never a safe injection target. Two things scope it: a bordered container
+# proves the composer structurally, and a cursor harness identity proves the
+# glyph is Cursor's. Every arrow verdict in the classifier routes through here.
+fm_composer_cursor_arrow_ok() {  # <bordered> <harness>
+  [ "$1" = 1 ] || [ "$2" = cursor ]
+}
+
+# fm_composer_strip_prompt_glyph: strip ONE leading prompt glyph plus the
+# whitespace after it, then re-emit the row for a second idle-placeholder
+# match. The four agent glyphs are always stripped; pass `all` to also strip
+# the shell prompt glyphs, which is correct only where the caller has already
+# decided a shell glyph could be the harness's own prompt.
+#
+# Literal prefixes rather than `?` wildcards: the agent glyphs are multibyte,
+# and a character-count strip is only correct in a UTF-8 locale.
+fm_composer_strip_prompt_glyph() {  # <content> [all]
+  local content=$1 stripped=
+  case "$content" in
+    '→'*) content=${content#'→'}; stripped=1 ;;
+    '❯'*) content=${content#'❯'}; stripped=1 ;;
+    '›'*) content=${content#'›'}; stripped=1 ;;
+    '⟩'*) content=${content#'⟩'}; stripped=1 ;;
+  esac
+  if [ -z "$stripped" ] && [ "${2:-}" = all ]; then
+    case "$content" in
+      '>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
+    esac
+  fi
+  printf '%s' "${content#"${content%%[![:space:]]*}"}"
+}
+
 fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content] [harness]
   local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content harness remainder arrow_leading=0
   plain_content=${5:-$content}
@@ -309,18 +343,8 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
         fi
         ;;
     esac
-    case "$plain_content" in
-      '→ '*) plain_content=${plain_content#'→ '} ;;
-      '❯ '*) plain_content=${plain_content#'❯ '} ;;
-      '› '*) plain_content=${plain_content#'› '} ;;
-      '⟩ '*) plain_content=${plain_content#'⟩ '} ;;
-      '→'*) plain_content=${plain_content#'→'} ;;
-      '❯'*) plain_content=${plain_content#'❯'} ;;
-      '›'*) plain_content=${plain_content#'›'} ;;
-      '⟩'*) plain_content=${plain_content#'⟩'} ;;
-    esac
-    plain_content="${plain_content#"${plain_content%%[![:space:]]*}"}"
-    if { [ "$arrow_leading" -eq 0 ] || [ "$harness" = cursor ]; } \
+    plain_content=$(fm_composer_strip_prompt_glyph "$plain_content")
+    if { [ "$arrow_leading" -eq 0 ] || fm_composer_cursor_arrow_ok "$bordered" "$harness"; } \
       && fm_composer_idle_matches "$plain_content" "$idle_re" "$idle_case"; then
       printf 'empty'
     else
@@ -331,7 +355,7 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   # A bare prompt glyph on its own row.
   case "$content" in
     '→')
-      if [ "$bordered" = 1 ] || [ "$harness" = cursor ]; then
+      if fm_composer_cursor_arrow_ok "$bordered" "$harness"; then
         printf 'empty'
       else
         printf 'unknown'
@@ -348,25 +372,21 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   [ -n "$content" ] || { printf 'empty'; return 0; }
   # Known idle placeholder (matched before a leading glyph is stripped).
   case "$content" in '→'*) arrow_leading=1 ;; esac
-  if { [ "$arrow_leading" -eq 0 ] || [ "$bordered" = 1 ] || [ "$harness" = cursor ]; } \
+  if { [ "$arrow_leading" -eq 0 ] || fm_composer_cursor_arrow_ok "$bordered" "$harness"; } \
     && fm_composer_idle_matches "$content" "$idle_re" "$idle_case"; then
     printf 'empty'; return 0
   fi
   # Strip a leading prompt glyph, then re-judge the remainder.
-  case "$content" in
-    '→ '*|'❯ '*|'› '*|'⟩ '*|'> '*|'$ '*|'% '*|'# '*) content=${content#??} ;;
-    '→'*|'❯'*|'›'*|'⟩'*|'>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
-  esac
-  content="${content#"${content%%[![:space:]]*}"}"
+  content=$(fm_composer_strip_prompt_glyph "$content" all)
   content="${content%"${content##*[![:space:]]}"}"
   [ -n "$content" ] || { printf 'empty'; return 0; }
   # Known idle placeholder (matched again after the leading glyph was stripped,
   # e.g. "❯ Type a message...").
-  if { [ "$arrow_leading" -eq 0 ] || [ "$bordered" = 1 ] || [ "$harness" = cursor ]; } \
+  if { [ "$arrow_leading" -eq 0 ] || fm_composer_cursor_arrow_ok "$bordered" "$harness"; } \
     && fm_composer_idle_matches "$content" "$idle_re" "$idle_case"; then
     printf 'empty'; return 0
   fi
-  if [ "$arrow_leading" -eq 1 ] && [ "$bordered" != 1 ] && [ "$harness" != cursor ] \
+  if [ "$arrow_leading" -eq 1 ] && ! fm_composer_cursor_arrow_ok "$bordered" "$harness" \
     && fm_composer_idle_matches "$content" "$idle_re" "$idle_case"; then
     printf 'unknown'; return 0
   fi

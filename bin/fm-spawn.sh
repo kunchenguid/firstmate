@@ -1129,9 +1129,9 @@ launch_template() {
     # precedence hazard reproduced and fixed). --worktree is NEVER passed:
     # firstmate owns worktree isolation.
     # The binary name is resolved at spawn time into __CURSORBIN__ (see
-    # resolve_cursor_binary below): cursor ships both `cursor-agent` and the
-    # legacy alias `agent`, and the user-local install path is often absent
-    # from a non-interactive PATH.
+    # fm_cursor_resolve_binary, bin/fm-cursor-lib.sh): cursor ships both
+    # `cursor-agent` and the legacy alias `agent`, and the user-local install
+    # path is often absent from a non-interactive PATH.
     cursor) printf '%s' 'env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT __CURSORBIN__ --force --trust __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
     # muse (Muse Code): a positional prompt starts the supervised interactive
@@ -1280,20 +1280,26 @@ shell_quote() {
   printf "'"
 }
 
+# absolute_command_path: print an absolute path for a `command -v` result.
+# A launch command is handed to a backend that may start it from another
+# directory, so a relative PATH hit has to be made absolute before it is
+# embedded. Returns 1 when the directory cannot be resolved, which the callers
+# treat as "not found" and answer with their own diagnostic.
+absolute_command_path() {  # <command -v result>
+  local candidate=$1 dir
+  case "$candidate" in
+    /*) printf '%s\n' "$candidate"; return 0 ;;
+  esac
+  dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || return 1
+  [ -n "$dir" ] || return 1
+  printf '%s/%s\n' "$dir" "$(basename "$candidate")"
+}
+
 resolve_kimi_binary() {
-  local candidate dir fallback
+  local candidate fallback
   candidate=$(command -v kimi 2>/dev/null || true)
   if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-    case "$candidate" in
-      /*) printf '%s\n' "$candidate"; return 0 ;;
-      *)
-        dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
-        if [ -n "$dir" ]; then
-          printf '%s/%s\n' "$dir" "$(basename "$candidate")"
-          return 0
-        fi
-        ;;
-    esac
+    absolute_command_path "$candidate" && return 0
   fi
   fallback="${HOME:-}/.kimi-code/bin/kimi"
   if [ -n "${HOME:-}" ] && [ -x "$fallback" ]; then
@@ -1305,19 +1311,10 @@ resolve_kimi_binary() {
 }
 
 resolve_muse_binary() {
-  local candidate dir
+  local candidate
   candidate=$(command -v muse 2>/dev/null || true)
   if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-    case "$candidate" in
-      /*) printf '%s\n' "$candidate"; return 0 ;;
-      *)
-        dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
-        if [ -n "$dir" ]; then
-          printf '%s/%s\n' "$dir" "$(basename "$candidate")"
-          return 0
-        fi
-        ;;
-    esac
+    absolute_command_path "$candidate" && return 0
   fi
   echo "error: muse executable not found on PATH; install Muse Code or select a different verified harness" >&2
   return 1
@@ -1352,12 +1349,6 @@ muse_credential_present() {
   local auth=$1
   [ -s "$auth" ] || muse_worker_meta_api_key_present
 }
-
-# Resolution order, the legacy-alias proof, and the diagnostic all live in
-# fm_cursor_resolve_binary (bin/fm-cursor-lib.sh), which bin/fm-remote-doctor.sh
-# reproduces so a readiness check and a spawn never disagree about what counts
-# as Cursor.
-resolve_cursor_binary() { fm_cursor_resolve_binary; }
 
 model_flag_for_harness() {
   local harness=$1 model=$2
@@ -1465,7 +1456,7 @@ esac
 
 case "$LAUNCH" in
   *__CURSORBIN__*)
-    CURSOR_BIN=$(resolve_cursor_binary) || exit 1
+    CURSOR_BIN=$(fm_cursor_resolve_binary) || exit 1
     LAUNCH=${LAUNCH//__CURSORBIN__/$(shell_quote "$CURSOR_BIN")}
     ;;
 esac
