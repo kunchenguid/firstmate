@@ -19,7 +19,7 @@
   "not_the_platform_capability_registry": "This is NOT the platform's CapabilityRegistry (its scripts/runtime_capabilities.py, a separate repository) and must never be merged into it. That registry answers a Kernel-side question - which service implementation handles a call - while this catalog answers an agent-side question - what a work identity is permitted to do. Conflating them would make a dispatch table look like an authority record.",
   "field_contract": {
     "name": "Dotted capability_id. Stable; the identity a future binding record would cite.",
-    "input_schema": "Typed inputs, using the loopspecs/schema.json type vocabulary (slug, string, string[], bool, object, pos_int).",
+    "input_schema": "Typed inputs, using the LoopSpec type vocabulary (slug, string, string[], object, pos_int) plus bool, a catalog-local extension of it. The only vocabulary this catalog is required to reuse from loopspecs/schema.json is the authority_class enum.",
     "output_schema": "Typed result of one successful exercise of the capability.",
     "owner": "Repo-relative path to the file that already implements this action. Exactly one owner per row. null ONLY where the catalog deliberately defines a capability nothing owns.",
     "authority_class": "A value from the enum above.",
@@ -163,7 +163,7 @@
     },
     {
       "name": "network.request",
-      "purpose": "Make an arbitrary outbound network request that is not already mediated by a named forge, quota, or vendor owner above.",
+      "purpose": "Make an arbitrary outbound network request that is not already mediated by a named forge owner above.",
       "input_schema": { "url": "string", "method": "string", "body": "string" },
       "output_schema": { "status": "pos_int", "body": "string" },
       "owner": null,

@@ -117,11 +117,13 @@ PY
 }
 
 # mutate <python-expression-body> - writes a copy of the real catalog with the
-# named edit applied and echoes its path. `cat` is the parsed catalog.
+# named edit applied and echoes its path. `cat` is the parsed catalog. A
+# mutation that does not apply fails the test: a control run against an
+# unwritten copy would fire on "catalog unreadable" and prove nothing.
 mutate() {
   local body=$1 dest
   dest="$TMP/mutated-$RANDOM.json"
-  python3 - "$CATALOG" "$dest" "$body" <<'PY'
+  if ! python3 - "$CATALOG" "$dest" "$body" <<'PY'
 import json, sys
 src, dest, body = sys.argv[1:4]
 with open(src) as fh:
@@ -130,6 +132,10 @@ exec(body)  # noqa: S102 - test fixture mutation, not runtime code
 with open(dest, "w") as fh:
     json.dump(cat, fh)
 PY
+  then
+    fail "capability catalog: mutation did not apply: $body"
+  fi
+  [ -f "$dest" ] || fail "capability catalog: mutation wrote no catalog: $body"
   printf '%s\n' "$dest"
 }
 
@@ -141,7 +147,7 @@ assert_clean() {  # <what> <label>
 
 assert_control_fires() {  # <what> <mutation> <label>
   local copy got
-  copy=$(mutate "$2")
+  copy=$(mutate "$2") || exit 1
   got=$(check "$1" "$copy")
   [ -n "$got" ] || fail "$3: negative control did not fire - the check is vacuous"
 }
