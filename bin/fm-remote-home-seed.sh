@@ -2,7 +2,7 @@
 # Register and provision a whole secondmate home on an SSH-reachable host.
 #
 # Usage:
-#   fm-remote-home-seed.sh <id> <ssh-alias> <remote-root> <remote-home> {<project>...|--no-projects}
+#   fm-remote-home-seed.sh <id> <ssh-alias> <remote-root> <remote-home> {<project>[=<origin-url>]...|--no-projects}
 #
 # The SSH alias must already reach a host whose non-interactive PATH exposes the
 # fixed fm-remote-entrypoint.sh from <remote-root>. The command records the
@@ -10,6 +10,16 @@
 # fm-remote-doctor.sh readiness before touching it, sends a bounded provisioning
 # manifest through fm-on.sh, and lets the remote host clone its own Firstmate
 # home and project origins. No project tree or secret environment is copied.
+#
+# Each project needs an origin the remote account can clone. Firstmate resolves
+# that origin and names it as <project>=<origin-url>, so seeding never requires
+# a clone of that project in this home; a bare <project> is accepted only when
+# this home already has projects/<project>, whose origin is then read instead.
+# bin/fm-project-origin-lib.sh owns which URLs are accepted, and this home's
+# data/projects.md still owns the project's registered delivery mode, so an
+# unregistered or local-only project is refused rather than provisioned.
+# Seeding writes nothing under projects/ and needs no fleet sync first.
+#
 # Known provisioning failure rolls the registry back. SSH status 255 preserves
 # the route and any newly scaffolded brief because completion is unknown and a same-route rerun converges.
 set -eu
@@ -31,9 +41,11 @@ MAX_MANIFEST_BYTES=1048576
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-project-origin-lib.sh
+. "$SCRIPT_DIR/fm-project-origin-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 encode() { base64 | tr -d '\n'; }
 safe_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac; }
 
@@ -69,12 +81,21 @@ case "$REMOTE_ROOT/" in "$REMOTE_HOME/"*) die "remote code root must not be insi
 
 NO_PROJECTS=0
 PROJECT_NAMES=()
+PROJECT_ORIGINS=()
 for arg in "$@"; do
   if [ "$arg" = --no-projects ]; then
     NO_PROJECTS=1
   else
-    safe_id "$arg" || die "invalid project name: $arg"
-    PROJECT_NAMES+=("$arg")
+    name=${arg%%=*}
+    origin=
+    case "$arg" in *=*) origin=${arg#*=} ;; esac
+    safe_id "$name" || die "invalid project name: $name"
+    case "$arg" in
+      *=*) fm_project_origin_safe "$origin" \
+        || die "project $name origin is not an accepted clone URL: $origin" ;;
+    esac
+    PROJECT_NAMES+=("$name")
+    PROJECT_ORIGINS+=("$origin")
   fi
 done
 if [ "$NO_PROJECTS" -eq 1 ]; then
@@ -135,9 +156,10 @@ done < "$BRIEF" > "$TMP/charter.remote"
 
 PROJECTS_CSV=
 : > "$TMP/project.records"
+PROJECT_INDEX=0
 for project in "${PROJECT_NAMES[@]}"; do
-  SRC="$PROJECTS/$project"
-  [ -d "$SRC/.git" ] || die "project clone is unavailable: $SRC"
+  ORIGIN=${PROJECT_ORIGINS[$PROJECT_INDEX]}
+  PROJECT_INDEX=$((PROJECT_INDEX + 1))
   MODE_LINE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$project")
   read -r MODE _ <<EOF
 $MODE_LINE
@@ -147,9 +169,17 @@ EOF
     local-only) die "project $project is local-only and cannot be provisioned remotely" ;;
     *) die "project $project has unsupported delivery mode: $MODE" ;;
   esac
-  ORIGIN=$(git -C "$SRC" remote get-url origin 2>/dev/null || true)
-  [ -n "$ORIGIN" ] || die "project $project has no origin remote"
-  REGISTRY_LINE=$(awk -v p="$project" '$1 == "-" && $2 == p { print; exit }' "$DATA/projects.md")
+  # An origin named on the command line is authoritative. Reading one from a
+  # clone this home happens to have is only a convenience for the already-cloned
+  # case; it is never a reason to create one.
+  if [ -z "$ORIGIN" ] && [ -d "$PROJECTS/$project/.git" ]; then
+    ORIGIN=$(git -C "$PROJECTS/$project" remote get-url origin 2>/dev/null || true)
+  fi
+  [ -n "$ORIGIN" ] \
+    || die "project $project has no origin; pass $project=<origin-url> so the remote host can clone it"
+  fm_project_origin_safe "$ORIGIN" \
+    || die "project $project origin is not an accepted clone URL: $ORIGIN"
+  REGISTRY_LINE=$(awk -v p="$project" '$1 == "-" && $2 == p { print; exit }' "$DATA/projects.md" 2>/dev/null || true)
   [ -n "$REGISTRY_LINE" ] || die "project $project has no registry record"
   NAME_B64=$(printf '%s' "$project" | encode)
   ORIGIN_B64=$(printf '%s' "$ORIGIN" | encode)
