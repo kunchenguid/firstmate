@@ -7,7 +7,7 @@
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab] [--host-home <path> --host-root <path>] [--gui-host]
-#        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+#        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects} [--host-home <path> --host-root <path>]
 #   --host-home/--host-root write a REMOTE TASK HOST variant: the brief file is
 #   still created in this home, but every path inside it - the status file, the
 #   report, the firstmate scripts and skills it points at - is spelled for the
@@ -15,6 +15,12 @@
 #   The variant also states that its status appends are the ONLY signal reaching
 #   the supervisor, because a turn-end marker written on the host cannot be seen
 #   across the relay (bin/fm-relay-check-make.sh, docs/relay-host.md).
+#   The same pair applies to a --secondmate charter whose home is on another
+#   fleet machine. A charter spells exactly one absolute path - the escalation
+#   status file - and the seed on the far side resolves the HOME, not the charter
+#   body, so without this pair that path names the machine the charter was
+#   written on and does not exist where the secondmate runs. Only that path and
+#   a short "where you are running" note change; --gui-host does not apply.
 #   --gui-host adds the graphical contract for a host with a real display: use a
 #   private browser instance and never the machine owner's own, and prove a
 #   window exists rather than claiming it. Requires the remote-host variant,
@@ -120,10 +126,10 @@ BRIEF_STATE=$STATE
 BRIEF_DATA=$DATA
 BRIEF_ROOT=$FM_ROOT
 BRIEF_REMOTE_NOTE=
+CHARTER_REMOTE_NOTE=
 if [ -n "$HOST_HOME" ] || [ -n "$HOST_ROOT" ]; then
   [ -n "$HOST_HOME" ] && [ -n "$HOST_ROOT" ] \
     || { echo "error: --host-home and --host-root must be given together" >&2; exit 1; }
-  [ "$KIND" != secondmate ] || { echo "error: a secondmate charter has no remote-host variant" >&2; exit 1; }
   # Each path on its own. Concatenating them only ever checks the first
   # character, so an absolute --host-home would smuggle a relative --host-root
   # into the brief's own BRIEF_ROOT and point the remote crewmate at nothing.
@@ -136,10 +142,27 @@ if [ -n "$HOST_HOME" ] || [ -n "$HOST_ROOT" ]; then
   BRIEF_STATE="$HOST_HOME/state"
   BRIEF_DATA="$HOST_HOME/data"
   BRIEF_ROOT=$HOST_ROOT
-  # printf, not a heredoc: bash 3.2 (the macOS system bash this repo still
-  # supports) mis-parses an apostrophe inside a quoted heredoc nested in $(...),
-  # and this text needs both. Same construction HERDR_SECTION above uses.
-  BRIEF_REMOTE_NOTE=$(printf '%s\n' \
+  if [ "$KIND" = secondmate ]; then
+    # A charter used to refuse this pair on the reasoning that the far side's
+    # seed resolves the home paths. It does resolve the HOME, and it does not
+    # touch the charter BODY - so the escalation path written here stayed this
+    # machine's. Measured 2026-08-06: the secondmate seeded on box151 reported as
+    # its first act that the status file the charter named did not exist there.
+    # The status path is the one path a charter spells absolutely, so this
+    # variant respells it and nothing else.
+    CHARTER_REMOTE_NOTE=$(printf '%s\n' \
+'' \
+'' \
+'# Where you are running' \
+'You are on another machine of this fleet, and the main firstmate supervises you from a different one over a relay link.' \
+'- The status file named below is on THIS machine. The main firstmate reads it across the link, and it is the only signal that reaches it; nothing else about this pane crosses.' \
+'- Expect a reply to take minutes rather than seconds. That is the polling cadence of the link, not a stall.' \
+'- Write every document you point at into your own home on THIS machine and give its absolute path. A path on the main firstmate machine does not exist here.')
+  else
+    # printf, not a heredoc: bash 3.2 (the macOS system bash this repo still
+    # supports) mis-parses an apostrophe inside a quoted heredoc nested in $(...),
+    # and this text needs both. Same construction HERDR_SECTION above uses.
+    BRIEF_REMOTE_NOTE=$(printf '%s\n' \
 '' \
 '' \
 '# Where you are running' \
@@ -147,8 +170,8 @@ if [ -n "$HOST_HOME" ] || [ -n "$HOST_ROOT" ]; then
 '- Your status appends are the only signal that reaches it. Nothing else about this pane crosses the link, and there is no turn-end notification, so a phase change you do not append is a phase change firstmate never learns about.' \
 '- Expect a supervisor reply to take minutes rather than seconds; that is the polling cadence of the link, not a stall.' \
 '- Write every deliverable and every piece of evidence into the paths named below on THIS machine. Firstmate fetches them by hash; a file left anywhere else does not exist as far as it is concerned.')
-  if [ "$GUI_HOST" -eq 1 ]; then
-    BRIEF_REMOTE_NOTE="$BRIEF_REMOTE_NOTE$(printf '%s\n' \
+    if [ "$GUI_HOST" -eq 1 ]; then
+      BRIEF_REMOTE_NOTE="$BRIEF_REMOTE_NOTE$(printf '%s\n' \
 '' \
 '' \
 '## This machine has a real screen' \
@@ -158,11 +181,17 @@ if [ -n "$HOST_HOME" ] || [ -n "$HOST_ROOT" ]; then
 '- Prove a real window exists rather than asserting it. CGWindowListCopyWindowInfo with optionOnScreenOnly lists it at layer 0; a headless browser never appears in that list at all, which is exactly what makes it proof.' \
 '- A locked screen is not a broken screen. Windows still exist and can still be driven while locked, but a full-screen capture returns the lock screen and a per-window capture is refused outright. If your evidence needs pixels, say which shot you could not take instead of shipping the lock screen as if it were the page.' \
 '- A dark display is not a failure either: a full-screen capture taken with the display asleep is a valid, entirely black image with exit status 0. Judge such a capture by its size, not its status.')"
+    fi
   fi
 fi
 
 if [ "$GUI_HOST" -eq 1 ] && [ -z "$HOST_HOME" ]; then
   echo "error: --gui-host applies only to a remote task host brief; pass --host-home and --host-root too" >&2
+  exit 1
+fi
+
+if [ "$GUI_HOST" -eq 1 ] && [ "$KIND" = secondmate ]; then
+  echo "error: --gui-host applies only to a crewmate ship or scout brief on a task host with a screen" >&2
   exit 1
 fi
 
@@ -240,7 +269,7 @@ Optional helper: \`bin/fm-secondmate-report.sh\` can append a correlated status 
 For a terse result, a status line is the whole answer.
 For a detailed answer (an investigation, a plan, an audit), write it to a doc under your home's \`data/\` and append a status line that points to that doc - the scout-report pattern - so the main firstmate is woken and can read it.
 Before treating an investigation or visual review as complete, load \`decision-hold-lifecycle\` from this home's \`.agents/skills/\` and pass its shared completion gate.
-A message with NO marker is the captain typing directly into your pane: treat it as authoritative captain intervention and stay conversational exactly as you would for any captain message; do not force it onto the status path.
+A message with NO marker is the captain typing directly into your pane: treat it as authoritative captain intervention and stay conversational exactly as you would for any captain message; do not force it onto the status path.$CHARTER_REMOTE_NOTE
 
 # Escalation to main firstmate
 Handle routine work yourself.

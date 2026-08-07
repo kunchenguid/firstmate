@@ -868,7 +868,7 @@ nm_unwatched_prs() {
     pr=$(grep '^pr=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     [ -n "$pr" ] || continue
     id=$(basename "$meta" .meta)
-    echo "NM_UNWATCHED: $id: $pr has no CI monitoring - $reason; read that PR's CI yourself before relaying it, then re-arm with bin/fm-nm-watch.sh $id $pr"
+    fm_nm_unwatched_diagnostic "$id" "$pr" "$reason"
   done
 }
 

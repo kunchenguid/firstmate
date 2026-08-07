@@ -8,8 +8,10 @@
 # skips that second watch for a caller that is about to merge immediately.
 # A watch that could not be armed still never fails the PR record - the poll is
 # the more important half - but it is no longer only a printed line either:
-# bin/fm-nm-watch.sh records it in the task meta and bin/fm-bootstrap.sh reports
-# the PR as unmonitored at every session start until it is armed for real.
+# bin/fm-nm-watch.sh records it in the task meta, this script restates it on
+# stderr as the NM_UNWATCHED line owned by bin/fm-nm-lib.sh, and
+# bin/fm-bootstrap.sh repeats that same line at every session start until the
+# watch is armed for real.
 # Usage: fm-pr-check.sh <task-id> <pr-url> [--no-watch]
 set -eu
 
@@ -22,6 +24,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-scm-lib.sh
 . "$SCRIPT_DIR/fm-scm-lib.sh"
+# For fm_nm_unwatched_diagnostic, the single owner of the "this PR has no CI
+# monitoring" sentence this script and bin/fm-bootstrap.sh both print.
+# shellcheck source=bin/fm-nm-lib.sh
+. "$SCRIPT_DIR/fm-nm-lib.sh"
 
 if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
   echo "error: invalid PR check request" >&2
@@ -126,5 +132,21 @@ printf 'armed: state/%s.check.sh\n' "$ID"
 
 if [ "$ARM_WATCH" = yes ] \
   && [ "$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)" = direct-PR ]; then
-  "$FM_ROOT/bin/fm-nm-watch.sh" "$ID" "$URL" || true
+  # The arm still never fails the PR record - the poll is the more important half
+  # and it is already published. What changed is that a failure is no longer only
+  # a line in the middle of a successful-looking run: measured 2026-08-06, a
+  # cross-machine direct-PR task printed `armed:` and exited 0 while its PR had
+  # nothing watching its CI, and the one line saying so scrolled past. The failed
+  # arm is now restated on stderr in the same words bin/fm-bootstrap.sh will use
+  # at every later session start (bin/fm-nm-lib.sh owns that sentence).
+  WATCH_RC=0
+  WATCH_OUT=$("$FM_ROOT/bin/fm-nm-watch.sh" "$ID" "$URL" 2>&1) || WATCH_RC=$?
+  [ -z "$WATCH_OUT" ] || printf '%s\n' "$WATCH_OUT"
+  if [ "$WATCH_RC" -ne 0 ]; then
+    # Prefer what the arm recorded durably; fall back to its own last printed
+    # line so a future refusal that records nothing is still stated, not hidden.
+    WATCH_REASON=$(grep '^nm_watch_unarmed=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ -n "$WATCH_REASON" ] || WATCH_REASON=$(printf '%s\n' "$WATCH_OUT" | grep -v '^[[:space:]]*$' | tail -1)
+    fm_nm_unwatched_diagnostic "$ID" "$URL" "${WATCH_REASON:-bin/fm-nm-watch.sh exited $WATCH_RC without a reason}" >&2
+  fi
 fi

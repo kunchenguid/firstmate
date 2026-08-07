@@ -409,8 +409,51 @@ test_spawn_unverified_secondmate_harness_refused() {
     "unverified: error names the rejected harness"
   assert_contains "$(cat "$err")" "config/secondmate-harness" \
     "unverified: error names the secondmate-harness source"
+  assert_contains "$(cat "$err")" "--harness <claude|codex|opencode|pi|grok|traex>" \
+    "unverified: the refusal must name the flag that fixes it, not only what it rejected"
   [ -e "$w/home/state/sm.meta" ] && fail "unverified: a meta was written despite the abort"
   pass "B6 spawn: an unverified resolved secondmate harness is refused (guard intact)"
+}
+
+# The OTHER harness failure, and the one a cross-machine seed actually hits: not
+# "this adapter has no template" but "nothing resolved at all". A spawn started
+# by a relay verb inherits no environment and no terminal, so detection answers
+# `unknown` and, with no config on that machine, that is the value that reaches
+# the template lookup (measured 2026-08-06 seeding a secondmate on box151).
+#
+# The value is forced through config/secondmate-harness because a test cannot
+# make process-ancestry detection answer `unknown` from inside a process tree
+# that has a harness in it; the string reaching launch_template is identical
+# either way, which is what this branch keys on.
+#
+# What it must say is the way out, because the caller is on another machine and
+# cannot read this machine's config to work out why nothing resolved.
+test_spawn_unresolved_secondmate_harness_names_the_flag() {
+  local w sm fakebin err rc
+  w="$TMP_ROOT/spawn-unresolved"
+  sm="$w/sm"
+  mkdir -p "$w/home/config" "$w/home/state"
+  printf 'unknown\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+  fakebin=$(make_noop_tmux "$w/tmux")
+  err="$w/spawn.err"
+  rc=0
+  PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" \
+    FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+    FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+    FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate >/dev/null 2>"$err" || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "unresolved: spawn should have failed"
+  assert_contains "$(cat "$err")" "no harness resolved" \
+    "unresolved: an unresolved harness must not be reported as a missing template for an adapter named 'unknown'"
+  assert_contains "$(cat "$err")" "--harness <claude|codex|opencode|pi|grok|traex>" \
+    "unresolved: the refusal must name the flag that fixes it"
+  assert_contains "$(cat "$err")" "bin/fm-spawn.sh --host" \
+    "unresolved: the refusal must show a caller on another machine how to pass it"
+  [ -e "$w/home/state/sm.meta" ] && fail "unresolved: a meta was written despite the abort"
+  pass "B6b spawn: an unresolved harness says which flag fixes it, including across machines"
 }
 
 # ===========================================================================
@@ -2095,6 +2138,7 @@ test_spawn_backward_compat_crew_fallback
 test_spawn_bare_backward_compat
 test_spawn_explicit_harness_wins
 test_spawn_unverified_secondmate_harness_refused
+test_spawn_unresolved_secondmate_harness_names_the_flag
 test_spawn_bare_harness_no_model_effort_flag
 test_spawn_traex_secondmate_launches_without_notify
 test_spawn_secondmate_harness_model_token

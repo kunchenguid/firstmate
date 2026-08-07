@@ -63,3 +63,16 @@ fm_nm_supports_watch() {
 fm_nm_incompatible_diagnostic() {
   echo "NM_INCOMPATIBLE: no-mistakes is installed but too old for direct-PR monitoring (its \`watch\` command is missing); direct-PR CI, review, and merge alerts will not arm until it is upgraded (upgrade: no-mistakes update)"
 }
+
+# fm_nm_unwatched_diagnostic <task-id> <pr-url> <reason>: the single-owner line
+# for "this PR has a merge poll but nothing watching its CI". Two producers say
+# it, and they must say it identically:
+#   - bin/fm-pr-check.sh, at the moment the arm fails, because that is the one
+#     time a person is looking at the PR record and can still fix it;
+#   - bin/fm-bootstrap.sh, at every later session start, from the
+#     nm_watch_unarmed= the failed arm recorded.
+# Both render this text so firstmate reads one contract and the
+# bootstrap-diagnostics skill owns one remedy.
+fm_nm_unwatched_diagnostic() {  # <task-id> <pr-url> <reason>
+  echo "NM_UNWATCHED: $1: $2 has no CI monitoring - $3; read that PR's CI yourself before relaying it, then re-arm with bin/fm-nm-watch.sh $1 $2"
+}

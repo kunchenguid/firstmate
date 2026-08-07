@@ -21,6 +21,20 @@
 #   (j) a watch that arms and instantly skips its watch step is reported as not
 #       armed, and never recorded as this task's run
 #   (k) a watch that fails in the task worktree falls back to the project clone
+#
+# Plus the cross-machine hole found on 2026-08-06, where a direct-PR task
+# dispatched with `fm-spawn --host` reached its PR record with both recorded
+# paths pointing at the other machine, so nothing here could arm a watch and the
+# merge poll still reported `armed`:
+#   (l) a task whose recorded paths are on another machine arms from this home's
+#       own clone of the same project name
+#   (m) firstmate's own repo counts as that clone by name, because it is this
+#       home's code root and not a directory under projects/
+#   (n) when nothing resolves, fm-pr-check.sh states the lost CI monitoring in
+#       its own right instead of leaving it to a line in the middle of a
+#       successful-looking run
+#   (o) a task whose recorded worktree is readable resolves exactly as before,
+#       with no new candidate consulted
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -49,6 +63,24 @@ make_case() {  # <name> [mode] [branch] [project-dir]
     "project=$project" \
     "kind=ship" \
     "mode=$mode"
+  printf '%s\n' "$case_dir"
+}
+
+# A task that RAN ON ANOTHER MACHINE: the recorded worktree and project are that
+# machine's absolute paths, so neither exists here. Everything else - the mode,
+# the PR, the meta shape - is an ordinary direct-PR ship task, because that is
+# exactly what it is on the machine that ran it.
+make_remote_case() {  # <name> <project-name>
+  local name=$1 proj=$2 case_dir
+  case_dir="$TMP_ROOT/$name"
+  mkdir -p "$case_dir/state" "$case_dir/data" "$case_dir/fakebin" "$case_dir/projects"
+  fm_write_meta "$case_dir/state/task-a.meta" \
+    "window=fm-task-a" \
+    "worktree=/host/pool/7/$proj" \
+    "project=/host/fmhome/projects/$proj" \
+    "kind=ship" \
+    "mode=direct-PR" \
+    "host=box151"
   printf '%s\n' "$case_dir"
 }
 
@@ -398,6 +430,102 @@ test_falls_back_to_project_clone() {
   pass "a watch that fails in the task worktree falls back to the project clone"
 }
 
+# --- a task that ran on another machine ---------------------------------------
+
+test_cross_machine_task_arms_from_the_local_clone() {
+  local dir out clone
+  dir=$(make_remote_case xmachine alpha)
+  fm_git_init_commit "$dir/projects/alpha" >/dev/null 2>&1
+  clone=$(cd "$dir/projects/alpha" && pwd -P)
+  add_nm_stub_needs_dir "$dir" 01KTESTRUN0014 "$dir/projects/alpha"
+
+  out=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_PROJECTS_OVERRIDE="$dir/projects" FM_NM_BIN="$dir/fakebin/no-mistakes" \
+    "$NM_WATCH" task-a "$PR_URL" 2>&1) || fail "xmachine: fm-nm-watch.sh exited non-zero: $out"
+
+  assert_contains "$out" "watch armed: run 01KTESTRUN0014" \
+    "xmachine: a task whose recorded paths are on another machine was left unmonitored"
+  assert_grep "$clone" "$dir/nm.cwd" "xmachine: this home's own clone of the project was never tried"
+  assert_grep "nm_watch_run=01KTESTRUN0014" "$dir/state/task-a.meta" \
+    "xmachine: the run armed from the local clone was not recorded"
+  pass "a task that ran on another machine arms from this home's clone of the same project"
+}
+
+# firstmate's own repo is the case that would otherwise still fail: it is this
+# home's code root, not a clone under projects/, so a name lookup that only
+# searched projects/ would miss exactly the repo most cross-machine firstmate
+# work runs in.
+test_cross_machine_firstmate_task_arms_from_the_code_root() {
+  local dir out root
+  dir=$(make_remote_case xmachine-fm firstmate)
+  fm_git_init_commit "$dir/firstmate" >/dev/null 2>&1
+  root=$(cd "$dir/firstmate" && pwd -P)
+  add_nm_stub_needs_dir "$dir" 01KTESTRUN0015 "$dir/firstmate"
+
+  out=$(FM_ROOT_OVERRIDE="$dir/firstmate" FM_HOME="$dir" \
+    FM_STATE_OVERRIDE="$dir/state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_PROJECTS_OVERRIDE="$dir/projects" FM_NM_BIN="$dir/fakebin/no-mistakes" \
+    "$NM_WATCH" task-a "$PR_URL" 2>&1) || fail "xmachine-fm: fm-nm-watch.sh exited non-zero: $out"
+
+  assert_contains "$out" "watch armed: run 01KTESTRUN0015" \
+    "xmachine-fm: a cross-machine firstmate task was left unmonitored"
+  assert_grep "$root" "$dir/nm.cwd" "xmachine-fm: this home's own code root was never tried"
+  pass "a cross-machine firstmate task arms from this home's code root, not a projects/ clone"
+}
+
+# The one that is easiest to regress, because the regression is silence: when no
+# checkout resolves at all, the PR record still succeeds and the poll is still
+# armed, so the lost CI monitoring has to be stated as its own result.
+test_unresolvable_checkout_is_stated_by_pr_check() {
+  local dir out err rc=0
+  dir=$(make_remote_case xmachine-none beta)
+  add_nm_stub "$dir" 01KTESTRUN0016
+  add_gh_stub "$dir"
+  err="$dir/pr-check.err"
+
+  out=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
+    FM_DATA_OVERRIDE="$dir/data" FM_PROJECTS_OVERRIDE="$dir/projects" \
+    FM_NM_BIN="$dir/fakebin/no-mistakes" "$PR_CHECK" task-a "$PR_URL" 2>"$err") || rc=$?
+
+  expect_code 0 "$rc" "xmachine-none: an unarmable watch must still not fail the PR record"
+  assert_present "$dir/state/task-a.check.sh" "xmachine-none: the merge poll was not armed"
+  assert_contains "$out" "no CI monitoring" "xmachine-none: the arm's own line went missing"
+  assert_contains "$(cat "$err")" "NM_UNWATCHED: task-a: $PR_URL has no CI monitoring" \
+    "xmachine-none: the lost CI monitoring was left buried in a run that otherwise reads as success"
+  assert_contains "$(cat "$err")" "re-arm with bin/fm-nm-watch.sh task-a" \
+    "xmachine-none: the report did not name the remedy"
+  assert_grep "another machine records THAT machine's paths" "$dir/state/task-a.meta" \
+    "xmachine-none: the recorded reason did not explain why no checkout resolved"
+  pass "an unresolvable checkout is reported as lost CI monitoring in its own right"
+}
+
+# The compatibility half: a task whose recorded worktree is readable must resolve
+# exactly where it always did, and must not reach a name-derived candidate at all.
+test_local_task_resolution_is_unchanged() {
+  local dir out err rc=0 checkout decoy
+  dir=$(make_case unchanged)
+  mkdir -p "$dir/projects"
+  fm_git_init_commit "$dir/projects/wt" >/dev/null 2>&1
+  checkout=$(cd "$dir/wt" && pwd -P)
+  decoy=$(cd "$dir/projects/wt" && pwd -P)
+  add_nm_stub "$dir" 01KTESTRUN0017
+  add_gh_stub "$dir"
+  err="$dir/pr-check.err"
+
+  out=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
+    FM_DATA_OVERRIDE="$dir/data" FM_PROJECTS_OVERRIDE="$dir/projects" \
+    FM_NM_BIN="$dir/fakebin/no-mistakes" "$PR_CHECK" task-a "$PR_URL" 2>"$err") || rc=$?
+
+  expect_code 0 "$rc" "unchanged: a healthy local direct-PR task must still record and arm"
+  assert_contains "$out" "watch armed: run 01KTESTRUN0017" "unchanged: the local arm regressed"
+  assert_grep "$checkout" "$dir/nm.cwd" "unchanged: the arm left the task's own checkout"
+  assert_no_grep "$decoy" "$dir/nm.cwd" \
+    "unchanged: a name-derived candidate was consulted for a task that resolved locally"
+  assert_not_contains "$(cat "$err")" "NM_UNWATCHED" \
+    "unchanged: a healthy arm reported lost CI monitoring"
+  pass "a task whose recorded worktree is readable resolves exactly as before"
+}
+
 test_arms_direct_pr_task
 test_explicit_branch_wins
 test_refuses_no_mistakes_mode
@@ -412,3 +540,7 @@ test_mode_refusal_is_not_reported_as_lost_monitoring
 test_instantly_skipped_watch_is_not_armed
 test_healthy_arm_is_verified
 test_falls_back_to_project_clone
+test_cross_machine_task_arms_from_the_local_clone
+test_cross_machine_firstmate_task_arms_from_the_code_root
+test_unresolvable_checkout_is_stated_by_pr_check
+test_local_task_resolution_is_unchanged
