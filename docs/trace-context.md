@@ -23,9 +23,10 @@ When enabled, for each spawn Firstmate resolves one W3C `traceparent` carrier fo
 This feature parents no SDK span by itself.
 
 Because the injected carrier and the recorded carrier are the same string, an observer that reads the metadata reconstructs exactly the identity the child received.
-The injection sits at the unconditional pre-launch export site, so it covers ship and scout spawns across `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, `muse`, and `cursor`, plus Secondmate spawns across that same set except the deliberately crewmate-only `muse` adapter.
+The injection sits at the unconditional pre-launch export site, so it covers supported ship and scout harness/backend combinations across `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, `muse`, and `cursor`, plus supported Secondmate combinations across that same set except the deliberately crewmate-only `muse` adapter.
 This is the same coverage `GOTMPDIR` already has and requires no trace-specific `launch_template()` behavior.
-Ship and scout spawns reach that site on every spawn backend (`tmux`, `herdr`, `zellij`, `orca`, `cmux`); a Secondmate reaches it on every backend that accepts a Secondmate spawn (`tmux`, `herdr`, `zellij`), because `bin/fm-spawn.sh` rejects a Secondmate on `orca` and `cmux`.
+Ship and scout spawns reach that site on every spawn backend accepted by the selected harness (`tmux`, `herdr`, `zellij`, `orca`, or `cmux`); Cursor is restricted to `tmux` and `herdr` because its detached worker-server needs those backends' process-tree discovery.
+A Secondmate reaches it on every backend that accepts both the Secondmate and selected harness (`tmux`, `herdr`, or `zellij`), because `bin/fm-spawn.sh` rejects a Secondmate on `orca` and `cmux` and rejects Cursor on every backend except `tmux` and `herdr`.
 
 ### Remote Secondmate routes
 
