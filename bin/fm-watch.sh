@@ -40,7 +40,16 @@
 #                          count, and demand-deep-inspection marker, for human
 #                          inspection only - never an automatic interrupt,
 #                          signal, or restart of the worker or its tool process.
-#   check: <script>: <out> authenticated check output, always actionable
+#   check: <script>: <out> authenticated check output, always actionable. A PR
+#                          poll's review-activity line is the one output first
+#                          filtered against its per-task cursor, because it
+#                          reports current activity on every sweep rather than a
+#                          terminal event; see bin/fm-pr-lib.sh. It is also the
+#                          one output that does not end the sweep: it is queued
+#                          durably and reported after the loop, so a merge on a
+#                          later poll is still observed this cycle instead of
+#                          queueing behind a chatty sibling for a whole
+#                          CHECK_INTERVAL.
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
 #                          and has not been surfaced yet; reported once per
@@ -803,6 +812,7 @@ while :; do
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
     rejected_checks=
+    activity_wake=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       is_pr_poll=0
@@ -827,6 +837,14 @@ while :; do
           run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
+          # The poll reports review activity as a stateless observation of the
+          # pull request right now, so an unanswered review comment would
+          # otherwise wake firstmate once per sweep forever: check output is
+          # always actionable and nothing else suppresses a repeat. The cursor
+          # lives here because the validated poll invocation deliberately
+          # carries no task identity. A merged line is never filtered.
+          fm_pr_activity_filter "$STATE" "$id" "$out"
+          out=$FM_PR_ACTIVITY_SURFACE
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
           run_check_capture "$custom_snapshot" || exit 1
@@ -849,7 +867,29 @@ while :; do
             triage_log "merged PR poll retirement deferred because its canonical snapshot changed for $id"
           fi
         fi
+        if [ "$is_pr_poll" -eq 1 ]; then
+          # After the durable append, never before it: a failure here costs a
+          # repeated wake on the next sweep, never a swallowed one.
+          fm_pr_activity_commit "$STATE" "$id" \
+            || triage_log "PR review-activity cursor could not be recorded for $id"
+        fi
         touch "$STATE/.last-check"
+        # A review-activity line is the one check output that is not terminal:
+        # it reports a conversation still in progress rather than an event that
+        # retires its own poll. Its wake is already durably queued above, so the
+        # sweep runs on and reports it after the loop instead of exiting here.
+        # Exiting here would cost every LATER poll in glob order a whole
+        # CHECK_INTERVAL - so a merge landing behind a chatty sibling would go
+        # unobserved for as long as the sibling stayed chatty, which is exactly
+        # when a busy fleet can least afford it.
+        if [ "$is_pr_poll" -eq 1 ]; then
+          case "$out" in
+            'review-activity '*)
+              [ -n "$activity_wake" ] || activity_wake=$reason
+              continue
+              ;;
+          esac
+        fi
         wake "$reason"
       fi
     done
@@ -860,6 +900,9 @@ while :; do
       wake "$reason"
     fi
     touch "$STATE/.last-check"
+    # Every other queued review-activity wake is already durable and drains with
+    # this one; reporting the first keeps the cadence and the exit unchanged.
+    [ -z "$activity_wake" ] || wake "$activity_wake"
   fi
 
   # On the first changed signal, linger one grace period and re-scan before

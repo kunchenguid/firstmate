@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared validation and atomic artifact helpers for merge polling on the
+# Shared validation and atomic artifact helpers for PR polling on the
 # supported forges. Callers must validate task IDs and raw PR/MR URLs before
 # constructing task paths or performing any side effect.
 #
@@ -89,6 +89,8 @@ FM_PR_RETIRE_REG_IDENTITY=
 FM_PR_RETIRE_RECEIPT_HASH=
 FM_PR_RETIRE_RECEIPT_IDENTITY=
 FM_PR_POLL_RETIREMENT_REJECTED=
+FM_PR_ACTIVITY_SURFACE=
+FM_PR_ACTIVITY_PENDING=
 
 fm_task_id_path_safe() {
   local id=${1-}
@@ -654,6 +656,76 @@ fm_pr_poll_snapshot_matches() {
   [ "$FM_PR_REG_CHECK_IDENTITY" = "$FM_PR_POLL_SNAPSHOT_CHECK_IDENTITY" ] || return 1
   [ "$reg_hash" = "$FM_PR_POLL_SNAPSHOT_REG_HASH" ] || return 1
   [ "$reg_identity" = "$FM_PR_POLL_SNAPSHOT_REG_IDENTITY" ]
+}
+
+# Review-activity cursor. The poll reports the pull request's current review
+# activity statelessly on every sweep, because a check is invoked with no task
+# identity and must never write task state. Suppressing an unchanged repeat is
+# therefore owned here: bin/fm-watch.sh treats every non-empty check output as
+# actionable, so without this cursor an unanswered review comment would wake
+# firstmate once per sweep forever.
+fm_pr_activity_cursor_path() {
+  local state=$1 id=$2
+  printf '%s/.%s.pr-activity-cursor\n' "$state" "$id"
+}
+
+# Decide what a PR poll's output should surface for this task.
+# FM_PR_ACTIVITY_SURFACE is the output to treat as a wake, empty when the
+# reported activity is unchanged. FM_PR_ACTIVITY_PENDING is the value to commit
+# once that wake is durably queued. A merged line and every other output pass
+# through untouched, so the terminal merge signal keeps its exact behavior.
+# shellcheck disable=SC2034 # FM_PR_ACTIVITY_SURFACE is read by callers after this returns.
+fm_pr_activity_filter() {
+  local state=$1 id=$2 out=$3 cursor stored
+  FM_PR_ACTIVITY_SURFACE=$out
+  FM_PR_ACTIVITY_PENDING=
+  case "$out" in
+    'review-activity '*) ;;
+    *) return 0 ;;
+  esac
+  fm_pr_task_id_valid "$id" || return 0
+  cursor=$(fm_pr_activity_cursor_path "$state" "$id") || return 0
+  stored=$(cat "$cursor" 2>/dev/null || true)
+  if [ "$stored" = "$out" ]; then
+    FM_PR_ACTIVITY_SURFACE=
+    return 0
+  fi
+  FM_PR_ACTIVITY_PENDING=$out
+}
+
+# Record the reported activity, only after its wake is durably queued: a watcher
+# that dies between the two repeats the wake rather than swallowing it.
+fm_pr_activity_commit() {
+  local state=$1 id=$2 cursor tmp
+  [ -n "$FM_PR_ACTIVITY_PENDING" ] || return 0
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  cursor=$(fm_pr_activity_cursor_path "$state" "$id") || return 1
+  fm_pr_regular_destination_or_absent "$cursor" || return 1
+  tmp=$(umask 077; mktemp "$state/.fm-pr-activity.XXXXXX") || return 1
+  if ! printf '%s\n' "$FM_PR_ACTIVITY_PENDING" > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! fm_pr_regular_destination_or_absent "$cursor" \
+    || ! mv -f -- "$tmp" "$cursor"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  FM_PR_ACTIVITY_PENDING=
+}
+
+# Drop the cursor so the next reported activity is surfaced. Used when arming
+# cannot establish a trustworthy starting point, and when a cursor cannot be
+# written at all: one extra wake is always preferable to inheriting a stale
+# cursor that could suppress a real one, or to leaving behind a cursor the
+# commit above will reject on every sweep from here on.
+# The task id stays validated because the path is task-derived, but the cursor's
+# own file type does not gate the removal: rm unlinks a symlink itself and never
+# follows it, so refusing one would leave in place exactly what this removes.
+fm_pr_activity_cursor_clear() {
+  local state=$1 id=$2 cursor
+  fm_pr_task_id_valid "$id" || return 1
+  cursor=$(fm_pr_activity_cursor_path "$state" "$id") || return 1
+  rm -f -- "$cursor"
 }
 
 fm_pr_poll_retirement_parse() {
