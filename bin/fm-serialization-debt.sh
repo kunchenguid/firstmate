@@ -9,8 +9,18 @@
 # Prints one explained SERIALIZATION-DEBT line per debt item and exits 1 when
 # action is required. Missing, malformed, truncated, or timed-out git or task
 # evidence prints SERIALIZATION-DEBT-EVIDENCE-UNAVAILABLE and also exits 1.
-# The probe reads refs and the project's existing op-direction task records; it
-# never updates a branch or task. Debt begins strictly after the age boundary.
+# The probe reads refs, the project's HEAD reflog, and the project's existing
+# op-direction task records; it never updates a branch, task, or checkout.
+# Debt begins strictly after the age boundary.
+#
+# Checkout-state debt: when the project checkout is not on the configured base
+# branch - any other local branch, or a detached HEAD - the probe dates the
+# checkout transition from the most recent `checkout:` entry in the bounded
+# HEAD reflog window (the newest 200 entries) and reports debt strictly beyond
+# the shift threshold. The target commit's age is never used, so switching to
+# an old branch cannot false-positive. A transition older than the reflog
+# window, or missing, malformed, or unreadable reflog evidence, fails closed
+# as SERIALIZATION-DEBT-EVIDENCE-UNAVAILABLE.
 set -u
 
 exec python3 - "$@" <<'PY'
@@ -35,6 +45,8 @@ if args.shift_seconds < 0 or args.now < 0:
 
 timeout_seconds = 5
 output_limit = 1_000_000
+reflog_window = 200
+min_plausible_epoch = 1104537600  # 2005-01-01: a real reflog date, not a selector index
 
 
 class EvidenceUnavailable(Exception):
@@ -62,6 +74,64 @@ def run(source, command):
         return result.stdout.decode("utf-8")
     except UnicodeDecodeError as error:
         raise EvidenceUnavailable(f"{source}-output-not-utf8") from error
+
+
+def checkout_transition_age(args, expected_branch):
+    reflog = run(
+        "git-checkout-reflog",
+        ["git", "reflog", "show", "-n", str(reflog_window), "--date=unix", "HEAD"],
+    )
+    record = re.compile(r"^[0-9a-f]+ HEAD@\{(\d+)\}: (.*)$")
+    for line in reflog.splitlines():
+        match = record.match(line)
+        if not match:
+            raise EvidenceUnavailable("git-checkout-reflog-record-malformed")
+        epoch = int(match.group(1))
+        subject = match.group(2)
+        if epoch < min_plausible_epoch:
+            raise EvidenceUnavailable("git-checkout-reflog-record-malformed")
+        if not subject.startswith("checkout:"):
+            continue
+        if expected_branch is not None and subject.split()[-1] != expected_branch:
+            raise EvidenceUnavailable("git-checkout-reflog-state-mismatch")
+        return epoch
+    raise EvidenceUnavailable("git-checkout-reflog-truncated")
+
+
+def current_checkout(args):
+    expected_short = args.base[11:] if args.base.startswith("refs/heads/") else args.base
+    try:
+        symbolic = subprocess.run(
+            ["git", "symbolic-ref", "-q", "--short", "HEAD"],
+            cwd=args.project,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise EvidenceUnavailable(
+            f"git-checkout-state-command-unavailable:{type(error).__name__}"
+        ) from error
+    if len(symbolic.stdout) > output_limit or len(symbolic.stderr) > output_limit:
+        raise EvidenceUnavailable("git-checkout-state-output-exceeded-bound")
+    if symbolic.returncode not in (0, 1):
+        raise EvidenceUnavailable(f"git-checkout-state-command-exit-{symbolic.returncode}")
+    if symbolic.returncode == 0:
+        try:
+            branch = symbolic.stdout.decode("utf-8").strip()
+        except UnicodeDecodeError as error:
+            raise EvidenceUnavailable("git-checkout-state-output-not-utf8") from error
+        if not branch:
+            raise EvidenceUnavailable("git-checkout-state-record-malformed")
+        if branch == expected_short:
+            return None, None
+        return branch, checkout_transition_age(args, expected_branch=branch)
+    head = run("git-checkout-head", ["git", "rev-parse", "--short", "HEAD"]).strip()
+    if not head:
+        raise EvidenceUnavailable("git-checkout-head-record-malformed")
+    return f"detached-head@{head}", checkout_transition_age(args, expected_branch=None)
 
 
 def iso_epoch(value, task_id):
@@ -105,11 +175,20 @@ def has_path_proof(task):
 try:
     run("git-repository", ["git", "rev-parse", "--git-dir"])
     run("git-base", ["git", "rev-parse", "--verify", f"{args.base}^{{commit}}"])
+    checkout_state, checkout_epoch = current_checkout(args)
     refs = run(
         "git-branches",
         ["git", "for-each-ref", "--format=%(refname:short)\t%(committerdate:unix)\t%(subject)", "refs/heads/fm/*"],
     )
     debt = []
+    if checkout_state is not None:
+        checkout_age = max(0, args.now - checkout_epoch)
+        if checkout_age > args.shift_seconds:
+            debt.append(
+                f"SERIALIZATION-DEBT: checkout={checkout_state} class=canonical-checkout "
+                f"age_seconds={checkout_age} limit_seconds={args.shift_seconds} "
+                f"expected_base={args.base}"
+            )
     for line in refs.splitlines():
         fields = line.split("\t", 2)
         if len(fields) != 3 or not fields[0].startswith("fm/") or not fields[1].isdigit():
