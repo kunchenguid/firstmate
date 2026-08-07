@@ -129,3 +129,7 @@ tests/fm-backend-cmux-smoke.test.sh
 ```
 
 [`verification/runtime-backends.md`](verification/runtime-backends.md#cmux) records the active source and live evidence, including socket modes and last-in-window cleanup.
+
+## Operator war room (manual)
+
+For a multi-pane side-by-side watch layout that does **not** change the 1:1 task spawn contract, see [`cmux-war-room.md`](cmux-war-room.md) and `bin/fm-cmux-war-room.sh`.
