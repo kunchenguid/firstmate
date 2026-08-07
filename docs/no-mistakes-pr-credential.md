@@ -18,7 +18,7 @@ The evidence below comes from the installed binary at v1.41.2 and the upstream s
   `agent_path_override` overrides agent binaries only, and `commands.*` covers lint, test, and format commands rather than the forge calls.
 - Bitbucket Cloud credentials, by contrast, come from named environment variables the operator controls: `NO_MISTAKES_BITBUCKET_EMAIL`, `NO_MISTAKES_BITBUCKET_API_TOKEN`, and `NO_MISTAKES_BITBUCKET_API_BASE_URL`.
   GitHub has no equivalent, which is the asymmetry the upstream proposal targets.
-- The daemon resolves its environment once from the login shell at startup and caches it, so the credential and `PATH` the PR step sees are whatever that login shell exported when the daemon started.
+- The daemon resolves its environment once from the login shell at startup and caches it, so the ambient GitHub token variables and `PATH` the PR step sees are whatever that login shell exported when the daemon started.
 
 The step-execution layer does already contain a first-class interception seam.
 `stepCmd` in `internal/pipeline/steps/common_exec.go` resolves a command against a step-scoped `PATH` and passes a step-scoped environment whenever `StepContext.Env` is populated.
@@ -65,8 +65,8 @@ A worktree-scoped shim is not possible: the PR step executes in the daemon proce
 Every process that resolves `gh` through the install directory is therefore affected, including interactive shells and unrelated tools.
 The shim keeps that blast radius as small as it can by delegating every invocation other than `pr create` and `pr edit` straight to the real `gh` without touching the credential.
 
-A daemon that started before the credential existed still sees the environment it captured at startup.
-The shim itself does not have that problem, because `PATH` directories are scanned at exec time rather than cached, so a newly installed shim takes effect on the next `gh` call.
+The daemon caches the `PATH` value it captured at startup, but `PATH` directories are scanned at exec time and `fm-gh.sh` reads `config/gh-credential` on every routed invocation.
+Installing the shim into a directory already present on the daemon's cached `PATH`, or changing the credential file, therefore takes effect on the next `gh` call; changing the `PATH` value itself requires a newly started daemon.
 
 ## Alternatives considered
 

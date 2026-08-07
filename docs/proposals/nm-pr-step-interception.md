@@ -11,7 +11,7 @@ The PR step cannot open a pull request when the daemon's environment carries a G
 
 GitHub forbids fine-grained personal access tokens from the GraphQL `createPullRequest` mutation.
 A token of that class passes `gh auth status`, satisfies every REST call the earlier steps make, and then fails only at `gh pr create` with "Resource not accessible by personal access token".
-Because `GITHUB_TOKEN` overrides `gh`'s own stored credential, any operator who exports one for unrelated tooling silently loses the PR step, and loses it at the end of a run that has already spent review, test, document, lint, and push.
+Because `GH_TOKEN` and `GITHUB_TOKEN` override `gh`'s own stored credential, with `GH_TOKEN` taking precedence between them, an operator who exports either for unrelated tooling can silently lose the PR step at the end of a run that has already spent review, test, document, lint, and push.
 
 The failure is not detected by the PR step's skip conditions, which check that `gh` is installed and authenticated.
 An authorized-for-everything-else token satisfies both.
@@ -44,7 +44,7 @@ The gap is only that nothing populates the field outside tests.
 
 ## Proposal
 
-Add a supported configuration knob that populates `StepContext.Env` for forge calls, so an operator can give the PR step a credential without changing the daemon's global environment.
+Add a supported credential input that populates `StepContext.Env` for forge calls, so an operator can give GitHub subprocesses a credential without exposing it through ambient `GH_TOKEN` or `GITHUB_TOKEN` to every daemon subprocess.
 
 Either of two shapes would resolve the problem; the first is smaller and matches the existing Bitbucket precedent.
 
@@ -52,10 +52,12 @@ Either of two shapes would resolve the problem; the first is smaller and matches
 
 Read a GitHub credential from named variables, exactly as Bitbucket already does:
 
-- `NO_MISTAKES_GITHUB_TOKEN` - the token handed to `gh` for this repository's forge calls, exported into the step environment as `GH_TOKEN`.
+- `NO_MISTAKES_GITHUB_TOKEN` - the token handed to `gh` for GitHub forge calls handled by this daemon.
+  Before launching `gh`, remove inherited `GH_TOKEN` and `GITHUB_TOKEN` from the child environment and export this value as `GH_TOKEN`, so neither ambient variable can override the configured credential.
 - `NO_MISTAKES_GITHUB_HOST` - optional, for GitHub Enterprise Server.
 
 This is a small change confined to host construction, it is symmetric with the Bitbucket provider, and it is discoverable in the existing environment reference.
+Like the Bitbucket variables, this option is daemon-global rather than per-repository.
 It does not, on its own, let an operator route a call through a credential helper that never materializes a token in a config file or an environment the daemon can be inspected for.
 
 ### Option B: a configured command prefix for forge calls
@@ -78,9 +80,9 @@ Option B additionally removes the need for any out-of-band `PATH` interception.
 
 ## Acceptance criteria for the upstream change
 
-- A repository whose daemon environment exports a `createPullRequest`-forbidden `GITHUB_TOKEN` completes the PR step when the new knob supplies an authorized credential.
+- A repository whose daemon environment exports a `createPullRequest`-forbidden `GH_TOKEN`, `GITHUB_TOKEN`, or both completes the PR step when the new credential input supplies an authorized credential.
 - The configured credential is used for `pr create` and `pr edit`, and the resolution is visible in the step log without printing the credential.
-- An absent knob preserves today's behavior exactly, including the existing skip conditions.
+- An absent credential input preserves today's behavior exactly, including the existing skip conditions.
 - A configured but unusable credential fails with a message naming the knob, rather than surfacing only `gh`'s own error text.
 
 ## Related improvement
