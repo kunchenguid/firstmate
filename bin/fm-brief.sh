@@ -41,6 +41,9 @@
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# Every ship brief carries the three-test admission contract for a proposed
+# mechanism, guard, or check. Agent-env ships also make passing that contract
+# and the CI change budget part of their definition of done.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns approval decisions, so yolo is
@@ -409,6 +412,14 @@ esac
 # briefs stay byte-identical to the historical Bash 5 output.
 DOD=${DOD%$'\n'}
 
+if [ "$REPO" = agent-env ]; then
+DOD="$DOD
+
+Before this agent-env ship is done, every new mechanism, guard, or check must pass all three tests in \`# Mechanism admission\`.
+CI SLOs: fast lane (\`check\`) <= 5 minutes; full lane (\`full\`) <= 10 minutes (current baseline about 8m45s).
+If the PR adds more than 60 seconds to \`full\`, its body must state which new invariant this proves and why no existing check covers it."
+fi
+
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
@@ -451,6 +462,12 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+
+# Mechanism admission
+When proposing a new mechanism, guard, or check, apply all three tests:
+- **Owner:** Does it require agent-env or firstmate to understand another product's live state, config format, or launch lifecycle? If yes, route it upstream or raise a decision; do not code it here.
+- **Budget:** Is the guard larger than the payload it protects? If yes, keep it out of this PR and file it as a separate backlog candidate for decision.
+- **Trigger:** Does the proof run automatically on a defined trigger? If not, it is documentation; give it a trigger or write and name it as a textual assertion.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

@@ -212,9 +212,49 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
+    assert_grep "# Mechanism admission" "$brief" \
+      "$id: ship brief missing the mechanism-admission contract"
+    assert_grep "**Owner:**" "$brief" \
+      "$id: ship brief missing the owner test"
+    assert_grep "**Budget:**" "$brief" \
+      "$id: ship brief missing the guard-to-payload budget test"
+    assert_grep "**Trigger:**" "$brief" \
+      "$id: ship brief missing the automatic-trigger test"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
+}
+
+test_agent_env_ship_acceptance_carries_ci_budget() {
+  local home agent_env other scout
+  home="$TMP_ROOT/agent-env-acceptance-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" agent-env-ship agent-env --mode direct-PR >/dev/null 2>&1
+  agent_env="$home/data/agent-env-ship/brief.md"
+  assert_grep "every new mechanism, guard, or check must pass all three tests" "$agent_env" \
+    "agent-env definition of done did not require the admission tests"
+  assert_grep "fast lane (\`check\`) <= 5 minutes" "$agent_env" \
+    "agent-env definition of done lost the fast-lane SLO"
+  assert_grep "full lane (\`full\`) <= 10 minutes" "$agent_env" \
+    "agent-env definition of done lost the full-lane SLO"
+  assert_grep "If the PR adds more than 60 seconds to \`full\`" "$agent_env" \
+    "agent-env definition of done lost the per-change CI budget"
+  assert_grep "which new invariant this proves and why no existing check covers it" "$agent_env" \
+    "agent-env definition of done lost the required PR-body justification"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" other-ship other-project --mode direct-PR >/dev/null 2>&1
+  other="$home/data/other-ship/brief.md"
+  assert_grep "# Mechanism admission" "$other" \
+    "ordinary ship brief did not carry the shared admission tests"
+  assert_no_grep "CI SLOs:" "$other" \
+    "ordinary ship brief inherited agent-env-specific CI acceptance"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" scout-no-admission agent-env --scout >/dev/null 2>&1
+  scout="$home/data/scout-no-admission/brief.md"
+  assert_no_grep "# Mechanism admission" "$scout" \
+    "scout brief inherited the ship-only admission contract"
+  pass "fm-brief.sh: agent-env ships require admission tests and CI budgets without widening other definitions of done"
 }
 
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
@@ -714,6 +754,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_agent_env_ship_acceptance_carries_ci_budget
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
