@@ -1,27 +1,27 @@
 #!/usr/bin/env bash
 # fm-mission-control.sh - render the mission control board as self-contained HTML.
 #
-# Phase 1 is READ-ONLY: it renders live fleet state and writes one HTML file.
+# The board is READ-ONLY: it renders live fleet state and writes one HTML file.
 # It acquires no lock, drains no wakes, arms no watcher, and mutates no fleet
-# state. The only file it writes is its own output.
+# state. It reads git metadata from the project clones, which never writes, and
+# the only file it writes is its own output.
 #
 # This command does not parse fleet state itself. Like bin/fm-fleet-view.sh it
 # shells out to bin/fm-fleet-snapshot.sh --json once and renders that stable
 # contract, so current_state, backlog roles, captain actionability, and
-# secondmate current state keep exactly one owner. Two inputs come from outside
-# the snapshot because the snapshot does not own them: data/projects.md is the
-# delivery-posture registry, and `quota-axi --json` is the live allowance
-# reading. Task-record age and last-update times come from the task's own
-# state/<id>.meta and state/<id>.status modification times, which the snapshot
-# does not expose.
+# secondmate current state keep exactly one owner. Three inputs come from
+# outside the snapshot because the snapshot does not own them: data/projects.md
+# is the delivery-posture registry, `quota-axi --json` is the live allowance
+# reading, and each project card's last-change time comes from that project's
+# own clone or, for a second mate, from when it last reported.
 #
 # The board never invents a completion percentage or an ETA. Progress judgement
-# belongs to firstmate, so each active task renders a clearly labelled empty
-# slot that phase 2 populates with a firstmate-supplied note.
+# belongs to firstmate, so each project card states only what live state can
+# prove: what is under way, what waits on the captain, and when it last changed.
 #
-# Paths resolve from the ACTIVE home: the snapshot's own roots.state and
-# roots.data are used verbatim, so FM_HOME and the FM_*_OVERRIDE variables are
-# honoured without a second resolution here.
+# Paths resolve from the ACTIVE home: the snapshot's own roots.state,
+# roots.data, and roots.projects are used verbatim, so FM_HOME and the
+# FM_*_OVERRIDE variables are honoured without a second resolution here.
 #
 # Usage:
 #   fm-mission-control.sh                  write <state>/mission-control.html
@@ -88,20 +88,43 @@ printf '%s' "$SNAPSHOT" | jq -e 'type == "object" and has("tasks")' >/dev/null 2
 
 STATE_DIR=$(printf '%s' "$SNAPSHOT" | jq -r '.roots.state // ""')
 DATA_DIR=$(printf '%s' "$SNAPSHOT" | jq -r '.roots.data // ""')
+PROJECTS_DIR=$(printf '%s' "$SNAPSHOT" | jq -r '.roots.projects // ""')
 
 NOW=${FM_MISSION_CONTROL_NOW_EPOCH:-$(date +%s)}
 case "$NOW" in ''|*[!0-9]*) NOW=$(date +%s) ;; esac
 
-# Modification time of one file, or empty when it is absent or unreadable.
-# BSD and GNU stat need separate invocations: `stat -f` asks GNU stat for
-# FILESYSTEM status and succeeds with output that is not a timestamp at all, so
-# a "try one, fall back to the other" chain reads the wrong thing on Linux
-# rather than failing over. A non-numeric answer degrades to no time rather
-# than breaking the render.
+IS_DARWIN=0
+[ "$(uname -s 2>/dev/null)" = Darwin ] && IS_DARWIN=1
+
+# Format one epoch in local time. BSD and GNU date disagree on how an epoch is
+# given, and the locale decides whether %p reads "PM" or "p.m.", so the format
+# is pinned to the C locale and the platform is chosen up front rather than by
+# trying one and falling back.
+epoch_fmt() {  # <epoch> <format>
+  if [ "$IS_DARWIN" = 1 ]; then
+    LC_ALL=C date -r "$1" +"$2" 2>/dev/null
+  else
+    LC_ALL=C date -d "@$1" +"$2" 2>/dev/null
+  fi
+}
+
+TODAY=$(epoch_fmt "$NOW" '%Y-%m-%d')
+if [ "$IS_DARWIN" = 1 ]; then
+  YESTERDAY=$(LC_ALL=C date -r "$NOW" -v-1d '+%Y-%m-%d' 2>/dev/null)
+else
+  YESTERDAY=$(LC_ALL=C date -d "$TODAY -1 day" '+%Y-%m-%d' 2>/dev/null)
+fi
+
+# Modification time of one file, or empty when it is absent or unreadable. BSD
+# and GNU stat need separate invocations: `stat -f` asks GNU stat for FILESYSTEM
+# status and succeeds with output that is not a timestamp at all, so a "try one,
+# fall back to the other" chain reads the wrong thing on Linux rather than
+# failing over. A non-numeric answer degrades to no time rather than breaking
+# the render.
 file_mtime() {  # <path>
   local mtime
   [ -e "$1" ] || return 0
-  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+  if [ "$IS_DARWIN" = 1 ]; then
     mtime=$(stat -f '%m' "$1" 2>/dev/null) || return 0
   else
     mtime=$(stat -c '%Y' "$1" 2>/dev/null) || return 0
@@ -110,22 +133,40 @@ file_mtime() {  # <path>
   printf '%s\n' "$mtime"
 }
 
-# Per-task record and last-update times keyed by task id. The snapshot's
-# observed_at fields are observation times, not task times, so these come from
-# the task's own durable records instead.
-TIMES=$(
-  printf '%s' "$SNAPSHOT" | jq -r '.tasks[]?.id' | while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    start=$(file_mtime "$STATE_DIR/$id.meta")
-    last=$(file_mtime "$STATE_DIR/$id.status")
-    printf '%s\t%s\t%s\n' "$id" "${start:-}" "${last:-}"
-  done | jq -R -s '
-    split("\n") | map(select(length > 0) | split("\t")) |
-    map({key: .[0], value: {
-      start: (if (.[1] // "") == "" then null else (.[1] | tonumber) end),
-      last:  (if (.[2] // "") == "" then null else (.[2] | tonumber) end)}}) |
-    from_entries'
-) || die "could not read task times"
+# A last-change time the captain reads at a glance: the clock for anything from
+# the last two days, the calendar date beyond that. Relative wording is derived
+# from this render's own NOW, never from a second clock reading, so a captured
+# snapshot renders identically every time.
+when_label() {  # <epoch>
+  local epoch=$1 day clock
+  case "$epoch" in ''|*[!0-9]*) return 0 ;; esac
+  if [ "$epoch" -gt "$NOW" ]; then printf 'just now\n'; return 0; fi
+  day=$(epoch_fmt "$epoch" '%Y-%m-%d')
+  [ -n "$day" ] || return 0
+  if [ "$day" = "$TODAY" ] || [ "$day" = "$YESTERDAY" ]; then
+    clock=$(epoch_fmt "$epoch" '%-I:%M%p' | tr '[:upper:]' '[:lower:]')
+    [ -n "$clock" ] || return 0
+    if [ "$day" = "$TODAY" ]; then
+      printf '%s today\n' "$clock"
+    else
+      printf '%s yesterday\n' "$clock"
+    fi
+  else
+    epoch_fmt "$epoch" '%-d %b'
+  fi
+}
+
+# A registry name reaches the filesystem, so it is checked against the shape a
+# clone directory actually has. A project may legitimately be named for its
+# domain (wongsuwarn.com), so dots are allowed inside the name while a leading
+# dot, a path separator, and a parent-directory hop are not.
+safe_project_name() {  # <name>
+  case "$1" in
+    ''|.*|*/*|*'..'*) return 1 ;;
+    *[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  return 0
+}
 
 PROJECTS_RAW=""
 PROJECTS_PRESENT=false
@@ -133,6 +174,69 @@ if [ -n "$DATA_DIR" ] && [ -r "$DATA_DIR/projects.md" ]; then
   PROJECTS_RAW=$(cat "$DATA_DIR/projects.md") || PROJECTS_RAW=""
   PROJECTS_PRESENT=true
 fi
+
+# The registry is parsed once, here, and passed to the render as data. The
+# project names are needed in the shell to read each clone, so parsing it a
+# second time inside the render would give the same rule two owners.
+REGISTRY=$(printf '%s' "$PROJECTS_RAW" | jq -R -s --argjson present "$PROJECTS_PRESENT" '
+  if ($present | not) then []
+  else
+    split("\n") |
+    map(select(test("^- \\S")) |
+      (capture("^- (?<name>\\S+) \\[(?<mode>[^\\]]*)\\] - (?<desc>.*)$") // null) |
+      select(. != null) |
+      {name, mode: (.mode | sub(" *\\+yolo"; "")), yolo: (.mode | test("\\+yolo")), desc}) |
+    map(select(.name != null))
+  end') || die "could not parse the project registry"
+
+# When each project last changed. A project with a card is dated by its clone's
+# last commit, which survives task teardown; a second mate is dated by when it
+# last reported, because its own clone can trail the work it advised on and a
+# plausible-but-stale time is worse than no time at all. Either source may be
+# missing, and a missing source renders as a dash.
+updated_rows() {
+  local name id epoch label
+  printf '%s' "$SNAPSHOT" | jq -r --argjson registry "$REGISTRY" '
+    def short_repo:
+      if (. // "") == "" then ""
+      elif test("/") then (split("/") | map(select(length > 0)) | last // "")
+      else . end;
+    ($registry | map(.name)) as $registered |
+    ([.secondmate_current.records[]?.id // empty] | unique) as $secondmates |
+    ([.tasks[]? | select(.kind != "secondmate") |
+      ((.backlog.repo // "") | short_repo) as $repo |
+      if $repo != "" then $repo else ((.project // "") | short_repo) end] |
+      map(. as $name | select($name != "" and (($secondmates | index($name)) == null)))) as $live |
+    ($registered + $live | unique[])
+  ' | while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    epoch=""
+    if [ -n "$PROJECTS_DIR" ] && safe_project_name "$name"; then
+      epoch=$(git --no-optional-locks -C "$PROJECTS_DIR/$name" log -1 --format=%ct \
+        2>/dev/null </dev/null) || epoch=""
+    fi
+    case "$epoch" in *[!0-9]*) epoch="" ;; esac
+    label=""
+    [ -n "$epoch" ] && label=$(when_label "$epoch")
+    printf 'project:%s\t%s\t%s\n' "$name" "$epoch" "$label"
+  done
+  printf '%s' "$SNAPSHOT" | jq -r '.secondmate_current.records[]?.id // empty' \
+    | while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    epoch=$(file_mtime "$STATE_DIR/$id.status")
+    [ -n "$epoch" ] || epoch=$(file_mtime "$STATE_DIR/$id.meta")
+    label=""
+    [ -n "$epoch" ] && label=$(when_label "$epoch")
+    printf 'secondmate:%s\t%s\t%s\n' "$id" "$epoch" "$label"
+  done
+}
+
+UPDATED=$(updated_rows | jq -R -s '
+  split("\n") | map(select(length > 0) | split("\t")) |
+  map({key: .[0], value: {
+    epoch: (if (.[1] // "") == "" then null else (.[1] | tonumber) end),
+    label: (.[2] // "")}}) |
+  from_entries') || die "could not read project change times"
 
 # Allowance gauges are best-effort: an absent, failing, or non-JSON quota-axi
 # renders as an explicit "unavailable" note, never as an empty zero gauge.
@@ -162,11 +266,11 @@ fi
 HTML=$(
   printf '%s' "$SNAPSHOT" | jq -r \
     --argjson quota "$QUOTA" \
-    --argjson times "$TIMES" \
     --arg quota_note "$QUOTA_NOTE" \
-    --arg projects_raw "$PROJECTS_RAW" \
+    --argjson registry "$REGISTRY" \
+    --argjson updated "$UPDATED" \
     --argjson projects_present "$PROJECTS_PRESENT" \
-    --argjson now "$NOW" \
+    --arg today "$TODAY" \
     --argjson refresh "$REFRESH" '
 
 # --------------------------------------------------------------------------
@@ -178,16 +282,7 @@ HTML=$(
 # --------------------------------------------------------------------------
 def dash($v): if ($v // "") == "" then "-" else ($v | tostring) end;
 
-def ago($epoch):
-  if $epoch == null then null
-  else ($now - $epoch) as $d |
-    if $d < 0 then "just now"
-    elif $d < 60 then "\($d)s"
-    elif $d < 3600 then "\(($d / 60) | floor)m"
-    elif $d < 86400 then "\(($d / 3600) | floor)h \((($d % 3600) / 60) | floor)m"
-    else "\(($d / 86400) | floor)d \((($d % 86400) / 3600) | floor)h"
-    end
-  end;
+def plural($n; $one; $many): if $n == 1 then $one else $many end;
 
 # A backlog row may record its repo as a bare name or as a full clone path.
 # Both name the same project, so both are reduced to the registry name: it is
@@ -203,29 +298,34 @@ def repo_of:
   elif (.project // "") != "" then (.project | short_repo)
   else "" end;
 
-def state_tone:
-  if . == null then "unknown"
-  elif test("fail|error|cancel"; "i") then "alert"
-  elif test("block"; "i") then "alert"
-  elif test("decision|approval|review"; "i") then "warn"
-  elif test("done|passed|green|merged"; "i") then "good"
-  elif test("work|running|fix|check|busy"; "i") then "live"
-  elif test("paus|idle|wait"; "i") then "calm"
-  else "unknown" end;
+# ------------------------------------------------------------------ icons ---
+# Monochrome line glyphs only. Each is a literal fragment with no interpolation,
+# so none of them can carry fleet prose into the page.
+def icon_bell: "<svg class=\"ico\" viewBox=\"0 0 24 24\"><path d=\"M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9\"/><path d=\"M13.7 21a2 2 0 01-3.4 0\"/></svg>";
+def icon_pulse: "<svg class=\"ico\" viewBox=\"0 0 24 24\"><polyline points=\"22 12 18 12 15 21 9 3 6 12 2 12\"/></svg>";
+def icon_shipped: "<svg class=\"ico\" viewBox=\"0 0 24 24\"><path d=\"M22 11.1V12a10 10 0 11-5.9-9.1\"/><polyline points=\"22 4 12 14 9 11\"/></svg>";
+def icon_folder: "<svg class=\"ico\" viewBox=\"0 0 24 24\"><path d=\"M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z\"/></svg>";
+def icon_clock: "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"9\"/><polyline points=\"12 7 12 12 15 14\"/></svg>";
+def icon_check: "<svg class=\"ck\" viewBox=\"0 0 24 24\"><polyline points=\"20 6 9 17 4 12\"/></svg>";
+def icon_alert: "<svg class=\"ico\" viewBox=\"0 0 24 24\"><path d=\"M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z\"/><line x1=\"12\" y1=\"9\" x2=\"12\" y2=\"13\"/><line x1=\"12\" y1=\"17\" x2=\"12.01\" y2=\"17\"/></svg>";
+def icon_compass: "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"10\"/><polygon points=\"16.2 7.8 14.1 14.1 7.8 16.2 9.9 9.9\"/></svg>";
 
-# ---------------------------------------------------------------- registry --
-def registry:
-  if $projects_present | not then []
-  else
-    ($projects_raw | split("\n")) |
-    map(select(test("^- \\S")) |
-      (capture("^- (?<name>\\S+) \\[(?<mode>[^\\]]*)\\] - (?<desc>.*)$") // null) |
-      select(. != null) |
-      {name, mode: (.mode | sub(" *\\+yolo"; "")), yolo: (.mode | test("\\+yolo")), desc}) |
-    map(select(.name != null))
-  end;
+# A project badge gives a card a recognisable identity, so the glyph is picked
+# from a set of deliberately neutral shapes by a stable function of the project
+# name. It claims nothing about the project, and the name sits beside it, so it
+# never has to be read as meaning.
+def project_glyph($name):
+  ([
+    "<svg viewBox=\"0 0 24 24\"><path d=\"M21 16V8a2 2 0 00-1-1.7l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.7l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z\"/><polyline points=\"3.3 7 12 12 20.7 7\"/><line x1=\"12\" y1=\"22\" x2=\"12\" y2=\"12\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><polygon points=\"12 2 22 8.5 12 15 2 8.5\"/><polyline points=\"2 15.5 12 22 22 15.5\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><rect x=\"3\" y=\"3\" width=\"7\" height=\"7\" rx=\"1.5\"/><rect x=\"14\" y=\"3\" width=\"7\" height=\"7\" rx=\"1.5\"/><rect x=\"3\" y=\"14\" width=\"7\" height=\"7\" rx=\"1.5\"/><rect x=\"14\" y=\"14\" width=\"7\" height=\"7\" rx=\"1.5\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><path d=\"M21 19a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h7a2 2 0 012 2z\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><rect x=\"2\" y=\"4\" width=\"20\" height=\"16\" rx=\"2\"/><polyline points=\"7 10 10 13 7 16\"/><line x1=\"13\" y1=\"16\" x2=\"17\" y2=\"16\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><path d=\"M4 4.5A2.5 2.5 0 016.5 2H20v18H6.5A2.5 2.5 0 004 22z\"/><line x1=\"8\" y1=\"7\" x2=\"16\" y2=\"7\"/></svg>"
+  ]) as $set |
+  $set[(($name | explode | add // 0) % ($set | length))];
 
-registry as $registry |
+# ---------------------------------------------------------------- inputs ----
 ($registry | map({key: .name, value: .}) | from_entries) as $registry_by_name |
 def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
 
@@ -233,7 +333,6 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
 (.backlog.records // []) as $records |
 (.backlog.present == true) as $backlog_present |
 ($tasks | map(select(.kind != "secondmate"))) as $work_tasks |
-($tasks | map(select(.kind == "secondmate"))) as $secondmate_tasks |
 (.secondmate_current.records // []) as $sm_records |
 (.secondmate_current.registry // {}) as $sm_registry |
 (($sm_registry.available == true)
@@ -245,7 +344,7 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
 # Three canonical sources, each tagged with the home it came from: main-home
 # captain-actionable backlog rows, tasks whose PR is recorded and awaiting a
 # merge or review call, and captain-held decisions inside a secondmate home
-# (which never appear in this home'"'"'s backlog).
+# (which never appear in this home backlog).
 ($records | map(select(.captain_actionable == true)) | map({
   kind: "decision",
   home: "main",
@@ -261,7 +360,9 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
   home: "main",
   id: $t.id,
   title: ($t.backlog.title // $t.id),
-  detail: ($t.current_state.state // "unknown"),
+  # The run state is an internal pipeline label, and the row already says what
+  # the captain has to do, so it is deliberately left off this row.
+  detail: "",
   repo: ($t | repo_of),
   yolo: ($t | repo_of | yolo_for(.)),
   link: $t.pr.url
@@ -353,66 +454,245 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
 # ----------------------------------------------------------- fleet health --
 ($work_tasks | map(select(
   ((.current_state.state // "") | test("block|fail|error|cancel"; "i"))
-  or (.hints.blocked_event == true)))) as $unhealthy |
-($records | map(select(.state != "done" and ((.unresolved_blocker_ids // []) | length) > 0))) as $blocked_items |
+  or (.hints.blocked_event == true)))) as $unhealthy_raw |
+($records | map(select(.state != "done" and ((.unresolved_blocker_ids // []) | length) > 0))) as $blocked_items_raw |
+($unhealthy_raw | map(.id)) as $unhealthy_ids |
+($unhealthy_raw | map(. as $task |
+  ($blocked_items_raw | map(select(.id == $task.id)) | first) as $row |
+  $task + {health_blocker_ids: ($row.unresolved_blocker_ids // [])})) as $unhealthy |
+($blocked_items_raw | map(. as $row |
+  select(($unhealthy_ids | index($row.id)) == null))) as $blocked_items |
+($sm_records | map(. as $sm |
+  (($sm.decisions_open // []) | map(.id // .key) | map(select(. != null))) as $decision_ids |
+  (($sm.holds // []) | map(. as $hold |
+    select((($decision_ids | index($hold.id)) == null)
+      and (($hold.source // "") == "child-state"
+        or (($hold.source // "") == "backlog"
+          and ((($hold.unresolved_blocker_ids // []) | length) > 0)))))) as $blocked_shown |
+  (($sm.holds // []) | length) as $shown |
+  ([($sm.counts.holds // $shown), $shown] | max) as $total |
+  ($blocked_shown | length) as $blocked_total |
+  {
+    id: ($sm.id // "secondmate"),
+    blocked_holds: ($blocked_shown | map(. + {home: ($sm.id // "secondmate")})),
+    blocked_shown: ($blocked_shown | length),
+    blocked_total: $blocked_total,
+    unclassified_omitted: ($total - $shown),
+    card_held_total: (if ($sm.current.state // "") == "externally_held" then $total else $blocked_total end)
+  })) as $secondmate_health |
+($secondmate_health | map(.blocked_holds) | add // []) as $secondmate_holds |
+($secondmate_health | map(select(.unclassified_omitted > 0))) as $secondmate_holds_omitted |
+($sm_records | map(select((.current.state // "unknown") == "unknown"))) as $secondmate_unknown |
+($secondmate_health | map(.blocked_total) | add // 0) as $secondmate_hold_count |
+((($sm_truncated > 0)
+  or ($sm_registry_complete | not)
+  or ($secondmate_unknown | length) > 0
+  or ($secondmate_holds_omitted | length) > 0)) as $health_incomplete |
+(($unhealthy | length) + ($blocked_items | length) + $secondmate_hold_count) as $health_count |
 
-# ------------------------------------------------------------- rollup ------
+# -------------------------------------------------------- shipped today ----
+($records | map(select(.state == "done"))) as $done_all |
+($done_all | map(select((.completion.date // "") == $today))) as $shipped |
+($done_all | map(select((.completion.date // "") == "")) | length) as $shipped_undated |
+
+# ------------------------------------------------------------ project cards -
+# One card per registered project, plus any project that is not in the registry
+# but has live work under way: a task the captain can see running must never be
+# invisible just because its project was never registered.
 ($registry | map(. as $p |
   ($records | map(select((.repo // "" | short_repo) == $p.name))) as $rows |
+  ($work_tasks | map(select((. | repo_of) == $p.name))) as $live |
   {
+    kind: "project",
+    key: ("project:" + $p.name),
     name: $p.name,
     mode: $p.mode,
     yolo: $p.yolo,
-    active: ($work_tasks | map(select((. | repo_of) == $p.name)) | length),
+    registered: true,
+    active: ($live | length),
+    active_title: (($live | first | .backlog.title) // ($live | first | .id) // ""),
+    prs: ($live | map(select((.pr.url // "") != "")) | length),
     queued: ($rows | map(select(.state == "queued")) | length),
     in_flight: ($rows | map(select(.state == "in_flight")) | length),
     waiting: ($rows | map(select(.captain_actionable == true)) | length),
     done: ($rows | map(select(.state == "done")) | length)
-  })) as $rollup |
+  })) as $registered_cards |
 
-($records | map(select(.state == "done")) | .[0:8]) as $shipped |
+($sm_records | map(.id)) as $sm_ids |
+($work_tasks | map(repo_of) | map(select(. != "")) | unique
+  | map(. as $n | select(($registry_by_name[$n] == null)
+                     and (($sm_ids | index($n)) == null)))) as $unregistered_names |
+
+($unregistered_names | map(. as $name |
+  ($records | map(select((.repo // "" | short_repo) == $name))) as $rows |
+  ($work_tasks | map(select((. | repo_of) == $name))) as $live |
+  {
+    kind: "project",
+    key: ("project:" + $name),
+    name: $name,
+    mode: "",
+    yolo: false,
+    registered: false,
+    active: ($live | length),
+    active_title: (($live | first | .backlog.title) // ($live | first | .id) // ""),
+    prs: ($live | map(select((.pr.url // "") != "")) | length),
+    queued: ($rows | map(select(.state == "queued")) | length),
+    in_flight: ($rows | map(select(.state == "in_flight")) | length),
+    waiting: ($rows | map(select(.captain_actionable == true)) | length),
+    done: ($rows | map(select(.state == "done")) | length)
+  })) as $unregistered_cards |
+
+($sm_records | map(. as $sm |
+  (($sm.decisions_open // []) | length) as $shown |
+  ([($sm.omitted // [])[] | select(.surface == "decisions_open") | (.count // 0)] | add // 0) as $omitted |
+  (($sm.active_children // []) | length) as $children_shown |
+  ([($sm.omitted // [])[] | select(.surface == "active_children") | (.count // 0)] | add // 0) as $children_omitted |
+  ([($sm.counts.active_children // $children_shown), ($children_shown + $children_omitted), $children_shown] | max) as $children_total |
+  ($secondmate_health | map(select(.id == ($sm.id // "secondmate"))) | first) as $health |
+  {
+    kind: "secondmate",
+    key: ("secondmate:" + ($sm.id // "secondmate")),
+    name: ($sm.id // "secondmate"),
+    state: ($sm.current.state // "unknown"),
+    reason: ($sm.current.reason // ""),
+    children: $children_total,
+    children_shown: $children_shown,
+    children_omitted: ($children_total - $children_shown),
+    holds: ($health.card_held_total // 0),
+    holds_shown: ($health.blocked_shown // 0),
+    hold_reason: (($health.blocked_holds | first | .reason) // ""),
+    decisions_available: ((($sm.registered != true) or (($sm.provenance.selected // "") == "structured-home"))),
+    decisions_shown: $shown,
+    decisions: ([($sm.counts.decisions_open // $shown), ($shown + $omitted), $shown] | max)
+  })) as $secondmate_cards |
+
+($registered_cards + $unregistered_cards) as $project_cards |
+(($project_cards | length) + ($secondmate_cards | length)) as $card_count |
+((($projects_present | not) or ($sm_registry_complete | not))) as $card_count_incomplete |
+($secondmate_cards | map(.children) | add // 0) as $secondmate_active_count |
+(($work_tasks | length) + $secondmate_active_count) as $in_progress_count |
+((($sm_truncated > 0)
+  or ($sm_registry_complete | not)
+  or ($secondmate_unknown | length) > 0)) as $in_progress_incomplete |
+($secondmate_cards | map(.children_omitted) | add // 0) as $active_details_omitted |
 
 # ------------------------------------------------------------- fragments ---
-def card_waiting:
+# A placeholder for "nothing here", kept as literal markup so it is never
+# double-escaped into a visible entity by the surrounding @html format.
+def none_mark: "&mdash;";
+
+def updated_line($key):
+  ($updated[$key].label // "") as $label |
+  "<div class=\"proj-updated\">" + icon_clock + "Updated "
+  + (if $label == "" then none_mark else (@html "\($label)") end);
+
+def need_row:
   . as $w |
   ($w.link // "") as $link |
-  (if $w.kind == "pr" then (if $w.yolo then "merge call (autonomous)" else "review or merge" end)
-   elif $w.kind == "incomplete" then "incomplete scan"
-   else "decision" end) as $badge |
-  (@html "<article class=\"call \($w.kind)\">
-     <header><span class=\"badge\">\($badge)</span>")
-  + (if ($w.home // "main") == "main" then ""
-     else (@html "<span class=\"home\">\($w.home)</span>") end)
-  + (if ($w.repo // "") == "" then ""
-     else (@html "<span class=\"repo\">\($w.repo)</span>") end)
-  + (@html "</header>
-     <h3>\($w.title)</h3>")
-  + (if ($w.detail // "") == "" then "" else (@html "<p class=\"why\">\($w.detail)</p>") end)
-  + (if $link == "" or $link == null then "" else (@html "<a class=\"link\" href=\"\($link)\">\($link)</a>") end)
-  + (@html "<footer class=\"mono\">\($w.id)</footer></article>");
+  (if $w.kind == "incomplete" then "Incomplete"
+   elif ($w.repo // "") != "" then $w.repo
+   elif ($w.home // "main") != "main" then $w.home
+   else "Fleet" end) as $tag |
+  (if $w.kind == "pr" then (if $w.yolo then "your merge call (autonomous)" else "your review or merge" end)
+   elif $w.kind == "incomplete" then ""
+   else "" end) as $ask_note |
+  (if $link == "" or $link == null
+   then "<div class=\"need\(if $w.kind == "incomplete" then " warn" else "" end)\">"
+   else (@html "<a class=\"need\(if $w.kind == "incomplete" then " warn" else "" end)\" href=\"\($link)\">") end)
+  + "<span class=\"band\"></span>"
+  + (@html "<span class=\"tag\">\($tag)</span>")
+  + (@html "<span class=\"ask\">\($w.title)")
+  + (if ($w.detail // "") == "" then "" else (@html "<span class=\"hint\">\($w.detail)</span>") end)
+  + (if $ask_note == "" then "" else (@html "<span class=\"hint\">Awaiting \($ask_note).</span>") end)
+  + (if $link == "" or $link == null then "" else (@html "<span class=\"url\">\($link)</span>") end)
+  + "</span>"
+  + (if $link == "" or $link == null then "<span class=\"go\"></span></div>"
+     else "<span class=\"go\">&rsaquo;</span></a>" end);
 
-def card_task:
-  . as $t |
-  ($times[$t.id] // {}) as $tm |
-  ($t.current_state.state // "unknown") as $st |
-  ($t.paths.status_log.last_event.raw // "") as $last |
-  (@html "<article class=\"task tone-\($st | state_tone)\">
-     <header>
-       <span class=\"dot\"></span>
-       <span class=\"state\">\($st)</span>
-       <span class=\"kindtag\">\(dash($t.kind))</span>
-       <span class=\"repo\">\(dash($t | repo_of))</span>
-     </header>
-     <h3>\(dash($t.backlog.title // $t.id))</h3>
-     <dl class=\"facts\">
-       <div><dt>phase</dt><dd>\(dash($t.current_state.detail // $t.current_state.source))</dd></div>
-       <div><dt>task record age</dt><dd>\(dash(ago($tm.start)))</dd></div>
-       <div><dt>last update</dt><dd>\(dash(if $tm.last == null then null else (ago($tm.last) + " ago") end))</dd></div>
-       <div><dt>runtime</dt><dd>\(dash($t.backend))\(if ($t.harness // "") != "" then " / " else "" end)\(dash($t.harness))</dd></div>
-     </dl>")
-  + (if $last == "" then "" else (@html "<p class=\"lastline mono\">\($last)</p>") end)
-  + "<p class=\"slot\" data-slot=\"progress-note\">progress note - populated by firstmate in phase 2</p>"
-  + (@html "<footer class=\"mono\">\($t.id) \(dash($t.mode))\(if ($t.yolo // "") == "on" then " +yolo" else "" end)</footer></article>");
+def project_card:
+  . as $p |
+  # Every quiet signal on this card - no decisions, nothing queued, nothing in
+  # flight - is read from the backlog. With the backlog unreadable, "Idle" is a
+  # claim the board cannot make, so the pill says so instead of guessing calm.
+  (if ($p.waiting > 0) or ($p.prs > 0) then "attn"
+   elif ($p.active > 0) or ($p.in_flight > 0) then "live"
+   elif ($backlog_present | not) then "unknown"
+   else "idle" end) as $tone |
+  (if $tone == "attn" then "Needs you"
+   elif $tone == "live" then "Working"
+   elif $tone == "unknown" then "Unconfirmed"
+   else "Idle" end) as $pill |
+  (if ($backlog_present | not) and ($p.active == 0) then "Live counts are unavailable while the backlog cannot be read."
+   elif $p.active == 1 and ($p.active_title // "") != "" then "Under way: \($p.active_title)"
+   elif $p.active > 0 then "\($p.active) tasks under way"
+   elif $p.in_flight > 0 then "\($p.in_flight) \(plural($p.in_flight; "task"; "tasks")) in flight, none running"
+   elif $p.queued > 0 then "\($p.queued) queued, nothing under way"
+   else "Nothing in flight." end) as $state_line |
+  (if ($backlog_present | not) then "Your decisions here cannot be counted."
+   elif $p.waiting > 0 and $p.prs > 0 then "\($p.waiting) \(plural($p.waiting; "decision"; "decisions")) and \($p.prs) \(plural($p.prs; "PR"; "PRs")) await you"
+   elif $p.waiting > 0 then "\($p.waiting) \(plural($p.waiting; "decision awaits"; "decisions await")) you"
+   elif $p.prs > 0 then "\($p.prs) \(plural($p.prs; "PR awaits"; "PRs await")) your call"
+   elif ($p.registered | not) then "Not in the project registry"
+   else "" end) as $meta_line |
+  (@html "<div class=\"proj s-\($tone)\">
+     <div class=\"proj-top\"><span class=\"badge\">")
+  + project_glyph($p.name)
+  + (@html "</span><span class=\"proj-name\">\($p.name)")
+  + (if $p.registered then "" else "<span class=\"sub-role\">&middot; unregistered</span>" end)
+  + (@html "</span><span class=\"pill \(if $tone == "attn" then "attn" elif $tone == "live" then "live" elif $tone == "unknown" then "unknown" else "idle" end)\">\($pill)</span></div>
+     <div class=\"proj-state\">\($state_line)</div>")
+  + "<div class=\"proj-meta\">"
+  + (if $meta_line == "" then none_mark else (@html "\($meta_line)") end)
+  + "</div>"
+  + updated_line($p.key)
+  + (if ($p.mode // "") == "" then ""
+     else (@html "<span class=\"posture\">\($p.mode)\(if $p.yolo then " +yolo" else "" end)</span>") end)
+  + "</div></div>";
+
+def secondmate_card:
+  . as $s |
+  (if ($s.decisions_available | not) or $s.state == "unknown" then "unknown"
+   elif ($s.decisions > 0) or $s.state == "captain_decision" then "attn"
+   elif $s.state == "externally_held" or $s.holds > 0 then "attn"
+   elif $s.state == "active_child_work" or $s.children > 0 then "live"
+   else "idle" end) as $tone |
+  (if $s.state == "externally_held" or $s.holds > 0 then "Blocked"
+   elif $tone == "attn" then "Needs you"
+   elif $tone == "live" then "Working"
+   elif $tone == "unknown" then "Unconfirmed"
+   else "Ready" end) as $pill |
+  (if ($s.reason // "") != "" then $s.reason
+   elif $s.state == "externally_held" or $s.holds > 0 then
+     (if ($s.hold_reason // "") != "" then $s.hold_reason
+      else "\($s.holds) routed \(plural($s.holds; "task is"; "tasks are")) externally held" end)
+   elif $s.children > 0 then "\($s.children) \(plural($s.children; "task"; "tasks")) routed and under way"
+   elif $s.state == "captain_decision" then "Routed work is waiting for your decision."
+   elif $s.state == "no_active_work" then "Idle and healthy, awaiting routed work."
+   else "Current secondmate state is unavailable." end) as $state_line |
+  (if ($s.decisions_available | not) then "Your decisions here cannot be read."
+   elif $s.decisions > $s.decisions_shown then "\($s.decisions) decisions await you (\($s.decisions_shown) shown)"
+   elif $s.decisions > 0 then "\($s.decisions) \(plural($s.decisions; "decision awaits"; "decisions await")) you"
+   elif $s.children_omitted > 0 then "\($s.children) active tasks (\($s.children_shown) shown)"
+   elif $s.holds > $s.holds_shown then "\($s.holds) held tasks (\($s.holds_shown) shown)"
+   else "" end) as $meta_line |
+  (@html "<div class=\"proj s-\($tone)\">
+     <div class=\"proj-top\"><span class=\"badge\">")
+  + icon_compass
+  + (@html "</span><span class=\"proj-name\">\($s.name)<span class=\"sub-role\">&middot; second mate</span></span>
+     <span class=\"pill \(if $tone == "attn" then "attn" elif $tone == "live" then "live" elif $tone == "unknown" then "unknown" else "idle" end)\">\($pill)</span></div>
+     <div class=\"proj-state\">\($state_line)</div>")
+  + "<div class=\"proj-meta\">"
+  + (if $meta_line == "" then none_mark else (@html "\($meta_line)") end)
+  + "</div>"
+  + updated_line($s.key)
+  + "</div></div>";
+
+def stat($icon; $value; $label; $note; $attn):
+  (@html "<div class=\"stat\(if $attn then " attn" else "" end)\">")
+  + $icon
+  + (@html "<div class=\"n\">\($value)</div><div class=\"l\">\($label)</div>")
+  + (if $note == "" then "" else (@html "<div class=\"note\">\($note)</div>") end)
+  + "</div>";
 
 def gauge($label; $pct; $note):
   (if $pct == null then "muted"
@@ -420,14 +700,14 @@ def gauge($label; $pct; $note):
    elif $pct <= 35 then "warn"
    else "good" end) as $tone |
   (@html "<div class=\"gauge tone-\($tone)\">
-     <div class=\"glabel\"><span>\($label)</span><span class=\"mono\">\(if $pct == null then "-" else "\($pct)%" end)</span></div>
+     <div class=\"glabel\"><span>\($label)</span><span class=\"gval\">\(if $pct == null then "-" else "\($pct)%" end)</span></div>
      <div class=\"bar\"><i style=\"width:\(if $pct == null then 0 else $pct end)%\"></i></div>
      <div class=\"gnote\">\($note)</div>
    </div>");
 
 def quota_block:
   if $quota == null then
-    (@html "<p class=\"empty\">Allowance unavailable - \($quota_note).</p>")
+    (@html "<p class=\"quiet\">Allowance unavailable - \($quota_note).</p>")
   else
     (($quota.providers // []) | map(. as $p |
       $p + {wins: (($p.windows // []) | map(select((.percentRemaining // null) != null)))})) as $providers |
@@ -442,34 +722,36 @@ def quota_block:
     + (if ($unmeasured | length) == 0 then ""
        else "<ul class=\"unmeasured\">"
          + (($unmeasured | map(. as $p |
-             (@html "<li><span>\($p.label // $p.provider)</span><span class=\"mono\">\($p.state.error // $p.state.status // "no window reported")</span></li>")) | add) // "")
+             (@html "<li><span>\($p.label // $p.provider)</span><span class=\"gval\">\($p.state.error // $p.state.status // "no window reported")</span></li>")) | add) // "")
          + "</ul>" end)
-    + (if ($providers | length) == 0 then "<p class=\"empty\">No allowance providers reported.</p>" else "" end)
+    + (if ($providers | length) == 0 then "<p class=\"quiet\">No allowance providers reported.</p>" else "" end)
   end;
 
-def secondmate_block:
-  (if $sm_registry_complete then ""
-   else "<p class=\"empty\">Secondmate registry state is incomplete, so registered homes may be missing.</p>" end)
-  + (if ($sm_records | length) == 0 and (($sm_registry.records // []) | length) == 0 then
-    (if $sm_registry_complete then "<p class=\"empty\">No second mates registered.</p>" else "" end)
+def health_block:
+  (if ($backlog_present | not) then
+     "<p class=\"quiet\">Backlog health is unavailable because the backlog could not be read.</p>"
+   else "" end)
+  + (if $backlog_present and $health_count == 0 and ($health_incomplete | not) then
+    "<p class=\"clear\">Nothing blocked or failed.</p>"
   else
-    ($sm_records | map(. as $sm |
-      ($secondmate_tasks | map(select(.id == $sm.id)) | first) as $task |
-      ($sm.current.state // "unknown") as $st |
-      ((.registered != true) or ((.provenance.selected // "") == "structured-home")) as $decisions_available |
-      (($sm.decisions_open // []) | length) as $decisions_shown |
-      ([($sm.omitted // [])[] | select(.surface == "decisions_open") | (.count // 0)] | add // 0) as $decisions_omitted |
-      ([($sm.counts.decisions_open // $decisions_shown), ($decisions_shown + $decisions_omitted), $decisions_shown] | max) as $decisions |
-      (($sm.active_children // []) | length) as $children |
-      (@html "<article class=\"secondmate\">
-        <header><span class=\"dot\"></span><h3>\($sm.id)</h3><span class=\"state\">\($st)</span></header>
-        <dl class=\"facts\">
-          <div><dt>routed work</dt><dd>\(if $children == 0 then "none - idle is healthy" else "\($children) under way" end)</dd></div>
-          <div><dt>your decisions</dt><dd>\(if ($decisions_available | not) then "unavailable" elif $decisions == 0 then "none" elif $decisions > $decisions_shown then "\($decisions) waiting (\($decisions_shown) shown)" else "\($decisions) waiting" end)</dd></div>
-          <div><dt>reachable</dt><dd>\(if ($task.endpoint.exists // false) then "yes" else ($task.endpoint.agent_alive // "unknown") end)</dd></div>
-        </dl>")
-      + (if ($sm.current.reason // "") == "" then "" else (@html "<p class=\"why\">\($sm.current.reason)</p>") end)
-      + (@html "<footer class=\"mono\">\(dash($sm.home))</footer></article>")) | add // "")
+    "<ul class=\"hlist\">"
+    + (($unhealthy | map(. as $t |
+        (@html "<li><span class=\"hstate\">\($t.current_state.state // "blocked")</span><span class=\"hwhat\">\($t.id)<span class=\"hint\">\(if ($t.health_blocker_ids | length) > 0 then "blocked by \($t.health_blocker_ids | join(", "))" else dash($t.paths.status_log.last_event.raw) end)</span></span></li>")) | add) // "")
+    + (($blocked_items | map(. as $r |
+        (@html "<li><span class=\"hstate wait\">waiting</span><span class=\"hwhat\">\(dash($r.title // $r.raw))<span class=\"hint\">blocked by \(($r.unresolved_blocker_ids // []) | join(", "))</span></span></li>")) | add) // "")
+    + (($secondmate_holds | map(. as $h |
+        (@html "<li><span class=\"hstate wait\">held</span><span class=\"hwhat\">\(dash($h.id // $h.title))<span class=\"hint\">\($h.home): \(dash($h.reason // $h.blocked_by))</span></span></li>")) | add) // "")
+    + (($secondmate_holds_omitted | map(. as $o |
+        (@html "<li><span class=\"hstate wait\">bounded</span><span class=\"hwhat\">\($o.id)<span class=\"hint\">\($o.unclassified_omitted) additional holds could not be classified</span></span></li>")) | add) // "")
+    + (($secondmate_unknown | map(. as $s |
+        (@html "<li><span class=\"hstate\">unknown</span><span class=\"hwhat\">\($s.id // "secondmate")<span class=\"hint\">\(dash($s.current.reason))</span></span></li>")) | add) // "")
+    + (if $sm_truncated > 0 then
+        (@html "<li><span class=\"hstate\">incomplete</span><span class=\"hwhat\">Secondmate health scan<span class=\"hint\">\($sm_truncated) secondmate records omitted</span></span></li>")
+       else "" end)
+    + (if ($sm_registry_complete | not) then
+        "<li><span class=\"hstate\">incomplete</span><span class=\"hwhat\">Secondmate registry health could not be fully read</span></li>"
+       else "" end)
+    + "</ul>"
   end);
 
 # ------------------------------------------------------------------ page ---
@@ -478,298 +760,264 @@ def secondmate_block:
 <meta charset=\"utf-8\">
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
 <meta http-equiv=\"refresh\" content=\"" + ($refresh | tostring) + "\">
-<title>Firstmate Mission Control</title>
+<title>Mission Control</title>
 <style>
 :root{
-  --bg:#05080c; --bg2:#080d13; --panel:#0c141d; --panel2:#101a25;
-  --line:#1a2836; --line2:#243546;
-  --ink:#dbe7f2; --dim:#7b90a5; --faint:#4d6076;
-  --teal:#2ee7bd; --amber:#ffb545; --red:#ff5470; --violet:#9b8cff;
+  --bg:#f5f6f8; --panel:#ffffff; --ink:#1a2233; --muted:#6b7688; --faint:#9aa4b2;
+  --line:#e9ecf1;
+  --amber:#b7791f; --amber-soft:#fdf6e7; --green:#0f8a5f; --green-soft:#e9f6ef;
+  --red:#b3382f; --red-soft:#fdefee;
+  --slate:#5b6472; --slate-soft:#eef1f5;
+  --shadow:0 1px 2px rgba(20,30,50,.04), 0 6px 20px rgba(20,30,50,.05);
   --mono:ui-monospace,SFMono-Regular,\"SF Mono\",Menlo,Consolas,monospace;
 }
 *{box-sizing:border-box;min-width:0}
-html,body{margin:0;padding:0}
-body{
-  background:
-    radial-gradient(1100px 620px at 12% -8%, #0d2030 0%, transparent 62%),
-    radial-gradient(900px 520px at 92% 4%, #131028 0%, transparent 58%),
-    var(--bg);
-  color:var(--ink);
-  font:15px/1.5 ui-sans-serif,-apple-system,\"Segoe UI\",Inter,system-ui,sans-serif;
-  -webkit-font-smoothing:antialiased;
-  padding:0 0 56px;
-}
-.mono{font-family:var(--mono)}
-a{color:var(--teal);text-decoration:none;word-break:break-all}
-a:hover{text-decoration:underline}
-.wrap{max-width:1500px;margin:0 auto;padding:0 22px}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",Inter,Roboto,Helvetica,Arial,sans-serif;
+  line-height:1.5;-webkit-font-smoothing:antialiased;}
+.wrap{max-width:1120px;margin:0 auto;padding:40px 32px 64px;}
+svg{stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round;}
+a{color:inherit;text-decoration:none}
 
-/* ---- top bar ---- */
-.top{
-  position:sticky;top:0;z-index:20;
-  background:linear-gradient(180deg,rgba(5,8,12,.97),rgba(5,8,12,.82));
-  border-bottom:1px solid var(--line);
-  backdrop-filter:blur(9px);
-}
-.top .wrap{display:flex;align-items:center;gap:18px;flex-wrap:wrap;padding-top:14px;padding-bottom:14px}
-.brand{display:flex;align-items:baseline;gap:10px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;font-size:13px}
-.brand b{color:var(--teal);letter-spacing:.2em}
-.brand span{color:var(--faint)}
-.live{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:12px;color:var(--dim)}
-.pulse{width:8px;height:8px;border-radius:50%;background:var(--teal);box-shadow:0 0 0 0 rgba(46,231,189,.6);animation:p 2.4s infinite}
-.stale .pulse{background:var(--amber);animation:none}
-@keyframes p{0%{box-shadow:0 0 0 0 rgba(46,231,189,.55)}70%{box-shadow:0 0 0 9px rgba(46,231,189,0)}100%{box-shadow:0 0 0 0 rgba(46,231,189,0)}}
-.top .spacer{flex:1}
-.counts{display:flex;gap:8px;flex-wrap:wrap}
-.pill{font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;padding:4px 10px;border-radius:999px;border:1px solid var(--line2);color:var(--dim);background:var(--panel)}
-.pill b{color:var(--ink)}
-.pill.hot{border-color:rgba(255,84,112,.55);color:#ffd7de}
-.pill.hot b{color:var(--red)}
+/* ---- header ---- */
+header{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:8px;flex-wrap:wrap;gap:8px;}
+h1{font-size:26px;font-weight:650;letter-spacing:-.02em;margin:0;}
+.sub{color:var(--muted);font-size:14px;margin:2px 0 0;}
+.live{display:inline-flex;align-items:center;gap:8px;color:var(--muted);font-size:13px;}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--green);position:relative;flex:none;}
+.dot::after{content:\"\";position:absolute;inset:0;border-radius:50%;background:var(--green);
+  animation:pulse 2s ease-out infinite;}
+.live.stale .dot{background:var(--amber);}
+.live.stale .dot::after{animation:none;background:none;}
+@keyframes pulse{0%{transform:scale(1);opacity:.55}70%{transform:scale(3);opacity:0}100%{opacity:0}}
+@media(prefers-reduced-motion:reduce){.dot::after{animation:none}}
+
+/* ---- stat strip ---- */
+.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin:26px 0 22px;}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px;
+  box-shadow:var(--shadow);position:relative;}
+.stat .ico{position:absolute;top:17px;right:18px;width:19px;height:19px;color:var(--faint);}
+.stat.attn .ico{color:var(--amber);}
+.stat .n{font-size:30px;font-weight:680;letter-spacing:-.02em;line-height:1;}
+.stat .l{margin-top:8px;color:var(--muted);font-size:12.5px;font-weight:500;text-transform:uppercase;letter-spacing:.06em;}
+.stat.attn .n{color:var(--amber);}
+.stat .note{margin-top:6px;color:var(--amber);font-size:11.5px;line-height:1.35;}
+
+/* ---- attention bar ---- */
+.attnbar{display:flex;align-items:center;gap:11px;margin:0 0 30px;padding:12px 18px;
+  background:var(--red-soft);border:1px solid #f3d6d3;border-radius:12px;color:#8f2c25;font-size:13.5px;}
+.attnbar .ico{width:17px;height:17px;flex:none;color:var(--red);}
+.attnbar .go{margin-left:auto;color:#c08b86;font-size:18px;flex:none;}
 
 /* ---- sections ---- */
-section{margin-top:30px}
-h2{
-  display:flex;align-items:center;gap:12px;flex-wrap:wrap;
-  font-size:12.5px;letter-spacing:.2em;text-transform:uppercase;color:var(--dim);
-  margin:0 0 14px;font-weight:700;
-}
-h2 .rule{flex:1;height:1px;background:linear-gradient(90deg,var(--line2),transparent);min-width:24px}
-h2 .n{font-family:var(--mono);color:var(--faint);letter-spacing:0}
-h2 .scope{font-size:10.5px;letter-spacing:.06em;text-transform:none;color:var(--faint);font-weight:400}
-.empty{color:var(--faint);font-size:13.5px;margin:0;padding:14px 16px;border:1px dashed var(--line2);border-radius:10px}
+section{margin-bottom:38px;}
+.sec-h{display:flex;align-items:baseline;gap:10px;margin:0 0 14px;flex-wrap:wrap;}
+.sec-h h2{font-size:15px;font-weight:640;letter-spacing:.01em;margin:0;}
+.sec-h .count{color:var(--faint);font-size:13px;font-weight:500;}
+.quiet{color:var(--muted);font-size:13.5px;margin:0;padding:15px 22px;background:var(--panel);
+  border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);}
+.clear{color:var(--green);font-size:13.5px;margin:0;}
+.quiet + .quiet,.quiet + .projects,.quiet + .needs,.quiet + .shipped{margin-top:14px;}
 
-/* ---- waiting on you ---- */
-.alert{
-  border:1px solid rgba(255,84,112,.42);
-  border-radius:16px;
-  background:linear-gradient(180deg,rgba(255,84,112,.10),rgba(255,84,112,.02) 60%,transparent),var(--panel);
-  box-shadow:0 0 0 1px rgba(255,84,112,.08),0 24px 60px -34px rgba(255,84,112,.5);
-  padding:20px 20px 22px;margin-top:26px;
-}
-.alert.clear{border-color:var(--line2);background:var(--panel);box-shadow:none}
-.alert h2{color:#ffb9c4;font-size:14px;letter-spacing:.22em;margin-bottom:16px}
-.alert.clear h2{color:var(--dim)}
-.calls{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:12px}
-.call{
-  border:1px solid var(--line2);border-left:3px solid var(--red);
-  border-radius:11px;background:var(--panel2);padding:13px 15px;
-  display:flex;flex-direction:column;gap:8px;
-}
-.call.pr{border-left-color:var(--amber)}
-.call header{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11px;letter-spacing:.09em;text-transform:uppercase}
-.badge{font-family:var(--mono);color:#ffd7de;background:rgba(255,84,112,.14);border:1px solid rgba(255,84,112,.34);border-radius:5px;padding:2px 7px}
-.call.pr .badge{color:#ffe2ba;background:rgba(255,181,69,.13);border-color:rgba(255,181,69,.34)}
-.home{color:var(--violet);font-family:var(--mono);border:1px solid rgba(155,140,255,.32);border-radius:5px;padding:1px 6px;overflow-wrap:anywhere}
-.repo{color:var(--dim);font-family:var(--mono);overflow-wrap:anywhere}
-.call h3{margin:0;font-size:15.5px;line-height:1.35;font-weight:620}
-.why{margin:0;color:var(--dim);font-size:13px;line-height:1.5}
-.call .link{font-family:var(--mono);font-size:12.5px}
-.call footer,.task footer,.secondmate footer{color:var(--faint);font-size:11px;margin-top:2px;overflow-wrap:anywhere}
+/* ---- awaiting your decision ---- */
+.needs{background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;}
+.need{display:flex;align-items:center;gap:14px;padding:15px 22px;border-top:1px solid var(--line);}
+.need:first-child{border-top:none;}
+.band{width:3px;align-self:stretch;border-radius:3px;background:var(--amber);flex:none;}
+.need.warn .band{background:var(--red);}
+.tag{flex:none;width:132px;font-size:12.5px;font-weight:600;color:var(--slate);overflow-wrap:anywhere;}
+.need.warn .tag{color:var(--red);}
+.need .ask{flex:1;font-size:14.5px;color:var(--ink);overflow-wrap:anywhere;}
+.need .hint{display:block;color:var(--muted);font-size:12.5px;font-weight:400;margin-top:2px;}
+.need .url{display:block;color:var(--faint);font-family:var(--mono);font-size:11.5px;margin-top:4px;overflow-wrap:anywhere;}
+.need .go{flex:none;color:var(--faint);font-size:18px;width:10px;text-align:right;}
+a.need:hover{background:#fbfcfe;}
 
-/* ---- main grid ---- */
-.grid{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:26px;align-items:start}
-.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:13px}
-.task,.secondmate{
-  border:1px solid var(--line);border-radius:12px;background:var(--panel);
-  padding:14px 16px;display:flex;flex-direction:column;gap:10px;position:relative;overflow:hidden;
-}
-.task::before{content:\"\";position:absolute;inset:0 auto 0 0;width:2px;background:var(--faint)}
-.task.tone-live::before{background:var(--teal)}
-.task.tone-warn::before{background:var(--amber)}
-.task.tone-alert::before{background:var(--red)}
-.task.tone-good::before{background:var(--teal)}
-.task.tone-calm::before{background:var(--violet)}
-.task header,.secondmate header{display:flex;align-items:center;gap:9px;flex-wrap:wrap;font-size:11px;letter-spacing:.09em;text-transform:uppercase}
-.dot{width:7px;height:7px;border-radius:50%;background:var(--faint);flex:none}
-.tone-live .dot{background:var(--teal);box-shadow:0 0 8px rgba(46,231,189,.8)}
-.tone-warn .dot{background:var(--amber);box-shadow:0 0 8px rgba(255,181,69,.7)}
-.tone-alert .dot{background:var(--red);box-shadow:0 0 8px rgba(255,84,112,.7)}
-.tone-good .dot{background:var(--teal)}
-.state{font-family:var(--mono);color:var(--ink);font-weight:600}
-.kindtag{font-family:var(--mono);color:var(--faint);border:1px solid var(--line2);border-radius:5px;padding:1px 6px}
-.task h3,.secondmate h3{margin:0;font-size:15px;line-height:1.35;font-weight:600}
-.secondmate h3{text-transform:none;letter-spacing:0;font-size:15px}
-.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:8px 14px;margin:0}
-.facts div{min-width:0}
-.facts dt{font-size:10px;letter-spacing:.11em;text-transform:uppercase;color:var(--faint)}
-.facts dd{margin:2px 0 0;font-family:var(--mono);font-size:12.5px;color:var(--ink);overflow-wrap:anywhere}
-.lastline{
-  margin:0;font-size:12px;color:var(--dim);background:var(--bg2);
-  border:1px solid var(--line);border-radius:8px;padding:8px 10px;
-  overflow-wrap:anywhere;max-height:5.4em;overflow:hidden;
-}
-.slot{
-  margin:0;font-size:11px;letter-spacing:.05em;color:var(--faint);
-  border:1px dashed var(--line2);border-radius:8px;padding:7px 10px;background:rgba(155,140,255,.045);
-}
+/* ---- project grid ---- */
+.projects{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;}
+.proj{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px 16px;
+  box-shadow:var(--shadow);position:relative;display:flex;flex-direction:column;gap:9px;}
+.proj::before{content:\"\";position:absolute;left:0;top:14px;bottom:14px;width:3px;border-radius:3px;background:var(--slate-soft);}
+.proj.s-live::before{background:var(--green);}
+.proj.s-attn::before{background:var(--amber);}
+.proj.s-idle::before{background:#d5dae2;}
+.proj.s-unknown::before{background:repeating-linear-gradient(180deg,#c9d0da 0 4px,transparent 4px 8px);}
+.proj-top{display:flex;align-items:center;gap:12px;}
+.badge{width:34px;height:34px;border-radius:9px;background:var(--slate-soft);color:var(--slate);
+  display:flex;align-items:center;justify-content:center;flex:none;}
+.badge svg{width:19px;height:19px;}
+.proj-name{font-size:15px;font-weight:630;letter-spacing:-.01em;flex:1;overflow-wrap:anywhere;}
+.sub-role{color:var(--faint);font-weight:500;font-size:12px;margin-left:4px;}
+.pill{font-size:11.5px;font-weight:600;padding:3px 10px;border-radius:999px;letter-spacing:.02em;flex:none;}
+.pill.live{color:var(--green);background:var(--green-soft);}
+.pill.attn{color:var(--amber);background:var(--amber-soft);}
+.pill.idle{color:var(--slate);background:var(--slate-soft);}
+.pill.unknown{color:var(--muted);background:transparent;border:1px dashed #c3cbd6;padding:2px 9px;}
+.proj-state{color:var(--muted);font-size:13.5px;overflow-wrap:anywhere;}
+.proj-meta{color:var(--faint);font-size:12.5px;margin-top:1px;}
+.proj-updated{display:flex;align-items:center;gap:6px;color:var(--faint);font-size:11.5px;
+  margin-top:auto;padding-top:8px;flex-wrap:wrap;}
+.proj-updated svg{width:12px;height:12px;flex:none;color:var(--faint);}
+.posture{font-family:var(--mono);font-size:10.5px;color:var(--faint);margin-left:auto;overflow-wrap:anywhere;}
 
-/* ---- rail ---- */
-.rail{display:flex;flex-direction:column;gap:26px}
-.panel{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:15px 16px}
-.gauge{margin-bottom:13px}
-.gauge:last-child{margin-bottom:0}
-.glabel{display:flex;justify-content:space-between;gap:10px;font-size:11.5px;color:var(--dim);margin-bottom:6px}
-.glabel span:first-child{overflow-wrap:anywhere}
-.glabel .mono{color:var(--ink);font-weight:600;flex:none}
-.bar{height:6px;border-radius:4px;background:var(--bg2);border:1px solid var(--line);overflow:hidden}
-.bar i{display:block;height:100%;background:var(--teal)}
-.tone-warn .bar i{background:var(--amber)}
-.tone-alert .bar i{background:var(--red)}
-.tone-muted .bar i{background:var(--faint)}
-.gnote{font-size:10.5px;color:var(--faint);margin-top:5px;font-family:var(--mono);overflow-wrap:anywhere}
-.unmeasured{margin:14px 0 0;padding:12px 0 0;border-top:1px solid var(--line);list-style:none}
-.unmeasured li{display:flex;justify-content:space-between;gap:12px;font-size:11.5px;color:var(--dim);margin-bottom:6px}
-.unmeasured li:last-child{margin-bottom:0}
-.unmeasured .mono{color:var(--faint);font-size:10.5px;text-align:right;overflow-wrap:anywhere}
-.health li{margin-bottom:9px;color:var(--dim);font-size:13px;list-style:none}
-.health ul{margin:0;padding:0}
-.health b{color:var(--red);font-family:var(--mono);font-weight:600}
-.health .warnid{color:var(--amber);font-family:var(--mono)}
+/* ---- shipped ---- */
+.shipped{background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;}
+.ship{display:flex;align-items:center;gap:14px;padding:12px 22px;border-top:1px solid var(--line);font-size:14px;}
+.ship:first-child{border-top:none;}
+.ship .ck{color:var(--green);flex:none;width:16px;height:16px;}
+.ship .what{overflow-wrap:anywhere;}
+.ship .who{color:var(--faint);font-size:12.5px;margin-left:auto;flex:none;padding-left:10px;}
+a.ship:hover{background:#fbfcfe;}
 
-/* ---- tables / strips ---- */
-.tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
-table{border-collapse:collapse;width:100%;font-size:13px}
-th{
-  text-align:left;font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:var(--faint);
-  font-weight:600;padding:11px 14px;border-bottom:1px solid var(--line);white-space:nowrap;
-}
-td{padding:10px 14px;border-bottom:1px solid rgba(26,40,54,.6);vertical-align:top}
-tr:last-child td{border-bottom:none}
-td.num{font-family:var(--mono);text-align:right;width:1%;white-space:nowrap}
-td.num.zero{color:var(--faint)}
-td.hot{color:var(--red);font-weight:600}
-.tag{font-family:var(--mono);font-size:10.5px;border:1px solid var(--line2);border-radius:5px;padding:1px 6px;color:var(--dim);white-space:nowrap}
-.tag.yolo{color:#bff4e6;border-color:rgba(46,231,189,.4);background:rgba(46,231,189,.08)}
-.shipped{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:11px}
-.ship{border:1px solid var(--line);border-left:3px solid var(--teal);border-radius:10px;background:var(--panel);padding:12px 14px}
-.ship h4{margin:0 0 6px;font-size:14px;font-weight:580;line-height:1.35}
-.ship .meta{font-family:var(--mono);font-size:11px;color:var(--faint);display:flex;gap:9px;flex-wrap:wrap;margin-bottom:6px}
-.ship a{font-family:var(--mono);font-size:12px}
-footer.foot{margin-top:34px;color:var(--faint);font-size:11.5px;font-family:var(--mono);overflow-wrap:anywhere}
+/* ---- health and allowance strip ---- */
+.strip{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;}
+.pane{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px;box-shadow:var(--shadow);}
+.pane h3{font-size:13px;font-weight:640;margin:0 0 12px;letter-spacing:.01em;}
+.pane h3 .count{color:var(--faint);font-weight:500;margin-left:6px;}
+.hlist{margin:0;padding:0;list-style:none;}
+.hlist li{display:flex;gap:10px;font-size:13px;margin-bottom:10px;}
+.hlist li:last-child{margin-bottom:0;}
+.hstate{flex:none;font-family:var(--mono);font-size:11px;color:var(--red);background:var(--red-soft);
+  border-radius:5px;padding:2px 7px;align-self:flex-start;}
+.hstate.wait{color:var(--amber);background:var(--amber-soft);}
+.hwhat{color:var(--ink);overflow-wrap:anywhere;}
+.hwhat .hint{display:block;color:var(--faint);font-size:11.5px;font-family:var(--mono);margin-top:2px;}
+.gauge{margin-bottom:14px;}
+.gauge:last-child{margin-bottom:0;}
+.glabel{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:var(--muted);margin-bottom:6px;}
+.glabel span:first-child{overflow-wrap:anywhere;}
+.gval{font-family:var(--mono);color:var(--ink);font-weight:600;flex:none;font-size:11.5px;}
+.bar{height:6px;border-radius:4px;background:var(--slate-soft);overflow:hidden;}
+.bar i{display:block;height:100%;background:var(--green);}
+.tone-warn .bar i{background:var(--amber);}
+.tone-alert .bar i{background:var(--red);}
+.tone-muted .bar i{background:#d5dae2;}
+.gnote{font-size:11px;color:var(--faint);margin-top:5px;font-family:var(--mono);overflow-wrap:anywhere;}
+.unmeasured{margin:14px 0 0;padding:12px 0 0;border-top:1px solid var(--line);list-style:none;}
+.unmeasured li{display:flex;justify-content:space-between;gap:12px;font-size:12px;color:var(--muted);margin-bottom:7px;}
+.unmeasured li:last-child{margin-bottom:0;}
+.unmeasured .gval{color:var(--faint);font-size:11px;text-align:right;overflow-wrap:anywhere;}
+.pane .quiet{padding:0;border:none;box-shadow:none;background:none;}
 
-@media (max-width:1080px){ .grid{grid-template-columns:minmax(0,1fr)} }
-@media (max-width:640px){
-  .wrap{padding:0 13px}
-  .calls,.cards,.shipped{grid-template-columns:minmax(0,1fr)}
-  .top .wrap{gap:10px}
-  .brand{font-size:11.5px}
-  .alert{padding:15px 14px 16px;border-radius:13px}
+footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overflow-wrap:anywhere;}
+
+@media(max-width:720px){
+  .stats{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .projects,.strip{grid-template-columns:minmax(0,1fr)}
+  .wrap{padding:28px 18px 48px}
+  .need{align-items:flex-start;flex-wrap:wrap;padding:14px 16px;gap:10px}
+  .tag{width:auto}
+  .need .go{display:none}
+  .ship{padding:12px 16px;align-items:flex-start;flex-wrap:wrap}
+  .ship .what{flex:1 1 auto}
+  .ship .who{margin-left:0;padding-left:0;flex:1 0 100%}
 }
 </style>
 </head><body>
-
-<div class=\"top\" id=\"top\"><div class=\"wrap\">
-  <div class=\"brand\"><b>Firstmate</b> <span>//</span> Mission Control</div>
-  <div class=\"live\"><span class=\"pulse\"></span><span id=\"age\">rendered "
-+ (@html "\(.generated)") + "</span></div>
-  <div class=\"spacer\"></div>
-  <div class=\"counts\">"
-+ (if $waiting_incomplete
-   then (@html "<span class=\"pill hot\"><b>\($waiting_count)+</b> waiting known</span>")
-   elif $waiting_count > 0
-   then (@html "<span class=\"pill hot\"><b>\($waiting_count)</b> waiting on you</span>")
-   else "<span class=\"pill\"><b>0</b> waiting on you</span>" end)
-+ (@html "<span class=\"pill\"><b>\($work_tasks | length)</b> under way</span>")
-+ (if $backlog_present
-   then (@html "<span class=\"pill\"><b>\($records | map(select(.state == "queued")) | length)</b> queued</span>")
-   else "<span class=\"pill hot\"><b>?</b> queued - backlog unavailable</span>" end)
-+ (@html "<span class=\"pill\"><b>\($rollup | length)</b> projects</span>")
-+ "</div>
-</div></div>
-
 <div class=\"wrap\">
+  <header>
+    <div>
+      <h1>Mission Control</h1>
+      <p class=\"sub\">Your fleet at a glance, Captain.</p>
+    </div>
+    <span class=\"live\" id=\"live\"><span class=\"dot\"></span><span id=\"age\">live &middot; rendered "
++ (@html "\(.generated)") + "</span></span>
+  </header>
 
-<section class=\"alert" + (if $waiting_count == 0 and ($waiting_incomplete | not) then " clear" else "" end) + "\">
-  <h2>" + (if $waiting_incomplete then "&#9888; Waiting status incomplete" elif $waiting_count == 0 then "&#9989; Nothing waiting on you" else "&#9888; Waiting on you" end)
-+ (@html "<span class=\"n\">\($waiting_count)\(if $waiting_incomplete then "+ known" else "" end)</span>") + "<i class=\"rule\"></i></h2>"
+  <div class=\"stats\">"
++ stat(icon_bell;
+       "\($waiting_count)\(if $waiting_incomplete then "+" else "" end)";
+       "Awaiting you";
+       (if $waiting_incomplete then "some sources unavailable" else "" end);
+       ($waiting_count > 0 or $waiting_incomplete))
++ stat(icon_pulse;
+       "\($in_progress_count)\(if $in_progress_incomplete then "+" else "" end)";
+       "In progress";
+       (if $in_progress_incomplete then "second mate activity incomplete"
+        elif $active_details_omitted > 0 then "\($active_details_omitted) active task details omitted"
+        else "" end);
+       $in_progress_incomplete)
++ stat(icon_shipped;
+       (if $backlog_present then "\($shipped | length)" else "?" end);
+       "Shipped today";
+       (if ($backlog_present | not) then "backlog unavailable"
+        elif $shipped_undated > 0 then "\($shipped_undated) landed with no recorded date"
+        else "" end);
+       (($backlog_present | not) or $shipped_undated > 0))
++ stat(icon_folder;
+       "\($card_count)\(if $card_count_incomplete then "+" else "" end)";
+       "Projects";
+       (((if ($projects_present | not) then ["project registry unavailable"] else [] end)
+         + (if ($sm_registry_complete | not) then ["second mate list incomplete"] else [] end))
+        | join(", "));
+       $card_count_incomplete)
++ "</div>
+"
++ (if ($health_count > 0) or $health_incomplete or ($backlog_present | not)
+   then "<a class=\"attnbar\" href=\"#health\">" + icon_alert
+     + (@html "<span>\(if $health_count > 0 then "\(if $secondmate_hold_count > 0 then "\($health_count) fleet health \(plural($health_count; "item needs"; "items need")) attention" else "\($health_count) \(plural($health_count; "item is"; "items are")) blocked or failed" end)\(if $health_incomplete or ($backlog_present | not) then "; health details are incomplete" else "" end)" else "Fleet health cannot be confirmed from the available sources" end)</span>")
+     + "<span class=\"go\">&rsaquo;</span></a>"
+   else "" end)
++ "
+  <section>
+    <div class=\"sec-h\"><h2>Awaiting your decision</h2>"
++ (@html "<span class=\"count\">\($waiting_count) \(plural($waiting_count; "item"; "items"))")
++ (if $waiting_incomplete then " &middot; waiting status incomplete" else "" end)
++ "</span></div>"
 + (if $waiting_count == 0 and ($waiting_incomplete | not)
-   then "<p class=\"empty\">No decisions, reviews, or merges need the captain right now.</p>"
-   else "<div class=\"calls\">" + (($waiting_notices | map(card_waiting) | add) // "")
-        + (($waiting_calls | map(card_waiting) | add) // "")
-        + (($waiting_prs | map(card_waiting) | add) // "") + "</div>" end)
-+ "</section>
-
-<div class=\"grid\">
-<div>
-  <section>
-    <h2>&#128295; In progress" + (@html "<span class=\"n\">\($work_tasks | length)</span>") + "<i class=\"rule\"></i></h2>"
-+ (if ($work_tasks | length) == 0
-   then "<p class=\"empty\">No work under way.</p>"
-   else "<div class=\"cards\">" + (($work_tasks | map(card_task) | add) // "") + "</div>" end)
+   then "<p class=\"quiet\">Nothing needs your decision right now.</p>"
+   else "<div class=\"needs\">"
+     + (($waiting_notices | map(need_row) | add) // "")
+     + (($waiting_calls | map(need_row) | add) // "")
+     + (($waiting_prs | map(need_row) | add) // "") + "</div>" end)
 + "  </section>
 
   <section>
-    <h2>&#9989; Recently shipped" + (if $backlog_present then (@html "<span class=\"n\">\($shipped | length)</span>") else "<span class=\"n\">unavailable</span>" end) + "<i class=\"rule\"></i></h2>"
+    <div class=\"sec-h\"><h2>Projects</h2>"
++ (if $card_count_incomplete then "<span class=\"count\">list incomplete</span>" else "" end)
++ "</div>"
++ (if ($projects_present | not)
+   then "<p class=\"quiet\">No project registry found - firstmate rebuilds it from the clones.</p>"
+   else "" end)
++ (if $sm_registry_complete and ($secondmate_cards | length) == 0
+   then "<p class=\"quiet\">No second mates registered.</p>" else "" end)
++ (if $card_count == 0 then ""
+   else "<div class=\"projects\">"
+     + (($project_cards | map(project_card) | add) // "")
+     + (($secondmate_cards | map(secondmate_card) | add) // "") + "</div>" end)
++ "  </section>
+
+  <section>
+    <div class=\"sec-h\"><h2>Shipped today</h2>"
++ (if $backlog_present
+   then (@html "<span class=\"count\">\($shipped | length) \(plural($shipped | length; "item"; "items"))</span>")
+   else "<span class=\"count\">unavailable</span>" end)
++ "</div>"
 + (if ($backlog_present | not)
-   then "<p class=\"empty\">Recently shipped is unavailable because the backlog could not be read.</p>"
+   then "<p class=\"quiet\">Shipped today is unavailable because the backlog could not be read.</p>"
    elif ($shipped | length) == 0
-   then "<p class=\"empty\">Nothing landed yet.</p>"
+   then "<p class=\"quiet\">Nothing landed yet today.</p>"
    else "<div class=\"shipped\">" + (($shipped | map(. as $d |
-     (@html "<article class=\"ship\">
-        <h4>\(dash($d.title // $d.raw))</h4>
-        <div class=\"meta\"><span>\(dash(($d.repo // "") | short_repo))</span><span>\(dash($d.completion.verb // "done"))</span><span>\(dash($d.completion.date))</span></div>")
-     + ((($d.pr_url // $d.report_path // ($d.links // [])[0]) // "") as $l |
-        if $l == "" then "" else (@html "<a href=\"\($l)\">\($l)</a>") end)
-     + "</article>") | add) // "") + "</div>" end)
+     (($d.pr_url // $d.report_path // ($d.links // [])[0]) // "") as $link |
+     (if $link == "" then "<div class=\"ship\">" else (@html "<a class=\"ship\" href=\"\($link)\">") end)
+     + icon_check
+     + (@html "<span class=\"what\">\(dash($d.title // $d.raw))</span><span class=\"who\">\(dash(($d.repo // "") | short_repo))</span>")
+     + (if $link == "" then "</div>" else "</a>" end)) | add) // "") + "</div>" end)
 + "  </section>
 
-  <section>
-    <h2>&#128506; Projects" + (@html "<span class=\"n\">\($rollup | length)</span>")
-+ "<span class=\"scope\">registered projects only</span><i class=\"rule\"></i></h2>"
-+ (if ($rollup | length) == 0
-   then "<p class=\"empty\">No project registry found - firstmate rebuilds it from the clones.</p>"
-   else (if $backlog_present then "" else "<p class=\"empty\">Backlog-derived project counts are unavailable.</p>" end)
-   + "<div class=\"tablewrap\"><table><thead><tr>
-     <th>Project</th><th>Delivery</th><th class=\"num\">Active</th><th class=\"num\">In flight</th>
-     <th class=\"num\">Queued</th><th class=\"num\">Waiting</th><th class=\"num\">Shipped</th></tr></thead><tbody>"
-   + (($rollup | map(. as $p |
-       "<tr>" + (@html "<td><span class=\"mono\">\($p.name)</span></td>
-        <td><span class=\"tag\">\($p.mode)</span>")
-       + (if $p.yolo then "<span class=\"tag yolo\">+yolo</span>" else "" end) + "</td>"
-       + (@html "<td class=\"num\(if $p.active == 0 then " zero" else "" end)\">\($p.active)</td>")
-       + (if $backlog_present then (@html "<td class=\"num\(if $p.in_flight == 0 then " zero" else "" end)\">\($p.in_flight)</td>
-          <td class=\"num\(if $p.queued == 0 then " zero" else "" end)\">\($p.queued)</td>
-          <td class=\"num\(if $p.waiting == 0 then " zero" else " hot" end)\">\($p.waiting)</td>
-          <td class=\"num\(if $p.done == 0 then " zero" else "" end)\">\($p.done)</td>")
-          else "<td class=\"num zero\">-</td><td class=\"num zero\">-</td><td class=\"num zero\">-</td><td class=\"num zero\">-</td>" end)
-       + "</tr>") | add) // "")
-   + "</tbody></table></div>" end)
-+ "  </section>
-</div>
-
-<div class=\"rail\">
-  <section>
-    <h2>&#128678; Fleet health<i class=\"rule\"></i></h2>
-    <div class=\"panel health\">"
-+ (if ($backlog_present | not)
-   then "<p class=\"empty\">Backlog health is unavailable because the backlog could not be read.</p>"
-     + (if ($unhealthy | length) == 0 then "" else "<ul>"
-       + (($unhealthy | map(. as $t |
-           (@html "<li><b>\($t.current_state.state // "blocked")</b> \($t.id)<br><span class=\"mono\">\(dash($t.paths.status_log.last_event.raw))</span></li>")) | add) // "")
-       + "</ul>" end)
-   elif ($unhealthy | length) == 0 and ($blocked_items | length) == 0
-   then "<p class=\"empty\">Nothing blocked or failed.</p>"
-   else "<ul>"
-     + (($unhealthy | map(. as $t |
-         (@html "<li><b>\($t.current_state.state // "blocked")</b> \($t.id)<br><span class=\"mono\">\(dash($t.paths.status_log.last_event.raw))</span></li>")) | add) // "")
-     + (($blocked_items | map(. as $r |
-         (@html "<li><span class=\"warnid\">waiting on \(($r.unresolved_blocker_ids // []) | join(", "))</span><br>\(dash($r.title // $r.raw))</li>")) | add) // "")
-     + "</ul>" end)
+  <section class=\"strip\" id=\"health\">
+    <div class=\"pane\">"
++ (@html "<h3>Fleet health<span class=\"count\">\(if $health_count > 0 then "\($health_count) \(plural($health_count; "item"; "items"))\(if $health_incomplete or ($backlog_present | not) then "+" else "" end)" elif $health_incomplete or ($backlog_present | not) then "incomplete" else "all clear" end)</span></h3>")
++ health_block
++ "    </div>
+    <div class=\"pane\">
+      <h3>Allowance</h3>"
++ quota_block
 + "    </div>
   </section>
 
-  <section>
-    <h2>&#9889; Allowance<i class=\"rule\"></i></h2>
-    <div class=\"panel\">" + quota_block + "</div>
-  </section>
-
-  <section>
-    <h2>&#129504; Second mates<i class=\"rule\"></i></h2>" + secondmate_block + "
-  </section>
-</div>
-</div>
-
-" + (@html "<footer class=\"foot\">home \(.fm_home) &middot; snapshot \(.schema) &middot; rendered \(.generated) &middot; self-reload \($refresh)s &middot; phase 1 read-only board</footer>")
+"
++ (@html "<footer>firstmate &middot; mission control &middot; home \(.fm_home) &middot; snapshot \(.schema) &middot; rendered \(.generated) &middot; self-reload \($refresh)s</footer>")
 + "
 </div>
 
@@ -778,15 +1026,15 @@ footer.foot{margin-top:34px;color:var(--faint);font-size:11.5px;font-family:var(
   var rendered = " + (.generated | @json | gsub("<"; "\\u003c")) + ";
   var stamp = Date.parse(rendered);
   var age = document.getElementById(\"age\");
-  var top = document.getElementById(\"top\");
+  var live = document.getElementById(\"live\");
   function tick() {
     if (isNaN(stamp)) { return; }
     var s = Math.max(0, Math.round((Date.now() - stamp) / 1000));
     var text = s < 60 ? s + \"s ago\"
       : s < 3600 ? Math.floor(s / 60) + \"m ago\"
       : Math.floor(s / 3600) + \"h \" + Math.floor((s % 3600) / 60) + \"m ago\";
-    age.textContent = \"live \" + String.fromCharCode(183) + \" refreshed \" + text;
-    top.className = s > " + (($refresh * 4) | tostring) + " ? \"top stale\" : \"top\";
+    age.textContent = \"live \" + String.fromCharCode(183) + \" updated \" + text;
+    live.className = s > " + (($refresh * 4) | tostring) + " ? \"live stale\" : \"live\";
   }
   tick();
   setInterval(tick, 1000);

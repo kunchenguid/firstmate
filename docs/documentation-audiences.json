@@ -249,6 +249,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/evidence/mission-control/README.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/examples/crew-dispatch-continuity.json",
       "audience": "operator-example"
     },
