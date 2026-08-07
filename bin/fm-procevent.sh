@@ -189,22 +189,31 @@ cmd_register() {
 # events - and it republishes on every call regardless of any earlier
 # publication, so a result stays eligible for re-announcement across restarts
 # and drains until `fm_procevent_mark_handled` records it.
-publish_pending() {
-  local result id seq adapter line published=0
+publish_result() {  # <result-file>
+  local result=$1 id seq adapter line status=1
+  id=$(fm_procevent_result_source_id "$result")
+  seq=$(fm_procevent_result_sequence "$result")
+  fm_procevent_source_id_valid "$id" || return 1
+  adapter=$(fm_procevent_result_adapter "$result" 2>/dev/null || true)
+  [ -n "$adapter" ] || return 1
+  line=$(fm_procevent_event_line "$adapter" "$id" "$seq") || return 1
+  fm_procevent_source_lock_acquire "$id" || return 1
+  if ! fm_procevent_is_handled "$STATE" "$id" "$seq" \
+    && fm_wake_append check "procevent:$id:$seq" "check: $line"; then
+    status=0
+  fi
+  fm_procevent_source_lock_release "$id"
+  return "$status"
+}
+
+publish_pending() {  # [result-file-to-skip]
+  local skip=${1-} result published=0
   while IFS= read -r result; do
     [ -n "$result" ] || continue
-    id=$(fm_procevent_result_source_id "$result")
-    seq=$(fm_procevent_result_sequence "$result")
-    fm_procevent_source_id_valid "$id" || continue
-    adapter=$(fm_procevent_result_adapter "$result" 2>/dev/null || true)
-    [ -n "$adapter" ] || continue
-    line=$(fm_procevent_event_line "$adapter" "$id" "$seq") || continue
-    fm_procevent_source_lock_acquire "$id" || continue
-    if ! fm_procevent_is_handled "$STATE" "$id" "$seq" \
-      && fm_wake_append check "procevent:$id:$seq" "check: $line"; then
+    [ "$result" = "$skip" ] && continue
+    if publish_result "$result"; then
       published=$((published + 1))
     fi
-    fm_procevent_source_lock_release "$id"
   done < <(fm_procevent_pending "$STATE")
   printf '%s\n' "$published"
 }
@@ -250,7 +259,7 @@ cmd_start_public() {
 }
 
 cmd_start() {
-  local id=${1-} adapter out rc claimed bound_rc
+  local id=${1-} adapter out rc claimed bound_rc published_capture=0
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   require_runner_group
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
@@ -354,11 +363,16 @@ cmd_start() {
   STAGED_OUTPUT=
   [ "$truncated" -eq 1 ] && printf 'truncated: %s at %s bytes\n' "$id" "$MAX_OUTPUT_BYTES" >&2
 
-  publish_pending >/dev/null
+  if publish_result "$durable"; then
+    published_capture=1
+  fi
+  publish_pending "$durable" >/dev/null
   rm -f -- "$(runner_file "$id")"
-  # Publication is already durable, so retiring an ended source here can never
-  # cost the result or its wake; leaving it armed, by contrast, lets every later
-  # reconcile restart a source that will only return empty ended results.
+  # The result is already durable, so retiring an ended source here cannot cost
+  # its captured output; if publication failed, later reconciliation can still
+  # announce that inbox result without a registration. Leaving the source armed
+  # would instead let every reconcile restart a source that only returns empty
+  # ended results.
   if adapter_result_is_terminal "$adapter" "$durable"; then
     if retire_owned_terminal_source "$id"; then
       printf 'retired: %s (adapter classified the captured result terminal)\n' "$id"
@@ -369,7 +383,7 @@ cmd_start() {
   # Strictly after the terminal retirement above: a handling adapter re-arms its
   # own next source, and retiring afterwards would drop that fresh registration
   # and leave the source silently dead.
-  if adapter_autohandle "$adapter" "$id" "$durable"; then
+  if [ "$published_capture" -eq 1 ] && adapter_autohandle "$adapter" "$id" "$durable"; then
     printf 'autohandled: %s\n' "$id"
   else
     printf 'not-autohandled: %s (left for the handler; still unacknowledged)\n' "$id" >&2
