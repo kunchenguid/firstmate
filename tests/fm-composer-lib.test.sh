@@ -181,6 +181,69 @@ test_cursor_stripped_ghost_plain_is_empty() {
   pass "fm_composer_classify_content: stripped ghost-only rows read empty only on an idle match, else unknown"
 }
 
+# --- Shared composer env contract (fm_composer_export_env) ------------------
+
+# export_env_probe: run the exporter with the env contract scoped to this call,
+# so one case's exported values cannot leak into the next.
+export_env_probe() {  # <harness> [caller-supplied idle regex] -> "<harness>|<idle regex>"
+  local FM_COMPOSER_HARNESS FM_COMPOSER_IDLE_RE
+  [ -z "${2:-}" ] || FM_COMPOSER_IDLE_RE=$2
+  fm_composer_export_env "$1"
+  printf '%s|%s' "${FM_COMPOSER_HARNESS:-}" "${FM_COMPOSER_IDLE_RE:-}"
+}
+
+test_export_env_sets_cursor_idle_default() {
+  local out
+  out=$(export_env_probe cursor)
+  [ "$out" = 'cursor|^Add a follow-up$' ] \
+    || fail "cursor must default FM_COMPOSER_IDLE_RE to its idle placeholder, got '$out'"
+  pass "fm_composer_export_env: cursor exports its verified idle-placeholder default"
+}
+
+test_export_env_keeps_explicit_idle_re_and_other_harnesses_unset() {
+  local out
+  out=$(export_env_probe cursor '^caller supplied$')
+  [ "$out" = 'cursor|^caller supplied$' ] \
+    || fail "an explicit idle regex must win over the cursor default, got '$out'"
+  out=$(export_env_probe claude)
+  [ "$out" = 'claude|' ] \
+    || fail "a non-cursor harness must leave the idle override unset, got '$out'"
+  pass "fm_composer_export_env: an explicit idle regex wins, and non-cursor harnesses stay unset"
+}
+
+# --- Shared exhausted-retry rule (fm_composer_queued_submit_verdict) --------
+
+test_queued_submit_verdict_needs_queueing_harness_and_busy() {
+  local h out
+  # shellcheck disable=SC2329 # invoked indirectly through the verdict helper
+  probe_busy() { return 0; }
+  # shellcheck disable=SC2329 # invoked indirectly through the verdict helper
+  probe_idle() { return 1; }
+  for h in opencode cursor; do
+    out=$(fm_composer_queued_submit_verdict "$h" probe_busy)
+    [ "$out" = empty ] || fail "$h + busy must report empty (queued Enter), got '$out'"
+    out=$(fm_composer_queued_submit_verdict "$h" probe_idle)
+    [ "$out" = pending ] || fail "$h + idle must stay pending (genuine swallow), got '$out'"
+  done
+  pass "fm_composer_queued_submit_verdict: a verified queueing harness reports empty only when affirmatively busy"
+}
+
+test_queued_submit_verdict_never_widens_to_other_harnesses() {
+  local h out
+  # shellcheck disable=SC2329 # would be invoked indirectly if the rule widened
+  probe_busy() { printf 'probed' >> "$PROBE_LOG"; return 0; }
+  PROBE_LOG=$(mktemp)
+  for h in claude codex pi grok kimi muse '' unknown-harness; do
+    out=$(fm_composer_queued_submit_verdict "$h" probe_busy)
+    [ "$out" = pending ] \
+      || fail "harness '$h' has no verified Enter-while-busy queuing and must stay pending, got '$out'"
+  done
+  [ ! -s "$PROBE_LOG" ] \
+    || fail "the busy probe must not run for a harness whose answer cannot change the verdict"
+  rm -f "$PROBE_LOG"
+  pass "fm_composer_queued_submit_verdict: the busy exception never widens past opencode/cursor, and skips their probe"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
@@ -194,3 +257,7 @@ test_cursor_agent_glyph_requires_cursor_context
 test_cursor_idle_placeholder_is_empty
 test_cursor_real_text_is_pending
 test_cursor_stripped_ghost_plain_is_empty
+test_export_env_sets_cursor_idle_default
+test_export_env_keeps_explicit_idle_re_and_other_harnesses_unset
+test_queued_submit_verdict_needs_queueing_harness_and_busy
+test_queued_submit_verdict_never_widens_to_other_harnesses

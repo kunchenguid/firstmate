@@ -373,3 +373,42 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   # Real, unsubmitted content remains.
   printf 'pending'; return 0
 }
+
+# fm_composer_export_env: set and export the composer-classification env
+# contract for one harness, so every caller that drives the shared classifier
+# through a subprocess (bin/fm-send.sh, bin/fm-supervise-daemon.sh) agrees on
+# the per-harness defaults. cursor-agent renders its bare `→` prompt glyph AND
+# its "Add a follow-up" idle placeholder fully de-emphasised, so after ghost
+# stripping only FM_COMPOSER_IDLE_RE can prove that composer empty. An idle
+# regex the caller already supplied always wins; other harnesses keep their
+# verified bare/bordered glyph routes and leave the override unset.
+fm_composer_export_env() {  # <harness>
+  local harness=$1
+  if [ -z "${FM_COMPOSER_IDLE_RE:-}" ] && [ "$harness" = cursor ]; then
+    FM_COMPOSER_IDLE_RE='^Add a follow-up$'
+  fi
+  FM_COMPOSER_HARNESS=$harness
+  export FM_COMPOSER_HARNESS FM_COMPOSER_IDLE_RE
+}
+
+# fm_composer_queued_submit_verdict: the ONE owner of the exhausted-retry rule
+# for a submit loop that ran out of retries with the composer still proven
+# pending. Only opencode and cursor have verified Enter-while-busy queuing
+# (opencode 1.18.4, cursor-agent 2026.07.23-e383d2b): on those harnesses an
+# affirmatively busy pane means the harness accepted the Enter and queued the
+# message for the end of the current turn, so the send counts as delivered.
+# Every other harness - and a busy probe that cannot affirm busy - keeps
+# pending, so a genuine swallow on an idle pane stays a loud failure.
+#
+# The busy probe stays backend-specific and is passed as a command that returns
+# 0 for busy. It is only run for a queueing harness, so no other harness pays
+# for a probe whose answer cannot change the verdict.
+fm_composer_queued_submit_verdict() {  # <harness> <busy-probe-cmd> [args...] -> empty|pending
+  local harness=$1
+  shift
+  case "$harness" in
+    opencode|cursor) ;;
+    *) printf 'pending'; return 0 ;;
+  esac
+  if "$@"; then printf 'empty'; else printf 'pending'; fi
+}

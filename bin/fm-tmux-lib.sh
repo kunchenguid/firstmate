@@ -118,15 +118,6 @@ fm_busy_lines_match() {  # [harness]
   [ -n "$regex" ] && printf '%s' "$lines" | grep -qiE "$regex"
 }
 
-# fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
-# fm_composer_strip_ghost (bin/fm-composer-lib.sh). It drops de-emphasised
-# ghost/placeholder runs - dim/faint (SGR 2, claude's/codex's ghost) AND a
-# dark/muted truecolor foreground (grok's placeholder) - from one captured,
-# styled composer line and prints the plain, real-typed text. Kept as a named
-# tmux entry point (and for existing callers/tests) but owns no logic of its own,
-# so the tmux and herdr adapters cannot drift apart on what counts as ghost text.
-fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
-
 # fm_tmux_composer_row_state: classify one raw styled candidate row.
 # A structural caller forces bordered=1; the compatibility fallback passes 0
 # and may recognize a busy footer.
@@ -414,22 +405,10 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness]
     printf '%s' "$state"
     return 0
   fi
-  # Retries exhausted, composer still shows proven pending.
-  # Only opencode and cursor have verified Enter-while-busy queuing: a busy
-  # pane means the harness accepted the Enter and queued the message for
-  # processing when the current turn ends. Treat it as submitted so the caller
-  # does not re-send. Other harnesses keep pending - a genuine swallow stays
-  # a loud failure.
-  case "$harness" in
-    opencode|cursor)
-      if fm_pane_is_busy "$target" "$harness"; then
-        printf 'empty'
-      else
-        printf 'pending'
-      fi
-      ;;
-    *) printf 'pending' ;;
-  esac
+  # Retries exhausted, composer still shows proven pending. The queueing-harness
+  # rule is owned by fm_composer_queued_submit_verdict (bin/fm-composer-lib.sh);
+  # tmux supplies its own busy probe.
+  fm_composer_queued_submit_verdict "$harness" fm_pane_is_busy "$target" "$harness"
 }
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [harness]
