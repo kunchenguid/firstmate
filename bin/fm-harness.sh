@@ -19,6 +19,9 @@
 # Model/effort come ONLY from this file - config/crew-harness stays a bare adapter
 # name and is never parsed for a model.
 # Detection layers: verified environment markers first, then process ancestry.
+# A single unambiguous marker wins immediately; when several markers conflict
+# (e.g. a shell profile exporting CLAUDECODE=1 inside a Pi session), no env
+# marker is trustworthy alone and the process-ancestry layer decides.
 # Record each newly verified env marker here.
 set -u
 
@@ -35,12 +38,15 @@ detect_own() {
   # multiplexer's stored environment can silently misidentify one of them before
   # ancestry is consulted. This is a precedence hazard, not evidence that
   # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
-  [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
-  if [ "${PI_CODING_AGENT:-}" = "true" ]; then
-    if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
-    return
-  fi
-  # grok set GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73).
+  # A verified marker can also be AMBIENT rather than live: a shell profile that
+  # exports CLAUDECODE=1 leaks it into a Pi session, which would misidentify the
+  # session as claude. A marker is therefore trusted only when it is the sole one
+  # present; when several conflict, no env marker is trustworthy alone and this
+  # layer falls through to the process-ancestry layer below to decide.
+  local claude_marker=0 pi_marker=0 grok_marker=0 marker_count=0
+  [ "${CLAUDECODE:-}" = "1" ] && { claude_marker=1; marker_count=$((marker_count + 1)); }
+  [ "${PI_CODING_AGENT:-}" = "true" ] && { pi_marker=1; marker_count=$((marker_count + 1)); }
+  # grok sets GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73).
   # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so the marker
   # is unambiguous WHEN PRESENT - but it is not guaranteed present. A grok 1.0.0
   # hook process carries GROK_HOOK_EVENT, GROK_HOOK_NAME, GROK_SESSION_ID, and
@@ -49,7 +55,15 @@ detect_own() {
   # a fast path only; the ancestry walk below is what actually guarantees grok is
   # identified, and any rule that must be RELIABLE under grok has to test the hook
   # markers too (see .claude/settings.json Stop entries, docs/turnend-guard.md).
-  [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
+  [ "${GROK_AGENT:-}" = "1" ] && { grok_marker=1; marker_count=$((marker_count + 1)); }
+  if [ "$marker_count" -le 1 ]; then
+    [ "$claude_marker" = 1 ] && { echo claude; return; }
+    if [ "$pi_marker" = 1 ]; then
+      if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
+      return
+    fi
+    [ "$grok_marker" = 1 ] && { echo grok; return; }
+  fi
   # muse (Muse Code) publishes no harness-identity marker of its own. The only
   # MUSE_* variable it is documented to hand a child is MUSE_CURRENT_SESSION_LOG,
   # a per-session log PATH rather than an identity, and its export to tool
