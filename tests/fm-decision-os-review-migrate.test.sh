@@ -122,6 +122,24 @@ test_dry_run_inventories_every_copy_and_defers_active_lane() {
   pass "migration dry run inventories all pool copies and defers active lanes without mutation"
 }
 
+test_apply_defers_review_link_setup_for_active_lane() {
+  local rec out status
+  rec=$(make_case active-link)
+  read_case "$rec"
+  mkdir -p "$SLOT2/data/local/reviews"
+  write_pool_json in-use in-use
+
+  out=$(run_migrate --apply)
+  status=$?
+  expect_code 0 "$status" "apply with only active lanes should defer without failing"$'\n'"$out"
+  assert_contains "$out" "DEFER active slot=1" "active lane with a missing review path was not deferred"
+  assert_contains "$out" "DEFER active slot=2" "active lane with an empty review directory was not deferred"
+  assert_absent "$SLOT1/data/local/reviews" "apply created a review path for an in-use lane"
+  [ -d "$SLOT2/data/local/reviews" ] && [ ! -L "$SLOT2/data/local/reviews" ] \
+    || fail "apply removed or linked the empty review directory of an in-use lane"
+  pass "apply defers review-path creation, removal, and linking for active lanes"
+}
+
 test_apply_copies_verifies_removes_then_links_and_reruns_idempotently() {
   local rec out status copied verified removed
   rec=$(make_case apply)
@@ -262,6 +280,7 @@ test_wrong_project_and_invalid_canonical_store_refuse() {
 
 test_dry_run_inventories_every_copy_and_defers_active_lane
 test_lane_becoming_active_before_retirement_is_deferred
+test_apply_defers_review_link_setup_for_active_lane
 test_apply_copies_verifies_removes_then_links_and_reruns_idempotently
 test_nonidentical_collision_refuses_and_identical_collision_resumes
 test_changing_source_is_deferred_without_destination_publication

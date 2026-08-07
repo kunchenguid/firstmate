@@ -224,6 +224,11 @@ while IFS=$'\t' read -r slot path status process_count; do
     continue
   fi
 
+  slot_available=1
+  if [ "$status" != available ] || [ "$process_count" -ne 0 ]; then
+    slot_available=0
+  fi
+
   reviews="$slot_real/data/local/reviews"
   if [ -L "$reviews" ]; then
     reviews_target=$(resolved_dir "$reviews" 2>/dev/null || true)
@@ -243,9 +248,14 @@ while IFS=$'\t' read -r slot path status process_count; do
   if [ ! -e "$reviews" ]; then
     echo "EMPTY slot=$slot path=$reviews"
     if [ "$APPLY" -eq 1 ]; then
-      mkdir -p "$(dirname "$reviews")"
-      ln -s "$CANONICAL_LINK" "$reviews"
-      echo "LINKED slot=$slot target=$CANONICAL_LINK"
+      if [ "$slot_available" -eq 0 ]; then
+        echo "DEFER active slot=$slot path=$reviews status=$status processes=$process_count"
+      elif mkdir -p "$(dirname "$reviews")" && ln -s "$CANONICAL_LINK" "$reviews"; then
+        echo "LINKED slot=$slot target=$CANONICAL_LINK"
+      else
+        echo "REFUSE slot=$slot review link could not be created path=$reviews" >&2
+        refused=1
+      fi
     fi
     continue
   fi
@@ -266,16 +276,21 @@ while IFS=$'\t' read -r slot path status process_count; do
   if [ ! -s "$entries" ]; then
     echo "EMPTY slot=$slot path=$reviews"
     if [ "$APPLY" -eq 1 ]; then
-      rmdir "$reviews"
-      ln -s "$CANONICAL_LINK" "$reviews"
-      echo "LINKED slot=$slot target=$CANONICAL_LINK"
+      if [ "$slot_available" -eq 0 ]; then
+        echo "DEFER active slot=$slot path=$reviews status=$status processes=$process_count"
+      elif rmdir "$reviews" && ln -s "$CANONICAL_LINK" "$reviews"; then
+        echo "LINKED slot=$slot target=$CANONICAL_LINK"
+      else
+        echo "REFUSE slot=$slot empty review directory could not be replaced path=$reviews" >&2
+        refused=1
+      fi
     fi
     continue
   fi
 
   active=0
   slot_can_link=1
-  if [ "$status" != available ] || [ "$process_count" -ne 0 ]; then
+  if [ "$slot_available" -eq 0 ]; then
     active=1
     slot_can_link=0
   fi
@@ -432,9 +447,12 @@ while IFS=$'\t' read -r slot path status process_count; do
   if [ "$slot_can_link" -eq 1 ] && [ -d "$reviews" ] \
     && [ -z "$(find "$reviews" -mindepth 1 -print -quit)" ]; then
     if [ "$APPLY" -eq 1 ]; then
-      rmdir "$reviews"
-      ln -s "$CANONICAL_LINK" "$reviews"
-      echo "LINKED slot=$slot target=$CANONICAL_LINK"
+      if rmdir "$reviews" && ln -s "$CANONICAL_LINK" "$reviews"; then
+        echo "LINKED slot=$slot target=$CANONICAL_LINK"
+      else
+        echo "REFUSE slot=$slot drained review directory could not be linked path=$reviews" >&2
+        refused=1
+      fi
     fi
   fi
 done < <(jq -r '.[] | [.name,.path,.status,(.processes|length)] | @tsv' "$POOL_JSON")
