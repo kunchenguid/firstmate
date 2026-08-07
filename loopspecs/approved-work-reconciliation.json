@@ -119,49 +119,49 @@
     {
       "name": "no_delta",
       "kind": "neutral",
-      "maps_to": "NOOP",
+      "maps_to": "no_delta",
       "description": "The corpus is unchanged since the last accepted iteration. Reaching this must cost no model turn."
     },
     {
       "name": "delta_emitted",
       "kind": "success",
-      "maps_to": "COMPLETE",
+      "maps_to": "goal_met",
       "description": "The corpus changed and a cited delta was emitted for firstmate to relay."
     },
     {
       "name": "confirmed_work_found",
       "kind": "success",
-      "maps_to": "COMPLETE",
+      "maps_to": "goal_met",
       "description": "At least one item is confirmed approved and still unimplemented, with approval and implementation proven separately."
     },
     {
       "name": "needs_ruling",
       "kind": "refusal",
-      "maps_to": "REFUSED",
+      "maps_to": "needs_ruling",
       "description": "An item's approval or supersession cannot be settled from evidence and requires a captain ruling. The loop stops rather than guessing."
     },
     {
       "name": "blocked_by_evidence_integrity",
       "kind": "failure",
-      "maps_to": "FAILED",
+      "maps_to": "blocked_by_evidence_integrity",
       "description": "A corpus member or decision source was unreadable, so absence of evidence could not be distinguished from evidence of absence."
     },
     {
       "name": "budget_exhausted",
       "kind": "failure",
-      "maps_to": "EXHAUSTED",
+      "maps_to": "budget_exhausted",
       "description": "An iteration, wall-clock or capacity budget was reached before the success condition was met."
     },
     {
       "name": "verification_failed",
       "kind": "failure",
-      "maps_to": "FAILED",
+      "maps_to": "verification_failed",
       "description": "The verifier ran and rejected the iteration, or was unavailable. An unavailable verifier lands here and can never become a pass."
     },
     {
       "name": "no_progress_stalled",
       "kind": "failure",
-      "maps_to": "STALLED",
+      "maps_to": "no_progress_stalled",
       "description": "Consecutive iterations produced no verifier-declared progress, so the loop stopped instead of repeating forever."
     }
   ],

@@ -29,6 +29,12 @@
 #   fm-loopspec.sh list                        id, version and status per spec
 #   fm-loopspec.sh show <id>                   print one spec
 #   fm-loopspec.sh triggers [--summary]        the sixteen-trigger register
+#   fm-loopspec.sh terminal-map [--source <s>] every source terminal state and
+#                                              the unified state it maps to
+#   fm-loopspec.sh terminal-map --unified      the unified vocabulary alone
+#   fm-loopspec.sh terminal-map --resolve <source> <state>
+#                                              resolve exactly one source state
+#   fm-loopspec.sh terminal-map --json         the whole mapping document
 #   fm-loopspec.sh select --trigger <id> [--scope <scope>]
 #                                              choose exactly one eligible spec
 #   fm-loopspec.sh claim <id> --event-key <k> --spec-version <n> [--headroom <pct>]
@@ -62,11 +68,16 @@
 #   refuse_iteration_open        another event key already holds the open iteration
 #   refuse_no_open_iteration     nothing to finish
 #   refuse_unknown_terminal      the terminal is not declared by this spec
+#   refuse_unmapped_terminal     no unified terminal state is mapped for that
+#                                source state, and one is never defaulted
 #   refuse_state_unreadable      persistent state exists but cannot be read truthfully
 #   refuse_state_unwritable      persistent state cannot be written truthfully
 #
-# The schema, the trigger register and each spec are data, owned by loopspecs/.
-# This script is their only interpreter; it never restates their content.
+# The schema, the trigger register, the terminal-state map and each spec are
+# data, owned by loopspecs/. This script is their only interpreter; it never
+# restates their content. In particular the unified terminal-state vocabulary
+# lives in terminal-states.json and is injected into schema validation as the
+# unified_terminal enum, so neither file can drift away from the other.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -100,15 +111,16 @@ need_jq() {
 
 schema_path() { printf '%s/schema.json' "$SPEC_DIR"; }
 triggers_path() { printf '%s/triggers.json' "$SPEC_DIR"; }
+terminals_path() { printf '%s/terminal-states.json' "$SPEC_DIR"; }
 
-# Every *.json under the registry except the two contract files.
+# Every *.json under the registry except the three contract files.
 spec_files() {
   local f base
   for f in "$SPEC_DIR"/*.json; do
     [ -f "$f" ] || continue
     base=$(basename "$f")
     case "$base" in
-      schema.json|triggers.json) continue ;;
+      schema.json|triggers.json|terminal-states.json) continue ;;
     esac
     printf '%s\n' "$f"
   done
@@ -138,6 +150,7 @@ validate_structure() {
   local spec_file=$1 file_id=$2 skills_json=$3 out rc
   out=$(jq -r --slurpfile schema "$(schema_path)" \
               --slurpfile triggers "$(triggers_path)" \
+              --slurpfile terminals "$(terminals_path)" \
               --arg file_id "$file_id" \
               --argjson skills "$skills_json" '
     # Identifiers are kebab-case; terminal-state names are snake_case tokens.
@@ -175,7 +188,14 @@ validate_structure() {
     . as $spec
     | $schema[0] as $S
     | $triggers[0] as $T
-    | ($S.enums) as $enums
+    | $terminals[0] as $TM
+    # The unified vocabulary is owned by terminal-states.json and injected here
+    # as an ordinary enum, so schema.json never carries a second copy of it.
+    | (((try ($TM.unified) catch null)) // []) as $unified
+    | ($S.enums + {unified_terminal: ($unified | map(.name))}) as $enums
+    | ($unified | map({key: .name, value: .kind}) | from_entries) as $unified_kind
+    | ((((try ($TM.sources[] | select(.source == "loopspec") | .map) catch null)) // [])
+       | map({key: .state, value: .unified}) | from_entries) as $loopspec_map
     | ((try ($spec.trigger.id) catch null)) as $trigger_id
     | ((try ($spec.no_progress.terminal) catch null)) as $np_terminal
     | (((try ($spec.escalation.on) catch null)) // []) as $esc_on
@@ -210,6 +230,29 @@ validate_structure() {
         ( (($esc_on - $declared)[]) | "escalation.on names an undeclared terminal state: \(.)" ),
         ( ($declared | group_by(.) | map(select(length > 1) | .[0]))[] | "duplicate terminal state: \(.)" ),
 
+        # A terminal state with no row in the map is refused outright rather
+        # than defaulted onto some plausible unified state, and a row that
+        # disagrees with the spec is refused rather than silently preferred.
+        ( (((try ($spec.terminal_states) catch null)) // [])[]
+          | select(type == "object")
+          | . as $ts
+          | (
+              ( select(($loopspec_map | has($ts.name)) | not)
+                | "terminal state \"\($ts.name)\" has no loopspec row in terminal-states.json, so no unified state is mapped for it" ),
+              # Both comparisons stand down when maps_to is absent, so the
+              # missing required field is reported as itself rather than as a
+              # mismatch against a value that was never declared.
+              ( select((($ts.maps_to | type) == "string")
+                       and ($loopspec_map | has($ts.name))
+                       and ($ts.maps_to != $loopspec_map[$ts.name]))
+                | "terminal state \"\($ts.name)\" maps_to \"\($ts.maps_to)\" but terminal-states.json maps it to \"\($loopspec_map[$ts.name])\"" ),
+              ( select((($ts.maps_to | type) == "string")
+                       and ($unified_kind | has($ts.maps_to))
+                       and ($ts.kind != $unified_kind[$ts.maps_to]))
+                | "terminal state \"\($ts.name)\" declares kind \"\($ts.kind)\" but unified state \"\($ts.maps_to)\" declares kind \"\($unified_kind[$ts.maps_to])\"" )
+            )
+        ),
+
         ( select($spec.status == "enabled")
           | (
               ( ($T.triggers[] | select(.id == $trigger_id)) as $t
@@ -237,10 +280,72 @@ validate_structure() {
   return 0
 }
 
+# Integrity of the terminal-state map itself, checked before any spec is read
+# against it. A map that is not total, not reachable or not a reduction is not a
+# map anything may be validated against.
+# Prints one line per problem, nothing when sound, non-zero if it could not run.
+terminal_map_problems() {
+  local out rc
+  out=$(jq -r '
+    def consequence($row): ($row.consequence // "");
+
+    . as $TM
+    | ((try ($TM.unified) catch null)) as $unified
+    | ((try ($TM.sources) catch null)) as $sources
+    | if ($unified | type) != "array" or ($unified | length) == 0 then
+        ["unified must be a non-empty array of terminal states"]
+      elif ($sources | type) != "array" or ($sources | length) == 0 then
+        ["sources must be a non-empty array of source vocabularies"]
+      else
+        ($unified | map(.name)) as $names
+        | ($unified | map({key: .name, value: .}) | from_entries) as $by_name
+        | [ $sources[] | .source as $s | (.map // [])[] | . + {source: $s} ] as $rows
+        | ($rows | map(.unified)) as $targets
+        | [
+            ( ($unified[] | select((.name | type) != "string" or (.kind | type) != "string"
+                                   or (.costs_model_turn | type) != "boolean"
+                                   or (.description | type) != "string"))
+              | "unified state \(.name // "?") is missing name, kind, costs_model_turn or description" ),
+            ( ($names | group_by(.) | map(select(length > 1) | .[0]))[]
+              | "duplicate unified terminal state: \(.)" ),
+            ( ($sources[] | .source as $s | (.map // []) | map(.state) | group_by(.)
+               | map(select(length > 1) | .[0])[] | "duplicate \($s) source state: \(.)") ),
+            ( $rows[] | . as $r | select(($names | index($r.unified)) == null)
+              | "\($r.source) state \"\($r.state)\" maps to \"\($r.unified)\", which is not a declared unified state" ),
+            ( $names[] as $n | select(($targets | index($n)) == null)
+              | "unified state \"\($n)\" is unreachable: no source state maps to it" ),
+            ( select(($unified | length) >= ($rows | length))
+              | "the unified vocabulary has \($unified | length) members against \($rows | length) source states, so the merge is not a reduction" ),
+            ( $sources[] | .source as $s
+              | (.map // []) | group_by(.unified)[]
+              | select((map(consequence(.)) | unique | length) > 1)
+              | . as $group
+              | $group[] | select((.distinction // "") == "")
+              | "\($s) state \"\(.state)\" shares unified state \"\(.unified)\" with a state of different consequence and does not declare how the distinction is preserved" ),
+            ( ($unified | map(select(.costs_model_turn == false))) as $free
+              | ( select(($free | length) != 1)
+                  | "exactly one unified state may cost no model turn, found \($free | length)" ),
+                ( select(($free | length) == 1 and ($free[0].name != "no_delta"))
+                  | "the zero-model-turn unified state must be no_delta, found \"\($free[0].name)\"" ) ),
+            ( select(($by_name | has("no_delta")) and ($by_name["no_delta"].kind != "neutral"))
+              | "no_delta must be neutral so reaching it can never demand a verifier verdict, found \"\($by_name["no_delta"].kind)\"" )
+          ]
+      end
+    | .[]
+  ' "$(terminals_path)")
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf 'the terminal-state map could not be read\n'
+    return 1
+  fi
+  [ -z "$out" ] || printf '%s\n' "$out"
+  return 0
+}
+
 # Registry-wide validation. Returns 0 only when every spec is sound.
 validate_registry() {
   local -a files=()
-  local f base file_id problems skills_json rc=0 count=0 dupes
+  local f base file_id problems skills_json rc=0 count=0 dupes map_problems
 
   if [ "$#" -gt 0 ]; then
     files=("$@")
@@ -253,8 +358,22 @@ validate_registry() {
 
   [ -f "$(schema_path)" ] || { printf 'refuse_invalid_spec registry schema is missing: %s\n' "$(schema_path)" >&2; return 1; }
   [ -f "$(triggers_path)" ] || { printf 'refuse_invalid_spec trigger register is missing: %s\n' "$(triggers_path)" >&2; return 1; }
+  [ -f "$(terminals_path)" ] || { printf 'refuse_invalid_spec terminal-state map is missing: %s\n' "$(terminals_path)" >&2; return 1; }
   jq -e . "$(schema_path)" >/dev/null 2>&1 || { printf 'refuse_invalid_spec registry schema is not readable JSON\n' >&2; return 1; }
   jq -e . "$(triggers_path)" >/dev/null 2>&1 || { printf 'refuse_invalid_spec trigger register is not readable JSON\n' >&2; return 1; }
+  jq -e . "$(terminals_path)" >/dev/null 2>&1 || { printf 'refuse_invalid_spec terminal-state map is not readable JSON\n' >&2; return 1; }
+
+  # The map is checked before any spec, because a spec is only ever validated
+  # against it and an unsound map would let an unsound spec read as sound.
+  map_problems=$(terminal_map_problems) || rc=1
+  if [ -n "$map_problems" ]; then
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      printf 'refuse_invalid_spec terminal-states.json: %s\n' "$line" >&2
+    done <<<"$map_problems"
+    return 1
+  fi
+  [ "$rc" -eq 0 ] || return 1
 
   skills_json=$(installed_skills_json)
 
@@ -396,6 +515,12 @@ cmd_show() {
   need_jq
   [ "$#" -eq 1 ] || die_usage "show requires exactly one spec id"
   local path
+  # The contract files share the registry directory but are not specs, so they
+  # are unknown here exactly as they are absent from list and from the count.
+  case "$1" in
+    schema|triggers|terminal-states)
+      refuse refuse_unknown_spec "\"$1\" is a registry contract file, not a spec" ;;
+  esac
   path=$(spec_path_for "$1")
   [ -f "$path" ] || refuse refuse_unknown_spec "no spec with id \"$1\" in $SPEC_DIR"
   cat "$path"
@@ -433,6 +558,80 @@ cmd_triggers() {
     .triggers[]
     | "\(.id)\tdetector=\(.detector_status)\tdeterministic=\(.deterministically_selectable)\texec_path=\(.execution_path_implemented)\tverified=\(.verified)\tenabled=\(.enabled)"
   ' "$(triggers_path)"
+}
+
+cmd_terminal_map() {
+  need_jq
+  local mode="rows" source="" resolve_source="" resolve_state=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --source) [ "$#" -gt 1 ] || die_usage "--source requires a value"; source=$2; shift 2 ;;
+      --unified) mode="unified"; shift ;;
+      --json) mode="json"; shift ;;
+      --resolve)
+        [ "$#" -gt 2 ] || die_usage "--resolve requires <source> <state>"
+        mode="resolve"; resolve_source=$2; resolve_state=$3; shift 3 ;;
+      *) die_usage "unknown option for terminal-map: $1" ;;
+    esac
+  done
+  [ -f "$(terminals_path)" ] || refuse refuse_invalid_spec "terminal-state map is missing"
+  jq -e . "$(terminals_path)" >/dev/null 2>&1 \
+    || refuse refuse_invalid_spec "terminal-state map is not readable JSON"
+
+  # Nothing may be resolved out of a map that does not hold together, because a
+  # broken map would answer confidently and wrongly.
+  local map_problems
+  map_problems=$(terminal_map_problems) \
+    || refuse refuse_invalid_spec "the terminal-state map could not be read"
+  [ -z "$map_problems" ] \
+    || refuse refuse_invalid_spec "terminal-state map: $(printf '%s' "$map_problems" | head -1)"
+
+  case "$mode" in
+    json)
+      cat "$(terminals_path)"
+      ;;
+    unified)
+      # The unified state is bound to $u before counting, so the comparison
+      # cannot shadow itself against the row it is filtering.
+      jq -r '
+        . as $TM
+        | [ $TM.sources[] | (.map // [])[] | .unified ] as $targets
+        | $TM.unified[]
+        | . as $u
+        | "\($u.name)\t\($u.kind)\tcosts_model_turn=\($u.costs_model_turn)\tsources=\([$targets[] | select(. == $u.name)] | length)"
+      ' "$(terminals_path)"
+      ;;
+    rows)
+      jq -r --arg src "$source" '
+        . as $TM
+        | ($TM.unified | map({key: .name, value: .}) | from_entries) as $by_name
+        | $TM.sources[]
+        | select($src == "" or .source == $src)
+        | .source as $s
+        | (.map // [])[]
+        | "\($s)\t\(.state)\t\(.unified)\t\($by_name[.unified].kind)\tcosts_model_turn=\($by_name[.unified].costs_model_turn)"
+      ' "$(terminals_path)"
+      ;;
+    resolve)
+      local resolved
+      resolved=$(jq -r --arg src "$resolve_source" --arg st "$resolve_state" '
+        . as $TM
+        | ($TM.unified | map({key: .name, value: .}) | from_entries) as $by_name
+        | [ $TM.sources[] | select(.source == $src) | (.map // [])[] | select(.state == $st) ]
+        | if length == 1 then
+            .[0] as $r | "\($r.unified)\t\($by_name[$r.unified].kind)\t\($by_name[$r.unified].costs_model_turn)"
+          else empty
+          end
+      ' "$(terminals_path)")
+      [ -n "$resolved" ] || refuse refuse_unmapped_terminal \
+        "no unified terminal state is mapped for \"$resolve_state\" in source \"$resolve_source\""
+      printf 'LOOPSPEC_TERMINAL_MAP %s %s -> %s kind=%s costs_model_turn=%s\n' \
+        "$resolve_source" "$resolve_state" \
+        "$(printf '%s' "$resolved" | cut -f1)" \
+        "$(printf '%s' "$resolved" | cut -f2)" \
+        "$(printf '%s' "$resolved" | cut -f3)"
+      ;;
+  esac
 }
 
 cmd_select() {
@@ -674,6 +873,7 @@ case "$COMMAND" in
   list) cmd_list "$@" ;;
   show) cmd_show "$@" ;;
   triggers) cmd_triggers "$@" ;;
+  terminal-map) cmd_terminal_map "$@" ;;
   select) cmd_select "$@" ;;
   claim) cmd_claim "$@" ;;
   finish) cmd_finish "$@" ;;

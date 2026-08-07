@@ -35,6 +35,9 @@ Never write a private loop runner to bypass this substrate, and never schedule w
 4. Record the outcome with `finish`, naming the terminal the evidence supports.
 5. Read the resulting terminal state, then follow the spec's escalation entry for it.
 
+Terminal states are not a per-spec invention: `loopspecs/terminal-states.json` owns the unified terminal-state vocabulary and the total mapping onto it from every source vocabulary that names the same facts, and `fm-loopspec.sh terminal-map` reads it.
+A state with no row there is refused rather than mapped to whatever looks closest, so add the row before adding the state.
+
 ## A refusal is a stop
 
 Every refusal token is a fail-closed result, never an obstacle to route around.

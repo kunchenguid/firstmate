@@ -37,6 +37,7 @@ new_case() {
   local d="$TMP_ROOT/$1"
   mkdir -p "$d/registry" "$d/state"
   cp "$ROOT/loopspecs/schema.json" "$d/registry/schema.json"
+  cp "$ROOT/loopspecs/terminal-states.json" "$d/registry/terminal-states.json"
   cat >"$d/registry/triggers.json" <<'JSON'
 {
   "loopspec_schema_version": 1,
@@ -653,6 +654,294 @@ test_shipped_instance_references_rather_than_duplicates_its_skill() {
   pass "the shipped instance names the research-approved-work skill, and the contract has nowhere to duplicate it"
 }
 
+# --- the unified terminal-state vocabulary ----------------------------------
+#
+# Two systems previously named the same terminal facts twice: a LoopSpec
+# finalising on no_progress_stalled and the platform execution node finalising
+# on iteration-cap-failed are one fact under two names. terminal-states.json
+# now names each fact once and records where every source name lands.
+#
+# The execution-node side is pinned here as literal names rather than read from
+# the platform, because that repository is not present in CI. These are the
+# eight FINALIZE_MATRIX outcomes of scripts/runtime_execution_node.py at
+# platform commit 5d86b7e; the pin is what makes a platform-side change to the
+# vocabulary show up as a failing test here rather than as silent drift.
+NODE_FINALIZE_OUTCOMES="context-ceiling budget-finish finish-signal timeout stop-signal iteration-cap-clean iteration-cap-failed unclassified"
+
+# map_case <name> <jq-filter> - a registry whose terminal-state map is the real
+# one put through <jq-filter>; echoes "<registry> <state>".
+map_case() {
+  local d="$TMP_ROOT/$1" filter=$2
+  mkdir -p "$d/registry" "$d/state"
+  cp "$ROOT/loopspecs/schema.json" "$d/registry/schema.json"
+  cp "$ROOT/loopspecs/triggers.json" "$d/registry/triggers.json"
+  cp "$ROOT/loopspecs/approved-work-reconciliation.json" "$d/registry/"
+  jq "$filter" "$ROOT/loopspecs/terminal-states.json" >"$d/registry/terminal-states.json" \
+    || fail "could not build terminal-state map fixture $1"
+  printf '%s %s\n' "$d/registry" "$d/state"
+}
+
+test_an_unmapped_terminal_state_is_refused_not_defaulted() {
+  local reg st
+  read -r reg st < <(new_case unmapped-refused)
+  write_spec "$reg" good "$READY"
+
+  # The negative controls come first. A resolver that answers everything
+  # confidently proves nothing by answering a real state correctly.
+  ls_run "$reg" "$st" terminal-map --resolve loopspec not_a_terminal_state
+  expect_code 1 "$CODE" "an unmapped loopspec state resolved instead of refusing"
+  assert_contains "$OUT" "refuse_unmapped_terminal" "an unmapped state did not refuse"
+
+  ls_run "$reg" "$st" terminal-map --resolve execution-node not-a-finalize-outcome
+  expect_code 1 "$CODE" "an unmapped execution-node state resolved instead of refusing"
+  assert_contains "$OUT" "refuse_unmapped_terminal" "an unmapped node outcome did not refuse"
+
+  ls_run "$reg" "$st" terminal-map --resolve not-a-source no_delta
+  expect_code 1 "$CODE" "an unknown source vocabulary resolved instead of refusing"
+  assert_contains "$OUT" "refuse_unmapped_terminal" "an unknown source did not refuse"
+
+  # A state one of the two sides does declare is still refused on the other,
+  # so the two vocabularies cannot leak into each other through the resolver.
+  ls_run "$reg" "$st" terminal-map --resolve loopspec timeout
+  expect_code 1 "$CODE" "a node outcome resolved against the loopspec vocabulary"
+  ls_run "$reg" "$st" terminal-map --resolve execution-node no_delta
+  expect_code 1 "$CODE" "a loopspec state resolved against the node vocabulary"
+
+  ls_run "$reg" "$st" terminal-map --resolve loopspec no_delta
+  expect_code 0 "$CODE" "a mapped state refused: $OUT"
+  assert_contains "$OUT" "LOOPSPEC_TERMINAL_MAP loopspec no_delta -> no_delta" \
+    "the mapped state did not resolve to its unified state"
+
+  # The map is a registry contract file, not a spec: it is never listed,
+  # never shown and never counted, so it can never be selected or claimed.
+  ls_run "$reg" "$st" list
+  assert_not_contains "$OUT" "terminal-states" "the terminal-state map was listed as a spec"
+  ls_run "$reg" "$st" show terminal-states
+  expect_code 1 "$CODE" "the terminal-state map was shown as a spec"
+  assert_contains "$OUT" "refuse_unknown_spec" "showing a contract file did not refuse"
+  ls_run "$reg" "$st" validate
+  expect_code 0 "$CODE" "the fixture registry did not validate: $OUT"
+  assert_contains "$OUT" "specs=1" "the terminal-state map was counted as a spec"
+
+  pass "an unmapped terminal state refuses on both sides rather than defaulting to a plausible unified state"
+}
+
+test_the_mapping_is_total_in_both_directions() {
+  local reg st name unified declared rows
+  read -r reg st < <(new_case mapping-total)
+  write_spec "$reg" good "$READY"
+
+  # Direction one: every terminal state the shipped spec declares resolves to
+  # exactly one unified state.
+  declared=$(jq -r '.terminal_states[].name' "$SPEC_SOURCE")
+  [ -n "$declared" ] || fail "the shipped instance declares no terminal states"
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    ls_run "$reg" "$st" terminal-map --resolve loopspec "$name"
+    expect_code 0 "$CODE" "declared terminal state $name does not map: $OUT"
+    unified=$(printf '%s\n' "$OUT" | awk '/LOOPSPEC_TERMINAL_MAP/ {print $5}')
+    [ -n "$unified" ] || fail "terminal state $name resolved to nothing"
+    [ "$(printf '%s\n' "$OUT" | grep -c 'LOOPSPEC_TERMINAL_MAP')" -eq 1 ] \
+      || fail "terminal state $name resolved to more than one unified state"
+  done <<<"$declared"
+
+  # Direction two: every finalize outcome the platform declares resolves too.
+  for name in $NODE_FINALIZE_OUTCOMES; do
+    ls_run "$reg" "$st" terminal-map --resolve execution-node "$name"
+    expect_code 0 "$CODE" "node outcome $name does not map: $OUT"
+    [ "$(printf '%s\n' "$OUT" | grep -c 'LOOPSPEC_TERMINAL_MAP')" -eq 1 ] \
+      || fail "node outcome $name resolved to more than one unified state"
+  done
+
+  # And the map carries no node row the platform does not actually have, so the
+  # pin above cannot pass by being a subset of an invented vocabulary.
+  rows=$(ls_run "$reg" "$st" terminal-map --source execution-node; printf '%s' "$OUT")
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    case " $NODE_FINALIZE_OUTCOMES " in
+      *" $name "*) ;;
+      *) fail "the map records node outcome $name, which the platform matrix does not declare" ;;
+    esac
+  done < <(printf '%s\n' "$rows" | awk -F'\t' 'NF > 1 {print $2}')
+
+  pass "every terminal state in both vocabularies maps to exactly one unified state, and the map invents none"
+}
+
+test_the_merge_is_a_reduction_with_nothing_unreachable() {
+  local reg st unified_count source_count reachable
+
+  ls_run "$ROOT/loopspecs" "$TMP_ROOT/shipped-state" terminal-map --unified
+  expect_code 0 "$CODE" "the unified vocabulary could not be read: $OUT"
+  unified_count=$(printf '%s\n' "$OUT" | grep -c 'costs_model_turn=')
+  ls_run "$ROOT/loopspecs" "$TMP_ROOT/shipped-state" terminal-map
+  expect_code 0 "$CODE" "the mapping rows could not be read: $OUT"
+  source_count=$(printf '%s\n' "$OUT" | grep -c 'costs_model_turn=')
+
+  [ "$unified_count" -lt "$source_count" ] \
+    || fail "the merged vocabulary has $unified_count members against $source_count source states, so it is not a reduction"
+
+  # No unified state may exist that nothing can reach, because an unreachable
+  # state is a claim about behaviour that cannot happen.
+  ls_run "$ROOT/loopspecs" "$TMP_ROOT/shipped-state" terminal-map --unified
+  reachable=$(printf '%s\n' "$OUT" | awk -F'sources=' 'NF > 1 && $2 + 0 == 0 {print}')
+  [ -z "$reachable" ] || fail "unified states no source state reaches: $reachable"
+
+  # The reduction claim is only meaningful if the validator can reject its
+  # opposite, so watch it reject a map that is not one.
+  # One unified state per source state: everything is still reachable and every
+  # other invariant still holds, so only the reduction claim can fail here.
+  read -r reg st < <(map_case not-a-reduction '
+    .unified = ([ .sources[] | .map[] | (.state | gsub("-"; "_"))
+                  | {name: ., kind: "failure", costs_model_turn: true, description: "one name per source state"} ]
+                | map(if .name == "no_delta" then .kind = "neutral" | .costs_model_turn = false else . end))
+    | .sources = (.sources | map(.map = (.map | map(.unified = (.state | gsub("-"; "_"))))))')
+  ls_run "$reg" "$st" validate
+  expect_code 1 "$CODE" "a map that renames rather than reduces was accepted"
+  assert_contains "$OUT" "so the merge is not a reduction" "the missing reduction was not named"
+
+  read -r reg st < <(map_case unreachable-unified \
+    '.unified += [{"name": "orphan_state", "kind": "failure", "costs_model_turn": true, "description": "nothing maps here"}]')
+  ls_run "$reg" "$st" validate
+  expect_code 1 "$CODE" "an unreachable unified state was accepted"
+  assert_contains "$OUT" "is unreachable" "the unreachable unified state was not named"
+
+  read -r reg st < <(map_case undeclared-target '.sources[0].map[0].unified = "invented_state"')
+  ls_run "$reg" "$st" validate
+  expect_code 1 "$CODE" "a row mapping to an undeclared unified state was accepted"
+  assert_contains "$OUT" "not a declared unified state" "the undeclared target was not named"
+
+  pass "the merged vocabulary is strictly smaller than the sum, nothing is unreachable, and the validator rejects the opposite of each claim"
+}
+
+test_no_terminal_state_loses_its_distinction_in_the_merge() {
+  local reg st collapsed
+
+  # Where the merge does collapse two source names onto one unified state, the
+  # map must say where the difference they used to carry still lives. This is
+  # the certification clause made mechanical rather than left as prose.
+  read -r reg st < <(map_case undeclared-collapse \
+    'del(.sources[] | select(.source == "execution-node") | .map[] | select(.state == "timeout") | .distinction)')
+  ls_run "$reg" "$st" validate
+  expect_code 1 "$CODE" "a collapse across differing consequences was accepted without a declared distinction"
+  assert_contains "$OUT" "does not declare how the distinction is preserved" \
+    "the undeclared collapse was not named"
+
+  # Only now does the shipped map's silence mean something.
+  ls_run "$ROOT/loopspecs" "$TMP_ROOT/shipped-state" validate
+  expect_code 0 "$CODE" "the shipped registry no longer validates: $OUT"
+
+  # Every collapse in the shipped map is declared, and the states that carry
+  # different consequences are not collapsed at all: the node's clean and
+  # failed iteration caps land on different unified states.
+  ls_run "$ROOT/loopspecs" "$TMP_ROOT/shipped-state" terminal-map --resolve execution-node iteration-cap-clean
+  expect_code 0 "$CODE" "iteration-cap-clean does not map: $OUT"
+  collapsed=$(printf '%s\n' "$OUT" | awk '/LOOPSPEC_TERMINAL_MAP/ {print $5}')
+  ls_run "$ROOT/loopspecs" "$TMP_ROOT/shipped-state" terminal-map --resolve execution-node iteration-cap-failed
+  expect_code 0 "$CODE" "iteration-cap-failed does not map: $OUT"
+  [ "$collapsed" != "$(printf '%s\n' "$OUT" | awk '/LOOPSPEC_TERMINAL_MAP/ {print $5}')" ] \
+    || fail "a clean and a failed iteration cap collapsed onto the same unified state"
+
+  # The one fact this increment exists to name once: the node's failed
+  # iteration cap and the loop's stall are the same terminal.
+  assert_contains "$OUT" "-> no_progress_stalled" \
+    "iteration-cap-failed no longer unifies with the loop's no_progress_stalled"
+
+  pass "a collapse that would drop a distinction is refused, and the two vocabularies' matching facts unify onto one name"
+}
+
+test_no_delta_still_costs_no_model_turn() {
+  local reg st free kind
+
+  # The property, as the vocabulary declares it: exactly one unified state may
+  # be reached without spending a model turn, and it is no_delta.
+  ls_run "$ROOT/loopspecs" "$TMP_ROOT/shipped-state" terminal-map --unified
+  expect_code 0 "$CODE" "the unified vocabulary could not be read: $OUT"
+  free=$(printf '%s\n' "$OUT" | awk -F'\t' '$3 == "costs_model_turn=false" {print $1}')
+  [ "$free" = "no_delta" ] \
+    || fail "the zero-model-turn state should be exactly no_delta, got: ${free:-none}"
+  kind=$(printf '%s\n' "$OUT" | awk -F'\t' '$1 == "no_delta" {print $2}')
+  [ "$kind" = "neutral" ] \
+    || fail "no_delta must stay neutral so reaching it can never demand a verifier verdict, got: $kind"
+
+  # Dropping or moving the property is refused, so its presence is a fact the
+  # validator holds rather than a comment someone remembered to keep.
+  read -r reg st < <(map_case zero-turn-dropped \
+    '(.unified[] | select(.name == "no_delta")).costs_model_turn = true')
+  ls_run "$reg" "$st" validate
+  expect_code 1 "$CODE" "a vocabulary with no zero-model-turn state was accepted"
+
+  read -r reg st < <(map_case zero-turn-moved \
+    '(.unified[] | select(.name == "no_delta")).costs_model_turn = true
+     | (.unified[] | select(.name == "cancelled")).costs_model_turn = false')
+  ls_run "$reg" "$st" validate
+  expect_code 1 "$CODE" "the zero-model-turn property was allowed to move off no_delta"
+  assert_contains "$OUT" "must be no_delta" "the moved property was not named"
+
+  read -r reg st < <(map_case zero-turn-not-neutral \
+    '(.unified[] | select(.name == "no_delta")).kind = "failure"')
+  ls_run "$reg" "$st" validate
+  expect_code 1 "$CODE" "no_delta was allowed to stop being neutral"
+
+  # And the property behaviourally: reaching no_delta demands no verifier
+  # verdict and no evidence, which is what "costs no model turn" means in
+  # practice. The negative control is the same call against a success terminal.
+  read -r reg st < <(new_case zero-turn-behaviour)
+  write_spec "$reg" loop "$READY"
+  ls_run "$reg" "$st" claim loop --event-key sha-1 --spec-version 1 --headroom 90
+  expect_code 0 "$CODE" "the iteration could not be claimed: $OUT"
+  ls_run "$reg" "$st" finish loop --event-key sha-1 --terminal delta_emitted --verifier-result unavailable
+  expect_code 1 "$CODE" "a success terminal was reachable without a verifier verdict"
+  ls_run "$reg" "$st" finish loop --event-key sha-1 --terminal no_delta --verifier-result unavailable
+  expect_code 0 "$CODE" "no_delta demanded a verifier verdict it must never need: $OUT"
+  assert_contains "$OUT" "terminal=no_delta kind=neutral" "no_delta was not recorded as the neutral terminal"
+
+  pass "no_delta survives the merge as the one terminal reachable without spending a model turn"
+}
+
+test_a_spec_terminal_cannot_drift_from_the_map() {
+  local reg st
+
+  read -r reg st < <(new_case terminal-drift)
+
+  write_spec "$reg" no-mapping "$READY | del(.terminal_states[0].maps_to)"
+  ls_run "$reg" "$st" validate
+  expect_code 1 "$CODE" "a terminal state with no unified mapping was accepted"
+  assert_contains "$OUT" "missing required field: terminal_states[].maps_to" \
+    "the missing mapping was not named"
+  rm -f "$reg/no-mapping.json"
+
+  write_spec "$reg" invented-mapping "$READY | .terminal_states[0].maps_to = \"PROBABLY_FINE\""
+  ls_run "$reg" "$st" validate
+  expect_code 1 "$CODE" "a terminal state mapping outside the unified vocabulary was accepted"
+  rm -f "$reg/invented-mapping.json"
+
+  write_spec "$reg" wrong-mapping "$READY | .terminal_states[0].maps_to = \"cancelled\""
+  ls_run "$reg" "$st" validate
+  expect_code 1 "$CODE" "a terminal state disagreeing with the map was accepted"
+  assert_contains "$OUT" "but terminal-states.json maps it to" "the disagreement was not named"
+  rm -f "$reg/wrong-mapping.json"
+
+  write_spec "$reg" unmapped-name \
+    "$READY | .terminal_states[0].name = \"invented_terminal\" | .no_progress.terminal = \"no_progress_stalled\""
+  ls_run "$reg" "$st" validate
+  expect_code 1 "$CODE" "a terminal state absent from the map was accepted"
+  assert_contains "$OUT" "has no loopspec row in terminal-states.json" \
+    "the unmapped terminal state was not named"
+  rm -f "$reg/unmapped-name.json"
+
+  write_spec "$reg" wrong-kind "$READY | .terminal_states[1].kind = \"failure\""
+  ls_run "$reg" "$st" validate
+  expect_code 1 "$CODE" "a terminal state contradicting its unified kind was accepted"
+  assert_contains "$OUT" "declares kind" "the kind disagreement was not named"
+  rm -f "$reg/wrong-kind.json"
+
+  write_spec "$reg" good "$READY"
+  ls_run "$reg" "$st" validate
+  expect_code 0 "$CODE" "a correctly mapped spec was refused: $OUT"
+
+  pass "a spec terminal state that is unmapped, invented, disagreeing or miskinded is refused rather than defaulted"
+}
+
 test_trigger_register_reports_one_of_sixteen() {
   ls_run "$ROOT/loopspecs" "$TMP_ROOT/shipped-state" triggers --summary
   expect_code 0 "$CODE" "the trigger summary failed: $OUT"
@@ -696,4 +985,10 @@ test_unwritable_state_refuses_rather_than_running_unrecorded
 test_finishing_without_an_open_iteration_refuses
 test_shipped_registry_is_valid_and_inert
 test_shipped_instance_references_rather_than_duplicates_its_skill
+test_an_unmapped_terminal_state_is_refused_not_defaulted
+test_the_mapping_is_total_in_both_directions
+test_the_merge_is_a_reduction_with_nothing_unreachable
+test_no_terminal_state_loses_its_distinction_in_the_merge
+test_no_delta_still_costs_no_model_turn
+test_a_spec_terminal_cannot_drift_from_the_map
 test_trigger_register_reports_one_of_sixteen
