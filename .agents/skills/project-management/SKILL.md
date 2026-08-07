@@ -19,7 +19,8 @@ It does not replace `secondmate-provisioning`, which owns project clones inside 
 
 ## Preconditions and registry
 
-Projects live flat under `projects/`, and `data/projects.md` is the private fleet registry.
+Home-owned project clones live flat under `projects/`, and `data/projects.md` is the private fleet registry.
+An intentionally registered external checkout must use the structured absolute `path=/absolute/project` identity in that registry instead of putting a path in the description.
 Use the registry format and parser contract owned by the header of `bin/fm-project-mode.sh`.
 Keep each registry description useful for identifying the project, but keep delivery posture, captain-private state, and detailed project knowledge in their existing designated homes.
 Do not turn the registry into project documentation.
@@ -56,6 +57,7 @@ Default it off for every project and every posture, and enable it only on the ca
 
 Confirm the source URL, local project name, delivery posture, and autonomy posture, stating the resolved default for each rather than asking the captain to invent one.
 Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
+When the captain explicitly chooses an existing checkout outside the home-owned `projects/` tree, register its absolute path identity in `data/projects.md` and keep the description as description only.
 A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because a conditional policy's product-facing work runs the pipeline while its internal-only work still takes the direct PR.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
 A `local-only` project may have no remote and skips no-mistakes initialization.
