@@ -711,7 +711,7 @@ clear_actionable_run_state_surfaced() {  # <task>
   rm -f "$(actionable_run_state_surfaced_path "$1")"
 }
 
-surface_actionable_run_state_if_new() {  # <window> <task> <hash> <crew-state-line>
+surface_actionable_run_state_if_new() {  # <window> <task> <hash> <crew-state-line> [pause-throttle]
   local win=$1 task=$2 h=$3 crew_state=$4 actionable_run_state actionable_run_state_marker key
   actionable_run_state=$(crew_actionable_run_state_line_from_state_line "$crew_state" || true)
   [ -n "$actionable_run_state" ] || return 1
@@ -724,7 +724,20 @@ surface_actionable_run_state_if_new() {  # <window> <task> <hash> <crew-state-li
   rm -f "$STATE/.stale-since-$key"
   mark_surfaced "$STATE/$task.status"
   mark_actionable_run_state_surfaced "$task" "$actionable_run_state_marker"
+  if [ "${5:-}" = pause-throttle ]; then
+    : > "$STATE/.paused-$key"
+    date +%s > "$STATE/.paused-rechecked-$key"
+    date +%s > "$STATE/.paused-resurfaced-$key"
+  fi
   wake "stale: $win"
+}
+
+surface_paused_actionable_run_state_if_new() {  # <window> <task> <hash>
+  local win=$1 task=$2 h=$3 last crew_state
+  last=$(last_status_line "$STATE/$task.status")
+  status_is_paused_or_captain_held "$last" || return 1
+  crew_state=$(crew_state_line "$task" || true)
+  surface_actionable_run_state_if_new "$win" "$task" "$h" "$crew_state" pause-throttle
 }
 
 # Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
@@ -1156,7 +1169,9 @@ EOF
       if [ "$n" -ge 2 ] && [ "$busy_now" -ne 0 ]; then
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
-        if [ "$kind" = secondmate ]; then
+        if ! afk_present && surface_paused_actionable_run_state_if_new "$w" "$task" "$h"; then
+          :
+        elif [ "$kind" = secondmate ]; then
           case "$(pause_state_class "$w" "$task")" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;
             *)      clear_pause_tracking "$w" ;;
@@ -1298,10 +1313,14 @@ EOF
       fi
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
-        case "$(pause_state_class "$w" "$task")" in
-          paused) handle_paused_stale "$w" "$task" "$h" ;;
-          *)      clear_pause_tracking "$w" ;;
-        esac
+        if surface_paused_actionable_run_state_if_new "$w" "$task" "$h"; then
+          :
+        else
+          case "$(pause_state_class "$w" "$task")" in
+            paused) handle_paused_stale "$w" "$task" "$h" ;;
+            *)      clear_pause_tracking "$w" ;;
+          esac
+        fi
       elif [ "$paused_bound" -ne 0 ] && [ -e "$pf" ]; then
         # Same rule as the stable-hash branch: never clear pause bookkeeping the
         # declared-pause cadence recorded on this very poll.
