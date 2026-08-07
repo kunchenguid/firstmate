@@ -25,6 +25,10 @@
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
 #       proving the watcher's own absorb-only-when-provably-working predicate
 #       benefits from the fix in both directions.
+#   (l) a live pipeline-owned run whose advanced head is not in this object
+#       store is attributed from branch_sync, never replaced by the superseded
+#       run it succeeded (the 2026-08-07 grok-stop-guard incident), with the
+#       binding's head, run, and state guards each pinned by a divergence.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1309,6 +1313,194 @@ test_missing_run_head_falls_back_to_current_state() {
   pass "missing run head falls back instead of matching by branch"
 }
 
+# --- pipeline-owned attribution (2026-08-07 grok-stop-guard incident) --------
+#
+# An in-flight run commits its fixes inside the gate repo
+# (~/.no-mistakes/repos/<id>.git), a SEPARATE object store that reaches the
+# crew's checkout only when custody returns. These fixtures reproduce that with
+# real git: a real clone stands in for the gate, so a pipeline-advanced head
+# genuinely does not resolve in the crew worktree, exactly as it does live.
+#
+# <wt> ends on branch <branch> at C1 with C2 also in its object store (run 1's
+# published head), while <gate> holds C1..C3 - C3 being the live run's advanced
+# head, absent from <wt>. Echoes "C1 C2 C3".
+make_gate_advanced_branch() {  # <wt> <gate> <branch>
+  local wt=$1 gate=$2 branch=$3 c1 c2 c3
+  make_repo_on_branch "$wt" "$branch"
+  c1=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" commit -q --allow-empty -m 'no-mistakes(document): sync docs'
+  c2=$(git -C "$wt" rev-parse HEAD)
+  git clone -q "$wt" "$gate"
+  git -C "$wt" reset -q --hard "$c1"
+  git -C "$gate" commit -q --allow-empty -m 'no-mistakes(review): tighten criterion'
+  c3=$(git -C "$gate" rev-parse HEAD)
+  git -C "$wt" rev-parse --verify "$c2^{commit}" >/dev/null 2>&1 \
+    || fail "fixture: run 1 head must be present in the crew worktree"
+  ! git -C "$wt" rev-parse --verify "$c3^{commit}" >/dev/null 2>&1 \
+    || fail "fixture: live pipeline head must be absent from the crew worktree"
+  printf '%s %s %s\n' "$c1" "$c2" "$c3"
+}
+
+# `axi status` for a run the pipeline currently owns, in the real v1.41.2 shape
+# (captured from a live run): run.head is the pipeline-ADVANCED head, while the
+# branch_sync block - computed by no-mistakes inside the crew's own worktree -
+# reports the local branch and head it was computed against.
+run_pipeline_owned() {  # <branch> <run-head> <sync-state> <sync-branch> <sync-head> <sync-run>
+  cat <<EOF
+run:
+  id: "01RUN2"
+  branch: $1
+  status: running
+  head: $2
+  pr: ""
+  findings: none
+  steps[3]{step,status,findings,duration_ms}:
+    intent,completed,0,84949
+    review,completed,0,425219
+    document,running,0,0
+branch_sync:
+  state: $3
+  changed: false
+  local:
+    branch: $4
+    head: $5
+    clean: true
+  pipeline:
+    run: "$6"
+    status: running
+    phase: ""
+    submitted_head: $2
+    current_head: $2
+  relation: behind
+  safety: blocked_pipeline_owned
+EOF
+}
+
+# The incident itself: a healthy running run reported as `failed`. Its advanced
+# head was unresolvable here, so head-binding rejected it and the coarse
+# runs-list lookup - which carries no run id and keys only on branch and
+# recency - attributed the terminal-failed run it had already superseded.
+test_pipeline_owned_run_beats_superseded_row() {
+  reset_fakes
+  local d heads c1 c2 c3 out
+  d=$(new_case pipeline-owned)
+  heads=$(make_gate_advanced_branch "$d/wt" "$d/gate" fm/feat-owned)
+  read -r c1 c2 c3 <<< "$heads"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/owned.meta" "window=fm:fm-owned" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned fm/feat-owned "${c3:0:8}" pipeline_owned fm/feat-owned "$c1" 01RUN2)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-owned ${c3:0:8}  2026-08-07 20:15
+  failed     fm/feat-owned ${c2:0:8}  2026-08-07 19:47
+EOF
+)"
+  out=$(run_crew_state "$d" owned)
+  assert_contains "$out" "source: run-step" "pipeline-owned run is attributed from branch_sync"
+  assert_contains "$out" "state: working" "the CURRENT run's real state is reported"
+  assert_not_contains "$out" "state: failed" "the superseded run must not become the verdict"
+  pass "pipeline-owned run outranks a superseded same-branch row"
+}
+
+# The coarse lookup's own guard, with no branch_sync to fall back on (the run
+# `axi status` answers for belongs to another crew's branch). The branch's
+# newest row is its current run; when that row cannot be bound here, every older
+# row for the same branch is a run it has already superseded, so the lookup must
+# report no run rather than scan on to a stale one.
+test_superseded_coarse_row_not_attributed() {
+  reset_fakes
+  local d heads c1 c2 c3 out
+  d=$(new_case coarse-superseded)
+  heads=$(make_gate_advanced_branch "$d/wt" "$d/gate" fm/feat-coarse)
+  read -r c1 c2 c3 <<< "$heads"
+  [ "$(git -C "$d/wt" rev-parse HEAD)" = "$c1" ] || fail "fixture: worktree must sit on the pre-pipeline head"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/coarse.meta" "window=fm:fm-coarse" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementation in progress\n' > "$d/state/coarse.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-07 20:20
+  running    fm/feat-coarse ${c3:0:8}  2026-08-07 20:15
+  failed     fm/feat-coarse ${c2:0:8}  2026-08-07 19:47
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" coarse
+  out=$(run_crew_state "$d" coarse)
+  assert_not_contains "$out" "source: run-step" "an unbindable newest row must not fall through to an older run"
+  assert_not_contains "$out" "state: failed" "the superseded run must not become the verdict"
+  assert_contains "$out" "source: status-log" "falls back to current-state sources instead"
+  pass "a superseded same-branch row is never attributed"
+}
+
+# Preserved protection, asserted as a divergence so no arm can go quietly
+# vacuous: ONE fixture, varying one branch_sync field at a time. branch_sync
+# attributes the run only while it names this worktree's own head and the run it
+# was reported alongside, so a block computed against a head this checkout is
+# not on, or carried over from another run, still falls back. Attribution is
+# never by branch name alone.
+test_pipeline_owned_binding_is_bound_to_this_run_and_head() {
+  reset_fakes
+  local d heads c1 c2 c3 out
+  d=$(new_case pipeline-owned-binding)
+  heads=$(make_gate_advanced_branch "$d/wt" "$d/gate" fm/feat-binding)
+  read -r c1 c2 c3 <<< "$heads"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/binding.meta" "window=fm:fm-binding" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementation in progress\n' > "$d/state/binding.status"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" binding
+
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned fm/feat-binding "${c3:0:8}" pipeline_owned fm/feat-binding "$c1" 01RUN2)"
+  out=$(run_crew_state "$d" binding)
+  assert_contains "$out" "source: run-step" "branch_sync naming this head and run attributes it"
+
+  # Same run, but branch_sync was computed against C2 - not this checkout.
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned fm/feat-binding "${c3:0:8}" pipeline_owned fm/feat-binding "$c2" 01RUN2)"
+  out=$(run_crew_state "$d" binding)
+  assert_not_contains "$out" "source: run-step" "branch_sync for another head must not attribute the run"
+  assert_contains "$out" "source: status-log" "falls back to current-state sources instead"
+
+  # Same head, but branch_sync describes a different run than the one reported.
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned fm/feat-binding "${c3:0:8}" pipeline_owned fm/feat-binding "$c1" 01OTHER)"
+  out=$(run_crew_state "$d" binding)
+  assert_not_contains "$out" "source: run-step" "branch_sync for another run must not attribute this one"
+  assert_contains "$out" "source: status-log" "falls back to current-state sources instead"
+  pass "pipeline-owned binding is bound to this worktree's run and head"
+}
+
+# Preserved protection, same divergence shape: only an UNRETURNED pipeline-owned
+# branch binds this way. Any other branch_sync state - local_ahead once local
+# work moved past the run, verified against a live run, standing here for the
+# whole non-owned class - leaves the sha rule's rejection standing.
+test_only_pipeline_owned_branch_sync_attributes() {
+  reset_fakes
+  local d heads c1 c2 c3 out state
+  d=$(new_case branch-sync-states)
+  heads=$(make_gate_advanced_branch "$d/wt" "$d/gate" fm/feat-states)
+  read -r c1 c2 c3 <<< "$heads"
+  [ -n "$c2" ] || fail "fixture: missing published pipeline head"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/states.meta" "window=fm:fm-states" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementation in progress\n' > "$d/state/states.status"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" states
+
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned fm/feat-states "${c3:0:8}" pipeline_owned fm/feat-states "$c1" 01RUN2)"
+  out=$(run_crew_state "$d" states)
+  assert_contains "$out" "source: run-step" "pipeline_owned attributes the run"
+  assert_contains "$out" "state: working" "the CURRENT run's real state is reported"
+
+  for state in local_ahead diverged already_retired; do
+    FM_FAKE_AXI_STATUS="$(run_pipeline_owned fm/feat-states "${c3:0:8}" "$state" fm/feat-states "$c1" 01RUN2)"
+    out=$(run_crew_state "$d" states)
+    assert_not_contains "$out" "source: run-step" "$state must not attribute the run"
+    assert_contains "$out" "source: status-log" "$state falls back to current-state sources"
+  done
+  pass "only a pipeline_owned branch_sync attributes the run"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1358,5 +1550,9 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
+test_pipeline_owned_run_beats_superseded_row
+test_superseded_coarse_row_not_attributed
+test_pipeline_owned_binding_is_bound_to_this_run_and_head
+test_only_pipeline_owned_branch_sync_attributes
 
 echo "all fm-crew-state tests passed"
