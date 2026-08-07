@@ -135,7 +135,7 @@ SH
 }
 
 test_mainthread_cursor_session_is_identified() {
-  local dir fakebin got binary
+  local dir fakebin got
   dir="$TMP_ROOT/mainthread-cursor"
   fakebin=$(fm_fakebin "$dir")
   mkdir -p "$dir/state"
@@ -150,10 +150,9 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
-binary=${FM_TEST_CURSOR_BIN:-cursor-agent}
 case "$pid:$field" in
-  710:comm=) printf '%s\n' MainThread ;;
-  710:args=) printf '/opt/%s/versions/current/%s --force\n' "$binary" "$binary" ;;
+  710:comm=) printf '%s\n' "${FM_TEST_CURSOR_COMM:-MainThread}" ;;
+  710:args=) printf '%s\n' "${FM_TEST_CURSOR_ARGS:?}" ;;
   710:ppid=) printf '%s\n' 1 ;;
   *:comm=) printf '%s\n' bash ;;
   *:args=) printf '%s\n' 'bash tests/run.sh' ;;
@@ -162,16 +161,48 @@ esac
 SH
   chmod +x "$fakebin/ps"
   printf '710\n' > "$dir/state/.lock"
-  for binary in cursor-agent agent; do
-    got=$(FM_TEST_CURSOR_BIN="$binary" lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
-      || fail "$binary MainThread Cursor session was not found in ancestry"
-    [ "$got" = 710 ] || fail "$binary MainThread Cursor ancestry resolved '$got', expected 710"
-    FM_TEST_CURSOR_BIN="$binary" lib_eval "$fakebin" 'fm_harness_pid_alive 710' \
-      || fail "$binary MainThread Cursor session was not live"
-    FM_TEST_CURSOR_BIN="$binary" lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
-      || fail "$binary MainThread Cursor session did not own its lock"
+  # Accepted: Cursor's own install path behind MainThread, under either
+  # installed name. The legacy alias identifies through the cursor-agent
+  # install tree it lives in, never through its own generic name.
+  local accepted=(
+    'MainThread|/opt/cursor-agent/versions/current/cursor-agent --force'
+    'MainThread|/opt/cursor-agent/versions/current/agent --force'
+    'cursor-agent|/opt/cursor-agent/versions/current/cursor-agent --force'
+  )
+  # Rejected: an unrelated executable named agent, an unrelated install tree
+  # whose directory merely happens to be named agent, another program running
+  # from a path with an agent/ component, and a bare MainThread with no Cursor
+  # evidence at all. Any of these owning the lock would let an unrelated
+  # process claim this home's session.
+  local rejected=(
+    'agent|/opt/agent --serve'
+    'MainThread|/opt/agent/versions/current/agent --force'
+    'MainThread|/usr/bin/node /srv/agent/app.js'
+    'MainThread|MainThread'
+  )
+  local entry comm args
+  for entry in "${accepted[@]}"; do
+    comm=${entry%%|*}; args=${entry#*|}
+    got=$(FM_TEST_CURSOR_COMM="$comm" FM_TEST_CURSOR_ARGS="$args" \
+      lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+      || fail "Cursor session '$args' was not found in ancestry"
+    [ "$got" = 710 ] || fail "Cursor ancestry for '$args' resolved '$got', expected 710"
+    FM_TEST_CURSOR_COMM="$comm" FM_TEST_CURSOR_ARGS="$args" \
+      lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+      || fail "Cursor session '$args' did not own its lock"
   done
-  pass "session-lock: Cursor MainThread ancestry identifies primary and legacy alias"
+  for entry in "${rejected[@]}"; do
+    comm=${entry%%|*}; args=${entry#*|}
+    if FM_TEST_CURSOR_COMM="$comm" FM_TEST_CURSOR_ARGS="$args" \
+      lib_eval "$fakebin" 'fm_harness_ancestry_pid' >/dev/null; then
+      fail "a non-Cursor process '$args' was identified as a harness ancestor"
+    fi
+    if FM_TEST_CURSOR_COMM="$comm" FM_TEST_CURSOR_ARGS="$args" \
+      lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+      fail "a non-Cursor process '$args' claimed the home's session lock"
+    fi
+  done
+  pass "session-lock: Cursor ancestry accepts proven Cursor identity and rejects unrelated agents"
 }
 
 test_harness_beyond_a_gap_never_owns_the_lock() {

@@ -65,7 +65,16 @@ ln -s "$SLEEP_BIN" "$LAB/bin/musescore"
 ln -s "$SLEEP_BIN" "$LAB/bin/amuse"
 ln -s "$SLEEP_BIN" "$LAB/bin/muse-binary"
 ln -s "$SLEEP_BIN" "$LAB/bin/muse-bind"
+# An unrelated executable that merely happens to be named agent: it must never
+# classify as a live agent pane.
 ln -s "$SLEEP_BIN" "$LAB/bin/agent"
+# Cursor's legacy alias as it is actually installed - inside Cursor's own
+# versioned install tree, which is what proves it rather than its generic name.
+mkdir -p "$LAB/cursor-agent/versions/2026.08.04-aaa8809"
+ln -s "$SLEEP_BIN" "$LAB/cursor-agent/versions/2026.08.04-aaa8809/agent"
+# A decoy install tree whose directory is merely named agent.
+mkdir -p "$LAB/agent/versions/current"
+ln -s "$SLEEP_BIN" "$LAB/agent/versions/current/agent"
 
 # A launcher whose own process identity is a bare shell, running the harness as
 # a child in the same foreground process group - the shape the real Pi Launcher
@@ -277,13 +286,36 @@ wait_for_state "$SESSION:cursorargv0" alive 2>/dev/null \
 "$REAL_TMUX" -L "$SOCKET" kill-window -t "$SESSION:cursorargv0" 2>/dev/null || true
 pass "tmux liveness: MainThread with cursor-agent argv0 classifies alive"
 
-# --- cursor legacy alias: agent ---------------------------------------------
+# --- cursor legacy alias: agent, proven by its install tree ------------------
 
-"$REAL_TMUX" -L "$SOCKET" new-window -t "$SESSION" -n cursoralias bash -c "exec -a '$LAB/bin/agent' '$LAB/bin/agent' 30"
+CURSOR_ALIAS="$LAB/cursor-agent/versions/2026.08.04-aaa8809/agent"
+"$REAL_TMUX" -L "$SOCKET" new-window -t "$SESSION" -n cursoralias bash -c "exec -a '$CURSOR_ALIAS' '$CURSOR_ALIAS' 30"
 wait_for_state "$SESSION:cursoralias" alive 2>/dev/null \
-  || fail "a legacy agent alias process must classify alive"
+  || fail "a legacy agent alias inside Cursor's install tree must classify alive"
 "$REAL_TMUX" -L "$SOCKET" kill-window -t "$SESSION:cursoralias" 2>/dev/null || true
-pass "tmux liveness: the Cursor legacy agent alias classifies alive"
+pass "tmux liveness: a Cursor legacy alias proven by its install tree classifies alive"
+
+# --- negative: unrelated executables named agent -----------------------------
+
+# An arbitrary executable whose basename is agent, and an unrelated install
+# tree whose DIRECTORY is named agent. Neither is Cursor, and classifying
+# either as a live agent pane would let firstmate read an unrelated process as
+# a working crewmate.
+"$REAL_TMUX" -L "$SOCKET" new-window -t "$SESSION" -n unrelagent bash -c "exec -a '$LAB/bin/agent' '$LAB/bin/agent' 30"
+sleep 1
+if [ "$(fm_backend_agent_state tmux "$SESSION:unrelagent" 2>/dev/null)" = alive ]; then
+  fail "an unrelated executable named agent must not classify as a live agent pane"
+fi
+"$REAL_TMUX" -L "$SOCKET" kill-window -t "$SESSION:unrelagent" 2>/dev/null || true
+
+DECOY_AGENT="$LAB/agent/versions/current/agent"
+"$REAL_TMUX" -L "$SOCKET" new-window -t "$SESSION" -n decoyagent bash -c "exec -a '$DECOY_AGENT' '$DECOY_AGENT' 30"
+sleep 1
+if [ "$(fm_backend_agent_state tmux "$SESSION:decoyagent" 2>/dev/null)" = alive ]; then
+  fail "an install tree merely named agent/ must not classify as a live agent pane"
+fi
+"$REAL_TMUX" -L "$SOCKET" kill-window -t "$SESSION:decoyagent" 2>/dev/null || true
+pass "tmux liveness: unrelated agent executables and agent/ directory components are not Cursor"
 
 # --- cursor-agent: cursor-agent pane command ---------------------------------
 

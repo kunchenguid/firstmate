@@ -652,63 +652,111 @@ unset FM_ROOT_OVERRIDE
 pass "the entrypoint symlink is recreated when absent and never overwritten when operator-owned"
 
 # --- cursor executable resolution through the public doctor probe ------------
-# The doctor must accept every Cursor executable the local spawn path does
-# (resolve_cursor_binary in bin/fm-spawn.sh): cursor-agent from PATH, the
-# legacy alias `agent` from PATH (fallback only), then the ~/.local/bin
-# installs for both names. The public worker-tool-probe exercises the real
-# command path; the generic `agent` name is never admitted as a harness on its
-# own.
+# The doctor must accept exactly the Cursor executables the local spawn path
+# does: cursor-agent from PATH, a PROVEN legacy `agent` from PATH, then the
+# ~/.local/bin installs for both names, preferring cursor-agent throughout.
+# The public worker-tool-probe exercises the real command path.
+#
+# The legacy alias is accepted only after it proves itself Cursor - by
+# resolving into Cursor's own install tree, or by a --help identity. Reporting
+# a host ready for Cursor because something named `agent` happened to be on its
+# PATH is the failure these cases exist to prevent.
 resolver_make_exe() {  # <path>
   printf '#!/usr/bin/env bash\nexit 0\n' > "$1"
   chmod +x "$1"
 }
 
-# Only the legacy alias on PATH, no other harness anywhere.
+# Only a PROVEN legacy alias on PATH, no other harness anywhere. This one
+# proves itself through its --help identity.
 new_case Linux with-herdr no-gui
 rm -f "$CASE_BIN/claude"
-resolver_make_exe "$CASE_BIN/agent"
+fm_fake_cursor_alias "$CASE_BIN" agent
 doctor --worker-tool-probe hermetic
 assert_contains "$DOCTOR_OUT" "required harness=cursor-agent:$CASE_BIN/agent" \
-  "public worker probe rejected a host with only the agent alias on PATH"
-pass "worker-tool-probe: accepts the agent alias from PATH when it is the only Cursor executable"
+  "public worker probe rejected a host whose agent alias identifies as Cursor"
+pass "worker-tool-probe: accepts an agent alias that identifies itself as the Cursor CLI"
 
-# Only ~/.local/bin/agent outside PATH.
+# The other proof: the alias resolves into Cursor's versioned install tree, so
+# no probe is needed. Either signal alone carries the verdict.
+new_case Linux with-herdr no-gui
+rm -f "$CASE_BIN/claude"
+fm_fake_cursor_alias_symlinked "$CASE_BIN" agent "$CASE_HOME/share"
+doctor --worker-tool-probe hermetic
+assert_contains "$DOCTOR_OUT" "required harness=cursor-agent:" \
+  "public worker probe rejected an alias resolving into Cursor's install tree"
+pass "worker-tool-probe: accepts an agent alias that resolves into Cursor's install tree"
+
+# Only ~/.local/bin/agent outside PATH, and proven.
 new_case Linux with-herdr no-gui
 rm -f "$CASE_BIN/claude"
 mkdir -p "$CASE_HOME/.local/bin"
-resolver_make_exe "$CASE_HOME/.local/bin/agent"
+fm_fake_cursor_alias "$CASE_HOME/.local/bin" agent
 doctor --worker-tool-probe hermetic
 assert_contains "$DOCTOR_OUT" "required harness=cursor-agent:$CASE_HOME/.local/bin/agent" \
-  "public worker probe rejected a host with only ~/.local/bin/agent"
-pass "worker-tool-probe: finds ~/.local/bin/agent outside PATH"
+  "public worker probe rejected a host with only a proven ~/.local/bin/agent"
+pass "worker-tool-probe: finds a proven ~/.local/bin/agent outside PATH"
 
 # cursor-agent takes precedence over the agent alias when both exist on PATH.
 new_case Linux with-herdr no-gui
 rm -f "$CASE_BIN/claude"
 resolver_make_exe "$CASE_BIN/cursor-agent"
-resolver_make_exe "$CASE_BIN/agent"
+fm_fake_cursor_alias "$CASE_BIN" agent
 doctor --worker-tool-probe hermetic
 assert_contains "$DOCTOR_OUT" "required harness=cursor-agent:$CASE_BIN/cursor-agent" \
   "public worker probe did not prefer cursor-agent over the alias"
 pass "worker-tool-probe: cursor-agent takes precedence over the agent alias"
 
-# The generic `agent` name is never admitted to HARNESS_TOOLS: the harness
-# readiness loop can only consult it through the cursor-agent alias branch,
-# so an unrelated executable named agent can never classify as a separate
-# verified harness. With only that unrelated agent on the hermetic PATH, the
-# worker-tool-probe must emit exactly one harness fact (the cursor-agent
-# alias) and never a standalone harness fact for agent, and --fix must never
-# create a wrapper for the generic name.
+# An UNRELATED executable named agent - the impostor. It exits 0 for every
+# invocation including --help, so a check that accepts a bare zero exit as
+# proof would pass it. The host has no Cursor, so readiness must report the
+# harness MISSING rather than naming the impostor, no standalone harness fact
+# may appear for the generic name, and --fix must never create a wrapper for
+# it.
 new_case Linux with-herdr no-gui
 rm -f "$CASE_BIN/claude"
-resolver_make_exe "$CASE_BIN/agent"
+fm_fake_unrelated_agent "$CASE_BIN"
 doctor hermetic
-harness_facts=$(printf '%s\n' "$DOCTOR_OUT" | grep -c '^required harness=' || true)
-[ "$harness_facts" -eq 1 ] || fail "expected exactly one harness fact, got $harness_facts"$'\n'"$DOCTOR_OUT"
-assert_contains "$DOCTOR_OUT" "required harness=cursor-agent:$CASE_BIN/agent" \
-  "the unrelated agent did not satisfy readiness through the cursor-agent alias"
+assert_contains "$DOCTOR_OUT" 'required harness=MISSING' \
+  "an unrelated executable named agent reported the host ready for Cursor"
+assert_not_contains "$DOCTOR_OUT" "harness=cursor-agent:$CASE_BIN/agent" \
+  "an unrelated executable named agent was resolved as the Cursor CLI"
 assert_not_contains "$DOCTOR_OUT" 'required harness=agent=' \
   "the bare agent name was reported as a standalone harness"
 doctor --fix hermetic
 assert_absent "$CASE_HOME/.local/bin/agent" "--fix created a wrapper for the generic agent name"
-pass "the bare agent name is never a standalone harness and never gets its own wrapper"
+pass "an unrelated executable named agent never satisfies Cursor readiness"
+
+# The doctor reproduces the resolver rather than sourcing it, so that a
+# hash-verified doctor bootstrap never pulls in an unverified helper
+# (bin/fm-remote-entrypoint.sh runs the doctor before the remote job worker
+# exists, and on a git-less host its only identity proof is its own pinned
+# digest). That split is only safe while the two agree, so drive the SAME
+# three fixtures through bin/fm-cursor-lib.sh and require the same verdicts
+# the public doctor probe produced above: accept a --help-proven alias, accept
+# an install-tree-proven alias, refuse an unrelated agent.
+resolver_equivalence_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-cursor-resolver.XXXXXX")
+resolver_lib_verdict() {  # <case-dir>
+  PATH="$1/bin:/usr/bin:/bin" HOME="$1" bash -c \
+    ". '$ROOT/bin/fm-cursor-lib.sh'; fm_cursor_resolve_binary 2>/dev/null || printf 'REFUSED\n'"
+}
+
+mkdir -p "$resolver_equivalence_dir/proven-help/bin"
+fm_fake_cursor_alias "$resolver_equivalence_dir/proven-help/bin" agent
+[ "$(resolver_lib_verdict "$resolver_equivalence_dir/proven-help")" \
+  = "$resolver_equivalence_dir/proven-help/bin/agent" ] \
+  || fail "the shared resolver refused a --help-proven alias the doctor accepts"
+
+mkdir -p "$resolver_equivalence_dir/proven-tree/bin"
+fm_fake_cursor_alias_symlinked "$resolver_equivalence_dir/proven-tree/bin" agent \
+  "$resolver_equivalence_dir/proven-tree/share"
+case "$(resolver_lib_verdict "$resolver_equivalence_dir/proven-tree")" in
+  */cursor-agent) : ;;
+  *) fail "the shared resolver refused an install-tree-proven alias the doctor accepts" ;;
+esac
+
+mkdir -p "$resolver_equivalence_dir/impostor/bin"
+fm_fake_unrelated_agent "$resolver_equivalence_dir/impostor/bin"
+[ "$(resolver_lib_verdict "$resolver_equivalence_dir/impostor")" = REFUSED ] \
+  || fail "the shared resolver accepted an unrelated agent the doctor refuses"
+rm -rf "$resolver_equivalence_dir"
+pass "the doctor's reproduced cursor resolver and bin/fm-cursor-lib.sh reach the same verdicts"

@@ -32,6 +32,9 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
+# shellcheck source=bin/fm-cursor-lib.sh
+. "$SCRIPT_DIR/fm-cursor-lib.sh"
+
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
@@ -71,8 +74,14 @@ detect_own() {
   local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
+    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    # Cursor identity is narrowed and owned by bin/fm-cursor-lib.sh: an exact
+    # cursor-agent name, or Cursor's own install path behind MainThread, a bare
+    # interpreter, or the legacy `agent` alias. An unrelated executable named
+    # agent, or a path that merely has an agent/ directory component, is not
+    # Cursor and must fall through to the checks below.
+    if fm_cursor_process_matches "$comm" "$args"; then echo cursor; return; fi
     case "$(basename -- "$comm")" in
-      agent|*cursor-agent*) echo cursor; return ;;
       *claude*) echo claude; return ;;
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
@@ -87,12 +96,10 @@ detect_own() {
       pi-signed) echo pi; return ;;
       pi) echo pi; return ;;
       node*|python*|MainThread)
-        # Bare interpreter or a renamed main thread (cursor-agent's Node
-        # bundle execs with comm=MainThread): match the harness name in the
-        # full argument string, which still carries the versioned install path.
-        args=$(ps -o args= -p "$pid" 2>/dev/null)
+        # Bare interpreter or a renamed main thread: match the harness name in
+        # the full argument string, which still carries the versioned install
+        # path. Cursor was already decided above.
         case "$args" in
-          *cursor-agent*|*/agent|*/agent\ *|*/agent/*|agent|agent\ *) echo cursor; return ;;
           *claude*) echo claude; return ;;
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;

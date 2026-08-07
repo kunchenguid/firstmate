@@ -59,26 +59,112 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)}"
 REQUIRED_TOOLS=(git jq herdr tasks-axi treehouse)
 HARNESS_TOOLS=(claude codex opencode pi pi-signed grok kimi cursor-agent)
 
+# Cursor resolution, reproduced rather than sourced.
+#
+# This doctor is the ONE command bin/fm-remote-entrypoint.sh may run before the
+# remote job worker exists, and on a host without git its only identity proof is
+# its own pinned SHA-256. Sourcing a helper for Cursor's proof would place
+# unverified code inside that hash-verified bootstrap, so the resolver, its
+# lookup order, and its legacy-alias proof are reproduced here instead. Trust is
+# therefore exactly what it was before Cursor readiness existed.
+#
+# bin/fm-cursor-lib.sh is the local owner of the same contract, and
+# tests/fm-remote-doctor.test.sh asserts the two agree on the same fixtures, so
+# a readiness check and a spawn can never disagree about what counts as Cursor.
+# Keep any change here and there in the same commit.
+FM_CURSOR_PROBE_TIMEOUT=${FM_CURSOR_PROBE_TIMEOUT:-10}
+
+fm_remote_doctor_cursor_canonical_path() {  # <path>
+  local path=$1 dir base hops=0 target
+  [ -n "$path" ] || return 1
+  dir=$(CDPATH='' cd -- "$(dirname -- "$path")" 2>/dev/null && pwd -P) || { printf '%s\n' "$path"; return 0; }
+  base=$(basename -- "$path")
+  while [ -L "$dir/$base" ] && [ "$hops" -lt 16 ]; do
+    target=$(readlink -- "$dir/$base") || break
+    case "$target" in
+      /*) dir=$(CDPATH='' cd -- "$(dirname -- "$target")" 2>/dev/null && pwd -P) || break
+          base=$(basename -- "$target") ;;
+      *)  dir=$(CDPATH='' cd -- "$dir/$(dirname -- "$target")" 2>/dev/null && pwd -P) || break
+          base=$(basename -- "$target") ;;
+    esac
+    hops=$((hops + 1))
+  done
+  printf '%s\n' "$dir/$base"
+}
+
+fm_remote_doctor_cursor_path_is_cursor() {  # <path>
+  local canonical
+  [ -n "$1" ] || return 1
+  canonical=$(fm_remote_doctor_cursor_canonical_path "$1") || return 1
+  case "${canonical##*/}" in cursor-agent) return 0 ;; esac
+  case "/$canonical/" in */cursor-agent/*) return 0 ;; esac
+  return 1
+}
+
+fm_remote_doctor_cursor_probe_is_cursor() {  # <path>
+  local path=$1 out runner=
+  [ -n "$path" ] && [ -x "$path" ] || return 1
+  if command -v timeout >/dev/null 2>&1; then runner=timeout
+  elif command -v gtimeout >/dev/null 2>&1; then runner=gtimeout
+  fi
+  if [ -n "$runner" ]; then
+    out=$("$runner" "$FM_CURSOR_PROBE_TIMEOUT" "$path" --help 2>/dev/null) || return 1
+  else
+    out=$("$path" --help 2>/dev/null) || return 1
+  fi
+  [ -n "$out" ] || return 1
+  case "$out" in
+    *"Start the Cursor Agent"*) return 0 ;;
+    *CURSOR_API_ENDPOINT*) return 0 ;;
+    *api2.cursor.sh*) return 0 ;;
+  esac
+  return 1
+}
+
+fm_remote_doctor_cursor_verify_executable() {  # <path>
+  local path=$1
+  [ -n "$path" ] && [ -x "$path" ] || return 1
+  case "${path##*/}" in cursor-agent) return 0 ;; esac
+  fm_remote_doctor_cursor_path_is_cursor "$path" && return 0
+  fm_remote_doctor_cursor_probe_is_cursor "$path"
+}
+
+fm_remote_doctor_resolve_cursor() {
+  local name candidate
+  for name in cursor-agent agent; do
+    candidate=$(command -v "$name" 2>/dev/null || true)
+    [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+    candidate=$(fm_remote_doctor_cursor_canonical_path "$candidate") || continue
+    if fm_remote_doctor_cursor_verify_executable "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  for name in cursor-agent agent; do
+    [ -n "${HOME:-}" ] || break
+    candidate="$HOME/.local/bin/$name"
+    [ -x "$candidate" ] || continue
+    if fm_remote_doctor_cursor_verify_executable "$candidate"; then
+      printf '%s\n' "$(fm_remote_doctor_cursor_canonical_path "$candidate")"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Resolve a harness executable like the local spawn path does. Cursor is the
-# one harness whose user-local install ($HOME/.local/bin) is often absent from
-# a non-interactive login PATH, mirroring resolve_cursor_binary in
-# bin/fm-spawn.sh; every other harness resolves from PATH only.
-# Cursor's lookup order matches resolve_cursor_binary exactly: cursor-agent
-# from PATH, then the legacy alias `agent` from PATH (fallback only - the name
-# is too generic to trust as the primary pick), then the ~/.local/bin
-# installs for both names. The generic `agent` name is NEVER added to
-# HARNESS_TOOLS: it is resolved only as a Cursor alias here, so an unrelated
-# executable named agent cannot classify as a separate harness.
+# one harness with two executable names and a user-local install often absent
+# from a non-interactive login PATH; every other harness resolves from PATH
+# only. The generic `agent` name is NEVER a standalone HARNESS_TOOLS entry: it
+# is reachable only as a Cursor alias, and only after it proves itself Cursor,
+# so an unrelated executable named agent neither classifies as a harness nor
+# reports this host ready for Cursor.
 fm_remote_doctor_resolve_harness() {  # <name>
-  local name=$1 resolved dir cursor_name
-  # A generic harness resolves from PATH only. Cursor is the exception: it
-  # ships two names and a user-local install, so its lookup order matches
-  # resolve_cursor_binary in bin/fm-spawn.sh exactly - cursor-agent from
-  # PATH, then the legacy alias `agent` from PATH (fallback only; the name is
-  # too generic to trust as the primary pick), then the ~/.local/bin
-  # installs for both names. The generic `agent` name is never a standalone
-  # HARNESS_TOOLS entry, so an unrelated executable cannot classify as a
-  # separate harness.
+  local name=$1 resolved dir
+  if [ "$name" = cursor-agent ]; then
+    fm_remote_doctor_resolve_cursor
+    return
+  fi
   resolved=$(command -v "$name" 2>/dev/null || true)
   if [ -n "$resolved" ] && [ -x "$resolved" ]; then
     case "$resolved" in
@@ -91,30 +177,6 @@ fm_remote_doctor_resolve_harness() {  # <name>
         fi
         ;;
     esac
-  fi
-  if [ "$name" = cursor-agent ]; then
-    for cursor_name in cursor-agent agent; do
-      resolved=$(command -v "$cursor_name" 2>/dev/null || true)
-      if [ -n "$resolved" ] && [ -x "$resolved" ]; then
-        case "$resolved" in
-          /*) printf '%s\n' "$resolved"; return 0 ;;
-          *)
-            dir=$(cd "$(dirname "$resolved")" 2>/dev/null && pwd -P) || dir=
-            if [ -n "$dir" ]; then
-              printf '%s/%s\n' "$dir" "$(basename "$resolved")"
-              return 0
-            fi
-            ;;
-        esac
-      fi
-    done
-    for cursor_name in cursor-agent agent; do
-      resolved="${HOME:-}/.local/bin/$cursor_name"
-      if [ -n "${HOME:-}" ] && [ -x "$resolved" ]; then
-        printf '%s\n' "$resolved"
-        return 0
-      fi
-    done
   fi
   return 1
 }

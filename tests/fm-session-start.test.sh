@@ -235,7 +235,9 @@ harness=${FM_FAKE_HARNESS:-claude}
 # fm-harness.sh's ancestry matcher recognizes Cursor's verified executable name,
 # including its legacy agent alias, or MainThread with that path.
 [ "$harness" = cursor ] && harness=cursor-agent
-[ "$harness" = cursor-alias ] && harness=agent
+# The legacy alias as Cursor actually installs it: the generic `agent` name
+# inside Cursor's own versioned install tree, which is what identifies it.
+[ "$harness" = cursor-alias ] && harness=cursor-agent/versions/2026.08.04-aaa8809/agent
 pid=
 previous=
 for argument in "$@"; do
