@@ -4,6 +4,7 @@
 # Usage:
 #   fm-procevent-remote-reply.sh arm <secondmate-id>
 #   fm-procevent-remote-reply.sh handle <secondmate-id> <sequence> <result-file>
+#   fm-procevent-remote-reply.sh autohandle <source-id> <sequence> <result-file>
 #   fm-procevent-remote-reply.sh classify <result-file>
 #   fm-procevent-remote-reply.sh terminal <result-file>
 #   fm-procevent-remote-reply.sh source-id <secondmate-id>
@@ -15,6 +16,13 @@
 # terminal for that exact registration; `handle` validates and idempotently
 # ingests it, acknowledges the captured generation, then registers the next
 # cursor-anchored source. A continuity break is escalated and not re-armed.
+#
+# `autohandle` is the runner's own entry into that same `handle`: it takes the
+# canonical source id instead of the secondmate id and is called by the runner
+# right after capture, so applying a reply never depends on a handler
+# remembering to run it. Ingesting a delta carries no judgement, so it belongs
+# in code. The published wake still reaches firstmate, and running `handle`
+# again on that wake is idempotent.
 #
 # This channel is a status-stream MIRROR, not a correlated-reply channel. A local
 # secondmate appends its whole status stream straight into the parent's
@@ -64,7 +72,7 @@ DOCUMENT_LOCAL_FAILURE=2
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 sha256_file() {
   if command -v shasum >/dev/null 2>&1; then
@@ -410,6 +418,22 @@ cmd_handle_locked() {
   return "$rc"
 }
 
+# The runner's entry into cmd_handle, keyed by canonical source id. An escalated
+# continuity break is fully handled too, so its distinct exit 3 is a success
+# here; only a genuine handling failure leaves the result for the handler.
+cmd_autohandle() {
+  local sid=${1:-} seq=${2:-} result=${3:-} id rc=0
+  case "$sid" in
+    remote-reply-?*) id=${sid#remote-reply-} ;;
+    *) die "not a remote reply source: $sid" ;;
+  esac
+  validate_id "$id"
+  [ "$(source_id "$id")" = "$sid" ] || die "source id does not identify one secondmate: $sid"
+  cmd_handle "$id" "$seq" "$result" || rc=$?
+  [ "$rc" -eq 3 ] && rc=0
+  return "$rc"
+}
+
 cmd_handle() {
   local id=${1:-} lock
   validate_id "$id"
@@ -509,6 +533,7 @@ case "${1:-}" in
   arm-locked) shift; [ "$#" -eq 1 ] || usage; require_parent_lifecycle_lock "$1"; cmd_arm_locked "$@" ;;
   source) shift; [ "$#" -eq 1 ] || usage; cmd_source "$@" ;;
   handle) shift; [ "$#" -eq 3 ] || usage; cmd_handle "$@" ;;
+  autohandle) shift; [ "$#" -eq 3 ] || usage; cmd_autohandle "$@" ;;
   ingest) shift; [ "$#" -eq 2 ] || usage; cmd_ingest "$@" ;;
   classify) shift; [ "$#" -eq 1 ] || usage; classify_result "$1" ;;
   terminal) shift; [ "$#" -eq 1 ] || usage; [ -s "$1" ] ;;

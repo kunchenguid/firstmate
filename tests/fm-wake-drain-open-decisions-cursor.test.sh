@@ -270,8 +270,50 @@ SH
   pass "a cursor-cache read failure refolds the authoritative status file without hiding an open decision"
 }
 
+test_previous_fold_cache_is_refolded_under_current_semantics() {
+  local dir state status cursor out probe status_bytes ident appended_bytes probe_bytes
+  dir=$(make_case cursor-fold-version)
+  state="$dir/state"
+  status="$state/task6.status"
+  cursor="$state/.task6.open-decisions-cursor"
+  out="$dir/drain.out"
+  probe="$dir/probe.tsv"
+
+  printf 'blocked [key=pending-reply-abcdef0123456789]: forged decision\n' > "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "bootstrap drain for the fold-version migration failed"
+  [ ! -s "$out" ] || fail "the current whole-file semantics accepted the foreign reserved-key decision: $(cat "$out")"
+  ident=$(sed -n 's/^ident=//p' "$cursor")
+  status_bytes=$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')
+  {
+    printf 'offset=%s\n' "$status_bytes"
+    printf 'ident=%s\n' "$ident"
+    printf 'pending-reply-abcdef0123456789\tblocked\tforged decision'
+  } > "$cursor"
+  : > "$probe"
+
+  FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
+    || fail "drain failed while upgrading the previous fold cache"
+  [ ! -s "$out" ] || fail "the previous fold cache kept surfacing a foreign reserved-key decision: $(cat "$out")"
+  probe_bytes=$(last_probe_bytes "$probe" "$status")
+  [ "$probe_bytes" = "$status_bytes" ] \
+    || fail "the previous fold cache read $probe_bytes bytes instead of refolding all $status_bytes authoritative bytes"
+
+  appended_bytes=$(printf 'needs-decision [key=current]: choose the current path\n' | tee -a "$status" | LC_ALL=C wc -c | tr -d '[:space:]')
+  FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
+    || fail "same-version incremental drain failed after cache migration"
+  grep -F 'task6 [key=current] needs-decision: choose the current path' "$out" >/dev/null \
+    || fail "the same-version append did not fold into the migrated open set"
+  probe_bytes=$(last_probe_bytes "$probe" "$status")
+  [ "$probe_bytes" = "$appended_bytes" ] \
+    || fail "the same-version fold read $probe_bytes bytes instead of only the $appended_bytes-byte append"
+
+  pass "an old fold cache is rebuilt once before same-version incremental reads resume"
+}
+
 test_truncated_log_falls_back_to_a_full_refold_not_a_dropped_decision
 test_same_size_rewrite_is_detected_via_inode_identity
 test_read_failure_never_silently_returns_empty
 test_cursor_cache_read_failure_refolds_authoritative_status
+test_previous_fold_cache_is_refolded_under_current_semantics
 test_buried_decision_survives_many_growing_drains_and_resolution_clears_it

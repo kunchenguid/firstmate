@@ -280,7 +280,7 @@ test_second_missed_turn_escalates_once_and_stays_durable() {
   [ "$(phase_of "$state" "$corr")" = escalated ] || fail "phase should be escalated"
   status_line=$(tail -1 "$state/hibit.status")
   case "$status_line" in
-    blocked:*pending-reply-missed:*pending-reply-id=$corr*) : ;;
+    "blocked [key=pending-reply-$corr]:"*pending-reply-missed:*pending-reply-id=$corr*) : ;;
     *) fail "parent status should carry one blocked missed-report line"$'\n'"$status_line" ;;
   esac
   [ ! -s "$state/.wake-queue" ] || fail "direct escalation must not enqueue a duplicate check wake"
@@ -290,7 +290,7 @@ test_second_missed_turn_escalates_once_and_stays_durable() {
     :
   fi
   [ "$(phase_of "$state" "$corr")" = escalated ] || fail "phase must stay escalated"
-  escalations=$(grep -Fc "pending-reply-id=$corr" "$state/hibit.status")
+  escalations=$(grep -Fc "blocked [key=pending-reply-$corr]:" "$state/hibit.status")
   [ "$escalations" = 1 ] || fail "missed recovery should publish one escalation, got $escalations"
   # Durable record retained (never silently expired).
   rec=$(fm_pending_reply_path "$state" "$corr")
@@ -329,9 +329,143 @@ test_escalation_publication_failure_retries() {
   rmdir "$target"
   fm_pending_reply_maybe_escalate "$state" "$corr" || fail "escalation retry should succeed"
   [ "$(phase_of "$state" "$corr")" = escalated ] || fail "successful retry should commit escalation"
-  escalations=$(grep -Fc "pending-reply-id=$corr" "$target")
+  escalations=$(grep -Fc "blocked [key=pending-reply-$corr]:" "$target")
   [ "$escalations" = 1 ] || fail "successful retry should publish exactly once, got $escalations"
   pass "failed escalation publication remains retryable and publishes once"
+}
+
+test_legacy_escalation_closes_default_decision() {
+  local home state corr rec open
+  home=$(setup_parent legacy-close)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=4725
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "legacy close")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_set "$rec" phase escalated
+  fm_pending_reply_set "$rec" escalated_epoch 4700
+  printf 'blocked: pending-reply-missed: task=hibit pending-reply-id=%s request=legacy close\n' "$corr" \
+    > "$state/hibit.status"
+  printf 'done [corr=%s]: delayed legacy reply\n' "$corr" >> "$state/hibit.status"
+
+  fm_pending_reply_try_resolve "$state" "$corr" || fail "legacy reply should resolve its record"
+  [ "$(grep -Fc "resolved [key=default]: pending-reply-resolved: task=hibit pending-reply-id=$corr" "$state/hibit.status")" -eq 1 ] \
+    || fail "legacy escalation did not append one guarded default-key resolution"
+  open=$(status_open_decisions "$state/hibit.status")
+  [ -z "$open" ] || fail "resolved legacy escalation remained open: $open"
+  [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ] \
+    || fail "legacy escalation closure was not recorded"
+  pass "legacy escalation closes under the shared default key"
+}
+
+test_legacy_escalation_does_not_close_taken_default_decision() {
+  local home state corr rec open
+  home=$(setup_parent legacy-escalation)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=4750
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "legacy escalation")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_set "$rec" phase escalated
+  fm_pending_reply_set "$rec" escalated_epoch 4700
+  printf 'blocked: pending-reply-missed: task=hibit pending-reply-id=%s request=legacy escalation\n' "$corr" \
+    > "$state/hibit.status"
+  printf 'blocked: unrelated operator decision\n' >> "$state/hibit.status"
+  printf 'done [corr=%s]: delayed legacy reply\n' "$corr" >> "$state/hibit.status"
+
+  fm_pending_reply_try_resolve "$state" "$corr" || fail "legacy reply should resolve its record"
+  if grep -Fq 'resolved [key=default]: pending-reply-resolved:' "$state/hibit.status"; then
+    fail "legacy escalation emitted an unsafe default-key resolution"
+  fi
+  fm_pending_reply_tick "$state" || fail "legacy close retry failed"
+  open=$(status_open_decisions "$state/hibit.status")
+  assert_contains "$open" "unrelated operator decision" \
+    "legacy escalation closure hid an unrelated default-key decision"
+  pass "legacy escalation cannot close an unrelated default-key decision"
+}
+
+test_foreign_blocker_is_not_selected_as_escalation() {
+  local home state corr rec open
+  home=$(setup_parent foreign-blocker)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=4775
+  export FM_PENDING_REPLY_SEND_HOOK=true
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "foreign blocker")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  fm_pending_reply_send_recovery "$state" "$corr" || fail "recovery send failed"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" recovery
+  fm_pending_reply_maybe_escalate "$state" "$corr" || fail "genuine escalation failed"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  printf 'blocked [key=release]: foreign decision pending-reply-id=%s corr=%s\n' \
+    "$corr" "$corr" >> "$state/hibit.status"
+
+  fm_pending_reply_try_resolve "$state" "$corr" || fail "correlated foreign blocker should resolve the record"
+  open=$(status_open_decisions "$state/hibit.status")
+  assert_contains "$open" $'release\tblocked\tforeign decision' \
+    "pending-reply closure cleared the foreign release decision"
+  assert_not_contains "$open" "pending-reply-$corr" \
+    "genuine keyed escalation remained open"
+  assert_no_grep 'resolved [key=release]: pending-reply-resolved:' "$state/hibit.status" \
+    "foreign release decision was selected as the pending-reply escalation"
+  [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ] \
+    || fail "genuine keyed escalation closure was not recorded"
+  pass "foreign correlated blocker cannot impersonate a pending-reply escalation"
+}
+
+test_concurrent_resolution_closes_escalation_once() {
+  local home state corr rec
+  home=$(setup_parent concurrent-resolution)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=4800
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "concurrent resolution")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_set "$rec" phase escalated
+  fm_pending_reply_set "$rec" escalated_epoch 4750
+  printf 'blocked [key=pending-reply-%s]: pending-reply-missed: task=hibit pending-reply-id=%s request=concurrent resolution\n' \
+    "$corr" "$corr" > "$state/hibit.status"
+  printf 'done [corr=%s]: concurrent delayed reply\n' "$corr" >> "$state/hibit.status"
+
+  for _ in 1 2 3 4 5 6 7 8; do
+    fm_pending_reply_try_resolve "$state" "$corr" &
+  done
+  wait
+
+  [ "$(phase_of "$state" "$corr")" = resolved ] \
+    || fail "concurrent resolvers left the expectation unresolved"
+  [ "$(grep -Fc "pending-reply-resolved: task=hibit pending-reply-id=$corr" "$state/hibit.status")" -eq 1 ] \
+    || fail "concurrent resolvers did not append exactly one decision close"
+  [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ] \
+    || fail "concurrent resolution did not record the closed escalation"
+  pass "concurrent resolution closes one keyed escalation exactly once"
+}
+
+test_concurrent_escalation_yields_to_late_reply() {
+  local home state corr rec
+  home=$(setup_parent concurrent-escalation)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=4900
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "concurrent escalation")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_set "$rec" phase recovery_sent
+  fm_pending_reply_set "$rec" recovery_turn_completed_epoch 4850
+  printf 'done [corr=%s]: late concurrent reply\n' "$corr" > "$state/hibit.status"
+
+  for _ in 1 2 3 4 5 6 7 8; do
+    fm_pending_reply_maybe_escalate "$state" "$corr" &
+    fm_pending_reply_try_resolve "$state" "$corr" &
+  done
+  wait
+
+  [ "$(phase_of "$state" "$corr")" = resolved ] \
+    || fail "concurrent escalation overwrote a resolved expectation"
+  assert_no_grep "pending-reply-id=$corr" "$state/hibit.status" \
+    "concurrent escalation published a false missed-reply blocker"
+  [ -z "$(fm_pending_reply_get "$rec" escalated_epoch)" ] \
+    || fail "concurrent escalation committed after the reply resolved"
+  pass "concurrent escalation yields to a late correlated reply"
 }
 
 test_transport_success_is_not_reply_success() {
@@ -443,7 +577,7 @@ test_delivery_confirmation_fallback_reconciles() {
       || fail "delivery uncertainty should use its distinct escalation"
     fm_pending_reply_tick_one "$state" "$prepared_corr" unknown \
       || fail "repeated delivery-unknown tick should be inert"
-    escalations=$(grep -Fc "pending-reply-id=$prepared_corr" "$state/hibit.status")
+    escalations=$(grep -Fc "blocked [key=pending-reply-$prepared_corr]:" "$state/hibit.status")
     [ "$escalations" = 1 ] \
       || fail "delivery-unknown escalation should publish once, got $escalations"
     printf 'done [corr=%s]: late report proves delivery\n' "$prepared_corr" >> "$state/hibit.status"
@@ -452,7 +586,7 @@ test_delivery_confirmation_fallback_reconciles() {
       || fail "late report should resolve escalated delivery-unknown"
     [ "$(fm_pending_reply_get "$prepared_rec" delivered_epoch)" = 5760 ] \
       || fail "late report should provide delivery evidence"
-    escalations=$(grep -Fc "pending-reply-id=$prepared_corr" "$state/hibit.status")
+    escalations=$(grep -Fc "blocked [key=pending-reply-$prepared_corr]:" "$state/hibit.status")
     [ "$escalations" = 1 ] || fail "late report must not re-escalate delivery-unknown"
     fm_pending_reply_tick "$state" || fail "resolved late report should remain idempotent"
     [ "$(phase_of "$state" "$prepared_corr")" = resolved ] \
@@ -913,6 +1047,11 @@ test_recovery_attempt_is_never_reinjected
 test_recovery_reply_resolves_original
 test_second_missed_turn_escalates_once_and_stays_durable
 test_escalation_publication_failure_retries
+test_legacy_escalation_closes_default_decision
+test_legacy_escalation_does_not_close_taken_default_decision
+test_foreign_blocker_is_not_selected_as_escalation
+test_concurrent_resolution_closes_escalation_once
+test_concurrent_escalation_yields_to_late_reply
 test_transport_success_is_not_reply_success
 test_undelivered_records_are_scan_immutable
 test_delivery_confirmation_fallback_reconciles
