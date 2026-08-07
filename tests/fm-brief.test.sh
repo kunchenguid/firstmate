@@ -371,6 +371,21 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+test_bead_pr_title_rule_is_conditional_for_ship_briefs() {
+  local home id brief
+  home="$TMP_ROOT/bead-title-home"
+  mkdir -p "$home/data"
+  id="brief-bead-title-c2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "ship brief was not scaffolded"
+  assert_grep "For a bead-backed project, include this task's bead ID in the PR title." "$brief" \
+    "ship brief lost the conditional bead ID PR-title rule"
+  assert_grep "If the project is not bead-backed, do not introduce a \`br\` workflow." "$brief" \
+    "ship brief imposed the bead workflow on projects that do not use it"
+  pass "fm-brief.sh: ship briefs condition PR-title bead IDs on bead-backed projects"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -720,6 +735,7 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_bead_pr_title_rule_is_conditional_for_ship_briefs
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
