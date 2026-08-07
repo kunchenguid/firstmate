@@ -8,11 +8,18 @@
 # heading-anchored regenerator built inside the fixture, and the test fails if
 # that naive implementation passes.
 #
+# The second guarantee proved the same way is that a source which could not be
+# read never renders as a source that was read and found empty. The control case
+# runs first, with a readable and genuinely empty backlog, so the assertion is
+# known to distinguish the two rather than passing whatever it is given.
+#
 # The rest covers marker refusal (missing, duplicated, reversed, overlapping),
-# the derived content itself (deadline items first, clustering, plain wording
-# for an empty section), the age stamp and the read-only narrative review line,
-# unmapped repository reporting, and one end-to-end demonstration that a real
-# lifecycle command refreshes the briefs on its own.
+# marker installation (an empty section body, a half-marked brief, a refusal
+# that must leave the file byte-identical), the derived content itself (deadline
+# items first, clustering, plain wording for an empty section), the age stamp
+# and the read-only narrative review line, unmapped repository reporting on both
+# surfaces, and one end-to-end demonstration that a real lifecycle command
+# refreshes the briefs on its own.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -26,7 +33,10 @@ TMP_ROOT=$(fm_test_tmproot fm-context-briefs)
 
 # A tasks-axi stub driven by $FAKE_TASKS, a file of
 # "<id>|<state>|<repo>|<hold_until>|<created>|<title>" records. It answers the
-# two read shapes the generator uses and nothing else.
+# two read shapes the generator uses, plus the version and feature probes the
+# shared backend decision in bin/fm-tasks-axi-lib.sh runs before any read.
+# $FAKE_TASKS_AXI_VERSION drives that version, so a fixture can present a build
+# this home refuses to read through.
 make_fakebin() {  # <dir>
   local fb
   fb=$(fm_fakebin "$1")
@@ -34,6 +44,15 @@ make_fakebin() {  # <dir>
 #!/usr/bin/env bash
 records=${FAKE_TASKS:-/dev/null}
 case "${1:-}" in
+  --version)
+    printf 'tasks-axi %s\n' "${FAKE_TASKS_AXI_VERSION:-0.2.4}"
+    ;;
+  update)
+    printf '  --archive-body   rewrite the note recoverably\n'
+    ;;
+  mv)
+    printf '  usage: tasks-axi mv [<id>...] <destination>\n'
+    ;;
   list)
     printf 'count: 0\n'
     printf 'tasks[0]{id,state,kind,repo,title}:\n'
@@ -337,6 +356,96 @@ test_empty_sections_say_so_plainly() {
   pass "an empty derived section says so plainly rather than writing filler"
 }
 
+# A backlog that could not be read must never render as a backlog that was read
+# and found empty. The two cases are indistinguishable to the captain otherwise,
+# and the block would carry a fresh generation date over a source nobody read,
+# which is the one lie the staleness probe cannot catch.
+#
+# The assertion is proved to have teeth first: the same fixture with a readable
+# backlog and no items really does render the confident empty, so an
+# implementation that ignores the backend decision fails the check below rather
+# than passing it by accident.
+test_an_unreadable_backlog_never_reads_as_an_empty_one() {
+  local home fb file empty_home empty_file
+  empty_home=$(new_home "$TMP_ROOT/unread-control")
+  fb=$(make_fakebin "$TMP_ROOT/unread-control")
+  : > "$TMP_ROOT/unread-control/tasks"
+  PATH="$fb:$PATH" FAKE_TASKS="$TMP_ROOT/unread-control/tasks" \
+    run_gen "$empty_home" >/dev/null 2>&1
+  empty_file="$empty_home/data/briefs/back-office.md"
+  assert_grep 'Nothing is waiting on you for this side.' "$empty_file" \
+    "a backlog that was read and holds nothing still says so plainly"
+
+  # Same fixture, same empty backlog, but a build this home refuses to read
+  # through. The rendered wording must differ from the control above.
+  home=$(new_home "$TMP_ROOT/unread-old")
+  file="$home/data/briefs/back-office.md"
+  PATH="$fb:$PATH" FAKE_TASKS="$TMP_ROOT/unread-control/tasks" \
+    FAKE_TASKS_AXI_VERSION=0.1.0 run_gen "$home" >/dev/null 2>&1
+  assert_no_grep 'Nothing is waiting on you for this side.' "$file" \
+    "an unreadable backlog must not claim nothing is waiting"
+  assert_grep 'could not be read' "$file" "the block says it could not be read"
+  assert_grep 'tasks-axi' "$file" "the block names what it could not reach"
+  [ "$(grep -c 'fm:brief:generated ' "$file")" = 1 ] ||
+    fail "the unread block must not carry a generation stamp, and the read one must"
+  assert_grep 'fm:brief:unread waiting-on-you' "$file" \
+    "the unread block is marked as unread rather than generated"
+
+  # The manual backlog backend is an opt-out, not an empty backlog either.
+  local manual manual_file
+  manual=$(new_home "$TMP_ROOT/unread-manual")
+  manual_file="$manual/data/briefs/back-office.md"
+  printf 'manual\n' > "$manual/config/backlog-backend"
+  PATH="$fb:$PATH" FAKE_TASKS="$TMP_ROOT/unread-control/tasks" \
+    run_gen "$manual" >/dev/null 2>&1
+  assert_no_grep 'Nothing is waiting on you for this side.' "$manual_file" \
+    "the manual backend must not claim nothing is waiting"
+  assert_grep 'manual backlog backend' "$manual_file" \
+    "the block names the manual backend as the reason"
+  pass "an unreadable backlog says it could not find out and carries no generation date"
+}
+
+# check() treats an unread block as a block that failed, because the captain's
+# probe is the date and an unread block deliberately carries none.
+test_check_fails_a_block_whose_source_could_not_be_read() {
+  local home fb out code
+  home=$(new_home "$TMP_ROOT/unread-check")
+  fb=$(make_fakebin "$TMP_ROOT/unread-check")
+  : > "$TMP_ROOT/unread-check/tasks"
+  PATH="$fb:$PATH" FAKE_TASKS="$TMP_ROOT/unread-check/tasks" \
+    FAKE_TASKS_AXI_VERSION=0.1.0 run_gen "$home" >/dev/null 2>&1
+
+  out=$(PATH="$fb:$PATH" FAKE_TASKS="$TMP_ROOT/unread-check/tasks" \
+    FAKE_TASKS_AXI_VERSION=0.1.0 run_gen "$home" --check 2>&1) && code=0 || code=$?
+  expect_code 1 "$code" "a block whose source could not be read must fail the audit"
+  assert_contains "$out" "source could not be read" "the audit says which way the block failed"
+  assert_contains "$out" "the backlog cannot be read right now" \
+    "the audit also names the live read it could not perform"
+  pass "check fails a block whose source could not be read and names the cause"
+}
+
+# The same distinction on the live-work half, through the same mechanism rather
+# than a second one.
+test_unreadable_task_state_never_reads_as_nothing_running() {
+  local home fb file
+  if [ "$(id -u)" = 0 ]; then
+    pass "skipped: running as root, where an unreadable directory cannot be staged"
+    return 0
+  fi
+  home=$(new_home "$TMP_ROOT/unread-state")
+  fb=$(make_fakebin "$TMP_ROOT/unread-state")
+  : > "$TMP_ROOT/unread-state/tasks"
+  file="$home/data/briefs/back-office.md"
+  chmod 000 "$home/state"
+  PATH="$fb:$PATH" FAKE_TASKS="$TMP_ROOT/unread-state/tasks" run_gen "$home" >/dev/null 2>&1
+  chmod 755 "$home/state"
+  assert_no_grep 'Nothing is running for this side right now.' "$file" \
+    "an unlistable task state must not claim nothing is running"
+  assert_grep 'fm:brief:unread running-now' "$file" \
+    "the running block is marked as unread rather than generated"
+  pass "task state that cannot be listed says so rather than reading as nothing running"
+}
+
 test_running_reports_live_work_and_skips_secondmates() {
   local home fb file
   home=$(new_home "$TMP_ROOT/running")
@@ -402,7 +511,8 @@ test_check_reports_a_stale_block_and_reads_the_review_line() {
   : > "$TMP_ROOT/check/tasks"
   PATH="$fb:$PATH" FAKE_TASKS="$TMP_ROOT/check/tasks" run_gen "$home" >/dev/null 2>&1
 
-  out=$(run_gen "$home" --check 2>&1) && code=0 || code=$?
+  out=$(PATH="$fb:$PATH" FAKE_TASKS="$TMP_ROOT/check/tasks" run_gen "$home" --check 2>&1) &&
+    code=0 || code=$?
   expect_code 0 "$code" "a freshly generated home is not stale"
   assert_contains "$out" 'last reviewed 7 August 2026, late afternoon' \
     "check reads the narrative review line"
@@ -412,10 +522,30 @@ test_check_reports_a_stale_block_and_reads_the_review_line() {
   old=$(( $(date +%s) - 172800 ))
   sed "s/epoch=[0-9]*/epoch=$old/" "$home/data/briefs/back-office.md" > "$home/x" &&
     mv "$home/x" "$home/data/briefs/back-office.md"
-  out=$(run_gen "$home" --check 2>&1) && code=0 || code=$?
+  out=$(PATH="$fb:$PATH" FAKE_TASKS="$TMP_ROOT/check/tasks" run_gen "$home" --check 2>&1) &&
+    code=0 || code=$?
   expect_code 1 "$code" "an aged block must fail the check"
   assert_contains "$out" "has stopped updating" "check names the stopped generator"
   pass "check reports an aged block, exits non-zero, and reads the review line it never writes"
+}
+
+# The read-only audit is one of the two surfaces required to name a repository
+# no context claims, so it reads the same records the generator does.
+test_check_reports_an_unmapped_repository() {
+  local home fb out code
+  home=$(new_home "$TMP_ROOT/check-unmapped")
+  fb=$(make_fakebin "$TMP_ROOT/check-unmapped")
+  cat > "$TMP_ROOT/check-unmapped/tasks" <<'EOF'
+somewhere-decision-one|queued|a-repo-nobody-claimed|-|2026-08-01|An orphaned decision
+EOF
+  PATH="$fb:$PATH" FAKE_TASKS="$TMP_ROOT/check-unmapped/tasks" run_gen "$home" >/dev/null 2>&1
+
+  out=$(PATH="$fb:$PATH" FAKE_TASKS="$TMP_ROOT/check-unmapped/tasks" \
+    run_gen "$home" --check 2>&1) && code=0 || code=$?
+  expect_code 0 "$code" "an unmapped repository is a fact, never a failing audit"
+  assert_contains "$out" 'unmapped: repository "a-repo-nobody-claimed"' \
+    "the read-only audit names the unmapped repository too"
+  pass "check reports an unmapped repository without turning it into a failure"
 }
 
 test_after_event_is_quiet_and_never_fails() {
@@ -426,6 +556,126 @@ test_after_event_is_quiet_and_never_fails() {
   expect_code 0 "$code" "--after-event must never fail a lifecycle command"
   [ -z "$out" ] || fail "--after-event printed: $out"
   pass "--after-event stays silent and exits 0 even with nothing configured"
+}
+
+# --- installing the markers -------------------------------------------------
+
+# install_home <dir> <body>: an FM_HOME whose brief carries the two headings but
+# no markers yet, which is the state --install-markers exists for.
+install_home() {
+  local home=$1 body=$2
+  mkdir -p "$home/data/briefs" "$home/config" "$home/state"
+  printf '%s' "$body" > "$home/data/briefs/back-office.md"
+  printf 'back-office: mldinvoicing\n' > "$home/config/context-briefs.conf"
+  printf '%s\n' "$home"
+}
+
+# A heading with nothing under it is the boundary case: the block to preserve is
+# empty, and an implementation that copies it anyway duplicates the line that
+# ended it into the block it was supposed to bound.
+test_install_markers_handles_an_empty_section_body() {
+  local home file
+  home=$(install_home "$TMP_ROOT/install-adjacent" \
+    '# Back office
+
+## Waiting on you
+## Running now
+
+A closing pointer.
+')
+  file="$home/data/briefs/back-office.md"
+  run_gen "$home" --install-markers >/dev/null 2>&1
+  [ "$(grep -c '^## Running now$' "$file")" = 1 ] ||
+    fail "the boundary heading was duplicated into the block above it"
+  [ "$(grep -c '^## Waiting on you$' "$file")" = 1 ] ||
+    fail "the first heading was duplicated"
+  assert_grep 'A closing pointer.' "$file" "the hand-written pointer survived"
+  # Having installed them, the file must now be one the generator accepts.
+  run_gen "$home" --install-markers >/dev/null 2>&1
+  [ "$(grep -c 'waiting-on-you:begin' "$file")" = 1 ] ||
+    fail "a second install added a duplicate marker"
+  pass "a heading with an empty body is wrapped without duplicating its boundary"
+}
+
+# A brief that only ever got one pair installed must stay repairable. The old
+# guard asked for both pairs at once, so repairing the missing pair inserted a
+# second copy of the pair that was already there and locked the file out.
+test_install_markers_repairs_a_half_marked_brief() {
+  local home file out code
+  home=$(install_home "$TMP_ROOT/install-half" \
+    '# Back office
+
+## Waiting on you
+
+Decisions live here.
+
+---
+
+## Running now
+
+Live work lives here.
+')
+  file="$home/data/briefs/back-office.md"
+  run_gen "$home" --install-markers >/dev/null 2>&1
+  grep -v 'running-now:begin' "$file" > "$file.cut" && mv "$file.cut" "$file"
+  grep -v 'running-now:end' "$file" > "$file.cut" && mv "$file.cut" "$file"
+
+  out=$(run_gen "$home" --install-markers 2>&1) && code=0 || code=$?
+  expect_code 0 "$code" "repairing a half-marked brief must succeed"
+  [ "$(grep -c 'waiting-on-you:begin' "$file")" = 1 ] ||
+    fail "repairing the missing pair duplicated the pair that was already there"
+  [ "$(grep -c 'running-now:begin' "$file")" = 1 ] ||
+    fail "the missing pair was not restored exactly once"
+  pass "a half-marked brief is repaired rather than locked out"
+}
+
+# The refusal message is a promise about the file on disk, so a refusal on the
+# second heading must leave the first heading unwrapped too.
+test_install_markers_refusal_leaves_the_file_byte_identical() {
+  local home file before out code
+  home=$(install_home "$TMP_ROOT/install-refuse" \
+    '# Back office
+
+## Waiting on you
+
+Decisions live here.
+
+---
+
+## Running now
+
+Live work lives here.
+
+---
+
+## Running now
+
+A second copy of the heading that makes the boundary ambiguous.
+')
+  file="$home/data/briefs/back-office.md"
+  before="$TMP_ROOT/install-refuse.before"
+  cp "$file" "$before"
+
+  out=$(run_gen "$home" --install-markers 2>&1) && code=0 || code=$?
+  expect_code 1 "$code" "an ambiguous second heading must refuse"
+  assert_contains "$out" "left untouched" "the refusal states the file was left alone"
+  assert_contains "$out" "back-office.md" "the refusal names the brief, not a staging copy"
+  diff "$before" "$file" >/dev/null ||
+    fail "the refusal claimed the file was left untouched but it was rewritten"
+  pass "a refusal on the second heading leaves the whole brief byte-identical"
+}
+
+test_a_symlinked_brief_is_refused_as_a_symlink() {
+  local home out code
+  home=$(new_home "$TMP_ROOT/symlink")
+  mv "$home/data/briefs/back-office.md" "$home/real-brief.md"
+  ln -s "$home/real-brief.md" "$home/data/briefs/back-office.md"
+  out=$(run_gen "$home" 2>&1) && code=0 || code=$?
+  expect_code 1 "$code" "a symlinked brief must refuse"
+  assert_contains "$out" "symbolic link" "the refusal names the real cause"
+  assert_not_contains "$out" "there is no brief at" \
+    "the refusal must not claim the brief is missing"
+  pass "a symlinked brief is refused for being a symlink rather than for being absent"
 }
 
 # --- the generator runs without being asked ---------------------------------
@@ -477,9 +727,17 @@ test_missing_brief_file_is_refused
 test_missing_mapping_is_refused
 test_deadline_items_lead_and_clusters_group
 test_empty_sections_say_so_plainly
+test_an_unreadable_backlog_never_reads_as_an_empty_one
+test_check_fails_a_block_whose_source_could_not_be_read
+test_unreadable_task_state_never_reads_as_nothing_running
 test_running_reports_live_work_and_skips_secondmates
 test_unmapped_repository_is_reported
 test_each_block_states_its_own_age
 test_check_reports_a_stale_block_and_reads_the_review_line
+test_check_reports_an_unmapped_repository
 test_after_event_is_quiet_and_never_fails
+test_install_markers_handles_an_empty_section_body
+test_install_markers_repairs_a_half_marked_brief
+test_install_markers_refusal_leaves_the_file_byte_identical
+test_a_symlinked_brief_is_refused_as_a_symlink
 test_a_landing_refreshes_the_briefs_on_its_own

@@ -26,6 +26,20 @@
 # generator that stopped running cannot hide behind a page that still looks
 # current. `--check` reads those same stamps and writes nothing.
 #
+# A section whose source could not be read at all says exactly that and names
+# what it could not reach. It never says nothing is waiting or nothing is
+# running, because this platform does not assert that something does not exist,
+# only that it could not find one and what it checked. Such a block carries an
+# unread marker INSTEAD of a generation stamp, because a fresh stamp over a
+# source that was never read is a lie the staleness probe cannot catch.
+#
+#   <!-- fm:brief:unread waiting-on-you -->
+#
+# The backlog is read only when the shared backend decision in
+# bin/fm-tasks-axi-lib.sh says tasks-axi is usable here, which is the same owner
+# bin/fm-session-start.sh, bin/fm-teardown.sh and bin/fm-decision-hold.sh
+# consult. Live work is read only when the task state directory can be listed.
+#
 # The narrative's own review date is the "*Current as at ...*" line each brief
 # already carries. This script READS it, for --check, and never writes it.
 #
@@ -49,16 +63,26 @@
 #   fm-context-briefs.sh --help
 #
 # Exit status: 0 on success, 1 on any refusal or failure, 2 on a usage error.
-# `--check` exits 1 when any block is stale, unreadable, or missing. Neither
-# path ever exits non-zero merely because a repository is unmapped, which is a
-# reported fact rather than a failure. `--after-event` always exits 0 so a
-# lifecycle command never fails because a reading surface could not refresh.
+# `--check` exits 1 when any block is stale, unreadable, or missing. Both paths
+# report an unmapped repository as an explicit line and neither ever exits
+# non-zero merely because one exists, which is a reported fact rather than a
+# failure. `--after-event` always exits 0 so a lifecycle command never fails
+# because a reading surface could not refresh.
+#
+# `--after-event` runs the whole refresh as one bounded child, because it fires
+# inside spawn, teardown, and every landing, and the record reads underneath it
+# are subprocesses of tools that can hang. A refresh that hits the bound leaves
+# every brief exactly as it found it, because each brief is staged in full and
+# moved into place in one step.
 #
 # Environment:
 #   FM_HOME                          the operational home to read and write
 #   FM_CONTEXT_BRIEFS_MAX_AGE_HOURS  --check staleness bound (default 24)
 #   FM_CONTEXT_BRIEFS_TIMEOUT        per-task current-state bound in seconds
 #                                    (default 20)
+#   FM_CONTEXT_BRIEFS_AFTER_EVENT_TIMEOUT
+#                                    aggregate bound in seconds on one
+#                                    --after-event refresh (default 60)
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -72,11 +96,27 @@ MAP="$CONFIG/context-briefs.conf"
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# fm-wake-lib.sh owns the portable lock this repository already uses everywhere a
+# read-then-rewrite must not interleave. Sourced after the paths above so its own
+# defaulting keeps them.
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
+# A bound that cannot be read is not a bound, so an unusable value falls back to
+# the default rather than silently removing the limit it was meant to impose.
 MAX_AGE_HOURS=${FM_CONTEXT_BRIEFS_MAX_AGE_HOURS:-24}
+case "$MAX_AGE_HOURS" in
+  '' | 0 | *[!0-9]*) MAX_AGE_HOURS=24 ;;
+esac
 STATE_TIMEOUT=${FM_CONTEXT_BRIEFS_TIMEOUT:-20}
 case "$STATE_TIMEOUT" in
   '' | 0 | *[!0-9]*) STATE_TIMEOUT=20 ;;
+esac
+AFTER_EVENT_TIMEOUT=${FM_CONTEXT_BRIEFS_AFTER_EVENT_TIMEOUT:-60}
+case "$AFTER_EVENT_TIMEOUT" in
+  '' | 0 | *[!0-9]*) AFTER_EVENT_TIMEOUT=60 ;;
 esac
 
 WOU_BEGIN='<!-- fm:brief:waiting-on-you:begin -->'
@@ -86,10 +126,17 @@ RN_END='<!-- fm:brief:running-now:end -->'
 WOU_HEADING='## Waiting on you'
 RN_HEADING='## Running now'
 STAMP_PREFIX='<!-- fm:brief:generated '
+UNREAD_PREFIX='<!-- fm:brief:unread '
+# The lock sits beside what it guards rather than in state/, so a home whose
+# task state cannot be read can still rewrite its briefs and say so.
+BRIEFS_LOCK="$BRIEFS/.context-briefs.lock"
+LOCK_TRIES=100
 TAB=$'\t'
 
 QUIET=0
 RC=0
+BACKLOG_UNREAD=
+RUNNING_UNREAD=
 
 usage() {
   awk '
@@ -205,6 +252,38 @@ tasks() {
   (cd "$FM_HOME" && tasks-axi "$@")
 }
 
+# backlog_available: whether this home's backlog can be read at all. The decision
+# belongs to bin/fm-tasks-axi-lib.sh, which already owns the version floor, the
+# feature probes for stripped builds, and the manual-backend opt-out. It is asked
+# here rather than re-derived, so a home that reads its backlog one way in
+# session start cannot read it another way in a brief.
+backlog_available() {
+  fm_tasks_axi_backend_available "$CONFIG"
+}
+
+# backlog_unread_reason: what could not be reached, in the reader's words. Only
+# ever called once backlog_available has already said no.
+backlog_unread_reason() {
+  if fm_backlog_backend_manual "$CONFIG"; then
+    printf 'This home is set to the manual backlog backend in %s/backlog-backend, so the backlog tooling was not read.\n' "$CONFIG"
+  elif ! command -v tasks-axi >/dev/null 2>&1; then
+    printf 'The backlog tool tasks-axi is not installed on this machine, so the captain-held items could not be read.\n'
+  else
+    printf 'The tasks-axi on this machine cannot be used by this home, which needs version %s or newer carrying the flags firstmate relies on, so the captain-held items could not be read.\n' "$FM_TASKS_AXI_MIN"
+  fi
+}
+
+# running_readable: whether live work can be enumerated at all. A directory that
+# exists and can be listed holding no records is a genuine empty. A directory
+# that cannot be listed is not an answer.
+running_readable() {
+  [ -d "$STATE" ] && [ -r "$STATE" ] && [ -x "$STATE" ]
+}
+
+running_unread_reason() {
+  printf 'The task state directory at %s could not be listed, so live work could not be read.\n' "$STATE"
+}
+
 # tasks_field <show-output> <key>: one scalar field from `tasks-axi show --full`.
 # Values are bare or double-quoted with backslash escapes, and "-" means empty.
 tasks_field() {
@@ -246,7 +325,7 @@ sentence() {
 
 task_title() {  # <id> -> full title, or empty when the backlog does not know it
   local out
-  command -v tasks-axi >/dev/null 2>&1 || return 0
+  backlog_available || return 0
   out=$(tasks show "$1" --full 2>/dev/null) || return 0
   tasks_field "$out" title
 }
@@ -256,7 +335,7 @@ task_title() {  # <id> -> full title, or empty when the backlog does not know it
 #   id <TAB> repo_key <TAB> repo_display <TAB> deadline <TAB> created <TAB> title
 captain_items() {
   local ids id out state repo title deadline created
-  command -v tasks-axi >/dev/null 2>&1 || return 0
+  backlog_available || return 0
   ids=$(tasks list --kind captain 2>/dev/null |
     sed -n 's/^  \([A-Za-z0-9][A-Za-z0-9._-]*\),.*/\1/p') || return 0
   for id in $ids; do
@@ -304,6 +383,20 @@ stamp_lines() {  # <epoch>
   printf '%s%s epoch=%s -->\n' "$STAMP_PREFIX" "$(iso_stamp "$1")" "$1"
   printf '*Generated %s at %s. If that date is not recent this section stopped updating, so do not trust it.*\n' \
     "$(human_date "$1")" "$(human_time "$1")"
+}
+
+# Backticks in the format string below are a Markdown code span, which a shell
+# linter cannot tell from command substitution.
+# shellcheck disable=SC2016
+# render_unread <section> <reason>: the block a section gets when its source
+# could not be read. It carries the unread marker rather than a generation
+# stamp, because a stamp here would tell the captain's own staleness probe that
+# a read succeeded when none happened.
+render_unread() {
+  printf '%s%s -->\n' "$UNREAD_PREFIX" "$1"
+  printf 'This section could not be read, so it is not telling you there is nothing here.\n\n'
+  printf '%s\n\n' "$2"
+  printf 'Until that is sorted this block has no generation date, because nothing was generated. Run `fm-context-briefs.sh` again once it can be read.\n'
 }
 
 state_words() {  # <crew-state> -> plain English
@@ -494,64 +587,145 @@ check_markers() {
   printf '%s\t%s\t%s\t%s\n' "$wb" "$we" "$rb" "$re"
 }
 
-# replace_block <file> <begin-line> <end-line> <body-file>
-# Rewrites only the bytes strictly between the two marker lines. head and tail
-# reproduce the surrounding bytes exactly, including a file with no final
-# newline, which is what keeps hand-written prose byte-identical.
-replace_block() {
-  local f=$1 b=$2 e=$3 body=$4 tmp
+# rewrite_blocks <file> <wb> <we> <rb> <re> <waiting-body> <running-body>
+# Rewrites only the bytes strictly between each pair of marker lines. head, sed
+# and tail reproduce the surrounding bytes exactly, including a file with no
+# final newline, which is what keeps hand-written prose byte-identical.
+#
+# Both blocks are staged into ONE temporary file and moved into place in one
+# step. A run that dies part way through, including one killed by the aggregate
+# bound on --after-event, therefore leaves the brief exactly as it found it
+# rather than with one block refreshed and the other stale.
+rewrite_blocks() {
+  local f=$1 wb=$2 we=$3 rb=$4 re=$5 wbody=$6 rbody=$7
+  local first_begin first_end first_body second_begin second_end second_body tmp
+  if [ "$wb" -lt "$rb" ]; then
+    first_begin=$wb first_end=$we first_body=$wbody
+    second_begin=$rb second_end=$re second_body=$rbody
+  else
+    first_begin=$rb first_end=$re first_body=$rbody
+    second_begin=$wb second_end=$we second_body=$wbody
+  fi
   tmp=$(mktemp "$(dirname "$f")/.fm-context-briefs.XXXXXX") || return 1
   {
-    head -n "$b" "$f" &&
+    head -n "$first_begin" "$f" &&
       printf '\n' &&
-      cat "$body" &&
+      cat "$first_body" &&
       printf '\n' &&
-      tail -n "+$e" "$f"
+      sed -n "$first_end,${second_begin}p" "$f" &&
+      printf '\n' &&
+      cat "$second_body" &&
+      printf '\n' &&
+      tail -n "+$second_end" "$f"
   } > "$tmp" || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$f"
 }
 
 # --- commands ---------------------------------------------------------------
 
+# collect_records <workdir>: fill captain.tsv and running.tsv, and record why
+# either source could not be read. An unreadable source leaves an EMPTY record
+# and a stated reason, which the renderers keep apart: no record plus no reason
+# is a genuine empty, no record plus a reason is "could not find out".
+collect_records() {
+  local work=$1
+  BACKLOG_UNREAD=
+  RUNNING_UNREAD=
+  if backlog_available; then
+    captain_items > "$work/captain.tsv"
+  else
+    BACKLOG_UNREAD=$(backlog_unread_reason)
+    : > "$work/captain.tsv"
+  fi
+  if running_readable; then
+    running_items > "$work/running.tsv"
+  else
+    RUNNING_UNREAD=$(running_unread_reason)
+    : > "$work/running.tsv"
+  fi
+}
+
+# brief_target <file> <context>: prove the path is a real file this run may
+# rewrite. A symlink is refused on its own terms, because the briefs are already
+# surfaced to the captain through one and an operator who linked a single file
+# deserves to be told that rather than that the file is missing.
+brief_target() {
+  local file=$1 ctx=$2
+  if [ -L "$file" ]; then
+    note_refusal "refused: $file for context '$ctx' is a symbolic link, and this generator will not write through one, so it was left untouched."
+    return 1
+  fi
+  if [ ! -f "$file" ]; then
+    note_refusal "refused: there is no brief at $file for context '$ctx'."
+    return 1
+  fi
+  return 0
+}
+
+# acquire_briefs_lock: take the rewrite lock, or refuse. fm_lock_try_acquire is
+# the repository's owner of this decision, including reclaiming a lock whose
+# holder is provably gone. The wait is bounded because this runs inside spawn and
+# teardown, where waiting forever on a lock is worse than saying it could not be
+# taken.
+acquire_briefs_lock() {
+  local tries=0
+  while ! fm_lock_try_acquire "$BRIEFS_LOCK"; do
+    if [ "$tries" -ge "$LOCK_TRIES" ]; then
+      note_refusal "refused: could not take the brief rewrite lock at $BRIEFS_LOCK, so no brief was touched."
+      return 1
+    fi
+    tries=$((tries + 1))
+    sleep 0.1
+  done
+  return 0
+}
+
 generate() {
-  local now ctx file lines wb we rb re work captain running status=0
+  local now ctx file lines wb we rb re work captain running status=0 locked=0
   require_map || return 1
   now=$(date +%s)
   work=$(mktemp -d "${TMPDIR:-/tmp}/fm-context-briefs.XXXXXX") || return 1
 
   captain="$work/captain.tsv"
   running="$work/running.tsv"
-  captain_items > "$captain"
-  running_items > "$running"
+  collect_records "$work"
 
   report_unmapped "$captain" "$running"
 
+  # Five lifecycle commands can fire this refresh at once in a fleet. The line
+  # numbers check_markers resolves are only true while the file holds still, so
+  # the lock spans reading them and moving the rewritten file into place. With no
+  # briefs directory there is nothing to guard and every context refuses below on
+  # its own terms, which is the more useful message.
+  if [ -d "$BRIEFS" ]; then
+    acquire_briefs_lock || { rm -rf "$work"; return 1; }
+    locked=1
+  fi
   for ctx in $(contexts); do
     file="$BRIEFS/$ctx.md"
-    if [ ! -f "$file" ] || [ -L "$file" ]; then
-      note_refusal "refused: there is no brief at $file for context '$ctx'."
-      status=1
-      continue
-    fi
+    brief_target "$file" "$ctx" || { status=1; continue; }
     lines=$(check_markers "$file") || { status=1; continue; }
     IFS="$TAB" read -r wb we rb re <<< "$lines"
 
     awk -F'\t' -v c="$ctx" \
       'NR == FNR { if ($1 == c) keep[$2] = 1; next } keep[$2]' \
       <(read_map) "$captain" | LC_ALL=C sort -t"$TAB" -k5,5 -k1,1 > "$work/wou.tsv"
-    render_waiting "$ctx" "$work/wou.tsv" "$now" > "$work/wou.body"
-    render_running "$ctx" "$running" "$now" > "$work/rn.body"
-
-    # Rewrite the later block first so the earlier block's line numbers hold.
-    if [ "$wb" -lt "$rb" ]; then
-      replace_block "$file" "$rb" "$re" "$work/rn.body" &&
-        replace_block "$file" "$wb" "$we" "$work/wou.body"
+    if [ -n "$BACKLOG_UNREAD" ]; then
+      render_unread waiting-on-you "$BACKLOG_UNREAD" > "$work/wou.body"
     else
-      replace_block "$file" "$wb" "$we" "$work/wou.body" &&
-        replace_block "$file" "$rb" "$re" "$work/rn.body"
-    fi || { note_refusal "refused: could not rewrite $file."; status=1; continue; }
+      render_waiting "$ctx" "$work/wou.tsv" "$now" > "$work/wou.body"
+    fi
+    if [ -n "$RUNNING_UNREAD" ]; then
+      render_unread running-now "$RUNNING_UNREAD" > "$work/rn.body"
+    else
+      render_running "$ctx" "$running" "$now" > "$work/rn.body"
+    fi
+
+    rewrite_blocks "$file" "$wb" "$we" "$rb" "$re" "$work/wou.body" "$work/rn.body" ||
+      { note_refusal "refused: could not rewrite $file."; status=1; continue; }
     say "updated $file"
   done
+  [ "$locked" -eq 0 ] || fm_lock_release "$BRIEFS_LOCK"
 
   rm -rf "$work"
   return "$status"
@@ -572,9 +746,19 @@ report_unmapped() {
 }
 
 check() {
-  local ctx file epoch age now reviewed line stale=0 blocks
+  local ctx file epoch age now reviewed line stale=0 blocks unread work
   require_map || return 1
   now=$(date +%s)
+
+  # The audit reads the same records the generator does, so an unmapped
+  # repository surfaces here too. It reads them and writes nothing.
+  work=$(mktemp -d "${TMPDIR:-/tmp}/fm-context-briefs-check.XXXXXX") || return 1
+  collect_records "$work"
+  report_unmapped "$work/captain.tsv" "$work/running.tsv"
+  rm -rf "$work"
+  [ -z "$BACKLOG_UNREAD" ] || printf 'the backlog cannot be read right now: %s\n' "$BACKLOG_UNREAD"
+  [ -z "$RUNNING_UNREAD" ] || printf 'live work cannot be read right now: %s\n' "$RUNNING_UNREAD"
+
   for ctx in $(contexts); do
     file="$BRIEFS/$ctx.md"
     if [ ! -f "$file" ]; then
@@ -587,7 +771,12 @@ check() {
       continue
     fi
     blocks=$(grep -c -F -- "$STAMP_PREFIX" "$file" 2>/dev/null || true)
-    if [ "$blocks" -lt 2 ]; then
+    unread=$(grep -c -F -- "$UNREAD_PREFIX" "$file" 2>/dev/null || true)
+    if [ "$unread" -gt 0 ]; then
+      printf '%s: a generated block says its source could not be read, so it carries no date\n' "$ctx"
+      stale=1
+    fi
+    if [ "$((blocks + unread))" -lt 2 ]; then
       printf '%s: a generated block carries no date of its own\n' "$ctx"
       stale=1
     fi
@@ -619,41 +808,65 @@ check() {
 
 # install_markers: wrap the two existing headings once, deleting nothing. A
 # block ends at the next "## " heading or "---" rule, whichever comes first.
+#
+# Each pair is guarded by its OWN begin marker, so a brief that only ever got
+# one pair installed can still be repaired rather than growing a second copy of
+# the pair it already had. Both insertions are staged on a copy and the copy
+# replaces the brief only once both have succeeded, so a refusal on the second
+# heading leaves the original byte-identical, exactly as the refusal says.
 install_markers() {
-  local ctx file status=0
+  local ctx file staged status=0 need_waiting need_running
   require_map || return 1
   for ctx in $(contexts); do
     file="$BRIEFS/$ctx.md"
-    if [ ! -f "$file" ] || [ -L "$file" ]; then
-      note_refusal "refused: there is no brief at $file for context '$ctx'."
-      status=1
-      continue
-    fi
-    if grep -q -x -F -- "$WOU_BEGIN" "$file" && grep -q -x -F -- "$RN_BEGIN" "$file"; then
+    brief_target "$file" "$ctx" || { status=1; continue; }
+    need_waiting=1
+    need_running=1
+    grep -q -x -F -- "$WOU_BEGIN" "$file" && need_waiting=0
+    grep -q -x -F -- "$RN_BEGIN" "$file" && need_running=0
+    if [ "$need_waiting" -eq 0 ] && [ "$need_running" -eq 0 ]; then
       say "$file already carries its markers"
       continue
     fi
-    install_one "$file" "$WOU_HEADING" "$WOU_BEGIN" "$WOU_END" || { status=1; continue; }
-    install_one "$file" "$RN_HEADING" "$RN_BEGIN" "$RN_END" || { status=1; continue; }
-    say "installed markers in $file"
+    staged=$(mktemp "$(dirname "$file")/.fm-context-briefs.XXXXXX") || { status=1; continue; }
+    if ! cp "$file" "$staged"; then
+      rm -f "$staged"
+      note_refusal "refused: could not stage $file, so it was left untouched."
+      status=1
+      continue
+    fi
+    if { [ "$need_waiting" -eq 0 ] ||
+      install_one "$staged" "$file" "$WOU_HEADING" "$WOU_BEGIN" "$WOU_END"; } &&
+      { [ "$need_running" -eq 0 ] ||
+        install_one "$staged" "$file" "$RN_HEADING" "$RN_BEGIN" "$RN_END"; } &&
+      mv "$staged" "$file"; then
+      say "installed markers in $file"
+    else
+      rm -f "$staged"
+      status=1
+    fi
   done
   return "$status"
 }
 
-install_one() {  # <file> <heading> <begin> <end>
-  local f=$1 heading=$2 begin=$3 end=$4 h stop total tmp
+install_one() {  # <staged-file> <display-name> <heading> <begin> <end>
+  local f=$1 display=$2 heading=$3 begin=$4 end=$5 h stop total tmp
   h=$(marker_line "$f" "$heading") || {
-    note_refusal "refused: $f does not carry exactly one '$heading' line, so it was left untouched."
+    note_refusal "refused: $display does not carry exactly one '$heading' line, so it was left untouched."
     return 1
   }
   total=$(awk 'END { print NR + 0 }' "$f")
   stop=$(awk -v h="$h" 'NR > h && ($0 ~ /^## / || $0 == "---") { print NR; exit }' "$f")
   [ -n "$stop" ] || stop=$((total + 1))
   tmp=$(mktemp "$(dirname "$f")/.fm-context-briefs.XXXXXX") || return 1
+  # A heading immediately followed by the next heading or rule has an EMPTY
+  # body. Asking sed for that range would ask it to print from h+1 back to h,
+  # and a reversed range prints its first line, which the tail below prints
+  # again. An empty body is copied as nothing at all.
   {
     head -n "$h" "$f" &&
       printf '%s\n' "$begin" &&
-      sed -n "$((h + 1)),$((stop - 1))p" "$f" &&
+      { [ "$stop" -le "$((h + 1))" ] || sed -n "$((h + 1)),$((stop - 1))p" "$f"; } &&
       printf '%s\n\n' "$end" &&
       tail -n "+$stop" "$f"
   } > "$tmp" || { rm -f "$tmp"; return 1; }
@@ -666,6 +879,19 @@ case "${1:---generate}" in
   --generate) generate || RC=$? ;;
   --after-event)
     QUIET=1
+    # One aggregate bound over the whole refresh, not one per subprocess. The
+    # backlog read launches a process per captain-held item and the current-state
+    # read launches one per live task, so a degraded backend with a full backlog
+    # and several live tasks would otherwise stall the lifecycle command that
+    # called this. The bound is imposed by re-entering this script as one bounded
+    # child, the same shape bin/fm-session-start.sh uses over the same
+    # subprocesses.
+    if [ -z "${FM_CONTEXT_BRIEFS_BOUNDED:-}" ]; then
+      fm_run_timed "$AFTER_EVENT_TIMEOUT" \
+        env FM_CONTEXT_BRIEFS_BOUNDED=1 "$SCRIPT_DIR/fm-context-briefs.sh" --after-event \
+        >/dev/null 2>&1 || true
+      exit 0
+    fi
     generate >/dev/null 2>&1 || true
     exit 0
     ;;
