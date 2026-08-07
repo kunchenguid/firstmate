@@ -474,6 +474,10 @@ To recover, restore that home's tracked `bin/fm-procevent.sh`, run `FM_HOME=<hom
 
 `FM_PROCEVENT_MAX_OUTPUT_BYTES` (default 1048576) bounds a single captured result while the source runs; oversized output is drained but truncated with a stderr notice rather than staged or published whole or dropped.
 
+A child that exits non-zero also leaves the tail of its own stderr, private and bounded, at `state/procevent/<source-id>.stderr`, because a runner started by `reconcile` is detached and has nowhere else to report why a source cannot start - a rejected credential, a missing tool.
+That record is diagnostic only: nothing waits on it, completion stays decided by the child's own output alone, and it is never mixed into the captured result or published as a wake.
+Each run of the same source replaces it, a run that succeeds or fails with nothing to report leaves none behind, and retirement removes it with the registration, so the record cannot outlive the problem it describes.
+
 The runner proves exactly one durability boundary: output that reached the runner is stored at mode `0600` before any event referencing it is published, and a captured result with no durable handled acknowledgement remains eligible for bounded re-announcement across any number of drains and restarts, not only the crash window right after capture.
 `bin/fm-procevent.sh handled <source-id> <sequence>` is the only thing that stops re-announcement: a generation-keyed, private, path-safe, durable, and idempotent acknowledgement that atomically checks and deduplicates by the exact source and sequence, so a paired effect gated on its first-time-vs-repeat report is never authorized twice.
 Wake publication itself is still best-effort, so the same source and sequence can repeat even before any restart; handlers deduplicate that identity rather than assuming a wake is unique.

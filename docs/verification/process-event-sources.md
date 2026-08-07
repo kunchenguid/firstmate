@@ -109,6 +109,7 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | argv integrity | an argument containing spaces survives as one argument, a shell-looking argument is passed literally with no interpretation, and an unrepresentable newline is rejected at registration |
 | bounded output | output beyond `FM_PROCEVENT_MAX_OUTPUT_BYTES` is drained while only the bound is staged, then truncated and captured |
 | silent failure handling | a nonzero exit with no output publishes nothing and leaves the source registered for retry |
+| kept failure diagnostic | a failed child's stderr tail is kept at `0600` under `state/procevent/<source-id>.stderr` and bounded when the child is loud, never joins the captured result and publishes nothing, is removed by a later successful run of the same source and by `retire`, and a descendant still holding that stderr never delays the runner's completion |
 | inertness | a home with no registered source generates no state, starts no process, and does not need supervision |
 
 ## Runner lifetime and cleanup
