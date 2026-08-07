@@ -67,7 +67,10 @@
 # report an unmapped repository as an explicit line and neither ever exits
 # non-zero merely because one exists, which is a reported fact rather than a
 # failure. `--after-event` always exits 0 so a lifecycle command never fails
-# because a reading surface could not refresh.
+# because a reading surface could not refresh. That promise stops at this
+# script, which cannot make it while it is not running at all, so every
+# lifecycle call site guards the invocation too: a home that does not ship this
+# generator must not fail the spawn, teardown, merge, or resolution it trails.
 #
 # `--after-event` runs the whole refresh as one bounded child, because it fires
 # inside spawn, teardown, and every landing, and the record reads underneath it

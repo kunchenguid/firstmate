@@ -2339,5 +2339,8 @@ echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW
 
 # The captain's context briefs carry a derived half. Refresh it here, at the
 # lifecycle moment its records changed, rather than on a timer.
-# bin/fm-context-briefs.sh --after-event is quiet and always exits 0.
-"$SCRIPT_DIR/fm-context-briefs.sh" --after-event
+# bin/fm-context-briefs.sh --after-event is quiet and always exits 0. The guard
+# covers the one case that promise cannot: a home that does not ship the
+# generator at all, where the invocation itself fails and would otherwise make
+# this last line the exit status of an already completed spawn.
+"$SCRIPT_DIR/fm-context-briefs.sh" --after-event || true

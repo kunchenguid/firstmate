@@ -456,8 +456,11 @@ command_resolve() {
 # The captain's context briefs carry a derived half listing exactly these
 # captain-held decisions. Refresh it when one opens or closes, rather than on
 # a timer. bin/fm-context-briefs.sh --after-event is quiet and always exits 0.
+# The guard covers the one case that promise cannot: a home that does not ship
+# the generator at all, where the invocation itself fails and would otherwise
+# become the exit status of an already recorded hold or resolution.
 refresh_context_briefs() {
-  "$SCRIPT_DIR/fm-context-briefs.sh" --after-event
+  "$SCRIPT_DIR/fm-context-briefs.sh" --after-event || true
 }
 
 case "${1:-}" in
