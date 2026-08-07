@@ -1138,6 +1138,14 @@ assert_contains "$runner_help" "Durability boundary" \
   "the runner's help scopes what it actually proves"
 assert_not_contains "$runner_help" "exactly-once" \
   "the runner's help claims no exactly-once delivery"
+# The durability boundary ends by naming what the runner does NOT prove, and
+# that closing clause is the part most easily lost when the header grows. Help
+# that silently drops its own limitation misleads harder than help that is
+# merely short, so the last rendered line is pinned to it.
+assert_contains "$runner_help" "about the source side of the handoff." \
+  "the runner's help states that it proves nothing about the source side"
+[ "$(printf '%s\n' "$runner_help" | tail -n 1)" = "about the source side of the handoff." ] \
+  || fail "the runner's help is cut off before the end of its loss-limitation sentence"$'\n'"--- output ---"$'\n'"$runner_help"
 pass "the published interfaces state the loss limitation and claim no lossless delivery"
 
 printf '\nall procevent tests passed\n'
