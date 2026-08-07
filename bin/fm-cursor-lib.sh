@@ -159,7 +159,7 @@ fm_cursor_args_are_cursor() {  # <args>
   local args=$1 argv0
   [ -n "$args" ] || return 1
   case "$args" in
-    cursor-agent|"cursor-agent "*|*/cursor-agent|*/cursor-agent\ *|*/cursor-agent/*) return 0 ;;
+    cursor-agent|"cursor-agent "*|*/cursor-agent|*/cursor-agent\ *) return 0 ;;
   esac
   argv0=${args%% *}
   case "$argv0" in ''|MainThread) return 1 ;; esac
