@@ -98,6 +98,8 @@ test_concurrent_urls_start_one_browser() {
   marker="$dir/ready"
   browser="$dir/browser"
   make_fake_browser "$browser"
+  mkdir -p "$dir/runtime/lock"
+  printf '99999999\n' > "$dir/runtime/lock/pid"
   : > "$dir/launch-a"
   : > "$dir/launch-b"
   (
