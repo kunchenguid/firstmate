@@ -133,7 +133,10 @@ test_changed_mode_lints_only_the_changed_file() {
   target="bin/fm-install-shellcheck.sh"
   fm_lint_write_diff_file "$diff_file" "$target" "README.md"
 
-  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 FM_TEST_GIT_BRANCH=feature \
+  # Clear the ambient CI/GITHUB_ACTIONS signals so changed-file mode is actually
+  # exercised: a CI run sets them and would otherwise force the full lint here.
+  out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
+    FM_TEST_GIT_BRANCH=feature \
     FM_TEST_GIT_DIFF_FILE="$diff_file" "$LINT" 2>&1) \
     || fail "changed-mode lint run failed"$'\n'"$out"
   [ "$(cat "$log")" = "$target" ] \
@@ -158,7 +161,10 @@ test_main_branch_forces_full_lint() {
   fakebin=$(fm_fakebin "$tmp")
   fm_lint_stub_git "$fakebin"
 
-  listed=$(PATH="$fakebin:$PATH" FM_TEST_GIT_BRANCH=main "$LINT" --list-files)
+  # Clear CI/GITHUB_ACTIONS so the on-main branch is what forces the full lint,
+  # not the ambient CI signal a real CI run would otherwise supply.
+  listed=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' \
+    FM_TEST_GIT_BRANCH=main "$LINT" --list-files)
   expected=$(find bin bin/backends tests -maxdepth 1 -type f -name '*.sh' -print | LC_ALL=C sort)
   [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
     || fail "fm-lint.sh did not force a full lint when HEAD is on main"
@@ -175,8 +181,11 @@ test_explicit_path_bypasses_changed_logic() {
   target="bin/fm-install-shellcheck.sh"
 
   # The git stub reports a broken merge-base, which would force a full lint
-  # under the no-args default. An explicit path must never even consult it.
-  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 FM_TEST_GIT_MERGE_BASE_OK=0 \
+  # under the no-args default. Clearing CI/GITHUB_ACTIONS keeps changed-file
+  # selection live so this proves the explicit path bypasses it, not that CI
+  # already forced full mode. An explicit path must never even consult git.
+  out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
+    FM_TEST_GIT_MERGE_BASE_OK=0 \
     "$LINT" "$target" 2>&1) || fail "explicit-path lint failed"$'\n'"$out"
   [ "$(cat "$log")" = "$target" ] \
     || fail "explicit path lint did not run on exactly the requested file"$'\n'"logged: $(cat "$log")"
@@ -192,7 +201,9 @@ test_zero_changed_files_exits_clean() {
   : > "$diff_file"
 
   rc=0
-  out=$(PATH="$fakebin:$PATH" FM_TEST_GIT_BRANCH=feature \
+  # Clear CI/GITHUB_ACTIONS so changed-file mode runs and can reach the empty
+  # target set; a CI run would otherwise force a full lint instead.
+  out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_TEST_GIT_BRANCH=feature \
     FM_TEST_GIT_DIFF_FILE="$diff_file" "$LINT" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "zero changed lint targets must exit 0, got $rc"$'\n'"$out"
   assert_contains "$out" "ShellCheck 0.11.0" "zero-changed run did not print the ShellCheck version line"
@@ -211,7 +222,9 @@ test_list_files_respects_changed_mode() {
   fm_lint_write_diff_file "$diff_file" \
     "tests/fm-lint.test.sh" "docs/README.md" "bin/definitely-not-real-file.sh"
 
-  listed=$(PATH="$fakebin:$PATH" FM_TEST_GIT_BRANCH=feature \
+  # Clear CI/GITHUB_ACTIONS so --list-files reflects the changed set rather than
+  # the full canonical set a CI run's ambient signals would otherwise force.
+  listed=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_TEST_GIT_BRANCH=feature \
     FM_TEST_GIT_DIFF_FILE="$diff_file" "$LINT" --list-files)
   [ "$listed" = "tests/fm-lint.test.sh" ] \
     || fail "--list-files did not report the would-be changed set in changed mode"$'\n'"got: $listed"
