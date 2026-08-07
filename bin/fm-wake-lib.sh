@@ -78,16 +78,67 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
+fm_watcher_canonical_path() {
+  local path=$1 dir base link hops=0
+  [ -n "$path" ] || return 1
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+    dir=$(dirname -- "$path")
+    base=$(basename -- "$path")
+    [ -d "$dir" ] || return 1
+    if command -v realpath >/dev/null 2>&1; then
+      dir=$(realpath -- "$dir" 2>/dev/null) || return 1
+    else
+      dir=$(CDPATH='' cd -P -- "$dir" 2>/dev/null && pwd -P) || return 1
+    fi
+    printf '%s/%s\n' "$dir" "$base"
+    return
+  fi
+  if command -v realpath >/dev/null 2>&1; then
+    realpath -- "$path" 2>/dev/null
+    return
+  fi
+  # Portable fallback for environments without realpath. Physical parent
+  # resolution handles case-normalized directory components and intermediate
+  # symlinks; the bounded loop resolves a symlink in the final component.
+  while [ "$hops" -lt 40 ]; do
+    if [ -d "$path" ]; then
+      CDPATH='' cd -P -- "$path" 2>/dev/null && pwd -P
+      return
+    fi
+    { [ -e "$path" ] || [ -L "$path" ]; } || return 1
+    dir=$(dirname -- "$path")
+    base=$(basename -- "$path")
+    dir=$(CDPATH='' cd -P -- "$dir" 2>/dev/null && pwd -P) || return 1
+    path="$dir/$base"
+    if [ ! -L "$path" ]; then
+      printf '%s\n' "$path"
+      return
+    fi
+    link=$(readlink "$path" 2>/dev/null) || return 1
+    case "$link" in
+      /*) path=$link ;;
+      *) path="$dir/$link" ;;
+    esac
+    hops=$((hops + 1))
+  done
+  return 1
+}
+
 FM_WATCHER_MATCHED_IDENTITY=
 fm_watcher_lock_matches_pid() {
   local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
+  local canonical_home canonical_watch canonical_lock_home canonical_lock_path
   FM_WATCHER_MATCHED_IDENTITY=
   lockdir="$state/.watch.lock"
   lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
   lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
-  [ "$lock_home" = "$home" ] || return 1
-  [ "$lock_path" = "$watch_path" ] || return 1
+  canonical_home=$(fm_watcher_canonical_path "$home") || return 1
+  canonical_watch=$(fm_watcher_canonical_path "$watch_path") || return 1
+  canonical_lock_home=$(fm_watcher_canonical_path "$lock_home") || return 1
+  canonical_lock_path=$(fm_watcher_canonical_path "$lock_path") || return 1
+  [ "$canonical_lock_home" = "$canonical_home" ] || return 1
+  [ "$canonical_lock_path" = "$canonical_watch" ] || return 1
   [ -n "$lock_identity" ] || return 1
   current_identity=$(fm_pid_identity "$pid") || return 1
   [ "$current_identity" = "$lock_identity" ] || return 1
@@ -98,13 +149,16 @@ FM_WATCHER_HEALTHY_PID=
 FM_WATCHER_HEALTHY_IDENTITY=
 fm_watcher_healthy() {
   local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid identity age
+  local canonical_home canonical_watch
   FM_WATCHER_HEALTHY_PID=
   FM_WATCHER_HEALTHY_IDENTITY=
   lockdir="$state/.watch.lock"
   beat="$state/.last-watcher-beat"
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   fm_pid_alive "$pid" || return 1
-  fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home" || return 1
+  canonical_home=$(fm_watcher_canonical_path "$home") || return 1
+  canonical_watch=$(fm_watcher_canonical_path "$watch_path") || return 1
+  fm_watcher_lock_matches_pid "$state" "$canonical_watch" "$pid" "$canonical_home" || return 1
   identity=$FM_WATCHER_MATCHED_IDENTITY
   age=$(fm_path_age "$beat")
   [ "$age" -lt "$grace" ] || return 1

@@ -190,6 +190,91 @@ test_guard_warnings() {
   pass "guard banner leads when down with pending wakes (repair-after-drain) and stays silent when live and fresh"
 }
 
+test_watcher_health_canonicalizes_owner_paths() {
+  local dir state canonical_home canonical_watch case_home case_watch alias_home alias_watch absent_watch
+  local other_home pid identity dead
+  dir=$(make_case watcher-owner-paths)
+  state="$dir/state"
+  canonical_home="$dir/GitHub/firstmate"
+  canonical_watch="$canonical_home/bin/fm-watch.sh"
+  other_home="$dir/GitHub/other-firstmate"
+  mkdir -p "$canonical_home/bin" "$other_home"
+  printf '#!/usr/bin/env bash\n' > "$canonical_watch"
+  chmod +x "$canonical_watch"
+  sleep 300 &
+  pid=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") \
+    || fail "could not identify watcher path fixture pid"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$canonical_home" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$canonical_watch" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+
+  case_home="$dir/github/firstmate"
+  case_watch="$case_home/bin/fm-watch.sh"
+  if [ -d "$case_home" ]; then
+    FM_HOME="$case_home" FM_STATE_OVERRIDE="$state" bash -c \
+      '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' \
+      _ "$LIB" "$state" "$case_watch" "$pid" "$case_home" \
+      || fail "standalone lock owner check rejected case-differing GitHub/github spellings"
+    FM_HOME="$case_home" FM_STATE_OVERRIDE="$state" bash -c \
+      '. "$1"; fm_watcher_healthy "$2" "$3" 300 "$4"' \
+      _ "$LIB" "$state" "$case_watch" "$case_home" \
+      || fail "case-differing GitHub/github spellings did not resolve to one watcher owner"
+  else
+    printf 'skip: watcher GitHub/github case fixture requires a case-insensitive filesystem\n'
+  fi
+
+  alias_home="$dir/home-link"
+  alias_watch="$canonical_home/bin/watch-link"
+  ln -s "$canonical_home" "$alias_home"
+  ln -s "$canonical_watch" "$alias_watch"
+  FM_HOME="$alias_home" FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' \
+    _ "$LIB" "$state" "$alias_watch" "$pid" "$alias_home" \
+    || fail "standalone lock owner check rejected symlinked home and watcher paths"
+  FM_HOME="$alias_home" FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1"; fm_watcher_healthy "$2" "$3" 300 "$4"' \
+    _ "$LIB" "$state" "$alias_watch" "$alias_home" \
+    || fail "symlinked home and watcher paths did not resolve to the recorded owner"
+
+  absent_watch="$canonical_home/bin/not-yet-started.sh"
+  printf '%s\n' "$absent_watch" > "$state/.watch.lock/watcher-path"
+  FM_HOME="$alias_home" FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' \
+    _ "$LIB" "$state" "$alias_home/bin/not-yet-started.sh" "$pid" "$alias_home" \
+    || fail "owner check stopped canonicalizing an absent watcher leaf under an existing parent"
+  printf '%s\n' "$canonical_watch" > "$state/.watch.lock/watcher-path"
+
+  if FM_HOME="$other_home" FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1"; fm_watcher_healthy "$2" "$3" 300 "$4"' \
+    _ "$LIB" "$state" "$canonical_watch" "$other_home"; then
+    fail "canonical owner comparison accepted a different Firstmate home"
+  fi
+
+  printf '%s\n' "$$" > "$state/.watch.lock/pid"
+  if FM_HOME="$canonical_home" FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1"; fm_watcher_healthy "$2" "$3" 300 "$4"' \
+    _ "$LIB" "$state" "$canonical_watch" "$canonical_home"; then
+    fail "canonical owner comparison accepted the wrong live watcher pid"
+  fi
+
+  dead=$(dead_pid)
+  printf '%s\n' "$dead" > "$state/.watch.lock/pid"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  if FM_HOME="$canonical_home" FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1"; fm_watcher_healthy "$2" "$3" 300 "$4"' \
+    _ "$LIB" "$state" "$canonical_watch" "$canonical_home"; then
+    fail "canonical owner comparison accepted a dead watcher pid"
+  fi
+
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "watcher health canonicalizes owner paths while PID and cross-home guards stay fail-closed"
+}
+
 test_lock_single_winner_under_concurrency() {
   local dir state lockdir marker i pids pid wins
   dir=$(make_case lock-concurrency)
@@ -1106,6 +1191,7 @@ test_stale_watch_lock_reclaimed
 test_stale_watch_reclaim_publishes_before_clear
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
+test_watcher_health_canonicalizes_owner_paths
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
