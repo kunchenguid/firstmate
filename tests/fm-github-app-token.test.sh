@@ -183,6 +183,46 @@ test_relative_key_path_fails() {
   pass "relative private key path is refused"
 }
 
+# A present-but-unreadable config file must be a hard error: reporting it as
+# "not configured" would make fm-spawn.sh launch the worker under the captain's
+# gh credentials with no diagnostic at all.
+test_unreadable_config_fails_closed() {
+  local home out rc key
+  if [ "$(id -u)" = 0 ]; then
+    pass "skipped unreadable-config check (root bypasses file permissions)"
+    return 0
+  fi
+  home=$(make_home unreadable-id)
+  key="$home/key.pem"
+  make_rsa_key "$key"
+  write_config "$home" "12345" "67890" "$key"
+  chmod 000 "$home/config/github-app-id"
+  out=$(run_helper "$home" 2>&1)
+  rc=$?
+  chmod 600 "$home/config/github-app-id"
+  expect_code 1 "$rc" "unreadable app-id config should be a hard error, not exit 2"
+  assert_contains "$out" "github-app-id" "error should name the unreadable file"
+  assert_contains "$out" "not readable" "error should say the file is unreadable"
+  pass "present-but-unreadable GitHub App config fails closed instead of reading as unconfigured"
+}
+
+test_symlinked_key_path_is_refused_with_a_clear_reason() {
+  local home out rc key link
+  home=$(make_home symlink-key)
+  key="$home/key.pem"
+  make_rsa_key "$key"
+  link="$home/key-link.pem"
+  ln -s "$key" "$link"
+  write_config "$home" "12345" "67890" "$link"
+  out=$(run_helper "$home" 2>&1)
+  rc=$?
+  expect_code 1 "$rc" "symlinked key path should fail"
+  assert_contains "$out" "symlink" "error should name the symlink restriction"
+  assert_contains "$out" "regular file" "error should say a regular file is required"
+  assert_not_contains "$out" "BEGIN" "error must not dump key material"
+  pass "symlinked private key path is refused with a reason the operator can act on"
+}
+
 test_bad_key_fails_without_leak() {
   local home out rc key
   home=$(make_home bad-key)
@@ -305,6 +345,8 @@ test_absent_config_is_not_configured
 test_partial_config_is_not_configured
 test_non_digit_ids_fail
 test_relative_key_path_fails
+test_unreadable_config_fails_closed
+test_symlinked_key_path_is_refused_with_a_clear_reason
 test_bad_key_fails_without_leak
 test_mint_succeeds_with_signed_request_and_no_token_in_argv
 test_http_failure_is_error_without_token_leak

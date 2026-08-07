@@ -165,7 +165,10 @@
 # is inert: the pane environment matches today's spawn path exactly. Secondmate
 # spawns never take this path (supervisor identity stays the captain's). A home
 # that is configured but cannot mint fails closed rather than launching under an
-# ambiguous identity.
+# ambiguous identity - both before launch (preflight refuses the spawn) and in
+# the pane itself, where the launch command is gated on a non-empty minted token
+# so a mint that fails after preflight blocks the worker instead of dropping it
+# onto the captain's gh credentials.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -2322,12 +2325,25 @@ if [ "$KIND" != secondmate ]; then
       sq_github_app_cmd=$(shell_quote "$GITHUB_APP_TOKEN_CMD")
       # Token lands only in the pane shell environment via command substitution;
       # send-keys argv carries the wrapper path, never the token bytes.
-      spawn_send_text_line "$T" "export GH_TOKEN=\"\$($sq_github_app_cmd)\" GITHUB_TOKEN=\"\$GH_TOKEN\" FM_GITHUB_APP_TOKEN_HELPER=$sq_github_app_cmd"
+      # Sequential exports, not one `export A=$(...) B=$A`: a single export
+      # command expands every word before assigning any of them, so B would take
+      # the pane's pre-existing (captain) value instead of the freshly minted one.
+      # An empty mint here scrubs both names so nothing downstream sees a blank
+      # token and quietly resolves gh's keyring identity instead.
+      spawn_send_text_line "$T" "export FM_GITHUB_APP_TOKEN_HELPER=$sq_github_app_cmd; export GH_TOKEN=\"\$($sq_github_app_cmd)\"; export GITHUB_TOKEN=\"\$GH_TOKEN\"; [ -n \"\$GH_TOKEN\" ] || { unset GH_TOKEN GITHUB_TOKEN; echo 'error: firstmate: GitHub App token mint failed in this pane' >&2; }"
+      # The preflight above only proves the mint worked BEFORE launch; the token
+      # the worker actually uses is the one minted by the line above. Gate the
+      # launch on both names so a failed pane mint AND a send that never landed
+      # both stop the worker instead of starting it on ambient credentials.
+      # FM_GITHUB_APP_TOKEN_HELPER is firstmate-internal and can only be set by
+      # that same send, so it distinguishes "line landed" from "captain already
+      # had GH_TOKEN exported".
+      LAUNCH="if [ -n \"\${FM_GITHUB_APP_TOKEN_HELPER:-}\" ] && [ -n \"\${GH_TOKEN:-}\" ]; then $LAUNCH; else echo 'error: firstmate: no GitHub App token in this pane; refusing to start the worker under an ambiguous GitHub identity - stop and report blocked' >&2; fi"
     elif [ "$GITHUB_APP_PREFLIGHT_RC" -ne 2 ]; then
       if [ -n "$GITHUB_APP_PREFLIGHT_ERR" ]; then
         printf '%s\n' "$GITHUB_APP_PREFLIGHT_ERR" >&2
       fi
-      echo "error: GitHub App is configured but mint preflight failed; refusing to launch a worker under an ambiguous GitHub identity" >&2
+      echo "error: GitHub App is configured but mint preflight failed for $W; refusing to launch a worker under an ambiguous GitHub identity; inspect window $W and clean up its worktree" >&2
       exit 1
     fi
   fi

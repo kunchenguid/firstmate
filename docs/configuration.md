@@ -136,9 +136,11 @@ Firstmate supervision, PR merge automation, and bootstrap `gh` checks keep using
 |---|---|
 | `config/github-app-id` | App id (digits only), first non-empty non-comment line |
 | `config/github-app-installation-id` | Installation id (digits only), first non-empty non-comment line |
-| `config/github-app-private-key-path` | Absolute path to the App private key PEM on this host (the file stores a path, never the key bytes) |
+| `config/github-app-private-key-path` | Absolute path to the App private key PEM on this host (the file stores a path, never the key bytes). Must name a **regular file, not a symlink** |
 
 The private key PEM itself stays outside every git repo (for example mode `600` under `~/.config/firstmate/` or a hardware-backed store).
+A symlinked key path is refused outright, with an error that says so, because a symlink lets whoever controls the link target redirect what gets signed; keep the PEM outside every clone as above and point this file at the real path (copy or bind-mount it into place if a dotfiles or secret-manager tree normally publishes it by symlink).
+A required `config/github-app-*` file that exists but cannot be read is a hard error too, never "not configured": degrading a half-configured home to inert would silently launch workers under the captain's identity.
 `bin/fm-github-app-token.sh` is the single owner of mint mechanics: it builds a short-lived App JWT with openssl RS256, posts it to the installation access-tokens endpoint with the JWT in a mode-0600 curl header file (never on argv), and prints only the installation access token on stdout.
 It never prints the private key, never logs a token, and never writes a token into a worktree or tracked file.
 Callers treat exit status `2` as "no App configured" (not an error), `0` as success, and `1` as a configured-but-failed mint.
@@ -150,7 +152,11 @@ When all three config items are present, a ship or scout spawn preflights one mi
 
 The send-keys argv carries only the wrapper path, matching the out-of-argv discipline used for Grok turn-end registry tokens.
 Secondmate spawns never take this path.
-If the home is configured but preflight mint fails, spawn refuses rather than launching under an ambiguous identity.
+If the home is configured but preflight mint fails, spawn refuses rather than launching under an ambiguous identity, naming the window it left behind so the leftover worktree can be cleaned up.
+
+Preflight only proves the mint worked *before* launch; the token the worker actually uses is minted again inside the pane.
+So the launch command is gated on that pane-time token: if the pane mint fails or the export never lands, `GH_TOKEN` and `GITHUB_TOKEN` are scrubbed, the harness is never started, and the pane prints a refusal instead.
+`bin/fm-spawn.sh` cannot see that from outside, so it still reports `spawned <id>` and exits 0 - a blocked pane leaves its window and worktree in place for the captain to inspect and clean up.
 
 ### Token expiry mid-task
 

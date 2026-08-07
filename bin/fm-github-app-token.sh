@@ -9,6 +9,16 @@
 #   config/github-app-installation-id    Installation id (digits only, one line)
 #   config/github-app-private-key-path   Absolute path to the App private key PEM
 #
+# The key path must name a regular file, not a symlink: a symlinked key path is
+# refused outright so the signing input cannot be redirected by whoever controls
+# the link target. Point the config file at the real PEM, or bind-mount / copy it
+# into place with mode 600.
+#
+# A required config file that exists but cannot be read is a hard error, never
+# "not configured": degrading a half-configured home to inert would silently
+# launch workers under the captain's identity, which is the one outcome this
+# path exists to prevent.
+#
 # The private key file is used only as the openssl signing input; this script
 # never prints the key, never puts a token or JWT on argv, and never writes a
 # token to a worktree or tracked path. The mint request uses curl -H @file so
@@ -62,6 +72,16 @@ read_config_line() {
   return 1
 }
 
+# A present-but-unreadable config file must never read as "absent". This runs in
+# the main shell, before the command substitutions below, because `die` inside
+# `$(...)` would only exit the subshell and be swallowed by its `|| true`.
+require_readable_config() {
+  local path=$1
+  if [ -f "$path" ] && [ ! -r "$path" ]; then
+    die "${path} exists but is not readable; refusing to treat a half-configured home as unconfigured"
+  fi
+}
+
 require_digits() {
   case "$1" in
     ''|*[!0-9]*) return 1 ;;
@@ -105,6 +125,10 @@ trap cleanup_temps EXIT HUP INT TERM
 
 # --- resolve config (absent => not configured) --------------------------------
 
+require_readable_config "$CONFIG/github-app-id"
+require_readable_config "$CONFIG/github-app-installation-id"
+require_readable_config "$CONFIG/github-app-private-key-path"
+
 APP_ID=$(read_config_line "$CONFIG/github-app-id" 2>/dev/null || true)
 INSTALLATION_ID=$(read_config_line "$CONFIG/github-app-installation-id" 2>/dev/null || true)
 KEY_PATH=$(read_config_line "$CONFIG/github-app-private-key-path" 2>/dev/null || true)
@@ -123,7 +147,7 @@ case "$KEY_PATH" in
   *) die "config/github-app-private-key-path must be an absolute path" ;;
 esac
 if [ -L "$KEY_PATH" ]; then
-  die "private key path must not be a symlink"
+  die "config/github-app-private-key-path must point at a regular file, not a symlink; give the real PEM path (docs/configuration.md \"GitHub App worker identity\")"
 fi
 if [ ! -f "$KEY_PATH" ]; then
   die "private key file is missing or not a regular file"
