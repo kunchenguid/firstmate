@@ -171,6 +171,9 @@ BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+PAUSED_STALE_RECHECK_COUNT=0
+PAUSED_STALE_RECHECK_WINDOWS=
+PAUSED_STALE_RECHECK_REASON=
 # Consecutive event-path failures (fm_backend_wait_transition returning 2 -
 # connect/subscribe failure) before the push fast-path is disabled for the rest
 # of this watcher process and the loop reverts to pure polling (report section
@@ -334,8 +337,29 @@ busy_turn_over_age() {  # <task>
 # status file mtime, not a per-hash marker, so a churny idle pane (a ticking
 # clock, a token counter) cannot keep resetting the cadence the way a hash-tied
 # timer would. A .paused-resurfaced-<key> throttle marker records the last
-# re-surface epoch so, once past the window, it fires once per window rather than
-# every poll. Advances the stale suppressor to <hash> and flags the key paused.
+# re-surface epoch so, once past the window, it queues once per window rather than
+# every poll. Due rechecks are batched by the caller, so multiple unchanged
+# paused panes from the same scan produce one watcher exit. Advances the stale
+# suppressor to <hash> and flags the key paused.
+record_paused_stale_recheck() {  # <window> <reason>
+  local win=$1 reason=$2
+  PAUSED_STALE_RECHECK_COUNT=$((PAUSED_STALE_RECHECK_COUNT + 1))
+  if [ -z "$PAUSED_STALE_RECHECK_WINDOWS" ]; then
+    PAUSED_STALE_RECHECK_WINDOWS=$win
+  else
+    PAUSED_STALE_RECHECK_WINDOWS="$PAUSED_STALE_RECHECK_WINDOWS, $win"
+  fi
+  [ -n "$PAUSED_STALE_RECHECK_REASON" ] || PAUSED_STALE_RECHECK_REASON=$reason
+}
+
+flush_paused_stale_rechecks() {
+  [ "$PAUSED_STALE_RECHECK_COUNT" -gt 0 ] || return 0
+  if [ "$PAUSED_STALE_RECHECK_COUNT" -eq 1 ]; then
+    wake "$PAUSED_STALE_RECHECK_REASON"
+  fi
+  wake "stale: paused recheck batch (${PAUSED_STALE_RECHECK_COUNT}): $PAUSED_STALE_RECHECK_WINDOWS"
+}
+
 handle_paused_stale() {  # <window> <task> <hash>
   local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason
   key=$(printf '%s' "$win" | tr ':/.' '___')
@@ -352,7 +376,7 @@ handle_paused_stale() {  # <window> <task> <hash>
     reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
     fm_wake_append stale "$win" "$reason" || exit 1
     date +%s > "$rf"
-    wake "$reason"
+    record_paused_stale_recheck "$win" "$reason"
   fi
   triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
 }
@@ -1031,6 +1055,9 @@ EOF
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified).
+  PAUSED_STALE_RECHECK_COUNT=0
+  PAUSED_STALE_RECHECK_WINDOWS=
+  PAUSED_STALE_RECHECK_REASON=
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
@@ -1203,6 +1230,7 @@ EOF
       fi
     fi
   done < <(recorded_windows)
+  flush_paused_stale_rechecks
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive

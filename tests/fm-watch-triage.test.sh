@@ -931,6 +931,45 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   pass "exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once"
 }
 
+test_multiple_paused_rechecks_batch_into_one_wake() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid back wakes lines item
+  dir=$(make_case multiple-paused-rechecks); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  printf 'idle, waiting on external dependency\n' > "$capture_file"
+  back=$(( $(date +%s) - 500 ))
+
+  for item in alpha beta; do
+    window="test:fm-held-$item"
+    statusf="$state/held-$item.status"
+    printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held-$item.meta"
+    printf 'paused: waiting on the external dependency\n' > "$statusf"
+    if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+    else touch -m -d "@$back" "$statusf"; fi
+    sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held-${item}_status"
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    pane_hash=$(hash_text "idle, waiting on external dependency")
+    printf '%s' "$pane_hash" > "$state/.hash-$key"
+    printf '%s' "$pane_hash" > "$state/.stale-$key"
+    printf '1\n' > "$state/.count-$key"
+    : > "$state/.paused-$key"
+  done
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting on the external dependency' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface the batched paused recheck"
+
+  lines=$(awk 'END { print NR + 0 }' "$out")
+  [ "$lines" -eq 1 ] || fail "multiple paused rechecks printed $lines wake reasons instead of one"
+  grep -F "test:fm-held-alpha" "$out" >/dev/null || fail "batched paused recheck omitted the first stale window"
+  grep -F "test:fm-held-beta" "$out" >/dev/null || fail "batched paused recheck omitted the second stale window"
+  wakes=$(awk -F '\t' '$3 == "stale" { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$wakes" -eq 2 ] || fail "batched paused recheck queued $wakes stale records instead of both records"
+  pass "multiple paused stale rechecks from one scan produce one watcher interruption with both durable records queued"
+}
+
 test_secondmate_paused_resurfaces_in_normal_mode() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back
   dir=$(make_case secondmate-paused-resurface); state="$dir/state"; fakebin="$dir/fakebin"
@@ -2121,6 +2160,7 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
+test_multiple_paused_rechecks_batch_into_one_wake
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking
