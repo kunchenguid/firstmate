@@ -1,9 +1,9 @@
 // Firstmate's home-persistent Pi transcript presentation toggle.
 //
-// Verified against Pi 0.81.1 and 0.82.0, which expose built-in ToolDefinitions, per-slot
-// renderers, renderShell: "self", session_start replacement reasons, agent_start and
-// agent_settled, ExtensionUIContext.setToolsExpanded(), setWorkingVisible(), setWidget()
-// with a disposable component factory, and setHiddenThinkingLabel().
+// Pi exposes built-in ToolDefinitions, per-slot renderers, renderShell: "self",
+// session_start replacement reasons, agent_start and agent_settled,
+// ExtensionUIContext.setToolsExpanded(), setWorkingVisible(), setWidget() with a
+// disposable component factory, and setHiddenThinkingLabel().
 // ./lib/fm-calm-working-ship.ts owns the animated working presentation this file
 // installs. The focused tests pin those assumptions but never reject a
 // newer Pi solely for its version. The collapsed-thinking and operational-user
@@ -16,8 +16,8 @@
 // unregister operation, and Pi 0.84 rejects duplicate extension-owned names at startup.
 // Register Calm's wrappers only after the extension runtime is bound, when getAllTools()
 // can identify foreign owners, and leave every contested name untouched.
-// docs/calm-mode-feasibility.md owns the Pi-source evidence and docs/calm.md owns the
-// user-facing behavior and restored-row presentation bound.
+// docs/calm-mode-feasibility.md owns the version-scoped Pi evidence, and docs/calm.md
+// owns the user-facing behavior and restored-row presentation bound.
 import { randomUUID } from "node:crypto";
 import {
   mkdirSync,
