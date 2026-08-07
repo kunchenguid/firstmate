@@ -14,6 +14,7 @@ A fresh Pi session or new Calm extension lifetime starts at the normal initial p
 Very narrow terminals fall back to a smaller deterministic sprite.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
 Calm hides collapsed thinking labels, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` tool shell, and canonically classified Firstmate operational user rows.
+If another extension replaces a built-in tool, Calm leaves that replacement untouched so its execution, prompt metadata, and rendering remain authoritative.
 The operational inputs remain ordinary user-role messages, while Pi's transcript layout renders their complete rows at zero height.
 The session-start nudge remains on its existing non-displayed custom-message path.
 
@@ -34,12 +35,11 @@ The collapsed-thinking and operational-user-row presentation adapters probe the 
 If Pi removes one of those seams, Calm logs a diagnostic naming the unavailable adapter and skips only that adapter; `/calm`, the other adapter, and unrelated Pi extensions remain available.
 
 Calm's built-in tool presentation (`bash`, `read`, `edit`, `write`, `grep`, `find`, `ls`) shares Pi's single, unmerged override slot per name with any other extension that overrides the same tool.
-While the persisted Calm preference is off, Calm registers none of those overrides and therefore contests no built-in tool name.
-The first time Calm turns on in a session that started off, it claims every built-in name no other extension already owns, leaves every contested tool intact and callable, and displays a prominent warning naming the tools it skipped.
-Tool-call rows already on screen before that first toggle do not retroactively collapse; later rows for the names Calm claimed use Calm presentation.
-When a session starts or reloads with Calm already on, Calm must instead register all seven overrides synchronously so Pi can render restored rows with them.
-Pi provides no ownership check early enough for that load-time path, and the first registrant wins the complete tool definition.
-If the other extension wins, a session-start console diagnostic names the tool and winning extension; if Calm wins, Pi does not expose the losing registration, so the other extension's override is unavailable and cannot be named.
+Pi 0.84 rejects duplicate extension-owned tool names during startup, before the ownership inventory is available.
+Calm therefore registers no built-in overrides while extensions are loading.
+When a session starts with Calm on, or Calm is toggled on later, it claims every built-in name no other extension owns, leaves every contested tool intact and callable, and displays a prominent warning naming the tools it skipped.
+Tool-call rows created before those wrappers are registered, including rows restored during `/reload`, do not retroactively collapse; later rows for names Calm claimed use Calm presentation.
+While Calm remains off, it registers none of those overrides and contests no built-in tool name.
 
 [`calm-mode-feasibility.md`](calm-mode-feasibility.md) owns the version-scoped renderer taxonomy, built-in override constraints, and empirical evidence.
 [`configuration.md`](configuration.md#pi-calm-preference-configcalm) owns the persisted preference file and resolution rules.

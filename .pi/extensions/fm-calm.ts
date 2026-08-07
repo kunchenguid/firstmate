@@ -13,11 +13,11 @@
 // docs/configuration.md owns the home-local Calm preference contract.
 //
 // Pi has one first-registration-wins ToolDefinition per tool name, with no merge or
-// unregister operation. Keep Calm-off registration empty; keep Calm-on load-time
-// registration synchronous because restored rows capture the registry before
-// session_start; and collision-check only the later first-activation path, when
-// getAllTools() is reliable. docs/calm-mode-feasibility.md owns the Pi-source evidence
-// and docs/calm.md owns the user-facing behavior and non-retroactive first-toggle bound.
+// unregister operation, and Pi 0.84 rejects duplicate extension-owned names at startup.
+// Register Calm's wrappers only after the extension runtime is bound, when getAllTools()
+// can identify foreign owners, and leave every contested name untouched.
+// docs/calm-mode-feasibility.md owns the Pi-source evidence and docs/calm.md owns the
+// user-facing behavior and restored-row presentation bound.
 import { randomUUID } from "node:crypto";
 import {
   mkdirSync,
@@ -303,23 +303,12 @@ export default function (pi: ExtensionAPI) {
     wrapBuiltIn(createLsToolDefinition),
   ];
 
-  // True once this extension has handled built-in registration for its lifetime:
-  // either all seven synchronously at load, or only the uncontested subset during
-  // first activation.
+  // True once this extension has handled built-in registration for its lifetime.
   let builtInsRegistered = false;
 
-  // Gate on Calm already being on at load time. This must stay synchronous and
-  // unconditional here (see file header): a foreign-claim check is not reachable at
-  // this point, while deferral would make restored rows capture the wrong definition.
-  // A Calm-off session or reload registers nothing and creates no collision exposure.
-  if (loadCalmPreference()) {
-    for (const tool of wrappedBuiltIns) pi.registerTool(tool);
-    builtInsRegistered = true;
-  }
-
   // Which of the 7 built-ins are currently owned by a different, non-builtin
-  // extension. Only safe to call once every extension has finished loading (see file
-  // header); never call this during the factory's own synchronous execution above.
+  // extension. This runs only after every extension has finished loading, when the
+  // runtime-backed ownership inventory is available.
   function contestedBuiltIns(): ToolDefinition<any, any, any>[] {
     let registered: ToolInfo[];
     try {
@@ -335,10 +324,9 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  // The first time Calm turns on in a session that started off, claim every
-  // uncontested built-in and leave each contested tool and its owning extension
-  // untouched. Tell the user which built-in Calm could not take over, since Calm's
-  // presentation does not apply to it.
+  // Once Calm is active, claim every uncontested built-in and leave each contested
+  // tool and its owning extension untouched. Tell the user which built-in Calm could
+  // not take over, since Calm's presentation does not apply to it.
   function activateBuiltInsIfNeeded(ui: ExtensionUIContext): void {
     if (builtInsRegistered) return;
     const contested = contestedBuiltIns();
@@ -359,36 +347,10 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // Backstop for the one case activateBuiltInsIfNeeded cannot reach: Calm registered
-  // unconditionally at load time because it was already on, without any chance to
-  // check for a foreign claim first, so it can still silently lose a name to an
-  // earlier-loaded extension. Runs on every session_start reason because a reload
-  // rebuilds every extension's registrations from scratch, so last session's clean
-  // bill of health does not carry over.
-  function reportBuiltInLosses(): void {
-    if (!builtInsRegistered) return;
-    let registered: ToolInfo[];
-    try {
-      registered = pi.getAllTools();
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      console.error(`Firstmate Calm: built-in ownership check unavailable. ${reason}`);
-      return;
-    }
-    for (const tool of wrappedBuiltIns) {
-      const owner = registered.find((info) => info.name === tool.name)?.sourceInfo;
-      if (owner && owner.source !== "builtin" && realpathOrSelf(owner.path) !== extensionRealFile) {
-        console.error(
-          `Firstmate Calm: another extension (${owner.path}) also claimed the built-in "${tool.name}" tool and won; Calm's presentation for it is unavailable this session.`,
-        );
-      }
-    }
-  }
-
   pi.on("session_start", (_event, ctx) => {
-    reportBuiltInLosses();
     exportRendering = false;
     setCalmPresentation(loadCalmPreference());
+    if (calmPresentationIsActive()) activateBuiltInsIfNeeded(ctx.ui);
     setCalmStockExportRendering(false);
     publishPresentationState();
     agentRunActive = false;

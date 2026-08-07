@@ -22,13 +22,15 @@ The exported classes used by the adapters (`AssistantMessageComponent` and `Inte
 
 [`calm.md`](calm.md#pi-compatibility) owns the current user-facing collision behavior and limitation.
 Inspection of Pi 0.80.10 and 0.82.0 established that extensions override a built-in tool by registering the same name, the first registered extension wins the complete `ToolDefinition` without merging, and Pi exposes no unregister operation.
-Pi loads project-local extensions before global or CLI-configured extensions, so Firstmate's tracked Calm extension previously won those collisions even when its persisted preference was off.
-The losing definition's execution and render functions are both discarded, so unconditionally registering Calm's wrappers would replace another extension's same-named tool rather than changing presentation alone.
+Pi 0.84 additionally rejects duplicate extension-owned tool names during startup.
+Pi loads project-local extensions before global or CLI-configured extensions, so Firstmate's tracked Calm extension previously either won those collisions or caused startup to stop even when the other extension supplied required behavior.
+The losing definition's execution and render functions are discarded, so unconditionally registering Calm's wrappers would replace another extension's same-named tool rather than changing presentation alone.
 
 Pi's `getAllTools()` exposes tool metadata and source identity but not the executable or rendering functions needed to wrap another extension's full definition.
-It is also usable for reliable collision detection only after extension binding, which makes it suitable for the first same-session `/calm` activation but not for synchronous extension loading.
-Deferring registration to `session_start` is not an equivalent path: Pi constructs restored tool rows from an earlier tool-registry snapshot during reload, new-session, fork, and session switching, so those rows retain the definition captured before `session_start`.
-`tests/fm-calm-pi-extension.test.sh` covers the resulting split contract: no load-time claims while Calm is off, synchronous claims while it is already on, collision-checked first activation with a warning, preservation of a contested tool's execution, and the non-retroactive bound for rows rendered before first activation.
+It is usable for reliable collision detection only after extension binding, so Calm now registers no tool wrappers during extension loading and claims only uncontested names from `session_start` or the first same-session `/calm` activation.
+Pi constructs `/reload`-restored tool rows from an earlier tool-registry snapshot, so those rows retain the definition captured before `session_start` and do not retroactively collapse.
+That bounded presentation limitation preserves startup and the complete behavior of external tool replacements.
+`tests/fm-calm-pi-extension.test.sh` covers no load-time claims, collision-checked session and command activation with a warning, preservation of a contested tool's execution, and the non-retroactive bound for rows rendered before wrapper registration.
 
 ## Pi 0.81.1 end-to-end reproduction
 
