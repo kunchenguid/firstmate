@@ -38,12 +38,14 @@ PROFILE_DIR="$RUNTIME_DIR/profile"
 LOGFILE="$RUNTIME_DIR/browser.log"
 URL="http://127.0.0.1:$PORT"
 LOCK_HELD=0
+OWNER_FILE=
 
 usage() {
   sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//'
 }
 
 release_lock() {
+  [ -z "$OWNER_FILE" ] || rm -f "$OWNER_FILE"
   [ "$LOCK_HELD" -eq 1 ] || return 0
   LOCK_HELD=0
   if [ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ]; then
@@ -55,11 +57,20 @@ release_lock() {
 acquire_lock() {
   local attempt=0 owner
   mkdir -p "$RUNTIME_DIR"
-  while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+  OWNER_FILE="$RUNTIME_DIR/lock-owner.$$"
+  printf '%s\n' "$$" > "$OWNER_FILE"
+  trap release_lock EXIT INT TERM
+  while :; do
+    mkdir "$LOCK_DIR" 2>/dev/null || true
+    if ln "$OWNER_FILE" "$LOCK_DIR/pid" 2>/dev/null; then
+      rm -f "$OWNER_FILE"
+      OWNER_FILE=
+      LOCK_HELD=1
+      return 0
+    fi
     owner=$(cat "$LOCK_DIR/pid" 2>/dev/null || true)
     case "$owner" in
       ''|*[!0-9])
-        rmdir "$LOCK_DIR" 2>/dev/null || true
         sleep 0.05
         ;;
       *)
@@ -69,7 +80,6 @@ acquire_lock() {
           if [ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" = "$owner" ] &&
             ! kill -0 "$owner" 2>/dev/null; then
             rm -f "$LOCK_DIR/pid"
-            rmdir "$LOCK_DIR" 2>/dev/null || true
           fi
         fi
         ;;
@@ -80,9 +90,6 @@ acquire_lock() {
       return 1
     fi
   done
-  printf '%s\n' "$$" > "$LOCK_DIR/pid"
-  LOCK_HELD=1
-  trap release_lock EXIT INT TERM
 }
 
 probe() {

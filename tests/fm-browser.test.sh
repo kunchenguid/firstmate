@@ -188,7 +188,7 @@ test_stale_lock_is_reclaimed() {
     "$BROWSER_HELPER" stop)
   [ "$out" = 'stopped=no-owned-browser' ] || fail "ownerless-lock stop returned '$out'"
   [ ! -e "$dir/runtime/lock" ] || fail "ownerless lock was not released"
-  pass "dead and ownerless browser locks are reclaimed"
+  pass "dead and ownerless browser locks are claimed atomically"
 }
 
 test_probe_hit_reuses_without_launching
