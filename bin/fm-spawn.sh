@@ -9,9 +9,10 @@
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
 #   standing posture as context, not as this task's answer, so a spawn never looks
 #   the mode up. A ship spawn additionally reads the brief's recorded
-#   "Delivery contract: mode=<mode>" line and REFUSES a mismatch, so the worker's
-#   instructions and the recorded task delivery cannot drift apart; a brief
-#   scaffolded before that line existed warns once and launches on the flag. When
+#   "Delivery contract: mode=<mode>" line, which must appear exactly once, and
+#   REFUSES both a duplicate and a mismatch, so the worker's instructions and the
+#   recorded task delivery cannot drift apart; a brief scaffolded before that line
+#   existed warns once and launches on the flag. When
 #   the explicit mode carries less rigor than the project's standing posture, a
 #   loud one-line deviation notice is printed and the spawn continues. gate-merge
 #   is the one exception: it lands on the default branch with no approval step, so
