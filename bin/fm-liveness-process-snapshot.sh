@@ -41,6 +41,11 @@ awk '
     }
   }
 ' "$TMP/env.raw" > "$TMP/token.tsv" || exit 1
+# A nonempty token table proves this observer can see the task-identity marker
+# on at least one live process. Without that witness, downstream absence is
+# unverified even if cwd rows exist: process visibility alone cannot bind a
+# worker to a task.
+[ -s "$TMP/token.tsv" ] && printf '__FM_LIVENESS_OBSERVER__\tworker-token-visible\n'
 pid_list=$(awk -F '\t' 'BEGIN{sep=""} {printf "%s%s",sep,$1; sep=","}' "$TMP/ps.tsv")
 [ -n "$pid_list" ] || exit 0
 lsof -a -d cwd -p "$pid_list" -Fn > "$TMP/lsof.raw" 2>/dev/null || true
@@ -54,6 +59,6 @@ awk -F '\t' '
   ($1 in cwd) { print $1 "\t" $2 "\t" $3 "\t" cwd[$1] }
 ' "$TMP/cwd.tsv" "$TMP/ps.tsv" > "$TMP/process.tsv"
 awk -F '\t' '
-  NR==FNR { token[$1]=$2; next }
+  FILENAME==ARGV[1] { token[$1]=$2; next }
   { print $0 "\t" token[$1] }
 ' "$TMP/token.tsv" "$TMP/process.tsv"

@@ -314,6 +314,34 @@ nm_runs_status_for_branch() {  # <branch>
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
+# A no-mistakes run identifies a branch and code head, but it has no firstmate
+# task identifier. A reusable local checkout is therefore not enough to bind a
+# run to one task: if another ship record currently names the same physical
+# checkout, either record could claim the one run. Refuse that ambiguous
+# attribution and let the task-bound liveness evidence below speak for each
+# record instead.
+RUN_STEP_REFUSAL=
+run_step_identity_is_unique() {
+  local meta other_id other_kind other_wt other_physical
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    other_id=$(basename "$meta" .meta)
+    [ "$other_id" = "$ID" ] && continue
+    other_kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ -n "$other_kind" ] || other_kind=ship
+    [ "$other_kind" = ship ] || continue
+    other_wt=$(grep '^worktree=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ -d "$other_wt" ] || continue
+    other_physical=$(cd "$other_wt" 2>/dev/null && pwd -P) || continue
+    if [ "$other_physical" = "$WORKTREE_IDENTITY" ]; then
+      RUN_STEP_REFUSAL="run-step attribution unverified: local checkout is also recorded by task $other_id"
+      return 1
+    fi
+  done
+  return 0
+}
+WORKTREE_IDENTITY=$(cd "$WT" 2>/dev/null && pwd -P) || WORKTREE_IDENTITY=$WT
+
 # 0 if the active axi-status run's head field matches this worktree's code
 # identity. Branch match is a precondition (caller). Rule owned by
 # fm_nm_head_matches_worktree in bin/fm-nm-run-lib.sh.
@@ -339,7 +367,8 @@ RUN_SOURCE=full
 COARSE_STATUS=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
-if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
+if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && run_step_identity_is_unique \
+  && command -v no-mistakes >/dev/null 2>&1; then
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
@@ -489,6 +518,7 @@ CPU_DELTA=$(printf '%s' "$LIVE_ROW" | jq -r '.cpu.delta_ms // 0')
 CPU_RATE=$(printf '%s' "$LIVE_ROW" | jq -r '.cpu.rate_ms_per_minute // 0')
 OUTPUT_CHANGED=$(printf '%s' "$LIVE_ROW" | jq -r '.output.changed // false')
 DETAIL="activity=$ACTIVITY endpoint=$ENDPOINT_PRESENCE worker=$WORKER_PRESENCE cpu_delta_ms=$CPU_DELTA cpu_rate_ms_per_min=$CPU_RATE output_changed=$OUTPUT_CHANGED"
+[ -z "$RUN_STEP_REFUSAL" ] || DETAIL="$RUN_STEP_REFUSAL${SEP}$DETAIL"
 case "$ACTIVITY" in
   active) emit working process-output "$DETAIL" ;;
   parked) emit parked process-output "$DETAIL" ;;

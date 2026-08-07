@@ -124,10 +124,16 @@ for meta in "$state"/*.meta; do
   target=$(sed -n 's/^window=//p' "$meta" | tail -1)
   busy=$(sed -n 's/.* state=\([^ ]*\).*/\1/p' "$state/$id.busy-state" 2>/dev/null | tail -1)
   case "$busy" in busy) activity=active ;; idle) activity=parked ;; *) activity=inactive ;; esac
-  row=$(jq -n --arg id "$id" --arg harness "$harness" --arg backend "$backend" --arg target "$target" --arg activity "$activity" '
+  worker=verified_present
+  [ "$activity" = inactive ] && worker=verified_absent
+  if [ "${FAKE_LIVENESS_BLIND:-0}" = 1 ]; then
+    activity=unverified
+    worker=unverified
+  fi
+  row=$(jq -n --arg id "$id" --arg harness "$harness" --arg backend "$backend" --arg target "$target" --arg activity "$activity" --arg worker "$worker" '
     {id:$id,harness:$harness,harness_family:$harness,backend:$backend,target:$target,worktree:null,
      endpoint:{presence:"verified_present",raw:"alive"},
-     worker:{presence:(if $activity=="inactive" then "verified_absent" else "verified_present" end),pids_sample_1:1,pids_sample_2:1,harness_processes_sample_1:1,harness_processes_sample_2:1},
+     worker:{presence:$worker,pids_sample_1:1,pids_sample_2:1,harness_processes_sample_1:1,harness_processes_sample_2:1},
      output:{sample_1_readable:true,sample_2_readable:true,changed:($activity=="active")},
      cpu:{sample_1_max_ms:1000,sample_2_max_ms:(if $activity=="active" then 1030 else 1000 end),delta_ms:(if $activity=="active" then 30 else 0 end),rate_ms_per_minute:(if $activity=="active" then 900 else 0 end),baseline:"verified",threshold_ms_per_minute:760},activity:$activity}')
   rows=$(jq -n --argjson a "$rows" --argjson b "$row" '$a+[$b]')
@@ -1906,6 +1912,21 @@ test_live_blocker_is_not_charted_queue_work() {
   pass "Bearings keeps blocked status historical and projects measured parked state"
 }
 
+test_bearings_keeps_blind_observation_unverified() {
+  local home fakebin json
+  home=$(make_home blind-observer); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  json=$(FAKE_LIVENESS_BLIND=1 run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.in_flight | any(.id == "ship-task") | not)
+    and (.unhealthy_endpoints | any(.id == "ship-task"
+      and .worker == "unverified" and .activity == "unverified"))
+    and (.gates | any(.id == "ship-task"
+      and (.reason | contains("measured liveness: unverified; endpoint=verified_present; worker=unverified"))))
+  ' >/dev/null || fail "Bearings collapsed blind observation into verified absence: $json"
+  pass "Bearings projects blind process observation as unverified, never verified absence"
+}
+
 # Captain's Call is populated only from the durable keyed open-decision set. The
 # anti-leak guard: action-free highlights - a working task, a completed scout,
 # queued/gated items, landed work - must never surface as an open decision, so they
@@ -2434,6 +2455,7 @@ test_landed_default_preserves_internal_order_for_ties
 test_landed_default_handles_no_landed_items
 test_landed_bounded_and_disclosed
 test_live_blocker_is_not_charted_queue_work
+test_bearings_keeps_blind_observation_unverified
 test_captains_call_anti_leak
 test_main_orphan_in_flight_is_disclosed_not_invented
 test_main_unstructured_current_is_disclosed_with_structured_sibling

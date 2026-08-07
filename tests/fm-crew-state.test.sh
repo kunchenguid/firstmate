@@ -751,6 +751,38 @@ EOF
   pass "cross-branch attribution picks the branch's most recent row"
 }
 
+# A no-mistakes run names only a branch and code head, not a firstmate task.
+# Two live task records may therefore point to the same local checkout and both
+# satisfy the old branch+head predicate. The process snapshot still identifies
+# the active task, so run-step attribution must refuse the ambiguous shared
+# checkout and let that task-bound evidence decide each row independently.
+test_shared_worktree_run_requires_unique_task_identity() {
+  reset_fakes
+  local d liveness alpha beta
+  d=$(new_case shared-run-identity)
+  make_repo_on_branch "$d/wt" fm/shared-run
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/alpha.meta" "window=fm:fm-alpha" "worktree=$d/wt" "kind=ship" "harness=claude"
+  fm_write_meta "$d/state/beta.meta" "window=fm:fm-beta" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_running fm/shared-run)"
+  liveness=$(jq -nc '
+    {records:[
+      {id:"alpha",activity:"active",endpoint:{presence:"verified_present"},
+       worker:{presence:"verified_present"},output:{changed:true},cpu:{delta_ms:100,rate_ms_per_minute:900}},
+      {id:"beta",activity:"inactive",endpoint:{presence:"verified_absent"},
+       worker:{presence:"verified_absent"},output:{changed:false},cpu:{delta_ms:0,rate_ms_per_minute:0}}
+    ]}')
+  alpha=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_LIVENESS_JSON="$liveness" "$CREW_STATE" alpha)
+  beta=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_LIVENESS_JSON="$liveness" "$CREW_STATE" beta)
+  assert_contains "$alpha" "state: working" "task-bound active evidence did not keep alpha working"
+  assert_contains "$alpha" "source: process-output" "alpha inherited the shared run instead of task-bound evidence"
+  assert_contains "$beta" "state: unknown" "inactive beta inherited another task's live run"
+  assert_contains "$beta" "source: process-output" "beta inherited the shared run instead of its own liveness evidence"
+  assert_contains "$beta" "worker=verified_absent" "beta did not retain its task-bound absent evidence"
+  assert_contains "$beta" "run-step attribution unverified" "human summary hid the shared-run attribution refusal"
+  pass "a shared local checkout cannot attribute one run-step to two task identities"
+}
+
 test_coarse_run_ignores_unverified_ready_status_event() {
   reset_fakes
   local d short; d=$(new_case coarse-ready-other-log)
@@ -1358,7 +1390,29 @@ test_liveness_file_transport_accepts_valid_and_refuses_missing_or_malformed() {
   pass "liveness file transport accepts valid evidence and refuses missing or malformed payloads"
 }
 
+test_unverified_worker_stays_unverified_in_human_state() {
+  reset_fakes
+  local d liveness out
+  d=$(new_case unverified-worker-human-state)
+  make_repo_on_branch "$d/wt" fm/feat-unverified-worker
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/unverified-worker.meta" "window=fm:fm-unverified-worker" \
+    "worktree=$d/wt" "kind=scout" "harness=claude"
+  liveness=$(jq -nc '{records:[{id:"unverified-worker",activity:"unverified",
+    endpoint:{presence:"verified_present"},worker:{presence:"unverified"},
+    output:{changed:false},cpu:{delta_ms:0,rate_ms_per_minute:0}}]}')
+  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_LIVENESS_JSON="$liveness" \
+    "$CREW_STATE" unverified-worker)
+  assert_contains "$out" "state: unknown" "unverified worker was rendered as a confident state"
+  assert_contains "$out" "source: process-output" "human state hid its liveness provenance"
+  assert_contains "$out" "worker=unverified" "human state relabelled unverified worker evidence"
+  assert_not_contains "$out" "worker=verified_absent" "human state collapsed unverified into verified absence"
+  pass "human crew-state output preserves unverified worker evidence"
+}
+
 test_liveness_file_transport_accepts_valid_and_refuses_missing_or_malformed
+test_unverified_worker_stays_unverified_in_human_state
+test_shared_worktree_run_requires_unique_task_identity
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
