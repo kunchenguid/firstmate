@@ -64,7 +64,7 @@ SH
 # entirely, distinct from both the project and the worktree - mirroring the
 # live incident where the stale read was another real firstmate home).
 make_settle_case() {
-  local name=$1 id=$2 stale_reads=$3 case_dir home proj wt stale fakebin countfile
+  local name=$1 id=$2 stale_reads=$3 case_dir home proj wt stale fakebin countfile project_branch
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
@@ -75,6 +75,11 @@ make_settle_case() {
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   printf 'codex\n' > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
+  printf '.env\n' > "$proj/.gitignore"
+  git -C "$proj" add .gitignore
+  git -C "$proj" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'ignore environment file'
+  project_branch=$(git -C "$proj" branch --show-current)
+  git -C "$wt" merge --quiet --ff-only "$project_branch"
   fm_git_init_commit "$stale"
   mkdir -p "$home/data/$id"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
@@ -141,7 +146,24 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
+test_spawn_syncs_a_configured_environment_file() {
+  local rec id out status
+  id=settle-env-sync-z3
+  rec=$(make_settle_case settle-env-sync "$id" 0)
+  read_settle_record "$rec"
+  printf 'test-only-content\n' > "$PROJ_DIR/.env"
+  printf '%s\t%s\t.env\n' "$PROJ_DIR" "$PROJ_DIR/.env" > "$HOME_DIR/config/worktree-env-sync.tsv"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should synchronize a configured environment file"
+  cmp -s "$PROJ_DIR/.env" "$WT_DIR/.env" || fail "spawn did not copy the configured environment file into its worktree"
+  git -C "$WT_DIR" check-ignore -q -- .env || fail "spawn copied an environment file to a non-ignored worktree target"
+  pass "spawn synchronizes configured local environment files after worktree setup"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_spawn_syncs_a_configured_environment_file
 
 echo "# all fm-spawn-worktree-settle tests passed"
