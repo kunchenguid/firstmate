@@ -99,15 +99,27 @@ finished=1786048723
 
 The worker started before the harness exited and published 6s after it was gone.
 
-The latency this buys was measured on 2026-08-06 in a throwaway home holding one remote secondmate whose host hangs 25s per SSH connection (an `FM_SSH_BIN`-shaped stub; no real host was contacted), against the same fixture on `345de4e` and on the deferred stage:
+The latency this buys was re-measured on 2026-08-07 against default-branch tip `8398d31`, in a throwaway home holding one remote secondmate whose host hangs 25s per SSH connection (an `FM_SSH_BIN`-shaped stub; no real host was contacted).
+Both runs used the same fixture and the same `bin/fm-session-start.sh` invocation, differing only in which checkout supplied the script:
 
 ```text
-before (345de4e)   real 1m18.184s   3 blocking SSH attempts inside the digest
-after              real 0m0.843s    digest prints IN PROGRESS; the same SSH attempts
-                                    continue at +0s and +25s, after it finished
+before (8398d31)   real 1m21.15s   3 blocking SSH attempts inside the digest
+after              real 0m3.36s    digest prints IN PROGRESS; the same 3 SSH attempts
+                                   run in the detached worker and finish at +77s
 ```
 
-The remaining 0.8s is entirely local subprocess work; the `NETWORK CHECKS` section named GitHub authentication, dead-secondmate relaunch, secondmate convergence, pending handoff delivery, and project clone refresh as not yet confirmed.
+The remaining seconds are entirely local subprocess work; the `NETWORK CHECKS` section named GitHub authentication, dead-secondmate relaunch, secondmate convergence, pending handoff delivery, and project clone refresh as not yet confirmed.
+
+Deferring the sweeps changed only when they run, not what they conclude.
+The deferred worker's published report was byte-identical to the three sweep lines the blocking baseline printed, on the same fixture:
+
+```text
+SECONDMATE_LIVENESS: secondmate ios: skipped: remote host unavailable or endpoint state unknown; route preserved on remote-mac
+SECONDMATE_SYNC: secondmate ios: skipped: remote tracked-file sync failed on remote-mac:
+SECONDMATE_SYNC: secondmate ios: skipped: remote inheritance failed on remote-mac:
+```
+
+The unreachable route was preserved rather than relaunched in both runs, and the result surfaced durably as a queued `check: startup-network` wake once the worker finished.
 
 Codex and Pi were not installed as run-tier labs in this measurement, so their evidence for this fact is NOT refreshed; `tests/fm-sessionstart-hook-live-e2e.test.sh` asserts it for every installed run-tier harness and is the command that refreshes this record.
 A harness that did reap the worker degrades loudly rather than silently: the leftover record reads as an abandoned run needing a rerun, and the next session start re-derives every finding, because these sweeps are idempotent detectors.
