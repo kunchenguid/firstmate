@@ -12,9 +12,15 @@
 # bin/fm-spawn.sh's advisory registry-deviation notice.
 #
 # Registry line format (data/projects.md):
-#   - <name> - <desc> (added <date>)                  -> no-mistakes off  (legacy default)
-#   - <name> [<mode>] - <desc> (added <date>)          -> <mode> off
-#   - <name> [<mode> +yolo] - <desc> (added <date>)    -> <mode> on
+#   - <name> - <desc> (added <date>)                         -> no-mistakes off  (legacy default)
+#   - <name> [<mode>] - <desc> (added <date>)                 -> <mode> off
+#   - <name> [<mode> +yolo] - <desc> (added <date>)           -> <mode> on
+#   - <name> [<mode> path=/absolute/project] - <desc> (...)   -> path identity for external projects
+#
+# Path lookups match structured identities only: the canonical in-home
+# projects/<name> path, a path= absolute-path token inside the registry
+# annotation, or one backtick-wrapped absolute path in the description. They do
+# not parse prose such as "at <path>".
 #
 # Registered modes:
 #   no-mistakes            full pipeline -> PR -> configured merge authority (default)
@@ -35,59 +41,271 @@
 #
 # An unknown/missing project or unknown mode falls back to "no-mistakes off" and warns
 # to stderr, so a typo never silently drops the gate.
-# Usage: fm-project-mode.sh [--raw] <project-name>
+# --path resolves by project directory instead of by name. When a path lookup
+# cannot find exactly one project, it fails closed only for malformed or
+# ambiguous registered identities; an unknown path keeps the default
+# "no-mistakes off" posture and warns.
+#
+# --with-name prefixes stdout with the resolved registry name:
+#   "<name> <mode> <yolo>"
+#
+# Usage: fm-project-mode.sh [--raw] [--with-name] [--path <project-path>] [<project-name>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 REG="$DATA/projects.md"
 RAW=0
-if [ "${1:-}" = "--raw" ]; then
-  RAW=1
+WITH_NAME=0
+PATH_ARG=
+NAME=
+
+usage() {
+  echo "usage: fm-project-mode.sh [--raw] [--with-name] [--path <project-path>] [<project-name>]" >&2
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --raw) RAW=1 ;;
+    --with-name) WITH_NAME=1 ;;
+    --path)
+      shift
+      [ $# -gt 0 ] || { usage; exit 2; }
+      PATH_ARG=$1
+      ;;
+    --path=*) PATH_ARG=${1#--path=} ;;
+    -h|--help) usage; exit 0 ;;
+    --*) usage; exit 2 ;;
+    *)
+      [ -z "$NAME" ] || { usage; exit 2; }
+      NAME=$1
+      ;;
+  esac
   shift
-fi
-NAME=${1:?usage: fm-project-mode.sh [--raw] <project-name>}
+done
+
+[ -n "$NAME" ] || [ -n "$PATH_ARG" ] || { usage; exit 2; }
+
+print_result() {  # <name> <mode> <yolo>
+  if [ "$WITH_NAME" -eq 1 ]; then
+    printf '%s %s %s\n' "$1" "$2" "$3"
+  else
+    printf '%s %s\n' "$2" "$3"
+  fi
+}
+
+default_name() {
+  if [ -n "$NAME" ]; then
+    printf '%s\n' "$NAME"
+    return
+  fi
+  basename -- "$PATH_ARG"
+}
+
+normalize_path() {  # <path>
+  local path=$1
+  [ -n "$path" ] || return 1
+  if [ -d "$path" ]; then
+    cd "$path" && pwd -P
+    return
+  fi
+  case "$path" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  while [ "$path" != "/" ] && [ "${path%/}" != "$path" ]; do
+    path=${path%/}
+  done
+  printf '%s\n' "$path"
+}
+
+registry_line_name() {  # <line>
+  local rest
+  case "$1" in
+    "- "*) ;;
+    *) return 1 ;;
+  esac
+  rest=${1#- }
+  case "$rest" in
+    *[[:space:]]*) printf '%s\n' "${rest%%[[:space:]]*}" ;;
+    *) return 1 ;;
+  esac
+}
+
+registry_annotation() {  # <name> <line>
+  local name=$1 line=$2 rest
+  rest=${line#"- $name "}
+  case "$rest" in
+    \[*)
+      case "$rest" in
+        *\]*) rest=${rest#\[}; printf '%s\n' "${rest%%\]*}" ;;
+        *) echo "error: malformed registry annotation for $name: missing closing ]" >&2; return 2 ;;
+      esac
+      ;;
+    *) printf '\n' ;;
+  esac
+}
+
+mode_yolo_from_annotation() {  # <name> <annotation>
+  local name=$1 ann=$2 token mode=no-mistakes yolo=off mode_set=0
+  for token in $ann; do
+    case "$token" in
+      +yolo) yolo=on ;;
+      path=*) ;;
+      *)
+        if [ "$mode_set" -eq 0 ]; then
+          mode=$token
+          mode_set=1
+        fi
+        ;;
+    esac
+  done
+  case "$mode" in
+    no-mistakes|direct-PR|local-only|no-mistakes-prod-only) ;;
+    *)
+      echo "warn: unknown mode \"$mode\" for $name; defaulting to no-mistakes off" >&2
+      mode=no-mistakes
+      yolo=off
+      ;;
+  esac
+  case "$yolo" in on|off) ;; *) yolo=off ;; esac
+  if [ "$RAW" -eq 0 ] && [ "$mode" = no-mistakes-prod-only ]; then
+    mode=no-mistakes
+  fi
+  printf '%s %s\n' "$mode" "$yolo"
+}
+
+explicit_paths_from_annotation() {  # <name> <annotation>
+  local name=$1 ann=$2 token path count=0
+  for token in $ann; do
+    case "$token" in
+      path=*)
+        count=$((count + 1))
+        path=${token#path=}
+        case "$path" in
+          /*) ;;
+          *) echo "error: malformed path identity for $name: path= must be an absolute path" >&2; return 2 ;;
+        esac
+        printf '%s\n' "$path"
+        ;;
+    esac
+  done
+  if [ "$count" -gt 1 ]; then
+    echo "error: malformed path identity for $name: multiple path= tokens" >&2
+    return 2
+  fi
+}
+
+absolute_code_paths_from_line() {  # <line>
+  local rest=$1 code
+  while :; do
+    case "$rest" in
+      *'`'*) rest=${rest#*'`'} ;;
+      *) return 0 ;;
+    esac
+    case "$rest" in
+      *'`'*)
+        code=${rest%%'`'*}
+        rest=${rest#*'`'}
+        ;;
+      *) return 0 ;;
+    esac
+    case "$code" in
+      /*) printf '%s\n' "$code" ;;
+    esac
+  done
+}
+
+paths_for_registry_line() {  # <name> <line> <annotation>
+  local name=$1 line=$2 ann=$3 explicit candidate
+  explicit=$(explicit_paths_from_annotation "$name" "$ann") || return 2
+  if [ -n "$explicit" ]; then
+    printf '%s\n' "$explicit"
+    return
+  fi
+  candidate="$PROJECTS/$name"
+  normalize_path "$candidate" 2>/dev/null || printf '%s\n' "$candidate"
+  absolute_code_paths_from_line "$line"
+}
 
 if [ ! -f "$REG" ]; then
-  echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2
-  echo "no-mistakes off"
+  name=$(default_name)
+  echo "warn: no registry at $REG; defaulting $name to no-mistakes off" >&2
+  print_result "$name" no-mistakes off
   exit 0
 fi
 
-# awk emits "<mode> <yolo>" (one line) or nothing if the project is absent.
-parsed=$(awk -v n="$NAME" '
-  $1=="-" && $2==n {
-    mode="no-mistakes"; yolo="off";
-    if ($3 ~ /^\[/) {
-      s="";
-      for (i=3; i<=NF; i++) { s = s (s==""?"":" ") $i; if ($i ~ /\]$/) break }
-      gsub(/^\[|\]$/, "", s);           # strip the surrounding brackets
-      k = split(s, a, " ");
-      if (a[1] != "" && a[1] != "+yolo") mode = a[1];
-      for (j=1; j<=k; j++) if (a[j]=="+yolo") yolo="on";
+if [ -z "$PATH_ARG" ]; then
+  parsed=
+  while IFS= read -r line; do
+    line_name=$(registry_line_name "$line" || true)
+    [ "$line_name" = "$NAME" ] || continue
+    ann=$(registry_annotation "$line_name" "$line") || exit 2
+    parsed=$(mode_yolo_from_annotation "$line_name" "$ann")
+    break
+  done < "$REG"
+
+  if [ -z "$parsed" ]; then
+    echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2
+    print_result "$NAME" no-mistakes off
+    exit 0
+  fi
+
+  mode=${parsed%% *}
+  yolo=${parsed##* }
+  print_result "$NAME" "$mode" "$yolo"
+  exit 0
+fi
+
+target=$(normalize_path "$PATH_ARG") || {
+  echo "error: --path must be an absolute path or an existing directory: $PATH_ARG" >&2
+  exit 2
+}
+matches=
+while IFS= read -r line; do
+  line_name=$(registry_line_name "$line" || true)
+  [ -n "$line_name" ] || continue
+  ann=$(registry_annotation "$line_name" "$line") || exit 2
+  paths=$(paths_for_registry_line "$line_name" "$line" "$ann") || exit 2
+  matched=0
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    candidate=$(normalize_path "$candidate") || {
+      echo "error: malformed path identity for $line_name: path is not absolute: $candidate" >&2
+      exit 2
     }
-    print mode, yolo; exit
-  }
-' "$REG")
+    if [ "$candidate" = "$target" ]; then
+      matched=1
+    fi
+  done <<EOF
+$paths
+EOF
+  [ "$matched" -eq 1 ] || continue
+  parsed=$(mode_yolo_from_annotation "$line_name" "$ann")
+  matches="${matches}${matches:+
+}$line_name $parsed"
+done < "$REG"
 
-if [ -z "$parsed" ]; then
-  echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2
-  echo "no-mistakes off"
-  exit 0
-fi
-
-mode=${parsed%% *}
-yolo=${parsed##* }
-case "$mode" in
-  no-mistakes|direct-PR|local-only|no-mistakes-prod-only) ;;
-  *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off ;;
+case "$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l | tr -d ' ')" in
+  0)
+    name=$(default_name)
+    echo "warn: no project registered for path \"$PATH_ARG\"; defaulting $name to no-mistakes off" >&2
+    print_result "$name" no-mistakes off
+    exit 0
+    ;;
+  1)
+    IFS=' ' read -r match_name match_mode match_yolo <<EOF
+$matches
+EOF
+    print_result "$match_name" "$match_mode" "$match_yolo"
+    exit 0
+    ;;
+  *)
+    echo "error: ambiguous path identity \"$PATH_ARG\" matches multiple projects:" >&2
+    printf '%s\n' "$matches" | sed '/^$/d; s/^/  - /' >&2
+    exit 2
+    ;;
 esac
-case "$yolo" in on|off) ;; *) yolo=off ;; esac
-# A conditional policy is not a task mode. Mechanical callers get its most
-# rigorous leg; --raw callers get the annotation itself (see the header).
-if [ "$RAW" -eq 0 ] && [ "$mode" = no-mistakes-prod-only ]; then
-  mode=no-mistakes
-fi
-echo "$mode $yolo"
