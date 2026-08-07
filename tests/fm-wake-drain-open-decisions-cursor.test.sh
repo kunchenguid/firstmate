@@ -185,7 +185,7 @@ test_same_size_rewrite_is_detected_via_inode_identity() {
 }
 
 test_read_failure_never_silently_returns_empty() {
-  local dir state fakebin statusfile cursor out before_cursor after_cursor real_dd
+  local dir state fakebin statusfile cursor out before_cursor after_cursor real_tail
   dir=$(make_case cursor-read-failure)
   state="$dir/state"
   fakebin="$dir/failbin"
@@ -203,19 +203,19 @@ test_read_failure_never_silently_returns_empty() {
   before_cursor=$(LC_ALL=C cksum "$cursor")
 
   printf 'working: more routine content\n' >> "$statusfile"
-  # Fail ONLY the byte-offset content read (`dd if=...`) that status_open_
+  # Fail ONLY the byte-offset content read (`tail -c ...`) that status_open_
   # decisions_incremental uses to pull new appended bytes; pass every other
-  # drain/guard invocation through to the real dd, so this isolates exactly
+  # drain/guard invocation through to the real tail, so this isolates exactly
   # the one read path under test.
-  real_dd=$(command -v dd)
-  cat > "$fakebin/dd" <<SH
+  real_tail=$(command -v tail)
+  cat > "$fakebin/tail" <<SH
 #!/usr/bin/env bash
 for a in "\$@"; do
-  case "\$a" in "if=$statusfile") exit 1 ;; esac
+  case "\$a" in "$statusfile") exit 1 ;; esac
 done
-exec "$real_dd" "\$@"
+exec "$real_tail" "\$@"
 SH
-  chmod +x "$fakebin/dd"
+  chmod +x "$fakebin/tail"
 
   FM_STATE_OVERRIDE="$state" PATH="$fakebin:$PATH" "$DRAIN" > "$out" \
     || fail "wake drain failed instead of preserving state after the injected read failure"
@@ -314,7 +314,7 @@ test_previous_fold_cache_is_refolded_under_current_semantics() {
 
 test_append_after_size_snapshot_is_deferred_without_replay() {
   local dir state fakebin status marker out probe first_bytes closure_bytes probe_bytes
-  local real_tail real_dd
+  local real_tail
   dir=$(make_case cursor-snapshot-race)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -324,7 +324,6 @@ test_append_after_size_snapshot_is_deferred_without_replay() {
   out="$dir/drain.out"
   probe="$dir/probe.tsv"
   real_tail=$(command -v tail)
-  real_dd=$(command -v dd)
 
   printf 'needs-decision [key=race]: pick the safe path\n' > "$status"
   first_bytes=$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')
@@ -342,18 +341,7 @@ for arg in "\$@"; do
 done
 exec "$real_tail" "\$@"
 SH
-  cat > "$fakebin/dd" <<SH
-#!/usr/bin/env bash
-for arg in "\$@"; do
-  if [ "\$arg" = "if=$status" ] && [ ! -e "$marker" ]; then
-    printf 'resolved [key=race]: picked the safe path\n' >> "$status"
-    : > "$marker"
-    break
-  fi
-done
-exec "$real_dd" "\$@"
-SH
-  chmod +x "$fakebin/tail" "$fakebin/dd"
+  chmod +x "$fakebin/tail"
 
   FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" PATH="$fakebin:$PATH" "$DRAIN" > "$out" \
     || fail "drain failed while appending after the size snapshot"

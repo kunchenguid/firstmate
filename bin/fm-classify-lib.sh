@@ -756,8 +756,8 @@ EOF
   if [ "$offset" -lt "$size" ]; then
     chunk_file="$cf.read.$$"
     expected_size=$((size - offset))
-    dd if="$f" of="$chunk_file" bs=1 skip="$offset" count="$expected_size" 2>/dev/null \
-      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
+    tail -c "+$((offset + 1))" "$f" 2>/dev/null \
+      | head -c "$expected_size" > "$chunk_file" 2>/dev/null
     chunk_size=$(LC_ALL=C wc -c < "$chunk_file" 2>/dev/null) \
       || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
     chunk_size=${chunk_size//[[:space:]]/}
