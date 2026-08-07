@@ -12,6 +12,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-calm.sh`             | Read or atomically update the effective Firstmate Calm presentation preference          |
 | `fm-claude-calm-nudge.sh` | Print Claude's effective Calm presentation state for a genuine primary                  |
 | `fm-operational-input.sh` | Construct and parse the canonical cross-language operational-input protocol |
+| `fm-link-intake.sh`       | Capture, retain, and validate private searchable link-intake records       |
 | `fm-bootstrap.sh`        | Detect toolchain and fleet problems, run the locked session-start sweeps, and install approved tools |
 | `fm-fleet-sync.sh`       | Refresh project clones with safe fast-forwards, self-heals, `STUCK:` reports, branch pruning, and bounded recovery from an orphaned `.git/packed-refs.lock` |
 | `fm-fleet-snapshot.sh`   | Print the read-only structured fleet snapshot JSON (schema `fm-fleet-snapshot.v1`)   |

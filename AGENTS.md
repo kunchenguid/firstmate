@@ -247,6 +247,7 @@ Keep `local-only` work in the main home.
 Send in-scope work to the fitting secondmate unless it is blocked or the captain explicitly redirects it; do not read the secondmate's chat because marked routed replies return through its status or referenced document.
 If no secondmate scope fits, use the main home or discuss creating an appropriate persistent secondmate.
 For one-off or infrequent operational work, start with the simplest direct end-to-end path.
+Link intake: whenever the captain sends meaningful URL input in session chat or the Relay inbox, first run `bin/fm-link-intake.sh capture` for its channel, then inspect it with the suitable existing browser or media tool and upsert its normalized result or visible failure; if capture cannot reach the helper, report its typed error and do not acknowledge or clear the input.
 Do not build wrappers, control planes, policy layers, custom verifiers, or automation unless the direct path exposes a concrete blocker or repeated need that justifies the added machinery.
 
 Before commissioning an investigation, consult existing reports and established evidence.

@@ -132,7 +132,8 @@ Treat `state/x-inbox/` as the source of truth and process **every** file you fin
    a. Read the object: you need `request_id`, `text`, and `in_reply_to`.
       `in_reply_to` is `{author_handle, text}` when this mention is a reply within an ongoing conversation, or `null` for a fresh, standalone mention.
       Ignore `tweet_id` entirely - you never name a platform message id; the relay binds the reply for you.
-   b. **Classify the mention into one of three cases** (see "A request to act on: acknowledge first, act, then follow up on completion"):
+   b. **Capture meaningful links, then classify the mention into one of three cases** (see "A request to act on: acknowledge first, act, then follow up on completion"). For each meaningful HTTP(S) URL in the captain's text, run `bin/fm-link-intake.sh capture --url <url> --channel relay-inbox`, then inspect and upsert it under the ordinary link-intake contract.
+      On any capture error, surface the typed `link-intake-unavailable` failure and leave the inbox file in place; do not reply, dismiss, or otherwise appear to accept that link.
       - **Actionable instruction / request** ("add this to the backlog", "look into X", "fix Y", "ship Z") - go to step 2c and do the work first.
       - **Question** - nothing to do; skip step 2c and answer from live fleet state in step 2d.
       - **Pure acknowledgment** ("thanks", "👍", "nice", "got it", a reaction, or a follow-up that just closes the loop with nothing to add) - **skip**: post nothing, but **dismiss it at the relay** (step 2e-skip), then remove the inbox file (the cleanup of step 2f), and move on **without** calling `bin/fm-x-reply.sh`. A deliberate non-answer is the correct outcome here, not a failure.
