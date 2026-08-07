@@ -98,6 +98,26 @@ RUNNER_NON_EXECUTION_EXITS: dict[str, dict[int, str]] = {
         5: "no test matched the named selector",
     },
 }
+# The classified statuses above are the runner's DEFAULT exit semantics, and
+# ambient variables can rewrite them: pytest documents PYTEST_ADDOPTS as being
+# appended to the command line, so an operator with
+# `PYTEST_ADDOPTS=--continue-on-collection-errors` exported turns a mutation
+# that broke collection into an ordinary failure, and the gate certifies a fix
+# on a test that was never collected - with no reviewer involved and nothing
+# naming the cause. Gate-executed mutation proofs therefore run with an
+# environment built from this list rather than the operator's.
+#
+# An allowlist because it fails CLOSED. A variable that is needed but missing
+# breaks the BASELINE run, which is required to exit 0, so the proof is refused
+# where it can be seen. A denylist fails open: PYTHONWARNINGS, PYTEST_PLUGINS,
+# NODE_OPTIONS, RUBYOPT and whatever ships next year sail through unlisted.
+PROOF_ENVIRONMENT_ALLOWLIST = (
+    "PATH",  # the runner's own interpreter lookup, and any tool its test runs
+    "HOME",  # interpreters and runners resolve user configuration against it
+    "LANG",  # text decoding: a wrong codec becomes a spurious runner error
+    "LC_ALL",
+    "LC_CTYPE",
+)
 
 
 class CrosscheckError(RuntimeError):
@@ -432,7 +452,7 @@ def run_sandboxed(
         allow_posix_ipc=allow_posix_ipc,
         additional_writable_roots=additional_writable_roots,
     )
-    environment = (env or os.environ).copy()
+    environment = (os.environ if env is None else env).copy()
     private_tmp = cwd / ".crosscheck" / "tmp"
     private_cache = cwd / ".crosscheck" / "cache"
     python_cache = cwd / ".crosscheck" / "pycache"
@@ -467,6 +487,21 @@ def run_sandboxed(
         description=description,
         maximum_output_bytes=maximum_output_bytes,
     )
+
+
+def proof_environment() -> dict[str, str]:
+    """Build the environment a gate-executed mutation proof runs under.
+
+    Constructed rather than inherited so no exported variable can change the
+    exit semantics the gate classifies. See PROOF_ENVIRONMENT_ALLOWLIST for
+    why this is an allowlist.
+    """
+
+    return {
+        name: os.environ[name]
+        for name in PROOF_ENVIRONMENT_ALLOWLIST
+        if name in os.environ
+    }
 
 
 def git(cwd: Path, *arguments: str, timeout: float = 60) -> str:
@@ -1095,6 +1130,7 @@ def execute_mutation_proof(
         profile_path=baseline_profile,
         allow_network=False,
         allow_posix_ipc=False,
+        env=proof_environment(),
         timeout=evidence_command_timeout(
             deadline, evidence_timeout(), f"{label} baseline test"
         ),
@@ -1149,6 +1185,7 @@ def execute_mutation_proof(
         profile_path=mutated_profile,
         allow_network=False,
         allow_posix_ipc=False,
+        env=proof_environment(),
         timeout=evidence_command_timeout(
             deadline, evidence_timeout(), f"{label} mutated test"
         ),
@@ -1774,6 +1811,7 @@ test_path may be a plain repository path, or a `path::selector` node id when the
 The proof checkout is a fresh clone holding tracked files only, so name a runner installed on PATH there; a runner that is absent, or a selector that matches no test, is reported as a non-execution rather than a test result and clears nothing.
 A mutation proof may name only a runner whose non-execution signal the gate has measured, currently: {', '.join(sorted(RUNNER_NON_EXECUTION_EXITS))}. On any other runner the gate cannot tell a test that caught the mutation from one that never ran, so it refuses to certify the fix rather than guess.
 A mutation proof takes no runner arguments at all: test_invocation.arguments must be empty, and any entry is refused by name. The gate reads the mutated exit status through the runner's default semantics, which a flag can change, and test_path is the only target it validates as tracked, symlink-free, and unreachable by your mutation patch.
+Both proof runs also execute under an environment the gate constructs from a fixed allowlist rather than the one it was launched with, so no ambient variable can alter those exit semantics; name a test that needs nothing beyond PATH, HOME, and the locale.
 The gate will independently run every reproduction and every mutation proof.
 If you cannot reproduce a concern, return it as a suspicion; suspicions block the merge.
 Silence never closes an existing finding.

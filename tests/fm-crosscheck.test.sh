@@ -42,17 +42,21 @@ make_case() {
     > "$repo/tests/nodeid.test.sh"
   # Passes whatever the mutation does, so it can never itself prove causality.
   printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/tests/vacuous.test.sh"
+  # Reaches its assertion only through a helper found on PATH, so the proof
+  # environment losing PATH is a real break rather than a hypothetical one.
+  printf '#!/usr/bin/env bash\nfm-test-helper\n' > "$repo/tests/pathdep.test.sh"
   mkdir -p "$repo/real-tests"
   printf '#!/usr/bin/env bash\ngrep -qx fixed app.txt\n' > "$repo/real-tests/linked.test.sh"
   ln -s ../real-tests "$repo/tests/linked"
   chmod +x "$repo/tests/regression.test.sh" "$repo/tests/stateful.test.sh" \
     "$repo/tests/readable-state.test.sh" "$repo/tests/support.test.sh" \
     "$repo/tests/nodeid.test.sh" "$repo/tests/vacuous.test.sh" \
-    "$repo/real-tests/linked.test.sh"
+    "$repo/tests/pathdep.test.sh" "$repo/real-tests/linked.test.sh"
   git -C "$repo" add app.txt other.txt shared-test.sh tests/regression.test.sh \
     tests/helper.sh tests/readable-state.test.sh tests/stateful.test.sh \
     tests/support.test.sh tests/symlink.test.sh tests/nodeid.test.sh \
-    tests/vacuous.test.sh real-tests/linked.test.sh tests/linked
+    tests/vacuous.test.sh tests/pathdep.test.sh real-tests/linked.test.sh \
+    tests/linked
   git -C "$repo" commit -qm base
   base=$(git -C "$repo" rev-parse HEAD)
   git -C "$repo" checkout -qb feature
@@ -78,7 +82,18 @@ EOF
   install_claude_fake "$case_dir"
   install_sandbox_fake "$case_dir"
   install_pytest_fake "$case_dir"
+  install_path_helper "$case_dir"
   printf '%s\t%s\t%s\n' "$case_dir" "$base" "$head"
+}
+
+# The one thing tests/pathdep.test.sh needs from PATH. Its verdict still tracks
+# the mutated implementation, so the proof is sound while PATH survives.
+install_path_helper() {
+  local case_dir=$1
+  mkdir -p "$case_dir/pathbin"
+  printf '#!/usr/bin/env bash\ngrep -qx fixed app.txt\n' \
+    > "$case_dir/pathbin/fm-test-helper"
+  chmod +x "$case_dir/pathbin/fm-test-helper"
 }
 
 # A node-id runner standing in for pytest. It reproduces the three outcomes the
@@ -115,17 +130,22 @@ for selector in "${targets[@]}"; do
 done
 # A mutation that breaks collection reports a non-execution status, never a
 # test failure. The gate must not read that as "the test caught the mutation".
-if [ "${FM_TEST_PYTEST_BREAK_COLLECTION:-}" = 1 ] && grep -qx broken app.txt; then
+# The switch lives beside this script rather than in the environment, because
+# the gate now builds the proof environment from an allowlist and no test-only
+# variable reaches here.
+collection_exit=$(dirname "$0")/collection-exit
+if [ -f "$collection_exit" ] && grep -qx broken app.txt; then
   echo "no tests ran"
   # Measured on pytest 9.1.1: --continue-on-collection-errors records the
   # collection error and reports it as an ordinary failure instead, which
-  # carries no classification and so reads as a caught regression.
-  for argument in "$@"; do
+  # carries no classification and so reads as a caught regression. pytest
+  # appends PYTEST_ADDOPTS to the command line, so it lands here too.
+  for argument in "$@" ${PYTEST_ADDOPTS:-}; do
     [ "$argument" = --continue-on-collection-errors ] || continue
     echo "ERROR collecting"
     exit 1
   done
-  exit 5
+  exit "$(cat "$collection_exit")"
 fi
 status=0
 for selector in "${targets[@]}"; do
@@ -442,6 +462,7 @@ elif scenario in {
     "symlink-forgery",
     "unclassified-runner",
     "positional-target",
+    "path-dependent",
 }:
     patch = protocol / "mutations" / "revert.patch"
     if scenario in {
@@ -449,6 +470,7 @@ elif scenario in {
         "forged-command",
         "unclassified-runner",
         "positional-target",
+        "path-dependent",
     }:
         patch.parent.mkdir(parents=True, exist_ok=True)
         patch.write_text("""diff --git a/app.txt b/app.txt
@@ -502,6 +524,7 @@ elif scenario in {
         "support-forgery": "tests/support.test.sh",
         "symlink-forgery": "tests/symlink.test.sh",
         "positional-target": "tests/vacuous.test.sh",
+        "path-dependent": "tests/pathdep.test.sh",
     }.get(scenario, "tests/regression.test.sh")
     # Only a runner whose non-execution the gate has measured can certify a
     # fix, so every scenario that must reach mutation causality names one.
@@ -1364,9 +1387,9 @@ test_flag_argument_cannot_rewrite_the_non_execution_signal() {
   record=$(make_case flag-argument)
   IFS=$'\t' read -r case_dir base head <<< "$record"
   seed_open_ledger "$case_dir" "$head"
+  printf '5\n' > "$case_dir/pathbin/collection-exit"
   set +e
-  FM_TEST_PYTEST_BREAK_COLLECTION=1 \
-    run_case "$case_dir" "$base" "$head" flag-argument run \
+  run_case "$case_dir" "$base" "$head" flag-argument run \
     > "$case_dir/out" 2> "$case_dir/err"
   rc=$?
   set -e
@@ -1433,9 +1456,9 @@ test_mutated_non_execution_cannot_clear_a_finding() {
   record=$(make_case node-id-mutated-nonexecution)
   IFS=$'\t' read -r case_dir base head <<< "$record"
   seed_open_ledger "$case_dir" "$head"
+  printf '5\n' > "$case_dir/pathbin/collection-exit"
   set +e
-  FM_TEST_PYTEST_BREAK_COLLECTION=1 \
-    run_case "$case_dir" "$base" "$head" node-id-mutated-nonexecution run \
+  run_case "$case_dir" "$base" "$head" node-id-mutated-nonexecution run \
     > "$case_dir/out" 2> "$case_dir/err"
   rc=$?
   set -e
@@ -1449,6 +1472,81 @@ assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecy
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "a mutation that only broke collection cleared the finding"
   pass "a mutated run that never executed the test cannot clear a finding"
+}
+
+# The same bypass the argument rule closed, reached without any reviewer: pytest
+# appends PYTEST_ADDOPTS to its command line, so an operator with
+# --continue-on-collection-errors exported turns every mutation that broke
+# collection into an ordinary failure. The proof runs must therefore carry an
+# environment the gate builds, not the one it was launched with.
+test_ambient_addopts_cannot_rewrite_the_non_execution_signal() {
+  local record case_dir base head rc
+  record=$(make_case ambient-addopts)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  printf '2\n' > "$case_dir/pathbin/collection-exit"
+  set +e
+  PYTEST_ADDOPTS=--continue-on-collection-errors \
+    run_case "$case_dir" "$base" "$head" verified-fixed run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "ambient PYTEST_ADDOPTS during a mutation proof"
+  assert_grep 'never ran its named test' "$case_dir/err" \
+    "an exported runner option still rewrote the classified exit semantics"
+  python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1]))
+assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+' "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    || fail "an exported runner option cleared a finding"
+  pass "an exported runner option cannot reach the gate's own proof runs"
+}
+
+# The allowlist is only worth having if omitting something fails loudly, so
+# prove it by execution rather than assertion. The same scenario runs twice: the
+# named test reaches its assertion through a helper on PATH, so with the real
+# allowlist it clears, and with PATH deleted from that constant in a real copy
+# of the gate the BASELINE refuses and carries the shell's own diagnostic. A
+# missing variable can therefore never degrade into a mutation outcome.
+test_incomplete_proof_environment_fails_loudly() {
+  local record case_dir base head rc
+  record=$(make_case path-dependent-proof)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  run_case "$case_dir" "$base" "$head" path-dependent run \
+    > "$case_dir/out" 2> "$case_dir/err" \
+    || fail "the PATH-dependent proof did not clear: $(cat "$case_dir/err")"
+
+  record=$(make_case narrow-proof-env)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  mkdir -p "$case_dir/narrowed"
+  cp "$ROOT/bin/fm_bounded_io.py" "$case_dir/narrowed/"
+  sed '/^    "PATH",/d' "$CROSSCHECK_PY" > "$case_dir/narrowed/fm-crosscheck.py"
+  if grep -q '^    "PATH",' "$case_dir/narrowed/fm-crosscheck.py"; then
+    fail "the narrowed copy still allowlists PATH"
+  fi
+  local CROSSCHECK_PY="$case_dir/narrowed/fm-crosscheck.py"
+  set +e
+  run_case "$case_dir" "$base" "$head" path-dependent run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "proof environment missing a variable the runner needs"
+  assert_grep 'does not pass before mutation' "$case_dir/err" \
+    "a proof environment missing PATH did not refuse at the baseline run"
+  assert_grep 'fm-test-helper' "$case_dir/err" \
+    "the refusal did not carry the diagnostic naming what could not be found"
+  assert_no_grep 'still passes after mutation' "$case_dir/err" \
+    "a broken proof environment was read as a mutation outcome"
+  python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1]))
+assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+' "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    || fail "a proof that never ran cleared a finding"
+  pass "an allowlist missing something the runner needs refuses at the baseline"
 }
 
 # `Path.stat(follow_symlinks=...)` is Python 3.10+. `fm-crosscheck.sh` execs
@@ -2576,6 +2674,8 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_null_ledger_fails_without_normalization|\
     test_unmatched_selector_is_never_a_failing_test|\
     test_mutated_non_execution_cannot_clear_a_finding|\
+    test_ambient_addopts_cannot_rewrite_the_non_execution_signal|\
+    test_incomplete_proof_environment_fails_loudly|\
     test_symlinked_directory_named_test_is_rejected|\
     test_symlinked_home_ancestor_still_clears|\
     test_reviewer_env_dependent_evidence_names_the_difference|\
@@ -2627,6 +2727,8 @@ test_positional_argument_cannot_supply_a_second_target
 test_flag_argument_cannot_rewrite_the_non_execution_signal
 test_unmatched_selector_is_never_a_failing_test
 test_mutated_non_execution_cannot_clear_a_finding
+test_ambient_addopts_cannot_rewrite_the_non_execution_signal
+test_incomplete_proof_environment_fails_loudly
 test_symlinked_directory_named_test_is_rejected
 test_symlinked_home_ancestor_still_clears
 test_reviewer_env_dependent_evidence_names_the_difference
