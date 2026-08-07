@@ -49,17 +49,29 @@ PAYLOAD=$(cat 2>/dev/null || true)
 command -v jq >/dev/null 2>&1 || exit 0
 
 MAX_BUDGET=1000000
-normalize_budget() {
-  local value=$1 default=$2
-  case "$value" in ''|*[!0-9]*|0) value=$default ;; esac
+
+# clamp_digits: the one digit normalizer behind every bound below. It strips
+# leading zeros and saturates at <ceiling>. The length comparison runs FIRST so
+# an arbitrarily long digit string saturates without ever reaching arithmetic
+# evaluation, which is what keeps the ceilings hard against a hostile counter.
+# Digit validation belongs to the callers, whose malformed-input answers differ.
+clamp_digits() {  # <digits> <ceiling> -> <digits, saturated at ceiling>
+  local value=$1 ceiling=$2
   while [ "${#value}" -gt 1 ] && [ "${value:0:1}" = 0 ]; do
     value=${value#0}
   done
-  [ "$value" != 0 ] || value=$default
-  if [ "${#value}" -gt "${#MAX_BUDGET}" ] \
-    || { [ "${#value}" -eq "${#MAX_BUDGET}" ] && [[ "$value" -gt "$MAX_BUDGET" ]]; }; then
-    value=$MAX_BUDGET
+  if [ "${#value}" -gt "${#ceiling}" ] \
+    || { [ "${#value}" -eq "${#ceiling}" ] && [[ "$value" -gt "$ceiling" ]]; }; then
+    value=$ceiling
   fi
+  printf '%s' "$value"
+}
+
+normalize_budget() {
+  local value=$1 default=$2
+  case "$value" in ''|*[!0-9]*|0) value=$default ;; esac
+  value=$(clamp_digits "$value" "$MAX_BUDGET")
+  [ "$value" != 0 ] || value=$default
   printf '%s' "$value"
 }
 
@@ -179,15 +191,7 @@ canonical_wake_reason() {
 normalize_counter() {
   local value=$1
   case "$value" in ''|*[!0-9]*) printf '0'; return 0 ;; esac
-  while [ "${#value}" -gt 1 ] && [ "${value:0:1}" = 0 ]; do
-    value=${value#0}
-  done
-  if [ "${#value}" -gt "${#TOTAL_BUDGET}" ] \
-    || { [ "${#value}" -eq "${#TOTAL_BUDGET}" ] && [[ "$value" -gt "$TOTAL_BUDGET" ]]; }; then
-    printf '%s' "$TOTAL_BUDGET"
-  else
-    printf '%s' "$value"
-  fi
+  clamp_digits "$value" "$TOTAL_BUDGET"
 }
 
 chain_load() {
@@ -250,13 +254,11 @@ chain_store() {
 }
 
 fallback_total_from_loop_count() {
-  local value=$1
-  while [ "${#value}" -gt 1 ] && [ "${value:0:1}" = 0 ]; do
-    value=${value#0}
-  done
-  if [ "${#value}" -gt "${#TOTAL_BUDGET}" ] \
-    || { [ "${#value}" -eq "${#TOTAL_BUDGET}" ] && [[ "$value" -gt "$TOTAL_BUDGET" ]]; } \
-    || [ "$value" = "$TOTAL_BUDGET" ]; then
+  local value
+  value=$(clamp_digits "$1" "$TOTAL_BUDGET")
+  # Saturated means the loop count already reached or passed the budget; below
+  # it, the fallback counts this turn too, so the chain still terminates.
+  if [ "$value" = "$TOTAL_BUDGET" ]; then
     printf '%s' "$TOTAL_BUDGET"
   else
     printf '%s' "$((value + 1))"

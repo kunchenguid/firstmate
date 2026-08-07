@@ -103,6 +103,8 @@ fi
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# shellcheck source=bin/fm-composer-lib.sh
+. "$SCRIPT_DIR/fm-composer-lib.sh"
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -470,12 +472,7 @@ else
   esac
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
-  if [ -z "${FM_COMPOSER_IDLE_RE:-}" ] && [ "$TARGET_HARNESS" = cursor ]; then
-    FM_COMPOSER_IDLE_RE='^Add a follow-up$'
-  fi
-  FM_COMPOSER_HARNESS=$TARGET_HARNESS
-  export FM_COMPOSER_HARNESS
-  export FM_COMPOSER_IDLE_RE
+  fm_composer_export_env "$TARGET_HARNESS"
   # Type once, submit, verify. Only exact empty confirms delivery; every other
   # verdict preserves the loud refusal boundary.
   send_rc=0
