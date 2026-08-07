@@ -59,18 +59,16 @@ acquire_lock() {
     owner=$(cat "$LOCK_DIR/pid" 2>/dev/null || true)
     case "$owner" in
       ''|*[!0-9])
+        rmdir "$LOCK_DIR" 2>/dev/null || true
         sleep 0.05
         ;;
       *)
         if kill -0 "$owner" 2>/dev/null; then
           sleep 0.05
         else
-          if mkdir "$LOCK_DIR/reclaim" 2>/dev/null; then
-            if [ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" = "$owner" ] &&
-              ! kill -0 "$owner" 2>/dev/null; then
-              rm -f "$LOCK_DIR/pid"
-            fi
-            rmdir "$LOCK_DIR/reclaim" 2>/dev/null || true
+          if [ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" = "$owner" ] &&
+            ! kill -0 "$owner" 2>/dev/null; then
+            rm -f "$LOCK_DIR/pid"
             rmdir "$LOCK_DIR" 2>/dev/null || true
           fi
         fi

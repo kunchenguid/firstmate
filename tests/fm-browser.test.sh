@@ -182,7 +182,13 @@ test_stale_lock_is_reclaimed() {
     "$BROWSER_HELPER" stop)
   [ "$out" = 'stopped=no-owned-browser' ] || fail "stale-lock stop returned '$out'"
   [ ! -e "$dir/runtime/lock" ] || fail "stale lock was not released"
-  pass "dead lock owners are reclaimed before acquiring the browser lock"
+  mkdir -p "$dir/runtime/lock"
+  out=$(FM_BROWSER_RUNTIME_DIR="$dir/runtime" FM_BROWSER_PORT=19228 \
+    FM_TEST_BROWSER_MARKER="$dir/never" PATH="$fakebin:$PATH" \
+    "$BROWSER_HELPER" stop)
+  [ "$out" = 'stopped=no-owned-browser' ] || fail "ownerless-lock stop returned '$out'"
+  [ ! -e "$dir/runtime/lock" ] || fail "ownerless lock was not released"
+  pass "dead and ownerless browser locks are reclaimed"
 }
 
 test_probe_hit_reuses_without_launching
