@@ -678,12 +678,80 @@ test_seed_marker_does_not_mask_real_dirt() {
 }
 
 # --- T15: the shipped firstmate repo gitignores the seed marker -----------------
-# Pins the actual fix so it cannot silently regress: without this .gitignore entry
-# every seeded home would read dirty again the moment it lands on this repo's HEAD.
+# Pins the actual fix so it cannot silently regress: without this ignore rule every
+# seeded home would read dirty again the moment it lands on this repo's HEAD. Asks
+# git for the decision rather than pinning a literal line, so the rule stays free to
+# be anchored or rewritten as long as the marker itself remains ignored at the root.
 test_repo_gitignores_seed_marker() {
-  grep -qxF '.fm-secondmate-home' "$ROOT/.gitignore" \
+  git -C "$ROOT" check-ignore --quiet --no-index .fm-secondmate-home \
     || fail "the firstmate repo .gitignore must ignore the seed marker (.fm-secondmate-home)"
   pass "T15 the firstmate repo gitignores the secondmate seed marker"
+}
+
+# --- T16: home-local Crosscheck artifacts do not strand a pre-ignore home -------
+# The same chicken-and-egg as T13, one generation later: a home that already carries
+# home-local config files and a root Crosscheck lock predates the commit that ignores
+# them, so a plain dirtiness check refuses the very fast-forward that would land the
+# ignore rules. The ff dirtiness guard tolerates exactly those two shapes so the home
+# converges, and the artifacts themselves survive the advance untouched.
+test_crosscheck_artifacts_do_not_strand_a_pre_ignore_home() {
+  local w c0 base
+  w=$(new_world crosscheck-artifacts)
+  c0=$(head_of "$w/main")
+  add_sm_worktree "$w" sm "$c0"
+  mkdir -p "$w/sm/config"
+  printf '{"reviewers":[]}\n' > "$w/sm/config/crosscheck-reviewer.json"
+  : > "$w/sm/.example-task.crosscheck.lock"
+  [ -n "$(git -C "$w/sm" status --porcelain --untracked-files=all)" ] \
+    || fail "precondition: the artifacts should read as dirt to a plain status check"
+  bump_primary "$w" instr
+  base=$(primary_head_commit "$w/main")
+
+  run_ff "$w/sm" "$base"
+
+  [ "$FF_STATUS" = updated ] \
+    || fail "artifact-only home did not converge, got '$FF_STATUS': $FF_OUT"
+  [ "$(head_of "$w/sm")" = "$base" ] || fail "artifact-only home did not fast-forward"
+  [ -f "$w/sm/config/crosscheck-reviewer.json" ] \
+    && [ -f "$w/sm/.example-task.crosscheck.lock" ] \
+    || fail "the fast-forward destroyed a live local Crosscheck artifact"
+  pass "T16 home-local config and a root Crosscheck lock do not block the ff sweep"
+}
+
+# --- T17: the artifact tolerance does not mask any other untracked dirt ---------
+# The tolerance is deliberately narrow - root-level config/ entries and root
+# .<id>.crosscheck.lock files only. Anything else untracked, including a config/
+# directory nested under some other path, must still refuse the fast-forward.
+test_crosscheck_tolerance_does_not_mask_unrelated_dirt() {
+  local w c0 base id before
+  w=$(new_world crosscheck-plus-dirt)
+  c0=$(head_of "$w/main")
+  for id in sm-unrelated sm-nested; do
+    add_sm_worktree "$w" "$id" "$c0"
+    mkdir -p "$w/$id/config"
+    printf '{"reviewers":[]}\n' > "$w/$id/config/crosscheck-reviewer.json"
+    : > "$w/$id/.example-task.crosscheck.lock"
+  done
+  printf 'must block\n' > "$w/sm-unrelated/unrelated-local-file"
+  mkdir -p "$w/sm-nested/nested/config"
+  printf 'must block\n' > "$w/sm-nested/nested/config/crosscheck-reviewer.json"
+  bump_primary "$w" instr
+  base=$(primary_head_commit "$w/main")
+
+  for id in sm-unrelated sm-nested; do
+    before=$(head_of "$w/$id")
+    run_ff "$w/$id" "$base"
+    [ "$FF_STATUS" = skipped ] \
+      || fail "$id: unrelated untracked dirt must skip, got '$FF_STATUS': $FF_OUT"
+    assert_contains "$FF_OUT" "secondmate sm: skipped: dirty working tree" \
+      "$id: unrelated untracked dirt is still reported as a dirty working tree"
+    [ "$(head_of "$w/$id")" = "$before" ] || fail "$id: HEAD moved (work at risk)"
+  done
+  grep -q 'must block' "$w/sm-unrelated/unrelated-local-file" \
+    || fail "unrelated untracked dirt was discarded"
+  grep -q 'must block' "$w/sm-nested/nested/config/crosscheck-reviewer.json" \
+    || fail "nested untracked dirt was discarded"
+  pass "T17 the Crosscheck artifact tolerance does not mask other untracked dirt"
 }
 
 test_ff_updated
@@ -702,5 +770,7 @@ test_seed_marker_clean_when_gitignored
 test_seed_marker_converges_existing_home
 test_seed_marker_does_not_mask_real_dirt
 test_repo_gitignores_seed_marker
+test_crosscheck_artifacts_do_not_strand_a_pre_ignore_home
+test_crosscheck_tolerance_does_not_mask_unrelated_dirt
 
 echo "# all fm-secondmate-sync tests passed"

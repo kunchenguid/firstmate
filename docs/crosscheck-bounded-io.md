@@ -9,6 +9,7 @@ Linux uses a child subreaper, which atomically adopts orphaned descendants befor
 macOS has no equivalent containment boundary in this implementation, so cleanup there is best effort: it covers descendants observed by the periodic census, processes that remain in the supervisor group, and processes that retain the inherited ownership marker.
 A macOS descendant can escape that coverage by detaching and replacing its environment before any census observes it; callers must not treat macOS cleanup as durable containment of hostile commands.
 The anchor is not reaped until cleanup of the processes within the platform's stated coverage is verified, and an unsupported or unprovable cleanup attempt fails closed.
+Failing closed never costs the diagnosis: an unverifiable cleanup that follows a bounded failure of its own is folded into that failure's message and raised as that failure's type, so a timeout still reads and exits as a timeout rather than as a generic cleanup error.
 Structured artifacts must be stable regular files within a byte ceiling before decoding, and decoded depth, item count, string bytes, and numeric finiteness are validated separately.
 Artifact opens are nonblocking and no-follow, and the opened descriptor must remain a regular file with the device and inode observed before opening.
 Review and evidence batches share a deadline and item counter rather than multiplying a per-item timeout by repository-controlled array length.

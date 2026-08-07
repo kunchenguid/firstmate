@@ -29,6 +29,38 @@ test_output_limit_terminates_noisy_process() {
     "output-limit failure was not loud"
   [ "$(wc -c < "$output" | tr -d '[:space:]')" -lt 2048 ] \
     || fail "output-limit diagnostic was itself unbounded"
+  python3 - "$HELPER" <<'PY'
+import importlib.util
+import sys
+
+# Never cache the helper's bytecode beside the source: pyc invalidation is
+# mtime-granular, so a cache written here can shadow a newer helper and make this
+# suite report on code that is no longer in the tree.
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("fm_bounded_io", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+unverified = "cleanup could not be verified for anchored process 4242"
+
+# Every bounded primary failure keeps its own type and its own message when the
+# cleanup proof does not arrive: __str__ is all the operator ever sees.
+for primary_type, primary_message in (
+    (module.BoundedOutputExceeded, "bounded command exceeded the 1024-byte aggregate output limit"),
+    (module.BoundedTimeout, "bounded command timed out after 5 seconds"),
+    (module.BoundedIOError, "owned-process cleanup could not be verified"),
+):
+    folded = module._fold_cleanup_into_primary(primary_type(primary_message), unverified)
+    assert type(folded) is primary_type, (primary_type, type(folded))
+    assert primary_message in str(folded), str(folded)
+    assert unverified in str(folded), str(folded)
+
+# With no bounded primary failure there is nothing to preserve, and a non-bounded
+# primary (an interrupt, say) is never rewritten into a bounded error.
+assert module._fold_cleanup_into_primary(None, unverified) is None
+assert module._fold_cleanup_into_primary(KeyboardInterrupt(), unverified) is None
+PY
 }
 
 test_final_wait_keeps_original_deadline() {
@@ -44,6 +76,31 @@ test_final_wait_keeps_original_deadline() {
     || fail "final wait exceeded the original deadline: ${elapsed}s"
   assert_contains "$(cat "$output")" "timed out after 0.25 seconds" \
     "final-wait timeout was not loud"
+  python3 - "$HELPER" <<'PY'
+import importlib.util
+import sys
+import time
+
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("fm_bounded_io", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+
+class ExitedSupervisor:
+    def __init__(self):
+        self.polls = 0
+
+    def poll(self):
+        self.polls += 1
+        return 0
+
+
+supervisor = ExitedSupervisor()
+assert module._reap_anchor(supervisor, time.monotonic() - 1)
+assert supervisor.polls == 1
+PY
 }
 
 test_success_reaps_residual_process_group() {
@@ -77,6 +134,7 @@ import importlib.util
 import sys
 import time
 
+sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("fm_bounded_io", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
@@ -105,6 +163,7 @@ test_selector_failure_precedes_spawn() {
 import importlib.util
 import sys
 
+sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("fm_bounded_io", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
@@ -142,6 +201,7 @@ test_input_validation_precedes_spawn() {
 import importlib.util
 import sys
 
+sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("fm_bounded_io", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
@@ -177,6 +237,7 @@ import importlib.util
 import signal
 import sys
 
+sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("fm_bounded_io", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
@@ -227,6 +288,7 @@ import importlib.util
 import sys
 import time
 
+sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("fm_bounded_io", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
@@ -276,6 +338,7 @@ import importlib.util
 import sys
 import time
 
+sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("fm_bounded_io", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
@@ -322,6 +385,7 @@ import importlib.util
 import sys
 import time
 
+sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("fm_bounded_io", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
@@ -361,6 +425,7 @@ test_partial_input_writes_do_not_copy_remainder() {
 import importlib.util
 import sys
 
+sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("fm_bounded_io", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
@@ -417,6 +482,7 @@ import signal
 import sys
 import threading
 
+sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("fm_bounded_io", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
@@ -506,6 +572,7 @@ import importlib.util
 from pathlib import Path
 import sys
 
+sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("fm_bounded_io", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
@@ -557,6 +624,7 @@ test_batch_item_count_is_bounded() {
 import importlib.util
 import sys
 
+sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("fm_bounded_io", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module

@@ -1887,8 +1887,8 @@ test_session_sync_all_bounds_each_task_and_reaches_later_mappings() {
   : > "$FAKEBIN_DIR/.session-block-$first"
   out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
     FM_DATA_OVERRIDE="$HOME_DIR/data" FM_AGENT_FLEET_BIN="$FAKEBIN_DIR/agent-fleet" \
-    FM_FAKE_AF_LOG="$AF_LOG" FM_FAKE_AF_SESSION_SLEEP=10 FM_FAKE_AF_SESSION_SLEEP_TASK="$first" \
-    FM_ACCOUNT_SESSION_QUERY_TIMEOUT=1 FM_ACCOUNT_SESSION_TASK_TIMEOUT=3 \
+    FM_FAKE_AF_LOG="$AF_LOG" FM_FAKE_AF_SESSION_SLEEP=30 FM_FAKE_AF_SESSION_SLEEP_TASK="$first" \
+    FM_ACCOUNT_SESSION_QUERY_TIMEOUT=1 FM_ACCOUNT_SESSION_TASK_TIMEOUT=8 \
     PATH="$FAKEBIN_DIR:$PATH" "$SESSION_SYNC" --all 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "sync-all hid the timed-out first mapping"

@@ -143,10 +143,11 @@ For `no-mistakes` projects, seeding initializes only projects newly cloned into 
 After creating a secondmate, move existing main-backlog queued items that you have judged in-scope with `fm-backlog-handoff.sh <secondmate-id> <item-key>...`; it is idempotent and refuses In flight, Done, or non-secondmate homes.
 Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled charter brief exists; set `FM_SECONDMATE_SCOPE` when the routing scope should differ from the charter text.
 Each seed writes an `.fm-secondmate-home` identity marker at the home root.
-The tracked root `.gitignore` ignores that marker, so validation can read it without making a freshly seeded home appear dirty to porcelain-based safety checks.
-This does not relax protection for any other untracked file.
-An existing linked-worktree home that predates this rule advances through its marker-only state during its next bootstrap or spawn local sync, after which Git ignores the marker normally.
-A standalone-clone home cannot receive a primary-local commit through that no-fetch sync, so it receives the rule through `/updatefirstmate`'s origin refresh instead.
+The tracked root `.gitignore` ignores that marker and the whole home-root `config/` directory, so validation and inherited config can be written without making a home appear dirty to porcelain-based safety checks, and it ignores root `.<task-id>.crosscheck.lock` files so a lock stranded at the home root by an older Crosscheck run cannot do the same.
+Because a home that predates one of those rules still carries the artifacts as untracked dirt, the shared fast-forward guard tolerates exactly those shapes - untracked `config/` content and root Crosscheck locks for every target, plus the seed marker for a secondmate home - so such a home can still advance onto the commit that lands the rule.
+Nothing else is relaxed: tracked changes and every other untracked path, including a `config/` directory nested below the home root, still skip the target as a dirty working tree.
+An existing linked-worktree home that predates one of these rules advances through its artifact-only state during its next bootstrap or spawn local sync, after which Git ignores the artifacts normally.
+A standalone-clone home cannot receive a primary-local commit through that no-fetch sync, so it receives the rules through `/updatefirstmate`'s origin refresh instead; an already-stale updater needs the bootstrap step in the `/updatefirstmate` skill.
 
 ## FM_HOME
 

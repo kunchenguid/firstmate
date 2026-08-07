@@ -20,6 +20,9 @@
 # The seeded .fm-secondmate-home identity marker is gitignored too; the local
 # sync tolerates only that marker during the one-time upgrade of pre-ignore
 # linked-worktree homes.
+# The dirtiness guard also tolerates only untracked home-local config files and
+# root Crosscheck locks so a stale home can fast-forward onto the commit that
+# first ignores them; tracked changes and every other untracked path still block.
 # Homes are leased at a detached HEAD on the
 # default branch, so the fast-forward advances HEAD only and never moves the
 # shared default branch or any other worktree's checkout.
@@ -226,11 +229,13 @@ changed_instr() {
 
 dirty_status() {
   local dir=$1 ignore_seed_marker=${2:-no}
-  if [ "$ignore_seed_marker" = yes ]; then
-    git -C "$dir" status --porcelain 2>/dev/null | awk -v marker="?? $SUB_HOME_MARKER" '$0 != marker { print; exit }'
-  else
-    git -C "$dir" status --porcelain 2>/dev/null | head -1
-  fi
+  git -C "$dir" status --porcelain --untracked-files=all 2>/dev/null \
+    | awk -v ignore_seed_marker="$ignore_seed_marker" -v marker="?? $SUB_HOME_MARKER" '
+        $0 ~ /^\?\? config\// { next }
+        $0 ~ /^\?\? \.[^\/]+\.crosscheck\.lock$/ { next }
+        ignore_seed_marker == "yes" && $0 == marker { next }
+        { print; exit }
+      '
 }
 
 secondmate_registry_field() {

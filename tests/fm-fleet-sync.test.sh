@@ -574,7 +574,7 @@ SH
     FM_TEST_EXPECT_LOCK="$lock" \
     FM_TEST_LOCK_BEFORE_MUTATION="$home/lock-before-mutation" \
     FM_TEST_LOCK_DURING_CLEANUP="$home/lock-during-cleanup" \
-    FM_CHECKOUT_REFRESH_SYNC_TIMEOUT=5 \
+    FM_CHECKOUT_REFRESH_SYNC_TIMEOUT=10 \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_CHECKOUT_REFRESH_STATE_BASE="$home/checkout-refresh-state" \
     PATH="$fakebin:$PATH" \
@@ -583,7 +583,7 @@ SH
   set -e
 
   [ "$status" -eq 0 ] || fail "direct bounded fleet sync failed unexpectedly: $out"
-  assert_contains "$out" "direct-timeout: skipped: refresh timed out after 5s" \
+  assert_contains "$out" "direct-timeout: skipped: refresh timed out after 10s" \
     "direct fleet sync did not surface its process-tree timeout"
   assert_present "$home/direct-fetch-parent.pid" \
     "direct fleet sync did not start the bounded fetch fixture: $out"

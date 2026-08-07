@@ -28,6 +28,26 @@ This touches only the firstmate repo and its own worktrees, never anything under
    It prints one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed by two action lines that tell you exactly what to do next:
    - `reread-firstmate: yes|no`
    - `nudge-secondmates: fm-<id>...|none`
+   If an older updater skips a home whose only reported dirt is untracked `config/` content or root `.*.crosscheck.lock` files, rerun that same stale entrypoint with a command-scoped excludes file:
+   ```sh
+   (
+     fm_update_state="${FM_HOME:-$(pwd -P)}/state"
+     mkdir -p "$fm_update_state" || exit
+     fm_update_excludes=$(mktemp "$fm_update_state/.fm-update-bootstrap-excludes.XXXXXX") || exit
+     trap 'unlink "$fm_update_excludes"' EXIT
+     trap 'exit 129' HUP
+     trap 'exit 130' INT
+     trap 'exit 143' TERM
+     printf '/config/\n/.*.crosscheck.lock\n' > "$fm_update_excludes" || exit
+     GIT_CONFIG_COUNT=1 \
+     GIT_CONFIG_KEY_0=core.excludesFile \
+     GIT_CONFIG_VALUE_0="$fm_update_excludes" \
+     bin/fm-update.sh
+     fm_update_result=$?
+     exit "$fm_update_result"
+   )
+   ```
+   This changes only the stale process's untracked-file view, so tracked changes and unrelated untracked files still block while the fast-forward lands the durable ignore rules.
 
 2. **Re-read AGENTS.md if your own instructions changed.**
    When the updater printed `reread-firstmate: yes`, the tracked instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) just advanced under you.
@@ -52,6 +72,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
 
 - **Fast-forward only.**
   A target that has diverged, is dirty, is offline, or is on a non-default branch is skipped and reported, never forced or stashed.
+  The artifact bootstrap is allowed only for untracked home-local config and root Crosscheck locks; unrelated dirt remains a refusal.
   Nothing with unlanded work is ever discarded - this is prime directive #3.
 - **Only the firstmate repo and its worktrees** are touched, never `projects/`.
   It is the same sanctioned self-write as the fleet sync.
