@@ -43,6 +43,11 @@ make_fakebin() {  # <dir>
   cat > "$fb/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 records=${FAKE_TASKS:-/dev/null}
+# Only the backlog listing stalls, so the backend probes above it stay quick and
+# a test can hold the generator open in the middle of a run.
+if [ -n "${FAKE_TASKS_AXI_SLEEP:-}" ] && [ "${1:-}" = list ]; then
+  sleep "$FAKE_TASKS_AXI_SLEEP"
+fi
 case "${1:-}" in
   --version)
     printf 'tasks-axi %s\n' "${FAKE_TASKS_AXI_VERSION:-0.2.4}"
@@ -83,9 +88,19 @@ esac
 exit 0
 SH
   chmod +x "$fb/tasks-axi"
-  # fm-crew-state reaches for these; a torn-down fixture reads unknown, which is
-  # exactly the deterministic answer these tests want.
-  fm_fake_exit0 "$fb" no-mistakes tmux
+  # fm-crew-state reaches for these, and a torn-down fixture reads unknown, which
+  # is exactly the deterministic answer these tests want. They also record that
+  # they ran when $FAKE_CALL_LOG is set, which is how a test observes whether a
+  # command performed a current-state read at all.
+  local tool
+  for tool in no-mistakes tmux; do
+    cat > "$fb/$tool" <<'SH'
+#!/usr/bin/env bash
+[ -n "${FAKE_CALL_LOG:-}" ] && printf '%s\n' "${0##*/}" >> "$FAKE_CALL_LOG"
+exit 0
+SH
+    chmod +x "$fb/$tool"
+  done
   printf '%s\n' "$fb"
 }
 
@@ -426,6 +441,21 @@ test_check_fails_a_block_whose_source_could_not_be_read() {
 
 # The same distinction on the live-work half, through the same mechanism rather
 # than a second one.
+test_absent_task_state_never_reads_as_nothing_running() {
+  local home fb file
+  home=$(new_home "$TMP_ROOT/nostate")
+  fb=$(make_fakebin "$TMP_ROOT/nostate")
+  : > "$TMP_ROOT/nostate/tasks"
+  file="$home/data/briefs/back-office.md"
+  rm -rf "$home/state"
+  PATH="$fb:$PATH" FAKE_TASKS="$TMP_ROOT/nostate/tasks" run_gen "$home" >/dev/null 2>&1
+  assert_no_grep 'Nothing is running for this side right now.' "$file" \
+    "a task state directory that does not exist must not claim nothing is running"
+  assert_grep 'fm:brief:unread running-now' "$file" \
+    "the running block is marked as unread rather than generated"
+  pass "task state that does not exist says so rather than reading as nothing running"
+}
+
 test_unreadable_task_state_never_reads_as_nothing_running() {
   local home fb file
   if [ "$(id -u)" = 0 ]; then
@@ -556,6 +586,115 @@ test_after_event_is_quiet_and_never_fails() {
   expect_code 0 "$code" "--after-event must never fail a lifecycle command"
   [ -z "$out" ] || fail "--after-event printed: $out"
   pass "--after-event stays silent and exits 0 even with nothing configured"
+}
+
+# --after-event runs at the end of spawn, teardown and every landing, so anything
+# it prints lands in the operator's face during an unrelated command. A home it
+# cannot even create a state directory in must still be completely silent.
+test_after_event_is_silent_when_the_state_directory_cannot_be_made() {
+  local home out code
+  if [ "$(id -u)" = 0 ]; then
+    pass "skipped: running as root, where an unwritable directory cannot be staged"
+    return 0
+  fi
+  home=$(new_home "$TMP_ROOT/quiet-nostate")
+  rm -rf "$home/state"
+  mkdir -p "$home/sealed"
+  chmod 500 "$home/sealed"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/sealed/state" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_DATA_OVERRIDE="$home/data" \
+    "$GEN" --after-event 2>&1) && code=0 || code=$?
+  chmod 755 "$home/sealed"
+  expect_code 0 "$code" "--after-event must never fail a lifecycle command"
+  [ -z "$out" ] || fail "--after-event printed on stdout or stderr: $out"
+  pass "--after-event stays silent even when it cannot create a state directory"
+}
+
+# --check and --help both promise in writing that they write nothing. A home with
+# no state directory proves it, because anything that creates one has written.
+test_the_read_only_paths_create_nothing() {
+  local home fb
+  home=$(new_home "$TMP_ROOT/readonly")
+  fb=$(make_fakebin "$TMP_ROOT/readonly")
+  : > "$TMP_ROOT/readonly/tasks"
+  rm -rf "$home/state"
+
+  PATH="$fb:$PATH" FAKE_TASKS="$TMP_ROOT/readonly/tasks" run_gen "$home" --help >/dev/null 2>&1
+  assert_absent "$home/state" "--help created a state directory"
+  PATH="$fb:$PATH" FAKE_TASKS="$TMP_ROOT/readonly/tasks" run_gen "$home" --check >/dev/null 2>&1
+  assert_absent "$home/state" "--check created a state directory"
+  pass "the read-only paths create nothing, not even a state directory"
+}
+
+# The audit reports which repositories appear, and a repository identity comes
+# from the task metadata alone. Reading what each live task is doing costs one
+# bounded current-state read apiece and the audit discards every one of them, so
+# on a degraded fleet that is minutes of waiting for nothing.
+test_check_does_not_perform_a_current_state_read() {
+  local home fb log
+  home=$(new_home "$TMP_ROOT/check-cheap")
+  fb=$(make_fakebin "$TMP_ROOT/check-cheap")
+  : > "$TMP_ROOT/check-cheap/tasks"
+  log="$TMP_ROOT/check-cheap/calls"
+  # The worktree has to be present, because the current-state reader stops before
+  # probing the harness when it is gone, and this test needs the probe to happen.
+  mkdir -p "$home/worktrees/mldinv-live"
+  fm_write_meta "$home/state/mldinv-live.meta" \
+    'window=firstmate:fm-mldinv-live' \
+    'endpoint_task_id=mldinv-live' \
+    "worktree=$home/worktrees/mldinv-live" \
+    "project=$home/projects/mldinvoicing" \
+    'harness=claude' 'kind=ship' 'mode=no-mistakes' 'yolo=off'
+
+  # The control: rendering a brief genuinely does read current state, so the
+  # log below is known to record one when it happens.
+  : > "$log"
+  PATH="$fb:$PATH" FAKE_TASKS="$TMP_ROOT/check-cheap/tasks" FAKE_CALL_LOG="$log" \
+    run_gen "$home" >/dev/null 2>&1
+  [ -s "$log" ] ||
+    fail "the control never recorded a current-state read, so this test proves nothing"
+
+  : > "$log"
+  PATH="$fb:$PATH" FAKE_TASKS="$TMP_ROOT/check-cheap/tasks" FAKE_CALL_LOG="$log" \
+    run_gen "$home" --check >/dev/null 2>&1
+  [ -s "$log" ] &&
+    fail "check performed a current-state read for data it discards:"$'\n'"$(cat "$log")"
+  pass "check reports repository identities without reading what each task is doing"
+}
+
+# A brief being rewritten is staged beside itself, in the directory the captain
+# browses through his Obsidian symlink, and the working records are staged under
+# the temporary directory. The aggregate bound on --after-event makes a run that
+# is stopped part way through a designed outcome rather than an accident, so
+# nothing staged may outlive it. Driving the real bound rather than signalling by
+# hand exercises the way it is actually stopped in production.
+test_a_stopped_run_leaves_nothing_staged() {
+  local home fb tmp leftovers out code
+  home=$(new_home "$TMP_ROOT/staging")
+  fb=$(make_fakebin "$TMP_ROOT/staging")
+  : > "$TMP_ROOT/staging/tasks"
+  tmp="$TMP_ROOT/staging/tmp"
+  mkdir -p "$tmp"
+
+  PATH="$fb:$PATH" FAKE_TASKS="$TMP_ROOT/staging/tasks" TMPDIR="$tmp" \
+    run_gen "$home" >/dev/null 2>&1
+  leftovers=$(find "$tmp" "$home/data/briefs" -name '*fm-context-briefs.*' 2>/dev/null)
+  [ -z "$leftovers" ] || fail "a completed run left staging paths: $leftovers"
+
+  # The bound fires while the backlog listing is still stalled, which is exactly
+  # how a degraded backend stops a refresh in production.
+  out=$(PATH="$fb:$PATH" FAKE_TASKS="$TMP_ROOT/staging/tasks" TMPDIR="$tmp" \
+    FAKE_TASKS_AXI_SLEEP=30 FM_CONTEXT_BRIEFS_AFTER_EVENT_TIMEOUT=1 \
+    run_gen "$home" --after-event 2>&1) && code=0 || code=$?
+  expect_code 0 "$code" "a refresh that hits the bound must still exit 0"
+  [ -z "$out" ] || fail "the bounded refresh printed: $out"
+
+  leftovers=$(find "$tmp" "$home/data/briefs" -name '*fm-context-briefs.*' 2>/dev/null)
+  [ -z "$leftovers" ] || fail "a run stopped by the bound left staging paths: $leftovers"
+  assert_grep 'A hand-written opening line that must never move.' \
+    "$home/data/briefs/back-office.md" "the brief survived the stopped run"
+  pass "nothing staged outlives a run, whether it finished or the bound stopped it"
 }
 
 # --- installing the markers -------------------------------------------------
@@ -729,13 +868,18 @@ test_deadline_items_lead_and_clusters_group
 test_empty_sections_say_so_plainly
 test_an_unreadable_backlog_never_reads_as_an_empty_one
 test_check_fails_a_block_whose_source_could_not_be_read
+test_absent_task_state_never_reads_as_nothing_running
 test_unreadable_task_state_never_reads_as_nothing_running
 test_running_reports_live_work_and_skips_secondmates
 test_unmapped_repository_is_reported
 test_each_block_states_its_own_age
 test_check_reports_a_stale_block_and_reads_the_review_line
 test_check_reports_an_unmapped_repository
+test_check_does_not_perform_a_current_state_read
+test_the_read_only_paths_create_nothing
 test_after_event_is_quiet_and_never_fails
+test_after_event_is_silent_when_the_state_directory_cannot_be_made
+test_a_stopped_run_leaves_nothing_staged
 test_install_markers_handles_an_empty_section_body
 test_install_markers_repairs_a_half_marked_brief
 test_install_markers_refusal_leaves_the_file_byte_identical

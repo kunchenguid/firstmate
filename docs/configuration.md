@@ -165,7 +165,8 @@ It never guesses a boundary and never appends, so hand-written prose immediately
 
 Each generated block opens with the date and time it was generated, in plain words and as a machine-readable stamp.
 That stamp is the staleness probe: a block whose date is not recent says so on the page the captain is reading, so a generator that stopped running cannot hide behind a page that still looks current.
-`--check` reads those stamps and the narrative's own `*Current as at ...*` review line, writes nothing, reports any unmapped repository, and exits non-zero when a block is stale, unreadable, or missing.
+`--check` reads those stamps and the narrative's own `*Current as at ...*` review line, writes nothing at all including creating no directory, reports any unmapped repository, and exits non-zero when a block is stale, unreadable, or missing.
+It reads live task state only as far as the repository identities it reports, so a degraded fleet cannot make the audit wait on answers it would discard.
 The generator reads that review line and never writes it, because the hand-written half's currency is the captain's to state.
 
 A section whose source could not be read at all says exactly that, names what it could not reach, and carries an unread marker instead of a generation date.
@@ -175,7 +176,8 @@ Live work counts as readable only when the task state directory can be listed.
 
 `--after-event` runs the whole refresh as one bounded child, because it fires inside spawn, teardown and every landing, and the backlog and current-state reads underneath it launch one subprocess per item.
 `FM_CONTEXT_BRIEFS_AFTER_EVENT_TIMEOUT` sets that aggregate bound in seconds and defaults to 60.
-A refresh that hits the bound leaves every brief exactly as it found it, because each brief is staged in full and moved into place in one step.
+A refresh that hits the bound leaves the brief it was part way through exactly as it found it, because each brief is staged in full and moved into place in one step, and briefs the same run had already moved into place keep their new content.
+No brief is ever left half rewritten, and nothing staged outlives the run.
 Concurrent lifecycle commands are serialised on one lock, so the marker line numbers a run resolves are still true when it writes.
 
 Regeneration is wired to the lifecycle moments the records change rather than to a schedule: opening or resolving a captain decision (`bin/fm-decision-hold.sh`), spawning a task (`bin/fm-spawn.sh`), landing work (`bin/fm-pr-merge.sh`, `bin/fm-merge-local.sh`), and finishing a task (`bin/fm-teardown.sh`).

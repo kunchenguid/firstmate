@@ -72,8 +72,14 @@
 # `--after-event` runs the whole refresh as one bounded child, because it fires
 # inside spawn, teardown, and every landing, and the record reads underneath it
 # are subprocesses of tools that can hang. A refresh that hits the bound leaves
-# every brief exactly as it found it, because each brief is staged in full and
-# moved into place in one step.
+# the brief it was part way through exactly as it found it, because each brief is
+# staged in full and moved into place in one step. Briefs the same run had
+# already moved into place keep their new content, which is the guarantee this
+# staging offers: no brief is ever left half rewritten.
+#
+# `--check` writes nothing at all, so it neither creates a directory nor stages a
+# file, and it reads live task state only as far as the repository identities it
+# reports. `--after-event` prints nothing on either stream.
 #
 # Environment:
 #   FM_HOME                          the operational home to read and write
@@ -98,11 +104,11 @@ MAP="$CONFIG/context-briefs.conf"
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
-# fm-wake-lib.sh owns the portable lock this repository already uses everywhere a
-# read-then-rewrite must not interleave. Sourced after the paths above so its own
-# defaulting keeps them.
-# shellcheck source=bin/fm-wake-lib.sh
-. "$SCRIPT_DIR/fm-wake-lib.sh"
+# fm-wake-lib.sh, which owns the lock, is sourced lazily by acquire_briefs_lock
+# rather than here. Sourcing it creates the state directory as a side effect, and
+# this script has two paths that must not do that: --check writes nothing and
+# --after-event says nothing. bin/fm-crew-state.sh, this repository's other
+# read-only reader, keeps that library off its file scope for the same reason.
 
 # A bound that cannot be read is not a bound, so an unusable value falls back to
 # the default rather than silently removing the limit it was meant to impose.
@@ -137,6 +143,32 @@ QUIET=0
 RC=0
 BACKLOG_UNREAD=
 RUNNING_UNREAD=
+TEMP_PATHS=()
+
+# Staging files live beside the brief, in the directory the captain browses
+# through his Obsidian symlink, and the aggregate bound on --after-event makes a
+# killed run a designed outcome rather than an accident. Every staged path is
+# tracked and removed on the way out, including when the bound signals this
+# process. A path already moved into place is gone, so removing it is a no-op.
+track_temp() {
+  TEMP_PATHS+=("$1")
+}
+
+# shellcheck disable=SC2329 # Invoked by the exit and signal traps below.
+clean_temps() {
+  local path
+  [ "${#TEMP_PATHS[@]}" -gt 0 ] || return 0
+  for path in "${TEMP_PATHS[@]}"; do
+    [ -n "$path" ] || continue
+    rm -rf -- "$path" 2>/dev/null || true
+  done
+  TEMP_PATHS=()
+}
+
+trap 'clean_temps' EXIT
+trap 'clean_temps; exit 129' HUP
+trap 'clean_temps; exit 130' INT
+trap 'clean_temps; exit 143' TERM
 
 usage() {
   awk '
@@ -359,22 +391,40 @@ meta_field() {  # <meta-file> <key>
 
 # running_items: TSV of every live work item recorded in this home.
 #   id <TAB> repo_key <TAB> state <TAB> pr <TAB> title
-running_items() {
-  local meta id kind project state pr title
+# running_identities: which live work items exist and whose repository each one
+# belongs to, from the metadata alone and with no current-state or backlog read.
+# This owns the "what counts as a live work item" decision, including leaving a
+# standing secondmate out, so running_items below does not restate it.
+#   id <TAB> repo_key
+running_identities() {
+  local meta id kind project
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     id=$(basename "$meta" .meta)
     kind=$(meta_field "$meta" kind)
     [ "$kind" = secondmate ] && continue
     project=$(meta_field "$meta" project)
+    printf '%s\t%s\n' "$id" "$(repo_key "$project")"
+  done
+}
+
+# running_items: the same items with what they are actually doing, which costs
+# one bounded current-state read and one backlog read apiece. Only a rendered
+# brief needs that, so only the generate path asks for it.
+#   id <TAB> repo_key <TAB> state <TAB> pr <TAB> title
+running_items() {
+  local id rk meta state pr title
+  while IFS="$TAB" read -r id rk; do
+    [ -n "$id" ] || continue
+    meta="$STATE/$id.meta"
     pr=$(meta_field "$meta" pr)
     state=$(fm_run_timed "$STATE_TIMEOUT" "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null |
       sed -n 's/^state: \([a-z-]*\).*/\1/p' | head -1)
     [ -n "$state" ] || state=unknown
     title=$(task_title "$id")
     printf '%s\t%s\t%s\t%s\t%s\n' \
-      "$id" "$(repo_key "$project")" "$state" "$(held "$pr")" "$(held "$title")"
-  done
+      "$id" "$rk" "$state" "$(held "$pr")" "$(held "$title")"
+  done < <(running_identities)
 }
 
 # --- rendering --------------------------------------------------------------
@@ -607,6 +657,7 @@ rewrite_blocks() {
     second_begin=$wb second_end=$we second_body=$wbody
   fi
   tmp=$(mktemp "$(dirname "$f")/.fm-context-briefs.XXXXXX") || return 1
+  track_temp "$tmp"
   {
     head -n "$first_begin" "$f" &&
       printf '\n' &&
@@ -623,12 +674,18 @@ rewrite_blocks() {
 
 # --- commands ---------------------------------------------------------------
 
-# collect_records <workdir>: fill captain.tsv and running.tsv, and record why
-# either source could not be read. An unreadable source leaves an EMPTY record
-# and a stated reason, which the renderers keep apart: no record plus no reason
-# is a genuine empty, no record plus a reason is "could not find out".
+# collect_records <workdir> <depth>: fill captain.tsv and running.tsv, and record
+# why either source could not be read. An unreadable source leaves an EMPTY
+# record and a stated reason, which the renderers keep apart: no record plus no
+# reason is a genuine empty, no record plus a reason is "could not find out".
+#
+# <depth> is "state" for a rendered brief, which needs what each live item is
+# doing, or "identities" for the audit, which only reports which repositories
+# appear. The audit asks for identities so it never waits on a current-state read
+# whose answer it would discard, which on a degraded fleet is the difference
+# between a file read and minutes of bounded subprocesses.
 collect_records() {
-  local work=$1
+  local work=$1 depth=$2
   BACKLOG_UNREAD=
   RUNNING_UNREAD=
   if backlog_available; then
@@ -637,11 +694,13 @@ collect_records() {
     BACKLOG_UNREAD=$(backlog_unread_reason)
     : > "$work/captain.tsv"
   fi
-  if running_readable; then
-    running_items > "$work/running.tsv"
-  else
+  if ! running_readable; then
     RUNNING_UNREAD=$(running_unread_reason)
     : > "$work/running.tsv"
+  elif [ "$depth" = state ]; then
+    running_items > "$work/running.tsv"
+  else
+    running_identities > "$work/running.tsv"
   fi
 }
 
@@ -669,6 +728,10 @@ brief_target() {
 # taken.
 acquire_briefs_lock() {
   local tries=0
+  # Sourced here rather than at file scope: this library creates the state
+  # directory when it loads, and only the writing path may do that.
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
   while ! fm_lock_try_acquire "$BRIEFS_LOCK"; do
     if [ "$tries" -ge "$LOCK_TRIES" ]; then
       note_refusal "refused: could not take the brief rewrite lock at $BRIEFS_LOCK, so no brief was touched."
@@ -685,10 +748,11 @@ generate() {
   require_map || return 1
   now=$(date +%s)
   work=$(mktemp -d "${TMPDIR:-/tmp}/fm-context-briefs.XXXXXX") || return 1
+  track_temp "$work"
 
   captain="$work/captain.tsv"
   running="$work/running.tsv"
-  collect_records "$work"
+  collect_records "$work" state
 
   report_unmapped "$captain" "$running"
 
@@ -753,7 +817,8 @@ check() {
   # The audit reads the same records the generator does, so an unmapped
   # repository surfaces here too. It reads them and writes nothing.
   work=$(mktemp -d "${TMPDIR:-/tmp}/fm-context-briefs-check.XXXXXX") || return 1
-  collect_records "$work"
+  track_temp "$work"
+  collect_records "$work" identities
   report_unmapped "$work/captain.tsv" "$work/running.tsv"
   rm -rf "$work"
   [ -z "$BACKLOG_UNREAD" ] || printf 'the backlog cannot be read right now: %s\n' "$BACKLOG_UNREAD"
@@ -829,6 +894,7 @@ install_markers() {
       continue
     fi
     staged=$(mktemp "$(dirname "$file")/.fm-context-briefs.XXXXXX") || { status=1; continue; }
+    track_temp "$staged"
     if ! cp "$file" "$staged"; then
       rm -f "$staged"
       note_refusal "refused: could not stage $file, so it was left untouched."
@@ -859,6 +925,7 @@ install_one() {  # <staged-file> <display-name> <heading> <begin> <end>
   stop=$(awk -v h="$h" 'NR > h && ($0 ~ /^## / || $0 == "---") { print NR; exit }' "$f")
   [ -n "$stop" ] || stop=$((total + 1))
   tmp=$(mktemp "$(dirname "$f")/.fm-context-briefs.XXXXXX") || return 1
+  track_temp "$tmp"
   # A heading immediately followed by the next heading or rule has an EMPTY
   # body. Asking sed for that range would ask it to print from h+1 back to h,
   # and a reversed range prints its first line, which the tail below prints
