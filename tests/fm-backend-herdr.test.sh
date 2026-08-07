@@ -3227,7 +3227,7 @@ test_composer_state_claude_dim_ghost_row_with_real_text_is_pending() {
   pass "fm_backend_herdr_composer_state: real typed text on the same claude prompt row still reads pending"
 }
 
-# grok's TRUECOLOR placeholder gap (harness-adapters "Known gap"), now covered by
+# grok's TRUECOLOR placeholder gap (harness-adapters adapters/grok.md), now covered by
 # the same owner. grok renders its composer inside a bordered box whose border
 # and placeholder/hint text use a dark, muted truecolor foreground (verified live
 # against grok 0.2.93: border 38;2;86;82;110, muted 38;2;50;47;70, hint
