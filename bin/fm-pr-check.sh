@@ -65,14 +65,6 @@ fi
 "$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || exit 1
 "$FM_ROOT/bin/fm-guard.sh" || true
 
-# Migration and watcher exclusion can take long enough for an intentional force
-# push to race the first lookup. Resolve once more at the publication boundary;
-# this explicit registration binds the latest exact revision it observed.
-if ! PR_HEAD=$(fm_pr_remote_head "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER"); then
-  echo "error: cannot revalidate the forge head at readiness publication; retry registration" >&2
-  exit 1
-fi
-
 # A readiness registration without an immutable forge head would let a later
 # force-push inherit old review or green-check evidence. Both supported forges
 # must therefore resolve an exact head now; failure leaves metadata and the
