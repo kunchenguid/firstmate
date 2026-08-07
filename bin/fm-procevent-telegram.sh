@@ -23,13 +23,15 @@
 #            with bounded backoff (FM_TELEGRAM_BACKOFF_SECONDS, default 5), and
 #            HTTP 429 waits the server's own retry_after instead, bounded by
 #            FM_TELEGRAM_MAX_BACKOFF_SECONDS (default 60). A hard auth failure
-#            (HTTP 401 or 403) and an active webhook (HTTP 409) exit non-zero so
-#            the runner surfaces the blocker rather than spinning on it. The bot
-#            token is never printed.
+#            (HTTP 401 or 403) and a getUpdates conflict (HTTP 409, which means
+#            either a webhook is configured on the bot or another poller is
+#            already running for it) exit non-zero so the runner surfaces the
+#            blocker rather than spinning on it. The bot token is never printed.
 # ack        Advance the cursor to <update-id> after that update has been fully
 #            handled. The write is atomic and idempotent, and it never moves the
 #            cursor backwards: an id at or below the current cursor is a
-#            successful no-op. Anything but a nonnegative integer is refused.
+#            successful no-op, and concurrent acks are serialized so the cursor
+#            cannot rewind. Anything but a nonnegative integer is refused.
 # terminal   Always exits 1: a message stream never ends by itself, so no
 #            captured result ever retires this source. Retirement is an explicit
 #            operator action through `fm-procevent.sh retire <source-id>`.
@@ -60,6 +62,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 TOKEN_FILE="$HOME/.config/firstmate/telegram-token"
 CURSOR_FILE="$HOME/.config/firstmate/telegram-cursor"
+CURSOR_LOCK="$HOME/.config/firstmate/.telegram-cursor.lock"
 API_BASE='https://api.telegram.org'
 POLL_TIMEOUT=${FM_TELEGRAM_POLL_TIMEOUT:-50}
 BACKOFF=${FM_TELEGRAM_BACKOFF_SECONDS:-5}
@@ -73,7 +76,7 @@ BATCH_LIMIT=8
 MAX_ID_DIGITS=18
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,56p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,58p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 # Read and validate the token without ever letting it reach stdout, stderr, or
 # a command line: it is passed to curl only through a stdin config, so neither
@@ -158,7 +161,7 @@ cmd_poll() {
     fi
     case "$http_code" in
       401|403) die "telegram rejected the bot token (HTTP $http_code); check $TOKEN_FILE" ;;
-      409) die "telegram refuses getUpdates while a webhook is active (HTTP 409); delete the bot's webhook before arming this poll" ;;
+      409) die "telegram refused getUpdates with a conflict (HTTP 409); either a webhook is configured on this bot or another getUpdates poller is already running for it, so check both before re-arming this poll" ;;
       429)
         sleep "$(retry_after_delay "$POLL_BODY")"
         continue
@@ -181,6 +184,14 @@ cmd_poll() {
   done
 }
 
+release_cursor_lock() {
+  fm_lock_release "$CURSOR_LOCK" 2>/dev/null || true
+}
+
+# The cursor is keyed on the operating-system user, not on one firstmate home,
+# so the compare-and-commit runs under the shared lock helper: without it two
+# concurrent acks can both read the old value and the later commit wins,
+# rewinding the cursor and re-capturing already handled updates.
 cmd_ack() {
   local id=${1:-} cursor dir tmp
   case "$id" in
@@ -188,17 +199,26 @@ cmd_ack() {
   esac
   [ "${#id}" -le "$MAX_ID_DIGITS" ] || die "ack needs a nonnegative integer update id: $id"
   id=$((10#$id))
-  cursor=$(read_cursor) || exit 1
-  if [ "$id" -le "$cursor" ]; then
-    printf 'already-acked: %s (cursor %s)\n' "$id" "$cursor"
-    return 0
-  fi
   dir=$(dirname "$CURSOR_FILE")
   [ -d "$dir" ] || mkdir -p "$dir" || die "cannot create the cursor directory: $dir"
-  tmp=$(umask 077; mktemp "$dir/.telegram-cursor.XXXXXX") || die "cannot stage the cursor"
-  { printf '%s\n' "$id" > "$tmp" && chmod 0600 "$tmp" && mv -f -- "$tmp" "$CURSOR_FILE"; } \
-    || { rm -f -- "$tmp"; die "cannot commit the cursor: $CURSOR_FILE"; }
-  printf 'acked: %s\n' "$id"
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$CURSOR_LOCK" || die "cannot lock the telegram cursor: $CURSOR_LOCK"
+  trap release_cursor_lock EXIT
+  trap 'release_cursor_lock; exit 1' HUP INT TERM
+  cursor=$(read_cursor) || exit 1
+  if [ "$id" -gt "$cursor" ]; then
+    tmp=$(umask 077; mktemp "$dir/.telegram-cursor.new.XXXXXX") || die "cannot stage the cursor"
+    { printf '%s\n' "$id" > "$tmp" && chmod 0600 "$tmp" && mv -f -- "$tmp" "$CURSOR_FILE"; } \
+      || { rm -f -- "$tmp"; die "cannot commit the cursor: $CURSOR_FILE"; }
+    release_cursor_lock
+    trap - EXIT HUP INT TERM
+    printf 'acked: %s\n' "$id"
+    return 0
+  fi
+  release_cursor_lock
+  trap - EXIT HUP INT TERM
+  printf 'already-acked: %s (cursor %s)\n' "$id" "$cursor"
 }
 
 cmd_terminal() {

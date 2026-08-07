@@ -213,7 +213,7 @@ printf '%s\n' "$TOKEN" > "$ACK_HOME/.config/firstmate/telegram-token"
 chmod 0600 "$ACK_HOME/.config/firstmate/telegram-token"
 ACK_CURSOR="$ACK_HOME/.config/firstmate/telegram-cursor"
 ack_home() {  # <argv>...: run the adapter against a config home of its own
-  HOME="$ACK_HOME" PATH="$FAKEBIN:$PATH" FM_TELEGRAM_BACKOFF_SECONDS=0 \
+  HOME="$ACK_HOME" FM_HOME="$ACK_HOME" PATH="$FAKEBIN:$PATH" FM_TELEGRAM_BACKOFF_SECONDS=0 \
     FM_TELEGRAM_POLL_TIMEOUT=1 "$ADAPTER" "$@"
 }
 
@@ -224,7 +224,7 @@ assert_contains "$out" "901" "ack reports the update id it recorded"
 [ "$(cat "$ACK_CURSOR")" = 901 ] || fail "ack did not advance the cursor: $(cat "$ACK_CURSOR")"
 perms=$(ls -l "$ACK_CURSOR" | cut -c1-10)
 [ "$perms" = '-rw-------' ] || fail "ack left the cursor readable beyond its owner: $perms"
-staged_cursor=$(find "$ACK_HOME/.config/firstmate" -name '.telegram-cursor.*' 2>/dev/null)
+staged_cursor=$(find "$ACK_HOME/.config/firstmate" -name '.telegram-cursor.new.*' 2>/dev/null)
 [ -z "$staged_cursor" ] || fail "ack left a half-written cursor behind: $staged_cursor"
 reset_api '200 updates'
 ack_home poll >/dev/null
@@ -257,6 +257,29 @@ rc=$?
 [ "$(cat "$ACK_CURSOR")" = 902 ] || fail "an argumentless ack still moved the cursor"
 pass "ack refuses anything but a nonnegative integer update id"
 
+# --- concurrent acks never leave the cursor below the highest acked id -------
+# The cursor path is keyed on the operating-system user, so two firstmate homes
+# sharing one bot can ack at the same moment. An unserialized read-modify-write
+# lets a lower id commit last and rewind the cursor, which re-captures updates
+# that were already handled.
+CONCURRENT_IDS='40 902 5 901 7 300'
+highest=902
+for round in $(seq 1 12); do
+  rm -f "$ACK_CURSOR"
+  for id in $CONCURRENT_IDS; do
+    ack_home ack "$id" >/dev/null 2>&1 &
+  done
+  wait
+  settled=$(cat "$ACK_CURSOR" 2>/dev/null || printf 'missing')
+  [ "$settled" = "$highest" ] \
+    || fail "concurrent acks left the cursor at $settled instead of $highest on round $round"
+  staged_cursor=$(find "$ACK_HOME/.config/firstmate" -name '.telegram-cursor.new.*' 2>/dev/null)
+  [ -z "$staged_cursor" ] || fail "a concurrent ack left a half-written cursor behind: $staged_cursor"
+done
+printf '%s\n' "$highest" > "$ACK_CURSOR"
+chmod 0600 "$ACK_CURSOR"
+pass "concurrent acks are serialized and never rewind the cursor"
+
 # --- empty batches keep blocking until real updates arrive ------------------
 reset_api '200 empty' '200 empty' '200 updates'
 out=$(adapter poll)
@@ -286,17 +309,20 @@ for code in 401 403; do
 done
 pass "a rejected token stops the poll instead of spinning"
 
-# --- an active webhook is a blocker, not something to retry forever ---------
+# --- a getUpdates conflict is a blocker, not something to retry forever -----
+# Telegram answers 409 both for a configured webhook and for a second poller on
+# the same bot, so the message must not send an operator after only one of them.
 reset_api '409 webhook' '200 updates'
 out=$(adapter poll 2>"$TMP_ROOT/conflict-err")
 rc=$?
 conflict_err=$(cat "$TMP_ROOT/conflict-err")
-[ "$rc" -ne 0 ] || fail "an active webhook did not fail the poll"
+[ "$rc" -ne 0 ] || fail "a getUpdates conflict did not fail the poll"
 [ "$(api_calls)" = 1 ] || fail "HTTP 409 kept polling: $(api_calls) calls"
-assert_contains "$conflict_err" "409" "the webhook conflict names its HTTP status"
-assert_contains "$conflict_err" "webhook" "the webhook conflict names the webhook as the cause"
-assert_not_contains "$out$conflict_err" "$TOKEN" "the webhook conflict never echoes the token"
-pass "an active webhook surfaces as a blocker instead of an invisible spin"
+assert_contains "$conflict_err" "409" "the conflict names its HTTP status"
+assert_contains "$conflict_err" "webhook" "the conflict names a configured webhook as one cause"
+assert_contains "$conflict_err" "poller" "the conflict names another running poller as the other cause"
+assert_not_contains "$out$conflict_err" "$TOKEN" "the conflict never echoes the token"
+pass "a getUpdates conflict names both of its causes instead of spinning invisibly"
 
 # --- a rate limit waits exactly as long as the server asked -----------------
 reset_api '429 flood' '200 updates'
