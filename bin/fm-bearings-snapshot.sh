@@ -56,6 +56,15 @@
 #   -h,--help        usage
 #
 # Output contract: `fm-bearings.v1`. Read-only; no locks, no mutation, no reports.
+#
+# candidate_prs[].checks reports one of none, failing, pending, no-result, or
+# passing, splitting adverse verdicts from absent ones on bin/fm-pr-lib.sh's
+# shared classification. "no-result" is the settled shape a queued run leaves
+# when the forge cancels it without ever assigning a runner: nothing is still
+# running, so it will not resolve on its own, and the head needs a fresh event
+# rather than a hunt for a defect no check ever observed. Sharing the owner also
+# keeps this view from calling a head "passing" that bin/fm-pr-merge.sh would
+# refuse to merge.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -63,6 +72,8 @@ FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 
 # Bounds (overridable for tests / large fleets).
 FM_BEARINGS_LANDED=${FM_BEARINGS_LANDED:-6}
@@ -232,7 +243,8 @@ EOF
         --json number,title,url,headRefName,reviewDecision,mergeable,statusCheckRollup 2>/dev/null) \
         || { nwarn=$((nwarn + 1)); continue; }
       [ -n "$out" ] || out='[]'
-      repo_result=$(printf '%s' "$out" | jq --arg repo "$repo" --argjson limit "$FM_BEARINGS_PR_LIMIT" '
+      repo_result=$(printf '%s' "$out" | jq --arg repo "$repo" --argjson limit "$FM_BEARINGS_PR_LIMIT" \
+        --argjson adverse "$FM_PR_CHECK_ADVERSE" '
         [ .[] | {
           num:(.number|tostring),
           repo:$repo,
@@ -243,8 +255,9 @@ EOF
           checks:(
             (.statusCheckRollup // []) as $c
             | if ($c|length) == 0 then "none"
-              elif any($c[]; (.conclusion // .state // "") as $s | ($s=="FAILURE" or $s=="ERROR" or $s=="TIMED_OUT" or $s=="CANCELLED" or $s=="ACTION_REQUIRED")) then "failing"
+              elif any($c[]; ((.conclusion // .state // "") | ascii_upcase) as $s | ($adverse | index($s)) != null) then "failing"
               elif any($c[]; ((.status // "") != "COMPLETED") and ((.state // "") != "SUCCESS")) then "pending"
+              elif any($c[]; ((.conclusion // .state // "") | ascii_upcase) != "SUCCESS") then "no-result"
               else "passing" end)
         } ] as $rows | {returned:($rows | length), rows:$rows[:$limit]}') || { nwarn=$((nwarn + 1)); continue; }
       returned=$(printf '%s' "$repo_result" | jq '.returned')

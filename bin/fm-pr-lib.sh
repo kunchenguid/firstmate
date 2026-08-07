@@ -16,6 +16,29 @@
 # after its durable wake is appended.
 # The receipt binds the terminal observation to the canonical registration and
 # lets a restart finish fixed-path removal without executing state-file bytes.
+#
+# This file also owns how a forge check-rollup member's verdict is classified,
+# because the merge gate and every operator-facing view must agree on it.
+#
+# A CheckRun carries .conclusion (empty while queued or running); a legacy
+# StatusContext carries .state instead. Neither is treated as a pass unless it
+# says SUCCESS.
+#
+# Members split into three disjoint buckets, not two, because "ran and reported
+# a failure" and "never produced a result" are different facts about a head and
+# collapsing them loses whichever one the reader needed. A run that failed,
+# errored, timed out, or failed to start returned an adverse verdict; a run that
+# is queued, in progress, skipped, neutral, cancelled, stale, or held at
+# action_required returned no verdict at all. Both block a merge, and each says
+# so in its own words.
+#
+# FM_PR_CHECK_ADVERSE is the whole adverse set, so anything absent from it that
+# is not SUCCESS carries no verdict rather than a failure. Reporting a
+# no-verdict member as a failure sends readers hunting for a defect that the
+# forge never actually observed, which is why the two sets have one owner here
+# instead of a copy per caller.
+# shellcheck disable=SC2034 # Public source-library variable read by callers after sourcing.
+FM_PR_CHECK_ADVERSE='["FAILURE","ERROR","TIMED_OUT","STARTUP_FAILURE"]'
 
 FM_PR_PROVIDER=
 FM_PR_URL=
