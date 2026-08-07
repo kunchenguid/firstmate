@@ -1,29 +1,30 @@
 #!/usr/bin/env bash
 # Self-update a running firstmate and its secondmates to the latest origin.
 #
-# Mechanical half of the /updatefirstmate skill. Fast-forwards the running
-# firstmate repo's default branch from origin, then fast-forwards every
-# registered secondmate home. Local homes are treehouse worktrees or standalone
-# clones; remote routes update their configured code root on that host and then
-# fast-forward the persistent home to that root. FAST-FORWARD ONLY, exactly like
-# fm-fleet-sync.sh: never force, never create a merge commit, never stash;
-# advance a target only when it is a clean fast-forward, otherwise skip and
-# report. A tracked-files fast-forward never touches the gitignored operational
-# dirs (data/, state/, config/, projects/, .no-mistakes/), so a secondmate's
-# in-flight work is never disrupted. Worktrees of this repo share one object
+# Mechanical half of the /updatefirstmate skill. Updates the running firstmate
+# repo's default branch from origin, then updates every registered secondmate
+# home. Local homes are treehouse worktrees or standalone clones; remote routes
+# update their configured code root on that host and then converge the persistent
+# home to that root. The absent/default per-home policy is the historical guarded
+# fast-forward. An exact home's explicit remote-authoritative opt-in may instead
+# replace that home's tracked code with its fetched origin/default commit. That
+# path never pushes, merges, stashes, deletes ignored files, or touches any
+# project repository. docs/configuration.md owns the policy contract and
+# bin/fm-ff-lib.sh owns its mechanics. Worktrees of this repo share one object
 # store, so a single fetch refreshes them all; standalone-clone homes are
 # fetched on their own. Secondmate homes are leased at a detached HEAD on the
 # default branch, so a fast-forward there advances HEAD only and never touches
 # any other worktree's checkout or the shared `main` branch.
 #
-# The fast-forward mechanics live in bin/fm-ff-lib.sh (base_mode "origin" here);
+# The convergence mechanics live in bin/fm-ff-lib.sh (base_mode "origin" here);
 # the same library drives the local-HEAD secondmate sync used by fm-spawn.sh and
-# fm-bootstrap.sh, so there is one ff implementation, not several.
+# fm-bootstrap.sh. Those non-origin paths remain fast-forward-only regardless of
+# this update policy.
 #
 # It does NOT re-read AGENTS.md or nudge secondmates itself - those are LLM /
 # tmux actions the skill performs. The script's job is the safe git mechanics
 # plus a parseable summary telling the caller what to do next:
-#   - one status line per target (updated/already current/skipped)
+#   - one status line per target (updated/replaced/already current/skipped)
 #   - reread-firstmate: yes|no    (did the running firstmate's instructions change)
 #   - nudge-secondmates: fm-<id>...|none   (updated live secondmates to nudge)
 #
@@ -51,7 +52,7 @@ fi
 # --- main firstmate repo ---------------------------------------------------
 
 reread_firstmate="no"
-ff_target "$FM_ROOT" "firstmate" origin no no
+ff_target "$FM_ROOT" "firstmate" origin no no "$FM_HOME"
 if [ "$FF_STATUS" = "updated" ] && [ -n "$FF_INSTR" ]; then
   reread_firstmate="yes"
 fi
@@ -88,6 +89,12 @@ if [ -f "$SECONDMATES_MD" ]; then
         case "$remote_result" in
           synced:*)
             echo "remote secondmate $id: updated on $SECONDMATE_REGISTRY_HOST (${remote_result#synced: })"
+            if [ -f "$STATE/$id.meta" ] && grep -qx 'kind=secondmate' "$STATE/$id.meta"; then
+              FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS fm-$id"
+            fi
+            ;;
+          replaced:*)
+            echo "remote secondmate $id: replaced on $SECONDMATE_REGISTRY_HOST (remote-authoritative; ${remote_result#replaced: })"
             if [ -f "$STATE/$id.meta" ] && grep -qx 'kind=secondmate' "$STATE/$id.meta"; then
               FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS fm-$id"
             fi

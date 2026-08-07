@@ -18,6 +18,36 @@ The tracked code root contains the shared instruction, skill, documentation, wor
 The producing PR and Relay helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
 Wake, watcher, away-mode, and Relay-specific state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.
 
+## Self-update policy (config/self-update-policy)
+
+`config/self-update-policy` is a local, gitignored, per-home selection for `/updatefirstmate`.
+An absent file or the exact one-line value `default` selects the historical fast-forward-only behavior.
+The only other accepted value is `remote-authoritative`.
+The file must be a regular, single-linked file beneath a non-symlinked `config/` directory and contain exactly one accepted value followed by one newline; an invalid file causes that target to be skipped without modification.
+
+The selection applies only to the exact target home that contains it.
+For the running primary code root, the selection comes from the effective `FM_HOME`, even when that operational home is separate from the tracked root selected by `FM_ROOT_OVERRIDE`.
+A local second mate uses its own home's file.
+A remote code root and its persistent remote second-mate home each use their own file independently.
+This setting is deliberately absent from the inherited-local-material allowlist, so a primary opt-in never propagates to second mates.
+
+Under `default`, each target retains the existing guarded update byte-for-byte where practical: the updater fetches origin and advances only a clean, non-diverged default-branch primary or valid detached second-mate home by fast-forward.
+Dirty, diverged, wrong-branch, detached-primary, offline, missing-origin, and otherwise unsafe targets are reported and left unchanged.
+Ordinary local-head convergence during second-mate launch and startup remains fast-forward-only regardless of this setting.
+
+Under `remote-authoritative`, the updater first resolves the target's origin default branch, completes the fetch, and verifies the fetched commit before any discard.
+It still refuses a primary on a non-default branch or detached HEAD, and it refuses a fetched tree that claims `.env`, `config/`, `data/`, `state/`, `projects/`, or `.no-mistakes/` as tracked code.
+It also refuses before replacement when an ignored path would obstruct the fetched tree.
+After those checks, it resets the opted-in target's tracked code exactly to `origin/<default>`.
+That reset may discard tracked modifications, staged changes, local-only commits on the target default branch, and non-ignored untracked paths that obstruct fetched tracked paths.
+It preserves unrelated untracked files and every ignored path, including `.env`, `config/`, `data/`, `state/`, `projects/`, and `.no-mistakes/`.
+It never runs an ignored-file clean, force-pushes, stashes, merges, alters origin, or recurses into project repositories.
+A fetch, remote, branch, private-path, ignored-obstruction, or reset failure never falls back to a destructive local operation.
+
+Status lines report `replaced ... (remote-authoritative)` for this path, distinct from ordinary `updated`, `already current`, and `skipped` results.
+The caller action lines remain `reread-firstmate: yes|no` and `nudge-secondmates: ...|none`, with a replacement treated as an update when loaded instructions changed or a live second mate needs a re-read.
+`bin/fm-update.sh` and `bin/fm-ff-lib.sh` own the exact mechanics, and `tests/fm-update.test.sh` exercises the policy through the public updater interface.
+
 `bin/fm-session-start.sh`'s header is the single owner of session-start ordering, composed commands, digest contents, and the digest's startup mechanism.
 `bin/fm-startup-network.sh`'s header owns the deferred network stage that keeps every external-network call off that digest's blocking path, including its state files and the safety argument for running them later.
 `docs/sessionstart-nudge.md` owns the native session-open adapter tiers that run or nudge the digest command, and the source routing between them.

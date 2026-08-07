@@ -297,11 +297,11 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 
 ## Self-updates stay safe
 
-`/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions and nudges updated secondmates without touching project clones.
-For a remote route, the configured code root updates from its own origin on that host before the persistent home fast-forwards to the code-root commit.
-The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
-Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
-The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
+`/updatefirstmate` updates the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions and nudges updated secondmates without touching project clones.
+Each exact target resolves its own local policy, so the absent/default path remains a guarded fast-forward while an explicit remote-authoritative target may replace its tracked Firstmate code after fetching and verifying origin.
+For a remote route, the configured code root and persistent home resolve independently on that host.
+Local homes share the convergence helper, while remote updates delegate the same per-target decision to the configured host through the generic transport.
+[`configuration.md`](configuration.md#self-update-policy-configself-update-policy) owns policy scope and safety, while the `/updatefirstmate` skill and [`AGENTS.md`](../AGENTS.md) own operator actions.
 
 ## Restart-proof
 

@@ -46,6 +46,8 @@ REMOTE_HERDR_SESSION=fm-remote
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$SCRIPT_DIR/fm-ff-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -242,7 +244,7 @@ cmd_sync() {
 }
 
 cmd_update() {
-  local id=$1 update_out root_status
+  local id=$1 update_out root_status target_out target_head
   validate_id "$id"
   validate_home "$id"
   if ! update_out=$(FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
@@ -252,12 +254,41 @@ cmd_update() {
   fi
   root_status=$(printf '%s\n' "$update_out" | grep '^firstmate:' | tail -1)
   case "$root_status" in
-    'firstmate: updated '*|'firstmate: already current'*) ;;
+    'firstmate: updated '*|'firstmate: replaced '*|'firstmate: already current'*) ;;
     *)
       [ -z "$update_out" ] || printf '%s\n' "$update_out" >&2
       die "remote code root did not complete a safe origin update"
       ;;
   esac
+
+  # The persistent remote home has its own independent policy. The primary's
+  # policy and the remote code root's policy never flow into it. A target that
+  # explicitly opts in fetches and verifies its own origin/default commit before
+  # replacement; otherwise the historical code-root fast-forward remains exact.
+  self_update_policy_for_home "$TARGET_HOME"
+  if [ "$SELF_UPDATE_POLICY" = invalid ]; then
+    die "remote home has invalid self-update policy: $SELF_UPDATE_POLICY_ERROR"
+  fi
+  if [ "$SELF_UPDATE_POLICY" = remote-authoritative ]; then
+    target_out=$(remote_authoritative_target "$TARGET_HOME" "remote secondmate $id" yes)
+    case "$target_out" in
+      'remote secondmate '*' replaced '*)
+        target_head=$(git -C "$TARGET_HOME" rev-parse HEAD 2>/dev/null) \
+          || die "remote home HEAD is unreadable after replacement"
+        printf 'replaced: %s\n' "$target_head"
+        ;;
+      'remote secondmate '*' already current')
+        target_head=$(git -C "$TARGET_HOME" rev-parse HEAD 2>/dev/null) \
+          || die "remote home HEAD is unreadable"
+        printf 'current: %s\n' "$target_head"
+        ;;
+      *)
+        [ -z "$target_out" ] || printf '%s\n' "$target_out" >&2
+        die "remote home did not complete its remote-authoritative update"
+        ;;
+    esac
+    return 0
+  fi
   cmd_sync "$id"
 }
 

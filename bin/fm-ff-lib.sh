@@ -2,9 +2,14 @@
 # Shared fast-forward machinery for firstmate self-sync.
 # Usage: . bin/fm-ff-lib.sh   (after FM_ROOT and FM_HOME are set)
 #
-# This is the one implementation of "advance a firstmate checkout to a base by a
-# clean fast-forward, never forcing, merging, or stashing" used by every sync
-# path:
+# This is the one implementation of tracked Firstmate-code convergence used by
+# every sync path. The default remains a clean fast-forward that never forces,
+# merges, or stashes. /updatefirstmate may instead use the explicit per-home
+# remote-authoritative policy owned by docs/configuration.md; that path resets
+# only the opted-in target after its origin/default commit is fetched and
+# verified, and preserves ignored/private paths.
+#
+# Callers:
 #   - /updatefirstmate (bin/fm-update.sh) pulls from origin: base_mode "origin".
 #   - the local-HEAD secondmate sync (bin/fm-spawn.sh on launch, bin/fm-bootstrap.sh
 #     on startup) follows the PRIMARY checkout's current default-branch commit:
@@ -48,6 +53,23 @@ default_branch() {
     fi
   done
   return 1
+}
+
+# Resolve origin's current advertised default branch from the remote itself.
+# The remote-authoritative policy uses this network-backed answer instead of a
+# possibly stale local origin/HEAD symbolic ref before it discards anything.
+remote_default_branch() {
+  local dir=$1 advertised line ref
+  advertised=$(git -C "$dir" ls-remote --symref origin HEAD 2>/dev/null) || return 1
+  line=$(printf '%s\n' "$advertised" | sed -n '1p')
+  case "$line" in
+    "ref: refs/heads/"*$'\tHEAD') ;;
+    *) return 1 ;;
+  esac
+  ref=${line#ref: refs/heads/}
+  ref=${ref%$'\tHEAD'}
+  [ -n "$ref" ] || return 1
+  printf '%s\n' "$ref"
 }
 
 # Resolve the PRIMARY checkout's current default-branch commit - the local-HEAD
@@ -253,6 +275,188 @@ live_secondmate_meta_records() {
   done
 }
 
+# Read the destructive self-update opt-in for one exact operational home.
+# docs/configuration.md owns the accepted values and policy semantics.
+# Globals:
+#   SELF_UPDATE_POLICY = default|remote-authoritative|invalid
+#   SELF_UPDATE_POLICY_ERROR = human-readable reason when invalid
+SELF_UPDATE_POLICY=""
+SELF_UPDATE_POLICY_ERROR=""
+self_update_policy_for_home() {
+  local home=$1 config_dir path links
+  config_dir="$home/config"
+  path="$config_dir/self-update-policy"
+  SELF_UPDATE_POLICY="default"
+  SELF_UPDATE_POLICY_ERROR=""
+  [ -e "$path" ] || [ -L "$path" ] || return 0
+  if [ -L "$config_dir" ] || [ ! -d "$config_dir" ]; then
+    SELF_UPDATE_POLICY="invalid"
+    SELF_UPDATE_POLICY_ERROR="config directory must be a regular directory"
+    return 0
+  fi
+  if [ -L "$path" ] || [ ! -f "$path" ]; then
+    SELF_UPDATE_POLICY="invalid"
+    SELF_UPDATE_POLICY_ERROR="config/self-update-policy must be a regular file"
+    return 0
+  fi
+  if [ "$(uname)" = Darwin ]; then
+    links=$(stat -f %l "$path" 2>/dev/null || true)
+  else
+    links=$(stat -c %h "$path" 2>/dev/null || true)
+  fi
+  if [ "$links" != 1 ]; then
+    SELF_UPDATE_POLICY="invalid"
+    SELF_UPDATE_POLICY_ERROR="config/self-update-policy must have one hard link"
+    return 0
+  fi
+  if cmp -s "$path" <(printf 'default\n'); then
+    return 0
+  fi
+  if cmp -s "$path" <(printf 'remote-authoritative\n'); then
+    SELF_UPDATE_POLICY="remote-authoritative"
+    return 0
+  fi
+  SELF_UPDATE_POLICY="invalid"
+  SELF_UPDATE_POLICY_ERROR="expected exactly default or remote-authoritative"
+}
+
+# A remote-authoritative reset must never make a fetched commit claim any
+# private operational surface as tracked code.
+remote_authoritative_base_is_private_safe() {
+  local dir=$1 base=$2 paths
+  paths=$(git -C "$dir" ls-tree -r --name-only "$base" -- \
+    .env config data state projects .no-mistakes 2>/dev/null) || return 1
+  [ -z "$paths" ]
+}
+
+# git reset --hard removes untracked paths that obstruct files in the target
+# tree, including ignored paths. Non-ignored obstructors are explicitly
+# discardable under the policy, but ignored paths are not. Refuse before reset
+# when any ignored path and target-tree path overlap in either direction.
+remote_authoritative_ignored_obstruction() {
+  local dir=$1 base=$2 ignored tracked
+  git -C "$dir" ls-tree -r -z --name-only "$base" >/dev/null 2>&1 || return 0
+  git -C "$dir" ls-files --others --ignored --exclude-standard --directory -z >/dev/null 2>&1 || return 0
+  while IFS= read -r -d '' ignored; do
+    ignored=${ignored%/}
+    [ -n "$ignored" ] || continue
+    while IFS= read -r -d '' tracked; do
+      case "$tracked" in
+        "$ignored"|"$ignored"/*) return 0 ;;
+      esac
+      case "$ignored" in
+        "$tracked"/*) return 0 ;;
+      esac
+    done < <(git -C "$dir" ls-tree -r -z --name-only "$base" 2>/dev/null)
+  done < <(git -C "$dir" ls-files --others --ignored --exclude-standard --directory -z 2>/dev/null)
+  return 1
+}
+
+# Paths whose loaded runtime meaning changed between the current worktree and
+# BASE. Unlike changed_instr, this includes staged and unstaged tracked edits,
+# which a remote-authoritative reset may replace even when HEAD is current.
+changed_instr_from_worktree() {
+  local dir=$1 base=$2 p out=""
+  for p in AGENTS.md bin .agents/skills; do
+    if ! git -C "$dir" diff --quiet "$base" -- "$p" 2>/dev/null; then
+      out="$out${out:+, }$p"
+    fi
+  done
+  printf '%s' "$out"
+}
+
+# Replace one opted-in target's tracked code with its fetched origin/default
+# commit. The policy owner is docs/configuration.md. This path does not clean,
+# stash, merge, push, or recurse into ignored directories. git reset --hard is
+# intentionally used only after the remote target, branch, private-path guard,
+# and ignored-obstruction guard all pass.
+remote_authoritative_target() {
+  local dir=$1 label=$2 allow_detached=${3:-no}
+  FF_STATUS="skipped"
+  FF_INSTR=""
+
+  if [ ! -d "$dir" ]; then
+    echo "$label: skipped: not a directory"
+    return 0
+  fi
+  if ! git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "$label: skipped: not a git repo"
+    return 0
+  fi
+
+  local default base cur local_rev base_rev instr before after out
+  if ! git -C "$dir" remote get-url origin >/dev/null 2>&1; then
+    echo "$label: skipped: no origin remote"
+    return 0
+  fi
+  default=$(remote_default_branch "$dir") || {
+    echo "$label: skipped: fetch failed"
+    return 0
+  }
+  if ! fetch_once "$dir"; then
+    echo "$label: skipped: fetch failed"
+    return 0
+  fi
+  base="origin/$default"
+  if ! git -C "$dir" rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
+    echo "$label: skipped: $base does not exist"
+    return 0
+  fi
+
+  cur=$(git -C "$dir" symbolic-ref --short HEAD 2>/dev/null || echo "")
+  if [ -z "$cur" ] && [ "$allow_detached" != yes ]; then
+    echo "$label: skipped: detached HEAD, expected $default"
+    return 0
+  fi
+  if [ -n "$cur" ] && [ "$cur" != "$default" ]; then
+    echo "$label: skipped: on $cur, expected $default"
+    return 0
+  fi
+
+  if ! remote_authoritative_base_is_private_safe "$dir" "$base"; then
+    echo "$label: skipped: remote-authoritative target contains private operational paths"
+    return 0
+  fi
+  if remote_authoritative_ignored_obstruction "$dir" "$base"; then
+    echo "$label: skipped: ignored path obstructs remote-authoritative replacement"
+    return 0
+  fi
+
+  local_rev=$(git -C "$dir" rev-parse HEAD 2>/dev/null) || {
+    echo "$label: skipped: cannot read HEAD"
+    return 0
+  }
+  base_rev=$(git -C "$dir" rev-parse "$base" 2>/dev/null) || {
+    echo "$label: skipped: cannot read $base"
+    return 0
+  }
+  if [ "$local_rev" = "$base_rev" ] && git -C "$dir" diff --quiet "$base" -- 2>/dev/null; then
+    FF_STATUS="current"
+    echo "$label: already current"
+    return 0
+  fi
+
+  instr=$(changed_instr_from_worktree "$dir" "$base")
+  before=$(git -C "$dir" rev-parse --short HEAD)
+  if ! out=$(git -C "$dir" reset --hard "$base" 2>&1); then
+    echo "$label: skipped: remote-authoritative replacement failed: $(first_line "$out")"
+    return 0
+  fi
+  after=$(git -C "$dir" rev-parse --short HEAD)
+  if [ "$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)" != "$base_rev" ] \
+    || ! git -C "$dir" diff --quiet "$base" -- 2>/dev/null; then
+    echo "$label: skipped: remote-authoritative replacement did not reach $base"
+    return 0
+  fi
+  FF_STATUS="updated"
+  FF_INSTR="$instr"
+  if [ -n "$instr" ]; then
+    echo "$label: replaced $before..$after from $base (remote-authoritative; instructions changed: $instr)"
+  else
+    echo "$label: replaced $before..$after from $base (remote-authoritative)"
+  fi
+}
+
 # Fast-forward one target to a base. Prints its status line. Sets globals for the
 # caller:
 #   FF_STATUS = updated|current|skipped
@@ -270,7 +474,7 @@ live_secondmate_meta_records() {
 # dirty, diverged, or wrong-branch target and leave its work untouched.
 FF_STATUS=""
 FF_INSTR=""
-ff_target() {
+ff_target_fast_forward() {
   local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no} ignore_seed_marker=${5:-no}
   FF_STATUS="skipped"
   FF_INSTR=""
@@ -358,6 +562,27 @@ ff_target() {
     echo "$label: updated $before..$after"
   fi
   return 0
+}
+
+# Dispatch origin-based /updatefirstmate calls through the exact target home's
+# explicit policy. Non-origin convergence paths always retain their existing
+# fast-forward-only behavior.
+ff_target() {
+  local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no} policy_home=${6:-$1}
+  if [ "$base_mode" = origin ]; then
+    self_update_policy_for_home "$policy_home"
+    if [ "$SELF_UPDATE_POLICY" = invalid ]; then
+      FF_STATUS="skipped"
+      FF_INSTR=""
+      echo "$label: skipped: invalid self-update policy: $SELF_UPDATE_POLICY_ERROR"
+      return 0
+    fi
+    if [ "$SELF_UPDATE_POLICY" = remote-authoritative ]; then
+      remote_authoritative_target "$dir" "$label" "$allow_detached"
+      return 0
+    fi
+  fi
+  ff_target_fast_forward "$@"
 }
 
 # Sweep accumulators. The caller resets both before a sweep and reads
