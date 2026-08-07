@@ -50,7 +50,7 @@ Two rules the commands cannot enforce for you:
   ```
   Here `<secondmate-id>` is the `<source-id>` with its `remote-reply-` prefix removed.
   The runner normally applies the result on capture, but this call is the required idempotent confirmation when the wake remains unacknowledged.
-  Never acknowledge a `remote-reply` wake through the generic command, because only the adapter validates and ingests the delta before acknowledging it and re-arming its source.
+  Never acknowledge a `remote-reply` wake through the generic command, because only the adapter ingests the delta, acknowledges it, and re-arms its source.
   Use the generic path below only after fully handling a result whose adapter has no applying command.
   [`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources-stateprocevent) owns the automatic-application contract and its failure boundary.
 : A captured result with no durable handled acknowledgement stays eligible for bounded re-announcement on the existing wake queue - across any number of drains and firstmate restarts, not only the crash window right after capture - until it is explicitly acknowledged. Once you have fully handled a result, durably record it:
