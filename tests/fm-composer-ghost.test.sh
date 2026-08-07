@@ -693,8 +693,10 @@ test_rev_off_inside_gap_keeps_real_text() {
   # content after it is real typed input and must survive a later dim
   # re-entry, not be flushed as the cursor cell. Sequence: dim ghost, reset,
   # rev-on cursor cell, rev-off, REAL text, dim re-entry ghost again.
+  # ghost_gap opens only under Cursor harness context, so this preservation
+  # proof must exercise FM_COMPOSER_HARNESS=cursor (not the direct-emit path).
   styled=$(printf '\033[2mghost\033[0;7mA\033[27mREAL\033[2mghost2\033[0m')
-  result=$(fm_composer_strip_ghost <<< "$styled")
+  result=$(FM_COMPOSER_HARNESS=cursor fm_composer_strip_ghost <<< "$styled")
   # The whole gap must not be flushed as droppable: real text after the
   # rev-off survives the dim re-entry flush (the rev-marked prefix may also
   # survive, an over-preserve that defers rather than injects).
@@ -712,8 +714,9 @@ test_real_text_between_dim_runs_survives() {
   # re-render can inject before re-entering dim), then a dim ghost run again.
   # The gap drop is reserved for reverse-video-marked content (the cursor
   # cell), so plain text in the gap is emitted rather than mistaken for ghost.
+  # Arm Cursor so this asserts gap-buffer emit, not pre-Cursor direct emission.
   styled=$(printf '\033[2mghost\033[0mREAL\033[48;2;21;21;21m\033[2mghost2\033[0m')
-  result=$(fm_composer_strip_ghost <<< "$styled")
+  result=$(FM_COMPOSER_HARNESS=cursor fm_composer_strip_ghost <<< "$styled")
   [ "$result" = REAL ] \
     || fail "real text between dim runs must survive strip, got '$result'"
   pass "fm_composer_strip_ghost: real text between dim runs survives"
@@ -743,9 +746,10 @@ test_dark_truecolor_ghost_after_dim_ghost_strips_empty() {
 test_real_text_between_dim_and_dark_ghost_runs_survives() {
   local result styled
   # dim ghost → reset → REAL text → dark TRUECOLOR ghost: the genuine normal
-  # text between the two ghost runs must survive.
+  # text between the two ghost runs must survive. Cursor harness context is
+  # required so the gap buffer (not direct emission) is what preserves REAL.
   styled=$(printf '\033[2mdim\033[0mREAL\033[38;2;60;60;60mdark\033[0m')
-  result=$(fm_composer_strip_ghost <<< "$styled")
+  result=$(FM_COMPOSER_HARNESS=cursor fm_composer_strip_ghost <<< "$styled")
   [ "$result" = REAL ] \
     || fail "real text between dim and dark truecolor ghost runs must survive, got '$result'"
   pass "fm_composer_strip_ghost: real text between dim and dark TRUECOLOR ghost runs survives"
