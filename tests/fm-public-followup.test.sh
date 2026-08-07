@@ -892,6 +892,60 @@ test_secondmate_teardown_rejects_unsafe_durable_parent_records() {
   pass "unsafe durable parent records fail closed before cleanup"
 }
 
+# A NUL byte inside the durable record must fail closed like every other
+# malformed record. bash's read drops NUL bytes while parsing, and different
+# bash generations disagree on the result (3.2 truncates the value at the NUL,
+# 5.x splices the surrounding bytes together), so a NUL-bearing parent_home can
+# resolve to a home the record's bytes never name contiguously - and teardown's
+# parent reads (registration, registry, relay state) then land in that other
+# home, with the promised-public-reply protection engaging or not depending on
+# which interpreter ran the cleanup. The fixture is deliberately the proven
+# clean-cleanup shape above (registered parent, landed worktree, quiet relay):
+# with the NUL spliced mid-path the record reassembles the real registered
+# parent under a NUL-dropping read, so before the parser rejected NUL this
+# cleanup PROCEEDED - the refusal asserted here is the parser failing closed,
+# not the fixture refusing for some unrelated reason.
+test_secondmate_teardown_rejects_nul_bearing_durable_parent_record() {
+  local parent child parent_resolved pre suf record
+  parent=$(make_home teardown-durable-nul-parent relay-off)
+  child="$TMP_ROOT/teardown-durable-nul-child"
+  FM_SECONDMATE_CHARTER='Durable-record NUL regression charter.' \
+    FM_HOME="$parent" "$ROOT/bin/fm-home-seed.sh" mate "$child" --no-projects >/dev/null \
+    || fail "real secondmate seeding failed"
+  child=$(cd "$child" && pwd -P)
+  parent_resolved=$(cd "$parent" && pwd -P)
+  make_fake_curl "$child" >/dev/null
+  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  assert_local_secondmate_parent_record "$child" "$parent_resolved"
+  fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
+  fm_git_init_commit "$child/projects/worktree"
+  printf 'manual\n' > "$child/config/backlog-backend"
+  fm_write_meta "$child/state/work-child.meta" \
+    "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
+    "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
+    "kind=ship" "mode=local-only"
+  pre=${parent_resolved%??????}
+  suf=${parent_resolved#"$pre"}
+  record="$child/.fm-secondmate-parent"
+  {
+    printf 'schema=fm-secondmate-parent.v1\nroute=local\n'
+    printf 'parent_home=%s' "$pre"
+    printf '\0'
+    printf '%s\n' "$suf"
+  } > "$record"
+
+  PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
+    FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
+    FM_CONFIG_OVERRIDE="$child/config" \
+    expect_failure "a NUL-bearing durable parent record must refuse cleanup" \
+    "$TEARDOWN" work-child
+  assert_contains "$EXPECT_OUT" "cannot resolve the primary home for marked secondmate mate" \
+    "a NUL-bearing durable parent record must produce the explicit binding refusal"
+  assert_present "$child/state/work-child.meta" \
+    "a NUL-bearing durable parent record must preserve child work metadata"
+  pass "a NUL-bearing durable parent record fails closed before cleanup"
+}
+
 test_relay_disabled_unmarked_teardown_skips_public_path() {
   local home tasks_log out rc
   home=$(make_home teardown-disabled-unmarked relay-off)
@@ -1287,6 +1341,7 @@ test_secondmate_teardown_durable_record_missing_parent_registration_still_refuse
 test_secondmate_teardown_durable_record_with_unknown_field_succeeds
 test_secondmate_teardown_rejects_conflicting_live_and_durable_parent_bindings
 test_secondmate_teardown_rejects_unsafe_durable_parent_records
+test_secondmate_teardown_rejects_nul_bearing_durable_parent_record
 test_relay_disabled_unmarked_teardown_skips_public_path
 test_relay_disabled_parent_allows_marked_child_teardown
 test_secondmate_parent_binding_matches_literal_id
