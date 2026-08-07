@@ -37,8 +37,11 @@
 #   3. wake-drain     - mutates the durable wake queue, so it also only runs
 #                       when locked.
 #   4. context digest - data/projects.md, data/secondmates.md, data/captain.md,
-#                       data/captain-shared.md, data/learnings.md: read-only,
-#                       always safe, always runs.
+#                       data/captain-shared.md, data/learnings.md, then a
+#                       multi-brain oracle context subsection (fm-oracle.sh
+#                       query over the registered brains, skipped with an
+#                       explicit unavailable line when the brain registry or
+#                       script is absent): read-only, always safe, always runs.
 #   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       state/.afk, and a cheap per-task endpoint-liveness read:
@@ -351,6 +354,17 @@ print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
 print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+
+subsection "Multi-brain oracle context"
+ORACLE_SCRIPT="$SCRIPT_DIR/fm-oracle.sh"
+if [ -f "$DATA/brains/brain_registry.json" ] && [ -f "$ORACLE_SCRIPT" ]; then
+  echo '(querying registered brains: firstmate_ops, um5_ops, crof_ops)'
+  oracle_context=$("$ORACLE_SCRIPT" query "fleet state, captain preferences, key decisions" 2 2>&1) || oracle_context='(oracle query failed)'
+  echo "$oracle_context" | head -120
+  echo '(brain context is additive — corroborate live facts with git/tasks-axi/quota-axi)'
+else
+  echo '(oracle unavailable — missing registry or script)'
+fi
 
 # --- 5. fleet-state digest ---------------------------------------------
 section "FLEET STATE"
