@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Contract tests for bin/fm-test-run.sh - the single owner of behavior suite
 # selection, portable lane composition, proven-isolated --jobs, timing markers,
-# JSON artifacts, coverage guard, and aggregate exit status.
+# JSON artifacts, coverage guard, aggregate exit status, and bounded detached
+# base/head failure partitioning.
 #
 # These tests intentionally exercise the runner with fixtures, --list, and
 # focused scheduler checks, not the complete Firstmate suite.
@@ -669,6 +670,151 @@ assert len(doc["scripts"])==3
   pass "aggregate-json merges lane timing artifacts"
 }
 
+init_compare_fixture_repo() {
+  local repo=$1
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cat >"$repo/tests/aa-pass.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - pass"
+SH
+  cat >"$repo/tests/ab-inherited.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "not ok - inherited"
+exit 1
+SH
+  cat >"$repo/tests/ac-fixed.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "not ok - base failure"
+exit 1
+SH
+  cat >"$repo/tests/ad-introduced.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - base pass"
+SH
+  cat >"$repo/tests/ae-skip.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "skip: optional fixture unavailable"
+SH
+  cat >"$repo/tests/af-hang.test.sh" <<'SH'
+#!/usr/bin/env bash
+trap '' TERM
+sleep 30
+SH
+  chmod +x "$repo"/tests/*.test.sh
+  git -C "$repo" init -q
+  git -C "$repo" add bin tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm base
+}
+
+test_compare_commits_partitions_and_bounds_every_script() {
+  local tmp repo base head rc out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-compare.XXXXXX")
+  repo="$tmp/repo"
+  init_compare_fixture_repo "$repo"
+  base=$(git -C "$repo" rev-parse HEAD)
+  cat >"$repo/tests/ac-fixed.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - fixed"
+SH
+  cat >"$repo/tests/ad-introduced.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "not ok - introduced"
+exit 1
+SH
+  chmod +x "$repo/tests/ac-fixed.test.sh" "$repo/tests/ad-introduced.test.sh"
+  git -C "$repo" add tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm head
+  head=$(git -C "$repo" rev-parse HEAD)
+
+  set +e
+  out=$(cd "$repo" && bin/fm-test-run.sh --compare-commits "$base" "$head" \
+    --script-timeout 1 --output-dir "$tmp/result" 2>"$tmp/err")
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || { rm -rf "$tmp"; fail "introduced failure must make compare exit 1 (got $rc): $(cat "$tmp/err")"; }
+  assert_contains "$out" "FM_TEST_COMPARE_INVENTORY side=base" "base terminal inventory marker"
+  assert_contains "$out" "FM_TEST_COMPARE_INVENTORY side=head" "head terminal inventory marker"
+  assert_contains "$out" "FM_TEST_COMPARE_PARTITION inherited=2 head_introduced=1 fixed_by_head=1" \
+    "mechanical failure partition"
+  if ! python3 - "$tmp/result/base.json" "$tmp/result/head.json" "$tmp/result/partition.json" <<'PY'
+import json, sys
+base, head, partition = (json.load(open(path, encoding="utf-8")) for path in sys.argv[1:])
+assert base["reconciliation"]["accounted"] is True, base
+assert head["reconciliation"]["accounted"] is True, head
+assert base["checkout"]["invariant_ok"] is True, base
+assert head["checkout"]["invariant_ok"] is True, head
+assert base["summary"] == {"errored": 0, "failed": 2, "passed": 2, "skipped": 1, "timed_out": 1, "total": 6}, base
+assert head["summary"] == {"errored": 0, "failed": 2, "passed": 2, "skipped": 1, "timed_out": 1, "total": 6}, head
+base_rows = {row["path"]: row["outcome"] for row in base["scripts"]}
+head_rows = {row["path"]: row["outcome"] for row in head["scripts"]}
+assert base_rows["tests/af-hang.test.sh"] == "timed_out", base_rows
+assert head_rows["tests/af-hang.test.sh"] == "timed_out", head_rows
+assert [row["path"] for row in partition["inherited_failures"]] == [
+    "tests/ab-inherited.test.sh", "tests/af-hang.test.sh"
+], partition
+assert [row["path"] for row in partition["head_introduced_failures"]] == ["tests/ad-introduced.test.sh"], partition
+assert [row["path"] for row in partition["failures_fixed_by_head"]] == ["tests/ac-fixed.test.sh"], partition
+PY
+  then
+    rm -rf "$tmp"
+    fail "compare JSON inventories or partition are wrong"
+  fi
+  rm -rf "$tmp"
+  pass "commit comparison bounds a deliberate hang and emits complete diffable inventories"
+}
+
+test_compare_commits_accounts_for_script_lost_after_discovery() {
+  local tmp repo commit rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-compare-missing.XXXXXX")
+  repo="$tmp/repo"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cat >"$repo/tests/aa-delete-next.test.sh" <<'SH'
+#!/usr/bin/env bash
+rm tests/zz-victim.test.sh
+SH
+  cat >"$repo/tests/zz-victim.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - should never run from a corrupted checkout"
+SH
+  chmod +x "$repo"/tests/*.test.sh
+  git -C "$repo" init -q
+  git -C "$repo" add bin tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm fixture
+  commit=$(git -C "$repo" rev-parse HEAD)
+
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --compare-commits "$commit" "$commit" \
+    --script-timeout 1 --output-dir "$tmp/result" >"$tmp/out" 2>"$tmp/err")
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || { rm -rf "$tmp"; fail "checkout corruption must make compare exit 1 (got $rc)"; }
+  if ! python3 - "$tmp/result/base.json" "$tmp/result/head.json" "$tmp/result/partition.json" <<'PY'
+import json, sys
+base, head, partition = (json.load(open(path, encoding="utf-8")) for path in sys.argv[1:])
+for doc in (base, head):
+    assert doc["discovered_scripts"] == ["tests/aa-delete-next.test.sh", "tests/zz-victim.test.sh"], doc
+    assert [row["path"] for row in doc["scripts"]] == doc["discovered_scripts"], doc
+    assert doc["reconciliation"] == {
+        "accounted": True, "discovered_count": 2, "duplicates": [],
+        "extra": [], "inventory_count": 2, "missing": []
+    }, doc
+    assert all(row["outcome"] == "errored" for row in doc["scripts"]), doc
+    assert doc["checkout"]["invariant_ok"] is False, doc
+assert partition["inventory_reconciled"] is True, partition
+assert partition["checkout_invariants_ok"] is False, partition
+PY
+  then
+    rm -rf "$tmp"
+    fail "lost-script accounting did not fail closed"
+  fi
+  rm -rf "$tmp"
+  pass "a script lost after discovery remains inventoried as errored and checkout drift fails loudly"
+}
+
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
@@ -686,3 +832,5 @@ test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
 test_jobs_parallel_scheduler_and_failure_propagation
 test_aggregate_json
+test_compare_commits_partitions_and_bounds_every_script
+test_compare_commits_accounts_for_script_lost_after_discovery

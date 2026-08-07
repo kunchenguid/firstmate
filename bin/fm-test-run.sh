@@ -12,6 +12,7 @@
 #   fm-test-run.sh --lane portable-serial-<k>of<n>   (one CI serial shard)
 #   fm-test-run.sh --proven-isolated
 #   fm-test-run.sh tests/<name>.test.sh [more scripts...]
+#   fm-test-run.sh --compare-commits <base> <head> --output-dir <dir>
 #
 # Inspection (no execution):
 #   fm-test-run.sh --list --all
@@ -23,6 +24,16 @@
 #
 # Aggregation (no suite execution):
 #   fm-test-run.sh --aggregate-json <out.json> <lane.json> [more lane.json...]
+#
+# Base/head partition (isolated execution):
+#   fm-test-run.sh --compare-commits <base> <head> --output-dir <dir> [--script-timeout <seconds>]
+#   Resolves both refs once, checks each out detached in an independent local
+#   clone, and writes base.json, head.json, and partition.json. Every discovered
+#   script receives one of: passed, failed, timed_out, skipped, errored. Each
+#   script runs in its own process group under a hard bound (default: 300s).
+#   The command exits non-zero only for head-introduced failures or an inventory
+#   or checkout-integrity error; inherited failures remain visible but do not by
+#   themselves fail the comparison.
 #
 # Options:
 #   --json <path>   write a deterministic timing artifact after the run
@@ -42,6 +53,9 @@
 #                   selected script is in the proven-isolated set
 #                   (bin/fm-test-isolation-proof.sh --list). Cap is 8. Stateful
 #                   families never schedule under --jobs.
+#   --script-timeout N
+#                   per-script bound in seconds for --compare-commits (default: 300).
+#   --output-dir D  fresh artifact directory for --compare-commits.
 #   -h, --help      print this header
 #
 # Per-script machine-parseable markers (stdout):
@@ -79,6 +93,10 @@ LIST_FAMILIES=0
 LIST_LANES=0
 CHECK_COVERAGE=0
 AGGREGATE_OUT=
+COMPARE_BASE=
+COMPARE_HEAD=
+COMPARE_OUTPUT_DIR=
+SCRIPT_TIMEOUT=300
 FAMILY=
 LANE=
 BASE_REF=origin/main
@@ -1193,6 +1211,384 @@ with open(out, "w", encoding="utf-8") as fh:
 PY
 }
 
+compare_commits() {
+  local base_ref=$1 head_ref=$2 output_dir=$3 script_timeout=$4
+  command -v python3 >/dev/null 2>&1 || die "--compare-commits requires python3"
+  python3 - "$ROOT" "$base_ref" "$head_ref" "$output_dir" "$script_timeout" <<'PY'
+import collections
+import json
+import os
+import pathlib
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+root = pathlib.Path(sys.argv[1]).resolve()
+base_ref, head_ref = sys.argv[2], sys.argv[3]
+output_dir = pathlib.Path(sys.argv[4]).resolve()
+timeout_seconds = int(sys.argv[5])
+
+
+def git(*args, cwd=root, check=True):
+    return subprocess.run(
+        ["git", *args], cwd=cwd, check=check, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+
+
+def resolve_commit(ref):
+    try:
+        return git("rev-parse", "--verify", f"{ref}^{{commit}}").stdout.strip()
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(f"commit not found: {ref}: {exc.stderr.strip()}") from exc
+
+
+def atomic_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stage = path.with_name(path.name + ".tmp")
+    stage.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(stage, path)
+
+
+def checkout_state(copy):
+    head = git("rev-parse", "HEAD", cwd=copy).stdout.strip()
+    detached = git("symbolic-ref", "-q", "HEAD", cwd=copy, check=False).returncode != 0
+    clean = git("status", "--porcelain", "--untracked-files=all", cwd=copy).stdout == ""
+    return head, detached, clean
+
+
+def inventory_summary(rows):
+    counts = collections.Counter(row["outcome"] for row in rows)
+    return {
+        "total": len(rows),
+        "passed": counts["passed"],
+        "failed": counts["failed"],
+        "timed_out": counts["timed_out"],
+        "skipped": counts["skipped"],
+        "errored": counts["errored"],
+    }
+
+
+def reconcile(doc):
+    discovered = doc["discovered_scripts"]
+    inventoried = [row["path"] for row in doc["scripts"]]
+    missing = sorted(set(discovered) - set(inventoried))
+    extra = sorted(set(inventoried) - set(discovered))
+    duplicates = sorted(path for path, count in collections.Counter(inventoried).items() if count != 1)
+    ok = discovered == inventoried and not missing and not extra and not duplicates
+    doc["reconciliation"] = {
+        "accounted": ok,
+        "discovered_count": len(discovered),
+        "inventory_count": len(inventoried),
+        "missing": missing,
+        "extra": extra,
+        "duplicates": duplicates,
+    }
+    doc["summary"] = inventory_summary(doc["scripts"])
+    return ok
+
+
+def write_inventory(doc):
+    reconcile(doc)
+    atomic_json(output_dir / f"{doc['label']}.json", doc)
+
+
+def first_meaningful_line(path):
+    with path.open(encoding="utf-8", errors="replace") as stream:
+        for line in stream:
+            if line.strip():
+                return line.strip()
+    return ""
+
+
+def stop_process_group(proc):
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=0.2)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    proc.wait()
+
+
+def make_inventory(label, requested_ref, commit, copy):
+    scripts = sorted(
+        str(path.relative_to(copy))
+        for path in (copy / "tests").glob("*.test.sh")
+        if path.is_file()
+    )
+    rows = []
+    for script in scripts:
+        rows.append({
+            "path": script,
+            "outcome": "errored",
+            "exit_code": None,
+            "duration_ms": 0,
+            "detail": "not_run: runner interrupted before execution",
+            "log": f"{label}/logs/{pathlib.Path(script).name}.log",
+        })
+    head, detached, clean = checkout_state(copy)
+    doc = {
+        "schema_version": 1,
+        "label": label,
+        "requested_ref": requested_ref,
+        "commit": commit,
+        "timeout_seconds": timeout_seconds,
+        "checkout": {
+            "path": str(copy),
+            "initial_head": head,
+            "final_head": None,
+            "detached": detached,
+            "clean_before": clean,
+            "clean_after": None,
+            "invariant_ok": head == commit and detached and clean,
+        },
+        "discovered_scripts": scripts,
+        "scripts": rows,
+    }
+    write_inventory(doc)
+    return doc
+
+
+def run_inventory(doc, copy):
+    compromised = not doc["checkout"]["invariant_ok"]
+    for row in doc["scripts"]:
+        if compromised:
+            row["detail"] = "not_run: checkout invariant was already violated"
+            write_inventory(doc)
+            continue
+
+        before_head, before_detached, before_clean = checkout_state(copy)
+        if before_head != doc["commit"] or not before_detached or not before_clean:
+            row["detail"] = (
+                "not_run: checkout invariant violated before script "
+                f"(head={before_head}, detached={before_detached}, clean={before_clean})"
+            )
+            compromised = True
+            doc["checkout"]["invariant_ok"] = False
+            write_inventory(doc)
+            continue
+
+        script_path = copy / row["path"]
+        log_path = output_dir / row["log"]
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        if not script_path.is_file():
+            row["detail"] = "not_run: discovered script is missing at execution"
+            compromised = True
+            doc["checkout"]["invariant_ok"] = False
+            write_inventory(doc)
+            continue
+
+        env = os.environ.copy()
+        for name in (
+            "FM_HOME", "FM_STATE_OVERRIDE", "FM_DATA_OVERRIDE", "FM_ROOT_OVERRIDE",
+            "FM_PROJECTS_OVERRIDE", "FM_CONFIG_OVERRIDE", "FM_BACKEND",
+        ):
+            env.pop(name, None)
+        script_tmp = pathlib.Path(tempfile.mkdtemp(prefix=f"fm-compare-{doc['label']}-"))
+        env["TMPDIR"] = str(script_tmp)
+        env["TMP"] = str(script_tmp)
+        started = time.monotonic()
+        try:
+            with log_path.open("wb") as log_stream:
+                proc = subprocess.Popen(
+                    ["/bin/bash", row["path"]], cwd=copy, env=env,
+                    stdout=log_stream, stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                try:
+                    returncode = proc.wait(timeout=timeout_seconds)
+                except subprocess.TimeoutExpired:
+                    stop_process_group(proc)
+                    returncode = 124
+                    row["outcome"] = "timed_out"
+                    row["detail"] = f"per-script timeout after {timeout_seconds}s"
+                else:
+                    if returncode == 0:
+                        if first_meaningful_line(log_path).startswith("skip:"):
+                            row["outcome"] = "skipped"
+                            row["detail"] = "first meaningful output line is a gate skip"
+                        else:
+                            row["outcome"] = "passed"
+                            row["detail"] = "exit 0"
+                    elif returncode < 0:
+                        row["outcome"] = "errored"
+                        row["detail"] = f"terminated by signal {-returncode}"
+                    else:
+                        row["outcome"] = "failed"
+                        row["detail"] = f"exit {returncode}"
+                row["exit_code"] = returncode
+        except OSError as exc:
+            row["outcome"] = "errored"
+            row["detail"] = f"runner error: {exc}"
+            row["exit_code"] = None
+        finally:
+            row["duration_ms"] = max(0, int((time.monotonic() - started) * 1000))
+            shutil.rmtree(script_tmp, ignore_errors=True)
+
+        after_head, after_detached, after_clean = checkout_state(copy)
+        if after_head != doc["commit"] or not after_detached or not after_clean:
+            row["outcome"] = "errored"
+            row["detail"] = (
+                "checkout invariant violated by script "
+                f"(head={after_head}, detached={after_detached}, clean={after_clean})"
+            )
+            compromised = True
+            doc["checkout"]["invariant_ok"] = False
+        write_inventory(doc)
+        print(
+            "FM_TEST_COMPARE_ROW "
+            f"side={doc['label']} script={row['path']} outcome={row['outcome']} "
+            f"exit={row['exit_code']} duration_ms={row['duration_ms']}",
+            flush=True,
+        )
+
+    final_head, final_detached, final_clean = checkout_state(copy)
+    doc["checkout"]["final_head"] = final_head
+    doc["checkout"]["clean_after"] = final_clean
+    doc["checkout"]["invariant_ok"] = bool(
+        doc["checkout"]["invariant_ok"]
+        and final_head == doc["commit"] and final_detached and final_clean
+    )
+    write_inventory(doc)
+
+
+def failure_rows(doc):
+    return {
+        row["path"]: row for row in doc["scripts"]
+        if row["outcome"] in {"failed", "timed_out", "errored"}
+    }
+
+
+def make_partition(base, head):
+    base_failures = failure_rows(base)
+    head_failures = failure_rows(head)
+    inherited = []
+    introduced = []
+    fixed = []
+    for path in sorted(set(base_failures) & set(head_failures)):
+        inherited.append({
+            "path": path,
+            "base_outcome": base_failures[path]["outcome"],
+            "head_outcome": head_failures[path]["outcome"],
+        })
+    for path in sorted(set(head_failures) - set(base_failures)):
+        introduced.append({
+            "path": path,
+            "base_outcome": next(
+                (row["outcome"] for row in base["scripts"] if row["path"] == path),
+                "absent",
+            ),
+            "head_outcome": head_failures[path]["outcome"],
+        })
+    for path in sorted(set(base_failures) - set(head_failures)):
+        fixed.append({
+            "path": path,
+            "base_outcome": base_failures[path]["outcome"],
+            "head_outcome": next(
+                (row["outcome"] for row in head["scripts"] if row["path"] == path),
+                "absent",
+            ),
+        })
+    return {
+        "schema_version": 1,
+        "base_commit": base["commit"],
+        "head_commit": head["commit"],
+        "inventory_reconciled": bool(
+            base["reconciliation"]["accounted"]
+            and head["reconciliation"]["accounted"]
+        ),
+        "checkout_invariants_ok": bool(
+            base["checkout"]["invariant_ok"]
+            and head["checkout"]["invariant_ok"]
+        ),
+        "inherited_failures": inherited,
+        "head_introduced_failures": introduced,
+        "failures_fixed_by_head": fixed,
+        "summary": {
+            "inherited": len(inherited),
+            "head_introduced": len(introduced),
+            "fixed_by_head": len(fixed),
+        },
+    }
+
+
+if timeout_seconds < 1:
+    raise SystemExit("fm-test-run: --script-timeout must be a positive integer")
+if output_dir.exists() and any(output_dir.iterdir()):
+    raise SystemExit(f"fm-test-run: --output-dir must be absent or empty: {output_dir}")
+output_dir.mkdir(parents=True, exist_ok=True)
+
+base_commit = resolve_commit(base_ref)
+head_commit = resolve_commit(head_ref)
+temp_root = pathlib.Path(tempfile.mkdtemp(prefix="fm-test-compare-"))
+inventories = []
+try:
+    copies = {}
+    for label, commit in (("base", base_commit), ("head", head_commit)):
+        copy = temp_root / label
+        clone = subprocess.run(
+            ["git", "clone", "--no-local", "--no-checkout", "--quiet", str(root), str(copy)],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        if clone.returncode != 0:
+            raise RuntimeError(f"could not create isolated {label} copy: {clone.stderr.strip()}")
+        checkout = git("checkout", "--detach", "--quiet", commit, cwd=copy, check=False)
+        if checkout.returncode != 0:
+            raise RuntimeError(f"could not detach {label} at {commit}: {checkout.stderr.strip()}")
+        copies[label] = copy
+
+    base = make_inventory("base", base_ref, base_commit, copies["base"])
+    head = make_inventory("head", head_ref, head_commit, copies["head"])
+    inventories.extend((base, head))
+    run_inventory(base, copies["base"])
+    run_inventory(head, copies["head"])
+    partition = make_partition(base, head)
+    atomic_json(output_dir / "partition.json", partition)
+    for doc in (base, head):
+        summary = doc["summary"]
+        print(
+            "FM_TEST_COMPARE_INVENTORY "
+            f"side={doc['label']} commit={doc['commit']} total={summary['total']} "
+            f"passed={summary['passed']} failed={summary['failed']} "
+            f"timed_out={summary['timed_out']} skipped={summary['skipped']} "
+            f"errored={summary['errored']} accounted={str(doc['reconciliation']['accounted']).lower()} "
+            f"checkout_ok={str(doc['checkout']['invariant_ok']).lower()}",
+            flush=True,
+        )
+    summary = partition["summary"]
+    print(
+        "FM_TEST_COMPARE_PARTITION "
+        f"inherited={summary['inherited']} head_introduced={summary['head_introduced']} "
+        f"fixed_by_head={summary['fixed_by_head']} output_dir={output_dir}",
+        flush=True,
+    )
+    valid = partition["inventory_reconciled"] and partition["checkout_invariants_ok"]
+    raise SystemExit(1 if partition["head_introduced_failures"] or not valid else 0)
+except BaseException as exc:
+    for doc in inventories:
+        write_inventory(doc)
+    if len(inventories) == 2:
+        atomic_json(output_dir / "partition.json", make_partition(*inventories))
+    if isinstance(exc, SystemExit):
+        raise
+    print(f"fm-test-run: compare failed: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+finally:
+    shutil.rmtree(temp_root, ignore_errors=True)
+PY
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --all)
@@ -1236,6 +1632,14 @@ while [ "$#" -gt 0 ]; do
       MODE=changed
       shift
       ;;
+    --compare-commits)
+      [ -z "$MODE" ] || die "only one selection mode is allowed"
+      [ "$#" -gt 2 ] || die "--compare-commits requires <base> <head>"
+      MODE=compare
+      COMPARE_BASE=$2
+      COMPARE_HEAD=$3
+      shift 3
+      ;;
     --base)
       [ "$#" -gt 1 ] || die "--base requires a git ref"
       BASE_REF=$2
@@ -1252,6 +1656,24 @@ while [ "$#" -gt 0 ]; do
       ;;
     --json=*)
       JSON_PATH=${1#--json=}
+      shift
+      ;;
+    --script-timeout)
+      [ "$#" -gt 1 ] || die "--script-timeout requires a positive integer"
+      SCRIPT_TIMEOUT=$2
+      shift 2
+      ;;
+    --script-timeout=*)
+      SCRIPT_TIMEOUT=${1#--script-timeout=}
+      shift
+      ;;
+    --output-dir)
+      [ "$#" -gt 1 ] || die "--output-dir requires a path"
+      COMPARE_OUTPUT_DIR=$2
+      shift 2
+      ;;
+    --output-dir=*)
+      COMPARE_OUTPUT_DIR=${1#--output-dir=}
       shift
       ;;
     --jobs)
@@ -1356,6 +1778,17 @@ if [ "${MODE:-}" = "aggregate" ]; then
   done
   aggregate_timing_json "$AGGREGATE_OUT" "${SCRIPTS[@]}"
   exit 0
+fi
+
+if [ "${MODE:-}" = "compare" ]; then
+  [ "$LIST_ONLY" -eq 0 ] || die "--list cannot be combined with --compare-commits"
+  [ -n "$COMPARE_OUTPUT_DIR" ] || die "--compare-commits requires --output-dir <dir>"
+  case "$SCRIPT_TIMEOUT" in
+    ''|*[!0-9]*) die "--script-timeout must be a positive integer" ;;
+  esac
+  [ "$SCRIPT_TIMEOUT" -ge 1 ] || die "--script-timeout must be >= 1"
+  compare_commits "$COMPARE_BASE" "$COMPARE_HEAD" "$COMPARE_OUTPUT_DIR" "$SCRIPT_TIMEOUT"
+  exit $?
 fi
 
 case "$JOBS" in
