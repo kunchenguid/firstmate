@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# fm-worktree-guard.sh - refuse a spawn that would be handed a pool slot which
-# still holds live work.
+# fm-worktree-guard.sh - choose the pool slot a spawn may be handed, and refuse
+# the spawn when every slot the pool would hand out still holds live work.
 #
 # WHY THIS RUNS BEFORE `treehouse get`, NOT AFTER
 # `treehouse get` resets the slot as part of ACQUIRING it, before it returns the
@@ -17,6 +17,20 @@
 # live process, and a clean working tree. It does NOT consider whether HEAD still
 # holds content the default branch never received, so a slot holding a
 # finished-but-unlanded branch is allocatable and the next spawn detaches it.
+# That is true of EVERY slot in that shape, so a pool holding several parked
+# branches reports several available slots, all of them at risk.
+#
+# WHY IT ALSO SELECTS THE SLOT
+# `treehouse get` hands out the first available slot and takes no slot argument,
+# so a guard that could only refuse turned one parked slot into a pool-wide
+# blockade: genuinely empty slots later in the pool were never reachable, and
+# the only way through was authorizing the parked slots by hand. `select`
+# therefore names a demonstrably empty slot for the caller to acquire BY NAME
+# (`treehouse enter <name>`, which does not reset it), and an occupied slot is
+# then simply skipped rather than reset or turned into a refusal.
+# The refusal is unchanged where it still matters: with no empty slot to steer
+# to, the caller falls back to `treehouse get`, so every available slot must be
+# demonstrably empty or explicitly authorized, exactly as before.
 #
 # WHAT "UNLANDED" MEASURES AGAINST
 # bin/fm-landed-lib.sh owns that question and the reasons commit reachability
@@ -31,8 +45,8 @@
 # branch.
 #
 # WHAT IT DOES NOT DO
-# It never resets, cleans, forces, discards, or releases anything. It only
-# refuses. bin/fm-teardown.sh remains the sole releaser of a slot holding work
+# It never resets, cleans, forces, discards, or releases anything. It only names
+# a slot, or refuses. bin/fm-teardown.sh remains the sole releaser of work
 # and owns the complete landed-work test; this guard deliberately asks the
 # strictly weaker, offline question "is this slot demonstrably empty?" and so
 # never restates or weakens that contract.
@@ -44,10 +58,28 @@
 # combines /proc stat field 22 (boot-relative starttime) with the full cmdline.
 # An ABSENT identity reads UNRESOLVED, never "dead".
 #
+# A RECORDED PID IS THE WEAKEST EVIDENCE, AND ONLY EVIDENCE *FOR* LIVENESS
+# The recorded pid is one process sampled when the slot was accepted, so it
+# stops matching for reasons that say nothing about the task: a reboot, or the
+# sampled process simply exiting while the worker runs on. "Gone" therefore
+# needs more than that mismatch. Every stronger binding is checked first, and
+# any one of them carries the live verdict on its own: HERDR_PANE_ID in a live
+# process's environment matching the task's recorded herdr_pane_id, the
+# GOTMPDIR fm-spawn exports into the pane matching its recorded tasktmp, or a
+# live process whose cwd is inside the slot. Only when none of them holds does
+# a mismatched identity read "dead".
+#
 # Usage:
 #   fm-worktree-guard.sh check <project-dir>
-#       Exit 0 when every slot treehouse would allocate is demonstrably empty.
-#       Exit 1 with an actionable refusal on stderr otherwise.
+#       Exit 0 when the pool can be allocated from safely: some available slot
+#       is demonstrably empty, or every available slot that is not is covered by
+#       explicit operator authority. Exit 1 with an actionable per-slot refusal
+#       on stderr otherwise.
+#   fm-worktree-guard.sh select <project-dir>
+#       The same decision as `check`, and on success additionally print
+#       "<slot-name><TAB><worktree-path>" for the demonstrably empty slot the
+#       caller should acquire by name. Prints nothing when the pool offers no
+#       such slot, which leaves the allocation to `treehouse get`.
 #   fm-worktree-guard.sh owner-fields <worktree>
 #       Print the worktree_owner_pid= and worktree_owner_identity= meta lines
 #       for an accepted worktree. Both values are empty when no occupant is
@@ -159,48 +191,102 @@ EOF
   return 0
 }
 
-# The firstmate task recording <worktree>, as "<id> <pid> <identity>" with the
-# pid/identity fields possibly empty. Non-zero when no task claims it.
-claiming_task() {  # <worktree-real>
-  local wt=$1 meta id claimed
+# The state/<id>.meta of the firstmate task recording <worktree>. Non-zero when
+# no task claims it.
+claiming_meta() {  # <worktree-real>
+  local wt=$1 meta claimed
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     claimed=$(fm_meta_get "$meta" worktree)
     [ -n "$claimed" ] || continue
     [ "$(real_or_raw "$claimed")" = "$wt" ] || continue
-    id=$(basename "$meta" .meta)
-    printf '%s\t%s\t%s\n' \
-      "$id" \
-      "$(fm_meta_get "$meta" worktree_owner_pid)" \
-      "$(fm_meta_get "$meta" worktree_owner_identity)"
+    printf '%s\n' "$meta"
     return 0
   done
   return 1
 }
 
-# How the apparent owner of <worktree-real> resolves, as "<state>\t<detail>":
-# alive / dead / unresolved / unclaimed. Only an identity match reads alive and
-# only a recorded identity that no longer matches reads dead; everything else is
-# unresolved, so a missing record can never be mistaken for a released slot.
+# The pid of a live process whose environment contains any of the given exact
+# <KEY>=<VALUE> entries, or non-zero when none does.
+#
+# This is how a task is recognised in a process it never recorded. Herdr injects
+# HERDR_PANE_ID into every process it manages a pane for (docs/herdr-backend.md),
+# and bin/fm-spawn.sh exports GOTMPDIR into the pane before the agent starts, so
+# either entry binds a running process to one task independently of the pid the
+# slot recorded. Two independent bindings are read on purpose: a live verdict
+# must survive losing one of them, so a backend that supplies no pane id is
+# still covered.
+#
+# Entries are compared whole - never as a prefix - so a longer id that merely
+# starts with another task's id can never be mistaken for it.
+env_bound_pid() {  # <key=value> [<key=value>...]
+  local proc_root dir pid entry binding
+  [ $# -gt 0 ] || return 1
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  [ -d "$proc_root" ] || return 1
+  for dir in "$proc_root"/[0-9]*; do
+    pid=${dir##*/}
+    [ "$pid" = "$$" ] && continue
+    [ -r "$dir/environ" ] || continue
+    # A process that exits between the readability test and the open is not an
+    # error, just one fewer candidate.
+    { exec 3< "$dir/environ"; } 2>/dev/null || continue
+    while IFS= read -r -d '' entry <&3 || [ -n "$entry" ]; do
+      for binding in "$@"; do
+        if [ "$entry" = "$binding" ]; then
+          exec 3<&-
+          printf '%s\n' "$pid"
+          return 0
+        fi
+      done
+      entry=
+    done
+    exec 3<&-
+  done
+  return 1
+}
+
+# How the apparent owner of <worktree-real> resolves, as
+# "<state>\t<id>\t<detail>": alive / dead / unresolved / unclaimed.
+#
+# Live evidence is read strongest-first, and any one source is enough, because
+# each is independently sufficient and none of them is available on every
+# backend. Only a recorded identity that no longer matches AND no live evidence
+# at all reads dead; a record that was never written reads unresolved. So a
+# missing record can never be mistaken for a released slot, and a live worker
+# can never be reported as an orphan on the strength of a stale pid alone.
 resolve_owner() {  # <worktree-real>
-  local wt=$1 row id pid identity current
-  if ! row=$(claiming_task "$wt"); then
-    printf 'unclaimed\t\n'
+  local wt=$1 meta id pid identity current pane tasktmp
+  local -a bindings=()
+  if ! meta=$(claiming_meta "$wt"); then
+    printf 'unclaimed\t\t\n'
     return 0
   fi
-  id=${row%%$'\t'*}
-  row=${row#*$'\t'}
-  pid=${row%%$'\t'*}
-  identity=${row#*$'\t'}
+  id=$(basename "$meta" .meta)
+  pid=$(fm_meta_get "$meta" worktree_owner_pid)
+  identity=$(fm_meta_get "$meta" worktree_owner_identity)
+  if [ -n "$pid" ] && [ -n "$identity" ] \
+    && current=$(fm_pid_identity "$pid" 2>/dev/null) && [ "$current" = "$identity" ]; then
+    printf 'alive\t%s\tprocess identity verified\n' "$id"
+    return 0
+  fi
+  pane=$(fm_meta_get "$meta" herdr_pane_id)
+  [ -z "$pane" ] || bindings+=("HERDR_PANE_ID=$pane")
+  tasktmp=$(fm_meta_get "$meta" tasktmp)
+  [ -z "$tasktmp" ] || bindings+=("GOTMPDIR=$tasktmp/gotmp")
+  if [ "${#bindings[@]}" -gt 0 ] && env_bound_pid "${bindings[@]}" >/dev/null; then
+    printf 'alive\t%s\tits worker process is still running\n' "$id"
+    return 0
+  fi
+  if occupant_pid "$wt" >/dev/null; then
+    printf 'alive\t%s\tprocesses are still running in it\n' "$id"
+    return 0
+  fi
   if [ -z "$pid" ] || [ -z "$identity" ]; then
-    printf 'unresolved\t%s\n' "$id"
+    printf 'unresolved\t%s\t\n' "$id"
     return 0
   fi
-  if current=$(fm_pid_identity "$pid" 2>/dev/null) && [ "$current" = "$identity" ]; then
-    printf 'alive\t%s\n' "$id"
-  else
-    printf 'dead\t%s\n' "$id"
-  fi
+  printf 'dead\t%s\t\n' "$id"
 }
 
 reclaim_authorized() {  # <worktree-real>
@@ -236,6 +322,27 @@ occupant_pid() {  # <worktree-real>
   done
   [ -n "$best" ] || return 1
   printf '%s\n' "$best"
+}
+
+# Whether a demonstrably empty <worktree> is also in the shape allocation may
+# steer to by name. `treehouse enter` does not reset the slot, so the slot must
+# already be parked where `treehouse get` would have left it: a detached HEAD or
+# the default branch, never a task branch. A slot whose directory is gone is
+# empty but cannot be entered by name at all; `treehouse get` recreates it, so
+# it is left to that path rather than selected.
+slot_parked_shape() {  # <slot-name> <worktree-real>
+  local name=$1 wt=$2 branch default
+  # The name is acquired by being typed into a shell, so only treehouse's own
+  # plain slot names are ever selected. Anything else is left to `treehouse get`
+  # rather than quoted through: this is a name that came from parsed output.
+  case "$name" in
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  [ -d "$wt" ] || return 1
+  branch=$(git --no-optional-locks -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  [ -n "$branch" ] || return 0
+  default=$(fm_landed_default_branch_name "$wt") || return 1
+  [ "$branch" = "$default" ]
 }
 
 cmd_owner_fields() {  # <worktree>
@@ -307,9 +414,44 @@ $raw
 OUTER
 }
 
-cmd_check() {  # <project-dir>
-  local proj proj_real raw total rows refusals=0 name path wt evidence owner ostate oid
+# The refusal block for one occupied slot, as it is printed to stderr.
+slot_refusal_block() {  # <name> <worktree-real> <evidence>
+  local name=$1 wt=$2 evidence=$3 owner ostate oid odetail
+  owner=$(resolve_owner "$wt")
+  ostate=${owner%%$'\t'*}
+  owner=${owner#*$'\t'}
+  oid=${owner%%$'\t'*}
+  odetail=${owner#*$'\t'}
+  printf '  slot %s: %s\n' "$name" "$wt"
+  printf '    found: %s\n' "$evidence"
+  case "$ostate" in
+    alive)
+      printf '    owner: task %s is still working here (%s)\n' "$oid" "$odetail"
+      printf '    to release: let %s finish, or tear it down with bin/fm-teardown.sh %s\n' "$oid" "$oid"
+      ;;
+    dead)
+      printf '    owner: task %s recorded this slot; its worker is gone (recorded process identity no longer matches, and nothing is running for it)\n' "$oid"
+      printf '    to release: land or discard %s'"'"'s work, then bin/fm-teardown.sh %s\n' "$oid" "$oid"
+      ;;
+    unresolved)
+      printf '    owner: task %s recorded this slot, but no process identity was recorded, so ownership is unresolved\n' "$oid"
+      printf '    to release: reconcile %s, then bin/fm-teardown.sh %s\n' "$oid" "$oid"
+      ;;
+    *)
+      printf '    owner: no firstmate task records this slot\n'
+      printf "    to release: confirm the work is landed or saved, then return the slot with 'treehouse return %s'\n" "$wt"
+      ;;
+  esac
+}
 
+# The pool decision, shared by `check` and `select` so the policy has one owner.
+# With <mode> = select, the chosen slot is printed to stdout.
+cmd_pool() {  # <mode> <project-dir>
+  local mode proj proj_real raw total rows refusals=0 name path wt evidence
+  local chosen='' report='' authorized=''
+
+  mode=$1
+  shift
   [ $# -eq 1 ] || { usage >&2; return 2; }
   proj=$1
   if ! proj_real=$(cd "$proj" 2>/dev/null && pwd -P); then
@@ -372,52 +514,53 @@ cmd_check() {  # <project-dir>
       return 1
     fi
     wt=$(real_or_raw "$path")
-    evidence=$(worktree_evidence "$wt") || continue
+    # Every slot is inspected before anything is reported: an occupied slot is
+    # only a refusal if no empty slot is found anywhere in the pool, and pool
+    # order decides nothing.
+    if ! evidence=$(worktree_evidence "$wt"); then
+      if [ -z "$chosen" ] && slot_parked_shape "$name" "$wt"; then
+        chosen=$(printf '%s\t%s' "$name" "$wt")
+      fi
+      continue
+    fi
     if reclaim_authorized "$wt"; then
-      echo "worktree guard: reclaiming slot $name ($wt) under explicit operator authority despite $evidence" >&2
+      authorized="$authorized""worktree guard: reclaiming slot $name ($wt) under explicit operator authority despite $evidence"$'\n'
       continue
     fi
     refusals=$((refusals + 1))
-    if [ "$refusals" = 1 ]; then
-      echo "error: refusing to spawn - a pool slot treehouse would hand out still holds live work." >&2
-    fi
-    owner=$(resolve_owner "$wt")
-    ostate=${owner%%$'\t'*}
-    oid=${owner#*$'\t'}
-    echo "  slot $name: $wt" >&2
-    echo "    found: $evidence" >&2
-    case "$ostate" in
-      alive)
-        echo "    owner: task $oid is still working here (process identity verified)" >&2
-        echo "    to release: let $oid finish, or tear it down with bin/fm-teardown.sh $oid" >&2
-        ;;
-      dead)
-        echo "    owner: task $oid recorded this slot; its worker is gone (recorded process identity no longer matches)" >&2
-        echo "    to release: land or discard $oid's work, then bin/fm-teardown.sh $oid" >&2
-        ;;
-      unresolved)
-        echo "    owner: task $oid recorded this slot, but no process identity was recorded, so ownership is unresolved" >&2
-        echo "    to release: reconcile $oid, then bin/fm-teardown.sh $oid" >&2
-        ;;
-      *)
-        echo "    owner: no firstmate task records this slot" >&2
-        echo "    to release: confirm the work is landed or saved, then return the slot with 'treehouse return $wt'" >&2
-        ;;
-    esac
+    report="$report$(slot_refusal_block "$name" "$wt" "$evidence")"$'\n'
   done <<EOF
 $rows
 EOF
 
+  # An empty slot is acquired BY NAME, so no other slot is in the allocation's
+  # way: an occupied one is skipped untouched rather than reset or refused, and
+  # authority no operator had to give is neither needed nor announced.
+  if [ -n "$chosen" ]; then
+    [ "$mode" = select ] && printf '%s\n' "$chosen"
+    return 0
+  fi
+
+  # Nothing to steer to, so the caller falls back to `treehouse get`, which
+  # hands out the first available slot whatever it holds. Every available slot
+  # must therefore be safe to hand out, which is the check this guard has always
+  # made.
+  [ -z "$authorized" ] || printf '%s' "$authorized" >&2
   if [ "$refusals" -ne 0 ]; then
-    echo "    Nothing was reset, cleaned, or discarded. This spawn simply did not run." >&2
-    echo "    Authorize one exact slot with FM_WORKTREE_RECLAIM_OK=<worktree-path> only after its work is safe." >&2
+    {
+      echo "error: refusing to spawn - every pool slot treehouse would hand out still holds live work."
+      printf '%s' "$report"
+      echo "    Nothing was reset, cleaned, or discarded. This spawn simply did not run."
+      echo "    Authorize one exact slot with FM_WORKTREE_RECLAIM_OK=<worktree-path> only after its work is safe."
+    } >&2
     return 1
   fi
   return 0
 }
 
 case "${1:-}" in
-  check) shift; cmd_check "$@" ;;
+  check) shift; cmd_pool check "$@" ;;
+  select) shift; cmd_pool select "$@" ;;
   owner-fields) shift; cmd_owner_fields "$@" ;;
   -h|--help|help) usage ;;
   *) usage >&2; exit 2 ;;

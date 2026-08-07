@@ -683,6 +683,17 @@ SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+SLOT_HOLDER_PID=
+
+# Stop occupying the chosen pool slot. Called as soon as the pane's own shell is
+# inside it, and again from the abort path so an aborted spawn never leaves the
+# slot looking in-use to the rest of the fleet.
+release_slot_holder() {
+  [ -n "$SLOT_HOLDER_PID" ] || return 0
+  kill "$SLOT_HOLDER_PID" 2>/dev/null || true
+  wait "$SLOT_HOLDER_PID" 2>/dev/null || true
+  SLOT_HOLDER_PID=
+}
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -703,6 +714,7 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  release_slot_holder
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
@@ -1329,15 +1341,35 @@ real_path_or_raw() {  # <path>
   fi
 }
 
-# Pool-allocation safety, BEFORE any endpoint exists. `treehouse get` resets a
-# slot as part of acquiring it, so the only place this can be checked is ahead
-# of the allocation - by the time the pane's cwd reveals the worktree, an
-# unlanded branch has already been detached. Running it here (rather than beside
-# the `treehouse get` send below) also means a refusal never leaves an orphan
-# window behind. Secondmate spawns own their home, and Orca owns its own
-# worktree, so neither goes through the treehouse pool.
+# Pool allocation, BEFORE any endpoint exists. `treehouse get` resets a slot as
+# part of acquiring it, so the only place this can be decided is ahead of the
+# allocation - by the time the pane's cwd reveals the worktree, an unlanded
+# branch has already been detached. Running it here (rather than beside the
+# acquire below) also means a refusal never leaves an orphan window behind.
+# Secondmate spawns own their home, and Orca owns its own worktree, so neither
+# goes through the treehouse pool.
+#
+# The guard both refuses and CHOOSES: `treehouse get` takes no slot argument and
+# hands out the first available slot, so one parked slot would otherwise
+# blockade a pool whose later slots are empty. A named slot is entered by name
+# below; empty output means the pool offered nothing to steer to and the
+# allocation falls back to `treehouse get`.
+WT_SLOT_NAME=
+WT_SLOT_REAL=
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  "$FM_ROOT/bin/fm-worktree-guard.sh" check "$PROJ_ABS_REAL" || exit 1
+  wt_selection=$("$FM_ROOT/bin/fm-worktree-guard.sh" select "$PROJ_ABS_REAL") || exit 1
+  if [ -n "$wt_selection" ]; then
+    WT_SLOT_NAME=${wt_selection%%$'\t'*}
+    WT_SLOT_REAL=$(real_path_or_raw "${wt_selection#*$'\t'}")
+    # Hold the chosen slot from the moment it is chosen until the pane's own
+    # shell is inside it. treehouse reports a slot in-use, and `get` skips it,
+    # while ANY process's cwd is inside it (docs/verification/worktree-allocation.md),
+    # so this occupies the slot across the window in which another home's
+    # `treehouse get` could otherwise still take it. The abort path releases it
+    # too, so a spawn that never got started leaves nothing occupied.
+    ( cd "$WT_SLOT_REAL" 2>/dev/null && exec sleep 300 ) >/dev/null 2>&1 &
+    SLOT_HOLDER_PID=$!
+  fi
 fi
 
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
@@ -1769,7 +1801,14 @@ kimi_spawn_fail() {  # <detail>
 }
 
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  if [ -n "$WT_SLOT_NAME" ]; then
+    # `enter` is deliberate: unlike `get` it acquires the slot chosen above
+    # without resetting it, so the slot base placement further below stays the
+    # only thing that moves this worktree's HEAD.
+    spawn_send_text_line "$WT_TARGET" "treehouse enter $(shell_quote "$WT_SLOT_NAME")"
+  else
+    spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  fi
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -1791,12 +1830,17 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # a mismatch just becomes the new candidate rather than resetting the wait, so a
   # pane that is already settled by the first real read only costs the one existing
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
+  #
+  # When a slot was chosen by name, the pane must arrive at THAT slot: any other
+  # path means the pane went somewhere this spawn never inspected, which is
+  # exactly what must never be recorded as the worktree.
   candidate=""
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
-      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
+      if [ "$p_real" != "$PROJ_ABS_REAL" ] \
+         && { [ -z "$WT_SLOT_REAL" ] || [ "$p_real" = "$WT_SLOT_REAL" ]; }; then
         if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
           WT="$p"
           break
@@ -1810,8 +1854,13 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     fi
     sleep 1
   done
+  release_slot_holder
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    if [ -n "$WT_SLOT_NAME" ]; then
+      echo "error: 'treehouse enter $WT_SLOT_NAME' did not enter $WT_SLOT_REAL within 60s; inspect window $T" >&2
+    else
+      echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    fi
     exit 1
   fi
 

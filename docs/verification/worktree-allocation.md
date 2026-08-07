@@ -34,6 +34,56 @@ handed out -> .../repo-5c2ced/2/repo
 A check placed where the path becomes known therefore inspects a slot whose evidence has already been erased, and passes every time.
 This is why the guard is a pre-allocation check over the slots treehouse reports allocatable, not a post-acquire inspection of the accepted worktree.
 
+## How the slot is chosen, and why `enter` is what acquires it
+
+Verified 2026-08-07 against treehouse v2.1.0, in an isolated throwaway pool with `max_trees = 4`.
+
+`get` takes no slot argument and hands out the lowest-numbered available slot, so one parked slot early in the pool blockades every later empty one.
+Measured with slot 1 on an unlanded branch, slot 2 clean, and slot 3 on an unlanded branch:
+
+```
+$ treehouse status                      # 1, 2, 3 all "available"
+$ treehouse get --lease --lease-holder pick
+.../proj-43a5c8/1/proj                  # the parked slot, not the clean one
+$ git -C .../1/proj symbolic-ref --short HEAD || git -C .../1/proj rev-parse --short HEAD
+detached at 211db19                     # the branch was detached out from under it
+```
+
+`enter <name>` acquires a named slot without that reset, which is what makes steering possible:
+
+```
+$ treehouse enter --print-path 3
+.../proj-43a5c8/3/proj
+$ git -C .../3/proj symbolic-ref --short HEAD
+fm/work-3                              # untouched, and status still reports it "available"
+```
+
+Because `enter` leaves pool state untouched, the acquiring claim is the occupancy itself.
+A slot is reported `in-use` and skipped by `get` while any process's cwd is inside it - a bare `sleep` is enough:
+
+```
+$ (cd .../2/proj && sleep 120 &)
+$ treehouse status
+2     in-use       .../proj-43a5c8/2/proj
+                   sleep (3783741)
+$ treehouse get --lease --lease-holder pick2
+🌳 Leased worktree at .../proj-43a5c8/3/proj      # 2 was skipped
+```
+
+`bin/fm-spawn.sh` therefore holds the chosen slot with one short-lived process of its own from the moment it chooses the slot until the pane's own shell is inside it, which is the only window in which another home's `get` could still take it.
+`get` and `enter` differ in nothing else that matters here: neither removes ignored files, and treehouse's config carries no setup hooks (`treehouse init` writes only `max_trees` and `root`).
+The slot is still placed at the resolved slot base by `fm-spawn.sh` itself, under its own guards, so nothing depends on `get`'s reset.
+
+The release side is unchanged, because `treehouse return` is addressed by path and does not care how the slot was acquired.
+A slot acquired by `enter` alone, carrying a branch and live processes, was returned by exactly the call `bin/fm-teardown.sh` makes:
+
+```
+$ treehouse return --force .../proj-43a5c8/3/proj
+🌳 Terminated lingering processes: bash (478542), sleep (478546)
+🌳 Worktree returned to pool.
+$ treehouse status          # 3 available again, HEAD detached back at the default branch
+```
+
 ## What treehouse already protects, and what it does not
 
 Verified 2026-08-02 against treehouse v2.1.0.
@@ -173,12 +223,23 @@ Either one not being resolvable is a refusal with the missing dependency named, 
 A recorded pid alone cannot establish ownership across a restart: the kernel reissues pid numbers, so a pre-restart pid often resolves to an unrelated live process and reads as falsely alive.
 `bin/fm-spawn.sh` therefore records `worktree_owner_pid` and `worktree_owner_identity` in `state/<id>.meta`, and the guard compares the recorded identity with `fm_pid_identity` (`bin/fm-wake-lib.sh`) rather than probing the pid.
 
-Only an identity match reads alive, and only a recorded identity that no longer matches reads dead.
 An absent record reads unresolved, never as a released slot, so a home that has never recorded an identity cannot have its slots reclaimed on that basis.
+
+A recorded pid is also the weakest evidence available, and only ever evidence *for* liveness.
+It names one process sampled when the slot was accepted, so it stops matching for reasons that say nothing about the task: a reboot, or that sampled process simply exiting while the worker runs on.
+Measured 2026-08-04 in this fleet, a slot whose worker was live and driving a validation pipeline was reported as `its worker is gone (recorded process identity no longer matches)`.
+Stronger bindings are therefore read first, and any one of them carries the live verdict alone:
+
+- `HERDR_PANE_ID` in a live process's `/proc/<pid>/environ` matching the task's recorded `herdr_pane_id`. Herdr injects it into every process it manages a pane for (`docs/herdr-backend.md`).
+- `GOTMPDIR` matching `<tasktmp>/gotmp`, which `bin/fm-spawn.sh` exports into the pane before the agent starts, so a backend that records no pane id is still covered.
+- A live process whose cwd is inside the slot.
+
+Only a mismatched identity with none of those present reads dead.
+`tests/fm-worktree-guard.test.sh` case (s3) pins each binding carrying the verdict on its own, with a negative control per binding and a near-miss value that must not read alive.
 
 ## Boundaries this guard does not cross
 
-The guard never resets, cleans, forces, discards, or releases a slot; it only refuses a spawn.
+The guard never resets, cleans, forces, discards, or releases a slot; it only names one to allocate, or refuses the spawn.
 `bin/fm-teardown.sh` remains the sole releaser of a slot holding work and the owner of the complete landed-work test.
 The guard deliberately asks the strictly weaker, offline question "is this slot demonstrably empty?", so it neither restates nor weakens that contract.
 It shares only the containment instrument with teardown, never teardown's policy: teardown refreshes the remote first and measures against it, which the guard must not do because it inspects every available slot before every spawn.
