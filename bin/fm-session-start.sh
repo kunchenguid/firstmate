@@ -12,9 +12,10 @@
 # belong in a script, not in N agent turns.
 #
 # COMPOSITION, NOT DUPLICATION: this script calls fm-lock.sh, fm-bootstrap.sh,
-# and fm-wake-drain.sh as real subprocesses and prints their real output. It
-# never re-implements their logic; all sequencing/formatting logic added here
-# stays local to this file. Those three scripts remain fully working
+# fm-wake-drain.sh, and fm-startup-network.sh as real subprocesses and prints
+# their real output. It never re-implements their logic; all
+# sequencing/formatting logic added here stays local to this file. Those four
+# scripts remain fully working
 # standalone with unchanged default behavior - other flows (fm-bootstrap.sh
 # install <tools> after consent, /updatefirstmate, the afk daemon, existing
 # tests) still call them directly. The one seam this script needed -
@@ -33,7 +34,8 @@
 #                       (legacy PR-check migration, secondmate convergence,
 #                       secondmate liveness, pending remote handoff retry,
 #                       X-mode artifact writes, fleet sync) also run only when
-#                       locked.
+#                       locked; the four network sweeps run in the deferred
+#                       stage rather than this synchronous bootstrap section.
 #   3. wake-drain     - mutates the durable wake queue, so it also only runs
 #                       when locked.
 #   4. supervision-instructions - the one emitted operating block for the
@@ -44,15 +46,36 @@
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       state/.afk, and a cheap per-task endpoint-liveness read:
 #                       read-only, always runs.
-#   7. context digest - data/projects.md, data/secondmates.md, data/captain.md,
+#   7. network checks - the result of the deferred network stage started back at
+#                       step 1, harvested WITHOUT waiting for it.
+#   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
 #                       data/captain-shared.md, data/learnings.md: read-only,
 #                       always safe, always runs.
-#   8. closing reminder - prints the context-specific watcher next step; this
+#   9. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
 #
-# Those eight names are also the runtime-bound stage list below, so a truncated
+# Those nine names are also the runtime-bound stage list below, so a truncated
 # startup can name exactly which of them never ran.
+#
+# NO NETWORK ON THE BLOCKING PATH. This digest runs on a session-open hook that
+# blocks session initialization, so anything it waits for is time the captain
+# waits before the first turn - and every external-network call it used to make
+# was individually unbounded. One unreachable remote secondmate could burn the
+# entire FM_SESSION_START_TIMEOUT and truncate the digest, so a slow network
+# could cost the work queue itself.
+# So no step between here and the last line below makes an external-network
+# call. The five that did - `gh auth status`, secondmate liveness, secondmate
+# convergence, pending remote handoff delivery, and the fleet-sync fetch - are
+# started as one detached bounded worker right after the lock (step 1) and
+# harvested at step 7 without ever blocking on it. bin/fm-startup-network.sh
+# owns that stage and its safety argument; bin/fm-bootstrap.sh remains the owner
+# of the sweeps themselves and still runs every one of them.
+# The digest is therefore composed from local reads and local subprocesses only,
+# and an unreachable host now delays a reported check rather than the startup.
+# What this deliberately trades: on a slow network the digest prints "IN
+# PROGRESS" and names exactly which checks are not yet confirmed, instead of
+# waiting for them. It never reports an unconfirmed check as passed.
 #
 # ORDERING, and why FLEET STATE now runs before CONTEXT: this digest is
 # delivered through a harness that truncates an oversized payload from the TAIL,
@@ -86,11 +109,12 @@
 #
 # The tradeoff this ordering accepts: a refused (read-only) session must not
 # go dark. So on refusal, bootstrap still runs (in FM_BOOTSTRAP_DETECT_ONLY=1
-# mode) for its read-only detect lines - missing tools, gh auth, the
-# worktree-tangle check, the harness override, crew-dispatch validation,
-# tasks-axi and quota-axi tool checks, and tasks-axi availability - none of
-# which mutate shared state and all of which are safe to compute without
-# verified lock ownership.
+# mode) for its local read-only detect lines - missing tools, the worktree-tangle
+# check, the harness override, crew-dispatch validation, tasks-axi and quota-axi
+# tool checks, and tasks-axi availability - none of which mutate shared state
+# and all of which are safe to compute without verified lock ownership.
+# It deliberately skips the network-only GitHub-auth probe because a read-only
+# session has no dispatch, spawn, steer, or merge action for that verdict to gate.
 # Only projection cleanup, the six bootstrap mutating sweeps, and the
 # wake-queue drain are skipped.
 # The context and fleet-state digests
@@ -137,11 +161,13 @@
 # RUNTIME BOUND: the digest is now executed on a session-open hook (see
 # bin/fm-sessionstart-run.sh), which blocks session initialization while it
 # runs, so an unbounded digest is no longer merely slow - it can strand a whole
-# session behind one hung subprocess. Not every step is individually bounded:
-# bootstrap's fleet sync is, but its `gh auth status` probe, tool version
-# probes, and secondmate liveness reads are not, and neither are the backlog
-# listing or the per-task endpoint reads. So the whole digest runs as ONE
-# bounded child of this script (FM_SESSION_START_TIMEOUT, default 120s). The
+# session behind one hung subprocess. Every remaining step is local, but local is
+# not the same as bounded: tool version probes, the backlog listing, and the
+# per-task endpoint reads are all unbounded subprocesses. So the whole digest
+# still runs as ONE bounded child of this script (FM_SESSION_START_TIMEOUT,
+# default 120s). The deferred network stage deliberately sits OUTSIDE that bound,
+# in its own process group under its own aggregate deadline, so a truncated
+# digest neither waits for it nor orphans it unbounded. The
 # child writes the digest straight to this script's stdout, so everything it
 # emitted before the bound was hit is already delivered; the parent then prints
 # a loud STARTUP TRUNCATED banner naming the stage that did not finish and the
@@ -201,7 +227,7 @@ done
 # The ordered stage list is the contract behind the truncation banner: the child
 # names the stage it is entering, and the parent reports every stage at or after
 # that one as never emitted. Keep it in the exact order the digest prints.
-SESSION_START_STAGES='lock bootstrap wake-queue supervision-instructions read-once fleet-state context next-step'
+SESSION_START_STAGES='lock bootstrap wake-queue supervision-instructions read-once fleet-state network-checks context next-step'
 
 stage() {  # <stage-name>: breadcrumb for the parent's truncation banner
   [ -n "${FM_SESSION_START_STAGE_FILE:-}" ] || return 0
@@ -263,6 +289,15 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
+
+# One tasks-axi compatibility verdict per session start. The probe costs three
+# tasks-axi subprocesses and this digest needs the same answer twice - here for
+# the backlog listing and again inside the fm-bootstrap.sh child, which reports
+# an incompatible build as MISSING. Computing it once and handing it to that
+# child collapses six subprocesses to three. fm-tasks-axi-lib.sh owns both reuse
+# layers and the one-hop consumption rule that keeps the verdict out of any
+# agent's environment.
+if fm_tasks_axi_compatible; then TASKS_AXI_COMPATIBLE=1; else TASKS_AXI_COMPATIBLE=0; fi
 
 STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
 case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
@@ -508,19 +543,37 @@ if [ "$READ_ONLY" -eq 0 ]; then
     rm -f "$COMPLETION_FILE" 2>/dev/null || true
   fi
   fm_trace_context_session_start "$CONFIG" "$STATE/.trace-context-effective"
+  # Every network call this session start owes is launched HERE, detached and
+  # bounded, so it runs concurrently with the whole digest below instead of in
+  # front of it. Step 7 harvests whatever it has finished, without ever waiting.
+  # --reemit passes --locked 0 for the same reason it runs bootstrap detect-only:
+  # this process already ran the mutating sweeps at its own startup, so only the
+  # read-only GitHub-auth probe is owed. A read-only session starts nothing at
+  # all: it holds no mutation authority for the sweeps, and it must not spawn,
+  # steer, or merge anyway, so it has no action left for an auth verdict to gate.
+  NETWORK_STAGE_LOCKED=1
+  [ "$REEMIT" -eq 0 ] || NETWORK_STAGE_LOCKED=0
+  "$SCRIPT_DIR/fm-startup-network.sh" start \
+    --locked "$NETWORK_STAGE_LOCKED" --harvest-pid $$ >/dev/null 2>&1 || true
 fi
 
 # --- 2. bootstrap --------------------------------------------------------
+# FM_BOOTSTRAP_NETWORK=skip on every path: bootstrap's own network half is what
+# the deferred stage above is running right now, and running it twice would both
+# re-block this digest and race the worker's sweeps against themselves.
 stage bootstrap
 subsection "BOOTSTRAP"
 if [ "$READ_ONLY" -eq 1 ]; then
-  BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
+  BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
+    FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
 elif [ "$REEMIT" -eq 1 ]; then
-  BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_LOCKED=1 "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
+  BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_LOCKED=1 FM_BOOTSTRAP_NETWORK=skip \
+    FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
 else
   BOOT_OUT=$(
     "$SCRIPT_DIR/fm-herdr-session-cleanup.sh" 2>&1 || true
-    "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1
+    FM_BOOTSTRAP_NETWORK=skip FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" \
+      "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1
   )
 fi
 if [ -n "$BOOT_OUT" ]; then
@@ -609,6 +662,8 @@ Go to a source directly only when:
     printed with its tail),
   - a full task body is needed (tasks-axi show <id> --full, or data/backlog.md),
   - the backlog listing disclosed omitted queued items and this turn needs them,
+  - the NETWORK CHECKS section reported its checks still IN PROGRESS and this
+    turn needs their verdict (bin/fm-startup-network.sh report),
   - or a STARTUP TRUNCATED banner named the stage that would have printed it, in
     which case that stage's sources were never emitted and must be reconciled.
 EOF
@@ -687,7 +742,26 @@ if fm_pf_relay_active "$FM_HOME" \
   fi
 fi
 
-# --- 7. context digest -----------------------------------------------------
+# --- 7. network checks ------------------------------------------------------
+# Deliberately here and not later: these lines are actionable (a stuck clone, a
+# secondmate that could not be relaunched, broken GitHub auth), and the section
+# after this one is the curated memory a truncated tail is meant to take first.
+# Deliberately here and not earlier: this is the last point in the digest, so the
+# worker started at step 1 has had the whole composition above to finish in. It
+# is a NON-BLOCKING read either way - whatever the worker has published by now is
+# printed, and whatever it has not is named as not yet confirmed.
+stage network-checks
+section "NETWORK CHECKS"
+if [ "$READ_ONLY" -eq 1 ]; then
+  printf 'skipped (read-only session) - GitHub authentication, project clone refresh,\n'
+  printf 'secondmate liveness and convergence, and pending handoff delivery were not run.\n'
+  printf 'They need the fleet lock, and this session must not spawn, steer, or merge, so it\n'
+  printf 'has no action they would gate. The session holding the lock runs them.\n'
+else
+  "$SCRIPT_DIR/fm-startup-network.sh" harvest --pid $$ 2>&1 || true
+fi
+
+# --- 8. context digest -----------------------------------------------------
 # Last of the bulk sections deliberately: curated memory is stable session to
 # session, already governed by config/startup-memory-budget, and recoverable
 # with one targeted read, so it is the cheapest thing for a truncated tail to
@@ -700,7 +774,7 @@ print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
 
-# --- 8. closing reminder -----------------------------------------------
+# --- 9. closing reminder -----------------------------------------------
 stage next-step
 section "NEXT STEP"
 if [ "$READ_ONLY" -eq 1 ]; then
