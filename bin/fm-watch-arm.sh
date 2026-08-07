@@ -223,12 +223,9 @@ cycle_mark_predecessor_successor() {
 }
 
 clear_stale_recorded_watcher_lock() {
-  local lock_home lock_path lock_identity
-  lock_home=$(cat "$WATCH_LOCK/fm-home" 2>/dev/null || true)
-  lock_path=$(cat "$WATCH_LOCK/watcher-path" 2>/dev/null || true)
+  local lock_identity
+  fm_watcher_lock_matches_owner "$STATE" "$WATCH" "$FM_HOME" || return 0
   lock_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
-  [ "$lock_home" = "$FM_HOME" ] || return 0
-  [ "$lock_path" = "$WATCH" ] || return 0
   [ -n "$lock_identity" ] || return 0
   fm_recovery_transition "$STATE/.watcher-down" clear-stale-lock "$WATCH_LOCK" downtime
 }

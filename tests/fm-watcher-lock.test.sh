@@ -537,6 +537,47 @@ test_watch_restart_rejects_reused_pid() {
   pass "watch restart preserves recovery without signaling a reused pid"
 }
 
+test_watch_restart_reclaims_aliased_reused_pid_lock() {
+  local dir canonical_home alias_home state fakebin out live pid i lock_pid
+  dir=$(make_case restart-aliased-reused-pid)
+  canonical_home="$dir/GitHub/firstmate"
+  alias_home="$dir/github/firstmate"
+  state="$canonical_home/state"
+  fakebin="$dir/fakebin"
+  out="$dir/restart.out"
+  mkdir -p "$state"
+  if [ ! -d "$alias_home" ]; then
+    alias_home="$dir/home-link"
+    ln -s "$canonical_home" "$alias_home"
+    printf 'skip: restart GitHub/github case fixture requires a case-insensitive filesystem; exercising symlink alias\n'
+  fi
+  mark_pr_check_migration_complete "$state"
+  sleep 300 &
+  live=$!
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$live" > "$state/.watch.lock/pid"
+  printf '%s\n' "$canonical_home" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "stale watcher identity" > "$state/.watch.lock/pid-identity"
+  PATH="$fakebin:$PATH" FM_HOME="$alias_home" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --restart > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$out" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  { [ -n "$lock_pid" ] && [ "$lock_pid" != "$live" ] && kill -0 "$lock_pid" 2>/dev/null; } \
+    || fail "restart did not replace aliased reused-pid lock with a live watcher (got '$lock_pid')"
+  grep -F "watcher: started pid=$lock_pid" "$out" >/dev/null || fail "restart did not report the fresh watcher it confirmed"
+  is_live_non_zombie "$live" || fail "restart killed a reused unrelated pid through an owner alias"
+  kill "$pid" "$lock_pid" "$live" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "watch restart reclaims an aliased reused-pid lock without signaling its pid"
+}
+
 test_watch_restart_attaches_to_healthy_peer() {
   local dir state fakebin out peer_ready peer identity armpid status i
   dir=$(make_case restart-healthy-peer)
@@ -1201,6 +1242,7 @@ test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
+test_watch_restart_reclaims_aliased_reused_pid_lock
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
 test_arm_self_eviction_is_loud_without_successor

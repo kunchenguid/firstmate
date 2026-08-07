@@ -124,21 +124,27 @@ fm_watcher_canonical_path() {
   return 1
 }
 
-FM_WATCHER_MATCHED_IDENTITY=
-fm_watcher_lock_matches_pid() {
-  local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
+fm_watcher_lock_matches_owner() {
+  local state=$1 watch_path=$2 home=${3:-$FM_HOME} lockdir lock_home lock_path
   local canonical_home canonical_watch canonical_lock_home canonical_lock_path
-  FM_WATCHER_MATCHED_IDENTITY=
   lockdir="$state/.watch.lock"
   lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
-  lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
   canonical_home=$(fm_watcher_canonical_path "$home") || return 1
   canonical_watch=$(fm_watcher_canonical_path "$watch_path") || return 1
   canonical_lock_home=$(fm_watcher_canonical_path "$lock_home") || return 1
   canonical_lock_path=$(fm_watcher_canonical_path "$lock_path") || return 1
   [ "$canonical_lock_home" = "$canonical_home" ] || return 1
   [ "$canonical_lock_path" = "$canonical_watch" ] || return 1
+}
+
+FM_WATCHER_MATCHED_IDENTITY=
+fm_watcher_lock_matches_pid() {
+  local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_identity current_identity
+  FM_WATCHER_MATCHED_IDENTITY=
+  lockdir="$state/.watch.lock"
+  fm_watcher_lock_matches_owner "$state" "$watch_path" "$home" || return 1
+  lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
   [ -n "$lock_identity" ] || return 1
   current_identity=$(fm_pid_identity "$pid") || return 1
   [ "$current_identity" = "$lock_identity" ] || return 1
@@ -149,16 +155,13 @@ FM_WATCHER_HEALTHY_PID=
 FM_WATCHER_HEALTHY_IDENTITY=
 fm_watcher_healthy() {
   local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid identity age
-  local canonical_home canonical_watch
   FM_WATCHER_HEALTHY_PID=
   FM_WATCHER_HEALTHY_IDENTITY=
   lockdir="$state/.watch.lock"
   beat="$state/.last-watcher-beat"
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   fm_pid_alive "$pid" || return 1
-  canonical_home=$(fm_watcher_canonical_path "$home") || return 1
-  canonical_watch=$(fm_watcher_canonical_path "$watch_path") || return 1
-  fm_watcher_lock_matches_pid "$state" "$canonical_watch" "$pid" "$canonical_home" || return 1
+  fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home" || return 1
   identity=$FM_WATCHER_MATCHED_IDENTITY
   age=$(fm_path_age "$beat")
   [ "$age" -lt "$grace" ] || return 1
