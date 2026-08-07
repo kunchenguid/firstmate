@@ -7,34 +7,17 @@
 # shared guard's blind-turn signal must be translated into the mechanism
 # cursor does honour: a JSON body on stdout with a `followup_message`.
 #
-# This shim (verified against cursor-agent 2026.07.23-e383d2b, 2026-08-05):
-#   1. reads the cursor stop payload from stdin;
-#   2. pins `stop_hook_active: false` for the shared guard so the predicate is
-#      evaluated on EVERY stop, including a forced follow-up turn: the arm is
-#      stop-hook-owned, so a continuation whose own supervision need is real
-#      must re-arm rather than end blind (the Claude --claude-mode lesson,
-#      bin/fm-turnend-guard.sh:41-46). The shim owns the bound instead, in a
-#      per-session chain record under state/ (keys
-#      session/total/fail/wake/reason, reset on session mismatch): consecutive
-#      loud arm-failure follow-ups (FM_CURSOR_TURNEND_BLOCK_BUDGET) and
-#      consecutive repeats of the SAME unchanged wake reason
-#      (FM_CURSOR_WAKE_CHAIN_BUDGET, a diagnostic follow-up at the ceiling that
-#      also clears the record so the next chain starts normal again). A new
-#      distinct wake reason is progress and does not consume the unified count;
-#      failures and re-firing any previously seen reason add to it, so alternating
-#      failures and wakes cannot evade the ceiling. An allowed stop or a
-#      non-continuation stop (loop_count 0, i.e. a captain-driven turn) clears the
-#      record. If the record cannot be persisted, a positive payload loop_count
-#      supplies the fallback count;
-#      absent or malformed loop_count never disables the persistent bound.
-#   3. runs bin/fm-turnend-guard.sh with the normalized payload;
-#   4. on exit 2 (a blind turn), foregrounds bin/fm-watch-arm.sh inside the
-#      hook-owned process tree - parked while the watcher arms, never shell
-#      & - then re-runs bin/fm-turnend-guard.sh against the post-arm state;
-#   5. emits a normal wake followup when the arm reports a typed actionable
-#      reason but the re-run still needs the model; a failed or untyped arm
-#      keeps the loud guard banner, and only a vanished need or healthy watcher
-#      emits {}.
+# Contract (verified against cursor-agent 2026.07.23-e383d2b, 2026-08-05): read
+# the stop payload, pin `stop_hook_active: false` so the shared predicate is
+# evaluated on EVERY stop, run bin/fm-turnend-guard.sh, and on a blind turn
+# foreground bin/fm-watch-arm.sh inside the hook-owned process tree before
+# re-judging. Because the arm is stop-hook-owned rather than budgeted by
+# cursor's own `loop_limit`, this shim owns the continuation bound itself, in a
+# session-scoped chain record under state/.
+#
+# docs/supervision-protocols/cursor.md is the single owner of that algorithm:
+# the chain record's keys, both budgets, what counts as progress, and how the
+# ceilings clear. Read it before changing any bound here.
 #
 # The translation layer is the grok-shim pattern (bin/fm-turnend-guard-grok.sh):
 # a thin layer, zero changes to the shared predicate. The arm/park follows the
@@ -376,9 +359,7 @@ else
   fi
 fi
 # Render the reason as one JSON string: cursor shows the followup_message
-# verbatim in the pane.
-REASON=${REASON//\\/\\\\}
-REASON=${REASON//\"/\\\"}
+# verbatim in the pane, on one line.
 REASON=$(printf '%s' "$REASON" | tr '\n' ' ')
-printf '{"followup_message":"%s"}\n' "$REASON"
+jq -cn --arg msg "$REASON" '{followup_message:$msg}'
 exit 0

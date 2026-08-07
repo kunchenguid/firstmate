@@ -1272,70 +1272,48 @@ test_cursor_shim_hard_bound_ends_a_runaway_chain() {
   pass "fm-turnend-guard-cursor: alternating arm outcomes share one persistent hard bound"
 }
 
-test_cursor_shim_bounds_nonconsecutive_wake_refires() {
+# One re-fire path, three wake shapes. Each shape stays under its ceiling while
+# the chain is still progressing, reaches its diagnostic when the re-fires
+# exhaust the bound, and clears the record rather than latching. <ceiling-text>
+# names which ceiling that shape is expected to reach: a previously-seen reason
+# re-firing non-consecutively reaches the unified TOTAL ceiling, while a reason
+# whose only variation is a changing detail canonicalizes to one key and
+# reaches the per-reason repeat ceiling.
+run_cursor_shim_wake_refire_case() {  # <slug> <arm-stub-installer> <turns-under-ceiling> <ceiling-text> <description>
+  local slug=$1 stub=$2 under=$3 ceiling_text=$4 desc=$5
   local dir out i
-  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-wake-refires")
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-$slug")
   CURSOR_FIXTURE_DIR=$dir
   : > "$dir/state/task1.meta"
-  install_alternating_actionable_arm_stub "$dir"
-  for i in 1 2 3 4; do
+  "$stub" "$dir"
+  i=1
+  while [ "$i" -le "$under" ]; do
     out=$(cursor_shim_stop "$i" env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
-    assert_not_contains "$out" "bounded chain" \
-      "distinct first-seen wake $i must not reach the diagnostic ceiling"
+    assert_not_contains "$out" "$ceiling_text" \
+      "$desc: progressing wake $i must not reach the ceiling"
+    i=$((i + 1))
   done
-  out=$(cursor_shim_stop 5 env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
-  assert_contains "$out" "diagnostic ceiling" \
-    "non-consecutive wake re-fires must reach the diagnostic ceiling"
-  out=$(cursor_shim_stop 6 env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
+  out=$(cursor_shim_stop "$i" env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
+  assert_contains "$out" "$ceiling_text" \
+    "$desc: the re-fires must reach the ceiling diagnostic"
+  out=$(cursor_shim_stop "$((i + 1))" env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
   assert_contains "$out" "firstmate watcher wake" \
-    "the next chain must restart after a non-consecutive re-fire ceiling"
-  assert_not_contains "$out" "bounded chain" \
-    "the cleared re-fire ceiling must not latch"
-  pass "fm-turnend-guard-cursor: non-consecutive wake re-fires share the persistent bound"
+    "$desc: the next chain must restart after the ceiling"
+  assert_not_contains "$out" "$ceiling_text" \
+    "$desc: the cleared ceiling must not latch"
+  pass "fm-turnend-guard-cursor: $desc"
 }
 
-test_cursor_shim_bounds_dynamic_wake_refires() {
-  local dir out i
-  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-dynamic-wake-refires")
-  CURSOR_FIXTURE_DIR=$dir
-  : > "$dir/state/task1.meta"
-  install_dynamic_stale_arm_stub "$dir"
-  for i in 1 2; do
-    out=$(cursor_shim_stop "$i" env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
-    assert_not_contains "$out" "keeps re-firing" \
-      "dynamic stale wake $i under the chain ceiling must stay normal"
-  done
-  out=$(cursor_shim_stop 3 env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
-  assert_contains "$out" "keeps re-firing" \
-    "changing stale diagnostics must still count as one re-firing wake reason"
-  out=$(cursor_shim_stop 4 env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
-  assert_contains "$out" "firstmate watcher wake" \
-    "the dynamic wake ceiling must clear state before the next chain"
-  assert_not_contains "$out" "keeps re-firing" \
-    "the cleared dynamic wake ceiling must not latch"
-  pass "fm-turnend-guard-cursor: dynamic wake diagnostics share a canonical bound key"
-}
-
-test_cursor_shim_bounds_procevent_wake_refires() {
-  local dir out i
-  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-procevent-refires")
-  CURSOR_FIXTURE_DIR=$dir
-  : > "$dir/state/task1.meta"
-  install_dynamic_procevent_arm_stub "$dir"
-  for i in 1 2; do
-    out=$(cursor_shim_stop "$i" env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
-    assert_not_contains "$out" "keeps re-firing" \
-      "process-event wake $i under the chain ceiling must stay normal"
-  done
-  out=$(cursor_shim_stop 3 env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
-  assert_contains "$out" "keeps re-firing" \
-    "new process-event sequences must still count as one re-firing wake reason"
-  out=$(cursor_shim_stop 4 env FM_CURSOR_TURNEND_BLOCK_BUDGET=1 FM_CURSOR_WAKE_CHAIN_BUDGET=2)
-  assert_contains "$out" "firstmate watcher wake" \
-    "the process-event wake ceiling must clear state before the next chain"
-  assert_not_contains "$out" "keeps re-firing" \
-    "the cleared process-event wake ceiling must not latch"
-  pass "fm-turnend-guard-cursor: process-event sequence details share a canonical bound key"
+test_cursor_shim_bounds_wake_refires() {
+  run_cursor_shim_wake_refire_case wake-refires \
+    install_alternating_actionable_arm_stub 4 "diagnostic ceiling" \
+    "non-consecutive wake re-fires share the persistent bound"
+  run_cursor_shim_wake_refire_case dynamic-wake-refires \
+    install_dynamic_stale_arm_stub 2 "keeps re-firing" \
+    "dynamic wake diagnostics share a canonical bound key"
+  run_cursor_shim_wake_refire_case procevent-refires \
+    install_dynamic_procevent_arm_stub 2 "keeps re-firing" \
+    "process-event sequence details share a canonical bound key"
 }
 
 test_cursor_shim_persists_bound_without_valid_loop_count() {
@@ -2497,9 +2475,7 @@ test_cursor_shim_bounds_the_actionable_wake_chain
 test_cursor_shim_distinct_wakes_do_not_hit_the_chain_ceiling
 test_cursor_shim_fresh_turn_resets_the_wake_chain
 test_cursor_shim_hard_bound_ends_a_runaway_chain
-test_cursor_shim_bounds_nonconsecutive_wake_refires
-test_cursor_shim_bounds_dynamic_wake_refires
-test_cursor_shim_bounds_procevent_wake_refires
+test_cursor_shim_bounds_wake_refires
 test_cursor_shim_persists_bound_without_valid_loop_count
 test_cursor_shim_rejects_fractional_loop_count
 test_cursor_shim_failure_budget_is_session_scoped
