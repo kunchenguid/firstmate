@@ -74,10 +74,10 @@ The captain's request to create that local project authorizes this local initial
 
 ## Initialize
 
-Run no-mistakes initialization only for `no-mistakes` and `no-mistakes-prod-only` projects:
+Run no-mistakes initialization only for `no-mistakes` and `no-mistakes-prod-only` projects, in the registered checkout path:
 
 ```sh
-cd projects/<name> && no-mistakes init && no-mistakes doctor
+cd <registered-checkout> && no-mistakes init && no-mistakes doctor
 ```
 
 Initialization configures the local gate and does not vendor a no-mistakes skill into the project.
