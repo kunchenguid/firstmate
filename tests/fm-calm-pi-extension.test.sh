@@ -15,6 +15,10 @@ WATCH_EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 OPERATIONAL_INPUT="$ROOT/bin/fm-operational-input.sh"
 PI_OPERATIONAL_INPUT="$ROOT/.pi/extensions/lib/fm-operational-input.ts"
 PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent"}
+PI_DEPENDENCY_DIR="$PI_PACKAGE_DIR/node_modules"
+if [ ! -e "$PI_DEPENDENCY_DIR/@earendil-works/pi-tui" ]; then
+  PI_DEPENDENCY_DIR="$(dirname "$(dirname "$PI_PACKAGE_DIR")")/.pnpm/node_modules"
+fi
 TMUX_SOCKET="fm-calm-$$"
 TMUX_SESSION="fm-calm-e2e"
 # Verified against Pi 0.81.1 and 0.82.0 (docs/calm-mode-feasibility.md). This is
@@ -97,8 +101,8 @@ test_home_resolution() {
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
-  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
-  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
+  ln -s "$PI_DEPENDENCY_DIR/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_DEPENDENCY_DIR/typebox" "$fixture/project/node_modules/typebox"
   printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
 
   out=$(cd "$fixture/launch-cwd" && \
@@ -219,8 +223,8 @@ test_pi_compat_degraded_adapter() {
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
-  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
-  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
+  ln -s "$PI_DEPENDENCY_DIR/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_DEPENDENCY_DIR/typebox" "$fixture/project/node_modules/typebox"
   printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
 
   out=$(cd "$fixture/project" && \
@@ -384,8 +388,8 @@ test_builtin_gate_after_extension_load() {
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
-  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
-  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
+  ln -s "$PI_DEPENDENCY_DIR/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_DEPENDENCY_DIR/typebox" "$fixture/project/node_modules/typebox"
   printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
   printf '%s\n' on >"$fixture/home-on/config/calm"
 
@@ -401,7 +405,7 @@ const diagnostics = [];
 const originalConsoleError = console.error;
 console.error = (...args) => diagnostics.push(args.join(" "));
 const builtinNames = ["bash", "edit", "find", "grep", "ls", "read", "write"];
-function fakePi(foreignRead = false) {
+function fakePi({ foreignRead = false, inventoryUnavailable = false } = {}) {
   const tools = [];
   const handlers = new Map();
   const notifications = [];
@@ -416,6 +420,7 @@ function fakePi(foreignRead = false) {
       tools.push(tool);
     },
     getAllTools() {
+      if (inventoryUnavailable) throw new Error("inventory offline");
       return builtinNames.map((name) => ({
         name,
         sourceInfo: name === "read" && foreignRead
@@ -459,7 +464,7 @@ if (offRun.tools.length !== 0) {
 }
 
 process.env.FM_HOME = process.env.HOME_ON;
-const onRun = fakePi(true);
+const onRun = fakePi({ foreignRead: true });
 const extensionOn = await import(`${pathToFileURL(process.env.EXT).href}?gate-on=${Date.now()}`);
 extensionOn.default(onRun.pi);
 if (onRun.tools.length !== 0) {
@@ -481,13 +486,203 @@ if (
 if (!diagnostics.some((line) => line.includes("read"))) {
   throw new Error(`Calm did not log the extension-owned read tool: ${JSON.stringify(diagnostics)}`);
 }
+
+const unavailableRun = fakePi({ inventoryUnavailable: true });
+const unavailableExtension = await import(`${pathToFileURL(process.env.EXT).href}?gate-unavailable=${Date.now()}`);
+unavailableExtension.default(unavailableRun.pi);
+await unavailableRun.handlers.get("session_start")({ reason: "startup" }, unavailableRun.ctx);
+if (unavailableRun.tools.length !== 0) {
+  throw new Error(`Calm claimed built-ins without an ownership inventory: ${unavailableRun.tools.map((tool) => tool.name).join(",")}`);
+}
+if (
+  unavailableRun.notifications.length !== 1 ||
+  unavailableRun.notifications[0].type !== "warning" ||
+  !unavailableRun.notifications[0].message.includes("ownership")
+) {
+  throw new Error(`Calm did not warn when ownership inventory failed: ${JSON.stringify(unavailableRun.notifications)}`);
+}
+if (!diagnostics.some((line) => line.includes("inventory offline"))) {
+  throw new Error(`Calm did not diagnose the ownership inventory failure: ${JSON.stringify(diagnostics)}`);
+}
 console.error = originalConsoleError;
 JS
   status=$?
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm gate-at-load-time path failed: $out"
   [ -z "$out" ] || fail "Pi calm gate-at-load-time test printed output: $out"
-  pass "Calm registers no tool wrappers during extension discovery, leaves an extension-owned read tool untouched when a persisted Calm session starts, and wraps the other built-ins"
+  pass "Calm registers no tool wrappers during extension discovery, leaves an extension-owned read tool untouched when a persisted Calm session starts, wraps the other built-ins, and fails closed when ownership inventory is unavailable"
+}
+
+test_persisted_calm_duplicate_read_pi_084() {
+  local fixture out output_file status version
+  if [ "${FM_PI_084_CONFLICT_E2E:-0}" != 1 ]; then
+    echo "skip: set FM_PI_084_CONFLICT_E2E=1 to run the Pi 0.84 persisted-Calm duplicate-read regression"
+    return 0
+  fi
+  if ! command -v node >/dev/null 2>&1 || [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: Pi package not found for Pi 0.84 persisted-Calm duplicate-read regression"
+    return 0
+  fi
+  version=$(node -p "require('$PI_PACKAGE_DIR/package.json').version")
+  case "$version" in
+    0.84.*) ;;
+    *)
+      echo "skip: Pi 0.84 required for persisted-Calm duplicate-read regression (found $version)"
+      return 0
+      ;;
+  esac
+
+  fixture="$TMP_ROOT/pi-084-persisted-read"
+  mkdir -p \
+    "$fixture/project/.pi/extensions/lib" \
+    "$fixture/project/node_modules/@earendil-works" \
+    "$fixture/home/config" \
+    "$fixture/agent"
+  cp "$EXT" "$fixture/project/.pi/extensions/fm-calm.ts"
+  cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_DEPENDENCY_DIR/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_DEPENDENCY_DIR/typebox" "$fixture/project/node_modules/typebox"
+  printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
+  printf '%s\n' on >"$fixture/home/config/calm"
+  cat >"$fixture/project/.pi/extensions/pdf-reader.ts" <<'TS'
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+
+const component = (text: string) => ({
+  invalidate() {},
+  render() {
+    return [text];
+  },
+});
+
+export default function (pi: ExtensionAPI): void {
+  pi.registerTool({
+    name: "read",
+    label: "Foreign PDF reader",
+    description: "FOREIGN_PDF_DESCRIPTION",
+    promptSnippet: "FOREIGN_PDF_PROMPT_SNIPPET",
+    promptGuidelines: ["FOREIGN_PDF_PROMPT_GUIDELINE"],
+    parameters: Type.Object({
+      path: Type.String({ description: "FOREIGN_PDF_PATH_PARAMETER" }),
+    }),
+    renderShell: "self",
+    async execute(_toolCallId, params) {
+      return {
+        content: [{ type: "text", text: `FOREIGN_PDF_EXECUTION:${params.path}` }],
+        details: {},
+      };
+    },
+    renderCall() {
+      return component("FOREIGN_PDF_RENDER_CALL");
+    },
+    renderResult() {
+      return component("FOREIGN_PDF_RENDER_RESULT");
+    },
+  });
+}
+TS
+
+  output_file="$fixture/node-output"
+  (cd "$fixture/project" && \
+    AGENT_DIR="$fixture/agent" \
+    CALM_EXT="$fixture/project/.pi/extensions/fm-calm.ts" \
+    PDF_EXT="$fixture/project/.pi/extensions/pdf-reader.ts" \
+    FM_HOME="$fixture/home" \
+    PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+    node --input-type=module) >"$output_file" 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+
+const packageRoot = process.env.PI_PACKAGE_DIR;
+const {
+  createAgentSession,
+  DefaultResourceLoader,
+  SessionManager,
+} = await import(pathToFileURL(`${packageRoot}/dist/index.js`).href);
+
+const loader = new DefaultResourceLoader({
+  cwd: process.cwd(),
+  agentDir: process.env.AGENT_DIR,
+  additionalExtensionPaths: [process.env.CALM_EXT, process.env.PDF_EXT],
+  noExtensions: true,
+  noSkills: true,
+  noPromptTemplates: true,
+  noThemes: true,
+  noContextFiles: true,
+});
+await loader.reload();
+const loaded = loader.getExtensions();
+if (loaded.extensions.length !== 2) {
+  throw new Error(`Pi did not load both extensions: ${JSON.stringify(loaded.errors)}`);
+}
+if (loaded.errors.some(({ error }) => error.includes('Tool "read" conflicts'))) {
+  throw new Error(`Calm contested read during Pi extension discovery: ${JSON.stringify(loaded.errors)}`);
+}
+
+const { session } = await createAgentSession({
+  cwd: process.cwd(),
+  agentDir: process.env.AGENT_DIR,
+  resourceLoader: loader,
+  sessionManager: SessionManager.inMemory(process.cwd()),
+});
+const diagnostics = [];
+const originalConsoleError = console.error;
+console.error = (...args) => diagnostics.push(args.join(" "));
+await session.bindExtensions({});
+console.error = originalConsoleError;
+if (!diagnostics.some((line) => line.includes('built-in "read"'))) {
+  throw new Error(`Calm did not diagnose the real PDF read conflict: ${JSON.stringify(diagnostics)}`);
+}
+
+const info = session.getAllTools().find((tool) => tool.name === "read");
+if (!info || !info.sourceInfo.path.endsWith("pdf-reader.ts")) {
+  throw new Error(`Pi did not keep the PDF extension as read owner: ${JSON.stringify(info)}`);
+}
+if (
+  info.description !== "FOREIGN_PDF_DESCRIPTION" ||
+  !JSON.stringify(info.parameters).includes("FOREIGN_PDF_PATH_PARAMETER") ||
+  JSON.stringify(info.promptGuidelines) !== JSON.stringify(["FOREIGN_PDF_PROMPT_GUIDELINE"])
+) {
+  throw new Error(`Pi did not keep the PDF reader prompt metadata: ${JSON.stringify(info)}`);
+}
+if (!session.systemPrompt.includes("FOREIGN_PDF_PROMPT_SNIPPET")) {
+  throw new Error("Pi did not keep the PDF reader prompt snippet in the active system prompt");
+}
+
+const definition = session.getToolDefinition("read");
+if (!definition || definition.label !== "Foreign PDF reader" || definition.renderShell !== "self") {
+  throw new Error("Pi did not select the complete PDF read definition");
+}
+const execution = await definition.execute("pdf-read", { path: "paper.pdf" }, undefined, undefined, {});
+if (execution.content[0]?.text !== "FOREIGN_PDF_EXECUTION:paper.pdf") {
+  throw new Error(`Pi selected the wrong read execution: ${JSON.stringify(execution)}`);
+}
+const callRows = definition.renderCall?.({ path: "paper.pdf" }, {}, {}).render(120);
+const resultRows = definition.renderResult?.(execution, {}, {}, {}).render(120);
+if (JSON.stringify(callRows) !== JSON.stringify(["FOREIGN_PDF_RENDER_CALL"])) {
+  throw new Error(`Pi selected the wrong read call renderer: ${JSON.stringify(callRows)}`);
+}
+if (JSON.stringify(resultRows) !== JSON.stringify(["FOREIGN_PDF_RENDER_RESULT"])) {
+  throw new Error(`Pi selected the wrong read result renderer: ${JSON.stringify(resultRows)}`);
+}
+
+for (const name of ["bash", "edit", "write", "grep", "find", "ls"]) {
+  const tool = session.getAllTools().find((candidate) => candidate.name === name);
+  if (!tool?.sourceInfo.path.endsWith("fm-calm.ts")) {
+    throw new Error(`Calm did not wrap uncontested built-in ${name}: ${JSON.stringify(tool)}`);
+  }
+}
+session.dispose();
+JS
+  status=$?
+  out=$(cat "$output_file")
+  [ "$status" -eq 0 ] || fail "Pi 0.84 persisted-Calm duplicate-read path failed: $out"
+  [ -z "$out" ] || fail "Pi 0.84 persisted-Calm duplicate-read test printed output: $out"
+  pass "Pi $version real runtime kept persisted Calm from contesting PDF read and preserved its execution, prompt metadata, and renderers"
 }
 
 test_calm_activation_collision_and_regression_bound() {
@@ -513,8 +708,8 @@ test_calm_activation_collision_and_regression_bound() {
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
-  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
-  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
+  ln -s "$PI_DEPENDENCY_DIR/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_DEPENDENCY_DIR/typebox" "$fixture/project/node_modules/typebox"
   printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
   printf '%s\n' 'export default function () {}' >"$fixture/project/foreign-bash-extension.ts"
 
@@ -523,6 +718,7 @@ test_calm_activation_collision_and_regression_bound() {
     EXT="$fixture/project/.pi/extensions/fm-calm.ts" \
     FOREIGN_EXT="$fixture/project/foreign-bash-extension.ts" \
     FM_HOME="$fixture/home" \
+    PI_DEPENDENCY_DIR="$PI_DEPENDENCY_DIR" \
     PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
     node --input-type=module) >"$output_file" 2>&1 <<'JS'
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -533,7 +729,7 @@ const { ToolExecutionComponent } = await import(
 );
 const { initTheme } = await import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href);
 const { setCapabilities } = await import(
-  pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href
+  pathToFileURL(`${process.env.PI_DEPENDENCY_DIR}/@earendil-works/pi-tui/dist/index.js`).href
 );
 initTheme("dark");
 setCapabilities({ images: null, trueColor: true, hyperlinks: false });
@@ -728,8 +924,8 @@ test_rendering_and_session_lifecycle() {
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/lib/fm-operational-input.ts"
   cp "$WATCH_EXT" "$fixture/fm-primary-pi-watch.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
-  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
-  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
+  ln -s "$PI_DEPENDENCY_DIR/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_DEPENDENCY_DIR/typebox" "$fixture/node_modules/typebox"
   printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
   cat >"$fixture/operational-input-probe.sh" <<'SH'
 #!/usr/bin/env bash
@@ -739,7 +935,7 @@ SH
   chmod +x "$fixture/operational-input-probe.sh"
 
   output_file="$fixture/node-output"
-  (cd "$fixture" && EXT="$fixture/fm-calm.ts" WATCH_EXT="$fixture/fm-primary-pi-watch.ts" FM_HOME="$fixture/home" FM_OPERATIONAL_INPUT_SCRIPT="$fixture/operational-input-probe.sh" FM_OPERATIONAL_INPUT_OWNER="$OPERATIONAL_INPUT" FM_OPERATIONAL_INPUT_CALLS="$fixture/operational-input-calls" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module) >"$output_file" 2>&1 <<'JS'
+  (cd "$fixture" && EXT="$fixture/fm-calm.ts" WATCH_EXT="$fixture/fm-primary-pi-watch.ts" FM_HOME="$fixture/home" FM_OPERATIONAL_INPUT_SCRIPT="$fixture/operational-input-probe.sh" FM_OPERATIONAL_INPUT_OWNER="$OPERATIONAL_INPUT" FM_OPERATIONAL_INPUT_CALLS="$fixture/operational-input-calls" PI_DEPENDENCY_DIR="$PI_DEPENDENCY_DIR" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module) >"$output_file" 2>&1 <<'JS'
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -757,7 +953,7 @@ const [{ AssistantMessageComponent }, { CustomEntryComponent }, { ToolExecutionC
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/user-message.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/interactive-mode.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
-  import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
+  import(pathToFileURL(`${process.env.PI_DEPENDENCY_DIR}/@earendil-works/pi-tui/dist/index.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/core/export-html/tool-renderer.js`).href),
 ]);
 initTheme("dark");
@@ -2020,17 +2216,17 @@ test_working_ship_geometry_and_lifecycle() {
   cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/lib/fm-operational-input.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
-  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
-  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
+  ln -s "$PI_DEPENDENCY_DIR/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_DEPENDENCY_DIR/typebox" "$fixture/node_modules/typebox"
   printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
 
-  out=$(cd "$fixture" && EXT="$fixture/fm-calm.ts" FM_HOME="$fixture/home" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module 2>&1 <<'JS'
+  out=$(cd "$fixture" && EXT="$fixture/fm-calm.ts" FM_HOME="$fixture/home" PI_DEPENDENCY_DIR="$PI_DEPENDENCY_DIR" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module 2>&1 <<'JS'
 import { pathToFileURL } from "node:url";
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
 const [{ initTheme, theme }, { visibleWidth, setCapabilities }] = await Promise.all([
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
-  import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
+  import(pathToFileURL(`${process.env.PI_DEPENDENCY_DIR}/@earendil-works/pi-tui/dist/index.js`).href),
 ]);
 initTheme("dark");
 setCapabilities({ images: null, trueColor: true, hyperlinks: false });
@@ -2866,7 +3062,7 @@ JS
 }
 
 test_interactive_terminal_e2e() {
-  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot export_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
+  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
     echo "skip: pi or tmux not found for Pi calm interactive E2E"
     return 0
@@ -2885,7 +3081,6 @@ test_interactive_terminal_e2e() {
   hidden_snapshot="$TMP_ROOT/hidden.txt"
   active_before_snapshot="$TMP_ROOT/active-before.txt"
   active_hidden_snapshot="$TMP_ROOT/active-hidden.txt"
-  export_snapshot="$TMP_ROOT/export.txt"
   restored_snapshot="$TMP_ROOT/restored.txt"
   working_snapshot="$TMP_ROOT/working.txt"
   working_response_snapshot="$TMP_ROOT/working-response.txt"
@@ -3289,8 +3484,12 @@ JS
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/export $export_file"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
-  wait_for_text "$export_snapshot" "Session exported to: $export_file" \
-    || fail "/export did not complete while calm mode was on"
+  active_wait=0
+  while [ "$active_wait" -lt 120 ] && [ ! -s "$export_file" ]; do
+    sleep 0.05
+    active_wait=$((active_wait + 1))
+  done
+  [ -s "$export_file" ] || fail "/export did not write its HTML artifact while calm mode was on"
   node - "$export_file" <<'JS' || fail "calm-mode HTML export lost tool data or persisted synthetic provenance"
 const html = require("node:fs").readFileSync(process.argv[2], "utf8");
 const match = html.match(/<script id="session-data" type="application\/json">([^<]+)<\/script>/);
@@ -3708,6 +3907,7 @@ test_pi_compat_no_upper_bound
 test_pi_compat_degraded_adapter
 test_pi_compat_missing_adapter_exports
 test_builtin_gate_after_extension_load
+test_persisted_calm_duplicate_read_pi_084
 test_calm_activation_collision_and_regression_bound
 test_rendering_and_session_lifecycle
 test_operational_followup_turn_e2e

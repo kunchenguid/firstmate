@@ -32,6 +32,17 @@ Pi constructs `/reload`-restored tool rows from an earlier tool-registry snapsho
 That bounded presentation limitation preserves startup and the complete behavior of external tool replacements.
 `tests/fm-calm-pi-extension.test.sh` covers no load-time claims, collision-checked session and command activation with a warning, preservation of a contested tool's execution, and the non-retroactive bound for rows rendered before wrapper registration.
 
+## Pi 0.84.0 ownership verification
+
+The real Pi 0.84.0 extension loader, runtime inventory, tool registry, and session-start lifecycle were verified on 2026-08-06 with persisted Calm and a competing PDF `read` definition:
+
+```text
+$ FM_PI_PACKAGE_DIR="$(pnpm ls -g --parseable @earendil-works/pi-coding-agent | tail -n 1)" FM_PI_084_CONFLICT_E2E=1 tests/fm-calm-pi-extension.test.sh
+ok - Pi 0.84.0 real runtime kept persisted Calm from contesting PDF read and preserved its execution, prompt metadata, and renderers
+```
+
+The selected `read` definition retained the PDF extension's execution marker, description, parameter schema, prompt snippet and guidelines, self-rendering mode, call renderer, and result renderer, while Calm owned the other six uncontested built-ins.
+
 ## Pi 0.81.1 end-to-end reproduction
 
 The Pi version installed at the time was verified on 2026-07-22.

@@ -309,14 +309,14 @@ export default function (pi: ExtensionAPI) {
   // Which of the 7 built-ins are currently owned by a different, non-builtin
   // extension. This runs only after every extension has finished loading, when the
   // runtime-backed ownership inventory is available.
-  function contestedBuiltIns(): ToolDefinition<any, any, any>[] {
+  function contestedBuiltIns(): ToolDefinition<any, any, any>[] | undefined {
     let registered: ToolInfo[];
     try {
       registered = pi.getAllTools();
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      console.error(`Firstmate Calm: built-in ownership check unavailable, claiming every built-in unconditionally. ${reason}`);
-      return [];
+      console.error(`Firstmate Calm: built-in ownership check unavailable; no built-in wrappers were registered. ${reason}`);
+      return undefined;
     }
     return wrappedBuiltIns.filter((tool) => {
       const owner = registered.find((info) => info.name === tool.name)?.sourceInfo;
@@ -330,6 +330,13 @@ export default function (pi: ExtensionAPI) {
   function activateBuiltInsIfNeeded(ui: ExtensionUIContext): void {
     if (builtInsRegistered) return;
     const contested = contestedBuiltIns();
+    if (!contested) {
+      ui.notify(
+        "Firstmate Calm: built-in ownership could not be verified, so Calm left every built-in tool untouched this session.",
+        "warning",
+      );
+      return;
+    }
     const contestedNames = new Set(contested.map((tool) => tool.name));
     for (const tool of wrappedBuiltIns) {
       if (!contestedNames.has(tool.name)) pi.registerTool(tool);
