@@ -1326,7 +1326,16 @@ import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompts = 0;
-const client = { session: { promptAsync: async () => { prompts += 1; } } };
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      prompts += 1;
+      if (!request.body.parts[0].text.includes("primary scope is not-primary")) {
+        throw new Error(`unexpected diagnostic: ${request.body.parts[0].text}`);
+      }
+    },
+  },
+};
 await mod.FmPrimaryWatchArm({
   client,
   directory: process.env.WORKTREE,
@@ -1342,6 +1351,15 @@ if (existsSync(process.env.FM_ARM_LOG)) {
   console.error("watch arm ran without owning the session lock");
   process.exit(1);
 }
+const repeat = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+if (repeat !== "not-primary") {
+  console.error(`expected repeated not-primary without lock ownership, got ${repeat}`);
+  process.exit(1);
+}
+if (prompts !== 1) {
+  console.error(`expected one not-primary diagnostic before lock, got ${prompts}`);
+  process.exit(1);
+}
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const second = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
 if (second !== "armed") {
@@ -1355,8 +1373,8 @@ if (!existsSync(process.env.FM_ARM_LOG)) {
   console.error("watch arm did not run after the session lock matched");
   process.exit(1);
 }
-if (prompts !== 0) {
-  console.error(`expected no not-primary diagnostic, got ${prompts}`);
+if (prompts !== 1) {
+  console.error(`expected one not-primary diagnostic, got ${prompts}`);
   process.exit(1);
 }
 EOF

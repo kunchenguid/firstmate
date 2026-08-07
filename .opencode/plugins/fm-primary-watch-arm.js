@@ -22,6 +22,7 @@ let launchInFlight = null;
 let restorationInFlight = null;
 let armClose = new WeakMap();
 let armReadiness = new WeakMap();
+let notPrimaryReported = false;
 
 function positiveInteger(name, fallback) {
   const value = Number(process.env[name]);
@@ -195,6 +196,17 @@ function wakePrompt(reason) {
 function surfaceFailure(paths, client, sessionID, reason) {
   void sendPrompt(paths, client, sessionID, wakePrompt(reason)).catch(() => {
   });
+}
+
+function reportNotPrimary(paths, client, sessionID) {
+  if (notPrimaryReported) return;
+  notPrimaryReported = true;
+  surfaceFailure(
+    paths,
+    client,
+    sessionID,
+    "watcher: FAILED - OpenCode primary scope is not-primary; session no longer owns the lock or primary evidence is incomplete; verify session lock ownership, primary hook paths, state metadata, and marker validity",
+  );
 }
 
 function retryDelay(attempt) {
@@ -371,7 +383,10 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
 
 async function beginArm(paths, sessionID, client, predecessorArmPid) {
   if (!sessionID) return { status: "skipped", armChild: null };
-  if (!(await isPrimaryRoot(paths))) return { status: "not-primary", armChild: null };
+  if (!(await isPrimaryRoot(paths))) {
+    reportNotPrimary(paths, client, sessionID);
+    return { status: "not-primary", armChild: null };
+  }
   if (child) return { status: "existing", armChild: child };
   if (retryTimer) return { status: "retrying", armChild: null };
   if (!shouldArm(paths)) return { status: "not-needed", armChild: null };
