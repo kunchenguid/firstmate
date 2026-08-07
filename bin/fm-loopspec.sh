@@ -193,9 +193,11 @@ validate_structure() {
     # as an ordinary enum, so schema.json never carries a second copy of it.
     | (((try ($TM.unified) catch null)) // []) as $unified
     | ($S.enums + {unified_terminal: ($unified | map(.name))}) as $enums
-    | ($unified | map({key: .name, value: .kind}) | from_entries) as $unified_kind
+    # Lookup tables are built only from string-keyed entries: a missing name or
+    # state is reported by its own field check, never by a crashed from_entries.
+    | ($unified | map(select((.name | type) == "string") | {key: .name, value: .kind}) | from_entries) as $unified_kind
     | ((((try ($TM.sources[] | select(.source == "loopspec") | .map) catch null)) // [])
-       | map({key: .state, value: .unified}) | from_entries) as $loopspec_map
+       | map(select((.state | type) == "string") | {key: .state, value: .unified}) | from_entries) as $loopspec_map
     | ((try ($spec.trigger.id) catch null)) as $trigger_id
     | ((try ($spec.no_progress.terminal) catch null)) as $np_terminal
     | (((try ($spec.escalation.on) catch null)) // []) as $esc_on
@@ -237,12 +239,14 @@ validate_structure() {
           | select(type == "object")
           | . as $ts
           | (
-              ( select(($loopspec_map | has($ts.name)) | not)
+              ( select((($ts.name | type) == "string")
+                       and (($loopspec_map | has($ts.name)) | not))
                 | "terminal state \"\($ts.name)\" has no loopspec row in terminal-states.json, so no unified state is mapped for it" ),
-              # Both comparisons stand down when maps_to is absent, so the
-              # missing required field is reported as itself rather than as a
-              # mismatch against a value that was never declared.
-              ( select((($ts.maps_to | type) == "string")
+              # Every comparison stands down when name or maps_to is absent, so
+              # the missing required field is reported as itself rather than as
+              # a mismatch against a value that was never declared.
+              ( select((($ts.name | type) == "string")
+                       and (($ts.maps_to | type) == "string")
                        and ($loopspec_map | has($ts.name))
                        and ($ts.maps_to != $loopspec_map[$ts.name]))
                 | "terminal state \"\($ts.name)\" maps_to \"\($ts.maps_to)\" but terminal-states.json maps it to \"\($loopspec_map[$ts.name])\"" ),
@@ -298,7 +302,7 @@ terminal_map_problems() {
         ["sources must be a non-empty array of source vocabularies"]
       else
         ($unified | map(.name)) as $names
-        | ($unified | map({key: .name, value: .}) | from_entries) as $by_name
+        | ($unified | map(select((.name | type) == "string") | {key: .name, value: .}) | from_entries) as $by_name
         | [ $sources[] | .source as $s | (.map // [])[] | . + {source: $s} ] as $rows
         | ($rows | map(.unified)) as $targets
         | [
@@ -306,6 +310,8 @@ terminal_map_problems() {
                                    or (.costs_model_turn | type) != "boolean"
                                    or (.description | type) != "string"))
               | "unified state \(.name // "?") is missing name, kind, costs_model_turn or description" ),
+            ( ($rows[] | select((.state | type) != "string" or (.unified | type) != "string"))
+              | "\(.source) source row \(.state // "?") is missing state or unified" ),
             ( ($names | group_by(.) | map(select(length > 1) | .[0]))[]
               | "duplicate unified terminal state: \(.)" ),
             ( ($sources[] | .source as $s | (.map // []) | map(.state) | group_by(.)
@@ -602,6 +608,12 @@ cmd_terminal_map() {
       ' "$(terminals_path)"
       ;;
     rows)
+      # An unknown source vocabulary refuses rather than printing no rows, so a
+      # typo can never read as "there is no mapping".
+      if [ -n "$source" ]; then
+        jq -e --arg src "$source" '(.sources | map(.source) | index($src)) != null' "$(terminals_path)" >/dev/null 2>&1 \
+          || refuse refuse_unmapped_terminal "the terminal-state map declares no source vocabulary \"$source\""
+      fi
       jq -r --arg src "$source" '
         . as $TM
         | ($TM.unified | map({key: .name, value: .}) | from_entries) as $by_name

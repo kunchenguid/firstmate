@@ -942,6 +942,67 @@ test_a_spec_terminal_cannot_drift_from_the_map() {
   pass "a spec terminal state that is unmapped, invented, disagreeing or miskinded is refused rather than defaulted"
 }
 
+test_a_malformed_field_is_named_rather_than_crashing_the_validator() {
+  local reg st
+
+  # Control first: the shipped registry validates, so every refusal below is
+  # attributable to its one mutation and not to a broken fixture pipeline.
+  ls_run "$ROOT/loopspecs" "$TMP_ROOT/shipped-state" validate
+  expect_code 0 "$CODE" "the shipped registry does not validate: $OUT"
+
+  # A spec terminal state with no name is reported as its own missing field,
+  # never as a validator that could not run.
+  read -r reg st < <(new_case nameless-terminal)
+  write_spec "$reg" nameless "$READY | del(.terminal_states[0].name)"
+  ls_run "$reg" "$st" validate
+  expect_code 1 "$CODE" "a terminal state with no name was accepted"
+  assert_contains "$OUT" "missing required field: terminal_states[].name" \
+    "the missing name was not reported as its own field"
+  assert_not_contains "$OUT" "could not run against this file" \
+    "a nameless terminal state crashed the validator instead of being named"
+
+  # A unified map entry with no name is caught by the map's own field check.
+  read -r reg st < <(map_case nameless-unified 'del(.unified[0].name)')
+  ls_run "$reg" "$st" validate
+  expect_code 1 "$CODE" "a unified state with no name was accepted"
+  assert_contains "$OUT" "is missing name, kind, costs_model_turn or description" \
+    "the nameless unified state was not reported by its own field check"
+  assert_not_contains "$OUT" "could not be read" \
+    "a nameless unified state crashed the map check instead of being named"
+
+  # A source row with no state is the map's defect and is attributed to the
+  # map, never to whichever spec would have been validated against it.
+  read -r reg st < <(map_case stateless-row \
+    'del((.sources[] | select(.source == "loopspec") | .map[0]).state)')
+  ls_run "$reg" "$st" validate
+  expect_code 1 "$CODE" "a source row with no state was accepted"
+  assert_contains "$OUT" "terminal-states.json: loopspec source row" \
+    "the stateless row was not attributed to the map"
+  assert_contains "$OUT" "is missing state or unified" "the stateless row was not named"
+  assert_not_contains "$OUT" "could not run against this file" \
+    "a stateless source row was blamed on a spec instead of the map"
+
+  pass "a malformed spec or map field is reported by its own precise diagnostic instead of crashing the validator"
+}
+
+test_a_source_typo_never_reads_as_an_empty_mapping() {
+  local reg st
+  read -r reg st < <(new_case source-typo)
+
+  # The negative control comes first: a command that printed rows for every
+  # source would prove nothing by printing them for a declared one.
+  ls_run "$reg" "$st" terminal-map --source execution-nod
+  expect_code 1 "$CODE" "a misspelled source vocabulary read as an empty mapping"
+  assert_contains "$OUT" "refuse_unmapped_terminal" "an unknown source vocabulary did not refuse"
+  assert_contains "$OUT" "execution-nod" "the refusal did not name the unknown source"
+
+  ls_run "$reg" "$st" terminal-map --source execution-node
+  expect_code 0 "$CODE" "a declared source vocabulary was refused: $OUT"
+  assert_contains "$OUT" "execution-node" "the declared source printed no rows"
+
+  pass "an unknown source vocabulary refuses rather than reading as an empty mapping"
+}
+
 test_trigger_register_reports_one_of_sixteen() {
   ls_run "$ROOT/loopspecs" "$TMP_ROOT/shipped-state" triggers --summary
   expect_code 0 "$CODE" "the trigger summary failed: $OUT"
@@ -991,4 +1052,6 @@ test_the_merge_is_a_reduction_with_nothing_unreachable
 test_no_terminal_state_loses_its_distinction_in_the_merge
 test_no_delta_still_costs_no_model_turn
 test_a_spec_terminal_cannot_drift_from_the_map
+test_a_malformed_field_is_named_rather_than_crashing_the_validator
+test_a_source_typo_never_reads_as_an_empty_mapping
 test_trigger_register_reports_one_of_sixteen
