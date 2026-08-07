@@ -664,7 +664,7 @@ _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure
 status_open_decisions_incremental() {  # <status-file> [<anomaly-sink>]
   local f=$1 sink=${2-} cf offset ident open='' activities='' trusted_open='' cursor_data first rest
   local offset_line ident_line record payload cursor_valid=0 rewrite=0
-  local size cur_ident resolve held chunk_file chunk_size line task
+  local size cur_ident resolve held chunk_file chunk_size expected_size line task
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   task=${f##*/}; task=${task%.status}
   cf=$(_fm_open_decisions_cursor_path "$f")
@@ -755,7 +755,8 @@ EOF
 
   if [ "$offset" -lt "$size" ]; then
     chunk_file="$cf.read.$$"
-    tail -c "+$((offset + 1))" "$f" > "$chunk_file" 2>/dev/null \
+    expected_size=$((size - offset))
+    dd if="$f" of="$chunk_file" bs=1 skip="$offset" count="$expected_size" 2>/dev/null \
       || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
     chunk_size=$(LC_ALL=C wc -c < "$chunk_file" 2>/dev/null) \
       || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
@@ -763,6 +764,8 @@ EOF
     case "$chunk_size" in
       ''|*[!0-9]*) rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0 ;;
     esac
+    [ "$chunk_size" = "$expected_size" ] \
+      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
     # Test-only observability seam (off by default, no production behavior
     # change): when set, records exactly how many bytes THIS call folded, so a
     # test can assert the incremental path stays bounded by new appends rather

@@ -185,7 +185,7 @@ test_same_size_rewrite_is_detected_via_inode_identity() {
 }
 
 test_read_failure_never_silently_returns_empty() {
-  local dir state fakebin statusfile cursor out before_cursor after_cursor
+  local dir state fakebin statusfile cursor out before_cursor after_cursor real_dd
   dir=$(make_case cursor-read-failure)
   state="$dir/state"
   fakebin="$dir/failbin"
@@ -203,18 +203,19 @@ test_read_failure_never_silently_returns_empty() {
   before_cursor=$(LC_ALL=C cksum "$cursor")
 
   printf 'working: more routine content\n' >> "$statusfile"
-  # Fail ONLY the byte-offset content read (`tail -c ...`) that status_open_
+  # Fail ONLY the byte-offset content read (`dd if=...`) that status_open_
   # decisions_incremental uses to pull new appended bytes; pass every other
-  # drain/guard invocation through to the real tail, so this isolates exactly
+  # drain/guard invocation through to the real dd, so this isolates exactly
   # the one read path under test.
-  cat > "$fakebin/tail" <<SH
+  real_dd=$(command -v dd)
+  cat > "$fakebin/dd" <<SH
 #!/usr/bin/env bash
 for a in "\$@"; do
-  case "\$a" in -c|-c*) exit 1 ;; esac
+  case "\$a" in "if=$statusfile") exit 1 ;; esac
 done
-exec "$(command -v tail)" "\$@"
+exec "$real_dd" "\$@"
 SH
-  chmod +x "$fakebin/tail"
+  chmod +x "$fakebin/dd"
 
   FM_STATE_OVERRIDE="$state" PATH="$fakebin:$PATH" "$DRAIN" > "$out" \
     || fail "wake drain failed instead of preserving state after the injected read failure"
@@ -311,9 +312,72 @@ test_previous_fold_cache_is_refolded_under_current_semantics() {
   pass "an old fold cache is rebuilt once before same-version incremental reads resume"
 }
 
+test_append_after_size_snapshot_is_deferred_without_replay() {
+  local dir state fakebin status marker out probe first_bytes closure_bytes probe_bytes
+  local real_tail real_dd
+  dir=$(make_case cursor-snapshot-race)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  status="$state/task6.status"
+  marker="$dir/appended"
+  out="$dir/drain.out"
+  probe="$dir/probe.tsv"
+  real_tail=$(command -v tail)
+  real_dd=$(command -v dd)
+
+  printf 'needs-decision [key=race]: pick the safe path\n' > "$status"
+  first_bytes=$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')
+  closure_bytes=$(printf 'resolved [key=race]: picked the safe path\n' | LC_ALL=C wc -c | tr -d '[:space:]')
+  : > "$probe"
+
+  cat > "$fakebin/tail" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  if [ "\$arg" = "$status" ] && [ ! -e "$marker" ]; then
+    printf 'resolved [key=race]: picked the safe path\n' >> "$status"
+    : > "$marker"
+    break
+  fi
+done
+exec "$real_tail" "\$@"
+SH
+  cat > "$fakebin/dd" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  if [ "\$arg" = "if=$status" ] && [ ! -e "$marker" ]; then
+    printf 'resolved [key=race]: picked the safe path\n' >> "$status"
+    : > "$marker"
+    break
+  fi
+done
+exec "$real_dd" "\$@"
+SH
+  chmod +x "$fakebin/tail" "$fakebin/dd"
+
+  FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" PATH="$fakebin:$PATH" "$DRAIN" > "$out" \
+    || fail "drain failed while appending after the size snapshot"
+  [ -e "$marker" ] || fail "test setup did not append after the size snapshot"
+  grep -F 'task6' "$out" | grep -F '[key=race]' | grep -F 'pick the safe path' >/dev/null \
+    || fail "an append after the size snapshot was folded before the next drain"
+  probe_bytes=$(last_probe_bytes "$probe" "$status")
+  [ "$probe_bytes" = "$first_bytes" ] \
+    || fail "snapshot drain folded $probe_bytes bytes, expected exactly the snapshotted $first_bytes bytes"
+
+  FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" PATH="$fakebin:$PATH" "$DRAIN" > "$out" \
+    || fail "next drain failed while consuming the deferred append"
+  [ ! -s "$out" ] || fail "the deferred closure replayed as a false anomaly: $(cat "$out")"
+  probe_bytes=$(last_probe_bytes "$probe" "$status")
+  [ "$probe_bytes" = "$closure_bytes" ] \
+    || fail "deferred drain folded $probe_bytes bytes, expected exactly the $closure_bytes-byte append"
+
+  pass "an append after the size snapshot is deferred and folded exactly once"
+}
+
 test_truncated_log_falls_back_to_a_full_refold_not_a_dropped_decision
 test_same_size_rewrite_is_detected_via_inode_identity
 test_read_failure_never_silently_returns_empty
 test_cursor_cache_read_failure_refolds_authoritative_status
 test_previous_fold_cache_is_refolded_under_current_semantics
 test_buried_decision_survives_many_growing_drains_and_resolution_clears_it
+test_append_after_size_snapshot_is_deferred_without_replay
