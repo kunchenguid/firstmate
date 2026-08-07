@@ -243,17 +243,28 @@ lab pane send-keys "$C_DOOMED_PANE" enter >/dev/null \
   || fail 'could not submit the Part C persistent-child command'
 C_SHELL_PID=
 C_CHILD_ATTEMPT=0
+C_CHILD_STABLE=0
 while [ "$C_CHILD_ATTEMPT" -lt 100 ]; do
   C_SHELL_PID=$(lab pane process-info --pane "$C_DOOMED_PANE" 2>/dev/null \
     | jq -r '.result.process_info.shell_pid // empty' 2>/dev/null) || C_SHELL_PID=
-  if [ -n "$C_SHELL_PID" ] && ps -axo ppid= | tr -d ' ' | grep -qx "$C_SHELL_PID"; then
-    break
+  if [ -n "$C_SHELL_PID" ] && ps -axo ppid=,comm= | awk -v parent="$C_SHELL_PID" '
+    $1 == parent {
+      command = $2
+      sub(/^.*\//, "", command)
+      if (command == "sleep") found = 1
+    }
+    END { exit(found ? 0 : 1) }
+  '; then
+    C_CHILD_STABLE=$((C_CHILD_STABLE + 1))
+    [ "$C_CHILD_STABLE" -ge 2 ] && break
+  else
+    C_CHILD_STABLE=0
+    C_SHELL_PID=
   fi
-  C_SHELL_PID=
   sleep 0.1
   C_CHILD_ATTEMPT=$((C_CHILD_ATTEMPT + 1))
 done
-[ -n "$C_SHELL_PID" ] || fail 'the Part C doomed pane never acquired a persistent child process'
+[ "$C_CHILD_STABLE" -ge 2 ] || fail 'the Part C doomed pane never acquired a stable persistent sleep child process'
 
 C_CALL_LOG="$TMP_ROOT/call-c.log"
 C_FOCUS_SAMPLES="$TMP_ROOT/focus-c.samples"
