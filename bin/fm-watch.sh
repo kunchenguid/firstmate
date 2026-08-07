@@ -76,6 +76,9 @@
 #                          agent, for human inspection only - never an automatic
 #                          interrupt, signal, or restart of the worker or its
 #                          tool process.
+#                          A paused append proved newer than the exact current
+#                          validated busy generation uses the long pause cadence
+#                          instead; old or ambiguously ordered pauses do not.
 #   stale: <window> (unread firstmate instruction: ...)
 #   stale: <window> (steering-inbox ladder bookkeeping unwritable: ...)
 #   stale: <window> (steering-inbox busy bookkeeping unwritable: ...)
@@ -337,7 +340,9 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # non-busy stale - so it escalates via the existing stale reason, escalation
 # counter, and demand-deep-inspection marker for human inspection only, never an
 # automatic interrupt, signal, or restart - unless the crew declared the wait
-# itself, which takes the long pause cadence instead. Set generously above
+# itself, when its declaration is strictly newer than the exact current
+# validated busy generation; old or ambiguously ordered pauses do not defer.
+# Set generously above
 # any legitimate interval without observable progress, including silent long
 # tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
@@ -1565,6 +1570,46 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # or tool activity, never a timer or a busy footer. It does not emit a wake or
 # change semantic busy state. Before either marker exists, age the spawn record.
 # The caller checks busy state and routes a crossed bound through inspection.
+current_busy_generation_is_paused() {  # <task>
+  local task=$1 meta statusf harness before after status_sig_before status_sig_after last pause_ts
+  local busy_state busy_source busy_event busy_seq busy_ts busy_gen
+  meta="$STATE/$task.meta"
+  statusf="$STATE/$task.status"
+  [ -f "$meta" ] && [ -f "$statusf" ] || return 1
+  harness=$(grep '^harness=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$harness" ] || return 1
+  before=$(fm_busy_record_read "$STATE" "$task" snapshot) || return 1
+  read -r busy_state busy_source busy_event busy_seq busy_ts busy_gen <<EOF
+$before
+EOF
+  [ "$busy_state" = busy ] || return 1
+  fm_busy_source_trusted "$harness" "$busy_source" || return 1
+  fm_busy_token_valid "$busy_event" || return 1
+  fm_busy_token_valid "$busy_gen" || return 1
+  case "$busy_seq" in ''|*[!0-9]*) return 1 ;; esac
+  case "$busy_ts" in ''|*[!0-9]*) return 1 ;; esac
+  status_sig_before=$(stat_sig "$statusf") || return 1
+  last=$(last_status_line "$statusf")
+  status_is_paused "$last" || return 1
+  pause_ts=$(stat_mtime "$statusf") || return 1
+  case "$pause_ts" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$pause_ts" -gt "$busy_ts" ] || return 1
+  status_sig_after=$(stat_sig "$statusf") || return 1
+  [ "$status_sig_before" = "$status_sig_after" ] || return 1
+  after=$(fm_busy_record_read "$STATE" "$task" snapshot) || return 1
+  [ "$before" = "$after" ]
+}
+
+handle_current_busy_pause() {  # <window> <task> <hash> <since-file> <escalation-file>
+  local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5
+  if afk_present; then
+    rm -f "$since_file" "$escalation_file"
+    triage_log "absorbed busy current-generation pause for daemon-owned long cadence: $win"
+  else
+    handle_paused_stale "$win" "$task" "$h"
+  fi
+}
+
 busy_turn_over_age() {  # <task>
   local task=$1 f progress
   f="$STATE/$task.turn-ended"
@@ -1660,7 +1705,8 @@ handle_paused_stale() {  # <window> <task> <hash>
 busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-file>
   local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5 key statusf declared
   statusf="$STATE/$task.status"
-  if status_is_paused_or_captain_held "$(status_declared_wait_line "$statusf")"; then
+  declared=$(status_declared_wait_line "$statusf")
+  if status_is_captain_held "$declared" || current_busy_generation_is_paused "$task"; then
     if afk_present; then
       # Away mode is daemon-owned, so this bound hands off the PLAIN wake identity
       # and lets the daemon classify the declaration itself - the undecorated
@@ -3084,6 +3130,13 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    # A pause from inside this exact validated busy generation is an explicit
+    # long external wait, not evidence that the foreground tool wedged. Handle
+    # it before either hash branch so stable and changing busy panes agree.
+    if [ "$busy_now" -eq 0 ] && current_busy_generation_is_paused "$task"; then
+      handle_current_busy_pause "$w" "$task" "$h" "$ssf" "$ewf"
+      continue
+    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"

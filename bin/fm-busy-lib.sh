@@ -254,13 +254,16 @@ fm_busy_source_trusted() {  # <harness> <source>
 
 # fm_busy_record_read: parse and validate state/<id>.busy-state against the
 # armed gen. Prints "<state> <source> <event> <seq>" for a valid record.
+# Optional mode "snapshot" appends "<ts> <gen>" so sequence-sensitive
+# consumers can bind a decision to one exact validated lifecycle snapshot
+# without reparsing the record independently.
 # Non-zero returns name the reason on stdout instead:
 #   missing      no record file (or no armed gen and no record)
 #   malformed    unparseable line, bad tokens, or a missing armed gen for an
 #                existing record
 #   gen-mismatch a record from a stale incarnation
-fm_busy_record_read() {  # <state-dir> <id>
-  local state=$1 id=$2 rec gen line extra ver f
+fm_busy_record_read() {  # <state-dir> <id> [snapshot]
+  local state=$1 id=$2 mode=${3:-} rec gen line extra ver f
   local r_gen='' r_seq='' r_state='' r_source='' r_event='' r_ts=''
   rec=$(fm_busy_record_path "$state" "$id")
   if [ ! -f "$rec" ]; then
@@ -305,6 +308,9 @@ fm_busy_record_read() {  # <state-dir> <id>
     return 1
   fi
   printf '%s %s %s %s' "$r_state" "$r_source" "$r_event" "$r_seq"
+  if [ "$mode" = snapshot ]; then
+    printf ' %s %s' "$r_ts" "$r_gen"
+  fi
 }
 
 # ---------------------------------------------------------------------------

@@ -4774,6 +4774,67 @@ test_cleanup_marker_lock_bound_is_decimal_with_zero_default() {
 # demand-deep-inspection marker - never an
 # automatic interrupt or restart.
 
+test_current_busy_generation_pause_uses_long_cadence() {
+  local dir state fakebin out capture_file window key pane_hash sig pid busy_ts
+  dir=$(make_case busy-current-pause); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-current-pause"
+  printf 'Working... current paused generation\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/current-pause.meta"
+  record_pi_busy "$state" current-pause
+  busy_ts=$(sed -n 's/.* ts=\([0-9][0-9]*\)$/\1/p' "$state/current-pause.busy-state")
+  printf 'paused: foreground keeper deliberately parked for review\n' > "$state/current-pause.status"
+  set_mtime $((busy_ts + 1)) "$state/current-pause.status"
+  sig=$(seen_sig "$state/current-pause.status"); printf '%s' "$sig" > "$state/.seen-current-pause_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Working... current paused generation")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  set_mtime $(( $(date +%s) - 500 )) "$state/current-pause.turn-ended"
+  prime_turnend_seen "$state/current-pause.turn-ended"
+  printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 30 || { reap "$pid"; fail "a current-generation pause used wedge cadence"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "a current-generation pause printed a wake"; }
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "a current-generation pause missed long-cadence tracking"; }
+  reap "$pid"
+  pass "a pause newer than the current busy generation uses long-cadence tracking"
+}
+
+test_old_or_unordered_pause_does_not_mask_newer_busy_generation() {
+  local ordering dir state fakebin out capture_file window key pane_hash sig pid busy_ts pause_ts
+  for ordering in older same-second; do
+    dir=$(make_case "busy-stale-pause-$ordering"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-stale-pause-$ordering"
+    printf 'Working... genuinely active generation\n' > "$capture_file"
+    printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/stale-pause.meta"
+    printf 'paused: declaration from an older generation\n' > "$state/stale-pause.status"
+    record_pi_busy "$state" stale-pause
+    busy_ts=$(sed -n 's/.* ts=\([0-9][0-9]*\)$/\1/p' "$state/stale-pause.busy-state")
+    if [ "$ordering" = older ]; then pause_ts=$((busy_ts - 1)); else pause_ts=$busy_ts; fi
+    set_mtime "$pause_ts" "$state/stale-pause.status"
+    sig=$(seen_sig "$state/stale-pause.status"); printf '%s' "$sig" > "$state/.seen-stale-pause_status"
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    pane_hash=$(hash_text "Working... genuinely active generation")
+    printf '%s' "$pane_hash" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+    set_mtime $(( $(date +%s) - 500 )) "$state/stale-pause.turn-ended"
+    prime_turnend_seen "$state/stale-pause.turn-ended"
+    printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=999 \
+      FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 40 || fail "a $ordering pause masked a busy-generation wedge"
+    grep -F "possible wedge" "$out" >/dev/null || fail "a $ordering pause removed wedge diagnostics"
+  done
+  pass "old or unordered pauses cannot mask a newer busy generation"
+}
+
 test_busy_pane_below_turn_age_bound_is_absorbed() {
   local dir state fakebin out capture_file window key sig pid
   dir=$(make_case busy-below-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
@@ -6686,6 +6747,8 @@ test_identical_dead_display_of_a_successor_still_reports
 test_term_stops_a_watcher_blocked_inside_a_poll
 test_term_stops_a_watcher_whose_cleanup_marker_lock_is_held
 test_cleanup_marker_lock_bound_is_decimal_with_zero_default
+test_current_busy_generation_pause_uses_long_cadence
+test_old_or_unordered_pause_does_not_mask_newer_busy_generation
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
