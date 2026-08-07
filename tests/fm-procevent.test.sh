@@ -932,6 +932,45 @@ assert_contains "$out" "no-result" "a failing source with no output publishes no
 assert_present "$HE/state/procevent/fail-src.source" "a failing source stays registered for retry"
 pass "nonzero exit with no output stays armed and silent"
 
+# --- a failed child's reason survives its exit status -----------------------
+# A source armed by reconcile runs detached, so a blocker the child reports - a
+# rejected credential, a missing tool - has nowhere to be seen unless the runner
+# keeps it. It stays diagnostic: never a result, never a wake, never mixed into
+# the captured output, and never outliving a healthy run of the same source.
+HES="$TMP_ROOT/hes"; new_home "$HES"
+pe_register "$HES" lavish blocked-src -- /bin/sh -c \
+  'printf "adapter rejected its credential (HTTP 401)\n" >&2; exit 1' >/dev/null
+out=$(pe "$HES" start blocked-src)
+assert_contains "$out" "no-result" "a blocked source still publishes nothing"
+[ -z "$(wake_payloads "$HES")" ] || fail "a blocked source published an event"
+first_result "$HES" blocked-src >/dev/null 2>&1 && fail "a blocked source captured a result"
+BLOCKED_ERR="$HES/state/procevent/blocked-src.stderr"
+assert_present "$BLOCKED_ERR" "a failed child's reason survives its exit status"
+assert_grep 'HTTP 401' "$BLOCKED_ERR" "the kept reason is the child's own message"
+blocked_mode=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
+  '. "$1/bin/fm-pr-lib.sh"; fm_pr_file_mode "$2"' _ "$ROOT" "$BLOCKED_ERR")
+assert_contains "$blocked_mode" 600 "the kept reason is private"
+assert_present "$HES/state/procevent/blocked-src.source" "keeping the reason leaves the source armed"
+
+# shellcheck disable=SC2016  # single quotes are deliberate: the child shell expands this.
+pe_register "$HES" lavish loud-fail-src -- /bin/sh -c 'printf "y%.0s" $(seq 1 20000) >&2; exit 1' >/dev/null
+pe "$HES" start loud-fail-src >/dev/null
+LOUD_ERR="$HES/state/procevent/loud-fail-src.stderr"
+assert_present "$LOUD_ERR" "a loud failure is still recorded"
+[ "$(wc -c < "$LOUD_ERR" | tr -d ' ')" -le 4096 ] || fail "a failed child's stderr was kept without a bound"
+
+pe_register "$HES" lavish chatty-src -- /bin/sh -c 'printf "just a warning\n" >&2; printf "payload\n"' >/dev/null
+pe "$HES" start chatty-src >/dev/null
+assert_absent "$HES/state/procevent/chatty-src.stderr" "a successful run keeps no diagnostic behind"
+CHATTY=$(first_result "$HES" chatty-src || true)
+[ -n "$CHATTY" ] || fail "a chatty but successful source captured no result"
+assert_grep 'payload' "$CHATTY" "the captured result still holds the source output verbatim"
+assert_no_grep 'just a warning' "$CHATTY" "the child's stderr never joins its captured result"
+
+pe "$HES" retire blocked-src >/dev/null
+assert_absent "$BLOCKED_ERR" "retiring a source removes the reason with it"
+pass "a detached runner keeps a failed child's bounded, private reason"
+
 HF="$TMP_ROOT/hf"; new_home "$HF"
 # shellcheck disable=SC2016  # single quotes are deliberate: the child shell expands this.
 pe_register "$HF" lavish big-src -- /bin/sh -c 'printf "x%.0s" $(seq 1 5000)' >/dev/null
