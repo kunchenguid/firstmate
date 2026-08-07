@@ -2954,6 +2954,11 @@ preserve_relaunch_meta() {
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
 } > "$SPAWN_META_PATH"
+META_WRITE_STATUS=$?
+if [ "$BACKEND" = orca ] && [ "$META_WRITE_STATUS" -ne 0 ]; then
+  echo "error: failed to publish Orca metadata for $ID; aborting launch" >&2
+  exit "$META_WRITE_STATUS"
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
