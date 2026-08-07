@@ -23,6 +23,12 @@
 # backlog roles, unresolved blockers, and captain actionability. It never infers
 # decisions from report or visual-review prose or reimplements snapshot semantics.
 #
+# Decision figures come from bin/fm-decision-ledger.sh, which owns them and their
+# definitions; this wrapper only projects them into decision_ledger[] (every figure
+# with what it counts) and decision_keys[] (one disposition-bearing row per distinct
+# open key). Read that script's header for why raw event counts can never be
+# published here as an open-decision count.
+#
 # Main-home inventory validity comes from the canonical snapshot's main_inventory
 # object (orphan structured in-flight without meta, unstructured current rows).
 # Bearings never invents Underway rows from backlog-only ids; it discloses those
@@ -107,7 +113,9 @@ Default is LOCAL-ONLY (no network); --include-prs is the only path that fetches.
 
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
-  decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
+  decisions_open{id,key,verb,summary,owner},
+  decision_ledger{figure,count,means}, decision_keys{task,key,verb,disposition,detail,summary},
+  landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
@@ -115,6 +123,8 @@ landed merges this home's Done with registered secondmate homes' Done, bounded b
   with omitted[] disclosure. Default selection is balanced across deterministic home
   order while preserving each home's internal newest-first order; sparse homes do
   not waste capacity. --all-landed reveals the full global newest-first set.
+decision_ledger and decision_keys come from bin/fm-decision-ledger.sh. decision_keys
+  is never capped: every distinct open decision key is listed with its disposition.
 For every registered secondmate, readable structured facts from its own home are
   authoritative, including independently trustworthy surfaces from a partial summary.
   Parent events and bounded terminal reads are labeled fallback or contradiction
@@ -167,6 +177,18 @@ command -v jq >/dev/null 2>&1 || { echo "fm-bearings-snapshot: jq not found" >&2
 "$SCRIPT_DIR/fm-afk-return.sh" guard || exit $?
 
 NOW=${FM_BEARINGS_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
+
+# --- decision-coverage ledger (local-only) ----------------------------------
+# bin/fm-decision-ledger.sh owns the figures and their definitions; this wrapper
+# only projects them. decision_ledger[] carries every figure with what it counts,
+# and decision_keys[] carries one disposition-bearing row per distinct open key.
+# decision_keys is deliberately UNCAPPED, unlike every other bounded surface here:
+# a truncated open-decision list is a silently unaccounted captain decision, which
+# is the exact failure this ledger exists to prevent, and the projection asserts
+# the emitted row count still equals the ledger's own open figure.
+LEDGER=$(FM_LEDGER_NOW="$NOW" "$SCRIPT_DIR/fm-decision-ledger.sh" --json 2>/dev/null) \
+  || LEDGER=''
+[ -n "$LEDGER" ] || LEDGER='{"unavailable":"decision ledger could not be produced"}'
 if [ "$ALL_LANDED" = 1 ] || [ "$ALL_SECONDMATES" = 1 ]; then
   if [ "$ALL_LANDED" = 1 ]; then
     SNAP=$(FM_SNAPSHOT_NOW="$NOW" FM_SNAPSHOT_SECONDMATES=0 FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 "$FLEET" --json) || exit $?
@@ -272,6 +294,7 @@ fi
 
 # --- projection: canonical snapshot -> fm-bearings.v1 model (JSON) ----------
 MODEL=$(printf '%s' "$SNAP" | jq \
+  --slurpfile ledger <(printf '%s\n' "$LEDGER") \
   --arg home "$HOME_LABEL" \
   --arg now "$NOW" \
   --arg prs "$PR_STATUS" \
@@ -312,6 +335,26 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | (($fl | index("paths")) != null) as $f_paths
   | (($fl | index("actions")) != null) as $f_actions
   | (($fl | index("endpoints")) != null) as $f_endpoints
+  | ($ledger[0] // {}) as $L
+  | (($L.schema // "") == "fm-decision-ledger.v1") as $ledger_ok
+  | (if $ledger_ok then
+       [ {figure:"raw_opening_events", count:$L.raw_decision_events.opening_total,
+          means:("needs-decision \($L.raw_decision_events.needs_decision) + blocked \($L.raw_decision_events.blocked) status events. " + $L.definitions.raw_decision_events)},
+         {figure:"raw_closing_events", count:$L.raw_decision_events.closing_total,
+          means:("resolved \($L.raw_decision_events.resolved) + captain-held \($L.raw_decision_events.captain_held) status events. " + $L.definitions.raw_decision_events)},
+         {figure:"keys_opened_distinct", count:$L.keys_opened_distinct, means:$L.definitions.keys_opened_distinct},
+         {figure:"keys_superseded", count:$L.keys_superseded, means:$L.definitions.keys_superseded},
+         {figure:"keys_stale", count:$L.keys_stale, means:$L.definitions.keys_stale},
+         {figure:"open_decision_keys", count:$L.open_decision_keys, means:$L.definitions.open_decision_keys} ]
+     else
+       [ {figure:"ledger_unavailable", count:0,
+          means:(($L.unavailable // "decision ledger could not be produced") + ". No open-decision figure is claimed here; inspect it with bin/fm-decision-ledger.sh")} ]
+     end) as $decision_ledger
+  | (if $ledger_ok then $L.open_decisions else [] end) as $decision_keys
+  | ([ $decision_keys[] | select(.disposition == "undetermined") ] | length) as $undetermined_keys
+  | (if $ledger_ok and ($L.open_decision_keys != ($decision_keys | length))
+     then error("bearings would report an open-decision count without a row per live key")
+     else . end)
   | ([ .backlog.records[] | select(.state == "done" and .structured and .kind != "captain")
        | {id, title, pr_url, report_path, local_note, completion, home:"(main)", home_id:"(main)"} ]) as $main_done
   | ((.secondmate_landed.records) // []) as $mate_done
@@ -426,6 +469,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       in_flight: (if $all_in_flight == 1 then $in_flight_all else $in_flight_all[:$in_flight_n] end),
       secondmates: (if $all_secondmates == 1 then $secondmates_all else $secondmates_all[:$secondmates_n] end),
       decisions_open: (if $all_decisions == 1 then $decisions_all else $decisions_all[:$decisions_n] end),
+      decision_ledger: $decision_ledger,
+      decision_keys: $decision_keys,
       landed: ($done | map({id, what:(.title | trunc(70)),
                             artifact:(.pr_url // .report_path // .local_note // "-"),owner:.home_id})),
       gates: (if $all_queued == 1 then $gates_all else $gates_all[:$gates_n] end),
@@ -464,6 +509,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (([($snap.secondmate_current.records // [])[] | select(.parent_event.activity_scan.input_truncated == true or .parent_event.activity_scan.retained_truncated == true)] | length) as $n | if $n > 0 then {surface:("secondmate parent activity evidence truncated for \($n) record(s)"), reveal:"raise FM_SNAPSHOT_PARENT_ACTIVITY_LINES, FM_SNAPSHOT_PARENT_ACTIVITY_BYTES, or FM_SNAPSHOT_PARENT_ACTIVITIES"} else empty end),
         (([($snap.secondmate_current.records // [])[] | select(.parent_event.activity_scan.available == false)] | length) as $n | if $n > 0 then {surface:("secondmate parent activity evidence unavailable for \($n) record(s)"), reveal:"inspect the parent status logs"} else empty end),
         (if $all_decisions == 0 and ($decisions_all | length) > $decisions_n then {surface:("decisions_open showing \($decisions_n) of \($decisions_all | length)"), reveal:"--all-decisions"} else empty end),
+        (if $ledger_ok then empty else {surface:"decision-coverage ledger unavailable; no open-decision figure is reported", reveal:"bin/fm-decision-ledger.sh"} end),
+        (if $ledger_ok and ($L.complete != true) then {surface:("decision keys whose durable state could not be classified: \($undetermined_keys)"), reveal:"bin/fm-decision-ledger.sh"} else empty end),
         (if $all_queued == 0 and ($gates_all | length) > $gates_n then {surface:("gates showing \($gates_n) of \($gates_all | length)"), reveal:"--all-queued"} else empty end),
         (if $all_reports == 0 and ($reports_all | length) > $reports_n then {surface:("reports showing \($reports_n) of \($reports_all | length)"), reveal:"--all-reports"} else empty end),
         (if $all_recorded_prs == 0 and ($recorded_prs_all | length) > $recorded_prs_n then {surface:("recorded_prs showing \($recorded_prs_n) of \($recorded_prs_all | length)"), reveal:"--all-recorded-prs"} else empty end),

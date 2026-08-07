@@ -550,8 +550,144 @@ test_resolve_matches_quoted_blocked_by_edges() {
   pass "resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id"
 }
 
+# Build a gate whose one captain decision is answered through `resolve` and then
+# archived out of the live backlog by Done retention - the state a real gate reaches
+# once its answer is a few days old. Returns the hold identity.
+answered_and_archived_fixture() {  # <home> <origin-id>
+  local home=$1 id=$2 hold
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Independent sample gate" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create archived-answer origin"
+  write_origin_meta "$home" "$id"
+  printf 'needs-decision [key=redirect]: fix the sample redirect now or accept it as documented\n' \
+    > "$home/state/$id.status"
+  printf '# Sample gate\n\nAll four verdicts passed.\n' > "$home/data/$id/report.md"
+  hold=$(run_decisions "$home" hold "$id" redirect \
+    --title "Fix the sample redirect now or defer it" \
+    --reason "captain call on a public sample route" --repo sample) \
+    || fail "could not register the redirect hold"
+  run_decisions "$home" complete "$id" redirect >/dev/null \
+    || fail "could not complete the redirect inventory"
+  tasks_in "$home" add sample-redirect-fix "Apply the sample redirect fix" \
+    --kind ship --repo sample --blocked-by "$hold" >/dev/null \
+    || fail "could not create the routed dependent"
+  printf 'Fix it now, on this branch, as a separable commit.\n' > "$home/redirect-decision.txt"
+  run_decisions "$home" resolve "$id" redirect --decision-file "$home/redirect-decision.txt" \
+    --routed-to sample-redirect-fix >/dev/null \
+    || fail "could not answer the redirect decision"
+  tasks_in "$home" prune --keep 0 >/dev/null || fail "could not archive the answered decision"
+  grep -E "^- \[[ x]\] $hold -" "$home/data/backlog.md" >/dev/null \
+    && fail "fixture did not archive the answered decision out of the live backlog"
+  grep -E "^- \[x\] $hold -" "$home/data/done-archive.md" >/dev/null \
+    || fail "fixture did not leave the answered decision in the archive"
+  printf '%s\n' "$hold"
+}
+
+# An inventory key proves a decision was INVENTORIED, not that it is still open.
+# Once the captain's answer is durably archived, the key is satisfied - so the gate
+# passes and the lane can finally be cleaned up - while a key that is genuinely
+# unaccounted for, including one whose row was collapsed away or whose archived
+# record no longer carries the answer, still refuses.
+test_answered_and_archived_key_is_closed_not_a_permanent_blocker() {
+  local home id hold rc archive
+  home=$(make_home archived-answer)
+  id=sample-gate-review
+  hold=$(answered_and_archived_fixture "$home" "$id")
+  archive="$home/data/done-archive.md"
+
+  run_decisions "$home" verify "$id" >/dev/null 2> "$home/verify.err" \
+    || fail "answered-and-archived decision blocked verification: $(cat "$home/verify.err")"
+  [ "$(run_decisions "$home" state "$id" redirect)" = "$(printf 'redirect\tarchived')" ] \
+    || fail "answered-and-archived decision was not classified as archived"
+  run_teardown "$home" "$id" >/dev/null 2> "$home/teardown.err" \
+    || fail "answered-and-archived decision blocked cleanup: $(cat "$home/teardown.err")"
+  grep -E "^- \[x\] $hold -" "$archive" >/dev/null \
+    || fail "the archived captain answer was consumed to make the gate pass"
+
+  # A row that was collapsed out of the live backlog without ever being answered is
+  # genuinely unaccounted for and must still refuse.
+  home=$(make_home collapsed-row)
+  id=sample-collapsed-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Collapsed-row sample gate" --kind scout --repo sample --start >/dev/null
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Collapsed row\n\nOne captain choice was inventoried.\n' > "$home/data/$id/report.md"
+  hold=$(run_decisions "$home" hold "$id" layout \
+    --title "Choose the sample layout" --reason "captain layout choice pending" --repo sample) \
+    || fail "could not register the collapsed-row hold"
+  run_decisions "$home" complete "$id" layout >/dev/null \
+    || fail "could not complete the collapsed-row inventory"
+  grep -v -E "^- \[ \] $hold -" "$home/data/backlog.md" > "$home/backlog.trimmed" \
+    || fail "could not build the collapsed-row fixture"
+  mv "$home/backlog.trimmed" "$home/data/backlog.md"
+  set +e
+  run_decisions "$home" verify "$id" > "$home/collapsed.out" 2> "$home/collapsed.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a collapsed inventory row passed verification"
+  assert_grep "unaccounted for" "$home/collapsed.err" \
+    "a collapsed row must refuse as unaccounted for"
+
+  # An archived row whose resolution record was edited away is equally unaccounted
+  # for: presence in the archive is never the evidence, the intact answer is.
+  home=$(make_home hollow-archive)
+  id=sample-hollow-review
+  hold=$(answered_and_archived_fixture "$home" "$id")
+  grep -v -E "^  (Resolution recorded by fm-decision-hold\.|Decision digest: |Routed identities: )" \
+    "$home/data/done-archive.md" > "$home/archive.trimmed" \
+    || fail "could not build the hollow-archive fixture"
+  mv "$home/archive.trimmed" "$home/data/done-archive.md"
+  set +e
+  run_decisions "$home" verify "$id" > "$home/hollow.out" 2> "$home/hollow.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an archived row without its captain answer passed verification"
+  assert_grep "unaccounted for" "$home/hollow.err" \
+    "a hollowed archive record must refuse as unaccounted for"
+  pass "an answered-and-archived key is closed while an unaccounted one still refuses"
+}
+
+# The answer is durable, so the archived identity must not become a way to reopen a
+# settled decision, and answering it again must stay identity-checked.
+test_archived_answer_is_not_reopenable_and_resolve_stays_idempotent() {
+  local home id hold rc
+  home=$(make_home archived-reopen)
+  id=sample-reopen-review
+  hold=$(answered_and_archived_fixture "$home" "$id")
+
+  set +e
+  run_decisions "$home" hold "$id" redirect \
+    --title "Fix the sample redirect now or defer it" \
+    --reason "captain call on a public sample route" --repo sample \
+    > "$home/reopen.out" 2> "$home/reopen.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an archived captain answer was reopened as a fresh hold"
+  assert_grep "already durably resolved and archived" "$home/reopen.err" \
+    "reopening an archived answer must say so"
+  assert_no_grep "$hold" "$home/data/backlog.md" \
+    "a refused reopen left a duplicate identity in the live backlog"
+
+  run_decisions "$home" resolve "$id" redirect --decision-file "$home/redirect-decision.txt" \
+    --routed-to sample-redirect-fix >/dev/null \
+    || fail "answering an already archived decision again was not idempotent"
+  printf 'Accept it as a documented limitation instead.\n' > "$home/changed-decision.txt"
+  set +e
+  run_decisions "$home" resolve "$id" redirect --decision-file "$home/changed-decision.txt" \
+    --routed-to sample-redirect-fix > "$home/drift.out" 2> "$home/drift.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a different captain decision was accepted against an archived answer"
+  assert_grep "records a different captain decision" "$home/drift.err" \
+    "a drifted answer must be rejected against the archived record"
+  pass "an archived captain answer cannot be reopened and stays identity-checked"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
+test_answered_and_archived_key_is_closed_not_a_permanent_blocker
+test_archived_answer_is_not_reopenable_and_resolve_stays_idempotent
 test_scout_teardown_always_requires_inventory_verification
 test_structured_holds_survive_teardown_and_route_resolution
 test_origin_slug_validation_precedes_path_construction

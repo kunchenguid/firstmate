@@ -11,7 +11,11 @@ It never reads report bodies, review artifacts, terminal output, or chat.
 
 The `hold` subcommand maps an originating work id and stable decision key to `<origin-id>-decision-<decision-key>`.
 It creates a kind `captain` backlog item when absent and invokes `tasks-axi hold <id> --reason <reason> --kind captain` on every retry.
-It rejects an identity collision, a changed title, and attempts to reopen an already resolved identity.
+It rejects an identity collision, a changed title, and attempts to reopen an already resolved identity, including one whose answer has since been archived.
+
+A hold identity carries one of five durable states, reported by the read-only `state` subcommand: actively held, resolved in the live backlog, resolved and archived out of it by Done retention, present but neither, or absent.
+The first three all satisfy the gates below, because an inventory key proves a decision was inventoried rather than that it is still open.
+An archived answer counts only when the archived record still carries the complete `resolve` resolution record, so a row that was collapsed into another, edited down, or deleted stays unaccounted for and still refuses.
 
 The `complete` subcommand unions the reviewed keys into `decision_keys=` and appends `decisions_reviewed=1` while originating task metadata is live.
 A post-teardown visual review can complete against the surviving report and durable holds without recreating volatile task metadata.
@@ -38,22 +42,31 @@ Its secondmate-home summary classifies an actionable captain hold as `captain_de
 It excludes completed kind `captain` records from Recently Landed.
 The projection remains read-only and does not inspect historical prose.
 
+`bin/fm-decision-ledger.sh` owns every decision FIGURE and its definition, so raw status-event counts cannot be published as open decisions.
+It folds the open set through `bin/fm-classify-lib.sh`'s `status_open_decisions` rather than counting events, classifies each key through `fm-decision-hold.sh state`, and refuses to emit unless the open-decision figure equals the length of an enumerated row list in which every key carries a disposition.
+Bearings projects that record into `decision_ledger` and the never-truncated `decision_keys`, and fails rather than publish an open-decision count that no enumerated key backs.
+
 ## Verification record
 
 Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
+Archived-answer and decision-coverage verification date: 2026-08-06.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
 The initial Bearings snapshot correctly has no open decision, and the new teardown gate refuses to erase the source.
 A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so `resolve` matches the first, middle, and last ids and rejects a genuinely absent id.
+The archived-answer regression drives a decision through `resolve` and then `tasks-axi prune --keep 0`, so verification meets a key whose answer exists only in the archive, and pairs it with a collapsed row and a hollowed archive record that must both still refuse.
+The coverage regression builds one home carrying every disposition at once, with far more raw decision events than open keys.
 
 The final verification commands and their exact summarized outputs follow.
 
 ```text
 $ bash tests/fm-decision-hold-lifecycle.test.sh
 ok - report-only unresolved decision is reproduced and completion refuses before loss
+ok - an answered-and-archived key is closed while an unaccounted one still refuses
+ok - an archived captain answer cannot be reopened and stays identity-checked
 ok - non-forced scout teardown always requires durable inventory verification
 ok - captain holds are idempotent, distinct, teardown-safe, Bearings-visible, and durably routed before close
 ok - completion and verification validate origins before constructing paths
@@ -62,6 +75,12 @@ ok - resolved findings and decision-like prose do not create false holds
 ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
+
+$ bash tests/fm-decision-ledger.test.sh
+ok - raw decision events stay distinct and can never stand in for the open-key count
+ok - every distinct live key carries its own disposition and closed keys stay out
+ok - an unclassifiable hold state is disclosed per key and never silently dropped
+ok - bearings publishes the ledger and refuses a count that no enumerated key backs
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly
@@ -73,6 +92,7 @@ ok - a completed scout with decision-like report prose is a pointer, not pending
 ok - action-free items (working/done/queued/landed) do not leak into Captain's Call
 ok - mixed secondmate roles, partial state, and captain readiness project independently
 ok - main and secondmate captain actionability use the same blocker readiness
+ok - an inventory beyond the argument limit still produces a complete bearings view
 
 $ bash tests/fm-brief.test.sh
 ok - fm-brief.sh: investigation and visual-review completions load the shared decision policy

@@ -246,6 +246,11 @@ _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
   _fm_decision_slug_ok "$k" || return 1
   printf '%s' "$k"
 }
+# Public accessor for the decision-key grammar owned by _fm_decision_key above,
+# for consumers that need one line's key without re-deriving the grammar.
+status_line_decision_key() {  # <status-line> -> key slug, or "default"
+  _fm_decision_key "$1"
+}
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
 # Portable (no associative arrays) so the fold runs on bash 3.2 as well as 4+.
 _fm_decision_drop() {  # <open-set> <key>
