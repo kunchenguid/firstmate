@@ -2106,7 +2106,7 @@ kimi_capture() {
 # background `node .../index.js worker-server` child and record its pid plus a
 # process identity in state/<id>.meta so teardown can reap it by pid even
 # after it detaches (reparents to init) and its cwd leaves the task worktree
-# (the observed cursor-worker-server-cleanup-gap incident, 2026-08-05).
+# (an observed worker-server cleanup gap, 2026-08-05).
 #
 # Discovery: the worker-server is a direct child of the cursor-agent process
 # running in this task's pane, so it is found from the pane's own process tree

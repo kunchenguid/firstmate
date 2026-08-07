@@ -1417,7 +1417,7 @@ reap_task_backend_process_group() {  # <label>
 # cursor_worker_server_record in bin/fm-spawn.sh). Cursor's background
 # `node .../index.js worker-server` child detaches from the pane (reparents to
 # init) and can leave the task worktree's cwd, so the cwd-based reaper below
-# cannot see it - the observed cursor-worker-server-cleanup-gap incident
+# cannot see it - an observed worker-server cleanup gap
 # (2026-08-05). The record carries the pid plus its process identity, using
 # Linux starttime or a portable `ps lstart` value, so a recycled pid is never
 # killed. A missing record falls through to the cwd-based reaper unchanged.
