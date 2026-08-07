@@ -191,7 +191,7 @@ test_spawn_resolves_standing_posture_by_registered_path() {
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects" "$external" "$fakebin"
   printf '#!/bin/sh\nexit 1\n' > "$fakebin/tmux"
   chmod +x "$fakebin/tmux"
-  printf -- "- pai-agent [no-mistakes] - external fixture at \`%s\` (added 2026-01-01)\n" "$external" \
+  printf -- "- pai-agent [no-mistakes path=%s] - external fixture (added 2026-01-01)\n" "$external" \
     > "$home/data/projects.md"
   write_brief "$home" delivery-extpath-e1 local-only
 
@@ -303,7 +303,7 @@ test_project_mode_resolves_registered_paths() {
   mkdir -p "$home/data" "$home/projects/tree" "$external" "$unknown"
   {
     printf -- '- tree [direct-PR] - in-tree fixture (added 2026-01-01)\n'
-    printf -- "- pai-agent [local-only] - external fixture at \`%s\` (added 2026-01-01)\n" "$external"
+    printf -- "- pai-agent [local-only path=%s] - external fixture (added 2026-01-01)\n" "$external"
   } > "$home/data/projects.md"
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" --path "$external" 2>/dev/null)
@@ -321,12 +321,20 @@ test_project_mode_resolves_registered_paths() {
 
   {
     printf -- '- one [local-only path=%s] - duplicate fixture (added 2026-01-01)\n' "$external"
-    printf -- "- two [direct-PR] - duplicate fixture at \`%s\` (added 2026-01-01)\n" "$external"
+    printf -- '- two [direct-PR path=%s] - duplicate fixture (added 2026-01-01)\n' "$external"
   } > "$home/data/projects.md"
   FM_HOME="$home" "$PROJECT_MODE" --path "$external" >"$outf" 2>"$errf"
   status=$?
   [ "$status" -ne 0 ] || fail "duplicate path identities should refuse"
   assert_grep 'ambiguous path identity' "$errf" "duplicate path refusal did not explain the ambiguity"
+
+  printf -- "- prose [local-only] - external fixture at \`%s\` (added 2026-01-01)\n" "$external" \
+    > "$home/data/projects.md"
+  FM_HOME="$home" "$PROJECT_MODE" --path "$external" >"$outf" 2>"$errf"
+  status=$?
+  expect_code 0 "$status" "free-form description paths should stay unknown, not refuse"
+  [ "$(cat "$outf")" = "no-mistakes off" ] || fail "description path parsed as a registered identity"
+  assert_grep 'no project registered for path' "$errf" "description path fallback did not print the unknown-path diagnostic"
 
   printf -- '- bad [local-only path=relative/project] - malformed fixture (added 2026-01-01)\n' \
     > "$home/data/projects.md"

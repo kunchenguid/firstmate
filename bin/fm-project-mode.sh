@@ -18,9 +18,9 @@
 #   - <name> [<mode> path=/absolute/project] - <desc> (...)   -> path identity for external projects
 #
 # Path lookups match structured identities only: the canonical in-home
-# projects/<name> path, a path= absolute-path token inside the registry
-# annotation, or one backtick-wrapped absolute path in the description. They do
-# not parse prose such as "at <path>".
+# projects/<name> path, or one path= absolute-path token inside the registry
+# annotation. They do not parse descriptions, backticks, or prose such as "at
+# <path>".
 #
 # Registered modes:
 #   no-mistakes            full pipeline -> PR -> configured merge authority (default)
@@ -199,28 +199,8 @@ explicit_paths_from_annotation() {  # <name> <annotation>
   fi
 }
 
-absolute_code_paths_from_line() {  # <line>
-  local rest=$1 code
-  while :; do
-    case "$rest" in
-      *'`'*) rest=${rest#*'`'} ;;
-      *) return 0 ;;
-    esac
-    case "$rest" in
-      *'`'*)
-        code=${rest%%'`'*}
-        rest=${rest#*'`'}
-        ;;
-      *) return 0 ;;
-    esac
-    case "$code" in
-      /*) printf '%s\n' "$code" ;;
-    esac
-  done
-}
-
-paths_for_registry_line() {  # <name> <line> <annotation>
-  local name=$1 line=$2 ann=$3 explicit candidate
+paths_for_registry_line() {  # <name> <annotation>
+  local name=$1 ann=$2 explicit candidate
   explicit=$(explicit_paths_from_annotation "$name" "$ann") || return 2
   if [ -n "$explicit" ]; then
     printf '%s\n' "$explicit"
@@ -228,7 +208,6 @@ paths_for_registry_line() {  # <name> <line> <annotation>
   fi
   candidate="$PROJECTS/$name"
   normalize_path "$candidate" 2>/dev/null || printf '%s\n' "$candidate"
-  absolute_code_paths_from_line "$line"
 }
 
 if [ ! -f "$REG" ]; then
@@ -269,7 +248,7 @@ while IFS= read -r line; do
   line_name=$(registry_line_name "$line" || true)
   [ -n "$line_name" ] || continue
   ann=$(registry_annotation "$line_name" "$line") || exit 2
-  paths=$(paths_for_registry_line "$line_name" "$line" "$ann") || exit 2
+  paths=$(paths_for_registry_line "$line_name" "$ann") || exit 2
   matched=0
   while IFS= read -r candidate; do
     [ -n "$candidate" ] || continue

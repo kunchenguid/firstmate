@@ -378,7 +378,7 @@ test_external_registered_local_only_path_skipped() {
   git init -q "$clone"
   git -C "$clone" symbolic-ref HEAD refs/heads/main
   commit_file "$clone" file.txt v0 C0
-  printf -- "- pai-agent [local-only] - external fixture at \`%s\` (added 2026-01-01)\n" "$clone" \
+  printf -- "- pai-agent [local-only path=%s] - external fixture (added 2026-01-01)\n" "$clone" \
     > "$home/data/projects.md"
 
   out=$(run_sync "$home" "$clone")
