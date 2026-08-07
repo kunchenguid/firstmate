@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Isolated real-Herdr E2E coverage for the default-off disposable single-task
-# presentation projection and its best-effort owning-parent ordering across
-# primary and secondmate homes.
+# Isolated real-Herdr E2E coverage for the default-on disposable single-task
+# presentation projection, its explicit opt-out, and its best-effort
+# owning-parent ordering across primary and secondmate homes.
 # The test drives the real spawn and teardown scripts, a real Treehouse pool,
 # and the guarded named-session lab helper.
 set -u
@@ -383,7 +383,7 @@ make_project() {  # <dir>
 spawn_task() {  # <id> <home> <project>
   local id=$1 home=$2 project=$3
   FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'sleep 120'" --backend herdr
+    "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'sleep 120'" --mode no-mistakes --yolo off --backend herdr
 }
 
 spawn_secondmate_task() {
@@ -455,8 +455,11 @@ mkdir -p "$HOME_DIR/state" "$HOME_DIR/config" \
   "$HOME_DIR/data/order-fail" "$HOME_DIR/data/fm-hibit-resume-r1" \
   "$HOME_DIR/data/wheelhouse-healing-r1"
 mkdir -p "$HOME_DIR/data/active-seeded" "$HOME_DIR/data/abort-a" "$HOME_DIR/data/abort-b" \
-  "$HOME_DIR/data/lock-contended"
+  "$HOME_DIR/data/lock-contended" "$HOME_DIR/data/default-on"
 touch "$HOME_DIR/state/.last-watcher-beat"
+# Presentation spaces are on by default, so the flat baseline below opts out
+# explicitly; the projected cases each restate the setting they exercise.
+printf 'off\n' > "$HOME_DIR/config/herdr-presentation-spaces"
 printf 'Projection anchor fixture.\n' > "$HOME_DIR/data/anchor/brief.md"
 printf 'Projection E2E fixture.\n' > "$HOME_DIR/data/shape/brief.md"
 printf 'Projection ordering fixture A.\n' > "$HOME_DIR/data/order-a/brief.md"
@@ -468,38 +471,90 @@ printf 'Projection active seeded fixture.\n' > "$HOME_DIR/data/active-seeded/bri
 printf 'Projection abort fixture A.\n' > "$HOME_DIR/data/abort-a/brief.md"
 printf 'Projection abort fixture B.\n' > "$HOME_DIR/data/abort-b/brief.md"
 printf 'Projection lock contention fixture.\n' > "$HOME_DIR/data/lock-contended/brief.md"
+printf 'Projection default-on fixture.\n' > "$HOME_DIR/data/default-on/brief.md"
 make_project "$PROJECT_DIR"
 
 # Keep one ordinary primary task live so the durable firstmate workspace is
 # first and remains present while disposable workers are projected around it.
 spawn_task anchor "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/anchor.out" 2> "$TMP_ROOT/anchor.err" \
-  || fail "flag-off anchor spawn failed: $(cat "$TMP_ROOT/anchor.err")"
+  || fail "opted-out anchor spawn failed: $(cat "$TMP_ROOT/anchor.err")"
 ANCHOR_META="$HOME_DIR/state/anchor.meta"
 remember_meta_worktree "$ANCHOR_META" >/dev/null
 FIRSTMATE_WSID=$(grep '^herdr_workspace_id=' "$ANCHOR_META" | cut -d= -f2-)
 [ -n "$FIRSTMATE_WSID" ] || fail "anchor metadata did not record the firstmate workspace"
 
-# The same task id and project run once with the flag absent and once with it
-# present, so Treehouse commands and metadata can be compared directly.
+# The same task id and project run once opted out and once projected, so
+# Treehouse commands and metadata can be compared directly.
 : > "$TREEHOUSE_CALL_LOG"
 OFF_HERDR_START=$(log_line_count)
 OFF_MOVE_START=$(wc -l < "$MOVE_CALL_LOG" | tr -d '[:space:]')
 spawn_task shape "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/off.out" 2> "$TMP_ROOT/off.err" \
-  || fail "flag-off spawn failed: $(cat "$TMP_ROOT/off.err")"
+  || fail "opted-out spawn failed: $(cat "$TMP_ROOT/off.err")"
 OFF_HERDR_END=$(log_line_count)
 OFF_META="$TMP_ROOT/off.meta"
 cp "$HOME_DIR/state/shape.meta" "$OFF_META"
 OFF_WT=$(remember_meta_worktree "$OFF_META")
 cp "$TREEHOUSE_CALL_LOG" "$TMP_ROOT/off-treehouse.log"
 [ "$(wc -l < "$MOVE_CALL_LOG" | tr -d '[:space:]')" = "$OFF_MOVE_START" ] \
-  || fail "flag-off spawn invoked the presentation-only workspace mover"
+  || fail "opted-out spawn invoked the presentation-only workspace mover"
 OFF_HERDR_CALLS=$(sed -n "$((OFF_HERDR_START + 1)),${OFF_HERDR_END}p" "$HERDR_CALL_LOG")
 if printf '%s\n' "$OFF_HERDR_CALLS" | grep -E $'^(api\tschema|session\tlist)' >/dev/null 2>&1; then
-  fail "flag-off spawn added presentation-ordering capability or socket calls"
+  fail "opted-out spawn added presentation-ordering capability or socket calls"
 fi
-pass "real Herdr lab: flag-off spawn retains the Stage 1 Herdr command sequence with zero ordering calls"
+pass "real Herdr lab: an opted-out spawn retains the Stage 1 Herdr command sequence with zero ordering calls"
 teardown_task shape "$HOME_DIR" > "$TMP_ROOT/off-teardown.out" 2> "$TMP_ROOT/off-teardown.err" \
-  || fail "flag-off teardown failed: $(cat "$TMP_ROOT/off-teardown.err")"
+  || fail "opted-out teardown failed: $(cat "$TMP_ROOT/off-teardown.err")"
+
+# A home that configured nothing at all follows the version floor: it is
+# projected on a release at or above it, and takes the ordinary flat layout with
+# one naming warning below it. The only difference from the opted-out spawn
+# above is the removed file, so this case is the floor's live end-user proof on
+# whichever Herdr this lab is running.
+rm -f "$HOME_DIR/config/herdr-presentation-spaces"
+FLOOR_STATUS=$(lab status --json) || fail 'could not read the lab release for the presentation floor'
+FLOOR_VERSION=$(printf '%s' "$FLOOR_STATUS" | jq -r 'if .server.running then .server.version else .client.version end')
+FLOOR_PROTOCOL=$(printf '%s' "$FLOOR_STATUS" | jq -r 'if .server.running then .server.protocol else .client.protocol end')
+FLOOR_VERDICT=$(bash -c '
+  . "$0/bin/backends/herdr.sh"
+  status=0
+  fm_backend_herdr_release_floor_verdict "$1" "$2" || status=$?
+  printf "%s\n" "$status"
+' "$ROOT" "$FLOOR_PROTOCOL" "$FLOOR_VERSION")
+[ "$FLOOR_VERDICT" = 0 ] || [ "$FLOOR_VERDICT" = 1 ] \
+  || fail "herdr $FLOOR_VERSION protocol $FLOOR_PROTOCOL could not be classified against the presentation floor"
+spawn_task default-on "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/default-on.out" 2> "$TMP_ROOT/default-on.err" \
+  || fail "default-on spawn failed: $(cat "$TMP_ROOT/default-on.err")"
+DEFAULT_ON_META="$HOME_DIR/state/default-on.meta"
+remember_meta_worktree "$DEFAULT_ON_META" >/dev/null
+DEFAULT_ON_JOURNAL="$HOME_DIR/state/default-on.herdr-presentation"
+DEFAULT_ON_WSID=$(grep '^herdr_workspace_id=' "$DEFAULT_ON_META" | cut -d= -f2-)
+if [ "$FLOOR_VERDICT" = 0 ]; then
+  [ -f "$DEFAULT_ON_JOURNAL" ] \
+    || fail "an unconfigured home did not publish a presentation journal on supported herdr $FLOOR_VERSION"
+  DEFAULT_ON_TOKEN=$(grep '^projection_id=' "$DEFAULT_ON_JOURNAL" | cut -d= -f2-)
+  [ -n "$DEFAULT_ON_WSID" ] && [ "$DEFAULT_ON_WSID" != "$FIRSTMATE_WSID" ] \
+    || fail "an unconfigured home reused the flat firstmate workspace instead of projecting"
+  DEFAULT_ON_LABEL=$(lab workspace get "$DEFAULT_ON_WSID" | jq -r '.result.workspace.label // empty')
+  [ "$DEFAULT_ON_LABEL" = "└ default-on · p:$DEFAULT_ON_TOKEN" ] \
+    || fail "default-on projection used an unexpected workspace label: $DEFAULT_ON_LABEL"
+  pass "real Herdr lab: a home that configured nothing is projected by default on herdr $FLOOR_VERSION"
+else
+  [ ! -e "$DEFAULT_ON_JOURNAL" ] \
+    || fail "an unconfigured home published a presentation journal on below-floor herdr $FLOOR_VERSION"
+  [ "$DEFAULT_ON_WSID" = "$FIRSTMATE_WSID" ] \
+    || fail "an unconfigured home did not land in the flat firstmate workspace on below-floor herdr $FLOOR_VERSION (got '${DEFAULT_ON_WSID:-<empty>}')"
+  grep -q "$FLOOR_VERSION" "$TMP_ROOT/default-on.err" \
+    || fail "the below-floor fallback did not name herdr $FLOOR_VERSION: $(cat "$TMP_ROOT/default-on.err")"
+  pass "real Herdr lab: a home that configured nothing falls back flat on below-floor herdr $FLOOR_VERSION with one naming warning"
+fi
+teardown_task default-on "$HOME_DIR" > "$TMP_ROOT/default-on-teardown.out" 2> "$TMP_ROOT/default-on-teardown.err" \
+  || fail "default-on teardown failed: $(cat "$TMP_ROOT/default-on-teardown.err")"
+if [ "$FLOOR_VERDICT" = 0 ] && lab workspace get "$DEFAULT_ON_WSID" >/dev/null 2>&1; then
+  fail "default-on teardown left its disposable workspace behind"
+fi
+# The ordering scenarios below read the whole move log cumulatively against the
+# projected workspaces that are still live, so this retired one starts them clean.
+: > "$MOVE_CALL_LOG"
 
 SECOND_ONE_OUT=$(lab workspace create --cwd "$PROJECT_DIR" --label 2ndmate-alpha --no-focus) \
   || fail "could not create the first secondmate presentation fixture"
@@ -516,6 +571,8 @@ CAPTAIN_FOCUS="$SECOND_TWO_WSID/$SECOND_TWO_TAB"
 assert_focus_is "$CAPTAIN_FOCUS" "focused secondmate fixture"
 
 : > "$TREEHOUSE_CALL_LOG"
+# The historical presence-based opt-in was an empty file; it must still project,
+# so no home that had already enabled the projection is turned off by the default.
 : > "$HOME_DIR/config/herdr-presentation-spaces"
 SHAPE_FOCUS_AUDIT_START=$(focus_audit_line_count)
 spawn_task shape "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/on.out" 2> "$TMP_ROOT/on.err" \
@@ -526,7 +583,7 @@ ON_META="$TMP_ROOT/on.meta"
 cp "$HOME_DIR/state/shape.meta" "$ON_META"
 ON_WT=$(remember_meta_worktree "$ON_META")
 cmp -s "$TMP_ROOT/off-treehouse.log" "$TREEHOUSE_CALL_LOG" \
-  || fail "Treehouse command sequence changed between flag-off and projected spawns"
+  || fail "Treehouse command sequence changed between opted-out and projected spawns"
 JOURNAL="$HOME_DIR/state/shape.herdr-presentation"
 [ -f "$JOURNAL" ] || fail "projected spawn did not publish its presentation journal"
 TOKEN=$(grep '^projection_id=' "$JOURNAL" | cut -d= -f2-)
@@ -659,7 +716,7 @@ PROJECTION_ORDER_START=$(log_line_count)
 normalize_meta "$OFF_META" > "$TMP_ROOT/off.meta.normalized"
 normalize_meta "$ON_META" > "$TMP_ROOT/on.meta.normalized"
 cmp -s "$TMP_ROOT/off.meta.normalized" "$TMP_ROOT/on.meta.normalized" \
-  || fail "metadata changed beyond Herdr container IDs between flag-off and projected paths"
+  || fail "metadata changed beyond Herdr container IDs between opted-out and projected paths"
 
 # Two real concurrent primary spawns share the bounded presentation-order lock.
 # Their final relative order must match Herdr's actual serialized create order,
@@ -875,18 +932,18 @@ mkdir -p "$SECOND_HOME_A/bin"
 printf '# Firstmate secondmate fixture\n' > "$SECOND_HOME_A/AGENTS.md"
 printf 'Secondmate alpha charter.\n' > "$SECOND_HOME_A/data/charter.md"
 
-# Primary flag only; real inheritance must push presence into both secondmate homes.
+# Primary setting only; real inheritance must push it into both secondmate homes.
 [ -f "$HOME_DIR/config/herdr-presentation-spaces" ] \
-  || fail "primary presentation flag disappeared before multi-home inheritance"
+  || fail "primary presentation setting disappeared before multi-home inheritance"
 [ ! -e "$SECOND_HOME_A/config/herdr-presentation-spaces" ] \
-  || fail "secondmate A unexpectedly had the presentation flag before inheritance"
+  || fail "secondmate A unexpectedly had a local presentation setting before inheritance"
 [ ! -e "$SECOND_HOME_B/config/herdr-presentation-spaces" ] \
-  || fail "secondmate B unexpectedly had the presentation flag before inheritance"
+  || fail "secondmate B unexpectedly had a local presentation setting before inheritance"
 SECOND_SPAWN_LOG_START=$(log_line_count)
 spawn_secondmate_task alpha "$SECOND_HOME_A" > "$TMP_ROOT/alpha.out" 2> "$TMP_ROOT/alpha.err" \
   || fail "secondmate alpha spawn failed: $(cat "$TMP_ROOT/alpha.err")"
 [ -f "$SECOND_HOME_A/config/herdr-presentation-spaces" ] \
-  || fail "secondmate spawn did not inherit the presentation flag"
+  || fail "secondmate spawn did not inherit the presentation setting"
 [ ! -e "$HOME_DIR/state/alpha.herdr-presentation" ] \
   || fail "secondmate spawn published a presentation journal"
 SECOND_META="$HOME_DIR/state/alpha.meta"
@@ -909,10 +966,10 @@ propagate_inheritable_config "$HOME_DIR/config" "$SECOND_HOME_A/config" \
 propagate_inheritable_config "$HOME_DIR/config" "$SECOND_HOME_B/config" \
   || fail "inheritance into secondmate B failed"
 [ -f "$SECOND_HOME_A/config/herdr-presentation-spaces" ] \
-  || fail "primary presentation flag did not reach secondmate A"
+  || fail "primary presentation setting did not reach secondmate A"
 [ -f "$SECOND_HOME_B/config/herdr-presentation-spaces" ] \
-  || fail "primary presentation flag did not reach secondmate B"
-pass "real Herdr lab: primary presentation opt-in inherits into real secondmate homes"
+  || fail "primary presentation setting did not reach secondmate B"
+pass "real Herdr lab: the primary presentation setting inherits into real secondmate homes"
 
 # Keep the pre-existing 2ndmate-alpha/bravo workspaces as owning parents and captain focus.
 assert_focus_is "$CAPTAIN_FOCUS" "multi-home captain focus"

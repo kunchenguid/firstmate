@@ -14,11 +14,16 @@
 #      explicit per-spawn harness arg still wins.
 #   B) Inheritance. The primary pushes a declared, extensible set of LOCAL
 #      (gitignored) config items - config/crew-dispatch.json, config/crew-harness,
-#      config/backlog-backend, config/backend, config/herdr-presentation-spaces, and
-#      config/startup-memory-budget -
+#      config/backlog-backend, config/backend, config/herdr-presentation-spaces,
+#      config/startup-memory-budget, and config/trace-context -
 #      down into each secondmate home's config/, so the secondmate's OWN crewmates,
-#      dispatch profiles, backlog backend, runtime-backend default, and Herdr
-#      presentation opt-in inherit the primary's settings. It is primary-authoritative
+#      dispatch profiles, backlog backend, runtime-backend default, Herdr
+#      presentation choice, startup-memory budget, and trace context inherit the
+#      primary's settings. For config/herdr-presentation-spaces, an absent
+#      primary file and an absent destination file both mean the same
+#      unconfigured default, so the generic absence mirror converges that item
+#      without deciding its release-dependent floor.
+#      It is primary-authoritative
 #      (re-pushed at secondmate spawn, on the bootstrap secondmate sweep, and by
 #      config push).
 #      config/secondmate-harness is deliberately NOT inherited (secondmates do
@@ -266,6 +271,7 @@ test_propagate_lib() {
   printf 'manual\n' > "$src/backlog-backend"
   printf 'tmux\n' > "$src/backend"
   : > "$src/herdr-presentation-spaces"
+  : > "$src/trace-context"
   stdout="$d/clean-copy.out"
   stderr="$d/clean-copy.err"
   propagate_inheritable_config "$src" "$dest" >"$stdout" 2>"$stderr" || fail "propagate returned non-zero"
@@ -279,6 +285,7 @@ test_propagate_lib() {
   printf 'herdr\n' > "$dest/backend"
   propagate_inheritable_config "$src" "$dest"
   [ "$(cat "$dest/backend")" = tmux ] || fail "primary backend did not overwrite a divergent destination"
+  [ -f "$dest/trace-context" ] || fail "trace-context not propagated by the default inheritable set"
 
   # 2. idempotent: an unchanged re-run does not churn the mtime
   m1=$(date -r "$dest/crew-harness" +%s 2>/dev/null || stat -c %Y "$dest/crew-harness")
@@ -315,13 +322,14 @@ test_propagate_lib() {
   # 4. removing the source mirrors absence downstream (primary-authoritative)
   printf 'herdr\n' > "$dest/backend"
   rm -f "$src/crew-dispatch.json" "$src/crew-harness" "$src/backlog-backend" \
-    "$src/backend" "$src/herdr-presentation-spaces"
+    "$src/backend" "$src/herdr-presentation-spaces" "$src/trace-context"
   propagate_inheritable_config "$src" "$dest"
   [ -e "$dest/crew-dispatch.json" ] && fail "dispatch profile absence not mirrored downstream"
   [ -e "$dest/crew-harness" ] && fail "absence not mirrored downstream"
   [ -e "$dest/backlog-backend" ] && fail "backlog-backend absence not mirrored downstream"
   [ -e "$dest/backend" ] && fail "backend absence not mirrored downstream"
   [ -e "$dest/herdr-presentation-spaces" ] && fail "herdr-presentation-spaces absence not mirrored downstream"
+  [ -e "$dest/trace-context" ] && fail "trace-context absence not mirrored downstream"
 
   rm -f "$dest/crew-harness"
   ln -s "$d/missing-target" "$dest/crew-harness"
@@ -824,6 +832,45 @@ test_spawn_explicit_harness_uses_explicit_profile_axes() {
   pass "C8 spawn: an explicit --harness still honors explicit model/effort flags"
 }
 
+test_spawned_secondmate_uses_its_harness_supervision_model() {
+  local harness expected w sm launchlog launch fakebin out
+  for harness in codex claude; do
+    w="$TMP_ROOT/spawn-supervision-model-$harness"
+    sm="$w/sm"
+    launchlog="$w/launch.log"
+    mkdir -p "$w/home/config"
+    printf '%s\n' "$harness" > "$w/home/config/secondmate-harness"
+    make_seeded_home "$sm" sm
+    spawn_secondmate_capture "$w" sm "$sm" "$launchlog" >/dev/null 2>&1
+    fm_write_meta "$sm/state/task.meta" "window=firstmate:fm-task" "kind=ship"
+    touch "$sm/state/.last-watcher-beat"
+    fakebin="$w/tmux-sm/fakebin"
+    # Point the guard at the fixture home, not at whatever checkout this suite
+    # happens to be running from. The guard also reports a tangled primary
+    # checkout, so without this the branch a contributor is working on decides
+    # whether this assertion passes.
+    cat > "$fakebin/$harness" <<SH
+#!/usr/bin/env bash
+FM_ROOT_OVERRIDE="$sm" "$ROOT/bin/fm-guard.sh"
+SH
+    chmod +x "$fakebin/$harness"
+    launch=$(cat "$launchlog")
+    out=$(PATH="$fakebin:$BASE_PATH" CLAUDECODE=1 bash -c "$launch" 2>&1)
+    case "$harness" in
+      codex)
+        expected='WATCHER DOWN - SUPERVISION IS OFF'
+        assert_contains "$out" "$expected" \
+          "Codex secondmate inherited Claude auto-arm despite its persistent watcher model"
+        ;;
+      claude)
+        [ -z "$out" ] \
+          || fail "Claude secondmate with a fresh beacon should use auto-arm supervision, got: $out"
+        ;;
+    esac
+  done
+  pass "C9 spawn: secondmate launch pins supervision to its own harness"
+}
+
 # The harness fallback chain (secondmate-harness -> crew-harness -> own) still
 # resolves correctly with no model/effort tokens anywhere in the chain, and a
 # crew/scout (non-secondmate) launch is entirely unaffected by this feature: no
@@ -862,7 +909,7 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_LAUNCH_LOG="$launchlog" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" >/dev/null 2>&1
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --mode no-mistakes --yolo off >/dev/null 2>&1
   meta="$home/state/$id.meta"
   [ "$(meta_field "$meta" kind)" = ship ] || fail "crew-unaffected: expected an ordinary ship task"
   [ "$(meta_field "$meta" harness)" = codex ] || fail "crew-unaffected: crew harness resolution changed"
@@ -904,6 +951,18 @@ new_world() {
   printf '%s\n' "$w"
 }
 
+record_live_watcher_fixture() {
+  local home=$1 identity
+  identity=$(FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_pid_identity "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$$") || fail "could not identify the live watcher fixture"
+  mkdir "$home/state/.watch.lock"
+  printf '%s\n' "$$" > "$home/state/.watch.lock/pid"
+  printf '%s\n' "$home" > "$home/state/.watch.lock/fm-home"
+  printf '%s\n' "$ROOT/bin/fm-watch.sh" > "$home/state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$home/state/.watch.lock/pid-identity"
+  touch "$home/state/.last-watcher-beat"
+}
+
 # A live secondmate home as a DETACHED worktree of the primary at <commit>, with
 # its seed marker and a live kind=secondmate meta.
 add_sm_worktree() {
@@ -921,7 +980,17 @@ make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin="$dir/fakebin"
   mkdir -p "$fakebin"
-  fm_fake_exit0 "$fakebin" node gh-axi chrome-devtools-axi lavish-axi
+  fm_fake_exit0 "$fakebin" node chrome-devtools-axi
+  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '0.1.29'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/gh-axi"
   # tmux fake supports fm-send's composer-verified submit path and optional
   # FM_FAKE_TMUX_LOG / FM_FAKE_TMUX_FAIL_LITERAL for reread-nudge assertions.
   cat > "$fakebin/tmux" <<'SH'
@@ -968,6 +1037,25 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/no-mistakes"
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "--version ") printf '%s\n' '0.2.4' ;;
+  "update --help") printf '%s\n' 'usage: tasks-axi update <id> [flags]' '  --archive-body' ;;
+  "mv --help") printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tasks-axi"
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '0.1.17'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/quota-axi"
   printf '%s\n' "$fakebin"
 }
 
@@ -1090,6 +1178,7 @@ test_bootstrap_sweep_propagates_and_reconverges() {
   printf 'codex\n' > "$w/home/config/crew-harness"
   printf 'manual\n' > "$w/home/config/backlog-backend"
   printf 'tmux\n' > "$w/home/config/backend"
+  : > "$w/home/config/trace-context"
   printf 'grok\n' > "$w/home/config/secondmate-harness"
   run_bootstrap "$w" >/dev/null
   [ "$(cat "$w/sm/config/crew-harness" 2>/dev/null)" = codex ] \
@@ -1100,6 +1189,8 @@ test_bootstrap_sweep_propagates_and_reconverges() {
     || fail "sweep: backlog-backend not pushed into the live home"
   [ "$(cat "$w/sm/config/backend" 2>/dev/null)" = tmux ] \
     || fail "sweep: backend not pushed into the live home"
+  [ ! -e "$w/sm/config/trace-context" ] \
+    || fail "sweep: trace-context changed a legacy live home before relaunch"
   [ -e "$w/sm/config/secondmate-harness" ] \
     && fail "sweep: secondmate-harness was inherited (must not be)"
 
@@ -1251,6 +1342,61 @@ test_backend_inheritance_present_and_absent() {
   pass "B12b backend inheritance: present values and primary absence converge exactly"
 }
 
+# config/herdr-presentation-spaces has an unconfigured default, so this item's
+# convergence is asserted through the preference the spawn gate actually reads
+# in the destination home, not through file presence alone: mirroring the primary's
+# absence must converge a secondmate to the same unconfigured default rather
+# than turning its projection off. The Herdr version floor that decides what
+# that default resolves to is a property of the running release, not of
+# inheritance, so it is pinned in tests/fm-backend-herdr.test.sh instead.
+sm_presentation_verdict() {  # <config-dir> -> on|off
+  bash -c '
+    . "$0/bin/backends/herdr.sh"
+    case "$(fm_backend_herdr_presentation_preference "$1")" in
+      off) printf "off\n" ;;
+      *) printf "on\n" ;;
+    esac
+  ' "$ROOT" "$1" 2>/dev/null
+}
+
+test_presentation_inheritance_default_on_and_opt_out() {
+  local w head out err status verdict
+  w=$(new_world presentation-inherit)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  err="$w/presentation-inherit.err"
+
+  out=$(run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "presentation default push should succeed"
+  [ -e "$w/sm/config/herdr-presentation-spaces" ] \
+    && fail "primary default must not write an opt-out downstream"
+  verdict=$(sm_presentation_verdict "$w/sm/config")
+  [ "$verdict" = on ] || fail "primary default left the secondmate projection $verdict"
+
+  mkdir -p "$w/sm/config"
+  printf 'off\n' > "$w/sm/config/herdr-presentation-spaces"
+  out=$(run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "presentation reconverge push should succeed"
+  assert_contains "$out" "herdr-presentation-spaces: pushed - mirrored primary absence" \
+    "a local secondmate opt-out should reconverge on the primary default"
+  verdict=$(sm_presentation_verdict "$w/sm/config")
+  [ "$verdict" = on ] || fail "primary default did not reconverge a locally opted-out secondmate ($verdict)"
+
+  printf 'off\n' > "$w/home/config/herdr-presentation-spaces"
+  out=$(run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "presentation opt-out push should succeed"
+  assert_contains "$out" "herdr-presentation-spaces: pushed" "explicit opt-out should report pushed"
+  verdict=$(sm_presentation_verdict "$w/sm/config")
+  [ "$verdict" = off ] || fail "explicit primary opt-out left the secondmate projection $verdict"
+
+  : > "$w/home/config/herdr-presentation-spaces"
+  out=$(run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "presentation legacy opt-in push should succeed"
+  verdict=$(sm_presentation_verdict "$w/sm/config")
+  [ "$verdict" = on ] || fail "a legacy primary opt-in file left the secondmate projection $verdict"
+  pass "B12c presentation inheritance: the primary default converges on, and only an explicit opt-out propagates off"
+}
+
 test_bootstrap_sweep_surfaces_config_propagation_failure() {
   local w c1 out fail_line
   w=$(new_world boot-prop-fail)
@@ -1308,6 +1454,8 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
   printf 'codex\n' > "$w/home/config/crew-harness"
   printf 'manual\n' > "$w/home/config/backlog-backend"
   printf 'tmux\n' > "$w/home/config/backend"
+  record_live_watcher_fixture "$w/home"
+  : > "$w/home/config/trace-context"
   err="$w/config-push-basic.err"
   log="$w/config-push-basic.tmux.log"
   out=$(run_config_push "$w" "$log" 2>"$err"); status=$?
@@ -1325,6 +1473,10 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
     "config push did not report backlog-backend as pushed"
   assert_contains "$out" "backend: pushed" \
     "config push did not report backend as pushed"
+  assert_contains "$out" "trace-context: unchanged" \
+    "live config push must report trace-context as session-scoped and unchanged"
+  [ ! -e "$w/sm/config/trace-context" ] \
+    || fail "live config push retroactively enabled trace context in a legacy secondmate home"
   assert_contains "$out" "config-reread: sent" \
     "config push with changed config must send a literal reread instruction"
   assert_not_contains "$out" "NUDGE_SECONDMATES" \
@@ -1350,6 +1502,8 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
     "idempotent config push did not report backlog-backend as unchanged"
   assert_contains "$out2" "backend: unchanged" \
     "idempotent config push did not report backend as unchanged"
+  assert_contains "$out2" "trace-context: unchanged" \
+    "idempotent config push did not preserve session-scoped trace context"
   assert_not_contains "$out2" "config-reread: sent" \
     "unchanged config must not send a reread message"
   [ ! -s "$log" ] || fail "unchanged config push still invoked tmux send: $(cat "$log")"
@@ -1492,6 +1646,7 @@ test_config_reread_per_home_changed_sets_and_exact_bytes() {
     printf '%s\n' "shared secret preference body that must never appear in a config reread"
   } > "$w/home/data/captain-shared.md"
 
+  record_live_watcher_fixture "$w/home"
   log="$w/config-reread-per-home.tmux.log"
   err="$w/config-reread-per-home.err"
   out=$(run_config_push "$w" "$log" 2>"$err"); status=$?
@@ -2327,12 +2482,14 @@ test_spawn_explicit_model_overrides_secondmate_harness_token
 test_spawn_explicit_effort_overrides_secondmate_harness_token
 test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens
 test_spawn_explicit_harness_uses_explicit_profile_axes
+test_spawned_secondmate_uses_its_harness_supervision_model
 test_spawn_fallback_chain_and_crew_scout_unaffected
 test_bootstrap_sweep_propagates_and_reconverges
 test_bootstrap_sweep_propagates_when_tracked_current
 test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home
 test_bootstrap_sweep_materializes_and_inherits_memory_default
 test_backend_inheritance_present_and_absent
+test_presentation_inheritance_default_on_and_opt_out
 test_bootstrap_sweep_surfaces_config_propagation_failure
 test_bootstrap_rereads_after_partial_propagation
 test_config_push_propagates_reports_without_ff_or_nudge
