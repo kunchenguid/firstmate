@@ -454,10 +454,6 @@ ORCA_PATH_MATCH_VERIFIED=0
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
-if [ "$KIND" != secondmate ] && [ -d "$WT" ]; then
-  fm_task_custody_validate "$STATE" "$ID" "$WT" || exit 1
-  WT=$FM_TASK_CUSTODY_WORKTREE
-fi
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 PUBLIC_FOLLOWUP_HOME=$FM_HOME
@@ -2351,6 +2347,14 @@ if [ "$FORCE" != "--force" ] \
     echo "Deliver it with bin/fm-public-followup.sh deliver <obligation-id>, waive it with tasks-axi public-followup waive, or use --force after explicit discard approval." >&2
     exit 1
   fi
+fi
+
+# Parent-home promise ownership must be resolved before worktree custody so a
+# marked secondmate home cannot hide an actionable missing-parent refusal behind
+# a downstream worktree diagnostic. Both checks remain before any cleanup.
+if [ "$KIND" != secondmate ] && [ -d "$WT" ]; then
+  fm_task_custody_validate "$STATE" "$ID" "$WT" || exit 1
+  WT=$FM_TASK_CUSTODY_WORKTREE
 fi
 
 if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
