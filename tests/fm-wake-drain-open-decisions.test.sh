@@ -54,6 +54,37 @@ test_explicit_resolution_closes_it() {
   pass "an explicit resolved [key=X] closes the keyed decision"
 }
 
+test_reserved_key_namespace_is_owned_by_its_library() {
+  local dir state out
+  dir=$(make_case reserved-key)
+  state="$dir/state"
+  out="$dir/drain.out"
+  # `pending-reply-<id>` names a decision bin/fm-pending-reply-lib.sh raises and
+  # is the only writer that closes it. Every writer reaches this same stream - a
+  # local mate appends into it directly, and a remote mate's lines are mirrored
+  # into it verbatim - so another writer must not be able to take that key over
+  # or clear it just by naming it.
+  printf 'blocked [key=pending-reply-abcdef0123456789]: pending-reply-missed: task=ios pending-reply-id=abcdef0123456789 request=ship it\n' > "$state/task9.status"
+  printf 'blocked [key=pending-reply-abcdef0123456789]: shipping is blocked on infra\n' >> "$state/task9.status"
+  printf 'resolved [key=pending-reply-abcdef0123456789]: all good now\n' >> "$state/task9.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on reserved-key lines"
+
+  grep -F 'pending-reply-id=abcdef0123456789' "$out" >/dev/null \
+    || fail "a foreign resolution cleared a reserved decision it does not own: $(cat "$out")"
+  if grep -F 'shipping is blocked on infra' "$out" >/dev/null; then
+    fail "a foreign line took over a reserved decision key: $(cat "$out")"
+  fi
+
+  # The owner's own resolution, which speaks that namespace's vocabulary, closes it.
+  printf 'resolved [key=pending-reply-abcdef0123456789]: pending-reply-resolved: task=ios pending-reply-id=abcdef0123456789 via=status\n' >> "$state/task9.status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed after the owner closed its decision"
+  if grep -F 'OPEN DECISIONS' "$out" >/dev/null; then
+    fail "the owner's own resolution did not close its reserved decision: $(cat "$out")"
+  fi
+  pass "a reserved decision key can only be opened or closed by its owning library"
+}
+
 test_later_unrelated_terminal_line_does_not_close_it() {
   local dir state out
   dir=$(make_case unrelated-terminal)
@@ -188,6 +219,7 @@ test_buried_decision_still_surfaces
 test_over_long_decision_note_is_capped_with_a_marker
 test_explicit_resolution_closes_it
 test_later_unrelated_terminal_line_does_not_close_it
+test_reserved_key_namespace_is_owned_by_its_library
 test_no_open_decisions_prints_nothing
 test_open_decision_surfaces_even_with_an_unrelated_queued_wake
 test_buried_decision_surfaces_on_the_empty_queue_fast_path
