@@ -1,0 +1,175 @@
+{
+  "capability_catalog_version": 1,
+  "description": "Harness-neutral catalog of the typed capabilities a Firstmate work identity may be said to hold. Definitions ONLY: nothing here is bound to an agent, nothing here executes, and no runtime reads this file. Each row names the existing owner that already implements the action, so the catalog renames a prose capability list ('use gh-axi, use chrome-devtools-axi') as typed rows without changing what any agent can do.",
+  "not_a_security_boundary": {
+    "statement": "This catalog is a CAPABILITY boundary, not a SECURITY boundary. It constrains a mistaken agent, never a hostile one.",
+    "why": "Every crewmate on every harness is currently launched with permission enforcement disabled - four through an explicit bypass flag and one because that harness has no permission system at all (bin/fm-launch-lib.sh; docs/launcher.md). The supported harnesses also do not share a sandbox. An agent that ignores a row, or a harness with no sandbox behind it, is not stopped by anything in this file.",
+    "consequence": "No decision anywhere may treat a row in this catalog as containment. A capability being named 'read-only' means the fleet intends it to be read-only, not that the host prevents a write.",
+    "when_this_changes": "Only when an enforcement point exists that refuses rather than truncates. CFVC-10 (capability binding record and issue-time authority law) is the increment that would create it, and it is deliberately not built here: it is blocked on the open work-identity ownership decision."
+  },
+  "authority_class": {
+    "source": "loopspecs/schema.json enums.authority_class",
+    "rule": "This catalog reuses that validated enum verbatim and never introduces a value of its own. A capability needing a class that does not exist is a change to the LoopSpec schema's enum, decided there, not a new vocabulary here.",
+    "meaning": {
+      "read-only": "Observes state and mutates nothing.",
+      "firstmate-routine": "Firstmate may exercise it within an already accepted task contract, with no fresh captain word.",
+      "captain-required": "Needs an explicit captain instruction for the concrete action, every time. Standing autonomy never substitutes."
+    }
+  },
+  "not_the_platform_capability_registry": "This is NOT the platform's CapabilityRegistry (its scripts/runtime_capabilities.py, a separate repository) and must never be merged into it. That registry answers a Kernel-side question - which service implementation handles a call - while this catalog answers an agent-side question - what a work identity is permitted to do. Conflating them would make a dispatch table look like an authority record.",
+  "field_contract": {
+    "name": "Dotted capability_id. Stable; the identity a future binding record would cite.",
+    "input_schema": "Typed inputs, using the loopspecs/schema.json type vocabulary (slug, string, string[], bool, object, pos_int).",
+    "output_schema": "Typed result of one successful exercise of the capability.",
+    "owner": "Repo-relative path to the file that already implements this action. Exactly one owner per row. null ONLY where the catalog deliberately defines a capability nothing owns.",
+    "authority_class": "A value from the enum above.",
+    "verifier": "Repo-relative path to the existing executable check that pins the owner's behavior. null where there is no owner to pin."
+  },
+  "capabilities": [
+    {
+      "name": "workspace.read",
+      "purpose": "Read files inside the work identity's own isolated task worktree.",
+      "input_schema": { "task_id": "slug", "path": "string" },
+      "output_schema": { "content": "string" },
+      "owner": "bin/fm-spawn.sh",
+      "authority_class": "read-only",
+      "verifier": "tests/fm-spawn-worktree-settle.test.sh"
+    },
+    {
+      "name": "workspace.write",
+      "purpose": "Create, edit, or delete files inside the work identity's own isolated task worktree, and nowhere else.",
+      "input_schema": { "task_id": "slug", "path": "string", "content": "string" },
+      "output_schema": { "path": "string", "written": "bool" },
+      "owner": "bin/fm-spawn.sh",
+      "authority_class": "firstmate-routine",
+      "verifier": "tests/fm-spawn-worktree-settle.test.sh"
+    },
+    {
+      "name": "worktree.allocate",
+      "purpose": "Obtain a disposable pool slot for a new task, refusing any slot that still holds live or unlanded work.",
+      "input_schema": { "task_id": "slug" },
+      "output_schema": { "worktree": "string", "slot": "string" },
+      "owner": "bin/fm-worktree-guard.sh",
+      "authority_class": "firstmate-routine",
+      "verifier": "tests/fm-worktree-guard.test.sh"
+    },
+    {
+      "name": "vcs.base.resolve",
+      "purpose": "Resolve a task's two base references - the slot base the worktree sits at, and the contribution target the work is offered to.",
+      "input_schema": { "task_id": "slug", "project": "slug" },
+      "output_schema": { "slot_base": "string", "contribution_target": "string", "base_state": "string" },
+      "owner": "bin/fm-task-base-lib.sh",
+      "authority_class": "read-only",
+      "verifier": "tests/fm-task-base.test.sh"
+    },
+    {
+      "name": "vcs.landed.verify",
+      "purpose": "Decide whether a branch's content is already contained in an accepted landing target, which is what makes discarding it safe.",
+      "input_schema": { "repo": "string", "ref": "string" },
+      "output_schema": { "landed": "bool", "landing_target": "string" },
+      "owner": "bin/fm-landed-lib.sh",
+      "authority_class": "read-only",
+      "verifier": "tests/fm-worktree-guard.test.sh"
+    },
+    {
+      "name": "vcs.merge.local",
+      "purpose": "Fast-forward a ready local-only branch onto the project's default branch.",
+      "input_schema": { "task_id": "slug" },
+      "output_schema": { "merged_ref": "string", "head": "string" },
+      "owner": "bin/fm-merge-local.sh",
+      "authority_class": "captain-required",
+      "verifier": "tests/fm-merge-local.test.sh"
+    },
+    {
+      "name": "forge.pr.read",
+      "purpose": "Read a pull or merge request's identity, head, and check state from the supported forges.",
+      "input_schema": { "url": "string" },
+      "output_schema": { "provider": "string", "number": "pos_int", "head": "string", "checks": "string" },
+      "owner": "bin/fm-pr-lib.sh",
+      "authority_class": "read-only",
+      "verifier": "tests/fm-pr-check-security.test.sh"
+    },
+    {
+      "name": "forge.pr.merge",
+      "purpose": "Merge a task's pull request after re-verifying that its current head is green, mergeable, and unblocked by review.",
+      "input_schema": { "task_id": "slug", "url": "string" },
+      "output_schema": { "merged": "bool", "merge_verified_head": "string" },
+      "owner": "bin/fm-pr-merge.sh",
+      "authority_class": "captain-required",
+      "verifier": "tests/fm-pr-merge.test.sh"
+    },
+    {
+      "name": "validation.run",
+      "purpose": "Attribute and drive a no-mistakes validation run for a worktree's current branch and code identity.",
+      "input_schema": { "task_id": "slug", "worktree": "string" },
+      "output_schema": { "run_id": "string", "step": "string" },
+      "owner": "bin/fm-nm-run-lib.sh",
+      "authority_class": "firstmate-routine",
+      "verifier": "tests/fm-crew-state.test.sh"
+    },
+    {
+      "name": "agent.spawn",
+      "purpose": "Launch a worker agent on a verified harness adapter with a resolved model and effort.",
+      "input_schema": { "task_id": "slug", "harness": "slug", "model": "string", "effort": "string" },
+      "output_schema": { "endpoint": "string", "harness": "slug" },
+      "owner": "bin/fm-launch-lib.sh",
+      "authority_class": "firstmate-routine",
+      "verifier": "tests/fm-launch-lib.test.sh"
+    },
+    {
+      "name": "agent.steer",
+      "purpose": "Deliver one marked operational message to a named agent endpoint.",
+      "input_schema": { "task_id": "slug", "message": "string" },
+      "output_schema": { "delivered": "bool" },
+      "owner": "bin/fm-send.sh",
+      "authority_class": "firstmate-routine",
+      "verifier": "tests/fm-send-strict.test.sh"
+    },
+    {
+      "name": "agent.state.read",
+      "purpose": "Reconcile an agent's current run state from live evidence rather than from its own status claims.",
+      "input_schema": { "task_id": "slug" },
+      "output_schema": { "state": "string", "evidence": "string[]" },
+      "owner": "bin/fm-crew-state.sh",
+      "authority_class": "read-only",
+      "verifier": "tests/fm-crew-state.test.sh"
+    },
+    {
+      "name": "agent.teardown",
+      "purpose": "Release a task's agent, worktree, and runtime records after proving its work is landed.",
+      "input_schema": { "task_id": "slug" },
+      "output_schema": { "released": "bool", "refusal_reason": "string" },
+      "owner": "bin/fm-teardown.sh",
+      "authority_class": "firstmate-routine",
+      "verifier": "tests/fm-teardown.test.sh"
+    },
+    {
+      "name": "backlog.update",
+      "purpose": "Record dispatch, completion, holds, and dependencies against the durable task queue.",
+      "input_schema": { "task_id": "slug", "state": "string", "note": "string" },
+      "output_schema": { "task_id": "slug", "state": "string" },
+      "owner": "bin/fm-tasks-axi-lib.sh",
+      "authority_class": "firstmate-routine",
+      "verifier": "tests/fm-backlog-handoff.test.sh"
+    },
+    {
+      "name": "decision.resolve",
+      "purpose": "Close a captain-gated decision hold against a recorded verdict, so an answered question stops being re-asked.",
+      "input_schema": { "hold_id": "slug", "verdict": "string" },
+      "output_schema": { "hold_id": "slug", "resolved": "bool" },
+      "owner": "bin/fm-decision-hold.sh",
+      "authority_class": "captain-required",
+      "verifier": "tests/fm-decision-hold-lifecycle.test.sh"
+    },
+    {
+      "name": "network.request",
+      "purpose": "Make an arbitrary outbound network request that is not already mediated by a named forge, quota, or vendor owner above.",
+      "input_schema": { "url": "string", "method": "string", "body": "string" },
+      "output_schema": { "status": "pos_int", "body": "string" },
+      "owner": null,
+      "authority_class": "captain-required",
+      "verifier": null,
+      "unowned_because": "Deliberate. Nothing in this repo mediates general outbound network access, so naming an owner would invent one. Every agent already has unmediated network access through its harness; recording that as captain-required states the intent and admits, honestly, that nothing enforces it. Siting an owner is CFVC-10's work, not this catalog's."
+    }
+  ]
+}
