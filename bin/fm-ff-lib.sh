@@ -377,18 +377,26 @@ FF_SEEN_HOMES=""
 # each resolved home is processed at most once.
 process_secondmate() {
   local id=$1 home=$2 window=${3:-} base_mode=$4 nudge_requires_instr=${5:-no} home_real fm_root_real
+  FF_STATUS="skipped"
+  FF_INSTR=""
   [ -n "$id" ] || return 0
   [ -n "$home" ] || return 0
   fm_root_real=$(resolve_path "$FM_ROOT")
   home_real=$(resolve_path "$home")
-  [ "$home_real" != "$fm_root_real" ] || return 0
+  if [ "$home_real" = "$fm_root_real" ]; then
+    FF_STATUS="current"
+    return 0
+  fi
   if ! validate_secondmate_home "$id" "$home"; then
     echo "secondmate $id: skipped: unsafe home: $VALIDATION_ERROR"
     return 0
   fi
   home_real="$VALIDATED_HOME"
   case " $FF_SEEN_HOMES " in
-    *" $home_real "*) return 0 ;;
+    *" $home_real "*)
+      FF_STATUS="current"
+      return 0
+      ;;
   esac
   FF_SEEN_HOMES="$FF_SEEN_HOMES $home_real"
 
