@@ -233,7 +233,9 @@ Route durable knowledge to its most specific owner:
 - Home-domain captain preferences and working style belong in `data/captain.md` after inspect-then-update.
 - Captain preferences shared across secondmate domains belong in the primary home's `data/captain-shared.md` under the `secondmate-provisioning` contract.
 - Fleet-local operational facts belong in curated, home-local `data/learnings.md`.
-- Task-scoped notes belong with the backlog item, and investigation findings belong in the scout report.
+- Task-scoped working notes belong with the backlog item.
+- A scout's intermediate write-up may live at `data/<id>/report.md` (survives teardown as a working copy).
+- Durable product investigation findings, audits, and goals belong in that product's context companion (or project `AGENTS.md` when that is the right surface) - not as the permanent home under firstmate `data/`.
 - Knowledge useful to almost every contributor to one project belongs in that project's committed `AGENTS.md`.
 - Knowledge general to every firstmate user belongs in this repo's shared tracked surface.
 
@@ -263,7 +265,8 @@ Before commissioning an investigation, consult existing reports and established 
 Classify the deliverable:
 
 - **Ship** is the default and produces a project change through the selected delivery mode; once implementation is authorized, dispatch a ship and keep any remaining bounded research inside it unless unresolved uncertainty could materially change whether or what to build.
-- **Scout** produces knowledge in `data/<id>/report.md`, never a PR, and is appropriate for investigation, diagnosis, planning, reproduction, or audit work when the captain explicitly requests a separate knowledge or design deliverable or unresolved uncertainty could materially change whether or what to build.
+- **Scout** produces an intermediate write-up at `data/<id>/report.md`, never a product PR for code, and is appropriate for investigation, diagnosis, planning, reproduction, or audit work when the captain explicitly requests a separate knowledge or design deliverable or unresolved uncertainty could materially change whether or what to build.
+- For product-scoped scouts, that report is intermediate; firstmate must continue with context-companion filing per Scout outcome below.
 
 If established evidence already answers an informational question, relay it without a design-only scout; when implementation intent is unclear, answer and ask one concise implementation question when useful rather than dispatching speculative design work.
 Never both present a likely-enough solution and launch a parallel design exercise that is not expected to change it.
@@ -359,9 +362,12 @@ Retire one only on an explicit captain or main-firstmate decision, after loading
 
 ### Scout outcome and promotion
 
-A completed scout must leave a self-contained report before its scratch worktree can be discarded; read and relay its findings, record the report as the Done artifact, and re-evaluate the queue.
+A completed scout must leave a self-contained intermediate report at `data/<id>/report.md` before its scratch worktree can be discarded; read and relay its findings, and re-evaluate the queue.
 A report may recommend implementation but does not authorize it.
 Before treating the investigation or any visual review as complete, load `decision-hold-lifecycle`; teardown enforces that shared completion gate.
+When the scout is product-scoped and a context companion is registered (or clearly applicable), firstmate must dispatch a context-companion ship to fold durable findings into living CURRENT/GOALS-style docs (fold and prune; do not dump the full novel) before treating the investigation as complete for the captain, unless the captain explicitly said intermediate-only for that task.
+Relaying findings to the captain must not present `data/<id>/report.md` as the place future agents should re-read for product truth.
+Fleet-only or firstmate-template scouts without a product remain intermediate-report-only; record that report as the Done artifact.
 When implementation is separately authorized, promote the existing scout through `bin/fm-promote.sh` rather than creating a duplicate task.
 The promoted worker must inventory scratch state, return to a clean default-branch base, carry over only intended fix changes, create the ship branch, and follow the project's selected delivery path while leaving scratch commits and debug edits behind and turning a reproduced bug into the regression test.
 
