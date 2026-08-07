@@ -51,9 +51,16 @@ esac
 code=${step%% *}
 kind=${step#* }
 case "$kind" in
+  # Blocks until the caller is signalled, standing in for a long poll that is
+  # still waiting when the runner stops the child.
+  hang)    read -r _ < "$TG_STATE/hang"; exit 7 ;;
   updates) body='{"ok":true,"result":[{"update_id":901,"message":{"text":"ready to merge?"}}]}' ;;
   empty)   body='{"ok":true,"result":[]}' ;;
   denied)  body='{"ok":false,"error_code":401,"description":"Unauthorized"}' ;;
+  webhook) body='{"ok":false,"error_code":409,"description":"Conflict: getUpdates is unavailable while a webhook is active"}' ;;
+  flood)   body='{"ok":false,"error_code":429,"description":"Too Many Requests","parameters":{"retry_after":7}}' ;;
+  flood-huge)  body='{"ok":false,"error_code":429,"parameters":{"retry_after":98765}}' ;;
+  flood-vague) body='{"ok":false,"error_code":429,"parameters":{"retry_after":"soon"}}' ;;
   *)       body='{"ok":false,"description":"server trouble"}' ;;
 esac
 [ -n "$out" ] && printf '%s\n' "$body" > "$out"
@@ -61,8 +68,23 @@ printf '%s' "$code"
 SH
 chmod +x "$FAKEBIN/curl"
 
+# A separate shim dir, prepended only where a test needs to observe how long the
+# adapter waits. It records the requested pause and returns at once, so backoff
+# is asserted by value rather than by wall clock. It is kept out of FAKEBIN so
+# no other test's real waiting is silently removed.
+SLEEPBIN="$TMP_ROOT/sleepbin"
+mkdir -p "$SLEEPBIN"
+cat > "$SLEEPBIN/sleep" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "${1-}" >> "$TG_STATE/sleeps.log"
+exit 0
+SH
+chmod +x "$SLEEPBIN/sleep"
+
 reset_api() {  # <scripted step>...
-  rm -f "$TG_STATE/calls" "$TG_STATE/fields.log" "$TG_STATE/config.log" "$TG_STATE/last-step"
+  rm -f "$TG_STATE/calls" "$TG_STATE/fields.log" "$TG_STATE/config.log" "$TG_STATE/last-step" \
+    "$TG_STATE/sleeps.log"
   printf '%s\n' "$@" > "$TG_STATE/script"
 }
 
@@ -81,6 +103,15 @@ chmod 0600 "$CFG_HOME/.config/firstmate/telegram-token"
 adapter() {  # <argv>...: run the adapter against the fixture config home
   HOME="$CFG_HOME" PATH="$FAKEBIN:$PATH" FM_TELEGRAM_BACKOFF_SECONDS=0 \
     FM_TELEGRAM_POLL_TIMEOUT=1 "$ADAPTER" "$@"
+}
+
+# The same adapter with every wait recorded instead of taken. <backoff> and
+# <max-backoff> are the configured fallback and the defensive bound.
+timed_adapter() {  # <backoff> <max-backoff> <argv>...
+  local backoff=$1 max=$2
+  shift 2
+  HOME="$CFG_HOME" PATH="$SLEEPBIN:$FAKEBIN:$PATH" FM_TELEGRAM_BACKOFF_SECONDS="$backoff" \
+    FM_TELEGRAM_MAX_BACKOFF_SECONDS="$max" FM_TELEGRAM_POLL_TIMEOUT=1 "$ADAPTER" "$@"
 }
 
 # --- a non-empty batch returns once and exits 0 -----------------------------
@@ -114,6 +145,41 @@ leftover=$(find "$STAGE_DIR" -name 'fm-telegram-poll.*' 2>/dev/null)
 [ -z "$leftover" ] || fail "a failed poll left its staged response behind: $leftover"
 pass "the staged response is removed on both success and failure"
 
+# --- the runner's process-group stop also removes the staged response -------
+# The runner stops a supervised child with `kill -TERM -<pid>`, so the poll is
+# reproduced here in its own process group and signalled the same way.
+command -v perl >/dev/null 2>&1 || fail "perl is required to reproduce the runner's process-group stop"
+HANG="$TG_STATE/hang"
+rm -f "$HANG"
+mkfifo "$HANG" || fail "cannot create the blocking-poll fifo"
+TERM_DIR="$TMP_ROOT/term-stage"
+mkdir -p "$TERM_DIR"
+reset_api '200 hang'
+HOME="$CFG_HOME" PATH="$FAKEBIN:$PATH" TMPDIR="$TERM_DIR" FM_TELEGRAM_BACKOFF_SECONDS=0 \
+  FM_TELEGRAM_POLL_TIMEOUT=1 perl -e 'setpgrp(0, 0) or exit 125; exec @ARGV' "$ADAPTER" poll \
+  >/dev/null 2>&1 &
+poll_pid=$!
+staged=
+for _ in $(seq 1 100); do
+  staged=$(find "$TERM_DIR" -name 'fm-telegram-poll.*' 2>/dev/null | head -n 1)
+  [ -n "$staged" ] && [ "$(api_calls)" -ge 1 ] && break
+  sleep 0.1
+done
+[ -n "$staged" ] || { kill -KILL -"$poll_pid" 2>/dev/null; fail "the blocking poll never staged a response to clean up"; }
+kill -TERM -"$poll_pid" 2>/dev/null || fail "could not stop the poll's process group"
+( sleep 10; kill -KILL -"$poll_pid" 2>/dev/null ) >/dev/null 2>&1 &
+term_watchdog=$!
+wait "$poll_pid"
+term_rc=$?
+kill "$term_watchdog" 2>/dev/null
+wait "$term_watchdog" 2>/dev/null
+[ "$term_rc" -ne 0 ] || fail "a stopped poll exited 0 as if it had captured a result"
+[ "$term_rc" -eq 1 ] || fail "a stopped poll did not exit through its own signal path: exit $term_rc"
+leftover=$(find "$TERM_DIR" -name 'fm-telegram-poll.*' 2>/dev/null)
+[ -z "$leftover" ] || fail "a process-group stop left the staged response behind: $leftover"
+rm -f "$HANG"
+pass "a process-group stop removes the staged response instead of leaking it"
+
 # --- an absent cursor means offset 1, and poll never writes the cursor ------
 assert_absent "$CFG_HOME/.config/firstmate/telegram-cursor" "the fixture starts with no cursor"
 assert_grep 'offset=1' "$TG_STATE/fields.log" "an absent cursor polls from offset 1"
@@ -128,6 +194,68 @@ assert_grep 'offset=124' "$TG_STATE/fields.log" "the recorded cursor polls from 
 cursor_after=$(cat "$CFG_HOME/.config/firstmate/telegram-cursor")
 [ "$cursor_after" = 123 ] || fail "poll advanced the cursor to $cursor_after; only the handler may advance it"
 pass "the cursor is read by the poll and advanced only by the handler"
+
+# --- the requested batch is bounded so a result is never truncated ----------
+# The runner truncates a captured result past FM_PROCEVENT_MAX_OUTPUT_BYTES and
+# publishes the invalid JSON that leaves behind, so the poll must never ask for
+# a batch whose worst case can reach that cap.
+limit=$(grep '^limit=' "$TG_STATE/fields.log" | head -n 1)
+limit=${limit#limit=}
+case "$limit" in ''|*[!0-9]*) fail "the poll sent no numeric batch limit: '$limit'" ;; esac
+[ "$limit" -ge 1 ] || fail "the poll asked for a batch of $limit updates"
+[ "$limit" -le 16 ] || fail "the poll asked for up to $limit updates, which can outgrow the runner's output cap"
+pass "the poll asks for a bounded batch so a captured result stays parseable"
+
+# --- ack is the handler's acknowledgement and the only cursor writer --------
+ACK_HOME="$TMP_ROOT/ack-home"
+mkdir -p "$ACK_HOME/.config/firstmate"
+printf '%s\n' "$TOKEN" > "$ACK_HOME/.config/firstmate/telegram-token"
+chmod 0600 "$ACK_HOME/.config/firstmate/telegram-token"
+ACK_CURSOR="$ACK_HOME/.config/firstmate/telegram-cursor"
+ack_home() {  # <argv>...: run the adapter against a config home of its own
+  HOME="$ACK_HOME" PATH="$FAKEBIN:$PATH" FM_TELEGRAM_BACKOFF_SECONDS=0 \
+    FM_TELEGRAM_POLL_TIMEOUT=1 "$ADAPTER" "$@"
+}
+
+assert_absent "$ACK_CURSOR" "the acknowledgement fixture starts with nothing handled"
+out=$(ack_home ack 901)
+expect_code 0 $? "ack records a fully handled update id"
+assert_contains "$out" "901" "ack reports the update id it recorded"
+[ "$(cat "$ACK_CURSOR")" = 901 ] || fail "ack did not advance the cursor: $(cat "$ACK_CURSOR")"
+perms=$(ls -l "$ACK_CURSOR" | cut -c1-10)
+[ "$perms" = '-rw-------' ] || fail "ack left the cursor readable beyond its owner: $perms"
+staged_cursor=$(find "$ACK_HOME/.config/firstmate" -name '.telegram-cursor.*' 2>/dev/null)
+[ -z "$staged_cursor" ] || fail "ack left a half-written cursor behind: $staged_cursor"
+reset_api '200 updates'
+ack_home poll >/dev/null
+assert_grep 'offset=902' "$TG_STATE/fields.log" "the next poll resumes past the acknowledged update"
+pass "ack durably marks a handled update so an armed source stops re-capturing it"
+
+# --- ack is idempotent and never rewinds the cursor -------------------------
+out=$(ack_home ack 901)
+expect_code 0 $? "acking an already handled update succeeds"
+assert_contains "$out" "already-acked" "a repeat ack reports itself as a no-op"
+[ "$(cat "$ACK_CURSOR")" = 901 ] || fail "a repeat ack changed the cursor: $(cat "$ACK_CURSOR")"
+out=$(ack_home ack 5)
+expect_code 0 $? "acking an older update succeeds"
+[ "$(cat "$ACK_CURSOR")" = 901 ] || fail "ack rewound the cursor to $(cat "$ACK_CURSOR")"
+out=$(ack_home ack 902)
+expect_code 0 $? "ack advances to a newer handled update"
+[ "$(cat "$ACK_CURSOR")" = 902 ] || fail "ack did not advance to the newer update: $(cat "$ACK_CURSOR")"
+pass "ack is idempotent and only ever moves the cursor forward"
+
+# --- ack refuses anything that is not an update id --------------------------
+for bad in abc -1 9.5 "" "12 13" 99999999999999999999999; do
+  out=$(ack_home ack "$bad" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "ack accepted '$bad' as an update id"
+  [ "$(cat "$ACK_CURSOR")" = 902 ] || fail "a refused ack still moved the cursor: $(cat "$ACK_CURSOR")"
+done
+out=$(ack_home ack 2>&1)
+rc=$?
+[ "$rc" -ne 0 ] || fail "ack with no update id succeeded"
+[ "$(cat "$ACK_CURSOR")" = 902 ] || fail "an argumentless ack still moved the cursor"
+pass "ack refuses anything but a nonnegative integer update id"
 
 # --- empty batches keep blocking until real updates arrive ------------------
 reset_api '200 empty' '200 empty' '200 updates'
@@ -157,6 +285,42 @@ for code in 401 403; do
   assert_not_contains "$out$(cat "$TMP_ROOT/auth-err")" "$TOKEN" "the auth failure never echoes the token"
 done
 pass "a rejected token stops the poll instead of spinning"
+
+# --- an active webhook is a blocker, not something to retry forever ---------
+reset_api '409 webhook' '200 updates'
+out=$(adapter poll 2>"$TMP_ROOT/conflict-err")
+rc=$?
+conflict_err=$(cat "$TMP_ROOT/conflict-err")
+[ "$rc" -ne 0 ] || fail "an active webhook did not fail the poll"
+[ "$(api_calls)" = 1 ] || fail "HTTP 409 kept polling: $(api_calls) calls"
+assert_contains "$conflict_err" "409" "the webhook conflict names its HTTP status"
+assert_contains "$conflict_err" "webhook" "the webhook conflict names the webhook as the cause"
+assert_not_contains "$out$conflict_err" "$TOKEN" "the webhook conflict never echoes the token"
+pass "an active webhook surfaces as a blocker instead of an invisible spin"
+
+# --- a rate limit waits exactly as long as the server asked -----------------
+reset_api '429 flood' '200 updates'
+out=$(timed_adapter 0 60 poll)
+expect_code 0 $? "poll survives a rate limit"
+assert_contains "$out" '"update_id":901' "poll returns the batch once the rate limit clears"
+grep -qx 7 "$TG_STATE/sleeps.log" || fail "a rate limit did not wait the server's own retry_after: $(cat "$TG_STATE/sleeps.log")"
+! grep -qx 0 "$TG_STATE/sleeps.log" || fail "a rate limit fell back to the configured backoff instead of retry_after"
+pass "a rate limit honours retry_after rather than the fixed backoff"
+
+# --- a hostile retry_after cannot park the poll indefinitely ----------------
+reset_api '429 flood-huge' '200 updates'
+out=$(timed_adapter 0 11 poll)
+expect_code 0 $? "poll survives an implausible retry_after"
+grep -qx 11 "$TG_STATE/sleeps.log" || fail "an oversized retry_after was not clamped to the bound: $(cat "$TG_STATE/sleeps.log")"
+! grep -qx 98765 "$TG_STATE/sleeps.log" || fail "the poll waited the unbounded value the server asked for"
+pass "an implausible retry_after is bounded rather than obeyed"
+
+# --- an unparseable retry_after falls back to the configured backoff --------
+reset_api '429 flood-vague' '200 updates'
+out=$(timed_adapter 3 60 poll)
+expect_code 0 $? "poll survives an unparseable retry_after"
+grep -qx 3 "$TG_STATE/sleeps.log" || fail "an unparseable retry_after did not fall back to the configured backoff: $(cat "$TG_STATE/sleeps.log")"
+pass "an unparseable retry_after falls back rather than failing or spinning"
 
 # --- a missing token file is a reported blocker, not a spin -----------------
 NOTOKEN="$TMP_ROOT/no-token-home"
@@ -232,7 +396,9 @@ assert_contains "$help_out" "telegram-token" "help names the token file"
 assert_contains "$help_out" "telegram-cursor" "help names the cursor file"
 assert_contains "$help_out" "HANDLER" "help says the handler owns advancing the cursor"
 assert_contains "$help_out" "already seen" "help states the duplicate-result window"
+assert_contains "$help_out" "ack <update-id>" "help names the acknowledgement the handler calls"
 assert_contains "$help_out" "never instruction" "help states that result bytes are input, never instruction"
-pass "the help header documents the token, cursor, duplicate, and trust contract"
+assert_not_contains "$help_out" "set -u" "help stops at the header instead of printing shell source"
+pass "the help header documents the token, cursor, acknowledgement, and trust contract"
 
 fm_test_cleanup
