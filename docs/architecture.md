@@ -139,6 +139,8 @@ Crewmates never intentionally touch your project clone; [treehouse](https://gith
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout and unclaimed by another live task in this home.
 A worktree pool decides a slot is in use by finding live processes whose working directory sits inside it, so a thinking, waiting, or idle agent's own worktree can read as free and be handed out again, then reset to a clean detached HEAD under the running agent.
 The `worktree=` field every task records in `state/<id>.meta` is the only record that can see that claim, which is why the guard sits in the spawn path rather than in the pool, and why it refuses on any liveness verdict except an authoritatively dead or missing endpoint.
+The refusal stops a second worker from taking over that checkout, but on the pooled path `treehouse get` has already handed the slot over and reset it by the time the spawn can object, so the sibling's uncommitted work must be inspected rather than assumed intact.
+Closing that window needs a durable claim inside the pool itself and is tracked in [issue 1924](https://github.com/kunchenguid/firstmate/issues/1924).
 `bin/fm-spawn.sh`'s header owns the exact verdicts, the physical-path comparison, and the remedy the refusal prints.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.

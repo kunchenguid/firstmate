@@ -621,6 +621,7 @@ if [ "$BACKEND" = orca ]; then
   fm_backend_orca_runtime_check || exit 1
 fi
 ORCA_ABORT_CLEANUP=0
+ORCA_ABORT_KEEP_WORKTREE=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
 HERDR_PROJECTION_ABORT_CLEANUP=0
@@ -676,7 +677,7 @@ spawn_abort_cleanup() {
     if [ -n "${ORCA_TERMINAL:-}" ]; then
       fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
     fi
-    if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
+    if [ -n "${ORCA_WORKTREE_ID:-}" ] && [ "$ORCA_ABORT_KEEP_WORKTREE" != 1 ]; then
       if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
         mkdir -p "$STATE" 2>/dev/null || true
         if [ -d "$STATE" ]; then
@@ -1410,8 +1411,13 @@ real_path_or_raw() {  # <path>
 # see an idle agent at all; firstmate owns the record that can, because every
 # task writes `worktree=` into state/<id>.meta. This is therefore the correct
 # layer for the guard, and it runs here - before the launched agent has been
-# handed its brief, let alone run `git checkout -b` - which is what keeps a
-# collision recoverable at zero cost.
+# handed its brief, let alone run `git checkout -b` - so no second worker ever
+# starts inside the shared checkout. What it cannot do is prevent the handover
+# itself: on the pooled path `treehouse get` acquires AND resets the slot before
+# this runs, so a refusal means the sibling's uncommitted work must be inspected
+# rather than assumed intact. Holding a slot instead of catching the collision
+# after the fact needs a durable claim inside the pool:
+# https://github.com/kunchenguid/firstmate/issues/1924
 #
 # Liveness comes from bin/fm-backend.sh's fm_backend_agent_state rather than a
 # second notion of "is that worker still there". Only `dead` and `missing`
@@ -1429,8 +1435,9 @@ real_path_or_raw() {  # <path>
 #
 # The refusal exits through the same path as the primary-checkout isolation
 # error above, which already leaves this spawn's own task endpoint behind:
-# spawn_abort_cleanup unwinds herdr projections and orca worktrees but never a
-# tmux window, so `firstmate:fm-<id>` survives and a bare retry then fails with
+# spawn_abort_cleanup unwinds herdr projections and orca worktrees (except the
+# sibling-owned one this refusal names, see ORCA_ABORT_KEEP_WORKTREE) but never
+# a tmux window, so `firstmate:fm-<id>` survives and a bare retry then fails with
 # `window ... already exists`. That orphan is pre-existing behaviour shared by
 # both refusals rather than something this guard introduces, and cleaning it up
 # is deliberately out of scope here; the remedy clause below names the removal
@@ -1470,15 +1477,18 @@ validate_worktree_free_of_live_sibling() {  # <source> <inspect-target> <worktre
     esac
     # Name the endpoint this refused spawn leaves behind, in the terms of the
     # backend that created it, so the retry sequence needs no source reading.
-    # An orca refusal is the one that leaves nothing: spawn_abort_cleanup kills
-    # whatever terminal orca had already returned and removes the worktree it
-    # created, so that path skips the removal step entirely.
+    # An orca refusal names no removal step: spawn_abort_cleanup kills whatever
+    # terminal orca had already returned, and ORCA_ABORT_KEEP_WORKTREE holds it
+    # back from removing the worktree, because the path orca handed over is the
+    # one this refusal just proved a live sibling records. That suppression also
+    # keeps the cleanup's removal-failure fallback from writing $STATE/$ID.meta,
+    # so an orca refusal leaves no record of its own either.
     case "$BACKEND" in
-      orca) leftover="" ;;
+      orca) leftover=""; ORCA_ABORT_KEEP_WORKTREE=1 ;;
       tmux) leftover="remove this spawn's leftover task window with tmux kill-window -t '$inspect_target'; then " ;;
       *) leftover="remove this spawn's leftover $BACKEND task endpoint '$inspect_target'; then " ;;
     esac
-    echo "error: $source handed back a worktree that task $sib_id already records as its own, and $sib_id's endpoint is $sib_state (shared worktree '$wt_real'); refusing to launch to avoid resetting a live worker's checkout. Recover in order: ${leftover}once $sib_id is finished, release its record with bin/fm-teardown.sh $sib_id; then spawn again. Inspect target $inspect_target" >&2
+    echo "error: $source handed back a worktree that task $sib_id already records as its own, and $sib_id's endpoint is $sib_state (shared worktree '$wt_real'); refusing to launch a second worker into that checkout. The pool may already have reset it, so inspect $sib_id's uncommitted work rather than assuming it survived. Recover in order: ${leftover}once $sib_id is finished, release its record with bin/fm-teardown.sh $sib_id; then spawn again. Inspect target $inspect_target" >&2
     exit 1
   done
 }

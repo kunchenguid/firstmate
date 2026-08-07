@@ -68,7 +68,40 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse
+  make_sibling_fake_orca "$fakebin"
   printf '%s\n' "$fakebin"
+}
+
+# make_sibling_fake_orca <fakebin> answers the JSON calls the orca spawn path
+# makes before the guard runs, so `--backend orca` reaches validate_spawn_worktree
+# with a worktree id armed for the EXIT trap - the shape the trap's removal
+# actually needs. `worktree rm` deletes the directory exactly as the real removal
+# would, so the assertion that the sibling's checkout survived cannot be
+# satisfied by a log line alone.
+#   FM_FAKE_ORCA_WT_PATH  the worktree path `orca worktree create` hands back
+#   FM_FAKE_ORCA_LOG      file every invocation is appended to
+make_sibling_fake_orca() {
+  local fakebin=$1
+  cat > "$fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -z "${FM_FAKE_ORCA_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_ORCA_LOG"
+case "${1:-} ${2:-}" in
+  "status "*) printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n' ;;
+  "repo show"*) printf '{"ok":true,"result":{"repo":{"id":"repo-1"}}}\n' ;;
+  "worktree create"*)
+    printf '{"ok":true,"result":{"worktree":{"id":"wt-1","path":"%s"}}}\n' "${FM_FAKE_ORCA_WT_PATH:-}"
+    ;;
+  "worktree rm"*)
+    rm -rf "${FM_FAKE_ORCA_WT_PATH:?orca worktree rm without a path}"
+    printf '{"ok":true,"result":{}}\n'
+    ;;
+  "terminal create"*) printf '{"ok":true,"result":{"terminal":{"handle":"term-1"}}}\n' ;;
+  *) printf '{"ok":true,"result":{}}\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/orca"
 }
 
 # make_case <name> builds a home, a project with one real worktree standing in
@@ -82,6 +115,7 @@ make_case() {
   PROJ_DIR="$case_dir/project"
   WT_DIR="$case_dir/wt"
   LOG_FILE="$case_dir/tmux.log"
+  ORCA_LOG="$case_dir/orca.log"
   FAKE_WINDOWS=''
   FAKE_LIST_FAIL=''
   FAKE_PANE_COMMAND=zsh
@@ -94,6 +128,7 @@ make_case() {
   # temp root is itself a symlinked, double-slashed spelling of that directory.
   WT_REAL=$(cd "$WT_DIR" && pwd -P)
   : > "$LOG_FILE"
+  : > "$ORCA_LOG"
 }
 
 seed_brief() {
@@ -140,6 +175,7 @@ write_endpointless_sibling() {
 
 run_spawn() {
   local id=$1
+  shift
   seed_brief "$id"
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
@@ -150,8 +186,10 @@ run_spawn() {
     FM_FAKE_LIST_FAIL="${FAKE_LIST_FAIL:-}" \
     FM_FAKE_PANE_COMMAND="${FAKE_PANE_COMMAND:-zsh}" \
     FM_FAKE_TMUX_LOG="$LOG_FILE" \
+    FM_FAKE_ORCA_WT_PATH="$WT_DIR" \
+    FM_FAKE_ORCA_LOG="$ORCA_LOG" \
     PATH="$FAKEBIN_DIR:$PATH" \
-    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off "$@" 2>&1
 }
 
 # assert_no_agent_launched: the refusal has to land before the incoming agent is
@@ -305,6 +343,29 @@ test_differently_spelled_path_is_caught() {
   pass "a symlinked, trailing-slash spelling of the same worktree is still caught"
 }
 
+# The orca path is the one that reaches this guard with a worktree of its own
+# already created and ORCA_ABORT_CLEANUP armed, so the refusal's EXIT trap would
+# otherwise remove the very checkout the guard just proved a live sibling
+# records - the guard deleting what it exists to protect, while looking like it
+# worked. The refusal must leave that directory exactly where it is.
+test_orca_refusal_keeps_the_siblings_worktree() {
+  local id=sibling-orca-a8 out status
+  make_case sibling-orca
+  write_sibling sibling-orca-worker "$WT_DIR"
+  FAKE_WINDOWS='fm-sibling-orca-worker'
+  FAKE_PANE_COMMAND=claude
+  out=$(run_spawn "$id" --backend orca)
+  status=$?
+  [ "$status" -ne 0 ] || fail "orca spawn succeeded onto a live sibling's worktree"
+  assert_contains "$out" "sibling-orca-worker" "the refusal did not name the offending task"
+  assert_contains "$out" "$WT_REAL" "the refusal did not name the shared worktree"
+  [ -d "$WT_DIR" ] || fail "the orca refusal removed the live sibling's worktree"
+  assert_no_grep 'worktree rm' "$ORCA_LOG" \
+    "the orca refusal asked orca to remove the live sibling's worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" "the refused orca spawn still recorded metadata"
+  pass "an orca refusal leaves the live sibling's worktree in place"
+}
+
 test_clean_spawn_still_succeeds
 test_live_sibling_refuses
 test_dead_sibling_still_spawns
@@ -312,5 +373,6 @@ test_own_record_does_not_refuse_itself
 test_unreadable_sibling_refuses
 test_endpointless_sibling_refuses_with_a_diagnostic
 test_differently_spelled_path_is_caught
+test_orca_refusal_keeps_the_siblings_worktree
 
 echo "# all fm-spawn-sibling-worktree tests passed"
