@@ -325,7 +325,12 @@ run_step_identity_is_unique() {
   local meta other_id other_kind other_wt other_physical
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
-    other_id=$(basename "$meta" .meta)
+    other_id=${meta##*/}
+    case "$other_id" in
+      *.meta) other_id=${other_id%.meta} ;;
+      *) continue ;;
+    esac
+    [ -n "$other_id" ] || continue
     [ "$other_id" = "$ID" ] && continue
     other_kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     [ -n "$other_kind" ] || other_kind=ship

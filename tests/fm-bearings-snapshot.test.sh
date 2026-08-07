@@ -129,6 +129,9 @@ for meta in "$state"/*.meta; do
   if [ "${FAKE_LIVENESS_BLIND:-0}" = 1 ]; then
     activity=unverified
     worker=unverified
+  elif [ "${FAKE_LIVENESS_EMPTY_FLEET:-0}" = 1 ]; then
+    activity=inactive
+    worker=verified_absent
   fi
   row=$(jq -n --arg id "$id" --arg harness "$harness" --arg backend "$backend" --arg target "$target" --arg activity "$activity" --arg worker "$worker" '
     {id:$id,harness:$harness,harness_family:$harness,backend:$backend,target:$target,worktree:null,
@@ -1927,6 +1930,23 @@ test_bearings_keeps_blind_observation_unverified() {
   pass "Bearings projects blind process observation as unverified, never verified absence"
 }
 
+test_bearings_keeps_observed_empty_fleet_verified_absent() {
+  local home fakebin json toon
+  home=$(make_home empty-worker-fleet); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  json=$(FAKE_LIVENESS_EMPTY_FLEET=1 run "$home" "$fakebin" --json)
+  toon=$(FAKE_LIVENESS_EMPTY_FLEET=1 run "$home" "$fakebin")
+  printf '%s' "$json" | jq -e '
+    (.unhealthy_endpoints | any(.id == "ship-task"
+      and .worker == "verified_absent" and .activity == "inactive"))
+    and (.gates | any(.id == "ship-task"
+      and (.reason | contains("measured liveness: inactive; endpoint=verified_present; worker=verified_absent"))))
+  ' >/dev/null || fail "Bearings collapsed an observed empty worker fleet into blind evidence: $json"
+  assert_contains "$toon" 'verified_absent' "Bearings human summary hid verified absence"
+  assert_not_contains "$toon" 'worker=unverified' "Bearings human summary relabelled observed absence as blind"
+  pass "Bearings preserves observed empty-worker absence in JSON and the human summary"
+}
+
 # Captain's Call is populated only from the durable keyed open-decision set. The
 # anti-leak guard: action-free highlights - a working task, a completed scout,
 # queued/gated items, landed work - must never surface as an open decision, so they
@@ -2422,6 +2442,8 @@ EOF
   pass "main and secondmate captain actionability use the same blocker readiness"
 }
 
+test_bearings_keeps_blind_observation_unverified
+test_bearings_keeps_observed_empty_fleet_verified_absent
 test_beyond_arg_max_secondmate_summary_carries_every_row_off_argv
 test_portfolio_boundary_declares_every_truncated_section_only_when_needed
 test_domain_alpha_stale_parent_event_does_not_become_current_work
@@ -2455,7 +2477,6 @@ test_landed_default_preserves_internal_order_for_ties
 test_landed_default_handles_no_landed_items
 test_landed_bounded_and_disclosed
 test_live_blocker_is_not_charted_queue_work
-test_bearings_keeps_blind_observation_unverified
 test_captains_call_anti_leak
 test_main_orphan_in_flight_is_disclosed_not_invented
 test_main_unstructured_current_is_disclosed_with_structured_sibling

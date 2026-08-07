@@ -53,7 +53,7 @@ if [ -n "${E_PROCESS_CLOCK_STEP_MS:-}" ] && [ -n "${FM_LIVENESS_PROCESS_TIMESTAM
   printf '%s\n' "$((n * E_PROCESS_CLOCK_STEP_MS))" > "$FM_LIVENESS_PROCESS_TIMESTAMP_FILE"
 fi
 if [ "${E_PROCESS:-working}" != blind ]; then
-  printf '__FM_LIVENESS_OBSERVER__\tworker-token-visible\n'
+  printf '__FM_LIVENESS_OBSERVER__\tprocess-table-visible\n'
 fi
 wt=${E_WT:?}
 family=${E_FAMILY:-claude}
@@ -101,6 +101,11 @@ case "${E_PROCESS:-working}" in
     fi
     ;;
   observed-absent)
+    printf '99\t42\tzsh\t%s-other\t\n' "$wt"
+    ;;
+  empty-fleet)
+    # The observer saw an ordinary process row, but no task-bound worker at
+    # all. This is the empty-worker-fleet recovery case, not observer blindness.
     printf '99\t42\tzsh\t%s-other\t\n' "$wt"
     ;;
   fail) exit 1 ;;
@@ -196,17 +201,12 @@ test_max_cpu_launcher_and_two_sample_delta() {
   pass "max CPU crosses launcher wrappers and only a two-sample delta establishes activity"
 }
 
-test_real_process_snapshot_without_token_witness_is_unverified() {
-  local dir json real_lsof
-  command -v lsof >/dev/null 2>&1 || { echo "skip: lsof not found (real process snapshot)"; return; }
-  real_lsof=$(command -v lsof)
+test_real_process_snapshot_without_process_table_is_unverified() {
+  local dir json
   dir=$(make_case real-process-snapshot codex); install_evidence "$dir"
-  cat > "$dir/bin/lsof" <<SH
+  cat > "$dir/bin/lsof" <<'SH'
 #!/usr/bin/env bash
-"$real_lsof" "\$@"
-rc=\$?
-[ -t 1 ] || exit 1
-exit "\$rc"
+exit 1
 SH
   chmod +x "$dir/bin/lsof"
   rm -f "$dir"/*.count
@@ -220,8 +220,8 @@ SH
     and .process_samples.sample_2_readable == false
     and .records[0].worker.presence == "unverified"
     and .records[0].evidence.grade == "unverified"
-  ' >/dev/null || fail "process output without a token-visibility witness was trusted as task-bound evidence: $json"
-  pass "real ps/lsof output without a worker-token witness is explicitly unverified"
+  ' >/dev/null || fail "producer without a readable process table was trusted as task-bound evidence: $json"
+  pass "producer without a readable process table is explicitly unverified"
 }
 
 test_cwd_binding_and_shell_amplifier_refusals() {
@@ -326,7 +326,7 @@ n=$(cat "$count_file" 2>/dev/null || printf 0)
 n=$((n + 1))
 printf '%s' "$n" > "$count_file"
 if [ "$n" -eq 1 ]; then cpu=1000; else cpu=1100; fi
-printf '__FM_LIVENESS_OBSERVER__\tworker-token-visible\n'
+printf '__FM_LIVENESS_OBSERVER__\tprocess-table-visible\n'
 printf '11\t%s\tclaude\t%s\t%s\n' "$cpu" "${E_WT:?}" "${E_SHARED_TOKEN:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
 SH
   chmod +x "$dir/bin/endpoint" "$dir/bin/capture" "$dir/bin/process"
@@ -384,6 +384,25 @@ test_process_observation_distinguishes_blind_from_absent() {
     and .records[0].activity == "unverified"
   ' >/dev/null || fail "blind observer was rendered as verified absence: $json"
 
+  dir=$(make_case observed-present claude); install_evidence "$dir"
+  json=$(E_PROCESS=working run_case "$dir")
+  printf '%s' "$json" | jq -e '
+    .process_samples.sample_1_readable == true
+    and .process_samples.sample_2_readable == true
+    and .records[0].worker.presence == "verified_present"
+    and .records[0].evidence.grade == "task_bound_process"
+  ' >/dev/null || fail "a visible task-bound worker was not rendered as present: $json"
+
+  dir=$(make_case empty-fleet claude); install_evidence "$dir"
+  json=$(E_PROCESS=empty-fleet run_case "$dir")
+  printf '%s' "$json" | jq -e '
+    .process_samples.sample_1_readable == true
+    and .process_samples.sample_2_readable == true
+    and .records[0].worker.presence == "verified_absent"
+    and .records[0].evidence.grade == "task_bound_process"
+    and .records[0].activity == "inactive"
+  ' >/dev/null || fail "a live observer on an empty worker fleet was rendered as blind: $json"
+
   dir=$(make_case observed-absence claude); install_evidence "$dir"
   json=$(E_PROCESS=observed-absent run_case "$dir")
   printf '%s' "$json" | jq -e '
@@ -393,7 +412,7 @@ test_process_observation_distinguishes_blind_from_absent() {
     and .records[0].evidence.grade == "task_bound_process"
     and .records[0].activity == "inactive"
   ' >/dev/null || fail "observed absence was not preserved as verified absence: $json"
-  pass "process observation distinguishes blind evidence from a verified task-bound absence"
+  pass "process observation distinguishes blind, present, empty-worker-fleet, and observed-absence evidence"
 }
 
 test_local_evidence_producers_are_bounded() {
@@ -783,13 +802,13 @@ test_neutralization_matrix_goes_red() {
 }
 
 test_harness_relative_cpu_rows
+test_process_observation_distinguishes_blind_from_absent
 test_max_cpu_launcher_and_two_sample_delta
-test_real_process_snapshot_without_token_witness_is_unverified
+test_real_process_snapshot_without_process_table_is_unverified
 test_cwd_binding_and_shell_amplifier_refusals
 test_between_sample_exit_is_absent_for_every_harness
 test_endpoint_three_way_and_output_activity
 test_shared_worktree_process_belongs_to_one_task
-test_process_observation_distinguishes_blind_from_absent
 test_local_evidence_producers_are_bounded
 test_cpu_rate_uses_actual_sample_elapsed_time
 test_production_cpu_clock_excludes_trailing_lsof_latency

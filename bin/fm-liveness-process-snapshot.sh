@@ -41,11 +41,6 @@ awk '
     }
   }
 ' "$TMP/env.raw" > "$TMP/token.tsv" || exit 1
-# A nonempty token table proves this observer can see the task-identity marker
-# on at least one live process. Without that witness, downstream absence is
-# unverified even if cwd rows exist: process visibility alone cannot bind a
-# worker to a task.
-[ -s "$TMP/token.tsv" ] && printf '__FM_LIVENESS_OBSERVER__\tworker-token-visible\n'
 pid_list=$(awk -F '\t' 'BEGIN{sep=""} {printf "%s%s",sep,$1; sep=","}' "$TMP/ps.tsv")
 [ -n "$pid_list" ] || exit 0
 lsof -a -d cwd -p "$pid_list" -Fn > "$TMP/lsof.raw" 2>/dev/null || true
@@ -58,6 +53,10 @@ awk -F '\t' '
   NR==FNR { cwd[$1]=$2; next }
   ($1 in cwd) { print $1 "\t" $2 "\t" $3 "\t" cwd[$1] }
 ' "$TMP/cwd.tsv" "$TMP/ps.tsv" > "$TMP/process.tsv"
+# This witness says the observer read a usable process/CWD table. It is
+# deliberately independent of worker tokens: an empty worker fleet is an
+# observed absence, while a failed or blind producer emits no witness.
+printf '__FM_LIVENESS_OBSERVER__\tprocess-table-visible\n'
 awk -F '\t' '
   FILENAME==ARGV[1] { token[$1]=$2; next }
   { print $0 "\t" token[$1] }

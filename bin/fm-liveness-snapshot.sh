@@ -48,8 +48,8 @@
 #   active | parked | inactive | absent | unverified
 #
 # Test seams name external evidence producers, not classifier decisions:
-#   FM_LIVENESS_PROCESS_SNAPSHOT_BIN prints an exact token-visibility witness
-#     __FM_LIVENESS_OBSERVER__<TAB>worker-token-visible
+#   FM_LIVENESS_PROCESS_SNAPSHOT_BIN prints an exact process-table witness
+#     __FM_LIVENESS_OBSERVER__<TAB>process-table-visible
 #   followed by pid<TAB>cpu_ms<TAB>comm<TAB>cwd<TAB>worker_token rows, and
 #     may write its CPU-read clock to FM_LIVENESS_PROCESS_TIMESTAMP_FILE.
 #   FM_LIVENESS_ENDPOINT_BIN prints an fm_backend_agent_state verdict.
@@ -150,11 +150,10 @@ process_snapshot() {  # <output> <timestamp-output>
     FM_LIVENESS_PROCESS_TIMESTAMP_FILE="$timestamp_output" \
       "$EVIDENCE_RUN" --total "$EVIDENCE_TIMEOUT" "$SCRIPT_DIR/fm-liveness-process-snapshot.sh" "$timestamp_output" > "$output" 2>/dev/null || return
   fi
-  # A successful producer without an exact token-visibility witness has not
-  # demonstrated that it can observe the identity used to bind a worker to a
-  # task. It may have seen ordinary process rows, but that is not task-bound
-  # evidence: a blind observer must never turn into verified absence.
-  grep -Fqx $'__FM_LIVENESS_OBSERVER__	worker-token-visible' "$output" || return 1
+  # A successful producer needs an exact process-table witness. The observer
+  # need not see any worker token: no task-bound worker anywhere is a verified
+  # empty fleet, whereas a failed or blind producer has no usable table.
+  grep -Fqx $'__FM_LIVENESS_OBSERVER__	process-table-visible' "$output" || return 1
   [ -s "$timestamp_output" ] || monotonic_ms > "$timestamp_output"
 }
 
