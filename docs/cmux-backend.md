@@ -121,6 +121,11 @@ Real tests share the captain's running app rather than creating an isolated cmux
 - Label lookup and recovery are currently scoped to the current cmux window, so a task moved to a non-current window is a known recovery blind spot.
 - Workspace ids do not survive app relaunch and are never recovery authority.
 
+## Multi-pane war rooms
+
+The one-task-one-surface shape above stays the spawn default.
+An operator who wants a labeled, multi-pane view of several already-running panes at once can build one manually with the same CLI; see [`cmux-war-room.md`](cmux-war-room.md) for the recipes and the standalone `bin/fm-cmux-war-room.sh` helper.
+
 ## Regression entry points
 
 ```sh
