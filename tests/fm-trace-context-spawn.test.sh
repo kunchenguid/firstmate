@@ -110,6 +110,10 @@ run_spawn() {
   shift 4
   : > "$launchlog"
   env -u FM_TRACE_CONTEXT \
+    HOME="$TMP_ROOT/no-browser-home" \
+    FM_BROWSER_PORT=19226 FM_BROWSER_BIN="$TMP_ROOT/no-browser-bin" \
+    FM_BROWSER_RUNTIME_DIR="$TMP_ROOT/spawn-browser-runtime" \
+    CHROME_DEVTOOLS_AXI_BROWSER_URL="${CHROME_DEVTOOLS_AXI_BROWSER_URL:-}" \
     FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -128,6 +132,9 @@ run_spawn_tc() {
   shift 5
   : > "$launchlog"
   env FM_TRACE_CONTEXT="$tc" \
+    HOME="$TMP_ROOT/no-browser-home" \
+    FM_BROWSER_PORT=19226 FM_BROWSER_BIN="$TMP_ROOT/no-browser-bin" \
+    FM_BROWSER_RUNTIME_DIR="$TMP_ROOT/spawn-browser-runtime" \
     FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -196,6 +203,9 @@ run_two_level() {
   smfake=$(make_spawn_fakebin "$base/sm-fake")
   : > "$smlog"
   env FM_TRACE_CONTEXT="$penv" \
+    HOME="$TMP_ROOT/no-browser-home" \
+    FM_BROWSER_PORT=19226 FM_BROWSER_BIN="$TMP_ROOT/no-browser-bin" \
+    FM_BROWSER_RUNTIME_DIR="$TMP_ROOT/spawn-browser-runtime" \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$prim" \
     FM_STATE_OVERRIDE="$prim/state" FM_DATA_OVERRIDE="$prim/data" \
     FM_PROJECTS_OVERRIDE="$prim/projects" FM_CONFIG_OVERRIDE="$prim/config" \
@@ -222,6 +232,9 @@ run_two_level() {
   wfake=$(make_spawn_fakebin "$base/w-fake")
   : > "$wlog"
   env FM_TRACE_CONTEXT="$TL_ENV_TC" TRACEPARENT="$TL_CARRIER" \
+    HOME="$TMP_ROOT/no-browser-home" \
+    FM_BROWSER_PORT=19226 FM_BROWSER_BIN="$TMP_ROOT/no-browser-bin" \
+    FM_BROWSER_RUNTIME_DIR="$TMP_ROOT/spawn-browser-runtime" \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$sm" \
     FM_STATE_OVERRIDE="$sm/state" FM_DATA_OVERRIDE="$sm/data" \
     FM_PROJECTS_OVERRIDE="$sm/projects" FM_CONFIG_OVERRIDE="$sm/config" \
@@ -560,6 +573,36 @@ test_secondmate_carrier_and_snapshot_share_one_decision() {
   pass "secondmate carrier and FM_TRACE_CONTEXT snapshot always agree, both derived from one frozen decision (file-decided path)"
 }
 
+test_missing_browser_does_not_fail_spawn() {
+  local rec out status
+  rec=$(make_spawn_case browser-missing)
+  read_case_record "$rec"
+  out=$(HOME="$TMP_ROOT/no-browser-home" \
+    FM_BROWSER_RUNTIME_DIR="$TMP_ROOT/no-browser-runtime" \
+    FM_BROWSER_BIN="$TMP_ROOT/no-browser-bin" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "a missing browser must not fail spawn"
+  assert_contains "$out" "spawned $CASE_ID" "spawn should succeed without a browser"
+  ! grep -q '^export CHROME_DEVTOOLS_AXI_BROWSER_URL=' "$LAUNCH_LOG" \
+    || fail "spawn exported a browser URL after the helper refused"
+  pass "a missing browser is best-effort and leaves the spawn successful with no URL export"
+}
+
+test_ambient_browser_url_is_preserved() {
+  local rec out status
+  rec=$(make_spawn_case browser-ambient)
+  read_case_record "$rec"
+  out=$(CHROME_DEVTOOLS_AXI_BROWSER_URL='http://127.0.0.1:19999' \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "an ambient browser URL must not fail spawn"
+  assert_contains "$out" "spawned $CASE_ID" "ambient URL spawn should report success"
+  grep -q "^export CHROME_DEVTOOLS_AXI_BROWSER_URL='http://127.0.0.1:19999'$" "$LAUNCH_LOG" \
+    || fail "spawn did not preserve the ambient browser URL"
+  pass "spawn preserves an operator-provided CHROME_DEVTOOLS_AXI_BROWSER_URL"
+}
+
 test_enabled_records_and_injects_identical_carrier_before_launch
 test_disabled_writes_and_injects_neither
 test_failed_delivery_omits_metadata_and_still_launches
@@ -572,5 +615,7 @@ test_secondmate_env_on_file_absent_keeps_nested_worker_enabled
 test_secondmate_env_off_file_present_keeps_nested_worker_disabled
 test_two_routed_tasks_through_one_secondmate_root_distinct_traces
 test_secondmate_carrier_and_snapshot_share_one_decision
+test_missing_browser_does_not_fail_spawn
+test_ambient_browser_url_is_preserved
 
 echo "# all fm-trace-context-spawn tests passed"
