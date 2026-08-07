@@ -48,6 +48,16 @@ set -u
 printf 'network=%s detect_only=%s\n' \
   "${FM_BOOTSTRAP_NETWORK:-all}" "${FM_BOOTSTRAP_DETECT_ONLY:-0}" \
   >> "${FM_FAKE_BOOTSTRAP_LOG:?}"
+# The real sweeps record their elapsed times through fm-timing-lib.sh, which
+# reaches them as an exported FM_TIMING_LOG. Recording the same way here proves
+# the stage actually hands that channel to its child and publishes what the child
+# wrote - the part of the contract this suite owns. What the real sweeps measure
+# is owned by tests/fm-bootstrap.test.sh.
+if [ -n "${FM_TIMING_LOG:-}" ]; then
+  . "$(dirname "$0")/fm-timing-lib.sh"
+  fm_timing_record phase "${FM_FAKE_TIMING_PHASE:-gh-auth}" \
+    "$(( $(fm_timing_now_ms) - 1500 ))" "${FM_FAKE_TIMING_DETAIL:-}"
+fi
 [ -z "${FM_FAKE_BOOTSTRAP_SLEEP:-}" ] || sleep "$FM_FAKE_BOOTSTRAP_SLEEP"
 [ -z "${FM_FAKE_BOOTSTRAP_OUT:-}" ] || printf '%s\n' "$FM_FAKE_BOOTSTRAP_OUT"
 exit "${FM_FAKE_BOOTSTRAP_RC:-0}"
@@ -457,6 +467,150 @@ EOF
   pass "fm-startup-network: fleet-lock takeover cannot overlap a mutating sweep"
 }
 
+# Every record carries a start offset from ONE origin, so the artifact reads as a
+# timeline and not just a bag of durations. The origin is normally exported by the
+# stage, but a process that starts recording without one has to adopt an origin
+# and KEEP it: recomputing it per record would silently flatten every offset to
+# zero and lose the ordering the artifact exists to show. Driven with explicit
+# start stamps so the assertion does not depend on the host clock's resolution.
+test_records_share_one_origin_so_offsets_form_a_timeline() {
+  local dir log offsets count second third
+  dir="$TMP_ROOT/timing-origin"
+  mkdir -p "$dir"
+  log="$dir/timings.tsv"
+
+  (
+    # shellcheck source=bin/fm-timing-lib.sh
+    . "$ROOT/bin/fm-timing-lib.sh"
+    unset FM_TIMING_EPOCH_MS
+    FM_TIMING_LOG=$log
+    export FM_TIMING_LOG
+    base=$(fm_timing_now_ms)
+    fm_timing_record phase first "$base"
+    fm_timing_record phase second "$(( base + 5000 ))"
+    fm_timing_record phase third "$(( base + 9000 ))"
+  )
+
+  # The origin lands within the first record, so that record's own offset rounds
+  # to zero; what proves the origin was KEPT is that the later records are spaced
+  # by exactly the interval they were given. Recomputing the origin per record
+  # would report every one of them as zero.
+  offsets=$(awk -F'\t' '$1 == "v1" { print $4 }' "$log")
+  count=$(printf '%s\n' "$offsets" | grep -c .)
+  second=$(printf '%s\n' "$offsets" | sed -n 2p)
+  third=$(printf '%s\n' "$offsets" | sed -n 3p)
+  [ "$count" -eq 3 ] || fail "expected three records, got: $offsets"
+  [ "$second" -gt 0 ] && [ "$third" -gt "$second" ] \
+    || fail "records did not share one origin - offsets were: $offsets"
+  [ "$(( third - second ))" -eq 4000 ] \
+    || fail "offsets did not preserve the interval between records: $offsets"
+  pass "fm-startup-network: timing records share one origin so their offsets form a timeline"
+}
+
+# The whole point of the artifact is that it is FREE until someone asks for it.
+# `harvest` is what composes a session start's NETWORK CHECKS section, so a
+# timing line leaking into it would be a change to every startup's output; only
+# the on-demand `report` may print them.
+test_timings_are_published_and_only_the_on_demand_report_prints_them() {
+  local rec home root log report_out harvest_out
+  rec=$(new_world timings-published)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  printf '%s\n' $$ > "$home/state/.lock"
+
+  FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_OUT='sweep finding' \
+    FM_FAKE_TIMING_PHASE=fleet-sync FM_FAKE_TIMING_DETAIL=dotfiles-private \
+    run_stage "$home" "$root" run --locked 1
+
+  assert_present "$home/state/.startup-network.timings" \
+    "a finished run published no timing record"
+  assert_grep 'fleet-sync' "$home/state/.startup-network.timings" \
+    "the stage did not publish what the sweep recorded"
+  assert_grep 'stage	network-checks' "$home/state/.startup-network.timings" \
+    "the stage did not record its own bounded total"
+
+  report_out=$(run_stage "$home" "$root" report)
+  assert_contains "$report_out" "sweep finding" "report stopped printing the sweep result"
+  assert_contains "$report_out" "TIMINGS" "report did not print the per-step timings"
+  assert_contains "$report_out" "fleet-sync dotfiles-private" \
+    "report did not attribute the elapsed time to the clone that spent it"
+  assert_contains "$report_out" "slowest:" "report did not surface the slowest steps"
+
+  harvest_out=$(run_stage "$home" "$root" harvest --pid $$)
+  assert_contains "$harvest_out" "sweep finding" "harvest stopped printing the sweep result"
+  assert_not_contains "$harvest_out" "TIMINGS" \
+    "the timings leaked into the session-start digest section"
+  assert_not_contains "$harvest_out" "slowest:" \
+    "the timings leaked into the session-start digest section"
+  pass "fm-startup-network: timings are durable and printed only on demand"
+}
+
+# A run that hit the bound is exactly the run worth attributing, so whatever the
+# killed sweeps managed to record must survive rather than being discarded with
+# them.
+test_a_bounded_run_still_publishes_the_timings_it_managed_to_record() {
+  local rec home root log report_out
+  rec=$(new_world timings-partial)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  printf '%s\n' $$ > "$home/state/.lock"
+
+  FM_STARTUP_NETWORK_TIMEOUT=1 FM_SESSION_START_TIMEOUT=2 \
+    FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_SLEEP=20 \
+    FM_FAKE_TIMING_PHASE=secondmate-liveness FM_FAKE_TIMING_DETAIL='mate-a@host-one' \
+    run_stage "$home" "$root" run --locked 1
+
+  [ "$(sed -n 's/^state=//p' "$home/state/.startup-network.status")" = timeout ] \
+    || fail "the bounded run did not record itself as timed out"
+  report_out=$(run_stage "$home" "$root" report)
+  assert_contains "$report_out" "hit the 1s bound" "the bound stopped being reported"
+  assert_contains "$report_out" "secondmate-liveness mate-a@host-one" \
+    "a timed-out run discarded the partial timings its sweeps had already recorded"
+  pass "fm-startup-network: a timed-out run still publishes the partial timings it recorded"
+}
+
+# The artifact is read by a human looking at a slow startup, so it must be
+# incapable of carrying an argv or a credential out of a sweep, and incapable of
+# being broken by one either: a detail with tabs or newlines would otherwise
+# forge extra records.
+test_the_timing_artifact_cannot_carry_a_command_line_or_forge_records() {
+  local rec home root log lines report_out
+  rec=$(new_world timings-sanitized)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  printf '%s\n' $$ > "$home/state/.lock"
+
+  FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_TIMING_PHASE=secondmate-sync \
+    FM_FAKE_TIMING_DETAIL="ssh -i /key host	v1	forged	0	9999
+GITHUB_TOKEN=ghp_supersecretvalue" \
+    run_stage "$home" "$root" run --locked 1
+
+  assert_no_grep 'ghp_supersecretvalue' "$home/state/.startup-network.timings" \
+    "the timing artifact carried a credential-shaped value through"
+  assert_no_grep 'forged' "$home/state/.startup-network.timings" \
+    "a detail containing tabs forged an extra timing record"
+  assert_no_grep 'ssh' "$home/state/.startup-network.timings" \
+    "the timing artifact carried a command line through"
+  assert_grep 'unrecordable' "$home/state/.startup-network.timings" \
+    "free text was silently dropped instead of being marked unrecordable"
+  lines=$(grep -c . "$home/state/.startup-network.timings")
+  [ "$lines" -eq 2 ] \
+    || fail "one sweep record plus the stage total should be 2 lines, got $lines"
+
+  # The step itself is still measured - only its untrustworthy label is refused,
+  # so a sweep that mislabels itself still shows up as time spent.
+  assert_grep 'secondmate-sync' "$home/state/.startup-network.timings" \
+    "refusing the label also discarded the measurement"
+
+  report_out=$(run_stage "$home" "$root" report)
+  assert_not_contains "$report_out" "ghp_supersecretvalue" \
+    "the rendered report printed a credential-shaped value"
+  pass "fm-startup-network: the timing artifact cannot carry a command line or forge records"
+}
+
 test_wait_fails_without_a_published_stage
 test_start_returns_without_holding_the_callers_stdout
 test_harvest_acknowledgement_suppresses_the_wake_and_no_claim_produces_it
@@ -469,5 +623,8 @@ test_start_is_single_flight
 test_start_reserves_its_generation_before_returning
 test_new_lock_owner_does_not_reuse_the_previous_owners_worker
 test_lock_takeover_stays_read_only_while_a_sweep_holds_the_lease
-
+test_records_share_one_origin_so_offsets_form_a_timeline
+test_timings_are_published_and_only_the_on_demand_report_prints_them
+test_a_bounded_run_still_publishes_the_timings_it_managed_to_record
+test_the_timing_artifact_cannot_carry_a_command_line_or_forge_records
 echo "# fm-startup-network.test.sh: all assertions passed"
