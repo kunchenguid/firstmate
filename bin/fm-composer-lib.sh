@@ -94,10 +94,11 @@ fm_composer_strip_ansi() {
 # LC_ALL=C makes awk walk bytes, so multibyte glyphs (e.g. ❯) and de-emphasised
 # runs alike pass through or drop intact without locale-dependent classes.
 fm_composer_strip_ghost() {
-  # Cursor reverse-video cursor-cell gap drop is harness-gated: verified only
-  # against Cursor (tmux coalesced and Herdr split SGR forms). Non-Cursor
-  # callers keep pre-Cursor strip semantics - reverse-video between dim runs
-  # is never dropped as a cursor cell.
+  # Cursor reverse-video cursor-cell gap buffering and drop are harness-gated:
+  # verified only against Cursor (tmux coalesced and Herdr split SGR forms).
+  # Non-Cursor callers keep pre-Cursor direct-emit semantics - no ghost_gap
+  # buffering, and reverse-video between dim runs is never dropped as a
+  # cursor cell.
   local cursor_rev_gap=0
   [ "${FM_COMPOSER_HARNESS:-}" = cursor ] && cursor_rev_gap=1
   LC_ALL=C awk -v lumamax="${FM_COMPOSER_GHOST_LUMA_MAX:-128}" -v cursor_rev_gap="$cursor_rev_gap" '
@@ -133,7 +134,7 @@ fm_composer_strip_ghost() {
       return ((299*r + 587*g + 114*b) / 1000 < lumamax) ? 1 : 0
     }
     {
-      line = $0; out = ""; dim = 0; darkfg = 0; rev = 0; n = length(line); i = 1
+      line = $0; out = ""; dim = 0; darkfg = 0; n = length(line); i = 1
       ghost_gap = 0; gap_buf = ""; gap_rev = 0
       while (i <= n) {
         c = substr(line, i, 1)
@@ -159,7 +160,8 @@ fm_composer_strip_ghost() {
               # content was reverse-video-marked (SGR 7, how the observed
               # cursor cell is always rendered): a plain-text gap is real typed
               # content and survives, deferring injection rather than licensing
-              # it over genuine input.
+              # it over genuine input. ghost_gap itself only opens under
+              # Cursor reverse-gap handling; non-Cursor never enters this path.
               if (ghost_gap) {
                 # peek: is this a de-emphasis-changing SGR or a color-only SGR?
                 # Must skip color payload parameters (38;2, 38;5, 48;2, 48;5,
@@ -233,22 +235,22 @@ fm_composer_strip_ghost() {
                 } else if (code == "2") {
                   if (!dim) { dim = 1; ghost_gap = 0; gap_buf = ""; gap_rev = 0 }
                 } else if (code == "0") {
-                  if (dim || darkfg) {
-                    # Exiting de-emphasis: start a ghost gap buffer to
-                    # capture potential reverse-video cursor cell.
+                  if (cursor_rev_gap && (dim || darkfg)) {
+                    # Exiting de-emphasis under Cursor: start a ghost gap
+                    # buffer to capture a potential reverse-video cursor cell.
                     ghost_gap = 1; gap_buf = ""; gap_rev = 0
                   }
-                  dim = 0; darkfg = 0; rev = 0
+                  dim = 0; darkfg = 0
                 } else if (code == "22") {
-                  if (dim) { ghost_gap = 1; gap_buf = ""; gap_rev = 0 }
+                  if (cursor_rev_gap && dim) { ghost_gap = 1; gap_buf = ""; gap_rev = 0 }
                   dim = 0
                 } else if (code == "7") {
-                  rev = 1
-                  # Mark reverse-video gaps only for Cursor: non-Cursor must
-                  # never drop reverse-video content as a cursor cell.
+                  # Mark reverse-video gaps only for Cursor: non-Cursor never
+                  # opens ghost_gap, so reverse-video content is never dropped
+                  # as a cursor cell.
                   if (ghost_gap && cursor_rev_gap) gap_rev = 1
                 } else if (code == "27") {
-                  rev = 0; gap_rev = 0
+                  gap_rev = 0
                 } else if (code == "39") { darkfg = 0 }
                 else if (code + 0 >= 30 && code + 0 <= 37) { darkfg = 0 }
                 else if (code + 0 >= 90 && code + 0 <= 97) { darkfg = 0 }
@@ -335,14 +337,16 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   harness=${6:-${FM_COMPOSER_HARNESS:-}}
   case "$plain_content" in '→'*) arrow_leading=1 ;; esac
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
-    # Ghost stripping emptied the row, so every byte was de-emphasised. A bare
-    # de-emphasised row is a confirmed empty agent composer only when its
-    # plain text (a leading agent glyph stripped) matches the harness idle
-    # placeholder: cursor renders its `→` glyph dim together with
-    # "Add a follow-up" (verified cursor-agent 2026.07.23-e383d2b). Any other
-    # fully de-emphasised bare row - a dimmed shell prompt, a dimmed prompt
-    # glyph alone - stays unknown: never a safe injection target.
+    # Ghost stripping emptied the row, so every byte was de-emphasised.
+    # Established agent glyphs remain empty composers on their own (claude
+    # ❯, codex ›, muse ⟩), matching pre-Cursor fleet behavior. Cursor's `→`
+    # stays different: bare unscoped arrow is unknown; Cursor-context bare
+    # arrow is empty; ghost-stripped `→ Add a follow-up` becomes empty only
+    # with Cursor context and a verified idle-placeholder match. Any other
+    # fully de-emphasised bare row (a dimmed shell prompt, an unscoped arrow
+    # with no idle match) stays unknown: never a safe injection target.
     case "$plain_content" in
+      '❯'|'›'|'⟩') printf 'empty'; return 0 ;;
       '→'|'→ '*)
         remainder=${plain_content#'→'}
         remainder="${remainder#"${remainder%%[![:space:]]*}"}"
