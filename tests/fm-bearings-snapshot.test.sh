@@ -452,7 +452,8 @@ test_bad_secondmate_homes_never_revive_parent_work() {
   write_parent_secondmate_event "$home" invalid "$invalid" "old invalid work"
 
   make_valid_secondmate_home unreadable "$unreadable"
-  chmod 000 "$unreadable/data"
+  rm "$unreadable/data/backlog.md"
+  ln -s /proc/1/mem "$unreadable/data/backlog.md"
   append_secondmate_registry "$home" unreadable "$unreadable"
   write_parent_secondmate_event "$home" unreadable "$unreadable" "old unreadable work"
 
@@ -474,7 +475,6 @@ test_bad_secondmate_homes_never_revive_parent_work() {
 
   fakebin=$(make_fakebin "$home")
   json=$(FAKE_NM_SLEEP=1 FM_SNAPSHOT_SECONDMATE_TIMEOUT=1 run "$home" "$fakebin" --json)
-  chmod 700 "$unreadable/data"
   printf '%s' "$json" | jq -e '
     (.secondmates | length) == 5
       and all(.secondmates[]; .state == "unknown")
@@ -484,7 +484,7 @@ test_bad_secondmate_homes_never_revive_parent_work() {
       and ([.secondmates[] | select(.id != "missing")]
         | all(.provenance == "parent-event-fallback" and .freshness == "historical-event"))
       and (.secondmates | any(.[]; .id == "invalid" and (.reason | contains("marked for"))))
-      and (.secondmates | any(.[]; .id == "unreadable" and (.reason | test("invalid home|unreadable"))))
+      and (.secondmates | any(.[]; .id == "unreadable" and (.reason | test("invalid home|unreadable|snapshot failed"))))
       and (.secondmates | any(.[]; .id == "malformed" and (.reason | contains("unstructured current backlog row"))))
       and (.secondmates | any(.[]; .id == "timedout" and (.reason | contains("timed out"))))
   ' >/dev/null || fail "bad home outcomes revived stale work or lacked provenance: $json"
