@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# fm-send strict target resolution.
+# fm-send strict target resolution and key delivery reporting.
 #
 # A send that cannot be tied to a recorded task/lane or to an explicit
 # well-formed backend target must fail loudly. These tests pin the historical
 # silent-fallback failures: missing FM_HOME, unresolved selectors, prefixless
 # herdr pane ids, dead explicit endpoints, and the healthy exact/fm-id paths.
+# They also verify that a key send reports whether delivery actually succeeded.
 set -u
 
 # shellcheck source=tests/lib.sh
