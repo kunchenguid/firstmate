@@ -99,6 +99,7 @@ test_concurrent_urls_start_one_browser() {
   browser="$dir/browser"
   make_fake_browser "$browser"
   mkdir -p "$dir/runtime/lock"
+  chmod 700 "$dir/runtime"
   printf '99999999\n' > "$dir/runtime/lock/pid"
   : > "$dir/launch-a"
   : > "$dir/launch-b"
@@ -157,6 +158,7 @@ test_stop_does_not_signal_unowned_pid() {
   fakebin=$(fm_fakebin "$dir")
   make_fake_curl "$fakebin"
   mkdir -p "$dir/runtime"
+  chmod 700 "$dir/runtime"
   {
     printf 'pid=%s\n' "$$"
     printf 'port=19225\n'
@@ -176,6 +178,7 @@ test_stale_lock_is_reclaimed() {
   fakebin=$(fm_fakebin "$dir")
   make_fake_curl "$fakebin"
   mkdir -p "$dir/runtime/lock"
+  chmod 700 "$dir/runtime"
   printf '99999999\n' > "$dir/runtime/lock/pid"
   out=$(FM_BROWSER_RUNTIME_DIR="$dir/runtime" FM_BROWSER_PORT=19228 \
     FM_TEST_BROWSER_MARKER="$dir/never" PATH="$fakebin:$PATH" \
@@ -191,11 +194,34 @@ test_stale_lock_is_reclaimed() {
   pass "dead and ownerless browser locks are claimed atomically"
 }
 
+test_insecure_runtime_dir_is_refused() {
+  local dir fakebin err status
+  dir="$TMP_ROOT/insecure-runtime"
+  fakebin=$(fm_fakebin "$dir")
+  make_fake_curl "$fakebin"
+  mkdir -p "$dir/runtime"
+  chmod 777 "$dir/runtime"
+  if FM_BROWSER_RUNTIME_DIR="$dir/runtime" FM_BROWSER_PORT=19229 \
+    FM_TEST_BROWSER_MARKER="$dir/never" PATH="$fakebin:$PATH" \
+    "$BROWSER_HELPER" stop >"$dir/output" 2>"$dir/error"; then
+    status=0
+  else
+    status=$?
+  fi
+  err=$(cat "$dir/error")
+  [ "$status" -ne 0 ] || fail "insecure runtime directory unexpectedly succeeded"
+  assert_contains "$err" 'not group/other-writable' \
+    "insecure runtime refusal omitted the permissions requirement"
+  [ ! -e "$dir/runtime/lock" ] || fail "insecure runtime directory was modified"
+  pass "group/other-writable runtime directories are refused"
+}
+
 test_probe_hit_reuses_without_launching
 test_discovery_prefers_explicit_binary
 test_concurrent_urls_start_one_browser
 test_missing_binary_refuses_without_url
 test_stop_does_not_signal_unowned_pid
 test_stale_lock_is_reclaimed
+test_insecure_runtime_dir_is_refused
 
 echo "# all fm-browser tests passed"
