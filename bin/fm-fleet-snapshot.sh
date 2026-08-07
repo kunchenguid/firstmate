@@ -254,7 +254,7 @@ first_pr_url_in_file() {  # <file>
 
 backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
   local backlog=${1:-$BACKLOG}
-  if [ ! -f "$backlog" ]; then
+  if [ ! -e "$backlog" ] && [ ! -L "$backlog" ]; then
     jq -n --arg path "$backlog" '{path:$path,present:false,records:[]}'
     return 0
   fi

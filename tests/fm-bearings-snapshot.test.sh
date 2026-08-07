@@ -453,7 +453,7 @@ test_bad_secondmate_homes_never_revive_parent_work() {
 
   make_valid_secondmate_home unreadable "$unreadable"
   rm "$unreadable/data/backlog.md"
-  ln -s /proc/1/mem "$unreadable/data/backlog.md"
+  ln -s "$unreadable/data" "$unreadable/data/backlog.md"
   append_secondmate_registry "$home" unreadable "$unreadable"
   write_parent_secondmate_event "$home" unreadable "$unreadable" "old unreadable work"
 
