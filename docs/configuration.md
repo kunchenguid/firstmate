@@ -126,6 +126,16 @@ A Secondmate on a remote route is covered the same way: the primary resolves and
 The presence flag is session-scoped enablement, so it transfers at launch and is left unchanged by live convergence into a running home.
 See [`trace-context.md`](trace-context.md) for carrier semantics, supported routes, the manual fleet-restart requirement, the session boundary, and safety limits; `bin/fm-trace-context-lib.sh`'s header owns the exact mechanics, and [`verification/trace-context.md`](verification/trace-context.md) records repeatable evidence.
 
+## Pull-request credential (config/gh-credential)
+
+The no-mistakes pipeline's PR step opens pull requests by shelling out to `gh`, and a GitHub fine-grained personal access token is forbidden from the `createPullRequest` mutation, so an ambient token of that class breaks the step while every earlier step succeeds.
+The local, gitignored `config/gh-credential` holds ONE command prefix line that injects a credential authorized for that mutation and then runs its trailing arguments, for example `cred run GITHUB_TOKEN=vault/path --`.
+Because `gh` gives `GH_TOKEN` precedence over `GITHUB_TOKEN`, a configured wrapper removes both ambient variables before starting the prefix, leaving the prefix-injected credential as the only GitHub token that reaches `gh`.
+Only the first non-empty, non-comment line is read, surrounding whitespace is trimmed, and the line is split on whitespace and executed directly rather than through a shell, so quoting, globbing, redirection, and pipelines in it are not interpreted.
+An absent or blank file means `bin/fm-gh.sh` execs its command unchanged, so a home with no special credential behaves exactly as if the wrapper were not there.
+The file supplies the credential only; delivering it to the pipeline additionally requires installing the `gh` shim onto the `PATH` the no-mistakes daemon resolves, which is never automatic.
+See [`no-mistakes-pr-credential.md`](no-mistakes-pr-credential.md) for the chosen mechanism, its `PATH`-wide scope, the alternatives considered, and the setup commands; `bin/fm-gh.sh`, `bin/fm-gh-shim.sh`, and `bin/fm-gh-shim-install.sh` own their exact flags in their own headers.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.
