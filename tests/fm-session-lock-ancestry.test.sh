@@ -171,13 +171,16 @@ SH
   )
   # Rejected: an unrelated executable named agent, an unrelated install tree
   # whose directory merely happens to be named agent, another program running
-  # from a path with an agent/ component, and a bare MainThread with no Cursor
-  # evidence at all. Any of these owning the lock would let an unrelated
-  # process claim this home's session.
+  # from a path with an agent/ component, a later argv token shaped like
+  # .../cursor-agent (must never classify via args after argv0), and a bare
+  # MainThread with no Cursor evidence at all. Any of these owning the lock
+  # would let an unrelated process claim this home's session.
   local rejected=(
     'agent|/opt/agent --serve'
     'MainThread|/opt/agent/versions/current/agent --force'
     'MainThread|/usr/bin/node /srv/cursor-agent/app.js'
+    'MainThread|/usr/bin/node /tmp/cursor-agent --foo'
+    'node|/usr/bin/node /tmp/cursor-agent --foo'
     'MainThread|/usr/bin/node /srv/agent/app.js'
     'MainThread|MainThread'
   )

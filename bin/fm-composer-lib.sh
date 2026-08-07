@@ -94,7 +94,13 @@ fm_composer_strip_ansi() {
 # LC_ALL=C makes awk walk bytes, so multibyte glyphs (e.g. ❯) and de-emphasised
 # runs alike pass through or drop intact without locale-dependent classes.
 fm_composer_strip_ghost() {
-  LC_ALL=C awk -v lumamax="${FM_COMPOSER_GHOST_LUMA_MAX:-128}" '
+  # Cursor reverse-video cursor-cell gap drop is harness-gated: verified only
+  # against Cursor (tmux coalesced and Herdr split SGR forms). Non-Cursor
+  # callers keep pre-Cursor strip semantics - reverse-video between dim runs
+  # is never dropped as a cursor cell.
+  local cursor_rev_gap=0
+  [ "${FM_COMPOSER_HARNESS:-}" = cursor ] && cursor_rev_gap=1
+  LC_ALL=C awk -v lumamax="${FM_COMPOSER_GHOST_LUMA_MAX:-128}" -v cursor_rev_gap="$cursor_rev_gap" '
     function sgr_code(v, b) {
       b = v
       sub(/:.*/, "", b)
@@ -149,10 +155,11 @@ fm_composer_strip_ghost() {
               # close the gap prematurely (cursor-agent reverse-video cursor
               # cell sits between a dim exit and a dim re-entry, with a
               # background-color SGR in between). The buffer is dropped on dim
-              # re-entry ONLY when its content was reverse-video-marked (SGR 7,
-              # how the observed cursor cell is always rendered): a plain-text
-              # gap is real typed content and survives, deferring injection
-              # rather than licensing it over genuine input.
+              # re-entry ONLY when Cursor reverse-gap handling is armed and the
+              # content was reverse-video-marked (SGR 7, how the observed
+              # cursor cell is always rendered): a plain-text gap is real typed
+              # content and survives, deferring injection rather than licensing
+              # it over genuine input.
               if (ghost_gap) {
                 # peek: is this a de-emphasis-changing SGR or a color-only SGR?
                 # Must skip color payload parameters (38;2, 38;5, 48;2, 48;5,
@@ -184,7 +191,7 @@ fm_composer_strip_ghost() {
                   # this same sequence), then decide. A de-emphasis-END-ONLY
                   # SGR (0 / 22 / 39 / base fg, with no dim or dark-38 re-entry
                   # in the same sequence) must NOT flush an open reverse-video
-                  # gap: herdr relays the raw split SGR sequences
+                  # gap under Cursor: herdr relays the raw split SGR sequences
                   # (ESC[0m + ESC[2m) while tmux coalesces them (0;2m), and the
                   # intermediate bare reset would flush the cursor cell as real
                   # text before the dim re-entry arrives. The gap stays open
@@ -237,7 +244,9 @@ fm_composer_strip_ghost() {
                   dim = 0
                 } else if (code == "7") {
                   rev = 1
-                  if (ghost_gap) gap_rev = 1
+                  # Mark reverse-video gaps only for Cursor: non-Cursor must
+                  # never drop reverse-video content as a cursor cell.
+                  if (ghost_gap && cursor_rev_gap) gap_rev = 1
                 } else if (code == "27") {
                   rev = 0; gap_rev = 0
                 } else if (code == "39") { darkfg = 0 }

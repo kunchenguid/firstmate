@@ -3112,12 +3112,44 @@ test_composer_state_cursor_real_text_is_pending() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-cursor-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   # Real typed cursor text (pre-submit) reads pending: → Reply with exactly...
+  # Requires Cursor harness context so bare → is a structural candidate.
   printf '  → Reply with exactly: pong\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_COMPOSER_IDLE_RE='^Add a follow-up$' \
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_COMPOSER_HARNESS=cursor FM_COMPOSER_IDLE_RE='^Add a follow-up$' \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
   [ "$out" = pending ] || fail "real typed cursor text should read pending, got '$out'"
   pass "fm_backend_herdr_composer_state: real typed cursor text reads pending"
+}
+
+test_composer_state_non_cursor_lower_arrow_does_not_shadow_composer() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-arrow-shadow"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Non-Cursor capture: a real Claude composer above a lower transcript/output
+  # line beginning →. Without Cursor-scoped structural admission, the lower
+  # arrow wins the bottom-most scan and shadows the real composer.
+  # Case 1: pending composer + dim bare → → must stay pending (not unknown).
+  printf '  ❯ please review the PR\n  \033[2m→\033[0m\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "non-Cursor lower dim → must not shadow a pending composer into unknown, got '$out'"
+  # Case 2: empty composer + lower → with non-idle text → must stay empty
+  # (not false pending from the arrow line).
+  : > "$log"
+  rm -f "$resp/.count"
+  printf '  ❯ \n  → saved to disk\n' > "$resp/1.out"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "non-Cursor lower → text must not shadow an empty composer into pending, got '$out'"
+  # Same capture with Cursor harness context must still recognize the arrow
+  # composer (bottom-most → wins and classifies as pending typed text).
+  : > "$log"
+  rm -f "$resp/.count"
+  printf '  ❯ please review the PR\n  → saved to disk\n' > "$resp/1.out"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_COMPOSER_HARNESS=cursor \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "Cursor harness must still recognize a lower → composer, got '$out'"
+  pass "fm_backend_herdr_composer_state: non-Cursor lower → does not shadow; Cursor still admits →"
 }
 
 test_composer_state_unknown_on_capture_failure() {
@@ -4407,6 +4439,7 @@ test_composer_state_cursor_idle_placeholder_is_empty
 test_composer_state_cursor_arrow_leading_requires_context
 test_composer_state_cursor_dimmed_bare_row_stays_unknown
 test_composer_state_cursor_real_text_is_pending
+test_composer_state_non_cursor_lower_arrow_does_not_shadow_composer
 test_composer_state_unknown_on_capture_failure
 test_composer_state_unknown_when_no_composer_row_found
 test_composer_state_pi_separator_idle_is_empty

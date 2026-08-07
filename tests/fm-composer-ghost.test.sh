@@ -636,8 +636,9 @@ test_cursor_reverse_video_ghost_cell_is_stripped() {
   # The fixture: bg(48;2;21;21;21) space dim(2) →
   #   reset+reverse(0;7) bg(48;2;21;21;21) A
   #   reset+dim(0;2) bg(48;2;21;21;21) dd a follow-up reset(0)
+  # Cursor reverse-gap drop requires explicit Cursor harness context.
   styled=$(printf '\033[48;2;21;21;21m \033[2m\xe2\x86\x92 \033[0;7m\033[48;2;21;21;21mA\033[0;2m\033[48;2;21;21;21mdd a follow-up\033[0m')
-  result=$(printf '%s' "$styled" | "$ROOT/bin/fm-composer-lib.sh" 2>/dev/null; fm_composer_strip_ghost <<< "$styled")
+  result=$(FM_COMPOSER_HARNESS=cursor fm_composer_strip_ghost <<< "$styled")
   # The ghost-gap fix drops the reverse-video cursor cell 'A' between the two
   # dim runs. A leading space (not dimmed) survives the strip but is trimmed
   # by the classifier. Assert the cursor cell 'A' is gone.
@@ -658,11 +659,32 @@ test_cursor_reverse_video_ghost_cell_split_sgr_is_stripped() {
   #   reset bg(48;2;21;21;21) space reset dim(2) bg →
   #   reset rev(7) bg A space reset dim(2) bg dd a follow-up space reset
   styled=$(printf '\033[0m\033[48;2;21;21;21m \033[0m\033[2m\033[48;2;21;21;21m\xe2\x86\x92 \033[0m\033[7m\033[48;2;21;21;21mA \033[0m\033[2m\033[48;2;21;21;21mdd a follow-up \033[0m')
-  result=$(printf '%s' "$styled" | "$ROOT/bin/fm-composer-lib.sh" 2>/dev/null; fm_composer_strip_ghost <<< "$styled")
+  result=$(FM_COMPOSER_HARNESS=cursor fm_composer_strip_ghost <<< "$styled")
   case "$result" in
     *A*) fail "cursor reverse-video ghost cell 'A' survived strip on split-SGR relay: result='$result'" ;;
   esac
   pass "fm_composer_strip_ghost: cursor reverse-video ghost cell is stripped on herdr's split-SGR relay"
+}
+
+test_non_cursor_reverse_video_gap_is_not_suppressed() {
+  local result styled
+  # Same reverse-video-between-dim-runs sequence as the Cursor fixture, but
+  # without Cursor harness context: non-Cursor strip must keep pre-Cursor
+  # semantics and must NOT drop the reverse-video cell as a cursor ghost.
+  styled=$(printf '\033[48;2;21;21;21m \033[2m\xe2\x86\x92 \033[0;7m\033[48;2;21;21;21mA\033[0;2m\033[48;2;21;21;21mdd a follow-up\033[0m')
+  unset FM_COMPOSER_HARNESS || true
+  result=$(fm_composer_strip_ghost <<< "$styled")
+  case "$result" in
+    *A*) : ;;
+    *) fail "non-Cursor reverse-video gap must keep the cell (no Cursor-only suppression), got '$result'" ;;
+  esac
+  # Explicit non-Cursor harness identity must behave the same.
+  result=$(FM_COMPOSER_HARNESS=claude fm_composer_strip_ghost <<< "$styled")
+  case "$result" in
+    *A*) : ;;
+    *) fail "claude reverse-video gap must keep the cell, got '$result'" ;;
+  esac
+  pass "fm_composer_strip_ghost: non-Cursor reverse-video gap is not Cursor-suppressed"
 }
 
 test_rev_off_inside_gap_keeps_real_text() {
@@ -709,9 +731,9 @@ test_dark_truecolor_ghost_after_dim_ghost_strips_empty() {
   result=$(fm_composer_strip_ghost <<< "$styled")
   [ -z "$result" ] || fail "dark colon-truecolor ghost after a dim ghost must strip to empty, got '$result'"
   # A reverse-video cursor cell between the dim exit and the dark re-entry is
-  # dropped exactly like the dim re-entry case.
+  # dropped exactly like the dim re-entry case under Cursor harness context.
   styled=$(printf '\033[2mg\033[0;7mA\033[38;2;60;60;60mrest\033[0m')
-  result=$(fm_composer_strip_ghost <<< "$styled")
+  result=$(FM_COMPOSER_HARNESS=cursor fm_composer_strip_ghost <<< "$styled")
   case "$result" in
     *A*) fail "reverse-video cursor cell survived a dark truecolor re-entry: result='$result'" ;;
   esac
@@ -781,6 +803,7 @@ test_non_bordered_interior_edges_are_pending
 test_peek_output_is_escape_free
 test_cursor_reverse_video_ghost_cell_is_stripped
 test_cursor_reverse_video_ghost_cell_split_sgr_is_stripped
+test_non_cursor_reverse_video_gap_is_not_suppressed
 test_rev_off_inside_gap_keeps_real_text
 test_real_text_between_dim_runs_survives
 test_dark_truecolor_ghost_after_dim_ghost_strips_empty
