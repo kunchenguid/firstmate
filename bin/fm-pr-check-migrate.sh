@@ -6,7 +6,10 @@
 # registered custom checks remain armed, and every other task poll is
 # quarantined for private review. A current X-mode shim is preserved by exact
 # content, while the recognized older byte-static shim is refreshed in place.
-# Usage: fm-pr-check-migrate.sh [--checks-safe]
+# Usage: fm-pr-check-migrate.sh [--checks-safe] [--watcher-lock-held=<pid>]
+# `--watcher-lock-held` is watcher-internal: the caller must be the current
+# `fm-watch.sh` lock holder for this exact home. It lets the watcher complete
+# preflight under its already-held singleton rather than trying to pause itself.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,12 +29,29 @@ NONCANONICAL_PREFIX='!noncanonical'
 LEGACY_NONCANONICAL_PREFIX=_noncanonical
 
 ALLOW_INCOMPLETE_REPAIRS=0
-if [ "$#" -eq 1 ] && [ "$1" = --checks-safe ]; then
-  ALLOW_INCOMPLETE_REPAIRS=1
-elif [ "$#" -ne 0 ]; then
-  echo "error: invalid PR check migration request" >&2
+WATCHER_LOCK_HELD_PID=
+for arg in "$@"; do
+  case "$arg" in
+    --checks-safe) ALLOW_INCOMPLETE_REPAIRS=1 ;;
+    --watcher-lock-held=*) WATCHER_LOCK_HELD_PID=${arg#--watcher-lock-held=} ;;
+    *)
+      echo "error: invalid PR check migration request" >&2
+      exit 2
+      ;;
+  esac
+done
+if [ -n "$WATCHER_LOCK_HELD_PID" ] && [ "$ALLOW_INCOMPLETE_REPAIRS" -ne 1 ]; then
+  echo "error: --watcher-lock-held requires --checks-safe" >&2
   exit 2
 fi
+case "$WATCHER_LOCK_HELD_PID" in
+  ''|*[!0-9]*)
+    [ -z "$WATCHER_LOCK_HELD_PID" ] || {
+      echo "error: --watcher-lock-held requires a numeric watcher pid" >&2
+      exit 2
+    }
+    ;;
+esac
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -39,6 +59,8 @@ fi
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 umask 077
 if [ ! -e "$STATE" ] && [ ! -L "$STATE" ]; then
@@ -50,6 +72,14 @@ fi
 if [ ! -d "$STATE" ] || [ -L "$STATE" ]; then
   echo "PR_CHECK_MIGRATION: state directory is not a private ordinary directory; migration did not complete safely" >&2
   exit 1
+fi
+
+if [ -n "$WATCHER_LOCK_HELD_PID" ]; then
+  if [ "${PPID:-}" != "$WATCHER_LOCK_HELD_PID" ] \
+    || ! fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$WATCHER_LOCK_HELD_PID" "$FM_HOME"; then
+    echo "PR_CHECK_MIGRATION: watcher-lock-held requires the current watcher singleton; refusing to scan state checks" >&2
+    exit 1
+  fi
 fi
 
 migration_marker_content_valid() {
@@ -261,53 +291,53 @@ if ! x_shim_locked_scan_needed; then
   [ "$ALLOW_INCOMPLETE_REPAIRS" -eq 1 ] && scan_complete && exit 0
 fi
 
-# shellcheck source=bin/fm-wake-lib.sh disable=SC1091
-. "$SCRIPT_DIR/fm-wake-lib.sh"
-
 stopped_watcher=0
-pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
-if fm_pid_alive "$pid"; then
-  if ! fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$pid" "$FM_HOME"; then
-    echo "PR_CHECK_MIGRATION: watcher ownership is ambiguous; review state/.watch.lock before rearming polls" >&2
-    exit 1
+lock_held=0
+if [ -z "$WATCHER_LOCK_HELD_PID" ]; then
+  pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  if fm_pid_alive "$pid"; then
+    if ! fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$pid" "$FM_HOME"; then
+      echo "PR_CHECK_MIGRATION: watcher ownership is ambiguous; review state/.watch.lock before rearming polls" >&2
+      exit 1
+    fi
+    kill -TERM "$pid" 2>/dev/null || {
+      echo "PR_CHECK_MIGRATION: watcher could not be paused; review state/.watch.lock before rearming polls" >&2
+      exit 1
+    }
+    stopped_watcher=1
+    i=0
+    while [ "$i" -lt 100 ] && fm_pid_alive "$pid"; do
+      sleep 0.05
+      i=$((i + 1))
+    done
+    if fm_pid_alive "$pid"; then
+      echo "PR_CHECK_MIGRATION: watcher did not pause; review state/.watch.lock before rearming polls" >&2
+      exit 1
+    fi
   fi
-  kill -TERM "$pid" 2>/dev/null || {
-    echo "PR_CHECK_MIGRATION: watcher could not be paused; review state/.watch.lock before rearming polls" >&2
-    exit 1
-  }
-  stopped_watcher=1
+
   i=0
-  while [ "$i" -lt 100 ] && fm_pid_alive "$pid"; do
+  while [ "$i" -lt 100 ]; do
+    if fm_lock_try_acquire "$WATCH_LOCK"; then
+      lock_held=1
+      break
+    fi
+    # A concurrent migration may have completed while this process waited.
+    # Its validated marker proves the old watcher crossed the boundary, so this
+    # process can continue to the normal watcher singleton instead of competing
+    # with the newly started watcher for a second migration lock.
+    if migration_complete && ! x_shim_locked_scan_needed; then
+      exit 0
+    fi
     sleep 0.05
     i=$((i + 1))
   done
-  if fm_pid_alive "$pid"; then
-    echo "PR_CHECK_MIGRATION: watcher did not pause; review state/.watch.lock before rearming polls" >&2
+  if [ "$lock_held" -ne 1 ]; then
+    echo "PR_CHECK_MIGRATION: watcher exclusion could not be acquired; review state/.watch.lock before rearming polls" >&2
     exit 1
   fi
 fi
 
-lock_held=0
-i=0
-while [ "$i" -lt 100 ]; do
-  if fm_lock_try_acquire "$WATCH_LOCK"; then
-    lock_held=1
-    break
-  fi
-  # A concurrent migration may have completed while this process waited.
-  # Its validated marker proves the old watcher crossed the boundary, so this
-  # process can continue to the normal watcher singleton instead of competing
-  # with the newly started watcher for a second migration lock.
-  if migration_complete && ! x_shim_locked_scan_needed; then
-    exit 0
-  fi
-  sleep 0.05
-  i=$((i + 1))
-done
-if [ "$lock_held" -ne 1 ]; then
-  echo "PR_CHECK_MIGRATION: watcher exclusion could not be acquired; review state/.watch.lock before rearming polls" >&2
-  exit 1
-fi
 watch_recovery_required=0
 if [ "$stopped_watcher" -eq 1 ] || [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
   watch_recovery_required=1
