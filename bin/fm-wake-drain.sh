@@ -14,6 +14,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRAIN_TMP=
 DRAIN_LOCK_HELD=false
 RAW_ROWS=
+# Single owner of clearing the arm-interrupted marker (written by the arm's
+# signal traps): once the queue is durably consumed the next healthy Cursor stop
+# may be silent again. Idempotent and best-effort, like the other post-commit
+# work below; a crash before this line only replays the diagnostic at the next
+# stop and is bounded to one loud followup.
+INTERRUPT_MARKER="$STATE/.cursor-hook-interrupted"
+
+clear_interrupt_marker() {
+  rm -f "$INTERRUPT_MARKER" 2>/dev/null || true
+}
 
 # Defense in depth for the supervision chain: this script runs at the top of
 # every wake-handling and recovery turn, so assert supervision health here too. A
@@ -109,6 +119,7 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   : > "$FM_WAKE_QUEUE"
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
+  clear_interrupt_marker
   (print_open_decisions_section) || true
   assert_watcher_liveness
   exit 0
@@ -137,6 +148,7 @@ DRAIN_LOCK_HELD=false
 
 # Raw output and queue deletion are authoritative. Everything below is
 # best-effort and cannot restore, duplicate, hide, or fail the consumed rows.
+clear_interrupt_marker
 (fm_wake_print_annotations "$RAW_ROWS") || true
 (print_open_decisions_section) || true
 assert_watcher_liveness
