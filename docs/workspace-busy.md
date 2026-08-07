@@ -24,7 +24,7 @@ Do not add a daemon, a marker file, or a charter change that pretends this is ex
 | --- | --- | --- |
 | Looks quiet | empty | 0 |
 | Looks busy | one short reason line | 1 |
-| Missing path, not a directory, or not a git work tree | error on stderr | 2 |
+| Usage error: bad flag or `--window` value, missing path, not a directory, not a git work tree | error on stderr | 2 |
 
 Callers branch on exit status.
 Print nothing when quiet so the tool is safe in `if bin/fm-workspace-busy.sh "$dir"; then ...`.
@@ -111,7 +111,6 @@ Commands run from a disposable firstmate worktree on this machine.
 Times are wall-clock from `/usr/bin/time -p` (real seconds); each figure is the median of seven runs after a warm cache.
 The mtime scan uses one `python3` process over the git path list when available (a per-file `stat` fork is deliberately avoided).
 
-These figures were re-measured after the scan moved to listing from the work-tree root.
 Other agents were active on the machine during the run, so read every number as an upper bound rather than a floor.
 
 | Target | Signal | real (s) |
@@ -124,8 +123,8 @@ Other agents were active on the machine during the run, so read every number as 
 | Synthetic tree: 5_000 tracked files plus ignored `cache/` with 2_000 hot files | quiet (ignored) | 0.28 |
 | Synthetic tree: 5_000 tracked files with one dirty file | busy: uncommitted changes | 0.24 |
 
-The quiet 5_000-file case is the worst one, because quiet is the only verdict that has to stat every candidate path.
-Both the current and the previous spelling of the scan were measured on the same fixtures in the same run, and neither showed a material cost difference.
+Quiet is the costliest verdict, because it is the only one that has to stat every candidate path; a busy verdict stops at the first signal.
+The two quiet 5_000-file rows differ by more than the effect they measure, so treat sub-second gaps at this scale as run-to-run noise on a shared machine, not as a ranking.
 
 Re-measure after material changes to the scan:
 

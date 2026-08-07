@@ -304,6 +304,21 @@ test_merge_head_busy() {
   pass "MERGE_HEAD reports git operation in progress"
 }
 
+# The marker checks are otherwise only asked from the work-tree root, so the
+# same relative-path trap the recent-write scan hit stays untested: abs_git_path
+# joins a relative `git rev-parse --git-path` answer against <dir>, and a
+# subdirectory target must still find a marker that lives at the repo root.
+test_index_lock_busy_from_subdir() {
+  local d lock
+  d=$(make_multi_dir_repo index-lock-subdir)
+  lock=$(fixture_git_path "$d" index.lock)
+  printf 'fake\n' >"$lock"
+  run_busy "$d/sub" --window 60
+  expect_busy "index.lock from subdir" "git operation in progress"
+  rm -f "$lock"
+  pass "a repo-root git marker is seen from a subdirectory target"
+}
+
 test_rebase_head_busy() {
   local d path
   d=$(make_repo rebase-head)
@@ -345,6 +360,52 @@ test_writes_nothing() {
     fail "writes-nothing: found a workspace-busy marker under the tree"
   fi
   pass "script writes nothing under the target tree"
+}
+
+# The fingerprint above prunes .git on purpose (git's own bookkeeping is not
+# the target tree's content), which leaves the one write this script could
+# plausibly make invisible: `git status` can refresh the index stat cache and
+# rewrite .git/index, taking .git/index.lock to do it. That would contradict
+# the header's "no lock file, no state" claim, and two concurrent checks could
+# then see each other's transient lock and report a git operation in progress.
+test_git_dir_untouched() {
+  local d before after out rc i
+  d=$(make_repo git-dir-untouched)
+  mkdir -p "$d/sub"
+  printf 'a\n' >"$d/sub/a.txt"
+  git -C "$d" add sub/a.txt
+  git -C "$d" commit -q -m sub
+  # Fresh mtimes with unchanged content: the index stat cache is now stale,
+  # which is exactly the state a tree is left in by another agent's writes.
+  touch "$d/README" "$d/sub/a.txt"
+
+  # Hash with git itself: the one hasher this whole file already depends on,
+  # so there is no fallback branch that could leave both sides empty and pass
+  # vacuously on a runner without shasum.
+  before=$(git -C "$d" hash-object -t blob -- "$d/.git/index")
+  run_busy "$d" --window 300
+  expect_busy "git-dir untouched" "recent write"
+  run_busy "$d" --window 0
+  after=$(git -C "$d" hash-object -t blob -- "$d/.git/index")
+  [ -n "$before" ] || fail "git-dir untouched: could not hash .git/index"
+  [ "$before" = "$after" ] || fail "git-dir untouched: the check rewrote .git/index"
+
+  # Nothing lock-shaped may survive a run either.
+  if [ -e "$d/.git/index.lock" ]; then
+    fail "git-dir untouched: the check left .git/index.lock behind"
+  fi
+
+  # Concurrent checks on one repo must not observe each other as a git op.
+  touch -t 202001011200 "$d/README" "$d/sub/a.txt"
+  for i in 1 2 3 4 5 6; do
+    "$BUSY" "$d" --window 60 >"$TMP_ROOT/conc.$i" 2>&1 &
+  done
+  wait
+  for i in 1 2 3 4 5 6; do
+    out=$(cat "$TMP_ROOT/conc.$i")
+    [ -z "$out" ] || fail "git-dir untouched: concurrent check $i reported '$out'"
+  done
+  pass "the check leaves .git untouched and concurrent runs do not false-busy"
 }
 
 # --- process scan opt-in shape ----------------------------------------------
@@ -445,9 +506,11 @@ test_status_failure_is_busy
 test_ls_files_failure_is_busy
 test_ignored_path_not_busy
 test_index_lock_busy
+test_index_lock_busy_from_subdir
 test_merge_head_busy
 test_rebase_head_busy
 test_writes_nothing
+test_git_dir_untouched
 test_process_flag_accepted
 test_end_of_options
 test_shell_fallback_scan
