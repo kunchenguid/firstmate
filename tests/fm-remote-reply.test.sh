@@ -14,19 +14,50 @@ REMOTE="$TMP_ROOT/remote"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/fake")
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$REMOTE/state" "$REMOTE/data/reply" "$CLAIMS"
+# worker.pid records only the --serve child of the remote-job worker, and under
+# FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux a detached restart supervisor respawns
+# that child when it dies. Killing just the published pid lets the supervisor
+# spawn a fresh child that writes into remote-jobs/ while rm -rf runs, and the
+# test body leaves errexit enabled, so that racing "directory not empty" rm
+# failure inside the trap fails an otherwise green run. Stop the supervisor (the
+# child's parent) first, then the child, and wait for both to be gone.
+stop_worker_tree() {
+  local child sup targets=() target alive _
+  child=$(cat "$TMP_ROOT/remote-jobs/worker.pid" 2>/dev/null) || child=
+  case "$child" in '' | *[!0-9]*) return 0 ;; esac
+  sup=$(ps -o ppid= -p "$child" 2>/dev/null | tr -d '[:space:]') || sup=
+  case "$sup" in '' | *[!0-9]* | 0 | 1) ;; *) targets+=("$sup") ;; esac
+  targets+=("$child")
+  for target in "${targets[@]}"; do
+    kill "$target" 2>/dev/null || true
+  done
+  for _ in $(seq 1 100); do
+    alive=0
+    for target in "${targets[@]}"; do
+      kill -0 "$target" 2>/dev/null && alive=1
+    done
+    [ "$alive" -eq 1 ] || return 0
+    sleep 0.05
+  done
+  for target in "${targets[@]}"; do
+    kill -9 "$target" 2>/dev/null || true
+  done
+  for _ in $(seq 1 40); do
+    alive=0
+    for target in "${targets[@]}"; do
+      kill -0 "$target" 2>/dev/null && alive=1
+    done
+    [ "$alive" -eq 1 ] || return 0
+    sleep 0.05
+  done
+  return 0
+}
+
 cleanup() {
-  local worker_pid='' wait_attempt=0
   FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
     "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
-  if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then
-    worker_pid=$(cat "$TMP_ROOT/remote-jobs/worker.pid")
-    kill "$worker_pid" 2>/dev/null || true
-    while kill -0 "$worker_pid" 2>/dev/null && [ "$wait_attempt" -lt 100 ]; do
-      wait_attempt=$((wait_attempt + 1))
-      sleep 0.05
-    done
-  fi
-  rm -rf -- "$TMP_ROOT"
+  stop_worker_tree
+  rm -rf -- "$TMP_ROOT" 2>/dev/null || rm -rf -- "$TMP_ROOT"
 }
 trap cleanup EXIT
 
