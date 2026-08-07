@@ -197,6 +197,34 @@ test_ref_without_note_for_head_refuses_distinctly() {
   pass "fm-attest.sh: an attestation for another commit is not evidence for this one"
 }
 
+test_unreadable_notes_ref_refuses_distinctly() {
+  local repo head blob out rc
+  repo="$TMP_ROOT/unreadable-ref"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  # A ref that resolves but cannot be read as notes. Publishing a note can never
+  # repair it, so it must not borrow the missing-note reason, whose repair is to
+  # publish one.
+  blob=$(printf 'not a notes tree\n' | git -C "$repo" hash-object -w --stdin)
+  git -C "$repo" update-ref "$NOTES_REF" "$blob"
+  out=$(verify_out "$repo" "$head")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "an unreadable attestation ref did not refuse as a verdict (exit $rc): $out"
+  assert_contains "$out" "attestation-ref-unreadable" \
+    "an unreadable ref did not report its own reason"
+  assert_not_contains "$out" "no-attestation-for-head" \
+    "an unreadable ref was reported as a missing note, which republishing can never repair"
+  # The matched control, differing by one property: the same repository once the
+  # ref again holds a readable notes commit carrying this head's attestation.
+  git -C "$repo" update-ref -d "$NOTES_REF"
+  add_note "$repo" "$head" "$(good_note "$head")"
+  out=$(verify_out "$repo" "$head")
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "the repaired ref was still refused: $out"
+  assert_contains "$out" "attested $head" "the success line did not name the attested head"
+  pass "fm-attest.sh: an attestation ref that cannot be read as notes is its own refusal"
+}
+
 test_note_naming_another_head_refuses_as_unbound() {
   local repo head other out rc
   repo="$TMP_ROOT/unbound"
@@ -904,6 +932,44 @@ test_write_withholds_url_shapes_no_reader_models() {
   pass "fm-attest.sh: a URL-shaped token no reader models is withheld rather than emitted"
 }
 
+test_write_withholds_a_url_carrying_a_query_or_fragment() {
+  local repo fork head out rc
+  repo="$TMP_ROOT/query-fragment"
+  fork="$TMP_ROOT/query-fragment-fork.git"
+  new_repo "$repo"
+  head=$(git -C "$repo" rev-parse HEAD)
+  # A query string or fragment is a place a token credential lives, so a form
+  # carrying either is not credential-free however safe its authority looks.
+  install_rejecting_fork "$fork" "$(printf '%s\n' \
+    'refs/notes/* is blocked by a ruleset' \
+    'safe https://safe.invalid/o/r.git' \
+    'query https://q1.invalid/o/r.git?private_token=SECRET123' \
+    'fragment https://q2.invalid/o/r.git#access_token=SECRET456' \
+    'mixed https://alice:pw@q3.invalid/o/r.git?token=SECRET789')"
+  git -C "$repo" remote add origin "$fork"
+  install_pipeline_stub "$repo/stub" "$(run_status_toon fm/demo "${head:0:8}" completed)"
+  out=$(publish_out "$repo")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a rejected push was reported as a publication"
+  assert_contains "$out" "withheld in full" "a URL carrying a query was dropped without saying so"
+  assert_not_contains "$out" "SECRET123" "a query-string credential reached the caller"
+  assert_not_contains "$out" "q1.invalid" "a URL carrying a query was emitted"
+  assert_not_contains "$out" "SECRET456" "a fragment credential reached the caller"
+  assert_not_contains "$out" "q2.invalid" "a URL carrying a fragment was emitted"
+  # The mixed shape: stripping the userinfo used to leave a form that emitted
+  # with its query token intact. The whole line must go instead.
+  assert_not_contains "$out" "SECRET789" "a query credential survived beside a stripped userinfo"
+  assert_not_contains "$out" "q3.invalid" \
+    "a userinfo URL carrying a query was emitted with only its userinfo stripped"
+  assert_not_contains "$out" "alice" "the userinfo reached the caller"
+  # The pairing, so this is not blanket suppression: a query-free URL and the
+  # server's own reason still reach the caller.
+  assert_contains "$out" "https://safe.invalid/o/r.git" "a query-free URL was withheld"
+  assert_contains "$out" "refs/notes/* is blocked by a ruleset" \
+    "the server's own rejection reason was withheld along with the URLs"
+  pass "fm-attest.sh: a URL whose emitted form carries a query or fragment is withheld"
+}
+
 # The pipeline tool's own two streams are text from outside this script exactly
 # as git's are, and all four run-record refusals quote them. Redaction is a
 # property of printing rather than of each call site remembering, so these four
@@ -1337,6 +1403,7 @@ test_show_reports_an_unknown_commit_as_such() {
 
 test_absent_notes_ref_refuses_as_absent
 test_ref_without_note_for_head_refuses_distinctly
+test_unreadable_notes_ref_refuses_distinctly
 test_note_naming_another_head_refuses_as_unbound
 test_genuine_attestation_does_not_survive_a_rewrite
 test_legacy_body_marker_is_not_an_attestation
@@ -1365,6 +1432,7 @@ test_write_withholds_a_push_target_it_cannot_positively_parse
 test_write_names_an_scp_style_push_target
 test_write_withholds_the_whole_line_a_withheld_url_sat_on
 test_write_withholds_url_shapes_no_reader_models
+test_write_withholds_a_url_carrying_a_query_or_fragment
 test_write_makes_the_pipeline_tools_own_streams_safe_to_print
 test_write_rejects_a_zero_bound_rather_than_running_the_read_unbounded
 test_check_step_separates_a_verdict_from_a_verifier_that_could_not_run

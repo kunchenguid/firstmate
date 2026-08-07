@@ -40,9 +40,10 @@ tool: <the pipeline binary and version that ran them>
 A `v1` note is accepted only when every field is present and well formed, `head` equals the commit the note is attached to, and `gates` records a completed `review`, `test`, `lint` and `push`.
 An unrecognized field is refused rather than ignored, so a later format can never be read as a weaker `v1` one.
 
-Each failure reports its own reason: `no-attestation-ref`, `no-attestation-for-head`, `head-commit-unavailable`, `attestation-malformed`, `attestation-not-bound`, or `attestation-missing-gate`.
+Each failure reports its own reason: `no-attestation-ref`, `attestation-ref-unreadable`, `no-attestation-for-head`, `head-commit-unavailable`, `attestation-malformed`, `attestation-not-bound`, or `attestation-missing-gate`.
 Keeping them distinct is the point rather than a convenience.
 An absent attestation and a rejected one need different repairs, and neither may be reported as a pass.
+`attestation-ref-unreadable` is the ref resolving but not readable as notes, such as one pointing at a blob; it is kept apart from `no-attestation-for-head` because publishing another note can never repair a damaged ref.
 
 ## The error model
 
@@ -50,7 +51,7 @@ An absent attestation and a rejected one need different repairs, and neither may
 
 A **refusal** exits 1 and prints `not attested (<reason>)`.
 The evidence was examined and found absent, unbound or invalid, so this is a verdict.
-`verify` refuses with the six reasons above.
+`verify` refuses with the seven reasons above.
 `write` refuses with `no-run-record`, `run-record-unreadable`, `run-record-unparsed`, `run-record-no-head`, `run-covers-another-branch`, `run-head-unavailable`, `run-covers-another-head` or `run-incomplete`.
 
 A **failure** exits 2 and prints `cannot attest (<reason>)`.

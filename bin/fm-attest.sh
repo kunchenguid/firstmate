@@ -131,8 +131,12 @@ KNOWN_KEYS="$ATTESTATION_KEY head run gates tool"
 # from path. That last point is the whole guard, so it is stated as a rule
 # rather than left to the regex to imply - a colon BEFORE the '@' is exactly
 # where a password would live, so a token carrying one is not this shape and is
-# withheld. Adding a modelled shape is default deny working; excepting one from
-# it is not, and the difference is the entire safety of this function.
+# withheld. Neither shape reaches into a query or fragment: a '?' or '#' is
+# exactly where a token credential lives in a remote URL or a presigned link,
+# so a form carrying either is not credential-free and is withheld like any
+# other unproven shape. Adding a modelled shape is default deny working;
+# excepting one from it is not, and the difference is the entire safety of this
+# function.
 #
 # The cost is deliberate: an address, or a URL with an '@' after its host, is
 # withheld even though it holds no secret, and it takes its line with it. The
@@ -150,7 +154,7 @@ credential_safe_stream() {
       trail = "\")]}>,.;:" quote
     }
     function is_safe(t) {
-      return t ~ /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]+)?(\/[^@]*)?$/
+      return t ~ /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]+)?(\/[^@?#]*)?$/
     }
     function without_userinfo(t,   mark, scheme, rest, host, tail) {
       mark = index(t, "://")
@@ -165,7 +169,7 @@ credential_safe_stream() {
       return scheme host tail
     }
     function is_safe_scp(t) {
-      return t ~ /^([A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\]):[^@]*$/
+      return t ~ /^([A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\]):[^@?#]*$/
     }
     function without_scp_user(t,   at) {
       if (t !~ /^[A-Za-z0-9._~-]+@/) return ""
@@ -383,10 +387,18 @@ cmd_verify() {
       "This repository holds no $notes_ref, so no attestation was published or fetched." \
       "Absence of evidence is not evidence: this is a refusal, not a pass."
 
-  note=$(git notes --ref="$notes_ref" show "$head" 2>/dev/null) \
-    || refuse no-attestation-for-head \
-      "$notes_ref exists but carries no attestation for $head." \
-      "An attestation for any other commit says nothing about this one."
+  # git reports a note genuinely absent for this head as exit 1 and a ref it
+  # cannot read as notes at all - one resolving to a blob, say - as a fatal
+  # error. The two need different repairs: publishing a note can never mend a
+  # damaged ref, so neither may borrow the other's reason.
+  note_rc=0
+  note=$(git notes --ref="$notes_ref" show "$head" 2>/dev/null) || note_rc=$?
+  [ "$note_rc" -ne 1 ] || refuse no-attestation-for-head \
+    "$notes_ref exists but carries no attestation for $head." \
+    "An attestation for any other commit says nothing about this one."
+  [ "$note_rc" -eq 0 ] || refuse attestation-ref-unreadable \
+    "$notes_ref resolves but cannot be read as notes (git notes exited $note_rc)." \
+    "Publishing an attestation cannot repair a damaged ref: repair or delete $notes_ref on the repository the gate reads, then publish afresh."
 
   verify_note_payload "$head" "$note"
 
