@@ -994,6 +994,57 @@ test_cursor_shim_allows_when_healthy() {
   pass "fm-turnend-guard-cursor: emits {} without arming when the shared guard allows the stop"
 }
 
+test_cursor_shim_refuses_silent_stop_on_interrupt_marker() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-interrupt-marker")
+  printf 'ts=1754000000\tsignal=TERM\torigin=attached\n' > "$dir/state/.cursor-hook-interrupted"
+  out=$(printf '{"session_id":"cur-session","loop_count":0,"workspace_roots":["%s"]}' "$dir" \
+    | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>&1); status=$?
+  expect_code 0 "$status" "cursor shim must exit 0 when refusing a silent stop for an interrupted park"
+  assert_contains "$out" "stop-hook supervision was interrupted" \
+    "cursor shim must diagnose the interrupted park instead of a silent {}"
+  assert_contains "$out" "bin/fm-wake-drain.sh" \
+    "cursor interrupt followup must instruct wake draining"
+  [ "$out" != '{}' ] || fail "cursor shim must not emit a silent {} while the interrupt marker exists"
+  pass "fm-turnend-guard-cursor: refuses {} while the arm-interrupted marker exists"
+}
+
+test_cursor_shim_refuses_silent_stop_on_undelivered_queue() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-queued-wake")
+  printf '1754000000\t1\tsignal\ttask.status\tstatus: working\n' > "$dir/state/.wake-queue"
+  out=$(printf '{"session_id":"cur-session","loop_count":0,"workspace_roots":["%s"]}' "$dir" \
+    | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>&1); status=$?
+  expect_code 0 "$status" "cursor shim must exit 0 when refusing a silent stop for a queued wake"
+  assert_contains "$out" "wake records are queued" \
+    "cursor shim must surface the undelivered queue instead of a silent {}"
+  assert_contains "$out" "bin/fm-wake-drain.sh" \
+    "cursor queue followup must instruct wake draining"
+  [ "$out" != '{}' ] || fail "cursor shim must not emit a silent {} while a wake is queued"
+  pass "fm-turnend-guard-cursor: refuses {} while an undelivered wake is queued"
+}
+
+test_cursor_shim_recovers_silent_stop_after_drain() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-interrupt-recover")
+  printf 'ts=1754000000\tsignal=TERM\torigin=attached\n' > "$dir/state/.cursor-hook-interrupted"
+  printf '1754000000\t1\tsignal\ttask.status\tstatus: working\n' > "$dir/state/.wake-queue"
+  out=$(printf '{"session_id":"cur-session","loop_count":0,"workspace_roots":["%s"]}' "$dir" \
+    | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>&1); status=$?
+  expect_code 0 "$status" "cursor shim must exit 0 on the loud pre-drain stop"
+  assert_contains "$out" "bin/fm-wake-drain.sh" \
+    "pre-drain stop must tell firstmate to drain and reconcile"
+  FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-wake-drain.sh" >/dev/null 2>&1 \
+    || fail "drain after the interrupted park failed"
+  [ ! -e "$dir/state/.cursor-hook-interrupted" ] || fail "drain did not clear the interrupt marker"
+  [ ! -s "$dir/state/.wake-queue" ] || fail "drain did not consume the queued wake"
+  out=$(printf '{"session_id":"cur-session","loop_count":0,"workspace_roots":["%s"]}' "$dir" \
+    | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>&1); status=$?
+  expect_code 0 "$status" "cursor shim must exit 0 after the drain"
+  [ "$out" = '{}' ] || fail "cursor shim must allow the stop again after drain, got: $out"
+  pass "fm-turnend-guard-cursor: drain clears the marker and restores the silent stop"
+}
+
 test_cursor_shim_rearms_on_loop_count_continuation() {
   local dir out status pid
   dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-loop-rearm")
@@ -2467,6 +2518,9 @@ test_cursor_shim_reports_temp_state_failure
 test_cursor_shim_wakes_after_actionable_arm
 test_cursor_shim_arms_then_allows
 test_cursor_shim_allows_when_healthy
+test_cursor_shim_refuses_silent_stop_on_interrupt_marker
+test_cursor_shim_refuses_silent_stop_on_undelivered_queue
+test_cursor_shim_recovers_silent_stop_after_drain
 test_cursor_shim_rearms_on_loop_count_continuation
 test_cursor_shim_wakes_after_actionable_arm_on_continuation
 test_cursor_shim_bounds_loud_failure_followups
