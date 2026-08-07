@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Shared positive-evidence predicate for tracked hooks that must act only in a
-# genuine firstmate primary home.
+# Shared positive-evidence predicate for primary-scoped entrypoints that must
+# act only in a genuine firstmate primary home.
 # This file is sourced by hook entrypoints and has no side effects on source.
 
 # Return 0 when $1 carries a genuine secondmate-home marker.
@@ -18,8 +18,8 @@ fm_root_is_secondmate_home() {
 }
 
 # Return 0 when $1 is a genuine primary root whose effective state dir is $2.
-# Runtime callers require a session lock, tracked hook surface, and active
-# state evidence from task metadata, X-mode polling, or a process-event source.
+# Runtime callers require a session lock and active state evidence from task
+# metadata, X-mode polling, or a process-event source.
 # A valid secondmate marker is an explicit primary-home signal.
 # --prelock is only for startup wrappers that run before the session lock and
 # active state evidence exist.
@@ -36,6 +36,15 @@ fm_primary_scope_matches() {
   [ -f "$root/AGENTS.md" ] || return 1
   [ -d "$root/bin" ] || return 1
   [ -d "$state" ] || return 1
+  # A linked root with a different effective home is a child worktree unless
+  # the root carries its own explicit home marker. Keep separate operational
+  # homes valid for a plain authoritative checkout, but reject inherited state
+  # from that checkout in its linked children.
+  if [ "$prelock" -eq 0 ] && [ "$root" != "$home" ] && ! fm_root_is_secondmate_home "$root"; then
+    git_dir=$(git -C "$root" rev-parse --git-dir 2>/dev/null) || return 1
+    git_common_dir=$(git -C "$root" rev-parse --git-common-dir 2>/dev/null) || return 1
+    [ "$git_dir" = "$git_common_dir" ] || return 1
+  fi
   if [ "$prelock" -eq 1 ]; then
     if ! fm_root_is_secondmate_home "$root" && ! fm_root_is_secondmate_home "$home"; then
       git_dir=$(git -C "$root" rev-parse --git-dir 2>/dev/null) || return 1

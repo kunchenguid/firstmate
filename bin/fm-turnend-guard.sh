@@ -111,9 +111,9 @@ if [ "$CLAUDE_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
 fi
 
 # --- scope precisely to a PRIMARY checkout ----------------------------------
-# The shared predicate accepts linked homes on positive runtime evidence instead
-# of inferring crew scope from git-dir topology: lock, tracked hook paths, active
-# state, and a valid secondmate marker when present.
+# The shared predicate accepts linked homes only with authoritative root/home
+# identity plus positive runtime evidence: lock, active state, and a valid
+# secondmate marker when present.
 # A crewmate worktree has no home lock or active state evidence, so it remains
 # inert while a linked primary home reaches the same guard.
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0

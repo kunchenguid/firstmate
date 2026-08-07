@@ -52,8 +52,8 @@ The deferred network stage deliberately runs in its own process group under its 
 `bin/fm-sessionstart-run.sh` and `bin/fm-sessionstart-nudge.sh` share the same two eligibility owners.
 They source `bin/fm-gate-refuse-lib.sh` and stay silent for a no-mistakes gate agent identified by `NO_MISTAKES_GATE` or a `.no-mistakes/repos/*.git` git-common-dir.
 They share `bin/fm-primary-scope-lib.sh` with `bin/fm-turnend-guard.sh`, so every hook uses one primary-detection owner.
-The Guard Predicates section of [`turnend-guard.md`](turnend-guard.md#guard-predicates) owns marker validation, runtime positive evidence, and required Firstmate-shaped paths.
-Startup wrappers pass the shared predicate's `--prelock` mode because session lock and active state evidence do not exist before the first session-start command runs.
+The Guard Predicates section of [`turnend-guard.md`](turnend-guard.md#guard-predicates) owns marker validation, root/home identity, runtime positive evidence, and required Firstmate-shaped paths.
+Startup wrappers pass the shared predicate's `--prelock` mode because session lock and active state evidence do not exist before the first session-start command runs; `--prelock` uses git topology, while runtime uses lock and active-state evidence.
 
 The nudge payload starts with U+2063 and the stable `FIRSTMATE_OP: ` label, carries the current `session-start` protocol kind, and retains exactly ``Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.`` as its body.
 The Ahoy skill owns the rule that this marked operational input is never a captain-authored session boundary, including its narrow legacy compatibility cases, and its own step 0 helm check is the fallback that protects a nudge-tier harness whose first command is a skill.

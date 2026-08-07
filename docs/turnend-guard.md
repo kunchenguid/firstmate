@@ -22,9 +22,12 @@ The guard remains a backstop; [`watcher-continuity.md`](watcher-continuity.md) o
 The guard first calls the shared primary scope.
 A secondmate home runs its own primary Firstmate session, so a valid `.fm-secondmate-home` marker remains an explicit primary-home signal whether the home is linked or cloned.
 The marker must be a regular non-symlink file whose whitespace-stripped first line is a non-empty identifier containing only letters, digits, dots, underscores, and dashes.
-An unmarked home no longer falls out of scope merely because its git dir differs from its git common dir.
+An unmarked root that is its effective home no longer falls out of scope merely because its git dir differs from its git common dir.
 Runtime scope requires `AGENTS.md`, `bin/`, a numeric `state/.lock`, and active state evidence from `state/*.meta`, `state/x-watch.check.sh`, or `state/procevent/*.source`.
+When effective state home differs from root, an unmarked linked root is out of scope, so a child worktree cannot inherit its parent's home state.
 This keeps crewmate and scout linked worktrees inert without excluding a linked primary home that owns the session lock.
+Startup wrappers use the shared predicate's `--prelock` mode before lock and active-state evidence exist; that mode uses git topology, while runtime scope uses the positive evidence above.
+An unmarked linked home therefore remains out of session-start scope until runtime evidence exists.
 
 For an in-scope primary, the guard counts in-flight work from `state/*.meta`.
 Registered `state/procevent/*.source` records also require supervision even though they have no task metadata.

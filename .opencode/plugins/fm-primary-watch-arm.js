@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
 
@@ -22,7 +22,6 @@ let launchInFlight = null;
 let restorationInFlight = null;
 let armClose = new WeakMap();
 let armReadiness = new WeakMap();
-let notPrimaryReported = false;
 
 function positiveInteger(name, fallback) {
   const value = Number(process.env[name]);
@@ -90,39 +89,20 @@ function effectivePaths(root) {
   return { root: fmRoot, home: fmHome, state, config };
 }
 
-function hasTaskMetadata(state) {
-  try {
-    return readdirSync(state).some((name) => name.endsWith(".meta"));
-  } catch {
-    return false;
-  }
-}
-
-function hasSecondmateMarker(root) {
-  try {
-    const id = readFileSync(`${root}/.fm-secondmate-home`, "utf8")
-      .split(/\r?\n/, 1)[0]
-      .replace(/\s/g, "");
-    return /^[A-Za-z0-9._-]+$/.test(id);
-  } catch {
-    return false;
-  }
-}
-
-async function isPrimaryRoot(root, home, state) {
-  if (!root) return false;
-  if (!existsSync(`${root}/AGENTS.md`) || !existsSync(`${root}/bin`)) return false;
-  if (!existsSync(`${root}/.opencode/plugins`) && !existsSync(`${root}/bin/fm-watch-arm.sh`)) return false;
-  if (existsSync(`${root}/.fm-secondmate-home`) && !hasSecondmateMarker(root)) return false;
-  if (home && home !== root && existsSync(`${home}/.fm-secondmate-home`)) return false;
-  if (!state || !hasTaskMetadata(state)) return false;
-  return sessionOwnsLock({ state });
+async function isPrimaryRoot(paths) {
+  const result = await runProcess("bash", [
+    "-c",
+    '. "$1"; fm_primary_scope_matches "$2" "$3"',
+    "fm-primary-scope",
+    `${paths.root}/bin/fm-primary-scope-lib.sh`,
+    paths.root,
+    paths.state,
+  ]);
+  return result.code === 0 && (await sessionOwnsLock(paths));
 }
 
 function shouldArm(paths) {
-  if (existsSync(`${paths.state}/.afk`)) return false;
-  if (existsSync(`${paths.config}/x-mode.env`)) return true;
-  return hasTaskMetadata(paths.state);
+  return !existsSync(`${paths.state}/.afk`);
 }
 
 async function sessionOwnsLock(paths) {
@@ -217,17 +197,6 @@ function surfaceFailure(paths, client, sessionID, reason) {
   });
 }
 
-function reportNotPrimary(paths, client, sessionID) {
-  if (notPrimaryReported) return;
-  notPrimaryReported = true;
-  surfaceFailure(
-    paths,
-    client,
-    sessionID,
-    "watcher: FAILED - OpenCode primary scope is not-primary; session no longer owns the lock or primary evidence is incomplete; verify session lock ownership, primary hook paths, state metadata, and marker validity",
-  );
-}
-
 function retryDelay(attempt) {
   return Math.min(REARM_RETRY_MAX_MS, REARM_RETRY_BASE_MS * 2 ** Math.max(0, attempt - 1));
 }
@@ -255,9 +224,6 @@ async function retireArm(armChild) {
 }
 
 function restorationFailure(status) {
-  if (status === "read-only") {
-    return "watcher: FAILED - OpenCode cannot restore continuity because this session no longer owns the lock";
-  }
   return `watcher: FAILED - OpenCode could not verify a ready successor watcher (${status || "idle"})`;
 }
 
@@ -274,7 +240,7 @@ async function restoreAfterActionableClose(paths, sessionID, client, predecessor
       setArmStatus("failed");
       return `${failure}\nwatcher: FAILED - OpenCode could not restore watcher continuity because the unready successor arm did not exit within ${ARM_RETIRE_TIMEOUT_MS}ms`;
     }
-    if (status === "read-only" || status === "not-primary" || status === "skipped") break;
+    if (status === "not-primary" || status === "skipped") break;
     if (attempt === REARM_RETRY_LIMIT) break;
     await waitForRetry(attempt + 1);
   }
@@ -405,10 +371,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
 
 async function beginArm(paths, sessionID, client, predecessorArmPid) {
   if (!sessionID) return { status: "skipped", armChild: null };
-  if (!(await isPrimaryRoot(paths.root, paths.home, paths.state))) {
-    reportNotPrimary(paths, client, sessionID);
-    return { status: "not-primary", armChild: null };
-  }
+  if (!(await isPrimaryRoot(paths))) return { status: "not-primary", armChild: null };
   if (child) return { status: "existing", armChild: child };
   if (retryTimer) return { status: "retrying", armChild: null };
   if (!shouldArm(paths)) return { status: "not-needed", armChild: null };

@@ -176,8 +176,8 @@ FM_HOME=${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 
 # Scope to a genuine primary home, exactly as the turn-end guard does.
-# fm_primary_scope_matches uses positive lock, hook, and active-state evidence,
-# with a valid secondmate marker as an explicit home signal.
+# fm_primary_scope_matches uses positive lock and active-state evidence, with a
+# valid secondmate marker as an explicit home signal.
 # A crewmate using delegation tools inside its own task worktree has no such
 # evidence and stays allowed.
 # Any failure to confirm the home is inert (exit 0), never a block, so a broken

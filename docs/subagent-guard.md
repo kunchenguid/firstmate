@@ -133,12 +133,9 @@ It costs one line and removes the failure mode where a rename or a rollback sile
 
 ## Scope
 
-The shipped hook fires only in a genuine firstmate primary home, using the shared predicate `fm_primary_scope_matches` from `bin/fm-primary-scope-lib.sh`.
-This is the same predicate `bin/fm-sessionstart-nudge.sh` and `bin/fm-turnend-guard.sh` use, so the three tracked primary-scoped hooks cannot drift apart.
-
-A home is in scope when it has `AGENTS.md`, a `bin/` directory, a numeric session lock, and active state evidence from task metadata, X-mode polling, or a process-event source.
-A valid `.fm-secondmate-home` marker is an explicit primary-home signal, including for a linked secondmate home.
-A marked secondmate home is in scope on purpose: it operates its own fleet and must dispatch through it for the same durability reasons.
+The shipped hook uses the shared predicate `fm_primary_scope_matches` from `bin/fm-primary-scope-lib.sh`.
+The Guard Predicates section of [`turnend-guard.md`](turnend-guard.md#guard-predicates) owns marker validation, root/home identity, runtime evidence, and required Firstmate-shaped paths.
+Session-start wrappers use that predicate's `--prelock` topology path before runtime lock and active-state evidence exist.
 
 A crewmate's disposable task worktree is a linked git worktree, which is the shape `bin/fm-spawn.sh` always hands out, so it is out of scope.
 A crewmate using delegation tools inside its own task worktree is legitimate and stays allowed.

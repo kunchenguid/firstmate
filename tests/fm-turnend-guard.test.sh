@@ -161,10 +161,9 @@ make_crewmate_worktree_dir() {
 }
 
 # A secondmate home's OWN child crew/scout worktree: a genuine linked git
-# worktree of the secondmate home, so git-dir != git-common-dir exactly as for a
-# main-home child worktree. A child worktree never carries the gitignored
-# .fm-secondmate-home marker, so the marker force-include never fires for it and
-# it stays exempt through the linked-worktree git-dir test.
+# worktree of the secondmate home. A child worktree never carries the gitignored
+# .fm-secondmate-home marker, so the child cannot inherit its parent's primary
+# scope.
 make_secondmate_child_worktree_dir() {
   local home=$1 dir=$2
   git -C "$home" worktree add --quiet -b fm/turnend-secondmate-child "$dir"
@@ -520,9 +519,8 @@ test_hook_secondmate_reinvoke_recovery_loop() {
 
 # The marker force-include must guard only the secondmate's OWN home, never its
 # children: a secondmate's linked crew/scout worktree carries no marker, so it
-# stays exempt by the same git-dir/git-common-dir test that exempts the main
-# home's children. An inherited secondmate FM_HOME must not make that child
-# primary either.
+# stays exempt from primary scope. An inherited secondmate FM_HOME must not make
+# that child primary either.
 test_hook_silent_in_secondmate_child_worktree() {
   local home dir out status
   home=$(make_secondmate_dir "$TMP_ROOT/hook-sm-child-home")
@@ -539,6 +537,18 @@ test_hook_silent_in_secondmate_child_worktree() {
   pass "fm-turnend-guard: inert in a secondmate's own child worktree (linked git worktree) even when unhealthy"
 }
 
+test_hook_silent_in_main_child_worktree_with_inherited_home() {
+  local home dir out status
+  home=$(make_primary_dir "$TMP_ROOT/hook-main-child-home")
+  dir="$TMP_ROOT/hook-main-child-wt"
+  make_crewmate_worktree_dir "$home" "$dir" >/dev/null
+  : > "$home/state/task1.meta"
+  out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "a main primary FM_HOME must not widen scope into its child worktree"
+  [ -z "$out" ] || fail "inherited main FM_HOME spoofed primary scope in child worktree: $out"
+  pass "fm-turnend-guard: inert in a main home's child worktree with inherited FM_HOME"
+}
+
 test_primary_scope_accepts_linked_primary_home() {
   local base dir out
   base="$TMP_ROOT/scope-linked-primary-base"
@@ -552,7 +562,7 @@ test_primary_scope_accepts_linked_primary_home() {
   out=$(bash -c '. "$1"; fm_primary_scope_matches "$2" "$3" && printf matched' _ \
     "$dir/bin/fm-primary-scope-lib.sh" "$dir" "$dir/state")
   [ "$out" = matched ] || fail "linked primary scope rejected positive evidence: $out"
-  pass "fm-primary-scope-lib: accepts a linked primary home from lock, hooks, and task metadata"
+  pass "fm-primary-scope-lib: accepts a linked primary home from lock and active task metadata"
 }
 
 # THE regression the plain git-init fixtures masked: a treehouse-leased secondmate
@@ -596,7 +606,7 @@ test_hook_exempts_linked_worktree_with_stray_marker() {
 # Anti-spoof under any locale: a NON-ASCII marker id must be REJECTED by the
 # ASCII-only (C-collation) allowlist, so it can never force-include a linked
 # worktree even where the ambient locale's collation would treat it as a letter.
-# Rejection -> git-dir exemption -> the linked worktree stays exempt.
+# Rejection -> no root/home identity -> the linked worktree stays exempt.
 test_hook_exempts_linked_worktree_with_non_ascii_marker() {
   local base dir out status
   base="$TMP_ROOT/hook-nonascii-marker-base"
@@ -1586,6 +1596,7 @@ test_hook_silent_in_idle_secondmate_home
 test_hook_secondmate_loop_guard_allows_retry
 test_hook_secondmate_reinvoke_recovery_loop
 test_hook_silent_in_secondmate_child_worktree
+test_hook_silent_in_main_child_worktree_with_inherited_home
 test_primary_scope_accepts_linked_primary_home
 test_hook_blocks_in_treehouse_leased_secondmate_home
 test_hook_exempts_linked_worktree_with_stray_marker

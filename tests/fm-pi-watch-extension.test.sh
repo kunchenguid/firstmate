@@ -59,6 +59,11 @@ export const Type = {
 JS
 }
 
+install_opencode_scope_fixture() {
+  local repo=$1
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
+}
+
 test_pi_extension_reports_external_healthy_watcher() {
   local repo home plugin out status
   repo="$TMP_ROOT/pi-external-healthy-root"
@@ -1205,6 +1210,7 @@ test_opencode_primary_watch_plugin_uses_effective_state_home() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  install_opencode_scope_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1255,6 +1261,7 @@ test_opencode_primary_watch_plugin_sources_effective_config() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  install_opencode_scope_fixture "$repo"
   : > "$home/state/task.meta"
   printf 'export FM_POLL=7\n' > "$home/config/x-mode.env"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -1305,6 +1312,7 @@ test_opencode_primary_watch_plugin_requires_session_lock() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  install_opencode_scope_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1318,17 +1326,8 @@ import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompts = 0;
-const client = {
-  session: {
-    promptAsync: async (request) => {
-      prompts += 1;
-      if (!request.body.parts[0].text.includes("primary scope is not-primary")) {
-        throw new Error(`unexpected diagnostic: ${request.body.parts[0].text}`);
-      }
-    },
-  },
-};
-const hooks = await mod.FmPrimaryWatchArm({
+const client = { session: { promptAsync: async () => { prompts += 1; } } };
+await mod.FmPrimaryWatchArm({
   client,
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
@@ -1356,8 +1355,8 @@ if (!existsSync(process.env.FM_ARM_LOG)) {
   console.error("watch arm did not run after the session lock matched");
   process.exit(1);
 }
-if (prompts !== 1) {
-  console.error(`expected one not-primary diagnostic, got ${prompts}`);
+if (prompts !== 0) {
+  console.error(`expected no not-primary diagnostic, got ${prompts}`);
   process.exit(1);
 }
 EOF
@@ -1373,12 +1372,13 @@ test_opencode_watch_arm_coordinator_accepts_linked_primary_scope() {
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
   base="$TMP_ROOT/opencode-coordinator-base"
   repo="$TMP_ROOT/opencode-coordinator-wt"
-  home="$TMP_ROOT/opencode-coordinator-home"
+  home="$TMP_ROOT/opencode-coordinator-wt"
   log="$TMP_ROOT/opencode-coordinator.log"
   stop="$TMP_ROOT/opencode-coordinator.stop"
   fm_git_worktree "$base" "$repo" fm/opencode-coordinator
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   : > "$repo/AGENTS.md"
+  install_opencode_scope_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1393,22 +1393,12 @@ import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-let prompts = 0;
-const client = { session: { promptAsync: async () => { prompts += 1; } } };
+const client = { session: { promptAsync: async () => {} } };
 await mod.FmPrimaryWatchArm({
   client,
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
 });
-const beforeLock = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
-if (beforeLock !== "not-primary") {
-  console.error(`expected not-primary without lock, got ${beforeLock}`);
-  process.exit(1);
-}
-if (existsSync(process.env.FM_ARM_LOG)) {
-  console.error("watch arm ran from a linked worktree without primary evidence");
-  process.exit(1);
-}
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const status = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
 if (status !== "armed") {
@@ -1419,10 +1409,6 @@ if (!existsSync(process.env.FM_ARM_LOG)) {
   console.error("watch arm did not run from a linked primary worktree");
   process.exit(1);
 }
-if (prompts !== 1) {
-  console.error(`expected one not-primary diagnostic, got ${prompts}`);
-  process.exit(1);
-}
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 EOF
   )
@@ -1430,6 +1416,66 @@ EOF
   expect_code 0 "$status" "OpenCode watch coordinator must accept positive primary evidence in a linked worktree"
   [ -z "$out" ] || fail "OpenCode coordinator linked-primary test printed output: $out"
   pass "OpenCode watcher coordinator accepts a linked primary worktree"
+}
+
+test_opencode_watch_arm_accepts_bash_active_state_evidence() {
+  local plugin repo evidence home log stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-evidence-root"
+  mkdir -p "$repo/bin"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  install_opencode_scope_fixture "$repo"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "$FM_ARM_LOG"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  for evidence in metadata relay source; do
+    home="$TMP_ROOT/opencode-evidence-$evidence-home"
+    log="$TMP_ROOT/opencode-evidence-$evidence.log"
+    stop="$TMP_ROOT/opencode-evidence-$evidence.stop"
+    mkdir -p "$home/state" "$home/config"
+    case "$evidence" in
+      metadata) : > "$home/state/task.meta" ;;
+      relay) : > "$home/state/x-watch.check.sh" ;;
+      source) mkdir -p "$home/state/procevent"; : > "$home/state/procevent/test.source" ;;
+    esac
+    out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const client = { session: { promptAsync: async () => {} } };
+await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(process.env.FM_HOME + "/state/.lock", process.pid + "\n");
+const status = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+if (status !== "armed") {
+  console.error("expected armed, got " + status);
+  process.exit(1);
+}
+for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!existsSync(process.env.FM_ARM_LOG)) {
+  console.error("watch arm did not run");
+  process.exit(1);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+    )
+    status=$?
+    expect_code 0 "$status" "OpenCode must accept bash active-state evidence: $evidence"
+    [ -z "$out" ] || fail "OpenCode $evidence evidence test printed output: $out"
+  done
+  pass "OpenCode watcher accepts metadata, Relay, and process-event evidence from the bash scope owner"
 }
 
 test_opencode_primary_watch_plugin_rearms_after_wake() {
@@ -1442,6 +1488,7 @@ test_opencode_primary_watch_plugin_rearms_after_wake() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  install_opencode_scope_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1523,6 +1570,7 @@ test_opencode_pre_ready_actionable_close_preserves_its_successor() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  install_opencode_scope_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1603,6 +1651,7 @@ test_opencode_hung_successor_falls_back_to_typed_wake() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  install_opencode_scope_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1672,6 +1721,7 @@ test_opencode_unretired_successor_falls_back_without_retry() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  install_opencode_scope_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1749,6 +1799,7 @@ test_opencode_late_unretired_close_resumes_supervision() {
     mkdir -p "$repo/bin" "$home/state" "$home/config"
     git init -q "$repo"
     : > "$repo/AGENTS.md"
+    install_opencode_scope_fixture "$repo"
     : > "$home/state/task.meta"
     cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1844,6 +1895,7 @@ test_opencode_empty_close_retries_instead_of_disappearing() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  install_opencode_scope_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1903,6 +1955,7 @@ test_opencode_established_empty_close_honors_retry_limit() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  install_opencode_scope_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1957,6 +2010,7 @@ test_opencode_actionable_close_rechecks_session_lock() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  install_opencode_scope_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1995,12 +2049,12 @@ try {
   writeFileSync(lock, `${other.pid}\n`);
   writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
   await eventPromise;
-  for (let i = 0; i < 250 && !prompt.includes("no longer owns the lock"); i += 1) {
+  for (let i = 0; i < 250 && !prompt.includes("could not verify a ready successor watcher (not-primary)"); i += 1) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
   if (rows.length !== 1) throw new Error(`successor launched after lock loss: ${rows.join(" | ")}`);
-  if (!prompt.includes("no longer owns the lock")) throw new Error(`missing lock-loss failure: ${prompt}`);
+  if (!prompt.includes("could not verify a ready successor watcher (not-primary)")) throw new Error(`missing lock-loss failure: ${prompt}`);
 } finally {
   other.kill("SIGTERM");
 }
@@ -2023,6 +2077,7 @@ test_opencode_watch_arm_coordinates_with_turnend_guard() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  install_opencode_scope_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -2096,6 +2151,7 @@ test_opencode_healthy_arm_output_does_not_suppress_guard() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
+  install_opencode_scope_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -2182,6 +2238,7 @@ test_opencode_primary_watch_plugin_uses_effective_state_home
 test_opencode_primary_watch_plugin_sources_effective_config
 test_opencode_primary_watch_plugin_requires_session_lock
 test_opencode_watch_arm_coordinator_accepts_linked_primary_scope
+test_opencode_watch_arm_accepts_bash_active_state_evidence
 test_opencode_primary_watch_plugin_rearms_after_wake
 test_opencode_pre_ready_actionable_close_preserves_its_successor
 test_opencode_hung_successor_falls_back_to_typed_wake
