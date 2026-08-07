@@ -430,6 +430,7 @@ function fakePi({ foreignRead = false, inventoryUnavailable = false } = {}) {
     },
   };
   const ctx = {
+    hasUI: true,
     ui: {
       getEditorText: () => "",
       getToolsExpanded: () => false,
@@ -462,6 +463,15 @@ await offRun.handlers.get("session_start")({ reason: "startup" }, offRun.ctx);
 if (offRun.tools.length !== 0) {
   throw new Error("Calm claimed built-ins when the session started with Calm off");
 }
+const headlessContext = { ...offRun.ctx, hasUI: false };
+await offRun.handlers.get("agent_start")({}, headlessContext);
+const invalidatedContext = new Proxy({}, {
+  get() {
+    throw new Error("stale headless extension context accessed");
+  },
+});
+await offRun.handlers.get("agent_settled")({}, invalidatedContext);
+await offRun.handlers.get("session_shutdown")({ reason: "quit" }, invalidatedContext);
 
 process.env.FM_HOME = process.env.HOME_ON;
 const onRun = fakePi({ foreignRead: true });
@@ -510,7 +520,7 @@ JS
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm gate-at-load-time path failed: $out"
   [ -z "$out" ] || fail "Pi calm gate-at-load-time test printed output: $out"
-  pass "Calm registers no tool wrappers during extension discovery, leaves an extension-owned read tool untouched when a persisted Calm session starts, wraps the other built-ins, and fails closed when ownership inventory is unavailable"
+  pass "Calm registers no tool wrappers during extension discovery, leaves an extension-owned read tool untouched when a persisted Calm session starts, wraps the other built-ins, fails closed when ownership inventory is unavailable, and avoids invalidated UI context after a headless Calm-off run"
 }
 
 test_calm_activation_collision_and_regression_bound() {
@@ -2655,7 +2665,7 @@ const ui = {
   notify() {},
   theme,
 };
-const ctx = { ui };
+const ctx = { hasUI: true, ui };
 const fire = async (event, payload = {}) => {
   for (const handler of handlers.get(event) ?? []) await handler(payload, ctx);
 };

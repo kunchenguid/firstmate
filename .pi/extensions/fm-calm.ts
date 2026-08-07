@@ -394,20 +394,24 @@ export default function (pi: ExtensionAPI) {
     });
   });
 
+  // Headless modes have no working row, so they must not retain UI work into
+  // print-mode shutdown after Pi invalidates the session-bound context.
   pi.on("agent_start", (_event, ctx) => {
     agentRunActive = true;
-    applyWorkingPresentation(ctx.ui);
+    if (ctx.hasUI) applyWorkingPresentation(ctx.ui);
   });
 
   // agent_settled is emitted from a finally block, so it also covers abort and failure.
   pi.on("agent_settled", (_event, ctx) => {
     agentRunActive = false;
-    applyWorkingPresentation(ctx.ui);
+    if (workingShipShown) applyWorkingPresentation(ctx.ui);
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
     agentRunActive = false;
-    applyWorkingPresentation(ctx.ui);
+    removeTerminalInputHandler?.();
+    removeTerminalInputHandler = undefined;
+    if (workingShipShown) applyWorkingPresentation(ctx.ui);
   });
 
   pi.registerCommand("calm", {
