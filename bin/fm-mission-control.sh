@@ -19,6 +19,11 @@
 # belongs to firstmate, so each project card states only what live state can
 # prove: what is under way, what waits on the captain, and when it last changed.
 #
+# A captain decision the captain has consciously set aside leaves "Awaiting your
+# decision" and its count, and appears in the quiet, closed-by-default Deferred
+# shelf below it. Deferring is not a board action; see "Deferring a decision"
+# below for the two commands that set one aside and bring it back.
+#
 # Paths resolve from the ACTIVE home: the snapshot's own roots.state,
 # roots.data, and roots.projects are used verbatim, so FM_HOME and the
 # FM_*_OVERRIDE variables are honoured without a second resolution here.
@@ -36,6 +41,24 @@
 #   FM_MISSION_CONTROL_NOW_EPOCH  fix "now" for deterministic rendering.
 #   FM_MISSION_CONTROL_QUOTA_JSON path to a captured quota-axi --json payload,
 #                                 used instead of running quota-axi.
+#
+# Deferring a decision:
+#   Firstmate sets a captain decision aside on the captain's word, in the home
+#   whose backlog holds it, by changing that item's HOLD KIND alone - from
+#   captain to tasks-axi's existing "parked" - and reverses it by restoring
+#   captain. The item stays kind: captain throughout, so it remains a captain
+#   decision rather than becoming generic future work.
+#
+#     set aside:   tasks-axi hold <id> --reason "<reason>" --kind parked
+#     bring back:  tasks-axi hold <id> --reason "<reason>" --kind captain
+#
+#   tasks-axi requires --reason on every hold and stores the reason it is given,
+#   so read the current reason from the owning home's backlog row and pass that
+#   exact stored text back unchanged. For a second mate decision, the owning
+#   home is that second mate's own home, not the main home or the board. The
+#   reason shown on the board identifies the decision but may be shortened, so
+#   it is not safe to copy. A different string silently rewrites the captain's
+#   decision text.
 #
 # Exit codes: 0 rendered, 1 runtime failure, 2 usage error.
 #
@@ -309,6 +332,7 @@ def icon_clock: "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"9\"/
 def icon_check: "<svg class=\"ck\" viewBox=\"0 0 24 24\"><polyline points=\"20 6 9 17 4 12\"/></svg>";
 def icon_alert: "<svg class=\"ico\" viewBox=\"0 0 24 24\"><path d=\"M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z\"/><line x1=\"12\" y1=\"9\" x2=\"12\" y2=\"13\"/><line x1=\"12\" y1=\"17\" x2=\"12.01\" y2=\"17\"/></svg>";
 def icon_compass: "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"10\"/><polygon points=\"16.2 7.8 14.1 14.1 7.8 16.2 9.9 9.9\"/></svg>";
+def icon_gauge: "<svg class=\"ico\" viewBox=\"0 0 24 24\"><path d=\"M4.9 18.5a9 9 0 1114.2 0\"/><line x1=\"12\" y1=\"14\" x2=\"16\" y2=\"9.5\"/></svg>";
 
 # A project badge gives a card a recognisable identity, so the glyph is picked
 # from a set of deliberately neutral shapes by a stable function of the project
@@ -450,6 +474,39 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
   or ($waiting_secondmate_omitted | length) > 0
   or ($waiting_secondmate_registry | length) > 0
   or ($waiting_secondmate_unavailable | length) > 0)) as $waiting_incomplete |
+
+# ------------------------------------------------------------- deferred ----
+# A decision the captain has consciously set aside. The snapshot already keeps
+# it out of the actionable set, so it is absent from the waiting list and the
+# waiting count without a second rule here; this reads the same rows back so
+# setting one aside puts it out of the eyeline rather than out of existence.
+($records | map(select(.captain_deferred == true)) | map({
+  home: "main",
+  id: .id,
+  title: (.title // .raw),
+  detail: (.hold_reason // ""),
+  repo: (.repo // "" | short_repo)
+})) as $deferred_main |
+
+($sm_records | map(. as $sm |
+  (($sm.queued // []) | map(select(.captain_deferred == true)) | map({
+    home: ($sm.id // "secondmate"),
+    id: (.id // "decision"),
+    title: (.title // .id // "decision"),
+    detail: (.hold_reason // ""),
+    repo: (.repo // "" | short_repo)
+  }))) | add // []) as $deferred_secondmate |
+
+($deferred_main + $deferred_secondmate) as $deferred |
+($deferred | length) as $deferred_count |
+# A secondmate home reports its queued rows bounded, so a decision deferred
+# there can fall outside the reported window. A visible shelf says so rather
+# than implying its list is complete. The bound alone never conjures a shelf:
+# an empty "0 set aside" panel standing over every busy secondmate is noise the
+# captain would learn to skip, and the board claims nothing about deferred work
+# when it has none to show.
+($sm_records | map([(.omitted // [])[] | select(.surface == "queued") | (.count // 0)] | add // 0)
+  | add // 0) as $deferred_bounded |
 
 # ----------------------------------------------------------- fleet health --
 ($work_tasks | map(select(
@@ -608,6 +665,19 @@ def need_row:
   + "</span>"
   + (if $link == "" or $link == null then "<span class=\"go\"></span></div>"
      else "<span class=\"go\">&rsaquo;</span></a>" end);
+
+# A deferred decision is deliberately quieter than a waiting one: no coloured
+# band, no link chase, no chevron. It carries only what identifies it.
+def deferred_row:
+  . as $d |
+  (if ($d.repo // "") != "" then $d.repo
+   elif ($d.home // "main") != "main" then $d.home
+   else "Fleet" end) as $tag |
+  "<div class=\"defer\">"
+  + (@html "<span class=\"tag\">\($tag)</span>")
+  + (@html "<span class=\"ask\">\($d.title)")
+  + (if ($d.detail // "") == "" then "" else (@html "<span class=\"hint\">\($d.detail)</span>") end)
+  + "</span></div>";
 
 def project_card:
   . as $p |
@@ -809,6 +879,60 @@ h1{font-size:26px;font-weight:650;letter-spacing:-.02em;margin:0;}
 .attnbar .ico{width:17px;height:17px;flex:none;color:var(--red);}
 .attnbar .go{margin-left:auto;color:#c08b86;font-size:18px;flex:none;}
 
+/* ---- tabs ----
+   The header, the stat strip and the attention bar sit above this and are never
+   tabbed away, so \"is anything on fire, and how much awaits me\" is always the
+   first thing on the page.
+
+   With no script the tab strip is hidden and every panel stays visible, so the
+   board degrades into the single scrolling page it was before. The script in
+   <head> adds the .js and .t-<tab> classes to <html> before first paint, so the
+   selected panel is the only one ever painted and no other panel flashes. */
+.tabs{display:none;}
+.js .tabs{display:flex;gap:6px;margin:0 0 22px;padding:5px;background:var(--panel);
+  border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);}
+.tab{flex:1 1 0;display:flex;align-items:center;justify-content:center;gap:7px;
+  padding:9px 10px;border-radius:10px;color:var(--muted);font-size:13px;font-weight:560;
+  cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  transition:background .15s ease,color .15s ease;}
+.tab .ico{width:16px;height:16px;flex:none;color:var(--faint);}
+.tab:hover{background:#f7f9fc;color:var(--ink);}
+.tab:focus-visible{outline:2px solid var(--amber);outline-offset:-2px;}
+html.t-decisions #tab-decisions,html.t-projects #tab-projects,
+html.t-activity #tab-activity,html.t-system #tab-system{
+  background:var(--slate-soft);color:var(--ink);}
+html.t-decisions #tab-decisions .ico,html.t-projects #tab-projects .ico,
+html.t-activity #tab-activity .ico,html.t-system #tab-system .ico{color:var(--slate);}
+.js .panel{display:none;}
+html.js.t-decisions #panel-decisions,html.js.t-projects #panel-projects,
+html.js.t-activity #panel-activity,html.js.t-system #panel-system{display:block;}
+.panel > section:last-child{margin-bottom:0;}
+@media(prefers-reduced-motion:reduce){.tab{transition:none}}
+
+/* ---- deferred shelf ----
+   Set aside, not lost: closed by default, no colour, no chevron chase. It reads
+   as secondary to the waiting list directly above it. */
+.shelf{margin-top:14px;border:1px solid var(--line);border-radius:14px;background:var(--panel);}
+.shelf summary{display:flex;align-items:center;gap:9px;padding:12px 20px;cursor:pointer;
+  color:var(--muted);font-size:13px;list-style:none;border-radius:14px;}
+.shelf summary::-webkit-details-marker{display:none;}
+.shelf summary:hover{color:var(--ink);}
+.shelf summary:focus-visible{outline:2px solid var(--amber);outline-offset:-2px;}
+.shelf .stitle{font-weight:600;}
+.shelf .scount{color:var(--faint);margin-left:auto;text-align:right;}
+.shelf .chev{color:var(--faint);flex:none;width:13px;height:13px;transition:transform .15s ease;}
+.shelf[open] .chev{transform:rotate(90deg);}
+@media(prefers-reduced-motion:reduce){.shelf .chev{transition:none}}
+.shelf-body{border-top:1px solid var(--line);}
+.defer{display:flex;align-items:flex-start;gap:14px;padding:13px 20px;border-top:1px solid var(--line);}
+.defer:first-child{border-top:none;}
+.defer .tag{flex:none;width:132px;font-size:12px;font-weight:600;color:var(--faint);overflow-wrap:anywhere;}
+.defer .ask{flex:1;font-size:13.5px;color:var(--muted);overflow-wrap:anywhere;}
+.defer .hint{display:block;color:var(--faint);font-size:12px;margin-top:2px;}
+.shelf-note{margin:0;padding:12px 20px;border-top:1px solid var(--line);
+  color:var(--faint);font-size:12px;}
+.shelf-note.warn{color:var(--amber);}
+
 /* ---- sections ---- */
 section{margin-bottom:38px;}
 .sec-h{display:flex;align-items:baseline;gap:10px;margin:0 0 14px;flex-wrap:wrap;}
@@ -911,8 +1035,42 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
   .ship{padding:12px 16px;align-items:flex-start;flex-wrap:wrap}
   .ship .what{flex:1 1 auto}
   .ship .who{margin-left:0;padding-left:0;flex:1 0 100%}
+  .defer{padding:12px 16px;flex-wrap:wrap;gap:8px}
+  .defer .tag{width:auto}
+  .shelf summary,.shelf-note{padding-left:16px;padding-right:16px}
+}
+/* Four tabs still have to fit an iPhone without a sideways scroll, so below
+   this width the label sits under the glyph rather than beside it. */
+@media(max-width:520px){
+  .js .tabs{gap:3px;padding:4px}
+  .tab{flex-direction:column;gap:3px;padding:8px 4px;font-size:11.5px;letter-spacing:-.01em}
 }
 </style>
+<script>
+/* Chooses the tab before the body is parsed, so the board opens on the tab it
+   was left on with no flash of the default one.
+
+   The self-reload is a meta refresh, which navigates without the fragment, so
+   the URL hash cannot be the mechanism that survives a reload - it is only an
+   entry point for a hand-typed or copied link. The remembered tab is what
+   actually survives, and a browser that refuses storage (a private context, or
+   a restricted file:// origin) simply opens on the default tab. */
+(function () {
+  var keys = [\"decisions\", \"projects\", \"activity\", \"system\"];
+  var key = \"decisions\";
+  var m = /^#(?:tab=|panel-)([a-z]+)$/.exec(window.location.hash || \"\");
+  try {
+    if (m && keys.indexOf(m[1]) !== -1) {
+      window.localStorage.setItem(\"fm-mission-control-tab\", m[1]);
+      key = m[1];
+    } else {
+      var saved = window.localStorage.getItem(\"fm-mission-control-tab\");
+      if (saved && keys.indexOf(saved) !== -1) { key = saved; }
+    }
+  } catch (e) { /* storage unavailable; the default tab is correct */ }
+  document.documentElement.className = \"js t-\" + key;
+}());
+</script>
 </head><body>
 <div class=\"wrap\">
   <header>
@@ -954,11 +1112,27 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
 + "</div>
 "
 + (if ($health_count > 0) or $health_incomplete or ($backlog_present | not)
-   then "<a class=\"attnbar\" href=\"#health\">" + icon_alert
+   then "<a class=\"attnbar\" href=\"#health\" data-tab=\"system\">" + icon_alert
      + (@html "<span>\(if $health_count > 0 then "\(if $secondmate_hold_count > 0 then "\($health_count) fleet health \(plural($health_count; "item needs"; "items need")) attention" else "\($health_count) \(plural($health_count; "item is"; "items are")) blocked or failed" end)\(if $health_incomplete or ($backlog_present | not) then "; health details are incomplete" else "" end)" else "Fleet health cannot be confirmed from the available sources" end)</span>")
      + "<span class=\"go\">&rsaquo;</span></a>"
    else "" end)
 + "
+  <nav class=\"tabs\" role=\"tablist\" aria-label=\"Board sections\">
+    <a class=\"tab\" id=\"tab-decisions\" role=\"tab\" data-tab=\"decisions\"
+       href=\"#panel-decisions\" aria-controls=\"panel-decisions\">"
++ icon_bell + "<span>Decisions</span></a>
+    <a class=\"tab\" id=\"tab-projects\" role=\"tab\" data-tab=\"projects\"
+       href=\"#panel-projects\" aria-controls=\"panel-projects\">"
++ icon_folder + "<span>Projects</span></a>
+    <a class=\"tab\" id=\"tab-activity\" role=\"tab\" data-tab=\"activity\"
+       href=\"#panel-activity\" aria-controls=\"panel-activity\">"
++ icon_shipped + "<span>Activity</span></a>
+    <a class=\"tab\" id=\"tab-system\" role=\"tab\" data-tab=\"system\"
+       href=\"#panel-system\" aria-controls=\"panel-system\">"
++ icon_gauge + "<span>System</span></a>
+  </nav>
+
+  <div class=\"panel\" id=\"panel-decisions\" role=\"tabpanel\" aria-labelledby=\"tab-decisions\">
   <section>
     <div class=\"sec-h\"><h2>Awaiting your decision</h2>"
 + (@html "<span class=\"count\">\($waiting_count) \(plural($waiting_count; "item"; "items"))")
@@ -970,8 +1144,22 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
      + (($waiting_notices | map(need_row) | add) // "")
      + (($waiting_calls | map(need_row) | add) // "")
      + (($waiting_prs | map(need_row) | add) // "") + "</div>" end)
++ (if $deferred_count == 0 then ""
+   else "<details class=\"shelf\"><summary>"
+     + "<svg class=\"chev\" viewBox=\"0 0 24 24\"><polyline points=\"9 6 15 12 9 18\"/></svg>"
+     + "<span class=\"stitle\">Deferred</span>"
+     + (@html "<span class=\"scount\">\($deferred_count) set aside</span>")
+     + "</summary><div class=\"shelf-body\">"
+     + (($deferred | map(deferred_row) | add) // "")
+     + (if $deferred_bounded > 0 then
+         (@html "<p class=\"shelf-note warn\">\($deferred_bounded) queued second mate \(plural($deferred_bounded; "row was"; "rows were")) not read, so a decision set aside there may be missing from this list.</p>")
+        else "" end)
+     + "<p class=\"shelf-note\">Set aside on your word, and brought back the same way - ask firstmate for any of these when you want it in view again.</p>"
+     + "</div></details>" end)
 + "  </section>
+  </div>
 
+  <div class=\"panel\" id=\"panel-projects\" role=\"tabpanel\" aria-labelledby=\"tab-projects\">
   <section>
     <div class=\"sec-h\"><h2>Projects</h2>"
 + (if $card_count_incomplete then "<span class=\"count\">list incomplete</span>" else "" end)
@@ -986,7 +1174,9 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
      + (($project_cards | map(project_card) | add) // "")
      + (($secondmate_cards | map(secondmate_card) | add) // "") + "</div>" end)
 + "  </section>
+  </div>
 
+  <div class=\"panel\" id=\"panel-activity\" role=\"tabpanel\" aria-labelledby=\"tab-activity\">
   <section>
     <div class=\"sec-h\"><h2>Shipped today</h2>"
 + (if $backlog_present
@@ -1004,7 +1194,9 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
      + (@html "<span class=\"what\">\(dash($d.title // $d.raw))</span><span class=\"who\">\(dash(($d.repo // "") | short_repo))</span>")
      + (if $link == "" then "</div>" else "</a>" end)) | add) // "") + "</div>" end)
 + "  </section>
+  </div>
 
+  <div class=\"panel\" id=\"panel-system\" role=\"tabpanel\" aria-labelledby=\"tab-system\">
   <section class=\"strip\" id=\"health\">
     <div class=\"pane\">"
 + (@html "<h3>Fleet health<span class=\"count\">\(if $health_count > 0 then "\($health_count) \(plural($health_count; "item"; "items"))\(if $health_incomplete or ($backlog_present | not) then "+" else "" end)" elif $health_incomplete or ($backlog_present | not) then "incomplete" else "all clear" end)</span></h3>")
@@ -1015,6 +1207,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
 + quota_block
 + "    </div>
   </section>
+  </div>
 
 "
 + (@html "<footer>firstmate &middot; mission control &middot; home \(.fm_home) &middot; snapshot \(.schema) &middot; rendered \(.generated) &middot; self-reload \($refresh)s</footer>")
@@ -1038,6 +1231,84 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
   }
   tick();
   setInterval(tick, 1000);
+}());
+
+/* Tab behaviour. The <head> script already painted the right panel; this adds
+   the interaction and the state a screen reader reads. */
+(function () {
+  var keys = [\"decisions\", \"projects\", \"activity\", \"system\"];
+  var root = document.documentElement;
+  var tabs = keys.map(function (k) { return document.getElementById(\"tab-\" + k); });
+  if (tabs.indexOf(null) !== -1) { return; }
+
+  function current() {
+    for (var i = 0; i < keys.length; i++) {
+      if (root.classList.contains(\"t-\" + keys[i])) { return keys[i]; }
+    }
+    return keys[0];
+  }
+
+  function paint() {
+    var key = current();
+    tabs.forEach(function (tab, i) {
+      var on = keys[i] === key;
+      tab.setAttribute(\"aria-selected\", on ? \"true\" : \"false\");
+      tab.tabIndex = on ? 0 : -1;
+    });
+  }
+
+  function select(key, focus) {
+    if (keys.indexOf(key) === -1) { return; }
+    root.className = \"js t-\" + key;
+    try { window.localStorage.setItem(\"fm-mission-control-tab\", key); } catch (e) { /* not remembered */ }
+    /* #tab=<key> matches no element, so restoring it never scrolls the header
+       off the top. The self-reload drops it regardless; the stored tab is what
+       carries across. */
+    try { history.replaceState(null, \"\", \"#tab=\" + key); } catch (e) { /* URL left alone */ }
+    paint();
+    if (focus) { tabs[keys.indexOf(key)].focus(); }
+  }
+
+  document.addEventListener(\"click\", function (ev) {
+    var el = ev.target;
+    if (el && el.nodeType !== 1) { el = el.parentElement; }
+    el = el && el.closest ? el.closest(\"[data-tab]\") : null;
+    if (!el) { return; }
+    var key = el.getAttribute(\"data-tab\");
+    if (keys.indexOf(key) === -1) { return; }
+    ev.preventDefault();
+    select(key, false);
+  });
+
+  document.querySelector(\".tabs\").addEventListener(\"keydown\", function (ev) {
+    var at = keys.indexOf(current());
+    var to = -1;
+    if (ev.key === \"ArrowRight\") { to = (at + 1) % keys.length; }
+    else if (ev.key === \"ArrowLeft\") { to = (at + keys.length - 1) % keys.length; }
+    else if (ev.key === \"Home\") { to = 0; }
+    else if (ev.key === \"End\") { to = keys.length - 1; }
+    if (to === -1) { return; }
+    ev.preventDefault();
+    select(keys[to], true);
+  });
+
+  paint();
+
+  /* The shelf is held to the same bar as the tabs: opening it to read three
+     decisions must not be undone by the next self-reload. It is remembered the
+     same way, so it stays shut for a captain who never opens it and stays open
+     for one who does, until they close it again. */
+  var shelf = document.querySelector(\"details.shelf\");
+  if (shelf) {
+    try {
+      if (window.localStorage.getItem(\"fm-mission-control-deferred\") === \"open\") { shelf.open = true; }
+    } catch (e) { /* not remembered; closed is the right default */ }
+    shelf.addEventListener(\"toggle\", function () {
+      try {
+        window.localStorage.setItem(\"fm-mission-control-deferred\", shelf.open ? \"open\" : \"closed\");
+      } catch (e) { /* not remembered */ }
+    });
+  }
 }());
 </script>
 </body></html>

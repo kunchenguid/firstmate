@@ -17,9 +17,14 @@
 #     those sections are preserved as unstructured records.
 #     Structured rows preserve captain-hold metadata such as hold_kind and
 #     hold_reason when tasks-axi emits it. They also carry normalized current_role,
-#     requires_child_metadata, blocked_by_ids, unresolved_blocker_ids, and
-#     captain_actionable fields. Repeated blocker tokens remain ordered; a blocker
-#     resolves only when its structured record is Done, and missing ids stay open.
+#     requires_child_metadata, blocked_by_ids, unresolved_blocker_ids,
+#     captain_actionable, and captain_deferred fields. Repeated blocker tokens
+#     remain ordered; a blocker resolves only when its structured record is Done,
+#     and missing ids stay open.
+#     captain_deferred is the same captain decision under a "parked" hold kind:
+#     the captain has consciously set it aside, so it is neither actionable nor
+#     blocked, and it is excluded from the secondmate holds projection for that
+#     reason.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
 #     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
 #     state, source, detail, and raw line separately.
@@ -148,8 +153,10 @@ validated registered-home handoff. It is local-only, skips nested secondmate
 aggregation, and marks inventory contradictions or unavailable child state invalid.
 Its invalidity object names the normalized failure kind and affected ids.
 Actionable tasks-axi captain holds appear as decisions_open and stay visible in
-queued with hold_reason, hold_kind, and plural blocker fields for downstream
-projections. A captain hold is actionable only when every blocker is Done.
+queued with hold_reason, hold_kind, captain_deferred, and plural blocker fields
+for downstream projections. A captain hold is actionable only when every blocker
+is Done. A captain decision under a parked hold kind is deferred rather than
+actionable or blocked, and is left out of holds.
 Cross-home reads use FM_SNAPSHOT_SECONDMATES (default 20, 0 lifts the count
 bound), FM_SNAPSHOT_SECONDMATE_TIMEOUT, and FM_SNAPSHOT_SECONDMATE_MAX_BYTES.
 Terminal contradiction evidence uses
@@ -391,6 +398,14 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
           | .requires_child_metadata = (.current_role == "worker")
           | .captain_actionable =
               (.state == "queued" and .kind == "captain" and .hold_kind == "captain"
+               and .hold_reason != null and (.unresolved_blocker_ids | length) == 0)
+          # A captain decision the captain has consciously set aside: the same
+          # row as an actionable decision in every respect except that its hold
+          # kind is "parked". It stays a captain decision rather than becoming
+          # generic future work, so it can be brought back by restoring the
+          # captain hold kind alone.
+          | .captain_deferred =
+              (.state == "queued" and .kind == "captain" and .hold_kind == "parked"
                and .hold_reason != null and (.unresolved_blocker_ids | length) == 0)
         else . end)
     | del(.section,.order)
@@ -705,6 +720,10 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
             | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
     | ([ $queued_all[]
+         # A deferred captain decision is held by the captain, by choice, and not
+         # by anything external, so it must not read as blocked or hold this home
+         # in an externally_held state.
+         | select(.captain_deferred != true)
          | select((.unresolved_blocker_ids | length) > 0 or (.hold_reason != null and .hold_kind != null))
          | {id:(.id | trunc(120)),title:(.title | trunc(90)),
             blocked_by:((.unresolved_blocker_ids | join(",")) | if . == "" then null else trunc(120) end),
@@ -755,6 +774,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
           hold_reason:((.hold_reason // null) | if . == null then null else trunc(160) end),
           hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
           captain_actionable:(.captain_actionable // false),
+          captain_deferred:(.captain_deferred // false),
           repo:((.repo // null) | if . == null then null else trunc(120) end),
           kind:((.kind // null) | if . == null then null else trunc(40) end)}][:$queued_n]),
         landed:(if $landed_n == 0 then $landed_all else $landed_all[:$landed_n] end),

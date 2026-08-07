@@ -5,7 +5,7 @@ It is a generator, not a server: each run writes one file, and the page reloads 
 
 The board is a calm, light executive summary: a stat strip, the decisions waiting on the captain, a card per project, what landed today, and a quiet strip carrying fleet health and allowance.
 It uses monochrome SVG line icons and no emoji.
-The script's own header and `--help` own its exact flags, environment variables, paths, and exit codes.
+The script's own header and `--help` own its exact flags, environment variables, paths, and exit codes, including the two commands that set a decision aside and bring it back.
 
 ## What the board does
 
@@ -24,6 +24,11 @@ Each project card instead states only what live state can prove: what is under w
   Each row names the home it came from when that home is not the main one.
   Bounded or unavailable secondmate registries, omitted homes, and registered homes whose decisions could not be read all mark the waiting status incomplete.
   Credential and login needs are not detected and are not faked.
+- **Deferred** is the quiet shelf under that list, closed by default, holding the decisions the captain has consciously set aside.
+  A deferred decision is excluded from the waiting list, from the section count, and from the "Awaiting you" tile, because reducing what is in the captain's eyeline is the entire point of setting one aside.
+  It keeps the title, the home or project it belongs to, and the reason that identifies it, so it is still there when the captain looks.
+  A second mate reports its queued rows bounded, so a shelf that is on screen says when a decision set aside there could fall outside that window rather than implying its list is complete.
+  A bound alone never puts the shelf on screen: with nothing set aside to show, the board says nothing about deferred work instead of standing an empty panel over every busy second mate.
 - **The stat strip** counts what is awaiting the captain, what is under way, what landed today, and how many project cards the board is showing.
 - **Projects** shows one card per registered project, plus a card for each second mate and for any unregistered project that has work under way.
   A task the captain can see running is never invisible just because its project was never registered.
@@ -36,6 +41,27 @@ Each project card instead states only what live state can prove: what is under w
 - **Allowance** shows the current allowance per provider.
 
 An idle second mate is healthy and is rendered as such, never as an alarm.
+
+## Navigation
+
+The board is one page, not one scroll.
+The header, the stat strip, and the red attention bar are always in view, because "is anything on fire, and how much awaits me" must never be a click away.
+Everything below them is grouped behind four tabs: Decisions (the waiting list and the Deferred shelf), Projects, Activity (what shipped today), and System (fleet health and allowance).
+The board opens on Decisions.
+
+The tabs are keyboard-reachable, carry the tab and tabpanel roles with their selected state, and move with the arrow, Home, and End keys.
+With no script the tab strip is hidden and every section stays visible, so the board degrades to the single scrolling page it was before rather than hiding its content behind controls that cannot work.
+
+The self-reload navigates without the URL fragment, so a fragment cannot be what carries the selected tab across a reload; the tab is remembered in the browser instead and restored before the page paints, so it neither resets nor flashes the default panel every 25 seconds.
+A `#tab=<name>` fragment still selects a tab on the first load, which is what a hand-typed or copied link uses.
+A browser that refuses storage - a private context, or a restricted `file://` origin - simply opens on Decisions each time.
+
+The Deferred shelf is held to the same bar, because a shelf that snapped shut every 25 seconds would be the same jarring reset in a smaller place.
+It is closed for a captain who never opens it, stays open for one who does, and stays closed again once they close it.
+
+## Deferring a decision
+
+The board stays read-only; `bin/fm-mission-control.sh --help` owns the exact commands for setting a decision aside and bringing it back, including the reason-preservation hazard.
 
 Any source may be absent.
 An absent backlog, project registry, secondmate table, or allowance reading renders an explicit unavailable or empty notice that states what is missing, and never a misleading zero.
@@ -75,5 +101,10 @@ The generator does not serve it; how the file is exposed is phase 2's decision.
 
 ## Verification
 
-`tests/fm-mission-control.test.sh` renders the board end to end from a fixture home and from captured snapshot payloads, covering present and absent sources, cross-home captain decisions, escaping of hostile prose, project folding, work outside the registry, blocked work, unmeasurable allowance windows, and self-reload.
+`tests/fm-mission-control.test.sh` renders the board end to end from a fixture home and from captured snapshot payloads, covering present and absent sources, cross-home captain decisions, escaping of hostile prose, project folding, work outside the registry, blocked work, unmeasurable allowance windows, self-reload, the tab structure, and the deferred shelf.
+The deferred cases pin the awaiting count and the section count to literal numbers rather than to the absence of a title, because dropping a decision from the list while still counting it and counting it while still listing it fail separately.
 It also pins a fixed current time and commits its fixture clones at explicit epochs, so the last-change wording, its three degrade-to-dash paths, and the promise that no clone is written to are all checked against times the test chose.
+
+`tests/fm-fleet-snapshot-view.test.sh` pins the deferred classification itself: a parked hold on work that is not a captain decision is ordinary held work, a captain decision that still has an unresolved blocker stays blocked rather than deferred, and a deferred decision never reaches the secondmate home summary's holds.
+
+That a tab survives the board's own reload cannot be shown by a shell test, so it is checked in a real browser and the before and after boards are captured in [`docs/evidence/mission-control/`](evidence/mission-control/).

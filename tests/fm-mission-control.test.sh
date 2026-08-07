@@ -309,8 +309,16 @@ EOF
   assert_grep '&quot;quoted&quot;' "$board" "quotes in fleet prose must be escaped"
   assert_no_grep '<script>alert(3)</script>' "$board" \
     "a generated timestamp with a literal JSON unicode closing tag must not break out of the inline script"
+  # Checked directly, not only by counting scripts: the payload has to be on the
+  # page in escaped form, which is what proves it was neutralized rather than
+  # dropped or silently rewritten.
+  assert_grep '&lt;/script&gt;&lt;script&gt;alert(3)&lt;/script&gt;' "$board" \
+    "the closing-tag payload must reach the page escaped and readable"
+  # The board renders exactly two of its own scripts: the tab chosen in <head>
+  # before first paint, and the age ticker plus tab wiring at the end of the
+  # body. A third means hostile prose opened one of its own.
   script_tags=$(grep -o '<script>' "$board" | wc -l | tr -d ' ')
-  [ "$script_tags" = 1 ] || fail "the rendered page must contain only its single intended script, got $script_tags"
+  [ "$script_tags" = 2 ] || fail "the rendered page must contain only its own two scripts, got $script_tags"
   pass "prose from fleet state is escaped before it reaches the page"
 }
 
@@ -337,7 +345,207 @@ test_missing_backlog_is_disclosed_as_unavailable() {
     "an absent backlog must not produce an authoritative shipped zero"
   assert_no_grep 'Nothing blocked or failed.' "$board" \
     "an absent backlog must not produce an authoritative health all-clear"
+  # An unreadable backlog cannot prove that nothing was set aside either, so the
+  # shelf stays away rather than asserting a count it did not read.
+  assert_no_grep 'set aside' "$board" \
+    "an absent backlog must not produce an authoritative deferred count"
   pass "an absent backlog marks every backlog-derived conclusion unavailable"
+}
+
+# A decision the captain sets aside must leave the primary view completely -
+# the list, the section count, and the "Awaiting you" tile - and reappear only
+# in the quiet shelf. Dropping it from the list while still counting it, or
+# counting it while still listing it, are separate failures, so both are pinned
+# to literal numbers rather than to the absence of the title alone.
+test_deferred_decision_leaves_the_primary_view() {
+  local home fakebin board
+  home=$(make_home deferred)
+  make_clone "$home" alpha "$TODAY_0905"
+  printf -- '- alpha [direct-PR] - Alpha service\n' > "$home/data/projects.md"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] alpha-window - Choose the alpha rollout window (repo: alpha) (kind: captain) (hold: Two rollout windows both cost money) (hold-kind: captain)
+- [ ] pushcut-sub - Approve the Pushcut Pro subscription (repo: alpha) (kind: captain) (hold: The subscription renews yearly) (hold-kind: parked)
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  board=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_MISSION_CONTROL_NOW_EPOCH="$NOW_EPOCH" \
+    "$BOARD" --no-quota) || fail "a home with a deferred decision must render"
+
+  assert_grep '<div class="n">1</div><div class="l">Awaiting you</div>' "$board" \
+    "a deferred decision must not be counted in the awaiting tile"
+  assert_grep '<span class="count">1 item' "$board" \
+    "a deferred decision must not be counted in the awaiting section header"
+  assert_grep 'Choose the alpha rollout window' "$board" \
+    "the decision still awaiting the captain must stay in view"
+
+  # Present once, in the shelf, with the reason that identifies it.
+  [ "$(grep -c 'Approve the Pushcut Pro subscription' "$board")" = 1 ] \
+    || fail "a deferred decision must appear exactly once, in the shelf"
+  assert_grep 'class="shelf"' "$board" "a deferred decision must render a deferred shelf"
+  assert_grep '1 set aside' "$board" "the shelf must say how many decisions are set aside"
+  assert_grep 'class="defer"' "$board" "the deferred decision must render as a deferred row"
+  assert_grep 'The subscription renews yearly' "$board" \
+    "a deferred decision must keep the reason that identifies it"
+
+  # Setting a decision aside is a choice, not a gap in the data, and it is not a
+  # blocker either.
+  assert_no_grep 'waiting status incomplete' "$board" \
+    "deferring a decision must not mark the waiting status incomplete"
+  assert_no_grep 'some sources unavailable' "$board" \
+    "deferring a decision must not read as an unavailable source"
+  assert_grep 'Nothing blocked or failed.' "$board" \
+    "a deferred decision must not surface as blocked or failed work"
+  assert_grep '1 decision awaits you' "$board" \
+    "a project card must count only the decisions still awaiting the captain"
+  pass "a deferred decision leaves the awaiting list, the awaiting count, and health"
+}
+
+# The shelf is fed by whatever the snapshot could read. A secondmate home reports
+# its queued rows bounded, so the shelf says when a decision set aside there may
+# be outside the window rather than implying the list is complete.
+test_deferred_shelf_reaches_a_secondmate_and_discloses_its_bound() {
+  local snap board
+  snap=$TMP_ROOT/deferred-sm.json
+  board=$TMP_ROOT/deferred-sm.html
+  snapshot_json '[]' '[{
+    "id": "homemux", "registered": true,
+    "provenance": {"selected": "structured-home"},
+    "current": {"state": "no_active_work"},
+    "decisions_open": [], "holds": [], "active_children": [],
+    "queued": [
+      {"id": "hm-tariff", "title": "Approve the HomeMux tariff switch",
+       "hold_reason": "The switch locks in for a year", "hold_kind": "parked",
+       "captain_actionable": false, "captain_deferred": true, "repo": "homemux"}
+    ],
+    "counts": {"decisions_open": 0, "holds": 0, "active_children": 0, "queued": 4},
+    "omitted": [{"surface": "queued", "count": 3}]
+  }]' > "$snap"
+  "$BOARD" --snapshot "$snap" --no-quota --out "$board" >/dev/null \
+    || fail "a snapshot carrying a deferred secondmate decision must render"
+  assert_grep 'Approve the HomeMux tariff switch' "$board" \
+    "a decision set aside in a secondmate home must reach the shelf"
+  assert_grep 'homemux' "$board" "a deferred row must name where the decision lives"
+  assert_grep '3 queued second mate rows were not read' "$board" \
+    "a bounded queued read must be disclosed instead of implying a complete shelf"
+  assert_no_grep 'class="hstate' "$board" \
+    "a deferred decision must not be reported as held or blocked fleet health"
+  pass "a deferred secondmate decision reaches the shelf with its bound disclosed"
+}
+
+# The header, the stat strip and the attention bar answer "is anything on fire,
+# and how much awaits me", so they must never be tabbed away; everything else is
+# grouped behind one of four tabs.
+test_navigation_tabs_group_the_board() {
+  local snap board section
+  snap=$TMP_ROOT/tabs.json
+  board=$TMP_ROOT/tabs.html
+  snapshot_json '[{"state": "queued", "id": "d1", "captain_actionable": true,
+    "title": "Choose something", "hold_reason": "because", "repo": "alpha"}]' '[]' > "$snap"
+  "$BOARD" --snapshot "$snap" --no-quota --out "$board" >/dev/null \
+    || fail "the board must render with its navigation tabs"
+
+  assert_grep 'role="tablist"' "$board" "the board must expose a tablist"
+  for section in decisions projects activity system; do
+    assert_grep "id=\"tab-$section\" role=\"tab\"" "$board" "the $section tab must render"
+    assert_grep "id=\"panel-$section\" role=\"tabpanel\"" "$board" "the $section panel must render"
+    assert_grep "aria-controls=\"panel-$section\"" "$board" \
+      "the $section tab must name the panel it controls"
+  done
+  assert_grep 'aria-labelledby="tab-decisions"' "$board" \
+    "each panel must name the tab that labels it"
+  # The tab has to be chosen before the body paints, or the default panel
+  # flashes on every one of the board's own reloads.
+  sed -n '1,/<body>/p' "$board" | grep -q '<script>' \
+    || fail "the board must choose its tab before the body paints"
+
+  # Always in view, outside every panel.
+  section=$(sed -n '/<div class="wrap">/,/<div class="panel"/p' "$board")
+  printf '%s' "$section" | grep -q '<h1>Mission Control</h1>' \
+    || fail "the header must sit above the tabs"
+  printf '%s' "$section" | grep -q 'class="l">Awaiting you</div>' \
+    || fail "the stat strip must sit above the tabs"
+  printf '%s' "$section" | grep -q 'class="tabs"' \
+    || fail "the tab strip must sit above every panel"
+
+  # The tab is remembered rather than carried in the URL, because the board's
+  # own reload navigates without the fragment.
+  assert_grep 'localStorage.setItem("fm-mission-control-tab"' "$board" \
+    "the selected tab must be remembered across the board's own reload"
+  assert_grep 'http-equiv="refresh"' "$board" \
+    "the board must keep reloading itself with tabs in place"
+  # An opened shelf snapping shut mid-read is the same reset the tabs avoid.
+  assert_grep 'localStorage.setItem("fm-mission-control-deferred"' "$board" \
+    "an opened deferred shelf must survive the board's own reload"
+  assert_no_grep 'src="http' "$board" "the tabs must not depend on a network asset"
+  pass "the board groups its sections behind keyboard-reachable navigation tabs"
+}
+
+# A fragment is only present on the entry load because the board's meta refresh
+# drops it. Execute the rendered head script twice against one browser-shaped
+# storage area to prove that the fragment-selected tab becomes the remembered
+# tab before the fragment disappears.
+test_fragment_selected_tab_survives_reload() {
+  local snap board
+  snap=$TMP_ROOT/fragment-tab.json
+  board=$TMP_ROOT/fragment-tab.html
+  snapshot_json '[]' '[]' > "$snap"
+  "$BOARD" --snapshot "$snap" --no-quota --out "$board" >/dev/null \
+    || fail "the fragment tab behavior fixture must render"
+  command -v node >/dev/null 2>&1 \
+    || fail "node is required to execute the rendered board's head script"
+  node - "$board" <<'JS' \
+    || fail "a fragment-selected tab must survive the next fragmentless load"
+const fs = require("node:fs");
+const vm = require("node:vm");
+const html = fs.readFileSync(process.argv[2], "utf8");
+const head = html.slice(0, html.indexOf("<body>"));
+const script = head.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+if (!script) process.exit(1);
+
+const values = new Map();
+const storage = {
+  getItem(key) { return values.has(key) ? values.get(key) : null; },
+  setItem(key, value) { values.set(key, value); }
+};
+
+function load(hash, localStorage) {
+  const document = {documentElement: {className: ""}};
+  const window = {location: {hash}, localStorage};
+  vm.runInNewContext(script, {document, window});
+  return document.documentElement.className;
+}
+
+if (load("#tab=system", storage) !== "js t-system") process.exit(1);
+if (load("", storage) !== "js t-system") process.exit(1);
+
+const refused = {
+  getItem() { throw new Error("storage refused"); },
+  setItem() { throw new Error("storage refused"); }
+};
+if (load("#tab=system", refused) !== "js t-decisions") process.exit(1);
+JS
+  pass "a fragment-selected tab is remembered before the fragment disappears"
+}
+
+# An attention bar the captain cannot follow is worse than none: clicking it has
+# to reach fleet health wherever health now lives.
+test_attention_bar_reaches_health_across_tabs() {
+  local snap board
+  snap=$TMP_ROOT/attn-tabs.json
+  board=$TMP_ROOT/attn-tabs.html
+  snapshot_json '[{"state": "queued", "id": "b1", "structured": true,
+    "title": "Blocked item", "unresolved_blocker_ids": ["dep-1"], "repo": "alpha"}]' '[]' > "$snap"
+  "$BOARD" --snapshot "$snap" --no-quota --out "$board" >/dev/null \
+    || fail "a board with blocked work must render"
+  assert_grep 'class="attnbar" href="#health" data-tab="system"' "$board" \
+    "the attention bar must open the tab that carries fleet health"
+  assert_grep 'id="health"' "$board" \
+    "fleet health must keep an anchor so the bar still lands with no script"
+  pass "the attention bar reaches fleet health once health sits behind a tab"
 }
 
 test_unreadable_backlog_does_not_leave_projects_looking_calm() {
@@ -785,6 +993,11 @@ test_render_writes_nothing_into_the_project_clones
 test_absent_sources_render_empty_sections
 test_hostile_text_is_escaped
 test_missing_backlog_is_disclosed_as_unavailable
+test_deferred_decision_leaves_the_primary_view
+test_deferred_shelf_reaches_a_secondmate_and_discloses_its_bound
+test_navigation_tabs_group_the_board
+test_fragment_selected_tab_survives_reload
+test_attention_bar_reaches_health_across_tabs
 test_unreadable_backlog_does_not_leave_projects_looking_calm
 test_blocked_work_is_raised_above_the_board
 test_duplicate_main_health_sources_are_normalized

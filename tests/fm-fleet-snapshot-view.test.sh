@@ -355,6 +355,53 @@ EOF
   pass "backlog normalization preserves strict roles and resolves every blocker compatibly"
 }
 
+# A captain decision the captain has consciously set aside keeps its identity as
+# a captain decision under a parked hold kind. It is neither actionable nor
+# blocked, so it must leave the actionable set without arriving in holds or
+# putting a home into an externally held state.
+test_parked_captain_hold_is_deferred_not_blocked() {
+  local home fakebin out summary
+  home=$(make_home deferred-captain-hold)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] live-call - Choose the rollout window (repo: alpha) (kind: captain) (hold: Both windows cost money) (hold-kind: captain)
+- [ ] set-aside - Approve the subscription (repo: alpha) (kind: captain) (hold: It renews yearly) (hold-kind: parked)
+- [ ] parked-ship - Rework the intake form (repo: alpha) (kind: ship) (hold: waiting on design) (hold-kind: parked)
+- [ ] blocked-aside - Approve the migration (repo: alpha) (kind: captain) blocked-by: live-call (hold: It is one way) (hold-kind: parked)
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    (.backlog.records[] | select(.id == "live-call")
+      | .captain_actionable == true and .captain_deferred == false)
+    and (.backlog.records[] | select(.id == "set-aside")
+      | .captain_actionable == false and .captain_deferred == true)
+    # A parked hold on work that is not a captain decision is ordinary held
+    # work, never a deferred decision.
+    and (.backlog.records[] | select(.id == "parked-ship")
+      | .captain_deferred == false)
+    # A decision that cannot be taken yet is blocked, not set aside, so parking
+    # it must not hide a real dependency.
+    and (.backlog.records[] | select(.id == "blocked-aside")
+      | .captain_actionable == false and .captain_deferred == false)
+  ' >/dev/null || fail "parked captain holds were not classified as deferred: $out"
+
+  summary=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$summary" | jq -e '
+    ([.holds[].id] | index("set-aside")) == null
+    and ([.holds[].id] | index("blocked-aside")) != null
+    and ([.holds[].id] | index("parked-ship")) != null
+    and (.queued[] | select(.id == "set-aside") | .captain_deferred == true)
+    and (.queued[] | select(.id == "live-call") | .captain_deferred == false)
+    and .state == "captain_decision"
+  ' >/dev/null || fail "a deferred decision leaked into the home summary holds: $summary"
+  pass "a parked captain hold reads as deferred rather than blocked or actionable"
+}
+
 test_event_hints_follow_reconciled_current_state() {
   local home fakebin out hint_gen
   home=$(make_home event-hints)
@@ -783,6 +830,7 @@ test_empty_fleet_json
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
+test_parked_captain_hold_is_deferred_not_blocked
 test_event_hints_follow_reconciled_current_state
 test_open_decision_survives_later_unrelated_event
 test_secondmate_open_decision_survives_live_endpoint
