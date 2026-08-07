@@ -13,7 +13,7 @@ set -u
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
 TMP_ROOT=$(fm_test_tmproot fm-bearings)
 
-command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
+FM_TEST_JQ_BIN=$(command -v jq) || { echo "skip: jq not found"; exit 0; }
 
 # A fakebin that stubs the local tools the canonical snapshot may reach for, plus a
 # gh/gh-axi that RECORDS every call to $NET_LOG so a test can prove the default path
@@ -67,6 +67,21 @@ exit 1
 SH
   chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/gh" "$fb/gh-axi" "$fb/curl"
   printf '%s\n' "$fb"
+}
+
+inject_backlog_access_failure() {  # <fakebin>
+  cat > "$1/jq" <<'SH'
+#!/usr/bin/env bash
+previous=
+for arg in "$@"; do
+  if [ "$previous" = path ] && [ "$arg" = "$FM_TEST_FAIL_BACKLOG" ]; then
+    exec "$FM_TEST_JQ_BIN" "$@" < "$FM_TEST_ACCESS_FAILURE_PATH"
+  fi
+  previous=$arg
+done
+exec "$FM_TEST_JQ_BIN" "$@"
+SH
+  chmod +x "$1/jq"
 }
 
 make_home() {  # <name>
@@ -452,8 +467,6 @@ test_bad_secondmate_homes_never_revive_parent_work() {
   write_parent_secondmate_event "$home" invalid "$invalid" "old invalid work"
 
   make_valid_secondmate_home unreadable "$unreadable"
-  rm "$unreadable/data/backlog.md"
-  ln -s "$unreadable/data" "$unreadable/data/backlog.md"
   append_secondmate_registry "$home" unreadable "$unreadable"
   write_parent_secondmate_event "$home" unreadable "$unreadable" "old unreadable work"
 
@@ -474,7 +487,11 @@ test_bad_secondmate_homes_never_revive_parent_work() {
   write_parent_secondmate_event "$home" timedout "$timedout" "old timed work"
 
   fakebin=$(make_fakebin "$home")
-  json=$(FAKE_NM_SLEEP=1 FM_SNAPSHOT_SECONDMATE_TIMEOUT=1 run "$home" "$fakebin" --json)
+  inject_backlog_access_failure "$fakebin"
+  json=$(FM_TEST_JQ_BIN="$FM_TEST_JQ_BIN" \
+    FM_TEST_FAIL_BACKLOG="$unreadable/data/backlog.md" \
+    FM_TEST_ACCESS_FAILURE_PATH="$unreadable/data" \
+    FAKE_NM_SLEEP=1 FM_SNAPSHOT_SECONDMATE_TIMEOUT=1 run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
     (.secondmates | length) == 5
       and all(.secondmates[]; .state == "unknown")
@@ -484,7 +501,7 @@ test_bad_secondmate_homes_never_revive_parent_work() {
       and ([.secondmates[] | select(.id != "missing")]
         | all(.provenance == "parent-event-fallback" and .freshness == "historical-event"))
       and (.secondmates | any(.[]; .id == "invalid" and (.reason | contains("marked for"))))
-      and (.secondmates | any(.[]; .id == "unreadable" and (.reason | test("invalid home|unreadable|snapshot failed"))))
+      and (.secondmates | any(.[]; .id == "unreadable" and (.reason | contains("snapshot failed"))))
       and (.secondmates | any(.[]; .id == "malformed" and (.reason | contains("unstructured current backlog row"))))
       and (.secondmates | any(.[]; .id == "timedout" and (.reason | contains("timed out"))))
   ' >/dev/null || fail "bad home outcomes revived stale work or lacked provenance: $json"
