@@ -1137,6 +1137,30 @@ crew_actionable_run_state_line_from_state_line() {  # <line>
   printf '%s\n' "$line"
 }
 
+crew_run_generation_from_state_line() {  # <line>
+  local line=$1 token generation=''
+  for token in $line; do
+    case "$token" in
+      run-id=*|run-head=*|runs-row=*)
+        generation="${generation}${generation:+ }$token"
+        ;;
+    esac
+  done
+  [ -n "$generation" ] || return 1
+  printf '%s\n' "$generation"
+}
+
+crew_actionable_run_state_marker_from_state_line() {  # <line>
+  local line=$1 generation
+  line=$(crew_actionable_run_state_line_from_state_line "$line") || return 1
+  generation=$(crew_run_generation_from_state_line "$line" || true)
+  if [ -n "$generation" ]; then
+    printf '%s\n%s\n' "$generation" "$line"
+  else
+    printf '%s\n' "$line"
+  fi
+}
+
 crew_actionable_run_state_line() {  # <id>
   local line
   line=$(crew_state_line "$1" || true)

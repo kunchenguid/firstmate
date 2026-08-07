@@ -1172,17 +1172,18 @@ EOF
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             crew_state=$(crew_state_line "$task" || true)
             actionable_run_state=$(crew_actionable_run_state_line_from_state_line "$crew_state" || true)
+            actionable_run_state_marker=$(crew_actionable_run_state_marker_from_state_line "$crew_state" || true)
             if [ "$(crew_absorb_class_from_state_line "$crew_state")" = working ]; then
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
               clear_actionable_run_state_surfaced "$task"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
-            elif [ -n "$actionable_run_state" ] && ! actionable_run_state_already_surfaced "$task" "$actionable_run_state"; then
+            elif [ -n "$actionable_run_state" ] && ! actionable_run_state_already_surfaced "$task" "$actionable_run_state_marker"; then
               fm_wake_append stale "$w" "stale: $w" || exit 1
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
               mark_surfaced "$STATE/$task.status"
-              mark_actionable_run_state_surfaced "$task" "$actionable_run_state"
+              mark_actionable_run_state_surfaced "$task" "$actionable_run_state_marker"
               wake "stale: $w"
             elif terminal_status_already_surfaced "$task"; then
               printf '%s' "$h" > "$sf"
