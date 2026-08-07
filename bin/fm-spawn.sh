@@ -2153,6 +2153,7 @@ cursor_worker_server_find() {  # <backend> <target> <cursor-binary> -> pid on st
     herdr)
       # herdr exposes the pane's foreground processes; the cursor-agent is one
       # of them. Its worker-server child is found by parent below.
+      fm_backend_herdr_parse_target "$target" || return 1
       fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
         | jq -r '.result.process_info.foreground_processes[]?.pid // empty' 2>/dev/null \
         | while read -r pid; do

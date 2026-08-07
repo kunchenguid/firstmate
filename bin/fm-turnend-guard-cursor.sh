@@ -307,7 +307,7 @@ if [ "$ARM_ACTIONABLE" -eq 1 ]; then
     COUNT=1
   fi
   WAKE_SEEN=0
-  for KNOWN_REASON in "${CHAIN_REASONS[@]}"; do
+  for KNOWN_REASON in ${CHAIN_REASONS[@]+"${CHAIN_REASONS[@]}"}; do
     if [ "$KNOWN_REASON" = "$WAKE_REASON" ]; then
       WAKE_SEEN=1
       break
