@@ -168,10 +168,26 @@ test_stop_does_not_signal_unowned_pid() {
   pass "stop refuses to signal a PID that is not the helper-owned browser"
 }
 
+test_stale_lock_is_reclaimed() {
+  local dir fakebin out
+  dir="$TMP_ROOT/stale-lock"
+  fakebin=$(fm_fakebin "$dir")
+  make_fake_curl "$fakebin"
+  mkdir -p "$dir/runtime/lock"
+  printf '99999999\n' > "$dir/runtime/lock/pid"
+  out=$(FM_BROWSER_RUNTIME_DIR="$dir/runtime" FM_BROWSER_PORT=19228 \
+    FM_TEST_BROWSER_MARKER="$dir/never" PATH="$fakebin:$PATH" \
+    "$BROWSER_HELPER" stop)
+  [ "$out" = 'stopped=no-owned-browser' ] || fail "stale-lock stop returned '$out'"
+  [ ! -e "$dir/runtime/lock" ] || fail "stale lock was not released"
+  pass "dead lock owners are reclaimed before acquiring the browser lock"
+}
+
 test_probe_hit_reuses_without_launching
 test_discovery_prefers_explicit_binary
 test_concurrent_urls_start_one_browser
 test_missing_binary_refuses_without_url
 test_stop_does_not_signal_unowned_pid
+test_stale_lock_is_reclaimed
 
 echo "# all fm-browser tests passed"

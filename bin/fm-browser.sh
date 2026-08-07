@@ -53,7 +53,7 @@ release_lock() {
 }
 
 acquire_lock() {
-  local attempt=0 owner
+  local attempt=0 owner reclaimed
   mkdir -p "$RUNTIME_DIR"
   while ! mkdir "$LOCK_DIR" 2>/dev/null; do
     owner=$(cat "$LOCK_DIR/pid" 2>/dev/null || true)
@@ -65,7 +65,13 @@ acquire_lock() {
         if kill -0 "$owner" 2>/dev/null; then
           sleep 0.05
         else
-          rmdir "$LOCK_DIR" 2>/dev/null || true
+          reclaimed="$RUNTIME_DIR/lock.reclaimed.$$.$attempt"
+          if mv "$LOCK_DIR" "$reclaimed" 2>/dev/null; then
+            if [ "$(cat "$reclaimed/pid" 2>/dev/null || true)" = "$owner" ]; then
+              rm -f "$reclaimed/pid"
+              rmdir "$reclaimed" 2>/dev/null || true
+            fi
+          fi
         fi
         ;;
     esac
