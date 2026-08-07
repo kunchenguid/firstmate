@@ -1470,13 +1470,13 @@ validate_worktree_free_of_live_sibling() {  # <source> <inspect-target> <worktre
     esac
     # Name the endpoint this refused spawn leaves behind, in the terms of the
     # backend that created it, so the retry sequence needs no source reading.
-    # An orca refusal is the one that leaves nothing: it fires before the
-    # terminal exists, and spawn_abort_cleanup unwinds the worktree orca did
-    # create, so that path skips the removal step entirely.
+    # An orca refusal is the one that leaves nothing: spawn_abort_cleanup kills
+    # whatever terminal orca had already returned and removes the worktree it
+    # created, so that path skips the removal step entirely.
     case "$BACKEND" in
       orca) leftover="" ;;
-      tmux) leftover="remove this spawn's leftover task window with tmux kill-window -t '$inspect_target', because a bare retry collides with it and bin/fm-teardown.sh $ID cannot clear it (this spawn recorded no metadata); then " ;;
-      *) leftover="remove this spawn's leftover $BACKEND task endpoint '$inspect_target' if it outlived the abort, because a bare retry collides with it and bin/fm-teardown.sh $ID cannot clear it (this spawn recorded no metadata); then " ;;
+      tmux) leftover="remove this spawn's leftover task window with tmux kill-window -t '$inspect_target'; then " ;;
+      *) leftover="remove this spawn's leftover $BACKEND task endpoint '$inspect_target'; then " ;;
     esac
     echo "error: $source handed back a worktree that task $sib_id already records as its own, and $sib_id's endpoint is $sib_state (shared worktree '$wt_real'); refusing to launch to avoid resetting a live worker's checkout. Recover in order: ${leftover}once $sib_id is finished, release its record with bin/fm-teardown.sh $sib_id; then spawn again. Inspect target $inspect_target" >&2
     exit 1
