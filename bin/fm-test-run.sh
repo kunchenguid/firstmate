@@ -28,12 +28,14 @@
 # Base/head partition (isolated execution):
 #   fm-test-run.sh --compare-commits <base> <head> --output-dir <dir> [--script-timeout <seconds>]
 #   Resolves both refs once, checks each out detached in an independent local
-#   clone, and writes base.json, head.json, and partition.json. Every discovered
-#   script receives one of: passed, failed, timed_out, skipped, errored. Each
-#   script runs in its own process group under a hard bound (default: 300s).
-#   The command exits non-zero only for head-introduced failures or an inventory
-#   or checkout-integrity error; inherited failures remain visible but do not by
-#   themselves fail the comparison.
+#   clone, and writes base.json, head.json, and partition.json. Every independently
+#   enumerated script receives passed, failed, timed_out, skipped, or errored;
+#   an interrupted in-flight row remains running. Each script runs in its own
+#   process group under a hard bound (default: 300s). Candidate introduced and
+#   regressed transitions are re-run once on both sides before classification.
+#   The command exits non-zero for confirmed introduced/regressed outcomes,
+#   deleted or skipped coverage, inventory refusal, or checkout-integrity error;
+#   inherited failures and explicitly recorded flakes do not fail by themselves.
 #
 # Options:
 #   --json <path>   write a deterministic timing artifact after the run
@@ -1230,6 +1232,11 @@ root = pathlib.Path(sys.argv[1]).resolve()
 base_ref, head_ref = sys.argv[2], sys.argv[3]
 output_dir = pathlib.Path(sys.argv[4]).resolve()
 timeout_seconds = int(sys.argv[5])
+active_proc = None
+inventories = []
+confirmations = {}
+temp_root = None
+termination = None
 
 
 def git(*args, cwd=root, check=True):
@@ -1269,22 +1276,34 @@ def inventory_summary(rows):
         "timed_out": counts["timed_out"],
         "skipped": counts["skipped"],
         "errored": counts["errored"],
+        "running": counts["running"],
     }
 
 
 def reconcile(doc):
+    expected = doc["expected_scripts"]
     discovered = doc["discovered_scripts"]
     inventoried = [row["path"] for row in doc["scripts"]]
-    missing = sorted(set(discovered) - set(inventoried))
-    extra = sorted(set(inventoried) - set(discovered))
+    missing = sorted(set(expected) - set(inventoried))
+    extra = sorted(set(inventoried) - set(expected))
+    missing_from_discovery = sorted(set(expected) - set(discovered))
+    extra_in_discovery = sorted(set(discovered) - set(expected))
     duplicates = sorted(path for path, count in collections.Counter(inventoried).items() if count != 1)
-    ok = discovered == inventoried and not missing and not extra and not duplicates
+    ok = bool(
+        expected == discovered == inventoried
+        and not missing and not extra
+        and not missing_from_discovery and not extra_in_discovery
+        and not duplicates
+    )
     doc["reconciliation"] = {
         "accounted": ok,
+        "expected_count": len(expected),
         "discovered_count": len(discovered),
         "inventory_count": len(inventoried),
         "missing": missing,
         "extra": extra,
+        "missing_from_discovery": missing_from_discovery,
+        "extra_in_discovery": extra_in_discovery,
         "duplicates": duplicates,
     }
     doc["summary"] = inventory_summary(doc["scripts"])
@@ -1321,14 +1340,31 @@ def stop_process_group(proc):
     proc.wait()
 
 
+def tracked_test_scripts(copy, commit):
+    tree = subprocess.run(
+        ["git", "ls-tree", "-rz", "--name-only", commit, "--", "tests"],
+        cwd=copy, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    ).stdout
+    scripts = set()
+    for raw_path in tree.split(b"\0"):
+        if not raw_path:
+            continue
+        path = os.fsdecode(raw_path)
+        parts = pathlib.PurePosixPath(path).parts
+        if len(parts) >= 2 and parts[0] == "tests" and parts[1].endswith(".test.sh"):
+            scripts.add(f"tests/{parts[1]}")
+    return sorted(scripts)
+
+
 def make_inventory(label, requested_ref, commit, copy):
-    scripts = sorted(
+    expected_scripts = tracked_test_scripts(copy, commit)
+    discovered_scripts = sorted(
         str(path.relative_to(copy))
         for path in (copy / "tests").glob("*.test.sh")
         if path.is_file()
     )
     rows = []
-    for script in scripts:
+    for script in expected_scripts:
         rows.append({
             "path": script,
             "outcome": "errored",
@@ -1339,7 +1375,7 @@ def make_inventory(label, requested_ref, commit, copy):
         })
     head, detached, clean = checkout_state(copy)
     doc = {
-        "schema_version": 1,
+        "schema_version": 2,
         "label": label,
         "requested_ref": requested_ref,
         "commit": commit,
@@ -1353,7 +1389,8 @@ def make_inventory(label, requested_ref, commit, copy):
             "clean_after": None,
             "invariant_ok": head == commit and detached and clean,
         },
-        "discovered_scripts": scripts,
+        "expected_scripts": expected_scripts,
+        "discovered_scripts": discovered_scripts,
         "scripts": rows,
     }
     write_inventory(doc)
@@ -1361,6 +1398,7 @@ def make_inventory(label, requested_ref, commit, copy):
 
 
 def run_inventory(doc, copy):
+    global active_proc
     compromised = not doc["checkout"]["invariant_ok"]
     for row in doc["scripts"]:
         if compromised:
@@ -1383,9 +1421,7 @@ def run_inventory(doc, copy):
         log_path = output_dir / row["log"]
         log_path.parent.mkdir(parents=True, exist_ok=True)
         if not script_path.is_file():
-            row["detail"] = "not_run: discovered script is missing at execution"
-            compromised = True
-            doc["checkout"]["invariant_ok"] = False
+            row["detail"] = "not_run: tracked test path is not a regular file"
             write_inventory(doc)
             continue
 
@@ -1406,6 +1442,11 @@ def run_inventory(doc, copy):
                     stdout=log_stream, stderr=subprocess.STDOUT,
                     start_new_session=True,
                 )
+                active_proc = proc
+                row["outcome"] = "running"
+                row["detail"] = "in flight"
+                row["exit_code"] = None
+                write_inventory(doc)
                 try:
                     returncode = proc.wait(timeout=timeout_seconds)
                 except subprocess.TimeoutExpired:
@@ -1428,11 +1469,13 @@ def run_inventory(doc, copy):
                         row["outcome"] = "failed"
                         row["detail"] = f"exit {returncode}"
                 row["exit_code"] = returncode
+                active_proc = None
         except OSError as exc:
             row["outcome"] = "errored"
             row["detail"] = f"runner error: {exc}"
             row["exit_code"] = None
         finally:
+            active_proc = None
             row["duration_ms"] = max(0, int((time.monotonic() - started) * 1000))
             shutil.rmtree(script_tmp, ignore_errors=True)
 
@@ -1463,45 +1506,143 @@ def run_inventory(doc, copy):
     write_inventory(doc)
 
 
-def failure_rows(doc):
-    return {
-        row["path"]: row for row in doc["scripts"]
-        if row["outcome"] in {"failed", "timed_out", "errored"}
+def run_confirmation(doc, copy, path, attempt):
+    global active_proc
+    if path not in doc["expected_scripts"]:
+        return "absent"
+    script_path = copy / path
+    if not script_path.is_file():
+        return "errored"
+    before_head, before_detached, before_clean = checkout_state(copy)
+    if before_head != doc["commit"] or not before_detached or not before_clean:
+        doc["checkout"]["invariant_ok"] = False
+        write_inventory(doc)
+        return "errored"
+    log_path = output_dir / doc["label"] / "confirmations" / (
+        f"{pathlib.Path(path).name}.attempt-{attempt}.log"
+    )
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    for name in (
+        "FM_HOME", "FM_STATE_OVERRIDE", "FM_DATA_OVERRIDE", "FM_ROOT_OVERRIDE",
+        "FM_PROJECTS_OVERRIDE", "FM_CONFIG_OVERRIDE", "FM_BACKEND",
+    ):
+        env.pop(name, None)
+    script_tmp = pathlib.Path(tempfile.mkdtemp(prefix=f"fm-confirm-{doc['label']}-"))
+    env["TMPDIR"] = str(script_tmp)
+    env["TMP"] = str(script_tmp)
+    outcome = "errored"
+    try:
+        with log_path.open("wb") as log_stream:
+            proc = subprocess.Popen(
+                ["/bin/bash", path], cwd=copy, env=env,
+                stdout=log_stream, stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            active_proc = proc
+            try:
+                returncode = proc.wait(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                stop_process_group(proc)
+                outcome = "timed_out"
+            else:
+                if returncode == 0:
+                    outcome = (
+                        "skipped" if first_meaningful_line(log_path).startswith("skip:")
+                        else "passed"
+                    )
+                elif returncode < 0:
+                    outcome = "errored"
+                else:
+                    outcome = "failed"
+    except OSError:
+        outcome = "errored"
+    finally:
+        active_proc = None
+        shutil.rmtree(script_tmp, ignore_errors=True)
+    after_head, after_detached, after_clean = checkout_state(copy)
+    if after_head != doc["commit"] or not after_detached or not after_clean:
+        doc["checkout"]["invariant_ok"] = False
+        outcome = "errored"
+        write_inventory(doc)
+    print(
+        "FM_TEST_COMPARE_CONFIRMATION "
+        f"side={doc['label']} script={path} attempt={attempt} outcome={outcome}",
+        flush=True,
+    )
+    return outcome
+
+
+def outcome_map(doc):
+    return {row["path"]: row["outcome"] for row in doc["scripts"]}
+
+
+def transition_entry(path, base_outcome, head_outcome, confirmation=None):
+    entry = {
+        "path": path,
+        "base_outcome": base_outcome,
+        "head_outcome": head_outcome,
     }
+    if confirmation is not None:
+        entry["base_observations"] = confirmation["base"]
+        entry["head_observations"] = confirmation["head"]
+    return entry
 
 
 def make_partition(base, head):
-    base_failures = failure_rows(base)
-    head_failures = failure_rows(head)
+    base_rows = outcome_map(base)
+    head_rows = outcome_map(head)
+    all_paths = sorted(set(base["expected_scripts"]) | set(head["expected_scripts"]))
     inherited = []
+    inherited_timeouts = []
     introduced = []
+    regressed = []
     fixed = []
-    for path in sorted(set(base_failures) & set(head_failures)):
-        inherited.append({
-            "path": path,
-            "base_outcome": base_failures[path]["outcome"],
-            "head_outcome": head_failures[path]["outcome"],
-        })
-    for path in sorted(set(head_failures) - set(base_failures)):
-        introduced.append({
-            "path": path,
-            "base_outcome": next(
-                (row["outcome"] for row in base["scripts"] if row["path"] == path),
-                "absent",
-            ),
-            "head_outcome": head_failures[path]["outcome"],
-        })
-    for path in sorted(set(base_failures) - set(head_failures)):
-        fixed.append({
-            "path": path,
-            "base_outcome": base_failures[path]["outcome"],
-            "head_outcome": next(
-                (row["outcome"] for row in head["scripts"] if row["path"] == path),
-                "absent",
-            ),
-        })
+    now_passing = []
+    no_longer_measured = []
+    flaky = []
+    comparable_outcomes = 0
+    for path in all_paths:
+        base_outcome = base_rows.get(path, "absent")
+        head_outcome = head_rows.get(path, "absent")
+        confirmation = confirmations.get(path)
+        entry = transition_entry(path, base_outcome, head_outcome, confirmation)
+        if base_outcome in {"passed", "failed"} and head_outcome in {"passed", "failed"}:
+            comparable_outcomes += 1
+        if base_outcome == head_outcome:
+            if base_outcome in {"failed", "errored"}:
+                inherited.append(entry)
+            elif base_outcome == "timed_out":
+                inherited_timeouts.append(entry)
+            continue
+        if head_outcome == "absent" and base_outcome != "absent":
+            no_longer_measured.append(entry)
+            continue
+        if head_outcome == "skipped" and base_outcome not in {"absent", "skipped"}:
+            no_longer_measured.append(entry)
+            continue
+        if base_outcome == "failed" and head_outcome == "passed":
+            fixed.append(entry)
+            continue
+        if head_outcome == "passed" and base_outcome in {"timed_out", "errored", "skipped"}:
+            now_passing.append(entry)
+            continue
+        candidate_bucket = None
+        if base_outcome == "absent" and head_outcome in {"failed", "timed_out", "errored"}:
+            candidate_bucket = introduced
+        elif base_outcome != "absent" and head_outcome in {"failed", "timed_out", "errored"}:
+            candidate_bucket = regressed
+        if candidate_bucket is not None:
+            if confirmation is not None and (
+                len(set(confirmation["base"])) != 1
+                or len(set(confirmation["head"])) != 1
+            ):
+                flaky.append(entry)
+            else:
+                candidate_bucket.append(entry)
+    comparison_total = len(all_paths)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "base_commit": base["commit"],
         "head_commit": head["commit"],
         "inventory_reconciled": bool(
@@ -1513,27 +1654,102 @@ def make_partition(base, head):
             and head["checkout"]["invariant_ok"]
         ),
         "inherited_failures": inherited,
+        "inherited_timeouts": inherited_timeouts,
         "head_introduced_failures": introduced,
-        "failures_fixed_by_head": fixed,
+        "regressed": regressed,
+        "fixed": fixed,
+        "now_passing": now_passing,
+        "no_longer_measured": no_longer_measured,
+        "flaky_transitions": flaky,
         "summary": {
             "inherited": len(inherited),
+            "inherited_timeouts": len(inherited_timeouts),
             "head_introduced": len(introduced),
-            "fixed_by_head": len(fixed),
+            "regressed": len(regressed),
+            "fixed": len(fixed),
+            "now_passing": len(now_passing),
+            "no_longer_measured": len(no_longer_measured),
+            "flaky": len(flaky),
+            "compared_outcomes": comparable_outcomes,
+            "comparison_total": comparison_total,
+            "coverage": f"{comparable_outcomes}/{comparison_total}",
         },
     }
 
 
-if timeout_seconds < 1:
-    raise SystemExit("fm-test-run: --script-timeout must be a positive integer")
-if output_dir.exists() and any(output_dir.iterdir()):
-    raise SystemExit(f"fm-test-run: --output-dir must be absent or empty: {output_dir}")
-output_dir.mkdir(parents=True, exist_ok=True)
+def confirm_regression_candidates(partition, base, head, copies):
+    paths = sorted(
+        row["path"]
+        for bucket in (partition["head_introduced_failures"], partition["regressed"])
+        for row in bucket
+    )
+    base_rows = outcome_map(base)
+    head_rows = outcome_map(head)
+    for path in paths:
+        observation = {
+            "base": [base_rows.get(path, "absent")],
+            "head": [head_rows.get(path, "absent")],
+        }
+        observation["base"].append(run_confirmation(base, copies["base"], path, 1))
+        observation["head"].append(run_confirmation(head, copies["head"], path, 1))
+        confirmations[path] = observation
 
-base_commit = resolve_commit(base_ref)
-head_commit = resolve_commit(head_ref)
-temp_root = pathlib.Path(tempfile.mkdtemp(prefix="fm-test-compare-"))
-inventories = []
+
+def current_partition():
+    if len(inventories) == 2:
+        partition = make_partition(*inventories)
+    else:
+        partition = {
+            "schema_version": 2,
+            "base_commit": base_commit,
+            "head_commit": head_commit,
+            "inventory_reconciled": False,
+            "checkout_invariants_ok": False,
+            "incomplete": True,
+            "inventories_available": len(inventories),
+        }
+    if termination is not None:
+        partition["termination"] = termination
+    return partition
+
+
+def write_current_partition():
+    atomic_json(output_dir / "partition.json", current_partition())
+
+
+def handle_signal(signum, _frame):
+    global termination
+    termination = {
+        "complete": False,
+        "signal": signal.Signals(signum).name,
+        "exit_code": 128 + signum,
+    }
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    if active_proc is not None:
+        stop_process_group(active_proc)
+    for doc in inventories:
+        write_inventory(doc)
+    write_current_partition()
+    raise SystemExit(128 + signum)
+
+
+base_commit = None
+head_commit = None
 try:
+    if timeout_seconds < 1:
+        raise RuntimeError("--script-timeout must be a positive integer")
+    if output_dir.exists():
+        if not output_dir.is_dir():
+            raise RuntimeError(f"--output-dir must be a directory: {output_dir}")
+        if any(output_dir.iterdir()):
+            raise RuntimeError(f"--output-dir must be absent or empty: {output_dir}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    base_commit = resolve_commit(base_ref)
+    head_commit = resolve_commit(head_ref)
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+    temp_root = pathlib.Path(tempfile.mkdtemp(prefix="fm-test-compare-"))
     copies = {}
     for label, commit in (("base", base_commit), ("head", head_commit)):
         copy = temp_root / label
@@ -1554,7 +1770,10 @@ try:
     run_inventory(base, copies["base"])
     run_inventory(head, copies["head"])
     partition = make_partition(base, head)
-    atomic_json(output_dir / "partition.json", partition)
+    write_current_partition()
+    confirm_regression_candidates(partition, base, head, copies)
+    partition = make_partition(base, head)
+    write_current_partition()
     for doc in (base, head):
         summary = doc["summary"]
         print(
@@ -1562,30 +1781,42 @@ try:
             f"side={doc['label']} commit={doc['commit']} total={summary['total']} "
             f"passed={summary['passed']} failed={summary['failed']} "
             f"timed_out={summary['timed_out']} skipped={summary['skipped']} "
-            f"errored={summary['errored']} accounted={str(doc['reconciliation']['accounted']).lower()} "
+            f"errored={summary['errored']} running={summary['running']} "
+            f"accounted={str(doc['reconciliation']['accounted']).lower()} "
             f"checkout_ok={str(doc['checkout']['invariant_ok']).lower()}",
             flush=True,
         )
     summary = partition["summary"]
     print(
         "FM_TEST_COMPARE_PARTITION "
-        f"inherited={summary['inherited']} head_introduced={summary['head_introduced']} "
-        f"fixed_by_head={summary['fixed_by_head']} output_dir={output_dir}",
+        f"inherited={summary['inherited']} inherited_timeouts={summary['inherited_timeouts']} "
+        f"head_introduced={summary['head_introduced']} regressed={summary['regressed']} "
+        f"fixed={summary['fixed']} now_passing={summary['now_passing']} "
+        f"no_longer_measured={summary['no_longer_measured']} flaky={summary['flaky']} "
+        f"compared_outcomes={summary['compared_outcomes']} coverage={summary['coverage']} "
+        f"output_dir={output_dir}",
         flush=True,
     )
     valid = partition["inventory_reconciled"] and partition["checkout_invariants_ok"]
-    raise SystemExit(1 if partition["head_introduced_failures"] or not valid else 0)
+    refused = bool(
+        partition["head_introduced_failures"]
+        or partition["regressed"]
+        or partition["no_longer_measured"]
+        or not valid
+    )
+    raise SystemExit(1 if refused else 0)
 except BaseException as exc:
     for doc in inventories:
         write_inventory(doc)
-    if len(inventories) == 2:
-        atomic_json(output_dir / "partition.json", make_partition(*inventories))
+    if output_dir.exists() and output_dir.is_dir():
+        write_current_partition()
     if isinstance(exc, SystemExit):
         raise
     print(f"fm-test-run: compare failed: {exc}", file=sys.stderr)
     raise SystemExit(2)
 finally:
-    shutil.rmtree(temp_root, ignore_errors=True)
+    if temp_root is not None:
+        shutil.rmtree(temp_root, ignore_errors=True)
 PY
 }
 
