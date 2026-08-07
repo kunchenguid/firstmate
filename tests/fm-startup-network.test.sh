@@ -156,9 +156,9 @@ $rec
 EOF
   printf '%s\n' $$ > "$home/state/.lock"
 
-  sleep 10 &
+  sleep 30 &
   claimant=$!
-  FM_SESSION_START_TIMEOUT=3 FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_OUT='acknowledged result' \
+  FM_SESSION_START_TIMEOUT=15 FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_OUT='acknowledged result' \
     run_stage "$home" "$root" start --locked 0 --harvest-pid "$claimant"
   run_stage "$home" "$root" wait 30 >/dev/null || fail "the claimed worker never published"
   worker_pid=$(sed -n 's/^pid=//p' "$home/state/.startup-network.status")
