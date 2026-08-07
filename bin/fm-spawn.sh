@@ -1426,9 +1426,19 @@ real_path_or_raw() {  # <path>
 # it. The refusal is also narrow - it fires only for a spawn that lands on that
 # one recorded path, so an unreadable record cannot stall the fleet, only the
 # reuse of its own slot, which `bin/fm-teardown.sh` releases.
+#
+# The refusal exits through the same path as the primary-checkout isolation
+# error above, which already leaves this spawn's own task endpoint behind:
+# spawn_abort_cleanup unwinds herdr projections and orca worktrees but never a
+# tmux window, so `firstmate:fm-<id>` survives and a bare retry then fails with
+# `window ... already exists`. That orphan is pre-existing behaviour shared by
+# both refusals rather than something this guard introduces, and cleaning it up
+# is deliberately out of scope here; the remedy clause below names the removal
+# step instead. Follow-up:
+# https://github.com/kunchenguid/firstmate/issues/1913
 validate_worktree_free_of_live_sibling() {  # <source> <inspect-target> <worktree-real-path>
   local source=$1 inspect_target=$2 wt_real=$3
-  local meta sib_id sib_wt sib_wt_real sib_backend sib_target sib_state
+  local meta sib_id sib_wt sib_wt_real sib_backend sib_target sib_state leftover
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     sib_id=$(basename "$meta" .meta)
@@ -1444,7 +1454,12 @@ validate_worktree_free_of_live_sibling() {  # <source> <inspect-target> <worktre
     sib_wt_real=$(real_path_or_raw "$sib_wt")
     [ "$sib_wt_real" = "$wt_real" ] || continue
     sib_backend=$(fm_backend_of_meta "$meta")
-    sib_target=$(fm_backend_target_of_meta "$meta")
+    # `|| true` because fm_backend_target_of_meta reports an absent endpoint by
+    # returning non-zero, and under this script's `set -eu` a bare assignment
+    # from it would abort the whole spawn with no diagnostic at all, leaving the
+    # unreadable verdict below unreachable. A record with no readable endpoint
+    # still refuses; it does not release the claim.
+    sib_target=$(fm_backend_target_of_meta "$meta" || true)
     if [ -n "$sib_target" ]; then
       sib_state=$(fm_backend_agent_state "$sib_backend" "$sib_target")
     else
@@ -1453,7 +1468,17 @@ validate_worktree_free_of_live_sibling() {  # <source> <inspect-target> <worktre
     case "$sib_state" in
       dead|missing) continue ;;
     esac
-    echo "error: $source handed back a worktree that task $sib_id already records as its own, and $sib_id's endpoint is $sib_state (shared worktree '$wt_real'); refusing to launch to avoid resetting a live worker's checkout. If $sib_id is finished, release its record with bin/fm-teardown.sh $sib_id and spawn again. Inspect target $inspect_target" >&2
+    # Name the endpoint this refused spawn leaves behind, in the terms of the
+    # backend that created it, so the retry sequence needs no source reading.
+    # An orca refusal is the one that leaves nothing: it fires before the
+    # terminal exists, and spawn_abort_cleanup unwinds the worktree orca did
+    # create, so that path skips the removal step entirely.
+    case "$BACKEND" in
+      orca) leftover="" ;;
+      tmux) leftover="remove this spawn's leftover task window with tmux kill-window -t '$inspect_target', because a bare retry collides with it and bin/fm-teardown.sh $ID cannot clear it (this spawn recorded no metadata); then " ;;
+      *) leftover="remove this spawn's leftover $BACKEND task endpoint '$inspect_target' if it outlived the abort, because a bare retry collides with it and bin/fm-teardown.sh $ID cannot clear it (this spawn recorded no metadata); then " ;;
+    esac
+    echo "error: $source handed back a worktree that task $sib_id already records as its own, and $sib_id's endpoint is $sib_state (shared worktree '$wt_real'); refusing to launch to avoid resetting a live worker's checkout. Recover in order: ${leftover}once $sib_id is finished, release its record with bin/fm-teardown.sh $sib_id; then spawn again. Inspect target $inspect_target" >&2
     exit 1
   done
 }

@@ -16,7 +16,9 @@
 # inventory and foreground command name are the two signals
 # fm_backend_tmux_agent_state reads, so listing or omitting the sibling's window
 # and naming an agent or a shell as its foreground command selects `alive`,
-# `missing`, or `unreadable` deterministically.
+# `missing`, or `unreadable` deterministically. One case needs no fake at all:
+# a record carrying no window= line names no endpoint to probe, and reaches the
+# same `unreadable` verdict from the metadata alone.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -120,6 +122,22 @@ write_sibling() {
     "yolo=off"
 }
 
+# write_endpointless_sibling <id> <worktree-path>: the same durable record with
+# no window= line at all. fm_backend_target_of_meta reports that absent endpoint
+# by returning non-zero, so this shape is what proves the guard reads the
+# unreadable verdict instead of dying on it under the spawn's `set -eu`.
+write_endpointless_sibling() {
+  local id=$1 worktree=$2
+  fm_write_meta "$HOME_DIR/state/$id.meta" \
+    "endpoint_task_id=$id" \
+    "worktree=$worktree" \
+    "project=$PROJ_DIR" \
+    "harness=codex" \
+    "kind=crewmate" \
+    "mode=no-mistakes" \
+    "yolo=off"
+}
+
 run_spawn() {
   local id=$1
   seed_brief "$id"
@@ -180,6 +198,12 @@ test_live_sibling_refuses() {
   [ "$status" -ne 0 ] || fail "spawn succeeded onto a live sibling's worktree"
   assert_contains "$out" "sibling-idle-worker" "the refusal did not name the offending task"
   assert_contains "$out" "$WT_REAL" "the refusal did not name the shared worktree"
+  # The refused spawn's own task window outlives the refusal (spawn_abort_cleanup
+  # never removes one), so a bare retry collides with it and no teardown can
+  # clear it - the record it would need was never written. The diagnostic has to
+  # name that window itself rather than leave the operator to derive it.
+  assert_contains "$out" "tmux kill-window -t 'firstmate:fm-$id'" \
+    "the refusal did not name the leftover task window blocking a retry"
   assert_absent "$HOME_DIR/state/$id.meta" "the refused spawn still recorded metadata"
   assert_no_agent_launched "the refused spawn still launched an agent onto the shared worktree"
   pass "a worktree recorded by a live sibling refuses the spawn"
@@ -234,9 +258,31 @@ test_unreadable_sibling_refuses() {
   status=$?
   [ "$status" -ne 0 ] || fail "spawn succeeded onto a sibling whose liveness could not be read"
   assert_contains "$out" "sibling-unknown-worker" "the refusal did not name the offending task"
+  assert_contains "$out" "$WT_REAL" "the refusal did not name the shared worktree"
   assert_contains "$out" "unreadable" "the refusal did not report the endpoint verdict"
   assert_no_agent_launched "the refused spawn still launched an agent onto the shared worktree"
   pass "an unreadable sibling endpoint refuses rather than releasing the claim"
+}
+
+# A sibling record with no window= line at all names no endpoint to probe.
+# fm_backend_target_of_meta signals that by returning non-zero, so the guard has
+# to tolerate the failure explicitly: a bare assignment from it would trip the
+# spawn's `set -eu` and exit 1 with no diagnostic, silently skipping the refusal
+# this record must produce. The assertions below therefore check both halves -
+# that the spawn refuses, and that it refused out loud.
+test_endpointless_sibling_refuses_with_a_diagnostic() {
+  local id=sibling-endpointless-a7 out status
+  make_case sibling-endpointless
+  write_endpointless_sibling sibling-no-window-worker "$WT_DIR"
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded onto a sibling record naming no endpoint"
+  assert_contains "$out" "error:" "the spawn died without any diagnostic"
+  assert_contains "$out" "sibling-no-window-worker" "the refusal did not name the offending task"
+  assert_contains "$out" "$WT_REAL" "the refusal did not name the shared worktree"
+  assert_contains "$out" "unreadable" "the refusal did not report the endpoint verdict"
+  assert_no_agent_launched "the refused spawn still launched an agent onto the shared worktree"
+  pass "a sibling record with no endpoint refuses with a named diagnostic"
 }
 
 # A record written through a symlinked prefix and with a trailing slash spells
@@ -254,6 +300,7 @@ test_differently_spelled_path_is_caught() {
   status=$?
   [ "$status" -ne 0 ] || fail "spawn succeeded onto a differently-spelled path for a live sibling's worktree"
   assert_contains "$out" "sibling-symlinked-worker" "the refusal did not name the offending task"
+  assert_contains "$out" "$WT_REAL" "the refusal did not name the resolved shared worktree"
   assert_no_agent_launched "the refused spawn still launched an agent onto the shared worktree"
   pass "a symlinked, trailing-slash spelling of the same worktree is still caught"
 }
@@ -263,6 +310,7 @@ test_live_sibling_refuses
 test_dead_sibling_still_spawns
 test_own_record_does_not_refuse_itself
 test_unreadable_sibling_refuses
+test_endpointless_sibling_refuses_with_a_diagnostic
 test_differently_spelled_path_is_caught
 
 echo "# all fm-spawn-sibling-worktree tests passed"
