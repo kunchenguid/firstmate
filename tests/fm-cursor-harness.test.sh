@@ -56,15 +56,23 @@ SH
 cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
+args=${FM_FAKE_CURSOR_AGENT_ARGS:-"/opt/cursor-agent --force --trust brief"}
 case "$*" in
   *"lstart="*)
     printf 'Mon Jan  1 00:00:00 2001\n'
     exit 0 ;;
+  # ppid= must be answered separately from args=/comm=: the ancestry walk in
+  # fm-harness.sh reads it as a number, and a fake that returns a command
+  # string for every -p query would make the walk error instead of ending.
+  *"ppid="*) exit 1 ;;
   *"-t "*)
-    printf '%s %s\n' "${FM_FAKE_CURSOR_AGENT_PID:-4242}" "${FM_FAKE_CURSOR_AGENT_ARGS:-"/opt/cursor-agent --force --trust brief"}"
+    printf '%s %s\n' "${FM_FAKE_CURSOR_AGENT_PID:-4242}" "$args"
+    exit 0 ;;
+  *"comm="*)
+    printf '%s\n' "${args%% *}"
     exit 0 ;;
   *"-p "*)
-    printf '%s\n' "${FM_FAKE_CURSOR_AGENT_ARGS:-"/opt/cursor-agent --force --trust brief"}"
+    printf '%s\n' "$args"
     exit 0 ;;
 esac
 exit 1
@@ -217,15 +225,16 @@ test_cursor_resolver_prefers_cursor_agent_over_agent() {
   pass "cursor resolver prefers cursor-agent over the agent alias"
 }
 
-test_cursor_resolver_falls_back_to_agent_alias() {
-  # Only the agent alias on PATH (cursor-agent absent): the resolver falls
-  # back to it, never failing just because the primary name is missing.
+test_cursor_resolver_falls_back_to_proven_agent_alias() {
+  # Only the agent alias on PATH (cursor-agent absent), and it PROVES itself
+  # Cursor through its own --help identity: the resolver falls back to it,
+  # never failing just because the primary name is missing.
   local rec id out status launch isolated_home
   id=cursor-alias-z5
   rec=$(make_cursor_case cursor-alias "$id")
   read_case_record "$rec"
   rm -f "$FAKEBIN_DIR/cursor-agent"
-  fm_fake_exit0 "$FAKEBIN_DIR" agent
+  fm_fake_cursor_alias "$FAKEBIN_DIR" agent
   isolated_home="$CASE_DIR/nohome"
   mkdir -p "$isolated_home"
   : > "$LAUNCH_LOG"
@@ -237,11 +246,69 @@ test_cursor_resolver_falls_back_to_agent_alias() {
     FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
   status=$?
-  expect_code 0 "$status" "cursor spawn with only the agent alias should succeed"
+  expect_code 0 "$status" "cursor spawn with a proven agent alias should succeed"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "'$FAKEBIN_DIR/agent' --force --trust" \
-    "cursor resolver must fall back to the agent alias"
-  pass "cursor resolver falls back to the agent alias when cursor-agent is absent"
+    "cursor resolver must fall back to a proven agent alias"
+  pass "cursor resolver falls back to a proven agent alias when cursor-agent is absent"
+}
+
+test_cursor_resolver_accepts_symlinked_agent_alias() {
+  # The alias proves itself structurally instead: it resolves into Cursor's own
+  # versioned install tree, so no probe is needed. Either signal alone suffices,
+  # so no single vendor string is load-bearing.
+  local rec id out status launch isolated_home
+  id=cursor-alias-link-za
+  rec=$(make_cursor_case cursor-alias-link "$id")
+  read_case_record "$rec"
+  rm -f "$FAKEBIN_DIR/cursor-agent"
+  fm_fake_cursor_alias_symlinked "$FAKEBIN_DIR" agent "$CASE_DIR/share"
+  isolated_home="$CASE_DIR/nohome"
+  mkdir -p "$isolated_home"
+  : > "$LAUNCH_LOG"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" HOME="$isolated_home" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "cursor spawn with a structurally proven alias should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "cursor-agent' --force --trust" \
+    "the alias must launch through its canonical Cursor path"
+  pass "cursor resolver accepts an agent alias that resolves into Cursor's install tree"
+}
+
+test_cursor_resolver_rejects_unrelated_agent() {
+  # An ordinary executable that merely happens to be named `agent`, and that
+  # exits 0 for everything including --help. Launching it with Cursor's flags
+  # is the hazard this refusal exists to prevent, so the spawn must fail rather
+  # than type a launch command.
+  local rec id out status isolated_home
+  id=cursor-alias-impostor-zb
+  rec=$(make_cursor_case cursor-alias-impostor "$id")
+  read_case_record "$rec"
+  rm -f "$FAKEBIN_DIR/cursor-agent"
+  fm_fake_unrelated_agent "$FAKEBIN_DIR"
+  isolated_home="$CASE_DIR/nohome"
+  mkdir -p "$isolated_home"
+  : > "$LAUNCH_LOG"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" HOME="$isolated_home" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1) && status=0 || status=$?
+  [ "$status" -ne 0 ] || fail "cursor spawn must refuse an unrelated executable named agent"
+  assert_contains "$out" "no verified cursor executable" \
+    "the refusal must name the missing verified cursor executable"
+  if [ -s "$LAUNCH_LOG" ]; then
+    fail "a refused cursor spawn must never type a launch command"
+  fi
+  pass "cursor resolver refuses an unrelated executable named agent"
 }
 
 test_cursor_resolver_unix_home_fallback() {
@@ -293,7 +360,7 @@ test_cursor_missing_binary_refusal() {
   expect_code 1 "$status" "a missing cursor executable should refuse the spawn"
   assert_contains "$out" "searched PATH for 'cursor-agent' and 'agent'" \
     "missing cursor refusal did not name the searched PATH names"
-  assert_contains "$out" "fallbacks '$isolated_home/.local/bin/cursor-agent' and '$isolated_home/.local/bin/agent'" \
+  assert_contains "$out" "plus '$isolated_home/.local/bin/cursor-agent' and '$isolated_home/.local/bin/agent'" \
     "missing cursor refusal did not name the searched fallback paths"
   assert_absent "$HOME_DIR/state/$id.meta" "missing cursor refusal wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "missing cursor refusal typed a launch command"
@@ -344,6 +411,60 @@ SH
   pass "non-cursor launch unsets CURSOR_AGENT; detection resolves to the actual target harness"
 }
 
+test_muse_launch_unsets_cursor_agent() {
+  # muse is markerless, so an inherited CURSOR_AGENT=1 would make a muse worker
+  # detect itself as cursor. It was the one verified harness the launch boundary
+  # omitted; the rule is now stated once for every non-cursor harness, so muse
+  # is covered by construction rather than by an added template exception.
+  # Marker absence is asserted INSIDE the launched process, not in the launch
+  # command's source text.
+  local rec id out status launch envlog probe_out xdg_config xdg_data
+  id=muse-under-cursor-zc
+  rec=$(make_cursor_case muse-under-cursor "$id")
+  read_case_record "$rec"
+  printf '%s\n' muse > "$HOME_DIR/config/crew-harness"
+  xdg_config="$CASE_DIR/xdgconfig"
+  xdg_data="$CASE_DIR/xdgdata"
+  mkdir -p "$xdg_config/muse" "$xdg_data"
+  printf '{"key":"test"}\n' > "$xdg_config/muse/auth.json"
+  cat > "$FAKEBIN_DIR/muse" <<'SH'
+#!/usr/bin/env bash
+printf 'cursor_agent=%s\n' "${CURSOR_AGENT:-unset}" >> "${FM_FAKE_MUSE_ENV:-/dev/null}"
+exec "${FM_HARNESS_PROBE:-true}"
+SH
+  chmod +x "$FAKEBIN_DIR/muse"
+  envlog="$CASE_DIR/muse.env"
+  : > "$envlog"
+  : > "$LAUNCH_LOG"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    CLAUDE_CONFIG_DIR='' CURSOR_AGENT=1 \
+    XDG_CONFIG_HOME="$xdg_config" XDG_DATA_HOME="$xdg_data" \
+    FM_FAKE_MUSE_EXECUTABLE="$FAKEBIN_DIR/muse" \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "muse spawn under CURSOR_AGENT=1 should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  case "$launch" in
+    "env -u CURSOR_AGENT "*) : ;;
+    *) fail "muse launch must unset CURSOR_AGENT at the launch boundary"$'\n'"launch: $launch" ;;
+  esac
+  # The fake ps otherwise reports a cursor-agent ancestor for every pid, which
+  # would answer this case from the fixture instead of from the marker.
+  probe_out=$(CURSOR_AGENT=1 PATH="$FAKEBIN_DIR:$PATH" \
+    FM_FAKE_CURSOR_AGENT_ARGS='/bin/bash' \
+    FM_HARNESS_PROBE="$HARNESS" FM_FAKE_MUSE_ENV="$envlog" \
+    bash -c "$launch")
+  [ "$probe_out" != cursor ] \
+    || fail "a muse worker still detected itself as cursor from an inherited marker"
+  assert_contains "$(cat "$envlog")" "cursor_agent=unset" \
+    "the muse child inherited the CURSOR_AGENT marker despite the launch-boundary unset"
+  pass "muse launch unsets CURSOR_AGENT inside the launched process"
+}
+
 # --- worker-server record: the cursor child daemon pid lands in meta ---------
 
 test_cursor_worker_server_recorded_at_spawn() {
@@ -364,6 +485,7 @@ test_cursor_worker_server_recorded_at_spawn() {
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
     FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID=$worker_pid \
     FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
@@ -383,7 +505,10 @@ test_cursor_worker_server_alias_uses_portable_identity() {
   rec=$(make_cursor_case cursor-worker-alias "$id")
   read_case_record "$rec"
   rm -f "$FAKEBIN_DIR/cursor-agent"
-  fm_fake_exit0 "$FAKEBIN_DIR" agent
+  # A PROVEN alias: it resolves into Cursor's own versioned install tree, so
+  # both the resolver and worker-server discovery accept it. An unrelated
+  # /opt/agent is covered by the negative cases above and below.
+  fm_fake_cursor_alias_symlinked "$FAKEBIN_DIR" agent "$CASE_DIR/share"
   ( exec sleep 300 ) &
   worker_pid=$!
   disown
@@ -394,7 +519,7 @@ test_cursor_worker_server_alias_uses_portable_identity() {
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
-    FM_FAKE_CURSOR_AGENT_ARGS='/opt/agent --force --trust brief' \
+    FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/agent --force --trust brief" \
     FM_FAKE_CURSOR_WORKER_PID=$worker_pid FM_PROC_ROOT_OVERRIDE="$CASE_DIR/no-proc" \
     FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
@@ -419,6 +544,7 @@ test_cursor_worker_server_absent_record_is_omitted() {
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
     FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID='' \
     FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
@@ -430,6 +556,126 @@ test_cursor_worker_server_absent_record_is_omitted() {
   pass "cursor spawn without a worker-server child records nothing and still succeeds"
 }
 
+# make_spaced_comm_proc <root> <pid> <starttime>
+# A synthetic /proc/<pid>/stat whose parenthesized comm contains spaces AND a
+# closing parenthesis, which is what shifts every positional field after it. A
+# reader that takes `$22` off the raw line records the wrong number here; the
+# shared parse strips through the FINAL `)` first and reads index 19 of the
+# remainder, so it records the real starttime.
+make_spaced_comm_proc() {
+  local root=$1 pid=$2 starttime=$3 i line
+  mkdir -p "$root/$pid"
+  line="$pid (node (worker server))"
+  # Fields 3..21: state plus the eighteen numeric fields before starttime.
+  line="$line S 1 1 1 0 -1 4194304"
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do line="$line $i"; done
+  line="$line $starttime 0 0"
+  printf '%s\n' "$line" > "$root/$pid/stat"
+}
+
+test_worker_server_identity_survives_spaced_comm() {
+  # Spawn's recorded identity and teardown's re-check must be the SAME parse:
+  # if they disagree on a spaced comm, the recycled-pid guard silently stops
+  # protecting anything.
+  local proc_root spawn_id teardown_id recycled
+  proc_root="$TMP_ROOT/spaced-proc"
+  make_spaced_comm_proc "$proc_root" 4242 987654
+
+  spawn_id=$(FM_PROC_ROOT_OVERRIDE="$proc_root" bash -c \
+    ". '$ROOT/bin/fm-cursor-lib.sh'; fm_process_identity 4242")
+  [ "$spawn_id" = "starttime=987654" ] \
+    || fail "spaced comm parsed as '$spawn_id', expected starttime=987654"
+
+  teardown_id=$(FM_PROC_ROOT_OVERRIDE="$proc_root" bash -c \
+    ". '$ROOT/bin/fm-cursor-lib.sh'; fm_process_identity 4242")
+  [ "$spawn_id" = "$teardown_id" ] \
+    || fail "spawn recorded '$spawn_id' but teardown read '$teardown_id'"
+
+  FM_PROC_ROOT_OVERRIDE="$proc_root" bash -c \
+    ". '$ROOT/bin/fm-cursor-lib.sh'; fm_process_identity_matches 4242 '$spawn_id'" \
+    || fail "the recorded identity must match the process it was recorded from"
+
+  # Same pid, different starttime: a recycled pid must never match.
+  recycled="$TMP_ROOT/spaced-proc-recycled"
+  make_spaced_comm_proc "$recycled" 4242 111111
+  if FM_PROC_ROOT_OVERRIDE="$recycled" bash -c \
+    ". '$ROOT/bin/fm-cursor-lib.sh'; fm_process_identity_matches 4242 '$spawn_id'"; then
+    fail "a recycled pid with a different starttime must not match the recorded identity"
+  fi
+  pass "worker-server identity is parsed identically at spawn and teardown for a spaced comm"
+}
+
+test_cursor_worker_server_reaped_after_spaced_comm_record() {
+  # End to end: spawn records the identity from a spaced-comm /proc, teardown
+  # re-checks it with the same parse, and the matching process is reaped.
+  local rec id out status worker_pid proc_root recorded
+  id=cursor-worker-spaced-zd
+  rec=$(make_cursor_case cursor-worker-spaced "$id")
+  read_case_record "$rec"
+  ( exec sleep 300 ) &
+  worker_pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$worker_pid" 2>/dev/null || fail "$id: worker stand-in did not start"
+  proc_root="$CASE_DIR/proc"
+  make_spaced_comm_proc "$proc_root" "$worker_pid" 5551212
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_PROC_ROOT_OVERRIDE="$proc_root" \
+    FM_FAKE_CURSOR_AGENT_ARGS="$FAKEBIN_DIR/cursor-agent --force --trust brief" \
+    FM_FAKE_CURSOR_AGENT_PID=4242 FM_FAKE_CURSOR_WORKER_PID=$worker_pid \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "cursor spawn with a spaced-comm worker-server should succeed"$'\n'"$out"
+  recorded=$(grep '^cursor_worker_server_start=' "$HOME_DIR/state/$id.meta" | tail -1)
+  [ "$recorded" = "cursor_worker_server_start=starttime=5551212" ] \
+    || fail "spawn recorded '$recorded', expected the spaced-comm starttime 5551212"
+  kill -KILL "$worker_pid" 2>/dev/null || true
+  pass "spawn records the spaced-comm starttime teardown later re-checks"
+}
+
+test_cursor_refuses_backends_without_worker_server_discovery() {
+  # zellij, orca, and cmux expose no pane process tree, so cursor's detached
+  # worker-server could never be recorded and would leak. The refusal must land
+  # before any endpoint, launch command, or task metadata exists.
+  local rec id out status backend
+  for backend in zellij orca cmux; do
+    id="cursor-backend-$backend-ze"
+    rec=$(make_cursor_case "cursor-backend-$backend" "$id")
+    read_case_record "$rec"
+    # Present the backend CLIs so the spawn reaches the cursor refusal rather
+    # than stopping earlier on a missing tool: the point of the case is that
+    # cursor is refused on an OTHERWISE USABLE backend.
+    fm_fake_exit0 "$FAKEBIN_DIR" zellij orca cmux
+    : > "$LAUNCH_LOG"
+    out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+      FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+      FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+      FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:$PATH" \
+      "$SPAWN" "$id" "$PROJ_DIR" --backend "$backend" --mode no-mistakes --yolo off 2>&1) \
+      && status=0 || status=$?
+    [ "$status" -ne 0 ] || fail "cursor spawn on backend=$backend must be refused"
+    assert_contains "$out" "backend=$backend" \
+      "the refusal must name the selected backend"
+    assert_contains "$out" "tmux, herdr" \
+      "the refusal must name the backends cursor supports"
+    assert_contains "$out" "worker-server" \
+      "the refusal must say worker-server discovery is unavailable"
+    if [ -e "$HOME_DIR/state/$id.meta" ]; then
+      fail "a refused cursor spawn on backend=$backend must not publish task metadata"
+    fi
+    if [ -s "$LAUNCH_LOG" ]; then
+      fail "a refused cursor spawn on backend=$backend must not type a launch command"
+    fi
+  done
+  pass "cursor refuses zellij, orca, and cmux before any endpoint, launch, or metadata"
+}
+
 # --- run all tests (order matters: simpler checks first) ---------------------
 
 test_cursor_env_marker
@@ -438,10 +684,16 @@ test_cursor_launch_command_typed
 test_cursor_model_flag_threaded
 test_cursor_effort_recorded_not_emitted
 test_cursor_resolver_prefers_cursor_agent_over_agent
-test_cursor_resolver_falls_back_to_agent_alias
+test_cursor_resolver_falls_back_to_proven_agent_alias
+test_cursor_resolver_accepts_symlinked_agent_alias
+test_cursor_resolver_rejects_unrelated_agent
 test_cursor_resolver_unix_home_fallback
 test_cursor_missing_binary_refusal
 test_non_cursor_launch_unsets_cursor_agent
+test_muse_launch_unsets_cursor_agent
 test_cursor_worker_server_recorded_at_spawn
 test_cursor_worker_server_alias_uses_portable_identity
 test_cursor_worker_server_absent_record_is_omitted
+test_worker_server_identity_survives_spaced_comm
+test_cursor_worker_server_reaped_after_spaced_comm_record
+test_cursor_refuses_backends_without_worker_server_discovery

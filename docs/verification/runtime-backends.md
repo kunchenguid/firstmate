@@ -747,6 +747,48 @@ CURSOR_CONVERSATION_ID=<conversation-uuid>
 `CLAUDECODE=1` and `CLAUDE_CODE_ENTRYPOINT=cli` leaked from a parent claude process.
 Fix: `env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT` in the cursor launch template.
 
+**Legacy `agent` alias proof (verified 2026-08-07, cursor-agent 2026.08.04-aaa8809, Linux):**
+
+Cursor installs both executable names, and both are symlinks into one versioned install tree.
+This is what lets the generic `agent` name be proven Cursor structurally, with no subprocess:
+
+```text
+$ ls -l ~/.local/bin/agent ~/.local/bin/cursor-agent
+lrwxrwxrwx 1 ... /home/<user>/.local/bin/agent -> /home/<user>/.local/share/cursor-agent/versions/2026.08.04-aaa8809/cursor-agent
+lrwxrwxrwx 1 ... /home/<user>/.local/bin/cursor-agent -> /home/<user>/.local/share/cursor-agent/versions/2026.08.04-aaa8809/cursor-agent
+$ readlink -f ~/.local/bin/agent
+/home/<user>/.local/share/cursor-agent/versions/2026.08.04-aaa8809/cursor-agent
+```
+
+The second, independent proof is the CLI's own `--help` identity, so no single signal is load-bearing:
+
+```text
+$ ~/.local/bin/agent --version
+2026.08.04-aaa8809
+$ ~/.local/bin/agent --help | grep -nE 'Start the Cursor Agent|CURSOR_API_ENDPOINT|api2\.cursor\.sh'
+3:Start the Cursor Agent
+15:                               CURSOR_API_ENDPOINT env var) (default:
+16:                               "https://api2.cursor.sh", env:
+17:                               CURSOR_API_ENDPOINT)
+86:  agent [prompt...]            Start the Cursor Agent
+```
+
+Note that `--version` alone is NOT proof: it prints a bare version string any program could print.
+A bare zero exit is not proof either, which is why the probe requires a Cursor-specific marker.
+Both signals accepted the real alias through `bin/fm-cursor-lib.sh`:
+
+```text
+$ bash -c '. bin/fm-cursor-lib.sh
+>   echo "resolve: $(fm_cursor_resolve_binary)"
+>   fm_cursor_path_is_cursor  "$HOME/.local/bin/agent" && echo "structural: yes"
+>   fm_cursor_probe_is_cursor "$HOME/.local/bin/agent" && echo "probe: yes"'
+resolve: /home/<user>/.local/share/cursor-agent/versions/2026.08.04-aaa8809/cursor-agent
+structural: yes
+probe: yes
+```
+
+The portable regressions in `tests/fm-cursor-harness.test.sh` and `tests/fm-remote-doctor.test.sh` pin both proofs and the refusal of an unrelated `agent`, and run with no Cursor installed.
+
 **Model support trap:**
 
 `--list-models` lists ~29 models, but the API accepts ~180.

@@ -8,14 +8,22 @@
 # lock-owning primary session before it may arm or rewake.
 # This file is sourced by scripts and has no side effects on source.
 
+# shellcheck source=bin/fm-cursor-lib.sh
+. "$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/fm-cursor-lib.sh"
+
 # Known harness command names; extend when a new adapter is verified.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|cursor-agent|^agent$|^pi$|^pi-signed$'
+# Cursor is deliberately absent from both lists below: its legacy `agent` alias
+# is too generic to identify by name, so Cursor is decided by the narrowed rule
+# in bin/fm-cursor-lib.sh instead. Adding `agent` here would classify any
+# unrelated executable named agent, and any path with an agent/ directory
+# component, as a lock-owning harness.
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
 
 # The same harnesses as exact executable names. Keep in sync with
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the
 # loose regex would also match ordinary firstmate paths such as
 # bin/fm-claude-stop-autoarm.sh.
-FM_HARNESS_NAMES=(claude codex opencode grok kimi cursor-agent agent pi-signed pi)
+FM_HARNESS_NAMES=(claude codex opencode grok kimi cursor-agent pi-signed pi)
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.
@@ -52,6 +60,9 @@ FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
   FM_HARNESS_IS_CLAUDE=0
+  # Cursor first, under its own narrowed identity rule (bin/fm-cursor-lib.sh):
+  # neither list above can carry its generic `agent` alias safely.
+  fm_cursor_process_matches "$comm" "$args" && return 0
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac

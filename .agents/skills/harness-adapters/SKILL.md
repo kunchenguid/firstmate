@@ -480,7 +480,8 @@ The positional prompt auto-submits (verified: no readiness-gated delivery needed
 
 | Fact | Value |
 |---|---|
-| Binary | Resolved at spawn time, not assumed from PATH: `cursor-agent` from PATH, then the legacy alias `agent` from PATH (fallback only - the name is too generic to trust as the primary pick), then `$HOME/.local/bin/cursor-agent` and `$HOME/.local/bin/agent`; spawning refuses only if none of them exists. `agent` is never a standalone harness entry. `bin/fm-remote-doctor.sh` mirrors this exact order in `fm_remote_doctor_resolve_harness` so remote readiness and local spawn agree. |
+| Binary | Resolved at spawn time, not assumed from PATH: `cursor-agent` from PATH, then the legacy alias `agent` from PATH, then `$HOME/.local/bin/cursor-agent` and `$HOME/.local/bin/agent`; spawning refuses when none of them is a VERIFIED Cursor executable. The generic `agent` name is accepted only after it proves itself Cursor, so an unrelated executable named agent is never launched with Cursor's flags. `agent` is never a standalone harness entry. `bin/fm-cursor-lib.sh` owns the order and the proof; `bin/fm-remote-doctor.sh` reproduces both so remote readiness and local spawn agree. |
+| Backends | tmux and herdr only. Cursor's background worker-server detaches from the pane and leaves the task worktree, so cleanup depends on the pid identity recorded at spawn from the pane's process tree - which only these two backends expose. A cursor spawn on zellij, orca, or cmux is refused before any endpoint, launch command, or task metadata exists, rather than shipping a task whose cleanup would leak that process. |
 | Busy state | Unknown until a semantic source is live-verified. The rendered `ctrl+c to stop` token is deliberately NOT a state source; stop and `preToolUse` hooks are supervision controls, so supervision falls back to stale-pane detection. |
 | Exit command | `/exit` (or `/quit`); needs ~1.5s settle before Enter. |
 | Interrupt | `C-c` (single Ctrl+C). Escape does NOT interrupt (verified 2026-08-04). |
@@ -501,6 +502,11 @@ The reverse-video cursor cell inside a dim ghost run (a single character wrapped
 Verification evidence: `docs/verification/runtime-backends.md`.
 
 **Liveness classification (fixed):** the tmux backend now recognizes Cursor's verified process identities through its harness and agent-name classifiers.
+
+**Process identity (narrowed):** `bin/fm-cursor-lib.sh` is the single owner of what counts as a Cursor process for harness detection, session-lock ancestry, tmux liveness, and worker-server discovery.
+An exact `cursor-agent` name is accepted; `MainThread`, a bare interpreter, or the legacy `agent` alias is accepted only with Cursor-specific executable or install-path evidence.
+A bare `MainThread`, an arbitrary executable whose basename is `agent`, and a path that merely contains an `agent/` directory component are all rejected.
+Worker-server discovery additionally binds the exact resolved Cursor executable rather than its basename, so a second install cannot capture another task's discovery.
 
 **CLAUDECODE leak (fixed):** a cursor worker launched from a claude firstmate inherited `CLAUDECODE=1` and `CLAUDE_CODE_ENTRYPOINT=cli`, which would misidentify it as claude.
 The launch template now unsets both variables before launching cursor-agent.

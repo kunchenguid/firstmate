@@ -170,6 +170,67 @@ SH
   done
 }
 
+# fm_fake_cursor_alias <dir> <name>
+# A Cursor executable installed under the given name whose --help carries
+# Cursor's own CLI identity - the PROBE half of the legacy-alias proof in
+# bin/fm-cursor-lib.sh. The banner and option text reproduce the real CLI's
+# (verified 2026-08-07, cursor-agent 2026.08.04-aaa8809; see
+# docs/verification/runtime-backends.md). Use this for a genuine alias; use
+# fm_fake_unrelated_agent for an impostor.
+fm_fake_cursor_alias() {
+  local dir=$1 name=$2
+  mkdir -p "$dir"
+  cat > "$dir/$name" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --help)
+    printf 'Usage: %s [options] [command] [prompt...]\n\n' "$(basename -- "$0")"
+    printf 'Start the Cursor Agent\n\n'
+    printf 'Options:\n'
+    printf '  -e, --endpoint <url>  Target API endpoint URL (can also use\n'
+    printf '                        CURSOR_API_ENDPOINT env var) (default:\n'
+    printf '                        "https://api2.cursor.sh", env: CURSOR_API_ENDPOINT)\n'
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/$name"
+}
+
+# fm_fake_cursor_alias_symlinked <dir> <name> <install-root>
+# A Cursor executable reachable under the given name through Cursor's own
+# versioned install tree - the STRUCTURAL half of the proof, which needs no
+# subprocess. The real installer links both ~/.local/bin/cursor-agent and
+# ~/.local/bin/agent to <root>/versions/<version>/cursor-agent.
+fm_fake_cursor_alias_symlinked() {
+  local dir=$1 name=$2 root=$3 real="$3/cursor-agent/versions/2026.08.04-aaa8809"
+  mkdir -p "$dir" "$real"
+  cat > "$real/cursor-agent" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$real/cursor-agent"
+  ln -sf "$real/cursor-agent" "$dir/$name"
+}
+
+# fm_fake_unrelated_agent <dir> [name]
+# An ordinary executable that merely happens to be named `agent`. It exits 0
+# for every invocation, including --help, so a check that accepts a bare zero
+# exit as proof of Cursor fails against it. Nothing may classify it as Cursor.
+fm_fake_unrelated_agent() {
+  local dir=$1 name=${2:-agent}
+  mkdir -p "$dir"
+  cat > "$dir/$name" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --help) printf 'Usage: agent [options]\n\nDeployment agent for the local host.\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/$name"
+}
+
 # fm_fake_version_tool <fakebin> <tool> <override-env-var> <default-version>
 # The stub answers `--version` with <override-env-var> when that variable is set
 # and non-empty, and with <default-version> otherwise; every other invocation

@@ -192,7 +192,7 @@ make_secondmate_linked_home_dir() {
 run_hook() {
   local dir=$1 stop_active=$2 home
   home=$(cd "$dir" && pwd)
-  printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+  printf '{"stop_hook_active":%s}' "$stop_active" | env -u CURSOR_AGENT CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
 }
 
 nonexistent_pid() {
@@ -369,7 +369,7 @@ test_hook_blocks_from_fm_home_state() {
   home="$TMP_ROOT/hook-fm-home-op"
   mkdir -p "$home/state"
   : > "$home/state/task1.meta"
-  out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  out=$(printf '{"stop_hook_active":false}' | env -u CURSOR_AGENT CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
   expect_code 2 "$status" "hook must inspect the active FM_HOME state dir"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   pass "fm-turnend-guard: blocks from active FM_HOME state, not only repo-root state"
@@ -417,7 +417,7 @@ test_hook_uses_state_override() {
   state="$TMP_ROOT/hook-state-override-active"
   mkdir -p "$home/state" "$state"
   : > "$state/task1.meta"
-  out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  out=$(printf '{"stop_hook_active":false}' | env -u CURSOR_AGENT CLAUDECODE=1 FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
   expect_code 2 "$status" "hook must let FM_STATE_OVERRIDE win over FM_HOME/state"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   pass "fm-turnend-guard: uses FM_STATE_OVERRIDE ahead of FM_HOME/state"
@@ -1936,7 +1936,7 @@ EOF
 run_hook_claude() {
   local dir=$1 stop_active=$2 home
   home=$(cd "$dir" && pwd)
-  printf '{"stop_hook_active":%s,"session_id":"sess-claude-mode"}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" --claude 2>&1
+  printf '{"stop_hook_active":%s,"session_id":"sess-claude-mode"}' "$stop_active" | env -u CURSOR_AGENT CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" --claude 2>&1
 }
 
 seed_claude_failure() {
@@ -1965,6 +1965,7 @@ install_integrated_autoarm() {
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
+  cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
   chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
   ln -s /bin/bash "$dir/fake-claude"
@@ -2111,7 +2112,7 @@ SH
         FM_TERMINAL_READY="$ready" \
         FM_TERMINAL_RELEASE="$release" \
         FM_TERMINAL_ONCE="$once" \
-        CLAUDECODE=1 FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" --claude \
+        env -u CURSOR_AGENT CLAUDECODE=1 FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" --claude \
           > "$guard_out" 2>&1
     printf '%s\n' "$?" > "$guard_status"
   ) &
@@ -2538,3 +2539,40 @@ test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_secondmate_reblocks_like_primary
+
+# This whole file simulates Claude by exporting CLAUDECODE=1. When the suite is
+# run FROM a Cursor primary, that session's own CURSOR_AGENT=1 is inherited by
+# every case, and fm-harness.sh checks the Cursor marker BEFORE CLAUDECODE - so
+# the cases would silently exercise Cursor's repair wording instead of Claude's.
+# Every Claude-pinned invocation therefore clears the foreign marker with
+# `env -u CURSOR_AGENT`. This case proves that hermeticity holds rather than
+# leaving it to a convention future edits could drop.
+test_claude_cases_are_hermetic_under_an_ambient_cursor_primary() {
+  local dir home resolved out status
+  dir=$(make_primary_dir "$TMP_ROOT/claude-hermetic")
+  home=$(cd "$dir" && pwd)
+  : > "$dir/state/task1.meta"
+
+  # 1. The parent environment really does look like a Cursor primary.
+  export CURSOR_AGENT=1
+  [ "${CURSOR_AGENT:-}" = 1 ] || fail "the ambient Cursor marker was not established"
+
+  # 2. Unhermetic detection resolves as cursor, which is the hazard.
+  resolved=$(CLAUDECODE=1 bash "$ROOT/bin/fm-harness.sh" 2>/dev/null)
+  [ "$resolved" = cursor ] \
+    || fail "expected the ambient marker to win without the unset, got '$resolved'"
+
+  # 3. The helper's own simulation resolves as claude.
+  resolved=$(env -u CURSOR_AGENT CLAUDECODE=1 bash "$ROOT/bin/fm-harness.sh" 2>/dev/null)
+  [ "$resolved" = claude ] \
+    || fail "the Claude simulation resolved as '$resolved', expected claude"
+
+  # 4. The shared guard still emits Claude's repair wording through run_hook.
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "the guard must still block under an ambient Cursor marker"
+  assert_contains "$out" "$REQUIRED_REASON" \
+    "the guard emitted non-Claude repair wording under an ambient Cursor marker"
+  unset CURSOR_AGENT
+  pass "fm-turnend-guard: Claude cases stay hermetic under an ambient Cursor primary"
+}
+test_claude_cases_are_hermetic_under_an_ambient_cursor_primary
