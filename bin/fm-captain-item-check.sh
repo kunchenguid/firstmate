@@ -1,22 +1,31 @@
 #!/usr/bin/env bash
-# fm-captain-item-check.sh - pre-surface guard for captain-facing risk and decision items.
+# fm-captain-item-check.sh - pre-surface guard for captain-facing items.
 #
 # WHY THIS EXISTS: a risk label, an internal mechanism, and a failure mode do
 # not give the captain enough information to weigh a tradeoff or correct a bad
 # premise.
 # A promise to write more clearly is not enforcement, so this check refuses an
-# item until it names the system's purpose, the business impact, both sides of
-# the cost tradeoff, and the exact decision being requested in plain language.
+# item until it reads as plain language, and - when the captain is being asked
+# to decide something - until it names the system's purpose, the business
+# impact, and the exact decision being requested.
 #
-# A risk or decision file contains exactly one plain-language wrapper with
-# these level-two sections, in order:
+# Two shapes of item exist, and the mode picks between them.
+#
+# `risk` and `decision` mode: exactly one plain-language wrapper with these
+# level-two sections, in order:
 #
 #   ## System and purpose
 #   ## Business impact
 #   ## Decision requested
 #
-# It may then carry an exact technical finding without forcing that finding to
-# become the captain-facing explanation:
+# `note` mode: any plain-language prose, with no required section, heading, or
+# length. It exists for captain-facing material that is read and annotated
+# rather than decided, where a mandated wrapper only pads the item. Only the
+# opaque-language rules below apply, so three sentences with no headings pass
+# and a sentence naming an internal mechanism still fails.
+#
+# Every mode may carry an exact technical finding without forcing that finding
+# to become the captain-facing explanation:
 #
 #   ## Verbatim technical finding
 #   <!-- fm-verbatim:start -->
@@ -32,14 +41,16 @@
 #   <one complete item>
 #   <!-- /fm-captain-item -->
 #
-# Use `decision` instead of `risk` in the opening marker when applicable.
+# Use `decision` or `note` instead of `risk` in the opening marker when
+# applicable; a single assembly may mix all three.
 # Request mode checks the assembly and every enclosed item.
 # `lavish-axi create` snapshots the request bytes once, runs request mode on
 # that snapshot, and stores those same bytes so checked and surfaced content
-# cannot diverge.
+# cannot diverge. For an annotation board it checks each declared item body the
+# same way, in note mode.
 #
 # Usage:
-#   fm-captain-item-check.sh <risk|decision|request> <file>
+#   fm-captain-item-check.sh <risk|decision|note|request> <file>
 #
 # Exit 0 = clear to surface.
 # Exit 1 = hard draft failure; fix every reported element first.
@@ -51,9 +62,9 @@ FILE=${2:-}
 SELF=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/${0##*/}
 
 case "$MODE" in
-  risk|decision|request) ;;
+  risk|decision|note|request) ;;
   *)
-    printf 'usage: %s <risk|decision|request> <file>\n' "${0##*/}" >&2
+    printf 'usage: %s <risk|decision|note|request> <file>\n' "${0##*/}" >&2
     exit 2
     ;;
 esac
@@ -77,7 +88,7 @@ check_request() {
       failed = 1
       exit 1
     }
-    /^<!-- fm-captain-item: (risk|decision) -->$/ {
+    /^<!-- fm-captain-item: (risk|decision|note) -->$/ {
       if (inside) refuse("nested item marker")
       inside = 1
       count += 1
@@ -224,25 +235,28 @@ else
   fi
 fi
 
-check_section '## System and purpose' \
-  'system-purpose' 'what the system does and why it exists' 12
-check_section '## Business impact' \
-  'business-impact' 'what breaks and which customers or business outcome feel it' 12
-check_section '## Decision requested' \
-  'decision' 'the specific call the captain is making' 8
+check_structured_item() {
+  local headings expected_headings system_body impact_body decision_body
 
-headings=$(printf '%s\n' "$CHECK_TEXT" | awk '/^## / { print }')
-expected_headings=$(cat <<'EOF'
+  check_section '## System and purpose' \
+    'system-purpose' 'what the system does and why it exists' 12
+  check_section '## Business impact' \
+    'business-impact' 'what breaks and which customers or business outcome feel it' 12
+  check_section '## Decision requested' \
+    'decision' 'the specific call the captain is making' 8
+
+  headings=$(printf '%s\n' "$CHECK_TEXT" | awk '/^## / { print }')
+  expected_headings=$(cat <<'EOF'
 ## System and purpose
 ## Business impact
 ## Decision requested
 EOF
 )
-if [ "$headings" != "$expected_headings" ]; then
-  add_failure 'invalid: structure - use the three required sections once each and in the documented order'
-fi
+  if [ "$headings" != "$expected_headings" ]; then
+    add_failure 'invalid: structure - use the three required sections once each and in the documented order'
+  fi
 
-if ! printf '%s\n' "$CHECK_TEXT" | awk '
+  if ! printf '%s\n' "$CHECK_TEXT" | awk '
   BEGIN {
     expected[1] = "## System and purpose"
     expected[2] = "## Business impact"
@@ -267,32 +281,47 @@ if ! printf '%s\n' "$CHECK_TEXT" | awk '
     if (section != 3) exit 1
   }
 '; then
-  add_failure 'invalid: structure - allow only one optional title, the three section bodies, and no prose after the decision question'
-fi
+    add_failure 'invalid: structure - allow only one optional title, the three section bodies, and no prose after the decision question'
+  fi
 
-system_body=$(section_body '## System and purpose')
-if [ -n "$system_body" ] && ! printf '%s\n' "$system_body" \
-  | grep -qiE '(^|[[:space:][:punct:]])(to|so|because|exists to)([[:space:][:punct:]]|$)'; then
-  add_failure 'missing: system-purpose - state why the system exists, not only what it does'
-fi
+  system_body=$(section_body '## System and purpose')
+  if [ -n "$system_body" ] && ! printf '%s\n' "$system_body" \
+    | grep -qiE '(^|[[:space:][:punct:]])(to|so|because|exists to)([[:space:][:punct:]]|$)'; then
+    add_failure 'missing: system-purpose - state why the system exists, not only what it does'
+  fi
 
-impact_body=$(section_body '## Business impact')
-if [ -n "$impact_body" ] && ! printf '%s\n' "$impact_body" \
-  | grep -qiE 'customer|shopper|merchant|buyer|subscriber|user|people|operator|team|business|Relvino'; then
-  add_failure 'missing: business-impact - name who feels the failure'
-fi
-if [ -n "$impact_body" ] && ! printf '%s\n' "$impact_body" \
-  | grep -qiE 'charge|bill|pay|lose|miss|wrong|delay|stop|fail|expose|privacy|revenue|trust|service|cashback|report|recommendation|purchase|campaign|message|harm|risk'; then
-  add_failure 'missing: business-impact - name the customer or business outcome that changes'
-fi
+  impact_body=$(section_body '## Business impact')
+  if [ -n "$impact_body" ] && ! printf '%s\n' "$impact_body" \
+    | grep -qiE 'customer|shopper|merchant|buyer|subscriber|user|people|operator|team|business|Relvino'; then
+    add_failure 'missing: business-impact - name who feels the failure'
+  fi
+  if [ -n "$impact_body" ] && ! printf '%s\n' "$impact_body" \
+    | grep -qiE 'charge|bill|pay|lose|miss|wrong|delay|stop|fail|expose|privacy|revenue|trust|service|cashback|report|recommendation|purchase|campaign|message|harm|risk'; then
+    add_failure 'missing: business-impact - name the customer or business outcome that changes'
+  fi
 
-decision_body=$(section_body '## Decision requested')
-if [ -n "$decision_body" ] && ! printf '%s\n' "$decision_body" | grep -q '?'; then
-  add_failure 'missing: decision - ask the specific call as a question'
-fi
-if [ -n "$decision_body" ] && ! printf '%s\n' "$decision_body" \
-  | grep -qiE 'approve|authorize|choose|decide|allow|keep|disable|accept|whether|which|should'; then
-  add_failure 'missing: decision - name the action or choice being decided'
+  decision_body=$(section_body '## Decision requested')
+  if [ -n "$decision_body" ] && ! printf '%s\n' "$decision_body" | grep -q '?'; then
+    add_failure 'missing: decision - ask the specific call as a question'
+  fi
+  if [ -n "$decision_body" ] && ! printf '%s\n' "$decision_body" \
+    | grep -qiE 'approve|authorize|choose|decide|allow|keep|disable|accept|whether|which|should'; then
+    add_failure 'missing: decision - name the action or choice being decided'
+  fi
+}
+
+# A note carries no mandated wrapper, so the only structural requirement is that
+# it actually says something. Everything else is left to the shared plain-
+# language rules below, which is the whole point of the mode.
+check_note_item() {
+  printf '%s\n' "$CHECK_TEXT" | grep -q '[^[:space:]]' \
+    || add_failure 'missing: content - write the item in plain language'
+}
+
+if [ "$MODE" = note ]; then
+  check_note_item
+else
+  check_structured_item
 fi
 
 # These terms are not forbidden in engineering work.

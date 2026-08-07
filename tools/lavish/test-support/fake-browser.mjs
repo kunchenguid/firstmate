@@ -53,8 +53,16 @@ function executePage(url, state, { submit }) {
   vm.runInContext(script, vm.createContext(window));
   if (submit) {
     const selected = document.querySelector('input[type="radio"]');
-    selected.checked = true;
-    selected.setAttribute('checked', '');
+    if (selected === null) {
+      // An annotation board has nothing to choose, so the batch is completed by
+      // typing a comment instead.
+      const note = document.querySelector('textarea[data-item-note]');
+      if (note === null) throw new Error('board offered neither a choice nor a comment box');
+      note.value = 'Fake browser comment.';
+    } else {
+      selected.checked = true;
+      selected.setAttribute('checked', '');
+    }
     document.querySelector('#review-button').click();
     document.querySelector('#submit-button').click();
     if (Object.keys(state.storage).length === 0) {

@@ -23,11 +23,11 @@ assert_required_failures() {
   local item=$1 rc element
   rc=$(run_check risk "$FIXTURES/negative/$item.txt")
   [ "$rc" -eq 1 ] || fail "$item returned $rc instead of rejecting the draft"
-  for element in system-purpose business-impact tradeoff.fix-cost tradeoff.leave-cost decision; do
+  for element in system-purpose business-impact decision; do
     grep -F "missing: $element" "$TMP_ROOT/output" >/dev/null \
       || fail "$item did not report missing $element"
   done
-  pass "$item: FAIL; missing system-purpose, business-impact, tradeoff.fix-cost, tradeoff.leave-cost, decision"
+  pass "$item: FAIL; missing system-purpose, business-impact, decision"
 }
 
 assert_positive_clear() {
@@ -63,6 +63,54 @@ test_decision_mode() {
   grep -F 'mode=decision' "$TMP_ROOT/output" >/dev/null \
     || fail "decision mode was not reported"
   pass "decision mode accepts a complete item"
+}
+
+test_note_mode_needs_no_structure() {
+  local rc item
+  for item in note-welcome-timing note-quiet-hours; do
+    rc=$(run_check note "$FIXTURES/positive/$item.md")
+    if [ "$rc" -ne 0 ]; then
+      cat "$TMP_ROOT/output" >&2
+      fail "$item returned $rc instead of clearing without a mandated wrapper"
+    fi
+    grep -F 'mode=note' "$TMP_ROOT/output" >/dev/null \
+      || fail "$item did not report note mode"
+  done
+
+  # The same headingless prose must still be refused as a decision item, so the
+  # new mode is an addition rather than a hole in the structured gate.
+  rc=$(run_check decision "$FIXTURES/positive/note-welcome-timing.md")
+  [ "$rc" -eq 1 ] || fail "decision mode accepted an item with no required sections"
+  pass "note mode clears plain prose with and without headings; decision mode still refuses it"
+}
+
+test_note_mode_keeps_the_opaque_gate() {
+  local rc
+  rc=$(run_check note "$FIXTURES/negative/note-jargon.txt")
+  [ "$rc" -eq 1 ] || fail "note mode accepted internal vocabulary"
+  grep -F "opaque: internal term 'ClickHouse'" "$TMP_ROOT/output" >/dev/null \
+    || fail "note mode did not name the internal term"
+  grep -F 'opaque: engineering reference' "$TMP_ROOT/output" >/dev/null \
+    || fail "note mode did not refuse implementation evidence"
+
+  # Dropping the wrapper must not drop the length floor into nothing at all.
+  rc=$(run_check note "$FIXTURES/negative/note-empty.txt")
+  [ "$rc" -eq 1 ] || fail "note mode accepted an empty item"
+  grep -F 'missing: content' "$TMP_ROOT/output" >/dev/null \
+    || fail "note mode did not report empty content"
+  pass "note mode still refuses internal vocabulary and empty items"
+}
+
+test_note_mode_drops_the_padding_heuristics() {
+  local rc
+  printf 'The nightly report is late.\n' > "$TMP_ROOT/terse-note.md"
+  rc=$(run_check note "$TMP_ROOT/terse-note.md")
+  [ "$rc" -eq 0 ] || fail "note mode refused a single plain sentence"
+  for element in system-purpose business-impact decision structure; do
+    grep -F "$element" "$TMP_ROOT/output" >/dev/null \
+      && fail "note mode still enforces $element"
+  done
+  pass "note mode drops word counts, required headings, and the impact and decision heuristics"
 }
 
 test_opaque_mechanism_fails() {
@@ -124,15 +172,28 @@ test_request_assembly() {
     printf '<!-- /fm-captain-item -->\n\n'
     printf '<!-- fm-captain-item: decision -->\n'
     cat "$FIXTURES/positive/risk-privacy.md"
+    printf '<!-- /fm-captain-item -->\n\n'
+    printf '<!-- fm-captain-item: note -->\n'
+    cat "$FIXTURES/positive/note-welcome-timing.md"
     printf '<!-- /fm-captain-item -->\n'
   } > "$TMP_ROOT/request.md"
 
   rc=$(run_check request "$TMP_ROOT/request.md")
-  [ "$rc" -eq 0 ] || fail "complete two-item request did not clear"
+  [ "$rc" -eq 0 ] || fail "complete three-item request did not clear"
   grep -F 'mode=request' "$TMP_ROOT/output" >/dev/null \
     || fail "request mode did not report its verdict"
-  grep -F 'items=2' "$TMP_ROOT/output" >/dev/null \
-    || fail "request mode did not report both checked items"
+  grep -F 'items=3' "$TMP_ROOT/output" >/dev/null \
+    || fail "request mode did not report every checked item"
+
+  {
+    printf '<!-- fm-captain-item: note -->\n'
+    cat "$FIXTURES/negative/note-jargon.txt"
+    printf '<!-- /fm-captain-item -->\n'
+  } > "$TMP_ROOT/request-bad-note.md"
+  rc=$(run_check request "$TMP_ROOT/request-bad-note.md")
+  [ "$rc" -eq 1 ] || fail "request mode accepted a note item full of internal vocabulary"
+  grep -F 'item 1 (note) failed' "$TMP_ROOT/output" >/dev/null \
+    || fail "request mode did not attribute the failure to the note item"
 
   printf 'Unchecked introduction.\n%s' "$(cat "$TMP_ROOT/request.md")" \
     > "$TMP_ROOT/request-unchecked.md"
@@ -163,8 +224,10 @@ test_wiring() {
   grep -F 'Creation snapshots the request bytes once' \
     "$ROOT/.agents/skills/lavish-decisions/SKILL.md" >/dev/null \
     || fail "lavish-decisions does not bind creation to the checked request"
-  grep -F 'beforeCreate: () => validateCaptainRequest(home, request),' "$ROOT/tools/lavish/src/cli.mjs" >/dev/null \
+  grep -F 'await validateCaptainRequest(home, request);' "$ROOT/tools/lavish/src/cli.mjs" >/dev/null \
     || fail "Lavish creation does not wire the request check before durable creation"
+  grep -F 'await validateCaptainItems(home, definition);' "$ROOT/tools/lavish/src/cli.mjs" >/dev/null \
+    || fail "Lavish creation does not check annotation item bodies before durable creation"
   grep -F 'request,' "$ROOT/tools/lavish/src/cli.mjs" >/dev/null \
     || fail "Lavish creation does not pass the checked bytes to durable creation"
   pass "always-loaded and Lavish creation paths invoke the check"
@@ -173,6 +236,9 @@ test_wiring() {
 test_negative_controls
 test_positive_controls
 test_decision_mode
+test_note_mode_needs_no_structure
+test_note_mode_keeps_the_opaque_gate
+test_note_mode_drops_the_padding_heuristics
 test_opaque_mechanism_fails
 test_unchecked_wrapper_prose_fails
 test_verbatim_block_preserves_technical_detail

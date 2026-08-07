@@ -23,7 +23,7 @@ Load `lavish-decisions` before completing the normal collect and consume workflo
 
 Establish the exact decision id, resolved Firstmate home, helper output, and named Chrome session before diagnosing the incident.
 Preserve any downloaded answer JSON, durable pickup payload, and unsubmitted captain input.
-Do not edit `request.md` or `manifest.toon`, because their digest and ordered questions are immutable.
+Do not edit `request.md` or `manifest.toon`, because their digest and ordered question or item set are immutable.
 
 ## Diagnose in route order
 

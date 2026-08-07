@@ -1,8 +1,8 @@
 ---
 name: lavish-decisions
 description: >-
-  Agent-only workflow for creating durable captain-facing Lavish decisions.
-  Use before creating, repairing, or presenting a multi-option captain choice; route it through the durable file protocol, with the Firstmate board wrapper as the sole supported browser surface, never a hand-authored page or built-in question tool.
+  Agent-only workflow for creating durable captain-facing Lavish decisions and annotation boards.
+  Use before creating, repairing, or presenting a multi-option captain choice, or before asking the captain to comment on material without choosing anything; route it through the durable file protocol, with the Firstmate board wrapper as the sole supported browser surface, never a hand-authored page or built-in question tool.
   Never use an upstream served session, server, or poll for this workflow.
   Do not use it for read-only reports or simple yes/no questions.
 user-invocable: false
@@ -15,19 +15,38 @@ metadata:
 Create a self-contained, durable decision that the captain can answer when convenient, even when no firstmate process is running.
 Use the firstmate-owned `lavish-axi` file protocol documented in `tools/lavish/README.md`.
 
+## Pick the mode first
+
+Ask what the captain is being asked to do, and pick before writing anything.
+
+- The captain is choosing between options: that is a **decision**, defined with `--questions`.
+- The captain is reading material and reacting to it: that is an **annotation**, defined with `--items`.
+  Each item gets its own comment box, plus one overall note.
+
+"Turn this into something I can comment on", "I want to react to each of these", and any ask that names no choice are all annotations.
+**Never invent questions to fit material the captain only wants to comment on.**
+Two-option questions manufactured around an artifact are worse than useless: they put words in the captain's mouth and hide the free text under a choice nobody asked for.
+If a decision seems to need zero questions, it is an annotation; `lavish-axi create` will refuse an empty question array and say so.
+
+An annotation item is a captain-facing item like any other, so it goes through `bin/fm-captain-item-check.sh` too, in `note` mode.
+That mode mandates no sections, no headings, and no length: write the item the way you would say it, and the check refuses it only for internal vocabulary.
+Do not pad an item to satisfy a wrapper it does not have.
+
 ## Create
 
 1. Reconcile the proposed decision against live fleet state immediately before writing it.
 2. Write each captain-facing risk or decision as the plain-language wrapper required by `AGENTS.md` section 9.
    When relaying exact source text, keep it unaltered in the optional verbatim block rather than rewriting or removing its technical detail.
-3. Define the ordered questions and options in the JSON shape documented by the tool.
+3. Define the ordered questions and options, or the ordered annotation items, in the JSON shape documented by the tool.
    Use nonempty unique lowercase-slug keys.
+   Item keys are how the captain's comments come back to you, so name them after the thing being commented on.
 4. Choose a durable `$FM_HOME`-relative destination below `data/`.
    This is where intake commits the validated answer before writing its receipt.
 5. Assemble the exact Markdown request from one or more items using the item boundaries and multi-item concatenation contract in the header of `bin/fm-captain-item-check.sh`.
    Put no captain-facing prose outside those boundaries.
-6. Run `lavish-axi create` with a stable decision id, title, that exact Markdown request, question JSON, and destination, and retain its emitted `Run:` line.
+6. Run `lavish-axi create` with a stable decision id, title, that exact Markdown request, the question or item JSON, and destination, and retain its emitted `Run:` line.
    Creation snapshots the request bytes once, runs request mode against that snapshot, and stores those same bytes; a separate earlier check grants no approval, and any failure refuses creation.
+   Annotation item bodies clear the same gate in note mode, reported by declared item number.
 7. From firstmate's environment, run `lavish show <id>` and `lavish inbox` to verify the exact durable request.
 8. Choose exactly one captain surface.
    For a terminal answer, surface only the title and the exact `Run:` line emitted by `lavish-axi create`:
@@ -49,7 +68,7 @@ Always carrying the explicit home is slightly noisier than asking the captain to
 The browser wrapper must receive that same explicit resolved home so its dedicated profile and recovery check stay bound to the decision's fleet home.
 
 Do not edit `request.md` or `manifest.toon` after surfacing the decision.
-Their digest and ordered question set are the immutable contract.
+Their digest and ordered question or item set are the immutable contract.
 
 ## Consume
 
@@ -61,6 +80,7 @@ If that proof is unavailable, accept the fail-closed refusal and rely on the dur
 When a destination appears:
 
 1. Read the full validated answer from the declared destination.
+   An annotation answer carries one `annotations` entry per item key; an empty note means the captain read that item and said nothing, which is not the same as an item that was never surfaced.
 2. Revalidate any execution preconditions that may have changed while the decision waited.
 3. Act on the captain's complete batch without weakening or reinterpreting it.
 4. Update the owning task or backlog record so the captain-gated thread is durably closed.

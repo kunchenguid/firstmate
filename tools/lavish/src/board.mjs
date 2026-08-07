@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import MarkdownIt from 'markdown-it';
-import { ANSWER_SCHEMA_VERSION } from './protocol.mjs';
+import { ANNOTATION_MODE, ANSWER_SCHEMA_VERSION } from './protocol.mjs';
 
 export const SUBMIT_MARKER = `LAVISH-SUBMIT v${ANSWER_SCHEMA_VERSION}`;
 
@@ -11,6 +11,21 @@ const markdown = new MarkdownIt({
   linkify: true,
   typographer: false,
 });
+
+// The request is stored exactly as it was checked, markers included, because
+// the digest binds those bytes. They are firstmate's checking scaffolding
+// though, so rendering them would put `<!-- fm-captain-item: note -->` in front
+// of the captain as literal text.
+const CHECK_MARKER = /^<!--\s*(?:fm-captain-item:\s*[a-z]+|\/fm-captain-item|fm-verbatim:(?:start|end))\s*-->\s*$/;
+
+function renderRequest(requestText) {
+  return markdown.render(
+    requestText
+      .split('\n')
+      .filter((line) => !CHECK_MARKER.test(line))
+      .join('\n'),
+  );
+}
 
 function escapeHtml(value) {
   return String(value)
@@ -118,6 +133,34 @@ function questionMarkup(question, index, visuals) {
   </section>`;
 }
 
+function itemMarkup(item, index, visuals) {
+  return `<section
+    class="question card"
+    data-item-key="${escapeHtml(item.key)}"
+    aria-labelledby="item-${index}-title"
+  >
+    <header class="question-header">
+      <span class="question-number">${index + 1}</span>
+      <div>
+        <p class="eyebrow">${escapeHtml(item.key)}</p>
+        <h2 id="item-${index}-title">${escapeHtml(item.title)}</h2>
+      </div>
+    </header>
+    ${item.body === '' ? '' : `<div class="item-body">${markdown.render(item.body)}</div>`}
+    ${visualGallery(item.visuals ?? [], visuals, `Evidence for ${item.title}`)}
+    <label class="annotation-label" for="item-${index}-note">
+      Your comment on this item
+    </label>
+    <textarea
+      id="item-${index}-note"
+      rows="4"
+      data-item-note
+      data-item-key="${escapeHtml(item.key)}"
+      placeholder="Anything you want to say about this item"
+    ></textarea>
+  </section>`;
+}
+
 function boardStyles(tokens) {
   return `${tokens}
 * { box-sizing: border-box; }
@@ -187,6 +230,15 @@ h2 { margin: 2px 0 0; font-size: clamp(20px, 3vw, var(--h7-size)); line-height: 
 .option-choice strong { display: block; font-weight: var(--fw-semibold); }
 .option-choice small { color: var(--text-tertiary); font-family: var(--font-mono); }
 .annotation-label { display: block; margin: 14px 0 6px; color: var(--text-secondary); font-size: var(--sm-size); font-weight: var(--fw-medium); }
+.item-body { margin: -8px 0 4px; }
+.item-body > :first-child { margin-top: 0; }
+.item-body > :last-child { margin-bottom: 0; }
+.item-body p, .item-body li { color: var(--text-secondary); }
+.item-body strong { color: var(--text-primary); }
+.item-body a { color: var(--text-link); }
+.item-body code { border-radius: var(--radius-xs); background: var(--bg-subtle); padding: 2px 6px; font-family: var(--font-mono); }
+.item-body pre { overflow: auto; border-radius: var(--radius-md); background: var(--bg-sunken); padding: 16px; }
+.item-body blockquote { margin-left: 0; border-left: 3px solid var(--ruby-green-ink); padding-left: 16px; color: var(--text-secondary); }
 textarea { width: 100%; resize: vertical; border: 1px solid var(--border-default); border-radius: var(--radius-md); background: var(--bg-surface); color: var(--text-primary); padding: 11px 12px; }
 textarea::placeholder { color: var(--text-placeholder); }
 textarea:focus { outline: 2px solid var(--border-focus); outline-offset: 1px; border-color: transparent; }
@@ -222,17 +274,116 @@ textarea:focus { outline: 2px solid var(--border-focus); outline-offset: 1px; bo
 }`;
 }
 
-function boardScript(decision) {
-  const clientManifest = {
-    decision_id: decision.id,
-    home_marker: decision.home,
-    request_sha256: decision.manifest.request_sha256,
-    questions: decision.manifest.questions.map((question) => ({
-      key: question.key,
-      prompt: question.prompt,
-      options: question.options,
-    })),
+// The two modes differ only in what a payload carries, what the review step
+// lists, and what makes a batch complete. Everything after review - durable
+// persistence, download, confirmation - is deliberately one shared path.
+function annotationScriptParts() {
+  return {
+    buildEntries: `annotations: MANIFEST.items.map((item) => ({
+        key: item.key,
+        note: form.querySelector(
+          'textarea[data-item-note][data-item-key="' + item.key + '"]',
+        ).value,
+      })),`,
+    renderEntries: `for (const annotation of payload.annotations) {
+      if (!annotation.note) continue;
+      const entry = MANIFEST.items.find((candidate) => candidate.key === annotation.key);
+      const item = document.createElement('article');
+      item.className = 'review-item';
+      const heading = document.createElement('h3');
+      heading.textContent = entry.title;
+      item.append(heading);
+      addReviewLine(item, annotation.note);
+      reviewList.append(item);
+    }`,
+    // Answer files are write-once, so an empty submit would burn the board
+    // without telling firstmate anything.
+    incompleteCheck: `const payload = buildPayload();
+    const empty = payload.annotations.every((annotation) => annotation.note.trim() === '')
+      && payload.note.trim() === '';
+    if (empty) {
+      formError.textContent = 'Add a comment on at least one item, or an overall note.';
+      formError.hidden = false;
+      return;
+    }`,
   };
+}
+
+function decisionScriptParts() {
+  return {
+    buildEntries: `answers: MANIFEST.questions.map((question) => {
+        const selected = form.querySelector(
+          'input[data-question-key="' + question.key + '"]:checked',
+        );
+        const questionNote = form.querySelector(
+          'textarea[data-question-note][data-question-key="' + question.key + '"]',
+        );
+        const optionComments = Object.create(null);
+        for (const input of form.querySelectorAll(
+          'textarea[data-option-comment][data-question-key="' + question.key + '"]',
+        )) {
+          if (input.value !== '') optionComments[input.dataset.optionValue] = input.value;
+        }
+        return {
+          key: question.key,
+          value: selected?.value,
+          question_note: questionNote.value,
+          option_comments: optionComments,
+        };
+      }),`,
+    renderEntries: `for (const answer of payload.answers) {
+      const question = MANIFEST.questions.find((candidate) => candidate.key === answer.key);
+      const option = question.options.find((candidate) => candidate.value === answer.value);
+      const item = document.createElement('article');
+      item.className = 'review-item';
+      const heading = document.createElement('h3');
+      heading.textContent = question.prompt;
+      item.append(heading);
+      addReviewLine(item, option.label + ' [' + option.value + ']', 'selection');
+      if (answer.question_note) addReviewLine(item, 'Question note: ' + answer.question_note);
+      for (const [value, comment] of Object.entries(answer.option_comments)) {
+        addReviewLine(item, 'Comment on ' + value + ': ' + comment);
+      }
+      reviewList.append(item);
+    }`,
+    incompleteCheck: `const missing = MANIFEST.questions.find((question) => !form.querySelector(
+      'input[data-question-key="' + question.key + '"]:checked',
+    ));
+    if (missing) {
+      formError.textContent = 'Choose one option for: ' + missing.prompt;
+      formError.hidden = false;
+      form.querySelector('[data-question-key="' + missing.key + '"]').scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+      });
+      return;
+    }`,
+  };
+}
+
+function boardScript(decision) {
+  const annotation = decision.manifest.mode === ANNOTATION_MODE;
+  const clientManifest = annotation
+    ? {
+      decision_id: decision.id,
+      home_marker: decision.home,
+      request_sha256: decision.manifest.request_sha256,
+      items: decision.manifest.items.map((item) => ({
+        key: item.key,
+        title: item.title,
+      })),
+    }
+    : {
+      decision_id: decision.id,
+      home_marker: decision.home,
+      request_sha256: decision.manifest.request_sha256,
+      questions: decision.manifest.questions.map((question) => ({
+        key: question.key,
+        prompt: question.prompt,
+        options: question.options,
+      })),
+    };
+  const parts = annotation ? annotationScriptParts() : decisionScriptParts();
   return `(() => {
   'use strict';
   const MANIFEST = ${scriptJson(clientManifest)};
@@ -256,26 +407,7 @@ function boardScript(decision) {
       decision_id: MANIFEST.decision_id,
       home_marker: MANIFEST.home_marker,
       request_sha256: MANIFEST.request_sha256,
-      answers: MANIFEST.questions.map((question) => {
-        const selected = form.querySelector(
-          'input[data-question-key="' + question.key + '"]:checked',
-        );
-        const questionNote = form.querySelector(
-          'textarea[data-question-note][data-question-key="' + question.key + '"]',
-        );
-        const optionComments = Object.create(null);
-        for (const input of form.querySelectorAll(
-          'textarea[data-option-comment][data-question-key="' + question.key + '"]',
-        )) {
-          if (input.value !== '') optionComments[input.dataset.optionValue] = input.value;
-        }
-        return {
-          key: question.key,
-          value: selected?.value,
-          question_note: questionNote.value,
-          option_comments: optionComments,
-        };
-      }),
+      ${parts.buildEntries}
       note: overallNote.value,
     };
   }
@@ -289,21 +421,7 @@ function boardScript(decision) {
 
   function renderReview(payload) {
     reviewList.replaceChildren();
-    for (const answer of payload.answers) {
-      const question = MANIFEST.questions.find((candidate) => candidate.key === answer.key);
-      const option = question.options.find((candidate) => candidate.value === answer.value);
-      const item = document.createElement('article');
-      item.className = 'review-item';
-      const heading = document.createElement('h3');
-      heading.textContent = question.prompt;
-      item.append(heading);
-      addReviewLine(item, option.label + ' [' + option.value + ']', 'selection');
-      if (answer.question_note) addReviewLine(item, 'Question note: ' + answer.question_note);
-      for (const [value, comment] of Object.entries(answer.option_comments)) {
-        addReviewLine(item, 'Comment on ' + value + ': ' + comment);
-      }
-      reviewList.append(item);
-    }
+    ${parts.renderEntries}
     if (payload.note) {
       const item = document.createElement('article');
       item.className = 'review-item';
@@ -337,18 +455,7 @@ function boardScript(decision) {
   }
 
   document.querySelector('#review-button').addEventListener('click', () => {
-    const missing = MANIFEST.questions.find((question) => !form.querySelector(
-      'input[data-question-key="' + question.key + '"]:checked',
-    ));
-    if (missing) {
-      formError.textContent = 'Choose one option for: ' + missing.prompt;
-      formError.hidden = false;
-      form.querySelector('[data-question-key="' + missing.key + '"]').scrollIntoView({
-        behavior: 'smooth',
-        block: 'center',
-      });
-      return;
-    }
+    ${parts.incompleteCheck}
     formError.hidden = true;
     renderReview(buildPayload());
     form.hidden = true;
@@ -391,18 +498,28 @@ function boardScript(decision) {
 }
 
 export async function renderBoard(decision) {
+  const annotation = decision.manifest.mode === ANNOTATION_MODE;
   const [tokens, visuals] = await Promise.all([
     readFile(fileURLToPath(new URL('./relvino-tokens.css', import.meta.url)), 'utf8'),
     loadVisuals(decision),
   ]);
-  const assignedVisuals = new Set(
-    decision.manifest.questions.flatMap((question) => question.visuals ?? []),
-  );
+  const entries = annotation ? decision.manifest.items : decision.manifest.questions;
+  const assignedVisuals = new Set(entries.flatMap((entry) => entry.visuals ?? []));
   const contextVisuals = [...visuals.keys()].filter((filename) => !assignedVisuals.has(filename));
-  const questions = decision.manifest.questions
-    .map((question, index) => questionMarkup(question, index, visuals))
+  const cards = entries
+    .map((entry, index) => (annotation
+      ? itemMarkup(entry, index, visuals)
+      : questionMarkup(entry, index, visuals)))
     .join('\n');
   const title = escapeHtml(decision.manifest.title);
+  const kindLabel = annotation ? 'Lavish annotation' : 'Lavish decision';
+  const subtitle = annotation
+    ? 'Comment on any item, add an overall note, then submit one complete batch.'
+    : 'Review the full context, annotate any option or question, then submit one complete batch.';
+  const reviewButtonLabel = annotation ? 'Review comments' : 'Review answers';
+  const reviewTitle = annotation
+    ? 'Submit these comments?'
+    : 'Submit this complete answer batch?';
   return `<!doctype html>
 <html lang="en" data-theme="dark">
 <head>
@@ -412,27 +529,27 @@ export async function renderBoard(decision) {
   <title>Lavish - ${title}</title>
   <style>${boardStyles(tokens)}</style>
 </head>
-<body>
+<body data-lavish-mode="${annotation ? 'annotation' : 'decision'}">
   <main>
     <header class="masthead">
-      <div class="brand"><span class="brand-mark">R</span><strong>Relvino</strong><span>Lavish decision</span></div>
+      <div class="brand"><span class="brand-mark">R</span><strong>Relvino</strong><span>${kindLabel}</span></div>
       <h1>${title}</h1>
-      <p class="subtitle">Review the full context, annotate any option or question, then submit one complete batch.</p>
+      <p class="subtitle">${subtitle}</p>
     </header>
-    <article class="context" data-request-context>${markdown.render(decision.requestText)}</article>
+    <article class="context" data-request-context>${renderRequest(decision.requestText)}</article>
     ${visualGallery(contextVisuals, visuals, 'Decision evidence')}
     <form id="decision-form" novalidate>
-      <div class="questions">${questions}</div>
+      <div class="questions">${cards}</div>
       <section class="overall card">
         <label class="annotation-label" for="overall-note">Overall note</label>
         <textarea id="overall-note" rows="3" placeholder="Anything firstmate should know about this complete batch"></textarea>
       </section>
       <p id="form-error" class="form-error" role="alert" hidden></p>
-      <div class="actions"><button id="review-button" class="button primary" type="button">Review answers</button></div>
+      <div class="actions"><button id="review-button" class="button primary" type="button">${reviewButtonLabel}</button></div>
     </form>
     <section id="review-step" class="review-card" aria-labelledby="review-title" hidden>
       <p class="eyebrow">Final review</p>
-      <h2 id="review-title">Submit this complete answer batch?</h2>
+      <h2 id="review-title">${reviewTitle}</h2>
       <div id="review-list" class="review-list"></div>
       <p id="confirmation" class="confirmation" role="status" hidden>Answer durably saved in this board's local profile. Firstmate will validate and confirm receipt.</p>
       <p id="submit-error" class="form-error" role="alert" hidden></p>

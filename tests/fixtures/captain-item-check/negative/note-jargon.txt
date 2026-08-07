@@ -1,0 +1,2 @@
+The nightly cron guard on main went green after 97 tests, so the ClickHouse feed pointer is fine now.
+See worker.py:97 for the exact change.

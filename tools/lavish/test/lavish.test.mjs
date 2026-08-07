@@ -52,9 +52,31 @@ If the rollout choice is wrong, customers may lose service and the business may 
 Which rollout should we approve: the safer staged release or the faster immediate release?
 `;
 
+const ANNOTATION_LEAD_IN = `These are the changes waiting on your read of the welcome sequence.
+Nothing here needs a yes or no. Write whatever you think next to each one.
+`;
+const ANNOTATION_ITEMS = [
+  {
+    key: 'welcome-timing',
+    title: 'Welcome message arrives twenty minutes after signup',
+    body: 'A new shopper hears from the merchant within one minute today, which reads as automated.\n\nWaiting lets them finish browsing first.',
+  },
+  {
+    key: 'quiet-hours',
+    title: 'Nothing sends late at night in the shopper own time zone',
+    body: 'Several shoppers unsubscribed right after a message arrived close to midnight.',
+  },
+];
+
 function captainRequest(...items) {
   return `${items.map((item) => (
     `<!-- fm-captain-item: decision -->\n${item.trimEnd()}\n<!-- /fm-captain-item -->`
+  )).join('\n\n')}\n`;
+}
+
+function captainNotes(...items) {
+  return `${items.map((item) => (
+    `<!-- fm-captain-item: note -->\n${item.trimEnd()}\n<!-- /fm-captain-item -->`
   )).join('\n\n')}\n`;
 }
 
@@ -89,6 +111,51 @@ async function fixture(name) {
     }])}\n`,
   );
   return { root, home, request, questions };
+}
+
+async function annotationFixture(name, items = ANNOTATION_ITEMS) {
+  const root = await mkdtemp(join(tmpdir(), `lavish-${name}-`));
+  const home = join(root, 'home');
+  const request = join(root, 'request.md');
+  const itemsPath = join(root, 'items.json');
+  await mkdir(home, { recursive: true });
+  await writeFile(request, captainNotes(ANNOTATION_LEAD_IN));
+  await writeFile(itemsPath, `${JSON.stringify(items)}\n`);
+  return { root, home, request, items: itemsPath };
+}
+
+async function createAnnotation(fx, {
+  id = 'welcome-review',
+  destination = 'data/replies/welcome-review.toon',
+  returnResult = false,
+} = {}) {
+  const result = await runCli([
+    'create',
+    '--id',
+    id,
+    '--title',
+    'Welcome sequence',
+    '--request',
+    fx.request,
+    '--items',
+    fx.items,
+    '--destination',
+    destination,
+  ], { home: fx.home });
+  if (!returnResult) assert.equal(result.code, 0, result.stderr);
+  return returnResult ? { id, result } : id;
+}
+
+function annotationPayload(fx, manifest, overrides = {}) {
+  return {
+    schema_version: 2,
+    decision_id: manifest.decision_id,
+    home_marker: resolve(fx.home),
+    request_sha256: manifest.request_sha256,
+    annotations: manifest.items.map((item) => ({ key: item.key, note: '' })),
+    note: '',
+    ...overrides,
+  };
 }
 
 function processGroupMembers(pgid) {
@@ -156,7 +223,7 @@ function processDescendants(rootPid) {
   return processes.filter((processInfo) => descendants.has(processInfo.pid));
 }
 
-function executeBoardSubmission(html, { storageFailure = false } = {}) {
+function executeBoardSubmission(html, { storageFailure = false, fill = undefined } = {}) {
   const { window, document } = parseHTML(html);
   const storage = new Map();
   Object.defineProperty(window, 'localStorage', {
@@ -183,9 +250,13 @@ function executeBoardSubmission(html, { storageFailure = false } = {}) {
   };
   const script = document.querySelector('script').textContent;
   vm.runInContext(script, vm.createContext(window));
-  const selected = document.querySelector('input[type="radio"]');
-  selected.checked = true;
-  selected.setAttribute('checked', '');
+  if (fill === undefined) {
+    const selected = document.querySelector('input[type="radio"]');
+    selected.checked = true;
+    selected.setAttribute('checked', '');
+  } else {
+    fill(document);
+  }
   document.querySelector('#review-button').click();
   document.querySelector('#submit-button').click();
   return { document, storage };
@@ -1105,6 +1176,300 @@ test('collect validates and persists structured annotations through the normal w
   });
   assert.equal(stored.note, 'Proceed after the current deploy completes.');
   assert.match(await readFile(join(fx.home, 'state/.wake-queue'), 'utf8'), /lavish:release-choice/);
+});
+
+test('create accepts a decision with no questions at all', async () => {
+  const fx = await annotationFixture('annotation-create');
+  const id = await createAnnotation(fx);
+  const manifest = await manifestFor(fx, id);
+
+  assert.equal(manifest.mode, 'annotation');
+  assert.deepEqual(manifest.questions, []);
+  assert.equal(manifest.expected_count, ANNOTATION_ITEMS.length);
+  assert.deepEqual(
+    manifest.items.map((item) => item.key),
+    ANNOTATION_ITEMS.map((item) => item.key),
+  );
+  assert.equal(manifest.items[0].title, ANNOTATION_ITEMS[0].title);
+  assert.equal(manifest.items[0].body, ANNOTATION_ITEMS[0].body);
+
+  const shown = await runCli(['show', id], { home: fx.home });
+  assert.equal(shown.code, 0, shown.stderr);
+  assert.match(shown.stdout, /Annotation: Welcome sequence/);
+  assert.doesNotMatch(shown.stdout, /^Decision:/m);
+  const inbox = await runCli(['inbox'], { home: fx.home });
+  assert.match(inbox.stdout, /2 items/);
+});
+
+test('create refuses both definitions and points an empty question set at items', async () => {
+  const fx = await annotationFixture('annotation-flags');
+  const both = await runCli([
+    'create', '--id', 'both', '--title', 'Both',
+    '--request', fx.request, '--items', fx.items, '--questions', fx.items,
+    '--destination', 'data/replies/both.toon',
+  ], { home: fx.home });
+  assert.equal(both.code, 2);
+  assert.match(both.stderr, /pass --questions or --items, never both/);
+
+  const neither = await runCli([
+    'create', '--id', 'neither', '--title', 'Neither',
+    '--request', fx.request, '--destination', 'data/replies/neither.toon',
+  ], { home: fx.home });
+  assert.equal(neither.code, 2);
+  assert.match(neither.stderr, /--items for an annotation board that asks nothing/);
+
+  // The trap this mode exists to remove: an agent with nothing to ask should be
+  // told where to go, not left inventing options.
+  const emptyQuestions = join(fx.root, 'empty.json');
+  await writeFile(emptyQuestions, '[]\n');
+  const empty = await runCli([
+    'create', '--id', 'empty', '--title', 'Empty',
+    '--request', fx.request, '--questions', emptyQuestions,
+    '--destination', 'data/replies/empty.toon',
+  ], { home: fx.home });
+  assert.equal(empty.code, 2);
+  assert.match(empty.stderr, /use items for an annotation board that asks nothing/);
+  assert.equal(await exists(join(fx.home, 'data/decisions/empty')), false);
+});
+
+test('create refuses an item body that never cleared the captain item check', async () => {
+  const fx = await annotationFixture('annotation-unchecked', [{
+    key: 'stale-feed',
+    title: 'Retry the ClickHouse ingest',
+    body: 'The cron guard on main failed at worker.py:97.',
+  }]);
+  const result = await createAnnotation(fx, { id: 'annotation-unchecked', returnResult: true });
+
+  assert.equal(result.result.code, 2);
+  assert.match(result.result.stderr, /captain items refused by the required draft check/);
+  assert.match(result.result.stderr, /item 1 \(note\) failed/);
+  assert.match(result.result.stderr, /opaque: internal term 'ClickHouse'/);
+  assert.equal(await exists(join(fx.home, 'data/decisions/annotation-unchecked')), false);
+});
+
+test('annotation board gives one comment box per item and offers no choices', async () => {
+  const fx = await annotationFixture('annotation-board');
+  const id = await createAnnotation(fx);
+  const output = join(fx.root, 'board.html');
+  const result = await runCli(['board', id, '--out', output], { home: fx.home });
+  assert.equal(result.code, 0, result.stderr);
+
+  const html = await readFile(output, 'utf8');
+  const { document } = parseHTML(html);
+  assert.equal(document.body.dataset.lavishMode, 'annotation');
+  const cards = [...document.querySelectorAll('[data-item-key].question')];
+  assert.equal(cards.length, ANNOTATION_ITEMS.length);
+  for (const [index, item] of ANNOTATION_ITEMS.entries()) {
+    assert.equal(cards[index].dataset.itemKey, item.key);
+    assert.equal(cards[index].querySelector('h2').textContent, item.title);
+    assert.equal(cards[index].querySelectorAll('textarea[data-item-note]').length, 1);
+  }
+  assert.equal(document.querySelectorAll('input[type="radio"]').length, 0);
+  assert.equal(document.querySelectorAll('textarea[data-option-comment]').length, 0);
+  assert.equal(document.querySelectorAll('textarea[data-question-note]').length, 0);
+  assert.ok(document.querySelector('#overall-note'));
+  assert.ok(document.querySelector('#submit-button'));
+  // The checking scaffolding is stored but must never be shown to the captain.
+  assert.doesNotMatch(
+    document.querySelector('[data-request-context]').textContent,
+    /fm-captain-item/,
+  );
+});
+
+test('annotation board refuses to submit an entirely empty batch', async () => {
+  const fx = await annotationFixture('annotation-empty-batch');
+  const id = await createAnnotation(fx);
+  const output = join(fx.root, 'board.html');
+  assert.equal((await runCli(['board', id, '--out', output], { home: fx.home })).code, 0);
+  const html = await readFile(output, 'utf8');
+
+  const { window, document } = parseHTML(html);
+  window.scrollTo = () => {};
+  vm.runInContext(document.querySelector('script').textContent, vm.createContext(window));
+  document.querySelector('#review-button').click();
+  assert.equal(document.querySelector('#form-error').hidden, false);
+  assert.match(document.querySelector('#form-error').textContent, /at least one item/);
+  assert.equal(
+    document.querySelector('#review-step').hidden,
+    true,
+    'an empty batch reached the submit step of a write-once answer',
+  );
+
+  // One comment is enough; the rest may stay blank.
+  const submitted = executeBoardSubmission(html, {
+    fill: (page) => {
+      page.querySelectorAll('textarea[data-item-note]')[1].value = 'Only this one matters.';
+    },
+  });
+  const payload = JSON.parse([...submitted.storage.values()][0]).payload;
+  assert.deepEqual(payload.annotations, [
+    { key: 'welcome-timing', note: '' },
+    { key: 'quiet-hours', note: 'Only this one matters.' },
+  ]);
+});
+
+test('annotation answers reach firstmate through the normal collect and intake path', async () => {
+  const fx = await annotationFixture('annotation-collect');
+  const id = await createAnnotation(fx);
+  const manifest = await manifestFor(fx, id);
+  const payloadPath = join(fx.root, 'payload.json');
+  await writeFile(payloadPath, `${JSON.stringify(annotationPayload(fx, manifest, {
+    annotations: [
+      { key: 'welcome-timing', note: 'Still too eager. Try an hour.' },
+      { key: 'quiet-hours', note: '' },
+    ],
+    note: 'Ship the second one.',
+  }))}\n`);
+
+  const collected = await runCli(['collect', id, '--payload', payloadPath], { home: fx.home });
+  assert.equal(collected.code, 0, collected.stderr);
+  const intake = await runCli(['intake'], { home: fx.home });
+  assert.equal(intake.code, 0, intake.stderr);
+  assert.match(intake.stdout, new RegExp(`${id},consumed`));
+
+  const stored = decode(
+    await readFile(join(fx.home, 'data/replies/welcome-review.toon'), 'utf8'),
+    { strict: true },
+  );
+  assert.equal(stored.schema_version, 2);
+  assert.equal(stored.annotations.length, 2);
+  assert.deepEqual(stored.annotations[0], {
+    key: 'welcome-timing',
+    note: 'Still too eager. Try an hour.',
+  });
+  // A read item the captain had nothing to say about is recorded as empty, not
+  // dropped, so firstmate can tell silence from an unanswered item.
+  assert.deepEqual(stored.annotations[1], { key: 'quiet-hours', note: '' });
+  assert.equal(stored.note, 'Ship the second one.');
+  assert.equal(stored.answers, undefined);
+  assert.equal(await exists(join(fx.home, 'data/decisions', id, 'receipt.toon')), true);
+  assert.match(await readFile(join(fx.home, 'state/.wake-queue'), 'utf8'), new RegExp(`lavish:${id}`));
+});
+
+test('annotation JSON destinations carry the annotations payload', async () => {
+  const fx = await annotationFixture('annotation-json');
+  const id = await createAnnotation(fx, { destination: 'data/replies/welcome-review.json' });
+  const manifest = await manifestFor(fx, id);
+  const payload = annotationPayload(fx, manifest, {
+    annotations: [
+      { key: 'welcome-timing', note: 'Fine by me.' },
+      { key: 'quiet-hours', note: 'Make it later.' },
+    ],
+    note: '',
+  });
+  const payloadPath = join(fx.root, 'payload.json');
+  await writeFile(payloadPath, `${JSON.stringify(payload)}\n`);
+
+  assert.equal((await runCli(['collect', id, '--payload', payloadPath], { home: fx.home })).code, 0);
+  assert.equal((await runCli(['intake'], { home: fx.home })).code, 0);
+  assert.deepEqual(
+    JSON.parse(await readFile(join(fx.home, 'data/replies/welcome-review.json'), 'utf8')),
+    payload,
+  );
+});
+
+test('annotation collect fails closed on count, key, and annotation drift', async () => {
+  const fx = await annotationFixture('annotation-collect-invalid');
+  const id = await createAnnotation(fx);
+  const manifest = await manifestFor(fx, id);
+  const payloadPath = join(fx.root, 'payload.json');
+  const cases = [
+    [{ annotations: [{ key: 'welcome-timing', note: 'One only.' }] }, /payload_count_mismatch/],
+    [{
+      annotations: [
+        { key: 'welcome-timing', note: '' },
+        { key: 'not-an-item', note: '' },
+      ],
+    }, /payload_unknown_key/],
+    [{
+      annotations: [
+        { key: 'welcome-timing', note: '' },
+        { key: 'welcome-timing', note: '' },
+      ],
+    }, /payload_duplicate_key/],
+    [{
+      annotations: [
+        { key: 'welcome-timing', note: null },
+        { key: 'quiet-hours', note: '' },
+      ],
+    }, /payload_invalid_annotation/],
+    [{ request_sha256: `sha256:${'0'.repeat(64)}` }, /payload_stale_request/],
+  ];
+
+  for (const [overrides, expected] of cases) {
+    await writeFile(
+      payloadPath,
+      `${JSON.stringify(annotationPayload(fx, manifest, overrides))}\n`,
+    );
+    const result = await runCli(['collect', id, '--payload', payloadPath], { home: fx.home });
+    assert.equal(result.code, 2, `expected refusal for ${JSON.stringify(overrides)}`);
+    assert.match(result.stderr, expected);
+  }
+  assert.equal(await exists(join(fx.home, 'data/decisions', id, 'answer.toon')), false);
+});
+
+test('an annotation manifest refuses a decision-shaped answer', async () => {
+  const fx = await annotationFixture('annotation-answer-shape');
+  const id = await createAnnotation(fx);
+  const manifest = await manifestFor(fx, id);
+  await writeFile(
+    join(fx.home, 'data/decisions', id, 'answer.toon'),
+    `${encode({
+      kind: 'lavish-decision-answer',
+      schema_version: 2,
+      decision_id: id,
+      request_sha256: manifest.request_sha256,
+      submitted_at: '2026-08-01T00:00:00.000Z',
+      answers: [{ key: 'welcome-timing', value: 'yes', label: 'Yes' }],
+      note: '',
+    })}\n`,
+  );
+  const shown = await runCli(['show', id], { home: fx.home });
+  assert.equal(shown.code, 2);
+  assert.match(shown.stderr, /answer\.annotations must be an array/);
+});
+
+test('fm-lavish-board opens and collects an annotation board end to end', async () => {
+  const fx = await annotationFixture('annotation-board-shell');
+  const id = await createAnnotation(fx);
+  const downloads = join(fx.root, 'Downloads');
+  const fakeBin = join(fx.root, 'browser-bin');
+  const fakeState = join(fx.root, 'fake-browser-state.json');
+  await mkdir(downloads);
+  await mkdir(fakeBin);
+  const chrome = join(fakeBin, 'chrome-devtools-axi');
+  await writeFile(chrome, `#!/bin/sh\nexec '${process.execPath}' '${FAKE_BROWSER}' "$@"\n`);
+  await chmod(chrome, 0o700);
+  const environment = {
+    PATH: `${fakeBin}:${process.env.PATH}`,
+    FM_LAVISH_BIN: CLI,
+    LAVISH_FAKE_CHROME_STATE: fakeState,
+    LAVISH_WAKE_COMMAND: WAKE_ADAPTER,
+  };
+
+  // The answerability preflight must not refuse a board that legitimately has
+  // no radio on it.
+  const opened = await runExecutable(
+    BOARD_ADAPTER,
+    [id, '--home', fx.home, '--downloads', downloads],
+    { env: environment },
+  );
+  assert.equal(opened.code, 0, opened.stderr);
+  const checkPath = join(fx.home, 'state', `lavish-board-${id}.check.sh`);
+  assert.equal(await exists(checkPath), true);
+
+  const stopped = await runExecutable(chrome, ['stop'], { env: environment });
+  assert.equal(stopped.code, 0, stopped.stderr);
+  const checked = await runExecutable(checkPath, [], { env: environment });
+  assert.equal(checked.code, 0, checked.stderr);
+  assert.match(checked.stdout, new RegExp(`lavish-submit: ${id}`));
+
+  const stored = decode(
+    await readFile(join(fx.home, 'data/decisions', id, 'answer.toon'), 'utf8'),
+    { strict: true },
+  );
+  assert.equal(stored.annotations[0].note, 'Fake browser comment.');
+  assert.equal(await exists(join(fx.home, 'data/replies/welcome-review.toon')), true);
 });
 
 test('intake recovers a browser download payload without manual copy', async () => {

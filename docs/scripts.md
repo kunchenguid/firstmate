@@ -73,7 +73,7 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm_bounded_io.py`      | Shared Python bounds for process trees, aggregate output, JSON artifacts, and item batches |
 | `fm-config-inherit-lib.sh` | Shared primary-to-secondmate inheritable-config propagation                        |
 | `fm-tasks-axi-lib.sh`    | Shared backlog-backend selector and `tasks-axi` compatibility probe                  |
-| `fm-lavish-board.sh`     | Open a self-contained decision board and arm its profile-first bounded submission check |
+| `fm-lavish-board.sh`     | Open a self-contained decision or annotation board and arm its profile-first bounded submission check |
 | `fm-lavish-intake.sh`    | Invoke compatible store-and-forward Lavish intake at an existing turn boundary       |
 | `fm-lavish-queue.sh`     | Queue redundant visible delivery only to a session-lock-proven home-bound supervisor |
 | `fm-lavish-version-lib.sh` | Shared Lavish store-forward minimum-version compatibility check                    |

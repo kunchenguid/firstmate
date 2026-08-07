@@ -1015,9 +1015,22 @@ SH
   chmod +x "$fakebin/lavish-axi"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "MISSING: lavish-axi" \
+    "bootstrap accepted a stale Lavish 1.2 without annotation mode"
+
+  cat > "$fakebin/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 'lavish-axi 1.3.0 (store-forward protocol 1)'
+fi
+exit 0
+SH
+  chmod +x "$fakebin/lavish-axi"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_not_contains "$out" "MISSING: lavish-axi" \
-    "bootstrap rejected captain-item-aware Lavish 1.2"
-  pass "bootstrap requires the captain-item-aware Lavish fork"
+    "bootstrap rejected annotation-aware Lavish 1.3"
+  pass "bootstrap requires the annotation-aware Lavish fork"
 }
 
 test_bootstrap_surfaces_low_treehouse_capacity_read_only() {

@@ -25,8 +25,10 @@ Render a self-contained Lavish board, open it in a headed dedicated Chrome
 profile, and arm a watcher check that captures the verified LAVISH-SUBMIT v2
 browser-profile record first and accepts a matching download as corroboration.
 The helper refuses before arming pickup or opening Chrome when the rendered
-page lacks radio choices, annotation inputs, or its schema-version-2 submit
-path.
+page lacks the inputs its declared mode needs or its schema-version-2 submit
+path. A decision board needs radio choices with per-option and per-question
+annotations; an annotation board needs one comment box per item and no choices
+at all.
 USAGE
 }
 
@@ -104,19 +106,33 @@ const hasClass = (tag, className) => {
 const radios = tags('input').filter((tag) => hasAttribute(tag, 'type', 'radio'));
 const optionNotes = tags('textarea').filter((tag) => hasAttribute(tag, 'data-option-comment'));
 const questionNotes = tags('textarea').filter((tag) => hasAttribute(tag, 'data-question-note'));
-const questions = tags('section').filter((tag) => hasClass(tag, 'question'));
+const itemNotes = tags('textarea').filter((tag) => hasAttribute(tag, 'data-item-note'));
+const cards = tags('section').filter((tag) => hasClass(tag, 'question'));
 const submit = tags('button').some((tag) => hasAttribute(tag, 'id', 'submit-button'));
+const overallNote = tags('textarea').some((tag) => hasAttribute(tag, 'id', 'overall-note'));
+// An annotation board is answerable without a single choice on it, so asserting
+// radios there would refuse exactly the board this mode exists to surface.
+const annotation = tags('body').some((tag) => hasAttribute(tag, 'data-lavish-mode', 'annotation'));
 const missing = [];
 
-if (radios.length === 0) missing.push('radio choices');
-if (optionNotes.length === 0) missing.push('per-option annotation inputs');
-if (radios.length !== optionNotes.length) {
-  missing.push(`one per-option annotation for each radio (${optionNotes.length}/${radios.length})`);
+if (annotation) {
+  if (itemNotes.length === 0) missing.push('per-item annotation inputs');
+  if (cards.length === 0 || itemNotes.length !== cards.length) {
+    missing.push(`one per-item annotation for each item (${itemNotes.length}/${cards.length})`);
+  }
+  if (radios.length > 0) missing.push('an annotation board must offer no choices');
+} else {
+  if (radios.length === 0) missing.push('radio choices');
+  if (optionNotes.length === 0) missing.push('per-option annotation inputs');
+  if (radios.length !== optionNotes.length) {
+    missing.push(`one per-option annotation for each radio (${optionNotes.length}/${radios.length})`);
+  }
+  if (questionNotes.length === 0) missing.push('per-question annotation inputs');
+  if (cards.length === 0 || questionNotes.length !== cards.length) {
+    missing.push(`one per-question annotation for each question (${questionNotes.length}/${cards.length})`);
+  }
 }
-if (questionNotes.length === 0) missing.push('per-question annotation inputs');
-if (questions.length === 0 || questionNotes.length !== questions.length) {
-  missing.push(`one per-question annotation for each question (${questionNotes.length}/${questions.length})`);
-}
+if (!overallNote) missing.push('overall note input');
 if (!submit) missing.push('submit button');
 if (!/\bschema_version\s*:\s*2\b/.test(html)) missing.push('schema_version 2 payload');
 if (!/querySelector\(\s*['"]#submit-button['"]\s*\)\.addEventListener\(\s*['"]click['"]/.test(html)) {

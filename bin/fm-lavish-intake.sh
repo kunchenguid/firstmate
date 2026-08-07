@@ -2,7 +2,7 @@
 # Consume durable Lavish answers at an existing Firstmate turn boundary.
 #
 # The fork identifies itself with:
-#   lavish-axi 1.2+ (store-forward protocol 1)
+#   lavish-axi 1.3+ (store-forward protocol 1)
 # Older upstream binaries are ignored during cutover because their lifecycle
 # commands are incompatible and must never be invoked by this adapter.
 set -u

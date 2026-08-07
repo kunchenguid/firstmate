@@ -8,7 +8,7 @@ The durable Lavish request and answer protocol remains owned by `tools/lavish/RE
 ## Purpose and boundary
 
 Firstmate has no legitimate route through a primary harness's built-in structured-question tool.
-A multi-option captain decision goes through `lavish-axi create`, and a yes/no goes through plain chat.
+A multi-option captain decision goes through `lavish-axi create --questions`, a comment-only annotation board goes through `lavish-axi create --items`, and a yes/no goes through plain chat.
 The gate therefore denies a confident exact-name match unconditionally.
 
 It never reads question prose, options, option counts, Bash command text, or any other tool arguments.
@@ -44,8 +44,14 @@ Empty stdin, malformed JSON, a non-string or missing tool identity, an unrelated
 That is transport fail-open, not a policy exception.
 Once an exact identity is positively known, the decision fails closed.
 
-The denial tells the agent both legitimate routes.
-It gives the complete `lavish-axi create --id ... --title ... --request ... --questions ... --destination ...` shape, points to the checked request-assembly contract, gives the lowercase-slug question-key and `value`/`label` option schema, names the plain-chat yes/no route, and preserves the captain-facing `Run: lavish answer <id>` surface line.
+The denial tells the agent all three legitimate routes.
+
+For a multi-option decision it gives the complete `lavish-axi create --id ... --title ... --request ... --questions ... --destination ...` shape, points to the checked request-assembly contract, and gives the lowercase-slug question-key and `value`/`label` option schema.
+
+For an artifact the captain should comment on rather than choose from, it names the annotation route instead: write `items.json` as `[{"key":"lowercase-slug","title":"<plain-language item>","body":"<the item text>"}]` and pass `--items <items.json>` in place of `--questions`, which renders one comment box per item plus an overall note.
+It states explicitly that questions must not be invented for that case, because inventing them is the exact failure the annotation mode exists to prevent.
+
+For a yes/no it names the plain-chat route, and it preserves the captain-facing `Run: lavish answer <id>` surface line.
 
 ## Harness evidence, 2026-08-01
 
