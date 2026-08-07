@@ -306,22 +306,44 @@ export default function (pi: ExtensionAPI) {
   // True once this extension has handled built-in registration for its lifetime.
   let builtInsRegistered = false;
 
-  // Which of the 7 built-ins are currently owned by a different, non-builtin
-  // extension. This runs only after every extension has finished loading, when the
-  // runtime-backed ownership inventory is available.
-  function contestedBuiltIns(): ToolDefinition<any, any, any>[] | undefined {
-    let registered: ToolInfo[];
+  function builtInOwnership():
+    | {
+        uncontested: ToolDefinition<any, any, any>[];
+        contested: ToolDefinition<any, any, any>[];
+        unverified: ToolDefinition<any, any, any>[];
+      }
+    | undefined {
     try {
-      registered = pi.getAllTools();
+      const registered = pi.getAllTools();
+      if (!Array.isArray(registered)) throw new Error("tool inventory was not an array");
+      const uncontested: ToolDefinition<any, any, any>[] = [];
+      const contested: ToolDefinition<any, any, any>[] = [];
+      const unverified: ToolDefinition<any, any, any>[] = [];
+      for (const tool of wrappedBuiltIns) {
+        const matches = registered.filter(
+          (info: ToolInfo) => info !== null && typeof info === "object" && info.name === tool.name,
+        );
+        const owner = matches.length === 1 ? matches[0].sourceInfo : undefined;
+        if (
+          !owner ||
+          typeof owner.source !== "string" ||
+          owner.source.trim().length === 0 ||
+          typeof owner.path !== "string" ||
+          owner.path.trim().length === 0
+        ) {
+          unverified.push(tool);
+        } else if (owner.source === "builtin" || realpathOrSelf(owner.path) === extensionRealFile) {
+          uncontested.push(tool);
+        } else {
+          contested.push(tool);
+        }
+      }
+      return { uncontested, contested, unverified };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       console.error(`Firstmate Calm: built-in ownership check unavailable; no built-in wrappers were registered. ${reason}`);
       return undefined;
     }
-    return wrappedBuiltIns.filter((tool) => {
-      const owner = registered.find((info) => info.name === tool.name)?.sourceInfo;
-      return owner !== undefined && owner.source !== "builtin" && realpathOrSelf(owner.path) !== extensionRealFile;
-    });
   }
 
   // Once Calm is active, claim every uncontested built-in and leave each contested
@@ -329,28 +351,37 @@ export default function (pi: ExtensionAPI) {
   // not take over, since Calm's presentation does not apply to it.
   function activateBuiltInsIfNeeded(ui: ExtensionUIContext): void {
     if (builtInsRegistered) return;
-    const contested = contestedBuiltIns();
-    if (!contested) {
+    const ownership = builtInOwnership();
+    if (!ownership) {
       ui.notify(
         "Firstmate Calm: built-in ownership could not be verified, so Calm left every built-in tool untouched this session.",
         "warning",
       );
       return;
     }
-    const contestedNames = new Set(contested.map((tool) => tool.name));
-    for (const tool of wrappedBuiltIns) {
-      if (!contestedNames.has(tool.name)) pi.registerTool(tool);
-    }
+    for (const tool of ownership.uncontested) pi.registerTool(tool);
     builtInsRegistered = true;
-    if (contested.length === 0) return;
-    const names = contested.map((tool) => `"${tool.name}"`).join(", ");
-    const plural = contested.length > 1;
-    ui.notify(
-      `Firstmate Calm: the ${names} built-in tool${plural ? "s are" : " is"} already provided by another extension, so Calm may not fully function for ${plural ? "them" : "it"} this session.`,
-      "warning",
-    );
-    for (const tool of contested) {
+    if (ownership.contested.length > 0) {
+      const names = ownership.contested.map((tool) => `"${tool.name}"`).join(", ");
+      const plural = ownership.contested.length > 1;
+      ui.notify(
+        `Firstmate Calm: the ${names} built-in tool${plural ? "s are" : " is"} already provided by another extension, so Calm may not fully function for ${plural ? "them" : "it"} this session.`,
+        "warning",
+      );
+    }
+    for (const tool of ownership.contested) {
       console.error(`Firstmate Calm: skipped claiming built-in "${tool.name}" because another extension already owns it.`);
+    }
+    if (ownership.unverified.length > 0) {
+      const names = ownership.unverified.map((tool) => `"${tool.name}"`).join(", ");
+      const plural = ownership.unverified.length > 1;
+      ui.notify(
+        `Firstmate Calm: ownership of the ${names} built-in tool${plural ? "s" : ""} could not be verified, so Calm left ${plural ? "them" : "it"} untouched this session.`,
+        "warning",
+      );
+    }
+    for (const tool of ownership.unverified) {
+      console.error(`Firstmate Calm: skipped claiming built-in "${tool.name}" because its ownership could not be verified.`);
     }
   }
 

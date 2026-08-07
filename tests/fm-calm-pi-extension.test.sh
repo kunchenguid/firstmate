@@ -132,7 +132,10 @@ function registerCalm() {
     registerEntryRenderer() {},
     registerTool() {},
     getAllTools() {
-      return [];
+      return ["read", "bash", "edit", "write", "grep", "find", "ls"].map((name) => ({
+        name,
+        sourceInfo: { source: "builtin", path: `<builtin:${name}>` },
+      }));
     },
   };
   extension.default(pi);
@@ -263,7 +266,7 @@ const pi = {
   getAllTools() {
     return ["read", "bash", "edit", "write", "grep", "find", "ls"].map((name) => ({
       name,
-      sourceInfo: { source: "builtin" },
+      sourceInfo: { source: "builtin", path: `<builtin:${name}>` },
     }));
   },
   registerTool() {},
@@ -405,7 +408,7 @@ const diagnostics = [];
 const originalConsoleError = console.error;
 console.error = (...args) => diagnostics.push(args.join(" "));
 const builtinNames = ["bash", "edit", "find", "grep", "ls", "read", "write"];
-function fakePi({ foreignRead = false, inventoryUnavailable = false } = {}) {
+function fakePi({ foreignRead = false, inventoryUnavailable = false, readInventory = "valid" } = {}) {
   const tools = [];
   const handlers = new Map();
   const notifications = [];
@@ -421,12 +424,17 @@ function fakePi({ foreignRead = false, inventoryUnavailable = false } = {}) {
     },
     getAllTools() {
       if (inventoryUnavailable) throw new Error("inventory offline");
-      return builtinNames.map((name) => ({
+      const inventory = builtinNames.map((name) => ({
         name,
         sourceInfo: name === "read" && foreignRead
           ? { source: "auto", path: "/global/pdf-read/index.ts" }
           : { source: "builtin", path: `<builtin:${name}>` },
       }));
+      if (readInventory === "missing") return inventory.filter((tool) => tool.name !== "read");
+      if (readInventory === "malformed") {
+        return inventory.map((tool) => tool.name === "read" ? { name: "read", sourceInfo: {} } : tool);
+      }
+      return inventory;
     },
   };
   const ctx = {
@@ -514,13 +522,34 @@ if (
 if (!diagnostics.some((line) => line.includes("inventory offline"))) {
   throw new Error(`Calm did not diagnose the ownership inventory failure: ${JSON.stringify(diagnostics)}`);
 }
+
+for (const readInventory of ["missing", "malformed"]) {
+  const unverifiedRun = fakePi({ readInventory });
+  const unverifiedExtension = await import(
+    `${pathToFileURL(process.env.EXT).href}?gate-${readInventory}=${Date.now()}`
+  );
+  unverifiedExtension.default(unverifiedRun.pi);
+  await unverifiedRun.handlers.get("session_start")({ reason: "startup" }, unverifiedRun.ctx);
+  const registeredNames = unverifiedRun.tools.map((tool) => tool.name).sort();
+  if (JSON.stringify(registeredNames) !== JSON.stringify(expected)) {
+    throw new Error(`Calm did not skip the ${readInventory} read owner: ${JSON.stringify(registeredNames)}`);
+  }
+  if (
+    unverifiedRun.notifications.length !== 1 ||
+    unverifiedRun.notifications[0].type !== "warning" ||
+    !unverifiedRun.notifications[0].message.includes("read") ||
+    !unverifiedRun.notifications[0].message.includes("ownership")
+  ) {
+    throw new Error(`Calm did not warn about the ${readInventory} read owner: ${JSON.stringify(unverifiedRun.notifications)}`);
+  }
+}
 console.error = originalConsoleError;
 JS
   status=$?
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm gate-at-load-time path failed: $out"
   [ -z "$out" ] || fail "Pi calm gate-at-load-time test printed output: $out"
-  pass "Calm registers no tool wrappers during extension discovery, leaves an extension-owned read tool untouched when a persisted Calm session starts, wraps the other built-ins, fails closed when ownership inventory is unavailable, and avoids invalidated UI context after a headless Calm-off run"
+  pass "Calm registers no tool wrappers during extension discovery, leaves contested and unverified built-ins untouched, wraps verified built-ins, fails closed when ownership inventory is unavailable, and avoids invalidated UI context after a headless Calm-off run"
 }
 
 test_calm_activation_collision_and_regression_bound() {
@@ -589,6 +618,7 @@ const foreignBash = {
   },
 };
 
+const builtinNames = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const registry = new Map([["bash", { tool: foreignBash, ownerPath: foreignPath }]]);
 const notifications = [];
 const diagnostics = [];
@@ -614,10 +644,15 @@ const pi = {
     }
   },
   getAllTools() {
-    return Array.from(registry.entries()).map(([name, { ownerPath }]) => ({
-      name,
-      sourceInfo: { source: "extension", path: ownerPath },
-    }));
+    return builtinNames.map((name) => {
+      const registered = registry.get(name);
+      return {
+        name,
+        sourceInfo: registered
+          ? { source: "extension", path: registered.ownerPath }
+          : { source: "builtin", path: `<builtin:${name}>` },
+      };
+    });
   },
 };
 
@@ -798,6 +833,7 @@ initTheme("dark");
 setCapabilities({ images: null, trueColor: true, hyperlinks: false });
 
 const tools = [];
+const builtinNames = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const handlers = new Map();
 const entryRenderers = new Map();
 const eventListeners = new Map();
@@ -830,12 +866,11 @@ const pi = {
     else tools[existingIndex] = tool;
   },
   getAllTools() {
-    // Only Calm itself has registered anything in this fixture, so every entry
-    // reports Calm's own extension path; the dedicated collision fixture below is
-    // what exercises a foreign extension already owning a name.
-    return tools.map((tool) => ({
-      name: tool.name,
-      sourceInfo: { source: "extension", path: extPath },
+    return builtinNames.map((name) => ({
+      name,
+      sourceInfo: tools.some((tool) => tool.name === name)
+        ? { source: "extension", path: extPath }
+        : { source: "builtin", path: `<builtin:${name}>` },
     }));
   },
 };
@@ -2617,7 +2652,10 @@ const pi = {
   registerEntryRenderer() {},
   registerTool() {},
   getAllTools() {
-    return [];
+    return ["read", "bash", "edit", "write", "grep", "find", "ls"].map((name) => ({
+      name,
+      sourceInfo: { source: "builtin", path: `<builtin:${name}>` },
+    }));
   },
   appendEntry: (...args) => sessionWrites.push(["appendEntry", ...args]),
   sendMessage: (...args) => sessionWrites.push(["sendMessage", ...args]),
