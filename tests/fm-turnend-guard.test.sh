@@ -782,6 +782,69 @@ test_grok_adapter_missing_jq_and_no_supervision_allow() {
   pass "fm-turnend-guard-grok: missing jq and no-supervision-needed stops stay silent and bounded"
 }
 
+# Grok loads Claude-compatible settings, so a TRACKED .claude/settings.json entry
+# that also has a .grok/hooks/ counterpart must refuse to run under Grok, or the
+# home gets a duplicate path. The regression this pins: the guard once tested
+# GROK_AGENT alone, which a grok 1.0.0 HOOK process does not carry, so the
+# Claude-only Stop auto-arm ran synchronously under Grok, foregrounded the
+# watcher, and wedged the Grok turn for its declared 28800-second timeout.
+#
+# bin/fm-subagent-pretool-check.sh is the deliberate exception: Grok has no
+# counterpart registration, so guarding it would REMOVE the guard from Grok
+# rather than deduplicate it (docs/subagent-guard.md "Known residual gap").
+# It is asserted to stay unguarded so the exception cannot be closed silently.
+test_tracked_claude_entries_inert_under_grok() {
+  local dir cmd script target guarded=0 unguarded=0
+  command -v jq >/dev/null 2>&1 || fail "test host must provide jq"
+  dir="$TMP_ROOT/claude-entries-grok-inert"
+  mkdir -p "$dir/bin"
+  for script in fm-turnend-guard.sh fm-claude-stop-autoarm.sh fm-sessionstart-run.sh \
+    fm-arm-pretool-check.sh fm-cd-pretool-check.sh fm-subagent-pretool-check.sh; do
+    printf '#!/usr/bin/env bash\nprintf ran >> %q\n' "$dir/invoked" > "$dir/bin/$script"
+    chmod +x "$dir/bin/$script"
+  done
+
+  # Runs one tracked command string and reports whether it reached its script.
+  ran_under() {
+    rm -f "$dir/invoked"
+    env "$@" CLAUDE_PROJECT_DIR="$dir" bash -c "$cmd" </dev/null >/dev/null 2>&1
+    [ -e "$dir/invoked" ]
+  }
+
+  while IFS= read -r cmd; do
+    [ -n "$cmd" ] || continue
+    target=$(printf '%s\n' "$cmd" | sed -n 's|.*/bin/\([a-z0-9-]*\.sh\).*|\1|p')
+    [ -n "$target" ] || fail "could not identify the target script of tracked entry: $cmd"
+
+    # Native Claude: EVERY tracked entry must still reach its script, or a guard
+    # has silently disarmed Claude's own protection.
+    ran_under -u GROK_AGENT -u GROK_HOOK_EVENT -u GROK_HOOK_NAME -u GROK_SESSION_ID \
+      -u GROK_WORKSPACE_ROOT \
+      || fail "tracked entry for $target did not run under a native Claude environment"
+
+    if [ "$target" = fm-subagent-pretool-check.sh ]; then
+      unguarded=$((unguarded + 1))
+      ran_under -u GROK_AGENT GROK_HOOK_EVENT=pre_tool_use GROK_SESSION_ID=grok-test-session \
+        || fail "the documented $target exception must stay unguarded; Grok has no counterpart to fall back to"
+      continue
+    fi
+
+    guarded=$((guarded + 1))
+    # grok 1.0.0 hook process: hook markers present, GROK_AGENT absent.
+    ! ran_under -u GROK_AGENT GROK_HOOK_EVENT=stop \
+      GROK_HOOK_NAME='project/settings:stop[0].hooks[0]' \
+      GROK_SESSION_ID=grok-test-session GROK_WORKSPACE_ROOT="$dir" \
+      || fail "tracked entry for $target ran under a grok 1.0.0 hook environment"
+    # grok 0.2.73 child/tool process: GROK_AGENT present, hook markers absent.
+    ! ran_under -u GROK_HOOK_EVENT -u GROK_HOOK_NAME GROK_AGENT=1 \
+      || fail "tracked entry for $target ran under a legacy GROK_AGENT environment"
+  done < <(jq -r '.hooks[][].hooks[].command' "$ROOT/.claude/settings.json")
+
+  [ "$guarded" -eq 5 ] || fail "expected 5 grok-guarded tracked entries, saw $guarded"
+  [ "$unguarded" -eq 1 ] || fail "expected 1 documented unguarded tracked entry, saw $unguarded"
+  pass "tracked .claude/settings.json entries: $guarded inert under grok, the documented subagent exception still armed, all live under Claude"
+}
+
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root() {
   local settings command dir expected_root outside payload out status
   settings="$ROOT/.codex/hooks.json"
@@ -1575,6 +1638,7 @@ test_grok_adapter_native_true_allows_without_resume
 test_grok_adapter_snake_case_native_and_camel_precedence
 test_grok_adapter_invalid_inputs_start_neither_path
 test_grok_adapter_missing_jq_and_no_supervision_allow
+test_tracked_claude_entries_inert_under_grok
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
