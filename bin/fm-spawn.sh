@@ -111,7 +111,10 @@
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
-#   git worktree root distinct from the primary project checkout.
+#   git worktree root distinct from the primary project checkout, and unless no
+#   other task in this home records that same path as its worktree with a
+#   still-live endpoint - the worktree pool cannot see an idle agent, so only
+#   an authoritatively dead or missing endpoint releases a recorded slot.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1395,6 +1398,66 @@ real_path_or_raw() {  # <path>
 # herdr-sm-spaces-k4). Both branches converge on the same $T ("target") string
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
+# validate_worktree_free_of_live_sibling: refuse a worktree that another live
+# task in this home already records as its own.
+#
+# The worktree pool decides a slot is in use by looking for live processes whose
+# working directory sits inside it. An agent that is thinking, waiting on the
+# network, or simply idle between commands has no such process, so its own
+# worktree reads as free and the next `treehouse get` hands the slot over. The
+# pool then resets it to a clean detached HEAD, destroying the running agent's
+# branch checkout. That detection is the pool's, not firstmate's, and it cannot
+# see an idle agent at all; firstmate owns the record that can, because every
+# task writes `worktree=` into state/<id>.meta. This is therefore the correct
+# layer for the guard, and it runs here - before the launched agent has been
+# handed its brief, let alone run `git checkout -b` - which is what keeps a
+# collision recoverable at zero cost.
+#
+# Liveness comes from bin/fm-backend.sh's fm_backend_agent_state rather than a
+# second notion of "is that worker still there". Only `dead` and `missing`
+# release the claim: stale metadata outlives its agent, worktrees are pooled and
+# reused, and a task whose endpoint is authoritatively gone has no claim on the
+# slot. Every other verdict - `alive`, `ambiguous`, `unreadable`, `unverified` -
+# refuses, matching this file's own duplicate-launch guard
+# (herdr_projection_existing_meta_allows_flat), which already treats an
+# unreadable endpoint exactly like a live one. The two errors are not
+# symmetric: wrongly refusing costs one spawn that names the record to clear,
+# while wrongly proceeding resets a live worker's branch checkout out from under
+# it. The refusal is also narrow - it fires only for a spawn that lands on that
+# one recorded path, so an unreadable record cannot stall the fleet, only the
+# reuse of its own slot, which `bin/fm-teardown.sh` releases.
+validate_worktree_free_of_live_sibling() {  # <source> <inspect-target> <worktree-real-path>
+  local source=$1 inspect_target=$2 wt_real=$3
+  local meta sib_id sib_wt sib_wt_real sib_backend sib_target sib_state
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    sib_id=$(basename "$meta" .meta)
+    # A relaunch legitimately re-seats the same task into the worktree its own
+    # metadata already records (stuck-crewmate-recovery depends on it), so the
+    # task's own record can never be the sibling that refuses it.
+    [ "$sib_id" != "$ID" ] || continue
+    sib_wt=$(fm_meta_get "$meta" worktree)
+    [ -n "$sib_wt" ] || continue
+    # Compare physically resolved paths, exactly as the isolation check above
+    # does: a symlinked prefix or a trailing slash spells the same directory
+    # differently, and a raw string comparison would miss the collision.
+    sib_wt_real=$(real_path_or_raw "$sib_wt")
+    [ "$sib_wt_real" = "$wt_real" ] || continue
+    sib_backend=$(fm_backend_of_meta "$meta")
+    sib_target=$(fm_backend_target_of_meta "$meta")
+    if [ -n "$sib_target" ]; then
+      sib_state=$(fm_backend_agent_state "$sib_backend" "$sib_target")
+    else
+      sib_state=unreadable
+    fi
+    case "$sib_state" in
+      dead|missing) continue ;;
+    esac
+    echo "error: $source handed back a worktree that task $sib_id already records as its own, and $sib_id's endpoint is $sib_state (shared worktree '$wt_real'); refusing to launch to avoid resetting a live worker's checkout. If $sib_id is finished, release its record with bin/fm-teardown.sh $sib_id and spawn again. Inspect target $inspect_target" >&2
+    exit 1
+  done
+}
+
 validate_spawn_worktree() {  # <source> <inspect-target>
   local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
   wt_real=
@@ -1411,6 +1474,7 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
+  validate_worktree_free_of_live_sibling "$source" "$inspect_target" "$wt_real"
 }
 
 herdr_projection_meta_field_exact() {  # <meta> <key>
