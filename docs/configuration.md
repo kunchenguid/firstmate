@@ -166,7 +166,7 @@ It never guesses a boundary and never appends, so hand-written prose immediately
 Each generated block opens with the date and time it was generated, in plain words and as a machine-readable stamp.
 That stamp is the staleness probe: a block whose date is not recent says so on the page the captain is reading, so a generator that stopped running cannot hide behind a page that still looks current.
 `--check` reads those stamps and the narrative's own `*Current as at ...*` review line, writes nothing at all including creating no directory, reports any unmapped repository, and exits non-zero when a block is stale, unreadable, or missing.
-It reads live task state only as far as the repository identities it reports, so a degraded fleet cannot make the audit wait on answers it would discard.
+It reads one backlog listing and one directory of task metadata, which is everything the identities it reports need, and never reads what an individual item or task is doing, so neither a large backlog nor a degraded fleet can make the audit wait on answers it would discard.
 The generator reads that review line and never writes it, because the hand-written half's currency is the captain's to state.
 
 A section whose source could not be read at all says exactly that, names what it could not reach, and carries an unread marker instead of a generation date.

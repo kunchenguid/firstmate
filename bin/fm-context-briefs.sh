@@ -77,9 +77,11 @@
 # already moved into place keep their new content, which is the guarantee this
 # staging offers: no brief is ever left half rewritten.
 #
-# `--check` writes nothing at all, so it neither creates a directory nor stages a
-# file, and it reads live task state only as far as the repository identities it
-# reports. `--after-event` prints nothing on either stream.
+# `--check` writes nothing at all, anywhere, so it neither creates a directory nor
+# stages a file. It reads one backlog listing and one directory of task metadata,
+# which is everything the identities it reports need, and never reads what an
+# individual item or task is doing. `--after-event` prints nothing on either
+# stream.
 #
 # Environment:
 #   FM_HOME                          the operational home to read and write
@@ -281,7 +283,7 @@ iso_day_to_human() {
 # tasks: run tasks-axi against THIS home's backlog rather than the caller's
 # working directory, the same way bin/fm-decision-hold.sh resolves it.
 tasks() {
-  (cd "$FM_HOME" && tasks-axi "$@")
+  (cd "$FM_HOME" && tasks-axi "$@") < /dev/null
 }
 
 # backlog_available: whether this home's backlog can be read at all. The decision
@@ -365,12 +367,54 @@ task_title() {  # <id> -> full title, or empty when the backlog does not know it
 # captain_items: TSV of every open captain-held item. The backlog is read only
 # through tasks-axi, never by parsing data/backlog.md.
 #   id <TAB> repo_key <TAB> repo_display <TAB> deadline <TAB> created <TAB> title
-captain_items() {
-  local ids id out state repo title deadline created
+# captain_identities: every open captain-held item and the repository it belongs
+# to, from the ONE listing call, taking both from the columns that listing names
+# in its own header rather than from a per-item read. This owns which items count,
+# so captain_items below does not restate it.
+#   id <TAB> repo_key <TAB> repo_display
+captain_identities() {
   backlog_available || return 0
-  ids=$(tasks list --kind captain 2>/dev/null |
-    sed -n 's/^  \([A-Za-z0-9][A-Za-z0-9._-]*\),.*/\1/p') || return 0
-  for id in $ids; do
+  tasks list --kind captain 2>/dev/null | awk -F'\t' '
+    /^[a-z]*\[[0-9]*\]\{/ {
+      header = $0
+      sub(/^[^{]*\{/, "", header)
+      sub(/\}.*$/, "", header)
+      n = split(header, names, ",")
+      for (i = 1; i <= n; i++) { at[names[i]] = i }
+      next
+    }
+    /^[[:space:]]+[A-Za-z0-9]/ {
+      if (!at["id"] || !at["repo"]) next
+      row = $0
+      sub(/^[[:space:]]+/, "", row)
+      split(row, field, ",")
+      if (at["state"] && field[at["state"]] == "done") next
+      id = field[at["id"]]
+      repo = field[at["repo"]]
+      if (id == "") next
+      key = repo
+      sub(/^.*\//, "", key)
+      printf "%s\t%s\t%s\n", id, tolower(key), (repo == "" ? "-" : repo)
+    }
+  '
+}
+
+# captain_items: the same items with everything a rendered block needs, which
+# costs one backlog read apiece. Only the generate path asks for that.
+#   id <TAB> repo_key <TAB> repo_display <TAB> deadline <TAB> created <TAB> title
+captain_items() {
+  local line id out state repo title deadline created
+  local -a identities=()
+  backlog_available || return 0
+  # The identity stream is drained in full before any child runs, so no
+  # subprocess below can inherit it as stdin and consume a live item.
+  while IFS= read -r line; do
+    identities+=("$line")
+  done < <(captain_identities)
+  [ "${#identities[@]}" -gt 0 ] || return 0
+  for line in "${identities[@]}"; do
+    id=${line%%"$TAB"*}
+    [ -n "$id" ] || continue
     out=$(tasks show "$id" --full 2>/dev/null) || continue
     state=$(tasks_field "$out" state)
     [ "$state" = "done" ] && continue
@@ -413,18 +457,30 @@ running_identities() {
 # brief needs that, so only the generate path asks for it.
 #   id <TAB> repo_key <TAB> state <TAB> pr <TAB> title
 running_items() {
-  local id rk meta state pr title
-  while IFS="$TAB" read -r id rk; do
+  local line id rk meta state pr title
+  local -a identities=()
+  # The identity stream is drained in full before any child runs. Feeding the
+  # loop from it directly would make it the stdin of every descendant, and the
+  # current-state reader reaches a whole tree of them, so one child reading a
+  # line would silently drop a live task from a block that still looks fresh.
+  while IFS= read -r line; do
+    identities+=("$line")
+  done < <(running_identities)
+  [ "${#identities[@]}" -gt 0 ] || return 0
+  for line in "${identities[@]}"; do
+    id=${line%%"$TAB"*}
+    rk=${line#*"$TAB"}
     [ -n "$id" ] || continue
     meta="$STATE/$id.meta"
     pr=$(meta_field "$meta" pr)
-    state=$(fm_run_timed "$STATE_TIMEOUT" "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null |
+    state=$(fm_run_timed "$STATE_TIMEOUT" "$SCRIPT_DIR/fm-crew-state.sh" "$id" \
+      < /dev/null 2>/dev/null |
       sed -n 's/^state: \([a-z-]*\).*/\1/p' | head -1)
     [ -n "$state" ] || state=unknown
     title=$(task_title "$id")
     printf '%s\t%s\t%s\t%s\t%s\n' \
       "$id" "$rk" "$state" "$(held "$pr")" "$(held "$title")"
-  done < <(running_identities)
+  done
 }
 
 # --- rendering --------------------------------------------------------------
@@ -679,13 +735,11 @@ rewrite_blocks() {
 # record and a stated reason, which the renderers keep apart: no record plus no
 # reason is a genuine empty, no record plus a reason is "could not find out".
 #
-# <depth> is "state" for a rendered brief, which needs what each live item is
-# doing, or "identities" for the audit, which only reports which repositories
-# appear. The audit asks for identities so it never waits on a current-state read
-# whose answer it would discard, which on a degraded fleet is the difference
-# between a file read and minutes of bounded subprocesses.
+# This is the rendering path's collection, so it reads everything a block shows.
+# The audit collects its own far cheaper streams in check() rather than asking
+# for these and discarding most of them.
 collect_records() {
-  local work=$1 depth=$2
+  local work=$1
   BACKLOG_UNREAD=
   RUNNING_UNREAD=
   if backlog_available; then
@@ -694,13 +748,11 @@ collect_records() {
     BACKLOG_UNREAD=$(backlog_unread_reason)
     : > "$work/captain.tsv"
   fi
-  if ! running_readable; then
-    RUNNING_UNREAD=$(running_unread_reason)
-    : > "$work/running.tsv"
-  elif [ "$depth" = state ]; then
+  if running_readable; then
     running_items > "$work/running.tsv"
   else
-    running_identities > "$work/running.tsv"
+    RUNNING_UNREAD=$(running_unread_reason)
+    : > "$work/running.tsv"
   fi
 }
 
@@ -752,9 +804,9 @@ generate() {
 
   captain="$work/captain.tsv"
   running="$work/running.tsv"
-  collect_records "$work" state
+  collect_records "$work"
 
-  report_unmapped "$captain" "$running"
+  { cut -f2,3 "$captain"; awk -F'\t' '{ print $2 "\t" $2 }' "$running"; } | report_unmapped
 
   # Five lifecycle commands can fire this refresh at once in a fleet. The line
   # numbers check_markers resolves are only true while the file holds still, so
@@ -795,12 +847,14 @@ generate() {
   return "$status"
 }
 
-# report_unmapped <captain-tsv> <running-tsv>: one explicit line per repository
-# present in the records that no context claims, so it is never silently dropped.
+# report_unmapped: one explicit line per repository present in the records that no
+# context claims, so it is never silently dropped. It reads
+# "<repo_key><TAB><repo_display>" pairs on stdin, so a caller can feed it straight
+# from the records it already holds without staging a file to do it.
 report_unmapped() {
   local mapped seen key display
   mapped=$(read_map | cut -f2 | LC_ALL=C sort -u)
-  seen=$( { cut -f2,3 "$1"; awk -F'\t' '{ print $2 "\t" $2 }' "$2"; } | LC_ALL=C sort -u)
+  seen=$(LC_ALL=C sort -u)
   printf '%s\n' "$seen" | while IFS="$TAB" read -r key display; do
     [ -n "$key" ] || continue
     printf '%s\n' "$mapped" | grep -qx -F -- "$key" && continue
@@ -810,17 +864,23 @@ report_unmapped() {
 }
 
 check() {
-  local ctx file epoch age now reviewed line stale=0 blocks unread work
+  local ctx file epoch age now reviewed line stale=0 blocks unread
   require_map || return 1
   now=$(date +%s)
 
-  # The audit reads the same records the generator does, so an unmapped
-  # repository surfaces here too. It reads them and writes nothing.
-  work=$(mktemp -d "${TMPDIR:-/tmp}/fm-context-briefs-check.XXXXXX") || return 1
-  track_temp "$work"
-  collect_records "$work" identities
-  report_unmapped "$work/captain.tsv" "$work/running.tsv"
-  rm -rf "$work"
+  # An unmapped repository has to surface here too, and a repository identity is
+  # all that takes. Both streams are piped straight into the report, so the audit
+  # reads one backlog listing and one directory of metadata, writes nothing
+  # anywhere, and stages nothing to do it. The two reasons are resolved before the
+  # pipeline, because a pipeline runs in a subshell and would lose them.
+  BACKLOG_UNREAD=
+  RUNNING_UNREAD=
+  backlog_available || BACKLOG_UNREAD=$(backlog_unread_reason)
+  running_readable || RUNNING_UNREAD=$(running_unread_reason)
+  {
+    [ -n "$BACKLOG_UNREAD" ] || captain_identities | awk -F'\t' '{ print $2 "\t" $3 }'
+    [ -n "$RUNNING_UNREAD" ] || running_identities | awk -F'\t' '{ print $2 "\t" $2 }'
+  } | report_unmapped
   [ -z "$BACKLOG_UNREAD" ] || printf 'the backlog cannot be read right now: %s\n' "$BACKLOG_UNREAD"
   [ -z "$RUNNING_UNREAD" ] || printf 'live work cannot be read right now: %s\n' "$RUNNING_UNREAD"
 

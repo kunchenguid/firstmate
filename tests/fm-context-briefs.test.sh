@@ -43,6 +43,8 @@ make_fakebin() {  # <dir>
   cat > "$fb/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 records=${FAKE_TASKS:-/dev/null}
+[ -n "${FAKE_TASKS_LOG:-}" ] && printf '%s\n' "${1:-}" >> "$FAKE_TASKS_LOG"
+[ -n "${FAKE_STDIN_EATER:-}" ] && read -r _ONE_LINE
 # Only the backlog listing stalls, so the backend probes above it stay quick and
 # a test can hold the generator open in the middle of a run.
 if [ -n "${FAKE_TASKS_AXI_SLEEP:-}" ] && [ "${1:-}" = list ]; then
@@ -92,11 +94,15 @@ SH
   # is exactly the deterministic answer these tests want. They also record that
   # they ran when $FAKE_CALL_LOG is set, which is how a test observes whether a
   # command performed a current-state read at all.
+# They also consume a line of stdin when $FAKE_STDIN_EATER is set, which is what
+# any ordinary command that happens to read stdin does. No enumeration may lose a
+# record to that.
   local tool
   for tool in no-mistakes tmux; do
     cat > "$fb/$tool" <<'SH'
 #!/usr/bin/env bash
 [ -n "${FAKE_CALL_LOG:-}" ] && printf '%s\n' "${0##*/}" >> "$FAKE_CALL_LOG"
+[ -n "${FAKE_STDIN_EATER:-}" ] && read -r _ONE_LINE
 exit 0
 SH
     chmod +x "$fb/$tool"
@@ -476,6 +482,74 @@ test_unreadable_task_state_never_reads_as_nothing_running() {
   pass "task state that cannot be listed says so rather than reading as nothing running"
 }
 
+# Every live task must appear, and the count is what is asserted. A run that
+# loses half of them still renders a well formed block carrying a fresh
+# generation stamp, so it reads as a successful refresh and the staleness probe
+# cannot catch it. That is precisely the silently wrong but fresh failure this
+# whole feature exists to prevent.
+#
+# The enumeration must not be able to lose a record to a child that reads stdin,
+# because the current-state reader reaches a tree of them and a correctness
+# property that holds only while no descendant happens to read stdin is not a
+# property. The stubs here do read a line, which is what makes this discriminating.
+test_every_live_task_survives_a_child_that_reads_stdin() {
+  local home fb file n listed
+  home=$(new_home "$TMP_ROOT/stdin-eater")
+  fb=$(make_fakebin "$TMP_ROOT/stdin-eater")
+  : > "$TMP_ROOT/stdin-eater/tasks"
+  file="$home/data/briefs/back-office.md"
+
+  for n in 1 2 3 4; do
+    # The worktree has to exist, because the current-state reader stops before
+    # probing the harness when it is gone and the probe is the stdin reader here.
+    mkdir -p "$home/worktrees/mldinv-live-$n"
+    fm_write_meta "$home/state/mldinv-live-$n.meta" \
+      "window=firstmate:fm-mldinv-live-$n" \
+      "endpoint_task_id=mldinv-live-$n" \
+      "worktree=$home/worktrees/mldinv-live-$n" \
+      "project=$home/projects/mldinvoicing" \
+      'harness=claude' 'kind=ship' 'mode=no-mistakes' 'yolo=off'
+  done
+
+  PATH="$fb:$PATH" FAKE_TASKS="$TMP_ROOT/stdin-eater/tasks" FAKE_STDIN_EATER=1 \
+    run_gen "$home" >/dev/null 2>&1
+
+  listed=0
+  for n in 1 2 3 4; do
+    grep -F -- "mldinv-live-$n" "$file" >/dev/null && listed=$((listed + 1))
+  done
+  [ "$listed" -eq 4 ] ||
+    fail "only $listed of 4 live tasks were rendered, and the block still looks fresh"
+  assert_no_grep 'Nothing is running for this side right now.' "$file" \
+    "the running block must not read as empty when four tasks are live"
+  pass "every live task is rendered even when a child of the state read consumes stdin"
+}
+
+# The same property on the backlog half, whose per-item read is also a child of
+# the enumeration.
+test_every_captain_item_survives_a_child_that_reads_stdin() {
+  local home fb file n listed
+  home=$(new_home "$TMP_ROOT/stdin-eater-backlog")
+  fb=$(make_fakebin "$TMP_ROOT/stdin-eater-backlog")
+  file="$home/data/briefs/back-office.md"
+  cat > "$TMP_ROOT/stdin-eater-backlog/tasks" <<'EOF'
+mld-bi-alpha-decision-one|queued|mld-bi|-|2026-08-01|Approve the first thing
+mld-bi-alpha-decision-two|queued|mld-bi|-|2026-08-02|Approve the second thing
+mld-bi-beta-decision-three|queued|mld-bi|-|2026-08-03|Approve the third thing
+mld-bi-beta-decision-four|queued|mld-bi|-|2026-08-04|Approve the fourth thing
+EOF
+  PATH="$fb:$PATH" FAKE_TASKS="$TMP_ROOT/stdin-eater-backlog/tasks" FAKE_STDIN_EATER=1 \
+    run_gen "$home" >/dev/null 2>&1
+
+  listed=0
+  for n in one two three four; do
+    grep -F -- "decision-$n" "$file" >/dev/null && listed=$((listed + 1))
+  done
+  [ "$listed" -eq 4 ] ||
+    fail "only $listed of 4 captain decisions were rendered, and the block still looks fresh"
+  pass "every captain decision is rendered even when a child consumes stdin"
+}
+
 test_running_reports_live_work_and_skips_secondmates() {
   local home fb file
   home=$(new_home "$TMP_ROOT/running")
@@ -661,6 +735,40 @@ test_check_does_not_perform_a_current_state_read() {
   [ -s "$log" ] &&
     fail "check performed a current-state read for data it discards:"$'\n'"$(cat "$log")"
   pass "check reports repository identities without reading what each task is doing"
+}
+
+# The other half of the audit's cost: one backlog read per captain-held item, for
+# a repository the single listing call already named.
+test_check_does_not_read_the_backlog_item_by_item() {
+  local home fb tasklog tmp
+  home=$(new_home "$TMP_ROOT/check-list-only")
+  fb=$(make_fakebin "$TMP_ROOT/check-list-only")
+  tasklog="$TMP_ROOT/check-list-only/tasks-axi-calls"
+  tmp="$TMP_ROOT/check-list-only/tmp"
+  mkdir -p "$tmp"
+  cat > "$TMP_ROOT/check-list-only/tasks" <<'EOF'
+mld-bi-alpha-decision-one|queued|mld-bi|-|2026-08-01|Approve the first thing
+orphan-decision-two|queued|a-repo-nobody-claimed|-|2026-08-02|An orphaned decision
+EOF
+
+  # The control: rendering a brief genuinely does read each item, so the log
+  # below is known to record a per-item read when one happens.
+  : > "$tasklog"
+  PATH="$fb:$PATH" FAKE_TASKS="$TMP_ROOT/check-list-only/tasks" FAKE_TASKS_LOG="$tasklog" \
+    run_gen "$home" >/dev/null 2>&1
+  grep -qx 'show' "$tasklog" ||
+    fail "the control never recorded a per-item backlog read, so this test proves nothing"
+
+  : > "$tasklog"
+  out=$(PATH="$fb:$PATH" FAKE_TASKS="$TMP_ROOT/check-list-only/tasks" \
+    FAKE_TASKS_LOG="$tasklog" TMPDIR="$tmp" run_gen "$home" --check 2>&1)
+  grep -qx 'show' "$tasklog" &&
+    fail "check read the backlog item by item for a repository the listing already named"
+  assert_contains "$out" 'unmapped: repository "a-repo-nobody-claimed"' \
+    "the audit still names the unmapped repository from the listing alone"
+  [ -z "$(find "$tmp" -mindepth 1 2>/dev/null)" ] ||
+    fail "check created something under the temporary directory: $(find "$tmp" -mindepth 1)"
+  pass "check takes each repository from the one listing and stages nothing to do it"
 }
 
 # A brief being rewritten is staged beside itself, in the directory the captain
@@ -870,12 +978,15 @@ test_an_unreadable_backlog_never_reads_as_an_empty_one
 test_check_fails_a_block_whose_source_could_not_be_read
 test_absent_task_state_never_reads_as_nothing_running
 test_unreadable_task_state_never_reads_as_nothing_running
+test_every_live_task_survives_a_child_that_reads_stdin
+test_every_captain_item_survives_a_child_that_reads_stdin
 test_running_reports_live_work_and_skips_secondmates
 test_unmapped_repository_is_reported
 test_each_block_states_its_own_age
 test_check_reports_a_stale_block_and_reads_the_review_line
 test_check_reports_an_unmapped_repository
 test_check_does_not_perform_a_current_state_read
+test_check_does_not_read_the_backlog_item_by_item
 test_the_read_only_paths_create_nothing
 test_after_event_is_quiet_and_never_fails
 test_after_event_is_silent_when_the_state_directory_cannot_be_made
