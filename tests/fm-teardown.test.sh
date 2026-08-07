@@ -515,6 +515,77 @@ test_local_only_fork_remote_allows() {
   pass "local-only worktree with HEAD on a fork remote is torn down (fix holds)"
 }
 
+test_landed_teardown_publishes_herdr_outcome() {
+  local case_dir rc
+  case_dir=$(make_case herdr-landed-outcome)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+  sed -i.bak 's/^window=.*/window=fmtest:w1:p2/' "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  printf '%s\n' \
+    'backend=herdr' \
+    'herdr_session=fmtest' \
+    'herdr_workspace_id=w1' \
+    'herdr_tab_id=w1:t2' \
+    'herdr_pane_id=w1:p2' >> "$case_dir/state/task-x1.meta"
+  cat > "$case_dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TEST_HERDR_LOG:?}"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/herdr"
+  : > "$case_dir/herdr.log"
+
+  set +e
+  FM_TEST_HERDR_LOG="$case_dir/herdr.log" run_teardown "$case_dir" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "herdr-landed-outcome: teardown should succeed"
+  assert_grep 'workspace report-signal --source firstmate --kind completed --from w1 --session fmtest' \
+    "$case_dir/herdr.log" "herdr-landed-outcome: landed teardown did not publish a herdr signal"
+  assert_grep 'workspace report-metadata --source firstmate --token outcome=landed --token summary=task task-x1 landed w1 --session fmtest' \
+    "$case_dir/herdr.log" "herdr-landed-outcome: landed teardown did not publish durable herdr metadata"
+  pass "fm-teardown publishes the landed outcome into herdr for a herdr-backed task"
+}
+
+test_forced_teardown_publishes_no_herdr_outcome() {
+  local case_dir rc
+  case_dir=$(make_case herdr-forced-no-outcome)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unpushed work"
+  sed -i.bak 's/^window=.*/window=fmtest:w1:p2/' "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  printf '%s\n' \
+    'backend=herdr' \
+    'herdr_session=fmtest' \
+    'herdr_workspace_id=w1' \
+    'herdr_tab_id=w1:t2' \
+    'herdr_pane_id=w1:p2' >> "$case_dir/state/task-x1.meta"
+  cat > "$case_dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TEST_HERDR_LOG:?}"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/herdr"
+  : > "$case_dir/herdr.log"
+
+  set +e
+  FM_TEST_HERDR_LOG="$case_dir/herdr.log" run_teardown "$case_dir" --force \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "herdr-forced-no-outcome: forced teardown should succeed"
+  assert_no_grep 'report-signal' "$case_dir/herdr.log" \
+    "herdr-forced-no-outcome: a forced discard must not publish a landed outcome"
+  assert_no_grep 'report-metadata' "$case_dir/herdr.log" \
+    "herdr-forced-no-outcome: a forced discard must not publish a landed outcome"
+  pass "fm-teardown publishes no herdr outcome for a forced (discarded) teardown"
+}
+
 test_teardown_prompts_tasks_axi_done_when_compatible() {
   local case_dir out
   case_dir=$(make_case tasks-axi-reminder)
@@ -1378,6 +1449,8 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
 }
 
 test_local_only_fork_remote_allows
+test_landed_teardown_publishes_herdr_outcome
+test_forced_teardown_publishes_no_herdr_outcome
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses

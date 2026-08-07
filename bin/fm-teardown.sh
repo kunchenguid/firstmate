@@ -1236,6 +1236,15 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
+if [ "$FORCE" != "--force" ]; then
+  # Decoration only, never a blocker: publishes the landed teardown into
+  # herdr as a signal and durable metadata when the task's own meta names a
+  # herdr workspace target. Read before the meta removal below, since that
+  # target lives only in this task's own state/<id>.meta. See
+  # bin/fm-herdr-outcome-publish.sh's header. --force means an explicitly
+  # authorized discard, not landed work, so it publishes nothing.
+  "$SCRIPT_DIR/fm-herdr-outcome-publish.sh" "$ID" completed landed "task $ID landed" || true
+fi
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token"

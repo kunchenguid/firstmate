@@ -86,3 +86,8 @@ if ! caller_has_merge_method "$@"; then
 fi
 
 gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+
+# Decoration only, never a blocker: publishes the merge into herdr as a
+# signal and durable metadata when the task's own meta names a herdr
+# workspace target. See bin/fm-herdr-outcome-publish.sh's header.
+"$SCRIPT_DIR/fm-herdr-outcome-publish.sh" "$ID" completed pr_merged "PR #$PR_NUMBER merged" || true

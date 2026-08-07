@@ -65,6 +65,23 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
+# Append herdr backend fields to a case's task meta and add a herdr fakebin
+# stub that logs every invocation to $case_dir/herdr.log. Args: case_dir
+add_herdr_target() {
+  local case_dir=$1
+  printf '%s\n' \
+    "backend=herdr" \
+    "herdr_session=fmtest" \
+    "herdr_workspace_id=w1" >> "$case_dir/state/task-x1.meta"
+  cat > "$case_dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TEST_HERDR_LOG:?}"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/herdr"
+  : > "$case_dir/herdr.log"
+}
+
 # gh-axi mock that fails the merge call but succeeds everything else, so a
 # real merge failure is distinguishable from the recording step.
 add_gh_mocks_merge_fails() {
@@ -89,6 +106,7 @@ run_pr_merge() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_HERDR_LOG="$case_dir/herdr.log" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
   rc=$?
@@ -120,6 +138,28 @@ test_records_pr_and_head_before_merging() {
   grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
     || fail "records-before-merge: gh-axi pr merge was not invoked with number, --repo, and default --squash"
   pass "fm-pr-merge records pr= and pr_head= before invoking gh-axi pr merge"
+}
+
+test_publishes_herdr_outcome_on_merge() {
+  local case_dir rc
+  case_dir=$(make_case herdr-outcome)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 1111111111111111111111111111111111111111
+  add_herdr_target "$case_dir"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/42 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "herdr-outcome: fm-pr-merge should succeed"
+  assert_grep 'workspace report-signal --source firstmate --kind completed --from w1 --session fmtest' \
+    "$case_dir/herdr.log" "herdr-outcome: the merge did not publish a herdr signal"
+  assert_grep 'workspace report-metadata --source firstmate --token outcome=pr_merged --token summary=PR #42 merged w1 --session fmtest' \
+    "$case_dir/herdr.log" "herdr-outcome: the merge did not publish durable herdr metadata"
+  pass "fm-pr-merge publishes the merge outcome into herdr for a herdr-backed task"
 }
 
 test_merge_failure_propagates_after_recording() {
@@ -302,6 +342,7 @@ test_parses_pr_url_for_gh_axi() {
 }
 
 test_records_pr_and_head_before_merging
+test_publishes_herdr_outcome_on_merge
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
 test_missing_meta_refuses_before_merge
