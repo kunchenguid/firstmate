@@ -6,7 +6,7 @@ Cursor ships date-stamped builds; re-verify this protocol after any cursor-agent
 When this session owns supervision and away mode is not active:
 1. Drain first with `bin/fm-wake-drain.sh`.
 2. Routine watcher arm and re-arm are owned by the `stop` hook (`bin/fm-turnend-guard-cursor.sh`), never by you.
-   Every turn end while supervision is needed foregrounds one home-scoped watcher cycle from inside the synchronous stop hook, with no model command and no model tokens spent while parked.
+   When a turn ends blind while supervision is needed, the stop hook foregrounds one home-scoped watcher cycle, with no model command and no model tokens spent while parked.
    Cursor's stop hook blocks for its whole `timeout` (600 s in the tracked registration) and then wakes the agent with a `followup_message` when an actionable event arrived.
    An actionable close wakes you through that follow-up message.
 3. On a follow-up wake (`signal:`, `stale:`, `check:`, or `heartbeat`), run `bin/fm-wake-drain.sh` first and handle the wake.
