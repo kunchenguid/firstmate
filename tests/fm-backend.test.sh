@@ -135,13 +135,19 @@ resolve_permissive_tmux_kill_ref() {
 # `. "$SCRIPT_DIR/<sibling>"` under set -eu, so one sibling missing from the
 # synthetic tree aborts the old script during its sourcing prologue, before it
 # parses a single argument.
+# The old-vs-new cases below then compare a crashed process against a working
+# one and report a behavior divergence that never happened, which is why the
+# sibling set is copied WHOLE rather than enumerated: an enumerated list has to
+# be extended by hand every time an entrypoint gains a dependency and is the
+# only thing that knows, while a whole-tree copy has nothing to forget.
 # Copies keep BASH_SOURCE-based sibling resolution inside the synthetic tree on
 # both macOS and Linux; symlinks make that resolution shell/platform-dependent.
 # FM_ROOT_OVERRIDE pointed at this dir's root makes
 # "$FM_ROOT/bin/fm-project-mode.sh" (etc.) resolve correctly.
-# Only the refactored entrypoints and the bin/backends/tmux.sh adapter are
-# extracted from BASE_REF, so conformance tests retain the exact historical
-# behavior even when this branch changes tmux dispatch semantics.
+# Siblings come from this checkout because they are the versions BASE_REF would
+# have used too; only the refactored entrypoints and the bin/backends/tmux.sh
+# adapter are extracted from BASE_REF, so conformance tests retain the exact
+# historical behavior even when this branch changes tmux dispatch semantics.
 OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh fm-marker-lib.sh"
 
 build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry point)
