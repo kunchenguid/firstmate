@@ -241,6 +241,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/examples/context-briefs.conf",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/crew-dispatch.json",
       "audience": "operator-example"
     },

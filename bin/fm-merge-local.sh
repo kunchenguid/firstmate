@@ -66,3 +66,8 @@ before=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null
 after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"
+
+# The captain's context briefs carry a derived half. Refresh it here, at the
+# lifecycle moment its records changed, rather than on a timer.
+# bin/fm-context-briefs.sh --after-event is quiet and always exits 0.
+"$SCRIPT_DIR/fm-context-briefs.sh" --after-event

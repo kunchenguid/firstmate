@@ -147,6 +147,31 @@ Fleet-local operational facts and gotchas live locally in `data/learnings.md`; i
 The file is created lazily on first learning and follows the same dated, evidence-backed, curated style as `data/captain.md`: inspect the current file first, then rewrite or prune stale entries instead of appending forever.
 There is no shared learnings file by captain decision.
 
+## Context briefs (config/context-briefs.conf / data/briefs)
+
+A context brief is a captain-facing reading surface under `data/briefs/<context>.md`, one per group of related repositories, gitignored like the rest of `data/`.
+Each brief has a hand-written half, the narrative and the pointers, and a derived half, the "Waiting on you" and "Running now" sections.
+[`bin/fm-context-briefs.sh`](../bin/fm-context-briefs.sh) owns the derived half and its header owns the exact commands, markers, refusal conditions, and environment overrides.
+
+The gitignored `config/context-briefs.conf` maps each context to its repositories, one line per context written as `<context>: <repo>, <repo>`, and the context name is the brief's file name without the `.md`.
+Copy [`docs/examples/context-briefs.conf`](examples/context-briefs.conf) to create it.
+Nothing derives this grouping and nothing rewrites it, because which repositories belong together is a human judgement.
+A repository that appears in the backlog or task records but on no line is reported as an explicit unmapped line on every run rather than silently dropped, and that report is a fact rather than a failure.
+The file is local to each home and is not inherited by secondmate homes.
+
+The generator refuses and leaves a brief untouched unless it carries all four boundary markers exactly once, correctly ordered, and not overlapping.
+It never guesses a boundary and never appends, so hand-written prose immediately either side of a generated block survives byte for byte.
+`--install-markers` inserts those markers around the two existing headings once, deleting nothing.
+
+Each generated block opens with the date and time it was generated, in plain words and as a machine-readable stamp.
+That stamp is the staleness probe: a block whose date is not recent says so on the page the captain is reading, so a generator that stopped running cannot hide behind a page that still looks current.
+`--check` reads those stamps and the narrative's own `*Current as at ...*` review line, writes nothing, and exits non-zero when a block is stale, unreadable, or missing.
+The generator reads that review line and never writes it, because the hand-written half's currency is the captain's to state.
+
+Regeneration is wired to the lifecycle moments the records change rather than to a schedule: opening or resolving a captain decision (`bin/fm-decision-hold.sh`), spawning a task (`bin/fm-spawn.sh`), landing work (`bin/fm-pr-merge.sh`, `bin/fm-merge-local.sh`), and finishing a task (`bin/fm-teardown.sh`).
+Each of those calls `--after-event`, which stays silent, does nothing when no mapping exists, and always exits 0 so a lifecycle command never fails because a reading surface could not refresh.
+Run the script with no arguments to refresh on demand.
+
 ## Startup memory budget (config/startup-memory-budget)
 
 `config/startup-memory-budget` is the primary-authoritative per-home allowance for the startup prompt-memory surface: `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md` together.

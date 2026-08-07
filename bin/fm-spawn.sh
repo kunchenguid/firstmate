@@ -2336,3 +2336,8 @@ fi
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
+
+# The captain's context briefs carry a derived half. Refresh it here, at the
+# lifecycle moment its records changed, rather than on a timer.
+# bin/fm-context-briefs.sh --after-event is quiet and always exits 0.
+"$SCRIPT_DIR/fm-context-briefs.sh" --after-event

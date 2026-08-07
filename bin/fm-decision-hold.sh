@@ -453,12 +453,19 @@ command_resolve() {
   printf 'resolved: %s -> %s\n' "$id" "$routed"
 }
 
+# The captain's context briefs carry a derived half listing exactly these
+# captain-held decisions. Refresh it when one opens or closes, rather than on
+# a timer. bin/fm-context-briefs.sh --after-event is quiet and always exits 0.
+refresh_context_briefs() {
+  "$SCRIPT_DIR/fm-context-briefs.sh" --after-event
+}
+
 case "${1:-}" in
   id) shift; command_id "$@" ;;
-  hold) shift; command_hold "$@" ;;
+  hold) shift; command_hold "$@"; refresh_context_briefs ;;
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
-  resolve) shift; command_resolve "$@" ;;
+  resolve) shift; command_resolve "$@"; refresh_context_briefs ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;
 esac

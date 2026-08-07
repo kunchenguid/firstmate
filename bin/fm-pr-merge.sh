@@ -82,3 +82,8 @@ if ! caller_has_merge_method "$@"; then
 fi
 
 gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+
+# The captain's context briefs carry a derived half. Refresh it here, at the
+# lifecycle moment its records changed, rather than on a timer.
+# bin/fm-context-briefs.sh --after-event is quiet and always exits 0.
+"$SCRIPT_DIR/fm-context-briefs.sh" --after-event
