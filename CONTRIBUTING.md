@@ -98,6 +98,7 @@ CI owns broad regression across required portable parallel shards, the portable 
 Use `bin/fm-test-run.sh --list-lanes` for exact lane names and `--help` for `--jobs` rules and required gate-skip flags when reproducing a lane locally.
 Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so pass one to `bin/fm-test-run.sh` to focus on a subject with canonical timing output.
 Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the portable suite remains safe on machines without those tools.
+Cases that need a case-insensitive filesystem, such as the spawn isolation gate's case-spelling regression, skip themselves on a case-sensitive one; the macOS CI job runs them with `FM_TEST_REQUIRE_CASE_INSENSITIVE=1`, which turns that skip into a failure where the filesystem can exercise them.
 The [Herdr backend guide](docs/herdr-backend.md#destructive-lab-safety) owns the lane's isolation boundary, while [runtime backend verification](docs/verification/runtime-backends.md#herdr) owns active empirical evidence; live harness credential tests remain opt-in.
 
 ## Questions

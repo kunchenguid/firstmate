@@ -137,6 +137,9 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
+Distinctness is decided by filesystem identity (device and inode), never by comparing path strings: `pwd -P` resolves symlinks but does not normalize letter case, so on a case-insensitive filesystem two spellings of one directory stay two different strings.
+The same identity test decides whether a task pane has actually left the project during worktree discovery, so no symlinked or differently-cased spelling of the project can be accepted as the isolated worktree.
+The gate is re-asserted immediately before the first hook, configuration, or metadata write, so a refusal leaves the project untouched, records no task, and launches no agent.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.

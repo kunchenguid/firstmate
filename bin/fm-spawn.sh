@@ -1375,10 +1375,11 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 # herdr's foreground_cwd, zellij/cmux's active pwd probe against the live
 # shell) reports the OS-level cwd. PROJ_ABS_REAL is that physical form, kept
 # only so validate_spawn_worktree's refusal message can show the operator both
-# spellings of the project path (docs/herdr-backend.md "Known gaps"). Nothing
-# compares against it to decide whether a path is the project: the settle loop
-# and the isolation gate both ask same_dir below, which answers by filesystem
-# identity rather than by any canonicalized string.
+# spellings of the project path (docs/architecture.md "Worktrees, not branches
+# in your checkout" owns the contract). Nothing compares against it to decide
+# whether a path is the project: the settle loop and the isolation gate both
+# ask same_dir below, which answers by filesystem identity rather than by any
+# canonicalized string.
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
 
 real_path_or_raw() {  # <path>
