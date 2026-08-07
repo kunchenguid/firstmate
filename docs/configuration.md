@@ -28,12 +28,12 @@ The file must be a regular, single-linked file beneath a non-symlinked `config/`
 The selection applies only to the exact target home that contains it.
 For the running primary code root, the selection comes from the effective `FM_HOME`, even when that operational home is separate from the tracked root selected by `FM_ROOT_OVERRIDE`.
 A local secondmate uses its own home's file.
-A remote code root and its persistent remote second-mate home each use their own file independently.
+A remote code root and its persistent remote secondmate home each use their own file independently.
 This setting is deliberately absent from the inherited-local-material allowlist, so a primary opt-in never propagates to secondmates.
 
-Under `default`, each target retains the existing guarded update byte-for-byte where practical: the updater fetches origin and advances only a clean, non-diverged default-branch primary or valid detached second-mate home by fast-forward.
+Under `default`, each target retains the existing guarded update byte-for-byte where practical: the updater fetches origin and advances only a clean, non-diverged default-branch primary or valid detached secondmate home by fast-forward.
 Dirty, diverged, wrong-branch, detached-primary, offline, missing-origin, and otherwise unsafe targets are reported and left unchanged.
-Ordinary local-head convergence during second-mate launch and startup remains fast-forward-only regardless of this setting.
+Ordinary local-head convergence during secondmate launch and startup remains fast-forward-only regardless of this setting.
 
 Under `remote-authoritative`, the updater first resolves the target's origin default branch, completes the fetch, and verifies the fetched commit before any discard.
 It still refuses a primary on a non-default branch or detached HEAD, and it refuses a fetched tree that claims `.env`, `config/`, `data/`, `state/`, `projects/`, or `.no-mistakes/` as tracked code.
