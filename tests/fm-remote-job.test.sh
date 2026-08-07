@@ -279,7 +279,16 @@ fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the timed-out job could no
 pass "the worker enforces the job timeout and publishes its result"
 
 QUEUED_SIDE_EFFECT="$TMP_ROOT/queued-side-effect"
-fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-timeout-job.sh < /dev/null > /dev/null
+BLOCKING_SIDE_EFFECT="$TMP_ROOT/blocking-side-effect"
+# The queued job's durable deadline is baked in at stage time rather than
+# rewritten once the record is already published. Rewriting it left a window in
+# which the worker could claim and run the job before the test could expire it,
+# and a loaded runner lost that race. Here the blocking job holds the worker for
+# five seconds against the queued job's one second queue bound, so the deadline
+# is long past before the worker is free to look at it.
+FM_REMOTE_JOB_TIMEOUT=8
+fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
+  fm-delay-job.sh 5 "$BLOCKING_SIDE_EFFECT" < /dev/null > /dev/null
 FIRST_JOB_ID=$FM_REMOTE_JOB_ID
 FIRST_JOB_DIR="$STATE_ROOT/jobs/$FIRST_JOB_ID"
 for _ in $(seq 1 100); do
@@ -288,9 +297,10 @@ for _ in $(seq 1 100); do
 done
 [ "$(fm_remote_job_read_state "$FIRST_JOB_DIR" 2>/dev/null || true)" = running ] \
   || fail "the blocking job did not begin running"
+FM_REMOTE_JOB_QUEUE_TIMEOUT=1
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-touch-job.sh "$QUEUED_SIDE_EFFECT" < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
-printf '%s\n' "$(fm_remote_job_read_deadline "$FIRST_JOB_DIR")" > "$STATE_ROOT/jobs/$JOB_ID/queue_deadline"
+FM_REMOTE_JOB_QUEUE_TIMEOUT=360
 fm_remote_job_wait "$ACCOUNT_HOME" "$FIRST_JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
 fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
 [ "$FM_REMOTE_JOB_EXIT" -eq 124 ] || fail "an expired queued job did not publish a timeout result"
