@@ -112,6 +112,12 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   A project exposes the Decision OS shared review-store contract by making its
+#   primary data/local/reviews path a symlink to an existing directory inside
+#   that project. After worktree validation and before worker launch, fm-spawn
+#   binds the lane's same path to that canonical store. A missing or external
+#   canonical target and any conflicting lane path fail closed without replacing
+#   or hiding bytes. Projects without that primary symlink remain unchanged.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1413,6 +1419,90 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+git_common_dir_real() {  # <worktree>
+  local worktree=$1 common
+  common=$(git -C "$worktree" rev-parse --git-common-dir 2>/dev/null) || return 1
+  case "$common" in
+    /*) cd "$common" 2>/dev/null && pwd -P ;;
+    *) cd "$worktree/$common" 2>/dev/null && pwd -P ;;
+  esac
+}
+
+bind_project_review_store() {
+  local canonical_link canonical_target wt_real lane_link lane_parent
+  local project_common wt_common lane_target
+  canonical_link="$PROJ_ABS_REAL/data/local/reviews"
+
+  # The canonical checkout's symlink is the existing opt-in contract. An
+  # ordinary project with no such link must retain its historical spawn path.
+  [ -L "$canonical_link" ] || return 0
+  if [ ! -d "$canonical_link" ]; then
+    echo "error: canonical review store is missing or is not a directory: $canonical_link; refusing to launch" >&2
+    return 1
+  fi
+  canonical_target=$(cd "$canonical_link" 2>/dev/null && pwd -P) || {
+    echo "error: canonical review store cannot be resolved: $canonical_link; refusing to launch" >&2
+    return 1
+  }
+  if ! path_is_ancestor_of "$PROJ_ABS_REAL" "$canonical_target"; then
+    echo "error: canonical review store resolves outside its project: $canonical_link -> $canonical_target; refusing to launch" >&2
+    return 1
+  fi
+
+  wt_real=$(cd "$WT" 2>/dev/null && pwd -P) || {
+    echo "error: Decision OS lane cannot be resolved before review-store setup: $WT; refusing to launch" >&2
+    return 1
+  }
+  project_common=$(git_common_dir_real "$PROJ_ABS_REAL") || {
+    echo "error: canonical review-store project identity cannot be resolved: $PROJ_ABS_REAL; refusing to launch" >&2
+    return 1
+  }
+  wt_common=$(git_common_dir_real "$wt_real") || {
+    echo "error: Decision OS lane project identity cannot be resolved: $WT; refusing to launch" >&2
+    return 1
+  }
+  if [ "$project_common" != "$wt_common" ]; then
+    echo "error: Decision OS lane belongs to a different project than canonical review store $canonical_link; refusing to launch" >&2
+    return 1
+  fi
+
+  lane_link="$WT/data/local/reviews"
+  if [ -L "$lane_link" ]; then
+    if [ ! -d "$lane_link" ]; then
+      echo "error: Decision OS lane review link is dangling or not a directory: $lane_link; refusing to launch" >&2
+      return 1
+    fi
+    lane_target=$(cd "$lane_link" 2>/dev/null && pwd -P) || lane_target=
+    if [ "$lane_target" != "$canonical_target" ]; then
+      echo "error: Decision OS lane review link targets '$lane_target', not canonical '$canonical_target'; refusing to launch" >&2
+      return 1
+    fi
+    return 0
+  fi
+  if [ -e "$lane_link" ]; then
+    echo "error: Decision OS lane review path already exists and could contain evidence: $lane_link; refusing to overwrite or hide it" >&2
+    return 1
+  fi
+
+  lane_parent="$WT/data/local"
+  mkdir -p "$lane_parent" || {
+    echo "error: could not create Decision OS lane review parent: $lane_parent; refusing to launch" >&2
+    return 1
+  }
+  lane_parent=$(cd "$lane_parent" 2>/dev/null && pwd -P) || {
+    echo "error: Decision OS lane review parent cannot be resolved; refusing to launch" >&2
+    return 1
+  }
+  if ! path_is_ancestor_of "$wt_real" "$lane_parent"; then
+    echo "error: Decision OS lane review parent resolves outside the lane: $lane_parent; refusing to launch" >&2
+    return 1
+  fi
+  if ! ln -s "$canonical_link" "$lane_link"; then
+    echo "error: could not bind Decision OS lane review store at $lane_link; refusing to launch" >&2
+    return 1
+  fi
+}
+
 herdr_projection_meta_field_exact() {  # <meta> <key>
   local meta=$1 key=$2 count
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
@@ -1866,6 +1956,10 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+fi
+
+if [ "$KIND" != secondmate ]; then
+  bind_project_review_store || exit 1
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
