@@ -6,6 +6,7 @@ if [ "${FM_PI_LIVE_E2E:-0}" != 1 ]; then
   exit 0
 fi
 
+# shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 command -v node >/dev/null 2>&1 || fail "node not found"
