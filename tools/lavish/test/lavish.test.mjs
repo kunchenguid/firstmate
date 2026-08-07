@@ -47,14 +47,6 @@ The release process moves approved product improvements to customers so they rec
 
 If the rollout choice is wrong, customers may lose service and the business may delay improvements that merchants already expect.
 
-## Fix cost
-
-Choosing the safer staged release requires additional monitoring time and delays full availability by one day.
-
-## Leave cost
-
-Choosing the faster release accepts a higher chance of customer disruption and urgent recovery work.
-
 ## Decision requested
 
 Which rollout should we approve: the safer staged release or the faster immediate release?

@@ -13,8 +13,6 @@
 #
 #   ## System and purpose
 #   ## Business impact
-#   ## Fix cost
-#   ## Leave cost
 #   ## Decision requested
 #
 # It may then carry an exact technical finding without forcing that finding to
@@ -230,10 +228,6 @@ check_section '## System and purpose' \
   'system-purpose' 'what the system does and why it exists' 12
 check_section '## Business impact' \
   'business-impact' 'what breaks and which customers or business outcome feel it' 12
-check_section '## Fix cost' \
-  'tradeoff.fix-cost' 'what fixing or containing the risk costs' 8
-check_section '## Leave cost' \
-  'tradeoff.leave-cost' 'what leaving the item unchanged costs' 8
 check_section '## Decision requested' \
   'decision' 'the specific call the captain is making' 8
 
@@ -241,22 +235,18 @@ headings=$(printf '%s\n' "$CHECK_TEXT" | awk '/^## / { print }')
 expected_headings=$(cat <<'EOF'
 ## System and purpose
 ## Business impact
-## Fix cost
-## Leave cost
 ## Decision requested
 EOF
 )
 if [ "$headings" != "$expected_headings" ]; then
-  add_failure 'invalid: structure - use the five required sections once each and in the documented order'
+  add_failure 'invalid: structure - use the three required sections once each and in the documented order'
 fi
 
 if ! printf '%s\n' "$CHECK_TEXT" | awk '
   BEGIN {
     expected[1] = "## System and purpose"
     expected[2] = "## Business impact"
-    expected[3] = "## Fix cost"
-    expected[4] = "## Leave cost"
-    expected[5] = "## Decision requested"
+    expected[3] = "## Decision requested"
   }
   /^## / {
     section += 1
@@ -270,14 +260,14 @@ if ! printf '%s\n' "$CHECK_TEXT" | awk '
   }
   section == 0 && $0 !~ /^[[:space:]]*$/ { exit 1 }
   section > 0 && /^#{1,6}[[:space:]]/ { exit 1 }
-  section == 5 && decision_ended && $0 !~ /^[[:space:]]*$/ { exit 1 }
-  section == 5 && /\?/ { decision_ended = 1 }
+  section == 3 && decision_ended && $0 !~ /^[[:space:]]*$/ { exit 1 }
+  section == 3 && /\?/ { decision_ended = 1 }
   $0 !~ /^[[:space:]]*$/ { seen_nonblank = 1 }
   END {
-    if (section != 5) exit 1
+    if (section != 3) exit 1
   }
 '; then
-  add_failure 'invalid: structure - allow only one optional title, the five section bodies, and no prose after the decision question'
+  add_failure 'invalid: structure - allow only one optional title, the three section bodies, and no prose after the decision question'
 fi
 
 system_body=$(section_body '## System and purpose')
