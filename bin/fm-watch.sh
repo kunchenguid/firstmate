@@ -1170,8 +1170,9 @@ EOF
           # exact terminal status was already surfaced through a signal, stale
           # hash drift is no new captain-facing information and is absorbed.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            actionable_run_state=$(crew_actionable_run_state_line "$task" || true)
-            if crew_is_provably_working "$task"; then
+            crew_state=$(crew_state_line "$task" || true)
+            actionable_run_state=$(crew_actionable_run_state_line_from_state_line "$crew_state" || true)
+            if [ "$(crew_absorb_class_from_state_line "$crew_state")" = working ]; then
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
               clear_actionable_run_state_surfaced "$task"

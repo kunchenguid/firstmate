@@ -713,6 +713,55 @@ test_already_surfaced_terminal_status_wakes_on_run_state_transition() {
   pass "already-surfaced terminal statuses still wake once for parked, PR-ready, or failed run states"
 }
 
+test_terminal_run_state_uses_one_crew_state_sample() {
+  local dir state fakebin out capture_file calls task window statusf line sig key pane_hash pid
+  dir=$(make_case terminal-run-state-single-read)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  capture_file="$dir/pane.txt"
+  calls="$dir/crew-state-calls"
+  task="terminal-single-read"
+  window="test:fm-$task"
+  statusf="$state/$task.status"
+  line="done: implementation complete, ready to validate"
+  printf '%s\n' "$line" > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-${task}_status"
+  printf '%s' "$line" > "$state/.hb-surfaced-$task"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/$task.meta"
+  printf 'terminal single-read pane\n' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "terminal single-read pane")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+count=$(cat "$FM_FAKE_CREW_STATE_COUNT" 2>/dev/null || echo 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_FAKE_CREW_STATE_COUNT"
+if [ "$count" -eq 1 ]; then
+  printf 'state: done · source: run-step · checks green: PR ready\n'
+else
+  printf 'state: working · source: run-step · stale second sample\n'
+fi
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE_COUNT="$calls" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_for_exit "$pid" 40; then
+    reap "$pid"
+    fail "terminal run-state wake was swallowed after a second crew-state sample"
+  fi
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "single-read run state did not print a stale wake"
+  [ "$(cat "$calls" 2>/dev/null || true)" = 1 ] || fail "terminal stale path sampled crew state more than once"
+  pass "already-surfaced terminal stale classification uses one crew-state sample"
+}
+
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
@@ -2298,6 +2347,7 @@ test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_already_surfaced_terminal_stales_absorbed_until_new_status_signal
 test_already_surfaced_terminal_status_wakes_on_run_state_transition
+test_terminal_run_state_uses_one_crew_state_sample
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold

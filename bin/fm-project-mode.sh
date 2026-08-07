@@ -122,6 +122,18 @@ normalize_path() {  # <path>
   printf '%s\n' "$path"
 }
 
+absolute_path_candidate() {  # <path>
+  local path=$1 base
+  [ -n "$path" ] || return 1
+  case "$path" in
+    /*) printf '%s\n' "$path" ;;
+    *)
+      base=$(pwd -P) || return 1
+      printf '%s/%s\n' "$base" "$path"
+      ;;
+  esac
+}
+
 registry_line_name() {  # <line>
   local rest
   case "$1" in
@@ -207,7 +219,7 @@ paths_for_registry_line() {  # <name> <annotation>
     return
   fi
   candidate="$PROJECTS/$name"
-  normalize_path "$candidate" 2>/dev/null || printf '%s\n' "$candidate"
+  normalize_path "$candidate" 2>/dev/null || absolute_path_candidate "$candidate"
 }
 
 if [ ! -f "$REG" ]; then

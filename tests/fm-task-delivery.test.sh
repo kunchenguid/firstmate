@@ -346,11 +346,12 @@ test_project_mode_resolves_registered_paths() {
 }
 
 test_project_mode_path_lookup_preserves_relative_override_base() {
-  local base caller home external outf errf out status abs_data abs_project_root
+  local base caller home external unknown outf errf out status abs_data abs_project_root
   base="$TMP_ROOT/project-path-cwd"
   caller="$base/caller"
   home="$caller/home"
   external="$base/external/project"
+  unknown="$base/unknown/project"
   mkdir -p "$caller" "$home/data" "$external"
   printf -- "- ext [direct-PR path=%s] - external fixture (added 2026-01-01)\n" "$external" \
     > "$home/data/projects.md"
@@ -366,8 +367,12 @@ test_project_mode_path_lookup_preserves_relative_override_base() {
 
   abs_data="$base/absolute-data"
   abs_project_root="$caller/projects-rel"
-  mkdir -p "$abs_data" "$abs_project_root/tree"
-  printf -- '- tree [no-mistakes] - in-tree fixture (added 2026-01-01)\n' > "$abs_data/projects.md"
+  mkdir -p "$abs_data" "$abs_project_root/tree" "$unknown"
+  {
+    printf -- '- missing [direct-PR] - absent in-home fixture (added 2026-01-01)\n'
+    printf -- '- tree [no-mistakes] - in-tree fixture (added 2026-01-01)\n'
+    printf -- "- ext [local-only path=%s] - external fixture (added 2026-01-01)\n" "$external"
+  } > "$abs_data/projects.md"
   outf="$base/project-mode-cwd.out"
   errf="$base/project-mode-cwd.err"
   (cd "$caller" && FM_HOME=missing-home FM_DATA_OVERRIDE="$abs_data" FM_PROJECTS_OVERRIDE=projects-rel \
@@ -376,6 +381,20 @@ test_project_mode_path_lookup_preserves_relative_override_base() {
   expect_code 0 "$status" "relative FM_PROJECTS_OVERRIDE should resolve from caller cwd"
   [ "$(cat "$outf")" = "tree no-mistakes off" ] || fail "relative FM_PROJECTS_OVERRIDE did not match the in-home project path"
   [ ! -s "$errf" ] || fail "relative FM_PROJECTS_OVERRIDE printed an unexpected diagnostic: $(cat "$errf")"
+
+  (cd "$caller" && FM_HOME=missing-home FM_DATA_OVERRIDE="$abs_data" FM_PROJECTS_OVERRIDE=projects-rel \
+    "$PROJECT_MODE" --with-name --path "$external" >"$outf" 2>"$errf")
+  status=$?
+  expect_code 0 "$status" "missing in-home clone should not break external path lookup"
+  [ "$(cat "$outf")" = "ext local-only off" ] || fail "external path was not resolved after an absent in-home clone"
+  [ ! -s "$errf" ] || fail "external path lookup printed an unexpected diagnostic: $(cat "$errf")"
+
+  (cd "$caller" && FM_HOME=missing-home FM_DATA_OVERRIDE="$abs_data" FM_PROJECTS_OVERRIDE=projects-rel \
+    "$PROJECT_MODE" --path "$unknown" >"$outf" 2>"$errf")
+  status=$?
+  expect_code 0 "$status" "missing in-home clone should not make an unknown path malformed"
+  [ "$(cat "$outf")" = "no-mistakes off" ] || fail "unknown path did not keep the protective default"
+  assert_grep 'no project registered for path' "$errf" "unknown path did not print its default diagnostic"
   pass "fm-project-mode: path normalization keeps relative overrides based at the caller cwd"
 }
 
