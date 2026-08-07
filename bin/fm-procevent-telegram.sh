@@ -193,7 +193,7 @@ release_cursor_lock() {
 # concurrent acks can both read the old value and the later commit wins,
 # rewinding the cursor and re-capturing already handled updates.
 cmd_ack() {
-  local id=${1:-} cursor dir tmp
+  local id=${1:-} cursor dir tmp message
   case "$id" in
     ''|*[!0-9]*) die "ack needs a nonnegative integer update id: $id" ;;
   esac
@@ -211,14 +211,13 @@ cmd_ack() {
     tmp=$(umask 077; mktemp "$dir/.telegram-cursor.new.XXXXXX") || die "cannot stage the cursor"
     { printf '%s\n' "$id" > "$tmp" && chmod 0600 "$tmp" && mv -f -- "$tmp" "$CURSOR_FILE"; } \
       || { rm -f -- "$tmp"; die "cannot commit the cursor: $CURSOR_FILE"; }
-    release_cursor_lock
-    trap - EXIT HUP INT TERM
-    printf 'acked: %s\n' "$id"
-    return 0
+    message="acked: $id"
+  else
+    message="already-acked: $id (cursor $cursor)"
   fi
   release_cursor_lock
   trap - EXIT HUP INT TERM
-  printf 'already-acked: %s (cursor %s)\n' "$id" "$cursor"
+  printf '%s\n' "$message"
 }
 
 cmd_terminal() {
