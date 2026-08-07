@@ -60,6 +60,19 @@ A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote 
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
 A `local-only` project may have no remote and skips no-mistakes initialization.
 
+## Nu service convention
+
+When intake resolves to a Nubank internal service reachable via the `nu` CLI (the `nu projects` command family, installed at `~/dev/nu/nucli/nu`), apply this convention instead of an ordinary clone into `projects/`.
+
+1. Search `~/dev/nu` by service name for an existing checkout before assuming one is absent; discover the exact subdirectory layout at intake time rather than hardcoding it, since it is a large multi-repo tree.
+2. If a checkout exists, do not clone it a second time.
+   Symlink `projects/<name>` to that existing `~/dev/nu` checkout, and add the registry entry the same way the existing `dotfiles` entry documents its symlink-not-clone status: name, delivery posture in brackets, a one-line description noting it is a symlink to the live checkout under `~/dev/nu` rather than a clone, and the added-date.
+3. If no checkout exists, run `nu projects clone <service-name>` to create one under `~/dev/nu` first, then symlink it into `projects/<name>` exactly as in step 2.
+4. Before exploring or working on a service intake'd this way, run `nu projects update <service-name>` first to refresh the `~/dev/nu` checkout.
+   This is a hard prerequisite, not optional housekeeping: never read or edit anything in the checkout before it completes.
+5. Every intake through this convention, whether existing checkout or fresh clone, unconditionally creates a persistent secondmate for that service; this is unconditional here regardless of the general secondmate-creation posture elsewhere.
+   Use the normal `secondmate-provisioning` procedure to seed it.
+
 ## Create a project
 
 Creating a GitHub repository is outward-facing.
