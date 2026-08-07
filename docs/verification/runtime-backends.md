@@ -672,3 +672,50 @@ The host-tool sequence was:
 Observed guarantee: a Desktop-owned thread can write Firstmate lifecycle files when the prompt provides an authorized absolute path, and create, send, read, and archive work at the Desktop host-tool layer.
 The missing guarantee remains a supported shell-callable bridge that lets Firstmate perform those operations against the same visible Desktop endpoint.
 App-server partial methods and raw socket experiments do not satisfy that bridge contract.
+
+## Cross-kernel localhost routing
+
+`bin/fm-localhost.py --help` is the single procedural owner for cross-kernel inspection, exact-PID recovery, launcher selection, and route verification.
+This section carries only the repeatable evidence for that active runtime guarantee.
+
+On 2026-08-06, the behavior suite passed with Python 3.12.3, GNU Bash 5.2.21, and Git 2.43.0.
+It uses real Git repositories and executable fake Windows/WSL kernel boundaries, so no host process is inspected or terminated while the parser, classifier, re-resolution, evidence, launcher, and refusal paths remain deterministic.
+
+```sh
+bash tests/fm-localhost.test.sh
+```
+
+Observed output:
+
+```text
+ok - localhost inspect parses listeners, converts Windows/WSL paths, classifies Git source, and redacts commands
+ok - stale native Windows Astro shadow recovers by exact PID to wslrelay plus clean WSL and matching routes
+ok - healthy wslrelay plus clean WSL server passes with matching browser-like route fingerprints
+ok - relay verification requires the trusted canonical Windows system identity
+ok - same-owner multiple listener bindings remain a verified relay pair
+ok - same-owner multiple stale Windows bindings recover by one exact PID
+ok - active Firstmate task ownership refuses recovery without termination
+ok - active WSL task ownership refuses recovery and verification
+ok - multiple WSL owners refuse recovery before mutation
+ok - WSL listener verification requires the default branch
+ok - production-like WSL owners and project launchers refuse recovery
+ok - task-state publication lock contention refuses within a fixed bound
+ok - PID or command change between observations refuses exact-PID recovery
+ok - verify revalidates the expected checkout after route inspection
+ok - node worker commands containing Astro words refuse exact-PID recovery
+ok - unknown commands and unrelated Windows repositories refuse without termination
+ok - unavailable Windows inspection refuses recovery without mutation
+ok - unavailable WSL inspection refuses recovery without mutation
+ok - unavailable Firstmate task-state inspection refuses recovery without termination
+ok - verify proves the listener pair before contacting localhost
+ok - fresh mutation-boundary source and task proof blocks termination
+ok - termination-boundary task proof blocks exact-PID termination
+ok - post-stop inspection failure blocks any restart
+ok - Astro launcher scripts with shell metacharacters refuse recovery
+ok - post-recovery Windows/WSL route fingerprint mismatch fails verification
+ok - post-route listener-pair changes fail verification
+ok - dirty expected checkout refuses restart after exact-PID termination
+```
+
+The suite covers Windows listener JSON parsing, Windows drive and WSL UNC conversion, WSL-to-Windows conversion, exact Astro script/dev classification, Git source classification, command redaction, exact PID and full mutation-boundary re-resolution, unavailable Windows, WSL, and Firstmate task-state inspection, route-proof ordering, unrelated, unknown, or production-like processes, task associations on both kernels, bounded shared task-state publication locking, trusted Windows system relay identity, same-owner multiple bindings, distinct WSL-owner ambiguity, WSL default-branch identity, the never-terminate relay boundary, the healthy relay pair, the stale native Astro recovery path, launcher shell validation and cleanup, post-route listener-pair changes, mismatched post-recovery route fingerprints, and expected-checkout revalidation before restart.
+Host-specific acceptance still requires `verify` against the actual project/port/expected-SHA tuple; private evidence remains under the active Firstmate home's gitignored `state/` tree rather than this maintained record.

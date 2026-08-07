@@ -220,6 +220,31 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
+TASK_STATE_LOCK="$STATE/.task-state.lock"
+TASK_STATE_LOCK_HELD=0
+task_state_lock_acquire() {
+  local attempt=0
+  mkdir -p "$STATE" || {
+    echo "error: could not create task-state directory" >&2
+    return 1
+  }
+  while [ "$attempt" -lt 50 ]; do
+    if fm_lock_try_acquire "$TASK_STATE_LOCK"; then
+      TASK_STATE_LOCK_HELD=1
+      return 0
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  echo "error: task-state publication lock timed out" >&2
+  return 1
+}
+task_state_lock_release() {
+  if [ "$TASK_STATE_LOCK_HELD" -eq 1 ]; then
+    TASK_STATE_LOCK_HELD=0
+    fm_lock_release "$TASK_STATE_LOCK"
+  fi
+}
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -584,11 +609,14 @@ spawn_remote_secondmate() {
 }
 
 if [ "$KIND" = secondmate ]; then
+  task_state_lock_acquire
   if spawn_remote_secondmate "${POS[0]:-}"; then
+    task_state_lock_release
     exit 0
   else
     remote_spawn_rc=$?
   fi
+  task_state_lock_release
   [ "$remote_spawn_rc" -eq 3 ] || exit "$remote_spawn_rc"
 fi
 
@@ -700,6 +728,7 @@ spawn_abort_cleanup() {
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
   fi
+  task_state_lock_release
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
@@ -783,6 +812,7 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
+task_state_lock_acquire
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -2291,6 +2321,7 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
     fi
   fi
 fi
+task_state_lock_release
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3

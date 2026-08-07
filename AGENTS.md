@@ -319,6 +319,8 @@ After an autonomous merge, give the captain a one-line full-URL or local-main ou
 
 ### Validate
 
+Before accepting localhost or browser QA on a Windows/WSL host, run `bin/fm-localhost.py verify` for the project/port/expected-SHA tuple; its `--help` is the single owner of inspection and narrowly proven recovery.
+
 For a no-mistakes ship, trigger validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
 The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.

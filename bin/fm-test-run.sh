@@ -138,7 +138,7 @@ family_for_basename() {
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-decision-hold-lifecycle.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
-    fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
+    fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|fm-localhost.test.sh|\
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-subagent-pretool-check.test.sh|\
@@ -939,6 +939,10 @@ families_for_changed_path() {
       # Pin or cleanup changes also select the real-Herdr family so the required
       # lane's contract coverage re-runs.
       printf '%s\n' real-herdr-gated
+      ;;
+    bin/fm-localhost.py|bin/fm-task-state-lock.sh)
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' __script__:fm-localhost.test.sh
       ;;
     bin/fm-lint.sh|bin/fm-install-shellcheck.sh|\
     bin/fm-brief.sh|bin/fm-ensure-agents-md.sh|bin/fm-crew-state.sh|\

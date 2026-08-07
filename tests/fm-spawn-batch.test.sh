@@ -141,8 +141,36 @@ test_scout_batch_refuses_delivery_flags() {
   pass "scout batch refuses ship delivery flags instead of ignoring them"
 }
 
+test_task_state_publication_lock_wait_is_bounded() {
+  local dir state home holder out status
+  dir="$TMP_ROOT/task-state-lock"
+  state="$dir/state"
+  home="$dir/home"
+  mkdir -p "$state" "$home/data" "$home/config"
+  mkfifo "$dir/lock-input"
+  bash "$ROOT/bin/fm-task-state-lock.sh" "$state" 50 < "$dir/lock-input" > "$dir/lock-output" &
+  holder=$!
+  exec 9>"$dir/lock-input"
+  while ! grep -qx locked "$dir/lock-output" 2>/dev/null; do
+    kill -0 "$holder" 2>/dev/null || fail "task-state lock holder exited before acquiring the lock"
+    sleep 0.05
+  done
+  out=$(timeout 8s env \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 \
+    "$SPAWN" lock-timeout-q1 "$home" claude --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "contended task-state publication lock was accepted"
+  printf '%s\n' "$out" | grep -F 'task-state publication lock timed out' >/dev/null \
+    || fail "contended task-state publication lock did not refuse with a bounded timeout"
+  exec 9>&-
+  wait "$holder" || fail "task-state lock holder did not release cleanly"
+  pass "task-state publication lock contention refuses within a fixed bound"
+}
+
 test_batch_dispatches_every_pair
 test_batch_mode_boundaries
 test_batch_requires_the_shared_delivery_contract
 test_scout_batch_refuses_delivery_flags
 test_projects_path_scoping
+test_task_state_publication_lock_wait_is_bounded
