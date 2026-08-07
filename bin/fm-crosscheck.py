@@ -84,7 +84,12 @@ SANDBOX_EXEC_FAILURE_MARKER = "execvp() of "
 SHELL_COMMAND_NOT_FOUND_EXIT = 127
 # Exit statuses that mean an approved runner started but never executed the
 # named test. They are not test outcomes in either direction: they can neither
-# condemn a baseline run nor vindicate a mutated one.
+# condemn a baseline run nor vindicate a mutated one. Every entry is measured
+# against the runner itself; a guessed status would reinstate exactly the
+# misreading this table exists to prevent, so a runner is absent from it until
+# its non-execution has been observed. A mutation proof may name only a runner
+# listed here, because on any other one the gate cannot tell a test that caught
+# the mutation from a test that never ran.
 RUNNER_NON_EXECUTION_EXITS: dict[str, dict[int, str]] = {
     "pytest": {
         2: "collection was interrupted",
@@ -750,8 +755,9 @@ def require_command_execution(
         )
     require(
         result.returncode != SHELL_COMMAND_NOT_FOUND_EXIT,
-        f"{label} never ran: its command was not found in the review checkout, "
-        "which holds tracked files only and none of the reviewer's tooling: "
+        f"{label} never ran: its command was not found when the gate re-ran it "
+        "in the review checkout with no network and none of the reviewer's "
+        "provider credentials or account environment: "
         f"{combined[:500] or 'no output'}",
     )
 
@@ -793,7 +799,7 @@ def execute_reproduction(
     require(
         result.returncode == expected_exit,
         f"{label} exited {result.returncode}, expected {expected_exit}. "
-        "The gate re-executes reviewer evidence in a clean checkout with no "
+        "The gate re-executes reviewer evidence in the review checkout with no "
         "network and none of the reviewer's provider credentials or account "
         f"environment, so evidence that depends on those will differ here: "
         f"{combined.strip()[:1000] or 'no output'}",
@@ -891,6 +897,25 @@ def require_test_execution(
         f"{label} never ran its named test during the {phase} run: {runner} "
         f"exited {result.returncode} because {reason}, which is not a test "
         f"outcome: {combined[:500]}",
+    )
+
+
+def require_classified_runner(runner: str, label: str) -> None:
+    """Refuse to certify a fix on a runner whose non-execution is unclassified.
+
+    A mutated run that never reached the named test exits nonzero exactly like
+    one that caught the regression. Telling those apart needs a measured
+    non-execution signal for that specific runner, so a runner the gate has no
+    entry for cannot support a mutation proof at all.
+    """
+
+    require(
+        runner in RUNNER_NON_EXECUTION_EXITS,
+        f"{label} cannot certify a fix through the {runner} runner: the gate "
+        f"has no measured non-execution signal for {runner}, so a mutated run "
+        "that never reached the named test is indistinguishable there from one "
+        "that caught the regression. Runners whose non-execution the gate can "
+        f"classify: {', '.join(sorted(RUNNER_NON_EXECUTION_EXITS))}",
     )
 
 
@@ -1025,8 +1050,10 @@ def execute_mutation_proof(
     create_proof_checkout(review_dir, proof_dir, head_sha, label, deadline)
 
     baseline_profile = proof_dir / ".crosscheck" / "mutation-proof.sb"
+    baseline_argv = test_arguments(invocation, test_path, proof_dir, label)
+    require_classified_runner(invocation["runner"], label)
     baseline = run_sandboxed(
-        test_arguments(invocation, test_path, proof_dir, label),
+        baseline_argv,
         cwd=proof_dir,
         profile_path=baseline_profile,
         allow_network=False,
@@ -1697,6 +1724,7 @@ The mutation may change only implementation paths already cited by that finding.
 The gate appends the named test path to the approved runner invocation, destroys all baseline state, and recreates the same clean checkout path before applying the mutation.
 test_path may be a plain repository path, or a `path::selector` node id when the runner is one of: {', '.join(sorted(NODE_ID_RUNNERS))}.
 The proof checkout is a fresh clone holding tracked files only, so name a runner installed on PATH there; a runner that is absent, or a selector that matches no test, is reported as a non-execution rather than a test result and clears nothing.
+A mutation proof may name only a runner whose non-execution signal the gate has measured, currently: {', '.join(sorted(RUNNER_NON_EXECUTION_EXITS))}. On any other runner the gate cannot tell a test that caught the mutation from one that never ran, so it refuses to certify the fix rather than guess.
 The gate will independently run every reproduction and every mutation proof.
 If you cannot reproduce a concern, return it as a suspicion; suspicions block the merge.
 Silence never closes an existing finding.
@@ -1707,7 +1735,7 @@ Use Bash to create its helper under `.crosscheck/reproductions/`, actually run i
 The helper must execute `git diff` between those two SHAs and emit a distinctive success marker.
 The helper must also write a separate receipt under `.crosscheck/reproductions/` while it runs.
 The receipt must name both exact SHAs, HOME, and the provider account selector, and `executed_reproduction` must name that receipt and a distinctive receipt marker.
-The gate reads that receipt and then independently re-runs every helper and command you supply, in a clean checkout with no network and none of your provider credentials or account environment.
+The gate reads that receipt and then independently re-runs every helper and command you supply, with no network and none of your provider credentials or account environment.
 So every helper must still exit as declared and emit its marker there: record context values like HOME or {config['account_selector']} into the receipt without requiring them to be set, never fail when they are absent (guard every expansion, for instance `${{VAR:-}}` under `set -u`), and depend on nothing outside the repository and its tracked files.
 Report `execution_home` from HOME.
 Report `executing_account_home` from {config['account_selector']}.

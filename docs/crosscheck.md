@@ -100,7 +100,7 @@ Every verdict artifact must also carry one verdict-level reproduction whose comm
 The reviewer must create and run that helper with its own command tool, and the helper must leave a receipt naming both SHAs, `HOME`, and the provider account selector.
 Crosscheck inspects that receipt before independently re-executing the helper, then stores the receipt digest and bounded content with the verdict.
 A missing or failed verdict-level reproduction is a `tool-failure`, so a reading-only concern from a reviewer with a dead command tool can never become a blocking code verdict.
-The gate's re-execution is deliberately independent: a clean checkout with no network and none of the reviewer's provider credentials or account environment.
+The gate's re-execution is deliberately independent: it re-runs the helper itself in the review checkout with no network and none of the reviewer's provider credentials or account environment.
 Reviewer helpers must therefore be self-contained and must not require reviewer-only variables to be set, even though the receipt they write records `HOME` and the provider account selector.
 That asymmetry is the trap this contract exists to name: a helper that reads those variables unguarded under `set -u` succeeds for the reviewer and fails for the gate.
 Every evidence-execution refusal carries the command's own bounded output, because a bare unexpected exit reads as a substantive verdict about the code when it is often a failure to execute at all.
@@ -123,6 +123,7 @@ The gate positions the tracked test path itself as the interpreter script or tes
 A run that never reached the named test is not a test result in either direction.
 The gate resolves the named runner to an absolute executable before launching, and treats an absent runner, a failed sandbox exec, and a runner-reported non-execution (pytest's usage and no-tests-collected statuses, for instance) as named non-executions.
 That matters in both directions: such a status must not condemn a baseline run, and must not vindicate a mutated one, because a mutation that merely broke collection would otherwise read as a caught regression.
+Because that reading is only safe where the non-execution signal has actually been measured, a mutation proof may name only a runner the gate classifies - `pytest` today - and any other runner is refused by name rather than certified on a status the gate would have to guess at.
 The proof checkout is a fresh clone carrying tracked files only, so a runner that lives solely in an untracked virtualenv is absent there.
 The patch may modify only non-test implementation paths already cited by the durable finding.
 It cannot modify the named test, conventional test trees, fixtures, or Crosscheck evidence support.

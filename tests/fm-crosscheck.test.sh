@@ -419,9 +419,10 @@ elif scenario in {
     "stateful-forgery",
     "support-forgery",
     "symlink-forgery",
+    "unclassified-runner",
 }:
     patch = protocol / "mutations" / "revert.patch"
-    if scenario in {"verified-fixed", "forged-command"}:
+    if scenario in {"verified-fixed", "forged-command", "unclassified-runner"}:
         patch.parent.mkdir(parents=True, exist_ok=True)
         patch.write_text("""diff --git a/app.txt b/app.txt
 --- a/app.txt
@@ -474,9 +475,15 @@ elif scenario in {
         "support-forgery": "tests/support.test.sh",
         "symlink-forgery": "tests/symlink.test.sh",
     }.get(scenario, "tests/regression.test.sh")
+    # Only a runner whose non-execution the gate has measured can certify a
+    # fix, so every scenario that must reach mutation causality names one.
+    # The pytest double runs a plain `bash <file>` fixture unchanged.
     mutation_proof = {
         "test_path": test_path,
-        "test_invocation": {"runner": "bash", "arguments": []},
+        "test_invocation": {
+            "runner": "bash" if scenario == "unclassified-runner" else "pytest",
+            "arguments": [],
+        },
         "mutation_patch_path": ".crosscheck/mutations/revert.patch",
     }
     if scenario == "forged-command":
@@ -1231,6 +1238,36 @@ test_absent_runner_is_never_a_test_outcome() {
     fail "an uninstalled runner was misreported as a failing test"
   fi
   pass "an uninstalled runner is named, never reported as a failing test"
+}
+
+# A mutated run that never reached the test exits nonzero exactly like one that
+# caught the regression. Only a runner whose non-execution status the gate has
+# measured can tell those apart, so any other runner must be refused by name
+# rather than certified on an exit status the gate would have to guess at.
+test_unclassified_runner_cannot_clear_a_finding() {
+  local record case_dir base head rc
+  record=$(make_case unclassified-runner)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  set +e
+  run_case "$case_dir" "$base" "$head" unclassified-runner run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "mutation proof on an unclassified runner"
+  assert_grep 'bash' "$case_dir/err" \
+    "the refusal did not name the runner whose non-execution is unclassified"
+  assert_grep 'no measured non-execution signal' "$case_dir/err" \
+    "the refusal did not say why that runner cannot certify a fix"
+  assert_grep 'classify: pytest' "$case_dir/err" \
+    "the refusal did not name the runners the gate can classify"
+  python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1]))
+assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+' "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    || fail "an unclassified runner cleared a finding"
+  pass "a runner with no measured non-execution signal cannot certify a fix"
 }
 
 test_unmatched_selector_is_never_a_failing_test() {
@@ -2352,6 +2389,7 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_evidence_batch_item_limit_precedes_execution|\
     test_node_id_selector_clears_a_passing_named_test|\
     test_absent_runner_is_never_a_test_outcome|\
+    test_unclassified_runner_cannot_clear_a_finding|\
     test_unmatched_selector_is_never_a_failing_test|\
     test_mutated_non_execution_cannot_clear_a_finding|\
     test_symlinked_directory_named_test_is_rejected|\
@@ -2400,6 +2438,7 @@ test_silence_never_closes_prior_finding
 test_verified_fix_executes_mutation_proof
 test_node_id_selector_clears_a_passing_named_test
 test_absent_runner_is_never_a_test_outcome
+test_unclassified_runner_cannot_clear_a_finding
 test_unmatched_selector_is_never_a_failing_test
 test_mutated_non_execution_cannot_clear_a_finding
 test_symlinked_directory_named_test_is_rejected
