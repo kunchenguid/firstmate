@@ -141,6 +141,8 @@ Firstmate supervision, PR merge automation, and bootstrap `gh` checks keep using
 The private key PEM itself stays outside every git repo (for example mode `600` under `~/.config/firstmate/` or a hardware-backed store).
 A symlinked key path is refused outright, with an error that says so, because a symlink lets whoever controls the link target redirect what gets signed; keep the PEM outside every clone as above and point this file at the real path (copy or bind-mount it into place if a dotfiles or secret-manager tree normally publishes it by symlink).
 A required `config/github-app-*` file that exists but cannot be read is a hard error too, never "not configured": degrading a half-configured home to inert would silently launch workers under the captain's identity.
+The same fail-closed rule covers a present but invalid value: a non-digit id, a relative key path, a symlinked key path, or a missing or unreadable PEM is a failed mint, not an inert home.
+Minting also needs `openssl`, `curl`, `base64`, and `jq` on `PATH`; bootstrap requires none of them universally and `curl`/`jq` only in some profiles ("Toolchain" below), so a configured home missing one has its ship and scout spawns refused until that tool is installed.
 `bin/fm-github-app-token.sh` is the single owner of mint mechanics: it builds a short-lived App JWT with openssl RS256, posts it to the installation access-tokens endpoint with the JWT in a mode-0600 curl header file (never on argv), and prints only the installation access token on stdout.
 It never prints the private key, never logs a token, and never writes a token into a worktree or tracked file.
 Callers treat exit status `2` as "no App configured" (not an error), `0` as success, and `1` as a configured-but-failed mint.

@@ -316,9 +316,133 @@ SH
   pass "pane-time mint failure blocks the worker instead of falling back to captain identity"
 }
 
+# The App path covers ship AND scout spawns. A scout resolves its own worktree
+# and takes a different argument shape, so cover it as its own contract rather
+# than assuming the ship case generalizes.
+test_configured_scout_spawn_takes_the_app_path() {
+  local rec out status key curlbin token wrapper export_line launch_line
+  token="ghs_scout_token_not_real_qrs"
+  rec=$(make_case scout ghapp-scout)
+  read_case "$rec"
+  key="$HOME_DIR/app.pem"
+  openssl genrsa -out "$key" 2048 2>/dev/null || fail "openssl genrsa failed"
+  chmod 600 "$key"
+  printf '111\n' > "$HOME_DIR/config/github-app-id"
+  printf '222\n' > "$HOME_DIR/config/github-app-installation-id"
+  printf '%s\n' "$key" > "$HOME_DIR/config/github-app-private-key-path"
+  curlbin=$(make_fake_curl "$HOME_DIR/fake-curl")
+
+  out=$(
+    env FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+      FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+      FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+      FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
+      FM_GITHUB_APP_API_BASE="https://example.test" \
+      FM_FAKE_INSTALL_TOKEN="$token" \
+      PATH="$curlbin:$FAKEBIN_DIR:$PATH" \
+      "$SPAWN" "$CASE_ID" "$PROJ_DIR" --scout 2>&1
+  )
+  status=$?
+  [ "$status" -eq 0 ] || fail "configured scout spawn should succeed (exit $status): $out"
+
+  wrapper="/tmp/fm-$CASE_ID/github-app-token-cmd"
+  assert_present "$wrapper" "configured scout spawn should write the mint wrapper under TASK_TMP"
+  export_line=$(grep -F 'export GH_TOKEN=' "$LAUNCH_LOG" | head -1 || true)
+  launch_line=$(grep -F 'FM_GITHUB_APP_TOKEN_HELPER:-' "$LAUNCH_LOG" | head -1 || true)
+  [ -n "$export_line" ] || fail "configured scout spawn should send a GH_TOKEN export line"
+  [ -n "$launch_line" ] || fail "scout launch command should be gated on the pane-minted token"
+  case "$export_line" in
+    *"$token"*) fail "installation token must not appear in scout send-keys argv: $export_line" ;;
+  esac
+  if grep -R -- "$token" "$WT_DIR" >/dev/null 2>&1; then
+    fail "installation token must not be written into the scout worktree"
+  fi
+  pass "configured scout spawn takes the same App identity path as a ship, token off argv"
+}
+
+# Secondmates are supervisors, not workers: they keep the captain's identity.
+# Spawn a secondmate from a home whose GitHub App config is present and usable
+# and prove the pane gets exactly today's env - no wrapper, no token exports,
+# no launch gate. Also proves the KIND gate is evaluated before the preflight,
+# by repeating the spawn with a deliberately broken key: a secondmate must launch
+# anyway, where a ship spawn would have been refused.
+#   run_secondmate_case <name> <good|broken>
+run_secondmate_case() {
+  local name=$1 keykind=$2
+  local base prim sm sm_id smlog smfake key curlbin status out
+  base="$TMP_ROOT/secondmate-$name"
+  prim="$base/primary"
+  sm="$base/sm"
+  mkdir -p "$prim/config" "$prim/data" "$prim/state" "$prim/projects"
+  printf 'codex\n' > "$prim/config/crew-harness"
+  touch "$prim/state/.last-watcher-beat"
+
+  key="$prim/app.pem"
+  if [ "$keykind" = good ]; then
+    openssl genrsa -out "$key" 2048 2>/dev/null || fail "openssl genrsa failed"
+  else
+    printf 'not-a-pem\n' > "$key"
+  fi
+  chmod 600 "$key"
+  printf '111\n' > "$prim/config/github-app-id"
+  printf '222\n' > "$prim/config/github-app-installation-id"
+  printf '%s\n' "$key" > "$prim/config/github-app-private-key-path"
+  curlbin=$(make_fake_curl "$base/fake-curl")
+
+  sm_id="sm-ghapp-$name"
+  mkdir -p "$sm/bin" "$sm/data"
+  printf '# Firstmate\n' > "$sm/AGENTS.md"
+  printf '%s\n' "$sm_id" > "$sm/.fm-secondmate-home"
+  printf 'charter\n' > "$sm/data/charter.md"
+
+  mkdir -p "$prim/data/$sm_id"
+  printf 'charter brief\n' > "$prim/data/$sm_id/brief.md"
+  smlog="$base/sm-launch.log"
+  smfake=$(make_spawn_fakebin "$base/sm-fake")
+  : > "$smlog"
+
+  out=$(
+    env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$prim" \
+      FM_STATE_OVERRIDE="$prim/state" FM_DATA_OVERRIDE="$prim/data" \
+      FM_PROJECTS_OVERRIDE="$prim/projects" FM_CONFIG_OVERRIDE="$prim/config" \
+      FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+      FM_FAKE_LAUNCH_LOG="$smlog" \
+      FM_GITHUB_APP_API_BASE="https://example.test" \
+      FM_FAKE_INSTALL_TOKEN="ghs_secondmate_must_not_see_this" \
+      PATH="$curlbin:$smfake:$PATH" \
+      "$SPAWN" "$sm_id" "$sm" --secondmate 2>&1
+  )
+  status=$?
+  [ "$status" -eq 0 ] || fail "secondmate spawn should succeed with a $keykind App key (exit $status): $out"
+  assert_grep 'export GOTMPDIR=' "$smlog" "secondmate should still get the ordinary GOTMPDIR export"
+  if grep -E 'GH_TOKEN|GITHUB_TOKEN|FM_GITHUB_APP|github-app-token' "$smlog" >/dev/null; then
+    fail "secondmate ($keykind key) must keep captain identity; launch log was: $(cat "$smlog")"
+  fi
+  assert_absent "/tmp/fm-$sm_id/github-app-token-cmd" \
+    "secondmate spawn must not write a github-app-token-cmd wrapper"
+  case "$out" in
+    *"ambiguous GitHub identity"*)
+      fail "secondmate spawn must not be refused by the GitHub App preflight: $out" ;;
+  esac
+}
+
+test_secondmate_keeps_captain_identity() {
+  run_secondmate_case good good
+  pass "configured GitHub App does not touch a secondmate spawn (captain identity kept)"
+}
+
+test_secondmate_unaffected_by_broken_app_config() {
+  run_secondmate_case broken broken
+  pass "a broken GitHub App config refuses ship spawns but never blocks a secondmate"
+}
+
 test_unconfigured_spawn_is_inert
 test_configured_spawn_injects_helper_not_token
 test_configured_but_broken_mint_refuses_spawn
 test_pane_mint_failure_blocks_worker_launch
+test_configured_scout_spawn_takes_the_app_path
+test_secondmate_keeps_captain_identity
+test_secondmate_unaffected_by_broken_app_config
 
 printf 'All fm-github-app-spawn tests passed.\n'
