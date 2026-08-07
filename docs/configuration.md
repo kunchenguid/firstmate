@@ -1221,7 +1221,6 @@ An unknown resolved backend emits `BACKEND_INVALID` and blocks dispatch instead 
 
 Orca provides both the task worktree and terminal endpoint (see "Runtime backend" above), so `backend=orca` requires only `orca` on top of the universal toolchain and skips both `treehouse` and every other backend's session CLI.
 A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the `treehouse` durable-lease upgrade check runs only for the backends that actually use treehouse.
-
 **Feature-specific requirements**
 
 - When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
@@ -1238,6 +1237,12 @@ A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the
 
 **Checkout diagnostics**
 
+When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
+When Relay is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
+For a registered GitHub project, an absent or incompatible `gh-axi` reports `MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)`.
+For a registered GitLab project, an absent `glab` reports `MISSING: glab` with the platform-specific install command.
+An absent or incompatible `lavish-axi` reports `PRESENTATION_UNAVAILABLE` with its required floor, install command, and explicit text fallback.
+[`bootstrap-diagnostics`](../.agents/skills/bootstrap-diagnostics/SKILL.md) owns the response and compatibility checks before visual or forge-dependent use.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
 
