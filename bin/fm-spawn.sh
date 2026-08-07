@@ -4141,6 +4141,17 @@ spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   spawn_send_text_line "$T" "export FM_TASK_ID=$ID"
 fi
+# chrome-devtools-axi's own browser launch is broken on some machines, so use a
+# best-effort machine-shared loopback browser when the operator did not provide
+# an ambient endpoint. The helper failure is intentionally non-fatal because a
+# task may not need browser verification.
+SPAWN_BROWSER_URL=${CHROME_DEVTOOLS_AXI_BROWSER_URL:-}
+if [ -z "$SPAWN_BROWSER_URL" ]; then
+  SPAWN_BROWSER_URL=$("$FM_ROOT/bin/fm-browser.sh" url 2>/dev/null || true)
+fi
+if [ -n "$SPAWN_BROWSER_URL" ]; then
+  spawn_send_text_line "$T" "export CHROME_DEVTOOLS_AXI_BROWSER_URL=$(shell_quote "$SPAWN_BROWSER_URL")"
+fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
 # entirely when trace context is off.
