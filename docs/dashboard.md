@@ -14,12 +14,14 @@ Supervision is explicit in the page.
 `no-watcher-active` means work needs supervision but no validated watcher is active.
 `not_needed` means there is no in-flight task, registered process-event source, or X-mode relay requiring a watcher.
 The page also shows the heartbeat age and does not treat an old snapshot as healthy.
+The `/health` endpoint returns `fm-dashboard-health.v1` JSON with `200` only while the poller is alive and no snapshot or poller error is recorded; degraded state returns `503` with the error and poller status.
 
 The service owns only `state/.dashboard/`.
 It atomically writes `snapshot.json`, appends dashboard events to `events.jsonl`, and records status-log cursors in `status-cursors.json`.
 It observes append-only main-home status files and status files for active validated registered-secondmate children, and uses the existing read-only snapshot readers.
 It never consumes or drains `state/.wake-queue`.
 The event stream uses reconnecting Server-Sent Events with durable numeric cursors, so a browser reconnect or service restart can replay events after the last received id.
+The snapshot's `service` object reports `state`, `poller_state`, `poller_error`, `snapshot_error`, `last_success_at`, and `poll_interval_seconds`, so a stale last snapshot cannot masquerade as a healthy poller.
 
 The first slice is intentionally observational.
 The page has no fleet-control operations, authenticated remote listener, or secret-bearing payloads.

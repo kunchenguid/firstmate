@@ -190,6 +190,7 @@ For a remote route, `tasks-axi mv` first moves the dependency-closed set atomica
 The outbox is then copied to the remote handoff scratch directory and `fm-backlog-receive.sh` atomically ingests every destination-absent key under the remote backlog's own lock.
 Confirmed receipt removes the outbox.
 An existing outbox is the complete retry record, and `--resume-pending` safely re-delivers it.
+If an interruption left an outbox key duplicated in the primary backlog, resume removes only that source duplicate after validating the primary backlog and before delivery; if the removal cannot be proved, the authoritative outbox remains and delivery stops.
 Bootstrap retries pending outboxes and emits `SECONDMATE_HANDOFF:` only when one remains.
 There is no two-phase journal and no additional tasks-axi release requirement.
 
