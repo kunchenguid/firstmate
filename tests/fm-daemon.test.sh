@@ -21,6 +21,12 @@ if [ -z "${FM_TEST_DAEMON_SOURCED:-}" ]; then
   . "$DAEMON"
 fi
 
+# Pure injection tests do not run daemon startup discovery. Give them an
+# explicit delivery endpoint instead of relying on a production fallback.
+FM_SUPERVISOR_TARGET=test-supervisor-pane
+FM_SUPERVISOR_BACKEND=tmux
+export FM_SUPERVISOR_TARGET FM_SUPERVISOR_BACKEND
+
 TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 FM_DAEMON_PRIMARY_HARNESS=claude
 export FM_DAEMON_PRIMARY_HARNESS
@@ -31,7 +37,7 @@ test_afk_start_refuses_when_flag_cannot_be_written() {
   state="$dir/state"
   mkdir -p "$state/.afk"
 
-  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=tmux "$AFK_START" 2>&1)
   status=$?
 
   [ "$status" -ne 0 ] || fail "fm-afk-start.sh should fail when state/.afk cannot be written"
@@ -49,11 +55,11 @@ test_afk_start_ignores_stale_pidfile_without_lock() {
   out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
   status=$?
 
-  [ "$status" -ne 0 ] || fail "fm-afk-start.sh should attempt daemon startup instead of trusting a pidfile-only live pid"
-  assert_contains "$out" "starting supervise daemon" "fm-afk-start.sh did not attempt daemon startup"
-  assert_contains "$out" "does not support supervisor backend 'unsupported'" "daemon startup did not reach backend validation"
+  [ "$status" -ne 0 ] || fail "fm-afk-start.sh should attempt delivery preflight instead of trusting a pidfile-only live pid"
+  assert_contains "$out" "backend=UNVERIFIED(unsupported-delivery-backend:unsupported)" \
+    "daemon startup did not report the unsupported backend as unavailable delivery"
   assert_not_contains "$out" "daemon already running" "fm-afk-start.sh trusted a stale pidfile-only live pid"
-  pass "fm-afk-start.sh ignores stale pidfile-only live pids"
+  pass "fm-afk-start.sh ignores stale pidfile-only live pids and reaches delivery validation"
 }
 
 test_afk_start_reclaims_stale_daemon_lock_reused_pid() {
@@ -69,12 +75,33 @@ test_afk_start_reclaims_stale_daemon_lock_reused_pid() {
   out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
   status=$?
 
-  [ "$status" -ne 0 ] || fail "fm-afk-start.sh should attempt daemon startup after rejecting a reused-pid lock"
-  assert_contains "$out" "starting supervise daemon" "fm-afk-start.sh did not attempt daemon startup after rejecting the stale lock"
-  assert_contains "$out" "does not support supervisor backend 'unsupported'" "daemon startup did not reach backend validation after stale lock cleanup"
+  [ "$status" -ne 0 ] || fail "fm-afk-start.sh should attempt delivery preflight after rejecting a reused-pid lock"
+  assert_contains "$out" "backend=UNVERIFIED(unsupported-delivery-backend:unsupported)" \
+    "daemon startup did not reach delivery validation after stale lock cleanup"
   assert_not_contains "$out" "daemon already running" "fm-afk-start.sh trusted a stale daemon lock with a reused pid"
   assert_not_contains "$out" "another fm-supervise-daemon is already running" "daemon singleton lock still trusted the reused pid"
   pass "fm-afk-start.sh reclaims stale daemon locks whose live pid identity no longer matches"
+}
+
+test_afk_start_blind_delivery_alarms_before_away_state() {
+  local dir state alert out status
+  dir=$(make_supercase afk-start-blind-delivery)
+  state="$dir/state"
+  alert="$dir/alert.log"
+  : > "$alert"
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' \
+    TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' FM_WEDGE_ALARM_CHANNEL=osascript \
+    FM_WEDGE_ALARM_LOG="$alert" "$AFK_START" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "fm-afk-start.sh should refuse blind delivery discovery"
+  [ ! -e "$state/.afk" ] || fail "fm-afk-start.sh armed away mode before delivery identity was verified"
+  assert_contains "$out" 'away mode NOT ARMED: escalation delivery unavailable' \
+    "fm-afk-start.sh blind delivery refusal was not printed"
+  assert_contains "$(cat "$alert" 2>/dev/null || true)" 'osascript' \
+    "fm-afk-start.sh blind delivery refusal did not fire the independent alarm"
+  pass "fm-afk-start.sh blind delivery refuses and alarms before away state"
 }
 
 test_daemon_state_root_uses_fm_home() {
@@ -1640,11 +1667,12 @@ test_discover_supervisor_backend_precedence() {
   [ "$out" = herdr ] || fail "HERDR_ENV=1 with HERDR_PANE_ID present should resolve to herdr: $out"
 
   if out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_backend); then
-    fail "bare fallback (no override, no TMUX_PANE, no HERDR_ENV) should return non-zero"
+    fail "blind backend discovery should return non-zero"
   fi
-  [ "$out" = tmux ] || fail "bare fallback should still print tmux: $out"
+  [ "$out" = 'UNVERIFIED(no-supported-delivery-backend)' ] \
+    || fail "blind backend discovery did not report explicit UNVERIFIED: $out"
 
-  pass "discover_supervisor_backend: override > TMUX_PANE > HERDR_ENV+HERDR_PANE_ID > tmux fallback"
+  pass "discover_supervisor_backend: override > TMUX_PANE > HERDR_ENV+HERDR_PANE_ID > explicit UNVERIFIED"
 }
 
 test_discover_supervisor_target_herdr() {
@@ -1662,11 +1690,65 @@ test_discover_supervisor_target_herdr() {
   [ "$out" = "iso1:w1:p9" ] || fail "herdr target should use an explicit HERDR_SESSION: $out"
 
   if out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target); then
-    fail "bare fallback should return non-zero"
+    fail "blind target discovery should return non-zero"
   fi
-  [ "$out" = "firstmate:0" ] || fail "bare fallback should still print firstmate:0: $out"
+  [ "$out" = 'UNVERIFIED(no-supported-delivery-target)' ] \
+    || fail "blind target discovery did not report explicit UNVERIFIED: $out"
 
-  pass "discover_supervisor_target: override > TMUX_PANE > herdr '<session>:<pane-id>' composition > firstmate:0 fallback"
+  pass "discover_supervisor_target: override > TMUX_PANE > herdr '<session>:<pane-id>' composition > explicit UNVERIFIED"
+}
+
+test_operator_session_identity_ghostty_lock() {
+  local dir state out
+  dir=$(make_supercase operator-ghostty-lock)
+  state="$dir/state"
+  printf '4242\n' > "$state/.lock"
+  out=$(
+    fm_harness_pid_alive() { [ "$1" = 4242 ]; }
+    ps() { printf 'ttys042\n'; }
+    FM_STATE_OVERRIDE="$state" FM_HOME='' FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' \
+      TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' TERM_PROGRAM=ghostty \
+      discover_operator_session_identity
+  )
+  [ "$out" = 'harness-pid=4242;tty=/dev/ttys042' ] \
+    || fail "Ghostty session lock did not resolve the harness pid and controlling TTY: $out"
+  pass "operator identity: Ghostty primary resolves from the live session lock and controlling TTY without tmux"
+}
+
+test_operator_session_identity_blind_is_unverified() {
+  local dir state out
+  dir=$(make_supercase operator-blind)
+  state="$dir/state"
+  if out=$(FM_STATE_OVERRIDE="$state" FM_HOME='' FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' \
+      TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_operator_session_identity); then
+    fail "operator identity discovery passed without an endpoint or session lock"
+  fi
+  [ "$out" = 'UNVERIFIED(no-regular-session-lock)' ] \
+    || fail "blind operator identity did not report exact UNVERIFIED reason: $out"
+  pass "operator identity: a blind path reports UNVERIFIED rather than confidently absent"
+}
+
+test_delivery_unavailable_refusal_fires_independent_alarm() {
+  local dir state alert out rc
+  dir=$(make_supercase delivery-unavailable-alarm)
+  state="$dir/state"
+  alert="$dir/alert.log"
+  : > "$alert"
+  out=$(FM_STATE_OVERRIDE="$state" FM_OPERATOR_SESSION_IDENTITY='harness-pid=4242;tty=/dev/ttys042' \
+    FM_SUPERVISOR_BACKEND_DISCOVERY='UNVERIFIED(no-supported-delivery-backend)' \
+    FM_SUPERVISOR_TARGET_DISCOVERY='UNVERIFIED(no-supported-delivery-target)' \
+    FM_WEDGE_ALARM_CHANNEL=osascript FM_WEDGE_ALARM_LOG="$alert" \
+    "$DAEMON" report-delivery-unavailable 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "delivery-unavailable alarm mode did not refuse"
+  assert_contains "$out" 'away mode NOT ARMED: escalation delivery unavailable' \
+    "delivery-unavailable refusal was not printed independently of the pane"
+  assert_contains "$(cat "$state/.subsuper-delivery-unavailable" 2>/dev/null || true)" \
+    'operator_session=harness-pid=4242;tty=/dev/ttys042' \
+    "delivery-unavailable marker lost the operator identity"
+  assert_contains "$(cat "$alert" 2>/dev/null || true)" 'osascript' \
+    "delivery-unavailable refusal did not fire the independent alert channel"
+  pass "delivery refusal: exact Ghostty-shaped firing input writes a marker and fires the independent alert"
 }
 
 test_pane_is_busy_herdr_native_busy_state() {
@@ -1835,6 +1917,7 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
+test_afk_start_blind_delivery_alarms_before_away_state
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
@@ -1921,6 +2004,9 @@ test_fm_send_exits_nonzero_on_initial_send_failure
 test_fm_send_exits_nonzero_on_unproven_submit
 test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
+test_operator_session_identity_ghostty_lock
+test_operator_session_identity_blind_is_unverified
+test_delivery_unavailable_refusal_fires_independent_alarm
 test_pane_is_busy_herdr_native_busy_state
 test_primary_busy_guard_is_harness_scoped
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted

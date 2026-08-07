@@ -89,6 +89,28 @@ set +e
 
 fm_afk_launch_log() { printf 'fm-afk-launch: %s\n' "$*" >&2; }
 
+fm_afk_launch_delivery_preflight() {
+  local identity target backend target_rc backend_rc
+  identity=$(discover_operator_session_identity) || true
+  target=$(discover_supervisor_target)
+  target_rc=$?
+  backend=$(discover_supervisor_backend)
+  backend_rc=$?
+  if [ "$backend_rc" -eq 0 ] && ! supervisor_delivery_backend_supported "$backend"; then
+    backend="UNVERIFIED(unsupported-delivery-backend:${backend:-empty})"
+    backend_rc=1
+  fi
+  if [ "$target_rc" -ne 0 ] || [ "$backend_rc" -ne 0 ]; then
+    FM_OPERATOR_SESSION_IDENTITY="${identity:-UNVERIFIED(operator-session-blind)}" \
+      FM_SUPERVISOR_TARGET_DISCOVERY="$target" \
+      FM_SUPERVISOR_BACKEND_DISCOVERY="$backend" \
+      "$FM_AFK_LAUNCH_DIR/fm-supervise-daemon.sh" report-delivery-unavailable || true
+    return 1
+  fi
+  FM_AFK_CAPTAIN_TARGET=$target
+  FM_AFK_CAPTAIN_BACKEND=$backend
+}
+
 fm_afk_launch_lock_owned() {
   local pid expected actual
   [ -d "$FM_AFK_LAUNCH_LOCK" ] || return 1
@@ -362,11 +384,12 @@ fm_afk_launch_restore_backup() {  # <backup> <had-afk>
   rm -f "$FM_AFK_LAUNCH_STATE/.afk" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-escalations" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.since" \
-    "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged" || result=1
+    "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged" \
+    "$FM_AFK_LAUNCH_STATE/.subsuper-delivery-unavailable" || result=1
   if [ "$had_afk" -eq 1 ]; then
     cp "$backup/.afk" "$FM_AFK_LAUNCH_STATE/.afk" || result=1
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-delivery-unavailable; do
     if [ -e "$backup/$artifact" ]; then
       cp -p "$backup/$artifact" "$FM_AFK_LAUNCH_STATE/$artifact" || result=1
     fi
@@ -466,11 +489,10 @@ fm_afk_launch_start() {
     fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
     return 1
   fi
-  # Capture the captain pane FIRST, before creating anything.
-  captain_target=$(discover_supervisor_target) || {
-    fm_afk_launch_log "could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"; return 1; }
-  captain_backend=$(discover_supervisor_backend) || {
-    fm_afk_launch_log "could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND)"; return 1; }
+  # Capture the captain delivery endpoint FIRST, before creating anything.
+  fm_afk_launch_delivery_preflight || return 1
+  captain_target=$FM_AFK_CAPTAIN_TARGET
+  captain_backend=$FM_AFK_CAPTAIN_BACKEND
 
   mkdir -p "$FM_AFK_LAUNCH_STATE"
 
@@ -489,7 +511,7 @@ fm_afk_launch_start() {
     had_afk=1
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-delivery-unavailable; do
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
     fi
@@ -536,6 +558,7 @@ fm_afk_launch_start_native() {
     fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
     return 1
   fi
+  fm_afk_launch_delivery_preflight || return 1
   if daemon_lock_held_by_live_daemon; then
     fm_afk_launch_record_validate_if_present || return 1
     fm_afk_launch_flag_write || return 1
@@ -547,7 +570,7 @@ fm_afk_launch_start_native() {
     had_afk=1
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-delivery-unavailable; do
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
     fi

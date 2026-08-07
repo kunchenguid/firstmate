@@ -372,6 +372,36 @@ tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
 ```
 
+## Operator-session identity and delivery refusal
+
+The non-tmux identity path was measured on 2026-08-06 with Ghostty 1.3.1 and a Claude primary whose live session-lock process had controlling TTY `ttys000`.
+
+Process evidence:
+
+```sh
+ps -o pid=,ppid=,tty=,comm= -p 16960
+ps -o pid=,ppid=,tty=,comm= -p 60454
+```
+
+Observed output:
+
+```text
+16960     1 ??       /Applications/Ghostty.app/Contents/MacOS/ghostty
+60454 58782 ttys000  claude
+```
+
+With `60454` written only to a disposable fixture's `state/.lock`, and with `FM_SUPERVISOR_TARGET`, `FM_SUPERVISOR_BACKEND`, `TMUX_PANE`, `HERDR_ENV`, and `HERDR_PANE_ID` unset, the production discovery functions returned:
+
+```text
+operator_identity rc=0 output=<harness-pid=60454;tty=/dev/ttys000>
+delivery_target rc=1 output=<UNVERIFIED(no-supported-delivery-target)>
+delivery_backend rc=1 output=<UNVERIFIED(no-supported-delivery-backend)>
+```
+
+This proves the operator session can be identified without tmux while the unsupported delivery surface still refuses honestly instead of fabricating an endpoint.
+`tests/fm-daemon.test.sh` pins that Ghostty-shaped identity result, the exact `UNVERIFIED` blind result, the refusal marker, and the independent alert firing input.
+`tests/fm-afk-launch.test.sh` pins the lifecycle boundary: missing delivery refuses before `.afk` is written, while an explicit discovered endpoint is the negative control and fires no alert.
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.

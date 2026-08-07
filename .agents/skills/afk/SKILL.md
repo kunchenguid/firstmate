@@ -31,7 +31,7 @@ batched digest rather than per-wake injections.
      `bin/fm-afk-launch.sh start-native`, then run
      `FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh` through that native tool.
      This is a deliberate no-separate-terminal exception because the harness-hosted job creates no terminal or layout mutation, and a shell launcher cannot invoke a harness-native background tool.
-     The launcher still owns lifecycle state and records the no-terminal mode, while the daemon inherits and auto-discovers the captain pane.
+     The launcher still owns lifecycle state and records the no-terminal mode, while preflight verifies the inherited captain delivery endpoint before that state is written.
      If the native launch fails, run `bin/fm-afk-launch.sh stop` to roll back the prepared lifecycle.
      Do not wrap it in `nohup ... &` (Codex/herdr can reap fire-and-forget shell children after a tool call returns).
    - **Harness WITHOUT one** (e.g. pi): run `bin/fm-afk-launch.sh start`. It is
@@ -44,6 +44,8 @@ batched digest rather than per-wake injections.
      shrinks the captain's pane (docs/herdr-backend.md "Away-mode supervisor
      support").
    Both paths share `bin/fm-afk-start.sh` as the daemon entry.
+   Both paths preflight a supported delivery endpoint before writing active away state.
+   If preflight reports `away mode NOT ARMED`, remain in normal supervision and surface the exact refusal; the same refusal writes a durable marker and fires the configured pane-independent alarm.
    The native path tells it that the launcher already prepared lifecycle state; the terminal-backed path lets the entry perform its existing state setup inside the new terminal.
    It exits immediately if the identity-backed daemon lock already names a live process, otherwise it execs `bin/fm-supervise-daemon.sh` in the foreground.
    The daemon is **presence-gated**: it injects escalations only while
@@ -216,12 +218,16 @@ the operational prefix lets firstmate distinguish it from a real captain message
   (tmux vs herdr) and TARGET independently, mirroring
   `bin/fm-backend.sh`'s own runtime auto-detection. Backend: `FM_SUPERVISOR_BACKEND`
   override, then `$TMUX_PANE` set (tmux), then `$HERDR_ENV=1` with
-  `$HERDR_PANE_ID` present (herdr), then a tmux fallback. Target:
+  `$HERDR_PANE_ID` present (herdr), then explicit `UNVERIFIED` refusal. Target:
   `FM_SUPERVISOR_TARGET` override (a tmux target or a herdr
   `"<session>:<pane-id>"` target), then `$TMUX_PANE`, then
-  `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then a
-  `firstmate:0` fallback with a warning. Both resolution sources are logged at
-  startup so a wrong-but-resolving fallback is detectable. Other runtime
+  `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then explicit
+  `UNVERIFIED` refusal. Independently, the operator session resolves from a
+  live endpoint or from the existing session-lock harness pid plus controlling
+  TTY, so a Ghostty primary is identified without fabricating a pane. A plain
+  TTY is not an injectable composer; the launcher refuses before `.afk`, writes
+  `state/.subsuper-delivery-unavailable`, and fires the pane-independent alert.
+  Other runtime
   backends, including zellij, orca, and cmux, are not yet supported as
   supervisor backends; the daemon refuses loudly at startup instead of
   misapplying tmux primitives to a pane that isn't one
@@ -229,7 +235,7 @@ the operational prefix lets firstmate distinguish it from a real captain message
 
 ## Stale-artifact lifecycle
 
-Treat `state/.subsuper-escalations`, its `.since` sidecar, and `state/.subsuper-inject-wedged` as session-scoped delivery artifacts, not as the durable work record.
+Treat `state/.subsuper-escalations`, its `.since` sidecar, `state/.subsuper-inject-wedged`, and `state/.subsuper-delivery-unavailable` as session-scoped delivery artifacts, not as the durable work record.
 Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifacts only for a fresh entry and preserves the current session's buffer on refresh.
 Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown flush and clears it last.
 `docs/herdr-backend.md` "Away-mode supervisor support" owns the current mechanism, and `docs/verification/runtime-backends.md` "Away-mode transport" owns active evidence.

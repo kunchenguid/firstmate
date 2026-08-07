@@ -20,8 +20,8 @@
 # This is the COMMON daemon entry for every backend. HOW it becomes a tracked
 # background process differs by harness/backend and is owned elsewhere:
 #   - Harnesses with a native in-pane tracked-background tool (e.g. claude, grok)
-#     run this directly via that tool, so the daemon inherits the captain pane's
-#     env and auto-discovers it.
+#     run this directly via that tool. Preflight accepts a real inherited
+#     tmux/herdr endpoint and refuses a plain terminal rather than guessing one.
 #   - Harnesses with NO native background mechanism (e.g. pi) run this THROUGH
 #     bin/fm-afk-launch.sh, which creates a non-visible tracked terminal per
 #     backend (herdr tab/workspace, tmux detached session) and passes the
@@ -41,6 +41,8 @@ FM_AFK_DAEMON="$FM_AFK_START_DIR/fm-supervise-daemon.sh"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$FM_AFK_START_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-supervisor-target-lib.sh
+. "$FM_AFK_START_DIR/fm-supervisor-target-lib.sh"
 
 fm_afk_start_usage() {
   sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -63,7 +65,8 @@ fm_afk_clear_stale_artifacts() {  # <state-dir>
   local state=$1
   rm -f "$state/.subsuper-escalations" \
         "$state/.subsuper-escalations.since" \
-        "$state/.subsuper-inject-wedged" 2>/dev/null
+        "$state/.subsuper-inject-wedged" \
+        "$state/.subsuper-delivery-unavailable" 2>/dev/null
 }
 
 daemon_lock_owner() {
@@ -111,6 +114,7 @@ daemon_lock_held_by_live_daemon() {
 }
 
 fm_afk_start_main() {
+  local pid identity target backend target_rc backend_rc
   case "${1:-}" in
     '' ) ;;
     -h|--help) fm_afk_start_usage; return 0 ;;
@@ -118,17 +122,40 @@ fm_afk_start_main() {
   esac
 
   mkdir -p "$FM_AFK_STATE"
+  pid=$(daemon_lock_pid 2>/dev/null || true)
+  if daemon_lock_held_by_live_daemon; then
+    date '+%s' > "$FM_AFK_STATE/.afk"
+    echo "afk: daemon already running pid=$pid"
+    return 0
+  fi
+
+  identity=$(discover_operator_session_identity) || true
+  if target=$(discover_supervisor_target); then
+    target_rc=0
+  else
+    target_rc=$?
+  fi
+  if backend=$(discover_supervisor_backend); then
+    backend_rc=0
+  else
+    backend_rc=$?
+  fi
+  if [ "$backend_rc" -eq 0 ] && ! supervisor_delivery_backend_supported "$backend"; then
+    backend="UNVERIFIED(unsupported-delivery-backend:${backend:-empty})"
+    backend_rc=1
+  fi
+  if [ "$target_rc" -ne 0 ] || [ "$backend_rc" -ne 0 ]; then
+    FM_OPERATOR_SESSION_IDENTITY="${identity:-UNVERIFIED(operator-session-blind)}" \
+      FM_SUPERVISOR_TARGET_DISCOVERY="$target" \
+      FM_SUPERVISOR_BACKEND_DISCOVERY="$backend" \
+      "$FM_AFK_DAEMON" report-delivery-unavailable || true
+    return 1
+  fi
+
   if [ "${FM_AFK_STATE_PREPARED:-0}" = 1 ]; then
     [ -f "$FM_AFK_STATE/.afk" ] || { echo "afk: launcher-prepared state is missing" >&2; return 1; }
   else
     date '+%s' > "$FM_AFK_STATE/.afk"
-  fi
-
-  local pid
-  pid=$(daemon_lock_pid 2>/dev/null || true)
-  if daemon_lock_held_by_live_daemon; then
-    echo "afk: daemon already running pid=$pid"
-    return 0
   fi
 
   if fm_pid_alive "$pid" && [ -n "$pid" ]; then
