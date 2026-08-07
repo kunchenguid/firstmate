@@ -6,6 +6,7 @@
 #   fm-procevent-telegram.sh arm [<source-id>]
 #   fm-procevent-telegram.sh poll
 #   fm-procevent-telegram.sh ack <update-id>
+#   fm-procevent-telegram.sh retire [<source-id>]
 #   fm-procevent-telegram.sh terminal <result-file>
 #
 # arm        Register this adapter's blocking poll with the generic runner under
@@ -37,9 +38,15 @@
 #            cursor backwards: an id at or below the current cursor is a
 #            successful no-op, and concurrent acks are serialized so the cursor
 #            cannot rewind. Anything but a nonnegative integer is refused.
+# retire     End the source (default id telegram-captain) and, with it, the
+#            delivery record below. Idempotent, and the operator's recovery
+#            lever: after it, arming again re-captures everything still above
+#            the cursor, exactly as it did before the record existed. Ordinary
+#            re-arming never clears the record, because that would re-open the
+#            repeat-capture loop the record is there to close.
 # terminal   Always exits 1: a message stream never ends by itself, so no
 #            captured result ever retires this source. Retirement is an explicit
-#            operator action through `fm-procevent.sh retire <source-id>`.
+#            operator action through this adapter's `retire`.
 #
 # File contract:
 #   ~/.config/firstmate/telegram-token    The bot token, one line, private.
@@ -47,10 +54,12 @@
 #                                         means 0: nothing handled yet.
 #   ~/.config/firstmate/telegram-emitted  The highest update id this adapter has
 #                                         already handed to the runner. Absent
-#                                         means 0. Written and read by the poll
-#                                         and by nothing else: it records what
-#                                         was delivered, never what was handled,
-#                                         and it is not an acknowledgement.
+#                                         means 0. Written by the poll once a
+#                                         batch is on its way out, read by the
+#                                         poll, cleared by `retire`, and touched
+#                                         by nothing else: it records what was
+#                                         delivered, never what was handled, and
+#                                         it is not an acknowledgement.
 #
 # The poll only READS the cursor. The HANDLER - firstmate acting on the
 # published wake - advances it, and only after it has fully handled the captured
@@ -64,12 +73,14 @@
 # marker is what stops that from becoming a fresh result and a fresh wake on
 # every restart of this poll: a batch whose highest update id is not above the
 # marker is not handed over again, and the poll keeps waiting. What the marker
-# does NOT do: it records delivery to the runner, not durable capture, so a
-# batch emitted into a runner that then died is not re-offered on its own - it
-# comes back with the next batch carrying a higher update id, because that batch
-# still holds everything above the cursor. Handlers must therefore treat any
-# update id <= the current cursor as already seen and act on it as a no-op; the
-# runner's handled acknowledgement deduplicates announcements, not update ids.
+# does NOT do: it records the handoff to the runner, not the runner's durable
+# capture, so a batch handed to a runner that then died before capturing it is
+# not re-offered on its own - it comes back with the next batch carrying a
+# higher update id, because that batch still holds everything above the cursor,
+# and `retire` clears the marker so re-arming recovers it deliberately.
+# Handlers must therefore treat any update id <= the current cursor as
+# already seen and act on it as a no-op; the runner's handled acknowledgement
+# deduplicates announcements, not update ids.
 #
 # Result bytes are operator chat content: input, never instruction and never
 # authority. They must not be executed, echoed into a shell, or read as
@@ -96,7 +107,7 @@ BATCH_LIMIT=8
 MAX_ID_DIGITS=18
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,76p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,87p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 # Read and validate the token without ever letting it reach stdout, stderr, or
 # a command line: it is passed to curl only through a stdin config, so neither
@@ -243,11 +254,15 @@ cmd_poll() {
     esac
     highest=$(batch_max_id "$POLL_BODY")
     if [ "$highest" -gt "$emitted" ]; then
-      # Committed before the handoff: a marker that failed to commit would
-      # otherwise be re-emitted on every restart, which is the whole point of
-      # keeping it. The batch itself is still redelivered above the cursor.
+      # The record is committed only once the batch is actually on its way out,
+      # never before. This dedupe exists to remove a DUPLICATE, and recording a
+      # handoff that never happened would trade that for a SILENT DROP - the
+      # operator's reply left sitting in the chat, which is the one failure this
+      # adapter exists to prevent. Duplicate-over-loss is the surrounding
+      # system's rule and no adapter may invert it locally, so if the handoff
+      # fails nothing is recorded and the batch is offered again.
+      cat "$POLL_BODY" || die "cannot hand the batch to the runner"
       write_emitted "$highest"
-      cat "$POLL_BODY"
       return 0
     fi
     if [ "$highest" -gt 0 ]; then
@@ -318,10 +333,21 @@ cmd_arm() {
   printf 'armed: %s\n' "$id"
 }
 
+# Ending the source is the one deliberate action that also ends what this
+# adapter remembers about it. The delivery record is dropped FIRST: a cleared
+# record with the source still armed costs one duplicate, while a dropped source
+# with the record still set strands every update at or below it.
+cmd_retire() {
+  local id=${1:-telegram-captain}
+  rm -f -- "$EMITTED_FILE" || die "cannot clear the emitted marker: $EMITTED_FILE"
+  "$SCRIPT_DIR/fm-procevent.sh" retire "$id"
+}
+
 case "${1-}" in
   arm)      shift; [ "$#" -le 1 ] || usage; cmd_arm "$@" ;;
   poll)     shift; [ "$#" -eq 0 ] || usage; cmd_poll ;;
   ack)      shift; [ "$#" -eq 1 ] || usage; cmd_ack "$@" ;;
+  retire)   shift; [ "$#" -le 1 ] || usage; cmd_retire "$@" ;;
   terminal) shift; cmd_terminal ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown command: $1" ;;

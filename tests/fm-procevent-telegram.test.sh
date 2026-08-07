@@ -289,6 +289,73 @@ expect_code 0 $? "the next genuinely new update is still delivered"
 assert_contains "$out" '"update_id":902' "an update after the quoted id is still handed over"
 pass "an update id quoted in chat content never becomes the emitted record"
 
+# --- a batch the runner never received is offered again ---------------------
+# The dedupe exists to remove a duplicate, so it must never create a loss. If
+# the handoff itself fails - the runner died between the poll's write and its
+# durable capture - the batch was not delivered, and a poll that recorded it as
+# delivered would strand the operator's reply in the chat until an unrelated
+# later message happened to arrive.
+HANDOFF_HOME="$TMP_ROOT/handoff-home"
+mkdir -p "$HANDOFF_HOME/.config/firstmate"
+printf '%s\n' "$TOKEN" > "$HANDOFF_HOME/.config/firstmate/telegram-token"
+chmod 0600 "$HANDOFF_HOME/.config/firstmate/telegram-token"
+HANDOFF_MARKER="$HANDOFF_HOME/.config/firstmate/telegram-emitted"
+handoff_poll() {  # <argv>...
+  run_bounded 60 env "HOME=$HANDOFF_HOME" "PATH=$FAKEBIN:$PATH" FM_TELEGRAM_BACKOFF_SECONDS=0 \
+    FM_TELEGRAM_POLL_TIMEOUT=1 "$ADAPTER" "$@"
+}
+
+reset_api '200 updates'
+handoff_status=0
+env "HOME=$HANDOFF_HOME" "PATH=$FAKEBIN:$PATH" FM_TELEGRAM_BACKOFF_SECONDS=0 \
+  FM_TELEGRAM_POLL_TIMEOUT=1 "$ADAPTER" poll >&- 2>/dev/null || handoff_status=$?
+[ "$handoff_status" -ne 0 ] || fail "a poll whose handoff failed still reported a delivered batch"
+assert_absent "$HANDOFF_MARKER" "a batch the runner never received is not recorded as handed over"
+reset_api_keep_emitted '200 updates'
+out=$(handoff_poll poll)
+expect_code 0 $? "the undelivered batch is offered again"
+assert_contains "$out" '"update_id":901' "the reply the runner never received comes back"
+[ "$(api_calls)" = 1 ] || fail "the undelivered batch was not offered on the first call: $(api_calls) calls"
+pass "a batch lost before the runner received it is redelivered rather than dropped"
+
+# --- retire is the operator's recovery lever and clears the record ----------
+# An agent that dies mid-handling leaves the cursor where it was and the record
+# ahead of it. Retire is the deliberate operator action that ends a source, so
+# it is where the record is cleared: after it, arming again re-captures
+# everything above the cursor exactly as it did before the record existed.
+RECOVER_HOME="$TMP_ROOT/recover-home"
+mkdir -p "$RECOVER_HOME/.config/firstmate"
+printf '%s\n' "$TOKEN" > "$RECOVER_HOME/.config/firstmate/telegram-token"
+chmod 0600 "$RECOVER_HOME/.config/firstmate/telegram-token"
+RECOVER_FM="$TMP_ROOT/recover-fm"
+mkdir -p "$RECOVER_FM/state"
+RECOVER_MARKER="$RECOVER_HOME/.config/firstmate/telegram-emitted"
+recover_adapter() {  # <argv>...
+  run_bounded 60 env "HOME=$RECOVER_HOME" "FM_HOME=$RECOVER_FM" "PATH=$FAKEBIN:$PATH" \
+    FM_TELEGRAM_BACKOFF_SECONDS=0 FM_TELEGRAM_POLL_TIMEOUT=1 "$ADAPTER" "$@"
+}
+
+reset_api '200 updates'
+out=$(recover_adapter poll)
+expect_code 0 $? "the stranded reply was handed over once"
+[ "$(cat "$RECOVER_MARKER")" = 901 ] || fail "the delivered update was not recorded: $(cat "$RECOVER_MARKER")"
+recover_adapter arm recovery-line >/dev/null
+assert_present "$RECOVER_FM/state/procevent/recovery-line.source" "the recovery fixture is armed"
+out=$(recover_adapter retire recovery-line)
+expect_code 0 $? "the adapter retires a source"
+assert_contains "$out" "recovery-line" "retire names the source it ended"
+assert_absent "$RECOVER_FM/state/procevent/recovery-line.source" "retire drops the registration"
+assert_absent "$RECOVER_MARKER" "retire clears the delivery record with the source"
+out=$(recover_adapter retire recovery-line)
+expect_code 0 $? "retiring an already retired source succeeds"
+assert_absent "$RECOVER_MARKER" "a repeat retire leaves nothing behind"
+assert_absent "$RECOVER_HOME/.config/firstmate/telegram-cursor" "retire is not an acknowledgement and writes no cursor"
+reset_api_keep_emitted '200 updates'
+out=$(recover_adapter poll)
+expect_code 0 $? "a poll after retire returns again"
+assert_contains "$out" '"update_id":901' "retire and re-arm re-captures everything above the cursor"
+pass "retire clears the delivery record so re-arming recovers a stranded reply"
+
 # --- a leading-zero poll timeout does not wedge the loop --------------------
 # Every numeric input here is a digit string, and 08 is a digit string: without
 # base-10 normalization its arithmetic expansion fails, curl never runs, and the

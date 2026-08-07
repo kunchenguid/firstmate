@@ -23,12 +23,13 @@
 #            turn. After publishing, it asks the source's own adapter whether the
 #            captured result ends the source and retires the registration when it
 #            says so, so a source that has ended stops being restarted.
-#            A child that exits non-zero keeps its stderr, bounded and private,
+#            A child that exits non-zero keeps the tail of its stderr, private,
 #            at <state>/procevent/<source-id>.stderr, because this runner is
 #            detached and has nowhere else to leave the reason a source cannot
 #            start - a rejected credential, a missing tool. It is diagnostic
-#            only: nothing reads it back, a successful run removes it, and the
-#            next run of the same source replaces it.
+#            only: nothing waits on it, completion is decided by the child's own
+#            output alone, a successful run removes it, the next run of the same
+#            source replaces it, and dropping the registration drops it too.
 # reconcile  Idempotent liveness entry the watcher calls on its ordinary cycle:
 #            republish every durably captured result with no handled
 #            acknowledgement yet - regardless of any earlier publication - and
@@ -83,39 +84,11 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 REG=$(fm_procevent_registry_dir "$STATE")
 MAX_OUTPUT_BYTES=${FM_PROCEVENT_MAX_OUTPUT_BYTES:-1048576}
-# A failed child's diagnostics are kept, so they are bounded too. This is an
-# error message, not a payload, so the bound is small and fixed rather than
-# configurable: the point is only that the reason survives the exit status.
+# A failed child's diagnostics are kept, so they are bounded too - but bounded
+# on read, once the child has exited, never by a reader in the hot path. The
+# result is the payload and is bounded in stream; stderr is diagnostic, nothing
+# waits on it, and it is its LAST bytes that carry the exit message.
 MAX_STDERR_BYTES=4096
-
-# Copy stdin to stdout up to <limit> bytes, drain whatever follows, and report a
-# truncation with exit 3. Everything a supervised child writes passes through
-# this, so neither its result nor its diagnostics can grow without bound.
-# shellcheck disable=SC2016 # Perl owns every $ expression in this literal program.
-BOUND_STREAM='
-    use strict;
-    use warnings;
-    my $limit = shift;
-    my ($written, $truncated) = (0, 0);
-    while (1) {
-      my $count = sysread(STDIN, my $buffer, 65536);
-      exit 2 unless defined $count;
-      last if $count == 0;
-      my $take = $written < $limit ? $limit - $written : 0;
-      $take = $count if $take > $count;
-      if ($take > 0) {
-        my $offset = 0;
-        while ($offset < $take) {
-          my $count_written = syswrite(STDOUT, $buffer, $take - $offset, $offset);
-          exit 2 unless defined $count_written;
-          $offset += $count_written;
-        }
-        $written += $take;
-      }
-      $truncated = 1 if $take < $count;
-    }
-    exit($truncated ? 3 : 0);
-  '
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,69p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -218,6 +191,19 @@ publish_pending() {
   printf '%s\n' "$published"
 }
 
+# Keep only the last MAX_STDERR_BYTES of a kept diagnostic. The child has
+# already exited, so this is a read, not a reader in its path, and the tail is
+# the useful end: an exit message is the last thing a failing child writes.
+bound_stderr_record() {  # <path>
+  local tmp
+  [ "$(wc -c < "$1" 2>/dev/null | tr -d '[:space:]')" -gt "$MAX_STDERR_BYTES" ] 2>/dev/null || return 0
+  tmp=$(umask 077; mktemp "$REG/.stderr.XXXXXX") || return 0
+  if tail -c "$MAX_STDERR_BYTES" "$1" > "$tmp" 2>/dev/null && chmod 0600 "$tmp" && mv -f -- "$tmp" "$1"; then
+    return 0
+  fi
+  rm -f -- "$tmp"
+}
+
 isolate_runner() {  # <wait|detach> <source-id>
   local mode=$1 id=$2 program
   # shellcheck disable=SC2016 # Perl owns every $ expression in this literal program.
@@ -317,18 +303,39 @@ cmd_start() {
   (umask 077; : > "$out") || die "cannot stage output"
   STAGED_OUTPUT=$out
   # The child's stderr is kept rather than discarded, so a detached runner can
-  # still say why a source refused to start. It is bounded by the same rule as
-  # the result and never joins it: the two streams stay separate all the way
-  # down, and a record that cannot be staged falls back to discarding it exactly
-  # as before rather than failing a source that would otherwise have run.
+  # still say why a source refused to start. It goes to a plain file the runner
+  # owns and nothing reads while the child runs: completion stays decided by the
+  # child's own output alone, exactly as when this was /dev/null. A file that
+  # cannot be staged falls back to discarding it rather than failing a source
+  # that would otherwise have run.
   err=$(stderr_file "$id")
   if [ -L "$err" ] || ! (umask 077; : > "$err") 2>/dev/null; then
     err=
   fi
-  (
-    "${ARGV[@]}" 2>&1 1>&3 3>&- | perl -e "$BOUND_STREAM" "$MAX_STDERR_BYTES" > "${err:-/dev/null}"
-    exit "${PIPESTATUS[0]}"
-  ) 3>&1 | perl -e "$BOUND_STREAM" "$MAX_OUTPUT_BYTES" > "$out"
+  "${ARGV[@]}" 2> "${err:-/dev/null}" | perl -e '
+    use strict;
+    use warnings;
+    my $limit = shift;
+    my ($written, $truncated) = (0, 0);
+    while (1) {
+      my $count = sysread(STDIN, my $buffer, 65536);
+      exit 2 unless defined $count;
+      last if $count == 0;
+      my $take = $written < $limit ? $limit - $written : 0;
+      $take = $count if $take > $count;
+      if ($take > 0) {
+        my $offset = 0;
+        while ($offset < $take) {
+          my $count_written = syswrite(STDOUT, $buffer, $take - $offset, $offset);
+          exit 2 unless defined $count_written;
+          $offset += $count_written;
+        }
+        $written += $take;
+      }
+      $truncated = 1 if $take < $count;
+    }
+    exit($truncated ? 3 : 0);
+  ' "$MAX_OUTPUT_BYTES" > "$out"
   local pipe_status=("${PIPESTATUS[@]}") truncated=0
   rc=${pipe_status[0]}
   bound_rc=${pipe_status[1]}
@@ -339,8 +346,12 @@ cmd_start() {
   esac
   # Diagnostics are evidence only when the child failed; a successful run leaves
   # nothing behind, so the record cannot outlive the problem it describes.
-  if [ -n "$err" ] && { [ "$rc" -eq 0 ] || [ ! -s "$err" ]; }; then
-    rm -f -- "$err"
+  if [ -n "$err" ]; then
+    if [ "$rc" -ne 0 ] && [ -s "$err" ]; then
+      bound_stderr_record "$err"
+    else
+      rm -f -- "$err"
+    fi
   fi
 
   if [ "$rc" -ne 0 ] && [ ! -s "$out" ]; then
@@ -392,6 +403,7 @@ retire_owned_terminal_source() {  # <source-id>
     && [ "$current_identity" = "$CLAIM_REG_IDENTITY" ] \
     && fm_procevent_claim_mark_terminal_locked "$id" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN"; then
     if rm -f -- "$registration" && [ ! -e "$registration" ] && [ ! -L "$registration" ]; then
+      rm -f -- "$(stderr_file "$id")"
       fm_procevent_claim_release_locked "$id" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN" || status=1
     else
       status=1
@@ -445,6 +457,7 @@ cmd_reconcile() {
         if fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
           rm -f -- "$(staging_file "$id" "$token")"
           rm -f -- "$(runner_file "$id")"
+          rm -f -- "$(stderr_file "$id")"
           stopped=$((stopped + 1))
         else
           uncertain=$((uncertain + 1))
@@ -478,6 +491,7 @@ cmd_reconcile() {
             && [ ! -e "$(source_file "$id")" ] \
             && [ ! -L "$(source_file "$id")" ] \
             && fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
+            rm -f -- "$(stderr_file "$id")"
             stopped=$((stopped + 1))
           else
             uncertain=$((uncertain + 1))

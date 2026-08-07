@@ -971,6 +971,38 @@ pe "$HES" retire blocked-src >/dev/null
 assert_absent "$BLOCKED_ERR" "retiring a source removes the reason with it"
 pass "a detached runner keeps a failed child's bounded, private reason"
 
+# --- completion waits on the child's output and on nothing else -------------
+# `register <adapter> <id> -- <argv>` is a generic boundary, so a child may hand
+# its stderr to a descendant that outlives it. Completion must still be decided
+# by the child's own output alone: anything else stalls every adapter's runner
+# behind a process the runner never agreed to wait for.
+HSE="$TMP_ROOT/hse"; new_home "$HSE"
+STDERR_HOLDER="$TMP_ROOT/stderr-holder.sh"
+cat > "$STDERR_HOLDER" <<'SH'
+#!/usr/bin/env bash
+# Leaves a descendant holding the inherited stderr long after this child exits,
+# with stdout sent elsewhere so only stderr could gate the runner.
+( sleep 20 ) >/dev/null &
+printf 'payload past a lingering grandchild\n'
+exit 0
+SH
+chmod +x "$STDERR_HOLDER"
+pe_register "$HSE" lavish holder-src -- "$STDERR_HOLDER" >/dev/null
+FM_HOME="$HSE" "$ROOT/bin/fm-procevent.sh" start holder-src >/dev/null 2>&1 &
+holder_pid=$!
+( sleep 10; kill -TERM "$holder_pid" 2>/dev/null ) >/dev/null 2>&1 &
+holder_guard=$!
+holder_rc=0
+wait "$holder_pid" || holder_rc=$?
+kill "$holder_guard" 2>/dev/null
+wait "$holder_guard" 2>/dev/null
+[ "$holder_rc" -eq 0 ] || fail "a descendant holding stderr stalled the runner past the child's exit (exit $holder_rc)"
+HOLDER_RESULT=$(first_result "$HSE" holder-src || true)
+[ -n "$HOLDER_RESULT" ] || fail "the source with a lingering grandchild captured no result"
+assert_grep 'lingering grandchild' "$HOLDER_RESULT" "the child's own output is still captured verbatim"
+pe "$HSE" retire holder-src >/dev/null
+pass "a descendant holding the child's stderr never gates the runner's completion"
+
 HF="$TMP_ROOT/hf"; new_home "$HF"
 # shellcheck disable=SC2016  # single quotes are deliberate: the child shell expands this.
 pe_register "$HF" lavish big-src -- /bin/sh -c 'printf "x%.0s" $(seq 1 5000)' >/dev/null
