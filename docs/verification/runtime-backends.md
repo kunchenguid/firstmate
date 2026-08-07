@@ -64,6 +64,8 @@ On macOS the pane command reflected the rewritable title while the full install 
 The classifier therefore accepts a harness basename first, then an exact harness path component in the full executable path, then the same component in argv[0], without depending on which field carries it on a given platform.
 
 The portable regression is CI-enforced, while the real-harness drift guard is opt-in under the policy in `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
+No CI job installs a harness binary, so every per-harness row above rests on the dated operator runs recorded here and none of them is ever refreshed by CI.
+Measured on 2026-08-07 with `bin/fm-test-run.sh --family live-harness-optin`, every member logged `expected_gate_skip=optin-env` and `gate_skip=true`, summarising as `FM_TEST_SUMMARY total=9 failed=0 skipped_gate=9`.
 Run the live guard after any harness upgrade and before trusting or refreshing the table above:
 
 ```sh
@@ -76,6 +78,14 @@ Bounded output from the run that produced the table:
 ok - harness liveness: claude 2.1.220 (Claude Code) classifies alive
 # claude 2.1.220 (Claude Code): title='2.1.220' foreground=[claude ]
 # checked 7 installed harness(es)
+```
+
+Bounded output from a 2026-08-07 Linux run on a machine carrying only three of the seven, recording how the guard accounts for the rest:
+
+```text
+# skip: opencode is not installed on this machine, so its classification is unverified here
+# unverified on this machine (not installed): opencode pi-signed grok kimi
+# checked 3 installed harness(es)
 ```
 
 Installed-wrapper checks:
