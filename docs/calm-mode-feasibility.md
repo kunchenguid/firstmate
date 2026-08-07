@@ -27,11 +27,12 @@ Pi loads project-local extensions before global or CLI-configured extensions, so
 The losing definition's execution and render functions are discarded, so unconditionally registering Calm's wrappers would replace another extension's same-named tool rather than changing presentation alone.
 
 Pi's `getAllTools()` exposes tool metadata and source identity but not the executable or rendering functions needed to wrap another extension's full definition.
-It is usable for reliable collision detection only after extension binding, so Calm now registers no tool wrappers during extension loading and claims only uncontested names from `session_start` or the first same-session `/calm` activation.
+Reliable collision detection begins only after extension binding and requires exactly one inventory entry with a non-empty source and path for each built-in name.
+Calm therefore registers no wrappers during extension loading, claims only verified built-in or Calm-owned names from `session_start` or the first same-session `/calm` activation, skips each contested or unverifiable name, and claims none if the inventory read itself fails.
 Pi constructs `/reload`-restored tool rows from an earlier tool-registry snapshot, so those rows retain the definition captured before `session_start` and do not retroactively collapse.
 That bounded presentation limitation preserves startup and the complete behavior of external tool replacements.
-`tests/fm-calm-pi-extension.test.sh` covers no load-time claims, collision-checked session and command activation with a warning, and the non-retroactive bound for rows rendered before wrapper registration.
-`tests/fm-calm-pi-conflict-live-e2e.test.sh` runs through the installed Pi runtime and preserves a contested tool's execution, prompt metadata, and renderers.
+`tests/fm-calm-pi-extension.test.sh` covers no load-time claims, collision-checked session and command activation, fail-closed missing, malformed, and unavailable ownership, and the non-retroactive bound for rows rendered before wrapper registration.
+`tests/fm-calm-pi-conflict-live-e2e.test.sh` runs through the installed Pi runtime and preserves a contested tool's complete selected definition, including execution, metadata, prompt behavior, and renderers.
 
 ## Pi 0.84.0 ownership verification
 
@@ -170,6 +171,7 @@ Pi's documented custom working-indicator frames are static and width-blind, so t
 `.pi/extensions/fm-calm.ts` remains the sole owner of the presentation choice and the only caller of `setWorkingVisible()`, while `.pi/extensions/lib/fm-calm-working-ship.ts` owns the sprite geometry, the bounce track, and the widget.
 Visibility follows `agent_start` through `agent_settled` rather than turns or tool calls.
 Pi emits `agent_settled` from a `finally` block once a run will not continue automatically, so retries, automatic continuations, queued follow-ups, and compaction inside one run never remove the boat, while settle, abort, and failure all reach the same cleanup.
+Headless runs never create the working widget, so settle and shutdown skip session-bound UI work after Pi invalidates that context, while shutdown still disposes the terminal-input handler.
 Repeated `agent_start` events inside one run are idempotent, and Pi disposes the previous component before installing a replacement under the same key and when it clears extension widgets, so the frame timer cannot duplicate or outlive the widget.
 Pi's above-editor widget container reserves one spacer row whether or not a widget is present, so removing the boat leaves no residual blank row.
 
@@ -274,7 +276,7 @@ Only Pi's Calm presentation implementation changed; every producer and non-Pi tr
 
 ## Regression coverage
 
-`tests/fm-calm-pi-extension.test.sh` compares wrapped and stock renderers, verifies all seven built-ins plus `fm_watch_arm_pi`, exercises redraw of already-rendered tool, thinking, current operational-user, and legacy synthetic rows, and covers every policy class.
+`tests/fm-calm-pi-extension.test.sh` compares wrapped and stock renderers, verifies all seven built-ins plus `fm_watch_arm_pi`, exercises redraw of already-rendered tool, thinking, current operational-user, and legacy synthetic rows, covers fail-closed ownership and headless invalidated-context lifecycles, and covers every policy class.
 It covers persisted preference restoration across every session-start reason and a real restart, proves the working-ship presentation and Calm-off stock `Working...` row through a delayed deterministic provider, asserts no Calm status row, verifies operational messages remain exact ordinary user-role session entries and complete exports, and drives genuine 100 by 44, 160 by 36, and 180 by 44 terminal fixtures.
 A native deterministic `/skill:ahoy` turn produces thinking, tool-call, and tool-result blocks, asserts that the collapsed skill-to-final gap equals the two-row visible-only baseline, expands and re-collapses original thinking, restores Calm-off rendering, verifies persisted hidden history, and repeats the geometry assertion after restart with `terminal.clearOnShrink` explicitly off.
 The operational provider path covers Calm loaded on, loaded off, default preference, extension absent, exact watcher delivery, narrow bare-marker legacy input, persisted restart replay, a genuine captain prompt, and adjacent notifications coalesced into one intended processing turn.

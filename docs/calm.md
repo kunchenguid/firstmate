@@ -14,7 +14,7 @@ A fresh Pi session or new Calm extension lifetime starts at the normal initial p
 Very narrow terminals fall back to a smaller deterministic sprite.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
 Calm hides collapsed thinking labels, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` tool shell, and canonically classified Firstmate operational user rows.
-If another extension replaces a built-in tool, Calm leaves that replacement untouched so its execution, prompt metadata, and rendering remain authoritative.
+If another extension replaces a built-in tool, Calm leaves that extension's complete tool definition untouched, including execution, metadata, prompt behavior, and rendering.
 The operational inputs remain ordinary user-role messages, while Pi's transcript layout renders their complete rows at zero height.
 The session-start nudge remains on its existing non-displayed custom-message path.
 
@@ -37,7 +37,8 @@ If Pi removes one of those seams, Calm logs a diagnostic naming the unavailable 
 Calm's built-in tool presentation (`bash`, `read`, `edit`, `write`, `grep`, `find`, `ls`) shares Pi's single, unmerged override slot per name with any other extension that overrides the same tool.
 Pi 0.84 rejects duplicate extension-owned tool names during startup, before the ownership inventory is available.
 Calm therefore registers no built-in overrides while extensions are loading.
-When a session starts with Calm on, or Calm is toggled on later, it claims every built-in name no other extension owns, leaves every contested tool intact and callable, and displays a prominent warning naming the tools it skipped.
+When a session starts with Calm on, or Calm is toggled on later, it claims only built-in names whose current ownership Pi can verify as built-in or Calm-owned, leaves contested or unverifiable definitions untouched, and displays a prominent warning naming the tools it skipped.
+If Pi's complete ownership inventory is unavailable, Calm leaves all seven built-in names untouched and warns rather than guessing.
 Tool-call rows created before those wrappers are registered, including rows restored during `/reload`, do not retroactively collapse; later rows for names Calm claimed use Calm presentation.
 While Calm remains off, it registers none of those overrides and contests no built-in tool name.
 
