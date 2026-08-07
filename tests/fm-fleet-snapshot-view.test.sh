@@ -197,6 +197,36 @@ test_fixture_snapshot_json() {
   pass "fixture snapshot covers task rows, backlog rows, pointers, and stable ordering"
 }
 
+test_large_parsed_backlog_crosses_public_snapshot_boundary() {
+  local home out i padding
+  home=$(make_home large-parsed-backlog)
+  padding=$(printf '%0200d' 0)
+  {
+    printf '%s\n' '## In flight'
+    printf '%s\n' '- [ ] preserved-orphan - Preserve this inventory contradiction (repo: alpha) (kind: ship)'
+    printf '\n%s\n' '## Queued'
+    i=1
+    while [ "$i" -le 850 ]; do
+      printf -- '- [ ] queued-%04d - Queued payload %s (repo: alpha) (kind: ship)\n' "$i" "$padding"
+      i=$((i + 1))
+    done
+    printf '\n%s\n' '## Done'
+  } > "$home/data/backlog.md"
+
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "public snapshot rejected a parsed backlog larger than Linux MAX_ARG_STRLEN"
+  printf '%s' "$out" | jq -e '
+    (.backlog | tojson | length) > 131072
+      and (.backlog.records | length) == 851
+      and .main_inventory.valid == false
+      and .main_inventory.reason == "in-flight backlog item has no child metadata"
+      and .main_inventory.orphan_in_flight == ["preserved-orphan"]
+      and (.backlog.records[] | select(.id == "queued-0850")
+        | .title | startswith("Queued payload"))
+  ' >/dev/null || fail "large snapshot lost backlog records or inventory disclosure"
+  pass "public snapshot preserves inventory across a parsed backlog larger than Linux MAX_ARG_STRLEN"
+}
+
 # R1 owner contract: main_inventory discloses orphan in-flight and unstructured
 # current rows without inventing task rows.
 test_main_inventory_orphan_and_unstructured_disclosure() {
@@ -781,6 +811,7 @@ test_parked_scout_decision_stays_pending() {
 
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_large_parsed_backlog_crosses_public_snapshot_boundary
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state
