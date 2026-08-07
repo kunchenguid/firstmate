@@ -148,7 +148,7 @@ print_anomaly_rows() {  # <anomaly-sink>
     [ -n "$kind" ] || continue
     case "$kind" in
       malformed)
-        printf '%s NOT APPLIED - the verb is followed by prose, not a [key=<slug>] token: %s\n' \
+        printf '%s NOT APPLIED - the line does not match <verb> [tokens]: <note>: %s\n' \
           "$task" "$line"
         ;;
       misplaced-key)

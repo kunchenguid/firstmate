@@ -204,13 +204,14 @@ status_is_paused_or_captain_held() {  # <status-line>
 #                   prevent; the line is reported as an anomaly so the writer
 #                   gets fixed. Only a LEADING token counts - a key mentioned
 #                   inside prose ("docs still mention [key=q1]") stays prose.
-#   malformed     - the first word IS a lifecycle verb but the rest of the
-#                   prefix is prose, e.g. "resolved the conflict by hand: ...".
-#                   Such a line is NEVER applied to the decision fold: reading
-#                   the first word alone would let that sentence close a key it
-#                   never claimed to close, and a wrongly CLOSED decision
-#                   vanishes with no review, which is worse than an unclosed one
-#                   that keeps surfacing. Reported as an anomaly instead.
+#   malformed     - the first word IS a lifecycle verb but the line either has
+#                   no colon or the rest of the prefix is prose, e.g. "resolved
+#                   the conflict by hand: ...". Such a line is NEVER applied to
+#                   the decision fold: reading the first word alone would let
+#                   that sentence close a key it never claimed to close, and a
+#                   wrongly CLOSED decision vanishes with no review, which is
+#                   worse than an unclosed one that keeps surfacing. Reported as
+#                   an anomaly instead.
 #   freeform      - the prefix does not conform and its first word is not a
 #                   lifecycle verb: an ordinary legacy line such as "merged" or
 #                   "PR ready https://...". Not an anomaly, and status_line_verb
@@ -267,7 +268,7 @@ _FM_STATUS_KEY=default
 _FM_STATUS_NOTE=
 
 _fm_status_parse() {  # <status-line>
-  local line=$1 prefix note rest word slug conforms=1 haskey=0
+  local line=$1 prefix note rest word slug conforms=1 haskey=0 has_colon=0
 
   _FM_STATUS_CLASS=freeform
   _FM_STATUS_VERB=
@@ -277,7 +278,7 @@ _fm_status_parse() {  # <status-line>
   # A line with no colon has no note of its own; status_line_note has always
   # returned the whole line verbatim for it, so keep that exactly.
   case "$line" in
-    *:*) note=${line#*:}; note=${note#"${note%%[![:space:]]*}"}; prefix=${line%%:*} ;;
+    *:*) has_colon=1; note=${line#*:}; note=${note#"${note%%[![:space:]]*}"}; prefix=${line%%:*} ;;
     *)   note=$line; prefix=$line ;;
   esac
   _FM_STATUS_NOTE=$note
@@ -286,6 +287,15 @@ _fm_status_parse() {  # <status-line>
   rest=${rest%"${rest##*[![:space:]]}"}
   _FM_STATUS_VERB=${rest%%[[:space:]]*}
   rest=${rest#"$_FM_STATUS_VERB"}
+
+  if [ "$has_colon" != 1 ]; then
+    if _fm_status_is_lifecycle_verb "$_FM_STATUS_VERB"; then
+      _FM_STATUS_CLASS=malformed
+    else
+      _FM_STATUS_CLASS=freeform
+    fi
+    return 0
+  fi
 
   while :; do
     rest=${rest#"${rest%%[![:space:]]*}"}
@@ -386,18 +396,18 @@ EOF
 }
 # --- status-line anomalies --------------------------------------------------
 #
-# A line the grammar refuses, and a resolution that closes a key nothing ever
-# opened, are both direct symptoms of a writer bug. Neither may be classified in
-# silence: an unreported refusal reads as "closed" to whoever wrote it while the
-# open set keeps crying wolf, and an unreported unmatched close is the only
-# on-disk trace that an OPENING line was misfiled under another key. So the fold
-# reports them on an explicit side channel. Records are
+# A line the grammar refuses, and a resolution that closes a key neither a
+# decision nor a work phase opened, are both direct symptoms of a writer bug.
+# Neither may be classified in silence: an unreported refusal reads as "closed"
+# to whoever wrote it while the open set keeps crying wolf, and an unreported
+# unmatched close is the only on-disk trace that an OPENING line was misfiled
+# under another key. So the fold reports them on an explicit side channel. Records are
 # "<task>\t<kind>\t<key>\t<line>", one per offending line, with these kinds:
 #
 #   malformed       out of grammar; NOT applied to the open set.
 #   misplaced-key   key token written after the colon; APPLIED to that key.
 #   unmatched-close a resolution or captain-held transfer for a key that was not
-#                   open; no effect on the open set.
+#                   open in either fold; no effect on the open set.
 #
 # Wiring a sink is opt-in: callers that only need the open set (the fleet
 # snapshot, the decision-hold verifier, the away-mode return digest) pass none
@@ -424,6 +434,31 @@ _fm_decision_is_open() {  # <open-set> <key>
     "$2"$'\t'*|*$'\n'"$2"$'\t'*) return 0 ;;
   esac
   return 1
+}
+
+# Fold ONE status line into an existing open work-phase set.
+_fm_activity_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb>
+  local open=$1 line=$2 resolve=$3 held=$4 verb key note stripped pause
+  stripped=${line//[[:space:]]/}
+  [ -n "$stripped" ] || { printf '%s' "$open"; return 0; }
+  pause=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+  _fm_status_parse "$line"
+  [ "$_FM_STATUS_CLASS" != malformed ] || { printf '%s' "$open"; return 0; }
+  verb=$_FM_STATUS_VERB
+  key=$_FM_STATUS_KEY
+  case "$verb" in
+    working|"$pause")
+      note=$_FM_STATUS_NOTE
+      open=$(_fm_decision_drop "$open" "$key")
+      [ -n "$open" ] && open="${open}"$'\n'
+      open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
+      ;;
+    done|failed|needs-decision|blocked|"$resolve"|"$held")
+      open=$(_fm_decision_drop "$open" "$key")
+      [ -n "$open" ] && open="${open}"$'\n'
+      ;;
+  esac
+  printf '%s' "$open"
 }
 
 # Fold ONE status line into an existing "<key>\t<verb>\t<note>\n"-per-line open
@@ -471,8 +506,9 @@ _fm_decision_key_transition_allowed() {  # <key> <note>
   return 0
 }
 
-_fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb> [<sink>] [<task>]
-  local open=$1 line=$2 resolve=$3 held=$4 sink=${5-} task=${6-} verb key note stripped
+_fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb> [<sink>] [<task>] [<open-activities>]
+  local open=$1 line=$2 resolve=$3 held=$4 sink=${5-} task=${6-} activities=${7-}
+  local verb key note stripped
   stripped=${line//[[:space:]]/}
   [ -n "$stripped" ] || { printf '%s' "$open"; return 0; }
   _fm_status_parse "$line"
@@ -499,6 +535,7 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
       ;;
     "$resolve"|"$held")
       _fm_decision_is_open "$open" "$key" \
+        || _fm_decision_is_open "$activities" "$key" \
         || _fm_decision_note_anomaly "$sink" "$task" unmatched-close "$key" "$line"
       open=$(_fm_decision_drop "$open" "$key")
       [ -n "$open" ] && open="${open}"$'\n'
@@ -520,13 +557,14 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
 # subprocess read, which exists for that function's much narrower payload-driven
 # path resolution rather than this directory-local glob.
 status_open_decisions() {  # <status-file> [<anomaly-sink>]
-  local f=$1 sink=${2-} line resolve held open='' task
+  local f=$1 sink=${2-} line resolve held open='' activities='' task
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   task=${f##*/}; task=${task%.status}
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
-    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$sink" "$task")
+    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$sink" "$task" "$activities")
+    activities=$(_fm_activity_fold_line "$activities" "$line" "$resolve" "$held")
   done < "$f"
   printf '%s' "$open"
 }
@@ -565,10 +603,10 @@ EOF
 # below are the bounded-cost siblings used for that per-drain path: each call
 # reads only the bytes appended to a status file since its own last call (a
 # persisted per-file byte cursor) and folds just those new lines into a
-# persisted running open-set, via the exact same _fm_decision_fold_line rule
+# persisted running decision and work-phase sets, via the exact same fold rules
 # status_open_decisions uses - so the two strategies can never disagree on what
-# is open. Cost is bounded by NEW appends since the last drain, not by the
-# status file's total lifetime size.
+# is open or whether a closure belongs to an open phase. Cost is bounded by NEW
+# appends since the last drain, not by the status file's total lifetime size.
 #
 # Correctness invariant (unchanged from the whole-file fold): an open decision
 # is dropped ONLY by an explicit resolved/captain-held line for its exact key,
@@ -576,23 +614,17 @@ EOF
 # persisted open-set carries every still-open key forward across calls
 # regardless of how much new unrelated log content has since been folded in.
 #
-# The cursor format is `version`, `offset`, `ident`, then the folded open set.
-# FM_OPEN_DECISIONS_FOLD_VERSION must be bumped whenever
-# _fm_decision_fold_line semantics change, so persisted state from an older
-# interpretation is discarded and rebuilt from byte 0.
-#
 # Cursor invalidation is deliberately minimal, matching how status files are
 # ACTUALLY used in this repo: every one is created once (`>`) and only ever
-# appended to (`>>`) - never replaced, renamed, or rewritten in place. So the
-# ways a cursor can go stale are a fold-version mismatch, a shrink (truncated),
-# or the file at this path being a different file than before
-# (replaced/rotated/recreated), which a changed device+inode makes an O(1) check
-# via a single `stat` call - no content hashing, no re-reading the consumed
-# prefix. Any signal falls back to a full re-fold of the whole current file from
-# byte 0 - byte for byte what status_open_decisions itself would compute - and
-# rewrites the cursor from that clean baseline. A same-inode, same-size,
-# in-place byte edit is NOT detected; that is a deliberately accepted gap
-# because no code path in this repo ever does that to a status file.
+# appended to (`>>`) - never replaced, renamed, or rewritten in place. A cursor
+# goes stale when its schema version changes, the file shrinks, or the file at
+# this path is replaced/rotated/recreated. A changed device+inode makes the last
+# case an O(1) check via a single `stat` call - no content hashing, no re-reading
+# the consumed prefix. Any signal falls back to a full re-fold of the whole
+# current file from byte 0 - byte for byte what status_open_decisions itself
+# would compute - and rewrites the cursor from that clean baseline. A same-inode,
+# same-size, in-place byte edit is NOT detected; that is a deliberately accepted
+# gap because no code path in this repo ever does that to a status file.
 #
 # The other real failure mode is OUR OWN read failing (a stat/wc/tail I/O
 # error), not a malformed writer: every such read here is checked, and on
@@ -610,14 +642,14 @@ EOF
 # drop an open decision - because a losing writer's offset can only ever be
 # equal to or behind an already-recorded byte position, and the next call
 # re-derives from whatever offset actually landed on disk.
+_FM_OPEN_DECISIONS_CURSOR_VERSION=2
+
 _fm_open_decisions_cursor_path() {  # <status-file>
   local f=$1 dir base
   dir=$(dirname "$f")
   base=$(basename "$f")
   printf '%s/.%s.open-decisions-cursor' "$dir" "${base%.status}"
 }
-
-FM_OPEN_DECISIONS_FOLD_VERSION=2
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure
@@ -630,8 +662,9 @@ _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure
 }
 
 status_open_decisions_incremental() {  # <status-file> [<anomaly-sink>]
-  local f=$1 sink=${2-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
-  local version='' size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0 task
+  local f=$1 sink=${2-} cf offset ident open='' activities='' trusted_open='' cursor_data first rest
+  local offset_line ident_line record payload cursor_valid=0 rewrite=0
+  local size cur_ident resolve held chunk_file chunk_size line task
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   task=${f##*/}; task=${task%.status}
   cf=$(_fm_open_decisions_cursor_path "$f")
@@ -640,40 +673,66 @@ status_open_decisions_incremental() {  # <status-file> [<anomaly-sink>]
   if [ -f "$cf" ] && [ -r "$cf" ] && [ ! -L "$cf" ]; then
     if cursor_data=$(LC_ALL=C command cat "$cf" 2>/dev/null); then
       first=${cursor_data%%$'\n'*}
-      case "$first" in
-        version=*)
-          version=${first#version=}
-          [ "$version" = "$FM_OPEN_DECISIONS_FOLD_VERSION" ] || version=''
-          rest=${cursor_data#*$'\n'}
-          offset_line=${rest%%$'\n'*}
-          case "$offset_line" in
-            offset=*) offset=${offset_line#offset=} ;;
-            *) offset=0; version='' ;;
-          esac
-          case "$offset" in
-            ''|*[!0-9]*) offset=0; version='' ;;
-            *)
-              case "$rest" in
-                *$'\n'*)
-                  rest=${rest#*$'\n'}
-                  ident_line=${rest%%$'\n'*}
-                  case "$ident_line" in
-                    ident=*)
-                      ident=${ident_line#ident=}
-                      case "$rest" in
-                        *$'\n'*) open=${rest#*$'\n'} ;;
-                      esac
-                      if [ -n "$version" ] && [ -n "$ident" ]; then trusted_open=$open; fi
-                      ;;
-                    *) offset=0; version='' ;;
-                  esac
-                  ;;
-                *) offset=0; version='' ;;
-              esac
-              ;;
-          esac
-          ;;
-      esac
+      if [ "$first" = "version=$_FM_OPEN_DECISIONS_CURSOR_VERSION" ]; then
+        case "$cursor_data" in
+          *$'\n'*) rest=${cursor_data#*$'\n'} ;;
+          *) rest= ;;
+        esac
+        offset_line=${rest%%$'\n'*}
+        case "$offset_line" in
+          offset=*) offset=${offset_line#offset=} ;;
+          *) offset= ;;
+        esac
+        case "$offset" in
+          ''|*[!0-9]*) offset=0 ;;
+          *)
+            case "$rest" in
+              *$'\n'*)
+                rest=${rest#*$'\n'}
+                ident_line=${rest%%$'\n'*}
+                case "$ident_line" in
+                  ident=*) ident=${ident_line#ident=}; cursor_valid=1 ;;
+                  *) offset=0 ;;
+                esac
+                case "$rest" in
+                  *$'\n'*) rest=${rest#*$'\n'} ;;
+                  *) rest= ;;
+                esac
+                ;;
+              *) offset=0 ;;
+            esac
+            ;;
+        esac
+        if [ "$cursor_valid" = 1 ] && [ -n "$rest" ]; then
+          while IFS= read -r record || [ -n "$record" ]; do
+            case "$record" in
+              decision$'\t'*)
+                payload=${record#*$'\t'}
+                [ -n "$payload" ] || { cursor_valid=0; break; }
+                [ -n "$open" ] && open="${open}"$'\n'
+                open="${open}${payload}"
+                ;;
+              activity$'\t'*)
+                payload=${record#*$'\t'}
+                [ -n "$payload" ] || { cursor_valid=0; break; }
+                [ -n "$activities" ] && activities="${activities}"$'\n'
+                activities="${activities}${payload}"
+                ;;
+              *) cursor_valid=0; break ;;
+            esac
+          done <<EOF
+$rest
+EOF
+        fi
+        if [ "$cursor_valid" = 1 ]; then
+          trusted_open=$open
+        else
+          offset=0
+          ident=''
+          open=''
+          activities=''
+        fi
+      fi
     fi
   fi
 
@@ -687,11 +746,11 @@ status_open_decisions_incremental() {  # <status-file> [<anomaly-sink>]
   size=${size//[[:space:]]/}
   case "$size" in ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;; esac
 
-  if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ]; then
+  if [ "$cursor_valid" != 1 ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ]; then
     offset=0
     open=''
-    trusted_open=''
-    cursor_dirty=1
+    activities=''
+    rewrite=1
   fi
 
   if [ "$offset" -lt "$size" ]; then
@@ -713,22 +772,29 @@ status_open_decisions_incremental() {  # <status-file> [<anomaly-sink>]
     resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
     held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
     while IFS= read -r line || [ -n "$line" ]; do
-      open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$sink" "$task")
+      open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$sink" "$task" "$activities")
+      activities=$(_fm_activity_fold_line "$activities" "$line" "$resolve" "$held")
     done < "$chunk_file"
     rm -f "$chunk_file"
     offset=$size
-    cursor_dirty=1
+    rewrite=1
   fi
-  if [ "$cursor_dirty" -eq 1 ]; then
+  if [ "$rewrite" = 1 ]; then
     {
-      printf 'version=%s\n' "$FM_OPEN_DECISIONS_FOLD_VERSION"
+      printf 'version=%s\n' "$_FM_OPEN_DECISIONS_CURSOR_VERSION"
       printf 'offset=%s\n' "$offset"
       printf 'ident=%s\n' "$cur_ident"
-      # An `if` (not `[ -n "$open" ] && printf ...`) so the group's exit status
-      # is always 0 even when open is empty (fully resolved) - a bare `&&`
-      # there would make the whole group fail on that condition, silently
-      # skipping the mv below and leaving the cursor stuck on the OLD offset.
-      if [ -n "$open" ]; then printf '%s' "$open"; fi
+      while IFS= read -r record; do
+        if [ -n "$record" ]; then printf 'decision\t%s\n' "$record"; fi
+      done <<EOF
+$open
+EOF
+      while IFS= read -r record; do
+        if [ -n "$record" ]; then printf 'activity\t%s\n' "$record"; fi
+      done <<EOF
+$activities
+EOF
+      :
     } > "$cf.tmp.$$" && mv -f "$cf.tmp.$$" "$cf"
   fi
   printf '%s' "$open"
@@ -766,31 +832,11 @@ EOF
 # It is never authoritative current crew state, and consumers must not let an open
 # phase outrank a structured home snapshot or fm-crew-state result.
 _fm_status_open_activities_stream() {
-  local line verb key note resolve held open='' stripped pause
+  local line resolve held open=''
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
-  pause=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
-    stripped=${line//[[:space:]]/}
-    [ -n "$stripped" ] || continue
-    # Same grammar owner as the decision fold: a line it refuses never opens or
-    # closes a phase either.
-    _fm_status_parse "$line"
-    [ "$_FM_STATUS_CLASS" != malformed ] || continue
-    verb=$_FM_STATUS_VERB
-    key=$_FM_STATUS_KEY
-    case "$verb" in
-      working|"$pause")
-        note=$_FM_STATUS_NOTE
-        open=$(_fm_decision_drop "$open" "$key")
-        [ -n "$open" ] && open="${open}"$'\n'
-        open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
-        ;;
-      done|failed|needs-decision|blocked|"$resolve"|"$held")
-        open=$(_fm_decision_drop "$open" "$key")
-        [ -n "$open" ] && open="${open}"$'\n'
-        ;;
-    esac
+    open=$(_fm_activity_fold_line "$open" "$line" "$resolve" "$held")
   done
   printf '%s' "$open"
 }

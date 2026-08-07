@@ -325,6 +325,79 @@ test_close_of_a_never_opened_key_is_reported() {
   pass "a closure matching no open key is reported, not ignored"
 }
 
+test_activity_closure_from_an_earlier_drain_is_not_reported() {
+  local dir state out
+  dir=$(make_case activity-close)
+  state="$dir/state"
+  out="$dir/drain.out"
+  printf 'working [key=phase]: implementation under way\n' > "$state/task-phase.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "first drain failed on an open work phase"
+  [ ! -s "$out" ] || fail "opening a work phase produced drain output: $(cat "$out")"
+
+  printf 'resolved [key=phase]: implementation complete\n' >> "$state/task-phase.status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "second drain failed on a work phase closure"
+  [ ! -s "$out" ] \
+    || fail "a closure owned by a work phase from an earlier drain produced an anomaly: $(cat "$out")"
+  pass "a work phase opened in an earlier drain owns its later closure"
+}
+
+test_lifecycle_line_without_a_colon_is_refused_and_reported() {
+  local dir state out
+  dir=$(make_case no-colon)
+  state="$dir/state"
+  out="$dir/drain.out"
+  printf 'needs-decision [key=x]: pick one\nresolved [key=x]\n' > "$state/task-no-colon.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a no-colon lifecycle line"
+
+  grep -F 'task-no-colon' "$out" | grep -F '[key=x]' | grep -F 'pick one' >/dev/null \
+    || fail "a no-colon lifecycle line silently closed its decision"
+  grep -F 'NOT APPLIED' "$out" | grep -F 'resolved [key=x]' >/dev/null \
+    || fail "a no-colon lifecycle line was refused silently"
+  pass "a no-colon lifecycle line is refused and reported"
+}
+
+test_legacy_cursor_is_refolded_once_under_current_semantics() {
+  local dir state out probe status cursor size ident
+  dir=$(make_case cursor-version)
+  state="$dir/state"
+  out="$dir/drain.out"
+  probe="$dir/read-probe"
+  status="$state/task-cursor.status"
+  cursor="$state/.task-cursor.open-decisions-cursor"
+  cat > "$status" <<'EOF'
+needs-decision: [key=insert-ask-user] review parked
+resolved [key=insert-ask-user]: captain decided
+EOF
+  size=$(LC_ALL=C wc -c < "$status"); size=${size//[[:space:]]/}
+  if [ "$(uname -s)" = Darwin ]; then
+    ident=$(LC_ALL=C stat -f '%d:%i' "$status")
+  else
+    ident=$(LC_ALL=C stat -c '%d:%i' "$status")
+  fi
+  printf 'offset=%s\nident=%s\ndefault\tneeds-decision\t[key=insert-ask-user] review parked' \
+    "$size" "$ident" > "$cursor"
+
+  FM_OPEN_DECISIONS_READ_PROBE="$probe" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed while migrating a legacy cursor"
+
+  grep -F 'OPEN DECISIONS' "$out" >/dev/null \
+    && fail "a legacy cursor kept its stale open set after migration: $(cat "$out")"
+  grep -F 'applied to [key=insert-ask-user]' "$out" >/dev/null \
+    || fail "legacy cursor migration did not re-report the status history"
+  [ "$(cut -f2 "$probe")" = "$size" ] \
+    || fail "legacy cursor migration did not refold from byte zero: $(cat "$probe")"
+
+  : > "$out"
+  FM_OPEN_DECISIONS_READ_PROBE="$probe" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "second drain failed after migrating a legacy cursor"
+  [ ! -s "$out" ] || fail "a migrated cursor re-reported history: $(cat "$out")"
+  [ "$(wc -l < "$probe" | tr -d '[:space:]')" = 1 ] \
+    || fail "a migrated cursor refolded its history more than once: $(cat "$probe")"
+  pass "a legacy cursor is fully refolded and re-reported exactly once"
+}
+
 test_terminal_done_still_does_not_close_a_key() {
   local dir state out
   dir=$(make_case done-does-not-close)
@@ -373,5 +446,8 @@ test_closure_carrying_another_token_before_the_key_closes
 test_prose_starting_with_a_verb_word_does_not_close
 test_key_token_after_the_colon_is_honored_and_reported
 test_close_of_a_never_opened_key_is_reported
+test_activity_closure_from_an_earlier_drain_is_not_reported
+test_lifecycle_line_without_a_colon_is_refused_and_reported
+test_legacy_cursor_is_refolded_once_under_current_semantics
 test_terminal_done_still_does_not_close_a_key
 test_clean_grammar_prints_no_anomaly_section

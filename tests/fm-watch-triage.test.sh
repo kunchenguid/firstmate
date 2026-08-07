@@ -241,8 +241,9 @@ EOF
 # obvious "just take the first word" repair introduces a worse, symmetric one -
 # so both directions are pinned here, against the real classifier.
 test_status_line_grammar() {
-  local dir state open
+  local dir state open sink legacy_line
   dir=$(make_case status-grammar); state="$dir/state"
+  sink="$state/anomalies"
 
   # A verb followed only by structured tokens is the grammar, whatever the
   # tokens are: bin/fm-secondmate-report.sh emits "[corr=<16hex>]", and
@@ -269,6 +270,12 @@ test_status_line_grammar() {
   status_is_captain_relevant 'PR ready https://x/pull/2' \
     || fail "legacy bare PR ready free-text stopped being captain-relevant"
   status_is_captain_relevant 'merged' || fail "legacy bare merged free-text stopped being captain-relevant"
+  for legacy_line in 'merged' 'checks green' 'ready in branch'; do
+    [ "$(status_line_verb "$legacy_line")" = "$legacy_line" ] \
+      || fail "legacy no-colon verb changed for: $legacy_line"
+    [ "$(status_line_note "$legacy_line"; printf x)" = "${legacy_line}x" ] \
+      || fail "legacy no-colon note changed for: $legacy_line"
+  done
 
   # Token-carrying lines DO change, and must: a secondmate escalating through
   # bin/fm-secondmate-report.sh writes "blocked [corr=...]:", which used to read
@@ -304,6 +311,12 @@ test_status_line_grammar() {
   printf 'needs-decision [key=a]: pick one\nresolved [key=a] [key=b]: which one?\n' > "$state/g5.status"
   status_open_decisions "$state/g5.status" | grep -F $'a\t' >/dev/null \
     || fail "a line carrying two different key tokens closed one of them anyway"
+  printf 'needs-decision [key=no-colon]: pick one\nresolved [key=no-colon]\n' > "$state/g6.status"
+  : > "$sink"
+  status_open_decisions "$state/g6.status" "$sink" | grep -F $'no-colon\t' >/dev/null \
+    || fail "a lifecycle line without a colon silently closed its decision"
+  grep -F $'g6\tmalformed\t-\tresolved [key=no-colon]' "$sink" >/dev/null \
+    || fail "a lifecycle line without a colon was refused silently"
   pass "status line grammar: tokens parse, prose is refused, a misplaced key is honored not defaulted"
 }
 
@@ -311,7 +324,7 @@ test_status_line_grammar() {
 # channel. A silent refusal is what let a perfect-looking closure sit next to a
 # decision that stayed open for a second day.
 test_status_line_anomalies_are_reported() {
-  local dir state sink
+  local dir state sink activity
   dir=$(make_case status-anomalies); state="$dir/state"
   sink="$state/anomalies"
 
@@ -333,6 +346,17 @@ EOF
     || fail "closing a never-opened key produced no unmatched-close record"
   [ "$(grep -c '' "$sink")" = 3 ] \
     || fail "grammar-clean lines produced extra anomaly records: $(cat "$sink")"
+
+  cat > "$state/activity.status" <<'EOF'
+working [key=phase]: implementation under way
+resolved [key=phase]: implementation complete
+EOF
+  : > "$sink"
+  status_open_decisions "$state/activity.status" "$sink" >/dev/null
+  [ ! -s "$sink" ] \
+    || fail "a closure owned by an open work phase produced an anomaly: $(cat "$sink")"
+  activity=$(status_open_activities "$state/activity.status")
+  [ -z "$activity" ] || fail "a resolved work phase remained open: $activity"
 
   # No sink wired means no file I/O and no behavior change for the callers that
   # only want the open set.
