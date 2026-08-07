@@ -145,7 +145,7 @@ family_for_basename() {
     fm-subagent-pretool-check.test.sh|\
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
-    fm-transition-lib.test.sh|\
+    fm-transition-lib.test.sh|fm-skills-lock.test.sh|\
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
@@ -838,6 +838,9 @@ families_for_test_reference() {
 families_for_changed_path() {
   local path=$1 fixture_ref
   case "$path" in
+    skills-lock.json|tests/fm-skills-lock.test.sh)
+      printf '%s\n' __script__:tests/fm-skills-lock.test.sh
+      ;;
     tests/fm-test-run.test.sh)
       printf '%s\n' pure-contract-unit
       ;;

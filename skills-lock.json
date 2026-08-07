@@ -6,7 +6,7 @@
       "sourceUrl": "https://github.com/mattpocock/skills.git",
       "sourceType": "github",
       "skillPath": "skills/engineering/ask-matt/SKILL.md",
-      "computedHash": "b2e8ef5ffc2f142022c1e1e1bba68073f0821356a8e1cf1b23670f61d13fe50b"
+      "computedHash": "ee13e520d1b535834b989826b94559384882593819f5f1d43db3fba776a99adc"
     },
     "code-review": {
       "source": "mattpocock/skills",
@@ -41,7 +41,7 @@
       "sourceUrl": "https://github.com/mattpocock/skills.git",
       "sourceType": "github",
       "skillPath": "skills/engineering/grill-with-docs/SKILL.md",
-      "computedHash": "9c460cbd94fd3c63cdef967dbdb6e66ca687103cdc380cd37834e4d10b738f78"
+      "computedHash": "28104dc0a4dbcf9e23c16ad68e0f94a8c6c5e1f695896c1380d213e99f872fb7"
     },
     "grilling": {
       "source": "mattpocock/skills",
@@ -55,21 +55,21 @@
       "sourceUrl": "https://github.com/mattpocock/skills.git",
       "sourceType": "github",
       "skillPath": "skills/productivity/handoff/SKILL.md",
-      "computedHash": "ad03e8d4ea3cbbff66420eb7ba3cc375b5cbe1821a2449b53e863256cf5b5cde"
+      "computedHash": "a7ae7508f55074f616be9dd4a677b294ecb7ee00d4059feb3166ac28be3052ae"
     },
     "implement": {
       "source": "mattpocock/skills",
       "sourceUrl": "https://github.com/mattpocock/skills.git",
       "sourceType": "github",
       "skillPath": "skills/engineering/implement/SKILL.md",
-      "computedHash": "2139cfedf24791adbc839aaab6019cff158af1e28bfead020ec6e0ce01b3e74d"
+      "computedHash": "f2447dab2f277ff6f67463b70997677ec7ec4cd98150448651bffc4d3fc0d1c1"
     },
     "improve-codebase-architecture": {
       "source": "mattpocock/skills",
       "sourceUrl": "https://github.com/mattpocock/skills.git",
       "sourceType": "github",
       "skillPath": "skills/engineering/improve-codebase-architecture/SKILL.md",
-      "computedHash": "66e8a50c83c3c724fcfe0769701b665c56cec220cc4f49cc1aee8bdfc07de94a"
+      "computedHash": "87bb4db9b77712a6646fddc42fa6fabbce0d85379ad9e66cd67feaf3152cc477"
     },
     "prototype": {
       "source": "mattpocock/skills",
@@ -97,7 +97,7 @@
       "sourceUrl": "https://github.com/mattpocock/skills.git",
       "sourceType": "github",
       "skillPath": "skills/engineering/setup-matt-pocock-skills/SKILL.md",
-      "computedHash": "f9c2b933dda18eea572e96f6ebbcd5b30e0d1bfdc074af53cc99728dc5f0bdac"
+      "computedHash": "8bfe76881731976a32e1f6ca4e5940dc510353dbe6e32cd63377a53502f14d40"
     },
     "tdd": {
       "source": "mattpocock/skills",
@@ -111,28 +111,28 @@
       "sourceUrl": "https://github.com/mattpocock/skills.git",
       "sourceType": "github",
       "skillPath": "skills/engineering/to-spec/SKILL.md",
-      "computedHash": "7e07d4cfabd1a4f61627ebe2705601784fae7b9aca7e13af3e201ace75738200"
+      "computedHash": "83192dc1b2ffc3e105d7e930cdba6e07fe73f2ac8bd44f5b6ca4d4822a1c56b1"
     },
     "to-tickets": {
       "source": "mattpocock/skills",
       "sourceUrl": "https://github.com/mattpocock/skills.git",
       "sourceType": "github",
       "skillPath": "skills/engineering/to-tickets/SKILL.md",
-      "computedHash": "0349eee265e7005e667b4543de849672106c46d545e998f37d3319300bb07751"
+      "computedHash": "8e65d586e1dbd1c48e0f515f35af791bfd5c5bcfa9e5ba5121e74f9d0c02368b"
     },
     "triage": {
       "source": "mattpocock/skills",
       "sourceUrl": "https://github.com/mattpocock/skills.git",
       "sourceType": "github",
       "skillPath": "skills/engineering/triage/SKILL.md",
-      "computedHash": "1bc5349f0b61e19a6df61496b5a03d88cd69595dd303353f87945997a9e4a884"
+      "computedHash": "239d2e165aeb761a37a15819880103b2427580bdc54401f383a4ffd6ba907235"
     },
     "wayfinder": {
       "source": "mattpocock/skills",
       "sourceUrl": "https://github.com/mattpocock/skills.git",
       "sourceType": "github",
       "skillPath": "skills/engineering/wayfinder/SKILL.md",
-      "computedHash": "f343ecf46157cb645a5494644418308ad95391e9fc696faa47ae5a412bf5f6e4"
+      "computedHash": "c195399ac33e29013a183aba99b089380484ad5374d0cc18724442324cee00a1"
     },
     "wizard": {
       "source": "mattpocock/skills",
