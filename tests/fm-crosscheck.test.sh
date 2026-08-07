@@ -117,6 +117,14 @@ done
 # test failure. The gate must not read that as "the test caught the mutation".
 if [ "${FM_TEST_PYTEST_BREAK_COLLECTION:-}" = 1 ] && grep -qx broken app.txt; then
   echo "no tests ran"
+  # Measured on pytest 9.1.1: --continue-on-collection-errors records the
+  # collection error and reports it as an ordinary failure instead, which
+  # carries no classification and so reads as a caught regression.
+  for argument in "$@"; do
+    [ "$argument" = --continue-on-collection-errors ] || continue
+    echo "ERROR collecting"
+    exit 1
+  done
   exit 5
 fi
 status=0
@@ -532,6 +540,7 @@ elif scenario in {
     "node-id-mutated-nonexecution",
     "absent-runner",
     "linked-directory-test",
+    "flag-argument",
 }:
     patch = protocol / "mutations" / "revert.patch"
     patch.parent.mkdir(parents=True, exist_ok=True)
@@ -556,7 +565,13 @@ elif scenario in {
             "test_path": selector,
             "test_invocation": {
                 "runner": "vitest" if scenario == "absent-runner" else "pytest",
-                "arguments": [],
+                # A flag that turns a mutation the runner could not collect
+                # into an ordinary failing test, which reads as a catch.
+                "arguments": (
+                    ["--continue-on-collection-errors"]
+                    if scenario == "flag-argument"
+                    else []
+                ),
             },
             "mutation_patch_path": ".crosscheck/mutations/revert.patch",
         },
@@ -755,6 +770,49 @@ seed_open_ledger() {
       "status": "open",
       "note": "Seeded reproduced blocker.",
       "proof": null
+    }]
+  }],
+  "runs": []
+}
+JSON
+}
+
+# A ledger recorded before mutation proofs had to be argument-free. It must
+# still load - the durable findings in it are not disposable - while the proof
+# itself no longer certifies anything.
+seed_argument_proof_ledger() {
+  local case_dir=$1 head=$2
+  mkdir -p "$case_dir/data/task-x1"
+  cat > "$case_dir/data/task-x1/crosscheck-ledger.json" <<JSON
+{
+  "schema": "firstmate.crosscheck-ledger.v2",
+  "task_id": "task-x1",
+  "pull_request": "https://github.com/ruby-dlee/firstmate/pull/72",
+  "findings": [{
+    "id": "cc-aaaaaaaaaaaa",
+    "lifecycle": "verified-fixed",
+    "title": "Prior blocker",
+    "severity": "blocking",
+    "description": "A durable reproduced blocker.",
+    "citations": [{"path": "app.txt", "line": 1}],
+    "history": [{
+      "at": "2026-08-02T00:00:00Z",
+      "head_sha": "$head",
+      "status": "verified-fixed",
+      "note": "Proof recorded before runner arguments were refused.",
+      "proof": {
+        "test_path": "tests/vacuous.test.sh",
+        "test_invocation": {
+          "runner": "pytest",
+          "arguments": ["tests/regression.test.sh"]
+        },
+        "mutation_patch_sha256": "$(printf 'a%.0s' $(seq 64))",
+        "mutated_files": ["app.txt"],
+        "baseline_exit": 0,
+        "mutated_exit": 1,
+        "baseline_output": "",
+        "mutated_output": ""
+      }
     }]
   }],
   "runs": []
@@ -1296,6 +1354,34 @@ assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecy
   pass "a runner with no measured non-execution signal cannot certify a fix"
 }
 
+# The classified non-execution signal is a property of the runner's DEFAULT exit
+# semantics. --continue-on-collection-errors changes them: a mutation the runner
+# could not collect stops reporting the no-tests-collected status and reports an
+# ordinary failure instead, which carries no classification and so reads as a
+# caught regression. Before arguments were refused, that cleared the finding.
+test_flag_argument_cannot_rewrite_the_non_execution_signal() {
+  local record case_dir base head rc
+  record=$(make_case flag-argument)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  set +e
+  FM_TEST_PYTEST_BREAK_COLLECTION=1 \
+    run_case "$case_dir" "$base" "$head" flag-argument run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "mutation proof carrying a runner flag"
+  assert_grep "must be empty for a mutation proof, but names '--continue-on-collection-errors'" \
+    "$case_dir/err" "the refusal did not name the rejected flag"
+  python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1]))
+assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+' "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    || fail "a flag that rewrote the non-execution signal cleared a finding"
+  pass "a runner flag cannot rewrite the exit semantics the gate classifies"
+}
+
 # The gate validates exactly one target: test_path, which it checks is tracked,
 # refuses when it traverses a symlink, and protects from the mutation patch. A
 # positional argument adds a second target that gets none of those checks, so
@@ -1312,8 +1398,8 @@ test_positional_argument_cannot_supply_a_second_target() {
   rc=$?
   set -e
   expect_code 1 "$rc" "mutation proof carrying a positional second target"
-  assert_grep "positional argument 'tests/regression.test.sh'" "$case_dir/err" \
-    "the refusal did not name the rejected positional argument"
+  assert_grep "must be empty for a mutation proof, but names 'tests/regression.test.sh'" \
+    "$case_dir/err" "the refusal did not name the rejected positional argument"
   python3 -c '
 import json, sys
 value = json.load(open(sys.argv[1]))
@@ -2171,6 +2257,34 @@ assert value["runs"][-1]["active_blockers"] == ["cc-aaaaaaaaaaaa"]
   pass "mutation proof remains durable but cannot clear a different head"
 }
 
+# A recorded proof that would not be accepted today must degrade the FINDING,
+# never the file. Failing ledger load instead would wedge the task: the gate
+# stops before it can record a run, so nothing on disk explains the stop and
+# every later run fails identically until someone hand-edits the ledger.
+test_recorded_argument_proof_loads_but_no_longer_clears() {
+  local record case_dir base head rc
+  record=$(make_case legacy-argument-proof)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_argument_proof_ledger "$case_dir" "$head"
+  set +e
+  run_case "$case_dir" "$base" "$head" clear run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "recorded proof whose invocation carried arguments"
+  assert_no_grep 'finding-ledger preflight failed' "$case_dir/err" \
+    "a ledger holding an argument-bearing proof failed to load"
+  python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1]))
+assert value["runs"], "the run was not recorded"
+assert value["runs"][-1]["active_blockers"] == ["cc-aaaaaaaaaaaa"], value["runs"][-1]
+assert value["findings"][0]["lifecycle"] == "verified-fixed"
+' "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    || fail "the argument-bearing proof still cleared its finding"
+  pass "a recorded argument-bearing proof loads but no longer certifies its finding"
+}
+
 test_equivalent_finding_reopens_when_direct_proof_regresses() {
   python3 - "$CROSSCHECK_PY" <<'PY' || fail "equivalent finding did not fail closed after target regression"
 import importlib.util
@@ -2185,7 +2299,11 @@ head = "a" * 40
 verified = {
     "id": "cc-aaaaaaaaaaaa",
     "lifecycle": "verified-fixed",
-    "history": [{"status": "verified-fixed", "head_sha": head}],
+    "history": [{
+        "status": "verified-fixed",
+        "head_sha": head,
+        "proof": {"test_invocation": {"runner": "pytest", "arguments": []}},
+    }],
 }
 equivalent = {
     "id": "cc-bbbbbbbbbbbb",
@@ -2230,6 +2348,15 @@ JSON
   grep -q '"findings":null' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "null ledger was rewritten or normalized"
   assert_absent "$case_dir/codex.log" "reviewer ran against a malformed ledger"
+  # This stop cannot record a run: appending to a ledger that failed to parse
+  # would risk destroying the durable findings it still holds. The readable
+  # report must therefore carry the cause, or nothing on disk explains why
+  # every later run stops the same way.
+  assert_grep 'TOOL-FAILURE' "$case_dir/data/task-x1/crosscheck.md" \
+    "the report did not record the stop"
+  assert_grep 'finding-ledger preflight failed' \
+    "$case_dir/data/task-x1/crosscheck.md" \
+    "the report did not name the cause of the stop"
   pass "null findings ledger fails closed and is never normalized to empty"
 }
 
@@ -2444,6 +2571,9 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_absent_runner_is_never_a_test_outcome|\
     test_unclassified_runner_cannot_clear_a_finding|\
     test_positional_argument_cannot_supply_a_second_target|\
+    test_flag_argument_cannot_rewrite_the_non_execution_signal|\
+    test_recorded_argument_proof_loads_but_no_longer_clears|\
+    test_null_ledger_fails_without_normalization|\
     test_unmatched_selector_is_never_a_failing_test|\
     test_mutated_non_execution_cannot_clear_a_finding|\
     test_symlinked_directory_named_test_is_rejected|\
@@ -2494,6 +2624,7 @@ test_node_id_selector_clears_a_passing_named_test
 test_absent_runner_is_never_a_test_outcome
 test_unclassified_runner_cannot_clear_a_finding
 test_positional_argument_cannot_supply_a_second_target
+test_flag_argument_cannot_rewrite_the_non_execution_signal
 test_unmatched_selector_is_never_a_failing_test
 test_mutated_non_execution_cannot_clear_a_finding
 test_symlinked_directory_named_test_is_rejected
@@ -2521,6 +2652,7 @@ test_ordinary_output_paths_remain_bounded
 test_prompt_uses_only_bounded_ledger_projection
 test_nonexistent_mutation_proof_is_unreviewed
 test_mutation_proof_does_not_float_to_a_new_head
+test_recorded_argument_proof_loads_but_no_longer_clears
 test_equivalent_finding_reopens_when_direct_proof_regresses
 test_null_ledger_fails_without_normalization
 test_claims_lookup_error_never_reaches_reviewer

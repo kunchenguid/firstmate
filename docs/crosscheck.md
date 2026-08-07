@@ -113,7 +113,11 @@ That inspection carries its own larger budget so such a state is refused by name
 
 A `verified-fixed` update must name a tracked test and provide an implementation-only patch under `.crosscheck/mutations/`.
 It supplies an approved test runner plus a structured argument array, never a free-form shell command.
-That array may carry flags only, never an additional test target: `test_path` is the only target the gate validates as tracked, symlink-free, and unreachable by the mutation patch, so a second positional target would let the verdict come from a file the gate never validated and is refused by name.
+That array must be empty for a mutation proof, and any entry is refused by name.
+The classified non-execution signal is a property of the runner's default exit semantics, and a supplied flag can change them: measured on pytest 9.1.1, a mutation raising during import of the named test's module exits 2 on its own but 1 under `--continue-on-collection-errors`, and 1 carries no classification, so the gate would certify a fix on a test that was never collected.
+A positional argument separately adds a second target, and `test_path` is the only target the gate validates as tracked, symlink-free, and unreachable by the mutation patch, so the verdict could come from a file the gate never validated.
+Requiring no arguments closes both without an enumeration of runner flags that would go stale.
+The same rule is not applied when replaying a recorded proof, so a ledger written before it still loads; instead a recorded proof whose invocation carried arguments no longer certifies its finding, which reverts to blocking and can be re-proved in band by a fresh review.
 Crosscheck creates one clean checkout at the exact reviewed head, confirms the named test passes, destroys the entire checkout, recreates the same path from the exact head, applies the patch, and requires the same test to fail.
 Destroying all readable baseline state before the mutated run prevents a test from manufacturing causality through a predictable sibling checkout.
 Proof sandboxes also omit shared POSIX IPC and give each run private writable temporary and cache state, while shared host temporary directories remain outside the write policy.
@@ -147,6 +151,7 @@ Claude's Bash engine otherwise creates workspace scratch under shared `/tmp/clau
 Crosscheck sets the supported `CLAUDE_CODE_TMPDIR` to a private directory inside the disposable checkout, keeping that scratch under the existing checkout write boundary instead of widening the sandbox to shared `/tmp`.
 It does not grant write access to the author worktree or the wider filesystem.
 An unavailable reviewer binary, sandbox, author-identity proof, executing-account binding, verdict-level execution proof, or exact remote PR head records a `tool-failure` attempt when the live head is already known, and otherwise emits the same tool-failure class without fabricating a ledger run.
+A ledger that cannot be read is the one stop that cannot record itself: appending a run to a file that failed to parse would risk destroying the durable findings it still holds, so the ledger is left exactly as it is and only the readable `crosscheck.md` report is rewritten, naming the parse failure so the cause is on disk rather than only in the exit status of a run nobody kept.
 A nonzero reviewer exit, timeout, missing artifact, empty artifact, malformed artifact, or wrong-head artifact records an `unreviewed` attempt and exits nonzero.
 An unresolved suspicion comes from a completed reviewer and records a `blocking` attempt instead of being conflated with an invalid review artifact.
 This includes provider refusals that surface only as a stopped or silent agent.

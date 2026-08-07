@@ -835,20 +835,6 @@ def validate_test_invocation(value: Any, label: str) -> dict[str, Any]:
         all("\x00" not in argument for argument in validated_arguments),
         f"{label}.arguments must not contain NUL bytes",
     )
-    # test_path is the only target the gate validates: it alone is checked as a
-    # tracked regular file, rejected when it traverses a symlink, and protected
-    # from the mutation patch. A second positional target routes around all
-    # three, so the mutated run could fail on a file the gate never saw while
-    # the named test says nothing. Flags are unconstrained; targets are not.
-    for index, argument in enumerate(validated_arguments):
-        require(
-            argument.startswith("-"),
-            f"{label}.arguments[{index}] is the positional argument "
-            f"{argument!r}, which adds a second test target beyond test_path. "
-            "The named test is the only target the gate validates as tracked, "
-            "symlink-free, and unreachable by the mutation patch, so a verdict "
-            "could come from a file the gate never validated. Pass flags only",
-        )
     return {"runner": runner, "arguments": validated_arguments}
 
 
@@ -930,6 +916,38 @@ def require_classified_runner(runner: str, label: str) -> None:
         "that never reached the named test is indistinguishable there from one "
         "that caught the regression. Runners whose non-execution the gate can "
         f"classify: {', '.join(sorted(RUNNER_NON_EXECUTION_EXITS))}",
+    )
+
+
+def invocation_is_argument_free(invocation: Any) -> bool:
+    return isinstance(invocation, dict) and invocation.get("arguments") == []
+
+
+def require_argument_free_invocation(invocation: dict[str, Any], label: str) -> None:
+    """Refuse a mutation proof that hands the runner anything but its target.
+
+    The classified non-execution signal is a property of the runner's DEFAULT
+    exit semantics, and a supplied argument can change them. Measured on pytest
+    9.1.1, a mutation raising during import of the named test's module exits 2
+    on its own but 1 under `--continue-on-collection-errors`, and 1 has no
+    table entry, so the gate would certify a fix on a test never collected. A
+    positional argument separately adds a second target beyond test_path, the
+    only target the gate checks as tracked, symlink-free, and unreachable by
+    the mutation patch. Requiring none closes both without an enumeration of
+    runner flags that would go stale.
+    """
+
+    arguments = invocation["arguments"]
+    require(
+        not arguments,
+        f"{label}.arguments must be empty for a mutation proof, but names "
+        + ", ".join(repr(argument) for argument in arguments)
+        + ". The gate reads the mutated run's exit status through the runner's "
+        "default exit semantics, which an argument can change: a flag can turn "
+        "a test that was never collected into an ordinary failure, and a "
+        "positional argument adds a second target beyond test_path, the only "
+        "target the gate validates as tracked, symlink-free, and unreachable "
+        "by the mutation patch",
     )
 
 
@@ -1048,6 +1066,7 @@ def execute_mutation_proof(
         value.get("test_invocation"), f"{label}.test_invocation"
     )
     require_supported_selector(test_path, invocation["runner"], label)
+    require_argument_free_invocation(invocation, f"{label}.test_invocation")
     patch_relative = require_string(
         value.get("mutation_patch_path"), f"{label}.mutation_patch_path"
     )
@@ -1367,17 +1386,33 @@ def new_ledger(task_id: str, url: str) -> dict[str, Any]:
     }
 
 
+def has_certifying_verified_fix(finding: dict[str, Any], head_sha: str) -> bool:
+    """Whether a recorded proof still certifies this finding on this head.
+
+    A ledger written before mutation proofs were required to be argument-free
+    still loads, so its findings are never lost, but a proof whose runner took
+    arguments no longer counts as one: the gate cannot stand behind an exit
+    status it read through semantics the reviewer supplied. Such a finding
+    reverts to blocking and can be re-proved in band by a fresh review.
+    """
+
+    return any(
+        event.get("status") == "verified-fixed"
+        and event.get("head_sha") == head_sha
+        and isinstance(event.get("proof"), dict)
+        and invocation_is_argument_free(event["proof"].get("test_invocation"))
+        for event in finding["history"]
+        if isinstance(event, dict)
+    )
+
+
 def finding_is_clear_for_head(
     finding: dict[str, Any],
     head_sha: str,
     by_id: dict[str, dict[str, Any]],
 ) -> bool:
     if finding["lifecycle"] == "verified-fixed":
-        return any(
-            event.get("status") == "verified-fixed" and event.get("head_sha") == head_sha
-            for event in finding["history"]
-            if isinstance(event, dict)
-        )
+        return has_certifying_verified_fix(finding, head_sha)
     if finding["lifecycle"] == "closed-equivalent":
         current_events = [
             event
@@ -1397,12 +1432,7 @@ def finding_is_clear_for_head(
             and target in by_id
             and target != finding["id"]
             and by_id[target]["lifecycle"] == "verified-fixed"
-            and any(
-                event.get("status") == "verified-fixed"
-                and event.get("head_sha") == head_sha
-                for event in by_id[target]["history"]
-                if isinstance(event, dict)
-            )
+            and has_certifying_verified_fix(by_id[target], head_sha)
         )
     return False
 
@@ -1743,7 +1773,7 @@ The gate appends the named test path to the approved runner invocation, destroys
 test_path may be a plain repository path, or a `path::selector` node id when the runner is one of: {', '.join(sorted(NODE_ID_RUNNERS))}.
 The proof checkout is a fresh clone holding tracked files only, so name a runner installed on PATH there; a runner that is absent, or a selector that matches no test, is reported as a non-execution rather than a test result and clears nothing.
 A mutation proof may name only a runner whose non-execution signal the gate has measured, currently: {', '.join(sorted(RUNNER_NON_EXECUTION_EXITS))}. On any other runner the gate cannot tell a test that caught the mutation from one that never ran, so it refuses to certify the fix rather than guess.
-test_invocation.arguments may contain flags only, never an additional test target: test_path is the only target the gate validates as tracked, symlink-free, and unreachable by your mutation patch, so a positional argument is refused by name.
+A mutation proof takes no runner arguments at all: test_invocation.arguments must be empty, and any entry is refused by name. The gate reads the mutated exit status through the runner's default semantics, which a flag can change, and test_path is the only target it validates as tracked, symlink-free, and unreachable by your mutation patch.
 The gate will independently run every reproduction and every mutation proof.
 If you cannot reproduce a concern, return it as a suspicion; suspicions block the merge.
 Silence never closes an existing finding.
@@ -2365,6 +2395,45 @@ def render_report(ledger: dict[str, Any], run: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def render_unloadable_ledger_report(
+    ledger_path: Path, snapshot_value: dict[str, Any], reason: str
+) -> str:
+    """Report why a run could not start when its own ledger cannot be read.
+
+    The ledger is deliberately left untouched: appending a run to a file that
+    failed to parse would risk destroying the durable findings it still holds.
+    Without this the stop leaves no readable trace at all, and every later run
+    fails the same way with nothing on disk naming the cause.
+    """
+
+    return "\n".join(
+        [
+            "# Crosscheck",
+            "",
+            "State: **TOOL-FAILURE**",
+            "",
+            f"Reviewed head: `{snapshot_value['head_sha']}`",
+            "",
+            f"Claims digest: `{snapshot_value['claims_sha256']}`",
+            "",
+            f"Summary: {reason}",
+            "",
+            "## Durable findings",
+            "",
+            f"Unknown: `{ledger_path}` could not be read.",
+            "",
+            "## This run",
+            "",
+            "No review ran, and the ledger was left exactly as it is on disk, "
+            "because writing to a ledger that failed to load would risk "
+            "destroying the durable findings it still holds.",
+            "",
+            "Repair or move that file to let crosscheck run again.",
+            "",
+        ]
+    )
+
+
 def prepare_review_checkout(
     destination: Path, snapshot_value: dict[str, Any]
 ) -> str:
@@ -2498,7 +2567,16 @@ def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
     try:
         ledger = load_ledger(ledger_path, task_id, url)
     except CrosscheckError as exc:
-        tool_fail(f"finding-ledger preflight failed at {ledger_path}: {exc}")
+        reason = f"finding-ledger preflight failed at {ledger_path}: {exc}"
+        try:
+            atomic_write(
+                report_path,
+                render_unloadable_ledger_report(ledger_path, snapshot_value, reason),
+                mode=0o644,
+            )
+        except OSError:
+            pass
+        tool_fail(reason)
     config: dict[str, str] | None = None
 
     try:
