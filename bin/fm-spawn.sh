@@ -155,6 +155,17 @@
 #   identity is owned by the parent home that holds its task metadata, while the
 #   pane export happens on the remote host (bin/fm-remote-secondmate-control.sh).
 #   Local spawns never pass it and resolve their own carrier exactly as before.
+# Optional GitHub App worker identity (docs/configuration.md "GitHub App worker
+# identity"; bin/fm-github-app-token.sh): when config/github-app-id,
+# config/github-app-installation-id, and config/github-app-private-key-path are
+# all present for ship or scout spawns, this script preflights a mint and injects
+# GH_TOKEN / GITHUB_TOKEN by running a private TASK_TMP wrapper that calls the
+# mint helper - the token never appears in send-keys argv, never lands in the
+# worktree, and is never written to a tracked file. Absent or incomplete config
+# is inert: the pane environment matches today's spawn path exactly. Secondmate
+# spawns never take this path (supervisor identity stays the captain's). A home
+# that is configured but cannot mint fails closed rather than launching under an
+# ambiguous identity.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -2275,6 +2286,52 @@ fi
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+# Optional GitHub App worker identity. Same send channel as GOTMPDIR so every
+# backend and harness that already gets pane exports gets this too. Inert when
+# the mint helper reports "not configured" (exit 2). The token itself never
+# rides argv: a mode-0700 wrapper under TASK_TMP (outside the worktree) runs the
+# mint helper with this home's config resolution, and the pane only exports
+# GH_TOKEN="$(wrapper)". Follows the same out-of-argv discipline as the Grok
+# turn-end registry (private path + pointer, never the secret on the command).
+if [ "$KIND" != secondmate ]; then
+  GITHUB_APP_TOKEN_HELPER="$FM_ROOT/bin/fm-github-app-token.sh"
+  if [ -x "$GITHUB_APP_TOKEN_HELPER" ]; then
+    set +e
+    GITHUB_APP_PREFLIGHT_ERR=$("$GITHUB_APP_TOKEN_HELPER" 2>&1 >/dev/null)
+    GITHUB_APP_PREFLIGHT_RC=$?
+    set -e
+    if [ "$GITHUB_APP_PREFLIGHT_RC" -eq 0 ]; then
+      GITHUB_APP_TOKEN_CMD="$TASK_TMP/github-app-token-cmd"
+      old_umask=$(umask)
+      umask 077
+      {
+        printf '#!/usr/bin/env bash\n'
+        printf 'set -eu\n'
+        printf 'export FM_HOME=%s\n' "$(shell_quote "$FM_HOME")"
+        printf 'export FM_CONFIG_OVERRIDE=%s\n' "$(shell_quote "$CONFIG")"
+        printf 'export FM_ROOT_OVERRIDE=%s\n' "$(shell_quote "$FM_ROOT")"
+        # Preserve a test/operator API base override when spawn itself had one;
+        # never bake a token or key path into this wrapper.
+        if [ -n "${FM_GITHUB_APP_API_BASE:-}" ]; then
+          printf 'export FM_GITHUB_APP_API_BASE=%s\n' "$(shell_quote "$FM_GITHUB_APP_API_BASE")"
+        fi
+        printf 'exec %s "$@"\n' "$(shell_quote "$GITHUB_APP_TOKEN_HELPER")"
+      } > "$GITHUB_APP_TOKEN_CMD"
+      umask "$old_umask"
+      chmod 700 "$GITHUB_APP_TOKEN_CMD"
+      sq_github_app_cmd=$(shell_quote "$GITHUB_APP_TOKEN_CMD")
+      # Token lands only in the pane shell environment via command substitution;
+      # send-keys argv carries the wrapper path, never the token bytes.
+      spawn_send_text_line "$T" "export GH_TOKEN=\"\$($sq_github_app_cmd)\" GITHUB_TOKEN=\"\$GH_TOKEN\" FM_GITHUB_APP_TOKEN_HELPER=$sq_github_app_cmd"
+    elif [ "$GITHUB_APP_PREFLIGHT_RC" -ne 2 ]; then
+      if [ -n "$GITHUB_APP_PREFLIGHT_ERR" ]; then
+        printf '%s\n' "$GITHUB_APP_PREFLIGHT_ERR" >&2
+      fi
+      echo "error: GitHub App is configured but mint preflight failed; refusing to launch a worker under an ambiguous GitHub identity" >&2
+      exit 1
+    fi
+  fi
+fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
 # entirely when trace context is off.

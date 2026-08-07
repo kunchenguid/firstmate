@@ -126,6 +126,56 @@ A Secondmate on a remote route is covered the same way: the primary resolves and
 The presence flag is session-scoped enablement, so it transfers at launch and is left unchanged by live convergence into a running home.
 See [`trace-context.md`](trace-context.md) for carrier semantics, supported routes, the manual fleet-restart requirement, the session boundary, and safety limits; `bin/fm-trace-context-lib.sh`'s header owns the exact mechanics, and [`verification/trace-context.md`](verification/trace-context.md) records repeatable evidence.
 
+## GitHub App worker identity (config/github-app-*)
+
+Optional local, gitignored config that lets ship and scout workers push and open pull requests as a GitHub App installation bot instead of borrowing the captain's personal `gh` identity.
+This path is deliberately **inert** until the captain registers an App, installs it, and places the three files below: with any required item absent, `bin/fm-github-app-token.sh` exits as "not configured" and `bin/fm-spawn.sh` leaves the worker environment byte-identical to today's spawn path.
+Firstmate supervision, PR merge automation, and bootstrap `gh` checks keep using the captain's credentials; only worker panes take the App path when it is configured.
+
+| File | Contents |
+|---|---|
+| `config/github-app-id` | App id (digits only), first non-empty non-comment line |
+| `config/github-app-installation-id` | Installation id (digits only), first non-empty non-comment line |
+| `config/github-app-private-key-path` | Absolute path to the App private key PEM on this host (the file stores a path, never the key bytes) |
+
+The private key PEM itself stays outside every git repo (for example mode `600` under `~/.config/firstmate/` or a hardware-backed store).
+`bin/fm-github-app-token.sh` is the single owner of mint mechanics: it builds a short-lived App JWT with openssl RS256, posts it to the installation access-tokens endpoint with the JWT in a mode-0600 curl header file (never on argv), and prints only the installation access token on stdout.
+It never prints the private key, never logs a token, and never writes a token into a worktree or tracked file.
+Callers treat exit status `2` as "no App configured" (not an error), `0` as success, and `1` as a configured-but-failed mint.
+
+When all three config items are present, a ship or scout spawn preflights one mint and, on success, injects into the pane:
+
+- `GH_TOKEN` and `GITHUB_TOKEN` set by running a private mode-0700 wrapper under `/tmp/fm-<task-id>/` (outside the worktree) that invokes the mint helper with this home's config resolution
+- `FM_GITHUB_APP_TOKEN_HELPER` pointing at that same wrapper so a long task can remint without reinventing config paths
+
+The send-keys argv carries only the wrapper path, matching the out-of-argv discipline used for Grok turn-end registry tokens.
+Secondmate spawns never take this path.
+If the home is configured but preflight mint fails, spawn refuses rather than launching under an ambiguous identity.
+
+### Token expiry mid-task
+
+Installation access tokens last about one hour.
+There is no durable on-disk token cache; each helper invocation mints a fresh token, so repeated calls are safe and cheap relative to a long task.
+When a token expires mid-task, remint and re-export before the next `git push` or `gh` call:
+
+```bash
+export GH_TOKEN="$($FM_GITHUB_APP_TOKEN_HELPER)"
+export GITHUB_TOKEN="$GH_TOKEN"
+```
+
+On 401/403 that look like expiry, remint once and retry; if remint itself fails, stop and report blocked rather than falling back to the captain's keyring token.
+`gh` honors `GH_TOKEN` / `GITHUB_TOKEN` for API and, when its git credential helper is installed, for HTTPS git as well.
+
+### Captain setup checklist (not automated)
+
+1. Create a private GitHub App (org-owned is preferred for org lifecycle) with the minimum repository permissions workers need (Contents read/write, Pull requests read/write, Metadata read).
+2. Install it only on the repos agents should touch.
+3. Generate one private key PEM; store it outside every clone with mode `600`.
+4. Write the three `config/github-app-*` files in this home (and any secondmate home that should launch workers under the same App).
+5. Smoke from a shell: `bin/fm-github-app-token.sh` should print one token and exit 0; then confirm a throwaway `gh api user` / PR path attributes to the bot.
+
+Registering the App, installing it, and any workflow guard that keys on bot actor fields are captain decisions outside this inert helper path.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.
@@ -503,6 +553,7 @@ FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reads in fm-wake-lib.sh and fm-teardown.sh, mainly for tests
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
 FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context propagation"
+FM_GITHUB_APP_API_BASE=https://api.github.com   # optional origin override for bin/fm-github-app-token.sh (tests / local mocks); see "GitHub App worker identity"
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_BACKEND_HERDR_COMPOSER_LINES=20  # herdr-only: tail lines scanned by composer-state guard/fallback paths; idle-baseline submit confirmation uses agent-state
 FM_BACKEND_HERDR_IDLE_RE='^Type a message\.\.\.$'  # herdr-only: empty-composer placeholder regex after shared ghost extraction plus border and prompt stripping
