@@ -712,14 +712,18 @@ clear_actionable_run_state_surfaced() {  # <task>
 }
 
 surface_actionable_run_state_if_new() {  # <window> <task> <hash> <crew-state-line> [pause-throttle]
-  local win=$1 task=$2 h=$3 crew_state=$4 actionable_run_state actionable_run_state_marker key
+  local win=$1 task=$2 h=$3 crew_state=$4 actionable_run_state actionable_run_state_marker key reason
   actionable_run_state=$(crew_actionable_run_state_line_from_state_line "$crew_state" || true)
   [ -n "$actionable_run_state" ] || return 1
   actionable_run_state_marker=$(crew_actionable_run_state_marker_from_state_line "$crew_state" || true)
   [ -n "$actionable_run_state_marker" ] || return 1
   actionable_run_state_already_surfaced "$task" "$actionable_run_state_marker" && return 1
   key=$(printf '%s' "$win" | tr ':/.' '___')
-  fm_wake_append stale "$win" "stale: $win" || exit 1
+  reason="stale: $win"
+  if [ "${5:-}" = pause-throttle ] && afk_present; then
+    reason="stale: $win (validation run outcome: $actionable_run_state)"
+  fi
+  fm_wake_append stale "$win" "$reason" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
   mark_surfaced "$STATE/$task.status"
@@ -729,7 +733,7 @@ surface_actionable_run_state_if_new() {  # <window> <task> <hash> <crew-state-li
     date +%s > "$STATE/.paused-rechecked-$key"
     date +%s > "$STATE/.paused-resurfaced-$key"
   fi
-  wake "stale: $win"
+  wake "$reason"
 }
 
 surface_paused_actionable_run_state_if_new() {  # <window> <task> <hash>

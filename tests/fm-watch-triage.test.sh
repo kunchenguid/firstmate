@@ -1669,7 +1669,8 @@ test_afk_paused_status_wakes_once_for_actionable_run_outcomes() {
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
     pid=$!
     wait_for_exit "$pid" 40 || fail "$item AFK paused run outcome did not wake"
-    grep -Fx "stale: $window" "$out" >/dev/null || fail "$item AFK paused run outcome did not print a plain stale wake"
+    grep -F "stale: $window (validation run outcome:" "$out" >/dev/null \
+      || fail "$item AFK paused run outcome did not print a validation outcome wake"
     [ "$(cat "$marker_file" 2>/dev/null || true)" = "$marker" ] || fail "$item AFK paused run outcome marker was not recorded"
     FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after $item AFK paused run outcome failed"
     wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$drain_out")

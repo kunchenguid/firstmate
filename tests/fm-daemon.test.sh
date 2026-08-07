@@ -238,6 +238,28 @@ test_handle_wake_paused_records_pause_marker() {
   pass "handle_wake on a paused stale records a pause marker, drops the wedge marker, and does not escalate"
 }
 
+test_handle_wake_paused_validation_outcome_escalates() {
+  local dir state win key item outcome reason
+  for item in ready failed; do
+    dir=$(make_supercase "handle-paused-validation-outcome-$item")
+    state="$dir/state"
+    win="sess:fm-held-$item"
+    printf 'paused: awaiting the vendor validation slot\n' > "$state/held-$item.status"
+    key=$(printf '%s' "held-$item" | tr ':/.' '___')
+    case "$item" in
+      ready) outcome='state: done · source: run-step · checks green: PR ready for review · run-id=afk-ready run-head=aaa111' ;;
+      *)     outcome='state: failed · source: run-step · checks failed · run-id=afk-failed run-head=bbb222' ;;
+    esac
+    reason="stale: $win (validation run outcome: $outcome)"
+    FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+    [ -s "$state/.subsuper-escalations" ] || fail "$item validation outcome was self-handled as a pause"
+    grep -F "validation run outcome" "$state/.subsuper-escalations" >/dev/null \
+      || fail "$item validation outcome escalation omitted the run outcome"
+    [ ! -e "$state/.subsuper-paused-$key" ] || fail "$item validation outcome recorded a pause marker"
+  done
+  pass "paused stale validation run outcomes escalate instead of self-handling"
+}
+
 test_handle_wake_paused_signal_records_pause_marker() {
   local dir state key win
   dir=$(make_supercase handle-paused-signal)
@@ -1854,6 +1876,7 @@ test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_stale_terminal_escalates
 test_stale_paused_classifies_pause
 test_handle_wake_paused_records_pause_marker
+test_handle_wake_paused_validation_outcome_escalates
 test_handle_wake_paused_signal_records_pause_marker
 test_handle_wake_terminal_signal_clears_pause_tracking
 test_housekeeping_migrates_watcher_pause_marker
