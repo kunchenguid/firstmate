@@ -21,6 +21,21 @@ SH
   chmod +x "$fakebin/curl"
 }
 
+# Shadow the PATH-fallback candidate names ahead of the real /usr/bin:/bin used
+# below for genuine coreutils, so a runner with a real browser preinstalled (as
+# hosted CI images commonly are) cannot make this "missing browser" case
+# actually discover and launch one; this suite must never launch a real browser.
+make_fake_missing_browsers() {
+  local fakebin=$1 browser
+  for browser in google-chrome chromium chromium-browser; do
+    cat > "$fakebin/$browser" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+    chmod +x "$fakebin/$browser"
+  done
+}
+
 make_fake_browser() {
   local path=$1
   cat > "$path" <<'SH'
@@ -136,6 +151,7 @@ test_missing_binary_refuses_without_url() {
   dir="$TMP_ROOT/missing"
   fakebin=$(fm_fakebin "$dir")
   make_fake_curl "$fakebin"
+  make_fake_missing_browsers "$fakebin"
   if out=$(FM_BROWSER_RUNTIME_DIR="$dir/runtime" FM_BROWSER_PORT=19224 \
     FM_BROWSER_BIN="$dir/not-a-browser" HOME="$dir/home" \
     FM_TEST_BROWSER_MARKER="$dir/never" PATH="$fakebin:/usr/bin:/bin" \

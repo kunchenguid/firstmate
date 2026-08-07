@@ -79,6 +79,21 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse
+  # This file never wants a real browser touched (browser discovery itself is
+  # covered by tests/fm-browser.test.sh). Every run_spawn/run_spawn_tc call
+  # points FM_BROWSER_BIN at a path that does not exist so fm-browser.sh's PATH
+  # fallback is what is actually exercised; shadow the candidate names here,
+  # ahead of the real PATH, so a runner with a real browser preinstalled (as
+  # hosted CI images commonly are) cannot make that fallback launch a genuine
+  # browser and defeat the missing-browser simulation.
+  local browser
+  for browser in google-chrome chromium chromium-browser; do
+    cat > "$fakebin/$browser" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+    chmod +x "$fakebin/$browser"
+  done
   printf '%s\n' "$fakebin"
 }
 
