@@ -195,7 +195,7 @@ jq_with_json_inputs() {  # <count> <json>... [<jq-option>... <filter>]
       echo "fm-fleet-snapshot: internal JSON input is missing" >&2
       return 2
     fi
-    documents[$i]=$1
+    documents[i]=$1
     shift
     i=$((i + 1))
   done
@@ -559,6 +559,7 @@ task_json_lines() {
       home_json=$(jq -n '{path:null,present:false}')
     fi
 
+    # shellcheck disable=SC2016 # Dollar expressions belong to jq, not the shell.
     jq_with_json_inputs 7 \
       "$current_json" "$meta_json" "$status_json" "$report_json" \
       "$worktree_json" "$home_json" "$open_decisions_json" \
@@ -641,6 +642,7 @@ task_json_lines() {
 # Meta inventory remains the sole source of live workers; this object only
 # discloses backlog↔task inconsistency for renderers (Bearings omitted/gates).
 main_inventory_json() {  # <backlog-json> <tasks-json>
+  # shellcheck disable=SC2016 # Dollar expressions belong to jq, not the shell.
   jq_with_json_inputs 2 "$1" "$2" '
     (input | fromjson) as $backlog
     | (input | fromjson) as $tasks
@@ -669,6 +671,7 @@ main_inventory_json() {  # <backlog-json> <tasks-json>
 # This mode never reads parent events or terminal text and never aggregates
 # nested secondmates.
 secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
+  # shellcheck disable=SC2016 # Dollar expressions belong to jq, not the shell.
   jq_with_json_inputs 2 "$1" "$2" \
     --arg generated "$SNAPSHOT_NOW" \
     --arg home "$FM_HOME" \
@@ -1084,6 +1087,7 @@ terminal_evidence_json() {  # <parent-task-json> <event-note> <evidence-contradi
 }
 
 parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <decisions-json>
+  # shellcheck disable=SC2016 # Dollar expressions belong to jq, not the shell.
   jq_with_json_inputs 3 "$1" "$2" "$3" '
     (input | fromjson) as $summary
     | (input | fromjson) as $activities
@@ -1152,6 +1156,7 @@ secondmate_current_json() {  # <parent-tasks-json>
   local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
   local records='[]' seen_homes=''
   registry=$(registry_secondmates_json) || return 1
+  # shellcheck disable=SC2016 # Dollar expressions belong to jq, not the shell.
   union=$(jq_with_json_inputs 2 "$registry" "$tasks" '
     (input | fromjson) as $registry
     | (input | fromjson) as $tasks
@@ -1293,6 +1298,7 @@ secondmate_current_json() {  # <parent-tasks-json>
           '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:"no useful contradiction check",lines:0,bytes:0,event_note_seen:false,contradiction:false}')
       fi
       if printf '%s' "$terminal" | jq -e '.contradiction == true' >/dev/null; then contradiction=true; fi
+      # shellcheck disable=SC2016 # Dollar expressions belong to jq, not the shell.
       record=$(jq_with_json_inputs 6 \
         "$summary" "$decisions" "$activities" "$activity_scan" "$reconciliation" "$terminal" \
         --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg state "$state" --arg current_reason "$current_reason" --arg observed "$SNAPSHOT_NOW" \
@@ -1328,6 +1334,7 @@ secondmate_current_json() {  # <parent-tasks-json>
         terminal=$(jq -n --arg observed "$SNAPSHOT_NOW" \
           '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:"no parent event to compare",lines:0,bytes:0,event_note_seen:false,contradiction:false}')
       fi
+      # shellcheck disable=SC2016 # Dollar expressions belong to jq, not the shell.
       record=$(jq_with_json_inputs 4 "$activities" "$activity_scan" "$decisions" "$terminal" \
         --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg reason "$reason" --arg observed "$SNAPSHOT_NOW" \
         --arg provenance "$provenance" --arg freshness "$freshness" --arg event_raw "$event_raw" --arg event_note "$event_note" \
@@ -1344,6 +1351,7 @@ secondmate_current_json() {  # <parent-tasks-json>
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan},
          terminal_evidence:$terminal,contradiction:false}')
     fi
+    # shellcheck disable=SC2016 # Dollar expressions belong to jq, not the shell.
     records=$(jq_with_json_inputs 2 "$records" "$record" '
       (input | fromjson) as $records
       | (input | fromjson) as $record
@@ -1351,6 +1359,7 @@ secondmate_current_json() {  # <parent-tasks-json>
   done <<EOF
 $rows
 EOF
+  # shellcheck disable=SC2016 # Dollar expressions belong to jq, not the shell.
   jq_with_json_inputs 2 "$(printf '%s' "$union" | jq '.registry')" "$records" \
     --argjson total_registered "$total_registered" \
     --argjson total "$total" \
@@ -1362,6 +1371,7 @@ EOF
 }
 
 secondmate_landed_from_current_json() {  # <secondmate-current-json>
+  # shellcheck disable=SC2016 # Dollar expressions belong to jq, not the shell.
   jq_with_json_inputs 1 "$1" '
     (input | fromjson) as $current
     | {records:[ $current.records[]
@@ -1412,6 +1422,7 @@ SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_JSON") \
 SECONDMATE_LANDED_JSON=$(secondmate_landed_from_current_json "$SECONDMATE_CURRENT_JSON") \
   || { echo "fm-fleet-snapshot: secondmate landed projection failed" >&2; exit 1; }
 
+# shellcheck disable=SC2016 # Dollar expressions belong to jq, not the shell.
 jq_with_json_inputs 6 \
   "$BACKLOG_JSON" "$TASKS_JSON" "$MAIN_INVENTORY_JSON" \
   "$SCOUT_REPORTS_JSON" "$SECONDMATE_CURRENT_JSON" "$SECONDMATE_LANDED_JSON" \
