@@ -21,7 +21,9 @@
 # Detection layers: verified environment markers first, then process ancestry.
 # A single unambiguous marker wins immediately; when several markers conflict
 # (e.g. a shell profile exporting CLAUDECODE=1 inside a Pi session), no env
-# marker is trustworthy alone and the process-ancestry layer decides.
+# marker is trustworthy alone and the process-ancestry layer decides the
+# family; a pi verdict still honors the launch-boundary selector
+# FM_PI_HARNESS=pi-signed when Pi's own PI_CODING_AGENT marker is present.
 # Record each newly verified env marker here.
 set -u
 
@@ -29,6 +31,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+
+# Print the Pi-family identity for a pi ancestry verdict ($1 = pi_marker).
+# FM_PI_HARNESS=pi-signed is firstmate's own launch-boundary selector, set only
+# by fm-spawn and never by an ambient shell profile, so once ancestry confirms
+# the Pi family it stays authoritative - but only alongside PI_CODING_AGENT;
+# without Pi's family marker the selector is inert.
+emit_pi_family() {
+  if [ "$1" = 1 ] && [ "${FM_PI_HARNESS:-}" = pi-signed ]; then
+    echo pi-signed
+  else
+    echo pi
+  fi
+}
 
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
@@ -42,7 +57,8 @@ detect_own() {
   # exports CLAUDECODE=1 leaks it into a Pi session, which would misidentify the
   # session as claude. A marker is therefore trusted only when it is the sole one
   # present; when several conflict, no env marker is trustworthy alone and this
-  # layer falls through to the process-ancestry layer below to decide.
+  # layer falls through to the process-ancestry layer below to decide the
+  # family (see emit_pi_family for the Pi-family signed selection).
   local claude_marker=0 pi_marker=0 grok_marker=0 marker_count=0
   [ "${CLAUDECODE:-}" = "1" ] && { claude_marker=1; marker_count=$((marker_count + 1)); }
   [ "${PI_CODING_AGENT:-}" = "true" ] && { pi_marker=1; marker_count=$((marker_count + 1)); }
@@ -87,8 +103,8 @@ detect_own() {
       # prefix rather than any exact name. Deliberately anchored, never *muse*, so
       # unrelated commands (musescore, amuse) cannot be misread as this harness.
       muse|muse-bin-*) echo muse; return ;;
-      pi-signed) echo pi; return ;;
-      pi) echo pi; return ;;
+      pi-signed) emit_pi_family "$pi_marker"; return ;;
+      pi) emit_pi_family "$pi_marker"; return ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
         args=$(ps -o args= -p "$pid" 2>/dev/null)
@@ -97,7 +113,7 @@ detect_own() {
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;
           *grok*) echo grok; return ;;
-          *" pi "*|*/pi) echo pi; return ;;
+          *" pi "*|*/pi) emit_pi_family "$pi_marker"; return ;;
         esac ;;
     esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')

@@ -192,15 +192,20 @@ SH
   # Conflicting ambient markers: a shell profile exporting CLAUDECODE=1 leaks
   # into a real Pi session, so both markers are present at once. No env marker
   # is trustworthy alone then, so process ancestry (the faked ps tree above,
-  # a Pi.app ancestor) must decide the family. Any pairing of conflicting
-  # markers must behave the same way; ambient markers from the suite's own
-  # harness cannot change the verdict because every conflict falls to ancestry.
+  # a Pi.app ancestor) must decide the family. Within the Pi family,
+  # FM_PI_HARNESS=pi-signed (fm-spawn's launch-boundary selector, never an
+  # ambient shell export) still selects the signed identity once
+  # PI_CODING_AGENT confirms the family, and stays inert without it. The suite
+  # unset every ambient marker above, so these verdicts do not depend on the
+  # launching harness.
   got=$(PATH="$fakebin:$BASE_PATH" CLAUDECODE=1 PI_CODING_AGENT=true "$ROOT/bin/fm-harness.sh")
   [ "$got" = pi ] || fail "conflicting claude+pi markers resolved '$got', expected pi by ancestry"
   got=$(PATH="$fakebin:$BASE_PATH" CLAUDECODE=1 PI_CODING_AGENT=true FM_PI_HARNESS=pi-signed "$ROOT/bin/fm-harness.sh")
-  [ "$got" = pi ] || fail "conflicting markers with signed selection resolved '$got', expected pi by ancestry"
+  [ "$got" = pi-signed ] || fail "conflicting markers with signed selection resolved '$got', expected pi-signed"
   got=$(PATH="$fakebin:$BASE_PATH" CLAUDECODE=1 GROK_AGENT=1 "$ROOT/bin/fm-harness.sh")
   [ "$got" = pi ] || fail "conflicting claude+grok markers resolved '$got', expected pi by ancestry"
+  got=$(PATH="$fakebin:$BASE_PATH" CLAUDECODE=1 GROK_AGENT=1 FM_PI_HARNESS=pi-signed "$ROOT/bin/fm-harness.sh")
+  [ "$got" = pi ] || fail "signed selector without Pi family marker resolved '$got', expected pi"
   got=$(PATH="$fakebin:$BASE_PATH" PI_CODING_AGENT=true GROK_AGENT=1 "$ROOT/bin/fm-harness.sh")
   [ "$got" = pi ] || fail "conflicting pi+grok markers resolved '$got', expected pi by ancestry"
 
