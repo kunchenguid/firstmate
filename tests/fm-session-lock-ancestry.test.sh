@@ -177,6 +177,7 @@ SH
   local rejected=(
     'agent|/opt/agent --serve'
     'MainThread|/opt/agent/versions/current/agent --force'
+    'MainThread|/usr/bin/node /srv/cursor-agent/app.js'
     'MainThread|/usr/bin/node /srv/agent/app.js'
     'MainThread|MainThread'
   )
