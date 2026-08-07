@@ -68,9 +68,48 @@ if [ "$resolved" != "$REQUIRED_SHELLCHECK" ]; then
 fi
 
 if [ "$#" -gt 0 ]; then
-  exec shellcheck --norc "$@"
+  exec shellcheck --norc -x "$@"
 fi
 
 # Canonical file set: the ONE authoritative definition. Callers reference this
 # script; they never re-spell these globs.
-exec shellcheck --norc bin/*.sh bin/backends/*.sh tests/*.sh
+files=(bin/*.sh bin/backends/*.sh tests/*.sh)
+
+# Lint in batches rather than one invocation over the whole set. ShellCheck holds
+# every input's AST for the life of the run, so a single invocation grew with the
+# repo until its resident set was measured in gigabytes; two lanes linting at once
+# then thrash against each other. Batching bounds peak memory to one batch.
+#
+# -x is required for batching, not a relaxation: 82 of these scripts source a
+# sibling, and ShellCheck resolves a sourced file either from the input list or,
+# with -x, from disk. Without it a sourced file landing in another batch would
+# raise SC1091 that the single invocation never saw, so -x is what keeps a batched
+# run reporting the same findings as an unbatched one. It applies to the explicit
+# -path form above for the same reason: one rule set, no drift between callers.
+#
+# Progress goes to stderr before each batch because this script otherwise prints
+# nothing between its version banner and its exit. Supervisors that read silence
+# as a wedged process have repeatedly misjudged this step; now the quiet gap is
+# one batch rather than the whole run.
+BATCH=25
+total=${#files[@]}
+batches=$(( (total + BATCH - 1) / BATCH ))
+status=0
+index=0
+number=0
+while [ "$index" -lt "$total" ]; do
+  number=$((number + 1))
+  chunk=("${files[@]:index:BATCH}")
+  printf 'fm-lint.sh: batch %d/%d (%d scripts)\n' \
+    "$number" "$batches" "${#chunk[@]}" >&2
+  rc=0
+  shellcheck --norc -x "${chunk[@]}" || rc=$?
+  # Every batch runs even after a failure, so one run reports every finding
+  # exactly as the single invocation did. The worst status wins.
+  if [ "$rc" -gt "$status" ]; then
+    status=$rc
+  fi
+  index=$((index + BATCH))
+done
+printf 'fm-lint.sh: linted %d scripts in %d batches\n' "$total" "$batches" >&2
+exit "$status"
