@@ -369,7 +369,7 @@ test_writes_nothing() {
 # the header's "no lock file, no state" claim, and two concurrent checks could
 # then see each other's transient lock and report a git operation in progress.
 test_git_dir_untouched() {
-  local d before after out rc i
+  local d before after out i
   d=$(make_repo git-dir-untouched)
   mkdir -p "$d/sub"
   printf 'a\n' >"$d/sub/a.txt"
