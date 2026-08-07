@@ -277,6 +277,8 @@ An unregistered project or absent registry resolves to `no-mistakes` with yolo o
 Record the resulting mode, yolo, and the one-line reason for any deviation in the backlog item note.
 
 Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, and dispatch isolated work immediately with no concurrency cap when each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts.
+For Decision OS implementation work, automatically refill ready P0/P1 work to this fleet's safe concurrency ceiling whenever quota headroom, green main, disjoint write sets, and a clear serialization lane permit; an operator request is never a prerequisite, but none of these conditions may be relaxed merely to raise utilization.
+Record one durable operator-visible reason whenever capacity is added or deliberately held back; silent slow mode is invalid, and unused safe capacity while ready P0/P1 beads exist is a reportable operational defect.
 Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
 Write the task-specific brief under section 11 before spawning.
 

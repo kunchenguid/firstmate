@@ -14,15 +14,20 @@ set -u
 FM_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 TASKS_DIR="/tmp/pi-subagents-1000/home-holu-fmate-firstmate/019fb7d2-b01e-71d5-845d-3d2fd223d0cf/tasks"
 MANIFEST="$FM_HOME/state/fleet-manifest.jsonl"
+PROJECT="${FM_REFILL_PROJECT:-/home/holu/decision-os}"
+SERIALIZATION_DEBT_PROBE="${FM_SERIALIZATION_DEBT_PROBE:-$FM_HOME/bin/fm-serialization-debt.sh}"
 ACTIVE_WINDOW_MIN=5
 QUEUE_WINDOW_MIN=60
 MIN_BATTERY=6
 MIN_OPEN=3
 
+serialization_debt=0
+"$SERIALIZATION_DEBT_PROBE" --project "$PROJECT" || serialization_debt=1
+
 now="$(date +%s)"
 active=0
 battery=0
-for id in $(cut -d' ' -f1 "$MANIFEST" 2>/dev/null); do
+while IFS= read -r id; do
   f="$TASKS_DIR/${id}.output"
   [ -f "$f" ] || continue
   m="$(stat -c %Y "$f" 2>/dev/null || echo 0)"
@@ -35,11 +40,11 @@ for id in $(cut -d' ' -f1 "$MANIFEST" 2>/dev/null); do
      { [ "$sz" -lt 3000 ] && [ "$age" -le "$QUEUE_WINDOW_MIN" ]; }; then
     battery=$((battery + 1))
   fi
-done
+done < <(cut -d' ' -f1 "$MANIFEST" 2>/dev/null)
 
 echo "fleet-refill: active=$active battery=$battery (min_battery=$MIN_BATTERY min_open=$MIN_OPEN)"
 
-open_count="$(cd /home/holu/decision-os && br list --status open --json 2>/dev/null \
+open_count="$(cd "$PROJECT" && br list --status open --json 2>/dev/null \
   | python3 -c 'import json,sys
 try:
     print(json.load(sys.stdin).get("total", 0))
@@ -50,6 +55,8 @@ if [ "$battery" -lt "$MIN_BATTERY" ] && [ "$open_count" -ge "$MIN_OPEN" ]; then
   echo "DISPATCH-NEEDED: battery $battery < $MIN_BATTERY with $open_count open beads."
   echo "Dispatch the next wave now (see NEXT-WAVE list, verify each id with br show,"
   echo "then launch the Agent calls). Do NOT process reviews/folds/landings first."
+  exit 1
+elif [ "$serialization_debt" -ne 0 ]; then
   exit 1
 else
   echo "fleet-ok: battery $battery >= $MIN_BATTERY or open=$open_count < $MIN_OPEN."

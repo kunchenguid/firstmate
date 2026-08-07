@@ -386,6 +386,19 @@ test_bead_pr_title_rule_is_conditional_for_ship_briefs() {
   pass "fm-brief.sh: ship briefs condition PR-title bead IDs on bead-backed projects"
 }
 
+test_ship_status_contributes_refill_evidence() {
+  local home id brief
+  home="$TMP_ROOT/refill-evidence-home"
+  mkdir -p "$home/data"
+  id="brief-refill-evidence-c3"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "ship brief was not scaffolded"
+  assert_grep "name the remaining completion work, intended write set, and any serialization dependency or say each is clear" "$brief" \
+    "ship brief did not collect proactive refill evidence through status"
+  pass "fm-brief.sh: ship status contributes completion, write-set, and serialization evidence to proactive refill"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -736,6 +749,7 @@ test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
 test_bead_pr_title_rule_is_conditional_for_ship_briefs
+test_ship_status_contributes_refill_evidence
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

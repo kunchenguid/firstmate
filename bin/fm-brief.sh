@@ -453,6 +453,7 @@ $RULE1
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 8. For a bead-backed project, include this task's bead ID in the PR title.
    If the project is not bead-backed, do not introduce a \`br\` workflow.
+9. In every phase-change or terminal status, name the remaining completion work, intended write set, and any serialization dependency or say each is clear, so firstmate can proactively refill safe capacity.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
