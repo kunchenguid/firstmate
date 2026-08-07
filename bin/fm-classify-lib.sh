@@ -21,11 +21,11 @@
 # and first sighting of a stale hash, never on every wake, so the per-wake triage
 # stays cheap. status_open_decisions_incremental (see "incremental (cursor-backed)
 # open-decisions fold" below) also writes: it persists a per-status-file byte
-# cursor and folded open-set as a side effect, so a per-drain fleet-wide scan
-# stays bounded by new appends instead of re-reading each task's whole lifetime
-# log every time. Third, the decision fold appends to an anomaly sink when a
-# caller wires one (see "status-line anomalies" below); with no sink it stays a
-# pure transform.
+# cursor with folded open-decision and work-phase sets as a side effect, so a
+# per-drain fleet-wide scan normally stays bounded by new appends instead of
+# re-reading each task's whole lifetime log every time. Third, the decision fold
+# appends to an anomaly sink when a caller wires one (see "status-line anomalies"
+# below); with no sink it stays a pure transform.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -171,7 +171,7 @@ status_is_paused_or_captain_held() {  # <status-line>
 
 # --- status line grammar ----------------------------------------------------
 #
-# Every status line is one event in the append-only log, shaped
+# The accepted grammar for one event in the append-only status log is
 #
 #   <verb>[ <token>]*: <note>
 #
@@ -190,8 +190,9 @@ status_is_paused_or_captain_held() {  # <status-line>
 # set keeps crying wolf, and the one genuinely open decision stops being read.
 #
 # _fm_status_parse therefore classifies each line into exactly one class and
-# never guesses. status_line_verb, status_line_note, _fm_decision_key and the
-# decision fold all read its result instead of re-deriving the shape:
+# never guesses. status_line_verb, status_line_note, _fm_decision_key, and the
+# decision and activity folds all read its result instead of re-deriving the
+# shape:
 #
 #   strict        - the prefix is a verb plus structured tokens only. Verb and
 #                   key are read from it. An unknown verb still parses strictly:
@@ -368,13 +369,13 @@ status_line_verb() {  # <status-line> -> leading verb word
   esac
 }
 status_line_note() {  # <status-line> -> text after the first colon, trimmed
-  # A honored misplaced key token is dropped from the note: leaving it in would
+  # An honored misplaced key token is dropped from the note: leaving it in would
   # print the key twice on a surface that already names it, which is what made
   # a mismatched key look like a match.
   _fm_status_parse "$1"
   printf '%s' "$_FM_STATUS_NOTE"
 }
-_fm_decision_key() {  # <status-line> -> key slug; nonzero when out of grammar
+_fm_decision_key() {  # <status-line> -> key slug; nonzero for malformed lifecycle lines
   _fm_status_parse "$1"
   [ "$_FM_STATUS_CLASS" != malformed ] || return 1
   printf '%s' "$_FM_STATUS_KEY"
@@ -416,8 +417,8 @@ EOF
 # after the second lost decision. Through the incremental fold each appended
 # line is read exactly once, so each anomaly reports once rather than on every
 # drain; the exceptions are the same ones that force a full re-fold there (no
-# cursor yet, or a truncated/replaced status file), which re-report that file's
-# history once under the drain's own byte cap.
+# current-schema cursor yet, or a truncated/replaced status file), which
+# re-report that file's history once under the drain's own byte cap.
 # The task and key fields default to "-" rather than staying empty: tab is an
 # IFS whitespace character, so a consumer splitting on tab would collapse an
 # empty field and shift the status line into the wrong column.

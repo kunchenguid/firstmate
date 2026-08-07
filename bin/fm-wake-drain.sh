@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Present durable watcher wake records, optionally acknowledge handled records,
-# annotate validated signal status keys, then assert liveness.
+# emit bounded validated status-event annotations, open decisions, and
+# status-line anomalies, then assert liveness.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -112,11 +113,12 @@ print_capped_section() {  # <header> <omitted-label> <item-bytes> <global-bytes>
 # latest-line annotations above, so a decision buried under later unrelated
 # appends cannot be silently missed. Runs on every drain - including the
 # empty-queue fast path - because the decision can still be open even when
-# nothing new is queued for its task this turn. The incremental wrapper bounds
-# this scan's cost to bytes appended to each task's status log since the LAST
-# drain, not that log's whole lifetime, while still never dropping an old buried
-# decision (see fm-classify-lib.sh's "incremental (cursor-backed) open-decisions
-# fold"). The same single pass fills <anomaly-sink> for the section below.
+# nothing new is queued for its task this turn. With a valid cursor, the
+# incremental wrapper bounds this scan's cost to bytes appended to each task's
+# status log since the LAST drain, not that log's whole lifetime, while still
+# never dropping an old buried decision (see fm-classify-lib.sh's "incremental
+# (cursor-backed) open-decisions fold"). The same single pass fills
+# <anomaly-sink> for the section below.
 print_open_decision_rows() {  # <anomaly-sink>
   local open task key verb note line
 
@@ -138,8 +140,9 @@ EOF
 # wrote it while the open set keeps crying wolf, and a close for a key nothing
 # opened is the only trace that the OPENING line was filed under another key.
 # Reporting them here makes the bad writer visible on the next wake instead of
-# after the next lost decision. Because the incremental fold reads each appended
-# line exactly once, each anomaly is reported once, not on every drain.
+# after the next lost decision. With a valid cursor, each newly appended anomaly
+# is reported once rather than on every drain; the classifier header owns the
+# full-refold exceptions.
 print_anomaly_rows() {  # <anomaly-sink>
   local sink=$1 task kind key line
 
