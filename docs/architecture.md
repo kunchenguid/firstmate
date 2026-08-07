@@ -43,6 +43,30 @@ For whole-fleet read-only review, `bin/fm-fleet-snapshot.sh --json` emits schema
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
 The script header owns the exact JSON schema.
 
+### Wake-outcome ledger
+
+`data/wake-ledger.tsv` is the durable record of what supervision actually costs, so coordinator attention is measured rather than estimated.
+`bin/fm-wake-ledger.sh` is its single owner: record format, the closed outcome vocabulary, and append semantics all live in that script's header and `--help`.
+It carries three record kinds - one `wake` record per drained wake, one `outcome` record per handled wake joined to it on the (seq, queued) pair, and terminal `task` records naming how each task ended.
+It lives under `data/` rather than `state/` because teardown clears `state/<id>.*` and this evidence must outlive the tasks it describes.
+
+A terminal outcome is derived from what the task itself declared, and every terminal record names the evidence behind it, so an outcome nothing corroborated cannot pass as an observed one.
+Teardown is not the only producer, because a task that fails and is never released would otherwise leave the ledger silent, and silence there is indistinguishable from a task that never failed.
+Terminal counts remain diagnostic rather than a success rate while this ledger counts released tasks and the no-mistakes pipeline counts validation runs; that divergence is an unreconciled gap the report names on every run.
+
+The wake half is written deterministically by `bin/fm-wake-drain.sh` and the outcome half by the first mate.
+That split is the point rather than an accident: a single coordinator-written line would make measured attention cost fall whenever the recording step was skipped, so the metric would move without the underlying quantity moving.
+Splitting it gives a denominator that is stable under no change and turns missing coverage into a reported number instead of a silent undercount.
+
+The coordinator names only what a wake cost, never which wake it was.
+The sequence was once supplied by hand and validated only as an integer, so a coordinator recording after the fact could pass a remembered or placeholder number; the resulting record stored an unresolvable join, which is indistinguishable from the legitimate record a wiped `state/` produces, and by 2026-08-04 that had fabricated 200 of 249 outcome records.
+The identifier is therefore resolved from the ledger rather than named, an explicitly passed sequence that joins no wake record is refused instead of stored, and session-start bootstrap reports how many outcome records join nothing, so the same corruption cannot recur silently or survive unmeasured.
+
+The ledger can never block, delay, alter, or fail a wake.
+The drain calls it only after its authoritative print-and-delete boundary, with stdout discarded and failure ignored, and the ledger itself takes no lock and writes one capped line per record.
+`bin/fm-teardown.sh` writes the terminal record immediately before deleting the task metadata, which is the last moment that task's harness, model, and effort are recoverable.
+Watcher-absorbed wakes stay out of the ledger by design: they never reach the coordinator, so they are not part of the quantity being measured, and `state/.watch-triage.log` remains their disposable debug record.
+
 ### Registered secondmate current state
 
 A registered secondmate's validated home is the authority for bearings current state because it owns the child metadata inventory, each child's current-state result, endpoint observations, backlog holds and dependencies, keyed unresolved decisions, and recent Done baseline.

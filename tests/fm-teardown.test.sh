@@ -545,6 +545,7 @@ run_teardown() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
 }
@@ -2002,6 +2003,164 @@ test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
   pass "herdr projection teardown surfaces failed focus restoration without turning confirmed cleanup into a hard failure"
 }
 
+write_profiled_meta() {  # <case_dir> <mode>
+  local case_dir=$1 mode=$2
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=$mode" \
+    "harness=pi" \
+    "model=openai-codex/gpt-5.6-sol" \
+    "effort=medium"
+}
+
+test_teardown_records_the_terminal_ledger_line() {
+  local case_dir ledger
+  case_dir=$(make_case ledger-terminal)
+  write_profiled_meta "$case_dir" local-only
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "ledger-terminal: teardown should succeed"
+
+  ledger="$case_dir/data/wake-ledger.tsv"
+  [ -f "$ledger" ] || fail "ledger-terminal: teardown wrote no terminal record"
+  grep -q "task=task-x1" "$ledger" || fail "ledger-terminal: task id missing"
+  grep -q "outcome=landed" "$ledger" || fail "ledger-terminal: terminal outcome missing"
+  # The model join must be captured BEFORE the meta is deleted; this is the last
+  # moment those facts exist anywhere.
+  grep -q "harness=pi" "$ledger" || fail "ledger-terminal: harness not captured from the meta"
+  grep -q "model=openai-codex/gpt-5.6-sol" "$ledger" || fail "ledger-terminal: model not captured"
+  grep -q "effort=medium" "$ledger" || fail "ledger-terminal: effort not captured"
+  grep -q "mode=local-only" "$ledger" || fail "ledger-terminal: delivery mode not captured"
+  [ ! -f "$case_dir/state/task-x1.meta" ] || fail "ledger-terminal: meta should be gone after teardown"
+  pass "teardown records the terminal ledger line with the meta's profile before deleting it"
+}
+
+test_teardown_force_records_abandoned() {
+  local case_dir
+  case_dir=$(make_case ledger-abandoned)
+  write_profiled_meta "$case_dir" local-only
+  wt_commit "$case_dir" "unpushed work"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "ledger-abandoned: --force teardown should succeed"
+
+  grep -q "outcome=abandoned" "$case_dir/data/wake-ledger.tsv" \
+    || fail "ledger-abandoned: discarded work should record an abandoned outcome"
+  pass "a --force teardown records the task as abandoned rather than landed"
+}
+
+test_teardown_records_a_declared_failure_as_failed() {
+  local case_dir ledger
+  case_dir=$(make_case ledger-failed)
+  write_profiled_meta "$case_dir" local-only
+  # The task said it failed. Its work still landed on a remote, so this is an
+  # ordinary release, not a --force discard: without the derivation the record
+  # would read landed and be indistinguishable from a success.
+  printf 'working: started\nfailed: the approach does not work\n' \
+    > "$case_dir/state/task-x1.status"
+  wt_commit "$case_dir" "abandoned approach"
+  add_fork_with_pushed_branch "$case_dir"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "ledger-failed: teardown should succeed"
+
+  ledger="$case_dir/data/wake-ledger.tsv"
+  grep -q "outcome=failed" "$ledger" \
+    || fail "ledger-failed: a declared failure recorded no failed outcome:"$'\n'"$(cat "$ledger")"
+  grep -q "outcome_source=declared" "$ledger" \
+    || fail "ledger-failed: the outcome did not record the task's own declaration as its evidence"
+  if grep -q "outcome=landed" "$ledger"; then
+    fail "ledger-failed: a failed task must not also record landed"
+  fi
+  pass "a task that declares failure and is torn down records failed, not landed"
+}
+
+test_teardown_marks_an_uncorroborated_outcome_as_assumed() {
+  local case_dir ledger
+  case_dir=$(make_case ledger-assumed)
+  write_profiled_meta "$case_dir" local-only
+  # No terminal declaration anywhere in the log. landed is still recorded - it
+  # is the only thing teardown can say - but it must be marked as the
+  # unevidenced constant it is, or it counts as a success nobody observed.
+  printf 'working: still going\n' > "$case_dir/state/task-x1.status"
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "ledger-assumed: teardown should succeed"
+
+  ledger="$case_dir/data/wake-ledger.tsv"
+  grep -q "outcome=landed" "$ledger" || fail "ledger-assumed: expected the landed default"
+  grep -q "outcome_source=assumed" "$ledger" \
+    || fail "ledger-assumed: an uncorroborated landed outcome must be marked assumed"
+  pass "a landed outcome no declaration corroborates records as assumed"
+}
+
+test_teardown_supersedes_and_clears_a_sweep_receipt() {
+  local case_dir ledger terminal_lines
+  case_dir=$(make_case ledger-supersede)
+  write_profiled_meta "$case_dir" local-only
+  printf 'failed: the approach does not work\n' > "$case_dir/state/task-x1.status"
+  wt_commit "$case_dir" "abandoned approach"
+  add_fork_with_pushed_branch "$case_dir"
+
+  # The sweep records the declared failure first, while the task still holds
+  # state; teardown then releases the same task.
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" \
+    "$ROOT/bin/fm-wake-ledger.sh" sweep >/dev/null \
+    || fail "ledger-supersede: sweep should succeed"
+  [ -f "$case_dir/state/task-x1.terminal-recorded" ] \
+    || fail "ledger-supersede: sweep left no receipt"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "ledger-supersede: teardown should succeed"
+
+  ledger="$case_dir/data/wake-ledger.tsv"
+  terminal_lines=$(grep -c 'task=task-x1' "$ledger" || true)
+  [ "$terminal_lines" -eq 2 ] \
+    || fail "ledger-supersede: expected the sweep record and teardown's release record, got $terminal_lines"
+  grep -q "outcome_source=unreleased" "$ledger" \
+    || fail "ledger-supersede: the sweep's record is missing"
+  # The last word is teardown's, and it is what a reader resolves.
+  [ "$(grep 'task=task-x1' "$ledger" | tail -1 | grep -c 'outcome_source=declared')" -eq 1 ] \
+    || fail "ledger-supersede: teardown's release record did not supersede the sweep's"
+  [ ! -e "$case_dir/state/task-x1.terminal-recorded" ] \
+    || fail "ledger-supersede: the receipt outlived the task's state"
+  pass "teardown supersedes a sweep record and clears its receipt with the rest of the state"
+}
+
+test_unwritable_ledger_never_fails_teardown() {
+  local case_dir rc
+  case_dir=$(make_case ledger-unwritable)
+  write_profiled_meta "$case_dir" local-only
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+
+  set +e
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_WAKE_LEDGER="/dev/null/impossible/wake-ledger.tsv" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$TEARDOWN" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "ledger-unwritable: a telemetry write must never fail a teardown"
+  [ ! -f "$case_dir/state/task-x1.meta" ] || fail "ledger-unwritable: cleanup did not complete"
+  grep -q "wake ledger terminal line not recorded" "$case_dir/stderr" \
+    || fail "ledger-unwritable: teardown should warn that the record was lost"
+  pass "an unwritable ledger warns but never fails or halts a teardown"
+}
+
 # --- Fix 1: conclude/abort the task's own parked no-mistakes run before the
 # worker is removed, and Fix 2: reap leaked descendant processes rooted under
 # the task's own worktree/tasktmp - both exercised through the real teardown
@@ -2632,6 +2791,12 @@ test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
 test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
+test_teardown_records_the_terminal_ledger_line
+test_teardown_records_a_declared_failure_as_failed
+test_teardown_marks_an_uncorroborated_outcome_as_assumed
+test_teardown_supersedes_and_clears_a_sweep_receipt
+test_teardown_force_records_abandoned
+test_unwritable_ledger_never_fails_teardown
 test_parked_own_run_is_aborted_before_teardown
 test_parked_own_run_refuses_when_abort_is_unconfirmed
 test_mismatched_run_after_abort_refuses_unconfirmed
