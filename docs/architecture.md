@@ -195,7 +195,6 @@ Explicit backend-target sends and direct human typing stay unmarked, so captain 
 After seeding a secondmate, `fm-backlog-handoff.sh` validates the fleet-specific handoff, then atomically delegates already-judged in-scope queued item moves to `tasks-axi mv` so the domain queue starts in the right place.
 Remote routes move that dependency-closed set into a non-dispatchable backlog-format outbox before transfer, then use an idempotent remote receive under the destination backlog's own lock.
 The outbox is the complete retry record, so no two-phase journal or transport-level retry is needed.
-Remote replies travel in the other direction through a non-destructive cursor-anchored log reader and the existing process-event runner, with deduplicated correlated append into the primary status channel.
 An unreachable remote host is unknown rather than dead, preserves its route and durable work, and is never failed over or relaunched locally.
 Idle secondmate panes are healthy; teardown is explicit and refuses while the secondmate home has in-flight work unless the captain has approved discard with `--force`.
 
