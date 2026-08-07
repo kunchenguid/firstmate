@@ -44,6 +44,26 @@ usage() {
   sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//'
 }
 
+ensure_runtime_dir() {
+  local owner mode permissions current_uid
+  current_uid=${UID:-$(id -u)}
+  if [ ! -e "$RUNTIME_DIR" ] && [ ! -L "$RUNTIME_DIR" ]; then
+    mkdir -p -m 700 "$RUNTIME_DIR"
+  fi
+  if [ ! -d "$RUNTIME_DIR" ] || [ -L "$RUNTIME_DIR" ]; then
+    printf 'fm-browser: runtime path is not a real directory: %s\n' "$RUNTIME_DIR" >&2
+    return 1
+  fi
+  owner=$(stat -c '%u' "$RUNTIME_DIR" 2>/dev/null || stat -f '%u' "$RUNTIME_DIR" 2>/dev/null) || return 1
+  mode=$(stat -c '%a' "$RUNTIME_DIR" 2>/dev/null || stat -f '%Lp' "$RUNTIME_DIR" 2>/dev/null) || return 1
+  permissions=$((8#$mode))
+  if [ "$owner" != "$current_uid" ] || (( permissions & 0022 )); then
+    printf 'fm-browser: runtime directory must be owned by uid %s and not group/other-writable: %s\n' \
+      "$current_uid" "$RUNTIME_DIR" >&2
+    return 1
+  fi
+}
+
 release_lock() {
   [ -z "$OWNER_FILE" ] || rm -f "$OWNER_FILE"
   [ "$LOCK_HELD" -eq 1 ] || return 0
@@ -56,7 +76,7 @@ release_lock() {
 
 acquire_lock() {
   local attempt=0 owner
-  mkdir -p "$RUNTIME_DIR"
+  ensure_runtime_dir || return 1
   OWNER_FILE="$RUNTIME_DIR/lock-owner.$$"
   printf '%s\n' "$$" > "$OWNER_FILE"
   trap release_lock EXIT INT TERM
@@ -252,6 +272,7 @@ url() {
 
 status() {
   local owner=none
+  ensure_runtime_dir || return 1
   if probe; then
     if owned_pid >/dev/null; then
       owner=helper
