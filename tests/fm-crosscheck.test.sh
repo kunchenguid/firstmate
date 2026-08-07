@@ -115,6 +115,19 @@ for argument in "$@"; do
   esac
 done
 [ "${#targets[@]}" -gt 0 ] || exit 4
+# pytest's locate_config walks every parent to the filesystem root and stops at
+# the first config it finds, whose addopts then join the command line.
+config_addopts=""
+config_dir=$PWD
+while :; do
+  if [ -f "$config_dir/pytest.ini" ]; then
+    echo "configfile: $config_dir/pytest.ini"
+    config_addopts=$(sed -n 's/^addopts *= *//p' "$config_dir/pytest.ini")
+    break
+  fi
+  [ "$config_dir" = / ] && break
+  config_dir=$(dirname "$config_dir")
+done
 for selector in "${targets[@]}"; do
   file=${selector%%::*}
   [ -f "$file" ] || { echo "ERROR: file or directory not found: $file"; exit 4; }
@@ -139,8 +152,9 @@ if [ -f "$collection_exit" ] && grep -qx broken app.txt; then
   # Measured on pytest 9.1.1: --continue-on-collection-errors records the
   # collection error and reports it as an ordinary failure instead, which
   # carries no classification and so reads as a caught regression. pytest
-  # appends PYTEST_ADDOPTS to the command line, so it lands here too.
-  for argument in "$@" ${PYTEST_ADDOPTS:-}; do
+  # appends PYTEST_ADDOPTS and the located config's addopts to the command
+  # line, so both land here too.
+  for argument in "$@" ${PYTEST_ADDOPTS:-} $config_addopts; do
     [ "$argument" = --continue-on-collection-errors ] || continue
     echo "ERROR collecting"
     exit 1
@@ -1474,6 +1488,67 @@ assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecy
   pass "a mutated run that never executed the test cannot clear a finding"
 }
 
+# The same bypass again through a third channel needing no reviewer: pytest
+# walks every parent to the filesystem root for a config, so an operator
+# pytest.ini above the gate's temporary root sets addopts for every proof on
+# the machine. The gate ends that walk with a neutral file in the root it owns.
+# The second half asserts the deliberately accepted surface is still intact:
+# the reviewed repository's own config sits closer to the named test and must
+# still win, which is proved here rather than assumed.
+test_ancestor_runner_config_cannot_rewrite_the_non_execution_signal() {
+  local record case_dir base head rc
+  record=$(make_case ancestor-runner-config)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  printf '2\n' > "$case_dir/pathbin/collection-exit"
+  # Above the gate's temporary root, which it creates inside the state dir.
+  printf '[pytest]\naddopts = --continue-on-collection-errors\n' \
+    > "$case_dir/state/pytest.ini"
+  set +e
+  run_case "$case_dir" "$base" "$head" verified-fixed run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "operator runner config above the proof checkout"
+  assert_grep 'never ran its named test' "$case_dir/err" \
+    "an ancestor runner config still rewrote the classified exit semantics"
+  python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1]))
+assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+' "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    || fail "an ancestor runner config cleared a finding"
+
+  record=$(make_case repository-runner-config)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  printf '[pytest]\n' > "$case_dir/repo/pytest.ini"
+  git -C "$case_dir/repo" add pytest.ini
+  git -C "$case_dir/repo" commit -qm "repository runner config"
+  head=$(git -C "$case_dir/repo" rev-parse HEAD)
+  git -C "$case_dir/repo" update-ref refs/pull/72/head "$head"
+  seed_open_ledger "$case_dir" "$head"
+  printf '[pytest]\naddopts = --continue-on-collection-errors\n' \
+    > "$case_dir/state/pytest.ini"
+  run_case "$case_dir" "$base" "$head" verified-fixed run \
+    > "$case_dir/out" 2> "$case_dir/err" \
+    || fail "the repository's own runner config broke a sound proof: $(cat "$case_dir/err")"
+  python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1]))
+proof = value["findings"][0]["history"][-1]["proof"]
+assert value["findings"][0]["lifecycle"] == "verified-fixed"
+configs = [
+    line.split(": ", 1)[1]
+    for line in proof["baseline_output"].splitlines()
+    if line.startswith("configfile: ")
+]
+assert configs, proof["baseline_output"]
+assert "/proof-" in configs[0], configs
+' "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    || fail "the repository's own runner config did not take precedence"
+  pass "runner config above the gate's checkouts is inert; the repository's own still wins"
+}
+
 # The same bypass the argument rule closed, reached without any reviewer: pytest
 # appends PYTEST_ADDOPTS to its command line, so an operator with
 # --continue-on-collection-errors exported turns every mutation that broke
@@ -2675,6 +2750,7 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_unmatched_selector_is_never_a_failing_test|\
     test_mutated_non_execution_cannot_clear_a_finding|\
     test_ambient_addopts_cannot_rewrite_the_non_execution_signal|\
+    test_ancestor_runner_config_cannot_rewrite_the_non_execution_signal|\
     test_incomplete_proof_environment_fails_loudly|\
     test_symlinked_directory_named_test_is_rejected|\
     test_symlinked_home_ancestor_still_clears|\
@@ -2728,6 +2804,7 @@ test_flag_argument_cannot_rewrite_the_non_execution_signal
 test_unmatched_selector_is_never_a_failing_test
 test_mutated_non_execution_cannot_clear_a_finding
 test_ambient_addopts_cannot_rewrite_the_non_execution_signal
+test_ancestor_runner_config_cannot_rewrite_the_non_execution_signal
 test_incomplete_proof_environment_fails_loudly
 test_symlinked_directory_named_test_is_rejected
 test_symlinked_home_ancestor_still_clears

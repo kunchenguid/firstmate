@@ -504,6 +504,32 @@ def proof_environment() -> dict[str, str]:
     }
 
 
+def write_neutral_runner_config(root: Path) -> None:
+    """End the runner's upward config search inside a directory the gate owns.
+
+    pytest's locate_config walks every parent of its target to the filesystem
+    root looking for pytest.ini, tox.ini, setup.cfg or pyproject.toml, and
+    stops at the first one it finds. Operator machine state above this root
+    could therefore set options for every proof run: measured on pytest 9.1.1,
+    an ancestor `addopts = --continue-on-collection-errors` turned a mutation
+    that broke collection from exit 2 into exit 1, which the gate reads as a
+    caught regression. A neutral file here terminates that walk, and it
+    neutralises every ini setting from above, not just addopts.
+
+    Both the proof checkouts and the review checkout live under this root, so
+    one file covers the mutation proofs and the reproduction re-execution
+    alike; the boundary is the root the gate owns, not any child of it.
+
+    The reviewed repository's own config still wins, because it sits closer to
+    the named test. That surface is deliberately accepted. The measured cost of
+    this file: for a repository carrying no pytest config at all, rootdir
+    becomes this temporary root rather than the checkout, which widens conftest
+    discovery by this one empty gate-owned directory.
+    """
+
+    (root / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+
+
 def git(cwd: Path, *arguments: str, timeout: float = 60) -> str:
     result = run_command(["git", "-C", str(cwd), *arguments], timeout=timeout)
     if result.returncode != 0:
@@ -1812,6 +1838,7 @@ The proof checkout is a fresh clone holding tracked files only, so name a runner
 A mutation proof may name only a runner whose non-execution signal the gate has measured, currently: {', '.join(sorted(RUNNER_NON_EXECUTION_EXITS))}. On any other runner the gate cannot tell a test that caught the mutation from one that never ran, so it refuses to certify the fix rather than guess.
 A mutation proof takes no runner arguments at all: test_invocation.arguments must be empty, and any entry is refused by name. The gate reads the mutated exit status through the runner's default semantics, which a flag can change, and test_path is the only target it validates as tracked, symlink-free, and unreachable by your mutation patch.
 Both proof runs also execute under an environment the gate constructs from a fixed allowlist rather than the one it was launched with, so no ambient variable can alter those exit semantics; name a test that needs nothing beyond PATH, HOME, and the locale.
+The gate also writes a neutral pytest.ini above its own checkouts, so runner configuration from directories above them is inert; configuration tracked inside the repository still applies.
 The gate will independently run every reproduction and every mutation proof.
 If you cannot reproduce a concern, return it as a suspicion; suspicions block the merge.
 Silence never closes an existing finding.
@@ -2624,6 +2651,7 @@ def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
             tool_fail(f"reviewer preflight failed: {exc}")
         with tempfile.TemporaryDirectory(prefix=f".{task_id}.crosscheck.", dir=state) as temporary:
             temp_root = Path(temporary)
+            write_neutral_runner_config(temp_root)
             review_dir = temp_root / "review"
             try:
                 merge_base = prepare_review_checkout(review_dir, snapshot_value)

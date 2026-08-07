@@ -120,6 +120,11 @@ Requiring no arguments closes both without an enumeration of runner flags that w
 Reviewer-supplied argv is only half of it: both proof runs also execute under an environment the gate constructs from `PROOF_ENVIRONMENT_ALLOWLIST` rather than the one it was launched with, because pytest appends `PYTEST_ADDOPTS` to the command line, so an operator with `--continue-on-collection-errors` exported would reproduce the same bypass on every proof with no reviewer involved.
 That list is an allowlist because it fails closed - a variable that is needed but missing breaks the baseline run, which must exit 0, so the proof is refused where it can be seen, while an unlisted variable on a denylist would sail through silently.
 The constructed environment is applied to the mutation-proof runs and not to reproduction re-execution: a proof's exit status is what decides clear versus not clear, whereas ambient interference with a reproduction can only push it toward refusal, and reproduction commands run through a login shell that re-imports operator profile state regardless.
+Configuration files are the third channel into the same semantics: pytest's `locate_config` walks every parent of its target to the filesystem root and stops at the first `pytest.ini`, `tox.ini`, `setup.cfg`, or `pyproject.toml` it finds, so an operator config above the gate's temporary root would set `addopts` for every proof on the machine.
+Crosscheck writes a neutral empty `[pytest]` `pytest.ini` into that temporary root before anything runs, ending the walk inside a directory the gate owns and neutralising every ini setting from above rather than only `addopts`.
+The proof checkouts and the review checkout are both children of that root, so the one file covers reproduction re-execution as well; the boundary is the root the gate owns, not any child of it.
+This is not free: for a repository carrying no pytest config of its own, rootdir becomes the gate's temporary root instead of the checkout, which widens conftest discovery by that one empty gate-owned directory.
+The reviewed repository's own config still takes precedence, because it sits closer to the named test, and that surface stays deliberately accepted.
 The same rule is not applied when replaying a recorded proof, so a ledger written before it still loads; instead a recorded proof whose invocation carried arguments no longer certifies its finding, which reverts to blocking and can be re-proved in band by a fresh review.
 Crosscheck creates one clean checkout at the exact reviewed head, confirms the named test passes, destroys the entire checkout, recreates the same path from the exact head, applies the patch, and requires the same test to fail.
 Destroying all readable baseline state before the mutated run prevents a test from manufacturing causality through a predictable sibling checkout.
@@ -135,6 +140,18 @@ Because that reading is only safe where the non-execution signal has actually be
 The proof checkout is a fresh clone carrying tracked files only, so a runner that lives solely in an untracked virtualenv is absent there.
 The patch may modify only non-test implementation paths already cited by the durable finding.
 It cannot modify the named test, conventional test trees, fixtures, or Crosscheck evidence support.
+
+### Known limitation: the mutated exit status is an inference, not proof
+
+Read the four guards above together and the shape of the real problem is visible.
+The gate concludes "the named test detected the regression" from one fact: the mutated run exited non-zero.
+That status is not a property of the test alone. It is influenced by reviewer-supplied argv, by the ambient environment, by repository and ancestor configuration, and by the runner's own version, and each of those four channels was closed only after it was found - a positional second target, a collection-error flag, `PYTEST_ADDOPTS`, and an ancestor ini file.
+An installed runner plugin is a known and accepted fifth door.
+Closing channels one at a time is unbounded work with no completion criterion, so the list above should be read as hardening, not as a proof of soundness.
+
+The planned replacement is POSITIVE PROOF OF EXECUTION: requiring the mutated run to demonstrate that the named test actually ran, rather than inferring it from an exit code.
+The leading candidate is a control test - a second tracked test the mutation should not affect, required to PASS while the named test fails - because it needs no per-runner knowledge and no enumeration of the ways a status can be rewritten.
+Until that lands, the exit-status inference remains this gate's weakest link, and the four closed channels do not make it sound.
 
 ## Refusal and liveness
 
