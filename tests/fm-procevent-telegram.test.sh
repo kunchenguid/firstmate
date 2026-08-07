@@ -114,6 +114,14 @@ timed_adapter() {  # <backoff> <max-backoff> <argv>...
     FM_TELEGRAM_MAX_BACKOFF_SECONDS="$max" FM_TELEGRAM_POLL_TIMEOUT=1 "$ADAPTER" "$@"
 }
 
+path_mode() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$1"
+  else
+    stat -c %a "$1"
+  fi
+}
+
 # --- a non-empty batch returns once and exits 0 -----------------------------
 reset_api '200 updates'
 out=$(adapter poll 2>"$TMP_ROOT/poll-err")
@@ -222,8 +230,8 @@ out=$(ack_home ack 901)
 expect_code 0 $? "ack records a fully handled update id"
 assert_contains "$out" "901" "ack reports the update id it recorded"
 [ "$(cat "$ACK_CURSOR")" = 901 ] || fail "ack did not advance the cursor: $(cat "$ACK_CURSOR")"
-perms=$(ls -l "$ACK_CURSOR" | cut -c1-10)
-[ "$perms" = '-rw-------' ] || fail "ack left the cursor readable beyond its owner: $perms"
+perms=$(path_mode "$ACK_CURSOR")
+[ "$perms" = 600 ] || fail "ack left the cursor readable beyond its owner: $perms"
 staged_cursor=$(find "$ACK_HOME/.config/firstmate" -name '.telegram-cursor.new.*' 2>/dev/null)
 [ -z "$staged_cursor" ] || fail "ack left a half-written cursor behind: $staged_cursor"
 reset_api '200 updates'

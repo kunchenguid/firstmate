@@ -116,7 +116,7 @@ cleanup_poll_body() {
 # The server's own requested pause for a rate-limited request, bounded so a
 # garbled or hostile retry_after cannot park the poll indefinitely.
 retry_after_delay() {  # <body-file>
-  local match= value=
+  local match value
   match=$(grep -o '"retry_after"[[:space:]]*:[[:space:]]*[0-9][0-9]*' "$1" 2>/dev/null | head -n 1)
   value=${match##*[![:digit:]]}
   case "$value" in
