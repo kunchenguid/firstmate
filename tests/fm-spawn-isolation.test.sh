@@ -252,7 +252,7 @@ test_symlinked_project_spelling_is_not_an_isolated_worktree() {
   ln -s "$PROJ" "$link"
   before=$(project_fingerprint "$PROJ")
   pane_reports "$link" "$link" "$link" "$TASK_WT"
-  out=$(run_spawn "$id" "$PROJ")
+  out=$(run_spawn "$id" "$PROJ" --mode no-mistakes --yolo off)
   status=$?
 
   expect_code 0 "$status" "spawn should succeed once the pane reaches the worktree"$'\n'"$out"
@@ -275,7 +275,7 @@ test_worktree_subdirectory_refuses() {
   mkdir -p "$TASK_WT/nested"
   before=$(project_fingerprint "$PROJ")
   pane_reports "$TASK_WT/nested"
-  out=$(run_spawn "$id" "$PROJ")
+  out=$(run_spawn "$id" "$PROJ" --mode no-mistakes --yolo off)
   status=$?
 
   [ "$status" -ne 0 ] || fail "spawn should refuse a subdirectory of a worktree"$'\n'"$out"
@@ -322,10 +322,10 @@ test_relative_and_absolute_project_arguments_agree() {
   before=$(project_fingerprint "$PROJ")
 
   pane_reports "$TASK_WT"
-  out_rel=$(run_spawn relformokz6 projects/peo-native)
+  out_rel=$(run_spawn relformokz6 projects/peo-native --mode no-mistakes --yolo off)
   status_rel=$?
   pane_reports "$TASK_WT"
-  out_abs=$(run_spawn absformokz7 "$PROJ")
+  out_abs=$(run_spawn absformokz7 "$PROJ" --mode no-mistakes --yolo off)
   status_abs=$?
   expect_code 0 "$status_rel" "relative project argument should spawn"$'\n'"$out_rel"
   expect_code 0 "$status_abs" "absolute project argument should spawn"$'\n'"$out_abs"
@@ -336,10 +336,10 @@ test_relative_and_absolute_project_arguments_agree() {
 
   pane_reports "$PROJ/nested-missing"
   mkdir -p "$PROJ/nested-missing"
-  out_rel=$(run_spawn relformbadz8 projects/peo-native)
+  out_rel=$(run_spawn relformbadz8 projects/peo-native --mode no-mistakes --yolo off)
   status_rel=$?
   pane_reports "$PROJ/nested-missing"
-  out_abs=$(run_spawn absformbadz9 "$PROJ")
+  out_abs=$(run_spawn absformbadz9 "$PROJ" --mode no-mistakes --yolo off)
   status_abs=$?
   rmdir "$PROJ/nested-missing"
   [ "$status_rel" -ne 0 ] || fail "relative form should refuse a path inside the project"$'\n'"$out_rel"
@@ -362,7 +362,7 @@ test_scout_and_ship_share_the_gate_and_hook_placement() {
   before=$(project_fingerprint "$PROJ")
 
   pane_reports "$TASK_WT"
-  out=$(run_spawn shipokz10 "$PROJ")
+  out=$(run_spawn shipokz10 "$PROJ" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "ship spawn should succeed into an isolated worktree"$'\n'"$out"
   assert_grep "kind=ship" "$HOME_REAL/state/shipokz10.meta" "ship spawn recorded the wrong kind"
@@ -397,7 +397,7 @@ test_hook_exclusion_write_stays_in_the_task_worktree() {
   caller="$CASE_DIR/caller-checkout"
   fm_git_init_commit "$caller"
   pane_reports "$OTHER_REPO"
-  out=$(cd "$caller" && run_spawn "$id" "$PROJ")
+  out=$(cd "$caller" && run_spawn "$id" "$PROJ" --mode no-mistakes --yolo off)
   status=$?
 
   expect_code 0 "$status" "spawn should succeed into an unrelated main checkout"$'\n'"$out"
