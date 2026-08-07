@@ -175,7 +175,7 @@ The backlog counts as readable only when the shared backend decision in [`bin/fm
 Live work counts as readable only when the task state directory can be listed.
 
 `--after-event` runs the whole refresh as one bounded child, because it fires inside spawn, teardown and every landing, and the backlog and current-state reads underneath it launch one subprocess per item.
-`FM_CONTEXT_BRIEFS_AFTER_EVENT_TIMEOUT` sets that aggregate bound in seconds and defaults to 60.
+`FM_CONTEXT_BRIEFS_AFTER_EVENT_TIMEOUT` sets that aggregate bound in seconds, with the other tuning knobs and their defaults in "Environment variables" below.
 A refresh that hits the bound leaves the brief it was part way through exactly as it found it, because each brief is staged in full and moved into place in one step, and briefs the same run had already moved into place keep their new content.
 No brief is ever left half rewritten, and nothing staged outlives the run.
 Concurrent lifecycle commands are serialised on one lock, so the marker line numbers a run resolves are still true when it writes.
@@ -573,6 +573,10 @@ FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed to the current code
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
+FM_CONTEXT_BRIEFS_TIMEOUT=20   # seconds allowed per current-state read inside fm-context-briefs.sh; see "Context briefs"
+FM_CONTEXT_BRIEFS_AFTER_EVENT_TIMEOUT=60   # seconds bounding one whole --after-event context-brief refresh
+FM_CONTEXT_BRIEFS_MAX_AGE_HOURS=24   # age after which --check calls a generated brief block stale
+
 FMX_PAIRING_TOKEN=      # Relay pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env
