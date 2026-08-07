@@ -835,6 +835,20 @@ def validate_test_invocation(value: Any, label: str) -> dict[str, Any]:
         all("\x00" not in argument for argument in validated_arguments),
         f"{label}.arguments must not contain NUL bytes",
     )
+    # test_path is the only target the gate validates: it alone is checked as a
+    # tracked regular file, rejected when it traverses a symlink, and protected
+    # from the mutation patch. A second positional target routes around all
+    # three, so the mutated run could fail on a file the gate never saw while
+    # the named test says nothing. Flags are unconstrained; targets are not.
+    for index, argument in enumerate(validated_arguments):
+        require(
+            argument.startswith("-"),
+            f"{label}.arguments[{index}] is the positional argument "
+            f"{argument!r}, which adds a second test target beyond test_path. "
+            "The named test is the only target the gate validates as tracked, "
+            "symlink-free, and unreachable by the mutation patch, so a verdict "
+            "could come from a file the gate never validated. Pass flags only",
+        )
     return {"runner": runner, "arguments": validated_arguments}
 
 
@@ -1050,6 +1064,10 @@ def execute_mutation_proof(
     create_proof_checkout(review_dir, proof_dir, head_sha, label, deadline)
 
     baseline_profile = proof_dir / ".crosscheck" / "mutation-proof.sb"
+    # Order is load-bearing: test_arguments must run first so an absent runner is
+    # refused as absent, and a `direct` target as non-executable, rather than as
+    # an unclassified runner. Swapping these two lines changes the refusal a
+    # reviewer sees for a runner that is both absent and unclassified.
     baseline_argv = test_arguments(invocation, test_path, proof_dir, label)
     require_classified_runner(invocation["runner"], label)
     baseline = run_sandboxed(
@@ -1725,6 +1743,7 @@ The gate appends the named test path to the approved runner invocation, destroys
 test_path may be a plain repository path, or a `path::selector` node id when the runner is one of: {', '.join(sorted(NODE_ID_RUNNERS))}.
 The proof checkout is a fresh clone holding tracked files only, so name a runner installed on PATH there; a runner that is absent, or a selector that matches no test, is reported as a non-execution rather than a test result and clears nothing.
 A mutation proof may name only a runner whose non-execution signal the gate has measured, currently: {', '.join(sorted(RUNNER_NON_EXECUTION_EXITS))}. On any other runner the gate cannot tell a test that caught the mutation from one that never ran, so it refuses to certify the fix rather than guess.
+test_invocation.arguments may contain flags only, never an additional test target: test_path is the only target the gate validates as tracked, symlink-free, and unreachable by your mutation patch, so a positional argument is refused by name.
 The gate will independently run every reproduction and every mutation proof.
 If you cannot reproduce a concern, return it as a suspicion; suspicions block the merge.
 Silence never closes an existing finding.

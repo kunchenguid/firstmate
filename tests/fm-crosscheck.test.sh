@@ -40,16 +40,19 @@ make_case() {
   ln -s ../shared-test.sh "$repo/tests/symlink.test.sh"
   printf '#!/usr/bin/env bash\n# def test_app_is_fixed()\ngrep -qx fixed app.txt\n' \
     > "$repo/tests/nodeid.test.sh"
+  # Passes whatever the mutation does, so it can never itself prove causality.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/tests/vacuous.test.sh"
   mkdir -p "$repo/real-tests"
   printf '#!/usr/bin/env bash\ngrep -qx fixed app.txt\n' > "$repo/real-tests/linked.test.sh"
   ln -s ../real-tests "$repo/tests/linked"
   chmod +x "$repo/tests/regression.test.sh" "$repo/tests/stateful.test.sh" \
     "$repo/tests/readable-state.test.sh" "$repo/tests/support.test.sh" \
-    "$repo/tests/nodeid.test.sh" "$repo/real-tests/linked.test.sh"
+    "$repo/tests/nodeid.test.sh" "$repo/tests/vacuous.test.sh" \
+    "$repo/real-tests/linked.test.sh"
   git -C "$repo" add app.txt other.txt shared-test.sh tests/regression.test.sh \
     tests/helper.sh tests/readable-state.test.sh tests/stateful.test.sh \
     tests/support.test.sh tests/symlink.test.sh tests/nodeid.test.sh \
-    real-tests/linked.test.sh tests/linked
+    tests/vacuous.test.sh real-tests/linked.test.sh tests/linked
   git -C "$repo" commit -qm base
   base=$(git -C "$repo" rev-parse HEAD)
   git -C "$repo" checkout -qb feature
@@ -81,36 +84,46 @@ EOF
 # A node-id runner standing in for pytest. It reproduces the three outcomes the
 # gate must tell apart: the named test ran and passed (0), ran and failed (1),
 # and never ran because the selector resolved to nothing (4 usage / 5 collected).
+# Like pytest it accepts more than one positional target, collects them all, and
+# fails the run when any one of them fails - which is what lets a second target
+# supplied through test_invocation.arguments decide the verdict.
 install_pytest_fake() {
   local case_dir=$1
   mkdir -p "$case_dir/pathbin"
   cat > "$case_dir/pathbin/pytest" <<'SH'
 #!/usr/bin/env bash
-selector=""
+targets=()
 for argument in "$@"; do
   case "$argument" in
     -*) ;;
-    *) selector=$argument ;;
+    *) targets+=("$argument") ;;
   esac
 done
-[ -n "$selector" ] || exit 4
-file=${selector%%::*}
-name=""
-case "$selector" in
-  *::*) name=${selector#*::} ;;
-esac
-[ -f "$file" ] || { echo "ERROR: file or directory not found: $file"; exit 4; }
-if [ -n "$name" ] && ! grep -q "def $name(" "$file"; then
-  echo "no tests ran"
-  exit 5
-fi
+[ "${#targets[@]}" -gt 0 ] || exit 4
+for selector in "${targets[@]}"; do
+  file=${selector%%::*}
+  [ -f "$file" ] || { echo "ERROR: file or directory not found: $file"; exit 4; }
+  case "$selector" in
+    *::*)
+      name=${selector#*::}
+      if ! grep -q "def $name(" "$file"; then
+        echo "no tests ran"
+        exit 5
+      fi
+      ;;
+  esac
+done
 # A mutation that breaks collection reports a non-execution status, never a
 # test failure. The gate must not read that as "the test caught the mutation".
 if [ "${FM_TEST_PYTEST_BREAK_COLLECTION:-}" = 1 ] && grep -qx broken app.txt; then
   echo "no tests ran"
   exit 5
 fi
-exec bash "$file"
+status=0
+for selector in "${targets[@]}"; do
+  bash "${selector%%::*}" || status=1
+done
+exit "$status"
 SH
   chmod +x "$case_dir/pathbin/pytest"
 }
@@ -420,9 +433,15 @@ elif scenario in {
     "support-forgery",
     "symlink-forgery",
     "unclassified-runner",
+    "positional-target",
 }:
     patch = protocol / "mutations" / "revert.patch"
-    if scenario in {"verified-fixed", "forged-command", "unclassified-runner"}:
+    if scenario in {
+        "verified-fixed",
+        "forged-command",
+        "unclassified-runner",
+        "positional-target",
+    }:
         patch.parent.mkdir(parents=True, exist_ok=True)
         patch.write_text("""diff --git a/app.txt b/app.txt
 --- a/app.txt
@@ -474,6 +493,7 @@ elif scenario in {
         "stateful-forgery": "tests/stateful.test.sh",
         "support-forgery": "tests/support.test.sh",
         "symlink-forgery": "tests/symlink.test.sh",
+        "positional-target": "tests/vacuous.test.sh",
     }.get(scenario, "tests/regression.test.sh")
     # Only a runner whose non-execution the gate has measured can certify a
     # fix, so every scenario that must reach mutation causality names one.
@@ -482,7 +502,13 @@ elif scenario in {
         "test_path": test_path,
         "test_invocation": {
             "runner": "bash" if scenario == "unclassified-runner" else "pytest",
-            "arguments": [],
+            # A second target whose result, unlike the vacuous named test's,
+            # does depend on the mutated implementation.
+            "arguments": (
+                ["tests/regression.test.sh"]
+                if scenario == "positional-target"
+                else []
+            ),
         },
         "mutation_patch_path": ".crosscheck/mutations/revert.patch",
     }
@@ -1268,6 +1294,33 @@ assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecy
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "an unclassified runner cleared a finding"
   pass "a runner with no measured non-execution signal cannot certify a fix"
+}
+
+# The gate validates exactly one target: test_path, which it checks is tracked,
+# refuses when it traverses a symlink, and protects from the mutation patch. A
+# positional argument adds a second target that gets none of those checks, so
+# the mutated run can fail on that file while the named test - here deliberately
+# vacuous - proves nothing. Before this was refused, that cleared the finding.
+test_positional_argument_cannot_supply_a_second_target() {
+  local record case_dir base head rc
+  record=$(make_case positional-target)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  set +e
+  run_case "$case_dir" "$base" "$head" positional-target run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "mutation proof carrying a positional second target"
+  assert_grep "positional argument 'tests/regression.test.sh'" "$case_dir/err" \
+    "the refusal did not name the rejected positional argument"
+  python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1]))
+assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+' "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    || fail "a vacuous named test cleared a finding through a second target"
+  pass "a positional argument cannot smuggle in a second, unvalidated test target"
 }
 
 test_unmatched_selector_is_never_a_failing_test() {
@@ -2390,6 +2443,7 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_node_id_selector_clears_a_passing_named_test|\
     test_absent_runner_is_never_a_test_outcome|\
     test_unclassified_runner_cannot_clear_a_finding|\
+    test_positional_argument_cannot_supply_a_second_target|\
     test_unmatched_selector_is_never_a_failing_test|\
     test_mutated_non_execution_cannot_clear_a_finding|\
     test_symlinked_directory_named_test_is_rejected|\
@@ -2439,6 +2493,7 @@ test_verified_fix_executes_mutation_proof
 test_node_id_selector_clears_a_passing_named_test
 test_absent_runner_is_never_a_test_outcome
 test_unclassified_runner_cannot_clear_a_finding
+test_positional_argument_cannot_supply_a_second_target
 test_unmatched_selector_is_never_a_failing_test
 test_mutated_non_execution_cannot_clear_a_finding
 test_symlinked_directory_named_test_is_rejected

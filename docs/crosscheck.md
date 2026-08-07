@@ -113,6 +113,7 @@ That inspection carries its own larger budget so such a state is refused by name
 
 A `verified-fixed` update must name a tracked test and provide an implementation-only patch under `.crosscheck/mutations/`.
 It supplies an approved test runner plus a structured argument array, never a free-form shell command.
+That array may carry flags only, never an additional test target: `test_path` is the only target the gate validates as tracked, symlink-free, and unreachable by the mutation patch, so a second positional target would let the verdict come from a file the gate never validated and is refused by name.
 Crosscheck creates one clean checkout at the exact reviewed head, confirms the named test passes, destroys the entire checkout, recreates the same path from the exact head, applies the patch, and requires the same test to fail.
 Destroying all readable baseline state before the mutated run prevents a test from manufacturing causality through a predictable sibling checkout.
 Proof sandboxes also omit shared POSIX IPC and give each run private writable temporary and cache state, while shared host temporary directories remain outside the write policy.
