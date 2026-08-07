@@ -324,6 +324,8 @@ After an autonomous merge, give the captain a one-line full-URL or local-main ou
 ### Validate
 
 For a no-mistakes ship, trigger validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
+When this crewmate is one of several dispatched onto the same shared project in a Herdr multiagent workflow, check before triggering whether another crewmate in that same group already has an active no-mistakes run, meaning a live run-step state such as running, fixing, or CI, not a task merely parked at a gate awaiting a captain decision, since that capacity is free while it waits.
+If one is active, hold off and continue normal supervision, retriggering this validation once the active run reaches a terminal or gated state; this governs only firstmate's own dispatch timing within that group, never the shared no-mistakes daemon itself.
 The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
 Once validation starts, prefer routing new requirements to follow-up work rather than expanding the current task, unless a new requirement completely invalidates the work being validated; however, the smallest downstream changes needed to keep already accepted product or engineering behavior correct, add behavioral tests where an executable contract exists, or keep documentation accurate remain within the current task even when they touch files not named at intake, and corrections required to satisfy already accepted intent are not new requirements.
