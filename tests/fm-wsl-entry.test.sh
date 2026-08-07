@@ -34,6 +34,64 @@ SH
   chmod +x "$1/bin/fm-launch.sh"
 }
 
+# The launcher probes each menu harness with `command -v`, so the only thing the
+# entry owes it is a PATH that resolves the same binaries an interactive login
+# shell resolves. This launcher stand-in reports exactly that.
+make_probe_launcher() {  # <root>
+  cat > "$1/bin/fm-launch.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'path=[%s]\n' "$PATH"
+printf 'claude=[%s]\n' "$(command -v claude 2>/dev/null || printf 'NOT-ON-PATH')"
+printf 'codex=[%s]\n' "$(command -v codex 2>/dev/null || printf 'NOT-ON-PATH')"
+SH
+  chmod +x "$1/bin/fm-launch.sh"
+}
+
+SYSTEM_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+test_wsl_entry_resolves_user_installed_harnesses() {
+  local fixture="$TMP_ROOT/user bins" fake_home="$TMP_ROOT/user bins home" out
+  make_entry_fixture "$fixture"
+  make_probe_launcher "$fixture"
+  mkdir -p "$fake_home/.local/bin" "$fake_home/bin"
+  printf '#!/bin/sh\nexit 0\n' > "$fake_home/.local/bin/claude"
+  printf '#!/bin/sh\nexit 0\n' > "$fake_home/bin/codex"
+  chmod +x "$fake_home/.local/bin/claude" "$fake_home/bin/codex"
+
+  out=$(env -i HOME="$fake_home" PATH="$SYSTEM_PATH" \
+    /bin/bash "$fixture/bin/fm-wsl-entry.sh" 2>&1) \
+    || fail "the WSL entry failed while establishing the launcher PATH"
+
+  assert_contains "$out" "claude=[$fake_home/.local/bin/claude]" \
+    "a fresh WSL session must resolve a harness installed in the account's ~/.local/bin"
+  assert_contains "$out" "codex=[$fake_home/bin/codex]" \
+    "a fresh WSL session must resolve a harness installed in the account's ~/bin"
+  assert_contains "$out" "/usr/bin" \
+    "establishing the user PATH must keep the inherited system directories"
+  pass "fm-wsl-entry: a fresh session resolves harnesses installed under the account's private bin directories"
+}
+
+test_wsl_entry_user_path_is_deterministic() {
+  local fixture="$TMP_ROOT/user bins order" fake_home="$TMP_ROOT/user bins order home"
+  local out path
+  make_entry_fixture "$fixture"
+  make_probe_launcher "$fixture"
+  mkdir -p "$fake_home/.local/bin"
+
+  out=$(env -i HOME="$fake_home" PATH="$fake_home/.local/bin:$SYSTEM_PATH" \
+    /bin/bash "$fixture/bin/fm-wsl-entry.sh" 2>&1) \
+    || fail "the WSL entry failed while establishing the launcher PATH"
+  path=${out#*path=[}
+  path=${path%%]*}
+
+  [ "$path" = "$fake_home/.local/bin:$SYSTEM_PATH" ] \
+    || fail "an already-present user bin directory must not be added twice: [$path]"
+  case ":$path:" in
+    *":$fake_home/bin:"*) fail "an absent ~/bin must never be added to the PATH" ;;
+  esac
+  pass "fm-wsl-entry: the established PATH adds only existing directories and never duplicates one"
+}
+
 test_wsl_entry_preserves_root_arguments_and_status() {
   local fixture="$TMP_ROOT/Firstmate repo with spaces" out status=0
   make_entry_fixture "$fixture"
@@ -159,5 +217,7 @@ test_checkout_pins_bridge_line_endings() {
 
 test_wsl_entry_preserves_root_arguments_and_status
 test_wsl_entry_missing_launcher_is_actionable
+test_wsl_entry_resolves_user_installed_harnesses
+test_wsl_entry_user_path_is_deterministic
 test_batch_constructs_one_deterministic_wsl_command
 test_checkout_pins_bridge_line_endings
