@@ -24,6 +24,11 @@
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
 #     fm-wake-drain.sh (their real, distinctive output appears verbatim), it
 #     does not reimplement their logic
+#   - the deferred network stage: an unreachable host delays a reported check
+#     rather than the digest, the sweeps it defers still run and land, a result
+#     surfaces exactly once (inline or as a wake, never both), a read-only
+#     session declares the checks it skipped, and the tasks-axi compatibility
+#     verdict is paid for once per session start
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -201,9 +206,7 @@ SH
 
 # make_fake_ps_claude <fakebin>: harness_pid()/holder_alive() (fm-lock.sh) walk
 # `ps` output looking for a harness command name; this fake reports EVERY
-# queried pid as a live `claude` harness, so the very first ancestry check
-# (this test process's own pid) matches and lock acquisition succeeds
-# deterministically. Mirrors fm-grok-harness.test.sh's fake ps.
+# queried pid as a live `claude` harness unless a stable harness pid is set.
 make_fake_ps_claude() {
   local fakebin=$1
   make_fake_ps_harness "$fakebin" claude
@@ -215,9 +218,33 @@ make_fake_ps_harness() {
 #!/usr/bin/env bash
 set -u
 harness=${FM_FAKE_HARNESS:-claude}
+pid=
+previous=
+for argument in "$@"; do
+  [ "$previous" = -p ] && pid=$argument
+  previous=$argument
+done
 case "$*" in
-  *"comm="*) printf '/usr/local/bin/%s\n' "$harness"; exit 0 ;;
-  *"args="*) printf '%s\n' "$harness"; exit 0 ;;
+  *"comm="*)
+    if [ -z "${FM_FAKE_HARNESS_PID:-}" ] || [ "$pid" = "$FM_FAKE_HARNESS_PID" ]; then
+      printf '/usr/local/bin/%s\n' "$harness"
+    else
+      printf '/bin/bash\n'
+    fi
+    exit 0
+    ;;
+  *"args="*)
+    if [ -z "${FM_FAKE_HARNESS_PID:-}" ] || [ "$pid" = "$FM_FAKE_HARNESS_PID" ]; then
+      printf '%s\n' "$harness"
+    else
+      printf 'bash\n'
+    fi
+    exit 0
+    ;;
+  *"ppid="*)
+    [ -n "${FM_FAKE_HARNESS_PID:-}" ] || exit 1
+    /bin/ps -o ppid= -p "$pid"
+    ;;
 esac
 exit 1
 SH
@@ -531,6 +558,7 @@ run_session_start_secondmate() {
   TMUX='' FM_BACKEND=tmux FM_FAKE_TMUX_MODE="$mode" FM_FAKE_TMUX_LOG="$log" \
     FM_FAKE_TMUX_SPAWNED="$spawned" FM_FAKE_SECOND_MATE_HOME="$mate" \
     FM_FAKE_SECOND_MATE_ID="$SESSION_START_SECOND_MATE_ID" \
+    FM_FAKE_HARNESS_PID=$$ \
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH"
 }
 
@@ -575,7 +603,34 @@ run_session_start_herdr_secondmate() {
   local root=$1 home=$2 fakebin=$3 mate=$4 log=$5 state=$6
   FM_BACKEND=herdr FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" \
     FM_FAKE_SECOND_MATE_ID="$SESSION_START_HERDR_SECOND_MATE_ID" \
+    FM_FAKE_HARNESS_PID=$$ \
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH"
+}
+
+# wait_for_network_stage <home> <root> [seconds]
+# Block until the deferred network stage this home's session start launched has
+# published. Only a TEST does this: the digest itself is required never to wait,
+# which is exactly why the sweeps it used to run inline have to be re-asserted
+# here instead of straight off the digest's own output.
+wait_for_network_stage() {
+  local home=$1 root=$2 limit=${3:-30}
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    "$ROOT/bin/fm-startup-network.sh" wait "$limit"
+}
+
+wait_for_network_wake() {
+  local home=$1 limit=${2:-30} waited=0
+  while ! grep -Fq $'check\tstartup-network' "$home/state/.wake-queue" 2>/dev/null \
+    && [ "$waited" -lt "$limit" ]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  grep -Fq $'check\tstartup-network' "$home/state/.wake-queue" 2>/dev/null
+}
+
+network_stage_report() {
+  local home=$1 root=$2
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$ROOT/bin/fm-startup-network.sh" report
 }
 
 hash_file_for_test() {
@@ -1095,21 +1150,55 @@ EOF
 
   out=$(run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" missing)
 
-  assert_not_contains "$out" "SECONDMATE_LIVENESS:" "successful missing-window recovery should stay non-actionable"
-  assert_contains "$(cat "$log")" "new-window" "session start did not relaunch the missing Pi secondmate"
-  assert_not_contains "$(cat "$log")" "kill-window" "session start tried to kill an already-absent window"
-  assert_contains "$out" "endpoint: alive (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
-    "the later fleet read did not confirm the relaunched window"
+  # The relaunch now runs off the blocking path, so the digest's own liveness
+  # read may legitimately still show the pre-relaunch endpoint. What must NOT
+  # happen is silence: the section names the relaunch as either done or not yet
+  # confirmed.
+  assert_contains "$out" "NETWORK CHECKS" "the digest lost its deferred network-check section"
+  assert_contains "$out" "dead-secondmate relaunch" \
+    "the digest never accounted for the dead-secondmate relaunch"
+
+  wait_for_network_stage "$home" "$root" \
+    || fail "the deferred network stage never published: $(network_stage_report "$home" "$root")"
+
+  assert_not_contains "$(network_stage_report "$home" "$root")" "SECONDMATE_LIVENESS:" \
+    "successful missing-window recovery should stay non-actionable"
+  assert_contains "$(cat "$log")" "new-window" "the deferred stage did not relaunch the missing Pi secondmate"
+  assert_not_contains "$(cat "$log")" "kill-window" "the deferred stage tried to kill an already-absent window"
   assert_grep 'harness=pi' "$home/state/$SESSION_START_SECOND_MATE_ID.meta" \
     "the real respawn path did not preserve the Pi harness: $(cat "$home/state/$SESSION_START_SECOND_MATE_ID.meta")"
 
   first_calls=$(grep -c 'new-window' "$log" || true)
   rm -f "$home/state/.lock"
   run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" missing >/dev/null
+  wait_for_network_stage "$home" "$root" \
+    || fail "the second pass's deferred network stage never published"
   second_calls=$(grep -c 'new-window' "$log" || true)
   [ "$first_calls" -eq 1 ] && [ "$second_calls" -eq 1 ] \
     || fail "a second session-start pass duplicated the relaunched Pi secondmate: $(cat "$log")"
-  pass "session start: an absent recorded tmux window relaunches its Pi secondmate exactly once"
+  pass "session start: an absent recorded tmux window relaunches its Pi secondmate exactly once, off the blocking path"
+}
+
+# The relaunch is the sharpest deferral: it mutates the very endpoint record the
+# digest printed moments earlier. Silence would leave that stale record looking
+# authoritative, so the deferred pass reports it whether or not verbose facts are
+# on, and the report says the digest's records are now behind.
+test_deferred_relaunch_is_always_reported() {
+  local rec root home fakebin mate log spawned report
+  rec=$(prepare_session_start_secondmate secondmate-relaunch-reported)
+  IFS='|' read -r root home fakebin mate log spawned <<EOF
+$rec
+EOF
+
+  run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" missing >/dev/null
+  wait_for_network_stage "$home" "$root" || fail "the deferred network stage never published"
+
+  report=$(network_stage_report "$home" "$root")
+  assert_contains "$report" "secondmate $SESSION_START_SECOND_MATE_ID relaunched" \
+    "a relaunch performed after the digest was composed went unreported"
+  assert_contains "$report" "re-read any record" \
+    "the report did not tell the reader the digest's records are now behind"
+  pass "session start: a deferred relaunch is always reported, so the digest's stale endpoint record cannot stand"
 }
 
 test_session_start_preserves_ambiguous_pi_process() {
@@ -1120,8 +1209,10 @@ $rec
 EOF
 
   out=$(run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" ambiguous)
+  wait_for_network_stage "$home" "$root" || fail "the deferred network stage never published"
 
-  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate $SESSION_START_SECOND_MATE_ID: skipped: existing endpoint has ambiguous agent process (backend=tmux)" \
+  assert_contains "$(network_stage_report "$home" "$root")" \
+    "SECONDMATE_LIVENESS: secondmate $SESSION_START_SECOND_MATE_ID: skipped: existing endpoint has ambiguous agent process (backend=tmux)" \
     "session start did not distinguish an existing Pi-shaped process from a missing window"
   [ ! -s "$log" ] || fail "session start touched an ambiguous existing Pi process: $(cat "$log")"
   assert_contains "$out" "endpoint: alive (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
@@ -1137,8 +1228,10 @@ $rec
 EOF
 
   out=$(run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" unreadable)
+  wait_for_network_stage "$home" "$root" || fail "the deferred network stage never published"
 
-  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate $SESSION_START_SECOND_MATE_ID: skipped: endpoint probe unreadable (backend=tmux)" \
+  assert_contains "$(network_stage_report "$home" "$root")" \
+    "SECONDMATE_LIVENESS: secondmate $SESSION_START_SECOND_MATE_ID: skipped: endpoint probe unreadable (backend=tmux)" \
     "session start did not distinguish transient unreadability from absence"
   [ ! -s "$log" ] || fail "session start touched a transiently unreadable target: $(cat "$log")"
   assert_contains "$out" "endpoint: dead (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
@@ -1153,14 +1246,14 @@ test_session_start_preserves_proven_bare_shell_recovery() {
 $rec
 EOF
 
-  out=$(run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" shell)
+  run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" shell >/dev/null
+  wait_for_network_stage "$home" "$root" || fail "the deferred network stage never published"
 
+  out=$(network_stage_report "$home" "$root")
   assert_not_contains "$out" "SECONDMATE_LIVENESS:" "successful bare-shell recovery should stay non-actionable"
   assert_contains "$(cat "$log")" "kill-window -t =firstmate:=fm-$SESSION_START_SECOND_MATE_ID" \
     "the proven bare-shell path did not remove its existing dead endpoint"
   assert_contains "$(cat "$log")" "new-window" "the proven bare-shell path did not relaunch"
-  assert_contains "$out" "endpoint: alive (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
-    "the later fleet read did not confirm the bare-shell relaunch"
   pass "session start: the proven bare-shell recovery path remains intact"
 }
 
@@ -1171,13 +1264,13 @@ test_session_start_relaunches_herdr_husk_secondmate() {
 $rec
 EOF
 
-  out=$(run_session_start_herdr_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$state")
+  run_session_start_herdr_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$state" >/dev/null
+  wait_for_network_stage "$home" "$root" || fail "the deferred network stage never published"
 
+  out=$(network_stage_report "$home" "$root")
   assert_not_contains "$out" "SECONDMATE_LIVENESS:" "successful Herdr husk recovery should stay non-actionable"
   assert_contains "$(cat "$log")" "pane close p-old" "session start did not close the confirmed Herdr husk"
   assert_contains "$(cat "$log")" "tab create" "session start did not relaunch the Herdr secondmate"
-  assert_contains "$out" "endpoint: alive (backend=herdr window=default:p-new)" \
-    "the later fleet read did not confirm the relaunched Herdr endpoint"
   assert_grep 'herdr_pane_id=p-new' "$home/state/$SESSION_START_HERDR_SECOND_MATE_ID.meta" \
     "the real respawn path did not record the replacement Herdr pane"
   pass "session start: a confirmed Herdr husk is closed and relaunched"
@@ -1251,6 +1344,143 @@ EOF
   assert_contains "$out" "wake annotation: latest wake-EVENT observed at drain, not current state: task-z.status: needs-decision: pick a library" "fm-session-start.sh did not preserve the drain's separate annotation line"
 
   pass "fm-session-start.sh composes the real fm-lock.sh, fm-bootstrap.sh, and fm-wake-drain.sh output verbatim"
+}
+
+# --- deferred network stage -------------------------------------------------
+
+# install_slow_gh <fakebin> <seconds>: one external-network call the digest used
+# to make directly. Making it pathologically slow is how a test stands in for an
+# unreachable host without touching one: if any part of the blocking path still
+# waits on the network, the digest cannot finish before this does.
+install_slow_gh() {
+  local fakebin=$1 seconds=$2 finished_marker=${3:-}
+  cat > "$fakebin/gh" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = auth ]; then
+  sleep $seconds
+  [ -z '$finished_marker' ] || : > '$finished_marker'
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+}
+
+# The headline guarantee: an unreachable host delays a reported CHECK, never the
+# startup. The fake host hangs for 12s; the digest must be done long before that,
+# must say so rather than implying the checks passed, and the sweeps must still
+# run and land afterwards.
+test_unreachable_network_never_blocks_the_digest() {
+  local rec root home fakebin mate log spawned network_finished out started elapsed
+  rec=$(prepare_session_start_secondmate secondmate-slow-network)
+  IFS='|' read -r root home fakebin mate log spawned <<EOF
+$rec
+EOF
+  network_finished="${root%/root}/network-finished"
+  install_slow_gh "$fakebin" 12 "$network_finished"
+
+  started=$(date +%s)
+  out=$(run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" missing)
+  elapsed=$(( $(date +%s) - started ))
+
+  [ ! -e "$network_finished" ] \
+    || fail "the digest waited for the 12s unreachable-host probe instead of returning from local state (${elapsed}s)"
+  assert_contains "$out" "SESSION START" "the digest did not complete"
+  assert_contains "$out" "IN PROGRESS - the deferred network checks have not finished yet." \
+    "the digest did not disclose that its network checks were still running"
+  assert_contains "$out" "NOT yet confirmed: GitHub authentication, dead-secondmate relaunch" \
+    "the digest did not name the checks it has not confirmed"
+  assert_not_contains "$out" "NEEDS_GH_AUTH" \
+    "the digest reported a GitHub-auth verdict it could not yet have"
+
+  # ... and the work itself still happens, off the blocking path.
+  wait_for_network_stage "$home" "$root" 60 \
+    || fail "the deferred stage never finished: $(network_stage_report "$home" "$root")"
+  assert_contains "$(network_stage_report "$home" "$root")" "NEEDS_GH_AUTH" \
+    "the deferred stage lost the GitHub-auth verdict it was deferring"
+  assert_contains "$(cat "$log")" "new-window" \
+    "the deferred stage lost the dead-secondmate relaunch"
+  pass "session start: an unreachable host delays a reported check, not the digest"
+}
+
+# A result the digest could not print must still reach the agent by itself. The
+# opposite half of the handshake - a printed result never ALSO queuing a wake -
+# is asserted deterministically in tests/fm-startup-network.test.sh, where the
+# claim can be set up directly instead of raced against digest composition.
+test_deferred_result_reaches_the_agent_when_the_digest_cannot_print_it() {
+  local rec root home fakebin mate log spawned queue
+  rec=$(prepare_session_start_secondmate secondmate-wake-once)
+  IFS='|' read -r root home fakebin mate log spawned <<EOF
+$rec
+EOF
+  install_slow_gh "$fakebin" 8
+  queue="$home/state/.wake-queue"
+
+  run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" missing >/dev/null
+  wait_for_network_stage "$home" "$root" 60 || fail "the deferred stage never finished"
+  wait_for_network_wake "$home" 60 || fail "the deferred stage never settled wake delivery"
+  assert_grep 'check	startup-network' "$queue" \
+    "a result the digest could not print never reached the agent: $(cat "$queue" 2>/dev/null)"
+  pass "session start: a deferred result the digest outran still reaches the agent as a wake"
+}
+
+# A read-only session has no lock, so it neither owns the mutating sweeps nor has
+# any action a GitHub-auth verdict would gate. It must say that plainly instead of
+# quietly dropping the checks.
+test_read_only_session_declares_skipped_network_checks() {
+  local rec root home fakebin out
+  rec=$(new_world network-read-only)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  printf '999999\n' > "$home/state/.lock"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"-p 999999"*) printf 'claude\n'; exit 0 ;;
+  *"comm="*|*"args="*) printf 'bash\n'; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/ps"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "READ-ONLY SESSION" "the read-only fixture did not actually refuse the lock"
+  assert_contains "$out" "skipped (read-only session) - GitHub authentication" \
+    "a read-only session did not declare its skipped network checks"
+  assert_absent "$home/state/.startup-network.status" \
+    "a read-only session started the deferred stage it has no authority for"
+  pass "session start: a read-only session declares its skipped network checks rather than dropping them"
+}
+
+# The compatibility verdict costs three tasks-axi subprocesses and one session
+# start needs it twice. The digest must pay for it once.
+test_tasks_axi_compatibility_is_probed_once() {
+  local rec root home fakebin log probes
+  rec=$(new_world tasks-axi-once)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tasks_axi_compact "$fakebin"
+  log="$home/tasks-axi.log"
+  printf '# Backlog\n\n## In flight\n\n## Queued\n' > "$home/data/backlog.md"
+
+  FM_FAKE_TASKS_AXI_LOG="$log" run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
+
+  probes=$(grep -c -- '--version' "$log" || true)
+  [ "$probes" -eq 1 ] \
+    || fail "tasks-axi was version-probed $probes times in one session start: $(cat "$log")"
+  probes=$(grep -c -- 'update --help' "$log" || true)
+  [ "$probes" -eq 1 ] \
+    || fail "tasks-axi update --help ran $probes times in one session start: $(cat "$log")"
+  assert_grep 'ready --file' "$log" "the backlog listing never ran, so the verdict was not actually reused"
+  pass "session start: the tasks-axi compatibility verdict is computed once and reused"
 }
 
 # --- fleet-state digest: compact backlog rendering --------------------------
@@ -1506,7 +1736,7 @@ EOF
     _ "$ROOT/bin/fm-timeout-lib.sh")
   [ "$mechanism" = bash ] || fail "the forced pure-Bash timeout fixture selected '$mechanism'"
 
-  out=$(FM_TIMEOUT_MECHANISM_OVERRIDE=bash FM_SESSION_START_TIMEOUT=3 \
+  out=$(FM_TIMEOUT_MECHANISM_OVERRIDE=bash FM_SESSION_START_TIMEOUT=3 FM_STARTUP_NETWORK_TIMEOUT=2 \
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
 
   expect_code 0 "$status" "a truncated session start must still exit 0 so the session can open"
@@ -1516,7 +1746,7 @@ EOF
   assert_contains "$out" "RUNTIME BOUND" "the truncation banner did not name the bound it hit"
   assert_contains "$out" 'stopped during the "bootstrap" stage' "the truncation banner did not name the incomplete stage"
   assert_contains "$out" "RECONCILE these stages" "the truncation banner did not tell the agent what to reconcile"
-  assert_contains "$out" "wake-queue supervision-instructions read-once fleet-state context next-step" \
+  assert_contains "$out" "wake-queue supervision-instructions read-once fleet-state network-checks context next-step" \
     "the truncation banner did not list every stage that never ran"
   assert_not_contains "$out" "NEXT STEP" "a truncated digest claimed to have reached its closing reminder"
   assert_absent "$home/state/.session-start-complete" \
@@ -1524,6 +1754,12 @@ EOF
 
   # The bound must reach the whole process group: a hung grandchild that
   # outlives the digest would keep holding whatever the digest was waiting on.
+  # There are now TWO bounds, deliberately independent - the digest's, and the
+  # deferred network stage's own - because a truncated digest must not kill work
+  # it was never waiting for. So the guarantee asserted here is the one that
+  # actually matters: once BOTH deadlines have passed, nothing hung is left.
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_STARTUP_NETWORK_TIMEOUT=2 \
+    "$ROOT/bin/fm-startup-network.sh" wait 30 >/dev/null || true
   sleep 1
   stray=$(pgrep -f "$fakebin/git" 2>/dev/null | wc -l | tr -d ' ')
   [ "$stray" -eq 0 ] || fail "the runtime bound left $stray hung subprocess(es) behind"
@@ -1656,7 +1892,7 @@ SH
 # --- context re-emit (--reemit) ----------------------------------------------
 
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain() {
-  local rec root home fakebin full reemit
+  local rec root home fakebin network_report reemit
   rec=$(new_world reemit)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -1668,11 +1904,15 @@ EOF
   append_wake "$home/state" signal task-r "done: queued after startup" || fail "seed wake failed"
 
   # A full startup reconciles the secondmate sweep and reports it.
-  full=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$full" "SECONDMATE_LIVENESS" "the full startup fixture did not exercise a mutating sweep"
+  FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
+  wait_for_network_stage "$home" "$root" \
+    || fail "the full startup fixture's deferred network stage never published"
+  network_report=$(network_stage_report "$home" "$root")
+  assert_contains "$network_report" "SECONDMATE_LIVENESS" \
+    "the full startup fixture did not exercise a mutating sweep"
 
   append_wake "$home/state" signal task-r "done: queued after the re-emit too" || fail "seed second wake failed"
-  reemit=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
+  reemit=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_FAKE_HARNESS_PID=$$ PATH="$fakebin:$BASE_PATH" \
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
     "$SESSION_START" --reemit)
 
@@ -1949,6 +2189,11 @@ test_output_ordering_diagnostics_lead
 test_read_once_contract_is_stated_once_before_its_subject
 test_herdr_backend_diagnostics_follow_real_session_start
 test_session_start_relaunches_missing_pi_secondmate
+test_deferred_relaunch_is_always_reported
+test_unreachable_network_never_blocks_the_digest
+test_deferred_result_reaches_the_agent_when_the_digest_cannot_print_it
+test_read_only_session_declares_skipped_network_checks
+test_tasks_axi_compatibility_is_probed_once
 test_session_start_preserves_ambiguous_pi_process
 test_session_start_preserves_transiently_unreadable_tmux
 test_session_start_preserves_proven_bare_shell_recovery
