@@ -55,20 +55,24 @@ Nothing placed inside a task worktree is on the `PATH` that resolves `gh` for th
 
 ## Routing behavior
 
-`tests/fm-gh-shim.test.sh` (8 assertions) drives the shim and wrapper with a fake `gh` that records its argv and the credential it received, plus a fake credential runner, touching no network and no real `gh`.
-It covers the exact argument vector the no-mistakes PR step builds (`pr create --head <ref> --base <base> --repo <slug> --title <title> --body-file -`) reaching the real `gh` unmodified with the configured credential injected; `pr list`, `pr view`, and `api` passing through without spending that credential; an unconfigured home execing commands unchanged; the first non-comment, whitespace-trimmed prefix line winning; a credential that re-resolves `gh` from `PATH` routing at most once rather than recursing; and the installer creating, verifying precedence for, refusing to overwrite a foreign `gh`, and removing only a link it owns.
+`tests/fm-gh-shim.test.sh` (11 behavioral cases) drives the shim and wrapper with a fake `gh` that records its argv and both GitHub token variables, plus a fake credential runner, touching no network and no real `gh`.
+It covers the exact argument vector the no-mistakes PR step builds (`pr create --head <ref> --base <base> --repo <slug> --title <title> --body-file -`) reaching the real `gh` unmodified with the configured credential injected; `pr list`, `pr view`, and `api` passing through without spending that credential; an unconfigured home preserving both ambient token variables; hostile ambient tokens being removed before the configured prefix injects the only token that reaches `gh`; the first non-comment, whitespace-trimmed prefix line winning; indented comments being skipped; a credential that re-resolves `gh` from `PATH` routing at most once rather than recursing; and the installer creating, verifying precedence for, refusing both foreign files and foreign symlinks without changing them, and removing only a link it owns.
 
-One assertion is a legacy-shell regression and self-skips where no bash 3.2 exists.
-Under `set -u`, bash 3.2 rejects an empty array's `"${arr[@]}"` expansion as an unbound variable, which broke the unconfigured pass-through path that every home without `config/gh-credential` takes; the observed failure was `bin/fm-gh.sh: line 81: PREFIX[@]: unbound variable` on GNU bash 3.2.57, the system bash macOS 26.5 ships. The wrapper now expands the prefix as `${PREFIX[@]+"${PREFIX[@]}"}`, and all three scripts were exercised under that shell.
+One case is a legacy-shell regression and self-skips where no bash 3.2 exists.
+Under `set -u`, bash 3.2 rejects an empty array's `"${arr[@]}"` expansion as an unbound variable, which broke the unconfigured pass-through path that every home without `config/gh-credential` takes; the observed failure was `bin/fm-gh.sh: line 81: PREFIX[@]: unbound variable` on GNU bash 3.2.57, the system bash macOS 26.5 ships.
+The wrapper now expands the prefix as `${PREFIX[@]+"${PREFIX[@]}"}`, and all three scripts were exercised under that shell.
 
 ```console
 $ bash tests/fm-gh-shim.test.sh
 ok - gh pr create routes through fm-gh.sh and reaches the real gh with the configured credential
 ok - pr list, pr view, and api pass through the shim without the privileged credential
 ok - fm-gh.sh with no config/gh-credential execs the command unchanged
+ok - configured fm-gh.sh exposes only the prefix-injected GitHub token
 ok - fm-gh.sh reads only the first non-empty, non-comment, trimmed prefix line
+ok - fm-gh.sh ignores credential comments after trimming whitespace
 ok - the shim routes at most once even when the credential re-resolves gh from PATH
 ok - fm-gh.sh runs both the unconfigured and configured paths under bash 3.2
 ok - the installer creates, verifies, reports precedence for, and removes the shim
 ok - the installer refuses to overwrite or remove a gh it does not own
+ok - the installer refuses a foreign gh symlink and leaves it intact
 ```

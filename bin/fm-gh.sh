@@ -17,6 +17,10 @@
 #
 #   cred run GITHUB_TOKEN=vault/path --
 #
+# `gh` gives GH_TOKEN precedence over GITHUB_TOKEN. When a prefix is configured, this
+# wrapper removes both ambient variables before starting the prefix so only the token
+# that prefix injects can reach `gh`. The unconfigured pass-through changes nothing.
+#
 # Only the first non-empty, non-comment line is read. The line is split on whitespace
 # and executed directly, NOT through a shell, so quoting, globbing, redirection, and
 # pipelines in that line are not interpreted. The prefix must end with whatever token
@@ -38,13 +42,11 @@ read_prefix() {
   [ -f "$CREDENTIAL_FILE" ] || return 0
   local line
   while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
     case "$line" in
       '' | '#'*) continue ;;
     esac
-    # Trim surrounding whitespace; a blank remainder means unconfigured.
-    line="${line#"${line%%[![:space:]]*}"}"
-    line="${line%"${line##*[![:space:]]}"}"
-    [ -n "$line" ] || continue
     printf '%s\n' "$line"
     return 0
   done < "$CREDENTIAL_FILE"
@@ -68,7 +70,13 @@ if [ "${1:-}" = "--check" ]; then
   # Report the identity the wrapper actually resolves. This is the decisive fact when
   # a PR lands under an unexpected account; it does not, and cannot, prove that the
   # credential is authorized for createPullRequest without opening a real pull request.
-  if identity=$(${PREFIX[@]+"${PREFIX[@]}"} gh api user --jq .login 2> /dev/null); then
+  if [ -n "$PREFIX_LINE" ]; then
+    identity=$(env -u GH_TOKEN -u GITHUB_TOKEN \
+      ${PREFIX[@]+"${PREFIX[@]}"} gh api user --jq .login 2> /dev/null) || identity=
+  else
+    identity=$(gh api user --jq .login 2> /dev/null) || identity=
+  fi
+  if [ -n "$identity" ]; then
     printf 'identity: %s\n' "$identity"
   else
     printf 'identity: unresolved (gh api user failed)\n' >&2
@@ -82,4 +90,7 @@ fi
   exit 2
 }
 
-exec ${PREFIX[@]+"${PREFIX[@]}"} "$@"
+if [ -n "$PREFIX_LINE" ]; then
+  exec env -u GH_TOKEN -u GITHUB_TOKEN ${PREFIX[@]+"${PREFIX[@]}"} "$@"
+fi
+exec "$@"

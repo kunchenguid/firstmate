@@ -129,6 +129,7 @@ See [`trace-context.md`](trace-context.md) for carrier semantics, supported rout
 
 The no-mistakes pipeline's PR step opens pull requests by shelling out to `gh`, and a GitHub fine-grained personal access token is forbidden from the `createPullRequest` mutation, so an ambient token of that class breaks the step while every earlier step succeeds.
 The local, gitignored `config/gh-credential` holds ONE command prefix line that injects a credential authorized for that mutation and then runs its trailing arguments, for example `cred run GITHUB_TOKEN=vault/path --`.
+Because `gh` gives `GH_TOKEN` precedence over `GITHUB_TOKEN`, a configured wrapper removes both ambient variables before starting the prefix, leaving the prefix-injected credential as the only GitHub token that reaches `gh`.
 Only the first non-empty, non-comment line is read, surrounding whitespace is trimmed, and the line is split on whitespace and executed directly rather than through a shell, so quoting, globbing, redirection, and pipelines in it are not interpreted.
 An absent or blank file means `bin/fm-gh.sh` execs its command unchanged, so a home with no special credential behaves exactly as if the wrapper were not there.
 The file supplies the credential only; delivering it to the pipeline additionally requires installing the `gh` shim onto the `PATH` the no-mistakes daemon resolves, which is never automatic.

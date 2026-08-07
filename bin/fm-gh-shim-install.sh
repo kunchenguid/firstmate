@@ -94,6 +94,10 @@ resolve_dir() {
   cd "$1" 2> /dev/null && pwd
 }
 
+owns_link() {
+  [ -L "$1" ] && [ "$(readlink "$1")" = "$SHIM_SOURCE" ]
+}
+
 case "$MODE" in
   --install)
     [ -n "$DIR" ] || {
@@ -105,8 +109,8 @@ case "$MODE" in
       exit 1
     }
     link="$dir_abs/gh"
-    if [ -e "$link" ] && [ ! -L "$link" ]; then
-      echo "fm-gh-shim-install: refusing to replace a non-symlink at $link" >&2
+    if { [ -e "$link" ] || [ -L "$link" ]; } && ! owns_link "$link"; then
+      echo "fm-gh-shim-install: refusing to replace $link because this installer does not own it; remove it yourself first" >&2
       exit 1
     fi
     real_gh=$(first_gh_on_path "$TARGET_PATH" "$dir_abs") || {
@@ -137,7 +141,7 @@ case "$MODE" in
       exit 0
     fi
     # Only remove a link this script owns, so an unrelated gh symlink survives.
-    if [ "$(readlink "$link")" != "$SHIM_SOURCE" ]; then
+    if ! owns_link "$link"; then
       echo "fm-gh-shim-install: $link does not point at $SHIM_SOURCE; leaving it alone" >&2
       exit 1
     fi
@@ -152,7 +156,7 @@ case "$MODE" in
         exit 1
       }
       link="$dir_abs/gh"
-      if [ -L "$link" ] && [ "$(readlink "$link")" = "$SHIM_SOURCE" ]; then
+      if owns_link "$link"; then
         printf 'shim: installed at %s\n' "$link"
       else
         printf 'shim: not installed at %s\n' "$link"

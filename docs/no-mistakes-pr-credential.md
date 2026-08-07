@@ -31,6 +31,7 @@ The mechanism exists; only a supported way to populate it from configuration is 
 Because no supported configuration seam exists, firstmate intercepts `gh` on the `PATH` the daemon resolves, and does it with an explicitly installed shim.
 
 - `bin/fm-gh.sh` runs one command with this home's PR-capable credential injected, reading the command prefix from `config/gh-credential`.
+  When configured, it removes ambient `GH_TOKEN` and `GITHUB_TOKEN` before starting that prefix because `gh` gives `GH_TOKEN` precedence, so a daemon's inherited token cannot override the injected credential.
   With no such file it execs the command unchanged, so an unconfigured home behaves exactly as before.
 - `bin/fm-gh-shim.sh` is installed as a symlink named `gh`.
   It routes `gh pr create` and `gh pr edit` through `fm-gh.sh` and execs the real `gh` directly for everything else, including the `pr list` and `pr view` calls the pipeline uses to find an existing PR.

@@ -29,6 +29,8 @@ make_fake_gh() {
 #!/usr/bin/env bash
 printf 'argv:%s\n' "$*" >> "$FAKE_GH_LOG"
 printf 'token:%s\n' "${GITHUB_TOKEN:-<none>}" >> "$FAKE_GH_LOG"
+printf 'gh-token:%s\n' "${GH_TOKEN:-<none>}" >> "$FAKE_GH_LOG"
+printf 'effective-token:%s\n' "${GH_TOKEN:-${GITHUB_TOKEN:-<none>}}" >> "$FAKE_GH_LOG"
 echo "https://github.com/o/r/pull/1"
 EOF
   chmod +x "$dir/gh"
@@ -131,6 +133,7 @@ test_wrapper_without_config_is_transparent() {
   out=$(
     FAKE_GH_LOG="$case_dir/gh.calls" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+      GH_TOKEN="ambient-gh-token" GITHUB_TOKEN="ambient-github-token" \
       "$WRAPPER" "$real_dir/gh" pr create --title T < /dev/null 2>&1
   )
 
@@ -138,7 +141,34 @@ test_wrapper_without_config_is_transparent() {
     "unconfigured wrapper did not exec the command"
   assert_grep 'argv:pr create --title T' "$case_dir/gh.calls" \
     "unconfigured wrapper altered the argument vector"
+  assert_grep 'gh-token:ambient-gh-token' "$case_dir/gh.calls" \
+    "unconfigured wrapper cleared the ambient GH_TOKEN"
+  assert_grep 'token:ambient-github-token' "$case_dir/gh.calls" \
+    "unconfigured wrapper cleared the ambient GITHUB_TOKEN"
   pass "fm-gh.sh with no config/gh-credential execs the command unchanged"
+}
+
+test_configured_wrapper_replaces_ambient_tokens() {
+  local case_dir real_dir home
+  case_dir="$TMP_ROOT/token-precedence"
+  real_dir="$case_dir/real"
+  home="$case_dir/home"
+  make_fake_gh "$real_dir"
+  make_fake_cred "$case_dir/tools"
+  make_home "$home" "$case_dir/tools/fakecred prefix-token --"
+
+  FAKE_GH_LOG="$case_dir/gh.calls" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    GH_TOKEN="hostile-gh-token" GITHUB_TOKEN="hostile-github-token" \
+    "$WRAPPER" "$real_dir/gh" pr create < /dev/null > /dev/null 2>&1
+
+  assert_grep 'gh-token:<none>' "$case_dir/gh.calls" \
+    "configured wrapper left the higher-precedence ambient GH_TOKEN in place"
+  assert_grep 'token:prefix-token' "$case_dir/gh.calls" \
+    "configured wrapper did not replace the ambient GITHUB_TOKEN"
+  assert_grep 'effective-token:prefix-token' "$case_dir/gh.calls" \
+    "prefix-injected credential did not win gh token precedence"
+  pass "configured fm-gh.sh exposes only the prefix-injected GitHub token"
 }
 
 test_wrapper_ignores_comments_and_blank_lines() {
@@ -166,6 +196,28 @@ test_wrapper_ignores_comments_and_blank_lines() {
   assert_no_grep 'token:ignored-token' "$case_dir/gh.calls" \
     "wrapper consumed a prefix line after the first usable one"
   pass "fm-gh.sh reads only the first non-empty, non-comment, trimmed prefix line"
+}
+
+test_wrapper_ignores_indented_comments() {
+  local case_dir real_dir home
+  case_dir="$TMP_ROOT/indented-comments"
+  real_dir="$case_dir/real"
+  home="$case_dir/home"
+  make_fake_gh "$real_dir"
+  make_fake_cred "$case_dir/tools"
+  mkdir -p "$home/config"
+  {
+    printf '  # an indented comment line  \n'
+    printf '%s indented-comment-token --\n' "$case_dir/tools/fakecred"
+  } > "$home/config/gh-credential"
+
+  FAKE_GH_LOG="$case_dir/gh.calls" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$WRAPPER" "$real_dir/gh" pr create < /dev/null > /dev/null 2>&1
+
+  assert_grep 'token:indented-comment-token' "$case_dir/gh.calls" \
+    "wrapper classified an indented comment as a credential prefix"
+  pass "fm-gh.sh ignores credential comments after trimming whitespace"
 }
 
 test_shim_does_not_recurse_when_credential_resolves_gh_through_it() {
@@ -298,7 +350,7 @@ test_installer_refuses_to_replace_a_foreign_gh() {
   status=0
   out=$("$INSTALLER" --install --dir "$shim_dir" --path "$shim_dir:$real_dir" 2>&1) || status=$?
   expect_code 1 "$status" "install over a real file"
-  assert_contains "$out" "refusing to replace a non-symlink" \
+  assert_contains "$out" "this installer does not own it; remove it yourself first" \
     "installer did not refuse to overwrite an existing gh binary"
 
   # An unrelated gh symlink is equally not ours to delete.
@@ -311,11 +363,35 @@ test_installer_refuses_to_replace_a_foreign_gh() {
   pass "the installer refuses to overwrite or remove a gh it does not own"
 }
 
+test_installer_refuses_to_replace_a_foreign_symlink() {
+  local case_dir real_dir shim_dir status out target
+  case_dir="$TMP_ROOT/foreign-symlink"
+  real_dir="$case_dir/real"
+  shim_dir="$case_dir/shim"
+  make_fake_gh "$real_dir"
+  mkdir -p "$shim_dir"
+  ln -s "$real_dir/gh" "$shim_dir/gh"
+  target=$(readlink "$shim_dir/gh")
+
+  status=0
+  out=$("$INSTALLER" --install --dir "$shim_dir" --path "$shim_dir:$real_dir" 2>&1) || status=$?
+  expect_code 1 "$status" "install over a foreign symlink"
+  assert_contains "$out" "this installer does not own it; remove it yourself first" \
+    "installer did not refuse to overwrite a foreign gh symlink"
+  [ -L "$shim_dir/gh" ] || fail "installer removed a foreign gh symlink"
+  [ "$(readlink "$shim_dir/gh")" = "$target" ] || \
+    fail "installer changed the target of a foreign gh symlink"
+  pass "the installer refuses a foreign gh symlink and leaves it intact"
+}
+
 test_pr_create_routes_through_wrapper
 test_non_pr_invocations_pass_through_untouched
 test_wrapper_without_config_is_transparent
+test_configured_wrapper_replaces_ambient_tokens
 test_wrapper_ignores_comments_and_blank_lines
+test_wrapper_ignores_indented_comments
 test_shim_does_not_recurse_when_credential_resolves_gh_through_it
 test_bash32_runs_both_credential_paths
 test_installer_reports_and_enforces_precedence
 test_installer_refuses_to_replace_a_foreign_gh
+test_installer_refuses_to_replace_a_foreign_symlink
