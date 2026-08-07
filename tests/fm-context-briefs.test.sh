@@ -65,6 +65,9 @@ case "${1:-}" in
     printf 'tasks[0]{id,state,kind,repo,title}:\n'
     while IFS='|' read -r id state repo until created title; do
       [ -n "$id" ] || continue
+      # tasks-axi 0.2.4 spells an absent repository as the quoted sentinel here,
+      # verified against the real tool, so the fixture spells it the same way.
+      case "$repo" in '' | -) repo='"-"' ;; esac
       printf '  %s,%s,captain,%s,%s\n' "$id" "$state" "$repo" "$title"
     done < "$records"
     ;;
@@ -588,6 +591,43 @@ EOF
   pass "a repository no context claims is reported rather than silently dropped"
 }
 
+# A captain-held decision with no repository recorded belongs to nobody, so it
+# has to stay visible. It must not be reported as a repository, because there is
+# no repository to name and naming one asserts something nothing verified. The
+# two surfaces must also agree, since they reach the same fact by different reads.
+test_a_record_with_no_repository_is_reported_without_naming_one() {
+  local home fb generated audited
+  home=$(new_home "$TMP_ROOT/no-repo")
+  fb=$(make_fakebin "$TMP_ROOT/no-repo")
+  cat > "$TMP_ROOT/no-repo/tasks" <<'EOF'
+homeless-decision-one|queued|-|-|2026-08-01|A decision with no repository
+EOF
+
+  generated=$(PATH="$fb:$PATH" FAKE_TASKS="$TMP_ROOT/no-repo/tasks" \
+    run_gen "$home" 2>&1 | grep '^unmapped:')
+  audited=$(PATH="$fb:$PATH" FAKE_TASKS="$TMP_ROOT/no-repo/tasks" \
+    run_gen "$home" --check 2>&1 | grep '^unmapped:')
+
+  assert_not_contains "$generated" 'repository "-"' \
+    "the generate path named the sentinel as a repository"
+  assert_not_contains "$generated" 'repository ""' \
+    "the generate path named an empty repository"
+  assert_not_contains "$audited" 'repository "-"' \
+    "the audit named the sentinel as a repository"
+  assert_not_contains "$audited" 'repository ""' \
+    "the audit named an empty repository"
+
+  assert_contains "$generated" 'records no repository' \
+    "the generate path must still report the decision rather than drop it"
+  assert_contains "$audited" 'records no repository' \
+    "the audit must still report the decision rather than drop it"
+  [ "$generated" = "$audited" ] ||
+    fail "the two surfaces disagree:"$'\n'"generate: $generated"$'\n'"check:    $audited"
+  assert_no_grep 'A decision with no repository' "$home/data/briefs/back-office.md" \
+    "a decision no context claims must not be filed into a brief"
+  pass "a record with no repository is reported as that, identically on both surfaces"
+}
+
 # --- age stamp and the read-only review line --------------------------------
 
 test_each_block_states_its_own_age() {
@@ -982,6 +1022,7 @@ test_every_live_task_survives_a_child_that_reads_stdin
 test_every_captain_item_survives_a_child_that_reads_stdin
 test_running_reports_live_work_and_skips_secondmates
 test_unmapped_repository_is_reported
+test_a_record_with_no_repository_is_reported_without_naming_one
 test_each_block_states_its_own_age
 test_check_reports_a_stale_block_and_reads_the_review_line
 test_check_reports_an_unmapped_repository

@@ -392,9 +392,18 @@ captain_identities() {
       id = field[at["id"]]
       repo = field[at["repo"]]
       if (id == "") next
+      # The listing quotes a value it had to escape, and spells an absent
+      # repository as the quoted sentinel, so both are unwrapped here to the
+      # same plain value the per-item read yields.
+      sub(/^"/, "", repo)
+      sub(/"$/, "", repo)
+      if (repo == "" || repo == "-") {
+        printf "%s\t-\t-\n", id
+        next
+      }
       key = repo
       sub(/^.*\//, "", key)
-      printf "%s\t%s\t%s\n", id, tolower(key), (repo == "" ? "-" : repo)
+      printf "%s\t%s\t%s\n", id, tolower(key), repo
     }
   '
 }
@@ -424,7 +433,7 @@ captain_items() {
     created=$(tasks_field "$out" created)
     [ -n "$title" ] || title=$id
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "$id" "$(repo_key "$repo")" "$(held "$repo")" "$(held "$deadline")" \
+      "$id" "$(held "$(repo_key "$repo")")" "$(held "$repo")" "$(held "$deadline")" \
       "$(held "$created")" "$(held "$title")"
   done
 }
@@ -448,7 +457,7 @@ running_identities() {
     kind=$(meta_field "$meta" kind)
     [ "$kind" = secondmate ] && continue
     project=$(meta_field "$meta" project)
-    printf '%s\t%s\n' "$id" "$(repo_key "$project")"
+    printf '%s\t%s\n' "$id" "$(held "$(repo_key "$project")")"
   done
 }
 
@@ -806,7 +815,10 @@ generate() {
   running="$work/running.tsv"
   collect_records "$work"
 
-  { cut -f2,3 "$captain"; awk -F'\t' '{ print $2 "\t" $2 }' "$running"; } | report_unmapped
+  {
+    awk -F'\t' '{ print $2 "\t" $3 "\tdecision" }' "$captain"
+    awk -F'\t' '{ print $2 "\t" $2 "\ttask" }' "$running"
+  } | report_unmapped
 
   # Five lifecycle commands can fire this refresh at once in a fleet. The line
   # numbers check_markers resolves are only true while the file holds still, so
@@ -849,17 +861,32 @@ generate() {
 
 # report_unmapped: one explicit line per repository present in the records that no
 # context claims, so it is never silently dropped. It reads
-# "<repo_key><TAB><repo_display>" pairs on stdin, so a caller can feed it straight
-# from the records it already holds without staging a file to do it.
+# "<repo_key><TAB><repo_display><TAB><record_kind>" rows on stdin, so a caller can
+# feed it straight from the records it already holds without staging a file.
+#
+# Every field carries the "-" sentinel when it has no value, because a tab is IFS
+# whitespace and an empty leading field would be swallowed, promoting the next
+# column into the key. A record with no repository is reported as exactly that
+# rather than as a repository named after the sentinel, because naming one would
+# assert a repository nothing verified.
 report_unmapped() {
-  local mapped seen key display
+  local mapped seen key display kind
   mapped=$(read_map | cut -f2 | LC_ALL=C sort -u)
   seen=$(LC_ALL=C sort -u)
-  printf '%s\n' "$seen" | while IFS="$TAB" read -r key display; do
+  printf '%s\n' "$seen" | while IFS="$TAB" read -r key display kind; do
     [ -n "$key" ] || continue
+    if [ "$key" = '-' ]; then
+      case "$kind" in
+        task) printf 'unmapped: a live task records no repository, so no context can claim it\n' ;;
+        *) printf 'unmapped: a captain-held decision records no repository, so no context can claim it\n' ;;
+      esac
+      continue
+    fi
     printf '%s\n' "$mapped" | grep -qx -F -- "$key" && continue
+    display=$(given "$display")
+    [ -n "$display" ] || display=$key
     printf 'unmapped: repository "%s" appears in the records but no context in %s claims it\n' \
-      "${display:-$key}" "$MAP"
+      "$display" "$MAP"
   done
 }
 
@@ -878,8 +905,8 @@ check() {
   backlog_available || BACKLOG_UNREAD=$(backlog_unread_reason)
   running_readable || RUNNING_UNREAD=$(running_unread_reason)
   {
-    [ -n "$BACKLOG_UNREAD" ] || captain_identities | awk -F'\t' '{ print $2 "\t" $3 }'
-    [ -n "$RUNNING_UNREAD" ] || running_identities | awk -F'\t' '{ print $2 "\t" $2 }'
+    [ -n "$BACKLOG_UNREAD" ] || captain_identities | awk -F'\t' '{ print $2 "\t" $3 "\tdecision" }'
+    [ -n "$RUNNING_UNREAD" ] || running_identities | awk -F'\t' '{ print $2 "\t" $2 "\ttask" }'
   } | report_unmapped
   [ -z "$BACKLOG_UNREAD" ] || printf 'the backlog cannot be read right now: %s\n' "$BACKLOG_UNREAD"
   [ -z "$RUNNING_UNREAD" ] || printf 'live work cannot be read right now: %s\n' "$RUNNING_UNREAD"
