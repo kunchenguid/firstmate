@@ -861,6 +861,79 @@ test_identical_run_outcomes_surface_per_validation_generation() {
   pass "identical PR-ready and failed run outcomes surface once per validation generation"
 }
 
+test_same_hash_run_outcomes_surface_once_after_working_state() {
+  local dir state fakebin out capture_file drain_out task window statusf line sig key pane_hash pid item working outcome marker_file marker
+  for item in ready failed; do
+    dir=$(make_case "terminal-same-hash-run-outcome-$item")
+    state="$dir/state"
+    fakebin="$dir/fakebin"
+    out="$dir/watch.out"
+    capture_file="$dir/pane.txt"
+    drain_out="$dir/drain.out"
+    task="terminal-same-hash-$item"
+    window="test:fm-$task"
+    statusf="$state/$task.status"
+    line="done: implementation complete, ready to validate"
+    case "$item" in
+      ready) outcome='state: done · source: run-step · checks green: PR ready for review · run-id=same-ready run-head=aaa111' ;;
+      *)     outcome='state: failed · source: run-step · run failed · run-id=same-failed run-head=bbb222' ;;
+    esac
+    working="state: working · source: run-step · validating ($item) · run-id=same-$item run-head=000000"
+    marker=$(crew_actionable_run_state_marker_from_state_line "$outcome")
+    printf '%s\n' "$line" > "$statusf"
+    sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-${task}_status"
+    printf '%s' "$line" > "$state/.hb-surfaced-$task"
+    printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/$task.meta"
+    printf 'same hash terminal pane\n' > "$capture_file"
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    pane_hash=$(hash_text "same hash terminal pane")
+    printf '%s' "$pane_hash" > "$state/.hash-$key"
+    printf '%s' "$pane_hash" > "$state/.stale-$key"
+    rm -f "$state/.stale-since-$key"
+    printf '1\n' > "$state/.count-$key"
+    marker_file="$state/.run-state-surfaced-$task"
+
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE="$working" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_live "$pid" 30 || { reap "$pid"; fail "$item same-hash working state woke: $(cat "$out")"; }
+    [ ! -s "$out" ] || { reap "$pid"; fail "$item same-hash working state printed a wake: $(cat "$out")"; }
+    [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "$item same-hash working state queued a wake"; }
+    reap "$pid"
+
+    : > "$out"
+    : > "$state/.wake-queue"
+    printf '1\n' > "$state/.count-$key"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE="$outcome" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 40 || fail "$item same-hash outcome did not wake"
+    grep -Fx "stale: $window" "$out" >/dev/null || fail "$item same-hash outcome did not print a stale wake"
+    [ "$(cat "$marker_file" 2>/dev/null || true)" = "$marker" ] || fail "$item same-hash outcome marker was not recorded"
+    FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after $item same-hash outcome failed"
+    grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "$item same-hash outcome was not queued"
+
+    : > "$out"
+    : > "$state/.wake-queue"
+    printf '1\n' > "$state/.count-$key"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE="$outcome" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_live "$pid" 30 || { reap "$pid"; fail "$item same-hash duplicate re-woke: $(cat "$out")"; }
+    [ ! -s "$out" ] || { reap "$pid"; fail "$item same-hash duplicate printed a wake: $(cat "$out")"; }
+    [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "$item same-hash duplicate queued a wake"; }
+    reap "$pid"
+  done
+
+  pass "same-hash PR-ready and failed run outcomes surface once after working state"
+}
+
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
@@ -2448,6 +2521,7 @@ test_already_surfaced_terminal_stales_absorbed_until_new_status_signal
 test_already_surfaced_terminal_status_wakes_on_run_state_transition
 test_terminal_run_state_uses_one_crew_state_sample
 test_identical_run_outcomes_surface_per_validation_generation
+test_same_hash_run_outcomes_surface_once_after_working_state
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold

@@ -711,6 +711,22 @@ clear_actionable_run_state_surfaced() {  # <task>
   rm -f "$(actionable_run_state_surfaced_path "$1")"
 }
 
+surface_actionable_run_state_if_new() {  # <window> <task> <hash> <crew-state-line>
+  local win=$1 task=$2 h=$3 crew_state=$4 actionable_run_state actionable_run_state_marker key
+  actionable_run_state=$(crew_actionable_run_state_line_from_state_line "$crew_state" || true)
+  [ -n "$actionable_run_state" ] || return 1
+  actionable_run_state_marker=$(crew_actionable_run_state_marker_from_state_line "$crew_state" || true)
+  [ -n "$actionable_run_state_marker" ] || return 1
+  actionable_run_state_already_surfaced "$task" "$actionable_run_state_marker" && return 1
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  fm_wake_append stale "$win" "stale: $win" || exit 1
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  rm -f "$STATE/.stale-since-$key"
+  mark_surfaced "$STATE/$task.status"
+  mark_actionable_run_state_surfaced "$task" "$actionable_run_state_marker"
+  wake "stale: $win"
+}
+
 # Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
 # any captain-relevant status has NOT already been surfaced to firstmate (its
 # content differs from the .hb-surfaced-<task> marker). Pure detect, no side
@@ -1164,27 +1180,20 @@ EOF
           # poll. Root cause of the 2026-07 herdr false-surface incidents: a
           # validating crew was surfaced as stale every few minutes despite an
           # actively-running pipeline, purely because of this stale leftover
-          # line. On a NEW hash, give an active run/busy pane (the same
+          # line. Give an active run/busy pane (the same
           # authoritative source fm-crew-state.sh itself already prioritizes
           # over the log) a chance to override before trusting the log. If this
           # exact terminal status was already surfaced through a signal, stale
           # hash drift is no new captain-facing information and is absorbed.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             crew_state=$(crew_state_line "$task" || true)
-            actionable_run_state=$(crew_actionable_run_state_line_from_state_line "$crew_state" || true)
-            actionable_run_state_marker=$(crew_actionable_run_state_marker_from_state_line "$crew_state" || true)
             if [ "$(crew_absorb_class_from_state_line "$crew_state")" = working ]; then
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
               clear_actionable_run_state_surfaced "$task"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
-            elif [ -n "$actionable_run_state" ] && ! actionable_run_state_already_surfaced "$task" "$actionable_run_state_marker"; then
-              fm_wake_append stale "$w" "stale: $w" || exit 1
-              printf '%s' "$h" > "$sf"
-              rm -f "$ssf"
-              mark_surfaced "$STATE/$task.status"
-              mark_actionable_run_state_surfaced "$task" "$actionable_run_state_marker"
-              wake "stale: $w"
+            elif surface_actionable_run_state_if_new "$w" "$task" "$h" "$crew_state"; then
+              :
             elif terminal_status_already_surfaced "$task"; then
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
@@ -1197,15 +1206,13 @@ EOF
               wake "stale: $w"
             fi
           elif [ -e "$ssf" ]; then
-            # This exact hash was already overridden as provably-working (a
-            # wedge timer is running for it) - keep treating it that way
-            # without re-reading the crew state every poll, and without
-            # letting the still-captain-relevant log line re-surface it.
-            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf"
+            crew_state=$(crew_state_line "$task" || true)
+            surface_actionable_run_state_if_new "$w" "$task" "$h" "$crew_state" \
+              || wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf"
+          else
+            crew_state=$(crew_state_line "$task" || true)
+            surface_actionable_run_state_if_new "$w" "$task" "$h" "$crew_state" || true
           fi
-          # else: already surfaced as genuinely terminal on a prior poll of
-          # this same hash - nothing left to do (matches the original,
-          # unmodified terminal-status behavior).
         else
           # Non-terminal stale: a crew gone quiet without a captain-relevant status.
           # Decided once per distinct stale hash (the costly state reads run only
