@@ -77,6 +77,9 @@ Firstmate adds this skill's load instruction to firstmate-repo briefs by hand in
 - `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`.
 - Run `bin/fm-lint.sh` before treating a script change as done; it is the single owner of the lint definition (file set, config, and pinned shellcheck version) that CI and the no-mistakes pre-push gate both invoke, and it refuses to run under any other shellcheck version.
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
+- `bin/*.py` runs under whichever `python3` is first on the invoking shell's `PATH`, which is often older than the version CI pins, so a newer-only API fails at runtime rather than in CI.
+- Prefer the idiom already used across `bin/`: `os.stat(path, follow_symlinks=...)`, not the Python 3.10+ `Path.stat(follow_symlinks=...)`.
+- `os.DirEntry.stat(follow_symlinks=...)` from `os.scandir` is a different API and is valid on every Python 3.
 - A backend-verification doc (`docs/*-backend.md`) records empirical facts, not assumptions.
 - Include the date, version, exact commands run, and exact output.
 - Write incidents the same way, as evidence, not narrative alone.

@@ -38,11 +38,18 @@ make_case() {
   printf '#!/usr/bin/env bash\n. tests/helper.sh\n' > "$repo/tests/support.test.sh"
   printf '#!/usr/bin/env bash\ngrep -qx fixed app.txt\n' > "$repo/shared-test.sh"
   ln -s ../shared-test.sh "$repo/tests/symlink.test.sh"
+  printf '#!/usr/bin/env bash\n# def test_app_is_fixed()\ngrep -qx fixed app.txt\n' \
+    > "$repo/tests/nodeid.test.sh"
+  mkdir -p "$repo/real-tests"
+  printf '#!/usr/bin/env bash\ngrep -qx fixed app.txt\n' > "$repo/real-tests/linked.test.sh"
+  ln -s ../real-tests "$repo/tests/linked"
   chmod +x "$repo/tests/regression.test.sh" "$repo/tests/stateful.test.sh" \
-    "$repo/tests/readable-state.test.sh" "$repo/tests/support.test.sh"
+    "$repo/tests/readable-state.test.sh" "$repo/tests/support.test.sh" \
+    "$repo/tests/nodeid.test.sh" "$repo/real-tests/linked.test.sh"
   git -C "$repo" add app.txt other.txt shared-test.sh tests/regression.test.sh \
     tests/helper.sh tests/readable-state.test.sh tests/stateful.test.sh \
-    tests/support.test.sh tests/symlink.test.sh
+    tests/support.test.sh tests/symlink.test.sh tests/nodeid.test.sh \
+    real-tests/linked.test.sh tests/linked
   git -C "$repo" commit -qm base
   base=$(git -C "$repo" rev-parse HEAD)
   git -C "$repo" checkout -qb feature
@@ -67,7 +74,45 @@ EOF
   install_codex_fake "$case_dir"
   install_claude_fake "$case_dir"
   install_sandbox_fake "$case_dir"
+  install_pytest_fake "$case_dir"
   printf '%s\t%s\t%s\n' "$case_dir" "$base" "$head"
+}
+
+# A node-id runner standing in for pytest. It reproduces the three outcomes the
+# gate must tell apart: the named test ran and passed (0), ran and failed (1),
+# and never ran because the selector resolved to nothing (4 usage / 5 collected).
+install_pytest_fake() {
+  local case_dir=$1
+  mkdir -p "$case_dir/pathbin"
+  cat > "$case_dir/pathbin/pytest" <<'SH'
+#!/usr/bin/env bash
+selector=""
+for argument in "$@"; do
+  case "$argument" in
+    -*) ;;
+    *) selector=$argument ;;
+  esac
+done
+[ -n "$selector" ] || exit 4
+file=${selector%%::*}
+name=""
+case "$selector" in
+  *::*) name=${selector#*::} ;;
+esac
+[ -f "$file" ] || { echo "ERROR: file or directory not found: $file"; exit 4; }
+if [ -n "$name" ] && ! grep -q "def $name(" "$file"; then
+  echo "no tests ran"
+  exit 5
+fi
+# A mutation that breaks collection reports a non-execution status, never a
+# test failure. The gate must not read that as "the test caught the mutation".
+if [ "${FM_TEST_PYTEST_BREAK_COLLECTION:-}" = 1 ] && grep -qx broken app.txt; then
+  echo "no tests ran"
+  exit 5
+fi
+exec bash "$file"
+SH
+  chmod +x "$case_dir/pathbin/pytest"
 }
 
 install_gh_axi_fake() {
@@ -448,6 +493,42 @@ elif scenario in {
         "mutation_proof": mutation_proof,
         "equivalent_to": None,
     }]
+elif scenario in {
+    "node-id-proof",
+    "node-id-unmatched",
+    "node-id-mutated-nonexecution",
+    "absent-runner",
+    "linked-directory-test",
+}:
+    patch = protocol / "mutations" / "revert.patch"
+    patch.parent.mkdir(parents=True, exist_ok=True)
+    patch.write_text("""diff --git a/app.txt b/app.txt
+--- a/app.txt
++++ b/app.txt
+@@ -1 +1 @@
+-fixed
++broken
+""")
+    selector = {
+        "node-id-unmatched": "tests/nodeid.test.sh::test_never_defined",
+        "linked-directory-test": "tests/linked/linked.test.sh",
+        "absent-runner": "tests/nodeid.test.sh",
+    }.get(scenario, "tests/nodeid.test.sh::test_app_is_fixed")
+    base["finding_updates"] = [{
+        "id": "cc-aaaaaaaaaaaa",
+        "status": "verified-fixed",
+        "note": "A node-id selector names the regression test that pins the fix.",
+        "reproduction": None,
+        "mutation_proof": {
+            "test_path": selector,
+            "test_invocation": {
+                "runner": "vitest" if scenario == "absent-runner" else "pytest",
+                "arguments": [],
+            },
+            "mutation_patch_path": ".crosscheck/mutations/revert.patch",
+        },
+        "equivalent_to": None,
+    }]
 elif scenario == "escaped-reproduction":
     base["new_findings"] = [{
         "title": "Escaped evidence",
@@ -459,6 +540,54 @@ elif scenario == "escaped-reproduction":
             "command": "bash .crosscheck/reproductions/../../tests/regression.test.sh",
             "expected_exit": 0,
             "output_contains": "UNREACHABLE-MARKER",
+        },
+    }]
+elif scenario == "reviewer-env-dependent-execution":
+    # The reviewer's own run has its provider account environment; the gate's
+    # independent re-run does not. A helper that requires it exits nonzero
+    # there without ever reproducing anything.
+    execution.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        "base=$1\n"
+        "head=$2\n"
+        "receipt=$3\n"
+        "account=$CODEX_HOME\n"
+        "git diff \"$base\" \"$head\" -- app.txt >/dev/null\n"
+        "printf 'CROSSCHECK-REVIEW-EXECUTED base=%s head=%s HOME=%s account=%s\\n' "
+        "\"$base\" \"$head\" \"$HOME\" \"$account\" | tee \"$receipt\"\n"
+    )
+    os.chmod(execution, 0o755)
+    subprocess.run(
+        [
+            "bash",
+            ".crosscheck/reproductions/review-execution.sh",
+            base_sha,
+            head,
+            ".crosscheck/reproductions/review-execution.receipt",
+        ],
+        cwd=workdir,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+elif scenario == "unfound-reproduction-command":
+    reproduction = protocol / "reproductions" / "missing-tool.sh"
+    reproduction.parent.mkdir(parents=True, exist_ok=True)
+    reproduction.write_text(
+        "#!/usr/bin/env bash\nexec fm-definitely-not-installed-xyz\n"
+    )
+    os.chmod(reproduction, 0o755)
+    base["new_findings"] = [{
+        "title": "Evidence needing absent tooling",
+        "severity": "blocking",
+        "description": "The helper invokes a tool the review checkout does not carry.",
+        "citations": [{"path": "app.txt", "line": 1}],
+        "reproduction": {
+            "test_path": ".crosscheck/reproductions/missing-tool.sh",
+            "command": "bash .crosscheck/reproductions/missing-tool.sh",
+            "expected_exit": 7,
+            "output_contains": "REPRODUCED-BUG",
         },
     }]
 elif scenario == "noisy-reproduction":
@@ -514,6 +643,28 @@ elif scenario == "reading-only-suspicion":
     execution.unlink()
     receipt.unlink(missing_ok=True)
 
+if scenario == "bulky-unauthorized-scratch":
+    # Unauthorized scratch is a refusal either way. It must be refused by NAME,
+    # not by the integrity inspection running out of output budget.
+    for index in range(12000):
+        (workdir / f"scratch-{index:06d}.txt").write_text("x")
+
+if scenario == "tampered-checkout":
+    # Collapsing untracked evidence into one status entry must not hide a
+    # reviewer that edited tracked code or wrote outside .crosscheck/.
+    (workdir / "app.txt").write_text("tampered\n")
+    (workdir / "tests" / "sneaky.sh").write_text("#!/usr/bin/env bash\n")
+
+if scenario == "bulky-evidence":
+    # A reviewer that substantiates a finding writes real evidence. Listing it
+    # file by file used to exceed the gate's bounded-output limit and refuse the
+    # review for doing its job.
+    bulk = protocol / "bulk"
+    bulk.mkdir(parents=True, exist_ok=True)
+    filler = "e" * 200
+    for index in range(1200):
+        (bulk / f"evidence-{index:05d}-{filler}").write_text("x")
+
 if scenario == "oversized-artifact":
     base["summary"] = "A" * 210000
 
@@ -546,6 +697,7 @@ run_case() {
   FM_TEST_AMBIENT_HOME="$HOME" \
   FM_TEST_BASE="$base" \
   FM_TEST_HEAD="$head" \
+  PATH="$case_dir/pathbin:$PATH" \
     python3 "$CROSSCHECK_PY" "$command" task-x1 "$PR_URL" "$@"
 }
 
@@ -1038,6 +1190,270 @@ assert proof["mutated_files"] == ["app.txt"]
 ' "$case_dir/data/task-x1/crosscheck-ledger.json" \
     || fail "mutation proof execution was not durably recorded"
   pass "verified-fixed requires a passing named test that fails after implementation mutation"
+}
+
+test_node_id_selector_clears_a_passing_named_test() {
+  local record case_dir base head
+  record=$(make_case node-id-proof)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  run_case "$case_dir" "$base" "$head" node-id-proof run \
+    > "$case_dir/out" 2> "$case_dir/err" \
+    || fail "node-id mutation proof did not clear: $(cat "$case_dir/err")"
+  python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1]))
+finding = value["findings"][0]
+proof = finding["history"][-1]["proof"]
+assert finding["lifecycle"] == "verified-fixed", finding["lifecycle"]
+assert proof["test_path"] == "tests/nodeid.test.sh::test_app_is_fixed", proof["test_path"]
+assert proof["baseline_exit"] == 0
+assert proof["mutated_exit"] != 0
+' "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    || fail "node-id proof was not durably recorded with its full selector"
+  pass "a runner node id names a test the gate can execute and clear"
+}
+
+test_absent_runner_is_never_a_test_outcome() {
+  local record case_dir base head rc
+  record=$(make_case absent-runner)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  set +e
+  run_case "$case_dir" "$base" "$head" absent-runner run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "absent named runner"
+  assert_grep 'is not installed on PATH' "$case_dir/err" \
+    "an uninstalled runner was not named as the reason no test ran"
+  if grep -q 'does not pass before mutation' "$case_dir/err"; then
+    fail "an uninstalled runner was misreported as a failing test"
+  fi
+  pass "an uninstalled runner is named, never reported as a failing test"
+}
+
+test_unmatched_selector_is_never_a_failing_test() {
+  local record case_dir base head rc
+  record=$(make_case node-id-unmatched)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  set +e
+  run_case "$case_dir" "$base" "$head" node-id-unmatched run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "selector matching no test"
+  assert_grep 'never ran its named test' "$case_dir/err" \
+    "a selector that matched no test was not reported as a non-execution"
+  if grep -q 'does not pass before mutation' "$case_dir/err"; then
+    fail "a test that never ran was misreported as a failing test"
+  fi
+  pass "a selector that matches no test is a non-execution, not a failure"
+}
+
+test_mutated_non_execution_cannot_clear_a_finding() {
+  local record case_dir base head rc
+  record=$(make_case node-id-mutated-nonexecution)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  set +e
+  FM_TEST_PYTEST_BREAK_COLLECTION=1 \
+    run_case "$case_dir" "$base" "$head" node-id-mutated-nonexecution run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "mutated run that never executed the test"
+  assert_grep 'never ran its named test' "$case_dir/err" \
+    "a mutated run that never executed the test was not named as a non-execution"
+  python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1]))
+assert value["findings"][0]["lifecycle"] == "open", value["findings"][0]["lifecycle"]
+' "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    || fail "a mutation that only broke collection cleared the finding"
+  pass "a mutated run that never executed the test cannot clear a finding"
+}
+
+# `Path.stat(follow_symlinks=...)` is Python 3.10+. `fm-crosscheck.sh` execs
+# whichever `python3` is first on PATH, so that form turns an older interpreter
+# into an uncaught TypeError deep inside evidence capture instead of a gate
+# verdict. `os.stat(path, follow_symlinks=...)` is the portable idiom the rest
+# of bin/ already uses.
+test_evidence_capture_runs_on_older_interpreters() {
+  local offenders older probe
+  # Scoped to the two evidence-path modules, where every such receiver is a
+  # pathlib.Path. os.DirEntry.stat(follow_symlinks=...) elsewhere in bin/ is a
+  # different API and is valid on every Python 3.
+  offenders=$(grep -nE '\.stat\(follow_symlinks=' \
+    "$ROOT/bin/fm-crosscheck.py" "$ROOT/bin/fm_bounded_io.py" || true)
+  if [ -n "$offenders" ]; then
+    fail "Path.stat(follow_symlinks=) is Python 3.10+ only: $offenders"
+  fi
+  older=""
+  for probe in python3.9 /usr/bin/python3 python3.8; do
+    command -v "$probe" > /dev/null 2>&1 || continue
+    if "$probe" -c 'import sys; raise SystemExit(0 if sys.version_info < (3, 10) else 1)'; then
+      older=$probe
+      break
+    fi
+  done
+  if [ -z "$older" ]; then
+    echo "SKIP: no pre-3.10 interpreter available for the portability probe"
+    pass "evidence capture avoids interpreter-version-only APIs"
+    return
+  fi
+  printf '{"ok":1}\n' > "$TMP_ROOT/portability.json"
+  "$older" - "$ROOT/bin" "$TMP_ROOT/portability.json" <<'PY' \
+    || fail "evidence capture is unusable on $("$older" --version 2>&1)"
+import importlib.util
+import sys
+from pathlib import Path
+
+bindir = Path(sys.argv[1])
+sys.path.insert(0, str(bindir))
+from fm_bounded_io import read_bounded_json
+
+assert read_bounded_json(Path(sys.argv[2]), maximum_bytes=4096) == {"ok": 1}
+
+spec = importlib.util.spec_from_file_location("xc", bindir / "fm-crosscheck.py")
+crosscheck = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(crosscheck)
+
+review = Path(sys.argv[2]).parent / "portability-review"
+(review / ".crosscheck" / "mutations").mkdir(parents=True, exist_ok=True)
+patch = review / ".crosscheck" / "mutations" / "revert.patch"
+patch.write_text("diff --git a/app.txt b/app.txt\n")
+resolved = crosscheck.safe_artifact(
+    review, ".crosscheck/mutations/revert.patch", ".crosscheck/mutations/"
+)
+assert resolved.name == "revert.patch", resolved
+PY
+  pass "evidence capture avoids interpreter-version-only APIs"
+}
+
+# The gate re-runs reviewer evidence without the reviewer's provider account
+# environment. That is deliberate, but the refusal must name the environment
+# difference and show the command's own output instead of reporting a bare
+# unexpected exit that reads as a substantive verdict about the code.
+test_reviewer_env_dependent_evidence_names_the_difference() {
+  local record case_dir base head rc
+  record=$(make_case reviewer-env-dependent)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  set +e
+  run_case "$case_dir" "$base" "$head" reviewer-env-dependent-execution run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "reviewer evidence depending on reviewer-only environment"
+  assert_grep 'none of the reviewer' "$case_dir/err" \
+    "the refusal did not name the independent re-execution environment"
+  assert_grep 'CODEX_HOME' "$case_dir/err" \
+    "the refusal did not surface the command output that explains the exit"
+  pass "evidence that needs reviewer-only environment is diagnosable, not a bare exit"
+}
+
+test_unfound_evidence_command_is_a_non_execution() {
+  local record case_dir base head rc
+  record=$(make_case unfound-reproduction)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  set +e
+  run_case "$case_dir" "$base" "$head" unfound-reproduction-command run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "evidence command that does not exist"
+  assert_grep 'never ran' "$case_dir/err" \
+    "an unfound evidence command was not reported as a non-execution"
+  pass "an evidence command that was never found is a non-execution"
+}
+
+# The gate's own integrity check reads `git status` through the bounded-output
+# limit. Listing evidence file by file meant a review that substantiated
+# anything could exceed that limit and be refused, while a review that found
+# nothing completed - the gate could block but never clear.
+test_bulky_reviewer_evidence_still_completes() {
+  local record case_dir base head
+  record=$(make_case bulky-evidence)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  run_case "$case_dir" "$base" "$head" bulky-evidence run \
+    > "$case_dir/out" 2> "$case_dir/err" \
+    || fail "substantial reviewer evidence blocked the review: $(cat "$case_dir/err")"
+  assert_grep 'crosscheck clear' "$case_dir/out" \
+    "a clean review carrying substantial evidence did not clear"
+  pass "a review carrying substantial evidence still reaches a verdict"
+}
+
+test_bulky_unauthorized_scratch_is_named_not_truncated() {
+  local record case_dir base head rc
+  record=$(make_case bulky-unauthorized)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  set +e
+  run_case "$case_dir" "$base" "$head" bulky-unauthorized-scratch run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "heavy unauthorized scratch in the review checkout"
+  assert_grep 'changed tracked or unauthorized path' "$case_dir/err" \
+    "heavy unauthorized scratch was not named as an unauthorized path"
+  if grep -q 'aggregate output limit' "$case_dir/err"; then
+    fail "the integrity inspection ran out of output budget instead of naming the path"
+  fi
+  pass "heavy unauthorized scratch is refused by name, not by output truncation"
+}
+
+test_tampered_review_checkout_is_still_detected() {
+  local record case_dir base head rc
+  record=$(make_case tampered-checkout)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  set +e
+  run_case "$case_dir" "$base" "$head" tampered-checkout run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "reviewer that edited the review checkout"
+  assert_grep 'changed tracked or unauthorized path' "$case_dir/err" \
+    "a reviewer that edited tracked code was not detected"
+  pass "a reviewer that edits tracked code or writes outside .crosscheck stays refused"
+}
+
+test_symlinked_directory_named_test_is_rejected() {
+  local record case_dir base head rc
+  record=$(make_case linked-directory-test)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  set +e
+  run_case "$case_dir" "$base" "$head" linked-directory-test run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "named test behind a symlinked directory"
+  assert_grep 'symlink' "$case_dir/err" \
+    "a named test reached through an in-repository symlink was accepted"
+  pass "a named test behind an in-repository symlink stays rejected"
+}
+
+# The symlink check used to compare against a purely lexical absolute path, so a
+# home reached through any symlinked ancestor - a macOS /tmp or /var path, say -
+# could never clear a finding no matter how sound the change was.
+test_symlinked_home_ancestor_still_clears() {
+  local record case_dir base head
+  record=$(make_case symlinked-home)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  seed_open_ledger "$case_dir" "$head"
+  ln -s state "$case_dir/state-link"
+  FM_TEST_STATE_OVERRIDE="$case_dir/state-link" \
+    run_case "$case_dir" "$base" "$head" verified-fixed run \
+    > "$case_dir/out" 2> "$case_dir/err" \
+    || fail "a symlinked home ancestor blocked a sound clearance: $(cat "$case_dir/err")"
+  python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1]))
+assert value["findings"][0]["lifecycle"] == "verified-fixed"
+' "$case_dir/data/task-x1/crosscheck-ledger.json" \
+    || fail "the clearance was not durably recorded"
+  pass "a home reached through a symlinked ancestor can still clear a finding"
 }
 
 test_forged_git_diff_mutation_command_is_rejected() {
@@ -1934,6 +2350,18 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_real_claude_sandbox_executes_exact_sha_git_diff|\
     test_symlinked_named_test_cannot_hide_test_mutation|\
     test_evidence_batch_item_limit_precedes_execution|\
+    test_node_id_selector_clears_a_passing_named_test|\
+    test_absent_runner_is_never_a_test_outcome|\
+    test_unmatched_selector_is_never_a_failing_test|\
+    test_mutated_non_execution_cannot_clear_a_finding|\
+    test_symlinked_directory_named_test_is_rejected|\
+    test_symlinked_home_ancestor_still_clears|\
+    test_reviewer_env_dependent_evidence_names_the_difference|\
+    test_unfound_evidence_command_is_a_non_execution|\
+    test_bulky_reviewer_evidence_still_completes|\
+    test_tampered_review_checkout_is_still_detected|\
+    test_bulky_unauthorized_scratch_is_named_not_truncated|\
+    test_evidence_capture_runs_on_older_interpreters|\
     test_evidence_batch_has_aggregate_deadline)
       "$FM_TEST_CASE"
       exit 0
@@ -1970,6 +2398,18 @@ test_missing_author_identity_is_a_named_tool_failure
 test_new_finding_requires_executed_reproduction
 test_silence_never_closes_prior_finding
 test_verified_fix_executes_mutation_proof
+test_node_id_selector_clears_a_passing_named_test
+test_absent_runner_is_never_a_test_outcome
+test_unmatched_selector_is_never_a_failing_test
+test_mutated_non_execution_cannot_clear_a_finding
+test_symlinked_directory_named_test_is_rejected
+test_symlinked_home_ancestor_still_clears
+test_reviewer_env_dependent_evidence_names_the_difference
+test_unfound_evidence_command_is_a_non_execution
+test_bulky_reviewer_evidence_still_completes
+test_tampered_review_checkout_is_still_detected
+test_bulky_unauthorized_scratch_is_named_not_truncated
+test_evidence_capture_runs_on_older_interpreters
 test_forged_git_diff_mutation_command_is_rejected
 test_stateful_test_cannot_fabricate_mutation_causality
 test_baseline_readable_state_is_destroyed_before_mutation

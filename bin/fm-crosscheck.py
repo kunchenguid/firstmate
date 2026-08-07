@@ -43,6 +43,11 @@ MAX_CAPTURE = 200_000
 DEFAULT_REVIEWER_CAPTURE = 16 * 1024 * 1024
 MAX_REVIEWER_CAPTURE = 64 * 1024 * 1024
 MAX_LEDGER_BYTES = 16 * 1024 * 1024
+# Budget for the post-review checkout integrity inspection. Authorized evidence
+# costs one line, so anything approaching this is already an unauthorized state;
+# the headroom exists so such a state is named rather than surfacing as a bare
+# output-limit error. Overflow remains a refusal.
+REVIEW_STATUS_MAX_BYTES = 4 * 1024 * 1024
 MAX_REVIEWER_CONFIG_BYTES = 64 * 1024
 MAX_LEDGER_PROMPT_BYTES = 64_000
 MAX_PROJECTED_FINDINGS = 512
@@ -66,6 +71,28 @@ TEST_RUNNERS = {
     "zsh",
 }
 FILE_TEST_RUNNERS = TEST_RUNNERS - {"direct", "jest", "pytest", "rspec", "vitest"}
+# Runners whose command line accepts a `path::selector` node id. Every other
+# approved runner is handed a plain file, so a selector there is a reviewer
+# mistake the gate must name rather than silently drop.
+NODE_ID_RUNNERS = {"pytest"}
+# sandbox-exec reports a failed execvp of its target with EX_OSERR and this
+# marker. The target never ran, so its exit status says nothing about the test.
+SANDBOX_EXEC_FAILURE_EXIT = 71
+SANDBOX_EXEC_FAILURE_MARKER = "execvp() of "
+# POSIX shells report an unfound command with this status; the command's own
+# exit statuses never reach the gate in that case.
+SHELL_COMMAND_NOT_FOUND_EXIT = 127
+# Exit statuses that mean an approved runner started but never executed the
+# named test. They are not test outcomes in either direction: they can neither
+# condemn a baseline run nor vindicate a mutated one.
+RUNNER_NON_EXECUTION_EXITS: dict[str, dict[int, str]] = {
+    "pytest": {
+        2: "collection was interrupted",
+        3: "the runner hit an internal error",
+        4: "the runner rejected its command line",
+        5: "no test matched the named selector",
+    },
+}
 
 
 class CrosscheckError(RuntimeError):
@@ -627,7 +654,7 @@ def safe_artifact(review_dir: Path, relative: str, prefix: str) -> Path:
         f"artifact is absent: {relative}",
     )
     try:
-        size = source_path.stat(follow_symlinks=False).st_size
+        size = os.stat(source_path, follow_symlinks=False).st_size
     except OSError as exc:
         fail(f"artifact is unavailable: {relative}: {exc}")
     require(size <= MAX_CAPTURE, f"artifact exceeds {MAX_CAPTURE} bytes: {relative}")
@@ -668,13 +695,76 @@ def evidence_command_timeout(
     return min(requested, remaining)
 
 
+def test_file_path(test_path: str, label: str) -> str:
+    """Return the repository file a test selector names.
+
+    A named test may be a plain repository path or a runner node id such as
+    `tests/test_login.py::TestSession::test_expiry`. Only the part before the
+    first `::` is a filesystem path; every path-shaped check works on that part
+    while the caller keeps the full value for the runner command line.
+    """
+
+    file_part = test_path.split("::", 1)[0]
+    require(
+        bool(file_part) and file_part == file_part.strip(),
+        f"{label}.test_path must name a repository file before its `::` selector",
+    )
+    return file_part
+
+
+def require_supported_selector(test_path: str, runner: str, label: str) -> None:
+    if "::" not in test_path:
+        return
+    require(
+        runner in NODE_ID_RUNNERS,
+        f"{label}.test_path uses a `::` node id, which {runner} does not accept; "
+        f"approved node-id runners: {', '.join(sorted(NODE_ID_RUNNERS))}",
+    )
+
+
+def sandbox_exec_failed(result: subprocess.CompletedProcess[str]) -> bool:
+    return (
+        result.returncode == SANDBOX_EXEC_FAILURE_EXIT
+        and SANDBOX_EXEC_FAILURE_MARKER in (result.stdout + result.stderr)
+    )
+
+
+def require_command_execution(
+    result: subprocess.CompletedProcess[str], label: str, expected_exit: int
+) -> None:
+    """Separate "the evidence command never ran" from "it ran and disagreed".
+
+    A launch failure exits nonzero like a real disagreement does, so without
+    this the gate reports a substantive verdict about code it never executed.
+    A reviewer that deliberately declares one of these statuses is taken at its
+    word; the classification only covers statuses it did not ask for.
+    """
+
+    combined = (result.stdout + result.stderr).strip()
+    if result.returncode == expected_exit:
+        return
+    if sandbox_exec_failed(result):
+        fail(
+            f"{label} never ran: the sandbox could not execute it, so no "
+            f"reproduction outcome exists: {combined[:500]}"
+        )
+    require(
+        result.returncode != SHELL_COMMAND_NOT_FOUND_EXIT,
+        f"{label} never ran: its command was not found in the review checkout, "
+        "which holds tracked files only and none of the reviewer's tooling: "
+        f"{combined[:500] or 'no output'}",
+    )
+
+
 def execute_reproduction(
     value: Any, review_dir: Path, label: str, deadline: float
 ) -> dict[str, Any]:
     require(isinstance(value, dict), f"{label} must be an object")
     require_exact_keys(value, {"test_path", "command", "expected_exit", "output_contains"}, label)
     test_path = require_string(value.get("test_path"), f"{label}.test_path")
-    safe_artifact(review_dir, test_path, ".crosscheck/reproductions/")
+    safe_artifact(
+        review_dir, test_file_path(test_path, label), ".crosscheck/reproductions/"
+    )
     command = require_string(value.get("command"), f"{label}.command")
     require(test_path in command, f"{label}.command must name {test_path}")
     expected_exit = value.get("expected_exit")
@@ -699,8 +789,20 @@ def execute_reproduction(
         description=label,
     )
     combined = result.stdout + result.stderr
-    require(result.returncode == expected_exit, f"{label} exited {result.returncode}, expected {expected_exit}")
-    require(output_contains in combined, f"{label} did not emit its required reproduction marker")
+    require_command_execution(result, label, expected_exit)
+    require(
+        result.returncode == expected_exit,
+        f"{label} exited {result.returncode}, expected {expected_exit}. "
+        "The gate re-executes reviewer evidence in a clean checkout with no "
+        "network and none of the reviewer's provider credentials or account "
+        f"environment, so evidence that depends on those will differ here: "
+        f"{combined.strip()[:1000] or 'no output'}",
+    )
+    require(
+        output_contains in combined,
+        f"{label} did not emit its required reproduction marker "
+        f"{output_contains!r}: {combined.strip()[:1000] or 'no output'}",
+    )
     return {
         "test_path": test_path,
         "command": command,
@@ -730,28 +832,76 @@ def validate_test_invocation(value: Any, label: str) -> dict[str, Any]:
     return {"runner": runner, "arguments": validated_arguments}
 
 
+def resolve_runner(runner: str, label: str) -> str:
+    """Resolve an approved runner to the absolute executable that will run.
+
+    Resolving before launch is what lets the gate tell "the runner is absent"
+    apart from "the test failed". It also closes the gap between the name the
+    reviewer asked for and the binary the sandbox would have found on PATH.
+    """
+
+    resolved = shutil.which(runner)
+    require(
+        resolved is not None,
+        f"{label} cannot execute its named test: the {runner} runner is not "
+        "installed on PATH for the proof checkout, so the gate never ran the "
+        "test and must not report a test outcome",
+    )
+    return str(resolved)
+
+
 def test_arguments(
-    invocation: dict[str, Any], test_path: str, checkout: Path
+    invocation: dict[str, Any], test_path: str, checkout: Path, label: str
 ) -> list[str]:
     if invocation["runner"] == "direct":
-        executable = checkout / test_path
+        executable = checkout / test_file_path(test_path, label)
         require(
             os.access(executable, os.X_OK),
             f"tracked named test is not executable: {test_path}",
         )
         return [str(executable), *invocation["arguments"]]
+    runner = resolve_runner(invocation["runner"], label)
     if invocation["runner"] in FILE_TEST_RUNNERS:
-        return [invocation["runner"], test_path, *invocation["arguments"]]
-    return [invocation["runner"], *invocation["arguments"], test_path]
+        return [runner, test_path, *invocation["arguments"]]
+    return [runner, *invocation["arguments"], test_path]
+
+
+def require_test_execution(
+    result: subprocess.CompletedProcess[str],
+    runner: str,
+    label: str,
+    phase: str,
+) -> None:
+    """Refuse to read a test outcome out of a run that never reached the test.
+
+    A non-run exits nonzero, which would otherwise read as "the baseline fails"
+    and, worse, as "the mutation was caught". Both readings are wrong, so the
+    gate names the non-run instead of scoring it.
+    """
+
+    combined = (result.stdout + result.stderr).strip()
+    if sandbox_exec_failed(result):
+        fail(
+            f"{label} could not launch its {phase} test run: the sandbox failed "
+            f"to execute {runner}, so no test outcome exists: {combined[:500]}"
+        )
+    reason = RUNNER_NON_EXECUTION_EXITS.get(runner, {}).get(result.returncode)
+    require(
+        reason is None,
+        f"{label} never ran its named test during the {phase} run: {runner} "
+        f"exited {result.returncode} because {reason}, which is not a test "
+        f"outcome: {combined[:500]}",
+    )
 
 
 def validate_named_test(
     review_dir: Path, test_path: str, label: str, deadline: float
 ) -> None:
-    relative = Path(test_path)
+    file_path = test_file_path(test_path, label)
+    relative = Path(file_path)
     require(not relative.is_absolute(), f"{label}.test_path must be relative")
     require(
-        relative.as_posix() == test_path
+        relative.as_posix() == file_path
         and all(part not in {"", ".", ".."} for part in relative.parts),
         f"{label}.test_path must be a canonical repository path",
     )
@@ -761,13 +911,16 @@ def validate_named_test(
     except OSError as exc:
         fail(f"{label}.test_path is unavailable: {exc}")
     require(stat.S_ISREG(mode), f"{label}.test_path must be a regular file")
-    lexical = Path(os.path.abspath(candidate))
+    # Anchor the symlink check at the resolved review root. Comparing against a
+    # purely lexical absolute path also rejected symlinks in ancestors the
+    # reviewer does not control, so any home reached through one (a macOS
+    # /tmp or /var path, for instance) could never clear a finding.
     require(
-        candidate.resolve() == lexical,
-        f"{label}.test_path must not traverse a symlink",
+        candidate.resolve() == review_dir.resolve() / relative,
+        f"{label}.test_path must not traverse a symlink inside the review checkout",
     )
     tracked = run_command(
-        ["git", "-C", str(review_dir), "ls-files", "--error-unmatch", "--", test_path],
+        ["git", "-C", str(review_dir), "ls-files", "--error-unmatch", "--", file_path],
         timeout=evidence_command_timeout(deadline, 60, f"{label} named test lookup"),
     )
     require(tracked.returncode == 0, f"{label}.test_path is not a tracked named test")
@@ -850,10 +1003,12 @@ def execute_mutation_proof(
         value, {"test_path", "test_invocation", "mutation_patch_path"}, label
     )
     test_path = require_string(value.get("test_path"), f"{label}.test_path")
+    test_file = test_file_path(test_path, label)
     validate_named_test(review_dir, test_path, label, deadline)
     invocation = validate_test_invocation(
         value.get("test_invocation"), f"{label}.test_invocation"
     )
+    require_supported_selector(test_path, invocation["runner"], label)
     patch_relative = require_string(
         value.get("mutation_patch_path"), f"{label}.mutation_patch_path"
     )
@@ -861,7 +1016,7 @@ def execute_mutation_proof(
     patch_text = patch_path.read_text(encoding="utf-8")
     require("diff --git " in patch_text, f"{label} is not a Git patch")
     require(
-        f" a/{test_path}" not in patch_text and f" b/{test_path}" not in patch_text,
+        f" a/{test_file}" not in patch_text and f" b/{test_file}" not in patch_text,
         f"{label} must mutate implementation, not its named test",
     )
 
@@ -871,7 +1026,7 @@ def execute_mutation_proof(
 
     baseline_profile = proof_dir / ".crosscheck" / "mutation-proof.sb"
     baseline = run_sandboxed(
-        test_arguments(invocation, test_path, proof_dir),
+        test_arguments(invocation, test_path, proof_dir, label),
         cwd=proof_dir,
         profile_path=baseline_profile,
         allow_network=False,
@@ -881,7 +1036,13 @@ def execute_mutation_proof(
         ),
         description=f"{label} baseline test",
     )
-    require(baseline.returncode == 0, f"{label} named test does not pass before mutation")
+    require_test_execution(baseline, invocation["runner"], label, "baseline")
+    require(
+        baseline.returncode == 0,
+        f"{label} named test does not pass before mutation: it ran and exited "
+        f"{baseline.returncode} in a fresh clone holding tracked files only: "
+        f"{(baseline.stdout + baseline.stderr).strip()[:1000] or 'no output'}",
+    )
     remove_proof_checkout(proof_dir, label)
     create_proof_checkout(review_dir, proof_dir, head_sha, label, deadline)
     applied = run_command(
@@ -903,7 +1064,7 @@ def execute_mutation_proof(
         timeout=evidence_command_timeout(deadline, 60, f"{label} mutation diff"),
     ).splitlines()
     require(bool(changed), f"{label} mutation patch changes no tracked implementation")
-    require(test_path not in changed, f"{label} mutation changed its named test")
+    require(test_file not in changed, f"{label} mutation changed its named test")
     unexpected = sorted(set(changed) - implementation_paths)
     require(
         not unexpected,
@@ -919,7 +1080,7 @@ def execute_mutation_proof(
 
     mutated_profile = proof_dir / ".crosscheck" / "mutation-proof.sb"
     mutated = run_sandboxed(
-        test_arguments(invocation, test_path, proof_dir),
+        test_arguments(invocation, test_path, proof_dir, label),
         cwd=proof_dir,
         profile_path=mutated_profile,
         allow_network=False,
@@ -929,6 +1090,7 @@ def execute_mutation_proof(
         ),
         description=f"{label} mutated test",
     )
+    require_test_execution(mutated, invocation["runner"], label, "mutated")
     require(mutated.returncode != 0, f"{label} named test still passes after mutation")
     return {
         "test_path": test_path,
@@ -1533,6 +1695,8 @@ The command must name its helper, and its exit code plus a distinctive output ma
 A prior finding is verified-fixed only when you name a tracked test, provide a structured test invocation, and provide a patch under .crosscheck/mutations/ that breaks or reverts cited implementation without changing test or evidence support.
 The mutation may change only implementation paths already cited by that finding.
 The gate appends the named test path to the approved runner invocation, destroys all baseline state, and recreates the same clean checkout path before applying the mutation.
+test_path may be a plain repository path, or a `path::selector` node id when the runner is one of: {', '.join(sorted(NODE_ID_RUNNERS))}.
+The proof checkout is a fresh clone holding tracked files only, so name a runner installed on PATH there; a runner that is absent, or a selector that matches no test, is reported as a non-execution rather than a test result and clears nothing.
 The gate will independently run every reproduction and every mutation proof.
 If you cannot reproduce a concern, return it as a suspicion; suspicions block the merge.
 Silence never closes an existing finding.
@@ -1543,6 +1707,8 @@ Use Bash to create its helper under `.crosscheck/reproductions/`, actually run i
 The helper must execute `git diff` between those two SHAs and emit a distinctive success marker.
 The helper must also write a separate receipt under `.crosscheck/reproductions/` while it runs.
 The receipt must name both exact SHAs, HOME, and the provider account selector, and `executed_reproduction` must name that receipt and a distinctive receipt marker.
+The gate reads that receipt and then independently re-runs every helper and command you supply, in a clean checkout with no network and none of your provider credentials or account environment.
+So every helper must still exit as declared and emit its marker there: record context values like HOME or {config['account_selector']} into the receipt without requiring them to be set, never fail when they are absent (guard every expansion, for instance `${{VAR:-}}` under `set -u`), and depend on nothing outside the repository and its tracked files.
 Report `execution_home` from HOME.
 Report `executing_account_home` from {config['account_selector']}.
 The gate will independently re-execute this verdict-level reproduction before treating the response as code evidence.
@@ -2223,8 +2389,37 @@ def assert_review_checkout_intact(review_dir: Path, head_sha: str) -> None:
         git(review_dir, "rev-parse", "HEAD") == head_sha,
         "reviewer or evidence command changed the reviewed HEAD",
     )
-    status = git(review_dir, "status", "--porcelain", "--untracked-files=all")
-    for line in status.splitlines():
+    # `--untracked-files=normal` collapses a wholly untracked directory into one
+    # entry, so `.crosscheck/` costs a single line however much evidence the
+    # reviewer wrote there. `all` listed every file, and a reviewer that
+    # substantiated a finding could push this past the bounded-output limit and
+    # be refused for doing its job. Detection is unchanged: a modified tracked
+    # file, or an untracked file inside a tracked directory, is still reported
+    # individually and still refused.
+    #
+    # Every entry this check must read is already an unauthorized one, so the
+    # generous budget below only buys a precise refusal instead of a bare
+    # output-limit error. Overflow still fails closed; it can never become a
+    # pass, which is why a bound rather than an unbounded read is correct here.
+    inspection = run_command(
+        [
+            "git",
+            "-C",
+            str(review_dir),
+            "status",
+            "--porcelain",
+            "--untracked-files=normal",
+        ],
+        timeout=60,
+        description="review checkout integrity inspection",
+        maximum_output_bytes=REVIEW_STATUS_MAX_BYTES,
+    )
+    require(
+        inspection.returncode == 0,
+        "review checkout integrity inspection failed: "
+        f"{(inspection.stderr or inspection.stdout).strip()[:500] or 'no diagnostic'}",
+    )
+    for line in inspection.stdout.strip().splitlines():
         require(
             line.startswith("?? .crosscheck/"),
             f"reviewer or evidence command changed tracked or unauthorized path: {line}",
