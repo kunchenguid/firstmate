@@ -76,6 +76,14 @@ ROOT=${ROOT%/}
 
 STATE=${FM_STATE_OVERRIDE:-${FM_HOME:-$ROOT}/state}
 
+# Durable evidence of an interrupted stop-hook park (written by the arm's
+# signal traps) and the durable wake queue. While either exists, a silent stop
+# would strand undelivered wake records on a primary whose only notification
+# path is this hook, so allow_stop refuses {} until bin/fm-wake-drain.sh clears
+# both (the drain is the single owner of clearing the marker).
+INTERRUPT_MARKER="$STATE/.cursor-hook-interrupted"
+WAKE_QUEUE_FILE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
+
 cursor_parent_identity() {
   local pid=${PPID:-} proc_root stat_line starttime
   local -a stat_fields
@@ -248,8 +256,31 @@ fallback_total_from_loop_count() {
   fi
 }
 
+# A stop is only silent while no durable evidence of an interrupted park or an
+# undelivered wake exists. Otherwise the loud drain-and-reconcile followup makes
+# the next stop a recovery vehicle instead of a blind end.
+interrupted_park_reason() {
+  local msg
+  msg=
+  if [ -f "$INTERRUPT_MARKER" ]; then
+    msg='Cursor stop-hook supervision was interrupted while parked; the durable wake queue may hold undelivered events.'
+  fi
+  if [ -s "$WAKE_QUEUE_FILE" ]; then
+    msg="$msg Undelivered watcher wake records are queued."
+  fi
+  if [ -z "$msg" ]; then
+    return 1
+  fi
+  printf '%s Run bin/fm-wake-drain.sh and reconcile before ending blind.' "$msg"
+}
+
 allow_stop() {
+  local reason
   rm -f "$CHAIN_FILE" 2>/dev/null || true
+  if reason=$(interrupted_park_reason); then
+    jq -cn --arg msg "$reason" '{followup_message:$msg}'
+    exit 0
+  fi
   printf '{}\n'
   exit 0
 }
