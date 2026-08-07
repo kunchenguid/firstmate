@@ -29,6 +29,7 @@ REAL_TMUX=$(command -v tmux)
 SOCKET="fm-liveness-$$"
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-liveness.XXXXXX")
 SESSION=liveness
+CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
 
 cleanup_all() {
   "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
@@ -68,10 +69,18 @@ ln -s "$SLEEP_BIN" "$LAB/bin/muse-bind"
 # An unrelated executable that merely happens to be named agent: it must never
 # classify as a live agent pane.
 ln -s "$SLEEP_BIN" "$LAB/bin/agent"
-# Cursor's legacy alias as it is actually installed - inside Cursor's own
-# versioned install tree, which is what proves it rather than its generic name.
+# Cursor's legacy alias as it is actually installed - a symlink into Cursor's
+# own versioned cursor-agent binary. A direct link to sleep would canonicalize
+# to /usr/bin/sleep and would not model the structural proof under test.
 mkdir -p "$LAB/cursor-agent/versions/2026.08.04-aaa8809"
-ln -s "$SLEEP_BIN" "$LAB/cursor-agent/versions/2026.08.04-aaa8809/agent"
+if [ -n "$CC_BIN" ] &&
+  printf '%s\n' '#include <unistd.h>' 'int main(void){for(;;)sleep(60);return 0;}' > "$LAB/cursor-spin.c" &&
+  "$CC_BIN" -o "$LAB/cursor-agent/versions/2026.08.04-aaa8809/cursor-agent" "$LAB/cursor-spin.c" 2>/dev/null; then
+  ln -s "$LAB/cursor-agent/versions/2026.08.04-aaa8809/cursor-agent" \
+    "$LAB/cursor-agent/versions/2026.08.04-aaa8809/agent"
+else
+  echo "skip: no C compiler, so the Cursor alias install-tree case cannot build its canonical binary"
+fi
 # A decoy install tree whose directory is merely named agent.
 mkdir -p "$LAB/agent/versions/current"
 ln -s "$SLEEP_BIN" "$LAB/agent/versions/current/agent"
@@ -189,7 +198,6 @@ pass "tmux liveness: unrelated muse-containing command names stay ambiguous"
 # real executable file rather than a symlink, because macOS takes the title
 # from the resolved target's name, so it is skipped where no C compiler exists.
 
-CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
 if [ -n "$CC_BIN" ] &&
   printf '%s\n' '#include <unistd.h>' 'int main(void){for(;;)sleep(60);return 0;}' > "$LAB/spin.c" &&
   "$CC_BIN" -o "$LAB/bin/claude/2.1.220" "$LAB/spin.c" 2>/dev/null &&
@@ -289,11 +297,13 @@ pass "tmux liveness: MainThread with cursor-agent argv0 classifies alive"
 # --- cursor legacy alias: agent, proven by its install tree ------------------
 
 CURSOR_ALIAS="$LAB/cursor-agent/versions/2026.08.04-aaa8809/agent"
-"$REAL_TMUX" -L "$SOCKET" new-window -t "$SESSION" -n cursoralias bash -c "exec -a '$CURSOR_ALIAS' '$CURSOR_ALIAS' 30"
-wait_for_state "$SESSION:cursoralias" alive 2>/dev/null \
-  || fail "a legacy agent alias inside Cursor's install tree must classify alive"
-"$REAL_TMUX" -L "$SOCKET" kill-window -t "$SESSION:cursoralias" 2>/dev/null || true
-pass "tmux liveness: a Cursor legacy alias proven by its install tree classifies alive"
+if [ -x "$CURSOR_ALIAS" ]; then
+  "$REAL_TMUX" -L "$SOCKET" new-window -t "$SESSION" -n cursoralias bash -c "exec -a '$CURSOR_ALIAS' '$CURSOR_ALIAS' 30"
+  wait_for_state "$SESSION:cursoralias" alive 2>/dev/null \
+    || fail "a legacy agent alias inside Cursor's install tree must classify alive"
+  "$REAL_TMUX" -L "$SOCKET" kill-window -t "$SESSION:cursoralias" 2>/dev/null || true
+  pass "tmux liveness: a Cursor legacy alias proven by its install tree classifies alive"
+fi
 
 # --- negative: unrelated executables named agent -----------------------------
 
