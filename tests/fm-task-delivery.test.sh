@@ -345,6 +345,40 @@ test_project_mode_resolves_registered_paths() {
   pass "fm-project-mode: path lookup handles external, in-tree, unknown, ambiguous, and malformed identities"
 }
 
+test_project_mode_path_lookup_preserves_relative_override_base() {
+  local base caller home external outf errf out status abs_data abs_project_root
+  base="$TMP_ROOT/project-path-cwd"
+  caller="$base/caller"
+  home="$caller/home"
+  external="$base/external/project"
+  mkdir -p "$caller" "$home/data" "$external"
+  printf -- "- ext [direct-PR path=%s] - external fixture (added 2026-01-01)\n" "$external" \
+    > "$home/data/projects.md"
+
+  out=$(cd "$caller" && FM_HOME=home "$PROJECT_MODE" --with-name --path "$external" 2>/dev/null)
+  [ "$out" = "ext direct-PR off" ] || fail "relative FM_HOME was resolved from the project path instead of caller cwd (got '$out')"
+
+  mkdir -p "$caller/data-rel"
+  printf -- "- datarel [local-only path=%s] - external fixture (added 2026-01-01)\n" "$external" \
+    > "$caller/data-rel/projects.md"
+  out=$(cd "$caller" && FM_HOME=missing-home FM_DATA_OVERRIDE=data-rel "$PROJECT_MODE" --with-name --path "$external" 2>/dev/null)
+  [ "$out" = "datarel local-only off" ] || fail "relative FM_DATA_OVERRIDE was resolved from the project path instead of caller cwd (got '$out')"
+
+  abs_data="$base/absolute-data"
+  abs_project_root="$caller/projects-rel"
+  mkdir -p "$abs_data" "$abs_project_root/tree"
+  printf -- '- tree [no-mistakes] - in-tree fixture (added 2026-01-01)\n' > "$abs_data/projects.md"
+  outf="$base/project-mode-cwd.out"
+  errf="$base/project-mode-cwd.err"
+  (cd "$caller" && FM_HOME=missing-home FM_DATA_OVERRIDE="$abs_data" FM_PROJECTS_OVERRIDE=projects-rel \
+    "$PROJECT_MODE" --with-name --path "$abs_project_root/tree" >"$outf" 2>"$errf")
+  status=$?
+  expect_code 0 "$status" "relative FM_PROJECTS_OVERRIDE should resolve from caller cwd"
+  [ "$(cat "$outf")" = "tree no-mistakes off" ] || fail "relative FM_PROJECTS_OVERRIDE did not match the in-home project path"
+  [ ! -s "$errf" ] || fail "relative FM_PROJECTS_OVERRIDE printed an unexpected diagnostic: $(cat "$errf")"
+  pass "fm-project-mode: path normalization keeps relative overrides based at the caller cwd"
+}
+
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
@@ -354,4 +388,5 @@ test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_project_mode_maps_the_conditional_policy
 test_project_mode_resolves_registered_paths
+test_project_mode_path_lookup_preserves_relative_override_base
 echo "# all fm-task-delivery tests passed"

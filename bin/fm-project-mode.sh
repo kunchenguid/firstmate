@@ -109,7 +109,7 @@ normalize_path() {  # <path>
   local path=$1
   [ -n "$path" ] || return 1
   if [ -d "$path" ]; then
-    cd "$path" && pwd -P
+    ( cd "$path" && pwd -P )
     return
   fi
   case "$path" in

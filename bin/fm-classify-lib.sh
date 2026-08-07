@@ -1115,6 +1115,20 @@ crew_absorb_class() {  # <id>
   printf 'none'
 }
 
+crew_actionable_run_state_line() {  # <id>
+  local id=$1 line state src
+  [ -n "$id" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  state=${line#state: }; state=${state%% *}
+  src=${line#*source: }; src=${src%% *}
+  case "$state" in
+    parked|done|failed) [ "$src" = run-step ] || return 1 ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$line"
+}
+
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class
 # reports `working`). This is the "provably working" predicate at the heart of
 # absorb-only-when-provably-working: a no-verb turn-end or stale wake is absorbed

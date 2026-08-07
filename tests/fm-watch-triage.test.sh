@@ -363,6 +363,14 @@ test_crew_absorb_class_classifier() {
   [ "$(crew_absorb_class a)" = none ] || fail "unknown crew classed absorbable"
   ! crew_is_paused a || fail "unknown crew classed paused"
   [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
+  FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review'
+  [ "$(crew_actionable_run_state_line a)" = "$FM_FAKE_CREW_STATE" ] || fail "run-step parked state was not surfaced as an actionable run state"
+  FM_FAKE_CREW_STATE='state: done · source: run-step · checks green'
+  [ "$(crew_actionable_run_state_line a)" = "$FM_FAKE_CREW_STATE" ] || fail "run-step done outcome was not surfaced as an actionable run state"
+  FM_FAKE_CREW_STATE='state: failed · source: run-step · checks failed'
+  [ "$(crew_actionable_run_state_line a)" = "$FM_FAKE_CREW_STATE" ] || fail "run-step failed outcome was not surfaced as an actionable run state"
+  FM_FAKE_CREW_STATE='state: done · source: status-log · old done line'
+  ! crew_actionable_run_state_line a >/dev/null || fail "status-log done line was treated as an actionable run state"
   unset FM_FAKE_CREW_STATE
   pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
 }
@@ -643,6 +651,66 @@ test_already_surfaced_terminal_stales_absorbed_until_new_status_signal() {
   grep -F "signal: $state/alpha-parked.status" "$out" >/dev/null \
     || fail "new parked decision did not wake through the signal path: $(cat "$out")"
   pass "already-surfaced parked and terminal stales are absorbed, while a new decision status still wakes"
+}
+
+test_already_surfaced_terminal_status_wakes_on_run_state_transition() {
+  local dir state fakebin out capture_file drain_out task window statusf line sig key pane_hash pid item outcome marker
+  for item in parked ready failed; do
+    dir=$(make_case "surfaced-terminal-run-state-$item")
+    state="$dir/state"
+    fakebin="$dir/fakebin"
+    out="$dir/watch.out"
+    capture_file="$dir/pane.txt"
+    drain_out="$dir/drain.out"
+    task="terminal-$item"
+    window="test:fm-$task"
+    statusf="$state/$task.status"
+    line="done: implementation complete, ready to validate"
+    case "$item" in
+      parked) outcome='state: parked · source: run-step · parked at review (ask-user: authority decision)' ;;
+      ready) outcome='state: done · source: run-step · checks green: PR ready for review' ;;
+      *)     outcome='state: failed · source: run-step · checks failed' ;;
+    esac
+    printf '%s\n' "$line" > "$statusf"
+    sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-${task}_status"
+    printf '%s' "$line" > "$state/.hb-surfaced-$task"
+    printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/$task.meta"
+    printf 'terminal run state %s\n' "$item" > "$capture_file"
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    pane_hash=$(hash_text "terminal run state $item")
+    printf '%s' "$pane_hash" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE="$outcome" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 40 || fail "$item run state did not wake after the status line had already surfaced"
+    grep -Fx "stale: $window" "$out" >/dev/null || fail "$item run state did not print a stale wake"
+    marker="$state/.run-state-surfaced-$task"
+    [ "$(cat "$marker" 2>/dev/null || true)" = "$outcome" ] || fail "$item run state marker was not recorded"
+    FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after $item run state failed"
+    grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "$item run state was not queued"
+    : > "$state/.wake-queue"
+
+    printf 'terminal run state %s display drift\n' "$item" > "$capture_file"
+    pane_hash=$(hash_text "terminal run state $item display drift")
+    printf '%s' "$pane_hash" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE="$outcome" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_live "$pid" 30 || { reap "$pid"; fail "$item run state re-woke on display drift: $(cat "$out")"; }
+    [ ! -s "$out" ] || { reap "$pid"; fail "$item run state printed a duplicate wake: $(cat "$out")"; }
+    [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "$item run state queued a duplicate wake"; }
+    reap "$pid"
+  done
+
+  pass "already-surfaced terminal statuses still wake once for parked, PR-ready, or failed run states"
 }
 
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
@@ -2229,6 +2297,7 @@ test_self_announced_close_does_not_rewake_but_next_note_does
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_already_surfaced_terminal_stales_absorbed_until_new_status_signal
+test_already_surfaced_terminal_status_wakes_on_run_state_transition
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold

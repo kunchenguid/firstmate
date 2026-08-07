@@ -695,6 +695,22 @@ terminal_status_already_surfaced() {  # <task>
   [ "$surfaced" = "$last" ]
 }
 
+actionable_run_state_surfaced_path() {  # <task>
+  printf '%s/.run-state-surfaced-%s' "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')"
+}
+
+actionable_run_state_already_surfaced() {  # <task> <line>
+  [ "$(cat "$(actionable_run_state_surfaced_path "$1")" 2>/dev/null || true)" = "$2" ]
+}
+
+mark_actionable_run_state_surfaced() {  # <task> <line>
+  printf '%s' "$2" > "$(actionable_run_state_surfaced_path "$1")"
+}
+
+clear_actionable_run_state_surfaced() {  # <task>
+  rm -f "$(actionable_run_state_surfaced_path "$1")"
+}
+
 # Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
 # any captain-relevant status has NOT already been surfaced to firstmate (its
 # content differs from the .hb-surfaced-<task> marker). Pure detect, no side
@@ -1154,10 +1170,19 @@ EOF
           # exact terminal status was already surfaced through a signal, stale
           # hash drift is no new captain-facing information and is absorbed.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
+            actionable_run_state=$(crew_actionable_run_state_line "$task" || true)
             if crew_is_provably_working "$task"; then
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
+              clear_actionable_run_state_surfaced "$task"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
+            elif [ -n "$actionable_run_state" ] && ! actionable_run_state_already_surfaced "$task" "$actionable_run_state"; then
+              fm_wake_append stale "$w" "stale: $w" || exit 1
+              printf '%s' "$h" > "$sf"
+              rm -f "$ssf"
+              mark_surfaced "$STATE/$task.status"
+              mark_actionable_run_state_surfaced "$task" "$actionable_run_state"
+              wake "stale: $w"
             elif terminal_status_already_surfaced "$task"; then
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
@@ -1201,6 +1226,7 @@ EOF
                 clear_pause_tracking "$w"
                 printf '%s' "$h" > "$sf"
                 date +%s > "$ssf"
+                clear_actionable_run_state_surfaced "$task"
                 triage_log "absorbed non-terminal stale (provably working): $w"
                 ;;
               paused)
