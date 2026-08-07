@@ -11,8 +11,9 @@
 # use `IFS= read -r -d '' VAR <<EOF || true` instead, which removes the `$(...)`
 # wrapper and eliminates the whole defect class regardless of future prose.
 # test_no_heredoc_in_command_substitution guards that structure directly.
-# Ambient `bash -n` here is Bash 5 and cannot see the bug, so the real
-# cross-version enforcement lives in the macos-stock-bash CI job.
+# The syntax and ordinary-task scaffold checks below invoke `/bin/bash`
+# explicitly. The macos-stock-bash CI job runs this suite and proves that path
+# is the stock Bash 3.2 runtime rather than a newer Bash selected through PATH.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -22,16 +23,15 @@ TMP_ROOT=$(fm_test_tmproot fm-brief)
 BRIEF_HOME="$TMP_ROOT/home"
 mkdir -p "$BRIEF_HOME/data"
 
-# The script itself must always parse under the ambient bash. That is Bash 5 in
-# CI and locally, where the issue #958/#1069 parser bug does not fire, so this
-# is a weak guard on its own; test_no_heredoc_in_command_substitution and the
-# macos-stock-bash CI job carry the real cross-version enforcement.
+# The script itself must always parse through `/bin/bash`. The macOS CI job
+# pins that executable to stock Bash 3.2.57; the structural guard below keeps
+# the defect class visible on platforms where `/bin/bash` is newer.
 test_script_parses() {
   local out rc
-  out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
-  expect_code 0 "$rc" "bash -n bin/fm-brief.sh must parse cleanly (got: $out)"
-  [ -z "$out" ] || fail "bash -n bin/fm-brief.sh emitted unexpected output: $out"
-  pass "fm-brief.sh: bash -n succeeds"
+  out=$(/bin/bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
+  expect_code 0 "$rc" "/bin/bash -n bin/fm-brief.sh must parse cleanly (got: $out)"
+  [ -z "$out" ] || fail "/bin/bash -n bin/fm-brief.sh emitted unexpected output: $out"
+  pass "fm-brief.sh: /bin/bash -n succeeds"
 }
 
 # Structural class guard (issues #166, #958, #1069): never build a variable by
@@ -215,6 +215,78 @@ test_ship_modes_generate_clean_briefs() {
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
+}
+
+# Execute every ordinary-task scaffold through `/bin/bash` with apostrophes in
+# both an interpolated repository name and a shell-quoted status path. Exact
+# line assertions pin the byte-sensitive quoting boundary, literal commands,
+# task placeholder, and mode-specific sections. On macOS CI this is Bash 3.2.
+test_stock_bash_apostrophe_fixture_scaffolds_every_ordinary_mode() {
+  local home kind mode id brief status_file_quoted
+  home="$TMP_ROOT/captain's fixtures"
+  mkdir -p "$home/data"
+
+  while IFS='|' read -r kind mode id; do
+    case "$kind" in
+      ship)
+        FM_HOME="$home" /bin/bash "$ROOT/bin/fm-brief.sh" \
+          "$id" "captain's repo" --mode "$mode" >/dev/null 2>&1 \
+          || fail "$kind/$mode: stock-Bash scaffold failed with apostrophe fixture"
+        ;;
+      scout)
+        FM_HOME="$home" /bin/bash "$ROOT/bin/fm-brief.sh" \
+          "$id" "captain's repo" --scout >/dev/null 2>&1 \
+          || fail "$kind: stock-Bash scaffold failed with apostrophe fixture"
+        ;;
+    esac
+
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind/$mode: apostrophe fixture did not produce a brief"
+    grep -Fqx "You are in a disposable git worktree of captain's repo, at a detached HEAD on a clean default branch." "$brief" \
+      || fail "$kind/$mode: interpolated apostrophe-bearing repository line changed"
+    grep -Fqx '{TASK}' "$brief" \
+      || fail "$kind/$mode: literal task placeholder was expanded or changed"
+
+    status_file_quoted="'$(printf '%s' "$home/state/$id.status" | sed "s/'/'\\\\''/g")'"
+    grep -Fqx "   \`echo \"{state}: {one short line}\" >> $status_file_quoted\`" "$brief" \
+      || fail "$kind/$mode: shell-quoted apostrophe-bearing status command changed"
+
+    case "$kind:$mode" in
+      ship:no-mistakes)
+        grep -Fqx 'Delivery contract: mode=no-mistakes' "$brief" \
+          || fail "no-mistakes: delivery section changed"
+        assert_grep '`no-mistakes axi run --help`' "$brief" \
+          "no-mistakes: literal pipeline help command changed"
+        assert_grep "firstmate's authority check" "$brief" \
+          "no-mistakes: apostrophe-bearing pipeline prose changed"
+        ;;
+      ship:direct-PR)
+        grep -Fqx 'Delivery contract: mode=direct-PR' "$brief" \
+          || fail "direct-PR: delivery section changed"
+        assert_grep 'open a PR with `gh-axi`' "$brief" \
+          "direct-PR: literal PR command changed"
+        ;;
+      ship:local-only)
+        grep -Fqx 'Delivery contract: mode=local-only' "$brief" \
+          || fail "local-only: delivery section changed"
+        assert_grep "branch \`fm/$id\`" "$brief" \
+          "local-only: literal task branch changed"
+        ;;
+      scout:scout)
+        grep -Fqx 'This is a SCOUT task: the deliverable is a written report, not a PR.' "$brief" \
+          || fail "scout: task-mode section changed"
+        grep -Fqx "Write your findings to \`$home/data/$id/report.md\`." "$brief" \
+          || fail "scout: literal report path changed"
+        ;;
+    esac
+    assert_no_grep 'EOF' "$brief" "$kind/$mode: heredoc terminator leaked into generated bytes"
+  done <<'ROWS'
+ship|no-mistakes|apostrophe-nm
+ship|direct-PR|apostrophe-direct
+ship|local-only|apostrophe-local
+scout|scout|apostrophe-scout
+ROWS
+  pass "fm-brief.sh: /bin/bash scaffolds apostrophe fixtures in every ordinary-task mode"
 }
 
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
@@ -714,6 +786,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_stock_bash_apostrophe_fixture_scaffolds_every_ordinary_mode
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
