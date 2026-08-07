@@ -3,7 +3,7 @@
 # tokens config/secondmate-harness carries alongside the harness, and the
 # primary->secondmate inherited local-material propagation.
 #
-# Three capabilities are under test:
+# Four capabilities are under test:
 #   A) Harness split. config/secondmate-harness sets the harness the PRIMARY uses
 #      to launch SECONDMATE agents, independent of config/crew-harness (the
 #      crewmate harness). fm-harness.sh secondmate resolves the fallback chain
