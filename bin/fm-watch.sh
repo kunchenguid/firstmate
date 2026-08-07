@@ -23,9 +23,10 @@
 #                          re-surface cadence, never as a wedge. Only when neither
 #                          absorb class applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
-#                          both surfaced at once. A provably-working stale past the
-#                          wedge threshold also surfaces, with an "escalation N"
-#                          count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
+#                          both surfaced at once unless the exact terminal status
+#                          was already surfaced. A provably-working stale past
+#                          the wedge threshold also surfaces, with an "escalation
+#                          N" count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
 #                          consecutive escalations on the SAME pane, the reason
 #                          also carries a "demand-deep-inspection" marker so the
 #                          wake payload itself, not just repetition, forces a
@@ -684,6 +685,16 @@ mark_all_captain_relevant_surfaced() {
   done < <(scan_captain_relevant_statuses "$STATE")
 }
 
+terminal_status_already_surfaced() {  # <task>
+  local task=$1 f last surfaced
+  f="$STATE/$task.status"
+  last=$(last_status_line "$f")
+  [ -n "$last" ] || return 1
+  status_is_captain_relevant "$last" || return 1
+  surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
+  [ "$surfaced" = "$last" ]
+}
+
 # Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
 # any captain-relevant status has NOT already been surfaced to firstmate (its
 # content differs from the .hb-surfaced-<task> marker). Pure detect, no side
@@ -1139,17 +1150,23 @@ EOF
           # actively-running pipeline, purely because of this stale leftover
           # line. On a NEW hash, give an active run/busy pane (the same
           # authoritative source fm-crew-state.sh itself already prioritizes
-          # over the log) a chance to override before trusting the log.
+          # over the log) a chance to override before trusting the log. If this
+          # exact terminal status was already surfaced through a signal, stale
+          # hash drift is no new captain-facing information and is absorbed.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
+            if crew_is_provably_working "$task"; then
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
+            elif terminal_status_already_surfaced "$task"; then
+              printf '%s' "$h" > "$sf"
+              rm -f "$ssf"
+              triage_log "absorbed stale (captain-relevant status already surfaced): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
-              mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
+              mark_surfaced "$STATE/$task.status"
               wake "stale: $w"
             fi
           elif [ -e "$ssf" ]; then

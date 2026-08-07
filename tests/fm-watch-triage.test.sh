@@ -590,6 +590,61 @@ test_terminal_stale_surfaced() {
   pass "a stale pane sitting on a terminal status is surfaced (queue + exit)"
 }
 
+test_already_surfaced_terminal_stales_absorbed_until_new_status_signal() {
+  local dir state fakebin out capture_file item task window statusf line sig key pane_hash pid i
+  dir=$(make_case surfaced-terminal-stales); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  printf 'unchanged parked or terminal pane\n' > "$capture_file"
+
+  for item in alpha-parked beta-done; do
+    task=$item
+    window="test:fm-$task"
+    statusf="$state/$task.status"
+    case "$item" in
+      alpha-parked) line='needs-decision: pick the API route' ;;
+      *)            line='done: PR https://example.test/pr/9 checks green' ;;
+    esac
+    printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/$task.meta"
+    printf '%s\n' "$line" > "$statusf"
+    sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-${task}_status"
+    printf '%s' "$line" > "$state/.hb-surfaced-$task"
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    pane_hash=$(hash_text "unchanged parked or terminal pane")
+    printf '%s' "$pane_hash" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+  done
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: unknown · source: none · parked or terminal idle' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 40 ] && kill -0 "$pid" 2>/dev/null; do
+    [ -s "$state/.stale-test_fm-alpha-parked" ] && [ -s "$state/.stale-test_fm-beta-done" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "already-surfaced terminal stale woke again: $(cat "$out")"; }
+  [ -s "$state/.stale-test_fm-alpha-parked" ] || { reap "$pid"; fail "already-surfaced parked stale was not recorded as handled"; }
+  [ -s "$state/.stale-test_fm-beta-done" ] || { reap "$pid"; fail "already-surfaced done stale was not recorded as handled"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "already-surfaced terminal stale printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "already-surfaced terminal stale queued a wake"; }
+  reap "$pid"
+
+  printf 'needs-decision [key=next]: choose the next route\n' >> "$state/alpha-parked.status"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: unknown · source: none · parked or terminal idle' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "new parked decision status did not wake after stale dedupe"
+  grep -F "signal: $state/alpha-parked.status" "$out" >/dev/null \
+    || fail "new parked decision did not wake through the signal path: $(cat "$out")"
+  pass "already-surfaced parked and terminal stales are absorbed, while a new decision status still wakes"
+}
+
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
@@ -2173,6 +2228,7 @@ test_secondmate_status_note_surfaced_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
+test_already_surfaced_terminal_stales_absorbed_until_new_status_signal
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
