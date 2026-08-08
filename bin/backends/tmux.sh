@@ -224,26 +224,43 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
       done
 }
 
-# fm_backend_tmux_target_state: exact recorded-window membership without
+# fm_backend_tmux_target_state: exact recorded endpoint membership without
 # trusting tmux's ambient active-window fallback. Prints present, missing, or
 # unreadable so existence checks and recovery-grade agent liveness share one
 # inventory verdict.
 fm_backend_tmux_target_state() {  # <target>
-  local target=$1 session window windows inventory_status
+  local target=$1 session member inventory inventory_status
   case "$target" in
-    *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
-    *:*) ;;
-    *) printf 'unreadable'; return 0 ;;
+    %*)
+      member=${target#%}
+      case "$member" in ''|*[!0-9]*) printf 'unreadable'; return 0 ;; esac
+      member=$target
+      if inventory=$(LC_ALL=C tmux list-panes -a -F '#{pane_id}' 2>&1); then
+        inventory_status=0
+      else
+        inventory_status=$?
+      fi
+      ;;
+    *:*:*|'':*|*:'')
+      printf 'unreadable'
+      return 0
+      ;;
+    *:*)
+      session=${target%%:*}
+      member=${target#*:}
+      if inventory=$(LC_ALL=C tmux list-windows -t "=$session" -F '#{window_name}' 2>&1); then
+        inventory_status=0
+      else
+        inventory_status=$?
+      fi
+      ;;
+    *)
+      printf 'unreadable'
+      return 0
+      ;;
   esac
-  session=${target%%:*}
-  window=${target#*:}
-  if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
-    inventory_status=0
-  else
-    inventory_status=$?
-  fi
   if [ "$inventory_status" -ne 0 ]; then
-    case "$windows" in
+    case "$inventory" in
       *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
         printf 'missing'
         ;;
@@ -253,7 +270,7 @@ fm_backend_tmux_target_state() {  # <target>
     esac
     return 0
   fi
-  if printf '%s\n' "$windows" | grep -Fqx "$window"; then
+  if printf '%s\n' "$inventory" | grep -Fqx "$member"; then
     printf 'present'
   else
     printf 'missing'
@@ -264,9 +281,9 @@ fm_backend_tmux_target_state() {  # <target>
 # recorded target. See bin/fm-backend.sh's fm_backend_agent_state for the
 # shared state vocabulary and docs/tmux-backend.md "Agent liveness probe" for
 # the empirical basis. Tmux silently falls back to the active window when a
-# named target is absent, so the exact recorded window must appear in a
-# successful session inventory before its foreground command can be trusted.
-# An omitted window or a definitive missing-session/server response is
+# named target is absent, so the exact recorded endpoint must appear in the
+# appropriate successful inventory before its foreground command can be trusted.
+# An omitted endpoint or a definitive missing-session/server response is
 # `missing`; any other inventory or pane read failure is `unreadable`, so a
 # transient tmux problem never licenses a duplicate.
 #

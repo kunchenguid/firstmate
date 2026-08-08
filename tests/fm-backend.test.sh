@@ -685,7 +685,7 @@ run_send_case() {  # <bin-root> <fakebin> <log> <home> -- <send args...>
 strip_send_preflight() {  # <log>
   local old_preflight new_preflight
   old_preflight=$'tmux\x1fdisplay-message\x1f-p\x1f-t\x1fsess:win\x1f#{pane_id}'
-  new_preflight=$'tmux\x1flist-windows\x1f-t\x1fsess\x1f-F\x1f#{window_name}'
+  new_preflight=$'tmux\x1flist-windows\x1f-t\x1f=sess\x1f-F\x1f#{window_name}'
   awk -v old_preflight="$old_preflight" -v new_preflight="$new_preflight" \
     '$0 != old_preflight && $0 != new_preflight { print }' "$1"
 }
@@ -704,7 +704,7 @@ test_send_conformance_old_vs_new() {
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" --key Escape
   rc_new=$?
   expect_code "$rc_old" "$rc_new" "fm-send --key: old vs new exit code"
-  assert_contains "$(cat "$log_new")" $'\x1f''list-windows'$'\x1f''-t'$'\x1f''sess'$'\x1f''-F'$'\x1f''#{window_name}' \
+  assert_contains "$(cat "$log_new")" $'\x1f''list-windows'$'\x1f''-t'$'\x1f''=sess'$'\x1f''-F'$'\x1f''#{window_name}' \
     "fm-send --key did not verify exact tmux window membership before sending"
   strip_send_preflight "$log_old" > "$filtered_old"
   strip_send_preflight "$log_new" > "$filtered_new"
@@ -1136,6 +1136,52 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   pass "fm-spawn.sh: auto-detect resolves nested tmux-in-herdr to tmux and stays silent end to end"
 }
 
+test_tmux_target_state_uses_exact_inventories() {
+  local dir fakebin log out
+  fm_backend_source tmux || fail "tmux adapter did not load for target-state tests"
+  dir="$TMP_ROOT/tmux-target-state"
+  fakebin="$dir/fakebin"
+  log="$dir/tmux.log"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TMUX_LOG:?}"
+case "${1:-}" in
+  list-windows)
+    target=
+    prev=
+    for arg in "$@"; do
+      [ "$prev" = -t ] && target=$arg
+      prev=$arg
+    done
+    case "$target" in
+      =exact) printf 'win\n' ;;
+      =gone) printf "can't find session: gone\n" >&2; exit 1 ;;
+      *) printf 'win\n' ;;
+    esac
+    ;;
+  list-panes) printf '%%3\n%%9\n' ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
+
+  out=$(PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" fm_backend_tmux_target_state exact:win)
+  [ "$out" = present ] || fail "exact session/window target should be present, got $out"
+  out=$(PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" fm_backend_tmux_target_state gone:win)
+  [ "$out" = missing ] || fail "missing exact session must not match a live session prefix, got $out"
+  out=$(PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" fm_backend_tmux_target_state %3)
+  [ "$out" = present ] || fail "stable tmux pane id should be present, got $out"
+  out=$(PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" fm_backend_tmux_target_state %4)
+  [ "$out" = missing ] || fail "absent stable tmux pane id should be missing, got $out"
+  out=$(PATH="$fakebin:$PATH" FM_TMUX_LOG="$log" fm_backend_tmux_target_state %bad)
+  [ "$out" = unreadable ] || fail "malformed tmux pane id should be unreadable, got $out"
+  assert_contains "$(cat "$log")" "list-windows -t =exact -F #{window_name}" \
+    "session/window inventory did not require exact session identity"
+  assert_contains "$(cat "$log")" "list-panes -a -F #{pane_id}" \
+    "stable pane targets did not use server-wide pane inventory"
+  pass "tmux target state uses exact session/window and stable pane-id inventories"
+}
+
 test_backend_name_precedence
 test_backend_detect_precedence
 test_backend_detect_cmux_fallback_bundle_id
@@ -1149,6 +1195,7 @@ test_backend_name_autodetect_notice
 test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
+test_tmux_target_state_uses_exact_inventories
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms

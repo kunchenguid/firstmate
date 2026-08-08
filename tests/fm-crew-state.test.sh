@@ -299,6 +299,19 @@ outcome: failed
 EOF
 }
 
+run_checks_passed() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: ci
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/1"
+  findings: none
+outcome: checks-passed
+EOF
+}
+
 run_ci_monitoring() {  # <branch>
   cat <<EOF
 run:
@@ -1100,9 +1113,8 @@ test_dead_window_still_reports_terminal_run_step() {
   pass "closed pane still reports a terminal run-step"
 }
 
-# The same for an active run: an agent pane that crashed mid-validation while the
-# daemon-backed run continues must report the live run-step, not unknown.
-test_dead_window_still_reports_active_run_step() {
+# An active run cannot prove a worker is working after its endpoint disappears.
+test_dead_window_overrides_active_run_step() {
   reset_fakes
   local d; d=$(new_case dead-window-active)
   make_repo_on_branch "$d/wt" fm/feat-dead-act
@@ -1111,10 +1123,26 @@ test_dead_window_still_reports_active_run_step() {
   FM_FAKE_AXI_STATUS="$(run_running fm/feat-dead-act)"
   FM_FAKE_TMUX_MISSING=1
   local out; out=$(run_crew_state "$d" feat-dead-act)
-  assert_contains "$out" "state: working" "closed pane still reports active run-step"
-  assert_contains "$out" "source: run-step" "closed pane does not mask the active run-step"
-  assert_not_contains "$out" "state: unknown" "closed pane with an active run must never be unknown"
-  pass "closed pane still reports an active run-step"
+  assert_contains "$out" "state: unknown" "closed pane overrides active run-step"
+  assert_contains "$out" "source: none" "closed pane removes the active run-step source"
+  assert_contains "$out" "backend target gone" "closed pane reports its missing endpoint"
+  assert_not_contains "$out" "state: working" "closed pane with an active run must never report working"
+  pass "closed pane overrides an active run-step"
+}
+
+test_dead_window_still_reports_checks_passed() {
+  reset_fakes
+  local d; d=$(new_case dead-window-checks-passed)
+  make_repo_on_branch "$d/wt" fm/feat-dead-checks-passed
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dead-checks-passed.meta" "window=fm:fm-feat-dead-checks-passed" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-dead-checks-passed)"
+  FM_FAKE_TMUX_MISSING=1
+  local out; out=$(run_crew_state "$d" feat-dead-checks-passed)
+  assert_contains "$out" "state: done" "closed pane still reports checks-passed as done"
+  assert_contains "$out" "source: run-step" "checks-passed remains run-step sourced"
+  assert_not_contains "$out" "state: unknown" "closed pane does not mask checks-passed"
+  pass "closed pane still reports checks-passed"
 }
 
 test_no_timeout_uses_perl_bound() {
@@ -1216,7 +1244,8 @@ test_provably_working_via_runs_list_fallback() {
   running    fm/feat-provable ${short}  2026-07-02 22:05
 EOF
 )"
-  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-provable \
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_FAKE_TMUX_WINDOWS=fm-feat-provable \
+    crew_is_provably_working feat-provable \
     || fail "cross-branch attribution via the runs list was not treated as provably working"
   pass "crew_is_provably_working absorbs a validating crew found only via the runs-list fallback"
 }
@@ -1381,7 +1410,8 @@ test_no_run_idle_secondmate_resolved_event_not_state
 test_dead_window_ignores_stale_status_log
 test_gone_pi_window_overrides_busy_record
 test_dead_window_still_reports_terminal_run_step
-test_dead_window_still_reports_active_run_step
+test_dead_window_overrides_active_run_step
+test_dead_window_still_reports_checks_passed
 test_no_timeout_uses_perl_bound
 test_scout_skips_run_lookup
 test_torn_down_worktree
