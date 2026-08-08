@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Shared no-mistakes axi run attribution primitives.
 #
-# ONE owner for the rules that decide whether a no-mistakes run belongs to a
+# ONE owner for the rule that decides whether a no-mistakes run belongs to a
 # given worktree, used by fm-crew-state.sh (read-only current-state reporting)
 # and fm-teardown.sh (pre-teardown run abort, see its "Fix 1" header comment).
 # Getting this wrong in either direction is unsafe: a false negative hides a
 # genuinely parked run, and a false positive lets teardown act on a run it does
-# not own. There are two rules, both binding on this worktree's own branch:
+# not own. fm_nm_run_binds_worktree is that rule and is what callers ask; it
+# combines two bindings, both requiring this worktree's own branch:
 # fm_nm_head_matches_worktree compares code identity by sha, and
 # fm_nm_pipeline_owns_worktree reads no-mistakes' own branch_sync verdict for
 # the case the sha rule cannot decide - a run whose head lives only in the gate.
@@ -123,4 +124,20 @@ fm_nm_pipeline_owns_worktree() {  # <worktree> <branch> <run_id> <toon-output>
   local_full=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || return 1
   sync_full=$(git -C "$wt" rev-parse --verify "${sync_head}^{commit}" 2>/dev/null) || return 1
   [ "$sync_full" = "$local_full" ]
+}
+
+# 0 when the run `axi status` output $5 describes - id $3, head $4 - belongs to
+# worktree $1 on branch $2. THE attribution question, asked as one call so both
+# readers decide identically: fm-crew-state.sh judging a crew's current state and
+# fm-teardown.sh deciding whether a run parked at a gate is this task's to abort.
+# Callers must still confirm the run's branch field matches; both bindings below
+# are about code identity, not about which branch the run names.
+#
+# The sha binding answers a run whose head this worktree has. The
+# pipeline-ownership binding answers the run whose head it does not - the shape
+# of every run still holding custody - which is why asking only the sha binding
+# reads a live run as no run at all.
+fm_nm_run_binds_worktree() {  # <worktree> <branch> <run_id> <run_head> <toon-output>
+  fm_nm_head_matches_worktree "$1" "$4" && return 0
+  fm_nm_pipeline_owns_worktree "$1" "$2" "$3" "$5"
 }

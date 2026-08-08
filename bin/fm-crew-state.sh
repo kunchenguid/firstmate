@@ -30,9 +30,10 @@
 #      diverged from it, invalidates attribution. A run whose head this worktree
 #      does not have at all - the shape of every in-flight run, whose fix commits
 #      stay in the gate repo until custody returns - is instead bound through
-#      `axi status`'s branch_sync verdict for this exact branch and HEAD
-#      (fm_nm_pipeline_owns_worktree), so a live run is never rejected as
-#      unattributable and replaced by a superseded one. The coarse fallback reads
+#      `axi status`'s branch_sync verdict for this exact branch and HEAD, so a
+#      live run is never rejected as unattributable and replaced by a superseded
+#      one. bin/fm-nm-run-lib.sh's fm_nm_run_binds_worktree owns both bindings
+#      and is the single rule bin/fm-teardown.sh asks too. The coarse fallback reads
 #      the branch's newest row only, for the same reason.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
@@ -373,27 +374,19 @@ nm_runs_status_for_branch() {  # <branch>
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
-# 0 if the active axi-status run's head field matches this worktree's code
-# identity. Branch match is a precondition (caller). Rule owned by
-# fm_nm_head_matches_worktree in bin/fm-nm-run-lib.sh.
-nm_run_head_matches_worktree() {
-  local run_head
-  run_head=$(strip_quotes "$(nm_field head)")
-  fm_nm_head_matches_worktree "$WT" "$run_head"
-}
-
-# 0 if the active axi-status run is bound to this worktree by no-mistakes' own
-# branch_sync verdict instead of by sha - the only rule that can attribute a run
-# whose pipeline-advanced head is not in this object store. Owned by
-# fm_nm_pipeline_owns_worktree in bin/fm-nm-run-lib.sh.
-nm_pipeline_owns_worktree() {
-  fm_nm_pipeline_owns_worktree "$WT" "$CREW_BRANCH" \
-    "$(strip_quotes "$(nm_field id)")" "$RUN_OUT"
+# 0 if the active axi-status run belongs to this worktree, by sha or by
+# no-mistakes' own branch_sync verdict. Branch match is a precondition (caller).
+# Rule owned by fm_nm_run_binds_worktree in bin/fm-nm-run-lib.sh.
+nm_run_binds_worktree() {
+  fm_nm_run_binds_worktree "$WT" "$CREW_BRANCH" \
+    "$(strip_quotes "$(nm_field id)")" \
+    "$(strip_quotes "$(nm_field head)")" "$RUN_OUT"
 }
 
 # Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
-# sha for this branch row matches the worktree head under the same rules as
-# nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
+# sha for this branch row matches the worktree head under the same sha rule
+# (equal, or local is ancestor of run tip). A coarse row carries no run id and
+# no branch_sync, so only that binding can be asked of it.
 nm_coarse_head_matches_worktree() {  # <short-sha>
   fm_nm_head_matches_worktree "$WT" "$1"
 }
@@ -412,7 +405,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] \
-      && { nm_run_head_matches_worktree || nm_pipeline_owns_worktree; }; then
+      && nm_run_binds_worktree; then
       HAVE_RUN=1
     else
       # The active-or-most-recent run is for another branch, or same branch with

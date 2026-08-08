@@ -2183,6 +2183,138 @@ test_another_branchs_parked_run_is_never_touched() {
   pass "a parked run on another branch is never aborted by this task's teardown (ownership is precise)"
 }
 
+# --- a parked run the pipeline still owns, whose head advanced past this
+# checkout (the same blind spot bin/fm-crew-state.sh closed) ----------------
+#
+# An in-flight run commits its fixes inside the gate repo
+# (~/.no-mistakes/repos/<id>.git), a SEPARATE object store that reaches the
+# crew's checkout only when custody returns. This reproduces that with real git:
+# a real clone stands in for the gate, so the advanced head genuinely does not
+# resolve in the crew worktree, exactly as it does live. Echoes that head.
+advance_head_in_gate_repo() {  # <case_dir>
+  local case_dir=$1 head
+  git clone -q "$case_dir/wt" "$case_dir/gate"
+  git -C "$case_dir/gate" -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m 'no-mistakes(review): apply gate fix'
+  head=$(git -C "$case_dir/gate" rev-parse HEAD)
+  if git -C "$case_dir/wt" rev-parse --verify "$head^{commit}" >/dev/null 2>&1; then
+    fail "fixture: the pipeline-advanced head must be absent from the crew worktree"
+  fi
+  printf '%s\n' "$head"
+}
+
+# Parked at a gate while the pipeline still owns the branch: run.head is the
+# pipeline-ADVANCED head above, while the branch_sync block - computed by
+# no-mistakes inside the crew's own worktree - names the branch, exact local
+# head, and run id it was computed against (the v1.41.2 shape pinned by
+# tests/fm-crew-state.test.sh's run_pipeline_owned fixture).
+parked_pipeline_owned_axi_status_toon() {  # <branch> <run-head> <sync-branch> <sync-head> <sync-run> [run-id]
+  cat <<EOF
+run:
+  id: "${6:-01RUN}"
+  branch: $1
+  status: fix_review
+  awaiting_agent: parked 2m10s
+  head: "$2"
+  pr: ""
+  findings: "2 actionable"
+gate: review
+branch_sync:
+  state: pipeline_owned
+  changed: false
+  local:
+    branch: $3
+    head: $4
+    clean: true
+  pipeline:
+    run: "$5"
+    status: running
+    phase: ""
+    submitted_head: $2
+    current_head: $2
+  relation: behind
+  safety: blocked_pipeline_owned
+EOF
+}
+
+# The blind spot itself: teardown reads "no run to abort" from the head rule
+# alone, so it removes the worker while the run is still parked at a gate with
+# custody of the branch and fix commits that exist only in the gate repo. The
+# landed-work refusals cannot catch this - the crew's own head is pushed, which
+# is exactly the shape after a pipeline push step and a re-run that parks again.
+test_parked_pipeline_owned_run_is_aborted_before_teardown() {
+  local case_dir rc local_head run_head
+  case_dir=$(make_case parked-pipeline-owned)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  run_head=$(advance_head_in_gate_repo "$case_dir")
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_pipeline_owned_axi_status_toon \
+    fm/task-x1 "${run_head:0:8}" fm/task-x1 "$local_head" 01RUN)" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-pipeline-owned: teardown should still succeed"
+  assert_present "$case_dir/nm-abort.log" \
+    "parked-pipeline-owned: a run the pipeline still owns was left parked and orphaned"
+  assert_grep "abort --run 01RUN" "$case_dir/nm-abort.log" \
+    "parked-pipeline-owned: no-mistakes axi abort did not target the verified run id"
+  assert_grep "parked at a gate; aborting" "$case_dir/stderr" \
+    "parked-pipeline-owned: teardown did not report aborting the parked run before removing the worker"
+  pass "a parked run whose pipeline-advanced head is not in this worktree is still aborted"
+}
+
+# Preserved ownership precision, asserted as a divergence so no arm can go
+# quietly vacuous: ONE fixture, varying one branch_sync field at a time. The
+# branch_sync binding attributes a run only while it names this worktree's own
+# branch, its exact head, and the run it was reported alongside, so teardown
+# never becomes more willing to abort a run it does not own.
+#
+# A teardown that proceeds consumes its own task record and worktree, so each
+# arm gets its own case. Divergence is by <sync-branch>/<sync-head>/<sync-run>
+# against a fixture that would otherwise abort. <sync-head> is a keyword:
+# "local" is this checkout, "parent" a real commit this worktree has but is not
+# on. Asserts teardown finished and touched no run.
+assert_pipeline_owned_binding_rejects() {  # <name> <sync-branch> <sync-head> <sync-run> <why>
+  local case_dir rc local_head run_head sync_head
+  case_dir=$(make_case "parked-pipeline-owned-$1")
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  case "$3" in
+    local)  sync_head=$local_head ;;
+    parent) sync_head=$(git -C "$case_dir/wt" rev-parse 'HEAD^') ;;
+    *)      fail "assert_pipeline_owned_binding_rejects: unknown sync-head keyword $3" ;;
+  esac
+  [ -n "$sync_head" ] || fail "$1: fixture head must resolve"
+  run_head=$(advance_head_in_gate_repo "$case_dir")
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_pipeline_owned_axi_status_toon \
+    fm/task-x1 "${run_head:0:8}" "$2" "$sync_head" "$4" 01RUN)" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "$1: teardown should still succeed"
+  assert_absent "$case_dir/nm-abort.log" "$1: $5"
+  assert_not_contains "$(cat "$case_dir/stderr")" "aborting" \
+    "$1: teardown reported aborting a run it does not own"
+}
+
+test_pipeline_owned_abort_is_bound_to_this_run_and_head() {
+  # The fixture these three diverge from is the one
+  # test_parked_pipeline_owned_run_is_aborted_before_teardown proves does abort,
+  # so no arm can pass vacuously.
+  assert_pipeline_owned_binding_rejects other-head fm/task-x1 parent 01RUN \
+    "branch_sync computed against another head must not abort the run"
+  assert_pipeline_owned_binding_rejects other-run fm/task-x1 local 01OTHER \
+    "branch_sync naming another run must not abort this one"
+  assert_pipeline_owned_binding_rejects other-branch fm/some-other-task local 01RUN \
+    "branch_sync naming another crew's branch must not abort the run"
+  pass "the pipeline-ownership abort is bound to this worktree's own branch, run, and head"
+}
+
 test_own_autonomous_run_is_left_alone() {
   local case_dir rc head
   case_dir=$(make_case autonomous-run-left-alone)
@@ -2638,6 +2770,8 @@ test_mismatched_run_after_abort_refuses_unconfirmed
 test_empty_status_after_abort_refuses_unconfirmed
 test_not_found_status_after_abort_confirms_completion
 test_another_branchs_parked_run_is_never_touched
+test_parked_pipeline_owned_run_is_aborted_before_teardown
+test_pipeline_owned_abort_is_bound_to_this_run_and_head
 test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped

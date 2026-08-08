@@ -103,9 +103,9 @@
 #     alone: no-mistakes drives those against its own gate-repo clone, not the
 #     crew's worktree, so they are not orphaned by removing the worktree.
 #     conclude_task_no_mistakes_run attributes the active-or-most-recent run to
-#     THIS task only when its branch AND code identity (bin/fm-nm-run-lib.sh's
-#     fm_nm_head_matches_worktree, the same rule bin/fm-crew-state.sh uses) both
-#     match this worktree, then runs `no-mistakes axi abort --run <id>` for
+#     THIS task only when its branch matches this worktree AND the run binds to
+#     it (bin/fm-nm-run-lib.sh's fm_nm_run_binds_worktree, the same rule
+#     bin/fm-crew-state.sh asks), then runs `no-mistakes axi abort --run <id>` for
 #     that verified run instance. A run already terminal
 #     (an outcome is set) or not parked at a gate is left untouched. Idempotent:
 #     an already-aborted run reads back terminal and is skipped on retry.
@@ -1216,7 +1216,7 @@ task_status_is_own_parked_run() {  # <worktree> <axi-status-output>
   run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$out" branch)")
   [ -n "$run_branch" ] && [ "$run_branch" = "$branch" ] || return 1
   run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$out" head)")
-  fm_nm_head_matches_worktree "$wt" "$run_head" || return 1
+  fm_nm_run_binds_worktree "$wt" "$branch" "$run_id" "$run_head" "$out" || return 1
   outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$out" outcome)")
   [ -z "$outcome" ] || return 1
   status=$(fm_nm_strip_quotes "$(fm_nm_field "$out" status)")
@@ -1262,7 +1262,7 @@ task_status_is_run_not_found() {  # <status-error> <run-id>
 # have answered its gate is removed, so no run is left orphaned holding a
 # fleet slot. Only KIND=ship drives a no-mistakes validation of its own
 # worktree (scouts and secondmates never do, mirroring bin/fm-crew-state.sh);
-# a run not attributed to this exact branch+head is left completely alone.
+# a run not attributed to this exact worktree is left completely alone.
 conclude_task_no_mistakes_run() {  # <worktree>
   local wt=$1 out run_id
   [ "$KIND" = ship ] || return 0
