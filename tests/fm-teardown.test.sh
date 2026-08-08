@@ -2489,6 +2489,48 @@ test_process_spawned_during_grace_is_reaped_on_later_pass() {
   pass "a process spawned during grace is reaped on a later pass"
 }
 
+test_process_exit_after_term_preserves_new_unknown_worktree_content() {
+  local case_dir rc pid unknown_path
+  case_dir=$(make_case post-reap-unknown-content)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  unknown_path="$case_dir/wt/unlanded-after-term.txt"
+
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf 'return\n' >> "$case_dir/treehouse.log"
+exit 0
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  ( cd "$case_dir/wt" && exec perl -e '
+      my $path = shift;
+      $SIG{TERM} = sub {
+        open my $fh, ">", $path or die "open";
+        print {$fh} "preserve me\\n";
+        close $fh;
+        exit 0;
+      };
+      sleep 300;
+    ' "$unknown_path" ) &
+  pid=$!
+  disown
+  sleep 0.2
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  kill -0 "$pid" 2>/dev/null && { kill -KILL "$pid" 2>/dev/null || true; }
+  expect_code 1 "$rc" "post-reap-unknown-content: teardown should refuse new unknown content"
+  assert_present "$case_dir/wt" "post-reap-unknown-content: teardown returned the worktree"
+  assert_present "$unknown_path" "post-reap-unknown-content: teardown discarded the process-created path"
+  assert_grep "unlanded-after-term.txt" "$case_dir/stderr" \
+    "post-reap-unknown-content: teardown did not name the process-created path"
+  assert_absent "$case_dir/treehouse.log" \
+    "post-reap-unknown-content: teardown invoked treehouse return after post-reap content appeared"
+  pass "process-created unknown worktree content is named and preserved after reap"
+}
+
 test_persistent_scan_refuses_after_bounded_retries() {
   local case_dir rc wt_path fake_pid=99999999
   case_dir=$(make_case persistent-reap-refusal)
@@ -2662,6 +2704,7 @@ test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed
 test_exec_changed_process_is_still_reaped
 test_process_spawned_during_grace_is_reaped_on_later_pass
+test_process_exit_after_term_preserves_new_unknown_worktree_content
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
