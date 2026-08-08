@@ -393,7 +393,7 @@ remote_secondmate_teardown() {
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
   rm -f -- "$STATE/$ID.status" "$STATE/$ID.meta" "$STATE/$ID.turn-ended" \
-    "$STATE/.$ID.open-decisions-cursor"
+    "$STATE/.$ID.open-decisions-cursor" "$STATE/$ID.terminal-recorded"
   printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
   return 0
 }
