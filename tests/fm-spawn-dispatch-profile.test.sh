@@ -49,18 +49,24 @@ SH
 #!/usr/bin/env bash
 set -u
 if [ "$#" -eq 2 ] && [ "$1" = daemon ] && [ "$2" = status ]; then
+  [ "${NO_MISTAKES_TELEMETRY:-}" = off ] || exit 3
+  [ "${NO_MISTAKES_NO_UPDATE_CHECK:-}" = 1 ] || exit 3
   if [ -f "${NM_HOME:-}/.fm-test-no-mistakes-daemon-running" ]; then
-    printf 'daemon running\n'
+    printf '  ✓ daemon running (pid 4242)\n'
   else
-    printf 'daemon not running\n'
+    printf '  ○ daemon not running\n'
   fi
   exit 0
 fi
 if [ "$#" -eq 1 ] && [ "$1" = axi ]; then
   [ "${NO_MISTAKES_TELEMETRY:-}" = off ] || exit 3
   [ "${NO_MISTAKES_NO_UPDATE_CHECK:-}" = 1 ] || exit 3
-  [ -f "${NM_HOME:-}/.fm-test-no-mistakes-daemon-running" ]
-  exit
+  if [ -f "${NM_HOME:-}/.fm-test-no-mistakes-daemon-running" ]; then
+    printf 'daemon: running\n'
+  else
+    printf 'daemon: stopped\n'
+  fi
+  exit 0
 fi
 exit 2
 SH
