@@ -108,9 +108,11 @@ for provider in claude codex; do
     safety_policy=worker
     [ ! -f "$home/test-disabled" ] || enabled=false
     [ ! -f "$home/test-non-worker" ] || safety_policy=manual_only
-    printf '%s{"id":"%s-%s","provider":"%s","home":"%s","pools":%s,"enabled":%s,"safety_policy":"%s"}' \
+    reserve=0
+    [ ! -f "$home/test-reserve" ] || reserve=$(cat "$home/test-reserve")
+    printf '%s{"id":"%s-%s","provider":"%s","home":"%s","pools":%s,"enabled":%s,"safety_policy":"%s","reserve_percent":%s}' \
       "$separator" "$provider" "$account" "$provider" "$home" "$pools" \
-      "$enabled" "$safety_policy"
+      "$enabled" "$safety_policy" "$reserve"
     separator=,
   done
 done
@@ -311,9 +313,59 @@ test_codex_rotates_when_no_account_has_a_fresh_window() {
   assert_contains "$(cat "$TMP_ROOT/codex-unavailable.err")" "CODEX USAGE UNAVAILABLE" \
     "Codex unavailable-usage fallback did not identify the degraded signal"
   assert_contains "$(cat "$TMP_ROOT/codex-unavailable.err")" \
-    "round-robin selection across 2 eligible codex-crew accounts" \
+    "round-robin selection across 2 unknown-usage codex-crew accounts" \
     "Codex unavailable-usage fallback did not report its rotation"
   pass "Codex rotates eligible accounts when every quota signal is unavailable"
+}
+
+# An account whose readable window is at or below its own registered
+# reserve_percent is spent, and must lose to an account that still has headroom.
+# Rotating into a spent account is the same outage as piling onto one account; it
+# just fails in a different place.
+test_codex_skips_accounts_at_or_below_their_reserve() {
+  local out err
+  reset_accounts
+  set_remaining 1 10,10
+  set_remaining 2 80,80
+  printf '15\n' > "$ACCOUNT_ROOT/codex/1/test-reserve"
+  printf '15\n' > "$ACCOUNT_ROOT/codex/2/test-reserve"
+  out=$({
+    run_selector select codex
+    run_selector select codex
+    run_selector select codex
+  } 2>"$TMP_ROOT/codex-reserve.err")
+  err=$(cat "$TMP_ROOT/codex-reserve.err")
+  case "$out" in
+    *"$ACCOUNT_ROOT/codex/1"*)
+      fail "Codex chose an account at or below its reserve: $out"
+      ;;
+  esac
+  [ "$out" = "$(printf '%s\n' "$ACCOUNT_ROOT/codex/2" "$ACCOUNT_ROOT/codex/2" "$ACCOUNT_ROOT/codex/2")" ] \
+    || fail "Codex did not keep every selection on the account with headroom: $out"
+  assert_contains "$err" "EXHAUSTED" \
+    "Codex reserve exclusion did not report the exhausted account"
+  pass "Codex excludes accounts at or below their registered reserve"
+}
+
+# The floor must not be able to block dispatch. When every account is spent there
+# is nothing better to pick, so selection spreads the damage rather than failing.
+test_codex_still_selects_when_every_account_is_exhausted() {
+  local out err
+  reset_accounts
+  set_remaining 1 5,5
+  set_remaining 2 5,5
+  printf '15\n' > "$ACCOUNT_ROOT/codex/1/test-reserve"
+  printf '15\n' > "$ACCOUNT_ROOT/codex/2/test-reserve"
+  out=$({
+    run_selector select codex
+    run_selector select codex
+  } 2>"$TMP_ROOT/codex-all-exhausted.err")
+  err=$(cat "$TMP_ROOT/codex-all-exhausted.err")
+  [ "$out" = "$(printf '%s\n' "$ACCOUNT_ROOT/codex/1" "$ACCOUNT_ROOT/codex/2")" ] \
+    || fail "all-exhausted Codex selection did not rotate rather than block: $out"
+  assert_contains "$err" "CODEX ALL ACCOUNTS EXHAUSTED" \
+    "all-exhausted Codex selection did not report the condition"
+  pass "Codex still selects, by rotation, when every account is exhausted"
 }
 
 test_codex_timeout_skips_wedged_account() {
@@ -1376,6 +1428,8 @@ test_claude_approval_marker_contract
 test_openat_binding_failure_is_a_setup_error
 test_codex_rechecks_health_on_every_selection
 test_codex_rotates_when_no_account_has_a_fresh_window
+test_codex_skips_accounts_at_or_below_their_reserve
+test_codex_still_selects_when_every_account_is_exhausted
 test_codex_timeout_skips_wedged_account
 test_claude_rotates_eligible_accounts_without_treating_usage_as_health
 test_concurrent_claude_selections_spread_without_usage

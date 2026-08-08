@@ -1081,6 +1081,18 @@ ACCOUNT_NATIVE_LAUNCH_READY=
 ACCOUNT_NATIVE_LAUNCH_GO=
 ACCOUNT_NATIVE_LAUNCH_DIR=
 DIRECT_ACCOUNT_ROUTING=0
+# Secondmate account selection. A secondmate is a long-lived supervisor whose
+# workspace is a firstmate home, not a task worktree, so it must NOT take on
+# DIRECT_ACCOUNT_ROUTING's worktree-identity, authoritative-final-state, and
+# fresh-selection-per-respawn contract. This flag is the narrow half it does
+# need: pick a rotated account directory and bind the provider identity onto the
+# launch, so secondmates stop inheriting whatever ambient identity the primary
+# happened to be running under and stop piling onto one account.
+DIRECT_ACCOUNT_SECONDMATE=0
+# Set when an observe-mode secondmate wanted a routed account but none could be
+# selected, so it launched on the provider's default identity. Recorded in task
+# metadata so a degraded launch is visible rather than looking like a routed one.
+DIRECT_ACCOUNT_DEGRADED=0
 DIRECT_ACCOUNT_HOME=
 # Environment delivered natively by `herdr agent start --env KEY=VALUE` (one
 # repeated flag per entry). Empty for every other backend, which has no native
@@ -2653,6 +2665,35 @@ if { [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ] \
     ACCOUNT_EFFECTIVE_MODE=off
   fi
 fi
+# Secondmate launches under OBSERVE take the same rotated account directory as
+# crewmates. Before this they fell through to the legacy Agent Fleet path, which
+# in observe mode is shadow-only ("no lease; legacy launch unchanged") and binds
+# no identity at all - so every secondmate inherited the ambient
+# CLAUDE_CONFIG_DIR and the fleet's whole supervisor load landed on one account.
+#
+# ENFORCE is deliberately NOT diverted here. That mode already binds a real
+# account through its Agent Fleet lease and native launch, so it was never the
+# defect; routing it through direct selection would change the enforced lease,
+# rollback, and recovery contract for no gain.
+#
+# Only the account binding is shared with the crewmate path. DIRECT_ACCOUNT_ROUTING
+# stays 0, so a secondmate home is never treated as a task worktree and its
+# metadata keeps the shape ordinary respawn expects. Selection is deferred to the
+# shared prepare point further down: no account is chosen and no Herdr hook is
+# installed until the home has proved its identity and its routing-policy
+# inheritance, so a launch that is going to be refused never consumes a rotation.
+if [ "$KIND" = secondmate ] && [ "$RECOVERY_ACCOUNT" = 0 ] && [ "$RAW_LAUNCH" != 1 ] \
+  && [ "$ACCOUNT_EFFECTIVE_MODE" = observe ]; then
+  case "$HARNESS" in
+    claude|codex)
+      DIRECT_ACCOUNT_SECONDMATE=1
+      DIRECT_ACCOUNT_PREPARE_DEFERRED=1
+      # The shadow Agent Fleet observe pass below would only re-derive a decision
+      # that nothing applies; this launch binds a real account instead.
+      ACCOUNT_EFFECTIVE_MODE=off
+      ;;
+  esac
+fi
 if [ "$ACCOUNT_EFFECTIVE_MODE" != off ] && [ -z "$ACCOUNT_POOL" ]; then
   if [ -n "$ACCOUNT_PROFILE" ]; then
     ACCOUNT_POOL=explicit
@@ -3258,8 +3299,28 @@ if [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ]; then
 fi
 
 if [ "$DIRECT_ACCOUNT_PREPARE_DEFERRED" = 1 ]; then
-  DIRECT_ACCOUNT_HOME=$("$SCRIPT_DIR/fm-account-directory.sh" prepare "$HARNESS") || exit 1
-  echo "fm-spawn: selected direct $HARNESS account home $DIRECT_ACCOUNT_HOME" >&2
+  if [ "$DIRECT_ACCOUNT_SECONDMATE" = 1 ]; then
+    # observe means "route when routing is possible", never "refuse to launch".
+    # On a fresh install, or any home whose account directories have not been
+    # provisioned, selection legitimately has nothing to choose from. Refusing
+    # here would leave a domain supervisor down entirely, which is strictly worse
+    # than running it on the provider's default identity - the outcome observe
+    # mode produced before this path existed.
+    # The degrade is deliberately LOUD and recorded in metadata rather than
+    # silent: a silently un-routed secondmate is the exact bug this change fixes,
+    # so it must be visible as a degraded launch instead of looking healthy.
+    if DIRECT_ACCOUNT_HOME=$("$SCRIPT_DIR/fm-account-directory.sh" prepare "$HARNESS"); then
+      echo "fm-spawn: selected direct $HARNESS account home $DIRECT_ACCOUNT_HOME" >&2
+    else
+      DIRECT_ACCOUNT_HOME=
+      DIRECT_ACCOUNT_SECONDMATE=0
+      DIRECT_ACCOUNT_DEGRADED=1
+      echo "WARNING: secondmate $ID could not be routed to a $HARNESS account directory; launching on the provider's default identity instead of refusing. This secondmate shares whatever identity the environment supplies, so account load is NOT balanced for it. Provision this machine's $HARNESS account directories and respawn to restore routing." >&2
+    fi
+  else
+    DIRECT_ACCOUNT_HOME=$("$SCRIPT_DIR/fm-account-directory.sh" prepare "$HARNESS") || exit 1
+    echo "fm-spawn: selected direct $HARNESS account home $DIRECT_ACCOUNT_HOME" >&2
+  fi
   DIRECT_ACCOUNT_PREPARE_DEFERRED=0
 fi
 
@@ -3566,7 +3627,7 @@ if [ "$RESUME_ACCOUNT" = 1 ]; then
   esac
 fi
 AGENT_COMMAND=$HARNESS
-if [ "$DIRECT_ACCOUNT_ROUTING" = 1 ]; then
+if [ "$DIRECT_ACCOUNT_ROUTING" = 1 ] || [ "$DIRECT_ACCOUNT_SECONDMATE" = 1 ]; then
   # herdr delivers the account directory NATIVELY, as `agent start --env KEY=VALUE`
   # (HERDR_AGENT_ENV below), instead of as a command-scoped shell prefix. Verified
   # before making the switch: no login profile on this machine sets CODEX_HOME or
@@ -3959,6 +4020,7 @@ META_TMP=$(mktemp "$STATE/.$ID.meta.XXXXXX") || exit 1
   [ "$NO_ACCOUNT_ROUTING" != 1 ] || echo "account_routing_emergency_bypass=1"
   [ -z "$BACKLOG_ROW_EXEMPTION" ] || echo "backlog_row_exemption=$BACKLOG_ROW_EXEMPTION"
   [ -z "$DIRECT_ACCOUNT_HOME" ] || echo "account_home=$DIRECT_ACCOUNT_HOME"
+  [ "$DIRECT_ACCOUNT_DEGRADED" != 1 ] || echo "account_routing_degraded=1"
   if [ "$RECOVERY_ACCOUNT" = 1 ]; then
     if grep -q '^report_required=' "$RESUME_META"; then
       RECORDED_REPORT_REQUIRED=$(fm_account_meta_value "$RESUME_META" report_required)

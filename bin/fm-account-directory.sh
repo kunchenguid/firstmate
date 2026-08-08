@@ -30,12 +30,29 @@
 # If every eligible Codex account lacks a readable window, selection degrades
 # explicitly to rotation across the whole eligible set instead of failing or
 # choosing the stable first directory.
-# Claude quota is not currently distinguishable per config directory because
-# quota-axi cannot non-interactively resolve Claude's config-dir-specific macOS
-# Keychain credential.
-# Claude therefore never treats a missing usage window as account failure and
-# rotates across every eligible account in stable bytewise order.
-# Codex uses the same rotation only to break exact best-score ties.
+# Claude selection is the same shape: it sets CLAUDE_CONFIG_DIR plus the
+# account-isolated XDG_CACHE_HOME so no shared cache can answer for the wrong
+# identity, and ranks by the minimum remaining percentage across its general
+# five_hour and seven_day windows.
+# It differs in one respect: it does NOT clear the cache before reading, because
+# Claude's upstream quota endpoint rate limits hard and a forced refresh per
+# account per dispatch would destroy the very signal selection depends on.
+# quota-axi's own TTL governs refreshes, and the per-account cache isolation is
+# what makes a cached reading trustworthy, so a stale-but-isolated reading counts.
+# Per-account Claude quota requires quota-axi 0.1.19 or newer; older releases
+# ignore CLAUDE_CONFIG_DIR and report one shared identity for every account,
+# which reads as "all accounts look identical" and hides an exhausted account
+# behind a healthy one. bin/fm-bootstrap.sh enforces that floor.
+# Both vendors apply the same exhaustion floor: an account whose readable
+# remaining percentage is at or below its own Agent Fleet reserve_percent is
+# spent and is excluded while any account still has headroom, because routing
+# work into a used-up account is the same outage as piling onto one account.
+# Accounts with no readable window are unknown rather than spent, so they are
+# preferred over known-exhausted ones.
+# When every eligible account is exhausted, selection still returns one by
+# rotation rather than blocking dispatch, and says so loudly.
+# Rotation is the fallback whenever usage cannot rank the field, and it also
+# breaks exact best-score ties for both vendors.
 # Rotation is machine-global, persisted under the passwd user's
 # .local/state/firstmate/account-directory/, and serialized by an advisory file
 # lock so concurrent selections spread deterministically instead of racing back
@@ -645,11 +662,130 @@ $1
 EOF
 }
 
+# Bind CLAUDE_CONFIG_DIR plus an account-isolated XDG_CACHE_HOME so no shared
+# cache can answer for the wrong identity - that shared cache is what made all
+# three accounts report the same numbers and hid an empty account behind a full
+# one. This deliberately does NOT clear the cache first, which is where it parts
+# company with the Codex read: Claude's upstream quota endpoint rate limits hard
+# (it returns state.status=rate_limited with an explicit retryAfter), so forcing a
+# refresh once per account per dispatch would rate limit the very signal this
+# selection depends on. quota-axi's own TTL governs refreshes; the isolation is
+# what makes a cached number trustworthy, so a cached-and-stale reading here is
+# still genuinely THIS account's reading.
+claude_usage_json() { # <account-home> <quota-command>
+  local account_home=$1 quota_bin=$2 cache_home cache_file environment_name timeout status
+  timeout=$(quota_timeout_seconds) || return 1
+  cache_home=$account_home/.agent-fleet-quota-cache
+  cache_file=$cache_home/quota-axi/quotas.json
+  if { [ -e "$cache_home" ] || [ -L "$cache_home" ]; } \
+    && { [ ! -d "$cache_home" ] || [ -L "$cache_home" ]; }; then
+    log "claude account $account_home usage unread: its quota cache root is not a real directory"
+    return 1
+  fi
+  if { [ -e "$cache_home/quota-axi" ] || [ -L "$cache_home/quota-axi" ]; } \
+    && { [ ! -d "$cache_home/quota-axi" ] || [ -L "$cache_home/quota-axi" ]; }; then
+    log "claude account $account_home usage unread: its quota-axi cache directory is not a real directory"
+    return 1
+  fi
+  if [ -L "$cache_file" ] || { [ -e "$cache_file" ] && [ ! -f "$cache_file" ]; }; then
+    log "claude account $account_home usage unread: its quota cache entry is not a regular file"
+    return 1
+  fi
+  (
+    while IFS='=' read -r environment_name _; do
+      case "$environment_name" in
+        XDG_*|QUOTA_AXI_*|AGENT_FLEET_*) unset "$environment_name" ;;
+      esac
+    done < <(/usr/bin/env)
+    CLAUDE_CONFIG_DIR=$account_home
+    XDG_CACHE_HOME=$cache_home
+    export CLAUDE_CONFIG_DIR XDG_CACHE_HOME
+    if run_bounded "$timeout" "$quota_bin" --provider claude --json 2>/dev/null; then
+      return 0
+    else
+      status=$?
+    fi
+    if [ "$status" -eq 124 ]; then
+      log "claude account $account_home usage unread: quota read timed out after ${timeout}s"
+    fi
+    return "$status"
+  )
+}
+
+# Unlike the Codex read, this deliberately accepts a stale status as well as a
+# fresh one. The read above binds an account-isolated XDG_CACHE_HOME, so a cached
+# number here belongs to THIS account and nothing else - which is exactly the
+# property the shared-cache bug destroyed. An upstream refresh that is rate
+# limited or unauthenticated returns no numeric general window at all, so it
+# still yields no score and still falls through to rotation.
+claude_score() { # <quota-json>
+  jq -er '
+    [.providers[]?
+      | select(.provider == "claude")
+      | (.windows // [])[]?
+      | select((.id == "five_hour" or .id == "seven_day")
+          and (.kind // "") != "model"
+          and (.percentRemaining | type) == "number")
+      | .percentRemaining]
+    | if length == 0 then empty else min end
+  ' 2>/dev/null <<EOF
+$1
+EOF
+}
+
+# Inside the test lab the quota binary must come FROM the lab. quota_command's
+# fallback to the ambient `command -v quota-axi` is fine in production but wrong
+# under test: it makes an isolated case reach the real network, take real
+# per-account timeouts, and depend on whatever happens to be installed on the
+# machine running it - so the same suite behaves differently on a developer box
+# with quota-axi installed than on CI without it. A lab that has not declared a
+# quota binary gets no Claude usage signal, which is the honest answer.
+claude_quota_command() {
+  if test_lab_enabled; then
+    [ -n "${FM_ACCOUNT_DIRECTORY_QUOTA_AXI:-}" ] || return 1
+    printf '%s\n' "$FM_ACCOUNT_DIRECTORY_QUOTA_AXI"
+    return 0
+  fi
+  command -v quota-axi 2>/dev/null
+}
+
+claude_status() { # <quota-json>
+  jq -er '[.providers[]? | select(.provider == "claude") | .state.status // "unknown"][0]' \
+    2>/dev/null <<EOF
+$1
+EOF
+}
+
+# Exhaustion floor. Agent Fleet already records each profile's reserve_percent,
+# so that registered reserve - not an invented constant - is what "this account
+# is used up" means: a readable account at or below its own reserve is spent and
+# must lose to any account that still has headroom. Emitting one home<TAB>reserve
+# line per eligible profile keeps this to a single registry read per selection.
+pool_reserve_percents() { # <vendor> <pool>
+  local vendor=$1 pool=$2 fleet_bin profiles
+  fleet_bin=$(agent_fleet_command) || return 1
+  profiles=$(read_profile_registry "$fleet_bin" 2>/dev/null) || return 1
+  printf '%s\n' "$profiles" | jq -r \
+    --arg vendor "$vendor" --arg pool "$pool" '
+      .profiles[]
+      | select(
+          (.provider? == $vendor)
+          and (.home? | type) == "string"
+          and (.pools? | type) == "array"
+          and ((.pools | index($pool)) != null)
+        )
+      | [.home, ((.reserve_percent // 0) | tostring)]
+      | @tsv
+    ' 2>/dev/null
+}
+
 select_codex() {
-  local pool quota_bin candidate usage score selected eligible
+  local pool quota_bin candidate usage score selected eligible reserve reserve_lines
   local best_score=''
   local -a best_homes=()
   local -a candidates=()
+  local -a unknown_homes=()
+  local -a exhausted_homes=()
   pool=$(crew_pool codex) || return 1
   eligible=$(eligible_account_homes codex "$pool") || return 1
   while IFS= read -r candidate; do
@@ -667,6 +803,7 @@ EOF
     return 1
   }
   quota_bin=$(quota_command) || return 1
+  reserve_lines=$(pool_reserve_percents codex "$pool" 2>/dev/null) || reserve_lines=
   LC_ALL=C
   export LC_ALL
   for candidate in "${candidates[@]}"; do
@@ -674,9 +811,16 @@ EOF
     score=$(codex_score "$usage") || score=
     if [ -z "$score" ]; then
       log "codex account $candidate skipped: no freshly readable usage window"
+      unknown_homes+=("$candidate")
       continue
     fi
-    log "codex account $candidate fresh remaining score=$score"
+    reserve=$(reserve_percent_for_home "$reserve_lines" "$candidate")
+    if numeric_at_or_below "$score" "$reserve"; then
+      log "codex account $candidate EXHAUSTED: ${score}% remaining is at or below its ${reserve}% reserve; excluded while any account still has headroom"
+      exhausted_homes+=("$candidate")
+      continue
+    fi
+    log "codex account $candidate fresh remaining score=$score (reserve ${reserve}%)"
     if [ "${#best_homes[@]}" -eq 0 ] || awk -v candidate_score="$score" -v current_score="$best_score" \
       'BEGIN { exit !(candidate_score > current_score) }'; then
       best_homes=("$candidate")
@@ -687,8 +831,14 @@ EOF
     fi
   done
   if [ "${#best_homes[@]}" -eq 0 ]; then
-    selected=$(rotate_account_home codex "$pool" "${candidates[@]}") || return 1
-    log "CODEX USAGE UNAVAILABLE: no eligible account has a freshly readable usage window; round-robin selection across ${#candidates[@]} eligible $pool accounts chose $selected"
+    if [ "${#unknown_homes[@]}" -gt 0 ]; then
+      selected=$(rotate_account_home codex "$pool" "${unknown_homes[@]}") || return 1
+      log "CODEX USAGE UNAVAILABLE: no eligible account has a freshly readable usage window above its reserve; round-robin selection across ${#unknown_homes[@]} unknown-usage $pool accounts chose $selected"
+      printf '%s\n' "$selected"
+      return 0
+    fi
+    selected=$(rotate_account_home codex "$pool" "${exhausted_homes[@]}") || return 1
+    log "CODEX ALL ACCOUNTS EXHAUSTED: every eligible $pool account is at or below its reserve; spreading rather than blocking dispatch, and $selected is this turn's least-recently-used account"
     printf '%s\n' "$selected"
     return 0
   fi
@@ -697,9 +847,33 @@ EOF
   printf '%s\n' "$selected"
 }
 
+reserve_percent_for_home() { # <reserve-lines> <home>
+  local lines=$1 home=$2 line_home line_reserve
+  while IFS=$(printf '\t') read -r line_home line_reserve; do
+    [ "$line_home" = "$home" ] || continue
+    case "$line_reserve" in
+      ''|*[!0-9]*) printf '0\n' ;;
+      *) printf '%s\n' "$line_reserve" ;;
+    esac
+    return 0
+  done <<EOF
+$lines
+EOF
+  printf '0\n'
+}
+
+numeric_at_or_below() { # <value> <threshold>
+  awk -v value="$1" -v threshold="$2" 'BEGIN { exit !(value <= threshold) }'
+}
+
 select_claude() {
   local pool fallback_pool selected eligible candidate
+  local quota_bin usage score reserve reserve_lines
+  local best_score=''
   local -a candidates=()
+  local -a best_homes=()
+  local -a unknown_homes=()
+  local -a exhausted_homes=()
   pool=$(crew_pool claude) || return 1
   eligible=$(eligible_account_homes claude "$pool") || return 1
   while IFS= read -r candidate; do
@@ -726,8 +900,62 @@ EOF
     echo "error: no usable Claude account directories remain in claude-crew or claude-crew-last-resort; every profile is reserved outside those pools or still needs captain Keychain approval" >&2
     return 1
   }
-  selected=$(rotate_account_home claude "$pool" "${candidates[@]}") || return 1
-  log "CLAUDE USAGE UNREADABLE: quota-axi cannot non-interactively resolve Claude's config-dir-specific macOS Keychain credential today; round-robin selection across ${#candidates[@]} eligible $pool accounts chose $selected"
+  # Rank by live per-account usage whenever it is readable, and fall back to
+  # rotation for whatever is not. Claude's per-directory read is unreadable on
+  # this machine today, so in practice every account lands in unknown_homes and
+  # the rotation branch runs - but nothing here assumes that stays true, and the
+  # moment quota-axi can resolve a config-dir-specific credential the same code
+  # starts ranking and starts skipping accounts that are spent.
+  reserve_lines=$(pool_reserve_percents claude "$pool" 2>/dev/null) || reserve_lines=
+  quota_bin=$(claude_quota_command 2>/dev/null) || quota_bin=
+  if [ -n "$quota_bin" ] && command -v jq >/dev/null 2>&1; then
+    LC_ALL=C
+    export LC_ALL
+    for candidate in "${candidates[@]}"; do
+      usage=$(claude_usage_json "$candidate" "$quota_bin") || usage=
+      score=$(claude_score "$usage") || score=
+      if [ -z "$score" ]; then
+        unknown_homes+=("$candidate")
+        continue
+      fi
+      reserve=$(reserve_percent_for_home "$reserve_lines" "$candidate")
+      if numeric_at_or_below "$score" "$reserve"; then
+        log "claude account $candidate EXHAUSTED: ${score}% remaining (read $(claude_status "$usage")) is at or below its ${reserve}% reserve; excluded while any account still has headroom"
+        exhausted_homes+=("$candidate")
+        continue
+      fi
+      log "claude account $candidate remaining score=$score (reserve ${reserve}%, read $(claude_status "$usage"))"
+      if [ "${#best_homes[@]}" -eq 0 ] || awk -v candidate_score="$score" -v current_score="$best_score" \
+        'BEGIN { exit !(candidate_score > current_score) }'; then
+        best_homes=("$candidate")
+        best_score=$score
+      elif awk -v candidate_score="$score" -v current_score="$best_score" \
+        'BEGIN { exit !(candidate_score == current_score) }'; then
+        best_homes+=("$candidate")
+      fi
+    done
+  else
+    unknown_homes=("${candidates[@]}")
+  fi
+
+  if [ "${#best_homes[@]}" -gt 0 ]; then
+    selected=$(rotate_account_home claude "$pool" "${best_homes[@]}") || return 1
+    log "selected claude account $selected with fresh remaining score=$best_score; round-robin among ${#best_homes[@]} tied accounts"
+    printf '%s\n' "$selected"
+    return 0
+  fi
+  if [ "${#unknown_homes[@]}" -gt 0 ]; then
+    selected=$(rotate_account_home claude "$pool" "${unknown_homes[@]}") || return 1
+    if [ "${#exhausted_homes[@]}" -gt 0 ]; then
+      log "CLAUDE USAGE PARTLY UNREADABLE: every account with a readable window is exhausted; round-robin across the ${#unknown_homes[@]} unknown-usage $pool accounts chose $selected"
+    else
+      log "CLAUDE USAGE UNREADABLE: quota-axi cannot non-interactively resolve Claude's config-dir-specific macOS Keychain credential today; round-robin selection across ${#unknown_homes[@]} eligible $pool accounts chose $selected"
+    fi
+    printf '%s\n' "$selected"
+    return 0
+  fi
+  selected=$(rotate_account_home claude "$pool" "${exhausted_homes[@]}") || return 1
+  log "CLAUDE ALL ACCOUNTS EXHAUSTED: every eligible $pool account is at or below its reserve; spreading rather than blocking dispatch, and $selected is this turn's least-recently-used account"
   printf '%s\n' "$selected"
 }
 

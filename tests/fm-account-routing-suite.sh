@@ -2432,6 +2432,38 @@ test_secondmate_pool_routes_when_mode_is_enforced_and_mode_inherits() {
   pass "secondmate routing uses the primary pool while the mode, but not that pool, inherits"
 }
 
+# observe mode must never be able to keep a supervisor down. A fresh install, or
+# any machine whose account directories have not been provisioned, has nothing to
+# select from; refusing there would trade "shares an identity" for "does not run
+# at all", which is strictly worse. The degrade has to stay visible though -
+# silently un-routed secondmates are the original defect - so it is asserted as a
+# warning plus recorded metadata, not merely as a successful launch.
+test_observe_secondmate_degrades_when_no_account_directories_exist() {
+  local id rec sm out status empty_root
+  id=account-secondmate-observe-degrade-z11j
+  rec=$(make_case secondmate-observe-degrade claude)
+  read_case "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+  printf 'observe\n' > "$HOME_DIR/config/account-routing-mode"
+  empty_root="$CASE_DIR/no-accounts"
+  mkdir -p "$empty_root"
+
+  out=$(FM_ACCOUNT_DIRECTORY_TEST_LAB=firstmate-account-directory-test-lab-v1 \
+    FM_ACCOUNT_DIRECTORY_ROOT="$empty_root" \
+    FM_TEST_PANE_PATH="$sm" run_spawn "$id" "$sm" --secondmate)
+  status=$?
+  [ "$status" -eq 0 ] || fail "unprovisioned observe secondmate refused to launch (exit $status): $out"
+  assert_contains "$out" "launching on the provider's default identity" \
+    "degraded secondmate launch was not warned"
+  assert_regex '^account_routing_degraded=1$' "$HOME_DIR/state/$id.meta" \
+    "degraded secondmate launch was not recorded in metadata"
+  assert_not_grep '^account_home=' "$HOME_DIR/state/$id.meta" \
+    "degraded secondmate recorded an account home it never received"
+  pass "an observe secondmate degrades to the default identity when no account directories exist"
+}
+
 test_explicit_secondmate_route_preserves_ambient_primary_enforce() {
   local id rec sm out status
   id=account-secondmate-explicit-env-z11c
@@ -6463,7 +6495,8 @@ if [ "${FM_TEST_FOCUSED:-}" = enforce-select-failure ]; then
 fi
 
 if [ "${FM_TEST_FOCUSED:-}" = explicit-secondmate-route ]; then
-  run_isolated_test test_explicit_secondmate_route_preserves_ambient_primary_enforce
+  run_isolated_test test_observe_secondmate_degrades_when_no_account_directories_exist
+run_isolated_test test_explicit_secondmate_route_preserves_ambient_primary_enforce
   exit 0
 fi
 
@@ -6797,6 +6830,7 @@ run_isolated_test test_native_resume_accepts_agent_fleet_utc_offset_timestamps
 run_isolated_test test_native_resume_uses_private_launch_directory_and_cleans_it
 run_isolated_test test_secondmate_pool_is_nonactivating_and_noninherited
 run_isolated_test test_secondmate_pool_routes_when_mode_is_enforced_and_mode_inherits
+run_isolated_test test_observe_secondmate_degrades_when_no_account_directories_exist
 run_isolated_test test_explicit_secondmate_route_preserves_ambient_primary_enforce
 run_isolated_test test_enforced_secondmate_requires_routing_inheritance_and_capable_home
 run_isolated_test test_secondmate_routing_inheritance_is_authoritative_for_every_mode

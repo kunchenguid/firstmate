@@ -260,9 +260,23 @@ test_bootstrap_reporting() {
       esac
       add_tasks_axi "$fakebin" "$tasks" "$archive_body" "$multi_id"
     fi
-    if [ "$quota" = "0" ]; then
-      rm -f "$fakebin/quota-axi"
-    fi
+    # quota column: 0 removes quota-axi, 1 keeps the version-silent stub (its
+    # version is unknowable, which must stay silent), and a dotted version makes
+    # the stub report exactly that version so the outdated notice can be pinned.
+    case "$quota" in
+      0)
+        rm -f "$fakebin/quota-axi"
+        ;;
+      1) ;;
+      *)
+        cat > "$fakebin/quota-axi" <<SH
+#!/usr/bin/env bash
+[ "\${1:-}" = --version ] && { printf '%s\n' "$quota"; exit 0; }
+exit 0
+SH
+        chmod +x "$fakebin/quota-axi"
+        ;;
+    esac
     # FM_ROOT_OVERRIDE points the worktree-tangle check at the non-git home dir so
     # it stays inert: this suite pins tool detection, not the tangle guard, and the
     # ambient checkout (CI runs on a feature branch) must not leak a TANGLE line in.
@@ -289,6 +303,10 @@ incompatible tasks-axi is required by default^1^0.1.0^1^-^exact^MISSING: tasks-a
 tasks-axi without archive-body is required by default^1^0.1.2:noarchive^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 tasks-axi without multi-id mv is required by default^1^0.2.2:nomulti^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 missing quota-axi is required by default^1^0.1.1^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
+quota-axi with an unreadable version stays silent rather than guessing it is old^1^0.1.1^1^manual^empty^^
+outdated quota-axi is reported as degraded routing, never as a blocking install^1^0.1.1^0.1.5^manual^exact^ACCOUNT_ROUTING: quota-axi 0.1.5 ignores CLAUDE_CONFIG_DIR, so per-account Claude quota reads one shared identity; account selection still rotates but cannot skip an exhausted account. Upgrade to 0.1.19+ with: npm install -g quota-axi^
+quota-axi at the floor is silent^1^0.1.1^0.1.19^manual^empty^^
+quota-axi above the floor is silent^1^0.1.1^0.2.0^manual^empty^^
 manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 manual backlog backend suppresses tasks-axi availability^1^0.1.1^1^manual^empty^^
 ROWS
