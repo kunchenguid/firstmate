@@ -129,7 +129,7 @@ SH
 make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
   local dir=$1 tb="$1/notimeoutbin" tool real
   mkdir -p "$tb"
-  for tool in bash git grep sed head cut tail dirname perl; do
+  for tool in bash git grep sed awk head cut tail dirname perl; do
     real=$(command -v "$tool" || true)
     [ -n "$real" ] || fail "missing tool for no-timeout path: $tool"
     ln -s "$real" "$tb/$tool"
@@ -170,8 +170,15 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_PIPELINE_HEAD=""
+  FM_FAKE_SYNC_STATE=""
+  FM_FAKE_SYNC_LOCAL_HEAD=""
+  FM_FAKE_SYNC_PIPELINE_RUN=""
+  FM_FAKE_SYNC_SUBMITTED_HEAD=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_PIPELINE_HEAD FM_FAKE_SYNC_STATE FM_FAKE_SYNC_LOCAL_HEAD
+  export FM_FAKE_SYNC_PIPELINE_RUN FM_FAKE_SYNC_SUBMITTED_HEAD
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -212,6 +219,64 @@ run:
   head: "${FM_FAKE_RUN_HEAD:-abc1234}"
   pr: "https://github.com/o/r/pull/2"
   findings: none
+EOF
+}
+
+# A live run mid fix-round whose head is NOT an object in the crew worktree, plus
+# the branch_sync custody object that binds it anyway. This is the shape every
+# pre-push no-mistakes run reports: it commits each gate fix round into its own
+# gate repo under ~/.no-mistakes/repos/<id>.git, never into the crew worktree, so
+# the head it reports cannot be resolved here by any history test (traced live
+# 2026-08-08 on v1.45.4 against a running pipeline; the shas below are
+# placeholders standing in for the shape that run reported).
+# Every branch_sync conjunct is separately overridable so a test can break one at
+# a time and confirm attribution is refused.
+run_pipeline_owned_prepush() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  head: ${FM_FAKE_PIPELINE_HEAD:-a1b2c3d4}
+  pr: ""
+  findings: 3 auto-fix
+  steps[3]{step,status,findings,duration_ms}:
+    intent,completed,0,2
+    rebase,completed,0,2856
+    review,fixing,3,3711165
+  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:
+    review,fixing,1h17m,"4m16s ago: log: reading the diff","3511495",fix 5
+branch_sync:
+  state: ${FM_FAKE_SYNC_STATE:-pipeline_owned}
+  changed: false
+  local:
+    branch: $1
+    head: ${FM_FAKE_SYNC_LOCAL_HEAD:-${FM_FAKE_RUN_HEAD:-}}
+    clean: true
+  pipeline:
+    run: "${FM_FAKE_SYNC_PIPELINE_RUN:-01RUN}"
+    status: running
+    phase: pre_push
+    submitted_head: ${FM_FAKE_SYNC_SUBMITTED_HEAD:-${FM_FAKE_RUN_HEAD:-}}
+    current_head: ${FM_FAKE_PIPELINE_HEAD:-a1b2c3d4}
+    pushed_head: ""
+    pushed_at: 0
+    push_generation: 0
+  target:
+    kind: ""
+    remote: origin
+    ref: ""
+  remote:
+    observed_head: ""
+    freshness: pipeline_push
+    observed_at: 0
+  relation: unknown
+  safety: blocked_pipeline_owned
+  pr_state: none
+  note: the pipeline head has moved but has not been successfully pushed
+  next_action:
+    code: continue_active_run
+    command: no-mistakes axi status
 EOF
 }
 
@@ -1290,6 +1355,198 @@ test_local_advanced_past_run_head_invalidates() {
   pass "local work advanced past run head invalidates attribution"
 }
 
+# --- pre-push pipeline custody (2026-08-08 false-`failed` regression) --------
+# A running pipeline reads as `failed` when its head is invisible here and an
+# older terminal run for the same branch still sits at the untouched worktree
+# head. These four cases pin both directions of the fix: custody binds a live
+# pre-push run, and every way a custody claim can fail still refuses attribution.
+
+# Assert the premise these cases rest on: the pipeline head really is
+# unresolvable in the crew worktree, so no history test could ever bind it. Without
+# this the "custody did the work" cases could pass vacuously off the history rule.
+assert_head_unresolvable() {  # <worktree> <head> <label>
+  git -C "$1" rev-parse --verify "$2^{commit}" >/dev/null 2>&1 \
+    && fail "$3: pipeline head $2 resolves in the worktree, case is vacuous"
+  return 0
+}
+
+# Direction 1 (broken before the fix): the branch's own live run is reported by
+# `axi status` with a pre-push head this worktree cannot resolve. branch_sync
+# states pipeline custody of exactly this branch and head, so the run IS this
+# crew's and its step is authoritative. Before the fix, attribution failed here
+# and the stale needs-decision log won, reporting a crew parked on a decision that
+# had already been answered five fix rounds ago.
+test_prepush_pipeline_custody_is_attributed() {
+  reset_fakes
+  local d out
+  d=$(new_case prepush-custody)
+  make_repo_on_branch "$d/wt" fm/feat-prepush
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/prepush.meta" "window=fm:fm-prepush" "worktree=$d/wt" "kind=ship" \
+    "harness=claude"
+  printf 'needs-decision: authority call on finding r2\n' > "$d/state/prepush.status"
+  FM_FAKE_PIPELINE_HEAD=a1b2c3d4
+  assert_head_unresolvable "$d/wt" "$FM_FAKE_PIPELINE_HEAD" "prepush custody"
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned_prepush fm/feat-prepush)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" prepush
+  out=$(run_crew_state "$d" prepush)
+  assert_contains "$out" "state: working" "live pre-push pipeline reports working"
+  assert_contains "$out" "source: run-step" "custody-bound run is authoritative"
+  assert_contains "$out" "status-log superseded by active run" "stale needs-decision log is superseded"
+  assert_not_contains "$out" "state: parked" "answered decision must not read as parked"
+  pass "pre-push pipeline custody is attributed to its own crew"
+}
+
+# Direction 2 (must keep working): same invisible head, but branch_sync reports
+# custody already RELEASED back to the user (`user_owned` - the run went terminal
+# without changing the submitted head). No live pipeline owns this branch, so the
+# run must not be attributed and the crew's own current state decides.
+test_released_custody_unresolvable_head_not_attributed() {
+  reset_fakes
+  local d out
+  d=$(new_case released-custody)
+  make_repo_on_branch "$d/wt" fm/feat-released
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/released.meta" "window=fm:fm-released" "worktree=$d/wt" "kind=ship" \
+    "harness=claude"
+  printf 'working: reworking the branch after the cancelled run\n' > "$d/state/released.status"
+  FM_FAKE_PIPELINE_HEAD=a1b2c3d4
+  assert_head_unresolvable "$d/wt" "$FM_FAKE_PIPELINE_HEAD" "released custody"
+  FM_FAKE_SYNC_STATE=user_owned
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned_prepush fm/feat-released)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" released
+  out=$(run_crew_state "$d" released)
+  assert_not_contains "$out" "source: run-step" "released custody must not bind an invisible head"
+  assert_contains "$out" "source: status-log" "falls back to the crew's own current state"
+  assert_contains "$out" "state: working" "status-log working: remains current"
+  pass "custody released back to the user is not attributed"
+}
+
+# Direction 2 (must keep working): branch_sync does claim live pipeline custody,
+# but the run was submitted from a DIFFERENT commit than the one checked out here
+# - local work advanced past submission, or the tip was rewritten. The
+# submitted_head equality is what preserves the divergence protection the
+# object-visibility test used to provide, so this is the case that proves the fix
+# did not blind the identity rule to an abandoned branch.
+test_pipeline_custody_submitted_elsewhere_not_attributed() {
+  reset_fakes
+  local d out
+  d=$(new_case custody-other-head)
+  make_repo_on_branch "$d/wt" fm/feat-otherhead
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/otherhead.meta" "window=fm:fm-otherhead" "worktree=$d/wt" "kind=ship" \
+    "harness=claude"
+  printf 'working: stage 2 work on the reused branch\n' > "$d/state/otherhead.status"
+  FM_FAKE_PIPELINE_HEAD=a1b2c3d4
+  assert_head_unresolvable "$d/wt" "$FM_FAKE_PIPELINE_HEAD" "custody other head"
+  # Custody claim is real, but for a submitted head that is not this worktree's.
+  FM_FAKE_SYNC_SUBMITTED_HEAD=0000000000000000000000000000000000000001
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned_prepush fm/feat-otherhead)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" otherhead
+  out=$(run_crew_state "$d" otherhead)
+  assert_not_contains "$out" "source: run-step" "custody of another head must not bind this worktree"
+  assert_contains "$out" "source: status-log" "falls back after the submitted head diverges"
+  assert_contains "$out" "state: working" "status-log working: remains current"
+  pass "pipeline custody of a different submitted head is not attributed"
+}
+
+# Direction 1 (broken before the fix), coarse path: `axi status` answers with
+# another crew's branch entirely, so there is no branch_sync for this branch to
+# read and the plain runs list decides. Its newest row is this branch's live run
+# with the same invisible pre-push sha; three rows down sits a superseded `failed`
+# run whose sha still matches the untouched worktree head exactly. Before the fix
+# the scan skipped the live row and kept walking until that older row matched,
+# reporting a healthy pipeline as failed - the exact live shape observed on a
+# running pipeline. An older run can never outrank the branch's newest one.
+test_coarse_older_terminal_row_does_not_outrank_newest_row() {
+  reset_fakes
+  local d short out
+  d=$(new_case coarse-superseded)
+  make_repo_on_branch "$d/wt" fm/feat-supersede
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/supersede.meta" "window=fm:fm-supersede" "worktree=$d/wt" "kind=ship" \
+    "harness=claude"
+  printf 'working: pipeline validating the branch\n' > "$d/state/supersede.status"
+  assert_head_unresolvable "$d/wt" a1b2c3d4 "coarse superseded"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-supersede a1b2c3d4  2026-08-08 13:50
+  running    fm/other-crew     c9d0e1f2  2026-08-08 13:37
+  failed     fm/feat-supersede ${short}  2026-08-08 13:32
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" supersede
+  out=$(run_crew_state "$d" supersede)
+  assert_not_contains "$out" "state: failed" "superseded older run must not be reported as failed"
+  assert_not_contains "$out" "run failed" "superseded older run must not supply the detail"
+  assert_contains "$out" "state: working" "the crew's own current state decides instead"
+  assert_contains "$out" "source: status-log" "no attribution from a non-binding newest row"
+  pass "older terminal runs-list row does not outrank the branch's newest row"
+}
+
+# Direction 2 (must keep working): `axi status` serves a CACHED branch_sync block
+# (the CLI's own help says so: "full detail plus cached branch_sync when
+# relevant"), so a cached claim can describe the worktree as it was before the
+# crew committed again. Here the whole cached block still points at the old head,
+# which no longer matches this checkout, so the custody claim describes a state
+# that has moved on and attribution is refused.
+test_stale_cached_custody_block_not_attributed() {
+  reset_fakes
+  local d stale_head out
+  d=$(new_case stale-cached-custody)
+  make_repo_on_branch "$d/wt" fm/feat-stalecache
+  stale_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'crew committed again after the cached read'
+  [ "$stale_head" != "$(git -C "$d/wt" rev-parse HEAD)" ] || fail "stale-cache case did not advance HEAD"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/stalecache.meta" "window=fm:fm-stalecache" "worktree=$d/wt" "kind=ship" \
+    "harness=claude"
+  printf 'working: follow-up commit on top of the validated tip\n' > "$d/state/stalecache.status"
+  FM_FAKE_PIPELINE_HEAD=a1b2c3d4
+  assert_head_unresolvable "$d/wt" "$FM_FAKE_PIPELINE_HEAD" "stale cached custody"
+  FM_FAKE_SYNC_LOCAL_HEAD=$stale_head
+  FM_FAKE_SYNC_SUBMITTED_HEAD=$stale_head
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned_prepush fm/feat-stalecache)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" stalecache
+  out=$(run_crew_state "$d" stalecache)
+  assert_not_contains "$out" "source: run-step" "a cached custody block for an older head must not bind"
+  assert_contains "$out" "source: status-log" "falls back after the cached custody block goes stale"
+  assert_contains "$out" "state: working" "status-log working: remains current"
+  pass "stale cached custody block is not attributed"
+}
+
+# Direction 2 (must keep working): the cached custody claim names a DIFFERENT run
+# than the one `axi status` is reporting, so it is not evidence about that run.
+# Attributing the reported run's step off someone else's custody claim would let a
+# terminal run inherit a live one's verdict.
+test_custody_claim_for_another_run_not_attributed() {
+  reset_fakes
+  local d out
+  d=$(new_case custody-other-run)
+  make_repo_on_branch "$d/wt" fm/feat-otherrun
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/otherrun.meta" "window=fm:fm-otherrun" "worktree=$d/wt" "kind=ship" \
+    "harness=claude"
+  printf 'working: waiting on the pipeline\n' > "$d/state/otherrun.status"
+  FM_FAKE_PIPELINE_HEAD=a1b2c3d4
+  assert_head_unresolvable "$d/wt" "$FM_FAKE_PIPELINE_HEAD" "custody other run"
+  FM_FAKE_SYNC_PIPELINE_RUN=01OTHERRUN
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned_prepush fm/feat-otherrun)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" otherrun
+  out=$(run_crew_state "$d" otherrun)
+  assert_not_contains "$out" "source: run-step" "custody of a different run must not bind the reported one"
+  assert_contains "$out" "source: status-log" "falls back when the custody claim names another run"
+  assert_contains "$out" "state: working" "status-log working: remains current"
+  pass "custody claim naming a different run is not attributed"
+}
+
 test_missing_run_head_falls_back_to_current_state() {
   reset_fakes
   local d out
@@ -1358,5 +1615,11 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
+test_prepush_pipeline_custody_is_attributed
+test_released_custody_unresolvable_head_not_attributed
+test_pipeline_custody_submitted_elsewhere_not_attributed
+test_stale_cached_custody_block_not_attributed
+test_custody_claim_for_another_run_not_attributed
+test_coarse_older_terminal_row_does_not_outrank_newest_row
 
 echo "all fm-crew-state tests passed"
