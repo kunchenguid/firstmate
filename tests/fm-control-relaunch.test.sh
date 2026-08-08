@@ -23,6 +23,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-trace-context-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -80,6 +82,17 @@ case "${1:-}" in
       esac
     else
       printf '%s\n' "$payload" >> "$D/keys"
+      case "$payload" in
+        'export GOTMPDIR='*)
+          if [ -n "${FM_FAKE_TRACE_PREPARE:-}" ]; then
+            : > "$FM_FAKE_TRACE_PREPARE"
+            while [ ! -e "$FM_FAKE_META_WRITER_READY" ]; do /bin/sleep 0.01; done
+          fi
+          ;;
+        'export TRACEPARENT='*)
+          [ -z "${FM_FAKE_TRACE_EXPORTED:-}" ] || : > "$FM_FAKE_TRACE_EXPORTED"
+          ;;
+      esac
     fi
     exit 0 ;;
   display-message)
@@ -155,6 +168,9 @@ run_control() {  # <case-dir> <args...>
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
     FM_REAL_MV="${FM_REAL_MV:-}" FM_FAKE_COMPLETE_JOURNAL_MV_FAIL="${FM_FAKE_COMPLETE_JOURNAL_MV_FAIL:-}" \
     FM_FAKE_META_PUBLISH_MV_FAIL="${FM_FAKE_META_PUBLISH_MV_FAIL:-}" \
+    FM_FAKE_TRACE_PREPARE="${FM_FAKE_TRACE_PREPARE:-}" \
+    FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
+    FM_FAKE_TRACE_EXPORTED="${FM_FAKE_TRACE_EXPORTED:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -200,24 +216,21 @@ if [ -n "${FM_FAKE_META_PUBLISH_MV_FAIL:-}" ]; then
     [ "$path" != "$FM_FAKE_META_PUBLISH_MV_FAIL" ] || exit 1
   done
 fi
+source_path=
+target_path=
+for path in "$@"; do
+  source_path=$target_path
+  target_path=$path
+done
+if [ -n "${FM_FAKE_META_WRITER_TARGET:-}" ] \
+   && [ "$target_path" = "$FM_FAKE_META_WRITER_TARGET" ] \
+   && grep -q '^x_request=' "$source_path" 2>/dev/null; then
+  : > "$FM_FAKE_META_WRITER_READY"
+  while [ ! -e "$FM_FAKE_META_WRITER_RELEASE" ]; do /bin/sleep 0.01; done
+fi
 exec "$FM_REAL_MV" "$@"
 SH
   chmod +x "$1/fakebin/mv"
-}
-
-make_meta_race_awk_stub() {  # <case-dir>
-  cat > "$1/fakebin/awk" <<'SH'
-#!/usr/bin/env bash
-for arg in "$@"; do
-  if [ -n "${FM_FAKE_META_RACE_PATH:-}" ] && [ "$arg" = "$FM_FAKE_META_RACE_PATH" ]; then
-    : > "$FM_FAKE_META_RACE_READY"
-    /bin/sleep 1
-    break
-  fi
-done
-exec "$FM_REAL_AWK" "$@"
-SH
-  chmod +x "$1/fakebin/awk"
 }
 
 make_rm_failure_stub() {  # <case-dir>
@@ -285,36 +298,84 @@ test_relaunch_preserves_durable_task_metadata() {
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
-  local dir control_pid link_out rc i=0
+  local dir control_pid link_pid rc i=0 traceparent prepare ready exported release
   dir=$(new_case metadata-race rl28)
   add_ship_task "$dir" rl28 claude
-  make_meta_race_awk_stub "$dir"
-  FM_REAL_AWK=$(command -v awk) \
-    FM_FAKE_META_RACE_PATH="$dir/home/state/rl28.meta" \
-    FM_FAKE_META_RACE_READY="$dir/meta-race-ready" \
+  printf '%s\n' "$$" > "$dir/home/state/.lock"
+  printf '%s on\n' "$$" > "$dir/home/state/.trace-context-effective"
+  make_mv_failure_stub "$dir"
+  prepare="$dir/trace-prepare"
+  ready="$dir/meta-writer-ready"
+  exported="$dir/trace-exported"
+  release="$dir/meta-writer-release"
+  FM_REAL_MV=$(command -v mv) \
+    FM_FAKE_TRACE_PREPARE="$prepare" \
+    FM_FAKE_META_WRITER_READY="$ready" \
+    FM_FAKE_TRACE_EXPORTED="$exported" \
     run_control "$dir" rl28 relaunch --note "continue after publication" > "$dir/control.out" &
   control_pid=$!
-  while [ ! -e "$dir/meta-race-ready" ] && [ "$i" -lt 200 ]; do
+  while [ ! -e "$prepare" ] && [ "$i" -lt 200 ]; do
     /bin/sleep 0.01
     i=$((i + 1))
   done
-  [ -e "$dir/meta-race-ready" ] || {
+  [ -e "$prepare" ] || {
     kill "$control_pid" 2>/dev/null || true
     wait "$control_pid" 2>/dev/null || true
-    fail "relaunch did not reach metadata publication"
+    fail "relaunch did not reach trace delivery"
   }
-  link_out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_REAL_AWK="$(command -v awk)" \
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_REAL_MV="$(command -v mv)" \
+    FM_FAKE_META_WRITER_TARGET="$dir/home/state/rl28.meta" \
+    FM_FAKE_META_WRITER_READY="$ready" \
+    FM_FAKE_META_WRITER_RELEASE="$release" \
     "$X_LINK" rl28 request-28 --carry-count 1 --carry-ts 1700000000 \
-      --carry-platform x --carry-max 280 2>&1); rc=$?
-  expect_code 0 "$rc" "concurrent X metadata publication should serialize"$'\n'"$link_out"
+      --carry-platform x --carry-max 280 > "$dir/link.out" 2>&1 &
+  link_pid=$!
+  i=0
+  while { [ ! -e "$ready" ] || [ ! -e "$exported" ]; } && [ "$i" -lt 200 ]; do
+    /bin/sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$ready" ] && [ -e "$exported" ] || {
+    : > "$release"
+    kill "$link_pid" "$control_pid" 2>/dev/null || true
+    wait "$link_pid" 2>/dev/null || true
+    wait "$control_pid" 2>/dev/null || true
+    fail "trace publication did not overlap the concurrent metadata writer"
+  }
+  : > "$release"
+  wait "$link_pid"; rc=$?
+  expect_code 0 "$rc" "concurrent X metadata publication should serialize"$'\n'"$(cat "$dir/link.out")"
   wait "$control_pid"; rc=$?
   expect_code 0 "$rc" "relaunch should complete after serialized metadata publication"$'\n'"$(cat "$dir/control.out")"
   [ "$(meta_field "$dir" rl28 x_request)" = request-28 ] \
     || fail "relaunch erased metadata published concurrently through the X interface"
   [ "$(meta_field "$dir" rl28 x_followups)" = 1 ] \
     || fail "relaunch erased the concurrent follow-up count"
-  pass "fm-control relaunch: concurrent task metadata publications serialize"
+  traceparent=$(meta_field "$dir" rl28 traceparent)
+  fm_trace_context_valid "$traceparent" \
+    || fail "concurrent metadata publication erased the replacement's trace carrier"
+  pass "fm-control relaunch: trace and concurrent task metadata publications serialize"
+}
+
+test_disabled_relaunch_clears_prior_trace_context() {
+  local dir out rc
+  dir=$(new_case trace-off rl33)
+  add_ship_task "$dir" rl33 claude
+  printf '%s\n' 'traceparent=00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01' \
+    >> "$dir/home/state/rl33.meta"
+  printf '%s\n' "$$" > "$dir/home/state/.lock"
+  printf '%s off\n' "$$" > "$dir/home/state/.trace-context-effective"
+
+  out=$(run_control "$dir" rl33 relaunch --note "crossing trace boundary"); rc=$?
+  expect_code 0 "$rc" "disabled relaunch should succeed"$'\n'"$out"
+  [ -z "$(meta_field "$dir" rl33 traceparent)" ] \
+    || fail "disabled relaunch must remove the prior trace carrier from metadata"
+  grep -q '^unset TRACEPARENT; .*claude' "$dir/fake/literal" \
+    || fail "disabled relaunch must clear the pane carrier before replacement launch"
+  ! grep -q '^export TRACEPARENT=' "$dir/fake/literal" \
+    || fail "disabled relaunch must not export a replacement trace carrier"
+  pass "fm-control relaunch: disabling tracing clears metadata and pane context"
 }
 
 test_relaunch_appends_the_progress_note_to_the_instructions() {
@@ -1210,6 +1271,7 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
+test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
