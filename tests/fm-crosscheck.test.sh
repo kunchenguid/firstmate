@@ -2677,6 +2677,79 @@ assert run["suspicions"] == []
   pass "a verdict without an executed reproduction is a tool failure, never blocking code evidence"
 }
 
+test_launcher_requires_supported_python() {
+  local candidate case_dir fakebin launcher marker modern rc
+  case_dir="$TMP_ROOT/python-launcher"
+  fakebin="$case_dir/fakebin"
+  launcher="$ROOT/bin/fm-crosscheck.sh"
+  marker="$case_dir/launched.args"
+  mkdir -p "$fakebin"
+
+  cat > "$fakebin/python-old" <<'SH'
+#!/bin/bash
+if [ "${1:-}" = -c ]; then
+  printf '3.9.6\n'
+  exit 1
+fi
+exit 97
+SH
+  chmod +x "$fakebin/python-old"
+
+  set +e
+  FM_CROSSCHECK_PYTHON="$fakebin/python-old" "$launcher" --help \
+    > "$case_dir/old.out" 2> "$case_dir/old.err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "explicit too-old crosscheck interpreter"
+  assert_grep 'Python 3.11 or newer is required' "$case_dir/old.err" \
+    "the launcher did not name its interpreter requirement"
+  assert_grep "looked for FM_CROSSCHECK_PYTHON='$fakebin/python-old'" \
+    "$case_dir/old.err" "the launcher did not name the requested interpreter"
+  assert_grep 'Python 3.9.6, too old' "$case_dir/old.err" \
+    "the launcher did not report the version it found"
+  assert_absent "$marker" "the launcher executed the gate under a too-old interpreter"
+
+  cat > "$fakebin/python3.11" <<'SH'
+#!/bin/bash
+if [ "${1:-}" = -c ]; then
+  printf '3.11.9\n'
+  exit 0
+fi
+printf '%s\n' "$@" > "$FM_TEST_CROSSCHECK_LAUNCH_MARKER"
+SH
+  chmod +x "$fakebin/python3.11"
+  for name in python3.14 python3.13 python3.12; do
+    ln -s python-old "$fakebin/$name"
+  done
+
+  env -u FM_CROSSCHECK_PYTHON \
+    PATH="$fakebin:/usr/bin:/bin" \
+    FM_TEST_CROSSCHECK_LAUNCH_MARKER="$marker" \
+    "$launcher" --help > "$case_dir/modern.out" 2> "$case_dir/modern.err" \
+    || fail "the launcher rejected a discoverable Python 3.11 interpreter: $(cat "$case_dir/modern.err")"
+  [ "$(sed -n '1p' "$marker")" = "$ROOT/bin/fm-crosscheck.py" ] \
+    || fail "the launcher did not execute fm-crosscheck.py with the supported interpreter"
+  [ "$(sed -n '2p' "$marker")" = --help ] \
+    || fail "the launcher did not preserve crosscheck arguments"
+
+  modern=
+  for candidate in python3.14 python3.13 python3.12 python3.11 python3; do
+    command -v "$candidate" >/dev/null 2>&1 || continue
+    if "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 11) else 1)' \
+      >/dev/null 2>&1; then
+      modern=$(command -v "$candidate")
+      break
+    fi
+  done
+  [ -n "$modern" ] || fail "the Crosscheck test environment has no Python 3.11 or newer"
+  FM_CROSSCHECK_PYTHON="$modern" "$launcher" --help \
+    > "$case_dir/real-modern.out" 2> "$case_dir/real-modern.err" \
+    || fail "the launcher rejected the real conforming interpreter: $(cat "$case_dir/real-modern.err")"
+  assert_grep 'usage: fm-crosscheck.py' "$case_dir/real-modern.out" \
+    "the real conforming interpreter did not execute the Crosscheck entrypoint"
+  pass "crosscheck launcher refuses old Python and discovers Python 3.11 or newer"
+}
+
 test_verify_rechecks_live_head_and_claims() {
   local record case_dir base head next_base rc verified
   record=$(make_case verify-live)
@@ -2726,6 +2799,7 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_unrouted_author_uses_cross_provider_independence|\
     test_unrouted_author_without_account_proof_fails_closed|\
     test_missing_author_identity_is_a_named_tool_failure|\
+    test_launcher_requires_supported_python|\
     test_completed_reviewer_suspicion_is_blocking|\
     test_reading_only_suspicion_is_a_tool_failure|\
     test_new_finding_requires_executed_reproduction|\
@@ -2780,6 +2854,7 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-3 ]; then
   exit 0
 fi
 
+test_launcher_requires_supported_python
 test_clear_review_uses_policy_contract
 test_empty_runtime_overrides_use_home_defaults
 test_empty_environment_fallback_is_generic

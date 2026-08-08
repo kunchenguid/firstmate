@@ -396,7 +396,9 @@ Scheduler installation and health checks dispatch through an adapter seam, while
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
 It installs automatically supported tools only after you say go; manual-only tools remain for you to install from the printed instructions.
 Required tools come in two parts: a universal toolchain every home needs regardless of backend, and a per-backend delta that follows the runtime backend actually resolved for this home.
-The universal toolchain is node, python3, git, gh with GitHub auth via `gh auth login`, Perl, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, the firstmate-owned Lavish store-and-forward fork, compatible tasks-axi per "Backlog backend" above, and quota-axi.
+The universal toolchain is node, Python 3.11 or newer, git, gh with GitHub auth via `gh auth login`, Perl, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, the firstmate-owned Lavish store-and-forward fork, compatible tasks-axi per "Backlog backend" above, and quota-axi.
+Bootstrap only checks that some `python3` exists, so that floor is enforced where it matters at the merge gate: `bin/fm-crosscheck.sh` probes `python3.14`, `python3.13`, `python3.12`, `python3.11`, and `python3` for a conforming interpreter instead of assuming the ambient `python3` is new enough, which makes it immune to `PATH` ordering.
+Set `FM_CROSSCHECK_PYTHON` to a command or absolute path to select a specific interpreter; an unavailable or pre-3.11 explicit selection is refused rather than silently replaced.
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
 In that list, no-mistakes runs the validation pipeline, gh-axi and chrome-devtools-axi cover GitHub and browser operations, the `lavish` and `lavish-axi` commands provide durable decision capture without a browser or resident process, and tasks-axi plus quota-axi back backlog mutations and quota-balanced dispatch.
 `config/lavish-wake-command` is the local, gitignored absolute path to this checkout's narrow wake adapter; `bin/fm-bootstrap.sh install lavish-axi` writes it after installing the fork, and it is intentionally not inherited because another firstmate home can use a different checkout.
@@ -531,6 +533,7 @@ FM_ROOT_OVERRIDE=        # override firstmate repo root, tangle-guard target, an
 FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_CROSSCHECK_FETCH_REMOTE=  # alternate Git remote for exact refs/pull/<number>/head resolution; unset derives the base GitHub repository
+FM_CROSSCHECK_PYTHON=       # explicit Python 3.11+ command or absolute path for crosscheck; unset auto-discovers, while an invalid explicit selection refuses
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_BACKEND=             # optional runtime backend override; tmux/herdr/zellij/cmux support new ship/scout spawns, Orca is legacy-recovery-only, and codex-app is not accepted

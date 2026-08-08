@@ -175,6 +175,8 @@ A ledger that cannot be read is the one stop that cannot record itself: appendin
 A nonzero reviewer exit, timeout, missing artifact, empty artifact, malformed artifact, or wrong-head artifact records an `unreviewed` attempt and exits nonzero.
 An unresolved suspicion comes from a completed reviewer and records a `blocking` attempt instead of being conflated with an invalid review artifact.
 This includes provider refusals that surface only as a stopped or silent agent.
+`bin/fm-crosscheck.sh` refuses earlier than any of these when it cannot resolve a Python 3.11 or newer interpreter for `fm-crosscheck.py`: it prints a `CROSSCHECK UNREVIEWED` banner naming the requested and discovered versions, exits nonzero, and records no ledger run because nothing about the PR was examined.
+That fail-closed banner keeps an interpreter defect from reading as a clear review; interpreter discovery order and the `FM_CROSSCHECK_PYTHON` override are owned by [configuration.md](configuration.md#toolchain).
 Reviewer stdout plus stderr use a separate 16 MiB capture ceiling because a full agent transcript routinely exceeds the ordinary command budget.
 `FM_CROSSCHECK_REVIEWER_MAX_CAPTURE_BYTES` can override that ceiling between 200,000 bytes and 64 MiB, and an invalid value fails closed before reviewer launch.
 This remains a hard bound rather than truncation: Claude returns its structured verdict in the captured JSON envelope, while Codex must still provide its separate authoritative result artifact.
