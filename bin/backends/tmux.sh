@@ -22,6 +22,11 @@
 . "$FM_BACKEND_LIB_DIR/fm-tmux-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-session-lock-lib.sh"
+# Shared process-name vocabulary (agent|shell|other), owned by
+# bin/fm-process-identity-lib.sh and reused by every adapter that classifies a
+# process identity, so a newly verified harness is taught to the fleet once.
+# shellcheck source=bin/fm-process-identity-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-process-identity-lib.sh"
 
 # fm_backend_tmux_resolve_bare_selector: the live-window-listing fallback for a
 # selector that is neither an explicit target nor a task selector routed
@@ -150,34 +155,13 @@ fm_backend_tmux_current_command() {  # <target>
   tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null
 }
 
-# fm_backend_tmux_classify_process_name: the single owner of the process-name
-# vocabulary shared by every liveness signal below - `agent` for a verified
-# harness, `shell` for an idle login/interactive shell, `other` for anything
-# else. Keeping one classifier means the two independent name sources can never
-# drift into disagreeing about what a given name means.
+# fm_backend_tmux_classify_process_name: this adapter's name for the shared
+# process-name vocabulary that every liveness signal below reads - `agent` for a
+# verified harness, `shell` for an idle login/interactive shell, `other` for
+# anything else. The verdict itself is owned by bin/fm-process-identity-lib.sh
+# so a second adapter classifying the same names cannot drift from this one.
 fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
-  local path=$1 argv0=${2:-} base
-  base=${path##*/}
-  base=${base#-}
-  case "$base" in
-    # muse is anchored rather than globbed like its neighbours: its installed
-    # binary is muse-bin-<version> (the launcher execs it, so the version is the
-    # live process name and changes on every auto-update), and unlike `claude` or
-    # `codex` the substring `muse` is a common English fragment - a *muse* glob
-    # would classify musescore or amuse as a live agent pane. The install path
-    # cannot carry it either: ~/.local/bin/muse-bin-<version> has no `muse` path
-    # COMPONENT, so the fm_harness_path_name fallback below never fires for it.
-    muse|muse-bin-*) printf 'agent' ;;
-    *claude*|*codex*|*opencode*|*grok*|*kimi*|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
-    zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
-    *)
-      if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then
-        printf 'agent'
-      else
-        printf 'other'
-      fi
-      ;;
-  esac
+  fm_process_classify_name "$@"
 }
 
 # fm_backend_tmux_foreground_comms: the kernel-side names of every process in

@@ -42,19 +42,20 @@
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
 #   config/backend, then runtime auto-detection from the runtime firstmate's
-#   environment: $TMUX, HERDR_ENV=1, or cmux runtime signals (via
-#   bin/fm-backend.sh's fm_backend_detect, with cmux fallback details in
+#   environment: $TMUX, HERDR_ENV=1, RYDER_SESSION_ID, or cmux runtime signals
+#   (via bin/fm-backend.sh's fm_backend_detect, with cmux fallback details in
 #   docs/cmux-backend.md),
 #   then tmux.
 #   Spawn-capable backends are the reference tmux adapter and experimental
-#   herdr, zellij, orca, and cmux. Orca owns both the task worktree and
-#   terminal, so ship/scout Orca spawns do not run treehouse get; cmux is a
-#   session provider only, exactly like herdr/zellij, so it does. An
-#   auto-detected herdr or cmux spawn prints a loud stderr notice;
+#   herdr, zellij, orca, cmux, and ryder. Orca owns both the task worktree and
+#   terminal, so ship/scout Orca spawns do not run treehouse get; cmux and ryder
+#   are session providers only, exactly like herdr/zellij, so they do. An
+#   auto-detected herdr, cmux, or ryder spawn prints a loud stderr notice;
 #   auto-detected tmux stays silent; zellij and orca are never auto-detected.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
-#   absent backend= means tmux. cmux does not support --secondmate spawns yet.
+#   absent backend= means tmux. cmux and ryder do not support --secondmate
+#   spawns yet.
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
@@ -939,6 +940,10 @@ if [ "$RELAUNCH" -eq 0 ]; then
   fi
   if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
     echo "error: backend=cmux does not support --secondmate spawns yet" >&2
+    exit 1
+  fi
+  if [ "$BACKEND" = ryder ] && [ "$KIND" = secondmate ]; then
+    echo "error: backend=ryder does not support --secondmate spawns yet" >&2
     exit 1
   fi
   if [ "$BACKEND" = orca ]; then
@@ -1986,6 +1991,20 @@ EOF
     fi
     T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
     ;;
+  ryder)
+    # No container to stand up: Ryder forks one detached host per session, so
+    # container_ensure is a pure client gate. The harness name is declared to
+    # the host purely as session metadata - the pty's agent is a login shell,
+    # exactly as on tmux, because the shared spawn steps below run
+    # `treehouse get` in it before launching the harness.
+    fm_backend_ryder_container_ensure || exit 1
+    RYDER_SESSION_ID_TASK=$(fm_backend_ryder_create_task "$W" "$PROJ_ABS" "$HARNESS") || exit 1
+    if [ -z "$RYDER_SESSION_ID_TASK" ]; then
+      echo "error: ryder did not return a session id for $W" >&2
+      exit 1
+    fi
+    T="$RYDER_SESSION_ID_TASK"
+    ;;
   orca)
     set +e
     ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
@@ -2031,6 +2050,7 @@ spawn_send_text_line() {  # <target> <text>
     zellij) fm_backend_zellij_send_text_line "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_text_line "$1" "$2" ;;
     cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" ;;
+    ryder) fm_backend_ryder_send_text_line "$1" "$2" "$W" ;;
   esac
 }
 spawn_current_path() {  # <target>
@@ -2039,6 +2059,7 @@ spawn_current_path() {  # <target>
     herdr) fm_backend_herdr_current_path "$1" ;;
     zellij) fm_backend_zellij_current_path "$1" "$W" ;;
     cmux) fm_backend_cmux_current_path "$1" "$W" ;;
+    ryder) fm_backend_ryder_current_path "$1" "$W" ;;
   esac
 }
 spawn_send_literal() {  # <target> <text>
@@ -2048,6 +2069,7 @@ spawn_send_literal() {  # <target> <text>
     zellij) fm_backend_zellij_send_literal "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_literal "$1" "$2" ;;
     cmux) fm_backend_cmux_send_literal "$1" "$2" "$W" ;;
+    ryder) fm_backend_ryder_send_literal "$1" "$2" "$W" ;;
   esac
 }
 spawn_send_key() {  # <target> <key>
@@ -2057,6 +2079,7 @@ spawn_send_key() {  # <target> <key>
     zellij) fm_backend_zellij_send_key "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_key "$1" "$2" ;;
     cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
+    ryder) fm_backend_ryder_send_key "$1" "$2" "$W" ;;
   esac
 }
 

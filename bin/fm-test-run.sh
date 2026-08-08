@@ -213,6 +213,9 @@ family_for_basename() {
     fm-backend-cmux.test.sh|fm-backend-cmux-smoke.test.sh)
       printf '%s\n' cmux
       ;;
+    fm-backend-ryder.test.sh)
+      printf '%s\n' ryder
+      ;;
     fm-backend-zellij.test.sh|fm-backend-zellij-smoke.test.sh)
       printf '%s\n' zellij
       ;;
@@ -229,7 +232,7 @@ expected_gate_skip_for_family() {
   case "$1" in
     real-herdr-gated) printf '%s\n' herdr ;;
     live-harness-optin) printf '%s\n' optin-env ;;
-    cmux|zellij|orca) printf '%s\n' optional-binary ;;
+    cmux|zellij|orca|ryder) printf '%s\n' optional-binary ;;
     snapshot-bearings) printf '%s\n' optional-binary ;;
     *) printf '%s\n' none ;;
   esac
@@ -250,6 +253,7 @@ snapshot-bearings
 cmux
 zellij
 orca
+ryder
 unclassified
 EOF
 }
@@ -381,6 +385,7 @@ tests/fm-backend-cmux-smoke.test.sh 29
 tests/fm-backend-cmux.test.sh 2349
 tests/fm-backend-herdr-focus-flash-e2e.test.sh 21
 tests/fm-backend-orca.test.sh 12041
+tests/fm-backend-ryder.test.sh 9000
 tests/fm-backend-tmux-smoke.test.sh 314
 tests/fm-backend-zellij-smoke.test.sh 21
 tests/fm-backend-zellij.test.sh 4225
@@ -867,6 +872,14 @@ families_for_changed_path() {
       ;;
     bin/backends/cmux*|tests/cmux-test-safety.sh)
       printf '%s\n' cmux
+      printf '%s\n' backend-dispatch
+      ;;
+    bin/backends/ryder*)
+      printf '%s\n' ryder
+      printf '%s\n' backend-dispatch
+      ;;
+    bin/fm-process-identity-lib.sh)
+      printf '%s\n' ryder
       printf '%s\n' backend-dispatch
       ;;
     bin/backends/orca*|bin/backends/tmux.sh)

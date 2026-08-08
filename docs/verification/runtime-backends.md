@@ -713,6 +713,68 @@ FM_CMUX_CLAUDE_COMPOSER_LIVE=1 bin/fm-test-run.sh tests/fm-cmux-claude-composer-
 
 The portable classifier regression is `tests/fm-backend-cmux.test.sh`.
 
+## Ryder
+
+The compatibility floor is the session host's protocol version, not the binary's semver: the protocol version and the `$RYDER_HOME/vN` path component move together, so a host speaking another protocol serves a different tree and cannot see this one's sessions.
+The adapter gates on protocol v1 and refuses any other version.
+Active live evidence is `ryder 0.1.0 (protocol v1)`, built with `cargo build --release` from the session host at commit `96890c1`, on macOS 27 (Darwin 27.0.0, aarch64) with `jq 1.8.1`, on 2026-08-08.
+
+```sh
+ryder --version
+```
+
+Observed version:
+
+```text
+ryder 0.1.0 (protocol v1)
+```
+
+Real tests need no shared-instance safety helper, unlike herdr, zellij, and cmux: `RYDER_HOME` relocates the whole registry and every session is its own detached process, so the suite's real half runs in a throwaway home that cannot see or be seen by a real fleet.
+
+Current active CLI findings:
+
+| Guarantee | Command shape | Result |
+| --- | --- | --- |
+| No container | adapter `container_ensure` | Created nothing; the sessions directory was still absent afterwards. |
+| Create | `create --id <id> --label <id> --cwd <dir> --harness <h> --env-remove <k>... --json -- <shell> -l` | Created one session and returned the derived id as the endpoint target. |
+| Live duplicate | `state <id>` before create | A live id was refused before any create ran. |
+| Id reuse after death | `create` with a killed session's id | Succeeded; the stale directory was archived first. |
+| Live cwd | `state <id> --json` `.cwd` | Followed a `cd` inside the session immediately, so no pwd-marker probe is needed. |
+| Capture | `snapshot <id> --lines N --json` `.text` | Whole viewport including trailing blank rows, plus up to N scrollback lines - a `tmux capture-pane -p -S -N` drop-in, untrimmed. |
+| Cursor offset | `snapshot --lines 10` on a scrolled session | 50 lines of text with the cursor genuinely on the last one, while `cursor_line` read 39; the text index is `scrollback + cursor_line`. |
+| Literal send | `write <id> --literal <text>` | Left text unsubmitted; its command output was absent until Enter. |
+| Keys | `key <id> Enter|Escape|C-c` | All shared key operations worked; an unknown name is a typed usage error, not a silent no-op. |
+| Liveness | `state <id> --json` | `alive:false` while the host lingers, `no_such_session`/`session_dead` once gone, kernel-read `fg_argv0` for foreground identity. |
+| Read-only probe | `state <id>` as the existence check | Session count unchanged across every probe; connecting starts nothing. |
+| Socket limit | `create` under a 90-byte `RYDER_HOME` | Refused up front with `usage`: `socket path is 123 bytes, over the 100-byte unix socket limit`. |
+
+The six-state liveness mapping was exercised in both directions: `dead` for a shell-only session and for an exited agent, `missing` for an absent session and after a kill, `unreadable` for a malformed target, and `ambiguous` for an unattributable foreground.
+
+`ambiguous` is retained against the design sketch's expectation that it could be dropped.
+The sketch's reason for dropping it - tmux needs it only to reconcile two disagreeing name sources - genuinely does not apply, since `fg_argv0` is read from the process's vnode and cannot be rewritten.
+A different case survives: Firstmate runs the harness inside a login shell, so the foreground can be a third process that is neither, and only `dead` and `missing` license recovery.
+
+Real-harness evidence, all under the same host:
+
+| Harness | Foreground identity | Composer idle | Composer with text typed |
+| --- | --- | --- | --- |
+| Claude Code 2.1.224 | `fg_comm=claude`, `fg_argv0=/opt/homebrew/Caskroom/claude-code@latest/2.1.224/claude` | `empty` | `pending` |
+| codex-cli 0.146.0 | `fg_comm=codex`, `fg_argv0=/opt/homebrew/Caskroom/codex/0.146.0/bin/codex` | `empty` | `pending` |
+| grok 0.2.118 | bordered composer with a dark-truecolor border | `empty` | `pending` |
+
+The ANSI style channel is load-bearing for those idle verdicts.
+An idle codex composer is plain text `> Write tests for @filename`, which a plain-text classifier reads as unsubmitted input; the styled row is `\x1b[0;1m>\x1b[0m \x1b[0;2mWrite tests for @filename\x1b[0m`, and dropping the dim run leaves a bare prompt.
+End to end against Claude Code, `send_text_submit` returned the proof-carrying `empty` and the agent answered; against codex an update interstitial classified `pending`, the Enter retry loop drove through it, and the verdict then became `empty`.
+
+`busy_state` reports `busy` only when a process that is neither a harness nor a shell owns the pty, and never reports `idle`.
+An earlier revision inferred busy from `fg_pgrp != agent_pid`; a real Claude Code session disproved it, since the harness is a foreground child of the session's login shell for the whole life of a task and that rule reported `busy` forever.
+
+```sh
+tests/fm-backend-ryder.test.sh
+```
+
+One script carries both halves: a fake-CLI structural suite that always runs, and a real-host end-to-end pass that runs whenever `ryder` is on `PATH` and skips cleanly otherwise.
+
 ## Codex App host tools
 
 A reusable Desktop host-tool smoke ran on 2026-07-06 against Codex Desktop bundle version 26.623.101652, build 4674, bundle id `com.openai.codex`.
