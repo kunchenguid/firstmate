@@ -858,15 +858,15 @@ landed_remote_command() {
 # test. A ref-name-only answer, stale tracking ref, failed fetch, or remote change
 # between observations is insufficient evidence and fails closed.
 head_is_landed_on_verified_remote() {  # <remote-url-or-name>
-  local remote=$1 advertised default_ref confirmed fetched post_fetch post_fetch_ref post_fetch_head current
+  local remote=$1 advertised default_ref confirmation confirmed fetched post_fetch post_fetch_ref post_fetch_head current
   [ -n "$remote" ] || return 1
   advertised=$(landed_remote_command ls-remote --symref "$remote" HEAD 2>/dev/null) || return 1
   default_ref=$(printf '%s\n' "$advertised" | awk '$1 == "ref:" && $3 == "HEAD" { print $2; exit }')
   case "$default_ref" in refs/heads/?*) ;; *) return 1 ;; esac
   advertised=$(printf '%s\n' "$advertised" | awk '$2 == "HEAD" && $1 != "ref:" { print $1; exit }')
   case "$advertised" in ''|*[!0-9a-fA-F]*) return 1 ;; esac
-  confirmed=$(landed_remote_command ls-remote "$remote" "$default_ref" 2>/dev/null \
-    | awk -v ref="$default_ref" '$2 == ref { print $1; exit }') || return 1
+  confirmation=$(landed_remote_command ls-remote "$remote" "$default_ref" 2>/dev/null) || return 1
+  confirmed=$(printf '%s\n' "$confirmation" | awk -v ref="$default_ref" '$2 == ref { print $1; exit }')
   [ -n "$confirmed" ] || return 1
   [ "$advertised" = "$confirmed" ] || return 1
   landed_remote_command fetch --no-tags --quiet "$remote" "$default_ref" >/dev/null 2>&1 || return 1

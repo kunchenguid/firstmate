@@ -593,7 +593,10 @@ count=0
 [ ! -f "$log" ] || count=$(cat "$log")
 count=$((count + 1))
 printf '%s\n' "$count" > "$log"
-[ "$count" -ne "$call" ] || exit 124
+if [ "$count" -eq "$call" ]; then
+  [ -z "${FM_TEST_REMOTE_TIMEOUT_PARTIAL_OUTPUT:-}" ] || printf '%s\n' "$FM_TEST_REMOTE_TIMEOUT_PARTIAL_OUTPUT"
+  exit 124
+fi
 [ "${1:-}" = -k ] || exit 2
 shift 3
 exec "$@"
@@ -839,6 +842,32 @@ test_foreign_remote_timeout_refuses() {
   expect_code 8 "$calls" "foreign-timeout: each remote proof operation was not bounded"
   grep -q REFUSED "$case_dir/stderr" || fail "foreign-timeout: no REFUSED line in stderr"
   pass "teardown refuses when a foreign landing proof call times out"
+}
+
+test_foreign_remote_partial_timeout_refuses() {
+  local case_dir foreign head timeout_log calls rc
+  case_dir=$(make_case foreign-partial-timeout)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "foreign landing"
+  foreign=$(land_head_on_foreign_default "$case_dir")
+  head=$(git -C "$foreign" rev-parse refs/heads/main)
+  timeout_log="$case_dir/timeout-count"
+  add_timeout_on_remote_call "$case_dir"
+
+  set +e
+  FM_TIMEOUT_MECHANISM_OVERRIDE= \
+  FM_TEST_REMOTE_TIMEOUT_LOG="$timeout_log" \
+  FM_TEST_REMOTE_TIMEOUT_CALL=2 \
+  FM_TEST_REMOTE_TIMEOUT_PARTIAL_OUTPUT="$(printf '%s\t%s' "$head" refs/heads/main)" \
+    run_teardown_with_landed_remote "$case_dir" "$foreign" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  calls=$(cat "$timeout_log")
+  expect_code 1 "$rc" "foreign-partial-timeout: teardown should refuse partial timed-out confirmation output"
+  expect_code 6 "$calls" "foreign-partial-timeout: confirmation failure did not stop the foreign proof"
+  grep -q REFUSED "$case_dir/stderr" || fail "foreign-partial-timeout: no REFUSED line in stderr"
+  pass "teardown refuses partial timed-out foreign confirmation output"
 }
 
 test_foreign_default_change_during_verification_refuses() {
@@ -2684,6 +2713,7 @@ test_foreign_configured_remote_default_allows
 test_foreign_override_remote_default_allows
 test_unreachable_foreign_override_refuses
 test_foreign_remote_timeout_refuses
+test_foreign_remote_partial_timeout_refuses
 test_foreign_default_change_during_verification_refuses
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
