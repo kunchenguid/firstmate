@@ -569,9 +569,24 @@ select_lane() {
   [ "$found" -eq 1 ] || die "lane '$want' selected no tests"
 }
 
+# Every set operation below sorts with LC_ALL=C and must COMPARE with LC_ALL=C
+# too. `comm` collates under the ambient locale, and en_US.UTF-8 orders
+# punctuation differently from C, so a C-sorted file reads as unsorted there:
+# `fm-pr-check-security.test.sh` sorts before `fm-pr-check.test.sh` under C
+# ('-' 0x2D < '.' 0x2E) and after it under en_US.UTF-8. That mismatch made the
+# guard fail on any developer machine with a UTF-8 locale while staying green in
+# CI's C locale, and it failed in the worst way: `comm` exits non-zero on a
+# sort-order complaint, so the unguarded overlap comparison below aborted the
+# whole script under `set -e` with no diagnostic beyond a bare
+# "comm: input is not in sorted order". Pinning the collation for the function
+# keeps the sorts and the comparisons in one order and restores the real
+# diagnostics.
 run_coverage_guard() {
   local tmp missing extra a b shard
   local -a saved_scripts=()
+  # -x so `comm`, `sort` and `uniq` in the subprocesses actually see it; bash
+  # restores the caller's value on return.
+  local -x LC_ALL=C
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-coverage.XXXXXX")
 
   all_repo_tests | LC_ALL=C sort -u >"$tmp/all"
