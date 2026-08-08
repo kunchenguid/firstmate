@@ -37,9 +37,8 @@ make_case() {
     "project=$case_dir/project" \
     "kind=ship" \
     "mode=no-mistakes"
-  # No worktree/project on disk; fm-pr-check.sh tolerates a worktree it cannot
-  # stat and simply skips the pr_head lookup via `gh` in that case, so give it
-  # one that resolves for cases that want pr_head recorded.
+  git init -q "$case_dir/project"
+  git -C "$case_dir/project" remote add origin git@forgejo.example:fork/repo.git
   printf '%s\n' "$case_dir"
 }
 
@@ -415,6 +414,27 @@ test_forgejo_identity_overrides_refuse_before_recording() {
   pass "fm-pr-merge refuses Forgejo base URL and expected-head overrides before recording"
 }
 
+test_forgejo_unregistered_host_refuses_before_cli() {
+  local case_dir rc
+  case_dir=$(make_case forgejo-unregistered-host)
+  mkdir -p "$case_dir/wt"
+  add_forgejo_mock "$case_dir" ffffffffffffffffffffffffffffffffffffffff
+  : > "$case_dir/forgejo-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://arbitrary.example/owner/repo/pulls/43 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "forgejo-unregistered-host: merge should refuse"
+  [ ! -s "$case_dir/forgejo-axi.log" ] \
+    || fail "forgejo-unregistered-host: merge reached forgejo-axi"
+  assert_no_grep '^pr=' "$case_dir/state/task-x1.meta" \
+    "forgejo-unregistered-host: refusal happened after recording"
+  pass "fm-pr-merge refuses Forgejo hosts absent from project remotes"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -429,3 +449,4 @@ test_forgejo_records_head_and_merges_ready_pull
 test_forgejo_unready_pull_refuses_before_merge
 test_forgejo_server_refusal_propagates
 test_forgejo_identity_overrides_refuse_before_recording
+test_forgejo_unregistered_host_refuses_before_cli

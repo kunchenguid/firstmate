@@ -75,6 +75,11 @@ run_review_diff() {
     "$REVIEW_DIFF" "$@"
 }
 
+authorize_forgejo_host() {
+  local case_dir=$1 host=${2:-forgejo.example}
+  git -C "$case_dir/project" remote add forgejo "git@$host:fork/repo.git"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local() {
   local case_dir out
   case_dir=$(make_case pr-head-sha)
@@ -153,6 +158,7 @@ test_forgejo_pr_meta_fetches_pull_head() {
   local case_dir out
   case_dir=$(make_case forgejo-pr-fetch)
   stale_and_pr_commits "$case_dir"
+  authorize_forgejo_host "$case_dir"
   git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/pull/9/head"
   git -C "$case_dir/wt" config \
     url."$case_dir/origin.git".insteadOf https://forgejo.example/owner/repo.git
@@ -171,6 +177,7 @@ test_forgejo_pr_meta_uses_canonical_repository() {
   local case_dir out
   case_dir=$(make_case forgejo-canonical-repository)
   stale_and_pr_commits "$case_dir"
+  authorize_forgejo_host "$case_dir"
   git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/pull/9/head"
   git clone -q --bare "$case_dir/origin.git" "$case_dir/canonical.git"
   git -C "$case_dir/wt" checkout -q -b canonical-head-tmp main
@@ -193,6 +200,29 @@ test_forgejo_pr_meta_uses_canonical_repository() {
   assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
     "forgejo-canonical-repository: canonical repository pull fetch should succeed"
   pass "fm-review-diff resolves Forgejo pull heads from their canonical repository"
+}
+
+test_forgejo_unregistered_host_never_fetches() {
+  local case_dir out
+  case_dir=$(make_case forgejo-unregistered-host)
+  stale_and_pr_commits "$case_dir"
+  authorize_forgejo_host "$case_dir"
+  git clone -q --bare "$case_dir/origin.git" "$case_dir/arbitrary.git"
+  git -C "$case_dir/wt" push -q "$case_dir/arbitrary.git" \
+    "pr-head-tmp:refs/pull/9/head"
+  git -C "$case_dir/wt" config \
+    url."$case_dir/arbitrary.git".insteadOf https://arbitrary.example/owner/repo.git
+  write_task_meta "$case_dir" "pr=https://arbitrary.example/owner/repo/pulls/9"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+stale-local' \
+    "forgejo-unregistered-host: review should retain the local branch"
+  assert_not_contains "$out" '+pr-fixed' \
+    "forgejo-unregistered-host: review fetched from an unauthorized host"
+  assert_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "forgejo-unregistered-host: review did not report the unavailable head"
+  pass "fm-review-diff refuses Forgejo fetches absent from project remotes"
 }
 
 test_noncanonical_pr_targets_are_rejected() {
@@ -263,6 +293,7 @@ test_pr_meta_fetches_pull_head_without_recorded_sha
 test_numeric_pr_meta_fetches_origin_pull_head
 test_forgejo_pr_meta_fetches_pull_head
 test_forgejo_pr_meta_uses_canonical_repository
+test_forgejo_unregistered_host_never_fetches
 test_noncanonical_pr_targets_are_rejected
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch

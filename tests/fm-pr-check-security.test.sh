@@ -55,7 +55,11 @@ make_case() {
   dir="$TMP_ROOT/$name"
   fakebin="$dir/fakebin"
   fake_root="$dir/root"
-  mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/wt" "$fakebin" "$fake_root/bin"
+  mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/home/bin" \
+    "$dir/wt" "$fakebin" "$fake_root/bin"
+  cp "$ROOT/bin/fm-pr-lib.sh" "$ROOT/bin/fm-project-origin-lib.sh" "$dir/home/bin/"
+  git init -q "$dir/project"
+  git -C "$dir/project" remote add origin git@forgejo.example:fork/repo.git
   cat > "$fake_root/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'guard\n' >> "$FM_TEST_GUARD_LOG"
@@ -123,10 +127,17 @@ write_task_meta() {
 }
 
 write_poll_meta() {
-  local state=$1 id=$2 url=$3
-  fm_write_meta "$state/$id.meta" \
-    "window=fm-$id" \
-    "pr=$url"
+  local state=$1 id=$2 url=$3 project=${4:-}
+  if [ -n "$project" ]; then
+    fm_write_meta "$state/$id.meta" \
+      "window=fm-$id" \
+      "project=$project" \
+      "pr=$url"
+  else
+    fm_write_meta "$state/$id.meta" \
+      "window=fm-$id" \
+      "pr=$url"
+  fi
 }
 
 write_ambiguous_poll() {
@@ -291,6 +302,8 @@ INVALID_URLS=(
   'http://gitlab.com/g/p/-/merge_requests/1'
   'https://github.com/o/r/pulls/1'
   'https://gitlab.com/o/r/pulls/1'
+  'https://www.github.com/o/r/pulls/1'
+  'https://api.gitlab.com/o/r/pulls/1'
   'https://Forgejo.example/o/r/pulls/1'
   'https://forgejo.example:443/o/r/pulls/1'
   'https://user@forgejo.example/o/r/pulls/1'
@@ -564,6 +577,7 @@ test_invalid_entrypoints_have_zero_side_effects() {
 
   [ ! -s "$dir/gh.log" ] || fail "invalid direct or merge data called gh"
   [ ! -s "$dir/gh-axi.log" ] || fail "invalid direct or merge data called gh-axi"
+  [ ! -s "$dir/forgejo-axi.log" ] || fail "invalid direct or merge data called forgejo-axi"
   [ ! -s "$dir/guard.log" ] || fail "invalid direct or merge data called the guard"
   [ ! -e "$TMP_ROOT/escape.check.sh" ] || fail "task traversal wrote outside state"
   pass "PR and teardown entrypoints reject invalid arguments before every side effect"
@@ -2942,6 +2956,30 @@ EOF
   pass "GitLab merge requests are followed on any instance and never wake falsely"
 }
 
+test_forgejo_project_remote_forms() {
+  local dir url
+  dir=$(make_case forgejo-project-remote-forms)
+  while IFS= read -r url; do
+    git -C "$dir/project" remote set-url origin "$url"
+    fm_pr_forgejo_project_authorized "$dir/project" forgejo.example \
+      || fail "Forgejo authorization rejected registered remote form: $url"
+  done <<'EOF'
+https://user:token@forgejo.example:8443/fork/repo.git
+http://forgejo.example:3000/fork/repo.git
+ssh://git@forgejo.example:2222/fork/repo.git
+git://forgejo.example/fork/repo.git
+git@forgejo.example:fork/repo.git
+EOF
+  git -C "$dir/project" remote set-url origin "file://$dir/project"
+  git -C "$dir/project" remote set-url --add --push origin \
+    git@forgejo.example:fork/repo.git
+  fm_pr_forgejo_project_authorized "$dir/project" forgejo.example \
+    || fail "Forgejo authorization ignored a registered push URL"
+  ! fm_pr_forgejo_project_authorized "$dir/project" arbitrary.example \
+    || fail "Forgejo authorization accepted an absent remote host"
+  pass "Forgejo authorization accepts every supported remote form by host"
+}
+
 test_forgejo_merge_watch() {
   local dir state out rc url value noforgejo entry bindir name
   dir=$(make_case forgejo-merge-watch)
@@ -2967,6 +3005,10 @@ owner/repo
   done
   out=$(FM_TEST_FORGEJO_MERGED=true run_poll "$dir")
   [ "$out" = merged ] || fail "Forgejo poll did not emit exactly one merged line"
+  printf '%s\n' 'touch "$FM_TEST_ADJACENT_LIB_MARKER"' > "$state/fm-pr-lib.sh"
+  out=$(FM_TEST_FORGEJO_MERGED=true FM_TEST_ADJACENT_LIB_MARKER="$dir/adjacent-lib-ran" run_poll "$dir")
+  [ "$out" = merged ] || fail "Forgejo poll did not use its trusted library"
+  [ ! -e "$dir/adjacent-lib-ran" ] || fail "Forgejo poll sourced a library from writable state"
   out=$(FM_TEST_FORGEJO_MERGED=true FM_TEST_FORGEJO_AXI_FAIL=1 run_poll "$dir")
   [ -z "$out" ] || fail "Forgejo poll emitted after a forgejo-axi failure"
   grep -qF 'pr merged --base-url https://forgejo.example --repo owner/repo 7' "$dir/forgejo-axi.log" \
@@ -2978,10 +3020,32 @@ owner/repo
     : > "$dir/forgejo-axi.log"
     out=$(FM_TEST_FORGEJO_MERGED=true FM_TEST_FORGEJO_AXI_LOG="$dir/forgejo-axi.log" \
       PATH="$dir/fakebin:$BASE_PATH" bash "$POLL" --validated forgejo \
-      "https://$host/owner/repo/pulls/7" "$host" owner/repo 7)
+      "https://$host/owner/repo/pulls/7" "$host" owner/repo 7 "$dir/project")
     [ -z "$out" ] || fail "Forgejo poll emitted for a numeric host"
     [ ! -s "$dir/forgejo-axi.log" ] || fail "Forgejo poll reached forgejo-axi for a numeric host"
   done
+
+  for host in www.github.com api.gitlab.com arbitrary.example; do
+    : > "$dir/forgejo-axi.log"
+    out=$(FM_TEST_FORGEJO_MERGED=true FM_TEST_FORGEJO_AXI_LOG="$dir/forgejo-axi.log" \
+      PATH="$dir/fakebin:$BASE_PATH" bash "$POLL" --validated forgejo \
+      "https://$host/owner/repo/pulls/7" "$host" owner/repo 7 "$dir/project")
+    [ -z "$out" ] || fail "Forgejo poll emitted for unauthorized host $host"
+    [ ! -s "$dir/forgejo-axi.log" ] \
+      || fail "Forgejo poll reached forgejo-axi for unauthorized host $host"
+  done
+
+  : > "$dir/forgejo-axi.log"
+  write_task_meta "$dir" task-b
+  set +e
+  run_check_entry "$dir" task-b https://arbitrary.example/owner/repo/pulls/7 \
+    > "$dir/arbitrary.out" 2> "$dir/arbitrary.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "Forgejo check accepted an unregistered project host"
+  [ ! -s "$dir/forgejo-axi.log" ] \
+    || fail "Forgejo check reached forgejo-axi for an unregistered project host"
+  [ ! -e "$state/task-b.check.sh" ] || fail "unauthorized Forgejo check armed a poll"
 
   printf '%s\n%s\n%s\n%s\n%s\n' forgejo "$url" elsewhere.example owner/repo 7 \
     > "$state/task-a.pr-poll"
@@ -3469,7 +3533,7 @@ test_forgejo_merged_poll_retires() {
   dir=$(make_case forgejo-merged-retirement)
   state="$dir/home/state"
   url=https://forgejo.example/owner/repo/pulls/17
-  write_poll_meta "$state" task-a "$url"
+  write_poll_meta "$state" task-a "$url" "$dir/project"
   seed_canonical_poll "$dir" task-a "$url"
   set +e
   FM_TEST_FORGEJO_MERGED=true run_watcher_bounded "$dir/home" "$dir/fakebin" \
@@ -3485,6 +3549,7 @@ test_forgejo_merged_poll_retires() {
 
 test_parser_matrix
 test_gitlab_merge_watch
+test_forgejo_project_remote_forms
 test_forgejo_merge_watch
 test_merged_poll_retires_once
 test_persistent_secondmate_retirement_is_poll_only

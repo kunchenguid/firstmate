@@ -40,6 +40,11 @@ if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" !=
   echo "error: task metadata is unavailable" >&2
   exit 1
 fi
+PROJECT=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
+if [ "$PROVIDER" = forgejo ] && ! fm_pr_forgejo_project_authorized "$PROJECT" "$HOST"; then
+  echo "error: Forgejo host is not authorized by the task project remotes" >&2
+  exit 1
+fi
 
 # A prior exact merged result may have queued its durable wake immediately
 # before interruption.

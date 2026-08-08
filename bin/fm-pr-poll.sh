@@ -10,7 +10,15 @@ set -u
 LC_ALL=C
 export LC_ALL
 
-if [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
+project=
+if [ "$#" -eq 7 ] && [ "$1" = --validated ]; then
+  provider=$2
+  url=$3
+  host=$4
+  path=$5
+  number=$6
+  project=$7
+elif [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
   provider=$2
   url=$3
   host=$4
@@ -33,6 +41,11 @@ elif [ "$#" -eq 0 ]; then
     exit 0
   fi
   exec 3<&-
+  if [ "$provider" = forgejo ]; then
+    meta=${data%.pr-poll}.meta
+    [ -f "$meta" ] && [ ! -L "$meta" ] || exit 0
+    project=$(sed -n 's/^project=//p' "$meta" | tail -1)
+  fi
 else
   exit 0
 fi
@@ -67,7 +80,9 @@ case "$provider" in
     ;;
   forgejo)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
-    [ "$host" != github.com ] && [ "$host" != gitlab.com ] || exit 0
+    case "$host" in
+      github.com|*.github.com|gitlab.com|*.gitlab.com) exit 0 ;;
+    esac
     case "$host" in
       .*|*.|*..*|*[!a-z0-9.-]*) exit 0 ;;
     esac
@@ -97,6 +112,20 @@ case "$provider" in
       .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
     esac
     [ "$url" = "https://$host/$owner/$repo/pulls/$number" ] || exit 0
+    poll_dir=$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit 0
+    if [ -n "${FM_ROOT_OVERRIDE:-}" ] && [ -f "$FM_ROOT_OVERRIDE/bin/fm-pr-lib.sh" ]; then
+      pr_lib="$FM_ROOT_OVERRIDE/bin/fm-pr-lib.sh"
+    elif [ -n "${FM_HOME:-}" ] && [ -f "$FM_HOME/bin/fm-pr-lib.sh" ]; then
+      pr_lib="$FM_HOME/bin/fm-pr-lib.sh"
+    elif [ "${poll_dir##*/}" = bin ] && [ -f "$poll_dir/fm-pr-lib.sh" ]; then
+      pr_lib="$poll_dir/fm-pr-lib.sh"
+    else
+      pr_lib="${poll_dir%/state}/bin/fm-pr-lib.sh"
+    fi
+    [ -f "$pr_lib" ] || exit 0
+    # shellcheck source=bin/fm-pr-lib.sh
+    . "$pr_lib"
+    fm_pr_forgejo_project_authorized "$project" "$host" || exit 0
     raw=$(forgejo-axi pr merged --base-url "https://$host" --repo "$owner/$repo" "$number" 2>/dev/null) || exit 0
     state=$(printf '%s\n' "$raw" | sed -n 's/^[[:space:]]*merged:[[:space:]]*//p' | head -1) || exit 0
     [ "$state" = true ] && printf '%s\n' merged

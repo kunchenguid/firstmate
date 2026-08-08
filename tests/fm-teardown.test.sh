@@ -301,6 +301,11 @@ SH
   : > "$case_dir/forgejo-axi.log"
 }
 
+authorize_forgejo_host() {
+  local case_dir=$1 host=${2:-forgejo.example}
+  git -C "$case_dir/project" remote add forgejo "git@$host:fork/repo.git"
+}
+
 append_pr_meta_for_current_head() {
   local case_dir=$1 head
   head=$(git -C "$case_dir/wt" rev-parse HEAD)
@@ -733,10 +738,31 @@ test_squash_merged_branch_deleted_allows() {
   pass "squash-merged + deleted-branch worktree (PR merged) is torn down (the fix)"
 }
 
+test_numeric_pr_metadata_merged_head_allows() {
+  local case_dir rc pr_head
+  case_dir=$(make_case numeric-pr-merged)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf '%s\n' 'pr=7' "pr_head=$pr_head" >> "$case_dir/state/task-x1.meta"
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "numeric-pr-merged: teardown should accept merged-head proof"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "numeric-pr-merged: teardown printed a REFUSED line"
+  pass "teardown retains merged-head proof for numeric GitHub PR metadata"
+}
+
 test_forgejo_squash_merged_branch_deleted_allows() {
   local case_dir rc pr_head
   case_dir=$(make_case forgejo-squash-merged)
   write_meta "$case_dir" no-mistakes ship
+  authorize_forgejo_host "$case_dir"
   wt_commit_file "$case_dir" feature.txt hello "add Forgejo feature"
   pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   printf '%s\n' \
@@ -761,6 +787,7 @@ test_forgejo_missing_head_fetches_canonical_repo() {
   local case_dir rc pr_head
   case_dir=$(make_case forgejo-canonical-head-fetch)
   write_meta "$case_dir" no-mistakes ship
+  authorize_forgejo_host "$case_dir"
   wt_commit_file "$case_dir" feature.txt hello "add Forgejo feature"
 
   git -C "$case_dir/wt" push -q origin "main:refs/pull/7/head"
@@ -799,6 +826,7 @@ test_forgejo_malformed_merged_head_refuses() {
   local case_dir rc pr_head
   case_dir=$(make_case forgejo-malformed-merged-head)
   write_meta "$case_dir" no-mistakes ship
+  authorize_forgejo_host "$case_dir"
   wt_commit_file "$case_dir" feature.txt hello "add Forgejo feature"
   pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   printf '%s\n' \
@@ -817,6 +845,31 @@ test_forgejo_malformed_merged_head_refuses() {
   [ -f "$case_dir/state/task-x1.meta" ] \
     || fail "forgejo-malformed-merged-head: teardown erased task metadata"
   pass "Forgejo merged proof rejects revision-like heads before Git use"
+}
+
+test_forgejo_unregistered_host_refuses_before_lookup() {
+  local case_dir rc pr_head
+  case_dir=$(make_case forgejo-unregistered-host)
+  write_meta "$case_dir" no-mistakes ship
+  authorize_forgejo_host "$case_dir"
+  wt_commit_file "$case_dir" feature.txt hello "add Forgejo feature"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf '%s\n' \
+    'pr=https://arbitrary.example/owner/repo/pulls/7' \
+    "pr_head=$pr_head" >> "$case_dir/state/task-x1.meta"
+  add_forgejo_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "forgejo-unregistered-host: teardown should refuse"
+  [ ! -s "$case_dir/forgejo-axi.log" ] \
+    || fail "forgejo-unregistered-host: teardown reached forgejo-axi"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "forgejo-unregistered-host: teardown erased task metadata"
+  pass "Forgejo teardown refuses hosts absent from project remotes"
 }
 
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
@@ -2716,9 +2769,11 @@ test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
 test_squash_merged_branch_deleted_allows
+test_numeric_pr_metadata_merged_head_allows
 test_forgejo_squash_merged_branch_deleted_allows
 test_forgejo_missing_head_fetches_canonical_repo
 test_forgejo_malformed_merged_head_refuses
+test_forgejo_unregistered_host_refuses_before_lookup
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch

@@ -793,6 +793,7 @@ ensure_commit_object() {
   local target=$1 commit=$2 n source=origin
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
   if fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = forgejo ]; then
+    fm_pr_forgejo_project_authorized "$PROJ" "$FM_PR_HOST" || return 1
     n=$FM_PR_NUMBER
     source="https://$FM_PR_HOST/$FM_PR_PATH.git"
   else
@@ -844,8 +845,12 @@ pr_is_merged() {
   local branch=$1 target provider view state head current
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
-    fm_pr_url_parse "$target" || return 1
-    provider=$FM_PR_PROVIDER
+    if [[ "$target" =~ ^[1-9][0-9]*$ ]]; then
+      provider=github
+    else
+      fm_pr_url_parse "$target" || return 1
+      provider=$FM_PR_PROVIDER
+    fi
   else
     target=$(pr_number_from_branch "$branch") || return 1
     provider=github
@@ -863,6 +868,7 @@ pr_is_merged() {
       esac
       ;;
     forgejo)
+      fm_pr_forgejo_project_authorized "$PROJ" "$FM_PR_HOST" || return 1
       view=$(forgejo-axi pr merged --base-url "https://$FM_PR_HOST" --repo "$FM_PR_PATH" "$FM_PR_NUMBER" 2>/dev/null) || return 1
       state=$(printf '%s\n' "$view" | sed -n 's/^[[:space:]]*merged:[[:space:]]*//p' | head -1)
       [ "$state" = true ] || return 1

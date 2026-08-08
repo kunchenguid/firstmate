@@ -38,8 +38,11 @@
 #   relative paths, which resolve against whatever directory git happens to
 #   be in on the other machine
 #   "/../" traversal inside a local or file: path
+FM_PROJECT_ORIGIN_HOST=
+
 fm_project_origin_safe() { # <url>; 0 when the URL is an accepted clone URL
   local url=${1-} rest authority userpart hostpart port inner host path
+  FM_PROJECT_ORIGIN_HOST=
 
   case $url in
     '' | -*) return 1 ;;
@@ -111,6 +114,8 @@ fm_project_origin_safe() { # <url>; 0 when the URL is an accepted clone URL
           fi
           ;;
       esac
+      FM_PROJECT_ORIGIN_HOST=${host#'['}
+      FM_PROJECT_ORIGIN_HOST=${FM_PROJECT_ORIGIN_HOST%']'}
       return 0
       ;;
     file:///?*)
@@ -160,6 +165,7 @@ fm_project_origin_safe() { # <url>; 0 when the URL is an accepted clone URL
       case $inner in
         *[!0-9A-Fa-f:.%]*) return 1 ;;
       esac
+      FM_PROJECT_ORIGIN_HOST=$inner
       return 0
       ;;
   esac
@@ -176,5 +182,12 @@ fm_project_origin_safe() { # <url>; 0 when the URL is an accepted clone URL
   case $path in
     '' | :*) return 1 ;;
   esac
+  FM_PROJECT_ORIGIN_HOST=$host
   return 0
+}
+
+fm_project_origin_host() {
+  fm_project_origin_safe "${1-}" || return 1
+  [ -n "$FM_PROJECT_ORIGIN_HOST" ] || return 1
+  printf '%s' "$FM_PROJECT_ORIGIN_HOST" | tr 'A-Z' 'a-z'
 }

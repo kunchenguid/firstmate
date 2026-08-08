@@ -66,6 +66,7 @@ FM_PR_POLL_SNAPSHOT_URL=
 FM_PR_POLL_SNAPSHOT_HOST=
 FM_PR_POLL_SNAPSHOT_PATH=
 FM_PR_POLL_SNAPSHOT_NUMBER=
+FM_PR_POLL_SNAPSHOT_PROJECT=
 FM_PR_POLL_SNAPSHOT_DATA_HASH=
 FM_PR_POLL_SNAPSHOT_TEMPLATE_HASH=
 FM_PR_POLL_SNAPSHOT_DATA_IDENTITY=
@@ -135,8 +136,29 @@ fm_pr_gitlab_host_valid() {
 fm_pr_forgejo_host_valid() {
   local host=${1-}
   fm_pr_gitlab_host_valid "$host" || return 1
-  [ "$host" != gitlab.com ] || return 1
+  case "$host" in
+    github.com|*.github.com|gitlab.com|*.gitlab.com) return 1 ;;
+  esac
   [[ ! "$host" =~ ^(0x[0-9a-f]+|[0-9]+)(\.(0x[0-9a-f]+|[0-9]+))*$ ]]
+}
+
+fm_pr_forgejo_project_authorized() {
+  local project=${1-} host=${2-} remote key url remote_host lib_dir
+  fm_pr_forgejo_host_valid "$host" || return 1
+  [ -d "$project" ] && git -C "$project" rev-parse --git-dir >/dev/null 2>&1 || return 1
+  lib_dir=$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd) || return 1
+  # shellcheck source=bin/fm-project-origin-lib.sh
+  . "$lib_dir/fm-project-origin-lib.sh"
+  while IFS= read -r remote; do
+    [ -n "$remote" ] || continue
+    for key in url pushurl; do
+      while IFS= read -r url; do
+        remote_host=$(fm_project_origin_host "$url") || continue
+        [ "$remote_host" = "$host" ] && return 0
+      done < <(git -C "$project" config --get-all "remote.$remote.$key" 2>/dev/null || true)
+    done
+  done < <(git -C "$project" remote 2>/dev/null || true)
+  return 1
 }
 
 fm_pr_forgejo_path_valid() {
@@ -663,9 +685,10 @@ fm_pr_poll_artifacts_valid() {
 }
 
 fm_pr_poll_snapshot_capture() {
-  local state=$1 id=$2 template=$3 registration
+  local state=$1 id=$2 template=$3 registration meta
   fm_pr_poll_artifacts_valid "$state" "$id" "$template" || return 1
   registration="$state/$id.pr-poll-registration"
+  meta="$state/$id.meta"
   FM_PR_POLL_SNAPSHOT_REG_HASH=$(fm_pr_sha256 "$registration") || return 1
   FM_PR_POLL_SNAPSHOT_REG_IDENTITY=$(fm_pr_file_identity "$registration") || return 1
   FM_PR_POLL_SNAPSHOT_ID=$id
@@ -674,6 +697,7 @@ fm_pr_poll_snapshot_capture() {
   FM_PR_POLL_SNAPSHOT_HOST=$FM_PR_DATA_HOST
   FM_PR_POLL_SNAPSHOT_PATH=$FM_PR_DATA_PATH
   FM_PR_POLL_SNAPSHOT_NUMBER=$FM_PR_DATA_NUMBER
+  FM_PR_POLL_SNAPSHOT_PROJECT=$(sed -n 's/^project=//p' "$meta" | tail -1)
   FM_PR_POLL_SNAPSHOT_DATA_HASH=$FM_PR_REG_DATA_HASH
   FM_PR_POLL_SNAPSHOT_TEMPLATE_HASH=$FM_PR_REG_TEMPLATE_HASH
   FM_PR_POLL_SNAPSHOT_DATA_IDENTITY=$FM_PR_REG_DATA_IDENTITY
@@ -681,17 +705,20 @@ fm_pr_poll_snapshot_capture() {
 }
 
 fm_pr_poll_snapshot_matches() {
-  local state=$1 id=$2 template=$3 registration reg_hash reg_identity
+  local state=$1 id=$2 template=$3 registration meta reg_hash reg_identity project
   [ -n "$FM_PR_POLL_SNAPSHOT_ID" ] && [ "$id" = "$FM_PR_POLL_SNAPSHOT_ID" ] || return 1
   fm_pr_poll_artifacts_valid "$state" "$id" "$template" || return 1
   registration="$state/$id.pr-poll-registration"
+  meta="$state/$id.meta"
   reg_hash=$(fm_pr_sha256 "$registration") || return 1
   reg_identity=$(fm_pr_file_identity "$registration") || return 1
+  project=$(sed -n 's/^project=//p' "$meta" | tail -1)
   [ "$FM_PR_DATA_PROVIDER" = "$FM_PR_POLL_SNAPSHOT_PROVIDER" ] || return 1
   [ "$FM_PR_DATA_URL" = "$FM_PR_POLL_SNAPSHOT_URL" ] || return 1
   [ "$FM_PR_DATA_HOST" = "$FM_PR_POLL_SNAPSHOT_HOST" ] || return 1
   [ "$FM_PR_DATA_PATH" = "$FM_PR_POLL_SNAPSHOT_PATH" ] || return 1
   [ "$FM_PR_DATA_NUMBER" = "$FM_PR_POLL_SNAPSHOT_NUMBER" ] || return 1
+  [ "$project" = "$FM_PR_POLL_SNAPSHOT_PROJECT" ] || return 1
   [ "$FM_PR_REG_DATA_HASH" = "$FM_PR_POLL_SNAPSHOT_DATA_HASH" ] || return 1
   [ "$FM_PR_REG_TEMPLATE_HASH" = "$FM_PR_POLL_SNAPSHOT_TEMPLATE_HASH" ] || return 1
   [ "$FM_PR_REG_DATA_IDENTITY" = "$FM_PR_POLL_SNAPSHOT_DATA_IDENTITY" ] || return 1
