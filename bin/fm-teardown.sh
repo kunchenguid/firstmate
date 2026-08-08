@@ -162,6 +162,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-disposition-lib.sh
+. "$SCRIPT_DIR/fm-disposition-lib.sh"
 # shellcheck source=bin/fm-cleanup-lib.sh
 . "$SCRIPT_DIR/fm-cleanup-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
@@ -382,6 +384,49 @@ else
   remote_teardown_rc=$?
 fi
 [ "$remote_teardown_rc" -eq 3 ] || exit "$remote_teardown_rc"
+
+# Structured attempt-bound cleanup path: when the task meta carries attempt=
+# AND the attempt record exists, teardown is a compatibility wrapper over the
+# ONE structured operation (fm_cleanup_attempt in bin/fm-cleanup-lib.sh). The
+# disposition is classified here: --force resolves to preserved_unlanded-
+# with-discard exactly as the legacy forced-discard flow; otherwise the
+# attempt's landing receipt decides when present, with fm_disposition_live as
+# the fresh-evidence fallback. An unclassifiable disposition refuses and
+# preserves the copy and every record. The structured operation runs its own
+# preflight (owned-copy identity match, live processes in the copy, dirty
+# copy, immature terminal-quiet interval, unknown disposition) before any
+# effect, so nothing is mutated on a refusal. Tasks WITHOUT an attempt record
+# fall through to the exact legacy flow below - byte identical, including the
+# landed-work proofs, PR-discovery fallback, and stale-lock recovery this
+# header documents. NO second cleanup policy exists.
+ATTEMPT=$(fm_meta_get "$META" attempt)
+if [ -n "$ATTEMPT" ] && fm_attempt_load "$ATTEMPT" >/dev/null 2>&1; then
+  DISPOSITION=
+  if [ "$FORCE" = "--force" ]; then
+    DISPOSITION=preserved_unlanded
+  else
+    DISPOSITION=$(fm_attempt_landing_disposition "$ATTEMPT")
+    case "$DISPOSITION" in
+      landed|preserved_unlanded) ;;
+      *)
+        DISPOSITION=$(fm_disposition_live "$ATTEMPT" 2>/dev/null || true)
+        ;;
+    esac
+  fi
+  case "$DISPOSITION" in
+    landed|preserved_unlanded) ;;
+    *)
+      echo "REFUSED: cannot classify attempt $ATTEMPT for task $ID as landed or preserved-unlanded; preserving the copy and every record." >&2
+      exit 1
+      ;;
+  esac
+  if ! fm_cleanup_attempt "$ATTEMPT" "$DISPOSITION"; then
+    echo "error: structured cleanup failed for attempt $ATTEMPT of task $ID; the copy and its durable records are preserved for retry" >&2
+    exit 1
+  fi
+  echo "teardown $ID complete (attempt $ATTEMPT, disposition $DISPOSITION)"
+  exit 0
+fi
 
 # This is the first cleanup authorization check. It is metadata-only and must
 # complete before fm-guard, a backend command, file removal, branch deletion,
