@@ -1288,6 +1288,67 @@ test_secondmate_health_and_activity_use_authoritative_counts() {
   pass "secondmate health and activity remain authoritative when bounded"
 }
 
+# The active-child count crosses a home boundary and can therefore be absent or
+# malformed independently of the child rows it describes. The board must keep
+# both count consumers numeric without turning arbitrary prose into a count.
+test_secondmate_child_count_shapes_render_safely() {
+  local snap board
+  snap=$TMP_ROOT/secondmate-child-count-shapes.json
+  board=$TMP_ROOT/secondmate-child-count-shapes.html
+  snapshot_json '[]' '[{
+    "id": "numeric", "current": {"state": "active_child_work"},
+    "active_children": [{"id": "numeric-visible"}],
+    "decisions_open": [], "holds": [],
+    "counts": {"active_children": 4, "decisions_open": 0, "holds": 0},
+    "omitted": [{"surface": "active_children", "count": 3}]
+  }, {
+    "id": "zero", "current": {"state": "no_active_work"},
+    "active_children": [], "decisions_open": [], "holds": [],
+    "counts": {"active_children": 0, "decisions_open": 0, "holds": 0},
+    "omitted": []
+  }, {
+    "id": "legacy", "current": {"state": "active_child_work"},
+    "active_children": [{"id": "legacy-visible"}],
+    "decisions_open": [], "holds": [],
+    "counts": {"decisions_open": 0, "holds": 0}, "omitted": []
+  }, {
+    "id": "text-count", "current": {"state": "active_child_work"},
+    "active_children": [{"id": "text-visible"}],
+    "decisions_open": [], "holds": [],
+    "counts": {"active_children": "many", "decisions_open": 0, "holds": 0},
+    "omitted": []
+  }, {
+    "id": "text-count-no-rows", "current": {"state": "active_child_work"},
+    "active_children": [], "decisions_open": [], "holds": [],
+    "counts": {"active_children": "several", "decisions_open": 0, "holds": 0},
+    "omitted": []
+  }]' > "$snap"
+
+  "$BOARD" --snapshot "$snap" --no-quota --out "$board" >/dev/null \
+    || fail "numeric, zero, missing, and non-numeric child counts must all render"
+  assert_grep '<div class="n">6+</div><div class="l">In progress</div>' "$board" \
+    "the in-progress tile must show the proven lower bound and disclose malformed counts"
+  assert_grep '4 tasks routed and under way' "$board" \
+    "a valid numeric count must retain its authoritative card total"
+  assert_grep '4 active tasks (1 shown)' "$board" \
+    "a valid numeric count must retain its omission semantics"
+  assert_grep 'Idle and healthy, awaiting routed work.' "$board" \
+    "a valid zero must retain the ready secondmate state"
+  assert_grep '<div class="proj-state">1 task routed and under way</div>' "$board" \
+    "a missing count must fall back to the complete rows an older producer supplied"
+  assert_grep '<div class="proj-state">At least 1 task routed and under way</div>' "$board" \
+    "a malformed count with one row must make the card state a lower bound"
+  assert_grep 'Active task count unavailable (1 shown)' "$board" \
+    "a malformed count must disclose that its visible row is not an authoritative total"
+  assert_grep 'Routed work is under way; active task count unavailable.' "$board" \
+    "a malformed count with no rows must not relabel active work as zero"
+  assert_no_grep 'many' "$board" \
+    "arbitrary count text must never be displayed as if it were a number"
+  assert_no_grep 'several' "$board" \
+    "another arbitrary count string must never leak into a count consumer"
+  pass "secondmate child counts stay honest across numeric, zero, missing, and malformed inputs"
+}
+
 test_unmeasurable_allowance_is_not_a_zero_gauge() {
   local snap quota board
   snap=$TMP_ROOT/quota-snap.json
@@ -1538,6 +1599,7 @@ test_path_form_repo_folds_into_the_project_rollup
 test_live_work_outside_the_registry_stays_visible
 test_unregistered_live_project_uses_clone_change_time
 test_secondmate_health_and_activity_use_authoritative_counts
+test_secondmate_child_count_shapes_render_safely
 test_unmeasurable_allowance_is_not_a_zero_gauge
 test_usage_errors_refuse
 test_self_reload_is_wired

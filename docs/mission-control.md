@@ -41,6 +41,8 @@ The stage itself is derived by the snapshot rather than by the board; see `bin/f
 - **Projects** shows one card per registered project, plus a card for each second mate and for any unregistered project that has work under way.
   A task the captain can see running is never invisible just because its project was never registered.
   Each card carries a status pill, a one-line live state, a row per in-progress item, the calls waiting on the captain, and when the project last changed.
+  A second mate's active-task total is accepted only as a non-negative integer; any other reported value is never converted into a count, and both its card and the "In progress" tile disclose either the received rows as a lower bound or that the count is unavailable.
+  An older second mate that omits the total keeps its original semantics: the received rows and their omission record establish the total instead.
   A card long enough to stop being readable keeps the first six items visible and puts every additional received item in an expandable shelf with its name, stage, and model intact.
   Rows omitted by an upstream second mate bound stay separately disclosed as unavailable rather than being mixed into that shelf.
   A model the fleet never recorded is labelled `model not recorded`; a stage omitted by a second mate home running an older firstmate is labelled `Stage unavailable` and drawn as an unfilled hatched ladder rather than as a proven zero stage.
@@ -146,7 +148,7 @@ The generator does not serve it; how the file is exposed is decided outside it.
 
 ## Verification
 
-`tests/fm-mission-control.test.sh` renders the board end to end from a fixture home and from captured snapshot payloads, covering present and absent sources, cross-home captain decisions, escaping of hostile prose, project folding, work outside the registry, per-item stage and model rendering, bounded cross-home stage values, item overflow, blocked work, unmeasurable allowance windows, self-reload, the tab structure, and the deferred shelf.
+`tests/fm-mission-control.test.sh` renders the board end to end from a fixture home and from captured snapshot payloads, covering present and absent sources, cross-home captain decisions, escaping of hostile prose, project folding, work outside the registry, per-item stage and model rendering, bounded cross-home stage values, safe handling of valid, missing, and malformed secondmate active-task totals, item overflow, blocked work, unmeasurable allowance windows, self-reload, the tab structure, and the deferred shelf.
 The deferred cases pin the awaiting count and the section count to literal numbers rather than to the absence of a title, because dropping a decision from the list while still counting it and counting it while still listing it fail separately.
 It also pins a fixed current time and commits its fixture clones at explicit epochs, so the last-change wording, its three degrade-to-dash paths, and the promise that no clone is written to are all checked against times the test chose.
 

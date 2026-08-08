@@ -730,7 +730,15 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
   ([($sm.omitted // [])[] | select(.surface == "decisions_open") | (.count // 0)] | add // 0) as $omitted |
   (($sm.active_children // []) | length) as $children_shown |
   ([($sm.omitted // [])[] | select(.surface == "active_children") | (.count // 0)] | add // 0) as $children_omitted |
-  ([($sm.counts.active_children // $children_shown), ($children_shown + $children_omitted), $children_shown] | max) as $children_total |
+  (($sm.counts // {}) | has("active_children")) as $children_count_present |
+  ($sm.counts.active_children // null) as $children_count_raw |
+  ($children_count_raw
+    | if type == "number" and . >= 0 and floor == . then . else null end) as $children_count |
+  # A missing count is an older-producer shape whose complete received rows and
+  # omission record still establish the total. A present malformed value proves
+  # no count at all, so it is ignored rather than converted and disclosed below.
+  ($children_count_present and $children_count == null) as $children_count_invalid |
+  ([($children_count // 0), ($children_shown + $children_omitted), $children_shown] | max) as $children_total |
   ($secondmate_health | map(select(.id == ($sm.id // "secondmate"))) | first) as $health |
   {
     kind: "secondmate",
@@ -741,6 +749,7 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
     children: $children_total,
     children_shown: $children_shown,
     children_omitted: ($children_total - $children_shown),
+    children_count_invalid: $children_count_invalid,
     # The title, model, and stage on a routed task are additive in the secondmate
     # home summary, so a home running an older firstmate reports the task with
     # those absent. work_item leaves each one unrecorded rather than empty, and
@@ -759,9 +768,11 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
 ((($projects_present | not) or ($sm_registry_complete | not))) as $card_count_incomplete |
 ($secondmate_cards | map(.children) | add // 0) as $secondmate_active_count |
 (($work_tasks | length) + $secondmate_active_count) as $in_progress_count |
+($secondmate_cards | any(.children_count_invalid)) as $secondmate_count_incomplete |
 ((($sm_truncated > 0)
   or ($sm_registry_complete | not)
-  or ($secondmate_unknown | length) > 0)) as $in_progress_incomplete |
+  or ($secondmate_unknown | length) > 0
+  or $secondmate_count_incomplete)) as $in_progress_incomplete |
 ($secondmate_cards | map(.children_omitted) | add // 0) as $active_details_omitted |
 
 # ------------------------------------------------------------- fragments ---
@@ -1019,6 +1030,8 @@ def secondmate_card:
    elif $s.state == "externally_held" or $s.holds > 0 then
      (if ($s.hold_reason // "") != "" then $s.hold_reason
       else "\($s.holds) routed \(plural($s.holds; "task is"; "tasks are")) externally held" end)
+   elif $s.children_count_invalid and $s.children > 0 then "At least \($s.children) \(plural($s.children; "task"; "tasks")) routed and under way"
+   elif $s.children_count_invalid and $s.state == "active_child_work" then "Routed work is under way; active task count unavailable."
    elif $s.children > 0 then "\($s.children) \(plural($s.children; "task"; "tasks")) routed and under way"
    elif $s.state == "captain_decision" then "Routed work is waiting for your decision."
    elif $s.state == "no_active_work" then "Idle and healthy, awaiting routed work."
@@ -1026,6 +1039,8 @@ def secondmate_card:
   (if ($s.decisions_available | not) then "Your decisions here cannot be read."
    elif $s.decisions > $s.decisions_shown then "\($s.decisions) decisions await you (\($s.decisions_shown) shown)"
    elif $s.decisions > 0 then "\($s.decisions) \(plural($s.decisions; "decision awaits"; "decisions await")) you"
+   elif $s.children_count_invalid and $s.children_shown > 0 then "Active task count unavailable (\($s.children_shown) shown)"
+   elif $s.children_count_invalid then "Active task count unavailable"
    elif $s.children_omitted > 0 then "\($s.children) active tasks (\($s.children_shown) shown)"
    elif $s.holds > $s.holds_shown then "\($s.holds) held tasks (\($s.holds_shown) shown)"
    else "" end) as $meta_line |
