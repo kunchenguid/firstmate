@@ -180,6 +180,37 @@ Valid cleanup removed only the exact task-bound target and left the control wind
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
+### Unpublished endpoint discard
+
+Two aborts sit between endpoint creation and task-record publication: a failed `GOTMPDIR` delivery, and a `TRACEPARENT` delivery whose partial input could not be cleared.
+Neither has a record to name the pane it leaves behind, so each must end the way a failed publication does.
+Validated on 2026-08-08 by driving `bin/fm-spawn.sh` end to end against fake backend CLIs that model endpoint presence, with real isolated git worktrees.
+
+```sh
+tests/fm-spawn-prepublication-abort.test.sh
+```
+
+```text
+ok - tmux: a failed GOTMPDIR delivery discards the endpoint it created
+ok - tmux: an endpoint surviving a failed GOTMPDIR delivery is reported as stranded
+ok - zellij: a failed GOTMPDIR delivery discards the endpoint it created
+ok - zellij: an endpoint surviving a failed GOTMPDIR delivery is reported as stranded
+ok - cmux: a failed GOTMPDIR delivery discards the endpoint it created
+ok - cmux: an endpoint surviving a failed GOTMPDIR delivery is reported as stranded
+ok - herdr: a failed GOTMPDIR delivery discards the endpoint it created
+ok - herdr: an endpoint surviving a failed GOTMPDIR delivery is reported as stranded
+ok - zellij: an uncleared TRACEPARENT input discards the endpoint it created
+ok - zellij: an endpoint surviving an uncleared TRACEPARENT input is reported as stranded
+ok - cmux: an uncleared TRACEPARENT input discards the endpoint it created
+ok - cmux: an endpoint surviving an uncleared TRACEPARENT input is reported as stranded
+```
+
+Each case asserts the same outcomes an operator can act on: no task record at `state/<id>.meta`, a close actually attempted, and one honest diagnostic naming that nothing was recorded.
+The stranded half sets the fake's close to return success while the endpoint survives - the shape every adapter's best-effort kill can produce - and requires the exact surviving endpoint to be named instead of a clean unwind implied.
+Every one of the twelve fails against the previous behavior, where `set -e` and a bare `exit 1` tore the process down without discarding the endpoint or reporting anything.
+The uncleared-input refusal is covered for zellij and cmux only, because `fm_backend_zellij_send_text_line` and `fm_backend_cmux_send_text_line` are the two adapters that return that status; tmux's and herdr's are single calls with no such status, so a failed carrier delivery there is the ordinary non-fatal omission covered in [`trace-context.md`](trace-context.md).
+Orca is absent by design: its terminal and worktree are unwound by the EXIT trap, whose cleanup flags are still set at both aborts, and the discard returns early for it - as it also does for a herdr spawn whose projection that trap owns, which is why the herdr case here is the flat, non-projected layout.
+
 ## Herdr
 
 The compatibility floor is protocol 14.

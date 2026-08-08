@@ -2286,28 +2286,6 @@ else
   fi
 fi
 
-# Deliver the pane's stable temporary-directory environment before tracing, at
-# the same pre-launch site and in the same order every harness already receives.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
-# Resolve trace delivery before publishing the task record. A reader must never
-# observe a final record without the carrier that the child is about to inherit,
-# and the final path must never be mutated after publication.
-SPAWN_RECORDED_TRACEPARENT=
-if [ -n "$SPAWN_TRACEPARENT" ]; then
-  if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
-    SPAWN_RECORDED_TRACEPARENT=$SPAWN_TRACEPARENT
-  else
-    TRACE_SEND_STATUS=$?
-    if [ "$TRACE_SEND_STATUS" -eq 2 ]; then
-      echo "error: trace-context input could not be cleared for $W; refusing to append the launch command" >&2
-      exit 1
-    fi
-  fi
-fi
-
-META_WINDOW=$T
-[ "$BACKEND" = orca ] && META_WINDOW=$W
-
 # The endpoint created above is reachable only through the task record, so a
 # spawn that never publishes one would otherwise strand a window no teardown
 # can find. Orca terminals/worktrees and a pending herdr projection are unwound
@@ -2370,6 +2348,35 @@ abort_unpublished_meta() {  # <detail>
   discard_unpublished_endpoint || true
   exit 1
 }
+
+# Deliver the pane's stable temporary-directory environment before tracing, at
+# the same pre-launch site and in the same order every harness already receives.
+# Every abort from here to the publication below leaves an endpoint that no task
+# record names, so each one routes through abort_unpublished_meta rather than
+# exiting on its own: `set -e` alone would tear the process down without
+# discarding the endpoint or saying that nothing was recorded for it.
+if ! spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"; then
+  echo "error: the task temporary-directory environment could not be delivered to $W; refusing to launch" >&2
+  abort_unpublished_meta "the task temporary-directory environment could not be delivered to $W"
+fi
+# Resolve trace delivery before publishing the task record. A reader must never
+# observe a final record without the carrier that the child is about to inherit,
+# and the final path must never be mutated after publication.
+SPAWN_RECORDED_TRACEPARENT=
+if [ -n "$SPAWN_TRACEPARENT" ]; then
+  if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
+    SPAWN_RECORDED_TRACEPARENT=$SPAWN_TRACEPARENT
+  else
+    TRACE_SEND_STATUS=$?
+    if [ "$TRACE_SEND_STATUS" -eq 2 ]; then
+      echo "error: trace-context input could not be cleared for $W; refusing to append the launch command" >&2
+      abort_unpublished_meta "trace-context input for $W could not be cleared"
+    fi
+  fi
+fi
+
+META_WINDOW=$T
+[ "$BACKEND" = orca ] && META_WINDOW=$W
 
 # Publish atomically. A truncated meta is worse than no meta at all, because
 # teardown and crew-state reconciliation read a record missing window= or
