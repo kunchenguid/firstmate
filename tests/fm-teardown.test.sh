@@ -2,7 +2,7 @@
 # Tests for bin/fm-teardown.sh's landed-work safety and stale-lock recovery.
 #
 # The check refuses to tear down a worktree whose work has not LANDED, because
-# treehouse return hard-resets the worktree. "Landed" means reachable from a remote
+# `proj rm` hard-resets/removes the worktree. "Landed" means reachable from a remote
 # OR - for a normal ship task whose commits are not so reachable - its PR is merged
 # and GitHub reports a PR head that contains the current local work, or its content
 # is already in the up-to-date default branch.
@@ -16,7 +16,7 @@
 #     recognizes a merged PR head containing the local work (or the content already
 #     in main) as landed.
 #   - teardown-lock-race: a killed crew process can leave a transient worktree
-#     git index.lock that blocks teardown. The return path retries on the lock
+#     git index.lock that blocks teardown. The removal path retries on the lock
 #     error signature (even if the lock self-clears mid-check), then only removes a
 #     provably stale lock before re-running safety checks.
 #
@@ -40,14 +40,14 @@
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
-# killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
+# killed crew process (bin/fm-teardown.sh's teardown_proj_remove).
 #   (r) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
 #   (s) index.lock with a live holder, any age                -> lock kept, REFUSE
 #   (t) lsof error while checking index.lock                  -> lock kept, REFUSE
 #   (u) dirty worktree after stale lock cleanup               -> lock removed, REFUSE
 #   (v) non-linked repo index.lock                            -> lock removed, ALLOW
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
-#   (x) transient lock cleared after first failed return      -> retry ALLOW
+#   (x) transient lock cleared after first failed removal     -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
 set -u
 
@@ -67,7 +67,7 @@ export REAL_LSOF_FOR_TEST
 
 # Build a fresh sandbox for one test case. Sets up:
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
-#   $CASE/fakebin/      - mocks for treehouse, tmux (PATH-prepended by caller)
+#   $CASE/fakebin/      - mocks for proj, tmux (PATH-prepended by caller)
 #   $CASE/origin.git/   - bare upstream repo (so the project clone has origin)
 #   $CASE/project/      - clone of origin; acts as the firstmate project dir
 #   $CASE/wt/           - a worktree of the project (the task worktree)
@@ -80,9 +80,9 @@ make_case() {
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
-  cat > "$fakebin/treehouse" <<'SH'
+  cat > "$fakebin/proj" <<'SH'
 #!/usr/bin/env bash
-# `treehouse return --force <wt>`: succeed silently.
+# `proj rm <project>/<worktree> [--force]`: succeed silently.
 exit 0
 SH
   cat > "$fakebin/tmux" <<'SH'
@@ -152,7 +152,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes"
+  chmod +x "$fakebin/proj" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -332,76 +332,73 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
-# Override fakebin/treehouse so `treehouse return --force <wt>` fails with a
+# Override fakebin/proj so `proj rm <project>/<worktree> [--force]` fails with a
 # git "file exists" lock error whenever the worktree's real index.lock is
 # present, and succeeds once it is gone. This drives the lock through
-# fm-teardown.sh's own retry-then-stale-cleanup logic (teardown_treehouse_return
+# fm-teardown.sh's own retry-then-stale-cleanup logic (teardown_proj_remove
 # in bin/fm-teardown.sh) rather than hand-simulating that logic in the test.
-add_lock_aware_treehouse() {
+# `proj rm` only ever receives the "<project>/<worktree>" pair, not the raw
+# worktree path (proj rm's addressing is location-independent - see
+# bin/fm-proj-lib.sh), so the fake reconstructs the real worktree directory as
+# $case_dir/<worktree> - true for every fixture in this file, which always
+# places the task worktree at exactly $case_dir/wt.
+add_lock_aware_proj() {
   local case_dir=$1
-  cat > "$case_dir/fakebin/treehouse" <<'SH'
+  cat > "$case_dir/fakebin/proj" <<SH
 #!/usr/bin/env bash
-if [ "${1:-}" = return ]; then
+if [ "\${1:-}" = rm ]; then
   shift
-  wt=""
-  for a in "$@"; do
-    case "$a" in
-      --force) ;;
-      *) wt=$a ;;
-    esac
-  done
-  lock=$(git -C "$wt" rev-parse --git-path index.lock 2>/dev/null || true)
-  case "$lock" in
+  target=\${1:-}
+  wt="$case_dir/\${target#*/}"
+  lock=\$(git -C "\$wt" rev-parse --git-path index.lock 2>/dev/null || true)
+  case "\$lock" in
     /*|'') ;;
-    *) lock="$wt/$lock" ;;
+    *) lock="\$wt/\$lock" ;;
   esac
-  if [ -n "$lock" ] && [ -e "$lock" ]; then
-    echo "fatal: Unable to create '$lock': File exists." >&2
+  if [ -n "\$lock" ] && [ -e "\$lock" ]; then
+    echo "fatal: Unable to create '\$lock': File exists." >&2
     exit 128
   fi
   exit 0
 fi
 exit 0
 SH
-  chmod +x "$case_dir/fakebin/treehouse"
+  chmod +x "$case_dir/fakebin/proj"
 }
 
-# treehouse return fails once with the index.lock signature, then clears the lock
+# proj rm fails once with the index.lock signature, then clears the lock
 # (simulating a dying crew git process finishing) so the next retry succeeds.
 # The first failure always reports the lock path even if the file is removed in
 # the same attempt - matching the production race where the lock self-clears
-# between the failed return and the supervisor's existence check.
-add_transient_lock_treehouse() {
+# between the failed removal and the supervisor's existence check. See
+# add_lock_aware_proj above for why the worktree path is reconstructed from
+# $case_dir rather than taken from argv.
+add_transient_lock_proj() {
   local case_dir=$1
-  cat > "$case_dir/fakebin/treehouse" <<'SH'
+  cat > "$case_dir/fakebin/proj" <<SH
 #!/usr/bin/env bash
-if [ "${1:-}" = return ]; then
+if [ "\${1:-}" = rm ]; then
   shift
-  wt=""
-  for a in "$@"; do
-    case "$a" in
-      --force) ;;
-      *) wt=$a ;;
-    esac
-  done
-  lock=$(git -C "$wt" rev-parse --git-path index.lock 2>/dev/null || true)
-  case "$lock" in
+  target=\${1:-}
+  wt="$case_dir/\${target#*/}"
+  lock=\$(git -C "\$wt" rev-parse --git-path index.lock 2>/dev/null || true)
+  case "\$lock" in
     /*|'') ;;
-    *) lock="$wt/$lock" ;;
+    *) lock="\$wt/\$lock" ;;
   esac
-  count_file="${TREEHOUSE_ATTEMPT_FILE:?}"
+  count_file="\${PROJ_ATTEMPT_FILE:?}"
   count=0
-  if [ -f "$count_file" ]; then
-    count=$(cat "$count_file")
+  if [ -f "\$count_file" ]; then
+    count=\$(cat "\$count_file")
   fi
-  count=$(( count + 1 ))
-  printf '%s\n' "$count" > "$count_file"
-  if [ "$count" -eq 1 ]; then
+  count=\$(( count + 1 ))
+  printf '%s\n' "\$count" > "\$count_file"
+  if [ "\$count" -eq 1 ]; then
     # Emit the real git signature, then drop the lock so a lock-existence-only
     # recovery path would wrongly abort without retrying.
-    if [ -n "$lock" ]; then
-      echo "fatal: Unable to create '$lock': File exists." >&2
-      rm -f "$lock"
+    if [ -n "\$lock" ]; then
+      echo "fatal: Unable to create '\$lock': File exists." >&2
+      rm -f "\$lock"
     else
       echo "fatal: Unable to create 'index.lock': File exists." >&2
     fi
@@ -411,38 +408,33 @@ if [ "${1:-}" = return ]; then
 fi
 exit 0
 SH
-  chmod +x "$case_dir/fakebin/treehouse"
+  chmod +x "$case_dir/fakebin/proj"
 }
 
-# treehouse return always fails with the lock signature while the lock file
-# remains; used to assert exhausted retries still refuse loudly.
-add_persistent_lock_treehouse() {
+# proj rm always fails with the lock signature while the lock file remains;
+# used to assert exhausted retries still refuse loudly.
+add_persistent_lock_proj() {
   local case_dir=$1
-  cat > "$case_dir/fakebin/treehouse" <<'SH'
+  cat > "$case_dir/fakebin/proj" <<SH
 #!/usr/bin/env bash
-if [ "${1:-}" = return ]; then
+if [ "\${1:-}" = rm ]; then
   shift
-  wt=""
-  for a in "$@"; do
-    case "$a" in
-      --force) ;;
-      *) wt=$a ;;
-    esac
-  done
-  lock=$(git -C "$wt" rev-parse --git-path index.lock 2>/dev/null || true)
-  case "$lock" in
+  target=\${1:-}
+  wt="$case_dir/\${target#*/}"
+  lock=\$(git -C "\$wt" rev-parse --git-path index.lock 2>/dev/null || true)
+  case "\$lock" in
     /*|'') ;;
-    *) lock="$wt/$lock" ;;
+    *) lock="\$wt/\$lock" ;;
   esac
-  if [ -z "$lock" ]; then
+  if [ -z "\$lock" ]; then
     lock="index.lock"
   fi
-  echo "fatal: Unable to create '$lock': File exists." >&2
+  echo "fatal: Unable to create '\$lock': File exists." >&2
   exit 128
 fi
 exit 0
 SH
-  chmod +x "$case_dir/fakebin/treehouse"
+  chmod +x "$case_dir/fakebin/proj"
 }
 
 git_index_lock_path() {
@@ -959,7 +951,7 @@ test_stale_index_lock_cleared_and_teardown_succeeds() {
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
 
-  add_lock_aware_treehouse "$case_dir"
+  add_lock_aware_proj "$case_dir"
   add_lsof_no_holder "$case_dir"
 
   lock=$(git_index_lock_path "$case_dir/wt")
@@ -988,7 +980,7 @@ test_live_index_lock_is_never_removed_and_teardown_refuses() {
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
 
-  add_lock_aware_treehouse "$case_dir"
+  add_lock_aware_proj "$case_dir"
   add_lsof_live_holder "$case_dir"
 
   lock=$(git_index_lock_path "$case_dir/wt")
@@ -1020,7 +1012,7 @@ test_lsof_error_never_clears_index_lock() {
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
 
-  add_lock_aware_treehouse "$case_dir"
+  add_lock_aware_proj "$case_dir"
   add_lsof_error "$case_dir"
 
   lock=$(git_index_lock_path "$case_dir/wt")
@@ -1052,7 +1044,7 @@ test_stale_index_lock_cleanup_rechecks_dirty_worktree() {
   git -C "$case_dir/project" fetch -q origin
   printf '%s\n' dirty > "$case_dir/wt/feature.txt"
 
-  add_lock_aware_treehouse "$case_dir"
+  add_lock_aware_proj "$case_dir"
   add_lsof_no_holder "$case_dir"
   add_git_status_lock_failure "$case_dir"
 
@@ -1088,7 +1080,7 @@ test_non_linked_index_lock_path_is_checked_from_worktree() {
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/wt" fetch -q origin
 
-  add_lock_aware_treehouse "$case_dir"
+  add_lock_aware_proj "$case_dir"
   add_lsof_no_holder "$case_dir"
 
   lock=$(git_index_lock_path "$case_dir/wt")
@@ -1117,7 +1109,7 @@ test_index_lock_mtime_read_failure_refuses() {
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
 
-  add_lock_aware_treehouse "$case_dir"
+  add_lock_aware_proj "$case_dir"
   add_lsof_no_holder "$case_dir"
   add_stat_error "$case_dir"
 
@@ -1151,7 +1143,7 @@ test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds() {
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
 
-  add_transient_lock_treehouse "$case_dir"
+  add_transient_lock_proj "$case_dir"
   add_lsof_no_holder "$case_dir"
 
   lock=$(git_index_lock_path "$case_dir/wt")
@@ -1160,11 +1152,11 @@ test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds() {
   # Fresh lock: not old enough for the force-remove path; patience must win.
   touch "$lock"
 
-  attempt_file="$case_dir/treehouse-attempts"
+  attempt_file="$case_dir/proj-attempts"
   : > "$attempt_file"
 
   set +e
-  TREEHOUSE_ATTEMPT_FILE="$attempt_file" \
+  PROJ_ATTEMPT_FILE="$attempt_file" \
   FM_TREEHOUSE_RETURN_LOCK_RETRIES=2 \
   FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=0 \
   FM_STALE_WORKTREE_LOCK_AGE_SECS=3600 \
@@ -1178,9 +1170,9 @@ test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds() {
   assert_not_contains "$(cat "$case_dir/stderr")" "removed provably-stale git lock" \
     "transient-index-lock: teardown force-removed a lock that only needed patience"
   [ "$(cat "$attempt_file")" = 2 ] \
-    || fail "transient-index-lock: expected exactly 2 treehouse return attempts, got $(cat "$attempt_file")"
+    || fail "transient-index-lock: expected exactly 2 proj rm attempts, got $(cat "$attempt_file")"
   assert_absent "$lock" "transient-index-lock: lock should remain cleared after success"
-  pass "transient index.lock cleared after first failed return is retried successfully without force-remove"
+  pass "transient index.lock cleared after first failed removal is retried successfully without force-remove"
 }
 
 test_persistent_index_lock_exhausts_retries_and_refuses_loudly() {
@@ -1191,7 +1183,7 @@ test_persistent_index_lock_exhausts_retries_and_refuses_loudly() {
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
 
-  add_persistent_lock_treehouse "$case_dir"
+  add_persistent_lock_proj "$case_dir"
   # Fresh lock with a live holder: never provably stale, never force-removed.
   add_lsof_live_holder "$case_dir"
 
@@ -1229,18 +1221,18 @@ test_empty_retry_wait_uses_default_without_aborting() {
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
 
-  add_transient_lock_treehouse "$case_dir"
+  add_transient_lock_proj "$case_dir"
   add_lsof_no_holder "$case_dir"
 
   lock=$(git_index_lock_path "$case_dir/wt")
   mkdir -p "$(dirname "$lock")"
   : > "$lock"
 
-  attempt_file="$case_dir/treehouse-attempts"
+  attempt_file="$case_dir/proj-attempts"
   : > "$attempt_file"
 
   set +e
-  TREEHOUSE_ATTEMPT_FILE="$attempt_file" \
+  PROJ_ATTEMPT_FILE="$attempt_file" \
   FM_TREEHOUSE_RETURN_LOCK_RETRIES=1 \
   FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS='' \
   FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS='' \
@@ -1253,7 +1245,7 @@ test_empty_retry_wait_uses_default_without_aborting() {
   assert_grep "waiting 1s and retrying" "$case_dir/stderr" \
     "empty-retry-wait: teardown did not use the default retry wait"
   [ "$(cat "$attempt_file")" = 2 ] \
-    || fail "empty-retry-wait: expected exactly 2 treehouse return attempts, got $(cat "$attempt_file")"
+    || fail "empty-retry-wait: expected exactly 2 proj rm attempts, got $(cat "$attempt_file")"
   pass "empty retry wait overrides use the default without aborting teardown"
 }
 
@@ -1265,7 +1257,7 @@ test_fractional_legacy_retry_wait_refuses_without_arithmetic_error() {
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
 
-  add_persistent_lock_treehouse "$case_dir"
+  add_persistent_lock_proj "$case_dir"
   add_lsof_live_holder "$case_dir"
 
   lock=$(git_index_lock_path "$case_dir/wt")
@@ -1424,7 +1416,7 @@ SH
 }
 
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes() {
-  local case_dir log closed lock ready release holder_pid rc thlog
+  local case_dir log closed lock ready release holder_pid rc prlog
   case_dir=$(make_case herdr-orphan-refusal)
   write_meta "$case_dir" local-only ship
   configure_flat_herdr_teardown_case "$case_dir"
@@ -1432,15 +1424,15 @@ test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes() {
   closed="$case_dir/closed"
   : > "$case_dir/state/task-x1.status"
   : > "$case_dir/state/task-x1.turn-ended"
-  # Record every treehouse invocation: the contended-lock refusal must fire
-  # BEFORE the isolated copy is returned, so phase 1 may not invoke it at all.
-  thlog="$case_dir/treehouse.log"; : > "$thlog"
-  cat > "$case_dir/fakebin/treehouse" <<SH
+  # Record every proj invocation: the contended-lock refusal must fire
+  # BEFORE the isolated copy is removed, so phase 1 may not invoke it at all.
+  prlog="$case_dir/proj.log"; : > "$prlog"
+  cat > "$case_dir/fakebin/proj" <<SH
 #!/usr/bin/env bash
-printf '%s\n' "\$*" >> "$thlog"
+printf '%s\n' "\$*" >> "$prlog"
 exit 0
 SH
-  chmod +x "$case_dir/fakebin/treehouse"
+  chmod +x "$case_dir/fakebin/proj"
 
   lock=$(FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" PATH="$case_dir/fakebin:$PATH" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path default' "$ROOT") \
@@ -1469,9 +1461,9 @@ SH
   [ -e "$case_dir/state/task-x1.status" ] || { : > "$release"; fail "herdr-orphan-refusal: refusal erased the task status record"; }
   [ -e "$case_dir/state/task-x1.turn-ended" ] || { : > "$release"; fail "herdr-orphan-refusal: refusal erased the turn-end record"; }
   assert_grep "presentation lock is contended" "$case_dir/stderr" \
-    "herdr-orphan-refusal: the pre-return refusal was not explained visibly"
-  if [ -s "$thlog" ]; then
-    : > "$release"; fail "herdr-orphan-refusal: the contended refusal still returned the isolated copy: $(cat "$thlog")"
+    "herdr-orphan-refusal: the pre-removal refusal was not explained visibly"
+  if [ -s "$prlog" ]; then
+    : > "$release"; fail "herdr-orphan-refusal: the contended refusal still removed the isolated copy: $(cat "$prlog")"
   fi
   [ -d "$case_dir/wt" ] || { : > "$release"; fail "herdr-orphan-refusal: the contended refusal removed the isolated copy"; }
   if [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD 2>/dev/null)" != "fm/task-x1" ]; then
@@ -1490,12 +1482,12 @@ SH
     run_teardown "$case_dir" --force > "$case_dir/stdout2" 2> "$case_dir/stderr2" \
     || fail "herdr-orphan-refusal: the retry after lock release failed: $(cat "$case_dir/stderr2")"
   [ -e "$closed" ] || fail "herdr-orphan-refusal: the retry never closed the pane under the lock"
-  [ -s "$thlog" ] || fail "herdr-orphan-refusal: the successful retry never returned the isolated copy"
+  [ -s "$prlog" ] || fail "herdr-orphan-refusal: the successful retry never removed the isolated copy"
   [ ! -e "$case_dir/state/task-x1.meta" ] || fail "herdr-orphan-refusal: the successful retry left the metadata behind"
   [ ! -e "$case_dir/state/task-x1.status" ] || fail "herdr-orphan-refusal: the successful retry left the status record behind"
   grep -q "teardown task-x1 complete" "$case_dir/stdout2" \
     || fail "herdr-orphan-refusal: the successful retry did not report completion"
-  pass "herdr flat teardown refuses before returning the isolated copy under lock contention and the retry completes cleanly"
+  pass "herdr flat teardown refuses before removing the isolated copy under lock contention and the retry completes cleanly"
 }
 
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence() {
@@ -1522,7 +1514,7 @@ test_herdr_flat_teardown_refuses_records_on_unparseable_presence() {
 }
 
 assert_herdr_teardown_preflight_refuses_before_changes() {
-  local mode=$1 case_dir log closed rc thlog teardown_bin
+  local mode=$1 case_dir log closed rc prlog teardown_bin
   case_dir=$(make_case "herdr-preflight-$mode")
   write_meta "$case_dir" local-only ship
   configure_flat_herdr_teardown_case "$case_dir"
@@ -1530,13 +1522,13 @@ assert_herdr_teardown_preflight_refuses_before_changes() {
   closed="$case_dir/closed"
   : > "$case_dir/state/task-x1.status"
   : > "$case_dir/state/task-x1.turn-ended"
-  thlog="$case_dir/treehouse.log"; : > "$thlog"
-  cat > "$case_dir/fakebin/treehouse" <<SH
+  prlog="$case_dir/proj.log"; : > "$prlog"
+  cat > "$case_dir/fakebin/proj" <<SH
 #!/usr/bin/env bash
-printf '%s\n' "\$*" >> "$thlog"
+printf '%s\n' "\$*" >> "$prlog"
 exit 0
 SH
-  chmod +x "$case_dir/fakebin/treehouse"
+  chmod +x "$case_dir/fakebin/proj"
 
   teardown_bin=$TEARDOWN
   case "$mode" in
@@ -1565,7 +1557,7 @@ SH
     "$teardown_bin" task-x1 --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   [ "$rc" -ne 0 ] || fail "herdr-preflight-$mode: teardown continued without its required preflight"
   assert_grep "nothing was changed" "$case_dir/stderr" \
-    "herdr-preflight-$mode: the retryable pre-return refusal was not explained visibly"
+    "herdr-preflight-$mode: the retryable pre-removal refusal was not explained visibly"
   [ -d "$case_dir/wt" ] || fail "herdr-preflight-$mode: refusal removed the isolated copy"
   [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "fm/task-x1" ] \
     || fail "herdr-preflight-$mode: refusal dropped the task branch"
@@ -1575,7 +1567,7 @@ SH
     || fail "herdr-preflight-$mode: refusal erased the task status record"
   [ -e "$case_dir/state/task-x1.turn-ended" ] \
     || fail "herdr-preflight-$mode: refusal erased the turn-end record"
-  [ ! -s "$thlog" ] || fail "herdr-preflight-$mode: refusal returned the isolated copy"
+  [ ! -s "$prlog" ] || fail "herdr-preflight-$mode: refusal removed the isolated copy"
   [ ! -e "$closed" ] || fail "herdr-preflight-$mode: refusal attempted an unlocked pane close"
 }
 
@@ -1638,19 +1630,19 @@ SH
 }
 
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes() {
-  local case_dir home log closed rc thlog
+  local case_dir home log closed rc prlog
   case_dir=$(make_case herdr-child-preflight)
   write_meta "$case_dir" local-only secondmate
   configure_secondmate_with_herdr_child "$case_dir"
   home="$case_dir/secondmate-home"
-  log="$case_dir/herdr.log"; closed="$case_dir/closed"; thlog="$case_dir/treehouse.log"
-  : > "$log"; : > "$thlog"
-  cat > "$case_dir/fakebin/treehouse" <<SH
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; prlog="$case_dir/proj.log"
+  : > "$log"; : > "$prlog"
+  cat > "$case_dir/fakebin/proj" <<SH
 #!/usr/bin/env bash
-printf '%s\n' "\$*" >> "$thlog"
+printf '%s\n' "\$*" >> "$prlog"
 exit 0
 SH
-  chmod +x "$case_dir/fakebin/treehouse"
+  chmod +x "$case_dir/fakebin/proj"
   rc=0
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
     FM_FAKE_HERDR_SESSION_LIST_GARBAGE=1 \
@@ -1660,7 +1652,7 @@ SH
   [ -e "$home/state/child-herdr.meta" ] || fail "herdr-child-preflight: refusal erased the child record"
   [ -e "$home/state/child-herdr.status" ] || fail "herdr-child-preflight: refusal erased child status"
   [ -d "$home" ] || fail "herdr-child-preflight: refusal removed the secondmate home"
-  [ ! -s "$thlog" ] || fail "herdr-child-preflight: refusal returned work before child preflight"
+  [ ! -s "$prlog" ] || fail "herdr-child-preflight: refusal removed work before child preflight"
   [ ! -e "$closed" ] || fail "herdr-child-preflight: refusal attempted a child close"
   assert_grep "nothing was changed" "$case_dir/stderr" \
     "herdr-child-preflight: refusal did not explain its non-mutating boundary"
@@ -2042,11 +2034,11 @@ test_parked_own_run_refuses_when_abort_is_unconfirmed() {
   pid=$!
   disown
 
-  cat > "$case_dir/fakebin/treehouse" <<EOF
+  cat > "$case_dir/fakebin/proj" <<EOF
 #!/usr/bin/env bash
-printf 'return\n' >> "$case_dir/treehouse.log"
+printf 'rm\n' >> "$case_dir/proj.log"
 EOF
-  chmod +x "$case_dir/fakebin/treehouse"
+  chmod +x "$case_dir/fakebin/proj"
 
   rc=0
   FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
@@ -2061,8 +2053,8 @@ EOF
     "parked-run-abort-unconfirmed: teardown removed the worktree after refusing"
   assert_present "$case_dir/state/task-x1.meta" \
     "parked-run-abort-unconfirmed: teardown removed task metadata after refusing"
-  assert_absent "$case_dir/treehouse.log" \
-    "parked-run-abort-unconfirmed: teardown returned the worktree after refusing"
+  assert_absent "$case_dir/proj.log" \
+    "parked-run-abort-unconfirmed: teardown removed the worktree after refusing"
   kill -0 "$pid" 2>/dev/null || fail "parked-run-abort-unconfirmed: process reap ran before refusal"
   kill -KILL "$pid" 2>/dev/null || true
   pass "teardown refuses before reap or removal when a task-owned run remains parked"
@@ -2212,11 +2204,11 @@ test_lsof_error_refuses_before_removal() {
 #!/usr/bin/env bash
 exit 1
 SH
-  cat > "$case_dir/fakebin/treehouse" <<EOF
+  cat > "$case_dir/fakebin/proj" <<EOF
 #!/usr/bin/env bash
-printf 'return\n' >> "$case_dir/treehouse.log"
+printf 'rm\n' >> "$case_dir/proj.log"
 EOF
-  chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/treehouse"
+  chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/proj"
 
   rc=0
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
@@ -2226,7 +2218,7 @@ EOF
     "lsof-error-refusal: teardown did not explain the lsof refusal"
   assert_present "$case_dir/wt" "lsof-error-refusal: teardown removed the worktree"
   assert_present "$case_dir/state/task-x1.meta" "lsof-error-refusal: teardown removed task metadata"
-  assert_absent "$case_dir/treehouse.log" "lsof-error-refusal: teardown returned the worktree"
+  assert_absent "$case_dir/proj.log" "lsof-error-refusal: teardown removed the worktree"
   pass "an erroring lsof scan refuses teardown and preserves the task"
 }
 
@@ -2438,19 +2430,19 @@ if [ "${1:-}" = -p ] && [ "${2:-}" = "${FM_FAKE_EXITED_PID:-}" ]; then
 fi
 exec "$REAL_PS_FOR_TEST" "$@"
 SH
-  cat > "$case_dir/fakebin/treehouse" <<EOF
+  cat > "$case_dir/fakebin/proj" <<EOF
 #!/usr/bin/env bash
-printf 'returned\n' > "$case_dir/treehouse.log"
+printf 'removed\n' > "$case_dir/proj.log"
 EOF
-  chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/ps" "$case_dir/fakebin/treehouse"
+  chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/ps" "$case_dir/fakebin/proj"
 
   rc=0
   FM_PROC_ROOT_OVERRIDE="$case_dir/no-proc" FM_FAKE_EXITED_PID="$fake_pid" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 0 "$rc" "identity-exit-convergence: teardown should succeed"
-  assert_present "$case_dir/treehouse.log" \
-    "identity-exit-convergence: teardown did not reach worktree return"
+  assert_present "$case_dir/proj.log" \
+    "identity-exit-convergence: teardown did not reach worktree removal"
   ! grep -q REFUSED "$case_dir/stderr" || \
     fail "identity-exit-convergence: a disappeared process caused teardown refusal"
   pass "a process exiting during identity lookup does not block teardown"
@@ -2470,17 +2462,17 @@ test_run_abort_precedes_process_reap_precedes_worktree_removal() {
   sleep 0.3
   kill -0 "$pid" 2>/dev/null || fail "abort-then-reap-then-remove-order: setup sleeper did not start"
 
-  # A treehouse fake that snapshots, at the exact moment the destructive
-  # worktree return runs, whether the run was already aborted and whether the
-  # leaked process was already reaped - direct causal proof of ordering from
-  # real observed state, not a source-text or line-number correlation.
-  cat > "$case_dir/fakebin/treehouse" <<EOF
+  # A proj fake that snapshots, at the exact moment the destructive worktree
+  # removal runs, whether the run was already aborted and whether the leaked
+  # process was already reaped - direct causal proof of ordering from real
+  # observed state, not a source-text or line-number correlation.
+  cat > "$case_dir/fakebin/proj" <<EOF
 #!/usr/bin/env bash
 if [ -s "$abort_log" ]; then echo "abort-already-happened" >> "$case_dir/order.log"; fi
 if ! kill -0 $pid 2>/dev/null; then echo "reap-already-happened" >> "$case_dir/order.log"; fi
 exit 0
 EOF
-  chmod +x "$case_dir/fakebin/treehouse"
+  chmod +x "$case_dir/fakebin/proj"
 
   rc=0
   FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
@@ -2490,12 +2482,12 @@ EOF
   kill -0 "$pid" 2>/dev/null && { kill -KILL "$pid" 2>/dev/null || true; }
 
   assert_present "$case_dir/order.log" \
-    "abort-then-reap-then-remove-order: the destructive worktree return was never invoked"
+    "abort-then-reap-then-remove-order: the destructive worktree removal was never invoked"
   assert_grep "abort-already-happened" "$case_dir/order.log" \
-    "abort-then-reap-then-remove-order: the run was not yet aborted when the worktree return ran"
+    "abort-then-reap-then-remove-order: the run was not yet aborted when the worktree removal ran"
   assert_grep "reap-already-happened" "$case_dir/order.log" \
-    "abort-then-reap-then-remove-order: the leaked process was not yet reaped when the worktree return ran"
-  pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
+    "abort-then-reap-then-remove-order: the leaked process was not yet reaped when the worktree removal ran"
+  pass "the run abort and the leaked-process reap both complete before the destructive worktree removal"
 }
 
 test_local_only_fork_remote_allows
