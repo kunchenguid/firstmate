@@ -294,6 +294,13 @@ worker_stop_active_execution() {
 worker_shutdown() {
   trap - HUP INT TERM
   worker_publish_quarantine || {
+    # A teardown that already removed the state root leaves nothing to guard.
+    # Staying alive here would make TERM a no-op and leave the serving child
+    # immortal while its restart supervisor keeps the tree at ppid 1.
+    if [ ! -d "$WORKER_LOCK" ]; then
+      WORKER_RELEASE_OWNERSHIP=0
+      exit 0
+    fi
     worker_error "cannot guard worker ownership for shutdown"
     trap worker_shutdown HUP INT TERM
     return 0
