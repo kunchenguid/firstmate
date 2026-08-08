@@ -216,7 +216,9 @@ Accept with Enter.
 The decision persists for that path; a fresh linked-worktree path can require its own directory trust.
 
 Codex hook activation has three independent gates: the `hooks` feature must be enabled when the process starts, the project path must be trusted so its `.codex` layer loads, and every non-managed command hook's current hash must be reviewed and trusted through `/hooks`.
+On codex-cli 0.146.0 `hooks` is a stable feature whose effective state is already true (`codex features list`), so the feature gate only bites a process launched with it explicitly disabled; the two trust gates are the ones an operator normally answers.
 Directory trust and hook review are separate durable records, and a changed hook hash requires review again.
+Until all three gates are satisfied, every tracked Codex project hook is inert, not just the turn-end guard: the session-start digest never lands, and the watcher-arm and cd PreToolUse seatbelts (`docs/arm-pretool-check.md`, `docs/cd-guard.md`) silently allow the anti-patterns they are documented to deny automatically.
 When the process started with hooks enabled, accepting the hook review activates those definitions in the same process; a `SessionStart` awaiting startup review runs before the first model request.
 Changing `features.hooks` from false to true cannot activate hooks in an already-running process because Codex keeps derived feature gates session-static; restart that Codex process, then complete any pending directory and hook review.
 `--dangerously-bypass-hook-trust` bypasses persisted per-hook review for a vetted automation run, but it does not replace enabling the feature.
