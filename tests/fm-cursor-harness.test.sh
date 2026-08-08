@@ -173,19 +173,19 @@ test_mainthread_only_matches_narrowed_cursor_identity() {
   fakebin=$(make_cursor_fakebin "$TMP_ROOT/mainthread-detection")
   proc_root="$TMP_ROOT/mainthread-detection/proc"
   mkdir -p "$proc_root"
-  out=$(CURSOR_AGENT= CLAUDECODE= PI_CODING_AGENT= FM_PI_HARNESS= GROK_AGENT= \
+  out=$(CURSOR_AGENT='' CLAUDECODE='' PI_CODING_AGENT='' FM_PI_HARNESS='' GROK_AGENT='' \
     FM_FAKE_CURSOR_COMM=MainThread \
     FM_FAKE_CURSOR_AGENT_ARGS='/usr/bin/node /tmp/claude --foo' \
     PATH="$fakebin:$PATH" "$HARNESS" 2>/dev/null)
   [ "$out" = unknown ] \
     || fail "unverified MainThread with Claude-like args detected as '$out'"
-  out=$(CURSOR_AGENT= CLAUDECODE= PI_CODING_AGENT= FM_PI_HARNESS= GROK_AGENT= \
+  out=$(CURSOR_AGENT='' CLAUDECODE='' PI_CODING_AGENT='' FM_PI_HARNESS='' GROK_AGENT='' \
     FM_FAKE_CURSOR_COMM=MainThread \
     FM_FAKE_CURSOR_AGENT_ARGS='/usr/bin/node /tmp/codex --foo' \
     PATH="$fakebin:$PATH" "$HARNESS" 2>/dev/null)
   [ "$out" = unknown ] \
     || fail "unverified MainThread with Codex-like args detected as '$out'"
-  out=$(CURSOR_AGENT= CLAUDECODE= PI_CODING_AGENT= FM_PI_HARNESS= GROK_AGENT= \
+  out=$(CURSOR_AGENT='' CLAUDECODE='' PI_CODING_AGENT='' FM_PI_HARNESS='' GROK_AGENT='' \
     FM_FAKE_CURSOR_COMM=MainThread \
     FM_FAKE_CURSOR_AGENT_ARGS='/opt/cursor-agent/versions/current/cursor-agent --force' \
     FM_PROC_ROOT_OVERRIDE="$proc_root" FM_FAKE_CURSOR_PROC_ROOT="$proc_root" \
