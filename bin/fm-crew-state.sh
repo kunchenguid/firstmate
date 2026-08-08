@@ -28,13 +28,11 @@
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
 #      the same line of history). Local work that advanced past the run head, or
 #      diverged from it, invalidates attribution. A run whose head this worktree
-#      does not have at all - the shape of every in-flight run, whose fix commits
-#      stay in the gate repo until custody returns - is instead bound through
-#      `axi status`'s branch_sync verdict for this exact branch and HEAD, so a
-#      live run is never rejected as unattributable and replaced by a superseded
-#      one. bin/fm-nm-run-lib.sh's fm_nm_run_binds_worktree owns both bindings
-#      and is the single rule bin/fm-teardown.sh asks too. The coarse fallback reads
-#      the branch's newest row only, for the same reason.
+#      does not have at all is bound by the rest of the rule, owned in full by
+#      bin/fm-nm-run-lib.sh's fm_nm_run_binds_worktree and asked identically by
+#      bin/fm-teardown.sh, so this reader never rejects a live run as
+#      unattributable and reports a superseded one in its place. The coarse
+#      fallback reads the branch's newest row only, for the same reason.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
