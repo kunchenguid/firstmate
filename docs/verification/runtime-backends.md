@@ -204,7 +204,7 @@ Bounded output from the successful run:
 ok - codex-cli 0.146.0 live E2E proved narrow Codex worker writable roots
 ```
 
-The 2026-08-07 static extension adds no-mistakes ship inclusion, direct-PR and local-only exclusion, non-Codex exclusion, preserved existing roots, the `NM_HOME` and default `HOME/.no-mistakes` selection contract, read-only AXI socket verification, unresolved and protected-overlap root refusal, stopped-daemon and unrelated-directory refusal, all opaque gate-launch refusal before endpoint creation, and workspace-write network access only for the verified no-mistakes Codex ship.
+The 2026-08-07 static extension adds no-mistakes ship inclusion, direct-PR and local-only exclusion, non-Codex exclusion, preserved existing roots, the `NM_HOME` and default `HOME/.no-mistakes` selection contract, direct AF_UNIX connectivity and captured daemon-status verification, unresolved and protected-overlap root refusal, stopped-daemon and unrelated-directory refusal, all opaque gate-launch refusal before endpoint creation, and workspace-write network access only for the verified no-mistakes Codex ship.
 
 The no-mistakes socket control ran on 2026-08-05 with no-mistakes v1.41.2 and codex-cli 0.146.0 in a Firstmate Codex worker whose effective sandbox was workspace-write and whose launch lacked the no-mistakes root.
 The installed matching v1.41.2 module source established that `NM_HOME` selects the root when non-empty, otherwise `HOME/.no-mistakes` does, and the Unix socket is `<root>/socket`.
@@ -220,8 +220,8 @@ no-mistakes daemon status
 connect to daemon socket: dial ipc: dial unix <home>/.no-mistakes/socket: connect: operation not permitted
 ```
 
-The refreshed opt-in guard keeps telemetry and update checks disabled, suppresses the AXI home payload, requires the control's exact socket denial, and then requires the same read-only AXI home command to connect after the selected no-mistakes root and workspace-write network access are added.
-It never invokes `no-mistakes axi run` or another pipeline-starting command.
+The refreshed opt-in guard keeps telemetry and update checks disabled, suppresses the captured daemon-status payload, requires the control's exact AF_UNIX socket denial, and then requires both a direct AF_UNIX connection and explicit `daemon running (pid N)` status after the selected no-mistakes root and workspace-write network access are added.
+It never starts a no-mistakes pipeline or invokes another state-mutating no-mistakes command.
 
 Its additional bounded success marker is:
 
