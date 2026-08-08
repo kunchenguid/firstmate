@@ -56,6 +56,21 @@
 # below. Re-sourcing is a cheap idempotent redefinition, so this file needs no
 # include guard (matching bin/fm-tmux-lib.sh).
 
+# --- per-harness constants: one place for harness-specific facts -------------
+# Cursor facts consumed by the composer classifier (here), the herdr scanner,
+# and the tmux submit path. Keep them together so a new harness adapter or a
+# Cursor rendering change updates exactly one definition.
+# Cursor's prompt glyph (bare → is the agent composer, but unscoped it is a
+# common decoration; bounded by fm_composer_cursor_arrow_ok below).
+FM_COMPOSER_CURSOR_PROMPT_GLYPH='→'
+# Cursor's fully de-emphasised idle placeholder: after ghost stripping, only
+# this regex match proves the composer is agent-empty for Cursor.
+FM_COMPOSER_CURSOR_IDLE_RE_DEFAULT='^Add a follow-up$'
+# Cursor and opencode are the only harnesses with verified Enter-while-busy
+# queuing; the submit path converts a proven-pending to empty on busy.
+FM_COMPOSER_CURSOR_QUEUED_SUBMIT=1
+# --- end per-harness constants -----------------------------------------------
+
 # fm_composer_strip_ansi: drop every CSI escape sequence, leaving plain text.
 # Used for STRUCTURAL row/shape detection, where ghost text must be KEPT so the
 # composer box border or bare prompt glyph is still visible; content extraction
@@ -427,7 +442,7 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 fm_composer_export_env() {  # <harness>
   local harness=$1
   if [ -z "${FM_COMPOSER_IDLE_RE:-}" ] && [ "$harness" = cursor ]; then
-    FM_COMPOSER_IDLE_RE='^Add a follow-up$'
+    FM_COMPOSER_IDLE_RE=$FM_COMPOSER_CURSOR_IDLE_RE_DEFAULT
   fi
   FM_COMPOSER_HARNESS=$harness
   export FM_COMPOSER_HARNESS FM_COMPOSER_IDLE_RE
