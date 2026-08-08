@@ -20,7 +20,7 @@
 #
 # Ships with TRACKED harness hook files at the repo root, so this file is
 # checked out into every worktree of this repo: the primary checkout, every
-# secondmate home (treehouse-leased or git-cloned), and any crewmate/scout task
+# secondmate home (proj-provisioned or git-cloned), and any crewmate/scout task
 # worktree spawned to work on firstmate itself (the recursive "firstmate
 # improving itself" case). A secondmate home runs its OWN primary firstmate
 # session, so it must be guarded like the main primary; only child crew/scout
@@ -112,7 +112,7 @@ fi
 
 # --- scope precisely to a PRIMARY checkout ----------------------------------
 # A genuinely-marked secondmate home runs its OWN primary firstmate session, so
-# force-INCLUDE it as a guarded primary whether treehouse leased it as a linked
+# force-INCLUDE it as a guarded primary whether proj provisioned it as a linked
 # worktree (git-dir != git-common-dir) or it is a git-cloned plain checkout. This
 # mirrors the cd-guard's intent that a secondmate's own session is a guarded
 # primary. Only an UNMARKED checkout (or one with an invalid marker) falls

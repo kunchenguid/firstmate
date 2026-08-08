@@ -26,7 +26,7 @@ Read the targeted current state with `bin/fm-crew-state.sh <id>` before deciding
 A no-mistakes run matched to the crew's branch and current code remains authoritative when the endpoint is dead: handle a terminal or parked run through the normal lifecycle, and keep supervising an active run instead of creating a duplicate worker.
 
 When no authoritative run accounts for the task, inspect only its recorded backend and worktree inventory.
-Use `treehouse status` for treehouse-backed tmux, herdr, zellij, or cmux tasks, and use the recorded `orca_worktree_id=` and `terminal=` for Orca tasks.
+For proj-provisioned tmux, herdr, zellij, or cmux tasks, inspect the recorded `worktree=` directly with plain git (`git -C <worktree> status`, `git -C <worktree> log`) or `proj ls <project>` to confirm it still exists - proj has no status subcommand of its own. For Orca tasks, use the recorded `orca_worktree_id=` and `terminal=`.
 Do not sweep another home's endpoints or infer ownership from a matching window label.
 
 Before relaunch, prove that no live agent still owns the recorded task and that the existing worktree remains available.

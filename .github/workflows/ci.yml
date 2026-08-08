@@ -191,20 +191,22 @@ jobs:
           set -eu
           bin/fm-install-herdr.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      - name: Install pinned Treehouse
-        run: |
-          set -eu
-          # Several real-herdr-gated E2E scripts require treehouse for spawn
-          # worktree acquisition (presentation, workspace-per-home, autodetect).
-          bin/fm-install-treehouse.sh "$RUNNER_TEMP/bin"
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      # Several real-herdr-gated E2E scripts also require a worktree provider
+      # (proj) for spawn worktree acquisition (presentation, workspace-per-home,
+      # autodetect). Unlike treehouse, proj is host-level tooling with no
+      # downloadable release to pin/checksum here and needs a real PROJ_ROOT
+      # (an XFS filesystem with reflink support - see docs/architecture.md), so
+      # there is no CI-installable equivalent of the old "Install pinned
+      # Treehouse" step. Those specific scripts self-skip ("skip: proj not
+      # found") rather than hard-failing this required lane; --fail-on-gate-skip
+      # below is scoped to "herdr not found" only, so this is a known,
+      # explicitly gated coverage gap, not a silent one. A future change can
+      # close it once a CI-compatible proj + PROJ_ROOT setup exists.
       - name: Assert Herdr pin and protocol floor
         run: |
           set -eu
           command -v herdr >/dev/null || { echo "::error::herdr not on PATH after install"; exit 1; }
-          command -v treehouse >/dev/null || { echo "::error::treehouse not on PATH after install"; exit 1; }
           herdr --version
-          treehouse --version
           status=$(herdr status --json)
           printf '%s\n' "$status"
           version=$(printf '%s' "$status" | jq -r '.client.version // empty')

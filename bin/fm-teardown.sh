@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tear down a finished task: return the treehouse worktree, release the Orca
+# Tear down a finished task: remove the proj worktree, release the Orca
 # worktree, or retire a secondmate home; kill the recorded runtime endpoint,
 # clear volatile state, refresh/prune the project's clone for PR-based ship
 # tasks, then print a backlog-refresh reminder for ship and scout teardowns
@@ -49,9 +49,9 @@
 # teardown refuses while their home has in-flight crewmate meta files; --force
 # is the approved discard path that prevalidates child removal targets, discards
 # child work, kills child runtime endpoints, and removes the retired home. Removing a
-# leased home releases its durable treehouse lease so the pool slot is freed,
-# never left leased forever. If the treehouse return fails, teardown leaves the
-# leased home and state in place instead of hiding a still-held lease.
+# proj-provisioned home removes its worktree so the disk it reflinked is freed,
+# never left behind forever. If the proj removal fails, teardown leaves the
+# home and state in place instead of hiding a still-present worktree.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -59,19 +59,21 @@
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
-# non-linked worktree, .git/index.lock) that makes `treehouse return --force` fail
-# with Unable to create '...index.lock': File exists. That lock is usually transient
-# (the dying process finishes or exits within seconds) and must never be force-deleted
-# while a live git process might still own it - the fix is patience, not rm.
+# non-linked worktree, .git/index.lock) that makes `proj rm` (itself just
+# `git worktree remove` underneath - see bin/fm-proj-lib.sh) fail with Unable to
+# create '...index.lock': File exists. That lock is usually transient (the dying
+# process finishes or exits within seconds) and must never be force-deleted while
+# a live git process might still own it - the fix is patience, not rm.
 #
-# On that failure signature only, teardown_treehouse_return:
-#   1. Retries up to FM_TREEHOUSE_RETURN_LOCK_RETRIES times (default 3), waiting
-#      FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS (default 1s; falls back to the older
-#      FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS name when the new one is unset) between
-#      attempts. Retries key off the error text, not whether the lock file still
-#      exists after the failed attempt - a lock that self-clears mid-check still
-#      deserves a retry of the return.
-#   2. Other treehouse return failures still abort immediately and loudly (no retry).
+# On that failure signature only, teardown_proj_remove:
+#   1. Retries up to FM_PROJ_RETURN_LOCK_RETRIES times (default 3; falls back to
+#      the older FM_TREEHOUSE_RETURN_LOCK_RETRIES name when the new one is unset),
+#      waiting FM_PROJ_RETURN_LOCK_RETRY_WAIT_SECS (default 1s; falls back to the
+#      older FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS, then FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS,
+#      when the new one is unset) between attempts. Retries key off the error
+#      text, not whether the lock file still exists after the failed attempt - a
+#      lock that self-clears mid-check still deserves a retry of the removal.
+#   2. Other proj rm failures still abort immediately and loudly (no retry).
 #   3. If every retry still hits the lock signature and the lock remains, it is removed
 #      and the return tried once more ONLY when the lock is provably stale per
 #      bin/fm-lock-lib.sh's fm_lock_is_provably_stale, passing the worktree dir as the
@@ -144,6 +146,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-proj-lib.sh
+. "$SCRIPT_DIR/fm-proj-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-lock-lib.sh
@@ -928,23 +932,26 @@ retry_wait_secs_is_valid() {
 
 STALE_WORKTREE_LOCK_AGE_SECS=${FM_STALE_WORKTREE_LOCK_AGE_SECS:-30}
 # Bounded patience window for transient index.lock after killing a crew process.
-# New knobs are preferred; FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS remains an alias
-# for the per-attempt wait so existing tests and operators keep working.
-TREEHOUSE_RETURN_LOCK_RETRIES=${FM_TREEHOUSE_RETURN_LOCK_RETRIES:-3}
-TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=${FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS:-${FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS:-1}}
-if ! retry_wait_secs_is_valid "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"; then
-  echo "teardown: invalid treehouse return lock retry wait '$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS'; using 1s" >&2
-  TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=1
+# New knobs are preferred; the older FM_TREEHOUSE_RETURN_LOCK_* and
+# FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS names remain aliases so existing
+# tests and operators keep working.
+PROJ_RETURN_LOCK_RETRIES=${FM_PROJ_RETURN_LOCK_RETRIES:-${FM_TREEHOUSE_RETURN_LOCK_RETRIES:-3}}
+PROJ_RETURN_LOCK_RETRY_WAIT_SECS=${FM_PROJ_RETURN_LOCK_RETRY_WAIT_SECS:-${FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS:-${FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS:-1}}}
+if ! retry_wait_secs_is_valid "$PROJ_RETURN_LOCK_RETRY_WAIT_SECS"; then
+  echo "teardown: invalid proj removal lock retry wait '$PROJ_RETURN_LOCK_RETRY_WAIT_SECS'; using 1s" >&2
+  PROJ_RETURN_LOCK_RETRY_WAIT_SECS=1
 fi
 # Compatibility alias used by the safety-check wait path and older call sites.
-STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS
-TEARDOWN_TREEHOUSE_LOCK_REFUSED=2
+STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=$PROJ_RETURN_LOCK_RETRY_WAIT_SECS
+TEARDOWN_PROJ_LOCK_REFUSED=2
 TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED=3
 TEARDOWN_PROCEVENT_RESTORE_FAILED=4
 
-# True when treehouse/git stderr shows the transient index.lock "File exists" race.
-# Other return failures must not enter the retry path.
-treehouse_return_is_index_lock_error() {
+# True when proj rm/git stderr shows the transient index.lock "File exists" race
+# (proj rm's own implementation is `git worktree remove` - see bin/fm-proj-lib.sh -
+# so it surfaces git's own error text unchanged). Other failures must not enter
+# the retry path.
+proj_rm_is_index_lock_error() {
   local text=$1
   printf '%s\n' "$text" | grep -Eq "Unable to create ['\"].*index\\.lock['\"]: File exists"
 }
@@ -998,24 +1005,31 @@ cleanup_stale_lock_for_safety_check() {
   fi
 
   echo "teardown: worktree safety check blocked by git lock $lock that is not provably stale (may belong to a live process); leaving it in place" >&2
-  return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
+  return "$TEARDOWN_PROJ_LOCK_REFUSED"
 }
 
-# Return a worktree/home via `treehouse return --force`, tolerating a transient or
+# Remove a worktree/home via `proj rm`, tolerating a transient or
 # stale git index.lock left by a killed crew process. See the script header.
-teardown_treehouse_return() {
-  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
-  local out lock attempt=0 max_retries lock_desc
+teardown_proj_remove() {
+  local dir=$1 label=$2 force=$3 post_cleanup_check=${4:-}
+  local out lock attempt=0 max_retries lock_desc project_name worktree_name
+  # $dir is always a task worktree (a direct sibling of the project's 00-*
+  # template, never the template itself), so its parent's basename is simply
+  # the project name.
+  project_name=$(basename "$(dirname "$dir")")
+  worktree_name=$(basename "$dir")
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
-  if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+  # proj rm itself has no stdout of its own (see bin/fm-proj-lib.sh), so $out is
+  # entirely diagnostic/error text.
+  if out=$(fm_proj_remove_worktree "$project_name" "$worktree_name" "$force" 2>&1); then
     [ -n "$out" ] && printf '%s\n' "$out"
     return 0
   fi
   [ -n "$out" ] && printf '%s\n' "$out" >&2
 
-  if ! treehouse_return_is_index_lock_error "$out"; then
+  if ! proj_rm_is_index_lock_error "$out"; then
     return 1
   fi
 
@@ -1026,23 +1040,23 @@ teardown_treehouse_return() {
     lock_desc="index.lock"
   fi
 
-  max_retries=$TREEHOUSE_RETURN_LOCK_RETRIES
+  max_retries=$PROJ_RETURN_LOCK_RETRIES
   case "$max_retries" in ''|*[!0-9]*) max_retries=3 ;; esac
 
   while [ "$attempt" -lt "$max_retries" ]; do
     attempt=$(( attempt + 1 ))
-    echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
-    sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
+    echo "teardown: $label removal failed with transient git lock ($lock_desc); waiting ${PROJ_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
+    sleep "$PROJ_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+    if out=$(fm_proj_remove_worktree "$project_name" "$worktree_name" "$force" 2>&1); then
       [ -n "$out" ] && printf '%s\n' "$out"
-      echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
+      echo "teardown: $label removal succeeded on retry; lock cleared on its own" >&2
       return 0
     fi
     [ -n "$out" ] && printf '%s\n' "$out" >&2
 
-    if ! treehouse_return_is_index_lock_error "$out"; then
-      echo "teardown: $label return failed with a non-lock error after retry; aborting" >&2
+    if ! proj_rm_is_index_lock_error "$out"; then
+      echo "teardown: $label removal failed with a non-lock error after retry; aborting" >&2
       return 1
     fi
   done
@@ -1054,28 +1068,28 @@ teardown_treehouse_return() {
     lock_desc=$lock
     if fm_lock_is_provably_stale "$lock" "$dir" "$STALE_WORKTREE_LOCK_AGE_SECS"; then
       rm -f "$lock"
-      echo "teardown: removed provably-stale git lock $lock (age >= ${STALE_WORKTREE_LOCK_AGE_SECS}s, no live holder) and retrying $label return" >&2
+      echo "teardown: removed provably-stale git lock $lock (age >= ${STALE_WORKTREE_LOCK_AGE_SECS}s, no live holder) and retrying $label removal" >&2
       if [ -n "$post_cleanup_check" ]; then
         if ! "$post_cleanup_check"; then
-          echo "teardown: $label return aborted after stale-lock cleanup because safety checks failed" >&2
+          echo "teardown: $label removal aborted after stale-lock cleanup because safety checks failed" >&2
           return 1
         fi
       fi
-      if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+      if out=$(fm_proj_remove_worktree "$project_name" "$worktree_name" "$force" 2>&1); then
         [ -n "$out" ] && printf '%s\n' "$out"
-        echo "teardown: $label return succeeded after stale-lock cleanup" >&2
+        echo "teardown: $label removal succeeded after stale-lock cleanup" >&2
         return 0
       fi
       [ -n "$out" ] && printf '%s\n' "$out" >&2
-      echo "teardown: $label return still failing after stale-lock cleanup" >&2
+      echo "teardown: $label removal still failing after stale-lock cleanup" >&2
       return 1
     fi
 
-    echo "teardown: $label return failed: git lock $lock_desc persisted across ${max_retries} retries (waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s each) and is not provably stale (may belong to a live process); leaving it in place" >&2
-    return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
+    echo "teardown: $label removal failed: git lock $lock_desc persisted across ${max_retries} retries (waiting ${PROJ_RETURN_LOCK_RETRY_WAIT_SECS}s each) and is not provably stale (may belong to a live process); leaving it in place" >&2
+    return "$TEARDOWN_PROJ_LOCK_REFUSED"
   fi
 
-  echo "teardown: $label return failed: git index.lock signature persisted across ${max_retries} retries (waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s each) even after the lock file disappeared" >&2
+  echo "teardown: $label removal failed: git index.lock signature persisted across ${max_retries} retries (waiting ${PROJ_RETURN_LOCK_RETRY_WAIT_SECS}s each) even after the lock file disappeared" >&2
   return 1
 }
 
@@ -1486,9 +1500,18 @@ require_orca_worktree_path_match_if_present() {
   require_orca_worktree_path_match "$worktree_id" "$inspected"
 }
 
-firstmate_home_has_treehouse_slot() {
-  local home=$1
-  worktree_registered_for_project "$FM_ROOT" "$home"
+# True when <home> is a linked git worktree (needs proj-rm-style removal)
+# rather than a plain standalone clone (needs a plain rm -rf). A proj-
+# provisioned home is a worktree of its own proj project's .repo, NOT of
+# FM_ROOT (unlike the old treehouse-pooled homes this replaces, which were
+# always worktrees of FM_ROOT directly) - so this checks git-dir vs
+# git-common-dir generically instead of registration against one specific
+# project, the same worktree-ness test the rest of the fleet's guards use.
+firstmate_home_is_linked_worktree() {
+  local home=$1 git_dir common_dir
+  git_dir=$(git -C "$home" rev-parse --git-dir 2>/dev/null) || return 1
+  common_dir=$(git -C "$home" rev-parse --git-common-dir 2>/dev/null) || return 1
+  [ "$git_dir" != "$common_dir" ]
 }
 
 validate_removal_target() {
@@ -1685,14 +1708,14 @@ remove_firstmate_home() {
     restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
     return 1
   fi
-  if firstmate_home_has_treehouse_slot "$abs_home_path"; then
-    command -v treehouse >/dev/null 2>&1 || {
-      echo "error: treehouse command not found; cannot return $label $abs_home_path" >&2
+  if firstmate_home_is_linked_worktree "$abs_home_path"; then
+    command -v proj >/dev/null 2>&1 || {
+      echo "error: proj command not found; cannot remove $label $abs_home_path" >&2
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
-    teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
-      echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
+    teardown_proj_remove "$abs_home_path" "$label" --force || {
+      echo "error: proj rm failed for $label $abs_home_path; worktree may still be present" >&2
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
@@ -2065,12 +2088,12 @@ cleanup_firstmate_home_children() {
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
         "$child_wt/.opencode/plugins/fm-busy-state.js" \
         "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
-      if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
-        if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
+      if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v proj >/dev/null 2>&1; then
+        if teardown_proj_remove "$child_wt" "child worktree" --force; then
           :
         else
           child_return_rc=$?
-          if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
+          if [ "$child_return_rc" -eq "$TEARDOWN_PROJ_LOCK_REFUSED" ]; then
             return "$child_return_rc"
           fi
           safe_rm_rf_child_worktree "$child_wt" "$child_proj"
@@ -2259,19 +2282,25 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
       git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
     fi
   fi
-  # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
+  # Remove our hook file first so it never counts as dirty work in the safety
+  # check, and so it cannot fire a signal after this worktree is gone.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
-  # Kills remaining processes in the worktree (including the agent), resets, returns
-  # to pool. treehouse resolves the pool from the working directory, so run it from
-  # the project. teardown_treehouse_return tolerates transient and stale git locks
+  # Kills remaining processes in the worktree (including the agent), then removes
+  # it via proj rm. teardown_proj_remove tolerates transient and stale git locks
   # left by a killed crew process; see the script header for retry and stale-lock proof.
   post_lock_cleanup_check=
+  proj_rm_force=--force
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
+    # validate_worktree_teardown_safety has already gated this exact case (a
+    # non-forced, non-scout ship worktree), so the tree should already be
+    # clean here; omit --force so git's own worktree-remove dirty-tree
+    # refusal stands as a genuine backstop instead of always overriding it.
+    proj_rm_force=
   fi
-  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
-    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+  teardown_proj_remove "$WT" "worktree" "$proj_rm_force" "$post_lock_cleanup_check" || {
+    echo "error: proj rm failed for worktree $WT; teardown aborted" >&2
     exit 1
   }
 fi

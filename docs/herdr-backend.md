@@ -3,7 +3,7 @@
 Herdr is an experimental agent-native terminal backend with native per-pane agent state and push events.
 Firstmate requires Herdr protocol 14 or newer; broad backend verification covers versions 0.7.1, 0.7.3, 0.7.4, 0.7.5, and 0.8.0, while protocol-16 features remain gated by availability.
 Default-on presentation spaces have a higher floor of Herdr 0.8.0 for the reason given under [Presentation spaces](#presentation-spaces).
-Herdr provides the terminal session while Treehouse continues to provide task worktrees.
+Herdr provides the terminal session while proj continues to provide task worktrees.
 [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns shared backend selection and metadata semantics.
 
 ## Setup
@@ -29,8 +29,9 @@ An auto-detected Herdr spawn prints an opt-out notice.
 Spawn stops before creating a Herdr container or acquiring a task worktree when `herdr`, `jq`, or the protocol floor is unavailable.
 No separate first-run provisioning is required.
 
-The required CI lane uses the pinned installers in `bin/fm-install-herdr.sh` and `bin/fm-install-treehouse.sh`.
-Those script headers own release assets, checksums, download bounds, and post-install gates.
+The required CI lane uses the pinned installer in `bin/fm-install-herdr.sh`.
+Its script header owns release assets, checksums, download bounds, and post-install gates.
+Proj-dependent real-worktree-acquisition scripts in that lane self-skip in CI (no CI-installable proj; see `.github/workflows/ci.yml`).
 Real harness credential tests remain opt-in rather than part of default CI.
 
 ## Watching and task containers
@@ -94,7 +95,7 @@ Only a fresh task with neither metadata nor an existing presentation journal is 
 Firstmate atomically publishes a three-field version 1 journal containing a random 128-bit base64url token before asking Herdr to create anything.
 After the new workspace converges to one exact task endpoint beneath one exact parent workspace id, the journal advances to a version 2 binding that records the physical home, named session, endpoint, parent, and immutable expected labels.
 Another parent with the same presentation label does not prevent publication or participate in restart reclaim.
-The token is visible in the workspace title because Herdr exposes no verified hidden persistent field, but neither token, title, nor journal authorizes send, capture, task ownership, Treehouse return, or general recovery.
+The token is visible in the workspace title because Herdr exposes no verified hidden persistent field, but neither token, title, nor journal authorizes send, capture, task ownership, proj worktree removal, or general recovery.
 
 The owning parent is the launcher's own exact workspace, resolved from the same identity the flat path uses, and falls back to a unique home-label lookup only for a Firstmate outside Herdr.
 Projected children are never collapsed back into that parent; it is the placement and ordering reference the projection is bound under.

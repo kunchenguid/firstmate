@@ -35,6 +35,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-proj-lib.sh
+. "$SCRIPT_DIR/fm-proj-lib.sh"
 # Inert unless FM_TIMING_LOG names a file; only the deferred network stage sets it.
 # shellcheck source=bin/fm-timing-lib.sh
 . "$SCRIPT_DIR/fm-timing-lib.sh"
@@ -68,9 +70,12 @@ fi
 [ $# -le 1 ] || { usage; exit 1; }
 
 project_label() {
+  local proj_root
+  proj_root=$(fm_proj_root)
   case "$PROJ" in
     "$PROJECTS"/*) basename "$PROJ" ;;
     projects/*) basename "$PROJ" ;;
+    "$proj_root/projects"/*/00-*) fm_proj_project_name_for_dir "$PROJ" ;;
     *) printf '%s\n' "$PROJ" ;;
   esac
 }
@@ -292,9 +297,44 @@ report_stuck() {
   echo "$label: STUCK: on $state, $behind commits behind $BASE - needs attention"
 }
 
+# Report-only status for a proj-managed project's 00-* template: a behind-count
+# against its upstream, read entirely from already-known remote-tracking state
+# (proj import's git-maintenance prefetch keeps that reasonably fresh) - no
+# fetch, no checkout, no merge. Never mutates the template; only `proj sync`
+# (captain-run) does that.
+report_proj_managed_status() {
+  local template basename_t upstream behind
+  template=$(fm_proj_template_dir "$label" 2>/dev/null) || {
+    echo "$label: proj-managed: template unavailable"
+    return 0
+  }
+  basename_t=$(basename "$template")
+  upstream=$(git -C "$template" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)
+  if [ -z "$upstream" ]; then
+    echo "$label: proj-managed ($basename_t): no upstream tracking branch - status unavailable"
+    return 0
+  fi
+  behind=$(git -C "$template" rev-list --count "HEAD..$upstream" 2>/dev/null) || behind="?"
+  if [ "$behind" = "0" ]; then
+    echo "$label: proj-managed ($basename_t): up to date with $upstream"
+  else
+    echo "$label: proj-managed ($basename_t): $behind commit(s) behind $upstream - run 'proj sync $label' to update"
+  fi
+}
+
 sync_project() {
   PROJ=$1
   label=$(project_label)
+
+  # A proj-managed project's authoritative code lives under its 00-* template
+  # worktree (bin/fm-proj-lib.sh), not this legacy clone; report_proj_managed_status
+  # reads that template read-only. proj sync is the only thing that ever pulls
+  # a template, and only on explicit captain request - never here, never
+  # automatically (AGENTS.md task lifecycle / captain decisions on proj).
+  if fm_proj_is_managed "$label"; then
+    report_proj_managed_status
+    return 0
+  fi
 
   if [ ! -d "$PROJ" ]; then
     echo "$label: skipped: not a directory"

@@ -6,7 +6,7 @@ Firstmate agents load [`firstmate-orca`](../.agents/skills/firstmate-orca/SKILL.
 
 ## Setup
 
-Pick Orca when you already use the Orca macOS app and want Orca-managed worktrees and terminals instead of Treehouse plus a session multiplexer.
+Pick Orca when you already use the Orca macOS app and want Orca-managed worktrees and terminals instead of proj plus a session multiplexer.
 Orca is macOS-only, explicit-only, and does not support secondmate spawns.
 
 Prerequisites:
@@ -29,7 +29,7 @@ Enter and Ctrl-C are supported; Escape is not.
 ## Task shape and metadata
 
 Each task has one Orca-managed git worktree and one Orca terminal.
-`fm-spawn.sh` does not call Treehouse for Orca tasks.
+`fm-spawn.sh` does not call proj for Orca tasks.
 The normal isolation and unlanded-work refusal rules still apply.
 
 ```text

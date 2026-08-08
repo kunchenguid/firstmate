@@ -3,7 +3,7 @@ name: secondmate-provisioning
 description: >-
   Agent-only reference for persistent secondmate setup and retirement.
   Use when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited local material into, or retiring a secondmate home, or when editing data/secondmates.md.
-  Covers local leases, whole-home remote routes, transactional seeding, record intake for an existing or inherited domain, project clone restrictions, secondmate harness pins, inherited local-material push, idle charter, handoff helper, and teardown safety.
+  Covers local proj-provisioned homes, whole-home remote routes, transactional seeding, record intake for an existing or inherited domain, project clone restrictions, secondmate harness pins, inherited local-material push, idle charter, handoff helper, and teardown safety.
 user-invocable: false
 metadata:
   internal: true
@@ -78,10 +78,11 @@ A bare `<project>` remains a convenience for a project this home already has clo
 [`docs/remote-secondmates.md`](../../../docs/remote-secondmates.md#provision-a-route) owns the rest of the operator contract, and [`bin/fm-project-origin-lib.sh`](../../../bin/fm-project-origin-lib.sh) owns the accepted origin forms.
 Pass `--no-projects` in the project position to seed the project-less home described above; the same mutual-exclusion and fail-loud-on-omission rules apply.
 It may only seed a home with no project clones or project-registry entries, and refuses conversion of populated homes without changing them.
-`-` durably leases a fresh firstmate worktree via `treehouse get --lease` under the secondmate id.
-The lease survives with no live process and is never recycled by later `treehouse get` or `prune`.
-The slot stays reserved across restarts until the lease is released.
-Release happens only on explicit retirement or seed rollback, never on routine restart or recovery.
+`-` acquires a fresh firstmate worktree via `proj new` (bin/fm-proj-lib.sh) against firstmate's own proj project under the secondmate id.
+It survives with no live process; proj never reuses or recycles a worktree it created, so no lease/pool bookkeeping is needed.
+It stays in place across restarts until explicitly removed.
+Removal happens only on explicit retirement or seed rollback, never on routine restart or recovery.
+Firstmate's own repo must already be a proj project (a one-time captain-run `proj import`, never automatic - see [`docs/architecture.md`](../../../docs/architecture.md#worktrees-not-branches-in-your-checkout)); `acquire_proj_home` reports a clear, actionable error otherwise.
 
 `bin/fm-home-seed.sh` copies the charter into the secondmate home as `data/charter.md`.
 It also writes the gitignored `.fm-secondmate-parent` durable binding before the required `.fm-secondmate-home` identity marker; the parser header in [`bin/fm-secondmate-parent-lib.sh`](../../../bin/fm-secondmate-parent-lib.sh) owns the record contract, and both files must remain in place.
@@ -233,13 +234,13 @@ Teardown refuses while its `state/*.meta` contains in-flight work.
 A remote route delegates the same guard to its configured host and additionally refuses while the primary has a pending handoff outbox or unresolved routed reply.
 SSH exit 255 preserves the route and local records because remote completion is unknown.
 When safe, teardown kills the direct endpoint, removes the `data/secondmates.md` route, clears the main home metadata, and removes the retired secondmate home.
-Removing a leased home releases its durable treehouse lease via `treehouse return`, so the pool slot is freed for reuse rather than left leased forever.
-A plain-clone home with no pool slot is simply removed.
-If `treehouse return` fails for a leased home, teardown stops with state intact rather than raw-removing the directory and hiding a held lease.
+Removing a proj-provisioned home removes its worktree via `proj rm`, so the disk it reflinked is freed rather than left behind forever.
+A plain-clone home with no linked worktree is simply removed.
+If `proj rm` fails for a proj-provisioned home, teardown stops with state intact rather than raw-removing the directory and hiding a still-present worktree.
 Before either return or direct removal, teardown asks the target home's process-event runner to retire its registrations and physically owned machine-wide claims through the safe generation-bound path.
 It refuses retirement while that cleanup is uncertain or unavailable, preserving the home and retirement records for a later retry.
 Raw deletion is unsupported because a blocking process-event child can outlive its home.
 
 With `--force`, teardown is the explicit discard path.
-It kills child windows, discards child work and state inside the secondmate home, removes the route, releases the lease, and removes the retired secondmate home.
+It kills child windows, discards child work and state inside the secondmate home, removes the route, removes the worktree, and removes the retired secondmate home.
 Never use `--force` unless the captain explicitly said to discard the work.

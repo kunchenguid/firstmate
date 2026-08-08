@@ -30,7 +30,7 @@ A crewmate or scout task worktree - the shape `bin/fm-spawn.sh` always hands out
 The checkout must also carry `AGENTS.md` and `bin/`, and any failure to confirm the primary is treated as inert, never as a block.
 
 The cd-guard does not inspect `.fm-secondmate-home`.
-It therefore applies in a git-cloned secondmate home where git-dir equals git-common-dir, but remains inert in a treehouse-leased secondmate home that is itself a linked worktree.
+It therefore applies in a git-cloned secondmate home where git-dir equals git-common-dir, but remains inert in a proj-provisioned secondmate home that is itself a linked worktree.
 Secondmate child crew and scout worktrees are likewise inert under the linked-worktree test.
 
 ## Block vs allow

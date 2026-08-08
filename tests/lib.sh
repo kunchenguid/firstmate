@@ -9,7 +9,7 @@
 # reporters, a self-cleaning temp root, fakebin/PATH-shim helpers, deterministic
 # git identity and fixture builders, state/<id>.meta writers, and the common
 # string/exit-code/file assertions. It deliberately does NOT bundle the
-# behavior-specific fake tmux/treehouse/no-mistakes mocks: those encode terminal
+# behavior-specific fake tmux/proj/no-mistakes mocks: those encode terminal
 # and lifecycle assumptions that differ per suite and belong with the tests that
 # own them.
 #

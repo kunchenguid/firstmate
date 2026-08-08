@@ -4,8 +4,8 @@
 # Design: data/cmux-backend-feasibility-c7/report.md (adapter design sketch,
 # section 4) plus the live-app verification pass recorded in
 # docs/cmux-backend.md (real cmux 0.64.17, macOS aarch64, 2026-07-03). cmux is
-# a session provider ONLY, exactly like herdr/zellij: the worktree provider
-# stays treehouse. Sourced only through bin/fm-backend.sh's fm_backend_source
+# a session provider ONLY, exactly like herdr/zellij: the worktree provider is
+# proj (bin/fm-proj-lib.sh). Sourced only through bin/fm-backend.sh's fm_backend_source
 # in normal operation; the unit tests source it directly.
 #
 # Container shape: cmux has no "session" layer to multiplex the way
@@ -23,7 +23,7 @@
 # runtime auto-detection when firstmate itself is already running inside a
 # cmux-spawned terminal (primary CMUX_WORKSPACE_ID marker, with documented
 # macOS fallback signals for wrapper-stripped claude). Unlike Orca, cmux is a
-# pure session provider (treehouse still owns the worktree) and Escape IS
+# pure session provider (proj still owns the worktree) and Escape IS
 # natively supported.
 #
 # Empirical findings from the live verification pass (docs/cmux-backend.md has

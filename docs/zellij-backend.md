@@ -1,7 +1,7 @@
 # Zellij runtime backend
 
 Zellij is an experimental explicit-only session backend.
-It provides the terminal session while Treehouse continues to provide task worktrees.
+It provides the terminal session while proj continues to provide task worktrees.
 [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns shared selection and metadata semantics.
 
 ## Setup
@@ -66,9 +66,8 @@ A pane can still disappear between verification and the operation; downstream su
 
 Every pane operation passes an explicit `--pane-id` because a new session can focus its release-notes plugin pane, whose numeric plugin id is in a separate namespace from terminal pane ids.
 
-`pane_cwd` follows a top-level shell `cd` but not the foreground subshell opened by `treehouse get`.
-Worktree discovery therefore sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines.
-This active probe is scoped to spawn-time worktree discovery and is not advertised as a general live-cwd API.
+`pane_cwd` follows a top-level shell `cd` but not a foreground subshell (verified against treehouse's old `treehouse get`, back when treehouse was the worktree provider).
+`fm_backend_zellij_current_path` works around that by sending begin and end markers around `pwd`, capturing the marked block, and joining wrapped path lines; it is no longer part of spawn's own worktree acquisition (proj prints the created path directly - see `bin/fm-proj-lib.sh`) but remains an independently useful, tested primitive, not advertised as a general live-cwd API.
 
 `new-tab` has no no-focus flag and temporarily focuses the created tab in attached clients.
 The adapter records the previously active tab and immediately restores it with `go-to-tab-by-id`.

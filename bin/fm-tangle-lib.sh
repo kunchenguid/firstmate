@@ -2,20 +2,23 @@
 # Shared worktree-tangle guard for the firstmate-on-itself case.
 # Usage: . bin/fm-tangle-lib.sh
 #
-# Firstmate is a treehouse-pooled git repo of itself: crewmate worktrees and
-# secondmate homes are all linked `git worktree`s of the same repo, while the
-# PRIMARY checkout (the repo root firstmate operates from) is a normal checkout
-# on a real branch - normally the default branch, main. The "worktree tangle"
-# failure mode is a crewmate spawned to work on firstmate ITSELF branching and
-# committing in the primary checkout instead of its own disposable worktree,
-# stranding the primary on a feature branch (e.g. fm/readme-restructure-d3).
+# Firstmate improving itself hands out `git worktree`s: a crewmate/scout task
+# worktree is a proj-provisioned worktree of firstmate's own proj project
+# (bin/fm-proj-lib.sh), a secondmate home is either that same proj-provisioned
+# shape or a plain git clone, while the PRIMARY checkout (the repo root
+# firstmate operates from) is a normal checkout on a real branch - normally the
+# default branch, main. The "worktree tangle" failure mode is a crewmate
+# spawned to work on firstmate ITSELF branching and committing in the primary
+# checkout instead of its own disposable worktree, stranding the primary on a
+# feature branch (e.g. fm/readme-restructure-d3).
 #
 # fm_primary_tangle_branch detects exactly that and nothing else: a NAMED,
-# non-default branch checked out in the given root. It is deliberately silent for
-# every legitimate state - the primary on its default branch, and detached HEAD,
-# which is how every linked worktree and secondmate home legitimately sits on the
-# default branch. Detached HEAD on the default is fine; a feature branch in a
-# primary checkout is the alarm.
+# non-default branch checked out in the given root. It only ever inspects the
+# one path already known to be the primary (FM_ROOT - see the callers), so it
+# is unaffected by what a task worktree's own HEAD looks like (proj worktrees
+# always check out a named branch, never detached). It is deliberately silent
+# for every legitimate state the primary itself can be in - on its default
+# branch, or detached HEAD; a feature branch in a primary checkout is the alarm.
 
 # Resolve the default branch name of the git repo at <dir>: prefer origin/HEAD,
 # then fall back to a local main/master. Echoes the name, or returns 1.

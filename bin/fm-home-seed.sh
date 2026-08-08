@@ -4,10 +4,13 @@
 # Usage:
 #   fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}
 #       Provision <home> as an isolated firstmate home. If <home> is "-", acquire
-#       a fresh firstmate worktree via "treehouse get --lease", which durably
-#       leases the worktree under the secondmate <id> so the home survives with
-#       no live process and is never recycled until the lease is released with
-#       "treehouse return". Projects are cloned
+#       a fresh firstmate worktree via "proj new" against firstmate's own proj
+#       project (see bin/fm-proj-lib.sh's fm_proj_self_project_name; the project
+#       must already exist - "proj import --local <FM_ROOT> --name <name>
+#       --branch <default-branch>" is a one-time captain setup step, never run
+#       automatically). The worktree persists under the secondmate <id> with no
+#       live process and is never recycled until it is removed with "proj rm".
+#       Projects are cloned
 #       from the active home into the secondmate home's projects/ directory.
 #       That project list is non-exclusive provisioning data. Pass --no-projects
 #       instead of a project list to seed a project-less home for a domain whose
@@ -20,8 +23,9 @@
 #       the .fm-secondmate-home identity marker, and data/secondmates.md is updated.
 #       Seeding is transactional: on validation, clone, init, or registry failure,
 #       generated briefs, new homes, new project clones, and registry edits are
-#       rolled back. Treehouse-acquired homes are returned only when the rollback
-#       target is safe; a failed return warns because the lease may still be held.
+#       rolled back. A proj-acquired home is removed only when the rollback
+#       target is safe; a failed removal warns because the worktree may still
+#       be present.
 #       Set FM_SECONDMATE_CHARTER='<charter>' to seed from inline charter text
 #       when no filled charter brief exists. Set FM_SECONDMATE_SCOPE='<scope>'
 #       to override the registry routing scope. Otherwise the registry summary
@@ -41,6 +45,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
+# shellcheck source=bin/fm-proj-lib.sh
+. "$SCRIPT_DIR/fm-proj-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
@@ -387,24 +393,24 @@ seeded_origin_url() {
   normalize_origin_url "$dst" "$url"
 }
 
-acquire_treehouse_home() {
-  local id=$1 home
-  # Durably lease a firstmate worktree from the pool. The lease persists with no
-  # live process and is skipped by later get/prune, so the home survives restarts
-  # until teardown or rollback returns it. treehouse prints only the worktree path
-  # to stdout (banners go to stderr), so command substitution captures the path.
-  home=$(cd "$FM_ROOT" && treehouse get --lease --lease-holder "$id") || {
-    echo "error: treehouse get --lease failed to lease a firstmate home" >&2
+acquire_proj_home() {
+  local id=$1 project_name home
+  # A fresh worktree of firstmate's own proj project, created via proj new
+  # (bin/fm-proj-lib.sh). It persists with no live process until teardown or
+  # rollback removes it - no lease/pool bookkeeping is needed since proj never
+  # reuses or recycles a worktree it created.
+  project_name=$(fm_proj_self_project_name "$FM_ROOT")
+  home=$(fm_proj_new_worktree "$project_name" "$id") || {
+    echo "error: proj new failed to create a firstmate home for $id against project '$project_name'" >&2
     return 1
   }
-  [ -n "$home" ] || { echo "error: treehouse get --lease did not report a firstmate home" >&2; return 1; }
   printf '%s\n' "$home"
 }
 
 ensure_home() {
   local id=$1 requested=$2 home
   if [ "$requested" = "-" ]; then
-    home=$(acquire_treehouse_home "$id")
+    home=$(acquire_proj_home "$id")
     verify_firstmate_home "$home"
     return
   fi
@@ -458,7 +464,7 @@ EOF
 
 clone_project() {
   local project=$1 home=$2 src dst url dst_url mode
-  src="$PROJECTS/$project"
+  src=$(fm_proj_resolve_project_source "$project" "$PROJECTS/$project")
   dst=$(validate_project_destination "$home" "$project") || return 1
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
@@ -486,7 +492,7 @@ EOF
 
 validate_seed_project() {
   local project=$1 src mode url
-  src="$PROJECTS/$project"
+  src=$(fm_proj_resolve_project_source "$project" "$PROJECTS/$project")
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
   read -r mode _ <<EOF
@@ -575,15 +581,17 @@ seed_rollback_target() {
   printf '%s\n' "$abs_target"
 }
 
-seed_return_treehouse_home() {
-  local home=$1 abs_home
-  abs_home=$(seed_rollback_target "$home" "treehouse-acquired home") || return 0
-  if ! command -v treehouse >/dev/null 2>&1; then
-    echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; treehouse command not found" >&2
+seed_remove_proj_home() {
+  local home=$1 abs_home project_name worktree_name
+  abs_home=$(seed_rollback_target "$home" "proj-acquired home") || return 0
+  if ! command -v proj >/dev/null 2>&1; then
+    echo "warning: failed to remove proj-acquired home $abs_home during seed rollback; proj command not found" >&2
     return 0
   fi
-  ( cd "$FM_ROOT" && treehouse return --force "$abs_home" >/dev/null ) || {
-    echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
+  project_name=$(basename "$(dirname "$abs_home")")
+  worktree_name=$(basename "$abs_home")
+  fm_proj_remove_worktree "$project_name" "$worktree_name" --force >/dev/null 2>&1 || {
+    echo "warning: failed to remove proj-acquired home $abs_home during seed rollback; worktree may still be present" >&2
     return 0
   }
 }
@@ -637,7 +645,7 @@ seed_rollback() {
 
   if [ -n "${SEED_HOME:-}" ] && [ "$SEED_HOME" != "/" ]; then
     if [ "$SEED_HOME_ACQUIRED" = 1 ]; then
-      seed_return_treehouse_home "$SEED_HOME"
+      seed_remove_proj_home "$SEED_HOME"
     elif [ "$SEED_HOME_CREATED" = 1 ]; then
       seed_remove_created_home "$SEED_HOME"
     else
@@ -858,7 +866,7 @@ seed_home() {
 
   if [ "$requested_home" = "-" ]; then
     SEED_HOME_ACQUIRED=1
-    home=$(acquire_treehouse_home "$id")
+    home=$(acquire_proj_home "$id")
     SEED_HOME="$home"
     home=$(verify_firstmate_home "$home")
   else

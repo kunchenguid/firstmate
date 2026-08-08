@@ -133,17 +133,17 @@ test_helper_normal_is_noop() {
 
 # --- fm-spawn ---------------------------------------------------------------
 
-# A fake tmux/treehouse so fm-spawn resolves the crew worktree from a controlled
-# pane path and completes without a live terminal (mirrors tests/fm-tangle-guard).
+# A fake tmux/proj so fm-spawn resolves the crew worktree from a controlled
+# path and completes without a live terminal (mirrors tests/fm-tangle-guard).
+# The fake proj's `new` just prints FM_FAKE_PROJ_NEW_PATH (a real worktree the
+# test pre-creates with plain git) rather than reflink-copying anything -
+# fm-spawn.sh only cares that stdout is a real, isolated git worktree.
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
-case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
@@ -152,20 +152,31 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/proj" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  new) printf '%s\n' "${FM_FAKE_PROJ_NEW_PATH:-}"; exit 0 ;;
+  rm) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/proj"
   printf '%s\n' "$fakebin"
 }
 
-# run_spawn <cwd> <home> <id> <proj> <pane> <fakebin> [ASSIGN...] -> combined output
+# run_spawn <cwd> <home> <id> <proj-root> <worktree> <fakebin> [ASSIGN...] -> combined output
+# <proj-root> must already contain a 00-* template (fm_proj_template_dir_at's
+# own pre-check, which runs before the fake proj binary is ever invoked).
 run_spawn() {
-  local cwd=$1 home=$2 id=$3 proj=$4 pane=$5 fakebin=$6; shift 6
+  local cwd=$1 home=$2 id=$3 proj=$4 wt=$5 fakebin=$6; shift 6
   mkdir -p "$home/data/$id"
   printf 'brief\n' > "$home/data/$id/brief.md"
   ( cd "$cwd" && env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
       "FM_ROOT_OVERRIDE=" "FM_HOME=$home" \
       "FM_STATE_OVERRIDE=$home/state" "FM_DATA_OVERRIDE=$home/data" \
       "FM_PROJECTS_OVERRIDE=$home/projects" "FM_CONFIG_OVERRIDE=$home/config" \
-      "FM_SPAWN_NO_GUARD=1" "FM_FAKE_PANE_PATH=$pane" "TMUX=fake,1,0" \
+      "FM_SPAWN_NO_GUARD=1" "FM_FAKE_PROJ_NEW_PATH=$wt" "TMUX=fake,1,0" \
       "PATH=$fakebin:$PATH" "$@" \
       "$SPAWN" "$id" "$proj" codex --mode no-mistakes --yolo off ) 2>&1
 }
@@ -174,6 +185,9 @@ test_spawn_refuses_and_admits() {
   local home proj fakebin wt out rc
   home="$TMP/spawn-home"; mkdir -p "$home/data"
   proj=$(make_normal_repo "$TMP/spawn-proj")
+  # fm_proj_template_dir_at (bin/fm-proj-lib.sh) requires a real 00-* template
+  # under the project dir before ever invoking the fake proj binary below.
+  git -C "$proj" worktree add -q --detach "$proj/00-main" main >/dev/null 2>&1
   fakebin=$(make_spawn_fakebin "$TMP/spawn-fake")
   wt="$TMP/spawn-wt"
   git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
@@ -285,7 +299,7 @@ make_teardown_case() {
   local name=$1 case_dir fakebin t
   case_dir="$TMP/$name"; fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
-  for t in treehouse tmux; do
+  for t in proj tmux; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/$t"
     chmod +x "$fakebin/$t"
   done
