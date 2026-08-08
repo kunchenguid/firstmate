@@ -158,6 +158,21 @@ fm_proj_new_worktree() {
   fm_proj_new_worktree_in "$(fm_proj_project_dir "$1")" "$2"
 }
 
+# fm_proj_detach_worktree <dir>: detach <dir> from whatever branch `proj new`
+# just checked it out on and delete that now-unreferenced branch, landing the
+# worktree at the same commit with no branch checked out. `proj new` always
+# checks out a real named branch, never a detached HEAD (bin/proj-new), but a
+# firstmate secondmate home needs the detached-HEAD shape bin/fm-ff-lib.sh's
+# self-update fast-forward assumes (see that file's header); a no-op if the
+# worktree is already detached. Only for a worktree that will serve as a
+# firstmate home, never a task worktree meant to carry real branch work.
+fm_proj_detach_worktree() {
+  local dir=$1 branch
+  branch=$(git -C "$dir" symbolic-ref --short HEAD 2>/dev/null) || return 0
+  git -C "$dir" checkout --detach HEAD >/dev/null 2>&1 || return 1
+  git -C "$dir" branch -D "$branch" >/dev/null 2>&1 || true
+}
+
 # fm_proj_remove_worktree <project-name> <worktree-name> [--force]: remove a
 # task worktree or secondmate home via `proj rm`. Location-independent (proj
 # rm's "<project>/<name>" form resolves without depending on cwd), so callers

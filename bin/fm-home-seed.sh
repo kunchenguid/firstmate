@@ -404,6 +404,10 @@ acquire_proj_home() {
     echo "error: proj new failed to create a firstmate home for $id against project '$project_name'" >&2
     return 1
   }
+  fm_proj_detach_worktree "$home" || {
+    echo "error: failed to detach $id's proj-provisioned home from its proj-created branch" >&2
+    return 1
+  }
   printf '%s\n' "$home"
 }
 
