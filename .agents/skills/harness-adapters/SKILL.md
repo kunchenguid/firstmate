@@ -204,7 +204,7 @@ Claude Code's primary watcher protocol is Stop-owned: the auto-arm hook fires on
 | Fact | Value |
 |---|---|
 | Busy state | Unknown until a semantic source is live-verified: the app-server turn lifecycle is unreachable for a pane worker, and project lifecycle hooks did not fire for a firstmate-launched worker. |
-| Exit command | `/quit` (slash popup needs about 1 second between text and Enter; `fm-send` handles it) |
+| Exit command | `/quit` (slash popup needs about 1 second between text and Enter; the shared submit path used by `fm-control` handles it) |
 | Interrupt | single Escape |
 | Skill invocation | `$<skill>` (e.g. `$no-mistakes`); `/<skill>` is claude-only and codex rejects it as "Unrecognized command" |
 
@@ -236,7 +236,7 @@ The checkpoint is deliberately foreground and bounded so Codex regains control r
 |---|---|
 | Busy state | The Firstmate-owned plugin's semantic `session.status`: `busy` and `retry` are active, `idle` is inactive, latched to the worker's own session. |
 | Exit command | `/exit` |
-| Interrupt | double Escape; known flaky while a long shell command runs, so a wedged pane may need `/exit` and relaunch |
+| Interrupt | double Escape; known flaky while a long shell command runs, so use `bin/fm-control.sh <task-id> relaunch` for a wedged pane |
 
 No trust dialog.
 Opencode can auto-upgrade itself in the background and the running TUI can exit mid-task, observed live from 1.15.7 to 1.17.3.
@@ -409,7 +409,7 @@ Muse Code is a CREWMATE and SCOUT adapter only.
 | Models | `--model <model>`; the only provider is `meta`. |
 | Busy state | Its own durable session event log, folded on demand by `bin/fm-busy-lib.sh`. There is no hook or plugin writer, so nothing is armed and no busy record is ever seeded. |
 | Exit command | `/exit` (the popup shows `/exit  Quit when idle`); one Enter submits it, and the pane prints `To continue this session, run muse resume <session-uuid>`. |
-| Interrupt | Single Escape. It closes the run with `terminal: cancelled` AND restores the interrupted prompt into the composer as real bright text, so `fm-send.sh` follows Escape with `C-u` to clear it. |
+| Interrupt | Single Escape, which closes the run with `terminal: cancelled` AND restores the interrupted prompt into the composer as real bright text, so `fm-control` follows Escape with `C-u` to clear it; `fm-send`'s legacy key path reads the same composer-clear table. |
 | Skill invocation | `/<skill>`, the claude/grok form. |
 | Autonomy | `--yolo`, which disables approval, disables the sandbox, and trusts the workspace for the run. |
 | Trust dialog | `Do you trust this workspace?` with `1 Trust and continue` preselected, accepted by Enter. `--yolo` suppresses it entirely, which is what firstmate relies on because every task gets a fresh worktree path. |

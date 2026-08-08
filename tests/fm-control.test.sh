@@ -572,11 +572,13 @@ test_verb_allowlist_is_closed() {
   assert_contains "$out" "interrupt" "the refusal should list the allowed verbs"
   out=$(run_control "$dir" t1 --key); rc=$?
   expect_code 2 "$rc" "a raw key is not a control verb"
+  out=$(run_control "$dir" t1 clear); rc=$?
+  expect_code 2 "$rc" "clear is not a control verb"
   out=$(run_control "$dir" t1 "please stop what you are doing"); rc=$?
   expect_code 2 "$rc" "arbitrary text is not a control verb"
   [ -z "$(literals "$dir")" ] || fail "a refused verb must send nothing"
   [ -z "$(keys_sent "$dir")" ] || fail "a refused verb must send no keys"
-  pass "fm-control: the verb list is closed - no raw keys, no arbitrary text"
+  pass "fm-control: the verb list is closed - no raw keys, arbitrary text, or clear verb"
 }
 
 test_resume_is_refused_with_its_reason() {
