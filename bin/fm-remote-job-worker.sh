@@ -54,6 +54,7 @@ WORKER_RELEASE_OWNERSHIP=1
 WORKER_SUPERVISED_PID=
 WORKER_PREEMPTIBLE=0
 WORKER_PREEMPTED=0
+WORKER_ACTIVE_GROUP_PID=
 
 worker_error() { printf 'remote-job-worker: %s\n' "$1" >&2; }
 
@@ -274,7 +275,12 @@ worker_stop_recorded_execution() { # <job-dir>
 }
 
 worker_stop_active_execution() {
-  local job=${WORKER_ACTIVE_JOB:-} owner owner_pid state
+  local job=${WORKER_ACTIVE_JOB:-} active_group_pid=${WORKER_ACTIVE_GROUP_PID:-} owner owner_pid state
+  if [ -n "$active_group_pid" ]; then
+    worker_signal_process_or_group group TERM "$active_group_pid"
+    worker_signal_process_or_group group KILL "$active_group_pid"
+    wait "$active_group_pid" 2>/dev/null || true
+  fi
   if [ -n "$job" ]; then
     worker_stop_recorded_execution "$job" || return 1
   else
@@ -288,6 +294,7 @@ worker_stop_active_execution() {
       worker_stop_recorded_execution "$job" || return 1
     done
   fi
+  WORKER_ACTIVE_GROUP_PID=
   WORKER_ACTIVE_JOB=
 }
 
@@ -298,6 +305,11 @@ worker_shutdown() {
     # Staying alive here would make TERM a no-op and leave the serving child
     # immortal while its restart supervisor keeps the tree at ppid 1.
     if [ ! -d "$WORKER_LOCK" ]; then
+      worker_stop_active_execution || {
+        worker_error "could not stop the active command tree"
+        WORKER_RELEASE_OWNERSHIP=0
+        exit 125
+      }
       WORKER_RELEASE_OWNERSHIP=0
       exit 0
     fi
@@ -419,10 +431,12 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
     exec "$@"
   ) &
   group_pid=$!
+  WORKER_ACTIVE_GROUP_PID=$group_pid
   set +m
   tmp=$(umask 077; mktemp "$job/.claim/.group.XXXXXX") || {
     worker_signal_process_or_group group KILL "$group_pid"
     wait "$group_pid" 2>/dev/null || true
+    WORKER_ACTIVE_GROUP_PID=
     WORKER_ACTIVE_JOB=
     return 125
   }
@@ -430,6 +444,7 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
     rm -f -- "$tmp"
     worker_signal_process_or_group group KILL "$group_pid"
     wait "$group_pid" 2>/dev/null || true
+    WORKER_ACTIVE_GROUP_PID=
     WORKER_ACTIVE_JOB=
     return 125
   }
@@ -437,6 +452,7 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
     rm -f -- "$tmp"
     worker_signal_process_or_group group KILL "$group_pid"
     wait "$group_pid" 2>/dev/null || true
+    WORKER_ACTIVE_GROUP_PID=
     WORKER_ACTIVE_JOB=
     return 125
   fi
@@ -444,6 +460,7 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
     worker_signal_process_or_group group KILL "$group_pid"
     wait "$group_pid" 2>/dev/null || true
     rm -f -- "$group_file"
+    WORKER_ACTIVE_GROUP_PID=
     WORKER_ACTIVE_JOB=
     return 125
   }
@@ -452,6 +469,7 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
     worker_signal_process_or_group group KILL "$group_pid"
     wait "$group_pid" 2>/dev/null || true
     rm -f -- "$group_file"
+    WORKER_ACTIVE_GROUP_PID=
     WORKER_ACTIVE_JOB=
     return 125
   fi
@@ -489,6 +507,7 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
   wait "$group_pid" 2>/dev/null
   rc=$?
   rm -f -- "$group_file" "$armed_file"
+  WORKER_ACTIVE_GROUP_PID=
   WORKER_ACTIVE_JOB=
   [ "$timed_out" -eq 0 ] || return 124
   [ "$heartbeat_failed" -eq 0 ] || return 125
