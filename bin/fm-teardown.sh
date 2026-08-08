@@ -1163,6 +1163,9 @@ validate_worktree_return_cleanliness() {
   local status line path quoted untracked_blockers='' tracked_blockers=''
   [ -d "$WT" ] || return 0
   if ! status=$(git -C "$WT" status --porcelain=v1 --untracked-files=all 2>/dev/null); then
+    if worktree_safety_blocked_by_lock "content that would survive or be discarded by return"; then
+      return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
+    fi
     echo "REFUSED: cannot inspect worktree $WT for content that would survive or be discarded by return." >&2
     return 1
   fi
@@ -1196,9 +1199,29 @@ EOF
   return 1
 }
 
-validate_worktree_return_safety_before_return() {
-  validate_worktree_return_cleanliness || return 1
+validate_worktree_return_cleanliness_with_lock_recovery() {
+  local rc
+  validate_worktree_return_cleanliness
+  rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  [ "$rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ] || return "$rc"
+  cleanup_stale_lock_for_safety_check "$WT" || return $?
+  validate_worktree_return_cleanliness
+}
+
+validate_worktree_teardown_safety_with_lock_recovery() {
+  local rc
   validate_worktree_teardown_safety
+  rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  [ "$rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ] || return "$rc"
+  cleanup_stale_lock_for_safety_check "$WT" || return $?
+  validate_worktree_teardown_safety
+}
+
+validate_worktree_return_safety_before_return() {
+  validate_worktree_return_cleanliness_with_lock_recovery || return $?
+  validate_worktree_teardown_safety_with_lock_recovery
 }
 
 # Fix 1 (see script header): does the active-or-most-recent no-mistakes run in
@@ -2244,21 +2267,11 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
 fi
 
 if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
-  validate_worktree_return_cleanliness || exit 1
+  validate_worktree_return_cleanliness_with_lock_recovery || exit 1
 fi
 
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
-  if validate_worktree_teardown_safety; then
-    :
-  else
-    safety_rc=$?
-    if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
-      cleanup_stale_lock_for_safety_check "$WT" || exit 1
-      validate_worktree_teardown_safety || exit 1
-    else
-      exit 1
-    fi
-  fi
+  validate_worktree_teardown_safety_with_lock_recovery || exit 1
 fi
 
 # Every landed/discard-work and return-cleanliness refusal above has now passed.

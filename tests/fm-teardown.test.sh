@@ -1068,6 +1068,7 @@ test_stale_index_lock_cleared_and_teardown_succeeds() {
 
   add_lock_aware_treehouse "$case_dir"
   add_lsof_no_holder "$case_dir"
+  add_git_status_lock_failure "$case_dir"
 
   lock=$(git_index_lock_path "$case_dir/wt")
   mkdir -p "$(dirname "$lock")"
@@ -2490,7 +2491,7 @@ test_process_spawned_during_grace_is_reaped_on_later_pass() {
 }
 
 test_process_exit_after_term_preserves_new_unknown_worktree_content() {
-  local case_dir rc pid unknown_path
+  local case_dir rc unknown_path
   case_dir=$(make_case post-reap-unknown-content)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
@@ -2503,24 +2504,19 @@ exit 0
 EOF
   chmod +x "$case_dir/fakebin/treehouse"
 
-  ( cd "$case_dir/wt" && exec perl -e '
-      my $path = shift;
-      $SIG{TERM} = sub {
-        open my $fh, ">", $path or die "open";
-        print {$fh} "preserve me\\n";
-        close $fh;
-        exit 0;
-      };
-      sleep 300;
-    ' "$unknown_path" ) &
-  pid=$!
-  disown
-  sleep 0.2
+  cat > "$case_dir/fakebin/lsof" <<EOF
+#!/usr/bin/env bash
+marker="$case_dir/lsof-ran"
+if [ ! -f "\$marker" ]; then
+  printf 'preserve me\n' > "$unknown_path"
+  : > "\$marker"
+fi
+EOF
+  chmod +x "$case_dir/fakebin/lsof"
 
   rc=0
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
-  kill -0 "$pid" 2>/dev/null && { kill -KILL "$pid" 2>/dev/null || true; }
   expect_code 1 "$rc" "post-reap-unknown-content: teardown should refuse new unknown content"
   assert_present "$case_dir/wt" "post-reap-unknown-content: teardown returned the worktree"
   assert_present "$unknown_path" "post-reap-unknown-content: teardown discarded the process-created path"
