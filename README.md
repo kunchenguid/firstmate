@@ -73,6 +73,7 @@ All three have verified turn-end guard paths when launched with their documented
 Pick whichever one matches your subscription and workflow.
 
 Codex and OpenCode are also verified and supported as primary harnesses; Codex uses bounded foreground checkpoints, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
+Start a Codex primary with its `hooks` feature already enabled (`codex --enable hooks`, or `features.hooks` in your Codex config) and accept both the directory-trust prompt and the separate hook-review prompt, or the tracked session-start and turn-end hooks never load; enabling the feature in an already-running Codex does not activate them, and [docs/turnend-guard.md](docs/turnend-guard.md) routes to the details.
 
 ### Install and launch
 
