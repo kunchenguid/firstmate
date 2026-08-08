@@ -25,7 +25,13 @@
 # the documented macOS fallback signals when cmux's claude wrapper strips that
 # marker) with no explicit backend setting - unlike Orca, which stays
 # never-auto-detected because it also owns the task worktree; see
-# docs/cmux-backend.md for its empirical basis.
+# docs/cmux-backend.md for its empirical basis. P6 adds bin/backends/ryder.sh,
+# also EXPERIMENTAL and spawn-capable, behind `--backend ryder`/
+# `FM_BACKEND=ryder`/`config/backend`, and behind runtime auto-detection when
+# firstmate itself is running inside a Ryder session (RYDER_SESSION_ID); it is
+# the first backend whose provider is a per-session PTY host rather than a
+# multiplexer, so it has no container layer at all - see docs/ryder-backend.md
+# for its empirical basis.
 # Codex App is intentionally not in the known set yet.
 # docs/codex-app-backend.md owns that blocked backend contract.
 #
@@ -33,8 +39,8 @@
 # treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh does not write
 # `backend=tmux` for a default-backend task, so existing and newly spawned
 # default-path metas stay byte-identical. Only a task spawned on a non-tmux
-# spawn-capable backend, currently experimental herdr, zellij, orca, or cmux,
-# carries an explicit `backend=` line.
+# spawn-capable backend, currently experimental herdr, zellij, orca, cmux, or
+# ryder, carries an explicit `backend=` line.
 #
 # Event-source framing (herdr-addendum "Events as the core abstraction"): a
 # backend's supervision surface is conceptually an EVENT SOURCE - it produces
@@ -65,9 +71,15 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # spawn-capable; unlike tmux/herdr/zellij it is also the worktree provider.
 # cmux is EXPERIMENTAL and spawn-capable, session-provider-only like
 # herdr/zellij - verified against the real 0.64.17 binary (docs/cmux-backend.md).
+# ryder is EXPERIMENTAL and spawn-capable, session-provider-only like
+# herdr/zellij/cmux - verified against a real protocol-v1 `ryder` binary
+# (docs/ryder-backend.md). It is PULL-ONLY: the session host sees every pty
+# byte and could push transitions natively, but that is a deliberate second
+# pass, so fm_backend_has_push stays false and the watcher's poll loop remains
+# the backstop exactly as designed.
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
-FM_BACKEND_KNOWN="tmux herdr zellij orca cmux"
-FM_BACKEND_SPAWN="tmux herdr zellij orca cmux"
+FM_BACKEND_KNOWN="tmux herdr zellij orca cmux ryder"
+FM_BACKEND_SPAWN="tmux herdr zellij orca cmux ryder"
 
 # fm_backend_list_contains: whitespace-delimited membership without relying on
 # shell word splitting. fm-backend.sh is normally sourced by bash scripts, but
@@ -95,7 +107,17 @@ fm_backend_is_known() {  # <name>
 # tmux started inside a herdr pane, so $TMUX is checked first and wins over
 # HERDR_ENV=1 in that nested case. herdr injects HERDR_ENV=1 (plus
 # HERDR_SOCKET_PATH/HERDR_PANE_ID) into every process it manages a pane for;
-# HERDR_ENV=1 alone (no $TMUX) selects herdr. cmux injects CMUX_WORKSPACE_ID
+# HERDR_ENV=1 alone (no $TMUX) selects herdr. Ryder's session host injects
+# RYDER_SESSION_ID (plus RYDER_SOCK) into the agent it spawns, and it STRIPS an
+# inherited $TMUX/$TMUX_PANE first - verified from the shipped source - so a
+# $TMUX seen inside a Ryder session is always a real tmux started in it and the
+# $TMUX check correctly wins. RYDER_SESSION_ID is checked after HERDR_ENV
+# rather than before it because neither host strips the other's marker, so a
+# Ryder session created from a herdr pane and a herdr pane started inside a
+# Ryder session are indistinguishable from the environment alone; keeping
+# herdr's existing verdict is the choice that changes no already-working home's
+# detection, and a home in the other arrangement pins config/backend. cmux
+# injects CMUX_WORKSPACE_ID
 # (plus CMUX_SURFACE_ID/CMUX_SOCKET_PATH and the legacy CMUX_TAB_ID/
 # CMUX_PANEL_ID aliases) into every terminal surface it spawns - verified from
 # the shipped source (`TerminalSurface+StartupEnvironment.swift`'s
@@ -133,8 +155,8 @@ fm_backend_is_known() {  # <name>
 #      tmux, where the tmux server reparents to launchd and the chain never
 #      reaches cmux - which is fine, because $TMUX already won there.
 # Callers needing the winning signal read FM_BACKEND_DETECT_SIGNAL (set to
-# TMUX, HERDR_ENV, CMUX_WORKSPACE_ID, bundle-id, or ancestry) and
-# FM_BACKEND_DETECTED after a direct (non-command-substitution) call.
+# TMUX, HERDR_ENV, RYDER_SESSION_ID, CMUX_WORKSPACE_ID, bundle-id, or ancestry)
+# and FM_BACKEND_DETECTED after a direct (non-command-substitution) call.
 FM_BACKEND_CMUX_BUNDLE_ID="com.cmuxterm.app"
 
 fm_backend_detect() {
@@ -150,6 +172,12 @@ fm_backend_detect() {
     FM_BACKEND_DETECTED=herdr
     FM_BACKEND_DETECT_SIGNAL=HERDR_ENV
     printf 'herdr'
+    return 0
+  fi
+  if [ -n "${RYDER_SESSION_ID:-}" ]; then
+    FM_BACKEND_DETECTED=ryder
+    FM_BACKEND_DETECT_SIGNAL=RYDER_SESSION_ID
+    printf 'ryder'
     return 0
   fi
   if [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
@@ -262,6 +290,9 @@ fm_backend_name() {
     if [ "$detected" = herdr ]; then
       echo "NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the EXPERIMENTAL herdr backend. Set config/backend or pass --backend tmux to opt out." >&2
     fi
+    if [ "$detected" = ryder ]; then
+      echo "NOTICE: auto-detected ryder runtime (RYDER_SESSION_ID) - spawning into the EXPERIMENTAL ryder backend. Set config/backend or pass --backend tmux to opt out." >&2
+    fi
     if [ "$detected" = cmux ]; then
       case "$FM_BACKEND_DETECT_SIGNAL" in
         bundle-id) marker="FALLBACK signal __CFBundleIdentifier=$FM_BACKEND_CMUX_BUNDLE_ID; CMUX_WORKSPACE_ID absent, stripped by cmux's bundled claude wrapper" ;;
@@ -300,12 +331,12 @@ fm_backend_validate_spawn() {  # <name>
 # single owner of the per-backend dependency delta, so bootstrap follows the
 # RESOLVED backend instead of demanding an inactive backend's tools. Each set is:
 #   - the session-provider CLI itself (tmux/herdr/zellij/orca/cmux);
-#   - jq, for the JSON-emitting experimental adapters (herdr, zellij, cmux) whose
-#     spawn/liveness paths parse the backend's JSON output (see each adapter's
-#     tool check, e.g. fm_backend_herdr_tool_check);
+#   - jq, for the JSON-emitting experimental adapters (herdr, zellij, cmux,
+#     ryder) whose spawn/liveness paths parse the backend's JSON output (see
+#     each adapter's tool check, e.g. fm_backend_herdr_tool_check);
 #   - the treehouse worktree provider for every session-provider-only backend
-#     (tmux, herdr, zellij, cmux); orca owns its own task worktree and terminal,
-#     so it drops both treehouse and any other backend's session CLI.
+#     (tmux, herdr, zellij, cmux, ryder); orca owns its own task worktree and
+#     terminal, so it drops both treehouse and any other backend's session CLI.
 # Prints a single space-separated line and returns 0 for a known backend; returns
 # 1 and prints nothing for an unknown backend.
 fm_backend_required_tools() {  # <backend>
@@ -314,6 +345,7 @@ fm_backend_required_tools() {  # <backend>
     herdr)  printf '%s' 'herdr jq treehouse' ;;
     zellij) printf '%s' 'zellij jq treehouse' ;;
     cmux)   printf '%s' 'cmux jq treehouse' ;;
+    ryder)  printf '%s' 'ryder jq treehouse' ;;
     orca)   printf '%s' 'orca' ;;
     *) return 1 ;;
   esac
@@ -509,6 +541,21 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       fi
       window=$terminal
       ;;
+    ryder)
+      # A Ryder target is ONE session id, not a composite, so there are no
+      # component fields to cross-check the way herdr/zellij/cmux cross-check
+      # theirs - the exact task binding plus the host's own id alphabet is the
+      # complete identity check, and a redundant second copy of the same id
+      # would add no safety. docs/ryder-backend.md "Task metadata" owns this.
+      [ "$binding" = "$id" ] || {
+        echo "REFUSED: ryder endpoint metadata for task $id lacks an exact task binding; preserving task state." >&2
+        return 1
+      }
+      if ! fm_backend_endpoint_atom_valid "$window"; then
+        echo "REFUSED: ryder endpoint metadata for task $id is malformed; preserving task state." >&2
+        return 1
+      fi
+      ;;
     cmux)
       [ "$binding" = "$id" ] || {
         echo "REFUSED: legacy cmux endpoint metadata for task $id lacks an exact task binding; preserving task state." >&2
@@ -631,6 +678,13 @@ fm_backend_source() {  # <name>
         _FM_BACKEND_CMUX_SOURCED=1
       fi
       ;;
+    ryder)
+      if [ -z "${_FM_BACKEND_RYDER_SOURCED:-}" ]; then
+        # shellcheck source=/dev/null
+        . "$FM_BACKEND_LIB_DIR/backends/ryder.sh" || return 1
+        _FM_BACKEND_RYDER_SOURCED=1
+      fi
+      ;;
   esac
 }
 
@@ -702,6 +756,7 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
     zellij) fm_backend_zellij_capture "$@" ;;
     orca) fm_backend_orca_capture "$@" ;;
     cmux) fm_backend_cmux_capture "$@" ;;
+    ryder) fm_backend_ryder_capture "$@" ;;
     *) echo "error: no capture implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -717,6 +772,7 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
     zellij) fm_backend_zellij_send_key "$@" ;;
     orca) fm_backend_orca_send_key "$@" ;;
     cmux) fm_backend_cmux_send_key "$@" ;;
+    ryder) fm_backend_ryder_send_key "$@" ;;
     *) echo "error: no send-key implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -734,6 +790,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
     zellij) fm_backend_zellij_send_text_submit "$@" ;;
     orca) fm_backend_orca_send_text_submit "$@" ;;
     cmux) fm_backend_cmux_send_text_submit "$@" ;;
+    ryder) fm_backend_ryder_send_text_submit "$@" ;;
     *) echo "error: no send-text implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -752,6 +809,7 @@ fm_backend_kill() {  # <backend> <target>
     zellij) fm_backend_zellij_kill "$@" ;;
     orca) fm_backend_orca_kill "$@" ;;
     cmux) fm_backend_cmux_kill "$@" ;;
+    ryder) fm_backend_ryder_kill "$@" ;;
     *) echo "error: no kill implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -789,6 +847,7 @@ fm_backend_busy_state() {  # <backend> <target>
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
     herdr) fm_backend_herdr_busy_state "$@" ;;
+    ryder) fm_backend_ryder_busy_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -804,7 +863,9 @@ fm_backend_busy_state() {  # <backend> <target>
 # the one shared shape owner (bin/fm-composer-lib.sh,
 # fm_composer_classify_screen) - so no backend can hold a private shape
 # assumption; zellij's classifier reads `dump-screen --ansi`, which replaced
-# its old no-classifier content-diff reporting.
+# its old no-classifier content-diff reporting. ryder recognizes its composer
+# row itself from an ANSI snapshot's style and cursor channels, then defers the
+# verdict to the same owner via fm_composer_classify_content.
 fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pending|pending-unproven|unknown
   local backend=$1
   shift
@@ -815,6 +876,7 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
     orca) fm_backend_orca_composer_state "$@" ;;
     cmux) fm_backend_cmux_composer_state "$@" ;;
     zellij) fm_backend_zellij_composer_state "$@" ;;
+    ryder) fm_backend_ryder_composer_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -864,6 +926,10 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
       fm_backend_source cmux || return 1
       fm_backend_cmux_target_ready "$target" "$expected_label"
       ;;
+    ryder)
+      fm_backend_source ryder || return 1
+      fm_backend_ryder_target_exists "$target" "$expected_label"
+      ;;
     *)
       return 1
       ;;
@@ -882,15 +948,18 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # Only `dead` and `missing` license recovery. The tmux adapter requires a
 # successful session inventory and returns `missing` only when it omits the
 # exact window; the Herdr adapter reuses its husk
-# classifier. Zellij remains unverified because its secondmate ghost-tab and
-# agent-process recovery path has not been empirically validated. Orca and cmux
-# do not support secondmate spawns.
+# classifier. The Ryder adapter reads the host's own typed error codes and
+# kernel-read foreground identity, so it distinguishes an absent session from a
+# transient read failure structurally. Zellij remains unverified because its
+# secondmate ghost-tab and agent-process recovery path has not been empirically
+# validated. Orca, cmux, and ryder do not support secondmate spawns.
 fm_backend_agent_state() {  # <backend> <target>
   local backend=$1 target=$2
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   case "$backend" in
     tmux) fm_backend_tmux_agent_state "$target" ;;
     herdr) fm_backend_herdr_agent_state "$target" ;;
+    ryder) fm_backend_ryder_agent_state "$target" ;;
     *) printf 'unverified' ;;
   esac
 }
