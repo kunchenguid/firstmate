@@ -388,12 +388,19 @@ seeded_origin_url() {
 }
 
 acquire_treehouse_home() {
-  local id=$1 home
+  local id=$1 holder home
   # Durably lease a firstmate worktree from the pool. The lease persists with no
   # live process and is skipped by later get/prune, so the home survives restarts
   # until teardown or rollback returns it. treehouse prints only the worktree path
   # to stdout (banners go to stderr), so command substitution captures the path.
-  home=$(cd "$FM_ROOT" && treehouse get --lease --lease-holder "$id") || {
+  # Task 7 attempt-bound ownership: when this seed is itself an attempt, the
+  # lease holder binds the home AND the attempt (<id>:<attempt>) - one physical
+  # copy is owned by exactly one (home, attempt). The attempt record stays the
+  # coordination owner; the treehouse lease remains the provider store (Task 7.2's
+  # no-second-Treehouse-lease-store boundary).
+  holder="$id"
+  [ -z "${FM_ATTEMPT_ID:-}" ] || holder="$id:$FM_ATTEMPT_ID"
+  home=$(cd "$FM_ROOT" && treehouse get --lease --lease-holder "$holder") || {
     echo "error: treehouse get --lease failed to lease a firstmate home" >&2
     return 1
   }

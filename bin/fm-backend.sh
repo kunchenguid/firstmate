@@ -869,6 +869,31 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   esac
 }
 
+# fm_backend_stop_receipt <backend> <id>: durable endpoint-stop evidence JSON
+# for the cleanup.endpoint effect. A pure reader/reporter of the stop outcome:
+# it never stops anything itself (the actual endpoint stop stays in the
+# existing backend kill/remove functions) and mutates nothing. It reads the
+# task's recorded endpoint identity (window/tab/pane handle) from its meta and
+# reports whether that exact endpoint is confirmed gone via
+# fm_backend_target_exists. Shape: {"backend":...,"endpoint":...,
+# "confirmed_gone":true|false}; an absent or unresolvable endpoint identity is
+# never reported as confirmed gone.
+fm_backend_stop_receipt() {  # <backend> <id>
+  local backend=$1 id=$2 state meta endpoint confirmed
+  state="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+  meta="$state/$id.meta"
+  endpoint=
+  if [ -f "$meta" ]; then
+    endpoint=$(fm_backend_target_of_meta "$meta")
+  fi
+  confirmed=false
+  if [ -n "$endpoint" ] && ! fm_backend_target_exists "$backend" "$endpoint" >/dev/null 2>&1; then
+    confirmed=true
+  fi
+  jq -n --arg backend "$backend" --arg endpoint "$endpoint" --argjson confirmed "$confirmed" \
+    '{backend:$backend, endpoint:$endpoint, confirmed_gone:$confirmed}'
+}
+
 # fm_backend_agent_state: the single recovery-grade agent/endpoint state
 # contract. It is deliberately richer than fm_backend_target_exists's cheap
 # pane-presence read and prints exactly one of:

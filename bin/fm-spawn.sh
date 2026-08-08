@@ -1483,6 +1483,41 @@ spawn_claim_before_allocation() {  # <task_key> <home_id>
   return 0
 }
 
+# Task 7 attempt-bound allocation freeze: once the physical copy is acquired
+# (treehouse pool lease under $FM_HOME:$ATTEMPT_ID, or the orca worktree claim)
+# the attempt's provider identity and delivery contract freeze write-once. The
+# successful first freeze IS the provider effect: a crash after this point
+# leaves the provider effect in place and the release obligation derives from
+# the missing launch effect. The write-once freeze contract verifies the
+# attempt owns the exact copy on replay and refuses a copy owned by a
+# different attempt or home. Only a claim-handshake spawn (ATTEMPT_ID set)
+# reaches this; every ordinary spawn is byte-identical.
+spawn_freeze_allocation() {  # <copy-path>
+  local copy_path=$1 gen base target
+  [ -n "${ATTEMPT_ID:-}" ] || return 0
+  gen=$(fm_attempt_generation "$ATTEMPT_ID") || {
+    echo "error: cannot resolve generation for $ATTEMPT_ID; refusing to launch without an allocation freeze" >&2
+    return 1
+  }
+  # Delivery contract at allocation: mode is this spawn's delivery contract;
+  # base/target are read from the project's live git state. planned-path, seam,
+  # and dependency evidence is PROVISIONAL admission evidence frozen at
+  # allocation (empty at spawn time), never authority.
+  base=$(git -C "$PROJ_ABS" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+  [ -n "$base" ] || base=main
+  target="origin/$base"
+  fm_attempt_freeze_allocation "$ATTEMPT_ID" "$gen" \
+    "$(jq -n --arg provider "$BACKEND" --arg copy "$copy_path" '{provider:$provider,copy:$copy}')" \
+    "$(jq -n --arg mode "${MODE:-}" --arg base "$base" --arg target "$target" \
+          --arg planned_path "" --arg declared_seams "" --arg dependencies "" \
+          '{mode:$mode,base:$base,target:$target,planned_path:$planned_path,declared_seams:$declared_seams,dependencies:$dependencies}')" \
+    || {
+      echo "error: allocation freeze refused for $ATTEMPT_ID: the attempt already owns a different physical copy ($copy_path); refusing to launch into a copy the attempt does not own" >&2
+      return 1
+    }
+  return 0
+}
+
 # The claim-before-allocation handshake is engaged by the attended dispatch
 # path (FM_TRACKER_CLAIM=1). It is additive: without it every existing spawn
 # invocation is byte-identical; with it the ship spawn claims its bead before
@@ -1918,7 +1953,12 @@ EOF
     ;;
   orca)
     set +e
-    ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
+    # Task 7 attempt-bound claim: an attempt-bound spawn carries the same
+    # home:attempt identity as the treehouse pool lease into the orca worktree
+    # claim (empty on every ordinary spawn, which stays byte-identical). Orca
+    # has no separate lease store: the attempt record is the coordination
+    # owner of the claimed worktree, frozen below.
+    ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W" "${ATTEMPT_ID:+$FM_HOME:$ATTEMPT_ID}")
     ORCA_WT_STATUS=$?
     set -e
     if [ "$ORCA_WT_STATUS" -ne 0 ]; then
@@ -1936,6 +1976,7 @@ EOF
       exit 1
     fi
     validate_spawn_worktree "orca worktree create" "$W"
+    spawn_freeze_allocation "$WT" || exit 1
     if [ -z "$ORCA_TERMINAL" ]; then
       ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
     fi
@@ -2041,7 +2082,15 @@ kimi_spawn_fail() {  # <detail>
 }
 
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  # Task 7 attempt-bound claim: an attempt-bound spawn leases the physical copy
+  # under $FM_HOME:$ATTEMPT_ID (one copy owned by exactly one home:attempt),
+  # mirroring the fm-home-seed.sh lease primitive extended with the attempt;
+  # ordinary spawns stay byte-identical with the plain `treehouse get`.
+  if [ -n "${ATTEMPT_ID:-}" ]; then
+    spawn_send_text_line "$WT_TARGET" "treehouse get --lease --lease-holder $(shell_quote "$FM_HOME:$ATTEMPT_ID")"
+  else
+    spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  fi
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -2088,6 +2137,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  spawn_freeze_allocation "$WT" || exit 1
 fi
 
 if [ "$KIND" != secondmate ]; then

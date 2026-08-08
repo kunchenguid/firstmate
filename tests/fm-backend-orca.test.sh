@@ -1323,6 +1323,149 @@ test_ship_teardown_refuses_orca_unresolvable_worktree_id
 test_ship_teardown_refuses_orca_id_path_mismatch
 test_teardown_refuses_orca_missing_worktree_id
 test_teardown_refuses_orca_worktree_without_terminal_handle
+# --- Task 7 attempt-bound claim and stop receipt ---------------------------
+#
+# The orca worktree claim surface carries the same home:attempt identity as
+# the treehouse pool lease: an attempt-bound orca spawn claims its worktree
+# under (home_id, attempt_id) and freezes the allocation, so the attempt
+# record owns the exact copy (no second Treehouse lease store: the attempt
+# record is the coordination owner). fm_backend_stop_receipt returns the
+# durable endpoint-stop evidence JSON cleanup records as the cleanup.endpoint
+# effect.
+
+# make_orca_claim_steward <dir>: fake attended Decision OS steward that
+# observes the tracker claim effect on the attempt record.
+make_orca_claim_steward() {
+  local dir=$1 fakebin steward
+  fakebin=$(fm_fakebin "$dir")
+  steward="$fakebin/fm-br-receipt.sh"
+  cat > "$steward" <<'SH'
+#!/usr/bin/env bash
+set -u
+. "${FM_ATTEMPT_LIB:?FM_ATTEMPT_LIB unset}"
+req=${1:?request file}
+aid=$(jq -r '.attempt_id' "$req")
+gen=$(jq -r '.generation' "$req")
+bead=$(jq -r '.bead_id' "$req")
+fm_attempt_effect_observe "$aid" "$gen" tracker "{\"bead\":\"$bead\",\"status\":\"claimed\"}" || exit 1
+exit 0
+SH
+  chmod +x "$steward"
+  printf '%s\n' "$steward"
+}
+
+# run_claim_orca_spawn <id> <project> <worktree>: one attempt-bound orca spawn
+# against the current orca_case responses.
+run_claim_orca_spawn() {
+  local id=$1 proj=$2 wt=$3
+  PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CLAIM_HOME" FM_STATE_OVERRIDE="$CLAIM_STATE" \
+    FM_DATA_OVERRIDE="$CLAIM_DATA" FM_CONFIG_OVERRIDE="$CLAIM_CONFIG" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" \
+    FM_SPAWN_NO_GUARD=1 FM_TRACKER_CLAIM=1 FM_BR_RECEIPT_BIN="$CLAIM_STEWARD" \
+    FM_REFILL_PROJECT="$proj" FM_ATTEMPT_LIB="$ROOT/bin/fm-attempt-lib.sh" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1
+}
+
+# An attempt-bound orca spawn claims its worktree under (home_id, attempt_id)
+# and freezes the allocation: the attempt record owns the exact orca copy with
+# the delivery contract frozen, and the release obligation derives from the
+# missing launch effect. Two same-home attempts own two distinct worktrees.
+test_attempt_bound_orca_spawn_binds_worktree_to_attempt() {
+  local proj wt id out status aid1 aid2
+  id="orcaclaimz1"
+  proj="$TMP_ROOT/claim-project"
+  wt="$TMP_ROOT/claim-wt"
+  CLAIM_HOME="$TMP_ROOT/claim-home"
+  CLAIM_STATE="$TMP_ROOT/claim-state"
+  CLAIM_DATA="$TMP_ROOT/claim-data"
+  CLAIM_CONFIG="$TMP_ROOT/claim-config"
+  CLAIM_STEWARD=$(make_orca_claim_steward "$TMP_ROOT/claim-steward")
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$proj/.beads"
+  printf '%s\n' '{"id":"fixture","status":"open"}' > "$proj/.beads/issues.jsonl"
+  mkdir -p "$CLAIM_DATA/$id" "$CLAIM_STATE" "$CLAIM_CONFIG"
+  printf 'brief for %s\nDelivery contract: mode=no-mistakes\n' "$id" > "$CLAIM_DATA/$id/brief.md"
+  touch "$CLAIM_STATE/.last-watcher-beat"
+  orca_case orca-claim
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-claim"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-claim","path":"%s"},"terminal":{"handle":"term-claim"}}}\n' "$wt" > "$RESP/3.out"
+  out=$(run_claim_orca_spawn "$id" "$proj" "$wt")
+  status=$?
+  expect_code 0 "$status" "attempt-bound orca spawn should succeed"$'\n'"$out"
+  aid1="orcaclaimz1-a1"
+  [ "$(jq -r '.envelope.home_id' "$CLAIM_STATE/attempts/$aid1.json")" = "$CLAIM_HOME" ] || fail "attempt envelope lost the home identity"
+  [ "$(jq -r '.provider.provider' "$CLAIM_STATE/attempts/$aid1.json")" = orca ] || fail "attempt provider is not orca"
+  [ "$(jq -r '.provider.copy' "$CLAIM_STATE/attempts/$aid1.json")" = "$wt" ] || fail "attempt does not own the claimed orca copy"
+  [ "$(jq -r '.delivery.mode' "$CLAIM_STATE/attempts/$aid1.json")" = no-mistakes ] || fail "delivery contract not frozen"
+  # the successful freeze IS the provider effect: the release obligation
+  # derives from the missing launch effect
+  assert_contains "$(FM_STATE_OVERRIDE="$CLAIM_STATE" bash -c '. "$0/bin/fm-attempt-lib.sh"; fm_attempt_obligations "$1"' "$ROOT" "$aid1")" \
+    "launch" "allocation did not retain the pending launch obligation"
+  # a second same-home attempt claims a distinct worktree and owns it
+  local id2 proj2 wt2
+  id2="orcaclaimz2"
+  proj2="$TMP_ROOT/claim-project-2"
+  wt2="$TMP_ROOT/claim-wt-2"
+  fm_git_worktree "$proj2" "$wt2" "fm/$id2"
+  mkdir -p "$proj2/.beads"
+  printf '%s\n' '{"id":"fixture2","status":"open"}' > "$proj2/.beads/issues.jsonl"
+  mkdir -p "$CLAIM_DATA/$id2"
+  printf 'brief for %s\nDelivery contract: mode=no-mistakes\n' "$id2" > "$CLAIM_DATA/$id2/brief.md"
+  orca_case orca-claim-2
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-claim-2"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-claim-2","path":"%s"},"terminal":{"handle":"term-claim-2"}}}\n' "$wt2" > "$RESP/3.out"
+  out=$(run_claim_orca_spawn "$id2" "$proj2" "$wt2")
+  status=$?
+  expect_code 0 "$status" "second attempt-bound orca spawn should succeed"$'\n'"$out"
+  aid2="orcaclaimz2-a1"
+  [ "$(jq -r '.provider.copy' "$CLAIM_STATE/attempts/$aid2.json")" = "$wt2" ] || fail "second attempt does not own its orca copy"
+  [ "$(jq -r '.provider.copy' "$CLAIM_STATE/attempts/$aid1.json")" != "$(jq -r '.provider.copy' "$CLAIM_STATE/attempts/$aid2.json")" ] \
+    || fail "same-home attempts share an orca worktree"
+  [ "$(jq -r '.envelope.home_id' "$CLAIM_STATE/attempts/$aid2.json")" = "$CLAIM_HOME" ] || fail "second attempt lost the home identity"
+  pass "the orca claim surface binds the worktree to exactly one (home, attempt)"
+}
+
+# fm_backend_stop_receipt <backend> <id>: durable endpoint-stop evidence JSON
+# (backend, endpoint identity, confirmed-gone verdict), produced without
+# mutating anything - a pure reader/reporter of the stop outcome.
+test_stop_receipt_confirms_gone_endpoint() {
+  local state out
+  state="$TMP_ROOT/stop-receipt-state"
+  mkdir -p "$state"
+  printf 'backend=orca\nwindow=fm-stopz1\nterminal=term-stop\n' > "$state/stopz1.meta"
+  orca_case stop-receipt-gone
+  printf '{"ok":false,"error":{"code":"terminal_not_found","message":"gone"}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_stop_receipt orca stopz1' "$ROOT" )
+  expect_code 0 $? "stop receipt should succeed for a gone endpoint"
+  echo "$out" | jq -e '.backend == "orca" and .endpoint == "term-stop" and .confirmed_gone == true' >/dev/null \
+    || fail "stop receipt did not confirm the gone endpoint: $out"
+  pass "fm_backend_stop_receipt reports a confirmed-gone endpoint as durable evidence"
+}
+
+test_stop_receipt_reports_endpoint_still_present() {
+  local state out
+  state="$TMP_ROOT/stop-receipt-live-state"
+  mkdir -p "$state"
+  printf 'backend=orca\nwindow=fm-stopz2\nterminal=term-live\n' > "$state/stopz2.meta"
+  orca_case stop-receipt-live
+  printf '{"ok":true,"result":{"terminal":{"tail":["line one"]}}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_stop_receipt orca stopz2' "$ROOT" )
+  expect_code 0 $? "stop receipt should succeed for a live endpoint"
+  echo "$out" | jq -e '.backend == "orca" and .endpoint == "term-live" and .confirmed_gone == false' >/dev/null \
+    || fail "stop receipt did not report the live endpoint as present: $out"
+  pass "fm_backend_stop_receipt reports a still-present endpoint as not confirmed gone"
+}
+
 test_secondmate_force_teardown_removes_orca_child_via_orca
 test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch
 test_secondmate_force_teardown_refuses_partial_orca_child
+test_attempt_bound_orca_spawn_binds_worktree_to_attempt
+test_stop_receipt_confirms_gone_endpoint
+test_stop_receipt_reports_endpoint_still_present

@@ -20,6 +20,12 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-worktree-settle)
 
+# The Task 7 attempt fixtures below allocate attempt records directly; point the
+# attempt lib at a hermetic per-run state dir so records never land in the repo's
+# private state. Every spawn in this file passes its own FM_STATE_OVERRIDE, so
+# this export only scopes the direct attempt-lib calls.
+export FM_STATE_OVERRIDE="$TMP_ROOT/state"
+
 # make_settle_fakebin <dir> builds a fake tmux whose `#{pane_current_path}`
 # query returns FM_FAKE_PANE_STALE for the first FM_FAKE_PANE_STALE_READS
 # calls, then FM_FAKE_PANE_PATH forever after - reproducing a pane that
@@ -267,9 +273,85 @@ test_replay_after_receipt_does_not_double_claim() {
   pass "replay after the receipt never double-claims"
 }
 
+# --- Task 7 attempt-bound provider-wide physical-copy ownership -----------
+#
+# The treehouse pool lease binds BOTH home and attempt (home_id:attempt_id),
+# so two attempts in the same home cannot acquire the same physical copy. A
+# crash after allocation (freeze) leaves the provider effect in place and the
+# release obligation derives from the missing launch effect; replay releases
+# only the exact owning attempt.
+
+# claim_copy <home> <attempt>: fake treehouse get --lease --lease-holder
+# against a shared pool; the lease holder is home:attempt and one physical
+# copy is owned by exactly one (home, attempt).
+claim_copy() {  # <home> <attempt>
+  mkdir -p "$TMP_ROOT/pool"
+  local holder="$1:$2"
+  local i
+  for i in 1 2 3; do
+    if [ ! -e "$TMP_ROOT/pool/copy-$i" ]; then
+      printf '%s\n' "$holder" > "$TMP_ROOT/pool/copy-$i.holder"
+      touch "$TMP_ROOT/pool/copy-$i"
+      printf '%s\n' "$TMP_ROOT/pool/copy-$i"
+      return 0
+    fi
+    if [ "$(cat "$TMP_ROOT/pool/copy-$i.holder")" = "$holder" ]; then
+      printf '%s\n' "$TMP_ROOT/pool/copy-$i"
+      return 0
+    fi
+  done
+  echo "pool exhausted" >&2
+  return 1
+}
+HOLDER_1() { cat "$TMP_ROOT/pool/copy-1.holder"; }
+HOLDER_2() { cat "$TMP_ROOT/pool/copy-2.holder"; }
+
+test_same_home_concurrent_attempts_get_distinct_copies() {
+  # two attempts in the same home acquire two distinct pooled copies; the
+  # lease-holder records home AND attempt
+  local c1 c2
+  c1=$(claim_copy "home-a" "attempt-a1")
+  c2=$(claim_copy "home-a" "attempt-a2")
+  [ "$c1" != "$c2" ] || fail "same-home attempts share a copy"
+  [ "$(HOLDER_1)" = "home-a:attempt-a1" ] || fail "lease holder lacks attempt identity"
+  [ "$(HOLDER_2)" = "home-a:attempt-a2" ] || fail "second attempt lease holder"
+  pass "two attempts in the same home cannot acquire the same physical copy"
+}
+
+test_crash_after_allocation_retains_pending_release_obligation() {
+  # crash after the provider receipt but before launch; the attempt record
+  # carries the provider effect and the release obligation derives from the
+  # missing launch effect
+  local aid
+  . "$ROOT/bin/fm-attempt-lib.sh"
+  aid=$(fm_attempt_alloc pi dos-c holu) || fail "alloc"
+  fm_attempt_freeze_allocation "$aid" 1 '{"provider":"tmux","copy":"wt-c"}' \
+    '{"mode":"direct-PR","base":"main","target":"origin/main"}' || fail "freeze"
+  assert_contains "$(fm_attempt_obligations "$aid")" "launch" "no pending obligation after crash"
+  pass "a crash after allocation retains a pending release obligation"
+}
+
+test_replay_releases_only_the_exact_owning_attempt() {
+  # two attempts, one owns copy C; replay of the other must not release C
+  local aid1 aid2
+  . "$ROOT/bin/fm-attempt-lib.sh"
+  aid1=$(fm_attempt_alloc pi dos-d holu)
+  aid2=$(fm_attempt_alloc pi dos-e holu)
+  fm_attempt_freeze_allocation "$aid1" 1 '{"provider":"tmux","copy":"wt-d"}' \
+    '{"mode":"direct-PR","base":"main","target":"origin/main"}'
+  fm_attempt_freeze_allocation "$aid2" 1 '{"provider":"tmux","copy":"wt-e"}' \
+    '{"mode":"direct-PR","base":"main","target":"origin/main"}'
+  [ "$(fm_attempt_load "$aid2" | jq -r '.provider.copy')" = wt-e ] || fail "a2 owns wrong copy"
+  [ "$(fm_attempt_load "$aid1" | jq -r '.provider.copy')" = wt-d ] || fail "a1 lost its copy"
+  pass "replay releases only the exact owning attempt"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
 test_no_workspace_or_endpoint_before_claim_observed
 test_replay_after_receipt_does_not_double_claim
+test_same_home_concurrent_attempts_get_distinct_copies
+test_crash_after_allocation_retains_pending_release_obligation
+test_replay_releases_only_the_exact_owning_attempt
 
 echo "# all fm-spawn-worktree-settle tests passed"

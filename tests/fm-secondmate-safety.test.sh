@@ -295,6 +295,111 @@ test_home_seed_uses_treehouse_acquired_home() {
   pass "home seeding durably leases treehouse-acquired dash homes under the secondmate id"
 }
 
+# --- Task 7 attempt-bound secondmate lease ---------------------------------
+#
+# A seed that is itself an attempt binds the treehouse lease to <id>:<attempt>
+# (Task 7.2's no-second-Treehouse-lease-store boundary: the attempt record is
+# the coordination owner, the treehouse lease remains the provider store).
+# Same-home concurrent attempts therefore acquire distinct leased copies.
+
+# make_pool_treehouse <dir>: a pool-backed fake treehouse whose get leases one
+# physical copy per holder (a distinct copy per distinct <id>:<attempt>) and
+# records the holder in a .holder file; return removes the copy. Copies are
+# cloned from FM_FAKE_TREEHOUSE_SOURCE so they are real firstmate homes.
+make_pool_treehouse() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf 'treehouse %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
+case "${1:-}" in
+  get)
+    shift
+    holder=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --lease) ;;
+        --lease-holder) shift; holder=${1:-} ;;
+        *) ;;
+      esac
+      shift
+    done
+    [ -n "$holder" ] || { echo "pool get requires --lease-holder" >&2; exit 1; }
+    i=1
+    while [ "$i" -le 3 ]; do
+      if [ ! -e "${FM_FAKE_TREEHOUSE_POOL:?}/copy-$i" ]; then
+        printf '%s\n' "$holder" > "$FM_FAKE_TREEHOUSE_POOL/copy-$i.holder"
+        git clone --quiet "${FM_FAKE_TREEHOUSE_SOURCE:?}" "$FM_FAKE_TREEHOUSE_POOL/copy-$i"
+        printf '%s\n' "$FM_FAKE_TREEHOUSE_POOL/copy-$i"
+        exit 0
+      fi
+      if [ "$(cat "$FM_FAKE_TREEHOUSE_POOL/copy-$i.holder" 2>/dev/null)" = "$holder" ]; then
+        printf '%s\n' "$FM_FAKE_TREEHOUSE_POOL/copy-$i"
+        exit 0
+      fi
+      i=$((i + 1))
+    done
+    echo "pool exhausted" >&2
+    exit 1
+    ;;
+  return)
+    shift
+    target=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --force) ;;
+        *) target=$1 ;;
+      esac
+      shift
+    done
+    [ -n "$target" ] || exit 0
+    rm -rf -- "$target"
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+  printf '%s\n' "$fakebin"
+}
+
+# Two same-home seeds, each itself an attempt, acquire two distinct pool
+# copies leased under id:attempt; the lease stays the provider store and the
+# attempt identity rides on the holder.
+test_secondmate_seed_binds_lease_to_home_and_attempt() {
+  local home pool fakebin out out2 home1 home2
+  home="$TMP_ROOT/attempt-home"
+  pool="$TMP_ROOT/attempt-pool"
+  mkdir -p "$home/projects" "$home/data" "$home/state" "$pool"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/attempt-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  fakebin=$(make_pool_treehouse "$TMP_ROOT/attempt-fake")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$TMP_ROOT/attempt-fake/tmux.log" \
+    FM_FAKE_TREEHOUSE_POOL="$pool" FM_FAKE_TREEHOUSE_SOURCE="$ROOT" \
+    FM_ATTEMPT_ID="dash-a1" \
+    FM_SECONDMATE_CHARTER='attempt bound scope' FM_SECONDMATE_SCOPE='attempt bound scope' \
+    "$ROOT/bin/fm-home-seed.sh" dash - alpha) \
+    || fail "attempt-bound seed for dash failed"
+  home1=$(printf '%s\n' "$out" | sed -n 's/^home=//p')
+  [ -n "$home1" ] || fail "first seed did not report its acquired home"
+  grep -F "treehouse get --lease --lease-holder dash:dash-a1" "$TMP_ROOT/attempt-fake/tmux.log" >/dev/null \
+    || fail "seed did not lease under id:attempt"
+  [ "$(cat "$pool/copy-1.holder")" = dash:dash-a1 ] || fail "first lease holder lacks the attempt identity"
+  out2=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$TMP_ROOT/attempt-fake/tmux.log" \
+    FM_FAKE_TREEHOUSE_POOL="$pool" FM_FAKE_TREEHOUSE_SOURCE="$ROOT" \
+    FM_ATTEMPT_ID="triage-a1" \
+    FM_SECONDMATE_CHARTER='attempt bound scope' FM_SECONDMATE_SCOPE='attempt bound scope' \
+    "$ROOT/bin/fm-home-seed.sh" triage - alpha) \
+    || fail "attempt-bound seed for triage failed"
+  home2=$(printf '%s\n' "$out2" | sed -n 's/^home=//p')
+  [ -n "$home2" ] || fail "second seed did not report its acquired home"
+  [ "$home1" != "$home2" ] || fail "same-home attempts share a leased copy"
+  [ "$(cat "$pool/copy-2.holder")" = triage:triage-a1 ] || fail "second lease holder lacks the attempt identity"
+  pass "same-home attempt-bound seeds acquire distinct copies leased under id:attempt"
+}
+
 test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
   local home acquired acquired_abs fakebin log err
   home="$TMP_ROOT/dash-fail-home"
@@ -2731,3 +2836,4 @@ test_secondmate_idle_pane_is_not_stale
 test_secondmate_charter_brief_is_idle_by_default
 test_backlog_handoff_aborts_safely
 test_backlog_handoff_refuses_done_items_and_non_secondmate_homes
+test_secondmate_seed_binds_lease_to_home_and_attempt
