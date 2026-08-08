@@ -757,6 +757,30 @@ test_forgejo_squash_merged_branch_deleted_allows() {
   pass "Forgejo squash-merged work is safely teardown-eligible through guarded proof"
 }
 
+test_forgejo_malformed_merged_head_refuses() {
+  local case_dir rc pr_head
+  case_dir=$(make_case forgejo-malformed-merged-head)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add Forgejo feature"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf '%s\n' \
+    'pr=https://forgejo.example/owner/repo/pulls/7' \
+    "pr_head=$pr_head" >> "$case_dir/state/task-x1.meta"
+  add_forgejo_pr_merged_for_head "$case_dir" HEAD
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "forgejo-malformed-merged-head: teardown should refuse"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "forgejo-malformed-merged-head: no REFUSED line in stderr"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "forgejo-malformed-merged-head: teardown erased task metadata"
+  pass "Forgejo merged proof rejects revision-like heads before Git use"
+}
+
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
   local case_dir rc local_head pr_head
   case_dir=$(make_case squash-ancestor)
@@ -2655,6 +2679,7 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
 test_squash_merged_branch_deleted_allows
 test_forgejo_squash_merged_branch_deleted_allows
+test_forgejo_malformed_merged_head_refuses
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch

@@ -865,7 +865,7 @@ pr_is_merged() {
       ;;
     *) return 1 ;;
   esac
-  [ -n "$head" ] || return 1
+  fm_pr_head_valid "$head" || return 1
   ensure_commit_object "$target" "$head" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null && return 0
