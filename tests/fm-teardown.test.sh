@@ -3,11 +3,13 @@
 #
 # The check refuses to tear down a worktree whose work has not LANDED, because
 # treehouse return hard-resets the worktree. "Landed" means reachable from a remote
-# OR - for a normal ship task whose commits are not so reachable - its PR is merged
-# and GitHub reports a PR head that contains the current local work, or its content
-# is already in the up-to-date default branch.
+# OR - for a normal ship task whose commits are not so reachable - the HEAD commit
+# is positively verified as reachable from a configured or explicitly supplied
+# foreign remote's default branch, its PR is merged and GitHub reports a PR head
+# that contains the current local work, or its content is already present in the
+# up-to-date default branch.
 #
-# Covers three fixes:
+# Covers four fixes:
 #   - local-only fork-remote: a fork IS a remote, so fork-pushed upstream-
 #     contribution PRs are teardown-eligible (the pre-fix code false-refused them).
 #   - squash-merge-then-delete-branch: the branch's own commits live nowhere on a
@@ -15,6 +17,9 @@
 #     main. Reachability alone false-refused this common GitHub flow; the check now
 #     recognizes a merged PR head containing the local work (or the content already
 #     in main) as landed.
+#   - foreign-default-landing: an exact worktree HEAD published as the default
+#     branch of a distinct configured or explicitly supplied remote is landed only
+#     after the remote's default ref and fetched commit agree.
 #   - teardown-lock-race: a killed crew process can leave a transient worktree
 #     git index.lock that blocks teardown. The return path retries on the lock
 #     error signature (even if the lock self-clears mid-check), then only removes a
@@ -38,17 +43,20 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (r) no-mistakes + HEAD landed on configured foreign default -> ALLOW  (foreign landing)
+#   (s) no-mistakes + HEAD landed via explicit foreign override -> ALLOW  (foreign landing)
+#   (t) no-mistakes + unreachable foreign override              -> REFUSE (fail-safe)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
-#   (r) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
-#   (s) index.lock with a live holder, any age                -> lock kept, REFUSE
-#   (t) lsof error while checking index.lock                  -> lock kept, REFUSE
-#   (u) dirty worktree after stale lock cleanup               -> lock removed, REFUSE
-#   (v) non-linked repo index.lock                            -> lock removed, ALLOW
-#   (w) index.lock mtime read failure                         -> lock kept, REFUSE
-#   (x) transient lock cleared after first failed return      -> retry ALLOW
-#   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#   (u) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
+#   (v) index.lock with a live holder, any age                -> lock kept, REFUSE
+#   (w) lsof error while checking index.lock                  -> lock kept, REFUSE
+#   (x) dirty worktree after stale lock cleanup               -> lock removed, REFUSE
+#   (y) non-linked repo index.lock                            -> lock removed, ALLOW
+#   (z) index.lock mtime read failure                         -> lock kept, REFUSE
+#   (aa) transient lock cleared after first failed return     -> retry ALLOW
+#   (ab) persistent lock (never clears, not provably stale)   -> REFUSE loudly
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -206,6 +214,20 @@ land_on_origin_main() {
   git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "squash $file"
   git -C "$tmp" push -q origin HEAD:main
   rm -rf "$tmp"
+}
+
+# Create a distinct bare repository with main as its default branch, then publish
+# the worktree's exact HEAD there. Args: case_dir [configure-remote]
+land_head_on_foreign_default() {
+  local case_dir=$1 configure_remote=${2:-0} foreign
+  foreign="$case_dir/foreign.git"
+  git init -q --bare "$foreign"
+  git -C "$foreign" symbolic-ref HEAD refs/heads/main
+  git -C "$case_dir/wt" push -q "$foreign" HEAD:refs/heads/main
+  if [ "$configure_remote" = 1 ]; then
+    git -C "$case_dir/project" remote add foreign "$foreign"
+  fi
+  printf '%s\n' "$foreign"
 }
 
 # Override GitHub lookups to report PR 7 as merged with the supplied head.
@@ -488,6 +510,49 @@ SH
   chmod +x "$case_dir/fakebin/git"
 }
 
+add_git_default_branch_switch_after_fetch() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+"$real" "$@"
+rc=$?
+[ "$rc" -eq 0 ] || exit "$rc"
+is_fetch=0
+is_landing_remote=0
+for arg in "$@"; do
+  [ "$arg" = fetch ] && is_fetch=1
+  [ "$arg" = "${FM_TEST_SWITCH_REMOTE_AFTER_FETCH:-}" ] && is_landing_remote=1
+done
+if [ "$is_fetch" = 1 ] && [ "$is_landing_remote" = 1 ]; then
+  "$real" -C "$FM_TEST_SWITCH_REMOTE_AFTER_FETCH" symbolic-ref HEAD refs/heads/other || exit $?
+fi
+exit "$rc"
+SH
+  chmod +x "$case_dir/fakebin/git"
+}
+
+add_timeout_on_remote_call() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+log=${FM_TEST_REMOTE_TIMEOUT_LOG:?}
+call=${FM_TEST_REMOTE_TIMEOUT_CALL:?}
+count=0
+[ ! -f "$log" ] || count=$(cat "$log")
+count=$((count + 1))
+printf '%s\n' "$count" > "$log"
+if [ "$count" -eq "$call" ]; then
+  [ -z "${FM_TEST_REMOTE_TIMEOUT_PARTIAL_OUTPUT:-}" ] || printf '%s\n' "$FM_TEST_REMOTE_TIMEOUT_PARTIAL_OUTPUT"
+  exit 124
+fi
+[ "${1:-}" = -k ] || exit 2
+shift 3
+exec "$@"
+SH
+  chmod +x "$case_dir/fakebin/timeout"
+}
+
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
   local case_dir=$1; shift
@@ -496,6 +561,30 @@ run_teardown() {
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
+}
+
+# Run teardown with an explicit foreign landing remote. Args: case_dir remote [extra args...]
+run_teardown_with_landed_remote() {
+  local case_dir=$1 landed_remote=$2; shift 2
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_TEARDOWN_LANDED_REMOTE="$landed_remote" \
+  PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
+    "$TEARDOWN" task-x1 "$@"
+}
+
+# Build the teardown test's executable search path without lsof, regardless of
+# whether the host installs it in /usr/bin, /usr/sbin, or a package-manager bin.
+make_path_without_lsof() {  # <case-dir>
+  local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
+  mkdir -p "$path_dir"
+  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
+    mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
+    resolved=$(command -v "$cmd" 2>/dev/null) || continue
+    case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
+  done
+  printf '%s\n' "$path_dir"
 }
 
 test_local_only_fork_remote_allows() {
@@ -625,7 +714,135 @@ test_no_mistakes_truly_unpushed_refuses() {
 
   expect_code 1 "$rc" "nm-unpushed: teardown should refuse"
   grep -q REFUSED "$case_dir/stderr" || fail "nm-unpushed: no REFUSED line in stderr"
+  grep -F 'FM_TEARDOWN_LANDED_REMOTE' "$case_dir/stderr" >/dev/null \
+    || fail "nm-unpushed: refusal did not mention the verified-remote landing path"
   pass "no-mistakes worktree with genuinely unlanded work is refused (safety preserved)"
+}
+
+test_foreign_configured_remote_default_allows() {
+  local case_dir rc
+  case_dir=$(make_case foreign-configured)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "foreign landing"
+  land_head_on_foreign_default "$case_dir" 1 >/dev/null
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "foreign-configured: teardown should accept HEAD on the verified foreign default branch"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "foreign-configured: teardown printed a REFUSED line"
+  pass "teardown accepts HEAD landed on a configured foreign remote default branch"
+}
+
+test_foreign_override_remote_default_allows() {
+  local case_dir foreign rc
+  case_dir=$(make_case foreign-override)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "foreign landing"
+  foreign=$(land_head_on_foreign_default "$case_dir")
+
+  set +e
+  run_teardown_with_landed_remote "$case_dir" "$foreign" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "foreign-override: teardown should accept HEAD on the verified override remote default branch"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "foreign-override: teardown printed a REFUSED line"
+  pass "teardown accepts HEAD landed through the explicit foreign remote override"
+}
+
+test_unreachable_foreign_override_refuses() {
+  local case_dir rc
+  case_dir=$(make_case foreign-unreachable)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "unpushed work"
+
+  set +e
+  run_teardown_with_landed_remote "$case_dir" "$case_dir/missing-foreign.git" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "foreign-unreachable: teardown should refuse without remote evidence"
+  grep -q REFUSED "$case_dir/stderr" || fail "foreign-unreachable: no REFUSED line in stderr"
+  pass "teardown refuses an unreachable foreign landing remote (fail-safe)"
+}
+
+test_foreign_remote_timeout_refuses() {
+  local case_dir foreign timeout_log calls rc
+  case_dir=$(make_case foreign-timeout)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "foreign landing"
+  foreign=$(land_head_on_foreign_default "$case_dir")
+  timeout_log="$case_dir/timeout-count"
+  add_timeout_on_remote_call "$case_dir"
+
+  set +e
+  FM_TIMEOUT_MECHANISM_OVERRIDE='' \
+  FM_TEST_REMOTE_TIMEOUT_LOG="$timeout_log" \
+  FM_TEST_REMOTE_TIMEOUT_CALL=4 \
+    run_teardown_with_landed_remote "$case_dir" "$foreign" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  calls=$(cat "$timeout_log")
+  expect_code 1 "$rc" "foreign-timeout: teardown should refuse when a landing proof call times out"
+  expect_code 8 "$calls" "foreign-timeout: each remote proof operation was not bounded"
+  grep -q REFUSED "$case_dir/stderr" || fail "foreign-timeout: no REFUSED line in stderr"
+  pass "teardown refuses when a foreign landing proof call times out"
+}
+
+test_foreign_remote_partial_timeout_refuses() {
+  local case_dir foreign head timeout_log calls rc
+  case_dir=$(make_case foreign-partial-timeout)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "foreign landing"
+  foreign=$(land_head_on_foreign_default "$case_dir")
+  head=$(git -C "$foreign" rev-parse refs/heads/main)
+  timeout_log="$case_dir/timeout-count"
+  add_timeout_on_remote_call "$case_dir"
+
+  set +e
+  FM_TIMEOUT_MECHANISM_OVERRIDE='' \
+  FM_TEST_REMOTE_TIMEOUT_LOG="$timeout_log" \
+  FM_TEST_REMOTE_TIMEOUT_CALL=2 \
+  FM_TEST_REMOTE_TIMEOUT_PARTIAL_OUTPUT="$(printf '%s\t%s' "$head" refs/heads/main)" \
+    run_teardown_with_landed_remote "$case_dir" "$foreign" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  calls=$(cat "$timeout_log")
+  expect_code 1 "$rc" "foreign-partial-timeout: teardown should refuse partial timed-out confirmation output"
+  expect_code 6 "$calls" "foreign-partial-timeout: confirmation failure did not stop the foreign proof"
+  grep -q REFUSED "$case_dir/stderr" || fail "foreign-partial-timeout: no REFUSED line in stderr"
+  pass "teardown refuses partial timed-out foreign confirmation output"
+}
+
+test_foreign_default_change_during_verification_refuses() {
+  local case_dir foreign base main_before main_after default_ref rc
+  case_dir=$(make_case foreign-default-change)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "foreign landing"
+  foreign=$(land_head_on_foreign_default "$case_dir" 1)
+  base=$(git -C "$case_dir/wt" rev-parse HEAD^)
+  git -C "$foreign" update-ref refs/heads/other "$base"
+  main_before=$(git -C "$foreign" rev-parse refs/heads/main)
+  add_git_default_branch_switch_after_fetch "$case_dir"
+
+  set +e
+  FM_TEST_SWITCH_REMOTE_AFTER_FETCH="$foreign" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  main_after=$(git -C "$foreign" rev-parse refs/heads/main)
+  default_ref=$(git -C "$foreign" symbolic-ref HEAD)
+  expect_code 1 "$rc" "foreign-default-change: teardown should refuse when the remote default branch changes during verification"
+  expect_code "$main_before" "$main_after" "foreign-default-change: main changed while simulating only a default-branch switch"
+  expect_code refs/heads/other "$default_ref" "foreign-default-change: test did not switch the remote default branch"
+  grep -q REFUSED "$case_dir/stderr" || fail "foreign-default-change: no REFUSED line in stderr"
+  pass "teardown refuses a remote default branch change during verification"
 }
 
 test_squash_merged_branch_deleted_allows() {
@@ -847,10 +1064,11 @@ test_dirty_worktree_refuses() {
   case_dir=$(make_case dirty-wt)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
-  # The committed work has fully landed (merged PR + content in default), but an
-  # uncommitted edit remains. Dirtiness must refuse regardless: the reset would
-  # discard those changes.
+  # The committed work has fully landed on both the source and a verified foreign
+  # default branch, but an uncommitted edit remains. Dirtiness must refuse
+  # regardless: the reset would discard those changes.
   wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_head_on_foreign_default "$case_dir" 1 >/dev/null
   land_on_origin_main "$case_dir" feature.txt hello
   pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
@@ -1830,6 +2048,12 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
+test_foreign_configured_remote_default_allows
+test_foreign_override_remote_default_allows
+test_unreachable_foreign_override_refuses
+test_foreign_remote_timeout_refuses
+test_foreign_remote_partial_timeout_refuses
+test_foreign_default_change_during_verification_refuses
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
