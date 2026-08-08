@@ -2387,12 +2387,17 @@ EOF
   printf '%s|%s\n' "$home" "$subhome"
 }
 
+task_set_lock_path() {  # <state-dir>
+  local state=$1
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_task_set_lock_path "$state" )
+}
+
 # The holder must stay ALIVE: fm_lock_try_acquire reclaims a lock whose owning
 # pid is gone, so a lock taken in a subshell that then exits would be stolen and
 # the contention under test would never happen.
 hold_task_set_lock() {  # <state-dir> -> echoes "<holder-pid> <lock-path>"
   local state=$1 lock holder i=0
-  lock=$( . "$ROOT/bin/fm-wake-lib.sh"; fm_task_set_lock_path "$state" ) || return 1
+  lock=$(task_set_lock_path "$state") || return 1
   [ -n "$lock" ] || return 1
   # stdout/stderr are redirected so the long-lived holder does not inherit this
   # function's command-substitution pipe; leaving it open would block the caller
@@ -2528,7 +2533,7 @@ SH
     wait "$pid" 2>/dev/null || true
     fail "forced teardown did not reach the post-lock preflight: $(cat "$err")"
   }
-  lock=$( . "$ROOT/bin/fm-wake-lib.sh"; fm_task_set_lock_path "$subhome/state" ) \
+  lock=$(task_set_lock_path "$subhome/state") \
     || fail "could not resolve the established descendant task-set lock"
   [ -d "$subhome/state" ] || fail "forced teardown did not establish the absent state directory"
   [ -e "$lock" ] || fail "forced teardown did not own the descendant task-set lock during preflight"
