@@ -566,15 +566,18 @@ test_session_provider_backends_do_not_require_tmux() {
 herdr^herdr
 zellij^zellij
 cmux^cmux
+ryder^ryder
 ROWS
   pass "bootstrap: session-provider backends require their own CLI + jq + treehouse, never tmux"
 }
 
 test_session_provider_backends_gate_own_cli_not_tmux() {
-  local backend cli case_dir fakebin out missing
+  local backend cli manual_hint case_dir fakebin out missing
   # With the backend's OWN session CLI absent (and tmux also absent), bootstrap
   # must fail closed on the genuine dep and never substitute a false tmux demand.
-  while IFS='^' read -r backend cli; do
+  # A third column names the manual-install instructions for a CLI that has no
+  # runnable installer, so its line must be the MISSING_MANUAL diagnostic.
+  while IFS='^' read -r backend cli manual_hint; do
     [ -n "$backend" ] || continue
     case_dir="$TMP_ROOT/$backend-missing-cli"
     mkdir -p "$case_dir/home/config"
@@ -584,21 +587,22 @@ test_session_provider_backends_gate_own_cli_not_tmux() {
     fakebin=$(make_fake_toolchain_no_tmux "$case_dir")
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-    if [ "$backend" = herdr ]; then
-      missing="MISSING_MANUAL: herdr (instructions: https://herdr.dev)"
+    if [ -n "$manual_hint" ]; then
+      missing="MISSING_MANUAL: $backend (instructions: $manual_hint)"
     else
       missing="MISSING: $cli"
     fi
     assert_contains "$out" "$missing" "backend=$backend must fail closed on its own missing session CLI"
-    if [ "$backend" = herdr ]; then
-      assert_not_contains "$out" "MISSING: herdr (install:" \
-        "backend=herdr must not advertise manual guidance as an executable install command"
+    if [ -n "$manual_hint" ]; then
+      assert_not_contains "$out" "MISSING: $backend (install:" \
+        "backend=$backend must not advertise manual guidance as an executable install command"
     fi
     assert_not_contains "$out" "MISSING: tmux" "backend=$backend must not demand tmux when its own CLI is missing"
   done <<'ROWS'
-herdr^herdr
-zellij^zellij
-cmux^cmux
+herdr^herdr^https://herdr.dev
+zellij^zellij^
+cmux^cmux^
+ryder^ryder^built from source from the Ryder app repository; see docs/ryder-backend.md 'Setup'
 ROWS
   pass "bootstrap: a session-provider backend gates its own CLI, never a false tmux requirement"
 }
@@ -611,6 +615,16 @@ test_herdr_install_requires_manual_action() {
   [ "$out" = "error: herdr requires manual installation (instructions: https://herdr.dev)" ] \
     || fail "install herdr should return actionable manual-install guidance, got: $out"
   pass "bootstrap: Herdr manual-install guidance is never executed as a shell command"
+}
+
+test_ryder_install_requires_manual_action() {
+  local out status
+  out=$("$ROOT/bin/fm-bootstrap.sh" install ryder 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "install ryder should fail instead of evaluating its manual-install hint"
+  [ "$out" = "error: ryder requires manual installation (instructions: built from source from the Ryder app repository; see docs/ryder-backend.md 'Setup')" ] \
+    || fail "install ryder should return actionable manual-install guidance, got: $out"
+  pass "bootstrap: Ryder manual-install guidance is never executed as a shell command"
 }
 
 test_cmux_bundled_cli_satisfies_dependency() {
@@ -1157,6 +1171,7 @@ test_orca_backend_gates_orca_tool_only_when_selected
 test_session_provider_backends_do_not_require_tmux
 test_session_provider_backends_gate_own_cli_not_tmux
 test_herdr_install_requires_manual_action
+test_ryder_install_requires_manual_action
 test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
 test_json_backends_require_jq_not_tmux
