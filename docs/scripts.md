@@ -59,9 +59,9 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-send.sh`             | Send one verified literal line or supported key through the target's recorded backend |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for busy detection, composer capture, and verified submit |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
-| `fm-pr-url-lib.sh`       | Shared PR URL parser dispatching GitHub and Gitea URLs by shape into forge, owner, repo, number |
+| `fm-pr-url-lib.sh`       | Shared PR URL parser dispatching GitHub, Gitea, and Bitbucket URLs by shape into forge, owner, repo, number |
 | `fm-pr-check.sh`         | Record `pr=` and `pr_head=` for a PR-ready task, then arm the watcher's merge poll   |
-| `fm-pr-merge.sh`         | Record PR metadata, then merge a task's GitHub or Gitea PR from its full URL         |
+| `fm-pr-merge.sh`         | Record PR metadata, then merge a task's GitHub or Gitea PR (or refuse a Bitbucket PR with open-URL guidance) from its full URL |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require scout reports, retire secondmate homes |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |

@@ -22,6 +22,13 @@
 # `tea pulls merge` instead, run with cwd inside the task's worktree so tea
 # auto-discovers the right login/host from its origin remote.
 #
+# A Bitbucket PR URL (fm-pr-url-lib.sh: any host, plural "pull-requests") has no
+# CLI equivalent here, so it cannot be auto-merged: after recording pr= the
+# script prints open-URL guidance and exits non-zero, telling firstmate the merge
+# must happen manually in the browser (teardown's content-in-default fallback
+# then verifies the merge landed). It never invokes gh-axi or tea for a Bitbucket
+# PR, and needs no worktree because there is no CLI login context to resolve.
+#
 # Merge method: defaults to --squash (gh-axi) / --style squash (tea) when the
 # caller passes no explicit method after the optional -- separator. An explicit
 # caller method is never overridden. For a Gitea PR the caller passes tea's own
@@ -76,7 +83,7 @@ parse_pr_url() {
     PR_NUMBER=$FM_PR_NUMBER
     return 0
   fi
-  echo "error: PR URL must match https://github.com/<owner>/<repo>/pull/<number> or a Gitea https://<host>/<owner>/<repo>/pulls/<number> URL (got: $url)" >&2
+  echo "error: PR URL must match https://github.com/<owner>/<repo>/pull/<number>, a Gitea https://<host>/<owner>/<repo>/pulls/<number> URL, or a Bitbucket https://<host>/<workspace>/<repo>/pull-requests/<number> URL (got: $url)" >&2
   return 1
 }
 
@@ -107,6 +114,9 @@ if [ "$PR_FORGE" = gitea ]; then
   WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
   [ -n "$WT" ] && [ -d "$WT" ] || { echo "error: no worktree recorded for task $ID; cannot resolve Gitea login context for tea" >&2; exit 1; }
   ( cd "$WT" && tea pulls merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" ${merge_args[@]+"${merge_args[@]}"} "$@" )
+elif [ "$PR_FORGE" = bitbucket ]; then
+  echo "error: Bitbucket PRs are merged manually in the browser; firstmate has no CLI merge path. Open $URL and merge there, then tell firstmate it is done." >&2
+  exit 1
 else
   if ! caller_has_merge_method "$@"; then
     merge_args=(--squash)

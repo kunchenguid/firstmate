@@ -16,6 +16,10 @@
 #   (g) Gitea check.sh re-reads the worktree from meta at poll time, so a
 #       worktree that appears after arming (not just at arm time) still lets
 #       the merge poll succeed instead of silently failing forever
+#   (h) Bitbucket URL (any host, plural "pull-requests") has no gh/tea CLI here:
+#       pr= is recorded without pr_head= even with a worktree present, and the
+#       armed check.sh is the silent manual-merge poll
+#   (i) Bitbucket check.sh stays silent (the merge happens manually in the browser)
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -225,6 +229,43 @@ SH
   pass "fm-pr-check's armed check.sh re-reads the worktree from meta at poll time and still detects merge"
 }
 
+test_bitbucket_records_pr_without_head() {
+  local case_dir rc
+  case_dir=$(make_case bitbucket-record)
+  mkdir -p "$case_dir/wt"
+  # gh mock that would resolve a headRefOid if the code wrongly fell through to
+  # the GitHub path for a Bitbucket URL; pr_head= must stay absent regardless.
+  add_gh_mock "$case_dir" 9999999999999999999999999999999999999999
+
+  set +e
+  run_pr_check "$case_dir" task-x1 https://bitbucket.org/example/repo/pull-requests/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "bitbucket-record: fm-pr-check should succeed"
+  assert_grep 'pr=https://bitbucket.org/example/repo/pull-requests/9' "$case_dir/state/task-x1.meta" \
+    "bitbucket-record: pr= was not recorded"
+  assert_no_grep 'pr_head=' "$case_dir/state/task-x1.meta" \
+    "bitbucket-record: pr_head= should not be recorded without a CLI to resolve it"
+  assert_grep 'merged manually in the browser' "$case_dir/state/task-x1.check.sh" \
+    "bitbucket-record: check.sh was not armed with the silent manual-merge poll"
+  pass "fm-pr-check records pr= without pr_head= for a Bitbucket PR URL and arms a silent check.sh"
+}
+
+test_bitbucket_check_stays_silent() {
+  local case_dir out
+  case_dir=$(make_case bitbucket-silent)
+  mkdir -p "$case_dir/wt"
+
+  run_pr_check "$case_dir" task-x1 https://bitbucket.org/example/repo/pull-requests/12 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "bitbucket-silent: fm-pr-check failed"
+
+  out=$(PATH="$case_dir/fakebin:$PATH" bash "$case_dir/state/task-x1.check.sh") || true
+  [ -z "$out" ] || fail "bitbucket-silent: armed check.sh should stay silent (got: $out)"
+  pass "fm-pr-check's armed Bitbucket check.sh stays silent (manual browser merge)"
+}
+
 test_github_records_pr_head_and_arms_check
 test_github_check_reports_merged
 test_gitea_records_pr_head_and_arms_check
@@ -232,3 +273,5 @@ test_gitea_check_reports_merged
 test_gitea_check_stays_silent_when_not_merged
 test_no_worktree_records_pr_without_head
 test_gitea_check_polls_worktree_recorded_after_arming
+test_bitbucket_records_pr_without_head
+test_bitbucket_check_stays_silent

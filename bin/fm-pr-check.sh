@@ -5,7 +5,10 @@
 # check contract: output = wake firstmate, silence = keep sleeping).
 # The PR URL's shape (fm-pr-url-lib.sh) picks the forge: a GitHub URL uses gh; a
 # Gitea URL (any host, plural "pulls") uses tea, run with cwd inside the task's
-# worktree so tea auto-discovers the right login/host from its origin remote.
+# worktree so tea auto-discovers the right login/host from its origin remote; a
+# Bitbucket URL (any host, plural "pull-requests") has no CLI equivalent here, so
+# pr_head= is skipped and the armed poll stays silent - the merge happens manually
+# in the browser and teardown's content-in-default fallback verifies it landed.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -34,7 +37,7 @@ if [ -f "$META" ]; then
           [ -n "$REMOTE_HEAD" ] && PR_HEAD=$REMOTE_HEAD
         fi
       fi
-    else
+    elif [ "$FORGE" != bitbucket ]; then
       if command -v gh >/dev/null 2>&1; then
         if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null); then
           PR_HEAD=$REMOTE_HEAD
@@ -57,6 +60,13 @@ if [ -n "\$WT" ] && [ -d "\$WT" ]; then
   state=\$(cd "\$WT" 2>/dev/null && tea pulls "$FM_PR_NUMBER" --repo "$FM_PR_OWNER/$FM_PR_REPO" -o json 2>/dev/null | jq -r '.hasMerged // false')
   [ "\$state" = "true" ] && echo "merged"
 fi
+EOF
+elif [ "$FORGE" = bitbucket ]; then
+  cat > "$STATE/$ID.check.sh" <<'EOF'
+# Bitbucket PRs are merged manually in the browser; firstmate has no CLI merge
+# poll for them, so this poll stays silent (the watcher's check contract) and
+# teardown's content-in-default fallback verifies the merge landed.
+exit 0
 EOF
 else
   cat > "$STATE/$ID.check.sh" <<EOF

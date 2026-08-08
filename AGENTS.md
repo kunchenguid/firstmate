@@ -461,7 +461,7 @@ This do-not-fight rule does not license evidence commits in firstmate's own repo
 **yolo (orthogonal).** With `yolo=off` (default) every approval is the captain's: ask-user findings, PR merges, the local-only merge.
 With `yolo=on`, firstmate makes those calls itself without asking - resolve ask-user findings on your judgment, and run `bin/fm-pr-merge.sh <id> <full PR URL>` / `bin/fm-merge-local.sh` once the work is green/approved - EXCEPT anything destructive, irreversible, or security-sensitive, which still escalates to the captain.
 Never merge a red PR even under yolo.
-`bin/fm-pr-merge.sh` always records `pr=` and records `pr_head=` when available before merging; it detects the forge from the PR URL's shape alone (`bin/fm-pr-url-lib.sh`: singular `https://github.com/<owner>/<repo>/pull/<n>` is GitHub, plural `https://<any-host>/<owner>/<repo>/pulls/<n>` is Gitea), never a hardcoded hostname. A GitHub URL parses into `gh-axi pr merge <n> --repo <owner>/<repo>` and defaults to `--squash` unless an explicit merge method is forwarded after `--`. A Gitea URL parses into `tea pulls merge <n> --repo <owner>/<repo>` (run with cwd inside the task's worktree so tea resolves login/host from its origin remote) and defaults to `--style squash` unless the caller passes an explicit `--style`; this holds even on a repo with no PR CI where the "checks green" signal that normally triggers `bin/fm-pr-check.sh` never fires - do not call `gh-axi pr merge` or `tea pulls merge` directly for a task's PR, or the recording step can be silently skipped and a later `fm-teardown.sh` has nothing to verify a squash merge against.
+`bin/fm-pr-merge.sh` always records `pr=` and records `pr_head=` when available before merging; it detects the forge from the PR URL's shape alone (`bin/fm-pr-url-lib.sh`: singular `https://github.com/<owner>/<repo>/pull/<n>` is GitHub, plural `https://<any-host>/<owner>/<repo>/pulls/<n>` is Gitea, plural `https://<any-host>/<workspace>/<repo>/pull-requests/<n>` is Bitbucket), never a hardcoded hostname. A GitHub URL parses into `gh-axi pr merge <n> --repo <owner>/<repo>` and defaults to `--squash` unless an explicit merge method is forwarded after `--`. A Gitea URL parses into `tea pulls merge <n> --repo <owner>/<repo>` (run with cwd inside the task's worktree so tea resolves login/host from its origin remote) and defaults to `--style squash` unless the caller passes an explicit `--style`. A Bitbucket URL has no CLI equivalent, so the helper records `pr=` then refuses with open-URL guidance - Bitbucket merges happen manually in the browser. This holds even on a repo with no PR CI where the "checks green" signal that normally triggers `bin/fm-pr-check.sh` never fires - do not call `gh-axi pr merge` or `tea pulls merge` directly for a task's PR, or the recording step can be silently skipped and a later `fm-teardown.sh` has nothing to verify a squash merge against.
 After any merge you perform without asking the captain, post a one-line "merged <full PR URL or local main> after checks passed" FYI so the captain keeps a trail.
 
 ### Validate
@@ -494,13 +494,13 @@ During the `ci` monitor phase, `bin/fm-crew-state.sh` also reads the ci step log
 ### PR ready
 
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
-Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll (GitHub via `gh`, Gitea via `tea`, detected from the URL's shape).
+Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll (GitHub via `gh`, Gitea via `tea`, detected from the URL's shape; a Bitbucket URL records `pr=` without `pr_head=` and arms a silent poll because there is no CLI, so its merge must be confirmed manually).
 Tell the captain: the PR's full URL (always the complete `https://...` link, never a bare `#number` - the captain's terminal makes a full URL clickable), a one-paragraph summary, and, for `no-mistakes`, the risk level it emitted.
 (The check contract, for any custom `state/<id>.check.sh` you write yourself: print one line only when firstmate should wake, print nothing otherwise, and finish before `FM_CHECK_TIMEOUT`.)
 
 If the captain says "merge it", run `bin/fm-pr-merge.sh <id> <full PR URL>` yourself; that instruction is the explicit approval.
 If `yolo=on`, merge a green/approved PR yourself the same way and post the required FYI.
-For a GitHub PR the helper defaults to `--squash` and accepts explicit merge-method flags such as `-- --merge`, `-- --rebase`, or `-- --method=merge`; for a Gitea PR it defaults to `--style squash` and accepts an explicit `-- --style <merge|rebase|squash|rebase-merge>`. Either way it refuses `--repo` or `-R` overrides because the repository is derived from the URL.
+For a GitHub PR the helper defaults to `--squash` and accepts explicit merge-method flags such as `-- --merge`, `-- --rebase`, or `-- --method=merge`; for a Gitea PR it defaults to `--style squash` and accepts an explicit `-- --style <merge|rebase|squash|rebase-merge>`; for a Bitbucket PR it refuses the merge and prints open-URL guidance because there is no CLI path - relay the URL to the captain to merge manually. Either way it refuses `--repo` or `-R` overrides because the repository is derived from the URL.
 
 ### Ship teardown (only after merge is confirmed)
 
@@ -701,7 +701,7 @@ If the primary leaves the file absent, each home uses the default tasks-axi back
 Keep Done to the 10 most recent entries.
 With the active compatible tasks-axi backend, `tasks-axi done` auto-prunes Done and archives pruned entries to `data/done-archive.md`, so do not hand-prune.
 When hand-editing, prune older Done entries manually whenever you add to the section.
-Pruning loses nothing: finished PR-based ship tasks live on as GitHub or Gitea PRs, local-only ship tasks live on in local `main`, and scout tasks live on as report files.
+Pruning loses nothing: finished PR-based ship tasks live on as GitHub, Gitea, or Bitbucket PRs, local-only ship tasks live on in local `main`, and scout tasks live on as report files.
 Map firstmate's real backlog operations to the approved commands:
 
 - File an item: `tasks-axi add <id> "<one line>" --kind <ship|scout> --repo <name>`, plus `--start` for immediate dispatch (In flight) or the default queue placement, and `--blocked-by <id>` (repeatable) when it waits on another task.

@@ -59,7 +59,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 ### Requirements
 
 - A verified agent harness: Claude Code, Grok, Pi, Codex, or OpenCode.
-- Git and the GitHub CLI, authenticated through `gh auth login`. A project hosted on a self-managed Gitea instead needs the `tea` CLI, authenticated for that host.
+- Git and the GitHub CLI, authenticated through `gh auth login`. A project hosted on a self-managed Gitea instead needs the `tea` CLI, authenticated for that host; a Bitbucket project needs no extra CLI, but its PRs are merged manually in the browser (firstmate prints open-URL guidance).
 - tmux, for the reference session backend.
 
 The first mate detects and offers to install everything else.

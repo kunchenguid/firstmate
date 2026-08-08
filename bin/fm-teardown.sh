@@ -21,6 +21,9 @@
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
+# A recorded Bitbucket PR URL (fm-pr-url-lib.sh: any host, plural "pull-requests")
+# has no CLI lookup here, so its containment check always falls back to the content
+# check too - firstmate never assumes a Bitbucket PR merged without content proof.
 # Uncommitted changes are never landed.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge on the captain's approval) as a fallback
@@ -197,6 +200,10 @@ pr_number_from_target() {
       n=${target##*/pulls/}
       n=${n%%[!0-9]*}
       ;;
+    *"/pull-requests/"*)
+      n=${target##*/pull-requests/}
+      n=${n%%[!0-9]*}
+      ;;
     [0-9]*)
       n=${target%%[!0-9]*}
       ;;
@@ -250,9 +257,12 @@ EOF
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
 # PR from the recorded pr= URL first, then from the branch name. A recorded
 # Gitea PR URL (fm-pr-url-lib.sh: any host, plural "pulls") is looked up via
-# `tea pulls` (cwd inside $WT so tea auto-discovers the login/host); anything
-# else (a GitHub URL, or a bare number from pr_number_from_branch, which is
-# always gh-axi-sourced) is looked up via `gh pr view` exactly as before.
+# `tea pulls` (cwd inside $WT so tea auto-discovers the login/host); a recorded
+# Bitbucket PR URL (any host, plural "pull-requests") has no CLI lookup here, so
+# it returns non-zero and the caller falls back to the content check (fail-safe:
+# never assume a Bitbucket PR merged without content proof); anything else (a
+# GitHub URL, or a bare number from pr_number_from_branch, which is always
+# gh-axi-sourced) is looked up via `gh pr view` exactly as before.
 # Returns non-zero when the PR is not merged, the current work is not contained
 # in the PR head, no PR is found, or any lookup error occurs - the caller then
 # falls back to the content check.
@@ -274,6 +284,8 @@ pr_is_merged() {
       true) ;;
       *) return 1 ;;
     esac
+  elif fm_parse_pr_url "$target" && [ "$FM_PR_FORGE" = bitbucket ]; then
+    return 1
   else
     view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
     state=${view%%$'\t'*}

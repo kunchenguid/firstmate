@@ -54,6 +54,11 @@
 # in the recorded pr= URL routes the containment check through `tea` instead of
 # `gh`):
 #   (z) no-mistakes + Gitea squash-merged PR, deleted branch  -> ALLOW (tea dispatch)
+#
+# Also covers Bitbucket PR dispatch (any host, plural "pull-requests"): there is
+# no CLI lookup, so the containment check always falls back to the content check:
+#   (aa) no-mistakes + Bitbucket PR, content landed on default -> ALLOW (content)
+#   (bb) no-mistakes + Bitbucket PR, content not landed        -> REFUSE (fail-safe)
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -278,6 +283,14 @@ SH
 append_pr_meta_url() {
   local case_dir=$1
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+}
+
+# Bitbucket equivalent of append_pr_meta_url: a hyphenated plural "pull-requests"
+# URL (any host) so fm-teardown.sh's containment check has no CLI to query and
+# falls back to the content check.
+append_bitbucket_pr_meta_url() {
+  local case_dir=$1
+  printf '%s\n' 'pr=https://bitbucket.org/example/repo/pull-requests/7' >> "$case_dir/state/task-x1.meta"
 }
 
 commit_tree_from_wt_head() {
@@ -875,6 +888,46 @@ test_content_in_default_fallback_allows() {
   pass "worktree whose content already landed in the default branch is torn down (content fallback)"
 }
 
+test_bitbucket_content_landed_allows() {
+  local case_dir rc
+  case_dir=$(make_case bitbucket-content-landed)
+  write_meta "$case_dir" no-mistakes ship
+  # A recorded Bitbucket PR URL cannot be queried (no CLI), so the containment
+  # check must fall back to the content check. The branch's feature.txt has
+  # landed on origin/main via a squash commit, so teardown may proceed.
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_bitbucket_pr_meta_url "$case_dir"
+  land_on_origin_main "$case_dir" feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "bitbucket-content-landed: teardown should succeed when content is in the default branch"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "bitbucket-content-landed: teardown printed a REFUSED line"
+  pass "Bitbucket PR worktree whose content landed in the default branch is torn down (content fallback)"
+}
+
+test_bitbucket_content_absent_refuses() {
+  local case_dir rc
+  case_dir=$(make_case bitbucket-content-absent)
+  write_meta "$case_dir" no-mistakes ship
+  # A recorded Bitbucket PR URL has no CLI lookup and the content never landed on
+  # origin/main, so teardown must refuse rather than assume the manual merge.
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_bitbucket_pr_meta_url "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "bitbucket-content-absent: teardown should refuse when content is not in the default branch"
+  grep -q REFUSED "$case_dir/stderr" || fail "bitbucket-content-absent: no REFUSED line in stderr"
+  pass "Bitbucket PR worktree whose content is not in the default branch is refused (fail-safe)"
+}
+
 test_content_fallback_refreshes_stale_origin_ref() {
   local case_dir rc
   case_dir=$(make_case content-stale-ref)
@@ -1334,6 +1387,8 @@ test_merged_pr_with_later_local_commit_refuses
 test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
+test_bitbucket_content_landed_allows
+test_bitbucket_content_absent_refuses
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses

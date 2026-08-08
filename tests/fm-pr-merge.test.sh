@@ -20,6 +20,12 @@
 #   (i) Gitea URL merges via tea with default --style squash
 #   (j) explicit --style is not overridden by the default
 #   (k) merge refuses when the task has no worktree to resolve tea's login from
+#
+# A Bitbucket PR URL (any host, plural "pull-requests") has no CLI equivalent
+# here, so it records pr= and then refuses with open-URL guidance instead of
+# auto-merging (bin/fm-pr-url-lib.sh):
+#   (l) Bitbucket URL records pr= then refuses with manual-merge guidance, never
+#       invoking gh-axi or tea, and needs no worktree (no CLI login context)
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -378,6 +384,31 @@ test_gitea_merge_refuses_without_worktree() {
   pass "fm-pr-merge refuses a Gitea merge when the task has no worktree to resolve tea's login from"
 }
 
+test_bitbucket_merge_refuses_with_manual_guidance() {
+  local case_dir rc
+  case_dir=$(make_case bitbucket-manual-merge)
+  add_gh_mocks "$case_dir" 0000000000000000000000000000000000000000
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/tea.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://bitbucket.org/example/repo/pull-requests/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "bitbucket-manual-merge: fm-pr-merge should refuse a Bitbucket merge"
+  assert_grep 'pr=https://bitbucket.org/example/repo/pull-requests/9' "$case_dir/state/task-x1.meta" \
+    "bitbucket-manual-merge: pr= was not recorded before refusing"
+  assert_grep 'merged manually in the browser' "$case_dir/stderr" \
+    "bitbucket-manual-merge: refusal did not give open-URL guidance"
+  assert_grep 'https://bitbucket.org/example/repo/pull-requests/9' "$case_dir/stderr" \
+    "bitbucket-manual-merge: refusal did not name the PR URL to open"
+  [ ! -s "$case_dir/gh-axi.log" ] || fail "bitbucket-manual-merge: gh-axi was invoked for a Bitbucket PR"
+  [ ! -s "$case_dir/tea.log" ] || fail "bitbucket-manual-merge: tea was invoked for a Bitbucket PR"
+  pass "fm-pr-merge records pr= then refuses a Bitbucket merge with open-URL guidance (no gh-axi or tea)"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -391,3 +422,4 @@ test_parses_pr_url_for_gh_axi
 test_gitea_merge_uses_tea_with_default_style
 test_gitea_explicit_style_not_overridden
 test_gitea_merge_refuses_without_worktree
+test_bitbucket_merge_refuses_with_manual_guidance
