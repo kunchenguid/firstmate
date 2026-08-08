@@ -211,8 +211,11 @@ Keep the brief as one positional argument.
 Multiple positional args become separate queued messages; `fm-spawn`'s template already does this correctly.
 
 Project trust dialog can appear on the first pi run in any not-yet-trusted directory, observed even on clean worktrees.
-Accept with Enter.
 The decision persists per path in `~/.pi/agent/trust.json`, so later spawns in the same worktree slot skip it.
+Because a task worktree or a freshly seeded secondmate home is always a new path, `fm-spawn` launches every pi agent with `--approve` (trust project-local files for this run), so a firstmate-launched pi agent should never be sitting on that dialog.
+If you find one parked on it anyway, that is a launch-path bug worth reporting, not a dialog to hand-accept; accepting with Enter unblocks that one lane in the meantime.
+`--approve` is per-run and scoped to the launched agent - never change the machine-wide `defaultProjectTrust` in `~/.pi/agent/settings.json` to work around a trust prompt, because that is a captain-owned security posture.
+pi crewmate and scout launches additionally carry `--exclude-tools ask_question` so a question tool cannot halt an unattended run; secondmate launches deliberately omit it, because a secondmate is a supervisor the captain may type into directly.
 
 `fm-spawn` keeps the turn-end extension in `state/`, outside the worktree, because project-local extension files make the trust gate strictly worse and pollute the project.
 The extension must listen for pi's `turn_end` event, not `agent_end`, so the watcher wakes after each completed turn instead of only when the whole agent run exits.

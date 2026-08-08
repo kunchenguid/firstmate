@@ -441,9 +441,77 @@ test_pi_omits_invalid_max_effort() {
   expect_code 0 "$status" "pi spawn with max effort should not pass an invalid flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi sonnet max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "pi --model 'sonnet' -e" "pi launch did not thread model"
+  assert_contains "$launch" "pi --approve --exclude-tools ask_question --model 'sonnet' -e" \
+    "pi launch did not thread model after the autonomy flags"
   assert_not_contains "$launch" "--thinking" "pi launch must omit --thinking max because the CLI rejects it"
   pass "pi threads model and omits unsupported max effort"
+}
+
+# A pi crewmate/scout must never sit parked on pi's project-trust dialog or on a
+# question tool nobody is watching. Both flags precede the model/effort
+# placeholders, so the rendered line has to stay well-formed in BOTH directions:
+# with the placeholders expanded and with them empty. The empty case is the one a
+# naive insertion breaks (a stray double space, or --exclude-tools separated from
+# its ask_question value), so it is asserted as an exact prefix.
+test_pi_crewmate_carries_autonomy_flags() {
+  local rec id out status launch
+  id=profile-pi-approve-z20
+  rec=$(make_spawn_case profile-pi-approve pi "$id")
+  read_case_record "$rec"
+
+  # With model and effort set: the flags lead, then --model/--thinking, then -e.
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model sonnet --effort high)
+  status=$?
+  expect_code 0 "$status" "pi spawn with model and effort should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "pi --approve --exclude-tools ask_question --model 'sonnet' --thinking 'high' -e" \
+    "pi launch with model/effort did not render the autonomy flags ahead of the profile flags"
+
+  # Without model or effort: both placeholders expand to nothing, so --approve and
+  # --exclude-tools ask_question must sit flush against -e with single spaces.
+  id=profile-pi-approve-bare-z21
+  rec=$(make_spawn_case profile-pi-approve-bare pi "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "pi spawn without model or effort should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "pi --approve --exclude-tools ask_question -e" \
+    "pi launch without model/effort did not render well-formed autonomy flags"
+  assert_not_contains "$launch" "--model" "bare pi launch must not carry a --model flag"
+  assert_not_contains "$launch" "--thinking" "bare pi launch must not carry a --thinking flag"
+  assert_not_contains "$launch" "  " "bare pi launch must not contain a doubled space from an empty placeholder"
+  pass "pi crewmate launches carry --approve and --exclude-tools ask_question, with and without profile flags"
+}
+
+# A pi SECONDMATE gets --approve for the same trust-dialog reason, but keeps its
+# question tool: it is a firstmate-class supervisor the captain may type into
+# directly. This asserts the split deliberately, so flipping either half is a
+# visible decision rather than a silent drift.
+test_pi_secondmate_approves_without_excluding_tools() {
+  local rec id sm source out status launch
+  id=profile-pi-secondmate-z22
+  rec=$(make_spawn_case profile-pi-secondmate pi "$id")
+  read_case_record "$rec"
+  printf 'pi\n' > "$HOME_DIR/config/secondmate-harness"
+  source="$CASE_DIR/upstream-source"
+  sm="$CASE_DIR/secondmate-home"
+  make_upstream_source "$source"
+  make_seeded_secondmate_home "$sm" "$id" "$source"
+  printf -- '- %s - pi secondmate flags test (home: %s; scope: test; projects: ; added 2026-08-07)\n' \
+    "$id" "$(cd "$sm" && pwd -P)" > "$HOME_DIR/data/secondmates.md"
+
+  out=$(FM_TEST_ROOT_OVERRIDE="$source" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "pi secondmate spawn should succeed: $out"
+  assert_contains "$out" "spawned $id harness=pi kind=secondmate" "secondmate did not launch on pi"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "pi --approve -e" \
+    "pi secondmate launch did not carry --approve ahead of its extensions"
+  assert_not_contains "$launch" "--exclude-tools" \
+    "pi secondmate launch must keep its question tool; --exclude-tools is crewmate-only"
+  pass "pi secondmate launches carry --approve but deliberately keep ask_question"
 }
 
 test_batch_forwards_shared_profile_flags() {
@@ -505,6 +573,8 @@ test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
 test_pi_omits_invalid_max_effort
+test_pi_crewmate_carries_autonomy_flags
+test_pi_secondmate_approves_without_excluding_tools
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
 

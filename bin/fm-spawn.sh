@@ -2461,11 +2461,35 @@ launch_template() {
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(cat __BRIEF__)"' ;;
+    # pi: --approve ("Trust project-local files for this run") is what keeps an
+    # unattended pi agent off the project-trust dialog. Pi has no permission system,
+    # but it DOES gate every not-yet-trusted directory behind that dialog on first
+    # run - observed even on clean worktrees - and a task worktree or a freshly
+    # seeded secondmate home is always a new path, so without --approve the agent
+    # parks on a prompt nobody is watching. It is per-run and scoped to this
+    # firstmate-launched agent; it never touches the captain's machine-wide
+    # defaultProjectTrust posture in ~/.pi/agent/settings.json. Both flags go ahead
+    # of __MODELFLAG__/__EFFORTFLAG__ so --exclude-tools stays adjacent to its value
+    # and the line renders correctly whether or not those placeholders expand.
     pi)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(cat __BRIEF__)"'
+        # A secondmate gets --approve for the same trust-dialog reason (and it also
+        # lets pi auto-discover the home's project-local extensions), but NOT
+        # --exclude-tools ask_question: a secondmate is a firstmate-class supervisor
+        # the captain may type into directly, so its interactive surface is
+        # deliberately left intact. Excluding the tool is only a denylist entry, so
+        # revisit this if pi ever ships a question tool that can park a secondmate -
+        # fm-watch.sh skips stale-pane wakes for kind=secondmate, so a parked
+        # secondmate would not trip stale detection.
+        printf '%s' 'pi --approve __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(cat __BRIEF__)"'
       else
-        printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(cat __BRIEF__)"'
+        # --exclude-tools is a plain denylist over built-in, extension, and custom
+        # tool names (pi 0.84.0 filters it as a Set, ignoring names that are not
+        # registered), and ask_question is pi's own documented example for it. A
+        # crewmate's contract is to run autonomously and report through its status
+        # file, so a tool that halts the run to ask a question nobody is watching is
+        # never the right behavior here.
+        printf '%s' 'pi --approve --exclude-tools ask_question __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(cat __BRIEF__)"'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
