@@ -99,8 +99,14 @@ cat > "$WORKTREE/probe.sh" <<SH
 #!/usr/bin/env bash
 set -eu
 python3 -c 'import socket; s=socket.socket(socket.AF_UNIX); s.connect("$NO_MISTAKES_ROOT/socket"); s.close()'
-if ! (cd '$ROOT' && NO_MISTAKES_TELEMETRY=off \
-  NO_MISTAKES_NO_UPDATE_CHECK=1 no-mistakes axi >/dev/null 2>&1); then
+no_mistakes_status=
+if ! no_mistakes_status=\$(cd '$ROOT' && env NM_HOME='$NO_MISTAKES_ROOT' \
+  NO_MISTAKES_TELEMETRY=off NO_MISTAKES_NO_UPDATE_CHECK=1 NO_COLOR=1 \
+  no-mistakes daemon status 2>&1); then
+  echo NO_MISTAKES_SOCKET_CONNECT_FAILED
+  exit 93
+fi
+if ! [[ "\$no_mistakes_status" =~ ^[[:space:]]*([^[:alnum:][:space:]]+[[:space:]]+)?daemon[[:space:]]+running[[:space:]]+\(pid[[:space:]]+[1-9][0-9]*\)[[:space:]]*\$ ]]; then
   echo NO_MISTAKES_SOCKET_CONNECT_FAILED
   exit 93
 fi
