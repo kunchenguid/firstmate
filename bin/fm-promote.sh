@@ -86,4 +86,4 @@ mv "$TMP" "$META"
 
 HOME_Q=$(printf '%q' "$FM_HOME")
 echo "promoted $ID to ship mode=$MODE yolo=$YOLO (teardown protection restored)"
-echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions for mode=$MODE: review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement, grouping related fixes and running the smallest focused checks that establish the changed behavior before rerunning broader suites; report done>'"
+echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions for mode=$MODE: review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement, grouping related fixes and running the smallest focused checks that establish the changed behavior before rerunning broader suites; those interim checks never narrow the definition of done or final checks this delivery mode requires; report done>'"
