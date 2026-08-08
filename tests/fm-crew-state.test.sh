@@ -1432,6 +1432,62 @@ EOF
   pass "a superseded same-branch row is never attributed"
 }
 
+# The branch_sync read must stop at the block, not one line past it. A sed range
+# ends ON its terminating line, so the first line of the NEXT top-level block is
+# still inside the range; taking every line lets a top-level key answer for one
+# absent from branch_sync. `axi` output really does place top-level keys after
+# this block, so the containment cannot rest on branch_sync happening to be last.
+# Here branch_sync carries no state of its own and a top-level `state:` follows
+# it, which must leave the run unattributed rather than reading as pipeline_owned.
+run_pipeline_owned_without_state() {  # <branch> <run-head> <sync-branch> <sync-head> <sync-run> <trailing-state>
+  cat <<EOF
+run:
+  id: "01RUN2"
+  branch: $1
+  status: running
+  head: $2
+  pr: ""
+  findings: none
+branch_sync:
+  changed: false
+  local:
+    branch: $3
+    head: $4
+    clean: true
+  pipeline:
+    run: "$5"
+    status: running
+state: $6
+EOF
+}
+
+test_branch_sync_read_stops_at_the_block_boundary() {
+  reset_fakes
+  local d heads c1 c2 c3 out
+  d=$(new_case branch-sync-boundary)
+  heads=$(make_gate_advanced_branch "$d/wt" "$d/gate" fm/feat-boundary)
+  read -r c1 c2 c3 <<< "$heads"
+  [ -n "$c2" ] || fail "fixture: missing published pipeline head"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/boundary.meta" "window=fm:fm-boundary" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementation in progress\n' > "$d/state/boundary.status"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" boundary
+
+  # Control: the same shape with a real pipeline_owned state DOES attribute, so
+  # the assertion below cannot pass merely because the fixture never binds.
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned fm/feat-boundary "${c3:0:8}" pipeline_owned fm/feat-boundary "$c1" 01RUN2)"
+  out=$(run_crew_state "$d" boundary)
+  assert_contains "$out" "source: run-step" "control: a real pipeline_owned branch_sync attributes the run"
+
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned_without_state fm/feat-boundary "${c3:0:8}" fm/feat-boundary "$c1" 01RUN2 pipeline_owned)"
+  out=$(run_crew_state "$d" boundary)
+  assert_not_contains "$out" "source: run-step" "a top-level key after branch_sync must not answer for a key absent from it"
+  assert_contains "$out" "source: status-log" "falls back to current-state sources instead"
+  pass "the branch_sync read stops at the block instead of one line past it"
+}
+
 # Preserved protection, asserted as a divergence so no arm can go quietly
 # vacuous: ONE fixture, varying one branch_sync field at a time. branch_sync
 # attributes the run only while it names this worktree's own head and the run it
@@ -1552,6 +1608,7 @@ test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
 test_pipeline_owned_run_beats_superseded_row
 test_superseded_coarse_row_not_attributed
+test_branch_sync_read_stops_at_the_block_boundary
 test_pipeline_owned_binding_is_bound_to_this_run_and_head
 test_only_pipeline_owned_branch_sync_attributes
 

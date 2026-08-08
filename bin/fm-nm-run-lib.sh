@@ -63,9 +63,15 @@ fm_nm_field() {  # <toon-output> <key>
 # reuses bare key names across blocks - run.head and branch_sync.local.head both
 # render as `head:` - so fm_nm_field's whole-output first-match scan cannot
 # address them; this bounds the scan to the named block.
+#
+# Only INDENTED lines inside the range are read, which is what makes that
+# bounding real rather than incidental. A sed range ends ON its terminating
+# line, so the first line of the NEXT top-level block is still inside it: taking
+# every line would let a following top-level key answer for one absent here, and
+# `axi` output does place top-level keys after this block.
 fm_nm_block_field() {  # <toon-output> <block> <key>
   printf '%s\n' "$1" \
-    | sed -n "/^$2:[[:space:]]*$/,/^[^[:space:]]/p" \
+    | sed -n "/^$2:[[:space:]]*$/,/^[^[:space:]]/{ /^[[:space:]]/p; }" \
     | sed -n "s/^[[:space:]]*$3:[[:space:]]*\(.*\)/\1/p" \
     | head -1
 }
