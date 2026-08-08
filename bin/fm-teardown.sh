@@ -53,9 +53,9 @@
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force]
-#   --force skips ordinary-task dirty and landed-work checks, skips scout report
-#   checks, and discards secondmate child work for kind=secondmate. Only use it
-#   when the captain has explicitly said to discard the work.
+#   --force skips ordinary-task landed-work and scout-report checks, and discards
+#   secondmate child work for kind=secondmate. It never returns a worktree with
+#   unknown untracked or tracked changes, and it never deletes a task branch.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -1145,6 +1145,51 @@ validate_worktree_teardown_safety() {
   fi
 }
 
+is_firstmate_runtime_artifact() {  # <untracked relative path>
+  case "$1" in
+    .claude/settings.local.json|.opencode/plugins/fm-turn-end.js|.opencode/plugins/fm-busy-state.js|\
+    .fm-grok-turnend|.fm-kimi-turnend) return 0 ;;
+  esac
+  return 1
+}
+
+validate_worktree_return_cleanliness() {
+  local status line path quoted untracked_blockers='' tracked_blockers=''
+  [ -d "$WT" ] || return 0
+  if ! status=$(git -C "$WT" status --porcelain=v1 --untracked-files=all 2>/dev/null); then
+    echo "REFUSED: cannot inspect worktree $WT for content that would survive or be discarded by return." >&2
+    return 1
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      '?? '*)
+        path=${line#?? }
+        is_firstmate_runtime_artifact "$path" && continue
+        printf -v quoted '%q' "$path"
+        untracked_blockers="${untracked_blockers}${untracked_blockers:+$'\n'}$quoted"
+        continue
+        ;;
+      *) path=${line:3} ;;
+    esac
+    printf -v quoted '%q' "$path"
+    tracked_blockers="${tracked_blockers}${tracked_blockers:+$'\n'}$quoted"
+  done <<EOF
+$status
+EOF
+  [ -z "$untracked_blockers$tracked_blockers" ] && return 0
+  if [ -n "$untracked_blockers" ]; then
+    echo "REFUSED: worktree $WT has untracked content that would survive return:" >&2
+    printf '%s\n' "$untracked_blockers" >&2
+  fi
+  if [ -n "$tracked_blockers" ]; then
+    echo "REFUSED: worktree $WT has tracked changes that return would discard:" >&2
+    printf '%s\n' "$tracked_blockers" >&2
+  fi
+  echo "Archive or remove the listed paths, then rerun teardown." >&2
+  return 1
+}
+
 # Fix 1 (see script header): does the active-or-most-recent no-mistakes run in
 # worktree $1 belong to THIS task, and is it parked at a gate awaiting an agent
 # that is about to be removed? Prints nothing; returns 0 only on a genuine
@@ -2187,6 +2232,10 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
+if [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+  validate_worktree_return_cleanliness || exit 1
+fi
+
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
     :
@@ -2201,8 +2250,8 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
-# Every landed/discard-work refusal above has now passed (or --force skipped
-# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
+# Every landed/discard-work and return-cleanliness refusal above has now passed.
+# Fix 1 and Fix 2 (see script header) run here, unconditionally on
 # --force, and before ANY destructive step below - a still-parked run or a
 # leaked process can own live work in this exact worktree. Not for
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
@@ -2233,19 +2282,12 @@ if [ "$BACKEND" = herdr ]; then
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
 fi
 
-# Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
   fi
   if [ -d "$WT" ]; then
-    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-    if [ "$branch" != "HEAD" ]; then
-      if git -C "$WT" checkout --detach -q 2>/dev/null; then
-        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-      fi
-    fi
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
@@ -2253,15 +2295,9 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
-  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-  if [ "$branch" != "HEAD" ]; then
-    if git -C "$WT" checkout --detach -q 2>/dev/null; then
-      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-    fi
-  fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
-    "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+    "$WT/.opencode/plugins/fm-busy-state.js" "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks

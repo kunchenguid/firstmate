@@ -931,6 +931,113 @@ test_dirty_worktree_refuses() {
   pass "dirty worktree is refused even when its committed work has landed (dirty always wins)"
 }
 
+add_pool_observing_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  shift
+  wt=
+  for arg in "$@"; do
+    case "$arg" in
+      --force) ;;
+      *) wt=$arg ;;
+    esac
+  done
+  if [ -n "$(git -C "$wt" status --porcelain=v1 --untracked-files=all)" ]; then
+    printf 'unavailable\n' > "${FM_FAKE_POOL_STATE:?}"
+  else
+    printf 'available\n' > "${FM_FAKE_POOL_STATE:?}"
+  fi
+  printf 'return %s\n' "$wt" >> "${FM_FAKE_TREEHOUSE_LOG:?}"
+fi
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+test_untracked_scratch_refuses_before_unusable_pool_return() {
+  local case_dir rc pool_state treehouse_log
+  case_dir=$(make_case untracked-scratch-return)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  mkdir -p "$case_dir/wt/.gate-lab"
+  printf 'scratch\n' > "$case_dir/wt/.gate-lab/scratch.txt"
+  pool_state="$case_dir/pool-state"
+  treehouse_log="$case_dir/treehouse.log"
+  add_pool_observing_treehouse "$case_dir"
+
+  rc=0
+  FM_FAKE_POOL_STATE="$pool_state" FM_FAKE_TREEHOUSE_LOG="$treehouse_log" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  if [ "$rc" -eq 0 ]; then
+    assert_present "$pool_state" \
+      "untracked-scratch-return: return completed without reporting the pool state"
+    assert_grep "unavailable" "$pool_state" \
+      "untracked-scratch-return: scratch did not make the returned copy unavailable"
+  fi
+  expect_code 1 "$rc" "untracked-scratch-return: teardown should refuse before returning scratch to the pool"
+  assert_grep "REFUSED: worktree $case_dir/wt has untracked content that would survive return:" "$case_dir/stderr" \
+    "untracked-scratch-return: refusal did not identify leftover content"
+  assert_grep ".gate-lab/scratch.txt" "$case_dir/stderr" \
+    "untracked-scratch-return: refusal did not name the exact scratch path"
+  assert_present "$case_dir/wt/.gate-lab/scratch.txt" \
+    "untracked-scratch-return: teardown destroyed untracked scratch"
+  assert_absent "$treehouse_log" \
+    "untracked-scratch-return: teardown returned a copy that the pool would mark unavailable"
+  assert_absent "$pool_state" \
+    "untracked-scratch-return: pool observed a return despite the refusal"
+  pass "untracked scratch is named and refused before it can make a returned copy unavailable"
+}
+
+test_untracked_work_and_branch_are_preserved_on_forced_return() {
+  local case_dir rc branch
+  case_dir=$(make_case untracked-work-preserved)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  mkdir -p "$case_dir/wt/notes"
+  printf 'candidate work\n' > "$case_dir/wt/notes/candidate.md"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "untracked-work-preserved: forced teardown should refuse unknown untracked work"
+  assert_grep "notes/candidate.md" "$case_dir/stderr" \
+    "untracked-work-preserved: refusal did not name the candidate work"
+  assert_present "$case_dir/wt/notes/candidate.md" \
+    "untracked-work-preserved: forced teardown silently destroyed candidate work"
+  branch=$(git -C "$case_dir/project" rev-parse --verify refs/heads/fm/task-x1 2>/dev/null || true)
+  [ -n "$branch" ] || fail "untracked-work-preserved: return deleted the task branch"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "untracked-work-preserved: refusal removed task metadata"
+  pass "forced return preserves untracked candidate work and its task branch"
+}
+
+test_clean_return_keeps_branch_and_pool_available() {
+  local case_dir rc branch pool_state treehouse_log
+  case_dir=$(make_case clean-return-preserves-branch)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  mkdir -p "$case_dir/wt/.opencode/plugins"
+  printf 'firstmate runtime state\n' > "$case_dir/wt/.opencode/plugins/fm-busy-state.js"
+  pool_state="$case_dir/pool-state"
+  treehouse_log="$case_dir/treehouse.log"
+  add_pool_observing_treehouse "$case_dir"
+
+  rc=0
+  FM_FAKE_POOL_STATE="$pool_state" FM_FAKE_TREEHOUSE_LOG="$treehouse_log" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "clean-return-preserves-branch: clean worktree should return"
+  assert_grep "available" "$pool_state" \
+    "clean-return-preserves-branch: returned clean copy was not available"
+  assert_absent "$case_dir/wt/.opencode/plugins/fm-busy-state.js" \
+    "clean-return-preserves-branch: teardown left its runtime artifact in the returned copy"
+  branch=$(git -C "$case_dir/project" rev-parse --verify refs/heads/fm/task-x1 2>/dev/null || true)
+  [ -n "$branch" ] || fail "clean-return-preserves-branch: return deleted the task branch"
+  pass "clean return preserves its task branch and makes the copy available"
+}
+
 test_gh_error_and_content_absent_refuses() {
   local case_dir rc
   case_dir=$(make_case gh-error)
@@ -2527,6 +2634,9 @@ test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
+test_untracked_scratch_refuses_before_unusable_pool_return
+test_untracked_work_and_branch_are_preserved_on_forced_return
+test_clean_return_keeps_branch_and_pool_available
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses
