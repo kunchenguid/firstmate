@@ -13,13 +13,19 @@
 # A hold identity is <origin-id>-decision-<decision-key>. Origin ids and decision
 # keys must already be privacy-safe slugs. Repeating `hold` with the same identity
 # is idempotent. A different decision key creates a different backlog identity.
+# An optional exact question and private decision-aid URL live in the hold body as
+# structured fields. `link` is the supported backfill for an existing hold; it
+# accepts HTTPS only, preserves the rest of the body, and never fetches or rewrites
+# the URL.
 # All backlog mutations run in the active FM_HOME, which keeps main-home and
 # secondmate-home ownership aligned with the work that discovered the decision.
 #
 # Usage:
 #   fm-decision-hold.sh id <origin-id> <decision-key>
 #   fm-decision-hold.sh hold <origin-id> <decision-key> \
-#     --title <title> --reason <reason> [--repo <repo>]
+#     --title <title> --reason <reason> [--repo <repo>] \
+#     [--question <exact-question>] [--decision-url <https-url>]
+#   fm-decision-hold.sh link <origin-id> <decision-key> --url <https-url>
 #   fm-decision-hold.sh complete <origin-id> (--none | <decision-key>...)
 #   fm-decision-hold.sh verify <origin-id>
 #   fm-decision-hold.sh retract <origin-id> <decision-key> --superseded-by <decision-key>
@@ -110,6 +116,21 @@ validate_one_line() {  # <label> <value>
   esac
 }
 
+validate_decision_url() {  # <url>
+  local url=$1
+  validate_one_line decision-url "$url"
+  [ "$(printf '%s' "$url" | LC_ALL=C wc -c | tr -d ' ')" -le 2000 ] \
+    || fail "decision-url exceeds 2000 bytes"
+  case "$url" in
+    https://*) ;;
+    *) fail "decision-url must use https://" ;;
+  esac
+  command -v jq >/dev/null 2>&1 || fail "jq is required"
+  jq -n -L "$SCRIPT_DIR" -e --arg url "$url" \
+    'include "fm-web-url"; $url | valid_web_url' >/dev/null 2>&1 \
+    || fail "decision-url is malformed"
+}
+
 sha256_text() {  # <text>
   if command -v shasum >/dev/null 2>&1; then
     printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
@@ -131,6 +152,7 @@ tasks_axi() {
 }
 
 require_tasks_axi() {
+  command -v jq >/dev/null 2>&1 || fail "jq is required"
   fm_tasks_axi_compatible || fail "compatible tasks-axi is required"
   tasks-axi hold --help 2>&1 | grep -F -- '--kind captain' >/dev/null \
     || fail "tasks-axi does not expose the captain-hold contract"
@@ -143,6 +165,32 @@ task_show() {  # <id>
 show_field() {  # <show-output> <field>
   local output=$1 field=$2
   printf '%s\n' "$output" | sed -n "s/^  $field: //p" | head -1
+}
+
+show_body() {  # <show-output>
+  local raw
+  raw=$(show_field "$1" body)
+  if [ "$raw" = "-" ] || [ -z "$raw" ]; then
+    return 0
+  fi
+  case "$raw" in
+    \"*) printf '%s' "$raw" | jq -er 'if type == "string" then . else error("body is not text") end' ;;
+    *) printf '%s' "$raw" ;;
+  esac
+}
+
+set_body_field() {  # <body> <label> <value>
+  local body=$1 label=$2 value=$3
+  printf '%s\n' "$body" | FM_BODY_FIELD_VALUE=$value awk -v label="$label: " '
+    BEGIN { found = 0 }
+    index($0, label) == 1 {
+      if (!found) print label ENVIRON["FM_BODY_FIELD_VALUE"]
+      found = 1
+      next
+    }
+    { print }
+    END { if (!found) print label ENVIRON["FM_BODY_FIELD_VALUE"] }
+  '
 }
 
 origin_exists_here() {  # <origin-id>
@@ -328,7 +376,7 @@ command_id() {
 }
 
 command_hold() {
-  local origin=${1:-} key=${2:-} title='' reason='' repo='' id show state kind existing_title body
+  local origin=${1:-} key=${2:-} title='' reason='' repo='' question='' decision_url='' id show state kind existing_title body
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -336,6 +384,8 @@ command_hold() {
       --title) shift; title=${1:-} ;;
       --reason) shift; reason=${1:-} ;;
       --repo) shift; repo=${1:-} ;;
+      --question) shift; question=${1:-} ;;
+      --decision-url) shift; decision_url=${1:-} ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -344,6 +394,12 @@ command_hold() {
   validate_slug decision-key "$key"
   validate_one_line title "$title"
   validate_one_line reason "$reason"
+  if [ -n "$question" ]; then
+    validate_one_line question "$question"
+    [ "$(printf '%s' "$question" | LC_ALL=C wc -c | tr -d ' ')" -le 2000 ] \
+      || fail "question exceeds 2000 bytes"
+  fi
+  [ -z "$decision_url" ] || validate_decision_url "$decision_url"
   case "$reason" in *'('*|*')'*) fail "reason must not contain parentheses (tasks-axi hold contract)" ;; esac
   require_tasks_axi
   origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
@@ -364,13 +420,49 @@ command_hold() {
     [ -n "$repo" ] || repo=firstmate
     validate_one_line repo "$repo"
     body=$(printf 'Origin: %s\nDecision key: %s\nState: awaiting captain decision.' "$origin" "$key")
+    [ -z "$question" ] || body=$(set_body_field "$body" "Decision question" "$question")
+    [ -z "$decision_url" ] || body=$(set_body_field "$body" "Decision URL" "$decision_url")
     tasks_axi add "$id" "$title" --kind captain --repo "$repo" --body "$body" >/dev/null \
       || fail "could not create captain decision item $id"
+  fi
+  if [ -n "$question" ] || [ -n "$decision_url" ]; then
+    show=$(task_show "$id") || fail "captain hold $id disappeared before its decision context was recorded"
+    body=$(show_body "$show") || fail "could not read captain hold $id body"
+    [ -z "$question" ] || body=$(set_body_field "$body" "Decision question" "$question")
+    [ -z "$decision_url" ] || body=$(set_body_field "$body" "Decision URL" "$decision_url")
+    tasks_axi update "$id" --body "$body" >/dev/null \
+      || fail "could not record decision context on $id"
   fi
   tasks_axi hold "$id" --reason "$reason" --kind captain >/dev/null \
     || fail "could not activate captain hold $id"
   verify_hold_active "$id"
   printf '%s\n' "$id"
+}
+
+command_link() {
+  local origin=${1:-} key=${2:-} url='' id show body
+  [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --url) shift; url=${1:-} ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    shift
+  done
+  validate_slug origin-id "$origin"
+  validate_slug decision-key "$key"
+  validate_decision_url "$url"
+  require_tasks_axi
+  origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
+  id=$(hold_id "$origin" "$key")
+  verify_hold_active "$id"
+  show=$(task_show "$id") || fail "captain hold $id disappeared before its link was recorded"
+  body=$(show_body "$show") || fail "could not read captain hold $id body"
+  body=$(set_body_field "$body" "Decision URL" "$url")
+  tasks_axi update "$id" --body "$body" >/dev/null \
+    || fail "could not record the decision URL on $id"
+  printf 'linked: %s -> %s\n' "$id" "$url"
 }
 
 command_complete() {
@@ -641,6 +733,7 @@ command_resolve() {
 case "${1:-}" in
   id) shift; command_id "$@" ;;
   hold) shift; command_hold "$@" ;;
+  link) shift; command_link "$@" ;;
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
   retract) shift; command_retract "$@" ;;

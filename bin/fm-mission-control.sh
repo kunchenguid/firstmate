@@ -91,9 +91,12 @@
 #   The layer is hidden by CSS and revealed only after a script confirms the
 #   Lavish bridge is present, so the same file served statically is the read-only
 #   board it is without this flag, and no viewer is ever shown a dead control.
-#   With --controls the self-reload moves into <noscript> and a managed reload
-#   takes over, holding while a control is open so a 25-second refresh cannot
-#   discard half-typed text. Without the flag the meta refresh is untouched.
+#   With script available, session-scoped presentation memory preserves the
+#   active tab and stable reading position across both managed reloads and full
+#   document replacement after an external output-file rewrite. --controls also
+#   saves every open composer and unsent draft under its exact control identity,
+#   and holds the managed timer while a control is open. The no-script fallback
+#   keeps the same cadence with a meta refresh and remains the read-only board.
 #
 #   Each request is one line: FM-BOARD-REQUEST followed by one JSON object.
 #   bin/fm-procevent-mission-control.sh owns arming the wake and normalizing what
@@ -434,7 +437,7 @@ if [ "$WITH_QUOTA" = 1 ]; then
 fi
 
 HTML=$(
-  printf '%s' "$SNAPSHOT" | jq -r \
+  printf '%s' "$SNAPSHOT" | jq -L "$SCRIPT_DIR" -r \
     --argjson quota "$QUOTA" \
     --arg quota_note "$QUOTA_NOTE" \
     --argjson token_dash "$TOKEN_DASH" \
@@ -446,6 +449,8 @@ HTML=$(
     --arg today "$TODAY" \
     --argjson controls "$CONTROLS" \
     --argjson refresh "$REFRESH" '
+
+include "fm-web-url";
 
 # --------------------------------------------------------------------------
 # Escaping rule: every value that came from fleet state, the registry, or the
@@ -591,8 +596,10 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
   id: .id,
   title: (.title // .raw),
   detail: (.hold_reason // .blocked_reason // ""),
+  question: (.decision_question // null),
+  decision_url: (.decision_url // null),
   repo: (.repo // "" | short_repo),
-  link: (.pr_url // .report_path // (.links // [])[0] // null),
+  link: (.pr_url // .report_path // null),
   # A main-home captain decision is always a backlog hold, so both controls
   # apply: it can be answered, and it has a row whose hold kind can be changed.
   ctl: {intents: ["answer", "defer"], home: "main", id: .id, key: ""}
@@ -606,6 +613,8 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
   # The run state is an internal pipeline label, and the row already says what
   # the captain has to do, so it is deliberately left off this row.
   detail: "",
+  question: null,
+  decision_url: null,
   repo: ($t | repo_of),
   yolo: ($t | repo_of | yolo_for(.)),
   link: $t.pr.url,
@@ -629,6 +638,8 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
     id: (.id // .key),
     title: (.summary // .key // "decision"),
     detail: (.reason // ""),
+    question: (.question // (if (.source // "") == "status" then (.summary // null) else null end)),
+    decision_url: (.decision_url // null),
     repo: "",
     link: null,
     ctl: (if $did == "" and $dkey == "" then null
@@ -651,6 +662,8 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
     id: (($sm.id // "secondmate") + "/omitted-decisions"),
     title: "Additional captain decisions are not shown",
     detail: ("Snapshot shows \($shown) of \($total) decisions. Inspect this secondmate home for all \($total - $shown) omitted decisions."),
+    question: null,
+    decision_url: null,
     repo: "",
     link: null,
     omitted_count: ($total - $shown)
@@ -663,6 +676,8 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
   id: "secondmate-current/truncated",
   title: "Secondmate decision scan is incomplete",
   detail: ("Snapshot omitted \($sm_truncated) secondmate record(s). Inspect the full fleet state before concluding that no other captain decisions are waiting."),
+  question: null,
+  decision_url: null,
   repo: "",
   link: null
 }] else [] end) as $waiting_secondmate_truncated |
@@ -676,6 +691,8 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
     then ("Registered secondmate table is unavailable: \($sm_registry.reason // "unknown reason"). Additional homes and captain decisions may be missing.")
     else ("Registered secondmate table was bounded or incomplete\(if (($sm_registry.reasons // []) | length) > 0 then " (\(($sm_registry.reasons // []) | join(", ")))" else "" end). Additional homes and captain decisions may be missing.")
     end),
+  question: null,
+  decision_url: null,
   repo: "",
   link: null
 }] end) as $waiting_secondmate_registry |
@@ -688,6 +705,8 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
     id: ((.id // "secondmate") + "/decisions-unavailable"),
     title: "Registered secondmate decisions are unavailable",
     detail: ("Captain decisions for this registered secondmate could not be read: \(.current.reason // "structured home unavailable"). Inspect the secondmate home before concluding that nothing is waiting."),
+    question: null,
+    decision_url: null,
     repo: "",
     link: null
   })) as $waiting_secondmate_unavailable |
@@ -698,6 +717,8 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
   id: "main/backlog-unavailable",
   title: "Main backlog is unavailable",
   detail: "Captain decisions from the main backlog cannot be counted. Restore or inspect the backlog before concluding that nothing is waiting.",
+  question: null,
+  decision_url: null,
   repo: "",
   link: null
 }] end) as $waiting_backlog_unavailable |
@@ -986,9 +1007,18 @@ def meta_block($line; $items):
     + "</div>"
   end;
 
+# Fleet records may name local evidence paths for an operator, but the generated
+# board is not a file server. Only an explicit web URL can navigate; everything
+# else stays escaped presentation context so a mobile tap cannot leave /mission
+# for a route that does not exist.
+# URL validation stays inside jq, the required Mission Control renderer runtime,
+# so a missing optional browser/test runtime can never erase valid links.
 def need_row:
   . as $w |
-  ($w.link // "") as $link |
+  (($w.link // "") | if type == "string" then . else "" end) as $raw_link |
+  ($raw_link | web_url_or_empty) as $link |
+  (($w.decision_url // "") | https_url_or_empty) as $aid |
+  (if $raw_link != "" and $link == "" and $aid == "" then $raw_link else "" end) as $local_ref |
   (if $w.kind == "incomplete" then "Incomplete"
    elif ($w.repo // "") != "" then $w.repo
    elif ($w.home // "main") != "main" then $w.home
@@ -996,18 +1026,23 @@ def need_row:
   (if $w.kind == "pr" then (if $w.yolo then "your merge call (autonomous)" else "your review or merge" end)
    elif $w.kind == "incomplete" then ""
    else "" end) as $ask_note |
-  (if $link == "" or $link == null
-   then "<div class=\"need\(if $w.kind == "incomplete" then " warn" else "" end)\">"
-   else (@html "<a class=\"need\(if $w.kind == "incomplete" then " warn" else "" end)\" href=\"\($link)\">") end)
+  "<div class=\"need\(if $w.kind == "incomplete" then " warn" else "" end)\">"
   + "<span class=\"band\"></span>"
   + (@html "<span class=\"tag\">\($tag)</span>")
+  + (if $link == "" then "<span class=\"need-main\">"
+     else (@html "<a class=\"need-main\" href=\"\($link)\">") end)
   + (@html "<span class=\"ask\">\($w.title)")
   + (if ($w.detail // "") == "" then "" else (@html "<span class=\"hint\">\($w.detail)</span>") end)
   + (if $ask_note == "" then "" else (@html "<span class=\"hint\">Awaiting \($ask_note).</span>") end)
-  + (if $link == "" or $link == null then "" else (@html "<span class=\"url\">\($link)</span>") end)
+  + (if $link != "" then (@html "<span class=\"url\">\($link)</span>")
+     elif $local_ref != "" then (@html "<span class=\"url local-ref\">Local report: \($local_ref)</span>")
+     else "" end)
   + "</span>"
-  + (if $link == "" or $link == null then "<span class=\"go\"></span></div>"
-     else "<span class=\"go\">&rsaquo;</span></a>" end);
+  + (if $link == "" then "<span class=\"go\"></span></span>"
+     else "<span class=\"go\">&rsaquo;</span></a>" end)
+  + (if $aid == "" then ""
+     else (@html "<a class=\"decision-aid\" href=\"\($aid)\" target=\"_blank\" rel=\"noreferrer\">Open decision aid</a>") end)
+  + "</div>";
 
 # A deferred decision is deliberately quieter than a waiting one: no coloured
 # band, no link chase, no chevron. It carries only what identifies it.
@@ -1029,19 +1064,29 @@ def deferred_row:
 # to adjudicate. With $controls false every def here yields the empty string, so
 # the default board is byte-identical to the one rendered without the flag.
 def rc_button($intent; $label):
-  (@html "<button type=\"button\" class=\"rc-b\" data-open=\"\($intent)\">\($label)</button>");
+  (@html "<button type=\"button\" class=\"rc-b rc-\($intent)\" data-open=\"\($intent)\">\($label)</button>");
 
-def rc_form($intent; $question; $note_label; $send_label):
+def rc_form($intent; $question; $note_label; $placeholder; $send_label):
   (@html "<form class=\"rc-f\" data-toggle data-intent=\"\($intent)\" hidden>")
   + (@html "<p class=\"rc-q\">\($question)</p>")
   + (if $note_label == "" then ""
-     else (@html "<textarea class=\"rc-t\" rows=\"3\" maxlength=\"2000\" aria-label=\"\($note_label)\" placeholder=\"\($note_label)\"></textarea>") end)
+     else (@html "<textarea class=\"rc-t\" rows=\"3\" maxlength=\"2000\" aria-label=\"\($note_label)\" placeholder=\"\($placeholder)\"></textarea>") end)
   + "<div class=\"rc-row\">"
   + (@html "<button type=\"submit\" class=\"rc-go\">\($send_label)</button>")
   + "<button type=\"button\" class=\"rc-x\">Cancel</button>"
   + "</div>"
   + "<p class=\"rc-hold\">The board holds its refresh while this is open.</p>"
   + "</form>";
+
+def answer_prompt($w):
+  (($w.question // "") | if type == "string" then gsub("^[[:space:]]+|[[:space:]]+$"; "") else "" end) as $question |
+  (($w.title // "") | if type == "string" then gsub("^[[:space:]]+|[[:space:]]+$"; "") else "" end) as $title |
+  (($w.detail // "") | if type == "string" then gsub("^[[:space:]]+|[[:space:]]+$"; "") else "" end) as $detail |
+  if $question != "" then $question
+  elif $title != "" and $detail != "" then $title + " - " + $detail
+  elif $title != "" then $title
+  elif $detail != "" then $detail
+  else "Your answer" end;
 
 def controls_for:
   . as $w |
@@ -1059,21 +1104,26 @@ def controls_for:
     + (($c.intents | map(
         if . == "merge" then rc_form("merge";
              "Ask firstmate to merge this? Firstmate runs its own checks first and merges only if they pass.";
-             ""; "Send request")
+             ""; ""; "Send request")
         elif . == "reply" then rc_form("reply";
              "Send firstmate a note about this. It carries no approval on its own.";
-             "Your note"; "Send to firstmate")
+             "Your note"; "Your note"; "Send to firstmate")
         elif . == "answer" then rc_form("answer";
              "Your answer goes to firstmate, which applies it through its normal decision flow.";
-             "Your answer"; "Send answer")
+             "Your answer"; answer_prompt($w); "Send answer")
         elif . == "defer" then rc_form("defer";
              "Set this aside? It leaves this list for the Deferred shelf, and your original reason is kept unchanged.";
-             ""; "Set aside")
+             ""; ""; "Set aside")
         else "" end)) | add // "")
     + "</div>"
   end;
 
-def need_item: need_row + controls_for;
+def need_item:
+  . as $w |
+  (@html "<div class=\"need-wrap\" data-scroll-anchor=\"call:\($w.home // "main"):\($w.id // ""):\($w.ctl.key // ""):\($w.kind // "")\">")
+  + ($w | need_row)
+  + ($w | controls_for)
+  + "</div>";
 
 def ask_block:
   if ($controls | not) then "" else
@@ -1113,7 +1163,7 @@ def project_card:
    elif $p.prs > 0 then "\($p.prs) \(plural($p.prs; "PR awaits"; "PRs await")) your call"
    elif ($p.registered | not) then "Not in the project registry"
    else "" end) as $meta_line |
-  (@html "<div class=\"proj s-\($tone)\">
+  (@html "<div class=\"proj s-\($tone)\" data-scroll-anchor=\"\($p.key)\">
      <div class=\"proj-top\"><span class=\"badge\">")
   + project_glyph($p.name)
   + (@html "</span><span class=\"proj-name\">\($p.name)")
@@ -1157,7 +1207,7 @@ def secondmate_card:
    elif $s.children_omitted > 0 then "\($s.children) active tasks (\($s.children_shown) shown)"
    elif $s.holds > $s.holds_shown then "\($s.holds) held tasks (\($s.holds_shown) shown)"
    else "" end) as $meta_line |
-  (@html "<div class=\"proj s-\($tone)\">
+  (@html "<div class=\"proj s-\($tone)\" data-scroll-anchor=\"\($s.key)\">
      <div class=\"proj-top\"><span class=\"badge\">")
   + icon_compass
   + (@html "</span><span class=\"proj-name\">\($s.name)<span class=\"sub-role\">&middot; second mate</span></span>
@@ -1403,9 +1453,15 @@ body.lavish .rc-ask{border:1px solid var(--line);border-radius:16px;background:v
   box-shadow:var(--shadow);margin-top:14px;padding:15px 22px 17px;}
 .rc-acts{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 0 0;}
 .rc-b{appearance:none;-webkit-appearance:none;border:1px solid var(--line);background:var(--panel);
-  color:var(--slate);font:inherit;font-size:12.5px;font-weight:600;padding:6px 13px;
+  color:var(--slate);font:inherit;font-size:12.5px;font-weight:600;padding:6px 13px;min-height:34px;
   border-radius:999px;cursor:pointer;}
 .rc-b:hover{border-color:#cfd6e0;color:var(--ink);}
+.rc-b.rc-answer{color:#936218;background:var(--amber-soft);border-color:#ead7ae;}
+.rc-b.rc-answer:hover{color:#724b10;background:#f8eccf;border-color:#dfc58e;}
+.rc-b.rc-defer{color:var(--slate);background:var(--slate-soft);border-color:#dce1e8;}
+.rc-b.rc-defer:hover{color:var(--ink);background:#e5e9ef;border-color:#cbd2dc;}
+.rc-b:disabled,.rc-go:disabled{opacity:.66;cursor:default;}
+.rc-b.rc-submitted{color:var(--green);background:var(--green-soft);border-color:#cfe7da;}
 .rc-b:focus-visible,.rc-go:focus-visible,.rc-x:focus-visible{outline:2px solid var(--amber);outline-offset:1px;}
 .rc-f{margin:11px 0 0;display:flex;flex-direction:column;gap:9px;}
 /* An explicit display beats the [hidden] default, so a closed form needs this
@@ -1427,7 +1483,7 @@ body.lavish .rc-ask{border:1px solid var(--line);border-radius:16px;background:v
 .rc-sent.rc-bad{color:var(--red);}
 @media(max-width:720px){
   body.lavish .rc,body.lavish .rc-ask{padding-left:16px;padding-right:16px;}
-  .rc-b,.rc-go{padding-top:9px;padding-bottom:9px;}
+  .rc-b,.rc-go{min-height:44px;padding-top:9px;padding-bottom:9px;}
 }
 "
   end;
@@ -1465,9 +1521,7 @@ def health_block:
 <meta charset=\"utf-8\">
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
 "
-+ (if $controls
-   then "<noscript><meta http-equiv=\"refresh\" content=\"" + ($refresh | tostring) + "\"></noscript>"
-   else "<meta http-equiv=\"refresh\" content=\"" + ($refresh | tostring) + "\">" end)
++ "<noscript><meta http-equiv=\"refresh\" content=\"" + ($refresh | tostring) + "\"></noscript>"
 + "
 <title>Mission Control</title>
 <link rel=\"icon\" type=\"image/svg+xml\" sizes=\"any\" href=\"data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%2715%27 fill=%27%231a2233%27/%3E%3Cpath d=%27M16 4.5 21.2 17.8 16 15.5 10.8 17.8Z%27 fill=%27white%27/%3E%3Cpath d=%27M16 27.5 10.8 14.2 16 16.5 21.2 14.2Z%27 fill=%27%230f8a5f%27/%3E%3C/svg%3E\">
@@ -1585,8 +1639,10 @@ section{margin-bottom:38px;}
 
 /* ---- awaiting your decision ---- */
 .needs{background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;}
-.need{display:flex;align-items:center;gap:14px;padding:15px 22px;border-top:1px solid var(--line);}
-.need:first-child{border-top:none;}
+.need-wrap{border-top:1px solid var(--line);}
+.need-wrap:first-child{border-top:none;}
+.need{display:flex;align-items:center;gap:14px;padding:15px 22px;}
+.need-main{display:flex;align-items:center;gap:14px;flex:1;min-width:0;}
 .band{width:3px;align-self:stretch;border-radius:3px;background:var(--amber);flex:none;}
 .need.warn .band{background:var(--red);}
 .tag{flex:none;width:132px;font-size:12.5px;font-weight:600;color:var(--slate);overflow-wrap:anywhere;}
@@ -1595,7 +1651,11 @@ section{margin-bottom:38px;}
 .need .hint{display:block;color:var(--muted);font-size:12.5px;font-weight:400;margin-top:2px;}
 .need .url{display:block;color:var(--faint);font-family:var(--mono);font-size:11.5px;margin-top:4px;overflow-wrap:anywhere;}
 .need .go{flex:none;color:var(--faint);font-size:18px;width:10px;text-align:right;}
-a.need:hover{background:#fbfcfe;}
+a.need-main:hover .ask{color:var(--amber);}
+.decision-aid{flex:none;color:var(--amber);background:var(--amber-soft);border:1px solid #ead7ae;
+  border-radius:999px;padding:7px 12px;font-size:12px;font-weight:650;white-space:nowrap;}
+.decision-aid:hover{background:#f8eccf;border-color:#dfc58e;}
+.decision-aid:focus-visible{outline:2px solid var(--amber);outline-offset:2px;}
 
 /* ---- project grid ---- */
 .projects{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;}
@@ -1764,7 +1824,9 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
   .projects,.strip,.quota-grid{grid-template-columns:minmax(0,1fr)}
   .wrap{padding:28px 18px 48px}
   .need{align-items:flex-start;flex-wrap:wrap;padding:14px 16px;gap:10px}
+  .need-main{align-items:flex-start;flex:1 1 calc(100% - 18px);gap:10px}
   .tag{width:auto}
+  .decision-aid{margin-left:13px;min-height:44px;display:inline-flex;align-items:center;white-space:normal}
   .need .go{display:none}
   .ship{padding:12px 16px;align-items:flex-start;flex-wrap:wrap}
   .ship .what{flex:1 1 auto}
@@ -1792,21 +1854,37 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
 /* Chooses the tab before the body is parsed, so the board opens on the tab it
    was left on with no flash of the default one.
 
-   The self-reload is a meta refresh, which navigates without the fragment, so
-   the URL hash cannot be the mechanism that survives a reload - it is only an
+   The managed self-reload navigates without the fragment, so the URL hash
+   cannot be the mechanism that survives a reload - it is only an
    entry point for a hand-typed or copied link. The remembered tab is what
    actually survives, and a browser that refuses storage (a private context, or
    a restricted file:// origin) simply opens on the default tab. */
 (function () {
   var keys = [\"decisions\", \"projects\", \"activity\", \"system\"];
+  var boardHome = " + (.fm_home | @json | gsub("<"; "\\u003c")) + ";
+  var origin = window.location.origin || \"\";
+  var path = window.location.pathname || \"\";
+  var scope = encodeURIComponent(boardHome) + \"|\" + encodeURIComponent(origin + path);
+  var tabKey = \"fm-mission-control-tab-v2:\" + scope;
   var key = \"decisions\";
   var m = /^#(?:tab=|panel-)([a-z]+)$/.exec(window.location.hash || \"\");
+  window.__fmBoardScope = scope;
+  window.__fmTabKey = tabKey;
+  window.__fmViewKey = \"fm-mission-control-view-v1:\" + scope;
+  window.__fmReloadKey = \"fm-mission-control-reload-v1:\" + scope;
+  window.__fmExplicitEntry = !!(m && !(window.history && window.history.state
+    && window.history.state.fmBoardScope === scope && window.history.state.fmBoardTab === m[1]));
+  try { if (window.history) { window.history.scrollRestoration = \"manual\"; } }
+  catch (e) { /* browser-native restoration remains the fallback */ }
   try {
     if (m && keys.indexOf(m[1]) !== -1) {
-      window.localStorage.setItem(\"fm-mission-control-tab\", m[1]);
+      window.localStorage.setItem(tabKey, m[1]);
+      try { window.sessionStorage.setItem(tabKey, m[1]); } catch (e) { /* session memory unavailable */ }
       key = m[1];
     } else {
-      var saved = window.localStorage.getItem(\"fm-mission-control-tab\");
+      var saved = null;
+      try { saved = window.sessionStorage.getItem(tabKey); } catch (e) { /* session memory unavailable */ }
+      if (!saved) { saved = window.localStorage.getItem(tabKey); }
       if (saved && keys.indexOf(saved) !== -1) { key = saved; }
     }
   } catch (e) { /* storage unavailable; the default tab is correct */ }
@@ -1875,7 +1953,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
   </nav>
 
   <div class=\"panel\" id=\"panel-decisions\" role=\"tabpanel\" aria-labelledby=\"tab-decisions\">
-  <section>
+  <section id=\"awaiting-decisions\" data-scroll-anchor=\"section:decisions\">
     <div class=\"sec-h\"><h2>Awaiting your decision</h2>"
 + (@html "<span class=\"count\">\($waiting_count) \(plural($waiting_count; "item"; "items"))")
 + (if $waiting_incomplete then " &middot; waiting status incomplete" else "" end)
@@ -1903,7 +1981,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
   </div>
 
   <div class=\"panel\" id=\"panel-projects\" role=\"tabpanel\" aria-labelledby=\"tab-projects\">
-  <section>
+  <section id=\"projects\" data-scroll-anchor=\"section:projects\">
     <div class=\"sec-h\"><h2>Projects</h2>"
 + (if $card_count_incomplete then "<span class=\"count\">list incomplete</span>" else "" end)
 + "</div>"
@@ -1920,7 +1998,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
   </div>
 
   <div class=\"panel\" id=\"panel-activity\" role=\"tabpanel\" aria-labelledby=\"tab-activity\">
-  <section>
+  <section id=\"activity\" data-scroll-anchor=\"section:activity\">
     <div class=\"sec-h\"><h2>Shipped today</h2>"
 + (if $backlog_present
    then (@html "<span class=\"count\">\($shipped | length) \(plural($shipped | length; "item"; "items"))</span>")
@@ -1931,7 +2009,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
    elif ($shipped | length) == 0
    then "<p class=\"quiet\">Nothing landed yet today.</p>"
    else "<div class=\"shipped\">" + (($shipped | map(. as $d |
-     (($d.pr_url // $d.report_path // ($d.links // [])[0]) // "") as $link |
+     ((($d.pr_url // $d.report_path // ($d.links // [])[0]) // "") | web_url_or_empty) as $link |
      (if $link == "" then "<div class=\"ship\">" else (@html "<a class=\"ship\" href=\"\($link)\">") end)
      + icon_check
      + (@html "<span class=\"what\">\(dash($d.title // $d.raw))</span><span class=\"who\">\(dash(($d.repo // "") | short_repo))</span>")
@@ -2002,13 +2080,17 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
 
   function select(key, focus) {
     if (keys.indexOf(key) === -1) { return; }
+    window.__fmExplicitNavigation = true;
     root.className = \"js t-\" + key;
-    try { window.localStorage.setItem(\"fm-mission-control-tab\", key); } catch (e) { /* not remembered */ }
+    try { window.localStorage.setItem(window.__fmTabKey, key); } catch (e) { /* not remembered */ }
+    try { window.sessionStorage.setItem(window.__fmTabKey, key); } catch (e) { /* session memory unavailable */ }
     /* #tab=<key> matches no element, so restoring it never scrolls the header
        off the top. The self-reload drops it regardless; the stored tab is what
        carries across. */
-    try { history.replaceState(null, \"\", \"#tab=\" + key); } catch (e) { /* URL left alone */ }
+    try { history.replaceState({fmBoardScope:window.__fmBoardScope,fmBoardTab:key}, \"\", \"#tab=\" + key); }
+    catch (e) { /* URL left alone */ }
     paint();
+    window.scrollTo(0, 0);
     if (focus) { tabs[keys.indexOf(key)].focus(); }
   }
 
@@ -2042,13 +2124,14 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
      same way, so it stays shut for a captain who never opens it and stays open
      for one who does, until they close it again. */
   var shelf = document.getElementById(\"deferred-shelf\");
+  var shelfKey = \"fm-mission-control-deferred-v2:\" + window.__fmBoardScope;
   if (shelf) {
     try {
-      if (window.localStorage.getItem(\"fm-mission-control-deferred\") === \"open\") { shelf.open = true; }
+      if (window.localStorage.getItem(shelfKey) === \"open\") { shelf.open = true; }
     } catch (e) { /* not remembered; closed is the right default */ }
     shelf.addEventListener(\"toggle\", function () {
       try {
-        window.localStorage.setItem(\"fm-mission-control-deferred\", shelf.open ? \"open\" : \"closed\");
+        window.localStorage.setItem(shelfKey, shelf.open ? \"open\" : \"closed\");
       } catch (e) { /* not remembered */ }
     });
   }
@@ -2056,13 +2139,14 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
   /* The compact balancing shelf is useful only if the board does not snap it
      shut on the next reload, so it keeps its own preference just like Deferred. */
   var balancing = document.getElementById(\"quota-balancing\");
+  var balancingKey = \"fm-mission-control-quota-balancing-v2:\" + window.__fmBoardScope;
   if (balancing) {
     try {
-      if (window.localStorage.getItem(\"fm-mission-control-quota-balancing\") === \"open\") { balancing.open = true; }
+      if (window.localStorage.getItem(balancingKey) === \"open\") { balancing.open = true; }
     } catch (e) { /* not remembered; closed is the right default */ }
     balancing.addEventListener(\"toggle\", function () {
       try {
-        window.localStorage.setItem(\"fm-mission-control-quota-balancing\", balancing.open ? \"open\" : \"closed\");
+        window.localStorage.setItem(balancingKey, balancing.open ? \"open\" : \"closed\");
       } catch (e) { /* not remembered */ }
     });
   }
@@ -2083,6 +2167,99 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
     try { time.textContent = new Intl.DateTimeFormat([], options).format(date); }
     catch (e) { /* ISO fallback stays visible */ }
   });
+}());
+
+/* Preserve the paragraph or card being read across this board own refresh.
+   Browser storage is presentation memory only: it never changes fleet state or
+   decides whether an item is still actionable. */
+(function () {
+  var viewKey = window.__fmViewKey;
+  var reloadKey = window.__fmReloadKey;
+  var explicitHash = window.location.hash || \"\";
+  var loadStateRaw = null;
+  var restoringView = true;
+  try { loadStateRaw = window.sessionStorage.getItem(viewKey); } catch (e) { /* no saved view */ }
+
+  function anchors() {
+    return Array.prototype.slice.call(document.querySelectorAll(\"[data-scroll-anchor]\"));
+  }
+
+  function visibleAnchor() {
+    var crossing = null;
+    var below = null;
+    anchors().forEach(function (row) {
+      var style = window.getComputedStyle(row);
+      if (style.display === \"none\" || style.visibility === \"hidden\") { return; }
+      var rect = row.getBoundingClientRect();
+      if (rect.height <= 0) { return; }
+      if (rect.top <= 16 && rect.bottom > 16) { crossing = row; }
+      else if (!below && rect.top > 16) { below = row; }
+    });
+    return crossing || below;
+  }
+
+  function saveView() {
+    var anchor = visibleAnchor();
+    var state = {y: Math.max(0, window.scrollY || 0)};
+    if (anchor) {
+      state.anchor = anchor.getAttribute(\"data-scroll-anchor\");
+      state.offset = anchor.getBoundingClientRect().top;
+    }
+    try { window.sessionStorage.setItem(viewKey, JSON.stringify(state)); }
+    catch (e) { /* scroll memory unavailable */ }
+  }
+  window.__fmSaveView = saveView;
+
+  function restoreView() {
+    try { window.sessionStorage.removeItem(reloadKey); } catch (e) { /* no managed-reload marker */ }
+    if ((explicitHash && window.__fmExplicitEntry) || window.__fmExplicitNavigation) {
+      if (/^#(?:tab=|panel-)[a-z]+$/.test(explicitHash)) { window.scrollTo(0, 0); }
+      restoringView = false;
+      saveView();
+      return;
+    }
+    var state = null;
+    try { state = JSON.parse(loadStateRaw || \"null\"); }
+    catch (e) { state = null; }
+    if (!state || typeof state.y !== \"number\") { restoringView = false; return; }
+
+    var target = null;
+    if (typeof state.anchor === \"string\") {
+      anchors().some(function (row) {
+        if (row.getAttribute(\"data-scroll-anchor\") === state.anchor) { target = row; return true; }
+        return false;
+      });
+    }
+    var y = state.y;
+    if (target && typeof state.offset === \"number\") {
+      y = window.scrollY + target.getBoundingClientRect().top - state.offset;
+    }
+    var max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    window.scrollTo(0, Math.max(0, Math.min(y, max)));
+    restoringView = false;
+    saveView();
+  }
+
+  window.addEventListener(\"scroll\", function () {
+    if (!restoringView) { saveView(); }
+  }, {passive: true});
+  window.addEventListener(\"pagehide\", saveView);
+  window.__fmRestoreView = restoreView;
+  if (!document.querySelector(\".rc\")) { restoreView(); }
+
+  var every = " + (($refresh * 1000) | tostring) + ";
+  var due = Date.now() + every;
+  setInterval(function () {
+    if (Date.now() < due) { return; }
+    if (typeof window.__fmMissionControlBusy === \"function\" && window.__fmMissionControlBusy()) { return; }
+    saveView();
+    try { window.sessionStorage.setItem(reloadKey, \"reload\"); } catch (e) { /* fallback is top */ }
+    if (/^#(?:tab=|panel-)[a-z]+$/.test(window.location.hash || \"\")) {
+      try { history.replaceState(null, \"\", window.location.pathname + window.location.search); }
+      catch (e) { /* harmless: explicit hash wins over restoration */ }
+    }
+    window.location.reload();
+  }, 1000);
 }());
 </script>
 "
@@ -2137,6 +2314,174 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
     return \"From the board - a new ask\";
   }
 
+  var ackPrefix = \"fm-mission-control-ack-v1:\" + window.__fmBoardScope + \":\";
+  function ackKey(block, intent) {
+    return ackPrefix + [block.getAttribute(\"data-home\") || \"main\",
+      block.getAttribute(\"data-id\") || \"\", block.getAttribute(\"data-key\") || \"\", intent]
+      .map(encodeURIComponent).join(\":\");
+  }
+  var draftKey = \"fm-mission-control-drafts-v1:\" + window.__fmBoardScope;
+  var requestState = {};
+  var requestInFlight = {};
+  function draftIdentity(block, intent) {
+    return [block.getAttribute(\"data-home\") || \"main\",
+      block.getAttribute(\"data-id\") || \"\", block.getAttribute(\"data-key\") || \"\", intent]
+      .map(encodeURIComponent).join(\":\");
+  }
+  function storedDrafts() {
+    var records = [];
+    try { records = JSON.parse(window.sessionStorage.getItem(draftKey) || \"[]\"); }
+    catch (e) { records = []; }
+    return Array.isArray(records) ? records : [];
+  }
+  function saveDrafts(skipView) {
+    var records = {};
+    storedDrafts().forEach(function (record) {
+      if (record && typeof record.identity === \"string\") { records[record.identity] = record; }
+    });
+    Array.prototype.forEach.call(document.querySelectorAll(\".rc\"), function (block) {
+      formsIn(block).forEach(function (form) {
+        var intent = form.getAttribute(\"data-intent\") || \"\";
+        if (!intent) { return; }
+        var identity = draftIdentity(block, intent);
+        var area = form.querySelector(\".rc-t\");
+        var note = area ? area.value : \"\";
+        var open = form.hasAttribute(\"data-toggle\") ? !form.hidden : note !== \"\";
+        var pending = requestState[identity];
+        if (!open && !note) { delete records[identity]; return; }
+        records[identity] = {identity:identity,open:open,note:note};
+        if (pending) {
+          records[identity].queued = {status:pending.status,payload:pending.payload,
+            note:pending.note,attempt:pending.attempt};
+        }
+      });
+    });
+    records = Object.keys(records).map(function (identity) { return records[identity]; });
+    try {
+      if (records.length) { window.sessionStorage.setItem(draftKey, JSON.stringify(records)); }
+      else { window.sessionStorage.removeItem(draftKey); }
+    } catch (e) { /* draft memory unavailable */ }
+    if (!skipView && window.__fmSaveView) { window.__fmSaveView(); }
+  }
+  function restoreDrafts() {
+    var records = storedDrafts();
+    records.forEach(function (record) {
+      Array.prototype.some.call(document.querySelectorAll(\".rc\"), function (block) {
+        var form = formsIn(block).find(function (candidate) {
+          return draftIdentity(block, candidate.getAttribute(\"data-intent\") || \"\") === record.identity;
+        });
+        if (!form) { return false; }
+        var opener = form.hasAttribute(\"data-toggle\")
+          ? block.querySelector(\"[data-open=\\\"\" + form.getAttribute(\"data-intent\") + \"\\\"]\") : null;
+        if (opener && opener.disabled) { return true; }
+        var area = form.querySelector(\".rc-t\");
+        if (area && typeof record.note === \"string\") { area.value = record.note; }
+        if (record.open && form.hasAttribute(\"data-toggle\")) { shut(block); form.hidden = false; }
+        if (record.queued && typeof record.queued.payload === \"string\"
+            && typeof record.queued.note === \"string\"
+            && typeof record.queued.attempt === \"string\" && record.queued.attempt) {
+          var status = record.queued.status === \"queuing\" ? \"queuing\" : \"queued\";
+          requestState[record.identity] = {
+            status:status, payload:record.queued.payload, note:record.queued.note,
+            attempt:record.queued.attempt
+          };
+          keepQueuedPayload(block, form, requestState[record.identity]);
+        }
+        return true;
+      });
+    });
+    saveDrafts(true);
+  }
+
+  function ackLabel(intent, delivery) {
+    var verb = delivery === \"sent\" ? \"sent\" : \"queued\";
+    if (intent === \"merge\") { return \"Merge request \" + verb; }
+    if (intent === \"answer\") { return \"Answer \" + verb; }
+    if (intent === \"reply\") { return \"Reply \" + verb; }
+    if (intent === \"defer\") { return \"Set-aside request \" + verb; }
+    return \"Request \" + verb;
+  }
+  function applyAck(block, intent, delivery) {
+    var label = ackLabel(intent, delivery);
+    var opener = block.querySelector(\"[data-open=\\\"\" + intent + \"\\\"]\");
+    if (opener) {
+      opener.disabled = true;
+      opener.textContent = label;
+      opener.classList.add(\"rc-submitted\");
+    }
+    formsIn(block).forEach(function (form) {
+      if (form.getAttribute(\"data-intent\") !== intent) { return; }
+      var submit = form.querySelector(\".rc-go\");
+      if (submit) { submit.disabled = true; submit.textContent = label; }
+    });
+    say(block, label + \" for firstmate.\", false);
+  }
+  function restoreAcks() {
+    var current = {};
+    Array.prototype.forEach.call(document.querySelectorAll(\".rc\"), function (block) {
+      formsIn(block).forEach(function (form) {
+        var intent = form.getAttribute(\"data-intent\") || \"\";
+        if (!intent || intent === \"ask\") { return; }
+        var key = ackKey(block, intent);
+        current[key] = true;
+        try {
+          var delivery = window.localStorage.getItem(key);
+          if (delivery === \"sent\" || delivery === \"queued\") { applyAck(block, intent, delivery); }
+        }
+        catch (e) { /* acknowledgement memory unavailable */ }
+      });
+    });
+    try {
+      var stale = [];
+      for (var i = 0; i < window.localStorage.length; i++) {
+        var key = window.localStorage.key(i);
+        if (key && key.indexOf(ackPrefix) === 0 && !current[key]) { stale.push(key); }
+      }
+      stale.forEach(function (key) { window.localStorage.removeItem(key); });
+    } catch (e) { /* stale presentation memory retires on a later load */ }
+  }
+  restoreAcks();
+  restoreDrafts();
+  if (window.__fmRestoreView) { window.__fmRestoreView(); }
+
+  function freezePayload(block, form, state) {
+    var area = form.querySelector(\".rc-t\");
+    var close = form.querySelector(\".rc-x\");
+    var submit = form.querySelector(\".rc-go\");
+    if (area) { area.value = state.note || \"\"; area.disabled = true; }
+    if (close) { close.disabled = true; }
+    if (submit) { submit.disabled = true; }
+  }
+
+  function releasePayload(form) {
+    var area = form.querySelector(\".rc-t\");
+    var close = form.querySelector(\".rc-x\");
+    var submit = form.querySelector(\".rc-go\");
+    if (area) { area.disabled = false; }
+    if (close) { close.disabled = false; }
+    if (submit) { submit.disabled = false; }
+  }
+
+  function keepQueuedPayload(block, form, state) {
+    freezePayload(block, form, state);
+    var submit = form.querySelector(\".rc-go\");
+    if (submit) { submit.disabled = false; }
+    say(block, state.status === \"queuing\"
+      ? \"Queue interrupted - retry this saved answer.\"
+      : \"Queued but not sent - retry to send this saved answer.\", true);
+  }
+
+  function newAttempt() {
+    var values = null;
+    try {
+      values = new Uint32Array(4);
+      window.crypto.getRandomValues(values);
+    } catch (e) { values = [Date.now(), Math.floor(Math.random() * 4294967296)]; }
+    return \"fm-board:\" + Array.prototype.map.call(values, function (value) {
+      return Number(value).toString(16);
+    }).join(\"-\");
+  }
+
   document.addEventListener(\"click\", function (ev) {
     var el = ev.target;
     if (el && el.nodeType !== 1) { el = el.parentElement; }
@@ -2145,7 +2490,8 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
     var opener = el.closest(\"[data-open]\");
     if (opener) {
       var block = opener.closest(\".rc\");
-      if (!block) { return; }
+      if (!block || opener.disabled) { return; }
+      window.__fmExplicitNavigation = true;
       var want = opener.getAttribute(\"data-open\");
       var already = false;
       formsIn(block).forEach(function (f) {
@@ -2160,17 +2506,31 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
           if (area) { area.focus(); }
         });
       }
+      saveDrafts();
       return;
     }
 
     var cancel = el.closest(\".rc-x\");
     if (cancel) {
       var owner = cancel.closest(\".rc\");
-      if (owner) { shut(owner); }
+      if (owner) {
+        var form = cancel.closest(\".rc-f\");
+        var intent = form && (form.getAttribute(\"data-intent\") || \"\");
+        var pending = form && requestState[draftIdentity(owner, intent)];
+        if (pending) {
+          if (pending.status === \"queued\") { keepQueuedPayload(owner, form, pending); }
+          else { say(owner, \"Sending - this answer cannot be changed yet.\", false); }
+          return;
+        }
+        var area = form && form.querySelector(\".rc-t\");
+        if (area) { area.value = \"\"; }
+        shut(owner);
+        saveDrafts();
+      }
     }
   });
 
-  document.addEventListener(\"submit\", function (ev) {
+  document.addEventListener(\"submit\", async function (ev) {
     var form = ev.target;
     if (!form || !form.classList || !form.classList.contains(\"rc-f\")) { return; }
     ev.preventDefault();
@@ -2192,29 +2552,110 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
     if (key) { request.key = key; }
     if (note) { request.note = note; }
 
-    var lav = bridge();
-    if (!lav) { say(block, \"Not sent - this board is not connected to firstmate.\", true); return; }
+    var persistent = request.intent !== \"ask\";
+    var identity = persistent ? ackKey(block, request.intent) : \"\";
+    var requestIdentity = draftIdentity(block, request.intent);
     try {
-      lav.queuePrompt(\"FM-BOARD-REQUEST \" + JSON.stringify(request), {
-        tag: \"board-request\",
-        text: summary(request.intent, block.getAttribute(\"data-what\") || \"\")
-      });
-      lav.sendQueuedPrompts();
+      var rememberedDelivery = persistent ? window.localStorage.getItem(identity) : null;
+      if (rememberedDelivery === \"sent\" || rememberedDelivery === \"queued\") {
+        applyAck(block, request.intent, rememberedDelivery);
+        shut(block);
+        return;
+      }
+    } catch (e) { /* duplicate prevention continues for this page */ }
+
+    var lav = bridge();
+    if (!lav) {
+      say(block, \"Not sent - this board is not connected to firstmate.\", true);
+      saveDrafts();
+      return;
+    }
+    var submit = form.querySelector(\".rc-go\");
+    var wire = \"FM-BOARD-REQUEST \" + JSON.stringify(request);
+    var pending = requestState[requestIdentity];
+    if (requestInFlight[requestIdentity]) { return; }
+    if (pending && pending.payload !== wire) {
+      keepQueuedPayload(block, form, pending);
+      saveDrafts();
+      return;
+    }
+    requestInFlight[requestIdentity] = true;
+    try {
+      if (!pending || pending.status !== \"queued\") {
+        if (!pending) {
+          pending = {status:\"queuing\",payload:wire,note:note,attempt:newAttempt()};
+          requestState[requestIdentity] = pending;
+        } else { pending.status = \"queuing\"; }
+        freezePayload(block, form, pending);
+        saveDrafts(true);
+        var queued = lav.queuePrompt(wire, {
+          tag: \"board-request\",
+          text: summary(request.intent, block.getAttribute(\"data-what\") || \"\"),
+          queueKey: pending.attempt
+        });
+        if (queued && typeof queued.then === \"function\") { queued = await queued; }
+        if (queued === false) { throw new Error(\"queue refused\"); }
+        pending.status = \"queued\";
+        saveDrafts(true);
+      }
+      pending.status = \"sending\";
+      freezePayload(block, form, pending);
+      var accepted = lav.sendQueuedPrompts();
+      if (accepted && typeof accepted.then === \"function\") { accepted = await accepted; }
+      if (accepted === false) { throw new Error(\"send refused\"); }
+      var delivery = accepted === true ? \"sent\" : \"queued\";
+      delete requestState[requestIdentity];
+      delete requestInFlight[requestIdentity];
     } catch (e) {
-      say(block, \"Not sent - the board could not reach firstmate.\", true);
+      delete requestInFlight[requestIdentity];
+      if (pending && pending.status === \"queuing\") {
+        delete requestState[requestIdentity];
+        releasePayload(form);
+      }
+      else if (pending) { pending.status = \"queued\"; keepQueuedPayload(block, form, pending); }
+      if (!pending || pending.status !== \"queued\") {
+        say(block, \"Not sent - the board could not reach firstmate.\", true);
+      }
+      saveDrafts();
       return;
     }
     if (area) { area.value = \"\"; }
+    releasePayload(form);
+    if (persistent) {
+      try { window.localStorage.setItem(identity, delivery); } catch (e) { /* page state still prevents a duplicate */ }
+      applyAck(block, request.intent, delivery);
+    } else {
+      say(block, ackLabel(request.intent, delivery) + \" for firstmate.\", false);
+    }
     shut(block);
-    say(block, \"Sent to firstmate.\", false);
+    saveDrafts();
   });
 
-  /* With the controls on, the meta refresh sits in <noscript> and this owns the
-     cadence, so a reload can be held while a control is open or carries typed
-     text instead of discarding what the captain is part way through writing. */
-  var every = " + (($refresh * 1000) | tostring) + ";
-  var due = Date.now() + every;
+  document.addEventListener(\"input\", function (ev) {
+    var area = ev.target;
+    if (!area || !area.closest) { return; }
+    var form = area.closest(\".rc-f\");
+    var block = form && form.closest(\".rc\");
+    var pending = block && form && requestState[draftIdentity(block, form.getAttribute(\"data-intent\") || \"\")];
+    if (pending) {
+      if (pending.status === \"queued\") { keepQueuedPayload(block, form, pending); }
+      else { freezePayload(block, form, pending); }
+      saveDrafts();
+      return;
+    }
+    var ask = area.closest(\".rc-ask\");
+    if (ask) {
+      var submit = ask.querySelector(\".rc-go\");
+      if (submit) { submit.disabled = false; submit.textContent = \"Send to firstmate\"; }
+      var sent = ask.querySelector(\".rc-sent\");
+      if (sent) { sent.hidden = true; }
+    }
+    if (area.classList && area.classList.contains(\"rc-t\")) { saveDrafts(); }
+  });
+  window.addEventListener(\"pagehide\", saveDrafts);
 
+  /* The common managed refresh consults this only to avoid discarding an open
+     control or text the captain has not sent. */
   function busy() {
     var open = document.querySelectorAll(\".rc-f[data-toggle]\");
     var i;
@@ -2226,11 +2667,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
     return false;
   }
 
-  setInterval(function () {
-    if (Date.now() < due) { return; }
-    if (busy()) { return; }
-    window.location.reload();
-  }, 1000);
+  window.__fmMissionControlBusy = busy;
 }());
 </script>
 " end)

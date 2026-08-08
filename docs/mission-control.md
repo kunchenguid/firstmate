@@ -31,6 +31,10 @@ The stage itself is derived by the snapshot rather than by the board; see `bin/f
 - **Awaiting your decision**, first and most prominent, merges three sources of captain-gated work: captain-held items in this home's backlog, tasks with a recorded PR awaiting a review or merge call, and captain-held decisions inside a registered secondmate's own home.
   That third source matters because a secondmate's decisions live in its backlog and never appear in this home's, so a board built from the local backlog alone would silently drop them.
   Each row names the home it came from when that home is not the main one.
+  A structured HTTPS decision aid appears as its own readable link and remains on its recorded private host.
+  Only valid HTTP or HTTPS references are clickable; a local report path such as `data/example/report.md` remains non-clickable context when no explicit served HTTPS aid exists, because the board does not serve fleet-local files.
+  URL validation runs in the required jq rendering path, so valid links do not disappear when optional browser tooling such as Node is unavailable.
+  The board never probes, publishes, mounts, or rewrites that destination.
   Bounded or unavailable secondmate registries, omitted homes, and registered homes whose decisions could not be read all mark the waiting status incomplete.
   Credential and login needs are not detected and are not faked.
 - **Deferred** is the quiet shelf under that list, closed by default, holding the decisions the captain has consciously set aside.
@@ -72,8 +76,11 @@ The board opens on Decisions.
 The tabs are keyboard-reachable, carry the tab and tabpanel roles with their selected state, and move with the arrow, Home, and End keys.
 With no script the tab strip is hidden and every section stays visible, so the board degrades to the single scrolling page it was before rather than hiding its content behind controls that cannot work.
 
-The self-reload navigates without the URL fragment, so a fragment cannot be what carries the selected tab across a reload; the tab is remembered in the browser instead and restored before the page paints, so it neither resets nor flashes the default panel every 25 seconds.
+The self-reload navigates without the URL fragment, so a fragment cannot be what carries the selected tab across a reload; the tab is remembered in browser-local state scoped to this board home and document and restored before the page paints, so it neither resets nor flashes the default panel every 25 seconds.
+The same scoped session memory preserves the visible card or section plus its viewport offset, with a clamped scroll fallback when that anchor disappears.
+Because the memory is updated while the captain reads and types, it also survives a full document replacement triggered by an external board-file rewrite rather than only the board's own reload timer.
 A `#tab=<name>` fragment still selects a tab on the first load, which is what a hand-typed or copied link uses.
+Explicit fragment navigation and deliberate tab changes win over saved reading position.
 A browser that refuses storage - a private context, or a restricted `file://` origin - simply opens on Decisions each time.
 
 The Deferred shelf is held to the same bar, because a shelf that snapped shut every 25 seconds would be the same jarring reset in a smaller place.
@@ -99,12 +106,27 @@ There are five controls, and each row offers only what it can actually resolve:
 - **Ask firstmate**, once, for something new.
 
 A decision belonging to a second mate carries the home it came from and is applied in that home, never in the main one.
+An Answer form uses the exact structured question when one was recorded, otherwise it uses the decision title and reason as a concise reminder, and only falls back to `Your answer` when no useful context exists.
+The textarea retains `Your answer` as its accessible label in every case.
 Setting a decision aside carries no reason text at all: the stored reason is the captain's own, and firstmate reads it from the owning home rather than letting a request overwrite it.
 A row the board cannot name unambiguously gets no controls, because a request firstmate cannot resolve is worse than one the captain makes in chat.
 
 The layer is hidden by CSS and revealed only after a script confirms the Lavish bridge is present.
 The same file served statically is therefore the read-only board exactly as before, with no controls and no dead affordances, and only the copy served through Lavish grows the reply layer.
-With `--controls` the self-reload moves into `<noscript>` and a managed reload takes over, holding while a control is open so a 25-second refresh cannot discard half-typed text; without the flag the meta refresh is untouched.
+With script available, a managed reload preserves the active tab and meaningful reading position.
+Browser-native restoration is disabled and the saved anchor is applied synchronously after draft layout is restored, so refreshed content does not paint at an intermediate position and visibly jump back.
+With `--controls`, that reload also holds while a control is open or contains unsent text.
+The no-script fallback remains read-only and refreshes through its meta tag.
+
+After the Lavish bridge accepts a request, the affected control reports only what the bridge proved and refuses an accidental duplicate while that same action remains on the board.
+A delivery result of `true` produces a confirmed label such as `Answer sent`; the pinned Lavish bridge currently returns before delivery completes, so its truthful labels are `Answer queued`, `Merge request queued`, and their corresponding request forms rather than a false claim that delivery succeeded.
+A failure before queuing leaves the form open, keeps its text editable, and remains retryable.
+When queuing succeeds but delivery fails, the board keeps the exact queued payload in that draft's session record and locks editing and cancellation across full-document reloads, so a retry can neither enqueue a duplicate nor acknowledge newer text while sending the older payload.
+An enqueue attempt receives one durable browser-generated identity that is reused as Lavish's queue key after an asynchronous acceptance is interrupted by a reload, so the bridge replaces that exact attempt instead of appending another request.
+Every open composer and its draft are saved eagerly in session storage under the exact board, owning home, item, decision key, and intent identity.
+A full document reload restores only controls whose exact identity still exists, so an external generator rewrite cannot erase an in-progress answer and cannot attach it to a neighbouring decision.
+Submitted presentation state is browser-local, scoped by board home, document, owning home, item, decision key, and intent.
+It survives a reload only while the same actionable item remains and is retired when that item disappears; it is never fleet truth and never claims that the requested merge or decision has happened.
 
 [`bin/fm-procevent-mission-control.sh`](../bin/fm-procevent-mission-control.sh) owns arming the wake and turning what comes back into validated requests, and its `--help` owns the request format, the fail-closed rules, and the lavish-axi version the format is verified against.
 
@@ -145,12 +167,16 @@ Reading a project clone's history is the only thing the board does to a project,
 A backlog row may record its project as a bare name or as a full clone path.
 Both name the same project, so both fold onto the same rollup row and display as the project name.
 
+[`docs/decision-hold-lifecycle.md`](decision-hold-lifecycle.md) owns how exact decision context is recorded and backfilled through the supported hold interface.
+The canonical backlog parser and secondmate-home summary carry that context to renderers, so Mission Control does not parse private body conventions itself.
+
 Every value that comes from fleet state, the registry, or either allowance source is HTML-escaped before it reaches the page.
 
 ## Serving and refreshing
 
 Firstmate regenerates the board by running the script again; the output is written to a temporary file and renamed into place, so a browser refreshing on its own cadence never reads a half-written page.
-The page carries a meta refresh (25 seconds by default, `--refresh` to change it) and shows how long ago it was rendered, so a board whose generator has stopped is visibly stale rather than quietly wrong.
+With script available, the page reloads on a managed cadence of 25 seconds by default, configurable with `--refresh`, and the no-script fallback carries the equivalent meta refresh.
+The page shows how long ago it was rendered, so a board whose generator has stopped is visibly stale rather than quietly wrong.
 
 The page is fully self-contained with inline styles and no external requests, so it renders correctly from a local file and over a private network.
 The generator does not serve it; how the file is exposed is decided outside it.
@@ -162,6 +188,9 @@ The deferred cases pin the awaiting count and the section count to literal numbe
 It also pins a fixed current time and commits its fixture clones at explicit epochs, so the last-change wording, its three degrade-to-dash paths, and the promise that no clone is written to are all checked against times the test chose.
 
 The reply layer is covered in the same suite: that the default board is unchanged by its existence, that each row offers only the controls it can resolve, that a control reaches nothing but the Lavish bridge, that it stays hidden until that bridge is proved present, and that fleet prose stays escaped inside the attributes a control carries.
+A real-browser regression also covers exact and fallback Answer prompts, main-home and secondmate decision links, malformed and hostile inputs, successful and failed sends, duplicate prevention, acknowledgement restoration and retirement, active-tab restoration, stable reading anchors, explicit-navigation precedence, and disappeared-anchor fallback.
+That regression rewrites the served HTML file repeatedly while an Answer composer contains unsent text, then performs full document reloads and verifies the exact draft, control identity, tab, and anchored reading offset survive both replacements.
+With `FM_MISSION_CONTROL_LIVE_HOME` set to an active home, the same suite generates a fresh board directly from that fleet and uses Chrome at 390 by 844 to verify a meaningful reading anchor remains fixed through regeneration, a full reload, and the early refresh frames without printing fleet records.
 `tests/fm-procevent-mission-control.test.sh` pins the request normalizer against bytes captured from a real send through a real browser, and drives every fail-closed path - a forged envelope, an out-of-vocabulary intent, a truncated capture, a defer carrying reason text - to a refusal rather than a plausible request.
 
 `tests/fm-fleet-snapshot-view.test.sh` pins lifecycle-stage derivation and its conservative fallbacks, secondmate Setup liveness, and the deferred classification itself: a parked hold on work that is not a captain decision is ordinary held work, a captain decision that still has an unresolved blocker stays blocked rather than deferred, and a deferred decision never reaches the secondmate home summary's holds.

@@ -65,15 +65,20 @@ const chrome = spawn(chromePath, [
 ], { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] });
 let buffer = "";
 let nextId = 0;
+let finished = false;
 const pending = new Map();
 
 function finish(code, message) {
+  if (finished) return;
+  finished = true;
   if (message) process.stderr.write(`${message}\n`);
   chrome.kill();
   process.exitCode = code;
 }
 
 chrome.on("error", (error) => finish(1, error.message));
+chrome.stdio[3].on("error", (error) => finish(1, error.message));
+chrome.stdio[4].on("error", (error) => finish(1, error.message));
 chrome.stdio[4].on("data", (chunk) => {
   buffer += chunk;
   let boundary;
@@ -161,7 +166,7 @@ async function run() {
   }
 }
 
-const timeout = setTimeout(() => finish(1, "timed out measuring the rendered 390px board"), 10000);
+const timeout = setTimeout(() => finish(1, "timed out measuring the rendered 390px board"), 30000);
 run().then(() => {
   clearTimeout(timeout);
   finish(0);
@@ -971,12 +976,12 @@ test_navigation_tabs_group_the_board() {
 
   # The tab is remembered rather than carried in the URL, because the board's
   # own reload navigates without the fragment.
-  assert_grep 'localStorage.setItem("fm-mission-control-tab"' "$board" \
+  assert_grep 'fm-mission-control-tab-v2:' "$board" \
     "the selected tab must be remembered across the board's own reload"
   assert_grep 'http-equiv="refresh"' "$board" \
     "the board must keep reloading itself with tabs in place"
   # An opened shelf snapping shut mid-read is the same reset the tabs avoid.
-  assert_grep 'localStorage.setItem("fm-mission-control-deferred"' "$board" \
+  assert_grep 'fm-mission-control-deferred-v2:' "$board" \
     "an opened deferred shelf must survive the board's own reload"
   assert_grep 'document.getElementById("deferred-shelf")' "$board" \
     "deferred persistence must target only the deferred shelf"
@@ -986,7 +991,7 @@ test_navigation_tabs_group_the_board() {
   pass "the board groups its sections behind keyboard-reachable navigation tabs"
 }
 
-# A fragment is only present on the entry load because the board's meta refresh
+# A fragment is only present on the entry load because the board's managed reload
 # drops it. Execute the rendered head script twice against one browser-shaped
 # storage area to prove that the fragment-selected tab becomes the remembered
 # tab before the fragment disappears.
@@ -1817,8 +1822,8 @@ test_controls_are_absent_unless_asked_for() {
   assert_no_grep 'class="rc"' "$board" "a board rendered without --controls carries no reply layer"
   assert_no_grep 'FM-BOARD-REQUEST' "$board" "a board rendered without --controls queues nothing"
   assert_no_grep 'data-open=' "$board" "a board rendered without --controls has no control markup"
-  assert_grep 'http-equiv="refresh" content="25"' "$board" \
-    "a board rendered without --controls keeps its own meta refresh untouched"
+  assert_grep '<noscript><meta http-equiv="refresh" content="25"' "$board" \
+    "a board rendered without --controls keeps its no-script refresh fallback"
   pass "the default board is unchanged by the existence of the reply layer"
 }
 
@@ -1920,8 +1925,8 @@ test_controls_can_only_queue_a_request() {
   assert_grep '.rc-f[hidden]{display:none' "$board" \
     "a closed control must stay closed against the layer own display rule"
 
-  # With controls the reload is managed so it can hold while a control is open.
-  # The meta refresh must survive ONLY for a page that runs no script, so every
+  # The script-managed reload can hold while a control is open.
+  # The meta refresh survives only for a page that runs no script, so every
   # occurrence of it has to be the one inside noscript.
   local all inert
   all=$(grep -o '<meta http-equiv="refresh"' "$board" | wc -l | tr -d ' ')
@@ -1931,6 +1936,543 @@ test_controls_can_only_queue_a_request() {
   [ "$all" = "$inert" ] \
     || fail "a managed reload must not race a live meta refresh ($all refresh tags, $inert in noscript)"
   pass "a control can only queue a request; it reaches nothing else"
+}
+
+test_decision_context_links_and_submission_state_in_a_browser() {
+  local snap board read_only reduced shifted missing node_free node_free_bin chrome
+  snap=$TMP_ROOT/decision-controls-runtime.json
+  board=$TMP_ROOT/decision-controls-runtime.html
+  read_only=$TMP_ROOT/decision-controls-readonly.html
+  reduced=$TMP_ROOT/decision-controls-reduced.html
+  shifted=$TMP_ROOT/decision-controls-shifted.html
+  missing=$TMP_ROOT/decision-controls-missing.html
+  node_free=$TMP_ROOT/decision-controls-node-free.html
+  node_free_bin=$TMP_ROOT/decision-controls-node-free-bin
+  snapshot_json '[
+    {"state":"queued","id":"d-exact","captain_actionable":true,
+     "title":"Choose the prototype emphasis","hold_reason":"Guidance and detail compete for the first screen",
+     "decision_question":"Should the prototype lead with guidance before showing raw detail?",
+     "decision_url":"https://sample.tailnet.invalid/decision-aid","repo":"sample"},
+    {"state":"queued","id":"d-fallback","captain_actionable":true,
+     "title":"Choose the comparison layout","hold_reason":"Scanning speed trades off against explanation","repo":"sample"},
+    {"state":"queued","id":"local-lane-bakeoff-v2-powered-decision-widen-bounded-judgment-rung",
+     "captain_actionable":true,
+     "title":"Widen bounded-judgment dispatch rung to include ollama/qwen3.6:35b-fm? data/local-lane-bakeoff-v2-powered/report.md",
+     "hold_reason":"The powered benchmark missed the pre-agreed reliability bar.",
+     "report_path":"data/local-lane-bakeoff-v2-powered/report.md","repo":"firstmate"},
+    {"state":"queued","id":"d-empty","captain_actionable":true,"title":"","hold_reason":"","repo":"sample"},
+    {"state":"queued","id":"d-bad-link","captain_actionable":true,
+     "title":"Choose without an aid","hold_reason":"The recorded link is unsupported",
+     "decision_url":"http://public.invalid/not-supported","repo":"sample"},
+    {"state":"queued","id":"d-malformed-link","captain_actionable":true,
+     "title":"Choose despite a malformed aid","hold_reason":"The URL has no authority",
+     "decision_url":"https://","repo":"sample"},
+    {"state":"queued","id":"d-invalid-ipv6","captain_actionable":true,
+     "title":"Choose despite an invalid IPv6 aid","hold_reason":"The authority is malformed",
+     "decision_url":"https://[::::]/aid","repo":"sample"},
+    {"state":"queued","id":"d-valid-ipv6","captain_actionable":true,
+     "title":"Choose with an IPv6 aid","hold_reason":"The authority is private IPv6",
+     "decision_url":"https://[fd00::1]/aid","repo":"sample"},
+    {"state":"queued","id":"d-valid-fqdn","captain_actionable":true,
+     "title":"Choose with an absolute FQDN aid","hold_reason":"The terminal root dot is valid",
+     "decision_url":"https://decision.example.com./aid","repo":"sample"},
+    {"state":"queued","id":"d-invalid-port","captain_actionable":true,
+     "title":"Choose despite an invalid port","hold_reason":"The port is out of range",
+     "decision_url":"https://example.invalid:99999/aid","repo":"sample"},
+    {"state":"queued","id":"d-hostile","captain_actionable":true,
+     "title":"Hostile <b>title</b>","hold_reason":"Reason & quote \" stays text",
+     "decision_question":"Question \" ><img src=x onerror=alert(1)> stays text?",
+     "decision_url":"https://safe.invalid/?q=%22%3E%3Cscript%3E","repo":"sample"}
+  ]' '[{
+    "id":"ios","registered":true,"provenance":{"selected":"structured-home"},
+    "current":{"state":"captain_decision"},"active_children":[],"holds":[],"queued":[],
+    "decisions_open":[
+      {"id":"d-exact","key":"route","verb":"captain-hold","source":"backlog",
+       "summary":"Choose the routed emphasis","reason":"The routed choice has two valid shapes",
+       "question":"Which routed shape should lead?","decision_url":"https://ios.tailnet.invalid/decision-aid"},
+      {"id":"d-exact","key":"route-b","verb":"needs-decision","source":"status",
+       "summary":"Which secondary routed shape should follow?","reason":null}
+    ],
+    "counts":{"active_children":0,"decisions_open":2,"holds":0,"queued":0},"omitted":[]
+  }]' | jq '.tasks = [{id:"pr-ready",kind:"ship",project:"sample",model:"claude-opus-5",
+    backlog:{title:"Review the ready change",repo:"sample"},
+    pr:{url:"https://github.com/example/sample/pull/7"},
+    current_state:{state:"done",stage:{ordinal:5,of:5,label:"Checks green",motion:"ready"}}}]' > "$snap"
+  "$BOARD" --snapshot "$snap" --no-quota --controls --refresh 300 --out "$board" >/dev/null \
+    || fail "the decision control runtime fixture must render"
+  mkdir -p "$node_free_bin"
+  ln -sf "$(command -v jq)" "$node_free_bin/jq"
+  PATH="$node_free_bin:/usr/bin:/bin" "$BOARD" --snapshot "$snap" --no-quota --controls --refresh 300 --out "$node_free" >/dev/null \
+    || fail "valid decision links must render without optional Node"
+  assert_grep 'href="https://sample.tailnet.invalid/decision-aid"' "$node_free" \
+    "a missing optional Node runtime must not erase a valid private decision aid"
+  assert_no_grep 'href="https://\[::::\]/aid"' "$node_free" \
+    "jq-owned URL validation must reject malformed IPv6 authorities without Node"
+  assert_no_grep 'href="https://example.invalid:99999/aid"' "$node_free" \
+    "jq-owned URL validation must reject out-of-range ports without Node"
+  "$BOARD" --snapshot "$snap" --no-quota --refresh 300 --out "$read_only" >/dev/null \
+    || fail "the read-only decision fixture must render"
+  jq '.backlog.records = ([range(0;8) | {state:"queued",id:("inserted-" + tostring),captain_actionable:true,
+        title:("New decision " + tostring),hold_reason:"Inserted above the reading anchor",repo:"sample"}]
+        + .backlog.records)' "$snap" > "$snap.shifted"
+  "$BOARD" --snapshot "$snap.shifted" --no-quota --controls --refresh 300 --out "$shifted" >/dev/null \
+    || fail "the shifted reading-position fixture must render"
+  jq '.backlog.records |= map(select(.id != "d-fallback"))' "$snap.shifted" > "$snap.missing"
+  "$BOARD" --snapshot "$snap.missing" --no-quota --controls --refresh 300 --out "$missing" >/dev/null \
+    || fail "the disappeared-anchor fixture must render"
+  snapshot_json '[]' '[]' > "$snap.reduced"
+  "$BOARD" --snapshot "$snap.reduced" --no-quota --controls --refresh 300 --out "$reduced" >/dev/null \
+    || fail "the acknowledgement-retirement fixture must render"
+
+  command -v node >/dev/null 2>&1 || { printf 'skip: node not found for decision-control browser regression\n'; return 0; }
+  chrome=$(find_chrome) || { printf 'skip: Chrome or Chromium not found for decision-control browser regression\n'; return 0; }
+  node - "$chrome" "$board" "$read_only" "$reduced" "$shifted" "$missing" <<'JS' \
+    || fail "decision prompts, links, and submission state failed in a real browser"
+const { spawn } = require("node:child_process");
+const fs = require("node:fs");
+const { pathToFileURL } = require("node:url");
+const [chromePath, boardPath, readonlyPath, reducedPath, shiftedPath, missingPath] = process.argv.slice(2);
+const original = fs.readFileSync(boardPath);
+const chrome = spawn(chromePath, ["--headless=new", "--disable-gpu", "--no-sandbox",
+  "--remote-debugging-pipe", `--user-data-dir=${boardPath}.runtime-profile`],
+  {stdio:["ignore","ignore","ignore","pipe","pipe"]});
+let buffer = ""; let nextId = 0; const pending = new Map();
+function send(method, params = {}, sessionId) { return new Promise((resolve) => {
+  const id = ++nextId; pending.set(id, resolve);
+  chrome.stdio[3].write(`${JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})})}\0`);
+}); }
+chrome.stdio[4].on("data", (chunk) => { buffer += chunk; let at;
+  while ((at = buffer.indexOf("\0")) >= 0) { const raw = buffer.slice(0, at); buffer = buffer.slice(at + 1);
+    if (!raw) continue; const message = JSON.parse(raw); const resolve = pending.get(message.id);
+    if (resolve) { pending.delete(message.id); resolve(message); } }
+});
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function evaluate(sessionId, expression) {
+  const result = await send("Runtime.evaluate", {expression,awaitPromise:true,returnByValue:true}, sessionId);
+  if (result.result.exceptionDetails) throw new Error(result.result.exceptionDetails.text);
+  return result.result.result.value;
+}
+async function navigate(sessionId, file, hash = "") {
+  const url = pathToFileURL(file); url.hash = hash;
+  await send("Page.navigate", {url:url.href}, sessionId);
+  for (let i=0;i<100;i++) { if (await evaluate(sessionId,"document.readyState") === "complete") break; await delay(20); }
+  await delay(250);
+}
+async function reload(sessionId) {
+  await send("Page.reload", {ignoreCache:true}, sessionId);
+  await delay(100);
+  for (let i=0;i<100;i++) { if (await evaluate(sessionId,"document.readyState") === "complete") break; await delay(20); }
+  await delay(250);
+}
+function assert(ok, message) { if (!ok) throw new Error(message); }
+(async () => {
+  const created = await send("Target.createTarget", {url:"about:blank"});
+  const attached = await send("Target.attachToTarget", {targetId:created.result.targetId,flatten:true});
+  const sid = attached.result.sessionId;
+  await send("Page.enable", {}, sid);
+  await send("Runtime.enable", {}, sid);
+  await send("Page.addScriptToEvaluateOnNewDocument", {source:`
+    window.__fmFrameTops=[];
+    window.addEventListener('DOMContentLoaded',function(){var left=8; function sample(){
+      var target=document.querySelector('[data-scroll-anchor="call:main:d-fallback::decision"]');
+      window.__fmFrameTops.push(target?target.getBoundingClientRect().top:null);
+      if(--left>0)requestAnimationFrame(sample);
+    } requestAnimationFrame(sample);});
+    window.lavish={
+      queuePrompt:function(prompt,options){
+        if(localStorage.getItem("test-bridge-fail")==="1") throw new Error("queue failed");
+        function accept(){
+          var p=JSON.parse(localStorage.getItem("test-prompts")||"[]");
+          var item={prompt:prompt,key:options&&options.queueKey||""};
+          var at=item.key?p.findIndex(x=>x.key===item.key):-1;
+          if(at===-1)p.push(item);else p[at]=item;
+          localStorage.setItem("test-prompts",JSON.stringify(p)); return true;
+        }
+        // Keep acceptance pending until the reload destroys this document.
+        if(localStorage.getItem("test-queue-delay")==="1") return new Promise(()=>{});
+        return accept();
+      },
+      sendQueuedPrompts:function(){
+        if(localStorage.getItem("test-send-fail")==="1") throw new Error("send failed");
+        if(localStorage.getItem("test-delivery-unconfirmed")==="1") return undefined;
+        return true;
+      }
+    };`}, sid);
+  await navigate(sid, boardPath);
+  const dom = await evaluate(sid, `(() => {
+    function block(home,id){return [...document.querySelectorAll('.rc')].find(x=>x.dataset.home===home&&x.dataset.id===id);}
+    function answer(home,id){return block(home,id).querySelector('form[data-intent=answer] textarea');}
+    return {
+      exact:[answer('main','d-exact').placeholder,answer('main','d-exact').getAttribute('aria-label')],
+      fallback:answer('main','d-fallback').placeholder,
+      empty:answer('main','d-empty').placeholder,
+      hostile:answer('main','d-hostile').placeholder,
+      injectedImages:document.querySelectorAll('img[src="x"]').length,
+      aids:[...document.querySelectorAll('.decision-aid')].map(a=>a.href),
+      badAid:!!block('main','d-bad-link').closest('.need-wrap').querySelector('.decision-aid'),
+      malformedAid:!!block('main','d-malformed-link').closest('.need-wrap').querySelector('.decision-aid'),
+      invalidIpv6Aid:!!block('main','d-invalid-ipv6').closest('.need-wrap').querySelector('.decision-aid'),
+      validIpv6Aid:!!block('main','d-valid-ipv6').closest('.need-wrap').querySelector('.decision-aid'),
+      validFqdnAid:!!block('main','d-valid-fqdn').closest('.need-wrap').querySelector('.decision-aid'),
+      invalidPortAid:!!block('main','d-invalid-port').closest('.need-wrap').querySelector('.decision-aid'),
+      localReport:(()=>{var row=block('main','local-lane-bakeoff-v2-powered-decision-widen-bounded-judgment-rung').closest('.need-wrap');
+        var ref=row.querySelector('.local-ref'); return {text:ref&&ref.textContent,anchor:!!row.querySelector('a[href="data/local-lane-bakeoff-v2-powered/report.md"]')};})(),
+      cards:document.querySelectorAll('.need-wrap').length
+    };
+  })()`);
+  assert(dom.exact[0] === "Should the prototype lead with guidance before showing raw detail?", "exact question was not the answer prompt");
+  assert(dom.exact[1] === "Your answer", "the answer textarea lost its accessible label");
+  assert(dom.fallback === "Choose the comparison layout - Scanning speed trades off against explanation", "decision context fallback was not specific");
+  assert(dom.empty === "Your answer", "an empty decision invented context");
+  assert(dom.hostile === 'Question " ><img src=x onerror=alert(1)> stays text?' && dom.injectedImages === 0, "hostile question escaped its text context");
+  assert(dom.aids.includes("https://sample.tailnet.invalid/decision-aid") && dom.aids.includes("https://ios.tailnet.invalid/decision-aid"), "main or secondmate decision aid was missing");
+  assert(dom.aids.includes("https://safe.invalid/?q=%22%3E%3Cscript%3E") && dom.validIpv6Aid && dom.validFqdnAid && !dom.badAid && !dom.malformedAid
+    && !dom.invalidIpv6Aid && !dom.invalidPortAid, "valid hostile text or malformed link handling was wrong");
+  assert(dom.localReport.text === "Local report: data/local-lane-bakeoff-v2-powered/report.md" && !dom.localReport.anchor,
+    "the Qwen bounded-judgment report path was not preserved as non-clickable context");
+  assert(dom.cards >= 8, "ordinary multi-card decision list did not render");
+
+  await send("Emulation.setDeviceMetricsOverride", {width:390,height:844,deviceScaleFactor:1,mobile:true}, sid);
+  await send("Emulation.setTouchEmulationEnabled", {enabled:true,maxTouchPoints:1}, sid);
+  const mobileTap = await evaluate(sid, `(() => {var ref=document.querySelector('.local-ref'); ref.scrollIntoView({block:'center'});
+    var r=ref.getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2,before:location.href,anchor:!!ref.closest('a')};})()`);
+  assert(!mobileTap.anchor && mobileTap.x >= 0 && mobileTap.x <= 390 && mobileTap.y >= 0 && mobileTap.y <= 844,
+    "the Qwen local report context was not a visible non-link mobile target");
+  await send("Input.dispatchTouchEvent", {type:"touchStart",touchPoints:[{x:mobileTap.x,y:mobileTap.y}]}, sid);
+  await send("Input.dispatchTouchEvent", {type:"touchEnd",touchPoints:[]}, sid);
+  await delay(100);
+  assert(await evaluate(sid,"location.href") === mobileTap.before, "a real mobile tap on the local Qwen report path navigated away from /mission");
+  await send("Emulation.setTouchEmulationEnabled", {enabled:false}, sid);
+  await send("Emulation.clearDeviceMetricsOverride", {}, sid);
+
+  await navigate(sid, readonlyPath);
+  assert(await evaluate(sid,"document.querySelectorAll('.rc').length") === 0, "controls appeared when disabled");
+  await navigate(sid, boardPath);
+  await evaluate(sid, `localStorage.removeItem('test-prompts'); localStorage.removeItem('test-bridge-fail');`);
+
+  const draftBefore = await evaluate(sid, `(async()=>{
+    var b=[...document.querySelectorAll('.rc')].find(x=>x.dataset.id==='d-fallback');
+    b.querySelector('[data-open=answer]').click(); var t=b.querySelector('textarea');
+    t.value='Draft survives an external artifact replacement'; t.dispatchEvent(new Event('input',{bubbles:true}));
+    var anchor=b.closest('.need-wrap'); anchor.scrollIntoView({block:'center'}); window.scrollBy(0,47);
+    await new Promise(r=>setTimeout(r,140)); return {top:anchor.getBoundingClientRect().top,tab:document.documentElement.className};
+  })()`);
+  fs.copyFileSync(shiftedPath, boardPath);
+  await reload(sid);
+  const draftOne = await evaluate(sid, `(() => {var b=[...document.querySelectorAll('.rc')].find(x=>x.dataset.id==='d-fallback');
+    return {value:b.querySelector('textarea').value,open:!b.querySelector('form[data-intent=answer]').hidden,
+      top:b.closest('.need-wrap').getBoundingClientRect().top,tab:document.documentElement.className,
+      view:sessionStorage.getItem(window.__fmViewKey),explicit:window.__fmExplicitNavigation,hash:location.hash};})()`);
+  assert(draftOne.value === 'Draft survives an external artifact replacement' && draftOne.open,
+    'an external file rewrite discarded the open draft or composer identity');
+  assert(draftOne.tab.includes('t-decisions') && Math.abs(draftOne.top-draftBefore.top)<=3,
+    'an external file rewrite lost the active tab or stable reading position: '+JSON.stringify({draftBefore,draftOne}));
+  fs.copyFileSync(missingPath, boardPath);
+  await reload(sid);
+  const absentDraft = await evaluate(sid, `JSON.parse(sessionStorage.getItem('fm-mission-control-drafts-v1:'+window.__fmBoardScope)||'[]')
+    .find(x=>decodeURIComponent(x.identity.split(':')[1])==='d-fallback')`);
+  assert(absentDraft && absentDraft.note === 'Draft survives an external artifact replacement' && absentDraft.open,
+    'a temporarily omitted item erased its unmatched stored draft identity');
+  fs.writeFileSync(boardPath, original);
+  await reload(sid);
+  const draftTwo = await evaluate(sid, `(() => {var b=[...document.querySelectorAll('.rc')].find(x=>x.dataset.id==='d-fallback');
+    return {value:b.querySelector('textarea').value,open:!b.querySelector('form[data-intent=answer]').hidden};})()`);
+  assert(draftTwo.value === 'Draft survives an external artifact replacement' && draftTwo.open,
+    'a second file rewrite discarded the restored draft');
+  await evaluate(sid, `var b=[...document.querySelectorAll('.rc')].find(x=>x.dataset.id==='d-fallback'); b.querySelector('.rc-x').click();`);
+
+  const success = await evaluate(sid, `(async()=>{
+    function block(home,id,key=''){return [...document.querySelectorAll('.rc')].find(x=>x.dataset.home===home&&x.dataset.id===id&&x.dataset.key===key);}
+    var a=block('main','d-exact'); a.querySelector('[data-open=answer]').click();
+    a.querySelector('textarea').value='Lead with guidance'; a.querySelector('form[data-intent=answer]').requestSubmit();
+    await new Promise(r=>setTimeout(r,20));
+    var p=block('main','pr-ready'); p.querySelector('[data-open=merge]').click(); p.querySelector('form[data-intent=merge]').requestSubmit();
+    await new Promise(r=>setTimeout(r,20));
+    var routed=block('ios','d-exact','route'); routed.querySelector('[data-open=answer]').click();
+    routed.querySelector('textarea').value='Lead with the routed shape'; routed.querySelector('form[data-intent=answer]').requestSubmit();
+    await new Promise(r=>setTimeout(r,20));
+    var routedB=block('ios','d-exact','route-b'); routedB.querySelector('[data-open=answer]').click();
+    routedB.querySelector('textarea').value='Use the secondary routed shape'; routedB.querySelector('form[data-intent=answer]').requestSubmit();
+    await new Promise(r=>setTimeout(r,20));
+    p.querySelector('[data-open=reply]').click(); p.querySelector('textarea').value='Keep the PR open for review';
+    p.querySelector('form[data-intent=reply]').requestSubmit(); await new Promise(r=>setTimeout(r,20));
+    a.querySelector('form[data-intent=answer]').requestSubmit(); await new Promise(r=>setTimeout(r,20));
+    return {answer:a.querySelector('[data-open=answer]').textContent,answerDisabled:a.querySelector('[data-open=answer]').disabled,
+      answerClosed:a.querySelector('form[data-intent=answer]').hidden,
+      answerMessage:a.querySelector('.rc-sent').textContent,
+      merge:p.querySelector('[data-open=merge]').textContent,mergeDisabled:p.querySelector('[data-open=merge]').disabled,
+      reply:p.querySelector('[data-open=reply]').textContent,
+      routed:routed.querySelector('[data-open=answer]').textContent,
+      routedB:routedB.querySelector('[data-open=answer]').textContent,
+      lavish:!!window.lavish,body:document.body.className,
+      prompts:JSON.parse(localStorage.getItem('test-prompts')||'[]').length};
+  })()`);
+  assert(success.answer === "Answer sent" && success.answerDisabled && success.answerClosed, "accepted answer was not acknowledged and closed: " + JSON.stringify(success));
+  assert(success.merge === "Merge request sent" && success.mergeDisabled && success.reply === "Reply sent", "PR intents did not keep distinct acknowledgement identities");
+  assert(success.routed === "Answer sent" && success.routedB === "Answer sent", "home or decision-key acknowledgement identities collided");
+  assert(success.prompts === 5, "duplicate answer submission reached the bridge or a distinct identity was dropped");
+
+  const unconfirmed = await evaluate(sid, `(async()=>{
+    localStorage.setItem('test-delivery-unconfirmed','1');
+    var b=[...document.querySelectorAll('.rc')].find(x=>x.dataset.id==='d-hostile');
+    b.querySelector('[data-open=answer]').click(); b.querySelector('textarea').value='Queue this exact answer';
+    b.querySelector('form[data-intent=answer]').requestSubmit(); await new Promise(r=>setTimeout(r,20));
+    var beforeDuplicate=JSON.parse(localStorage.getItem('test-prompts')||'[]').length;
+    b.querySelector('form[data-intent=answer]').requestSubmit(); await new Promise(r=>setTimeout(r,20));
+    var stored=[...Array(localStorage.length)].map((_,i)=>localStorage.key(i))
+      .filter(k=>k&&k.startsWith('fm-mission-control-ack-v1:')&&localStorage.getItem(k)==='queued');
+    localStorage.removeItem('test-delivery-unconfirmed');
+    return {label:b.querySelector('[data-open=answer]').textContent,message:b.querySelector('.rc-sent').textContent,
+      disabled:b.querySelector('[data-open=answer]').disabled,stored:stored.length,
+      beforeDuplicate,afterDuplicate:JSON.parse(localStorage.getItem('test-prompts')||'[]').length};
+  })()`);
+  assert(unconfirmed.label === 'Answer queued' && unconfirmed.message === 'Answer queued for firstmate.'
+    && unconfirmed.disabled && unconfirmed.stored === 1
+    && unconfirmed.beforeDuplicate === unconfirmed.afterDuplicate,
+    'an unconfirmed Lavish delivery was reported as sent or allowed to duplicate: '+JSON.stringify(unconfirmed));
+
+  const asynchronous = await evaluate(sid, `(async()=>{
+    localStorage.setItem('test-queue-delay','1');
+    var b=[...document.querySelectorAll('.rc')].find(x=>x.dataset.id==='d-empty');
+    b.querySelector('[data-open=answer]').click(); var t=b.querySelector('textarea'); t.value='Frozen asynchronous answer';
+    b.querySelector('form[data-intent=answer]').requestSubmit(); await new Promise(r=>setTimeout(r,20));
+    var saved=JSON.parse(sessionStorage.getItem('fm-mission-control-drafts-v1:'+window.__fmBoardScope)||'[]')
+      .find(x=>decodeURIComponent(x.identity.split(':')[1])==='d-empty');
+    return {value:t.value,textLocked:t.disabled,closeLocked:b.querySelector('.rc-x').disabled,
+      submitLocked:b.querySelector('.rc-go').disabled,saved,prompts:JSON.parse(localStorage.getItem('test-prompts')||'[]').length};
+  })()`);
+  assert(asynchronous.value === 'Frozen asynchronous answer' && asynchronous.textLocked
+    && asynchronous.closeLocked && asynchronous.submitLocked && asynchronous.saved
+    && asynchronous.saved.queued && asynchronous.saved.queued.status === 'queuing'
+    && typeof asynchronous.saved.queued.attempt === 'string' && asynchronous.saved.queued.attempt,
+    'an asynchronous enqueue attempt was not frozen and durably bound before acceptance: '+JSON.stringify(asynchronous));
+  await reload(sid);
+  const asynchronousRetry = await evaluate(sid, `(async()=>{
+    localStorage.removeItem('test-queue-delay');
+    var b=[...document.querySelectorAll('.rc')].find(x=>x.dataset.id==='d-empty'); var t=b.querySelector('textarea');
+    var restored={value:t.value,textLocked:t.disabled,closeLocked:b.querySelector('.rc-x').disabled,
+      retry:!b.querySelector('.rc-go').disabled};
+    b.querySelector('form[data-intent=answer]').requestSubmit(); await new Promise(r=>setTimeout(r,20));
+    var prompts=JSON.parse(localStorage.getItem('test-prompts')||'[]');
+    return {restored,label:b.querySelector('[data-open=answer]').textContent,
+      prompts:prompts.length,key:prompts.length&&prompts[prompts.length-1].key};
+  })()`);
+  assert(asynchronousRetry.restored.value === 'Frozen asynchronous answer' && asynchronousRetry.restored.textLocked
+    && asynchronousRetry.restored.closeLocked && asynchronousRetry.restored.retry
+    && asynchronousRetry.label === 'Answer sent' && asynchronousRetry.prompts === asynchronous.prompts + 1
+    && asynchronousRetry.key === asynchronous.saved.queued.attempt,
+    'reload during asynchronous queue acceptance re-queued or changed the frozen answer: '+JSON.stringify({asynchronous,asynchronousRetry}));
+
+  const failed = await evaluate(sid, `(async()=>{
+    localStorage.setItem('test-send-fail','1');
+    var b=[...document.querySelectorAll('.rc')].find(x=>x.dataset.id==='d-fallback');
+    b.querySelector('[data-open=answer]').click(); var t=b.querySelector('textarea'); t.value='Keep comparison compact';
+    b.querySelector('form[data-intent=answer]').requestSubmit(); await new Promise(r=>setTimeout(r,20));
+    var failed={open:!b.querySelector('form[data-intent=answer]').hidden,value:t.value,
+      retry:!b.querySelector('.rc-go').disabled,message:b.querySelector('.rc-sent').textContent,
+      textLocked:t.disabled,closeLocked:b.querySelector('.rc-x').disabled};
+    failed.queued=JSON.parse(localStorage.getItem('test-prompts')||'[]').length;
+    failed.saved=JSON.parse(sessionStorage.getItem('fm-mission-control-drafts-v1:'+window.__fmBoardScope)||'[]')
+      .find(x=>decodeURIComponent(x.identity.split(':')[1])==='d-fallback');
+    return failed;
+  })()`);
+  assert(failed.open && failed.value === "Keep comparison compact" && failed.retry
+    && failed.message.startsWith("Queued but not sent") && failed.textLocked && failed.closeLocked,
+    "a queued-but-unsent answer was not visibly preserved and retryable");
+  assert(failed.saved && failed.saved.queued && failed.saved.queued.note === 'Keep comparison compact',
+    'the queued payload was not persisted under its exact draft identity: '+JSON.stringify(failed));
+
+  await reload(sid);
+  const retried = await evaluate(sid, `(async()=>{
+    var b=[...document.querySelectorAll('.rc')].find(x=>x.dataset.id==='d-fallback'); var t=b.querySelector('textarea');
+    var restored={open:!b.querySelector('form[data-intent=answer]').hidden,value:t.value,
+      textLocked:t.disabled,closeLocked:b.querySelector('.rc-x').disabled,retry:!b.querySelector('.rc-go').disabled};
+    localStorage.removeItem('test-send-fail');
+    t.value='Edited answer that was never queued'; b.querySelector('form[data-intent=answer]').requestSubmit();
+    await new Promise(r=>setTimeout(r,20));
+    var afterEdit={value:t.value,label:b.querySelector('[data-open=answer]').textContent,
+      queued:JSON.parse(localStorage.getItem('test-prompts')||'[]').length};
+    b.querySelector('form[data-intent=answer]').requestSubmit(); await new Promise(r=>setTimeout(r,20));
+    return {restored,afterEdit,after:b.querySelector('[data-open=answer]').textContent,
+      afterQueued:JSON.parse(localStorage.getItem('test-prompts')||'[]').length};
+  })()`);
+  assert(retried.restored.open && retried.restored.value === 'Keep comparison compact' && retried.restored.textLocked
+    && retried.restored.closeLocked && retried.restored.retry, 'reload did not restore the locked queued answer: '+JSON.stringify(retried));
+  assert(retried.afterEdit.value === "Keep comparison compact" && retried.afterEdit.label === "Answer",
+    "edited text replaced or acknowledged the older queued answer: " + JSON.stringify(retried));
+  assert(retried.after === "Answer sent", "retry of the exact queued answer was not acknowledged");
+  assert(failed.queued === retried.afterEdit.queued && failed.queued === retried.afterQueued,
+    "retry after a partial bridge failure queued a duplicate request: " + JSON.stringify({failed,retried}));
+
+  await navigate(sid, boardPath);
+  const restored = await evaluate(sid, `(() => {var all=[...document.querySelectorAll('.rc')]; var pr=all.find(x=>x.dataset.id==='pr-ready'); return {
+    answer:all.find(x=>x.dataset.home==='main'&&x.dataset.id==='d-exact').querySelector('[data-open=answer]').textContent,
+    routed:all.find(x=>x.dataset.home==='ios'&&x.dataset.key==='route').querySelector('[data-open=answer]').textContent,
+    routedB:all.find(x=>x.dataset.home==='ios'&&x.dataset.key==='route-b').querySelector('[data-open=answer]').textContent,
+    merge:pr.querySelector('[data-open=merge]').textContent,reply:pr.querySelector('[data-open=reply]').textContent};})()`);
+  assert(restored.answer === "Answer sent" && restored.routed === "Answer sent" && restored.routedB === "Answer sent"
+    && restored.merge === "Merge request sent" && restored.reply === "Reply sent",
+    "acknowledgements did not survive managed page reload under each exact identity");
+
+  fs.copyFileSync(reducedPath, boardPath);
+  await navigate(sid, boardPath);
+  const stale = await evaluate(sid, `[...Array(localStorage.length)].map((_,i)=>localStorage.key(i)).filter(k=>k.startsWith('fm-mission-control-ack-v1:'))`);
+  assert(stale.length === 0, "acknowledgements survived after their actionable items disappeared: "+JSON.stringify(stale));
+
+  fs.writeFileSync(boardPath, original);
+  await navigate(sid, boardPath);
+  await evaluate(sid, `document.getElementById('tab-projects').click();
+    history.replaceState(null,'',location.pathname+location.search); window.__fmSaveView();
+    sessionStorage.setItem(window.__fmReloadKey,'reload');`);
+  await navigate(sid, boardPath);
+  assert(await evaluate(sid,"document.documentElement.classList.contains('t-projects')"), "active tab did not survive managed reload");
+
+  const beforeAnchor = await evaluate(sid, `(async()=>{
+    document.getElementById('tab-decisions').click();
+    var target=document.querySelector('[data-scroll-anchor="call:main:d-fallback::decision"]');
+    target.scrollIntoView({block:'center'}); window.scrollBy(0,73); await new Promise(r=>requestAnimationFrame(r));
+    window.__fmSaveView(); sessionStorage.setItem(window.__fmReloadKey,'reload');
+    return target.getBoundingClientRect().top;
+  })()`);
+  fs.copyFileSync(shiftedPath, boardPath);
+  await reload(sid);
+  const afterAnchorState = await evaluate(sid,"({top:document.querySelector('[data-scroll-anchor=\\\"call:main:d-fallback::decision\\\"]').getBoundingClientRect().top,hash:location.hash,frames:window.__fmFrameTops})");
+  const afterAnchor = afterAnchorState.top;
+  assert(Math.abs(afterAnchor - beforeAnchor) <= 3, `stable reading anchor shifted from ${beforeAnchor} to ${afterAnchor}`);
+  assert(afterAnchorState.hash === '#tab=decisions', 'an internally generated tab fragment did not survive the external reload regression');
+  assert(afterAnchorState.frames.filter(x=>typeof x==='number').every(x=>Math.abs(x-beforeAnchor)<=3),
+    'the reading anchor visibly jumped during early refresh frames: '+JSON.stringify({beforeAnchor,afterAnchorState}));
+
+  await evaluate(sid, `window.scrollTo(0,700); window.__fmSaveView(); sessionStorage.setItem(window.__fmReloadKey,'reload');`);
+  await navigate(sid, readonlyPath);
+  await navigate(sid, boardPath, "tab=projects");
+  const explicit = await evaluate(sid,"({projects:document.documentElement.classList.contains('t-projects'),y:scrollY})");
+  assert(explicit.projects && explicit.y < 5, "explicit tab navigation was dragged to an old scroll offset: " + JSON.stringify(explicit));
+
+  const fallbackY = await evaluate(sid, `(async()=>{
+    document.getElementById('tab-decisions').click(); history.replaceState(null,'',location.pathname+location.search);
+    var target=document.querySelector('[data-scroll-anchor="call:main:d-fallback::decision"]');
+    target.scrollIntoView({block:'center'}); window.scrollBy(0,61); await new Promise(r=>requestAnimationFrame(r));
+    window.__fmSaveView(); sessionStorage.setItem(window.__fmReloadKey,'reload'); return scrollY;
+  })()`);
+  fs.copyFileSync(missingPath, boardPath);
+  await reload(sid);
+  const fallback = await evaluate(sid,"({y:scrollY,max:Math.max(0,document.documentElement.scrollHeight-innerHeight)})");
+  assert(Math.abs(fallback.y - Math.min(fallbackY,fallback.max)) <= 3, "disappeared anchor did not use the clamped scroll fallback: " + JSON.stringify({fallbackY,...fallback}));
+
+  const opened = await evaluate(sid, `(async()=>{
+    document.getElementById('tab-decisions').click(); var b=[...document.querySelectorAll('.rc')].find(x=>x.dataset.id==='inserted-0');
+    b.querySelector('[data-open=answer]').click(); await new Promise(r=>setTimeout(r,30));
+    return {focused:document.activeElement===b.querySelector('textarea'),open:!b.querySelector('form[data-intent=answer]').hidden};
+  })()`);
+  assert(opened.focused && opened.open, "a newly opened control was displaced by stale scroll restoration");
+})().finally(() => { fs.writeFileSync(boardPath, original); chrome.kill(); }).catch((error) => { console.error(error.stack||error); process.exitCode=1; });
+JS
+  pass "decision prompts, private links, and reply acknowledgements behave coherently in a browser"
+}
+
+test_live_fleet_mobile_refresh_keeps_reading_position() {
+  local live_home=${FM_MISSION_CONTROL_LIVE_HOME:-} board chrome
+  if [ -z "$live_home" ]; then
+    [ "${FM_MISSION_CONTROL_REQUIRE_LIVE:-0}" = 1 ] \
+      && fail "FM_MISSION_CONTROL_LIVE_HOME is required for the live-fleet browser regression"
+    printf 'skip: FM_MISSION_CONTROL_LIVE_HOME not set for live-fleet browser regression\n'
+    return 0
+  fi
+  [ -f "$live_home/data/backlog.md" ] \
+    || fail "FM_MISSION_CONTROL_LIVE_HOME has no live backlog"
+  command -v node >/dev/null 2>&1 \
+    || fail "node is required for the live-fleet browser regression"
+  chrome=$(find_chrome) \
+    || fail "Chrome or Chromium is required for the live-fleet browser regression"
+  board=$TMP_ROOT/live-fleet-mobile-refresh.html
+  FM_HOME="$live_home" "$BOARD" --no-quota --controls --refresh 300 --out "$board" >/dev/null \
+    || fail "the live fleet board did not render"
+
+  node - "$chrome" "$board" "$BOARD" "$live_home" <<'JS' \
+    || fail "the privacy-safe live-fleet mobile refresh regression failed"
+const { spawn, spawnSync } = require("node:child_process");
+const { pathToFileURL } = require("node:url");
+const [chromePath, boardPath, boardBin, liveHome] = process.argv.slice(2);
+const chrome = spawn(chromePath, ["--headless=new", "--disable-gpu", "--no-sandbox",
+  "--remote-debugging-pipe", `--user-data-dir=${boardPath}.live-profile`],
+  {stdio:["ignore","ignore","ignore","pipe","pipe"]});
+let buffer = ""; let nextId = 0; const pending = new Map();
+function send(method, params = {}, sessionId) { return new Promise((resolve) => {
+  const id = ++nextId; pending.set(id, resolve);
+  chrome.stdio[3].write(`${JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})})}\0`);
+}); }
+chrome.stdio[4].on("data", (chunk) => { buffer += chunk; let at;
+  while ((at = buffer.indexOf("\0")) >= 0) { const raw = buffer.slice(0, at); buffer = buffer.slice(at + 1);
+    if (!raw) continue; const message = JSON.parse(raw); const resolve = pending.get(message.id);
+    if (resolve) { pending.delete(message.id); resolve(message); } }
+});
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function evaluate(sessionId, expression) {
+  const result = await send("Runtime.evaluate", {expression,awaitPromise:true,returnByValue:true}, sessionId);
+  if (result.result.exceptionDetails) throw new Error("browser evaluation failed");
+  return result.result.result.value;
+}
+async function loaded(sessionId) {
+  for (let i=0;i<100;i++) { if (await evaluate(sessionId,"document.readyState") === "complete") return; await delay(20); }
+  throw new Error("live board load timed out");
+}
+function assert(ok, message) { if (!ok) throw new Error(message); }
+(async () => {
+  const created = await send("Target.createTarget", {url:"about:blank"});
+  const attached = await send("Target.attachToTarget", {targetId:created.result.targetId,flatten:true});
+  const sid = attached.result.sessionId;
+  await send("Page.enable", {}, sid);
+  await send("Runtime.enable", {}, sid);
+  await send("Emulation.setDeviceMetricsOverride", {width:390,height:844,deviceScaleFactor:1,mobile:true}, sid);
+  await send("Page.addScriptToEvaluateOnNewDocument", {source:`
+    window.__fmLiveFrameTops=[];
+    window.lavish={queuePrompt:function(){return true},sendQueuedPrompts:function(){return true}};
+    window.addEventListener('DOMContentLoaded',function(){var left=8;function sample(){
+      var state=null;try{state=JSON.parse(sessionStorage.getItem(window.__fmViewKey)||'null')}catch(e){}
+      var target=state&&typeof state.anchor==='string'?[...document.querySelectorAll('[data-scroll-anchor]')]
+        .find(x=>x.getAttribute('data-scroll-anchor')===state.anchor):null;
+      window.__fmLiveFrameTops.push(target?target.getBoundingClientRect().top:null);
+      if(--left>0)requestAnimationFrame(sample);
+    }requestAnimationFrame(sample)});`}, sid);
+  await send("Page.navigate", {url:pathToFileURL(boardPath).href}, sid);
+  await loaded(sid); await delay(200);
+  const before = await evaluate(sid, `(async()=>{
+    var tabs=[...document.querySelectorAll('[role=tab]')]; var best=null;
+    for(var tab of tabs){tab.click();await new Promise(r=>requestAnimationFrame(r));
+      var height=document.documentElement.scrollHeight;if(!best||height>best.height)best={id:tab.id,height:height};}
+    document.getElementById(best.id).click();await new Promise(r=>requestAnimationFrame(r));
+    var max=Math.max(0,document.documentElement.scrollHeight-innerHeight);
+    if(max<160)return {meaningful:false,max:max};
+    scrollTo(0,Math.max(120,Math.round(max*.55)));await new Promise(r=>requestAnimationFrame(r));
+    window.__fmSaveView();var state=JSON.parse(sessionStorage.getItem(window.__fmViewKey)||'null');
+    var target=state&&[...document.querySelectorAll('[data-scroll-anchor]')]
+      .find(x=>x.getAttribute('data-scroll-anchor')===state.anchor);
+    return {meaningful:!!target,y:scrollY,top:target&&target.getBoundingClientRect().top,tab:best.id};
+  })()`);
+  assert(before.meaningful && before.y >= 120, "live board lacks a meaningful mobile reading position");
+  const regenerated = spawnSync(boardBin, ["--no-quota","--controls","--refresh","300","--out",boardPath],
+    {env:{...process.env,FM_HOME:liveHome},stdio:"ignore"});
+  assert(regenerated.status === 0, "live board regeneration failed");
+  await send("Page.reload", {ignoreCache:true}, sid);
+  await loaded(sid); await delay(200);
+  const after = await evaluate(sid, `(()=>{
+    var state=JSON.parse(sessionStorage.getItem(window.__fmViewKey)||'null');
+    var target=state&&[...document.querySelectorAll('[data-scroll-anchor]')]
+      .find(x=>x.getAttribute('data-scroll-anchor')===state.anchor);
+    return {found:!!target,y:scrollY,top:target&&target.getBoundingClientRect().top,
+      classes:document.documentElement.className,
+      frames:window.__fmLiveFrameTops};
+  })()`);
+  assert(after.found && after.y >= 120, "live board lost its meaningful mobile reading position");
+  assert(documentTab(before.tab, after.classes), "live board lost its active tab");
+  assert(Math.abs(after.top-before.top)<=3, `live board anchor shifted by ${Math.abs(after.top-before.top)}px`);
+  const frames=after.frames.filter(x=>typeof x==="number");
+  assert(frames.length>0 && frames.every(x=>Math.abs(x-before.top)<=3), "live board jumped during early refresh frames");
+  function documentTab(tabId, classes){return classes.split(/\s+/).includes("t-"+tabId.replace(/^tab-/,""));}
+})().finally(() => chrome.kill()).catch((error) => { console.error(error.message); process.exitCode=1; });
+JS
+  pass "a privacy-safe live fleet stays anchored across regeneration and full reload"
 }
 
 test_control_targets_are_escaped() {
@@ -1997,3 +2539,5 @@ test_controls_are_absent_unless_asked_for
 test_controls_match_what_each_row_can_actually_resolve
 test_controls_can_only_queue_a_request
 test_control_targets_are_escaped
+test_decision_context_links_and_submission_state_in_a_browser
+test_live_fleet_mobile_refresh_keeps_reading_position

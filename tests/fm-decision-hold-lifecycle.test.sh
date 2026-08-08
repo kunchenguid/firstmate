@@ -922,12 +922,86 @@ EOF
   pass "a de-duplicated decision key is retractable and no longer strands teardown"
 }
 
+test_decision_question_and_private_link_use_the_supported_hold_interface() {
+  local home origin hold out question summary show bad_url good_url
+  home=$(make_home decision-context)
+  origin=sample-context-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Review sample decision context" --kind scout --repo sample --start >/dev/null
+  write_origin_meta "$home" "$origin"
+  printf '# Sample context review\n' > "$home/data/$origin/report.md"
+  printf 'done: review complete\n' > "$home/state/$origin.status"
+
+  question='Should the sample preserve literal \n and \t text?'
+  hold=$(run_decisions "$home" hold "$origin" emphasis \
+    --title "Choose the sample emphasis" \
+    --reason "captain emphasis choice pending" \
+    --question "$question" \
+    --decision-url "https://sample.tailnet.invalid/decision-aid" \
+    --repo sample) || fail "the supported hold interface could not record decision context"
+
+  out=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$out" | jq -e --arg hold "$hold" --arg question "$question" '
+    .backlog.records[] | select(.id == $hold)
+    | .decision_question == $question
+      and .decision_url == "https://sample.tailnet.invalid/decision-aid"
+  ' >/dev/null || fail "main-home decision context did not reach the canonical snapshot: $out"
+
+  summary=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary)
+  printf '%s' "$summary" | jq -e --arg hold "$hold" --arg question "$question" '
+    .decisions_open[] | select(.id == $hold)
+    | .question == $question
+      and .decision_url == "https://sample.tailnet.invalid/decision-aid"
+  ' >/dev/null || fail "decision context did not reach the secondmate-home projection: $summary"
+
+  run_decisions "$home" link "$origin" emphasis \
+    --url "https://sample.tailnet.invalid/revised-aid" >/dev/null \
+    || fail "the supported link backfill could not update an existing hold"
+  show=$(tasks_in "$home" show "$hold" --full)
+  out=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$out" | jq -e --arg hold "$hold" --arg question "$question" '
+    .backlog.records[] | select(.id == $hold) | .decision_question == $question
+  ' >/dev/null || fail "link backfill overwrote the exact question"
+  assert_contains "$show" 'Decision URL: https://sample.tailnet.invalid/revised-aid' \
+    "link backfill did not replace the structured URL"
+  if run_decisions "$home" link "$origin" emphasis --url "http://public.invalid/not-private" \
+    > "$home/http-link.out" 2> "$home/http-link.err"; then
+    fail "the decision link interface accepted a non-HTTPS URL"
+  fi
+  for bad_url in \
+    'https://[::::]/aid' \
+    'https://captain:secret@sample.invalid/aid' \
+    'https://sample.invalid:99999/aid'
+  do
+    if run_decisions "$home" link "$origin" emphasis --url "$bad_url" \
+      > "$home/malformed-link.out" 2> "$home/malformed-link.err"; then
+      fail "the decision link interface accepted malformed URL $bad_url"
+    fi
+  done
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" 'Decision URL: https://sample.tailnet.invalid/revised-aid' \
+    "a refused link changed the existing private URL"
+  for good_url in \
+    'https://decision.example.com./aid' \
+    'https://192.0.2.1/aid' \
+    'https://[fd00::1]/aid'
+  do
+    run_decisions "$home" link "$origin" emphasis --url "$good_url" >/dev/null \
+      || fail "the decision link interface rejected valid URL $good_url"
+  done
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" 'Decision URL: https://[fd00::1]/aid' \
+    "valid decision URLs were not preserved exactly"
+  pass "exact questions and private HTTPS links use one supported hold interface across homes"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
 test_archived_resolved_decision_satisfies_the_gate
 test_archive_lookup_refuses_every_unresolved_shape
 test_structured_holds_survive_teardown_and_route_resolution
+test_decision_question_and_private_link_use_the_supported_hold_interface
 test_origin_slug_validation_precedes_path_construction
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds

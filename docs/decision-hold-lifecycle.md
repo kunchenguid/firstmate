@@ -11,7 +11,9 @@ It never reads report bodies, review artifacts, terminal output, or chat.
 
 The `hold` subcommand maps an originating work id and stable decision key to `<origin-id>-decision-<decision-key>`.
 It creates a kind `captain` backlog item when absent and invokes `tasks-axi hold <id> --reason <reason> --kind captain` on every retry.
-It rejects an identity collision, a changed title, and attempts to reopen an already resolved identity.
+It can record an exact question and an HTTPS decision-aid URL as structured body fields without probing or rewriting the destination.
+The `link` subcommand is the supported HTTPS-only backfill for an existing active hold and preserves every other body field.
+It rejects an identity collision, a changed title, attempts to reopen an already resolved identity, malformed links, and non-HTTPS links.
 
 The `complete` subcommand unions the reviewed keys into `decision_keys=` and appends `decisions_reviewed=1` while originating task metadata is live.
 A post-teardown visual review can complete against the surviving report and durable holds without recreating volatile task metadata.
@@ -47,6 +49,7 @@ A failed intermediate step leaves the hold open.
 ## Structured read surfaces
 
 `bin/fm-fleet-snapshot.sh` parses canonical tasks-axi `(hold: ...)` and `(hold-kind: captain)` metadata alongside existing backlog fields.
+It also parses the decision question and decision URL written by `bin/fm-decision-hold.sh`, then carries them through the main-home record and secondmate-home decision projection.
 It resolves every repeated `blocked-by:` edge against structured Done records, keeps missing blockers unresolved, and classifies only an unblocked captain hold as actionable.
 Its secondmate-home summary classifies an actionable captain hold as `captain_decision` and preserves blocked captain holds as queued work in the owning home.
 
@@ -61,11 +64,13 @@ Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
 Archived resolved decision lookup verification date: 2026-08-05.
 Duplicate decision key retraction verification date: 2026-08-08.
+Decision-context field and HTTPS-link verification date: 2026-08-08.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
 The initial Bearings snapshot correctly has no open decision, and the new teardown gate refuses to erase the source.
 A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so `resolve` matches the first, middle, and last ids and rejects a genuinely absent id.
+The decision-context regression records exact questions and private HTTPS links through the supported hold interface in both main and secondmate homes, backfills an existing hold without changing its other body fields, and rejects malformed or non-HTTPS destinations without fetching them.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -73,13 +78,17 @@ The final verification commands and their exact summarized outputs follow.
 $ bash tests/fm-decision-hold-lifecycle.test.sh
 ok - report-only unresolved decision is reproduced and completion refuses before loss
 ok - non-forced scout teardown always requires durable inventory verification
+ok - an archived resolved captain decision satisfies the completion gate
+ok - only a genuinely resolved archived captain decision satisfies the gate
 ok - captain holds are idempotent, distinct, teardown-safe, Bearings-visible, and durably routed before close
+ok - exact questions and private HTTPS links use one supported hold interface across homes
 ok - completion and verification validate origins before constructing paths
 ok - ended visual review follows the same decision-hold completion owner
 ok - resolved findings and decision-like prose do not create false holds
 ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
+ok - a de-duplicated decision key is retractable and no longer strands teardown
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly

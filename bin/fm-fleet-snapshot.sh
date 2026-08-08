@@ -16,7 +16,10 @@
 #     Canonical tasks-axi rows are structured; free-form non-empty lines in
 #     those sections are preserved as unstructured records.
 #     Structured rows preserve captain-hold metadata such as hold_kind and
-#     hold_reason when tasks-axi emits it. They also carry normalized current_role,
+#     hold_reason when tasks-axi emits it. A captain hold created through
+#     fm-decision-hold may also carry decision_question and decision_url in its
+#     structured body; the URL is private data and is never fetched or rewritten.
+#     They also carry normalized current_role,
 #     requires_child_metadata, blocked_by_ids, unresolved_blocker_ids,
 #     captain_actionable, and captain_deferred fields. Repeated blocker tokens
 #     remain ordered; a blocker resolves only when its structured record is Done,
@@ -336,6 +339,8 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     def url_pattern: "https?://[^[:space:])\"<>]+";
     def wrapped_url_pattern: "<?" + url_pattern + ">?";
     def links($rest): [$rest | scan(url_pattern)];
+    def body_field($lines; $label):
+      ([ $lines[]? | select(startswith($label + ": ")) | ltrimstr($label + ": ") ] | last) // null;
     def strip_trailing_metadata:
       reduce range(0; 20) as $_ (.;
         sub("[[:space:]]*\\([[:space:]]*(?:(?:repo|kind|priority|hold|hold-kind):[[:space:]]*[^)]*|(?:since|merged|reported|done)[[:space:]]+[^)]*)[[:space:]]*\\)[[:space:]]*$"; ""));
@@ -434,7 +439,11 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     | .records |= map(
         if (.body_lines | length) > 0 then
           .body_excerpt = ((.body_lines | join(" "))[:240])
-        else . end)
+        else . end
+        | if .structured and .kind == "captain" then
+            .decision_question = body_field(.body_lines; "Decision question")
+            | .decision_url = body_field(.body_lines; "Decision URL")
+          else . end)
     | .records as $records
     | (reduce ($records[] | select(.structured)) as $record ({};
          .[$record.id] = ((.[$record.id] // true) and ($record.state == "done")))) as $resolved_ids
@@ -740,6 +749,8 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
     | ([ $queued_all[]
          | select(.captain_actionable == true)
          | {id,key:.id,verb:"captain-hold",summary:(.title | trunc(160)),
+            question:((.decision_question // null) | if . == null then null else trunc(2000) end),
+            decision_url:((.decision_url // null) | if . == null then null else trunc(2000) end),
             reason:(.hold_reason | trunc(160)),source:"backlog"} ]) as $captain_holds_all
     | ([ $backlog.records[]? | select(.state == "done" and .structured and .kind != "captain")
          | {id:(.id | trunc(120)),title:(.title | trunc(120)),
@@ -790,7 +801,8 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
-            | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
+            | {id:$t.id,key,verb,summary:(.summary | trunc(160)),
+               question:(.summary | trunc(2000)),decision_url:null,reason:null,source:"status"} ])) as $decisions_all
     | ([ $queued_all[]
          # A deferred captain decision is held by the captain, by choice, and not
          # by anything external, so it must not read as blocked or hold this home
@@ -845,6 +857,8 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
           blocked_reason:((.blocked_reason // null) | if . == null then null else trunc(160) end),
           hold_reason:((.hold_reason // null) | if . == null then null else trunc(160) end),
           hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
+          decision_question:((.decision_question // null) | if . == null then null else trunc(2000) end),
+          decision_url:((.decision_url // null) | if . == null then null else trunc(2000) end),
           captain_actionable:(.captain_actionable // false),
           captain_deferred:(.captain_deferred // false),
           repo:((.repo // null) | if . == null then null else trunc(120) end),

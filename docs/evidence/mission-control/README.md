@@ -11,20 +11,40 @@ The after images show each row carrying only the controls it can resolve: the tw
 
 `controls-served-statically.png` is the safety property that matters most, so it is captured rather than asserted in prose: it is the very same `--controls` file opened directly with no Lavish server, and it renders as the read-only board with no controls and no dead affordances.
 
+`before-decision-context-desktop.png` and `after-decision-context-desktop.png` show an ordinary five-item Awaiting Decision list at 1280px with the first Answer form open.
+`before-decision-context-mobile.png` and `after-decision-context-mobile.png` show the same state at exactly 390px by 844px.
+The after images retain the complete long question, add the explicit private decision-aid link, give Answer and Set aside distinct calm treatments, and put the exact recorded question in the Answer prompt without horizontal overflow.
+
+`before-local-report-mobile.png` and `after-local-report-mobile.png` reproduce the reported 390px Qwen bounded-judgment card before and after local report paths stopped being links.
+The after image identifies `data/local-lane-bakeoff-v2-powered/report.md` as local report context and removes the navigation chevron; the browser regression additionally performs a real emulated mobile touch on that exact text and confirms the page does not navigate.
+
 `before-token-integration-desktop.png` and `after-token-integration-desktop.png` show the full desktop board System view before and after the local pace-first allowance integration.
 `before-token-integration-mobile.png` and `after-token-integration-mobile.png` show the same comparison at the captain's 390px viewport.
 The after view keeps fleet health distinct, presents each primary allowance window once, and leaves automatic balancing collapsed.
 
-All of these are rendered from a synthetic fixture home, never from a real fleet, so they carry no private project, decision, or PR data.
-The fixture pins the render clock so the comparison is not affected by the day it was captured.
+All image evidence here is rendered from synthetic fixture homes rather than a live fleet.
+The local-report pair reproduces only the reported card label and local path, never the report contents; the other fixtures carry no private project, decision, or PR data.
+The fixtures pin the render clock so the comparisons are not affected by the day they were captured.
 
-That the selected tab survives the board's own reload was checked in Chrome against a board rendered with a three second interval: the System tab was selected, a page-scoped marker was set to prove a real navigation happened, and after two reload cycles the marker was gone, the URL fragment had been dropped by the meta refresh, and the System panel was still the selected one.
-That is why the selected tab is remembered in the browser rather than carried in the URL.
+The separate privacy-safe live-fleet check is `FM_MISSION_CONTROL_LIVE_HOME=<active-home> FM_MISSION_CONTROL_REQUIRE_LIVE=1 tests/fm-mission-control.test.sh`.
+It generates the board directly from the active fleet, uses real Chrome at 390 by 844, regenerates the file at a nonzero reading position, performs a full reload, and reports only pass/fail geometry rather than fleet identities or records.
+The required acceptance run passed on 2026-08-08 with `ok - a privacy-safe live fleet stays anchored across regeneration and full reload`; no fleet text, identity, screenshot, or record was written into this evidence directory.
+
+That the selected tab survives the board's managed reload was checked in Chrome after selecting the Projects tab and reloading the document without a fragment; the Projects panel remained selected.
+The same browser regression replaced the served HTML with fixtures that inserted rows above the current decision or temporarily omitted that decision, then verified the exact reading offset and identity-bound draft survived when the row returned.
 
 The allowance integration was verified on 2026-08-08 with `chrome-devtools-axi 0.1.27`.
 The desktop run used `chrome-devtools-axi emulate --viewport '1280x1000x1'`, rendered all three allowance cards at 228.28125px by 254px, and returned `overflow: false` for the 1280px document.
 The mobile run used `chrome-devtools-axi emulate --viewport '390x844x3,mobile,touch'`, rendered all three cards at 320px by 261.25px, and returned a 390px document width with `overflow: false`.
 At that same 390px viewport, the Decisions rows measured 352px wide, the Projects cards measured 354px wide, and both views returned `overflow: false`, preserving the existing decision and in-progress content around the new System view.
-`bin/fm-evidence-check.sh --local docs/evidence/mission-control` returned `fm-evidence-check: ok pairs_checked=7 identical_opted_out=0`.
+
+The decision-context evidence was verified on 2026-08-08 with `chrome-devtools-axi 0.1.27` and the same isolated browser session used for the functional inspection.
+The desktop and mobile checks returned document widths of 1280px and 390px respectively, reported no horizontal overflow, and confirmed that the Answer form was open in all four images.
+The after checks additionally confirmed that the explicit decision-aid link was present.
+
+The local-report evidence was verified on 2026-08-08 with `chrome-devtools-axi 0.1.27` at exactly 390px by 844px.
+Chrome's accessibility snapshot exposed the before card as a link to the nonexistent local file route, while the after card exposed the same path only as static text.
+
+`bin/fm-evidence-check.sh --local docs/evidence/mission-control` returned `fm-evidence-check: ok pairs_checked=10 identical_opted_out=0`.
 
 See [`docs/mission-control.md`](../../mission-control.md) for what the board shows and where each value comes from.
