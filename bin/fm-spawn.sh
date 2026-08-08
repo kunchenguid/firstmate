@@ -107,8 +107,11 @@
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. pi-signed launches that exact executable name from PATH and
-#   refuses before endpoint creation when it is unavailable; it never falls back to pi.
+#   new adapters outside no-mistakes ship mode. A no-mistakes ship refuses a raw
+#   launch before endpoint creation because only a verified adapter can construct
+#   its required writable-root boundary. pi-signed launches that exact executable
+#   name from PATH and refuses before endpoint creation when it is unavailable;
+#   it never falls back to pi.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its

@@ -189,22 +189,10 @@ It checks ship and scout construction, physical path and symlink normalization, 
 tests/fm-spawn-dispatch-profile.test.sh
 ```
 
-The credentialed live control ran on 2026-08-04 with codex-cli 0.146.0 under an explicit workspace-write sandbox.
+The credentialed live control first ran on 2026-08-04 with codex-cli 0.146.0 under an explicit workspace-write sandbox.
 Without additional roots, the control proved that the active home's state directory remained denied.
 With the narrow roots, the worker appended status, wrote its task-local report, created a linked-worktree branch and commit, and remained unable to write sibling-task data.
-
-```sh
-FM_CODEX_WRITABLE_ROOTS_LIVE_E2E=1 \
-  bin/fm-test-run.sh tests/fm-codex-writable-roots-live-e2e.test.sh
-```
-
-Bounded output from the successful run:
-
-```text
-ok - codex-cli 0.146.0 live E2E proved narrow Codex worker writable roots
-```
-
-The 2026-08-07 static extension adds no-mistakes ship inclusion, direct-PR and local-only exclusion, non-Codex exclusion, preserved existing roots, the `NM_HOME` and default `HOME/.no-mistakes` selection contract, direct AF_UNIX connectivity and captured daemon-status verification, unresolved and protected-overlap root refusal, stopped-daemon and unrelated-directory refusal, all opaque gate-launch refusal before endpoint creation, and workspace-write network access only for the verified no-mistakes Codex ship.
+The 2026-08-07 static extension exercises the inclusion and exclusion contract documented in the [harness-adapters skill](../../.agents/skills/harness-adapters/SKILL.md), plus unresolved, unsafe-overlap, unverified-home, and raw-launch refusals.
 
 The no-mistakes socket control ran on 2026-08-05 with no-mistakes v1.41.2 and codex-cli 0.146.0 in a Firstmate Codex worker whose effective sandbox was workspace-write and whose launch lacked the no-mistakes root.
 The installed matching v1.41.2 module source established that `NM_HOME` selects the root when non-empty, otherwise `HOME/.no-mistakes` does, and the Unix socket is `<root>/socket`.
@@ -223,9 +211,12 @@ connect to daemon socket: dial ipc: dial unix <home>/.no-mistakes/socket: connec
 The refreshed opt-in guard keeps telemetry and update checks disabled, suppresses the captured daemon-status payload, requires the control's exact AF_UNIX socket denial, and then requires both a direct AF_UNIX connection and explicit `daemon running (pid N)` status after the selected no-mistakes root and workspace-write network access are added.
 It never starts a no-mistakes pipeline or invokes another state-mutating no-mistakes command.
 
-Its additional bounded success marker is:
+```sh
+FM_CODEX_WRITABLE_ROOTS_LIVE_E2E=1 \
+  bin/fm-test-run.sh tests/fm-codex-writable-roots-live-e2e.test.sh
+```
 
-The credentialed guard produced this marker on 2026-08-07 with no-mistakes v1.41.2 and codex-cli 0.146.0 after the workspace-write network correction.
+The credentialed guard produced the bounded marker below on 2026-08-07 with no-mistakes v1.41.2 and codex-cli 0.146.0 after the workspace-write network correction.
 
 ```text
 ok - codex-cli 0.146.0 live E2E proved narrow Codex worker writable roots and read-only no-mistakes socket access
