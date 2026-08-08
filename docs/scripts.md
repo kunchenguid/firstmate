@@ -105,7 +105,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full GitHub URL                    |
 | `fm-gh.sh`               | Run one GitHub command with this home's configured PR-capable credential injected    |
-| `fm-gh-shim.sh`          | The `gh` shim routing only `pr create` and `pr edit` through `fm-gh.sh`              |
+| `fm-gh-ci-fallback.sh`   | Recover exact-head workflow verdicts when check-runs reads are forbidden             |
+| `fm-gh-shim.sh`          | Route PR mutations and bounded CI reads while passing every other `gh` call through |
 | `fm-gh-shim-install.sh`  | Install, remove, and verify the `gh` shim and its `PATH` precedence                  |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
