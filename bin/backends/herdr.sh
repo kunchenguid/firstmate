@@ -2778,7 +2778,7 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   # Build the prompt regex from the shared glyph table so Cursor's glyph is
   # defined once (fm-composer-lib.sh), not duplicated here.
   bare_prompt_re=$FM_BACKEND_HERDR_BARE_PROMPT_RE
-  [ "${FM_COMPOSER_HARNESS:-}" = cursor ] && bare_prompt_re="${bare_prompt_re%)\$}→)\$"
+  [ "${FM_COMPOSER_HARNESS:-}" = cursor ] && bare_prompt_re="${bare_prompt_re%)}|${FM_COMPOSER_CURSOR_PROMPT_GLYPH:-→})"
   cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
     || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
   # Structural scan: locate the bottom-most composer row and remember its RAW
