@@ -168,6 +168,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -178,6 +180,8 @@ FORCE=${2:-}
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
 FM_LOCK_LOG_PREFIX=teardown
+LANDED_REMOTE_TIMEOUT=${FM_TEARDOWN_LANDED_REMOTE_TIMEOUT:-10}
+case "$LANDED_REMOTE_TIMEOUT" in ''|*[!0-9]*|0) LANDED_REMOTE_TIMEOUT=10 ;; esac
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
@@ -844,6 +848,10 @@ landing_remote_candidates() {
   done < <(git -C "$WT" remote 2>/dev/null)
 }
 
+landed_remote_command() {
+  fm_run_timed "$LANDED_REMOTE_TIMEOUT" git -C "$WT" "$@"
+}
+
 # Does candidate remote's currently advertised default branch contain HEAD? This
 # needs two independent remote observations: ls-remote identifies HEAD and its
 # branch ref, then fetch retrieves that exact advertised commit for the ancestry
@@ -852,17 +860,17 @@ landing_remote_candidates() {
 head_is_landed_on_verified_remote() {  # <remote-url-or-name>
   local remote=$1 advertised default_ref confirmed fetched post_fetch post_fetch_ref post_fetch_head current
   [ -n "$remote" ] || return 1
-  advertised=$(git -C "$WT" ls-remote --symref "$remote" HEAD 2>/dev/null) || return 1
+  advertised=$(landed_remote_command ls-remote --symref "$remote" HEAD 2>/dev/null) || return 1
   default_ref=$(printf '%s\n' "$advertised" | awk '$1 == "ref:" && $3 == "HEAD" { print $2; exit }')
   case "$default_ref" in refs/heads/?*) ;; *) return 1 ;; esac
   advertised=$(printf '%s\n' "$advertised" | awk '$2 == "HEAD" && $1 != "ref:" { print $1; exit }')
   case "$advertised" in ''|*[!0-9a-fA-F]*) return 1 ;; esac
-  confirmed=$(git -C "$WT" ls-remote "$remote" "$default_ref" 2>/dev/null \
+  confirmed=$(landed_remote_command ls-remote "$remote" "$default_ref" 2>/dev/null \
     | awk -v ref="$default_ref" '$2 == ref { print $1; exit }') || return 1
   [ -n "$confirmed" ] || return 1
   [ "$advertised" = "$confirmed" ] || return 1
-  git -C "$WT" fetch --no-tags --quiet "$remote" "$default_ref" >/dev/null 2>&1 || return 1
-  post_fetch=$(git -C "$WT" ls-remote --symref "$remote" HEAD 2>/dev/null) || return 1
+  landed_remote_command fetch --no-tags --quiet "$remote" "$default_ref" >/dev/null 2>&1 || return 1
+  post_fetch=$(landed_remote_command ls-remote --symref "$remote" HEAD 2>/dev/null) || return 1
   post_fetch_ref=$(printf '%s\n' "$post_fetch" | awk '$1 == "ref:" && $3 == "HEAD" { print $2; exit }')
   case "$post_fetch_ref" in refs/heads/?*) ;; *) return 1 ;; esac
   post_fetch_head=$(printf '%s\n' "$post_fetch" | awk '$2 == "HEAD" && $1 != "ref:" { print $1; exit }')

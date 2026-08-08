@@ -583,6 +583,24 @@ SH
   chmod +x "$case_dir/fakebin/git"
 }
 
+add_timeout_on_remote_call() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+log=${FM_TEST_REMOTE_TIMEOUT_LOG:?}
+call=${FM_TEST_REMOTE_TIMEOUT_CALL:?}
+count=0
+[ ! -f "$log" ] || count=$(cat "$log")
+count=$((count + 1))
+printf '%s\n' "$count" > "$log"
+[ "$count" -ne "$call" ] || exit 124
+[ "${1:-}" = -k ] || exit 2
+shift 3
+exec "$@"
+SH
+  chmod +x "$case_dir/fakebin/timeout"
+}
+
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
   local case_dir=$1; shift
@@ -797,6 +815,30 @@ test_unreachable_foreign_override_refuses() {
   expect_code 1 "$rc" "foreign-unreachable: teardown should refuse without remote evidence"
   grep -q REFUSED "$case_dir/stderr" || fail "foreign-unreachable: no REFUSED line in stderr"
   pass "teardown refuses an unreachable foreign landing remote (fail-safe)"
+}
+
+test_foreign_remote_timeout_refuses() {
+  local case_dir foreign timeout_log calls rc
+  case_dir=$(make_case foreign-timeout)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "foreign landing"
+  foreign=$(land_head_on_foreign_default "$case_dir")
+  timeout_log="$case_dir/timeout-count"
+  add_timeout_on_remote_call "$case_dir"
+
+  set +e
+  FM_TIMEOUT_MECHANISM_OVERRIDE= \
+  FM_TEST_REMOTE_TIMEOUT_LOG="$timeout_log" \
+  FM_TEST_REMOTE_TIMEOUT_CALL=4 \
+    run_teardown_with_landed_remote "$case_dir" "$foreign" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  calls=$(cat "$timeout_log")
+  expect_code 1 "$rc" "foreign-timeout: teardown should refuse when a landing proof call times out"
+  expect_code 8 "$calls" "foreign-timeout: each remote proof operation was not bounded"
+  grep -q REFUSED "$case_dir/stderr" || fail "foreign-timeout: no REFUSED line in stderr"
+  pass "teardown refuses when a foreign landing proof call times out"
 }
 
 test_foreign_default_change_during_verification_refuses() {
@@ -2641,6 +2683,7 @@ test_no_mistakes_origin_remote_allows
 test_foreign_configured_remote_default_allows
 test_foreign_override_remote_default_allows
 test_unreachable_foreign_override_refuses
+test_foreign_remote_timeout_refuses
 test_foreign_default_change_during_verification_refuses
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
