@@ -2,7 +2,7 @@
 name: secondmate-provisioning
 description: >-
   Agent-only reference for persistent secondmate setup and retirement.
-  Use when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited local material into, or retiring a secondmate home, or when editing data/secondmates.md.
+  Use when creating, seeding, validating, launching, restarting, recovering, handing backlog to, pushing inherited local material into, or retiring a secondmate home, or when editing data/secondmates.md.
   Covers local leases, whole-home remote routes, transactional seeding, project clone restrictions, secondmate harness pins, inherited local-material push, idle charter, handoff helper, and teardown safety.
 user-invocable: false
 metadata:
@@ -11,7 +11,7 @@ metadata:
 
 # secondmate-provisioning
 
-Use this reference before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a persistent secondmate, and before editing `data/secondmates.md`.
+Use this reference before creating, seeding, validating, launching, restarting, handing backlog to, recovering, pushing inherited local material into, or retiring a persistent secondmate, and before editing `data/secondmates.md`.
 
 Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, local-only projects stay with the main firstmate, and secondmates are idle by default.
 
@@ -193,6 +193,12 @@ For a remote route, the same command probes and relaunches only on the configure
 An SSH transport failure or unreadable remote endpoint remains unknown and must be reconciled on that host; never launch a local replacement.
 Respawn re-resolves the secondmate harness from current config, uses the same guarded pre-launch sync, and re-propagates inherited local material, so recovered secondmates converge inherited config items and shared captain preferences whenever their home validates; tracked-file sync remains guarded separately.
 If the secondmate is already running and only inherited local material changed, prefer `bin/fm-config-push.sh` over respawning.
+
+To change a launch flag on a secondmate that is still running, use `bin/fm-secondmate-restart.sh <id>` rather than teardown, a hand-run endpoint close, or a bare respawn.
+Teardown is retirement and removes the home; a bare `fm-spawn.sh --secondmate` refuses while the old endpoint is still there.
+The restart retires only the recorded endpoint and relaunches the same id in the same home, so the home, backlog, project clones, inherited local material, lease, registry route, unresolved routed replies, that secondmate's own crewmates, and all unlanded work survive.
+It is local-only, refuses any endpoint state that does not positively read alive, agent-free, or already gone, and restores the previous record after a failed relaunch only when any exact replacement is confirmed gone; otherwise it retains replacement ownership for reconciliation.
+Its header and `--help` own the flags, including how `remote_control` is retained or changed.
 
 Do not reconstruct a secondmate's whole tree from the main home.
 The main firstmate reconciles only direct reports.

@@ -166,7 +166,8 @@ async function run() {
   }
 }
 
-const timeout = setTimeout(() => finish(1, "timed out measuring the rendered 390px board"), 30000);
+// Chrome startup on shared CI runners has exceeded 30 seconds, so keep this below the job-level hang tripwire but above observed startup variance.
+const timeout = setTimeout(() => finish(1, "timed out measuring the rendered 390px board"), 90000);
 run().then(() => {
   clearTimeout(timeout);
   finish(0);
