@@ -9,6 +9,24 @@
 # diagnostic remain.
 set -u
 FM_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+
+# Shadow-only parallel run (Task 3): --count-json emits the shared capacity
+# object (fm-fleet-capacity.v1); FM_REFILL_SHADOW records that same object
+# alongside the quarantined run. Neither path touches the quarantined verdict
+# below: consumer decisions stay on the quarantine until the Task 13 cutover
+# after parity proof. The snapshot is not modified in this task.
+if [ "${1:-}" = "--count-json" ]; then
+  # shellcheck source=bin/fm-capacity-lib.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/fm-capacity-lib.sh"
+  fm_capacity_project
+  exit 0
+fi
+if [ -n "${FM_REFILL_SHADOW:-}" ]; then
+  # shellcheck source=bin/fm-capacity-lib.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/fm-capacity-lib.sh"
+  fm_capacity_project > "$FM_REFILL_SHADOW"
+fi
+
 PROJECT="${FM_REFILL_PROJECT:-/home/holu/decision-os}"
 SERIALIZATION_DEBT_PROBE="${FM_SERIALIZATION_DEBT_PROBE:-$FM_HOME/bin/fm-serialization-debt.sh}"
 

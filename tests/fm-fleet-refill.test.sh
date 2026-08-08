@@ -49,6 +49,28 @@ exit 1
 SH
 chmod +x "$TMP_ROOT/quar-clean-probe" "$TMP_ROOT/quar-debt-probe"
 
+# --- shadow stage (Task 3): --count-json emits the shared object; shadow
+# mode records it while the quarantined verdict stays unchanged -------------
+STATE="$TMP_ROOT/shadow-state"
+FAKE_CREW="$TMP_ROOT/fake-crew-state.sh"
+mkdir -p "$STATE"
+
+write_meta_fixture() {  # <id> <mode> [kind=ship]; kind defaults to ship so the pinned two-arg calls produce a real implementation row
+  local id=$1 mode=$2 kind=${3:-ship}
+  {
+    printf 'window=w-%s\n' "$id"
+    printf 'kind=%s\n' "$kind"
+    printf 'mode=%s\n' "$mode"
+    printf 'worktree=%s/wt-%s\n' "$TMP_ROOT" "$id"
+  } > "$STATE/$id.meta"
+}
+
+cat > "$FAKE_CREW" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"schema":"fm-crew-state.v1","id":"fixture","state":"working","source":"run-step","detail":"busy"}'
+SH
+chmod +x "$FAKE_CREW"
+
 epoch_iso() {
   python3 - "$1" <<'PY'
 import datetime as dt
@@ -414,8 +436,55 @@ test_quarantine_still_propagates_serialization_debt() {
   pass "serialization-debt diagnostic remains under quarantine"
 }
 
+test_count_json_emits_shared_object() {
+  local out
+  write_meta_fixture ship direct-PR
+  out=$(PATH="$FAKEBIN:$PATH" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_BIN="$FAKE_CREW" \
+    FM_REFILL_PROJECT="$PROJECT" FM_SERIALIZATION_DEBT_PROBE="$TMP_ROOT/quar-clean-probe" \
+    "$ROOT/bin/fm-fleet-refill.sh" --count-json 2>/dev/null)
+  echo "$out" | jq -e '.schema == "fm-fleet-capacity.v1"' >/dev/null || fail "schema"
+  pass "fleet refill --count-json emits the shared capacity object"
+}
+
+test_quarantined_verdict_is_unchanged_in_shadow_mode() {
+  local out
+  write_meta_fixture ship direct-PR
+  out=$(PATH="$FAKEBIN:$PATH" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_BIN="$FAKE_CREW" \
+    FM_REFILL_PROJECT="$PROJECT" FM_SERIALIZATION_DEBT_PROBE="$TMP_ROOT/quar-clean-probe" \
+    FM_REFILL_SHADOW="$TMP_ROOT/shadow.json" \
+    "$ROOT/bin/fm-fleet-refill.sh" 2>&1)
+  assert_contains "$out" "fleet-refill:" "quarantined summary line missing"
+  assert_contains "$out" "capacity=unknown" "quarantined verdict changed in shadow mode"
+  assert_not_contains "$out" "DISPATCH-NEEDED" "shadow mode emitted a dispatch verdict"
+  [ -f "$TMP_ROOT/shadow.json" ] || fail "shadow object not recorded"
+  jq -e '.schema == "fm-fleet-capacity.v1"' "$TMP_ROOT/shadow.json" >/dev/null || fail "shadow not capacity object"
+  pass "shadow mode records the object while the quarantined verdict stays authoritative"
+}
+
+test_frozen_observation_parity() {
+  # one frozen observation drives every consumer; rows/aggregates compare
+  # byte-identically without timing dependence
+  local frozen refill
+  write_meta_fixture ship direct-PR
+  frozen="$TMP_ROOT/frozen.json"
+  FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_BIN="$FAKE_CREW" \
+    "$ROOT/bin/fm-fleet-refill.sh" --count-json 2>/dev/null > "$frozen"
+  jq -e '.schema == "fm-fleet-capacity.v1"' "$frozen" >/dev/null || fail "frozen file is not the capacity object"
+  refill=$(FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_BIN="$FAKE_CREW" \
+    FM_CAPACITY_OBSERVATION_FILE="$frozen" \
+    "$ROOT/bin/fm-fleet-refill.sh" --count-json 2>/dev/null)
+  [ "$(echo "$refill" | jq -c '.rows')" = "$(jq -c '.rows' "$frozen")" ] \
+    || fail "frozen observation rows differ"
+  [ "$(echo "$refill" | jq -c '.aggregate')" = "$(jq -c '.aggregate' "$frozen")" ] \
+    || fail "frozen observation aggregate differs"
+  pass "one frozen observation gives deterministic rows and aggregates across consumers"
+}
+
 test_lane_checker_defaults_to_project_scripts_path
 test_refill_cadence_propagates_lane_contract_debt
 test_quarantine_reports_unknown_capacity_and_never_dispatches
 test_quarantine_ignores_legacy_manifest_and_output_mtimes
 test_quarantine_still_propagates_serialization_debt
+test_count_json_emits_shared_object
+test_quarantined_verdict_is_unchanged_in_shadow_mode
+test_frozen_observation_parity

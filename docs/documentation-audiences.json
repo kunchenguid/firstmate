@@ -329,6 +329,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/fleet-capacity.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/muse.md",
       "audience": "maintainer-verification"
     },
