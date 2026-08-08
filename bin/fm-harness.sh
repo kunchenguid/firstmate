@@ -95,10 +95,10 @@ detect_own() {
       muse|muse-bin-*) echo muse; return ;;
       pi-signed) echo pi; return ;;
       pi) echo pi; return ;;
-      node*|python*|MainThread)
-        # Bare interpreter or a renamed main thread: match the harness name in
-        # the full argument string, which still carries the versioned install
-        # path. Cursor was already decided above.
+      node*|python*)
+        # Bare interpreter: match the harness name in the full argument string,
+        # which still carries the versioned install path. Cursor was already
+        # decided above.
         case "$args" in
           *claude*) echo claude; return ;;
           *codex*) echo codex; return ;;

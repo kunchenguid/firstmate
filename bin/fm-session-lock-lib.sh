@@ -75,10 +75,7 @@ fm_harness_process_matches() {  # <comm> <args>
   fi
   # Bare interpreter (e.g. node): match the harness name in its script path.
   case "$comm" in
-    *node*|*python*|MainThread)
-      if fm_harness_path_name "$args" || fm_harness_path_name "$argv0"; then
-        return 0
-      fi
+    *node*|*python*)
       if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
         case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
         return 0

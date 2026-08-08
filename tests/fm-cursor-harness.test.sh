@@ -57,6 +57,7 @@ cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
 args=${FM_FAKE_CURSOR_AGENT_ARGS:-"/opt/cursor-agent --force --trust brief"}
+comm=${FM_FAKE_CURSOR_COMM:-${args%% *}}
 case "$*" in
   *"lstart="*)
     printf 'Mon Jan  1 00:00:00 2001\n'
@@ -69,7 +70,7 @@ case "$*" in
     printf '%s %s\n' "${FM_FAKE_CURSOR_AGENT_PID:-4242}" "$args"
     exit 0 ;;
   *"comm="*)
-    printf '%s\n' "${args%% *}"
+    printf '%s\n' "$comm"
     exit 0 ;;
   *"-p "*)
     printf '%s\n' "$args"
@@ -152,6 +153,27 @@ test_cursor_env_marker_wins_over_claudecode() {
   out=$(CURSOR_AGENT=1 CLAUDECODE=1 "$HARNESS" 2>/dev/null)
   [ "$out" = cursor ] || fail "CURSOR_AGENT=1 must win over CLAUDECODE=1, got '$out'"
   pass "CURSOR_AGENT=1 wins over CLAUDECODE=1"
+}
+
+test_mainthread_only_matches_narrowed_cursor_identity() {
+  local fakebin out
+  fakebin=$(make_cursor_fakebin "$TMP_ROOT/mainthread-detection")
+  out=$(FM_FAKE_CURSOR_COMM=MainThread \
+    FM_FAKE_CURSOR_AGENT_ARGS='/usr/bin/node /tmp/claude --foo' \
+    PATH="$fakebin:$PATH" "$HARNESS" 2>/dev/null)
+  [ "$out" = unknown ] \
+    || fail "unverified MainThread with Claude-like args detected as '$out'"
+  out=$(FM_FAKE_CURSOR_COMM=MainThread \
+    FM_FAKE_CURSOR_AGENT_ARGS='/usr/bin/node /tmp/codex --foo' \
+    PATH="$fakebin:$PATH" "$HARNESS" 2>/dev/null)
+  [ "$out" = unknown ] \
+    || fail "unverified MainThread with Codex-like args detected as '$out'"
+  out=$(FM_FAKE_CURSOR_COMM=MainThread \
+    FM_FAKE_CURSOR_AGENT_ARGS='/opt/cursor-agent/versions/current/cursor-agent --force' \
+    PATH="$fakebin:$PATH" "$HARNESS" 2>/dev/null)
+  [ "$out" = cursor ] \
+    || fail "verified Cursor MainThread detected as '$out'"
+  pass "harness: MainThread is accepted only through narrowed Cursor identity"
 }
 
 # --- launch: --force, --trust, env sanitization, encoded brief, no --worktree --
@@ -696,6 +718,7 @@ test_cursor_refuses_backends_without_worker_server_discovery() {
 
 test_cursor_env_marker
 test_cursor_env_marker_wins_over_claudecode
+test_mainthread_only_matches_narrowed_cursor_identity
 test_cursor_launch_command_typed
 test_cursor_model_flag_threaded
 test_cursor_effort_recorded_not_emitted
