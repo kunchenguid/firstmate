@@ -478,6 +478,21 @@ fm_lock_release() {
   rmdir "$lockdir" 2>/dev/null || true
 }
 
+fm_meta_lock_path() {
+  local meta=$1 dir base id
+  dir=${meta%/*}
+  base=${meta##*/}
+  [ "$dir" != "$meta" ] || dir=.
+  case "$base" in
+    *.meta) id=${base%.meta} ;;
+    *) return 1 ;;
+  esac
+  case "$id" in
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  printf '%s/.meta-%s.lock\n' "$dir" "$id"
+}
+
 fm_failure_episode_reset() {
   local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
   lock="$state/.turnend-claude-blocks.lock"

@@ -146,6 +146,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-control-lib.sh
+. "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -168,12 +170,43 @@ if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
 fi
 ID=$1
 FORCE=${2:-}
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+CONTROL_LOCK="$STATE/.control-$ID.lock"
+CONTROL_LOCK_HELD=0
+META_LOCK=
+META_LOCK_HELD=0
+teardown_release_locks() {
+  local status=$?
+  if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
+    teardown_release_herdr_locks || true
+  fi
+  if [ "$META_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$META_LOCK" || true
+    META_LOCK_HELD=0
+  fi
+  if [ "$CONTROL_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$CONTROL_LOCK" || true
+    CONTROL_LOCK_HELD=0
+  fi
+  return "$status"
+}
+trap teardown_release_locks EXIT
+fm_lock_try_acquire "$CONTROL_LOCK" || {
+  echo "error: another lifecycle action is already running for task $ID; nothing was changed" >&2
+  exit 1
+}
+CONTROL_LOCK_HELD=1
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
 FM_LOCK_LOG_PREFIX=teardown
 
 META="$STATE/$ID.meta"
+[ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+META_LOCK=$(fm_meta_lock_path "$META") || exit 1
+fm_lock_acquire_wait "$META_LOCK"
+META_LOCK_HELD=1
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 
 REMOTE_HANDOFF_DIR_PRESENT=0
@@ -597,20 +630,29 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   [ -z "$T_ORCA" ] || T=$T_ORCA
 fi
 
+# Where a harness's firstmate-owned global turn-end registry entry lives is
+# owned by bin/fm-control-lib.sh, so teardown and the control plane's relaunch
+# retire the same artifact rather than each carrying its own copy of the path.
 remove_grok_turnend_auth() {
-  local state_dir=$1 id=$2 token hooks_dir
-  token=$(cat "$state_dir/$id.grok-turnend-token" 2>/dev/null || true)
-  case "$token" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
-  hooks_dir="${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d"
-  rm -f "$hooks_dir/$token"
+  local state_dir=$1 id=$2 token_path token='' path
+  token_path=$(fm_control_harness_turnend_token_path grok "$state_dir" "$id") || return 1
+  if [ -n "$token_path" ] && [ -f "$token_path" ]; then
+    IFS= read -r token < "$token_path" || [ -n "$token" ] || return 1
+  fi
+  path=$(fm_control_harness_turnend_auth_path grok "$token") || return 1
+  [ -n "$path" ] || return 0
+  rm -f -- "$path"
 }
 
 remove_kimi_turnend_auth() {
-  local state_dir=$1 id=$2 token hooks_dir
-  token=$(cat "$state_dir/$id.kimi-turnend-token" 2>/dev/null || true)
-  case "$token" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
-  hooks_dir="$HOME/.kimi-code/fm-turn-end.d"
-  rm -f "$hooks_dir/$token"
+  local state_dir=$1 id=$2 token_path token='' path
+  token_path=$(fm_control_harness_turnend_token_path kimi "$state_dir" "$id") || return 1
+  if [ -n "$token_path" ] && [ -f "$token_path" ]; then
+    IFS= read -r token < "$token_path" || [ -n "$token" ] || return 1
+  fi
+  path=$(fm_control_harness_turnend_auth_path kimi "$token") || return 1
+  [ -n "$path" ] || return 0
+  rm -f -- "$path"
 }
 
 retire_busy_state() {
@@ -1969,7 +2011,6 @@ $session	$lock_path"
       else
         TEARDOWN_HERDR_LOCK_RECORDS="$session	$lock_path"
       fi
-      trap teardown_release_herdr_locks EXIT
       return 0
     fi
     sleep 0.1
@@ -2079,8 +2120,8 @@ cleanup_firstmate_home_children() {
         safe_rm_rf_child_worktree "$child_wt" "$child_proj"
       fi
     fi
-    remove_grok_turnend_auth "$sub_state" "$child_id"
-    remove_kimi_turnend_auth "$sub_state" "$child_id"
+    remove_grok_turnend_auth "$sub_state" "$child_id" || return 1
+    remove_kimi_turnend_auth "$sub_state" "$child_id" || return 1
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
     child_busy_gen=$(meta_value "$child_meta" busy_gen)
     if [ -z "$child_busy_gen" ]; then
@@ -2355,8 +2396,8 @@ if [ "$KIND" = secondmate ]; then
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit $?
   remove_secondmate_registry_entry "$ID"
 fi
-remove_grok_turnend_auth "$STATE" "$ID"
-remove_kimi_turnend_auth "$STATE" "$ID"
+remove_grok_turnend_auth "$STATE" "$ID" || exit 1
+remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
@@ -2367,7 +2408,11 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" \
-  "$STATE/.$ID.open-decisions-cursor"
+  "$STATE/.$ID.open-decisions-cursor" \
+  "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
+  "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note"
+fm_lock_release "$META_LOCK"
+META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
