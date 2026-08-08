@@ -830,7 +830,7 @@ test_foreign_remote_timeout_refuses() {
   add_timeout_on_remote_call "$case_dir"
 
   set +e
-  FM_TIMEOUT_MECHANISM_OVERRIDE= \
+  FM_TIMEOUT_MECHANISM_OVERRIDE='' \
   FM_TEST_REMOTE_TIMEOUT_LOG="$timeout_log" \
   FM_TEST_REMOTE_TIMEOUT_CALL=4 \
     run_teardown_with_landed_remote "$case_dir" "$foreign" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -855,7 +855,7 @@ test_foreign_remote_partial_timeout_refuses() {
   add_timeout_on_remote_call "$case_dir"
 
   set +e
-  FM_TIMEOUT_MECHANISM_OVERRIDE= \
+  FM_TIMEOUT_MECHANISM_OVERRIDE='' \
   FM_TEST_REMOTE_TIMEOUT_LOG="$timeout_log" \
   FM_TEST_REMOTE_TIMEOUT_CALL=2 \
   FM_TEST_REMOTE_TIMEOUT_PARTIAL_OUTPUT="$(printf '%s\t%s' "$head" refs/heads/main)" \
