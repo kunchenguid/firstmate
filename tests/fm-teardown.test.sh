@@ -562,6 +562,53 @@ make_path_without_lsof() {  # <case-dir>
   printf '%s\n' "$path_dir"
 }
 
+# Fixture for the extraction-identity pin test: one deterministic --force
+# teardown whose stdout, exit code, and resulting state are captured into a
+# single string. Exercises the cleanup pieces factored into fm-cleanup-lib.sh:
+# teardown_treehouse_return (happy path), the provider hook-token removals,
+# retire_busy_state, remove_pr_poll_artifacts (with artifacts present), and
+# the final state-file removal block. make_case names the fixture under the
+# suite's single TMP_ROOT, so output and state are byte-stable within a run.
+# Guard supervision banners (watcher-down, worktree-tangle) embed the repo
+# root path and a live beat age, so they are stripped and the beat age is
+# normalized before the comparison string is emitted.
+run_teardown_fixture() {
+  local case_dir rc out gen
+  rm -rf "$TMP_ROOT/extraction-identity"
+  case_dir=$(make_case extraction-identity)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "extraction identity work"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$case_dir/state" task-x1)
+  printf 'busy_gen=%s\n' "$gen" >> "$case_dir/state/task-x1.meta"
+  : > "$case_dir/state/task-x1.check.sh"
+  : > "$case_dir/state/task-x1.pr-poll"
+  : > "$case_dir/state/task-x1.check-trust"
+  printf '%s\n' 't0k3n-abc' > "$case_dir/state/task-x1.grok-turnend-token"
+  printf '%s\n' 't0k3n-def' > "$case_dir/state/task-x1.kimi-turnend-token"
+  : > "$case_dir/state/task-x1.status"
+  : > "$case_dir/state/task-x1.turn-ended"
+  : > "$case_dir/state/task-x1.muse-session"
+  : > "$case_dir/state/.task-x1.open-decisions-cursor"
+  set +e
+  out=$(FM_HOME="$case_dir" GROK_HOME="$case_dir/grokhome" HOME="$case_dir/home" \
+        run_teardown "$case_dir" --force 2>&1)
+  rc=$?
+  set -e
+  printf 'rc=%s\n%s\n---STATE---\n' "$rc" "$out" \
+    | sed -E '/^●/d; s/last beat: [0-9]+s ago/last beat: Ns ago/g'
+  (cd "$case_dir/state" && find . -mindepth 1 | sort)
+}
+
+test_extraction_is_behavior_identical() {
+  # run the same teardown fixture before and after extraction; stdout, exit
+  # code, and resulting state must be identical
+  local before after
+  before=$(run_teardown_fixture)   # helper capturing output and rc
+  after=$(run_teardown_fixture)    # same helper after the extraction commit
+  [ "$before" = "$after" ] || fail "extraction changed teardown behavior"
+  pass "the extraction preserves teardown behavior byte-for-byte"
+}
+
 test_local_only_fork_remote_allows() {
   local case_dir rc
   case_dir=$(make_case fork-allow)
@@ -2507,6 +2554,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
+test_extraction_is_behavior_identical
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
