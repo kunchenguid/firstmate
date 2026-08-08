@@ -39,7 +39,9 @@
 #   metadata as overlap=,
 #   overlap_refs=, and overlap_ack=. Code emits the candidate set and NEVER
 #   decides equivalence, which is firstmate's judgment. A source that cannot be
-#   read yields overlap=unavailable, never overlap=none. config/spawn-overlap
+#   read yields overlap=unavailable, never overlap=none, and a pull request
+#   listing whose forge-reported open total exceeds FM_SPAWN_OVERLAP_PR_LIMIT
+#   (default 600) counts as unreadable the same way. config/spawn-overlap
 #   selects advisory (the default: printed and recorded, never refused),
 #   enforce (--overlap-ack must name every surfaced ref), or off; any other
 #   value refuses. --overlap-ack <ref>[,<ref>...] is that acknowledgement and is
@@ -1670,6 +1672,11 @@ overlap_match() {  # <subject-text> <min-tokens> <min-percent>; candidate rows o
   awk -v subject="$1" -v min="$2" -v pct="$3" -v stop=" $OVERLAP_STOPWORDS " '
     function norm(w) {
       if (length(w) < 3) return ""
+      # Stopword membership is checked BOTH before and after de-pluralization:
+      # a stopword whose stemmed form is not itself listed ("this" -> "thi",
+      # "fixes" -> "fixe") would otherwise escape the filter and count as
+      # shared signal.
+      if (index(stop, " " w " ") > 0) return ""
       if (length(w) > 3 && substr(w, length(w), 1) == "s" && substr(w, length(w) - 1, 1) != "s")
         w = substr(w, 1, length(w) - 1)
       if (length(w) < 3) return ""
@@ -1729,15 +1736,19 @@ overlap_match() {  # <subject-text> <min-tokens> <min-percent>; candidate rows o
 #   <kind>\t<ref>\t<title>\t<searchable text>
 # A source that cannot answer emits kind "unavailable" with its reason.
 overlap_candidates() {  # <task-id> <project-dir>
-  local id=$1 proj=$2 backlog="$DATA/backlog.md" meta tid ref num title out limit prlist
+  local id=$1 proj=$2 backlog="$DATA/backlog.md" meta tid ref num title out limit prlist rc
 
   # Open tasks: this home's durable queue, plus any task with live runtime
   # metadata, so a task dispatched without a backlog row is still visible.
   if [ -d "$DATA" ]; then
     if [ -f "$backlog" ]; then
       # Field separators are stripped inside awk rather than by a downstream
-      # pipeline, so a tab in a task body can never shift a later field.
-      awk -v self="$id" '
+      # pipeline, so a tab in a task body can never shift a later field. The
+      # awk is guarded because this function runs with set -e inherited: a
+      # backlog that passes -f but cannot be read must mark the gap with an
+      # unavailable row rather than abort the subshell and silently truncate
+      # the sweep.
+      if ! awk -v self="$id" '
         function emit() {
           if (id != "" && id != self) {
             gsub(/\t/, " ", title); gsub(/\t/, " ", body)
@@ -1758,7 +1769,9 @@ overlap_candidates() {  # <task-id> <project-dir>
         /^[ \t]/ { if (id != "") body = body " " $0; next }
         { next }
         END { emit() }
-      ' "$backlog"
+      ' "$backlog"; then
+        printf 'unavailable\ttask\tthe backlog at %s could not be read\t\n' "$backlog"
+      fi
     fi
   else
     printf 'unavailable\ttask\tthis home has no readable data directory at %s\t\n' "$DATA"
@@ -1768,7 +1781,15 @@ overlap_candidates() {  # <task-id> <project-dir>
       [ -f "$meta" ] || continue
       tid=$(basename "$meta" .meta)
       [ "$tid" != "$id" ] || continue
-      grep -q '^kind=secondmate$' "$meta" && continue
+      # grep exit 2 means the record could not be read - a vanished or
+      # unreadable file - which is a gap in the set, not a non-match.
+      rc=0
+      grep -q '^kind=secondmate$' "$meta" || rc=$?
+      [ "$rc" -ne 0 ] || continue
+      if [ "$rc" -ge 2 ]; then
+        printf 'unavailable\ttask\tthe task record at %s could not be read\t\n' "$meta"
+        continue
+      fi
       if [ -f "$backlog" ] && grep -qF -- "- [ ] $tid " "$backlog"; then
         continue
       fi
@@ -1783,8 +1804,12 @@ overlap_candidates() {  # <task-id> <project-dir>
   if out=$(git -C "$proj" for-each-ref --format='%(refname:short)' refs/heads refs/remotes 2>&1); then
     while IFS= read -r ref; do
       [ -n "$ref" ] || continue
+      # Only the task's OWN branch is excluded, and the exclusion requires a
+      # path-component boundary: a branch that merely ends with the id, such as
+      # fm/re-verify-green for task verify-green, is the same work family and
+      # must stay visible.
       case "$ref" in
-        *"$id") continue ;;
+        "$id"|*/"$id") continue ;;
         */HEAD|HEAD) continue ;;
       esac
       printf 'branch\t%s\t\t%s\n' "$ref" "$ref"
@@ -1800,12 +1825,13 @@ EOF
   # file rather than a command substitution because FM_PR_LIST_ERROR - the
   # reason a forge could not answer, and the whole difference between
   # "unavailable" and "none" - would not survive the subshell.
-  limit=${FM_SPAWN_OVERLAP_PR_LIMIT:-100}
+  limit=${FM_SPAWN_OVERLAP_PR_LIMIT:-600}
   if ! prlist=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-overlap-pr.XXXXXX" 2>/dev/null); then
     printf 'unavailable\tpr\tno temporary file could be created for the pull request listing\t\n'
   elif fm_pr_open_request_titles "$proj" "$limit" > "$prlist" 2>/dev/null; then
     while IFS=$'\t' read -r num title; do
       [ -n "$num" ] || continue
+      title=${title//$'\t'/ }
       printf 'pr\t%s\t%s\t%s\n' "$num" "$title" "$title"
     done < "$prlist"
     rm -f "$prlist"
@@ -1818,7 +1844,14 @@ EOF
 if [ "$KIND" != secondmate ]; then
   OVERLAP_MODE=advisory
   if [ -f "$CONFIG/spawn-overlap" ]; then
-    OVERLAP_MODE=$(head -n 1 "$CONFIG/spawn-overlap" 2>/dev/null | tr -d '[:space:]')
+    # Absent stays advisory; PRESENT but unreadable refuses. An unreadable
+    # enforce file that quietly downgraded to advisory would be a broken
+    # safety knob reading as an absent one.
+    if [ ! -r "$CONFIG/spawn-overlap" ] || ! OVERLAP_MODE=$(head -n 1 "$CONFIG/spawn-overlap" 2>/dev/null); then
+      echo "error: config/spawn-overlap exists but cannot be read. A safety knob that cannot be read must never be treated as an absent one" >&2
+      exit 1
+    fi
+    OVERLAP_MODE=$(printf '%s' "$OVERLAP_MODE" | tr -d '[:space:]')
     [ -n "$OVERLAP_MODE" ] || OVERLAP_MODE=advisory
   fi
   case "$OVERLAP_MODE" in

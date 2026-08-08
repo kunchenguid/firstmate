@@ -335,8 +335,9 @@ fm_pr_metadata_identity_parse() {
 # rather than growing a second forge reader with its own failure semantics.
 #
 # The empty-set law binds here and is the whole reason this returns a status.
-# A missing CLI, an unauthenticated CLI, a network failure, or a rejected
-# listing all return non-zero with FM_PR_LIST_ERROR set to a one-line reason.
+# A missing CLI, an unauthenticated CLI, a network failure, a rejected listing,
+# or a listing truncated below the forge's reported open total all return
+# non-zero with FM_PR_LIST_ERROR set to a one-line reason.
 # A caller must render that as "unknown" and NEVER as "no open requests": the
 # absence of an answer is not an answer. A successful listing with no rows is
 # the only thing that means no open requests, and it returns zero.
@@ -344,7 +345,7 @@ fm_pr_metadata_identity_parse() {
 # No --fields is passed: the default gh-axi listing already carries number,
 # title, and state, and a rejected field list would fail the whole call.
 fm_pr_open_request_titles() {  # <repo-dir> [limit]
-  local repo=$1 limit=${2:-100} out
+  local repo=$1 limit=${2:-600} out rows total
   FM_PR_LIST_ERROR=
   case "$limit" in
     ''|*[!0-9]*) FM_PR_LIST_ERROR="pull request limit '$limit' is not a number"; return 1 ;;
@@ -357,13 +358,33 @@ fm_pr_open_request_titles() {  # <repo-dir> [limit]
     [ -n "$FM_PR_LIST_ERROR" ] || FM_PR_LIST_ERROR="gh-axi pr list failed with no output"
     return 1
   fi
-  # gh-axi prints a TOON block: a "pull_requests[N]{...}:" header, then one
-  # indented "<number>,\"<title>\",<state>,<author>,<draft>,<review>" row each.
-  # The title is matched greedily up to the last quote that is followed by the
-  # four trailing scalar fields, so a comma or quote inside a title cannot
-  # truncate it.
-  printf '%s\n' "$out" \
-    | sed -n 's/^[[:space:]]\{1,\}\([0-9]\{1,\}\),"\(.*\)",[^,]*,[^,]*,[^,]*,[^,]*$/\1\t\2/p'
+  # gh-axi prints a TOON block: a count header, a "pull_requests[N]{...}:"
+  # header, then one indented "<number>,\"<title>\",<state>,<author>,<draft>,
+  # <review>" row each. The title is matched greedily up to the last quote that
+  # is followed by the four trailing scalar fields, so a comma or quote inside
+  # a title cannot truncate it.
+  rows=$(printf '%s\n' "$out" \
+    | sed -n 's/^[[:space:]]\{1,\}\([0-9]\{1,\}\),"\(.*\)",[^,]*,[^,]*,[^,]*,[^,]*$/\1\t\2/p')
+  # A listing bounded by the window still exits zero, so the "count: N of M
+  # total" header is the only truncation signal, and a total above the window
+  # FAILS the call: a window onto the open set must never read as the open set.
+  # An absent or unparseable header leaves the total unknown rather than proven
+  # untruncated, so a listing that fills its whole window is refused too; only
+  # a listing smaller than its window - which no limit can have cut - passes
+  # without a total.
+  total=$(printf '%s\n' "$out" \
+    | sed -n 's/^count:[[:space:]]*[0-9]\{1,\}[[:space:]]\{1,\}of[[:space:]]\{1,\}\([0-9]\{1,\}\)[[:space:]]\{1,\}total$/\1/p' \
+    | head -n 1)
+  if [ -n "$total" ]; then
+    if [ "$total" -gt "$limit" ]; then
+      FM_PR_LIST_ERROR="the forge reports $total open pull requests and only the newest $limit were listed; a truncated listing must not read as the open set"
+      return 1
+    fi
+  elif [ "$(printf '%s\n' "$rows" | grep -c .)" -ge "$limit" ]; then
+    FM_PR_LIST_ERROR="the listing filled its whole $limit-row window and reported no total, so truncation cannot be ruled out"
+    return 1
+  fi
+  [ -z "$rows" ] || printf '%s\n' "$rows"
 }
 
 # Sidecar layout: provider, url, host, path, number, one per line. A sidecar

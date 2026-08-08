@@ -137,6 +137,7 @@ Candidates are listed strongest evidence first, and the list is ordered rather t
 Code emits candidates and never decides equivalence: whether two prose descriptions are the same work is firstmate's judgment, made from a surfaced set.
 
 A source that cannot be read yields `overlap=unavailable` and never `overlap=none`, so an incomplete set is never mistaken for a clean one.
+A pull request listing whose forge-reported open total exceeds `FM_SPAWN_OVERLAP_PR_LIMIT` fails the same way, because a truncated listing is an incomplete set rather than the open set.
 The result is recorded in the task's own metadata as `overlap=`, plus `overlap_refs=` when candidates exist and `overlap_ack=` when an acknowledgement was given, which keeps "nothing was compared" and "compared, found nothing" distinguishable afterwards.
 
 The local, gitignored `config/spawn-overlap` file selects the posture and is inherited by secondmate homes.
@@ -144,7 +145,7 @@ Absent or `advisory` prints and records the result and never refuses.
 `enforce` additionally requires `bin/fm-spawn.sh --overlap-ack <ref>[,<ref>...]` to name every surfaced ref before the dispatch proceeds; the refusal prints the exact value to reuse.
 `off` skips the scan and says so.
 Any other value refuses the spawn, because a safety knob that cannot be read must never be treated as an absent one.
-`FM_SPAWN_OVERLAP_PR_LIMIT` bounds the pull requests listed per spawn (default 100), `FM_SPAWN_OVERLAP_MIN_TOKENS` sets the shared-token floor (default 2), and `FM_SPAWN_OVERLAP_MIN_PERCENT` sets the coverage threshold (default 50).
+`FM_SPAWN_OVERLAP_PR_LIMIT` bounds the pull requests listed per spawn (default 600), `FM_SPAWN_OVERLAP_MIN_TOKENS` sets the shared-token floor (default 2), and `FM_SPAWN_OVERLAP_MIN_PERCENT` sets the coverage threshold (default 50).
 
 ## Gate defaults (.no-mistakes.yaml)
 
@@ -538,7 +539,7 @@ FM_ZELLIJ_SESSION=firstmate  # zellij-only: named session for normal backend ops
 FM_BACKEND_CMUX_COMPOSER_LINES=20  # cmux-only: tail lines scanned to locate the composer row for submit verification
 FM_BACKEND_CMUX_IDLE_RE='^Type a message\.\.\.$'  # cmux-only: empty-composer placeholder regex after border/prompt stripping
 CMUX_SOCKET_PASSWORD=   # cmux-only: socket password fallback when config/cmux-socket-password is absent (docs/cmux-backend.md)
-FM_SPAWN_OVERLAP_PR_LIMIT=100   # open pull requests listed per spawn by the duplicate-work overlap scan
+FM_SPAWN_OVERLAP_PR_LIMIT=600   # open pull requests listed per spawn by the duplicate-work overlap scan; a forge total above it reads as unavailable, never as none
 FM_SPAWN_OVERLAP_MIN_TOKENS=2   # shared normalised tokens required before a candidate is surfaced as an overlap
 FM_SPAWN_OVERLAP_MIN_PERCENT=50  # percent of the smaller vocabulary those shared tokens must cover
 FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the session-start digest; each line is capped by bin/fm-line-cap-lib.sh

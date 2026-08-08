@@ -202,6 +202,29 @@ test_forge_outage_is_unavailable_not_none() {
   pass "an unreachable forge yields overlap=unavailable and never overlap=none"
 }
 
+test_truncated_pr_listing_is_unavailable_not_none() {
+  local rec out status meta
+  rec=$(make_case pr-window "$UNRELATED_TASK")
+  read_case_record "$rec"
+
+  # The fake gh-axi's count header reports 523 open in total, so a two-row
+  # window is a bounded look at a larger open set. The unrelated task is
+  # deliberate: with a window covering the whole total this same fixture
+  # reports overlap=none, so the only thing under test is the truncation.
+  out=$(FM_SPAWN_OVERLAP_PR_LIMIT=2 run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$UNRELATED_TASK" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "advisory mode must not refuse on a truncated listing"
+  assert_contains "$out" "overlap=unavailable" "a truncated pull request listing was not reported as unavailable"
+  assert_not_contains "$out" "overlap=none" "a truncated listing must never read as an empty overlap set"
+  assert_contains "$out" "unavailable,pr," "the truncated source was not named"
+  assert_contains "$out" "523" "the reason did not name the forge's reported open total"
+
+  meta="$HOME_DIR/state/$UNRELATED_TASK.meta"
+  assert_grep "overlap=unavailable" "$meta" "the spawn record does not preserve the incomplete set"
+  assert_no_grep "overlap=none" "$meta" "the spawn record downgraded a truncated listing to a pass"
+  pass "a pull request listing smaller than the forge's open total yields overlap=unavailable and never overlap=none"
+}
+
 test_missing_forge_cli_is_unavailable_not_none() {
   local rec out fakebin
   rec=$(make_case forge-missing "$UNRELATED_TASK")
@@ -298,7 +321,7 @@ test_off_skips_the_scan_but_says_so() {
   pass "off skips the scan and records that nothing was compared"
 }
 
-test_unreadable_config_refuses() {
+test_misspelled_config_value_refuses() {
   local rec out status
   rec=$(make_case bad-config "$NEW_TASK")
   read_case_record "$rec"
@@ -309,7 +332,30 @@ test_unreadable_config_refuses() {
   expect_code 1 "$status" "a safety knob that cannot be read must refuse"
   assert_contains "$out" "config/spawn-overlap" "the refusal did not name the file to fix"
   assert_absent "$HOME_DIR/state/$NEW_TASK.meta" "a refused spawn must leave no task metadata behind"
-  pass "an unreadable overlap config refuses instead of reading as absent"
+  pass "a misspelled overlap config value refuses instead of reading as absent"
+}
+
+test_unreadable_config_file_refuses() {
+  local rec out status
+  rec=$(make_case unreadable-config "$NEW_TASK")
+  read_case_record "$rec"
+  if [ "$(id -u)" = 0 ]; then
+    pass "skipped: running as root ignores the unreadable-config permission bits"
+    return 0
+  fi
+  # The knob is set to enforce and then made unreadable: absent stays advisory,
+  # but PRESENT and unreadable must refuse rather than silently downgrade.
+  printf 'enforce\n' > "$HOME_DIR/config/spawn-overlap"
+  chmod 000 "$HOME_DIR/config/spawn-overlap"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$NEW_TASK" "$PROJ_DIR")
+  status=$?
+  chmod 644 "$HOME_DIR/config/spawn-overlap"
+  expect_code 1 "$status" "a present but unreadable safety knob must refuse"
+  assert_contains "$out" "config/spawn-overlap" "the refusal did not name the file to fix"
+  assert_contains "$out" "cannot be read" "the refusal did not say why"
+  assert_absent "$HOME_DIR/state/$NEW_TASK.meta" "a refused spawn must leave no task metadata behind"
+  pass "a present but unreadable overlap config refuses instead of reading as absent"
 }
 
 # --- sources ----------------------------------------------------------------
@@ -331,6 +377,21 @@ test_live_task_without_a_backlog_row_is_surfaced() {
   assert_contains "$out" "task,merge-green-verifier-live," "a task under way with no backlog row was invisible"
   assert_not_contains "$out" "merge-green-secondmate" "a persistent second mate was surfaced as overlapping work"
   pass "a task under way with no backlog row is surfaced, and a second mate is not"
+}
+
+test_a_branch_merely_ending_with_the_task_id_stays_visible() {
+  local rec out
+  rec=$(make_case branch-boundary "$NEW_TASK")
+  read_case_record "$rec"
+  # Only the task's OWN branch is excluded from the scan, on a path-component
+  # boundary. A branch that merely ends with the id - a retry or follow-up of
+  # the same work family - is the strongest evidence of a duplicate.
+  git -C "$PROJ_DIR" branch "fm/re-$NEW_TASK" >/dev/null 2>&1
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$NEW_TASK" "$PROJ_DIR")
+  assert_contains "$out" "branch,fm/re-$NEW_TASK," \
+    "a branch that merely ends with the task id was hidden as if it were the task's own branch"
+  pass "a branch that merely ends with the task id stays visible to the scan"
 }
 
 # --- what separates a candidate from a coincidence --------------------------
@@ -398,7 +459,7 @@ test_forge_reader_separates_no_rows_from_no_answer() {
   fakebin=$(make_fakebin "$dir/fake")
   mkdir -p "$dir/repo"
 
-  out=$(PATH="$fakebin:$PATH" bash -c '. "$1/bin/fm-pr-lib.sh"; fm_pr_open_request_titles "$2" 100' _ "$ROOT" "$dir/repo")
+  out=$(PATH="$fakebin:$PATH" bash -c '. "$1/bin/fm-pr-lib.sh"; fm_pr_open_request_titles "$2" 600' _ "$ROOT" "$dir/repo")
   status=$?
   expect_code 0 "$status" "a reachable forge must return success"
   assert_contains "$out" "1614" "the listing dropped the pull request number"
@@ -408,23 +469,33 @@ test_forge_reader_separates_no_rows_from_no_answer() {
   assert_contains "$out" "Make filed work reach the captain by name, not just the record" \
     "a comma inside a title truncated it"
 
-  out=$(PATH="$fakebin:$PATH" FM_FAKE_GH_FAIL=1 bash -c '. "$1/bin/fm-pr-lib.sh"; fm_pr_open_request_titles "$2" 100; echo "rc=$?"; echo "err=$FM_PR_LIST_ERROR"' _ "$ROOT" "$dir/repo")
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_GH_FAIL=1 bash -c '. "$1/bin/fm-pr-lib.sh"; fm_pr_open_request_titles "$2" 600; echo "rc=$?"; echo "err=$FM_PR_LIST_ERROR"' _ "$ROOT" "$dir/repo")
   assert_contains "$out" "rc=1" "an unreachable forge returned success"
   assert_contains "$out" "err=" "an unreachable forge reported no reason"
   assert_not_contains "$out" "1614" "a failed listing must yield no rows at all"
-  pass "the shared forge reader separates 'no open requests' from 'no answer'"
+
+  # A window smaller than the forge's reported open total must fail the call,
+  # naming both, and yield no rows: a truncated listing is not the open set.
+  out=$(PATH="$fakebin:$PATH" bash -c '. "$1/bin/fm-pr-lib.sh"; fm_pr_open_request_titles "$2" 2; echo "rc=$?"; echo "err=$FM_PR_LIST_ERROR"' _ "$ROOT" "$dir/repo")
+  assert_contains "$out" "rc=1" "a truncated listing returned success"
+  assert_contains "$out" "523" "the truncation reason did not name the forge's open total"
+  assert_not_contains "$out" "1614" "a truncated listing must yield no rows at all"
+  pass "the shared forge reader separates 'no open requests' from 'no answer' and from 'a bounded window'"
 }
 
 test_replay_surfaces_the_recorded_duplicate
 test_unrelated_task_surfaces_no_overlap
 test_forge_outage_is_unavailable_not_none
+test_truncated_pr_listing_is_unavailable_not_none
 test_missing_forge_cli_is_unavailable_not_none
 test_enforce_requires_acknowledgement_and_records_it
 test_enforce_refuses_an_incomplete_set_without_acknowledgement
 test_advisory_default_never_refuses
 test_off_skips_the_scan_but_says_so
-test_unreadable_config_refuses
+test_misspelled_config_value_refuses
+test_unreadable_config_file_refuses
 test_live_task_without_a_backlog_row_is_surfaced
+test_a_branch_merely_ending_with_the_task_id_stays_visible
 test_a_long_subject_keeps_short_branches_and_drops_coincidences
 test_strongest_evidence_is_listed_first
 test_forge_reader_separates_no_rows_from_no_answer
