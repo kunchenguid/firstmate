@@ -451,9 +451,9 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
-8. Before validation starts, group related fixes and run the smallest focused checks that establish the
-   changed behavior before rerunning broader suites. This orders your own implementation and correction
-   loop only - it never narrows what your Definition of done requires.
+8. While the change is still yours to edit, group related fixes and run the smallest focused checks that
+   establish the changed behavior before rerunning broader suites. This ordering ends when this mode's
+   required final checks begin, and it never narrows what your Definition of done requires.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

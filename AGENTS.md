@@ -187,7 +187,8 @@ Establish model support and provider family from that harness's own authoritativ
 Missing model-level quota, a missing authentication source, unmeasurable headroom, or unmodeled authentication is disclosed uncertainty that keeps a candidate eligible, never a credential or login escalation.
 Only concrete contradictory evidence blocks a candidate, such as an authoritative catalog proving the model unsupported or proof that the credential selected for that surface is unusable; never infer a credential store, provider family, or quota mapping from a harness, model, or source name, and never launch another harness's CLI to judge a candidate.
 Preserve malformed profile configuration as an actionable error rather than selecting around it.
-When every candidate is tight, preserve the captain's strongest-reasoning class and the task-appropriate effort rather than silently downgrading either solely to conserve tokens or quota; stop and report the tight choice if that class cannot proceed.
+Choose the task-appropriate model and effort from the accepted work and dispatch evidence; never lower either solely to conserve tokens or quota.
+When every candidate is tight, preserve the captain's strongest-reasoning class rather than silently downgrading it solely to conserve quota; stop and report the tight choice if that class cannot proceed.
 Break genuine evidence ties without array-order or harness bias.
 `quota-axi` owns how model or product windows relate to bounding account windows and remains data-only.
 Load `quota-array-dispatch` before choosing among a matched profile array; that skill is the single owner of the completion-aware selection procedure.
@@ -261,7 +262,7 @@ Do not build wrappers, control planes, policy layers, custom verifiers, or autom
 
 Save tokens by eliminating duplicated work, irrelevant raw context, and repeated evidence collection, never by weakening accepted scope, necessary reasoning, evidence, validation, or safety.
 Preserve direct user requirements, authoritative source material, and durable decisions, and perform necessary targeted rereads; never substitute a lossy summary when the exact source is required to act safely or correctly.
-When firstmate or a secondmate implements or corrects work directly under section 1's existing exceptions, group related fixes and run the smallest focused checks that establish the changed behavior before rerunning broader suites; that ordering applies only before validation begins and never narrows the delivery path's required final checks.
+When firstmate or a secondmate implements or corrects work directly under section 1's existing exceptions, group related fixes and run the smallest focused checks that establish the changed behavior before rerunning broader suites; that ordering ends when the delivery path's required final checks begin and never narrows them.
 Before commissioning an investigation, consult existing reports and established evidence.
 Classify the deliverable:
 

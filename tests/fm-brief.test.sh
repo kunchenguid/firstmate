@@ -212,10 +212,10 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
-    assert_grep "Before validation starts, group related fixes and run the smallest focused" "$brief" \
-      "$id: brief missing the pre-validation grouped-fix/focused-check iteration guidance"
-    assert_grep "never narrows what your Definition of done requires" "$brief" \
-      "$id: iteration guidance is not scoped away from the mode's required final checks"
+    assert_grep "While the change is still yours to edit, group related fixes" "$brief" \
+      "$id: brief missing the worker-owned grouped-fix/focused-check iteration guidance"
+    assert_grep "required final checks begin, and it never narrows what your Definition of done requires" "$brief" \
+      "$id: iteration guidance is not bounded by this mode's required final checks"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
