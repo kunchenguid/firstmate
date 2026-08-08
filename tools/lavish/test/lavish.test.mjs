@@ -886,7 +886,10 @@ test('board renders the manifest, annotations, Markdown context, visuals, and su
   const html = await readFile(output, 'utf8');
   const { document } = parseHTML(html);
   assert.equal(document.documentElement.dataset.theme, 'dark');
-  assert.equal(document.querySelector('[data-request-context] h1').textContent, 'Release choice');
+  // The request is stored and digest-bound but never rendered: a context
+  // block above the questions restates what the questions say and displaces
+  // the decisions themselves.
+  assert.equal(document.querySelector('[data-request-context]'), null);
   const questionNodes = [...document.querySelectorAll('[data-question-key].question')];
   assert.equal(questionNodes.length, 2);
   for (const [index, question] of (await manifestFor(fx, id)).questions.entries()) {
@@ -1276,10 +1279,9 @@ test('annotation board gives one comment box per item and offers no choices', as
   assert.ok(document.querySelector('#overall-note'));
   assert.ok(document.querySelector('#submit-button'));
   // The checking scaffolding is stored but must never be shown to the captain.
-  assert.doesNotMatch(
-    document.querySelector('[data-request-context]').textContent,
-    /fm-captain-item/,
-  );
+  // The whole context block is now unrendered, which satisfies that outright.
+  assert.equal(document.querySelector('[data-request-context]'), null);
+  assert.doesNotMatch(document.body.textContent, /fm-captain-item/);
 });
 
 test('annotation board refuses to submit an entirely empty batch', async () => {

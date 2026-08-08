@@ -209,7 +209,21 @@ export function validateQuestions(questions) {
       `questions[${questionIndex}]`,
       `question ${key}`,
     );
-    return { key, prompt, options, ...(visuals.length === 0 ? {} : { visuals }) };
+    // A question may carry an optional markdown `body`. The prompt is the
+    // heading and must stay short enough to read as one; anything longer
+    // belongs in the body, where it renders as prose instead of being forced
+    // into a heading. Without this split, a detailed question becomes a wall
+    // of heading-weight text that nobody reads.
+    const body = question.body === undefined
+      ? ''
+      : requireString(question.body, `questions[${questionIndex}].body`);
+    return {
+      key,
+      prompt,
+      ...(body === '' ? {} : { body }),
+      options,
+      ...(visuals.length === 0 ? {} : { visuals }),
+    };
   });
 }
 

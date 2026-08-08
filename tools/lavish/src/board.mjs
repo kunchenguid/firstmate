@@ -12,21 +12,12 @@ const markdown = new MarkdownIt({
   typographer: false,
 });
 
-// The request is stored exactly as it was checked, markers included, because
-// the digest binds those bytes. They are firstmate's checking scaffolding
-// though, so rendering them would put `<!-- fm-captain-item: note -->` in front
-// of the captain as literal text.
-const CHECK_MARKER = /^<!--\s*(?:fm-captain-item:\s*[a-z]+|\/fm-captain-item|fm-verbatim:(?:start|end))\s*-->\s*$/;
-
-function renderRequest(requestText) {
-  return markdown.render(
-    requestText
-      .split('\n')
-      .filter((line) => !CHECK_MARKER.test(line))
-      .join('\n'),
-  );
-}
-
+// The request bytes are stored and digest-bound, but the board deliberately
+// does NOT render them. A context block above the questions restates what the
+// questions say; a reader who must wade through a summary to reach the first
+// decision stops reading the summary, and then stops trusting that anything
+// above the questions is worth reading. Detail belongs in each question's own
+// `body`, next to the choice it informs.
 function escapeHtml(value) {
   return String(value)
     .replaceAll('&', '&amp;')
@@ -118,6 +109,7 @@ function questionMarkup(question, index, visuals) {
         <h2 id="question-${index}-title">${escapeHtml(question.prompt)}</h2>
       </div>
     </header>
+    ${question.body ? `<div class="item-body">${markdown.render(question.body)}</div>` : ''}
     ${visualGallery(questionVisuals, visuals, `Evidence for ${question.prompt}`)}
     <div class="options">${optionMarkup}</div>
     <label class="annotation-label" for="question-${index}-note">
@@ -536,7 +528,6 @@ export async function renderBoard(decision) {
       <h1>${title}</h1>
       <p class="subtitle">${subtitle}</p>
     </header>
-    <article class="context" data-request-context>${renderRequest(decision.requestText)}</article>
     ${visualGallery(contextVisuals, visuals, 'Decision evidence')}
     <form id="decision-form" novalidate>
       <div class="questions">${cards}</div>
