@@ -466,35 +466,44 @@ owned_child_finished() {
   fi
 
   if [ "$rc" -eq 0 ]; then
-    if wait_for_healthy_successor; then
-      cycle_log_append "$rc" "$signal" unexpected-clean-exit "attached:$HEALTHY_PID"
-      print_watch_output "$child_out"
-      rm -f "$child_out" 2>/dev/null || true
-      child=
-      child_out=
-      cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
-      report_attached
-      cycle_begin "$HEALTHY_PID" attached "$HEALTHY_IDENTITY"
-      attach_and_wait "$HEALTHY_PID"
-      return $?
-    fi
+    reason_type=unexpected-clean-exit
+  else
+    reason_type="nonzero-exit"
+    [ "$signal" = none ] || reason_type="signal-exit"
+  fi
+
+  # Our own child ended without ever printing a wake of its own - a clean
+  # stand-down, a startup race the PR-check migration guard or lock acquire
+  # rejected (both inspect the singleton lock before it is fully published, so a
+  # sibling mid-startup can read as ambiguous), or a genuine crash/kill. A
+  # sibling watcher started by another concurrent arm - e.g. a manual recovery
+  # arm racing the Stop-hook auto-arm - may already hold the singleton or be
+  # about to, so check for a live successor and the durable delivery ledger
+  # before ever declaring the cycle FAILED: only a close with neither is real.
+  if wait_for_healthy_successor; then
+    cycle_log_append "$rc" "$signal" "$reason_type" "attached:$HEALTHY_PID"
     print_watch_output "$child_out"
     rm -f "$child_out" 2>/dev/null || true
     child=
     child_out=
-    if close_unobserved_cycle; then
-      cycle_log_append "$rc" "$signal" clean-exit-delivered-wake none
-      return 0
-    fi
-    cycle_log_append "$rc" "$signal" unexpected-clean-exit none
-    return 1
+    cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
+    report_attached
+    cycle_begin "$HEALTHY_PID" attached "$HEALTHY_IDENTITY"
+    attach_and_wait "$HEALTHY_PID"
+    return $?
   fi
 
-  reason_type="nonzero-exit"
-  [ "$signal" = none ] || reason_type="signal-exit"
-  cycle_log_append "$rc" "$signal" "$reason_type" none
   print_watch_output "$child_out"
-  if ! grep -q '^watcher: FAILED' "$child_out" 2>/dev/null; then
+  if close_unobserved_cycle; then
+    cycle_log_append "$rc" "$signal" "${reason_type}-delivered-wake" none
+    rm -f "$child_out" 2>/dev/null || true
+    child=
+    child_out=
+    return 0
+  fi
+
+  cycle_log_append "$rc" "$signal" "$reason_type" none
+  if [ "$rc" -ne 0 ] && ! grep -q '^watcher: FAILED' "$child_out" 2>/dev/null; then
     echo "watcher: FAILED - watcher cycle exited $rc without an actionable reason"
   fi
   rm -f "$child_out" 2>/dev/null || true

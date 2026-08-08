@@ -885,7 +885,11 @@ test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
   mark_pr_check_migration_complete "$state"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  # A killed watcher's nonzero exit now gets the same bounded successor check as
+  # a clean exit (test_arm_self_eviction_is_loud_without_successor exercises the
+  # rc=0 twin of this case with the same override) before the arm may declare
+  # the cycle FAILED, so keep that window short here too.
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
   armpid=$!
   i=0
   while [ "$i" -lt 80 ]; do

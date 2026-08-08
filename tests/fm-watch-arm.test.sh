@@ -146,6 +146,75 @@ test_attached_arm_still_fails_on_a_wake_it_did_not_deliver() {
   pass "watch-arm: a cycle that delivered no wake of its own still fails loudly"
 }
 
+# A second arm's own forked watcher child can lose the PID-check migration's
+# pre-lock ownership check to a real sibling watcher that already holds the
+# singleton, and exit nonzero before ever printing a wake of its own. Before
+# this fix that nonzero close skipped straight to FAILED without ever
+# checking whether a live sibling already held (or was about to hold) the
+# singleton - the exact false alarm this suite exists to catch, just reached
+# through a startup race instead of a clean attach.
+test_arm_reports_sibling_delivered_wake_after_losing_a_startup_race() {
+  local dir state fakebin out armout status fm_home_file real_home co i
+  dir=$(make_case migration-race)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  start_seed_watcher "$state" "$fakebin" "$out"
+
+  # Unsettle the sibling's recorded home so fm_watcher_lock_matches_pid fails
+  # for both this arm's own top-level health check (forcing it down the fork
+  # path instead of a clean attach) and its forked child's PR-check migration
+  # guard (bin/fm-pr-check-migrate.sh), which runs that same identity check
+  # against the live lock before a fresh watcher may acquire it. The sibling
+  # itself only re-checks the bare pid file for self-eviction, so it keeps
+  # running unaffected while its recorded home is unsettled.
+  fm_home_file="$state/.watch.lock/fm-home"
+  real_home=$(cat "$fm_home_file")
+  printf 'not-a-real-home\n' > "$fm_home_file"
+  # The seed's own startup already completed PR-check migration and left a
+  # valid marker, which would otherwise let the arm's forked child skip
+  # straight past the ownership check this case targets.
+  rm -f "$state/.pr-check-migration-v1" "$state/.pr-check-migration-scan-v1"
+
+  # The migration guard's ambiguity message is the child watcher's own stderr,
+  # inherited straight through from this arm rather than captured on its
+  # tracked stdout (bin/fm-watch-arm.sh only redirects the child's stdout), so
+  # give the arm its own stderr file to poll as the race-lost signal.
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 \
+    FM_ARM_CONFIRM_TIMEOUT=3 "$WATCH_ARM" > "$armout" 2> "$armout.err" &
+  ARM_PID=$!
+
+  # Wait for the arm's own child to actually lose the race before restoring
+  # the sibling's real home, so this proves the exact failure path instead of
+  # a no-op that never exercised it.
+  co=
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -q 'PR_CHECK_MIGRATION: watcher ownership is ambiguous' "$armout.err" 2>/dev/null && { co=1; break; }
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -n "$co" ] || fail "arm's own child never lost the migration race; this case proves nothing"
+  printf '%s\n' "$real_home" > "$fm_home_file"
+
+  printf 'done: fixture finished\n' > "$state/demo.status"
+  wait_for_exit "$SEED_PID" 120
+  grep -q '^signal:' "$out" || fail "seed watcher did not surface the signal wake: $(cat "$out")"
+
+  wait_for_exit "$ARM_PID" 120
+  status=$?
+  ! grep -qF 'watcher: FAILED' "$armout" \
+    || fail "arm reported a live sibling's delivered wake as a failed cycle after losing a startup race: $(cat "$armout")"
+  grep -q '^signal:' "$armout" \
+    || fail "arm did not report the sibling's delivered wake reason: $(cat "$armout")"
+  expect_code 0 "$status" "an arm that loses a startup race to a live sibling must still close successfully once that sibling delivers"
+  grep -q 'reason=nonzero-exit' "$state/.watch-cycle-exits.log" \
+    || fail "the lost-race close was not classified in the lifecycle ledger"
+  pass "watch-arm: an arm whose own child loses a startup race to a live sibling reports that sibling's delivered wake instead of a false failure"
+}
+
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
+test_arm_reports_sibling_delivered_wake_after_losing_a_startup_race
