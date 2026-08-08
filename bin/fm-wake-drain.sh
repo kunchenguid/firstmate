@@ -9,6 +9,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-line-cap-lib.sh
+. "$SCRIPT_DIR/fm-line-cap-lib.sh"
 
 DRAIN_TMP=
 DRAIN_LOCK_HELD=false
@@ -42,18 +44,22 @@ record_wake_ledger() {
 
 # Print the consolidated OPEN DECISIONS section: every still-open
 # needs-decision/blocked, fleet-wide, folded from the durable status logs by
-# fm-classify-lib.sh's status_open_decisions (via its scan_open_decisions
-# wrapper) rather than from the latest-line annotations above, so a decision
-# buried under later unrelated appends cannot be silently missed. Runs on
-# every drain - including the empty-queue fast path - because the decision can
-# still be open even when nothing new is queued for its task this turn.
+# fm-classify-lib.sh's status_open_decisions fold (via its cursor-backed
+# scan_open_decisions_incremental wrapper) rather than from the latest-line
+# annotations above, so a decision buried under later unrelated appends cannot
+# be silently missed. Runs on every drain - including the empty-queue fast path
+# - because the decision can still be open even when nothing new is queued for
+# its task this turn. The incremental wrapper bounds this scan's cost to bytes
+# appended to each task's status log since the LAST drain, not that log's whole
+# lifetime, while still never dropping an old buried decision (see
+# fm-classify-lib.sh's "incremental (cursor-backed) open-decisions fold").
 # Bounded and silent: prints nothing when no decision is open, which is the
 # common case.
 print_open_decisions_section() {
   local open task key verb note line item_bytes=220 global_bytes=4000
-  local output='' used=0 shown=0 omitted=0 bytes suffix keep
+  local output='' used=0 shown=0 omitted=0 bytes
 
-  open=$(scan_open_decisions "$STATE") || return 0
+  open=$(scan_open_decisions_incremental "$STATE") || return 0
   [ -n "$open" ] || return 0
 
   while IFS=$(printf '\t') read -r task key verb note; do
@@ -61,11 +67,11 @@ print_open_decisions_section() {
     line="$task"
     [ "$key" = default ] || line="$line [key=$key]"
     line="$line $verb: $note"
-    if [ $(( ${#line} + 1 )) -gt "$item_bytes" ]; then
-      suffix=' [truncated]'
-      keep=$((item_bytes - ${#suffix} - 1))
-      line="${line:0:$keep}$suffix"
-    fi
+    # The shared cut counts the item's own characters; the trailing newline this
+    # section's global budget also pays for is this caller's, so the per-item
+    # allowance passed down is one short of the cap.
+    fm_cap_line_var "$line" $((item_bytes - 1))
+    line=$FM_LINE_CAP_LINE
     bytes=$(( ${#line} + 1 ))
     if [ $((used + bytes)) -gt "$global_bytes" ]; then
       omitted=$((omitted + 1))
@@ -85,6 +91,11 @@ EOF
   if [ "$omitted" -gt 0 ]; then
     printf 'OPEN DECISIONS: %d more omitted (byte cap)\n' "$omitted"
   fi
+  # Answerer-closes hint, printed at exactly the moment an answer gets written:
+  # the send that answers a listed decision also closes it, so closure never
+  # depends on the busy worker writing a matching resolved line (contract:
+  # bin/fm-send.sh header).
+  printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n"
 }
 
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.

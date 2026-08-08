@@ -39,9 +39,9 @@
 #   fm-interrupt     a firstmate-controlled interruption of the worker
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
-#   endpoint-gone, herdr-native, grok-regex, missing, malformed,
-#   gen-mismatch, source-mismatch, kimi-unverified, codex-unverified,
-#   capture-failed, no-target
+#   endpoint-gone, herdr-native, grok-regex, muse-session-log, missing,
+#   malformed, gen-mismatch, source-mismatch, kimi-unverified,
+#   codex-unverified, capture-failed, no-target
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
 # with the producing source as the second token. Precedence:
@@ -50,8 +50,8 @@
 #   3. a valid, gen-matching, source-trusted record -> its state and source
 #   4. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
-#      Grok-only temporary regex fallback classifies a grok task from its
-#      rendered tail, then unknown missing
+#      muse session-log pull source, then the Grok-only temporary regex fallback
+#      classifies a grok task from its rendered tail, then unknown missing
 #   5. malformed, stale, or untrusted records -> unknown, never a fallback
 # The Grok arm is the ONLY rendered-text classification that survives the
 # redesign, because Grok's structured lifecycle was not credited-live-verified
@@ -59,6 +59,14 @@
 # another adapter. The delivery guards in bin/fm-tmux-lib.sh match rendered
 # footers for submit acknowledgement and away-mode supervisor injection only;
 # neither is a recorded worker state source.
+#
+# The muse pull source is semantic, not rendered: it folds muse's own durable
+# session event log. It has no writer, no arm, and no gen, because
+# muse's default build ships no hook or plugin surface that could push events
+# (its plugin engine reports "plugins are not available in this build" without
+# MUSE_EXPERIMENTAL_PLUGINS). Nothing is armed for muse for the same reason
+# standalone Kimi is not: a seeded record with no writer could never be
+# cleared. See fm_busy_muse_run_state for the fold.
 #
 # Codex negotiation (fm_busy_codex_appserver_observable,
 # fm_busy_codex_hooks_verified): the approved contract prefers Codex's
@@ -161,8 +169,11 @@ fm_busy_current_gen() {  # <state-dir> <id>
 # fm_busy_sources_for_harness: the semantic sources trusted to classify a
 # task recorded with <harness>. One line, space-separated, possibly empty.
 # The firstmate-owned sources are appended for every converted adapter.
-# Grok deliberately trusts nothing: it has no semantic writer yet, and its
-# temporary rendered-tail fallback lives in the classifier, not in records.
+# Grok and muse deliberately trust nothing: neither has a semantic WRITER, so
+# neither is armed, and both read their live source on demand in the classifier
+# (grok's rendered tail, muse's session log) rather than through a stored
+# record. Listing a source here without a writer that can clear it would seed a
+# busy record nothing could ever settle.
 fm_busy_sources_for_harness() {  # <harness>
   local adapter=
   case "${1:-}" in
@@ -246,6 +257,299 @@ fm_busy_record_read() {  # <state-dir> <id>
   printf '%s %s %s %s' "$r_state" "$r_source" "$r_event" "$r_seq"
 }
 
+# ---------------------------------------------------------------------------
+# muse session-log busy source
+#
+# muse persists an append-only session event log per session at
+# <sessions-root>/YYYY/MM/DD/<session-uuid>/session.jsonl, and brackets every
+# submitted turn with one run lifecycle pair. Verified live on muse
+# 0.1.0-R708.1 across completed, interrupted, and killed-mid-turn turns:
+#   {"payload":{"kind":"run","run_id":"<uuid>","event":{"kind":"started",...
+#   {"payload":{"kind":"run","run_id":"<uuid>","event":{"kind":"terminal",
+#     "terminal":"completed"|"cancelled",...
+# An Escape interrupt closes its run with terminal=cancelled, so unlike Claude's
+# Stop hook this source covers the interrupt path itself. Any later
+# run_retracted records follow the terminal rather than replacing it.
+#
+# Both halves of the fold are trusted. An open run is positive proof a turn is
+# in flight, and a settled log is idle: the credentialed multi-step smoke showed
+# one run pair spans a whole multi-step turn, including an Escape interrupt that
+# closes the run with terminal=cancelled instead of continuing the turn in
+# another run. This gives the settled log the same idle trust as the Claude and
+# Pi push sources. A version allowlist would be false precision and a maintenance
+# treadmill for an auto-updating vendor binary: busy classification receives
+# only the normalized muse harness identity, while session metadata records
+# semver 0.1.0 plus a build SHA that cannot be matched against it. Resolution
+# failures - no sidecar, no matching log, an unreadable or run-free log - remain
+# unknown because those prove nothing about the turn either way. See
+# docs/verification/muse.md for the evidence.
+# fm_busy_muse_binding_path: the per-task sidecar fm-spawn writes so the
+# classifier binds a pane to its session log without re-deriving muse's data
+# directory. It records sessions_root=<abs>, workspace_root=<abs>, one
+# binding_id=<token>, and one prior_log=<abs> for each matching main log that
+# predates this pane.
+fm_busy_muse_binding_path() {  # <state-dir> <id>
+  printf '%s/%s.muse-session' "$1" "$2"
+}
+
+fm_busy_muse_cache_path() {  # <state-dir> <id>
+  printf '%s/%s.muse-session-current' "$1" "$2"
+}
+
+# fm_busy_muse_binding_field: read one field from the sidecar, or fail.
+fm_busy_muse_binding_field() {  # <state-dir> <id> <key>
+  local path line key=$3
+  path=$(fm_busy_muse_binding_path "$1" "$2")
+  [ -f "$path" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$key="*)
+        line=${line#"$key="}
+        [ -n "$line" ] || return 1
+        printf '%s' "$line"
+        return 0
+        ;;
+    esac
+  done < "$path"
+  return 1
+}
+
+# fm_busy_muse_matching_logs: every MAIN session log whose recorded
+# workspace_root is this task's worktree. The depth bounds are what exclude
+# muse's own native sub-agent logs, which live one directory deeper under
+# subagent/<child-session-id>/session.jsonl and carry their own independent run
+# lifecycle - folding a child's log would report the parent busy long after the
+# parent's turn ended.
+fm_busy_muse_matching_logs() {  # <sessions-root> <workspace-root>
+  local root=$1 ws=$2
+  [ -d "$root" ] || return 1
+  command -v node >/dev/null 2>&1 || return 1
+  node - "$root" "$ws" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const [root, workspace] = process.argv.slice(2);
+
+function directories(parent) {
+  try {
+    return fs.readdirSync(parent, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => path.join(parent, entry.name));
+  } catch {
+    return [];
+  }
+}
+
+function metadataWorkspace(file) {
+  let descriptor;
+  try {
+    descriptor = fs.openSync(file, "r");
+    const buffer = Buffer.alloc(65536);
+    const length = fs.readSync(descriptor, buffer, 0, buffer.length, 0);
+    const newline = buffer.indexOf(10, 0);
+    if (newline < 0 || newline >= length) return null;
+    const record = JSON.parse(buffer.subarray(0, newline).toString("utf8"));
+    return record?.payload?.record?.workspace_root ?? null;
+  } catch {
+    return null;
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+
+for (const year of directories(root)) {
+  for (const month of directories(year)) {
+    for (const day of directories(month)) {
+      for (const session of directories(day)) {
+        const file = path.join(session, "session.jsonl");
+        try {
+          if (!fs.lstatSync(file).isFile()) continue;
+        } catch {
+          continue;
+        }
+        if (metadataWorkspace(file) === workspace) process.stdout.write(`${file}\n`);
+      }
+    }
+  }
+}
+NODE
+}
+
+fm_busy_muse_binding_has_prior_log() {  # <state-dir> <id> <session-log>
+  local path line
+  path=$(fm_busy_muse_binding_path "$1" "$2")
+  [ -f "$path" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ "$line" = "prior_log=$3" ] && return 0
+  done < "$path"
+  return 1
+}
+
+fm_busy_muse_cache_field() {  # <state-dir> <id> <key>
+  local path line key=$3
+  path=$(fm_busy_muse_cache_path "$1" "$2")
+  [ -f "$path" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$key="*)
+        line=${line#"$key="}
+        [ -n "$line" ] || return 1
+        printf '%s' "$line"
+        return 0
+        ;;
+    esac
+  done < "$path"
+  return 1
+}
+
+fm_busy_muse_main_log_path_valid() {  # <sessions-root> <session-log>
+  local root=${1%/} log=$2 rel year month day session leaf
+  while :; do
+    case "$root" in
+      *'//'*) root=${root//\/\//\/} ;;
+      *) break ;;
+    esac
+  done
+  [ -n "$root" ] && [ -f "$log" ] && [ ! -L "$log" ] || return 1
+  case "$log" in
+    "$root"/*) rel=${log#"$root"/} ;;
+    *) return 1 ;;
+  esac
+  year=${rel%%/*}; rel=${rel#*/}
+  month=${rel%%/*}; rel=${rel#*/}
+  day=${rel%%/*}; rel=${rel#*/}
+  session=${rel%%/*}; leaf=${rel#*/}
+  [ -n "$year" ] && [ -n "$month" ] && [ -n "$day" ] && [ -n "$session" ] \
+    && [ "$leaf" = session.jsonl ]
+}
+
+fm_busy_muse_namespace_day() {  # <sessions-root>
+  printf '%s/%s' "${1%/}" "$(date '+%Y/%m/%d')"
+}
+
+fm_busy_muse_namespace_signature() {  # <day-directory>
+  local first first_signature manifest='' path paths signature
+  if [ ! -d "$1" ]; then
+    printf '%s' missing
+    return 0
+  fi
+  paths=$(find "$1" -mindepth 2 -maxdepth 2 -type f -name session.jsonl -print 2>/dev/null) \
+    || return 1
+  paths=$(printf '%s\n' "$paths" | LC_ALL=C sort) || return 1
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    first=$(sed -n '1p' "$path") || return 1
+    first_signature=$(printf '%s' "$first" | cksum | awk '{ print $1 ":" $2 }') || return 1
+    manifest="${manifest}${path}:${first_signature}
+"
+  done <<EOF
+$paths
+EOF
+  signature=$(printf '%s' "$manifest" | cksum | awk '{ print $1 ":" $2 }') || return 1
+  [ -n "$signature" ] || return 1
+  printf '%s' "$signature"
+}
+
+fm_busy_muse_cached_session_log() {  # <state-dir> <id> <root> <binding-id>
+  local cache_binding log cache_day cache_signature day signature
+  [ -n "$4" ] || return 1
+  cache_binding=$(fm_busy_muse_cache_field "$1" "$2" binding_id) || return 1
+  [ "$cache_binding" = "$4" ] || return 1
+  log=$(fm_busy_muse_cache_field "$1" "$2" session_log) || return 1
+  fm_busy_muse_main_log_path_valid "$3" "$log" || return 1
+  fm_busy_muse_binding_has_prior_log "$1" "$2" "$log" && return 1
+  cache_day=$(fm_busy_muse_cache_field "$1" "$2" namespace_day) || return 1
+  cache_signature=$(fm_busy_muse_cache_field "$1" "$2" namespace_signature) || return 1
+  day=$(fm_busy_muse_namespace_day "$3") || return 1
+  [ "$cache_day" = "$day" ] || return 1
+  signature=$(fm_busy_muse_namespace_signature "$day") || return 1
+  [ "$cache_signature" = "$signature" ] || return 1
+  printf '%s' "$log"
+}
+
+fm_busy_muse_cache_session_log() {  # <state-dir> <id> <binding-id> <session-log> <namespace-day> <namespace-signature>
+  local cache tmp current
+  [ -n "$3" ] || return 0
+  current=$(fm_busy_muse_binding_field "$1" "$2" binding_id) || return 1
+  [ "$current" = "$3" ] || return 1
+  cache=$(fm_busy_muse_cache_path "$1" "$2")
+  tmp="$cache.tmp.$$"
+  {
+    printf 'binding_id=%s\n' "$3"
+    printf 'session_log=%s\n' "$4"
+    printf 'namespace_day=%s\n' "$5"
+    printf 'namespace_signature=%s\n' "$6"
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f -- "$tmp" "$cache"
+}
+
+# fm_busy_muse_session_log: the one matching MAIN session log that did not
+# exist when fm-spawn created this pane's binding. Multiple candidates are
+# ambiguous and fail closed rather than guessing which pane owns either log.
+fm_busy_muse_session_log() {  # <state-dir> <id>
+  local root ws binding_id='' candidate selected='' cache namespace_day namespace_before namespace_after
+  root=$(fm_busy_muse_binding_field "$1" "$2" sessions_root) || return 1
+  ws=$(fm_busy_muse_binding_field "$1" "$2" workspace_root) || return 1
+  binding_id=$(fm_busy_muse_binding_field "$1" "$2" binding_id 2>/dev/null || true)
+  if cache=$(fm_busy_muse_cached_session_log "$1" "$2" "$root" "$binding_id"); then
+    printf '%s' "$cache"
+    return 0
+  fi
+  rm -f "$(fm_busy_muse_cache_path "$1" "$2")"
+  namespace_day=$(fm_busy_muse_namespace_day "$root") || return 1
+  namespace_before=$(fm_busy_muse_namespace_signature "$namespace_day") || return 1
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    fm_busy_muse_binding_has_prior_log "$1" "$2" "$candidate" && continue
+    [ -z "$selected" ] || return 1
+    selected=$candidate
+  done <<EOF
+$(fm_busy_muse_matching_logs "$root" "$ws")
+EOF
+  [ -n "$selected" ] || return 1
+  namespace_after=$(fm_busy_muse_namespace_signature "$namespace_day") || return 1
+  [ "$namespace_before" = "$namespace_after" ] || return 1
+  fm_busy_muse_cache_session_log "$1" "$2" "$binding_id" "$selected" \
+    "$namespace_day" "$namespace_after" || return 1
+  printf '%s' "$selected"
+}
+
+# fm_busy_muse_run_state: fold one session log to busy|settled|none.
+#   busy     at least one run started with no matching terminal
+#   settled  every started run reached a terminal
+#   none     the log holds no run lifecycle records at all
+# The match is anchored on the exact structural prefix rather than a bare
+# "kind":"terminal" search, because muse also emits nested "record":{"kind":
+# "terminal"} cleanup-effect payloads that are NOT run terminals and would
+# otherwise close a run that is still in flight.
+fm_busy_muse_run_state() {  # <session-log>
+  [ -f "$1" ] || return 1
+  LC_ALL=C awk '
+    BEGIN { pre = "\"payload\":{\"kind\":\"run\",\"run_id\":\"" }
+    {
+      p = index($0, pre)
+      if (p == 0) next
+      rest = substr($0, p + length(pre))
+      q = index(rest, "\"")
+      if (q == 0) next
+      rid = substr(rest, 1, q - 1)
+      rest = substr(rest, q)
+      head = "\",\"event\":{\"kind\":\""
+      if (substr(rest, 1, length(head)) != head) next
+      rest = substr(rest, length(head) + 1)
+      q = index(rest, "\"")
+      if (q == 0) next
+      ev = substr(rest, 1, q - 1)
+      if (ev == "started") { open[rid] = 1; seen = 1 }
+      else if (ev == "terminal") { open[rid] = 0 }
+    }
+    END {
+      if (!seen) { print "none"; exit }
+      for (r in open) if (open[r] == 1) { print "busy"; exit }
+      print "settled"
+    }
+  ' "$1"
+}
+
 # fm_busy_grok_tail_busy: the Grok-only temporary rendered-tail fallback.
 # Consumes the tail on stdin; 0 when Grok's verified busy signature matches.
 # FM_BUSY_REGEX still globally overrides the signature, mirroring the
@@ -263,7 +567,7 @@ fm_busy_grok_tail_busy() {
 # if available, else reports unknown capture-failed.
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
-  local out rc r_state r_source native
+  local out rc r_state r_source native log
   case "$harness" in
     kimi*)
       if ! fm_busy_kimi_verified; then
@@ -308,6 +612,22 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     fi
   fi
   case "$harness" in
+    muse*)
+      # Semantic, on demand: fold this task's bound session log. An open run is
+      # positive proof of a turn in flight and a settled log is a finished turn.
+      # Every other outcome - no sidecar, no matching log, an unreadable or
+      # run-free log - is unknown, never idle.
+      if ! log=$(fm_busy_muse_session_log "$state" "$id"); then
+        printf 'unknown muse-session-log'
+        return 0
+      fi
+      case "$(fm_busy_muse_run_state "$log" 2>/dev/null)" in
+        busy) printf 'busy muse-session-log' ;;
+        settled) printf 'idle muse-session-log' ;;
+        *) printf 'unknown muse-session-log' ;;
+      esac
+      return 0
+      ;;
     grok*)
       if [ -z "$tail40" ]; then
         if command -v fm_backend_capture >/dev/null 2>&1; then

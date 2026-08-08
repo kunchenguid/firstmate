@@ -43,12 +43,28 @@
 #   recovery_turn_seen_busy=
 #   recovery_turn_completed_epoch=
 #   escalated_epoch=
+#   escalation_closed_epoch=
+#                           when the durable status decision opened by that
+#                           escalation was closed again (see the escalation
+#                           lifecycle note below); empty until then
 #   resolved_epoch=
 #   resolved_via=           status | document | helper | empty
 #   wrong_home_hits=        count of corr sightings under the secondmate home
 #   wrong_home_sightings=   comma-separated identities of counted sightings
 #   wrong_home_scan_signature=
 #   grace_secs=             bounded grace before recovery is eligible
+#
+# Escalation lifecycle: an escalation is not just a message, it OPENS a durable
+# keyed decision in the parent status log, and bin/fm-classify-lib.sh's fold is
+# the one owner of what closes it. So this library owns both ends of that
+# decision: fm_pending_reply_maybe_escalate opens it under a per-request key, and
+# fm_pending_reply_close_escalation closes it once the record resolves. Resolving
+# the record alone would leave the decision open forever, re-surfacing a settled
+# request in every later OPEN DECISIONS fold.
+# That per-request key lives in a namespace the fold reserves to this library, so
+# no other writer into the same status stream - a local mate appending directly,
+# or a remote mate's mirrored line - can take the key over or clear it; see the
+# reserved-key rule in bin/fm-classify-lib.sh.
 #
 # Sourced by bin/fm-send.sh, bin/fm-watch.sh, bin/fm-secondmate-report.sh, and
 # tests. No side effects on source. set -u / set -e safe.
@@ -68,6 +84,8 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-tmux-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$_FM_PENDING_REPLY_LIB_DIR/fm-classify-lib.sh"
 
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
 FM_PENDING_REPLY_CORR_RE='corr=[A-Fa-f0-9]{16}'
@@ -472,6 +490,26 @@ fm_pending_reply_resolve_via_of_line() {  # <line>
 # Idempotently resolve an expectation from a correlated parent report.
 # Returns 0 when the record is resolved after the call (already or newly).
 fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
+  # Serialized per correlation so a resolution and an escalation cannot interleave.
+  # bin/fm-wake-lib.sh owns the lock primitives but assigns its own globals when
+  # sourced, so they are declared local here: that contains them to this call
+  # instead of leaking into every script that sources this library, without the
+  # subshell that would make every later use of them read as a lost write.
+  # The lock is released explicitly rather than from an EXIT trap, because a trap
+  # in a plain function would clobber the caller's own.
+  local state=$1 corr=$2 lock rc=0
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  STATE=$state
+  lock="$state/.pending-reply-$corr.lock"
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$lock" || return 1
+  _fm_pending_reply_try_resolve_locked "$@" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
+_fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-override]
   local state=$1 corr=$2 status_override=${3-}
   local rec phase delivered marker delivery_entry delivery_state status_file signature previous line via now
   local unconfirmed=0
@@ -479,6 +517,7 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
   if [ "$phase" = resolved ]; then
+    _fm_pending_reply_close_escalation_locked "$state" "$corr" || true
     return 0
   fi
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
@@ -512,6 +551,9 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
   fi
   fm_pending_reply_set "$rec" resolved_epoch "$now" || return 1
   fm_pending_reply_set "$rec" resolved_via "$via" || return 1
+  # The record is resolved either way; a failed close stays retryable from the
+  # watcher tick rather than turning a settled request back into a failure.
+  _fm_pending_reply_close_escalation_locked "$state" "$corr" || true
   return 0
 }
 
@@ -786,11 +828,142 @@ fm_pending_reply_reconcile_recovery() {  # <state-dir> <corr_id>
   fm_pending_reply_set "$rec" phase recovery_unknown || return 1
 }
 
+# The decision key an escalation for <corr_id> opens in the parent status log.
+# Per-request rather than the bare default key, so one request's escalation
+# neither masks nor is masked by an unrelated decision on the same task.
+fm_pending_reply_escalation_key() {  # <corr_id>
+  printf 'pending-reply-%s' "$1"
+}
+
+fm_pending_reply_escalation_payload() {  # <record-path> <kind>
+  local rec=$1 kind=$2 task_id corr summary outcome token
+  task_id=$(fm_pending_reply_get "$rec" task_id)
+  corr=$(fm_pending_reply_get "$rec" corr_id)
+  summary=$(fm_pending_reply_get "$rec" request_summary)
+  [ -n "$task_id" ] && [ -n "$corr" ] || return 1
+  case "$kind" in
+    missed)
+      token=pending-reply-missed
+      ;;
+    delivery-unknown)
+      token=pending-reply-delivery-unknown
+      ;;
+    recovery-delivery)
+      outcome=$(fm_pending_reply_get "$rec" recovery_delivery_outcome)
+      case "$outcome" in failed|unknown) ;; *) return 1 ;; esac
+      token="pending-reply-recovery-delivery-$outcome"
+      ;;
+    *) return 1 ;;
+  esac
+  printf '%s: task=%s pending-reply-id=%s request=%s' "$token" "$task_id" "$corr" "$summary"
+}
+
+# The escalation line this library published for <corr_id>, or empty. A legacy
+# unkeyed escalation is matched and closed under the shared default key while
+# that exact escalation remains open. If an unrelated decision has since taken
+# over that key, the close is withheld so the unrelated decision is not cleared.
+fm_pending_reply_escalation_line() {  # <status-file> <record-path> <corr_id>
+  local status_file=$1 rec=$2 corr=$3 line found='' kind payload own_key
+  [ -f "$status_file" ] || return 0
+  [ "$(fm_pending_reply_get "$rec" corr_id)" = "$corr" ] || return 0
+  own_key=$(fm_pending_reply_escalation_key "$corr")
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ "$(status_line_verb "$line")" = blocked ] || continue
+    for kind in missed delivery-unknown recovery-delivery; do
+      payload=$(fm_pending_reply_escalation_payload "$rec" "$kind") || continue
+      case "$line" in
+        "blocked [key=$own_key]: $payload"|"blocked: $payload") found=$line; break ;;
+      esac
+    done
+  done < "$status_file"
+  printf '%s' "$found"
+}
+
+# Close the durable status decision a previous escalation opened for <corr_id>.
+# Idempotent, and safe to retry until it succeeds: it appends the closing line
+# only while that exact keyed decision is still open in
+# bin/fm-classify-lib.sh's fold. Records that never escalated are left untouched.
+fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
+  # Serialized per correlation so a resolution and an escalation cannot interleave.
+  # bin/fm-wake-lib.sh owns the lock primitives but assigns its own globals when
+  # sourced, so they are declared local here: that contains them to this call
+  # instead of leaking into every script that sources this library, without the
+  # subshell that would make every later use of them read as a lost write.
+  # The lock is released explicitly rather than from an EXIT trap, because a trap
+  # in a plain function would clobber the caller's own.
+  local state=$1 corr=$2 lock rc=0
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  STATE=$state
+  lock="$state/.pending-reply-$corr.lock"
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$lock" || return 1
+  _fm_pending_reply_close_escalation_locked "$@" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
+_fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 rec escalated closed parent_status escalation key note
+  local open_line open_key open_note now
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] || return 1
+  [ "$(fm_pending_reply_get "$rec" phase)" = resolved ] || return 0
+  escalated=$(fm_pending_reply_get "$rec" escalated_epoch)
+  [ -n "$escalated" ] || return 0
+  closed=$(fm_pending_reply_get "$rec" escalation_closed_epoch)
+  [ -z "$closed" ] || return 0
+  parent_status=$(fm_pending_reply_get "$rec" parent_status)
+  [ -n "$parent_status" ] || return 1
+  escalation=$(fm_pending_reply_escalation_line "$parent_status" "$rec" "$corr")
+  if [ -n "$escalation" ]; then
+    key=$(_fm_decision_key "$escalation") || key=''
+    note=$(status_line_note "$escalation")
+    while IFS= read -r open_line; do
+      [ -n "$open_line" ] || continue
+      open_key=${open_line%%$'\t'*}
+      [ "$open_key" = "$key" ] || continue
+      open_note=${open_line#*$'\t'}
+      open_note=${open_note#*$'\t'}
+      [ "$open_note" = "$note" ] || continue
+      printf 'resolved [key=%s]: pending-reply-resolved: task=%s pending-reply-id=%s via=%s\n' \
+        "$key" "$(fm_pending_reply_get "$rec" task_id)" "$corr" \
+        "$(fm_pending_reply_get "$rec" resolved_via)" \
+        >> "$parent_status" 2>/dev/null || return 1
+      break
+    done <<EOF
+$(status_open_decisions "$parent_status")
+EOF
+  fi
+  now=$(fm_pending_reply_now)
+  fm_pending_reply_set "$rec" escalation_closed_epoch "$now"
+}
+
 # Escalate once after a missed recovery report or failed delivery outcome.
 # Retains the durable unresolved record. Never loops.
 fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
+  # Serialized per correlation so a resolution and an escalation cannot interleave.
+  # bin/fm-wake-lib.sh owns the lock primitives but assigns its own globals when
+  # sourced, so they are declared local here: that contains them to this call
+  # instead of leaking into every script that sources this library, without the
+  # subshell that would make every later use of them read as a lost write.
+  # The lock is released explicitly rather than from an EXIT trap, because a trap
+  # in a plain function would clobber the caller's own.
+  local state=$1 corr=$2 lock rc=0
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  STATE=$state
+  lock="$state/.pending-reply-$corr.lock"
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$lock" || return 1
+  _fm_pending_reply_maybe_escalate_locked "$@" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
+_fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   local state=$1 corr=$2
-  local rec phase completed now task_id summary payload parent_status outcome
+  local rec phase completed now payload parent_status line kind
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
@@ -808,28 +981,21 @@ fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
     *) return 1 ;;
   esac
   # Resolve wins if a late report arrived between completion and this call.
-  if fm_pending_reply_try_resolve "$state" "$corr"; then
+  if _fm_pending_reply_try_resolve_locked "$state" "$corr"; then
     return 0
   fi
-  task_id=$(fm_pending_reply_get "$rec" task_id)
-  summary=$(fm_pending_reply_get "$rec" request_summary)
   parent_status=$(fm_pending_reply_get "$rec" parent_status)
-  # Use pending-reply-id= (not corr=) so this parent-written line cannot be
-  # mistaken for a secondmate acknowledgement by fm_pending_reply_line_resolves.
-  outcome=$(fm_pending_reply_get "$rec" recovery_delivery_outcome)
   case "$phase" in
-    delivery_unknown)
-      payload="pending-reply-delivery-unknown: task=${task_id} pending-reply-id=${corr} request=${summary}"
-      ;;
-    recovery_failed|recovery_unknown)
-      payload="pending-reply-recovery-delivery-${outcome}: task=${task_id} pending-reply-id=${corr} request=${summary}"
-      ;;
-    *) payload="pending-reply-missed: task=${task_id} pending-reply-id=${corr} request=${summary}" ;;
+    delivery_unknown) kind=delivery-unknown ;;
+    recovery_failed|recovery_unknown) kind=recovery-delivery ;;
+    *) kind=missed ;;
   esac
+  payload=$(fm_pending_reply_escalation_payload "$rec" "$kind") || return 1
   [ -n "$parent_status" ] || return 1
   mkdir -p "$(dirname "$parent_status")" 2>/dev/null || return 1
-  if ! grep -Fqx "blocked: $payload" "$parent_status" 2>/dev/null; then
-    printf 'blocked: %s\n' "$payload" >> "$parent_status" 2>/dev/null || return 1
+  line="blocked [key=$(fm_pending_reply_escalation_key "$corr")]: $payload"
+  if ! grep -Fqx "$line" "$parent_status" 2>/dev/null; then
+    printf '%s\n' "$line" >> "$parent_status" 2>/dev/null || return 1
   fi
   now=$(fm_pending_reply_now)
   fm_pending_reply_set "$rec" escalated_epoch "$now" || return 1
@@ -969,7 +1135,12 @@ fm_pending_reply_tick() {  # <state-dir>
     [ -n "$corr" ] || corr=$(basename "$rec")
     task_id=$(fm_pending_reply_get "$rec" task_id)
     phase=$(fm_pending_reply_get "$rec" phase)
-    [ "$phase" != resolved ] || continue
+    if [ "$phase" = resolved ]; then
+      # Cheap no-op unless an escalation for this record is still open; this is
+      # the retry that makes the close converge after a transient write failure.
+      fm_pending_reply_close_escalation "$state" "$corr" || true
+      continue
+    fi
     fm_pending_reply_reconcile_delivery "$state" "$corr" || true
     phase=$(fm_pending_reply_get "$rec" phase)
     delivered=$(fm_pending_reply_get "$rec" delivered_epoch)

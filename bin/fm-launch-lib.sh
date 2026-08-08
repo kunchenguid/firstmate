@@ -246,6 +246,28 @@ launch_template() {
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
+    # muse (Muse Code): a positional prompt starts the supervised interactive
+    # session. --yolo is the single flag that makes a crewmate pane viable: muse
+    # ships approval prompts AND a filesystem/network sandbox ON by default
+    # (--sandbox-network defaults to proxy-only, which refuses outright without a
+    # managed proxy), and it gates a fresh workspace behind a trust dialog. One
+    # --yolo disables approval, disables the sandbox so git and network work, and
+    # trusts the workspace for the run, so no dialog appears on the fresh
+    # per-task worktree (verified, muse 0.1.0-R708.1).
+    # MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on is the privacy control:
+    # muse otherwise loads the OPERATOR's foreign personal rules from ~/.claude
+    # into every run and ships them to Meta-hosted inference, even under an
+    # isolated XDG_CONFIG_HOME. exec mode's --no-foreign-personal-context flag is
+    # NOT accepted by the interactive TUI (it exits with "unexpected argument"),
+    # so this env var is the only control that reaches a pane worker. Verified to
+    # drop the foreign rules_file context block while KEEPING the project's own
+    # AGENTS.md rules, which the crewmate contract depends on.
+    # muse's turn-end signal rides neither the launch command nor a hook: its
+    # plugin engine is off in the default build, so firstmate folds muse's own
+    # session event log instead (bin/fm-busy-lib.sh), bound by the sidecar
+    # bin/fm-spawn.sh writes. Nothing to place in the template for it.
+    # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
+    muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -254,7 +276,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -291,6 +313,20 @@ effort_flag_for_harness() {
       # its --thinking flag.
       case "$effort" in
         low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
+    muse)
+      # muse 0.1.0-R708.1 --reasoning-effort accepts none|minimal|low|medium|
+      # high|xhigh|ultra and defaults to high, so low..xhigh map straight across.
+      # ultra is muse's max-CLASS level, so firstmate's max maps onto it - but
+      # only ever as an EXPLICIT captain choice, never as a fallback, because
+      # AGENTS.md section 4 forbids selecting max without captain preference and
+      # the omitted effort here leaves muse on its own high default. muse's extra
+      # none/minimal levels sit below firstmate's shared vocabulary and are
+      # deliberately unreachable rather than remapped onto low.
+      case "$effort" in
+        low|medium|high|xhigh) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
+        max) printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
       esac
       ;;
     # opencode's interactive `opencode --prompt` launch has a verified --model

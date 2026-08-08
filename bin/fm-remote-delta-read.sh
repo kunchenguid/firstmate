@@ -9,6 +9,12 @@
 # available, returns at most 65536 payload bytes, and never truncates or consumes
 # the source. A shortened or changed prefix returns a structured continuity-break
 # result instead of silently rebasing the cursor.
+#
+# Exit 75 means the wait window closed with no complete line. SIGTERM exits the
+# same way after cleanup. The remote job worker preempts this read-only poll to
+# unblock any queued command other than another reply long-poll. The
+# bin/fm-remote-job-lib.sh header owns that contract, and a preempted read is
+# indistinguishable from an empty window.
 set -eu
 
 FM_HOME=${FM_HOME:?FM_HOME is required}
@@ -120,6 +126,7 @@ case "$MAX_BYTES" in ''|*[!0-9]*|0) die "FM_REMOTE_DELTA_MAX_BYTES must be a pos
 LOG=$(resolve_log "$REL")
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-remote-delta.XXXXXX") || die "cannot create delta staging directory"
 trap 'rm -rf -- "$TMP"' EXIT
+trap 'exit 75' TERM
 : > "$TMP/empty"
 EMPTY_HASH=$(sha256_file "$TMP/empty")
 START=$(date +%s)

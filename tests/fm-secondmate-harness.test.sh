@@ -19,9 +19,10 @@
 #      down into each secondmate home's config/, so the secondmate's OWN crewmates,
 #      dispatch profiles, backlog backend, runtime-backend default, Herdr
 #      presentation choice, startup-memory budget, and trace context inherit the
-#      primary's settings. config/herdr-presentation-spaces is default-ON, so an
-#      absent primary file and an absent destination file both mean on and the
-#      generic absence mirror already converges that item correctly.
+#      primary's settings. For config/herdr-presentation-spaces, an absent
+#      primary file and an absent destination file both mean the same
+#      unconfigured default, so the generic absence mirror converges that item
+#      without deciding its release-dependent floor.
 #      It is primary-authoritative
 #      (re-pushed at secondmate spawn, on the bootstrap secondmate sweep, and by
 #      config push).
@@ -854,9 +855,13 @@ test_spawned_secondmate_uses_its_harness_supervision_model() {
     fm_write_meta "$sm/state/task.meta" "window=firstmate:fm-task" "kind=ship"
     touch "$sm/state/.last-watcher-beat"
     fakebin="$w/tmux-sm/fakebin"
+    # Point the guard at the fixture home, not at whatever checkout this suite
+    # happens to be running from. The guard also reports a tangled primary
+    # checkout, so without this the branch a contributor is working on decides
+    # whether this assertion passes.
     cat > "$fakebin/$harness" <<SH
 #!/usr/bin/env bash
-"$ROOT/bin/fm-guard.sh"
+FM_ROOT_OVERRIDE="$sm" "$ROOT/bin/fm-guard.sh"
 SH
     chmod +x "$fakebin/$harness"
     launch=$(cat "$launchlog")
@@ -985,7 +990,8 @@ make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin="$dir/fakebin"
   mkdir -p "$fakebin"
-  fm_fake_exit0 "$fakebin" node chrome-devtools-axi lavish-axi
+  fm_fake_exit0 "$fakebin" node chrome-devtools-axi
+  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
@@ -1055,7 +1061,7 @@ SH
   cat > "$fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
-  "--version ") printf '%s\n' '0.2.2' ;;
+  "--version ") printf '%s\n' '0.2.4' ;;
   "update --help") printf '%s\n' 'usage: tasks-axi update <id> [flags]' '  --archive-body' ;;
   "mv --help") printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
 esac
@@ -1065,7 +1071,7 @@ SH
   cat > "$fakebin/quota-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
-  printf '%s\n' '0.1.16'
+  printf '%s\n' '0.1.17'
   exit 0
 fi
 exit 0
@@ -1357,14 +1363,20 @@ test_backend_inheritance_present_and_absent() {
   pass "B12b backend inheritance: present values and primary absence converge exactly"
 }
 
-# config/herdr-presentation-spaces is default-ON, so this item's convergence is
-# asserted through the verdict the spawn gate actually reads in the destination
-# home, not through file presence alone: mirroring the primary's absence must
-# converge a secondmate to the same default rather than turning its projection off.
+# config/herdr-presentation-spaces has an unconfigured default, so this item's
+# convergence is asserted through the preference the spawn gate actually reads
+# in the destination home, not through file presence alone: mirroring the primary's
+# absence must converge a secondmate to the same unconfigured default rather
+# than turning its projection off. The Herdr version floor that decides what
+# that default resolves to is a property of the running release, not of
+# inheritance, so it is pinned in tests/fm-backend-herdr.test.sh instead.
 sm_presentation_verdict() {  # <config-dir> -> on|off
   bash -c '
     . "$0/bin/backends/herdr.sh"
-    if fm_backend_herdr_presentation_enabled "$1"; then printf "on\n"; else printf "off\n"; fi
+    case "$(fm_backend_herdr_presentation_preference "$1")" in
+      off) printf "off\n" ;;
+      *) printf "on\n" ;;
+    esac
   ' "$ROOT" "$1" 2>/dev/null
 }
 

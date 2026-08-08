@@ -4,6 +4,7 @@
 # Usage:
 #   fm-procevent-remote-reply.sh arm <secondmate-id>
 #   fm-procevent-remote-reply.sh handle <secondmate-id> <sequence> <result-file>
+#   fm-procevent-remote-reply.sh autohandle <source-id> <sequence> <result-file>
 #   fm-procevent-remote-reply.sh classify <result-file>
 #   fm-procevent-remote-reply.sh terminal <result-file>
 #   fm-procevent-remote-reply.sh source-id <secondmate-id>
@@ -16,10 +17,36 @@
 # ingests it, acknowledges the captured generation, then registers the next
 # cursor-anchored source. A continuity break is escalated and not re-armed.
 #
-# Ingest accepts only bounded, printable status lines with an allowed lifecycle
-# verb and corr=<16hex>. Exact lines are appended at most once to the parent's
-# state/<id>.status. A data/*.md pointer is fetched through the path-confined
-# remote file reader and rewritten to its local private copy before append.
+# `autohandle` is the runner's own entry into that same `handle`: it takes the
+# canonical source id instead of the secondmate id and is called by the runner
+# right after capture, so applying a reply never depends on a handler
+# remembering to run it. Ingesting a delta carries no judgement, so it belongs
+# in code. The published wake still reaches firstmate, and running `handle`
+# again on that wake is idempotent.
+#
+# This channel is a status-stream MIRROR, not a correlated-reply channel. A local
+# secondmate appends its whole status stream straight into the parent's
+# state/<id>.status, and every parent consumer - the open-decision fold, wake
+# classification, crew-state reconciliation, and pending-reply resolution - reads
+# that one stream. A remote secondmate must present the same model, so ingest
+# mirrors every content-bearing line at most once, omits blank separators, and
+# leaves every semantic judgement to those same shared consumers. Correlation is
+# a per-line property that fm-pending-reply-lib.sh consumes; it is never a gate
+# on the stream. Gating on it here made a remote mate's own progress lines and
+# newly raised decisions - which carry no corr= by contract - unrepresentable,
+# and rejecting one line failed the whole delta, so the cursor could never
+# advance past it. No single line can stop or wedge the stream.
+#
+# What remains here is only what crossing a machine boundary genuinely adds:
+#   - cursor continuity and identity (offset plus prefix digest)
+#   - data/*.md pointers fetched through the path-confined remote file reader and
+#     rewritten to their local copies, because the parent cannot read the remote
+#     filesystem
+#   - at-most-once append, because a captured generation can be replayed
+#   - control-byte normalization, so content-bearing bytes from another machine
+#     cannot make the parent's status file unsafe to read
+# Line framing and size bounding belong to bin/fm-remote-delta-read.sh, which
+# delivers only whole lines and breaks continuity on an over-long one.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,8 +57,12 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CURSOR_DIR="$STATE/remote-replies"
 REMOTE_LOG='state/parent-replies.status'
 WAIT_SECONDS=${FM_REMOTE_REPLY_WAIT_SECONDS:-55}
-MAX_LINE_BYTES=${FM_REMOTE_REPLY_MAX_LINE_BYTES:-2048}
 MAX_DOC_BYTES=${FM_REMOTE_REPLY_MAX_DOC_BYTES:-262144}
+# fm-on.sh returns ssh's status unchanged, so 255 alone means unavailable
+# transport or unknown remote completion. Any other nonzero status is the remote
+# reader's own refusal and will not change on a retry.
+SSH_UNAVAILABLE=255
+DOCUMENT_LOCAL_FAILURE=2
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -41,7 +72,7 @@ MAX_DOC_BYTES=${FM_REMOTE_REPLY_MAX_DOC_BYTES:-262144}
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 sha256_file() {
   if command -v shasum >/dev/null 2>&1; then
@@ -142,10 +173,14 @@ write_ingest_receipt() { # <id> <sequence> <result>
 }
 
 result_field() { # <result> <field>
-  local count
-  count=$(grep -c "^$2=" "$1" 2>/dev/null || true)
-  [ "$count" -eq 1 ] || return 1
-  grep "^$2=" "$1" | cut -d= -f2-
+  LC_ALL=C awk -v prefix="$2=" '
+    $0 == "" { exit }
+    index($0, prefix) == 1 { count++; value = substr($0, length(prefix) + 1) }
+    END {
+      if (count != 1) exit 1
+      print value
+    }
+  ' "$1"
 }
 
 classify_result() {
@@ -207,41 +242,57 @@ safe_doc_path() {
   return 0
 }
 
+# Fetch one referenced remote document. Returns 0 on success, 1 when the remote
+# reader refused the path or size, DOCUMENT_LOCAL_FAILURE when local storage
+# failed, and SSH_UNAVAILABLE when transport completion is unknown.
 fetch_document() { # <id> <remote-relative> <result-var>
-  local id=$1 rel=$2 result_var=$3 base destination parent parent_real tmp local_rel
+  local id=$1 rel=$2 result_var=$3 base destination parent parent_real tmp local_rel rc=0
   safe_doc_path "$rel" || return 1
   base="$DATA/remote-secondmates/$id"
   destination="$base/$rel"
   parent=$(dirname "$destination")
-  mkdir -p "$parent" || return 1
-  [ ! -L "$base" ] && [ ! -L "$parent" ] || return 1
-  parent_real=$(CDPATH='' cd -- "$parent" 2>/dev/null && pwd -P) || return 1
-  case "$parent_real" in "$base"|"$base"/*) ;; *) return 1 ;; esac
-  [ ! -L "$destination" ] || return 1
-  tmp=$(umask 077; mktemp "$parent/.remote-doc.XXXXXX") || return 1
-  if ! "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh get "$rel" "$MAX_DOC_BYTES" < /dev/null > "$tmp"; then
+  mkdir -p "$parent" || return "$DOCUMENT_LOCAL_FAILURE"
+  [ ! -L "$base" ] && [ ! -L "$parent" ] || return "$DOCUMENT_LOCAL_FAILURE"
+  parent_real=$(CDPATH='' cd -- "$parent" 2>/dev/null && pwd -P) || return "$DOCUMENT_LOCAL_FAILURE"
+  case "$parent_real" in "$base"|"$base"/*) ;; *) return "$DOCUMENT_LOCAL_FAILURE" ;; esac
+  [ ! -L "$destination" ] || return "$DOCUMENT_LOCAL_FAILURE"
+  tmp=$(umask 077; mktemp "$parent/.remote-doc.XXXXXX") || return "$DOCUMENT_LOCAL_FAILURE"
+  "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh get "$rel" "$MAX_DOC_BYTES" < /dev/null > "$tmp" || rc=$?
+  if [ "$rc" -ne 0 ]; then
     rm -f -- "$tmp"
+    [ "$rc" -ne "$SSH_UNAVAILABLE" ] || return "$SSH_UNAVAILABLE"
     return 1
   fi
-  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
-  mv -f -- "$tmp" "$destination" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return "$DOCUMENT_LOCAL_FAILURE"; }
+  mv -f -- "$tmp" "$destination" || { rm -f -- "$tmp"; return "$DOCUMENT_LOCAL_FAILURE"; }
   local_rel="data/remote-secondmates/$id/$rel"
   printf -v "$result_var" '%s' "$local_rel"
 }
 
-line_valid() { # <line>
-  local line=$1 bytes
-  [ -n "$line" ] || return 1
-  bytes=$(printf '%s' "$line" | LC_ALL=C wc -c | tr -d ' ')
-  [ "$bytes" -le "$MAX_LINE_BYTES" ] || return 1
-  [ -z "$(printf '%s' "$line" | LC_ALL=C tr -d '\11\40-\176')" ] || return 1
-  printf '%s' "$line" | grep -Eq '^(working|needs-decision|blocked|paused|done|failed|resolved)([[:space:]]+\[[^]]+\])?:' || return 1
-  printf '%s' "$line" | grep -Eq 'corr=[A-Fa-f0-9]{16}'
+# The one adaptation a machine boundary forces on the mirrored bytes: NUL and
+# every other C0 control except tab and newline, plus DEL, become '?'. Printable
+# ASCII and every high byte pass through untouched, so ordinary UTF-8 notes
+# mirror exactly as a local secondmate would have written them. Newlines remain
+# framing rather than payload bytes, and blank separators are not carried into
+# the parent status stream.
+normalize_payload() { # <source> <destination>
+  LC_ALL=C tr '\000-\010\013-\037\177' '?' < "$1" > "$2"
+}
+
+# The one place a line enters the parent status stream. A captured generation can
+# be replayed, so every append - a mirrored line or an escalation this adapter
+# raises itself - is at most once on exact bytes.
+# Returns 0 appended, 1 already present, 2 the write itself failed.
+append_status_once() { # <status-file> <line>
+  grep -Fqx -- "$2" "$1" 2>/dev/null && return 1
+  printf '%s\n' "$2" >> "$1" || return 2
+  return 0
 }
 
 cmd_ingest() {
-  local id=${1:-} result=${2:-} seq=${3:-} class blank payload schema status path from to from_hash to_hash payload_hash payload_bytes reason
+  local id=${1:-} result=${2:-} seq=${3:-} class blank payload normalized_payload schema status path from to from_hash to_hash payload_hash payload_bytes reason
   local actual_bytes actual_hash line doc local_doc rewritten appended=0 cursor_already=0 lock status_file tmp
+  local fetch_rc append_rc undelivered=''
   validate_id "$id"
   [ -f "$result" ] && [ ! -L "$result" ] || die "result file is unavailable or unsafe: $result"
   class=$(classify_result "$result")
@@ -262,7 +313,7 @@ cmd_ingest() {
     case "$hash" in *[!A-Fa-f0-9]*|'') die "result carries an invalid SHA-256 value" ;; esac
     [ "${#hash}" -eq 64 ] || die "result carries an invalid SHA-256 length"
   done
-  blank=$(grep -n -m 1 '^$' "$result" | cut -d: -f1)
+  blank=$(LC_ALL=C awk '$0 == "" { print NR; exit }' "$result")
   case "$blank" in ''|*[!0-9]*) die "result has no payload boundary" ;; esac
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-remote-reply-ingest.XXXXXX") || die "cannot create ingest staging directory"
   trap 'rm -rf -- "$tmp"' EXIT
@@ -272,6 +323,8 @@ cmd_ingest() {
   actual_hash=$(sha256_file "$payload")
   [ "$actual_bytes" -eq "$payload_bytes" ] && [ "$actual_hash" = "$payload_hash" ] \
     || die "result payload bytes do not match its committed digest"
+  normalized_payload="$tmp/normalized-payload"
+  normalize_payload "$payload" "$normalized_payload" || die "cannot normalize remote reply payload"
   status_file="$STATE/$id.status"
   mkdir -p "$STATE" || die "cannot create parent state directory"
   [ ! -L "$status_file" ] || die "parent status log is a symlink"
@@ -285,31 +338,50 @@ cmd_ingest() {
   fi
   if [ "$class" = continuity-broken ]; then
     line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason)"
-    if ! grep -Fqx -- "$line" "$status_file" 2>/dev/null; then
-      printf '%s\n' "$line" >> "$status_file" || { fm_lock_release "$lock"; die "cannot append continuity escalation"; }
-    fi
+    append_rc=0
+    append_status_once "$status_file" "$line" || append_rc=$?
+    [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append continuity escalation"; }
     fm_lock_release "$lock"
     printf 'continuity-broken: %s (%s)\n' "$id" "$reason"
     return 3
   fi
   [ "$status" = delta ] && [ "$payload_bytes" -gt 0 ] || { fm_lock_release "$lock"; die "delta result has no payload"; }
   while IFS= read -r line || [ -n "$line" ]; do
-    line_valid "$line" || { fm_lock_release "$lock"; die "delta contains an invalid or uncorrelated status line"; }
+    [ -n "$line" ] || continue
     rewritten=$line
     while IFS= read -r doc; do
       [ -n "$doc" ] || continue
-      fetch_document "$id" "$doc" local_doc || { fm_lock_release "$lock"; die "could not fetch referenced remote document: $doc"; }
+      fetch_rc=0
+      fetch_document "$id" "$doc" local_doc || fetch_rc=$?
+      if [ "$fetch_rc" -eq 1 ]; then
+        # The remote reader refused this document and always will. Mirror the
+        # mate's line with its own pointer intact rather than inventing a local
+        # path or stalling the stream, and name the gap once for this delta.
+        undelivered="${undelivered}${undelivered:+, }$doc"
+        continue
+      fi
+      [ "$fetch_rc" -ne "$SSH_UNAVAILABLE" ] \
+        || { fm_lock_release "$lock"; die "remote transport was unavailable while fetching $doc"; }
+      [ "$fetch_rc" -eq 0 ] \
+        || { fm_lock_release "$lock"; die "could not store referenced remote document: $doc"; }
       rewritten=${rewritten//"$doc"/"$local_doc"}
     done < <(printf '%s\n' "$line" | grep -Eo 'data/[A-Za-z0-9._/-]+\.md' | awk '!seen[$0]++')
-    if ! grep -Fqx -- "$rewritten" "$status_file" 2>/dev/null; then
-      printf '%s\n' "$rewritten" >> "$status_file" || { fm_lock_release "$lock"; die "cannot append remote reply"; }
-      appended=$((appended + 1))
-    fi
-  done < "$payload"
+    append_rc=0
+    append_status_once "$status_file" "$rewritten" || append_rc=$?
+    [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append remote reply"; }
+    [ "$append_rc" -ne 0 ] || appended=$((appended + 1))
+  done < "$normalized_payload"
+  if [ -n "$undelivered" ]; then
+    line="blocked [key=remote-reply-document-$id]: remote documents did not transfer for $id ($undelivered)"
+    append_rc=0
+    append_status_once "$status_file" "$line" || append_rc=$?
+    [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append document escalation"; }
+    [ "$append_rc" -ne 0 ] || appended=$((appended + 1))
+  fi
   while IFS= read -r corr; do
     [ -n "$corr" ] || continue
     fm_pending_reply_try_resolve "$STATE" "$corr" "$status_file" >/dev/null 2>&1 || true
-  done < <(grep -Eo 'corr=[A-Fa-f0-9]{16}' "$payload" | cut -d= -f2- | tr 'A-F' 'a-f' | awk '!seen[$0]++')
+  done < <(grep -Eo 'corr=[A-Fa-f0-9]{16}' "$normalized_payload" | cut -d= -f2- | tr 'A-F' 'a-f' | awk '!seen[$0]++')
   if [ -n "$seq" ]; then
     write_ingest_receipt "$id" "$seq" "$result" \
       || { fm_lock_release "$lock"; die "cannot commit remote reply ingestion receipt"; }
@@ -343,6 +415,22 @@ cmd_handle_locked() {
     cmd_arm_locked "$id" || return 1
   fi
   "$SCRIPT_DIR/fm-procevent.sh" handled "$sid" "$seq" || return 1
+  return "$rc"
+}
+
+# The runner's entry into cmd_handle, keyed by canonical source id. An escalated
+# continuity break is fully handled too, so its distinct exit 3 is a success
+# here; only a genuine handling failure leaves the result for the handler.
+cmd_autohandle() {
+  local sid=${1:-} seq=${2:-} result=${3:-} id rc=0
+  case "$sid" in
+    remote-reply-?*) id=${sid#remote-reply-} ;;
+    *) die "not a remote reply source: $sid" ;;
+  esac
+  validate_id "$id"
+  [ "$(source_id "$id")" = "$sid" ] || die "source id does not identify one secondmate: $sid"
+  cmd_handle "$id" "$seq" "$result" || rc=$?
+  [ "$rc" -eq 3 ] && rc=0
   return "$rc"
 }
 
@@ -445,6 +533,7 @@ case "${1:-}" in
   arm-locked) shift; [ "$#" -eq 1 ] || usage; require_parent_lifecycle_lock "$1"; cmd_arm_locked "$@" ;;
   source) shift; [ "$#" -eq 1 ] || usage; cmd_source "$@" ;;
   handle) shift; [ "$#" -eq 3 ] || usage; cmd_handle "$@" ;;
+  autohandle) shift; [ "$#" -eq 3 ] || usage; cmd_autohandle "$@" ;;
   ingest) shift; [ "$#" -eq 2 ] || usage; cmd_ingest "$@" ;;
   classify) shift; [ "$#" -eq 1 ] || usage; classify_result "$1" ;;
   terminal) shift; [ "$#" -eq 1 ] || usage; [ -s "$1" ] ;;

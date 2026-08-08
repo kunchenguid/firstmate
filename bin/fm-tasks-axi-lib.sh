@@ -6,11 +6,11 @@
 # Compatible means tasks-axi --version reports FM_TASKS_AXI_MIN or newer,
 # `tasks-axi update --help` exposes --archive-body for recoverable note rewrites,
 # and `tasks-axi mv --help` exposes [<id>...] for atomic multi-ID moves required
-# by secondmate handoffs (introduced in tasks-axi 0.2.2).
-# 0.2.2 is the floor because multi-ID mv is the true minimum firstmate uses;
-# earlier builds could pass a 0.1.1 version check and still fail handoff.
-# Feature probes stay as defense in depth for stripped or forked builds that
-# advertise a current version without those flags.
+# by secondmate handoffs.
+# FM_TASKS_AXI_MIN follows the axi-family floor policy owned beside the floor
+# constants in bin/fm-bootstrap.sh.
+# The feature probes are a separate concern and stay as defense in depth for
+# stripped or forked builds that advertise a current version without those flags.
 # `config/backlog-backend=manual` opts out of tasks-axi for routine firstmate
 # backlog mutations, but validated secondmate handoffs always use `tasks-axi mv`.
 # Absent or any other value keeps the default tasks-axi backend path, falling
@@ -18,8 +18,30 @@
 #
 # This file is the single owner of FM_TASKS_AXI_MIN. bin/fm-bootstrap.sh turns a
 # failing check into the operator-facing MISSING diagnostic.
+#
+# COMPATIBILITY VERDICT REUSE. fm_tasks_axi_compatible costs three tasks-axi
+# subprocesses, and one session start needs the same verdict twice: once in
+# bin/fm-session-start.sh's backlog listing and once in the bin/fm-bootstrap.sh
+# child it runs. Two reuse layers collapse that to a single probe:
+#   - Within a process the first probe's answer is memoised.
+#   - Across ONE process hop, a parent that already holds the verdict passes it
+#     in FM_TASKS_AXI_COMPATIBLE=0|1. Sourcing this file CONSUMES that variable
+#     (it is unset from the environment and kept only as a private shell
+#     variable), so the verdict reaches the child that needs it and never leaks
+#     onward into a spawned agent's environment, where it could outlive a
+#     tasks-axi upgrade. Any value other than exactly 0 or 1 is ignored and the
+#     probe runs normally.
+# Both layers are bounded by process lifetime, so a tasks-axi install or upgrade
+# is picked up by the next process rather than being cached to disk.
 
-FM_TASKS_AXI_MIN=0.2.2
+FM_TASKS_AXI_MIN=0.2.4
+
+FM_TASKS_AXI_COMPATIBLE_MEMO=${FM_TASKS_AXI_COMPATIBLE:-}
+unset FM_TASKS_AXI_COMPATIBLE
+case "$FM_TASKS_AXI_COMPATIBLE_MEMO" in
+  0|1) ;;
+  *) FM_TASKS_AXI_COMPATIBLE_MEMO= ;;
+esac
 
 fm_tasks_axi_version_parts() {
   local output
@@ -31,6 +53,19 @@ fm_tasks_axi_version_parts() {
 }
 
 fm_tasks_axi_compatible() {
+  case "$FM_TASKS_AXI_COMPATIBLE_MEMO" in
+    1) return 0 ;;
+    0) return 1 ;;
+  esac
+  if fm_tasks_axi_compatible_probe; then
+    FM_TASKS_AXI_COMPATIBLE_MEMO=1
+    return 0
+  fi
+  FM_TASKS_AXI_COMPATIBLE_MEMO=0
+  return 1
+}
+
+fm_tasks_axi_compatible_probe() {
   local parts major minor patch extra
   local min_major min_minor min_patch min_extra
   parts=$(fm_tasks_axi_version_parts) || return 1

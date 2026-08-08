@@ -130,6 +130,16 @@
 #     roots are unique per task and never
 #     shared, so this can never reach another task's or the primary's
 #     processes. Idempotent: nothing left to find is a silent no-op.
+#   Fix 3 - sweep abandoned remote job workers. A remote job worker started
+#     from a worktree's own bin/ outlives that worktree's removal without
+#     being reachable by Fix 2, because its working directory is wherever it
+#     was launched rather than the task worktree (observed 2026-08-07: 29
+#     workers at ppid 1, 1-2 days old, each still polling and appending to a
+#     log in a pruned no-mistakes gate worktree). bin/fm-remote-job-reap-orphans.sh
+#     owns that sweep and its safety rule; it never touches a worker whose code
+#     root still exists, so the account's healthy LaunchAgent worker and every
+#     live remote secondmate worker are out of scope. Best effort: a sweep
+#     failure never blocks this teardown.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -140,6 +150,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SECONDMATE_REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
+SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -158,6 +169,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-admission-lib.sh"
 # shellcheck source=bin/fm-landed-lib.sh
 . "$SCRIPT_DIR/fm-landed-lib.sh"
+# shellcheck source=bin/fm-secondmate-parent-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
@@ -348,7 +361,8 @@ remote_secondmate_teardown() {
   tmp="$SECONDMATE_REG.tmp.$$"
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
-  rm -f -- "$STATE/$ID.status" "$STATE/$ID.meta" "$STATE/$ID.turn-ended" "$STATE/$ID.childcpu"
+  rm -f -- "$STATE/$ID.status" "$STATE/$ID.meta" "$STATE/$ID.turn-ended" "$STATE/$ID.childcpu" \
+    "$STATE/.$ID.open-decisions-cursor"
   printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
   return 0
 }
@@ -417,12 +431,16 @@ PUBLIC_FOLLOWUP_WORK_HOME=main
 PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=0
 PUBLIC_FOLLOWUP_PARENT_RELAY_ACTIVE=0
 PUBLIC_FOLLOWUP_RELAY_ACTIVE=0
+public_followup_canonical_home() {
+  local home=$1
+  case "$home" in /*) ;; *) return 1 ;; esac
+  CDPATH='' cd -- "$home" 2>/dev/null && pwd -P
+}
 public_followup_resolve_primary_home() {
   local parent=$1 child=$2 id=$3 parent_meta registry meta_home
   fm_pf_home_id_valid "secondmate:$id" || return 1
-  case "$parent" in /*) ;; *) return 1 ;; esac
-  parent=$(CDPATH='' cd -- "$parent" 2>/dev/null && pwd -P) || return 1
-  child=$(CDPATH='' cd -- "$child" 2>/dev/null && pwd -P) || return 1
+  parent=$(public_followup_canonical_home "$parent") || return 1
+  child=$(public_followup_canonical_home "$child") || return 1
   [ "$parent" != "$child" ] || return 1
   parent_meta="$parent/state/$id.meta"
   [ -f "$parent_meta" ] && [ ! -L "$parent_meta" ] || return 1
@@ -436,22 +454,64 @@ public_followup_resolve_primary_home() {
 }
 if [ -f "$FM_HOME/$SUB_HOME_MARKER" ]; then
   SECOND_MATE_ID=$(sed -n '1p' "$FM_HOME/$SUB_HOME_MARKER")
-  # A marked child only enters the primary-binding path when the authoritative
-  # parent relay is active. A child that has not opted into the relay must
-  # retain the old teardown path, even without a durable parent registry.
-  if [ -n "${FM_PUBLIC_FOLLOWUP_PRIMARY_HOME:-}" ]; then
-    if fm_pf_relay_active "$FM_PUBLIC_FOLLOWUP_PRIMARY_HOME"; then
-      PUBLIC_FOLLOWUP_PARENT_RELAY_ACTIVE=1
+  # The durable parent record (written once at seeding, next to the identity
+  # marker) names this home's route to its parent: "local" when they share a
+  # filesystem, "remote" when the parent lives on another machine. Absent for
+  # a home seeded before this record existed, which preserves today's exact
+  # env-var-only behavior for that legacy home rather than guessing its route.
+  PARENT_ROUTE_FILE="$FM_HOME/$SUB_HOME_PARENT_MARKER"
+  PARENT_ROUTE_RECORD=absent
+  PARENT_ROUTE=
+  PARENT_ROUTE_HOME=
+  if [ -e "$PARENT_ROUTE_FILE" ] || [ -L "$PARENT_ROUTE_FILE" ]; then
+    PARENT_ROUTE_RECORD=invalid
+    if fm_secondmate_parent_record_parse "$PARENT_ROUTE_FILE"; then
+      PARENT_ROUTE=$FM_SECONDMATE_PARENT_ROUTE
+      PARENT_ROUTE_HOME=$FM_SECONDMATE_PARENT_HOME
+      PARENT_ROUTE_RECORD=valid
     fi
-  elif fm_pf_relay_active "$FM_HOME"; then
-    PUBLIC_FOLLOWUP_PARENT_RELAY_ACTIVE=1
   fi
-  if [ "$PUBLIC_FOLLOWUP_PARENT_RELAY_ACTIVE" = 1 ]; then
+  if [ "$PARENT_ROUTE_RECORD" = invalid ]; then
     PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=1
-    if fm_pf_home_id_valid "secondmate:$SECOND_MATE_ID"; then
+  elif [ "$PARENT_ROUTE" = remote ]; then
+    # The entire promised-public-reply subsystem is same-filesystem by
+    # construction (bin/fm-public-followup-emit.sh header): a parent recorded
+    # on another machine can never hold a delegated promise for this child, so
+    # the delegated-parent path is out of scope and never refuses cleanup on
+    # its own. A token committed directly to THIS home's own .env is still a
+    # real, same-filesystem signal, so it is still checked - but read only
+    # from the file, never from the process environment, so an unrelated
+    # export in the remote host's own login shell cannot trigger it the way
+    # fm_pf_relay_active's environment-wins rule would.
+    if [ -f "$FM_HOME/.env" ]; then
+      HOME_ENV_TOKEN=$(fmx_env_get FMX_PAIRING_TOKEN "$FM_HOME/.env")
+      [ -z "$HOME_ENV_TOKEN" ] || PUBLIC_FOLLOWUP_PARENT_RELAY_ACTIVE=1
+    fi
+    if [ "$PUBLIC_FOLLOWUP_PARENT_RELAY_ACTIVE" = 1 ]; then
+      PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=1
+    else
+      PUBLIC_FOLLOWUP_HOME=
+      PUBLIC_FOLLOWUP_STATE=
+    fi
+  elif [ "$PARENT_ROUTE" = local ]; then
+    PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=1
+    PRIMARY_HOME_CANDIDATE=${FM_PUBLIC_FOLLOWUP_PRIMARY_HOME:-$PARENT_ROUTE_HOME}
+    PARENT_BINDINGS_MATCH=1
+    if [ -n "${FM_PUBLIC_FOLLOWUP_PRIMARY_HOME:-}" ]; then
+      LIVE_PARENT_HOME=$(public_followup_canonical_home \
+        "$FM_PUBLIC_FOLLOWUP_PRIMARY_HOME") || PARENT_BINDINGS_MATCH=0
+      DURABLE_PARENT_HOME=$(public_followup_canonical_home \
+        "$PARENT_ROUTE_HOME") || PARENT_BINDINGS_MATCH=0
+      if [ "$PARENT_BINDINGS_MATCH" = 1 ] \
+        && [ "$LIVE_PARENT_HOME" != "$DURABLE_PARENT_HOME" ]; then
+        PARENT_BINDINGS_MATCH=0
+      fi
+    fi
+    if [ "$PARENT_BINDINGS_MATCH" = 1 ] \
+      && fm_pf_home_id_valid "secondmate:$SECOND_MATE_ID"; then
       PUBLIC_FOLLOWUP_WORK_HOME="secondmate:$SECOND_MATE_ID"
       if PUBLIC_FOLLOWUP_HOME=$(public_followup_resolve_primary_home \
-          "${FM_PUBLIC_FOLLOWUP_PRIMARY_HOME:-}" "$FM_HOME" "$SECOND_MATE_ID"); then
+          "$PRIMARY_HOME_CANDIDATE" "$FM_HOME" "$SECOND_MATE_ID"); then
         PUBLIC_FOLLOWUP_STATE="$PUBLIC_FOLLOWUP_HOME/state"
         PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=0
         if [ "$FORCE" != "--force" ] \
@@ -464,8 +524,37 @@ if [ -f "$FM_HOME/$SUB_HOME_MARKER" ]; then
       fi
     fi
   else
-    PUBLIC_FOLLOWUP_HOME=
-    PUBLIC_FOLLOWUP_STATE=
+    # A home seeded before the durable record existed retains the legacy
+    # launch-time binding behavior unchanged.
+    PRIMARY_HOME_CANDIDATE=${FM_PUBLIC_FOLLOWUP_PRIMARY_HOME:-}
+    if [ -n "$PRIMARY_HOME_CANDIDATE" ]; then
+      if fm_pf_relay_active "$PRIMARY_HOME_CANDIDATE"; then
+        PUBLIC_FOLLOWUP_PARENT_RELAY_ACTIVE=1
+      fi
+    elif fm_pf_relay_active "$FM_HOME"; then
+      PUBLIC_FOLLOWUP_PARENT_RELAY_ACTIVE=1
+    fi
+    if [ "$PUBLIC_FOLLOWUP_PARENT_RELAY_ACTIVE" = 1 ]; then
+      PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=1
+      if fm_pf_home_id_valid "secondmate:$SECOND_MATE_ID"; then
+        PUBLIC_FOLLOWUP_WORK_HOME="secondmate:$SECOND_MATE_ID"
+        if PUBLIC_FOLLOWUP_HOME=$(public_followup_resolve_primary_home \
+            "$PRIMARY_HOME_CANDIDATE" "$FM_HOME" "$SECOND_MATE_ID"); then
+          PUBLIC_FOLLOWUP_STATE="$PUBLIC_FOLLOWUP_HOME/state"
+          PUBLIC_FOLLOWUP_PARENT_UNRESOLVED=0
+          if [ "$FORCE" != "--force" ] \
+            && fm_pf_relay_active "$PUBLIC_FOLLOWUP_HOME"; then
+            PUBLIC_FOLLOWUP_RELAY_ACTIVE=1
+          fi
+        else
+          PUBLIC_FOLLOWUP_HOME=
+          PUBLIC_FOLLOWUP_STATE=
+        fi
+      fi
+    else
+      PUBLIC_FOLLOWUP_HOME=
+      PUBLIC_FOLLOWUP_STATE=
+    fi
   fi
 elif [ "$KIND" = secondmate ]; then
   PUBLIC_FOLLOWUP_WORK_HOME="secondmate:$ID"
@@ -2083,7 +2172,8 @@ cleanup_firstmate_home_children() {
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
     rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" \
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
-      "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token"
+      "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
+      "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current"
   done
 }
 
@@ -2206,6 +2296,10 @@ if [ "$KIND" != secondmate ]; then
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
 
+# Fix 3 (see script header): sweep remote job workers abandoned by an already
+# pruned code root. Best effort - a sweep failure never blocks this teardown.
+"$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
+
 # A Herdr close may reposition shared workspace order, so the whole
 # destructive sequence below (worktree return, pane close, record removal)
 # runs under the named-session presentation lock, acquired BEFORE anything is
@@ -2290,8 +2384,16 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   # The presentation lock was acquired before the worktree return above; a
   # contended lock already refused this teardown while everything was intact.
   if teardown_herdr_session_lock_held "$HERDR_PRESENTATION_SESSION"; then
+    # stderr is deliberately NOT discarded here. This is the highest-frequency
+    # projected-close call site, and the helper's only stderr output is a real
+    # warning - unverifiable workspace.move support, a refused focus-unsafe
+    # close, an unconfirmed repositioned-workspace removal, or a failed exact
+    # restore.
+    # Swallowing them left a wrong active workspace with no operator-visible
+    # signal at all. The close stays non-fatal exactly as before: the presence
+    # gate below is what decides whether any durable record may be removed.
     fm_backend_herdr_projection_close_pane_focus_preserving \
-      "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" 2>/dev/null || true
+      "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" || true
   else
     echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
   fi
@@ -2375,7 +2477,9 @@ FM_WAKE_LEDGER="${FM_WAKE_LEDGER:-$DATA/wake-ledger.tsv}" \
   || echo "warning: wake ledger terminal line not recorded for $ID" >&2
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
-  "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.childcpu"
+  "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.childcpu" \
+  "$STATE/$ID.muse-session" "$STATE/$ID.muse-session-current" \
+  "$STATE/.$ID.open-decisions-cursor"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
