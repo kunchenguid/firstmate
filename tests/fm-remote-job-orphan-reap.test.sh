@@ -41,6 +41,14 @@ pgid_of() { ps -p "$1" -o pgid= 2>/dev/null | tr -d '[:space:]'; }
 
 ppid_of() { ps -p "$1" -o ppid= 2>/dev/null | tr -d '[:space:]'; }
 
+inode_of() {
+  if [ "$(uname -s 2>/dev/null || true)" = Darwin ]; then
+    stat -f %i "$1" 2>/dev/null
+  else
+    stat -c %i "$1" 2>/dev/null
+  fi
+}
+
 # Wait up to <seconds> for <pid> to exit; 0 when it did.
 wait_gone() { # <pid> <seconds>
   local pid=$1 deadline=$(( $(date +%s) + $2 ))
@@ -115,14 +123,58 @@ pass "the Linux start path puts the whole worker tree in its own process group"
 
 # The exact teardown shape that leaked in production: a fixture cleanup removes
 # the worker's state root and then TERMs the single recorded worker pid - which
-# is the serving child, not the supervisor. The supervisor respawns, so the tree
-# survives a teardown that looks complete.
+# is the serving child, not the supervisor. Stop the serving child immediately
+# after its atomic heartbeat replaces the ready inode. It then cannot execute
+# while the state root is removed, and CONT resumes the real loop immediately
+# before its stale-job sweep recreates the root without the ownership lock.
+READY="$CASE1/remote-jobs/worker.ready"
+for _ in $(seq 1 200); do
+  READY_INODE=$(inode_of "$READY" 2>/dev/null || true)
+  [ -n "$READY_INODE" ] && break
+  sleep 0.01
+done
+[ -n "${READY_INODE:-}" ] || fail "the serving child did not publish its initial heartbeat"
+for _ in $(seq 1 1000); do
+  NEXT_READY_INODE=$(inode_of "$READY" 2>/dev/null || true)
+  if [ -n "$NEXT_READY_INODE" ] && [ "$NEXT_READY_INODE" != "$READY_INODE" ]; then
+    kill -STOP "$SERVE" || fail "could not stop the serving child after its heartbeat publication"
+    break
+  fi
+  sleep 0.001
+done
+[ -n "${NEXT_READY_INODE:-}" ] && [ "$NEXT_READY_INODE" != "$READY_INODE" ] \
+  || fail "the serving child did not atomically replace its heartbeat inode"
+for _ in $(seq 1 200); do
+  case "$(ps -p "$SERVE" -o state= 2>/dev/null | tr -d '[:space:]')" in T*) break ;; esac
+  sleep 0.01
+done
+case "$(ps -p "$SERVE" -o state= 2>/dev/null | tr -d '[:space:]')" in
+  T*) ;;
+  *) fail "the serving child was not stopped before state removal" ;;
+esac
 rm -rf "$CASE1/remote-jobs"
-kill -TERM "$SERVE" 2>/dev/null || true
-wait_gone "$SERVE" 10 || fail "the serving child ignored TERM"
+assert_absent "$CASE1/remote-jobs" "the serving child mutated state while stopped"
+kill -CONT "$SERVE" || fail "could not resume the serving child after state removal"
+for _ in $(seq 1 1000); do
+  if [ -d "$CASE1/remote-jobs/jobs" ] && [ -d "$CASE1/remote-jobs/logs" ] &&
+    [ ! -e "$CASE1/remote-jobs/worker.lock" ] && [ -f "$READY" ]; then
+    break
+  fi
+  alive "$SERVE" || fail "the serving child exited before recreating the lock-free state"
+  sleep 0.01
+done
+[ -d "$CASE1/remote-jobs/jobs" ] && [ -d "$CASE1/remote-jobs/logs" ] &&
+  [ ! -e "$CASE1/remote-jobs/worker.lock" ] && [ -f "$READY" ] \
+  || fail "the stale-job sweep did not recreate state without the ownership lock"
+READY_INODE=$(inode_of "$READY") || fail "the recreated heartbeat has no inode"
+kill -TERM "$SERVE" || fail "could not TERM the lock-free serving child"
+if ! wait_gone "$SERVE" 6; then
+  NEXT_READY_INODE=$(inode_of "$READY" 2>/dev/null || true)
+  fail "the lock-free serving child survived TERM and advanced heartbeat $READY_INODE->$NEXT_READY_INODE"
+fi
 alive "$WORKER" || fail "the fixture supervisor did not survive a lone child kill, so this case no longer covers the leak"
 wait_child "$WORKER" 15 || fail "the supervisor did not respawn after its recorded child pid was killed"
-pass "removing the state root and killing the recorded worker pid leaves the tree running at ppid 1"
+pass "a serving child honors TERM after its state root is recreated without the ownership lock"
 
 # A worker whose code root is intact is never a reap candidate, which is what
 # keeps the account's healthy LaunchAgent worker out of scope.

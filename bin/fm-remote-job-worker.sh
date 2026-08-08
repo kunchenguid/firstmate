@@ -295,8 +295,9 @@ worker_shutdown() {
   trap - HUP INT TERM
   worker_publish_quarantine || {
     worker_error "cannot guard worker ownership for shutdown"
-    trap worker_shutdown HUP INT TERM
-    return 0
+    # Returning would resume service even when the ownership directory is gone.
+    # Exit cleanup still stops active execution before releasing any ownership.
+    exit 125
   }
   worker_stop_active_execution || {
     worker_error "could not stop the active command tree"
