@@ -204,7 +204,7 @@ Bounded output from the successful run:
 ok - codex-cli 0.146.0 live E2E proved narrow Codex worker writable roots
 ```
 
-The 2026-08-07 static extension adds no-mistakes ship inclusion, direct-PR and local-only exclusion, non-Codex exclusion, preserved existing roots, the `NM_HOME` and default `HOME/.no-mistakes` selection contract, unresolved and protected-overlap root refusal, raw Codex gate-launch refusal before endpoint creation, and workspace-write network access only for the verified no-mistakes Codex ship.
+The 2026-08-07 static extension adds no-mistakes ship inclusion, direct-PR and local-only exclusion, non-Codex exclusion, preserved existing roots, the `NM_HOME` and default `HOME/.no-mistakes` selection contract, active-daemon home verification, unresolved and protected-overlap root refusal, all opaque gate-launch refusal before endpoint creation, and workspace-write network access only for the verified no-mistakes Codex ship.
 
 The no-mistakes socket control ran on 2026-08-05 with no-mistakes v1.41.2 and codex-cli 0.146.0 in a Firstmate Codex worker whose effective sandbox was workspace-write and whose launch lacked the no-mistakes root.
 The installed matching v1.41.2 module source established that `NM_HOME` selects the root when non-empty, otherwise `HOME/.no-mistakes` does, and the Unix socket is `<root>/socket`.

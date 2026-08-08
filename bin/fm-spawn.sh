@@ -1118,10 +1118,12 @@ launch_template() {
   esac
 }
 
-RAW_LAUNCH=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
-    RAW_LAUNCH=1
+    if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+      echo "error: raw launch commands cannot satisfy the no-mistakes writable-root contract; select a verified harness adapter instead" >&2
+      exit 1
+    fi
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
@@ -1155,11 +1157,6 @@ case "$ARG3" in
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
-
-if [ "$RAW_LAUNCH" -eq 1 ] && [ "$HARNESS" = codex ] && [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
-  echo "error: raw Codex launch commands cannot satisfy the no-mistakes writable-root contract; select the verified codex harness instead" >&2
-  exit 1
-fi
 
 case "$HARNESS" in
   pi|pi-signed) LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH" ;;
@@ -1508,6 +1505,11 @@ validate_no_mistakes_root() {
   done
   if paths_overlap "$root" "$project"; then
     echo "error: refusing broad or overlapping no-mistakes root: primary project directory" >&2
+    return 1
+  fi
+  if ! env NM_HOME="$root" NO_MISTAKES_NO_UPDATE_CHECK=1 \
+    no-mistakes daemon status >/dev/null 2>&1; then
+    echo "error: selected root cannot be verified as an active no-mistakes home: $root" >&2
     return 1
   fi
 }

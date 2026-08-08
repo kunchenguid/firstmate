@@ -45,7 +45,13 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/tmux"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" = daemon ] && [ "${2:-}" = status ] || exit 2
+[ -f "${NM_HOME:-}/.fm-test-no-mistakes-home" ]
+SH
+  chmod +x "$fakebin/tmux" "$fakebin/no-mistakes"
   fm_fake_exit0 "$fakebin" treehouse pi-signed
   printf '%s\n' "$fakebin"
 }
@@ -61,6 +67,8 @@ make_spawn_case() {
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config" \
     "$home/no-mistakes-home" "$home/user-home/.no-mistakes"
+  touch "$home/no-mistakes-home/.fm-test-no-mistakes-home" \
+    "$home/user-home/.no-mistakes/.fm-test-no-mistakes-home"
   printf '%s\n' "$harness" > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
@@ -361,22 +369,22 @@ test_active_dispatch_profile_allows_positional_harness() {
   pass "active crew-dispatch profile allows the legacy positional harness form"
 }
 
-test_active_dispatch_profile_allows_raw_launch_command() {
+test_active_dispatch_profile_allows_raw_non_gate_launch_command() {
   local rec id out status launch
   id=profile-raw-z15
   rec=$(make_spawn_case profile-raw claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "custom-agent --flag")
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "custom-agent --flag" --mode local-only --yolo off)
   status=$?
   expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
   [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
-  pass "active crew-dispatch profile allows the raw launch-command escape hatch"
+  pass "active crew-dispatch profile allows the raw launch-command escape hatch outside no-mistakes mode"
 }
 
 test_claude_threads_model_and_effort() {
@@ -551,6 +559,7 @@ test_codex_no_mistakes_root_is_physical_and_shell_quoted() {
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   mkdir -p "$home_real/data/$id" "$home_real/projects" "$home_real/state" \
     "$home_real/config" "$home_real/user-home" "$no_mistakes_real"
+  touch "$no_mistakes_real/.fm-test-no-mistakes-home"
   printf '%s\n' codex > "$home_real/config/crew-harness"
   printf 'brief for %s\n' "$id" > "$home_real/data/$id/brief.md"
   touch "$home_real/state/.last-watcher-beat"
@@ -637,23 +646,60 @@ test_codex_no_mistakes_root_rejects_broad_or_overlapping_paths() {
   pass "Codex no-mistakes spawn rejects broad and protected overlapping roots"
 }
 
-test_raw_codex_no_mistakes_launch_fails_closed() {
-  local rec id out status
-  id=profile-raw-codex-no-mistakes-z3i
-  rec=$(make_spawn_case profile-raw-codex-no-mistakes claude "$id")
+test_codex_no_mistakes_root_rejects_unverified_homes() {
+  local rec base_id labels candidates i id out status
+  base_id=profile-codex-roots-unverified-z3j
+  rec=$(make_spawn_case profile-codex-roots-unverified codex \
+    "$base_id-credentials" "$base_id-repository")
   read_case_record "$rec"
+  mkdir -p "$HOME_DIR/user-home/.ssh" "$CASE_DIR/unrelated-repository"
+  git -C "$CASE_DIR/unrelated-repository" init -q
+  labels=(credentials repository)
+  candidates=("$HOME_DIR/user-home/.ssh" "$CASE_DIR/unrelated-repository")
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "codex --profile isolated")
-  status=$?
-  expect_code 1 "$status" "raw Codex no-mistakes launch should fail"
-  assert_contains "$out" "raw Codex launch commands cannot satisfy the no-mistakes writable-root contract" \
-    "raw Codex no-mistakes refusal did not name the unsupported access contract"
-  assert_absent "$HOME_DIR/state/$id.meta" \
-    "raw Codex no-mistakes refusal wrote task metadata"
-  [ ! -s "$LAUNCH_LOG.endpoint" ] || fail "raw Codex no-mistakes refusal created an endpoint"
-  [ ! -s "$LAUNCH_LOG" ] || fail "raw Codex no-mistakes refusal typed a launch command"
-  pass "raw Codex no-mistakes launch fails before endpoint creation"
+  for i in "${!labels[@]}"; do
+    id="$base_id-${labels[$i]}"
+    out=$(FM_TEST_NM_HOME="${candidates[$i]}" \
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 1 "$status" "Codex no-mistakes spawn with an unverified ${labels[$i]} root should fail"
+    assert_contains "$out" "selected root cannot be verified as an active no-mistakes home" \
+      "Codex no-mistakes refusal did not require positive runtime identity"
+    assert_absent "$HOME_DIR/state/$id.meta" \
+      "Codex no-mistakes unverified-root refusal wrote task metadata"
+    [ ! -s "$LAUNCH_LOG.endpoint" ] || fail "Codex no-mistakes unverified-root refusal created an endpoint"
+    [ ! -s "$LAUNCH_LOG" ] || fail "Codex no-mistakes unverified-root refusal typed a launch command"
+  done
+  pass "Codex no-mistakes spawn rejects credential and unrelated repository roots without runtime identity"
+}
+
+test_raw_no_mistakes_launches_fail_closed() {
+  local rec base_id labels commands i id out status
+  base_id=profile-raw-no-mistakes-z3i
+  rec=$(make_spawn_case profile-raw-no-mistakes claude \
+    "$base_id-codex" "$base_id-env-codex" "$base_id-opaque")
+  read_case_record "$rec"
+  labels=(codex env-codex opaque)
+  commands=(
+    "codex --profile isolated"
+    "env NM_HOME=$HOME_DIR/no-mistakes-home codex --profile isolated"
+    "custom-agent --flag"
+  )
+
+  for i in "${!labels[@]}"; do
+    id="$base_id-${labels[$i]}"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "${commands[$i]}")
+    status=$?
+    expect_code 1 "$status" "raw ${labels[$i]} no-mistakes launch should fail"
+    assert_contains "$out" "raw launch commands cannot satisfy the no-mistakes writable-root contract" \
+      "raw no-mistakes refusal did not name the unsupported access contract"
+    assert_absent "$HOME_DIR/state/$id.meta" \
+      "raw no-mistakes refusal wrote task metadata"
+    [ ! -s "$LAUNCH_LOG.endpoint" ] || fail "raw no-mistakes refusal created an endpoint"
+    [ ! -s "$LAUNCH_LOG" ] || fail "raw no-mistakes refusal typed a launch command"
+  done
+  pass "all opaque no-mistakes launches fail before endpoint creation"
 }
 
 test_codex_omits_invalid_max_effort() {
@@ -947,7 +993,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
-test_active_dispatch_profile_allows_raw_launch_command
+test_active_dispatch_profile_allows_raw_non_gate_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_no_mistakes_ship_receives_gate_state_and_git_writable_roots
@@ -958,7 +1004,8 @@ test_codex_no_mistakes_root_is_physical_and_shell_quoted
 test_codex_no_mistakes_root_uses_home_default_when_nm_home_is_empty
 test_codex_no_mistakes_root_resolution_fails_closed
 test_codex_no_mistakes_root_rejects_broad_or_overlapping_paths
-test_raw_codex_no_mistakes_launch_fails_closed
+test_codex_no_mistakes_root_rejects_unverified_homes
+test_raw_no_mistakes_launches_fail_closed
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
