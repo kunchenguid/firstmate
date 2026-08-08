@@ -810,6 +810,14 @@ spawn_herdr_presentation_order_lock_acquire() {
 
 clear_relaunch_harness_wiring() {
   local harness=$1 wt=$2 state=$3 id=$4 token_path token auth_path path
+  # The wiring arms above match on harness PREFIXES, because a task launched
+  # from a raw command records that command's basename rather than the exact
+  # adapter name. The retirement tables are keyed by the exact adapter, so the
+  # recorded value is resolved to its adapter first; otherwise a task recorded
+  # as, say, `grok-2` would have wiring armed and never retired. An
+  # unrecognized value resolves to no adapter, which is also the case in which
+  # no wiring was armed to begin with.
+  harness=$(fm_control_harness_family "$harness") || harness=
   token_path=$(fm_control_harness_turnend_token_path "$harness" "$state" "$id") || return 1
   token=
   if [ -n "$token_path" ] && [ -f "$token_path" ]; then

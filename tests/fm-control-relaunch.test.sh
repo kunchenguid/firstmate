@@ -666,6 +666,31 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
 }
 
+# fm-spawn arms per-task wiring on harness PREFIXES, because a task launched
+# from a raw command records that command's basename rather than the exact
+# adapter name. Retirement must resolve the same way, or a task recorded as
+# `grok-2` would have its turn-end token and hook pointer armed and never
+# retired - leaving a registry entry that outlives the agent that owned it.
+test_prefixed_prior_harness_wiring_is_still_retired() {
+  local dir auth
+  dir=$(new_case prefixwiring rl30)
+  add_ship_task "$dir" rl30 grok-2
+  mkdir -p "$dir/grokhome/hooks/fm-turn-end.d"
+  printf 'fm.abcdefabcdef\n' > "$dir/home/state/rl30.grok-turnend-token"
+  auth="$dir/grokhome/hooks/fm-turn-end.d/fm.abcdefabcdef"
+  printf '%s\n' "$dir/home/state/rl30.turn-ended" > "$auth"
+  printf 'token=fm.abcdefabcdef\n' > "$dir/wt/.fm-grok-turnend"
+  printf 'zsh' > "$dir/fake/command"
+  run_spawn "$dir" rl30 --relaunch --harness claude >/dev/null
+  [ ! -e "$auth" ] \
+    || fail "a prefixed prior harness must still have its turn-end registry entry revoked"
+  [ ! -e "$dir/home/state/rl30.grok-turnend-token" ] \
+    || fail "a prefixed prior harness must still have its private token retired"
+  [ ! -e "$dir/wt/.fm-grok-turnend" ] \
+    || fail "a prefixed prior harness must still have its worktree hook pointer removed"
+  pass "fm-spawn --relaunch: wiring armed under a prefixed harness name is still retired"
+}
+
 # --- 3 and 4. refusals before the agent is touched ---------------------------
 
 test_missing_worktree_refuses_before_stopping_anything() {
@@ -1154,6 +1179,7 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
+test_prefixed_prior_harness_wiring_is_still_retired
 test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical
