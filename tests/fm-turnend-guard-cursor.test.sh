@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2153
 # Cursor stop-hook adapter tests — extracted from tests/fm-turnend-guard.test.sh
 # (code-judo finding #4). The shared guard suite sources this file so the
 # Cursor-specific test functions are available to the test list while staying
