@@ -135,7 +135,7 @@ Because `gh` gives `GH_TOKEN` precedence over `GITHUB_TOKEN`, a configured wrapp
 Only the first non-empty, non-comment line is read, surrounding whitespace is trimmed, and the line is split on whitespace and executed directly rather than through a shell, so quoting, globbing, redirection, and pipelines in it are not interpreted.
 An absent or blank file means `bin/fm-gh.sh` execs its command unchanged, so a home with no special credential behaves exactly as if the wrapper were not there.
 The file supplies the credential only; delivering it to the pipeline additionally requires installing the `gh` shim onto the `PATH` the no-mistakes daemon resolves, which is never automatic.
-See [`no-mistakes-pr-credential.md`](no-mistakes-pr-credential.md) for the chosen mechanism, its `PATH`-wide scope, the alternatives considered, and the setup commands; `bin/fm-gh.sh`, `bin/fm-gh-shim.sh`, and `bin/fm-gh-shim-install.sh` own their exact flags in their own headers.
+See [`no-mistakes-pr-credential.md`](no-mistakes-pr-credential.md) for the chosen mechanism, its `PATH`-wide scope, the alternatives considered, and the setup commands; `bin/fm-gh.sh`, `bin/fm-gh-shim.sh`, `bin/fm-gh-ci-fallback.sh`, and `bin/fm-gh-shim-install.sh` own their exact flags in their own headers.
 
 ## Gate defaults (.no-mistakes.yaml)
 

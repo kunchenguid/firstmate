@@ -1,10 +1,10 @@
-# Pull-request credential routing verification
+# GitHub shim routing verification
 
-Repeatable evidence for the `gh` shim that routes pull-request mutations through `bin/fm-gh.sh`.
+Repeatable evidence for the `gh` shim that routes pull-request mutations through `bin/fm-gh.sh` and recovers exact-head workflow verdicts through `bin/fm-gh-ci-fallback.sh`.
 Current behavior and rationale are owned by [`../no-mistakes-pr-credential.md`](../no-mistakes-pr-credential.md), the configuration schema by [`../configuration.md`](../configuration.md) ("Pull-request credential"), and the upstream ask by [`../proposals/nm-pr-step-interception.md`](../proposals/nm-pr-step-interception.md); this page records evidence only.
 
-Date: 2026-08-06.
-Comparison base: `main` at `fb368dc`.
+Date: 2026-08-07.
+Comparison base: `fork/main` at `ae95570`.
 Shell: GNU bash 5.3.9 (macOS 26.5).
 `gh` 2.92.0.
 no-mistakes v1.41.2 installed; upstream source read at release 1.46.0, commit `20892e6`.
@@ -48,6 +48,10 @@ Read from the upstream source at release 1.46.0 and cross-checked against the in
 
 The pipeline's nine steps, read from the daemon's own `step_results` records, are `intent`, `rebase`, `review`, `test`, `document`, `lint`, `push`, `pr`, `ci`.
 
+The installed v1.41.2 CI implementation calls `gh pr checks <selector> --repo <owner/repo> --json name,state,bucket,completedAt`.
+Current upstream adds `link` to that exact JSON field set.
+Both implementations treat a nonzero check-runs read as unavailable CI state, so a persistent 403 cannot become a terminal verdict without a fallback.
+
 ## Interception cannot be scoped to a task worktree
 
 The `pr` step runs in the no-mistakes daemon process, which resolves its environment once from the login shell at startup and caches it.
@@ -55,16 +59,33 @@ Nothing placed inside a task worktree is on the `PATH` that resolves `gh` for th
 
 ## Routing behavior
 
-`tests/fm-gh-shim.test.sh` (11 behavioral cases) drives the shim and wrapper with a fake `gh` that records its argv and both GitHub token variables, plus a fake credential runner, touching no network and no real `gh`.
+`tests/fm-gh-shim.test.sh` (18 behavioral cases) drives the shim and wrapper with a fake `gh` that records its argv and both GitHub token variables, plus a fake credential runner, touching no network and no real `gh`.
 It covers the exact argument vector the no-mistakes PR step builds (`pr create --head <ref> --base <base> --repo <slug> --title <title> --body-file -`) reaching the real `gh` unmodified with the configured credential injected; `pr list`, `pr view`, and `api` passing through without spending that credential; an unconfigured home preserving both ambient token variables; hostile ambient tokens being removed before the configured prefix injects the only token that reaches `gh`; the first non-comment, whitespace-trimmed prefix line winning; indented comments being skipped; a credential that re-resolves `gh` from `PATH` routing at most once rather than recursing; and the installer creating, verifying precedence for, refusing both foreign files and foreign symlinks without changing them, and removing only a link it owns.
+
+Seven CI cases reproduce the check-runs authorization boundary and exercise the fallback through the shim's public `gh` interface.
+The fake applies the helper's real jq expression to paginated raw workflow-run fixtures, so the assertions cover the same transformation `gh api --paginate --slurp --jq` performs.
+The green case provides a failed workflow under a stale SHA and a successful workflow under the PR head, then asserts that the only Actions endpoint called contains `head_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` and that the result is `bucket: pass`.
+It also configures a distinct PR-capable token and proves that every CI call retains only the ambient narrow token.
+The red case maps an exact-head workflow failure to `bucket: fail` and preserves its Actions link.
+The zero-run case emits a pending placeholder, and a multi-page case maps cancelled, skipped, and queued workflows to the cancellation, skipping, and pending buckets.
+The moving-head case refuses a verdict when the PR advances during pagination.
+The unrelated-failure case proves generic HTTP 403 responses, denials for other APIs, and non-403 failures never reach the fallback API, while the unsupported-shape case proves only the two literal no-mistakes argument vectors enter the capturing helper.
+These fixtures establish GitHub Actions behavior only; the workflow-runs API cannot reproduce third-party check-provider evidence hidden behind check-runs.
 
 One case is a legacy-shell regression and self-skips where no bash 3.2 exists.
 Under `set -u`, bash 3.2 rejects an empty array's `"${arr[@]}"` expansion as an unbound variable, which broke the unconfigured pass-through path that every home without `config/gh-credential` takes; the observed failure was `bin/fm-gh.sh: line 81: PREFIX[@]: unbound variable` on GNU bash 3.2.57, the system bash macOS 26.5 ships.
-The wrapper now expands the prefix as `${PREFIX[@]+"${PREFIX[@]}"}`, and all three scripts were exercised under that shell.
+The wrapper now expands the prefix as `${PREFIX[@]+"${PREFIX[@]}"}`, and both wrapper paths were exercised under that shell.
 
 ```console
 $ bash tests/fm-gh-shim.test.sh
 ok - gh pr create routes through fm-gh.sh and reaches the real gh with the configured credential
+ok - a check-runs 403 reaches a green exact-head workflow verdict without the privileged token
+ok - a check-runs 403 reaches a red exact-head workflow verdict
+ok - zero exact-head workflow runs remain explicitly pending
+ok - paginated exact-head runs map cancellation, skipping, and pending buckets
+ok - a moving PR head cannot emit a stale workflow verdict
+ok - unrelated check failures are preserved without an API fallback
+ok - unsupported gh pr checks shapes exec the real gh directly
 ok - pr list, pr view, and api pass through the shim without the privileged credential
 ok - fm-gh.sh with no config/gh-credential execs the command unchanged
 ok - configured fm-gh.sh exposes only the prefix-injected GitHub token

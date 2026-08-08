@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# A `gh` shim that routes pull-request mutations through fm-gh.sh and passes every
-# other invocation straight to the real gh.
+# A `gh` shim that routes pull-request mutations through fm-gh.sh and gives the
+# no-mistakes CI read one exact-head, least-privilege workflow-runs fallback.
 #
 # Install it as a SYMLINK named `gh` in a directory that precedes the real gh on the
 # PATH of the process you need to intercept; bin/fm-gh-shim-install.sh owns
@@ -10,22 +10,26 @@
 # this shim is scoped to a PATH, not to a repository or a worktree, so every process
 # resolving gh through that directory is affected.
 #
-# Routed invocations, chosen because these are the two calls a fine-grained token is
-# forbidden from and the pipeline's PR step makes both:
+# Credential-routed invocations, chosen because these are the two calls a
+# fine-grained token is forbidden from and the pipeline's PR step makes both:
 #   gh pr create ...
 #   gh pr edit ...
-# The shape must be exactly `pr` as the first argument and `create` or `edit` as the
-# second. Every other invocation, including any other `pr` subcommand, execs the real
-# gh unchanged, so the shim's default is current behavior.
+# The CI monitor's exact `gh pr checks ... --json name,state,bucket,completedAt[,link]`
+# vectors first try the real gh with the ambient narrow token. Only the known HTTP
+# GraphQL personal-token denial for statusCheckRollup reaches fm-gh-ci-fallback.sh, which uses
+# that SAME token to read the PR's exact head and workflow runs filtered by that SHA.
+# It never reaches fm-gh.sh or config/gh-credential's broader token. Every other
+# invocation execs the real gh unchanged, so the shim's default remains current behavior.
 set -eu
 
 # FM_GH_SHIM_ACTIVE is a hard recursion stop: if fm-gh.sh's credential prefix itself
 # resolves gh through this shim, the second entry passes straight through rather than
 # routing again.
-ROUTE=no
+ROUTE=passthrough
 if [ "${FM_GH_SHIM_ACTIVE:-}" != "1" ] && [ "${1:-}" = "pr" ]; then
   case "${2:-}" in
-    create | edit) ROUTE=yes ;;
+    create | edit) ROUTE=credential ;;
+    checks) ROUTE=ci-candidate ;;
   esac
 fi
 
@@ -89,9 +93,15 @@ REAL_GH=$(find_real_gh) || {
   exit 127
 }
 
-if [ "$ROUTE" = "yes" ]; then
+if [ "$ROUTE" = credential ]; then
   export FM_GH_SHIM_ACTIVE=1
   exec "${FM_GH_SHIM_WRAPPER:-$SHIM_SRC_DIR/fm-gh.sh}" "$REAL_GH" "$@"
+fi
+
+CI_FALLBACK="$SHIM_SRC_DIR/fm-gh-ci-fallback.sh"
+if [ "$ROUTE" = ci-candidate ] && [ -x "$CI_FALLBACK" ] && \
+  "$CI_FALLBACK" --supports "$@"; then
+  exec "${FM_GH_SHIM_CI_FALLBACK:-$CI_FALLBACK}" "$REAL_GH" "$@"
 fi
 
 exec "$REAL_GH" "$@"
