@@ -305,3 +305,123 @@ ok - preflight requires and accepts --repo --status-out --br-bin
 Run again without the env gate it self-skips: `skip: FM_LIVE_DECISION_OS not set (live Decision OS contract guard)`, exit 0.
 
 No failure was observed. Note: the registered clone is a live store with active tracker-writing lanes; a dirty `.beads/issues.jsonl` working tree observed during the run is live lane traffic (an unrelated no-mistakes lane was actively writing `.beads` at the time), not output of the guard, and was left untouched.
+
+## Final acceptance
+
+Task 15 acceptance evidence, 2026-08-08, integration base `454b10d`, branch `fm/fm-fleet-refill-implementation-r1` (parent commit `d769ccc`).
+
+### Deletion and alert-only rollback
+
+The legacy arithmetic (`TASKS_DIR`, `MANIFEST`, `ACTIVE_WINDOW_MIN`, `QUEUE_WINDOW_MIN`, `MIN_BATTERY`, `MIN_OPEN`, the output-mtime loop, and the legacy `active=`/`battery=` verdict line) was already removed by the Task 3 quarantine and the Task 13 cutover. Task 15 verified zero residual references in `bin/` and updated every remaining prose reference to the new contract. The serialization-debt probe and the authoritative bead-query diagnostic remain; `state/fleet-manifest.jsonl` is left untouched and simply stops being read (verified: no runtime script reads it).
+
+The rollback flip: when `config/refill-auto` is absent and `FM_REFILL_AUTO` is not `1`, `--refill` prints the admission verdict and `fleet-ok: alert-only` and exits 0 without winning the home lock, re-reading beads, creating claims, printing dispatch commands, or launching. Every attempt, bead, branch, ref, copy, and receipt is preserved (byte-compare pinned by `test_rollback_is_alert_only_and_preserves_everything`), and re-enabling the gate resumes from the persisted effect receipts through the same idempotent claim-replay, obligation-retry, and terminal-reconciliation paths. The projection still reports ambiguity and reconciliation exactly as before; missing evidence never becomes zero capacity (`test_rollback_never_restores_legacy_arithmetic`). The sentinel reports `mode=alert-only` unless the gate is on.
+
+### Commands
+
+```sh
+bash tests/fm-fleet-refill.test.sh
+bash tests/fm-refill-admission.test.sh
+bash tests/fm-refill-sentinel.test.sh
+bash tests/fm-capacity.test.sh
+bash tests/fm-attempt.test.sh
+bash tests/fm-fleet-snapshot-view.test.sh
+bin/fm-lint.sh bin/fm-fleet-refill.sh bin/fm-refill-sentinel.sh tests/fm-fleet-refill.test.sh tests/fm-refill-admission.test.sh tests/fm-refill-sentinel.test.sh
+bin/fm-doc-audience-check.sh
+# full suite: bin/fm-test-run.sh over 143 of 145 scripts (the two known-hanging
+# scripts fm-on and fm-remote-secondmate-lifecycle-e2e bounded by `timeout 120`)
+```
+
+### Results
+
+- `tests/fm-fleet-refill.test.sh`: 25 ok, all passed (22 prior + 3 new: legacy-manifest/output-mtime no-fallback, rollback alert-only + state preservation, missing evidence never becomes zero capacity).
+- `tests/fm-refill-admission.test.sh`: 6 ok, all passed; the Task 12 attended command-printing test was reconciled to the rollback contract (`test_rollback_mode_is_alert_only_and_never_dispatches`).
+- `tests/fm-refill-sentinel.test.sh`: 7 ok, all passed (6 prior + the new alert-only/automatic mode-report test).
+- `tests/fm-capacity.test.sh`, `tests/fm-attempt.test.sh`, `tests/fm-fleet-snapshot-view.test.sh`: all passed.
+- Full suite: `FM_TEST_SUMMARY total=143 failed=6 skipped_gate=17 duration_ms=2639024`. The two known-hanging scripts were bounded: `fm-on bounded rc=124` and `fm-remote-secondmate-lifecycle-e2e bounded rc=124` (both hang in this shell environment on the remote-job stdin machinery, as documented).
+- `bin/fm-lint.sh` (changed files and the repo): clean (ShellCheck 0.11.0 pinned), exit 0; `bash -n` clean on both changed scripts.
+- `bin/fm-doc-audience-check.sh`: `fm-doc-audience-check: ok surfaces=67 local_links=214`, exit 0.
+
+### Full-suite failures, exact, with the environment set named
+
+Environment set (pre-existing, unchanged from the Task 0 baseline, not fixed by Task 15):
+
+- `tests/fm-teardown.test.sh`: exactly one `not ok` - `leaked-process-reap: leaked worktree process survived teardown` (`lsof` is not installed).
+- `tests/fm-calm-pi-extension.test.sh`: fails on the installed Pi v22.23.1 (`TypeError: this.getMarkdownTransformers is not a function` in interactive-mode.js).
+- `tests/fm-backend-herdr-focus-flash-e2e.test.sh`: `not ok - the Part C doomed pane never acquired a stable persistent sleep child process` (real herdr runtime).
+- `tests/fm-on.test.sh` and `tests/fm-remote-secondmate-lifecycle-e2e.test.sh`: hang (bounded at 120 s each, both rc=124), remote-job stdin machinery.
+- `tests/fm-remote-job.test.sh`: fails in-suite (`not ok - remote job worker did not report ready after startup`; interference pattern), passes in isolation (`ALL TESTS PASSED`, rc=0). `tests/fm-remote-job-orphan-reap.test.sh` passed in-suite (exit=0).
+
+Newly surfaced by this first full-suite run in this environment (root-caused, both environment/latent-branch issues, outside Task 15's write set):
+
+- `tests/fm-test-run.test.sh`: `comm: file 2 is not in sorted order` under the ambient `en_US.UTF-8` locale; passes with `LC_ALL=C` (rc=0). The runner's coverage-guard `comm` steps assume the C collation CI uses.
+- `tests/fm-gotmp.test.sh`: `not ok - teardown exited non-zero with a valid tasktmp`; root cause is that `bin/fm-teardown.sh` sources `fm-disposition-lib.sh` and `fm-cleanup-lib.sh` (Tasks 4 and 8/9) but the test's `make_fake_root` symlink list predates those dependencies (`fm-teardown.sh: No such file or directory` for fm-disposition-lib.sh). A latent fixture lag introduced by Task 9's cleanup extraction, not by Task 15.
+
+All six failures are therefore the documented pre-existing environment set plus two root-caused environment/latent-branch issues; every refill, capacity, attempt, terminal, snapshot, and admission test is green.
+
+### Step 5 verification, exact outputs
+
+Forbidden-symbol check (scoped to runtime code; the deliberate negative fixture in `tests/fm-fleet-refill.test.sh` is excluded by scope):
+
+```text
+$ grep -rn "ACTIVE_WINDOW_MIN\|QUEUE_WINDOW_MIN\|MIN_BATTERY\|MIN_OPEN\|fleet-manifest" bin/ && echo "LEGACY-ARITHMETIC-FOUND" || echo "NO-LEGACY-ARITHMETIC"
+NO-LEGACY-ARITHMETIC
+
+$ grep -c "productive_count\|reserved_ownership_count" bin/fm-fleet-refill.sh bin/fm-fleet-snapshot.sh bin/fm-refill-sentinel.sh | grep -v ":0" | grep -v fm-capacity-lib.sh || echo "CONSUMERS-ONLY"
+bin/fm-fleet-refill.sh:5
+bin/fm-refill-sentinel.sh:4
+```
+
+The two count hits are consumer jq reads of `.aggregate.productive_count`/`.aggregate.reserved_ownership_count` (refill's admission summary and sentinel's consume-only note); `bin/fm-fleet-snapshot.sh` embeds the object whole (0 lines, filtered by `grep -v ":0"`). The counters appear only in the one classifier (`bin/fm-capacity-lib.sh`, excluded) and its consumers.
+
+File-map verification (`git diff --name-only main...HEAD` = 80 paths): every plan map path the implementation needed is in the branch diff. Three map paths were never touched and are documented map over-predictions: the plan document itself (already on `main` at `d40fd7f`), `tests/fm-backlog-handoff.test.sh` (no task modified it; Task 14 exposure/recovery coverage landed in the mapped `tests/fm-session-start.test.sh`/`tests/fm-watch-triage.test.sh`), and `tests/fm-teardown-endpoint-safety.test.sh` (no task modified it; extraction-identity coverage landed in the mapped `tests/fm-teardown.test.sh`). Non-map diff paths, documented deviations: 34 files are exactly the Task 0 reconciliation set (origin/main's five upstream commits `833a9a2`, `be32879`, `167ff42`, `60eb534`, `06b33aa` brought in by the `454b10d` merge), and `tests/live-decision-os-contract.test.sh` is the Task 5 live-contract guard added by `4b7ef96` beyond the map's `tests/fm-br-receipt.test.sh` entry.
+
+Home-aware scans (read-only; nothing under `/home/holu/fmate/firstmate` was modified) and crontab inspection, exact outputs:
+
+```text
+$ rg -uu -l "fleet-manifest" /home/holu/fmate/firstmate/ | grep -v '\.git/' | grep -v 'docs/superpowers/plans/'
+/home/holu/fmate/firstmate/config/crew-dispatch.json
+/home/holu/fmate/firstmate/data/fm-fleet-refill-design-fresh-eyes-r1/report.md
+/home/holu/fmate/firstmate/data/fm-fleet-refill-design-fresh-eyes-r1/brief.md
+/home/holu/fmate/firstmate/bin/fm-fleet-refill.sh
+/home/holu/fmate/firstmate/data/fm-fleet-refill-plan-review-r1/report.md
+/home/holu/fmate/firstmate/data/learnings.md
+/home/holu/fmate/firstmate/data/dos-fleet-reality-audit-r1/report.md
+/home/holu/fmate/firstmate/data/dos-fleet-gate-inventory/report.md
+/home/holu/fmate/firstmate/data/fm-fleet-depth-counter-investigation-r1/report.md
+/home/holu/fmate/firstmate/data/fm-fleet-depth-counter-investigation-r1/brief.md
+/home/holu/fmate/firstmate/state/.hb-surfaced-fm-fleet-refill-implementation-r1
+/home/holu/fmate/firstmate/state/fm-fleet-refill-implementation-r1.status
+MANIFEST-CONSUMER-FOUND
+
+$ rg -uu -l "pi-subagents-1000" /home/holu/fmate/firstmate/ | grep -v '\.git/' | grep -v 'docs/superpowers/plans/'
+/home/holu/fmate/firstmate/bin/fm-fleet-refill.sh
+/home/holu/fmate/firstmate/data/fm-fleet-refill-design-fresh-eyes-r1/report.md
+/home/holu/fmate/firstmate/data/dos-fleet-reality-audit-r1/report.md
+/home/holu/fmate/firstmate/data/fm-fleet-depth-counter-investigation-r1/report.md
+/home/holu/fmate/firstmate/data/fm-fleet-depth-counter-investigation-r1/brief.md
+OUTPUT-PATH-REFERENCE-FOUND
+
+$ rg -uu -l "fleet-depth-check" /home/holu/fmate/firstmate/ /home/holu/.treehouse/firstmate-b8697d/1/firstmate/
+docs/verification/fleet-capacity.md            (this doc, removal record)
+docs/superpowers/plans/2026-08-08-fleet-refill-terminal-lifecycle.md  (both homes, plan prose)
+... plus real-home data/*/report.md, brief.md and state/*.status, .hb-surfaced-* records (prose)
+SENTINEL-REFERENCE-FOUND
+
+$ crontab -l | grep -c "fleet-depth-check" && echo "CRON-SENTINEL-STILL-ACTIVE" || echo "CRON-SENTINEL-GONE"
+0
+CRON-SENTINEL-GONE
+
+$ crontab -l | grep "firstmate/data/" && echo "OTHER-CRON-FIRSTMATE-ENTRIES" || echo "NO-OTHER-CRON"
+15 */2 * * * /home/holu/fmate/firstmate/data/openmodel-price-check.sh >> /home/holu/fmate/firstmate/data/openmodel-price-check.log 2>&1
+OTHER-CRON-FIRSTMATE-ENTRIES
+```
+
+Interpretation: the raw `rg -uu` hits are either (a) prose and volatile records (the plan/verification docs, scout reports and briefs, `config/crew-dispatch.json`'s note, and this task's own `state/*.status`/`.hb-surfaced-*` records) that document the legacy paths but never read them, or (b) the real home's pre-delivery copy of `bin/fm-fleet-refill.sh` on local `main` `d40fd7f` (the legacy released script; it is dormant - nothing invokes it: no crontab entry, no daemon, no session-start hook, no live process, and the real home's `AGENTS.md` no longer references `fm-fleet-refill`; only `bin/fm-test-run.sh`'s family map mentions the name). The tracked-side replacement reaches the real home only through the post-Task-15 no-mistakes delivery fast-forward, which is outside this task's scope (no push, no merge). No ACTIVE consumer of the legacy manifest, output paths, or private cron sentinel remains; the private cron sentinel removal (`data/fleet-depth-check.sh` absent, crontab 0 matches) is verified done by firstmate and confirmed here. The only `firstmate/data/` crontab entry is the named-safe `openmodel-price-check.sh`.
+
+### Design-requirement re-check and the 16-task count
+
+Every accepted design requirement maps to landed tasks (architecture section "Durable implementation capacity and attempt lifecycle design" plus the F1-F8 correction list): one attended dispatch/refill invocation (Tasks 6, 12); automatic terminal reconciliation and refill (11, 12, 13); no new scheduler/daemon/dashboard/wrapper/parser/phase machine/duplicate counter (2, 8, 9, 15 negative assertions); one shared capacity classifier (2) with consumers cut over (13); one structured cleanup operation (8, 9); write-once receipt-derived attempt model (1, F1); one outer non-reentrant terminal transaction with lock-held primitives (1, 9, 11, F2); real-history reconciliation and shadow-only consumers until post-parity cutover (0, 3, 13, F3); structured crew-state plus an enforceable total deadline and latency (2, F4); installed br/storage contracts and a pathspec transaction (5, 6, F5); centralized live disposition with fresh per-effect authority (4, 11, F6); attempt-bound copy/landing/planned-path semantics with a pre-land actual-diff recheck (1, 7, 10, 11, 12, F7); deterministic parity commands, brief wiring, exhaustive file map, split Tasks 5/8 (3, 5, 6, 8, 9, 13, 15, F8); full branch and isolated-copy lifecycle (5, 6, 7, 9, 10, 11, 12); obsolete manifests/output paths/duplicated counters/legacy compatibility reads deleted only after measured parity, never discarding unknown or unlanded work (4, 9, 11, 13, 14, 15); private cron sentinel quarantined in Task 3, removed after the Task 13 cutover proof, verified gone here (3, 13, 15); representative latency, fixture parity, crash/replay, concurrency, migration, rollback-to-alert-only, and exact verification commands (2, 3, 5, 7, 9, 10, 11, 12, 13, 14, 15).
+
+Sixteen tasks (Task 0 through Task 15), each on a green baseline with a small commit, verified on the branch: Task 0 `454b10d` (integration base merge + canonical review), Task 1 `384e68d`, Task 2 `7b0a995`, Task 3 `9e7247b`+`58cffcb`, Task 4 `ec3e2d2`+`022fdb3`, Task 5 `4b7ef96`, Task 6 `13e8a02`, Task 7 `f3d11dc`, Task 8 `feb4fb2`, Task 9 `35871d0`+`73c131d`, Task 10 `6c63f30`, Task 11 `01a9ab3`+`74a6cec`, Task 12 `3eac13a`, Task 13 `fb230a0`+`9cb53bb`+`45d0560`+`b50fdce`, Task 14 `e5cff35`+`d769ccc`, Task 15 this commit.
+
+Automatic refill stays disabled: nothing in this repo creates `config/refill-auto`, and `--refill` is alert-only until the gate is enabled.

@@ -1,39 +1,43 @@
 #!/usr/bin/env bash
-# Fleet refill — shared-projection verdict (Task 13 cutover).
+# Fleet refill — shared-projection verdict (Task 13 cutover; Task 15 rollback).
 #
 # The human verdict is derived solely from the shared capacity projection
 # (fm-fleet-capacity.v1): productive, reserved, refill_safe, alert_only, and
 # reconciliation come from fm_capacity_project, never from legacy arithmetic.
 # The legacy owned-manifest/output mtime battery count and the DISPATCH-NEEDED
-# verdict were quarantined in Task 3 and never return; this script emits no
-# dispatch verdict and stages no work. The serialization-debt safety probe
-# and the authoritative bead-query diagnostic remain.
+# verdict were quarantined in Task 3 and never return; Task 15 deletes the
+# last residual references. This script emits no dispatch verdict and stages
+# no work. The serialization-debt safety probe and the authoritative bead-query
+# diagnostic remain.
 #
-# Task 12 adds the --refill admission action. Refill acts ONLY on a complete
-# projection reporting productive work below the target and reserved
-# ownership below the ceiling. It queries the live beads graph, applies the
-# accepted Decision OS admission contract against the FROZEN provisional
-# admission evidence in each current attempt's delivery record
-# (planned_path, declared_seams, dependencies, written once at allocation)
-# plus the known exclusive seams, and serializes a candidate ONLY when that
-# bounded evidence identifies a concrete path overlap. No .beadscope,
-# declaration registry, write-set enforcer, or claim inferred from planned
-# paths is introduced, and admission never lands or merges: the actual diff
-# stays the authoritative pre-land overlap check in bin/fm-review-diff.sh
-# (Task 11). Automatic launching requires config/refill-auto in the home or
-# FM_REFILL_AUTO=1; otherwise --refill is attended-only (verdict plus the
-# exact next-wave dispatch commands, no launching). Automatic refill stays
-# disabled through Task 13: nothing in this repo creates config/refill-auto.
+# Task 12 adds the --refill admission action; Task 15 flips the non-automatic
+# path to alert-only rollback. Refill acts ONLY on a complete projection
+# reporting productive work below the target and reserved ownership below the
+# ceiling. It queries the live beads graph, applies the accepted Decision OS
+# admission contract against the FROZEN provisional admission evidence in each
+# current attempt's delivery record (planned_path, declared_seams,
+# dependencies, written once at allocation) plus the known exclusive seams,
+# and serializes a candidate ONLY when that bounded evidence identifies a
+# concrete path overlap. No .beadscope, declaration registry, write-set
+# enforcer, or claim inferred from planned paths is introduced, and admission
+# never lands or merges: the actual diff stays the authoritative pre-land
+# overlap check in bin/fm-review-diff.sh (Task 11). Automatic launching
+# requires config/refill-auto in the home or FM_REFILL_AUTO=1; otherwise
+# --refill is alert-only: it prints the admission verdict and `fleet-ok:
+# alert-only` and never dispatches, claims, or launches, so every attempt,
+# bead, branch, ref, copy, and receipt is preserved and forward recovery
+# resumes from the persisted effect receipts when the gate is re-enabled.
+# Automatic refill stays disabled: nothing in this repo creates
+# config/refill-auto.
 set -u
 FM_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 PROJECT="${FM_REFILL_PROJECT:-/home/holu/decision-os}"
 
 # Shadow-only parallel run (Task 3): --count-json emits the shared capacity
-# object (fm-fleet-capacity.v1); FM_REFILL_SHADOW records that same object
-# alongside the quarantined run. Neither path touches the quarantined verdict
-# below: consumer decisions stay on the quarantine until the Task 13 cutover
-# after parity proof. The snapshot is not modified in this task.
+# object (fm-fleet-capacity.v1); FM_REFILL_SHADOW records that same object.
+# Consumers switched to the shared object at the Task 13 cutover after parity
+# proof; no legacy verdict exists here anymore.
 if [ "${1:-}" = "--count-json" ]; then
   # shellcheck source=bin/fm-capacity-lib.sh
   . "$(dirname "${BASH_SOURCE[0]}")/fm-capacity-lib.sh"
@@ -55,8 +59,8 @@ CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # fm_refill_automatic: the automatic-refill gate. Automatic action requires
 # config/refill-auto in the home (gitignored; nothing in this repo creates
-# it before Task 13) or FM_REFILL_AUTO=1; otherwise --refill is attended-only.
-# It must never fire in production through any path other than those two.
+# it) or FM_REFILL_AUTO=1; otherwise --refill is alert-only rollback (Task
+# 15). It must never fire in production through any path other than those two.
 # shellcheck source=bin/fm-wake-lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fm-wake-lib.sh"
 
@@ -200,8 +204,8 @@ fm_refill_lock_release() {
 # immutable attempt, persist the exact claim request, invoke the attended
 # decision-os main-steward adapter synchronously) followed by the spawn
 # resume path. A refused or unobserved claim leaves the attempt pending and
-# never launches. Only the automatic gate reaches this; the attended path
-# prints the same commands instead.
+# never launches. Only the automatic gate reaches this; without the gate
+# --refill is alert-only (Task 15) and never claims or launches.
 fm_refill_claim_and_launch() {
   local id=$1 aid gen req source_hash
   aid=$(fm_attempt_alloc pi "$id" "$FM_HOME") || {
@@ -266,12 +270,13 @@ fm_refill_claim_and_launch() {
 }
 
 # fm_refill_admit_and_dispatch <capacity-json>: query candidates, apply the
-# frozen-evidence admission contract (admit vs serialize), win the home lock
-# (state/.lock.acquire, the same claim lock bin/fm-lock.sh uses) plus the
-# attempt allocation lock (fm_attempt_alloc owns state/attempts/.alloc.lock
-# per candidate), re-read live bead ownership, then either run the split
-# handshake and launch (automatic) or print the exact dispatch commands
-# (attended). Never lands, merges, or decrements capacity.
+# frozen-evidence admission contract (admit vs serialize), then either win the
+# home lock (state/.lock.acquire, the same claim lock bin/fm-lock.sh uses)
+# plus the attempt allocation lock (fm_attempt_alloc owns
+# state/attempts/.alloc.lock per candidate), re-read live bead ownership, and
+# run the split handshake and launch (automatic), or stop alert-only without
+# the lock when the automatic gate is off (Task 15 rollback). Never lands,
+# merges, or decrements capacity.
 fm_refill_admit_and_dispatch() {
   local cap=$1 candidates evid id cpath prod reserved
   local admitted=() serialized=() available=() cand
@@ -293,8 +298,19 @@ fm_refill_admit_and_dispatch() {
   prod=$(printf '%s' "$cap" | jq -r '.aggregate.productive_count // 0' 2>/dev/null || echo 0)
   reserved=$(printf '%s' "$cap" | jq -r '.aggregate.reserved_ownership_count // 0' 2>/dev/null || echo 0)
   echo "refill: admission productive=$prod reserved=$reserved candidates=$(( ${#admitted[@]} + ${#serialized[@]} )) admitted=${#admitted[@]} serialized=${#serialized[@]}"
-  # win the home lock, then re-read live bead ownership: the loser of a
-  # concurrent wave sees the winner's claims and dispatches nothing
+  # Task 15 rollback flip: without the automatic gate, --refill is alert-only.
+  # The admission verdict lines above are the summary; no home lock is won, no
+  # bead is re-read, no claim is created, no launch command prints, and no
+  # allocation happens. Every attempt, bead, branch, ref, copy, and receipt is
+  # preserved; re-enabling the gate resumes from the persisted effect receipts
+  # through the same idempotent claim-replay, obligation-retry, and
+  # terminal-reconciliation paths.
+  if ! fm_refill_automatic; then
+    echo "fleet-ok: alert-only"
+    return 0
+  fi
+  # automatic path: win the home lock, then re-read live bead ownership: the
+  # loser of a concurrent wave sees the winner's claims and dispatches nothing
   FM_REFILL_LOCK_HELD=0
   trap fm_refill_lock_release EXIT
   fm_lock_acquire_wait "$STATE/.lock.acquire"
@@ -309,19 +325,10 @@ fm_refill_admit_and_dispatch() {
       fi
     done
   fi
-  if fm_refill_automatic; then
-    if [ "${#available[@]}" -gt 0 ]; then
-      for id in "${available[@]}"; do
-        fm_refill_claim_and_launch "$id"
-      done
-    fi
-  else
-    echo "refill: next-wave dispatch commands (attended; no automatic dispatch without config/refill-auto or FM_REFILL_AUTO=1):"
-    if [ "${#available[@]}" -gt 0 ]; then
-      for id in "${available[@]}"; do
-        echo "refill:   FM_TRACKER_CLAIM=1 FM_BR_RECEIPT_BIN=\"$FM_BR_RECEIPT_BIN\" FM_REFILL_PROJECT=\"$PROJECT\" \"$FM_REFILL_SPAWN_BIN\" \"$id\" \"$PROJECT\" \"$FM_REFILL_HARNESS\" --mode \"$FM_REFILL_MODE\" --yolo off"
-      done
-    fi
+  if [ "${#available[@]}" -gt 0 ]; then
+    for id in "${available[@]}"; do
+      fm_refill_claim_and_launch "$id"
+    done
   fi
   fm_refill_lock_release
   return 0
@@ -378,5 +385,5 @@ echo "fleet-refill: productive=$productive reserved=$reserved refill_safe=$refil
 if [ "$serialization_debt" -ne 0 ]; then
   exit 1
 fi
-echo "fleet-ok: capacity derived from the shared projection; automatic refill remains gated (config/refill-auto or FM_REFILL_AUTO=1)"
+echo "fleet-ok: capacity derived from the shared projection; refill is alert-only until the automatic gate is enabled (config/refill-auto or FM_REFILL_AUTO=1)"
 exit 0

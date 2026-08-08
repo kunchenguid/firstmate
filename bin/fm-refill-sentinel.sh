@@ -3,7 +3,10 @@
 # retains ONLY cadence, the authoritative candidate query, logging, and
 # notification policy. It never classifies attempts and never recounts
 # capacity. Invoked by the away-mode daemon heartbeat fleet review and by the
-# attended refill path; it starts no scheduler or daemon of its own.
+# refill path; it starts no scheduler or daemon of its own. Task 15 adds the
+# alert-only rollback mode report: without config/refill-auto or
+# FM_REFILL_AUTO=1 the sentinel reports mode=alert-only and never dispatches
+# or launches regardless (the sentinel is a consumer/reporter only).
 set -u
 FM_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,6 +47,15 @@ FM_REFILL_SENTINEL_LOG="${FM_REFILL_SENTINEL_LOG:-$FM_HOME/state/refill-sentinel
 FM_REFILL_TARGET_PRODUCTIVE="${FM_REFILL_TARGET_PRODUCTIVE:-6}"
 FM_REFILL_RESERVED_CEILING="${FM_REFILL_RESERVED_CEILING:-10}"
 
+# --- rollback flip (Task 15): the sentinel is alert-only unless the
+# automatic-refill gate is on. It never dispatches regardless; the mode is
+# reported in the log line and the verbose note so the wiring is verifiable.
+FM_REFILL_SENTINEL_MODE="alert-only"
+if [ "${FM_REFILL_AUTO:-0}" = 1 ] \
+  || [ -f "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/refill-auto" ]; then
+  FM_REFILL_SENTINEL_MODE=automatic
+fi
+
 # refill_candidates_json: the authoritative candidate query (read-only; br
 # reads pass --no-auto-flush so the tracked .beads/issues.jsonl export is
 # never rewritten by the sentinel). Safe when br is absent or the project is
@@ -65,12 +77,12 @@ alert=$(echo "$cap" | jq -r '
     "REFILL-ALERT: productive \(.aggregate.productive_count) below target \('"$FM_REFILL_TARGET_PRODUCTIVE"')"
   else "" end')
 candidates=$(refill_candidates_json)
-printf '%s %s\n' "$now" "sentinel: cadence=$FM_REFILL_SENTINEL_CADENCE_SECS ${alert:-refill-safe} candidates=$(echo "$candidates" | jq 'length')" \
+printf '%s %s\n' "$now" "sentinel: cadence=$FM_REFILL_SENTINEL_CADENCE_SECS mode=$FM_REFILL_SENTINEL_MODE ${alert:-refill-safe} candidates=$(echo "$candidates" | jq 'length')" \
   >> "$FM_REFILL_SENTINEL_LOG" 2>/dev/null || true
 if [ -n "${FM_REFILL_SENTINEL_VERBOSE:-}" ]; then
   # consume-only note: prints aggregate values read from the object, never a
   # recount or a re-classification of rows
-  printf '%s\n' "sentinel: consumed aggregate cadence=$FM_REFILL_SENTINEL_CADENCE_SECS refill_safe=$(echo "$cap" | jq -r '.aggregate.refill_safe') productive=$(echo "$cap" | jq -r '.aggregate.productive_count') reserved=$(echo "$cap" | jq -r '.aggregate.reserved_ownership_count') alert_only=$(echo "$cap" | jq -r '.aggregate.alert_only') reconciliation=$(echo "$cap" | jq -r '.aggregate.reconciliation_required')"
+  printf '%s\n' "sentinel: consumed aggregate cadence=$FM_REFILL_SENTINEL_CADENCE_SECS mode=$FM_REFILL_SENTINEL_MODE refill_safe=$(echo "$cap" | jq -r '.aggregate.refill_safe') productive=$(echo "$cap" | jq -r '.aggregate.productive_count') reserved=$(echo "$cap" | jq -r '.aggregate.reserved_ownership_count') alert_only=$(echo "$cap" | jq -r '.aggregate.alert_only') reconciliation=$(echo "$cap" | jq -r '.aggregate.reconciliation_required')"
 fi
 [ -n "$alert" ] || exit 0
 printf '%s\n' "$alert"

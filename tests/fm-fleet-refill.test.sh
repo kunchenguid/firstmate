@@ -487,6 +487,60 @@ test_frozen_observation_parity() {
   pass "one frozen observation gives deterministic rows and aggregates across consumers"
 }
 
+# --- Task 15: deletion and alert-only rollback (2026-08-08) --------------
+# The legacy arithmetic is already gone post-quarantine/cutover; these
+# fixtures pin that a legacy manifest and output mtimes never become fallback
+# arithmetic, that the rollback flip keeps --refill alert-only without
+# touching any attempt/bead/branch/ref/copy/receipt record, and that missing
+# evidence never converts into zero capacity.
+
+test_legacy_manifest_and_output_mtimes_never_fallback() {
+  # a state/fleet-manifest.jsonl with fresh mtimes and a fake output file with
+  # a fresh mtime must be ignored completely by the cut-over projection
+  local id out
+  id=legacy-m
+  printf '%s\n' "$id" > "$STATE/fleet-manifest.jsonl"
+  mkdir -p "$TMP_ROOT/output-tasks"
+  : > "$TMP_ROOT/output-tasks/$id.output"
+  printf 'kind=ship\nmode=direct-PR\n' > "$STATE/$id.meta"
+  out=$(FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_BIN="$FAKE_CREW" \
+    "$ROOT/bin/fm-fleet-refill.sh" --count-json 2>/dev/null)
+  assert_not_contains "$out" "manifest" "legacy manifest leaked into capacity"
+  pass "legacy manifests and output mtimes never become fallback arithmetic"
+}
+
+test_rollback_is_alert_only_and_preserves_everything() {
+  # with config/refill-auto absent and FM_REFILL_AUTO != 1, --refill must not
+  # dispatch; attempts, beads, branches, refs, copies, and receipts are
+  # untouched (byte-compare the state dir). A fresh empty state keeps the
+  # projection complete so the rollback flip itself is what is exercised.
+  local state cand before after out
+  state="$TMP_ROOT/rollback-state"
+  cand="$TMP_ROOT/rollback-candidates.json"
+  mkdir -p "$state"
+  printf '[{"id":"dos-rb","planned_path":"docs/"}]' > "$cand"
+  before=$(find "$state" -type f -exec sha256sum {} + | sort)
+  out=$(FM_STATE_OVERRIDE="$state" FM_REFILL_AUTO=0 FM_REFILL_CANDIDATES_FILE="$cand" \
+    FM_CREW_STATE_BIN="$FAKE_CREW" \
+    "$ROOT/bin/fm-fleet-refill.sh" --refill 2>&1 || true)
+  assert_contains "$out" "fleet-ok" "rollback mode did not stay alert-only"
+  assert_not_contains "$out" "launch " "rollback mode dispatched"
+  after=$(find "$state" -type f -exec sha256sum {} + | sort)
+  [ "$before" = "$after" ] || fail "rollback mutated the state dir"
+  pass "rollback disables automatic dispatch and preserves every attempt record"
+}
+
+test_rollback_never_restores_legacy_arithmetic() {
+  # missing evidence yields ambiguous/incomplete rows, never zero capacity
+  local out
+  printf 'kind=ship\nmode=direct-PR\n' > "$STATE/legacy-r.meta"
+  out=$(FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_BIN="$FAKE_CREW" \
+    "$ROOT/bin/fm-fleet-refill.sh" --count-json 2>/dev/null)
+  echo "$out" | jq -e '.aggregate.refill_safe == false' >/dev/null \
+    || fail "rollback invented capacity"
+  pass "rollback never converts missing evidence into zero capacity"
+}
+
 test_lane_checker_defaults_to_project_scripts_path
 test_refill_cadence_propagates_lane_contract_debt
 test_cutover_verdict_derives_from_shared_projection
@@ -495,3 +549,6 @@ test_cutover_still_propagates_serialization_debt
 test_count_json_emits_shared_object
 test_cutover_verdict_is_unchanged_in_shadow_mode
 test_frozen_observation_parity
+test_legacy_manifest_and_output_mtimes_never_fallback
+test_rollback_is_alert_only_and_preserves_everything
+test_rollback_never_restores_legacy_arithmetic

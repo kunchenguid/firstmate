@@ -5,8 +5,10 @@
 # serializes only on a concrete overlap with the FROZEN provisional evidence
 # in a current attempt's delivery record; the home lock serializes concurrent
 # refill waves so a bead is never double-dispatched; completion or merge
-# events never decrement capacity directly; attended mode prints the exact
-# next-wave dispatch commands without launching, allocating, or claiming; and
+# events never decrement capacity directly; without the automatic gate
+# (config/refill-auto or FM_REFILL_AUTO=1) --refill is alert-only rollback
+# (Task 15) - it prints the informational admission verdict and the alert-only
+# verdict, never dispatch commands, launches, allocations, or claims; and
 # provisional planned paths never claim a landing (the pre-land actual-diff
 # authority stays with bin/fm-review-diff.sh, Task 11).
 set -u
@@ -188,21 +190,23 @@ test_completion_or_merge_alone_never_decrements_capacity() {
   pass "a completion notification or merge event never decrements capacity directly"
 }
 
-test_attended_mode_prints_commands_without_launching_or_mutating() {
-  # no config/refill-auto and FM_REFILL_AUTO != 1: --refill prints the exact
-  # next-wave dispatch commands and never launches, allocates attempts, or
-  # claims beads
+test_rollback_mode_is_alert_only_and_never_dispatches() {
+  # no config/refill-auto and FM_REFILL_AUTO != 1: --refill prints the
+  # informational admission verdict and the alert-only rollback verdict, and
+  # never prints next-wave dispatch commands, launches, allocates attempts,
+  # or claims beads
   local out aidcount
   fresh_state
   printf '[{"id":"dos-att","planned_path":"docs/"},{"id":"dos-att-b","planned_path":"src/"}]' > "$READY_JSON"
   out=$(FM_REFILL_AUTO=0 "$ROOT/bin/fm-fleet-refill.sh" --refill 2>&1 || true)
-  assert_contains "$out" "next-wave" "attended refill printed no next-wave commands"
-  assert_contains "$out" "dos-att" "attended refill omitted an admitted candidate"
-  assert_not_contains "$out" "launch " "attended refill launched"
+  assert_contains "$out" "fleet-ok: alert-only" "rollback mode did not print the alert-only verdict"
+  assert_contains "$out" "admit dos-att" "rollback mode omitted the informational admission verdict"
+  assert_not_contains "$out" "next-wave" "rollback mode printed next-wave dispatch commands"
+  assert_not_contains "$out" "launch " "rollback mode launched"
   aidcount=$(find "$STATE/attempts" -name '*.json' 2>/dev/null | wc -l)
-  [ "$aidcount" = 0 ] || fail "attended refill allocated attempts"
-  [ ! -s "$FAKE_CLAIMS" ] || fail "attended refill claimed beads"
-  pass "attended mode prints the exact dispatch commands and never launches, allocates, or claims"
+  [ "$aidcount" = 0 ] || fail "rollback refill allocated attempts"
+  [ ! -s "$FAKE_CLAIMS" ] || fail "rollback refill claimed beads"
+  pass "rollback mode prints the alert-only verdict and never dispatches, allocates, or claims"
 }
 
 test_actual_diffs_remain_authoritative_pre_land() {
@@ -220,7 +224,7 @@ test_refill_acts_only_on_complete_projection
 test_provisional_planned_path_admission_serializes_on_concrete_conflict
 test_no_duplicate_dispatch_on_concurrent_refill
 test_completion_or_merge_alone_never_decrements_capacity
-test_attended_mode_prints_commands_without_launching_or_mutating
+test_rollback_mode_is_alert_only_and_never_dispatches
 test_actual_diffs_remain_authoritative_pre_land
 
 echo "all fm-refill-admission tests passed"

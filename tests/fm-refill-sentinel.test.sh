@@ -134,9 +134,31 @@ test_sentinel_env_cadence_overrides_config() {
   pass "FM_REFILL_SENTINEL_CADENCE_SECS still overrides the config file"
 }
 
+# --- Task 15: alert-only rollback mode -------------------------------------
+# Without the automatic gate (config/refill-auto or FM_REFILL_AUTO=1) the
+# sentinel reports alert-only mode in its log and verbose output; with the
+# gate on it reports automatic. It never dispatches regardless.
+NOAUTO_CONFIG="$TMP_ROOT/noauto-config"
+mkdir -p "$NOAUTO_CONFIG"
+
+test_sentinel_reports_alert_only_mode_without_the_automatic_gate() {
+  local out
+  out=$(FM_CAPACITY_OBSERVATION_FILE="$TMP_ROOT/safe.json" FM_REFILL_SENTINEL_VERBOSE=1 \
+    FM_CONFIG_OVERRIDE="$NOAUTO_CONFIG" FM_REFILL_AUTO=0 \
+    "$ROOT/bin/fm-refill-sentinel.sh" 2>&1)
+  assert_contains "$out" "mode=alert-only" "sentinel did not report the alert-only rollback mode"
+  assert_contains "$out" "mode=alert-only" "sentinel log line lacks the alert-only mode"
+  out=$(FM_CAPACITY_OBSERVATION_FILE="$TMP_ROOT/safe.json" FM_REFILL_SENTINEL_VERBOSE=1 \
+    FM_CONFIG_OVERRIDE="$NOAUTO_CONFIG" FM_REFILL_AUTO=1 \
+    "$ROOT/bin/fm-refill-sentinel.sh" 2>&1)
+  assert_contains "$out" "mode=automatic" "sentinel did not report automatic mode with the gate on"
+  pass "sentinel reports alert-only mode unless the automatic gate is on"
+}
+
 test_sentinel_is_silent_when_refill_is_safe
 test_sentinel_notifies_on_reconciliation_or_alert
 test_sentinel_never_counts
 test_sentinel_honors_cadence_config
 test_sentinel_invalid_cadence_falls_back_to_default
 test_sentinel_env_cadence_overrides_config
+test_sentinel_reports_alert_only_mode_without_the_automatic_gate
