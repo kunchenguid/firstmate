@@ -985,6 +985,163 @@ test_self_reload_is_wired() {
   pass "the board self-reloads and stays self-contained"
 }
 
+# A snapshot carrying one of every row the reply layer has to decide about: a
+# main captain decision, a secondmate decision that IS a backlog hold, a
+# secondmate decision that is only a task-level open decision, and a PR row.
+controls_snapshot() {
+  snapshot_json '[{"state": "queued", "id": "d1", "captain_actionable": true,
+      "title": "Choose the rollout window", "hold_reason": "Both windows cost money",
+      "repo": "alpha"}]' \
+    '[{"id": "ios", "registered": true, "provenance": {"selected": "structured-home"},
+       "current": {"state": "captain_decision"},
+       "decisions_open": [
+         {"id": "b7", "key": "b7", "verb": "captain-hold", "summary": "Pick the signing route",
+          "reason": "two routes", "source": "backlog"},
+         {"id": "t9", "key": "api-shape", "verb": "needs-decision", "summary": "Which API shape",
+          "reason": null, "source": "status"}],
+       "holds": [], "queued": [], "counts": {}, "omitted": []}]' \
+  | jq '.tasks = [{id: "t1", kind: "ship", project: "alpha",
+        backlog: {title: "Wire the intake form", repo: "alpha"},
+        pr: {url: "https://github.com/example/alpha/pull/9"},
+        current_state: {state: "working"}}]'
+}
+
+# The reply layer must never appear unless it was asked for, because the same
+# file is what gets served read-only.
+test_controls_are_absent_unless_asked_for() {
+  local snap board
+  snap=$TMP_ROOT/nocontrols.json
+  board=$TMP_ROOT/nocontrols.html
+  controls_snapshot > "$snap"
+  "$BOARD" --snapshot "$snap" --no-quota --out "$board" >/dev/null \
+    || fail "the board must still render without the controls flag"
+  assert_no_grep 'class="rc"' "$board" "a board rendered without --controls carries no reply layer"
+  assert_no_grep 'FM-BOARD-REQUEST' "$board" "a board rendered without --controls queues nothing"
+  assert_no_grep 'data-open=' "$board" "a board rendered without --controls has no control markup"
+  assert_grep 'http-equiv="refresh" content="25"' "$board" \
+    "a board rendered without --controls keeps its own meta refresh untouched"
+  pass "the default board is unchanged by the existence of the reply layer"
+}
+
+# The reply layer one row carries: everything from that row's control block up
+# to the next one, so an assertion cannot accidentally read a neighbour.
+control_block() {  # <board> <home> <id>
+  FM_CB_HOME=$2 FM_CB_ID=$3 perl -0777 -ne '
+    my $open = "<div class=\"rc\" data-home=\"$ENV{FM_CB_HOME}\" data-id=\"$ENV{FM_CB_ID}\"";
+    my $at = index($_, $open);
+    exit 1 if $at < 0;
+    my $rest = substr($_, $at + length($open));
+    my $next = index($rest, "<div class=\"rc\"");
+    print $next < 0 ? $rest : substr($rest, 0, $next);
+  ' "$1"
+}
+
+# Which controls a row gets is the safety-relevant decision: a task-level
+# decision has no backlog row behind it, so it has no hold kind to change and
+# must not offer to be set aside.
+test_controls_match_what_each_row_can_actually_resolve() {
+  local snap board block
+  snap=$TMP_ROOT/controls.json
+  board=$TMP_ROOT/controls.html
+  controls_snapshot > "$snap"
+  "$BOARD" --snapshot "$snap" --no-quota --controls --out "$board" >/dev/null \
+    || fail "the board must render with the controls flag"
+
+  # A main captain decision is a backlog hold: answerable and deferrable.
+  block=$(control_block "$board" "main" "d1")
+  assert_contains "$block" 'data-open="answer"' "a main captain decision must offer an answer"
+  assert_contains "$block" 'data-open="defer"' "a main captain decision must offer to be set aside"
+
+  # A secondmate decision that is a backlog hold behaves the same, in its home.
+  block=$(control_block "$board" "ios" "b7")
+  assert_contains "$block" 'data-open="answer"' "a secondmate backlog decision must offer an answer"
+  assert_contains "$block" 'data-open="defer"' "a secondmate backlog decision must offer to be set aside"
+
+  # A task-level open decision has no backlog row, so setting it aside would
+  # name nothing. It carries its decision key so two on one task stay distinct.
+  block=$(control_block "$board" "ios" "t9")
+  assert_contains "$block" 'data-key="api-shape"' \
+    "a task-level decision must carry its decision key, not just its task"
+  assert_contains "$block" 'data-open="answer"' "a task-level decision must offer an answer"
+  case "$block" in
+    *'data-open="defer"'*)
+      fail "a task-level decision has no backlog hold to change and must not offer to be set aside" ;;
+  esac
+
+  block=$(control_block "$board" "main" "t1")
+  assert_contains "$block" 'data-open="merge"' "a PR awaiting the captain must offer a merge request"
+  assert_contains "$block" 'data-open="reply"' "a PR awaiting the captain must offer a reply"
+
+  assert_grep 'data-intent="ask"' "$board" "the board must offer one composer for a new ask"
+
+  # Every control that can hold the refresh has to say so. The composer is
+  # always open, so text left in it holds the board with no form to close.
+  holds=$(grep -o 'class="rc-hold"' "$board" | wc -l | tr -d ' ')
+  opens=$(grep -o 'class="rc-f" data-toggle' "$board" | wc -l | tr -d ' ')
+  [ "$holds" = "$((opens + 1))" ] \
+    || fail "each toggled control and the always-open composer must say the refresh is held, got $holds notes for $opens forms"
+  pass "each row offers only the controls it can actually resolve"
+}
+
+# The whole safety model rests on a control being unable to do anything itself.
+test_controls_can_only_queue_a_request() {
+  local snap board
+  snap=$TMP_ROOT/inert.json
+  board=$TMP_ROOT/inert.html
+  controls_snapshot > "$snap"
+  "$BOARD" --snapshot "$snap" --no-quota --controls --out "$board" >/dev/null \
+    || fail "the controls board must render"
+
+  # No way out of the page other than the Lavish bridge.
+  assert_no_grep 'fetch(' "$board" "a control must not call out over the network"
+  assert_no_grep 'XMLHttpRequest' "$board" "a control must not call out over the network"
+  assert_no_grep 'WebSocket' "$board" "a control must not open a socket"
+  assert_no_grep 'method="post"' "$board" "a control must not post anywhere"
+  ! grep -Eq '<form[^>]*action=' "$board" || fail "a control must not post anywhere"
+  assert_grep 'queuePrompt' "$board" "a control queues its request through the Lavish bridge"
+  assert_grep 'FM-BOARD-REQUEST' "$board" "a queued request carries the request marker"
+
+  # Hidden by CSS, revealed only once the bridge is proved present, so a
+  # statically served copy of this same file shows no control at all.
+  assert_grep '.rc{display:none' "$board" "the reply layer must be hidden by default"
+  assert_grep 'body.lavish .rc{display:block' "$board" \
+    "the reply layer must be revealed only for a page carrying the Lavish bridge"
+  assert_grep 'classList.add("lavish")' "$board" \
+    "the reveal must be gated on the bridge being present"
+  # An explicit display beats [hidden], so without this a closed control stands
+  # open and every form on the board shows at once.
+  assert_grep '.rc-f[hidden]{display:none' "$board" \
+    "a closed control must stay closed against the layer own display rule"
+
+  # With controls the reload is managed so it can hold while a control is open.
+  # The meta refresh must survive ONLY for a page that runs no script, so every
+  # occurrence of it has to be the one inside noscript.
+  local all inert
+  all=$(grep -o '<meta http-equiv="refresh"' "$board" | wc -l | tr -d ' ')
+  inert=$(grep -o '<noscript><meta http-equiv="refresh"' "$board" | wc -l | tr -d ' ')
+  [ "$inert" = 1 ] \
+    || fail "the meta refresh must move into noscript once the reload is managed, got $inert"
+  [ "$all" = "$inert" ] \
+    || fail "a managed reload must not race a live meta refresh ($all refresh tags, $inert in noscript)"
+  pass "a control can only queue a request; it reaches nothing else"
+}
+
+test_control_targets_are_escaped() {
+  local snap board
+  snap=$TMP_ROOT/hostile-controls.json
+  board=$TMP_ROOT/hostile-controls.html
+  snapshot_json '[{"state": "queued", "id": "d1", "captain_actionable": true,
+      "title": "Ship \"><script>alert(1)</script> now", "hold_reason": "x", "repo": "alpha"}]' \
+    '[]' > "$snap"
+  "$BOARD" --snapshot "$snap" --no-quota --controls --out "$board" >/dev/null \
+    || fail "hostile prose must still render with controls"
+  assert_no_grep '<script>alert(1)</script>' "$board" \
+    "hostile prose must not reach the page as markup through a control attribute"
+  assert_grep 'data-what="Ship &quot;&gt;' "$board" \
+    "hostile prose must be escaped inside the control attribute that carries it"
+  pass "fleet prose stays escaped where a control carries it"
+}
+
 test_renders_live_fixture_home
 test_project_last_change_comes_from_the_clone
 test_yesterday_uses_local_calendar_arithmetic
@@ -1013,3 +1170,7 @@ test_secondmate_health_and_activity_use_authoritative_counts
 test_unmeasurable_allowance_is_not_a_zero_gauge
 test_usage_errors_refuse
 test_self_reload_is_wired
+test_controls_are_absent_unless_asked_for
+test_controls_match_what_each_row_can_actually_resolve
+test_controls_can_only_queue_a_request
+test_control_targets_are_escaped

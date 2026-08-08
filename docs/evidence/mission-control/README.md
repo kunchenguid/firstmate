@@ -6,6 +6,11 @@
 `before-mobile.png` and `after-mobile.png` are that same pair at 390px, the width the captain reads it at.
 In the after images three of the six calls have been set aside, so they sit in the shelf, which is shown open; on the board itself the shelf is closed by default.
 
+`before-controls.png` and `after-controls.png` are the same board served through Lavish without and with `--controls`, at desktop width, and `before-controls-mobile.png` and `after-controls-mobile.png` are that pair at 390px with a merge confirmation open.
+The after images show each row carrying only the controls it can resolve: the two backlog-held decisions offer an answer and setting aside, the task-level decision offers an answer alone because it has no backlog row to set aside, and the PR offers a merge request and a reply.
+
+`controls-served-statically.png` is the safety property that matters most, so it is captured rather than asserted in prose: it is the very same `--controls` file opened directly with no Lavish server, and it renders as the read-only board with no controls and no dead affordances.
+
 All of these are rendered from a synthetic fixture home, never from a real fleet, so they carry no private project, decision, or PR data.
 The fixture pins the render clock so the comparison is not affected by the day it was captured.
 

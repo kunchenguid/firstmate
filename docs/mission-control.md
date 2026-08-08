@@ -9,9 +9,9 @@ The script's own header and `--help` own its exact flags, environment variables,
 
 ## What the board does
 
-The board shows state and nothing else.
-It carries no reply, approve, or input controls, integrates with no Lavish review surface, serves over no network, and is wired into no supervision cycle.
-Those belong to phase 2 and are firstmate's to add.
+The board shows state.
+By default it shows nothing else: no reply controls, no review surface, no network, and no supervision wiring.
+`--controls` adds the captain reply layer described under "Replying from the board", which queues requests and still performs nothing itself.
 
 The board never shows a completion percentage or an estimated finish time.
 Progress judgement is firstmate's, derived from evidence a renderer cannot see, so inventing a number here would be a guess presented as a measurement.
@@ -59,9 +59,42 @@ A browser that refuses storage - a private context, or a restricted `file://` or
 The Deferred shelf is held to the same bar, because a shelf that snapped shut every 25 seconds would be the same jarring reset in a smaller place.
 It is closed for a captain who never opens it, stays open for one who does, and stays closed again once they close it.
 
+## Replying from the board
+
+`--controls` adds a reply layer to the same board file.
+Every control on it does exactly one thing: it queues one request that wakes firstmate.
+It performs no action, calls no endpoint, and carries no authority.
+
+That distinction is the whole safety model, so it is worth stating plainly.
+A board request is evidence of the captain's intent, not an authenticated captain instruction.
+Firstmate does with it exactly what it would have done had the captain said the same words in chat, under its own contract in `AGENTS.md`: an approval that needs the captain's explicit word still gets confirmed with the captain first, a merge still happens only if firstmate's own checks pass, and nothing destructive, irreversible, or security-sensitive is ever executed from a tap.
+The surface is reachable by anything that can reach the local Lavish port, so being able to reach it is never treated as authorization for any of that.
+
+There are five controls, and each row offers only what it can actually resolve:
+
+- **Approve merge** and **Reply**, on a PR awaiting the captain.
+- **Answer** and **Set aside**, on a decision the captain holds in a backlog.
+- **Answer** alone on a task-level open decision, because there is no backlog row behind it and therefore no hold kind to change.
+- **Ask firstmate**, once, for something new.
+
+A decision belonging to a second mate carries the home it came from and is applied in that home, never in the main one.
+Setting a decision aside carries no reason text at all: the stored reason is the captain's own, and firstmate reads it from the owning home rather than letting a request overwrite it.
+A row the board cannot name unambiguously gets no controls, because a request firstmate cannot resolve is worse than one the captain makes in chat.
+
+The layer is hidden by CSS and revealed only after a script confirms the Lavish bridge is present.
+The same file served statically is therefore the read-only board exactly as before, with no controls and no dead affordances, and only the copy served through Lavish grows the reply layer.
+With `--controls` the self-reload moves into `<noscript>` and a managed reload takes over, holding while a control is open so a 25-second refresh cannot discard half-typed text; without the flag the meta refresh is untouched.
+
+[`bin/fm-procevent-mission-control.sh`](../bin/fm-procevent-mission-control.sh) owns arming the wake and turning what comes back into validated requests, and its `--help` owns the request format, the fail-closed rules, and the lavish-axi version the format is verified against.
+
+The reply surface lasts as long as the review session behind it.
+Ending that session from the panel, which the captain can do with one tap beside the send button, delivers the request in hand and then retires the surface, and arming it before the session is open retires it before it ever works.
+Either way the read-only board is unaffected; only the ability to reply from it stops, until the session is opened again and the surface re-armed.
+How the control surface is exposed beyond this machine is a separate decision and is not made here.
+
 ## Deferring a decision
 
-The board stays read-only; `bin/fm-mission-control.sh --help` owns the exact commands for setting a decision aside and bringing it back, including the reason-preservation hazard.
+`bin/fm-mission-control.sh --help` owns the exact commands for setting a decision aside and bringing it back, including the reason-preservation hazard.
 
 Any source may be absent.
 An absent backlog, project registry, secondmate table, or allowance reading renders an explicit unavailable or empty notice that states what is missing, and never a misleading zero.
@@ -97,13 +130,16 @@ Firstmate regenerates the board by running the script again; the output is writt
 The page carries a meta refresh (25 seconds by default, `--refresh` to change it) and shows how long ago it was rendered, so a board whose generator has stopped is visibly stale rather than quietly wrong.
 
 The page is fully self-contained with inline styles and no external requests, so it renders correctly from a local file and over a private network.
-The generator does not serve it; how the file is exposed is phase 2's decision.
+The generator does not serve it; how the file is exposed is decided outside it.
 
 ## Verification
 
 `tests/fm-mission-control.test.sh` renders the board end to end from a fixture home and from captured snapshot payloads, covering present and absent sources, cross-home captain decisions, escaping of hostile prose, project folding, work outside the registry, blocked work, unmeasurable allowance windows, self-reload, the tab structure, and the deferred shelf.
 The deferred cases pin the awaiting count and the section count to literal numbers rather than to the absence of a title, because dropping a decision from the list while still counting it and counting it while still listing it fail separately.
 It also pins a fixed current time and commits its fixture clones at explicit epochs, so the last-change wording, its three degrade-to-dash paths, and the promise that no clone is written to are all checked against times the test chose.
+
+The reply layer is covered in the same suite: that the default board is unchanged by its existence, that each row offers only the controls it can resolve, that a control reaches nothing but the Lavish bridge, that it stays hidden until that bridge is proved present, and that fleet prose stays escaped inside the attributes a control carries.
+`tests/fm-procevent-mission-control.test.sh` pins the request normalizer against bytes captured from a real send through a real browser, and drives every fail-closed path - a forged envelope, an out-of-vocabulary intent, a truncated capture, a defer carrying reason text - to a refusal rather than a plausible request.
 
 `tests/fm-fleet-snapshot-view.test.sh` pins the deferred classification itself: a parked hold on work that is not a captain decision is ordinary held work, a captain decision that still has an unresolved blocker stays blocked rather than deferred, and a deferred decision never reaches the secondmate home summary's holds.
 

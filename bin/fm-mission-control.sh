@@ -34,6 +34,7 @@
 #   fm-mission-control.sh --stdout         print the HTML instead of writing
 #   fm-mission-control.sh --no-quota       skip the quota-axi allowance read
 #   fm-mission-control.sh --refresh <sec>  self-reload interval (default 25)
+#   fm-mission-control.sh --controls       add the captain reply layer
 #   fm-mission-control.sh --snapshot <f>   render a captured snapshot JSON file
 #   fm-mission-control.sh -h|--help        usage
 #
@@ -60,6 +61,25 @@
 #   it is not safe to copy. A different string silently rewrites the captain's
 #   decision text.
 #
+# Reply controls (--controls):
+#   The render stays read-only. --controls adds a reply layer whose every control
+#   does exactly one thing: queue ONE request through the Lavish bridge that wakes
+#   firstmate. It performs no action, calls no endpoint, and carries no authority;
+#   firstmate adjudicates each request under its own contract, exactly as if the
+#   captain had said the same words in chat. The surface is reachable by anything
+#   that can reach the local Lavish port, so reachability is never authorization.
+#
+#   The layer is hidden by CSS and revealed only after a script confirms the
+#   Lavish bridge is present, so the same file served statically is the read-only
+#   board it is without this flag, and no viewer is ever shown a dead control.
+#   With --controls the self-reload moves into <noscript> and a managed reload
+#   takes over, holding while a control is open so a 25-second refresh cannot
+#   discard half-typed text. Without the flag the meta refresh is untouched.
+#
+#   Each request is one line: FM-BOARD-REQUEST followed by one JSON object.
+#   bin/fm-procevent-mission-control.sh owns arming the wake and normalizing what
+#   comes back; see docs/mission-control.md for the controls and their limits.
+#
 # Exit codes: 0 rendered, 1 runtime failure, 2 usage error.
 #
 # Output is written through a temporary file and renamed into place, so a
@@ -80,6 +100,7 @@ TO_STDOUT=0
 WITH_QUOTA=1
 REFRESH=25
 SNAPSHOT_FILE=""
+CONTROLS=false
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -87,6 +108,7 @@ while [ $# -gt 0 ]; do
     --out) [ $# -ge 2 ] || die "--out needs a path" 2; OUT=$2; shift 2 ;;
     --stdout) TO_STDOUT=1; shift ;;
     --no-quota) WITH_QUOTA=0; shift ;;
+    --controls) CONTROLS=true; shift ;;
     --refresh)
       [ $# -ge 2 ] || die "--refresh needs seconds" 2
       case "$2" in ''|*[!0-9]*|0) die "--refresh must be a positive integer" 2 ;; esac
@@ -294,6 +316,7 @@ HTML=$(
     --argjson updated "$UPDATED" \
     --argjson projects_present "$PROJECTS_PRESENT" \
     --arg today "$TODAY" \
+    --argjson controls "$CONTROLS" \
     --argjson refresh "$REFRESH" '
 
 # --------------------------------------------------------------------------
@@ -376,7 +399,10 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
   title: (.title // .raw),
   detail: (.hold_reason // .blocked_reason // ""),
   repo: (.repo // "" | short_repo),
-  link: (.pr_url // .report_path // (.links // [])[0] // null)
+  link: (.pr_url // .report_path // (.links // [])[0] // null),
+  # A main-home captain decision is always a backlog hold, so both controls
+  # apply: it can be answered, and it has a row whose hold kind can be changed.
+  ctl: {intents: ["answer", "defer"], home: "main", id: .id, key: ""}
 })) as $waiting_decisions |
 
 ($work_tasks | map(select((.pr.url // "") != "")) | map(. as $t | {
@@ -389,18 +415,36 @@ def yolo_for($repo): ($registry_by_name[$repo // ""].yolo // false);
   detail: "",
   repo: ($t | repo_of),
   yolo: ($t | repo_of | yolo_for(.)),
-  link: $t.pr.url
+  link: $t.pr.url,
+  ctl: {intents: ["merge", "reply"], home: "main", id: $t.id, key: ""}
 })) as $waiting_prs |
 
+# A secondmate decision row is not one shape. A "backlog" decision is a captain
+# hold whose id is that home BACKLOG ITEM, so it can be answered and set aside. A
+# "status" decision is a task-level open decision whose id is the TASK and whose
+# key is the decision - there is no backlog row behind it, so it has no hold kind
+# to change and is answered only, carrying both so two decisions on one task stay
+# distinguishable. A row naming neither gets no controls at all, because a
+# request firstmate cannot resolve is worse than one the captain makes in chat.
 ($sm_records | map(. as $sm |
-  ($sm.decisions_open // []) | map({
+  ($sm.decisions_open // []) | map(
+    ((.id // "") | tostring) as $did |
+    ((.key // "") | tostring) as $dkey |
+    {
     kind: "decision",
     home: ($sm.id // "secondmate"),
     id: (.id // .key),
     title: (.summary // .key // "decision"),
     detail: (.reason // ""),
     repo: "",
-    link: null
+    link: null,
+    ctl: (if $did == "" and $dkey == "" then null
+          else {
+            intents: (if (.source // "") == "backlog" then ["answer", "defer"] else ["answer"] end),
+            home: ($sm.id // "secondmate"),
+            id: $did,
+            key: $dkey
+          } end)
   })) | add // []) as $waiting_secondmate |
 
 ($sm_records | map(. as $sm |
@@ -679,6 +723,73 @@ def deferred_row:
   + (if ($d.detail // "") == "" then "" else (@html "<span class=\"hint\">\($d.detail)</span>") end)
   + "</span></div>";
 
+# ------------------------------------------------------- reply controls ----
+# Every control below queues ONE request and performs nothing. The markup holds
+# no endpoint, no token, and no action; the only thing a tap reaches is the
+# Lavish bridge, and the only thing that travels is captain intent for firstmate
+# to adjudicate. With $controls false every def here yields the empty string, so
+# the default board is byte-identical to the one rendered without the flag.
+def rc_button($intent; $label):
+  (@html "<button type=\"button\" class=\"rc-b\" data-open=\"\($intent)\">\($label)</button>");
+
+def rc_form($intent; $question; $note_label; $send_label):
+  (@html "<form class=\"rc-f\" data-toggle data-intent=\"\($intent)\" hidden>")
+  + (@html "<p class=\"rc-q\">\($question)</p>")
+  + (if $note_label == "" then ""
+     else (@html "<textarea class=\"rc-t\" rows=\"3\" maxlength=\"2000\" aria-label=\"\($note_label)\" placeholder=\"\($note_label)\"></textarea>") end)
+  + "<div class=\"rc-row\">"
+  + (@html "<button type=\"submit\" class=\"rc-go\">\($send_label)</button>")
+  + "<button type=\"button\" class=\"rc-x\">Cancel</button>"
+  + "</div>"
+  + "<p class=\"rc-hold\">The board holds its refresh while this is open.</p>"
+  + "</form>";
+
+def controls_for:
+  . as $w |
+  ($w.ctl // null) as $c |
+  if ($controls | not) or $c == null then "" else
+    (@html "<div class=\"rc\" data-home=\"\($c.home)\" data-id=\"\($c.id)\" data-key=\"\($c.key)\" data-what=\"\($w.title)\">")
+    + "<div class=\"rc-acts\">"
+    + (($c.intents | map(
+        if . == "merge" then rc_button("merge"; "Approve merge")
+        elif . == "reply" then rc_button("reply"; "Reply")
+        elif . == "answer" then rc_button("answer"; "Answer")
+        elif . == "defer" then rc_button("defer"; "Set aside")
+        else "" end)) | add // "")
+    + "<span class=\"rc-sent\" hidden></span></div>"
+    + (($c.intents | map(
+        if . == "merge" then rc_form("merge";
+             "Ask firstmate to merge this? Firstmate runs its own checks first and merges only if they pass.";
+             ""; "Send request")
+        elif . == "reply" then rc_form("reply";
+             "Send firstmate a note about this. It carries no approval on its own.";
+             "Your note"; "Send to firstmate")
+        elif . == "answer" then rc_form("answer";
+             "Your answer goes to firstmate, which applies it through its normal decision flow.";
+             "Your answer"; "Send answer")
+        elif . == "defer" then rc_form("defer";
+             "Set this aside? It leaves this list for the Deferred shelf, and your original reason is kept unchanged.";
+             ""; "Set aside")
+        else "" end)) | add // "")
+    + "</div>"
+  end;
+
+def need_item: need_row + controls_for;
+
+def ask_block:
+  if ($controls | not) then "" else
+    "<div class=\"rc rc-ask\" data-home=\"main\" data-id=\"\" data-key=\"\" data-what=\"\">"
+    + "<form class=\"rc-f\" data-intent=\"ask\">"
+    + "<p class=\"rc-q\">Ask firstmate for something new, or say what you want changed.</p>"
+    + "<textarea class=\"rc-t\" rows=\"3\" maxlength=\"2000\" aria-label=\"Ask firstmate\"></textarea>"
+    + "<div class=\"rc-row\"><button type=\"submit\" class=\"rc-go\">Send to firstmate</button>"
+    + "<span class=\"rc-sent\" hidden></span></div>"
+    # This composer is always open, so text left in it holds the refresh with no
+    # form to close. It has to say so, or the board just quietly stops updating.
+    + "<p class=\"rc-hold\">The board holds its refresh while there is text here.</p>"
+    + "</form></div>"
+  end;
+
 def project_card:
   . as $p |
   # Every quiet signal on this card - no decisions, nothing queued, nothing in
@@ -797,6 +908,47 @@ def quota_block:
     + (if ($providers | length) == 0 then "<p class=\"quiet\">No allowance providers reported.</p>" else "" end)
   end;
 
+# Hidden by CSS, revealed only once a script confirms the Lavish bridge, so the
+# same file served statically stays the read-only board and no viewer is ever
+# shown a control that cannot reach anything.
+def controls_css:
+  if ($controls | not) then "" else
+"/* ---- captain reply layer (--controls) ---- */
+.rc{display:none;}
+body.lavish .rc{display:block;border-top:1px solid var(--line);background:#fbfcfe;padding:4px 22px 13px;}
+body.lavish .rc-ask{border:1px solid var(--line);border-radius:16px;background:var(--panel);
+  box-shadow:var(--shadow);margin-top:14px;padding:15px 22px 17px;}
+.rc-acts{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 0 0;}
+.rc-b{appearance:none;-webkit-appearance:none;border:1px solid var(--line);background:var(--panel);
+  color:var(--slate);font:inherit;font-size:12.5px;font-weight:600;padding:6px 13px;
+  border-radius:999px;cursor:pointer;}
+.rc-b:hover{border-color:#cfd6e0;color:var(--ink);}
+.rc-b:focus-visible,.rc-go:focus-visible,.rc-x:focus-visible{outline:2px solid var(--amber);outline-offset:1px;}
+.rc-f{margin:11px 0 0;display:flex;flex-direction:column;gap:9px;}
+/* An explicit display beats the [hidden] default, so a closed form needs this
+   or every control on the board stands open at once. */
+.rc-f[hidden]{display:none;}
+.rc-q{margin:0;color:var(--muted);font-size:13px;}
+.rc-t{font:inherit;font-size:13.5px;color:var(--ink);background:var(--panel);border:1px solid var(--line);
+  border-radius:10px;padding:9px 11px;resize:vertical;width:100%;}
+.rc-t:focus-visible{outline:2px solid var(--amber);outline-offset:-1px;}
+.rc-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+.rc-go{appearance:none;-webkit-appearance:none;border:1px solid transparent;background:var(--ink);
+  color:#fff;font:inherit;font-size:12.5px;font-weight:600;padding:7px 15px;border-radius:999px;cursor:pointer;}
+.rc-go:hover{background:#2c3648;}
+.rc-x{appearance:none;-webkit-appearance:none;border:none;background:none;color:var(--muted);
+  font:inherit;font-size:12.5px;padding:7px 2px;cursor:pointer;text-decoration:underline;}
+.rc-x:hover{color:var(--ink);}
+.rc-hold{margin:0;color:var(--faint);font-size:11.5px;}
+.rc-sent{color:var(--green);font-size:12.5px;font-weight:600;overflow-wrap:anywhere;}
+.rc-sent.rc-bad{color:var(--red);}
+@media(max-width:720px){
+  body.lavish .rc,body.lavish .rc-ask{padding-left:16px;padding-right:16px;}
+  .rc-b,.rc-go{padding-top:9px;padding-bottom:9px;}
+}
+"
+  end;
+
 def health_block:
   (if ($backlog_present | not) then
      "<p class=\"quiet\">Backlog health is unavailable because the backlog could not be read.</p>"
@@ -829,7 +981,11 @@ def health_block:
 <html lang=\"en\"><head>
 <meta charset=\"utf-8\">
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
-<meta http-equiv=\"refresh\" content=\"" + ($refresh | tostring) + "\">
+"
++ (if $controls
+   then "<noscript><meta http-equiv=\"refresh\" content=\"" + ($refresh | tostring) + "\"></noscript>"
+   else "<meta http-equiv=\"refresh\" content=\"" + ($refresh | tostring) + "\">" end)
++ "
 <title>Mission Control</title>
 <style>
 :root{
@@ -1045,7 +1201,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
   .js .tabs{gap:3px;padding:4px}
   .tab{flex-direction:column;gap:3px;padding:8px 4px;font-size:11.5px;letter-spacing:-.01em}
 }
-</style>
+" + controls_css + "</style>
 <script>
 /* Chooses the tab before the body is parsed, so the board opens on the tab it
    was left on with no flash of the default one.
@@ -1141,9 +1297,10 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
 + (if $waiting_count == 0 and ($waiting_incomplete | not)
    then "<p class=\"quiet\">Nothing needs your decision right now.</p>"
    else "<div class=\"needs\">"
-     + (($waiting_notices | map(need_row) | add) // "")
-     + (($waiting_calls | map(need_row) | add) // "")
-     + (($waiting_prs | map(need_row) | add) // "") + "</div>" end)
+     + (($waiting_notices | map(need_item) | add) // "")
+     + (($waiting_calls | map(need_item) | add) // "")
+     + (($waiting_prs | map(need_item) | add) // "") + "</div>" end)
++ ask_block
 + (if $deferred_count == 0 then ""
    else "<details class=\"shelf\"><summary>"
      + "<svg class=\"chev\" viewBox=\"0 0 24 24\"><polyline points=\"9 6 15 12 9 18\"/></svg>"
@@ -1311,7 +1468,156 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
   }
 }());
 </script>
-</body></html>
+"
++ (if ($controls | not) then "" else
+"<script>
+/* The captain reply layer. It queues requests and performs nothing: the only
+   call it makes is to the Lavish bridge, and the only thing it sends is one
+   FM-BOARD-REQUEST line per deliberate tap. There is no endpoint, no token, and
+   no action here, so a tap can never be the thing that merges, answers, or sets
+   anything aside - firstmate decides all of that under its own contract. */
+(function () {
+  var tries = 0;
+
+  function bridge() {
+    return (window.lavish && typeof window.lavish.queuePrompt === \"function\"
+      && typeof window.lavish.sendQueuedPrompts === \"function\") ? window.lavish : null;
+  }
+
+  /* The controls stay hidden until the bridge is proved present, so a statically
+     served copy of this same file shows the read-only board and nothing else.
+     The bridge may be injected just after this runs, so give it a short window
+     rather than deciding on the first frame. */
+  function reveal() {
+    if (bridge()) { document.body.classList.add(\"lavish\"); return; }
+    if (++tries < 20) { setTimeout(reveal, 150); }
+  }
+  reveal();
+
+  function formsIn(block) {
+    return Array.prototype.slice.call(block.querySelectorAll(\".rc-f\"));
+  }
+
+  function shut(block) {
+    formsIn(block).forEach(function (f) {
+      if (f.hasAttribute(\"data-toggle\")) { f.hidden = true; }
+    });
+  }
+
+  function say(block, message, bad) {
+    var sent = block.querySelector(\".rc-sent\");
+    if (!sent) { return; }
+    sent.hidden = false;
+    sent.textContent = message;
+    if (bad) { sent.classList.add(\"rc-bad\"); } else { sent.classList.remove(\"rc-bad\"); }
+  }
+
+  function summary(intent, what) {
+    if (intent === \"merge\")  { return \"From the board - please merge: \" + what; }
+    if (intent === \"defer\")  { return \"From the board - set aside: \" + what; }
+    if (intent === \"answer\") { return \"From the board - answer on: \" + what; }
+    if (intent === \"reply\")  { return \"From the board - note on: \" + what; }
+    return \"From the board - a new ask\";
+  }
+
+  document.addEventListener(\"click\", function (ev) {
+    var el = ev.target;
+    if (el && el.nodeType !== 1) { el = el.parentElement; }
+    if (!el || !el.closest) { return; }
+
+    var opener = el.closest(\"[data-open]\");
+    if (opener) {
+      var block = opener.closest(\".rc\");
+      if (!block) { return; }
+      var want = opener.getAttribute(\"data-open\");
+      var already = false;
+      formsIn(block).forEach(function (f) {
+        if (f.getAttribute(\"data-intent\") === want && !f.hidden) { already = true; }
+        if (f.hasAttribute(\"data-toggle\")) { f.hidden = true; }
+      });
+      if (!already) {
+        formsIn(block).forEach(function (f) {
+          if (f.getAttribute(\"data-intent\") !== want) { return; }
+          f.hidden = false;
+          var area = f.querySelector(\".rc-t\");
+          if (area) { area.focus(); }
+        });
+      }
+      return;
+    }
+
+    var cancel = el.closest(\".rc-x\");
+    if (cancel) {
+      var owner = cancel.closest(\".rc\");
+      if (owner) { shut(owner); }
+    }
+  });
+
+  document.addEventListener(\"submit\", function (ev) {
+    var form = ev.target;
+    if (!form || !form.classList || !form.classList.contains(\"rc-f\")) { return; }
+    ev.preventDefault();
+    var block = form.closest(\".rc\");
+    if (!block) { return; }
+
+    var area = form.querySelector(\".rc-t\");
+    var note = area ? area.value.replace(/^\\s+|\\s+$/g, \"\") : \"\";
+    if (area && !note) { area.focus(); return; }
+
+    var request = {
+      v: 1,
+      intent: form.getAttribute(\"data-intent\"),
+      home: block.getAttribute(\"data-home\") || \"main\"
+    };
+    var id = block.getAttribute(\"data-id\");
+    var key = block.getAttribute(\"data-key\");
+    if (id) { request.id = id; }
+    if (key) { request.key = key; }
+    if (note) { request.note = note; }
+
+    var lav = bridge();
+    if (!lav) { say(block, \"Not sent - this board is not connected to firstmate.\", true); return; }
+    try {
+      lav.queuePrompt(\"FM-BOARD-REQUEST \" + JSON.stringify(request), {
+        tag: \"board-request\",
+        text: summary(request.intent, block.getAttribute(\"data-what\") || \"\")
+      });
+      lav.sendQueuedPrompts();
+    } catch (e) {
+      say(block, \"Not sent - the board could not reach firstmate.\", true);
+      return;
+    }
+    if (area) { area.value = \"\"; }
+    shut(block);
+    say(block, \"Sent to firstmate.\", false);
+  });
+
+  /* With the controls on, the meta refresh sits in <noscript> and this owns the
+     cadence, so a reload can be held while a control is open or carries typed
+     text instead of discarding what the captain is part way through writing. */
+  var every = " + (($refresh * 1000) | tostring) + ";
+  var due = Date.now() + every;
+
+  function busy() {
+    var open = document.querySelectorAll(\".rc-f[data-toggle]\");
+    var i;
+    for (i = 0; i < open.length; i++) { if (!open[i].hidden) { return true; } }
+    var areas = document.querySelectorAll(\".rc-t\");
+    for (i = 0; i < areas.length; i++) {
+      if (areas[i].value.replace(/^\\s+|\\s+$/g, \"\")) { return true; }
+    }
+    return false;
+  }
+
+  setInterval(function () {
+    if (Date.now() < due) { return; }
+    if (busy()) { return; }
+    window.location.reload();
+  }, 1000);
+}());
+</script>
+" end)
++ "</body></html>
 "
 '
 ) || die "rendering failed"
