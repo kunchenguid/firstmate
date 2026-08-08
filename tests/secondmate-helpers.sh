@@ -3,7 +3,7 @@
 # suites (fm-secondmate-lifecycle-e2e and fm-secondmate-safety).
 #
 # These mocks encode secondmate-lifecycle behavior (fake tmux that logs window
-# ops, fake treehouse that leases/returns homes, fake no-mistakes that records
+# ops, fake proj that creates/removes homes, fake no-mistakes that records
 # init/doctor), so they live here rather than in the generic tests/lib.sh. The
 # generic git/identity/meta primitives come from lib.sh, which this file pulls in.
 
@@ -12,9 +12,11 @@
 
 # A fake tmux (window ops are logged to FM_FAKE_TMUX_LOG, list-windows returns
 # FM_FAKE_TMUX_WINDOW, capture-pane echoes FM_FAKE_TMUX_CAPTURE) plus a fake
-# treehouse (durable lease of FM_FAKE_TREEHOUSE_HOME, recording the lease holder
-# to FM_FAKE_TREEHOUSE_LEASE_FILE; `return` removes the target and lease unless
-# FM_FAKE_TREEHOUSE_RETURN_FAIL is set). Echoes the fakebin dir.
+# proj (`new` creates FM_FAKE_PROJ_HOME and prints only that path to
+# stdout - bin/fm-proj-lib.sh's real contract - recording the worktree name it
+# was given, which is the secondmate id per fm-home-seed.sh's
+# acquire_proj_home, to FM_FAKE_PROJ_LEASE_FILE; `rm` removes the target
+# unless FM_FAKE_PROJ_RETURN_FAIL is set). Echoes the fakebin dir.
 make_fake_tmux() {
   local dir=$1 fakebin capture
   fakebin=$(fm_fakebin "$dir")
@@ -49,52 +51,41 @@ case "${1:-}" in
 esac
 exit 1
 SH
-  cat > "$fakebin/treehouse" <<'SH'
+  cat > "$fakebin/proj" <<'SH'
 #!/usr/bin/env bash
 set -u
-printf 'treehouse %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
+printf 'proj %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
 case "${1:-}" in
-  get)
-    # Durable lease: print only the worktree path to stdout (banners to stderr),
-    # and record the lease holder so tests can assert it is set and later cleared.
-    shift
-    holder=
-    while [ $# -gt 0 ]; do
-      case "$1" in
-        --lease) ;;
-        --lease-holder) shift; holder=${1:-} ;;
-        --lease-holder=*) holder=${1#--lease-holder=} ;;
-      esac
-      shift
-    done
-    if [ -n "${FM_FAKE_TREEHOUSE_HOME:-}" ]; then
-      mkdir -p "$FM_FAKE_TREEHOUSE_HOME"
-      [ -n "${FM_FAKE_TREEHOUSE_LEASE_FILE:-}" ] && printf '%s\n' "$holder" > "$FM_FAKE_TREEHOUSE_LEASE_FILE"
-      printf 'leased worktree for %s\n' "${holder:-unknown}" >&2
-      printf '%s\n' "$FM_FAKE_TREEHOUSE_HOME"
+  new)
+    # bin/fm-proj-lib.sh's real contract: stdout is exactly and only the
+    # created worktree path; everything else (including this fake's own
+    # tracking) goes to stderr/the shared log. The worktree-name argument IS
+    # the secondmate id (fm-home-seed.sh's acquire_proj_home calls
+    # fm_proj_new_worktree "$project_name" "$id"), so record it directly -
+    # proj has no separate --lease-holder flag to parse.
+    name=${2:-}
+    if [ -n "${FM_FAKE_PROJ_HOME:-}" ]; then
+      mkdir -p "$FM_FAKE_PROJ_HOME"
+      [ -n "${FM_FAKE_PROJ_LEASE_FILE:-}" ] && printf '%s\n' "$name" > "$FM_FAKE_PROJ_LEASE_FILE"
+      printf 'created worktree for %s\n' "${name:-unknown}" >&2
+      printf '%s\n' "$FM_FAKE_PROJ_HOME"
     fi
     exit 0
     ;;
-  return)
-    shift
-    target=
-    while [ $# -gt 0 ]; do
-      case "$1" in
-        --force) ;;
-        *) target=$1 ;;
-      esac
-      shift
-    done
-    [ -z "${FM_FAKE_TREEHOUSE_RETURN_FAIL:-}" ] || exit 17
-    [ -n "${FM_FAKE_TREEHOUSE_LEASE_FILE:-}" ] && rm -f "$FM_FAKE_TREEHOUSE_LEASE_FILE"
-    [ -n "$target" ] && rm -rf -- "$target"
+  rm)
+    # proj rm has no stdout of its own (bin/fm-proj-lib.sh) - success/failure
+    # is exit status only. The <project>/<worktree> argument names the fixed
+    # FM_FAKE_PROJ_HOME this fake already knows, so it does not need parsing.
+    [ -z "${FM_FAKE_PROJ_RETURN_FAIL:-}" ] || exit 17
+    [ -n "${FM_FAKE_PROJ_LEASE_FILE:-}" ] && rm -f "$FM_FAKE_PROJ_LEASE_FILE"
+    [ -n "${FM_FAKE_PROJ_HOME:-}" ] && rm -rf -- "$FM_FAKE_PROJ_HOME"
     exit 0
     ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  chmod +x "$fakebin/treehouse"
+  chmod +x "$fakebin/proj"
   : > "$dir/tmux.log"
   printf '%s\n' "$fakebin"
 }
@@ -145,8 +136,8 @@ mark_firstmate_home() {
   printf '# Firstmate\n' > "$home/AGENTS.md"
 }
 
-# A firstmate home that is also a real git repo (so it can host detached
-# worktrees for teardown/lease tests).
+# A firstmate home that is also a real git repo (so it can host worktrees for
+# teardown/proj-removal tests).
 make_firstmate_git_root() {
   local home=$1
   mkdir -p "$home/bin"
