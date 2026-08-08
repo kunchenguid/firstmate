@@ -102,7 +102,7 @@ send_line() {  # <session> <text>
 }
 
 shell_quote() {  # <word...> -> echoes a shell-safe command line
-  local out= word
+  local out='' word
   for word in "$@"; do
     out="$out${out:+ }$(printf '%q' "$word")"
   done
