@@ -19,7 +19,18 @@ REAL_GIT=$(command -v git)
 OTHER_PID=
 RECOVERY_WORKER_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
-trap 'if [ -n "$OTHER_PID" ]; then kill "$OTHER_PID" 2>/dev/null || true; fi; if [ -n "$RECOVERY_WORKER_PID" ]; then kill "$RECOVERY_WORKER_PID" 2>/dev/null || true; fi; if [ -f "$STATE_ROOT/worker.pid" ]; then kill "$(cat "$STATE_ROOT/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
+# worker.pid records the serving child, not its restart supervisor, so stopping
+# that pid alone leaves the supervisor to respawn - the leak
+# tests/fm-remote-job-orphan-reap.test.sh pins. Stop the whole worker tree.
+cleanup_remote_job_fixture() {
+  [ -z "$OTHER_PID" ] || kill "$OTHER_PID" 2>/dev/null || true
+  [ -z "$RECOVERY_WORKER_PID" ] || kill "$RECOVERY_WORKER_PID" 2>/dev/null || true
+  if [ -f "$STATE_ROOT/worker.pid" ]; then
+    fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
+  fi
+  rm -rf -- "$TMP_ROOT"
+}
+trap cleanup_remote_job_fixture EXIT
 
 cp "$ROOT/bin/fm-remote-job-lib.sh" "$ROOT/bin/fm-remote-job-worker.sh" \
   "$ROOT/bin/fm-remote-delta-read.sh" "$REMOTE_ROOT/bin/"

@@ -40,9 +40,15 @@ detect_own() {
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
     return
   fi
-  # grok sets GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73).
-  # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so this marker
-  # is unambiguous when firstmate runs natively on grok.
+  # grok set GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73).
+  # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so the marker
+  # is unambiguous WHEN PRESENT - but it is not guaranteed present. A grok 1.0.0
+  # hook process carries GROK_HOOK_EVENT, GROK_HOOK_NAME, GROK_SESSION_ID, and
+  # GROK_WORKSPACE_ROOT with no GROK_AGENT at all (verified from the live process
+  # environment of a wedged grok 1.0.0 Stop hook, 2026-08-07). Treat this marker as
+  # a fast path only; the ancestry walk below is what actually guarantees grok is
+  # identified, and any rule that must be RELIABLE under grok has to test the hook
+  # markers too (see .claude/settings.json Stop entries, docs/turnend-guard.md).
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
   # muse (Muse Code) publishes no harness-identity marker of its own. The only
   # MUSE_* variable it is documented to hand a child is MUSE_CURRENT_SESSION_LOG,
