@@ -81,6 +81,7 @@ The declaration verifies that root has the expected Firstmate shape and registra
 Spawn separately passes the canonical worktree through `FM_ROOT_OVERRIDE` for primary-scope classification, so a linked child remains exempt without becoming executable authority.
 The cd-guard resolves its policy executable from its trusted wrapper directory rather than from that scope root.
 An ordinary primary Codex session without the launch binding continues to use its hook process working directory.
+`tests/fm-codex-hook-integrity.test.sh` models the linked-worktree payload swap and proves the anchored Stop hook preserves normal execution.
 
 A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill starts it through the tracked foreground helper `bin/fm-afk-start.sh`, after which the watcher reverts to daemon-managed one-shot mode and the daemon self-handles routine wakes in bash.
 The watcher and daemon share `bin/fm-classify-lib.sh` for captain-relevant status verbs, declared-external-wait vocabulary, and status-scan primitives.
