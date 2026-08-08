@@ -604,6 +604,10 @@ spawn_remote_secondmate() {
     [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
   } > "$tmp"
   mv -f -- "$tmp" "$meta"
+  if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
+    SPAWN_TASK_SET_LOCK_HELD=0
+    fm_lock_release "$SPAWN_TASK_SET_LOCK"
+  fi
   fm_lock_release "$remote_lock" || true
   fm_lock_release "$registry_lock" || true
   fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -614,15 +618,6 @@ spawn_remote_secondmate() {
   echo "spawned $id harness=$harness kind=secondmate mode=secondmate yolo=off window=remote:$id worktree=$home remote=$host backend=$remote_backend"
   return 0
 }
-
-if [ "$KIND" = secondmate ]; then
-  if spawn_remote_secondmate "${POS[0]:-}"; then
-    exit 0
-  else
-    remote_spawn_rc=$?
-  fi
-  [ "$remote_spawn_rc" -eq 3 ] || exit "$remote_spawn_rc"
-fi
 
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else runtime auto-detection, else
@@ -931,6 +926,14 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   fi
   SPAWN_TASK_SET_LOCK_HELD=1
+fi
+if [ "$KIND" = secondmate ]; then
+  if spawn_remote_secondmate "$ID"; then
+    exit 0
+  else
+    remote_spawn_rc=$?
+  fi
+  [ "$remote_spawn_rc" -eq 3 ] || exit "$remote_spawn_rc"
 fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then

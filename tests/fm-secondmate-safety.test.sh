@@ -2477,6 +2477,34 @@ EOF
   pass "a fresh spawn refuses to publish while a forced teardown owns the task set"
 }
 
+test_fresh_remote_secondmate_spawn_refuses_while_task_set_is_owned() {
+  local home err held holder lock
+  home="$TMP_ROOT/taskset-remote-spawn-home"
+  err="$TMP_ROOT/taskset-remote-spawn.err"
+  mkdir -p "$home/state" "$home/data"
+  printf '%s\n' '- remote-new - remote domain (host: remote-mac; root: /remote/root; home: /remote/home; scope: remote work; projects: alpha; added 2026-08-02)' \
+    > "$home/data/secondmates.md"
+  held=$(hold_task_set_lock "$home/state") \
+    || fail "could not stage a held remote-spawn task-set lock"
+  holder=${held%% *}
+  lock=${held#* }
+  if FM_HOME="$home" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" remote-new --secondmate >/dev/null 2>"$err"; then
+    kill "$holder" 2>/dev/null || true
+    fail "a fresh remote secondmate spawn published while the task set was owned"
+  fi
+  [ ! -e "$home/state/remote-new.meta" ] \
+    || fail "a refused remote secondmate spawn still published a durable record"
+  [ -e "$lock" ] || fail "a refused remote secondmate spawn removed the owner's task-set lock"
+  grep -F "task set is locked" "$err" >/dev/null \
+    || fail "the remote spawn refusal did not name task-set contention: $(cat "$err")"
+  [ ! -e "$home/state/.spawn-remote-new.lock" ] \
+    || fail "a refused remote secondmate spawn left its own task lock behind"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  pass "a fresh remote secondmate spawn refuses while the task set is owned"
+}
+
 test_secondmate_force_teardown_refuses_child_active_home_descendant() {
   local home subhome childproj childwt fakebin err log
   home="$TMP_ROOT/child-active-descendant-home"
@@ -2858,6 +2886,7 @@ test_secondmate_teardown_refuses_child_registry_nested_home
 test_secondmate_force_teardown_prevalidates_before_child_cleanup
 test_force_teardown_refuses_while_a_task_is_being_published
 test_fresh_spawn_refuses_while_a_forced_teardown_owns_the_task_set
+test_fresh_remote_secondmate_spawn_refuses_while_task_set_is_owned
 test_secondmate_force_teardown_refuses_child_active_home_descendant
 test_secondmate_force_teardown_refuses_child_repo_descendant
 test_secondmate_force_teardown_refuses_unregistered_child_worktree
