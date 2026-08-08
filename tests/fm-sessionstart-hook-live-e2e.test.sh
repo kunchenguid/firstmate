@@ -19,23 +19,30 @@
 # processes and no harness. This guard covers only what CI cannot see.
 #
 # It swaps a RECORDER in for bin/fm-sessionstart-run.sh inside a throwaway lab
-# checkout, so nothing here touches a real home, lock, or fleet. The recorder
-# logs the source the harness supplied and prints a source-stamped token; the
-# model is then asked to quote that token back, which is the only way to prove
-# the stdout genuinely landed in context rather than merely being produced.
-# The token index advances on every open, so a stale earlier token can never
-# satisfy a later assertion and no case can go quietly vacuous.
+# checkout, so nothing here touches a real Firstmate home, lock, or fleet. The
+# recorder logs the source the harness supplied and prints a source-stamped
+# token; the model is then asked to quote that token back, which is the only way
+# to prove the stdout genuinely landed in context rather than merely being
+# produced. The token index advances on every open, so a stale earlier token can
+# never satisfy a later assertion and no case can go quietly vacuous.
 #
-# Every harness here runs against the operator's own authenticated model
-# surface, because that is the only surface a live guard can prove anything on.
-# It therefore reads the live harness homes and never copies a credential out of
-# one. Codex is the one harness that would otherwise WRITE to its live home:
-# directory trust and per-hook review are both persisted into
-# $CODEX_HOME/config.toml, and a throwaway lab path is a new project and a new
-# hook source every run. So the Codex probes supply the lab's trust as a
-# per-process `-c` override that is never persisted, bypass hook review for the
-# invocation only, refuse to answer any trust prompt that still appears, and
-# assert the live config is byte-identical before and after.
+# Every harness here runs against the operator's own authenticated model surface,
+# because that is the only surface a live guard can prove anything on. It uses
+# the live harness homes and never copies a credential out of one, and it does
+# leave ordinary session state in them: each Codex probe writes a session rollout
+# and a history entry under $CODEX_HOME, and the resume case DEPENDS on that,
+# because `codex exec resume --last` can only resolve the cold-open session if
+# the live home recorded it. A side effect is that the operator's own
+# `resume --last` afterwards points at a throwaway lab session. Both are by
+# design; this guard makes no claim that the whole home is untouched.
+#
+# What the Codex probes must never do is persist a THROWAWAY DECISION. Directory
+# trust and per-hook review are durable gates keyed by path, both stored in
+# $CODEX_HOME/config.toml, and the lab is a new project and a new hook source
+# every run. So they supply the lab's trust as a per-process `-c` override that
+# is never written, bypass hook review for the invocation only, refuse to answer
+# any trust prompt that still appears, and assert that config.toml alone is
+# byte-identical before and after.
 #
 # Run it after every harness upgrade and before trusting refreshed evidence in
 # docs/verification/supervision.md:
@@ -116,6 +123,13 @@ TRUST_UI='do you trust|trust (this|the|parent) |trust the contents of this|trust
 # $CODEX_HOME/config.toml, and the lab is a brand-new path every run. Trust is
 # supplied instead as an in-memory `-c` override; the inline-table form is
 # required, because the dotted-path form does not reach the trust lookup.
+#
+# The assertion below deliberately stops at reporting. This guard runs for
+# minutes against a home the operator is usually also using, and Codex writes
+# config.toml for reasons that have nothing to do with the lab (another window
+# granting trust, a `/model` change, a feature toggle, first-run creation). It
+# cannot tell such a write apart from its own, so it keeps a pre-run copy for
+# comparison and never restores it, nor tells anyone to restore it wholesale.
 CODEX_CONFIG="${CODEX_HOME:-$HOME/.codex}/config.toml"
 
 codex_trust_override() {  # <lab> -> echoes the per-process trust override
@@ -134,9 +148,9 @@ codex_config_assert_unchanged() {  # <snapshot> <lab> <what>
   cp "$snapshot" "$rescue" 2>/dev/null || true
   diff "$snapshot" "$now" >&2 || true
   if grep -Fq "$lab" "$now" 2>/dev/null; then
-    fail "codex: $what wrote the throwaway lab path into $CODEX_CONFIG; restore it from $rescue"
+    fail "codex: $what persisted the throwaway lab path '$lab' into $CODEX_CONFIG, which the per-process trust override and --dangerously-bypass-hook-trust are supposed to make impossible; remove the entries naming that path by hand, reading the pre-run copy kept at $rescue as the reference, and do not copy that file back wholesale, because anything else in the diff above may be a concurrent Codex session's legitimate write"
   fi
-  fail "codex: $what modified $CODEX_CONFIG, which this guard must leave untouched; restore it from $rescue"
+  fail "codex: $what saw $CODEX_CONFIG change with no lab path in it, so this guard cannot attribute the change and will not guess; the pre-run copy is kept at $rescue, and the diff above is for inspection only - do not restore it blindly, because a concurrent Codex session writes this file for its own reasons"
 }
 
 # --- lab ---------------------------------------------------------------------

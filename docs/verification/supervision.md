@@ -86,9 +86,15 @@ The interactive context-reset path was then exercised in that isolated process w
 The command created a new thread without immediately invoking the hook; the first submitted post-clear turn displayed `SessionStart hook (completed)`, supplied `source=clear`, and sent the recorder's exact `LAB_SESSION_START_CONTEXT:clear` stdout in the next mock model request.
 The startup control used the same recorder and supplied `source=startup`, so stale startup context could not satisfy the clear assertion.
 
-The tracked guard `tests/fm-sessionstart-hook-live-e2e.test.sh` reproduces the same interactive path on the operator's live `CODEX_HOME`, because only that home is authenticated, and it must still leave that home untouched.
+The tracked guard `tests/fm-sessionstart-hook-live-e2e.test.sh` reproduces the same interactive path on the operator's live `CODEX_HOME`, because only that home is authenticated.
+It was not executed for this record: the evidence above was measured in the isolated mock-provider homes described at the top of this section, and the guard exists to refresh that evidence against a real model on demand.
+It is not a claim that the whole home is untouched.
+Running it writes ordinary session state into `$CODEX_HOME`, and its resume case depends on that, because `codex exec resume --last` can only resolve the cold-open session if the live home recorded it; a side effect is that the operator's own `resume --last` afterwards points at a throwaway lab session.
+What it must never do is persist a throwaway decision, so its assertion is scoped to `$CODEX_HOME/config.toml`, the one file holding both durable gates.
+
 It supplies the throwaway lab's directory trust as the per-process override `-c 'projects={"<lab>"={trust_level="trusted"}}'`, which suppresses the trust prompt without writing a record; the dotted-path form `-c projects."<lab>".trust_level="trusted"` does not reach the trust lookup and leaves the prompt up.
-Per-hook review is bypassed for the invocation with `--dangerously-bypass-hook-trust`, the guard refuses to answer any trust dialog that still appears rather than pressing Enter, and it asserts `$CODEX_HOME/config.toml` is byte-identical before and after.
+Per-hook review is bypassed for the invocation with `--dangerously-bypass-hook-trust`, and the guard refuses to answer any trust dialog that still appears rather than pressing Enter.
+It then asserts `config.toml` is byte-identical before and after, and a difference fails the run and keeps a pre-run copy for inspection rather than restoring anything, because the guard cannot tell its own write from a concurrent Codex session's legitimate one.
 
 The installed Codex source and the disabled-at-launch counterfactual establish a different boundary for the feature flag.
 Hook trust state can reload in one process, but derived feature gates are session-static, so changing `features.hooks` from false to true after launch does not activate hooks until a genuinely new Codex process starts.
