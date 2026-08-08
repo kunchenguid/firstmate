@@ -196,7 +196,7 @@ case "${1:-}:${2:-}" in
   mv:--help) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...]' ;;
 esac
 SH
-  cat > "$CASE_BIN/treehouse" <<'SH'
+  cat > "$CASE_BIN/proj" <<'SH'
 #!/usr/bin/env bash
 exit 0
 SH
@@ -204,7 +204,7 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-  chmod +x "$CASE_BIN/uname" "$CASE_BIN/launchctl" "$CASE_BIN/tasks-axi" "$CASE_BIN/treehouse" "$CASE_BIN/claude"
+  chmod +x "$CASE_BIN/uname" "$CASE_BIN/launchctl" "$CASE_BIN/tasks-axi" "$CASE_BIN/proj" "$CASE_BIN/claude"
   cat > "$CASE_BIN/sleep" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -548,14 +548,18 @@ expect_code 0 "$DOCTOR_RC" "--fix did not wrap one discoverable harness when non
 assert_present "$CASE_HOME/.local/bin/codex" "--fix did not create the first needed harness wrapper"
 assert_absent "$CASE_HOME/.local/bin/grok" "--fix created more harness wrappers than readiness requires"
 
-mv "$CASE_BIN/treehouse" "$MANAGER_BIN/treehouse"
+# herdr stands in for any required tool here: the refusal is generic over
+# REQUIRED_TOOLS, and herdr is one whose absence the fixture PATH can actually
+# hold (that PATH keeps /usr/bin, so a host-installed git, jq, or proj resolves
+# no matter what the fixture does).
+mv "$CASE_BIN/herdr" "$MANAGER_BIN/herdr"
 mkdir -p "$CASE_HOME/.local/bin"
-printf 'operator wrapper\n' > "$CASE_HOME/.local/bin/treehouse"
+printf 'operator wrapper\n' > "$CASE_HOME/.local/bin/herdr"
 doctor --fix
 expect_code 1 "$DOCTOR_RC" "--fix overwrote an operator-owned reserved wrapper"
-assert_contains "$DOCTOR_OUT" 'fix required-treehouse=failed:' \
+assert_contains "$DOCTOR_OUT" 'fix required-herdr=failed:' \
   "the non-Firstmate wrapper refusal was not reported"
-[ "$(cat "$CASE_HOME/.local/bin/treehouse")" = 'operator wrapper' ] \
+[ "$(cat "$CASE_HOME/.local/bin/herdr")" = 'operator wrapper' ] \
   || fail "--fix overwrote an operator-owned wrapper"
 pass "--fix creates only owned version-manager wrappers and never clobbers an operator file"
 
@@ -564,7 +568,7 @@ CASE_REMOTE_JOB_ACTIVE=
 CASE_PLATFORM_OVERRIDE=Linux
 rm -f "$CASE_BIN/sleep" "$CASE_BIN/uname"
 mkdir -p "$CASE_HOME/.local/bin"
-for tool in herdr tasks-axi treehouse claude; do
+for tool in herdr tasks-axi proj claude; do
   ln -s "$CASE_BIN/$tool" "$CASE_HOME/.local/bin/$tool"
 done
 HOME="$CASE_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
