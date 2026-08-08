@@ -370,6 +370,32 @@ test_sweep_respawns_confirmed_dead_secondmate() {
   pass "sweep: a confirmed-dead secondmate endpoint is killed and respawned"
 }
 
+
+# A secondmate previously launched with Claude Code's Remote Control on
+# (bin/fm-spawn.sh --remote-control) must keep it on across an automatic
+# recovery respawn: fm-spawn.sh itself never replays a prior remote_control=
+# from meta on a plain respawn (see tests/fm-spawn-remote-control.test.sh), so
+# this sweep is the one caller responsible for reading it back and passing
+# --remote-control through. Harness is pinned to claude (--remote-control is
+# claude-only) rather than new_world's default codex.
+test_sweep_reapplies_remote_control_on_dead_respawn() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-rc)
+  printf 'claude\n' > "$w/home/config/crew-harness"
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  printf 'remote_control=1\n' >> "$w/home/state/sm1.meta"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+
+  assert_contains "$(cat "$log")" "new-window" \
+    "a confirmed-dead secondmate should actually be relaunched"$'\n'"$out"
+  grep -q '^remote_control=1$' "$w/home/state/sm1.meta" \
+    || fail "the respawned secondmate's fresh meta must still record remote_control=1 (the sweep must re-pass --remote-control)"
+  pass "sweep: a dead secondmate previously launched with Remote Control keeps it on after an automatic respawn"
+}
+
 test_sweep_leaves_alive_secondmate_untouched() {
   local w fb tmuxfb log out
   w=$(new_world sweep-alive)
@@ -545,6 +571,7 @@ test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
 test_sweep_respawns_confirmed_dead_secondmate
+test_sweep_reapplies_remote_control_on_dead_respawn
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate
 test_sweep_respawns_authoritatively_missing_pi_signed_secondmate

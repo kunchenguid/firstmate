@@ -186,6 +186,7 @@ For local `kind=secondmate` meta with no window, treat the secondmate as a dead 
 bin/fm-spawn.sh <id> --secondmate
 ```
 
+Before manually respawning a Remote-Control-enabled Claude secondmate, follow `bin/fm-spawn.sh`'s header rule for replaying that launch flag; the startup liveness sweep applies the rule automatically.
 Use the recorded `home=` in meta.
 If meta is missing but `data/secondmates.md` still registers the secondmate, respawn from the registry entry and its persistent home.
 For a remote route, the same command probes and relaunches only on the configured host.

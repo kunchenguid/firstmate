@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--resume-worktree <path>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--resume-worktree <path>]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--remote-control|--rc] [--backend <name>] [--resume-worktree <path>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--remote-control|--rc] [--backend <name>] [--resume-worktree <path>]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--remote-control|--rc] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -22,6 +22,21 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   --remote-control (alias --rc) adds Claude Code's --remote-control flag to the
+#   launch command, so the session appears in the Claude mobile app's Code tab and
+#   at claude.ai/code (code.claude.com/docs/en/remote-control). It is claude-harness-only
+#   and REFUSED for any other resolved harness, every raw launch command, and every
+#   remote secondmate. Claude Code requires version 2.1.51 or later and a
+#   claude.ai OAuth login; API-key auth is unsupported, and Team or Enterprise
+#   admins must enable Remote Control. A spawn with the flag set records remote_control=1 in
+#   state/<id>.meta; the field is omitted entirely when unset, matching the
+#   backend= convention. That record is NOT auto-replayed by this script on a
+#   plain respawn - a caller wanting Remote Control to survive a respawn passes
+#   --remote-control again, exactly like --model/--effort/--harness. The one
+#   automatic exception is bin/fm-bootstrap.sh's secondmate liveness sweep, which
+#   reads a dead/missing secondmate's existing remote_control=1 before respawning
+#   it and passes --remote-control back through so a captain's Remote-Control-
+#   enabled secondmate stays reachable across an unattended recovery relaunch.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -244,6 +259,7 @@ MODE=
 YOLO=
 TRACEPARENT_ARG=
 RESUME_WT_ARG=
+REMOTE_CONTROL=0
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -276,6 +292,7 @@ for a in "$@"; do
   case "$a" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
+    --remote-control|--rc) REMOTE_CONTROL=1 ;;
     --harness) want_value=harness ;;
     --harness=*) HARNESS_ARG=${a#--harness=}; HARNESS_SET=1 ;;
     --model) want_value=model ;;
@@ -375,6 +392,13 @@ spawn_remote_secondmate() {
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || { echo "error: invalid task id" >&2; return 2; }
+  if [ "$REMOTE_CONTROL" -eq 1 ]; then
+    remote=$(secondmate_registry_field "$DATA/secondmates.md" "$id" remote 2>/dev/null || true)
+    if [ "$remote" = 1 ]; then
+      echo "error: --remote-control (--rc) is not yet supported for remote secondmates" >&2
+      return 1
+    fi
+  fi
   mkdir -p "$STATE" || { echo "error: could not create parent state directory" >&2; return 1; }
   SPAWN_TASK_LOCK="$STATE/.spawn-$id.lock"
   if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
@@ -392,6 +416,12 @@ spawn_remote_secondmate() {
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     return 3
+  fi
+  if [ "$REMOTE_CONTROL" -eq 1 ]; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: --remote-control (--rc) is not yet supported for remote secondmates" >&2
+    return 1
   fi
   host=$(secondmate_registry_field "$DATA/secondmates.md" "$id" host)
   root=$(secondmate_registry_field "$DATA/secondmates.md" "$id" root)
@@ -891,7 +921,7 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __RCFLAG____MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -926,6 +956,10 @@ launch_template() {
 
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    if [ "$REMOTE_CONTROL" -eq 1 ]; then
+      echo "error: --remote-control cannot be reliably applied to a raw launch command" >&2
+      exit 1
+    fi
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
@@ -959,6 +993,11 @@ case "$ARG3" in
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
+
+if [ "$REMOTE_CONTROL" -eq 1 ] && [ "$HARNESS" != claude ]; then
+  echo "error: --remote-control (--rc) enables Claude Code's Remote Control and launches only on the claude harness; refusing for '$HARNESS'" >&2
+  exit 1
+fi
 
 case "$HARNESS" in
   pi|pi-signed) LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH" ;;
@@ -1035,6 +1074,18 @@ model_flag_for_harness() {
     claude|codex|opencode|pi|pi-signed|grok|kimi)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
+  esac
+}
+
+# Claude Code's Remote Control flag; refused for every other harness before
+# LAUNCH is ever composed (see the guard by the harness-resolution case
+# above), so this defense-in-depth case is never reached with harness!=claude
+# in practice.
+remote_control_flag_for_harness() {
+  local harness=$1 remote_control=$2
+  [ "$remote_control" -eq 1 ] || return 0
+  case "$harness" in
+    claude) printf -- '--remote-control ' ;;
   esac
 }
 
@@ -2171,6 +2222,9 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  # Off by default; written only when on, so an ordinary spawn's meta stays
+  # byte-identical (absent remote_control= means off, same convention as backend=).
+  [ "$REMOTE_CONTROL" -eq 0 ] || echo "remote_control=1"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   # Default-off writes no traceparent= line (meta stays byte-identical).
   # backend= is written only for a non-default (non-tmux) backend, so the
@@ -2209,8 +2263,10 @@ sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
+RCFLAG=$(remote_control_flag_for_harness "$HARNESS" "$REMOTE_CONTROL")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+LAUNCH=${LAUNCH//__RCFLAG__/$RCFLAG}
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}

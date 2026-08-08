@@ -523,7 +523,7 @@ secondmate_liveness_sweep() {
   # primary-only no-op there. Mid-session liveness remains explicitly out of
   # scope and requires a separate periodic signal.
   [ -d "$STATE" ] || return 0
-  local meta id window harness backend target agent_state out cause remote_host remote_rc readiness_reason route_out remote_backend
+  local meta id window harness backend target agent_state out cause remote_host remote_rc readiness_reason route_out remote_backend remote_control_arg
   SECONDMATE_RESPAWNED_IDS=""
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -533,6 +533,12 @@ secondmate_liveness_sweep() {
     [ -n "$window" ] || continue
     harness=$(fm_meta_get "$meta" harness)
     remote_host=$(fm_meta_get "$meta" remote_host)
+    # Carry a Remote-Control-enabled secondmate's setting across an automatic
+    # recovery respawn: fm-spawn.sh itself never replays remote_control= from a
+    # prior meta (a plain respawn re-resolves harness/model/effort from config
+    # or explicit flags only), so this is the one caller that reads it back.
+    remote_control_arg=""
+    [ "$(fm_meta_get "$meta" remote_control)" != 1 ] || remote_control_arg="--remote-control"
     if [ -n "$remote_host" ]; then
       remote_rc=0
       fm_remote_readiness_ensure "$SCRIPT_DIR" "$id" || remote_rc=$?
@@ -586,7 +592,7 @@ secondmate_liveness_sweep() {
           ;;
         dead|missing)
           cause="remote endpoint $agent_state on its configured host"
-          if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+          if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate ${remote_control_arg:+"$remote_control_arg"} 2>&1); then
             SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
           else
             echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $cause: $(first_line "$out")"
@@ -622,7 +628,7 @@ secondmate_liveness_sweep() {
         else
           cause="recorded endpoint confidently missing"
         fi
-        if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+        if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate ${remote_control_arg:+"$remote_control_arg"} 2>&1); then
           SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
           if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
             echo "BOOTSTRAP_INFO: secondmate $id relaunched after $cause (backend=$backend)"
