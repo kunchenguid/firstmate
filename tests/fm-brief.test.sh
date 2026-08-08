@@ -212,34 +212,13 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
+    assert_grep "group related fixes and run the smallest focused" "$brief" \
+      "$id: brief missing the grouped-fix/focused-check iteration guidance"
+    assert_grep "never narrows what your Definition of done requires" "$brief" \
+      "$id: iteration guidance is not scoped away from the mode's required final checks"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
-}
-
-# The grouped-fix/focused-check policy binds whoever actually runs implementation
-# and correction loops, and that is the crewmate - which never loads firstmate's
-# own AGENTS.md, only the generated brief. Assert the emitted brief (the
-# generated interface delivered to the agent) carries the guidance for every ship
-# mode, and that it stays scoped so no worker can read it as license to narrow
-# the final checks its delivery mode requires.
-test_ship_briefs_carry_focused_check_guidance() {
-  local home id mode brief
-  home="$TMP_ROOT/focused-check-home"
-  mkdir -p "$home/data"
-
-  for id_mode in "brief-focus-c1:no-mistakes" "brief-focus-c2:direct-PR" "brief-focus-c3:local-only"; do
-    id=${id_mode%%:*}
-    mode=${id_mode##*:}
-    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1 \
-      || fail "$id: fm-brief.sh --mode $mode should exit 0"
-    brief="$home/data/$id/brief.md"
-    assert_grep "group related fixes and run the smallest focused" "$brief" \
-      "$id ($mode): brief missing the grouped-fix/focused-check iteration guidance"
-    assert_grep "never narrows what your Definition of done requires" "$brief" \
-      "$id ($mode): iteration guidance is not scoped away from the mode's required final checks"
-  done
-  pass "fm-brief.sh: every ship mode's brief carries scoped focused-check iteration guidance"
 }
 
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
@@ -739,7 +718,6 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
-test_ship_briefs_carry_focused_check_guidance
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
