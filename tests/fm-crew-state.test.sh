@@ -25,6 +25,12 @@
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
 #       proving the watcher's own absorb-only-when-provably-working predicate
 #       benefits from the fix in both directions.
+#   (l) a ready run-step does not outlive the crew's resumption: unlanded
+#       uncommitted work, including new files, demotes it, a busy crew to working
+#       and a wedged one to a state that stays absorb-INELIGIBLE; gitignored
+#       scratch files are exempt
+#   (m) the crew's own checks-green report is trusted by default, but not on a ci
+#       log whose markers are no longer recognized
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -154,6 +160,49 @@ arm_idle_record() {  # <state-dir> <id>
   gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
   "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" idle --gen "$gen" \
     --source claude-hook --event stop
+}
+
+arm_busy_record() {  # <state-dir> <id>
+  local state=$1 id=$2 gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+}
+
+# A crew that resumed AFTER its run reached a ready state: three tracked files
+# committed (so the run head still matches this worktree), then edited without
+# committing. Uncommitted edits do not move HEAD, which is precisely why the
+# run-attribution path cannot see them. Re-exports FM_FAKE_RUN_HEAD so the run
+# fixtures still bind to the worktree.
+dirty_tracked_worktree() {  # <worktree>
+  local wt=$1 i
+  for i in 1 2 3; do
+    printf 'base\n' > "$wt/followup$i.txt"
+    git -C "$wt" add "followup$i.txt"
+  done
+  git -C "$wt" commit -q -m "files the crew edits after its run reported ready"
+  FM_FAKE_RUN_HEAD=$(git -C "$wt" rev-parse HEAD)
+  export FM_FAKE_RUN_HEAD
+  for i in 1 2 3; do
+    printf 'post-pipeline follow-up edit\n' >> "$wt/followup$i.txt"
+  done
+}
+
+# A newly created source or test file is unlanded work even though it does not
+# move HEAD.
+untracked_new_worktree() {  # <worktree>
+  printf '# new regression test\n' > "$1/followup-new.test.sh"
+}
+
+gitignored_scratch_worktree() {  # <worktree>
+  local wt=$1
+  printf 'scratch/\n' > "$wt/.gitignore"
+  git -C "$wt" add .gitignore
+  git -C "$wt" commit -q -m "ignore expected scratch files"
+  FM_FAKE_RUN_HEAD=$(git -C "$wt" rev-parse HEAD)
+  export FM_FAKE_RUN_HEAD
+  mkdir -p "$wt/scratch"
+  printf 'png bytes\n' > "$wt/scratch/evidence-after.png"
 }
 
 # Clear the fake-driver vars and (re-)mark them exported, so the per-test plain
@@ -322,6 +371,19 @@ run:
     review,completed,0,0
     push,completed,0,0
     ci,running,0,0
+EOF
+}
+
+run_checks_passed() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/2"
+  findings: none
+outcome: checks-passed
 EOF
 }
 
@@ -1162,6 +1224,133 @@ test_missing_meta() {
   pass "missing meta is handled gracefully"
 }
 
+# (l) A ready/done run-step must not outlive the crew's own resumption. The crew
+# resumes after its run reports ready (a review-round fix, a post-pipeline
+# follow-up) and leaves the work uncommitted; HEAD does not move, so the run
+# stays attributed and its stale ready verdict would otherwise survive. Reported
+# 2026-08-08 as "checks green: PR ready for review" while three files were dirty
+# and the crew was mid-turn.
+test_ci_green_ready_with_unlanded_edits_is_not_done() {
+  reset_fakes
+  local d; d=$(new_case unlanded-ci-green)
+  make_repo_on_branch "$d/wt" fm/feat-unlanded
+  dirty_tracked_worktree "$d/wt"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-unlanded.meta" "window=fm:fm-feat-unlanded" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-unlanded.status"
+  arm_busy_record "$d/state" feat-unlanded
+  FM_FAKE_BUSY=1
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-unlanded)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  local out; out=$(run_crew_state "$d" feat-unlanded)
+  assert_not_contains "$out" "state: done" "unlanded work must not read as a ready PR"
+  assert_contains "$out" "state: working" "a busy crew with unlanded work is working"
+  assert_contains "$out" "uncommitted changes" "the verdict names why the ready reading was demoted"
+  pass "green CI ready verdict is demoted while the crew holds unlanded work"
+}
+
+# The same guard on the terminal route: outcome=checks-passed is a run-level
+# terminal state, and it too describes the run rather than the resumed crew.
+test_terminal_checks_passed_with_unlanded_edits_is_not_done() {
+  reset_fakes
+  local d; d=$(new_case unlanded-terminal)
+  make_repo_on_branch "$d/wt" fm/feat-unlandedterm
+  dirty_tracked_worktree "$d/wt"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-unlandedterm.meta" "window=fm:fm-feat-unlandedterm" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  arm_busy_record "$d/state" feat-unlandedterm
+  FM_FAKE_BUSY=1
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-unlandedterm)"
+  local out; out=$(run_crew_state "$d" feat-unlandedterm)
+  assert_not_contains "$out" "state: done" "terminal checks-passed must not survive unlanded work"
+  assert_contains "$out" "state: working" "a busy crew with unlanded work is working"
+  pass "terminal checks-passed verdict is demoted while the crew holds unlanded work"
+}
+
+# The trap in the fix: demoting an unlanded-work crew to `working` would make it
+# ABSORB-ELIGIBLE in crew_absorb_class, so a crew that finished its run, left
+# work uncommitted and then WEDGED would stop surfacing entirely. Cleanliness
+# alone cannot tell "dirty and mid-turn" from "dirty and dead"; the busy verdict
+# is what separates them. This case must never report working, and must remain
+# not-provably-working so its wake still reaches firstmate.
+test_unlanded_edits_with_dead_endpoint_is_not_absorb_eligible() {
+  reset_fakes
+  local d; d=$(new_case unlanded-dead-endpoint)
+  make_repo_on_branch "$d/wt" fm/feat-unlandeddead
+  dirty_tracked_worktree "$d/wt"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-unlandeddead.meta" "window=fm:fm-feat-unlandeddead" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-unlandeddead)"
+  FM_FAKE_TMUX_MISSING=1   # the crew wedged and its window is gone
+  local out; out=$(run_crew_state "$d" feat-unlandeddead)
+  assert_not_contains "$out" "state: done" "a wedged crew with unlanded work is not ready"
+  assert_not_contains "$out" "state: working" "a wedged crew must not be reported as working"
+  assert_contains "$out" "uncommitted changes" "the verdict names the unlanded work"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-unlandeddead \
+    && fail "a wedged crew with unlanded work was treated as provably working (its wake would be absorbed)"
+  pass "unlanded work plus a dead endpoint stays absorb-ineligible"
+}
+
+# A newly created source or test file is unlanded work just like an edit to a
+# tracked file: it leaves HEAD unchanged while proving the crew moved on.
+test_untracked_new_file_demotes_ready_verdict() {
+  reset_fakes
+  local d; d=$(new_case untracked-new)
+  make_repo_on_branch "$d/wt" fm/feat-new
+  untracked_new_worktree "$d/wt"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-new.meta" "window=fm:fm-feat-new" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  arm_idle_record "$d/state" feat-new >/dev/null
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-new)"
+  local out; out=$(run_crew_state "$d" feat-new)
+  assert_not_contains "$out" "state: done" "an untracked new file must demote a ready verdict"
+  assert_contains "$out" "state: unknown" "an idle crew with untracked new work stays visible"
+  pass "an untracked new file counts as unlanded work"
+}
+
+# Gitignored paths are the deliberate escape hatch for expected scratch files.
+test_gitignored_scratch_does_not_demote_ready_verdict() {
+  reset_fakes
+  local d; d=$(new_case gitignored-scratch)
+  make_repo_on_branch "$d/wt" fm/feat-ignored
+  gitignored_scratch_worktree "$d/wt"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ignored.meta" "window=fm:fm-feat-ignored" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  arm_idle_record "$d/state" feat-ignored >/dev/null
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-ignored)"
+  local out; out=$(run_crew_state "$d" feat-ignored)
+  assert_contains "$out" "state: done" "gitignored scratch must not demote a ready verdict"
+  assert_contains "$out" "source: run-step" "ready verdict still comes from the run-step"
+  pass "gitignored scratch does not count as unlanded work"
+}
+
+# (m) The crew's own "done: ... checks green" report is trusted by default, but
+# only while the ci-log marker vocabulary still works. A log that WAS read and
+# matched nothing means nm_ci_checks_state has gone blind (no-mistakes reworded
+# its ci step output), so it can no longer reveal a relapse either - trusting the
+# stale report on that reading would fail open exactly when the check stopped
+# working. An absent log is different and still trusts the crew, which
+# test_ci_ready_done_log_beats_monitoring_run pins.
+test_unrecognized_ci_log_does_not_confirm_stale_ready_report() {
+  reset_fakes
+  local d; d=$(new_case ci-log-vocabulary-drift)
+  make_repo_on_branch "$d/wt" fm/feat-cidrift
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cidrift.meta" "window=fm:fm-feat-cidrift" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-cidrift.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cidrift)"
+  FM_FAKE_CI_LOGS="waiting on required reviewers before merge"
+  local out; out=$(run_crew_state "$d" feat-cidrift)
+  assert_not_contains "$out" "state: done" "an unrecognized ci log must not confirm a stale ready report"
+  assert_contains "$out" "state: working" "unconfirmable ci state stays working"
+  pass "unrecognized ci-log markers do not confirm a stale checks-green report"
+}
+
 # (k) crew_is_provably_working end-to-end over the REAL fm-crew-state.sh (not a
 # canned fake verdict, unlike tests/fm-watch-triage.test.sh's classifier
 # coverage). This is the direct regression pair for the 2026-07-02 herdr
@@ -1358,5 +1547,11 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
+test_ci_green_ready_with_unlanded_edits_is_not_done
+test_terminal_checks_passed_with_unlanded_edits_is_not_done
+test_unlanded_edits_with_dead_endpoint_is_not_absorb_eligible
+test_untracked_new_file_demotes_ready_verdict
+test_gitignored_scratch_does_not_demote_ready_verdict
+test_unrecognized_ci_log_does_not_confirm_stale_ready_report
 
 echo "all fm-crew-state tests passed"

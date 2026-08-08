@@ -35,6 +35,12 @@
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
 #      green, so a green PR is never silently read as still-validating.
+#   2b. A done/ready verdict describes the RUN, not the crew. A crew that resumed
+#      AFTER its run reached that state holds the new work uncommitted, where
+#      nothing above can see it, because attribution compares commit identity
+#      only. So a ready verdict is demoted whenever the worktree still holds
+#      unlanded uncommitted work: to working when the crew is busy, to unknown when
+#      it is not. See demote_ready_when_unlanded for why those must not collapse.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -289,12 +295,25 @@ nm_effective_ci_step_status() {
 # for the MOST RECENT recognized marker (the log is append-only/chronological,
 # so the last match is current): green with nothing red after it means CI is
 # green right now, still only waiting on merge/close.
+#
+# Prints one of four tokens, and `no-log` vs `unknown` is a load-bearing
+# distinction rather than two spellings of "don't know":
+#   green     - the last recognized marker says checks are green
+#   not-ready - the last recognized marker says checks are pending, failed, or re-armed
+#   no-log    - no ci-step log could be read at all (no run id, or an empty tail),
+#               so this marker vocabulary was never consulted
+#   unknown   - a log WAS read but no marker in it was recognized, i.e. the
+#               vocabulary above no longer matches what no-mistakes emits
+# A caller that trusts the crew's own green report by default must still refuse
+# to trust it on `unknown`, because silently unrecognized markers would also
+# hide a genuine relapse (see the CI_LOG_STATE handling near the ci-ready
+# status-log path below).
 nm_ci_checks_state() {
   local run_id log_tail marker
   run_id=$(strip_quotes "$(nm_field id)")
-  [ -n "$run_id" ] || { printf 'unknown'; return; }
+  [ -n "$run_id" ] || { printf 'no-log'; return; }
   log_tail=$(nm_run axi logs --step ci --run "$run_id") || true
-  [ -n "$log_tail" ] || { printf 'unknown'; return; }
+  [ -n "$log_tail" ] || { printf 'no-log'; return; }
   marker=$(printf '%s\n' "$log_tail" \
     | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
     | tail -1)
@@ -413,6 +432,63 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   fi
 fi
 
+# --- unlanded-work guard on a ready verdict --------------------------------
+# A run-step that reads done/ready describes the run, not the crew. A crew that
+# resumed AFTER its run reached that state - a review-round fix, a post-pipeline
+# follow-up - leaves its edits uncommitted, and uncommitted edits do not move
+# HEAD, so the run stays attributed (fm_nm_head_matches_worktree compares commit
+# identity only) and the stale ready verdict survives. Committing that same work
+# advances HEAD past the run head and correctly drops the attribution; leaving it
+# uncommitted is exactly the case nothing else here can see.
+#
+# Any uncommitted change counts, including newly created files, because a resumed
+# crew often adds new source or test files and those leave HEAD unchanged too.
+# Gitignored paths are the deliberate exemption for expected scratch files.
+#
+# Answered once per invocation: this process is short-lived, and a single
+# observation keeps every branch below judging the same worktree rather than
+# re-racing the crew's next write.
+_UNLANDED_EDITS=""
+wt_has_unlanded_edits() {
+  if [ -z "$_UNLANDED_EDITS" ]; then
+    if [ -n "$(git -C "$WT" status --porcelain 2>/dev/null)" ]; then
+      _UNLANDED_EDITS=yes
+    else
+      _UNLANDED_EDITS=no
+    fi
+  fi
+  [ "$_UNLANDED_EDITS" = yes ]
+}
+
+# Cleanliness alone decides only WHETHER the ready verdict is trustworthy; it
+# cannot tell "dirty and mid-turn" from "dirty and wedged". The busy contract
+# owner answers that, so the two are read together: `working` is absorb-eligible
+# in bin/fm-classify-lib.sh's crew_absorb_class, and handing a wedged crew a
+# `working` verdict would silence its wake instead of surfacing it.
+crew_is_busy_now() {
+  local verdict
+  [ "$KIND" != secondmate ] || return 1
+  [ -n "$BACKEND_TARGET" ] || return 1
+  pane_readable "$BACKEND_TARGET" || return 1
+  verdict=$(crew_busy_verdict "$BACKEND_TARGET")
+  [ "${verdict%% *}" = busy ]
+}
+
+# Demote a done/ready RUN_STATE when the worktree still holds unlanded work:
+#   busy crew     -> working (absorb-eligible; the crew genuinely is working)
+#   not-busy crew -> unknown (NOT absorb-eligible; the wake still surfaces)
+demote_ready_when_unlanded() {
+  [ "$RUN_STATE" = "done" ] || return 0
+  wt_has_unlanded_edits || return 0
+  if crew_is_busy_now; then
+    RUN_STATE=working
+    RUN_DETAIL="$RUN_DETAIL${SEP}uncommitted changes; crew busy"
+  else
+    RUN_STATE=unknown
+    RUN_DETAIL="$RUN_DETAIL${SEP}uncommitted changes; crew not busy"
+  fi
+}
+
 # --- run-step authoritative path -------------------------------------------
 
 if [ "$HAVE_RUN" = 1 ]; then
@@ -496,7 +572,20 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
-  if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
+  demote_ready_when_unlanded
+
+  # The crew's own "done: PR ... checks green" report is first-hand testimony, so
+  # this path DECLINES TO DEMOTE it rather than needing to promote it - the
+  # opposite burden of proof from the ci-green override above, which needs a
+  # positive green before it will promote a working run. Two things still block
+  # it: unlanded work (the crew moved on from what it reported), and a ci log
+  # that was read but whose markers were not recognized. `unknown` means the
+  # vocabulary in nm_ci_checks_state no longer matches what no-mistakes emits, so
+  # it can no longer be relied on to reveal a relapse either; trusting the stale
+  # report on it would fail open exactly when the check has gone blind. `no-log`
+  # is different and still trusts the crew: there was no ci log to consult, which
+  # is the ordinary pre-ci-step case, not evidence of anything.
+  if [ "$RUN_STATE" = working ] && log_reports_ci_ready && ! wt_has_unlanded_edits; then
     if [ "$RUN_SOURCE" = coarse ]; then
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
@@ -508,9 +597,10 @@ if [ "$HAVE_RUN" = 1 ]; then
     elif [ "$CI_STEP_STATUS" = fixing ]; then
       CI_LOG_STATE=not-ready
     fi
-    if [ "$CI_LOG_STATE" != not-ready ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
-    fi
+    case "$CI_LOG_STATE" in
+      not-ready|unknown) ;;
+      *) emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR" ;;
+    esac
   fi
 
   # Reconcile the status log. A needs-decision/blocked log line that the run-step
