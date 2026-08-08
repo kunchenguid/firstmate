@@ -25,12 +25,13 @@
 #          instead converge the persistent home to their configured remote code
 #          root. If either placement changes its loaded instruction surface
 #          (AGENTS.md, bin/, or .agents/skills/), bootstrap immediately nudges it
-#          via FM_HOME=<active-home> bin/fm-send.sh fm-<id> so meta resolves the
-#          current route and the standard from-firstmate marker is applied. A
-#          successful send prints one BOOTSTRAP_INFO line with the exact target
-#          and message sent; a failed send leaves an idempotent retry marker
-#          under state/.secondmate-nudge-pending/ and prints an actionable
-#          NUDGE_SECONDMATES line.
+#          via FM_HOME=<active-home> bin/fm-send.sh fm-<id> --delivery-only so
+#          meta resolves the current route, the standard from-firstmate marker
+#          is applied, and confirmed delivery completes the action without a
+#          correlated report. A successful send prints one BOOTSTRAP_INFO line
+#          with the exact target and message sent; a failed send leaves an
+#          idempotent retry marker under state/.secondmate-nudge-pending/ and
+#          prints an actionable NUDGE_SECONDMATES line.
 #          Already-current or no-instruction-change homes are silently left alone.
 #          The secondmate sweep also propagates declared inherited local material
 #          into each validated live secondmate home.

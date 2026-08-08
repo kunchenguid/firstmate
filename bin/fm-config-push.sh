@@ -10,9 +10,10 @@
 # fast-forward tracked files.
 # After a successful per-home propagation that changes any allowlisted config/*
 # item, local routes receive the generation-specific literal-content pointer from
-# fm-config-inherit-lib.sh. Remote routes receive one durable marked reread nudge
-# through their SSH route. Unchanged config and data/captain-shared.md-only
-# updates send no reread unless a previous send failure is pending for that home.
+# fm-config-inherit-lib.sh as a delivery-only action. Remote routes receive one
+# durable marked delivery-only reread nudge through their SSH route. Unchanged
+# config and data/captain-shared.md-only updates send no reread unless a previous
+# send failure is pending for that home.
 # Warnings-only skips exit 0; real propagation or reread-send errors exit non-zero.
 set -u
 
@@ -26,7 +27,7 @@ live secondmate home.
 This is local-material-only:
   - does not fast-forward tracked files
   - after successful config/* changes, sends a local literal-content pointer or
-    one durable marked remote reread nudge
+    one durable marked remote reread nudge as a delivery-only action
     (no message when config is unchanged unless a previous send failure is pending)
   - reports each live home and each inheritable item as pushed, unchanged,
     skipped, or error

@@ -32,8 +32,9 @@
 # and is re-pushed on every convergence, so the fleet stays converged on the
 # primary; an item the primary does not set is mirrored as absence downstream.
 # After successful config/* changes under an already-running secondmate, callers
-# invoke fm_config_send_reread_nudge so the live agent re-reads exact post-write
-# bytes (spawn/respawn already re-reads at launch and needs no redundant nudge).
+# invoke fm_config_send_reread_nudge so the live agent receives a delivery-only
+# pointer to exact post-write bytes (spawn/respawn already re-reads at launch and
+# needs no redundant nudge).
 #
 # Extensible by design: FM_INHERITABLE_CONFIG is the single declared list of
 # config-dir-relative items the primary propagates. Add an item there and every
@@ -854,6 +855,8 @@ fm_config_reread_send_failure() {
 }
 
 # fm_config_reread_send_pointer <id> <instruction-path>
+# Sends a delivery-only action because confirmed pointer delivery is the
+# complete parent-side outcome; no correlated reread report is required.
 fm_config_reread_send_pointer() {
   local id=$1 instruction_path=$2 pending_path selector out rc send_bin message pending_pointer
   pending_path="$instruction_path.pending"
