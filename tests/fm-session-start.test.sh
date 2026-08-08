@@ -70,7 +70,7 @@ new_world() {
 # test deliberately breaks one. Mirrors fm-bootstrap.test.sh's fixture.
 make_fake_toolchain() {
   local fakebin=$1
-  fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi
+  fm_fake_exit0 "$fakebin" tmux proj node chrome-devtools-axi
   fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
@@ -86,15 +86,6 @@ SH
 exit 0
 SH
   chmod +x "$fakebin/gh"
-  cat > "$fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
-  printf '%s\n' 'Usage: treehouse get [--lease]'
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/treehouse"
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
@@ -1032,7 +1023,7 @@ SH
     assert_not_contains "$out" "MISSING: tmux" "Herdr session start falsely required masked tmux"
     assert_not_contains "$out" "MISSING: herdr" "Herdr session start missed its available session CLI"
     assert_not_contains "$out" "MISSING: jq" "Herdr session start missed its available JSON dependency"
-    assert_not_contains "$out" "MISSING: treehouse" "Herdr session start missed its available worktree provider"
+    assert_not_contains "$out" "MISSING_MANUAL: proj" "Herdr session start missed its available worktree provider"
   done
   pass "session start: configured and auto-detected Herdr homes never require tmux"
 }
