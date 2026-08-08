@@ -154,6 +154,15 @@ case "${1:-} ${2:-}" in
     fi
     ;;
   "repo sync")
+    upstream_ref=refs/fm-test/upstream
+    git --git-dir="$FM_TEST_FORK_REPO" fetch -q "$FM_TEST_UPSTREAM_REPO" \
+      "refs/heads/$FM_TEST_DEFAULT:$upstream_ref"
+    if git --git-dir="$FM_TEST_FORK_REPO" merge-base --is-ancestor \
+      "$upstream_ref" "refs/heads/$FM_TEST_DEFAULT"; then
+      git --git-dir="$FM_TEST_FORK_REPO" update-ref -d "$upstream_ref"
+      exit 0
+    fi
+    git --git-dir="$FM_TEST_FORK_REPO" update-ref -d "$upstream_ref"
     git --git-dir="$FM_TEST_UPSTREAM_REPO" push -q "$FM_TEST_FORK_REPO" \
       "refs/heads/$FM_TEST_DEFAULT:refs/heads/$FM_TEST_DEFAULT"
     ;;
@@ -473,7 +482,7 @@ test_github_fork_already_current() {
   pass "T13 already-current GitHub fork is an idempotent update"
 }
 
-test_github_fork_divergence_refused() {
+test_downstream_fork_divergence_requires_reviewed_import() {
   local w out local_before fork_before rc
   w=$(new_world github-diverged)
   configure_github_world "$w"
@@ -489,14 +498,67 @@ test_github_fork_divergence_refused() {
   rc=$?
 
   [ "$rc" -ne 0 ] || fail "diverged GitHub fork update unexpectedly succeeded"
-  assert_contains "$out" "update refused: GitHub fork sync failed without changing divergence" \
-    "diverged GitHub fork refused"
+  assert_contains "$out" \
+    "update refused: GitHub fork sync failed; unresolved downstream divergence requires a reviewed upstream-integration branch/PR before retry" \
+    "diverged downstream fork did not name its separate import path"
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$local_before" ] \
     || fail "local checkout moved after fork divergence"
   [ "$(git --git-dir="$w/origin.git" rev-parse refs/heads/main)" = "$fork_before" ] \
     || fail "diverged fork was changed"
   [ ! -e "$w/order.log" ] || fail "config convergence ran after fork divergence"
-  pass "T14 diverged GitHub fork is refused without mutation"
+  pass "T14 downstream fork divergence refuses without mutation and names reviewed import"
+}
+
+test_help_owns_downstream_import_boundary() {
+  local out rc
+  out=$($UPDATE --help 2>&1)
+  rc=$?
+
+  [ "$rc" -eq 0 ] || fail "fm-update --help failed: $out"
+  assert_contains "$out" \
+    "separate reviewed upstream-integration branch/PR" \
+    "help omitted the downstream import boundary"
+  assert_contains "$out" "This updater never creates," \
+    "help omitted the updater's no-create boundary"
+  pass "T26 help separates reviewed upstream integration from updatefirstmate"
+}
+
+test_reviewed_integration_restores_downstream_updates() {
+  local w out expected rc
+  w=$(new_world github-reviewed-integration)
+  configure_github_world "$w"
+
+  printf 'downstream updater policy\n' >> "$w/seed/.agents/skills/note.md"
+  git -C "$w/seed" add .agents/skills/note.md
+  git -C "$w/seed" commit -qm downstream-updater-feature
+  git -C "$w/seed" push -q origin main
+  bump_upstream "$w" canonical-updater-change
+
+  git -C "$w/seed" remote add canonical "file://$w/upstream.git"
+  git -C "$w/seed" fetch -q canonical main
+  git -C "$w/seed" merge -q --no-edit canonical/main
+  git -C "$w/seed" push -q origin main
+  expected=$(git --git-dir="$w/origin.git" rev-parse refs/heads/main)
+
+  out=$(FM_TEST_EXPECTED_HEAD="$expected" \
+    FM_TEST_ORDER_LOG="$w/order.log" run_github_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -eq 0 ] || fail "reviewed downstream integration update failed: $out"
+  assert_contains "$out" \
+    "fork-sync: already current acme/firstmate-fork with acme/firstmate" \
+    "integrated downstream fork was not accepted as parent-compatible"
+  assert_contains "$out" "firstmate: updated " \
+    "local checkout did not fast-forward to reviewed integration"
+  assert_contains "$out" "reread-firstmate: yes" \
+    "downstream updater-skill feature did not trigger instruction reload"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$expected" ] \
+    || fail "local checkout did not reach reviewed integration tip"
+  grep -q '^downstream updater policy$' "$w/main/.agents/skills/note.md" \
+    || fail "downstream updater-skill feature was lost during integration"
+  [ "$(cat "$w/order.log")" = config ] \
+    || fail "config convergence did not follow reviewed integration update"
+  pass "T27 reviewed canonical integration preserves downstream updater features and restores updates"
 }
 
 test_github_api_failure_refused() {
@@ -727,7 +789,9 @@ test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
 test_github_fork_ahead_sync_and_convergence_order
 test_github_fork_already_current
-test_github_fork_divergence_refused
+test_downstream_fork_divergence_requires_reviewed_import
+test_help_owns_downstream_import_boundary
+test_reviewed_integration_restores_downstream_updates
 test_github_api_failure_refused
 test_non_github_origin_bypasses_gh
 test_stale_origin_tracking_is_refreshed_before_github_api

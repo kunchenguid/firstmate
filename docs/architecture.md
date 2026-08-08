@@ -315,6 +315,10 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 `/updatefirstmate` first resolves the configured origin and upstream identities without assuming the forge.
 For a github.com fork, it uses GitHub's guarded fork-sync API through `gh` before fetching; direct GitHub, non-GitHub, and local origins retain the ordinary direct update path.
 It then fast-forwards the running Firstmate repo and registered secondmate homes from `origin`, converges inherited local material through the existing config contract, re-reads updated instructions, and nudges updated secondmates without touching project clones.
+The configured fork's default branch may be a downstream product line that accepts custom pull requests.
+When canonical and downstream main advance independently, their histories diverge and `/updatefirstmate` refuses before local, secondmate, or config mutation.
+A separate reviewed `upstream-integration/*` branch and pull request owns combining those histories; the updater never creates, pushes, or merges that integration.
+After the integration lands on the captain fork, `/updatefirstmate` resumes its fast-forward-only job from the already-reconciled origin.
 For a remote route, the configured code root updates from its own origin on that host before the persistent home fast-forwards to the code-root commit.
 The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
 Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.

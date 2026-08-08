@@ -33,6 +33,11 @@
 # hostname alone cannot prove that a server implements GitHub's guarded sync
 # API. github.com fork metadata and sync failures are fatal. Non-GitHub and local
 # origins retain the ordinary direct fast-forward behavior.
+# A fork default branch may intentionally carry downstream commits. If its
+# parent later advances independently, the histories have unresolved divergence
+# and this updater refuses before local, secondmate, or config mutation. A
+# separate reviewed upstream-integration branch/PR owns that reconciliation;
+# this updater never creates, pushes, or merges one.
 #
 # Test-only override:
 #   FM_CONFIG_PUSH_OVERRIDE=<executable>  replace the config convergence owner.
@@ -65,6 +70,12 @@ inherited-config convergence.
 Every git advance is fast-forward only. Dirty work, divergence, authentication
 failure, unsupported fork topology, fetch failure, secondmate refusal, or config
 convergence failure returns nonzero without forcing, stashing, or merging.
+
+When a downstream fork and its parent have independently advanced, this updater
+refuses the unresolved divergence before local or config mutation. Import the
+parent through a separate reviewed upstream-integration branch/PR, land it on
+the fork default branch, then rerun this command. This updater never creates,
+pushes, or merges that integration.
 
 Test-only environment:
   FM_CONFIG_PUSH_OVERRIDE  executable replacing bin/fm-config-push.sh
@@ -215,7 +226,7 @@ sync_github_fork_if_needed() {
     ''|*[!0-9a-fA-F]*) refuse "GitHub fork tip inspection returned an invalid commit ID" ;;
   esac
   if ! metadata=$(gh repo sync "$api_origin" --branch "$api_default" 2>&1); then
-    refuse "GitHub fork sync failed without changing divergence: $(first_line "$metadata")"
+    refuse "GitHub fork sync failed; unresolved downstream divergence requires a reviewed upstream-integration branch/PR before retry: $(first_line "$metadata")"
   fi
   if ! after_oid=$(gh api "repos/$api_origin/commits/$api_default" --jq .sha 2>&1); then
     refuse "GitHub fork post-sync inspection failed: $(first_line "$after_oid")"

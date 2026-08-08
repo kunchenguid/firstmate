@@ -172,7 +172,7 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | `/afk`             | Enter away-mode supervision: the sub-supervisor self-handles routine notifications in bash, escalates captain-relevant events and bounded declared-external-wait rechecks as batched digests, and actively alerts if delivery gets stuck while you step away |
 | `/ahoy`            | Recap visible session events since the prior real captain message plus visibly unanswered captain decisions, then guide the captain through any open decisions one at a time in agent-judged impact order; fall back to Bearings when invoked as the session's first real captain message |
 | `/bearings`        | Generate a concise four-section chat digest from bounded local fleet and registered-secondmate state; use `/bearings file` to also replace today's dated report in `data/`, and add `include PRs` when live PR enrichment is wanted |
-| `/updatefirstmate` | Guardedly sync an applicable GitHub fork, then fast-forward Firstmate and its secondmates from the configured origin, converge inherited config, and refresh instructions |
+| `/updatefirstmate` | Guardedly sync a fast-forward-compatible GitHub fork, then update Firstmate and its secondmates; a divergent downstream fork requires a separate reviewed upstream-integration PR |
 | `/stow`            | Sweep the session for uncaptured durable knowledge, curate tiered startup memory with decay and cold archival, enforce each home's budget or surface the required decision, cascade to registered second mates, and report what is safe to reset |
 
 Bearings invocation examples:

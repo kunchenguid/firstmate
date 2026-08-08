@@ -20,6 +20,10 @@ bin/fm-update.sh
 The script owns origin and upstream discovery, guarded GitHub fork synchronization, local and secondmate fast-forwards, and inherited-config convergence.
 Treat a nonzero result as a refusal and report its concrete reason without continuing around it.
 
+For a downstream fork, an independent canonical advance can make fork main and its parent diverge.
+Stop on that refusal.
+Import canonical through a separate reviewed `upstream-integration/*` branch and pull request outside `/updatefirstmate`, then rerun the updater after that integration lands.
+
 When the script prints `reread-firstmate: yes`, re-read `AGENTS.md` before any further work.
 When it prints `reread-firstmate: no`, retain the current instructions.
 
@@ -34,3 +38,4 @@ Do not nudge a target the updater skipped or left current.
 
 Report which fork, Firstmate checkout, and secondmates advanced or remained current.
 Surface every refusal plainly, including dirty or divergent work, authentication failure, unsupported topology, failed fetch, and failed config convergence.
+Never turn unresolved downstream divergence into an updater-owned merge, push, reset, or force operation.
