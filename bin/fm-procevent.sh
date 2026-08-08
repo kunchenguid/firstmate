@@ -51,6 +51,17 @@
 # only terminal verdict. A missing command, an error, or any other exit keeps the
 # registration armed, so an adapter that has no notion of ending needs no change.
 #
+# Applying a result is adapter-owned through the same kind of seam. Some results
+# carry no judgement at all - they must simply be applied idempotently to the
+# home's own durable state - and leaving that to an agent that has to remember
+# means it silently does not happen. So after publishing, `start` calls
+# `bin/fm-procevent-<adapter>.sh autohandle <source-id> <sequence> <result-file>`
+# and lets the adapter apply and acknowledge its own result. Exit 0 means the
+# adapter fully handled it. A missing command, an error, or any other exit is not
+# a failure of capture: the result stays unacknowledged and therefore eligible
+# for re-announcement, so the handler still receives it exactly as before. This
+# runner still inspects nothing and still names no adapter-specific condition.
+#
 # Ownership is machine-wide per canonical source, because separate Firstmate
 # homes can share one underlying source store. A live owner is never displaced;
 # only a claim whose whole generation is gone is reclaimed. A runner leads its
@@ -79,7 +90,7 @@ REG=$(fm_procevent_registry_dir "$STATE")
 MAX_OUTPUT_BYTES=${FM_PROCEVENT_MAX_OUTPUT_BYTES:-1048576}
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,63p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,74p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 adapter_script() { printf '%s/bin/fm-procevent-%s.sh\n' "$FM_ROOT" "$1"; }
 
@@ -97,6 +108,26 @@ adapter_result_is_terminal() {  # <adapter> <result-file>
 source_file()  { printf '%s/%s.source\n' "$REG" "$1"; }
 runner_file()  { printf '%s/%s.runner\n' "$REG" "$1"; }
 staging_file() { printf '%s/.%s.%s.output\n' "$REG" "$1" "$2"; }
+
+# Let the source's own adapter apply and acknowledge one captured result. See
+# the header for why this exists and what each exit means. An already
+# acknowledged result is skipped, so this is safe to call more than once for the
+# same generation. The adapter runs OUTSIDE any source-lock hold here, because a
+# handling adapter is expected to re-arm its own next source, which takes that
+# same lock.
+adapter_autohandle() {  # <adapter> <source-id> <result-file>
+  local adapter=$1 id=$2 result=$3 script seq
+  script=$(adapter_script "$adapter")
+  [ -f "$script" ] && [ ! -L "$script" ] || return 1
+  seq=$(fm_procevent_result_sequence "$result") || return 1
+  case "$seq" in ''|*[!0-9]*) return 1 ;; esac
+  fm_procevent_is_handled "$STATE" "$id" "$seq" && return 0
+  # Silenced exactly like the terminal seam above, so an adapter that has no
+  # such command is a quiet no-op rather than runner noise. This runner's own
+  # one-line outcome is the interface; an adapter that failed keeps its result
+  # announced, and the handler's own call reproduces the diagnostics in full.
+  "$script" autohandle "$id" "$seq" "$result" >/dev/null 2>&1
+}
 
 read_adapter() {  # <source-id>
   local f; f=$(source_file "$1")
@@ -158,22 +189,31 @@ cmd_register() {
 # events - and it republishes on every call regardless of any earlier
 # publication, so a result stays eligible for re-announcement across restarts
 # and drains until `fm_procevent_mark_handled` records it.
-publish_pending() {
-  local result id seq adapter line published=0
+publish_result() {  # <result-file>
+  local result=$1 id seq adapter line status=1
+  id=$(fm_procevent_result_source_id "$result")
+  seq=$(fm_procevent_result_sequence "$result")
+  fm_procevent_source_id_valid "$id" || return 1
+  adapter=$(fm_procevent_result_adapter "$result" 2>/dev/null || true)
+  [ -n "$adapter" ] || return 1
+  line=$(fm_procevent_event_line "$adapter" "$id" "$seq") || return 1
+  fm_procevent_source_lock_acquire "$id" || return 1
+  if ! fm_procevent_is_handled "$STATE" "$id" "$seq" \
+    && fm_wake_append check "procevent:$id:$seq" "check: $line"; then
+    status=0
+  fi
+  fm_procevent_source_lock_release "$id"
+  return "$status"
+}
+
+publish_pending() {  # [result-file-to-skip]
+  local skip=${1-} result published=0
   while IFS= read -r result; do
     [ -n "$result" ] || continue
-    id=$(fm_procevent_result_source_id "$result")
-    seq=$(fm_procevent_result_sequence "$result")
-    fm_procevent_source_id_valid "$id" || continue
-    adapter=$(fm_procevent_result_adapter "$result" 2>/dev/null || true)
-    [ -n "$adapter" ] || continue
-    line=$(fm_procevent_event_line "$adapter" "$id" "$seq") || continue
-    fm_procevent_source_lock_acquire "$id" || continue
-    if ! fm_procevent_is_handled "$STATE" "$id" "$seq" \
-      && fm_wake_append check "procevent:$id:$seq" "check: $line"; then
+    [ "$result" = "$skip" ] && continue
+    if publish_result "$result"; then
       published=$((published + 1))
     fi
-    fm_procevent_source_lock_release "$id"
   done < <(fm_procevent_pending "$STATE")
   printf '%s\n' "$published"
 }
@@ -219,7 +259,7 @@ cmd_start_public() {
 }
 
 cmd_start() {
-  local id=${1-} adapter out rc claimed bound_rc
+  local id=${1-} adapter out rc claimed bound_rc published_capture=0
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   require_runner_group
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
@@ -323,17 +363,30 @@ cmd_start() {
   STAGED_OUTPUT=
   [ "$truncated" -eq 1 ] && printf 'truncated: %s at %s bytes\n' "$id" "$MAX_OUTPUT_BYTES" >&2
 
-  publish_pending >/dev/null
+  if publish_result "$durable"; then
+    published_capture=1
+  fi
+  publish_pending "$durable" >/dev/null
   rm -f -- "$(runner_file "$id")"
-  # Publication is already durable, so retiring an ended source here can never
-  # cost the result or its wake; leaving it armed, by contrast, lets every later
-  # reconcile restart a source that will only return empty ended results.
+  # The result is already durable, so retiring an ended source here cannot cost
+  # its captured output; if publication failed, later reconciliation can still
+  # announce that inbox result without a registration. Leaving the source armed
+  # would instead let every reconcile restart a source that only returns empty
+  # ended results.
   if adapter_result_is_terminal "$adapter" "$durable"; then
     if retire_owned_terminal_source "$id"; then
       printf 'retired: %s (adapter classified the captured result terminal)\n' "$id"
     else
       printf 'cannot retire terminal source; it remains registered: %s\n' "$id" >&2
     fi
+  fi
+  # Strictly after the terminal retirement above: a handling adapter re-arms its
+  # own next source, and retiring afterwards would drop that fresh registration
+  # and leave the source silently dead.
+  if [ "$published_capture" -eq 1 ] && adapter_autohandle "$adapter" "$id" "$durable"; then
+    printf 'autohandled: %s\n' "$id"
+  else
+    printf 'not-autohandled: %s (left for the handler; still unacknowledged)\n' "$id" >&2
   fi
   printf 'captured: %s\n' "$durable"
 }

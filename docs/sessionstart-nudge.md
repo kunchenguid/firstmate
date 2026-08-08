@@ -40,10 +40,12 @@ On a run-tier harness the nudge cannot also fire: `resume`, `reload`, and `fork`
 ## Runtime bound
 
 The run tier blocks session initialization while the digest runs, so `bin/fm-session-start.sh` bounds itself rather than betting on each harness's own hook timeout.
-Individual steps are not all bounded - bootstrap's fleet sync is, but its `gh auth status` probe, its tool version probes, the backlog listing, and the per-task endpoint reads are not - so the whole digest runs as one bounded child, default 120s via `FM_SESSION_START_TIMEOUT`.
+The digest makes no external-network call at all: every one it owes runs concurrently in the separately bounded deferred stage owned by `bin/fm-startup-network.sh`, so an unreachable host can no longer consume this budget.
+What remains is still not individually bounded - tool version probes, the backlog listing, and the per-task endpoint reads are all local but unbounded subprocesses - so the whole digest runs as one bounded child, default 120s via `FM_SESSION_START_TIMEOUT`.
 The shared timeout owner falls back to a pure-Bash process-group watchdog when timeout, gtimeout, and perl are unavailable, so no supported host runs the digest unbounded.
 Because the child writes straight to the hook's stdout, everything emitted before the bound was hit is already delivered; the parent then prints a `STARTUP TRUNCATED` banner naming the stage that did not finish and the stages that were therefore never emitted, and still exits 0.
 The registered hook timeouts sit above that budget so the harness never preempts the banner.
+The deferred network stage deliberately runs in its own process group under its own deadline, so a truncated digest neither kills work it was not waiting for nor orphans unbounded network work.
 
 ## Shared wrapper and safety
 
@@ -58,7 +60,7 @@ The Ahoy skill owns the rule that this marked operational input is never a capta
 Before printing, the nudge wrapper reads `state/.lock` and walks at most eight parents from its own pid in its own separate, hard-coded loop, independent of `bin/fm-lock.sh`'s ancestry walk (`fm_harness_ancestry_pid()` in `bin/fm-session-lock-lib.sh`, which now walks up to sixteen parents and can extend past a claude-named match to a still-more-ancestral one) and of Pi's `lockOwnership()`.
 If the lock names a live pid in that ancestry, session start already ran in this harness session and the wrapper stays silent.
 Every path in both wrappers exits 0, including malformed state and adapter errors, because a Claude SessionStart exit 2 blocks session initialization.
-A lock another session holds, broken GitHub auth, and a truncated digest therefore all surface as digest text the agent reads and acts on, never as a refusal to open the session.
+A lock another session holds and a truncated digest therefore surface as digest text, while broken GitHub auth surfaces through the deferred network result inline or as a wake; none becomes a refusal to open the session.
 
 ## Harness transports
 
