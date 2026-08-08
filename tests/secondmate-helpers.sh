@@ -10,6 +10,22 @@
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# make_fake_proj_root <dir> -> echoes a sandboxed PROJ_ROOT whose
+# projects/<basename of $ROOT>/00-main already exists. acquire_proj_home
+# (bin/fm-home-seed.sh) resolves fm_proj_self_project_name from FM_ROOT, which
+# these tests leave at its default ($ROOT, this checkout, since overriding it
+# would also need a full fake bin/ tree), and fm_proj_new_worktree_in
+# (bin/fm-proj-lib.sh) requires a real 00-* template to exist there before it
+# ever invokes the fake proj binary - a plain directory suffices, no git
+# repo needed. Callers pass this as PROJ_ROOT so the check passes without
+# touching the real /mnt/work.
+make_fake_proj_root() {
+  local dir=$1 proj_root
+  proj_root="$dir/proj-root"
+  mkdir -p "$proj_root/projects/$(basename "$ROOT")/00-main"
+  printf '%s\n' "$proj_root"
+}
+
 # A fake tmux (window ops are logged to FM_FAKE_TMUX_LOG, list-windows returns
 # FM_FAKE_TMUX_WINDOW, capture-pane echoes FM_FAKE_TMUX_CAPTURE) plus a fake
 # proj (`new` creates FM_FAKE_PROJ_HOME and prints only that path to
