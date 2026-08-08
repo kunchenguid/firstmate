@@ -135,7 +135,8 @@ fm_pr_gitlab_host_valid() {
 fm_pr_forgejo_host_valid() {
   local host=${1-}
   fm_pr_gitlab_host_valid "$host" || return 1
-  [ "$host" != gitlab.com ]
+  [ "$host" != gitlab.com ] || return 1
+  [[ ! "$host" =~ ^(0x[0-9a-f]+|[0-9]+)(\.(0x[0-9a-f]+|[0-9]+))*$ ]]
 }
 
 fm_pr_forgejo_path_valid() {
@@ -188,7 +189,7 @@ fm_pr_gitlab_path_valid() {
 # paths address pull requests by owner/repository. A GitLab URL leaves them
 # empty; GitLab merge support remains out of scope.
 fm_pr_url_parse() {
-  local raw=${1-} pattern host path
+  local raw=${1-} pattern host path owner repo number
   local LC_ALL=C
   FM_PR_PROVIDER=
   FM_PR_URL=
@@ -216,7 +217,10 @@ fm_pr_url_parse() {
   pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._-]{1,100})/([A-Za-z0-9._-]{1,100})/pulls/([1-9][0-9]*)$'
   if [[ "$raw" =~ $pattern ]]; then
     host=${BASH_REMATCH[1]}
-    path="${BASH_REMATCH[2]}/${BASH_REMATCH[3]}"
+    owner=${BASH_REMATCH[2]}
+    repo=${BASH_REMATCH[3]}
+    number=${BASH_REMATCH[4]}
+    path="$owner/$repo"
     fm_pr_forgejo_host_valid "$host" || return 1
     fm_pr_forgejo_path_valid "$path" || return 1
     FM_PR_PROVIDER=forgejo
@@ -224,10 +228,10 @@ fm_pr_url_parse() {
     FM_PR_HOST=$host
     FM_PR_PATH=$path
     # shellcheck disable=SC2034
-    FM_PR_OWNER=${BASH_REMATCH[2]}
+    FM_PR_OWNER=$owner
     # shellcheck disable=SC2034
-    FM_PR_REPO=${BASH_REMATCH[3]}
-    FM_PR_NUMBER=${BASH_REMATCH[4]}
+    FM_PR_REPO=$repo
+    FM_PR_NUMBER=$number
     return 0
   fi
   # The path class contains "/" and "-", so this match is greedy to the last
@@ -237,13 +241,14 @@ fm_pr_url_parse() {
   [[ "$raw" =~ $pattern ]] || return 1
   host=${BASH_REMATCH[1]}
   path=${BASH_REMATCH[2]}
+  number=${BASH_REMATCH[3]}
   fm_pr_gitlab_host_valid "$host" || return 1
   fm_pr_gitlab_path_valid "$path" || return 1
   FM_PR_PROVIDER=gitlab
   FM_PR_URL=$raw
   FM_PR_HOST=$host
   FM_PR_PATH=$path
-  FM_PR_NUMBER=${BASH_REMATCH[3]}
+  FM_PR_NUMBER=$number
 }
 
 fm_pr_head_valid() {

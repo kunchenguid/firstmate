@@ -18,6 +18,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {
@@ -75,24 +78,16 @@ if ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; th
 fi
 
 pr_number_from_target() {
-  local target=$1 n
-  case "$target" in
-    '' ) return 1 ;;
-    *"/pull/"*)
-      n=${target##*/pull/}
-      n=${n%%[!0-9]*}
-      ;;
-    *"/pulls/"*)
-      n=${target##*/pulls/}
-      n=${n%%[!0-9]*}
-      ;;
-    [0-9]*)
-      n=${target%%[!0-9]*}
-      ;;
+  local target=$1
+  if [[ "$target" =~ ^[1-9][0-9]*$ ]]; then
+    printf '%s' "$target"
+    return 0
+  fi
+  fm_pr_url_parse "$target" || return 1
+  case "$FM_PR_PROVIDER" in
+    github|forgejo) printf '%s' "$FM_PR_NUMBER" ;;
     *) return 1 ;;
   esac
-  [ -n "$n" ] || return 1
-  printf '%s' "$n"
 }
 
 fetch_pull_head() {
@@ -109,12 +104,10 @@ fetch_pull_head() {
 
 resolve_pr_head() {
   local pr_url=$1 recorded_head=$2 n resolved
-  n=$(pr_number_from_target "$pr_url") || true
-  if [ -n "$n" ]; then
-    if resolved=$(fetch_pull_head "$n"); then
-      printf '%s' "$resolved"
-      return 0
-    fi
+  n=$(pr_number_from_target "$pr_url") || return 1
+  if resolved=$(fetch_pull_head "$n"); then
+    printf '%s' "$resolved"
+    return 0
   fi
   # Offline / unreachable remote: recorded pr_head is better than the local
   # branch, but never preferred over a successful pull-head fetch above.

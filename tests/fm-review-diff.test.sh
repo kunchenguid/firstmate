@@ -149,6 +149,33 @@ test_forgejo_pr_meta_fetches_pull_head() {
   pass "fm-review-diff resolves a Forgejo /pulls/<n> URL through refs/pull/<n>/head"
 }
 
+test_noncanonical_pr_targets_are_rejected() {
+  local name target case_dir out err
+  while IFS='|' read -r name target; do
+    case_dir=$(make_case "rejected-$name")
+    stale_and_pr_commits "$case_dir"
+    git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/pull/9/head"
+    write_task_meta "$case_dir" "pr=$target" "pr_head=$PR_SHA"
+
+    out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+    err=$(cat "$case_dir/stderr")
+
+    assert_contains "$out" '+stale-local' "$name: invalid PR metadata must use the local branch"
+    assert_not_contains "$out" '+pr-fixed' "$name: invalid PR metadata must not resolve a pull head"
+    assert_contains "$err" 'warning: PR head unavailable; diff may lag the open PR' \
+      "$name: invalid PR metadata must warn"
+  done <<'EOF'
+forgejo-extra|https://forgejo.example/owner/repo/pulls/9/extra
+forgejo-slash|https://forgejo.example/owner/repo/pulls/9/
+forgejo-query|https://forgejo.example/owner/repo/pulls/9?x=1
+forgejo-fragment|https://forgejo.example/owner/repo/pulls/9#note
+numeric-zero|0
+numeric-leading-zero|09
+numeric-suffix|9extra
+EOF
+  pass "fm-review-diff rejects noncanonical PR metadata targets"
+}
+
 test_no_pr_meta_uses_local_branch() {
   local case_dir out
   case_dir=$(make_case no-pr-meta)
@@ -188,6 +215,7 @@ test_unreachable_pr_head_falls_back_with_warning() {
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_forgejo_pr_meta_fetches_pull_head
+test_noncanonical_pr_targets_are_rejected
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
