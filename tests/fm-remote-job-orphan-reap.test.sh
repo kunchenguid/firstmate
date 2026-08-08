@@ -110,6 +110,47 @@ SERVE=$(pgrep -P "$WORKER" | head -n 1)
   fail "the serving child is outside the worker's process group"
 pass "the Linux start path puts the whole worker tree in its own process group"
 
+CASE_TERM="$TMP_ROOT/case-term"
+mkdir -p "$CASE_TERM/account"
+build_remote_root "$CASE_TERM/remote-root"
+TERM_JOB_START="$CASE_TERM/job-started"
+cat > "$CASE_TERM/remote-root/bin/fm-sleep-job.sh" <<'SH'
+#!/bin/bash
+printf 'started\n' > "$1"
+sleep 30
+SH
+chmod +x "$CASE_TERM/remote-root/bin/fm-sleep-job.sh"
+git -C "$CASE_TERM/remote-root" add bin/fm-sleep-job.sh
+git -C "$CASE_TERM/remote-root" commit -qm 'add active job fixture'
+TERM_WORKER=$(start_worker "$CASE_TERM/remote-root" "$CASE_TERM/account" "$CASE_TERM/remote-jobs") ||
+  fail "could not start the TERM teardown fixture worker"
+track "$TERM_WORKER"
+wait_child "$TERM_WORKER" 10 || fail "the TERM teardown fixture never started its serving child"
+TERM_SERVE=$(pgrep -P "$TERM_WORKER" | head -n 1)
+TERM_JOB_ID=$(
+  export FM_REMOTE_JOB_STATE_ROOT="$CASE_TERM/remote-jobs"
+  export FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux
+  export FM_REMOTE_JOB_TIMEOUT=30
+  # shellcheck source=bin/fm-remote-job-lib.sh
+  . "$ROOT/bin/fm-remote-job-lib.sh"
+  fm_remote_job_stage "$CASE_TERM/account" "$CASE_TERM/remote-root" "$CASE_TERM/account" \
+    fm-sleep-job.sh "$TERM_JOB_START" </dev/null
+)
+TERM_JOB_DIR="$CASE_TERM/remote-jobs/jobs/$TERM_JOB_ID"
+for _ in $(seq 1 100); do
+  [ -f "$TERM_JOB_START" ] && [ -f "$TERM_JOB_DIR/.claim/group" ] && break
+  sleep 0.05
+done
+[ -f "$TERM_JOB_START" ] && [ -f "$TERM_JOB_DIR/.claim/group" ] ||
+  fail "the TERM teardown fixture job never started"
+TERM_GROUP_PID=$(cat "$TERM_JOB_DIR/.claim/group")
+rm -rf "$CASE_TERM/remote-jobs"
+kill -TERM "$TERM_SERVE" 2>/dev/null || true
+wait_gone "$TERM_SERVE" 10 || fail "the serving child ignored TERM after state-root teardown"
+wait_gone "$TERM_GROUP_PID" 10 || fail "the active job survived TERM after state-root teardown"
+wait_gone "$TERM_WORKER" 10 || fail "the supervisor survived a clean TERM after state-root teardown"
+pass "TERM after state-root removal exits the serving worker cleanly"
+
 [ "$(ppid_of "$WORKER")" = 1 ] ||
   fail "the fixture worker is not orphaned to init, so this case does not reproduce the leak"
 
