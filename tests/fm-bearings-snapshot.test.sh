@@ -896,6 +896,50 @@ test_default_is_bounded_and_local_only() {
   pass "default output is bounded, local-only, and marks omitted surfaces"
 }
 
+test_large_canonical_payload_avoids_argv_limits() {
+  local home fakebin canonical bearings i
+  home=$(make_home large-canonical-payload)
+  fakebin=$(make_fakebin "$home")
+  mkdir -p "$home/projects/large-task"
+  {
+    printf '## In flight\n\n## Queued\n'
+    i=1
+    while [ "$i" -le 1800 ]; do
+      printf -- '- [ ] synthetic-%04d - Synthetic fleet row %04d with deterministic padding 0123456789abcdef (repo: synthetic) (kind: ship)\n' "$i" "$i"
+      i=$((i + 1))
+    done
+    printf '\n## Done\n'
+  } > "$home/data/backlog.md"
+  fm_write_meta "$home/state/large-task.meta" \
+    "window=firstmate:fm-large-task" \
+    "worktree=$home/projects/large-task" \
+    "project=synthetic" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  awk 'BEGIN { printf "needs-decision [key=large]: "; for (i = 0; i < 180000; i++) printf "x"; printf "\n" }' \
+    > "$home/state/large-task.status"
+
+  canonical="$home/canonical.json"
+  bearings="$home/bearings.json"
+  PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json > "$canonical" \
+    || fail "canonical snapshot failed with a large file-transport payload"
+  run "$home" "$fakebin" --json > "$bearings" \
+    || fail "Bearings failed with a large canonical payload"
+  jq -e '
+    .schema == "fm-fleet-snapshot.v1"
+    and (.backlog.records | length) == 1800
+    and .backlog.records[0].id == "synthetic-0001"
+    and .backlog.records[-1].id == "synthetic-1800"
+    and ([.tasks[] | select(.id == "large-task")
+          | (.paths.status_log.last_event.raw | length) > 180000] | length) == 1
+  ' "$canonical" >/dev/null || fail "large canonical snapshot changed payload semantics or ordering"
+  jq -e '.schema == "fm-bearings.v1" and .home != null' "$bearings" >/dev/null \
+    || fail "large canonical payload did not project through Bearings"
+  [ ! -s "$home/net.log" ] || fail "large local-only snapshot unexpectedly called the network"
+  pass "large backlog and task JSON cross canonical and Bearings interfaces without argv transport"
+}
+
 test_toon_json_parity() {
   local home fakebin toon json keys k
   home=$(make_home parity); write_fixture "$home"
@@ -1002,7 +1046,7 @@ test_perl_fallback_bounds_github_call() {
   fakebin=$(make_fakebin "$home")
   toolbin="$home/toolbin"
   mkdir -p "$toolbin"
-  for cmd in bash dirname basename jq date sed git grep tail cut tr head sort wc perl sleep cat find; do
+  for cmd in bash dirname basename jq date sed git grep tail cut tr head sort wc perl sleep cat find mktemp rm; do
     ln -s "$(command -v "$cmd")" "$toolbin/$cmd"
   done
   started=$(date +%s)
@@ -1903,6 +1947,7 @@ test_nonprogressing_child_states_are_explicit
 test_registry_unavailability_and_bounds_are_explicit
 test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_local_only
+test_large_canonical_payload_avoids_argv_limits
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges
 test_landed_default_balances_dominant_and_sparse_homes

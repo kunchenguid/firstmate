@@ -151,6 +151,20 @@ test_empty_fleet_json() {
   pass "empty fleet snapshot and view use explicit absence markers"
 }
 
+test_temporary_transport_failure_is_explicit() {
+  local home out err rc
+  home=$(make_home bad-tmpdir)
+  printf 'not a directory\n' > "$home/not-a-directory"
+  err="$home/snapshot.err"
+  out=$(TMPDIR="$home/not-a-directory" FM_HOME="$home" "$SNAPSHOT" --json 2> "$err")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "snapshot accepted an unusable temporary transport directory"
+  [ -z "$out" ] || fail "snapshot emitted output after temporary transport setup failed"
+  grep -F 'fm-fleet-snapshot: cannot create temporary workspace' "$err" >/dev/null \
+    || fail "temporary transport failure lacked the canonical diagnostic"
+  pass "temporary JSON transport setup fails closed with an explicit diagnostic"
+}
+
 test_fixture_snapshot_json() {
   local home fakebin out ids
   home=$(make_home fixture)
@@ -780,6 +794,7 @@ test_parked_scout_decision_stays_pending() {
 }
 
 test_empty_fleet_json
+test_temporary_transport_failure_is_explicit
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
