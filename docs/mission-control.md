@@ -4,7 +4,7 @@
 It is a generator, not a server: each run writes one file, and the page reloads itself so a regenerated file appears without a click.
 
 The board is a calm, light executive summary: a stat strip, the decisions waiting on the captain, a card per project, what landed today, and a quiet System view carrying fleet health plus allowance pace.
-It uses monochrome SVG line icons and no emoji.
+Its in-page controls use monochrome SVG line icons and no emoji, while an inline SVG compass mark keeps Mission Control distinct in browser tabs and bookmarks without adding an asset request.
 The script's own header and `--help` own its exact flags, environment variables, paths, and exit codes, including the two commands that set a decision aside and bring it back.
 
 ## What the board does
@@ -157,7 +157,7 @@ The generator does not serve it; how the file is exposed is decided outside it.
 
 ## Verification
 
-`tests/fm-mission-control.test.sh` renders the board end to end from a fixture home and from captured snapshot payloads, covering present and absent sources, cross-home captain decisions, escaping of hostile prose, project folding, work outside the registry, per-item stage and model rendering, bounded cross-home stage values, safe handling of valid, missing, and malformed secondmate active-task totals, item overflow, blocked work, rich allowance pace and history, automatic balancing, unavailable and stale allowance sources, narrow allowance labels, unmeasurable fallback windows, self-reload, the tab structure, and the deferred shelf.
+`tests/fm-mission-control.test.sh` renders the board end to end from a fixture home and from captured snapshot payloads, covering present and absent sources, cross-home captain decisions, escaping of hostile prose, project folding, work outside the registry, per-item stage and model rendering, bounded cross-home stage values, safe handling of valid, missing, and malformed secondmate active-task totals, item overflow, blocked work, rich allowance pace and history, automatic balancing, unavailable and stale allowance sources, narrow allowance labels, unmeasurable fallback windows, self-reload, the self-contained favicon in ordinary and control-enabled boards, the tab structure, and the deferred shelf.
 The deferred cases pin the awaiting count and the section count to literal numbers rather than to the absence of a title, because dropping a decision from the list while still counting it and counting it while still listing it fail separately.
 It also pins a fixed current time and commits its fixture clones at explicit epochs, so the last-change wording, its three degrade-to-dash paths, and the promise that no clone is written to are all checked against times the test chose.
 

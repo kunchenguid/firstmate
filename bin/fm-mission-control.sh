@@ -1470,6 +1470,7 @@ def health_block:
    else "<meta http-equiv=\"refresh\" content=\"" + ($refresh | tostring) + "\">" end)
 + "
 <title>Mission Control</title>
+<link rel=\"icon\" type=\"image/svg+xml\" sizes=\"any\" href=\"data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%2715%27 fill=%27%231a2233%27/%3E%3Cpath d=%27M16 4.5 21.2 17.8 16 15.5 10.8 17.8Z%27 fill=%27white%27/%3E%3Cpath d=%27M16 27.5 10.8 14.2 16 16.5 21.2 14.2Z%27 fill=%27%230f8a5f%27/%3E%3C/svg%3E\">
 <style>
 :root{
   --bg:#f5f6f8; --panel:#ffffff; --ink:#1a2233; --muted:#6b7688; --faint:#9aa4b2;

@@ -1713,6 +1713,76 @@ test_self_reload_is_wired() {
   pass "the board self-reloads and stays self-contained"
 }
 
+# Exercise both public render modes, then parse their emitted document contract
+# rather than looking for implementation text in the renderer. The browser gets
+# one percent-encoded, standalone SVG with an explicit MIME type in either mode.
+test_favicon_is_self_contained_in_every_board() {
+  local snap board controls_board
+  snap=$TMP_ROOT/favicon.json
+  board=$TMP_ROOT/favicon.html
+  controls_board=$TMP_ROOT/favicon-controls.html
+  snapshot_json '[]' '[]' > "$snap"
+  "$BOARD" --snapshot "$snap" --no-quota --out "$board" >/dev/null \
+    || fail "the ordinary board must render with its favicon"
+  "$BOARD" --snapshot "$snap" --no-quota --controls --out "$controls_board" >/dev/null \
+    || fail "the control-enabled board must render with its favicon"
+
+  python3 - "$board" "$controls_board" <<'PY' \
+    || fail "every rendered board must expose the same valid, self-contained SVG favicon"
+import sys
+import urllib.parse
+import xml.etree.ElementTree as ET
+from html.parser import HTMLParser
+
+class IconParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.icons = []
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if tag == "link" and "icon" in attributes.get("rel", "").split():
+            self.icons.append(attributes)
+
+def icon_contract(path):
+    parser = IconParser()
+    with open(path, encoding="utf-8") as rendered:
+        parser.feed(rendered.read())
+    if len(parser.icons) != 1:
+        raise AssertionError(f"{path}: expected one favicon, got {len(parser.icons)}")
+    icon = parser.icons[0]
+    if icon.get("type") != "image/svg+xml" or icon.get("sizes") != "any":
+        raise AssertionError(f"{path}: favicon MIME or scalable-size contract is missing")
+    prefix = "data:image/svg+xml,"
+    href = icon.get("href", "")
+    if not href.startswith(prefix):
+        raise AssertionError(f"{path}: favicon is not an inline SVG data URL")
+    encoded = href[len(prefix):]
+    if "<" in encoded or ">" in encoded:
+        raise AssertionError(f"{path}: SVG markup is not URL encoded")
+    payload = urllib.parse.unquote_to_bytes(encoded).decode("utf-8", "strict")
+    root = ET.fromstring(payload)
+    if root.tag != "{http://www.w3.org/2000/svg}svg" or root.get("viewBox") != "0 0 32 32":
+        raise AssertionError(f"{path}: favicon is not the expected scalable SVG document")
+    children = list(root)
+    if len(children) < 3 or not any(child.tag.endswith("circle") for child in children):
+        raise AssertionError(f"{path}: favicon has no complete compact mark")
+    for element in root.iter():
+        if element.tag.endswith(("script", "foreignObject")):
+            raise AssertionError(f"{path}: favicon contains executable or foreign content")
+        for name, value in element.attrib.items():
+            if name.endswith("href") or "url(" in value.lower():
+                raise AssertionError(f"{path}: favicon references another resource")
+    return href
+
+ordinary = icon_contract(sys.argv[1])
+controlled = icon_contract(sys.argv[2])
+if ordinary != controlled:
+    raise AssertionError("ordinary and control-enabled boards emitted different favicons")
+PY
+  pass "ordinary and control-enabled boards share one valid self-contained favicon"
+}
+
 # A snapshot carrying one of every row the reply layer has to decide about: a
 # main captain decision, a secondmate decision that IS a backlog hold, a
 # secondmate decision that is only a task-level open decision, and a PR row.
@@ -1922,6 +1992,7 @@ test_narrow_token_shapes_keep_every_value_wrappable
 test_unmeasurable_allowance_is_not_a_zero_gauge
 test_usage_errors_refuse
 test_self_reload_is_wired
+test_favicon_is_self_contained_in_every_board
 test_controls_are_absent_unless_asked_for
 test_controls_match_what_each_row_can_actually_resolve
 test_controls_can_only_queue_a_request
