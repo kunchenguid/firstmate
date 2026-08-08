@@ -95,7 +95,9 @@
 #   focus-sensitive presentation mutation.
 #   Every single-task invocation holds one task-id-scoped lock across backend
 #   creation through metadata publication, so concurrent same-id spawns serialize
-#   even when they select different backends.
+#   even when they select different backends. A fresh spawn first takes the
+#   per-home task-set lock and refuses rather than waits when forced teardown owns
+#   it; relaunch is exempt because the existing task's control lock covers it.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
