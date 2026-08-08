@@ -446,8 +446,9 @@ else
   RESOLVE_ANSWER_TEXT=$MESSAGE
   if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
     # Reuse an existing correlation id for recovery resends; otherwise create a
-    # durable parent expectation before delivery. Transport success never
-    # resolves that expectation (see fm-pending-reply-lib.sh).
+    # durable parent request record before delivery. Confirmed transport resolves
+    # delivery-only actions; reply-expected records stay open for their correlated
+    # reports (see fm-pending-reply-lib.sh).
     existing_corr=${FM_PENDING_REPLY_EXISTING_CORR:-$(fm_pending_reply_extract_corr "$MESSAGE")}
     if [ -n "$existing_corr" ] \
       && fm_pending_reply_corr_reusable "$STATE" "$existing_corr" "$TARGET_TASK_ID"; then

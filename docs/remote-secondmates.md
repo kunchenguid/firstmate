@@ -162,13 +162,14 @@ Backends that already refuse secondmate launch, currently Orca and cmux, remain 
 
 Startup liveness recovery relaunches a dead or missing remote second mate through this same command, so recovery passes the same readiness gate rather than a weaker one.
 
-Send routed requests normally:
+Send routed questions and report requests normally:
 
 ```sh
 FM_HOME=<primary-home> bin/fm-send.sh fm-<id> '<request>'
 ```
 
-Marked requests keep the existing correlation contract.
+Ordinary marked requests remain reply-expected and keep the existing correlation contract.
+For an action whose confirmed delivery is the complete parent-side outcome, pass `--delivery-only`; the marked record then resolves on delivery without waiting for a correlated report or entering missed-report recovery.
 The remote charter appends replies to `state/parent-replies.status` in the remote home.
 A process-event source performs a non-destructive, cursor-anchored delta read, fetches only referenced `data/*.md` documents through the confined reader, mirrors every content-bearing line at most once into the primary status channel, and does not carry blank separators.
 The channel carries the mate's status and decision model: an uncorrelated progress line and a newly raised `needs-decision` travel the same path as a correlated answer, and reach the parent's open-decision fold identically.

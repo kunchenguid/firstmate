@@ -31,7 +31,7 @@
 #   request_summary=        short sanitized summary (no secrets by design)
 #   reply_expected=         1 for a question/report request; 0 for a
 #                           delivery-only action
-#   created_epoch=          when the expectation was created
+#   created_epoch=          when the record was created
 #   delivered_epoch=        when the marked request was confirmed delivered
 #                           (empty until delivery; delivery resolves only a
 #                           delivery-only action)
@@ -421,7 +421,7 @@ fm_pending_reply_confirm_delivery() {  # <state-dir> <corr_id>
   return 2
 }
 
-# Preserve an expectation when a remote transport disconnect makes delivery
+# Preserve a record when a remote transport disconnect makes delivery
 # completion unknowable. This never resolves or retries the request; it moves
 # the existing prepared record to the owner's explicit unknown-delivery path.
 fm_pending_reply_mark_delivery_unknown() {  # <state-dir> <corr_id>
@@ -493,7 +493,7 @@ _fm_pending_reply_reconcile_delivery_locked() {  # <state-dir> <corr_id>
   return 1
 }
 
-# Drop an undelivered expectation after a failed send so transport failure does
+# Drop an undelivered record after a failed send so transport failure does
 # not masquerade as a missed report later.
 fm_pending_reply_discard_undelivered() {  # <state-dir> <corr_id>
   local state=$1 corr=$2 rec delivered marker
