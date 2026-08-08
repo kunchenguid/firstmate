@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Public-interface tests for the refill cadence and serialization-debt probe.
+# Public-interface tests for the refill cadence and serialization-debt probe,
+# including the fleet-depth quarantine (2026-08-08): legacy capacity is
+# unknown, no dispatch verdict or staging is ever emitted, and the
+# serialization-debt and authoritative bead-query diagnostics remain.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -32,6 +35,19 @@ cat > "$FAKEBIN/lane-checker" <<'SH'
 exit 0
 SH
 chmod +x "$FAKEBIN/lane-checker"
+
+# Quarantine fixtures: a clean probe and a debt probe for the refill cadence
+# under the fleet-depth quarantine.
+cat > "$TMP_ROOT/quar-clean-probe" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+cat > "$TMP_ROOT/quar-debt-probe" <<'SH'
+#!/usr/bin/env bash
+echo "SERIALIZATION-DEBT: quarantine fixture"
+exit 1
+SH
+chmod +x "$TMP_ROOT/quar-clean-probe" "$TMP_ROOT/quar-debt-probe"
 
 epoch_iso() {
   python3 - "$1" <<'PY'
@@ -348,5 +364,58 @@ test_lane_checker_clean_keeps_probe_calm_and_invokes_project
 test_lane_checker_exit_1_violation_surfaces_debt
 test_lane_checker_exit_2_cannot_run_surfaces_debt
 test_unavailable_lane_checker_reports_condition_without_hiding_other_debt
+# --- fleet-depth quarantine (2026-08-08) ----------------------------------
+# Legacy capacity is unknown: no owned-manifest/mtime arithmetic, no
+# DISPATCH-NEEDED verdict, no next-wave staging. The serialization-debt and
+# authoritative bead-query diagnostics remain.
+
+test_quarantine_reports_unknown_capacity_and_never_dispatches() {
+  # even with abundant open beads (the old dispatch condition would fire), the
+  # quarantined script reports capacity=unknown and never dispatches
+  local out rc
+  printf '{"total":50}\n' > "$TASKS_JSON"
+  out=$(PATH="$FAKEBIN:$PATH" TASKS_JSON="$TASKS_JSON" FM_REFILL_PROJECT="$PROJECT" \
+    FM_SERIALIZATION_DEBT_PROBE="$TMP_ROOT/quar-clean-probe" "$ROOT/bin/fm-fleet-refill.sh" 2>&1); rc=$?
+  expect_code 0 "$rc" "quarantined refill should stay calm with a clean probe"
+  assert_contains "$out" "capacity=unknown" "quarantine did not report unknown capacity"
+  assert_contains "$out" "open_beads=50" "authoritative bead-query diagnostic missing"
+  assert_not_contains "$out" "DISPATCH-NEEDED" "quarantined refill emitted a dispatch verdict"
+  assert_not_contains "$out" "NEXT-WAVE" "quarantined refill staged work"
+  assert_not_contains "$out" "active=" "legacy active counter survived the quarantine"
+  assert_not_contains "$out" "battery=" "legacy battery counter survived the quarantine"
+  pass "quarantine reports unknown capacity and never emits a dispatch verdict"
+}
+
+test_quarantine_ignores_legacy_manifest_and_output_mtimes() {
+  # a legacy manifest and fresh-looking output files must not influence the
+  # quarantined verdict: capacity stays unknown, the verdict stays calm
+  local out rc
+  mkdir -p "$TMP_ROOT/state" "$TMP_ROOT/output-tasks"
+  printf 'legacy-task-1 legacy-task-2\n' > "$TMP_ROOT/state/fleet-manifest.jsonl"
+  : > "$TMP_ROOT/output-tasks/legacy-task-1.output"
+  printf '{"total":3}\n' > "$TASKS_JSON"
+  out=$(PATH="$FAKEBIN:$PATH" TASKS_JSON="$TASKS_JSON" FM_REFILL_PROJECT="$PROJECT" \
+    FM_SERIALIZATION_DEBT_PROBE="$TMP_ROOT/quar-clean-probe" "$ROOT/bin/fm-fleet-refill.sh" 2>&1); rc=$?
+  expect_code 0 "$rc" "legacy manifest presence should not dispatch"
+  assert_contains "$out" "capacity=unknown" "manifest influenced the quarantined capacity"
+  assert_not_contains "$out" "DISPATCH-NEEDED" "manifest triggered a dispatch verdict"
+  pass "legacy manifests and output mtimes never influence the quarantined verdict"
+}
+
+test_quarantine_still_propagates_serialization_debt() {
+  # the serialization-debt safety diagnostic remains authoritative under the
+  # quarantine: debt still surfaces and still fails the cadence
+  local out rc
+  printf '{"total":0}\n' > "$TASKS_JSON"
+  out=$(PATH="$FAKEBIN:$PATH" TASKS_JSON="$TASKS_JSON" FM_REFILL_PROJECT="$PROJECT" \
+    FM_SERIALIZATION_DEBT_PROBE="$TMP_ROOT/quar-debt-probe" "$ROOT/bin/fm-fleet-refill.sh" 2>&1); rc=$?
+  expect_code 1 "$rc" "serialization debt must still surface under quarantine"
+  assert_contains "$out" "SERIALIZATION-DEBT: quarantine fixture" "debt diagnostic lost under quarantine"
+  pass "serialization-debt diagnostic remains under quarantine"
+}
+
 test_lane_checker_defaults_to_project_scripts_path
 test_refill_cadence_propagates_lane_contract_debt
+test_quarantine_reports_unknown_capacity_and_never_dispatches
+test_quarantine_ignores_legacy_manifest_and_output_mtimes
+test_quarantine_still_propagates_serialization_debt
