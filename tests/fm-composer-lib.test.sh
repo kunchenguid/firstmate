@@ -160,10 +160,12 @@ test_cursor_idle_placeholder_is_empty() {
   out=$(classify 0 '→ Add a follow-up' "$idle")
   [ "$out" = unknown ] || fail "an unscoped arrow idle placeholder must stay unknown, got '$out'"
   out=$(classify 0 '→ Add a follow-up' "$idle" insensitive '' cursor)
-  [ "$out" = empty ] || fail "a Cursor arrow idle placeholder should read empty, got '$out'"
+  [ "$out" = pending ] || fail "a bright Cursor draft matching its idle placeholder must stay pending, got '$out'"
+  out=$(classify 1 '→ Add a follow-up' "$idle" insensitive '' cursor)
+  [ "$out" = pending ] || fail "a bordered bright Cursor draft matching its idle placeholder must stay pending, got '$out'"
   out=$(classify 0 '→ Add a follow-up')
   [ "$out" = pending ] || fail "cursor idle placeholder without idle regex should be pending, got '$out'"
-  pass "fm_composer_classify_content: cursor idle placeholder 'Add a follow-up' reads empty"
+  pass "fm_composer_classify_content: Cursor idle placeholder requires ghost evidence"
 }
 
 test_cursor_real_text_is_pending() {

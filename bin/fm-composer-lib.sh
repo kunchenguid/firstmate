@@ -309,6 +309,10 @@ fm_composer_cursor_arrow_ok() {  # <bordered> <harness>
   [ "$1" = 1 ] || [ "$2" = cursor ]
 }
 
+fm_composer_cursor_idle_ok() {  # <bordered> <harness> <ghost-evidence>
+  [ "$3" = 1 ] && fm_composer_cursor_arrow_ok "$1" "$2"
+}
+
 # fm_composer_strip_prompt_glyph: strip ONE leading prompt glyph plus the
 # whitespace after it, then re-emit the row for a second idle-placeholder
 # match. The four agent glyphs are always stripped; pass `all` to also strip
@@ -334,10 +338,13 @@ fm_composer_strip_prompt_glyph() {  # <content> [all]
 }
 
 fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content] [harness]
-  local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content harness remainder arrow_leading=0
+  local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content harness remainder arrow_leading=0 cursor_idle_evidence=1
   plain_content=${5:-$content}
   harness=${6:-${FM_COMPOSER_HARNESS:-}}
   case "$plain_content" in '→'*) arrow_leading=1 ;; esac
+  if [ "$arrow_leading" -eq 1 ] && [ "$content" = "$plain_content" ]; then
+    cursor_idle_evidence=0
+  fi
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     # Ghost stripping emptied the row, so every byte was de-emphasised.
     # Established agent glyphs remain empty composers on their own (claude
@@ -359,7 +366,7 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
         ;;
     esac
     plain_content=$(fm_composer_strip_prompt_glyph "$plain_content")
-    if { [ "$arrow_leading" -eq 0 ] || fm_composer_cursor_arrow_ok "$bordered" "$harness"; } \
+    if { [ "$arrow_leading" -eq 0 ] || fm_composer_cursor_idle_ok "$bordered" "$harness" "$cursor_idle_evidence"; } \
       && fm_composer_idle_matches "$plain_content" "$idle_re" "$idle_case"; then
       printf 'empty'
     else
@@ -387,7 +394,7 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   [ -n "$content" ] || { printf 'empty'; return 0; }
   # Known idle placeholder (matched before a leading glyph is stripped).
   case "$content" in '→'*) arrow_leading=1 ;; esac
-  if { [ "$arrow_leading" -eq 0 ] || fm_composer_cursor_arrow_ok "$bordered" "$harness"; } \
+  if { [ "$arrow_leading" -eq 0 ] || fm_composer_cursor_idle_ok "$bordered" "$harness" "$cursor_idle_evidence"; } \
     && fm_composer_idle_matches "$content" "$idle_re" "$idle_case"; then
     printf 'empty'; return 0
   fi
@@ -397,7 +404,7 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   [ -n "$content" ] || { printf 'empty'; return 0; }
   # Known idle placeholder (matched again after the leading glyph was stripped,
   # e.g. "❯ Type a message...").
-  if { [ "$arrow_leading" -eq 0 ] || fm_composer_cursor_arrow_ok "$bordered" "$harness"; } \
+  if { [ "$arrow_leading" -eq 0 ] || fm_composer_cursor_idle_ok "$bordered" "$harness" "$cursor_idle_evidence"; } \
     && fm_composer_idle_matches "$content" "$idle_re" "$idle_case"; then
     printf 'empty'; return 0
   fi

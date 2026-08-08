@@ -162,7 +162,7 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
   # Cursor is classified by the narrowed identity rule in bin/fm-cursor-lib.sh,
   # never by a bare `agent` basename: an unrelated executable named agent must
   # not read as a live agent pane.
-  if fm_cursor_process_matches "$path" "$argv0"; then printf 'agent'; return; fi
+  if fm_cursor_process_matches "$path" '' "$argv0"; then printf 'agent'; return; fi
   case "$base" in
     # muse is anchored rather than globbed like its neighbours: its installed
     # binary is muse-bin-<version> (the launcher execs it, so the version is the
@@ -222,16 +222,14 @@ fm_backend_tmux_foreground_comms() {  # <target>
 }
 
 fm_backend_tmux_foreground_argv0s() {  # <target>
-  local target=$1 tty pid pgid tpgid comm args argv0
+  local target=$1 tty pid pgid tpgid comm argv0
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
   [ -n "$tty" ] || return 0
   LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
     | while read -r pid pgid tpgid comm; do
         [ -n "$comm" ] || continue
         [ "$pgid" = "$tpgid" ] || continue
-        args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || continue
-        args=${args#"${args%%[![:space:]]*}"}
-        argv0=${args%%[[:space:]]*}
+        argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" || true)
         [ -n "$argv0" ] && printf '%s\n' "$argv0"
       done
 }

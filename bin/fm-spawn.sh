@@ -2126,17 +2126,16 @@ kimi_capture() {
 # resolved path, never the basename, so a second Cursor install or an unrelated
 # executable sharing the alias name cannot capture this task's worker-server
 # discovery.
-cursor_process_matches() {  # <args> <cursor-binary>
-  local args=$1 binary=$2 argv0
+cursor_process_matches() {  # <args> <cursor-binary> <argv0>
+  local args=$1 binary=$2 argv0=${3:-}
   [ -n "$args" ] || return 1
-  fm_cursor_process_matches "${args%% *}" "$args" || return 1
-  argv0=${args%% *}
   [ -n "$argv0" ] || return 1
+  fm_cursor_process_matches "$argv0" "$args" "$argv0" || return 1
   [ "$(fm_cursor_canonical_path "$argv0")" = "$(fm_cursor_canonical_path "$binary")" ]
 }
 
 cursor_worker_server_find() {  # <backend> <target> <cursor-binary> -> pid on stdout
-  local backend=$1 target=$2 binary=${3:-${CURSOR_BIN:-cursor-agent}} tty pid args
+  local backend=$1 target=$2 binary=${3:-${CURSOR_BIN:-cursor-agent}} tty pid args argv0
   case "$backend" in
     tmux)
       tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
@@ -2145,7 +2144,8 @@ cursor_worker_server_find() {  # <backend> <target> <cursor-binary> -> pid on st
       # comm MainThread) is the group leader. Its worker-server child is NOT in
       # the foreground group once detached, so match by parent below instead.
       LC_ALL=C ps -t "${tty#/dev/}" -o pid=,args= 2>/dev/null | while read -r pid args; do
-        cursor_process_matches "$args" "$binary" || continue
+        argv0=$(fm_cursor_argv0_for_pid "$pid" || true)
+        cursor_process_matches "$args" "$binary" "$argv0" || continue
         printf '%s\n' "$pid"
         return 0
       done
@@ -2168,14 +2168,15 @@ cursor_worker_server_find() {  # <backend> <target> <cursor-binary> -> pid on st
 # (fm_process_identity, bin/fm-process-identity-lib.sh), so a comm containing
 # spaces cannot make the two disagree and silently defeat the recycled-pid check.
 cursor_worker_server_record() {  # <backend> <target> <meta>
-  local backend=$1 target=$2 meta=$3 agent_pid worker_pid identity binary=${CURSOR_BIN:-cursor-agent} i
+  local backend=$1 target=$2 meta=$3 agent_pid worker_pid identity binary=${CURSOR_BIN:-cursor-agent} argv0 i
   for i in 1 2 3 4 5; do
     agent_pid=
     while IFS= read -r pid; do
       [ -n "$pid" ] || continue
       # The selected Cursor process names the selected binary; the
       # worker-server's cmdline does not, even though its parent does.
-      if cursor_process_matches "$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null)" "$binary"; then
+      argv0=$(fm_cursor_argv0_for_pid "$pid" || true)
+      if cursor_process_matches "$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null)" "$binary" "$argv0"; then
         agent_pid=$pid
         break
       fi
