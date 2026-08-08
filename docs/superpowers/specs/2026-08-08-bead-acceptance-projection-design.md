@@ -39,6 +39,7 @@ A candidate row may carry a bounded evidence snapshot naming the owner that prod
 The projection has exactly two consumption surfaces, both through one command:
 
 1. `bin/fm-fleet-refill.sh --refill` admission (plan Task 12) consumes the projection's rows to select which beads to claim and dispatch.
+   Plan Task 12 step 1's own open, ready, unclaimed, and dependency-safe filtering is superseded by projection consumption, so refill never re-classifies candidate readiness; refill retains only the fresh live re-verify at claim time that decision 4 requires.
 2. Fleet review paths (`bin/fm-fleet-snapshot.sh`, bearings, and the human refill verdict) embed the exact projection object or call the same function; they never re-classify candidates.
 
 The private sentinel, when it needs candidate facts, consumes the same object; it retains only cadence, query, logging, and notification policy.
@@ -115,7 +116,7 @@ The projection is a snapshot, never a cache that outlives its observation: the r
 
 Phase A must prove its accuracy against the completed full P0/P1 state-reconciliation audit at `/home/holu/fmate/firstmate/data/dos-p0p1-state-reconciliation-audit-0808/report.md`.
 That audit is the reference for the P0/P1 non-closed universe: 129 rows with per-row dispositions, the 21-row ready-band challenge, false-ready rows, stale assignments, comment-carried rulings, landed-but-unclosed work, program parents, preserved branches, and tracker serialization ordering.
-Its evidence files (`all_p0p1_nonclosed.json`, `comments_p0p1.json`, `deps_p0p1.json`, `p0p1_table.txt`) are the frozen shadow-validation fixtures.
+Its evidence files (`all_p0p1_nonclosed.json`, `comments_p0p1.json`, `deps_p0p1.json`, `p0p1_table.txt`, `p0p1_desc.txt`) are the frozen shadow-validation fixtures.
 
 The proof runs the projection over the full audit universe in shadow mode and compares each row's disposition against the audit's disposition.
 Acceptance is measurable and has two parts:
@@ -136,6 +137,7 @@ The projection integrates the complete delivery lifecycle through the `landed-aw
 
 A bead is `landed-awaiting-closure` when the exact content is in the authorized target or joined through an authorized local-only merge, but the canonical bead closure remains outstanding.
 The disposition requires merge or landing evidence from the forge and Git owners, the current Closure-Receipt identity or its absence, the exact branch fate, the isolated-copy return state, and the explicit preservation or archive disposition.
+It also requires the registered clone to be refreshed through the guarded fleet-sync path after any merge, never forced, with that refresh's observed revision recorded as part of the landing evidence so the next projection and re-verify see the merged main.
 A pushed branch or merged PR alone is not terminal completion when bead closure remains: the row stays `landed-awaiting-closure` until the operative Closure-Receipt is verified or appended, the canonical bead closes through the serialized steward transaction, the exact branch fate is recorded, the provider copy returns, and the attempt retires.
 The plan's ordered terminal composition owns that sequence; the projection only classifies and names the next action.
 
@@ -149,7 +151,7 @@ Phase B enables a narrow, attended allowlist of mechanical tracker corrections u
 It is enabled only after the Phase A accuracy proof passes and the captain separately authorizes the allowlist.
 Every Phase B correction is performed by firstmate or the attended steward through the existing `bin/fm-br-receipt.sh` transaction in the audit's serialization order, never autonomously by the projection and never by a worker.
 
-The allowlist is exactly the bookkeeping class the audit already determined under existing authority:
+The allowlist is the bookkeeping class the audit already determined under existing authority, bounded to mechanical tracker corrections and nothing else:
 
 - Recording already-ruled captain decisions, such as deferring `dos-dedou` and `dos-t1pk2` per the recorded 2026-08-06 rulings and re-blocking `dos-bars-pg-cutover-env-scope-w1zzz` per its recorded NO-GO.
 - Amending recorded notes, such as the `dos-72n4n` revive-trigger amendment.
