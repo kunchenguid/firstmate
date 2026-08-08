@@ -30,6 +30,7 @@ set -u
 
 SEND="$ROOT/bin/fm-send.sh"
 REPORT="$ROOT/bin/fm-secondmate-report.sh"
+RESOLVE="$ROOT/bin/fm-pending-reply-resolve.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pending-reply)
 
 export FM_PENDING_REPLY_GRACE_SECS=0
@@ -739,6 +740,8 @@ test_fm_send_marked_secondmate_creates_pending_and_embeds_corr() {
   [ "${#corr}" -eq 16 ] || fail "corr id should be 16 hex chars, got '$corr'"
   rec=$(fm_pending_reply_path "$home/state" "$corr")
   [ -f "$rec" ] || fail "pending-reply record must exist after marked send"
+  [ "$(fm_pending_reply_get "$rec" reply_expected)" = 1 ] \
+    || fail "ordinary secondmate request must remain reply-expected by default"
   [ "$(fm_pending_reply_get "$rec" phase)" = awaiting_report ] \
     || fail "phase should be awaiting_report after delivery"
   [ -n "$(fm_pending_reply_get "$rec" delivered_epoch)" ] \
@@ -746,6 +749,87 @@ test_fm_send_marked_secondmate_creates_pending_and_embeds_corr() {
   [ "$(fm_pending_reply_get "$rec" task_id)" = hibit ] \
     || fail "task_id must match secondmate id"
   pass "fm-send marked secondmate path creates pending and embeds corr"
+}
+
+test_fm_send_delivery_only_action_resolves_on_delivery() {
+  local dir fb log home rc got corr rec
+  dir="$TMP_ROOT/send-delivery-only"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_parent send-delivery-only)
+  fm_write_secondmate_meta "$home/state/hibit.meta" "$home/hibit" "sess:fm-hibit"
+
+  run_send "$fb" "$home" "$log" "hibit" --delivery-only "re-read the inherited config"; rc=$?
+  expect_code 0 "$rc" "delivery-only secondmate action should send successfully"
+  got=$(cat "$log")
+  corr=$(fm_pending_reply_extract_corr "$got")
+  [ -n "$corr" ] || fail "delivery-only send should retain correlation provenance"
+  case "$got" in
+    *"--delivery-only"*) fail "delivery-only control flag leaked into the request body" ;;
+  esac
+  rec=$(fm_pending_reply_path "$home/state" "$corr")
+  [ "$(fm_pending_reply_get "$rec" reply_expected)" = 0 ] \
+    || fail "delivery-only record must be created with reply_expected=0"
+  [ "$(phase_of "$home/state" "$corr")" = resolved ] \
+    || fail "confirmed delivery-only action should resolve without a correlated report"
+  [ "$(fm_pending_reply_get "$rec" resolved_via)" = delivery ] \
+    || fail "delivery-only action should record delivery as its resolution"
+
+  fm_pending_reply_mark_turn_completed "$home/state" "$corr" request
+  fm_pending_reply_tick_one "$home/state" "$corr" idle "$home/hibit"
+  [ "$(phase_of "$home/state" "$corr")" = resolved ] \
+    || fail "completed delivery-only action must remain resolved"
+  : > "$home/state/hibit.status"
+  assert_no_grep "pending-reply-missed" "$home/state/hibit.status" \
+    "delivery-only action falsely escalated after completing without a correlated report"
+  pass "delivery-only secondmate action resolves on delivery and never false-escalates"
+}
+
+test_operator_resolve_closes_stuck_records() {
+  local home state corr rec key open output rc phase pending_corr pending_rec
+  home=$(setup_parent operator-resolve)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=9250
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "is the release ready")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  key=$(fm_pending_reply_escalation_key "$corr")
+  fm_pending_reply_set "$rec" phase escalated
+  fm_pending_reply_set "$rec" escalated_epoch 9250
+  printf 'blocked [key=%s]: pending-reply-missed: task=hibit pending-reply-id=%s request=is the release ready\n' \
+    "$key" "$corr" > "$state/hibit.status"
+
+  output=$(FM_HOME="$home" FM_PENDING_REPLY_NOW=9300 "$RESOLVE" "$corr" "confirmed in operator review" 2>&1); rc=$?
+  expect_code 0 "$rc" "operator resolve command should close a stuck pending reply"
+  [ "$(phase_of "$state" "$corr")" = resolved ] \
+    || fail "operator resolve command should mark the record resolved"
+  [ "$(fm_pending_reply_get "$rec" resolved_via)" = operator ] \
+    || fail "operator resolve command should preserve operator provenance"
+  [ "$(fm_pending_reply_get "$rec" resolved_note)" = "confirmed in operator review" ] \
+    || fail "operator resolve command should preserve its bounded reason"
+  open=$(status_open_decisions "$state/hibit.status")
+  [ -z "$open" ] || fail "operator resolve left its escalation decision open: $open"
+  case "$output" in
+    *"resolved pending reply $corr for task hibit"*) : ;;
+    *) fail "operator resolve command did not identify the closed record: $output" ;;
+  esac
+  FM_HOME="$home" FM_PENDING_REPLY_NOW=9301 "$RESOLVE" "$corr" "confirmed again" >/dev/null \
+    || fail "operator resolve command should be idempotent"
+  [ "$(grep -Fc "resolved [key=$key]:" "$state/hibit.status")" -eq 1 ] \
+    || fail "idempotent operator resolve duplicated the durable decision close"
+
+  for phase in awaiting_report recovery_sent; do
+    pending_corr=$(fm_pending_reply_create "$home" "$state" hibit "stuck in $phase")
+    fm_pending_reply_mark_delivered "$state" "$pending_corr"
+    pending_rec=$(fm_pending_reply_path "$state" "$pending_corr")
+    fm_pending_reply_set "$pending_rec" phase "$phase"
+    FM_HOME="$home" FM_PENDING_REPLY_NOW=9302 "$RESOLVE" "$pending_corr" "cleared $phase" >/dev/null \
+      || fail "operator resolve command should clear a $phase record"
+    [ "$(phase_of "$state" "$pending_corr")" = resolved ] \
+      || fail "operator resolve command left a $phase record open"
+    [ "$(fm_pending_reply_get "$pending_rec" resolved_via)" = operator ] \
+      || fail "operator resolve command lost provenance for a $phase record"
+  done
+  pass "operator resolve command closes awaiting, recovery, and escalated records"
 }
 
 test_document_pointer_resolves() {
@@ -1060,6 +1144,8 @@ test_restart_preserves_expectation_and_parent_destination
 test_wrong_home_detected_not_acknowledged
 test_unmarked_captain_input_creates_no_expectation
 test_fm_send_marked_secondmate_creates_pending_and_embeds_corr
+test_fm_send_delivery_only_action_resolves_on_delivery
+test_operator_resolve_closes_stuck_records
 test_document_pointer_resolves
 test_helper_report_resolves
 test_busy_idle_observation_via_backend_abstraction

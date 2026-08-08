@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Send one line of literal text to a crewmate endpoint, then Enter.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... <text...>
+# Usage: fm-send.sh <target> [--resolve-key <key>]... [--delivery-only] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -29,13 +29,15 @@
 # an explicit backend-target escape-hatch target, and the --key path are never
 # marked - their behavior is unchanged.
 #
-# Parent-owned pending-reply expectation: every newly marked secondmate request
-# also receives a privacy-safe correlation id and a durable parent record under
-# state/pending-replies/ before delivery (bin/fm-pending-reply-lib.sh). Delivery
-# success and reply success are separate facts: a successful submit never
-# resolves the expectation. Set FM_PENDING_REPLY_EXISTING_CORR=<id> when
-# re-sending a recovery request for an already-open expectation so a second
-# record is not created. Direct unmarked captain input never creates one.
+# Parent-owned pending-reply tracking: every newly marked secondmate request also
+# receives a privacy-safe correlation id and a durable parent record under
+# state/pending-replies/ before delivery (bin/fm-pending-reply-lib.sh). Questions
+# and report requests expect a correlated reply by default. Pass --delivery-only
+# for an action whose successful delivery is the complete parent-side outcome;
+# its record is created with reply_expected=0 and resolves only after confirmed
+# delivery. Set FM_PENDING_REPLY_EXISTING_CORR=<id> when re-sending a recovery
+# request for an already-open expectation so a second record is not created.
+# Direct unmarked captain input never creates one.
 #
 # Decision closure (answerer-closes): pass --resolve-key <key> (repeatable,
 # before the message) when this send answers an open keyed needs-decision: or
@@ -292,6 +294,7 @@ shift
 # must precede --key or the message text; everything after the last flag is the
 # message exactly as before, so ordinary sends are byte-identical.
 RESOLVE_KEYS=
+DELIVERY_ONLY=0
 fm_send_add_resolve_key() {  # <key>
   local k=$1
   case "$k" in
@@ -319,6 +322,11 @@ while :; do
       fm_send_add_resolve_key "${1#--resolve-key=}" || exit 1
       shift
       ;;
+    --delivery-only)
+      [ "$DELIVERY_ONLY" = 0 ] || { echo "error: duplicate --delivery-only" >&2; exit 1; }
+      DELIVERY_ONLY=1
+      shift
+      ;;
     *) break ;;
   esac
 done
@@ -339,6 +347,10 @@ TARGET_TASK_ID=
 if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
   MARK_FROM_FIRSTMATE=1
   TARGET_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
+fi
+if [ "$DELIVERY_ONLY" = 1 ] && [ "$MARK_FROM_FIRSTMATE" != 1 ]; then
+  echo "error: --delivery-only requires a metadata-routed secondmate target" >&2
+  exit 1
 fi
 
 # Validate the answerer-closes request before any durable mutation or send: the
@@ -404,6 +416,10 @@ fm_send_close_resolved_keys() {  # <answer-text>
 # error with the attempted resolution attached.
 
 if [ "${1:-}" = "--key" ]; then
+  if [ "$DELIVERY_ONLY" = 1 ]; then
+    echo "error: --delivery-only cannot accompany --key; it classifies a text action" >&2
+    exit 1
+  fi
   case "$*" in
     *--resolve-key*)
       echo "error: --resolve-key cannot accompany --key; answering a decision requires a text answer" >&2
@@ -441,7 +457,7 @@ else
         echo "error: cannot create pending-reply expectation without a resolvable secondmate task id" >&2
         exit 1
       fi
-      PENDING_REPLY_CORR=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$TARGET_TASK_ID" "$MESSAGE") \
+      PENDING_REPLY_CORR=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$TARGET_TASK_ID" "$MESSAGE" "$((1 - DELIVERY_ONLY))") \
         || { echo "error: failed to create parent pending-reply expectation for $TARGET_TASK_ID" >&2; exit 1; }
       PENDING_REPLY_CREATED=1
     fi

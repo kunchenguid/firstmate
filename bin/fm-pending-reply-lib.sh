@@ -3,10 +3,12 @@
 #
 # When the main firstmate delivers a marked from-firstmate request to a
 # secondmate, this library records a durable parent-owned pending-reply
-# expectation BEFORE delivery, embeds a privacy-safe correlation id in the
-# outbound message, and later resolves that expectation only from a correlated
-# parent status line or status-pointed document - never from transport success,
-# chat content, or unrelated status activity.
+# record BEFORE delivery and embeds a privacy-safe correlation id in the
+# outbound message. Reply-expected records resolve only from a correlated parent
+# status line or status-pointed document - never from transport success, chat
+# content, or unrelated status activity. Delivery-only action records are
+# explicitly marked reply_expected=0 at creation and resolve on confirmed
+# delivery without entering missed-report recovery.
 #
 # Safety property (captain direction 2026-07-22): a secondmate agent may ignore
 # the marker and answer only in its visible conversation. The parent must notice
@@ -27,9 +29,12 @@
 #   parent_status=          absolute path of parent state/<task_id>.status
 #   parent_status_scan_signature=
 #   request_summary=        short sanitized summary (no secrets by design)
+#   reply_expected=         1 for a question/report request; 0 for a
+#                           delivery-only action
 #   created_epoch=          when the expectation was created
 #   delivered_epoch=        when the marked request was confirmed delivered
-#                           (empty until delivery; delivery never resolves)
+#                           (empty until delivery; delivery resolves only a
+#                           delivery-only action)
 #   phase=                  awaiting_report | delivery_unknown | recovery_sending |
 #                           recovery_sent | recovery_failed | recovery_unknown |
 #                           escalated | resolved
@@ -48,7 +53,9 @@
 #                           escalation was closed again (see the escalation
 #                           lifecycle note below); empty until then
 #   resolved_epoch=
-#   resolved_via=           status | document | helper | empty
+#   resolved_via=           status | document | helper | delivery | operator |
+#                           empty
+#   resolved_note=          bounded operator reason for an explicit close
 #   wrong_home_hits=        count of corr sightings under the secondmate home
 #   wrong_home_sightings=   comma-separated identities of counted sightings
 #   wrong_home_scan_signature=
@@ -228,12 +235,13 @@ fm_pending_reply_embed_corr() {  # <message> <corr_id> <result-var>
   printf -v "$result_var" '%s' "${FM_FROMFIRST_MARK}${token} ${body}"
 }
 
-# Create a durable pending-reply expectation. Prints corr_id on success.
+# Create a durable pending-reply record. Prints corr_id on success.
 # Does not deliver anything. Fails if parent paths cannot be prepared.
-fm_pending_reply_create() {  # <parent-home> <state-dir> <task_id> <request-text>
-  local parent_home=$1 state=$2 task_id=$3 request_text=$4
+fm_pending_reply_create() {  # <parent-home> <state-dir> <task_id> <request-text> [reply-expected: 0|1]
+  local parent_home=$1 state=$2 task_id=$3 request_text=$4 reply_expected=${5:-1}
   local dir rec corr now summary status_path tmp
   [ -n "$parent_home" ] && [ -n "$state" ] && [ -n "$task_id" ] || return 2
+  case "$reply_expected" in 0|1) ;; *) return 2 ;; esac
   dir=$(fm_pending_reply_dir "$state")
   mkdir -p "$dir" || return 1
   chmod 700 "$dir" 2>/dev/null || true
@@ -267,6 +275,7 @@ parent_home=$parent_home
 parent_status=$status_path
 parent_status_scan_signature=
 request_summary=$summary
+reply_expected=$reply_expected
 created_epoch=$now
 delivered_epoch=
 phase=awaiting_report
@@ -282,6 +291,7 @@ recovery_turn_completed_epoch=
 escalated_epoch=
 resolved_epoch=
 resolved_via=
+resolved_note=
 wrong_home_hits=0
 wrong_home_sightings=
 wrong_home_scan_signature=
@@ -292,9 +302,10 @@ EOF
   printf '%s' "$corr"
 }
 
-# Mark delivery success for an existing expectation. Never resolves.
+# Mark delivery success for an existing record. A delivery-only action resolves
+# here; reply-expected requests remain open for their correlated report.
 fm_pending_reply_mark_delivered() {  # <state-dir> <corr_id> [confirmed-epoch]
-  local state=$1 corr=$2 confirmed_epoch=${3-} rec phase delivered now
+  local state=$1 corr=$2 confirmed_epoch=${3-} rec phase delivered now reply_expected
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
@@ -309,6 +320,14 @@ fm_pending_reply_mark_delivered() {  # <state-dir> <corr_id> [confirmed-epoch]
   fi
   if [ "$phase" = delivery_unknown ]; then
     fm_pending_reply_set "$rec" phase awaiting_report || return 1
+  fi
+  reply_expected=$(fm_pending_reply_get "$rec" reply_expected)
+  [ -n "$reply_expected" ] || reply_expected=1
+  if [ "$reply_expected" = 0 ] && [ "$(fm_pending_reply_get "$rec" phase)" != resolved ]; then
+    now=${confirmed_epoch:-$(fm_pending_reply_now)}
+    fm_pending_reply_set "$rec" resolved_epoch "$now" || return 1
+    fm_pending_reply_set "$rec" resolved_via delivery || return 1
+    fm_pending_reply_set "$rec" phase resolved || return 1
   fi
   return 0
 }
@@ -554,6 +573,49 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
   # The record is resolved either way; a failed close stays retryable from the
   # watcher tick rather than turning a settled request back into a failure.
   _fm_pending_reply_close_escalation_locked "$state" "$corr" || true
+  return 0
+}
+
+# Explicitly resolve a stuck record under operator authority while preserving
+# its audit record and closing any durable decision opened by its escalation.
+# Idempotent for an already-resolved record. This is the supported alternative
+# to hand-editing parent-owned state.
+fm_pending_reply_resolve_manual() {  # <state-dir> <corr_id> [reason]
+  local state=$1 corr=$2 lock rc=0
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 2
+  corr=$(printf '%s' "$corr" | tr 'A-F' 'a-f')
+  STATE=$state
+  lock="$state/.pending-reply-$corr.lock"
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$lock" || return 1
+  _fm_pending_reply_resolve_manual_locked "$state" "$corr" "${3:-closed by operator}" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
+_fm_pending_reply_resolve_manual_locked() {  # <state-dir> <corr_id> [reason]
+  local state=$1 corr=$2 reason=${3:-closed by operator}
+  local rec phase now marker
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] || return 1
+  [ "$(fm_pending_reply_get "$rec" corr_id)" = "$corr" ] || return 1
+  phase=$(fm_pending_reply_get "$rec" phase)
+  if [ "$phase" = resolved ]; then
+    _fm_pending_reply_close_escalation_locked "$state" "$corr" || return 1
+    return 0
+  fi
+  reason=$(fm_pending_reply_summarize "$reason")
+  [ -n "$reason" ] || reason='closed by operator'
+  now=$(fm_pending_reply_now)
+  fm_pending_reply_set "$rec" resolved_epoch "$now" || return 1
+  fm_pending_reply_set "$rec" resolved_via operator || return 1
+  fm_pending_reply_set "$rec" resolved_note "$reason" || return 1
+  fm_pending_reply_set "$rec" phase resolved || return 1
+  marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$corr")
+  rm -f "$marker" 2>/dev/null || true
+  _fm_pending_reply_close_escalation_locked "$state" "$corr" || return 1
   return 0
 }
 
