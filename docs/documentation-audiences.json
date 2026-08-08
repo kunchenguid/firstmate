@@ -391,6 +391,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/vocabulary-collisions.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/watcher-continuity.md",
       "audience": "operator-current"
     },
