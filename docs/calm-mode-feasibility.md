@@ -174,7 +174,7 @@ Each colored run is closed with a default-foreground reset so styling cannot ble
 
 The presentation is TUI-only and visual-only.
 It adds no session entry, transcript row, model context, or export or share content, and its widget takes no keyboard input, so editor focus and Escape abort are unchanged.
-Compaction and retry loaders remain stock because Pi exposes no supported replacement for them.
+Calm leaves compaction and retry loaders untouched.
 
 ## Central visibility and input policy
 

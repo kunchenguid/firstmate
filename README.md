@@ -106,6 +106,8 @@ FM_PI_HARNESS=pi-signed pi-signed
 
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
 For Pi, approve the project trust prompt once per clone on first launch so the tracked `.pi/extensions/*.ts` files auto-load.
+Pi uses `openai-codex/gpt-5.6-luna` only for session compaction and keeps the selected conversation model unchanged.
+Unsafe Luna compactions automatically retry once with `openai-codex/gpt-5.6-sol`; set `FM_PI_LUNA_COMPACTION=off` before launching Pi to use Pi's normal compaction instead.
 Pi's `/calm` toggle hides supported transcript chrome, including canonically classified Firstmate operational user rows, and uses a Calm-only animated working boat during active runs while preserving all model context and session data.
 The hidden operational inputs remain ordinary user-role messages with unchanged delivery, ordering, authority, persistence, and exports.
 The preference persists for the effective Firstmate home, and toggling it off restores ordinary rendering.
