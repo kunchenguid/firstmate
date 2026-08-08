@@ -289,6 +289,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/superpowers/specs/2026-08-08-bead-acceptance-projection-design.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/supervision-protocols/claude.md",
       "audience": "agent-runtime"
     },
