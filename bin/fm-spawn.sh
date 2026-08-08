@@ -2170,8 +2170,9 @@ if [ "$KIND" != secondmate ]; then
       # a turn; Stop (normal completion), StopFailure (API-error turn end),
       # and SessionEnd (process shutdown) all close it, so an abnormal end can
       # never leave a stale busy record. Claude fires no hook for a manual
-      # interrupt, so its last adapter-owned busy state remains as observed.
-      # Stop keeps the turn-ended NOTIFICATION touch for the watcher. Every
+      # interrupt: fm-control preserves the adapter-owned state, while the
+      # legacy fm-send --key Escape path records idle/fm-interrupt. Stop keeps
+      # the turn-ended NOTIFICATION touch for the watcher. Every
       # hook command tolerates a refused event (|| true) so a stale-gen writer
       # can never break Claude's own lifecycle.
       mkdir -p "$WT/.claude"
