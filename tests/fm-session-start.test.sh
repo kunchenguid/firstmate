@@ -206,24 +206,31 @@ SH
   chmod +x "$fakebin/ps"
 }
 
-# make_fake_tmux <fakebin> <live-target>: display-message succeeds only for
-# the given "session:window" target - the exact primitive
-# fm_backend_target_exists uses for a tmux endpoint liveness read.
+# make_fake_tmux <fakebin> <live-target>: list-windows includes only the given
+# exact "session:window" target, matching fm_backend_target_exists's tmux
+# endpoint liveness read.
 make_fake_tmux() {
   local fakebin=$1 live=$2
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
 case "\${1:-}" in
-  display-message)
-    target=""
+  list-windows)
+    session=""
+    format=""
     prev=""
     for a in "\$@"; do
-      [ "\$prev" = "-t" ] && target="\$a"
+      [ "\$prev" = "-t" ] && session="\$a"
+      [ "\$prev" = "-F" ] && format="\$a"
       prev="\$a"
     done
-    [ "\$target" = "$live" ] && { printf '%%1\n'; exit 0; }
-    exit 1
+    if [ "\$session" = "${live%%:*}" ]; then
+      case "\$format" in
+        *session_name*) printf '%s\n' "$live" ;;
+        *) printf '%s\n' "${live#*:}" ;;
+      esac
+    fi
+    exit 0
     ;;
 esac
 exit 1

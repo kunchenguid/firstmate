@@ -146,10 +146,7 @@ TASK_BACKEND=$(fm_backend_of_meta "$META")
 BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
 EXPECTED_LABEL="fm-$ID"
 pane_readable() {  # <target>
-  case "$TASK_BACKEND" in
-    tmux) tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1 ;;
-    *) fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
-  esac
+  fm_backend_target_exists "$TASK_BACKEND" "$1" "$EXPECTED_LABEL"
 }
 # crew_busy_verdict: the crew's semantic busy state from the one contract
 # owner (bin/fm-busy-lib.sh), as "<busy|idle|unknown> <source>". A converted
@@ -163,7 +160,7 @@ crew_busy_verdict() {  # <target>
   case "$HARNESS" in
     grok*) tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || tail40='' ;;
   esac
-  fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40"
+  fm_busy_classify_live "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$EXPECTED_LABEL" "$tail40"
 }
 
 # --- no-mistakes run lookup (authoritative when a run matches this branch) --

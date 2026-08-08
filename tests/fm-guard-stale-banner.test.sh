@@ -96,14 +96,29 @@ test_repeated_same_episode_prints_reminder_only() {
   pass "fm-guard stale banner: repeated same-episode calls print a concise reminder only"
 }
 
-test_fresh_beacon_without_live_watcher_stays_alarm() {
-  local dir out
+test_fresh_beacon_suppresses_pull_guard_alarm() {
+  local dir home out
   dir=$(make_guard_case fresh-no-live)
-  touch "$(case_home "$dir")/state/.last-watcher-beat"
+  home=$(case_home "$dir")
+  touch "$home/state/.last-watcher-beat"
+  out=$(run_guard_case "$dir")
+  [ -z "$out" ] || fail "a fresh beacon inside the pull guard's grace window must stay silent: $out"
+  assert_absent "$home/state/.guard-watcher-stale-banner" \
+    "a fresh beacon must not latch a stale-banner episode"
+  pass "fm-guard stale banner: a fresh beacon suppresses the pull-guard alarm"
+}
+
+test_stale_beacon_prints_matching_evidence() {
+  local dir home out
+  dir=$(make_guard_case stale-beat)
+  home=$(case_home "$dir")
+  touch -t 202001010000 "$home/state/.last-watcher-beat"
   out=$(run_guard_case "$dir")
   [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
-    || fail "a fresh leftover beacon without a live watcher must still alarm: $out"
-  pass "fm-guard stale banner: a fresh beacon without a live watcher remains unhealthy"
+    || fail "a genuinely stale beacon must print the full banner: $out"
+  assert_contains "$out" "last beat:" "the stale alarm must print the beacon age it tested"
+  assert_contains "$out" "grace 999s" "the stale alarm must print the grace bound it tested"
+  pass "fm-guard stale banner: a genuinely stale beacon prints matching predicate evidence"
 }
 
 test_x_mode_without_live_watcher_stays_alarm() {
@@ -117,31 +132,25 @@ test_x_mode_without_live_watcher_stays_alarm() {
   pass "fm-guard stale banner: X-mode polling without a live watcher remains unhealthy"
 }
 
-test_healthy_recovery_rearms_next_stale_episode() {
-  local dir home out1 healthy out2 pid
+test_fresh_recovery_rearms_next_stale_episode() {
+  local dir home out1 healthy out2
   dir=$(make_guard_case healthy-recovery)
   home=$(case_home "$dir")
   out1=$(run_guard_case "$dir")
   [ "$(count_text "$out1" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
     || fail "first stale episode did not print the full banner: $out1"
 
-  sleep 60 &
-  pid=$!
-  record_live_watcher "$dir" "$pid" || fail "could not record the live watcher for recovery"
   touch "$home/state/.last-watcher-beat"
   healthy=$(run_guard_case "$dir")
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
-  [ -z "$healthy" ] || fail "guard should be silent after watcher recovery, got: $healthy"
+  [ -z "$healthy" ] || fail "guard should be silent after fresh-beacon recovery, got: $healthy"
   assert_absent "$home/state/.guard-watcher-stale-banner" \
-    "healthy recovery must clear the stale-banner marker"
+    "fresh-beacon recovery must clear the stale-banner marker"
 
-  rm -f "$home/state/.last-watcher-beat"
-  rm -rf "$home/state/.watch.lock"
+  touch -t 202001010000 "$home/state/.last-watcher-beat"
   out2=$(run_guard_case "$dir")
   [ "$(count_text "$out2" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
     || fail "second stale episode did not re-print the full banner: $out2"
-  pass "fm-guard stale banner: healthy recovery rearms the next stale episode"
+  pass "fm-guard stale banner: fresh-beacon recovery rearms the next stale episode"
 }
 
 test_concurrent_same_episode_prints_one_full_banner() {
@@ -285,9 +294,10 @@ test_read_only_never_mutates_stale_banner_state_files() {
 
 test_first_stale_call_prints_full_banner
 test_repeated_same_episode_prints_reminder_only
-test_fresh_beacon_without_live_watcher_stays_alarm
+test_fresh_beacon_suppresses_pull_guard_alarm
+test_stale_beacon_prints_matching_evidence
 test_x_mode_without_live_watcher_stays_alarm
-test_healthy_recovery_rearms_next_stale_episode
+test_fresh_recovery_rearms_next_stale_episode
 test_concurrent_same_episode_prints_one_full_banner
 test_home_isolation
 test_queued_wake_warning_stays_independent

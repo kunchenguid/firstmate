@@ -25,6 +25,7 @@
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
 #       proving the watcher's own absorb-only-when-provably-working predicate
 #       benefits from the fix in both directions.
+#   (l) missing tmux window + stale Pi busy marker                -> unknown/none
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -83,11 +84,16 @@ SH
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
+  list-windows)
+    if [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ]; then printf "can't find session: fm\n" >&2; exit 1
+    elif [ "${FM_FAKE_TMUX_WINDOW_GONE:-0}" = 1 ]; then printf 'some-other-window\n'
+    else printf '%s\n' "${FM_FAKE_TMUX_WINDOWS:-}"; fi ;;
   display-message)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
     printf '%%1\n' ;;
   capture-pane)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
+    [ "${FM_FAKE_TMUX_WINDOW_GONE:-0}" = 1 ] && exit 1
     if [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\n%s\n' "${FM_FAKE_BUSY_TEXT:-esc to interrupt}"
     else printf 'all quiet\n> \n'; fi ;;
 esac
@@ -140,7 +146,7 @@ make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
 # Run the helper for one case dir. FM_FAKE_* env (run output, busy flag) are read
 # from the caller's environment by the fakes above.
 run_crew_state() {  # <case-dir> <id>
-  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
+  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" FM_FAKE_TMUX_WINDOWS="fm-$2" "$CREW_STATE" "$2"
 }
 
 new_case() {  # <name> -> echoes case dir with an empty state/
@@ -166,11 +172,13 @@ reset_fakes() {
   FM_FAKE_BUSY=0
   FM_FAKE_BUSY_TEXT=
   FM_FAKE_TMUX_MISSING=0
+  FM_FAKE_TMUX_WINDOW_GONE=0
   FM_FAKE_HERDR_BUSY=0
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
+  export FM_FAKE_TMUX_WINDOW_GONE
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
 }
 
@@ -1047,6 +1055,31 @@ test_dead_window_ignores_stale_status_log() {
   pass "dead window ignores stale status log"
 }
 
+# Regression (2026-08-08): tmux display-message silently falls back to the
+# client's active window when the recorded window is absent. A stale Pi busy
+# record must not turn that unrelated readable pane into a working verdict.
+test_gone_pi_window_overrides_busy_record() {
+  reset_fakes
+  local d gen out
+  d=$(new_case gone-pi-busy)
+  make_repo_on_branch "$d/wt" fm/feat-gone-pi
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-gone-pi.meta" "window=fm:fm-feat-gone-pi" "worktree=$d/wt" "kind=ship" "harness=pi"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_WINDOW_GONE=1
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-gone-pi)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-gone-pi busy --gen "$gen" \
+    --source pi-ext --event agent-start
+
+  out=$(run_crew_state "$d" feat-gone-pi)
+  assert_contains "$out" "state: unknown" "a missing Pi window must override its stale busy marker"
+  assert_contains "$out" "backend target gone" "the missing endpoint must be reported explicitly"
+  assert_not_contains "$out" "state: working" "a missing Pi window must never report working"
+  assert_not_contains "$out" "harness busy" "a missing Pi window must never consume the busy marker"
+  pass "a missing Pi window overrides a stale busy marker"
+}
+
 # A closed/unreadable pane must NOT mask an authoritative run-step: judge by the
 # run-step, not the shell. The common case is a finished crew whose agent has
 # exited and closed its window (the normal gap between completion and teardown) -
@@ -1106,7 +1139,8 @@ SH
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-timeout busy --gen "$gen" \
     --source claude-hook --event user-prompt-submit
   start=$SECONDS
-  out=$(FM_FAKE_NM_CALLS="$calls_file" PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_NM_TIMEOUT=1 "$CREW_STATE" feat-timeout)
+  out=$(FM_FAKE_NM_CALLS="$calls_file" PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" \
+    FM_FAKE_TMUX_WINDOWS=fm-feat-timeout FM_CREW_STATE_NM_TIMEOUT=1 "$CREW_STATE" feat-timeout)
   elapsed=$((SECONDS - start))
   assert_contains "$out" "state: working" "timed-out no-mistakes falls back to pane"
   assert_contains "$out" "source: pane" "timed-out no-mistakes -> pane source"
@@ -1345,6 +1379,7 @@ test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
 test_dead_window_ignores_stale_status_log
+test_gone_pi_window_overrides_busy_record
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound

@@ -141,10 +141,10 @@ resolve_permissive_tmux_kill_ref() {
 # hence the dispatcher is a copied sibling, while the tmux adapter is extracted
 # from BASE_REF so conformance tests retain the exact historical behavior even
 # when this branch changes tmux dispatch semantics.
-OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-decision-hold.sh fm-backend.sh fm-operational-input.sh fm-public-followup-lib.sh fm-secondmate-registry-lib.sh fm-x-lib.sh"
+OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-decision-hold.sh fm-operational-input.sh fm-public-followup-lib.sh fm-secondmate-registry-lib.sh fm-x-lib.sh"
 # A pull-request merge may add a new main-only dependency that the branch's older baseline does not have yet.
 OLD_BIN_OPTIONAL_SIBLINGS="fm-pending-reply-lib.sh"
-OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh fm-marker-lib.sh"
+OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh fm-marker-lib.sh fm-backend.sh"
 
 build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry point)
   local name=$1 root bin f
@@ -665,7 +665,7 @@ case "${1:-}" in
       printf '╭────╮\n│    │\n╰────╯\n'
     fi
     exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows) printf 'win\n'; exit 0 ;;
 esac
 exit 0
 SH
@@ -683,9 +683,11 @@ run_send_case() {  # <bin-root> <fakebin> <log> <home> -- <send args...>
 }
 
 strip_send_preflight() {  # <log>
-  local preflight
-  preflight=$'tmux\x1fdisplay-message\x1f-p\x1f-t\x1fsess:win\x1f#{pane_id}'
-  awk -v preflight="$preflight" '$0 != preflight { print }' "$1"
+  local old_preflight new_preflight
+  old_preflight=$'tmux\x1fdisplay-message\x1f-p\x1f-t\x1fsess:win\x1f#{pane_id}'
+  new_preflight=$'tmux\x1flist-windows\x1f-t\x1fsess\x1f-F\x1f#{window_name}'
+  awk -v old_preflight="$old_preflight" -v new_preflight="$new_preflight" \
+    '$0 != old_preflight && $0 != new_preflight { print }' "$1"
 }
 
 test_send_conformance_old_vs_new() {
@@ -702,8 +704,8 @@ test_send_conformance_old_vs_new() {
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" --key Escape
   rc_new=$?
   expect_code "$rc_old" "$rc_new" "fm-send --key: old vs new exit code"
-  assert_contains "$(cat "$log_new")" $'\x1f''display-message'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''#{pane_id}' \
-    "fm-send --key did not verify the explicit tmux target before sending"
+  assert_contains "$(cat "$log_new")" $'\x1f''list-windows'$'\x1f''-t'$'\x1f''sess'$'\x1f''-F'$'\x1f''#{window_name}' \
+    "fm-send --key did not verify exact tmux window membership before sending"
   strip_send_preflight "$log_old" > "$filtered_old"
   strip_send_preflight "$log_new" > "$filtered_new"
   diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-key.txt" 2>&1 \

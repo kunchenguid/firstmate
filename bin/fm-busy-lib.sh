@@ -334,8 +334,8 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
 # fm_busy_classify_live: fm_busy_classify behind the one process-level
 # override - a gone endpoint is dead, never busy. Requires fm-backend.sh to
 # be sourced for fm_backend_target_exists.
-fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir> [expected-label]
-  local backend=$1 target=$2 harness=$3 id=$4 state=$5 label=${6-}
+fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir> [expected-label] [tail40]
+  local backend=$1 target=$2 harness=$3 id=$4 state=$5 label=${6-} tail40=${7-}
   if [ -z "$target" ]; then
     printf 'unknown no-target'
     return 0
@@ -344,7 +344,7 @@ fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir> [expe
     printf 'dead endpoint-gone'
     return 0
   fi
-  fm_busy_classify "$backend" "$target" "$harness" "$id" "$state"
+  fm_busy_classify "$backend" "$target" "$harness" "$id" "$state" "$tail40"
 }
 
 # fm_busy_classify_meta: classify a task from its recorded metadata, so every
