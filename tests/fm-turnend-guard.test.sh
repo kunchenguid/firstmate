@@ -997,7 +997,7 @@ test_cursor_shim_allows_when_healthy() {
 test_cursor_shim_refuses_silent_stop_on_interrupt_marker() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-interrupt-marker")
-  printf 'ts=1754000000\tsignal=TERM\torigin=attached\n' > "$dir/state/.cursor-hook-interrupted"
+  printf 'ts=1754000000\tsignal=TERM\torigin=attached\n' > "$dir/state/.hook-arm-interrupted"
   out=$(printf '{"session_id":"cur-session","loop_count":0,"workspace_roots":["%s"]}' "$dir" \
     | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>&1); status=$?
   expect_code 0 "$status" "cursor shim must exit 0 when refusing a silent stop for an interrupted park"
@@ -1027,7 +1027,7 @@ test_cursor_shim_refuses_silent_stop_on_undelivered_queue() {
 test_cursor_shim_recovers_silent_stop_after_drain() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/cursor-shim-interrupt-recover")
-  printf 'ts=1754000000\tsignal=TERM\torigin=attached\n' > "$dir/state/.cursor-hook-interrupted"
+  printf 'ts=1754000000\tsignal=TERM\torigin=attached\n' > "$dir/state/.hook-arm-interrupted"
   printf '1754000000\t1\tsignal\ttask.status\tstatus: working\n' > "$dir/state/.wake-queue"
   out=$(printf '{"session_id":"cur-session","loop_count":0,"workspace_roots":["%s"]}' "$dir" \
     | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>&1); status=$?
@@ -1036,7 +1036,7 @@ test_cursor_shim_recovers_silent_stop_after_drain() {
     "pre-drain stop must tell firstmate to drain and reconcile"
   FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-wake-drain.sh" >/dev/null 2>&1 \
     || fail "drain after the interrupted park failed"
-  [ ! -e "$dir/state/.cursor-hook-interrupted" ] || fail "drain did not clear the interrupt marker"
+  [ ! -e "$dir/state/.hook-arm-interrupted" ] || fail "drain did not clear the interrupt marker"
   [ ! -s "$dir/state/.wake-queue" ] || fail "drain did not consume the queued wake"
   out=$(printf '{"session_id":"cur-session","loop_count":0,"workspace_roots":["%s"]}' "$dir" \
     | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>&1); status=$?

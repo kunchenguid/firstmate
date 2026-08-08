@@ -1,29 +1,21 @@
 #!/usr/bin/env bash
 # Cursor Stop-hook adapter for a firstmate primary or secondmate turn-end guard.
 #
-# Cursor's `stop` hook differs from Claude's and Codex's in exactly one
-# place: it does not honour exit code 2 as a forced continuation. A stop hook
-# that exits 2 with a rendered stderr banner simply ends the turn, so the
-# shared guard's blind-turn signal must be translated into the mechanism
+# Cursor's `stop` hook does not honour exit code 2 as a forced continuation.
+# A stop hook that exits 2 with a rendered stderr banner simply ends the turn,
+# so the shared guard's blind-turn signal must be translated into the mechanism
 # cursor does honour: a JSON body on stdout with a `followup_message`.
 #
-# Contract (verified against cursor-agent 2026.07.23-e383d2b, 2026-08-05): read
-# the stop payload, pin `stop_hook_active: false` so the shared predicate is
-# evaluated on EVERY stop, run bin/fm-turnend-guard.sh, and on a blind turn
-# foreground bin/fm-watch-arm.sh inside the hook-owned process tree before
-# re-judging. Because the arm is stop-hook-owned rather than budgeted by
-# cursor's own `loop_limit`, this shim owns the continuation bound itself, in a
-# session-scoped chain record under state/.
+# This adapter is a thin translation layer over the shared hook-arm primitive
+# (bin/fm-hook-arm-lib.sh). It parses the Cursor payload, calls the canonical
+# arm+classify operation, applies a bounded continuation counter, and renders
+# the outcome as {} or a followup_message. The arm lifecycle, actionable-wake
+# classification, and healthy-watcher verification are owned once by the
+# shared primitive.
 #
-# docs/supervision-protocols/cursor.md is the single owner of that algorithm:
-# the chain record's keys, both budgets, what counts as progress, and how the
+# docs/supervision-protocols/cursor.md is the single owner of the counter
+# algorithm: chain keys, both budgets, what counts as progress, and how the
 # ceilings clear. Read it before changing any bound here.
-#
-# The translation layer is the grok-shim pattern (bin/fm-turnend-guard-grok.sh):
-# a thin layer, zero changes to the shared predicate. The arm/park follows the
-# claude auto-arm model (bin/fm-claude-stop-autoarm.sh): the hook-owned
-# foreground tree is the arm lifecycle, and the watcher parks until an
-# actionable wake closes the cycle or the hook timeout tears the tree down.
 set -u
 
 PAYLOAD=$(cat 2>/dev/null || true)
@@ -31,13 +23,12 @@ PAYLOAD=$(cat 2>/dev/null || true)
 
 command -v jq >/dev/null 2>&1 || exit 0
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-hook-arm-lib.sh
+. "$SCRIPT_DIR/fm-hook-arm-lib.sh"
+
 MAX_BUDGET=1000000
 
-# clamp_digits: the one digit normalizer behind every bound below. It strips
-# leading zeros and saturates at <ceiling>. The length comparison runs FIRST so
-# an arbitrarily long digit string saturates without ever reaching arithmetic
-# evaluation, which is what keeps the ceilings hard against a hostile counter.
-# Digit validation belongs to the callers, whose malformed-input answers differ.
 clamp_digits() {  # <digits> <ceiling> -> <digits, saturated at ceiling>
   local value=$1 ceiling=$2
   while [ "${#value}" -gt 1 ] && [ "${value:0:1}" = 0 ]; do
@@ -76,13 +67,9 @@ ROOT=${ROOT%/}
 
 STATE=${FM_STATE_OVERRIDE:-${FM_HOME:-$ROOT}/state}
 
-# Durable evidence of an interrupted stop-hook park (written by the arm's
-# signal traps) and the durable wake queue. While either exists, a silent stop
-# would strand undelivered wake records on a primary whose only notification
-# path is this hook, so allow_stop refuses {} until bin/fm-wake-drain.sh clears
-# both (the drain is the single owner of clearing the marker).
-INTERRUPT_MARKER="$STATE/.cursor-hook-interrupted"
 WAKE_QUEUE_FILE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
+
+# --- session identity derivation (Cursor-specific) ---------------------------
 
 cursor_parent_identity() {
   local pid=${PPID:-} proc_root stat_line starttime
@@ -162,23 +149,6 @@ CHAIN_REASON=
 CHAIN_REASONS=()
 CHAIN_HAS_REASONS=0
 
-canonical_wake_reason() {
-  local reason=$1 check_reason
-  case "$reason" in
-    stale:*) reason=${reason%% (*} ;;
-    check:*)
-      check_reason=${reason#check: }
-      case "$check_reason" in
-        procevent\ *\ *\ *) check_reason=${check_reason% *} ;;
-        *': '*) check_reason=${check_reason%%: *} ;;
-      esac
-      reason="check: $check_reason"
-      ;;
-    heartbeat:*) reason=heartbeat ;;
-  esac
-  printf '%s' "$reason"
-}
-
 normalize_counter() {
   local value=$1
   case "$value" in ''|*[!0-9]*) printf '0'; return 0 ;; esac
@@ -197,9 +167,9 @@ chain_load() {
       total) CHAIN_TOTAL=$value ;;
       fail) CHAIN_FAIL=$value ;;
       wake) CHAIN_WAKE=$value ;;
-      reason) CHAIN_REASON=$(canonical_wake_reason "$value") ;;
+      reason) CHAIN_REASON=$(fm_hook_arm_canonical_reason "$value") ;;
       wake_reason)
-        value=$(canonical_wake_reason "$value")
+        value=$(fm_hook_arm_canonical_reason "$value")
         CHAIN_REASONS+=("$value")
         CHAIN_HAS_REASONS=1
         ;;
@@ -247,8 +217,6 @@ chain_store() {
 fallback_total_from_loop_count() {
   local value
   value=$(clamp_digits "$1" "$TOTAL_BUDGET")
-  # Saturated means the loop count already reached or passed the budget; below
-  # it, the fallback counts this turn too, so the chain still terminates.
   if [ "$value" = "$TOTAL_BUDGET" ]; then
     printf '%s' "$TOTAL_BUDGET"
   else
@@ -256,28 +224,10 @@ fallback_total_from_loop_count() {
   fi
 }
 
-# A stop is only silent while no durable evidence of an interrupted park or an
-# undelivered wake exists. Otherwise the loud drain-and-reconcile followup makes
-# the next stop a recovery vehicle instead of a blind end.
-interrupted_park_reason() {
-  local msg
-  msg=
-  if [ -f "$INTERRUPT_MARKER" ]; then
-    msg='Cursor stop-hook supervision was interrupted while parked; the durable wake queue may hold undelivered events.'
-  fi
-  if [ -s "$WAKE_QUEUE_FILE" ]; then
-    msg="$msg Undelivered watcher wake records are queued."
-  fi
-  if [ -z "$msg" ]; then
-    return 1
-  fi
-  printf '%s Run bin/fm-wake-drain.sh and reconcile before ending blind.' "$msg"
-}
-
 allow_stop() {
   local reason
   rm -f "$CHAIN_FILE" 2>/dev/null || true
-  if reason=$(interrupted_park_reason); then
+  if reason=$(fm_hook_arm_interrupted_park_reason "$STATE"); then
     jq -cn --arg msg "$reason" '{followup_message:$msg}'
     exit 0
   fi
@@ -304,22 +254,19 @@ printf '%s' "$NORMALIZED" | "$ROOT/bin/fm-turnend-guard.sh" 2>"$ERR"
 RC=$?
 [ "$RC" -eq 2 ] || allow_stop
 
-# Blind turn: park in the hook-owned foreground tree while the watcher arms.
-# Never shell &: the harness owns this process group, so the hook timeout and
-# turn end tear arm and watcher down together; a backgrounded child would be
-# reaped at hook exit, leaving no watcher and a false "already running".
+# --- canonical arm + classify (shared primitive) -----------------------------
 # shellcheck source=/dev/null
 [ -f "$ROOT/config/x-mode.env" ] && . "$ROOT/config/x-mode.env"
 if [ -n "$ARM_OUT" ]; then
-  "$ROOT/bin/fm-watch-arm.sh" >"$ARM_OUT" 2>&1 || true
+  fm_hook_arm_foreground "$STATE" "$ARM_OUT"
   cat "$ARM_OUT" >&2
-  WAKE_REASON=$(grep -Em1 '^(signal:|stale:|check:|heartbeat($|:))' "$ARM_OUT" 2>/dev/null || true)
-  if [ -n "$WAKE_REASON" ]; then
-    WAKE_REASON=$(canonical_wake_reason "$WAKE_REASON")
+  if fm_hook_arm_has_actionable "$ARM_OUT"; then
+    WAKE_REASON=$(fm_hook_arm_wake_reason "$ARM_OUT")
+    WAKE_REASON=$(fm_hook_arm_canonical_reason "$WAKE_REASON")
     ARM_ACTIONABLE=1
   fi
 else
-  "$ROOT/bin/fm-watch-arm.sh" >&2 || true
+  fm_hook_arm_foreground "$STATE" /dev/null
 fi
 
 # Re-run the guard against the post-arm state: a healthy watcher or vanished
@@ -329,9 +276,8 @@ printf '%s' "$NORMALIZED" | "$ROOT/bin/fm-turnend-guard.sh" 2>"$ERR"
 RC=$?
 [ "$RC" -eq 2 ] || allow_stop
 
+# --- bounded continuation counter (Cursor-specific) --------------------------
 if [ "$ARM_ACTIONABLE" -eq 1 ]; then
-  # Only a canonical wake reason that keeps re-firing advances the chain count;
-  # a different reason is progress and restarts it.
   if [ "$WAKE_REASON" = "$CHAIN_REASON" ]; then
     COUNT=$((CHAIN_WAKE + 1))
   else
@@ -391,8 +337,6 @@ else
     REASON="${REASON}"$'\n'"Cursor stop-hook arm has failed repeatedly. Repair .cursor/hooks.json registration and watcher startup before ending blind."
   fi
 fi
-# Render the reason as one JSON string: cursor shows the followup_message
-# verbatim in the pane, on one line.
 REASON=$(printf '%s' "$REASON" | tr '\n' ' ')
 jq -cn --arg msg "$REASON" '{followup_message:$msg}'
 exit 0

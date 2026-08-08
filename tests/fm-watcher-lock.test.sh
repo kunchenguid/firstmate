@@ -628,10 +628,10 @@ test_attached_arm_signal_is_recorded_in_cycle_ledger() {
   grep -q "arm_pid=$armpid.*watcher_pid=$wpid.*origin=attached.*exit_code=143.*signal=TERM.*reason=arm-interrupted" "$state/.watch-cycle-exits.log" \
     || fail "attached arm signal was not recorded in the lifecycle ledger"
   is_live_non_zombie "$wpid" || fail "signaling an attached arm terminated the peer watcher"
-  [ -f "$state/.cursor-hook-interrupted" ] || fail "attached arm TERM did not write the interrupt marker"
-  grep -q 'signal=TERM' "$state/.cursor-hook-interrupted" \
+  [ -f "$state/.hook-arm-interrupted" ] || fail "attached arm TERM did not write the interrupt marker"
+  grep -q 'signal=TERM' "$state/.hook-arm-interrupted" \
     || fail "interrupt marker did not record the TERM signal"
-  grep -q 'origin=attached' "$state/.cursor-hook-interrupted" \
+  grep -q 'origin=attached' "$state/.hook-arm-interrupted" \
     || fail "interrupt marker did not record the attached origin"
   kill "$wpid" 2>/dev/null || true
   wait "$wpid" 2>/dev/null || true
@@ -642,7 +642,7 @@ test_drain_clears_interrupt_marker_on_both_paths() {
   local dir state marker
   dir=$(make_case interrupt-marker-drain)
   state="$dir/state"
-  marker="$state/.cursor-hook-interrupted"
+  marker="$state/.hook-arm-interrupted"
   # Empty-queue fast path: draining nothing still clears a stale marker so the
   # next healthy stop can be silent again.
   printf 'ts=1754000000\tsignal=TERM\torigin=attached\n' > "$marker"
@@ -723,8 +723,8 @@ test_arm_hup_cleans_child_and_temp_output() {
   wait_for_exit "$armpid" 80
   status=$?
   [ "$status" -eq 129 ] || fail "arm did not exit with HUP status (got $status)"
-  [ -f "$state/.cursor-hook-interrupted" ] || fail "HUP cleanup did not write the interrupt marker"
-  grep -q 'origin=started' "$state/.cursor-hook-interrupted" \
+  [ -f "$state/.hook-arm-interrupted" ] || fail "HUP cleanup did not write the interrupt marker"
+  grep -q 'origin=started' "$state/.hook-arm-interrupted" \
     || fail "interrupt marker did not record the started origin"
   i=0
   while [ "$i" -lt 80 ] && is_live_non_zombie "$lock_pid"; do

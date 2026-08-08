@@ -15,11 +15,11 @@ DRAIN_TMP=
 DRAIN_LOCK_HELD=false
 RAW_ROWS=
 # Single owner of clearing the arm-interrupted marker (written by the arm's
-# signal traps): once the queue is durably consumed the next healthy Cursor stop
+# signal traps): once the queue is durably consumed the next healthy stop
 # may be silent again. Idempotent and best-effort, like the other post-commit
 # work below; a crash before this line only replays the diagnostic at the next
 # stop and is bounded to one loud followup.
-INTERRUPT_MARKER="$STATE/.cursor-hook-interrupted"
+INTERRUPT_MARKER="$STATE/.hook-arm-interrupted"
 
 clear_interrupt_marker() {
   rm -f "$INTERRUPT_MARKER" 2>/dev/null || true
