@@ -910,6 +910,46 @@ test_target_exists_rejects_orca_error_json() {
   pass "fm_backend_target_exists: Orca ok:false read JSON is not live"
 }
 
+test_endpoint_validation_accepts_live_composite_orca_worktree_id() {
+  local state id wt proj out
+  state="$TMP_ROOT/composite-id-state"
+  id="orcacompositez1"
+  wt="$TMP_ROOT/composite-id-wt"
+  proj="$TMP_ROOT/composite-id-project"
+  mkdir -p "$state" "$wt" "$proj"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-composite" \
+    "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" \
+    "backend=orca" "orca_worktree_id=repo-123::$wt"
+  out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_validate_task_endpoint "$1" "$2"; printf "%s" "$FM_BACKEND_VALIDATED_TARGET"' \
+    "$ROOT" "$state/$id.meta" "$id")
+  [ "$out" = "term-composite" ] || fail "live composite Orca worktree id should validate, got '$out'"
+  pass "fm_backend_validate_task_endpoint: accepts live Orca repo-id::absolute-path handle"
+}
+
+test_endpoint_validation_refuses_composite_orca_path_mismatch() {
+  local state id wt other proj out rc
+  state="$TMP_ROOT/composite-mismatch-state"
+  id="orcacompositemismatchz2"
+  wt="$TMP_ROOT/composite-mismatch-wt"
+  other="$TMP_ROOT/composite-mismatch-other"
+  proj="$TMP_ROOT/composite-mismatch-project"
+  mkdir -p "$state" "$wt" "$other" "$proj"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-composite-mismatch" \
+    "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" \
+    "backend=orca" "orca_worktree_id=repo-123::$other"
+  set +e
+  out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_validate_task_endpoint "$1" "$2"' \
+    "$ROOT" "$state/$id.meta" "$id" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "composite Orca worktree id with a different path should be refused"
+  assert_contains "$out" "malformed or inconsistent" \
+    "composite Orca path mismatch refusal should preserve the endpoint safety diagnostic"
+  pass "fm_backend_validate_task_endpoint: refuses composite Orca handle/path mismatch"
+}
+
 test_scout_teardown_removes_orca_worktree_via_helper() {
   local proj wt data state config id out rc neutral
   id="orcateardownz3"
@@ -1456,6 +1496,8 @@ test_spawn_releases_orca_resources_when_metadata_write_fails
 test_peek_send_and_crew_state_route_through_orca_meta
 test_peek_and_crew_state_fail_closed_on_orca_error_json
 test_target_exists_rejects_orca_error_json
+test_endpoint_validation_accepts_live_composite_orca_worktree_id
+test_endpoint_validation_refuses_composite_orca_path_mismatch
 test_scout_teardown_removes_orca_worktree_via_helper
 test_scout_teardown_refuses_orca_id_path_mismatch
 test_teardown_removes_orca_worktree_when_path_missing
