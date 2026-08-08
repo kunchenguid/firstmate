@@ -3,14 +3,15 @@
 `bin/fm-mission-control.sh` renders the fleet's current state into one self-contained HTML board that the captain keeps open.
 It is a generator, not a server: each run writes one file, and the page reloads itself so a regenerated file appears without a click.
 
-The board is a calm, light executive summary: a stat strip, the decisions waiting on the captain, a card per project, what landed today, and a quiet strip carrying fleet health and allowance.
+The board is a calm, light executive summary: a stat strip, the decisions waiting on the captain, a card per project, what landed today, and a quiet System view carrying fleet health plus allowance pace.
 It uses monochrome SVG line icons and no emoji.
 The script's own header and `--help` own its exact flags, environment variables, paths, and exit codes, including the two commands that set a decision aside and bring it back.
 
 ## What the board does
 
 The board shows state.
-By default it shows nothing else: no reply controls, no review surface, no network, and no supervision wiring.
+By default it shows nothing else: no reply controls, no review surface, no browser network requests, and no supervision wiring.
+The generator's allowance read is a bounded loopback GET to the local Token Dashboard, never a request from the rendered page or to a remote host.
 `--controls` adds the captain reply layer described under "Replying from the board", which queues requests and still performs nothing itself.
 
 The board never shows a completion percentage or an estimated finish time.
@@ -51,7 +52,13 @@ The stage itself is derived by the snapshot rather than by the board; see `bin/f
   Done records without a completion date are excluded from the list and disclosed in the stat tile instead of being silently counted as today.
 - **Fleet health** lists blocked or failed tasks, backlog items waiting on an unresolved blocker, and non-decision secondmate work whose own state or blocker linkage says it is held.
   It sits in the closing strip, so anything blocked or failed is also announced in a bar above the primary sections rather than left for the captain to scroll to.
-- **Allowance** shows the current allowance per provider.
+- **Allowance & pace** integrates the local Token Dashboard into the System view rather than repeating its numbers in a separate dashboard-shaped panel.
+  Each primary allowance window leads with current remaining allowance, then keeps pace against the reset, observed cycle history, and projected runway or exhaustion in one compact card.
+  Recent automatic balancing is a quiet collapsed shelf under those cards, so its activity remains visible without becoming another monitoring feed.
+  Mission Control consumes only normalized allowance windows, bounded history, pace thresholds, and the safe balancing summary from the Token Dashboard API.
+  Session rows, credentials, action reasons, action details, and unknown payload fields are discarded before rendering.
+  An old successful reading is labelled stale, a failed latest collection is stated, and an absent Token Dashboard falls back to the original live `quota-axi` gauges with history, runway, and balancing explicitly unavailable.
+  The renderer only reads the standalone service and never refreshes, changes, stops, or replaces it.
 
 An idle second mate is healthy and is rendered as such, never as an alarm.
 
@@ -111,7 +118,7 @@ How the control surface is exposed beyond this machine is a separate decision an
 `bin/fm-mission-control.sh --help` owns the exact commands for setting a decision aside and bringing it back, including the reason-preservation hazard.
 
 Any source may be absent.
-An absent backlog, project registry, secondmate table, or allowance reading renders an explicit unavailable or empty notice that states what is missing, and never a misleading zero.
+An absent backlog, project registry, secondmate table, Token Dashboard reading, or live allowance fallback renders an explicit unavailable or empty notice that states what is missing, and never a misleading zero.
 
 ## Where the data comes from
 
@@ -119,10 +126,12 @@ The board does not parse fleet state itself.
 Like `bin/fm-fleet-view.sh` it renders one `bin/fm-fleet-snapshot.sh --json` capture, so current state, backlog roles, captain actionability, and secondmate current state keep exactly one owner.
 Paths come from that snapshot's own resolved roots, so the board follows the active home without resolving `FM_HOME` a second time.
 
-Three inputs come from outside the snapshot because the snapshot does not own them:
+Three concerns come from outside the snapshot because the snapshot does not own them:
 
 - `data/projects.md` is the delivery-posture registry that the project cards group by.
-- `quota-axi --json` is the live allowance reading.
+- The local Token Dashboard API is the preferred allowance source because that service owns normalized pace thresholds, append-only quota history, projected runway, and the automatic balancing feed.
+  The board narrows the response to its display contract before rendering and never carries session-level metering into its HTML.
+  If the local service has no successful reading or cannot be reached, `quota-axi --json` remains the live-only fallback.
   A provider with no readable window is reported with its reason, because a sign-in gap is not an exhausted allowance.
 - Each project card's last-change time.
   A registered project is dated by its clone's last commit, read with `git log -1`, which survives task teardown as the per-task state-file times do not.
@@ -136,7 +145,7 @@ Reading a project clone's history is the only thing the board does to a project,
 A backlog row may record its project as a bare name or as a full clone path.
 Both name the same project, so both fold onto the same rollup row and display as the project name.
 
-Every value that comes from fleet state, the registry, or the allowance reading is HTML-escaped before it reaches the page.
+Every value that comes from fleet state, the registry, or either allowance source is HTML-escaped before it reaches the page.
 
 ## Serving and refreshing
 
@@ -148,7 +157,7 @@ The generator does not serve it; how the file is exposed is decided outside it.
 
 ## Verification
 
-`tests/fm-mission-control.test.sh` renders the board end to end from a fixture home and from captured snapshot payloads, covering present and absent sources, cross-home captain decisions, escaping of hostile prose, project folding, work outside the registry, per-item stage and model rendering, bounded cross-home stage values, safe handling of valid, missing, and malformed secondmate active-task totals, item overflow, blocked work, unmeasurable allowance windows, self-reload, the tab structure, and the deferred shelf.
+`tests/fm-mission-control.test.sh` renders the board end to end from a fixture home and from captured snapshot payloads, covering present and absent sources, cross-home captain decisions, escaping of hostile prose, project folding, work outside the registry, per-item stage and model rendering, bounded cross-home stage values, safe handling of valid, missing, and malformed secondmate active-task totals, item overflow, blocked work, rich allowance pace and history, automatic balancing, unavailable and stale allowance sources, narrow allowance labels, unmeasurable fallback windows, self-reload, the tab structure, and the deferred shelf.
 The deferred cases pin the awaiting count and the section count to literal numbers rather than to the absence of a title, because dropping a decision from the list while still counting it and counting it while still listing it fail separately.
 It also pins a fixed current time and commits its fixture clones at explicit epochs, so the last-change wording, its three degrade-to-dash paths, and the promise that no clone is written to are all checked against times the test chose.
 

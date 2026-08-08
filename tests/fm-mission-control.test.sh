@@ -19,6 +19,159 @@ TMP_ROOT=$(fm_test_tmproot fm-mission-control)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
+find_chrome() {
+  local candidate
+  if [ -n "${FM_CHROME_BIN:-}" ] && [ -x "$FM_CHROME_BIN" ]; then
+    printf '%s\n' "$FM_CHROME_BIN"
+    return 0
+  fi
+  for candidate in \
+    google-chrome \
+    google-chrome-stable \
+    chromium \
+    chromium-browser \
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+  do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+assert_narrow_board_geometry() {  # <html> <window-label> <provider-label>
+  local html=$1 window_label=$2 provider_label=$3 chrome
+  command -v node >/dev/null 2>&1 || {
+    printf 'skip: node not found for rendered narrow-board geometry assertion\n'
+    return 0
+  }
+  chrome=$(find_chrome) || {
+    printf 'skip: Chrome or Chromium not found for rendered narrow-board geometry assertion\n'
+    return 0
+  }
+
+  node - "$chrome" "$html" "$window_label" "$provider_label" <<'JS'
+const { spawn } = require("node:child_process");
+const { pathToFileURL } = require("node:url");
+
+const [chromePath, htmlPath, windowLabel, providerLabel] = process.argv.slice(2);
+const chrome = spawn(chromePath, [
+  "--headless=new",
+  "--disable-gpu",
+  "--no-sandbox",
+  "--remote-debugging-pipe",
+  `--user-data-dir=${htmlPath}.chrome-profile`,
+], { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] });
+let buffer = "";
+let nextId = 0;
+const pending = new Map();
+
+function finish(code, message) {
+  if (message) process.stderr.write(`${message}\n`);
+  chrome.kill();
+  process.exitCode = code;
+}
+
+chrome.on("error", (error) => finish(1, error.message));
+chrome.stdio[4].on("data", (chunk) => {
+  buffer += chunk;
+  let boundary;
+  while ((boundary = buffer.indexOf("\0")) >= 0) {
+    const raw = buffer.slice(0, boundary);
+    buffer = buffer.slice(boundary + 1);
+    if (!raw) continue;
+    const message = JSON.parse(raw);
+    const resolve = pending.get(message.id);
+    if (resolve) {
+      pending.delete(message.id);
+      resolve(message);
+    }
+  }
+});
+
+function send(method, params = {}, sessionId) {
+  return new Promise((resolve) => {
+    const id = ++nextId;
+    pending.set(id, resolve);
+    chrome.stdio[3].write(`${JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) })}\0`);
+  });
+}
+
+async function run() {
+  const created = await send("Target.createTarget", { url: "about:blank" });
+  const attached = await send("Target.attachToTarget", {
+    targetId: created.result.targetId,
+    flatten: true,
+  });
+  const sessionId = attached.result.sessionId;
+  await send("Emulation.setDeviceMetricsOverride", {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 1,
+    mobile: true,
+  }, sessionId);
+  const boardUrl = pathToFileURL(htmlPath);
+  boardUrl.hash = "tab=system";
+  await send("Page.navigate", { url: boardUrl.href }, sessionId);
+
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const ready = await send("Runtime.evaluate", {
+      expression: "document.readyState",
+      returnByValue: true,
+    }, sessionId);
+    if (ready.result.result.value === "complete") break;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+
+  const expression = `(() => {
+    const expected = ${JSON.stringify([windowLabel, providerLabel])};
+    const viewportWidth = document.documentElement.clientWidth;
+    const leaves = [...document.body.querySelectorAll("*")].filter((element) => element.children.length === 0);
+    const targets = expected.map((text) => leaves.find((element) => element.textContent.trim() === text));
+    return {
+      viewportWidth,
+      documentWidth: document.documentElement.scrollWidth,
+      targets: targets.map((element) => {
+        if (!element) return null;
+        const rect = element.getBoundingClientRect();
+        return {
+          left: rect.left,
+          right: rect.right,
+          width: rect.width,
+          height: rect.height,
+          clientWidth: element.clientWidth,
+          scrollWidth: element.scrollWidth,
+        };
+      }),
+    };
+  })()`;
+  const evaluated = await send("Runtime.evaluate", {
+    expression,
+    returnByValue: true,
+  }, sessionId);
+  const geometry = evaluated.result.result.value;
+  const documentFits = geometry.documentWidth <= geometry.viewportWidth;
+  const labelsFit = geometry.targets.every((target) => target &&
+    target.width > 0 && target.height > 0 &&
+    target.left >= 0 && target.right <= geometry.viewportWidth + 0.5 &&
+    target.scrollWidth <= target.clientWidth + 1);
+  if (!documentFits || !labelsFit) {
+    throw new Error(`390px board overflowed: ${JSON.stringify(geometry)}`);
+  }
+}
+
+const timeout = setTimeout(() => finish(1, "timed out measuring the rendered 390px board"), 10000);
+run().then(() => {
+  clearTimeout(timeout);
+  finish(0);
+}).catch((error) => {
+  clearTimeout(timeout);
+  finish(1, error.message);
+});
+JS
+}
+
 # 2026-01-02T15:00:00Z, with TZ=UTC pinned by every case that renders a time.
 NOW_EPOCH=1767366000
 TODAY_0905=1767344700    # 2026-01-02T09:05:00Z
@@ -1349,6 +1502,167 @@ test_secondmate_child_count_shapes_render_safely() {
   pass "secondmate child counts stay honest across numeric, zero, missing, and malformed inputs"
 }
 
+# A captured Token Dashboard API response drives the board through the same
+# public payload the standalone service serves. The board keeps the pace-first
+# hierarchy but narrows the payload before rendering, so session rows and action
+# reasons cannot leak into Mission Control.
+write_token_payload() {  # <path>
+  cat > "$1" <<'EOF'
+{
+  "latest": {
+    "capturedAt": "2026-01-02T14:50:00Z",
+    "windows": [
+      {"key":"claude:five_hour","provider":"claude","providerLabel":"Claude Max","id":"five_hour","label":"Claude · 5-hour","shortLabel":"Claude 5-hour","percentUsed":30,"percentRemaining":70,"resetsAt":"2026-01-02T17:00:00Z","windowSeconds":18000,"pace":{"status":"behind","elapsedPercent":60,"reservePercentPoints":30,"burnMultiple":0.5,"projectedExhaustedAt":"2026-01-02T18:00:00Z"}},
+      {"key":"claude:seven_day","provider":"claude","providerLabel":"Claude Max","id":"seven_day","label":"Claude · 7-day","shortLabel":"Claude 7-day","percentUsed":80,"percentRemaining":20,"resetsAt":"2026-01-03T08:10:00Z","windowSeconds":604800,"pace":{"status":"ahead","elapsedPercent":90,"reservePercentPoints":10,"burnMultiple":0.89,"projectedExhaustedAt":"2026-01-03T07:00:00Z"}},
+      {"key":"codex:weekly","provider":"codex","providerLabel":"ChatGPT Pro (OpenAI)","id":"weekly","label":"ChatGPT · weekly","shortLabel":"ChatGPT weekly","percentUsed":80,"percentRemaining":20,"resetsAt":"2026-01-04T05:30:00Z","windowSeconds":604800,"pace":{"status":"ahead","elapsedPercent":77,"reservePercentPoints":-3,"burnMultiple":1.04,"projectedExhaustedAt":"2026-01-03T20:30:00Z"}}
+    ]
+  },
+  "history": [
+    {"capturedAt":"2026-01-02T13:00:00Z","windows":[{"key":"claude:five_hour","percentUsed":10,"resetsAt":"2026-01-02T17:00:00Z"},{"key":"claude:seven_day","percentUsed":70,"resetsAt":"2026-01-03T08:10:00Z"},{"key":"codex:weekly","percentUsed":70,"resetsAt":"2026-01-04T05:30:00Z"}]},
+    {"capturedAt":"2026-01-02T14:00:00Z","windows":[{"key":"claude:five_hour","percentUsed":20,"resetsAt":"2026-01-02T17:00:00Z"},{"key":"claude:seven_day","percentUsed":75,"resetsAt":"2026-01-03T08:10:00Z"},{"key":"codex:weekly","percentUsed":75,"resetsAt":"2026-01-04T05:30:00Z"}]},
+    {"capturedAt":"2026-01-02T14:50:00Z","windows":[{"key":"claude:five_hour","percentUsed":30,"resetsAt":"2026-01-02T17:00:00Z"},{"key":"claude:seven_day","percentUsed":80,"resetsAt":"2026-01-03T08:10:00Z"},{"key":"codex:weekly","percentUsed":80,"resetsAt":"2026-01-04T05:30:00Z"}]}
+  ],
+  "settings":{"paceThresholds":{"fiveHour":{"comfortable":20,"edge":8},"weekly":{"comfortable":15,"edge":5}}},
+  "lastError":null,
+  "balancing":{"error":null,"actions":[
+    {"ts":"2026-01-02T14:40:00Z","action":"route_visual_to_chatgpt","providerEased":"claude","auto":true,"tokens":1234,"reason":"TOP_SECRET_REASON","detail":"TOP_SECRET_DETAIL"},
+    {"ts":"2026-01-02T12:00:00Z","action":"manual_override","providerEased":"codex","auto":false}
+  ]},
+  "metering":{"ranges":[{"providers":{"claude":{"sessions":[{"sessionId":"TOP_SECRET_SESSION"}]}}}]},
+  "credentials":{"token":"TOP_SECRET_CREDENTIAL"},
+  "refreshIntervalMs":900000
+}
+EOF
+}
+
+test_rich_token_dashboard_is_one_pace_first_allowance_view() {
+  local snap token board cards
+  snap=$TMP_ROOT/rich-token-snapshot.json
+  token=$TMP_ROOT/rich-token.json
+  board=$TMP_ROOT/rich-token.html
+  snapshot_json '[]' '[]' > "$snap"
+  write_token_payload "$token"
+
+  FM_MISSION_CONTROL_TOKEN_JSON="$token" FM_MISSION_CONTROL_NOW_EPOCH="$NOW_EPOCH" \
+    "$BOARD" --snapshot "$snap" --out "$board" >/dev/null \
+    || fail "a rich local token payload must render"
+
+  assert_grep 'Allowance &amp; pace' "$board" \
+    "the richer view must replace the old allowance heading rather than compete with it"
+  cards=$(grep -o 'class="qwindow tone-' "$board" | wc -l | tr -d ' ')
+  [ "$cards" = 3 ] || fail "the three primary allowance windows must render once each, got $cards"
+  assert_grep '<strong>70%</strong><span>remaining</span>' "$board" \
+    "current allowance must lead a window card"
+  assert_grep 'Comfortably under pace' "$board" "a roomy window must carry the configured pace verdict"
+  assert_grep 'Near your pace edge' "$board" "a narrowing window must carry the configured pace verdict"
+  assert_grep 'Past your pace edge' "$board" "an over-pace window must carry the configured pace verdict"
+  assert_grep '30% used · 60% through cycle · 30 pt pace buffer' "$board" \
+    "used allowance, cycle position, and reserve must remain one supporting pace line"
+  assert_grep 'Projected runway reaches reset' "$board" \
+    "a projection beyond reset must be stated as runway through reset"
+  assert_grep 'Projected exhaustion' "$board" \
+    "a projection before reset must state exhaustion rather than implying enough runway"
+  assert_grep '3 saved rounds · +20 pts observed' "$board" \
+    "the compact trend must state its observed history rather than inventing a forecast"
+  assert_grep 'Automatic balancing</strong> · 1 recent shift' "$board" \
+    "automatic balancing must remain visible without expanding into a monitoring wall"
+  assert_grep 'Route visual to chatgpt' "$board" "the newest automatic balancing action must be inspectable"
+  assert_no_grep 'Manual override' "$board" "manual activity must not be relabelled as automatic balancing"
+  assert_no_grep 'TOP_SECRET' "$board" \
+    "session rows, credentials, action reasons, and unknown fields must not enter Mission Control"
+  assert_no_grep '<h3>Allowance</h3>' "$board" \
+    "the legacy gauge pane must not duplicate the richer allowance view"
+  pass "rich local token data renders as one pace-first Mission Control allowance view"
+}
+
+test_unavailable_token_sources_are_explicit() {
+  local snap token quota board
+  snap=$TMP_ROOT/unavailable-token-snapshot.json
+  token=$TMP_ROOT/unavailable-token.json
+  quota=$TMP_ROOT/unavailable-quota.json
+  board=$TMP_ROOT/unavailable-token.html
+  snapshot_json '[]' '[]' > "$snap"
+  printf '%s\n' '{"latest":null,"history":[],"balancing":{"actions":[]},"refreshIntervalMs":900000}' > "$token"
+  printf '%s\n' '[]' > "$quota"
+
+  FM_MISSION_CONTROL_TOKEN_JSON="$token" FM_MISSION_CONTROL_QUOTA_JSON="$quota" \
+    "$BOARD" --snapshot "$snap" --out "$board" >/dev/null \
+    || fail "unavailable token sources must still render the board"
+  assert_grep 'Allowance unavailable' "$board" "an absent rich and raw reading must never look like zero"
+  assert_grep 'local token history has no successful reading' "$board" \
+    "the missing richer source must be named"
+  assert_no_grep '<strong>0%</strong><span>remaining</span>' "$board" \
+    "an unavailable allowance must not render as exhausted"
+  pass "unavailable rich and raw allowance sources render an explicit unavailable state"
+}
+
+test_token_dashboard_url_cannot_leave_the_local_machine() {
+  local snap board fakebin calls
+  snap=$TMP_ROOT/local-token-url-snapshot.json
+  board=$TMP_ROOT/local-token-url.html
+  calls=$TMP_ROOT/local-token-url.calls
+  snapshot_json '[]' '[]' > "$snap"
+  fakebin=$(fm_fakebin "$TMP_ROOT/local-token-url-bin")
+  cat > "$fakebin/curl" <<EOF
+#!/usr/bin/env bash
+printf '%s\\n' called >> '$calls'
+printf '%s\\n' '{"latest":{"capturedAt":"2026-01-02T14:50:00Z","windows":[]}}'
+EOF
+  cat > "$fakebin/quota-axi" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"providers":[]}'
+EOF
+  chmod +x "$fakebin/curl" "$fakebin/quota-axi"
+
+  PATH="$fakebin:$PATH" FM_MISSION_CONTROL_TOKEN_URL='http://localhost:4173@outside.invalid/api/dashboard' \
+    "$BOARD" --snapshot "$snap" --out "$board" >/dev/null \
+    || fail "a non-local token URL must fall back without leaving the machine"
+  assert_absent "$calls" "a userinfo-shaped URL must not trick the local-only reader into calling outside"
+  assert_grep 'token dashboard URL must be local' "$board" \
+    "the live-only fallback must say why richer local history was refused"
+  pass "the Token Dashboard reader cannot be redirected outside the local machine"
+}
+
+test_stale_token_history_is_labelled_without_hiding_it() {
+  local snap token board
+  snap=$TMP_ROOT/stale-token-snapshot.json
+  token=$TMP_ROOT/stale-token.json
+  board=$TMP_ROOT/stale-token.html
+  snapshot_json '[]' '[]' > "$snap"
+  write_token_payload "$token"
+
+  FM_MISSION_CONTROL_TOKEN_JSON="$token" FM_MISSION_CONTROL_NOW_EPOCH="$((NOW_EPOCH + 7200))" \
+    "$BOARD" --snapshot "$snap" --out "$board" >/dev/null \
+    || fail "a stale saved token reading must still render"
+  assert_grep 'Allowance data is stale' "$board" "an old successful reading must be labelled stale"
+  assert_grep '2h ago' "$board" "staleness must be judged against the board clock"
+  assert_grep '<strong>70%</strong><span>remaining</span>' "$board" \
+    "stale data must remain inspectable rather than disappearing"
+  assert_grep '3 saved snapshots' "$board" "saved history must remain visible in the stale state"
+  pass "stale token history stays visible with an explicit freshness warning"
+}
+
+test_narrow_token_shapes_keep_every_value_wrappable() {
+  local snap token board long
+  snap=$TMP_ROOT/narrow-token-snapshot.json
+  token=$TMP_ROOT/narrow-token.json
+  board=$TMP_ROOT/narrow-token.html
+  snapshot_json '[]' '[]' > "$snap"
+  write_token_payload "$token"
+  long='ClaudeAllowanceWindowWithAnIntentionallyLongUnbrokenOperatorFacingName1234567890'
+  jq --arg long "$long" \
+    '.latest.windows[0].shortLabel = $long | .latest.windows[0].providerLabel = ($long + $long)' \
+    "$token" > "$token.tmp" && mv "$token.tmp" "$token"
+
+  FM_MISSION_CONTROL_TOKEN_JSON="$token" FM_MISSION_CONTROL_NOW_EPOCH="$NOW_EPOCH" \
+    "$BOARD" --snapshot "$snap" --out "$board" >/dev/null \
+    || fail "a narrow-screen-shaped token payload must render"
+  assert_grep "$long" "$board" "a long honest label must stay present rather than being clipped from the payload"
+  assert_narrow_board_geometry "$board" "$long" "$long$long" \
+    || fail "long allowance labels must fit the rendered board without horizontal overflow"
+  pass "narrow-screen token shapes keep every operator value present and wrappable"
+}
+
 test_unmeasurable_allowance_is_not_a_zero_gauge() {
   local snap quota board
   snap=$TMP_ROOT/quota-snap.json
@@ -1600,6 +1914,11 @@ test_live_work_outside_the_registry_stays_visible
 test_unregistered_live_project_uses_clone_change_time
 test_secondmate_health_and_activity_use_authoritative_counts
 test_secondmate_child_count_shapes_render_safely
+test_rich_token_dashboard_is_one_pace_first_allowance_view
+test_unavailable_token_sources_are_explicit
+test_token_dashboard_url_cannot_leave_the_local_machine
+test_stale_token_history_is_labelled_without_hiding_it
+test_narrow_token_shapes_keep_every_value_wrappable
 test_unmeasurable_allowance_is_not_a_zero_gauge
 test_usage_errors_refuse
 test_self_reload_is_wired

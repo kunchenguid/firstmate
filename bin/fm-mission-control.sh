@@ -9,10 +9,11 @@
 # This command does not parse fleet state itself. Like bin/fm-fleet-view.sh it
 # shells out to bin/fm-fleet-snapshot.sh --json once and renders that stable
 # contract, so current_state, backlog roles, captain actionability, and
-# secondmate current state keep exactly one owner. Three inputs come from
+# secondmate current state keep exactly one owner. Three concerns come from
 # outside the snapshot because the snapshot does not own them: data/projects.md
-# is the delivery-posture registry, `quota-axi --json` is the live allowance
-# reading, and each project card's last-change time comes from that project's
+# is the delivery-posture registry; the local Token Dashboard API owns richer
+# allowance history, pace, and balancing with `quota-axi --json` as the live-only
+# fallback; and each project card's last-change time comes from that project's
 # own clone or, for a second mate, from when it last reported.
 #
 # The board never invents a completion percentage or an ETA. Progress judgement
@@ -47,7 +48,7 @@
 #   fm-mission-control.sh                  write <state>/mission-control.html
 #   fm-mission-control.sh --out <path>     write to an explicit path
 #   fm-mission-control.sh --stdout         print the HTML instead of writing
-#   fm-mission-control.sh --no-quota       skip the quota-axi allowance read
+#   fm-mission-control.sh --no-quota       skip local allowance reads
 #   fm-mission-control.sh --refresh <sec>  self-reload interval (default 25)
 #   fm-mission-control.sh --controls       add the captain reply layer
 #   fm-mission-control.sh --snapshot <f>   render a captured snapshot JSON file
@@ -57,6 +58,9 @@
 #   FM_MISSION_CONTROL_NOW_EPOCH  fix "now" for deterministic rendering.
 #   FM_MISSION_CONTROL_QUOTA_JSON path to a captured quota-axi --json payload,
 #                                 used instead of running quota-axi.
+#   FM_MISSION_CONTROL_TOKEN_JSON path to a captured Token Dashboard API payload.
+#   FM_MISSION_CONTROL_TOKEN_URL  local Token Dashboard API URL (default
+#                                 http://127.0.0.1:4173/api/dashboard).
 #
 # Deferring a decision:
 #   Firstmate sets a captain decision aside on the captain's word, in the home
@@ -298,28 +302,134 @@ UPDATED=$(updated_rows | jq -R -s '
     label: (.[2] // "")}}) |
   from_entries') || die "could not read project change times"
 
-# Allowance gauges are best-effort: an absent, failing, or non-JSON quota-axi
-# renders as an explicit "unavailable" note, never as an empty zero gauge.
+# The richer local Token Dashboard already owns normalization, history, pace
+# thresholds, and the balancing feed. Mission Control reads that public API and
+# immediately narrows it to the fields this board renders. Session rows, task
+# details, reasons, and unknown future fields never enter the generated page.
+# If that service is absent, the existing quota-axi read remains the reversible
+# fallback and is labelled as a live-only view rather than fabricated history.
+sanitize_token_dashboard() {
+  jq -c '
+    if type != "object" then empty else
+    {
+      latest: (if (.latest | type) == "object" then {
+        capturedAt: .latest.capturedAt,
+        windows: [(.latest.windows // [])[] | {
+          key, provider, providerLabel, id, label, shortLabel,
+          percentUsed, percentRemaining, resetsAt, windowSeconds,
+          pace: {status: .pace.status, elapsedPercent: .pace.elapsedPercent,
+                 reservePercentPoints: .pace.reservePercentPoints,
+                 burnMultiple: .pace.burnMultiple,
+                 projectedExhaustedAt: .pace.projectedExhaustedAt}
+        }]
+      } else null end),
+      historyCount: ((.history // []) | length),
+      history: ([((.history // [])[] | {
+        capturedAt,
+        windows: [(.windows // [])[] | {key, percentUsed, resetsAt}]
+      })] | if length > 672 then .[-672:] else . end),
+      settings: {paceThresholds: {
+        fiveHour: {comfortable: .settings.paceThresholds.fiveHour.comfortable,
+                   edge: .settings.paceThresholds.fiveHour.edge},
+        weekly: {comfortable: .settings.paceThresholds.weekly.comfortable,
+                 edge: .settings.paceThresholds.weekly.edge}
+      }},
+      lastError: (if (.lastError | type) == "object" then {at: .lastError.at} else null end),
+      balancing: {
+        error: .balancing.error,
+        actions: [(.balancing.actions // [])[:20][] | {
+          ts, action, providerEased, auto
+        }]
+      },
+      refreshIntervalMs: .refreshIntervalMs
+    }
+    end
+  '
+}
+
+TOKEN_DASH='null'
+TOKEN_DASH_NOTE="not requested"
 QUOTA='null'
 QUOTA_NOTE="not requested"
 if [ "$WITH_QUOTA" = 1 ]; then
-  quota_raw=""
-  if [ -n "${FM_MISSION_CONTROL_QUOTA_JSON:-}" ]; then
-    if [ -r "$FM_MISSION_CONTROL_QUOTA_JSON" ]; then
-      quota_raw=$(cat "$FM_MISSION_CONTROL_QUOTA_JSON" 2>/dev/null) || quota_raw=""
-      QUOTA_NOTE="captured payload unreadable"
-    else
-      QUOTA_NOTE="captured payload not found"
-    fi
-  elif command -v quota-axi >/dev/null 2>&1; then
-    quota_raw=$(quota-axi --json 2>/dev/null </dev/null) || quota_raw=""
-    QUOTA_NOTE="quota-axi returned no usable reading"
-  else
-    QUOTA_NOTE="quota-axi not installed"
+  token_raw=""
+  token_candidate=""
+  try_token=1
+
+  # A captured raw quota payload is an explicit fixture or operator override.
+  # Do not let a live local service make that deterministic input non-deterministic.
+  if [ -z "${FM_MISSION_CONTROL_TOKEN_JSON:-}" ] && [ -n "${FM_MISSION_CONTROL_QUOTA_JSON:-}" ]; then
+    try_token=0
+    TOKEN_DASH_NOTE="captured quota payload selected"
   fi
-  if [ -n "$quota_raw" ] && printf '%s' "$quota_raw" | jq -e 'type == "object"' >/dev/null 2>&1; then
-    QUOTA=$quota_raw
-    QUOTA_NOTE=""
+
+  if [ "$try_token" = 1 ] && [ -n "${FM_MISSION_CONTROL_TOKEN_JSON:-}" ]; then
+    if [ -r "$FM_MISSION_CONTROL_TOKEN_JSON" ]; then
+      token_raw=$(cat "$FM_MISSION_CONTROL_TOKEN_JSON" 2>/dev/null) || token_raw=""
+      TOKEN_DASH_NOTE="captured token payload unreadable"
+    else
+      TOKEN_DASH_NOTE="captured token payload not found"
+    fi
+  elif [ "$try_token" = 1 ]; then
+    token_url=${FM_MISSION_CONTROL_TOKEN_URL:-http://127.0.0.1:4173/api/dashboard}
+    token_authority=${token_url#http://}
+    token_authority=${token_authority%%/*}
+    token_host=${token_authority%:*}
+    token_port=${token_authority##*:}
+    case "$token_host:$token_port" in
+      127.0.0.1:*|localhost:*)
+        case "$token_port" in
+          ''|*[!0-9]*) TOKEN_DASH_NOTE="token dashboard URL must be local" ;;
+          *)
+            if command -v curl >/dev/null 2>&1; then
+              token_raw=$(curl --disable --proto '=http' --noproxy '*' --fail --silent \
+                --max-filesize 8388608 --max-time 2 "$token_url" 2>/dev/null) || token_raw=""
+              TOKEN_DASH_NOTE="local token dashboard not reachable"
+            else
+              TOKEN_DASH_NOTE="curl not installed for the local token dashboard read"
+            fi
+            ;;
+        esac
+        ;;
+      *) TOKEN_DASH_NOTE="token dashboard URL must be local" ;;
+    esac
+  fi
+
+  if [ -n "$token_raw" ]; then
+    token_candidate=$(printf '%s' "$token_raw" | sanitize_token_dashboard 2>/dev/null) || token_candidate=""
+    if [ -n "$token_candidate" ] && printf '%s' "$token_candidate" | jq -e 'type == "object"' >/dev/null 2>&1; then
+      TOKEN_DASH=$token_candidate
+      if printf '%s' "$TOKEN_DASH" | jq -e '.latest | type == "object"' >/dev/null 2>&1; then
+        TOKEN_DASH_NOTE=""
+      else
+        TOKEN_DASH_NOTE="local token history has no successful reading"
+      fi
+    else
+      TOKEN_DASH_NOTE="token dashboard returned no usable reading"
+    fi
+  fi
+
+  # The richer service may be absent or may not have its first successful
+  # snapshot yet. Preserve the old direct allowance view in either case.
+  if ! printf '%s' "$TOKEN_DASH" | jq -e '.latest | type == "object"' >/dev/null 2>&1; then
+    quota_raw=""
+    if [ -n "${FM_MISSION_CONTROL_QUOTA_JSON:-}" ]; then
+      if [ -r "$FM_MISSION_CONTROL_QUOTA_JSON" ]; then
+        quota_raw=$(cat "$FM_MISSION_CONTROL_QUOTA_JSON" 2>/dev/null) || quota_raw=""
+        QUOTA_NOTE="captured payload unreadable"
+      else
+        QUOTA_NOTE="captured payload not found"
+      fi
+    elif command -v quota-axi >/dev/null 2>&1; then
+      quota_raw=$(quota-axi --json 2>/dev/null </dev/null) || quota_raw=""
+      QUOTA_NOTE="quota-axi returned no usable reading"
+    else
+      QUOTA_NOTE="quota-axi not installed"
+    fi
+    if [ -n "$quota_raw" ] && printf '%s' "$quota_raw" | jq -e 'type == "object"' >/dev/null 2>&1; then
+      QUOTA=$quota_raw
+      QUOTA_NOTE=""
+    fi
   fi
 fi
 
@@ -327,6 +437,9 @@ HTML=$(
   printf '%s' "$SNAPSHOT" | jq -r \
     --argjson quota "$QUOTA" \
     --arg quota_note "$QUOTA_NOTE" \
+    --argjson token_dash "$TOKEN_DASH" \
+    --arg token_dash_note "$TOKEN_DASH_NOTE" \
+    --argjson now "$NOW" \
     --argjson registry "$REGISTRY" \
     --argjson updated "$UPDATED" \
     --argjson projects_present "$PROJECTS_PRESENT" \
@@ -1062,6 +1175,161 @@ def stat($icon; $value; $label; $note; $attn):
   + (if $note == "" then "" else (@html "<div class=\"note\">\($note)</div>") end)
   + "</div>";
 
+# Token Dashboard timestamps are normalized ISO strings, but fractional seconds
+# vary. Strip only that fraction before jq parses the epoch; every malformed
+# value remains unavailable rather than becoming a plausible local time.
+def iso_epoch:
+  if type != "string" then null
+  else try (sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) catch null end;
+
+def clamp($value; $minimum; $maximum):
+  if $value < $minimum then $minimum elif $value > $maximum then $maximum else $value end;
+
+def local_time($iso; $format):
+  ($iso | iso_epoch) as $epoch |
+  if $epoch == null then "unavailable"
+  else (@html "<time class=\"qtime\" datetime=\"\($iso)\" data-format=\"\($format)\">\($iso)</time>") end;
+
+def age_copy($seconds):
+  if $seconds == null then "age unavailable"
+  elif $seconds < 60 then "just now"
+  elif $seconds < 3600 then "\(($seconds / 60) | floor)m ago"
+  elif $seconds < 86400 then "\(($seconds / 3600) | floor)h ago"
+  else "\(($seconds / 86400) | floor)d ago" end;
+
+def token_age:
+  ($token_dash.latest.capturedAt | iso_epoch) as $captured |
+  if $captured == null then null else ([$now - $captured, 0] | max) end;
+
+def token_is_stale:
+  token_age as $age |
+  (($token_dash.refreshIntervalMs // 900000) |
+    if type == "number" and . > 0 then (. / 1000) else 900 end) as $cadence |
+  $age != null and $age > ($cadence * 4);
+
+def pace_band($window):
+  (if $window.id == "five_hour"
+   then $token_dash.settings.paceThresholds.fiveHour
+   else $token_dash.settings.paceThresholds.weekly end) as $thresholds |
+  ($window.pace.reservePercentPoints // null) as $reserve |
+  if ($reserve | type) != "number" then {tone: "muted", label: "Pace unavailable"}
+  elif (($thresholds.comfortable | type) == "number") and $reserve >= $thresholds.comfortable
+    then {tone: "good", label: "Comfortably under pace"}
+  elif (($thresholds.edge | type) == "number") and $reserve >= $thresholds.edge
+    then {tone: "warn", label: "Near your pace edge"}
+  elif (($thresholds.edge | type) == "number")
+    then {tone: "alert", label: "Past your pace edge"}
+  elif $reserve >= 0 then {tone: "good", label: "Under straight-line pace"}
+  else {tone: "alert", label: "Over straight-line pace"} end;
+
+def cycle_points($window):
+  [($token_dash.history // [])[]? as $snapshot |
+   ($snapshot.windows // [])[]? |
+   select(.key == $window.key and .resetsAt == $window.resetsAt) |
+   (.percentUsed // null) as $used |
+   ($snapshot.capturedAt | iso_epoch) as $epoch |
+   select(($used | type) == "number" and $epoch != null) |
+   {epoch: $epoch, used: clamp($used; 0; 100)}] |
+  sort_by(.epoch);
+
+def trend_chart($window; $band):
+  cycle_points($window) as $all |
+  ($window.resetsAt | iso_epoch) as $reset |
+  ($window.windowSeconds // null) as $duration |
+  if $reset == null or ($duration | type) != "number" or $duration <= 0 then
+    "<div class=\"qtrend-empty\">Trend timing unavailable.</div>"
+  else
+    ($reset - $duration) as $start |
+    ($all | if length > 48 then .[-48:] else . end) as $draw |
+    ($draw | map(
+      (clamp(((.epoch - $start) / $duration * 100); 0; 100)) as $x |
+      (30 - (.used * 0.28)) as $y |
+      "\($x),\($y)") | join(" ")) as $points |
+    (($window.pace.elapsedPercent // null) |
+      if type == "number" then clamp(.; 0; 100) else null end) as $now_x |
+    ($draw | last // null) as $last |
+    (@html "<svg class=\"qtrend tone-\($band.tone)\" viewBox=\"0 0 100 32\" role=\"img\" aria-label=\"\($all | length) saved allowance readings in this cycle\">")
+    + "<line class=\"qbudget\" x1=\"0\" y1=\"30\" x2=\"100\" y2=\"2\"></line>"
+    + (if $now_x == null then ""
+       else (@html "<line class=\"qnow\" x1=\($now_x) y1=\"1\" x2=\($now_x) y2=\"31\"></line>") end)
+    + (if ($draw | length) > 1 then (@html "<polyline class=\"qactual\" points=\"\($points)\"></polyline>") else "" end)
+    + (if $last == null then ""
+       else (clamp((($last.epoch - $start) / $duration * 100); 0; 100)) as $last_x |
+            (30 - ($last.used * 0.28)) as $last_y |
+            (@html "<circle class=\"qlatest\" cx=\"\($last_x)\" cy=\"\($last_y)\" r=\"2.4\"></circle>") end)
+    + "</svg>"
+  end;
+
+def trend_note($window):
+  cycle_points($window) as $points |
+  if ($points | length) < 2 then "Collecting history for this cycle"
+  else (($points | last | .used) - ($points | first | .used) | round) as $change |
+    "\($points | length) saved rounds · \(if $change > 0 then "+" else "" end)\($change) pts observed"
+  end;
+
+def runway_copy($window):
+  ($window.pace.projectedExhaustedAt | iso_epoch) as $projected |
+  ($window.resetsAt | iso_epoch) as $reset |
+  if $projected == null or $reset == null then "Projected runway unavailable"
+  elif $projected >= $reset then "Projected runway reaches reset"
+  else "Projected exhaustion " + local_time($window.pace.projectedExhaustedAt; "short") end;
+
+def reserve_copy($window):
+  ($window.pace.reservePercentPoints // null) as $reserve |
+  if ($reserve | type) != "number" then "pace buffer unavailable"
+  elif $reserve >= 0 then "\($reserve | round) pt pace buffer"
+  else "\(($reserve | -.) | round) pt over pace" end;
+
+def token_window:
+  . as $window |
+  pace_band($window) as $band |
+  (($window.percentRemaining // null) |
+    if type == "number" then (clamp(.; 0; 100) | round) else null end) as $remaining |
+  (($window.percentUsed // null) |
+    if type == "number" then (clamp(.; 0; 100) | round) else null end) as $used |
+  (($window.pace.elapsedPercent // null) |
+    if type == "number" then (clamp(.; 0; 100) | round) else null end) as $elapsed |
+  (@html "<article class=\"qwindow tone-\($band.tone)\">
+    <div class=\"qw-head\"><span class=\"qw-name\">\($window.shortLabel // $window.label // $window.key // "Allowance window")</span><span class=\"qw-provider\">\($window.providerLabel // $window.provider // "")</span></div>
+    <div class=\"qw-reading\"><strong>\(if $remaining == null then "-" else $remaining end)\(if $remaining == null then "" else "%" end)</strong><span>remaining</span></div>
+    <div class=\"qw-verdict\">\($band.label)</div>")
+  + (@html "<div class=\"qw-context\">\(if $used == null then "Usage unavailable" else "\($used)% used" end) · \(if $elapsed == null then "cycle position unavailable" else "\($elapsed)% through cycle" end) · \(reserve_copy($window))</div>")
+  + trend_chart($window; $band)
+  + (@html "<div class=\"qw-trend-note\">\(trend_note($window))</div>")
+  + "<div class=\"qw-foot\"><span>" + runway_copy($window) + "</span><span>reset "
+  + local_time($window.resetsAt; "reset") + "</span></div></article>";
+
+def human_action($value):
+  (($value // "") | tostring | gsub("[_-]+"; " ") | gsub("  +"; " ")) as $text |
+  if $text == "" then "Balancing adjustment"
+  else (($text[0:1] | ascii_upcase) + $text[1:]) end;
+
+def eased_provider($value):
+  (($value // "") | tostring | ascii_downcase) as $provider |
+  if ($provider | contains("claude")) then "Claude Max"
+  elif ($provider | test("chatgpt|codex|openai")) then "ChatGPT Pro"
+  elif $provider == "" then "provider not recorded"
+  else $value end;
+
+def balancing_row:
+  (@html "<li><time class=\"qtime\" datetime=\"\(.ts // "")\" data-format=\"action\">\(.ts // "time unavailable")</time><span>\(human_action(.action))</span><small>eased \(eased_provider(.providerEased))</small></li>");
+
+def balancing_block:
+  (($token_dash.balancing.actions // []) | map(select(.auto == true))) as $automatic |
+  if ($token_dash.balancing.error // null) != null and ($automatic | length) == 0 then
+    "<p class=\"qbalance-empty\">Automatic balancing activity is unavailable.</p>"
+  elif ($automatic | length) == 0 then
+    "<p class=\"qbalance-empty\">No automatic balancing activity recorded.</p>"
+  else
+    "<details class=\"qbalance\" id=\"quota-balancing\"><summary><span><strong>Automatic balancing</strong> · "
+    + (@html "\($automatic | length) recent \(plural($automatic | length; "shift"; "shifts"))")
+    + "</span><span class=\"qbalance-last\">latest "
+    + local_time(($automatic | first | .ts); "action")
+    + "</span></summary><ul>"
+    + (($automatic[0:3] | map(balancing_row) | add) // "")
+    + "</ul></details>"
+  end;
+
 def gauge($label; $pct; $note):
   (if $pct == null then "muted"
    elif $pct <= 15 then "alert"
@@ -1073,17 +1341,19 @@ def gauge($label; $pct; $note):
      <div class=\"gnote\">\($note)</div>
    </div>");
 
-def quota_block:
+def quota_fallback:
   if $quota == null then
-    (@html "<p class=\"quiet\">Allowance unavailable - \($quota_note).</p>")
+    (([$token_dash_note, $quota_note] | map(select(. != "" and . != "not requested")) | unique | join("; ")) // "") as $reason |
+    (@html "<p class=\"quiet\">Allowance unavailable\(if $reason == "" then "." else " - \($reason)." end)</p>")
   else
     (($quota.providers // []) | map(. as $p |
       $p + {wins: (($p.windows // []) | map(select((.percentRemaining // null) != null)))})) as $providers |
     ($providers | map(select((.wins | length) > 0))) as $measured |
     ($providers | map(select((.wins | length) == 0))) as $unmeasured |
+    (@html "<p class=\"qfallback\">Live allowance only. Pace history, projected runway, and balancing activity are unavailable - \(if $token_dash_note == "" then "local token history has no successful reading" else $token_dash_note end).</p>")
     # A provider with no readable window is a sign-in or reporting gap, not an
     # exhausted allowance, so it never renders as an empty zero gauge.
-    (($measured | map(. as $p |
+    + (($measured | map(. as $p |
       ($p.wins | map(gauge(("\($p.label // $p.provider) / \(.label // .id)");
                            (.percentRemaining | floor);
                            ("resets \(.resetsAt // "-")"))) | add)) | add) // "")
@@ -1093,6 +1363,32 @@ def quota_block:
              (@html "<li><span>\($p.label // $p.provider)</span><span class=\"gval\">\($p.state.error // $p.state.status // "no window reported")</span></li>")) | add) // "")
          + "</ul>" end)
     + (if ($providers | length) == 0 then "<p class=\"quiet\">No allowance providers reported.</p>" else "" end)
+  end;
+
+def quota_block:
+  if ($token_dash.latest | type) != "object" then quota_fallback
+  else
+    ($token_dash.latest.windows // []) as $windows |
+    (($token_dash.historyCount // ($token_dash.history | length)) |
+      if type == "number" then floor else 0 end) as $history_count |
+    token_age as $age |
+    "<div class=\"qmeta\"><span>Local allowance history</span>"
+    + (@html "<span>\($history_count) saved \(plural($history_count; "snapshot"; "snapshots"))</span>")
+    + "<span>updated " + local_time($token_dash.latest.capturedAt; "updated") + "</span></div>"
+    + (if $age == null then
+         "<p class=\"qalert\">Allowance freshness is unavailable.</p>"
+       elif token_is_stale then
+         "<p class=\"qalert\">Allowance data is stale - the last successful reading was "
+         + (@html "\(age_copy($age))") + ".</p>"
+       elif ($token_dash.lastError | type) == "object" then
+         "<p class=\"qalert\">The latest local collection failed; showing the last successful reading.</p>"
+       else "" end)
+    + (if ($windows | length) == 0 then
+         "<p class=\"quiet\">No allowance windows were reported by the local token dashboard.</p>"
+       else "<div class=\"quota-grid\">" + (($windows | map(token_window) | add) // "") + "</div>" end)
+    + (if ([$windows[]? | select(.key == "claude:five_hour" or .key == "claude:seven_day" or .key == "codex:weekly")] | length) < 3
+       then "<p class=\"qmissing\">One or more primary allowance windows are unavailable.</p>" else "" end)
+    + balancing_block
   end;
 
 # Hidden by CSS, revealed only once a script confirms the Lavish bridge, so the
@@ -1372,7 +1668,7 @@ a.need:hover{background:#fbfcfe;}
 a.ship:hover{background:#fbfcfe;}
 
 /* ---- health and allowance strip ---- */
-.strip{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;}
+.strip{display:grid;grid-template-columns:minmax(240px,.72fr) minmax(0,1.8fr);gap:16px;align-items:start;}
 .pane{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px;box-shadow:var(--shadow);}
 .pane h3{font-size:13px;font-weight:640;margin:0 0 12px;letter-spacing:.01em;}
 .pane h3 .count{color:var(--faint);font-weight:500;margin-left:6px;}
@@ -1401,11 +1697,70 @@ a.ship:hover{background:#fbfcfe;}
 .unmeasured .gval{color:var(--faint);font-size:11px;text-align:right;overflow-wrap:anywhere;}
 .pane .quiet{padding:0;border:none;box-shadow:none;background:none;}
 
+/* The local token service owns collection and history; this pane is its calm
+   Mission Control summary. One allowance number leads each card, with pace,
+   runway, observed trend, and balancing activity subordinate to that number. */
+.allowance-pane{padding:18px 18px 16px;}
+.qmeta{display:flex;align-items:center;gap:8px 14px;flex-wrap:wrap;margin:-3px 0 12px;
+  color:var(--faint);font-size:11px;}
+.qmeta span:first-child{color:var(--slate);font-weight:600;}
+.qalert,.qfallback,.qmissing{margin:0 0 12px;padding:9px 11px;border-radius:9px;font-size:11.5px;}
+.qalert{color:var(--amber);background:var(--amber-soft);border:1px solid #f1dfb9;}
+.qfallback{color:var(--muted);background:var(--slate-soft);}
+.qmissing{margin-top:10px;color:var(--amber);background:var(--amber-soft);}
+.quota-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;}
+.qwindow{min-width:0;padding:12px 11px 10px;border:1px solid var(--line);border-radius:11px;background:#fbfcfe;
+  display:flex;flex-direction:column;}
+.qwindow.tone-good{border-color:#d8eadf;}
+.qwindow.tone-warn{border-color:#efdfb8;}
+.qwindow.tone-alert{border-color:#efd1ce;}
+.qw-head{display:flex;align-items:baseline;gap:7px;min-height:30px;}
+.qw-name{flex:1;font-size:11.5px;font-weight:650;color:var(--ink);overflow-wrap:anywhere;}
+.qw-provider{flex:none;max-width:45%;font-size:9px;color:var(--faint);text-align:right;overflow-wrap:anywhere;}
+.qw-reading{display:flex;align-items:baseline;gap:5px;margin-top:3px;}
+.qw-reading strong{font-size:27px;line-height:1;font-weight:680;letter-spacing:-.03em;}
+.qw-reading span{font-size:10px;color:var(--muted);}
+.qw-verdict{margin-top:6px;font-size:12px;font-weight:640;line-height:1.25;}
+.tone-good .qw-verdict{color:var(--green);}
+.tone-warn .qw-verdict{color:var(--amber);}
+.tone-alert .qw-verdict{color:var(--red);}
+.tone-muted .qw-verdict{color:var(--muted);}
+.qw-context{min-height:31px;margin-top:3px;font-size:9.5px;line-height:1.4;color:var(--faint);overflow-wrap:anywhere;}
+.qtrend{display:block;width:100%;height:54px;margin:7px 0 2px;overflow:visible;}
+.qbudget{stroke:#b7bec8;stroke-width:.7;stroke-dasharray:2 2;}
+.qnow{stroke:#c9ced6;stroke-width:.65;stroke-dasharray:1.5 1.5;}
+.qactual{fill:none;stroke:var(--slate);stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;}
+.qlatest{fill:var(--slate);stroke:#fff;stroke-width:.7;}
+.qtrend.tone-good .qactual{stroke:var(--green);}.qtrend.tone-good .qlatest{fill:var(--green);}
+.qtrend.tone-warn .qactual{stroke:var(--amber);}.qtrend.tone-warn .qlatest{fill:var(--amber);}
+.qtrend.tone-alert .qactual{stroke:var(--red);}.qtrend.tone-alert .qlatest{fill:var(--red);}
+.qtrend-empty{height:54px;margin:7px 0 2px;display:flex;align-items:center;justify-content:center;
+  border-top:1px dashed var(--line);border-bottom:1px dashed var(--line);color:var(--faint);font-size:9.5px;text-align:center;}
+.qw-trend-note{font-size:9px;color:var(--faint);overflow-wrap:anywhere;}
+.qw-foot{display:flex;flex-direction:column;gap:2px;margin-top:auto;padding-top:7px;border-top:1px solid var(--line);
+  color:var(--muted);font-size:9.5px;overflow-wrap:anywhere;}
+.qbalance{margin-top:12px;border-top:1px solid var(--line);}
+.qbalance summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 2px 0;
+  color:var(--muted);font-size:11px;cursor:pointer;list-style:none;}
+.qbalance summary::-webkit-details-marker{display:none;}
+.qbalance summary strong{color:var(--slate);font-weight:640;}
+.qbalance-last{color:var(--faint);text-align:right;}
+.qbalance ul{margin:9px 0 0;padding:0;list-style:none;border:1px solid var(--line);border-radius:9px;overflow:hidden;}
+.qbalance li{display:grid;grid-template-columns:118px minmax(0,1fr) auto;gap:8px;padding:8px 10px;
+  border-top:1px solid var(--line);font-size:10.5px;align-items:baseline;}
+.qbalance li:first-child{border-top:none;}
+.qbalance li time{color:var(--faint);font-family:var(--mono);font-size:9px;overflow-wrap:anywhere;}
+.qbalance li span{overflow-wrap:anywhere;}.qbalance li small{color:var(--muted);text-align:right;overflow-wrap:anywhere;}
+.qbalance-empty{margin:12px 0 0;padding-top:10px;border-top:1px solid var(--line);color:var(--faint);font-size:11px;}
+
 footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overflow-wrap:anywhere;}
 
+@media(max-width:920px){
+  .strip{grid-template-columns:minmax(0,1fr)}
+}
 @media(max-width:720px){
   .stats{grid-template-columns:repeat(2,minmax(0,1fr))}
-  .projects,.strip{grid-template-columns:minmax(0,1fr)}
+  .projects,.strip,.quota-grid{grid-template-columns:minmax(0,1fr)}
   .wrap{padding:28px 18px 48px}
   .need{align-items:flex-start;flex-wrap:wrap;padding:14px 16px;gap:10px}
   .tag{width:auto}
@@ -1416,6 +1771,14 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
   .defer{padding:12px 16px;flex-wrap:wrap;gap:8px}
   .defer .tag{width:auto}
   .shelf summary,.shelf-note{padding-left:16px;padding-right:16px}
+  .allowance-pane{padding:16px}
+  .qwindow{padding:13px 12px 11px}
+  .qw-head{min-height:0}
+  .qtrend{height:72px}
+  .qbalance summary{align-items:flex-start;flex-direction:column;gap:2px}
+  .qbalance-last{text-align:left}
+  .qbalance li{grid-template-columns:minmax(0,1fr) auto}
+  .qbalance li time{grid-column:1 / -1}
 }
 /* Four tabs still have to fit an iPhone without a sideways scroll, so below
    this width the label sits under the glyph rather than beside it. */
@@ -1577,12 +1940,12 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
 
   <div class=\"panel\" id=\"panel-system\" role=\"tabpanel\" aria-labelledby=\"tab-system\">
   <section class=\"strip\" id=\"health\">
-    <div class=\"pane\">"
+    <div class=\"pane health-pane\">"
 + (@html "<h3>Fleet health<span class=\"count\">\(if $health_count > 0 then "\($health_count) \(plural($health_count; "item"; "items"))\(if $health_incomplete or ($backlog_present | not) then "+" else "" end)" elif $health_incomplete or ($backlog_present | not) then "incomplete" else "all clear" end)</span></h3>")
 + health_block
 + "    </div>
-    <div class=\"pane\">
-      <h3>Allowance</h3>"
+    <div class=\"pane allowance-pane\">
+      <h3>Allowance &amp; pace</h3>"
 + quota_block
 + "    </div>
   </section>
@@ -1688,6 +2051,37 @@ footer{color:var(--faint);font-size:12px;text-align:center;margin-top:10px;overf
       } catch (e) { /* not remembered */ }
     });
   }
+
+  /* The compact balancing shelf is useful only if the board does not snap it
+     shut on the next reload, so it keeps its own preference just like Deferred. */
+  var balancing = document.getElementById(\"quota-balancing\");
+  if (balancing) {
+    try {
+      if (window.localStorage.getItem(\"fm-mission-control-quota-balancing\") === \"open\") { balancing.open = true; }
+    } catch (e) { /* not remembered; closed is the right default */ }
+    balancing.addEventListener(\"toggle\", function () {
+      try {
+        window.localStorage.setItem(\"fm-mission-control-quota-balancing\", balancing.open ? \"open\" : \"closed\");
+      } catch (e) { /* not remembered */ }
+    });
+  }
+
+  /* Token history remains useful with script disabled because ISO timestamps
+     stay visible. With script, render those same values in the viewer local
+     timezone without introducing a second collection or freshness clock. */
+  var formats = {
+    reset: {weekday: \"short\", hour: \"numeric\", minute: \"2-digit\"},
+    short: {day: \"numeric\", month: \"short\", hour: \"numeric\", minute: \"2-digit\"},
+    action: {day: \"numeric\", month: \"short\", hour: \"numeric\", minute: \"2-digit\"},
+    updated: {day: \"numeric\", month: \"short\", hour: \"numeric\", minute: \"2-digit\"}
+  };
+  Array.prototype.forEach.call(document.querySelectorAll(\"time.qtime\"), function (time) {
+    var date = new Date(time.dateTime);
+    if (isNaN(date.valueOf())) { return; }
+    var options = formats[time.getAttribute(\"data-format\")] || formats.short;
+    try { time.textContent = new Intl.DateTimeFormat([], options).format(date); }
+    catch (e) { /* ISO fallback stays visible */ }
+  });
 }());
 </script>
 "
