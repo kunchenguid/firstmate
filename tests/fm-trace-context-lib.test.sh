@@ -10,6 +10,16 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
 
+# Hermetic against an ambient FM_TRACE_CONTEXT, as the sibling spawn suite is
+# by `env -u`. A non-empty value is an explicit override that wins over the
+# config file, so a maintainer running with `export FM_TRACE_CONTEXT=off` - a
+# supported operator setting that bin/fm-test-run.sh does not clear - would
+# otherwise silently change what every file-driven assertion below tests.
+# Cleared once here, at the boundary, so an assertion added anywhere in this
+# file inherits it; the precedence assertions still set the variable explicitly
+# per call, which is what they are about.
+unset FM_TRACE_CONTEXT
+
 VALID='00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'
 
 # --- strict W3C validation ---------------------------------------------------
@@ -87,7 +97,6 @@ CFG_ON="$WORK/cfg-on"; CFG_OFF="$WORK/cfg-off"
 mkdir -p "$CFG_ON" "$CFG_OFF"
 : > "$CFG_ON/trace-context"
 
-unset FM_TRACE_CONTEXT
 fm_trace_context_enabled "$CFG_OFF" && fail "absent config/trace-context must be off by default"
 fm_trace_context_enabled "$CFG_ON" || fail "present config/trace-context must enable"
 FM_TRACE_CONTEXT=off fm_trace_context_enabled "$CFG_ON" && fail "FM_TRACE_CONTEXT=off must override a present file"
@@ -248,12 +257,15 @@ pass "no resolve path invokes sleep or an external timeout, and every path retur
 # --- config/trace-context is a presence flag, never a command provider --------
 # A file whose CONTENT is shaped like a provider spec must stay inert data: the
 # capability enables because the file EXISTS, and nothing in it is executed.
+# The explicit empty FM_TRACE_CONTEXT is the documented "empty defers to the
+# file" input (asserted above), so this case names the file as its own
+# enablement source rather than inheriting whatever the environment holds.
 
 HOSTILE_CFG="$WORK/cfg-hostile"
 mkdir -p "$HOSTILE_CFG"
 printf 'command: touch %s/pwned-provider\nsleep: 30\nprovider: $(touch %s/pwned-subst)\n' \
   "$WORK" "$WORK" > "$HOSTILE_CFG/trace-context"
-hostile=$(fm_trace_context_resolve "$HOSTILE_CFG" "$NOMETA"); hostile_rc=$?
+hostile=$(FM_TRACE_CONTEXT='' fm_trace_context_resolve "$HOSTILE_CFG" "$NOMETA"); hostile_rc=$?
 fm_trace_context_valid "$hostile" && [ "$hostile_rc" -eq 0 ] \
   || fail "a provider-shaped config file must still enable as a plain presence flag (rc=$hostile_rc out='$hostile')"
 [ ! -e "$WORK/pwned-provider" ] && [ ! -e "$WORK/pwned-subst" ] \
