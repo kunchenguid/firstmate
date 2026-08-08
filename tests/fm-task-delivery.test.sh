@@ -236,8 +236,8 @@ test_promote_requires_and_records_the_delivery_contract() {
   assert_contains "$out" "ship instructions for mode=direct-PR" "promotion hint did not carry the decided mode"
   assert_contains "$out" "grouping related fixes and running the smallest focused checks" \
     "promotion handoff dropped the loop guidance the promoted scout's brief never carried"
-  assert_contains "$out" "never narrow the definition of done or final checks" \
-    "promotion handoff dropped the safeguard keeping interim checks from narrowing the delivery mode"
+  assert_contains "$out" "apply only before validation starts and never narrow the definition of done or final checks" \
+    "promotion handoff dropped the pre-validation scoping keeping interim checks from narrowing the delivery mode"
   case "$out" in
     *"bin/fm-send.sh fm-promote-d1 '<"*"'"*) ;;
     *) fail "promotion hint no longer emits a single-quoted fm-send payload" ;;

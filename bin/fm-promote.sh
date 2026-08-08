@@ -5,8 +5,8 @@
 # again. After promoting, send the crewmate its ship instructions via fm-send.sh
 # (inventory scratch state, reset to a clean default-branch base, carry over only
 # intended fix changes, create branch fm/<task-id>, implement with related fixes
-# grouped behind the smallest focused checks, then report done according to this
-# task's delivery mode).
+# grouped behind the smallest focused checks until validation starts, then report
+# done according to this task's delivery mode).
 # A scout records no delivery posture, so promotion is where this task's delivery
 # contract is decided: --mode and --yolo are REQUIRED and written into the meta
 # alongside the kind= flip. Firstmate resolves both at promotion time, having just
@@ -86,4 +86,4 @@ mv "$TMP" "$META"
 
 HOME_Q=$(printf '%q' "$FM_HOME")
 echo "promoted $ID to ship mode=$MODE yolo=$YOLO (teardown protection restored)"
-echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions for mode=$MODE: review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement, grouping related fixes and running the smallest focused checks that establish the changed behavior before rerunning broader suites; those interim checks never narrow the definition of done or final checks this delivery mode requires; report done>'"
+echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions for mode=$MODE: review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement, grouping related fixes and running the smallest focused checks that establish the changed behavior before rerunning broader suites; those interim checks apply only before validation starts and never narrow the definition of done or final checks this delivery mode requires; report done>'"

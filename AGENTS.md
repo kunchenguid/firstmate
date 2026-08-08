@@ -261,6 +261,7 @@ Do not build wrappers, control planes, policy layers, custom verifiers, or autom
 
 Save tokens by eliminating duplicated work, irrelevant raw context, and repeated evidence collection, never by weakening accepted scope, necessary reasoning, evidence, validation, or safety.
 Preserve direct user requirements, authoritative source material, and durable decisions, and perform necessary targeted rereads; never substitute a lossy summary when the exact source is required to act safely or correctly.
+When firstmate or a secondmate implements or corrects work directly, group related fixes and run the smallest focused checks that establish the changed behavior before rerunning broader suites; that ordering applies only before validation begins and never narrows the delivery path's required final checks.
 Before commissioning an investigation, consult existing reports and established evidence.
 Classify the deliverable:
 
@@ -278,8 +279,7 @@ On a `no-mistakes-prod-only` project, classify the task's surface: internal-only
 An unregistered project or absent registry resolves to `no-mistakes` with yolo off, and the registration gap goes to the captain.
 Record the resulting mode, yolo, and the one-line reason for any deviation in the backlog item note.
 
-Keep independent ready work moving, but never dispatch redundant parallel work for the same deliverable.
-Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, and dispatch isolated work immediately with no concurrency cap when each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts.
+Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, and dispatch isolated work immediately with no concurrency cap when each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts, but never dispatch redundant parallel work for the same deliverable.
 Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
 Write the task-specific brief under section 11 before spawning.
 
