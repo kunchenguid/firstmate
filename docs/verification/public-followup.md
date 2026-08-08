@@ -55,28 +55,8 @@ bash tests/fm-x-mode.test.sh | grep -c '^ok -'
 
 ## Relay-disabled zero overhead
 
-A home with no `.env` at all, a `tasks-axi` shim that logs every invocation, and a full session-start run:
-
-```sh
-find "$HOME_DIR/state" | LC_ALL=C sort > state-before.txt
-FAKE_TASKS_AXI_LOG=tasks-axi.log bin/fm-session-start.sh > session-start.out 2>&1
-find "$HOME_DIR/state" | LC_ALL=C sort > state-after.txt
-grep -c 'public-followup' tasks-axi.log
-grep -ci 'public commitment' session-start.out
-diff state-before.txt state-after.txt | grep '^>'
-```
-
-```
-0
-0
-> <home>/state/.lock
-> <home>/state/.pr-check-migration-scan-v1
-> <home>/state/.pr-check-migration-v1
-> <home>/state/.wake-queue
-```
-
-No `tasks-axi public-followup` invocation, no public-commitments output, and no `state/public-followup` directory.
-The four created paths are session-start's pre-existing session lock, PR-check migration markers, and wake queue, none of which this work touches.
+The relay-disabled case in `tests/fm-public-followup.test.sh` invokes every public-followup entry point against a home with no `.env`, logs every `tasks-axi` invocation, and compares the state tree before and after.
+It proves the feature makes no `tasks-axi` call, prints nothing, and creates no `state/public-followup` artifact without coupling that guarantee to session start's independently owned state files.
 
 The whole added cost in that home is the activation predicate, measured over 1000 in-process calls including loop overhead:
 

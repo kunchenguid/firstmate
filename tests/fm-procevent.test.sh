@@ -339,13 +339,44 @@ cat > "$ADAPTER_ROOT/bin/fm-procevent-openended.sh" <<'SH'
 # Fixture adapter with no terminal knowledge at all: nothing ever ends it.
 exit 2
 SH
-chmod +x "$ADAPTER_ROOT/bin/fm-procevent-endnow.sh" "$ADAPTER_ROOT/bin/fm-procevent-openended.sh"
+cat > "$ADAPTER_ROOT/bin/fm-procevent-applying.sh" <<'SH'
+#!/usr/bin/env bash
+case "${1-}" in
+  autohandle)
+    printf '%s %s\n' "$2" "$3" >> "$FM_HOME/state/applied"
+    "$FM_PROCEVENT_UNDER_TEST" handled "$2" "$3" >/dev/null
+    ;;
+  *) exit 2 ;;
+esac
+SH
+chmod +x "$ADAPTER_ROOT/bin/fm-procevent-endnow.sh" "$ADAPTER_ROOT/bin/fm-procevent-openended.sh" \
+  "$ADAPTER_ROOT/bin/fm-procevent-applying.sh"
 
 pe_adapter() {  # <home> <command>...: run the runner against the fixture adapters
   local home=$1
   shift
-  FM_ROOT_OVERRIDE="$ADAPTER_ROOT" FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" "$@"
+  FM_ROOT_OVERRIDE="$ADAPTER_ROOT" FM_PROCEVENT_UNDER_TEST="$ROOT/bin/fm-procevent.sh" \
+    FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" "$@"
 }
+
+HPUBLISH="$TMP_ROOT/hpublish"; new_home "$HPUBLISH"
+PE_TRACKED+=("$HPUBLISH|publish-src")
+pe_adapter "$HPUBLISH" register applying publish-src -- /bin/echo "apply after publish" >/dev/null
+mkdir "$HPUBLISH/state/.wake-queue"
+out=$(pe_adapter "$HPUBLISH" start publish-src 2>&1)
+assert_contains "$out" "not-autohandled: publish-src" "failed publication did not suppress automatic application"
+assert_absent "$HPUBLISH/state/applied" "a result was applied before its wake was durably published"
+assert_absent "$HPUBLISH/state/procevent-inbox/publish-src.1.handled" "a result was acknowledged before its wake was durably published"
+rmdir "$HPUBLISH/state/.wake-queue"
+out=$(pe_adapter "$HPUBLISH" reconcile)
+assert_contains "$out" "published=1" "the unpublished capture was not announced on later reconciliation"
+assert_contains "$(wake_payloads "$HPUBLISH")" "procevent applying publish-src 1" "later reconciliation did not deliver the capture to a handler"
+FM_HOME="$HPUBLISH" FM_PROCEVENT_UNDER_TEST="$ROOT/bin/fm-procevent.sh" \
+  "$ADAPTER_ROOT/bin/fm-procevent-applying.sh" autohandle publish-src 1 \
+    "$HPUBLISH/state/procevent-inbox/publish-src.1.result"
+assert_grep 'publish-src 1' "$HPUBLISH/state/applied" "the handler could not apply the later announcement"
+assert_present "$HPUBLISH/state/procevent-inbox/publish-src.1.handled" "the later handler application was not acknowledged"
+pass "automatic application waits for durable publication and failed publication remains recoverable"
 
 HTERM="$TMP_ROOT/hterm"; new_home "$HTERM"
 PE_TRACKED+=("$HTERM|ends-src")

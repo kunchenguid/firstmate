@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 # Opt-in live guard for the RUN-tier session-open adapters (Claude, Codex exec, Pi).
 #
-# Two facts in this area come from the vendor, not from Firstmate, so a stub can
-# only confirm the assumption already written into the stub:
+# Three facts in this area come from the vendor, not from Firstmate, so a stub
+# can only confirm the assumption already written into the stub:
 #
 #   (a) the harness tells the hook WHICH session open this is, well enough that
-#       a context-preserving reopen is never mistaken for a context reset, and
+#       a context-preserving reopen is never mistaken for a context reset,
 #   (b) hook stdout actually reaches model context on a context-RESET open
-#       (clear/compact), not only on a cold startup.
+#       (clear/compact), not only on a cold startup, and
+#   (c) a worker the hook detaches SURVIVES the hook returning. Session start
+#       moved every external-network call into such a worker
+#       (bin/fm-startup-network.sh), so a harness that reaps the hook's process
+#       tree would silently stop running the sweeps entirely. Whether it does is
+#       a vendor behavior no portable test can see.
 #
-# docs/sessionstart-nudge.md owns the routing those two facts feed, and
+# docs/sessionstart-nudge.md owns the routing facts (a) and (b) feed, and
 # tests/fm-sessionstart-nudge.test.sh pins that routing portably with real
 # processes and no harness. This guard covers only what CI cannot see.
 #
@@ -105,6 +110,26 @@ make_lab() {  # <harness> -> echoes lab dir
     chmod +x "$lab/bin/$stub"
   done
 
+  # The REAL deferred-network stage plus the two libraries it sources, so fact
+  # (c) is proven against the actual detach this ship relies on rather than a
+  # re-creation of it. Its bootstrap child is a stub: what is under test here is
+  # survival across the hook boundary, not the sweeps, which
+  # tests/fm-bootstrap.test.sh already owns.
+  ln -sf "$ROOT/bin/fm-startup-network.sh" "$lab/bin/fm-startup-network.sh"
+  ln -sf "$ROOT/bin/fm-timeout-lib.sh" "$lab/bin/fm-timeout-lib.sh"
+  ln -sf "$ROOT/bin/fm-wake-lib.sh" "$lab/bin/fm-wake-lib.sh"
+  ln -sf "$ROOT/bin/fm-session-lock-lib.sh" "$lab/bin/fm-session-lock-lib.sh"
+  cat > "$lab/bin/fm-bootstrap.sh" <<'SH'
+#!/usr/bin/env bash
+# Outlives the hook on purpose: the marker can only appear if the worker was
+# still running well after the harness finished with its session-open hook.
+set -u
+sleep 6
+printf 'detached worker survived the hook\n' > "${FM_LIVE_DETACH_MARKER:?}"
+exit 0
+SH
+  chmod +x "$lab/bin/fm-bootstrap.sh"
+
   cat > "$lab/bin/fm-sessionstart-run.sh" <<'SH'
 #!/usr/bin/env bash
 # Recorder standing in for the real wrapper: logs the source the harness
@@ -129,6 +154,10 @@ if [ -z "$source" ]; then
 fi
 [ -n "$source" ] || source=none
 printf '%s\n' "$source" >> "$record"
+# Exactly what bin/fm-session-start.sh does after taking the lock.
+if [ -n "${FM_LIVE_DETACH_MARKER:-}" ]; then
+  "$(dirname "$0")/fm-startup-network.sh" start --locked 0 --harvest-pid $$ >/dev/null 2>&1 || true
+fi
 printf 'FMHOOKTOKEN-%s-%s-%s\n' "$source" "$(grep -c . "$record" | tr -d ' ')" "${FM_LIVE_NONCE:?}"
 exit 0
 SH
@@ -159,13 +188,16 @@ probe_process_opens() {  # <harness> <version> <lab> <expect-resume> <cold-argv.
   local harness=$1 version=$2 lab=$3 expect_resume=$4
   shift 4
   local record="$lab/record" cold=() resume=() seen_sep=0 arg out source
+  local marker="$lab/detach-marker" waited
   for arg in "$@"; do
     if [ "$arg" = -- ] && [ "$seen_sep" -eq 0 ]; then seen_sep=1; continue; fi
     if [ "$seen_sep" -eq 0 ]; then cold+=("$arg"); else resume+=("$arg"); fi
   done
 
   : > "$record"
+  rm -f "$marker" "$lab/state/.startup-network."*
   out=$( cd "$lab" && FM_LIVE_RECORD="$record" FM_LIVE_NONCE="$LIVE_NONCE" FM_ROOT_OVERRIDE="$lab" FM_HOME="$lab" \
+    FM_LIVE_DETACH_MARKER="$marker" \
     "${cold[@]}" "$ASK" < /dev/null 2>&1 )
   source=$(head -n 1 "$record")
   [ -n "$source" ] \
@@ -177,6 +209,15 @@ probe_process_opens() {  # <harness> <version> <lab> <expect-resume> <cold-argv.
   printf '%s' "$out" | grep -Fq "FMHOOKTOKEN-$source-1-$LIVE_NONCE" \
     || { printf '# cold-open model reply: %s\n' "$out" >&2; fail "$harness $version: hook stdout did not reach model context on a cold open"; }
   pass "$harness $version: a cold open reports source '$source' and its hook stdout reaches model context"
+
+  # (c) The harness process is gone; the worker it detached must not be. The
+  # marker is written 6s after the hook returned, so it can only exist if the
+  # worker outlived the whole session-open boundary.
+  waited=0
+  while [ ! -s "$marker" ] && [ "$waited" -lt 30 ]; do sleep 1; waited=$((waited + 1)); done
+  [ -s "$marker" ] \
+    || fail "$harness $version: the session-open hook's detached worker did not survive the hook, so session start's deferred network checks would never run on this harness"
+  pass "$harness $version: a worker detached by the session-open hook outlives it, so the deferred network checks still run"
 
   : > "$record"
   ( cd "$lab" && FM_LIVE_RECORD="$record" FM_LIVE_NONCE="$LIVE_NONCE" FM_ROOT_OVERRIDE="$lab" FM_HOME="$lab" \
