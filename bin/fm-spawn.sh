@@ -396,6 +396,33 @@ publish_task_meta_atomic() {  # <final-path> <complete-body>
 }
 trap meta_publish_cleanup EXIT
 
+# Is there a record at the final path an operator - or bin/fm-crew-state.sh,
+# which gates on the same `[ -f ]` - would read as this task's record? A
+# relaunch republishes over a record that is already there, and publication
+# never removes the old one first, so a failed rename leaves the earlier record
+# intact and readable. Every failure diagnostic asks this before saying what
+# exists, so none of them reports "no task record" while one is still being
+# served to every reader. A directory at the path answers no: nothing reads it
+# as a record.
+task_record_survives() {
+  [ -f "$STATE/$ID.meta" ]
+}
+
+# Every early return in spawn_remote_secondmate drops the whole lock set the
+# function can hold, so the release lives here once instead of being copied per
+# return - releasing two of the three would strand the third for the lock's full
+# lifetime. Reads the caller's locals directly (Bash gives a called function the
+# caller's `local` variables) so no call site can pass the wrong subset.
+# Releasing a lock this process never acquired costs nothing: fm_lock_release
+# (bin/fm-wake-lib.sh) removes a lock only when the pid recorded inside it is
+# this process's, and returns 0 otherwise.
+release_remote_spawn_locks() {
+  [ -z "${remote_lock:-}" ] || fm_lock_release "$remote_lock" || true
+  [ -z "${registry_lock:-}" ] || fm_lock_release "$registry_lock" || true
+  [ -z "${SPAWN_TASK_LOCK:-}" ] || fm_lock_release "$SPAWN_TASK_LOCK" || true
+  return 0
+}
+
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
@@ -411,14 +438,13 @@ spawn_remote_secondmate() {
   fi
   registry_lock=$(secondmate_registry_lock_path "$STATE")
   if ! fm_lock_acquire_wait "$registry_lock"; then
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    release_remote_spawn_locks
     echo "error: secondmate registry could not be locked for remote spawn" >&2
     return 1
   fi
   remote=$(secondmate_registry_field "$DATA/secondmates.md" "$id" remote 2>/dev/null || true)
   if [ "$remote" != 1 ]; then
-    fm_lock_release "$registry_lock" || true
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    release_remote_spawn_locks
     return 3
   fi
   host=$(secondmate_registry_field "$DATA/secondmates.md" "$id" host)
@@ -426,8 +452,7 @@ spawn_remote_secondmate() {
   home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home)
   positional=${POS[1]:-}
   if [ "${#POS[@]}" -gt 2 ]; then
-    fm_lock_release "$registry_lock" || true
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    release_remote_spawn_locks
     echo "error: remote secondmate spawn accepts no local home positional argument" >&2
     return 2
   fi
@@ -441,8 +466,7 @@ spawn_remote_secondmate() {
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi) ;;
     *)
-      fm_lock_release "$registry_lock" || true
-      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      release_remote_spawn_locks
       echo "error: remote secondmate spawn requires a verified harness adapter, not a raw launch command: $harness" >&2
       return 1
       ;;
@@ -466,8 +490,7 @@ spawn_remote_secondmate() {
   case "${BACKEND_ARG:--}" in
     -|herdr) backend=herdr ;;
     *)
-      fm_lock_release "$registry_lock" || true
-      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      release_remote_spawn_locks
       echo "error: a remote secondmate runs only on the herdr backend, not '$BACKEND_ARG'" >&2
       return 1
       ;;
@@ -475,8 +498,7 @@ spawn_remote_secondmate() {
   case "$effort" in
     -|low|medium|high|xhigh|max) ;;
     *)
-    fm_lock_release "$registry_lock" || true
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
+      release_remote_spawn_locks
       echo "error: invalid configured remote secondmate effort: $effort" >&2
       return 1
       ;;
@@ -488,8 +510,7 @@ spawn_remote_secondmate() {
       || [ "$(fm_meta_get "$meta" remote_host)" != "$host" ] \
       || [ "$(fm_meta_get "$meta" remote_root)" != "$root" ] \
       || [ "$(fm_meta_get "$meta" home)" != "$home" ]; then
-      fm_lock_release "$registry_lock" || true
-      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      release_remote_spawn_locks
       echo "error: existing metadata for $id does not identify this remote secondmate route" >&2
       return 1
     fi
@@ -501,8 +522,7 @@ spawn_remote_secondmate() {
   rc=0
   fm_remote_readiness_ensure "$SCRIPT_DIR" "$id" || rc=$?
   if [ "$rc" -ne 0 ]; then
-    fm_lock_release "$registry_lock" || true
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    release_remote_spawn_locks
     # Summary first, then the doctor's own text: a caller that reports only the
     # first line, such as the startup liveness sweep, must still say something
     # actionable.
@@ -517,16 +537,13 @@ spawn_remote_secondmate() {
   fi
   remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id")
   if ! fm_lock_acquire_wait "$remote_lock"; then
-    fm_lock_release "$registry_lock" || true
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    release_remote_spawn_locks
     echo "error: remote secondmate $id inheritance transaction could not be locked" >&2
     return 1
   fi
   remote_generation=$(fm_remote_inherit_generation_next "$STATE" "$id" 2>/dev/null || true)
   if [ -z "$remote_generation" ]; then
-    fm_lock_release "$remote_lock" || true
-    fm_lock_release "$registry_lock" || true
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    release_remote_spawn_locks
     echo "error: remote secondmate $id inheritance generation could not be published" >&2
     return 1
   fi
@@ -534,9 +551,7 @@ spawn_remote_secondmate() {
     :
   else
     rc=$?
-    fm_lock_release "$remote_lock" || true
-    fm_lock_release "$registry_lock" || true
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    release_remote_spawn_locks
     if [ "$rc" -eq 255 ]; then
       echo "error: remote secondmate $id inheritance completion is unknown; launch refused and route preserved for reconciliation" >&2
     else
@@ -564,9 +579,7 @@ spawn_remote_secondmate() {
     rc=$?
   fi
   if [ "$rc" -ne 0 ]; then
-    fm_lock_release "$remote_lock" || true
-    fm_lock_release "$registry_lock" || true
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    release_remote_spawn_locks
     [ -z "$out" ] || printf '%s\n' "$out" >&2
     if [ "$rc" -eq 255 ]; then
       echo "error: remote secondmate $id is unavailable or launch completion is unknown; preserved route $host:$home" >&2
@@ -578,23 +591,17 @@ spawn_remote_secondmate() {
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
   remote_herdr_session=$(printf '%s\n' "$out" | sed -n 's/^herdr_session=//p' | tail -1)
   if [ "$remote_backend" != herdr ]; then
-    fm_lock_release "$remote_lock" || true
-    fm_lock_release "$registry_lock" || true
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    release_remote_spawn_locks
     echo "error: remote launch returned backend '${remote_backend:-missing}', expected herdr; preserving the remote route for reconciliation" >&2
     return 1
   fi
   [ -n "$remote_target" ] && [ "$remote_harness" = "$harness" ] || {
-    fm_lock_release "$remote_lock" || true
-    fm_lock_release "$registry_lock" || true
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    release_remote_spawn_locks
     echo "error: remote launch returned malformed route metadata; preserving the remote route for reconciliation" >&2
     return 1
   }
   if [ "$remote_herdr_session" != fm-remote ] || [ "${remote_target%%:*}" != "$remote_herdr_session" ]; then
-    fm_lock_release "$remote_lock" || true
-    fm_lock_release "$registry_lock" || true
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    release_remote_spawn_locks
     echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected 'fm-remote'; preserving the remote route for reconciliation" >&2
     return 1
   fi
@@ -607,9 +614,7 @@ spawn_remote_secondmate() {
   remote_recorded_traceparent=$(printf '%s\n' "$out" | sed -n 's/^traceparent=//p' | tail -1)
   fm_trace_context_valid "$remote_recorded_traceparent" || remote_recorded_traceparent=
   if ! remote_projects=$(secondmate_registry_field "$DATA/secondmates.md" "$id" projects); then
-    fm_lock_release "$remote_lock" || true
-    fm_lock_release "$registry_lock" || true
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    release_remote_spawn_locks
     echo "error: remote secondmate $id launched at $remote_target, but its parent route could not be composed; the exact endpoint remains recorded on remote host $host for reconciliation" >&2
     return 1
   fi
@@ -634,23 +639,17 @@ spawn_remote_secondmate() {
     echo "remote_target=$remote_target"
     [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
   ); then
-    fm_lock_release "$remote_lock" || true
-    fm_lock_release "$registry_lock" || true
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    release_remote_spawn_locks
     echo "error: remote secondmate $id launched at $remote_target, but its parent route could not be composed; the exact endpoint remains recorded on remote host $host for reconciliation" >&2
     return 1
   fi
   if ! publish_task_meta_atomic "$meta" "$remote_meta_body"; then
     publish_error=$FM_META_PUBLISH_ERROR
-    fm_lock_release "$remote_lock" || true
-    fm_lock_release "$registry_lock" || true
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    release_remote_spawn_locks
     echo "error: remote secondmate $id launched, but parent metadata could not be published ($publish_error); the exact endpoint remains recorded on remote host $host at $remote_target for reconciliation" >&2
     return 1
   fi
-  fm_lock_release "$remote_lock" || true
-  fm_lock_release "$registry_lock" || true
-  fm_lock_release "$SPAWN_TASK_LOCK" || true
+  release_remote_spawn_locks
   if ! "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm "$id" >/dev/null; then
     echo "error: remote secondmate $id launched, but its reply source could not be armed; endpoint metadata is preserved" >&2
     return 1
@@ -786,6 +785,8 @@ spawn_abort_cleanup() {
   if [ -n "${META_PUBLICATION_FAILURE_DETAIL:-}" ]; then
     if [ "$ORCA_RECOVERY_META_PUBLISHED" = 1 ]; then
       echo "error: task metadata could not be published at $STATE/$ID.meta ($META_PUBLICATION_FAILURE_DETAIL); a complete recovery record was preserved for the surviving Orca worktree" >&2
+    elif task_record_survives; then
+      echo "error: task metadata could not be published at $STATE/$ID.meta ($META_PUBLICATION_FAILURE_DETAIL); this spawn wrote no record, but an earlier task record for $ID survives at that path and describes a previous spawn, not this one; reconcile it against the running endpoints before reusing $ID" >&2
     else
       echo "error: task metadata could not be published at $STATE/$ID.meta ($META_PUBLICATION_FAILURE_DETAIL); no task record was written for $ID" >&2
     fi
@@ -2345,7 +2346,11 @@ discard_unpublished_endpoint() {
     sleep 0.1
     attempt=$((attempt + 1))
   done
-  echo "warning: the $BACKEND endpoint $T for $ID was not confirmed gone after the failed spawn and no task record names it; check for a surviving endpoint and remove it by hand" >&2
+  if task_record_survives; then
+    echo "warning: the $BACKEND endpoint $T for $ID was not confirmed gone after the failed spawn and only an earlier task record for $ID names it; check for a surviving endpoint and remove it by hand" >&2
+  else
+    echo "warning: the $BACKEND endpoint $T for $ID was not confirmed gone after the failed spawn and no task record names it; check for a surviving endpoint and remove it by hand" >&2
+  fi
   return 1
 }
 

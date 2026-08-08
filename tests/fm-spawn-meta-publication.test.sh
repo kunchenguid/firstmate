@@ -6,10 +6,12 @@
 # meta missing window= or worktree= is still read as authoritative. Publication
 # therefore stages the record, verifies the bytes landed, and only then renames
 # it into place. These tests drive the real script with a fake tmux and assert
-# the two outcomes that matter to an operator: a successful spawn leaves a
-# complete record and no staging debris, and a failed publication leaves no
-# record at all, no staging debris, an accurate message, and no endpoint that
-# nothing names.
+# the outcomes that matter to an operator: a successful spawn leaves a
+# complete record and no staging debris; a failed publication leaves no record
+# at all, no staging debris, an accurate message, and no endpoint that nothing
+# names; and a failed relaunch, which republishes over a record already at the
+# final path, reports the earlier record that survives there rather than
+# denying that any record exists.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -219,6 +221,74 @@ test_failed_publication_publishes_no_record() {
   pass "a failed metadata publication leaves no task record and no staging file"
 }
 
+# Publication renames over whatever is already at state/<id>.meta and never
+# unlinks it first, so a relaunch whose rename fails leaves the EARLIER record
+# in place - readable by the operator and still counted as a task by
+# bin/fm-crew-state.sh. Telling that operator "no task record was written"
+# sends them looking for a record they are in fact still being served, while
+# the endpoint the surviving record names has just been discarded by this run.
+test_failed_republication_reports_the_surviving_record() {
+  local rec id out status published
+  id=meta-republish-stale-z7
+  rec=$(make_meta_case meta-republish-stale "$id")
+  read_meta_record "$rec"
+
+  out=$(run_meta_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "the first spawn should publish a record cleanly"
+  published=$(cat "$HOME_DIR/state/$id.meta")
+
+  # The worker dies; its record stays. That is exactly the state a relaunch
+  # starts from, and the only state in which the spawn republishes over a
+  # record that is already at the final path.
+  rm -f "$LIVE_DIR/fm-$id"
+  : > "$GONE_DIR/fm-$id"
+
+  add_failing_mv "$FAKEBIN_DIR"
+  out=$(run_meta_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "the relaunch reported success despite a failed publication: $out"
+  [ "$(cat "$HOME_DIR/state/$id.meta")" = "$published" ] \
+    || fail "the failed relaunch altered the earlier record: $(cat "$HOME_DIR/state/$id.meta")"
+  case "$out" in
+    *"no task record was written"*)
+      fail "the failed relaunch denied a record that survives at the final path: $out" ;;
+  esac
+  assert_contains "$out" "an earlier task record for $id survives at that path" \
+    "the failed relaunch did not name the surviving earlier record"
+  pass "a failed relaunch reports the earlier record that survives at the final path"
+}
+
+# The stranded-endpoint warning has the same honesty problem from the other
+# side. When a relaunch's publication fails and the discard cannot be
+# confirmed, the surviving earlier record is precisely what names an endpoint
+# for this task id - so "no task record names it" would send the operator
+# hunting for an unnamed window while state/<id>.meta names one.
+test_stranded_endpoint_on_a_relaunch_names_the_surviving_record() {
+  local rec id out status
+  id=meta-republish-stranded-z8
+  rec=$(make_meta_case meta-republish-stranded "$id")
+  read_meta_record "$rec"
+
+  out=$(run_meta_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "the first spawn should publish a record cleanly"
+  rm -f "$LIVE_DIR/fm-$id"
+  : > "$GONE_DIR/fm-$id"
+
+  add_failing_mv "$FAKEBIN_DIR"
+  out=$(FM_FAKE_KILL_NOOP=1 run_meta_spawn "$id") || true
+  assert_contains "$out" "was not confirmed gone" \
+    "the relaunch's surviving endpoint was not reported as stranded"
+  case "$out" in
+    *"no task record names it"*)
+      fail "the stranded-endpoint warning denied a record that names this task: $out" ;;
+  esac
+  assert_contains "$out" "only an earlier task record for $id names it" \
+    "the stranded-endpoint warning did not point at the surviving earlier record"
+  pass "a stranded endpoint on a relaunch points at the record that still names it"
+}
+
 # The publication failure is one event, so the operator reads it once. Two
 # owners printed it before: the abort path and the EXIT trap that alone knows
 # whether an Orca recovery record survived. A duplicated line reads like two
@@ -303,6 +373,8 @@ test_unreadable_runtime_is_not_read_as_a_removed_endpoint() {
 
 test_successful_publication_is_complete_and_leaves_no_staging_file
 test_failed_publication_publishes_no_record
+test_failed_republication_reports_the_surviving_record
+test_stranded_endpoint_on_a_relaunch_names_the_surviving_record
 test_failed_publication_reports_the_failure_once
 test_failed_publication_discards_its_endpoint
 test_surviving_endpoint_is_reported_despite_a_successful_kill
