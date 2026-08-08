@@ -8,11 +8,13 @@
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
 # upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
-# normal ship task whose commits are not so reachable - when its PR is merged and
-# GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
-# squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
-# on a remote yet the change is fully in main.
+# normal ship task whose commits are not so reachable - when a fresh fetch verifies
+# HEAD is reachable from a configured remote's default branch (or the explicit
+# FM_TEARDOWN_LANDED_REMOTE override), its PR is merged and GitHub reports a PR head
+# that contains the current local work, or its content is already present in the
+# up-to-date source default branch. This recognizes foreign-repository landings and
+# the common squash-merge-then-delete-branch flow, where the branch's own commits
+# live nowhere on a remote yet the change is fully in main.
 # The PR itself is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
 # where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
@@ -25,6 +27,10 @@
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
+# A remote landing counts only after its advertised default branch is corroborated
+# by an exact fresh fetch and that fetched commit contains HEAD. An unavailable,
+# malformed, or changed remote is inconclusive and therefore never authorizes
+# teardown.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
@@ -826,13 +832,62 @@ content_in_default() {
   [ "$merged_tree" = "$default_tree" ]
 }
 
+# Print each configured fetch or push URL, plus the explicitly supplied landing
+# remote when present. The caller deduplicates the list before contacting remotes.
+landing_remote_candidates() {
+  local remote
+  [ -z "${FM_TEARDOWN_LANDED_REMOTE:-}" ] || printf '%s\n' "$FM_TEARDOWN_LANDED_REMOTE"
+  while IFS= read -r remote; do
+    [ -n "$remote" ] || continue
+    git -C "$WT" remote get-url --all "$remote" 2>/dev/null || true
+    git -C "$WT" remote get-url --push --all "$remote" 2>/dev/null || true
+  done < <(git -C "$WT" remote 2>/dev/null)
+}
+
+# Does candidate remote's currently advertised default branch contain HEAD? This
+# needs two independent remote observations: ls-remote identifies HEAD and its
+# branch ref, then fetch retrieves that exact advertised commit for the ancestry
+# test. A ref-name-only answer, stale tracking ref, failed fetch, or remote change
+# between observations is insufficient evidence and fails closed.
+head_is_landed_on_verified_remote() {  # <remote-url-or-name>
+  local remote=$1 advertised default_ref confirmed fetched current
+  [ -n "$remote" ] || return 1
+  advertised=$(git -C "$WT" ls-remote --symref "$remote" HEAD 2>/dev/null) || return 1
+  default_ref=$(printf '%s\n' "$advertised" | awk '$1 == "ref:" && $3 == "HEAD" { print $2; exit }')
+  case "$default_ref" in refs/heads/?*) ;; *) return 1 ;; esac
+  advertised=$(printf '%s\n' "$advertised" | awk '$2 == "HEAD" && $1 != "ref:" { print $1; exit }')
+  case "$advertised" in ''|*[!0-9a-fA-F]*) return 1 ;; esac
+  confirmed=$(git -C "$WT" ls-remote "$remote" "$default_ref" 2>/dev/null \
+    | awk -v ref="$default_ref" '$2 == ref { print $1; exit }') || return 1
+  [ -n "$confirmed" ] || return 1
+  [ "$advertised" = "$confirmed" ] || return 1
+  git -C "$WT" fetch --no-tags --quiet "$remote" "$default_ref" >/dev/null 2>&1 || return 1
+  fetched=$(git -C "$WT" rev-parse --verify 'FETCH_HEAD^{commit}' 2>/dev/null) || return 1
+  [ "$fetched" = "$confirmed" ] || return 1
+  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
+  git -C "$WT" merge-base --is-ancestor "$current" "$fetched" 2>/dev/null
+}
+
+# Is HEAD provably contained in the default branch of an explicit or configured
+# remote? Each candidate needs fresh positive evidence from the helper above.
+head_is_landed_on_any_verified_remote() {
+  local remote
+  while IFS= read -r remote; do
+    [ -n "$remote" ] || continue
+    head_is_landed_on_verified_remote "$remote" && return 0
+  done < <(landing_remote_candidates | awk 'NF && !seen[$0]++')
+  return 1
+}
+
 # Has the worktree's committed work actually LANDED, though its commits are not
-# reachable from any remote-tracking branch? True when a merged PR proves the
-# current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
-# only for genuinely unlanded work.
+# reachable from any remote-tracking branch? True when a verified remote default
+# branch contains HEAD, a merged PR proves the current local work is contained in
+# the PR head, OR the content is already in the source default branch (fallback,
+# which also covers the no-PR and gh-error paths). False only for genuinely
+# unlanded work.
 work_is_landed() {
   local branch=$1
+  head_is_landed_on_any_verified_remote && return 0
   pr_is_merged "$branch" && return 0
   content_in_default
 }
@@ -1108,6 +1163,9 @@ validate_worktree_teardown_safety() {
   unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
 
   if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
+    if [ -z "$dirty" ] && head_is_landed_on_any_verified_remote; then
+      return 0
+    fi
     DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
     if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
       if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
@@ -1122,7 +1180,7 @@ validate_worktree_teardown_safety() {
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
       [ -n "$dirty" ] && echo "uncommitted changes present" >&2
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
-      echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
+      echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), push to a fork/remote, or add the verified landing remote (or set FM_TEARDOWN_LANDED_REMOTE), or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
   elif [ -n "$dirty" ]; then
@@ -1139,7 +1197,7 @@ validate_worktree_teardown_safety() {
     if ! work_is_landed "$branch"; then
       echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
-      echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
+      echo "Push the branch, land its PR, or add the verified landing remote (or set FM_TEARDOWN_LANDED_REMOTE), or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
   fi
