@@ -86,9 +86,10 @@
 #   even when they select different backends.
 #   Metadata publication is staged into <id>.meta.tmp.<pid>, verified, and then
 #   renamed into place, so state/<id>.meta is only ever a complete task record:
-#   a compose, write, or rename failure publishes nothing, removes the staging
-#   file, and discards the endpoint this spawn created rather than stranding a
-#   window no task record names.
+#   a compose, write, verification, or rename failure - and a record path that
+#   already exists as a directory, which would silently absorb the rename -
+#   publishes nothing, removes the staging file, and discards the endpoint this
+#   spawn created rather than stranding a window no task record names.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch

@@ -36,9 +36,11 @@ tests/fm-role-context.test.sh
 Observed output on Pi 0.83.0:
 
 ```text
-ok - generated role contexts: root=8416 system=20532 skills=21 ship=6863 scout=4140 second=6165
 ok - role-aware startup wrapper orders the runtime owner before primary mutation
+ok - generated role contexts: root=8416 system=20532 skills=21 ship=6863 scout=4140 second=6165
 ```
+
+The startup-ordering assertion runs first because it needs no harness, so a runner without Pi's loader still proves it and skips only the generated-context half.
 
 Pi embeds the absolute path of the repository context file, of every discovered skill, and of the working directory in each generated prompt.
 `root=` and `skills=` are therefore checkout-independent, while `system=`, `ship=`, `scout=`, and `second=` shift by the length of the checkout path in which the test runs.

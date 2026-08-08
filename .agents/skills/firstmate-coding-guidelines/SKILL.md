@@ -11,7 +11,7 @@ metadata:
 # firstmate-coding-guidelines
 
 Load this before changing Firstmate's shared tracked material, as defined by the root `AGENTS.md` repository boundaries.
-It exists because `AGENTS.md` grew from 585 to 958 lines between its last two restructures, entirely from conditional detail added inline instead of routed to its right home.
+It exists because `AGENTS.md` grew from 585 to 958 lines between two earlier restructures, entirely from conditional detail added inline instead of routed to its right home.
 Applying the rules below on every change is what keeps that from happening again.
 
 ## Knowledge-placement decision tree
