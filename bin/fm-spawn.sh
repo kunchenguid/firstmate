@@ -619,34 +619,7 @@ spawn_remote_secondmate() {
   return 0
 }
 
-# Backend selection (data/fm-backend-design-d7): explicit --backend, else
-# FM_BACKEND env, else config/backend, else runtime auto-detection, else
-# default tmux (fm_backend_name). fm_backend_validate_spawn refuses unknown or
-# non-spawn-capable backends. The resolved value is
-# recorded in meta only when it is NOT tmux (fm-teardown.sh and fm-watch.sh's
-# window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
-# so the default path's meta stays byte-identical.
 BACKEND=
-if [ "$RELAUNCH" -eq 0 ]; then
-  if [ "$BACKEND_SET" -eq 1 ]; then
-    BACKEND=$BACKEND_ARG
-  else
-    BACKEND=$(fm_backend_name)
-  fi
-  fm_backend_validate_spawn "$BACKEND" || exit 1
-  fm_backend_source "$BACKEND" || exit 1
-  if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
-    echo "error: backend=orca does not support --secondmate spawns yet" >&2
-    exit 1
-  fi
-  if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
-    echo "error: backend=cmux does not support --secondmate spawns yet" >&2
-    exit 1
-  fi
-  if [ "$BACKEND" = orca ]; then
-    fm_backend_orca_runtime_check || exit 1
-  fi
-fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
@@ -902,6 +875,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ]; then
+  mkdir -p "$STATE" || {
+    echo "error: could not create parent state directory" >&2
+    exit 1
+  }
   # A FRESH spawn changes which tasks this home has, so it must not interleave
   # with a forced teardown that has already enumerated that set: a record
   # published inside the enumerate-then-remove window is invisible to the
@@ -934,6 +911,33 @@ if [ "$KIND" = secondmate ]; then
     remote_spawn_rc=$?
   fi
   [ "$remote_spawn_rc" -eq 3 ] || exit "$remote_spawn_rc"
+fi
+# Backend selection (data/fm-backend-design-d7): explicit --backend, else
+# FM_BACKEND env, else config/backend, else runtime auto-detection, else
+# default tmux (fm_backend_name). fm_backend_validate_spawn refuses unknown or
+# non-spawn-capable backends. The resolved value is
+# recorded in meta only when it is NOT tmux (fm-teardown.sh and fm-watch.sh's
+# window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
+# so the default path's meta stays byte-identical.
+if [ "$RELAUNCH" -eq 0 ]; then
+  if [ "$BACKEND_SET" -eq 1 ]; then
+    BACKEND=$BACKEND_ARG
+  else
+    BACKEND=$(fm_backend_name)
+  fi
+  fm_backend_validate_spawn "$BACKEND" || exit 1
+  fm_backend_source "$BACKEND" || exit 1
+  if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
+    echo "error: backend=orca does not support --secondmate spawns yet" >&2
+    exit 1
+  fi
+  if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
+    echo "error: backend=cmux does not support --secondmate spawns yet" >&2
+    exit 1
+  fi
+  if [ "$BACKEND" = orca ]; then
+    fm_backend_orca_runtime_check || exit 1
+  fi
 fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
