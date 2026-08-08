@@ -177,9 +177,11 @@ test_help_includes_entire_header() {
   pass "fm-brief.sh: --help renders the complete header"
 }
 
-# Registry with one project per delivery mode. fm-brief.sh no longer reads it -
-# the ship mode arrives as an explicit flag - so this fixture exists to prove the
-# scaffold ignores the registered posture (test_ship_mode_is_explicit_not_registry).
+# Registry with one project per delivery mode. The ship mode arrives as an
+# explicit flag, so this fixture exists to prove the scaffold follows the
+# explicit --mode regardless of the registered posture
+# (test_ship_mode_is_explicit_not_registry). The registry is consulted only for
+# the optional `jj` token that selects the jj branch step, never for the mode.
 write_registry() {
   local home=$1
   mkdir -p "$home/data"
@@ -246,7 +248,8 @@ ROWS
 
 # The registry is the captain's standing posture, not this task's answer: the
 # scaffold must follow the explicit flag even when the project is registered
-# with a different mode, and must not consult the registry at all.
+# with a different mode; the registry is consulted only for the optional `jj`
+# token that switches the branch step, never for the delivery mode.
 test_ship_mode_is_explicit_not_registry() {
   local home brief
   home="$TMP_ROOT/explicit-over-registry-home"
@@ -259,12 +262,59 @@ test_ship_mode_is_explicit_not_registry() {
   assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
-  # An unregistered project is not a blocker either, because nothing is looked up.
+  # An unregistered project is not a blocker either: a missing row simply
+  # means the default git branch step.
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a6 never-registered --mode local-only >/dev/null 2>&1 \
     || fail "unregistered project should still scaffold from the explicit mode"
   grep -qx "Delivery contract: mode=local-only" "$home/data/brief-explicit-a6/brief.md" \
     || fail "unregistered project did not honour the explicit --mode"
   pass "fm-brief.sh: the explicit ship mode wins over the registered posture"
+}
+
+# A `jj` token after the mode bracket opts the scaffold into the jj bookmark
+# branch step; its absence keeps the git branch step. The token is honoured
+# through the FM_DATA_OVERRIDE seam like the rest of the script.
+test_jj_token_selects_jj_branch_step() {
+  local home data brief
+  home="$TMP_ROOT/jj-token-home"
+  data="$TMP_ROOT/jj-token-data"
+  mkdir -p "$data"
+  cat > "$data/projects.md" <<'EOF'
+- jj-proj [no-mistakes] jj - fixture for jj-managed (added 2026-07-01)
+- git-proj [no-mistakes] - fixture for git-managed (added 2026-07-01)
+EOF
+
+  FM_HOME="$home" FM_DATA_OVERRIDE="$data" \
+    "$ROOT/bin/fm-brief.sh" brief-jj-a9 jj-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "jj-token brief should scaffold"
+  brief="$data/brief-jj-a9/brief.md"
+  assert_grep 'jj bookmark create fm/brief-jj-a9' "$brief" \
+    "jj-token project brief did not scaffold the jj bookmark step"
+  assert_no_grep 'git checkout -b fm/brief-jj-a9' "$brief" \
+    "jj-token project brief still scaffolds the git branch step"
+
+  FM_HOME="$home" FM_DATA_OVERRIDE="$data" \
+    "$ROOT/bin/fm-brief.sh" brief-git-b9 git-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "git-managed brief should scaffold"
+  brief="$data/brief-git-b9/brief.md"
+  assert_grep 'git checkout -b fm/brief-git-b9' "$brief" \
+    "project without the jj token did not keep the git branch step"
+  assert_no_grep 'jj bookmark create fm/brief-git-b9' "$brief" \
+    "project without the jj token got the jj bookmark step"
+
+  # A relocated data dir (FM_DATA_OVERRIDE) is where the token is read from;
+  # a home whose default-location registry has no jj token must not flip it.
+  mkdir -p "$home/data"
+  cat > "$home/data/projects.md" <<'EOF'
+- jj-proj [no-mistakes] - no jj token in the default-location registry (added 2026-07-01)
+EOF
+  FM_HOME="$home" FM_DATA_OVERRIDE="$data" \
+    "$ROOT/bin/fm-brief.sh" brief-jj-c9 jj-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "jj-token brief with relocated data should scaffold"
+  brief="$data/brief-jj-c9/brief.md"
+  assert_grep 'jj bookmark create fm/brief-jj-c9' "$brief" \
+    "FM_DATA_OVERRIDE relocated registry token was ignored"
+  pass "fm-brief.sh: jj registry token selects the jj branch step through FM_DATA_OVERRIDE"
 }
 
 # yolo is firstmate's merge authority and never reaches the worker, and a scout
@@ -718,6 +768,7 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
+test_jj_token_selects_jj_branch_step
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording

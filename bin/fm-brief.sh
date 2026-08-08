@@ -29,7 +29,9 @@
 #   without it carry a loud declaration so an omitted contract cannot be silent.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
-# captain's standing posture as context, and this script never reads it:
+# captain's standing posture as context plus the optional `jj` opt-in token that
+# selects jj bookmarks for jj-managed projects; the delivery mode itself is never
+# read from it here - the explicit --mode is authoritative:
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
@@ -412,14 +414,22 @@ DOD=${DOD%$'\n'}
 
 # jj-managed projects (registry token `jj` after the mode bracket) get a jj
 # branch step instead of `git checkout -b`: their AGENTS.md forbids raw git
-# write commands and jj is their version control. The token is documented in
-# the registry format header of data/projects.md, so firstmate records this
-# once per project instead of hand-patching every brief.
+# write commands and jj is their version control. The token is part of the
+# registry line format documented in bin/fm-project-mode.sh, so firstmate
+# records it once per project instead of hand-patching every brief.
 JJ_MANAGED=0
-if [ -f "$FM_HOME/data/projects.md" ]; then
-  if grep -Eq "^\- $REPO \[[^]]*\] jj " "$FM_HOME/data/projects.md"; then
-    JJ_MANAGED=1
-  fi
+if [ -f "$DATA/projects.md" ]; then
+  JJ_TOKEN=$(awk -v n="$REPO" '
+    $1=="-" && $2==n {
+      for (i=3; i<=NF; i++)
+        if ($i ~ /\]$/) {
+          if ($(i+1)=="jj") print "jj"
+          exit
+        }
+      exit
+    }
+  ' "$DATA/projects.md")
+  [ "$JJ_TOKEN" = jj ] && JJ_MANAGED=1
 fi
 if [ "$JJ_MANAGED" = 1 ]; then
   BRANCH_STEP="1. First action: create your branch. This repo is jj-managed (its AGENTS.md forbids raw git write commands): run \`jj bookmark create fm/$ID\`."
