@@ -36,7 +36,8 @@ Marking rules:
 - Tier defaults are file-scoped: entries in `data/captain.md` and `data/captain-shared.md` default to `pinned` because preferences and authority boundaries do not age, and entries in `data/learnings.md` default to `aging` because operational facts must re-prove themselves.
 - An entry carries `tier:` only when it deviates from its file's default.
 - `pinned` entries carry no date because no clock applies; `aging` and `perishable` entries always carry `reinforced: YYYY-MM-DD`.
-- Each memory file's header carries a one-line legend stating that file's default tier, the marker spelling, and the current clocks, so the scheme is self-describing to any reader.
+- During legacy migration only, `legacy-grace: pending` may appear in the trailing marker without a `reinforced:` date; it records that the entry has consumed its grace cycle and is not reinforcement.
+- Each memory file's header carries a one-line legend stating that file's default tier, the marker spelling (including the migration-only grace state while one exists), and the current clocks, so the scheme is self-describing to any reader.
 - The clocks are policy owned by this skill text and echoed by the legends, deliberately not configuration.
 - A missing or hand-dropped marker is never an error: it means the file's default tier, aged per the unmarked-entry migration rule below.
 
@@ -180,8 +181,9 @@ The first pass after adoption performs a one-time revalidation sweep instead of 
 
 - In `data/captain.md` and `data/captain-shared.md`, a confirmed entry matching the default `pinned` needs no marker at all; mark only genuine deviations.
 - In `data/learnings.md`, stamp each entry the pass can confirm current with `reinforced:` today, plus a `tier:` where it deviates from the `aging` default.
-- An entry the sweep cannot confirm stays unstamped and gets exactly one grace cycle: when the next pass still cannot confirm it, archive it with provenance `legacy-unvalidated`.
-- The grace period is one full stow cycle, not a time window, and it also covers entries a hand edit later leaves unmarked.
+- On the first pass that cannot confirm an unmarked entry, add `<!-- legacy-grace: pending -->` as its trailing marker without a `reinforced:` date; this persists that it has consumed exactly one grace cycle without pretending it was reinforced.
+- On the next pass, replace that marker with the normal tier marker if current evidence confirms the entry; otherwise archive it with provenance `legacy-unvalidated`.
+- The grace period is one full stow cycle, not a time window, and the same persisted transition applies to entries a hand edit later leaves unmarked.
 
 ## Completion receipt
 

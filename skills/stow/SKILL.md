@@ -106,14 +106,17 @@ Rules:
 
 - Unless a file's own legend says otherwise, a user-level memory file defaults to `pinned`, while a project memory file and `.stow-notes.md` default to `aging`.
 - An entry carries `tier:` only when it deviates from its file's default, and `pinned` entries need no date.
-- When first writing a marked entry into a file, add a one-line header legend stating that file's default tier, the marker spelling, and the current clocks, so the scheme explains itself to any later reader or tool.
+- During legacy migration only, `legacy-grace: pending` may appear in the trailing marker without a `reinforced:` date; it records that the entry has consumed its grace cycle and is not reinforcement.
+- When first writing a marked entry into a file, add a one-line header legend stating that file's default tier, the marker spelling (including the migration-only grace state while one exists), and the current clocks, so the scheme explains itself to any later reader or tool.
 - Refresh a `reinforced:` date only on real evidence from the current session: the fact was used, confirmed, or re-derived.
   Mere presence in the file is not evidence, and re-reading memory is never reinforcement.
 - Re-confirm a stale `perishable` entry against its named condition: still open means refresh the date, while resolved, expired, or no longer checkable means archive it now.
 - Decay is evaluated only when this skill runs; nothing happens between passes, so an infrequently stowed project experiences the clocks at its stow interval.
 - Stale never means deleted: a stale entry moves, with its marker and a one-line reason, to a `.stow-archive.md` beside the file it came from - the current directory for `.stow-notes.md` and project files - never loaded by any session, and kept out of git the same way as `.stow-notes.md` when it lands in a git worktree.
   Recovery is search plus copy back.
-- Pre-existing unmarked entries are the file's default tier with unknown age, and unknown age is not guilt: the first pass stamps what it can confirm, an unconfirmable entry gets exactly one more pass of grace, and only then is it archived with a `legacy-unvalidated` note.
+- Pre-existing unmarked entries are the file's default tier with unknown age, and unknown age is not guilt: the first pass stamps what it can confirm; otherwise it adds `<!-- legacy-grace: pending -->` without a `reinforced:` date to persist one grace cycle without treating presence as reinforcement.
+  On the next pass, current evidence replaces that marker with the normal tier marker; without such evidence, archive the entry with a `legacy-unvalidated` note.
+  The same persisted transition applies to an entry a hand edit later leaves unmarked.
 - When an always-loaded memory file has grown past what every session should pay for, this skill may propose - never execute - moving a durable entry that matters only in a nameable situation into an on-demand-loaded home, such as a skill or scoped instruction file the user's agent loads only when that situation arises.
   The user approves each move, the new home is created through the user's own change process rather than by this skill, and the entry leaves the memory file only once the new home exists.
 
