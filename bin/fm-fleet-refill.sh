@@ -7,8 +7,26 @@
 # proof. This script never emits a dispatch verdict and never stages work.
 # The serialization-debt safety probe and the authoritative bead-query
 # diagnostic remain.
+#
+# Task 12 adds the --refill admission action. Refill acts ONLY on a complete
+# projection reporting productive work below the target and reserved
+# ownership below the ceiling. It queries the live beads graph, applies the
+# accepted Decision OS admission contract against the FROZEN provisional
+# admission evidence in each current attempt's delivery record
+# (planned_path, declared_seams, dependencies, written once at allocation)
+# plus the known exclusive seams, and serializes a candidate ONLY when that
+# bounded evidence identifies a concrete path overlap. No .beadscope,
+# declaration registry, write-set enforcer, or claim inferred from planned
+# paths is introduced, and admission never lands or merges: the actual diff
+# stays the authoritative pre-land overlap check in bin/fm-review-diff.sh
+# (Task 11). Automatic launching requires config/refill-auto in the home or
+# FM_REFILL_AUTO=1; otherwise --refill is attended-only (verdict plus the
+# exact next-wave dispatch commands, no launching). Automatic refill stays
+# disabled through Task 13: nothing in this repo creates config/refill-auto.
 set -u
 FM_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+PROJECT="${FM_REFILL_PROJECT:-/home/holu/decision-os}"
 
 # Shadow-only parallel run (Task 3): --count-json emits the shared capacity
 # object (fm-fleet-capacity.v1); FM_REFILL_SHADOW records that same object
@@ -21,13 +39,316 @@ if [ "${1:-}" = "--count-json" ]; then
   fm_capacity_project
   exit 0
 fi
+
+# --- Task 12: --refill admission action ----------------------------------
+#
+# Config and defaults for the admission action. FM_REFILL_CANDIDATES_FILE
+# and FM_REFILL_CURRENT_PATHS are TEST-ONLY overrides (see their comments);
+# every other knob is a real runtime default.
+
+FM_REFILL_HARNESS="${FM_REFILL_HARNESS:-pi}"
+FM_REFILL_MODE="${FM_REFILL_MODE:-direct-PR}"
+FM_BR_RECEIPT_BIN="${FM_BR_RECEIPT_BIN:-$FM_HOME/bin/fm-br-receipt.sh}"
+FM_REFILL_SPAWN_BIN="${FM_REFILL_SPAWN_BIN:-$FM_HOME/bin/fm-spawn.sh}"
+CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+
+# fm_refill_automatic: the automatic-refill gate. Automatic action requires
+# config/refill-auto in the home (gitignored; nothing in this repo creates
+# it before Task 13) or FM_REFILL_AUTO=1; otherwise --refill is attended-only.
+# It must never fire in production through any path other than those two.
+# shellcheck source=bin/fm-wake-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fm-wake-lib.sh"
+
+fm_refill_automatic() {  # 0 when automatic refill is authorized by the gate
+  [ "${FM_REFILL_AUTO:-0}" = 1 ] && return 0
+  [ -f "$CONFIG_DIR/refill-auto" ] && return 0
+  return 1
+}
+
+# fm_refill_paths_overlap <path-a> <path-b>: 0 when the two paths concretely
+# overlap at a path-component boundary (equal, or one is a directory prefix
+# of the other). This is the bounded admission-overlap test: it runs only on
+# FROZEN provisional evidence and never inspects live diffs.
+fm_refill_paths_overlap() {
+  local a=$1 b=$2
+  a=${a%/}
+  b=${b%/}
+  [ -n "$a" ] && [ -n "$b" ] || return 1
+  [ "$a" = "$b" ] && return 0
+  case "$a/" in
+    "$b/"*) return 0 ;;
+  esac
+  case "$b/" in
+    "$a/"*) return 0 ;;
+  esac
+  return 1
+}
+
+# fm_refill_current_evidence: the FROZEN provisional admission evidence from
+# every current (allocated, not retired) attempt's delivery record
+# (planned_path, declared_seams, dependencies) plus the known exclusive
+# seams. FM_REFILL_CURRENT_PATHS is a TEST-ONLY override that replaces this
+# read with a literal newline-separated path list so hermetic admission
+# tests do not need a live attempt record.
+fm_refill_current_evidence() {  # -> newline-separated path evidence lines
+  local dir f aid
+  if [ -n "${FM_REFILL_CURRENT_PATHS:-}" ]; then
+    printf '%s\n' "$FM_REFILL_CURRENT_PATHS"
+    return 0
+  fi
+  dir="$STATE/attempts"
+  [ -d "$dir" ] || return 0
+  for f in "$dir"/*.json; do
+    [ -e "$f" ] || continue
+    aid=$(basename "$f" .json)
+    if fm_attempt_is_retired "$aid" 2>/dev/null; then
+      continue
+    fi
+    # shellcheck disable=SC2016  # jq filters are single-quoted by design.
+    jq -r '.delivery as $d |
+      ($d.planned_path?, $d.declared_seams?, $d.dependencies?) |
+      if type == "array" then .[] elif type == "string" and length > 0 then . else empty end' \
+      "$f" 2>/dev/null || true
+  done
+}
+
+# fm_refill_candidate_conflicts <planned_path> <evidence-lines>: 0 when the
+# candidate's planned path concretely overlaps any frozen evidence line.
+fm_refill_candidate_conflicts() {
+  local path=$1 evidence=$2 line
+  [ -n "$path" ] || return 1
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    if fm_refill_paths_overlap "$path" "$line"; then
+      return 0
+    fi
+  done <<< "$evidence"
+  return 1
+}
+
+# fm_refill_query_candidates: the live beads-graph query. Runs in the
+# registered decision-os main clone: `br ready --json` (array shape), then
+# `br show --json <id>` per candidate to re-verify open/ready/unclaimed
+# while creating the claim request, extracting the provisional planned_path.
+# FM_REFILL_CANDIDATES_FILE is a TEST-ONLY override supplying the candidate
+# array ({id, planned_path, mode}) directly so admission is hermetic.
+# FM_REFILL_CANDIDATES_QUERIED_MARKER is a TEST-ONLY hook: the moment this
+# query actually runs, it touches the marker path so tests can prove an
+# unsafe projection never queries candidates.
+fm_refill_query_candidates() {  # -> JSON array of {id, planned_path, mode}
+  local ready cand show id entry cands=()
+  [ -z "${FM_REFILL_CANDIDATES_QUERIED_MARKER:-}" ] || : > "$FM_REFILL_CANDIDATES_QUERIED_MARKER"
+  if [ -n "${FM_REFILL_CANDIDATES_FILE:-}" ]; then
+    if [ -f "$FM_REFILL_CANDIDATES_FILE" ] \
+      && jq -e 'type == "array"' "$FM_REFILL_CANDIDATES_FILE" >/dev/null 2>&1; then
+      cat "$FM_REFILL_CANDIDATES_FILE"
+    else
+      echo "refill: candidate evidence unavailable (FM_REFILL_CANDIDATES_FILE)" >&2
+      return 1
+    fi
+    return 0
+  fi
+  ready=$(cd "$PROJECT" 2>/dev/null && br ready --json 2>/dev/null) || ready=''
+  if [ -z "$ready" ] || ! printf '%s' "$ready" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    echo "refill: candidate evidence unavailable (br ready)" >&2
+    return 1
+  fi
+  while IFS= read -r cand; do
+    [ -n "$cand" ] || continue
+    id=$(printf '%s' "$cand" | jq -r '.id // empty' 2>/dev/null || true)
+    [ -n "$id" ] || continue
+    show=$(cd "$PROJECT" 2>/dev/null && br show --json "$id" 2>/dev/null) || show=''
+    [ -n "$show" ] || continue
+    # re-verify open/ready/unclaimed while creating the claim request
+    printf '%s' "$show" | jq -e \
+      '.status == "open" and ((.claimed_by // "") | tostring | length == 0)' >/dev/null 2>&1 || continue
+    entry=$(printf '%s' "$show" | jq -c --arg id "$id" \
+      '{id:$id,planned_path:(.planned_path // ""),mode:(.mode // "")}' 2>/dev/null || true)
+    [ -n "$entry" ] || continue
+    cands+=("$entry")
+  done <<< "$(printf '%s' "$ready" | jq -c '.[]' 2>/dev/null || true)"
+  if [ "${#cands[@]}" -gt 0 ]; then
+    printf '%s\n' "${cands[@]}" | jq -s -c '.'
+  else
+    echo '[]'
+  fi
+}
+
+# fm_refill_bead_available <id>: live ownership re-read after winning the
+# home lock. A candidate whose bead was claimed or closed by another wave
+# between the query and the lock is skipped, so concurrent refill
+# invocations never double-dispatch.
+fm_refill_bead_available() {
+  local id=$1 show
+  show=$(cd "$PROJECT" 2>/dev/null && br show --json "$id" 2>/dev/null) || return 1
+  [ -n "$show" ] || return 1
+  printf '%s' "$show" | jq -e \
+    '.status == "open" and ((.claimed_by // "") | tostring | length == 0)' >/dev/null 2>&1
+}
+
+# fm_refill_lock_release: release the home claim lock won by the admission
+# wave. Safe to fire at EXIT when the lock was never won.
+fm_refill_lock_release() {
+  if [ "${FM_REFILL_LOCK_HELD:-0}" = 1 ]; then
+    fm_lock_release "$STATE/.lock.acquire" 2>/dev/null || true
+    FM_REFILL_LOCK_HELD=0
+  fi
+}
+
+# fm_refill_claim_and_launch <id>: the Task 6 split handshake (allocate the
+# immutable attempt, persist the exact claim request, invoke the attended
+# decision-os main-steward adapter synchronously) followed by the spawn
+# resume path. A refused or unobserved claim leaves the attempt pending and
+# never launches. Only the automatic gate reaches this; the attended path
+# prints the same commands instead.
+fm_refill_claim_and_launch() {
+  local id=$1 aid gen req source_hash
+  aid=$(fm_attempt_alloc pi "$id" "$FM_HOME") || {
+    echo "refill: attempt allocation failed for $id; refusing to launch without the claim" >&2
+    return 1
+  }
+  gen=$(fm_attempt_generation "$aid") || {
+    echo "refill: cannot resolve generation for $aid" >&2
+    return 1
+  }
+  source_hash=$(cd "$PROJECT" 2>/dev/null && sha256sum .beads/issues.jsonl 2>/dev/null | cut -d' ' -f1) || source_hash=''
+  [ -n "$source_hash" ] || {
+    echo "refill: cannot resolve the Decision OS source hash at $PROJECT/.beads/issues.jsonl; refusing to launch without the claim" >&2
+    return 1
+  }
+  req="$STATE/attempts/$aid.request.claim.json"
+  jq -n \
+    --arg attempt_id "$aid" \
+    --argjson generation "$gen" \
+    --arg bead_id "$id" \
+    --arg transition claim \
+    --arg expected_state open \
+    --arg expected_source_hash "$source_hash" \
+    --arg evidence intake \
+    --arg authority "${FM_REFILL_AUTHORITY:-captain:dispatch}" \
+    --arg agent "$FM_REFILL_HARNESS" \
+    --arg repo "$PROJECT" \
+    '{attempt_id:$attempt_id,generation:$generation,bead_id:$bead_id,transition:$transition,expected_state:$expected_state,expected_source_hash:$expected_source_hash,evidence:$evidence,authority:$authority,agent:$agent,repo:$repo}' \
+    > "$req.tmp.$$" || {
+    echo "refill: cannot write the claim request for $aid" >&2
+    return 1
+  }
+  mv -f "$req.tmp.$$" "$req" || {
+    echo "refill: cannot publish the claim request for $aid" >&2
+    return 1
+  }
+  if ! "$FM_BR_RECEIPT_BIN" "$req"; then
+    fm_attempt_effect_pending "$aid" "$gen" tracker \
+      "$(jq -n --arg reason 'refill claim steward refused or unavailable' \
+            --arg transition claim --arg authority "${FM_REFILL_AUTHORITY:-captain:dispatch}" \
+            '{status:"pending",reason:$reason,transition:$transition,authority:$authority}')" \
+      >/dev/null 2>&1 || true
+    echo "refill: claim_pending $id (reconcile before allocation)" >&2
+    return 1
+  fi
+  [ -z "${FM_REFILL_DISPATCH_LOG:-}" ] || printf 'launch %s\n' "$id" >> "$FM_REFILL_DISPATCH_LOG"
+  # spawn resume path: the claim request file plus the observed tracker
+  # receipt let fm-spawn.sh resume this exact attempt (FM_TRACKER_CLAIM=1)
+  env FM_TRACKER_CLAIM=1 \
+    FM_STATE_OVERRIDE="$STATE" \
+    FM_DATA_OVERRIDE="${FM_DATA_OVERRIDE:-}" \
+    FM_CONFIG_OVERRIDE="${FM_CONFIG_OVERRIDE:-}" \
+    FM_HOME="$FM_HOME" \
+    FM_BR_RECEIPT_BIN="$FM_BR_RECEIPT_BIN" \
+    FM_REFILL_PROJECT="$PROJECT" \
+    "$FM_REFILL_SPAWN_BIN" "$id" "$PROJECT" "$FM_REFILL_HARNESS" \
+    --mode "$FM_REFILL_MODE" --yolo off || {
+    echo "refill: launch failed for $id" >&2
+    return 1
+  }
+  return 0
+}
+
+# fm_refill_admit_and_dispatch <capacity-json>: query candidates, apply the
+# frozen-evidence admission contract (admit vs serialize), win the home lock
+# (state/.lock.acquire, the same claim lock bin/fm-lock.sh uses) plus the
+# attempt allocation lock (fm_attempt_alloc owns state/attempts/.alloc.lock
+# per candidate), re-read live bead ownership, then either run the split
+# handshake and launch (automatic) or print the exact dispatch commands
+# (attended). Never lands, merges, or decrements capacity.
+fm_refill_admit_and_dispatch() {
+  local cap=$1 candidates evid id cpath prod reserved
+  local admitted=() serialized=() available=() cand
+  candidates=$(fm_refill_query_candidates) || return $?
+  evid=$(fm_refill_current_evidence)
+  while IFS= read -r cand; do
+    [ -n "$cand" ] || continue
+    id=$(printf '%s' "$cand" | jq -r '.id // empty' 2>/dev/null || true)
+    [ -n "$id" ] || continue
+    cpath=$(printf '%s' "$cand" | jq -r '.planned_path // ""' 2>/dev/null || true)
+    if fm_refill_candidate_conflicts "$cpath" "$evid"; then
+      serialized+=("$id")
+      echo "refill: serialize $id (planned path overlaps frozen admission evidence)"
+    else
+      admitted+=("$id")
+      echo "refill: admit $id"
+    fi
+  done <<< "$(printf '%s\n' "$candidates" | jq -c '.[]' 2>/dev/null || true)"
+  prod=$(printf '%s' "$cap" | jq -r '.aggregate.productive_count // 0' 2>/dev/null || echo 0)
+  reserved=$(printf '%s' "$cap" | jq -r '.aggregate.reserved_ownership_count // 0' 2>/dev/null || echo 0)
+  echo "refill: admission productive=$prod reserved=$reserved candidates=$(( ${#admitted[@]} + ${#serialized[@]} )) admitted=${#admitted[@]} serialized=${#serialized[@]}"
+  # win the home lock, then re-read live bead ownership: the loser of a
+  # concurrent wave sees the winner's claims and dispatches nothing
+  FM_REFILL_LOCK_HELD=0
+  trap fm_refill_lock_release EXIT
+  fm_lock_acquire_wait "$STATE/.lock.acquire"
+  FM_REFILL_LOCK_HELD=1
+  available=()
+  if [ "${#admitted[@]}" -gt 0 ]; then
+    for id in "${admitted[@]}"; do
+      if fm_refill_bead_available "$id"; then
+        available+=("$id")
+      else
+        echo "refill: skip $id (no longer open/ready/unclaimed after the lock)" >&2
+      fi
+    done
+  fi
+  if fm_refill_automatic; then
+    if [ "${#available[@]}" -gt 0 ]; then
+      for id in "${available[@]}"; do
+        fm_refill_claim_and_launch "$id"
+      done
+    fi
+  else
+    echo "refill: next-wave dispatch commands (attended; no automatic dispatch without config/refill-auto or FM_REFILL_AUTO=1):"
+    if [ "${#available[@]}" -gt 0 ]; then
+      for id in "${available[@]}"; do
+        echo "refill:   FM_TRACKER_CLAIM=1 FM_BR_RECEIPT_BIN=\"$FM_BR_RECEIPT_BIN\" FM_REFILL_PROJECT=\"$PROJECT\" \"$FM_REFILL_SPAWN_BIN\" \"$id\" \"$PROJECT\" \"$FM_REFILL_HARNESS\" --mode \"$FM_REFILL_MODE\" --yolo off"
+      done
+    fi
+  fi
+  fm_refill_lock_release
+  return 0
+}
+
+if [ "${1:-}" = "--refill" ]; then
+  # shellcheck source=bin/fm-capacity-lib.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/fm-capacity-lib.sh"
+  cap=$(fm_capacity_project)
+  echo "$cap" | jq -e '.aggregate.refill_safe == true' >/dev/null || {
+    echo "REFILL-UNSAFE: no attended or automatic refill on an unsafe projection" >&2
+    exit 1
+  }
+  echo "$cap" | jq -e --argjson t "${FM_REFILL_TARGET_PRODUCTIVE:-6}" \
+    --argjson c "${FM_REFILL_RESERVED_CEILING:-10}" \
+    '.aggregate.productive_count < $t and .aggregate.reserved_ownership_count < $c' >/dev/null || {
+    echo "fleet-ok: no refill needed"
+    exit 0
+  }
+  fm_refill_admit_and_dispatch "$cap"
+  exit $?
+fi
 if [ -n "${FM_REFILL_SHADOW:-}" ]; then
   # shellcheck source=bin/fm-capacity-lib.sh
   . "$(dirname "${BASH_SOURCE[0]}")/fm-capacity-lib.sh"
   fm_capacity_project > "$FM_REFILL_SHADOW"
 fi
 
-PROJECT="${FM_REFILL_PROJECT:-/home/holu/decision-os}"
 SERIALIZATION_DEBT_PROBE="${FM_SERIALIZATION_DEBT_PROBE:-$FM_HOME/bin/fm-serialization-debt.sh}"
 
 serialization_debt=0
