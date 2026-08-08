@@ -372,6 +372,59 @@ test_policy_cli_direct() {
 
 # --- per-harness wiring -----------------------------------------------------
 
+test_codex_hook_separates_trusted_payload_from_scope() {
+  local base worktree settings command payload marker out rc legacy_out legacy_rc
+  base=$(make_primary_fixture "$TMP_ROOT/codex-anchor-base")
+  worktree="$TMP_ROOT/codex-anchor-worktree"
+  settings="$base/.codex/hooks.json"
+  marker="$TMP_ROOT/untrusted-cd-policy-executed"
+  mkdir -p "$base/.codex"
+  cp "$ROOT/.codex/hooks.json" "$settings"
+  git -C "$base" add .
+  git -C "$base" commit -qm codex-anchor-base
+  git -C "$base" worktree add -q -b fm/codex-anchor-worktree "$worktree"
+
+  command=$(jq -r '[.hooks.PreToolUse[0].hooks[].command | select(contains("fm-cd-pretool-check.sh"))][0] // empty' "$settings")
+  [ -n "$command" ] || fail "Codex cd-guard hook command is missing"
+  printf '#!/usr/bin/env bash\nprintf "UNTRUSTED_CD_CHECK_EXECUTED\\n"\n' \
+    > "$worktree/bin/fm-cd-pretool-check.sh"
+  chmod +x "$worktree/bin/fm-cd-pretool-check.sh"
+  cat > "$worktree/bin/fm-cd-command-policy.mjs" <<'JS'
+import { writeFileSync } from "node:fs";
+if (process.env.FM_TEST_UNTRUSTED_POLICY_MARKER) {
+  writeFileSync(process.env.FM_TEST_UNTRUSTED_POLICY_MARKER, "executed\n");
+}
+process.stdout.write("deny\tuntrusted-policy\tworktree policy executed\n");
+JS
+  payload=$(jq -cn --arg command 'cd projects/foo' '{tool_input:{command:$command}}')
+
+  rm -f "$worktree/.git"
+  git init -q "$worktree"
+  legacy_out=$(FM_TEST_UNTRUSTED_POLICY_MARKER="$marker" \
+    node "$worktree/bin/fm-cd-command-policy.mjs" --command 'cd projects/foo' 2>&1)
+  legacy_rc=$?
+  expect_code 0 "$legacy_rc" "legacy worktree policy resolution should execute"
+  assert_contains "$legacy_out" "untrusted-policy" \
+    "legacy worktree policy resolution did not return its untrusted decision"
+  assert_present "$marker" "legacy worktree policy resolution did not execute"
+
+  rm -f "$marker"
+  out=$(printf '%s' "$payload" \
+    | (cd "$worktree" && FM_TEST_UNTRUSTED_POLICY_MARKER="$marker" \
+      FM_CODEX_HOOK_ROOT="$base" FM_ROOT_OVERRIDE="$worktree" \
+      bash -c "$command") 2>&1)
+  rc=$?
+  expect_code 2 "$rc" "trusted cd hook must deny primary-shaped worktree scope"
+  assert_contains "$out" "[persistent-cd]" \
+    "trusted cd hook did not positively execute the trusted policy"
+  assert_not_contains "$out" "untrusted-policy" \
+    "trusted cd hook returned the worktree policy decision"
+  assert_not_contains "$out" "UNTRUSTED_CD_CHECK_EXECUTED" \
+    "trusted cd hook executed the worktree checker"
+  assert_absent "$marker" "trusted cd hook executed the worktree policy"
+  pass ".codex/hooks.json: cd hook separates trusted executable code from runtime scope"
+}
+
 test_scripts_are_shellcheck_clean() {
   command -v shellcheck >/dev/null 2>&1 || { pass "shellcheck not installed, skipping"; return; }
   shellcheck "$ROOT/bin/fm-cd-pretool-check.sh" >/dev/null 2>&1 \
@@ -391,4 +444,5 @@ test_fail_open_missing_node
 test_fail_open_missing_jq_on_stdin
 test_prefilter_skips_node_without_cd_substring
 test_policy_cli_direct
+test_codex_hook_separates_trusted_payload_from_scope
 test_scripts_are_shellcheck_clean

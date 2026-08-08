@@ -2255,9 +2255,23 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
+if [ "$HARNESS" = codex ]; then
+  CODEX_HOOK_ROOT=$FM_ROOT
+  [ "$KIND" = secondmate ] && CODEX_HOOK_ROOT=$PROJ_ABS
+  CODEX_HOOK_SCOPE=$(cd "$WT" 2>/dev/null && pwd -P) || {
+    echo "error: cannot resolve Codex hook scope for $WT" >&2
+    exit 1
+  }
+  LAUNCH="FM_CODEX_HOOK_ROOT=$(shell_quote "$CODEX_HOOK_ROOT") $LAUNCH"
+  if [ "$KIND" != secondmate ]; then
+    LAUNCH="FM_ROOT_OVERRIDE=$(shell_quote "$CODEX_HOOK_SCOPE") $LAUNCH"
+  fi
+fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
+  sq_root_override=
+  [ "$HARNESS" != codex ] || sq_root_override=$(shell_quote "$PROJ_ABS")
   case "$HARNESS" in
     claude) supervision_model=autoarm ;;
     *) supervision_model=persistent ;;
@@ -2269,7 +2283,7 @@ if [ "$KIND" = secondmate ]; then
   # not enable them across the launch boundary (bin/fm-trace-context-lib.sh header).
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+  LAUNCH="FM_ROOT_OVERRIDE=$sq_root_override FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
