@@ -272,16 +272,25 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
     || { capture "$session" >&2; fail "$harness $version: hook stdout did not reach interactive model context"; }
 
   send_line "$session" "$clear_cmd"
+  # The reset itself fires the hook on some harnesses (Claude, Pi) and only
+  # opens the new thread on others: Codex runs the pending session-open hook
+  # when the FIRST post-reset turn is submitted, so waiting for the record
+  # before asking would deadlock there. Give the eager harnesses a short window
+  # to record the open first, then submit the post-reset turn either way and
+  # keep waiting; the same turn is the one that must quote the fresh token, so
+  # neither ordering can be satisfied by pre-reset context.
+  n=0
+  while [ "$n" -lt 5 ] && [ -z "$(sed -n '2p' "$record")" ]; do sleep 2; n=$((n + 1)); done
+  send_line "$session" "$ASK"
   n=0
   while [ "$n" -lt 20 ] && [ -z "$(sed -n '2p' "$record")" ]; do sleep 2; n=$((n + 1)); done
   reset=$(sed -n '2p' "$record")
   [ -n "$reset" ] \
-    || { capture "$session" >&2; fail "$harness $version: '$clear_cmd' fired no session-open event, so a context reset leaves the session blind"; }
+    || { capture "$session" >&2; fail "$harness $version: '$clear_cmd' fired no session-open event even on the first post-reset turn, so a context reset leaves the session blind"; }
   case "$reset" in
     clear|compact|new) : ;;
     *) fail "$harness $version: '$clear_cmd' reported source '$reset', which the run tier would treat as a cold startup" ;;
   esac
-  send_line "$session" "$ASK"
   wait_for_text "$session" "FMHOOKTOKEN-$reset-2-$LIVE_NONCE" \
     || { capture "$session" >&2; fail "$harness $version: hook stdout did not reach model context after '$clear_cmd'"; }
   pass "$harness $version: '$clear_cmd' reports source '$reset' and re-injects hook stdout into model context"

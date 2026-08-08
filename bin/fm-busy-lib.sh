@@ -119,14 +119,16 @@ fm_busy_codex_appserver_observable() {
 
 # fm_busy_codex_hooks_verified: the sanctioned intermediate - Codex's stable
 # hooks engine (UserPromptSubmit to open a turn, Stop and SessionEnd to close
-# it). Returns 0 only once those hooks are live-verified to fire for a
-# firstmate-launched worker. codex-cli 0.145.0 verdict (live, 2026-07-28):
-# NOT verified. Firstmate-written project hooks under <worktree>/.codex/
-# never fired in an interactive pane whose directory trust was granted, nor
-# under `codex exec`, in either case with --dangerously-bypass-hook-trust,
-# while global hooks fired in the same runs. Codex additionally exposes no
-# StopFailure hook, so an API-error turn end would need separate coverage
-# even after the discovery problem is solved.
+# it). Returns 0 only once those hooks are live-verified to bracket a
+# firstmate-launched worker's turn. codex-cli 0.146.0 verdict (live,
+# 2026-08-08): NOT verified. Project hooks under <worktree>/.codex/ DO fire
+# once the hooks feature was enabled before process start, the project path is
+# trusted, and the per-hook review is accepted, but the tracked registrations
+# are the primary's session-open and turn-boundary hooks: nothing in them
+# publishes a task-worker turn lifecycle, and no external observer of an
+# interactive pane's app-server lifecycle exists either. Codex additionally
+# exposes no StopFailure hook, so an API-error turn end would need separate
+# coverage even after a worker-scoped lifecycle is wired.
 fm_busy_codex_hooks_verified() {
   return 1
 }

@@ -833,7 +833,7 @@ test_spawn_explicit_harness_uses_explicit_profile_axes() {
 }
 
 test_spawned_secondmate_uses_its_harness_supervision_model() {
-  local harness w sm launchlog launch fakebin out
+  local harness expected w sm launchlog launch fakebin out
   for harness in codex claude; do
     w="$TMP_ROOT/spawn-supervision-model-$harness"
     sm="$w/sm"
@@ -855,17 +855,17 @@ FM_ROOT_OVERRIDE="$sm" "$ROOT/bin/fm-guard.sh"
 SH
     chmod +x "$fakebin/$harness"
     launch=$(cat "$launchlog")
-    out=$(PATH="$fakebin:$BASE_PATH" CLAUDECODE=1 bash -c "$launch" 2>&1)
     case "$harness" in
-      codex)
-        [ -z "$out" ] \
-          || fail "Codex secondmate with a fresh checkpoint beacon should use checkpoint supervision, got: $out"
-        ;;
-      claude)
-        [ -z "$out" ] \
-          || fail "Claude secondmate with a fresh beacon should use auto-arm supervision, got: $out"
-        ;;
+      codex) expected=checkpoint ;;
+      claude) expected=autoarm ;;
     esac
+    # Both models stay silent on a fresh beacon with no watcher, so the
+    # behavior check alone cannot tell them apart; pin the delivered model too.
+    assert_contains "$launch" "FM_SUPERVISION_MODEL=$expected " \
+      "$harness secondmate launch must pin FM_SUPERVISION_MODEL=$expected, not the primary's model"
+    out=$(PATH="$fakebin:$BASE_PATH" CLAUDECODE=1 bash -c "$launch" 2>&1)
+    [ -z "$out" ] \
+      || fail "$harness secondmate with a fresh beacon should be healthy under $expected supervision, got: $out"
   done
   pass "C9 spawn: secondmate launch pins auto-arm or checkpoint supervision to its own harness"
 }
