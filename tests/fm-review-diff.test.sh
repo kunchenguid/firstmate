@@ -133,11 +133,29 @@ test_pr_meta_fetches_pull_head_without_recorded_sha() {
   pass "fm-review-diff fetches refs/pull/<n>/head when pr_head= is absent"
 }
 
+test_numeric_pr_meta_fetches_origin_pull_head() {
+  local case_dir out
+  case_dir=$(make_case numeric-pr-fetch)
+  stale_and_pr_commits "$case_dir"
+  git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/pull/9/head"
+  write_task_meta "$case_dir" "pr=9"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+pr-fixed' "numeric-pr-fetch: diff should use origin pull head"
+  assert_not_contains "$out" 'stale-local' "numeric-pr-fetch: diff must not use the local branch"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "numeric-pr-fetch: origin pull fetch should succeed"
+  pass "fm-review-diff retains origin resolution for numeric PR metadata"
+}
+
 test_forgejo_pr_meta_fetches_pull_head() {
   local case_dir out
   case_dir=$(make_case forgejo-pr-fetch)
   stale_and_pr_commits "$case_dir"
   git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/pull/9/head"
+  git -C "$case_dir/wt" config \
+    url."$case_dir/origin.git".insteadOf https://forgejo.example/owner/repo.git
   write_task_meta "$case_dir" "pr=https://forgejo.example/owner/repo/pulls/9"
 
   out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
@@ -147,6 +165,34 @@ test_forgejo_pr_meta_fetches_pull_head() {
   assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
     "forgejo-pr-fetch: should not warn when refs/pull/<n>/head resolves"
   pass "fm-review-diff resolves a Forgejo /pulls/<n> URL through refs/pull/<n>/head"
+}
+
+test_forgejo_pr_meta_uses_canonical_repository() {
+  local case_dir out
+  case_dir=$(make_case forgejo-canonical-repository)
+  stale_and_pr_commits "$case_dir"
+  git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/pull/9/head"
+  git clone -q --bare "$case_dir/origin.git" "$case_dir/canonical.git"
+  git -C "$case_dir/wt" checkout -q -b canonical-head-tmp main
+  printf 'canonical-pr\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm "canonical Forgejo pull head"
+  git -C "$case_dir/wt" push -q "$case_dir/canonical.git" \
+    "canonical-head-tmp:refs/pull/9/head"
+  git -C "$case_dir/wt" checkout -q fm/task-x1
+  git -C "$case_dir/wt" config \
+    url."$case_dir/canonical.git".insteadOf https://forgejo.example/owner/repo.git
+  write_task_meta "$case_dir" "pr=https://forgejo.example/owner/repo/pulls/9"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+canonical-pr' \
+    "forgejo-canonical-repository: diff should use the URL repository pull head"
+  assert_not_contains "$out" '+pr-fixed' \
+    "forgejo-canonical-repository: diff must not use origin's same-number pull"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "forgejo-canonical-repository: canonical repository pull fetch should succeed"
+  pass "fm-review-diff resolves Forgejo pull heads from their canonical repository"
 }
 
 test_noncanonical_pr_targets_are_rejected() {
@@ -214,7 +260,9 @@ test_unreachable_pr_head_falls_back_with_warning() {
 
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
+test_numeric_pr_meta_fetches_origin_pull_head
 test_forgejo_pr_meta_fetches_pull_head
+test_forgejo_pr_meta_uses_canonical_repository
 test_noncanonical_pr_targets_are_rejected
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch

@@ -77,25 +77,11 @@ if ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; th
   git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $WT" >&2; exit 1; }
 fi
 
-pr_number_from_target() {
-  local target=$1
-  if [[ "$target" =~ ^[1-9][0-9]*$ ]]; then
-    printf '%s' "$target"
-    return 0
-  fi
-  fm_pr_url_parse "$target" || return 1
-  case "$FM_PR_PROVIDER" in
-    github|forgejo) printf '%s' "$FM_PR_NUMBER" ;;
-    *) return 1 ;;
-  esac
-}
-
 fetch_pull_head() {
-  local n=$1 resolved
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
+  local source=$1 n=$2 resolved
   # Fetch into a private ref so a later base-branch fetch cannot clobber the
   # compare tip via FETCH_HEAD, and so we never review a stale local object.
-  git -C "$WT" fetch --quiet origin \
+  git -C "$WT" fetch --quiet "$source" \
     "+refs/pull/$n/head:refs/fm-review/pull/$n/head" >/dev/null 2>&1 || return 1
   resolved=$(git -C "$WT" rev-parse --verify "refs/fm-review/pull/$n/head^{commit}" 2>/dev/null) || return 1
   [ -n "$resolved" ] || return 1
@@ -103,9 +89,19 @@ fetch_pull_head() {
 }
 
 resolve_pr_head() {
-  local pr_url=$1 recorded_head=$2 n resolved
-  n=$(pr_number_from_target "$pr_url") || return 1
-  if resolved=$(fetch_pull_head "$n"); then
+  local pr_url=$1 recorded_head=$2 n resolved source=origin
+  if [[ "$pr_url" =~ ^[1-9][0-9]*$ ]]; then
+    n=$pr_url
+  else
+    fm_pr_url_parse "$pr_url" || return 1
+    n=$FM_PR_NUMBER
+    case "$FM_PR_PROVIDER" in
+      github) ;;
+      forgejo) source="https://$FM_PR_HOST/$FM_PR_PATH.git" ;;
+      *) return 1 ;;
+    esac
+  fi
+  if resolved=$(fetch_pull_head "$source" "$n"); then
     printf '%s' "$resolved"
     return 0
   fi

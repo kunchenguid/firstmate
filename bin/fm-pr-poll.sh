@@ -71,6 +71,7 @@ case "$provider" in
     case "$host" in
       .*|*.|*..*|*[!a-z0-9.-]*) exit 0 ;;
     esac
+    [[ ! "$host" =~ ^(0x[0-9a-f]+|[0-9]+)(\.(0x[0-9a-f]+|[0-9]+))*$ ]] || exit 0
     rest=$host
     while [ -n "$rest" ]; do
       case "$rest" in

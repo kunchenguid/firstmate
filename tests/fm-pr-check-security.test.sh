@@ -2974,6 +2974,15 @@ owner/repo
   ! grep -qF -- "$url" "$dir/forgejo-axi.log" \
     || fail "Forgejo poll passed the pull request URL to forgejo-axi"
 
+  for host in 127.0.0.1 2130706433 0x7f000001; do
+    : > "$dir/forgejo-axi.log"
+    out=$(FM_TEST_FORGEJO_MERGED=true FM_TEST_FORGEJO_AXI_LOG="$dir/forgejo-axi.log" \
+      PATH="$dir/fakebin:$BASE_PATH" bash "$POLL" --validated forgejo \
+      "https://$host/owner/repo/pulls/7" "$host" owner/repo 7)
+    [ -z "$out" ] || fail "Forgejo poll emitted for a numeric host"
+    [ ! -s "$dir/forgejo-axi.log" ] || fail "Forgejo poll reached forgejo-axi for a numeric host"
+  done
+
   printf '%s\n%s\n%s\n%s\n%s\n' forgejo "$url" elsewhere.example owner/repo 7 \
     > "$state/task-a.pr-poll"
   out=$(FM_TEST_FORGEJO_MERGED=true run_poll "$dir")
