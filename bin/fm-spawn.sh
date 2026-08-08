@@ -1664,14 +1664,15 @@ OVERLAP_STOPWORDS='the and for are was were has have had been being this that wi
 # matching.
 #
 # A candidate must clear BOTH a floor and a ratio, and the ratio is what makes
-# this usable. Measured against a real 140-item backlog, 254 branches, and 95
-# open pull requests, a bare two-token floor surfaced 61 candidates for one
-# task: in a fleet whose work all shares a house vocabulary, "two words in
-# common" is met by almost everything, and a set nobody can read is a set
-# nobody reads. Requiring a candidate to cover half of the SUBJECT's own
-# tokens is scale-free - it stays satisfied by the short ids of the recorded
-# incident, where two shared tokens are two thirds of the subject, and drops
-# the coincidental matches, whose share is a quarter or less.
+# this usable. Measured against a real 140-item backlog, 254 branches, and the
+# newest 95 of 534 open pull requests, a bare two-token floor surfaced 61
+# candidates for one task: in a fleet whose work all shares a house
+# vocabulary, "two words in common" is met by almost everything, and a set
+# nobody can read is a set nobody reads. Requiring the shared tokens to cover
+# half of the SMALLER of the two token vocabularies is scale-free - it stays
+# satisfied by the short ids of the recorded incident, where the two shared
+# tokens are half of the smaller vocabulary, and drops the coincidental
+# matches, whose share is a quarter or less.
 overlap_match() {  # <subject-text> <min-tokens> <min-percent>; candidate rows on stdin
   awk -v subject="$1" -v min="$2" -v pct="$3" -v stop=" $OVERLAP_STOPWORDS " '
     function norm(w) {
