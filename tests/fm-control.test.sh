@@ -101,8 +101,16 @@ case "${1:-}" in
       esac
     else
       printf '%s\n' "$payload" >> "$D/keys"
+      if [ -n "${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" ] \
+         && { [ "$payload" = Escape ] || [ "$payload" = C-c ]; }; then
+        printf 'zsh' > "$D/command"
+      fi
       if [ "$payload" = Escape ] && [ -n "${FM_FAKE_MUSE_LOG:-}" ]; then
-        printf '%s\n' '{"schema_version":1,"payload_type":"runtime.session","payload":{"kind":"run","run_id":"run-1","event":{"kind":"terminal","terminal":"cancelled","reason":null}}}' >> "$FM_FAKE_MUSE_LOG"
+        if [ -n "${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" ]; then
+          : > "$D/muse-ack-pending"
+        else
+          printf '%s\n' '{"schema_version":1,"payload_type":"runtime.session","payload":{"kind":"run","run_id":"run-1","event":{"kind":"terminal","terminal":"cancelled","reason":null}}}' >> "$FM_FAKE_MUSE_LOG"
+        fi
       fi
     fi
     exit 0 ;;
@@ -127,6 +135,12 @@ SH
   chmod +x "$fb/tmux"
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
+if [ -n "${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" ] \
+   && [ -e "$FM_FAKE_DIR/muse-ack-pending" ]; then
+  rm -f "$FM_FAKE_DIR/muse-ack-pending"
+  printf 'zsh' > "$FM_FAKE_DIR/command"
+  printf '%s\n' '{"schema_version":1,"payload_type":"runtime.session","payload":{"kind":"run","run_id":"run-1","event":{"kind":"terminal","terminal":"cancelled","reason":null}}}' >> "$FM_FAKE_MUSE_LOG"
+fi
 exit 0
 SH
   chmod +x "$fb/sleep"
@@ -180,6 +194,8 @@ run_control() {
     FM_CONTROL_POLL=0.01 FM_CONTROL_SETTLE_WAIT=0.05 \
     FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
     FM_FAKE_MUSE_LOG="${FM_FAKE_MUSE_LOG:-}" \
+    FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK="${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" \
+    FM_FAKE_INTERRUPT_STOPS_AGENT="${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -706,6 +722,49 @@ test_muse_interrupt_confirms_adapter_acknowledgement() {
   pass "fm-control interrupt: muse confirms cancellation from its session log"
 }
 
+test_interrupt_revalidates_agent_after_acknowledgement_wait() {
+  local dir root log out rc
+  dir=$(new_case ack-race)
+  add_task "$dir" t1 muse
+  alive_as "$dir" muse
+  root="$dir/muse-sessions"
+  log="$root/2026/08/08/session-1/session.jsonl"
+  mkdir -p "$(dirname "$log")"
+  printf '%s\n' \
+    "{\"schema_version\":1,\"payload_type\":\"runtime.session.metadata\",\"payload\":{\"kind\":\"metadata\",\"record\":{\"workspace_root\":\"$dir/wt-t1\"}}}" \
+    '{"schema_version":1,"payload_type":"runtime.session","payload":{"kind":"run","run_id":"run-1","event":{"kind":"started","prompt":"work"}}}' > "$log"
+  printf 'sessions_root=%s\nworkspace_root=%s\nbinding_id=test\n' \
+    "$root" "$dir/wt-t1" > "$dir/home/state/t1.muse-session"
+  out=$(FM_FAKE_MUSE_LOG="$log" FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK=1 \
+    run_control "$dir" t1 interrupt); rc=$?
+  expect_code 1 "$rc" "interrupt should fail when the agent stops during acknowledgement polling"
+  assert_contains "$out" "agent is 'dead' after its interrupt key" \
+    "the final postcondition should observe the agent after acknowledgement polling"
+  assert_not_contains "$out" "interrupt-delivered" \
+    "a stale pre-wait liveness proof must not be published"
+  pass "fm-control interrupt: postconditions are revalidated after acknowledgement polling"
+}
+
+test_exit_accepts_agent_stopped_by_busy_interrupt() {
+  local dir out rc gen
+  dir=$(new_case interrupt-stops)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  out=$(FM_FAKE_INTERRUPT_STOPS_AGENT=1 run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit should accept a busy agent stopped by interrupt"$'\n'"$out"
+  assert_contains "$out" "stopped t1 harness=claude" \
+    "the authoritative gone-state should complete exit successfully"
+  [ "$(keys_sent "$dir")" = Escape ] \
+    || fail "exit should deliver the busy agent's interrupt sequence"
+  [ -z "$(literals "$dir")" ] \
+    || fail "exit should not type a command after interrupt already stopped the agent"
+  [ ! -e "$dir/home/state/t1.busy-gen" ] && [ ! -e "$dir/home/state/t1.busy-state" ] \
+    || fail "exit should retire busy wiring for an agent stopped by interrupt"
+  pass "fm-control exit: an interrupt-stopped agent satisfies the gone-state postcondition"
+}
+
 test_agent_that_does_not_stop_fails_closed() {
   local dir out rc gen
   dir=$(new_case stubborn)
@@ -827,6 +886,8 @@ test_busy_agent_is_interrupted_before_the_exit_command
 test_idle_agent_is_not_interrupted
 test_interrupt_without_acknowledgement_preserves_busy_state
 test_muse_interrupt_confirms_adapter_acknowledgement
+test_interrupt_revalidates_agent_after_acknowledgement_wait
+test_exit_accepts_agent_stopped_by_busy_interrupt
 test_agent_that_does_not_stop_fails_closed
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation

@@ -391,13 +391,18 @@ interrupt_cancel_claim() {
   printf 'unconfirmed'
 }
 
-# do_interrupt: the shared interrupt action, used by the `interrupt` verb and
-# as `exit`'s busy precondition. Prints the delivery postcondition followed by
-# the independently observed cancellation claim.
-do_interrupt() {
-  local proof after cancel
+# deliver_interrupt: deliver and observe the strongest adapter-owned
+# cancellation claim available after delivery.
+deliver_interrupt() {
+  local cancel
   prepare_interrupt_ack
   send_interrupt_keys
+  cancel=$(interrupt_cancel_claim)
+  printf '%s' "$cancel"
+}
+
+verify_interrupt_running() {
+  local proof after
   fm_backend_target_exists "$BACKEND" "$T" "$LABEL" \
     || die "task $ID's endpoint disappeared while interrupting it; no further control action is safe"
   proof=endpoint
@@ -409,14 +414,26 @@ do_interrupt() {
       || die "task $ID's agent is '$after' after its interrupt key; an interrupt must leave the agent running"
     proof=agent-alive
   fi
-  cancel=$(interrupt_cancel_claim)
+  printf '%s' "$proof"
+}
+
+do_interrupt() {
+  local proof cancel
+  cancel=$(deliver_interrupt) || return $?
+  proof=$(verify_interrupt_running) || return $?
   printf '%s cancel=%s' "$proof" "$cancel"
+}
+
+retire_busy_incarnation() {
+  if [ -f "$STATE/$ID.busy-gen" ]; then
+    "$SCRIPT_DIR/fm-busy-event.sh" retire "$STATE" "$ID" --current-gen >/dev/null 2>&1 || true
+  fi
 }
 
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped` or `stopped`.
 do_exit() {
-  local state cmd verdict interrupt_result=not-needed
+  local state cmd verdict cancel interrupt_result=not-needed
   require_state_verified_backend exit
   state=$(agent_state)
   case "$state" in
@@ -430,7 +447,20 @@ do_exit() {
   esac
   # A busy agent is interrupted first before the exit command is submitted.
   case "$(busy_verdict)" in
-    busy*) interrupt_result="delivered verified=$(do_interrupt)" ;;
+    busy*)
+      cancel=$(deliver_interrupt) || return $?
+      state=$(agent_state)
+      case "$state" in
+        dead)
+          retire_busy_incarnation
+          printf 'stopped'
+          return 0
+          ;;
+        alive) interrupt_result="delivered verified=agent-alive cancel=$cancel" ;;
+        missing) die "task $ID's recorded endpoint disappeared after interrupt delivery, so exit cannot prove whether the agent stopped" ;;
+        *) die "task $ID's endpoint reads '$state' after interrupt delivery rather than a positively classified state; exit cannot prove whether the agent stopped" ;;
+      esac
+      ;;
   esac
   cmd=$(fm_control_exit_command "$HARNESS")
   # The submit verdict is NOT the postcondition here: a successful exit command
@@ -448,9 +478,7 @@ do_exit() {
   }
   # The incarnation is over: retire its busy wiring so no stale record or
   # orphaned generation survives the agent that produced it.
-  if [ -f "$STATE/$ID.busy-gen" ]; then
-    "$SCRIPT_DIR/fm-busy-event.sh" retire "$STATE" "$ID" --current-gen >/dev/null 2>&1 || true
-  fi
+  retire_busy_incarnation
   printf 'stopped'
 }
 
