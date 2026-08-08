@@ -121,6 +121,16 @@
 #     roots are unique per task and never
 #     shared, so this can never reach another task's or the primary's
 #     processes. Idempotent: nothing left to find is a silent no-op.
+#   Fix 3 - sweep abandoned remote job workers. A remote job worker started
+#     from a worktree's own bin/ outlives that worktree's removal without
+#     being reachable by Fix 2, because its working directory is wherever it
+#     was launched rather than the task worktree (observed 2026-08-07: 29
+#     workers at ppid 1, 1-2 days old, each still polling and appending to a
+#     log in a pruned no-mistakes gate worktree). bin/fm-remote-job-reap-orphans.sh
+#     owns that sweep and its safety rule; it never touches a worker whose code
+#     root still exists, so the account's healthy LaunchAgent worker and every
+#     live remote secondmate worker are out of scope. Best effort: a sweep
+#     failure never blocks this teardown.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -2202,6 +2212,10 @@ if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
+
+# Fix 3 (see script header): sweep remote job workers abandoned by an already
+# pruned code root. Best effort - a sweep failure never blocks this teardown.
+"$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
 
 # A Herdr close may reposition shared workspace order, so the whole
 # destructive sequence below (worktree return, pane close, record removal)
