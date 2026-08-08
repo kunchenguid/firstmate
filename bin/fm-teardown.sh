@@ -19,7 +19,7 @@
 # up a merged PR whose head branch matches the worktree's branch, fetching its head
 # via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
 # by itself causes a false refusal of landed work.
-# A gh lookup error falls back to the content check; if that is also inconclusive,
+# A forge lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
 # local-only projects additionally accept work merged into the local default
@@ -790,11 +790,16 @@ pr_number_from_target() {
 }
 
 ensure_commit_object() {
-  local target=$1 commit=$2 n
+  local target=$1 commit=$2 n source=origin
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
-  n=$(pr_number_from_target "$target") || return 1
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
+  if fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = forgejo ]; then
+    n=$FM_PR_NUMBER
+    source="https://$FM_PR_HOST/$FM_PR_PATH.git"
+  else
+    n=$(pr_number_from_target "$target") || return 1
+    git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
+  fi
+  git -C "$WT" fetch --quiet "$source" "refs/pull/$n/head" >/dev/null 2>&1 || return 1
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 

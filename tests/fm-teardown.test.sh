@@ -757,6 +757,44 @@ test_forgejo_squash_merged_branch_deleted_allows() {
   pass "Forgejo squash-merged work is safely teardown-eligible through guarded proof"
 }
 
+test_forgejo_missing_head_fetches_canonical_repo() {
+  local case_dir rc pr_head
+  case_dir=$(make_case forgejo-canonical-head-fetch)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add Forgejo feature"
+
+  git -C "$case_dir/wt" push -q origin "main:refs/pull/7/head"
+  git init -q --bare "$case_dir/canonical.git"
+  git -C "$case_dir/canonical.git" symbolic-ref HEAD refs/heads/main
+  git -C "$case_dir/wt" push -q "$case_dir/canonical.git" "HEAD:refs/heads/main"
+  git clone -q "$case_dir/canonical.git" "$case_dir/canonical-wt"
+  git -C "$case_dir/canonical-wt" -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m "Forgejo PR follow-up"
+  pr_head=$(git -C "$case_dir/canonical-wt" rev-parse HEAD)
+  git -C "$case_dir/canonical-wt" push -q origin "HEAD:refs/pull/7/head"
+  rm -rf "$case_dir/canonical-wt"
+  ! git -C "$case_dir/wt" cat-file -e "$pr_head^{commit}" 2>/dev/null \
+    || fail "forgejo-canonical-head-fetch: canonical head was already local"
+
+  git -C "$case_dir/wt" config \
+    url."$case_dir/canonical.git".insteadOf https://forgejo.example/owner/repo.git
+  printf '%s\n' \
+    'pr=https://forgejo.example/owner/repo/pulls/7' \
+    "pr_head=$pr_head" >> "$case_dir/state/task-x1.meta"
+  add_forgejo_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" \
+    "forgejo-canonical-head-fetch: teardown should fetch the canonical Forgejo head"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "forgejo-canonical-head-fetch: teardown printed a REFUSED line"
+  pass "Forgejo teardown fetches missing proof heads from canonical repository identity"
+}
+
 test_forgejo_malformed_merged_head_refuses() {
   local case_dir rc pr_head
   case_dir=$(make_case forgejo-malformed-merged-head)
@@ -2679,6 +2717,7 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
 test_squash_merged_branch_deleted_allows
 test_forgejo_squash_merged_branch_deleted_allows
+test_forgejo_missing_head_fetches_canonical_repo
 test_forgejo_malformed_merged_head_refuses
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
