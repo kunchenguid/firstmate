@@ -3,8 +3,8 @@
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
-# A GitHub pull request URL and a GitLab merge request URL are both accepted,
-# including a merge request on a self-hosted GitLab instance.
+# GitHub and Forgejo pull request URLs and GitLab merge request URLs are
+# accepted, including self-hosted Forgejo and GitLab instances.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -57,6 +57,10 @@ if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   echo "error: watching a GitLab merge request requires glab on PATH" >&2
   exit 1
 fi
+if [ "$PROVIDER" = forgejo ] && ! command -v forgejo-axi >/dev/null 2>&1; then
+  echo "error: watching a Forgejo pull request requires forgejo-axi on PATH" >&2
+  exit 1
+fi
 
 # Neutralize any pre-fix poll before recording or arming this task. The
 # migration never executes legacy artifacts and holds watcher exclusion while
@@ -64,10 +68,8 @@ fi
 "$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || exit 1
 "$FM_ROOT/bin/fm-guard.sh" || true
 
-# pr_head is recorded only when the forge's CLI can supply it. gh exposes the
-# head commit as a selectable field; plain glab exposes it only inside its JSON
-# output, which would need a JSON processor firstmate does not require, so a
-# GitLab task records no pr_head. Both consumers already treat it as optional:
+# pr_head is recorded only when the forge's CLI can supply it without a JSON
+# dependency. GitLab records none. Both consumers already treat it as optional:
 # bin/fm-teardown.sh reads the head from the forge at teardown rather than from
 # metadata and falls back to its provider-agnostic content check, and
 # bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
@@ -76,6 +78,12 @@ PR_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
+    PR_HEAD=$REMOTE_HEAD
+  fi
+elif [ "$PROVIDER" = forgejo ]; then
+  RAW_VIEW=$(forgejo-axi pr view --base-url "https://$HOST" --repo "$PROJECT_PATH" "$NUMBER" 2>/dev/null) || RAW_VIEW=
+  REMOTE_HEAD=$(printf '%s\n' "$RAW_VIEW" | sed -n 's/^[[:space:]]*head_sha:[[:space:]]*//p' | head -1)
+  if fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
   fi
 fi

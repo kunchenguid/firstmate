@@ -4,7 +4,7 @@
 # The check refuses to tear down a worktree whose work has not LANDED, because
 # treehouse return hard-resets the worktree. "Landed" means reachable from a remote
 # OR - for a normal ship task whose commits are not so reachable - its PR is merged
-# and GitHub reports a PR head that contains the current local work, or its content
+# and the forge reports a PR head that contains the current local work, or its content
 # is already in the up-to-date default branch.
 #
 # Covers three fixes:
@@ -284,6 +284,23 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
+add_forgejo_pr_merged_for_head() {
+  local case_dir=$1 head=$2
+  cat > "$case_dir/fakebin/forgejo-axi" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\$FM_TEST_FORGEJO_AXI_LOG"
+case "\${1:-} \${2:-}" in
+  "pr merged")
+    printf 'proof:\n  merged: true\n  head_sha: %s\n' '$head'
+    exit 0
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/forgejo-axi"
+  : > "$case_dir/forgejo-axi.log"
+}
+
 append_pr_meta_for_current_head() {
   local case_dir=$1 head
   head=$(git -C "$case_dir/wt" rev-parse HEAD)
@@ -545,6 +562,7 @@ run_teardown() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_TEST_FORGEJO_AXI_LOG="$case_dir/forgejo-axi.log" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
 }
@@ -713,6 +731,30 @@ test_squash_merged_branch_deleted_allows() {
   expect_code 0 "$rc" "squash-merged: teardown should succeed when the PR is merged"
   ! grep -q REFUSED "$case_dir/stderr" || fail "squash-merged: teardown printed a REFUSED line"
   pass "squash-merged + deleted-branch worktree (PR merged) is torn down (the fix)"
+}
+
+test_forgejo_squash_merged_branch_deleted_allows() {
+  local case_dir rc pr_head
+  case_dir=$(make_case forgejo-squash-merged)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add Forgejo feature"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf '%s\n' \
+    'pr=https://forgejo.example/owner/repo/pulls/7' \
+    "pr_head=$pr_head" >> "$case_dir/state/task-x1.meta"
+  add_forgejo_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "forgejo-squash-merged: teardown should accept exact merged proof"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "forgejo-squash-merged: teardown printed a REFUSED line"
+  grep -qxF 'pr merged --base-url https://forgejo.example --repo owner/repo 7' \
+    "$case_dir/forgejo-axi.log" \
+    || fail "forgejo-squash-merged: teardown did not use validated Forgejo identity arguments"
+  pass "Forgejo squash-merged work is safely teardown-eligible through guarded proof"
 }
 
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
@@ -2612,6 +2654,7 @@ test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
 test_squash_merged_branch_deleted_allows
+test_forgejo_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch

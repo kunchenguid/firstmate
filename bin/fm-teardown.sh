@@ -9,7 +9,7 @@
 # reachable from any remote-tracking branch (a fork counts as a remote, so
 # upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
-# GitHub reports a PR head that contains the current local work, or its content is
+# the forge reports a PR head that contains the current local work, or its content is
 # already present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main.
@@ -776,6 +776,10 @@ pr_number_from_target() {
       n=${target##*/pull/}
       n=${n%%[!0-9]*}
       ;;
+    *"/pulls/"*)
+      n=${target##*/pulls/}
+      n=${n%%[!0-9]*}
+      ;;
     [0-9]*)
       n=${target%%[!0-9]*}
       ;;
@@ -827,24 +831,38 @@ EOF
 }
 
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
-# PR from the recorded pr= URL first, then from the branch name, and asks GitHub
-# for both the PR state and head. Returns non-zero when the PR is not merged, the
-# current work is not contained in the PR head, no PR is found, or any gh error
-# occurs - the caller then falls back to the content check.
+# PR from the recorded pr= URL first, then from the branch name, and asks its
+# forge for both the PR state and head. Returns non-zero when the PR is not
+# merged, the current work is not contained in the PR head, no PR is found, or
+# any forge lookup fails - the caller then falls back to the content check.
 pr_is_merged() {
-  local branch=$1 target view state head current
+  local branch=$1 target provider view state head current
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
+    fm_pr_url_parse "$target" || return 1
+    provider=$FM_PR_PROVIDER
   else
     target=$(pr_number_from_branch "$branch") || return 1
+    provider=github
   fi
   [ -n "$target" ] || return 1
-  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
-  state=${view%%$'\t'*}
-  head=${view#*$'\t'}
-  [ "$state" != "$view" ] || return 1
-  case "$state" in
-    MERGED|merged) ;;
+  case "$provider" in
+    github)
+      view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
+      state=${view%%$'\t'*}
+      head=${view#*$'\t'}
+      [ "$state" != "$view" ] || return 1
+      case "$state" in
+        MERGED|merged) ;;
+        *) return 1 ;;
+      esac
+      ;;
+    forgejo)
+      view=$(forgejo-axi pr merged --base-url "https://$FM_PR_HOST" --repo "$FM_PR_PATH" "$FM_PR_NUMBER" 2>/dev/null) || return 1
+      state=$(printf '%s\n' "$view" | sed -n 's/^[[:space:]]*merged:[[:space:]]*//p' | head -1)
+      [ "$state" = true ] || return 1
+      head=$(printf '%s\n' "$view" | sed -n 's/^[[:space:]]*head_sha:[[:space:]]*//p' | head -1)
+      ;;
     *) return 1 ;;
   esac
   [ -n "$head" ] || return 1

@@ -87,10 +87,26 @@ printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
 SH
-  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
+  cat > "$fakebin/forgejo-axi" <<'SH'
+#!/usr/bin/env bash
+[ -z "${FM_TEST_FORGEJO_AXI_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_TEST_FORGEJO_AXI_LOG"
+[ "${FM_TEST_FORGEJO_AXI_FAIL:-0}" = 0 ] || exit 1
+case "${1:-} ${2:-}" in
+  "pr view")
+    printf 'pull_request:\n  head_sha: %s\n' "${FM_TEST_FORGEJO_HEAD:-0123456789abcdef0123456789abcdef01234567}"
+    ;;
+  "pr merged")
+    printf 'proof:\n  merged: %s\n  head_sha: %s\n' \
+      "${FM_TEST_FORGEJO_MERGED:-false}" \
+      "${FM_TEST_FORGEJO_HEAD:-0123456789abcdef0123456789abcdef01234567}"
+    ;;
+esac
+SH
+  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab" "$fakebin/forgejo-axi"
   : > "$dir/gh.log"
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
+  : > "$dir/forgejo-axi.log"
   : > "$dir/guard.log"
   printf '%s\n' "$dir"
 }
@@ -238,6 +254,7 @@ run_check_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_FORGEJO_AXI_LOG="$dir/forgejo-axi.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
 }
@@ -248,6 +265,7 @@ run_merge_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_FORGEJO_AXI_LOG="$dir/forgejo-axi.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
 }
@@ -271,6 +289,24 @@ INVALID_URLS=(
   'https://.gitlab.com/g/p/-/merge_requests/1'
   'https://gitlab.com./g/p/-/merge_requests/1'
   'http://gitlab.com/g/p/-/merge_requests/1'
+  'https://github.com/o/r/pulls/1'
+  'https://gitlab.com/o/r/pulls/1'
+  'https://Forgejo.example/o/r/pulls/1'
+  'https://forgejo.example:443/o/r/pulls/1'
+  'https://user@forgejo.example/o/r/pulls/1'
+  'https://forgejo.example./o/r/pulls/1'
+  'https://forgejo.example/o/r/pulls/1/'
+  'https://forgejo.example/o/r/pulls/0'
+  'https://forgejo.example/o/r/pulls/01'
+  'https://forgejo.example/o/r/pulls/1?x=1'
+  'https://forgejo.example/o/r/pulls/1#note'
+  'https://forgejo.example/o/r/pull/1'
+  'https://forgejo.example/o/sub/r/pulls/1'
+  'https://forgejo.example/o%2Fr/pulls/1'
+  'https://forgejo.example/o/r%2Fx/pulls/1'
+  'https://forgejo.example/./r/pulls/1'
+  'https://forgejo.example/o/../pulls/1'
+  $'https://forgejo.example/o/r/pulls/1\nnext'
   'https://github.com/o/r/pull/1/'
   ' https://github.com/o/r/pull/1'
   'https://github.com/o/r/pull/1 '
@@ -406,6 +442,20 @@ https://gitlab.com/group/project/-/merge_requests/1|gitlab.com|group/project|1
 https://gitlab.com/group/sub/deep/project/-/merge_requests/42|gitlab.com|group/sub/deep/project|42
 https://gitlab.example.co.uk/g/p/-/merge_requests/7|gitlab.example.co.uk|g/p|7
 https://code.internal/team/tools/ci-runner/-/merge_requests/123456|code.internal|team/tools/ci-runner|123456
+EOF
+  while IFS='|' read -r url host owner repo number; do
+    [ -n "$url" ] || continue
+    fm_pr_url_parse "$url" || fail "parser rejected a canonical Forgejo pull request URL"
+    [ "$FM_PR_PROVIDER" = forgejo ] || fail "parser did not tag a Forgejo URL as forgejo"
+    [ "$FM_PR_URL" = "$url" ] || fail "parser changed a canonical Forgejo URL"
+    [ "$FM_PR_HOST" = "$host" ] || fail "parser returned wrong Forgejo host"
+    [ "$FM_PR_PATH" = "$owner/$repo" ] || fail "parser returned wrong Forgejo repository path"
+    [ "$FM_PR_OWNER" = "$owner" ] && [ "$FM_PR_REPO" = "$repo" ] \
+      || fail "parser returned wrong Forgejo owner/repository"
+    [ "$FM_PR_NUMBER" = "$number" ] || fail "parser returned wrong Forgejo pull number"
+  done <<'EOF'
+https://forgejo.samesies.gay/eve/orchalycious/pulls/39|forgejo.samesies.gay|eve|orchalycious|39
+https://code.example.co.uk/Team_1/repo-name.with.parts/pulls/123456|code.example.co.uk|Team_1|repo-name.with.parts|123456
 EOF
   fm_pr_url_parse https://github.com/a/b/pull/1 || fail "parser rejected canonical URL"
   [ "$FM_PR_PROVIDER" = github ] || fail "parser did not tag a pull request URL as github"
@@ -705,6 +755,7 @@ make_poll_fixture() {
 run_poll() {
   local dir=$1
   FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_FORGEJO_AXI_LOG="$dir/forgejo-axi.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     bash "$dir/home/state/task-a.check.sh"
 }
@@ -2885,6 +2936,79 @@ EOF
   pass "GitLab merge requests are followed on any instance and never wake falsely"
 }
 
+test_forgejo_merge_watch() {
+  local dir state out rc url value noforgejo entry bindir name
+  dir=$(make_case forgejo-merge-watch)
+  state="$dir/home/state"
+  url=https://forgejo.example/owner/repo/pulls/7
+  write_task_meta "$dir" task-a
+
+  run_check_entry "$dir" task-a "$url" >/dev/null
+  grep -qxF "pr=$url" "$state/task-a.meta" || fail "Forgejo check did not record canonical pr= metadata"
+  grep -qxF 'pr_head=0123456789abcdef0123456789abcdef01234567' "$state/task-a.meta" \
+    || fail "Forgejo check did not record the validated head SHA"
+  [ "$(cat "$state/task-a.pr-poll")" = "forgejo
+$url
+forgejo.example
+owner/repo
+7" ] || fail "published Forgejo sidecar bytes were not exact"
+  grep -qxF 'pr view --base-url https://forgejo.example --repo owner/repo 7' "$dir/forgejo-axi.log" \
+    || fail "Forgejo head lookup did not use the validated base URL, repository, and pull number"
+
+  for value in false TRUE merged '' true-but-not; do
+    out=$(FM_TEST_FORGEJO_MERGED="$value" run_poll "$dir")
+    [ -z "$out" ] || fail "Forgejo poll emitted for a non-merged result"
+  done
+  out=$(FM_TEST_FORGEJO_MERGED=true run_poll "$dir")
+  [ "$out" = merged ] || fail "Forgejo poll did not emit exactly one merged line"
+  out=$(FM_TEST_FORGEJO_MERGED=true FM_TEST_FORGEJO_AXI_FAIL=1 run_poll "$dir")
+  [ -z "$out" ] || fail "Forgejo poll emitted after a forgejo-axi failure"
+  grep -qF 'pr merged --base-url https://forgejo.example --repo owner/repo 7' "$dir/forgejo-axi.log" \
+    || fail "Forgejo poll did not use the validated base URL, repository, and pull number"
+  ! grep -qF -- "$url" "$dir/forgejo-axi.log" \
+    || fail "Forgejo poll passed the pull request URL to forgejo-axi"
+
+  printf '%s\n%s\n%s\n%s\n%s\n' forgejo "$url" elsewhere.example owner/repo 7 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_FORGEJO_MERGED=true run_poll "$dir")
+  [ -z "$out" ] || fail "Forgejo poll emitted for a sidecar whose host was swapped"
+  printf '%s\n%s\n%s\n%s\n%s\n' forgejo "$url" forgejo.example owner/other 7 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_FORGEJO_MERGED=true run_poll "$dir")
+  [ -z "$out" ] || fail "Forgejo poll emitted for a sidecar whose repository was swapped"
+
+  noforgejo="$dir/noforgejo"
+  mkdir -p "$noforgejo"
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=$(basename "$entry")
+      [ "$name" = forgejo-axi ] && continue
+      [ -e "$noforgejo/$name" ] || ln -s "$entry" "$noforgejo/$name" 2>/dev/null
+    done
+  done <<EOF
+$dir/fakebin
+$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+EOF
+  ! PATH="$noforgejo" command -v forgejo-axi >/dev/null 2>&1 \
+    || fail "the forgejo-axi-free search path still resolved forgejo-axi"
+  write_task_meta "$dir" task-b
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_TEST_GUARD_LOG="$dir/guard.log" PATH="$noforgejo" \
+    "$PR_CHECK" task-b "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming a Forgejo watch succeeded with forgejo-axi absent"
+  case "$out" in
+    *"requires forgejo-axi on PATH"*) ;;
+    *) fail "arming a Forgejo watch with forgejo-axi absent did not report the missing CLI" ;;
+  esac
+  [ ! -e "$state/task-b.check.sh" ] || fail "refused Forgejo arming left a poll armed"
+  pass "Forgejo pull requests record their head and wake only on exact merged truth"
+}
+
 seed_canonical_poll() {
   local dir=$1 id=$2 url=$3 template=${4:-$POLL} state provider host path number
   state="$dir/home/state"
@@ -3325,8 +3449,28 @@ test_gitlab_merged_poll_retires() {
   pass "GitHub and GitLab exact merged results share one retirement path"
 }
 
+test_forgejo_merged_poll_retires() {
+  local dir state url rc
+  dir=$(make_case forgejo-merged-retirement)
+  state="$dir/home/state"
+  url=https://forgejo.example/owner/repo/pulls/17
+  write_poll_meta "$state" task-a "$url"
+  seed_canonical_poll "$dir" task-a "$url"
+  set +e
+  FM_TEST_FORGEJO_MERGED=true run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "Forgejo merged retirement watcher failed: $(cat "$dir/watch.err")"
+  case "$(cat "$dir/watch.out")" in check:*task-a.check.sh:*merged) ;; *) fail "Forgejo merged wake was missing" ;; esac
+  assert_poll_absent "$state" task-a
+  grep -qxF "pr=$url" "$state/task-a.meta" || fail "Forgejo retirement removed canonical metadata"
+  pass "Forgejo exact merged results use the guarded retirement path"
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
+test_forgejo_merge_watch
 test_merged_poll_retires_once
 test_persistent_secondmate_retirement_is_poll_only
 test_retirement_crash_recovery
@@ -3334,6 +3478,7 @@ test_external_merge_transition_retires_only_terminal_poll
 test_retirement_refuses_replacement_and_nonterminal_results
 test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
+test_forgejo_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert

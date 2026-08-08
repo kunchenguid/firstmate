@@ -133,6 +133,22 @@ test_pr_meta_fetches_pull_head_without_recorded_sha() {
   pass "fm-review-diff fetches refs/pull/<n>/head when pr_head= is absent"
 }
 
+test_forgejo_pr_meta_fetches_pull_head() {
+  local case_dir out
+  case_dir=$(make_case forgejo-pr-fetch)
+  stale_and_pr_commits "$case_dir"
+  git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/pull/9/head"
+  write_task_meta "$case_dir" "pr=https://forgejo.example/owner/repo/pulls/9"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+pr-fixed' "forgejo-pr-fetch: diff should use fetched pull head"
+  assert_not_contains "$out" 'stale-local' "forgejo-pr-fetch: diff must not use the stale local branch"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "forgejo-pr-fetch: should not warn when refs/pull/<n>/head resolves"
+  pass "fm-review-diff resolves a Forgejo /pulls/<n> URL through refs/pull/<n>/head"
+}
+
 test_no_pr_meta_uses_local_branch() {
   local case_dir out
   case_dir=$(make_case no-pr-meta)
@@ -171,6 +187,7 @@ test_unreachable_pr_head_falls_back_with_warning() {
 
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
+test_forgejo_pr_meta_fetches_pull_head
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning

@@ -14,6 +14,7 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
+#   (i) Forgejo uses validated base/repository identity, expected head, and readiness
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -84,11 +85,33 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
+add_forgejo_mock() {
+  local case_dir=$1 head=$2
+  cat > "$case_dir/fakebin/forgejo-axi" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\$FM_TEST_FORGEJO_AXI_LOG"
+case "\${1:-} \${2:-}" in
+  "pr view")
+    printf 'pull_request:\n  head_sha: %s\n' '$head'
+    ;;
+  "pr mergeability")
+    printf 'mergeability:\n  head_sha: %s\n  mergeable: %s\n' '$head' "\${FM_TEST_FORGEJO_MERGEABLE:-true}"
+    ;;
+  "pr merge")
+    [ "\${FM_TEST_FORGEJO_MERGE_RC:-0}" = 0 ] || exit "\$FM_TEST_FORGEJO_MERGE_RC"
+    printf 'proof:\n  merged: true\n  head_sha: %s\n' '$head'
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/forgejo-axi"
+}
+
 run_pr_merge() {
   local case_dir=$1 rc; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_FORGEJO_AXI_LOG="$case_dir/forgejo-axi.log" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
   rc=$?
@@ -245,7 +268,7 @@ test_repo_override_args_refuse_before_recording() {
   set -e
 
   expect_code 1 "$rc" "repo-override: fm-pr-merge should refuse repo override flags"
-  assert_grep 'extra merge arguments must not override the repository' "$case_dir/stderr" \
+  assert_grep 'extra merge arguments must not override PR identity' "$case_dir/stderr" \
     "repo-override: refusal did not explain the repo override"
   assert_no_grep 'pr=https://github.com/right/repo/pull/5' "$case_dir/state/task-x1.meta" \
     "repo-override: PR URL was recorded before rejecting repo override"
@@ -301,6 +324,97 @@ test_parses_pr_url_for_gh_axi() {
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
+test_forgejo_records_head_and_merges_ready_pull() {
+  local case_dir head
+  case_dir=$(make_case forgejo-ready)
+  mkdir -p "$case_dir/wt"
+  head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  add_forgejo_mock "$case_dir" "$head"
+  : > "$case_dir/forgejo-axi.log"
+
+  run_pr_merge "$case_dir" task-x1 https://forgejo.example/owner/repo/pulls/39 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "forgejo-ready: fm-pr-merge failed"
+
+  assert_grep 'pr=https://forgejo.example/owner/repo/pulls/39' "$case_dir/state/task-x1.meta" \
+    "forgejo-ready: canonical pr= was not recorded"
+  assert_grep "pr_head=$head" "$case_dir/state/task-x1.meta" \
+    "forgejo-ready: validated pr_head= was not recorded"
+  grep -qxF 'pr view --base-url https://forgejo.example --repo owner/repo 39' "$case_dir/forgejo-axi.log" \
+    || fail "forgejo-ready: head lookup did not use validated identity arguments"
+  grep -qxF 'pr mergeability --base-url https://forgejo.example --repo owner/repo 39' "$case_dir/forgejo-axi.log" \
+    || fail "forgejo-ready: readiness check did not use validated identity arguments"
+  grep -qxF "pr merge --base-url https://forgejo.example --repo owner/repo 39 --expected-head $head --method squash" \
+    "$case_dir/forgejo-axi.log" \
+    || fail "forgejo-ready: merge did not use validated identity, expected head, and default squash"
+  pass "fm-pr-merge records and merges a ready Forgejo pull through forgejo-axi"
+}
+
+test_forgejo_unready_pull_refuses_before_merge() {
+  local case_dir rc
+  case_dir=$(make_case forgejo-unready)
+  mkdir -p "$case_dir/wt"
+  add_forgejo_mock "$case_dir" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  : > "$case_dir/forgejo-axi.log"
+
+  set +e
+  FM_TEST_FORGEJO_MERGEABLE=false run_pr_merge "$case_dir" task-x1 \
+    https://forgejo.example/owner/repo/pulls/40 > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "forgejo-unready: failed or pending work must refuse"
+  assert_grep 'Forgejo pull request is not mergeable' "$case_dir/stderr" \
+    "forgejo-unready: refusal did not explain readiness"
+  assert_no_grep '^pr merge --base-url' "$case_dir/forgejo-axi.log" \
+    "forgejo-unready: merge was attempted despite failed or pending readiness"
+  pass "fm-pr-merge refuses a Forgejo pull whose checks or mergeability are not ready"
+}
+
+test_forgejo_server_refusal_propagates() {
+  local case_dir rc
+  case_dir=$(make_case forgejo-server-refusal)
+  mkdir -p "$case_dir/wt"
+  add_forgejo_mock "$case_dir" cccccccccccccccccccccccccccccccccccccccc
+  : > "$case_dir/forgejo-axi.log"
+
+  set +e
+  FM_TEST_FORGEJO_MERGE_RC=1 run_pr_merge "$case_dir" task-x1 \
+    https://forgejo.example/owner/repo/pulls/41 > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "forgejo-server-refusal: review-required merge refusal must propagate"
+  grep -q '^pr merge --base-url ' "$case_dir/forgejo-axi.log" \
+    || fail "forgejo-server-refusal: the guarded merge command was not reached"
+  pass "fm-pr-merge propagates Forgejo server refusals such as required review"
+}
+
+test_forgejo_identity_overrides_refuse_before_recording() {
+  local case_dir rc flag value
+  for flag in --base-url --expected-head; do
+    case_dir=$(make_case "forgejo-override-${flag#--}")
+    mkdir -p "$case_dir/wt"
+    add_forgejo_mock "$case_dir" dddddddddddddddddddddddddddddddddddddddd
+    : > "$case_dir/forgejo-axi.log"
+    case "$flag" in
+      --base-url) value=https://evil.example ;;
+      --expected-head) value=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee ;;
+    esac
+    set +e
+    run_pr_merge "$case_dir" task-x1 https://forgejo.example/owner/repo/pulls/42 -- "$flag" "$value" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "forgejo-override: $flag must refuse"
+    assert_grep 'extra merge arguments must not override PR identity' "$case_dir/stderr" \
+      "forgejo-override: $flag refusal was not fixed"
+    assert_no_grep '^pr=' "$case_dir/state/task-x1.meta" \
+      "forgejo-override: $flag was rejected only after recording"
+    [ ! -s "$case_dir/forgejo-axi.log" ] || fail "forgejo-override: $flag reached forgejo-axi"
+  done
+  pass "fm-pr-merge refuses Forgejo base URL and expected-head overrides before recording"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -311,3 +425,7 @@ test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
+test_forgejo_records_head_and_merges_ready_pull
+test_forgejo_unready_pull_refuses_before_merge
+test_forgejo_server_refusal_propagates
+test_forgejo_identity_overrides_refuse_before_recording

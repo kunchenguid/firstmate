@@ -4,13 +4,11 @@
 # constructing task paths or performing any side effect.
 #
 # The stored identity is provider-tagged: provider, url, host, path, number.
-# "path" is the full project path, which is owner/repository on GitHub and an
-# arbitrarily nested group/subgroup/project namespace on GitLab. A GitLab
-# project can sit at any depth, so no owner/repository pair can address one and
-# the sidecar carries the whole path instead. GitLab also runs on self-hosted
-# instances, so the host is part of that identity rather than a constant. Every
-# consumer re-derives the identity from the stored URL and refuses any record
-# whose parts do not reconstruct that exact URL.
+# "path" is owner/repository on GitHub and Forgejo, and the full arbitrarily
+# nested group/subgroup/project namespace on GitLab. Self-hosted forge hosts
+# carry their validated host in that identity. Every consumer re-derives the
+# identity from the stored URL and refuses any record whose parts do not
+# reconstruct that exact URL.
 #
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
@@ -134,6 +132,31 @@ fm_pr_gitlab_host_valid() {
   done
 }
 
+fm_pr_forgejo_host_valid() {
+  local host=${1-}
+  fm_pr_gitlab_host_valid "$host" || return 1
+  [ "$host" != gitlab.com ]
+}
+
+fm_pr_forgejo_path_valid() {
+  local path=${1-} owner repo
+  local LC_ALL=C
+  case "$path" in
+    ''|/*|*/|*/*/*) return 1 ;;
+    */*) ;;
+    *) return 1 ;;
+  esac
+  owner=${path%%/*}
+  repo=${path#*/}
+  [ "${#owner}" -le 100 ] && [ "${#repo}" -le 100 ] || return 1
+  case "$owner" in
+    .|..|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  case "$repo" in
+    .|..|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+}
+
 # A GitLab project path is group[/subgroup...]/project, so at least two
 # segments and no fixed depth. GitLab reserves "-" as its route separator and
 # forbids a leading hyphen, ".git", and ".atom", so none of those can name a
@@ -158,13 +181,12 @@ fm_pr_gitlab_path_valid() {
 
 # Parse a canonical PR or MR URL into the provider-tagged identity. Validation
 # is strict and per provider: the GitHub username and repository rules are
-# unchanged, and GitLab gets its own host and namespace rules rather than a
-# loosened GitHub rule.
+# unchanged, Forgejo gets an exact host/owner/repository shape, and GitLab
+# keeps its own host and nested namespace rules.
 #
-# FM_PR_OWNER and FM_PR_REPO are additionally set for github because
-# bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab URL leaves
-# them empty; teaching the merge path about GitLab is a separate change, and
-# until then it refuses a GitLab URL rather than merging anything.
+# FM_PR_OWNER and FM_PR_REPO are set for GitHub and Forgejo because both merge
+# paths address pull requests by owner/repository. A GitLab URL leaves them
+# empty; GitLab merge support remains out of scope.
 fm_pr_url_parse() {
   local raw=${1-} pattern host path
   local LC_ALL=C
@@ -189,6 +211,23 @@ fm_pr_url_parse() {
     # shellcheck disable=SC2034
     FM_PR_REPO=${BASH_REMATCH[2]}
     FM_PR_NUMBER=${BASH_REMATCH[3]}
+    return 0
+  fi
+  pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._-]{1,100})/([A-Za-z0-9._-]{1,100})/pulls/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    host=${BASH_REMATCH[1]}
+    path="${BASH_REMATCH[2]}/${BASH_REMATCH[3]}"
+    fm_pr_forgejo_host_valid "$host" || return 1
+    fm_pr_forgejo_path_valid "$path" || return 1
+    FM_PR_PROVIDER=forgejo
+    FM_PR_URL=$raw
+    FM_PR_HOST=$host
+    FM_PR_PATH=$path
+    # shellcheck disable=SC2034
+    FM_PR_OWNER=${BASH_REMATCH[2]}
+    # shellcheck disable=SC2034
+    FM_PR_REPO=${BASH_REMATCH[3]}
+    FM_PR_NUMBER=${BASH_REMATCH[4]}
     return 0
   fi
   # The path class contains "/" and "-", so this match is greedy to the last
