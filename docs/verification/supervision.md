@@ -310,6 +310,40 @@ fm-doc-audience-check: ok surfaces=64 local_links=188
 FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=80078
 ```
 
+That predicate was extended to Codex on 2026-08-08: `bin/fm-wake-lib.sh` gained a `checkpoint` supervision model for a Codex primary, and `bin/fm-spawn.sh` pins a spawned Codex secondmate to it instead of `persistent`.
+The counterfactual ran against the pre-change guard at `833a9a2`, in a throwaway home whose process table reports a Codex ancestor, holding a fresh beacon and no watcher process - the healthy gap between one foreground checkpoint returning and the next starting.
+
+```text
+before (833a9a2)  ●  WATCHER DOWN - SUPERVISION IS OFF
+                  ●  1 task(s) in flight, but no live watcher process holds this home lock (last beat: 0s ago).
+after             (no output)
+```
+
+The corrected guard still alarms in the same home when no checkpoint has polled within grace, so the fix narrows the predicate rather than silencing it:
+
+```text
+●  1 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 999s).
+```
+
+The commands below are scoped to the two suites that own this correction rather than the sibling records' wider list.
+
+```sh
+bin/fm-lint.sh
+bin/fm-doc-audience-check.sh
+bin/fm-test-run.sh tests/fm-guard-stale-banner.test.sh tests/fm-secondmate-harness.test.sh
+```
+
+Observed output:
+
+```text
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-doc-audience-check: ok surfaces=65 local_links=218
+FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=213308
+```
+
+`tests/fm-guard-stale-banner.test.sh` passed 20 assertions, including the checkpoint model's healthy fresh-beacon case, its stale-beacon alarm, and detected-Codex model selection.
+`tests/fm-secondmate-harness.test.sh` passed 47, including the C9 case that pins a spawned secondmate to `autoarm`, `checkpoint`, or `persistent` by its own harness rather than the primary's.
+
 The broader relevant regression pass was rerun on 2026-08-02 without live-home or daemon mutation.
 
 ```sh
