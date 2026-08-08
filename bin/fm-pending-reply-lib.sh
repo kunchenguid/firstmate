@@ -52,6 +52,9 @@
 #                           when the durable status decision opened by that
 #                           escalation was closed again (see the escalation
 #                           lifecycle note below); empty until then
+#   escalation_checked_epoch=
+#                           when a resolved record was confirmed never to have
+#                           published a durable escalation
 #   resolved_epoch=
 #   resolved_via=           status | document | helper | delivery | operator |
 #                           empty
@@ -1032,18 +1035,23 @@ fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
 }
 
 _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
-  local state=$1 corr=$2 rec escalated closed parent_status escalation key note
+  local state=$1 corr=$2 rec escalated closed checked parent_status escalation key note
   local open_line open_key open_note now
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   [ "$(fm_pending_reply_get "$rec" phase)" = resolved ] || return 0
   escalated=$(fm_pending_reply_get "$rec" escalated_epoch)
   closed=$(fm_pending_reply_get "$rec" escalation_closed_epoch)
-  [ -z "$closed" ] || return 0
+  checked=$(fm_pending_reply_get "$rec" escalation_checked_epoch)
+  [ -z "$closed" ] && [ -z "$checked" ] || return 0
   parent_status=$(fm_pending_reply_get "$rec" parent_status)
   [ -n "$parent_status" ] || return 1
   escalation=$(fm_pending_reply_escalation_line "$parent_status" "$rec" "$corr")
-  [ -n "$escalated" ] || [ -n "$escalation" ] || return 0
+  if [ -z "$escalated" ] && [ -z "$escalation" ]; then
+    now=$(fm_pending_reply_now)
+    fm_pending_reply_set "$rec" escalation_checked_epoch "$now"
+    return $?
+  fi
   if [ -n "$escalation" ]; then
     key=$(_fm_decision_key "$escalation") || key=''
     note=$(status_line_note "$escalation")

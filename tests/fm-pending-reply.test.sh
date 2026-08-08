@@ -98,7 +98,7 @@ phase_of() {  # <state> <corr>
 # --- tests ------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once() {
-  local home state corr status rec
+  local home state corr status rec checked
   home=$(setup_parent resolve-once)
   state="$home/state"
   export FM_PENDING_REPLY_NOW=1000
@@ -117,6 +117,12 @@ test_normal_correlated_reply_resolves_once() {
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ "$(fm_pending_reply_get "$rec" resolved_via)" = status ] \
     || fail "resolved_via should be status"
+  checked=$(fm_pending_reply_get "$rec" escalation_checked_epoch)
+  [ "$checked" = 1000 ] || fail "non-escalated resolution should persist its terminal scan"
+  export FM_PENDING_REPLY_NOW=1001
+  fm_pending_reply_tick "$state" || fail "resolved record tick should succeed"
+  [ "$(fm_pending_reply_get "$rec" escalation_checked_epoch)" = "$checked" ] \
+    || fail "resolved record repeated its terminal escalation scan"
   pass "normal correlated reply resolves once (idempotent)"
 }
 
