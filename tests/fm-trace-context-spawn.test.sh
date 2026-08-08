@@ -82,6 +82,30 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  # Publication commits a task record by renaming its staged file into place
+  # (publish_task_meta_atomic in bin/fm-spawn.sh). Interposing on that rename
+  # records the exact bytes publication commits, and how many times it commits
+  # them, without reading a line of the implementation: whatever the final
+  # record holds afterwards that these bytes do not is a post-publication
+  # mutation. Every other rename passes straight through.
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -n "${FM_FAKE_META_PUBLISH_CAPTURE:-}" ]; then
+  args=("$@")
+  n=${#args[@]}
+  if [ "$n" -ge 2 ]; then
+    case "${args[$((n - 1))]}" in
+      *.meta)
+        printf '%s\n' "${args[$((n - 1))]}" >> "$FM_FAKE_META_PUBLISH_CAPTURE.log"
+        cat "${args[$((n - 2))]}" > "$FM_FAKE_META_PUBLISH_CAPTURE"
+        ;;
+    esac
+  fi
+fi
+exec /bin/mv "$@"
+SH
+  chmod +x "$fakebin/mv"
   fm_fake_exit0 "$fakebin" treehouse
   printf '%s\n' "$fakebin"
 }
@@ -121,6 +145,7 @@ run_spawn() {
     FM_FAKE_TRACEPARENT_SEND_FAIL="${FM_FAKE_TRACEPARENT_SEND_FAIL:-0}" \
     FM_FAKE_TRACEPARENT_SEND_UNSAFE="${FM_FAKE_TRACEPARENT_SEND_UNSAFE:-0}" \
     FM_FAKE_TRACE_META_OBSERVE="${FM_FAKE_TRACE_META_OBSERVE:-}" \
+    FM_FAKE_META_PUBLISH_CAPTURE="${FM_FAKE_META_PUBLISH_CAPTURE:-}" \
     FM_FAKE_META_PATH="$home/state/$1.meta" \
     FM_FAKE_LAUNCH_LOG="$launchlog" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" --mode no-mistakes --yolo off 2>&1
@@ -326,14 +351,15 @@ test_unsafe_delivery_refuses_to_append_launch() {
 }
 
 test_trace_delivery_precedes_single_complete_metadata_publication() {
-  local rec out status meta observed
+  local rec out status meta observed committed commits
   rec=$(make_spawn_case tc-prepublish-trace)
   read_case_record "$rec"
   : > "$HOME_DIR/config/trace-context"
   start_trace_session "$HOME_DIR"
   observed="$TMP_ROOT/tc-prepublish-trace.meta-observed"
+  committed="$TMP_ROOT/tc-prepublish-trace.meta-committed"
 
-  out=$(FM_FAKE_TRACE_META_OBSERVE="$observed" \
+  out=$(FM_FAKE_TRACE_META_OBSERVE="$observed" FM_FAKE_META_PUBLISH_CAPTURE="$committed" \
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "enabled trace-context spawn should publish after delivery resolves"
@@ -344,7 +370,20 @@ test_trace_delivery_precedes_single_complete_metadata_publication() {
     || fail "the final metadata path was visible while TRACEPARENT delivery was still resolving"
   fm_trace_context_valid "$(meta_traceparent "$meta")" \
     || fail "the single final metadata record omitted the confirmed carrier"
-  pass "TRACEPARENT delivery resolves before one complete metadata record becomes visible"
+
+  # The record is published ONCE and never touched again. Without this, a
+  # variant that publishes an incomplete record and then appends the carrier to
+  # the already-published path satisfies every assertion above: the path is
+  # still absent during delivery, and the final record still holds a valid
+  # carrier. Readers do not see the final bytes - they see whatever is at the
+  # path when they read it, so a record that grows after publication is a
+  # record other processes can read half-formed.
+  commits=$(wc -l < "$committed.log" 2>/dev/null || printf 0)
+  [ "$commits" -eq 1 ] \
+    || fail "the task record was committed $commits times, expected exactly one complete publication"
+  cmp -s "$committed" "$meta" \
+    || fail "the published record was mutated after publication (committed: $(cat "$committed") / final: $(cat "$meta"))"
+  pass "TRACEPARENT delivery resolves before one complete metadata record becomes visible, and that record is never mutated after publication"
 }
 
 test_duplicate_secondmate_spawn_does_not_converge_trace_context() {

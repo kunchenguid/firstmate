@@ -212,31 +212,117 @@ ef_res=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$NOMETA"); ef_r
 pass "entropy failure omits telemetry safely: mint reports failure, resolve returns success with no carrier"
 
 # --- fail-independent timing: no hang source, always returns 0 ---------------
+# Observed by running the resolver with `sleep` and `timeout` shadowed by
+# recorders that only ever run if the library actually invokes them. The
+# library's documented external dependencies are `od` and `tr` alone (see its
+# "Security / trust boundary" note), which still resolve from the real PATH
+# behind the probe directory.
 
-assert_no_grep 'sleep' "$ROOT/bin/fm-trace-context-lib.sh" "trace-context lib must not sleep on the spawn path"
-assert_no_grep 'timeout' "$ROOT/bin/fm-trace-context-lib.sh" "trace-context lib must not depend on an external timeout"
-assert_no_grep 'command:' "$ROOT/bin/fm-trace-context-lib.sh" "trace-context lib must not run an arbitrary command provider"
-fm_trace_context_resolve "$CFG_OFF" "$NOMETA" >/dev/null || fail "resolve must return 0 when off"
-pass "the resolver has no sleep/timeout/command hang source and always returns success"
-
-# --- harness/backend/kind independence (code only, comments stripped) ---------
-
-LIB_CODE=$(sed 's/#.*$//' "$ROOT/bin/fm-trace-context-lib.sh")
-for tok in harness backend tmux herdr zellij orca cmux claude codex opencode grok kind ship scout secondmate ; do
-  case "$LIB_CODE" in
-    *"$tok"*) fail "trace-context lib code must be harness/backend/kind agnostic, but references '$tok'" ;;
-  esac
+PROBE_BIN=$(fm_fakebin "$WORK/no-hang")
+PROBE_LOG="$WORK/no-hang.log"
+: > "$PROBE_LOG"
+for probe in sleep timeout ; do
+  cat > "$PROBE_BIN/$probe" <<'SH'
+#!/usr/bin/env bash
+printf '%s %s\n' "${0##*/}" "$*" >> "$FM_TRACE_PROBE_LOG"
+exit 0
+SH
+  chmod +x "$PROBE_BIN/$probe"
 done
-pass "the carrier is minted identically for every harness, backend, and spawn kind (no such branching in the lib code)"
+export FM_TRACE_PROBE_LOG="$PROBE_LOG"
+PROBE_SAVED_PATH=$PATH
+PATH="$PROBE_BIN:$PATH"
+hash -r
+probe_off=$(fm_trace_context_resolve "$CFG_OFF" "$NOMETA"); probe_off_rc=$?
+probe_mint=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_OFF" "$NOMETA"); probe_mint_rc=$?
+probe_reuse=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$REC_META"); probe_reuse_rc=$?
+PATH=$PROBE_SAVED_PATH
+hash -r
+unset FM_TRACE_PROBE_LOG
+[ ! -s "$PROBE_LOG" ] || fail "the resolver invoked an external sleep or timeout: $(cat "$PROBE_LOG")"
+[ -z "$probe_off" ] && [ "$probe_off_rc" -eq 0 ] || fail "the off path must omit and return 0 (rc=$probe_off_rc out='$probe_off')"
+fm_trace_context_valid "$probe_mint" && [ "$probe_mint_rc" -eq 0 ] || fail "the mint path must yield a valid carrier and return 0 (rc=$probe_mint_rc out='$probe_mint')"
+[ "$probe_reuse" = "$VALID" ] && [ "$probe_reuse_rc" -eq 0 ] || fail "the reuse path must return the recorded carrier and return 0 (rc=$probe_reuse_rc out='$probe_reuse')"
+pass "no resolve path invokes sleep or an external timeout, and every path returns success"
 
-# --- no prompt / task-prose reads (code only, comments stripped) --------------
+# --- config/trace-context is a presence flag, never a command provider --------
+# A file whose CONTENT is shaped like a provider spec must stay inert data: the
+# capability enables because the file EXISTS, and nothing in it is executed.
 
-for tok in brief prompt report status ; do
-  case "$LIB_CODE" in
-    *"$tok"*) fail "trace-context lib code must never read task prose, but references '$tok'" ;;
+HOSTILE_CFG="$WORK/cfg-hostile"
+mkdir -p "$HOSTILE_CFG"
+printf 'command: touch %s/pwned-provider\nsleep: 30\nprovider: $(touch %s/pwned-subst)\n' \
+  "$WORK" "$WORK" > "$HOSTILE_CFG/trace-context"
+hostile=$(fm_trace_context_resolve "$HOSTILE_CFG" "$NOMETA"); hostile_rc=$?
+fm_trace_context_valid "$hostile" && [ "$hostile_rc" -eq 0 ] \
+  || fail "a provider-shaped config file must still enable as a plain presence flag (rc=$hostile_rc out='$hostile')"
+[ ! -e "$WORK/pwned-provider" ] && [ ! -e "$WORK/pwned-subst" ] \
+  || fail "config/trace-context content must never be executed as a command provider"
+pass "config/trace-context enables by existing; its content is inert data, never a command provider"
+
+# --- harness/backend/kind independence (executable, not a source scan) -------
+# The claim is that one carrier is resolved identically for every harness,
+# backend, and spawn kind. Proven by resolving against real metadata records
+# that differ ONLY in those fields: a source scan for the token names would pass
+# an equivalent refactor that branches through a variable, and would fail a
+# comment that merely mentions a backend.
+
+AGNOSTIC_DIR="$WORK/agnostic"
+mkdir -p "$AGNOSTIC_DIR"
+agnostic_minted=
+for combo in \
+  claude:tmux:ship codex:herdr:scout opencode:zellij:secondmate \
+  pi:orca:ship grok:cmux:scout kimi:tmux:secondmate ; do
+  a_harness=${combo%%:*}
+  a_rest=${combo#*:}
+  a_backend=${a_rest%%:*}
+  a_kind=${a_rest#*:}
+
+  a_reuse_meta="$AGNOSTIC_DIR/$a_harness-$a_backend-$a_kind.reuse.meta"
+  printf 'harness=%s\nbackend=%s\nkind=%s\ntraceparent=%s\nmode=no-mistakes\n' \
+    "$a_harness" "$a_backend" "$a_kind" "$VALID" > "$a_reuse_meta"
+  a_out=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$a_reuse_meta")
+  [ "$a_out" = "$VALID" ] \
+    || fail "a recorded carrier must be reused verbatim for harness=$a_harness backend=$a_backend kind=$a_kind (got '$a_out')"
+
+  a_mint_meta="$AGNOSTIC_DIR/$a_harness-$a_backend-$a_kind.mint.meta"
+  printf 'harness=%s\nbackend=%s\nkind=%s\nmode=no-mistakes\n' \
+    "$a_harness" "$a_backend" "$a_kind" > "$a_mint_meta"
+  a_out=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$a_mint_meta")
+  fm_trace_context_valid "$a_out" \
+    || fail "a fresh root must be minted for harness=$a_harness backend=$a_backend kind=$a_kind (got '$a_out')"
+  case "$agnostic_minted" in
+    *"${a_out:3:32}"*) fail "harness=$a_harness backend=$a_backend kind=$a_kind reused another combination's trace id, so minting branches on it" ;;
   esac
+  agnostic_minted="$agnostic_minted ${a_out:3:32}"
 done
-pass "the lib code never reads a brief, prompt, report, or status - it cannot leak content"
+pass "every harness, backend, and spawn kind reuses one recorded carrier verbatim and otherwise roots its own fresh trace"
+
+# --- no prompt / task-prose reads (executable, not a source scan) -------------
+# The carrier must be a fresh random root, never derived from the task's own
+# prose. A derived value would be STABLE across calls on the same record, so
+# resolving the same prose-laden metadata twice and getting two distinct roots
+# is what rules derivation out - and neither root may carry the prose bytes.
+
+PROSE_SENTINEL=leakcanary7f3
+PROSE_DIR="$WORK/prose"
+mkdir -p "$PROSE_DIR"
+PROSE_META="$PROSE_DIR/task.meta"
+printf 'kind=ship\nbrief=%s\nprompt=%s\nreport=%s\nstatus=%s\n' \
+  "$PROSE_SENTINEL" "$PROSE_SENTINEL" "$PROSE_SENTINEL" "$PROSE_SENTINEL" > "$PROSE_META"
+for prose_file in brief.md prompt.md report.md status.md ; do
+  printf 'secret %s\n' "$PROSE_SENTINEL" > "$PROSE_DIR/$prose_file"
+done
+prose_a=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$PROSE_META")
+prose_b=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$PROSE_META")
+fm_trace_context_valid "$prose_a" && fm_trace_context_valid "$prose_b" \
+  || fail "resolving beside task prose must still yield valid carriers (a='$prose_a' b='$prose_b')"
+case "$prose_a$prose_b" in
+  *"$PROSE_SENTINEL"*) fail "a carrier leaked task prose into its value (a='$prose_a' b='$prose_b')" ;;
+esac
+[ "${prose_a:3:32}" != "${prose_b:3:32}" ] \
+  || fail "two resolves of one prose-laden record returned the same trace id, so the carrier is derived from content rather than freshly minted"
+pass "a carrier resolved beside a brief, prompt, report, and status is a fresh random root that carries none of their bytes"
 
 # --- secondmate inheritance wires the nested chain ---------------------------
 
