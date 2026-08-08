@@ -46,10 +46,12 @@ lib_eval() {  # <fakebin> <expression>
 }
 
 test_version_named_session_is_identified_on_both_platforms() {
-  local dir fakebin shape got
+  local dir fakebin proc_root shape got
   dir="$TMP_ROOT/version-named"
   fakebin=$(fm_fakebin "$dir")
-  mkdir -p "$dir/state"
+  proc_root="$dir/proc"
+  mkdir -p "$dir/state" "$proc_root/700"
+  printf '/opt/claude/versions/2.1.220\0--resume\0' > "$proc_root/700/cmdline"
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -76,12 +78,12 @@ SH
   printf '700\n' > "$dir/state/.lock"
 
   for shape in linux macos; do
-    got=$(FM_TEST_CLAUDE_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    got=$(FM_PROC_ROOT_OVERRIDE="$proc_root" FM_TEST_CLAUDE_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
       || fail "$shape: the version-named session was not found in the ancestry at all"
     [ "$got" = 700 ] || fail "$shape: ancestry resolved '$got', expected the version-named session pid 700"
-    FM_TEST_CLAUDE_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_alive 700' \
+    FM_PROC_ROOT_OVERRIDE="$proc_root" FM_TEST_CLAUDE_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_alive 700' \
       || fail "$shape: a live version-named session was not recognized as a harness"
-    FM_TEST_CLAUDE_SHAPE="$shape" lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    FM_PROC_ROOT_OVERRIDE="$proc_root" FM_TEST_CLAUDE_SHAPE="$shape" lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
       || fail "$shape: the session holding the lock did not recognize itself as the owner"
   done
   pass "session-lock: a version-named Claude Code session is identified from its install path and argv[0]"
@@ -105,7 +107,7 @@ while [ "$#" -gt 0 ]; do
 done
 case "$pid:$field:${FM_TEST_PATH_SHAPE:-hookdir}" in
   810:comm=:hookdir) printf '%s\n' '/home/u/.claude/hooks/notify.sh' ;;
-  810:args=:hookdir) printf '%s\n' '/home/u/.claude/hooks/notify.sh --quiet' ;;
+  810:args=:hookdir) printf '%s\n' 'bash /tmp/claude/helper.sh' ;;
   810:comm=:piprefix) printf '%s\n' '/opt/pipeline/bin/runner' ;;
   810:args=:piprefix) printf '%s\n' '/opt/pipeline/bin/runner --once' ;;
   810:ppid=:*) printf '%s\n' 1 ;;
@@ -338,10 +340,12 @@ SH
 }
 
 test_competing_version_named_session_is_seen_as_live() {
-  local dir fakebin
+  local dir fakebin proc_root
   dir="$TMP_ROOT/competing"
   fakebin=$(fm_fakebin "$dir")
-  mkdir -p "$dir/state"
+  proc_root="$dir/proc"
+  mkdir -p "$dir/state" "$proc_root/600"
+  printf '/opt/claude/versions/2.1.220\0' > "$proc_root/600/cmdline"
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -370,10 +374,10 @@ SH
   # descends from 650 instead. Treating 600 as dead would let this session
   # reclaim a live competitor's home.
   printf '600\n' > "$dir/state/.lock"
-  if lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+  if FM_PROC_ROOT_OVERRIDE="$proc_root" lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
     fail "a lock held outside this ancestry was claimed as this session's own"
   fi
-  lib_eval "$fakebin" 'fm_harness_pid_alive 600' \
+  FM_PROC_ROOT_OVERRIDE="$proc_root" lib_eval "$fakebin" 'fm_harness_pid_alive 600' \
     || fail "a live competing version-named session was classified as a dead lock owner"
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }

@@ -3063,14 +3063,18 @@ test_composer_state_cursor_bare_arrow_requires_context() {
 test_composer_state_cursor_idle_placeholder_is_empty() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-cursor-idle"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  # Bare cursor idle row: → Add a follow-up (plain capture; the styled form
-  # is exercised by the ghost-strip fixtures in fm-composer-ghost.test.sh).
-  printf '  → Add a follow-up\n\n  ctrl+c to stop\n' > "$resp/1.out"
+  printf '\033[0m\033[48;2;21;21;21m \033[0m\033[2m\033[48;2;21;21;21m→ \033[0m\033[7m\033[48;2;21;21;21mA\033[0m\033[2m\033[48;2;21;21;21mdd a follow-up\033[0m\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_COMPOSER_HARNESS=cursor FM_COMPOSER_IDLE_RE='^Add a follow-up$' \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
   [ "$out" = empty ] || fail "cursor idle '→ Add a follow-up' should read empty, got '$out'"
-  pass "fm_backend_herdr_composer_state: cursor idle placeholder reads empty via the idle regex"
+  : > "$log"
+  rm -f "$resp/.count"
+  printf '  → Add a follow-up\n\n  ctrl+c to stop\n' > "$resp/1.out"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_COMPOSER_HARNESS=cursor FM_COMPOSER_IDLE_RE='^Add a follow-up$' \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "cursor idle text without ANSI evidence should stay pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: cursor idle requires de-emphasis evidence"
 }
 
 test_composer_state_cursor_arrow_leading_requires_context() {
@@ -3086,10 +3090,10 @@ test_composer_state_cursor_arrow_leading_requires_context() {
     rm -f "$resp/.count"
     out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_COMPOSER_HARNESS=cursor FM_COMPOSER_IDLE_RE='^Add a follow-up$' \
       bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
-    [ "$out" = empty ] || fail "Cursor leading arrow '$row' should read empty, got '$out'"
+    [ "$out" = pending ] || fail "Cursor leading arrow '$row' without ANSI evidence should stay pending, got '$out'"
     i=$((i + 1))
   done
-  pass "fm_backend_herdr_composer_state: leading Cursor arrows stay harness-scoped"
+  pass "fm_backend_herdr_composer_state: leading Cursor arrows need de-emphasis evidence"
 }
 
 test_composer_state_cursor_dimmed_bare_row_stays_unknown() {

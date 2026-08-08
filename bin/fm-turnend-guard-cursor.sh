@@ -338,12 +338,14 @@ if [ "$ARM_ACTIONABLE" -eq 1 ]; then
     COUNT=1
   fi
   WAKE_SEEN=0
-  for KNOWN_REASON in ${CHAIN_REASONS[@]+"${CHAIN_REASONS[@]}"}; do
-    if [ "$KNOWN_REASON" = "$WAKE_REASON" ]; then
-      WAKE_SEEN=1
-      break
-    fi
-  done
+  if [ "${#CHAIN_REASONS[@]}" -gt 0 ]; then
+    for KNOWN_REASON in "${CHAIN_REASONS[@]}"; do
+      if [ "$KNOWN_REASON" = "$WAKE_REASON" ]; then
+        WAKE_SEEN=1
+        break
+      fi
+    done
+  fi
   TOTAL=$CHAIN_TOTAL
   if [ "$WAKE_SEEN" -eq 1 ]; then
     TOTAL=$((TOTAL + 1))

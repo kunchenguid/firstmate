@@ -232,7 +232,7 @@ The adapter locates the bottom-most recognized bordered row, Claude `❯` row, C
 A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains pending or unknown.
 
 Cursor's idle composer (`→ Add a follow-up`) is fully de-emphasised, and Herdr relays the app's raw split SGR sequences (`ESC[0m` + `ESC[7m`, `ESC[0m` + `ESC[2m`) where tmux coalesces them.
-The shared `fm_composer_strip_ghost` keeps the reverse-video gap open across a bare reset so the cursor cell drops identically on both transports, and the plain-row plus idle-regex call shape makes the ghost-only row read `empty` only when it matches the harness idle placeholder - a dimmed bare `→` row without the placeholder stays `unknown`, never an injection target.
+The shared `fm_composer_strip_ghost` keeps the reverse-video gap open across a bare reset so the cursor cell drops identically on both transports, and the plain-row plus idle-regex call shape makes an ANSI-proven ghost-only row read `empty` only when it matches the harness idle placeholder - a plain capture or dimmed bare `→` row without the placeholder stays `pending` or `unknown`, never an injection target.
 
 ANSI capture preserves de-emphasized placeholder style.
 `bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.
