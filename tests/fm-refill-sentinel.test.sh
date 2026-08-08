@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Public-interface tests for the private fleet sentinel: it consumes the
+# shared capacity object and owns only cadence, candidate query, logging, and
+# notification policy; it never counts.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+TMP_ROOT=$(fm_test_tmproot fm-refill-sentinel)
+export FM_REFILL_SENTINEL_LOG="$TMP_ROOT/sentinel.log"
+# Hermetic candidate query: the sentinel must never touch the real
+# decision-os clone (its br reads must not auto-flush the tracked export).
+export FM_REFILL_PROJECT="$TMP_ROOT/project"
+mkdir -p "$FM_REFILL_PROJECT"
+
+# Real fm-fleet-capacity.v1 fixtures consumed by the sentinel tests. safe.json
+# is a complete observation at the refill target (six working ships, no
+# reconciliation, no timeout), so the sentinel stays silent; alert.json
+# carries a legacy meta row that requires reconciliation, so the projection is
+# not refill-safe and the sentinel must notify.
+# shellcheck source=bin/fm-attempt-lib.sh
+. "$ROOT/bin/fm-attempt-lib.sh"
+
+export FM_CAPACITY_READ_TIMEOUT_SECS=2
+export FM_CAPACITY_TOTAL_TIMEOUT_SECS=10
+export FM_CREW_STATE_BIN="$TMP_ROOT/fm-crew-state.sh"
+SAFE_STATE="$TMP_ROOT/safe-state"
+ALERT_STATE="$TMP_ROOT/alert-state"
+mkdir -p "$SAFE_STATE" "$ALERT_STATE" "$TMP_ROOT/safe-data" "$TMP_ROOT/alert-data"
+
+cat > "$TMP_ROOT/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"schema":"fm-crew-state.v1","id":"fixture","state":"working","source":"run-step","detail":"busy"}'
+SH
+chmod +x "$TMP_ROOT/fm-crew-state.sh"
+
+build_safe_projection() {
+  local i aid
+  for i in 1 2 3 4 5 6; do
+    aid=$(FM_STATE_OVERRIDE="$SAFE_STATE" FM_DATA_OVERRIDE="$TMP_ROOT/safe-data" \
+      fm_attempt_alloc pi "safe-$i" holu) || fail "safe fixture alloc $i"
+    FM_STATE_OVERRIDE="$SAFE_STATE" FM_DATA_OVERRIDE="$TMP_ROOT/safe-data" \
+      fm_attempt_freeze_allocation "$aid" 1 '{"provider":"tmux","copy":"wt-x"}' \
+      '{"mode":"direct-PR","base":"main","target":"origin/main","planned_path":"docs/"}' \
+      || fail "safe fixture freeze $i"
+    FM_STATE_OVERRIDE="$SAFE_STATE" FM_DATA_OVERRIDE="$TMP_ROOT/safe-data" \
+      fm_attempt_effect_observe "$aid" 1 launch '{"endpoint":"w1"}' || fail "safe fixture launch $i"
+    printf 'kind=ship\nmode=direct-PR\nattempt=%s\n' "$aid" > "$SAFE_STATE/safe-$i.meta"
+  done
+  FM_STATE_OVERRIDE="$SAFE_STATE" FM_DATA_OVERRIDE="$TMP_ROOT/safe-data" \
+    "$ROOT/bin/fm-fleet-refill.sh" --count-json > "$TMP_ROOT/safe.json" 2>/dev/null \
+    || fail "safe projection generation"
+}
+
+build_alert_projection() {
+  printf 'kind=ship\nmode=direct-PR\n' > "$ALERT_STATE/legacy-1.meta"
+  FM_STATE_OVERRIDE="$ALERT_STATE" FM_DATA_OVERRIDE="$TMP_ROOT/alert-data" \
+    "$ROOT/bin/fm-fleet-refill.sh" --count-json > "$TMP_ROOT/alert.json" 2>/dev/null \
+    || fail "alert projection generation"
+}
+
+build_safe_projection
+build_alert_projection
+jq -e '.aggregate.refill_safe == true' "$TMP_ROOT/safe.json" >/dev/null \
+  || fail "safe fixture is not refill-safe"
+jq -e '.aggregate.refill_safe == false and .aggregate.reconciliation_required == true' \
+  "$TMP_ROOT/alert.json" >/dev/null \
+  || fail "alert fixture does not require reconciliation"
+
+test_sentinel_is_silent_when_refill_is_safe() {
+  local out rc
+  out=$(FM_CAPACITY_OBSERVATION_FILE="$TMP_ROOT/safe.json" \
+    "$ROOT/bin/fm-refill-sentinel.sh" 2>&1); rc=$?
+  expect_code 0 "$rc" "safe sentinel should exit 0"
+  [ -z "$out" ] || fail "safe sentinel printed: $out"
+  pass "sentinel stays silent when the projection is refill-safe"
+}
+
+test_sentinel_notifies_on_reconciliation_or_alert() {
+  local out rc
+  out=$(FM_CAPACITY_OBSERVATION_FILE="$TMP_ROOT/alert.json" \
+    "$ROOT/bin/fm-refill-sentinel.sh" 2>&1); rc=$?
+  expect_code 1 "$rc" "alerting sentinel should exit 1"
+  assert_contains "$out" "REFILL-ALERT" "alert line missing"
+  pass "sentinel emits one alert line when reconciliation or alert-only applies"
+}
+
+test_sentinel_never_counts() {
+  local out
+  out=$(FM_CAPACITY_OBSERVATION_FILE="$TMP_ROOT/safe.json" FM_REFILL_SENTINEL_VERBOSE=1 \
+    "$ROOT/bin/fm-refill-sentinel.sh" 2>&1)
+  assert_not_contains "$out" "productive_count" "sentinel recomputed capacity"
+  pass "sentinel never classifies or recounts; it only consumes the object"
+}
+
+test_sentinel_is_silent_when_refill_is_safe
+test_sentinel_notifies_on_reconciliation_or_alert
+test_sentinel_never_counts

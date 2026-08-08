@@ -132,6 +132,34 @@ EOF
     "mode=ship"
 }
 
+# Task 13: the snapshot embeds the shared capacity object from one frozen
+# observation byte-identically; it never classifies or recounts.
+test_snapshot_capacity_embed_matches_frozen_object() {
+  local home fakebin frozen out
+  home=$(make_home capacity-embed)
+  write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  # hermetic working crew read so the frozen projection is deterministic
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"schema":"fm-crew-state.v1","id":"fixture","state":"working","source":"run-step","detail":"busy"}'
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+  frozen="$TMP_ROOT/capacity-frozen.json"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    "$ROOT/bin/fm-fleet-refill.sh" --count-json 2>/dev/null > "$frozen"
+  jq -e '.schema == "fm-fleet-capacity.v1"' "$frozen" >/dev/null \
+    || fail "frozen observation is not the capacity object"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_CAPACITY_OBSERVATION_FILE="$frozen" "$SNAPSHOT" --json)
+  [ "$(jq -c '.rows' "$frozen")" = "$(printf '%s' "$out" | jq -c '.capacity.rows')" ] \
+    || fail "snapshot capacity rows differ from the frozen object"
+  [ "$(jq -c '.aggregate' "$frozen")" = "$(printf '%s' "$out" | jq -c '.capacity.aggregate')" ] \
+    || fail "snapshot capacity aggregate differs from the frozen object"
+  pass "snapshot capacity embed is byte-identical to the frozen observation"
+}
+
 test_empty_fleet_json() {
   local home out view
   home=$(make_home empty)
@@ -794,3 +822,4 @@ test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
+test_snapshot_capacity_embed_matches_frozen_object

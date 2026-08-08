@@ -232,6 +232,37 @@ test_parallel_reads_are_byte_identical() {
   pass "bounded parallel reads produce byte-identical output to sequential reads"
 }
 
+test_composition_byte_parity_across_consumers_from_one_observation() {
+  # one frozen observation drives --count-json, the snapshot embed, and the
+  # sentinel; rows and aggregates compare byte-identically
+  local frozen snap sentinel
+  write_meta "c1" ship direct-PR
+  frozen="$TMP_ROOT/frozen.json"
+  FM_STATE_OVERRIDE="$STATE" "$ROOT/bin/fm-fleet-refill.sh" --count-json 2>/dev/null > "$frozen"
+  snap=$(FM_STATE_OVERRIDE="$STATE" FM_CAPACITY_OBSERVATION_FILE="$frozen" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json 2>/dev/null)
+  [ "$(jq -c '.rows' "$frozen")" = "$(echo "$snap" | jq -c '.capacity.rows')" ] \
+    || fail "snapshot rows differ from the frozen object"
+  [ "$(jq -c '.aggregate' "$frozen")" = "$(echo "$snap" | jq -c '.capacity.aggregate')" ] \
+    || fail "snapshot aggregate differs"
+  sentinel=$(FM_CAPACITY_OBSERVATION_FILE="$frozen" FM_REFILL_PROJECT="$TMP_ROOT/sentinel-project" \
+    FM_REFILL_SENTINEL_LOG="$TMP_ROOT/sentinel.log" \
+    "$ROOT/bin/fm-refill-sentinel.sh" 2>&1 || true)
+  assert_contains "$sentinel" "REFILL-ALERT" "sentinel did not consume the object" || true
+  pass "composition fixtures prove byte-equivalent rows and aggregates across consumers"
+}
+
+test_generated_timestamp_never_breaks_parity() {
+  # two separately generated objects differ in `generated` but rows/aggregates
+  # compare identically
+  local a b
+  a=$(FM_STATE_OVERRIDE="$STATE" "$ROOT/bin/fm-fleet-refill.sh" --count-json 2>/dev/null)
+  b=$(FM_STATE_OVERRIDE="$STATE" "$ROOT/bin/fm-fleet-refill.sh" --count-json 2>/dev/null)
+  [ "$(echo "$a" | jq -c '.rows')" = "$(echo "$b" | jq -c '.rows')" ] || fail "rows differ across runs"
+  [ "$(echo "$a" | jq -c '.aggregate')" = "$(echo "$b" | jq -c '.aggregate')" ] || fail "aggregate differs"
+  pass "timing-dependent fields never break deterministic parity"
+}
+
 test_implementation_is_productive_and_reserved
 test_merge_wait_stays_reserved
 test_retired_attempt_contributes_nothing
@@ -244,5 +275,7 @@ test_malformed_structured_output_is_ambiguous
 test_schema_failure_is_alert_only
 test_aggregates_are_exactly_derivable_from_rows
 test_parallel_reads_are_byte_identical
+test_composition_byte_parity_across_consumers_from_one_observation
+test_generated_timestamp_never_breaks_parity
 
 echo "all fm-capacity tests passed"

@@ -11,6 +11,10 @@
 #   generated: UTC observation time for this fresh command execution.
 #   fm_home: resolved operational home.
 #   roots: resolved root/config/data/state/projects directories.
+#   capacity: the exact shared fm-fleet-capacity.v1 object from
+#     fm_capacity_project (rows plus aggregates). The snapshot only embeds
+#     it; it never classifies or recounts. FM_CAPACITY_OBSERVATION_FILE, when
+#     set, makes this a pure read of one frozen observation.
 #   backlog: {path,present,records[]} where records are ordered as written in
 #     data/backlog.md and cover In flight, Queued, and Done.
 #     Canonical tasks-axi rows are structured; free-form non-empty lines in
@@ -137,6 +141,9 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIME
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"  # fm_run_timed: the shared hard bound
+# shellcheck source=bin/fm-capacity-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-capacity-lib.sh"  # fm_capacity_project: the one shared capacity object (fm-fleet-capacity.v1)
 
 usage() {
   cat <<'EOF'
@@ -1355,6 +1362,20 @@ if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
 fi
 
 SCOUT_REPORTS_JSON=$(scout_report_lines)
+# Task 13: the snapshot embeds the exact shared capacity object computed by
+# fm_capacity_project with the same FM_*_OVERRIDE pass-through crew_state_json
+# uses. The snapshot never classifies or recounts; it consumes the object.
+# FM_CAPACITY_OBSERVATION_FILE (when set) makes this a pure read of one frozen
+# observation, which is what the byte-parity fixtures drive.
+CAPACITY_JSON=$(
+  FM_ROOT_OVERRIDE="$FM_ROOT" \
+    FM_HOME="$FM_HOME" \
+    FM_STATE_OVERRIDE="$STATE" \
+    FM_DATA_OVERRIDE="$DATA" \
+    FM_PROJECTS_OVERRIDE="$PROJECTS" \
+    FM_CONFIG_OVERRIDE="$CONFIG" \
+    fm_capacity_project 2>/dev/null || true
+)
 MAIN_INVENTORY_JSON=$(main_inventory_json "$BACKLOG_JSON" "$TASKS_JSON") \
   || { echo "fm-fleet-snapshot: main inventory summary failed" >&2; exit 1; }
 SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_JSON") \
@@ -1376,6 +1397,7 @@ jq -n \
   --argjson scout_reports "$SCOUT_REPORTS_JSON" \
   --argjson secondmate_current "$SECONDMATE_CURRENT_JSON" \
   --argjson secondmate_landed "$SECONDMATE_LANDED_JSON" \
+  --arg capacity "$CAPACITY_JSON" \
   'def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
    def task_by_id($id): ($tasks[]? | select(.id == $id) | .) // null;
    def report_kind($id): (task_by_id($id).kind // backlog_by_id($id).kind // "scout");
@@ -1384,6 +1406,7 @@ jq -n \
      generated:$generated,
      fm_home:$fm_home,
      roots:{fm_root:$fm_root,state:$state,data:$data,config:$config,projects:$projects},
+     capacity:($capacity | fromjson),
      backlog:$backlog,
      tasks:($tasks | map(. + {backlog:backlog_by_id(.id)})),
      main_inventory:$main_inventory,

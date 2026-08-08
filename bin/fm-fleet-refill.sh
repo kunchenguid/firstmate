@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Fleet refill — fleet-depth quarantine (2026-08-08).
+# Fleet refill — shared-projection verdict (Task 13 cutover).
 #
-# The legacy capacity arithmetic is QUARANTINED: the owned-manifest/output
-# mtime battery count and the DISPATCH-NEEDED verdict are disabled until the
-# shared capacity projection (fm-fleet-capacity.v1) is cut over after parity
-# proof. This script never emits a dispatch verdict and never stages work.
-# The serialization-debt safety probe and the authoritative bead-query
-# diagnostic remain.
+# The human verdict is derived solely from the shared capacity projection
+# (fm-fleet-capacity.v1): productive, reserved, refill_safe, alert_only, and
+# reconciliation come from fm_capacity_project, never from legacy arithmetic.
+# The legacy owned-manifest/output mtime battery count and the DISPATCH-NEEDED
+# verdict were quarantined in Task 3 and never return; this script emits no
+# dispatch verdict and stages no work. The serialization-debt safety probe
+# and the authoritative bead-query diagnostic remain.
 #
 # Task 12 adds the --refill admission action. Refill acts ONLY on a complete
 # projection reporting productive work below the target and reserved
@@ -361,9 +362,21 @@ try:
 except Exception:
     print(-1)' 2>/dev/null || echo -1)"
 
-echo "fleet-refill: capacity=unknown (quarantined); open_beads=$open_count; serialization_debt=$serialization_debt"
+# Task 13 cutover: the human verdict is derived solely from the shared
+# fm-fleet-capacity.v1 object. No legacy capacity arithmetic remains here;
+# the serialization-debt probe is a safety gate, not capacity arithmetic.
+# shellcheck source=bin/fm-capacity-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fm-capacity-lib.sh"
+cap=$(fm_capacity_project)
+productive=$(echo "$cap" | jq -r '.aggregate.productive_count // 0')
+reserved=$(echo "$cap" | jq -r '.aggregate.reserved_ownership_count // 0')
+refill_safe=$(echo "$cap" | jq -r '.aggregate.refill_safe // false')
+alert_only=$(echo "$cap" | jq -r '.aggregate.alert_only // false')
+reconciliation=$(echo "$cap" | jq -r '.aggregate.reconciliation_required // false')
+
+echo "fleet-refill: productive=$productive reserved=$reserved refill_safe=$refill_safe alert_only=$alert_only reconciliation=$reconciliation; open_beads=$open_count; serialization_debt=$serialization_debt"
 if [ "$serialization_debt" -ne 0 ]; then
   exit 1
 fi
-echo "fleet-ok: quarantine active - no dispatch verdict or staging"
+echo "fleet-ok: capacity derived from the shared projection; automatic refill remains gated (config/refill-auto or FM_REFILL_AUTO=1)"
 exit 0
