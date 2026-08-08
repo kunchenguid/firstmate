@@ -386,54 +386,61 @@ test_lane_checker_clean_keeps_probe_calm_and_invokes_project
 test_lane_checker_exit_1_violation_surfaces_debt
 test_lane_checker_exit_2_cannot_run_surfaces_debt
 test_unavailable_lane_checker_reports_condition_without_hiding_other_debt
-# --- fleet-depth quarantine (2026-08-08) ----------------------------------
-# Legacy capacity is unknown: no owned-manifest/mtime arithmetic, no
-# DISPATCH-NEEDED verdict, no next-wave staging. The serialization-debt and
-# authoritative bead-query diagnostics remain.
+# --- fleet-depth quarantine and Task 13 cutover (2026-08-08) --------------
+# Legacy capacity arithmetic is gone: no owned-manifest/mtime counters, no
+# DISPATCH-NEEDED verdict, no next-wave staging. After the Task 13 cutover the
+# human verdict derives solely from the shared capacity projection
+# (fm-fleet-capacity.v1); the serialization-debt and authoritative bead-query
+# diagnostics remain.
 
-test_quarantine_reports_unknown_capacity_and_never_dispatches() {
+test_cutover_verdict_derives_from_shared_projection() {
   # even with abundant open beads (the old dispatch condition would fire), the
-  # quarantined script reports capacity=unknown and never dispatches
+  # cut-over script derives its verdict from the shared projection and never
+  # dispatches
   local out rc
   printf '{"total":50}\n' > "$TASKS_JSON"
-  out=$(PATH="$FAKEBIN:$PATH" TASKS_JSON="$TASKS_JSON" FM_REFILL_PROJECT="$PROJECT" \
+  out=$(PATH="$FAKEBIN:$PATH" TASKS_JSON="$TASKS_JSON" FM_STATE_OVERRIDE="$STATE" \
+    FM_CREW_STATE_BIN="$FAKE_CREW" FM_REFILL_PROJECT="$PROJECT" \
     FM_SERIALIZATION_DEBT_PROBE="$TMP_ROOT/quar-clean-probe" "$ROOT/bin/fm-fleet-refill.sh" 2>&1); rc=$?
-  expect_code 0 "$rc" "quarantined refill should stay calm with a clean probe"
-  assert_contains "$out" "capacity=unknown" "quarantine did not report unknown capacity"
+  expect_code 0 "$rc" "cut-over refill should stay calm with a clean probe"
+  assert_contains "$out" "productive=" "verdict does not derive from the shared projection"
+  assert_contains "$out" "refill_safe=" "verdict lacks the shared refill-safety flag"
   assert_contains "$out" "open_beads=50" "authoritative bead-query diagnostic missing"
-  assert_not_contains "$out" "DISPATCH-NEEDED" "quarantined refill emitted a dispatch verdict"
-  assert_not_contains "$out" "NEXT-WAVE" "quarantined refill staged work"
-  assert_not_contains "$out" "active=" "legacy active counter survived the quarantine"
-  assert_not_contains "$out" "battery=" "legacy battery counter survived the quarantine"
-  pass "quarantine reports unknown capacity and never emits a dispatch verdict"
+  assert_not_contains "$out" "DISPATCH-NEEDED" "cut-over refill emitted a dispatch verdict"
+  assert_not_contains "$out" "NEXT-WAVE" "cut-over refill staged work"
+  assert_not_contains "$out" "active=" "legacy active counter survived the cutover"
+  assert_not_contains "$out" "battery=" "legacy battery counter survived the cutover"
+  pass "the cut-over verdict derives from the shared projection and never dispatches"
 }
 
-test_quarantine_ignores_legacy_manifest_and_output_mtimes() {
+test_cutover_ignores_legacy_manifest_and_output_mtimes() {
   # a legacy manifest and fresh-looking output files must not influence the
-  # quarantined verdict: capacity stays unknown, the verdict stays calm
+  # cut-over verdict: the shared projection drives it, the verdict stays calm
   local out rc
   mkdir -p "$TMP_ROOT/state" "$TMP_ROOT/output-tasks"
   printf 'legacy-task-1 legacy-task-2\n' > "$TMP_ROOT/state/fleet-manifest.jsonl"
   : > "$TMP_ROOT/output-tasks/legacy-task-1.output"
   printf '{"total":3}\n' > "$TASKS_JSON"
-  out=$(PATH="$FAKEBIN:$PATH" TASKS_JSON="$TASKS_JSON" FM_REFILL_PROJECT="$PROJECT" \
+  out=$(PATH="$FAKEBIN:$PATH" TASKS_JSON="$TASKS_JSON" FM_STATE_OVERRIDE="$STATE" \
+    FM_CREW_STATE_BIN="$FAKE_CREW" FM_REFILL_PROJECT="$PROJECT" \
     FM_SERIALIZATION_DEBT_PROBE="$TMP_ROOT/quar-clean-probe" "$ROOT/bin/fm-fleet-refill.sh" 2>&1); rc=$?
   expect_code 0 "$rc" "legacy manifest presence should not dispatch"
-  assert_contains "$out" "capacity=unknown" "manifest influenced the quarantined capacity"
+  assert_contains "$out" "productive=" "manifest influenced the cut-over verdict"
   assert_not_contains "$out" "DISPATCH-NEEDED" "manifest triggered a dispatch verdict"
-  pass "legacy manifests and output mtimes never influence the quarantined verdict"
+  pass "legacy manifests and output mtimes never influence the cut-over verdict"
 }
 
-test_quarantine_still_propagates_serialization_debt() {
-  # the serialization-debt safety diagnostic remains authoritative under the
-  # quarantine: debt still surfaces and still fails the cadence
+test_cutover_still_propagates_serialization_debt() {
+  # the serialization-debt safety diagnostic remains authoritative after the
+  # cutover: debt still surfaces and still fails the cadence
   local out rc
   printf '{"total":0}\n' > "$TASKS_JSON"
-  out=$(PATH="$FAKEBIN:$PATH" TASKS_JSON="$TASKS_JSON" FM_REFILL_PROJECT="$PROJECT" \
+  out=$(PATH="$FAKEBIN:$PATH" TASKS_JSON="$TASKS_JSON" FM_STATE_OVERRIDE="$STATE" \
+    FM_CREW_STATE_BIN="$FAKE_CREW" FM_REFILL_PROJECT="$PROJECT" \
     FM_SERIALIZATION_DEBT_PROBE="$TMP_ROOT/quar-debt-probe" "$ROOT/bin/fm-fleet-refill.sh" 2>&1); rc=$?
-  expect_code 1 "$rc" "serialization debt must still surface under quarantine"
-  assert_contains "$out" "SERIALIZATION-DEBT: quarantine fixture" "debt diagnostic lost under quarantine"
-  pass "serialization-debt diagnostic remains under quarantine"
+  expect_code 1 "$rc" "serialization debt must still surface after cutover"
+  assert_contains "$out" "SERIALIZATION-DEBT: quarantine fixture" "debt diagnostic lost after cutover"
+  pass "serialization-debt diagnostic remains after the cutover"
 }
 
 test_count_json_emits_shared_object() {
@@ -446,19 +453,19 @@ test_count_json_emits_shared_object() {
   pass "fleet refill --count-json emits the shared capacity object"
 }
 
-test_quarantined_verdict_is_unchanged_in_shadow_mode() {
+test_cutover_verdict_is_unchanged_in_shadow_mode() {
   local out
   write_meta_fixture ship direct-PR
   out=$(PATH="$FAKEBIN:$PATH" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_BIN="$FAKE_CREW" \
     FM_REFILL_PROJECT="$PROJECT" FM_SERIALIZATION_DEBT_PROBE="$TMP_ROOT/quar-clean-probe" \
     FM_REFILL_SHADOW="$TMP_ROOT/shadow.json" \
     "$ROOT/bin/fm-fleet-refill.sh" 2>&1)
-  assert_contains "$out" "fleet-refill:" "quarantined summary line missing"
-  assert_contains "$out" "capacity=unknown" "quarantined verdict changed in shadow mode"
+  assert_contains "$out" "fleet-refill:" "cut-over summary line missing"
+  assert_contains "$out" "productive=" "shadow mode changed the cut-over verdict"
   assert_not_contains "$out" "DISPATCH-NEEDED" "shadow mode emitted a dispatch verdict"
   [ -f "$TMP_ROOT/shadow.json" ] || fail "shadow object not recorded"
   jq -e '.schema == "fm-fleet-capacity.v1"' "$TMP_ROOT/shadow.json" >/dev/null || fail "shadow not capacity object"
-  pass "shadow mode records the object while the quarantined verdict stays authoritative"
+  pass "shadow mode records the object while the cut-over verdict stays authoritative"
 }
 
 test_frozen_observation_parity() {
@@ -482,9 +489,9 @@ test_frozen_observation_parity() {
 
 test_lane_checker_defaults_to_project_scripts_path
 test_refill_cadence_propagates_lane_contract_debt
-test_quarantine_reports_unknown_capacity_and_never_dispatches
-test_quarantine_ignores_legacy_manifest_and_output_mtimes
-test_quarantine_still_propagates_serialization_debt
+test_cutover_verdict_derives_from_shared_projection
+test_cutover_ignores_legacy_manifest_and_output_mtimes
+test_cutover_still_propagates_serialization_debt
 test_count_json_emits_shared_object
-test_quarantined_verdict_is_unchanged_in_shadow_mode
+test_cutover_verdict_is_unchanged_in_shadow_mode
 test_frozen_observation_parity
