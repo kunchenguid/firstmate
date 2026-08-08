@@ -142,7 +142,7 @@ fm_afk_start_main() {
   fi
 
   echo "afk: starting supervise daemon in foreground; keep this command as a tracked background session"
-  exec "$FM_AFK_DAEMON"
+  exec /bin/bash "$FM_AFK_DAEMON"
 }
 
 # Run only when executed, not when sourced (tests source fm_afk_clear_stale_artifacts
