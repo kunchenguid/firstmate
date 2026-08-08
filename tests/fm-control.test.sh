@@ -101,6 +101,9 @@ case "${1:-}" in
       esac
     else
       printf '%s\n' "$payload" >> "$D/keys"
+      if [ "$payload" = Escape ] && [ -n "${FM_FAKE_MUSE_LOG:-}" ]; then
+        printf '%s\n' '{"schema_version":1,"payload_type":"runtime.session","payload":{"kind":"run","run_id":"run-1","event":{"kind":"terminal","terminal":"cancelled","reason":null}}}' >> "$FM_FAKE_MUSE_LOG"
+      fi
     fi
     exit 0 ;;
   display-message)
@@ -176,6 +179,7 @@ run_control() {
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_SETTLE_WAIT=0.05 \
     FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    FM_FAKE_MUSE_LOG="${FM_FAKE_MUSE_LOG:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -645,7 +649,7 @@ test_busy_agent_is_interrupted_before_the_exit_command() {
   [ "$(keys_sent "$dir")" = "Escape" ] \
     || fail "a busy agent should be interrupted once before its exit command, got: $(keys_sent "$dir")"
   [ "$(literals "$dir")" = "/exit" ] || fail "the exit command should follow the interrupt"
-  pass "fm-control exit: a busy agent is interrupted first so the exit command reaches an idle composer"
+  pass "fm-control exit: a busy agent receives interrupt delivery before the exit command"
 }
 
 test_idle_agent_is_not_interrupted() {
@@ -663,37 +667,43 @@ test_idle_agent_is_not_interrupted() {
   pass "fm-control exit: an idle agent goes straight to its exit command"
 }
 
-test_interrupt_records_idle_against_the_armed_generation() {
-  local dir gen record
-  dir=$(new_case record)
+test_interrupt_without_acknowledgement_preserves_busy_state() {
+  local dir gen before after out rc
+  dir=$(new_case unconfirmed)
   add_task "$dir" t1 claude
   alive_as "$dir" claude
   gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
   printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
-  run_control "$dir" t1 interrupt >/dev/null
-  record=$(cat "$dir/home/state/t1.busy-state")
-  assert_contains "$record" "state=idle" "a proven interrupt should record idle"
-  assert_contains "$record" "source=fm-interrupt" "the record should attribute the interrupt to firstmate"
-  assert_contains "$record" "gen=$gen" "the record should bind the armed generation"
-  pass "fm-control interrupt: a proven interrupt records idle/fm-interrupt on the armed generation"
+  before=$(cat "$dir/home/state/t1.busy-state")
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "an interrupt without acknowledgement should still deliver"$'\n'"$out"
+  after=$(cat "$dir/home/state/t1.busy-state")
+  [ "$after" = "$before" ] || fail "an unconfirmed interrupt must preserve adapter-owned busy state"
+  assert_contains "$out" "verified=agent-alive cancel=unconfirmed" \
+    "the result should distinguish delivery proof from unconfirmed cancellation"
+  assert_not_contains "$out" "cancel=confirmed" \
+    "an adapter without acknowledgement must not report cancellation"
+  pass "fm-control interrupt: unconfirmed delivery preserves observed busy state"
 }
 
-test_interrupt_refuses_when_armed_idle_transition_cannot_publish() {
-  local dir gen out rc
-  dir=$(new_case stale-record)
-  add_task "$dir" t1 claude
-  alive_as "$dir" claude
-  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
-  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
-  printf '%s\n' 'not-a-busy-record' > "$dir/home/state/t1.busy-state"
-  mkdir "$dir/home/state/t1.busy-state.lock"
-  out=$(FM_BUSY_LOCK_STALE_SECS=999999 run_control "$dir" t1 interrupt); rc=$?
-  expect_code 1 "$rc" "an interrupt must refuse when its idle event cannot publish"
-  assert_contains "$out" "could not be recorded idle" \
-    "the refusal should name the failed idle transition"
-  [ "$(cat "$dir/home/state/t1.busy-state")" = 'not-a-busy-record' ] \
-    || fail "the fixture should retain the malformed stale record"
-  pass "fm-control interrupt: an armed generation must publish verified idle state"
+test_muse_interrupt_confirms_adapter_acknowledgement() {
+  local dir root log out rc
+  dir=$(new_case confirmed)
+  add_task "$dir" t1 muse
+  alive_as "$dir" muse
+  root="$dir/muse-sessions"
+  log="$root/2026/08/08/session-1/session.jsonl"
+  mkdir -p "$(dirname "$log")"
+  printf '%s\n' \
+    "{\"schema_version\":1,\"payload_type\":\"runtime.session.metadata\",\"payload\":{\"kind\":\"metadata\",\"record\":{\"workspace_root\":\"$dir/wt-t1\"}}}" \
+    '{"schema_version":1,"payload_type":"runtime.session","payload":{"kind":"run","run_id":"run-1","event":{"kind":"started","prompt":"work"}}}' > "$log"
+  printf 'sessions_root=%s\nworkspace_root=%s\nbinding_id=test\n' \
+    "$root" "$dir/wt-t1" > "$dir/home/state/t1.muse-session"
+  out=$(FM_FAKE_MUSE_LOG="$log" run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "muse interrupt should observe its adapter acknowledgement"$'\n'"$out"
+  assert_contains "$out" "verified=agent-alive cancel=confirmed" \
+    "the result should report muse's cancelled terminal acknowledgement"
+  pass "fm-control interrupt: muse confirms cancellation from its session log"
 }
 
 test_agent_that_does_not_stop_fails_closed() {
@@ -710,33 +720,31 @@ test_agent_that_does_not_stop_fails_closed() {
   pass "fm-control exit: an agent that ignores its exit command fails closed instead of claiming success"
 }
 
-test_interrupt_that_does_not_settle_fails_closed() {
+test_grok_interrupt_without_acknowledgement_reports_unconfirmed() {
   local dir out rc
   dir=$(new_case nosettle)
   add_task "$dir" t1 grok
   alive_as "$dir" grok
-  # Grok has no semantic busy writer yet, so its verdict comes from the
-  # rendered cancel hint. A footer that never clears means the cancel did not
-  # take, and the control plane must say so instead of reporting a landed
-  # interrupt.
   printf '╭────╮\n│    │\n╰────╯\n Ctrl+c:cancel\n' > "$dir/fake/pane"
   out=$(run_control "$dir" t1 interrupt); rc=$?
-  expect_code 1 "$rc" "an interrupt whose busy verdict never settles should fail closed"
-  assert_contains "$out" "the interrupt did not take" "the failure should say the interrupt did not take"
-  pass "fm-control interrupt: a busy verdict that never settles fails closed rather than claiming success"
+  expect_code 0 "$rc" "grok interrupt delivery should not depend on inferred cancellation"$'\n'"$out"
+  assert_contains "$out" "verified=agent-alive cancel=unconfirmed" \
+    "a rendered busy hint is not a cancellation acknowledgement"
+  pass "fm-control interrupt: grok reports delivery without claiming cancellation"
 }
 
-test_interrupt_settles_once_the_rendered_footer_clears() {
+test_grok_idle_footer_does_not_confirm_cancellation() {
   local dir out rc
   dir=$(new_case settles)
   add_task "$dir" t1 grok
   alive_as "$dir" grok
   printf '╭────╮\n│    │\n╰────╯\n Shift+Tab:mode │ Ctrl+.:shortcuts\n' > "$dir/fake/pane"
   out=$(run_control "$dir" t1 interrupt); rc=$?
-  expect_code 0 "$rc" "an interrupt whose verdict reads idle should succeed"$'\n'"$out"
-  assert_contains "$out" "verified=agent-alive" "the proof should name the surviving agent"
-  [ "$(keys_sent "$dir")" = "C-c" ] || fail "grok should be cancelled with C-c, got: $(keys_sent "$dir")"
-  pass "fm-control interrupt: grok's cancel lands and its idle footer settles the verdict"
+  expect_code 0 "$rc" "grok interrupt delivery should succeed"$'\n'"$out"
+  assert_contains "$out" "verified=agent-alive cancel=unconfirmed" \
+    "an idle footer is not an explicit cancellation acknowledgement"
+  [ "$(keys_sent "$dir")" = "C-c" ] || fail "grok should receive C-c, got: $(keys_sent "$dir")"
+  pass "fm-control interrupt: grok's idle footer does not confirm cancellation"
 }
 
 # --- 6. marker non-regression -----------------------------------------------
@@ -808,10 +816,10 @@ test_interrupt_refuses_when_no_agent_runs
 test_ambiguous_endpoint_refuses
 test_busy_agent_is_interrupted_before_the_exit_command
 test_idle_agent_is_not_interrupted
-test_interrupt_records_idle_against_the_armed_generation
-test_interrupt_refuses_when_armed_idle_transition_cannot_publish
+test_interrupt_without_acknowledgement_preserves_busy_state
+test_muse_interrupt_confirms_adapter_acknowledgement
 test_agent_that_does_not_stop_fails_closed
-test_interrupt_that_does_not_settle_fails_closed
-test_interrupt_settles_once_the_rendered_footer_clears
+test_grok_interrupt_without_acknowledgement_reports_unconfirmed
+test_grok_idle_footer_does_not_confirm_cancellation
 test_secondmate_control_command_carries_no_marker
 test_fm_send_still_marks_the_same_secondmate_task

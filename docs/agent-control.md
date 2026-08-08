@@ -30,11 +30,13 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 
 | Verb | Effect | Postcondition |
 | --- | --- | --- |
-| `interrupt` | Cancel the running turn. The agent keeps running. | The endpoint still exists, the agent is still alive where the backend can classify that, and no stale busy record survives. |
+| `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
 | `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. |
 | `relaunch` | Replace the running agent with a new one in the same endpoint and worktree, on the same or a newly chosen harness, model, and effort. | The new agent is alive on the recorded endpoint, and the durable record names the harness that is actually running. |
 
-Firstmate records the interrupt's `idle`/`fm-interrupt` busy event itself rather than waiting for the harness to report one, because a manual interrupt is not something every harness reports: Claude fires no lifecycle hook for one at all, so waiting would hang forever on exactly the adapter that needs the control plane most.
+Interrupt never rewrites busy state as proof of its own success.
+Claude exposes no lifecycle acknowledgement for a manual interrupt, so delivery succeeds with `cancel=unconfirmed` and its adapter-owned busy state remains as observed.
+muse's session log records `terminal=cancelled` for the interrupted run, so the control plane reports `cancel=confirmed` only after observing that exact acknowledgement.
 
 An interrupt is not complete until the composer is empty.
 muse is the one verified adapter that restores the cancelled prompt back into its composer as real text, so its interrupt key is followed by a Ctrl+U clear; without it the next submitted line - including this plane's own exit command - would concatenate onto the restored prompt and submit both as one line.

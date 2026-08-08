@@ -20,13 +20,12 @@
 # NO generic raw-key entry point here; fm-send remains the only way to send an
 # agent something to read.
 #
-#   interrupt  Cancel the running turn with the harness's verified interrupt
-#              key. The agent keeps running. Postcondition: the endpoint still
-#              exists, the agent is still alive where the backend can classify
-#              that, and no stale busy record survives - firstmate records
-#              idle/fm-interrupt against the armed busy generation itself,
-#              because a manual interrupt is not something every harness
-#              reports (Claude fires no hook for one).
+#   interrupt  Deliver the harness's verified interrupt sequence. The agent
+#              keeps running. Postcondition: delivery succeeded, the endpoint
+#              still exists, and the agent is still alive where the backend can
+#              classify that. Cancellation is confirmed only from an adapter-
+#              owned acknowledgement and otherwise reported unconfirmed. Busy
+#              state is never rewritten as proof of the action.
 #   exit       Stop the agent, preserving its terminal endpoint, worktree, and
 #              every uncommitted change. Interrupts first when the task reads
 #              busy, then submits the harness's exit command. Postcondition:
@@ -84,7 +83,7 @@
 #
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
-#   FM_CONTROL_SETTLE_WAIT       busy->not-busy settle after an interrupt (5)
+#   FM_CONTROL_SETTLE_WAIT       adapter acknowledgement wait after interrupt (5)
 #   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
@@ -358,24 +357,44 @@ send_interrupt_keys() {
     || die "interrupt key $key reached task $ID, but $clear did not, so its composer still holds the cancelled prompt; clear it before the next lifecycle action"
 }
 
-record_interrupt_idle() {
-  # Only a task with an armed busy generation has a record to update. A manual
-  # interrupt is not something every harness reports: Claude fires no lifecycle
-  # hook for one at all, so waiting for an adapter to clear its own busy record
-  # would hang forever on exactly the adapter that needs this most. Firstmate
-  # therefore owns the transition itself through the fm-interrupt source every
-  # converted adapter trusts.
-  [ -f "$STATE/$ID.busy-gen" ] || return 0
-  "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE" "$ID" idle \
-    --current-gen --source fm-interrupt --event interrupt >/dev/null 2>&1
+prepare_interrupt_ack() {
+  INTERRUPT_ACK_SOURCE=$(fm_control_interrupt_ack_source "$HARNESS")
+  INTERRUPT_ACK_LOG=
+  INTERRUPT_ACK_RUN=
+  case "$INTERRUPT_ACK_SOURCE" in
+    muse-session-terminal)
+      INTERRUPT_ACK_LOG=$(fm_busy_muse_session_log "$STATE" "$ID" 2>/dev/null || true)
+      [ -n "$INTERRUPT_ACK_LOG" ] || return 0
+      INTERRUPT_ACK_RUN=$(fm_busy_muse_active_run_id "$INTERRUPT_ACK_LOG" 2>/dev/null || true)
+      ;;
+  esac
+}
+
+interrupt_cancel_claim() {
+  local elapsed=0 terminal=
+  case "$INTERRUPT_ACK_SOURCE:$INTERRUPT_ACK_RUN" in
+    muse-session-terminal:?*) ;;
+    *) printf 'unconfirmed'; return 0 ;;
+  esac
+  while :; do
+    terminal=$(fm_busy_muse_run_terminal "$INTERRUPT_ACK_LOG" "$INTERRUPT_ACK_RUN" 2>/dev/null || true)
+    case "$terminal" in
+      cancelled) printf 'confirmed'; return 0 ;;
+      ?*) printf 'unconfirmed'; return 0 ;;
+    esac
+    awk -v e="$elapsed" -v t="$SETTLE_WAIT" 'BEGIN{exit !(e < t)}' || break
+    sleep "$POLL"
+    elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
+  done
+  printf 'unconfirmed'
 }
 
 # do_interrupt: the shared interrupt action, used by the `interrupt` verb and
-# as `exit`'s busy precondition. Prints the proof it obtained: `agent-alive`
-# when the backend could confirm the agent survived the interrupt, `endpoint`
-# when only the endpoint's existence could be confirmed.
+# as `exit`'s busy precondition. Prints the delivery postcondition followed by
+# the independently observed cancellation claim.
 do_interrupt() {
-  local proof after elapsed
+  local proof after cancel
+  prepare_interrupt_ack
   send_interrupt_keys
   fm_backend_target_exists "$BACKEND" "$T" "$LABEL" \
     || die "task $ID's endpoint disappeared while interrupting it; no further control action is safe"
@@ -388,33 +407,8 @@ do_interrupt() {
       || die "task $ID's agent is '$after' after its interrupt key; an interrupt must leave the agent running"
     proof=agent-alive
   fi
-  record_interrupt_idle \
-    || die "task $ID's interrupt landed, but its armed busy generation could not be recorded idle; refusing to claim the stale record was cleared"
-  # No stale busy record may survive the interrupted turn. After the
-  # firstmate-owned idle event above this is immediate for every adapter with a
-  # semantic source. Grok is the exception: it has no semantic writer yet, so
-  # its verdict comes from a rendered footer that needs a beat to repaint after
-  # the cancel. Give any still-busy verdict that bounded settle rather than
-  # calling a landed interrupt a failure - but keep the failure, because a
-  # verdict that never settles means the interrupt did not take.
-  after=$(busy_verdict)
-  elapsed=0
-  while [ "${after%% *}" = busy ]; do
-    awk -v e="$elapsed" -v t="$SETTLE_WAIT" 'BEGIN{exit !(e < t)}' || break
-    sleep "$POLL"
-    elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
-    after=$(busy_verdict)
-  done
-  case "$after" in
-    idle\ *) ;;
-    unknown\ *)
-      [ ! -e "$STATE/$ID.busy-gen" ] && [ ! -e "$STATE/$ID.busy-state" ] \
-        || die "task $ID's busy state is unresolved after its interrupt (${after}); refusing to claim the stale record was cleared"
-      ;;
-    busy\ *) die "task $ID still reads busy ${SETTLE_WAIT}s after its interrupt (${after}); the interrupt did not take" ;;
-    *) die "task $ID's busy state is unresolved after its interrupt (${after}); refusing to claim the stale record was cleared" ;;
-  esac
-  printf '%s' "$proof"
+  cancel=$(interrupt_cancel_claim)
+  printf '%s cancel=%s' "$proof" "$cancel"
 }
 
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
@@ -432,8 +426,7 @@ do_exit() {
     missing) die "task $ID's recorded endpoint is gone, so there is no agent to stop; reconcile the task before any further control action" ;;
     *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac
-  # A busy agent is interrupted first so the exit command reaches an idle
-  # composer instead of being queued behind the running turn.
+  # A busy agent is interrupted first before the exit command is submitted.
   case "$(busy_verdict)" in
     busy*) do_interrupt >/dev/null ;;
   esac
@@ -823,7 +816,7 @@ case "$VERB" in
       *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle key into an unattributed endpoint" ;;
     esac
     proof=$(do_interrupt)
-    echo "interrupted $ID harness=$HARNESS backend=$BACKEND verified=$proof"
+    echo "interrupt-delivered $ID harness=$HARNESS backend=$BACKEND verified=$proof"
     ;;
   exit)
     result=$(do_exit)

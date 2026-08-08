@@ -2170,11 +2170,10 @@ if [ "$KIND" != secondmate ]; then
       # a turn; Stop (normal completion), StopFailure (API-error turn end),
       # and SessionEnd (process shutdown) all close it, so an abnormal end can
       # never leave a stale busy record. Claude fires no hook for a manual
-      # interrupt, so the firstmate-controlled interruption procedure
-      # (harness-adapters) records idle/fm-interrupt itself. Stop keeps the
-      # turn-ended NOTIFICATION touch for the watcher. Every hook command
-      # tolerates a refused event (|| true) so a stale-gen writer can never
-      # break Claude's own lifecycle.
+      # interrupt, so its last adapter-owned busy state remains as observed.
+      # Stop keeps the turn-ended NOTIFICATION touch for the watcher. Every
+      # hook command tolerates a refused event (|| true) so a stale-gen writer
+      # can never break Claude's own lifecycle.
       mkdir -p "$WT/.claude"
       busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
       busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"

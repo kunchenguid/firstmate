@@ -21,8 +21,9 @@
 #      is refused.
 #   2. Per-harness control mechanics: which key interrupts a running turn, how
 #      many times it must be sent, whether the composer needs clearing after
-#      that key, which command exits the agent, and which task kinds the adapter
-#      is verified to run. These are the empirically verified facts previously
+#      that key, which adapter-owned cancellation acknowledgement is observable,
+#      which command exits the agent, and which task kinds the adapter is
+#      verified to run. These are the empirically verified facts previously
 #      carried only in the harness-adapters skill's per-adapter tables; that
 #      skill now points here so one executable owner holds them, and
 #      bin/fm-send.sh's --key path reads the same table rather than a second
@@ -134,6 +135,14 @@ fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
     muse) printf 'C-u' ;;
     claude|codex|opencode|pi|pi-signed|grok|kimi) ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_control_interrupt_ack_source() {  # <harness>
+  case "${1-}" in
+    muse) printf 'muse-session-terminal' ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi) printf 'none' ;;
     *) return 1 ;;
   esac
 }

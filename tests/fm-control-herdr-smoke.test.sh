@@ -124,7 +124,7 @@ STATE=$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")
 
 OUT=$(run_control hsmoke interrupt) || fail "interrupt against a registered agent should succeed: $OUT"
 case "$OUT" in
-  *"interrupted hsmoke harness=claude backend=herdr verified=agent-alive"*) : ;;
+  *"interrupt-delivered hsmoke harness=claude backend=herdr verified=agent-alive cancel=unconfirmed"*) : ;;
   *) fail "interrupt should report the agent-alive proof on herdr, got: $OUT" ;;
 esac
 pass "real herdr: interrupt delivers the harness's key and proves the agent survived it"
