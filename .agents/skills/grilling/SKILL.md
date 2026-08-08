@@ -7,6 +7,8 @@ description: >-
   Use when the user wants to stress-test their thinking, or uses any 'grill' trigger phrases.
 ---
 
+Before applying this vendored skill inside Firstmate, read [`VENDORED-ENGINEERING-CONTRACT.md`](../VENDORED-ENGINEERING-CONTRACT.md).
+
 Interview the user relentlessly until you reach a shared understanding.
 Map this as a **design tree**: every decision branches into the decisions that hang off it.
 

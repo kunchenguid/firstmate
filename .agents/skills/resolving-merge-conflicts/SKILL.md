@@ -5,6 +5,8 @@ metadata:
 description: "Use when you need to resolve an in-progress git merge/rebase conflict."
 ---
 
+Before applying this vendored skill inside Firstmate, read [`VENDORED-ENGINEERING-CONTRACT.md`](../VENDORED-ENGINEERING-CONTRACT.md).
+
 1. **See the current state** of the merge/rebase.
    Check git history, and the conflicting files.
 

@@ -6,6 +6,8 @@ description: Scan a codebase for deepening opportunities, present them as a visu
 disable-model-invocation: true
 ---
 
+Before applying this vendored skill inside Firstmate, read [`VENDORED-ENGINEERING-CONTRACT.md`](../VENDORED-ENGINEERING-CONTRACT.md).
+
 # Improve Codebase Architecture
 
 Surface architectural friction and propose **deepening opportunities** - refactors that turn shallow modules into deep ones.

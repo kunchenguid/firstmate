@@ -8,6 +8,8 @@ description: >-
 disable-model-invocation: true
 ---
 
+Before applying this vendored skill inside Firstmate, read [`VENDORED-ENGINEERING-CONTRACT.md`](../VENDORED-ENGINEERING-CONTRACT.md).
+
 # Setup Matt Pocock's Skills
 
 Scaffold the per-repo configuration that the engineering skills assume:
@@ -51,7 +53,7 @@ Give a one-line explainer only when the choice genuinely branches; skip the sect
 **Section A - Issue tracker.**
 
 > Explainer: The "issue tracker" is where issues live for this repo.
-Skills like `to-tickets`, `triage`, and `to-spec` read from and write to it - they need to know whether to call `gh issue create`, write a markdown file under `.scratch/`, or follow some other workflow you describe.
+Skills like `to-tickets`, `triage`, and `to-spec` read from and write to it - they need to know whether to call `gh-axi issue create`, write a markdown file under `.scratch/`, or follow some other workflow you describe.
 Pick the place you actually track work for this repo.
 
 Default posture: these skills were designed for GitHub.

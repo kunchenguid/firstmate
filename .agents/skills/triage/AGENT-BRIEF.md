@@ -37,7 +37,7 @@ The agent needs to know when it's done.
 Every agent brief must have concrete, testable acceptance criteria.
 Each criterion should be independently verifiable.
 
-- **Good:** "Running `gh issue list --label needs-triage` returns issues that have been through initial classification"
+- **Good:** "Running `gh-axi issue list --label needs-triage` returns issues that have been through initial classification"
 - **Bad:** "Triage should work correctly"
 
 ### Explicit scope boundaries

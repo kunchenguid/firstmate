@@ -109,6 +109,14 @@
   ],
   "surfaces": [
     {
+      "path": ".agents/skills/VENDORED-ENGINEERING-CONTRACT.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/VENDORED-ENGINEERING-LICENSE.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": ".agents/skills/afk/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -514,6 +522,10 @@
     },
     {
       "path": "docs/verification/trace-context.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/vendored-engineering-skills.md",
       "audience": "maintainer-verification"
     },
     {

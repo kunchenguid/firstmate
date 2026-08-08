@@ -8,6 +8,8 @@ description: >-
   Use when the user wants to review a branch, a PR, work-in-progress changes, or asks to "review since X".
 ---
 
+Before applying this vendored skill inside Firstmate, read [`VENDORED-ENGINEERING-CONTRACT.md`](../VENDORED-ENGINEERING-CONTRACT.md).
+
 Two-axis review of the diff between `HEAD` and a fixed point the user supplies:
 
 - **Standards** - does the code conform to this repo's documented coding standards?

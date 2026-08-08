@@ -1,75 +1,52 @@
 #!/usr/bin/env bash
-# Verify every locked skill against its vendored directory using the canonical
-# skills CLI folder hash: regular files only, recursively excluding .git and
-# node_modules, relative paths normalized to forward slashes and locale-sorted,
-# then SHA-256 over each path immediately followed by its raw file bytes.
+# Exercise the public vendored-skill validator against the checked-in snapshot
+# and a tampered Firstmate-shaped fixture.
 set -u
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-node - "$ROOT" <<'NODE'
-const { createHash } = require('node:crypto');
-const { readdir, readFile } = require('node:fs/promises');
-const { join, relative } = require('node:path');
+CHECK="$ROOT/bin/fm-skills-lock.sh"
+TMP_ROOT=$(fm_test_tmproot fm-skills-lock-tests)
 
-const root = process.argv[2];
+out=$($CHECK 2>&1)
+status=$?
+[ "$status" -eq 0 ] || fail "checked-in vendored snapshot failed validation: $out"
+assert_contains "$out" \
+  "ok - skills lock: 21 adapted skills and Firstmate discovery paths match" \
+  "checked-in snapshot did not report its complete discovery result"
+pass "checked-in vendored snapshot and discovery paths validate through the public checker"
 
-async function collectFiles(baseDir, currentDir, results) {
-  const entries = await readdir(currentDir, { withFileTypes: true });
-  await Promise.all(entries.map(async (entry) => {
-    const fullPath = join(currentDir, entry.name);
-    if (entry.isDirectory()) {
-      if (entry.name === '.git' || entry.name === 'node_modules') return;
-      await collectFiles(baseDir, fullPath, results);
-    } else if (entry.isFile()) {
-      results.push({
-        relativePath: relative(baseDir, fullPath).split('\\').join('/'),
-        content: await readFile(fullPath),
-      });
-    }
-  }));
-}
+fixture="$TMP_ROOT/tampered"
+mkdir -p "$fixture/.agents" "$fixture/.claude"
+cp "$ROOT/skills-lock.json" "$fixture/skills-lock.json"
+cp -R "$ROOT/.agents/skills" "$fixture/.agents/skills"
+ln -s ../.agents/skills "$fixture/.claude/skills"
+printf '\ntampered\n' >> "$fixture/.agents/skills/code-review/SKILL.md"
 
-async function computeSkillFolderHash(skillDir) {
-  const files = [];
-  await collectFiles(skillDir, skillDir, files);
-  files.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
-  const hash = createHash('sha256');
-  for (const file of files) {
-    hash.update(file.relativePath);
-    hash.update(file.content);
-  }
-  return hash.digest('hex');
-}
+out=$(FM_ROOT_OVERRIDE="$fixture" "$CHECK" 2>&1)
+status=$?
+[ "$status" -ne 0 ] || fail "tampered vendored snapshot unexpectedly validated"
+assert_contains "$out" "code-review: lock=" \
+  "tampered snapshot did not identify the changed skill"
+pass "public checker rejects a changed vendored skill without trusting its lock"
 
-async function main() {
-  const lock = JSON.parse(await readFile(join(root, 'skills-lock.json'), 'utf8'));
-  const entries = Object.entries(lock.skills || {});
-  if (entries.length === 0) throw new Error('skills-lock.json has no locked skills');
+cp "$ROOT/.agents/skills/code-review/SKILL.md" \
+  "$fixture/.agents/skills/code-review/SKILL.md"
+printf '\ntampered\n' >> "$fixture/.agents/skills/VENDORED-ENGINEERING-LICENSE.md"
 
-  const mismatches = [];
-  for (const [name, entry] of entries) {
-    const skillDir = join(root, '.agents', 'skills', name);
-    let actual;
-    try {
-      actual = await computeSkillFolderHash(skillDir);
-    } catch (error) {
-      mismatches.push(`${name}: cannot hash vendored directory: ${error.message}`);
-      continue;
-    }
-    if (entry.computedHash !== actual) {
-      mismatches.push(`${name}: lock=${entry.computedHash} vendored=${actual}`);
-    }
-  }
+out=$(FM_ROOT_OVERRIDE="$fixture" "$CHECK" 2>&1)
+status=$?
+[ "$status" -ne 0 ] || fail "tampered third-party notice unexpectedly validated"
+assert_contains "$out" "vendored source-license hash mismatch" \
+  "tampered third-party notice was not identified"
+pass "public checker integrity-binds the upstream redistribution notice"
 
-  if (mismatches.length > 0) {
-    throw new Error(`vendored skill lock mismatch:\n${mismatches.join('\n')}`);
-  }
-  console.log(`ok - skills lock: ${entries.length} vendored directory hashes match`);
-}
+out=$($CHECK --help 2>&1)
+status=$?
+[ "$status" -eq 0 ] || fail "skills lock help failed: $out"
+assert_contains "$out" "--source-root" \
+  "skills lock help omitted the pinned-upstream verification path"
+pass "public checker documents optional pinned-upstream verification"
 
-main().catch((error) => {
-  console.error(`not ok - ${error.message}`);
-  process.exit(1);
-});
-NODE
+echo "# all fm-skills-lock tests passed"

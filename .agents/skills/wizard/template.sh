@@ -28,7 +28,7 @@ _MINUTES_ELAPSED=0
 ENV_FILE="${ENV_FILE:-.env}"
 WRITTEN_ENV=()    # KEYs written to ENV_FILE this run
 WRITTEN_SECRET=() # secret NAMEs set this run
-SKIPPED=()        # things we couldn't do (e.g. gh missing)
+SKIPPED=()        # things we couldn't do (e.g. gh-axi missing)
 
 # _clear - wipe the terminal so only the current step is on screen. No-op when
 # output isn't a terminal, so piped logs stay readable.
@@ -144,32 +144,32 @@ write_env() {
   printf '  %s✓ wrote%s %s → %s\n' "$GREEN" "$RESET" "$key" "$ENV_FILE"
 }
 
-# set_secret NAME VALUE - set a GitHub Actions repo secret via gh. Falls back
-# to a warning (and records it) if gh is unavailable or unauthenticated.
+# set_secret NAME VALUE - set a GitHub Actions repo secret via gh-axi. Falls back
+# to a warning (and records it) if gh-axi is unavailable or the write fails.
 set_secret() {
   local name="$1" value="$2"
-  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
-    if printf '%s' "$value" | gh secret set "$name" >/dev/null 2>&1; then
+  if command -v gh-axi >/dev/null 2>&1; then
+    if printf '%s' "$value" | gh-axi secret set "$name" >/dev/null 2>&1; then
       WRITTEN_SECRET+=("$name")
       printf '  %s✓ set%s GitHub secret %s\n' "$GREEN" "$RESET" "$name"
       return
     fi
   fi
-  SKIPPED+=("GitHub secret $name (set it manually: gh secret set $name)")
-  warn "skipped GitHub secret $name - gh not ready; set it later"
+  SKIPPED+=("GitHub secret $name (set it manually: gh-axi secret set $name)")
+  warn "skipped GitHub secret $name - gh-axi not ready; set it later"
 }
 
 # set_var NAME VALUE - set a GitHub Actions repo variable (non-secret).
 set_var() {
   local name="$1" value="$2"
-  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
-    if gh variable set "$name" --body "$value" >/dev/null 2>&1; then
+  if command -v gh-axi >/dev/null 2>&1; then
+    if gh-axi variable set "$name" --body "$value" >/dev/null 2>&1; then
       printf '  %s✓ set%s GitHub variable %s\n' "$GREEN" "$RESET" "$name"
       return
     fi
   fi
   SKIPPED+=("GitHub variable $name")
-  warn "skipped GitHub variable $name - gh not ready; set it later"
+  warn "skipped GitHub variable $name - gh-axi not ready; set it later"
 }
 
 # finish - clear, then a closing summary of everything configured.

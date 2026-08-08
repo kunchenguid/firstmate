@@ -8,6 +8,8 @@ description: >-
 disable-model-invocation: true
 ---
 
+Before applying this vendored skill inside Firstmate, read [`VENDORED-ENGINEERING-CONTRACT.md`](../VENDORED-ENGINEERING-CONTRACT.md).
+
 # Ask Matt
 
 You don't remember every skill, so ask.

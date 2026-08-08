@@ -581,6 +581,27 @@ test_missing_origin_default_refused_before_github_api() {
   pass "T24 missing origin/default is refused before GitHub mutation"
 }
 
+test_configured_upstream_must_match_github_parent() {
+  local w out before rc
+  w=$(new_world github-upstream-mismatch)
+  configure_github_world "$w"
+  git -C "$w/main" remote set-url upstream https://github.com/acme/not-the-parent.git
+  before=$(git -C "$w/main" rev-parse HEAD)
+
+  out=$(run_github_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -ne 0 ] || fail "mismatched configured upstream unexpectedly succeeded"
+  assert_contains "$out" \
+    "update refused: unsupported topology: configured upstream acme/not-the-parent differs from GitHub parent acme/firstmate" \
+    "configured upstream mismatch was not refused"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
+    || fail "local checkout moved after configured upstream mismatch"
+  assert_not_contains "$(cat "$w/gh.log")" "repo sync" \
+    "fork sync ran despite configured upstream mismatch"
+  pass "T25 configured upstream must match the GitHub-reported parent"
+}
+
 test_direct_github_origin_bypasses_fork_sync() {
   local w out gh_log rc
   w=$(new_world github-direct)
@@ -711,6 +732,7 @@ test_github_api_failure_refused
 test_non_github_origin_bypasses_gh
 test_stale_origin_tracking_is_refreshed_before_github_api
 test_missing_origin_default_refused_before_github_api
+test_configured_upstream_must_match_github_parent
 test_direct_github_origin_bypasses_fork_sync
 test_mixed_case_github_host_uses_fork_sync
 test_credentialed_github_origin_uses_fork_sync

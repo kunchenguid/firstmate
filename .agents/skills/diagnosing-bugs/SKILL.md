@@ -7,6 +7,8 @@ description: >-
   Use when the user says "diagnose"/"debug this", or reports something broken/throwing/failing/slow.
 ---
 
+Before applying this vendored skill inside Firstmate, read [`VENDORED-ENGINEERING-CONTRACT.md`](../VENDORED-ENGINEERING-CONTRACT.md).
+
 # Diagnosing Bugs
 
 A discipline for hard bugs.

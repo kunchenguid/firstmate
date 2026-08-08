@@ -8,6 +8,8 @@ description: >-
   Don't invoke this for steps the agent can perform itself.
 ---
 
+Before applying this vendored skill inside Firstmate, read [`VENDORED-ENGINEERING-CONTRACT.md`](../VENDORED-ENGINEERING-CONTRACT.md).
+
 # Wizard
 
 A **wizard** is a bash script that walks a human, step by step, through a manual procedure that's tedious to do by hand and tedious to re-explain to an AI every time.
@@ -15,7 +17,7 @@ It opens each URL, says exactly what to click and copy, captures the values, wri
 It might configure third-party services, run a one-off migration, or move the project from one state to another.
 
 The delightful UX is already solved by [template.sh](template.sh).
-It provides progress with time-remaining, confirmation gates, cross-platform URL opening (including WSL), hidden secret entry, idempotent `.env` upserts, `gh secret`/`gh variable` writes, and a closing summary.
+It provides progress with time-remaining, confirmation gates, cross-platform URL opening (including WSL), hidden secret entry, idempotent `.env` upserts, `gh-axi secret`/`gh-axi variable` writes, and a closing summary.
 **Your job is only to scope the procedure and author its stages.**
 The library above the `STAGES` marker is identical in every wizard; that consistency is the point - never hand-edit it.
 

@@ -6,6 +6,8 @@ description: Turn the current conversation into a spec and publish it to the pro
 disable-model-invocation: true
 ---
 
+Before applying this vendored skill inside Firstmate, read [`VENDORED-ENGINEERING-CONTRACT.md`](../VENDORED-ENGINEERING-CONTRACT.md).
+
 This skill takes the current conversation context and codebase understanding and produces a spec.
 Do NOT interview the user - just synthesize what you already know.
 

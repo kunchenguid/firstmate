@@ -6,6 +6,8 @@ description: "Implement a piece of work based on a spec or set of tickets."
 disable-model-invocation: true
 ---
 
+Before applying this vendored skill inside Firstmate, read [`VENDORED-ENGINEERING-CONTRACT.md`](../VENDORED-ENGINEERING-CONTRACT.md).
+
 When running as Firstmate, commission one ship through the task lifecycle and put the specification or tickets plus the checks below in its brief.
 When running as the delegated implementation worker, implement the described work in the assigned worktree.
 

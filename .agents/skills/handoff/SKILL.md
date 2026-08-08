@@ -7,6 +7,8 @@ argument-hint: "What will the next session be used for?"
 disable-model-invocation: true
 ---
 
+Before applying this vendored skill inside Firstmate, read [`VENDORED-ENGINEERING-CONTRACT.md`](../VENDORED-ENGINEERING-CONTRACT.md).
+
 Write a handoff document summarising the current conversation so a fresh agent can continue the work.
 Save to the temporary directory of the user's OS - not the current workspace.
 

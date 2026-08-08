@@ -7,6 +7,8 @@ description: >-
   Use when the user wants to sanity-check whether a state model or logic feels right, or explore what a UI should look like.
 ---
 
+Before applying this vendored skill inside Firstmate, read [`VENDORED-ENGINEERING-CONTRACT.md`](../VENDORED-ENGINEERING-CONTRACT.md).
+
 # Prototype
 
 A prototype is **throwaway code that answers a question**.

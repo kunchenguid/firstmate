@@ -7,6 +7,8 @@ description: >-
   Use when the user wants a topic researched, docs or API facts gathered, or reading legwork delegated to a background agent.
 ---
 
+Before applying this vendored skill inside Firstmate, read [`VENDORED-ENGINEERING-CONTRACT.md`](../VENDORED-ENGINEERING-CONTRACT.md).
+
 Spin up a **background agent** to do the research, so you keep working while it reads.
 
 Its job:
