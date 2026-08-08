@@ -163,7 +163,7 @@ test_cursor_shim_refuses_silent_stop_on_interrupt_marker() {
   out=$(printf '{"session_id":"cur-session","loop_count":0,"workspace_roots":["%s"]}' "$dir" \
     | CURSOR_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-cursor.sh" 2>&1); status=$?
   expect_code 0 "$status" "cursor shim must exit 0 when refusing a silent stop for an interrupted park"
-  assert_contains "$out" "stop-hook supervision was interrupted" \
+  assert_contains "$out" "Hook-owned supervision was interrupted" \
     "cursor shim must diagnose the interrupted park instead of a silent {}"
   assert_contains "$out" "bin/fm-wake-drain.sh" \
     "cursor interrupt followup must instruct wake draining"
