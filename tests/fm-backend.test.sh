@@ -6,16 +6,22 @@
 # fm-teardown.sh used to run inline into named adapter functions. This suite:
 #
 #   1. Unit-tests bin/fm-backend.sh's selection, meta, and dispatch helpers.
-#   2. Runs the PRE-REFACTOR versions of fm-send.sh, fm-peek.sh, fm-spawn.sh,
-#      and fm-teardown.sh (checked out from the merge-base with `main`, the
-#      commit this branch started from) against the SAME fake tmux/treehouse
-#      binaries and fixtures as the REFACTORED versions in this checkout, then
-#      diffs the two command logs byte-for-byte - the report's P1 checklist
+#   2. Runs the PRE-REFACTOR versions of fm-send.sh and fm-peek.sh (checked out
+#      from the merge-base with `main`, the commit this branch started from)
+#      against the SAME fake tmux binaries and fixtures as the REFACTORED
+#      versions in this checkout, then diffs the two command logs
+#      byte-for-byte - the report's P1 checklist
 #      item "run current main scripts and refactored scripts against the same
-#      fake tools and compare command logs". The teardown old-vs-new case also
-#      overlays a content-historical permissive tmux kill fixture: after the
-#      exact-selector change lands on the default branch, merge-base with main
-#      collapses to HEAD and can no longer supply that baseline.
+#      fake tools and compare command logs". fm-spawn.sh and fm-teardown.sh
+#      dropped out of this same byte-identical comparison once their worktree
+#      provider genuinely changed (treehouse -> proj, not a pure extraction):
+#      fm-spawn.sh's window-construction sequence is instead pinned directly by
+#      tests/fm-tangle-guard.test.sh, and fm-teardown.sh's own
+#      test_teardown_conformance_old_vs_new below now pairs the CURRENT
+#      fm-teardown.sh with a content-historical permissive-selector tmux
+#      adapter (found by content, not by ref, so it stays historical even after
+#      merge-base with main collapses to HEAD) purely to keep the tmux
+#      kill-window exact-selector regression covered.
 #   3. Asserts the `--backend`/`FM_BACKEND` selection refuses unknown backends
 #      and the blocked `codex-app` backend loudly.
 #
@@ -962,7 +968,7 @@ test_teardown_conformance_old_vs_new() {
   assert_contains "$(cat "$log_new")" "tmux"$'\x1f''kill-window'$'\x1f''-t'$'\x1f'"=firstmate:=fm-$id" \
     "teardown did not call tmux kill-window with exact session and window selectors"
 
-  pass "fm-teardown.sh: treehouse return remains compatible while tmux cleanup uses exact selectors"
+  pass "fm-teardown.sh: proj rm remains correct while tmux cleanup uses exact selectors"
 }
 
 # --- backend selection loudly refuses an unknown backend --------------------
