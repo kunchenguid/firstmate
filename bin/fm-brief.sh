@@ -410,6 +410,23 @@ esac
 # briefs stay byte-identical to the historical Bash 5 output.
 DOD=${DOD%$'\n'}
 
+# jj-managed projects (registry token `jj` after the mode bracket) get a jj
+# branch step instead of `git checkout -b`: their AGENTS.md forbids raw git
+# write commands and jj is their version control. The token is documented in
+# the registry format header of data/projects.md, so firstmate records this
+# once per project instead of hand-patching every brief.
+JJ_MANAGED=0
+if [ -f "$FM_HOME/data/projects.md" ]; then
+  if grep -Eq "^\- $REPO \[[^]]*\] jj " "$FM_HOME/data/projects.md"; then
+    JJ_MANAGED=1
+  fi
+fi
+if [ "$JJ_MANAGED" = 1 ]; then
+  BRANCH_STEP="1. First action: create your branch. This repo is jj-managed (its AGENTS.md forbids raw git write commands): run \`jj bookmark create fm/$ID\`."
+else
+  BRANCH_STEP="1. First action: create your branch: \`git checkout -b fm/$ID\`"
+fi
+
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
@@ -425,7 +442,7 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+$BRANCH_STEP$SETUP2
 
 # Rules
 $RULE1
