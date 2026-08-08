@@ -144,6 +144,11 @@ TRUST_UI='do you trust|trust (this|the|parent) |trust the contents of this|trust
 # that need it: every `fail` inside a probe exits at once, and a check wired
 # only into the success path would be skipped precisely when a probe died
 # because a gate it was supposed to bypass started writing again.
+#
+# The headless and interactive probes are separate armed phases, each with its
+# own pre-run copy and its own verdict, so a difference names the phase that
+# caused it and stops the run before the next phase starts. Whichever phase is
+# armed when an exit happens is the one cleanup compares.
 CODEX_CONFIG="${CODEX_HOME:-$HOME/.codex}/config.toml"
 CODEX_CONFIG_BEFORE="${TMPDIR:-/tmp}/fm-sessionstart-hook-live-e2e.codex-config.$$.toml"
 CODEX_CONFIG_LAB=
@@ -178,7 +183,7 @@ codex_config_verify() {  # -> 0 unchanged (or never armed), 1 changed
   if cmp -s "$CODEX_CONFIG_BEFORE" "$now"; then
     CODEX_CONFIG_VERDICT=0
     rm -f "$now" "$CODEX_CONFIG_BEFORE"
-    pass "codex: the live Codex config gained no throwaway directory trust or hook state"
+    pass "codex: $CODEX_CONFIG_PHASE left no throwaway directory trust or hook state in the live Codex config"
     return 0
   fi
   CODEX_CONFIG_VERDICT=1
@@ -466,16 +471,18 @@ for harness in claude codex pi; do
       ;;
     codex)
       trust_override=$(codex_trust_override "$lab")
+      # One armed phase at a time, each verified before the next is armed: a
+      # phase that dirtied the live config must stop the run rather than hand
+      # the next probe an already-polluted home and its own chance to write,
+      # and the verdict must name the phase that actually caused it.
       codex_config_arm "$lab" "the headless probes"
       probe_process_opens codex "$version" "$lab" resume \
         codex exec -c "$trust_override" --enable hooks --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check \
         -- codex exec resume --last -c "$trust_override" --enable hooks --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check
-      CODEX_CONFIG_PHASE="the interactive probe"
+      codex_config_verify || exit 1
+      codex_config_arm "$lab" "the interactive probe"
       probe_context_reset codex "$version" "$lab" /clear \
         codex -c "$trust_override" --enable hooks --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox
-      # Report the verdict here too, so a live-config change stops the run
-      # before the next harness spends model turns; cleanup then repeats this
-      # cached verdict instead of re-reading anything.
       codex_config_verify || exit 1
       ;;
     pi)
