@@ -132,9 +132,14 @@ FM_BACKEND_RYDER_PROTOCOL=1
 #     transcript saving in an unrelated agent that merely inherited it.
 #   CLAUDECODE - bin/fm-harness.sh's own harness auto-detection marker, so an
 #     inherited copy makes a spawned worker misidentify its own harness.
+#   PI_CODING_AGENT - the same marker for pi, checked by the same
+#     bin/fm-harness.sh detect_own between CLAUDECODE and GROK_AGENT.
+#   FM_PI_HARNESS - the pi-signed refinement of that verdict, which leaks the
+#     same way; bin/fm-spawn.sh unsets it alongside PI_CODING_AGENT for its own
+#     muse launch for exactly this hazard.
 #   GROK_AGENT - the same hazard for grok (.agents/skills/harness-adapters).
 # Override for a home that needs a different set; an empty value strips none.
-FM_BACKEND_RYDER_ENV_REMOVE=${FM_BACKEND_RYDER_ENV_REMOVE-CLAUDE_CODE_CHILD_SESSION CLAUDECODE GROK_AGENT}
+FM_BACKEND_RYDER_ENV_REMOVE=${FM_BACKEND_RYDER_ENV_REMOVE-CLAUDE_CODE_CHILD_SESSION CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT}
 
 # The shell put in the pty. Ryder spawns an explicit argv rather than a
 # configured default-command the way tmux does, so the choice is named here.
@@ -616,6 +621,28 @@ EOF
   fi
 }
 
+# fm_backend_ryder_alive_flag: the reply's own `.alive` as true|false|unknown.
+# The one place a state body's liveness field is read, so the verdicts below
+# cannot disagree about the same reply.
+#
+# `unknown` is deliberately distinct from `false`. A `jq` filter of
+# `.alive // false` collapses three different outcomes onto `false`: the host
+# genuinely answering false, a body carrying no `.alive` at all, and a reply jq
+# could not parse (an empty body, a truncated one, or a broken or absent jq,
+# which exits nonzero and prints nothing). Only the first is the host's own
+# answer that the agent is gone, and `dead` is one of the two recovery-licensing
+# states, so the other two must never reach it.
+fm_backend_ryder_alive_flag() {  # <reply-body> -> true|false|unknown
+  local flag
+  flag=$(printf '%s' "$1" \
+    | jq -r 'if (.alive | type) == "boolean" then (.alive | tostring) else "unknown" end' 2>/dev/null) \
+    || flag=unknown
+  case "$flag" in
+    true|false) printf '%s' "$flag" ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 # fm_backend_ryder_agent_state: recovery-grade harness-agent state for one
 # recorded target. bin/fm-backend.sh's fm_backend_agent_state owns the shared
 # state vocabulary and docs/ryder-backend.md "Agent liveness" owns the mapping
@@ -638,8 +665,11 @@ fm_backend_ryder_agent_state() {  # <target>
     esac
     return 0
   fi
-  alive=$(printf '%s' "$raw" | jq -r '.alive // false' 2>/dev/null)
-  [ "$alive" = true ] || { printf 'dead'; return 0; }
+  alive=$(fm_backend_ryder_alive_flag "$raw")
+  case "$alive" in
+    false) printf 'dead'; return 0 ;;
+    unknown) printf 'unreadable'; return 0 ;;
+  esac
   case "$(fm_backend_ryder_foreground_class "$raw")" in
     agent) printf 'alive' ;;
     shell) printf 'dead' ;;
@@ -680,7 +710,7 @@ fm_backend_ryder_busy_state() {  # <target> -> busy|unknown
   local target=$1 raw alive
   fm_backend_ryder_target_valid "$target" || { printf 'unknown'; return 0; }
   raw=$(fm_backend_ryder_state_raw "$target") || { printf 'unknown'; return 0; }
-  alive=$(printf '%s' "$raw" | jq -r '.alive // false' 2>/dev/null)
+  alive=$(fm_backend_ryder_alive_flag "$raw")
   [ "$alive" = true ] || { printf 'unknown'; return 0; }
   case "$(fm_backend_ryder_foreground_class "$raw")" in
     other) printf 'busy' ;;

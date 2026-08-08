@@ -180,6 +180,8 @@ test_create_task_argv_and_env_scrub() {
   # an agent session silently inherits its parent's child-process markers.
   log_has --env-remove CLAUDE_CODE_CHILD_SESSION || fail "CLAUDE_CODE_CHILD_SESSION must be removed"
   log_has --env-remove CLAUDECODE || fail "CLAUDECODE must be removed"
+  log_has --env-remove PI_CODING_AGENT || fail "PI_CODING_AGENT must be removed"
+  log_has --env-remove FM_PI_HARNESS || fail "FM_PI_HARNESS must be removed"
   log_has --env-remove GROK_AGENT || fail "GROK_AGENT must be removed"
   # Every ryder flag must precede `--`; everything after it is the agent's argv.
   local line sep_seen=0 flag_after=0 a
@@ -233,7 +235,36 @@ test_agent_state_unreadable_never_licenses_recovery() {
   [ "$(fm_backend_ryder_agent_state fm-h-t)" = unreadable ] || fail "an unparseable reply must map to unreadable"
   new_case state_malformed
   [ "$(fm_backend_ryder_agent_state 'a:b')" = unreadable ] || fail "a malformed target must map to unreadable"
+  # The SUCCEEDING-call variants of the same hazard: the CLI exits zero but the
+  # body is unparseable, empty, or carries no `.alive` at all. None of the three
+  # is the host answering that the agent is gone, so none may reach `dead`.
+  new_case state_ok_garbage
+  respond 1 'not json at all'
+  [ "$(fm_backend_ryder_agent_state fm-h-t)" = unreadable ] \
+    || fail "a zero-exit reply with an unparseable body must map to unreadable, never dead"
+  new_case state_ok_empty
+  respond 1 ''
+  [ "$(fm_backend_ryder_agent_state fm-h-t)" = unreadable ] \
+    || fail "a zero-exit reply with an empty body must map to unreadable, never dead"
+  new_case state_ok_no_alive
+  respond 1 '{"id":"s","fg_comm":"bash","tty":"/dev/ttys999"}'
+  [ "$(fm_backend_ryder_agent_state fm-h-t)" = unreadable ] \
+    || fail "a zero-exit reply carrying no .alive field must map to unreadable, never dead"
   pass "ryder: a transient or unparseable read stays unreadable, never dead or missing"
+}
+
+test_busy_state_unknown_on_an_unreadable_reply() {
+  # The same reply shapes through busy_state, which shares the one `.alive`
+  # reader, so the two verdicts cannot disagree about the same body.
+  new_case busy_ok_garbage
+  respond 1 'not json at all'
+  [ "$(fm_backend_ryder_busy_state fm-h-t)" = unknown ] \
+    || fail "a zero-exit reply with an unparseable body must leave busy_state unknown"
+  new_case busy_ok_no_alive
+  respond 1 '{"id":"s","fg_comm":"cargo","fg_argv0":"/usr/bin/cargo","tty":"/dev/ttys999","fg_pgrp":10}'
+  [ "$(fm_backend_ryder_busy_state fm-h-t)" = unknown ] \
+    || fail "a reply carrying no .alive field must leave busy_state unknown, never busy"
+  pass "ryder: busy_state stays unknown on a reply whose liveness cannot be read"
 }
 
 test_agent_state_dead_when_the_agent_is_gone() {
@@ -713,6 +744,7 @@ test_agent_state_dead_when_the_agent_is_gone
 test_agent_state_classifies_the_foreground
 test_agent_state_ambiguous_never_collapses_to_dead
 test_busy_state_is_honest
+test_busy_state_unknown_on_an_unreadable_reply
 test_composer_empty_pending_and_unknown
 test_composer_dead_shell_prompt_is_never_empty
 test_composer_strips_ghost_text_via_the_style_channel
