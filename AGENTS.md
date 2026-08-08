@@ -261,7 +261,7 @@ Do not build wrappers, control planes, policy layers, custom verifiers, or autom
 
 Save tokens by eliminating duplicated work, irrelevant raw context, and repeated evidence collection, never by weakening accepted scope, necessary reasoning, evidence, validation, or safety.
 Preserve direct user requirements, authoritative source material, and durable decisions, and perform necessary targeted rereads; never substitute a lossy summary when the exact source is required to act safely or correctly.
-When firstmate or a secondmate implements or corrects work directly, group related fixes and run the smallest focused checks that establish the changed behavior before rerunning broader suites; that ordering applies only before validation begins and never narrows the delivery path's required final checks.
+When firstmate or a secondmate implements or corrects work directly under section 1's existing exceptions, group related fixes and run the smallest focused checks that establish the changed behavior before rerunning broader suites; that ordering applies only before validation begins and never narrows the delivery path's required final checks.
 Before commissioning an investigation, consult existing reports and established evidence.
 Classify the deliverable:
 

@@ -89,7 +89,7 @@ Never use headroom, runway, pace, or reserve to silently replace that reasoning 
 2. Honor any explicit captain instruction that sets a floor for that candidate before the generic comparison.
    Do not invent a generic percentage floor or treat a low percentage as an automatic failure.
 3. Keep the strongest-reasoning class when every candidate is tight or completion evidence is poor.
-   Dispatch inside that class when a candidate can proceed, or report that its strongest-class choice cannot proceed.
+   Dispatch inside that class when a candidate can proceed, or report that its strongest-class choice cannot proceed rather than downgrading it to conserve quota.
 4. Compare comparable-fit candidates on their applicable effective headroom and usable runway.
    Eliminate a candidate only when another candidate Pareto-dominates it on both dimensions, with at least one dimension strictly better.
    Establish dominance only from comparable known evidence, never by treating absent, `unknown`, or unmeasurable headroom or runway as zero or as a healthy value.
