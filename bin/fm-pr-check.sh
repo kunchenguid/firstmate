@@ -78,6 +78,14 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
   fi
 fi
 
+# Provisionally journal the forge observation for attempt-bound tasks: the
+# authoritative observation here is the head read above (no forge state is
+# read at check time, so state stays null rather than guessing). Additive only -
+# a task without attempt= behaves exactly as before, and the final landing
+# receipt is written only by the disposition step, never here.
+fm_pr_attempt_observe_forge "$META" "$PROVIDER" "$PROJECT_PATH" "$ID" \
+  "" "$PR_HEAD" "" "" "" "$URL" || true
+
 META_TMP=
 pr_check_cleanup() {
   fm_pr_poll_cleanup

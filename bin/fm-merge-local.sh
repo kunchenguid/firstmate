@@ -16,6 +16,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=${1:?usage: fm-merge-local.sh <task-id>}
 META="$STATE/$ID.meta"
@@ -63,6 +65,15 @@ if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BRANCH"; then
 fi
 
 before=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
+before_full=$(git -C "$PROJ" rev-parse "$DEFAULT")
 git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null
 after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
+after_full=$(git -C "$PROJ" rev-parse "$DEFAULT")
 echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"
+# Provisionally journal the local-merge observation for attempt-bound tasks:
+# the authoritative observation is the completed ff-only merge, whose provider,
+# target branch, state, and both tip shas are read from the local repository
+# (full shas; the short-shas echo above is unchanged). Additive only - a task
+# without attempt= behaves exactly as before, and the final landing receipt is
+# written only by the disposition step, never here.
+fm_pr_attempt_observe_forge "$META" local "$PROJ" "$ID" "$DEFAULT" "$after_full" merged "$before_full" "$after_full" "" || true

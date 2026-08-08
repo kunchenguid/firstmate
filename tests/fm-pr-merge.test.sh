@@ -301,6 +301,204 @@ test_parses_pr_url_for_gh_axi() {
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
+# --- attempt-bound landing receipts (Task 10) ------------------------------
+# The PR scripts only journal provisional forge observations; the final landing
+# receipt is written once by the disposition step and is landed ONLY when the
+# merged content is equivalent to the PR head's patch. These fixtures build a
+# real git history (squash merge whose net change matches the PR head, and an
+# authorized local-only fast-forward) and prove the receipt-bound evidence.
+#
+# Content-equivalence proof mirroring teardown's unpushed_patches_are_in_pr_head
+# on an explicit repo: every unpushed commit in <repo> HEAD must be contained
+# (by stable patch-id) in the PR head's commit set, exactly the check a squash
+# merge needs to be proof of landing.
+unpushed_patches_are_in_pr_head() {  # <repo> <pr_head>
+  local repo=$1 pr_head=$2
+  local current base pr_patch_ids commit patch_id unpushed
+  current=$(git -C "$repo" rev-parse --verify HEAD 2>/dev/null) || return 1
+  base=$(git -C "$repo" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
+  pr_patch_ids=$(
+    git -C "$repo" log --format=%H "$base..$pr_head" -- 2>/dev/null \
+      | while IFS= read -r commit; do
+          [ -n "$commit" ] || continue
+          git -C "$repo" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
+            | git patch-id --stable 2>/dev/null \
+            | awk 'NR == 1 { print $1 }'
+        done \
+      | sed '/^$/d' \
+      | sort -u
+  ) || return 1
+  [ -n "$pr_patch_ids" ] || return 1
+  unpushed=$(git -C "$repo" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
+  [ -n "$unpushed" ] || return 1
+  while IFS= read -r commit; do
+    [ -n "$commit" ] || continue
+    patch_id=$(git -C "$repo" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
+      | git patch-id --stable 2>/dev/null \
+      | awk 'NR == 1 { print $1 }') || return 1
+    [ -n "$patch_id" ] || return 1
+    printf '%s\n' "$pr_patch_ids" | grep -qxF "$patch_id" || return 1
+  done <<EOF
+$unpushed
+EOF
+}
+
+# build_squash_landing_repo <root>: a bare origin with main=base, a project clone
+# with a pr/feature branch (the PR head) and a squash-merge commit on local main
+# whose net change equals the PR head's patch. Prints "base pr_tip squash".
+build_squash_landing_repo() {
+  local root=$1 repo="$1/project" base pr_tip squash
+  git init -q --bare "$root/origin.git"
+  git -C "$root/origin.git" symbolic-ref HEAD refs/heads/main
+  mkdir -p "$root/_seed"
+  git -C "$root/_seed" init -q -b main
+  printf 'base\n' > "$root/_seed/base.txt"
+  git -C "$root/_seed" add base.txt
+  git -C "$root/_seed" -c user.email=t@t -c user.name=t commit -qm base
+  git -C "$root/_seed" remote add origin "$root/origin.git"
+  git -C "$root/_seed" push -q origin main
+  rm -rf "$root/_seed"
+  git clone -q "$root/origin.git" "$repo"
+  git -C "$repo" remote set-head origin main 2>/dev/null || true
+  git -C "$repo" checkout -qb pr/feature
+  printf 'feature\n' > "$repo/feature.txt"
+  git -C "$repo" add feature.txt
+  git -C "$repo" -c user.email=t@t -c user.name=t commit -qm feature
+  pr_tip=$(git -C "$repo" rev-parse HEAD)
+  git -C "$repo" checkout -q main
+  base=$(git -C "$repo" rev-parse main)
+  git -C "$repo" merge --squash pr/feature >/dev/null 2>&1
+  git -C "$repo" -c user.email=t@t -c user.name=t commit -qm 'squash merge feature'
+  squash=$(git -C "$repo" rev-parse HEAD)
+  printf '%s %s %s\n' "$base" "$pr_tip" "$squash"
+}
+
+test_squash_merge_landing_receipt_requires_content_equivalence() {
+  local root aid base pr_tip squash repo
+  root="$TMP_ROOT/squash-landing-proof"
+  rm -rf "$root"
+  mkdir -p "$root/state"
+  export FM_STATE_OVERRIDE="$root/state"
+  . "$ROOT/bin/fm-attempt-lib.sh"
+  aid=$(fm_attempt_alloc pi dos-s holu) || fail "squash alloc"
+  fm_attempt_freeze_allocation "$aid" 1 '{"provider":"tmux","copy":"wt-s"}' \
+    '{"mode":"direct-PR","base":"main","target":"origin/main"}' || fail "squash freeze"
+  fm_attempt_effect_observe "$aid" 1 launch '{"endpoint":"w-s"}' || fail "squash launch"
+  read -r base pr_tip squash <<EOF
+$(build_squash_landing_repo "$root")
+EOF
+  repo="$root/project"
+  # journal open then merged; the merged head is the squash-merge commit
+  fm_attempt_observe "$aid" 1 forge "{\"provider\":\"github\",\"pr\":\"https://github.com/example/repo/pull/7\",\"state\":\"open\"}" \
+    || fail "squash open journal"
+  fm_attempt_observe "$aid" 1 forge "{\"provider\":\"github\",\"pr\":\"https://github.com/example/repo/pull/7\",\"state\":\"merged\",\"head\":\"$squash\",\"before_sha\":\"$base\",\"after_sha\":\"$squash\"}" \
+    || fail "squash merged journal"
+  # the landing disposition is landed ONLY with the content-equivalence proof
+  unpushed_patches_are_in_pr_head "$repo" "$pr_tip" \
+    || fail "squash fixture content was not equivalent to the PR head"
+  fm_attempt_effect_observe "$aid" 1 landing "{\"disposition\":\"landed\",\"provider\":\"github\",\"repo\":\"example/repo\",\"source\":\"task-x1\",\"target\":\"main\",\"head\":\"$squash\",\"before_sha\":\"$base\",\"after_sha\":\"$squash\"}" \
+    || fail "squash landing receipt"
+  jq -e --arg n landing '[.receipts[$n][]? | select(.state == "observed")] | length == 1' \
+    "$root/state/attempts/$aid.json" >/dev/null || fail "squash landing receipt not written exactly once"
+  jq -e --arg h "$squash" --arg b "$base" --arg a "$squash" \
+    '[.receipts.landing[]? | select(.state == "observed")][0].evidence as $e |
+     $e.disposition == "landed" and $e.provider == "github" and $e.repo == "example/repo" and
+     $e.source == "task-x1" and $e.target == "main" and $e.head == $h and
+     $e.before_sha == $b and $e.after_sha == $a' \
+    "$root/state/attempts/$aid.json" >/dev/null || fail "squash landing identity not exact"
+  # negative: a local divergence absent from the PR head must refuse the receipt
+  aid=$(fm_attempt_alloc pi dos-s2 holu) || fail "diverged alloc"
+  fm_attempt_freeze_allocation "$aid" 1 '{"provider":"tmux","copy":"wt-s"}' \
+    '{"mode":"direct-PR","base":"main","target":"origin/main"}' || fail "diverged freeze"
+  fm_attempt_effect_observe "$aid" 1 launch '{"endpoint":"w-s"}' || fail "diverged launch"
+  fm_attempt_observe "$aid" 1 forge "{\"provider\":\"github\",\"pr\":\"https://github.com/example/repo/pull/7\",\"state\":\"open\"}" \
+    || fail "diverged open journal"
+  fm_attempt_observe "$aid" 1 forge "{\"provider\":\"github\",\"pr\":\"https://github.com/example/repo/pull/7\",\"state\":\"merged\",\"head\":\"$squash\",\"before_sha\":\"$base\",\"after_sha\":\"$squash\"}" \
+    || fail "diverged merged journal"
+  git -C "$repo" checkout -q -b diverged
+  printf 'local-only change\n' >> "$repo/feature.txt"
+  git -C "$repo" add feature.txt
+  git -C "$repo" -c user.email=t@t -c user.name=t commit -qm 'local divergence'
+  if unpushed_patches_are_in_pr_head "$repo" "$pr_tip"; then
+    fail "diverged content was falsely equivalent to the PR head"
+  fi
+  jq -e --arg n landing '[.receipts[$n][]? | select(.state == "observed")] | length == 0' \
+    "$root/state/attempts/$aid.json" >/dev/null || fail "diverged content received a landing receipt"
+  pass "the final landing receipt is landed only with the content-equivalence proof and exact identity"
+}
+
+test_local_only_merge_records_receipt_bound_to_local_main() {
+  local root aid repo before_full after_full branch_sha rc
+  root="$TMP_ROOT/local-only-landing"
+  rm -rf "$root"
+  mkdir -p "$root/state" "$root/fakebin"
+  export FM_STATE_OVERRIDE="$root/state"
+  . "$ROOT/bin/fm-attempt-lib.sh"
+  aid=$(fm_attempt_alloc pi dos-l holu) || fail "local alloc"
+  fm_attempt_freeze_allocation "$aid" 1 '{"provider":"tmux","copy":"wt-l"}' \
+    '{"mode":"local-only","base":"main","target":"main"}' || fail "local freeze"
+  fm_attempt_effect_observe "$aid" 1 launch '{"endpoint":"w-l"}' || fail "local launch"
+  repo="$root/project"
+  git init -q --bare "$root/origin.git"
+  git -C "$root/origin.git" symbolic-ref HEAD refs/heads/main
+  mkdir -p "$root/_seed"
+  git -C "$root/_seed" init -q -b main
+  printf 'base\n' > "$root/_seed/base.txt"
+  git -C "$root/_seed" add base.txt
+  git -C "$root/_seed" -c user.email=t@t -c user.name=t commit -qm base
+  git -C "$root/_seed" remote add origin "$root/origin.git"
+  git -C "$root/_seed" push -q origin main
+  rm -rf "$root/_seed"
+  git clone -q "$root/origin.git" "$repo"
+  git -C "$repo" remote set-head origin main 2>/dev/null || true
+  git -C "$repo" checkout -qb fm/task-x1
+  printf 'feature\n' > "$repo/feature.txt"
+  git -C "$repo" add feature.txt
+  git -C "$repo" -c user.email=t@t -c user.name=t commit -qm feature
+  branch_sha=$(git -C "$repo" rev-parse HEAD)
+  git -C "$repo" checkout -q main
+  before_full=$(git -C "$repo" rev-parse main)
+  fm_write_meta "$root/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$root/wt" \
+    "project=$repo" \
+    "kind=ship" \
+    "mode=local-only" \
+    "attempt=$aid"
+
+  set +e
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$root/state" \
+    PATH="$root/fakebin:$PATH" \
+    "$ROOT/bin/fm-merge-local.sh" task-x1 > "$root/out" 2> "$root/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "local-only merge failed: $(cat "$root/err")"
+  after_full=$(git -C "$repo" rev-parse main)
+  [ "$after_full" = "$branch_sha" ] || fail "ff-only merge did not land the branch tip"
+  # the script journaled the exact local-main identity
+  jq -e --arg b "$before_full" --arg a "$after_full" \
+    '[.observations[]? | select(.name == "forge")][-1].evidence as $e |
+     $e.provider == "local" and $e.repo == "'"$repo"'" and $e.source == "task-x1" and
+     $e.target == "main" and $e.state == "merged" and $e.head == $a and
+     $e.before_sha == $b and $e.after_sha == $a' \
+    "$root/state/attempts/$aid.json" >/dev/null \
+    || fail "local merge did not journal the exact local-main identity"
+  # the disposition step writes the final landing receipt bound to that evidence
+  fm_attempt_effect_observe "$aid" 1 landing "{\"disposition\":\"landed\",\"provider\":\"local\",\"repo\":\"$repo\",\"source\":\"task-x1\",\"target\":\"main\",\"head\":\"$after_full\",\"before_sha\":\"$before_full\",\"after_sha\":\"$after_full\"}" \
+    || fail "local landing receipt"
+  jq -e --arg n landing '[.receipts[$n][]? | select(.state == "observed")] | length == 1' \
+    "$root/state/attempts/$aid.json" >/dev/null || fail "local landing receipt not written exactly once"
+  jq -e --arg b "$before_full" --arg a "$after_full" \
+    '[.receipts.landing[]? | select(.state == "observed")][0].evidence.disposition == "landed" and
+     [.receipts.landing[]? | select(.state == "observed")][0].evidence.provider == "local" and
+     [.receipts.landing[]? | select(.state == "observed")][0].evidence.before_sha == $b and
+     [.receipts.landing[]? | select(.state == "observed")][0].evidence.after_sha == $a' \
+    "$root/state/attempts/$aid.json" >/dev/null \
+    || fail "landing receipt is not bound to the exact local-main evidence"
+  pass "local-only merge journals the exact local-main identity and the receipt is bound to it"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -311,3 +509,5 @@ test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
+test_squash_merge_landing_receipt_requires_content_equivalence
+test_local_only_merge_records_receipt_bound_to_local_main

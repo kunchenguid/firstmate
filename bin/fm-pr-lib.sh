@@ -940,3 +940,93 @@ fm_pr_poll_retirement_recover_all() {
   done
   [ -z "$FM_PR_POLL_RETIREMENT_REJECTED" ]
 }
+
+# --- provisional forge observations and the final landing receipt -----------
+#
+# The PR lifecycle scripts (bin/fm-pr-check.sh, bin/fm-pr-merge.sh,
+# bin/fm-pr-poll.sh, bin/fm-merge-local.sh) append PROVISIONAL forge
+# observations into the task's attempt journal with
+# `fm_attempt_observe <attempt> <gen> forge <evidence>` when the task meta
+# carries attempt=. The journal is append-only and NEVER authority: a later
+# observation never rewrites an earlier one, and no observation ever decides a
+# disposition. The final immutable landing receipt
+# (`fm_attempt_effect_observe <attempt> <gen> landing {...}`) is written ONLY
+# by the disposition step (Task 11's fm_disposition_live consumer), never by a
+# PR script - a squash merge is landed only when existing Git and forge proof
+# establishes content equivalence, which only that step performs.
+#
+# Observation evidence schema fm-pr-forge-observation.v1 - one JSON object with
+# exactly these fields, each populated from what the observing script actually
+# read or explicit null, NEVER inferred from absence or context:
+#
+#   provider    "github" | "gitlab" | "local" - the forge or merge provider,
+#               observed from the validated PR/MR URL or the local merge path.
+#   repo        the repository identity: the GitHub owner/repo, the GitLab
+#               project path, or the local project path for a local-only merge.
+#   source      the task id whose meta carries the attempt= binding.
+#   target      the merge target branch/ref when the script observed one
+#               (local-only merges observe the default branch), else null.
+#   head        the observed head commit sha when the script read one
+#               (fm-pr-check's headRefOid read, a local ff-only result), else
+#               null. A read failure is null, never a guessed sha.
+#   state       the forge lifecycle state exactly as read (fm-pr-poll's exact
+#               "merged" state read, the observed local merge result), else
+#               null. A script that only performed an action or read a head -
+#               fm-pr-check, fm-pr-merge - leaves state null rather than
+#               guessing "open" from merely arming a watch.
+#   before_sha  the observed pre-merge tip sha (local-only merge), else null.
+#   after_sha   the observed post-merge tip sha (local-only merge), else null.
+#   pr          the canonical PR/MR URL when the observation concerns one,
+#               observed from the validated URL; consumed by fm_disposition_live
+#               to find the forge owner. null for a local-only merge.
+#
+# fm_pr_forge_observation builds that evidence from positional arguments
+# (empty or omitted trailing fields become explicit null); every caller uses
+# this one builder so the shape cannot drift. fm_pr_attempt_observe_forge reads
+# the attempt= binding from the task meta and appends the observation
+# additively: a task without attempt= behaves exactly as before, and any
+# journaling failure is reported on stderr without changing the caller's
+# PR-side behavior or exit status.
+
+FM_PR_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+fm_pr_forge_observation() {  # <provider> <repo> <source> [target] [head] [state] [before_sha] [after_sha] [pr]
+  local provider=${1:?} repo=${2:?} source=${3:?}
+  local target=${4-} head=${5-} state=${6-} before_sha=${7-} after_sha=${8-} pr=${9-}
+  jq -nc \
+    --arg provider "$provider" --arg repo "$repo" --arg source "$source" \
+    --arg target "$target" --arg head "$head" --arg state "$state" \
+    --arg before_sha "$before_sha" --arg after_sha "$after_sha" --arg pr "$pr" \
+    '{provider:$provider, repo:$repo, source:$source, target:$target, head:$head,
+      state:$state, before_sha:$before_sha, after_sha:$after_sha, pr:$pr}
+     | with_entries(.value = (if .value == "" then null else .value end))'
+}
+
+fm_pr_attempt_observe_forge() {  # <meta> <provider> <repo> <source> [target] [head] [state] [before_sha] [after_sha] [pr]
+  local meta=${1:?} provider=${2:?} repo=${3:?} source=${4:?}
+  local target=${5-} head=${6-} state=${7-} before_sha=${8-} after_sha=${9-} pr=${10-}
+  local attempt evidence gen
+  attempt=$(sed -n 's/^attempt=//p' "$meta" 2>/dev/null | head -1)
+  [ -n "$attempt" ] || return 0
+  if [ -z "${FM_ATTEMPT_LIB_SOURCED:-}" ]; then
+    # shellcheck source=bin/fm-attempt-lib.sh
+    . "$FM_PR_LIB_DIR/fm-attempt-lib.sh" 2>/dev/null || {
+      echo "fm-pr: could not load the attempt library to journal a forge observation for $attempt" >&2
+      return 0
+    }
+  fi
+  evidence=$(fm_pr_forge_observation "$provider" "$repo" "$source" \
+    "$target" "$head" "$state" "$before_sha" "$after_sha" "$pr") || {
+    echo "fm-pr: could not build forge observation evidence for $attempt" >&2
+    return 0
+  }
+  gen=$(fm_attempt_generation "$attempt" 2>/dev/null) || {
+    echo "fm-pr: could not read generation for attempt $attempt; forge observation not journaled" >&2
+    return 0
+  }
+  if ! fm_attempt_observe "$attempt" "$gen" forge "$evidence"; then
+    echo "fm-pr: failed to journal forge observation for attempt $attempt" >&2
+  fi
+  return 0
+}
+

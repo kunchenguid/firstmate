@@ -3325,6 +3325,129 @@ test_gitlab_merged_poll_retires() {
   pass "GitHub and GitLab exact merged results share one retirement path"
 }
 
+# --- attempt-bound provisional forge observations (Task 10) ---------------
+# The PR lifecycle scripts journal provisional forge observations into the
+# attempt record only when the task meta carries attempt=; the final landing
+# receipt is written only by the disposition step. This fixture builds one live
+# attempt whose meta carries attempt= and runs the REAL fm-pr-check.sh against
+# a fake gh that answers the head read.
+PR_ATTEMPT_ROOT=$(fm_test_tmproot fm-pr-attempt)
+PR_ATTEMPT_HOME="$PR_ATTEMPT_ROOT/home"
+PR_ATTEMPT_STATE="$PR_ATTEMPT_HOME/state"
+PR_ATTEMPT_ROOTDIR="$PR_ATTEMPT_ROOT/root"
+PR_ATTEMPT_FAKEBIN="$PR_ATTEMPT_ROOT/fakebin"
+PR_ATTEMPT_WT="$PR_ATTEMPT_ROOT/wt"
+mkdir -p "$PR_ATTEMPT_HOME" "$PR_ATTEMPT_ROOTDIR/bin" "$PR_ATTEMPT_FAKEBIN" "$PR_ATTEMPT_WT"
+cat > "$PR_ATTEMPT_ROOTDIR/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'guard\n' >> "${FM_TEST_GUARD_LOG:-/dev/null}"
+SH
+chmod +x "$PR_ATTEMPT_ROOTDIR/bin/fm-guard.sh"
+cat > "$PR_ATTEMPT_FAKEBIN/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TEST_GH_LOG:-/dev/null}"
+case " $* " in
+  *" headRefOid "*) printf '%s\n' '0123456789abcdef0123456789abcdef01234567' ;;
+esac
+SH
+chmod +x "$PR_ATTEMPT_FAKEBIN/gh"
+
+# setup_pr_attempt -> prints an attempt id with claim+launch receipts and a
+# task-p.meta carrying attempt=. The test bodies export FM_STATE_OVERRIDE and
+# source the attempt library first (each test body runs in the parent shell, so
+# the export and the sourced functions persist for the sequential tests that
+# follow); the command-substitution call itself runs setup_pr_attempt in a
+# subshell, so the per-call unique task key is tracked in a file rather than a
+# shell counter - each attempt is generation 1 (allocation increments the
+# generation per task key, which would stale the literal gen 1 receipts).
+setup_pr_attempt() {  # -> prints an attempt id with claim+launch receipts
+  local aid key n
+  n=0
+  [ -f "$PR_ATTEMPT_ROOT/seq" ] && n=$(cat "$PR_ATTEMPT_ROOT/seq" 2>/dev/null || printf 0)
+  case "$n" in
+    ''|*[!0-9]*) n=0 ;;
+  esac
+  n=$((n + 1))
+  printf '%s\n' "$n" > "$PR_ATTEMPT_ROOT/seq"
+  key="dos-p$n"
+  aid=$(fm_attempt_alloc pi "$key" holu) || fail "alloc"
+  fm_attempt_freeze_allocation "$aid" 1 '{"provider":"tmux","copy":"wt-p"}' \
+    '{"mode":"direct-PR","base":"main","target":"origin/main"}' || fail "freeze"
+  fm_attempt_effect_observe "$aid" 1 launch '{"endpoint":"w-p"}' || fail "launch"
+  printf 'kind=ship\nmode=direct-PR\nattempt=%s\nworktree=%s\n' "$aid" "$PR_ATTEMPT_WT" > "$PR_ATTEMPT_STATE/task-p.meta"
+  printf '%s\n' "$aid"
+}
+
+run_pr_check_attempt() {  # <task-id> <pr-url>
+  FM_ROOT_OVERRIDE="$PR_ATTEMPT_ROOTDIR" FM_HOME="$PR_ATTEMPT_HOME" \
+    FM_STATE_OVERRIDE="$PR_ATTEMPT_STATE" FM_TEST_GH_LOG="$PR_ATTEMPT_ROOT/gh.log" \
+    PATH="$PR_ATTEMPT_FAKEBIN:$BASE_PATH" \
+    "$PR_CHECK" "$@"
+}
+
+test_open_observation_is_journaled_not_receipted() {
+  local aid rc
+  export FM_STATE_OVERRIDE="$PR_ATTEMPT_STATE"
+  . "$ROOT/bin/fm-attempt-lib.sh"
+  aid=$(setup_pr_attempt)
+  : > "$PR_ATTEMPT_ROOT/gh.log"
+  set +e
+  run_pr_check_attempt task-p "https://github.com/kunchenguid/firstmate/pull/1" \
+    > "$PR_ATTEMPT_ROOT/out" 2> "$PR_ATTEMPT_ROOT/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "attempt-bound PR check failed: $(cat "$PR_ATTEMPT_ROOT/err")"
+  grep -qF 'headRefOid' "$PR_ATTEMPT_ROOT/gh.log" || fail "attempt-bound check did not read the forge head"
+  jq -e --arg n landing '[.receipts[$n][]? | select(.state == "observed")] | length == 0' \
+    "$PR_ATTEMPT_STATE/attempts/$aid.json" >/dev/null || fail "open observation became a landing receipt"
+  jq -e '[.observations[]? | select(.name == "forge")] | length >= 1' \
+    "$PR_ATTEMPT_STATE/attempts/$aid.json" >/dev/null || fail "open observation not journaled"
+  jq -e --arg head '0123456789abcdef0123456789abcdef01234567' \
+    '[.observations[]? | select(.name == "forge")][-1].evidence as $e |
+     $e.provider == "github" and $e.repo == "kunchenguid/firstmate" and $e.source == "task-p" and
+     $e.pr == "https://github.com/kunchenguid/firstmate/pull/1" and $e.head == $head and
+     $e.state == null and $e.before_sha == null and $e.after_sha == null' \
+    "$PR_ATTEMPT_STATE/attempts/$aid.json" >/dev/null \
+    || fail "check observation did not record the observed head with unobserved fields null"
+  pass "provisional forge observations append to the journal and never become receipts"
+}
+
+test_final_landing_receipt_written_once_at_disposition() {
+  local aid
+  export FM_STATE_OVERRIDE="$PR_ATTEMPT_STATE"
+  . "$ROOT/bin/fm-attempt-lib.sh"
+  aid=$(setup_pr_attempt)
+  # open -> merged sequence: the journal grows; the disposition step then
+  # writes the final landing receipt exactly once
+  fm_attempt_observe "$aid" 1 forge '{"provider":"github","pr":"https://github.com/kunchenguid/firstmate/pull/1","state":"open"}' \
+    || fail "open journal"
+  fm_attempt_observe "$aid" 1 forge '{"provider":"github","pr":"https://github.com/kunchenguid/firstmate/pull/1","state":"merged","head":"abc123","before_sha":"old","after_sha":"new"}' \
+    || fail "merged journal"
+  # the disposition step (Task 11 consumer) writes the final landing receipt
+  fm_attempt_effect_observe "$aid" 1 landing '{"disposition":"landed","provider":"github","repo":"kunchenguid/firstmate","source":"task-p","target":"origin/main","head":"abc123","before_sha":"old","after_sha":"new"}' \
+    || fail "landing receipt"
+  jq -e --arg n landing '[.receipts[$n][]? | select(.state == "observed")] | length == 1' \
+    "$PR_ATTEMPT_STATE/attempts/$aid.json" >/dev/null || fail "landing receipt not written exactly once"
+  jq -e --arg n landing '[.receipts[$n][]? | select(.state == "observed")][0].evidence.provider == "github" and
+    [.receipts[$n][]? | select(.state == "observed")][0].evidence.head == "abc123" and
+    [.receipts[$n][]? | select(.state == "observed")][0].evidence.before_sha == "old" and
+    [.receipts[$n][]? | select(.state == "observed")][0].evidence.after_sha == "new"' \
+    "$PR_ATTEMPT_STATE/attempts/$aid.json" >/dev/null || fail "landing identity not exact"
+  pass "the final landing receipt is written once, bound to disposition, with exact identity"
+}
+
+test_unknown_forge_never_guesses() {
+  local aid
+  export FM_STATE_OVERRIDE="$PR_ATTEMPT_STATE"
+  . "$ROOT/bin/fm-attempt-lib.sh"
+  aid=$(setup_pr_attempt)
+  # missing-head and unknown forge states stay unknown, never guessed
+  fm_attempt_observe "$aid" 1 forge '{"provider":"gitlab","pr":"https://gitlab.example/x","state":"unknown","head":null}' \
+    || fail "unknown journal"
+  [ "$(fm_attempt_landing_disposition "$aid")" = "" ] || fail "unknown forge inferred a disposition"
+  pass "missing-head and unknown forge observations remain unknown"
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
@@ -3361,3 +3484,6 @@ test_bootstrap_isolates_incomplete_poll_migration
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
+test_open_observation_is_journaled_not_receipted
+test_final_landing_receipt_written_once_at_disposition
+test_unknown_forge_never_guesses

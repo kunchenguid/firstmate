@@ -82,3 +82,13 @@ if ! caller_has_merge_method "$@"; then
 fi
 
 gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+
+# Provisionally journal the merge-request observation for attempt-bound tasks:
+# the authoritative observation here is the merge action itself (no forge state
+# is read at merge time, so state stays null and the poll's exact merged read
+# is the forge state authority). Additive only - a task without attempt=
+# behaves exactly as before, and the final landing receipt is written only by
+# the disposition step, never here.
+PR_HEAD_META=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
+fm_pr_attempt_observe_forge "$META" github "$PR_OWNER/$PR_REPO" "$ID" \
+  "" "$PR_HEAD_META" "" "" "" "$URL" || true
