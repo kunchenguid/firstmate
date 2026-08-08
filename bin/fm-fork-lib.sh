@@ -2,12 +2,13 @@
 # Shared fork-main primitives.
 # Usage: . bin/fm-fork-lib.sh
 #
-# Three facts are read by more than one fork script and must mean exactly the
+# Four facts are read by more than one fork script and must mean exactly the
 # same thing in each, so they live here rather than being copied:
 #   - which branch a remote's default is (origin/upstream default resolution);
 #   - which ref is a divergence's canonical topic (published fork branch first,
 #     then a local branch);
-#   - whether a manifest path spec owns an actual changed path.
+#   - whether a manifest path spec owns an actual changed path;
+#   - what one commit's patch identity is.
 #
 # Path ownership in particular is a shared invariant between two competing
 # consumers: fm-fork-merge.sh derives the affected-unit list for a conflict
@@ -16,6 +17,11 @@
 # apart and attribute a conflict to a unit the health report says does not own
 # that path, which would then demand re-justification decisions for the wrong
 # units.
+#
+# Patch identity is the same kind of shared invariant. fm-fork-merge.sh records
+# the evidence that upstream accepted a divergence, and fm-fork-status.sh
+# re-proves that recorded evidence. Both must compute the identity the same way
+# or the merge would write proof the health owner cannot verify.
 
 fm_fork_remote_branch() { # <repo> <remote>
   local repo=$1 remote=$2 ref branch
@@ -44,6 +50,17 @@ fm_fork_topic_ref() { # <repo> <topic>
     return 0
   fi
   return 1
+}
+
+fm_fork_commit_patch_id() { # <repo> <commit>; prints the stable patch id
+  # Git documents `git diff-tree` output as carrying the commit's object name,
+  # which is what lets `git patch-id` map a patch identity back to its commit.
+  # `--stable` is passed explicitly because Git's default is the unstable
+  # algorithm and patchid.stable can change it per repository.
+  local repo=$1 commit=$2 id
+  id=$(git -C "$repo" diff-tree -p "$commit" | git patch-id --stable | awk 'NR == 1 { print $1 }') || return 1
+  [ -n "$id" ] || return 1
+  printf '%s\n' "$id"
 }
 
 fm_fork_path_covered() { # <manifest-spec> <actual-path>

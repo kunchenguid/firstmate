@@ -12,6 +12,8 @@
 #     integration need;
 #   - git-cherry-backed divergence health survives changed commit identity and
 #     fails on manifest drift;
+#   - an upstream-accepted divergence retires with re-provable Git evidence that
+#     outlives the merge which made git cherry blind to it;
 #   - upstream merges are prepared only in isolated candidates, preserve live
 #     origin/main on conflicts, require per-unit re-justification, and reuse a
 #     recorded resolution without staging it;
@@ -594,6 +596,111 @@ JSON
   pass "fork merge: conflicts require re-justification and rerere reuse stays unstaged"
 }
 
+# Upstream acceptance is the divergence set's main retirement path, and it must
+# survive the integration merge that makes it true. After that merge upstream is
+# an ancestor of fork main, so `git cherry` can no longer see the equivalence and
+# the fork's own copy of the accepted patch is a raw `+` fact forever. The merge
+# therefore records the proof it could still take, the health owner re-derives
+# that proof from Git rather than trusting it, the divergence count falls with
+# visible evidence, and later divergence work keeps working.
+test_upstream_acceptance_retires_a_divergence_with_evidence() {
+  local w candidate admin manifest out rc fork_patch upstream_patch tampered
+  w=$(new_world upstream-accepted)
+  admin="$w/admin"
+  git clone -q "$w/fork.git" "$admin"
+  configure_fork_clone "$admin" "$w"
+  git -C "$admin" switch -qC fm/divergence/banner upstream/main
+  printf 'FLEET\n' > "$admin/banner.txt"
+  git -C "$admin" add banner.txt
+  git -C "$admin" commit -qm 'Show the fleet banner'
+  git -C "$admin" push -q origin fm/divergence/banner
+  git -C "$admin" switch -q main
+  candidate=$(new_candidate "$w" accept-integrate)
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" integrate --repo "$candidate" --id banner \
+    --summary 'Shows the fleet banner on startup.' --class pending --topic fm/divergence/banner \
+    --retire-when 'Upstream prints the fleet banner itself.' --path banner.txt \
+    --pr-url https://github.com/example/firstmate/pull/43 --pr-disposition open 2>&1) \
+    || fail "banner integration failed: $out"
+  assert_contains "$out" "retained=1 patches=1" "the carried divergence was not counted"
+  git -C "$candidate" push -q origin HEAD:main
+  fork_patch=$(git -C "$admin" rev-parse fm/divergence/banner)
+
+  # Upstream accepts the same patch under a different commit identity.
+  advance_upstream "$w" banner.txt FLEET 'official: show the fleet banner'
+  candidate=$(new_candidate "$w" accept-merge)
+  upstream_patch=$(git -C "$w/integration" rev-parse upstream/main)
+  [ "$upstream_patch" != "$fork_patch" ] || fail "the upstream fixture reused the fork commit identity"
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$MERGE" prepare --repo "$candidate" 2>&1) \
+    || fail "the upstream merge that accepts a carried divergence failed: $out"
+  assert_contains "$out" "retained=0 patches=0" "the accepted divergence was still counted as carried"
+  assert_contains "$out" "accepted-upstream-patches=1" "the retired patch was not reported as accepted upstream"
+  assert_contains "$out" "trend=down" "retiring a divergence did not reward a falling count"
+  assert_contains "$out" "proof: fork patch $fork_patch equals upstream commit $upstream_patch" \
+    "the health report did not explain the retirement with its Git evidence"
+  manifest="$candidate/fork-divergences.json"
+  jq -e --arg fork "$fork_patch" --arg upstream "$upstream_patch" '
+    (.divergences | length) == 0 and (.retired_upstream | length) == 1
+    and .retired_upstream[0].id == "banner"
+    and .retired_upstream[0].summary == "Shows the fleet banner on startup."
+    and .retired_upstream[0].fork_patch == $fork and .retired_upstream[0].upstream_patch == $upstream
+  ' "$manifest" >/dev/null || fail "the merge did not persist the retirement evidence beside the removed unit"
+  [ "$(git -C "$candidate" show HEAD:fork-divergences.json | jq '.retired_upstream | length')" -eq 1 ] \
+    || fail "the retirement record did not land in the upstream merge commit itself"
+  git -C "$candidate" push -q origin HEAD:main
+
+  # The machine-readable report carries the same evidence and a healthy verdict.
+  git -C "$admin" fetch -q origin
+  git -C "$admin" fetch -q upstream
+  git -C "$admin" merge -q --ff-only origin/main
+  out=$("$STATUS" --repo "$admin" --json) || fail "the caught-up fork reported unhealthy: $out"
+  printf '%s' "$out" | jq -e --arg fork "$fork_patch" '
+    .healthy == true and .retained.patches == 0 and .retained.accepted_upstream_patches == 1
+    and (.accepted_upstream | length) == 1 and .accepted_upstream[0].proved == true
+    and .accepted_upstream[0].fork_patch == $fork and (.errors | length) == 0
+  ' >/dev/null || fail "fork-health JSON did not publish a proved retirement: $out"
+
+  # A later divergence still integrates on top of the retirement.
+  git -C "$admin" switch -qC fm/divergence/next upstream/main
+  printf 'next\n' > "$admin/next.txt"
+  git -C "$admin" add next.txt
+  git -C "$admin" commit -qm 'Add the next divergence'
+  git -C "$admin" push -q origin fm/divergence/next
+  git -C "$admin" switch -q main
+  git -C "$admin" fetch -q origin
+  candidate=$(new_candidate "$w" accept-next)
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" integrate --repo "$candidate" --id next \
+    --summary 'Adds the next divergence.' --class pending --topic fm/divergence/next \
+    --retire-when 'Upstream ships an equivalent next behavior.' --path next.txt \
+    --pr-url https://github.com/example/firstmate/pull/44 --pr-disposition open 2>&1) \
+    || fail "a later divergence could not be integrated after a retirement: $out"
+  assert_contains "$out" "retained=1 patches=1" "the later divergence was not counted"
+
+  # Evidence is re-derived from Git, never trusted. A record pointing at a real
+  # upstream commit that carries a different patch is unproved, so its patch
+  # stays counted and named instead of quietly shrinking the divergence set.
+  tampered="$w/tampered"
+  git -C "$admin" worktree add -q --detach "$tampered" origin/main
+  jq --arg upstream "$(git -C "$admin" rev-parse upstream/main~1)" \
+    '.retired_upstream[0].upstream_patch = $upstream' "$tampered/fork-divergences.json" > "$w/tampered.json"
+  mv "$w/tampered.json" "$tampered/fork-divergences.json"
+  set +e
+  out=$("$STATUS" --repo "$tampered" --fork-ref HEAD 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an unproved retirement record was accepted as healthy"
+  assert_contains "$out" "is unproved" "the unproved retirement was not named"
+  assert_contains "$out" "unowned non-equivalent patch $fork_patch" "the unproved retirement still hid its patch"
+
+  # Deleting the evidence does not delete the patch either.
+  jq '.retired_upstream = []' "$tampered/fork-divergences.json" > "$w/dropped.json"
+  mv "$w/dropped.json" "$tampered/fork-divergences.json"
+  set +e
+  out=$("$STATUS" --repo "$tampered" --fork-ref HEAD 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "dropping the retirement evidence reported healthy"
+  assert_contains "$out" "unowned non-equivalent patch $fork_patch" "a missing retirement record hid its patch"
+  pass "fork health: upstream acceptance retires a divergence only on re-provable Git evidence"
+}
+
 # The private fork registration is added without changing the ordinary
 # upstream/fork registration. A mismatch stops before clone creation.
 test_no_mistakes_registration_isolation_is_proven() {
@@ -700,6 +807,7 @@ test_health_uses_git_cherry_equivalence_and_exposes_drift
 test_topics_are_independently_revertible_units
 test_clean_upstream_merge_is_isolated_and_validated_as_candidate
 test_conflict_requires_rejustification_and_rerere_stays_reviewable
+test_upstream_acceptance_retires_a_divergence_with_evidence
 test_no_mistakes_registration_isolation_is_proven
 
 echo "# all fork-main integration tests passed"

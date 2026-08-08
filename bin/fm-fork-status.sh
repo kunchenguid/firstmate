@@ -8,7 +8,10 @@
 # The factual patch set comes from `git cherry upstream/<default>
 # origin/<default>`. The tracked fork-divergences.json manifest supplies only
 # Git's missing intent: one named topic, class, pull-request disposition,
-# falsifiable retirement condition, path ownership, and integration merges.
+# falsifiable retirement condition, path ownership, and integration merges. Its
+# retired_upstream records add the one fact Git can no longer recompute after an
+# integration merge, and every one of them is re-proved here against reachable
+# objects before its patch leaves the carried set.
 # Manifest disagreement is an unhealthy result, never silently repaired.
 #
 # --refresh fetches origin and upstream and verifies recorded GitHub PR
@@ -113,7 +116,8 @@ if ! jq -e '
   .schema == "firstmate.fork-divergences.v1" and
   (.upstream_syncs | type == "array" and length <= 20) and
   (.divergences | type == "array") and
-  ([.divergences[].id] | length == (unique | length)) and
+  ((.retired_upstream // []) | type == "array") and
+  ([.divergences[].id] + [(.retired_upstream // [])[].id] | length == (unique | length)) and
   all(.divergences[];
     (.id | type == "string" and test("^[a-z0-9][a-z0-9-]*$")) and
     (.summary | type == "string" and length > 0 and (test("[[:cntrl:]]") | not)) and
@@ -124,6 +128,15 @@ if ! jq -e '
     (.paths | type == "array" and length > 0 and all(.[]; type == "string" and length > 0 and (test("[[:cntrl:]]") | not) and (startswith("/") | not) and (contains("..") | not))) and
     (if .class == "private" then (.upstream_pr == null or (.upstream_pr | type == "object"))
      else (.upstream_pr | type == "object" and (.url | type == "string" and test("^https://github\\.com/[^/]+/[^/]+/pull/[0-9]+$")) and (.disposition == "open" or .disposition == "rejected" or .disposition == "merged" or .disposition == "closed")) end)
+  ) and
+  all((.retired_upstream // [])[];
+    (.id | type == "string" and test("^[a-z0-9][a-z0-9-]*$")) and
+    (.topic == ("fm/divergence/" + .id)) and
+    (.summary | type == "string" and length > 0 and (test("[[:cntrl:]]") | not)) and
+    (.date | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")) and
+    (.fork_patch | type == "string" and test("^[0-9a-f]{40,64}$")) and
+    (.upstream_patch | type == "string" and test("^[0-9a-f]{40,64}$")) and
+    (.patch_id | type == "string" and test("^[0-9a-f]{40,64}$"))
   ) and
   all(.upstream_syncs[];
     (.date | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")) and
@@ -143,9 +156,14 @@ ERRORS="$TMP/errors"
 OWNED="$TMP/owned"
 CHERRY="$TMP/cherry"
 RETIRED="$TMP/retired"
+ACCEPTED="$TMP/accepted"
+PROVED="$TMP/proved"
+EXCLUDED="$TMP/excluded"
 : > "$ERRORS"
 : > "$OWNED"
 : > "$RETIRED"
+: > "$ACCEPTED"
+: > "$PROVED"
 git -C "$REPO" cherry -v "$UPSTREAM_REF" "$ORIGIN_REF" > "$CHERRY" \
   || die "git cherry failed"
 
@@ -193,12 +211,54 @@ add_error() {
   printf '%s\n' "$*" >> "$ERRORS"
 }
 
+# Upstream acceptance is the documented retirement path, but it stops being
+# measurable from the merged refs: once the integration merge lands, upstream is
+# an ancestor of fork main and `git cherry`'s documented <head>..<upstream>
+# equivalence search space is empty, so the fork's own copy of an accepted patch
+# is a `+` fact forever. fm-fork-merge.sh therefore captured the proof while it
+# still existed, and this owner re-derives that proof from reachable Git objects
+# rather than trusting the record. A record that no longer holds keeps its patch
+# counted and named as an error instead of quietly shrinking the divergence set.
+while IFS=$'\t' read -r id fork_patch upstream_patch patch_id; do
+  [ -n "$id" ] || continue
+  if ! git -C "$REPO" rev-parse --verify --quiet "$fork_patch^{commit}" >/dev/null; then
+    add_error "accepted-upstream retirement $id names unknown fork patch $fork_patch"
+    continue
+  fi
+  if ! git -C "$REPO" rev-parse --verify --quiet "$upstream_patch^{commit}" >/dev/null; then
+    add_error "accepted-upstream retirement $id names unknown upstream commit $upstream_patch"
+    continue
+  fi
+  if ! grep -Fxq "$fork_patch" "$TMP/plus"; then
+    add_error "accepted-upstream retirement $id is stale: $fork_patch is not a carried patch on $ORIGIN_REF"
+    continue
+  fi
+  if ! git -C "$REPO" merge-base --is-ancestor "$upstream_patch" "$UPSTREAM_REF" 2>/dev/null; then
+    add_error "accepted-upstream retirement $id claims upstream commit $upstream_patch that $UPSTREAM_REF does not contain"
+    continue
+  fi
+  fork_patch_id=$(fm_fork_commit_patch_id "$REPO" "$fork_patch" || true)
+  upstream_patch_id=$(fm_fork_commit_patch_id "$REPO" "$upstream_patch" || true)
+  if [ "$fork_patch_id" != "$patch_id" ]; then
+    add_error "accepted-upstream retirement $id records patch identity $patch_id but fork patch $fork_patch has ${fork_patch_id:-none}"
+    continue
+  fi
+  if [ "$upstream_patch_id" != "$patch_id" ]; then
+    add_error "accepted-upstream retirement $id is unproved: upstream commit $upstream_patch has patch identity ${upstream_patch_id:-none}"
+    continue
+  fi
+  printf '%s\t%s\n' "$fork_patch" "$upstream_patch" >> "$PROVED"
+  grep -Fxq "$fork_patch" "$RETIRED" || printf '%s\n' "$fork_patch" >> "$ACCEPTED"
+done < <(jq -r '.retired_upstream // [] | .[] | [.id,.fork_patch,.upstream_patch,.patch_id] | @tsv' "$MANIFEST")
+sort -u "$ACCEPTED" -o "$ACCEPTED"
+cat "$RETIRED" "$ACCEPTED" | sort -u > "$EXCLUDED"
+
 # Resolve every factual non-equivalent patch to exactly one canonical topic.
 while IFS= read -r line || [ -n "$line" ]; do
   [ "${line%% *}" = + ] || continue
   rest=${line#? }
   sha=${rest%% *}
-  grep -Fxq "$sha" "$RETIRED" && continue
+  grep -Fxq "$sha" "$EXCLUDED" && continue
   owners=
   while IFS=$'\t' read -r id topic; do
     [ -n "$id" ] || continue
@@ -282,7 +342,8 @@ fi
 
 raw_plus_total=$(awk '$1 == "+" { n++ } END { print n+0 }' "$CHERRY")
 retired_patch_count=$(awk 'NF { n++ } END { print n+0 }' "$RETIRED")
-raw_plus=$((raw_plus_total - retired_patch_count))
+accepted_patch_count=$(awk 'NF { n++ } END { print n+0 }' "$ACCEPTED")
+raw_plus=$((raw_plus_total - retired_patch_count - accepted_patch_count))
 active_ids=$(awk -F '\t' '{ print $2 }' "$OWNED" | sort -u)
 active_count=$(printf '%s\n' "$active_ids" | awk 'NF { n++ } END { print n+0 }')
 pending_count=$(jq '[.divergences[] | select(.class == "pending")] | length' "$MANIFEST")
@@ -312,7 +373,17 @@ if [ -n "$last_sync" ]; then
   upstream_before=$(printf '%s' "$last_sync" | jq -r .upstream_before)
   if git -C "$REPO" rev-parse --verify --quiet "$fork_before^{commit}" >/dev/null \
       && git -C "$REPO" rev-parse --verify --quiet "$upstream_before^{commit}" >/dev/null; then
-    baseline_count=$(git -C "$REPO" cherry "$upstream_before" "$fork_before" | awk '$1 == "+" { n++ } END { print n+0 }')
+    git -C "$REPO" cherry "$upstream_before" "$fork_before" | awk '$1 == "+" { print $2 }' > "$TMP/baseline-plus"
+    baseline_count=$(awk 'NF { n++ } END { print n+0 }' "$TMP/baseline-plus")
+    # A patch upstream had already accepted at that baseline was not part of the
+    # carried set then either. Leaving it in the baseline would report a falling
+    # count on every later report for a retirement that happened once.
+    while IFS=$'\t' read -r proved_fork proved_upstream; do
+      [ -n "$proved_fork" ] || continue
+      grep -Fxq "$proved_fork" "$TMP/baseline-plus" || continue
+      git -C "$REPO" merge-base --is-ancestor "$proved_upstream" "$upstream_before" 2>/dev/null || continue
+      baseline_count=$((baseline_count - 1))
+    done < "$PROVED"
     if [ "$raw_plus" -lt "$baseline_count" ]; then trend=down
     elif [ "$raw_plus" -gt "$baseline_count" ]; then trend=up
     else trend=unchanged
@@ -329,9 +400,14 @@ if [ -z "$FORK_REF" ] && [ -n "$local_main" ] && [ "$local_main" != "$origin_sha
   error_count=$((error_count + 1))
 fi
 
+accepted_record_count=$(jq '.retired_upstream // [] | length' "$MANIFEST")
+proved_forks_json=$(awk -F '\t' '{ print $1 }' "$PROVED" | jq -Rsc 'split("\n") | map(select(length > 0))')
+
 if [ "$JSON" -eq 1 ]; then
   errors_json=$(jq -Rsc 'split("\n") | map(select(length > 0))' "$ERRORS")
   touched_json=$(jq '.upstream_syncs | last // {touched:[]} | .touched' "$MANIFEST")
+  accepted_json=$(jq -c --argjson proved "$proved_forks_json" \
+    '(.retired_upstream // []) | map(.fork_patch as $f | . + {proved: (($proved | index($f)) != null)})' "$MANIFEST")
   jq -n \
     --arg schema firstmate.fork-health.v1 \
     --arg origin "$ORIGIN_REF" --arg origin_sha "$origin_sha" \
@@ -339,13 +415,14 @@ if [ "$JSON" -eq 1 ]; then
     --arg trend "$trend" --arg oldest_pending "${oldest_id:-}" \
     --arg oldest_pending_date "${oldest_date:-}" --argjson oldest_pending_age "$oldest_age_json" \
     --argjson active "$active_count" --argjson patches "$raw_plus" --argjson retired_patches "$retired_patch_count" \
+    --argjson accepted_patches "$accepted_patch_count" --argjson accepted "$accepted_json" \
     --argjson pending "$pending_count" --argjson rejected "$rejected_count" \
     --argjson private "$private_count" --argjson superseded "$superseded_count" \
     --argjson touched "$touched_json" --argjson errors "$errors_json" \
-    '{schema:$schema, refs:{fork:$origin,fork_sha:$origin_sha,upstream:$upstream,upstream_sha:$upstream_sha}, retained:{units:$active,patches:$patches,retired_history_patches:$retired_patches,trend:$trend,classes:{pending:$pending,"rejected-but-retained":$rejected,private:$private,superseded:$superseded}}, oldest_pending:{id:$oldest_pending,date:$oldest_pending_date,age_days:$oldest_pending_age}, last_upstream_merge:{touched:$touched}, errors:$errors, healthy:($errors|length == 0 and $superseded == 0 and $trend != "up")}'
+    '{schema:$schema, refs:{fork:$origin,fork_sha:$origin_sha,upstream:$upstream,upstream_sha:$upstream_sha}, retained:{units:$active,patches:$patches,retired_history_patches:$retired_patches,accepted_upstream_patches:$accepted_patches,trend:$trend,classes:{pending:$pending,"rejected-but-retained":$rejected,private:$private,superseded:$superseded}}, oldest_pending:{id:$oldest_pending,date:$oldest_pending_date,age_days:$oldest_pending_age}, last_upstream_merge:{touched:$touched}, accepted_upstream:$accepted, errors:$errors, healthy:($errors|length == 0 and $superseded == 0 and $trend != "up")}'
 else
-  printf 'Fork divergence health: retained=%s patches=%s retired-history-patches=%s trend=%s superseded=%s errors=%s\n' \
-    "$active_count" "$raw_plus" "$retired_patch_count" "$trend" "$superseded_count" "$error_count"
+  printf 'Fork divergence health: retained=%s patches=%s retired-history-patches=%s accepted-upstream-patches=%s trend=%s superseded=%s errors=%s\n' \
+    "$active_count" "$raw_plus" "$retired_patch_count" "$accepted_patch_count" "$trend" "$superseded_count" "$error_count"
   printf 'Refs: fork=%s@%s upstream=%s@%s\n' "$ORIGIN_REF" "${origin_sha%%????????????????????????????????}" "$UPSTREAM_REF" "${upstream_sha%%????????????????????????????????}"
   printf 'Classes: pending=%s rejected-but-retained=%s private=%s superseded=%s\n' \
     "$pending_count" "$rejected_count" "$private_count" "$superseded_count"
@@ -361,6 +438,17 @@ else
     printf '  does: %s\n' "$summary"
     printf '  retire when: %s\n' "$retire"
   done < <(jq -r '.divergences[] | [.id,.class,.summary,.topic,.retire_when,(.upstream_pr.url // ""),(.upstream_pr.disposition // "")] | @tsv' "$MANIFEST")
+  printf 'Accepted upstream and retired: %s\n' "$accepted_record_count"
+  while IFS=$'\t' read -r id topic summary date fork_patch upstream_patch patch_id; do
+    [ -n "$id" ] || continue
+    printf '%s [accepted-upstream] topic=%s retired=%s\n' "$id" "$topic" "$date"
+    printf '  did: %s\n' "$summary"
+    if grep -Fxq "$fork_patch" "$ACCEPTED"; then
+      printf '  proof: fork patch %s equals upstream commit %s (patch-id %s)\n' "$fork_patch" "$upstream_patch" "$patch_id"
+    else
+      printf '  proof: unproved against %s and %s; see the mismatch below\n' "$ORIGIN_REF" "$UPSTREAM_REF"
+    fi
+  done < <(jq -r '.retired_upstream // [] | .[] | [.id,.topic,.summary,.date,.fork_patch,.upstream_patch,.patch_id] | @tsv' "$MANIFEST")
   if [ "$last_touched_count" -gt 0 ] && [ -n "$last_sync" ]; then
     fork_before=$(printf '%s' "$last_sync" | jq -r .fork_before)
     upstream_before=$(printf '%s' "$last_sync" | jq -r .upstream_before)

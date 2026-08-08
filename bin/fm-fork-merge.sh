@@ -20,8 +20,11 @@
 # conflicts have been resolved and staged.
 #
 # A successful merge updates fork-divergences.json in the merge commit itself:
-# patch-equivalent units now accepted upstream are removed, and one bounded sync
-# record captures the pre-merge fork/upstream refs and touched units. It then
+# a unit whose one aggregate patch Git proves equivalent to a reachable upstream
+# commit is moved from divergences to retired_upstream with that proof, and one
+# bounded sync record captures the pre-merge fork/upstream refs and touched
+# units. The proof stays because after this merge upstream is an ancestor of
+# fork main, which empties git cherry's equivalence search space. It then
 # commits the two-parent merge, runs the human `git range-diff --remerge-diff`
 # review, and validates the candidate manifest against HEAD. It never pushes,
 # opens a PR, force-updates a ref, or invokes no-mistakes; the task worker owns
@@ -129,9 +132,14 @@ index_without_paths_hash() { # <newline-delimited-path-file>
   git -C "$REPO" ls-files "${pathspecs[@]}" | git hash-object --stdin
 }
 
-accepted_ids() { # active units now patch-equivalent to incoming upstream
-  local id class topic ref cherry plus
-  while IFS=$'\t' read -r id class topic; do
+accepted_records() { # one JSON retirement record per unit accepted upstream
+  # Once this merge lands, upstream becomes an ancestor of fork main and
+  # `git cherry`'s <head>..<upstream> equivalence search space is empty, so the
+  # fork's own copy of an accepted patch can never be proved equivalent from the
+  # merged refs again. This is the last moment the proof exists, so capture the
+  # concrete commits and patch identity rather than only the verdict.
+  local id class topic summary ref cherry plus minus fork_patch patch_id upstream_patch
+  while IFS=$'\t' read -r id class topic summary; do
     [ "$class" != superseded ] || continue
     ref=$(fm_fork_topic_ref "$REPO" "$topic" || true)
     [ -n "$ref" ] || continue
@@ -142,8 +150,39 @@ accepted_ids() { # active units now patch-equivalent to incoming upstream
     cherry=$(git -C "$REPO" cherry "$UPSTREAM_REF" "$ref") \
       || die "git cherry could not compare $topic against $UPSTREAM_REF; refusing to treat $id as accepted upstream"
     plus=$(printf '%s\n' "$cherry" | awk '$1 == "+" { n++ } END { print n+0 }')
-    [ "$plus" -ne 0 ] || printf '%s\n' "$id"
-  done < <(jq -r '.divergences[] | [.id,.class,.topic] | @tsv' "$MANIFEST")
+    [ "$plus" -eq 0 ] || continue
+    minus=$(printf '%s\n' "$cherry" | awk '$1 == "-" { n++ } END { print n+0 }')
+    # The one-aggregate-patch invariant is the proof boundary. Without exactly
+    # one carried commit there is no single patch whose acceptance Git can
+    # prove, so the unit keeps its governance record instead of disappearing.
+    [ "$minus" -eq 1 ] \
+      || die "$topic has $minus equivalent commits rather than one aggregate patch; refusing to retire $id without a single provable patch"
+    fork_patch=$(printf '%s\n' "$cherry" | awk '$1 == "-" { print $2 }')
+    patch_id=$(fm_fork_commit_patch_id "$REPO" "$fork_patch") \
+      || die "cannot compute the patch identity of $fork_patch; refusing to retire $id without it"
+    upstream_patch=$(git -C "$REPO" rev-list --no-merges "$ref..$UPSTREAM_REF" \
+      | git -C "$REPO" diff-tree -p --stdin \
+      | git patch-id --stable | awk -v want="$patch_id" '$1 == want { print $2; exit }')
+    [ -n "$upstream_patch" ] \
+      || die "git cherry called $topic equivalent upstream but no commit in $UPSTREAM_REF carries patch identity $patch_id; refusing to retire $id unproved"
+    jq -nc --arg id "$id" --arg topic "$topic" --arg summary "$summary" \
+      --arg date "${FM_FORK_DATE_OVERRIDE:-$(date +%F)}" --arg fork_patch "$fork_patch" \
+      --arg upstream_patch "$upstream_patch" --arg patch_id "$patch_id" \
+      '{id:$id,topic:$topic,summary:$summary,date:$date,fork_patch:$fork_patch,upstream_patch:$upstream_patch,patch_id:$patch_id}'
+  done < <(jq -r '.divergences[] | [.id,.class,.topic,.summary] | @tsv' "$MANIFEST")
+}
+
+record_retirements() { # <json-lines-file>
+  # Removing the active entry and persisting its proof are one manifest edit so
+  # the merge can never publish a fallen divergence count without its evidence.
+  local records tmp
+  records=$(jq -sc '.' "$1") || die "cannot read the accepted-upstream retirement records"
+  tmp=$(mktemp "$MANIFEST.XXXXXX") || die "cannot create manifest update"
+  jq --argjson retired "$records" '
+    .retired_upstream = ((.retired_upstream // []) + $retired)
+    | .divergences |= map(select(.id as $id | ($retired | map(.id) | index($id)) == null))
+  ' "$MANIFEST" > "$tmp" || { rm -f "$tmp"; die "cannot record accepted-upstream retirements"; }
+  mv -f "$tmp" "$MANIFEST"
 }
 
 remove_manifest_ids() { # ids on stdin
@@ -168,8 +207,11 @@ record_sync() { # <fork-before> <upstream-before> <upstream-after> <touched-file
   mv -f "$tmp" "$MANIFEST"
 }
 
-commit_merge_and_review() { # <fork-before> <upstream-before> <upstream-after> <touched-file> [removed-file]
-  local fork_before=$1 upstream_before=$2 upstream_after=$3 touched_file=$4 removed_file=${5:-}
+commit_merge_and_review() { # <fork-before> <upstream-before> <upstream-after> <touched-file> [removed-file] [accepted-file]
+  local fork_before=$1 upstream_before=$2 upstream_after=$3 touched_file=$4 removed_file=${5:-} accepted_file=${6:-}
+  if [ -n "$accepted_file" ] && [ -s "$accepted_file" ]; then
+    record_retirements "$accepted_file"
+  fi
   if [ -n "$removed_file" ] && [ -s "$removed_file" ]; then
     remove_manifest_ids < "$removed_file"
   fi
@@ -239,8 +281,8 @@ cmd_prepare() {
     exit 3
   fi
 
-  accepted_ids > "$TMP/accepted"
-  commit_merge_and_review "$local_head" "$upstream_before" "$upstream_after" "$TMP/touched" "$TMP/accepted"
+  accepted_records > "$TMP/accepted"
+  commit_merge_and_review "$local_head" "$upstream_before" "$upstream_after" "$TMP/touched" '' "$TMP/accepted"
 }
 
 cmd_continue() {
@@ -272,12 +314,11 @@ cmd_continue() {
   [ "$(index_without_paths_hash "$TMP/conflicts")" = "$(jq -r .clean_index_hash "$RECEIPT")" ] \
     || die "non-conflict index entries changed after the merge stopped"
   jq -r '.touched[]' "$RECEIPT" > "$TMP/touched"
-  jq -r '.decisions[] | select(.action == "remove" and .id != "__unowned__") | .id' "$DECISIONS" > "$TMP/remove"
-  accepted_ids >> "$TMP/remove"
-  sort -u "$TMP/remove" -o "$TMP/remove"
+  jq -r '.decisions[] | select(.action == "remove" and .id != "__unowned__") | .id' "$DECISIONS" | sort -u > "$TMP/remove"
+  accepted_records > "$TMP/accepted"
   # Ensure rerere records the manually staged result before the merge commit.
   git -C "$REPO" rerere >/dev/null 2>&1 || true
-  commit_merge_and_review "$fork_before" "$upstream_before" "$upstream_after" "$TMP/touched" "$TMP/remove"
+  commit_merge_and_review "$fork_before" "$upstream_before" "$upstream_after" "$TMP/touched" "$TMP/remove" "$TMP/accepted"
   rm -f "$RECEIPT"
 }
 

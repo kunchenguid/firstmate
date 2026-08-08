@@ -132,6 +132,12 @@ An upstream-sync record keeps the pre-merge fork SHA, previous and incoming upst
 Counts are derived from Git rather than copied into the manifest.
 The history stays bounded to the latest 20 integrations.
 
+A `retired_upstream` record is the one exception to deriving facts from Git, because it preserves a fact Git can no longer recompute.
+It keeps the retired unit's ID, canonical topic, summary, retirement date, the fork commit that carried the patch, the upstream commit that carries the same patch, and their shared patch ID.
+Each record is written into the same upstream merge that removes the active divergence entry, so the divergence count can never fall without the evidence explaining it.
+Records are not bounded, because a fork patch stays in history forever and its proof must stay auditable for exactly as long.
+A retired ID is never reused for a new divergence.
+
 Update the manifest in the same fork integration or upstream merge that changes the divergence set.
 A follow-up is not acceptable because a stale manifest looks authoritative.
 
@@ -149,13 +155,20 @@ Candidate helpers use `--facts-only` internally when an already-authorized add o
 Do not use `--facts-only` to characterize the fork to the captain.
 
 The report uses `git cherry upstream/main origin/main` for patch-equivalence facts and groups active patches by canonical topic.
-It reports active unit and patch counts, trend since the previous upstream merge, counts by class, oldest pending unit, last merge's touched units, retirement conditions, superseded debt, and every Git/manifest mismatch.
+It reports active unit and patch counts, trend since the previous upstream merge, counts by class, oldest pending unit, last merge's touched units, retirement conditions, every accepted-upstream retirement with its proof, superseded debt, and every Git/manifest mismatch.
 
 A merge revert leaves both the original patch and its inverse in history, so both remain raw `git cherry +` facts after their net effect is gone.
 The status owner excludes a pair from active health only when Git proves the exact reachable `git revert -m 1 <topic-merge>` relationship.
 It reports the excluded count as retired history rather than hiding it.
 
-The report is unhealthy when a factual patch has no manifest owner, a patch has multiple owners, an active unit owns no patch, one canonical topic has several non-equivalent commits, a topic or integration merge is missing, declared paths omit a changed file, a pull-request disposition is stale, any superseded unit remains, or retained patches trend up.
+An upstream-accepted patch is the second exclusion, and it needs stored evidence because Git stops being able to recompute the fact.
+Git documents `git cherry`'s equivalence search space as `<head>..<upstream>`, so once the integration merge makes upstream an ancestor of fork main, that range is empty and the fork's own copy of the accepted patch is a raw `+` fact forever.
+The status owner therefore re-derives each `retired_upstream` record from reachable objects instead of trusting it: the recorded fork commit must still be a carried patch on fork main, the recorded upstream commit must still be reachable from `upstream/<default>`, and both must still hash to the one recorded patch ID.
+Only that independent proof excludes the patch, and the report names every retirement with the fork commit, upstream commit, and patch ID it rests on.
+A record that is stale, contradictory, unproved, or missing leaves its patch counted and reported, never silently excluded.
+PR state, commit messages, branch names, ancestry, and stated intent never retire a patch.
+
+The report is unhealthy when a factual patch has no manifest owner, a patch has multiple owners, an active unit owns no patch, one canonical topic has several non-equivalent commits, a topic or integration merge is missing, declared paths omit a changed file, a pull-request disposition is stale, a retirement record no longer re-proves, any superseded unit remains, or retained patches trend up.
 Git facts win whenever prose disagrees.
 
 `git range-diff` remains a human review tool because Git documents its output as version-unstable and not machine-readable.
@@ -181,7 +194,8 @@ Prepare a candidate in an isolated worktree of the private integration clone:
 bin/fm-fork-merge.sh prepare --repo <isolated-worktree>
 ```
 
-A clean result creates a two-parent upstream merge, removes manifest units whose canonical patch is now equivalent upstream, records the sync input, runs `git range-diff --remerge-diff`, and validates health against candidate `HEAD`.
+A clean result creates a two-parent upstream merge, moves each unit whose canonical patch Git proves equivalent to a reachable upstream commit into `retired_upstream` with that proof, records the sync input, runs `git range-diff --remerge-diff`, and validates health against candidate `HEAD`.
+A unit that is equivalent upstream but no longer has exactly one aggregate patch commit stops the merge instead of retiring, because that single commit is the whole proof boundary.
 It does not push or invoke no-mistakes.
 The worker validates through the fork registration and opens a fork-main pull request.
 
@@ -231,5 +245,5 @@ If upstream review reveals a correctness or security problem that applies locall
 Fix the topic or use the independent discard path immediately.
 
 When upstream accepts an equivalent patch, `git cherry` removes it from the active patch set even when squash or rebase changed the SHA.
-The next upstream integration removes its manifest unit while preserving upstream's implementation.
+That equivalence is visible only until the integration merge lands, so the next upstream integration captures it as a `retired_upstream` proof in the same commit that removes the manifest unit, and preserves upstream's implementation.
 A materially edited upstream version can still conflict, which is exactly when range-diff and the retirement condition must decide which behavior remains.

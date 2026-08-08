@@ -123,6 +123,11 @@ cmd_integrate() {
   fi
   [ "$(jq --arg id "$ID" '[.divergences[] | select(.id == $id)] | length' "$MANIFEST")" -eq 0 ] \
     || die "manifest already contains divergence $ID"
+  # Reusing a retired id would leave two records claiming the same unit, and the
+  # retirement's proof must stay auditable for as long as its patch is in
+  # history.
+  [ "$(jq --arg id "$ID" '[(.retired_upstream // [])[] | select(.id == $id)] | length' "$MANIFEST")" -eq 0 ] \
+    || die "manifest records $ID as accepted upstream and retired; choose a new id"
   TOPIC_REF=$(fm_fork_topic_ref "$REPO" "$TOPIC") || die "canonical topic is missing: $TOPIC"
   git -C "$REPO" merge-base --is-ancestor "$UPSTREAM_REF" "$ORIGIN_REF" \
     || die "official upstream must be integrated and validated before adding a divergence topic"

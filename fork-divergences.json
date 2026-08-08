@@ -1,5 +1,6 @@
 {
   "schema": "firstmate.fork-divergences.v1",
   "upstream_syncs": [],
-  "divergences": []
+  "divergences": [],
+  "retired_upstream": []
 }
