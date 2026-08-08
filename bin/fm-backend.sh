@@ -885,8 +885,8 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 #
 # Every adapter here reads a structured runtime answer and refuses on anything
 # it cannot parse: herdr's pane presence state, tmux's session inventory,
-# zellij's session and pane listings, and cmux's socket ping plus workspace and
-# pane listings. Orca is deliberately absent: it has no verified
+# zellij's session and pane listings, and cmux's socket ping plus a walk of
+# every window's own workspace list. Orca is deliberately absent: it has no verified
 # terminal-not-found response shape, and no caller needs one, because the
 # failed-spawn path unwinds an Orca terminal and worktree under the spawn's
 # EXIT trap and publishes a complete recovery record naming both when the

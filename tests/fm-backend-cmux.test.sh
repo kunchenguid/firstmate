@@ -1048,11 +1048,20 @@ test_secondmate_spawn_refuses_cmux_backend() {
 #
 # fm_backend_cmux_endpoint_confirmed_gone answers a stricter question than
 # fm_backend_cmux_surface_exists: not "is the surface there" but "did cmux tell
-# me it is not". An unreachable or unauthorized socket fails exactly like a
-# closed surface, so a caller about to record a close as successful - or to
-# drop the only record naming an endpoint - would otherwise read a socket that
-# never answered as proof. These cases reach the same "not present" outcome
-# once through an answer and once through a failure; only the answer counts.
+# me it is not, anywhere". Two ways to get that wrong meet here.
+#
+# An unreachable or unauthorized socket fails exactly like a closed surface, so
+# a caller about to record a close as successful - or to drop the only record
+# naming an endpoint - would otherwise read a socket that never answered as
+# proof. These cases reach the same "not present" outcome once through an
+# answer and once through a failure; only the answer counts.
+#
+# And an answered read can still be the wrong read: `workspace list` with no
+# `--window` covers the CURRENT window only (bin/backends/cmux.sh's
+# fm_backend_cmux_window_of_workspace, verified live; docs/cmux-backend.md
+# "Active limits"). A task workspace sitting in a window the captain is not
+# looking at is missing from that list while very much alive, so absence must
+# be established across every window instead.
 cmux_confirmed_gone() {  # <dir> <target> [ping-reply]
   local dir=$1 target=$2 ping=${3:-PONG} fb rc=0
   fb=$(make_cmux_fakebin "$dir")
@@ -1063,45 +1072,97 @@ cmux_confirmed_gone() {  # <dir> <target> [ping-reply]
   printf '%s' "$rc"
 }
 
+cmux_presence_state() {  # <dir> <workspace-id>
+  local dir=$1 wsid=$2 fb
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_workspace_presence_state "$1"' \
+    "$ROOT" "$wsid"
+}
+
+WIN_A="e1111111-0000-0000-0000-000000000000"
+WIN_B="e2222222-0000-0000-0000-000000000000"
+
 test_endpoint_confirmed_gone_needs_an_answer_not_a_failure() {
   local dir rc ws="aaaaaaaa-0000-0000-0000-000000000000" sf="bbbbbbbb-0000-0000-0000-000000000000"
   dir="$TMP_ROOT/cmux-gone-present"; mkdir -p "$dir/responses"
-  cmux_workspace_list_response "$dir" 1 "$ws" "fm-task"
-  cmux_panes_response "$dir" 2 "$sf"
+  cmux_windows_response "$dir" 1 "$WIN_A" 1
+  cmux_workspace_list_response "$dir" 2 "$ws" "fm-task"
   rc=$(cmux_confirmed_gone "$dir" "$ws:$sf")
-  expect_code 1 "$rc" "a surface cmux still lists must not be reported gone"
+  expect_code 1 "$rc" "a workspace cmux still lists must not be reported gone"
 
-  dir="$TMP_ROOT/cmux-gone-surface"; mkdir -p "$dir/responses"
-  cmux_workspace_list_response "$dir" 1 "$ws" "fm-task"
-  cmux_panes_empty_response "$dir" 2
+  dir="$TMP_ROOT/cmux-gone-absent"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 "$WIN_A" 1 "$WIN_B" 1
+  cmux_workspace_list_response "$dir" 2 "ffffffff-0000-0000-0000-000000000000" "other"
+  cmux_workspace_list_response "$dir" 3 "cccccccc-0000-0000-0000-000000000000" "another"
   rc=$(cmux_confirmed_gone "$dir" "$ws:$sf")
-  expect_code 0 "$rc" "a successful pane listing that omits the surface is proof it is gone"
+  expect_code 0 "$rc" "a workspace no window holds, after every window answered, is proof it is gone"
 
-  dir="$TMP_ROOT/cmux-gone-workspace"; mkdir -p "$dir/responses"
-  cmux_workspace_list_response "$dir" 1 "ffffffff-0000-0000-0000-000000000000" "other"
-  rc=$(cmux_confirmed_gone "$dir" "$ws:$sf")
-  expect_code 0 "$rc" "a workspace the socket no longer lists takes its surfaces with it"
-
-  dir="$TMP_ROOT/cmux-gone-cli-fails"; mkdir -p "$dir/responses"
+  dir="$TMP_ROOT/cmux-gone-windows-fail"; mkdir -p "$dir/responses"
   printf '1\n' > "$dir/responses/1.exit"
   rc=$(cmux_confirmed_gone "$dir" "$ws:$sf")
-  expect_code 1 "$rc" "a failed workspace list must not be read as a removed endpoint"
+  expect_code 1 "$rc" "a failed window inventory must not be read as a removed endpoint"
+
+  dir="$TMP_ROOT/cmux-gone-partial-walk"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 "$WIN_A" 1 "$WIN_B" 1
+  cmux_workspace_list_response "$dir" 2 "ffffffff-0000-0000-0000-000000000000" "other"
+  printf '1\n' > "$dir/responses/3.exit"
+  rc=$(cmux_confirmed_gone "$dir" "$ws:$sf")
+  expect_code 1 "$rc" "a walk that could not read every window proves nothing about the endpoint"
+  dir="$TMP_ROOT/cmux-gone-partial-walk-state"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 "$WIN_A" 1 "$WIN_B" 1
+  cmux_workspace_list_response "$dir" 2 "ffffffff-0000-0000-0000-000000000000" "other"
+  printf '1\n' > "$dir/responses/3.exit"
+  [ "$(cmux_presence_state "$dir" "$ws")" = unknown ] \
+    || fail "an unreadable window must leave the workspace unknown, not decided"
 
   dir="$TMP_ROOT/cmux-gone-garbage"; mkdir -p "$dir/responses"
   printf 'not json at all\n' > "$dir/responses/1.out"
   rc=$(cmux_confirmed_gone "$dir" "$ws:$sf")
-  expect_code 1 "$rc" "an unparseable workspace list must not be read as a removed endpoint"
-  pass "fm_backend_cmux_endpoint_confirmed_gone: only a listing that answered and omits the endpoint is proof"
+  expect_code 1 "$rc" "an unparseable window inventory must not be read as a removed endpoint"
+
+  dir="$TMP_ROOT/cmux-gone-no-windows"; mkdir -p "$dir/responses"
+  printf '[]' > "$dir/responses/1.out"
+  rc=$(cmux_confirmed_gone "$dir" "$ws:$sf")
+  expect_code 1 "$rc" "an app listing no window at all has not shown that the workspace is gone"
+  pass "fm_backend_cmux_endpoint_confirmed_gone: only a complete window walk that omits the workspace is proof"
+}
+
+# The regression this contract exists for: cmux is a GUI app whose current
+# window is whatever the captain last clicked. A task workspace in any other
+# window is absent from the unscoped `workspace list` while its surface is
+# still running the worker's shell, so reading that list as proof would report
+# a clean discard over a live endpoint no task record names.
+test_endpoint_confirmed_gone_sees_a_workspace_outside_the_current_window() {
+  local dir rc ws="aaaaaaaa-0000-0000-0000-000000000000" sf="bbbbbbbb-0000-0000-0000-000000000000"
+  dir="$TMP_ROOT/cmux-gone-other-window"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 "$WIN_A" 1 "$WIN_B" 1
+  # The current window (A) does not hold it; the window the captain is not
+  # looking at (B) does.
+  cmux_workspace_list_response "$dir" 2 "ffffffff-0000-0000-0000-000000000000" "other"
+  cmux_workspace_list_response "$dir" 3 "$ws" "fm-task"
+  rc=$(cmux_confirmed_gone "$dir" "$ws:$sf")
+  expect_code 1 "$rc" "a workspace living in a non-current window was reported gone"
+  assert_contains "$(cat "$dir/log")" $'\x1f''--window'$'\x1f'"$WIN_B" \
+    "confirmed_gone never asked the non-current window for its own workspace list"
+
+  dir="$TMP_ROOT/cmux-gone-other-window-state"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 "$WIN_A" 1 "$WIN_B" 1
+  cmux_workspace_list_response "$dir" 2 "ffffffff-0000-0000-0000-000000000000" "other"
+  cmux_workspace_list_response "$dir" 3 "$ws" "fm-task"
+  [ "$(cmux_presence_state "$dir" "$ws")" = present ] \
+    || fail "a workspace found in a non-current window must read as present, not merely undecided"
+  pass "fm_backend_cmux_endpoint_confirmed_gone: a workspace outside the current window is not absence"
 }
 
 test_endpoint_confirmed_gone_refuses_an_unreachable_socket() {
   local dir rc ws="aaaaaaaa-0000-0000-0000-000000000000" sf="bbbbbbbb-0000-0000-0000-000000000000"
   dir="$TMP_ROOT/cmux-gone-socket-down"; mkdir -p "$dir/responses"
-  cmux_panes_empty_response "$dir" 1
+  cmux_windows_response "$dir" 1 "$WIN_A" 1
   rc=$(cmux_confirmed_gone "$dir" "$ws:$sf" "Socket not found")
   expect_code 1 "$rc" "a socket that cannot be reached proves nothing about the endpoint"
-  assert_not_contains "$(cat "$dir/log")" $'\x1f''workspace'$'\x1f''list' \
-    "confirmed_gone queried workspaces through a socket that had not answered ping"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''list-windows' \
+    "confirmed_gone walked windows through a socket that had not answered ping"
   pass "fm_backend_cmux_endpoint_confirmed_gone: an unreachable socket refuses instead of proving absence"
 }
 
@@ -1109,6 +1170,7 @@ test_endpoint_confirmed_gone_refuses_an_unreachable_socket() {
 . "$ROOT/bin/fm-backend.sh"
 
 test_endpoint_confirmed_gone_needs_an_answer_not_a_failure
+test_endpoint_confirmed_gone_sees_a_workspace_outside_the_current_window
 test_endpoint_confirmed_gone_refuses_an_unreachable_socket
 test_version_check_accepts_current_version
 test_version_check_accepts_newer_version

@@ -403,46 +403,79 @@ fm_backend_cmux_surface_exists() {  # <workspace_id> <surface_id>
     | jq -e --arg s "$sfid" '[.panes[]? | select(.surface_ids // [] | index($s))] | length > 0' >/dev/null 2>&1
 }
 
+# fm_backend_cmux_workspace_presence_state: does <workspace_id> exist anywhere
+# in the running app - present|absent|unknown, from reads that answered.
+#
+# `workspace list` with no `--window` cannot answer this: it is scoped to the
+# CURRENT window only (verified live, see fm_backend_cmux_window_of_workspace
+# below, and docs/cmux-backend.md "Active limits", which records the same
+# boundary as a known recovery blind spot). An id missing from that list means
+# "not in the window that happens to be current", which for a GUI app the
+# captain drives is routine, not removal.
+#
+# The whole-app question is answered the way fm_backend_cmux_window_of_workspace
+# already answers membership: walk every window from `list-windows --json` and
+# ask each for its OWN scoped `workspace list --window <id>`. That function is
+# best-effort by design (its caller only wants a window to add a sibling to), so
+# it treats a failed read as "not found"; this one cannot. `absent` here means
+# every window answered and none held the workspace, so any failed or
+# unparseable read - the window inventory, one window's list, an app with no
+# window listed at all - is `unknown` instead. jq's `-e` separates a definitive
+# `false` (exit 1) from an unparseable or absent answer (jq 1.7's exit 5 / 4).
+fm_backend_cmux_workspace_presence_state() {  # <workspace_id> -> present|absent|unknown
+  local wsid=$1 wins wids wid wss status seen=0
+  wins=$(fm_backend_cmux_cli list-windows --json --id-format uuids 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  wids=$(printf '%s' "$wins" | jq -r '.[]? | .id' 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  while IFS= read -r wid; do
+    [ -n "$wid" ] || continue
+    seen=1
+    wss=$(fm_backend_cmux_cli workspace list --json --id-format uuids --window "$wid" 2>/dev/null) \
+      || { printf 'unknown'; return 0; }
+    if printf '%s' "$wss" \
+      | jq -e --arg id "$wsid" '[.workspaces[]? | select(.id == $id)] | length > 0' >/dev/null 2>&1; then
+      printf 'present'
+      return 0
+    else
+      status=$?
+      [ "$status" -eq 1 ] || { printf 'unknown'; return 0; }
+    fi
+  done <<EOF
+$wids
+EOF
+  [ "$seen" -eq 1 ] || { printf 'unknown'; return 0; }
+  printf 'absent'
+}
+
 # fm_backend_cmux_endpoint_confirmed_gone: the cmux half of the fleet-wide
 # confirmed-absence contract (bin/fm-backend.sh's
 # fm_backend_endpoint_confirmed_gone). fm_backend_cmux_surface_exists above
 # cannot serve it: an unreachable or unauthorized socket fails exactly like a
 # closed surface, which is right for a liveness read and wrong as proof of
-# removal. Proof here needs a socket that demonstrably answered.
+# removal. Proof here needs reads that demonstrably answered.
 #
 #   1. `ping` must answer PONG (fm_backend_cmux_ping_state ok). Every other
 #      classification - denied, unauth, down, error - means this caller cannot
 #      see the app's state at all, so it can prove nothing about it.
-#   2. `workspace list` must answer with parseable JSON. fm_backend_cmux_kill
-#      removes the task's WHOLE workspace, so a workspace id the socket no
-#      longer lists is the ordinary proof that the endpoint is gone.
-#   3. If the workspace survived, its own `list-panes` must answer and omit the
-#      exact surface.
-# jq's `-e` separates a definitive `false` (exit 1) from an unparseable or
-# absent answer (jq 1.7's exit 5 / 4), so a truncated reply never reads as
-# absence.
+#   2. The workspace must be absent from EVERY window
+#      (fm_backend_cmux_workspace_presence_state). A cmux task owns one
+#      workspace and fm_backend_cmux_kill removes that whole workspace, so a
+#      workspace no window holds is the removal itself; a workspace still held
+#      somewhere means the close did not take - which is exactly the outcome
+#      cmux produces when it refuses to remove the only workspace in a window
+#      while returning success (docs/cmux-backend.md "Closing the last
+#      workspace in a window").
+#
+# The surface is deliberately not consulted to soften a surviving workspace:
+# `list-panes --workspace <id>` names its workspace explicitly, but whether it
+# answers for a workspace outside the current window is not something this
+# repository has verified, and the caller's next step - warn, or record the
+# close as done - is too consequential to rest on that open question.
 fm_backend_cmux_endpoint_confirmed_gone() {  # <target>
-  local wss panes status
   fm_backend_cmux_parse_target "$1" || return 1
   [ "$(fm_backend_cmux_ping_state)" = ok ] || return 1
-  wss=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || return 1
-  if printf '%s' "$wss" \
-    | jq -e --arg id "$FM_BACKEND_CMUX_WORKSPACE" '[.workspaces[]? | select(.id == $id)] | length > 0' >/dev/null 2>&1; then
-    :
-  else
-    status=$?
-    [ "$status" -eq 1 ] && return 0
-    return 1
-  fi
-  panes=$(fm_backend_cmux_cli list-panes --workspace "$FM_BACKEND_CMUX_WORKSPACE" --json --id-format uuids 2>/dev/null) || return 1
-  if printf '%s' "$panes" \
-    | jq -e --arg s "$FM_BACKEND_CMUX_SURFACE" '[.panes[]? | select(.surface_ids // [] | index($s))] | length > 0' >/dev/null 2>&1; then
-    return 1
-  else
-    status=$?
-    [ "$status" -eq 1 ] && return 0
-    return 1
-  fi
+  [ "$(fm_backend_cmux_workspace_presence_state "$FM_BACKEND_CMUX_WORKSPACE")" = absent ]
 }
 
 # fm_backend_cmux_target_ready: parse the target and verify it is live via
