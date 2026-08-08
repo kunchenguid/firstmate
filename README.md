@@ -173,7 +173,7 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | `/ahoy`            | Recap visible session events since the prior real captain message plus visibly unanswered captain decisions, falling back to Bearings when invoked as the session's first real captain message |
 | `/bearings`        | Generate a concise four-section chat digest from bounded local fleet and registered-secondmate state; use `/bearings file` to also replace today's dated report in `data/`, and add `include PRs` when live PR enrichment is wanted |
 | `/updatefirstmate` | Self-update the running firstmate and its secondmates to the latest from origin with fast-forward-only pulls, then re-read instructions and nudge secondmates |
-| `/stow`            | Sweep the session for uncaptured durable knowledge, route each finding to its disk home per AGENTS.md, file undone next steps to the backlog, and report what is now safe to reset |
+| `/stow`            | Sweep the session for uncaptured durable knowledge, route each finding to its disk home per AGENTS.md, file undone next steps to the backlog, cascade the same sweep to every registered second mate against that home's own memory budget, and report what is now safe to reset |
 
 Bearings invocation examples:
 
