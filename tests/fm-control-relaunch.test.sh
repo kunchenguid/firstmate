@@ -691,6 +691,26 @@ test_prefixed_prior_harness_wiring_is_still_retired() {
   pass "fm-spawn --relaunch: wiring armed under a prefixed harness name is still retired"
 }
 
+# muse installs no hook; its busy source is its own session event log, bound to
+# the pane by two firstmate-owned sidecars. Relaunching AWAY from muse must
+# retire that binding, or a retired incarnation's session pin outlives the agent
+# that produced it.
+test_muse_session_binding_is_retired_on_a_harness_switch() {
+  local dir
+  dir=$(new_case musewiring rl31)
+  add_ship_task "$dir" rl31 muse
+  printf 'sessions_root=/nonexistent\nworkspace_root=%s\nbinding_id=1.2.3\n' "$dir/wt" \
+    > "$dir/home/state/rl31.muse-session"
+  printf '/nonexistent/session.jsonl\n' > "$dir/home/state/rl31.muse-session-current"
+  printf 'zsh' > "$dir/fake/command"
+  run_spawn "$dir" rl31 --relaunch --harness claude >/dev/null
+  [ ! -e "$dir/home/state/rl31.muse-session" ] \
+    || fail "the retired muse incarnation's session binding must not outlive it"
+  [ ! -e "$dir/home/state/rl31.muse-session-current" ] \
+    || fail "the retired muse incarnation's resolved session pin must not outlive it"
+  pass "fm-spawn --relaunch: switching away from muse retires its session binding"
+}
+
 # --- 3 and 4. refusals before the agent is touched ---------------------------
 
 test_missing_worktree_refuses_before_stopping_anything() {
@@ -1180,6 +1200,7 @@ test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_prefixed_prior_harness_wiring_is_still_retired
+test_muse_session_binding_is_retired_on_a_harness_switch
 test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical
