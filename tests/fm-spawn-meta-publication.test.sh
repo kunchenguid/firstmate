@@ -22,20 +22,52 @@ TMP_ROOT=$(fm_test_tmproot fm-spawn-meta-publication)
 # worktree for pane_current_path and appends every kill-window invocation to
 # FM_FAKE_KILL_LOG, so a test can observe whether the spawn discarded the
 # window it created.
+#
+# It also models window PRESENCE, because that is what the spawn now reads to
+# decide whether its endpoint is gone: a killed window is recorded under
+# FM_FAKE_GONE_DIR and its `-t <session>:<window> #{pane_id}` probe then fails,
+# exactly as real tmux answers for a window that no longer exists. Setting
+# FM_FAKE_KILL_NOOP=1 keeps kill-window succeeding while the window survives -
+# the real shape of every adapter's best-effort kill, which reports success
+# even when the close was refused or silently dropped.
 make_meta_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+# The window half of the `-t` target, with tmux's exact-match `=` prefix
+# stripped, or empty when this invocation carries no target.
+fake_target_window() {
+  local arg prev= win=
+  for arg in "$@"; do
+    [ "$prev" = "-t" ] && win=$arg
+    prev=$arg
+  done
+  win=${win##*:}
+  printf '%s' "${win#=}"
+}
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_id}"*)
+    win=$(fake_target_window "$@")
+    if [ -n "${FM_FAKE_GONE_DIR:-}" ] && [ -n "$win" ] && [ -e "$FM_FAKE_GONE_DIR/$win" ]; then
+      echo "can't find window: $win" >&2
+      exit 1
+    fi
+    printf '%%1\n'
+    exit 0
+    ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   kill-window)
     [ -z "${FM_FAKE_KILL_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_KILL_LOG"
+    if [ "${FM_FAKE_KILL_NOOP:-0}" != 1 ] && [ -n "${FM_FAKE_GONE_DIR:-}" ]; then
+      win=$(fake_target_window "$@")
+      [ -z "$win" ] || : > "$FM_FAKE_GONE_DIR/$win"
+    fi
     exit 0
     ;;
   has-session|new-session|new-window) exit 0 ;;
@@ -73,17 +105,17 @@ make_meta_case() {
   proj="$case_dir/project"
   wt="$case_dir/wt"
   fakebin=$(make_meta_fakebin "$case_dir/fake" "$wt")
-  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
+  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config" "$case_dir/gone"
   printf 'codex\n' > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   mkdir -p "$home/data/$id"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   touch "$home/state/.last-watcher-beat"
-  printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$case_dir/kill-log"
+  printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$case_dir/kill-log|$case_dir/gone"
 }
 
 read_meta_record() {
-  IFS='|' read -r _ HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR KILL_LOG <<EOF
+  IFS='|' read -r _ HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR KILL_LOG GONE_DIR <<EOF
 $1
 EOF
 }
@@ -95,6 +127,7 @@ run_meta_spawn() {
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_KILL_LOG="$KILL_LOG" \
+    FM_FAKE_GONE_DIR="$GONE_DIR" FM_FAKE_KILL_NOOP="${FM_FAKE_KILL_NOOP:-0}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -163,11 +196,36 @@ test_failed_publication_discards_its_endpoint() {
     *"cleaning up the incomplete spawn"*)
       fail "the failure message still claims an unverified complete cleanup: $out" ;;
   esac
+  case "$out" in
+    *"outlived the failed spawn"*)
+      fail "the failure reported a stranded endpoint after a close that worked: $out" ;;
+  esac
   pass "a failed metadata publication discards the endpoint it created"
+}
+
+# Every adapter's kill is best-effort: it reports success even when the close
+# was refused (a herdr pane close without its session presentation lock) or
+# silently dropped. If the spawn read that exit status as proof, the operator
+# would be told only that no record was written, while a live pane no record
+# names keeps running. The verdict must come from re-reading the endpoint.
+test_surviving_endpoint_is_reported_despite_a_successful_kill() {
+  local rec id out
+  id=meta-publish-survivor-z4
+  rec=$(make_meta_case meta-publish-survivor "$id")
+  read_meta_record "$rec"
+  add_failing_mv "$FAKEBIN_DIR"
+
+  out=$(FM_FAKE_KILL_NOOP=1 run_meta_spawn "$id") || true
+  [ -s "$KILL_LOG" ] || fail "the failed spawn never attempted to discard its endpoint: $out"
+  assert_contains "$out" "outlived the failed spawn" \
+    "a surviving endpoint was not reported after a success-shaped kill: $out"
+  assert_contains "$out" "$id" "the stranded-endpoint warning did not name the task"
+  pass "an endpoint that survives a success-shaped kill is reported as stranded"
 }
 
 test_successful_publication_is_complete_and_leaves_no_staging_file
 test_failed_publication_publishes_no_record
 test_failed_publication_discards_its_endpoint
+test_surviving_endpoint_is_reported_despite_a_successful_kill
 
 echo "# all fm-spawn-meta-publication tests passed"

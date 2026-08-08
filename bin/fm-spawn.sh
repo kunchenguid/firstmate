@@ -2203,11 +2203,42 @@ META_TMP="$STATE/$ID.meta.tmp.$$"
 # spawn that never publishes one would otherwise strand a window no teardown
 # can find. Orca terminals/worktrees and a pending herdr projection are unwound
 # by the EXIT trap instead, which still holds their cleanup flags here.
+#
+# unpublished_endpoint_gone: the verdict, because a kill's exit status cannot
+# carry one. Every adapter's kill is best-effort by contract (fm_backend_kill):
+# the tmux one ends in `kill-window ... || true`, the herdr one returns 0 after
+# refusing an unlocked pane close, and the zellij and cmux ones return 0 when
+# the session or target is already unreadable. So the endpoint is re-read
+# instead. Herdr answers through its own confirmation primitive, which treats
+# only a structured pane-not-found as proof and refuses on unknown presence -
+# the same rule fm-teardown.sh gates durable-record removal on. Every other
+# backend answers through the shared read-only presence check.
+unpublished_endpoint_gone() {
+  if [ "$BACKEND" = herdr ] \
+     && declare -F fm_backend_herdr_endpoint_confirmed_gone >/dev/null 2>&1; then
+    fm_backend_herdr_endpoint_confirmed_gone "$T" 2>/dev/null
+    return
+  fi
+  ! fm_backend_target_exists "$BACKEND" "$T" "$W" >/dev/null 2>&1
+}
+
+# A close is not always observable the instant the adapter returns, so give a
+# closing endpoint a bounded moment to disappear before declaring it stranded.
 discard_unpublished_endpoint() {
+  local attempt=0
   [ "$BACKEND" != orca ] || return 0
   [ "${HERDR_PROJECTION_ABORT_CLEANUP:-0}" != 1 ] || return 0
   [ -n "${T:-}" ] || return 0
-  fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "$W" 2>/dev/null && return 0
+  # The adapter's own diagnostics reach the operator: on this path a refusal
+  # ("could not acquire its session presentation lock") is exactly what names
+  # the endpoint that is about to be reported as stranded.
+  fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "$W" || true
+  while :; do
+    unpublished_endpoint_gone && return 0
+    [ "$attempt" -lt 20 ] || break
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
   echo "warning: the $BACKEND endpoint $T for $ID outlived the failed spawn and no task record names it; remove it by hand" >&2
   return 1
 }

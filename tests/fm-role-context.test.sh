@@ -2,10 +2,40 @@
 # Behavior tests for role-aware generated Firstmate instruction contexts.
 # The assertions use Pi's real resource loader and system-prompt builder plus
 # generated briefs and the executable startup wrapper, never source snapshots.
+#
+# Two halves with different prerequisites, in prerequisite order. The startup
+# wrapper is a plain script, so its ordering assertion runs on every runner -
+# including this file's own pure-contract-unit lane, where Pi is not installed.
+# Only the second half needs a real Pi loader, so only it may skip.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+TMP_ROOT=$(fm_test_tmproot fm-role-context)
+PRIMARY="$TMP_ROOT/primary"
+mkdir -p "$PRIMARY/bin" "$PRIMARY/state"
+
+cp "$ROOT/AGENTS.md" "$PRIMARY/AGENTS.md"
+cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$ROOT/bin/fm-primary-scope-lib.sh" \
+  "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" "$PRIMARY/bin/"
+chmod +x "$PRIMARY/bin/fm-sessionstart-nudge.sh"
+git init -q "$PRIMARY"
+fm_git_identity fixture fixture@example.invalid
+git -C "$PRIMARY" config commit.gpgsign false
+git -C "$PRIMARY" add AGENTS.md bin
+git -C "$PRIMARY" commit -qm fixture
+nudge=$(FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" "$PRIMARY/bin/fm-sessionstart-nudge.sh") \
+  || fail "primary startup wrapper failed"
+case "$nudge" in
+  *primary-runtime/SKILL.md*fm-session-start.sh*) ;;
+  *) fail "primary startup wrapper did not load runtime before session start: $nudge" ;;
+esac
+case "$nudge" in
+  *"before any other operational instruction or fleet mutation"*) ;;
+  *) fail "primary startup wrapper did not prevent pre-runtime mutation: $nudge" ;;
+esac
+pass "role-aware startup wrapper orders the runtime owner before primary mutation"
 
 command -v npm >/dev/null 2>&1 || { echo "skip: npm not found for generated role-context test"; exit 0; }
 PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g)/@earendil-works/pi-coding-agent"}
@@ -15,16 +45,14 @@ if [ ! -f "$PI_PACKAGE_DIR/dist/core/resource-loader.js" ] || \
   exit 0
 fi
 
-TMP_ROOT=$(fm_test_tmproot fm-role-context)
 HOME_DIR="$TMP_ROOT/home"
-PRIMARY="$TMP_ROOT/primary"
 OUT="$TMP_ROOT/context.json"
 # An empty user-scope Pi agent dir. Without it the loader would pull the
 # operator's own SYSTEM.md, settings, packages, and user skills into the
 # measured prompt, so the budgets below would grade host material this
 # repository does not own.
 PI_AGENT_DIR="$TMP_ROOT/pi-agent"
-mkdir -p "$HOME_DIR/data" "$HOME_DIR/state" "$PRIMARY/bin" "$PRIMARY/state" "$PI_AGENT_DIR"
+mkdir -p "$HOME_DIR/data" "$HOME_DIR/state" "$PI_AGENT_DIR"
 
 FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   "$ROOT/bin/fm-brief.sh" role-ship firstmate --mode no-mistakes >/dev/null \
@@ -158,24 +186,3 @@ print(
     f"ship={len(x['ship'])} scout={len(x['scout'])} second={len(second)}"
 )
 PY
-
-cp "$ROOT/AGENTS.md" "$PRIMARY/AGENTS.md"
-cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$ROOT/bin/fm-primary-scope-lib.sh" \
-  "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" "$PRIMARY/bin/"
-chmod +x "$PRIMARY/bin/fm-sessionstart-nudge.sh"
-git init -q "$PRIMARY"
-fm_git_identity fixture fixture@example.invalid
-git -C "$PRIMARY" config commit.gpgsign false
-git -C "$PRIMARY" add AGENTS.md bin
-git -C "$PRIMARY" commit -qm fixture
-nudge=$(FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" "$PRIMARY/bin/fm-sessionstart-nudge.sh") \
-  || fail "primary startup wrapper failed"
-case "$nudge" in
-  *primary-runtime/SKILL.md*fm-session-start.sh*) ;;
-  *) fail "primary startup wrapper did not load runtime before session start: $nudge" ;;
-esac
-case "$nudge" in
-  *"before any other operational instruction or fleet mutation"*) ;;
-  *) fail "primary startup wrapper did not prevent pre-runtime mutation: $nudge" ;;
-esac
-pass "role-aware startup wrapper orders the runtime owner before primary mutation"
