@@ -152,13 +152,14 @@ make_fake_tmux() {
 #!/usr/bin/env bash
 set -u
 case "\${1:-}" in
-  display-message)
+  has-session|display-message)
     target=""
     prev=""
     for a in "\$@"; do
       [ "\$prev" = "-t" ] && target="\$a"
       prev="\$a"
     done
+    target=\$(printf '%s' "\$target" | tr -d '=')
     [ "\$target" = "$live" ] && { printf '%%1\n'; exit 0; }
     exit 1
     ;;
@@ -504,14 +505,14 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
-  make_fake_tmux "$fakebin" "fm-sess:live-window"
+  make_fake_tmux "$fakebin" "fm-sess:fm-task-live"
 
-  printf 'window=fm-sess:live-window\nkind=ship\n' > "$home/state/task-live.meta"
-  printf 'window=fm-sess:dead-window\nkind=ship\n' > "$home/state/task-dead.meta"
+  printf 'window=fm-sess:fm-task-live\nkind=ship\n' > "$home/state/task-live.meta"
+  printf 'window=fm-sess:fm-task-dead\nkind=ship\n' > "$home/state/task-dead.meta"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:live-window)" "live tmux endpoint not reported alive"
-  assert_contains "$out" "endpoint: dead (backend=tmux window=fm-sess:dead-window)" "dead tmux endpoint not reported dead"
+  assert_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:fm-task-live)" "live tmux endpoint not reported alive"
+  assert_contains "$out" "endpoint: dead (backend=tmux window=fm-sess:fm-task-dead)" "dead tmux endpoint not reported dead"
 
   pass "tmux endpoint liveness is reported per task: alive for a live window, dead for a gone one"
 }

@@ -306,11 +306,12 @@ SH
 #!/usr/bin/env bash
 state="$(dirname "$0")/.tmux-live"
 case "${1:-}" in
-  display-message)
+  has-session|display-message)
     [ -f "$state" ] || exit 1
     case "$*" in
       *pane_current_command*) printf 'bash\n' ;;
-      *session_name*window_name*) printf 'firstmate\tfm-task-x1\n' ;;
+      *session_name*) printf 'firstmate\n' ;;
+      *window_name*) printf 'fm-task-x1\n' ;;
       *) printf '%%1\n' ;;
     esac
     exit 0
@@ -3590,7 +3591,7 @@ SH
   cat > "$case_dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  display-message) exit 1 ;;
+  has-session|display-message) exit 1 ;;
   *) exit 0 ;;
 esac
 SH
@@ -3641,7 +3642,7 @@ test_managed_teardown_retains_lease_when_endpoint_state_is_unknown() {
   cat > "$case_dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  display-message) exit 1 ;;
+  has-session|display-message) exit 1 ;;
   list-windows) echo 'permission denied' >&2; exit 74 ;;
   kill-window) exit 74 ;;
 esac
@@ -3727,11 +3728,12 @@ test_managed_teardown_locks_generation_before_endpoint_cleanup() {
 set -u
 state="$(dirname "$0")/.tmux-live"
 case "${1:-}" in
-  display-message)
+  has-session|display-message)
     [ -f "$state" ] || exit 1
     case "$*" in
       *pane_current_command*) printf 'claude\n' ;;
-      *session_name*window_name*) printf 'firstmate\tfm-task-x1\n' ;;
+      *session_name*) printf 'firstmate\n' ;;
+      *window_name*) printf 'fm-task-x1\n' ;;
       *) printf '%%1\n' ;;
     esac
     ;;
@@ -3834,7 +3836,7 @@ set -u
 parent_state="$(dirname "$0")/.tmux-live"
 child_state="$(dirname "$0")/.child-tmux-live"
 case "${1:-}" in
-  display-message)
+  has-session|display-message)
     case "$*" in
       *fm-child-lock-x3*) state=$child_state; label=fm-child-lock-x3 ;;
       *) state=$parent_state; label=fm-task-x1 ;;
@@ -3842,7 +3844,8 @@ case "${1:-}" in
     [ -f "$state" ] || exit 1
     case "$*" in
       *pane_current_command*) printf 'claude\n' ;;
-      *session_name*window_name*) printf 'firstmate\t%s\n' "$label" ;;
+      *session_name*) printf 'firstmate\n' ;;
+      *window_name*) printf '%s\n' "$label" ;;
       *) printf '%%1\n' ;;
     esac
     ;;
@@ -4038,7 +4041,7 @@ live_marker() {
   esac
 }
 case "${1:-}" in
-  display-message)
+  has-session|display-message)
     marker=$(live_marker "$@")
     [ -n "$marker" ] && [ -f "$marker" ] || exit 1
     case " $* " in
@@ -4123,7 +4126,7 @@ live_marker() {
   esac
 }
 case "${1:-}" in
-  display-message)
+  has-session|display-message)
     marker=$(live_marker "$@")
     [ -n "$marker" ] && [ -f "$marker" ] || exit 1
     case " $* " in
@@ -4358,7 +4361,7 @@ live_marker() {
   esac
 }
 case "${1:-}" in
-  display-message)
+  has-session|display-message)
     marker=$(live_marker "$@")
     [ -n "$marker" ] && [ -f "$marker" ] || exit 1
     case " $* " in
@@ -4452,7 +4455,7 @@ test_required_report_blocks_then_publishes_before_cleanup() {
   cat > "$case_dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  display-message)
+  has-session|display-message)
     [ -f "$FM_FAKE_REPORT_LIVE" ] || exit 1
     case " $* " in
       *' #{pane_current_command} '*) printf '%s\n' bash ;;
@@ -4542,11 +4545,12 @@ test_required_report_restores_rollback_generation_before_publish() {
   cat > "$case_dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  display-message)
+  has-session|display-message)
     [ -f "$FM_FAKE_REPORT_LIVE" ] || exit 1
     case "$*" in
       *pane_current_command*) printf 'claude\n' ;;
-      *session_name*window_name*) printf 'firstmate\tfm-task-x1\n' ;;
+      *session_name*) printf 'firstmate\n' ;;
+      *window_name*) printf 'fm-task-x1\n' ;;
       *) printf '%%1\n' ;;
     esac
     ;;
@@ -4596,7 +4600,7 @@ test_required_report_revalidates_after_quiescence() {
   cat > "$case_dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  display-message)
+  has-session|display-message)
     [ -f "$FM_FAKE_REPORT_LIVE" ] || exit 1
     case " $* " in
       *' #{pane_current_command} '*) printf '%s\n' bash ;;
@@ -4640,7 +4644,7 @@ test_legacy_teardown_revalidates_after_quiescence() {
   cat > "$case_dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  display-message)
+  has-session|display-message)
     [ -f "$FM_FAKE_REPORT_LIVE" ] || exit 1
     case " $* " in
       *' #{pane_current_command} '*) printf '%s\n' bash ;;
@@ -4999,7 +5003,7 @@ for arg in "$@"; do
   prev=$arg
 done
 case "${1:-}" in
-  display-message)
+  has-session|display-message)
     case "$target" in
       *task-x1) [ -f "$FM_FAKE_PARENT_LIVE" ] || exit 1 ;;
       *child-live-x9) [ -f "$FM_FAKE_CHILD_LIVE" ] || exit 1 ;;
@@ -5315,7 +5319,7 @@ test_retained_direct_spawn_requires_confirmed_endpoint_quiescence() {
 case "${1:-}" in
   kill-window) exit 0 ;;
   list-windows) echo "control plane unavailable" >&2; exit 1 ;;
-  display-message) exit 1 ;;
+  has-session|display-message) exit 1 ;;
 esac
 exit 0
 SH
@@ -6029,7 +6033,7 @@ test_teardown_distinguishes_dead_and_live_harness_processes() {
 #!/usr/bin/env bash
 state="$(dirname "$0")/.tmux-live"
 case "${1:-}" in
-  display-message)
+  has-session|display-message)
     [ -f "$state" ] || exit 1
     case " $* " in *pane_current_command*) printf 'zsh\n' ;; esac
     ;;
@@ -6050,7 +6054,7 @@ SH
   cat > "$live_case/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  display-message)
+  has-session|display-message)
     case " $* " in *pane_current_command*) printf 'codex\n' ;; esac
     exit 0
     ;;
@@ -6296,7 +6300,7 @@ state="$(dirname "$0")/.tmux-live"
 started="$(dirname "$0")/.retirement-started"
 release="$(dirname "$0")/.retirement-release"
 case "${1:-}" in
-  display-message)
+  has-session|display-message)
     [ -f "$state" ] || exit 1
     case " $* " in
       *' #{pane_current_command} '*) printf '%s\n' bash ;;

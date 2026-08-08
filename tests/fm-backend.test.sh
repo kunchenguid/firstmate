@@ -711,8 +711,18 @@ test_managed_tmux_target_identity_checks_recorded_session() {
   fake_label=fm-intended-task
   tmux() {
     printf '%s\n' "$*" >> "$log"
-    case "$*" in
-      *'#{session_name}'*) printf '%s\t%s\n' "$fake_session" "$fake_label" ;;
+    # Scoped to display-message: the identity fields are queried one at a time
+    # (a tab inside a tmux format string is not portable - tmux 3.4 renders it
+    # as "_" - so the adapter reads #{session_name} and #{window_name}
+    # separately), and `list-windows -F '#{window_name}'` must NOT be answered
+    # as an identity read.
+    case "${1:-}" in
+      has-session|display-message)
+        case "$*" in
+          *'#{session_name}'*) printf '%s\n' "$fake_session" ;;
+          *'#{window_name}'*) printf '%s\n' "$fake_label" ;;
+        esac
+        ;;
     esac
   }
 
@@ -771,7 +781,7 @@ test_managed_tmux_target_state_finds_replacement_window() {
   tmux() {
     printf '%s\n' "$*" >> "$log"
     case "${1:-}" in
-      display-message) return 1 ;;
+      has-session|display-message) return 1 ;;
       list-windows)
         [ "${2:-}" = -t ] && [ "${3:-}" = recorded-session ] || return 1
         printf '%s\n' "$window_names"
@@ -811,9 +821,16 @@ test_managed_tmux_target_state_resolves_id_after_recorded_session_disappears() {
         printf "can't find session: recorded-session\n" >&2
         return 1
         ;;
-      display-message)
+      # Whether the stable id still resolves is decided by has-session, not by
+      # display-message: real tmux exits 0 from display-message even for a
+      # target that no longer resolves, so its status carries no existence
+      # information at all.
+      has-session|display-message)
         [ "$resolved" = 1 ] || return 1
-        printf 'other-session\tfm-renamed-task\n'
+        case "$*" in
+          *'#{session_name}'*) printf 'other-session\n' ;;
+          *'#{window_name}'*) printf 'fm-renamed-task\n' ;;
+        esac
         ;;
       *) return 1 ;;
     esac
@@ -838,7 +855,7 @@ set -u
 { printf 'tmux'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TMUX_LOG:?}"
 case "${1:-}" in
   send-keys) exit 0 ;;
-  display-message)
+  has-session|display-message)
     for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '\xe2\x94\x82 \xe2\x94\x82\n'; exit 0 ;;
@@ -859,10 +876,19 @@ run_send_case() {  # <bin-root> <fakebin> <log> <home> -- <send args...>
     "$bin/bin/fm-send.sh" "$@" >/dev/null 2>&1
 }
 
+# The target preflight is the ONE tmux call that deliberately differs old vs
+# new, so it is stripped from both logs before the conformance diff. The old
+# preflight was `display-message -p -t <target> '#{pane_id}'`, which exits 0
+# even when the target's window no longer exists (tmux falls back to the
+# session's current window), so it verified nothing; the new one is
+# `has-session -t <target>`, which resolves the full target and fails. Both
+# forms are stripped so this diff keeps asserting what it is actually for -
+# that the SEND sequence is unchanged - rather than the probe verb.
 strip_send_preflight() {  # <log>
-  local preflight
-  preflight=$'tmux\x1fdisplay-message\x1f-p\x1f-t\x1fsess:win\x1f#{pane_id}'
-  awk -v preflight="$preflight" '$0 != preflight { print }' "$1"
+  local old_preflight new_preflight
+  old_preflight=$'tmux\x1fdisplay-message\x1f-p\x1f-t\x1fsess:win\x1f#{pane_id}'
+  new_preflight=$'tmux\x1fhas-session\x1f-t\x1fsess:win'
+  awk -v old="$old_preflight" -v new="$new_preflight" '$0 != old && $0 != new { print }' "$1"
 }
 
 test_send_conformance_old_vs_new() {
@@ -879,8 +905,14 @@ test_send_conformance_old_vs_new() {
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" --key Escape
   rc_new=$?
   expect_code "$rc_old" "$rc_new" "fm-send --key: old vs new exit code"
-  assert_contains "$(cat "$log_new")" $'\x1f''display-message'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''#{pane_id}' \
+  # The explicit target must still be verified before sending, and it must be
+  # verified with a command whose exit status actually means something: a
+  # display-message probe exits 0 for a window that is gone, so it never
+  # blocked a send into a dead target.
+  assert_contains "$(cat "$log_new")" $'\x1f''has-session'$'\x1f''-t'$'\x1f''sess:win' \
     "fm-send --key did not verify the explicit tmux target before sending"
+  ! grep -q $'\x1f''display-message'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''#{pane_id}' "$log_new" \
+    || fail "fm-send --key still uses display-message as its target preflight, which exits 0 for a target that no longer exists"
   strip_send_preflight "$log_old" > "$filtered_old"
   strip_send_preflight "$log_new" > "$filtered_new"
   diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-key.txt" 2>&1 \
@@ -975,7 +1007,7 @@ make_spawn_fakebin() {  # <dir> <fake-worktree-path> -> echoes fakebin dir
 set -u
 { printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
 case "\${1:-}" in
-  display-message)
+  has-session|display-message)
     for a in "\$@"; do case "\$a" in *pane_current_path*) printf '%s\\n' "$wt"; exit 0 ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
   list-windows) exit 0 ;;
@@ -1045,7 +1077,7 @@ make_spawn_symlink_fakebin() {  # <dir> <initial-project-path> <worktree-path> -
 set -u
 { printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
 case "\${1:-}" in
-  display-message)
+  has-session|display-message)
     for a in "\$@"; do case "\$a" in *pane_current_path*)
       printf x >> "$counter"
       if [ "\$(wc -c < "$counter")" -le 1 ]; then
@@ -1138,7 +1170,8 @@ case "${1:-}" in
   display-message)
     [ -e "$live" ] || exit 1
     case "${*: -1}" in
-      *session_name*window_name*) printf 'firstmate\t%s\n' "${target#*:}" ;;
+      *session_name*) printf 'firstmate\n' ;;
+      *window_name*) printf '%s\n' "${target#*:}" ;;
       *pane_current_command*) printf 'bash\n' ;;
       *pane_id*) printf '%%1\n' ;;
     esac

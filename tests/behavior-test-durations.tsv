@@ -30,6 +30,7 @@
 148500	tests/fm-backend-herdr.test.sh
 12746	tests/fm-backend-orca.test.sh
 2573	tests/fm-backend-tmux-smoke.test.sh
+540	tests/fm-backend-tmux-target-exists.test.sh
 20	tests/fm-backend-zellij-smoke.test.sh
 3820	tests/fm-backend-zellij.test.sh
 25568	tests/fm-backend.test.sh

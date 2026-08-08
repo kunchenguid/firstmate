@@ -271,6 +271,12 @@ async function fakeTmux(fx) {
     tmux,
     `#!/bin/sh
 case "$1" in
+  # This fixture models a LIVE supervisor pane - display-message and
+  # capture-pane both answer for it - and firstmate proves endpoint existence
+  # with has-session (display-message exits 0 even for a window that is gone,
+  # so its status carries no existence information). Without this arm the
+  # catch-all failure below would report the live supervisor as not live.
+  has-session) exit 0 ;;
   display-message)
     case "$*" in
       *pane_pid*) printf '%s\\n' "\${LAVISH_FAKE_TMUX_PANE_PID:?}" ;;

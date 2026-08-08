@@ -90,6 +90,20 @@ case "$*" in
     fi
     [ -f "${FM_FAKE_ENDPOINT_FILE:-/nonexistent}" ]; exit $?
     ;;
+  has-session*)
+    # A bare session target is the container-ensure probe and always resolves;
+    # a window/pane target answers from the same endpoint oracle as the
+    # '#{pane_id}' probe above, so existence cannot contradict it.
+    case "$*" in
+      *:*|*@*|*%*) ;;
+      *) exit 0 ;;
+    esac
+    case "${FM_FAKE_TARGET_STATE:-auto}" in
+      present) exit 0 ;;
+      absent|unknown) exit 1 ;;
+    esac
+    [ -f "${FM_FAKE_ENDPOINT_FILE:-/nonexistent}" ]; exit $?
+    ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;

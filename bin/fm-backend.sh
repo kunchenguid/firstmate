@@ -705,14 +705,25 @@ fm_backend_composer_state() {  # <backend> <target> -> empty|pending|unknown
 # primitive so callers that only need a fast alive/dead read (recovery
 # digests, the session-start fleet digest) do not re-derive it inline.
 fm_backend_target_exists() {  # <backend> <target> [expected-label] [recorded-scoped-target]
-  local backend=$1 target=$2 expected_label=${3:-} recorded_scoped_target=${4:-} probe_target session pane
+  local backend=$1 target=$2 expected_label=${3:-} recorded_scoped_target=${4:-} session pane
   case "$backend" in
     tmux)
       fm_backend_source tmux || return 1
       fm_backend_tmux_expected_label_matches "$target" "$expected_label" "$recorded_scoped_target" || return 1
-      probe_target=$target
-      case "$target" in @*) [ -z "$recorded_scoped_target" ] || probe_target=$recorded_scoped_target ;; esac
-      tmux display-message -p -t "$probe_target" '#{pane_id}' >/dev/null 2>&1
+      # The probe was `tmux display-message -p -t <target> '#{pane_id}'`, which
+      # exits 0 for a window that no longer exists (tmux silently falls back to
+      # the session's current window - see fm_backend_tmux_target_exists), so
+      # this returned true for EVERY gone tmux window whose session survived.
+      # That made fm_backend_target_state below always answer `present` and
+      # fm-teardown.sh refuse to release the task forever, leaking its worktree
+      # lease.
+      #
+      # The probe used to fall back to the recorded scoped target for a
+      # @window-id. That indirection is gone: the guard above already proves a
+      # @window-id resolves AND that the session and window it resolves to are
+      # the recorded ones, which is strictly stronger than probing the recorded
+      # session:window on its own.
+      fm_backend_tmux_target_exists "$target"
       ;;
     herdr)
       fm_backend_source herdr || return 1
@@ -794,11 +805,17 @@ fm_backend_target_state() {  # <backend> <target> [expected-label] [recorded-sco
           count=$(printf '%s\n' "$windows" | awk -v want="$expected_label" '$0 == want { count += 1 } END { print count + 0 }')
           case "$count" in
             0)
-              tmux_identity=
+              # The expected label is absent from the session. For a @window-id
+              # target that STILL resolves, that is a contradiction rather than
+              # a proof of absence, so it stays unknown and no lease is
+              # released. Resolution is checked with fm_backend_tmux_target_exists
+              # because the display-message identity read used here before
+              # answers for the session's current window when the id is gone.
+              tmux_identity=absent
               case "$target" in
-                @*) tmux_identity=$(tmux display-message -p -t "$target" $'#{session_name}\t#{window_name}' 2>/dev/null || true) ;;
+                @*) fm_backend_tmux_target_exists "$target" && tmux_identity=resolves ;;
               esac
-              if [ -n "$tmux_identity" ]; then
+              if [ "$tmux_identity" = resolves ]; then
                 printf 'unknown'
               else
                 printf 'absent'
@@ -813,11 +830,13 @@ fm_backend_target_state() {  # <backend> <target> [expected-label] [recorded-sco
       else
         case "$windows" in
           *'no server running on '*|*'failed to connect to server: No such file or directory'*|*'can'\''t find session:'*)
-            tmux_identity=
+            # Same contradiction check as the count==0 branch above, for the
+            # case where the session itself (or the whole server) is gone.
+            tmux_identity=absent
             case "$target" in
-              @*) tmux_identity=$(tmux display-message -p -t "$target" $'#{session_name}\t#{window_name}' 2>/dev/null || true) ;;
+              @*) fm_backend_tmux_target_exists "$target" && tmux_identity=resolves ;;
             esac
-            if [ -n "$tmux_identity" ]; then
+            if [ "$tmux_identity" = resolves ]; then
               printf 'unknown'
             else
               printf 'absent'

@@ -722,7 +722,7 @@ test_declared_pause_preempts_permission_prompt_stale() {
   local dir state fakebin out capture_file statusf window key pid
   dir=$(make_case paused-permission-prompt); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/paused-permission.status"
-  window="default:w6:p3H"
+  window="firstmate:fm-paused-permission"
   cat > "$capture_file" <<'EOF'
 Would you like to run the following command?
 
@@ -1016,7 +1016,7 @@ test_nonterminal_stale_not_working_surfaced() {
 test_terminal_run_step_declared_pause_absorbed_with_markers() {
   local dir state fakebin out capture_file window key pane_hash sig pid
   dir=$(make_case terminal-run-declared-pause); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="default:w6:pKV"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="firstmate:fm-terminal-paused"
   printf 'idle after checks passed, awaiting ordered merges\n' > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/terminal-paused.meta"
   printf 'paused: waiting on the captain to merge PRs #63, #64, and #65 in order before D4 can start\n' \
@@ -1051,7 +1051,7 @@ test_terminal_run_step_declared_pause_absorbed_with_markers() {
 
 test_surface_nonterminal_stale_clears_pause_only_after_status_resumes() {
   local dir state window key
-  dir=$(make_case surface-stale-pause-markers); state="$dir/state"; window="default:w6:pKV"
+  dir=$(make_case surface-stale-pause-markers); state="$dir/state"; window="firstmate:fm-marker-owner"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/marker-owner.meta"
   printf 'paused: awaiting ordered PR merges\n' > "$state/marker-owner.status"
   key=$(printf '%s' "$window" | tr ':/.' '___')

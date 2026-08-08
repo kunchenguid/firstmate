@@ -198,8 +198,8 @@ case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  has-session|display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) [ -z "${FM_FAKE_TMUX_WINDOWS:-}" ] || printf '%s\n' "$FM_FAKE_TMUX_WINDOWS"; exit 0 ;;
   has-session|new-session|new-window|send-keys|set-window-option) exit 0 ;;
 esac
 exit 0
@@ -286,7 +286,7 @@ case "${1:-}" in
     done
     printf 'send-keys target=%s literal=%s arg=%s\n' "$target" "$literal" "${1:-}" >> "$FM_TMUX_LOG"
     exit 0 ;;
-  display-message) printf '%%1\n'; exit 0 ;;
+  has-session|display-message) printf '%%1\n'; exit 0 ;;
   capture-pane) printf '\xe2\x94\x82 \xe2\x94\x82\n'; exit 0 ;;
 esac
 exit 0
@@ -351,7 +351,11 @@ make_teardown_case() {
 #!/usr/bin/env bash
 state="$(dirname "$0")/.tmux-live"
 case "${1:-}" in
-  display-message)
+  # Existence is proven with has-session, so it has to follow the same live
+  # marker the rest of this stub does: leaving it an unconditional success
+  # would report the window as alive forever after kill-window, which is
+  # exactly the false positive that blocks teardown.
+  has-session|display-message)
     [ -f "$state" ] || exit 1
     case " $* " in
       *' #{pane_current_command} '*) printf '%s\n' bash ;;

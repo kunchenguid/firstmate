@@ -37,7 +37,7 @@ case "${1:-}" in
     done
     printf 'send-keys target=%s literal=%s arg=%s\n' "$target" "$literal" "${1:-}" >> "$FM_TMUX_LOG"
     exit 0 ;;
-  display-message)
+  has-session|display-message)
     target=
     while [ $# -gt 0 ]; do
       case "$1" in
@@ -50,7 +50,18 @@ case "${1:-}" in
     fi
     case "$all" in
       *'#{cursor_y}'*) printf '0\n' ;;
-      *'#{session_name}'*) printf '%s\t%s\n' "${FM_FAKE_TMUX_SESSION:-sess}" "${FM_FAKE_TMUX_LABEL:-fm-lost}" ;;
+      # The identity read. By DEFAULT echo back the session and window that were
+      # actually asked for, which is what real tmux does for a target that
+      # resolves; the tests that deliberately exercise an identity MISMATCH set
+      # FM_FAKE_TMUX_SESSION/FM_FAKE_TMUX_LABEL explicitly to override it.
+      *'#{session_name}'*)
+        default_session=sess
+        case "$target" in *:*) default_session=${target%%:*} ;; esac
+        printf '%s\n' "${FM_FAKE_TMUX_SESSION:-$default_session}" ;;
+      *'#{window_name}'*)
+        default_label=fm-lost
+        case "$target" in *:*) default_label=${target#*:} ;; esac
+        printf '%s\n' "${FM_FAKE_TMUX_LABEL:-$default_label}" ;;
       *) printf '%%1\n' ;;
     esac
     exit 0 ;;
@@ -61,6 +72,8 @@ case "${1:-}" in
   list-windows)
     printf 'foreign:%s\n' "${FM_FAKE_TMUX_WINDOW:-fm-lost}"
     exit 0 ;;
+  # Existence is proven with has-session now, so a target the fixture declares
+  # dead has to fail here too, not only on the identity read.
 esac
 exit 0
 SH

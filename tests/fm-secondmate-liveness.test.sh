@@ -60,7 +60,7 @@ make_probe_tmux() {
 #!/usr/bin/env bash
 set -u
 case "\${1:-}" in
-  display-message)
+  has-session|display-message)
     for a in "\$@"; do case "\$a" in *pane_current_command*) printf '%s\n' '$comm'; exit 0 ;; esac; done
     exit 0 ;;
 esac
@@ -238,7 +238,7 @@ make_liveness_tmux() {
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
-  display-message)
+  has-session|display-message)
     for a in "$@"; do
       case "$a" in
         *pane_current_command*)
@@ -293,7 +293,7 @@ case "${1:-}" in
         ;;
     esac
     exit 0 ;;
-  list-windows|has-session) exit 0 ;;
+  list-windows) exit 0 ;;
 esac
 exit 0
 SH
@@ -745,6 +745,11 @@ test_sweep_converges_no_retouch_once_alive() {
 
   # Round 2: the (now-respawned) secondmate is genuinely alive - a second
   # sweep must converge to a pure no-op, not respawn again.
+  # Round 1 kills the dead generation's endpoint before deferring the respawn,
+  # so the endpoint has to be re-created here for "genuinely alive" to hold:
+  # that is the operator relaunch the deferral asked for. A live pane command
+  # alone is not liveness when the endpoint itself is gone.
+  touch "$w/home/state/.fake-endpoint"
   : > "$log"
   out2=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log")
   assert_contains "$out2" "SECONDMATE_LIVENESS: secondmate sm1: already-live" "round 2 should see the now-live secondmate and stop touching it"
