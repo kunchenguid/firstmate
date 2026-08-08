@@ -867,6 +867,8 @@ SH
   grep -qF "watcher: started pid=$successor_pid" "$armout" || fail "successor ledger cycle did not start"
   grep -q "arm_pid=$first_arm.*successor=started:$successor_pid" "$state/.watch-cycle-exits.log" \
     || fail "predecessor ledger record was not linked to its verified successor"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
+    || fail "could not consume the handled wake before unrelated bounded ledger cycles"
   kill -HUP "$successor_arm" 2>/dev/null || true
   wait "$successor_arm" 2>/dev/null || true
   # The forced interruption is a watcher-down interval. Consume the prior

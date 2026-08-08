@@ -855,6 +855,17 @@ fm_wake_queued_keys_locked() {
     "$FM_WAKE_QUEUE" 2>/dev/null || true
 }
 
+# Return 0 exactly while the durable queue has records that a successful drain
+# has not consumed. Read under the append/drain lock so an arm never mistakes a
+# queue being rotated by fm-wake-drain.sh for still-pending work.
+fm_wake_queue_pending() {
+  local status=1
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  [ -s "$FM_WAKE_QUEUE" ] && status=0
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
+}
+
 fm_wake_restore_queue() {
   local drained=$1 restore
   restore="$STATE/.wake-queue.restore.$(fm_current_pid)"

@@ -41,7 +41,7 @@ The whole map at low resolution, loaded once per session. Open tickets are **not
 
 <!-- the index — one line per closed ticket: enough to judge relevance, then zoom the link for the detail the ticket holds -->
 
-- [<closed ticket title>](link) — <one-line gist of the answer>
+- <closed ticket title> — <one-line gist of the answer>
 
 ## Not yet specified
 
