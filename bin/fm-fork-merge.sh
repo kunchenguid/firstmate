@@ -35,6 +35,8 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+# shellcheck source=bin/fm-fork-lib.sh
+. "$SCRIPT_DIR/fm-fork-lib.sh"
 MODE=${1:-}
 [ "$#" -eq 0 ] || shift
 REPO=
@@ -67,27 +69,6 @@ MANIFEST=${FM_FORK_MANIFEST_OVERRIDE:-$REPO/fork-divergences.json}
 RECEIPT=$(git -C "$REPO" rev-parse --git-path fm-fork-rejustify.json)
 SYNC_RECEIPT=$(git -C "$REPO" rev-parse --git-path fm-fork-last-sync.json)
 
-remote_branch() { # <remote>
-  local remote=$1 ref branch
-  ref=$(git -C "$REPO" symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null || true)
-  if [ -n "$ref" ]; then printf '%s\n' "${ref#"$remote"/}"; return 0; fi
-  for branch in main master; do
-    git -C "$REPO" rev-parse --verify --quiet "refs/remotes/$remote/$branch^{commit}" >/dev/null \
-      && { printf '%s\n' "$branch"; return 0; }
-  done
-  return 1
-}
-
-path_matches() { # <spec> <path>
-  local spec=$1 path=$2 prefix
-  case "$spec" in
-    */'**') prefix=${spec%'**'}; case "$path" in "$prefix"*) return 0 ;; esac ;;
-    */) case "$path" in "$spec"*) return 0 ;; esac ;;
-    *) [ "$path" = "$spec" ] && return 0 ;;
-  esac
-  return 1
-}
-
 ids_for_paths() { # [include-unowned], paths on stdin, unique ids on stdout
   local include_unowned=${1:-no} path id spec matched
   while IFS= read -r path || [ -n "$path" ]; do
@@ -95,7 +76,7 @@ ids_for_paths() { # [include-unowned], paths on stdin, unique ids on stdout
     matched=0
     while IFS= read -r id; do
       while IFS= read -r spec; do
-        if path_matches "$spec" "$path"; then
+        if fm_fork_path_covered "$spec" "$path"; then
           printf '%s\n' "$id"
           matched=1
           break
@@ -113,22 +94,20 @@ require_topology() {
   case "$MANIFEST" in "$REPO"/*) ;; *) die "manifest must be inside the candidate repository" ;; esac
   git -C "$REPO" ls-files --error-unmatch -- "${MANIFEST#"$REPO"/}" >/dev/null 2>&1 \
     || die "manifest is not tracked"
-  ORIGIN_BRANCH=$(remote_branch origin) || die "cannot determine origin default branch"
-  UPSTREAM_BRANCH=$(remote_branch upstream) || die "cannot determine upstream default branch"
+  ORIGIN_BRANCH=$(fm_fork_remote_branch "$REPO" origin) || die "cannot determine origin default branch"
+  UPSTREAM_BRANCH=$(fm_fork_remote_branch "$REPO" upstream) || die "cannot determine upstream default branch"
   ORIGIN_REF="origin/$ORIGIN_BRANCH"
   UPSTREAM_REF="upstream/$UPSTREAM_BRANCH"
 }
 
 require_isolated_candidate() {
-  local branch top common primary
+  local branch top primary
   branch=$(git -C "$REPO" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
   [ -n "$branch" ] || die "candidate is detached; expected a named feature branch"
   [ "$branch" != "$ORIGIN_BRANCH" ] || die "refusing to merge upstream directly on $ORIGIN_BRANCH"
   top=$(git -C "$REPO" rev-parse --show-toplevel)
-  common=$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir)
   primary=$(git -C "$REPO" worktree list --porcelain | awk 'NR == 1 && $1 == "worktree" { print substr($0,10) }')
   [ "$top" != "$primary" ] || die "candidate is the repository's primary checkout, not an isolated worktree"
-  : "$common"
 }
 
 write_json_atomic() { # <dest>, stdin
@@ -150,23 +129,19 @@ index_without_paths_hash() { # <newline-delimited-path-file>
   git -C "$REPO" ls-files "${pathspecs[@]}" | git hash-object --stdin
 }
 
-topic_ref() { # <topic>
-  if git -C "$REPO" rev-parse --verify --quiet "refs/remotes/origin/$1^{commit}" >/dev/null; then
-    printf 'refs/remotes/origin/%s\n' "$1"
-  elif git -C "$REPO" rev-parse --verify --quiet "refs/heads/$1^{commit}" >/dev/null; then
-    printf 'refs/heads/%s\n' "$1"
-  else
-    return 1
-  fi
-}
-
 accepted_ids() { # active units now patch-equivalent to incoming upstream
-  local id class topic ref plus
+  local id class topic ref cherry plus
   while IFS=$'\t' read -r id class topic; do
     [ "$class" != superseded ] || continue
-    ref=$(topic_ref "$topic" || true)
+    ref=$(fm_fork_topic_ref "$REPO" "$topic" || true)
     [ -n "$ref" ] || continue
-    plus=$(git -C "$REPO" cherry "$UPSTREAM_REF" "$ref" 2>/dev/null | awk '$1 == "+" { n++ } END { print n+0 }')
+    # A failed `git cherry` prints nothing, which would otherwise count as zero
+    # non-equivalent patches and silently delete this unit's governance record
+    # from the manifest inside a merge commit claiming upstream accepted it.
+    # Git's own diagnosis stays on stderr.
+    cherry=$(git -C "$REPO" cherry "$UPSTREAM_REF" "$ref") \
+      || die "git cherry could not compare $topic against $UPSTREAM_REF; refusing to treat $id as accepted upstream"
+    plus=$(printf '%s\n' "$cherry" | awk '$1 == "+" { n++ } END { print n+0 }')
     [ "$plus" -ne 0 ] || printf '%s\n' "$id"
   done < <(jq -r '.divergences[] | [.id,.class,.topic] | @tsv' "$MANIFEST")
 }

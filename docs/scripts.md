@@ -23,6 +23,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-fork-status.sh`      | Report Git-backed divergence health and manifest drift, or probe whether upstream needs integration |
 | `fm-fork-topic.sh`       | Prepare one branch-level divergence integration or independent discard candidate       |
 | `fm-fork-merge.sh`       | Prepare or continue one isolated, re-justified, range-diff-reviewed upstream merge candidate |
+| `fm-fork-lib.sh`         | Single owner of remote default-branch resolution, canonical topic ref lookup, and manifest path ownership for the fork scripts |
 | `fm-on.sh`               | Execute one tracked Firstmate command in a configured remote secondmate home, using its job worker except for the doctor bootstrap |
 | `fm-remote-job-lib.sh`   | Shared bounded remote job queue, worker readiness, LaunchAgent contract, and filesystem-composed PATH |
 | `fm-remote-job-worker.sh` | Long-lived remote queue worker for tracked `fm-*.sh` commands in the account runtime |

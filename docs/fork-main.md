@@ -169,6 +169,9 @@ It fetches and advances safe homes from already validated fork `origin/main`, th
 It never merges in the operating checkout.
 
 Locked startup performs the same read-only need check as part of its deferred network work and emits `UPSTREAM_SYNC:` only when a validated merge is needed or the check failed.
+That probe runs only once `bin/fm-fork-remotes.sh check` passes.
+A home that has an `upstream` remote but has not finished the explicit migration is reported as `UPSTREAM_SYNC: fork topology is not validated: <first missing requirement>` on every startup, with no probe and no daily marker written, so a half-configured home stays loud until it is corrected or reversed.
+A home with no `upstream` remote at all is classic single-origin and stays silent.
 The main primary owns that work.
 Secondmates and remote code roots do not create competing merges.
 

@@ -5,6 +5,8 @@
 # properties without touching the live fork, its remotes, secondmate homes, or
 # no-mistakes service:
 #   - explicit and reversible origin=fork/upstream=official topology;
+#   - startup probes upstream only from a validated topology, and reports a
+#     half-migrated one loudly on every startup instead of skipping it;
 #   - rerere enabled with autoupdate off and inherited by standalone homes;
 #   - self-update stays fast-forward-only while reporting a separate upstream
 #     integration need;
@@ -116,6 +118,61 @@ new_candidate() { # <world> <name>; prints path
   git -C "$repo" worktree add -q --detach "$candidate" origin/main
   git -C "$candidate" switch -qc "fm/$name"
   printf '%s\n' "$candidate"
+}
+
+bootstrap_network_only() { # <repo> <home>
+  FM_ROOT_OVERRIDE="$1" FM_HOME="$2" FM_BOOTSTRAP_NETWORK=only \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
+}
+
+# Startup probes official upstream only from a fully validated fork-main
+# primary, but a home part-way through the explicit migration must not go quiet:
+# it names the first missing requirement on every startup, runs no probe, and
+# writes no daily marker, so it stays loud until it is finished or reversed. A
+# home with no upstream remote at all is classic single-origin and stays silent.
+test_startup_upstream_probe_requires_validated_topology() {
+  local w repo home marker out second classic classic_home
+  w=$(new_world startup-probe)
+  repo="$w/primary"
+  home="$w/home"
+  marker="$home/state/.fork-upstream-check"
+  mkdir -p "$home/state" "$home/data"
+  git clone -q "$w/fork.git" "$repo"
+  git -C "$repo" config commit.gpgsign false
+  # A tracked bin/ is what makes this checkout a firstmate home to bootstrap.
+  ln -s "$ROOT/bin" "$repo/bin"
+
+  # Half-migrated: `gh repo fork --remote` left origin=fork and upstream=parent,
+  # but the confirmed apply that configures reviewable rerere never ran.
+  git -C "$repo" remote add upstream "$w/upstream.git"
+  git -C "$repo" fetch -q upstream
+  out=$(bootstrap_network_only "$repo" "$home")
+  assert_contains "$out" "UPSTREAM_SYNC: fork topology is not validated: rerere.enabled is not true" \
+    "a half-migrated home did not name its first missing requirement"
+  assert_not_contains "$out" "upstream-integration" "the upstream movement probe ran on an unvalidated topology"
+  [ ! -e "$marker" ] || fail "an unvalidated topology published a successful daily-check marker"
+  second=$(bootstrap_network_only "$repo" "$home")
+  assert_contains "$second" "UPSTREAM_SYNC: fork topology is not validated:" \
+    "the half-migrated home went quiet on the next startup"
+
+  # Completing the topology restores the ordinary probe and its daily marker.
+  git -C "$repo" config rerere.enabled true
+  git -C "$repo" config rerere.autoupdate false
+  advance_upstream "$w" startup-probe.txt moved startup-probe-moved
+  out=$(bootstrap_network_only "$repo" "$home")
+  assert_not_contains "$out" "fork topology is not validated" "a validated topology was still reported as unvalidated"
+  assert_contains "$out" "UPSTREAM_SYNC: required" "a validated primary did not report the needed upstream integration"
+  [ -f "$marker" ] || fail "a successful check did not publish its daily-check marker"
+
+  # Classic single-origin homes never learn about any of this.
+  classic="$w/classic"
+  classic_home="$w/classic-home"
+  mkdir -p "$classic_home/state" "$classic_home/data"
+  git clone -q "$w/upstream.git" "$classic"
+  ln -s "$ROOT/bin" "$classic/bin"
+  out=$(bootstrap_network_only "$classic" "$classic_home")
+  assert_not_contains "$out" "UPSTREAM_SYNC" "a classic single-origin home was given fork-main output"
+  pass "bootstrap: the upstream probe is gated on validated topology and never silently skipped"
 }
 
 # Topology migration is explicit, prints its reverse before mutation, enables
@@ -632,6 +689,7 @@ SH
   pass "fork integration: isolated no-mistakes registration is proven without reconfiguring the live one"
 }
 
+test_startup_upstream_probe_requires_validated_topology
 test_remote_topology_is_explicit_and_reversible
 test_remote_topology_inheritance_refuses_unrelated_clones
 test_remote_provisioning_inherits_fork_topology

@@ -23,6 +23,8 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+# shellcheck source=bin/fm-fork-lib.sh
+. "$SCRIPT_DIR/fm-fork-lib.sh"
 REPO=$FM_ROOT
 REFRESH=0
 JSON=0
@@ -62,22 +64,6 @@ REPO=$(cd "$REPO" 2>/dev/null && pwd -P) || die "repository path is unavailable:
 git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not a Git worktree: $REPO"
 [ -n "$MANIFEST" ] || MANIFEST="$REPO/fork-divergences.json"
 
-remote_branch() { # <remote>
-  local remote=$1 ref branch
-  ref=$(git -C "$REPO" symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null || true)
-  if [ -n "$ref" ]; then
-    printf '%s\n' "${ref#"$remote"/}"
-    return 0
-  fi
-  for branch in main master; do
-    if git -C "$REPO" rev-parse --verify --quiet "refs/remotes/$remote/$branch^{commit}" >/dev/null; then
-      printf '%s\n' "$branch"
-      return 0
-    fi
-  done
-  return 1
-}
-
 origin_url=$(git -C "$REPO" remote get-url origin 2>/dev/null || true)
 upstream_url=$(git -C "$REPO" remote get-url upstream 2>/dev/null || true)
 if [ -z "$upstream_url" ]; then
@@ -97,8 +83,8 @@ if [ "$REFRESH" -eq 1 ]; then
   GIT_TERMINAL_PROMPT=0 git -C "$REPO" fetch --quiet --prune upstream || die "upstream fetch failed"
 fi
 
-origin_branch=$(remote_branch origin) || die "cannot determine origin's default branch"
-upstream_branch=$(remote_branch upstream) || die "cannot determine upstream's default branch"
+origin_branch=$(fm_fork_remote_branch "$REPO" origin) || die "cannot determine origin's default branch"
+upstream_branch=$(fm_fork_remote_branch "$REPO" upstream) || die "cannot determine upstream's default branch"
 ORIGIN_REF=${FORK_REF:-"origin/$origin_branch"}
 UPSTREAM_REF=${UPSTREAM_REF_OVERRIDE:-"upstream/$upstream_branch"}
 origin_sha=$(git -C "$REPO" rev-parse "$ORIGIN_REF") || die "cannot read $ORIGIN_REF"
@@ -207,29 +193,6 @@ add_error() {
   printf '%s\n' "$*" >> "$ERRORS"
 }
 
-topic_ref() { # <topic>
-  local topic=$1
-  if git -C "$REPO" rev-parse --verify --quiet "refs/remotes/origin/$topic^{commit}" >/dev/null; then
-    printf 'refs/remotes/origin/%s\n' "$topic"
-    return 0
-  fi
-  if git -C "$REPO" rev-parse --verify --quiet "refs/heads/$topic^{commit}" >/dev/null; then
-    printf 'refs/heads/%s\n' "$topic"
-    return 0
-  fi
-  return 1
-}
-
-path_covered() { # <manifest-path> <actual-path>
-  local spec=$1 actual=$2 prefix
-  case "$spec" in
-    */'**') prefix=${spec%'**'}; case "$actual" in "$prefix"*) return 0 ;; esac ;;
-    */) case "$actual" in "$spec"*) return 0 ;; esac ;;
-    *) [ "$actual" = "$spec" ] && return 0 ;;
-  esac
-  return 1
-}
-
 # Resolve every factual non-equivalent patch to exactly one canonical topic.
 while IFS= read -r line || [ -n "$line" ]; do
   [ "${line%% *}" = + ] || continue
@@ -239,7 +202,7 @@ while IFS= read -r line || [ -n "$line" ]; do
   owners=
   while IFS=$'\t' read -r id topic; do
     [ -n "$id" ] || continue
-    ref=$(topic_ref "$topic" || true)
+    ref=$(fm_fork_topic_ref "$REPO" "$topic" || true)
     [ -n "$ref" ] || continue
     if git -C "$REPO" merge-base --is-ancestor "$sha" "$ref" 2>/dev/null; then
       owners="${owners}${owners:+ }$id"
@@ -256,7 +219,7 @@ done < "$CHERRY"
 # branch-level integration merge, and declared path coverage.
 while IFS=$'\t' read -r id class topic; do
   [ -n "$id" ] || continue
-  ref=$(topic_ref "$topic" || true)
+  ref=$(fm_fork_topic_ref "$REPO" "$topic" || true)
   if [ -z "$ref" ]; then
     add_error "manifest unit $id is missing canonical topic $topic"
     continue
@@ -292,7 +255,7 @@ while IFS=$'\t' read -r id class topic; do
       [ -n "$changed_path" ] || continue
       covered=0
       while IFS= read -r spec; do
-        if path_covered "$spec" "$changed_path"; then covered=1; break; fi
+        if fm_fork_path_covered "$spec" "$changed_path"; then covered=1; break; fi
       done < <(jq -r --arg id "$id" '.divergences[] | select(.id == $id) | .paths[]' "$MANIFEST")
       [ "$covered" -eq 1 ] || add_error "manifest unit $id does not cover changed path $changed_path"
     done < <(git -C "$REPO" diff-tree --no-commit-id --name-only -r "$patch_sha")

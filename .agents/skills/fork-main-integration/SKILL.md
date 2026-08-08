@@ -2,7 +2,7 @@
 name: fork-main-integration
 description: >-
   Agent-only procedure for operating Firstmate from a permanent personal-fork main.
-  Use before configuring or reversing Firstmate code remotes, briefing a Firstmate divergence topic, provisioning or using the isolated fork validation registration, integrating or discarding a divergence, responding to UPSTREAM_SYNC or upstream-sync output, preparing an upstream merge, re-justifying its conflicts, or deciding what the fork still carries.
+  Use before configuring or reversing Firstmate code remotes, briefing a Firstmate divergence topic, provisioning or using the isolated fork validation registration, integrating or discarding a divergence, responding to UPSTREAM_SYNC output or an upstream-integration required/failed result, preparing an upstream merge, re-justifying its conflicts, or deciding what the fork still carries.
 user-invocable: false
 metadata:
   internal: true
@@ -66,8 +66,12 @@ A correctness or security finding that applies locally is stronger evidence than
 
 ## Upstream integration
 
-Handle `UPSTREAM_SYNC: required` or `upstream-sync: required` as work for the main primary, never a secondmate or remote code root.
+Handle `UPSTREAM_SYNC: required` or `upstream-integration: required` as work for the main primary, never a secondmate or remote code root.
 Coalesce duplicate notifications behind one open integration task.
+
+`UPSTREAM_SYNC: fork topology is not validated: <requirement>` is a different problem and never starts a merge.
+This home has an `upstream` remote but has not completed the explicit migration, so the upstream movement probe was skipped and the line repeats on every startup until it is fixed.
+Report the named requirement to the captain and, once they confirm, complete the migration through `plan` then the live `apply` command, or reverse it - never migrate `origin` silently to clear the line.
 
 1. Ensure the private fork registration passes `bin/fm-fork-integration.sh check`.
 2. Create an isolated candidate branch at fetched `origin/main` from the private integration clone.

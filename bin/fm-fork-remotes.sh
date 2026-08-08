@@ -31,6 +31,11 @@
 # after a no-mistakes error. apply explicitly leaves
 # rerere.autoupdate off: rerere may populate a repeated resolution in the working
 # tree, but it must remain unstaged for review.
+#
+# Every network call runs with GIT_TERMINAL_PROMPT=0. Remote home provisioning
+# calls apply non-interactively while holding the provision lock, so an
+# unconfigured credential helper must fail the run rather than block it on a
+# username prompt that no one can answer.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -284,10 +289,10 @@ cmd_apply() {
       || die "could not add fork as origin; original topology will be restored"
   fi
   configure_policy "$REPO"
-  git -C "$REPO" fetch --quiet --prune origin || die "fork fetch failed after topology configuration"
-  git -C "$REPO" fetch --quiet --prune upstream || die "upstream fetch failed after topology configuration"
-  git -C "$REPO" remote set-head origin --auto >/dev/null 2>&1 || true
-  git -C "$REPO" remote set-head upstream --auto >/dev/null 2>&1 || true
+  GIT_TERMINAL_PROMPT=0 git -C "$REPO" fetch --quiet --prune origin || die "fork fetch failed after topology configuration"
+  GIT_TERMINAL_PROMPT=0 git -C "$REPO" fetch --quiet --prune upstream || die "upstream fetch failed after topology configuration"
+  GIT_TERMINAL_PROMPT=0 git -C "$REPO" remote set-head origin --auto >/dev/null 2>&1 || true
+  GIT_TERMINAL_PROMPT=0 git -C "$REPO" remote set-head upstream --auto >/dev/null 2>&1 || true
   validate_topology "$REPO" "$(remote_url "$REPO" origin)" "$(remote_url "$REPO" upstream)"
   if [ "$skip_registration" -eq 0 ]; then
     registration_after=$(no_mistakes_registration "$REPO")

@@ -30,13 +30,16 @@ This touches only the firstmate repo and its own worktrees, never anything under
    bin/fm-update.sh
    ```
    It fast-forwards this firstmate repo's default branch from origin, then updates every registered local or remote secondmate home through its placement-specific guarded path.
-   It prints one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), an `upstream-sync:` result when the fork topology is active, and two action lines that tell you exactly what to do next:
+   It prints one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), one `upstream-integration:` result line, and two action lines that tell you exactly what to do next:
    - `reread-firstmate: yes|no`
    - `nudge-secondmates: fm-<id>...|none`
 
 2. **Handle the upstream integration result.**
-   Load `fork-main-integration` for every `upstream-sync:` line.
-   `not-needed` requires no action.
+   The `upstream-integration:` line carries exactly one of four tokens.
+   `disabled` means this home has no upstream remote at all - a classic single-origin home, where this line is a no-op fact.
+   `current` means the fork already contains official upstream.
+   Neither requires any action, and neither needs the skill.
+   For `required` or `failed`, load `fork-main-integration` first.
    `required` starts or coalesces the main primary's isolated upstream-integration work rather than merging in this operating checkout.
    `failed` is a real blocker and includes the evidence to report.
 

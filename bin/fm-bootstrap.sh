@@ -18,7 +18,7 @@
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
-#                 "UPSTREAM_SYNC: required ...|check failed: ...",
+#                 "UPSTREAM_SYNC: required ...|fork topology is not validated: ...|check failed: ...",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING local secondmate worktree is fast-forwarded to
 #          firstmate's own current default-branch commit, that update is a
@@ -71,6 +71,13 @@
 #          A validated fork-main primary checks official upstream at most once
 #          per successful 24-hour interval during the deferred network phase;
 #          only a required integration or failed check is actionable output.
+#          A home that has an upstream remote but does not yet satisfy
+#          fm-fork-remotes.sh check is half-migrated, not classic: it reports the
+#          validator's first missing requirement on EVERY startup, skips the
+#          upstream movement probe, and writes no daily marker, so the loud line
+#          persists until the explicit migration is completed or reversed.
+#          A home with no upstream remote at all is classic single-origin and
+#          stays silent.
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
@@ -239,10 +246,22 @@ fleet_sync_relay_all_output() {
 }
 
 fork_upstream_check() {
-  local out marker now previous tmp
+  local out marker now previous tmp topology
   [ -x "$FM_ROOT/bin/fm-fork-status.sh" ] || return 0
+  [ -x "$FM_ROOT/bin/fm-fork-remotes.sh" ] || return 0
   [ ! -f "$FM_HOME/.fm-secondmate-home" ] || return 0
   git -C "$FM_ROOT" remote get-url upstream >/dev/null 2>&1 || return 0
+  # An upstream remote alone does not make this a fork-main primary. Probing
+  # upstream movement is only meaningful once the whole topology validates, but
+  # a home that is part-way through the explicit migration must not go quiet
+  # either: report the validator's first missing requirement, skip the probe,
+  # and leave the daily marker unwritten so this repeats until it is corrected.
+  if ! topology=$("$FM_ROOT/bin/fm-fork-remotes.sh" check "$FM_ROOT" 2>&1 >/dev/null); then
+    topology=${topology%%$'\n'*}
+    topology=${topology#fm-fork-remotes: }
+    echo "UPSTREAM_SYNC: fork topology is not validated: ${topology:-fm-fork-remotes.sh check failed}"
+    return 0
+  fi
   marker="$STATE/.fork-upstream-check"
   now=$(date +%s)
   if [ -e "$marker" ] || [ -L "$marker" ]; then

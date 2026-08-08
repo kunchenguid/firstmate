@@ -172,7 +172,7 @@ Bootstrap detects first, asks for consent, and installs only after the captain a
 Do not dispatch until the required tools are present and GitHub authentication is good.
 Use `gh-axi` for GitHub, `chrome-devtools-axi` for browser work, and `lavish-axi` for structured decisions or reports; consult current help rather than memorizing flags.
 A silent bootstrap section needs no action; for any printed actionable diagnostic line other than `UPSTREAM_SYNC:`, load `bootstrap-diagnostics` and follow its owner procedure.
-Load `fork-main-integration` for every `UPSTREAM_SYNC:` or `upstream-sync:` line.
+Load `fork-main-integration` for every `UPSTREAM_SYNC:` line; startup prints one only when an upstream integration is required, the fork topology fails validation, or the check itself failed.
 `BOOTSTRAP_INFO:` lines are completed no-action facts and do not require loading a skill.
 `secondmate-provisioning` owns startup secondmate sync, liveness, and inherited local-material convergence.
 
@@ -508,7 +508,7 @@ Firstmate's shared instruction surface reaches running homes only after it lands
 Only `AGENTS.md`, `bin/`, and `.agents/skills/` are loaded by a running firstmate; public `skills/` is an installer-facing surface.
 When the captain invokes `/updatefirstmate` or asks to update firstmate, load the `/updatefirstmate` skill.
 It performs guarded fast-forward updates of firstmate and registered secondmate homes, refreshes instructions, and never touches anything under `projects/`.
-A permanent fork-main home consumes only validated `origin/main`; load `fork-main-integration` before configuring or reversing its remotes, provisioning its isolated validation registration, briefing, integrating, or discarding a divergence, responding to `UPSTREAM_SYNC:` or `upstream-sync:`, or preparing and re-justifying an official-upstream merge.
+A permanent fork-main home consumes only validated `origin/main`; load `fork-main-integration` before configuring or reversing its remotes, provisioning its isolated validation registration, briefing, integrating, or discarding a divergence, responding to `UPSTREAM_SYNC:` or an `upstream-integration: required|failed` self-update result, or preparing and re-justifying an official-upstream merge.
 Never migrate the captain's live `origin` implicitly: print the exact reverse command and obtain concrete captain confirmation before the migration.
 
 ## 13. Agent-only reference skills
@@ -529,7 +529,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `process-event-sources` - load before arming a long-polling source, and on any `procevent <adapter> <source-id> <sequence>` check wake.
   Never run a registered source's blocking command yourself in a conversational turn.
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the Relay configuration blocker, on a `public-followup ...` `check:` wake or a startup-surfaced public commitment, and on any milestone or terminal wake for a Relay-linked task before posting its completion follow-up; relevant only when Relay is on.
-- `fork-main-integration` - load before configuring or reversing Firstmate code remotes, provisioning or using the isolated fork validation registration, briefing, integrating, or discarding a permanent divergence, responding to `UPSTREAM_SYNC:` or `upstream-sync:`, preparing or re-justifying an upstream merge, or deciding what the fork still carries.
+- `fork-main-integration` - load before configuring or reversing Firstmate code remotes, provisioning or using the isolated fork validation registration, briefing, integrating, or discarding a permanent divergence, responding to `UPSTREAM_SYNC:` or an `upstream-integration: required|failed` self-update result, preparing or re-justifying an upstream merge, or deciding what the fork still carries.
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
 

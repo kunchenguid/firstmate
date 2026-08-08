@@ -33,6 +33,8 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+# shellcheck source=bin/fm-fork-lib.sh
+. "$SCRIPT_DIR/fm-fork-lib.sh"
 MODE=${1:-}
 [ "$#" -eq 0 ] || shift
 REPO=$FM_ROOT
@@ -74,25 +76,14 @@ REPO=$(cd "$REPO" 2>/dev/null && pwd -P) || die "repository path is unavailable"
 git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not a Git worktree"
 MANIFEST=${FM_FORK_MANIFEST_OVERRIDE:-$REPO/fork-divergences.json}
 
-remote_branch() { # <remote>
-  local remote=$1 ref branch
-  ref=$(git -C "$REPO" symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null || true)
-  if [ -n "$ref" ]; then printf '%s\n' "${ref#"$remote"/}"; return 0; fi
-  for branch in main master; do
-    git -C "$REPO" rev-parse --verify --quiet "refs/remotes/$remote/$branch^{commit}" >/dev/null \
-      && { printf '%s\n' "$branch"; return 0; }
-  done
-  return 1
-}
-
 require_candidate() {
   "$SCRIPT_DIR/fm-fork-remotes.sh" check "$REPO" >/dev/null || die "fork topology is invalid"
   [ -f "$MANIFEST" ] && [ ! -L "$MANIFEST" ] || die "manifest is missing or unsafe"
   case "$MANIFEST" in "$REPO"/*) ;; *) die "manifest must be inside the candidate repository" ;; esac
   git -C "$REPO" ls-files --error-unmatch -- "${MANIFEST#"$REPO"/}" >/dev/null 2>&1 \
     || die "manifest is not tracked"
-  ORIGIN_BRANCH=$(remote_branch origin) || die "cannot determine origin default branch"
-  UPSTREAM_BRANCH=$(remote_branch upstream) || die "cannot determine upstream default branch"
+  ORIGIN_BRANCH=$(fm_fork_remote_branch "$REPO" origin) || die "cannot determine origin default branch"
+  UPSTREAM_BRANCH=$(fm_fork_remote_branch "$REPO" upstream) || die "cannot determine upstream default branch"
   ORIGIN_REF="origin/$ORIGIN_BRANCH"
   UPSTREAM_REF="upstream/$UPSTREAM_BRANCH"
   branch=$(git -C "$REPO" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
@@ -106,16 +97,6 @@ require_candidate() {
     || die "candidate HEAD is not fetched $ORIGIN_REF"
   BASELINE_UPSTREAM=$(git -C "$REPO" merge-base "$ORIGIN_REF" "$UPSTREAM_REF") \
     || die "fork and upstream do not share a merge base"
-}
-
-path_matches() {
-  local spec=$1 path=$2 prefix
-  case "$spec" in
-    */'**') prefix=${spec%'**'}; case "$path" in "$prefix"*) return 0 ;; esac ;;
-    */) case "$path" in "$spec"*) return 0 ;; esac ;;
-    *) [ "$path" = "$spec" ] && return 0 ;;
-  esac
-  return 1
 }
 
 cmd_integrate() {
@@ -142,13 +123,7 @@ cmd_integrate() {
   fi
   [ "$(jq --arg id "$ID" '[.divergences[] | select(.id == $id)] | length' "$MANIFEST")" -eq 0 ] \
     || die "manifest already contains divergence $ID"
-  if git -C "$REPO" rev-parse --verify --quiet "refs/remotes/origin/$TOPIC^{commit}" >/dev/null; then
-    TOPIC_REF="refs/remotes/origin/$TOPIC"
-  elif git -C "$REPO" rev-parse --verify --quiet "refs/heads/$TOPIC^{commit}" >/dev/null; then
-    TOPIC_REF="refs/heads/$TOPIC"
-  else
-    die "canonical topic is missing: $TOPIC"
-  fi
+  TOPIC_REF=$(fm_fork_topic_ref "$REPO" "$TOPIC") || die "canonical topic is missing: $TOPIC"
   git -C "$REPO" merge-base --is-ancestor "$UPSTREAM_REF" "$ORIGIN_REF" \
     || die "official upstream must be integrated and validated before adding a divergence topic"
   git -C "$REPO" merge-base --is-ancestor "$UPSTREAM_REF" "$TOPIC_REF" \
@@ -163,7 +138,7 @@ cmd_integrate() {
   while IFS= read -r changed_path; do
     covered=0
     for spec in "${PATHS[@]}"; do
-      if path_matches "$spec" "$changed_path"; then covered=1; break; fi
+      if fm_fork_path_covered "$spec" "$changed_path"; then covered=1; break; fi
     done
     [ "$changed_path" != "${MANIFEST#"$REPO"/}" ] || die "a divergence topic must not edit its governance manifest"
     [ "$covered" -eq 1 ] || die "declared paths do not cover topic path $changed_path"
@@ -200,13 +175,7 @@ cmd_discard() {
   case "$ID" in ''|*[!a-z0-9-]*|-*) die "invalid divergence id" ;; esac
   topic=$(jq -r --arg id "$ID" '.divergences[] | select(.id == $id) | .topic' "$MANIFEST")
   [ -n "$topic" ] || die "manifest has no divergence $ID"
-  if git -C "$REPO" rev-parse --verify --quiet "refs/remotes/origin/$topic^{commit}" >/dev/null; then
-    topic_ref="refs/remotes/origin/$topic"
-  elif git -C "$REPO" rev-parse --verify --quiet "refs/heads/$topic^{commit}" >/dev/null; then
-    topic_ref="refs/heads/$topic"
-  else
-    die "canonical topic is missing: $topic"
-  fi
+  topic_ref=$(fm_fork_topic_ref "$REPO" "$topic") || die "canonical topic is missing: $topic"
   "$SCRIPT_DIR/fm-fork-status.sh" --repo "$REPO" --fork-ref "$ORIGIN_REF" --upstream-ref "$BASELINE_UPSTREAM" --facts-only >/dev/null \
     || die "existing divergence manifest facts are inconsistent"
   merges=
