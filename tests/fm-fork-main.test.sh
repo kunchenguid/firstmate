@@ -706,6 +706,144 @@ JSON
   pass "fork topics: integration conflicts continue only through a branch-and-merge-bound receipt"
 }
 
+# The receipt binding is only worth having if it refuses. Every way a stopped
+# conflict could be continued from the wrong place - no receipt at all, a
+# different branch, a moved HEAD, a missing or wrong explicit decision, an
+# unresolved index, or an unrelated staged change - must be refused with the
+# merge sequencer and the receipt left exactly as the conflict wrote them, and
+# the correct continuation must still complete atomically afterwards.
+test_topic_continue_refuses_unbound_continuation() {
+  local w admin candidate out rc receipt decisions branch base_head manifest_hash head
+  w=$(new_world topic-continue-binding)
+  add_topic_and_merge "$w" alpha shared.txt alpha
+  admin="$w/admin"
+  git -C "$admin" fetch -q origin
+  git -C "$admin" fetch -q upstream
+  git -C "$admin" switch -qC fm/divergence/beta upstream/main
+  printf 'beta\n' > "$admin/shared.txt"
+  git -C "$admin" add shared.txt
+  git -C "$admin" commit -qm 'Add beta behavior'
+  git -C "$admin" push -q origin fm/divergence/beta
+
+  candidate=$(new_candidate "$w" continue-binding)
+  decisions="$w/continue-binding-decisions.json"
+  cat > "$decisions" <<'JSON'
+{"schema":"firstmate.fork-rejustify.v1","decisions":[{"id":"beta","action":"retain","reason":"Both retained behaviors remain required after resolving the overlap."}]}
+JSON
+
+  # No conflict has stopped here, so there is nothing to continue.
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" continue --repo "$candidate" --decisions "$decisions" 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "continue ran without any conflict receipt"
+  assert_contains "$out" "no topic conflict receipt exists" "continue without a receipt was unclear"
+
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" integrate --repo "$candidate" --id beta \
+    --summary 'Adds beta behavior.' --class pending --topic fm/divergence/beta \
+    --retire-when 'Upstream ships equivalent beta behavior.' --path shared.txt \
+    --pr-url https://github.com/example/firstmate/pull/91 --pr-disposition open 2>&1); rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "topic integration conflict returned $rc instead of 3: $out"
+  receipt=$(git -C "$candidate" rev-parse --path-format=absolute --git-path fm-fork-topic-rejustify.json)
+  assert_present "$receipt" "topic integration conflict did not publish a receipt"
+  branch=$(git -C "$candidate" symbolic-ref --short HEAD)
+  base_head=$(git -C "$candidate" rev-parse HEAD)
+  manifest_hash=$(git hash-object "$candidate/fork-divergences.json")
+  printf 'alpha plus beta\n' > "$candidate/shared.txt"
+  git -C "$candidate" add shared.txt
+
+  # The receipt names one branch. Renaming the checked-out branch without
+  # touching the index must not let the same resolution land somewhere else.
+  git -C "$candidate" branch other-candidate
+  git -C "$candidate" symbolic-ref HEAD refs/heads/other-candidate
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" continue --repo "$candidate" --decisions "$decisions" 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "continue accepted a branch the receipt does not name"
+  assert_contains "$out" "candidate branch differs from the receipt" "branch binding refusal was unclear"
+  git -C "$candidate" symbolic-ref HEAD "refs/heads/$branch"
+
+  # The receipt also names the exact pre-merge HEAD the resolution was computed
+  # against. A moved branch tip is a different merge, not this one.
+  git -C "$candidate" update-ref "refs/heads/$branch" "$(git -C "$candidate" rev-parse HEAD^)"
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" continue --repo "$candidate" --decisions "$decisions" 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "continue accepted a HEAD the receipt does not name"
+  assert_contains "$out" "candidate HEAD differs from the receipt" "head binding refusal was unclear"
+  git -C "$candidate" update-ref "refs/heads/$branch" "$base_head"
+
+  # Continuation is decision-driven: no decision, another unit's decision, and
+  # the opposite action are each refused.
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" continue --repo "$candidate" 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "continue accepted an implicit decision"
+  assert_contains "$out" "continue requires --decisions" "missing decision refusal was unclear"
+  cat > "$w/wrong-id.json" <<'JSON'
+{"schema":"firstmate.fork-rejustify.v1","decisions":[{"id":"alpha","action":"retain","reason":"This decision belongs to an entirely different divergence unit."}]}
+JSON
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" continue --repo "$candidate" --decisions "$w/wrong-id.json" 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "continue accepted a decision for a different divergence"
+  assert_contains "$out" "must name exactly divergence beta" "wrong-unit decision refusal was unclear"
+  cat > "$w/wrong-action.json" <<'JSON'
+{"schema":"firstmate.fork-rejustify.v1","decisions":[{"id":"beta","action":"remove","reason":"Removing is not the decision an integration conflict can act on."}]}
+JSON
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" continue --repo "$candidate" --decisions "$w/wrong-action.json" 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "continue accepted a remove decision for an integration conflict"
+  assert_contains "$out" "must resolve this operation as retain" "wrong-action decision refusal was unclear"
+
+  # An unresolved conflict path and an unrelated staged change are both refused,
+  # so a continuation can never quietly commit something it never resolved.
+  git -C "$candidate" checkout --merge -- shared.txt
+  [ -n "$(git -C "$candidate" diff --name-only --diff-filter=U)" ] \
+    || fail "the unresolved-index fixture did not restore Git's conflicted stages"
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" continue --repo "$candidate" --decisions "$decisions" 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "continue accepted an unresolved conflict path"
+  assert_contains "$out" "conflicts remain unresolved or unstaged" "unresolved index refusal was unclear"
+  printf 'alpha plus beta\n' > "$candidate/shared.txt"
+  git -C "$candidate" add shared.txt
+  printf 'base drift\n' > "$candidate/base.txt"
+  git -C "$candidate" add base.txt
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" continue --repo "$candidate" --decisions "$decisions" 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "continue accepted an unrelated staged change"
+  assert_contains "$out" "non-conflict index entries changed" "unrelated staged change refusal was unclear"
+  git -C "$candidate" checkout HEAD -- base.txt
+
+  # Every refusal above left the stopped conflict exactly as it was.
+  assert_present "$receipt" "a refused continuation removed the conflict receipt"
+  [ -n "$(git -C "$candidate" rev-parse MERGE_HEAD 2>/dev/null || true)" ] \
+    || fail "a refused continuation dropped Git's merge state"
+  [ "$(git -C "$candidate" symbolic-ref --short HEAD)" = "$branch" ] \
+    || fail "a refused continuation left the candidate on another branch"
+  [ "$(git -C "$candidate" rev-parse HEAD)" = "$base_head" ] \
+    || fail "a refused continuation moved the candidate HEAD"
+  [ "$(git hash-object "$candidate/fork-divergences.json")" = "$manifest_hash" ] \
+    || fail "a refused continuation changed the manifest before the merge commit"
+
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" continue --repo "$candidate" --decisions "$decisions" 2>&1) \
+    || fail "the bound continuation failed after the refused attempts: $out"
+  assert_absent "$receipt" "the completed continuation left its receipt"
+  head=$(git -C "$candidate" rev-parse HEAD)
+  [ "$(git -C "$candidate" rev-list --parents -n1 "$head" | wc -w | tr -d ' ')" -eq 3 ] \
+    || fail "the bound continuation did not finish a two-parent merge"
+  [ "$(git -C "$candidate" rev-parse "$head^")" = "$base_head" ] \
+    || fail "the bound continuation made intermediate commits"
+  jq -e '[.divergences[].id] == ["alpha","beta"]' "$candidate/fork-divergences.json" >/dev/null \
+    || fail "the bound continuation did not atomically add the manifest unit"
+  assert_contains "$out" 'errors=0' "the bound continuation did not validate its completed candidate"
+  pass "fork topics: an unbound continuation is refused without disturbing the stopped conflict"
+}
+
 # Discard applies every selected inverse in one no-commit sequence. A product
 # conflict requires the resolved remove decision, then the helper completes the
 # sequencer and commits product plus manifest removal exactly once.
@@ -1103,6 +1241,7 @@ test_health_attributes_pipeline_fixes_and_supports_disposition_transition
 test_refresh_parses_current_gh_axi_scalar_envelope
 test_topics_are_independently_revertible_units
 test_topic_integration_conflict_has_receipt_bound_continuation
+test_topic_continue_refuses_unbound_continuation
 test_topic_discard_conflict_has_receipt_bound_continuation
 test_topic_discard_continuation_finishes_an_empty_resolved_revert
 test_clean_upstream_merge_is_isolated_and_validated_as_candidate

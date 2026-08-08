@@ -65,12 +65,13 @@
 # entire FM_SESSION_START_TIMEOUT and truncate the digest, so a slow network
 # could cost the work queue itself.
 # So no step between here and the last line below makes an external-network
-# call. The five that did - `gh auth status`, secondmate liveness, secondmate
-# convergence, pending remote handoff delivery, and the fleet-sync fetch - are
-# started as one detached bounded worker right after the lock (step 1) and
-# harvested at step 7 without ever blocking on it. bin/fm-startup-network.sh
-# owns that stage and its safety argument; bin/fm-bootstrap.sh remains the owner
-# of the sweeps themselves and still runs every one of them.
+# call. All six that a session start owes - `gh auth status`, the fork-upstream
+# probe, secondmate liveness, secondmate convergence, pending remote handoff
+# delivery, and the fleet-sync fetch - are started as one detached bounded
+# worker right after the lock (step 1) and harvested at step 7 without ever
+# blocking on it. bin/fm-startup-network.sh owns that stage and its safety
+# argument; bin/fm-bootstrap.sh remains the owner of the sweeps themselves and
+# still runs every one of them.
 # The digest is therefore composed from local reads and local subprocesses only,
 # and an unreachable host now delays a reported check rather than the startup.
 # What this deliberately trades: on a slow network the digest prints "IN

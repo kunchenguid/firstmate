@@ -2,7 +2,7 @@
 # Shared fork-main primitives.
 # Usage: . bin/fm-fork-lib.sh
 #
-# Four facts are read by more than one fork script and must mean exactly the
+# Six facts are read by more than one fork script and must mean exactly the
 # same thing in each, so they live here rather than being copied:
 #   - which branch a remote's default is (origin/upstream default resolution);
 #   - which ref is a divergence's canonical topic (published fork branch first,

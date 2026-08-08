@@ -110,7 +110,8 @@
 #                 before. Unrecognized values fall back here on purpose: a typo
 #                 must never silently skip a safety sweep.
 #            skip - every LOCAL step, and none of the network ones. Skips
-#                 `gh auth status`, secondmate_liveness_sweep, secondmate_sync,
+#                 `gh auth status`, fork_upstream_check,
+#                 secondmate_liveness_sweep, secondmate_sync,
 #                 secondmate_handoff_resume, and fleet_sync.
 #            only - ONLY those network steps and nothing else. No tool detection,
 #                 no version floors, no tangle check, no PR-check migration, no
