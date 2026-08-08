@@ -187,6 +187,7 @@ Establish model support and provider family from that harness's own authoritativ
 Missing model-level quota, a missing authentication source, unmeasurable headroom, or unmodeled authentication is disclosed uncertainty that keeps a candidate eligible, never a credential or login escalation.
 Only concrete contradictory evidence blocks a candidate, such as an authoritative catalog proving the model unsupported or proof that the credential selected for that surface is unusable; never infer a credential store, provider family, or quota mapping from a harness, model, or source name, and never launch another harness's CLI to judge a candidate.
 Preserve malformed profile configuration as an actionable error rather than selecting around it.
+Choose the task-appropriate model and effort from the accepted work and dispatch evidence; never lower either solely to conserve tokens or quota.
 When every candidate is tight, preserve the captain's strongest-reasoning class rather than silently downgrading it solely to conserve quota; stop and report the tight choice if that class cannot proceed.
 Break genuine evidence ties without array-order or harness bias.
 `quota-axi` owns how model or product windows relate to bounding account windows and remains data-only.
@@ -259,7 +260,9 @@ If no secondmate scope fits, use the main home or discuss creating an appropriat
 For one-off or infrequent operational work, start with the simplest direct end-to-end path.
 Do not build wrappers, control planes, policy layers, custom verifiers, or automation unless the direct path exposes a concrete blocker or repeated need that justifies the added machinery.
 
-Before commissioning an investigation, consult existing reports and established evidence.
+Save tokens by eliminating duplicated work, irrelevant raw context, and repeated evidence collection, never by weakening accepted scope, necessary reasoning, evidence, validation, or safety.
+Preserve direct user requirements, authoritative source material, and durable decisions, and perform necessary targeted rereads; never substitute a lossy summary when the exact source is required to act safely or correctly.
+Before commissioning an investigation, consult existing reports and established evidence, and do not repeat one already answered unless the captain explicitly requested that deliverable or new evidence could materially change the outcome.
 Classify the deliverable:
 
 - **Ship** is the default and produces a project change through the selected delivery mode; once implementation is authorized, dispatch a ship and keep any remaining bounded research inside it unless unresolved uncertainty could materially change whether or what to build.
@@ -276,6 +279,7 @@ On a `no-mistakes-prod-only` project, classify the task's surface: internal-only
 An unregistered project or absent registry resolves to `no-mistakes` with yolo off, and the registration gap goes to the captain.
 Record the resulting mode, yolo, and the one-line reason for any deviation in the backlog item note.
 
+Keep independent ready work moving, but never dispatch redundant parallel work for the same deliverable.
 Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, and dispatch isolated work immediately with no concurrency cap when each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts.
 Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
 Write the task-specific brief under section 11 before spawning.
@@ -295,9 +299,9 @@ Supervise all live work under section 8.
 
 ### Selected delivery path and approval authority
 
-The selected delivery path owns its own rigor.
+The selected delivery path owns its own rigor; token savings never skip, narrow, or replace its required final tests, documentation, review, no-mistakes gates, PR checks, or CI.
 When no-mistakes is selected, no-mistakes alone owns review, fixes, tests, documentation, push, PR, and CI; otherwise follow the faster path without adding an independent reviewer.
-Never hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.
+Never commission an optional duplicate reviewer, hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.
 A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.
 If fast-path risk needs more rigor, escalate whether to use no-mistakes instead of inventing a manual gate.
 The path's worker, automated gates, and captain approval remain authoritative:
@@ -319,9 +323,11 @@ After an autonomous merge, give the captain a one-line full-URL or local-main ou
 
 ### Validate
 
+Within each delivery-path owner's implementation and correction loops, group related fixes and run the smallest focused checks that establish the changed behavior before rerunning broader suites.
 For a no-mistakes ship, trigger validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
 The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
+Never restart, duplicate, or supersede an active validation run to save tokens; preserve its fixes and drive its current gate.
 Once validation starts, prefer routing new requirements to follow-up work rather than expanding the current task, unless a new requirement completely invalidates the work being validated; however, the smallest downstream changes needed to keep already accepted product or engineering behavior correct, add behavioral tests where an executable contract exists, or keep documentation accurate remain within the current task even when they touch files not named at intake, and corrections required to satisfy already accepted intent are not new requirements.
 
 Only a current, explicit captain instruction that completely invalidates the work being validated keeps the task with the same worker instead of routing it to follow-up work or handing it to a replacement.
