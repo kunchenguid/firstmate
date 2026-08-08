@@ -873,6 +873,34 @@ test_operator_resolve_closes_stuck_records() {
   pass "operator resolve command closes awaiting, recovery, and escalated records"
 }
 
+test_operator_resolve_closes_unjournaled_escalation() {
+  local home state corr rec key open
+  home=$(setup_parent operator-resolve-unjournaled)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=9350
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "unjournaled escalation")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  key=$(fm_pending_reply_escalation_key "$corr")
+  fm_pending_reply_set "$rec" phase recovery_sent
+  printf 'blocked [key=%s]: pending-reply-missed: task=hibit pending-reply-id=%s request=unjournaled escalation\n' \
+    "$key" "$corr" > "$state/hibit.status"
+
+  [ -z "$(fm_pending_reply_get "$rec" escalated_epoch)" ] \
+    || fail "unjournaled escalation fixture unexpectedly has an epoch"
+  FM_HOME="$home" FM_PENDING_REPLY_NOW=9351 "$RESOLVE" "$corr" "closed after interrupted escalation" >/dev/null \
+    || fail "operator resolve should close an unjournaled escalation"
+  open=$(status_open_decisions "$state/hibit.status")
+  [ -z "$open" ] || fail "unjournaled escalation remained open: $open"
+  [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ] \
+    || fail "unjournaled escalation closure was not recorded"
+  FM_HOME="$home" FM_PENDING_REPLY_NOW=9352 "$RESOLVE" "$corr" "closed again" >/dev/null \
+    || fail "unjournaled escalation close should be idempotent"
+  [ "$(grep -Fc "resolved [key=$key]:" "$state/hibit.status")" -eq 1 ] \
+    || fail "unjournaled escalation close was duplicated"
+  pass "operator resolve closes an unjournaled durable escalation"
+}
+
 test_document_pointer_resolves() {
   local home state corr
   home=$(setup_parent doc-pointer)
@@ -1189,6 +1217,7 @@ test_fm_send_delivery_only_action_resolves_on_delivery
 test_updatefirstmate_nudge_is_delivery_only
 test_delivery_only_partial_commit_reconciles_before_marker_retirement
 test_operator_resolve_closes_stuck_records
+test_operator_resolve_closes_unjournaled_escalation
 test_document_pointer_resolves
 test_helper_report_resolves
 test_busy_idle_observation_via_backend_abstraction

@@ -1038,12 +1038,12 @@ _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
   [ -f "$rec" ] || return 1
   [ "$(fm_pending_reply_get "$rec" phase)" = resolved ] || return 0
   escalated=$(fm_pending_reply_get "$rec" escalated_epoch)
-  [ -n "$escalated" ] || return 0
   closed=$(fm_pending_reply_get "$rec" escalation_closed_epoch)
   [ -z "$closed" ] || return 0
   parent_status=$(fm_pending_reply_get "$rec" parent_status)
   [ -n "$parent_status" ] || return 1
   escalation=$(fm_pending_reply_escalation_line "$parent_status" "$rec" "$corr")
+  [ -n "$escalated" ] || [ -n "$escalation" ] || return 0
   if [ -n "$escalation" ]; then
     key=$(_fm_decision_key "$escalation") || key=''
     note=$(status_line_note "$escalation")

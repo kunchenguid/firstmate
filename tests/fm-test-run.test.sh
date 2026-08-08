@@ -99,6 +99,7 @@ init_changed_fixture_repo() {
     fm-cd-pretool-check.test.sh \
     fm-daemon.test.sh \
     fm-backend-herdr-smoke.test.sh \
+    fm-pending-reply.test.sh \
     fm-secondmate-safety.test.sh \
     fm-session-start.test.sh \
     fm-afk-pi-herdr-return-e2e.test.sh \
@@ -116,6 +117,8 @@ init_changed_fixture_repo() {
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
+  : >"$repo/bin/fm-pending-reply-lib.sh"
+  : >"$repo/bin/fm-send.sh"
   : >"$repo/bin/unmapped-source.sh"
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
     >>"$repo/tests/fm-cd-pretool-check.test.sh"
@@ -144,6 +147,20 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-bearings-snapshot.test.sh" "shared helper selects snapshot dependents"
   git -C "$repo" add tests/lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm helper-change
+
+  printf '\n' >>"$repo/bin/fm-pending-reply-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-pending-reply.test.sh" "pending-reply source selects pending-reply coverage"
+  git -C "$repo" add bin/fm-pending-reply-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm pending-reply-change
+
+  printf '\n' >>"$repo/bin/fm-send.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-pending-reply.test.sh" "fm-send selects pending-reply coverage"
+  assert_contains "$listed" "tests/fm-backend.test.sh" "fm-send retains backend coverage"
+  assert_contains "$listed" "tests/fm-brief.test.sh" "fm-send retains pure contract coverage"
+  git -C "$repo" add bin/fm-send.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm fm-send-change
 
   printf '\n' >>"$repo/tests/fm-backend-herdr-eventwait.test.py"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
