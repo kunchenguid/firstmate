@@ -1010,13 +1010,17 @@ cleanup_stale_lock_for_safety_check() {
 
 # Remove a worktree/home via `proj rm`, tolerating a transient or
 # stale git index.lock left by a killed crew process. See the script header.
+# <project_ref> is the project directory this worktree belongs to (typically
+# $PROJ/$child_proj, exactly what fm-spawn.sh recorded before ever acquiring
+# the worktree) - fm_proj_project_name_for_dir derives the proj project name
+# from it. Deliberately not derived from dirname(dir): dir's own parent
+# directory is only guaranteed to BE the project root for a genuine
+# proj-provisioned worktree, never for a plain-clone secondmate home path or a
+# test fixture.
 teardown_proj_remove() {
-  local dir=$1 label=$2 force=$3 post_cleanup_check=${4:-}
+  local dir=$1 project_ref=$2 label=$3 force=$4 post_cleanup_check=${5:-}
   local out lock attempt=0 max_retries lock_desc project_name worktree_name
-  # $dir is always a task worktree (a direct sibling of the project's 00-*
-  # template, never the template itself), so its parent's basename is simply
-  # the project name.
-  project_name=$(basename "$(dirname "$dir")")
+  project_name=$(fm_proj_project_name_for_dir "$project_ref")
   worktree_name=$(basename "$dir")
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
@@ -1714,7 +1718,7 @@ remove_firstmate_home() {
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
-    teardown_proj_remove "$abs_home_path" "$label" --force || {
+    teardown_proj_remove "$abs_home_path" "$(dirname "$abs_home_path")" "$label" --force || {
       echo "error: proj rm failed for $label $abs_home_path; worktree may still be present" >&2
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
@@ -2089,7 +2093,7 @@ cleanup_firstmate_home_children() {
         "$child_wt/.opencode/plugins/fm-busy-state.js" \
         "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v proj >/dev/null 2>&1; then
-        if teardown_proj_remove "$child_wt" "child worktree" --force; then
+        if teardown_proj_remove "$child_wt" "$child_proj" "child worktree" --force; then
           :
         else
           child_return_rc=$?
@@ -2299,7 +2303,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     # refusal stands as a genuine backstop instead of always overriding it.
     proj_rm_force=
   fi
-  teardown_proj_remove "$WT" "worktree" "$proj_rm_force" "$post_lock_cleanup_check" || {
+  teardown_proj_remove "$WT" "$PROJ" "worktree" "$proj_rm_force" "$post_lock_cleanup_check" || {
     echo "error: proj rm failed for worktree $WT; teardown aborted" >&2
     exit 1
   }

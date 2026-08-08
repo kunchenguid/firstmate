@@ -588,7 +588,7 @@ seed_remove_proj_home() {
     echo "warning: failed to remove proj-acquired home $abs_home during seed rollback; proj command not found" >&2
     return 0
   fi
-  project_name=$(basename "$(dirname "$abs_home")")
+  project_name=$(fm_proj_self_project_name "$FM_ROOT")
   worktree_name=$(basename "$abs_home")
   fm_proj_remove_worktree "$project_name" "$worktree_name" --force >/dev/null 2>&1 || {
     echo "warning: failed to remove proj-acquired home $abs_home during seed rollback; worktree may still be present" >&2

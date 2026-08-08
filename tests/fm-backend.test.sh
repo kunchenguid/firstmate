@@ -774,6 +774,18 @@ test_peek_conformance_old_vs_new() {
 
 # --- old vs new: fm-spawn.sh --------------------------------------------------
 
+# add_proj_template <project-dir>: adds a 00-* template worktree at HEAD, since
+# fm_proj_template_dir_at (bin/fm-proj-lib.sh) requires a real one before the
+# fake proj binary below is ever invoked. --detach at HEAD rather than a named
+# branch: fm_git_worktree's own default init branch depends on this system's
+# git config, never assumed to be any particular name.
+add_proj_template() {
+  git -C "$1" worktree add -q --detach "$1/00-main" >/dev/null 2>&1
+}
+
+# <fake-worktree-path> is what the fake proj's `new` prints (fm-spawn.sh reads
+# the worktree path directly from proj's stdout - bin/fm-proj-lib.sh - so this
+# no longer needs to be fed through a polled pane_current_path).
 make_spawn_fakebin() {  # <dir> <fake-worktree-path> -> echoes fakebin dir
   local dir=$1 wt=$2 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -782,15 +794,22 @@ make_spawn_fakebin() {  # <dir> <fake-worktree-path> -> echoes fakebin dir
 set -u
 { printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
 case "\${1:-}" in
-  display-message)
-    for a in "\$@"; do case "\$a" in *pane_current_path*) printf '%s\\n' "$wt"; exit 0 ;; esac; done
-    printf 'firstmate\\n'; exit 0 ;;
+  display-message) printf 'firstmate\\n'; exit 0 ;;
   list-windows) exit 0 ;;
 esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
+  cat > "$fb/proj" <<SH
+#!/usr/bin/env bash
+set -u
+case "\${1:-}" in
+  new) printf '%s\n' "$wt"; exit 0 ;;
+  rm) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/proj"
   printf '%s\n' "$fb"
 }
 
@@ -821,95 +840,24 @@ run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> 
 # run_spawn_case are retained: test_spawn_default_backend_writes_no_meta_field
 # uses make_spawn_fakebin, and #294's run_spawn_symlink_case uses run_spawn_case.)
 
-# --- symlinked project prefix must not false-refuse the isolation guard -----
-#
-# docs/herdr-backend.md "Known gaps": a real backend's pane_current_path read
-# (tmux, herdr) reports the OS-level PHYSICALLY-resolved cwd. When the project
-# itself lives under a symlinked prefix (e.g. macOS's /tmp -> /private/tmp),
-# fm-spawn.sh's PROJ_ABS - a logical `cd && pwd` - differs string-for-string
-# from that physical read even before treehouse moves the pane at all, so the
-# worktree-discovery poll used to mistake an UNMOVED pane for one that had
-# already left the project, handing validate_spawn_worktree the project's own
-# directory as "the worktree" and tripping its false isolation refusal.
-# make_spawn_symlink_fakebin's tmux stub returns an unmoved project path on the
-# first pane_current_path poll, then the real worktree path from the second poll
-# onward, so this test fails loudly if the PROJ_ABS/PROJ_ABS_REAL
-# canonicalization in bin/fm-spawn.sh ever regresses.
-make_spawn_symlink_fakebin() {  # <dir> <initial-project-path> <worktree-path> -> echoes fakebin dir
-  local dir=$1 initial_path=$2 wt=$3 fb="$1/fakebin" counter="$1/poll-count"
-  mkdir -p "$fb"
-  : > "$counter"
-  cat > "$fb/tmux" <<SH
-#!/usr/bin/env bash
-set -u
-{ printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
-case "\${1:-}" in
-  display-message)
-    for a in "\$@"; do case "\$a" in *pane_current_path*)
-      printf x >> "$counter"
-      if [ "\$(wc -c < "$counter")" -le 1 ]; then
-        printf '%s\\n' "$initial_path"
-      else
-        printf '%s\\n' "$wt"
-      fi
-      exit 0
-    ;; esac; done
-    printf 'firstmate\\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-esac
-exit 0
-SH
-  chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
-  printf '%s\n' "$fb"
-}
-
-run_spawn_symlink_case() {  # <label> <physical|logical>
-  local label=$1 first_reply=$2 real_root link_root proj wt id fb data state config log out rc proj_phys initial_path
-  real_root="$TMP_ROOT/symlink-real-$label"; link_root="$TMP_ROOT/symlink-link-$label"
-  mkdir -p "$real_root"
-  ln -s "$real_root" "$link_root"
-  proj="$link_root/proj"
-  wt="$TMP_ROOT/symlink-wt-$label"
-  id="spawnsymlink$label"
-  fm_git_worktree "$real_root/proj" "$wt" "fm/$id"
-  # TMP_ROOT itself can already sit behind an OS-level symlink (e.g. macOS's
-  # /var -> /private/var), so resolve the fakebin's "physical" reply with
-  # pwd -P rather than string concatenation - it must match exactly what
-  # fm-spawn.sh's own PROJ_ABS_REAL computes, including any symlink layers
-  # ABOVE this test's own synthetic real_root/link_root pair.
-  proj_phys=$(cd "$real_root/proj" && pwd -P)
-  case "$first_reply" in
-    physical) initial_path=$proj_phys ;;
-    logical) initial_path=$proj ;;
-    *) fail "unknown symlink first-reply mode: $first_reply" ;;
-  esac
-  fb=$(make_spawn_symlink_fakebin "$TMP_ROOT/symlink-fake-$label" "$initial_path" "$wt")
-  data="$TMP_ROOT/symlink-data-$label"
-  mkdir -p "$data/$id"
-  printf 'test brief content\n' > "$data/$id/brief.md"
-  state="$TMP_ROOT/symlink-state-$label"; config="$TMP_ROOT/symlink-config-$label"
-  mkdir -p "$state" "$config"
-  log="$TMP_ROOT/symlink-spawn-$label.log"
-
-  out=$(run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$proj" -- "$id" "$proj" claude --mode no-mistakes --yolo off 2>&1)
-  rc=$?
-  expect_code 0 "$rc" "fm-spawn.sh should succeed for a project reached through a symlinked prefix when the backend reports $first_reply cwd"$'\n'"$out"
-  assert_contains "$out" "worktree=$wt" \
-    "fm-spawn.sh did not resolve a symlinked-prefix project to its real worktree when the backend reports $first_reply cwd"
-
-  rm -rf "/tmp/fm-$id"
-}
-
-test_spawn_symlinked_project_prefix_avoids_false_refusal() {
-  run_spawn_symlink_case physical physical
-  run_spawn_symlink_case logical logical
-  pass "fm-spawn.sh: a project reached through a symlinked prefix (e.g. macOS /tmp -> /private/tmp) does not trip the isolation guard's false refusal"
-}
+# NOTE: the symlinked-project-prefix poll-confusion test that used to live here
+# was retired. It guarded a bug class specific to the old treehouse-era design:
+# fm-spawn.sh repeatedly polled a backend's live pane_current_path and compared
+# each raw read against PROJ_ABS to detect "the pane left the project", and a
+# symlinked project prefix (e.g. macOS's /tmp -> /private/tmp) could make an
+# UNMOVED pane's first physically-resolved read look identical to a real,
+# already-departed worktree. proj new (bin/fm-proj-lib.sh) replaces that whole
+# poll: fm-spawn.sh gets the worktree path directly from proj's own stdout, with
+# no live read and no PROJ_ABS comparison in the loop at all, so this specific
+# bug class no longer has a mechanism to occur through. validate_spawn_worktree
+# itself still canonicalizes both PROJ_ABS_REAL and the worktree's own path via
+# `pwd -P` before ever comparing them (unchanged by this refactor), and that
+# path is already exercised without a symlink by
+# test_spawn_isolation_abort's "ok-isolated" case above.
 
 # --- old vs new: fm-teardown.sh ----------------------------------------------
 
-make_teardown_fakebin() {  # <dir> -> echoes fakebin dir; logs tmux+treehouse calls
+make_teardown_fakebin() {  # <dir> -> echoes fakebin dir; logs tmux+proj calls
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
   cat > "$fb/tmux" <<'SH'
@@ -918,13 +866,18 @@ set -u
 { printf 'tmux'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TMUX_LOG:?}"
 exit 0
 SH
-  cat > "$fb/treehouse" <<'SH'
+  # old_bin/bin/fm-teardown.sh below is NOT a historical checkout (BASE_REF is
+  # forced to HEAD for entrypoints in this case, isolating only the tmux
+  # adapter as genuinely historical - see test_teardown_conformance_old_vs_new),
+  # so both the "old" and "new" runs are this checkout's own current
+  # fm-teardown.sh and both call proj (bin/fm-proj-lib.sh), never treehouse.
+  cat > "$fb/proj" <<'SH'
 #!/usr/bin/env bash
 set -u
-{ printf 'treehouse'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TMUX_LOG:?}"
+{ printf 'proj'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TMUX_LOG:?}"
 exit 0
 SH
-  chmod +x "$fb/tmux" "$fb/treehouse"
+  chmod +x "$fb/tmux" "$fb/proj"
   printf '%s\n' "$fb"
 }
 
@@ -987,8 +940,16 @@ test_teardown_conformance_old_vs_new() {
 
   expect_code 0 "$rc_old" "old fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_old"
   expect_code 0 "$rc_new" "new fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_new"
-  assert_contains "$(cat "$log_new")" "treehouse"$'\x1f''return'$'\x1f''--force'$'\x1f'"$wt" \
-    "teardown did not call treehouse return --force <worktree>"
+  # old_bin/bin/fm-teardown.sh is NOT a historical checkout here - BASE_REF was
+  # forced to HEAD above for entrypoints, precisely so this case can isolate the
+  # ONE genuinely historical piece (old_tmux_ref's permissive-selector adapter)
+  # from the rest. Both old and new therefore run the SAME (current) teardown
+  # logic and both call proj rm; only the tmux kill-window form differs below,
+  # driven purely by which adapter file each run was paired with.
+  assert_contains "$(cat "$log_old")" "proj"$'\x1f''rm'$'\x1f'"$(basename "$proj")/$(basename "$wt")"$'\x1f''--force' \
+    "legacy teardown fixture did not call proj rm <project>/<worktree> --force"
+  assert_contains "$(cat "$log_new")" "proj"$'\x1f''rm'$'\x1f'"$(basename "$proj")/$(basename "$wt")"$'\x1f''--force' \
+    "teardown did not call proj rm <project>/<worktree> --force"
   # The legacy fixture's adapter comes from BASE_REF, so its selector form is
   # whatever the merge-base carried: permissive while the exact-selector change
   # was still on a branch, exact for every branch cut after it landed on main.
@@ -1046,6 +1007,7 @@ test_spawn_default_backend_writes_no_meta_field() {
   proj="$TMP_ROOT/nobackend-project"; wt="$TMP_ROOT/nobackend-wt"; data="$TMP_ROOT/nobackend-data"
   id="nobackendz3"
   fm_git_worktree "$proj" "$wt" "fm/$id"
+  add_proj_template "$proj"
   local fb
   fb=$(make_spawn_fakebin "$TMP_ROOT/nobackend-fake" "$wt")
   mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
@@ -1069,6 +1031,7 @@ test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
   proj="$TMP_ROOT/explicit-backend-project"; wt="$TMP_ROOT/explicit-backend-wt"; data="$TMP_ROOT/explicit-backend-data"
   id="explicitbackendz4"
   fm_git_worktree "$proj" "$wt" "fm/$id"
+  add_proj_template "$proj"
   fb=$(make_spawn_fakebin "$TMP_ROOT/explicit-backend-fake" "$wt")
   mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
   state="$TMP_ROOT/explicit-backend-state"; config="$TMP_ROOT/explicit-backend-config"
@@ -1093,6 +1056,7 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   proj="$TMP_ROOT/nest-project"; wt="$TMP_ROOT/nest-wt"; data="$TMP_ROOT/nest-data"
   id="nestbackendz5"
   fm_git_worktree "$proj" "$wt" "fm/$id"
+  add_proj_template "$proj"
   fb=$(make_spawn_fakebin "$TMP_ROOT/nest-fake" "$wt")
   mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
   state="$TMP_ROOT/nest-state"; config="$TMP_ROOT/nest-config"
@@ -1137,7 +1101,6 @@ test_resolve_selector_three_forms
 test_backend_of_selector_matches_explicit_target_meta
 test_send_conformance_old_vs_new
 test_peek_conformance_old_vs_new
-test_spawn_symlinked_project_prefix_avoids_false_refusal
 test_teardown_conformance_old_vs_new
 test_spawn_refuses_unknown_backend_flag
 test_spawn_refuses_codex_app_backend_flag
