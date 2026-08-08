@@ -10,14 +10,15 @@
 # healthy, prints a loud, clearly delimited banner so the agent cannot skim past
 # it in the tool output of whatever it was doing - the one channel every harness
 # has. Supervision health is MODEL-AWARE (fm_watcher_supervision_verdict in
-# bin/fm-wake-lib.sh): under the Claude Stop auto-arm model the watcher runs only
-# between turns, so mid-turn a fresh beacon with no live watcher is healthy and
-# only a stale beacon (beyond FM_GUARD_GRACE) is a genuine lapse; under every
-# persistent-watcher harness a live identity-matched watcher with a fresh beacon
-# is required. The banner names the true failing condition (a missing live
-# watcher process vs a genuinely stale beacon). The full banner is emitted once
+# bin/fm-wake-lib.sh): under the Claude Stop auto-arm and Codex foreground-
+# checkpoint models the watcher is deliberately absent while the model handles
+# a turn, so a fresh beacon with no live watcher is healthy and only a stale
+# beacon (beyond FM_GUARD_GRACE) is a genuine lapse; under every persistent-
+# watcher harness a live identity-matched watcher with a fresh beacon is
+# required. The banner names the true failing condition (a missing live watcher
+# process vs a genuinely stale beacon). The full banner is emitted once
 # per distinct down-episode in this FM_HOME (keyed to the failing condition, not
-# the beacon mtime, which a healthy between-turns watcher advances every poll);
+# the beacon mtime, which a healthy watcher advances every poll);
 # later guarded commands in the same episode print a one-line reminder instead.
 # Episode state lives only under state/.guard-watcher-stale-banner (volatile,
 # bounded). Independent alarms (queued wakes, worktree tangle) are never

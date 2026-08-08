@@ -74,6 +74,18 @@ run_guard_case_autoarm() {
     "$ROOT/bin/fm-guard.sh" 2>&1
 }
 
+# The Codex foreground-checkpoint model: the watcher runs only while Codex is
+# blocked in the checkpoint tool call, so the healthy handling gap has a fresh
+# beacon and no live watcher process.
+run_guard_case_checkpoint() {
+  local dir=$1
+  FM_ROOT_OVERRIDE="$(case_root "$dir")" \
+    FM_HOME="$(case_home "$dir")" \
+    FM_GUARD_GRACE=999 \
+    FM_SUPERVISION_MODEL=checkpoint \
+    "$ROOT/bin/fm-guard.sh" 2>&1
+}
+
 count_text() {
   local haystack=$1 needle=$2
   awk -v needle="$needle" 'index($0, needle) { c++ } END { print c + 0 }' <<EOF
@@ -337,6 +349,54 @@ test_autoarm_stale_episode_is_stable() {
   pass "fm-guard stale banner: auto-arm stale episode stays one episode across calls"
 }
 
+test_checkpoint_fresh_beacon_without_watcher_is_healthy() {
+  local dir out
+  dir=$(make_guard_case checkpoint-fresh)
+  touch "$(case_home "$dir")/state/.last-watcher-beat"
+  out=$(run_guard_case_checkpoint "$dir")
+  [ -z "$out" ] \
+    || fail "checkpoint model with a fresh beacon and no live watcher must stay silent, got: $out"
+  pass "fm-guard stale banner: checkpoint fresh beacon without a watcher is healthy"
+}
+
+test_checkpoint_stale_beacon_alarms() {
+  local dir out
+  dir=$(make_guard_case checkpoint-stale)
+  out=$(run_guard_case_checkpoint "$dir")
+  [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+    || fail "checkpoint model with an absent/stale beacon must alarm: $out"
+  assert_contains "$out" "no watcher has a fresh beacon" \
+    "checkpoint stale-beacon banner must name the inactive checkpoint signal"
+  pass "fm-guard stale banner: checkpoint stale beacon still alarms"
+}
+
+test_detected_codex_uses_checkpoint_model() {
+  local dir fakebin out
+  dir=$(make_guard_case detected-codex-fresh)
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' -o comm= '*) printf '%s\n' /opt/codex/bin/codex ;;
+  *' -o args= '*) printf '%s\n' codex ;;
+  *' -o ppid= '*) printf '%s\n' 1 ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  touch "$(case_home "$dir")/state/.last-watcher-beat"
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    PATH="$fakebin:$PATH" \
+    FM_ROOT_OVERRIDE="$(case_root "$dir")" \
+    FM_HOME="$(case_home "$dir")" \
+    FM_GUARD_GRACE=999 \
+    "$ROOT/bin/fm-guard.sh" 2>&1)
+  [ -z "$out" ] \
+    || fail "detected Codex with a fresh checkpoint beacon must stay silent, got: $out"
+  pass "fm-guard stale banner: detected Codex selects checkpoint supervision"
+}
+
 test_persistent_no_watcher_banner_names_missing_process() {
   local dir out
   dir=$(make_guard_case persistent-no-watcher-reason)
@@ -378,6 +438,9 @@ test_repeated_same_episode_prints_reminder_only
 test_autoarm_fresh_beacon_without_watcher_is_healthy
 test_autoarm_stale_beacon_alarms_with_correct_reason
 test_autoarm_stale_episode_is_stable
+test_checkpoint_fresh_beacon_without_watcher_is_healthy
+test_checkpoint_stale_beacon_alarms
+test_detected_codex_uses_checkpoint_model
 test_persistent_no_watcher_banner_names_missing_process
 test_persistent_no_watcher_episode_survives_beacon_touch
 test_fresh_beacon_without_live_watcher_stays_alarm

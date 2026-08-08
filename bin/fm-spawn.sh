@@ -2260,6 +2260,7 @@ if [ "$KIND" = secondmate ]; then
   sq_primary_home=$(shell_quote "$FM_HOME")
   case "$HARNESS" in
     claude) supervision_model=autoarm ;;
+    codex) supervision_model=checkpoint ;;
     *) supervision_model=persistent ;;
   esac
   # Deliver the primary's EFFECTIVE trace-context decision as a normalized on/off

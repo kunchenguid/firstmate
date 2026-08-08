@@ -833,7 +833,7 @@ test_spawn_explicit_harness_uses_explicit_profile_axes() {
 }
 
 test_spawned_secondmate_uses_its_harness_supervision_model() {
-  local harness expected w sm launchlog launch fakebin out
+  local harness w sm launchlog launch fakebin out
   for harness in codex claude; do
     w="$TMP_ROOT/spawn-supervision-model-$harness"
     sm="$w/sm"
@@ -858,9 +858,8 @@ SH
     out=$(PATH="$fakebin:$BASE_PATH" CLAUDECODE=1 bash -c "$launch" 2>&1)
     case "$harness" in
       codex)
-        expected='WATCHER DOWN - SUPERVISION IS OFF'
-        assert_contains "$out" "$expected" \
-          "Codex secondmate inherited Claude auto-arm despite its persistent watcher model"
+        [ -z "$out" ] \
+          || fail "Codex secondmate with a fresh checkpoint beacon should use checkpoint supervision, got: $out"
         ;;
       claude)
         [ -z "$out" ] \
@@ -868,7 +867,7 @@ SH
         ;;
     esac
   done
-  pass "C9 spawn: secondmate launch pins supervision to its own harness"
+  pass "C9 spawn: secondmate launch pins auto-arm or checkpoint supervision to its own harness"
 }
 
 # The harness fallback chain (secondmate-harness -> crew-harness -> own) still
