@@ -61,6 +61,10 @@ Start a Firstmate divergence brief from official upstream rather than detached f
 bin/fm-brief.sh <task-id> firstmate --mode no-mistakes --start-ref upstream/main
 ```
 
+The exact `upstream/main` start ref also makes the generator place the fork worker contract in the brief that `fm-spawn.sh` delivers as its typed launch input.
+That delivered contract loads `fork-main-integration`, forbids rewriting a published topic or pull-request branch, forbids routine upstream or fork-main merges into the topic, and keeps topic validation on the ordinary official-upstream registration.
+A source-file grep is not proof of this contract: `tests/fm-fork-main.test.sh` generates the brief, sends it through the executable launch-input encoder, reads the delivered body back, and asserts each worker rule there.
+
 A canonical new topic has one aggregate non-merge patch commit before its first fork integration.
 This constraint matters because `git cherry` compares patches one commit at a time.
 It recognizes the same one-commit patch after upstream squash or rebase changes its commit ID, but it cannot prove that several topic commits equal one aggregate upstream squash.
@@ -92,7 +96,17 @@ bin/fm-fork-topic.sh integrate \
 
 The helper merges with `--no-ff --no-commit`, adds the manifest entry to that merge, commits the two-parent result, and validates health against candidate `HEAD`.
 It never pushes or opens a pull request.
-The worker runs no-mistakes through the isolated fork registration, waits for fork CI, and the captain merges the fork pull request with the regular merge method so the topic merge remains reachable.
+A product conflict exits 3 with Git's merge state intact and a private receipt that binds the branch, original head, topic merge head, manifest, conflict paths, and unaffected index.
+Settle whether the divergence remains worth carrying, resolve and stage the product files, and write a complete `firstmate.fork-rejustify.v1` decision with action `retain` outside the candidate.
+Continue with:
+
+```sh
+bin/fm-fork-topic.sh continue --decisions <file> --repo <isolated-worktree>
+```
+
+The continuation refuses a changed branch, merge head, manifest, unaffected index, incomplete decision, unstaged resolution, or untracked file.
+It writes the manifest entry into the completed merge commit and validates that candidate.
+The worker runs no-mistakes through the isolated fork registration, runs health against the actual post-pipeline head, waits for fork CI, and the captain merges the fork pull request with the regular merge method so the topic merge remains reachable.
 
 Discarding selects only the named topic's first-parent integration merges and reverts them newest to oldest with mainline parent one:
 
@@ -101,8 +115,10 @@ bin/fm-fork-topic.sh discard --id <id> --repo <isolated-worktree>
 ```
 
 A manifest-only overlap from a later topic is preserved mechanically while the named entry is removed.
-Any product-file conflict stops for re-justification.
-The resulting branch still goes through no-mistakes, fork CI, pull request, and captain approval.
+Any product-file conflict stops for re-justification with a receipt bound to the branch, original head, active revert head, queued integration merges, manifest backup, conflict paths, and unaffected index.
+After settling the remove decision and staging the product resolution, use the same `continue` command above with action `remove`.
+The helper finishes the complete `git revert --no-commit` sequence, collects any continuation commits back into the unpublished candidate, removes the manifest unit, and records product plus governance changes in one final commit.
+The resulting branch still goes through no-mistakes, post-pipeline health, fork CI, pull request, and captain approval.
 
 Git documents an important merge-revert consequence.
 A reverted merge tells later merges that its ancestors are unwanted.
@@ -150,12 +166,19 @@ bin/fm-fork-status.sh
 ```
 
 Add `--refresh` to fetch both remotes and compare recorded GitHub pull-request dispositions through `gh-axi`.
+The current `gh-axi` help documents `--jq` but does not promise raw scalar stdout, so refresh parses the observed `api_response.body` TOON envelope and requires `truncated: false` rather than comparing the complete serializer output with `open`.
 Add `--json` for schema `firstmate.fork-health.v1`.
 Candidate helpers use `--facts-only` internally when an already-authorized add or discard can legitimately make the historical count rise; that mode still prints the trend but makes its exit status represent Git/manifest consistency and superseded debt rather than holistic fork health.
 Do not use `--facts-only` to characterize the fork to the captain.
 
-The report uses `git cherry upstream/main origin/main` for patch-equivalence facts and groups active patches by canonical topic.
-It reports active unit and patch counts, trend since the previous upstream merge, counts by class, oldest pending unit, last merge's touched units, retirement conditions, every accepted-upstream retirement with its proof, superseded debt, and every Git/manifest mismatch.
+The report uses `git cherry upstream/main origin/main` for one fact only: which commits have no equivalent upstream patch.
+The manifest supplies the meaning of what the fork intends to carry, so active patch counts come from each manifest unit's canonical topic rather than every raw `+` line.
+A non-upstream commit outside those canonical patches is a visible signal, not automatically a carried divergence or a failed report.
+A validation fix descending from a recognized topic or upstream integration is attributed as an `integration-path` artifact.
+A manifest-only review-disposition commit is attributed as a `manifest-governance` artifact.
+Run the report against the actual post-pipeline `HEAD`, because helper-prepared health cannot classify commits that validation added later.
+
+The report names active units and canonical patches, all factual non-upstream commits, integration artifacts, informational signals, trend since the previous upstream merge, counts by class, the oldest pending unit, the latest merge's touched units, retirement conditions, every accepted-upstream retirement with its proof, superseded debt, and structural health errors.
 
 A merge revert leaves both the original patch and its inverse in history, so both remain raw `git cherry +` facts after their net effect is gone.
 The status owner excludes a pair from active health only when Git proves the exact reachable `git revert -m 1 <topic-merge>` relationship.
@@ -168,8 +191,10 @@ Only that independent proof excludes the patch, and the report names every retir
 A record that is stale, contradictory, unproved, or missing leaves its patch counted and reported, never silently excluded.
 PR state, commit messages, branch names, ancestry, and stated intent never retire a patch.
 
-The report is unhealthy when a factual patch has no manifest owner, a patch has multiple owners, an active unit owns no patch, one canonical topic has several non-equivalent commits, a topic or integration merge is missing, declared paths omit a changed file, a pull-request disposition is stale, a retirement record no longer re-proves, any superseded unit remains, or retained patches trend up.
-Git facts win whenever prose disagrees.
+The report is unhealthy when one canonical patch has multiple manifest owners, one canonical topic has several non-equivalent commits, a topic or integration merge is missing, declared paths omit a changed file, a pull-request disposition is stale, a recorded retirement no longer re-proves, any superseded unit remains, or retained canonical patches trend up.
+A manifest unit whose topic has become equivalent upstream is signaled for retirement review rather than misreported as a raw-patch ownership failure.
+An unrepresented non-upstream commit is likewise a signal until an operator classifies its meaning.
+The signal remains named and counted, so this distinction does not hide the Git fact.
 
 `git range-diff` remains a human review tool because Git documents its output as version-unstable and not machine-readable.
 When the latest upstream integration touched a divergence, the health report prints the exact `git range-diff --remerge-diff` command for review.
@@ -197,7 +222,7 @@ bin/fm-fork-merge.sh prepare --repo <isolated-worktree>
 A clean result creates a two-parent upstream merge, moves each unit whose canonical patch Git proves equivalent to a reachable upstream commit into `retired_upstream` with that proof, records the sync input, runs `git range-diff --remerge-diff`, and validates health against candidate `HEAD`.
 A unit that is equivalent upstream but no longer has exactly one aggregate patch commit stops the merge instead of retiring, because that single commit is the whole proof boundary.
 It does not push or invoke no-mistakes.
-The worker validates through the fork registration and opens a fork-main pull request.
+The worker validates through the fork registration, runs health against the actual post-pipeline head, and opens a fork-main pull request.
 
 A conflict exits with code 3, leaves the merge and rerere result unstaged, identifies affected manifest units, and writes a worktree-private re-justification receipt.
 Decide whether every affected divergence remains worth carrying before resolving it.
@@ -237,7 +262,17 @@ After the fork pull request lands, `/updatefirstmate` performs only safe fast-fo
 Upstream review is evidence, not the local shipping gate.
 A change enters use only after its topic validation, fork merge candidate validation, green fork CI, captain-approved fork pull request, and safe fleet update.
 
-If upstream rejects a useful running change, reclassify it from `pending` to `rejected-but-retained` in the next validated fork integration.
+If upstream rejects a useful running change, reclassify it from `pending` to `rejected-but-retained` in the next validated fork integration through the supported interface:
+
+```sh
+bin/fm-fork-topic.sh disposition \
+  --id <id> \
+  --class rejected-but-retained \
+  --pr-disposition rejected \
+  --repo <isolated-worktree>
+```
+
+The helper changes the class and recorded pull-request disposition together, commits the governance transition, and validates candidate health.
 Keep or sharpen its falsifiable retirement condition.
 Do not roll it back merely because upstream declined it, and do not leave it mislabeled.
 

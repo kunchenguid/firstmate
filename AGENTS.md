@@ -494,7 +494,7 @@ Keep additions task-specific rather than repeating lifecycle instructions, and a
 
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
 If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.
-If it is a divergence topic for the permanent fork, load `fork-main-integration` and scaffold it from `upstream/main` through `--start-ref`; never let unrelated fork divergences enter its upstream pull request.
+If it is a divergence topic for the permanent fork, load `fork-main-integration` and scaffold it from `upstream/main` through `--start-ref`; that generated shape delivers the worker-owned fork contract through the launch brief, and removing it is a safety failure.
 If a task will drive Herdr lifecycle behavior, scaffold with `--herdr-lab`; if that need appears after an unguarded scaffold, stop and regenerate rather than adding commands by hand.
 The generated Herdr contract must use a named non-`default` isolated lab and its guarded helper for every lifecycle action.
 

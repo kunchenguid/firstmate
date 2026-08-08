@@ -10,15 +10,17 @@
 #   - rerere enabled with autoupdate off and inherited by standalone homes;
 #   - self-update stays fast-forward-only while reporting a separate upstream
 #     integration need;
-#   - git-cherry-backed divergence health survives changed commit identity and
-#     fails on manifest drift;
+#   - manifest-driven divergence health preserves raw git-cherry signals while
+#     attributing validation and governance artifacts without failing them;
 #   - an upstream-accepted divergence retires with re-provable Git evidence that
 #     outlives the merge which made git cherry blind to it;
 #   - upstream merges are prepared only in isolated candidates, preserve live
 #     origin/main on conflicts, require per-unit re-justification, and reuse a
 #     recorded resolution without staging it;
 #   - fork-target no-mistakes setup proves the ordinary registration unchanged;
-#   - fork divergence briefs can branch explicitly from upstream/main.
+#   - fork divergence briefs deliver the worker rules through the executable
+#     launch-input path;
+#   - topic integration and discard conflicts require receipt-bound continuation.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -328,13 +330,26 @@ EOF
 # Firstmate divergence topics branch from upstream explicitly, while malformed
 # refs and use on scouts are refused.
 test_brief_supports_explicit_upstream_start_ref() {
-  local home brief out rc
+  local home brief out rc encoded delivered
   home="$TMP_ROOT/brief-home"
   mkdir -p "$home/data"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" fork-topic firstmate --mode no-mistakes --start-ref upstream/main >/dev/null \
     || fail "ship brief refused upstream start ref"
   brief="$home/data/fork-topic/brief.md"
   assert_grep 'git checkout -b fm/fork-topic upstream/main' "$brief" "brief did not branch from upstream/main"
+  assert_grep '.agents/skills/fork-main-integration/SKILL.md`.' "$brief" \
+    "generated fork brief did not load the worker-owned procedure"
+  assert_grep 'Never force-push or rewrite a published topic or pull-request branch.' "$brief" \
+    "generated fork brief did not deliver the published-branch rewrite prohibition"
+  assert_grep 'Do not routinely merge official upstream or fork main into this topic.' "$brief" \
+    "generated fork brief did not deliver the routine-merge prohibition"
+  assert_grep 'ordinary no-mistakes registration for this topic must continue to target official upstream' "$brief" \
+    "generated fork brief did not deliver the upstream-target validation rule"
+  encoded=$("$ROOT/bin/fm-operational-input.sh" encode launch-brief < "$brief") \
+    || fail "fork brief did not enter the executable launch-input path"
+  delivered=$(printf '%s' "$encoded" | "$ROOT/bin/fm-operational-input.sh" body) \
+    || fail "fork brief could not be read back from the executable launch-input path"
+  [ "$delivered" = "$(cat "$brief")" ] || fail "the executable launch path changed the generated worker contract"
   set +e
   out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" bad-ref firstmate --mode no-mistakes --start-ref 'upstream/main;rm' 2>&1); rc=$?
   set -e
@@ -429,12 +444,13 @@ test_health_uses_git_cherry_equivalence_and_exposes_drift() {
   set +e
   out=$("$STATUS" --repo "$repo" 2>&1); rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "accepted equivalent patch left a stale active manifest healthy"
-  assert_contains "$out" "retained=0 patches=0" "git cherry did not recognize equivalent upstream patch"
-  assert_contains "$out" "owns no non-equivalent patch" "stale manifest entry was not surfaced"
+  [ "$rc" -eq 0 ] || fail "accepted equivalent patch turned a Git/manifest signal into a health failure: $out"
+  assert_contains "$out" "retained=1 patches=0" "manifest intent did not remain distinct from Git patch equivalence"
+  assert_contains "$out" "has no canonical patch outside" "accepted-upstream signal was not surfaced"
 
   # Add another fork-only patch without a manifest unit. The factual patch must
-  # remain visible even though prose does not explain it.
+  # remain visible as a signal even though prose does not explain it; raw patch
+  # non-equivalence alone does not assign meaning or fail health.
   git -C "$repo" switch -qc stray upstream/main
   printf 'stray\n' > "$repo/stray.txt"
   git -C "$repo" add stray.txt
@@ -445,15 +461,91 @@ test_health_uses_git_cherry_equivalence_and_exposes_drift() {
   set +e
   out=$("$STATUS" --repo "$repo" 2>&1); rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "unowned patch reported healthy"
-  assert_contains "$out" "unowned non-equivalent patch" "manifest drift did not name the factual patch"
-  pass "fork health: diff equivalence survives changed IDs and Git facts outrank stale manifest"
+  [ "$rc" -eq 0 ] || fail "an unattributed non-upstream commit was reported as a health failure: $out"
+  assert_contains "$out" "not represented by a canonical manifest topic" "manifest discrepancy signal did not name the factual commit"
+  assert_contains "$out" "signals=" "health summary did not separate signals from errors"
+  pass "fork health: Git non-equivalence stays factual while the manifest owns carried intent"
+}
+
+# The manifest defines carried intent. A no-mistakes fix commit on top of a
+# prepared integration remains visible as an attributable integration artifact,
+# and the supported upstream-review transition produces a healthy candidate.
+test_health_attributes_pipeline_fixes_and_supports_disposition_transition() {
+  local w admin candidate out health_json fix_sha
+  w=$(new_world health-artifacts)
+  admin="$w/admin"
+  git clone -q "$w/fork.git" "$admin"
+  configure_fork_clone "$admin" "$w"
+  git -C "$admin" switch -qc fm/divergence/artifact upstream/main
+  printf 'carried\n' > "$admin/carried.txt"
+  git -C "$admin" add carried.txt
+  git -C "$admin" commit -qm 'Add carried behavior'
+  git -C "$admin" push -q origin fm/divergence/artifact
+
+  candidate=$(new_candidate "$w" artifact-integrate)
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" integrate --repo "$candidate" --id artifact \
+    --summary 'Adds carried behavior.' --class pending --topic fm/divergence/artifact \
+    --retire-when 'Upstream ships equivalent carried behavior.' --path carried.txt \
+    --pr-url https://github.com/example/firstmate/pull/88 --pr-disposition open 2>&1) \
+    || fail "artifact fixture integration failed: $out"
+  printf 'pipeline correction\n' > "$candidate/pipeline.txt"
+  git -C "$candidate" add pipeline.txt
+  git -C "$candidate" commit -qm 'no-mistakes: pipeline correction'
+  fix_sha=$(git -C "$candidate" rev-parse HEAD)
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$STATUS" --repo "$candidate" --fork-ref HEAD --upstream-ref upstream/main --facts-only 2>&1) \
+    || fail "actual post-pipeline head failed manifest-driven health: $out"
+  assert_contains "$out" 'retained=1 patches=1 not-upstream=2 integration-artifacts=1' \
+    "pipeline fix was counted as a carried divergence"
+  assert_contains "$out" "non-upstream commit $fix_sha is an integration-path artifact" \
+    "pipeline fix was not attributed to the integration path"
+  assert_contains "$out" 'errors=0' "pipeline fix created a health error"
+  health_json=$(FM_ROOT_OVERRIDE="$ROOT" "$STATUS" --repo "$candidate" --fork-ref HEAD --upstream-ref upstream/main --facts-only --json) \
+    || fail "post-pipeline machine health failed"
+  printf '%s' "$health_json" | jq -e --arg fix "$fix_sha" '
+    .healthy == true and .retained.units == 1 and .retained.patches == 1
+    and .retained.not_upstream_commits == 2 and (.errors | length) == 0
+    and any(.retained.integration_artifacts[]; .commit == $fix and .kind == "integration-path")
+  ' >/dev/null || fail "post-pipeline machine health did not attribute the validation fix: $health_json"
+  git -C "$candidate" push -q origin HEAD:main
+
+  candidate=$(new_candidate "$w" artifact-disposition)
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" disposition --repo "$candidate" --id artifact \
+    --class rejected-but-retained --pr-disposition rejected 2>&1) \
+    || fail "supported pending-to-rejected transition failed: $out"
+  assert_contains "$out" 'rejected-but-retained=1' "disposition candidate did not expose the new class"
+  assert_contains "$out" 'retained=1 patches=1 not-upstream=3 integration-artifacts=2' \
+    "manifest-only transition or earlier pipeline fix was counted as a divergence"
+  jq -e '.divergences[0].class == "rejected-but-retained" and .divergences[0].upstream_pr.disposition == "rejected"' \
+    "$candidate/fork-divergences.json" >/dev/null || fail "disposition interface did not update both manifest fields"
+  pass "fork health: pipeline fixes and disposition transitions are attributable non-divergence artifacts"
+}
+
+# gh-axi 0.1.29 wraps a selected scalar in an api_response TOON envelope.
+# Refresh parses that current real shape and rejects the old fake-scalar assumption.
+test_refresh_parses_current_gh_axi_scalar_envelope() {
+  local w repo fakebin out
+  w=$(new_world refresh-envelope)
+  add_topic_and_merge "$w" refresh refresh.txt current
+  repo="$w/admin"
+  fakebin="$w/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'api_response:' '  body: open' '  truncated: false'
+SH
+  chmod +x "$fakebin/gh-axi"
+  out=$(PATH="$fakebin:$PATH" "$STATUS" --repo "$repo" --refresh 2>&1) \
+    || fail "refresh rejected gh-axi's current scalar envelope: $out"
+  assert_not_contains "$out" 'records pull request open but live pull request is api_response' \
+    "refresh compared the serializer envelope as the live disposition"
+  assert_contains "$out" 'errors=0' "current gh-axi scalar envelope created a refresh error"
+  pass "fork health refresh parses gh-axi's current untruncated scalar envelope"
 }
 
 # Two canonical topics integrate as separate merge units, and discarding one
 # reverts only its merge while preserving its neighbor.
 test_topics_are_independently_revertible_units() {
-  local w candidate out beta_merge rc
+  local w candidate out beta_merge fake_sha rc
   w=$(new_world topic-units)
   admin="$w/admin"
   git clone -q "$w/fork.git" "$admin"
@@ -497,12 +589,103 @@ test_topics_are_independently_revertible_units() {
   printf 'not a revert\n' > "$candidate/fake.txt"
   git -C "$candidate" add fake.txt
   git -C "$candidate" commit -qm 'Fake revert marker' -m "This reverts commit $beta_merge, reversing"
+  fake_sha=$(git -C "$candidate" rev-parse HEAD)
   set +e
   out=$(FM_ROOT_OVERRIDE="$ROOT" "$STATUS" --repo "$candidate" --fork-ref HEAD 2>&1); rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "message-only fake revert was accepted as retired Git history"
-  assert_contains "$out" "unowned non-equivalent patch" "fake revert marker hid an unrelated patch"
+  [ "$rc" -eq 0 ] || fail "message-only fake revert turned a discrepancy signal into a health failure: $out"
+  assert_contains "$out" "non-upstream commit $fake_sha" "fake revert marker disappeared from the discrepancy signals"
+  assert_contains "$out" "not-upstream=2" "fake revert marker reduced the factual non-upstream count"
   pass "fork topics: each divergence is a branch-level unit that can be discarded alone"
+}
+
+# Topic integration conflicts keep Git's merge state and bind continuation to
+# the exact branch, merge head, decision, and unaffected index before the
+# manifest enters the completed merge commit.
+test_topic_integration_conflict_has_receipt_bound_continuation() {
+  local w admin candidate out rc receipt decisions head
+  w=$(new_world topic-integrate-conflict)
+  add_topic_and_merge "$w" alpha shared.txt alpha
+  admin="$w/admin"
+  git -C "$admin" fetch -q origin
+  git -C "$admin" fetch -q upstream
+  git -C "$admin" switch -qC fm/divergence/beta upstream/main
+  printf 'beta\n' > "$admin/shared.txt"
+  git -C "$admin" add shared.txt
+  git -C "$admin" commit -qm 'Add beta behavior'
+  git -C "$admin" push -q origin fm/divergence/beta
+
+  candidate=$(new_candidate "$w" integrate-beta-conflict)
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" integrate --repo "$candidate" --id beta \
+    --summary 'Adds beta behavior.' --class pending --topic fm/divergence/beta \
+    --retire-when 'Upstream ships equivalent beta behavior.' --path shared.txt \
+    --pr-url https://github.com/example/firstmate/pull/90 --pr-disposition open 2>&1); rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "topic integration conflict returned $rc instead of 3: $out"
+  receipt=$(git -C "$candidate" rev-parse --git-path fm-fork-topic-rejustify.json)
+  assert_present "$receipt" "topic integration conflict did not publish a receipt"
+  [ -n "$(git -C "$candidate" rev-parse MERGE_HEAD 2>/dev/null || true)" ] \
+    || fail "topic integration conflict did not retain merge state"
+  printf 'alpha plus beta\n' > "$candidate/shared.txt"
+  git -C "$candidate" add shared.txt
+  decisions="$w/integrate-decisions.json"
+  cat > "$decisions" <<'JSON'
+{"schema":"firstmate.fork-rejustify.v1","decisions":[{"id":"beta","action":"retain","reason":"Both retained behaviors remain required after resolving the overlap."}]}
+JSON
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" continue --repo "$candidate" --decisions "$decisions" 2>&1) \
+    || fail "receipt-bound topic integration continuation failed: $out"
+  assert_absent "$receipt" "successful topic integration continuation left its receipt"
+  head=$(git -C "$candidate" rev-parse HEAD)
+  [ "$(git -C "$candidate" rev-list --parents -n1 "$head" | wc -w | tr -d ' ')" -eq 3 ] \
+    || fail "continued topic integration did not finish a two-parent merge"
+  jq -e '[.divergences[].id] == ["alpha","beta"]' "$candidate/fork-divergences.json" >/dev/null \
+    || fail "continued topic integration did not atomically add the manifest unit"
+  assert_contains "$out" 'errors=0' "continued topic integration did not validate its completed candidate"
+  pass "fork topics: integration conflicts continue only through a branch-and-merge-bound receipt"
+}
+
+# Discard applies every selected inverse in one no-commit sequence. A product
+# conflict requires the resolved remove decision, then the helper completes the
+# sequencer and commits product plus manifest removal exactly once.
+test_topic_discard_conflict_has_receipt_bound_continuation() {
+  local w candidate out rc receipt decisions before head
+  w=$(new_world topic-discard-conflict)
+  add_topic_and_merge "$w" alpha shared.txt alpha
+  git -C "$w/admin" switch -q main
+  printf 'alpha after pipeline\n' > "$w/admin/shared.txt"
+  git -C "$w/admin" add shared.txt
+  git -C "$w/admin" commit -qm 'Pipeline follow-up on alpha'
+  git -C "$w/admin" push -q origin main
+
+  candidate=$(new_candidate "$w" discard-alpha-conflict)
+  before=$(git -C "$candidate" rev-parse HEAD)
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" discard --repo "$candidate" --id alpha 2>&1); rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "topic discard conflict returned $rc instead of 3: $out"
+  receipt=$(git -C "$candidate" rev-parse --git-path fm-fork-topic-rejustify.json)
+  assert_present "$receipt" "topic discard conflict did not publish a receipt"
+  [ -n "$(git -C "$candidate" rev-parse REVERT_HEAD 2>/dev/null || true)" ] \
+    || fail "topic discard conflict did not retain revert state"
+  git -C "$candidate" rm -f shared.txt >/dev/null
+  decisions="$w/discard-decisions.json"
+  cat > "$decisions" <<'JSON'
+{"schema":"firstmate.fork-rejustify.v1","decisions":[{"id":"alpha","action":"remove","reason":"The retained behavior is no longer justified and must be removed."}]}
+JSON
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" continue --repo "$candidate" --decisions "$decisions" 2>&1) \
+    || fail "receipt-bound topic discard continuation failed: $out"
+  assert_absent "$receipt" "successful topic discard continuation left its receipt"
+  [ -z "$(git -C "$candidate" rev-parse --verify --quiet REVERT_HEAD 2>/dev/null || true)" ] \
+    || fail "successful topic discard continuation left the revert sequencer active"
+  assert_absent "$candidate/shared.txt" "continued discard retained the removed product behavior"
+  jq -e '.divergences == []' "$candidate/fork-divergences.json" >/dev/null \
+    || fail "continued discard did not atomically remove the manifest unit"
+  head=$(git -C "$candidate" rev-parse HEAD)
+  [ "$(git -C "$candidate" rev-parse "$head^")" = "$before" ] \
+    || fail "discard continuation made intermediate revert or manifest commits"
+  assert_contains "$out" 'errors=0' "continued discard did not validate its completed candidate"
+  pass "fork topics: discard conflicts finish the queued revert through a receipt-bound continuation"
 }
 
 # A clean upstream merge is committed only in an isolated candidate, records its
@@ -688,7 +871,7 @@ test_upstream_acceptance_retires_a_divergence_with_evidence() {
   set -e
   [ "$rc" -ne 0 ] || fail "an unproved retirement record was accepted as healthy"
   assert_contains "$out" "is unproved" "the unproved retirement was not named"
-  assert_contains "$out" "unowned non-equivalent patch $fork_patch" "the unproved retirement still hid its patch"
+  assert_contains "$out" "non-upstream commit $fork_patch is not represented" "the unproved retirement still hid its patch"
 
   # Deleting the evidence does not delete the patch either.
   jq '.retired_upstream = []' "$tampered/fork-divergences.json" > "$w/dropped.json"
@@ -696,8 +879,9 @@ test_upstream_acceptance_retires_a_divergence_with_evidence() {
   set +e
   out=$("$STATUS" --repo "$tampered" --fork-ref HEAD 2>&1); rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "dropping the retirement evidence reported healthy"
-  assert_contains "$out" "unowned non-equivalent patch $fork_patch" "a missing retirement record hid its patch"
+  [ "$rc" -eq 0 ] || fail "missing retirement evidence turned a raw discrepancy into a health failure: $out"
+  assert_contains "$out" "non-upstream commit $fork_patch is not represented" "a missing retirement record hid its patch"
+  assert_contains "$out" "not-upstream=1" "a missing retirement record still excluded the factual patch"
   pass "fork health: upstream acceptance retires a divergence only on re-provable Git evidence"
 }
 
@@ -804,7 +988,11 @@ test_brief_supports_explicit_upstream_start_ref
 test_self_update_stays_fast_forward_only
 test_topic_waits_for_validated_upstream
 test_health_uses_git_cherry_equivalence_and_exposes_drift
+test_health_attributes_pipeline_fixes_and_supports_disposition_transition
+test_refresh_parses_current_gh_axi_scalar_envelope
 test_topics_are_independently_revertible_units
+test_topic_integration_conflict_has_receipt_bound_continuation
+test_topic_discard_conflict_has_receipt_bound_continuation
 test_clean_upstream_merge_is_isolated_and_validated_as_candidate
 test_conflict_requires_rejustification_and_rerere_stays_reviewable
 test_upstream_acceptance_retires_a_divergence_with_evidence

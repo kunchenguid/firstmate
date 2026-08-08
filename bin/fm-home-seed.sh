@@ -19,8 +19,9 @@
 #       initialized, an ignored .fm-secondmate-parent binding is published before
 #       the .fm-secondmate-home identity marker, and data/secondmates.md is updated.
 #       Seeding is transactional: on validation, clone, init, or registry failure,
-#       generated briefs, new homes, new project clones, and registry edits are
-#       rolled back. Treehouse-acquired homes are returned only when the rollback
+#       generated briefs, new homes, new project clones, registry edits, and an
+#       existing standalone home's complete Git config and remote-ref topology
+#       are rolled back. Treehouse-acquired homes are returned only when the rollback
 #       target is safe; a failed return warns because the lease may still be held.
 #       Set FM_SECONDMATE_CHARTER='<charter>' to seed from inline charter text
 #       when no filled charter brief exists. Set FM_SECONDMATE_SCOPE='<scope>'
@@ -530,6 +531,8 @@ SEED_SUB_REG_EXISTED=0
 SEED_CHARTER_EXISTED=0
 SEED_MARKER_EXISTED=0
 SEED_PARENT_MARKER_EXISTED=0
+SEED_GIT_TOPOLOGY_BACKED_UP=0
+SEED_GIT_CONFIG_PATH=
 
 restore_seed_file() {
   local existed=$1 backup=$2 path=$3
@@ -623,6 +626,43 @@ seed_project_was_created() {
   grep -Fx -- "$project_path" "$SEED_CREATED_PROJECTS_FILE" >/dev/null 2>&1
 }
 
+snapshot_seed_git_topology() { # <existing-standalone-home>
+  local home=$1 source_common target_common config_path
+  git -C "$home" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  source_common=$(git -C "$FM_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  target_common=$(git -C "$home" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  [ -n "$source_common" ] && [ "$source_common" = "$target_common" ] && return 0
+  config_path=$(git -C "$home" rev-parse --path-format=absolute --git-path config) || return 1
+  [ -f "$config_path" ] && [ ! -L "$config_path" ] || {
+    echo "error: existing secondmate Git config is unavailable or unsafe: $config_path" >&2
+    return 1
+  }
+  cp -p "$config_path" "$SEED_BACKUP_DIR/git-config" || return 1
+  git -C "$home" for-each-ref --format='%(refname)%09%(objectname)%09%(symref)' refs/remotes \
+    > "$SEED_BACKUP_DIR/git-remote-refs" || return 1
+  SEED_GIT_CONFIG_PATH=$config_path
+  SEED_GIT_TOPOLOGY_BACKED_UP=1
+}
+
+restore_seed_git_topology() {
+  local ref object symref
+  [ "${SEED_GIT_TOPOLOGY_BACKED_UP:-0}" = 1 ] || return 0
+  [ -n "${SEED_GIT_CONFIG_PATH:-}" ] || return 0
+  cp -p "$SEED_BACKUP_DIR/git-config" "$SEED_GIT_CONFIG_PATH" 2>/dev/null || return 0
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    git -C "$SEED_HOME" update-ref -d "$ref" >/dev/null 2>&1 || true
+  done < <(git -C "$SEED_HOME" for-each-ref --format='%(refname)' refs/remotes 2>/dev/null || true)
+  while IFS=$'\t' read -r ref object symref; do
+    [ -n "$ref" ] && [ -z "$symref" ] || continue
+    git -C "$SEED_HOME" update-ref "$ref" "$object" >/dev/null 2>&1 || true
+  done < "$SEED_BACKUP_DIR/git-remote-refs"
+  while IFS=$'\t' read -r ref object symref; do
+    [ -n "$ref" ] && [ -n "$symref" ] || continue
+    git -C "$SEED_HOME" symbolic-ref "$ref" "$symref" >/dev/null 2>&1 || true
+  done < "$SEED_BACKUP_DIR/git-remote-refs"
+}
+
 seed_rollback() {
   local project_path
   [ "${SEED_ROLLBACK_ACTIVE:-0}" = 1 ] || return 0
@@ -647,6 +687,7 @@ seed_rollback() {
           seed_remove_created_project "$project_path"
         done < "$SEED_CREATED_PROJECTS_FILE"
       fi
+      restore_seed_git_topology
       if [ -n "${SEED_BACKUP_DIR:-}" ] && [ "${SEED_HOME_BACKED_UP:-0}" = 1 ]; then
         restore_seed_file "$SEED_MARKER_EXISTED" "$SEED_BACKUP_DIR/marker" "$SEED_HOME/$SUB_HOME_MARKER"
         restore_seed_file "$SEED_PARENT_MARKER_EXISTED" "$SEED_BACKUP_DIR/parent-marker" "$SEED_HOME/$SUB_HOME_PARENT_MARKER"
@@ -851,6 +892,8 @@ seed_home() {
   SEED_SUB_REG_EXISTED=0
   SEED_CHARTER_EXISTED=0
   SEED_MARKER_EXISTED=0
+  SEED_GIT_TOPOLOGY_BACKED_UP=0
+  SEED_GIT_CONFIG_PATH=
   if [ -f "$REG" ]; then
     SEED_PARENT_REG_EXISTED=1
     cp "$REG" "$SEED_BACKUP_DIR/parent-secondmates.md"
@@ -870,6 +913,9 @@ seed_home() {
     home=$(ensure_home "$id" "$requested_abs")
   fi
   SEED_HOME="$home"
+  if [ "$SEED_HOME_CREATED" -eq 0 ] && [ "$SEED_HOME_ACQUIRED" -eq 0 ]; then
+    snapshot_seed_git_topology "$home" || return 1
+  fi
   # A leased worktree already shares the primary's Git config. A new standalone
   # clone initially points origin at the local source path, so the provisioning
   # owner converges it to the primary's validated fork/upstream topology here.
